@@ -1,4 +1,5 @@
 #include "kernel32_internal.h"
+#include "kernel32_nls_format.h" /* nls_locale_number (LOCALE_RETURN_NUMBER) */
 
 /* ------------------------------------------------------------------
  * Locale APIs — fixed en-US (LCID 0x0409). DuetOS has no real
@@ -89,6 +90,16 @@ static const wchar_t16 sLongDate[] = {'d', 'd', 'd', 'd', ',', ' ', 'M', 'M', 'M
                                       ' ', 'd', ',', ' ', 'y', 'y', 'y', 'y', 0};
 /* Time format: h:mm:ss tt (12-hour with AM/PM) */
 static const wchar_t16 sTimeFormat[] = {'h', ':', 'm', 'm', ':', 's', 's', ' ', 't', 't', 0};
+/* Short time: h:mm tt (LOCALE_SSHORTTIME) */
+static const wchar_t16 sShortTime[] = {'h', ':', 'm', 'm', ' ', 't', 't', 0};
+/* Hex LANGID string (LOCALE_ILANGUAGE returns "0409" as text). */
+static const wchar_t16 sLangId[] = {'0', '4', '0', '9', 0};
+/* AM/PM designators (LOCALE_S1159 / LOCALE_S2359). */
+static const wchar_t16 sAm[] = {'A', 'M', 0};
+static const wchar_t16 sPm[] = {'P', 'M', 0};
+/* Obsolete-since-Vista date/time separators, derived from the pictures. */
+static const wchar_t16 sDateSep[] = {'/', 0};
+static const wchar_t16 sTimeSep[] = {':', 0};
 
 /* Full day names (1=Monday..7=Sunday, Win32 convention) */
 static const wchar_t16 sDayMon[] = {'M', 'o', 'n', 'd', 'a', 'y', 0};
@@ -139,7 +150,23 @@ static const wchar_t16 sAbbMonDec[] = {'D', 'e', 'c', 0};
 __declspec(dllexport) int GetLocaleInfoW(unsigned long lcid, unsigned long lctype, wchar_t16* buf, int cchData)
 {
     (void)lcid;
+    /* LOCALE_RETURN_NUMBER (0x20000000): return the value as a binary
+     * DWORD rather than a string, and return its size in WCHAR units. */
+    int return_number = (lctype & 0x20000000UL) != 0;
     lctype &= 0x0FFFFFFFUL;
+    if (return_number)
+    {
+        unsigned int uval;
+        if (!nls_locale_number((unsigned int)lctype, &uval))
+            return 0; /* RETURN_NUMBER on a non-numeric LCType is invalid */
+        if (cchData == 0)
+            return 2; /* a DWORD occupies 2 WCHARs */
+        if (buf == (wchar_t16*)0 || cchData < 2)
+            return 0;
+        DWORD val = (DWORD)uval;
+        __builtin_memcpy(buf, &val, sizeof(val));
+        return 2;
+    }
     const wchar_t16* msg;
     switch (lctype)
     {
@@ -305,6 +332,28 @@ __declspec(dllexport) int GetLocaleInfoW(unsigned long lcid, unsigned long lctyp
         break;
     case 0x005A: /* LOCALE_SISO3166CTRYNAME */
         msg = sIso3166;
+        break;
+    case 0x0001: /* LOCALE_ILANGUAGE — hex LANGID as text */
+        msg = sLangId;
+        break;
+    case 0x0004: /* LOCALE_SNATIVELANGNAME */
+    case 0x1001: /* LOCALE_SENGLANGUAGE */
+        msg = sLangName;
+        break;
+    case 0x001D: /* LOCALE_SDATE — date separator (derived) */
+        msg = sDateSep;
+        break;
+    case 0x001E: /* LOCALE_STIME — time separator (derived) */
+        msg = sTimeSep;
+        break;
+    case 0x0028: /* LOCALE_S1159 — AM designator */
+        msg = sAm;
+        break;
+    case 0x0029: /* LOCALE_S2359 — PM designator */
+        msg = sPm;
+        break;
+    case 0x0079: /* LOCALE_SSHORTTIME */
+        msg = sShortTime;
         break;
     default:
         msg = sLang;

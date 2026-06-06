@@ -21,6 +21,19 @@ static void Out(const char* s)
     WriteConsoleA(h, s, len, &n, 0);
 }
 
+static int streq(const char* a, const char* b)
+{
+    int i = 0;
+    for (;;)
+    {
+        if (a[i] != b[i])
+            return 0;
+        if (a[i] == 0)
+            return 1;
+        ++i;
+    }
+}
+
 static int g_locale_cb_count = 0;
 static BOOL CALLBACK locale_cb(LPSTR name)
 {
@@ -65,12 +78,37 @@ void __cdecl mainCRTStartup(void)
         Out(n > 0 ? "PASS\r\n" : "FAIL/STUB\r\n");
     }
 
-    /* GetNumberFormatA. */
+    /* GetNumberFormatA — en-US default: grouping by 3, 2 decimals. */
     {
         char buf[64] = {0};
-        int n = GetNumberFormatA(LOCALE_USER_DEFAULT, 0, "1234567.89", NULL, buf, 64);
+        GetNumberFormatA(LOCALE_USER_DEFAULT, 0, "1234567.89", NULL, buf, 64);
         Out("[nls_smoke] GetNumberFormatA    = ");
-        Out(n > 0 ? "PASS\r\n" : "FAIL/STUB\r\n");
+        Out(streq(buf, "1,234,567.89") ? "PASS\r\n" : "FAIL/STUB\r\n");
+    }
+
+    /* GetNumberFormatA — rounding (must round, not truncate): .899 -> .90
+     * with the carry rippling through the fraction. */
+    {
+        char buf[64] = {0};
+        GetNumberFormatA(LOCALE_USER_DEFAULT, 0, "1234567.899", NULL, buf, 64);
+        Out("[nls_smoke] GetNumberFormat rnd = ");
+        Out(streq(buf, "1,234,567.90") ? "PASS\r\n" : "FAIL\r\n");
+    }
+
+    /* GetCurrencyFormatA — positive: "$1,234.50". */
+    {
+        char buf[64] = {0};
+        GetCurrencyFormatA(LOCALE_USER_DEFAULT, 0, "1234.5", NULL, buf, 64);
+        Out("[nls_smoke] GetCurrencyFormatA  = ");
+        Out(streq(buf, "$1,234.50") ? "PASS\r\n" : "FAIL/STUB\r\n");
+    }
+
+    /* GetCurrencyFormatA — negative: en-US parenthesised "($1,234.50)". */
+    {
+        char buf[64] = {0};
+        GetCurrencyFormatA(LOCALE_USER_DEFAULT, 0, "-1234.5", NULL, buf, 64);
+        Out("[nls_smoke] GetCurrencyFmt neg  = ");
+        Out(streq(buf, "($1,234.50)") ? "PASS\r\n" : "FAIL\r\n");
     }
 
     Out("[nls_smoke] done\r\n");

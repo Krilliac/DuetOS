@@ -10795,3 +10795,32 @@ flip (Roadmap).
 own appended test regions (`TruncateOwnedRegions(snap)`), so it no longer
 clobbers the production registrations that now precede it. Region table bumped
 16 → 32 (two entries per partition volume + RAM devices + headroom).
+
+## 2026-06-06 — NLS number formatting: round (not truncate), full digit-stack grouping, hosted-tested
+
+`kernel32!GetNumberFormat{A,W}` formats by operating on the **decimal input
+string**, not a binary float. The fraction is **rounded** half-away-from-zero
+to `NumDigits` with the carry rippling through the kept fraction and into the
+integer part (`9.999`@2 → `10.00`; `999.999`@2 → `1,000.00`), and the
+`NUMBERFMT.Grouping` field is decoded as the Win32 **digit-stack** encoding
+(group widths from the decimal point outward, last width repeats, a `0` width
+stops): `3` → `1,234,567`, `32` → `12,34,567`, `30` → `1234,567`.
+
+**Rules out.** The previous truncate-the-fraction shortcut (it silently dropped
+the rounding the API contract requires) and the `Grouping % 100` single-uniform
+-group shortcut (it mis-rendered every non-3 grouping, e.g. South-Asian lakh).
+A float-based formatter is also ruled out: parsing the input to `double` would
+reintroduce binary rounding error the string algorithm avoids, and kernel/
+freestanding code has no FP-formatting runtime to lean on anyway.
+
+**Why a freestanding header.** The pure formatting logic
+(`num_format_core_a`, `currency_format_core_a`, `nls_locale_number`) lives in
+`userland/libs/kernel32/kernel32_nls_format.h` as `static inline`, included by
+both the DLL TU (`kernel32_io.c`/`kernel32_locale.c`) and the host test
+(`tests/host/test_kernel32_nls.cpp`). This is the same pattern the kernel crypto
+TUs use (`ec`/`x509_verify`): the algorithmically risky code gets a
+millisecond RED→GREEN unit test under ASan/UBSan instead of relying on the
+`nls_smoke`/`locale_smoke` PEs — which only run on bare metal (`if (!emulator)`
+in `ring3_smoke.cpp`), so QEMU CI never exercises them. The `__declspec`-laden
+DLL entry points stay thin buffer-contract wrappers that the freestanding core
+can't carry.

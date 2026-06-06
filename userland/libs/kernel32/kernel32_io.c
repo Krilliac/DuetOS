@@ -747,234 +747,12 @@ __declspec(dllexport) int GetTimeFormatW(unsigned long lcid, DWORD flags, const 
     return needed;
 }
 
-/* NUMBERFMT structure layout (Win32 SDK):
- *   NumDigits    — decimal digits after the decimal separator
- *   LeadingZero  — whether to use a leading zero before the decimal point
- *   Grouping     — digit grouping (3 → "1,000"; 32 → "12,34,567")
- *   lpDecimalSep — decimal separator string
- *   lpThousandSep — thousands separator string
- *   NegativeOrder — how negative numbers are formatted (0-15)
- */
-typedef struct
-{
-    unsigned int NumDigits;
-    unsigned int LeadingZero;
-    unsigned int Grouping;
-    const char* lpDecimalSep;
-    const char* lpThousandSep;
-    unsigned int NegativeOrder;
-} DUETOS_NUMBERFMT_A;
-
-/* Core number formatter: formats the string `num` according to `nf`
- * into `out[0..out_cap-1]` (NUL-terminated).  Returns the number of
- * characters written (excluding NUL).
- *
- * Algorithm:
- *   1. Parse sign, integer part, and existing fractional part from `num`.
- *   2. Build the integer digits with thousands-separator grouping.
- *   3. Append decimal separator + fractional digits padded/truncated to
- *      NumDigits.
- *   4. Wrap with sign notation per NegativeOrder.
- *
- * GAP: NegativeOrder values 5-15 use parentheses/dash styles not all
- *      covered here; common values 0-4 are fully handled. — revisit
- *      when apps that require those styles surface.
- * GAP: Grouping values other than simple 3-digit groups (e.g. 32 for
- *      South-Asian lakhs) are accepted and applied for the first group
- *      but repeating-group semantics are not emulated. — revisit with
- *      locale table work.
- */
-static int num_format_core_a(const char* num, const DUETOS_NUMBERFMT_A* nf, char* out, int out_cap)
-{
-    if (out_cap <= 1)
-        return 0;
-
-    /* Default locale separators if struct fields are NULL. */
-    const char* dec_sep = (nf->lpDecimalSep && nf->lpDecimalSep[0]) ? nf->lpDecimalSep : ".";
-    const char* tho_sep = (nf->lpThousandSep) ? nf->lpThousandSep : ",";
-
-    /* 1. Parse: skip leading whitespace, capture sign. */
-    const char* p = num;
-    while (*p == ' ' || *p == '\t')
-        ++p;
-    int negative = 0;
-    if (*p == '-')
-    {
-        negative = 1;
-        ++p;
-    }
-    else if (*p == '+')
-        ++p;
-
-    /* Collect integer digits (before any '.'). */
-    char int_digits[64];
-    int int_len = 0;
-    while (*p >= '0' && *p <= '9' && int_len < 63)
-        int_digits[int_len++] = *p++;
-    int_digits[int_len] = 0;
-
-    /* Skip leading zeros for grouping, but remember if we had any digit. */
-    int first_nonzero = 0;
-    while (first_nonzero < int_len - 1 && int_digits[first_nonzero] == '0')
-        ++first_nonzero;
-    /* Keep at least one digit. */
-    const char* int_start = int_digits + first_nonzero;
-    int sig_len = int_len - first_nonzero;
-
-    /* Collect fractional digits (after '.'). */
-    char frac_digits[32];
-    int frac_len = 0;
-    if (*p == '.' || *p == ',') /* accept either separator in input */
-    {
-        ++p;
-        while (*p >= '0' && *p <= '9' && frac_len < 31)
-            frac_digits[frac_len++] = *p++;
-    }
-    frac_digits[frac_len] = 0;
-
-    /* 2. Build integer part with grouping into a temp buffer (reversed). */
-    char int_buf[128];
-    int ib = 0;
-    unsigned int group_size = (nf->Grouping > 0) ? (nf->Grouping % 100u) : 0u;
-    if (group_size == 0)
-    {
-        /* No grouping. */
-        for (int i = 0; i < sig_len && ib < 127; ++i)
-            int_buf[ib++] = int_start[i];
-    }
-    else
-    {
-        /* Count digits to place — forward pass inserting separators. */
-        int sep_len = 0;
-        while (tho_sep[sep_len])
-            ++sep_len;
-
-        /* How many digits before first separator? */
-        int first_grp = (int)(sig_len % group_size);
-        if (first_grp == 0)
-            first_grp = (int)group_size;
-
-        int i = 0;
-        /* First group (may be shorter). */
-        for (int k = 0; k < first_grp && i < sig_len && ib < 127; ++k, ++i)
-            int_buf[ib++] = int_start[i];
-        /* Remaining full groups. */
-        while (i < sig_len && ib < 127)
-        {
-            /* Insert separator. */
-            for (int si = 0; si < sep_len && ib < 127; ++si)
-                int_buf[ib++] = tho_sep[si];
-            for (unsigned int g = 0; g < group_size && i < sig_len && ib < 127; ++g, ++i)
-                int_buf[ib++] = int_start[i];
-        }
-    }
-
-    /* Handle zero integer part + LeadingZero. */
-    if (sig_len == 0 || (sig_len == 1 && int_start[0] == '0'))
-    {
-        if (ib == 0)
-        {
-            if (nf->LeadingZero || (sig_len == 1))
-                int_buf[ib++] = '0';
-        }
-    }
-    int_buf[ib] = 0;
-
-    /* 3. Build fractional part: pad/truncate frac_digits to NumDigits. */
-    char frac_buf[36];
-    int fb = 0;
-    for (unsigned int i = 0; i < nf->NumDigits && fb < 35; ++i)
-        frac_buf[fb++] = (i < (unsigned int)frac_len) ? frac_digits[i] : '0';
-    frac_buf[fb] = 0;
-
-    /* 4. Compose result with NegativeOrder.
-     *   0: (1.1)      1: -1.1      2: - 1.1
-     *   3: 1.1-       4: 1.1 -     (others treated as 1) */
-    int pos = 0;
-#define EMIT_STR(s)                                                                                                    \
-    do                                                                                                                 \
-    {                                                                                                                  \
-        const char* _s = (s);                                                                                          \
-        while (*_s && pos < out_cap - 1)                                                                               \
-            out[pos++] = *_s++;                                                                                        \
-    } while (0)
-#define EMIT_CH(c)                                                                                                     \
-    do                                                                                                                 \
-    {                                                                                                                  \
-        if (pos < out_cap - 1)                                                                                         \
-            out[pos++] = (char)(c);                                                                                    \
-    } while (0)
-
-    if (negative)
-    {
-        switch (nf->NegativeOrder)
-        {
-        case 0: /* (1.1) */
-            EMIT_CH('(');
-            EMIT_STR(int_buf);
-            if (nf->NumDigits > 0)
-            {
-                EMIT_STR(dec_sep);
-                EMIT_STR(frac_buf);
-            }
-            EMIT_CH(')');
-            break;
-        case 2: /* - 1.1 */
-            EMIT_CH('-');
-            EMIT_CH(' ');
-            EMIT_STR(int_buf);
-            if (nf->NumDigits > 0)
-            {
-                EMIT_STR(dec_sep);
-                EMIT_STR(frac_buf);
-            }
-            break;
-        case 3: /* 1.1- */
-            EMIT_STR(int_buf);
-            if (nf->NumDigits > 0)
-            {
-                EMIT_STR(dec_sep);
-                EMIT_STR(frac_buf);
-            }
-            EMIT_CH('-');
-            break;
-        case 4: /* 1.1 - */
-            EMIT_STR(int_buf);
-            if (nf->NumDigits > 0)
-            {
-                EMIT_STR(dec_sep);
-                EMIT_STR(frac_buf);
-            }
-            EMIT_CH(' ');
-            EMIT_CH('-');
-            break;
-        default: /* 1: -1.1 and catch-all */
-            EMIT_CH('-');
-            EMIT_STR(int_buf);
-            if (nf->NumDigits > 0)
-            {
-                EMIT_STR(dec_sep);
-                EMIT_STR(frac_buf);
-            }
-            break;
-        }
-    }
-    else
-    {
-        EMIT_STR(int_buf);
-        if (nf->NumDigits > 0)
-        {
-            EMIT_STR(dec_sep);
-            EMIT_STR(frac_buf);
-        }
-    }
-
-#undef EMIT_STR
-#undef EMIT_CH
-
-    out[pos] = 0;
-    return pos;
-}
+/* NUMBERFMT formatting core (DUETOS_NUMBERFMT_A + num_format_core_a)
+ * lives in the freestanding header so the same code is exercised by a
+ * fast hosted unit test (tests/host/test_kernel32_nls.cpp) as well as
+ * the DLL build. See kernel32_nls_format.h for the rounding + grouping
+ * contract. */
+#include "kernel32_nls_format.h"
 
 /* Default locale NUMBERFMT for en-US (used when fmt == NULL). */
 static const DUETOS_NUMBERFMT_A k_default_numfmt_a = {
@@ -1207,7 +985,12 @@ __declspec(dllexport) int FoldStringW(unsigned long flags, const wchar_t16* src,
     return n;
 }
 
-/* GetCurrencyFormatA — prefix "$" + pass-through. */
+/* GetCurrencyFormatA — en-US: "$1,234.50"; negative "($1,234.50)".
+ * Routes the magnitude through the shared NUMBERFMT core (grouping +
+ * 2 decimals + half-up rounding), then applies the currency symbol and
+ * the en-US default negative order (parentheses — LOCALE_INEGCURR 0).
+ * GAP: the CURRENCYFMT struct argument is not honoured; the en-US
+ *      locale default is always applied. — revisit with locale tables. */
 __declspec(dllexport) int GetCurrencyFormatA(unsigned long lcid, DWORD flags, const char* num, void* fmt, char* buf,
                                              int cchData)
 {
@@ -1216,18 +999,17 @@ __declspec(dllexport) int GetCurrencyFormatA(unsigned long lcid, DWORD flags, co
     (void)fmt;
     if (num == (const char*)0)
         return 0;
-    int n = 0;
-    while (num[n] != 0)
-        ++n;
-    int needed = n + 2; /* "$" + n + NUL */
+
+    char scratch[160];
+    int len = currency_format_core_a(num, &k_default_numfmt_a, "$", scratch, (int)sizeof(scratch));
+    int needed = len + 1;
     if (cchData == 0)
         return needed;
     if (buf == (char*)0 || cchData < needed)
         return 0;
-    buf[0] = '$';
-    for (int i = 0; i < n; ++i)
-        buf[1 + i] = num[i];
-    buf[1 + n] = 0;
+    for (int i = 0; i < len; ++i)
+        buf[i] = scratch[i];
+    buf[len] = 0;
     return needed;
 }
 

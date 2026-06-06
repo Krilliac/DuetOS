@@ -148,3 +148,11 @@ add_host_test(app_widgets_bounds)
 add_host_test(app_widgets_paint)
 add_host_test(app_widgets_events)
 add_host_test(widget_group)
+
+# kernel32.dll NLS number-format core (GetNumberFormat / GetCurrencyFormat).
+# The header under test is header-only; its authoritative warning gate is
+# the freestanding DLL build (-Wall -Wextra -Wpedantic -Werror, no
+# -Wconversion), so relax the host harness's extra -Wconversion/
+# -Wsign-conversion here — they only fire on legitimate char-index math.
+add_host_test(kernel32_nls)
+target_compile_options(test_kernel32_nls PRIVATE -Wno-conversion -Wno-sign-conversion)

@@ -997,18 +997,32 @@ Re-derive the full inventory with `git grep -nE "// (STUB|GAP):"`.
 
 Landed 2026-05-29: `kernel32!MulDiv`, `user32!wsprintf{A,W}`/`wvsprintf{A,W}`
 (were MISSING), and `kernel32!GetDateFormat{A,W}`/`GetTimeFormat{A,W}` now
-honor their format-picture string (were `(void)fmt`-ignored). Remaining,
-same clean en-US-table pattern (verifiable via the `hello_winapi` pe-winapi
-smoke):
+honor their format-picture string (were `(void)fmt`-ignored).
 
-- **`GetNumberFormatA/W`** still ignores its `NUMBERFMT` picture
-  (`userland/libs/kernel32/kernel32_io.c` ~`GetNumberFormatA`,
-  `(void)fmt;`): grouping commas, decimal places, separators. The
-  easiest next item — mirrors the `GetDateFormat` picture work.
-- **`GetLocaleInfoW`** — widen the LCType table
-  (`kernel32_locale.c`): `LOCALE_SSHORTDATE`/`SLONGDATE`/`STIMEFORMAT`/
-  `SCURRENCY`/`SDAYNAME1..7`/`SMONTHNAME1..12` (reuse the day/month
-  tables added for GetDateFormat).
+Landed 2026-06-06: `kernel32!GetNumberFormat{A,W}` now **rounds** the
+fraction to `NumDigits` (half-away-from-zero, carry rippling into the
+integer part) instead of truncating, and implements the full
+`NUMBERFMT.Grouping` digit-stack encoding (3 => repeating-3, 32 => South
+-Asian `12,34,567`, 30 => group-once-then-stop). `GetCurrencyFormatA`
+now routes its magnitude through that core (grouping + 2 decimals +
+rounding + parenthesised negatives `($1,234.50)`) instead of a bare `$`
+prefix. `GetLocaleInfoW` now honors `LOCALE_RETURN_NUMBER` (binary DWORD
+for `IDIGITS`/`ILZERO`/`INEGNUMBER`/`ILANGUAGE`/`ICOUNTRY`) and answers
+`S1159`/`S2359` (AM/PM), `SSHORTTIME`, `SDATE`/`STIME`, and `ILANGUAGE`
+(was a bogus `"en"` fallthrough). The pure number/currency/locale-number
+logic moved to the freestanding `kernel32_nls_format.h` and is pinned by
+`tests/host/test_kernel32_nls.cpp` (37 assertions, RED→GREEN).
+
+Remaining, same clean en-US-table pattern (the number/currency/locale
+paths run only in the bare-metal `nls_smoke`/`locale_smoke` PEs — they
+sit behind `if (!emulator)` in `ring3_smoke.cpp`, so QEMU CI does not
+exercise them; the hosted test is their automated gate):
+
+- **`GetCurrencyFormat{A,W}`** — honor the `CURRENCYFMT` struct argument
+  (currently the en-US default is always applied — `// GAP:` in
+  `kernel32_io.c`), and add the missing `GetCurrencyFormatW`.
+- **`GetNumberFormatW`** — non-ASCII separator code points are truncated
+  to their low byte (`// GAP:`); needs Unicode locale tables.
 - **`LCMapStringW`** — add `LCMAP_SORTKEY` (an upcased ordinal key is
   valid en-US/invariant) and standalone `NORM_IGNORECASE`
   (`kernel32_io.c` ~`LCMapStringW`, currently case-map only).
