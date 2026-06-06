@@ -150,7 +150,7 @@ void DeriveSessionKeys(const u8 pmk[kDrshPmkBytes], const u8 nonce_s[kDrshNonceB
     out_session.bytes_rx = 0;
 }
 
-bool ServerHandshake(DrshTransport& t, const u8* password, u32 password_len, DrshSession& out_session)
+HandshakeOutcome ServerHandshake(DrshTransport& t, const u8* password, u32 password_len, DrshSession& out_session)
 {
     // Session struct comes in zeroed.
     out_session.authenticated = false;
@@ -160,14 +160,14 @@ bool ServerHandshake(DrshTransport& t, const u8* password, u32 password_len, Drs
     u32 plen = 0;
     // Client hello: { magic(4 BE) | version(2 BE) | nonce_c(16) } = 22 bytes.
     if (!RecvPlainFrame(t, out_session, kDrshFrameHelloC, buf, &plen))
-        return false;
+        return HandshakeOutcome::ProtocolError;
     if (plen != 4 + 2 + kDrshNonceBytes)
-        return false;
+        return HandshakeOutcome::ProtocolError;
     const u32 magic = (static_cast<u32>(buf[0]) << 24) | (static_cast<u32>(buf[1]) << 16) |
                       (static_cast<u32>(buf[2]) << 8) | static_cast<u32>(buf[3]);
     const u16 version = static_cast<u16>((static_cast<u16>(buf[4]) << 8) | static_cast<u16>(buf[5]));
     if (magic != kDrshMagic || version != kDrshVersion)
-        return false;
+        return HandshakeOutcome::ProtocolError;
     u8 nonce_c[kDrshNonceBytes];
     for (u32 i = 0; i < kDrshNonceBytes; ++i)
         nonce_c[i] = buf[6 + i];
@@ -185,19 +185,19 @@ bool ServerHandshake(DrshTransport& t, const u8* password, u32 password_len, Drs
     for (u32 i = 0; i < kDrshNonceBytes; ++i)
         hello_s[6 + i] = nonce_s[i];
     if (!SendPlainFrame(t, out_session, kDrshFrameHelloS, hello_s, sizeof(hello_s)))
-        return false;
+        return HandshakeOutcome::ProtocolError;
 
     // ----------------------------- Challenge.
     u8 challenge[kDrshChallengeBytes];
     duetos::core::RandomFillBytes(challenge, kDrshChallengeBytes);
     if (!SendPlainFrame(t, out_session, kDrshFrameChallenge, challenge, kDrshChallengeBytes))
-        return false;
+        return HandshakeOutcome::ProtocolError;
 
     // ----------------------------- Auth response.
     if (!RecvPlainFrame(t, out_session, kDrshFrameAuth, buf, &plen))
-        return false;
+        return HandshakeOutcome::ProtocolError;
     if (plen != crypto::kSha256DigestBytes)
-        return false;
+        return HandshakeOutcome::ProtocolError;
 
     u8 pmk[kDrshPmkBytes];
     DerivePmk(password, password_len, nonce_s, pmk);
@@ -212,17 +212,20 @@ bool ServerHandshake(DrshTransport& t, const u8* password, u32 password_len, Drs
         // iterations.
         (void)SendPlainFrame(t, out_session, kDrshFrameAuthFail, nullptr, 0);
         KLOG_WARN("net/drsh", "auth failed (bad response)");
-        return false;
+        // Reached the AUTH step with a wrong response — this is a
+        // genuine credential failure, the only outcome that feeds the
+        // brute-force lockout streak in drsh_server.cpp.
+        return HandshakeOutcome::BadCredentials;
     }
 
     // ----------------------------- Promote to authenticated.
     DeriveSessionKeys(pmk, nonce_s, nonce_c, out_session);
     out_session.authenticated = true;
     if (!SendPlainFrame(t, out_session, kDrshFrameAuthOk, nullptr, 0))
-        return false;
+        return HandshakeOutcome::ProtocolError;
 
     KLOG_INFO("net/drsh", "session authenticated");
-    return true;
+    return HandshakeOutcome::Ok;
 }
 
 } // namespace duetos::net::drsh::internal

@@ -27,6 +27,18 @@ i32 PipeAlloc();
 // on the pool internals.
 i64 PipeRead(u32 idx, u64 user_dst, u64 len);
 i64 PipeWrite(u32 idx, u64 user_src, u64 len);
+
+// Kernel-buffer variants of PipeRead / PipeWrite: copy to/from a
+// kernel pointer with a plain in-kernel copy instead of CopyToUser /
+// CopyFromUser. Required by the loopback socket short-circuit
+// (kernel/net/socket.cpp), which already holds the payload in a kernel
+// staging buffer — passing that to the user-pointer variants trips the
+// user-range check and returns -EFAULT, which silently broke ALL
+// loopback stream traffic (it went unnoticed because the one test that
+// exercises it, net_loopback_smoke, is gated to bare metal). Same
+// blocking semantics as the user-pointer variants.
+i64 PipeReadKernel(u32 idx, u8* dst, u64 len);
+i64 PipeWriteKernel(u32 idx, const u8* src, u64 len);
 void PipeReleaseRead(u32 idx);
 void PipeReleaseWrite(u32 idx);
 // Bump the read- / write-end refcount. Used by fork() for fd

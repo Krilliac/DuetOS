@@ -31,6 +31,36 @@
  * a file descriptor + buffer. */
 #define DUET_SYS_STDIN_READ 171
 
+/* SYS_SLEEP_MS — block the calling task for `ms` milliseconds (rdi).
+ * ms == 0 behaves like a yield. Mirrors kernel SYS_SLEEP_MS = 19. */
+#define DUET_SYS_SLEEP_MS 19
+
+/* SYS_SOCKET_OP — the kernel's multiplexed BSD-socket entry point
+ * (kernel/syscall/syscall.h SYS_SOCKET_OP = 153). Native binaries
+ * reach the same kernel socket pool the Win32 ws2_32.dll uses. The
+ * op selector goes in arg0 (rdi); the rest are op-specific. Cap-gated
+ * on kCapNet. See duet/socket.h for typed wrappers. */
+#define DUET_SYS_SOCKET_OP 153
+
+#define DUET_SOCKOP_CREATE 1
+#define DUET_SOCKOP_BIND 2
+#define DUET_SOCKOP_CONNECT 3
+#define DUET_SOCKOP_LISTEN 4
+#define DUET_SOCKOP_ACCEPT 5
+#define DUET_SOCKOP_SENDTO 6
+#define DUET_SOCKOP_RECVFROM 7
+#define DUET_SOCKOP_SHUTDOWN 8
+#define DUET_SOCKOP_CLOSE 9
+
+/* Six-arg raw trampoline for SYS_SOCKET_OP (arg3 -> r10, arg4 -> r8,
+ * arg5 -> r9). Implemented in userland/libc/src/syscall.c. Returns
+ * the kernel result: >= 0 on success, negative -errno on failure. */
+long duet_socket_op(long op, long a1, long a2, long a3, long a4, long a5);
+
+/* Block the calling task for `ms` milliseconds (SYS_SLEEP_MS).
+ * Implemented in userland/libc/src/syscall.c. */
+void duet_sleep_ms(unsigned long ms);
+
 /* Native syscall ABI errno values returned as negative rax payloads.
  * Keep these in sync with kernel/syscall/error.h. */
 #define DUET_EPERM 1

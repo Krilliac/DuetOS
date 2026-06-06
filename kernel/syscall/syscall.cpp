@@ -2110,6 +2110,13 @@ void SyscallDispatch(arch::TrapFrame* frame)
                 break;
             }
             const i32 idx = ::duetos::net::SocketAlloc(alloc_dom, static_cast<u16>(frame->rdx));
+            if (idx >= 0)
+            {
+                // Stamp the owning PID so process teardown reclaims this
+                // socket if the process exits without closing it.
+                const Process* cur_proc = CurrentProcess();
+                ::duetos::net::SocketSetOwner(static_cast<u32>(idx), (cur_proc != nullptr) ? cur_proc->pid : 0);
+            }
             rv = (idx < 0) ? -23 /* -ENFILE */ : static_cast<i64>(idx);
             break;
         }
@@ -2152,6 +2159,13 @@ void SyscallDispatch(arch::TrapFrame* frame)
                 break;
             }
             (void)write_sa(frame->rdx, frame->r10, peer_ip, peer_port);
+            // The accepted child socket belongs to the accepting process
+            // too — stamp it so a server's connections are reclaimed on
+            // its exit, not just the listener.
+            {
+                const Process* cur_proc = CurrentProcess();
+                ::duetos::net::SocketSetOwner(static_cast<u32>(accepted), (cur_proc != nullptr) ? cur_proc->pid : 0);
+            }
             rv = static_cast<i64>(accepted);
             break;
         }

@@ -4987,6 +4987,37 @@ bool SchedIsPidZombie(u64 target_pid)
     return hit;
 }
 
+bool SchedProcessAlive(u64 target_pid)
+{
+    if (!cpu::BspInstalled())
+    {
+        return false;
+    }
+    // Walk the global all-tasks registry (every live task in every
+    // state, including Blocked-on-a-WaitQueue) under g_sched_lock —
+    // the same anchor the hung-task detector uses. A task parked in a
+    // blocking syscall is NOT on the runqueue / sleep / zombie lists
+    // SchedFindProcessByPid walks, so only this registry sees it. A
+    // process is "alive" if any of its tasks is not Dead; Dead tasks
+    // linger here only until reaped.
+    bool alive = false;
+    sync::IrqFlags f = sync::SpinLockAcquire(g_sched_lock);
+    for (Task* t = g_all_tasks_head; t != nullptr; t = t->all_next)
+    {
+        if (t->state == TaskState::Dead)
+        {
+            continue;
+        }
+        if (t->process != nullptr && t->process->pid == target_pid)
+        {
+            alive = true;
+            break;
+        }
+    }
+    sync::SpinLockRelease(g_sched_lock, f);
+    return alive;
+}
+
 u64 SchedCountChildrenOfPid(u64 parent_pid)
 {
     if (!cpu::BspInstalled())

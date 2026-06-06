@@ -171,13 +171,18 @@ bool RunCertVerifier(const ServerChain* chain, const char* hostname)
         return g_cert_verify_fn(leaf, leaf_len, inter, inter_len, inter_count, hostname, g_cert_verify_ctx);
     }
 
-    // GAP: no cert verifier installed (e.g. a non-browser TLS caller
-    // that never called TlsSocketSetVerifier) — chain NOT validated,
-    // MITM-possible. The browser DOES install net::x509::Verify (see
-    // apps/browser.cpp::InstallTlsVerifierOnce), so its HTTPS path is
-    // gated; this leg only fires for an uninstalled caller.
-    KLOG_WARN("net/tls-sock", "no cert verifier installed — accepting server chain UNVERIFIED (MITM-possible)");
-    return true;
+    // No cert verifier installed: FAIL CLOSED. A TLS caller that never
+    // installed a verifier (via TlsSocketSetVerifier) must not silently
+    // accept an unauthenticated chain — that's a MITM. This matches the
+    // fail-closed philosophy of the verifier itself (net/x509_verify):
+    // an unverifiable peer is refused, not waved through. Real callers
+    // install net::x509::Verify (the browser does so before its first
+    // HTTPS; see apps/browser.cpp::InstallTlsVerifierOnce); a caller
+    // that legitimately wants no authentication (e.g. a self-signed
+    // loopback test) must install an explicit accept-any verifier and
+    // own that decision.
+    KLOG_WARN("net/tls-sock", "no cert verifier installed — refusing server chain (fail-closed)");
+    return false;
 }
 
 } // namespace
@@ -915,8 +920,33 @@ bool ChainParserSelfCheck(const char** out_fail_label)
 
 } // namespace
 
+// Accept-any verifier for the loopback self-test, which presents a
+// self-signed leaf to exercise handshake mechanics, NOT peer auth. The
+// default is now fail-closed, so the test must opt in explicitly and
+// own that decision (and restore the default afterwards).
+static bool SelfTestAcceptAnyVerify(const u8*, u32, const u8* const*, const u32*, u32, const char*, void*)
+{
+    return true;
+}
+
 void TlsSocketSelfTest()
 {
+    // Install an explicit accept-any verifier for the duration of the
+    // test (the loopback cert is self-signed; this test is not about
+    // authentication). Saved/restored so the secure fail-closed default
+    // is back in place when the test returns.
+    CertVerifyFn saved_fn = g_cert_verify_fn;
+    void* saved_ctx = g_cert_verify_ctx;
+    TlsSocketSetVerifier(SelfTestAcceptAnyVerify, nullptr);
+    // Restore the (fail-closed) default on EVERY exit — this function
+    // has many early returns on failure legs.
+    struct VerifierRestore
+    {
+        CertVerifyFn fn;
+        void* ctx;
+        ~VerifierRestore() { TlsSocketSetVerifier(fn, ctx); }
+    } verifier_restore{saved_fn, saved_ctx};
+
     // 1. In-memory loopback handshake: client driver vs. a server
     //    built from the same tls.h primitives.
     static LoopbackServer sv;

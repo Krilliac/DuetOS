@@ -115,6 +115,7 @@ i32 SocketAlloc(u16 domain, u16 type)
         s.family = domain;
         s.type = type;
         s.iface_index = 0;
+        s.owner_pid = 0; // stamped by SocketSetOwner from the syscall handler
         s.bound = false;
         s.connected = false;
         s.listening = false;
@@ -152,6 +153,40 @@ void SocketRetain(u32 idx)
     if (g_pool[idx].in_use)
         ++g_pool[idx].refs;
     arch::Sti();
+}
+
+void SocketSetOwner(u32 idx, u64 pid)
+{
+    if (idx >= kSocketPoolCap)
+        return;
+    arch::Cli();
+    if (g_pool[idx].in_use)
+        g_pool[idx].owner_pid = pid;
+    arch::Sti();
+}
+
+void SocketReleaseByOwner(u64 pid)
+{
+    if (pid == 0)
+        return; // kernel-owned sockets are never swept by a process exit
+    for (u32 i = 0; i < kSocketPoolCap; ++i)
+    {
+        arch::Cli();
+        const bool match = g_pool[i].in_use && g_pool[i].owner_pid == pid;
+        if (match)
+        {
+            // Force the full teardown regardless of any lingering dup
+            // refs: the owning process is gone, so no valid handle to
+            // this slot survives. Collapse refs to 1 and clear the
+            // owner so the SocketRelease below runs the real teardown
+            // (RX drain, TCB close, loopback pipe release) exactly once.
+            g_pool[i].refs = 1;
+            g_pool[i].owner_pid = 0;
+        }
+        arch::Sti();
+        if (match)
+            SocketRelease(i);
+    }
 }
 
 void SocketRelease(u32 idx)
@@ -648,8 +683,11 @@ i64 SocketSendStream(u32 idx, const u8* data, u32 len)
         return 0;
     if (s.loopback_paired && s.loopback_pipe_send_idx >= 0)
     {
-        const i64 wrote = ::duetos::subsystems::linux::internal::PipeWrite(static_cast<u32>(s.loopback_pipe_send_idx),
-                                                                           reinterpret_cast<u64>(data), len);
+        // Kernel-buffer variant: `data` is the syscall handler's kernel
+        // staging buffer, not a user pointer — the user-pointer PipeWrite
+        // would CopyFromUser it and fail the user-range check (-EFAULT).
+        const i64 wrote = ::duetos::subsystems::linux::internal::PipeWriteKernel(
+            static_cast<u32>(s.loopback_pipe_send_idx), data, len);
         if (wrote > 0)
             ++g_stats.stream_tx;
         return wrote;
@@ -695,8 +733,11 @@ i64 SocketRecvStream(u32 idx, u8* out, u32 cap)
         return -107;
     if (s.loopback_paired && s.loopback_pipe_recv_idx >= 0)
     {
-        const i64 got = ::duetos::subsystems::linux::internal::PipeRead(static_cast<u32>(s.loopback_pipe_recv_idx),
-                                                                        reinterpret_cast<u64>(out), cap);
+        // Kernel-buffer variant: `out` is the syscall handler's kernel
+        // staging buffer (the handler CopyToUser's it afterwards), so the
+        // user-pointer PipeRead would CopyToUser it and fail (-EFAULT).
+        const i64 got =
+            ::duetos::subsystems::linux::internal::PipeReadKernel(static_cast<u32>(s.loopback_pipe_recv_idx), out, cap);
         if (got > 0)
             ++g_stats.stream_rx;
         return got;

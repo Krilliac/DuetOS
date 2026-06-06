@@ -60,6 +60,30 @@ void exit(int code)
     DUET_USER_TRAP_UNREACHABLE();
 }
 
+void duet_sleep_ms(unsigned long ms)
+{
+    long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long)DUET_SYS_SLEEP_MS), "D"(ms) : "memory", "rcx", "r11");
+    (void)rv;
+}
+
+long duet_socket_op(long op, long a1, long a2, long a3, long a4, long a5)
+{
+    /* Six-arg int 0x80 ABI: arg3/4/5 land in r10/r8/r9 (Linux-shaped).
+     * Mirrors ws2_32.dll's ws2_op trampoline so native binaries and
+     * Win32 PEs drive the one kernel socket pool through identical
+     * register packing. */
+    long rv;
+    __asm__ volatile("mov %5, %%r10\n\t"
+                     "mov %6, %%r8\n\t"
+                     "mov %7, %%r9\n\t"
+                     "int $0x80"
+                     : "=a"(rv)
+                     : "a"((long)DUET_SYS_SOCKET_OP), "D"(op), "S"(a1), "d"(a2), "r"(a3), "r"(a4), "r"(a5)
+                     : "r10", "r8", "r9", "rcx", "r11", "memory");
+    return rv;
+}
+
 /* String helpers — implemented in userland/libc/src/string.S
  * (memcpy, memmove, memset, strlen, strcmp). The asm versions use
  * `rep movsb` / `rep stosb` which the silicon optimises into a

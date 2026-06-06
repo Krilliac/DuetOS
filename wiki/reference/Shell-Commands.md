@@ -275,7 +275,8 @@ All write-side FAT operations are admin-gated.
 | `http <ip> [port [path]]` | TCP connect + GET, prints 16 lines | |
 | `net <up\|status\|test>` | Bring up / status / end-to-end smoke | |
 | `usbnet [args...]` | USB-network helpers | |
-| `drshd <sub>` | DRSH remote-access service control | `status` shows state / counters / port; `start [port]`, `stop`, and `passwd <pw>` are admin-gated. Listener refuses to start without a pre-shared key set |
+| `drshd <sub>` | DRSH remote-access service control | `status` shows state / counters / port / lockout; `start [port]`, `stop`, `passwd <pw>`, and `unlock` (clear a brute-force lockout) are admin-gated. Listener refuses to start without a pre-shared key set |
+| `svc [list\|start\|stop\|restart <name>]` | Service manager front-end | `list` (default) shows each manifest service's state / policy / pid / restart count (any user); `start`/`stop`/`restart <name>` are admin-gated |
 | `fwpolicy [args...]` | Firewall policy view / edit | |
 | `fwtrace [show N]` | Firewall trace dispatch points | |
 | `crtrace [show N\|clear\|stats\|mark ...]` | Cleanroom-trace ring: dump / clear / boot+rolling counts / inject a manual marker | |

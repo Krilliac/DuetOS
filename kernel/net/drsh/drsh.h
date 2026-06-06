@@ -95,6 +95,23 @@ inline constexpr u32 kDrshPmkBytes = 32;
 
 inline constexpr u32 kDrshMaxPasswordBytes = 64;
 
+// Brute-force lockout policy — mirrors the local-login lockout in
+// security/auth.h (kAuthLockoutThreshold / kAuthLockoutDurationNs) so
+// a remote attacker faces the same wall the console login already
+// puts up. After kDrshLockoutThreshold consecutive handshakes that
+// complete the AUTH step with a WRONG password, the listener refuses
+// ALL new connections — without running any crypto — for
+// kDrshLockoutDurationNs. A successful handshake, a password
+// rotation, or `drshd unlock` clears the streak.
+//
+// Only genuine bad-credential handshakes feed the streak: malformed
+// frames, version mismatches, and bare TCP connects that drop before
+// AUTH do NOT count. Counting raw connection noise would let a port
+// scanner lock the admin out of their own box (a self-DoS) — the
+// opposite of what the wall is for.
+inline constexpr u32 kDrshLockoutThreshold = 5;
+inline constexpr u64 kDrshLockoutDurationNs = 60ull * 1000ull * 1000ull * 1000ull; // 60 s
+
 // Channel identifiers — 0 reserved for control.
 inline constexpr u8 kDrshChannelControl = 0;
 inline constexpr u8 kDrshChannelShell = 1;
@@ -146,6 +163,11 @@ struct DrshStatus
     u64 frames_tx;
     u64 bytes_rx;
     u64 bytes_tx;
+    // Brute-force throttle state (see kDrshLockoutThreshold).
+    u64 throttled_total; // connections refused while the lockout was armed
+    u64 locked_until_ns; // 0 = not locked; else MonotonicNs at which the lockout lifts
+    u32 failed_streak;   // consecutive bad-credential handshakes since last success / unlock
+    u32 _pad3;
 };
 
 /// One-time module init. Idempotent. Wires the service into the
@@ -165,6 +187,13 @@ bool DrshServerStart(u16 port);
 
 /// Stop the listener and tear down any active session. Idempotent.
 void DrshServerStop();
+
+/// Clear an active brute-force lockout: zero the consecutive-failure
+/// streak and lift any timed lockout immediately. Idempotent. Caller-
+/// side policy (admin-only) is enforced by the `drshd unlock` shell
+/// command, mirroring AuthUnlockUser. Publishes an unlock event only
+/// when a lockout was actually armed at call time.
+void DrshUnlock();
 
 /// Snapshot status for `drshd status` + diag.
 DrshStatus DrshServerStatus();

@@ -292,6 +292,73 @@ i64 PipeWrite(u32 idx, u64 user_src, u64 len)
     return static_cast<i64>(to_write);
 }
 
+i64 PipeReadKernel(u32 idx, u8* dst, u64 len)
+{
+    if (idx >= kPipePoolCap || len == 0 || dst == nullptr)
+        return 0;
+    Pipe& p = g_pipe_pool[idx];
+    arch::Cli();
+    while (p.in_use && p.count == 0)
+    {
+        if (p.write_refs == 0)
+        {
+            arch::Sti();
+            return 0; // EOF — every writer closed
+        }
+        sched::WaitQueueBlock(&p.read_wq);
+        arch::Cli();
+    }
+    if (!p.in_use)
+    {
+        arch::Sti();
+        return 0;
+    }
+    const u64 to_read = (len < p.count) ? len : p.count;
+    for (u64 i = 0; i < to_read; ++i)
+    {
+        dst[i] = p.buf[p.tail];
+        p.tail = (p.tail + 1) % kPipeBufBytes;
+        --p.count;
+    }
+    sched::WaitQueueWakeOne(&p.write_wq);
+    arch::Sti();
+    return static_cast<i64>(to_read);
+}
+
+i64 PipeWriteKernel(u32 idx, const u8* src, u64 len)
+{
+    if (idx >= kPipePoolCap || len == 0 || src == nullptr)
+        return 0;
+    Pipe& p = g_pipe_pool[idx];
+    arch::Cli();
+    while (p.in_use && p.count == kPipeBufBytes)
+    {
+        if (p.read_refs == 0)
+        {
+            arch::Sti();
+            return kEpipe;
+        }
+        sched::WaitQueueBlock(&p.write_wq);
+        arch::Cli();
+    }
+    if (!p.in_use || p.read_refs == 0)
+    {
+        arch::Sti();
+        return kEpipe;
+    }
+    const u64 free_slots = kPipeBufBytes - p.count;
+    const u64 to_write = (len < free_slots) ? len : free_slots;
+    for (u64 i = 0; i < to_write; ++i)
+    {
+        p.buf[p.head] = src[i];
+        p.head = (p.head + 1) % kPipeBufBytes;
+        ++p.count;
+    }
+    sched::WaitQueueWakeOne(&p.read_wq);
+    arch::Sti();
+    return static_cast<i64>(to_write);
+}
+
 // splice / tee — kernel-bypass byte movement between two pipe
 // rings. No CopyFromUser/CopyToUser bounce; no per-byte loops on
 // the slow path because the rings are already kernel-owned and

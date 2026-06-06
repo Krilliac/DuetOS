@@ -1,6 +1,7 @@
 #include "drivers/video/console.h"
 #include "net/drsh/drsh.h"
 #include "shell/shell_internal.h"
+#include "time/timekeeper.h"
 #include "util/string.h"
 #include "util/types.h"
 
@@ -28,6 +29,7 @@ using duetos::net::drsh::DrshServerStatus;
 using duetos::net::drsh::DrshServerStop;
 using duetos::net::drsh::DrshSetPassword;
 using duetos::net::drsh::DrshStatus;
+using duetos::net::drsh::DrshUnlock;
 
 namespace
 {
@@ -55,6 +57,20 @@ void PrintStatus()
     WriteU64Dec(s.frames_rx);
     ConsoleWrite("/");
     WriteU64Dec(s.frames_tx);
+    ConsoleWriteln("");
+    // Brute-force throttle. `locked` reflects the live clock; the
+    // server task auto-thaws an expired lockout on its next accept,
+    // but a status read between attempts should not report a stale
+    // lock, so compare against the monotonic clock here too.
+    const bool locked = s.locked_until_ns != 0 && duetos::time::MonotonicNs() < s.locked_until_ns;
+    ConsoleWrite("DRSH: lockout=");
+    ConsoleWrite(locked ? "ARMED" : "clear");
+    ConsoleWrite(", failed_streak=");
+    WriteU64Dec(static_cast<u64>(s.failed_streak));
+    ConsoleWrite("/");
+    WriteU64Dec(static_cast<u64>(duetos::net::drsh::kDrshLockoutThreshold));
+    ConsoleWrite(", throttled=");
+    WriteU64Dec(s.throttled_total);
     ConsoleWriteln("");
 }
 
@@ -131,7 +147,15 @@ void CmdDrshd(u32 argc, char** argv)
         ConsoleWriteln("DRSHD: stop requested");
         return;
     }
-    ConsoleWriteln("DRSHD: usage: drshd [status|start [port]|stop|passwd <pw>]");
+    if (StrEqual(argv[1], "unlock"))
+    {
+        if (!RequireAdmin("DRSHD"))
+            return;
+        DrshUnlock();
+        ConsoleWriteln("DRSHD: lockout cleared");
+        return;
+    }
+    ConsoleWriteln("DRSHD: usage: drshd [status|start [port]|stop|passwd <pw>|unlock]");
 }
 
 } // namespace duetos::core::shell::internal

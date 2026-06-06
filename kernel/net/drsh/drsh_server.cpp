@@ -7,6 +7,8 @@
 #include "net/socket.h"
 #include "net/stack.h"
 #include "sched/sched.h"
+#include "security/event_ring.h"
+#include "time/timekeeper.h"
 
 /*
  * DRSH — service orchestration.
@@ -73,6 +75,59 @@ void ResetSessionKeys()
     sess.frames_rx = 0;
     sess.bytes_tx = 0;
     sess.bytes_rx = 0;
+}
+
+// ----------------------------------------------------------------
+// Brute-force lockout — the same shape as security/auth.cpp's
+// per-account lockout, applied to the (single, system-wide) DRSH
+// pre-shared key. State lives in DrshGlobal; all access is from the
+// server task (single-threaded accept loop) plus the admin shell
+// commands, which are serialised against it by the scheduler.
+// ----------------------------------------------------------------
+
+// True iff the listener is currently refusing connections because the
+// failure threshold was crossed. Side effect (mirrors auth.cpp's
+// AccountIsLocked): an expired lockout auto-thaws — the streak and
+// timer are cleared and an unlock event is published — so the next
+// accept boundary that runs past the threshold window re-opens the
+// door without a separate sweep.
+bool LockoutActive(u64 now_ns)
+{
+    if (g_global.locked_until_ns == 0)
+        return false;
+    if (now_ns < g_global.locked_until_ns)
+        return true;
+    g_global.locked_until_ns = 0;
+    g_global.failed_streak = 0;
+    duetos::security::EventRingPublishKind(duetos::security::EventKind::AuthAccountUnlocked, 0, 0 /*expired*/, 0,
+                                           "drshd");
+    return false;
+}
+
+// A successful handshake clears the streak — the legitimate admin just
+// proved they hold the key, so an attacker's prior misses shouldn't
+// keep them on the brink.
+void RegisterAuthSuccess()
+{
+    g_global.failed_streak = 0;
+    g_global.locked_until_ns = 0;
+}
+
+// A genuine wrong-credential handshake bumps the streak and, on
+// crossing the threshold, arms the timed lockout.
+void RegisterAuthFailure(u64 now_ns)
+{
+    if (g_global.failed_streak < 0xFFFFFFFFu)
+        ++g_global.failed_streak;
+    duetos::security::EventRingPublishKind(duetos::security::EventKind::AuthLoginFailure, 0, 0, g_global.failed_streak,
+                                           "drshd");
+    if (g_global.failed_streak >= kDrshLockoutThreshold && g_global.locked_until_ns == 0)
+    {
+        g_global.locked_until_ns = now_ns + kDrshLockoutDurationNs;
+        duetos::security::EventRingPublishKind(duetos::security::EventKind::AuthAccountLocked, 0,
+                                               g_global.failed_streak, kDrshLockoutDurationNs, "drshd");
+        KLOG_WARN("net/drsh", "listener locked (consecutive bad-credential handshakes)");
+    }
 }
 
 bool OpenListenerSocket(u16 port, i32* out_idx)
@@ -162,16 +217,24 @@ void RunOneSession(u32 accepted_idx)
     ResetSessionKeys();
     g_global.session_active = true;
 
-    const bool auth_ok = ServerHandshake(t, g_global.password, g_global.password_len, g_global.session);
-    if (!auth_ok)
+    const HandshakeOutcome outcome = ServerHandshake(t, g_global.password, g_global.password_len, g_global.session);
+    if (outcome == HandshakeOutcome::Ok)
     {
-        g_global.auth_failures_total += 1;
-        KLOG_WARN("net/drsh", "handshake refused");
+        g_global.connections_total += 1;
+        RegisterAuthSuccess();
+        (void)HandleSessionFrames(t);
     }
     else
     {
-        g_global.connections_total += 1;
-        (void)HandleSessionFrames(t);
+        // Any non-Ok outcome counts as a refused handshake for the
+        // visible counter, but only a genuine wrong-password attempt
+        // (BadCredentials) feeds the brute-force lockout — wire noise
+        // and malformed frames must not let a scanner lock out the
+        // legitimate admin. See kDrshLockoutThreshold in drsh.h.
+        g_global.auth_failures_total += 1;
+        if (outcome == HandshakeOutcome::BadCredentials)
+            RegisterAuthFailure(duetos::time::MonotonicNs());
+        KLOG_WARN("net/drsh", "handshake refused");
     }
 
     // Best-effort orderly disconnect; ignore failure (likely the
@@ -218,6 +281,15 @@ void ServerTaskEntry(void* /*arg*/)
             duetos::net::SocketRelease(static_cast<u32>(accepted));
             continue;
         }
+        if (LockoutActive(duetos::time::MonotonicNs()))
+        {
+            // Brute-force wall is up: drop the connection before any
+            // crypto runs, so a flood of attempts during the lockout
+            // window costs the box a SocketRelease, not a PBKDF2.
+            g_global.throttled_total += 1;
+            duetos::net::SocketRelease(static_cast<u32>(accepted));
+            continue;
+        }
         RunOneSession(static_cast<u32>(accepted));
     }
 
@@ -231,6 +303,59 @@ void ServerTaskEntry(void* /*arg*/)
 DrshGlobal& Globals()
 {
     return g_global;
+}
+
+bool RunLockoutSelfTest()
+{
+    // Snapshot the live lockout fields so the boot self-test is
+    // non-destructive — the service is off at boot, but the streak /
+    // timer are real global state and we must hand them back intact.
+    const u32 saved_streak = g_global.failed_streak;
+    const u64 saved_until = g_global.locked_until_ns;
+    const u64 saved_throttled = g_global.throttled_total;
+
+    bool ok = true;
+    const u64 t0 = 1'000'000'000ull; // arbitrary synthetic clock base
+
+    g_global.failed_streak = 0;
+    g_global.locked_until_ns = 0;
+
+    // Below threshold: no lock.
+    for (u32 i = 0; i + 1 < kDrshLockoutThreshold; ++i)
+        RegisterAuthFailure(t0);
+    if (LockoutActive(t0))
+        ok = false;
+
+    // Crossing the threshold arms the timed lockout.
+    RegisterAuthFailure(t0);
+    if (!LockoutActive(t0))
+        ok = false;
+    // A wrong attempt while locked must still be refused by the clock,
+    // not re-armed past the original window.
+    if (!LockoutActive(t0 + kDrshLockoutDurationNs - 1))
+        ok = false;
+
+    // Past expiry: auto-thaw clears both the timer and the streak.
+    if (LockoutActive(t0 + kDrshLockoutDurationNs))
+        ok = false;
+    if (g_global.locked_until_ns != 0 || g_global.failed_streak != 0)
+        ok = false;
+
+    // Re-arm, then confirm the manual clear path drops the lock.
+    for (u32 i = 0; i < kDrshLockoutThreshold; ++i)
+        RegisterAuthFailure(t0);
+    if (!LockoutActive(t0))
+        ok = false;
+    g_global.failed_streak = 0;
+    g_global.locked_until_ns = 0;
+    if (LockoutActive(t0))
+        ok = false;
+
+    // Restore.
+    g_global.failed_streak = saved_streak;
+    g_global.locked_until_ns = saved_until;
+    g_global.throttled_total = saved_throttled;
+    return ok;
 }
 
 } // namespace internal
@@ -250,6 +375,9 @@ void DrshInit()
         g.password[i] = 0;
     g.connections_total = 0;
     g.auth_failures_total = 0;
+    g.failed_streak = 0;
+    g.locked_until_ns = 0;
+    g.throttled_total = 0;
     internal::ResetSessionKeys();
 }
 
@@ -278,6 +406,12 @@ bool DrshSetPassword(const char* password)
         g.password[i] = static_cast<u8>(password[i]);
     g.password_len = len;
     g.password_set = (len > 0);
+    // A key rotation is a clean slate, mirroring AuthChangePassword:
+    // lift any standing lockout and zero the failure streak so the
+    // admin who just set a new secret isn't left locked out by the
+    // attempts that prompted the rotation.
+    g.failed_streak = 0;
+    g.locked_until_ns = 0;
     return true;
 }
 
@@ -309,6 +443,19 @@ void DrshServerStop()
     // will see the listener_running flag flip in `drshd status`.
 }
 
+void DrshUnlock()
+{
+    auto& g = internal::g_global;
+    const bool was_locked = g.locked_until_ns != 0;
+    g.failed_streak = 0;
+    g.locked_until_ns = 0;
+    if (was_locked)
+    {
+        duetos::security::EventRingPublishKind(duetos::security::EventKind::AuthAccountUnlocked, 0, 1 /*manual*/, 0,
+                                               "drshd");
+    }
+}
+
 DrshStatus DrshServerStatus()
 {
     auto& g = internal::g_global;
@@ -325,6 +472,9 @@ DrshStatus DrshServerStatus()
     s.frames_tx = g.session.frames_tx;
     s.bytes_rx = g.session.bytes_rx;
     s.bytes_tx = g.session.bytes_tx;
+    s.throttled_total = g.throttled_total;
+    s.locked_until_ns = g.locked_until_ns;
+    s.failed_streak = g.failed_streak;
     return s;
 }
 
@@ -433,7 +583,14 @@ void DrshSelfTest()
             return;
         }
     }
-    arch::SerialWrite("[net/drsh-selftest] PASS (frame round-trip)\n");
+
+    if (!internal::RunLockoutSelfTest())
+    {
+        arch::SerialWrite("[net/drsh-selftest] FAIL (lockout)\n");
+        return;
+    }
+
+    arch::SerialWrite("[net/drsh-selftest] PASS (frame round-trip + lockout)\n");
 }
 
 } // namespace duetos::net::drsh

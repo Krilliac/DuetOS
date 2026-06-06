@@ -725,6 +725,7 @@ constinit const char* const kCommandSet[] = {
     "loadtest",  "stress",    "bench",       "dbg",          "dfix",       "dintro",      "selfthink", "drshd",
     "pe-triage", "caplog",    "live-update", "fault-inject", "suspend",    "resume",      "affinity",  "vtop",
     "logclock",  "dpms",      "wrmsr",       "io",           "peek",       "poke",        "fbdump",    "kpath",
+    "svc",
 };
 constinit const u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -1370,6 +1371,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "drshd"))
     {
         CmdDrshd(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "svc"))
+    {
+        CmdSvc(argc, argv);
         return;
     }
     if (StrEq(cmd, "nic") || StrEq(cmd, "lsnic") || StrEq(cmd, "ip"))
