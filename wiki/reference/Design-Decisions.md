@@ -10496,3 +10496,35 @@ stamp `kDuetOsVolumeSerial` in the VolumeSerialNumber field.
 **Related.** The full hardware-safety contract and the pre-landing
 precondition table for every still-unimplemented risky controller live
 in [`security/Hardware-Safety`](../security/Hardware-Safety.md).
+
+## 2026-06-06 — RAPL is read-only telemetry, vendor + hypervisor gated
+
+First slice of the hardware build-out following the Hardware-Safety
+audit. `kernel/arch/x86_64/rapl.{h,cpp}` reads the RAPL energy/power MSRs
+and decodes joules / watts / the TDP envelope.
+
+**Decision — read-only, no limit writes.** RAPL exposes
+`MSR_PKG_POWER_LIMIT`, but DuetOS deliberately does NOT write it. Raising
+PL1/PL2 without adequate cooling overheats the package, so per the
+hardware-safety contract RAPL is telemetry only; a future limit-*setting*
+surface must sit behind a kernel capability + a cooling-aware tune mode.
+This rules out "expose a powerlimit knob now" for the next slice.
+
+**Decision — mirror thermal's gating, not a fault-safe rdmsr.** Reads are
+issued only when `CpuHas(kCpuFeatMsr)` AND the vendor is Intel/AMD AND
+`!IsEmulator()`. An unimplemented-MSR `rdmsr` raises a `#GP` the trap
+dispatcher does not recover from; KVM/TCG do not reliably expose RAPL.
+The proven thermal.cpp envelope (vendor whitelist + emulator bail) is
+reused rather than introducing a `ReadMsrSafe` extable primitive this
+slice. Consequence: RAPL reports "unavailable" under QEMU, so the
+runtime-verifiable part is the pure-math `RaplSelfTest()` (unit decode +
+µJ/ms→mW), which gates CI identically on QEMU and bare metal — the same
+verification model thermal uses.
+
+**Decision — Rust not used.** Per the project's Rust rule (standalone
+greenfield subsystems only, no Rust-in-a-C++-call-chain), RAPL is
+MSR/register reads tightly coupled to existing C++ arch code
+(`cpu_info`, `hypervisor`, `timekeeper`), so it stays C++. Rust is
+reserved for the later device-blob *parsers* in this program (EDID,
+SPI SFDP, NIC EEPROM image) — the standalone-parser shape the
+`exfat_rust` / `ntfs_rust` crates already use.

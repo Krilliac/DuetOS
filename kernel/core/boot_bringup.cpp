@@ -33,6 +33,7 @@
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/smbios.h"
 #include "arch/x86_64/thermal.h"
+#include "arch/x86_64/rapl.h"
 #include "arch/x86_64/hpet.h"
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/ioapic.h"
@@ -526,6 +527,9 @@ void BootBringupEarly(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
     SerialWrite("[boot] Reading MSR thermals.\n");
     duetos::arch::ThermalProbe();
 
+    SerialWrite("[boot] Reading RAPL power telemetry.\n");
+    duetos::arch::RaplProbe();
+
     // Phase::Earlycon — utility-primitive self-tests (Result /
     // String / Hexdump / VaRegion). All four panic on failure, so
     // each adapter just calls + returns Ok. Registered here rather
@@ -615,6 +619,7 @@ void BootBringupEarly(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
     DUETOS_BOOT_SELFTEST(duetos::util::SaturatingSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::vt::VtParserSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::core::Sf32SelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::arch::RaplSelfTest());
 
     // KASLR — compute the candidate slide from the now-seeded entropy
     // pool. The slide isn't applied to the kernel image yet (that

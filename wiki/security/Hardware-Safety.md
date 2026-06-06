@@ -85,6 +85,7 @@ tree already follows the contract everywhere except one latent gap
 | **FAT32 / exFAT write** | Bounded tier | In-place / append / create / delete / rename; no cluster-chain growth past envelope |
 | **TRIM (`fstrim`)** | Owned-only | Routes through `Fat32Volume(idx)` → only owned volumes; discards free clusters within the partition |
 | **CPU MSRs** | No physical-state writes | No Vcore/`0x150`, no RAPL `PKG_POWER_LIMIT`, no thermal-throttle/PROCHOT disable. SYSCALL/EFER/CET writes panic-on-fault by design |
+| **RAPL telemetry** | Read-only (landed 2026-06-06) | `arch/x86_64/rapl.cpp` reads energy/power/TDP MSRs only; never writes a limit. Vendor + hypervisor gated like thermal. See [Power-Management](../drivers/Power-Management.md) |
 | **UEFI NVRAM** | No writes | No `SetVariable` / capsule / `UpdateCapsule` path exists |
 | **SPI flash / microcode** | No writes | None; **ME/PSP guard** actively refuses PCI config writes to coprocessor BDFs (`me_psp_guard`) |
 | **CMOS / RTC** | Bounded | `RtcWrite` bounds-checked, freeze/unfreeze, touches only time bytes 0x00–0x09 |

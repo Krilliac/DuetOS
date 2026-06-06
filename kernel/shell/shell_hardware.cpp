@@ -29,6 +29,7 @@
 #include "arch/x86_64/cpu_mitigations.h"
 #include "arch/x86_64/hpet.h"
 #include "arch/x86_64/lapic.h"
+#include "arch/x86_64/rapl.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/smbios.h"
 #include "arch/x86_64/timer.h"
@@ -1446,6 +1447,41 @@ void CmdHwmon()
             ConsoleWrite("mW");
         }
         ConsoleWriteln("");
+    }
+
+    ConsoleWriteln("-- rapl (cpu power) --");
+    const auto rapl = duetos::arch::RaplRead();
+    if (!rapl.valid)
+    {
+        ConsoleWriteln("RAPL:         (unavailable — hypervisor / unknown vendor / no MSR)");
+    }
+    else
+    {
+        ConsoleWrite("VENDOR:       ");
+        ConsoleWriteln(rapl.is_intel ? "Intel RAPL" : "AMD RAPL");
+        ConsoleWrite("PKG ENERGY:   ");
+        WriteU64Dec(rapl.pkg_energy_uj / 1000); // microjoules -> millijoules
+        ConsoleWriteln(" mJ (cumulative)");
+        if (rapl.tdp_valid)
+        {
+            ConsoleWrite("TDP:          ");
+            WriteU64Dec(rapl.tdp_mw / 1000);
+            ConsoleWrite("W  (min ");
+            WriteU64Dec(rapl.min_power_mw / 1000);
+            ConsoleWrite("W / max ");
+            WriteU64Dec(rapl.max_power_mw / 1000);
+            ConsoleWriteln("W)");
+        }
+        // Live spot reading: busy-waits 200 ms to measure package draw.
+        const u32 pkg_mw = duetos::arch::RaplSamplePackagePowerMw(200);
+        if (pkg_mw != 0)
+        {
+            ConsoleWrite("PKG POWER:    ");
+            WriteU64Dec(pkg_mw / 1000);
+            ConsoleWrite(".");
+            WriteU64Dec((pkg_mw % 1000) / 100);
+            ConsoleWriteln("W (200ms sample)");
+        }
     }
 
     ConsoleWriteln("-- fans --");

@@ -151,8 +151,40 @@ The thermal throttle flag is sampled at boot and exposed via
 it post-boot — adding a periodic thermal poll to the heartbeat is a
 small, well-bounded next step once the operator surface needs it.
 
+## RAPL Power Telemetry (read-only)
+
+`kernel/arch/x86_64/rapl.{h,cpp}` reads the RAPL (Running Average Power
+Limit) energy + power-info MSRs and decodes them into joules / watts /
+the TDP envelope. It is **read-only** — it never writes a RAPL MSR.
+Raising a power limit (`MSR_PKG_POWER_LIMIT`) without adequate cooling
+can overheat the package, so per the
+[Hardware-Safety contract](../security/Hardware-Safety.md) RAPL is
+read-only telemetry by default; a future limit-*setting* surface must
+sit behind a kernel capability + an explicit cooling-aware tune mode.
+
+- **Intel** (architectural since Sandy Bridge): `MSR_RAPL_POWER_UNIT`
+  (0x606) for the unit exponents, `MSR_PKG_POWER_INFO` (0x614) for the
+  TDP / min / max envelope, `MSR_PKG_ENERGY_STATUS` (0x611) and
+  `MSR_DRAM_ENERGY_STATUS` (0x619) for cumulative energy.
+- **AMD** (family 17h+): `MSR_AMD_RAPL_PWR_UNIT` (0xC0010299) +
+  `MSR_AMD_PKG_ENERGY_STAT` (0xC001029B); no `PKG_POWER_INFO`, so TDP
+  reads "unknown".
+- **Gating** mirrors the thermal probe exactly: reads issue only when
+  `CpuHas(kCpuFeatMsr)` AND the vendor is recognised AND we are not
+  under a hypervisor (`IsEmulator()`) — KVM/TCG do not reliably expose
+  RAPL, and an unimplemented-MSR `rdmsr` would `#GP`. On those paths
+  `RaplRead()` returns `valid=false` and the boot probe logs "no data".
+- **Surface:** `RaplRead()` (one-shot), `RaplSamplePackagePowerMw(ms)`
+  (busy-waits a window for a live spot reading), `RaplProbe()` (boot
+  one-liner), and `RaplSelfTest()` (pure-math unit-decode test, gates
+  CI). The `hwmon` shell command shows the package energy / TDP / live
+  draw alongside thermal + battery.
+
 ## Known Limits / GAPs
 
+- **RAPL is read-only.** Energy / power / TDP readout only; setting a
+  power limit is deliberately not implemented (Hardware-Safety
+  pre-landing row "RAPL power-limit raise").
 - **No `_BST` / `_BIF` evaluation.** Battery presence yes, charge /
   capacity / discharge rate no.
 - **No EC region reads.** Most laptop sensors (lid switch, fan RPM,
