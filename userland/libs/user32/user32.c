@@ -2298,8 +2298,14 @@ __declspec(dllexport) BOOL Beep(DWORD freq, DWORD dur)
  * fixed-size flat array, with parent rows carrying child_index /
  * child_count back-references into the same array. Depth is capped
  * at the kernel's kMenuMaxStack (4 panels).
- * GetMenu/SetMenu/DrawMenuBar/LoadMenu/GetSystemMenu remain stubs
- * because menubars and resource-loaded menus are out of scope. */
+ *
+ * SetMenu/GetMenu/GetSystemMenu keep the HWND->HMENU association in
+ * a small userland-side table (s_window_menus below); the kernel
+ * compositor owns the window chrome, so the HMENU here is purely the
+ * client-side data model that a PE can round-trip. DrawMenuBar can
+ * only trigger an invalidate/redraw — see its GAP marker.
+ * LoadMenu remains a stub because resource-loaded menus are out of
+ * scope. */
 
 #define USER32_MENU_CAP 32
 #define USER32_MENU_ITEM_CAP 16
@@ -2389,6 +2395,49 @@ static HANDLE user32_menu_alloc(unsigned is_popup)
     return (HANDLE)0;
 }
 
+/* Per-HWND menu association. The kernel owns the window object; this
+ * table is the userland-side data model only, mapping an HWND to its
+ * attached menubar HMENU (SetMenu/GetMenu) and to a lazily-synthesized
+ * cached system menu (GetSystemMenu). Linear scan, matching the
+ * s_classes idiom — windows with menus are few. */
+#define USER32_WINDOW_MENU_CAP 32
+
+struct user32_window_menu
+{
+    HANDLE hwnd;     /* 0 when the slot is free */
+    HANDLE menu;     /* attached menubar HMENU, or 0 */
+    HANDLE sys_menu; /* cached GetSystemMenu HMENU, or 0 */
+};
+
+static struct user32_window_menu s_window_menus[USER32_WINDOW_MENU_CAP];
+
+/* Find the slot for `hwnd`, optionally allocating one. Returns 0 when
+ * the table is full and `create` was requested, or when no slot exists
+ * and `create` is 0. */
+static struct user32_window_menu* user32_window_menu_slot(HANDLE hwnd, int create)
+{
+    if (!hwnd)
+        return 0;
+    for (unsigned i = 0; i < USER32_WINDOW_MENU_CAP; ++i)
+    {
+        if (s_window_menus[i].hwnd == hwnd)
+            return &s_window_menus[i];
+    }
+    if (!create)
+        return 0;
+    for (unsigned i = 0; i < USER32_WINDOW_MENU_CAP; ++i)
+    {
+        if (s_window_menus[i].hwnd == (HANDLE)0)
+        {
+            s_window_menus[i].hwnd = hwnd;
+            s_window_menus[i].menu = (HANDLE)0;
+            s_window_menus[i].sys_menu = (HANDLE)0;
+            return &s_window_menus[i];
+        }
+    }
+    return 0; /* table full */
+}
+
 static unsigned user32_menu_translate_flags(UINT mf)
 {
     unsigned k = 0;
@@ -2426,16 +2475,23 @@ __declspec(dllexport) BOOL DestroyMenu(HANDLE menu)
     m->count = 0;
     return 1;
 }
-/* Menubar slots — STUB: menubar drawing is out of scope for v0. */
+/* Menubar association — userland data-model round-trip. The kernel
+ * compositor does not yet paint the menubar band (see DrawMenuBar). */
 __declspec(dllexport) HANDLE GetMenu(HANDLE hwnd)
 {
-    (void)hwnd;
-    return (HANDLE)0;
+    struct user32_window_menu* slot = user32_window_menu_slot(hwnd, 0);
+    return slot ? slot->menu : (HANDLE)0;
 }
 __declspec(dllexport) BOOL SetMenu(HANDLE hwnd, HANDLE menu)
 {
-    (void)hwnd;
-    (void)menu;
+    if (!hwnd)
+        return 0;
+    /* SetMenu(hwnd, NULL) clears the association. Only allocate a slot
+     * when there is actually a menu to store. */
+    struct user32_window_menu* slot = user32_window_menu_slot(hwnd, menu ? 1 : 0);
+    if (!slot)
+        return menu ? 0 : 1; /* table full only matters when storing */
+    slot->menu = menu;
     return 1;
 }
 __declspec(dllexport) HANDLE GetSubMenu(HANDLE menu, int pos)
@@ -2526,6 +2582,52 @@ __declspec(dllexport) BOOL AppendMenuW(HANDLE menu, UINT flags, unsigned long lo
         buf[i] = '\0';
     }
     return AppendMenuA(menu, flags, item_id, buf);
+}
+/* GetSystemMenu — synthesize (and cache per HWND) a minimal system
+ * menu using the same CreatePopupMenu/AppendMenu machinery a PE would
+ * use. bRevert==TRUE destroys the cached copy and returns NULL, per
+ * MSDN. The SC_* command ids match the Win32 ABI so a PE that handles
+ * WM_SYSCOMMAND sees the expected values. */
+#define USER32_SC_SIZE 0xF000u
+#define USER32_SC_MOVE 0xF010u
+#define USER32_SC_MINIMIZE 0xF020u
+#define USER32_SC_MAXIMIZE 0xF030u
+#define USER32_SC_CLOSE 0xF060u
+#define USER32_SC_RESTORE 0xF120u
+
+__declspec(dllexport) HANDLE GetSystemMenu(HANDLE hwnd, BOOL bRevert)
+{
+    if (!hwnd)
+        return (HANDLE)0;
+    struct user32_window_menu* slot = user32_window_menu_slot(hwnd, bRevert ? 0 : 1);
+    if (bRevert)
+    {
+        /* Destroy the cached copy; the next non-revert call rebuilds
+         * the default system menu. */
+        if (slot && slot->sys_menu)
+        {
+            DestroyMenu(slot->sys_menu);
+            slot->sys_menu = (HANDLE)0;
+        }
+        return (HANDLE)0;
+    }
+    if (!slot)
+        return (HANDLE)0; /* table full */
+    if (slot->sys_menu)
+        return slot->sys_menu;
+
+    HANDLE menu = CreatePopupMenu();
+    if (!menu)
+        return (HANDLE)0;
+    AppendMenuA(menu, 0, USER32_SC_RESTORE, "&Restore");
+    AppendMenuA(menu, 0, USER32_SC_MOVE, "&Move");
+    AppendMenuA(menu, 0, USER32_SC_SIZE, "&Size");
+    AppendMenuA(menu, 0, USER32_SC_MINIMIZE, "Mi&nimize");
+    AppendMenuA(menu, 0, USER32_SC_MAXIMIZE, "Ma&ximize");
+    AppendMenuA(menu, USER32_MF_SEPARATOR, 0, (const char*)0);
+    AppendMenuA(menu, 0, USER32_SC_CLOSE, "&Close");
+    slot->sys_menu = menu;
+    return menu;
 }
 __declspec(dllexport) BOOL InsertMenuA(HANDLE menu, UINT pos, UINT flags, unsigned long long item_id, const char* text)
 {
@@ -2838,8 +2940,23 @@ __declspec(dllexport) BOOL TrackPopupMenuEx(HANDLE menu, UINT flags, int x, int 
 }
 __declspec(dllexport) BOOL DrawMenuBar(HANDLE hwnd)
 {
-    /* STUB: menubar drawing not implemented in v0. */
-    (void)hwnd;
+    /* GAP: the kernel compositor does not yet paint menu-bar item
+     * glyphs — only the HWND->HMENU data model (SetMenu/GetMenu) and
+     * this redraw trigger are wired. Revisit when the compositor
+     * grows a non-client menu band. For now, request a window
+     * invalidate so a PE that calls DrawMenuBar after mutating its
+     * menu still gets a WM_PAINT, matching the observable Win32
+     * contract that the bar is refreshed. */
+    if (hwnd)
+    {
+        long long rv;
+        __asm__ volatile("int $0x80"
+                         : "=a"(rv)
+                         : "a"((long long)SYS_WIN_INVALIDATE), "D"((long long)(unsigned long long)hwnd),
+                           "S"((long long)1)
+                         : "memory");
+        (void)rv;
+    }
     return 1;
 }
 

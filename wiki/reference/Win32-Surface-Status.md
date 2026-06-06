@@ -1356,9 +1356,12 @@ WinDbg client API, `SymLoadModuleEx`.
   `TPMPARAMS` exclude-rect ignored; concurrent TrackPopupMenu
   from two PE processes serialise on the single-instance kernel
   menu (second caller cancels).
-- Menus: `LoadMenuW`, `GetSystemMenu`, `GetMenu`, `SetMenu`,
-  `DrawMenuBar` — STUB (menubars and resource-loaded menus
-  out of scope for v0)
+- Menus: `GetMenu`/`SetMenu` (per-HWND HMENU store, round-trips),
+  `GetSystemMenu` (synthesizes + caches a standard system menu;
+  `bRevert` destroys it) — REAL. `DrawMenuBar` triggers a real
+  window redraw (`SYS_WIN_INVALIDATE`) but the compositor has no
+  non-client menu band yet, so item glyphs aren't painted — GAP.
+  `LoadMenuW` — STUB (needs the `.rsrc` resource loader).
 - Modal dialogs: `DialogBoxA/W`, `DialogBoxParamA/W`,
   `DialogBoxIndirectParamA/W`, `CreateDialogA/W`,
   `CreateDialogParamA/W`, `EndDialog`, `IsDialogMessageA/W`,
@@ -2649,9 +2652,12 @@ above and are deliberately absent from this list.
   import the family link and follow the affirmative branch.
 - **Menus** — `CreatePopupMenu` / `AppendMenu` /
   `TrackPopupMenu` / `DestroyMenu` and the surrounding
-  property/state queries are REAL. `LoadMenu`, `GetMenu`,
-  `SetMenu`, `DrawMenuBar`, `GetSystemMenu` remain stubs
-  (menubars + resource-loaded menus are out of scope).
+  property/state queries are REAL. `GetMenu` / `SetMenu`
+  (per-HWND HMENU store) and `GetSystemMenu` (synthesized +
+  cached standard system menu) are now REAL; `DrawMenuBar`
+  triggers a real window redraw but the compositor paints no
+  non-client menu band yet (item glyphs unpainted — GAP).
+  `LoadMenu` remains a stub (needs the `.rsrc` loader).
   Submenu marshaling, exclude-rect, and concurrent popups
   across PEs are documented v0 GAPs — see the Menus row in
   the per-method inventory above.

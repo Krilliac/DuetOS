@@ -79,7 +79,7 @@ Toolchain: Clang 18+, CMake 3.25+, NASM 2.16+. ISO build needs `qemu-system-x86`
 | Working today | Skeleton / not yet |
 |---|---|
 | Freestanding PEs (no CRT, direct `int 0x80`) | `ws2_32!socket` returns `INVALID_SOCKET` — kernel net stack is a skeleton |
-| Console PEs with CRT — threads, mutexes, events, atomics, `printf`, file I/O | GDI paint APIs — chrome paints, client area stays blank |
+| Console PEs with CRT — threads, mutexes, events, atomics, `printf`, file I/O · client-area GDI paint (`FillRect`/`Rectangle`/`TextOut`/`Line`/`Ellipse`/`BitBlt`, reset per `BeginPaint`) | GDI advanced surface — 8×8 bitmap font only, no clipping regions, `Polygon`/path fill, or `GetPixel` readback |
 | Registry queries against a real Win32-shaped hive | Per-window message queues — `GetMessage` returns `WM_QUIT` so pumps exit immediately |
 | Windowing — `CreateWindowExA` / `ShowWindow` / `MessageBoxA` land in the compositor | Keyboard / mouse routing to the focused window (input still goes to the native console) |
 | DirectX v0 — `D3D11CreateDeviceAndSwapChain`, `ClearRenderTargetView`, `Present` BitBlt | Real `Draw*` calls, shaders, fences, cross-DLL DXGI ↔ D3D11/12 swap-chain marriage |

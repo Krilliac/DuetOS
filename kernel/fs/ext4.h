@@ -148,6 +148,17 @@ const Volume* Ext4VolumeByHandle(u32 block_handle);
 ///   entries the leaf walk captured. Revisit when htree lands.
 ::duetos::core::Result<void> Ext4FindInRoot(const Volume& v, const char* name, Ext4DirEntry* out);
 
+/// Find a child named `name` directly under the directory inode `dir`
+/// (any directory, not just root), filling `*out` with its directory
+/// entry. Reads `dir`'s data block-by-block via `Ext4ReadFile` and
+/// scans the linux_dirent records, so it works for any extent-mapped
+/// directory — this is what lets `VfsResolve` walk multi-component
+/// paths (`/sub/file`). Returns NotFound if absent.
+///   GAP: htree (hashed) directories are not walked — same limit as
+///   Ext4FindInRoot. Names longer than the `Ext4DirEntry::name`
+///   buffer (127 chars) cannot be matched.
+::duetos::core::Result<void> Ext4FindInDir(const Volume& v, const InodeInfo& dir, const char* name, Ext4DirEntry* out);
+
 /// Read up to `len` bytes of regular-file data starting at byte
 /// `offset` from the extent-mapped inode `inode` on volume `v`.
 /// Writes into `buf` and reports the byte count actually read via
@@ -158,10 +169,14 @@ const Volume* Ext4VolumeByHandle(u32 block_handle);
 ///   (ext2/3 layout, EXT4_EXTENTS_FL clear) are not read here. The
 ///   modern mkfs.ext4 default is extents, so the happy path is
 ///   covered; revisit for legacy images.
-///   GAP: depth-0 (inline) extent tree only — a file large enough
-///   to need an extent index node (depth>0) is not followed. The
-///   root-dir walker already has the depth>0 DFS; lifting it into a
-///   shared file-read helper is the follow-up.
+///   Depth>0 extent trees are followed: when the inode's extent
+///   header has depth>0, the read path descends the interior index
+///   nodes (one covering child per level, read into a dedicated
+///   scratch buffer) until it reaches the covering leaf.
+///   GAP: descent depth is capped at kMaxExtentDepth (16) — a tree
+///   deeper than that (only reachable via corruption; real ext4
+///   trees top out near 5 levels) is treated as a miss. depth>1 is
+///   code-supported but the self-test only exercises depth-1.
 ::duetos::core::Result<void> Ext4ReadFile(const Volume& v, const InodeInfo& inode, u64 offset, void* buf, u64 len,
                                           u64* out_read);
 

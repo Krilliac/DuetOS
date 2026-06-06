@@ -4,15 +4,16 @@
 >
 > **Execution context:** Kernel — process context
 >
-> **Maturity:** Read-only; directory extent walk handles every depth,
-> file-extent reads still depth-0 only
+> **Maturity:** Read-only; directory and file extent reads both
+> handle every depth (file reads capped at kMaxExtentDepth=16)
 
 ## Overview
 
 `kernel/fs/ext4.{h,cpp}` reads ext4 partitions for interoperability
 with Linux-formatted media. Read paths are live for the
-root-directory walk (every depth) and inode metadata; file-content
-extent reads are still limited to depth-0 extent trees.
+root-directory walk (every depth), inode metadata, and file-content
+extent reads (depth-0 inline and depth>0 index trees, capped at
+`kMaxExtentDepth`).
 
 The byte-parsing layer is Rust: `kernel/fs/ext4_rust/` is a
 **production crate** (no_std) that owns the superblock probe, the
@@ -51,12 +52,14 @@ mkfs.ext4 emits extent format by default since ~2008).
 
 ## Known Limits / GAPs
 
-- **File-extent reads are depth-0 only.** `ext4.cpp:603` — the
-  directory walk handles every extent-tree depth, but `Ext4ReadFile`
-  only maps file blocks from a depth-0 extent tree; a file whose
-  extents live behind an interior index node returns false. (The
-  walker logic exists for directories; the file read path doesn't
-  reuse it yet.)
+- **File-extent reads follow depth>0 trees, capped at
+  `kMaxExtentDepth` (16).** `Ext4ReadFile` maps each file block via
+  `MapLogicalBlock`, which descends interior index nodes (one
+  covering child per level, into the dedicated extent-node scratch)
+  until it reaches the covering leaf — the same descent the
+  directory walk uses. A tree deeper than the cap (only reachable
+  via corruption) is treated as a miss. depth>1 is code-supported
+  but the self-test exercises depth-1.
 - **No 64bit feature support.** `ext4.cpp:658` — only single-block,
   32-byte group descriptors are decoded; 64-byte descriptors /
   multi-block GDT (the `64bit` feature) are not handled.
@@ -78,5 +81,15 @@ for the gate locations). There is no write surface to gate.
 ## Related Pages
 
 - [VFS](VFS.md)
+- [Mount Registry](Mount-Registry.md) — ext4 has an `FsType` slot
+  with real `lookup` ops registered (`g_ext4_ops` → `Ext4Lookup`).
+  `VfsResolve` on an ext4 mount surfaces an `Ext4`-tagged `VfsNode`
+  (mount block_handle + inode number + size/is-dir snapshot); the
+  shell read path streams it via `Ext4ReadInode` → `Ext4ReadFile`.
+  Multi-component paths (`/sub/file`) are walked one directory at a
+  time via `Ext4FindInDir` (root inode → component → descend into
+  the child inode → repeat); verified by the `[ext4-selftest]`
+  "VFS resolve (single + multi-component) verified" boot gate.
+  htree (hashed) directories and symlinks are not followed.
 - [Storage (NVMe + AHCI)](../drivers/Storage.md)
 - [GPT](GPT.md)

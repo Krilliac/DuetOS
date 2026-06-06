@@ -21,12 +21,21 @@
  * we don't track per-process user/system CPU time at the
  * granularity needed for them. That's a documented sub-GAP.
  *
- * POSIX timers (timer_create / timer_settime etc.) need a
- * timer table per Process. The v0 Process struct doesn't have
- * one yet; the handlers here return -ENOSYS for create and
- * -EINVAL for ops on a non-existent timerid (which is every
- * timerid since we never hand any out). When per-process
- * timer storage lands, those handlers become real.
+ * POSIX timers (timer_create / timer_settime etc.) are real,
+ * backed by the per-process Process::linux_posix_timers[]
+ * table (kLinuxTimerCap slots). timer_create allocates a slot
+ * and stashes the configured signo; timer_settime arms a
+ * deadline + interval; LinuxAlarmCheckAndRaise (this file)
+ * walks the table on every syscall return and OR's the
+ * configured signal into linux_pending_signals when a timer
+ * elapses, ticking the overrun counter for missed intervals.
+ *
+ * GAP: clockid is ignored — every timer is treated as
+ *      CLOCK_MONOTONIC for the deadline check; CLOCK_REALTIME
+ *      vs CLOCK_MONOTONIC distinction is not modelled.
+ * GAP: SIGEV_THREAD notification is not honoured — we never
+ *      fork a notification thread; only signal delivery
+ *      (SIGEV_SIGNAL, the default) fires.
  */
 
 #include "subsystems/linux/syscall_internal.h"

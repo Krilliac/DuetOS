@@ -410,7 +410,8 @@ u32 FindAttribute(const u8* rec, u32 rec_size, u32 want_type)
     return {};
 }
 
-::duetos::core::Result<void> NtfsEnumerateRoot(const Volume& v, DirEntry* out_entries, u32 cap, u32* out_count)
+::duetos::core::Result<void> NtfsEnumerateDir(const Volume& v, u64 dir_record_num, DirEntry* out_entries, u32 cap,
+                                              u32* out_count)
 {
     using ::duetos::core::Err;
     using ::duetos::core::ErrorCode;
@@ -418,7 +419,11 @@ u32 FindAttribute(const u8* rec, u32 rec_size, u32 want_type)
         return Err{ErrorCode::InvalidArgument};
     *out_count = 0;
 
-    RESULT_TRY(NtfsReadMftRecord(v, kRootDirRecordNum, g_rec_scratch));
+    // NOTE: non-reentrant — decodes into the module-static g_rec_scratch.
+    // Callers that walk multiple levels must fully consume each level's
+    // DirEntry results (value copies) before the next NtfsEnumerateDir /
+    // NtfsFindInDir call clobbers the scratch.
+    RESULT_TRY(NtfsReadMftRecord(v, dir_record_num, g_rec_scratch));
     const u32 rec_size = v.mft_record_size;
     const u32 ir_off = FindAttribute(g_rec_scratch, rec_size, kAttrTypeIndexRoot);
     if (ir_off == 0)
@@ -484,7 +489,12 @@ u32 FindAttribute(const u8* rec, u32 rec_size, u32 want_type)
     return {};
 }
 
-::duetos::core::Result<void> NtfsFindInRoot(const Volume& v, const char* name, DirEntry* out)
+::duetos::core::Result<void> NtfsEnumerateRoot(const Volume& v, DirEntry* out_entries, u32 cap, u32* out_count)
+{
+    return NtfsEnumerateDir(v, kRootDirRecordNum, out_entries, cap, out_count);
+}
+
+::duetos::core::Result<void> NtfsFindInDir(const Volume& v, u64 dir_record_num, const char* name, DirEntry* out)
 {
     using ::duetos::core::Err;
     using ::duetos::core::ErrorCode;
@@ -492,7 +502,7 @@ u32 FindAttribute(const u8* rec, u32 rec_size, u32 want_type)
         return Err{ErrorCode::InvalidArgument};
     DirEntry entries[kMaxDirEntries];
     u32 count = 0;
-    RESULT_TRY(NtfsEnumerateRoot(v, entries, kMaxDirEntries, &count));
+    RESULT_TRY(NtfsEnumerateDir(v, dir_record_num, entries, kMaxDirEntries, &count));
     for (u32 i = 0; i < count; ++i)
     {
         u32 j = 0;
@@ -505,6 +515,11 @@ u32 FindAttribute(const u8* rec, u32 rec_size, u32 want_type)
         }
     }
     return Err{ErrorCode::NotFound};
+}
+
+::duetos::core::Result<void> NtfsFindInRoot(const Volume& v, const char* name, DirEntry* out)
+{
+    return NtfsFindInDir(v, kRootDirRecordNum, name, out);
 }
 
 ::duetos::core::Result<void> NtfsReadFile(const Volume& v, const u8* rec, const DataLocation& data, u64 offset,

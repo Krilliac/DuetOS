@@ -1,27 +1,35 @@
 /*
- * DuetOS — Linux ABI: stub handlers.
+ * DuetOS — Linux ABI: child-reaping + page-cache-hint +
+ * compat/tracing/mount stub handlers.
  *
- * Sibling TU of syscall.cpp. Houses the entry points for
- * subsystems v0 has no machinery for yet: pipes, fork/wait,
- * eventfd / timerfd / signalfd, epoll, inotify, plus the
- * page-cache-hint pair (fadvise64 / readahead).
+ * Sibling TU of syscall.cpp. The subsystems this file used to
+ * stub with -ENOSYS now have real homes elsewhere:
+ *   - pipe / pipe2, eventfd / eventfd2  → syscall_pipe.cpp
+ *   - timerfd_* / signalfd / epoll_*    → syscall_async_io.cpp
+ *   - inotify_*                         → inotify.cpp (real ring
+ *                                         + watch table wired to
+ *                                         fs::routing mutations)
  *
- * Each returns the canonical Linux errno for "we don't have that
- * subsystem":
- *   - pipe / pipe2          → -ENFILE (no pipe machinery)
- *   - wait4 / waitid        → -ECHILD (no fork, no children)
- *   - eventfd / timerfd_*   → -ENOSYS
- *   - signalfd / signalfd4  → -ENOSYS
- *   - epoll_*               → -ENOSYS
- *   - inotify_*             → -ENOSYS
+ * What still lives here:
+ *   - wait4 / waitid        → real: drain the per-process
+ *                             linux_child_exits queue (fork()
+ *                             registers child exits); -ECHILD
+ *                             only when the caller truly has no
+ *                             children. See the GAP notes on the
+ *                             handlers (no pgid model, rusage
+ *                             zero-filled, no stop/continue).
  *   - fadvise64 / readahead → 0 after fd validation (no readahead
- *                             engine, but the caller still expects
- *                             -EBADF for a bad fd).
- *
- * Other stub families (ptrace / syslog / mount / sync / rename /
- * link / symlink / set_thread_area / ioprio_*) live in syscall.cpp
- * for now — they're interleaved with non-stub handlers and were
- * left in place to keep this slice surgical.
+ *                             engine, but a bad fd still sees
+ *                             -EBADF).
+ *   - compat / tracing / mount group: ptrace (cap-gated, engine
+ *                             absent), syslog (canned banner),
+ *                             vhangup, acct, mount / umount2,
+ *                             sync / syncfs, link / symlink,
+ *                             set_thread_area / get_thread_area,
+ *                             ioprio_get / ioprio_set. Each
+ *                             returns the spec-correct errno for
+ *                             "v0 has no machinery for this" (see
+ *                             the per-handler comments).
  */
 
 #include "subsystems/linux/syscall_internal.h"
