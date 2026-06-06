@@ -71,8 +71,8 @@ void RtcRead(RtcTime* out)
     // compare. If they differ, an update snuck in; try again.
     // Bounded to a handful of attempts — unbounded retry on a
     // wedged chip would freeze the caller.
-    u8 s1, m1, h1, d1, mo1, y1;
-    u8 s2, m2, h2, d2, mo2, y2;
+    u8 s1 = 0, m1 = 0, h1 = 0, d1 = 0, mo1 = 0, y1 = 0;
+    u8 s2 = 0, m2 = 0, h2 = 0, d2 = 0, mo2 = 0, y2 = 0;
     u8 status_b = 0;
     bool stable = false;
     for (u32 attempt = 0; attempt < 8; ++attempt)

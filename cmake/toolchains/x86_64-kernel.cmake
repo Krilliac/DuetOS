@@ -126,10 +126,72 @@ set(DUETOS_KERNEL_C_FLAGS
     -Wextra
     -Wpedantic
     -Wshadow
+    # --- Extended warning floor (beyond -Wall/-Wextra) ---------------
+    # These are not part of -Wall/-Wextra but earn their place in a
+    # freestanding kernel where the wrong cast / promotion / stack
+    # shape is a fault on real hardware, not a lint nit. All of them
+    # build clean today; -Werror below keeps them that way.
+    #
+    # -Wdouble-promotion / -Wfloat-equal: the kernel builds
+    #   -mgeneral-regs-only -mno-sse, so ANY float in codegen is a
+    #   latent #UD / corrupted-FPU-state bug. These two are tripwires
+    #   for "someone snuck floating point into kernel code".
+    # -Wvla: a runtime-sized stack array on our small fixed kernel /
+    #   IRQ stacks is a stack-overflow → triple-fault waiting to fire.
+    # -Wcast-qual: dropping const/volatile via a cast — volatile-drop
+    #   silently breaks MMIO ordering.
+    # -Wpointer-arith: arithmetic on void*/function pointers (GNU ext)
+    #   is almost always an unintended size assumption.
+    # -Wover-aligned: allocating an over-aligned type through an
+    #   allocator that can't honour the alignment (our slab returns
+    #   16-byte-aligned chunks).
+    # -Wnull-dereference / -Wconditional-uninitialized: real
+    #   control-flow bugs the base set misses.
+    # -Wundef: `#if FOO` where FOO is a typo'd / never-defined config
+    #   macro silently evaluates to 0.
+    # -Wformat=2: full printf-family checking for klog format strings.
+    # -Wcomma / -Wextra-semi: comma-operator misuse and stray `;`.
+    # -Wmissing-declarations: a non-static global with no prior
+    #   declaration is link-surface drift (should be static or in a
+    #   header).
+    # -Wimplicit-fallthrough: force explicit [[fallthrough]].
+    # -Wthread-safety: enables clang's lock-capability analysis. Inert
+    #   until headers carry GUARDED_BY/REQUIRES annotations, but on
+    #   now so the enforcement lands the moment they do (see the
+    #   locking discipline in CLAUDE.md / Subsystem-Isolation).
+    -Wdouble-promotion
+    -Wfloat-equal
+    -Wvla
+    -Wcast-qual
+    -Wpointer-arith
+    -Wover-aligned
+    -Wnull-dereference
+    -Wconditional-uninitialized
+    -Wundef
+    -Wformat=2
+    -Wcomma
+    -Wextra-semi
+    -Wmissing-declarations
+    -Wimplicit-fallthrough
+    -Wthread-safety
+    # Zero-warning policy (CLAUDE.md): the kernel image now matches the
+    # -Werror floor that boot/uefi, tests/host, and tools/ already
+    # enforce. Note: clang silently no-ops -Walloca and
+    # -Wredundant-decls for this target, and -Wcast-align never fires
+    # on x86_64 (unaligned access is legal) — those are deferred to the
+    # aarch64 tier rather than carried as dead config here.
+    -Werror
 )
 
 set(DUETOS_KERNEL_CXX_FLAGS
     ${DUETOS_KERNEL_C_FLAGS}
+    # C++-only additions to the extended floor above.
+    # -Wzero-as-null-pointer-constant: `0`/`NULL` used as a pointer.
+    # -Wnon-virtual-dtor / -Woverloaded-virtual: polymorphism foot-guns
+    #   that survive even with -fno-rtti.
+    -Wzero-as-null-pointer-constant
+    -Wnon-virtual-dtor
+    -Woverloaded-virtual
     -fno-exceptions
     -fno-rtti
     -fno-threadsafe-statics

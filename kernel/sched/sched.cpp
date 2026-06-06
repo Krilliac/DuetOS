@@ -995,7 +995,7 @@ void RunqueuePush(Task* t)
 {
     cpu::PerCpu* preferred = TargetPerCpuFor(t);
     cpu::PerCpu* target = (t->priority == TaskPriority::Idle) ? preferred : PickClusterPlacement(preferred, t);
-#if DUETOS_SCHED_ROUTING_TRACE
+#if defined(DUETOS_SCHED_ROUTING_TRACE) && DUETOS_SCHED_ROUTING_TRACE
     // Flag-gated routing trace. Attributes the wake-side decision
     // (source CPU, last_cpu hint, preferred = TargetPerCpuFor's
     // pick, target = PickClusterPlacement's pick) so an SMP routing

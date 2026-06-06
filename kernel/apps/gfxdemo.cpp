@@ -175,7 +175,10 @@ void DispatchRender(Mode m, duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duet
 void FmtU32Pad(duetos::u32 v, char* out, duetos::u32 width)
 {
     for (duetos::u32 i = 0; i < width; ++i)
-        out[width - 1 - i] = static_cast<char>('0' + (v % 10)), v /= 10;
+    {
+        out[width - 1 - i] = static_cast<char>('0' + (v % 10));
+        v /= 10;
+    }
     out[width] = '\0';
 }
 

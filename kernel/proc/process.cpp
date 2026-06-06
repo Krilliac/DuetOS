@@ -809,11 +809,11 @@ u64 ProcessFindDllBaseByName(const Process* proc, const char* dll_name)
     trimmed[i] = '\0';
     if (i >= 4)
     {
-        const char* tail = trimmed + i - 4;
+        char* tail = trimmed + i - 4;
         if ((tail[0] == '.') && AsciiToLower(tail[1]) == 'd' && AsciiToLower(tail[2]) == 'l' &&
             AsciiToLower(tail[3]) == 'l')
         {
-            *(char*)tail = '\0';
+            tail[0] = '\0';
         }
     }
     for (u64 j = 0; j < proc->dll_image_count; ++j)
@@ -835,11 +835,11 @@ u64 ProcessFindDllBaseByName(const Process* proc, const char* dll_name)
         other[oi] = '\0';
         if (oi >= 4)
         {
-            const char* tail = other + oi - 4;
+            char* tail = other + oi - 4;
             if ((tail[0] == '.') && AsciiToLower(tail[1]) == 'd' && AsciiToLower(tail[2]) == 'l' &&
                 AsciiToLower(tail[3]) == 'l')
             {
-                *(char*)tail = '\0';
+                tail[0] = '\0';
             }
         }
         if (DllNameEq(trimmed, other))
