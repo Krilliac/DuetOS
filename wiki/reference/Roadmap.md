@@ -910,18 +910,25 @@ Re-derive the full inventory with `git grep -nE "// (STUB|GAP):"`.
   driver-owned buffers into device address space; validate descriptor
   targets. (Hardware-Safety pre-landing row "DMA without IOMMU".)
 
-### Ownership write-chokepoint — one predicate, not N call-sites
+### Ownership write-chokepoint — populate the registry + flip to Deny
 
-- **Residual:** disk-write ownership is enforced per-call-site
-  (`Fat32VolumeIsDuetOsOwned`, `ExfatVolumeIsDuetOsOwned`,
-  `GptCrashDumpRegionSane`). The incident (7bb94062) happened because one
-  call-site missed its check. The block layer's `BlockWriteGuard`
-  (Off/Advisory/Deny) is defense-in-depth but not mandatory.
-- **What's needed:** a single `DiskRegionIsOwned(handle, lba, len)` that
-  *every* persistent block-write primitive routes through, so a new
-  writer cannot compile without passing the gate — converting the
-  allow-list class-of-bug into an enforced property. Land it with a
-  foreign-reject self-test.
+- **Landed 2026-06-06:** the mechanism. `DiskRegionIsOwned(handle, lba,
+  count)` + an owned-region registry (`BlockOwnedRegionAdd`) + an
+  owned-write enforcement mode (`BlockOwnedWriteSetMode`
+  Off/Advisory/Deny) live at the `BlockDeviceWrite` boundary: under Deny a
+  write not fully contained in a registered owned region is refused. The
+  single property that supersedes the per-call-site ownership checks.
+  `BlockOwnedRegionSelfTest` proves containment / straddle / wrong-handle
+  / wildcard + a RAM-disk allowed/denied write pair. **Default mode is
+  Off** — no behaviour change yet.
+- **Residual:** (1) register every legitimate writer's owned region —
+  the FAT32 system volume's partition (at `Fat32Probe` adoption), the
+  crash-dump partition (`GptFindCrashDumpRegion`), RAM scratch devices
+  (auto-own on create), and the disk installer's target (declared before
+  it writes). (2) Then flip the default to Advisory (soak — log every
+  write outside an owned region) and finally Deny. Until the registry is
+  fully populated, Deny would refuse legitimate writes, so the flip waits
+  on the registration pass.
 
 ### DuetFS superblock owner GUID (probe hardening)
 

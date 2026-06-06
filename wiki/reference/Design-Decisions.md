@@ -10737,3 +10737,31 @@ no fault, selftest PASS.
 **Stays read-only forever.** Only GetVariable (read) is implemented;
 SetVariable (write) is out of scope by the Hardware-Safety contract (a
 NVRAM write can brick a board), not just by v0 scope.
+
+## 2026-06-06 — Ownership write-chokepoint mechanism (DiskRegionIsOwned), default Off
+
+The incident (7bb94062) happened because disk-write ownership was checked
+per-call-site and one site was missed. Landed the durable form: a single
+predicate every persistent block-write can route through.
+
+**Decision — an allow-list owned-region registry at the BlockDeviceWrite
+boundary, inverse of the existing deny-list BlockWriteGuard.**
+`BlockOwnedRegionAdd(handle, first_lba, count, tag)` registers a
+DuetOS-owned LBA region; `DiskRegionIsOwned(handle, lba, count)` is true
+only when the write is FULLY contained in a registered region (with a
+kBlockHandleInvalid wildcard). Under `BlockOwnedWriteSetMode(Deny)`,
+`BlockDeviceWrite` refuses any write `DiskRegionIsOwned` rejects — so a new
+writer cannot reach a foreign region even if it skips the per-call-site
+adoption check (`Fat32VolumeIsDuetOsOwned` etc.). This converts the
+"whitelist incompleteness" class-of-bug into one enforced property.
+
+**Decision — default mode Off (no behaviour change), mechanism + self-test
+only.** Flipping to Deny safely requires EVERY legitimate writer to register
+its owned region first — the FAT32 system volume, the crash-dump partition,
+RAM scratch devices, and critically the disk installer (which writes a disk
+that is being *created*, not yet owned). Registering those is the follow-up
+(Roadmap); flipping the default before the registry is complete would refuse
+legitimate writes (notably break the installer). So this slice lands the
+chokepoint + a thorough self-test (containment / straddle / wrong-handle /
+wildcard + a RAM-disk Deny-mode allowed/denied write pair, verified at boot)
+and leaves the enforcement opt-in.

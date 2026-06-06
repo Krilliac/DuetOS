@@ -1,6 +1,7 @@
 #include "drivers/storage/block.h"
 
 #include "arch/x86_64/serial.h"
+#include "core/panic.h"
 #include "log/klog.h"
 #include "mm/kheap.h"
 #include "util/saturating.h"
@@ -345,6 +346,128 @@ u64 BlockWriteGuardDenyCount()
     return g_write_guard_deny_count;
 }
 
+// ---- Owned-region write chokepoint (allow-list) ----
+namespace
+{
+struct OwnedRegion
+{
+    u32 handle; // kBlockHandleInvalid = every device
+    u64 first_lba;
+    u64 count;
+    const char* tag;
+    bool valid;
+};
+constexpr u64 kMaxOwnedRegions = 16;
+constinit OwnedRegion g_owned_regions[kMaxOwnedRegions] = {};
+constinit u64 g_owned_region_count = 0;
+constinit WriteGuardMode g_owned_write_mode = WriteGuardMode::Off;
+constinit util::SatU64 g_owned_write_deny_count = 0;
+} // namespace
+
+void BlockOwnedRegionAdd(u32 handle, u64 first_lba, u64 count, const char* tag)
+{
+    if (count == 0)
+        return;
+    if (g_owned_region_count >= kMaxOwnedRegions)
+    {
+        core::Log(core::LogLevel::Warn, "blockguard", "owned-region table full — dropping new region");
+        return;
+    }
+    g_owned_regions[g_owned_region_count] = {handle, first_lba, count, (tag != nullptr) ? tag : "(untagged)", true};
+    ++g_owned_region_count;
+}
+
+void BlockOwnedRegionClear()
+{
+    for (u64 i = 0; i < g_owned_region_count; ++i)
+        g_owned_regions[i].valid = false;
+    g_owned_region_count = 0;
+}
+
+bool DiskRegionIsOwned(u32 handle, u64 lba, u32 count)
+{
+    const u64 end = lba + static_cast<u64>(count);
+    for (u64 i = 0; i < g_owned_region_count; ++i)
+    {
+        const OwnedRegion& r = g_owned_regions[i];
+        if (!r.valid)
+            continue;
+        if (r.handle != kBlockHandleInvalid && r.handle != handle)
+            continue;
+        const u64 r_end = r.first_lba + r.count;
+        if (r.first_lba <= lba && end <= r_end)
+            return true; // fully contained in an owned region
+    }
+    return false;
+}
+
+WriteGuardMode BlockOwnedWriteMode()
+{
+    return g_owned_write_mode;
+}
+
+void BlockOwnedWriteSetMode(WriteGuardMode m)
+{
+    g_owned_write_mode = m;
+    const char* names[] = {"Off", "Advisory", "Deny"};
+    arch::SerialWrite("[blockguard] owned-write mode -> ");
+    arch::SerialWrite(names[u8(m)]);
+    arch::SerialWrite("\n");
+}
+
+u64 BlockOwnedWriteDenyCount()
+{
+    return g_owned_write_deny_count;
+}
+
+void BlockOwnedRegionSelfTest()
+{
+    using ::duetos::core::PanicWithValue;
+    BlockOwnedRegionClear();
+
+    // --- Predicate logic. H owns [100, 150).
+    const u32 H = 7;
+    if (DiskRegionIsOwned(H, 0, 1))
+        PanicWithValue("blockguard", "owned with no regions", 0);
+    BlockOwnedRegionAdd(H, 100, 50, "test");
+    if (!DiskRegionIsOwned(H, 100, 50))
+        PanicWithValue("blockguard", "exact region not owned", 1);
+    if (!DiskRegionIsOwned(H, 120, 10))
+        PanicWithValue("blockguard", "inside region not owned", 2);
+    if (DiskRegionIsOwned(H, 90, 20))
+        PanicWithValue("blockguard", "low straddle owned", 3);
+    if (DiskRegionIsOwned(H, 145, 20))
+        PanicWithValue("blockguard", "high straddle owned", 4);
+    if (DiskRegionIsOwned(H, 200, 1))
+        PanicWithValue("blockguard", "outside region owned", 5);
+    if (DiskRegionIsOwned(H + 1, 120, 10))
+        PanicWithValue("blockguard", "wrong handle owned", 6);
+    // Wildcard handle owns everything.
+    BlockOwnedRegionAdd(kBlockHandleInvalid, 0, 1000000, "any");
+    if (!DiskRegionIsOwned(H + 1, 500, 1))
+        PanicWithValue("blockguard", "wildcard region miss", 7);
+    BlockOwnedRegionClear();
+
+    // --- Deny-mode write refusal on a RAM disk. Own only sectors 0..3.
+    const u32 ram = RamBlockDeviceCreate("ramowntest", 512, 8);
+    if (ram == kBlockHandleInvalid)
+        PanicWithValue("blockguard", "ram create failed", 8);
+    BlockOwnedRegionClear();
+    BlockOwnedRegionAdd(ram, 0, 4, "owned-half");
+    BlockOwnedWriteSetMode(WriteGuardMode::Deny);
+    u8 buf[512] = {};
+    if (BlockDeviceWrite(ram, 0, 1, buf) < 0)
+        PanicWithValue("blockguard", "owned write was denied", 9);
+    if (BlockDeviceWrite(ram, 5, 1, buf) >= 0)
+        PanicWithValue("blockguard", "unowned write was allowed", 10);
+    if (BlockOwnedWriteDenyCount() == 0)
+        PanicWithValue("blockguard", "deny counter did not advance", 11);
+    BlockOwnedWriteSetMode(WriteGuardMode::Off);
+    BlockOwnedRegionClear();
+
+    arch::SerialWrite("[block-owned-selftest] PASS (containment + straddle + wildcard + Deny refusal)\n");
+}
+
 i32 BlockDeviceWrite(u32 handle, u64 lba, u32 count, const void* buf)
 {
     if (!ValidHandle(handle) || buf == nullptr || count == 0)
@@ -378,6 +501,28 @@ i32 BlockDeviceWrite(u32 handle, u64 lba, u32 count, const void* buf)
             }
         }
     }
+
+    // Owned-region chokepoint (allow-list). When enforcement is on, a
+    // write not fully contained in a DuetOS-owned region is refused — the
+    // single property that supersedes the per-call-site ownership checks.
+    // Default Off, so no behaviour change until a future slice registers
+    // every legitimate writer's region and flips the default.
+    if (g_owned_write_mode != WriteGuardMode::Off && !DiskRegionIsOwned(handle, lba, count))
+    {
+        arch::SerialWrite("[blockguard] write outside owned region: dev=");
+        arch::SerialWriteHex(handle);
+        arch::SerialWrite(" lba=");
+        arch::SerialWriteHex(lba);
+        arch::SerialWrite(" count=");
+        arch::SerialWriteHex(count);
+        arch::SerialWrite(g_owned_write_mode == WriteGuardMode::Deny ? " DENIED\n" : " (advisory)\n");
+        if (g_owned_write_mode == WriteGuardMode::Deny)
+        {
+            ++g_owned_write_deny_count;
+            return -1;
+        }
+    }
+
     return d.ops->write(d.cookie, lba, count, buf);
 }
 

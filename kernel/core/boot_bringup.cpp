@@ -2312,6 +2312,7 @@ void BootBringupDevices(bool force_net_smoke)
     SerialWrite("[boot] Bringing up block device layer.\n");
     duetos::drivers::storage::BlockLayerInit();
     DUETOS_BOOT_SELFTEST(duetos::drivers::storage::BlockLayerSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::storage::BlockOwnedRegionSelfTest());
 
     SerialWrite("[boot] Bringing up NVMe controller.\n");
     duetos::drivers::storage::NvmeInit();
