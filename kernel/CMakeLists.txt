@@ -1657,6 +1657,36 @@ if(DUETOS_ENABLE_UBSAN)
     target_compile_definitions(duetos-kernel-stage1   PRIVATE DUETOS_UBSAN=1)
 endif()
 
+# Integer-conversion audit (opt-in; x86_64-debug-conv preset).
+#
+# -Wconversion / -Wsign-conversion flag every implicit narrowing and
+# signedness change. The kernel does this *deliberately* and pervasively
+# — network header fields are u16, lengths are stored in u32, ring
+# indices wrap — so the overwhelming majority are intentional, not bugs.
+# That is the same reason the integer UBSan family above is off by
+# default. Carrying these as a permanent -Werror gate would impose
+# explicit-cast friction on every future net/fs line for almost no
+# steady-state signal, so they are NOT part of the toolchain floor.
+#
+# Instead this is an on-demand audit: turn it ON to surface the full
+# narrowing set in one build, then eyeball the list for the dangerous
+# cases (an oversize length truncated to u32, a negative reaching an
+# unsigned size). The -Wno-error= lines keep these as warnings so the
+# audit run completes and shows ALL sites at once rather than failing at
+# the first — the rest of the -Werror floor still bites as normal.
+option(DUETOS_ENABLE_CONVERSION_AUDIT "Build the kernel with -Wconversion/-Wsign-conversion as non-fatal warnings (opt-in audit; x86_64-debug-conv)" OFF)
+if(DUETOS_ENABLE_CONVERSION_AUDIT)
+    set(DUETOS_CONV_AUDIT_FLAGS
+        -Wconversion
+        -Wsign-conversion
+        -Wno-error=conversion
+        -Wno-error=sign-conversion
+        -Wno-error=shorten-64-to-32
+        -Wno-error=implicit-int-conversion)
+    target_compile_options(duetos-kernel        PRIVATE ${DUETOS_CONV_AUDIT_FLAGS})
+    target_compile_options(duetos-kernel-stage1 PRIVATE ${DUETOS_CONV_AUDIT_FLAGS})
+endif()
+
 # Debug builds upgrade the toolchain's -fstack-protector-strong to
 # -fstack-protector-all: a stack cookie on EVERY function, not just
 # the ones the strong heuristic flags (arrays / address-of-local /

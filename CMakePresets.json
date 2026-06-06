@@ -67,6 +67,14 @@
             }
         },
         {
+            "name": "x86_64-debug-conv",
+            "displayName": "x86_64 debug + integer-conversion audit (-Wconversion/-Wsign-conversion, non-fatal)",
+            "inherits": "x86_64-debug",
+            "cacheVariables": {
+                "DUETOS_ENABLE_CONVERSION_AUDIT": "ON"
+            }
+        },
+        {
             "name": "x86_64-debug-redteam",
             "displayName": "x86_64 debug + AttackSim red-team suite (escalates guards; not a normal-boot build)",
             "inherits": "x86_64-debug",
@@ -161,6 +169,10 @@
         {
             "name": "x86_64-debug-san",
             "configurePreset": "x86_64-debug-san"
+        },
+        {
+            "name": "x86_64-debug-conv",
+            "configurePreset": "x86_64-debug-conv"
         },
         {
             "name": "x86_64-debug-redteam",
