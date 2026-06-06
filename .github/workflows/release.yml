@@ -157,7 +157,13 @@ jobs:
         with:
           name: duetos-flavor-${{ matrix.label }}-${{ needs.build-release-assets.outputs.source_ref }}
           if-no-files-found: error
-          path: dist/flavors/**
+          # Upload from dist/** (not dist/flavors/**) so the `flavors/`
+          # directory is preserved inside the artifact. upload-artifact@v4
+          # strips the literal prefix before the first wildcard, so
+          # dist/flavors/** would flatten the ISOs to the artifact root —
+          # and both consumers (flavor-smoke-gate's dist-flavor/flavors/…
+          # and publish-flavor-channels' dist/flavors/…) expect the prefix.
+          path: dist/**
           retention-days: 14
 
   release-smoke-gate:
