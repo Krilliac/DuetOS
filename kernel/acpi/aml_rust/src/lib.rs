@@ -383,7 +383,7 @@ fn skip_data_ref_object(p: &[u8]) -> u32 {
                 (i + 1) as u32
             }
         }
-        0x11 | 0x12 | 0x13 => {
+        0x11..=0x13 => {
             // Buffer / Package / VarPackage: PkgLength + body.
             match read_pkg_length(&p[1..]) {
                 Some((pkg_len, _)) => {
@@ -734,7 +734,8 @@ impl<'a, 'o> Walker<'a, 'o> {
             Some(p) => p,
             None => return false,
         };
-        self.out.record_entry(&path, KIND_METHOD, method_args, self.source_idx, start);
+        self.out
+            .record_entry(&path, KIND_METHOD, method_args, self.source_idx, start);
         self.next_pos = pkg_end;
         true
     }
@@ -825,7 +826,11 @@ impl<'a, 'o> Walker<'a, 'o> {
                 let mut ok = true;
                 for i in 0..4u32 {
                     let ch = self.base[(q + i) as usize];
-                    let good = if i == 0 { is_lead_name_char(ch) } else { is_name_char(ch) };
+                    let good = if i == 0 {
+                        is_lead_name_char(ch)
+                    } else {
+                        is_name_char(ch)
+                    };
                     if !good {
                         ok = false;
                     }
@@ -840,7 +845,8 @@ impl<'a, 'o> Walker<'a, 'o> {
                 q += fc;
                 if ok {
                     if let Some(unit_path) = compose_path(scope, &us) {
-                        self.out.record_field(&unit_path, &region_path, bit_off, fl, acc, self.source_idx);
+                        self.out
+                            .record_field(&unit_path, &region_path, bit_off, fl, acc, self.source_idx);
                     }
                 }
                 bit_off = bit_off.wrapping_add(fl);
