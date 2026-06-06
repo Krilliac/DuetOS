@@ -134,9 +134,10 @@ fi
 # `DUETOS_EXTRA_CMDLINE` sidecar — when set, builds an ISO sidecar
 # that appends the given string to the multiboot2 cmdline. Lets a
 # caller select a non-default theme / cap-audit level / etc. without
-# touching the canonical grub.cfg. Mutually exclusive with
-# DUETOS_SMOKE_PROFILE (which has its own kernel-routing semantics);
-# if both are set, SMOKE_PROFILE wins. Default empty (no sidecar).
+# touching the canonical grub.cfg. When DUETOS_SMOKE_PROFILE is ALSO
+# set, the extra string is appended to the profile's cmdline instead
+# (so e.g. `bringup` + `selftests=full` can run together for a manual
+# on-target crypto self-test check). Default empty (no sidecar).
 EXTRA_CMDLINE="${DUETOS_EXTRA_CMDLINE:-}"
 
 SMOKE_PROFILE="${DUETOS_SMOKE_PROFILE:-}"
@@ -209,11 +210,19 @@ if [[ -n "${SMOKE_PROFILE}" ]]; then
     if [[ -n "${DUETOS_BOOT_STALL:-}" ]]; then
         BOOT_STALL_ARG=" boot-stall=${DUETOS_BOOT_STALL}"
     fi
+    # Append DUETOS_EXTRA_CMDLINE to the profile cmdline when both are
+    # set — e.g. `selftests=full` so the bringup profile also runs the
+    # opt-in heavy crypto self-tests for a manual on-target check.
+    EXTRA_ARG=""
+    if [[ -n "${EXTRA_CMDLINE}" ]]; then
+        EXTRA_ARG=" ${EXTRA_CMDLINE}"
+        echo "[run.sh] smoke profile extra cmdline: ${EXTRA_CMDLINE}" >&2
+    fi
     cat > "${SMOKE_ISO_STAGE}/boot/grub/grub.cfg" <<EOF
 set timeout=0
 set default=0
 menuentry "DuetOS — smoke ${SMOKE_PROFILE}" {
-    multiboot2 /boot/duetos-kernel.elf boot=desktop smoke=${SMOKE_PROFILE} autologin=1${BOOT_STALL_ARG}
+    multiboot2 /boot/duetos-kernel.elf boot=desktop smoke=${SMOKE_PROFILE} autologin=1${BOOT_STALL_ARG}${EXTRA_ARG}
     boot
 }
 EOF
@@ -395,8 +404,23 @@ else
     COM1_ARGS=(-serial stdio)
 fi
 
+# Optional Intel VT-d IOMMU emulation. The kernel's VT-d driver no-ops
+# without a DMAR table, so by default QEMU exposes none and the IOMMU
+# stays inert. DUETOS_IOMMU_DEVICE=1 adds `-device intel-iommu` (DMA
+# remapping only, intremap=off) plus the split irqchip QEMU requires for
+# it; the kernel then programs VT-d identity translation at boot. Used to
+# verify DMA-remapping enforcement under QEMU.
+MACHINE_OPTS="q35,accel=${ACCEL}"
+IOMMU_DEVICE_ARGS=()
+if [[ "${DUETOS_IOMMU_DEVICE:-0}" != "0" ]]; then
+    MACHINE_OPTS="${MACHINE_OPTS},kernel-irqchip=split"
+    IOMMU_DEVICE_ARGS=(-device "intel-iommu,intremap=off")
+    echo "[run.sh] Intel VT-d IOMMU device enabled (intremap=off)" >&2
+fi
+
 QEMU_ARGS=(
-    -machine  "q35,accel=${ACCEL}"
+    -machine  "${MACHINE_OPTS}"
+    "${IOMMU_DEVICE_ARGS[@]}"
     -cpu      "${CPU_MODEL}"
     "${SMP_ARGS[@]}"
     -m        "${RAM_SIZE}"

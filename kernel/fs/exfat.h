@@ -56,6 +56,21 @@ inline constexpr u32 kMaxVolumes = 8;
 inline constexpr u32 kMaxDirEntries = 32;
 inline constexpr u64 kBootSectorLba = 0;
 
+/// DuetOS-ownership marker for an exFAT volume: the VolumeSerialNumber
+/// field (VBR offset 0x64) stamped to this exact value by the DuetOS
+/// exFAT formatter. It is the exFAT analogue of fat32::kDuetOsVolumeId
+/// (same value, same intent) — the single signal `ExfatProbe` uses to
+/// tell a volume DuetOS formatted from a foreign one (a Windows / macOS
+/// SD card, a USB stick). exFAT carries its volume label in a root-dir
+/// entry (type 0x83), not the boot sector, so — unlike FAT32, which
+/// requires BOTH a serial and a label — the serial alone is the marker
+/// here; a 1-in-2^32 accidental collision is acceptable under this
+/// threat model. (Not a security boundary: a disk that deliberately
+/// forges the serial can still be adopted — the threat model is
+/// accidental corruption of the user's own Windows/macOS data, not a
+/// hostile disk. Mirrors the FAT32 adoption gate landed in 7bb94062.)
+inline constexpr u32 kDuetOsVolumeSerial = 0xCAFEBABE;
+
 // exFAT directory-entry type bytes. The high bit distinguishes
 // "in-use" (1) from "deleted" (0). Primary entry types share the
 // 0x80..0xBF range; secondary (follow-up) entries use 0xC0..0xFF.
@@ -82,14 +97,26 @@ struct Volume
     u32 cluster_heap_offset_sectors;
     u32 cluster_count;
     u32 first_cluster_of_root;
+    u32 volume_serial;            // VBR VolumeSerialNumber (offset 0x64)
     u8 bytes_per_sector_shift;    // log2
     u8 sectors_per_cluster_shift; // log2
     u32 root_entry_count;         // count of parsed root entries
     DirEntry root_entries[kMaxDirEntries];
 };
 
+/// True iff `v` carries the DuetOS-ownership marker (VolumeSerialNumber
+/// == kDuetOsVolumeSerial). Used by `ExfatProbe` to decide whether to
+/// adopt the volume into the registry. A foreign exFAT volume returns
+/// false and is never registered at boot, so its (root-dir) write paths
+/// can never reach a partition DuetOS does not own. Safe to call with
+/// v == nullptr (returns false).
+bool ExfatVolumeIsDuetOsOwned(const Volume* v);
+
 /// Probe the block device at `handle`. On success returns the
-/// registry slot index; errors as for Ext4Probe.
+/// registry slot index; errors as for Ext4Probe. A volume that parses
+/// as exFAT but lacks the DuetOS-ownership marker is recognised and
+/// logged but NOT registered (returns ErrorCode::NotFound) — inert by
+/// default, mirroring the FAT32 adoption gate (commit 7bb94062).
 ::duetos::core::Result<u32> ExfatProbe(u32 block_handle);
 u32 ExfatVolumeCount();
 const Volume* ExfatVolumeByIndex(u32 index);

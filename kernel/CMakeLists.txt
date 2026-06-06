@@ -1426,13 +1426,18 @@ endif()
 # kernel just gains the ability to refuse a future DMA from
 # unknown source-id (slice 28+ wires that part).
 #
-# OFF by default because a bug in the enable path can brick all
-# device DMA (disk, NIC, USB, GPU) and leave the box unbootable.
-# Operators turn it on per-build with
-#   cmake -DDUETOS_IOMMU_ENABLE=ON
-# tools/test/iommu-smoke.sh is the canonical repro under QEMU's
-# `-device intel-iommu`.
-option(DUETOS_IOMMU_ENABLE "Enable Intel VT-d translation at boot (RTADDR + GCMD.TE)" OFF)
+# ON by default: the VT-d path builds a full identity map (IOVA == phys
+# for 0..512 GiB), so every existing driver's physical-address DMA keeps
+# working unchanged while a buggy/malicious device is confined to the
+# mapped range — the DMA-protection the hardware-safety contract calls
+# for. Safe to default on because (a) the enable no-ops cleanly when no
+# DMAR table is present (QEMU without `-device intel-iommu`, machines
+# without VT-d), (b) a failed enable logs + leaves translation off rather
+# than wedging, and (c) `iommu=off` on the kernel cmdline is the boot-time
+# escape hatch if a real-hardware regression is suspected.
+# tools/test/iommu-smoke.sh / DUETOS_IOMMU_DEVICE=1 tools/qemu/run.sh
+# exercise it under QEMU's `-device intel-iommu`.
+option(DUETOS_IOMMU_ENABLE "Enable Intel VT-d translation at boot (RTADDR + GCMD.TE)" ON)
 if(DUETOS_IOMMU_ENABLE)
     target_compile_definitions(duetos-kernel          PRIVATE DUETOS_IOMMU_ENABLE=1)
     target_compile_definitions(duetos-kernel-stage1   PRIVATE DUETOS_IOMMU_ENABLE=1)

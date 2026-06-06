@@ -876,6 +876,95 @@ Re-derive the full inventory with `git grep -nE "// (STUB|GAP):"`.
 
 ---
 
+## Hardware safety
+
+> The governing contract — *default to inert; mutate persistent /
+> physical hardware state only on positive DuetOS ownership + explicit
+> operator action* — lives in
+> [`security/Hardware-Safety`](../security/Hardware-Safety.md). That page
+> carries the full **pre-landing precondition table**: the safety gate
+> each unimplemented risky controller (UEFI NVRAM, SPI flash, GPU
+> VBIOS/fan/clock, NIC EEPROM, voltage/RAPL/thermal MSRs, Wi-Fi TX power,
+> secure-erase, …) **must ship in the same slice** that implements it.
+> The items below are the *active* safety work; everything else is the
+> "don't build the writer without its gate" rule enforced at review.
+
+### IOMMU — AMD-Vi enable + DMAR fault-IRQ handler (residual)
+
+- **Landed 2026-06-06:** Intel VT-d is now **enforcing by default**
+  (`DUETOS_IOMMU_ENABLE` defaults ON). It builds a full identity map
+  (IOVA==phys, 0..512 GiB) + programs GCMD.TE when a DMAR is present;
+  every existing driver's physical-address DMA keeps working while a
+  rogue device is confined. No-ops without a DMAR; `iommu=off` cmdline
+  escape hatch; verified under `DUETOS_IOMMU_DEVICE=1 tools/qemu/run.sh`
+  (translation ENABLED, all device I/O works, 0 faults).
+- **Residual:** (1) **AMD-Vi** is parse-only (IVRS) — register decode /
+  paging / enable deferred until an AMD test machine exists. (2) **DMAR
+  fault reporting landed 2026-06-06** (`VtdDecodeFault` + `LogAndClearFaults`
+  read FSTS + the fault-record buffer after enable and log + clear any
+  pending DMA fault; `VtdFaultPoll()` is wired into the `kheartbeat` loop
+  (silent when clean — no per-beat spam — no-op when VT-d is off);
+  `[vtd] no DMA faults pending` verified). Residual: wire FECTL + a fault
+  MSI so faults raise an *interrupt* instead of a once-per-beat poll. (3) Interrupt remapping
+  (intremap) is decoded but not programmed. (4) Per-device domains (real
+  isolation vs the shared identity map) are a later slice.
+- **Precondition for every new bus-master driver:** map only
+  driver-owned buffers into device address space; validate descriptor
+  targets. (Hardware-Safety pre-landing row "DMA without IOMMU".)
+
+### Ownership write-chokepoint — populate the registry + flip to Deny
+
+- **Landed 2026-06-06:** the mechanism. `DiskRegionIsOwned(handle, lba,
+  count)` + an owned-region registry (`BlockOwnedRegionAdd`) + an
+  owned-write enforcement mode (`BlockOwnedWriteSetMode`
+  Off/Advisory/Deny) live at the `BlockDeviceWrite` boundary: under Deny a
+  write not fully contained in a registered owned region is refused. The
+  single property that supersedes the per-call-site ownership checks.
+  `BlockOwnedRegionSelfTest` proves containment / straddle / wrong-handle
+  / wildcard + a RAM-disk allowed/denied write pair. **Default mode is
+  Off** — no behaviour change yet.
+- **Registration pass landed 2026-06-06 (boot writers):** RAM scratch
+  devices auto-own on create; the FAT32 system volume's partition
+  registers at `Fat32Probe` adoption. `BlockOwnedRegionAdd` resolves a
+  partition handle down to its parent disk + LBA offset and owns the
+  region in BOTH terms (the chokepoint runs at the FS-facing handle AND
+  again when `PartitionBlockWrite` re-enters on the parent). An
+  `ownedwrite=advisory|deny` cmdline opt-in drives enforcement. **Verified
+  at boot: zero writes fall outside an owned region under both Advisory
+  and Deny** — the registry fully covers the boot write set, so Deny does
+  not break the boot.
+- **Residual:** (1) register the remaining writers before flipping the
+  default — the disk installer's target (declared before it formats a
+  not-yet-owned disk), disk-backed DuetFS volumes, and the crash-dump
+  partition (panic-only). (2) Runtime soak under Advisory (boot is clean;
+  confirm steady-state app/FS writes are too) → then flip the default to
+  Advisory and finally Deny. The mechanism is proven enforceable; the
+  flip waits on installer/DuetFS registration + the runtime soak.
+
+### DuetFS superblock owner GUID (probe hardening)
+
+- **Residual:** `ProbeBlockHandle` mounts a DuetFS volume on a bare
+  superblock-magic match with no DuetOS-owner GUID. Real-world risk is
+  very low (a foreign disk would need valid DuetFS magic at the exact
+  offset), but it's inconsistent with the FAT32/exFAT ownership gates.
+- **What's needed:** add a DuetOS-owner GUID/UUID to the DuetFS
+  superblock (Rust crate) and verify it in `ProbeBlockHandle` before
+  mounting. Optional / low priority.
+
+### Wi-Fi regulatory + TX-power clamp (before live TX lands)
+
+- **Residual:** the wireless stack has no TX-power programming yet (safe
+  by absence). When live silicon TX lands (see *Drivers → iwlwifi /
+  ath9k_htc*), TX power must be clamped to the lesser of the regulatory
+  limit and the EEPROM-calibrated max, defaulting to the most-restrictive
+  ("world") domain until a country is set — exceeding limits overheats
+  the PA/PHY and is illegal. See
+  [`drivers/Wireless-Regulatory`](../drivers/Wireless-Regulatory.md) and
+  the Hardware-Safety "Wi-Fi TX power" row. **Precondition, not a
+  standalone slice** — it ships with the TX path.
+
+---
+
 ## Win32 / NT subsystem
 
 ### Locale / format-picture surface (residual)

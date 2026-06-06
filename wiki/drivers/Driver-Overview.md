@@ -103,11 +103,11 @@ userland. See [Subsystem Isolation](../kernel/Subsystem-Isolation.md).
 | Class | Source files | Path |
 |-------|--------------|------|
 | `audio` | 5 | `kernel/drivers/audio/` |
-| `gpu` | 24 | `kernel/drivers/gpu/` |
+| `gpu` | 25 | `kernel/drivers/gpu/` |
 | `input` | 3 | `kernel/drivers/input/` |
 | `iommu` | 5 | `kernel/drivers/iommu/` |
 | `mei` | 1 | `kernel/drivers/mei/` |
-| `net` | 19 | `kernel/drivers/net/` |
+| `net` | 20 | `kernel/drivers/net/` |
 | `npu` | 1 | `kernel/drivers/npu/` |
 | `pci` | 1 | `kernel/drivers/pci/` |
 | `power` | 1 | `kernel/drivers/power/` |

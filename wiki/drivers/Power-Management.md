@@ -151,8 +151,64 @@ The thermal throttle flag is sampled at boot and exposed via
 it post-boot — adding a periodic thermal poll to the heartbeat is a
 small, well-bounded next step once the operator surface needs it.
 
+## RAPL Power Telemetry (read-only)
+
+`kernel/arch/x86_64/rapl.{h,cpp}` reads the RAPL (Running Average Power
+Limit) energy + power-info MSRs and decodes them into joules / watts /
+the TDP envelope. It is **read-only** — it never writes a RAPL MSR.
+Raising a power limit (`MSR_PKG_POWER_LIMIT`) without adequate cooling
+can overheat the package, so per the
+[Hardware-Safety contract](../security/Hardware-Safety.md) RAPL is
+read-only telemetry by default; a future limit-*setting* surface must
+sit behind a kernel capability + an explicit cooling-aware tune mode.
+
+- **Intel** (architectural since Sandy Bridge): `MSR_RAPL_POWER_UNIT`
+  (0x606) for the unit exponents, `MSR_PKG_POWER_INFO` (0x614) for the
+  TDP / min / max envelope, `MSR_PKG_ENERGY_STATUS` (0x611) and
+  `MSR_DRAM_ENERGY_STATUS` (0x619) for cumulative energy.
+- **AMD** (family 17h+): `MSR_AMD_RAPL_PWR_UNIT` (0xC0010299) +
+  `MSR_AMD_PKG_ENERGY_STAT` (0xC001029B); no `PKG_POWER_INFO`, so TDP
+  reads "unknown".
+- **Gating** mirrors the thermal probe exactly: reads issue only when
+  `CpuHas(kCpuFeatMsr)` AND the vendor is recognised AND we are not
+  under a hypervisor (`IsEmulator()`) — KVM/TCG do not reliably expose
+  RAPL, and an unimplemented-MSR `rdmsr` would `#GP`. On those paths
+  `RaplRead()` returns `valid=false` and the boot probe logs "no data".
+- **Surface:** `RaplRead()` (one-shot), `RaplSamplePackagePowerMw(ms)`
+  (busy-waits a window for a live spot reading), `RaplProbe()` (boot
+  one-liner), and `RaplSelfTest()` (pure-math unit-decode test, gates
+  CI). The `hwmon` shell command shows the package energy / TDP / live
+  draw alongside thermal + battery.
+
+## CPU Frequency Telemetry (read-only)
+
+`kernel/arch/x86_64/cpufreq.{h,cpp}` reads the architectural
+frequency-reporting MSRs and decodes them to MHz. Like RAPL it is
+**read-only** — it never writes a P-state / voltage MSR (`IA32_PERF_CTL`,
+the OC mailbox, HWP request); driving frequency or voltage from software
+is a physical-damage surface, so frequency is telemetry only.
+
+- **Intel:** `MSR_PLATFORM_INFO` (0xCE) for the base + max-efficiency
+  ratios, `IA32_PERF_STATUS` (0x198) for the current operating ratio,
+  `IA32_MPERF`/`IA32_APERF` (0xE7/0xE8) for the effective frequency under
+  load (`base * dAPERF / dMPERF`). The reference clock is taken as
+  100 MHz (Nehalem+/Zen BCLK).
+- **AMD:** MPERF/APERF work (effective frequency); the static base/min
+  ratios live in P-state-def MSRs and read "unknown" in v0.
+- **Gating** is identical to thermal/RAPL (`CpuHas(kCpuFeatMsr)` &&
+  vendor && `!IsEmulator()`), so it reports `valid=false` under QEMU.
+- **Surface:** `CpuFreqRead()`, `CpuFreqSampleEffectiveMhz(ms)`,
+  `CpuFreqProbe()` (boot one-liner), `CpuFreqSelfTest()` (pure-math
+  ratio→MHz + effective-freq test, gates CI). Shown by `hwmon`.
+
 ## Known Limits / GAPs
 
+- **RAPL is read-only.** Energy / power / TDP readout only; setting a
+  power limit is deliberately not implemented (Hardware-Safety
+  pre-landing row "RAPL power-limit raise").
+- **CPU frequency is read-only.** Current/base/min + effective-frequency
+  readout only; no P-state / HWP / voltage writes (Hardware-Safety
+  pre-landing row "MSR voltage / Vcore offset").
 - **No `_BST` / `_BIF` evaluation.** Battery presence yes, charge /
   capacity / discharge rate no.
 - **No EC region reads.** Most laptop sensors (lid switch, fan RPM,

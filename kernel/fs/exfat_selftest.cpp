@@ -81,11 +81,13 @@ bool PutSector(u32 handle, u64 lba, const u8* sector)
 }
 
 // Lay out a minimal-but-valid exFAT volume on the RAM disk at `handle`.
-// Returns true on success. After this the device passes ExfatProbe and
-// carries an allocation bitmap that marks clusters 2 (bitmap) and 3
-// (root) used, everything else free — exactly what the write path's
-// AllocateCluster scan expects.
-bool BuildSyntheticVolume(u32 handle)
+// Returns true on success. After this the device passes ExfatProbe (when
+// `volume_serial == kDuetOsVolumeSerial`) and carries an allocation
+// bitmap that marks clusters 2 (bitmap) and 3 (root) used, everything
+// else free — exactly what the write path's AllocateCluster scan
+// expects. `volume_serial` lets a caller stamp a FOREIGN serial to
+// exercise the adoption gate's rejection path.
+bool BuildSyntheticVolume(u32 handle, u32 volume_serial = kDuetOsVolumeSerial)
 {
     u8 sec[kBytesPerSector];
 
@@ -103,7 +105,7 @@ bool BuildSyntheticVolume(u32 handle)
     StoreLe32(sec + 0x58, kClusterHeapOffset); // ClusterHeapOffset
     StoreLe32(sec + 0x5C, kClusterCount);      // ClusterCount
     StoreLe32(sec + 0x60, kRootCluster);       // FirstClusterOfRootDirectory
-    StoreLe32(sec + 0x64, 0x12345678);         // VolumeSerialNumber
+    StoreLe32(sec + 0x64, volume_serial);      // VolumeSerialNumber (DuetOS-owned marker, or foreign for the gate test)
     sec[0x6C] = u8(kBpsShift);                 // BytesPerSectorShift
     sec[0x6D] = u8(kSpcShift);                 // SectorsPerClusterShift
     sec[0x6E] = 1;                             // NumberOfFats
@@ -202,6 +204,37 @@ void ExfatSelfTest()
     {
         Fail("volume-lookup");
         return;
+    }
+
+    // ---- Adoption-gate regression (commit 7bb94062, FAT32 -> exFAT):
+    // a parseable exFAT volume whose VolumeSerialNumber is NOT the
+    // DuetOS marker must be REFUSED registration. Build one on a second
+    // RAM disk with a foreign serial and assert ExfatProbe returns
+    // NotFound and the registry count did not grow.
+    {
+        const u32 foreign = drivers::storage::RamBlockDeviceCreate("ramexfatx", kBytesPerSector, kSectorCount);
+        if (foreign == drivers::storage::kBlockHandleInvalid)
+        {
+            Fail("foreign-ramdisk-create");
+            return;
+        }
+        if (!BuildSyntheticVolume(foreign, 0x12345678u))
+        {
+            Fail("foreign-build");
+            return;
+        }
+        const u32 before = ExfatVolumeCount();
+        auto foreign_probe = ExfatProbe(foreign);
+        if (foreign_probe || foreign_probe.error() != ::duetos::core::ErrorCode::NotFound)
+        {
+            Fail("foreign-not-rejected");
+            return;
+        }
+        if (ExfatVolumeCount() != before)
+        {
+            Fail("foreign-registered");
+            return;
+        }
     }
     // Mutable working copy — the append/create/truncate ops take a
     // non-const Volume* (they refresh the cached root snapshot). The
@@ -345,7 +378,8 @@ void ExfatSelfTest()
         }
     }
 
-    SerialWrite("[exfat-selftest] PASS (synthetic volume: create+find+write+append+truncate verified)\n");
+    SerialWrite(
+        "[exfat-selftest] PASS (synthetic volume: foreign-reject+create+find+write+append+truncate verified)\n");
 }
 
 } // namespace duetos::fs::exfat

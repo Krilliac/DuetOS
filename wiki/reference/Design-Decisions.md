@@ -10458,3 +10458,340 @@ so the `-d int` log + unbuffered serial were the capture path).
 
 **Related roadmap track(s):** Scheduler / SMP / boot. Closes the Roadmap
 entry "SMP=4 boot-tail wild-jump cascade (post-x509 self-test)".
+
+## 2026-06-06 — exFAT adopts only DuetOS-owned volumes (serial marker), mirroring the FAT32 gate
+
+Following the hardware-safety audit generalizing commit 7bb94062, the
+exFAT probe was inverted from default-to-act to default-to-inert.
+
+**Decision.** `ExfatProbe` registers a parsed exFAT volume **only** when
+its VBR VolumeSerialNumber (offset 0x64) equals
+`exfat::kDuetOsVolumeSerial` (0xCAFEBABE) — checked via the new
+`ExfatVolumeIsDuetOsOwned` predicate, the exFAT analogue of
+`Fat32VolumeIsDuetOsOwned`. A foreign exFAT volume (a Windows / macOS SD
+card, a USB stick) is parsed and logged but **not** added to the
+registry, so its root-dir write paths can never reach a partition DuetOS
+does not own once exFAT is wired into the VFS.
+
+**Alternatives ruled out (so the next slice doesn't re-pick them):**
+
+- *Adopt any parseable exFAT volume* (the pre-fix behaviour) — this is
+  exactly Vector B of the incident; a foreign exFAT volume would become
+  writable the moment exFAT is exposed through the VFS.
+- *Gate on the volume label instead of the serial* — exFAT carries its
+  label in a root-directory entry (type 0x83), not the boot sector, so
+  it isn't available at probe time without a second walk. FAT32 requires
+  BOTH serial + label because the BPB gives it both cheaply; for exFAT
+  the boot-sector serial alone is the pragmatic marker. A 1-in-2³²
+  accidental collision is acceptable under this threat model (accidental
+  corruption of the user's own data, not a hostile disk) — the same
+  "not a security boundary" framing as the FAT32 marker.
+
+**Required of every exFAT producer.** The synthetic selftest VBR
+(`exfat_selftest.cpp`) now stamps the marker, and a new foreign-reject
+leg asserts a non-marked volume is refused (`Fail("foreign-not-rejected")`
+/ `Fail("foreign-registered")`). A future on-target exFAT formatter must
+stamp `kDuetOsVolumeSerial` in the VolumeSerialNumber field.
+
+**Related.** The full hardware-safety contract and the pre-landing
+precondition table for every still-unimplemented risky controller live
+in [`security/Hardware-Safety`](../security/Hardware-Safety.md).
+
+## 2026-06-06 — RAPL is read-only telemetry, vendor + hypervisor gated
+
+First slice of the hardware build-out following the Hardware-Safety
+audit. `kernel/arch/x86_64/rapl.{h,cpp}` reads the RAPL energy/power MSRs
+and decodes joules / watts / the TDP envelope.
+
+**Decision — read-only, no limit writes.** RAPL exposes
+`MSR_PKG_POWER_LIMIT`, but DuetOS deliberately does NOT write it. Raising
+PL1/PL2 without adequate cooling overheats the package, so per the
+hardware-safety contract RAPL is telemetry only; a future limit-*setting*
+surface must sit behind a kernel capability + a cooling-aware tune mode.
+This rules out "expose a powerlimit knob now" for the next slice.
+
+**Decision — mirror thermal's gating, not a fault-safe rdmsr.** Reads are
+issued only when `CpuHas(kCpuFeatMsr)` AND the vendor is Intel/AMD AND
+`!IsEmulator()`. An unimplemented-MSR `rdmsr` raises a `#GP` the trap
+dispatcher does not recover from; KVM/TCG do not reliably expose RAPL.
+The proven thermal.cpp envelope (vendor whitelist + emulator bail) is
+reused rather than introducing a `ReadMsrSafe` extable primitive this
+slice. Consequence: RAPL reports "unavailable" under QEMU, so the
+runtime-verifiable part is the pure-math `RaplSelfTest()` (unit decode +
+µJ/ms→mW), which gates CI identically on QEMU and bare metal — the same
+verification model thermal uses.
+
+**Decision — Rust not used.** Per the project's Rust rule (standalone
+greenfield subsystems only, no Rust-in-a-C++-call-chain), RAPL is
+MSR/register reads tightly coupled to existing C++ arch code
+(`cpu_info`, `hypervisor`, `timekeeper`), so it stays C++. Rust is
+reserved for the later device-blob *parsers* in this program (EDID,
+SPI SFDP, NIC EEPROM image) — the standalone-parser shape the
+`exfat_rust` / `ntfs_rust` crates already use.
+
+## 2026-06-06 — Heavy crypto boot self-tests are opt-in (`selftests=full`), default off everywhere
+
+The asymmetric-crypto boot self-tests (`RsaSelfTest`, `X509SelfTest`,
+`X509VerifySelfTest` incl. the ECDSA `EcSelfTest`, `TlsSelfTest`,
+`TlsSocketSelfTest`, Argon2id `PasswordHashSelfTest`) cost ~200 s under
+QEMU TCG — a single contiguous block that dominated boot time.
+
+**Decision.** Gate them behind an explicit `selftests=full` kernel-cmdline
+token (`g_expensive_selftests` + `DUETOS_BOOT_SELFTEST_CI` in
+`boot_bringup.cpp`), OFF by default. They run neither on a normal
+interactive boot nor under the CI `bringup` smoke gate.
+
+**Why not tie them to the `smoke=` profile.** The first cut keyed "expensive
+enabled" off any `smoke=` token, reasoning that CI wants full coverage. That
+was wrong: the CI smoke job *is* the time-constrained path — running the
+200 s crypto block there ate its entire timeout. The whole point is to keep
+the smoke gate fast, so the trigger is a dedicated `selftests=full` that CI's
+main job does not pass. A full-verification run (developer chasing a crypto
+regression, or a dedicated/nightly job) opts in explicitly and budgets the
+longer timeout.
+
+**Safety of skipping.** These are pure self-tests (validate + panic on fail,
+no init side effects — the `DUETOS_BOOT_SELFTEST` contract), so skipping
+changes no runtime state. The smoke harness (`ctest-boot-smoke.sh`) asserts
+no crypto sentinels, so nothing downstream breaks.
+
+**Measured effect.** The `bringup` smoke (`profile-boot-smoke.sh bringup`,
+the exact CI path) drops from ~520 s of guest time (timing out) to ~45 s
+guest / ~59 s wall, `boot-report result=pass`.
+
+**Ruled out for the next slice.** Do not re-enable these on the default boot
+path "for coverage" — coverage belongs in the explicit `selftests=full`
+lane. Further gating of other heavy tests (SMP saturation / stress) can reuse
+the same `DUETOS_BOOT_SELFTEST_CI` macro if they later dominate.
+
+## 2026-06-06 — Heavy crypto verification runs as hosted ctest, not a QEMU boot
+
+Follow-on to the `selftests=full` gating: the gated crypto self-tests still
+needed automated CI coverage, but a nightly QEMU boot would pay the full
+~200 s TCG penalty for what is pure computation over embedded byte fixtures.
+
+**Decision.** Verify the heavy crypto in **hosted ctest** — compile the real
+production crypto TUs natively and run their own self-test entrypoints:
+`tests/host/test_ec.cpp` (drives `duetos::net::ec::EcSelfTest`, ECDSA
+P-256/P-384) and `tests/host/test_x509_verify.cpp` (drives
+`duetos::net::x509::X509VerifySelfTest`, RSA-4096 + ECDSA + 8-root chain).
+They run in ~4.5 s + ~8.5 s on every PR via the existing `host-tests` job —
+no QEMU, no TCG. The nightly-QEMU approach was built and then dropped in
+favour of this.
+
+**Why this is sound.** These tests compile the SAME production code
+(`ec.cpp`, `bigint.cpp`, `rsa.cpp`, `x509.cpp`, `asn1.cpp`, `sha256/384.cpp`,
+`x509_verify.cpp`) — they are not a verbatim reproduction (cf.
+`test_text_hash.cpp`), so a regression in the real verifier is caught. The
+kernel-only symbols (`arch::SerialWrite`, `core::Panic*`,
+`debug::ProbeFire`) come from `tests/host/crypto_host_shims.h`, which
+captures the serial output so the test reads back the self-test's own
+PASS/FAIL verdict line.
+
+**Consequences / ruled out.**
+- The in-kernel boot copies stay gated behind `selftests=full` (on-target
+  counterpart), so nothing is lost — the algorithm is verified per-PR
+  natively, the on-target integration on demand.
+- `crypto_host_shims.h` uses plain (non-`inline`) external definitions:
+  the kernel TUs are separate compilation units needing emitted symbols,
+  and each crypto test is its own executable with exactly one TU including
+  the header. Include it from a single TU per test executable.
+- TLS (`TlsSelfTest`/`TlsSocketSelfTest`) and Argon2id
+  (`PasswordHashSelfTest`) are NOT yet hosted — their dep graphs pull the
+  net/TLS stack. They remain `selftests=full`-gated; host them next if
+  per-PR coverage is wanted.
+- `run.sh` gained the ability to append `DUETOS_EXTRA_CMDLINE` to a smoke
+  profile's cmdline (so `bringup` + `selftests=full` compose) for manual
+  on-target checks.
+
+## 2026-06-06 — Hardware telemetry readers: SPI flash, GPU, NIC, Wi-Fi regulatory (read-only)
+
+Batch of read-only telemetry readers extending the RAPL/cpufreq pattern, so
+every hardware-safety pre-landing surface has a *reader in place* before any
+*writer* is contemplated.
+
+**Decision — all four are read-only, each with honest GAP markers where QEMU
+or per-generation decode limits what's reachable:**
+- `arch/x86_64/spi_flash.cpp` — finds the Intel PCH SPI controller (0:1f.5,
+  BAR0=SPIBAR) and reads HSFSTS FDV/FLOCKDN on Skylake+. The legacy ICH9
+  RCBA path (QEMU q35 / 8086:2918 LPC) is detected-only + GAP'd; JEDEC RDID
+  GAP'd. Never writes the controller or flash (a write bricks the board).
+- `drivers/gpu/gpu_telemetry.cpp` — reads the Intel GT P-state register
+  (GEN6_RPSTAT1) and reports the raw dword + a GAP-flagged Gen9+ CAGF→MHz
+  estimate. Temperature + AMD/NVIDIA frequency GAP'd. Never writes a GPU reg.
+- `drivers/net/nic_telemetry.cpp` — surfaces the MAC/link the vendor probe
+  already read into `NicInfo`; the RAL/RAH→MAC decode is unit-tested. Never
+  writes NIC NVM/MAC.
+- `net/wireless/reg_telemetry.cpp` — reports the active regdb domain + per-
+  band EIRP caps. Never programs radio TX power.
+
+**Why GAP-not-fabricate.** Under QEMU the SPI HSFS (q35 is ICH9, no 1f.5),
+GPU clock/temp (bochs-vga), and Intel-specific paths are unreachable. Rather
+than emit fabricated numbers, each reader reports "unavailable" with the
+specific GAP reason, and the verifiable part is a pure-math decode self-test
+(HSFS bits, CAGF→MHz, RAL/RAH→MAC, channel→freq + EIRP rounding) that gates
+CI identically on QEMU and bare metal. Verified at boot: all four probes emit
+honest lines, all four self-tests PASS, 0 FAILs.
+
+**Ruled out for the next slice.** Do not add any *writer* (SPI flash write,
+GPU clock/fan, NIC EEPROM, radio TX power) without the default-inert
+capability gate from the Hardware-Safety contract — the readers exist
+precisely so a control surface, if ever added, reads-before-it-writes.
+
+## 2026-06-06 — UEFI firmware reader via multiboot2 tag 12; request tag 12 only (not 17)
+
+The fifth hardware-reader slice: a read-only UEFI firmware reader
+(`arch/x86_64/uefi_nvram.cpp`) that captures the EFI System Table the
+bootloader relays and reports the firmware identity.
+
+**Decision — request the EFI64 system-table tag (12), NOT the EFI memory
+map (17).** GRUB only relays the EFI tags if the kernel's multiboot2 header
+asks for them via an information-request tag (type 1). Adding the request
+made tag 12 appear — but also requesting tag 17 (the EFI memory map) pushed
+the multiboot info structure to ~8.9 KiB, past the kernel's 8 KiB snapshot
+buffer, which then captured *nothing* (size 0) and silently degraded every
+snapshot consumer including ACPI. v0 does not consume the EFI memory map
+(GetVariable is GAP'd), so the header requests tag 12 only, and the
+snapshot buffer was raised 8 KiB → 16 KiB for headroom (the over-cap
+failure mode loses the whole snapshot, so generous headroom is cheap
+insurance). Verified under OVMF: `[uefi] system table phys=… efi_rev=0x20046
+(EFI 2.7) … runtime-services=present getvar=GAP`.
+
+**Decision — GetVariable is GAP'd, not faked.** Reading Boot####/BootOrder
+needs the tag-17 EFI memory map parsed so the EfiRuntimeServicesCode/Data
+regions can be mapped, plus an MS-x64-ABI thunk to call
+RuntimeServices->GetVariable in physical mode. That's a follow-up; v0 puts
+the System-Table reader in place, confirms the RT-services pointer is
+present, and pins the gap. The reader stays **read-only / append-only
+forever** regardless — `SetVariable` can brick a board (Hardware-Safety
+TIER-1), so the variable *write* surface is out of scope by contract, not
+just by v0 scope.
+
+**Diagnostic kept:** when no tag 12 is relayed, the probe dumps the
+multiboot tag types present, so "firmware didn't relay" is distinguishable
+from a walker bug (the distinction that cost a debug cycle here).
+
+## 2026-06-06 — Intel VT-d enforcing by default (identity map); iommu=off escape hatch
+
+The IOMMU DMA-remapping path (discover DMAR → decode → build identity page
+tables → program RTADDR + GCMD.TE) was complete but gated OFF behind
+`DUETOS_IOMMU_ENABLE`. Flipped the default to ON.
+
+**Why it's safe to default on.** `VtdPagingInit` builds a FULL identity map
+(IOVA==phys for 0..512 GiB, 1 GiB leaves), so every existing driver's
+physical-address DMA (NVMe PRP, AHCI PRDT, xHCI rings, e1000 descriptors)
+keeps working unchanged — the IOMMU translates phys X to itself — while a
+buggy/malicious device is confined to the mapped range. The enable also
+(a) no-ops cleanly when no DMAR table is present (QEMU without
+`-device intel-iommu`, machines without VT-d), and (b) logs + leaves
+translation off on a program timeout rather than wedging. Verified under
+`DUETOS_IOMMU_DEVICE=1 tools/qemu/run.sh`: "[vtd] translation ENABLED",
+all NVMe/AHCI/FAT32/ext4 I/O works, 0 faults.
+
+**Escape hatch.** `iommu=off` on the kernel cmdline skips the enable
+without a rebuild — the recovery path if a real-hardware regression is
+suspected (checked at the boot call site in BootBringupKernelServices).
+
+**QEMU testing.** `tools/qemu/run.sh` gained `DUETOS_IOMMU_DEVICE=1` which
+adds `-device intel-iommu,intremap=off` + `kernel-irqchip=split`; without
+it QEMU exposes no DMAR and the path stays inert (so the default CI smoke
+is unaffected).
+
+**Ruled out / residual.** Per-device domains (real isolation vs the shared
+identity map), interrupt remapping, AMD-Vi enable, and a DMAR fault-IRQ
+handler (faults are contained but not yet *reported*) remain follow-ups —
+see Roadmap. Do NOT switch to per-device domains without first mapping
+every driver's DMA buffers, or devices will fault.
+
+## 2026-06-06 — UEFI GetVariable: physical-mode firmware call via a raw asm thunk
+
+Completed the UEFI reader's GAP: reading Boot####/BootOrder through
+RuntimeServices->GetVariable.
+
+**Decision — call firmware in physical mode via the low identity map, no
+SetVirtualAddressMap, no tag 17.** The boot identity map (PML4[0], 0..1 GiB,
+phys==virt) persists post-boot and is RWX (boot.S fills boot_pd with
+0x83 = P|RW|PS, NX clear), and OVMF's RT services live at phys ~0x1f000000
+(< 1 GiB). So the firmware code is directly callable where it sits; the EFI
+memory map (tag 17) is not needed and is deliberately NOT requested (it
+bloats the multiboot snapshot). The reader guards on rt_phys < 1 GiB and
+no-ops otherwise.
+
+**Decision — a hand-written asm thunk, because the retpoline guard forbids
+the call.** The kernel's compiler-emitted indirect calls all route through
+the validating retpoline thunk (retpoline_thunks.S), which PANICS on a
+target outside [_text_start,_text_end) — and a firmware address is exactly
+that (observed first: "[retpoline] WILD indirect call — refusing dispatch
+target=0x1fad5b94"). `arch/x86_64/uefi_call.S::EfiCallGetVariable` issues a
+RAW `call *%rax` (which the compiler does not rewrite) and bridges System V
+-> Microsoft x64 (rcx/rdx/r8/r9 + 5th arg above the 32-byte shadow space).
+Interrupts are masked across the call (RFLAGS saved/restored).
+
+**Decision — the firmware call is opt-in (`uefi-getvar` cmdline).** Calling
+firmware is the one genuinely risky operation in the reader (a faulting/
+hanging RT service is hard to recover), so a default boot never makes it —
+it reports `getvar=available(pass uefi-getvar)`. Verified under OVMF with
+the flag: "[uefi] BootOrder OK: 0x12 bytes (9 boot entries) Boot0..Boot8",
+no fault, selftest PASS.
+
+**Stays read-only forever.** Only GetVariable (read) is implemented;
+SetVariable (write) is out of scope by the Hardware-Safety contract (a
+NVRAM write can brick a board), not just by v0 scope.
+
+## 2026-06-06 — Ownership write-chokepoint mechanism (DiskRegionIsOwned), default Off
+
+The incident (7bb94062) happened because disk-write ownership was checked
+per-call-site and one site was missed. Landed the durable form: a single
+predicate every persistent block-write can route through.
+
+**Decision — an allow-list owned-region registry at the BlockDeviceWrite
+boundary, inverse of the existing deny-list BlockWriteGuard.**
+`BlockOwnedRegionAdd(handle, first_lba, count, tag)` registers a
+DuetOS-owned LBA region; `DiskRegionIsOwned(handle, lba, count)` is true
+only when the write is FULLY contained in a registered region (with a
+kBlockHandleInvalid wildcard). Under `BlockOwnedWriteSetMode(Deny)`,
+`BlockDeviceWrite` refuses any write `DiskRegionIsOwned` rejects — so a new
+writer cannot reach a foreign region even if it skips the per-call-site
+adoption check (`Fat32VolumeIsDuetOsOwned` etc.). This converts the
+"whitelist incompleteness" class-of-bug into one enforced property.
+
+**Decision — default mode Off (no behaviour change), mechanism + self-test
+only.** Flipping to Deny safely requires EVERY legitimate writer to register
+its owned region first — the FAT32 system volume, the crash-dump partition,
+RAM scratch devices, and critically the disk installer (which writes a disk
+that is being *created*, not yet owned). Registering those is the follow-up
+(Roadmap); flipping the default before the registry is complete would refuse
+legitimate writes (notably break the installer). So this slice lands the
+chokepoint + a thorough self-test (containment / straddle / wrong-handle /
+wildcard + a RAM-disk Deny-mode allowed/denied write pair, verified at boot)
+and leaves the enforcement opt-in.
+
+## 2026-06-06 — Write-chokepoint registration: own in both partition AND parent terms
+
+Populated the owned-region registry (the chokepoint from the prior slice) for
+the boot write set and proved it enforceable.
+
+**Decision — register RAM scratch (auto-own on create) + the FAT32 system
+volume (at adoption), resolving partition handles to the parent.** A write to a
+partition device is translated by `PartitionBlockWrite` to
+`(parent_handle, parent_first_lba + lba)` and re-enters `BlockDeviceWrite` — so
+the owned-write chokepoint runs at BOTH the FS-facing partition handle and the
+parent disk handle. `BlockOwnedRegionAdd` therefore registers the region in
+both terms (`ResolveToParent` walks the partition→parent chain and accumulates
+the offset). Registering only one term left the other check tripping (first the
+parent writes flagged, then — after the naive parent-only fix — the partition
+writes flagged); owning both is the correct model.
+
+**Decision — `ownedwrite=advisory|deny` cmdline opt-in, default Off.** Verified
+at boot under both: zero legitimate writes fall outside an owned region, so Deny
+does not break the boot — the chokepoint is proven enforceable, not just latent.
+The default stays Off because the disk installer writes a disk that is being
+*created* (not yet owned) and disk-backed DuetFS volumes aren't registered yet;
+flipping the default to Deny before those register would refuse legitimate
+writes. The installer/DuetFS registration + a runtime soak gate the default
+flip (Roadmap).
+
+**Detail.** The self-test snapshots the registry count and rolls back only its
+own appended test regions (`TruncateOwnedRegions(snap)`), so it no longer
+clobbers the production registrations that now precede it. Region table bumped
+16 → 32 (two entries per partition volume + RAM devices + headroom).

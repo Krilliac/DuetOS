@@ -37,6 +37,17 @@ namespace
 
 constexpr u32 kMsrLstar = 0xC0000082;
 
+// Deliberately a raw `wrmsr`, NOT `arch::WriteMsrSafe`. LSTAR is
+// SYSCALL-setup state: a silent failure here would route the next
+// user-mode SYSCALL to a stale/garbage entry RIP — a correctness and
+// security hazard, not a recoverable hiccup. msr_safe.h is explicit
+// that SYSCALL-setup MSRs must panic on fault (so the operator sees the
+// misconfiguration) rather than continue with WriteMsrSafe's 0-return.
+// A #GP on this wrmsr therefore lands on the unhandled-kernel-exception
+// path (no extable row) and panics with the faulting RIP — the desired
+// behaviour. In practice LSTAR is present on every long-mode CPU and
+// every SYSCALL-capable hypervisor, so a fault implies a genuinely
+// broken platform we must not paper over.
 void WriteMsr(u32 msr, u64 value)
 {
     const u32 lo = static_cast<u32>(value);

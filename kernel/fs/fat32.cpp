@@ -436,6 +436,12 @@ bool Fat32Probe(u32 block_handle, u32* out_index)
     const u32 index = g_volume_count++;
     if (out_index != nullptr)
         *out_index = index;
+    // Register the adopted (DuetOS-owned) volume's whole partition with
+    // the block-layer write chokepoint, so its writes are permitted when
+    // owned-write enforcement is on. Only volumes that passed the
+    // ownership gate above reach here.
+    drivers::storage::BlockOwnedRegionAdd(block_handle, 0, drivers::storage::BlockDeviceSectorCount(block_handle),
+                                          "fat32-system");
     return true;
 }
 

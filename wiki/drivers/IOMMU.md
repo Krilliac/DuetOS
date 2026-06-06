@@ -4,7 +4,7 @@
 >
 > **Execution context:** Kernel — boot bring-up (process context, before SMP); no IRQ path in v0
 >
-> **Maturity:** v0 — Intel VT-d discovery → decode → identity page tables → enable is complete and gated OFF by default; AMD-Vi is parse-only
+> **Maturity:** v0 — Intel VT-d discovery → decode → identity page tables → enable is complete and **ON by default** (`DUETOS_IOMMU_ENABLE=ON`; identity map + GCMD.TE when a DMAR is present; `iommu=off` cmdline escape hatch); AMD-Vi is parse-only; DMAR fault-IRQ handler still residual
 
 ## Overview
 

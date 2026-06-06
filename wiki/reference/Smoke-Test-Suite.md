@@ -259,6 +259,46 @@ catalogue:
 See [QEMU Smoke](../tooling/QEMU-Smoke.md) for the profile contract
 and what each profile asserts at boot exit.
 
+### Expensive self-tests are opt-in (`selftests=full`)
+
+The heavy asymmetric-crypto boot self-tests — `RsaSelfTest`,
+`X509SelfTest`, `X509VerifySelfTest` (RSA-4096 + ECDSA P-256/P-384, and
+the ECDSA `EcSelfTest` it calls), `TlsSelfTest`, `TlsSocketSelfTest`, and
+`PasswordHashSelfTest` (Argon2id) — cost **~200 s under QEMU TCG**. That
+blew the budget in both directions: it made an interactive boot crawl
+*and* ate the entire CI smoke timeout.
+
+They are therefore **OFF by default everywhere** — the normal interactive
+boot AND the CI `bringup` smoke gate — and run only behind an explicit
+kernel-cmdline opt-in:
+
+```
+multiboot2 /boot/duetos-kernel.elf ... selftests=full
+```
+
+Wired via `g_expensive_selftests` + the `DUETOS_BOOT_SELFTEST_CI` macro in
+`kernel/core/boot_bringup.cpp`. Deliberately **not** triggered by the
+`smoke=` profile token, so the smoke gate stays fast. The smoke harness
+(`tools/test/ctest-boot-smoke.sh`) asserts no crypto sentinels, so
+skipping them under smoke breaks no CI check. Result: the `bringup` smoke
+reaches `boot : metrics bringup-complete` in ~45 s of guest time instead
+of ~520 s. A full on-target verification run passes `selftests=full` —
+e.g. `DUETOS_EXTRA_CMDLINE="selftests=full" tools/qemu/run.sh`, or with
+the bringup profile via `DUETOS_EXTRA_CMDLINE="selftests=full"
+tools/test/profile-boot-smoke.sh bringup`.
+
+**Where the per-PR crypto coverage actually lives: hosted ctest.** The
+heavy crypto verification is pure computation over embedded byte
+fixtures, so booting a whole kernel under TCG to run it is the wrong
+tool. The same production crypto TUs are compiled and run **natively**
+as `tests/host/test_ec.cpp` (ECDSA P-256/P-384) and
+`tests/host/test_x509_verify.cpp` (RSA-4096 + ECDSA + 8-root chain
+verify), driving the kernel's own `EcSelfTest()` / `X509VerifySelfTest()`
+with host shims (`tests/host/crypto_host_shims.h`). They run in ~13 s
+total in the existing `host-tests` CI job on **every** PR — no QEMU, no
+TCG penalty. The `selftests=full` boot path is the on-target counterpart
+for when you want to exercise the same code in the real kernel.
+
 ## Known Limits / GAPs
 
 - **PE smokes alone.** No ELF smoke harness yet — ELF segment load is

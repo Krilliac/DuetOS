@@ -324,6 +324,45 @@ bool VtdEnableRequested()
 namespace
 {
 
+// Read FSTS + the fault-record buffer, log + clear any pending DMA
+// fault. Translation already confined the bad DMA; this reports it.
+void LogAndClearFaults(const VtdIommuInfo& info, bool report_clean)
+{
+    using namespace vtd;
+    void* mmio = info.register_mmio;
+    if (mmio == nullptr)
+        return;
+    constexpr u32 kFstsPfo = 1U << 0; // Primary Fault Overflow
+    constexpr u32 kFstsPpf = 1U << 1; // Primary Pending Fault
+    const u32 fsts = ReadReg32(mmio, kRegFsts);
+    if ((fsts & (kFstsPpf | kFstsPfo)) == 0)
+    {
+        // Silent when clean on the runtime poll (every heartbeat) — only
+        // the one-shot enable check announces a clean status.
+        if (report_clean)
+            arch::SerialWrite("[vtd] no DMA faults pending\n");
+        return;
+    }
+    for (u8 i = 0; i < info.num_fault_records; ++i)
+    {
+        const u32 off = info.fault_record_offset + static_cast<u32>(i) * 16;
+        const u64 low = ReadReg64(mmio, off);
+        const u64 high = ReadReg64(mmio, off + 8);
+        const VtdFaultRecord rec = VtdDecodeFault(low, high);
+        if (!rec.valid)
+            continue;
+        arch::SerialWrite("[vtd] DMA FAULT reason=");
+        SerialWriteHex64(rec.reason);
+        arch::SerialWrite(" sid=");
+        SerialWriteHex64(rec.sid);
+        arch::SerialWrite(" addr=");
+        SerialWriteHex64(rec.addr);
+        arch::SerialWrite("\n");
+        WriteReg64(mmio, off + 8, 1ULL << 63); // RW1C the F bit
+    }
+    WriteReg32(mmio, kRegFsts, fsts & (kFstsPpf | kFstsPfo)); // RW1C the status
+}
+
 ::duetos::core::Result<void> ProgramOneIommu(const VtdIommuInfo& info, u64 root_table_phys)
 {
     using namespace vtd;
@@ -380,6 +419,9 @@ namespace
     arch::SerialWrite("] translation ENABLED (root=");
     SerialWriteHex64(root_table_phys);
     arch::SerialWrite(")\n");
+    // Report (and clear) any fault the firmware left or that fired
+    // during the enable handshake (announces a clean status once).
+    LogAndClearFaults(info, /*report_clean=*/true);
     return {};
 }
 
@@ -407,6 +449,45 @@ namespace
         }
     }
     return {};
+}
+
+VtdFaultRecord VtdDecodeFault(u64 low, u64 high)
+{
+    VtdFaultRecord r{};
+    r.valid = ((high >> 63) & 1ULL) != 0; // F bit
+    r.reason = static_cast<u8>((high >> 32) & 0xFFULL);
+    r.sid = static_cast<u16>(high & 0xFFFFULL);
+    r.addr = low & ~0xFFFULL; // page-aligned faulting address
+    return r;
+}
+
+void VtdFaultPoll()
+{
+    if (!VtdAvailable())
+        return;
+    for (u32 i = 0; i < g_iommu_count; ++i)
+        LogAndClearFaults(g_iommus[i], /*report_clean=*/false);
+}
+
+void VtdFaultSelfTest()
+{
+    using ::duetos::core::PanicWithValue;
+    // Synthetic FRCD: F=1, reason=0x05, SID=0x0010 (00:02.0), addr bits.
+    const u64 high = (1ULL << 63) | (0x05ULL << 32) | 0x0010ULL;
+    const u64 low = 0x0000000012345678ULL; // low 12 bits dropped from addr
+    const VtdFaultRecord r = VtdDecodeFault(low, high);
+    if (!r.valid)
+        PanicWithValue("drivers/iommu", "fault F-bit not decoded", 0);
+    if (r.reason != 0x05)
+        PanicWithValue("drivers/iommu", "fault reason decode wrong", r.reason);
+    if (r.sid != 0x0010)
+        PanicWithValue("drivers/iommu", "fault SID decode wrong", r.sid);
+    if (r.addr != 0x0000000012345000ULL)
+        PanicWithValue("drivers/iommu", "fault addr decode wrong", r.addr);
+    // F=0 ⇒ not a valid record regardless of the other fields.
+    if (VtdDecodeFault(low, 0x05ULL << 32).valid)
+        PanicWithValue("drivers/iommu", "F=0 decoded as valid", 1);
+    arch::SerialWrite("[vtd-fault-selftest] PASS (FRCD reason/SID/addr decode)\n");
 }
 
 } // namespace duetos::drivers::iommu

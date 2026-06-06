@@ -100,7 +100,11 @@ constinit u64 g_peak_used_frames = 0;
 // raw multiboot_info_phys, which is unreliable past MmFinalizePaging
 // for reasons documented in the init-site comment. 8 KiB cap is well
 // above every multiboot2 loader's observed total_size (GRUB ~1 KiB).
-constinit u8 g_multiboot_info_snapshot[8192] = {};
+// 16 KiB: GRUB ships ~1 KiB, but requesting the EFI64 system-table tag
+// (and headroom for other EFI tags) pushes the info structure past the
+// old 8 KiB cap; an over-cap MBI loses the snapshot entirely, which also
+// degrades the ACPI snapshot consumer, so keep generous headroom.
+constinit u8 g_multiboot_info_snapshot[16384] = {};
 constinit u64 g_multiboot_info_snapshot_size = 0;
 
 // Cross-CPU mutual exclusion for the shared bitmap + counters +

@@ -100,6 +100,38 @@ add_host_test(render_stats)
 target_sources(test_render_stats PRIVATE
     "${CMAKE_SOURCE_DIR}/../../kernel/drivers/video/render_stats.cpp"
 )
+
+# ECDSA P-256/P-384 verify — compiles the real kernel crypto TUs and
+# runs their EcSelfTest natively (replaces the ~200 s under-TCG boot
+# copy; that stays gated behind `selftests=full`).
+add_host_test(ec)
+target_sources(test_ec PRIVATE
+    "${CMAKE_SOURCE_DIR}/../../kernel/net/ec.cpp"
+    "${CMAKE_SOURCE_DIR}/../../kernel/crypto/bigint.cpp"
+)
+
+# X.509 chain verify (HTTPS trust path) — the heaviest boot crypto
+# self-test (RSA-4096 + ECDSA + 8 real roots). Hosted native, gating
+# every PR; the in-kernel copy stays behind `selftests=full`.
+add_host_test(x509_verify)
+target_sources(test_x509_verify PRIVATE
+    "${CMAKE_SOURCE_DIR}/../../kernel/net/x509_verify.cpp"
+    "${CMAKE_SOURCE_DIR}/../../kernel/net/ec.cpp"
+    "${CMAKE_SOURCE_DIR}/../../kernel/crypto/bigint.cpp"
+    "${CMAKE_SOURCE_DIR}/../../kernel/crypto/rsa.cpp"
+    "${CMAKE_SOURCE_DIR}/../../kernel/crypto/asn1.cpp"
+    "${CMAKE_SOURCE_DIR}/../../kernel/crypto/x509.cpp"
+    "${CMAKE_SOURCE_DIR}/../../kernel/crypto/sha256.cpp"
+    "${CMAKE_SOURCE_DIR}/../../kernel/crypto/sha384.cpp"
+    "${CMAKE_SOURCE_DIR}/../../kernel/util/datetime.cpp"
+)
+# x509_verify.cpp documents the OpenSSL fixture-generation commands in
+# `//` comments with trailing `\` shell continuations, which trips the
+# host build's stricter -Wcomment (the kernel build doesn't enable it).
+# These are intentional command documentation, not a code defect, so
+# suppress -Wcomment for this target rather than reflow security-critical
+# crypto source.
+target_compile_options(test_x509_verify PRIVATE -Wno-comment)
 add_host_test(wild_address)
 add_host_test(disk_path)
 add_host_test(nospec)

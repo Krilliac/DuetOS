@@ -238,6 +238,55 @@ void BlockWriteGuardAddRule(u32 handle, u64 first_lba, u32 count, const char* ta
 /// How many writes have been refused since boot.
 u64 BlockWriteGuardDenyCount();
 
+// -------------------------------------------------------------------
+// Owned-region write chokepoint (allow-list, the inverse of the
+// deny-list above).
+//
+// The incident class behind wiki/security/Hardware-Safety.md was a
+// write to a disk DuetOS does not own. Ownership is checked per-call-
+// site today (Fat32VolumeIsDuetOsOwned, GptCrashDumpRegionSane); this
+// chokepoint converts that into one enforced property: register the
+// LBA regions DuetOS owns, and `DiskRegionIsOwned` is the single
+// predicate every persistent write can be routed through. A write that
+// is not FULLY contained in a registered owned region is, under the
+// owned-write enforcement mode, refused at the `BlockDeviceWrite`
+// boundary — so a new writer cannot reach a foreign region even if it
+// skips the per-call-site adoption check.
+//
+// Default mode is Off (no behaviour change): the mechanism + registry
+// are in place and exercised by the self-test, but flipping the default
+// to Deny needs every legitimate writer (FAT32 system volume, crash-dump
+// partition, the disk installer's target) to register its owned region
+// first — see the Roadmap follow-up.
+// -------------------------------------------------------------------
+
+/// Register an LBA region [first_lba, first_lba+count) on `handle`
+/// (or kBlockHandleInvalid for "every device") as DuetOS-owned and thus
+/// writable. Up to 16 regions cached.
+void BlockOwnedRegionAdd(u32 handle, u64 first_lba, u64 count, const char* tag);
+
+
+/// True iff [lba, lba+count) is FULLY contained in some registered
+/// owned region for `handle`. The single ownership predicate the write
+/// chokepoint routes through.
+bool DiskRegionIsOwned(u32 handle, u64 lba, u32 count);
+
+/// Owned-write enforcement mode (reuses the WriteGuardMode tri-state):
+///   Off      — no owned-region check (default).
+///   Advisory — log a write outside any owned region, let it through.
+///   Deny     — refuse a write outside any owned region (return -1).
+WriteGuardMode BlockOwnedWriteMode();
+void BlockOwnedWriteSetMode(WriteGuardMode m);
+
+/// How many writes the owned-write chokepoint has refused since boot.
+u64 BlockOwnedWriteDenyCount();
+
+/// Boot self-test of the owned-region predicate + the Deny-mode write
+/// refusal (containment, straddle, wrong-handle, wildcard; a RAM-disk
+/// allowed/denied write pair). Panics on failure; emits one
+/// "[block-owned-selftest] PASS" line.
+void BlockOwnedRegionSelfTest();
+
 // ---------------------------------------------------------------
 // Backends
 // ---------------------------------------------------------------
