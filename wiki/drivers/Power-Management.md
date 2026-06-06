@@ -180,11 +180,35 @@ sit behind a kernel capability + an explicit cooling-aware tune mode.
   CI). The `hwmon` shell command shows the package energy / TDP / live
   draw alongside thermal + battery.
 
+## CPU Frequency Telemetry (read-only)
+
+`kernel/arch/x86_64/cpufreq.{h,cpp}` reads the architectural
+frequency-reporting MSRs and decodes them to MHz. Like RAPL it is
+**read-only** — it never writes a P-state / voltage MSR (`IA32_PERF_CTL`,
+the OC mailbox, HWP request); driving frequency or voltage from software
+is a physical-damage surface, so frequency is telemetry only.
+
+- **Intel:** `MSR_PLATFORM_INFO` (0xCE) for the base + max-efficiency
+  ratios, `IA32_PERF_STATUS` (0x198) for the current operating ratio,
+  `IA32_MPERF`/`IA32_APERF` (0xE7/0xE8) for the effective frequency under
+  load (`base * dAPERF / dMPERF`). The reference clock is taken as
+  100 MHz (Nehalem+/Zen BCLK).
+- **AMD:** MPERF/APERF work (effective frequency); the static base/min
+  ratios live in P-state-def MSRs and read "unknown" in v0.
+- **Gating** is identical to thermal/RAPL (`CpuHas(kCpuFeatMsr)` &&
+  vendor && `!IsEmulator()`), so it reports `valid=false` under QEMU.
+- **Surface:** `CpuFreqRead()`, `CpuFreqSampleEffectiveMhz(ms)`,
+  `CpuFreqProbe()` (boot one-liner), `CpuFreqSelfTest()` (pure-math
+  ratio→MHz + effective-freq test, gates CI). Shown by `hwmon`.
+
 ## Known Limits / GAPs
 
 - **RAPL is read-only.** Energy / power / TDP readout only; setting a
   power limit is deliberately not implemented (Hardware-Safety
   pre-landing row "RAPL power-limit raise").
+- **CPU frequency is read-only.** Current/base/min + effective-frequency
+  readout only; no P-state / HWP / voltage writes (Hardware-Safety
+  pre-landing row "MSR voltage / Vcore offset").
 - **No `_BST` / `_BIF` evaluation.** Battery presence yes, charge /
   capacity / discharge rate no.
 - **No EC region reads.** Most laptop sensors (lid switch, fan RPM,

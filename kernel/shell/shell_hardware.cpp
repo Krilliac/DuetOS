@@ -28,6 +28,7 @@
 #include "arch/x86_64/cpu_info.h"
 #include "arch/x86_64/cpu_mitigations.h"
 #include "arch/x86_64/hpet.h"
+#include "arch/x86_64/cpufreq.h"
 #include "arch/x86_64/lapic.h"
 #include "arch/x86_64/rapl.h"
 #include "arch/x86_64/serial.h"
@@ -1481,6 +1482,35 @@ void CmdHwmon()
             ConsoleWrite(".");
             WriteU64Dec((pkg_mw % 1000) / 100);
             ConsoleWriteln("W (200ms sample)");
+        }
+    }
+
+    ConsoleWriteln("-- cpu frequency --");
+    const auto freq = duetos::arch::CpuFreqRead();
+    if (!freq.valid)
+    {
+        ConsoleWriteln("FREQ:         (unavailable — hypervisor / unknown vendor / no MSR)");
+    }
+    else
+    {
+        ConsoleWrite("CURRENT:      ");
+        WriteU64Dec(freq.current_mhz);
+        ConsoleWriteln(" MHz");
+        if (freq.ratios_valid)
+        {
+            ConsoleWrite("BASE / MIN:   ");
+            WriteU64Dec(freq.base_mhz);
+            ConsoleWrite(" / ");
+            WriteU64Dec(freq.min_mhz);
+            ConsoleWriteln(" MHz");
+            // Live effective frequency under load (busy-waits 200 ms).
+            const u32 eff = duetos::arch::CpuFreqSampleEffectiveMhz(200);
+            if (eff != 0)
+            {
+                ConsoleWrite("EFFECTIVE:    ");
+                WriteU64Dec(eff);
+                ConsoleWriteln(" MHz (200ms sample)");
+            }
         }
     }
 
