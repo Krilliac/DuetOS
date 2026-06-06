@@ -326,7 +326,7 @@ namespace
 
 // Read FSTS + the fault-record buffer, log + clear any pending DMA
 // fault. Translation already confined the bad DMA; this reports it.
-void LogAndClearFaults(const VtdIommuInfo& info)
+void LogAndClearFaults(const VtdIommuInfo& info, bool report_clean)
 {
     using namespace vtd;
     void* mmio = info.register_mmio;
@@ -337,7 +337,10 @@ void LogAndClearFaults(const VtdIommuInfo& info)
     const u32 fsts = ReadReg32(mmio, kRegFsts);
     if ((fsts & (kFstsPpf | kFstsPfo)) == 0)
     {
-        arch::SerialWrite("[vtd] no DMA faults pending\n");
+        // Silent when clean on the runtime poll (every heartbeat) — only
+        // the one-shot enable check announces a clean status.
+        if (report_clean)
+            arch::SerialWrite("[vtd] no DMA faults pending\n");
         return;
     }
     for (u8 i = 0; i < info.num_fault_records; ++i)
@@ -417,8 +420,8 @@ void LogAndClearFaults(const VtdIommuInfo& info)
     SerialWriteHex64(root_table_phys);
     arch::SerialWrite(")\n");
     // Report (and clear) any fault the firmware left or that fired
-    // during the enable handshake.
-    LogAndClearFaults(info);
+    // during the enable handshake (announces a clean status once).
+    LogAndClearFaults(info, /*report_clean=*/true);
     return {};
 }
 
@@ -463,7 +466,7 @@ void VtdFaultPoll()
     if (!VtdAvailable())
         return;
     for (u32 i = 0; i < g_iommu_count; ++i)
-        LogAndClearFaults(g_iommus[i]);
+        LogAndClearFaults(g_iommus[i], /*report_clean=*/false);
 }
 
 void VtdFaultSelfTest()

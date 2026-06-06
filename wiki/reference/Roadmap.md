@@ -902,9 +902,10 @@ Re-derive the full inventory with `git grep -nE "// (STUB|GAP):"`.
   paging / enable deferred until an AMD test machine exists. (2) **DMAR
   fault reporting landed 2026-06-06** (`VtdDecodeFault` + `LogAndClearFaults`
   read FSTS + the fault-record buffer after enable and log + clear any
-  pending DMA fault; `VtdFaultPoll()` for runtime; `[vtd] no DMA faults
-  pending` verified). Residual: wire FECTL + a fault MSI so faults raise
-  an *interrupt* instead of needing a poll. (3) Interrupt remapping
+  pending DMA fault; `VtdFaultPoll()` is wired into the `kheartbeat` loop
+  (silent when clean — no per-beat spam — no-op when VT-d is off);
+  `[vtd] no DMA faults pending` verified). Residual: wire FECTL + a fault
+  MSI so faults raise an *interrupt* instead of a once-per-beat poll. (3) Interrupt remapping
   (intremap) is decoded but not programmed. (4) Per-device domains (real
   isolation vs the shared identity map) are a later slice.
 - **Precondition for every new bus-master driver:** map only

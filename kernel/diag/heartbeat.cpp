@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/smp.h"
+#include "drivers/iommu/vtd.h"
 #include "mm/frame_allocator.h"
 #include "mm/kheap.h"
 #include "sched/sched.h"
@@ -379,6 +380,11 @@ void RegisterHeartbeatKstats()
         // registry.
         FaultDomainTick();
         LogWithValue(LogLevel::Info, "kheartbeat", "fault_domains_count", FaultDomainCount());
+
+        // Poll the IOMMU for DMA faults a rogue/buggy device raised since
+        // the last beat. Silent when clean; no-op when VT-d isn't enabled.
+        // Bridges the gap until a fault MSI/IRQ handler lands.
+        ::duetos::drivers::iommu::VtdFaultPoll();
 
         // FMA diagnosis pass. Runs AFTER FaultReactDrainPending +
         // FaultDomainTick so the engine sees the full picture of
