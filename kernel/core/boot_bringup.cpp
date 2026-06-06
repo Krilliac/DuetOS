@@ -328,6 +328,7 @@
 #include "core/menu_dispatch.h"
 #include "core/panic.h"
 #include "core/serial_input.h"
+#include "core/service.h"
 #include "core/session_restore.h"
 #include "syscall/cap_gate.h"
 #include "proc/process.h"
@@ -2164,6 +2165,13 @@ void BootBringupDevices(bool force_net_smoke)
     duetos::net::drsh::DrshInit();
     DUETOS_BOOT_SELFTEST(duetos::net::drsh::DrshSelfTest());
 
+    // Service manager: build the runtime table (no spawns yet — the
+    // autostart set launches later, after ramfs snapshots, where the
+    // inline boot spawns used to run). Self-test covers the crash-loop
+    // respawn rate limiter.
+    duetos::core::ServiceManagerInit();
+    DUETOS_BOOT_SELFTEST(duetos::core::ServiceManagerSelfTest());
+
     SerialWrite("[boot] Detecting NICs.\n");
     duetos::drivers::net::NetInit();
     // drivers/net fault domain self-registers via
@@ -3878,57 +3886,19 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     duetos::fs::RamfsCpuhistSnapshot();
     duetos::fs::RamfsInspectSnapshot();
 
-    // Spawn the userland shell stub. Hand-built ELF ships in
-    // /bin/usershell.elf; calls SYS_WRITE("Hello from
-    // userland shell stub\n") + SYS_EXIT(0) and returns to
-    // the reaper. Proves end-to-end ring-3: ELF parse,
-    // PT_LOAD map, ring transition, syscall round-trip,
-    // exit cleanup. A future slice grows this into a real
-    // prompt-driven shell with TOML reader.
-    {
-        const auto pid = duetos::core::SpawnElfFile("/bin/usershell.elf", duetos::fs::RamfsUsershellElfBytes(),
-                                                    duetos::fs::RamfsUsershellElfSize(), duetos::core::CapSetTrusted(),
-                                                    duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
-                                                    duetos::core::kTickBudgetTrusted);
-        SerialWrite("[boot] usershell pid=");
-        SerialWriteHex(pid);
-        SerialWrite("\n");
-    }
+    // Launch the userland service set through the service manager. The
+    // manifest (kernel/core/service.cpp) is now the single source of
+    // truth for what runs at boot — the userland shell stub, the native
+    // demo apps (hello_native, nat_calc, nat_sysinfo), and the duet-pkg
+    // selftest — replacing the hand-unrolled SpawnElfFile blocks that
+    // used to live here. ServiceManagerStartAll spawns every autostart
+    // entry in manifest order and starts the `svcmon` supervisor task
+    // that tracks each service's state and respawns Always-services with
+    // crash-loop protection. Operators drive the set at runtime via the
+    // `svc` shell command. (The duet-pkg entry still emits its
+    // `[duet-pkg-selftest] PASS` sentinel on every healthy boot.)
+    duetos::core::ServiceManagerStartAll();
 
-    // Portable native ELF demo apps. Both compiled by the new
-    // `duetos_native_app()` CMake helper (see kernel/CMakeLists.txt)
-    // and embedded into ramfs the same way usershell.elf is.
-    // hello_native is a "did the pipeline survive?" smoke; nat_calc
-    // exercises the userland libc's printf-family + a recursive-
-    // descent expression evaluator. Same trusted-cap set + frame
-    // budget as the shell.
-    {
-        const auto pid = duetos::core::SpawnElfFile("/bin/hello_native", duetos::fs::RamfsHelloNativeBytes(),
-                                                    duetos::fs::RamfsHelloNativeSize(), duetos::core::CapSetTrusted(),
-                                                    duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
-                                                    duetos::core::kTickBudgetTrusted);
-        SerialWrite("[boot] hello_native pid=");
-        SerialWriteHex(pid);
-        SerialWrite("\n");
-    }
-    {
-        const auto pid =
-            duetos::core::SpawnElfFile("/bin/nat_calc", duetos::fs::RamfsNatCalcBytes(), duetos::fs::RamfsNatCalcSize(),
-                                       duetos::core::CapSetTrusted(), duetos::fs::RamfsTrustedRoot(),
-                                       duetos::mm::kFrameBudgetTrusted, duetos::core::kTickBudgetTrusted);
-        SerialWrite("[boot] nat_calc pid=");
-        SerialWriteHex(pid);
-        SerialWrite("\n");
-    }
-    {
-        const auto pid = duetos::core::SpawnElfFile("/bin/nat_sysinfo", duetos::fs::RamfsNatSysinfoBytes(),
-                                                    duetos::fs::RamfsNatSysinfoSize(), duetos::core::CapSetTrusted(),
-                                                    duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
-                                                    duetos::core::kTickBudgetTrusted);
-        SerialWrite("[boot] nat_sysinfo pid=");
-        SerialWriteHex(pid);
-        SerialWrite("\n");
-    }
     // peexec=<FATPATH> kernel cmdline: load a Windows PE/.exe off
     // FAT32 vol 0 and spawn it as a Win32 process at boot. This is the
     // automated entry point for running EXTERNAL .exe files staged onto
@@ -3976,21 +3946,9 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         }
     }
 
-    // /bin/duet-pkg — on-target package manager scaffold. Spawning
-    // it at boot with no argv runs its built-in selftest, so the
-    // boot log carries the `[duet-pkg-selftest] PASS` sentinel on
-    // every healthy boot. Once full subcommand support lands, the
-    // boot spawn can drop the selftest and gate the binary behind
-    // an explicit shell invocation.
-    {
-        const auto pid =
-            duetos::core::SpawnElfFile("/bin/duet-pkg", duetos::fs::RamfsDuetPkgBytes(), duetos::fs::RamfsDuetPkgSize(),
-                                       duetos::core::CapSetTrusted(), duetos::fs::RamfsTrustedRoot(),
-                                       duetos::mm::kFrameBudgetTrusted, duetos::core::kTickBudgetTrusted);
-        SerialWrite("[boot] duet-pkg pid=");
-        SerialWriteHex(pid);
-        SerialWrite("\n");
-    }
+    // (/bin/duet-pkg now boots via the service manifest above — its
+    // `[duet-pkg-selftest] PASS` sentinel still fires on every healthy
+    // boot, now under the `duet-pkg` service entry.)
 
     // Login gate — blocks keyboard input from reaching the shell
     // until a valid session is open. TTY mode prints a classic
