@@ -48,6 +48,21 @@ multiboot2_header_start:
     .long   multiboot2_header_end - multiboot2_header_start
     .long   -(MULTIBOOT2_MAGIC + MULTIBOOT2_ARCH_I386 + (multiboot2_header_end - multiboot2_header_start))
 
+    /* Information-request tag (type 1). Ask GRUB to relay the EFI64
+     * system-table pointer (type 12) in the boot info, which the UEFI
+     * reader (arch/x86_64/uefi_nvram) consumes. We deliberately do NOT
+     * request the EFI memory map (type 17): it can run to several KiB
+     * and would blow the kernel's multiboot-info snapshot buffer, and
+     * v0 does not consume it (GetVariable is GAP'd). flags bit 0 = 1
+     * (optional): a non-EFI / legacy-BIOS boot where the tag doesn't
+     * exist still boots — the reader then reports "no EFI system table
+     * tag" rather than the box failing. */
+    .align 8
+    .word   1                   /* type = MULTIBOOT_HEADER_TAG_INFORMATION_REQUEST */
+    .word   1                   /* flags = 1 → optional */
+    .long   12                  /* size = 8 header + 1 × u32 request */
+    .long   12                  /* MULTIBOOT_TAG_TYPE_EFI64 (system table) */
+
     /* Framebuffer request tag (type 5). Request a concrete, universally
      * supported mode (1024x768x32) rather than 0/0/0 "any": with "any",
      * GRUB lands at 1024x768 on QEMU std-vga but at the lowest VBE mode

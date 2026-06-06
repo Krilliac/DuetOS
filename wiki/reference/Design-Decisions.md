@@ -10637,3 +10637,36 @@ honest lines, all four self-tests PASS, 0 FAILs.
 GPU clock/fan, NIC EEPROM, radio TX power) without the default-inert
 capability gate from the Hardware-Safety contract — the readers exist
 precisely so a control surface, if ever added, reads-before-it-writes.
+
+## 2026-06-06 — UEFI firmware reader via multiboot2 tag 12; request tag 12 only (not 17)
+
+The fifth hardware-reader slice: a read-only UEFI firmware reader
+(`arch/x86_64/uefi_nvram.cpp`) that captures the EFI System Table the
+bootloader relays and reports the firmware identity.
+
+**Decision — request the EFI64 system-table tag (12), NOT the EFI memory
+map (17).** GRUB only relays the EFI tags if the kernel's multiboot2 header
+asks for them via an information-request tag (type 1). Adding the request
+made tag 12 appear — but also requesting tag 17 (the EFI memory map) pushed
+the multiboot info structure to ~8.9 KiB, past the kernel's 8 KiB snapshot
+buffer, which then captured *nothing* (size 0) and silently degraded every
+snapshot consumer including ACPI. v0 does not consume the EFI memory map
+(GetVariable is GAP'd), so the header requests tag 12 only, and the
+snapshot buffer was raised 8 KiB → 16 KiB for headroom (the over-cap
+failure mode loses the whole snapshot, so generous headroom is cheap
+insurance). Verified under OVMF: `[uefi] system table phys=… efi_rev=0x20046
+(EFI 2.7) … runtime-services=present getvar=GAP`.
+
+**Decision — GetVariable is GAP'd, not faked.** Reading Boot####/BootOrder
+needs the tag-17 EFI memory map parsed so the EfiRuntimeServicesCode/Data
+regions can be mapped, plus an MS-x64-ABI thunk to call
+RuntimeServices->GetVariable in physical mode. That's a follow-up; v0 puts
+the System-Table reader in place, confirms the RT-services pointer is
+present, and pins the gap. The reader stays **read-only / append-only
+forever** regardless — `SetVariable` can brick a board (Hardware-Safety
+TIER-1), so the variable *write* surface is out of scope by contract, not
+just by v0 scope.
+
+**Diagnostic kept:** when no tag 12 is relayed, the probe dumps the
+multiboot tag types present, so "firmware didn't relay" is distinguishable
+from a walker bug (the distinction that cost a debug cycle here).

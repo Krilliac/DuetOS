@@ -36,6 +36,7 @@
 #include "arch/x86_64/rapl.h"
 #include "arch/x86_64/cpufreq.h"
 #include "arch/x86_64/spi_flash.h"
+#include "arch/x86_64/uefi_nvram.h"
 #include "drivers/gpu/gpu_telemetry.h"
 #include "drivers/net/nic_telemetry.h"
 #include "net/wireless/reg_telemetry.h"
@@ -694,6 +695,7 @@ void BootBringupEarly(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::GpuTelemetrySelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::net::NicTelemetrySelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::RegTelemetrySelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::arch::UefiNvramSelfTest());
 
     // KASLR — compute the candidate slide from the now-seeded entropy
     // pool. The slide isn't applied to the kernel image yet (that
@@ -2144,11 +2146,12 @@ void BootBringupDevices(bool force_net_smoke)
 
     // Read-only hardware telemetry probes — PCI, GPU and NIC are all up
     // by here, so each reader can report what it found.
-    SerialWrite("[boot] Reading hardware telemetry (SPI / GPU / NIC / Wi-Fi regulatory).\n");
+    SerialWrite("[boot] Reading hardware telemetry (SPI / GPU / NIC / Wi-Fi regulatory / UEFI).\n");
     duetos::arch::SpiFlashProbe();
     duetos::drivers::gpu::GpuTelemetryProbe();
     duetos::drivers::net::NicTelemetryProbe();
     duetos::net::wireless::RegTelemetryProbe();
+    duetos::arch::UefiNvramProbe();
 
     SerialWrite("[boot] Detecting USB host controllers.\n");
     duetos::drivers::usb::UsbInit();
