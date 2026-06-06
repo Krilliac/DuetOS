@@ -97,11 +97,24 @@ bool ConstantTimeEquals(const u8* a, const u8* b, u32 len);
 bool SendFrame(DrshTransport& t, DrshSession& s, u8 type, u8 channel, const u8* payload, u32 payload_len);
 bool RecvFrame(DrshTransport& t, DrshSession& s, u8* out_type, u8* out_channel, u8* out_payload, u32* out_payload_len);
 
+// Outcome of a server-side handshake. The caller (drsh_server.cpp)
+// needs to tell a genuine wrong-password attempt apart from wire
+// noise so the brute-force lockout only counts real credential
+// failures — see the kDrshLockoutThreshold rationale in drsh.h.
+enum class HandshakeOutcome : u8
+{
+    Ok = 0,             // authenticated; out_session is populated
+    BadCredentials = 1, // client completed AUTH but the response was wrong
+    ProtocolError = 2,  // malformed frame, bad magic/version, transport drop
+};
+
 // drsh_auth.cpp — server-side handshake. Drives the wire flow on top
 // of the unauthenticated transport, fills `out_session` on success.
-// On any deviation from the script (wrong magic, version mismatch,
-// MAC mismatch on AUTH, etc.) returns false; caller drops the link.
-bool ServerHandshake(DrshTransport& t, const u8* password, u32 password_len, DrshSession& out_session);
+// Returns BadCredentials only when the client reached the AUTH step
+// and presented a wrong response; every other deviation (wrong magic,
+// version mismatch, short frame, link drop) returns ProtocolError so
+// the caller can refuse to count it against the lockout streak.
+HandshakeOutcome ServerHandshake(DrshTransport& t, const u8* password, u32 password_len, DrshSession& out_session);
 
 // drsh_auth.cpp — derive the four session keys (enc, mac, ctr_s2c,
 // ctr_c2s) into `out_session` from the negotiated nonces + the PMK
@@ -141,9 +154,21 @@ struct DrshGlobal
     u32 password_len;
     u64 connections_total;
     u64 auth_failures_total;
+    // Brute-force throttle (see kDrshLockoutThreshold in drsh.h).
+    u32 failed_streak;   // consecutive bad-credential handshakes since last success / unlock
+    u64 locked_until_ns; // 0 = unlocked; else MonotonicNs at which the lockout expires
+    u64 throttled_total; // connections refused without crypto while locked out
     DrshSession session;
 };
 
 DrshGlobal& Globals();
+
+// drsh_server.cpp — exercise the brute-force lockout state machine
+// (threshold arm, timed auto-thaw, manual clear) against the live
+// DrshGlobal, saving and restoring its lockout fields so the boot
+// self-test leaves no residue. Returns true on success. Lives in the
+// named internal namespace so it can reach the anonymous-namespace
+// lockout helpers in the same TU.
+bool RunLockoutSelfTest();
 
 } // namespace duetos::net::drsh::internal
