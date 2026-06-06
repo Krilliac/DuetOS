@@ -379,21 +379,21 @@ bool RamVolLookup(u32 block_handle, const char* subpath, void* out_node)
 
 constinit VfsBackendOps g_ramvol_ops = {&RamVolLookup};
 
-// ext4 read backend. Resolves a name directly under the ext4 root
-// directory; the read path it routes through (probe → group-desc →
-// inode → root-dir enumerate → Ext4FindInRoot) lives in fs/ext4.cpp.
-// `subpath` arrives volume-relative with a leading '/'. A successful
-// resolve leaves an `Ext4`-tagged VfsNode carrying the mount
-// block_handle + on-disk inode number (a stable handle) plus a
-// size / is-dir snapshot; reads re-derive the InodeInfo via
-// Ext4ReadInode then stream through Ext4ReadFile (see shell_fsio.cpp).
+// ext4 read backend. Resolves a (possibly multi-component) path under
+// the ext4 root by walking one directory at a time: read the root
+// inode, find the next component in it, descend into the child inode
+// if it is a directory, repeat. The read path each component routes
+// through (probe → inode → extent-walked dir data → linux_dirent
+// scan) lives in fs/ext4.cpp. `subpath` arrives volume-relative with a
+// leading '/'. A successful resolve leaves an `Ext4`-tagged VfsNode
+// carrying the mount block_handle + on-disk inode number (a stable
+// handle) plus a size / is-dir snapshot; reads re-derive the InodeInfo
+// via Ext4ReadInode then stream through Ext4ReadFile (see
+// shell_fsio.cpp).
 //
-// GAP: single-component paths only — a bare "/" addresses the root
-//   directory and "<name>" a direct child of root, matching
-//   Ext4FindInRoot's reach. Multi-component walks ("/dir/file") miss
-//   because no on-disk entry name contains '/'; lifting that needs
-//   repeated Ext4ReadInode + dir enumerate. — revisit when a nested
-//   ext4 image is in test.
+// GAP: htree (hashed) directories are not walked (same limit as
+//   Ext4FindInDir); path components longer than 127 chars cannot
+//   match and symlinks are not followed.
 bool Ext4Lookup(u32 block_handle, const char* subpath, void* out_node)
 {
     if (subpath == nullptr || out_node == nullptr)
@@ -405,13 +405,14 @@ bool Ext4Lookup(u32 block_handle, const char* subpath, void* out_node)
     {
         return false;
     }
-    const char* name = subpath;
-    while (*name == '/')
-    {
-        ++name;
-    }
     auto* out = static_cast<VfsNode*>(out_node);
-    if (*name == '\0')
+
+    const char* p = subpath;
+    while (*p == '/')
+    {
+        ++p;
+    }
+    if (*p == '\0')
     {
         // Bare mount point — the volume's root directory (inode 2,
         // EXT4_ROOT_INO). Directories carry size 0 at the VFS layer.
@@ -422,11 +423,57 @@ bool Ext4Lookup(u32 block_handle, const char* subpath, void* out_node)
         out->ext4_is_dir = true;
         return true;
     }
-    ext4::Ext4DirEntry entry{};
-    if (!ext4::Ext4FindInRoot(*v, name, &entry))
+
+    // Walk components from the root directory inode.
+    ext4::InodeInfo dir{};
+    if (!ext4::Ext4ReadInode(*v, 2, &dir))
     {
         return false;
     }
+    ext4::Ext4DirEntry entry{};
+    while (*p != '\0')
+    {
+        char comp[128];
+        u32 ci = 0;
+        while (*p != '\0' && *p != '/' && ci + 1 < sizeof(comp))
+        {
+            comp[ci++] = *p++;
+        }
+        comp[ci] = '\0';
+        // A component that overrun the buffer (next char neither '/'
+        // nor end) is longer than any storable dir-entry name — miss.
+        if (*p != '\0' && *p != '/')
+        {
+            return false;
+        }
+        while (*p == '/')
+        {
+            ++p;
+        }
+        if (ci == 0)
+        {
+            continue; // collapse "//" / trailing slash
+        }
+        if (!ext4::Ext4FindInDir(*v, dir, comp, &entry))
+        {
+            return false;
+        }
+        if (*p != '\0')
+        {
+            // More components follow — `entry` must be a directory to
+            // descend into.
+            if (entry.file_type != 2) // EXT4_FT_DIR
+            {
+                return false;
+            }
+            if (!ext4::Ext4ReadInode(*v, entry.inode, &dir))
+            {
+                return false;
+            }
+        }
+    }
+
+    // `entry` is now the final path component.
     const bool is_dir = (entry.file_type == 2); // EXT4_FT_DIR
     u64 size = 0;
     if (!is_dir)

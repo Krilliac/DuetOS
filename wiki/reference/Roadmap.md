@@ -648,9 +648,11 @@ In rough priority:
    `NtfsReadFile`; ext4 read-only landed identically — see
    `Ext4Lookup` / `NtfsLookup` in `kernel/fs/mount.cpp` and the
    `[ext4-selftest]` / `[ntfs-selftest]` "VFS resolve verified"
-   boot gates. **Residual:** single-component paths only — root +
-   direct children of root; multi-component walks need repeated
-   record/inode read + dir enumerate. NTFS *write* is a separate
+   boot gates. ext4 walks **multi-component** paths (`/sub/file`)
+   via `Ext4FindInDir`; **residual:** NTFS resolve is still
+   single-component (root + direct children) — multi-component
+   needs a generic `NtfsFindInDir` over an arbitrary record's $I30
+   index, mirroring the ext4 template. NTFS *write* is a separate
    item — **T7-04** below.)
 
 ### Foreign-FAT interop read — explicit opt-in mount

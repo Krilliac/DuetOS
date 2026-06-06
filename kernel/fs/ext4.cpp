@@ -705,6 +705,70 @@ bool MapLogicalBlockInline(const InodeInfo& inode, u32 logical, u64& phys)
     return Err{ErrorCode::NotFound};
 }
 
+// Find `name` among the linux_dirent records in one directory data
+// block. Returns true + fills *out (inode + file_type + NUL-terminated
+// name) on the first match. Mirrors ParseDirBlock's record walk but
+// matches a single name rather than collecting the whole block, so it
+// needs no caller-side entry array on the stack.
+static bool FindDirentInBlock(const u8* block, u32 block_size, const char* name, Ext4DirEntry* out)
+{
+    u32 off = 0;
+    while (off + 8 <= block_size)
+    {
+        DuetosExt4DirEntry rec{};
+        const u32 consumed = duetos::fs::ext4_rust::duetos_ext4_parse_dirent(block, block_size, off, &rec);
+        if (consumed == 0)
+            break;
+        if (rec.ok != 0 && rec.inode != 0)
+        {
+            char nm[sizeof(out->name)];
+            const u32 copy = (rec.name_len < sizeof(nm) - 1) ? u32(rec.name_len) : u32(sizeof(nm) - 1);
+            for (u32 i = 0; i < copy; ++i)
+                nm[i] = char(block[rec.name_offset + i]);
+            nm[copy] = '\0';
+            if (StrEq(nm, name))
+            {
+                out->inode = rec.inode;
+                out->file_type = rec.file_type;
+                for (u32 i = 0; i <= copy; ++i)
+                    out->name[i] = nm[i];
+                return true;
+            }
+        }
+        off += consumed;
+    }
+    return false;
+}
+
+::duetos::core::Result<void> Ext4FindInDir(const Volume& v, const InodeInfo& dir, const char* name, Ext4DirEntry* out)
+{
+    using ::duetos::core::Err;
+    using ::duetos::core::ErrorCode;
+    if (name == nullptr || out == nullptr)
+        return Err{ErrorCode::InvalidArgument};
+    if (!dir.uses_extents || v.block_size == 0 || v.block_size > sizeof(g_block_scratch))
+        return Err{ErrorCode::InvalidArgument};
+    // Stream the directory's data a block at a time through Ext4ReadFile
+    // — the same extent walker regular files use; directory inodes are
+    // extent-mapped the same way. ext4 dir records never straddle a
+    // block boundary, so a per-block scan is complete. The block cap
+    // bounds a corrupt inode size so the walk can't spin.
+    alignas(8) u8 dirbuf[sizeof(g_block_scratch)];
+    const u32 bs = v.block_size;
+    constexpr u32 kMaxDirBlocks = 4096; // 4096 * up-to-4 KiB = 16 MiB dir
+    u64 off = 0;
+    for (u32 blk = 0; blk < kMaxDirBlocks && off < dir.size_bytes; ++blk)
+    {
+        u64 got = 0;
+        if (!Ext4ReadFile(v, dir, off, dirbuf, bs, &got) || got == 0)
+            break;
+        if (FindDirentInBlock(dirbuf, u32(got), name, out))
+            return {};
+        off += bs;
+    }
+    return Err{ErrorCode::NotFound};
+}
+
 ::duetos::core::Result<void> Ext4ReadFile(const Volume& v, const InodeInfo& inode, u64 offset, void* buf, u64 len,
                                           u64* out_read)
 {

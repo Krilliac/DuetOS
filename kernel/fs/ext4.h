@@ -148,6 +148,17 @@ const Volume* Ext4VolumeByHandle(u32 block_handle);
 ///   entries the leaf walk captured. Revisit when htree lands.
 ::duetos::core::Result<void> Ext4FindInRoot(const Volume& v, const char* name, Ext4DirEntry* out);
 
+/// Find a child named `name` directly under the directory inode `dir`
+/// (any directory, not just root), filling `*out` with its directory
+/// entry. Reads `dir`'s data block-by-block via `Ext4ReadFile` and
+/// scans the linux_dirent records, so it works for any extent-mapped
+/// directory — this is what lets `VfsResolve` walk multi-component
+/// paths (`/sub/file`). Returns NotFound if absent.
+///   GAP: htree (hashed) directories are not walked — same limit as
+///   Ext4FindInRoot. Names longer than the `Ext4DirEntry::name`
+///   buffer (127 chars) cannot be matched.
+::duetos::core::Result<void> Ext4FindInDir(const Volume& v, const InodeInfo& dir, const char* name, Ext4DirEntry* out);
+
 /// Read up to `len` bytes of regular-file data starting at byte
 /// `offset` from the extent-mapped inode `inode` on volume `v`.
 /// Writes into `buf` and reports the byte count actually read via

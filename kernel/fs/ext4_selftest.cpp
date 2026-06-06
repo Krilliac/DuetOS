@@ -60,6 +60,11 @@ constexpr u32 kRootIno = 2;
 // lost-slot collision. 16 inodes/group * 128 B = 2 blocks, so only
 // inodes 1..8 live in block 5; the file must be one of those.
 constexpr u32 kFileIno = 3;
+// Subdirectory "sub" (inode 4) and the file it holds, "deep.txt"
+// (inode 5). Both records live in the first inode-table block (offsets
+// 384 and 512, < 1024) alongside inodes 1..3 — no lost-slot collision.
+constexpr u32 kSubDirIno = 4;
+constexpr u32 kDeepFileIno = 5;
 
 // Block numbers (FS-relative, 1 KiB units).
 constexpr u32 kGdtBlock = 2;
@@ -68,6 +73,8 @@ constexpr u32 kInodeBitmapBlock = 4;
 constexpr u32 kInodeTableBlock = 5;
 constexpr u32 kRootDirBlock = 6;
 constexpr u32 kFileDataBlock = 7;
+constexpr u32 kSubDirBlock = 8;   // "sub" directory data
+constexpr u32 kDeepDataBlock = 9; // "deep.txt" file data
 
 constexpr u16 kExtentHeaderMagic = 0xF30A;
 constexpr u32 kInodeFlagExtents = 0x80000;
@@ -76,6 +83,9 @@ constexpr u32 kFeatureIncompatExtents = 0x40;
 // File body the test plants and reads back.
 constexpr char kFileBody[] = "hello from ext4\n";
 constexpr u32 kFileBodyLen = 16; // strlen, excludes the NUL
+// Body of the nested file "/sub/deep.txt" (multi-component walk test).
+constexpr char kDeepBody[] = "deep ext4 file\n";
+constexpr u32 kDeepBodyLen = 15; // strlen, excludes the NUL
 
 inline void StoreLe16(u8* p, u16 v)
 {
@@ -204,20 +214,23 @@ bool BuildSyntheticVolume(u32 handle)
     Zero(block, sizeof(block));
     PutInode(block, kRootIno, 0x41ED, kBlockSize, 2, kRootDirBlock);
     PutInode(block, kFileIno, 0x81A4, kFileBodyLen, 1, kFileDataBlock);
+    // "sub" directory (one block of dir data) and the nested file.
+    PutInode(block, kSubDirIno, 0x41ED, kBlockSize, 2, kSubDirBlock);
+    PutInode(block, kDeepFileIno, 0x81A4, kDeepBodyLen, 1, kDeepDataBlock);
     if (!PutBlock(handle, kInodeTableBlock, block))
         return false;
 
-    // ---- Root directory data (FS block 6). Three records: ".",
-    // "..", and "hello.txt" → inode 11. rec_lens are 4-byte aligned
-    // and the last record stretches to the block end.
+    // ---- Root directory data (FS block 6). Records: ".", "..",
+    // "hello.txt" → inode 3, "sub" → inode 4. rec_lens are 4-byte
+    // aligned; the last record stretches to the block end.
     Zero(block, sizeof(block));
     u32 off = 0;
     PutDirent(block, off, kRootIno, ".", 1, 2, 12);
     PutDirent(block, off, kRootIno, "..", 2, 2, 12);
-    // "hello.txt" = 9 chars → 8 + 9 = 17 → round to 20; stretch its
-    // rec_len to consume the rest of the block (the dir occupies the
-    // whole 1 KiB block, so the final record's rec_len = remaining).
-    PutDirent(block, off, kFileIno, "hello.txt", 9, 1, u16(kBlockSize - off));
+    // "hello.txt" = 9 chars → 8 + 9 = 17 → round to 20.
+    PutDirent(block, off, kFileIno, "hello.txt", 9, 1, 20);
+    // "sub" (file_type 2 = dir) is last → stretch to the block end.
+    PutDirent(block, off, kSubDirIno, "sub", 3, 2, u16(kBlockSize - off));
     if (!PutBlock(handle, kRootDirBlock, block))
         return false;
 
@@ -226,6 +239,23 @@ bool BuildSyntheticVolume(u32 handle)
     for (u32 i = 0; i < kFileBodyLen; ++i)
         block[i] = u8(kFileBody[i]);
     if (!PutBlock(handle, kFileDataBlock, block))
+        return false;
+
+    // ---- "sub" directory data (FS block 8). Records: ".", "..",
+    // "deep.txt" → inode 5 (last record stretches to the block end).
+    Zero(block, sizeof(block));
+    off = 0;
+    PutDirent(block, off, kSubDirIno, ".", 1, 2, 12);
+    PutDirent(block, off, kRootIno, "..", 2, 2, 12);
+    PutDirent(block, off, kDeepFileIno, "deep.txt", 8, 1, u16(kBlockSize - off));
+    if (!PutBlock(handle, kSubDirBlock, block))
+        return false;
+
+    // ---- Nested file data (FS block 9).
+    Zero(block, sizeof(block));
+    for (u32 i = 0; i < kDeepBodyLen; ++i)
+        block[i] = u8(kDeepBody[i]);
+    if (!PutBlock(handle, kDeepDataBlock, block))
         return false;
 
     return true;
@@ -406,8 +436,50 @@ void Ext4SelfTest()
         return;
     }
 
-    SerialWrite(
-        "[ext4-selftest] PASS (synthetic volume: probe+gdt+inode+root-dir+extent file read + VFS resolve verified)\n");
+    // ---- Phase 6: multi-component resolve. "/sub/deep.txt" walks
+    // root → "sub" (a directory) → "deep.txt", exercising the
+    // descend-into-subdirectory path (Ext4FindInDir + Ext4ReadInode).
+    // First the subdirectory itself must resolve as a directory.
+    const char kSubPath[] = "/mnt/ext4-selftest/sub";
+    const VfsNode subnode = VfsResolve(RamfsTrustedRoot(), kSubPath, 256);
+    if (subnode.backend != VfsBackend::Ext4 || !VfsNodeIsDir(subnode) || VfsNodeIsFile(subnode))
+    {
+        Fail("vfs-subdir");
+        return;
+    }
+    const char kDeepPath[] = "/mnt/ext4-selftest/sub/deep.txt";
+    const VfsNode dnode = VfsResolve(RamfsTrustedRoot(), kDeepPath, 256);
+    if (dnode.backend != VfsBackend::Ext4 || !VfsNodeIsFile(dnode))
+    {
+        Fail("vfs-deep-resolve");
+        return;
+    }
+    if (VfsNodeSize(dnode) != kDeepBodyLen || dnode.ext4_inode != kDeepFileIno)
+    {
+        Fail("vfs-deep-fields");
+        return;
+    }
+    const Volume* dvol = Ext4VolumeByHandle(dnode.ext4_block_handle);
+    InodeInfo dinfo{};
+    u8 dbuf[64];
+    u64 dread = 0;
+    if (dvol == nullptr || !Ext4ReadInode(*dvol, dnode.ext4_inode, &dinfo) ||
+        !Ext4ReadFile(*dvol, dinfo, 0, dbuf, sizeof(dbuf), &dread) || dread != kDeepBodyLen)
+    {
+        Fail("vfs-deep-read");
+        return;
+    }
+    for (u32 i = 0; i < kDeepBodyLen; ++i)
+    {
+        if (dbuf[i] != u8(kDeepBody[i]))
+        {
+            Fail("vfs-deep-content");
+            return;
+        }
+    }
+
+    SerialWrite("[ext4-selftest] PASS (synthetic volume: probe+gdt+inode+root-dir+extent file read + VFS resolve "
+                "(single + multi-component) verified)\n");
 }
 
 } // namespace duetos::fs::ext4
