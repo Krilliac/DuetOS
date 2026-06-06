@@ -81,10 +81,13 @@ for the gate locations). There is no write surface to gate.
 
 - [VFS](VFS.md)
 - [Mount Registry](Mount-Registry.md) — NTFS has an `FsType` slot
-  with real `lookup` ops registered (`g_ntfs_ops` → `NtfsLookup`);
-  the lookup runs real resolution but currently returns false
-  because `vfs.h` has no `VfsBackend::Ntfs` tag (`mount.cpp:438`
-  `// STUB:`).
+  with real `lookup` ops registered (`g_ntfs_ops` → `NtfsLookup`).
+  `VfsResolve` on an NTFS mount surfaces an `Ntfs`-tagged `VfsNode`
+  (mount block_handle + MFT reference + size/is-dir snapshot); the
+  shell read path streams it via `NtfsReadMftRecord` →
+  `NtfsResolveData` → `NtfsReadFile`. Single-component paths only
+  (root + direct children of root); verified by the
+  `[ntfs-selftest]` "VFS resolve verified" boot gate.
 - [Storage (NVMe + AHCI)](../drivers/Storage.md)
 - [GPT](GPT.md)
 - [DuetFS](DuetFS.md) — the native FS NTFS-typed partitions

@@ -13,7 +13,9 @@
 #include "shell/shell_internal.h"
 
 #include "fs/duetfs.h"
+#include "fs/ext4.h"
 #include "fs/fat32.h"
+#include "fs/ntfs.h"
 #include "fs/ramfs.h"
 #include "fs/tmpfs.h"
 #include "fs/vfs.h"
@@ -99,6 +101,62 @@ u32 ReadFileToBuf(const char* path, char* buf, u32 cap)
             return static_cast<u32>(-1);
         }
         return ctx.used;
+    }
+    if (v.backend == VfsBackend::Ext4)
+    {
+        // ext4 read-only: re-derive the inode from its number (a stable
+        // handle the VfsNode snapshotted), then stream the extent-mapped
+        // body into `buf` clamped to `cap`.
+        namespace ext4 = duetos::fs::ext4;
+        const ext4::Volume* vol = ext4::Ext4VolumeByHandle(v.ext4_block_handle);
+        if (vol == nullptr)
+        {
+            return static_cast<u32>(-1);
+        }
+        ext4::InodeInfo info{};
+        if (!ext4::Ext4ReadInode(*vol, v.ext4_inode, &info))
+        {
+            return static_cast<u32>(-1);
+        }
+        duetos::u64 got = 0;
+        if (!ext4::Ext4ReadFile(*vol, info, 0, buf, cap, &got))
+        {
+            return static_cast<u32>(-1);
+        }
+        return static_cast<u32>(got);
+    }
+    if (v.backend == VfsBackend::Ntfs)
+    {
+        // NTFS read-only: re-read the MFT record for the snapshotted
+        // reference, apply the USA fixup, resolve $DATA, then stream the
+        // body into `buf` clamped to `cap`.
+        namespace ntfs = duetos::fs::ntfs;
+        const ntfs::Volume* vol = ntfs::NtfsVolumeByHandle(v.ntfs_block_handle);
+        if (vol == nullptr || vol->mft_record_size > ntfs::kMaxMftRecordSize)
+        {
+            return static_cast<u32>(-1);
+        }
+        duetos::u8 rec[ntfs::kMaxMftRecordSize];
+        if (!ntfs::NtfsReadMftRecord(*vol, v.ntfs_mft_reference, rec))
+        {
+            return static_cast<u32>(-1);
+        }
+        ntfs::DataLocation data{};
+        if (!ntfs::NtfsResolveData(*vol, rec, &data) || !data.valid)
+        {
+            return static_cast<u32>(-1);
+        }
+        duetos::u64 got = 0;
+        if (!ntfs::NtfsReadFile(*vol, rec, data, 0, buf, cap, &got))
+        {
+            return static_cast<u32>(-1);
+        }
+        return static_cast<u32>(got);
+    }
+    if (v.backend != VfsBackend::DuetFs)
+    {
+        // RamVol / unknown backends have no streaming read path here.
+        return static_cast<u32>(-1);
     }
     // DuetFS — read sequential chunks until the buffer is full or
     // the file ends.

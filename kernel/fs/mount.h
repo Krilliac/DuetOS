@@ -132,8 +132,8 @@ struct VfsBackendOps
 };
 
 /// Returns the ops table for `t`, or nullptr if no backend is
-/// registered. Today: FAT32 is wired; Ext4 / NTFS return nullptr
-/// (they have a registry slot but no read path yet).
+/// registered. FAT32, DuetFS, RamVol, ext4, and NTFS are wired; each
+/// surfaces a backend-tagged VfsNode that VfsResolve hands back.
 const VfsBackendOps* VfsBackendForFsType(FsType t);
 
 } // namespace duetos::fs

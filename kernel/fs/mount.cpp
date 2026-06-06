@@ -382,24 +382,21 @@ constinit VfsBackendOps g_ramvol_ops = {&RamVolLookup};
 // ext4 read backend. Resolves a name directly under the ext4 root
 // directory; the read path it routes through (probe → group-desc →
 // inode → root-dir enumerate → Ext4FindInRoot) lives in fs/ext4.cpp.
-// `subpath` arrives volume-relative with a leading '/'.
+// `subpath` arrives volume-relative with a leading '/'. A successful
+// resolve leaves an `Ext4`-tagged VfsNode carrying the mount
+// block_handle + on-disk inode number (a stable handle) plus a
+// size / is-dir snapshot; reads re-derive the InodeInfo via
+// Ext4ReadInode then stream through Ext4ReadFile (see shell_fsio.cpp).
 //
-// STUB: a successful resolve cannot yet surface a usable VfsNode.
-//   vfs.h owns the `VfsBackend` enum + the `VfsNode` field set and is
-//   outside this slice's file scope, so there is no `VfsBackend::Ext4`
-//   tag nor an ext4 volume-idx/inode pair to populate. VfsResolve's
-//   contract is "a `true` return leaves a backend-tagged node"; an
-//   ext4 hit can't honour that, so this lookup always reports miss.
-//   The real read path IS reachable and exercised on every boot via
-//   Ext4SelfTest (probe → enumerate → Ext4ReadFile). To finish the
-//   VFS wiring: add `VfsBackend::Ext4` + an `ext4_volume_idx` /
-//   `ext4_dir_entry` pair to VfsNode in vfs.h, then fill out_node here
-//   the way Fat32Lookup does and extend to multi-component path walks
-//   via repeated Ext4ReadInode + dir enumerate.
+// GAP: single-component paths only — a bare "/" addresses the root
+//   directory and "<name>" a direct child of root, matching
+//   Ext4FindInRoot's reach. Multi-component walks ("/dir/file") miss
+//   because no on-disk entry name contains '/'; lifting that needs
+//   repeated Ext4ReadInode + dir enumerate. — revisit when a nested
+//   ext4 image is in test.
 bool Ext4Lookup(u32 block_handle, const char* subpath, void* out_node)
 {
-    (void)out_node;
-    if (subpath == nullptr)
+    if (subpath == nullptr || out_node == nullptr)
     {
         return false;
     }
@@ -408,23 +405,46 @@ bool Ext4Lookup(u32 block_handle, const char* subpath, void* out_node)
     {
         return false;
     }
-    // Strip leading slash(es). A bare "/" addresses the root dir; a
-    // name addresses a direct child of root. We perform the real
-    // resolution (it exercises the parsed root-dir snapshot) but, per
-    // the STUB above, cannot surface a tagged VfsNode, so the result
-    // is discarded and we always report miss until vfs.h grows an
-    // ext4 backend tag.
     const char* name = subpath;
     while (*name == '/')
     {
         ++name;
     }
-    if (*name != '\0')
+    auto* out = static_cast<VfsNode*>(out_node);
+    if (*name == '\0')
     {
-        ext4::Ext4DirEntry entry{};
-        (void)ext4::Ext4FindInRoot(*v, name, &entry);
+        // Bare mount point — the volume's root directory (inode 2,
+        // EXT4_ROOT_INO). Directories carry size 0 at the VFS layer.
+        out->backend = VfsBackend::Ext4;
+        out->ext4_block_handle = block_handle;
+        out->ext4_inode = 2;
+        out->ext4_size_bytes = 0;
+        out->ext4_is_dir = true;
+        return true;
     }
-    return false;
+    ext4::Ext4DirEntry entry{};
+    if (!ext4::Ext4FindInRoot(*v, name, &entry))
+    {
+        return false;
+    }
+    const bool is_dir = (entry.file_type == 2); // EXT4_FT_DIR
+    u64 size = 0;
+    if (!is_dir)
+    {
+        // Size comes from the inode; a read failure here leaves size 0
+        // (the node still resolves — the read path reports the error).
+        ext4::InodeInfo info{};
+        if (ext4::Ext4ReadInode(*v, entry.inode, &info))
+        {
+            size = info.size_bytes;
+        }
+    }
+    out->backend = VfsBackend::Ext4;
+    out->ext4_block_handle = block_handle;
+    out->ext4_inode = entry.inode;
+    out->ext4_size_bytes = size;
+    out->ext4_is_dir = is_dir;
+    return true;
 }
 
 constinit VfsBackendOps g_ext4_ops = {&Ext4Lookup};
@@ -433,24 +453,20 @@ constinit VfsBackendOps g_ext4_ops = {&Ext4Lookup};
 // directory; the read path it routes through (probe → MFT record +
 // USA fixup → $I30 INDEX_ROOT enumerate → NtfsFindInRoot → resolve
 // $DATA → NtfsReadFile) lives in fs/ntfs.cpp. `subpath` arrives
-// volume-relative with a leading '/'.
+// volume-relative with a leading '/'. A successful resolve leaves an
+// `Ntfs`-tagged VfsNode carrying the mount block_handle + MFT record
+// reference (a stable handle) plus a size / is-dir snapshot; reads
+// re-read the record + resolve $DATA, then stream NtfsReadFile (see
+// shell_fsio.cpp).
 //
-// STUB: identical limitation to Ext4Lookup — vfs.h owns the
-//   `VfsBackend` enum + the `VfsNode` field set and is outside this
-//   slice's file scope, so there is no `VfsBackend::Ntfs` tag nor an
-//   NTFS volume-idx / MFT-reference pair to populate. VfsResolve's
-//   contract is "a `true` return leaves a backend-tagged node"; an
-//   NTFS hit can't honour that, so this lookup always reports miss.
-//   The real read path IS reachable and exercised on every boot via
-//   NtfsSelfTest (probe → enumerate → NtfsReadFile). To finish the
-//   VFS wiring: add `VfsBackend::Ntfs` + an `ntfs_volume_idx` /
-//   `ntfs_mft_reference` pair to VfsNode in vfs.h, then fill out_node
-//   here the way Fat32Lookup does and extend to multi-component path
-//   walks via repeated MFT-record read + $I30 enumerate.
+// GAP: single-component paths only — a bare "/" addresses the root
+//   directory (MFT record 5) and "<name>" a direct child of root,
+//   matching NtfsFindInRoot's reach. Multi-component walks miss;
+//   lifting that needs repeated MFT-record read + $I30 enumerate.
+//   — revisit when a nested NTFS image is in test.
 bool NtfsLookup(u32 block_handle, const char* subpath, void* out_node)
 {
-    (void)out_node;
-    if (subpath == nullptr)
+    if (subpath == nullptr || out_node == nullptr)
     {
         return false;
     }
@@ -459,22 +475,50 @@ bool NtfsLookup(u32 block_handle, const char* subpath, void* out_node)
     {
         return false;
     }
-    // Strip leading slash(es); a name addresses a direct child of the
-    // root dir. We perform the real resolution (it exercises the
-    // resident $I30 index walk) but, per the STUB above, cannot
-    // surface a tagged VfsNode, so the result is discarded and we
-    // report miss until vfs.h grows an NTFS backend tag.
     const char* name = subpath;
     while (*name == '/')
     {
         ++name;
     }
-    if (*name != '\0')
+    auto* out = static_cast<VfsNode*>(out_node);
+    if (*name == '\0')
     {
-        ntfs::DirEntry entry{};
-        (void)ntfs::NtfsFindInRoot(*v, name, &entry);
+        // Bare mount point — the volume's root directory (MFT record 5).
+        out->backend = VfsBackend::Ntfs;
+        out->ntfs_block_handle = block_handle;
+        out->ntfs_mft_reference = 5;
+        out->ntfs_size_bytes = 0;
+        out->ntfs_is_dir = true;
+        return true;
     }
-    return false;
+    ntfs::DirEntry entry{};
+    if (!ntfs::NtfsFindInRoot(*v, name, &entry))
+    {
+        return false;
+    }
+    u64 size = 0;
+    if (!entry.is_directory)
+    {
+        // Size comes from the resolved $DATA location: read the target
+        // MFT record, apply the USA fixup, decode $DATA. A failure here
+        // leaves size 0 (the node still resolves — the read path
+        // reports the error).
+        u8 rec[ntfs::kMaxMftRecordSize];
+        if (v->mft_record_size <= sizeof(rec) && ntfs::NtfsReadMftRecord(*v, entry.mft_reference, rec))
+        {
+            ntfs::DataLocation data{};
+            if (ntfs::NtfsResolveData(*v, rec, &data) && data.valid)
+            {
+                size = data.size_bytes;
+            }
+        }
+    }
+    out->backend = VfsBackend::Ntfs;
+    out->ntfs_block_handle = block_handle;
+    out->ntfs_mft_reference = entry.mft_reference;
+    out->ntfs_size_bytes = size;
+    out->ntfs_is_dir = entry.is_directory;
+    return true;
 }
 
 constinit VfsBackendOps g_ntfs_ops = {&NtfsLookup};

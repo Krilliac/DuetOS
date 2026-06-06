@@ -641,9 +641,17 @@ In rough priority:
 1. **Native DuetOS FS** — journalled, ext-like, done in Rust.
    Partly landed (DuetFS v3) — see **DuetFS follow-ups** below.
 2. **NTFS read-only** — required by the Windows-PE pillar to load
-   a `.exe` from a real NTFS partition. (NTFS metadata walker
-   landed; the read path + NTFS *write* are separate items —
-   write is **T7-04** below.)
+   a `.exe` from a real NTFS partition. (NTFS metadata walker +
+   read path landed, including VFS integration: `VfsResolve` on an
+   NTFS mount surfaces an `Ntfs`-tagged `VfsNode` that the shell
+   read path streams via `NtfsReadMftRecord` → `NtfsResolveData` →
+   `NtfsReadFile`; ext4 read-only landed identically — see
+   `Ext4Lookup` / `NtfsLookup` in `kernel/fs/mount.cpp` and the
+   `[ext4-selftest]` / `[ntfs-selftest]` "VFS resolve verified"
+   boot gates. **Residual:** single-component paths only — root +
+   direct children of root; multi-component walks need repeated
+   record/inode read + dir enumerate. NTFS *write* is a separate
+   item — **T7-04** below.)
 
 ### Foreign-FAT interop read — explicit opt-in mount
 

@@ -78,5 +78,12 @@ for the gate locations). There is no write surface to gate.
 ## Related Pages
 
 - [VFS](VFS.md)
+- [Mount Registry](Mount-Registry.md) — ext4 has an `FsType` slot
+  with real `lookup` ops registered (`g_ext4_ops` → `Ext4Lookup`).
+  `VfsResolve` on an ext4 mount surfaces an `Ext4`-tagged `VfsNode`
+  (mount block_handle + inode number + size/is-dir snapshot); the
+  shell read path streams it via `Ext4ReadInode` → `Ext4ReadFile`.
+  Single-component paths only (root + direct children of root);
+  verified by the `[ext4-selftest]` "VFS resolve verified" boot gate.
 - [Storage (NVMe + AHCI)](../drivers/Storage.md)
 - [GPT](GPT.md)

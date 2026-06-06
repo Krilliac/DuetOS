@@ -116,6 +116,8 @@ enum class VfsBackend : u8
     Fat32 = 2,
     DuetFs = 3,
     RamVol = 4, ///< frame-backed writable RAM volume (fs::RamVol*, mounted at /run)
+    Ext4 = 5,   ///< ext4 read-only tier (Linux data partitions); fs::ext4::*
+    Ntfs = 6,   ///< NTFS read-only tier (Windows interop); fs::ntfs::*
 };
 
 /// Resolved node — backend-tagged. Storage is by-value so the
@@ -149,6 +151,22 @@ struct VfsNode
     /// structs are module-private, so the path IS the stable
     /// handle; reads re-resolve via fs::RamVolRead/Stat. NUL-term.
     char ramvol_path[192];
+    /// ext4-backed nodes — mount block_handle + on-disk inode number
+    /// (a stable handle), plus a size / is-dir snapshot. Reads
+    /// re-derive the InodeInfo via `ext4::Ext4ReadInode` then stream
+    /// through `ext4::Ext4ReadFile`.
+    u32 ext4_block_handle;
+    u32 ext4_inode;
+    u64 ext4_size_bytes;
+    bool ext4_is_dir;
+    /// NTFS-backed nodes — mount block_handle + MFT record reference
+    /// (a stable handle), plus a size / is-dir snapshot. Reads
+    /// re-read the record via `ntfs::NtfsReadMftRecord`, resolve $DATA
+    /// via `ntfs::NtfsResolveData`, then stream `ntfs::NtfsReadFile`.
+    u32 ntfs_block_handle;
+    u64 ntfs_mft_reference;
+    u64 ntfs_size_bytes;
+    bool ntfs_is_dir;
 };
 
 /// True when `n` is a real resolved node (backend != Invalid).

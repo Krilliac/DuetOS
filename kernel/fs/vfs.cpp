@@ -493,6 +493,14 @@ bool VfsNodeIsDir(const VfsNode& n)
         bool is_dir = false;
         return RamVolStat(n.ramvol_path, nullptr, &is_dir, nullptr) && is_dir;
     }
+    if (n.backend == VfsBackend::Ext4)
+    {
+        return n.ext4_is_dir;
+    }
+    if (n.backend == VfsBackend::Ntfs)
+    {
+        return n.ntfs_is_dir;
+    }
     return false;
 }
 
@@ -515,6 +523,14 @@ bool VfsNodeIsFile(const VfsNode& n)
         bool is_dir = true;
         return RamVolStat(n.ramvol_path, nullptr, &is_dir, nullptr) && !is_dir;
     }
+    if (n.backend == VfsBackend::Ext4)
+    {
+        return !n.ext4_is_dir;
+    }
+    if (n.backend == VfsBackend::Ntfs)
+    {
+        return !n.ntfs_is_dir;
+    }
     return false;
 }
 
@@ -536,6 +552,14 @@ u64 VfsNodeSize(const VfsNode& n)
     {
         u64 sz = 0;
         return RamVolStat(n.ramvol_path, &sz, nullptr, nullptr) ? sz : 0;
+    }
+    if (n.backend == VfsBackend::Ext4)
+    {
+        return n.ext4_is_dir ? 0 : n.ext4_size_bytes;
+    }
+    if (n.backend == VfsBackend::Ntfs)
+    {
+        return n.ntfs_is_dir ? 0 : n.ntfs_size_bytes;
     }
     return 0;
 }

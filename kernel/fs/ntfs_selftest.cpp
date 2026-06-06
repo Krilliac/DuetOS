@@ -37,6 +37,9 @@
 #include "arch/x86_64/serial.h"
 #include "debug/probes.h"
 #include "drivers/storage/block.h"
+#include "fs/mount.h"
+#include "fs/ramfs.h"
+#include "fs/vfs.h"
 #include "log/klog.h"
 
 namespace duetos::fs::ntfs
@@ -382,8 +385,61 @@ void NtfsSelfTest()
         }
     }
 
-    SerialWrite(
-        "[ntfs-selftest] PASS (synthetic volume: probe+USA-fixup+root-index+resident-data file read verified)\n");
+    // ---- Phase 7: VFS integration. Mount the synthetic volume and
+    // prove VfsResolve surfaces an NTFS-tagged node the predicates +
+    // read path agree on — the wire-in that makes a path under an NTFS
+    // mount (`cat /mnt/.../hello.txt`) reach this backend.
+    const MountId mid = VfsMount("/mnt/ntfs-selftest", FsType::Ntfs, handle);
+    if (mid == kInvalidMountId)
+    {
+        Fail("vfs-mount");
+        return;
+    }
+    const char kVfsPath[] = "/mnt/ntfs-selftest/hello.txt";
+    const VfsNode node = VfsResolve(RamfsTrustedRoot(), kVfsPath, 256);
+    if (node.backend != VfsBackend::Ntfs || !VfsNodeIsFile(node) || VfsNodeIsDir(node))
+    {
+        Fail("vfs-resolve");
+        return;
+    }
+    if (VfsNodeSize(node) != kFileBodyLen || node.ntfs_mft_reference != kFileRecordNum)
+    {
+        Fail("vfs-node-fields");
+        return;
+    }
+    // Read through the node exactly as the shell read path does
+    // (NtfsReadMftRecord → NtfsResolveData → NtfsReadFile) and compare.
+    const Volume* vvol = NtfsVolumeByHandle(node.ntfs_block_handle);
+    u8 vrec[kRecordSize];
+    DataLocation vdata{};
+    u8 vbuf[64];
+    u64 vread = 0;
+    if (vvol == nullptr || !NtfsReadMftRecord(*vvol, node.ntfs_mft_reference, vrec) ||
+        !NtfsResolveData(*vvol, vrec, &vdata) || !vdata.valid ||
+        !NtfsReadFile(*vvol, vrec, vdata, 0, vbuf, sizeof(vbuf), &vread) || vread != kFileBodyLen)
+    {
+        Fail("vfs-read");
+        return;
+    }
+    for (u32 i = 0; i < kFileBodyLen; ++i)
+    {
+        if (vbuf[i] != u8(kFileBody[i]))
+        {
+            Fail("vfs-content");
+            return;
+        }
+    }
+    // A path that obviously doesn't exist under the mount must miss.
+    const char kMissPath[] = "/mnt/ntfs-selftest/_NOPE_.X";
+    const VfsNode miss = VfsResolve(RamfsTrustedRoot(), kMissPath, 256);
+    if (VfsNodeIsValid(miss) || miss.backend != VfsBackend::Invalid)
+    {
+        Fail("vfs-miss");
+        return;
+    }
+
+    SerialWrite("[ntfs-selftest] PASS (synthetic volume: probe+USA-fixup+root-index+resident-data file read + VFS "
+                "resolve verified)\n");
 }
 
 } // namespace duetos::fs::ntfs

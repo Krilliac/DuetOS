@@ -32,6 +32,9 @@
 #include "arch/x86_64/serial.h"
 #include "debug/probes.h"
 #include "drivers/storage/block.h"
+#include "fs/mount.h"
+#include "fs/ramfs.h"
+#include "fs/vfs.h"
 #include "log/klog.h"
 
 namespace duetos::fs::ext4
@@ -350,7 +353,61 @@ void Ext4SelfTest()
         }
     }
 
-    SerialWrite("[ext4-selftest] PASS (synthetic volume: probe+gdt+inode+root-dir+extent file read verified)\n");
+    // ---- Phase 5: VFS integration. Mount the synthetic volume and
+    // prove VfsResolve surfaces an ext4-tagged node the predicates +
+    // read path agree on. This is the wire-in that makes a path under
+    // an ext4 mount (`cat /mnt/.../hello.txt`) reach this backend
+    // rather than reporting a phantom miss.
+    const MountId mid = VfsMount("/mnt/ext4-selftest", FsType::Ext4, handle);
+    if (mid == kInvalidMountId)
+    {
+        Fail("vfs-mount");
+        return;
+    }
+    const char kVfsPath[] = "/mnt/ext4-selftest/hello.txt";
+    const VfsNode node = VfsResolve(RamfsTrustedRoot(), kVfsPath, 256);
+    if (node.backend != VfsBackend::Ext4 || !VfsNodeIsFile(node) || VfsNodeIsDir(node))
+    {
+        Fail("vfs-resolve");
+        return;
+    }
+    if (VfsNodeSize(node) != kFileBodyLen || node.ext4_inode != kFileIno)
+    {
+        Fail("vfs-node-fields");
+        return;
+    }
+    // Read through the node exactly as the shell read path does
+    // (Ext4VolumeByHandle → Ext4ReadInode → Ext4ReadFile) and compare.
+    const Volume* vvol = Ext4VolumeByHandle(node.ext4_block_handle);
+    InodeInfo vinfo{};
+    u8 vbuf[64];
+    u64 vread = 0;
+    if (vvol == nullptr || !Ext4ReadInode(*vvol, node.ext4_inode, &vinfo) ||
+        !Ext4ReadFile(*vvol, vinfo, 0, vbuf, sizeof(vbuf), &vread) || vread != kFileBodyLen)
+    {
+        Fail("vfs-read");
+        return;
+    }
+    for (u32 i = 0; i < kFileBodyLen; ++i)
+    {
+        if (vbuf[i] != u8(kFileBody[i]))
+        {
+            Fail("vfs-content");
+            return;
+        }
+    }
+    // A path that obviously doesn't exist under the mount must miss
+    // (proves the lookup runs the ext4 backend, not a papered-over hit).
+    const char kMissPath[] = "/mnt/ext4-selftest/_NOPE_.X";
+    const VfsNode miss = VfsResolve(RamfsTrustedRoot(), kMissPath, 256);
+    if (VfsNodeIsValid(miss) || miss.backend != VfsBackend::Invalid)
+    {
+        Fail("vfs-miss");
+        return;
+    }
+
+    SerialWrite(
+        "[ext4-selftest] PASS (synthetic volume: probe+gdt+inode+root-dir+extent file read + VFS resolve verified)\n");
 }
 
 } // namespace duetos::fs::ext4
