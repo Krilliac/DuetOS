@@ -34,6 +34,7 @@ CMakeLists.txt text eol=lf
 
 # Binary assets — never touch.
 *.png   binary
+*.ppm   binary
 *.jpg   binary
 *.jpeg  binary
 *.gif   binary
