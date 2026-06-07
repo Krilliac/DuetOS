@@ -4,7 +4,9 @@
 #include "apps/notes.h"
 #include "apps/trash.h"
 #include "arch/x86_64/serial.h"
+#include "arch/x86_64/timer.h"
 #include "diag/fix_journal.h"
+#include "log/klog.h"
 #include "drivers/input/ps2kbd.h"
 #include "drivers/input/ps2mouse.h"
 #include "drivers/video/app_widgets/app_button.h"
@@ -58,6 +60,8 @@ constexpr duetos::u64 kUserLaunchFrames = 512;
 
 constexpr u32 kMaxDepth = 8;
 constexpr u32 kFatMax = 64;
+// Type-ahead inter-key idle gap: 100 ticks @ 100 Hz = 1 second.
+constexpr u64 kTypeaheadTimeoutTicks = 100;
 constexpr u32 kGlyphW = 8;
 constexpr u32 kRowH = 10;
 constexpr u32 kInkFg = 0x00D0D8E0;
@@ -156,6 +160,16 @@ struct State
     // disarm cleanly.
     Pending pending;
     u32 pending_idx;
+
+    // Type-ahead prefix buffer. Accumulates alphanumeric key presses
+    // and resets after kTypeaheadTimeoutTicks idle ticks. Each append
+    // scans the current listing for the first entry whose name begins
+    // (case-insensitively) with the buffered prefix and moves the
+    // selection there. If no match is found the buffer stays unchanged
+    // so the user can see their prefix and backspace to correct it.
+    char typeahead_buf[32];
+    u32 typeahead_len;
+    u64 typeahead_tick; // tick stamp of the last typeahead key press
 };
 
 constinit State g_state = {duetos::drivers::video::kWindowInvalid,
@@ -177,6 +191,9 @@ constinit State g_state = {duetos::drivers::video::kWindowInvalid,
                            {},
                            0,
                            Pending::None,
+                           0,
+                           {},
+                           0,
                            0};
 
 // ---- Pass D chrome: AppToolbar header + 6 mode/action buttons +
@@ -402,6 +419,132 @@ void SortTrashEntries()
     SortFat32Array(g_state.trash_entries, g_state.trash_count, g_state.sort);
 }
 
+// ---- Type-ahead helpers -----------------------------------------------
+
+// Reset the type-ahead buffer. Called on mode-switch, navigation,
+// or after the idle timeout fires.
+void TypeaheadReset()
+{
+    g_state.typeahead_len = 0;
+    g_state.typeahead_buf[0] = '\0';
+    g_state.typeahead_tick = 0;
+}
+
+// Case-insensitive prefix match: does `name` start with the
+// buffered prefix? Returns true if prefix is empty (matches all).
+bool TypeaheadNameMatches(const char* name)
+{
+    if (g_state.typeahead_len == 0)
+        return true;
+    for (u32 i = 0; i < g_state.typeahead_len; ++i)
+    {
+        if (name[i] == '\0')
+            return false; // name shorter than prefix
+        char nc = name[i];
+        char pc = g_state.typeahead_buf[i];
+        if (nc >= 'a' && nc <= 'z')
+            nc = static_cast<char>(nc - 32);
+        if (pc >= 'a' && pc <= 'z')
+            pc = static_cast<char>(pc - 32);
+        if (nc != pc)
+            return false;
+    }
+    return true;
+}
+
+// Scan the current mode's entry list for the first entry whose name
+// begins with the type-ahead prefix. If found, moves the selection
+// there and returns true. If not found, leaves the selection
+// unchanged and returns false.
+bool TypeaheadSearch()
+{
+    if (g_state.typeahead_len == 0)
+        return false;
+    if (g_state.mode == Mode::Fat32)
+    {
+        for (u32 i = 0; i < g_state.fat_count; ++i)
+        {
+            if (TypeaheadNameMatches(g_state.fat_entries[i].name))
+            {
+                g_state.fat_selection = i;
+                KLOG_DEBUG_S("files", "typeahead fat32 match", "prefix", g_state.typeahead_buf);
+                return true;
+            }
+        }
+        KLOG_DEBUG_S("files", "typeahead fat32 no match", "prefix", g_state.typeahead_buf);
+        return false;
+    }
+    if (g_state.mode == Mode::Trash)
+    {
+        for (u32 i = 0; i < g_state.trash_count; ++i)
+        {
+            if (TypeaheadNameMatches(g_state.trash_entries[i].name))
+            {
+                g_state.trash_selection = i;
+                KLOG_DEBUG_S("files", "typeahead trash match", "prefix", g_state.typeahead_buf);
+                return true;
+            }
+        }
+        return false;
+    }
+    if (g_state.mode == Mode::DuetFs)
+    {
+        for (u32 i = 0; i < g_state.duet_count; ++i)
+        {
+            // DuetFS names are stored as u8[] with a separate length;
+            // build a small NUL-terminated copy for the prefix check.
+            char nm[65];
+            const u32 nl = g_state.duet_entries[i].name_len < 64 ? g_state.duet_entries[i].name_len : 64;
+            for (u32 k = 0; k < nl; ++k)
+                nm[k] = static_cast<char>(g_state.duet_entries[i].name[k]);
+            nm[nl] = '\0';
+            if (TypeaheadNameMatches(nm))
+            {
+                g_state.duet_selection = i;
+                KLOG_DEBUG_S("files", "typeahead duetfs match", "prefix", g_state.typeahead_buf);
+                return true;
+            }
+        }
+        return false;
+    }
+    // Ramfs mode.
+    const duetos::fs::RamfsNode* cur = g_state.ramfs_depth > 0 ? g_state.ramfs_stack[g_state.ramfs_depth - 1] : nullptr;
+    if (cur == nullptr || cur->children == nullptr)
+        return false;
+    for (u32 i = 0; cur->children[i] != nullptr; ++i)
+    {
+        const char* name = cur->children[i]->name;
+        if (name != nullptr && TypeaheadNameMatches(name))
+        {
+            g_state.ramfs_selection = i;
+            KLOG_DEBUG_S("files", "typeahead ramfs match", "prefix", g_state.typeahead_buf);
+            return true;
+        }
+    }
+    return false;
+}
+
+// Append one alphanumeric character to the type-ahead buffer,
+// resetting first if the inter-key gap exceeded the timeout.
+// Then scans for the first prefix match and moves the selection.
+void TypeaheadAppend(char c)
+{
+    const u64 now = duetos::arch::TimerTicks();
+    if (g_state.typeahead_tick != 0 && (now - g_state.typeahead_tick) >= kTypeaheadTimeoutTicks)
+    {
+        TypeaheadReset();
+        KLOG_DEBUG("files", "typeahead timeout reset");
+    }
+    if (g_state.typeahead_len + 1 < sizeof(g_state.typeahead_buf))
+    {
+        g_state.typeahead_buf[g_state.typeahead_len++] = c;
+        g_state.typeahead_buf[g_state.typeahead_len] = '\0';
+    }
+    g_state.typeahead_tick = now;
+    TypeaheadSearch();
+    KLOG_DEBUG_S("files", "typeahead append", "buf", g_state.typeahead_buf);
+}
+
 u32 CountChildren(const duetos::fs::RamfsNode* dir)
 {
     if (dir == nullptr || dir->children == nullptr)
@@ -489,6 +632,58 @@ void RescanDuetFs()
         start += static_cast<u32>(got);
     }
 }
+
+// ---- Mode-switch helpers (shared by toolbar trampolines + self-test)
+// Defined here, after all Rescan* functions they depend on.
+
+void SwitchToRam()
+{
+    if (g_state.mode != Mode::Ramfs)
+    {
+        g_state.mode = Mode::Ramfs;
+        TypeaheadReset();
+        duetos::drivers::video::NotifyShow("files: ram view");
+    }
+}
+
+void SwitchToDisk()
+{
+    if (g_state.mode != Mode::Fat32)
+    {
+        g_state.mode = Mode::Fat32;
+        g_state.fat_selection = 0;
+        TypeaheadReset();
+        RescanFat32();
+        duetos::drivers::video::NotifyShow("files: disk view");
+    }
+}
+
+void SwitchToTrash()
+{
+    if (g_state.mode != Mode::Trash)
+    {
+        g_state.mode = Mode::Trash;
+        g_state.trash_selection = 0;
+        TypeaheadReset();
+        RescanTrash();
+        duetos::drivers::video::NotifyShow("files: trash view");
+    }
+}
+
+void SwitchToDrive()
+{
+    if (g_state.mode != Mode::DuetFs)
+    {
+        g_state.mode = Mode::DuetFs;
+        g_state.duet_selection = 0;
+        g_state.duet_depth = 0;
+        TypeaheadReset();
+        RescanDuetFs();
+        duetos::drivers::video::NotifyShow("files: main drive");
+    }
+}
+
+// ---- End mode-switch helpers ------------------------------------------
 
 u32 ModeCount()
 {
@@ -911,21 +1106,22 @@ void RefreshFooterText()
     }
     else
     {
-        // Per-mode hint. Matches the strings the legacy inline
-        // footer code used to paint per-mode at the same screen
-        // slot.
-        const char* hint = "UP/DN ENTER:OPEN B:BACK D:DISK F:DRIVE";
+        // Per-mode hint. Shows keyboard shortcuts still available
+        // (navigation, Enter, Backspace); view switches now use
+        // the toolbar buttons. Letters / digits do type-ahead;
+        // Del = delete/trash; F5 = empty trash.
+        const char* hint = "UP/DN ENTER:OPEN BKSP:BACK  TYPE:JUMP";
         if (g_state.mode == Mode::Fat32)
         {
-            hint = (g_state.fat_count == 0) ? "M:RAM  R:RESCAN" : "ENTER:OPEN R:RESCAN X:TRASH T:TRASH M:RAM F:DRIVE";
+            hint = (g_state.fat_count == 0) ? "TOOLBAR:VIEW  TYPE:JUMP" : "ENTER:OPEN DEL:TRASH  TYPE:JUMP";
         }
         else if (g_state.mode == Mode::Trash)
         {
-            hint = (g_state.trash_count == 0) ? "D:DISK  M:RAM" : "R:RESTORE  X:PERM-DEL  E:EMPTY  D:DISK  M:RAM";
+            hint = (g_state.trash_count == 0) ? "TOOLBAR:VIEW" : "DEL:PERM-DEL  F5:EMPTY  TYPE:JUMP";
         }
         else if (g_state.mode == Mode::DuetFs)
         {
-            hint = (g_state.duet_count == 0) ? "B:BACK  M:RAM  D:DISK" : "UP/DN ENTER:OPEN B:BACK M:RAM D:DISK";
+            hint = (g_state.duet_count == 0) ? "BKSP:BACK  TYPE:JUMP" : "ENTER:OPEN BKSP:BACK  TYPE:JUMP";
         }
         FooterAppend(g_footer_text, sizeof(g_footer_text), &o, hint);
     }
@@ -1290,36 +1486,110 @@ void EmptyTrashAll()
 }
 
 // ---- Pass D toolbar click trampolines (forward-declared above
-// the constinit g_files). Each routes through the equivalent
-// FilesFeedChar keybind so the click + key surfaces stay in
-// lock-step automatically — adding a new keybind branch
-// propagates to the button for free. Trampolines exist (rather
-// than binding FilesFeedChar directly) because AppButton's
-// `on_click` is `void(*)()`, not `bool(*)(char)`.
+// the constinit g_files). Each calls the mode-switch / action
+// helper directly so the click path remains independent of the
+// letter-key dispatch — letter keys now drive type-ahead, not
+// view switches. Trampolines exist (rather than binding the
+// helper directly) because AppButton's `on_click` is
+// `void(*)()`, not the helper's signature.
 
 void ClickModeRam()
 {
-    duetos::apps::files::FilesFeedChar('m');
+    SwitchToRam();
 }
 void ClickModeDisk()
 {
-    duetos::apps::files::FilesFeedChar('d');
+    SwitchToDisk();
 }
 void ClickModeTrash()
 {
-    duetos::apps::files::FilesFeedChar('t');
+    SwitchToTrash();
 }
 void ClickModeDrive()
 {
-    duetos::apps::files::FilesFeedChar('f');
+    SwitchToDrive();
 }
 void ClickRefresh()
 {
-    duetos::apps::files::FilesFeedChar('r');
+    // Refresh is mode-dependent: disk view rescans FAT32, trash
+    // view rescans the bin; other views have no backend to re-read.
+    if (g_state.mode == Mode::Fat32)
+    {
+        const u32 prev_sel = g_state.fat_selection;
+        RescanFat32();
+        if (prev_sel >= g_state.fat_count)
+            g_state.fat_selection = (g_state.fat_count > 0) ? (g_state.fat_count - 1) : 0;
+        else
+            g_state.fat_selection = prev_sel;
+        TypeaheadReset();
+        duetos::drivers::video::NotifyShow("files: rescan");
+    }
+    else if (g_state.mode == Mode::Trash)
+    {
+        RescanTrash();
+        TypeaheadReset();
+        duetos::drivers::video::NotifyShow("files: rescan");
+    }
 }
 void ClickSort()
 {
-    duetos::apps::files::FilesFeedChar('s');
+    // Cycle sort mode. Mirrors the sort logic previously in
+    // FilesFeedChar('s') — extracted so the toolbar can call it
+    // without going through the letter-key dispatch.
+    const auto next = static_cast<u8>(g_state.sort) + 1;
+    g_state.sort = (next >= static_cast<u8>(SortMode::kCount)) ? SortMode::Name : static_cast<SortMode>(next);
+    char saved_name[128] = {};
+    u32 nlen = 0;
+    if (g_state.mode == Mode::Fat32 && g_state.fat_selection < g_state.fat_count)
+    {
+        const char* sn = g_state.fat_entries[g_state.fat_selection].name;
+        for (; nlen + 1 < sizeof(saved_name) && sn[nlen] != '\0'; ++nlen)
+            saved_name[nlen] = sn[nlen];
+    }
+    else if (g_state.mode == Mode::Trash && g_state.trash_selection < g_state.trash_count)
+    {
+        const char* sn = g_state.trash_entries[g_state.trash_selection].name;
+        for (; nlen + 1 < sizeof(saved_name) && sn[nlen] != '\0'; ++nlen)
+            saved_name[nlen] = sn[nlen];
+    }
+    SortFat32Entries();
+    SortTrashEntries();
+    if (nlen > 0)
+    {
+        if (g_state.mode == Mode::Fat32)
+        {
+            for (u32 i = 0; i < g_state.fat_count; ++i)
+            {
+                if (FilesNameCmpCi(g_state.fat_entries[i].name, saved_name) == 0)
+                {
+                    g_state.fat_selection = i;
+                    break;
+                }
+            }
+        }
+        else if (g_state.mode == Mode::Trash)
+        {
+            for (u32 i = 0; i < g_state.trash_count; ++i)
+            {
+                if (FilesNameCmpCi(g_state.trash_entries[i].name, saved_name) == 0)
+                {
+                    g_state.trash_selection = i;
+                    break;
+                }
+            }
+        }
+    }
+    TypeaheadReset();
+    char msg[32];
+    u32 mo = 0;
+    const char* lead = "files: sort by ";
+    for (u32 i = 0; lead[i] != '\0' && mo + 1 < sizeof(msg); ++i)
+        msg[mo++] = lead[i];
+    const char* sname = SortModeName(g_state.sort);
+    for (u32 i = 0; sname[i] != '\0' && mo + 1 < sizeof(msg); ++i)
+        msg[mo++] = sname[i];
+    msg[mo] = '\0';
+    duetos::drivers::video::NotifyShow(msg);
 }
 
 } // namespace
@@ -1441,9 +1711,12 @@ void FilesPromoteToDisk()
 
 bool FilesFeedArrow(bool up)
 {
-    // Any navigation cancels a pending prompt — keeps every
-    // confirmation flow strictly modal at the caret.
+    // Any navigation cancels a pending prompt and clears the
+    // type-ahead buffer — keeps every confirmation flow strictly
+    // modal at the caret and avoids a stale prefix after the user
+    // manually repositions with the arrow keys.
     g_state.pending = Pending::None;
+    TypeaheadReset();
     const u32 n = ModeCount();
     if (n == 0)
         return true;
@@ -1483,12 +1756,56 @@ u32 FilesListVisibleRows()
     return (content_h > (list_top - content_y) + kRowH) ? (content_h - (list_top - content_y)) / kRowH : 0;
 }
 
-// Home / End / PageUp / PageDown for the active list. Matches the
-// list-navigation surface sibling apps (calendar, hexview,
+// Home / End / PageUp / PageDown / Delete / F5 for the active list.
+// Matches the list-navigation surface sibling apps (calendar, hexview,
 // notify-center) already expose. `code` is a VK navigation key.
+//   Delete — arm move-to-trash (Fat32) or perm-delete (Trash).
+//            Replaces the former bare 'x' shortcut; both are now
+//            equivalent to the X-then-Y two-step confirmation. No
+//            toolbar button for destructive delete — kept on a
+//            non-letter key so letters are free for type-ahead.
+//   F5     — arm empty-trash in Trash mode (replaces bare 'e').
+//            Kept off letters for the same reason as Delete.
 bool FilesFeedListKey(duetos::u16 code)
 {
     g_state.pending = Pending::None;
+    TypeaheadReset();
+
+    // Delete — mode-sensitive destructive action (no navigation).
+    if (code == duetos::drivers::input::kKeyDelete)
+    {
+        if (g_state.mode == Mode::Fat32 && g_state.fat_selection < g_state.fat_count)
+        {
+            const auto& e = g_state.fat_entries[g_state.fat_selection];
+            if ((e.attributes & 0x10) != 0)
+            {
+                duetos::drivers::video::NotifyShow("cannot trash directories");
+                return true;
+            }
+            g_state.pending = Pending::DeleteToTrash;
+            g_state.pending_idx = g_state.fat_selection;
+            duetos::drivers::video::NotifyShow("press Y to move to trash");
+        }
+        else if (g_state.mode == Mode::Trash && g_state.trash_selection < g_state.trash_count)
+        {
+            g_state.pending = Pending::PermDeleteFromTrash;
+            g_state.pending_idx = g_state.trash_selection;
+            duetos::drivers::video::NotifyShow("press Y to perm-delete");
+        }
+        return true;
+    }
+    // F5 — empty trash (only meaningful in Trash mode).
+    if (code == duetos::drivers::input::kKeyF5)
+    {
+        if (g_state.mode == Mode::Trash && g_state.trash_count > 0)
+        {
+            g_state.pending = Pending::EmptyTrash;
+            g_state.pending_idx = 0;
+            duetos::drivers::video::NotifyShow("press Y to empty trash");
+        }
+        return true;
+    }
+
     const u32 n = ModeCount();
     if (n == 0)
         return true;
@@ -1514,11 +1831,14 @@ bool FilesFeedChar(char c)
 {
     // Pending two-step prompts. 'Y' confirms whatever was armed,
     // anything else cancels. This branch comes first so a stale
-    // arm followed by an unrelated key cleanly disarms.
+    // arm followed by an unrelated key cleanly disarms. The
+    // pending prompt overrides type-ahead so a destructive action
+    // can never be accidentally confirmed by a mistyped prefix.
     if (g_state.pending != Pending::None)
     {
         const Pending p = g_state.pending;
         g_state.pending = Pending::None;
+        TypeaheadReset();
         if (c == 'y' || c == 'Y')
         {
             switch (p)
@@ -1542,181 +1862,9 @@ bool FilesFeedChar(char c)
         }
         return true;
     }
-    if (c == 'j' || c == 'J')
-        return FilesFeedArrow(false);
-    if (c == 'k' || c == 'K')
-        return FilesFeedArrow(true);
-    // X — two distinct semantics by mode: Fat32 view soft-
-    // deletes (move to trash); Trash view perm-deletes the
-    // selected item.
-    if (c == 'x' || c == 'X')
+    if (static_cast<u8>(c) == 0x08) // Backspace — navigate up (back to parent dir)
     {
-        if (g_state.mode == Mode::Fat32 && g_state.fat_selection < g_state.fat_count)
-        {
-            const auto& e = g_state.fat_entries[g_state.fat_selection];
-            if ((e.attributes & 0x10) != 0)
-            {
-                duetos::drivers::video::NotifyShow("cannot trash directories");
-                return true;
-            }
-            g_state.pending = Pending::DeleteToTrash;
-            g_state.pending_idx = g_state.fat_selection;
-            duetos::drivers::video::NotifyShow("press Y to move to trash");
-        }
-        else if (g_state.mode == Mode::Trash && g_state.trash_selection < g_state.trash_count)
-        {
-            g_state.pending = Pending::PermDeleteFromTrash;
-            g_state.pending_idx = g_state.trash_selection;
-            duetos::drivers::video::NotifyShow("press Y to perm-delete");
-        }
-        return true;
-    }
-    if (c == 'e' || c == 'E')
-    {
-        // Empty trash — only meaningful in trash mode.
-        if (g_state.mode == Mode::Trash && g_state.trash_count > 0)
-        {
-            g_state.pending = Pending::EmptyTrash;
-            g_state.pending_idx = 0;
-            duetos::drivers::video::NotifyShow("press Y to empty trash");
-        }
-        return true;
-    }
-    if (c == 'd' || c == 'D')
-    {
-        if (g_state.mode != Mode::Fat32)
-        {
-            g_state.mode = Mode::Fat32;
-            g_state.fat_selection = 0;
-            RescanFat32();
-            duetos::drivers::video::NotifyShow("files: disk view");
-        }
-        return true;
-    }
-    if (c == 'm' || c == 'M')
-    {
-        if (g_state.mode != Mode::Ramfs)
-        {
-            g_state.mode = Mode::Ramfs;
-            duetos::drivers::video::NotifyShow("files: ram view");
-        }
-        return true;
-    }
-    if (c == 't' || c == 'T')
-    {
-        if (g_state.mode != Mode::Trash)
-        {
-            g_state.mode = Mode::Trash;
-            g_state.trash_selection = 0;
-            RescanTrash();
-            duetos::drivers::video::NotifyShow("files: trash view");
-        }
-        return true;
-    }
-    if (c == 'f' || c == 'F')
-    {
-        if (g_state.mode != Mode::DuetFs)
-        {
-            g_state.mode = Mode::DuetFs;
-            g_state.duet_selection = 0;
-            g_state.duet_depth = 0; // RescanDuetFs re-seeds root
-            RescanDuetFs();
-            duetos::drivers::video::NotifyShow("files: main drive");
-        }
-        return true;
-    }
-    if (c == 'r' || c == 'R')
-    {
-        // Disk view: rescan. Trash view: restore selected item.
-        if (g_state.mode == Mode::Fat32)
-        {
-            const u32 prev_sel = g_state.fat_selection;
-            RescanFat32();
-            if (prev_sel >= g_state.fat_count)
-            {
-                g_state.fat_selection = (g_state.fat_count > 0) ? (g_state.fat_count - 1) : 0;
-            }
-            else
-            {
-                g_state.fat_selection = prev_sel;
-            }
-            duetos::drivers::video::NotifyShow("files: rescan");
-            return true;
-        }
-        if (g_state.mode == Mode::Trash)
-        {
-            return RestoreSelectedTrash();
-        }
-        return false;
-    }
-    if (c == 's' || c == 'S')
-    {
-        // Cycle sort mode: name -> size -> type -> name. Re-sort
-        // both arrays so a subsequent T-toggle into Trash also
-        // shows the new order. Selection follows the previously-
-        // selected entry by name match where possible — better
-        // UX than "selection randomly jumps because the array
-        // reordered."
-        const auto next = static_cast<u8>(g_state.sort) + 1;
-        g_state.sort = (next >= static_cast<u8>(SortMode::kCount)) ? SortMode::Name : static_cast<SortMode>(next);
-        // Capture the selected name BEFORE re-sorting so we can
-        // find it again after the order changes.
-        char saved_name[128] = {};
-        u32 nlen = 0;
-        if (g_state.mode == Mode::Fat32 && g_state.fat_selection < g_state.fat_count)
-        {
-            const char* s = g_state.fat_entries[g_state.fat_selection].name;
-            for (; nlen + 1 < sizeof(saved_name) && s[nlen] != '\0'; ++nlen)
-                saved_name[nlen] = s[nlen];
-        }
-        else if (g_state.mode == Mode::Trash && g_state.trash_selection < g_state.trash_count)
-        {
-            const char* s = g_state.trash_entries[g_state.trash_selection].name;
-            for (; nlen + 1 < sizeof(saved_name) && s[nlen] != '\0'; ++nlen)
-                saved_name[nlen] = s[nlen];
-        }
-        SortFat32Entries();
-        SortTrashEntries();
-        // Re-anchor selection to the named entry.
-        if (nlen > 0)
-        {
-            if (g_state.mode == Mode::Fat32)
-            {
-                for (u32 i = 0; i < g_state.fat_count; ++i)
-                {
-                    if (FilesNameCmpCi(g_state.fat_entries[i].name, saved_name) == 0)
-                    {
-                        g_state.fat_selection = i;
-                        break;
-                    }
-                }
-            }
-            else if (g_state.mode == Mode::Trash)
-            {
-                for (u32 i = 0; i < g_state.trash_count; ++i)
-                {
-                    if (FilesNameCmpCi(g_state.trash_entries[i].name, saved_name) == 0)
-                    {
-                        g_state.trash_selection = i;
-                        break;
-                    }
-                }
-            }
-        }
-        char msg[32];
-        u32 mo = 0;
-        const char* lead = "files: sort by ";
-        for (u32 i = 0; lead[i] != '\0' && mo + 1 < sizeof(msg); ++i)
-            msg[mo++] = lead[i];
-        const char* sn = SortModeName(g_state.sort);
-        for (u32 i = 0; sn[i] != '\0' && mo + 1 < sizeof(msg); ++i)
-            msg[mo++] = sn[i];
-        msg[mo] = '\0';
-        duetos::drivers::video::NotifyShow(msg);
-        return true;
-    }
-    if (c == 'b' || c == 'B' || static_cast<u8>(c) == 0x08) // Back / Backspace
-    {
+        TypeaheadReset();
         if (g_state.mode == Mode::Ramfs)
         {
             if (g_state.ramfs_depth > 1)
@@ -1739,8 +1887,9 @@ bool FilesFeedChar(char c)
         // Fat32 mode: Back is a no-op in v0 (root only).
         return true;
     }
-    if (static_cast<u8>(c) == 0x0A) // Enter
+    if (static_cast<u8>(c) == 0x0A) // Enter — open / descend
     {
+        TypeaheadReset();
         if (g_state.mode == Mode::Ramfs)
         {
             const duetos::fs::RamfsNode* cur = RamfsCur();
@@ -1813,6 +1962,21 @@ bool FilesFeedChar(char c)
         // Fat32 mode.
         return OpenFat32Selected();
     }
+    // Alphanumeric keys — type-ahead jump to first filename prefix match.
+    // Toolbar buttons (RAM/DISK/TRASH/DRIVE/REFRESH/SORT) remain the
+    // clickable surface for all view-switch actions. The previously
+    // bare-letter view shortcuts (d/m/t/f/r/s) are removed so these
+    // characters are available for type-ahead. j/k vim navigation is
+    // also removed (redundant with Up/Down arrow keys). Delete (kKeyDelete)
+    // and F5 are routed through FilesFeedListKey for destructive actions
+    // (delete-to-trash / perm-delete and empty-trash respectively).
+    const bool is_alpha = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+    const bool is_digit = (c >= '0' && c <= '9');
+    if (is_alpha || is_digit)
+    {
+        TypeaheadAppend(c);
+        return true;
+    }
     return false;
 }
 
@@ -1836,7 +2000,7 @@ void FilesSelfTest()
                 FilesFeedChar('\n'); // Enter -> descend
                 if (g_state.ramfs_depth != saved_depth + 1 || RamfsCur() != root->children[i])
                     pass = false;
-                FilesFeedChar('b'); // Back -> pop
+                FilesFeedChar('\x08'); // Backspace -> pop
                 if (g_state.ramfs_depth != saved_depth || RamfsCur() != saved_top)
                     pass = false;
                 break;
@@ -1846,11 +2010,12 @@ void FilesSelfTest()
 
     // Mode toggle round-trip. Disk mode is reachable iff a FAT32
     // volume is mounted; either way, switching back to ram mode
-    // must succeed.
-    FilesFeedChar('d');
+    // must succeed. Call the mode-switch helpers directly — bare
+    // letter keys now drive type-ahead, not view switches.
+    SwitchToDisk();
     if (g_state.mode != Mode::Fat32)
         pass = false;
-    FilesFeedChar('m');
+    SwitchToRam();
     if (g_state.mode != Mode::Ramfs)
         pass = false;
 
@@ -1858,7 +2023,7 @@ void FilesSelfTest()
     // mounted at /duetfs and seeded with /etc, so entering the
     // view, descending into the first directory, and backing out
     // must all hold. duet_depth tracks the navigation stack.
-    FilesFeedChar('f');
+    SwitchToDrive();
     if (g_state.mode != Mode::DuetFs || g_state.duet_depth != 1)
         pass = false;
     {
@@ -1877,7 +2042,7 @@ void FilesSelfTest()
             FilesFeedChar('\n'); // descend
             if (g_state.duet_depth != 2)
                 pass = false;
-            FilesFeedChar('b'); // back to root
+            FilesFeedChar('\x08'); // Backspace -> back to root
             if (g_state.duet_depth != 1)
                 pass = false;
             // Generic context dispatch (37 OPEN / 39 REFRESH) must
@@ -1887,13 +2052,13 @@ void FilesSelfTest()
             FilesDispatchContextAction(37, dir_row); // OPEN -> descend
             if (g_state.duet_depth != 2)
                 pass = false;
-            FilesFeedChar('b');
+            FilesFeedChar('\x08');             // Backspace -> back to root
             FilesDispatchContextAction(39, 0); // REFRESH (no-op safe)
             if (g_state.mode != Mode::DuetFs || g_state.duet_depth != 1)
                 pass = false;
         }
     }
-    FilesFeedChar('m');
+    SwitchToRam();
     if (g_state.mode != Mode::Ramfs)
         pass = false;
 
@@ -2000,6 +2165,35 @@ void FilesSelfTest()
         pass = false;
     g_state.pending = Pending::None;
 
+    // Type-ahead unit tests (no filesystem I/O — prefix match logic only).
+    // TypeaheadNameMatches is tested directly against known names.
+    {
+        TypeaheadReset();
+        g_state.typeahead_buf[0] = 'S';
+        g_state.typeahead_buf[1] = '\0';
+        g_state.typeahead_len = 1;
+        // "SHOT0001.BMP" starts with 'S' — must match.
+        if (!TypeaheadNameMatches("SHOT0001.BMP"))
+            pass = false;
+        // "AFILE.TXT" does not start with 'S' — must not match.
+        if (TypeaheadNameMatches("AFILE.TXT"))
+            pass = false;
+        // Empty prefix always matches.
+        TypeaheadReset();
+        if (!TypeaheadNameMatches("anything"))
+            pass = false;
+        // Multi-char prefix: "SH" — must match "SHOT" but not "SNAP".
+        g_state.typeahead_buf[0] = 'S';
+        g_state.typeahead_buf[1] = 'H';
+        g_state.typeahead_buf[2] = '\0';
+        g_state.typeahead_len = 2;
+        if (!TypeaheadNameMatches("SHOT0001.BMP"))
+            pass = false;
+        if (TypeaheadNameMatches("SNAP.TXT"))
+            pass = false;
+        TypeaheadReset();
+    }
+
     g_state.ramfs_depth = saved_depth;
     g_state.ramfs_selection = saved_sel;
     g_state.mode = saved_mode;
@@ -2007,7 +2201,7 @@ void FilesSelfTest()
     if (pass)
     {
         SerialWrite("[files] self-test OK (ramfs descend+back, mode toggle, duetfs descend+back, ctx-dispatch, "
-                    "home/end, ext match, delete-disarm, widget-click, footer-refresh)\n");
+                    "home/end, ext match, delete-disarm, widget-click, footer-refresh, typeahead)\n");
         SerialWrite("[files-selftest] PASS\n");
     }
     else
