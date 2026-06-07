@@ -258,6 +258,15 @@ privileged `net.fetch` executor; elevated-origin behaviour is
 deferred to [Privileged-Origin Mode](Privileged-Origin.md). See
 [Capabilities](../security/Capabilities.md).
 
+**Dense-array index bound.** Integer array indices `>= kMaxArrayIndex`
+(`2^24`, in `js/object.h`) are treated as ordinary string-keyed
+properties on both the write (`DoAssign`) and read (`EvalExpr` Index)
+paths, and `ArrEnsure` grows capacity in `u64` with a clamp. This stops
+a hostile script index such as `a[4294967295]` from wrapping a `u32`
+capacity to 0 and driving an out-of-bounds kernel-heap write. Regression
+cases live in `js/selftest.cpp` (snippets 24–26). (Security audit
+SEC-002, CWE-787/190, 2026-06-07.)
+
 ## See also
 
 - [In-Kernel Apps](Kernel-Apps.md) — the `browser` app shell, chrome, and

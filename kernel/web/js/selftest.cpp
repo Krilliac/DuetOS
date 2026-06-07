@@ -416,6 +416,15 @@ void JsSelfTest()
         EvalConfig cfg;
         run(CheckErr("var = ;", ErrorCode::InvalidArgument, cfg));
     }
+    // 24. SEC-002 regression: an out-of-dense-range index (>= kMaxArrayIndex)
+    // is an ordinary string-keyed property — it must store AND read back the
+    // same value (write/read symmetry), never truncate to a wild u32 OOB write.
+    run(CheckCase("var a=[]; a[16777300]=5; a[16777300];", "5", nullptr));
+    // 25. SEC-002 regression: the exact exploit index 0xFFFFFFFF round-trips via
+    // the string-key path without an out-of-bounds heap write or a crash.
+    run(CheckCase("var a=[]; a[4294967295]=9; a[4294967295];", "9", nullptr));
+    // 26. SEC-002 regression: in-range dense arrays are unaffected by the bound.
+    run(CheckCase("var a=[]; a[5]=7; a[0]=1; a[5] + ',' + a.length;", "7,6", nullptr));
 
     char numBuf[12];
 

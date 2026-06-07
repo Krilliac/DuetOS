@@ -54,6 +54,13 @@ struct PropChunk
 // regexp.h; carried by a JsObject whose `regexp` field is non-null.
 struct JsRegExp;
 
+// SEC-002: dense-array index upper bound. ECMAScript indices run 0..2^32-2,
+// but DuetOS bounds the dense fast path far lower so `idx + 1` and the
+// capacity doubling in ArrEnsure can never wrap a u32. Indices at/above this
+// are treated as ordinary string-keyed properties. Shared by interp.cpp's
+// index assignment fast path and object.cpp's ArrSet/ArrEnsure.
+inline constexpr u32 kMaxArrayIndex = 1u << 24;
+
 struct JsObject
 {
     bool isArray;

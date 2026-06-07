@@ -327,7 +327,11 @@ static Result<JsValue> DoAssign(Interp& I, const AstNode* target, const JsValue&
         JS_TRY_ASSIGN(JsValue idx, EvalExpr(I, target->b, env));
         if (obj.type != JsType::Object)
             return Err{ErrorCode::BadState};
-        if (obj.as.obj->isArray && idx.IsNumber() && idx.as.num.isInt && idx.as.num.ival >= 0)
+        // SEC-002: only take the dense fast path for in-range indices; a huge
+        // index (e.g. 0xFFFFFFFF) survives ival>=0 and truncates to a wild u32
+        // OOB write. Out-of-range falls through to the string-key path below.
+        if (obj.as.obj->isArray && idx.IsNumber() && idx.as.num.isInt && idx.as.num.ival >= 0 &&
+            idx.as.num.ival < static_cast<i64>(kMaxArrayIndex))
         {
             if (!ArrSet(obj.as.obj, I.arena, static_cast<u32>(idx.as.num.ival), val))
                 return Err{ErrorCode::OutOfMemory};
@@ -525,8 +529,12 @@ Result<JsValue> EvalExpr(Interp& I, const AstNode* n, Env* env)
     {
         JS_TRY_ASSIGN(JsValue obj, EvalExpr(I, n->a, env));
         JS_TRY_ASSIGN(JsValue idx, EvalExpr(I, n->b, env));
+        // SEC-002: mirror the write-path bound so an index >= kMaxArrayIndex
+        // (stored under a string key) reads back via the string-key path, not
+        // dense ArrGet (which would yield undefined) keeps a[i]=v; a[i]
+        // symmetric for valid indices in 2^24..2^32-2.
         if (obj.type == JsType::Object && obj.as.obj->isArray && idx.IsNumber() && idx.as.num.isInt &&
-            idx.as.num.ival >= 0)
+            idx.as.num.ival >= 0 && idx.as.num.ival < static_cast<i64>(kMaxArrayIndex))
         {
             JsValue out;
             if (ArrGet(obj.as.obj, static_cast<u32>(idx.as.num.ival), out))
