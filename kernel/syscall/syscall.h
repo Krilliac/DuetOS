@@ -2166,6 +2166,19 @@ enum SyscallNumber : u64
     // today the cap-gating happens one layer up, at the Win32
     // dispatch entry — see Subsystem-Isolation.md for the rule).
     SYS_VK_CALL = 211,
+
+    // SYS_RANDOM_BYTES — fill a user buffer with cryptographically-strong
+    // random bytes from the kernel CSPRNG (core::RandomFillBytes, RDSEED/
+    // RDRAND-seeded). Args: rdi = user buffer VA, rsi = length. Returns the
+    // number of bytes written (== length on success, a short count if the
+    // copy faulted part-way, 0 on a bad/zero buffer). NOT cap-gated: reading
+    // entropy is a universally-available primitive (cf. Linux getrandom(2)),
+    // so denying it protects nothing a native process couldn't already do;
+    // the kernel still validates [buf, len] lies in the caller's user half.
+    // The length is capped (kRandomBytesMax) so one call can't pin a CPU.
+    // Backs userland/libs/bcrypt BCryptGenRandom on RDRAND-absent hardware.
+    // ABI stable from this commit.
+    SYS_RANDOM_BYTES = 212,
 };
 
 // Vulkan syscall op-codes. Used as the `rdi` value to SYS_VK_CALL
