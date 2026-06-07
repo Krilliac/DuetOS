@@ -169,6 +169,20 @@ See [Shell Commands](../reference/Shell-Commands.md) for the full list.
   `FwRemove`, `FwToggle`, `FwSetDefaultPolicy`). Read access
   to the rule table and per-iface counters is unprivileged.
 
+## Spoofing resistance
+
+- **TCP ISN** is generated with an RFC-6528-style keyed hash over the
+  connection 4-tuple plus a boot-seeded CSPRNG secret (`core::RandomU64`),
+  not the old tick-seeded LCG — an off-path attacker can no longer predict
+  the initial sequence number to forge in-window segments, while the
+  per-4-tuple keying keeps `TIME-WAIT` old-duplicate monotonicity.
+  (Security audit ML-02, CWE-330.)
+- **DNS** now uses a random transaction ID and a random ephemeral source
+  port per query, and `DnsOnUdp` validates the reply's source IP
+  (resolver), source port (53), and destination port before accepting it —
+  blind cache poisoning now requires guessing ~30 bits instead of zero.
+  (Security audit ML-03, CWE-290.)
+
 ## Operator Surface
 
 The kernel shell exposes the firewall via a `firewall`

@@ -42,26 +42,73 @@ namespace
 
 namespace duetos::mm
 {
-void AddressSpaceMapUserPage(AddressSpace*, u64, PhysAddr, u64) { Trap("AddressSpaceMapUserPage"); }
-bool AddressSpaceUnmapUserPage(AddressSpace*, u64) { Trap("AddressSpaceUnmapUserPage"); }
-PhysAddr AddressSpaceLookupUserFrame(const AddressSpace*, u64) { Trap("AddressSpaceLookupUserFrame"); }
-core::Result<PhysAddr> AllocateFrame() { Trap("AllocateFrame"); }
-core::Result<PhysAddr> AllocateContiguousFrames(u64) { Trap("AllocateContiguousFrames"); }
-void* PhysToVirt(PhysAddr) { Trap("PhysToVirt"); }
+void AddressSpaceMapUserPage(AddressSpace*, u64, PhysAddr, u64)
+{
+    Trap("AddressSpaceMapUserPage");
+}
+bool AddressSpaceUnmapUserPage(AddressSpace*, u64)
+{
+    Trap("AddressSpaceUnmapUserPage");
+}
+// MapSection's section-overlap reuse path (GS-03) re-stamps the shared page;
+// the parse-driven harness never reaches a full section map, same as the
+// MapUserPage stub above.
+u64 AddressSpaceProbePteRaw(const AddressSpace*, u64)
+{
+    Trap("AddressSpaceProbePteRaw");
+}
+bool AddressSpaceProtectUserPage(AddressSpace*, u64, u64)
+{
+    Trap("AddressSpaceProtectUserPage");
+}
+PhysAddr AddressSpaceLookupUserFrame(const AddressSpace*, u64)
+{
+    Trap("AddressSpaceLookupUserFrame");
+}
+core::Result<PhysAddr> AllocateFrame()
+{
+    Trap("AllocateFrame");
+}
+core::Result<PhysAddr> AllocateContiguousFrames(u64)
+{
+    Trap("AllocateContiguousFrames");
+}
+void* PhysToVirt(PhysAddr)
+{
+    Trap("PhysToVirt");
+}
 // ElfLoad path (fuzz_elf reuses this TU). Never reached by the
 // pure ElfValidate/ElfForEachPtLoad surface the harness drives.
-core::Result<AddressSpace*> AddressSpaceCreate(u64) { Trap("AddressSpaceCreate"); }
-void AddressSpaceRelease(AddressSpace*) { Trap("AddressSpaceRelease"); }
-u64 FreeFramesCount() { return 0; }
+core::Result<AddressSpace*> AddressSpaceCreate(u64)
+{
+    Trap("AddressSpaceCreate");
+}
+void AddressSpaceRelease(AddressSpace*)
+{
+    Trap("AddressSpaceRelease");
+}
+u64 FreeFramesCount()
+{
+    return 0;
+}
 void FrameAllocatorDrainPools() {}
 void FrameAllocatorSetFailAfter(u64) {}
-u64 FrameAllocatorGetFailAfter() { return 0; }
+u64 FrameAllocatorGetFailAfter()
+{
+    return 0;
+}
 } // namespace duetos::mm
 
 namespace duetos::core
 {
-u64 RandomU64() { Trap("RandomU64"); }
-bool DbgIsEnabled(DbgChannel) { return false; }
+u64 RandomU64()
+{
+    Trap("RandomU64");
+}
+bool DbgIsEnabled(DbgChannel)
+{
+    return false;
+}
 void DbgEmit(DbgChannel, const char*, const char*) {}
 void DbgEmitV(DbgChannel, const char*, const char*, u64) {}
 void DbgEmitS(DbgChannel, const char*, const char*, const char*, const char*) {}
@@ -76,7 +123,10 @@ void ProbeFire(ProbeId, u64, u64) {}
 
 namespace duetos::diag
 {
-::duetos::core::Result<void> FixJournalRecord(FixDetector, const char*, const char*, u64, u64) { return {}; }
+::duetos::core::Result<void> FixJournalRecord(FixDetector, const char*, const char*, u64, u64)
+{
+    return {};
+}
 
 // Code-path ledger flag — kernel-side defaults to 0 (disabled) and
 // the kpath KPATH_* macros in pe_loader.cpp early-out on the load.
@@ -92,23 +142,56 @@ namespace duetos::loader
 // `api-ms-*` import as "no static contract", which routes through
 // the regular DLL miss-logger and is the correct behaviour under
 // fuzz (we're parsing PE bytes, not resolving real api-set names).
-bool ApiSetResolveStatic(const char*, const char**) { return false; }
+bool ApiSetResolveStatic(const char*, const char**)
+{
+    return false;
+}
 } // namespace duetos::loader
 
 namespace duetos::security
 {
-bool Gate(const ImageDescriptor&) { Trap("security::Gate"); }
+bool Gate(const ImageDescriptor&)
+{
+    Trap("security::Gate");
+}
 } // namespace duetos::security
 
 namespace duetos::win32
 {
-bool IsLikelyDataImport(const char*) { Trap("IsLikelyDataImport"); }
-void Win32ProcEnvPopulate(u8*, const char*, u64) { Trap("Win32ProcEnvPopulate"); }
-void Win32Thunks32Populate(u8*) { Trap("Win32Thunks32Populate"); }
-void Win32ThunksPopulate(u8*) { Trap("Win32ThunksPopulate"); }
-bool Win32ThunksLookupCatchAll(u64*) { Trap("Win32ThunksLookupCatchAll"); }
-bool Win32ThunksLookupDataCatchAll(u64*) { Trap("Win32ThunksLookupDataCatchAll"); }
-bool Win32ThunksLookupDataNamed(const char*, u64*) { Trap("Win32ThunksLookupDataNamed"); }
-bool Win32ThunksLookupKind(const char*, const char*, u64*, bool*) { Trap("Win32ThunksLookupKind"); }
-void Win32KuserSharedDataPopulate(u8*) { Trap("Win32KuserSharedDataPopulate"); }
+bool IsLikelyDataImport(const char*)
+{
+    Trap("IsLikelyDataImport");
+}
+void Win32ProcEnvPopulate(u8*, const char*, u64)
+{
+    Trap("Win32ProcEnvPopulate");
+}
+void Win32Thunks32Populate(u8*)
+{
+    Trap("Win32Thunks32Populate");
+}
+void Win32ThunksPopulate(u8*)
+{
+    Trap("Win32ThunksPopulate");
+}
+bool Win32ThunksLookupCatchAll(u64*)
+{
+    Trap("Win32ThunksLookupCatchAll");
+}
+bool Win32ThunksLookupDataCatchAll(u64*)
+{
+    Trap("Win32ThunksLookupDataCatchAll");
+}
+bool Win32ThunksLookupDataNamed(const char*, u64*)
+{
+    Trap("Win32ThunksLookupDataNamed");
+}
+bool Win32ThunksLookupKind(const char*, const char*, u64*, bool*)
+{
+    Trap("Win32ThunksLookupKind");
+}
+void Win32KuserSharedDataPopulate(u8*)
+{
+    Trap("Win32KuserSharedDataPopulate");
+}
 } // namespace duetos::win32

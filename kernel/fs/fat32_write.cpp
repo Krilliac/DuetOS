@@ -38,9 +38,11 @@ namespace internal_write
 // the on-disk mirror stays in sync. Returns true on success.
 bool WriteFatEntry(const Volume& v, u32 cluster, u32 value)
 {
-    const u32 byte_off = cluster * 4;
-    const u32 sec_off = byte_off / v.bytes_per_sector;
-    const u32 byte_in_sec = byte_off % v.bytes_per_sector;
+    // ML-06: 64-bit FAT byte-offset arithmetic so an unmasked cluster can't
+    // wrap cluster*4. Mirrors exfat.cpp:361.
+    const u64 byte_off = u64(cluster) * 4;
+    const u64 sec_off = byte_off / v.bytes_per_sector;
+    const u32 byte_in_sec = static_cast<u32>(byte_off % v.bytes_per_sector);
     for (u32 copy = 0; copy < v.num_fats; ++copy)
     {
         const u64 lba = u64(v.reserved_sectors) + u64(copy) * u64(v.fat_size_sectors) + sec_off;
@@ -79,9 +81,10 @@ u32 AllocateFreeCluster(const Volume& v)
         // the root directory and corrupts later directory walks.
         if (cluster == v.root_cluster)
             continue;
-        const u32 byte_off = cluster * 4;
-        const u32 sec_off = byte_off / v.bytes_per_sector;
-        const u32 byte_in_sec = byte_off % v.bytes_per_sector;
+        // ML-06: 64-bit FAT byte-offset arithmetic (see WriteFatEntry / exfat.cpp).
+        const u64 byte_off = u64(cluster) * 4;
+        const u64 sec_off = byte_off / v.bytes_per_sector;
+        const u32 byte_in_sec = static_cast<u32>(byte_off % v.bytes_per_sector);
         const u64 lba = u64(v.reserved_sectors) + sec_off;
         if (drivers::storage::BlockDeviceRead(v.block_handle, lba, 1, g_scratch) != 0)
             return 0;

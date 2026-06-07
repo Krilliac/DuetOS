@@ -235,6 +235,12 @@ extern constinit u8 g_buckets[kTcbBuckets];
 extern constinit Stats g_stats;
 extern constinit bool g_initialised;
 extern constinit u16 g_ephemeral_cursor;
+// ML-02 (net-0): per-boot secret keying the RFC 6528 ISN generator.
+// Seeded once from the CSPRNG (duetos::core::RandomU64) in tcp::Init;
+// 0 until then. Keeps the ISN off-path-unpredictable while remaining
+// a deterministic function of the 4-tuple so TIME_WAIT old-duplicate
+// monotonicity is preserved across reincarnated connections.
+extern constinit u64 g_isn_secret;
 // NOLINTEND(bugprone-dynamic-static-initializers)
 
 // Helpers shared across the TCP TUs. All assume the caller holds
@@ -244,6 +250,13 @@ u32 MsToTicks(u32 ms);
 bool IpEq(Ipv4Address a, Ipv4Address b);
 bool IpZero(Ipv4Address a);
 u32 BucketHash(u32 iface, Ipv4Address local_ip, u16 local_port, Ipv4Address peer_ip, u16 peer_port);
+// ML-02 (net-0): RFC 6528 keyed ISN. Returns a coarse-clock component
+// (NowTicks >> 6, ~640ms granularity) plus a secret-keyed hash of the
+// connection 4-tuple. The clock term keeps successive connections on
+// the same 4-tuple monotonic enough for TIME_WAIT; the keyed hash
+// makes the ISN unpredictable to an off-path attacker. Defined in
+// tcp.cpp; called from the active-open and passive-open paths.
+u32 GenIsn(Ipv4Address local_ip, u16 local_port, Ipv4Address peer_ip, u16 peer_port);
 TcbId MakeId(u32 idx, u8 generation);
 bool DecodeId(TcbId id, u32* out_idx);
 Tcb* TcbFromId(TcbId id);

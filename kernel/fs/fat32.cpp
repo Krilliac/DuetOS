@@ -208,9 +208,11 @@ void Fat32InvalidateFatCache()
 // bits reserved.
 u32 ReadFatEntry(const Volume& v, u32 cluster)
 {
-    const u32 byte_off = cluster * 4;
-    const u32 sec_off = byte_off / v.bytes_per_sector;
-    const u32 byte_in_sec = byte_off % v.bytes_per_sector;
+    // ML-06: compute the FAT byte offset in 64-bit so a hostile/unmasked
+    // cluster (>= 0x40000000) can't wrap the multiply. Mirrors exfat.cpp:346.
+    const u64 byte_off = u64(cluster) * 4;
+    const u64 sec_off = byte_off / v.bytes_per_sector;
+    const u32 byte_in_sec = static_cast<u32>(byte_off % v.bytes_per_sector);
     const u64 lba = v.reserved_sectors + sec_off;
 
     // Cache hit — same volume's block handle, same FAT sector LBA,

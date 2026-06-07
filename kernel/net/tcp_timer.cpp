@@ -19,6 +19,7 @@
 #include "log/klog.h"
 #include "sched/sched.h"
 #include "time/tick.h"
+#include "util/random.h"
 
 namespace duetos::net::tcp
 {
@@ -228,6 +229,8 @@ void Init()
     for (u32 i = 0; i < kTcbBuckets; ++i)
         internal::g_buckets[i] = internal::kBucketNone;
     internal::g_stats = {};
+    // ML-02 (net-0): seed the per-boot ISN secret from the CSPRNG once.
+    internal::g_isn_secret = ::duetos::core::RandomU64();
     internal::g_initialised = true;
     arch::Sti();
     internal::StartTimerTask();

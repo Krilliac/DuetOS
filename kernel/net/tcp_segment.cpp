@@ -1223,8 +1223,8 @@ void HandleListenSyn(u32 listener_idx, u32 iface_index, const MacAddress& peer_m
     child.peer_mac = peer_mac;
     child.refs = 1;
     child.parent_listener = MakeId(listener_idx, parent.generation);
-    const u64 mix = NowTicks() * 1103515245u + 12345u;
-    child.iss = u32(mix);
+    // ML-02 (net-0): RFC 6528 keyed ISN — see GenIsn (tcp.cpp).
+    child.iss = GenIsn(child.local_ip, child.local_port, child.peer_ip, child.peer_port);
     child.snd_una = child.iss;
     child.snd_nxt = child.iss + 1;
     child.irs = peer_seq;

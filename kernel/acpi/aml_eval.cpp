@@ -381,6 +381,11 @@ struct Arena
 };
 
 constexpr u8 kMaxCallDepth = 12;
+// ML-04: bound TermArg operand recursion (e.g. nested Add(Add(...))).
+// The operand path (binop -> ReadIntArg -> EvalTermArg) consumes no arena
+// and is otherwise limited only by table length, so a crafted DSDT/SSDT
+// can recurse ~300+ bytes/frame and overrun the 64 KiB kernel stack.
+constexpr u16 kMaxExprDepth = 64;
 
 struct EvalState
 {
@@ -393,7 +398,8 @@ struct EvalState
     bool returned = false;
     bool brk = false;
     bool cont = false;
-    u8 depth = 0; // method-call recursion depth
+    u16 expr_depth = 0; // TermArg operand recursion depth (ML-04 guard)
+    u8 depth = 0;       // method-call recursion depth
 };
 
 u64 AsInteger(const AmlValue& v)
@@ -563,9 +569,22 @@ bool IsNameStart(u8 c)
     return c == '\\' || c == '^' || c == 0x2E || c == 0x2F || IsLeadNameChar(c);
 }
 
+// ML-04: RAII depth guard — bumps st.expr_depth on entry and restores it on
+// every exit (EvalTermArg has ~40 return points). Over the cap -> bail false.
+struct ExprDepthGuard
+{
+    EvalState& st;
+    bool ok;
+    explicit ExprDepthGuard(EvalState& s) : st(s), ok(++s.expr_depth <= kMaxExprDepth) {}
+    ~ExprDepthGuard() { --st.expr_depth; }
+};
+
 // EvalTermArg — decode and evaluate one TermArg at p[pos], advance pos.
 bool EvalTermArg(const u8* p, u32 len, u32& pos, EvalState& st, AmlValue& out)
 {
+    ExprDepthGuard guard(st);
+    if (!guard.ok)
+        return false;
     if (pos >= len)
         return false;
     const u8 op = p[pos++];
@@ -697,16 +716,24 @@ bool EvalTermArg(const u8* p, u32 len, u32& pos, EvalState& st, AmlValue& out)
         out.type = AmlType::Package;
         out.pkg_count = 0;
         out.pkg_first = st.arena.used;
-        for (u64 e = 0; e < nelem && pos < pkg_end; ++e)
+        // ML-08: reserve all parent element slots up front so they stay
+        // contiguous. Evaluating an element may recursively allocate arena
+        // slots (a nested Package), which would otherwise push the parent's
+        // later elements to non-contiguous indices and make nodes[pkg_first+idx]
+        // resolve to a nested child's slot in Index/AmlEvaluatePackageInts.
+        const u32 first = st.arena.used;
+        for (u64 e = 0; e < nelem; ++e)
         {
-            const int slot = st.arena.Alloc();
-            if (slot < 0)
+            if (st.arena.Alloc() < 0)
                 break;
+            ++out.pkg_count;
+        }
+        for (u32 e = 0; e < out.pkg_count && pos < pkg_end; ++e)
+        {
             AmlValue ev;
             if (!EvalTermArg(p, pkg_end, pos, st, ev))
                 ev = AmlValue{};
-            st.arena.nodes[slot] = ev;
-            ++out.pkg_count;
+            st.arena.nodes[first + e] = ev;
         }
         pos = pkg_end;
         return true;
@@ -1344,10 +1371,13 @@ void AmlEvalSelfTest()
                             0x70, 0x72, 0x60, 0x01, 0x00, 0x60, 0xA4, 0x60};
     // 4. Return(Index(Package(2){7,9}, 1)) == 9
     static const u8 p4[] = {0xA4, 0x88, 0x12, 0x06, 0x02, 0x0A, 0x07, 0x0A, 0x09, 0x01, 0x00};
+    // ML-08: 5. Return(Index(Package(2){Package(1){5}, 9}, 1)) == 9 — a nested
+    // Package as a non-last element must not shift the parent's later slots.
+    static const u8 p5[] = {0xA4, 0x88, 0x12, 0x09, 0x02, 0x12, 0x04, 0x01, 0x0A, 0x05, 0x0A, 0x09, 0x01, 0x00};
     const Case cases[] = {
         {p1, sizeof(p1), 0, false, 8, "add"},           {p2, sizeof(p2), 1, true, 0x2A, "if-true"},
         {p2, sizeof(p2), 0, true, 0x0D, "if-false"},    {p3, sizeof(p3), 0, false, 5, "while"},
-        {p4, sizeof(p4), 0, false, 9, "package-index"},
+        {p4, sizeof(p4), 0, false, 9, "package-index"}, {p5, sizeof(p5), 0, false, 9, "nested-package-index"},
     };
     for (const Case& c : cases)
     {
@@ -1366,7 +1396,8 @@ void AmlEvalSelfTest()
             core::PanicWithValue("acpi/aml-eval", "method-interpreter selftest failed", r.integer);
         }
     }
-    arch::SerialWrite("[acpi/aml-eval] selftest PASS (5 programs: add/if/while/package + namespace methods=");
+    arch::SerialWrite(
+        "[acpi/aml-eval] selftest PASS (6 programs: add/if/while/package/nested-package + namespace methods=");
     arch::SerialWriteHex(AmlNamespaceCountByKind(AmlObjectKind::Method));
     arch::SerialWrite(")\n");
     KLOG_INFO_V("acpi/aml-eval", "selftest PASS — namespace method count",

@@ -100,6 +100,14 @@ syscall table:
 | async I/O | [`syscall_async_io.cpp`](../../kernel/subsystems/linux/syscall_async_io.cpp) | `io_setup` / `io_submit` and the `io_uring_*` setup/enter surface. |
 | pidfd / splice | [`pidfd_splice.cpp`](../../kernel/subsystems/linux/pidfd_splice.cpp) | `pidfd_open` / `pidfd_send_signal` plus `splice` / `tee` / `vmsplice`. |
 
+**SysV shm isolation.** An `IPC_PRIVATE` (`key == 0`) shared-memory segment
+carries no sharing token, so `shmat` refuses attach from any pid other than
+the creator — a co-resident ELF can no longer brute-force `shmid` 1..8 to map
+another process's private segment. **Keyed** segments stay shareable to any
+process that `shmget`s the same key (correct POSIX). `shmat` also now honors
+`SHM_RDONLY` (a read-only attach no longer gets a writable mapping).
+(Security audit ML-01, CWE-281, 2026-06-07.)
+
 ## vDSO
 
 Every Linux ELF process gets a one-page vDSO blob mapped at a

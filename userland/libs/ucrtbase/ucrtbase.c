@@ -697,6 +697,12 @@ __declspec(dllexport) int snprintf(char* buf, size_t cap, const char* fmt, ...)
     return n;
 }
 
+/* GS-04: sprintf is UNBOUNDED by the C/MSVC contract — its signature
+ * carries no destination size, so the cap below is effectively unlimited
+ * (0x7FFFFFFF) and the caller alone is responsible for sizing buf. An
+ * over-long result overruns the caller's buffer; this is confined to the
+ * guest PE's own address space (no kernel/cross-process reach). Prefer
+ * snprintf (above) for any output whose length is not provably bounded. */
 __declspec(dllexport) int sprintf(char* buf, const char* fmt, ...)
 {
     va_list ap;
@@ -2179,6 +2185,11 @@ __declspec(dllexport) int _wcsnicmp(const _ucrt_wchar_t* a, const _ucrt_wchar_t*
     return 0;
 }
 
+// GS-09: in-place lowercase — like _wcsupr below, MSVC's contract REQUIRES
+// a writable buffer. A read-only/literal string here is a caller bug, not
+// ours; the NULL guard only catches the cheap case. The fault on a
+// non-writable literal is guest-local (this DLL runs in the guest PE's own
+// address space), so there is no kernel/cross-process reach to gate.
 __declspec(dllexport) _ucrt_wchar_t* _wcslwr(_ucrt_wchar_t* s)
 {
     if (s == (_ucrt_wchar_t*)0)

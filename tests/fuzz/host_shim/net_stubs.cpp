@@ -99,3 +99,18 @@ namespace duetos::debug
 // frame fuzzer never runs the self-test, so a no-op satisfies the link.
 void ProbeFire(ProbeId, u64, u64) {}
 } // namespace duetos::debug
+
+namespace duetos::core
+{
+// Kernel CSPRNG. tcp_timer.cpp seeds the ISN secret and stack.cpp's DNS
+// query draws the transaction id / ephemeral source port from this
+// (security hardening ML-02 / ML-03). The fuzzer drives the RX parse path,
+// where randomness quality is irrelevant — a deterministic LCG keeps fuzz
+// crashes reproducible while satisfying the link.
+u64 RandomU64()
+{
+    static u64 s = 0x9E3779B97F4A7C15ull;
+    s = s * 6364136223846793005ull + 1442695040888963407ull;
+    return s;
+}
+} // namespace duetos::core

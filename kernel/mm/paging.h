@@ -284,6 +284,15 @@ PageWalkSnapshot SnapshotPageWalk(u64 virt);
 bool CopyFromUser(void* kernel_dst, const void* user_src, u64 len);
 bool CopyToUser(void* user_dst, const void* kernel_src, u64 len);
 
+// ML-05: export the canonical user-half range predicate that CopyFromUser /
+// CopyToUser already build on, so callers outside this TU (e.g. the debug
+// SYS_BP_INSTALL handler) can refuse a ring-3-supplied kernel VA up front.
+/// True if [addr, addr+len) lies wholly inside the canonical low (user)
+/// half — strict on both ends (no overflow, no boundary crossing). A
+/// `len == 0` range is trivially valid. Pointer accessibility (a present,
+/// correctly-flagged PTE) is a separate check; this is the cheap bounds gate.
+bool IsUserAddressRange(u64 addr, u64 len);
+
 /// Read up to `len` bytes from `kernel_src` into `kernel_dst`,
 /// surviving a #PF on the source. Returns true if all bytes
 /// were copied; false if the load faulted (in which case the

@@ -1658,6 +1658,29 @@ void SyscallDispatch(arch::TrapFrame* frame)
             for (u64 i = 0; i < page_size; ++i)
                 kva[i] = 0;
             mm::AddressSpaceMapUserPage(target->as, va, fp, pte_flags | mm::kPagePresent);
+            // GS-02 (CWE-401): AddressSpaceMapUserPage returns void and can
+            // silently refuse (budget exhausted / region-table grow OOM /
+            // PTE-pool dry — address_space.cpp:408/431/449), leaving `va`
+            // unmapped. The SEC-003 pre-screen at 1631 proved every page in
+            // this range was absent, so re-probing the PTE after the map is
+            // an exact success test: a still-absent PTE means the map was
+            // refused. Without this check the loop leaks `fp` (allocated at
+            // 1641, never recorded in any region table, never reclaimable
+            // until process exit) AND returns kStatusSuccess with an
+            // unmapped base_va — the caller's first touch #PFs and the
+            // process is reaped. Detect, free the orphan frame, unwind the
+            // pages mapped so far this call (same idiom as the OOM leg at
+            // 1651), and surface kStatusNoMemory. Impact is guest-self-only;
+            // this turns a silent leak-plus-false-success into a clean
+            // out-of-memory return.
+            if (mm::AddressSpaceProbePte(target->as, va) == mm::kNullFrame)
+            {
+                mm::FreeFrame(fp);
+                for (u64 j = base_va; j < va; j += page_size)
+                    (void)mm::AddressSpaceUnmapUserPage(target->as, j);
+                frame->rax = kStatusNoMemory;
+                return;
+            }
         }
         if (hint_va == 0)
             target->linux_mmap_cursor = base_va + aligned_size;

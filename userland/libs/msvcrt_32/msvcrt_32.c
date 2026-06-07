@@ -414,6 +414,18 @@ __declspec(dllexport) int ferror(void* fp)
 static unsigned char g_arena[MSVCRT32_ARENA_BYTES];
 static size_t g_arena_cursor = 0;
 
+/* GS-08: realloc needs the old block's size to copy min(old_sz, sz) and
+ * avoid an out-of-bounds read past the original allocation. The bump
+ * allocator carries no per-block header, so record (offset, len) for each
+ * live block in a small side table. Bounded by MSVCRT32_ARENA_BYTES / 16
+ * (the minimum aligned alloc), so it can never overflow before the arena
+ * itself OOMs. Lookup is linear — fine at this scale; the real heap port
+ * replaces the whole arena. */
+#define MSVCRT32_MAX_BLOCKS (MSVCRT32_ARENA_BYTES / 16)
+static size_t g_block_off[MSVCRT32_MAX_BLOCKS];
+static size_t g_block_len[MSVCRT32_MAX_BLOCKS];
+static size_t g_block_count = 0;
+
 __declspec(dllexport) void* malloc(size_t sz)
 {
     if (sz == 0)
@@ -423,12 +435,26 @@ __declspec(dllexport) void* malloc(size_t sz)
     if (g_arena_cursor + sz > sizeof(g_arena))
         return 0;
     void* p = &g_arena[g_arena_cursor];
+    /* GS-08: record this block's offset + length so realloc can bound its
+     * copy to the old size. */
+    if (g_block_count < MSVCRT32_MAX_BLOCKS)
+    {
+        g_block_off[g_block_count] = g_arena_cursor;
+        g_block_len[g_block_count] = sz;
+        ++g_block_count;
+    }
     g_arena_cursor += sz;
     return p;
 }
 
 __declspec(dllexport) void* calloc(size_t n, size_t sz)
 {
+    /* GS-07: overflow guard mirrors ucrtbase.c calloc. Without it,
+     * n * sz can wrap to a small nonzero total, malloc hands back a
+     * tiny block, and the caller writes off the end. Reject before
+     * the multiply. */
+    if (n != 0 && sz > (size_t)-1 / n)
+        return 0;
     size_t total = n * sz;
     void* p = malloc(total);
     if (p)
@@ -449,9 +475,26 @@ __declspec(dllexport) void* realloc(void* p, size_t sz)
     void* np = malloc(sz);
     if (np && p)
     {
-        /* TODO: copy min(old_sz, sz). v0 copies up to sz bytes
-         * assuming sz is small enough to be within the arena. */
-        memcpy(np, p, sz);
+        /* GS-08: copy min(old_sz, sz) so we never read past the original
+         * block. Look the old size up in the side table; if p isn't a
+         * known arena block (foreign pointer), copy nothing — reading
+         * from an unknown provenance would be the OOB read we're
+         * guarding against. */
+        size_t copy = 0;
+        if ((unsigned char*)p >= g_arena && (unsigned char*)p < g_arena + sizeof(g_arena))
+        {
+            size_t off = (size_t)((unsigned char*)p - g_arena);
+            for (size_t i = 0; i < g_block_count; ++i)
+            {
+                if (g_block_off[i] == off)
+                {
+                    copy = g_block_len[i] < sz ? g_block_len[i] : sz;
+                    break;
+                }
+            }
+        }
+        if (copy)
+            memcpy(np, p, copy);
     }
     return np;
 }
