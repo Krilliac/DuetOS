@@ -11,6 +11,7 @@
 #include "drivers/video/notify.h"
 #include "drivers/video/theme.h"
 #include "mm/kheap.h"
+#include "sched/sched.h"
 #include "time/tick.h"
 #include "util/string.h"
 
@@ -38,6 +39,7 @@ constexpr u32 kPanelGap = 6;
 // modulo kSysmonRingDepth.
 struct Sample
 {
+    u8 cpu_pct;        // 0..100, instantaneous CPU-busy over the last sample window
     u8 heap_used_pct;  // 0..100
     u8 frag_score;     // 0..100, clamped from free_chunk_count
     u16 alive_windows; // 0..kMaxWindows (16) but width-friendly
@@ -49,10 +51,17 @@ struct State
     Sample ring[kSysmonRingDepth];
     u32 head;  // next-write index
     u32 count; // populated entries (≤ kSysmonRingDepth)
+    // CPU-busy is published as lifetime tick counters; the
+    // instantaneous percentage for each sample is the delta between
+    // consecutive reads. These hold the previous read so CollectSample
+    // can difference against it. Seeded on first Init.
+    u64 prev_total_ticks;
+    u64 prev_idle_ticks;
+    bool cpu_seeded;
     bool initted;
 };
 
-constinit State g_state = {kWindowInvalid, {}, 0, 0, false};
+constinit State g_state = {kWindowInvalid, {}, 0, 0, 0, 0, false, false};
 
 // -------------------------------------------------------------------
 // Ring helpers — small + testable.
@@ -98,6 +107,29 @@ void RingClear()
 Sample CollectSample()
 {
     Sample s{};
+    // CPU-busy: difference the lifetime tick counters since the last
+    // sample so the bar shows the *instantaneous* load over this
+    // window rather than the since-boot average the tray pill shows.
+    // busy = total - idle, both deltas; pct = busy_delta / total_delta.
+    const auto sched_stats = ::duetos::sched::SchedStatsRead();
+    if (g_state.cpu_seeded)
+    {
+        const u64 total_delta = (sched_stats.total_ticks > g_state.prev_total_ticks)
+                                    ? (sched_stats.total_ticks - g_state.prev_total_ticks)
+                                    : 0;
+        const u64 idle_delta =
+            (sched_stats.idle_ticks > g_state.prev_idle_ticks) ? (sched_stats.idle_ticks - g_state.prev_idle_ticks) : 0;
+        if (total_delta > 0)
+        {
+            const u64 busy_delta = (total_delta > idle_delta) ? (total_delta - idle_delta) : 0;
+            const u64 pct = (busy_delta * 100ULL) / total_delta;
+            s.cpu_pct = static_cast<u8>(pct > 100 ? 100 : pct);
+        }
+    }
+    g_state.prev_total_ticks = sched_stats.total_ticks;
+    g_state.prev_idle_ticks = sched_stats.idle_ticks;
+    g_state.cpu_seeded = true;
+
     const auto h = mm::KernelHeapStatsRead();
     if (h.pool_bytes > 0)
     {
@@ -414,7 +446,9 @@ void RefreshSysmonHeader()
     const Sample latest = (g_state.count > 0) ? RingAt(0) : Sample{};
     const auto h = mm::KernelHeapStatsRead();
     u32 lp = 0;
-    AppendStr(g_header_text, &lp, sizeof(g_header_text), "UPTIME ");
+    AppendStr(g_header_text, &lp, sizeof(g_header_text), "CPU ");
+    AppendU64(g_header_text, &lp, sizeof(g_header_text), latest.cpu_pct);
+    AppendStr(g_header_text, &lp, sizeof(g_header_text), "%  UPTIME ");
     AppendUptime(g_header_text, &lp, sizeof(g_header_text), time::TickCount(), time::TickHz());
     AppendStr(g_header_text, &lp, sizeof(g_header_text), "  WIN ");
     AppendU64(g_header_text, &lp, sizeof(g_header_text), latest.alive_windows);
@@ -485,20 +519,40 @@ void PaintSysmonContent(u32 cx, u32 cy, u32 cw, u32 ch)
     const auto& th = ThemeCurrent();
     const u32 dim = th.banner_fg;
     const u32 axis_rgb = 0x00404858;
+    const u32 trace_cpu = 0x0040A0F0;  // blue — CPU-busy trace (the headline metric)
     const u32 trace_used = 0x0050C050; // green — heap-used trace
     const u32 trace_frag = 0x00E0A040; // amber — fragmentation trace
     FramebufferFillRect(cx, cy, cw, ch, kBg);
 
-    // Two stacked sparkline panels with a caption row above each.
+    // Three stacked sparkline panels with a caption row above each:
+    // CPU on top (the System-Monitor headline metric), then the two
+    // heap panels. The live "CPU NN%" numeric readout lives in the
+    // header label so the graph and a precise value sit together.
     const u32 panels_w = (cw > 2 * kPad) ? cw - 2 * kPad : cw;
-    const u32 panels_h_total = (ch > kPanelGap) ? ch : 0;
-    const u32 panel_h = (panels_h_total > kPanelGap) ? (panels_h_total - kPanelGap) / 2 : 0;
+    const u32 gaps_total = 2 * kPanelGap;
+    const u32 panel_h = (ch > gaps_total) ? (ch - gaps_total) / 3 : 0;
     if (panel_h > 8)
     {
-        const u32 panel_top = cy;
+        // Latest CPU% — also drawn beside the caption so the panel
+        // carries its own numeric readout, not just the header line.
+        const Sample latest = (g_state.count > 0) ? RingAt(0) : Sample{};
+        char cpu_cap[20];
+        u32 cp = 0;
+        AppendStr(cpu_cap, &cp, sizeof(cpu_cap), "CPU ");
+        AppendU64(cpu_cap, &cp, sizeof(cpu_cap), latest.cpu_pct);
+        AppendStr(cpu_cap, &cp, sizeof(cpu_cap), "%");
+        cpu_cap[(cp < sizeof(cpu_cap)) ? cp : sizeof(cpu_cap) - 1] = '\0';
+
+        const u32 cpu_top = cy;
+        FramebufferDrawString(cx + kPad, cpu_top, cpu_cap, dim, kBg);
+        PaintSparkline(cx + kPad, cpu_top + kRowH, panels_w, panel_h - kRowH, trace_cpu, axis_rgb,
+                       [](const Sample& s) -> u8 { return s.cpu_pct; });
+
+        const u32 panel_top = cpu_top + panel_h + kPanelGap;
         FramebufferDrawString(cx + kPad, panel_top, "HEAP USED %", dim, kBg);
         PaintSparkline(cx + kPad, panel_top + kRowH, panels_w, panel_h - kRowH, trace_used, axis_rgb,
                        [](const Sample& s) -> u8 { return s.heap_used_pct; });
+
         const u32 panel2_top = panel_top + panel_h + kPanelGap;
         FramebufferDrawString(cx + kPad, panel2_top, "FRAGMENTATION", dim, kBg);
         PaintSparkline(cx + kPad, panel2_top + kRowH, panels_w, panel_h - kRowH, trace_frag, axis_rgb,
@@ -599,14 +653,17 @@ void SysmonSelfTest()
 
     // Push three known samples and assert newest-first ordering.
     Sample a{};
+    a.cpu_pct = 11;
     a.heap_used_pct = 10;
     a.frag_score = 5;
     a.alive_windows = 1;
     Sample b{};
+    b.cpu_pct = 22;
     b.heap_used_pct = 20;
     b.frag_score = 15;
     b.alive_windows = 2;
     Sample c{};
+    c.cpu_pct = 33;
     c.heap_used_pct = 30;
     c.frag_score = 25;
     c.alive_windows = 3;
@@ -614,9 +671,9 @@ void SysmonSelfTest()
     RingPush(b);
     RingPush(c);
     ok = ok && (g_state.count == 3);
-    ok = ok && (RingAt(0).heap_used_pct == 30);
-    ok = ok && (RingAt(1).heap_used_pct == 20);
-    ok = ok && (RingAt(2).heap_used_pct == 10);
+    ok = ok && (RingAt(0).heap_used_pct == 30 && RingAt(0).cpu_pct == 33);
+    ok = ok && (RingAt(1).heap_used_pct == 20 && RingAt(1).cpu_pct == 22);
+    ok = ok && (RingAt(2).heap_used_pct == 10 && RingAt(2).cpu_pct == 11);
 
     // Wrap: push enough to evict the oldest.
     for (u32 i = 0; i < kSysmonRingDepth; ++i)
