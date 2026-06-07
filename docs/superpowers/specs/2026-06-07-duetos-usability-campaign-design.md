@@ -34,7 +34,7 @@ Driven from the **WSL checkout** (the only place DuetOS builds — `/mnt/c` cann
 
 **Grafts:** Phase 2 uses Approach-B per-app parallelism; Phase 3 uses Approach-C loop-until-dry (≥2 dry rounds) because intermittent bugs are ASLR/scheduling-sensitive — one clean run is not proof.
 
-**Concurrency:** each parallel agent owns an **isolated QEMU instance** (distinct QMP port, serial-log path, screenshot dir), capped at **3–4 concurrent VMs** to avoid thrashing a TCG-only laptop host. "Multiple boots" = concurrent VMs *and* sequential re-boots.
+**Concurrency:** each parallel agent owns an **isolated QEMU instance** (distinct QMP port, serial-log path, screenshot dir, namespaced via `desktop-qmp-session.sh INSTANCE`). Concurrency is **scaled to host capacity, not fixed** — Phase 0 measures `nproc` + free RAM and computes `MAX_VMS = min(nproc-2, floor(free_MiB / per_guest_MiB))` (≈6–8 on the 8c/16t Ryzen 7840HS host). The user has authorized maxing the host, so the orchestrator runs at `MAX_VMS` and gives each guest SMP (up to SMP8) during the extreme-load sweeps. "Multiple boots" = concurrent VMs *and* sequential re-boots.
 
 ## 3. The interaction loop (how an agent "uses" the OS)
 
