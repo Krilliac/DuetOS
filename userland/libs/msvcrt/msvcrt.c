@@ -800,17 +800,41 @@ __declspec(dllexport) int ferror(DUETOS_FILE* f)
 }
 
 /* _aligned_malloc — round up to alignment boundary. */
+/* GS-06 (CWE-763): _aligned_free used to blindly trust the back-pointer
+ * stored at p-8, so a caller that passed a pointer it never got from
+ * _aligned_malloc (or one whose header it corrupted) handed an arbitrary
+ * value straight to SYS_HEAP_FREE. The kernel bounds the free to the
+ * process's own heap, so the blast radius is the guest's OWN freelist —
+ * but we can refuse the obviously-bogus case cheaply. Stash a magic just
+ * below the back-pointer at malloc time and validate it at free time;
+ * a mismatch means "not one of ours", so we drop the free. */
+#define MSVCRT_ALIGNED_MAGIC 0x416C6E4D53564331ULL /* "AlnMSVC1" */
+
 __declspec(dllexport) void* _aligned_malloc(size_t sz, size_t align)
 {
     if (align < 16)
         align = 16;
+    /* GS-05 (CWE-190): require a power-of-two alignment so ~(align - 1) is a
+     * valid mask, and reject a size that would overflow the sz + align + 16
+     * reservation below (e.g. _aligned_malloc(SIZE_MAX, 64)) rather than
+     * wrapping to a tiny block the aligned store would then overrun. */
+    if ((align & (align - 1)) != 0)
+        return 0;
+    if (sz > (size_t)-1 - align - 16)
+        return 0;
     long long p;
-    __asm__ volatile("int $0x80" : "=a"(p) : "a"((long long)11), "D"((long long)(sz + align)) : "memory");
+    /* GS-06: reserve align + 16 extra so a 16-byte header (magic + the
+     * original pointer) always fits below the aligned address, even when
+     * the raw block is already aligned and the rounding gap is zero. */
+    __asm__ volatile("int $0x80" : "=a"(p) : "a"((long long)11), "D"((long long)(sz + align + 16)) : "memory");
     if (p == 0)
         return 0;
-    /* Round up to alignment. */
-    unsigned long long aligned = ((unsigned long long)p + align - 1) & ~(align - 1);
-    /* Store original behind the aligned ptr. */
+    /* GS-06: round (p + 16) up to alignment so there are always >= 16
+     * header bytes between the raw block and the returned pointer. */
+    unsigned long long aligned = ((unsigned long long)p + 16 + align - 1) & ~(align - 1);
+    /* Store the provenance magic at aligned-16 and the original ptr at
+     * aligned-8, so _aligned_free can prove the header is one of ours. */
+    *((unsigned long long*)(aligned - 16)) = MSVCRT_ALIGNED_MAGIC;
     *((unsigned long long*)(aligned - 8)) = (unsigned long long)p;
     return (void*)aligned;
 }
@@ -818,6 +842,12 @@ __declspec(dllexport) void* _aligned_malloc(size_t sz, size_t align)
 __declspec(dllexport) void _aligned_free(void* p)
 {
     if (p == 0)
+        return;
+    /* GS-06: validate the provenance magic before trusting the back-pointer.
+     * A pointer that wasn't produced by _aligned_malloc (or whose header was
+     * clobbered) won't carry the magic — drop the free rather than hand an
+     * unvetted value to SYS_HEAP_FREE. */
+    if (*((unsigned long long*)((unsigned char*)p - 16)) != MSVCRT_ALIGNED_MAGIC)
         return;
     unsigned long long orig = *((unsigned long long*)((unsigned char*)p - 8));
     long long discard;

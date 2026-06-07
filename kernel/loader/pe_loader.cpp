@@ -489,6 +489,31 @@ bool MapSection(const u8* file, const u8* sec, u64 image_base, duetos::mm::Addre
             AddressSpaceMapUserPage(as, page_va, frame, flags);
             guard.Track(page_va);
         }
+        else
+        {
+            // GS-03 (loader-3, CWE-281): two PE sections sharing this
+            // 4 KiB page would otherwise keep only the FIRST section's
+            // protection — the later section's bytes could land in an
+            // executable-or-read-only page (or a writable page get the
+            // execute bit). Re-stamp the shared page with the restrictive
+            // merge of both sections' protections: writable if EITHER is
+            // writable, executable only if BOTH are executable, and force
+            // NX on any writable page. We test the raw PTE bits directly
+            // (kPageWritable / kPageNoExecute don't overlap the frame
+            // address field), so no flag mask is needed. The W^X
+            // invariant in AddressSpaceProtectUserPage rejects RWX.
+            const u64 existing_flags = AddressSpaceProbePteRaw(as, page_va);
+            u64 merged = kPagePresent | kPageUser;
+            // Writable if either section wants write.
+            if ((existing_flags & kPageWritable) || (flags & kPageWritable))
+                merged |= kPageWritable;
+            // Executable only if BOTH sections are executable, i.e. NX is
+            // set on the merged page if EITHER section had NX set, and
+            // any writable page is forced NX.
+            if ((existing_flags & kPageNoExecute) || (flags & kPageNoExecute) || (merged & kPageWritable))
+                merged |= kPageNoExecute;
+            AddressSpaceProtectUserPage(as, page_va, merged);
+        }
     }
     return true;
 }
