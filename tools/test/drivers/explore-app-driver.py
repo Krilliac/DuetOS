@@ -24,6 +24,13 @@ SHOT_DIR = os.environ.get("EXPLORE_SHOT_DIR", "/tmp")
 LAUNCH = os.environ.get("EXPLORE_LAUNCH", "icon")
 ICON_X = int(os.environ.get("EXPLORE_ICON_X", "62"))
 ICON_Y = int(os.environ.get("EXPLORE_ICON_Y", "66"))
+# Optional app-specific interaction: a comma-separated list of QEMU HMP
+# sendkey names typed after the window opens (instead of the default
+# "t,e,s,t"). A literal "shot" token captures an intermediate screendump
+# named typed-<N>.ppm so multi-step flows (e.g. calculator digit entry,
+# settings tab nav) can be graded frame-by-frame. Example:
+#   EXPLORE_KEYS="kp_7,kp_8,shot,kp_9,ret"
+KEYS = os.environ.get("EXPLORE_KEYS", "t,e,s,t")
 
 SCRW, SCRH = 1024, 768
 
@@ -167,7 +174,10 @@ if LAUNCH == "startmenu":
 else:
     launch_icon()
 time.sleep(1.5); shot("open")
-for k in ["t", "e", "s", "t"]:
+shot_seq = 0
+for k in [t for t in KEYS.split(",") if t]:
+    if k == "shot":
+        shot(f"typed-{shot_seq}"); shot_seq += 1; continue
     hmp(f"sendkey {k}"); time.sleep(0.05)
 shot("typed")
 hmp("sendkey ret"); time.sleep(0.5); shot("enter")
