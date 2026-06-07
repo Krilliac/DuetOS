@@ -18,7 +18,7 @@ Window geometry (from boot_bringup.cpp):
   settings_chrome.x=320, y=100, w=380, h=340
   Title bar = 22px. Client area starts at y=122.
   Tab strip right pane: x=320+112=432, y=122..143 (kTabStripH=22)
-  Tab buttons: i*(38+4)+4 from x=432, center_y=122+2+9=133
+  Tab buttons: cover full kTabStripH row, center_y=122+11=133
   Tab i x-center = 432 + 4 + i*(38+4) + 19
   i=0 GEN=455, i=1 DSP=497, i=2 SND=539, i=3 KBD=581, i=4 MSE=623, i=5 DT=665
 """
@@ -48,9 +48,8 @@ READOUT_X      = WIN_X + 112      # 432
 TAB_PAD_X      = 4
 TAB_BTN_W      = 38
 TAB_BTN_GAP    = 4
-TAB_BTN_H      = 18
-TAB_PAD_Y      = 2
-TAB_Y          = CLIENT_Y + TAB_PAD_Y + TAB_BTN_H // 2  # 133
+TAB_STRIP_H    = 22   # kTabStripH — buttons cover the full strip height
+TAB_Y          = CLIENT_Y + TAB_STRIP_H // 2  # 133 — center of full strip
 
 def tab_x(i):
     return READOUT_X + TAB_PAD_X + i * (TAB_BTN_W + TAB_BTN_GAP) + TAB_BTN_W // 2
@@ -83,7 +82,7 @@ def drain():
 def hmp(line):
     s.sendall((line + "\n").encode()); time.sleep(0.04); drain()
 
-cur = [SCRW // 2, SCRH // 2]
+cur = [(SCRW - 12) // 2, (SCRH - 20) // 2]  # match kernel CursorInit: (w-12)/2, (h-20)/2
 
 def move_to(tx, ty):
     tx = max(0, min(SCRW - 1, tx))
