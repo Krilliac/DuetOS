@@ -4385,6 +4385,14 @@ void EmitTask(const Task* t, SchedEnumCb cb, void* cookie, bool is_running)
     info.has_process = (t->process != nullptr);
     for (u32 i = 0; i < sizeof(info._pad); ++i)
         info._pad[i] = 0;
+    // Snapshot the owning AS's mapped user-page count. Safe here
+    // because EmitTask runs under arch::Cli (the SchedEnumerate
+    // bracket), so the AS can't be concurrently torn down; we
+    // read region_count without holding the AS's regions_lock
+    // because we're just sampling a u16 counter for display (not
+    // walking the regions array itself).
+    info.mapped_pages =
+        static_cast<u32>(mm::AddressSpaceUserPageCount((t->process != nullptr) ? t->process->as : nullptr));
     cb(info, cookie);
 }
 

@@ -530,6 +530,10 @@ struct SchedTaskInfo
     bool is_running;  // true if this is the currently-scheduled task
     bool has_process; // true if owner_pid is meaningful (vs. kernel-only)
     u8 _pad[4];
+    // Number of 4 KiB user pages currently mapped in the owning
+    // process's address space, snapshotted at enumerate time.
+    // 0 for kernel-only tasks (no user AS). Multiply by 4 for KiB.
+    u32 mapped_pages;
 };
 
 /// Enumerate every known task — runqueues (Normal + Idle),
