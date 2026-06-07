@@ -115,6 +115,8 @@ void DecodeEntry(const u8* e, DirEntry& out)
     const u16 cl_hi = LeU16(e + 20);
     out.first_cluster = (u32(cl_hi) << 16) | u32(cl_lo);
     out.size_bytes = LeU32(e + 28);
+    out.mtime_time = LeU16(e + 22); // FAT write-time (WrtTime)
+    out.mtime_date = LeU16(e + 24); // FAT write-date (WrtDate)
 }
 
 // Visitor type for the directory-cluster walker. Return true to

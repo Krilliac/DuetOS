@@ -578,8 +578,17 @@ read-only "selector" would be worse than the honest read-only panel).
   (bitwise/sqrt/factorial/memory, all keyboard-driven) is otherwise
   complete and correct. Rubric: *Productivity ▸ calculator ▸ "Decimal
   point input — `1/4 = 0.25`"*.
-- **Evidence:** `docs/usability/findings.md` rows F-010 / F-029 /
-  F-030; campaign screenshots under `docs/usability/screenshots/`.
+- **F-019 (partial) — Files ▸ modified-date column: stamp timestamps
+  in test FAT image.** The column code landed (`mtime_date`/`mtime_time`
+  fields in `fat32::DirEntry`, decoded from FAT WrtDate/WrtTime, rendered
+  right-aligned as `YYYY-MM-DD`). Invisible in CI because
+  `tools/qemu/make-gpt-image.py` writes zero timestamps on synthetic
+  entries. **Unblocked by:** patching `make-gpt-image.py` to call
+  `mtools`' `mcopy -m` or stamp an `MTOOLS_SKIP_CHECK`-safe timestamp
+  (FAT date word from the host clock) on each file it copies in. Small
+  one-file fix; no kernel change needed.
+- **Evidence:** `docs/usability/findings.md` rows F-010 / F-019 /
+  F-029 / F-030; campaign screenshots under `docs/usability/screenshots/`.
 
 ### Linux CVE audit — invariants to honour before the surface lands
 
