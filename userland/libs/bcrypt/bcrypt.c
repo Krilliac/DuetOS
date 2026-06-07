@@ -25,6 +25,7 @@ typedef unsigned short wchar_t16;
 #define STATUS_SUCCESS 0UL
 #define STATUS_NOT_FOUND 0xC0000225UL
 #define STATUS_INVALID_PARAMETER 0xC000000DUL
+#define STATUS_UNSUCCESSFUL 0xC0000001UL
 
 /* SHA-256 reference. ~80 lines. Hash state is stored per handle
  * below so different Win32 threads can hash concurrently without
@@ -1430,20 +1431,15 @@ __declspec(dllexport) NTSTATUS BCryptGetProperty(HANDLE h, const wchar_t16* prop
     return STATUS_NOT_FOUND;
 }
 
-/* BCryptGenRandom — RDRAND/RDSEED-backed if the host CPU
- * supports it; falls back to a SPLITMIX64 counter mixed with
- * SYS_PERF_COUNTER (kernel ticks) so the output is at least
- * unpredictable across reboots. NOT formally cryptographic —
- * real crypto callers should still avoid this entry point — but
- * the previous implementation was a pure deterministic LCG, so
- * any caller that relied on freshness is strictly better off.
- *
- * Mix:
- *   - Seed: g_bcrypt_rand XOR SYS_PERF_COUNTER (per-call).
- *   - Try RDRAND for each byte (gated on CPUID via a probe).
- *   - On RDRAND failure, fall through to SPLITMIX64 + LCG step.
- */
-static unsigned long long g_bcrypt_rand = 0x9E3779B97F4A7C15ULL;
+/* BCryptGenRandom — RDRAND-backed when the host CPU supports it;
+ * otherwise drawn from the kernel CSPRNG via SYS_RANDOM_BYTES (212).
+ * GS-01 (CWE-338): the previous RDRAND-absent fallback was a
+ * non-cryptographic in-DLL SPLITMIX64/LCG; it is replaced by the
+ * kernel's RDSEED/RDRAND-seeded generator so the output is
+ * cryptographically strong on every CPU. If the kernel can't fill the
+ * buffer the call now FAILS (STATUS_UNSUCCESSFUL) rather than silently
+ * degrading to a deterministic counter. */
+#define SYS_RANDOM_BYTES 212
 
 static int has_rdrand(void)
 {
@@ -1482,29 +1478,32 @@ __declspec(dllexport) NTSTATUS BCryptGenRandom(HANDLE alg, unsigned char* buf, U
     if (!buf || len == 0)
         return STATUS_SUCCESS;
 
-    /* Per-call seed mix from kernel performance counter. */
-    long long ticks;
-    __asm__ volatile("int $0x80" : "=a"(ticks) : "a"((long long)13) : "memory");
-    g_bcrypt_rand ^= (unsigned long long)ticks;
-
-    const int rdrand_ok = has_rdrand();
     ULONG i = 0;
-    while (i < len)
+    if (has_rdrand())
     {
-        unsigned long long bits = 0;
-        int got = 0;
-        if (rdrand_ok)
-            got = rdrand_u64(&bits);
-        if (!got)
+        while (i < len)
         {
-            g_bcrypt_rand = g_bcrypt_rand * 6364136223846793005ULL + 1442695040888963407ULL;
-            bits = g_bcrypt_rand;
+            unsigned long long bits = 0;
+            if (!rdrand_u64(&bits))
+                break; /* RDRAND stalled — finish the remainder from the kernel */
+            const ULONG room = len - i;
+            const ULONG take = (room < 8) ? room : 8;
+            for (ULONG j = 0; j < take; ++j)
+                buf[i + j] = (unsigned char)(bits >> (j * 8));
+            i += take;
         }
-        const ULONG room = len - i;
-        const ULONG take = (room < 8) ? room : 8;
-        for (ULONG j = 0; j < take; ++j)
-            buf[i + j] = (unsigned char)(bits >> (j * 8));
-        i += take;
+        if (i == len)
+            return STATUS_SUCCESS;
     }
-    return STATUS_SUCCESS;
+
+    /* GS-01: no RDRAND (or it stalled) — fill the rest from the kernel CSPRNG.
+     * SYS_RANDOM_BYTES returns the count written; a short count means the
+     * kernel rejected the buffer, in which case we fail rather than degrade. */
+    long long got;
+    __asm__ volatile("int $0x80"
+                     : "=a"(got)
+                     : "a"((long long)SYS_RANDOM_BYTES), "D"((long long)(unsigned long long)(buf + i)),
+                       "S"((long long)(unsigned long long)(len - i))
+                     : "memory");
+    return ((unsigned long long)got == (unsigned long long)(len - i)) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
 }

@@ -480,6 +480,15 @@ native,200,SYS_VIRTUAL_FREE,implemented,kernel/syscall/syscall.h::SyscallNumber,
 native,201,SYS_VIRTUAL_PROTECT,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
 native,202,SYS_NAMED_PIPE_CREATE,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
 native,203,SYS_NAMED_PIPE_OPEN,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,204,SYS_DIAG_FAULT_INJECT,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,205,SYS_DLL_LOAD_FROM_PATH,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,206,SYS_COMPAT_QUERY,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,207,SYS_MODULE_BASE_BY_VA,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,208,SYS_WAIT_ON_ADDRESS,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,209,SYS_WAKE_BY_ADDRESS,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,210,SYS_AUDIO_WRITE,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,211,SYS_VK_CALL,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,212,SYS_RANDOM_BYTES,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
 native,512,native_gapfill_0x200,translated,kernel/subsystems/translation/translate.cpp::NativeClockNs,linux-self:NowNs
 native,513,native_gapfill_0x201,translated,kernel/subsystems/translation/translate.cpp::NativeGetRandom,synthetic:xorshift-from-rdtsc
 native,528,native_gapfill_0x210,translated,kernel/subsystems/translation/translate.cpp::NativeWin32Alloc,win32:HeapAlloc

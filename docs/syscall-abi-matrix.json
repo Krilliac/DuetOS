@@ -3849,6 +3849,78 @@
   },
   {
     "abi": "native",
+    "number": 204,
+    "name": "SYS_DIAG_FAULT_INJECT",
+    "status": "implemented",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 205,
+    "name": "SYS_DLL_LOAD_FROM_PATH",
+    "status": "implemented",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 206,
+    "name": "SYS_COMPAT_QUERY",
+    "status": "implemented",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 207,
+    "name": "SYS_MODULE_BASE_BY_VA",
+    "status": "implemented",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 208,
+    "name": "SYS_WAIT_ON_ADDRESS",
+    "status": "implemented",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 209,
+    "name": "SYS_WAKE_BY_ADDRESS",
+    "status": "implemented",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 210,
+    "name": "SYS_AUDIO_WRITE",
+    "status": "implemented",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 211,
+    "name": "SYS_VK_CALL",
+    "status": "implemented",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 212,
+    "name": "SYS_RANDOM_BYTES",
+    "status": "implemented",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
     "number": 512,
     "name": "native_gapfill_0x200",
     "status": "translated",

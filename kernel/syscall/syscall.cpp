@@ -4000,6 +4000,44 @@ void SyscallDispatch(arch::TrapFrame* frame)
         ::duetos::syscall::DoVkCall(frame);
         return;
 
+    case SYS_RANDOM_BYTES:
+    {
+        // GS-01 (CWE-338): hand userland the kernel CSPRNG so bcrypt's
+        // BCryptGenRandom (and any other guest) gets real entropy instead of
+        // an in-DLL LCG on RDRAND-absent CPUs. Ungated — reading entropy is a
+        // universally-available primitive (cf. getrandom(2)), so denying it
+        // protects nothing a native process couldn't already do. The only
+        // security obligation is to write solely into a buffer the caller
+        // owns: validate [buf, len) lies in the user half before filling.
+        constexpr u64 kRandomBytesMax = 1u << 20; // 1 MiB — bound per-call work
+        const u64 user_buf = frame->rdi;
+        u64 len = frame->rsi;
+        if (user_buf == 0 || len == 0)
+        {
+            frame->rax = 0;
+            return;
+        }
+        if (len > kRandomBytesMax)
+            len = kRandomBytesMax;
+        if (!mm::IsUserAddressRange(user_buf, len))
+        {
+            frame->rax = 0;
+            return;
+        }
+        u8 bounce[256];
+        u64 done = 0;
+        while (done < len)
+        {
+            const u64 step = (len - done < sizeof(bounce)) ? (len - done) : sizeof(bounce);
+            RandomFillBytes(bounce, step);
+            if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf + done), bounce, step))
+                break; // partial fill on a faulting buffer — report the short count
+            done += step;
+        }
+        frame->rax = done;
+        return;
+    }
+
     case SYS_DLL_LOAD_FROM_PATH:
     {
         // Real LoadLibraryW from disk: look the name up under

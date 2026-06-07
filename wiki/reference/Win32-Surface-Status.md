@@ -1983,14 +1983,16 @@ SSPI facade. `AcquireCredentialsHandleA/W`,
 
 > **Status:** REAL for the algorithm set most callers want.
 > Backed by the in-tree SHA-256 / SHA-384 / SHA-512 / SHA-1 / MD5 /
-> AES hash + cipher cores. `BCryptGenRandom` draws from **RDRAND**
-> when the CPU advertises it; on RDRAND-absent hardware it falls back
-> to an in-DLL LCG seeded from `SYS_PERF_COUNTER` — **not
-> cryptographic** (audit GS-01 / ulibs-net-2, CWE-338). There is no
-> `SYS_RANDOM_BYTES` syscall today; wiring one (a cap-gated kernel
-> CSPRNG read so the fallback becomes CSPRNG-grade) is the deferred
-> follow-up. Crypto callers needing guaranteed entropy should not rely
-> on this entry point on RDRAND-less CPUs.
+> AES hash + cipher cores. `BCryptGenRandom` (64-bit `bcrypt.dll`)
+> draws from **RDRAND** when the CPU advertises it, otherwise from the
+> kernel CSPRNG via **`SYS_RANDOM_BYTES`** (212) — cryptographically
+> strong on every CPU; it returns `STATUS_UNSUCCESSFUL` if the kernel
+> can't fill the buffer rather than degrading to a counter (audit
+> GS-01 / ulibs-net-2, CWE-338, fixed). **Known limit:** the 32-bit
+> `bcrypt_32.dll` `BCryptGenRandom` is still a v0 in-DLL LCG — wiring
+> it to `SYS_RANDOM_BYTES` is gated on verifying the i386 syscall
+> arg-passing ABI (the `_32` DLLs pass args in `ebx/ecx/edx`, which the
+> native dispatch does not yet remap to `rdi/rsi`).
 
 `BCryptOpenAlgorithmProvider`, `BCryptCloseAlgorithmProvider`,
 `BCryptCreateHash`, `BCryptHashData`, `BCryptFinishHash`,

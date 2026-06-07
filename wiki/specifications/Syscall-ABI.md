@@ -1222,6 +1222,12 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 204 | `SYS_DIAG_FAULT_INJECT` |
 | 205 | `SYS_DLL_LOAD_FROM_PATH` |
 | 206 | `SYS_COMPAT_QUERY` |
+| 207 | `SYS_MODULE_BASE_BY_VA` |
+| 208 | `SYS_WAIT_ON_ADDRESS` |
+| 209 | `SYS_WAKE_BY_ADDRESS` |
+| 210 | `SYS_AUDIO_WRITE` |
+| 211 | `SYS_VK_CALL` |
+| 212 | `SYS_RANDOM_BYTES` |
 <!-- /AUTO:syscall_list -->
 
 ## Native Syscall Argument / Return Reference
@@ -1457,4 +1463,5 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 208 | `SYS_WAIT_ON_ADDRESS` | `rdi` = user VA of the watched word; `rsi` = the expected value (by value; `rdx` = size in bytes (1/2/4/8); `r10` = timeout in ms (0xFFFFFFFF = infinite) | immediately, otherwise it blocks the caller on an address-hashed wait queue u... |
 | 209 | `SYS_WAKE_BY_ADDRESS` | `rdi` = user VA; `rsi` = 0 for WakeByAddressSingle (best effort) | — |
 | 211 | `SYS_VK_CALL` | — | is the per-op return value |
+| 212 | `SYS_RANDOM_BYTES` | `rdi` = user buffer VA; `rsi` = length | the number of bytes written (== length on success, a short count if the copy ... |
 <!-- /AUTO:syscall_args -->
