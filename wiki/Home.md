@@ -91,11 +91,11 @@ DuetOS is licensed under the terms in [`LICENSE`](../LICENSE).
 | Kernel drivers | 14 |
 | Userland DLLs | 60 |
 | DLL exports (approx) | 0 |
-| Test files | 71 |
+| Test files | 72 |
 | STUB markers | 40 |
-| GAP markers | 167 |
+| GAP markers | 173 |
 | Wiki pages | 129 |
-| *Last synced* | *2026-06-07 04:54* |
+| *Last synced* | *2026-06-07 17:14* |
 <!-- /AUTO:stats -->
 
 _Run `docs/sync-wiki.sh sync` to refresh this block from the live tree._

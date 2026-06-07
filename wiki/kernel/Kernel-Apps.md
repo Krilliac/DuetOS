@@ -71,7 +71,7 @@ Apps marked **v0** are scaffolded but missing significant functionality
 
 | App | Source | What it does | Subsystems touched |
 |-----|--------|--------------|--------------------|
-| **files** | [`files.cpp`](../../kernel/apps/files.cpp) | FAT32 browser; double-click `.TXT` opens in notes. | [VFS](../filesystem/VFS.md), [FAT32](../filesystem/FAT32.md) |
+| **files** | [`files.cpp`](../../kernel/apps/files.cpp) | FAT32 browser; double-click `.TXT` opens in notes. Subdirectory descent (Enter / double-click) + parent-ascent (Backspace) + `[`/`]` back-forward history; letters do filename **type-ahead** (not view-switch — those are toolbar buttons); modified-date column from FAT `WrtDate`. | [VFS](../filesystem/VFS.md), [FAT32](../filesystem/FAT32.md) |
 | **hexview** | [`hexview.cpp`](../../kernel/apps/hexview.cpp) | Hex + ASCII viewer for any file the FS exposes. | VFS |
 | **imageview** | [`imageview.cpp`](../../kernel/apps/imageview.cpp) | Decodes PNG / JPEG / BMP / TGA, paints fitted to chrome. | [util image codecs](Util.md) |
 
@@ -80,10 +80,10 @@ Apps marked **v0** are scaffolded but missing significant functionality
 | App | Source | What it does | Subsystems touched |
 |-----|--------|--------------|--------------------|
 | **about** | [`about.cpp`](../../kernel/apps/about.cpp) | CPU model + memory + uptime banner. | ACPI, [arch/rtc](../kernel/Time.md) |
-| **devicemgr** | [`devicemgr.h`](../../kernel/apps/devicemgr.h) | Device tree from PCI + USB enumeration. | [PCI](../drivers/PCIe-Enumeration.md), [USB](../drivers/USB.md) |
+| **devicemgr** | [`devicemgr.h`](../../kernel/apps/devicemgr.h) | Device tree from PCI + USB enumeration. Columns: BUS:DV.F, VID:DID, human-readable NAME (vendor + PCI subclass), STATUS (OK / no-driver), DRIVER (class-inferred — there is no driver-binding registry on the device record yet). | [PCI](../drivers/PCIe-Enumeration.md), [USB](../drivers/USB.md) |
 | **settings** | [`settings.cpp`](../../kernel/apps/settings.cpp) (+ `settings_datetime`, `settings_display`, `settings_keyboard`, `settings_mouse`, `settings_sound`) | Multi-page settings panel: time + display theme + input + audio. | time, gpu, input, audio |
 | **sysmon** | [`sysmon.h`](../../kernel/apps/sysmon.h) | CPU % + memory + per-task histogram. | scheduler stats |
-| **taskman** | [`taskman.h`](../../kernel/apps/taskman.h) | Process / thread lister with kill. | scheduler |
+| **taskman** | [`taskman.h`](../../kernel/apps/taskman.h) | Process / thread lister with kill. Columns: PID/NAME/STATE/CPU%/TICKS/**MEM** (per-process mapped KiB via `mm::AddressSpaceUserPageCount`). Clickable column-header sort with asc/desc `^`/`v` indicator (S-key still cycles). | scheduler, [mm](../mm/Memory-Management.md) |
 | **netstatus** | [`netstatus.h`](../../kernel/apps/netstatus.h) | Live interface stats (RX/TX bytes, link state). | [network stack](../networking/Network-Stack.md) |
 | **firewall** | [`firewall.cpp`](../../kernel/apps/firewall.cpp) | ACL editor for `kernel/net/` rules. | network stack |
 | **terminal** | [`terminal.cpp`](../../kernel/apps/terminal.cpp) / [`terminal.h`](../../kernel/apps/terminal.h) | Windowed terminal emulator — a character-cell grid that mirrors the live kernel shell session byte-for-byte, parses VT/ANSI via `util/vt_parser`, and routes keystrokes back through `ShellFeedChar`/`ShellSubmit`. | kernel shell, [framebuffer console](../subsystems/UI-Toolkit.md), util/vt_parser |
@@ -102,7 +102,7 @@ Apps marked **v0** are scaffolded but missing significant functionality
 |-----|--------|--------------|--------------------|
 | **help** | [`help.h`](../../kernel/apps/help.h) | Bundled help text for every keyboard shortcut. | UI |
 | **notify_center** | [`notify_center.cpp`](../../kernel/apps/notify_center.cpp) | Toast / banner history dashboard. | UI (notify subsystem) |
-| **browser** | [`browser.h`](../../kernel/apps/browser.h) | Web-browser UI **stub** — v0 chrome only, no HTTP. | networking |
+| **browser** | [`browser.h`](../../kernel/apps/browser.h) | Web-browser UI + HTTP fetch/render pipeline. Address bar **auto-focuses on open** (icon + start-menu launch paths) so keyboard URL entry works without a click. | networking |
 
 ## Launching
 
@@ -164,11 +164,22 @@ thread**. That means:
 
 ## Known Limits / GAPs
 
-- **browser** — chrome only, no HTTP backend. The same chrome will host
-  the renderer once the networking + render stack supports it.
-- **calculator** — FP not yet wired; integer-only.
-- **devicemgr / sysmon / taskman** — show the data; admin actions
-  (uninstall, kill priorities, NIC reset) are next-slice work.
+- **browser** — HTTP fetch/render pipeline is live; address bar
+  auto-focuses on open (F-032). Multi-tab and persistent history UI are
+  next-slice work.
+- **calculator** — integer-only (signed `i64`); a decimal-point /
+  fractional engine needs a fixed-point or soft-float rework (filed
+  F-010, see Roadmap). The large-font decimal display does not clip for
+  very long values (F-051, Low). Bitwise/sqrt/factorial/memory are all
+  present but keyboard-only (no on-screen buttons for them).
+- **devicemgr** — NAME/STATUS/DRIVER columns landed (F-026); DRIVER is
+  class-inferred until a real driver-binding registry exists on the
+  device record. Admin actions (uninstall, NIC reset) are next-slice
+  work.
+- **sysmon / taskman** — taskman now shows per-process MEM and supports
+  column-header sort (F-024/F-025); sysmon has a live CPU sparkline
+  (F-022). Per-core CPU% (F-023) still needs a public
+  `SchedStatsReadCpu(cpu)` accessor. Other admin actions are next-slice.
 - **trash** — UI only; restore / empty wired, true deletion deferred
   until the FS write path graduates from FAT32 read-mostly to a full
   read-write profile.

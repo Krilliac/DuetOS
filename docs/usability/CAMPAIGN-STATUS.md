@@ -17,7 +17,8 @@
 | E-6 Exploration | ✅ | 24 apps, **266 screenshots** (`docs/usability/screenshots/`), findings F-010..F-042 |
 | E-6 re-runs | ✅ | 6 quarantined apps re-graded post-F-002; help/about/notify_center confirmed NOT wiring bugs |
 | E-7 Chaos/stress | ✅ | solo + maxchaos + extreme (SMP8) + loop; core robust; found F-050 (timer livelock) + F-040 |
-| E-8 fixes (5 done) | ✅/partial | see below |
+| E-8 fixes | ✅ | 11 fixed/extended + 4 filed + 1 corrected — see below |
+| E-9 Synthesis | ✅ | `docs/usability/2026-06-07-evaluation.md` written; Kernel-Apps + Design-Decisions + Roadmap synced; DoD scan clean (no stale refs, final boot rc=0); PR opened |
 
 ### E-8 fixes landed (verified by screenshot + boot rc=0 + no self-test regression)
 - **F-002** keyboard input-drop — VBox auto-repeat suppressor firing on every host → gated to VBox (`58cef239`)
@@ -31,33 +32,37 @@ combined chaos (rc=0, 0 panics); graceful OOM. The one real crash (F-050) is
 intermittent, load-induced, caught by the recursion guard, and filed with a fix recipe.
 Four real usability/correctness fixes landed; each app "flaw" narrated a deeper defect.
 
-## Remaining (resume here)
+## E-8/E-9 outcome (2026-06-07)
 
-**E-8 — remaining app fixes** (one root-cause investigation each; fix or extend-to-bar
-per the rubric, re-verify every signal; the 5 done above are the pattern to follow):
-- **High:** F-018 files type-ahead eaten by single-key shortcuts (note: a design call —
-  toolbar buttons already cover the view-switches the letters duplicate) · F-028 settings
-  tab-click doesn't switch panels (hit-test; number-keys already work) · F-029 display
-  panel read-only / no resolution selector (bigger — needs mode-setting; consider filing) ·
-  F-030 sound no volume slider (bigger — needs HDA volume; consider filing).
-- **Medium:** F-010/011/012 calculator (no decimal button, hex/binary display, no CE —
-  CHECK FIRST whether it's deliberately a programmer's calc before "fixing") · F-017
-  charmap (no font selector / no glyph name) · F-019 files (no back/fwd, no date col,
-  subdir-descent stub) · F-020 trash (no restore/empty actions) · F-021 hexview (no path
-  input) · F-024/025 taskman (no per-proc mem, no col-sort) · F-026 devicemgr (no
-  status/driver/names) · F-031 settings (no NTP/button-swap/persist) · F-032 browser
-  (no address-bar autofocus) · F-036 terminal prompt-echo artifact.
-- **Low:** F-001 wm window-create sentinel · F-014/015 notes dialog/filename · F-023
-  sysmon per-core (needs a public `SchedStatsReadCpu` accessor) · F-027 devicemgr tree ·
-  F-033 browser taskbar button · F-035 netstatus header clip · F-037 terminal Ctrl+C ·
-  F-041 help scrollbar · F-042 notify dismiss.
-- **Anti-bloat guard:** extend only to a cited rubric bar; file (Roadmap) anything
-  needing a real refactor (like F-050 was).
+**Fixed/extended (10 this phase + F-002/016/022/034 prior = 11 total apps touched):**
+F-018 files type-ahead · F-019 files subdir-descent+back/fwd+date · F-024 taskman
+per-proc MEM · F-025 taskman column sort · F-026 devicemgr name/status/driver ·
+F-028 settings tab-click · F-032 browser autofocus (+ F-022 sysmon CPU, F-016
+charmap, F-034 netstatus, F-002 keyboard from the prior session).
 
-**E-9 — synthesis:** write `docs/usability/2026-06-07-evaluation.md` (per-surface grade
-table + findings + what-fixed/extended/filed + coverage map + comparison verdicts);
-flip any `wiki/reference/Win32-Surface-Status.md` rows; amend subsystem wiki; run the
-Definition-of-Done scan; finish the branch (PR + CI green).
+**Filed (need a subsystem that doesn't exist — concrete unblocker in Roadmap):**
+F-010 calc decimals (float engine) · F-029 display resolution (GPU modeset) ·
+F-030 sound volume (audio gain stage) · F-019-date-subpart (image-builder
+timestamps) · F-050 timer livelock (prior).
+
+**Corrected:** F-011 (misread — display IS decimal) → surfaced F-051 (Low, calc
+display overflow, open).
+
+**Still open (lower-priority, recorded not fixed):** F-001, F-012, F-013, F-014,
+F-015, F-017, F-020, F-021, F-023, F-027, F-031, F-033, F-035, F-036, F-037,
+F-041, F-042, F-051 — none block the daily-driver path; see the evaluation §3.
+
+**Report:** `docs/usability/2026-06-07-evaluation.md`. **Win32-Surface-Status:**
+no rows flipped (all fixes were native apps / kernel subsystems, not the PE
+surface). **DoD scan:** no stale wiki refs, final boot rc=0, STUB/GAP honest
+(F-019 removed the descent stub).
+
+## Remaining (if a future session continues)
+
+The open findings above are the backlog (mostly Low cosmetic / observability).
+**Anti-bloat guard still applies:** extend only to a cited rubric bar; file
+(Roadmap) anything needing a real refactor. F-036 (terminal echo) likely already
+resolved by the F-002 keyboard fix — needs a quick re-verify pass.
 
 ## How to resume
 Everything is committed on `claude/usability-campaign`. The WSL build checkout

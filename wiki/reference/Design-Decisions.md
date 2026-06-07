@@ -10867,3 +10867,49 @@ millisecond RED→GREEN unit test under ASan/UBSan instead of relying on the
 in `ring3_smoke.cpp`), so QEMU CI never exercises them. The `__declspec`-laden
 DLL entry points stay thin buffer-contract wrappers that the freestanding core
 can't carry.
+
+## 2026-06-07 — Usability campaign E-8: extend-to-the-cited-bar, file the rest, don't fake
+
+The usability campaign's fix phase (E-8) followed one rule: **extend an app
+only to the specific peer-OS/Win32 rubric bar a finding cites, and file (don't
+fake) anything that needs a subsystem we don't have.** The concrete decisions:
+
+- **Files: bare letters do filename type-ahead, not view-switching (F-018).**
+  Peer file managers (Haiku Tracker, Windows Explorer) treat letters as
+  type-ahead; DuetOS's Files ate them as single-key view-switch shortcuts
+  (`t`→Trash, etc.). **Rules out** keeping the bare-letter shortcuts — the
+  on-screen toolbar already covers every view switch, so the letters are free
+  for type-ahead. Destructive actions with no toolbar twin (delete, empty
+  trash) moved to **Delete / F5**, not deleted outright. Subdir descent
+  (F-019) then fell out almost free because `Fat32ListDirByCluster` already
+  accepted an arbitrary start cluster — only path/history *state* was missing.
+
+- **taskman per-process memory comes from a new `mm` public accessor, not a
+  struct reach-in (F-024).** `AddressSpaceUserPageCount(as)` was added to
+  `kernel/mm/address_space.h` and surfaced through `SchedTaskInfo.mapped_pages`.
+  **Rules out** having the app read the private per-process region table
+  directly — that would violate the subsystem boundary (an app must go through
+  a public subsystem API), the same discipline the per-core CPU% gap (F-023)
+  is still blocked on (it needs `SchedStatsReadCpu(cpu)` rather than walking
+  private per-CPU sched state).
+
+- **devicemgr STATUS/DRIVER are class-inferred, honestly labelled (F-026).**
+  There is no driver-binding registry on the PCI device record, so the DRIVER
+  column maps PCI class→known-driver-name and STATUS reads "no driver" for
+  unclaimed classes. **Rules out** inventing a per-device "bound driver" field
+  the kernel doesn't actually track — the wiki + finding say "class-inferred"
+  so the value is never mistaken for a real binding.
+
+- **Filed, not faked: resolution selector (F-029), volume slider (F-030),
+  decimal calculator (F-010).** Each needs a subsystem that doesn't exist
+  (runtime GPU modeset / audio gain stage / fixed-point arithmetic engine).
+  **Rules out** shipping a non-functional "selector"/"slider" or a truncating
+  pseudo-decimal — a fake control that silently does nothing is worse than an
+  honest read-only panel. Filed to Roadmap with the concrete unblocker each.
+
+- **A misread finding gets corrected, and the act of disproving it gets its own
+  finding.** F-011 ("display is opaque hex") was wrong — the calculator's main
+  display *is* decimal; the grader mistook the deliberate hex/bin/oct preview
+  band. Capturing the digit-entry screenshot that disproved it surfaced a *real*
+  defect (F-051: the large-font display overflows the window for long numbers).
+  Discovery compounds; the ledger records both the correction and the new bug.
