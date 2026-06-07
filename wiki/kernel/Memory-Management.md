@@ -153,6 +153,16 @@ task's address space differs from the current one. Userland mappings
 live in the low half; kernel mappings live in the high half and stay
 identical across every address space.
 
+`SYS_VM_ALLOCATE` (the self-path needs no capability) **probes each
+target page with `AddressSpaceProbePte` before mapping** and returns
+`kStatusConflictingAddresses` if any is already present — a guest can no
+longer drive `AddressSpaceMapUserPage`'s present-PTE `PanicAs` into a
+full kernel halt by allocating at an already-mapped hint address. On a
+mid-loop allocation failure it also **unwinds the pages already mapped**
+(mirroring the Linux `DoMmap` path) so a partial OOM neither leaks
+frames nor leaves the cursor poised to re-panic. (Security audit
+SEC-003, CWE-617/459, 2026-06-07.)
+
 ## Kernel Stack Guard Pages
 
 Every task has an unmapped low-edge guard page on its kernel stack.

@@ -150,6 +150,8 @@ i32 SectionCreate(u64 size_bytes, u32 page_protect)
     s.num_pages = num_pages;
     s.refcount = 1; // new handle
     s.page_protect = page_protect;
+    s.has_writable_view = false;
+    s.has_executable_view = false;
     return static_cast<i32>(idx);
 }
 
@@ -189,6 +191,8 @@ void SectionRelease(u32 idx)
         s.in_use = false;
         s.num_pages = 0;
         s.page_protect = 0;
+        s.has_writable_view = false;
+        s.has_executable_view = false;
     }
 }
 
@@ -204,6 +208,28 @@ bool SectionMap(u32 idx, mm::AddressSpace* target_as, u64 base_va, u32 view_prot
     if (!s.in_use)
     {
         KLOG_WARN_V("subsystems/win32/section", "SectionMap: idx not in use, idx=", static_cast<u64>(idx));
+        return false;
+    }
+    // SEC-004
+    // W^X across the whole section's view history. ProtectToPteFlags downgrades
+    // PAGE_EXECUTE_READWRITE to RW+NX for a single view, but it cannot see the
+    // other views of the same frames. Reject a view that would grant EXECUTE on
+    // a section that has ever had a writable view, and vice versa, so the
+    // write-here / execute-there aliasing bypass can never form.
+    constexpr u32 PAGE_READWRITE = 0x04;
+    constexpr u32 PAGE_EXECUTE = 0x10;
+    constexpr u32 PAGE_EXECUTE_READ = 0x20;
+    constexpr u32 PAGE_EXECUTE_READWRITE = 0x40;
+    constexpr u32 PAGE_WRITECOPY = 0x08;
+    const bool wants_write = (view_protect == PAGE_READWRITE) || (view_protect == PAGE_WRITECOPY) ||
+                             (view_protect == PAGE_EXECUTE_READWRITE);
+    const bool wants_exec = (view_protect == PAGE_EXECUTE) || (view_protect == PAGE_EXECUTE_READ) ||
+                            (view_protect == PAGE_EXECUTE_READWRITE);
+    if ((wants_exec && s.has_writable_view) || (wants_write && s.has_executable_view))
+    {
+        KLOG_WARN_V("subsystems/win32/section",
+                    "SectionMap: W^X — refusing aliased writable+executable view; view_protect=",
+                    static_cast<u64>(view_protect));
         return false;
     }
     const u64 flags = ProtectToPteFlags(view_protect);
@@ -223,6 +249,15 @@ bool SectionMap(u32 idx, mm::AddressSpace* target_as, u64 base_va, u32 view_prot
             return false;
         }
     }
+    // SEC-004
+    // Record this view's W/X disposition only after the whole map committed,
+    // so a rolled-back partial map never poisons the section's history. The
+    // installed PTE is RW+NX whenever ProtectToPteFlags saw a writable request
+    // (incl. the RWX downgrade), so track has_writable_view off wants_write.
+    if (wants_write)
+        s.has_writable_view = true;
+    if (wants_exec && !wants_write)
+        s.has_executable_view = true;
     return true;
 }
 

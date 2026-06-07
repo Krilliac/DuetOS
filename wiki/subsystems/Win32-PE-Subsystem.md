@@ -220,6 +220,16 @@ The kernel cap gates are the only authority. See
 > do something a native DuetOS process with the same caps could
 > not? If yes, the gate is wrong, not the workload.
 
+**Heap free-list hardening.** The Win32 user-heap arena is
+guest-writable, so its in-band `next` pointers are attacker-controlled.
+`Win32HeapAllocOnBinding` (`subsystems/win32/heap.cpp`) now validates
+every `cur`/`prev` block link against `[base_va, heap_end - header)` and
+8-byte alignment before dereferencing — the same bound `…FreeOnBinding`
+already used — and `PeekU64`/`PokeU64` reject any access that would cross
+a page boundary, so a forged link can no longer spill an 8-byte read/
+write into the adjacent kernel direct-map frame. (Security audit SEC-005,
+CWE-787, 2026-06-07.)
+
 ## Related Pages
 
 - [PE Loader](PE-Loader.md)

@@ -46,6 +46,13 @@ constexpr u64 kMinSplitPayload = 16;
 u64 PeekU64(const duetos::core::Process* proc, u64 user_va)
 {
     const u64 page_va = user_va & ~0xFFFULL;
+    // SEC-005: a guest-writable in-band next pointer can aim `user_va` 1..7
+    // bytes below a mapped page top; the 8-byte loop below would then spill
+    // into the adjacent direct-map frame. Reject any access whose 8 bytes
+    // would cross the page boundary. Legitimate headers are 8-byte-aligned
+    // and live well inside a page, so this never fires on valid input.
+    if ((user_va - page_va) > duetos::mm::kPageSize - 8)
+        return 0;
     const duetos::mm::PhysAddr frame = duetos::mm::AddressSpaceLookupUserFrame(proc->as, page_va);
     if (frame == duetos::mm::kNullFrame)
         return 0;
@@ -60,6 +67,10 @@ u64 PeekU64(const duetos::core::Process* proc, u64 user_va)
 void PokeU64(duetos::core::Process* proc, u64 user_va, u64 value)
 {
     const u64 page_va = user_va & ~0xFFFULL;
+    // SEC-005: mirror the PeekU64 guard — a write that crosses the page top
+    // would corrupt the adjacent direct-map frame. Reject it.
+    if ((user_va - page_va) > duetos::mm::kPageSize - 8)
+        return;
     const duetos::mm::PhysAddr frame = duetos::mm::AddressSpaceLookupUserFrame(proc->as, page_va);
     if (frame == duetos::mm::kNullFrame)
         return;
@@ -153,6 +164,18 @@ u64 Win32HeapAllocOnBinding(duetos::core::Process* proc, const Win32HeapBinding&
     u64 cur = *b.free_head_ptr;
     while (cur != 0)
     {
+        // SEC-005: `cur` is read from the guest-writable in-band next field,
+        // so validate it the same way Win32HeapFreeOnBinding bounds block_hdr
+        // before dereferencing — header must lie in [base_va, base_va +
+        // pages*kPageSize) with room for the 16-byte header, and be 8-byte
+        // aligned (all real headers are). An out-of-range link terminates the
+        // walk (heap-exhaust path) rather than spilling a PeekU64/PokeU64 into
+        // an unrelated frame. PeekU64/PokeU64 still self-guard page crossings.
+        const u64 heap_end = b.base_va + b.pages * duetos::mm::kPageSize;
+        if (cur < b.base_va || cur > heap_end - kHeaderSize || (cur & 7) != 0)
+        {
+            break;
+        }
         const u64 block_size = PeekU64(proc, cur + 0);
         const u64 block_next = PeekU64(proc, cur + 8);
         if (block_size >= needed && !duetos::subsystems::win32::custom::IsQuarantined(proc, cur + kHeaderSize))

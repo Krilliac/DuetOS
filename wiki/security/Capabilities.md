@@ -38,10 +38,21 @@ the only privilege model.
   unprivileged syscalls (`SYS_GETPID`, `SYS_YIELD`, `SYS_EXIT`)
   succeed; everything observable from outside the process AS denies.
 - **`CapSetTrusted`** — every defined cap. For kernel-shipped userland
-  fixtures and trusted system processes.
+  fixtures and trusted system processes **only** — never for an
+  operator-chosen binary (it includes `kCapDebug` = cross-process VM
+  read/write + `SetContext`, and `kCapDiag` = `SYS_DIAG_FAULT_INJECT`, a
+  guest-reachable kernel panic).
 
 A real process between these extremes uses `CapSetEmpty` plus
 selectively-granted bits. Caps are ABI: numbers never change.
+
+> **User-launched binaries get least privilege.** The Files app and the
+> shell `peexec` command launch arbitrary user-chosen `.exe`/`.elf`
+> files — these are **untrusted** and now spawn with `CapSetEmpty` plus
+> only `kCapSerialConsole + kCapFsRead + kCapSpawnThread`, into the
+> sandbox ramfs root with sandbox-class budgets (modelled on the browser
+> broker's `DeriveChildCaps`). They no longer inherit `CapSetTrusted`.
+> (Security audit SEC-008, CWE-250/269, 2026-06-07.)
 
 ## Why `kCapNone = 0` is a Sentinel
 

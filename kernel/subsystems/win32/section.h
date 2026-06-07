@@ -65,6 +65,17 @@ struct Section
     util::SatU32 refcount;
     u32 page_protect;     // Win32 PAGE_* on creation
     mm::PhysAddr* frames; // owned, length = num_pages, 0 entries are unallocated
+    // SEC-004
+    // Sticky W^X history across ALL views of this section. A PE could map the
+    // same section RW at va1 and RX at va2, write shellcode through va1, then
+    // execute it through va2 — classic W^X bypass that no per-view PTE check
+    // catches (each view is individually W^X-clean). Once a writable view has
+    // ever existed, no executable view is allowed for the life of the section
+    // (and vice versa). The flags are sticky (never cleared on unmap): the
+    // frames may still hold attacker-controlled bytes after a writable view is
+    // torn down, so a later executable view is just as dangerous.
+    bool has_writable_view;
+    bool has_executable_view;
 };
 
 // Returns the index of a freshly-created section, or -1 on

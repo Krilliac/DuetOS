@@ -263,6 +263,21 @@ void LoadSegment(LoadCtx& ctx, const ElfSegment& seg)
     // Derive page-level flags from the ELF PF_* bits. Always set
     // Present + User. Writable iff PF_W. Non-exec iff !PF_X — EFER.NXE
     // is on so the bit is honoured.
+    // SEC-006: reject a PF_W|PF_X (W+X) PT_LOAD segment gracefully.
+    // W^X is enforced centrally in AddressSpaceMapUserPage (PanicAs on
+    // writable+!NX), so a hostile or malformed image declaring a
+    // writable+executable segment would HALT the kernel (DoS) rather
+    // than mapping shellcode-friendly RWX. Bail the same way the span
+    // guard above does — fail the load (ctx.ok=false) before any page
+    // reaches MapUserPage — so a bad image is reaped, not the box.
+    if ((seg.flags & kElfPfW) && (seg.flags & kElfPfX))
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Loader, "elf-loader",
+                     "PT_LOAD segment requests W+X (W^X violation) — rejecting load", seg.flags);
+        ctx.ok = false;
+        return;
+    }
+
     u64 flags = kPagePresent | kPageUser;
     if (seg.flags & kElfPfW)
         flags |= kPageWritable;

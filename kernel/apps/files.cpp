@@ -34,6 +34,28 @@ namespace duetos::apps::files
 namespace
 {
 
+// SEC-008: least-privilege cap set for USER-CHOSEN .exe/.elf launches.
+// An arbitrary file the operator double-clicks is UNTRUSTED — it must NOT
+// inherit CapSetTrusted() (which sets every bit, incl. kCapDebug =
+// cross-proc VM r/w + SetContext, and kCapDiag = SYS_DIAG_FAULT_INJECT, a
+// guest-reachable kernel panic). Mirrors the browser broker's intended
+// model (kernel/apps/browser/priv_exec.cpp::DeriveChildCaps): grant only
+// the minimum a console/GUI binary needs and NEVER kCapDebug/kCapDiag/
+// kCapNetAdmin/kCapNet/kCapInput/kCapFsWrite.
+inline duetos::core::CapSet UserLaunchCaps()
+{
+    duetos::core::CapSet caps = duetos::core::CapSetEmpty();
+    duetos::core::CapSetAdd(caps, duetos::core::kCapSerialConsole);
+    duetos::core::CapSetAdd(caps, duetos::core::kCapFsRead);
+    duetos::core::CapSetAdd(caps, duetos::core::kCapSpawnThread);
+    return caps;
+}
+
+// SEC-008: PE import preload pulls in ~44 DLLs, so kFrameBudgetSandbox (8)
+// is too tight — grant bounded headroom (same rationale as priv_exec's
+// kBrokeredSpawnFrames) while staying far below the trusted region table.
+constexpr duetos::u64 kUserLaunchFrames = 512;
+
 constexpr u32 kMaxDepth = 8;
 constexpr u32 kFatMax = 64;
 constexpr u32 kGlyphW = 8;
@@ -973,13 +995,12 @@ bool MaybeLaunchRamfsExe(const duetos::fs::RamfsNode* sel)
         tag[ti++] = sel->name[ni++];
     }
     tag[ti] = '\0';
-    const duetos::u64 pid =
-        is_exe ? duetos::core::SpawnPeFile(tag, sel->file_bytes, sel->file_size, duetos::core::CapSetTrusted(),
-                                           duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
-                                           duetos::core::kTickBudgetTrusted)
-               : duetos::core::SpawnElfFile(tag, sel->file_bytes, sel->file_size, duetos::core::CapSetTrusted(),
-                                            duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
-                                            duetos::core::kTickBudgetTrusted);
+    const duetos::u64 pid = is_exe ? duetos::core::SpawnPeFile(tag, sel->file_bytes, sel->file_size, UserLaunchCaps(),
+                                                               duetos::fs::RamfsSandboxRoot(), kUserLaunchFrames,
+                                                               duetos::core::kTickBudgetSandbox)
+                                   : duetos::core::SpawnElfFile(tag, sel->file_bytes, sel->file_size, UserLaunchCaps(),
+                                                                duetos::fs::RamfsSandboxRoot(), kUserLaunchFrames,
+                                                                duetos::core::kTickBudgetSandbox);
     duetos::arch::SerialWrite("[files] launch ");
     duetos::arch::SerialWrite(is_exe ? "PE" : "ELF");
     duetos::arch::SerialWrite(" name=");
@@ -1050,12 +1071,11 @@ bool MaybeLaunchFat32Entry(const duetos::fs::fat32::DirEntry& e)
         tag[ti++] = e.name[i];
     tag[ti] = '\0';
     const duetos::u64 pid =
-        is_exe ? duetos::core::SpawnPeFile(tag, staging, e.size_bytes, duetos::core::CapSetTrusted(),
-                                           duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
-                                           duetos::core::kTickBudgetTrusted)
-               : duetos::core::SpawnElfFile(tag, staging, e.size_bytes, duetos::core::CapSetTrusted(),
-                                            duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
-                                            duetos::core::kTickBudgetTrusted);
+        is_exe
+            ? duetos::core::SpawnPeFile(tag, staging, e.size_bytes, UserLaunchCaps(), duetos::fs::RamfsSandboxRoot(),
+                                        kUserLaunchFrames, duetos::core::kTickBudgetSandbox)
+            : duetos::core::SpawnElfFile(tag, staging, e.size_bytes, UserLaunchCaps(), duetos::fs::RamfsSandboxRoot(),
+                                         kUserLaunchFrames, duetos::core::kTickBudgetSandbox);
     // SpawnPeFile/SpawnElfFile copies the bytes into the new
     // process's AS during PeLoad / ElfLoad, so the staging buffer
     // can be freed immediately after the call returns regardless

@@ -33,6 +33,29 @@ if (Writable(flags) && !NoExecute(flags)) {
 }
 ```
 
+## Protect-time and aliasing gates
+
+The map-time panic is necessary but not sufficient: a guest can reach
+write+execute *without* a single W+X map by (a) creating two views of
+the same frames — one writable, one executable (Win32 section aliasing)
+— or (b) flipping a mapped page's protection from RW to RX afterwards
+via `NtProtectVirtualMemory`. Both are now closed:
+
+- **Section views** — `Section` tracks sticky `has_writable_view` /
+  `has_executable_view` flags; `SectionMap`
+  (`subsystems/win32/section.cpp`) refuses an executable view of a
+  section that has (or had) a writable view, and vice-versa. (SEC-004,
+  CWE-693.)
+- **mprotect transitions** — `AddressSpaceProtectUserPage`
+  (`mm/address_space.cpp`) refuses to add EXECUTE to a currently-writable
+  user page (the W→X transition), keeping the invariant at protect time
+  as well as map time. (SEC-004.)
+- **ELF loader** — a `PT_LOAD` segment declaring both `PF_W` and `PF_X`
+  is rejected as a load error *before* any page reaches the map-time
+  gate, so a hostile image fails gracefully instead of tripping the
+  panic (DoS). (SEC-006, CWE-272. The PE/DLL loaders already funnel
+  through the map-time gate.)
+
 ## kPageGlobal Refused on User Pages
 
 `kPageGlobal` (PTE bit 8) keeps a mapping in the TLB across CR3
