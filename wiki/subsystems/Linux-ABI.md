@@ -76,6 +76,14 @@ kernel authority. The kernel's `Process::caps` is the source of
 truth. See [Subsystem Isolation](../kernel/Subsystem-Isolation.md)
 and [Capabilities](../security/Capabilities.md).
 
+**Cross-process signal delivery is cap-gated.** `LinuxSignalDeliver`
+(`syscall_sig.cpp`) — the chokepoint for `kill`/`tgkill`/`tkill`/
+`pidfd_send_signal` — requires `kCapDebug` when the target is not the
+caller itself, mirroring the native `SYS_PROCESS_TERMINATE` gate. A
+sandboxed ELF cannot send a fatal signal to an arbitrary pid; self-
+signalling (`raise`/`abort`) stays ungated. (Security audit SEC-001,
+CWE-862, 2026-06-07.)
+
 ## Feature Families
 
 Beyond the file/process/memory/socket core, the subsystem ships

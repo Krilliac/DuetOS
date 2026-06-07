@@ -1620,11 +1620,36 @@ void SyscallDispatch(arch::TrapFrame* frame)
             frame->rax = kStatusInvalidParameter;
             return;
         }
+        // SEC-003: Reject any range that overlaps an already-mapped page
+        // BEFORE installing a single frame. AddressSpaceMapUserPage PanicAs
+        // on a present PTE (address_space.cpp), so without this probe a
+        // caller can drive a kernel halt by re-allocating over a live page
+        // — including a Win32 borrowed-section view whose present PTE is not
+        // in the regions ledger. Probe the ACTUAL PTE (AddressSpaceProbePte
+        // walks the page tables) rather than the ledger-only lookup so every
+        // page that would make MapUserPage panic is caught here.
+        for (u64 va = base_va; va < base_va + aligned_size; va += page_size)
+        {
+            if (mm::AddressSpaceProbePte(target->as, va) != mm::kNullFrame)
+            {
+                frame->rax = kStatusConflictingAddresses;
+                return;
+            }
+        }
         for (u64 va = base_va; va < base_va + aligned_size; va += page_size)
         {
             const mm::PhysAddr fp = mm::AllocateFrame().value_or(mm::kNullFrame);
             if (fp == mm::kNullFrame)
             {
+                // SEC-003: Unwind the pages mapped so far. Without this the
+                // installed frames stay mapped at [base_va, va) AND the
+                // cursor below is not advanced, so the NEXT zero-hint alloc
+                // hands out the same base and AddressSpaceMapUserPage panics
+                // on "virt already mapped" — an unprivileged caller turns OOM
+                // into a kernel halt. Mirrors the Linux DoMmap unwind idiom
+                // (kernel/subsystems/linux/syscall_mm.cpp).
+                for (u64 j = base_va; j < va; j += page_size)
+                    (void)mm::AddressSpaceUnmapUserPage(target->as, j);
                 frame->rax = kStatusNoMemory;
                 return;
             }

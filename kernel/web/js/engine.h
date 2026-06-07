@@ -30,6 +30,12 @@ using duetos::core::Result;
 // enough that a hostile loop dies in well under a scheduler tick.
 inline constexpr u64 kDefaultStepBudget = 5'000'000;
 inline constexpr u32 kMaxCallDepth = 200;
+// SEC-007: coarse parser-recursion backstop. The parser recurses on the
+// native C++ stack just like the interpreter; on a kstack-arena worker the
+// frame-address guard (kJsStackGuardMargin, below) is the true limit, but
+// boot-context threads run on a larger non-arena stack where that guard's
+// range check is false -- this cap bounds them. Shares the call-depth ceiling.
+inline constexpr u32 kMaxParseDepth = kMaxCallDepth;
 
 // Native (kernel) stack-overflow guard margin (bytes). The interpreter
 // recurses on the C++ stack, so the kernel's 64 KiB arena stack — not

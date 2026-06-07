@@ -252,9 +252,19 @@ void CmdPeexec(u32 argc, char** argv)
         ConsoleWriteln(duetos::core::PeStatusName(st));
         return;
     }
-    const u64 pid = duetos::core::SpawnPeFile(path, pe_buf, static_cast<u64>(n), duetos::core::CapSetTrusted(),
-                                              duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
-                                              duetos::core::kTickBudgetTrusted);
+    // SEC-008: PEEXEC runs an operator-chosen FAT32 .exe — an UNTRUSTED
+    // binary. It must NOT inherit CapSetTrusted() (every bit, incl.
+    // kCapDebug cross-proc VM r/w and kCapDiag = SYS_DIAG_FAULT_INJECT,
+    // a guest-reachable kernel panic). Grant a least-privilege set
+    // (SerialConsole + FsRead + SpawnThread only) into the SANDBOX
+    // namespace with sandbox-class budgets, matching the browser broker
+    // model (kernel/apps/browser/priv_exec.cpp::DeriveChildCaps).
+    duetos::core::CapSet caps = duetos::core::CapSetEmpty();
+    duetos::core::CapSetAdd(caps, duetos::core::kCapSerialConsole);
+    duetos::core::CapSetAdd(caps, duetos::core::kCapFsRead);
+    duetos::core::CapSetAdd(caps, duetos::core::kCapSpawnThread);
+    const u64 pid = duetos::core::SpawnPeFile(path, pe_buf, static_cast<u64>(n), caps, duetos::fs::RamfsSandboxRoot(),
+                                              /*frame_budget=*/512, duetos::core::kTickBudgetSandbox);
     if (pid == 0)
     {
         ConsoleWriteln("PEEXEC: SPAWNPEFILE FAILED (load/import-resolution error — see serial log)");

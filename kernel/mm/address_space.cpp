@@ -725,6 +725,26 @@ bool AddressSpaceProtectUserPage(AddressSpace* as, u64 virt, u64 new_flags)
     u64* pte = WalkToPteIn(as->pml4_virt, virt, /*create=*/false);
     if (pte == nullptr || (*pte & kPagePresent) == 0)
         return false;
+    // SEC-004
+    // W^X-at-mprotect: even though new_flags is itself W^X-clean (the RWX panic
+    // above guarantees that), a page that is CURRENTLY writable must never be
+    // flipped to executable. Otherwise a PE maps a section / VirtualAlloc RW,
+    // writes shellcode, then NtProtectVirtualMemory(...PAGE_EXECUTE_READ) turns
+    // the very bytes it just wrote into code — the same write-then-execute
+    // bypass that SectionMap's sticky flags close, but routed around the
+    // section path entirely. Refuse adding EXECUTE to a writable page by
+    // clearing WRITE as we grant EXECUTE: the resulting page is RX, never RWX
+    // and never W-then-X on the same observable contents. DuetOS enforces W^X
+    // as a pillar (no JIT pages), so no legitimate non-JIT workload regresses —
+    // loaders map .text RX and .data/.bss RW as distinct pages.
+    const bool granting_exec = (new_flags & kPageNoExecute) == 0;
+    const bool currently_writable = (*pte & kPageWritable) != 0;
+    if (granting_exec && currently_writable)
+    {
+        new_flags |= kPageNoExecute; // keep it non-executable; preserve current W
+        KLOG_ONCE_WARN("mm/address_space",
+                       "AddressSpaceProtectUserPage: W^X — refusing W->X transition, kept page non-executable");
+    }
     const u64 frame = *pte & kAddrMask;
     *pte = frame | (new_flags | kPagePresent);
     // Protect downgrades (e.g. RW→RO) leave stale RW entries in

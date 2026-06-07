@@ -136,16 +136,23 @@ static bool ArrEnsure(JsObject* arr, Arena& a, u32 needCap)
 {
     if (arr->elemsCap >= needCap)
         return true;
-    u32 newCap = arr->elemsCap ? arr->elemsCap * 2 : 4;
+    // SEC-002: grow capacity in u64 so the doubling can't wrap a u32 to 0
+    // (which would allocate a 0-length array and make every elems[] write
+    // OOB), then clamp to the dense-index bound. needCap is always
+    // <= kMaxArrayIndex (ArrSet rejects larger indices; ArrPush is bounded
+    // by length), so the clamp never starves a legitimate request.
+    u64 newCap = arr->elemsCap ? static_cast<u64>(arr->elemsCap) * 2 : 4;
     while (newCap < needCap)
         newCap *= 2;
-    JsValue* ne = a.NewArray<JsValue>(newCap);
+    if (newCap > kMaxArrayIndex)
+        newCap = kMaxArrayIndex;
+    JsValue* ne = a.NewArray<JsValue>(static_cast<u32>(newCap));
     if (!ne)
         return false;
     for (u32 i = 0; i < arr->length; ++i)
         ne[i] = arr->elems[i];
     arr->elems = ne;
-    arr->elemsCap = newCap;
+    arr->elemsCap = static_cast<u32>(newCap);
     return true;
 }
 
@@ -167,6 +174,11 @@ bool ArrGet(const JsObject* arr, u32 idx, JsValue& out)
 
 bool ArrSet(JsObject* arr, Arena& a, u32 idx, const JsValue& v)
 {
+    // SEC-002: reject out-of-range indices before computing idx+1 so the
+    // capacity request can't wrap to 0 (which skips growth and writes OOB at
+    // elems[idx]). Callers fall back to a string-keyed property.
+    if (idx >= kMaxArrayIndex)
+        return false;
     if (!ArrEnsure(arr, a, idx + 1))
         return false;
     // fill any gap with undefined

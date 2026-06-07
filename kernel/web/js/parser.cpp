@@ -3,6 +3,12 @@
 #include "web/js/arena.h"
 #include "web/js/interp.h"
 #include "web/js/lexer.h"
+// SEC-007: the native kstack-arena geometry + the shared JS stack-guard
+// margin, reused so the parser's recursion bails (graceful parse error)
+// before it can smash the slot's guard page and panic the kernel.
+#include "mm/frame_allocator.h"
+#include "mm/kstack.h"
+#include "web/js/engine.h"
 
 /*
  * DuetOS — kernel/web/js: precedence-climbing (Pratt) parser.
@@ -38,6 +44,7 @@ struct Parser
     bool ok;
     const char* err;
     u32 errLine;
+    u32 parseDepth; // SEC-007: recursion-depth backstop for boot-context stacks
 
     const Token& Cur() const { return t[pos < n ? pos : n - 1]; }
     const Token& Peek(u32 o = 1) const
@@ -95,6 +102,47 @@ struct Parser
         return n2;
     }
 };
+
+// SEC-007: parser stack-overflow guard. The parser recurses on the native
+// C++ stack along two paths whose per-level byte cost differs ~10x the
+// expression chain (ParsePrimary -> ParseUnary -> ... -> ParseExpr) and the
+// statement-brace chain (ParseStatement -> ParseBlock, whose frame carries a
+// 2 KiB AstNode* tmp[256]). A single logical-depth cap calibrated to one path
+// either rejects legitimate input or overflows the other, so the real guard
+// measures ACTUAL native stack consumption against the kstack-arena guard
+// page identical to CallFunction in interp.cpp and is immune to that
+// skew. parseDepth is only a coarse backstop for boot-context (non-arena)
+// stacks, where the frame-address range check below is false.
+struct ParseRecurseGuard
+{
+    Parser& p;
+    explicit ParseRecurseGuard(Parser& pp) : p(pp) { p.parseDepth++; }
+    ~ParseRecurseGuard() { p.parseDepth--; }
+};
+
+// Returns true (recording a graceful parse error via p.Fail) when the current
+// frame is within kJsStackGuardMargin of this thread's stack guard page, or
+// when the coarse depth backstop is exceeded. Callers MUST bail to nullptr.
+bool ParseStackExhausted(Parser& p)
+{
+    const u64 fr = reinterpret_cast<u64>(__builtin_frame_address(0));
+    if (fr >= mm::kKernelStackArenaBase && fr < mm::kKernelStackArenaBase + mm::kKernelStackArenaBytes)
+    {
+        const u64 offInSlot = (fr - mm::kKernelStackArenaBase) % mm::kKernelStackSlotBytes;
+        const u64 floor = mm::kKernelStackGuardPages * mm::kPageSize + kJsStackGuardMargin;
+        if (offInSlot <= floor)
+        {
+            p.Fail("parse nesting too deep (stack guard)");
+            return true;
+        }
+    }
+    if (p.parseDepth >= kMaxParseDepth)
+    {
+        p.Fail("parse nesting too deep");
+        return true;
+    }
+    return false;
+}
 
 // Forward decls.
 AstNode* ParseExpr(Parser& p);
@@ -492,6 +540,11 @@ AstNode* ParseTemplate(Parser& p)
 
 AstNode* ParsePrimary(Parser& p)
 {
+    // SEC-007: bound expression-paren recursion against real native stack use.
+    ParseRecurseGuard recurseGuard(p);
+    if (ParseStackExhausted(p))
+        return nullptr;
+
     if (LooksLikeArrow(p))
         return ParseArrow(p);
 
@@ -1087,6 +1140,12 @@ AstNode* ParseFunctionDecl(Parser& p)
 
 AstNode* ParseStatement(Parser& p)
 {
+    // SEC-007: bound statement-brace recursion (ParseBlock's 2 KiB frame) the
+    // same way same guard, immune to the per-level byte-cost skew.
+    ParseRecurseGuard recurseGuard(p);
+    if (ParseStackExhausted(p))
+        return nullptr;
+
     switch (p.Kind())
     {
     case Tok::KwVar:
@@ -1173,7 +1232,7 @@ AstNode* ParseStatement(Parser& p)
 ParseResult Parse(const TokenStream& toks, Arena& arena)
 {
     ParseResult r{};
-    Parser p{toks.tokens, toks.count, 0, arena, true, nullptr, 0};
+    Parser p{toks.tokens, toks.count, 0, arena, true, nullptr, 0, 0};
 
     AstNode* prog = arena.New<AstNode>();
     if (!prog)

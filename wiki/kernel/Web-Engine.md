@@ -77,6 +77,18 @@ the debug build (a few levels) and deeper in release** (smaller frames).
 Lifting it would mean a heap-allocated interpreter stack or shrinking the
 per-level native frame.
 
+The **parser** recurses on the same native stack (the Pratt expression
+chain *and* the statement-brace chain `ParseStatement`→`ParseBlock`,
+whose frame carries a 2 KiB `tmp[256]`). Because per-level byte cost
+differs ~10× between those paths, a single logical-depth cap can't be
+both safe and non-rejecting — so `ParsePrimary` and `ParseStatement`
+([`js/parser.cpp`](../../kernel/web/js/parser.cpp)) carry the **same
+`__builtin_frame_address` guard** as `CallFunction`, bailing with a
+graceful parse error (`p.Fail`, not a panic) near the guard page; a
+coarse `kMaxParseDepth` backstop covers boot-context (non-arena) stacks.
+This stops untrusted `(((…)))` / `{{{…}}}` from guard-faulting the
+kernel. (Security audit SEC-007, CWE-674, 2026-06-07.)
+
 ## Self-tests
 
 Every stage boots a self-test, registered in
@@ -257,6 +269,15 @@ The Assistant's inert `RemoteLlm` direction would route through the
 privileged `net.fetch` executor; elevated-origin behaviour is
 deferred to [Privileged-Origin Mode](Privileged-Origin.md). See
 [Capabilities](../security/Capabilities.md).
+
+**Dense-array index bound.** Integer array indices `>= kMaxArrayIndex`
+(`2^24`, in `js/object.h`) are treated as ordinary string-keyed
+properties on both the write (`DoAssign`) and read (`EvalExpr` Index)
+paths, and `ArrEnsure` grows capacity in `u64` with a clamp. This stops
+a hostile script index such as `a[4294967295]` from wrapping a `u32`
+capacity to 0 and driving an out-of-bounds kernel-heap write. Regression
+cases live in `js/selftest.cpp` (snippets 24–26). (Security audit
+SEC-002, CWE-787/190, 2026-06-07.)
 
 ## See also
 

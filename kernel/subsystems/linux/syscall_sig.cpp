@@ -79,6 +79,22 @@ i64 LinuxSignalDeliver(core::Process* target, u32 signum)
         return kEINVAL;
     if (signum == 0 || signum >= core::Process::kLinuxSignalCount)
         return kEINVAL;
+    // SEC-001 (CWE-862): signalling a process other than self is the same
+    // threat class as the native SYS_PROCESS_TERMINATE path (syscall.cpp) and
+    // the sibling DoPidfdGetfd (pidfd_splice.cpp) — both require kCapDebug.
+    // Every kill/tgkill/tkill/pidfd_send_signal caller funnels through here,
+    // so gate at the chokepoint: a sandboxed PE/ELF must not be able to send
+    // a fatal signal to an arbitrary pid when a native cap-gated process
+    // couldn't. Self-signalling (musl abort(), raise()) stays ungated.
+    core::Process* caller = core::CurrentProcess();
+    if (target != caller)
+    {
+        if (caller == nullptr || !core::CapSetHas(caller->caps, core::kCapDebug))
+        {
+            core::RecordSandboxDenial(core::kCapDebug);
+            return kEPERM;
+        }
+    }
     constexpr u32 kSIGKILL = 9;
     constexpr u32 kSIGSTOP = 19;
     constexpr u64 kSigDfl = 0;
