@@ -29,11 +29,19 @@ Keyboard navigation is fully wired (`kernel/drivers/video/menu.cpp`
 - **Enter** activates the highlighted row → `DispatchMenuAction`.
 
 Pure `sendkey` — no pixel-targeting of menu geometry — which makes it far
-more robust than clicking menu rows. The driver uses **0.18 s per
-keypress**: a faster burst drops a press (the hover advance runs under the
-compositor lock on the kbd-reader thread and coalesces if the redraw
-hasn't caught up). The first validation run at 0.08 s landed one row short
-(fired Files instead of Clock); 0.18 s fixed it deterministically.
+more robust than clicking menu rows. The driver now uses **0.09 s per
+keypress** (only to let QEMU's HMP flush each `sendkey` before the next).
+
+> **F-002 fixed.** The original driver needed **0.18 s** because the
+> kbd-reader's VirtualBox auto-repeat suppressor ran on *every* host and
+> ate any same-key re-press inside ~100 ms of its release. A faster burst
+> (0.06–0.08 s) landed one row short and opened the WRONG app (e.g. fired
+> CLOCK instead of IMAGE VIEWER). That suppressor is now gated to
+> VirtualBox only (`kernel/core/boot_tasks.cpp` `KbdReaderTask`,
+> `vbox_auto_repeat`), so on QEMU / KVM / VMware / real hardware fast
+> keystrokes are delivered verbatim — the 0xF3 typematic command already
+> disables host auto-repeat there. Verified: 6 fast Down presses at
+> 0.06 s/key now all register and IMAGE VIEWER opens correctly.
 
 ### Sequence
 

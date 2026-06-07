@@ -30,9 +30,16 @@ SCRW, SCRH = 1024, 768
 # Start-menu navigation map. Each app -> (root_steps, submenu_steps),
 # both counted in DOWN presses among *activatable* rows (the kernel's
 # MenuMoveHover skips separators + disabled rows, so these are stable
-# regardless of separator placement). Root order (activatable):
-#   0 APPS  1 UTILITIES  2 SYSTEM  3 SCREENSHOT  4 POWER
-#   (USER APPS is disabled+skipped when no /APPS shortcuts exist.)
+# regardless of separator placement). Root rows, in order
+# (kernel/core/boot_tasks.cpp StartMenuRebuildAndOpen):
+#   0 APPS  1 UTILITIES  2 SYSTEM  3 USER APPS  (sep)  SCREENSHOT  POWER
+# USER APPS (row 3) is activatable whenever the /APPS scan found at least
+# one shortcut. StartMenuAppsScan plants APPS/SAMPLE.MNF, so in practice
+# USER APPS IS activatable (F-003) and the activatable order is:
+#   0 APPS  1 UTILITIES  2 SYSTEM  3 USER APPS  4 SCREENSHOT  5 POWER
+# Crucially USER APPS sits AFTER SYSTEM, so SYSTEM stays activatable
+# index 2 either way — the SYSTEM root_steps below are correct as-is.
+# (If a future layout moves USER APPS before SYSTEM, bump those to 3.)
 # After Ctrl+Esc the menu auto-hovers row 0; after Right the submenu
 # auto-hovers its row 0. So the sequence is:
 #   ctrl-esc, down*root_steps, right, down*submenu_steps, ret
@@ -118,13 +125,17 @@ def double_click(x, y):
     click(x, y); time.sleep(0.08); click(x, y)
 
 def key(name, n=1):
-    # Generous inter-key spacing: the menu's hover advance is applied
-    # under the compositor lock on the kbd-reader thread, and a too-
-    # fast sendkey burst can coalesce / drop a press before the redraw
-    # catches up. 0.18s per press is well inside the human range and
-    # has proven reliable for the nested start-menu navigation.
+    # Inter-key spacing. Pre-F-002 this had to be 0.18s because the
+    # kbd-reader's VBox auto-repeat suppressor ran on EVERY host and ate
+    # any same-key re-press inside ~100ms of its release — so a fast
+    # start-menu nav landed short and opened the wrong app. That
+    # suppressor is now VBox-only (kernel/core/boot_tasks.cpp), so on
+    # QEMU/real-HW fast keys are delivered verbatim. We keep a modest
+    # 0.09s here only to give QEMU's HMP time to flush each sendkey
+    # (back-to-back monitor commands can otherwise coalesce); 0.06s
+    # nav was verified correct after the fix.
     for _ in range(n):
-        hmp(f"sendkey {name}"); time.sleep(0.18)
+        hmp(f"sendkey {name}"); time.sleep(0.09)
 
 def shot(name):
     path = os.path.join(SHOT_DIR, f"{APP}-{name}.ppm")

@@ -56,6 +56,25 @@ US-QWERTY character. The IRQ path and `Ps2KeyboardRead` (raw bytes)
 remain untouched for any future consumer that needs set-2 decoding,
 debugger-side view, or alternate keymap.
 
+### Auto-repeat suppression is VirtualBox-only (F-002)
+
+The kbd-reader task (`kernel/core/boot_tasks.cpp` `KbdReaderTask`)
+carries a software auto-repeat suppressor: when the *same* key is
+re-pressed within ~100 ms of its own release, the press is treated as
+host-driven auto-repeat and eaten. This is needed **only under
+VirtualBox**, which ACKs the `0xF3` typematic-rate command (1 s delay,
+2 cps) but ignores it, driving repeat from the host as make+break pairs.
+On QEMU, KVM, VMware, and real hardware the `0xF3` command genuinely
+disables host auto-repeat, so there is nothing to suppress.
+
+The suppressor's release→re-press heuristic *cannot* distinguish VBox
+auto-repeat from a fast legitimate same-key burst (automation `sendkey`,
+or a fast typist). Running it on every host therefore dropped genuine
+keys: typing "peek" fast came out "PEK", and a multi-press start-menu
+nav landed rows short and opened the wrong app. The fix gates the whole
+suppressor on `arch::HypervisorInfoGet().kind == HypervisorKind::VirtualBox`
+(`vbox_auto_repeat`). Everywhere else, every press is delivered verbatim.
+
 ## USB HID Boot Keyboard
 
 xHCI interrupt-IN poll (`kernel/drivers/usb/xhci_init.cpp`
