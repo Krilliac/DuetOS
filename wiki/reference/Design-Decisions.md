@@ -3521,6 +3521,49 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 049 — F-050 runaway timer-IRQ recursion is livelock-by-preemption, not an irq-restore bug
+
+- **Scope:** `kernel/arch/x86_64/traps.cpp` (timer-IRQ EOI +
+  preemption point), `kernel/mm/slab.cpp` (`GrowOneSlab` /
+  `SlabAlloc`), `kernel/sched/sched.cpp` (`Schedule` /
+  `ScheduleLockedHandoff`). Investigation only — no code change.
+- **Decision:** F-050 (LAPIC timer vec 0x20 nested 9× → controlled
+  panic under saturation) is **root-caused as livelock-by-
+  preemption** and **FILED, not fixed**. The candidate "surgical"
+  fix — *"the slab-grow-under-pressure / `heap_alloc_fail` path
+  leaves IRQs disabled or skips the LAPIC EOI, so timer IRQs
+  nest"* — is **explicitly ruled out**: every `SlabAlloc` /
+  `MutexLock` / `Schedule` exit path saves/restores IF via RAII
+  (`IrqOff` in slab.cpp, `SpinLockAcquire`/`SpinLockRelease`
+  flags in sched.cpp), and `LapicEoi()` is sent unconditionally
+  for every handled hardware vector (`traps.cpp:1228`). No future
+  slice should re-open F-050 as an irq-restore / EOI-ordering bug.
+- **Why:** the real mechanism is that the timer ISR EOIs early
+  (`traps.cpp:1228`) then runs the preemption `Schedule()`
+  (`traps.cpp:1261`); under sustained pressure (slow slab path
+  lengthens each tick) the next timer IRQ re-preempts a freshly-
+  resumed busy thread **before** it can `iretq` out of the prior
+  tick's `TrapDispatch` frame, so frames accumulate (tight
+  descent) until the depth-8 guard (`traps.cpp:1117`) fires. The
+  `mm.heap_alloc_fail` probe is a correlated pressure symptom, not
+  a cause.
+- **Rules out / defers:** ruled out the irq-restore/EOI surgical
+  fix (above). **Defers** the actual fix — gate the timer-IRQ
+  reschedule on `IrqNestDepth() > 1` and `SetNeedResched()`-only
+  (mirroring `DeferPreemptIfCritical()`) — because it is a
+  timer-path behavioral change that must be proven on a reliable
+  reproducer before shipping, and the recursion guard already
+  bounds the failure to a clean panic (no corruption). Full
+  residual in `wiki/reference/Roadmap.md` → "Timer-IRQ preemption
+  livelock under saturation (F-050)".
+- **Revisit when:** a deterministic saturation reproducer exists
+  (or F-040 — the sibling intermittent hung-task soft-panic — is
+  picked up); then implement and verify the nesting-defer.
+- **Related tracks:** Track 1 (Scheduler — preemption fairness
+  under load), Track 3 (Memory — slab pressure path).
+
+---
+
 ## 048 — Scheduler publishes TSS.RSP0 on every switch-in
 
 - **Scope:** `kernel/sched/sched.cpp` — `Schedule()` now calls
