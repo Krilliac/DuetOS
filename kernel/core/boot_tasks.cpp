@@ -2722,6 +2722,10 @@ void MouseReaderTask(void*)
                 if (is_dbl)
                 {
                     duetos::drivers::video::DesktopIconActivate(icon);
+                    // Auto-focus the URL bar when the browser icon is activated
+                    // so keyboard-first URL entry works immediately (F-032).
+                    if (duetos::drivers::video::DesktopIconWindow(icon) == duetos::apps::browser::BrowserWindow())
+                        duetos::apps::browser::BrowserFocusUrl();
                     duetos::drivers::video::CursorHide();
                     duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
                     duetos::drivers::video::CursorShow();
