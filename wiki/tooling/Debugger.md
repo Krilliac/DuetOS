@@ -164,7 +164,7 @@ A breakpoint set inside a kernel path that the BP handler itself reaches will re
 
 ### Install-time blocklist
 
-At `BpInit`, the kernel walks the embedded `.symtab` and caches `[addr, addr+size)` ranges for every function whose demangled name contains any of the curated unsafe-substrings (the BP handlers themselves, the symbol resolver, `SerialWrite`, klog emitters, panic / trap dispatchers, scheduler core, spinlock primitives, `KMalloc` / `KFree`, frame allocator). `BpInstallSoftware` and `BpInstallHardware` (HW-execute only) reject installs that target one of those ranges with `BpError::UnsafeZone`.
+At `BpInit`, the kernel walks the embedded `.symtab` and caches `[addr, addr+size)` ranges for every function whose demangled name contains any of the curated unsafe-substrings (the BP handlers themselves, the symbol resolver, `SerialWrite`, klog emitters, panic / trap dispatchers, scheduler core, spinlock primitives, `KMalloc` / `KFree`, frame allocator). `BpInstallSoftware` and `BpInstallHardware` reject installs that target one of those ranges with `BpError::UnsafeZone` — the unsafe-zone gate now covers **all** hardware kinds (HW-write / read-write as well as HW-execute), not just execute. In addition, a ring-3 caller's `SYS_BP_INSTALL` is restricted to its own user address space: a kernel-half watchpoint VA is refused, so a `kCapDebug`-holding PE/ELF cannot arm a data watchpoint on a kernel address (KASLR info-leak / kernel-context fault). (Security audit ML-05, CWE-284, 2026-06-07.)
 
 To override — for research, deep kernel debugging, or paths the curated list misses — pass `BpInstallFlags::AllowUnsafe` to the C++ API, or append the literal `unsafe` to the shell command:
 

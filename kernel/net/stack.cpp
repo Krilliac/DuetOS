@@ -48,6 +48,7 @@
 #include "sched/sched.h"
 #include "util/string.h"
 #include "util/compiler.h"
+#include "util/random.h"
 
 namespace duetos::net
 {
@@ -1794,7 +1795,19 @@ constinit bool g_dns_pending = false;
 constinit bool g_dns_resolved = false;
 constinit u16 g_dns_xid = 0;
 constinit Ipv4Address g_dns_result_ip = {};
-constexpr u16 kDnsEphemeralPort = 54321;
+
+// ML-03: source-validation + anti-spoof state. A reply is only
+// accepted when it arrives from the resolver we queried, from
+// UDP source port 53, addressed to the random ephemeral port we
+// bound for this query (alongside the random transaction ID
+// check below). All three plus the xid must match — a blind
+// off-path spoofer now has to guess xid (16 bits) AND the source
+// port (~14 bits of entropy) instead of replaying a fixed
+// name-derived xid at the fixed port 54321 the old code used.
+constinit Ipv4Address g_dns_resolver_ip = {};
+// The ephemeral source port bound for the in-flight query. 0 ==
+// no port currently bound (nothing to unbind yet).
+constinit u16 g_dns_src_port = 0;
 
 // Skip over a DNS name in the RR stream. Handles both raw label
 // sequences + RFC 1035 §4.1.4 name-compression pointers (top two
@@ -1815,10 +1828,18 @@ u64 DnsSkipName(const u8* buf, u64 offset, u64 len)
 void DnsOnUdp(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, const void* payload, u64 len)
 {
     (void)iface_index;
-    (void)src_ip;
-    (void)src_port;
-    (void)dst_port;
     if (!g_dns_pending)
+        return;
+    // ML-03: reject spoofed / off-path replies. Only accept a
+    // datagram that came from the resolver we asked, from the DNS
+    // service port (53), addressed to the exact random ephemeral
+    // port we bound for this query. Combined with the random xid
+    // check below, an attacker must guess all four to be heard.
+    if (!IpEq(src_ip, g_dns_resolver_ip))
+        return;
+    if (src_port != 53)
+        return;
+    if (dst_port != g_dns_src_port)
         return;
     if (payload == nullptr || len < 12)
         return;
@@ -1933,13 +1954,19 @@ bool NetDnsQueryA(u32 iface_index, Ipv4Address resolver_ip, const char* name)
 
     // Build query.
     u8 qbuf[12 + kDnsMaxName + 2 + 4];
-    // Transaction ID — xor the name's first few bytes so repeats
-    // against the same name don't collide with each other's
-    // in-flight answers (prev landing in current's pending slot
-    // would resolve wrong).
-    u16 xid = 0x1000 ^ u16(name[0]) ^ (u16(name[1]) << 4);
+    // ML-03: random transaction ID from the kernel CSPRNG. The old
+    // code derived the xid deterministically from the queried name,
+    // which let any off-path attacker who could guess the name
+    // forge a matching reply. A random xid forces a blind spoofer
+    // to guess all 16 bits per attempt.
+    u16 xid = u16(::duetos::core::RandomU64() & 0xFFFF);
     if (xid == 0)
         xid = 0x1234;
+    // ML-03: random ephemeral source port in the IANA dynamic range
+    // (49152..65535). Replaces the fixed 54321 the old code bound,
+    // adding ~14 bits of entropy a spoofer must also guess. One
+    // slot is reused across queries (see unbind below).
+    const u16 sport = u16(49152 + (::duetos::core::RandomU64() % (65535 - 49152 + 1)));
     qbuf[0] = u8(xid >> 8);
     qbuf[1] = u8(xid & 0xFF);
     // Flags: RD=1 (request recursion), everything else 0.
@@ -1968,9 +1995,30 @@ bool NetDnsQueryA(u32 iface_index, Ipv4Address resolver_ip, const char* name)
     g_dns_resolved = false;
     g_dns_xid = xid;
     g_dns_result_ip = {};
-    NetUdpBindRx(kDnsEphemeralPort, DnsOnUdp);
+    // ML-03: remember the resolver so DnsOnUdp can source-validate
+    // the reply.
+    g_dns_resolver_ip = resolver_ip;
+    // ML-03: a fresh random port each query would leak UDP demux
+    // slots — the table only has kUdpBindingsMax slots and DHCP/NTP
+    // already hold some, so it fills after a handful of queries and
+    // every later bind silently fails (DNS permanently broken).
+    // Unbind the port the previous query bound before claiming the
+    // new one, preserving the single-slot budget the old fixed-port
+    // design relied on.
+    if (g_dns_src_port != 0)
+        NetUdpBindRx(g_dns_src_port, nullptr);
+    if (!NetUdpBindRx(sport, DnsOnUdp))
+    {
+        // No RX slot — sending anyway would drop the reply with no
+        // handler. Fail the query cleanly so the caller times out
+        // and the demux table is left in a sane state.
+        g_dns_pending = false;
+        g_dns_src_port = 0;
+        return false;
+    }
+    g_dns_src_port = sport;
 
-    return NetUdpSend(iface_index, dst_mac, resolver_ip, /*dst_port=*/53, ifc.ip, kDnsEphemeralPort, qbuf, qpos);
+    return NetUdpSend(iface_index, dst_mac, resolver_ip, /*dst_port=*/53, ifc.ip, sport, qbuf, qpos);
 }
 
 DnsResult NetDnsResultRead()

@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/traps.h"
 #include "debug/breakpoints.h"
+#include "mm/paging.h"
 #include "proc/process.h"
 
 namespace duetos::debug
@@ -58,6 +59,16 @@ void DoBpInstall(arch::TrapFrame* frame)
         len = BpLen::Eight;
         break;
     default:
+        frame->rax = static_cast<u64>(-1);
+        return;
+    }
+    // ML-05: a ring-3 caller may only arm a watch on its OWN user half.
+    // Without this, a debug-capable PE could pass an arbitrary kernel VA
+    // for a HwWrite / HwReadWrite watch — the unsafe-zone gate downstream
+    // only covers HwExecute, so the watch would arm on kernel memory and
+    // the #DB handler would log the raw kernel address (KASLR leak).
+    if (!mm::IsUserAddressRange(va, len_u))
+    {
         frame->rax = static_cast<u64>(-1);
         return;
     }

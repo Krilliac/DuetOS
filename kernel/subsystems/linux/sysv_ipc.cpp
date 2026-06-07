@@ -52,6 +52,9 @@ constexpr u64 kIpcCreat = 0x200;
 constexpr u64 kIpcExcl = 0x400;
 constexpr u64 kIpcNowait = 0x800; // semop SEM_NOWAIT
 
+// shmat flag bits
+constexpr u64 kShmRdonly = 0x1000; // SHM_RDONLY — attach read-only
+
 // IPC commands
 constexpr u64 kIpcRmid = 0;
 constexpr u64 kIpcSet = 1;
@@ -71,6 +74,11 @@ struct ShmSegment
     u32 refcount; // attachments + open handles
     i32 key;      // SysV key passed by the caller (IPC_PRIVATE = 0)
     u32 page_count;
+    // Creating process. For IPC_PRIVATE (key == 0) segments — which carry no
+    // sharing token — DoShmat refuses attach from any other pid so a
+    // co-resident ELF cannot brute-force shmid 1..8 and map a private
+    // segment. Keyed segments (key != 0) stay shareable by design.
+    u64 owner_pid;
     u64 size_bytes;
     mm::PhysAddr* frames; // KMalloc'd page_count entries
 };
@@ -132,6 +140,7 @@ i32 ShmAlloc(i32 key, u64 size)
         s.marked_destroy = false;
         s.refcount = 1; // shmget itself holds the initial reference
         s.key = key;
+        s.owner_pid = (core::CurrentProcess() != nullptr) ? core::CurrentProcess()->pid : 0;
         s.page_count = static_cast<u32>(page_count);
         s.size_bytes = page_count * kPage;
         arch::Sti();
@@ -238,7 +247,6 @@ i64 DoShmget(u64 key, u64 size, u64 shmflg)
 
 i64 DoShmat(u64 shmid, u64 shmaddr, u64 shmflg)
 {
-    (void)shmflg;
     if (shmid == 0 || shmid > kShmPoolCap)
         return -22; // -EINVAL
     const u32 idx = static_cast<u32>(shmid - 1);
@@ -251,6 +259,15 @@ i64 DoShmat(u64 shmid, u64 shmaddr, u64 shmflg)
     {
         arch::Sti();
         return -22;
+    }
+    // IPC_PRIVATE isolation: a key == 0 segment has no sharing token, so only
+    // its creator may attach. Keyed segments stay shareable (POSIX). This
+    // closes the brute-force-shmid cross-process leak without breaking keyed
+    // cross-process sharing.
+    if (g_shm_pool[idx].key == 0 && g_shm_pool[idx].owner_pid != p->pid)
+    {
+        arch::Sti();
+        return -13; // -EACCES
     }
     const u32 page_count = g_shm_pool[idx].page_count;
     arch::Sti();
@@ -320,7 +337,11 @@ i64 DoShmat(u64 shmid, u64 shmaddr, u64 shmflg)
         return -22; // -EINVAL
     }
 
-    constexpr u64 kFlags = mm::kPagePresent | mm::kPageWritable | mm::kPageUser | mm::kPageNoExecute;
+    // SHM_RDONLY drops the writable bit so a read-only attach can't be used to
+    // mutate the segment. Default (no flag) keeps the writable mapping.
+    const u64 kFlags = (shmflg & kShmRdonly) != 0
+                           ? (mm::kPagePresent | mm::kPageUser | mm::kPageNoExecute)
+                           : (mm::kPagePresent | mm::kPageWritable | mm::kPageUser | mm::kPageNoExecute);
     bool ok = true;
     u32 mapped = 0;
     for (u32 i = 0; i < pages; ++i)

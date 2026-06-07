@@ -165,6 +165,16 @@ EC region read — that is the job of the AML method interpreter
 ([`aml_eval.cpp`](../../kernel/acpi/aml_eval.cpp), `AmlEvaluate` /
 `AmlEvaluateInteger`), which runs over the index this walker builds.
 
+The interpreter is hardened against malformed firmware tables (a crafted
+DSDT/SSDT delivered via modified firmware or a hostile VM): `EvalTermArg`
+carries a recursion-depth guard (in addition to the existing per-method
+`InvokeMethod` cap) so deeply nested operand expressions can't overflow the
+kernel stack (ML-04, CWE-674), and `Package` element slots are reserved
+contiguously before evaluation so a nested-`Package` element no longer
+mis-resolves into a neighbour's arena slot (ML-08, CWE-682). Both are
+covered by the `[acpi/aml-eval]` boot self-test (incl. a nested-package
+case). (Security audit, 2026-06-07.)
+
 ## Rust Decoders
 
 [`kernel/acpi/acpi_rust/`](../../kernel/acpi/acpi_rust/) is a small Rust

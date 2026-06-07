@@ -24,6 +24,7 @@
 #include "mm/kheap.h"
 #include "sched/sched.h"
 #include "time/tick.h"
+#include "util/random.h"
 #include "util/string.h"
 #include "util/compiler.h"
 
@@ -44,6 +45,9 @@ constinit bool g_initialised = false;
 // Ephemeral port pool — kicked off above the well-known + reserved
 // range. Wraps in RFC-6056 dynamic range. Allocated under Cli.
 constinit u16 g_ephemeral_cursor = 49152;
+
+// ML-02 (net-0): see tcp_internal.h. Seeded in tcp::Init (tcp_timer.cpp).
+constinit u64 g_isn_secret = 0;
 
 u64 NowTicks()
 {
@@ -80,6 +84,27 @@ DUETOS_NO_SANITIZE_WRAP u32 BucketHash(u32 iface, Ipv4Address local_ip, u16 loca
     for (u32 i = 0; i < 4; ++i)
         h = ((h << 5) + h) + peer_ip.octets[i];
     return h & (kTcbBuckets - 1);
+}
+
+// ML-02 (net-0): RFC 6528 keyed initial sequence number. Replaces the
+// predictable LCG (NowTicks * prime) that leaked the ISN to any off-path
+// attacker who could estimate the coarse boot-relative tick (CWE-330).
+// FNV-1a mixes the per-boot secret with the connection 4-tuple, then a
+// coarse clock term is added so two connections on the same 4-tuple still
+// advance monotonically (TIME_WAIT old-duplicate protection).
+DUETOS_NO_SANITIZE_WRAP u32 GenIsn(Ipv4Address local_ip, u16 local_port, Ipv4Address peer_ip, u16 peer_port)
+{
+    u64 h = 0xCBF29CE484222325ull ^ g_isn_secret;
+    const auto mix = [&h](u64 v) DUETOS_NO_SANITIZE_WRAP { h = (h ^ v) * 0x100000001B3ull; };
+    for (u32 i = 0; i < 4; ++i)
+        mix(local_ip.octets[i]);
+    for (u32 i = 0; i < 4; ++i)
+        mix(peer_ip.octets[i]);
+    mix(local_port);
+    mix(peer_port);
+    // Fold the 64-bit hash down to 32 bits, then add the coarse clock.
+    const u32 keyed = u32(h ^ (h >> 32));
+    return u32(NowTicks() >> 6) + keyed;
 }
 
 TcbId MakeId(u32 idx, u8 generation)
@@ -511,12 +536,8 @@ TcbId Connect(u32 iface_index, Ipv4Address dst_ip, u16 dst_port, u16 local_port)
     t.local_port = local_port;
     t.peer_port = dst_port;
     t.refs = 1;
-    // Random-ish ISN. Real stacks use a high-entropy source +
-    // monotonic clock per RFC-6528; v0 uses NowTicks * a prime
-    // to mix bits. Good enough until KASLR's RNG is wired into
-    // the net stack.
-    const u64 mix = NowTicks() * 1103515245u + 12345u;
-    t.iss = u32(mix);
+    // ML-02 (net-0): RFC 6528 keyed ISN — see GenIsn.
+    t.iss = GenIsn(t.local_ip, t.local_port, t.peer_ip, t.peer_port);
     t.snd_una = t.iss;
     t.snd_nxt = t.iss + 1; // SYN consumes one
     t.rcv_wnd = kRcvBufBytes;

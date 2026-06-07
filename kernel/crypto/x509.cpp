@@ -116,6 +116,19 @@ bool ParseSpki(const asn1::Element& spki, RsaPublicKey* rsa, bool* rsa_present)
     // disambiguation if present) and hand to RsaPublicKeyFromBE.
     u8 mod_buf[kBigIntBits / 8];
     u8 exp_buf[16];
+    // ML-07: IntegerToBytesBE clamps an over-long INTEGER to the
+    // buffer capacity (its contract — the exponent path relies on
+    // it). For the modulus that clamp would silently TRUNCATE a
+    // >4096-bit RSA key from an untrusted cert into a different,
+    // shorter key, feeding key-confusion into real verification.
+    // Reject the over-long modulus here instead of accepting the
+    // clamp. Mirror IntegerToBytesBE's de-padding so the comparison
+    // is against the natural unsigned big-endian length.
+    u32 mod_natural_len = mod_int.len;
+    if (mod_int.len >= 2 && mod_int.value[0] == 0x00 && (mod_int.value[1] & 0x80) != 0)
+        mod_natural_len -= 1;
+    if (mod_natural_len > sizeof(mod_buf))
+        return false;
     const u32 mod_bytes = asn1::IntegerToBytesBE(mod_int, mod_buf, sizeof(mod_buf));
     const u32 exp_bytes = asn1::IntegerToBytesBE(exp_int, exp_buf, sizeof(exp_buf));
     if (mod_bytes == 0 || exp_bytes == 0)

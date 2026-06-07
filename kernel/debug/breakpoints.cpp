@@ -654,15 +654,17 @@ BreakpointId BpInstallHardware(u64 va, BpKind kind, BpLen len, u64 owner_pid, bo
     // context switches, so SMP is safe without an IPI shootdown —
     // each CPU re-loads the running task's DRs on every switch-in.
     sync::SpinLockGuard g(g_lock);
-    // The unsafe-zone gate applies to HwExecute targets only:
-    // a Hw-write or Hw-read-write watch on a kernel data region
-    // doesn't fire instruction-fetch recursion. (Suspend-on-hit
-    // for a hot data slot is still a footgun, but a different
-    // class — operator can disarm or remove the BP.)
+    // ML-05: the unsafe-zone gate applies to ALL hardware-BP kinds.
+    // The unsafe ranges are the .text of critical functions (the BP
+    // handler itself, KMalloc, AllocateFrame, …); a Hw-write /
+    // Hw-read-write watch landing inside one of those code ranges arms
+    // a DR that fires a #DB while that very code runs — the same
+    // recursion class an exec BP would. Kernel callers that knowingly
+    // need a watch there pass BpInstallFlags::AllowUnsafe.
     const bool allow_unsafe = (static_cast<u8>(flags) & static_cast<u8>(BpInstallFlags::AllowUnsafe)) != 0;
-    if (!allow_unsafe && kind == BpKind::HwExecute && InUnsafeRange(va))
+    if (!allow_unsafe && InUnsafeRange(va))
     {
-        KLOG_WARN_V("debug/bp", "HW exec BP refused (unsafe zone) addr=", va);
+        KLOG_WARN_V("debug/bp", "HW BP refused (unsafe zone) addr=", va);
         set_err(BpError::UnsafeZone);
         return kBpIdNone;
     }
@@ -1148,7 +1150,15 @@ bool BpHandleDebug(arch::TrapFrame* frame)
             ++e->hit_count;
             if (e->kind == BpKind::HwExecute)
                 any_exec = true;
-            KLOG_INFO_2V("debug/bp", "HW BP hit", "addr", e->address, "hits", e->hit_count);
+            // ML-05: only the kernel-owned (owner_pid == 0) hit logs the
+            // raw watched address at INFO. A ring-3-owned watch is now
+            // confined to its own user half (SYS_BP_INSTALL gate), but we
+            // still keep its address out of the default-level log so the
+            // hit line never leaks an address-space layout detail.
+            if (e->owner_pid == 0)
+                KLOG_INFO_2V("debug/bp", "HW BP hit", "addr", e->address, "hits", e->hit_count);
+            else
+                KLOG_DEBUG_V("debug/bp", "HW BP hit (ring-3) hits=", e->hit_count);
             claimed = true;
             if (e->suspend_on_hit && suspend_id == 0)
                 suspend_id = e->id;
