@@ -37,6 +37,7 @@
 #include "arch/x86_64/machine_check.h"
 #include "arch/x86_64/nmi_watchdog.h"
 #include "arch/x86_64/serial.h"
+#include "arch/x86_64/timer.h"
 
 #include "diag/diag_decode.h"
 #include "diag/event_trace.h"
@@ -626,6 +627,32 @@ const char* TrapResponseName(TrapResponse r)
 // indexed by the current CPU id; g_irq_nest_max is the global
 // monotonic high-water mark read by the health check.
 constinit u64 g_irq_nest_max = 0;
+
+// F-050 livelock kill-switch + diagnostic counter.
+//
+// Under sustained saturation a busy ring-0 thread could be re-preempted
+// by the NEXT timer IRQ before it iretq'd out of the prior IRQ-driven
+// Schedule() frame, stacking one TrapDispatch frame per 100 Hz tick
+// (tight descent) until the depth-8 recursion guard fired a controlled
+// panic ("runaway trap recursion (fault loop)"). The fix: when a TIMER
+// IRQ fires while already nested inside another not-yet-unwound IRQ
+// frame (IrqNestDepth() > 1), DEFER its reschedule — set need-resched
+// only and let the OUTER (un-nested) frame perform the single Schedule()
+// on its way out. The busy thread then always gets to iretq out of
+// frame #1 before another Schedule() can stack on top. Mirrors the
+// existing DeferPreemptIfCritical() critical-section defer.
+//
+// Default true (fix active). Flip to false to revert to the historical
+// always-Schedule path (the recursion guard still bounds the blast
+// radius to a clean panic). Exposed as a flippable global so a future
+// kernel-cmdline / shell knob can toggle it without a config system —
+// same precedent as net's `cubic.enabled` kill-switch for risky changes.
+constinit bool g_timer_nest_defer_enabled = true;
+
+// How many times the nesting-defer above actually fired. Diagnostic
+// only — proves the new path is exercised under load. Relaxed atomic
+// add (trap context; no lock).
+constinit u64 g_timer_nest_defer_count = 0;
 
 // Current CPU's live-depth slot. CurrentCpuIdOrBsp() falls back to
 // the BSP id (0) before per-CPU state is installed, so this is safe
@@ -1256,7 +1283,28 @@ extern "C" void TrapDispatch(TrapFrame* frame)
             // doesn't see a stale flag.
             if (sched::TakeNeedResched())
             {
-                if (!cpu::DeferPreemptIfCritical())
+                // F-050 nesting defer: a TIMER IRQ that interrupted a
+                // context still inside a not-yet-unwound IRQ frame
+                // (IrqNestDepth() > 1, i.e. an outer IRQ's Schedule()
+                // chain hasn't iretq'd yet) must NOT call Schedule()
+                // here — doing so stacks another TrapDispatch frame on
+                // the same descending stack each tick (tight descent ->
+                // recursion guard -> panic). Defer instead: re-arm
+                // need-resched and let the OUTER frame run the single
+                // Schedule() on its way out, so the busy thread always
+                // iretqs out of frame #1 before another Schedule()
+                // lands. Only the timer drives this (it's the periodic
+                // preemption source); a nested device IRQ that legitly
+                // needs to reschedule still does so via the critnest
+                // path below. Gated on g_timer_nest_defer_enabled so the
+                // historical always-Schedule path can be restored.
+                if (g_timer_nest_defer_enabled && frame->vector == kTimerVector && IrqNestDepth() > 1)
+                {
+                    sched::SetNeedResched();
+                    __atomic_fetch_add(&g_timer_nest_defer_count, 1, __ATOMIC_RELAXED);
+                    KLOG_DEBUG_V("sched", "timer preempt deferred (nested IRQ)", IrqNestDepth());
+                }
+                else if (!cpu::DeferPreemptIfCritical())
                 {
                     sched::Schedule();
                 }
