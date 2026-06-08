@@ -26,6 +26,7 @@
 #include "apps/taskman.h"
 #include "apps/terminal.h"
 #include "apps/trash.h"
+#include "arch/x86_64/hypervisor.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/timer.h"
 #include "core/menu_dispatch.h"
@@ -158,23 +159,34 @@ void KbdReaderTask(void*)
     // takes effect on the very next repaint — don't cache.
     auto desktop_bg = []() { return duetos::drivers::video::ThemeCurrent().desktop_bg; };
 
-    // Software auto-repeat suppression. A held key auto-repeats; the
-    // ps2kbd typematic-rate set (0xF3) disables this on real hardware
-    // and QEMU, but VirtualBox ACKs that command and ignores it,
-    // driving repeat from the HOST as make/BREAK PAIRS — so a guard
-    // that keys off "a press with no intervening release" can't catch
-    // it, and the press-to-press interval (~180-330 ms observed)
-    // overlaps deliberate double-letter typing, so a fixed time
-    // window can't either. The reliable discriminator is the
-    // release->re-press GAP: the emulator's auto-repeat re-presses the
-    // same key only ~50-80 ms after its own release, which a human
-    // physically cannot do (a deliberate same-key re-type — "ll",
-    // "ee" — is >120 ms apart). So: when a key is re-pressed within
-    // kRepeatGapNs of its OWN release, treat it as the start of an
-    // auto-repeat RUN and suppress every further press of that key
-    // until a different key arrives or the key goes idle for
-    // kRunBreakNs. Result: tap = one char, held key = one char,
-    // genuine double-letters preserved.
+    // Software auto-repeat suppression — VirtualBox ONLY. A held key
+    // auto-repeats; the ps2kbd typematic-rate set (0xF3) disables this
+    // on real hardware, QEMU, KVM, and VMware, but VirtualBox ACKs that
+    // command and ignores it, driving repeat from the HOST as make/BREAK
+    // PAIRS — so a guard that keys off "a press with no intervening
+    // release" can't catch it, and the press-to-press interval
+    // (~180-330 ms observed) overlaps deliberate double-letter typing,
+    // so a fixed time window can't either. The reliable discriminator is
+    // the release->re-press GAP: VBox's auto-repeat re-presses the same
+    // key only ~50-80 ms after its own release, which a human physically
+    // cannot do (a deliberate same-key re-type — "ll", "ee" — is >120 ms
+    // apart). So under VBox: when a key is re-pressed within kRepeatGapNs
+    // of its OWN release, treat it as the start of an auto-repeat RUN and
+    // suppress every further press of that key until a different key
+    // arrives or the key goes idle for kRunBreakNs. Result: tap = one
+    // char, held key = one char, genuine double-letters preserved.
+    //
+    // Why this is gated to VBox (F-002): the 50-80 ms release->re-press
+    // window the heuristic keys off ALSO catches fast LEGITIMATE input —
+    // an automation/test sendkey burst, or a real fast typist (and QEMU
+    // sendkey delivers make+break instantaneously, so two back-to-back
+    // commands look like a sub-ms re-press). Applying the suppressor
+    // universally dropped genuine keys on every non-VBox host: typing
+    // "peek" fast came out "PEK", and a 6-press start-menu nav landed 3
+    // rows short, opening the wrong app. Since the 0xF3 typematic command
+    // genuinely disables host auto-repeat everywhere EXCEPT VBox, the
+    // suppressor is only ever needed under VBox — everywhere else it can
+    // only do harm. Gate it on the cached hypervisor kind.
     //
     // The clock is time::MonotonicNs() (HPET / clocksource-backed real
     // time), NOT time::TickCount() (scheduler ticks): the scheduler
@@ -182,6 +194,7 @@ void KbdReaderTask(void*)
     // register as <10 ticks and be wrongly eaten. MonotonicNs tracks
     // wall time on QEMU and VBox alike (falls back to TSC/PIT when HPET
     // is absent, as it is under VirtualBox).
+    const bool vbox_auto_repeat = duetos::arch::HypervisorInfoGet().kind == duetos::arch::HypervisorKind::VirtualBox;
     constexpr duetos::u64 kRepeatGapNs = 100'000'000ull; // 100 ms release->re-press
     constexpr duetos::u64 kRunBreakNs = 450'000'000ull;  // 450 ms idle ends a run
     duetos::u16 last_press_code = kKeyNone;              // last accepted (delivered) press
@@ -264,9 +277,13 @@ void KbdReaderTask(void*)
             continue;
         }
 
-        // Software auto-repeat suppression (see the declaration block
-        // above for the full rationale / why hardware + time-window
-        // approaches don't work under VirtualBox).
+        // Software auto-repeat suppression — VirtualBox ONLY (see the
+        // declaration block above for the full rationale / why hardware +
+        // time-window approaches don't work under VirtualBox, and why
+        // running this anywhere else drops genuine fast keystrokes, F-002).
+        // On QEMU / KVM / VMware / real HW the 0xF3 typematic command
+        // already disables host auto-repeat, so every press here is real.
+        if (vbox_auto_repeat)
         {
             const duetos::u64 now_ns = duetos::time::MonotonicNs();
             // Already eating an auto-repeat run for this key: keep
@@ -1663,7 +1680,7 @@ void KbdReaderTask(void*)
                 }
                 else if (active == duetos::apps::files::FilesWindow() &&
                          (ev.code == kKeyHome || ev.code == kKeyEnd || ev.code == kKeyPageUp ||
-                          ev.code == kKeyPageDown))
+                          ev.code == kKeyPageDown || ev.code == kKeyDelete || ev.code == kKeyF5))
                 {
                     app_consumed = duetos::apps::files::FilesFeedListKey(static_cast<duetos::u16>(ev.code));
                 }
@@ -2705,6 +2722,10 @@ void MouseReaderTask(void*)
                 if (is_dbl)
                 {
                     duetos::drivers::video::DesktopIconActivate(icon);
+                    // Auto-focus the URL bar when the browser icon is activated
+                    // so keyboard-first URL entry works immediately (F-032).
+                    if (duetos::drivers::video::DesktopIconWindow(icon) == duetos::apps::browser::BrowserWindow())
+                        duetos::apps::browser::BrowserFocusUrl();
                     duetos::drivers::video::CursorHide();
                     duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
                     duetos::drivers::video::CursorShow();

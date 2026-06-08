@@ -357,11 +357,17 @@ void NetStackInit()
     firewall::FwInit();
     tcp::Init();
 
-    // Walk the driver-layer NIC table. Today we just log a
-    // one-line-per-interface "would bind" record — there's no
-    // real TX/RX yet. The binding will be symmetric: each
-    // `drivers::net::NicInfo` gets one entry in an internal
-    // interface table keyed by (bus, device, function).
+    // Walk the driver-layer NIC table for a boot-log "would bind"
+    // record. This scan is diagnostic only: it does NOT drive
+    // InterfaceCount(). The real per-NIC binding happens later
+    // (asynchronously, from each driver's bring-up / DHCP path) via
+    // NetStackBindInterface, which is what advances g_interface_count.
+    // Counting here would be a lie — these enumerated NICs aren't
+    // bound yet, and the driver-assigned iface indices are sparse, so
+    // a 0..n pre-count never matches the slots the drivers actually
+    // populate. (This stale pre-count was the F-034 netstatus bug:
+    // NicCount() was 0 at init, so the count stuck at 0 even after the
+    // NICs bound.)
     const u64 n = drivers::net::NicCount();
     for (u64 i = 0; i < n; ++i)
     {
@@ -382,11 +388,10 @@ void NetStackInit()
             arch::SerialWrite(nic.family);
         }
         arch::SerialWrite(")\n");
-        ++g_interface_count;
     }
 
-    core::LogWithValue(core::LogLevel::Info, "net/stack", "interfaces registered", g_interface_count);
-    if (g_interface_count == 0)
+    core::LogWithValue(core::LogLevel::Info, "net/stack", "NICs enumerated (bind deferred to drivers)", n);
+    if (n == 0)
     {
         core::Log(core::LogLevel::Warn, "net/stack", "no NICs to bind — stack is up but silent");
     }
@@ -2118,6 +2123,17 @@ bool NetStackBindInterface(u32 iface_index, MacAddress mac, Ipv4Address ip, NetT
     g_interfaces[iface_index].tx = tx;
     g_interfaces[iface_index].bound = true;
     g_interfaces[iface_index].counters = IfaceCounters{};
+    // Interface bindings arrive AFTER NetStackInit's NicCount() scan
+    // (drivers bind asynchronously at NIC bring-up / DHCP completion),
+    // so the init-time count is stale — it never saw these slots. Keep
+    // InterfaceCount() covering every bound index so read-only consumers
+    // (the Network Status app, shell `ifconfig`) enumerate the live set
+    // instead of the empty boot-time snapshot. Indices are sparse and
+    // driver-assigned, so the count is the highest bound index + 1.
+    if (iface_index + 1 > g_interface_count)
+    {
+        g_interface_count = iface_index + 1;
+    }
     arch::SerialWrite("[net-stack] iface ");
     arch::SerialWriteHex(iface_index);
     arch::SerialWrite(" bound ip=");

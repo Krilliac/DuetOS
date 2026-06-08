@@ -49,11 +49,18 @@ void FilesPromoteToDisk();
 duetos::drivers::video::WindowHandle FilesWindow();
 
 /// Keyboard handler. Consumes:
-///   - Enter           — descend into the selected directory,
-///                       log the selected file's size.
-///   - Backspace / 'b' — ascend to parent.
-///   - 'j' / Arrow Dn  — move selection down.
-///   - 'k' / Arrow Up  — move selection up.
+///   - Enter           — descend into the selected directory or open
+///                       the selected file.
+///   - Backspace       — ascend to parent directory.
+///   - 'a'..'z','A'..'Z','0'..'9'
+///                     — type-ahead: accumulate a prefix buffer (reset
+///                       after ~1s idle) and jump the selection to the
+///                       first entry whose name starts with the prefix
+///                       (case-insensitive, Haiku / Windows Explorer
+///                       behaviour). Old bare-letter view-switch
+///                       shortcuts (d/m/t/f/r/s) are removed; use the
+///                       toolbar buttons (RAM/DISK/TRASH/DRIVE/REFRESH/
+///                       SORT) or Delete / F5 for destructive actions.
 /// Returns true iff consumed.
 bool FilesFeedChar(char c);
 
@@ -62,9 +69,15 @@ bool FilesFeedChar(char c);
 /// true iff consumed.
 bool FilesFeedArrow(bool up);
 
-/// Home / End / PageUp / PageDown handler for the active list.
-/// `code` is a VK navigation key (kKeyHome / kKeyEnd /
-/// kKeyPageUp / kKeyPageDown). Returns true iff consumed.
+/// Home / End / PageUp / PageDown / Delete / F5 handler for the
+/// active list.
+///   kKeyDelete — arm move-to-trash (Fat32 mode) or perm-delete
+///               (Trash mode) with a Y-confirmation prompt. Replaces
+///               the former bare 'x' shortcut.
+///   kKeyF5     — arm empty-trash in Trash mode. Replaces bare 'e'.
+///   Navigation codes (kKeyHome / kKeyEnd / kKeyPageUp / kKeyPageDown)
+///   move the selection and reset the type-ahead buffer.
+/// Returns true iff consumed.
 bool FilesFeedListKey(duetos::u16 code);
 
 /// One-shot self-test: verifies the root has at least one

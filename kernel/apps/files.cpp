@@ -4,7 +4,9 @@
 #include "apps/notes.h"
 #include "apps/trash.h"
 #include "arch/x86_64/serial.h"
+#include "arch/x86_64/timer.h"
 #include "diag/fix_journal.h"
+#include "log/klog.h"
 #include "drivers/input/ps2kbd.h"
 #include "drivers/input/ps2mouse.h"
 #include "drivers/video/app_widgets/app_button.h"
@@ -58,6 +60,12 @@ constexpr duetos::u64 kUserLaunchFrames = 512;
 
 constexpr u32 kMaxDepth = 8;
 constexpr u32 kFatMax = 64;
+// Back/Forward history length. Each entry records a (cluster, label) pair
+// for a visited directory. Independent of the path stack — the stack models
+// current position; the history enables Alt-Back / '[' revisits.
+constexpr u32 kFatHistMax = 16;
+// Type-ahead inter-key idle gap: 100 ticks @ 100 Hz = 1 second.
+constexpr u64 kTypeaheadTimeoutTicks = 100;
 constexpr u32 kGlyphW = 8;
 constexpr u32 kRowH = 10;
 constexpr u32 kInkFg = 0x00D0D8E0;
@@ -124,13 +132,34 @@ struct State
     u32 ramfs_depth;
     u32 ramfs_selection;
 
-    // Fat32 view (root only in v0). entries cached on entry to
-    // disk mode; refreshed via 'r' / on every mode toggle so newly
-    // written files (e.g. a fresh screenshot) appear without
-    // reboot.
+    // Fat32 view. entries cached on entry to disk mode; refreshed
+    // via 'r' / on every mode toggle so newly written files appear
+    // without reboot.
     duetos::fs::fat32::DirEntry fat_entries[kFatMax];
     u32 fat_count;
     u32 fat_selection;
+
+    // FAT32 subdirectory navigation stack. fat_depth==0 means root.
+    // Each frame beyond root records the cluster number of that
+    // directory and its short name for the path header.
+    u32 fat_path_clusters[kMaxDepth];   // cluster for each depth level (0=root cluster)
+    char fat_path_names[kMaxDepth][16]; // directory name at each depth
+    u32 fat_depth;                      // 0 = in root, >0 = in subdir
+
+    // Back/Forward history stack. Independent linear buffer; back_pos
+    // indexes the current position. Descending a subdir pushes a new
+    // entry (discarding any forward tail); ascending (Backspace) decrements
+    // back_pos; '[' / ']' move back_pos without altering fat_path_*.
+    // An entry stores the cluster of the directory we were in BEFORE the
+    // navigation, plus a display label for the header.
+    struct Fat32HistEntry
+    {
+        u32 cluster;
+        char name[64]; // path label (e.g. "DISK:/SUB/")
+    };
+    Fat32HistEntry fat_hist[kFatHistMax];
+    u32 fat_hist_len; // total entries stored
+    u32 fat_hist_pos; // current position (index into fat_hist of "where we came from")
 
     // Trash view — same shape as the Fat32 view but populated
     // from /TRASH instead of root. Separate selection so a
@@ -156,28 +185,19 @@ struct State
     // disarm cleanly.
     Pending pending;
     u32 pending_idx;
+
+    // Type-ahead prefix buffer. Accumulates alphanumeric key presses
+    // and resets after kTypeaheadTimeoutTicks idle ticks. Each append
+    // scans the current listing for the first entry whose name begins
+    // (case-insensitively) with the buffered prefix and moves the
+    // selection there. If no match is found the buffer stays unchanged
+    // so the user can see their prefix and backspace to correct it.
+    char typeahead_buf[32];
+    u32 typeahead_len;
+    u64 typeahead_tick; // tick stamp of the last typeahead key press
 };
 
-constinit State g_state = {duetos::drivers::video::kWindowInvalid,
-                           Mode::Ramfs,
-                           SortMode::Name,
-                           {},
-                           0,
-                           0,
-                           {},
-                           0,
-                           0,
-                           {},
-                           0,
-                           0,
-                           {},
-                           0,
-                           0,
-                           {},
-                           {},
-                           0,
-                           Pending::None,
-                           0};
+constinit State g_state = {};
 
 // ---- Pass D chrome: AppToolbar header + 6 mode/action buttons +
 // AppLabel footer hint. The list rows themselves remain raw paint
@@ -402,6 +422,132 @@ void SortTrashEntries()
     SortFat32Array(g_state.trash_entries, g_state.trash_count, g_state.sort);
 }
 
+// ---- Type-ahead helpers -----------------------------------------------
+
+// Reset the type-ahead buffer. Called on mode-switch, navigation,
+// or after the idle timeout fires.
+void TypeaheadReset()
+{
+    g_state.typeahead_len = 0;
+    g_state.typeahead_buf[0] = '\0';
+    g_state.typeahead_tick = 0;
+}
+
+// Case-insensitive prefix match: does `name` start with the
+// buffered prefix? Returns true if prefix is empty (matches all).
+bool TypeaheadNameMatches(const char* name)
+{
+    if (g_state.typeahead_len == 0)
+        return true;
+    for (u32 i = 0; i < g_state.typeahead_len; ++i)
+    {
+        if (name[i] == '\0')
+            return false; // name shorter than prefix
+        char nc = name[i];
+        char pc = g_state.typeahead_buf[i];
+        if (nc >= 'a' && nc <= 'z')
+            nc = static_cast<char>(nc - 32);
+        if (pc >= 'a' && pc <= 'z')
+            pc = static_cast<char>(pc - 32);
+        if (nc != pc)
+            return false;
+    }
+    return true;
+}
+
+// Scan the current mode's entry list for the first entry whose name
+// begins with the type-ahead prefix. If found, moves the selection
+// there and returns true. If not found, leaves the selection
+// unchanged and returns false.
+bool TypeaheadSearch()
+{
+    if (g_state.typeahead_len == 0)
+        return false;
+    if (g_state.mode == Mode::Fat32)
+    {
+        for (u32 i = 0; i < g_state.fat_count; ++i)
+        {
+            if (TypeaheadNameMatches(g_state.fat_entries[i].name))
+            {
+                g_state.fat_selection = i;
+                KLOG_DEBUG_S("files", "typeahead fat32 match", "prefix", g_state.typeahead_buf);
+                return true;
+            }
+        }
+        KLOG_DEBUG_S("files", "typeahead fat32 no match", "prefix", g_state.typeahead_buf);
+        return false;
+    }
+    if (g_state.mode == Mode::Trash)
+    {
+        for (u32 i = 0; i < g_state.trash_count; ++i)
+        {
+            if (TypeaheadNameMatches(g_state.trash_entries[i].name))
+            {
+                g_state.trash_selection = i;
+                KLOG_DEBUG_S("files", "typeahead trash match", "prefix", g_state.typeahead_buf);
+                return true;
+            }
+        }
+        return false;
+    }
+    if (g_state.mode == Mode::DuetFs)
+    {
+        for (u32 i = 0; i < g_state.duet_count; ++i)
+        {
+            // DuetFS names are stored as u8[] with a separate length;
+            // build a small NUL-terminated copy for the prefix check.
+            char nm[65];
+            const u32 nl = g_state.duet_entries[i].name_len < 64 ? g_state.duet_entries[i].name_len : 64;
+            for (u32 k = 0; k < nl; ++k)
+                nm[k] = static_cast<char>(g_state.duet_entries[i].name[k]);
+            nm[nl] = '\0';
+            if (TypeaheadNameMatches(nm))
+            {
+                g_state.duet_selection = i;
+                KLOG_DEBUG_S("files", "typeahead duetfs match", "prefix", g_state.typeahead_buf);
+                return true;
+            }
+        }
+        return false;
+    }
+    // Ramfs mode.
+    const duetos::fs::RamfsNode* cur = g_state.ramfs_depth > 0 ? g_state.ramfs_stack[g_state.ramfs_depth - 1] : nullptr;
+    if (cur == nullptr || cur->children == nullptr)
+        return false;
+    for (u32 i = 0; cur->children[i] != nullptr; ++i)
+    {
+        const char* name = cur->children[i]->name;
+        if (name != nullptr && TypeaheadNameMatches(name))
+        {
+            g_state.ramfs_selection = i;
+            KLOG_DEBUG_S("files", "typeahead ramfs match", "prefix", g_state.typeahead_buf);
+            return true;
+        }
+    }
+    return false;
+}
+
+// Append one alphanumeric character to the type-ahead buffer,
+// resetting first if the inter-key gap exceeded the timeout.
+// Then scans for the first prefix match and moves the selection.
+void TypeaheadAppend(char c)
+{
+    const u64 now = duetos::arch::TimerTicks();
+    if (g_state.typeahead_tick != 0 && (now - g_state.typeahead_tick) >= kTypeaheadTimeoutTicks)
+    {
+        TypeaheadReset();
+        KLOG_DEBUG("files", "typeahead timeout reset");
+    }
+    if (g_state.typeahead_len + 1 < sizeof(g_state.typeahead_buf))
+    {
+        g_state.typeahead_buf[g_state.typeahead_len++] = c;
+        g_state.typeahead_buf[g_state.typeahead_len] = '\0';
+    }
+    g_state.typeahead_tick = now;
+    TypeaheadSearch();
+    KLOG_DEBUG_S("files", "typeahead append", "buf", g_state.typeahead_buf);
+}
+
 u32 CountChildren(const duetos::fs::RamfsNode* dir)
 {
     if (dir == nullptr || dir->children == nullptr)
@@ -419,6 +565,163 @@ const duetos::fs::RamfsNode* RamfsCur()
     return g_state.ramfs_stack[g_state.ramfs_depth - 1];
 }
 
+// Forward declaration — defined after RescanFat32 helpers below.
+void RescanFat32();
+
+// Return the cluster number for the current FAT32 directory.
+// fat_depth==0 => root cluster; fat_depth>0 => the cluster stored at the
+// top of the path stack.
+u32 Fat32CurrentCluster()
+{
+    const duetos::fs::fat32::Volume* v = duetos::fs::fat32::Fat32Volume(0);
+    if (v == nullptr)
+        return 0;
+    if (g_state.fat_depth == 0)
+        return v->root_cluster;
+    return g_state.fat_path_clusters[g_state.fat_depth - 1];
+}
+
+// Build the path header string for the current FAT32 directory, e.g.
+// "DISK:/" at root, "DISK:/SUB/" one level deep.
+void Fat32BuildPathHeader(char* out, u32 cap)
+{
+    u32 o = 0;
+    const char* prefix = "DISK:/";
+    for (u32 i = 0; prefix[i] != '\0' && o + 1 < cap; ++i)
+        out[o++] = prefix[i];
+    for (u32 d = 0; d < g_state.fat_depth && o + 1 < cap; ++d)
+    {
+        for (u32 j = 0; g_state.fat_path_names[d][j] != '\0' && o + 1 < cap; ++j)
+            out[o++] = g_state.fat_path_names[d][j];
+        if (o + 1 < cap)
+            out[o++] = '/';
+    }
+    out[o] = '\0';
+}
+
+// Push the current directory position onto the back/forward history, then
+// descend into the subdirectory entry `e`. Updates fat_depth and the path
+// name stack; the caller must call RescanFat32() after to populate the listing.
+// Returns false if the depth cap would be exceeded or the volume is unavailable.
+bool Fat32DescendInto(const duetos::fs::fat32::DirEntry& e)
+{
+    if (g_state.fat_depth >= kMaxDepth)
+        return false;
+    // Push history entry: record the cluster we are LEAVING so going
+    // back can re-list it. Discard any forward tail (pos was pointing
+    // at the end already from normal navigation; trim in case the user
+    // went back then descended a different child).
+    const u32 leaving_cluster = Fat32CurrentCluster();
+    char leaving_label[64];
+    Fat32BuildPathHeader(leaving_label, sizeof(leaving_label));
+    // Trim forward tail at fat_hist_pos.
+    g_state.fat_hist_len = g_state.fat_hist_pos;
+    if (g_state.fat_hist_len < kFatHistMax)
+    {
+        State::Fat32HistEntry& he = g_state.fat_hist[g_state.fat_hist_len];
+        he.cluster = leaving_cluster;
+        u32 j = 0;
+        while (leaving_label[j] != '\0' && j + 1 < sizeof(he.name))
+        {
+            he.name[j] = leaving_label[j];
+            ++j;
+        }
+        he.name[j] = '\0';
+        ++g_state.fat_hist_len;
+        g_state.fat_hist_pos = g_state.fat_hist_len;
+    }
+    // Push the path frame.
+    g_state.fat_path_clusters[g_state.fat_depth] = e.first_cluster;
+    u32 ni = 0;
+    for (; e.name[ni] != '\0' && ni + 1 < sizeof(g_state.fat_path_names[0]); ++ni)
+        g_state.fat_path_names[g_state.fat_depth][ni] = e.name[ni];
+    g_state.fat_path_names[g_state.fat_depth][ni] = '\0';
+    ++g_state.fat_depth;
+    g_state.fat_selection = 0;
+    KLOG_DEBUG_S("files", "fat32 descend into", "name", e.name);
+    return true;
+}
+
+// Pop the current directory off the path stack (go to parent). Decrements
+// fat_depth and adjusts fat_hist_pos so '[' / ']' history still works.
+// Returns false if already at root.
+bool Fat32AscendToParent()
+{
+    if (g_state.fat_depth == 0)
+        return false;
+    --g_state.fat_depth;
+    // Walk history position back one slot to match where we came from.
+    if (g_state.fat_hist_pos > 0)
+        --g_state.fat_hist_pos;
+    g_state.fat_selection = 0;
+    KLOG_DEBUG("files", "fat32 ascend to parent");
+    return true;
+}
+
+// Navigate back in history without altering the path stack in the same way
+// as ascent — instead, restore the historical cluster + label directly.
+// Called on '[' key press.
+void Fat32HistBack()
+{
+    if (g_state.fat_hist_pos == 0)
+    {
+        duetos::drivers::video::NotifyShow("at beginning of history");
+        return;
+    }
+    --g_state.fat_hist_pos;
+    // Restore path stack to the state recorded in history[fat_hist_pos]:
+    // the cluster stored there is the directory we were in at that point.
+    // Rebuild fat_depth by re-walking from 0 is complex; instead we simply
+    // set fat_depth = 0 if going all the way to root cluster, else we patch
+    // the top path frame to match. A simpler approach: store the full depth
+    // in each history entry is future work — for now Backspace handles the
+    // common parent-go-back, '[' handles the less-common full jump.
+    // For v0 of Back/Forward, '[' is equivalent to repeated Backspace presses
+    // (implemented as: pop one depth level if we have one).
+    if (g_state.fat_depth > 0)
+        --g_state.fat_depth;
+    g_state.fat_selection = 0;
+    RescanFat32();
+    duetos::drivers::video::NotifyShow("back");
+    KLOG_DEBUG("files", "fat32 history back");
+}
+
+// Navigate forward in history — re-descend after going back.
+// Called on ']' key press.
+void Fat32HistForward()
+{
+    if (g_state.fat_hist_pos >= g_state.fat_hist_len)
+    {
+        duetos::drivers::video::NotifyShow("at end of history");
+        return;
+    }
+    // The forward entry tells us the cluster to enter. Rebuild the
+    // path frame for it. For v0 the name is not stored directly; we
+    // rely on the listing to show the directory's contents. The
+    // cluster is enough for RescanFat32.
+    const State::Fat32HistEntry& he = g_state.fat_hist[g_state.fat_hist_pos];
+    if (g_state.fat_depth < kMaxDepth)
+    {
+        g_state.fat_path_clusters[g_state.fat_depth] = he.cluster;
+        // Name: derive from history label tail (after last '/').
+        const char* lbl = he.name;
+        u32 last_slash = 0;
+        for (u32 i = 0; lbl[i] != '\0'; ++i)
+            if (lbl[i] == '/')
+                last_slash = i + 1;
+        u32 ni = 0;
+        for (u32 i = last_slash; lbl[i] != '\0' && lbl[i] != '/' && ni + 1 < sizeof(g_state.fat_path_names[0]); ++i)
+            g_state.fat_path_names[g_state.fat_depth][ni++] = lbl[i];
+        g_state.fat_path_names[g_state.fat_depth][ni] = '\0';
+        ++g_state.fat_depth;
+        ++g_state.fat_hist_pos;
+    }
+    g_state.fat_selection = 0;
+    RescanFat32();
+    duetos::drivers::video::NotifyShow("forward");
+    KLOG_DEBUG("files", "fat32 history forward");
+}
+
 void RescanFat32()
 {
     namespace fat = fs::fat32;
@@ -426,16 +729,17 @@ void RescanFat32()
     const fat::Volume* v = fat::Fat32Volume(0);
     if (v == nullptr)
         return;
+    const u32 scan_cluster = Fat32CurrentCluster();
     fat::DirEntry tmp[fat::kMaxDirEntries];
-    const u32 n = fat::Fat32ListDirByCluster(v, v->root_cluster, tmp, fat::kMaxDirEntries);
+    const u32 n = fat::Fat32ListDirByCluster(v, scan_cluster, tmp, fat::kMaxDirEntries);
+    const bool at_root = (g_state.fat_depth == 0);
     for (u32 i = 0; i < n && g_state.fat_count < kFatMax; ++i)
     {
-        // Hide the TRASH directory from the Fat32 view — users
-        // reach it through the T-toggle, and showing it here
-        // would let them descend into the bin via Enter (which
-        // v0 doesn't support for any subdir).
         const auto& e = tmp[i];
-        if ((e.attributes & 0x10) != 0)
+        // Hide the TRASH directory from the root Fat32 view — users
+        // reach it through the T-toggle. In subdirectories all entries
+        // are shown (there is no TRASH subdir below root by construction).
+        if (at_root && (e.attributes & 0x10) != 0)
         {
             const char* name = e.name;
             if (name[0] == 'T' && name[1] == 'R' && name[2] == 'A' && name[3] == 'S' && name[4] == 'H' &&
@@ -445,6 +749,7 @@ void RescanFat32()
         g_state.fat_entries[g_state.fat_count++] = e;
     }
     SortFat32Entries();
+    KLOG_DEBUG_S("files", "fat32 rescan", "path", at_root ? "DISK:/" : g_state.fat_path_names[g_state.fat_depth - 1]);
 }
 
 void RescanTrash()
@@ -489,6 +794,61 @@ void RescanDuetFs()
         start += static_cast<u32>(got);
     }
 }
+
+// ---- Mode-switch helpers (shared by toolbar trampolines + self-test)
+// Defined here, after all Rescan* functions they depend on.
+
+void SwitchToRam()
+{
+    if (g_state.mode != Mode::Ramfs)
+    {
+        g_state.mode = Mode::Ramfs;
+        TypeaheadReset();
+        duetos::drivers::video::NotifyShow("files: ram view");
+    }
+}
+
+void SwitchToDisk()
+{
+    if (g_state.mode != Mode::Fat32)
+    {
+        g_state.mode = Mode::Fat32;
+        g_state.fat_selection = 0;
+        g_state.fat_depth = 0;
+        g_state.fat_hist_len = 0;
+        g_state.fat_hist_pos = 0;
+        TypeaheadReset();
+        RescanFat32();
+        duetos::drivers::video::NotifyShow("files: disk view");
+    }
+}
+
+void SwitchToTrash()
+{
+    if (g_state.mode != Mode::Trash)
+    {
+        g_state.mode = Mode::Trash;
+        g_state.trash_selection = 0;
+        TypeaheadReset();
+        RescanTrash();
+        duetos::drivers::video::NotifyShow("files: trash view");
+    }
+}
+
+void SwitchToDrive()
+{
+    if (g_state.mode != Mode::DuetFs)
+    {
+        g_state.mode = Mode::DuetFs;
+        g_state.duet_selection = 0;
+        g_state.duet_depth = 0;
+        TypeaheadReset();
+        RescanDuetFs();
+        duetos::drivers::video::NotifyShow("files: main drive");
+    }
+}
+
+// ---- End mode-switch helpers ------------------------------------------
 
 u32 ModeCount()
 {
@@ -603,9 +963,42 @@ void DrawListHeaderWithCount(u32 cx, u32 cy, const char* path, u32 count, u32 co
     duetos::drivers::video::FramebufferDrawString(cx + 4, cy + 2, line, color, kBg);
 }
 
-// Generic row painter — takes the type tag, name, and size; the
-// per-mode draw paths assemble these from their entry types.
-void DrawRowGeneric(u32 x, u32 y, u32 w, bool is_dir, const char* name, u64 size_bytes, bool selected)
+// Format a FAT mtime_date word (bytes 24-25 of the SFN record) into
+// "YYYY-MM-DD\0" (11 bytes). date==0 means no date available.
+// FAT date: bits 15-9 = year offset from 1980, 8-5 = month (1-12), 4-0 = day (1-31).
+void FormatFatDate(u16 date, char* out)
+{
+    if (date == 0)
+    {
+        out[0] = '\0';
+        return;
+    }
+    const u32 year = ((date >> 9) & 0x7F) + 1980;
+    const u32 month = (date >> 5) & 0x0F;
+    const u32 day = date & 0x1F;
+    // YYYY-MM-DD
+    auto put2 = [](char* p, u32 v)
+    {
+        p[0] = static_cast<char>('0' + v / 10);
+        p[1] = static_cast<char>('0' + v % 10);
+    };
+    // year (4 digits)
+    out[0] = static_cast<char>('0' + year / 1000);
+    out[1] = static_cast<char>('0' + (year / 100) % 10);
+    out[2] = static_cast<char>('0' + (year / 10) % 10);
+    out[3] = static_cast<char>('0' + year % 10);
+    out[4] = '-';
+    put2(out + 5, month);
+    out[7] = '-';
+    put2(out + 8, day);
+    out[10] = '\0';
+}
+
+// Generic row painter — takes the type tag, name, size, and optional FAT
+// date word. `mtime_date==0` suppresses the date column. The per-mode
+// draw paths assemble these from their entry types; non-FAT modes pass 0.
+void DrawRowGeneric(u32 x, u32 y, u32 w, bool is_dir, const char* name, u64 size_bytes, bool selected,
+                    u16 mtime_date = 0)
 {
     using duetos::drivers::video::FramebufferDrawString;
     using duetos::drivers::video::FramebufferFillRect;
@@ -619,6 +1012,13 @@ void DrawRowGeneric(u32 x, u32 y, u32 w, bool is_dir, const char* name, u64 size
     FramebufferDrawString(x + 4, y + 1, tag, fg, bg);
     const char* dn = (name != nullptr && name[0] != '\0') ? name : "(root)";
     FramebufferDrawString(x + 4 + 4 * kGlyphW, y + 1, dn, fg, bg);
+
+    // Right-aligned columns: modified date (if available) then size (if file).
+    // Layout: right edge → [size] ← [space] ← [date] ← ...
+    // Date column is 10 chars ("YYYY-MM-DD") + 1 space = 11 glyphs wide.
+    const u32 right = x + w - 4;
+    u32 right_cursor = right;
+
     if (!is_dir)
     {
         char num[24];
@@ -626,13 +1026,27 @@ void DrawRowGeneric(u32 x, u32 y, u32 w, bool is_dir, const char* name, u64 size
         u32 len = 0;
         while (num[len] != '\0')
             ++len;
-        const u32 bytes_len = 6;
-        const u32 right = x + w - 4;
-        if (right > (len + bytes_len) * kGlyphW + 8)
+        const u32 bytes_label_len = 6; // " BYTES"
+        const u32 size_col_w = (len + bytes_label_len) * kGlyphW;
+        if (right_cursor > size_col_w + 8)
         {
-            const u32 nx = right - (len + bytes_len) * kGlyphW;
+            const u32 nx = right_cursor - size_col_w;
             FramebufferDrawString(nx, y + 1, num, fg, bg);
             FramebufferDrawString(nx + len * kGlyphW, y + 1, " BYTES", selected ? kInkSel : kInkDim, bg);
+            right_cursor = nx - kGlyphW; // one-glyph gap before next column
+        }
+    }
+
+    // Date column (10 chars + separator space).
+    if (mtime_date != 0)
+    {
+        char date_str[12];
+        FormatFatDate(mtime_date, date_str);
+        const u32 date_col_w = 10 * kGlyphW;
+        if (right_cursor > date_col_w + 4)
+        {
+            const u32 dx = right_cursor - date_col_w;
+            FramebufferDrawString(dx, y + 1, date_str, selected ? kInkSel : kInkDim, bg);
         }
     }
 }
@@ -697,12 +1111,8 @@ void DrawFat32(u32 cx, u32 cy, u32 cw, u32 ch)
     using duetos::drivers::video::FramebufferFillRect;
     FramebufferFillRect(cx, cy, cw, ch, kBg);
 
-    char header[40];
-    u32 h_off = 0;
-    const char* prefix = "DISK:/";
-    for (u32 i = 0; prefix[i] != '\0' && h_off + 1 < sizeof(header); ++i)
-        header[h_off++] = prefix[i];
-    header[h_off] = '\0';
+    char header[80];
+    Fat32BuildPathHeader(header, sizeof(header));
     DrawListHeaderWithCount(cx, cy, header, g_state.fat_count, 0x0080F088, SortModeName(g_state.sort));
 
     if (g_state.fat_count == 0)
@@ -725,7 +1135,8 @@ void DrawFat32(u32 cx, u32 cy, u32 cw, u32 ch)
         const u32 idx = first + i;
         const auto& e = g_state.fat_entries[idx];
         const bool is_dir = (e.attributes & 0x10) != 0;
-        DrawRowGeneric(cx, list_top + i * kRowH, list_w, is_dir, e.name, e.size_bytes, idx == g_state.fat_selection);
+        DrawRowGeneric(cx, list_top + i * kRowH, list_w, is_dir, e.name, e.size_bytes, idx == g_state.fat_selection,
+                       e.mtime_date);
     }
     // Scrollbar at the right edge of the row area.
     if (max_rows > 0 && cw > duetos::drivers::video::kScrollbarWidth)
@@ -911,21 +1322,27 @@ void RefreshFooterText()
     }
     else
     {
-        // Per-mode hint. Matches the strings the legacy inline
-        // footer code used to paint per-mode at the same screen
-        // slot.
-        const char* hint = "UP/DN ENTER:OPEN B:BACK D:DISK F:DRIVE";
+        // Per-mode hint. Shows keyboard shortcuts still available
+        // (navigation, Enter, Backspace); view switches now use
+        // the toolbar buttons. Letters / digits do type-ahead;
+        // Del = delete/trash; F5 = empty trash.
+        const char* hint = "UP/DN ENTER:OPEN BKSP:BACK  TYPE:JUMP";
         if (g_state.mode == Mode::Fat32)
         {
-            hint = (g_state.fat_count == 0) ? "M:RAM  R:RESCAN" : "ENTER:OPEN R:RESCAN X:TRASH T:TRASH M:RAM F:DRIVE";
+            if (g_state.fat_count == 0)
+                hint = "TOOLBAR:VIEW  TYPE:JUMP";
+            else if (g_state.fat_depth > 0)
+                hint = "ENTER:OPEN BKSP:UP []:HIST DEL:TRASH TYPE:JUMP";
+            else
+                hint = "ENTER:OPEN/ENTER-DIR DEL:TRASH []:HIST TYPE:JUMP";
         }
         else if (g_state.mode == Mode::Trash)
         {
-            hint = (g_state.trash_count == 0) ? "D:DISK  M:RAM" : "R:RESTORE  X:PERM-DEL  E:EMPTY  D:DISK  M:RAM";
+            hint = (g_state.trash_count == 0) ? "TOOLBAR:VIEW" : "DEL:PERM-DEL  F5:EMPTY  TYPE:JUMP";
         }
         else if (g_state.mode == Mode::DuetFs)
         {
-            hint = (g_state.duet_count == 0) ? "B:BACK  M:RAM  D:DISK" : "UP/DN ENTER:OPEN B:BACK M:RAM D:DISK";
+            hint = (g_state.duet_count == 0) ? "BKSP:BACK  TYPE:JUMP" : "ENTER:OPEN BKSP:BACK  TYPE:JUMP";
         }
         FooterAppend(g_footer_text, sizeof(g_footer_text), &o, hint);
     }
@@ -1097,11 +1514,25 @@ bool OpenFat32Selected()
     const auto& e = g_state.fat_entries[g_state.fat_selection];
     if ((e.attributes & 0x10) != 0)
     {
-        // v0: no FAT32 directory descent. Log + notify.
-        duetos::arch::SerialWrite("[files] (fat32 dir descent not supported in v0): ");
-        duetos::arch::SerialWrite(e.name);
-        duetos::arch::SerialWrite("\n");
-        duetos::drivers::video::NotifyShow("subdir descent not in v0");
+        // Directory entry — descend into it.
+        if (Fat32DescendInto(e))
+        {
+            RescanFat32();
+            char msg[32];
+            u32 mi = 0;
+            const char* prefix = "entered: ";
+            for (u32 i = 0; prefix[i] != '\0' && mi + 1 < sizeof(msg); ++i)
+                msg[mi++] = prefix[i];
+            for (u32 i = 0; e.name[i] != '\0' && mi + 1 < sizeof(msg); ++i)
+                msg[mi++] = e.name[i];
+            msg[mi] = '\0';
+            duetos::drivers::video::NotifyShow(msg);
+            duetos::arch::SerialWrite("[files] fat32 descend cluster=");
+            duetos::arch::SerialWriteHex(e.first_cluster);
+            duetos::arch::SerialWrite(" name=");
+            duetos::arch::SerialWrite(e.name);
+            duetos::arch::SerialWrite("\n");
+        }
         return true;
     }
     if (EndsWithCi(e.name, ".BMP"))
@@ -1290,36 +1721,110 @@ void EmptyTrashAll()
 }
 
 // ---- Pass D toolbar click trampolines (forward-declared above
-// the constinit g_files). Each routes through the equivalent
-// FilesFeedChar keybind so the click + key surfaces stay in
-// lock-step automatically — adding a new keybind branch
-// propagates to the button for free. Trampolines exist (rather
-// than binding FilesFeedChar directly) because AppButton's
-// `on_click` is `void(*)()`, not `bool(*)(char)`.
+// the constinit g_files). Each calls the mode-switch / action
+// helper directly so the click path remains independent of the
+// letter-key dispatch — letter keys now drive type-ahead, not
+// view switches. Trampolines exist (rather than binding the
+// helper directly) because AppButton's `on_click` is
+// `void(*)()`, not the helper's signature.
 
 void ClickModeRam()
 {
-    duetos::apps::files::FilesFeedChar('m');
+    SwitchToRam();
 }
 void ClickModeDisk()
 {
-    duetos::apps::files::FilesFeedChar('d');
+    SwitchToDisk();
 }
 void ClickModeTrash()
 {
-    duetos::apps::files::FilesFeedChar('t');
+    SwitchToTrash();
 }
 void ClickModeDrive()
 {
-    duetos::apps::files::FilesFeedChar('f');
+    SwitchToDrive();
 }
 void ClickRefresh()
 {
-    duetos::apps::files::FilesFeedChar('r');
+    // Refresh is mode-dependent: disk view rescans FAT32, trash
+    // view rescans the bin; other views have no backend to re-read.
+    if (g_state.mode == Mode::Fat32)
+    {
+        const u32 prev_sel = g_state.fat_selection;
+        RescanFat32();
+        if (prev_sel >= g_state.fat_count)
+            g_state.fat_selection = (g_state.fat_count > 0) ? (g_state.fat_count - 1) : 0;
+        else
+            g_state.fat_selection = prev_sel;
+        TypeaheadReset();
+        duetos::drivers::video::NotifyShow("files: rescan");
+    }
+    else if (g_state.mode == Mode::Trash)
+    {
+        RescanTrash();
+        TypeaheadReset();
+        duetos::drivers::video::NotifyShow("files: rescan");
+    }
 }
 void ClickSort()
 {
-    duetos::apps::files::FilesFeedChar('s');
+    // Cycle sort mode. Mirrors the sort logic previously in
+    // FilesFeedChar('s') — extracted so the toolbar can call it
+    // without going through the letter-key dispatch.
+    const auto next = static_cast<u8>(g_state.sort) + 1;
+    g_state.sort = (next >= static_cast<u8>(SortMode::kCount)) ? SortMode::Name : static_cast<SortMode>(next);
+    char saved_name[128] = {};
+    u32 nlen = 0;
+    if (g_state.mode == Mode::Fat32 && g_state.fat_selection < g_state.fat_count)
+    {
+        const char* sn = g_state.fat_entries[g_state.fat_selection].name;
+        for (; nlen + 1 < sizeof(saved_name) && sn[nlen] != '\0'; ++nlen)
+            saved_name[nlen] = sn[nlen];
+    }
+    else if (g_state.mode == Mode::Trash && g_state.trash_selection < g_state.trash_count)
+    {
+        const char* sn = g_state.trash_entries[g_state.trash_selection].name;
+        for (; nlen + 1 < sizeof(saved_name) && sn[nlen] != '\0'; ++nlen)
+            saved_name[nlen] = sn[nlen];
+    }
+    SortFat32Entries();
+    SortTrashEntries();
+    if (nlen > 0)
+    {
+        if (g_state.mode == Mode::Fat32)
+        {
+            for (u32 i = 0; i < g_state.fat_count; ++i)
+            {
+                if (FilesNameCmpCi(g_state.fat_entries[i].name, saved_name) == 0)
+                {
+                    g_state.fat_selection = i;
+                    break;
+                }
+            }
+        }
+        else if (g_state.mode == Mode::Trash)
+        {
+            for (u32 i = 0; i < g_state.trash_count; ++i)
+            {
+                if (FilesNameCmpCi(g_state.trash_entries[i].name, saved_name) == 0)
+                {
+                    g_state.trash_selection = i;
+                    break;
+                }
+            }
+        }
+    }
+    TypeaheadReset();
+    char msg[32];
+    u32 mo = 0;
+    const char* lead = "files: sort by ";
+    for (u32 i = 0; lead[i] != '\0' && mo + 1 < sizeof(msg); ++i)
+        msg[mo++] = lead[i];
+    const char* sname = SortModeName(g_state.sort);
+    for (u32 i = 0; sname[i] != '\0' && mo + 1 < sizeof(msg); ++i)
+        msg[mo++] = sname[i];
+    msg[mo] = '\0';
+    duetos::drivers::video::NotifyShow(msg);
 }
 
 } // namespace
@@ -1332,6 +1837,9 @@ void FilesInit(duetos::drivers::video::WindowHandle handle)
     g_state.ramfs_selection = 0;
     g_state.fat_count = 0;
     g_state.fat_selection = 0;
+    g_state.fat_depth = 0;
+    g_state.fat_hist_len = 0;
+    g_state.fat_hist_pos = 0;
     g_state.trash_count = 0;
     g_state.trash_selection = 0;
     g_state.pending = Pending::None;
@@ -1436,14 +1944,20 @@ void FilesPromoteToDisk()
         return;
     g_state.mode = Mode::Fat32;
     g_state.fat_selection = 0;
+    g_state.fat_depth = 0;
+    g_state.fat_hist_len = 0;
+    g_state.fat_hist_pos = 0;
     RescanFat32();
 }
 
 bool FilesFeedArrow(bool up)
 {
-    // Any navigation cancels a pending prompt — keeps every
-    // confirmation flow strictly modal at the caret.
+    // Any navigation cancels a pending prompt and clears the
+    // type-ahead buffer — keeps every confirmation flow strictly
+    // modal at the caret and avoids a stale prefix after the user
+    // manually repositions with the arrow keys.
     g_state.pending = Pending::None;
+    TypeaheadReset();
     const u32 n = ModeCount();
     if (n == 0)
         return true;
@@ -1483,12 +1997,56 @@ u32 FilesListVisibleRows()
     return (content_h > (list_top - content_y) + kRowH) ? (content_h - (list_top - content_y)) / kRowH : 0;
 }
 
-// Home / End / PageUp / PageDown for the active list. Matches the
-// list-navigation surface sibling apps (calendar, hexview,
+// Home / End / PageUp / PageDown / Delete / F5 for the active list.
+// Matches the list-navigation surface sibling apps (calendar, hexview,
 // notify-center) already expose. `code` is a VK navigation key.
+//   Delete — arm move-to-trash (Fat32) or perm-delete (Trash).
+//            Replaces the former bare 'x' shortcut; both are now
+//            equivalent to the X-then-Y two-step confirmation. No
+//            toolbar button for destructive delete — kept on a
+//            non-letter key so letters are free for type-ahead.
+//   F5     — arm empty-trash in Trash mode (replaces bare 'e').
+//            Kept off letters for the same reason as Delete.
 bool FilesFeedListKey(duetos::u16 code)
 {
     g_state.pending = Pending::None;
+    TypeaheadReset();
+
+    // Delete — mode-sensitive destructive action (no navigation).
+    if (code == duetos::drivers::input::kKeyDelete)
+    {
+        if (g_state.mode == Mode::Fat32 && g_state.fat_selection < g_state.fat_count)
+        {
+            const auto& e = g_state.fat_entries[g_state.fat_selection];
+            if ((e.attributes & 0x10) != 0)
+            {
+                duetos::drivers::video::NotifyShow("cannot trash directories");
+                return true;
+            }
+            g_state.pending = Pending::DeleteToTrash;
+            g_state.pending_idx = g_state.fat_selection;
+            duetos::drivers::video::NotifyShow("press Y to move to trash");
+        }
+        else if (g_state.mode == Mode::Trash && g_state.trash_selection < g_state.trash_count)
+        {
+            g_state.pending = Pending::PermDeleteFromTrash;
+            g_state.pending_idx = g_state.trash_selection;
+            duetos::drivers::video::NotifyShow("press Y to perm-delete");
+        }
+        return true;
+    }
+    // F5 — empty trash (only meaningful in Trash mode).
+    if (code == duetos::drivers::input::kKeyF5)
+    {
+        if (g_state.mode == Mode::Trash && g_state.trash_count > 0)
+        {
+            g_state.pending = Pending::EmptyTrash;
+            g_state.pending_idx = 0;
+            duetos::drivers::video::NotifyShow("press Y to empty trash");
+        }
+        return true;
+    }
+
     const u32 n = ModeCount();
     if (n == 0)
         return true;
@@ -1514,11 +2072,14 @@ bool FilesFeedChar(char c)
 {
     // Pending two-step prompts. 'Y' confirms whatever was armed,
     // anything else cancels. This branch comes first so a stale
-    // arm followed by an unrelated key cleanly disarms.
+    // arm followed by an unrelated key cleanly disarms. The
+    // pending prompt overrides type-ahead so a destructive action
+    // can never be accidentally confirmed by a mistyped prefix.
     if (g_state.pending != Pending::None)
     {
         const Pending p = g_state.pending;
         g_state.pending = Pending::None;
+        TypeaheadReset();
         if (c == 'y' || c == 'Y')
         {
             switch (p)
@@ -1542,181 +2103,9 @@ bool FilesFeedChar(char c)
         }
         return true;
     }
-    if (c == 'j' || c == 'J')
-        return FilesFeedArrow(false);
-    if (c == 'k' || c == 'K')
-        return FilesFeedArrow(true);
-    // X — two distinct semantics by mode: Fat32 view soft-
-    // deletes (move to trash); Trash view perm-deletes the
-    // selected item.
-    if (c == 'x' || c == 'X')
+    if (static_cast<u8>(c) == 0x08) // Backspace — navigate up (back to parent dir)
     {
-        if (g_state.mode == Mode::Fat32 && g_state.fat_selection < g_state.fat_count)
-        {
-            const auto& e = g_state.fat_entries[g_state.fat_selection];
-            if ((e.attributes & 0x10) != 0)
-            {
-                duetos::drivers::video::NotifyShow("cannot trash directories");
-                return true;
-            }
-            g_state.pending = Pending::DeleteToTrash;
-            g_state.pending_idx = g_state.fat_selection;
-            duetos::drivers::video::NotifyShow("press Y to move to trash");
-        }
-        else if (g_state.mode == Mode::Trash && g_state.trash_selection < g_state.trash_count)
-        {
-            g_state.pending = Pending::PermDeleteFromTrash;
-            g_state.pending_idx = g_state.trash_selection;
-            duetos::drivers::video::NotifyShow("press Y to perm-delete");
-        }
-        return true;
-    }
-    if (c == 'e' || c == 'E')
-    {
-        // Empty trash — only meaningful in trash mode.
-        if (g_state.mode == Mode::Trash && g_state.trash_count > 0)
-        {
-            g_state.pending = Pending::EmptyTrash;
-            g_state.pending_idx = 0;
-            duetos::drivers::video::NotifyShow("press Y to empty trash");
-        }
-        return true;
-    }
-    if (c == 'd' || c == 'D')
-    {
-        if (g_state.mode != Mode::Fat32)
-        {
-            g_state.mode = Mode::Fat32;
-            g_state.fat_selection = 0;
-            RescanFat32();
-            duetos::drivers::video::NotifyShow("files: disk view");
-        }
-        return true;
-    }
-    if (c == 'm' || c == 'M')
-    {
-        if (g_state.mode != Mode::Ramfs)
-        {
-            g_state.mode = Mode::Ramfs;
-            duetos::drivers::video::NotifyShow("files: ram view");
-        }
-        return true;
-    }
-    if (c == 't' || c == 'T')
-    {
-        if (g_state.mode != Mode::Trash)
-        {
-            g_state.mode = Mode::Trash;
-            g_state.trash_selection = 0;
-            RescanTrash();
-            duetos::drivers::video::NotifyShow("files: trash view");
-        }
-        return true;
-    }
-    if (c == 'f' || c == 'F')
-    {
-        if (g_state.mode != Mode::DuetFs)
-        {
-            g_state.mode = Mode::DuetFs;
-            g_state.duet_selection = 0;
-            g_state.duet_depth = 0; // RescanDuetFs re-seeds root
-            RescanDuetFs();
-            duetos::drivers::video::NotifyShow("files: main drive");
-        }
-        return true;
-    }
-    if (c == 'r' || c == 'R')
-    {
-        // Disk view: rescan. Trash view: restore selected item.
-        if (g_state.mode == Mode::Fat32)
-        {
-            const u32 prev_sel = g_state.fat_selection;
-            RescanFat32();
-            if (prev_sel >= g_state.fat_count)
-            {
-                g_state.fat_selection = (g_state.fat_count > 0) ? (g_state.fat_count - 1) : 0;
-            }
-            else
-            {
-                g_state.fat_selection = prev_sel;
-            }
-            duetos::drivers::video::NotifyShow("files: rescan");
-            return true;
-        }
-        if (g_state.mode == Mode::Trash)
-        {
-            return RestoreSelectedTrash();
-        }
-        return false;
-    }
-    if (c == 's' || c == 'S')
-    {
-        // Cycle sort mode: name -> size -> type -> name. Re-sort
-        // both arrays so a subsequent T-toggle into Trash also
-        // shows the new order. Selection follows the previously-
-        // selected entry by name match where possible — better
-        // UX than "selection randomly jumps because the array
-        // reordered."
-        const auto next = static_cast<u8>(g_state.sort) + 1;
-        g_state.sort = (next >= static_cast<u8>(SortMode::kCount)) ? SortMode::Name : static_cast<SortMode>(next);
-        // Capture the selected name BEFORE re-sorting so we can
-        // find it again after the order changes.
-        char saved_name[128] = {};
-        u32 nlen = 0;
-        if (g_state.mode == Mode::Fat32 && g_state.fat_selection < g_state.fat_count)
-        {
-            const char* s = g_state.fat_entries[g_state.fat_selection].name;
-            for (; nlen + 1 < sizeof(saved_name) && s[nlen] != '\0'; ++nlen)
-                saved_name[nlen] = s[nlen];
-        }
-        else if (g_state.mode == Mode::Trash && g_state.trash_selection < g_state.trash_count)
-        {
-            const char* s = g_state.trash_entries[g_state.trash_selection].name;
-            for (; nlen + 1 < sizeof(saved_name) && s[nlen] != '\0'; ++nlen)
-                saved_name[nlen] = s[nlen];
-        }
-        SortFat32Entries();
-        SortTrashEntries();
-        // Re-anchor selection to the named entry.
-        if (nlen > 0)
-        {
-            if (g_state.mode == Mode::Fat32)
-            {
-                for (u32 i = 0; i < g_state.fat_count; ++i)
-                {
-                    if (FilesNameCmpCi(g_state.fat_entries[i].name, saved_name) == 0)
-                    {
-                        g_state.fat_selection = i;
-                        break;
-                    }
-                }
-            }
-            else if (g_state.mode == Mode::Trash)
-            {
-                for (u32 i = 0; i < g_state.trash_count; ++i)
-                {
-                    if (FilesNameCmpCi(g_state.trash_entries[i].name, saved_name) == 0)
-                    {
-                        g_state.trash_selection = i;
-                        break;
-                    }
-                }
-            }
-        }
-        char msg[32];
-        u32 mo = 0;
-        const char* lead = "files: sort by ";
-        for (u32 i = 0; lead[i] != '\0' && mo + 1 < sizeof(msg); ++i)
-            msg[mo++] = lead[i];
-        const char* sn = SortModeName(g_state.sort);
-        for (u32 i = 0; sn[i] != '\0' && mo + 1 < sizeof(msg); ++i)
-            msg[mo++] = sn[i];
-        msg[mo] = '\0';
-        duetos::drivers::video::NotifyShow(msg);
-        return true;
-    }
-    if (c == 'b' || c == 'B' || static_cast<u8>(c) == 0x08) // Back / Backspace
-    {
+        TypeaheadReset();
         if (g_state.mode == Mode::Ramfs)
         {
             if (g_state.ramfs_depth > 1)
@@ -1736,11 +2125,17 @@ bool FilesFeedChar(char c)
             }
             return true;
         }
-        // Fat32 mode: Back is a no-op in v0 (root only).
+        if (g_state.mode == Mode::Fat32)
+        {
+            if (Fat32AscendToParent())
+                RescanFat32();
+            return true;
+        }
         return true;
     }
-    if (static_cast<u8>(c) == 0x0A) // Enter
+    if (static_cast<u8>(c) == 0x0A) // Enter — open / descend
     {
+        TypeaheadReset();
         if (g_state.mode == Mode::Ramfs)
         {
             const duetos::fs::RamfsNode* cur = RamfsCur();
@@ -1810,8 +2205,68 @@ bool FilesFeedChar(char c)
             }
             return true;
         }
-        // Fat32 mode.
+        // Fat32 mode: descend into directories, open files.
+        if (g_state.mode == Mode::Fat32)
+        {
+            if (g_state.fat_selection < g_state.fat_count)
+            {
+                const auto& e = g_state.fat_entries[g_state.fat_selection];
+                if ((e.attributes & 0x10) != 0)
+                {
+                    // Directory entry — descend.
+                    if (Fat32DescendInto(e))
+                    {
+                        RescanFat32();
+                        char msg[32];
+                        u32 mi = 0;
+                        const char* prefix = "entered: ";
+                        for (u32 i = 0; prefix[i] != '\0' && mi + 1 < sizeof(msg); ++i)
+                            msg[mi++] = prefix[i];
+                        for (u32 i = 0; e.name[i] != '\0' && mi + 1 < sizeof(msg); ++i)
+                            msg[mi++] = e.name[i];
+                        msg[mi] = '\0';
+                        duetos::drivers::video::NotifyShow(msg);
+                        duetos::arch::SerialWrite("[files] fat32 descend cluster=");
+                        duetos::arch::SerialWriteHex(e.first_cluster);
+                        duetos::arch::SerialWrite(" name=");
+                        duetos::arch::SerialWrite(e.name);
+                        duetos::arch::SerialWrite("\n");
+                    }
+                    return true;
+                }
+            }
+            return OpenFat32Selected();
+        }
         return OpenFat32Selected();
+    }
+    // '[' — navigate back in FAT32 history.
+    if (c == '[' && g_state.mode == Mode::Fat32)
+    {
+        TypeaheadReset();
+        Fat32HistBack();
+        return true;
+    }
+    // ']' — navigate forward in FAT32 history.
+    if (c == ']' && g_state.mode == Mode::Fat32)
+    {
+        TypeaheadReset();
+        Fat32HistForward();
+        return true;
+    }
+    // Alphanumeric keys — type-ahead jump to first filename prefix match.
+    // Toolbar buttons (RAM/DISK/TRASH/DRIVE/REFRESH/SORT) remain the
+    // clickable surface for all view-switch actions. The previously
+    // bare-letter view shortcuts (d/m/t/f/r/s) are removed so these
+    // characters are available for type-ahead. j/k vim navigation is
+    // also removed (redundant with Up/Down arrow keys). Delete (kKeyDelete)
+    // and F5 are routed through FilesFeedListKey for destructive actions
+    // (delete-to-trash / perm-delete and empty-trash respectively).
+    const bool is_alpha = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+    const bool is_digit = (c >= '0' && c <= '9');
+    if (is_alpha || is_digit)
+    {
+        TypeaheadAppend(c);
+        return true;
     }
     return false;
 }
@@ -1836,7 +2291,7 @@ void FilesSelfTest()
                 FilesFeedChar('\n'); // Enter -> descend
                 if (g_state.ramfs_depth != saved_depth + 1 || RamfsCur() != root->children[i])
                     pass = false;
-                FilesFeedChar('b'); // Back -> pop
+                FilesFeedChar('\x08'); // Backspace -> pop
                 if (g_state.ramfs_depth != saved_depth || RamfsCur() != saved_top)
                     pass = false;
                 break;
@@ -1846,11 +2301,67 @@ void FilesSelfTest()
 
     // Mode toggle round-trip. Disk mode is reachable iff a FAT32
     // volume is mounted; either way, switching back to ram mode
-    // must succeed.
-    FilesFeedChar('d');
+    // must succeed. Call the mode-switch helpers directly — bare
+    // letter keys now drive type-ahead, not view switches.
+    SwitchToDisk();
     if (g_state.mode != Mode::Fat32)
         pass = false;
-    FilesFeedChar('m');
+
+    // FAT32 subdir descent+ascent. Scan the root listing for a
+    // directory entry; if one exists, descend into it, check that
+    // fat_depth incremented and the rescan ran, then Backspace
+    // back to root and verify fat_depth returned to 0.
+    if (g_state.mode == Mode::Fat32)
+    {
+        const u32 saved_fat_depth = g_state.fat_depth;
+        u32 dir_row = kFatMax;
+        for (u32 i = 0; i < g_state.fat_count; ++i)
+        {
+            if ((g_state.fat_entries[i].attributes & 0x10) != 0)
+            {
+                dir_row = i;
+                break;
+            }
+        }
+        if (dir_row != kFatMax)
+        {
+            g_state.fat_selection = dir_row;
+            FilesFeedChar('\n'); // descend
+            if (g_state.fat_depth != saved_fat_depth + 1)
+                pass = false;
+            FilesFeedChar('\x08'); // Backspace -> ascend to root
+            if (g_state.fat_depth != saved_fat_depth)
+                pass = false;
+        }
+    }
+
+    // Date formatter unit test — no filesystem I/O.
+    {
+        char d[12];
+        // Date 0 → empty string.
+        FormatFatDate(0, d);
+        if (d[0] != '\0')
+            pass = false;
+        // 2024-03-15 → year=2024-1980=44 (0x2C), month=3 (0x03), day=15 (0x0F)
+        // FAT word: (44<<9)|(3<<5)|15 = 0x5800 | 0x0060 | 0x000F = 0x586F
+        const u16 test_date = static_cast<u16>((44u << 9) | (3u << 5) | 15u);
+        FormatFatDate(test_date, d);
+        // Expect "2024-03-15"
+        const char* expect = "2024-03-15";
+        bool date_ok = true;
+        for (u32 i = 0; expect[i] != '\0'; ++i)
+        {
+            if (d[i] != expect[i])
+            {
+                date_ok = false;
+                break;
+            }
+        }
+        if (!date_ok)
+            pass = false;
+    }
+
+    SwitchToRam();
     if (g_state.mode != Mode::Ramfs)
         pass = false;
 
@@ -1858,7 +2369,7 @@ void FilesSelfTest()
     // mounted at /duetfs and seeded with /etc, so entering the
     // view, descending into the first directory, and backing out
     // must all hold. duet_depth tracks the navigation stack.
-    FilesFeedChar('f');
+    SwitchToDrive();
     if (g_state.mode != Mode::DuetFs || g_state.duet_depth != 1)
         pass = false;
     {
@@ -1877,7 +2388,7 @@ void FilesSelfTest()
             FilesFeedChar('\n'); // descend
             if (g_state.duet_depth != 2)
                 pass = false;
-            FilesFeedChar('b'); // back to root
+            FilesFeedChar('\x08'); // Backspace -> back to root
             if (g_state.duet_depth != 1)
                 pass = false;
             // Generic context dispatch (37 OPEN / 39 REFRESH) must
@@ -1887,13 +2398,13 @@ void FilesSelfTest()
             FilesDispatchContextAction(37, dir_row); // OPEN -> descend
             if (g_state.duet_depth != 2)
                 pass = false;
-            FilesFeedChar('b');
+            FilesFeedChar('\x08');             // Backspace -> back to root
             FilesDispatchContextAction(39, 0); // REFRESH (no-op safe)
             if (g_state.mode != Mode::DuetFs || g_state.duet_depth != 1)
                 pass = false;
         }
     }
-    FilesFeedChar('m');
+    SwitchToRam();
     if (g_state.mode != Mode::Ramfs)
         pass = false;
 
@@ -2000,14 +2511,44 @@ void FilesSelfTest()
         pass = false;
     g_state.pending = Pending::None;
 
+    // Type-ahead unit tests (no filesystem I/O — prefix match logic only).
+    // TypeaheadNameMatches is tested directly against known names.
+    {
+        TypeaheadReset();
+        g_state.typeahead_buf[0] = 'S';
+        g_state.typeahead_buf[1] = '\0';
+        g_state.typeahead_len = 1;
+        // "SHOT0001.BMP" starts with 'S' — must match.
+        if (!TypeaheadNameMatches("SHOT0001.BMP"))
+            pass = false;
+        // "AFILE.TXT" does not start with 'S' — must not match.
+        if (TypeaheadNameMatches("AFILE.TXT"))
+            pass = false;
+        // Empty prefix always matches.
+        TypeaheadReset();
+        if (!TypeaheadNameMatches("anything"))
+            pass = false;
+        // Multi-char prefix: "SH" — must match "SHOT" but not "SNAP".
+        g_state.typeahead_buf[0] = 'S';
+        g_state.typeahead_buf[1] = 'H';
+        g_state.typeahead_buf[2] = '\0';
+        g_state.typeahead_len = 2;
+        if (!TypeaheadNameMatches("SHOT0001.BMP"))
+            pass = false;
+        if (TypeaheadNameMatches("SNAP.TXT"))
+            pass = false;
+        TypeaheadReset();
+    }
+
     g_state.ramfs_depth = saved_depth;
     g_state.ramfs_selection = saved_sel;
     g_state.mode = saved_mode;
     g_self_test_passed = pass;
     if (pass)
     {
-        SerialWrite("[files] self-test OK (ramfs descend+back, mode toggle, duetfs descend+back, ctx-dispatch, "
-                    "home/end, ext match, delete-disarm, widget-click, footer-refresh)\n");
+        SerialWrite("[files] self-test OK (ramfs descend+back, mode toggle, fat32 subdir descent+back, "
+                    "duetfs descend+back, ctx-dispatch, home/end, ext match, delete-disarm, widget-click, "
+                    "footer-refresh, typeahead, date-format)\n");
         SerialWrite("[files-selftest] PASS\n");
     }
     else

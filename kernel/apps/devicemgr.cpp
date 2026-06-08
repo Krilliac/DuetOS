@@ -1,6 +1,7 @@
 #include "apps/devicemgr.h"
 
 #include "arch/x86_64/serial.h"
+#include "diag/log_names.h"
 #include "drivers/input/ps2mouse.h"
 #include "drivers/pci/pci.h"
 #include "drivers/usb/usb.h"
@@ -88,6 +89,46 @@ const char* ClassLabel(u8 base, u8 sub)
     }
 }
 
+// Which DuetOS in-tree driver handles this (class, subclass, prog_if, vendor)?
+// Returns a short driver name or "no driver" if none is registered.
+// This is a static lookup against the known driver set — not a live
+// driver-binding registry (the Device struct carries no bound-driver
+// field). Devices shown as "no driver" are enumerated but unclaimed.
+const char* PciDriverName(u8 cls, u8 sub, u8 prog_if, u16 vendor)
+{
+    switch (cls)
+    {
+    case 0x01: // mass storage
+        switch (sub)
+        {
+        case 0x06: // SATA; prog_if 0x01 = AHCI
+            return (prog_if == 0x01) ? "ahci" : "no driver";
+        case 0x08: // NVM; prog_if 0x02 = NVMe
+            return (prog_if == 0x02) ? "nvme" : "no driver";
+        }
+        break;
+    case 0x02: // network
+        if (sub == 0x00 && vendor == 0x8086)
+            return "e1000";
+        if (sub == 0x00 && (vendor == 0x1AF4 || vendor == 0x6900))
+            return "virtio-net";
+        break;
+    case 0x03: // display — GPU driver present for Intel/AMD/NVIDIA
+        if (vendor == 0x8086)
+            return "intel-gpu";
+        if (vendor == 0x1002)
+            return "amdgpu";
+        if (vendor == 0x10DE)
+            return "nvidia";
+        break;
+    case 0x0C: // serial bus
+        if (sub == 0x03 && prog_if == 0x30)
+            return "xhci";
+        break;
+    }
+    return "no driver";
+}
+
 // Translate a USB device class byte to a short label. Codes
 // per USB.org Class Code Reference. 0x00 indicates the device
 // defers class declaration to the interface descriptor, which
@@ -161,11 +202,63 @@ const char* UsbSpeedLabel(u8 speed)
     }
 }
 
+// Fixed x-offsets (pixels past cx+kMargin) for each column.
+// Window content is ~436 px wide (460 - 2*12). At 8px/char:
+//   col 0 addr  : +0   (8 chars  = 64 px)
+//   col 1 id    : +72  (9 chars  = 72 px)
+//   col 2 name  : +152 (14 chars = 112 px)
+//   col 3 status: +272 (9 chars  = 72 px)
+//   col 4 driver: +352 (rest)
+constexpr u32 kColAddr = 0U;
+constexpr u32 kColId = 72U;
+constexpr u32 kColName = 152U;
+constexpr u32 kColStatus = 272U;
+constexpr u32 kColDriver = 352U;
+
+// Append src chars to buf starting at offset o, advancing o. Stops at
+// buf_max-1 to leave room for a null. Does NOT null-terminate — caller
+// must do so.
+u32 AppendStr(char* buf, u32 o, u32 buf_max, const char* src)
+{
+    for (u32 i = 0; src[i] != '\0' && o + 1 < buf_max; ++i)
+        buf[o++] = src[i];
+    return o;
+}
+
+// Build a human-readable device name in buf (max buf_max chars including NUL)
+// from vendor + PciSubclassDetail. Format: "<vendor> <detail>" trimmed to fit.
+// Falls back to just the vendor if detail is empty.
+void BuildDeviceName(char* buf, u32 buf_max, u16 vendor_id, u8 cls, u8 sub, u8 prog_if)
+{
+    const char* vendor = duetos::core::PciVendorName(vendor_id);
+    const char* detail = duetos::drivers::pci::PciSubclassDetail(cls, sub, prog_if);
+    u32 o = 0;
+    // Vendor prefix — skip the bare "?" unknown sentinel
+    if (!(vendor[0] == '?' && vendor[1] == '\0'))
+        o = AppendStr(buf, o, buf_max, vendor);
+    if (detail != nullptr && detail[0] != '\0')
+    {
+        if (o > 0 && o + 1 < buf_max)
+            buf[o++] = ' ';
+        o = AppendStr(buf, o, buf_max, detail);
+    }
+    if (o == 0)
+        o = AppendStr(buf, o, buf_max, duetos::drivers::pci::PciClassName(cls));
+    buf[o] = '\0';
+}
+
 void DrawPciSection(u32 cx, u32& y, u32 cy, u32 ch)
 {
     FramebufferDrawString(cx + kMargin, y, "PCI DEVICES", kSection, kBg);
     y += kRowH + 4;
-    FramebufferDrawString(cx + kMargin, y, "BUS:DV.F  VEND:DEV   CLASS", kFgDim, kBg);
+
+    // Column header
+    const u32 hx = cx + kMargin;
+    FramebufferDrawString(hx + kColAddr, y, "BUS:DV.F", kFgDim, kBg);
+    FramebufferDrawString(hx + kColId, y, "VEND:DEV", kFgDim, kBg);
+    FramebufferDrawString(hx + kColName, y, "NAME", kFgDim, kBg);
+    FramebufferDrawString(hx + kColStatus, y, "STATUS", kFgDim, kBg);
+    FramebufferDrawString(hx + kColDriver, y, "DRIVER", kFgDim, kBg);
     y += kRowH;
 
     const u64 n = duetos::drivers::pci::PciDeviceCount();
@@ -179,35 +272,43 @@ void DrawPciSection(u32 cx, u32& y, u32 cy, u32 ch)
     for (u64 i = 0; i < n && y + kRowH < cy + ch; ++i)
     {
         const auto& d = duetos::drivers::pci::PciDevice(i);
+        const u32 rx = cx + kMargin;
 
-        char line[64];
-        u32 o = 0;
-        HexN(line + o, d.addr.bus, 2);
-        o += 2;
-        line[o++] = ':';
-        HexN(line + o, d.addr.device, 2);
-        o += 2;
-        line[o++] = '.';
-        line[o++] = static_cast<char>('0' + (d.addr.function & 0x7));
-        line[o++] = ' ';
-        line[o++] = ' ';
+        // Col 0: BUS:DV.F
+        char addr[9];
+        HexN(addr, d.addr.bus, 2);
+        addr[2] = ':';
+        HexN(addr + 3, d.addr.device, 2);
+        addr[5] = '.';
+        addr[6] = static_cast<char>('0' + (d.addr.function & 0x7));
+        addr[7] = '\0';
+        FramebufferDrawString(rx + kColAddr, y, addr, kFg, kBg);
 
-        HexN(line + o, d.vendor_id, 4);
-        o += 4;
-        line[o++] = ':';
-        HexN(line + o, d.device_id, 4);
-        o += 4;
-        line[o++] = ' ';
-        line[o++] = ' ';
-        line[o++] = ' ';
+        // Col 1: VEND:DEV
+        char id[10];
+        HexN(id, d.vendor_id, 4);
+        id[4] = ':';
+        HexN(id + 5, d.device_id, 4);
+        id[9] = '\0';
+        FramebufferDrawString(rx + kColId, y, id, kFg, kBg);
 
-        const char* cls = ClassLabel(d.class_code, d.subclass);
-        u32 c = 0;
-        while (cls[c] != '\0' && o < sizeof(line) - 1)
-            line[o++] = cls[c++];
-        line[o] = '\0';
+        // Col 2: human-readable name (vendor + subclass detail), truncated to 14 chars
+        char name[15];
+        BuildDeviceName(name, sizeof(name), d.vendor_id, d.class_code, d.subclass, d.prog_if);
+        FramebufferDrawString(rx + kColName, y, name, kFg, kBg);
 
-        FramebufferDrawString(cx + kMargin, y, line, kFg, kBg);
+        // Col 3: status — "OK" if a known driver covers this device, else "no driver"
+        const char* drv = PciDriverName(d.class_code, d.subclass, d.prog_if, d.vendor_id);
+        // "no driver" is the only value with a space at [2].
+        const bool has_driver = (drv[2] != ' ');
+        const char* status = has_driver ? "OK" : "no driver";
+        const u32 status_fg = has_driver ? 0x0040C040U : kFgDim;
+        FramebufferDrawString(rx + kColStatus, y, status, status_fg, kBg);
+
+        // Col 4: bound driver name (from static class→driver map)
+        if (has_driver)
+            FramebufferDrawString(rx + kColDriver, y, drv, kFgDim, kBg);
+
         y += kRowH;
     }
 }

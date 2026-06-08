@@ -316,8 +316,19 @@ void PaintNetstatusContent(u32 cx, u32 cy, u32 cw, u32 ch)
         kBg);
     y += kRowH;
 
+    // InterfaceCount() spans every bound iface index. Indices are
+    // sparse / driver-assigned (pcnet binds 0, e1000 binds 1, virtio
+    // binds 2…), so a slot inside [0, count) can be unbound — we skip
+    // those rows and only render live NICs. The "no interfaces" hint
+    // fires only when nothing in range is actually bound.
     const u64 n = duetos::net::InterfaceCount();
-    if (n == 0)
+    u32 bound_rows = 0;
+    for (u32 i = 0; i < n; ++i)
+    {
+        if (duetos::net::InterfaceIsBound(i))
+            ++bound_rows;
+    }
+    if (bound_rows == 0)
     {
         FramebufferDrawString(cx + kMargin, y, "  (NO BOUND INTERFACES - STACK NOT INITIALISED)", kFgDim, kBg);
         return;
@@ -325,6 +336,9 @@ void PaintNetstatusContent(u32 cx, u32 cy, u32 cw, u32 ch)
 
     for (u32 i = 0; i < n && y + kRowH < cy + ch; ++i)
     {
+        if (!duetos::net::InterfaceIsBound(i))
+            continue;
+
         char line[160];
         u32 o = 0;
         line[o++] = ' ';

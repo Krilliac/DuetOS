@@ -13,10 +13,14 @@
  * the operator can watch the trace shift over the last ~64 samples.
  *
  * v0 surface:
- *   - Header line: uptime + alive windows + heap pool
- *   - Two stacked sparkline panels:
- *       1. Heap-used (% of pool, 0..100)
- *       2. Heap-fragmentation proxy (free_chunk_count / 32 clamped)
+ *   - Header line: live CPU-busy % + uptime + alive windows + heap pool
+ *   - Three stacked sparkline panels:
+ *       1. CPU-busy (% of ticks, 0..100; instantaneous per-sample delta
+ *          of the scheduler's total/idle tick accounting — the same
+ *          source the taskbar tray pill reads, differenced for the live
+ *          rate instead of the since-boot average)
+ *       2. Heap-used (% of pool, 0..100)
+ *       3. Heap-fragmentation proxy (free_chunk_count / 32 clamped)
  *   - Footer hint: F5 force-refresh, C clear ring
  *
  * Pass D chrome: AppToolbar with two AppButtons (SAMPLE, CLEAR)

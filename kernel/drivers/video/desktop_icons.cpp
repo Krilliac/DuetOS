@@ -267,6 +267,13 @@ u32 DesktopIconCount()
     return g_icon_count;
 }
 
+WindowHandle DesktopIconWindow(int index)
+{
+    if (index < 0 || static_cast<u32>(index) >= g_icon_count)
+        return kWindowInvalid;
+    return g_icons[static_cast<u32>(index)].target;
+}
+
 void DesktopIconsSelfTest()
 {
     bool ok = true;

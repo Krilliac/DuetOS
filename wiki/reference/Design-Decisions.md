@@ -3521,6 +3521,49 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 049 — F-050 runaway timer-IRQ recursion is livelock-by-preemption, not an irq-restore bug
+
+- **Scope:** `kernel/arch/x86_64/traps.cpp` (timer-IRQ EOI +
+  preemption point), `kernel/mm/slab.cpp` (`GrowOneSlab` /
+  `SlabAlloc`), `kernel/sched/sched.cpp` (`Schedule` /
+  `ScheduleLockedHandoff`). Investigation only — no code change.
+- **Decision:** F-050 (LAPIC timer vec 0x20 nested 9× → controlled
+  panic under saturation) is **root-caused as livelock-by-
+  preemption** and **FILED, not fixed**. The candidate "surgical"
+  fix — *"the slab-grow-under-pressure / `heap_alloc_fail` path
+  leaves IRQs disabled or skips the LAPIC EOI, so timer IRQs
+  nest"* — is **explicitly ruled out**: every `SlabAlloc` /
+  `MutexLock` / `Schedule` exit path saves/restores IF via RAII
+  (`IrqOff` in slab.cpp, `SpinLockAcquire`/`SpinLockRelease`
+  flags in sched.cpp), and `LapicEoi()` is sent unconditionally
+  for every handled hardware vector (`traps.cpp:1228`). No future
+  slice should re-open F-050 as an irq-restore / EOI-ordering bug.
+- **Why:** the real mechanism is that the timer ISR EOIs early
+  (`traps.cpp:1228`) then runs the preemption `Schedule()`
+  (`traps.cpp:1261`); under sustained pressure (slow slab path
+  lengthens each tick) the next timer IRQ re-preempts a freshly-
+  resumed busy thread **before** it can `iretq` out of the prior
+  tick's `TrapDispatch` frame, so frames accumulate (tight
+  descent) until the depth-8 guard (`traps.cpp:1117`) fires. The
+  `mm.heap_alloc_fail` probe is a correlated pressure symptom, not
+  a cause.
+- **Rules out / defers:** ruled out the irq-restore/EOI surgical
+  fix (above). **Defers** the actual fix — gate the timer-IRQ
+  reschedule on `IrqNestDepth() > 1` and `SetNeedResched()`-only
+  (mirroring `DeferPreemptIfCritical()`) — because it is a
+  timer-path behavioral change that must be proven on a reliable
+  reproducer before shipping, and the recursion guard already
+  bounds the failure to a clean panic (no corruption). Full
+  residual in `wiki/reference/Roadmap.md` → "Timer-IRQ preemption
+  livelock under saturation (F-050)".
+- **Revisit when:** a deterministic saturation reproducer exists
+  (or F-040 — the sibling intermittent hung-task soft-panic — is
+  picked up); then implement and verify the nesting-defer.
+- **Related tracks:** Track 1 (Scheduler — preemption fairness
+  under load), Track 3 (Memory — slab pressure path).
+
+---
+
 ## 048 — Scheduler publishes TSS.RSP0 on every switch-in
 
 - **Scope:** `kernel/sched/sched.cpp` — `Schedule()` now calls
@@ -10824,3 +10867,49 @@ millisecond RED→GREEN unit test under ASan/UBSan instead of relying on the
 in `ring3_smoke.cpp`), so QEMU CI never exercises them. The `__declspec`-laden
 DLL entry points stay thin buffer-contract wrappers that the freestanding core
 can't carry.
+
+## 2026-06-07 — Usability campaign E-8: extend-to-the-cited-bar, file the rest, don't fake
+
+The usability campaign's fix phase (E-8) followed one rule: **extend an app
+only to the specific peer-OS/Win32 rubric bar a finding cites, and file (don't
+fake) anything that needs a subsystem we don't have.** The concrete decisions:
+
+- **Files: bare letters do filename type-ahead, not view-switching (F-018).**
+  Peer file managers (Haiku Tracker, Windows Explorer) treat letters as
+  type-ahead; DuetOS's Files ate them as single-key view-switch shortcuts
+  (`t`→Trash, etc.). **Rules out** keeping the bare-letter shortcuts — the
+  on-screen toolbar already covers every view switch, so the letters are free
+  for type-ahead. Destructive actions with no toolbar twin (delete, empty
+  trash) moved to **Delete / F5**, not deleted outright. Subdir descent
+  (F-019) then fell out almost free because `Fat32ListDirByCluster` already
+  accepted an arbitrary start cluster — only path/history *state* was missing.
+
+- **taskman per-process memory comes from a new `mm` public accessor, not a
+  struct reach-in (F-024).** `AddressSpaceUserPageCount(as)` was added to
+  `kernel/mm/address_space.h` and surfaced through `SchedTaskInfo.mapped_pages`.
+  **Rules out** having the app read the private per-process region table
+  directly — that would violate the subsystem boundary (an app must go through
+  a public subsystem API), the same discipline the per-core CPU% gap (F-023)
+  is still blocked on (it needs `SchedStatsReadCpu(cpu)` rather than walking
+  private per-CPU sched state).
+
+- **devicemgr STATUS/DRIVER are class-inferred, honestly labelled (F-026).**
+  There is no driver-binding registry on the PCI device record, so the DRIVER
+  column maps PCI class→known-driver-name and STATUS reads "no driver" for
+  unclaimed classes. **Rules out** inventing a per-device "bound driver" field
+  the kernel doesn't actually track — the wiki + finding say "class-inferred"
+  so the value is never mistaken for a real binding.
+
+- **Filed, not faked: resolution selector (F-029), volume slider (F-030),
+  decimal calculator (F-010).** Each needs a subsystem that doesn't exist
+  (runtime GPU modeset / audio gain stage / fixed-point arithmetic engine).
+  **Rules out** shipping a non-functional "selector"/"slider" or a truncating
+  pseudo-decimal — a fake control that silently does nothing is worse than an
+  honest read-only panel. Filed to Roadmap with the concrete unblocker each.
+
+- **A misread finding gets corrected, and the act of disproving it gets its own
+  finding.** F-011 ("display is opaque hex") was wrong — the calculator's main
+  display *is* decimal; the grader mistook the deliberate hex/bin/oct preview
+  band. Capturing the digit-entry screenshot that disproved it surfaced a *real*
+  defect (F-051: the large-font display overflows the window for long numbers).
+  Discovery compounds; the ledger records both the correction and the new bug.

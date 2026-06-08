@@ -37,6 +37,7 @@
 
 #include "core/menu_dispatch.h"
 
+#include "apps/browser.h"
 #include "apps/dbg.h"
 #include "apps/devicemgr.h"
 #include "apps/files.h"
@@ -630,6 +631,10 @@ void DispatchMenuAction(duetos::u32 action, duetos::u32 ctx)
             {
                 duetos::drivers::video::WindowSetVisible(h, true);
                 duetos::drivers::video::WindowRaise(h);
+                // Auto-focus the URL bar so keyboard-first URL entry works
+                // immediately after opening the browser (F-032).
+                if (role == duetos::drivers::video::ThemeRole::Browser)
+                    duetos::apps::browser::BrowserFocusUrl();
                 duetos::drivers::video::ConsoleWrite("-> RAISED ");
                 const char* tt = duetos::drivers::video::WindowTitle(h);
                 duetos::drivers::video::ConsoleWriteln((tt != nullptr) ? tt : "(UNNAMED)");

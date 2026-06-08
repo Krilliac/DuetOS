@@ -71,6 +71,8 @@ struct DirEntry
     u8 attributes;     // FAT attribute byte (0x20 = ARCHIVE, 0x10 = DIR, etc.)
     u32 first_cluster; // 0 for entries with no cluster (zero-length file)
     u32 size_bytes;    // size field; 0 for directories
+    u16 mtime_date;    // FAT write-date word (bytes 24-25): bits 15-9=year-1980, 8-5=month, 4-0=day
+    u16 mtime_time;    // FAT write-time word (bytes 22-23): bits 15-11=hour, 10-5=min, 4-0=sec/2
 };
 
 struct Volume

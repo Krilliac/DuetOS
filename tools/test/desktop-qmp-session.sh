@@ -39,6 +39,7 @@ DRIVER_PY="${2:?usage: desktop-qmp-session.sh INSTANCE DRIVER_PY}"
 PRESET="${DUETOS_PRESET:-x86_64-debug}"
 SETTLE="${DUETOS_SETTLE:-20}"
 BOOT_TIMEOUT="${DUETOS_BOOT_TIMEOUT:-600}"
+SMP="${DUETOS_SMP:-1}"
 BUILD_DIR="${REPO_ROOT}/build/${PRESET}"
 KERNEL_ELF="${BUILD_DIR}/kernel/duetos-kernel.elf"
 OVMF_CODE="${DUETOS_OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
@@ -92,7 +93,7 @@ rm -f "${MON_SOCK}" "${SERIAL_LOG}"
 qemu-system-x86_64 \
     -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}" \
     -drive "if=pflash,format=raw,file=${VARS}" \
-    -machine q35 -cpu max -m 512M -vga virtio -display none \
+    -machine q35 -cpu max -m 512M -smp "${SMP}" -vga virtio -display none \
     -serial "file:${SERIAL_LOG}" -monitor "unix:${MON_SOCK},server,nowait" \
     -no-reboot -no-shutdown \
     -drive "file=${NVME},if=none,id=nvme0,format=raw" -device "nvme,serial=cafebabe,drive=nvme0" \

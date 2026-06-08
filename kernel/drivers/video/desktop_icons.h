@@ -77,6 +77,11 @@ void DesktopIconActivate(int index);
 /// Number of icons registered so far (for diagnostics / self-test).
 u32 DesktopIconCount();
 
+/// Return the WindowHandle bound to icon `index`, or kWindowInvalid for an
+/// out-of-range index. Callers use this to post-hoc dispatch on which app
+/// was just activated (e.g. auto-focus the URL bar when the browser opens).
+WindowHandle DesktopIconWindow(int index);
+
 /// Boot self-test: pure layout math — verifies hit-testing the centre of
 /// each registered icon's cell returns that icon and a far-off point
 /// returns none. Emits a greppable PASS/FAIL sentinel; never panics

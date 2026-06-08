@@ -41,8 +41,12 @@ framebuffer:
     scrollbar drag-the-thumb path.
   - **Character Map** — codepoint grid over the bitmap font's
     printable range (0x20..0x7E ASCII; Tab toggles to the full
-    0x20..0xFF range that includes the font8x8 extended glyphs).
-    Enter / Space copies the selected glyph as UTF-8 to the
+    0x20..0xFF range). The `font8x8` table covers ASCII plus the
+    Latin-1 Supplement printable block U+00A0..U+00FF (accented
+    letters, guillemets, © ® ° ± ÷ × £ ¥ ¢ § µ ¶ fractions, …);
+    the C1 control block 0x80..0x9F is non-printable and renders
+    as the placeholder box. Enter / Space copies the selected
+    glyph as UTF-8 to the
     clipboard so it pastes into Notes / Calculator / Browser via
     the standard Ctrl+V path.
 - **Win32 PE windows**: `windowed_hello` paints with `Rectangle` /

@@ -342,6 +342,18 @@ PhysAddr AddressSpaceLookupUserFrame(const AddressSpace* as, u64 virt);
 /// switches don't pay a CR3 write.
 void AddressSpaceActivate(AddressSpace* as);
 
+/// Return the number of 4 KiB user pages currently mapped in `as`.
+/// Each page in `region_count` represents exactly one 4 KiB frame.
+/// Used by diagnostics (taskman MEM column) to show per-process
+/// resident page count without reaching into AS internals.
+/// Returns 0 for a null `as` (kernel-only tasks have no user AS).
+inline u16 AddressSpaceUserPageCount(const AddressSpace* as)
+{
+    if (as == nullptr)
+        return 0;
+    return as->region_count;
+}
+
 /// Currently-active AS on this CPU (nullptr = kernel AS / boot PML4).
 AddressSpace* AddressSpaceCurrent();
 

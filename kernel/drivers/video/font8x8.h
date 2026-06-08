@@ -16,10 +16,13 @@
  *   - Uppercase A..Z (0x41..0x5A)
  *   - Lowercase a..z aliased to uppercase at lookup time
  *   - Common punctuation: . , : ; - _ / \ ! ? ( ) [ ] < > = + * "
+ *   - Latin-1 Supplement printable range U+00A0..U+00FF (accented
+ *     letters, guillemets, © ® ° ± ÷ × £ ¥ ¢ § µ ¶ ½ … etc.)
  *
- * Every other ASCII code renders as a filled-box placeholder so
- * unmapped characters are visible-but-clearly-unmapped. Extending
- * coverage is drop-in: add bytes to the table + index.
+ * Bytes 0x80..0x9F (the C1 control block) and any unmapped ASCII
+ * code render as a filled-box placeholder so unmapped characters
+ * are visible-but-clearly-unmapped. Extending coverage is drop-in:
+ * add bytes to the table + index.
  *
  * Context: kernel. Font data lives in .rodata; lookup is a pure
  * table read, safe from any context.

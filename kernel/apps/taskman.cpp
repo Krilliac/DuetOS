@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/timer.h"
+#include "log/klog.h"
 #include "drivers/input/ps2kbd.h"
 #include "drivers/input/ps2mouse.h"
 #include "drivers/video/app_widgets/app_button.h"
@@ -27,13 +28,14 @@ constexpr duetos::u32 kHeaderH = 22; // header band: 2 lines
 constexpr duetos::u32 kFooterH = 12; // hint footer
 constexpr duetos::u32 kColPad = 6;   // left padding inside client
 
-// Per-column character widths. The list view has five columns:
-// PID (5 chars), NAME (16), STATE (5), CPU% (6), TICKS (10).
+// Per-column character widths. The list view has six columns:
+// PID (5 chars), NAME (16), STATE (5), CPU% (6), TICKS (10), MEM (6).
 constexpr duetos::u32 kColPid = 5;
 constexpr duetos::u32 kColName = 16;
 constexpr duetos::u32 kColState = 5;
 constexpr duetos::u32 kColCpu = 6;
 constexpr duetos::u32 kColTicks = 10;
+constexpr duetos::u32 kColMem = 6; // per-process mapped KiB, right-justified
 
 enum class SortMode : duetos::u8
 {
@@ -41,7 +43,8 @@ enum class SortMode : duetos::u8
     Pid = 1,   // ascending
     Name = 2,  // ascending, case-insensitive
     State = 3, // Running > Ready > Sleeping > Blocked > Dead
-    kCount = 4,
+    Mem = 4,   // descending — highest mapped KiB at top
+    kCount = 5,
 };
 
 const char* SortModeName(SortMode m)
@@ -56,6 +59,8 @@ const char* SortModeName(SortMode m)
         return "NAME";
     case SortMode::State:
         return "STAT";
+    case SortMode::Mem:
+        return "MEM ";
     default:
         return "????";
     }
@@ -113,11 +118,11 @@ struct Row
     duetos::u64 ticks_run;
     duetos::u64 owner_pid;
     char name[24];
+    duetos::u32 mapped_kib; // per-process mapped user pages × 4 KiB
     duetos::u8 state;
     duetos::u8 priority;
     bool is_running;
     bool has_process;
-    duetos::u8 _pad[4];
 };
 
 // Module-private state. All of it is mutated under the
@@ -125,6 +130,11 @@ struct Row
 // FeedKey), so no extra locking is required.
 constinit duetos::drivers::video::WindowHandle g_handle = duetos::drivers::video::kWindowInvalid;
 constinit SortMode g_sort = SortMode::Cpu;
+// Sort direction: true = ascending, false = descending.
+// Default is descending for CPU% and MEM (highest first), ascending
+// for PID, NAME, STATE. Toggled when the user clicks the active
+// column header again or presses S on an already-active column.
+constinit bool g_sort_asc = false;
 constinit duetos::u32 g_selected = 0;         // index into g_rows
 constinit duetos::u32 g_first_visible = 0;    // top of viewport
 constinit duetos::u32 g_row_count = 0;        // valid rows in g_rows
@@ -468,6 +478,7 @@ void OnEnumTask(const duetos::sched::SchedTaskInfo& info, void* /*cookie*/)
     r.task_id = info.id;
     r.ticks_run = info.ticks_run;
     r.owner_pid = info.has_process ? info.owner_pid : 0;
+    r.mapped_kib = info.mapped_pages * 4u; // pages × 4 KiB/page
     r.state = info.state;
     r.priority = info.priority;
     r.is_running = info.is_running;
@@ -509,31 +520,40 @@ int CompareNamesCi(const char* a, const char* b)
     return *a == '\0' ? -1 : 1;
 }
 
-// Sort comparator for SortMode `m`. Returns true iff `a` should
-// come before `b` in the sorted listing. Tie-breaks on task_id
-// so the order is stable across redraws even when two tasks
-// share the primary key.
+// Sort comparator for SortMode `m`, respecting g_sort_asc direction.
+// Returns true iff `a` should come before `b` in the sorted listing.
+// Tie-breaks on task_id so the order is stable across redraws even
+// when two tasks share the primary key.
+//
+// g_sort_asc == false (descending) means the "natural" order for
+// each mode — highest CPU% / MEM first, lowest PID first, etc. When
+// g_sort_asc is true the primary comparison is flipped. Tie-break on
+// task_id is always ascending so the list is deterministic.
 bool RowLess(const Row& a, const Row& b, SortMode m)
 {
     switch (m)
     {
     case SortMode::Cpu:
+    {
         if (a.ticks_run != b.ticks_run)
-            return a.ticks_run > b.ticks_run; // descending
+            return g_sort_asc ? a.ticks_run < b.ticks_run : a.ticks_run > b.ticks_run;
         return a.task_id < b.task_id;
+    }
     case SortMode::Pid:
     {
         const duetos::u64 ka = a.has_process ? a.owner_pid : (~0ull >> 1);
         const duetos::u64 kb = b.has_process ? b.owner_pid : (~0ull >> 1);
         if (ka != kb)
-            return ka < kb;
+            // ascending = smaller PID first (ka < kb), descending = larger first
+            return g_sort_asc ? ka < kb : ka > kb;
         return a.task_id < b.task_id;
     }
     case SortMode::Name:
     {
         const int c = CompareNamesCi(a.name, b.name);
         if (c != 0)
-            return c < 0;
+            // ascending = a < b (c < 0), descending = a > b (c > 0)
+            return g_sort_asc ? c < 0 : c > 0;
         return a.task_id < b.task_id;
     }
     case SortMode::State:
@@ -541,7 +561,14 @@ bool RowLess(const Row& a, const Row& b, SortMode m)
         const duetos::u8 ka = StateSortKey(a.state);
         const duetos::u8 kb = StateSortKey(b.state);
         if (ka != kb)
-            return ka > kb; // higher key first
+            // natural order: Running(5) first → descending by key; ascending inverts
+            return g_sort_asc ? ka < kb : ka > kb;
+        return a.task_id < b.task_id;
+    }
+    case SortMode::Mem:
+    {
+        if (a.mapped_kib != b.mapped_kib)
+            return g_sort_asc ? a.mapped_kib < b.mapped_kib : a.mapped_kib > b.mapped_kib;
         return a.task_id < b.task_id;
     }
     default:
@@ -676,18 +703,51 @@ void DrawHeader(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 fg, 
 
     // Line 2: column headers (PROCESSES tab only — the
     // PERFORMANCE tab paints labels inside the graph stack).
+    // The active sort column is drawn in the highlight colour.
+    // A '^' (ascending) or 'v' (descending) indicator is appended
+    // to the active column label so the sort direction is visible
+    // without any extra row. Clicking a column header sets that
+    // column as the sort key; clicking the active column again
+    // toggles asc/desc (see TaskmanMouseInput HitTestColHeader).
     if (g_tab != Tab::Processes)
         return;
+
+    // Helper: build a column label with a trailing sort indicator
+    // on the active column. 'w' is the column character width; we
+    // fit the indicator just inside the last char slot.
+    auto make_col_label = [&](const char* base_label, duetos::u32 w, SortMode key, char* out)
+    {
+        duetos::u32 o = 0;
+        for (; o < w && base_label[o] != '\0'; ++o)
+            out[o] = base_label[o];
+        while (o < w)
+            out[o++] = ' ';
+        // Overwrite the last character with the indicator when this
+        // is the active sort column. '^' = ascending, 'v' = descending.
+        if (g_sort == key)
+            out[w - 1] = g_sort_asc ? '^' : 'v';
+        out[w] = '\0';
+    };
+
     char col_pid[8];
     char col_name[24];
     char col_state[8];
     char col_cpu[8];
     char col_ticks[16];
-    FmtStrLeft("PID", col_pid, kColPid);
-    FmtStrLeft("NAME", col_name, kColName);
-    FmtStrLeft("STATE", col_state, kColState);
-    FmtStrLeft("  CPU%", col_cpu, kColCpu);
-    FmtStrLeft("     TICKS", col_ticks, kColTicks);
+    char col_mem[8];
+    make_col_label("PID", kColPid, SortMode::Pid, col_pid);
+    make_col_label("NAME", kColName, SortMode::Name, col_name);
+    make_col_label("STATE", kColState, SortMode::State, col_state);
+    // CPU% and TICKS labels are right-padded with spaces first,
+    // then the indicator overwrites the last char.
+    make_col_label("  CPU%", kColCpu, SortMode::Cpu, col_cpu);
+    make_col_label("     TICKS", kColTicks, SortMode::Cpu, col_ticks);
+    // TICKS has no sort mode of its own; it uses the CPU sort key for
+    // the indicator (TICKS is just the raw numerator of CPU%).
+    // Override: TICKS column indicator is NOT shown — it shares the
+    // CPU% sort key, so the indicator already appears on the CPU% col.
+    FmtStrLeft("     TICKS", col_ticks, kColTicks); // plain, no indicator
+    make_col_label("  MEM", kColMem, SortMode::Mem, col_mem);
 
     duetos::u32 x = cx + kColPad;
     const duetos::u32 y = cy + 12;
@@ -701,7 +761,9 @@ void DrawHeader(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 fg, 
     draw_col(col_name, kColName, SortMode::Name);
     draw_col(col_state, kColState, SortMode::State);
     draw_col(col_cpu, kColCpu, SortMode::Cpu);
-    FramebufferDrawString(x, y, col_ticks, fg, bg);
+    FramebufferDrawString(x, y, col_ticks, fg, bg); // TICKS: no sort key
+    x += kColTicks * 8 + 4;
+    draw_col(col_mem, kColMem, SortMode::Mem);
 }
 
 void DrawRows(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, duetos::u32 fg, duetos::u32 fg_run,
@@ -740,6 +802,7 @@ void DrawRows(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, du
         char col_state[8];
         char col_cpu[8];
         char col_ticks[16];
+        char col_mem[8];
         if (r.has_process)
             FmtU64Right(r.owner_pid, col_pid, kColPid);
         else
@@ -748,6 +811,12 @@ void DrawRows(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, du
         FmtStrLeft(StateGlyph(r.state), col_state, kColState);
         FmtCpuPercent(r.ticks_run, g_total_ticks_snap, col_cpu, kColCpu);
         FmtU64Right(r.ticks_run, col_ticks, kColTicks);
+        // MEM: show KiB if < 9999, else show "  NNN K" style.
+        // Kernel-only tasks (no user AS) show " ----".
+        if (r.has_process)
+            FmtU64Right(r.mapped_kib, col_mem, kColMem);
+        else
+            FmtStrLeft(" ----", col_mem, kColMem);
 
         const duetos::u32 row_bg = selected ? sel_bg : bg;
         const duetos::u32 row_fg = r.is_running ? fg_run : fg;
@@ -761,6 +830,8 @@ void DrawRows(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, du
         FramebufferDrawString(x, row_y + 1, col_cpu, row_fg, row_bg);
         x += kColCpu * 8 + 4;
         FramebufferDrawString(x, row_y + 1, col_ticks, row_fg, row_bg);
+        x += kColTicks * 8 + 4;
+        FramebufferDrawString(x, row_y + 1, col_mem, row_fg, row_bg);
     }
 }
 
@@ -1057,6 +1128,76 @@ void ClickRefresh()
 }
 
 // ---------------------------------------------------------------
+// Column-header click hit-test (F-025).
+//
+// The PROCESSES tab header row 2 is painted at
+//   abs_y = window_top + kTitleH + kHdrToolbarH + 12
+// with height kHeaderH - 12 = 10 px.
+//
+// Column X origins (relative to window left edge wx):
+//   PID:   wx + kColPad
+//   NAME:  PID_x + kColPid * 8 + 4
+//   STATE: NAME_x + kColName * 8 + 4
+//   CPU%:  STATE_x + kColState * 8 + 4
+//   TICKS: CPU%_x + kColCpu * 8 + 4   (unsortable, skip)
+//   MEM:   TICKS_x + kColTicks * 8 + 4
+//
+// Each column owns a horizontal hit zone from its X origin up to
+// (but not including) the next column's origin. We use that zone
+// to determine which sort mode to set.
+//
+// Returns kCount when the point is not inside any sortable column
+// header zone.
+// ---------------------------------------------------------------
+SortMode HitTestColHeader(duetos::u32 px, duetos::u32 py, duetos::u32 wx, duetos::u32 wy, duetos::u32 ww,
+                          duetos::u32 wh)
+{
+    constexpr duetos::u32 kTitleH = 22U;
+    // Column header row 2 is inside the legacy header band which
+    // starts at client_y + kHdrToolbarH. Row 2 within that band is
+    // at +12 px; row 2 height is kHeaderH - 12 = 10 px.
+    const duetos::u32 header_top = wy + kTitleH + kHdrToolbarH + 12U;
+    const duetos::u32 header_bot = header_top + (kHeaderH - 12U);
+
+    if (py < header_top || py >= header_bot)
+        return SortMode::kCount;
+    if (px < wx || px >= wx + ww || wy + wh == 0)
+        return SortMode::kCount;
+
+    // Only active on the PROCESSES tab.
+    if (g_tab != Tab::Processes)
+        return SortMode::kCount;
+
+    // Build column X boundaries.
+    duetos::u32 x = wx + kColPad;
+    struct ColZone
+    {
+        duetos::u32 x_start;
+        duetos::u32 x_end;
+        SortMode mode;
+    };
+    // kCount sentinel for TICKS (no sort key).
+    const ColZone zones[] = {
+        {x, x + kColPid * 8 + 4, SortMode::Pid},
+        {x + kColPid * 8 + 4, x + (kColPid + kColName) * 8 + 8, SortMode::Name},
+        {x + (kColPid + kColName) * 8 + 8, x + (kColPid + kColName + kColState) * 8 + 12, SortMode::State},
+        {x + (kColPid + kColName + kColState) * 8 + 12, x + (kColPid + kColName + kColState + kColCpu) * 8 + 16,
+         SortMode::Cpu},
+        // TICKS zone is unsortable — skip (use kCount sentinel).
+        // MEM starts after TICKS.
+        {x + (kColPid + kColName + kColState + kColCpu + kColTicks) * 8 + 20,
+         x + (kColPid + kColName + kColState + kColCpu + kColTicks + kColMem) * 8 + 24, SortMode::Mem},
+    };
+
+    for (duetos::u32 i = 0; i < sizeof(zones) / sizeof(zones[0]); ++i)
+    {
+        if (px >= zones[i].x_start && px < zones[i].x_end)
+            return zones[i].mode;
+    }
+    return SortMode::kCount;
+}
+
+// ---------------------------------------------------------------
 // Public API + input handlers
 // ---------------------------------------------------------------
 
@@ -1138,8 +1279,12 @@ bool TaskmanFeedChar(char c)
     }
     if (c == 's' || c == 'S')
     {
+        // Cycle to the next sort mode and reset to that mode's
+        // natural default direction (descending for CPU%/MEM,
+        // ascending for PID/NAME/STATE).
         const auto next = static_cast<duetos::u8>(g_sort) + 1;
         g_sort = (next >= static_cast<duetos::u8>(SortMode::kCount)) ? SortMode::Cpu : static_cast<SortMode>(next);
+        g_sort_asc = (g_sort == SortMode::Pid || g_sort == SortMode::Name || g_sort == SortMode::State);
         return true;
     }
     if (c == 'r' || c == 'R')
@@ -1225,9 +1370,11 @@ void TaskmanSelfTest()
         saved[i] = g_rows[i];
     const duetos::u32 saved_count = g_row_count;
     const SortMode saved_mode = g_sort;
+    const bool saved_asc = g_sort_asc;
 
     g_row_count = 4;
-    auto fill = [](Row& r, duetos::u64 id, duetos::u64 pid, const char* name, duetos::u64 ticks, duetos::u8 state)
+    auto fill = [](Row& r, duetos::u64 id, duetos::u64 pid, const char* name, duetos::u64 ticks, duetos::u8 state,
+                   duetos::u32 mem_kib)
     {
         r.task_id = id;
         r.owner_pid = pid;
@@ -1237,28 +1384,35 @@ void TaskmanSelfTest()
             r.name[o] = name[o];
         r.name[o] = '\0';
         r.ticks_run = ticks;
+        r.mapped_kib = mem_kib;
         r.state = state;
         r.priority = 0;
         r.is_running = false;
     };
     using duetos::sched::TaskState;
-    fill(g_rows[0], 1, 10, "boot", 5, static_cast<duetos::u8>(TaskState::Sleeping));
-    fill(g_rows[1], 2, 20, "alpha", 50, static_cast<duetos::u8>(TaskState::Running));
-    fill(g_rows[2], 3, 30, "beta", 1, static_cast<duetos::u8>(TaskState::Ready));
-    fill(g_rows[3], 4, 5, "Gamma", 100, static_cast<duetos::u8>(TaskState::Blocked));
+    // mapped_kib values: boot=8, alpha=64, beta=4, Gamma=128
+    fill(g_rows[0], 1, 10, "boot", 5, static_cast<duetos::u8>(TaskState::Sleeping), 8u);
+    fill(g_rows[1], 2, 20, "alpha", 50, static_cast<duetos::u8>(TaskState::Running), 64u);
+    fill(g_rows[2], 3, 30, "beta", 1, static_cast<duetos::u8>(TaskState::Ready), 4u);
+    fill(g_rows[3], 4, 5, "Gamma", 100, static_cast<duetos::u8>(TaskState::Blocked), 128u);
 
+    // All sort tests run with descending as the default direction for
+    // CPU%/MEM, ascending for PID/NAME/STATE.
     g_sort = SortMode::Cpu;
+    g_sort_asc = false; // descending
     SortRows();
     if (g_rows[0].task_id != 4 || g_rows[1].task_id != 2 || g_rows[2].task_id != 1 || g_rows[3].task_id != 3)
         pass = false;
 
     g_sort = SortMode::Pid;
+    g_sort_asc = true; // ascending
     SortRows();
     // Expected ascending PID: 5(g), 10(b), 20(a), 30(beta)
     if (g_rows[0].owner_pid != 5 || g_rows[1].owner_pid != 10 || g_rows[2].owner_pid != 20 || g_rows[3].owner_pid != 30)
         pass = false;
 
     g_sort = SortMode::Name;
+    g_sort_asc = true; // ascending
     SortRows();
     // Case-insensitive ascending: alpha, beta, boot, Gamma
     if (CompareNamesCi(g_rows[0].name, "alpha") != 0 || CompareNamesCi(g_rows[1].name, "beta") != 0 ||
@@ -1266,12 +1420,29 @@ void TaskmanSelfTest()
         pass = false;
 
     g_sort = SortMode::State;
+    g_sort_asc = false; // descending (Running > Ready > Sleeping > Blocked)
     SortRows();
     // Expected order by StateSortKey desc: Running, Ready, Sleeping, Blocked
     if (static_cast<TaskState>(g_rows[0].state) != TaskState::Running ||
         static_cast<TaskState>(g_rows[1].state) != TaskState::Ready ||
         static_cast<TaskState>(g_rows[2].state) != TaskState::Sleeping ||
         static_cast<TaskState>(g_rows[3].state) != TaskState::Blocked)
+        pass = false;
+
+    // SortMode::Mem descending: Gamma(128) > alpha(64) > boot(8) > beta(4)
+    g_sort = SortMode::Mem;
+    g_sort_asc = false;
+    SortRows();
+    if (g_rows[0].mapped_kib != 128u || g_rows[1].mapped_kib != 64u || g_rows[2].mapped_kib != 8u ||
+        g_rows[3].mapped_kib != 4u)
+        pass = false;
+
+    // SortMode::Mem ascending: beta(4) > boot(8) > alpha(64) > Gamma(128)
+    g_sort = SortMode::Mem;
+    g_sort_asc = true;
+    SortRows();
+    if (g_rows[0].mapped_kib != 4u || g_rows[1].mapped_kib != 8u || g_rows[2].mapped_kib != 64u ||
+        g_rows[3].mapped_kib != 128u)
         pass = false;
 
     // Restore the sort-comparator state before the Pass D click
@@ -1281,6 +1452,7 @@ void TaskmanSelfTest()
         g_rows[i] = saved[i];
     g_row_count = saved_count;
     g_sort = saved_mode;
+    g_sort_asc = saved_asc;
 
     // Pass D: drive a synthetic click on the REFRESH toolbar
     // button (kBtnRefresh slot) via the WidgetGroup dispatch
@@ -1340,7 +1512,7 @@ void TaskmanSelfTest()
     g_self_test_passed = pass;
     if (pass)
     {
-        SerialWrite("[taskman] self-test OK (sort comparators, widget-click, footer-refresh)\n");
+        SerialWrite("[taskman] self-test OK (sort comparators incl. Mem asc/desc, widget-click, footer-refresh)\n");
         SerialWrite("[taskman-selftest] PASS\n");
     }
     else
@@ -1387,6 +1559,35 @@ void TaskmanMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
     }
     if (press_edge && inside_window)
     {
+        // F-025: column-header click sort. HitTestColHeader runs
+        // before the toolbar widget dispatch so a click on a
+        // column header takes priority over the toolbar (they are
+        // in disjoint Y bands, but ordering is explicit here to
+        // keep the two surfaces independent). If the hit lands on a
+        // sortable column, update g_sort and g_sort_asc then return
+        // — the compositor will repaint on the next tick.
+        const SortMode hit = HitTestColHeader(cx, cy, wx, wy, ww, wh);
+        if (hit != SortMode::kCount)
+        {
+            if (g_sort == hit)
+            {
+                // Same column clicked again: toggle asc/desc.
+                g_sort_asc = !g_sort_asc;
+            }
+            else
+            {
+                // New column: set default direction for this mode.
+                // CPU% and MEM default to descending (highest first);
+                // PID, NAME, STATE default to ascending.
+                g_sort = hit;
+                g_sort_asc = (hit == SortMode::Pid || hit == SortMode::Name || hit == SortMode::State);
+            }
+            KLOG_DEBUG_S("taskman", "header-click sort", "mode", SortModeName(g_sort));
+            // Don't fall through to DispatchEvent — the header band is
+            // not a toolbar widget zone.
+            return;
+        }
+
         const Event d{EventKind::MouseDown, cx, cy, 0U, 0U};
         g_taskman.DispatchEvent(d);
     }

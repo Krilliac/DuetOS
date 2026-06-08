@@ -473,6 +473,123 @@ long-term fix; the guard page still self-diagnoses any future overflow.
   lift; deferred until a use-after-free hunt needs it. (Slab
   allocator + freed-object poison landed.)
 
+### Timer-IRQ preemption livelock under saturation (F-050)
+
+- **Symptom:** under sustained resource pressure (chaos `resource`
+  vector + concurrent guests, ~73% CPU for minutes) a busy ring-0
+  kernel thread (`win-timer#43`) panicked with
+  `arch/traps "runaway trap recursion (fault loop)" value=0x9` —
+  the LAPIC timer (vec `0x20`) nested **9×** on one descending
+  stack at `TrapDispatch+0x1453`. The tight-descent guard
+  (`kernel/arch/x86_64/traps.cpp:1117`, `kMaxTightRecursion=8`)
+  caught it → **controlled panic, no triple-fault, no corruption**.
+  Intermittent: 1/4 maxchaos runs; 0/3 loop rounds; 0 under SMP8.
+  Immediately preceded by `mm.heap_alloc_fail` in `GrowOneSlab`
+  (`kernel/mm/slab.cpp:153`) — a *correlated* pressure symptom, not
+  the cause.
+- **Root cause (confirmed by code trace, not a missing
+  irq-restore):** the timer ISR sends `LapicEoi()` **early**
+  (`traps.cpp:1228`, clearing the in-service bit) and only **then**
+  runs the preemption point `Schedule()` (`traps.cpp:1261`). When
+  `Schedule()` switches away from the busy thread, that thread's
+  kernel stack retains the in-flight `TrapDispatch → Schedule →
+  ContextSwitch` frame chain; on resume it must run *forward* past
+  the `Schedule()` return and `iretq` to unwind frame #1. Under
+  saturation (slow slab path → longer ticks) the **next** timer
+  IRQ re-preempts the freshly-resumed thread **before** it iretqs
+  out of the prior frame, so each 100 Hz tick stacks one more
+  `TrapDispatch` frame slightly lower on the stack (tight descent).
+  This is **livelock-by-preemption**, not an IRQ-discipline bug:
+  every `SlabAlloc`/`MutexLock`/`Schedule` exit path correctly
+  saves/restores IF (RAII `IrqOff` / `SpinLockAcquire` flags), and
+  EOI is sent unconditionally for handled hardware vectors. The
+  hypothesised "slab-grow-under-pressure leaves IRQs disabled /
+  skips EOI" mechanism is **disproven**.
+- **Recommended fix (a timer-path change — must be verified on a
+  reproducer before shipping):** gate the timer-IRQ preemption
+  point on the per-CPU IRQ nesting depth. The infrastructure
+  already exists: `IrqNestDepth()` (`traps.cpp:656`) is incremented
+  at entry by `IrqNestScope` and saved/restored across context
+  switches. When a timer IRQ fires at nest depth > 1 (i.e. it
+  interrupted a context that was itself still inside a
+  not-yet-unwound IRQ-driven `Schedule()` chain), **defer** the
+  reschedule — `SetNeedResched()` only, skip the `Schedule()` call
+  — exactly as the existing `DeferPreemptIfCritical()` branch does
+  for critical sections (`traps.cpp:1259`). The outer (un-nested)
+  frame then performs the single reschedule on its way out, so the
+  busy thread always gets to `iretq` out of frame #1 before another
+  `Schedule()` can stack on top. **Risk:** changing *when* the
+  scheduler runs from a timer IRQ is the riskiest kernel path; a
+  wrong predicate can disable preemption or invert priority. Do
+  **not** ship without a reliable reproducer confirming the panic
+  is removed AND a stress soak proving no preemption-fairness
+  regression. The recursion guard already bounds the blast radius
+  to a clean panic, so this is correctness-hardening, not a
+  data-safety emergency.
+- **Likely shares a root with F-040** (intermittent hung-task
+  soft-panic, `selftest-42` stuck under the same load): both are
+  saturation-induced scheduler-progress failures. Re-check F-040
+  once the nesting-defer lands.
+- **Evidence:** `docs/usability/findings.md` F-050 row; maxchaos
+  round-1 `resource`-vector serial capture.
+
+### Usability campaign — app gaps that need a real subsystem (2026-06-07)
+
+These three E-8 findings each cite a concrete rubric bar the app does
+not meet, but closing the gap needs a kernel/driver subsystem that does
+not exist yet — so they are **filed**, not patched (a fake slider /
+read-only "selector" would be worse than the honest read-only panel).
+
+- **F-029 — Settings ▸ Display: runtime resolution selector.** The
+  Display panel (`kernel/apps/settings_display.cpp`) is read-only info
+  (it reads `fb.width`/`fb.height` from the live framebuffer). A
+  working selector needs a **runtime GPU mode-set** path:
+  re-negotiate a UEFI-GOP/VBE mode (or program a real GPU display
+  pipe) and re-bind the framebuffer via the existing
+  `FramebufferRebind(...)` (`kernel/drivers/video/framebuffer.h:496`).
+  Today nothing under `drivers/gpu/` exposes modeset — the mode is
+  fixed at boot from the firmware GOP handoff. **Unblocked by:** a GPU
+  driver modeset entry point (Intel/AMD display pipe, or a GOP
+  re-`SetMode` shim in the boot stub) + a revert-timeout confirm
+  dialog (the rubric's safety bar). Rubric: *Settings ▸ display ▸
+  "Resolution selector applies on confirm (with revert-timeout
+  safety)"*.
+- **F-030 — Settings ▸ Sound: master volume slider.** The Sound panel
+  (`kernel/apps/settings_sound.cpp`) only toggles UI-cue mute and the
+  PC-speaker beep. The audio backend
+  (`kernel/subsystems/audio/audio_backend.*`) is a v0 fixed mixer that
+  saturating-sums producer samples at a fixed 48 kHz/16-bit format —
+  it has **no gain stage** and the HDA path exposes no codec amplifier
+  control. A real master volume needs either a software gain multiply
+  in the mixer submit path **or** HDA codec amp-gain register
+  programming. **Unblocked by:** an `AudioSetMasterGain(q15)` API on
+  the backend (software-gain is the smaller lift) wired to a slider
+  widget. Rubric: *Settings ▸ sound ▸ "Master volume takes effect
+  immediately"*.
+- **F-010 — Calculator: decimal-point / fractional input.** The
+  engine (`kernel/apps/calculator.cpp`) is end-to-end signed `i64`:
+  `ReadDisplayAsI64`, `SetDisplayI64`, and every op
+  (`ApplyPending`, sqrt, %, reciprocal) are integer. A `.` button and
+  `1/4 = 0.25` need a fixed-point or floating display+parse+arithmetic
+  rework across the whole TU (and a divide that yields a fraction, not
+  a truncated quotient). **Unblocked by:** a fixed-point (e.g. Q32.32)
+  or soft-float value type threaded through the engine. This is a
+  rewrite, not an extension — the integer scientific calculator
+  (bitwise/sqrt/factorial/memory, all keyboard-driven) is otherwise
+  complete and correct. Rubric: *Productivity ▸ calculator ▸ "Decimal
+  point input — `1/4 = 0.25`"*.
+- **F-019 (partial) — Files ▸ modified-date column: stamp timestamps
+  in test FAT image.** The column code landed (`mtime_date`/`mtime_time`
+  fields in `fat32::DirEntry`, decoded from FAT WrtDate/WrtTime, rendered
+  right-aligned as `YYYY-MM-DD`). Invisible in CI because
+  `tools/qemu/make-gpt-image.py` writes zero timestamps on synthetic
+  entries. **Unblocked by:** patching `make-gpt-image.py` to call
+  `mtools`' `mcopy -m` or stamp an `MTOOLS_SKIP_CHECK`-safe timestamp
+  (FAT date word from the host clock) on each file it copies in. Small
+  one-file fix; no kernel change needed.
+- **Evidence:** `docs/usability/findings.md` rows F-010 / F-019 /
+  F-029 / F-030; campaign screenshots under `docs/usability/screenshots/`.
+
 ### Linux CVE audit — invariants to honour before the surface lands
 
 Each must be honoured **when the matching surface lands**, not

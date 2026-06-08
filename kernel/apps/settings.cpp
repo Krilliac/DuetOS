@@ -241,10 +241,8 @@ constexpr u32 kReadoutX = 112; // right of the button column
 
 constexpr u32 kTabStripH = 22U;
 constexpr u32 kTabBtnW = 38U;
-constexpr u32 kTabBtnH = 18U;
 constexpr u32 kTabBtnGap = 4U;
 constexpr u32 kTabPadX = 4U;
-constexpr u32 kTabPadY = 2U;
 constexpr u32 kFooterBandH = 12U;
 constexpr u32 kFooterPadX = 4U;
 
@@ -359,7 +357,7 @@ void RebindSettingsBounds(u32 cx, u32 cy, u32 cw, u32 ch)
     for (u32 i = 0; i < kTabBtnCount; ++i)
     {
         const u32 bx = strip_x + kTabPadX + i * (kTabBtnW + kTabBtnGap);
-        TabButton(i)->bounds = Rect{bx, cy + kTabPadY, kTabBtnW, kTabBtnH};
+        TabButton(i)->bounds = Rect{bx, cy, kTabBtnW, kTabStripH};
         // Bold the active tab so the visual selection state is
         // unambiguous (legacy UX had no distinction at all).
         TabButton(i)->weight =
@@ -880,7 +878,7 @@ void SettingsSelfTest()
     RebindSettingsBounds(0U, 22U, 380U, 318U);
     g_active_panel = Panel::General;
     const u32 dx = kReadoutX + kTabPadX + 1U * (kTabBtnW + kTabBtnGap) + kTabBtnW / 2U;
-    const u32 dy = 22U + kTabPadY + kTabBtnH / 2U;
+    const u32 dy = 22U + kTabStripH / 2U;
     const Event d_move{EventKind::MouseMove, dx, dy, 0U, 0U};
     const Event d_down{EventKind::MouseDown, dx, dy, 0U, 0U};
     const Event d_up{EventKind::MouseUp, dx, dy, 0U, 0U};
