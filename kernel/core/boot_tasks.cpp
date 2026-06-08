@@ -1547,8 +1547,8 @@ void KbdReaderTask(void*)
                     s_close_target = active;
                     duetos::drivers::video::MessageBoxOpen(
                         "UNSAVED CHANGES",
-                        "The Notes buffer has unsaved edits.\n"
-                        "OK = discard and close. Cancel = keep editing.",
+                        "NOTES.TXT has unsaved changes.\n"
+                        "Discard closes without saving.",
                         [](duetos::drivers::video::DialogResult r, const char* /*text*/, void* /*user*/)
                         {
                             if (r == duetos::drivers::video::DialogResult::Ok &&
@@ -1565,7 +1565,7 @@ void KbdReaderTask(void*)
                             }
                             s_close_target = duetos::drivers::video::kWindowInvalid;
                         },
-                        nullptr);
+                        nullptr, "Discard", "Cancel");
                     duetos::drivers::video::CursorHide();
                     duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
                     duetos::drivers::video::CursorShow();
