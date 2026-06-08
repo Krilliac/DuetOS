@@ -967,6 +967,13 @@ bool VirtioGpuResetScanout(u32 width, u32 height)
         return false;
     }
 
+    // Remember the live geometry so that if the new-size setup fails
+    // AFTER we've torn the old resource down (a device-command failure
+    // the feasibility probe below can't predict), we can rebuild the
+    // PREVIOUS mode instead of leaving the screen bound to freed memory.
+    const u32 old_width = g_scanout.width;
+    const u32 old_height = g_scanout.height;
+
     // Feasibility probe: confirm the new backing run is allocatable
     // BEFORE tearing the live scanout down. If the contiguous frames
     // aren't available we bail with the old scanout fully intact —
@@ -1035,7 +1042,23 @@ bool VirtioGpuResetScanout(u32 width, u32 height)
     arch::SerialWrite("x");
     arch::SerialWriteHex(height);
     arch::SerialWrite("\n");
-    return VirtioGpuSetupScanout(width, height);
+    if (VirtioGpuSetupScanout(width, height))
+        return true;
+
+    // New-size setup failed on a device command AFTER teardown — the old
+    // backing is already freed, so there is no previous scanout left to
+    // fall back to passively. Best-effort: rebuild the PREVIOUS mode from
+    // scratch (its frames were just returned to the allocator, so the
+    // contiguous run is available again) so the display recovers rather
+    // than going dark. Return false either way: the REQUESTED mode was
+    // not applied. The caller rebinds the framebuffer to whatever scanout
+    // is live (recovered old mode, or none) by checking `ready`.
+    arch::SerialWrite("[virtio-gpu] reset-scanout: new-mode setup failed; restoring previous mode\n");
+    if (old_width != 0 && old_height != 0 && VirtioGpuSetupScanout(old_width, old_height))
+        arch::SerialWrite("[virtio-gpu] reset-scanout: previous mode restored\n");
+    else
+        arch::SerialWrite("[virtio-gpu] reset-scanout: RECOVERY FAILED — scanout is down\n");
+    return false;
 }
 
 const VirtioScanoutInfo& VirtioGpuScanoutInfo()

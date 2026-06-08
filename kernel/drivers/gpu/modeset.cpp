@@ -80,21 +80,31 @@ bool DisplaySetMode(u32 width, u32 height)
     if (cur.width == width && cur.height == height)
         return true; // already there
 
-    // 1) virtio-gpu: tear the old resource + backing down, build a
-    //    new resource/backing/scanout at the requested geometry. On
-    //    failure the OLD scanout is left intact + on screen (the
-    //    reset path feasibility-probes the new backing before it
-    //    touches the live resource).
-    if (!VirtioGpuResetScanout(width, height))
-    {
-        arch::SerialWrite("[modeset] virtio-gpu reset-scanout failed; staying at old mode\n");
-        return false;
-    }
+    // 1) virtio-gpu: tear the old resource + backing down, build a new
+    //    resource/backing/scanout at the requested geometry. The reset
+    //    path feasibility-probes the new backing before touching the
+    //    live resource (so an allocation shortfall is safe), and if the
+    //    post-teardown device-command setup fails it rebuilds the
+    //    PREVIOUS mode from scratch. Either way, the freed-and-rebuilt
+    //    backing lives at a NEW address, so step 2 must rebind whenever
+    //    a scanout is live — not only on the requested-mode success.
+    const bool applied = VirtioGpuResetScanout(width, height);
     const auto& sc = VirtioGpuScanoutInfo();
 
-    // 2) Rebind the framebuffer to the NEW backing. This resets the
-    //    presented-snapshot validity so the next compose does a full
-    //    first-frame blit.
+    if (!sc.ready)
+    {
+        // Catastrophic: the requested mode failed AND the previous-mode
+        // recovery also failed. Nothing to rebind to. The framebuffer
+        // still points at the freed old backing, but there is no live
+        // scanout to repoint it at — surface the failure.
+        arch::SerialWrite("[modeset] scanout down after reset (no live mode to bind)\n");
+        return false;
+    }
+
+    // 2) Rebind the framebuffer to the live backing (new mode on
+    //    success, or the recovered previous mode on failure). This
+    //    resets the presented-snapshot validity so the next compose
+    //    does a full first-frame blit.
     if (!::duetos::drivers::video::FramebufferRebindExternal(sc.backing_va, sc.backing_phys, sc.width, sc.height,
                                                              sc.pitch, 32))
     {
@@ -104,10 +114,18 @@ bool DisplaySetMode(u32 width, u32 height)
 
     // 3) Drop the compose shadow + snapshot — they were sized to the
     //    OLD geometry. The next FramebufferBeginCompose re-allocates
-    //    them at the new width/height. Safe here: we hold the
+    //    them at the live width/height. Safe here: we hold the
     //    compositor lock (caller is the settings key handler), so no
     //    compose is mid-flight.
     ::duetos::drivers::video::FramebufferDropComposeBuffers();
+
+    if (!applied)
+    {
+        // Display is alive at the recovered previous geometry, but the
+        // mode the user asked for was not applied.
+        arch::SerialWrite("[modeset] requested mode not applied; display recovered at prior geometry\n");
+        return false;
+    }
 
     // The window manager reads FramebufferGet() fresh on every
     // DesktopCompose pass, so the ui-ticker's next frame relays out

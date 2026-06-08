@@ -268,7 +268,18 @@ i64 ReadDisplayAsFixed(bool* overflow)
         const char c = g_state.display[i];
         if (c < '0' || c > '9')
             break;
-        scaled += static_cast<i64>(c - '0') * place;
+        // Guard the fractional accumulation: for a near-ceiling integer
+        // part (e.g. `9223372036854.8`) `int_part * kScale` fits but the
+        // first fractional digit can still push past i64 max. An
+        // unchecked `+=` would be signed-overflow UB — trip ERR instead.
+        i64 term = 0;
+        if (__builtin_mul_overflow(static_cast<i64>(c - '0'), place, &term) ||
+            __builtin_add_overflow(scaled, term, &scaled))
+        {
+            if (overflow != nullptr)
+                *overflow = true;
+            return 0;
+        }
         place /= 10;
     }
     return neg ? -scaled : scaled;
