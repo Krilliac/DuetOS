@@ -1564,6 +1564,25 @@ void CalculatorSelfTest()
     if (!g_state.error)
         all_pass = false;
 
+    // Divide-by-zero → ERR (F-013).
+    HandleClear();
+    DispatchKey('5');
+    DispatchKey('/');
+    DispatchKey('0');
+    DispatchKey('=');
+    if (!g_state.error)
+        all_pass = false;
+    // After ERR, C clears the error state; subsequent ops work normally.
+    HandleClear();
+    if (g_state.error)
+        all_pass = false;
+    DispatchKey('7');
+    DispatchKey('*');
+    DispatchKey('8');
+    DispatchKey('=');
+    if (ReadDisplayAsI64() != 56 || g_state.error)
+        all_pass = false;
+
     // Bitwise (integer-only — operate on truncated integer part).
     HandleClear();
     DispatchKey('1');

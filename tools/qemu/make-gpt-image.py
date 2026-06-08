@@ -361,11 +361,15 @@ def stage_files(buf: bytearray, part_sector_count: int, staged) -> None:
         run_off = run_sector * SECTOR
         buf[run_off:run_off + size] = body
 
-        # SFN root-dir entry.
+        # SFN root-dir entry (same deterministic timestamp as seeded entries).
+        STAGE_DATE = (46 << 9) | (6 << 5) | 8   # 2026-06-08
+        STAGE_TIME = (12 << 11) | 0 | 0          # 12:00:00
         entry = bytearray(32)
         entry[0:11] = sfn11
         entry[11] = 0x20  # ATTR_ARCHIVE
         struct.pack_into("<H", entry, 20, (first_cluster >> 16) & 0xFFFF)
+        struct.pack_into("<H", entry, 22, STAGE_TIME)   # write time
+        struct.pack_into("<H", entry, 24, STAGE_DATE)   # write date
         struct.pack_into("<H", entry, 26, first_cluster & 0xFFFF)
         struct.pack_into("<I", entry, 28, size)
         buf[root_slot_off:root_slot_off + 32] = entry
@@ -507,6 +511,12 @@ def build_fat32(part_sector_count: int) -> bytearray:
     buf[fat1_off:fat1_off + len(fat)] = fat
     buf[fat2_off:fat2_off + len(fat)] = fat
 
+    # Deterministic FAT timestamp for all seeded entries: 2026-06-08 12:00:00.
+    # FAT date = ((year-1980)<<9) | (month<<5) | day = (46<<9)|(6<<5)|8 = 0x5CC8
+    # FAT time = (hour<<11) | (min<<5) | (sec/2) = (12<<11)|(0<<5)|0 = 0x6000
+    SEED_DATE = (46 << 9) | (6 << 5) | 8   # 2026-06-08 → 0x5CC8
+    SEED_TIME = (12 << 11) | 0 | 0          # 12:00:00  → 0x6000
+
     # Root directory (cluster 2). One 32-byte SFN entry.
     data_start_sector = FAT_RESERVED + FAT_NUM_FATS * FAT_FATSZ
     root_off = data_start_sector * SECTOR
@@ -515,12 +525,12 @@ def build_fat32(part_sector_count: int) -> bytearray:
     entry[11] = 0x20                       # ATTR_ARCHIVE
     entry[12] = 0                          # NTRes
     entry[13] = 0                          # CrtTimeTenth
-    struct.pack_into("<H", entry, 14, 0)   # creation time
-    struct.pack_into("<H", entry, 16, 0)   # creation date
-    struct.pack_into("<H", entry, 18, 0)   # last access date
+    struct.pack_into("<H", entry, 14, SEED_TIME)    # creation time
+    struct.pack_into("<H", entry, 16, SEED_DATE)    # creation date
+    struct.pack_into("<H", entry, 18, SEED_DATE)    # last access date
     struct.pack_into("<H", entry, 20, 0)   # first_cluster_high (= 0; cluster 3 fits in low)
-    struct.pack_into("<H", entry, 22, 0)   # write time
-    struct.pack_into("<H", entry, 24, 0)   # write date
+    struct.pack_into("<H", entry, 22, SEED_TIME)    # write time
+    struct.pack_into("<H", entry, 24, SEED_DATE)    # write date
     struct.pack_into("<H", entry, 26, FAT_FILE_CLUSTER)  # first_cluster_low
     struct.pack_into("<I", entry, 28, len(FAT_FILE_BODY))
     buf[root_off:root_off + 32] = entry
@@ -534,6 +544,8 @@ def build_fat32(part_sector_count: int) -> bytearray:
     sub_entry = bytearray(32)
     sub_entry[0:11] = FAT_SUBDIR_NAME
     sub_entry[11] = 0x10   # ATTR_DIRECTORY
+    struct.pack_into("<H", sub_entry, 22, SEED_TIME)               # write time
+    struct.pack_into("<H", sub_entry, 24, SEED_DATE)               # write date
     struct.pack_into("<H", sub_entry, 20, 0)                       # cluster high
     struct.pack_into("<H", sub_entry, 26, FAT_SUBDIR_CLUSTER)      # cluster low
     struct.pack_into("<I", sub_entry, 28, 0)                       # size (dirs=0)
@@ -563,6 +575,8 @@ def build_fat32(part_sector_count: int) -> bytearray:
     inner[0:11] = FAT_INNER_NAME
     inner[11] = 0x20
     struct.pack_into("<H", inner, 20, 0)
+    struct.pack_into("<H", inner, 22, SEED_TIME)    # write time
+    struct.pack_into("<H", inner, 24, SEED_DATE)    # write date
     struct.pack_into("<H", inner, 26, FAT_INNER_CLUSTER)
     struct.pack_into("<I", inner, 28, len(FAT_INNER_BODY))
     buf[sub_off + 64:sub_off + 96] = inner
@@ -583,6 +597,8 @@ def build_fat32(part_sector_count: int) -> bytearray:
     sfn[0:11] = FAT_LONG_SFN
     sfn[11] = 0x20
     struct.pack_into("<H", sfn, 20, 0)
+    struct.pack_into("<H", sfn, 22, SEED_TIME)    # write time
+    struct.pack_into("<H", sfn, 24, SEED_DATE)    # write date
     struct.pack_into("<H", sfn, 26, FAT_LONG_CLUSTER)
     struct.pack_into("<I", sfn, 28, len(FAT_LONG_BODY))
     buf[root_off + 96:root_off + 128] = sfn
@@ -597,6 +613,8 @@ def build_fat32(part_sector_count: int) -> bytearray:
     big_sfn[0:11] = FAT_BIG_SFN
     big_sfn[11] = 0x20
     struct.pack_into("<H", big_sfn, 20, 0)
+    struct.pack_into("<H", big_sfn, 22, SEED_TIME)    # write time
+    struct.pack_into("<H", big_sfn, 24, SEED_DATE)    # write date
     struct.pack_into("<H", big_sfn, 26, FAT_BIG_CLUSTER)
     struct.pack_into("<I", big_sfn, 28, FAT_BIG_SIZE)
     buf[root_off + 128:root_off + 160] = big_sfn
@@ -611,6 +629,8 @@ def build_fat32(part_sector_count: int) -> bytearray:
     elf_sfn[0:11] = FAT_ELF_SFN
     elf_sfn[11] = 0x20
     struct.pack_into("<H", elf_sfn, 20, 0)
+    struct.pack_into("<H", elf_sfn, 22, SEED_TIME)    # write time
+    struct.pack_into("<H", elf_sfn, 24, SEED_DATE)    # write date
     struct.pack_into("<H", elf_sfn, 26, FAT_ELF_CLUSTER)
     struct.pack_into("<I", elf_sfn, 28, FAT_ELF_SIZE)
     buf[root_off + 160:root_off + 192] = elf_sfn
