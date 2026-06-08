@@ -11,6 +11,7 @@
 #include "drivers/video/widget.h"
 #include "fs/fat32.h"
 #include "log/klog.h"
+#include "subsystems/audio/audio_backend.h"
 #include "time/timezone.h"
 #include "util/string.h"
 
@@ -412,6 +413,16 @@ void FormatPayload(char* dst, u64 cap, u64* len_out)
     AppendU32(dst, &pos, cap, v::SoundCueIsEnabled() ? 1u : 0u);
     Append(dst, &pos, cap, "\n");
 
+    // Master output volume (0..100) + mute — the software-gain stage
+    // the Sound sub-panel's +/- and V keys drive. Persisting both so
+    // the level *and* the mute state survive a re-open / reboot.
+    Append(dst, &pos, cap, "sound.volume=");
+    AppendU32(dst, &pos, cap, subsystems::audio::AudioGetMasterVolume());
+    Append(dst, &pos, cap, "\n");
+    Append(dst, &pos, cap, "sound.muted=");
+    AppendU32(dst, &pos, cap, subsystems::audio::AudioIsMuted() ? 1u : 0u);
+    Append(dst, &pos, cap, "\n");
+
     // Timezone offset in minutes (signed; range -720..+840).
     Append(dst, &pos, cap, "tz.minutes=");
     AppendI32(dst, &pos, cap, time::TimezoneOffsetMinutes());
@@ -512,6 +523,24 @@ bool ApplyOne(const char* key, const char* val)
         if (ParseU32(val, static_cast<u32>(StrLen(val)), &num))
         {
             v::SoundCueSetEnabled(num != 0);
+        }
+        return true;
+    }
+    if (StrEqual(key, "sound.volume"))
+    {
+        u32 num = 0;
+        if (ParseU32(val, static_cast<u32>(StrLen(val)), &num) && num <= 100u)
+        {
+            subsystems::audio::AudioSetMasterVolume(static_cast<u8>(num));
+        }
+        return true;
+    }
+    if (StrEqual(key, "sound.muted"))
+    {
+        u32 num = 0;
+        if (ParseU32(val, static_cast<u32>(StrLen(val)), &num))
+        {
+            subsystems::audio::AudioSetMuted(num != 0);
         }
         return true;
     }

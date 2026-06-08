@@ -554,18 +554,6 @@ read-only "selector" would be worse than the honest read-only panel).
   dialog (the rubric's safety bar). Rubric: *Settings ▸ display ▸
   "Resolution selector applies on confirm (with revert-timeout
   safety)"*.
-- **F-030 — Settings ▸ Sound: master volume slider.** The Sound panel
-  (`kernel/apps/settings_sound.cpp`) only toggles UI-cue mute and the
-  PC-speaker beep. The audio backend
-  (`kernel/subsystems/audio/audio_backend.*`) is a v0 fixed mixer that
-  saturating-sums producer samples at a fixed 48 kHz/16-bit format —
-  it has **no gain stage** and the HDA path exposes no codec amplifier
-  control. A real master volume needs either a software gain multiply
-  in the mixer submit path **or** HDA codec amp-gain register
-  programming. **Unblocked by:** an `AudioSetMasterGain(q15)` API on
-  the backend (software-gain is the smaller lift) wired to a slider
-  widget. Rubric: *Settings ▸ sound ▸ "Master volume takes effect
-  immediately"*.
 - **F-019 (partial) — Files ▸ modified-date column: stamp timestamps
   in test FAT image.** The column code landed (`mtime_date`/`mtime_time`
   fields in `fat32::DirEntry`, decoded from FAT WrtDate/WrtTime, rendered

@@ -86,6 +86,26 @@ HDA's consumer default. Producers convert to that shape before
 calling `WritePcmS16Stereo`; a follow-up slice adds format /
 sample-rate conversion when a producer demands a different format.
 
+### Software master gain (F-030)
+
+The backend applies a software **master volume** (`AudioSetMasterVolume`
+/ `AudioGetMasterVolume`, 0..100%, default 100 = identity) plus a
+**mute** flag (`AudioSetMuted` / `AudioIsMuted`) as a per-sample scale
+inside the `WritePcm*` producer paths (`ApplyMasterGain`:
+`sample * pct / 100`, saturating; mute forces the applied gain to 0
+while the stored level is retained so un-mute restores it). It is the
+single software output volume — both the taskbar volume flyout and the
+Settings ▸ Sound panel drive the same backend state. The level + mute
+persist across reboot via `SESSION.CFG` (`sound.volume` / `sound.muted`,
+round-tripped by `kernel/core/session_restore.cpp`). A boot self-test
+(`[audio-selftest] gain PASS`) verifies the unity / half / mute /
+level-kept math deterministically (runs even with no HDA controller).
+**GAP:** the gain is applied at *write* time — the HDA DMA reads the
+ring directly with no kernel hook, so a level change affects samples
+written after it (correct for streaming producers like waveOutWrite).
+A future HDA codec amp-gain path would move the control downstream;
+the audible result is unverified (DuetOS audio is QEMU-smoke-only).
+
 ## Known Limits / GAPs
 
 - **No producers yet.** Slice 2 ships the backend layer but no
