@@ -3226,6 +3226,115 @@ bool TakeNeedResched()
     return v;
 }
 
+// Per-CPU slice of the scheduler tick, invoked on an AP from the
+// AP-timer IPI handler when the BSP is on the PIT-tick fallback
+// (VirtualBox: the LAPIC timer counts but never delivers its IRQ, so
+// each AP's LAPIC timer is left un-armed and the PIT IRQ0 reaches only
+// the BSP — see arch/x86_64/timer.cpp). Without this, an AP receives
+// no tick at all: its sched_total_ticks freezes at 0 (so sysmon shows
+// it idle forever) and it is never preempted.
+//
+// Mirrors ONLY the per-CPU accounting + preemption half of
+// OnTimerTick. The BSP-owned, once-per-tick work — global timekeeping
+// (g_ticks), the sleep-list drain, cyclic timers, RCU, the heartbeat,
+// the NMI-watchdog pet — stays on the BSP's full OnTimerTick and is
+// deliberately NOT duplicated here.
+void OnApTimerTick()
+{
+    Task* cur = Current();
+    if (cur != nullptr)
+    {
+        ++cur->ticks_run;
+        ++g_total_ticks;
+        const bool cur_idle = (cur->priority == TaskPriority::Idle);
+        if (cur_idle)
+        {
+            ++g_idle_ticks;
+        }
+        // Per-CPU accounting — what sysmon reads via SchedStatsReadCpu.
+        // Written only by this CPU, so no lock is needed.
+        cpu::PerCpu* self_pcpu = cpu::CurrentCpu();
+        if (self_pcpu != nullptr)
+        {
+            ++self_pcpu->sched_total_ticks;
+            if (cur_idle)
+            {
+                ++self_pcpu->sched_idle_ticks;
+            }
+        }
+        // Per-process CPU-time budget — same enforcement OnTimerTick
+        // applies, so a runaway task scheduled on this AP is still
+        // flagged for termination at the next reschedule. We do NOT
+        // call SchedExit here (IRQ context); Schedule() converts a
+        // budget-burned task into a Dead one on re-enqueue.
+        if (cur->process != nullptr)
+        {
+            core::Process* proc = cur->process;
+            ++proc->ticks_used;
+            if (proc->ticks_used >= proc->tick_budget && !cur->kill_requested)
+            {
+                cur->kill_requested = true;
+                cur->kill_reason = KillReason::TickBudget;
+            }
+        }
+    }
+    // Request preemption on this CPU. The whole point of the AP tick:
+    // tasks here are now time-sliced instead of running until they
+    // block. The IRQ dispatcher's post-EOI check calls Schedule().
+    SetNeedResched();
+}
+
+// Boot self-test for OnApTimerTick's per-CPU accounting. Runs the tick
+// with interrupts OFF so a concurrent real timer tick on this CPU
+// cannot also bump the counters and mask a broken OnApTimerTick — with
+// IF=0 exactly one increment (ours) can occur, making the check
+// deterministic. Emits an explicit PASS/FAIL sentinel (does not panic)
+// so CI can grep for it. Exercised on the BSP; the cross-CPU IPI
+// delivery path is confirmed on a live VirtualBox boot.
+void SchedApTickSelfTest()
+{
+    using arch::SerialWrite;
+    cpu::PerCpu* self = cpu::CurrentCpu();
+    if (self == nullptr || Current() == nullptr)
+    {
+        SerialWrite("[sched-aptick-selftest] SKIP (no CurrentCpu/task — pre-Schedule)\n");
+        return;
+    }
+
+    constexpr u64 kRflagsIf = 1ULL << 9;
+    const bool was_enabled = (arch::ReadRflags() & kRflagsIf) != 0;
+    arch::Cli();
+
+    // Assert ONLY on this CPU's private counter + this CPU's
+    // need_resched flag. Both are written exclusively by the current
+    // CPU, so with IF=0 no concurrent writer (peer timer ticks or our
+    // own preemption) can perturb them — the +1 is exactly our call.
+    // We deliberately do NOT assert on the global g_total_ticks sum:
+    // peer CPUs increment it from their own (interrupts-enabled) timer
+    // ticks, so an exact delta there races under SMP (observed FAIL on
+    // SMP=4, PASS on SMP=1 before this was tightened).
+    const u64 before_self = self->sched_total_ticks;
+    const bool prev_resched = NeedResched();
+    NeedResched() = false; // prove OnApTimerTick sets it
+
+    OnApTimerTick();
+
+    const u64 after_self = self->sched_total_ticks;
+    const bool resched_set = NeedResched();
+
+    // Restore: never lose a pending reschedule that predated the test.
+    NeedResched() = prev_resched || resched_set;
+
+    if (was_enabled)
+    {
+        arch::Sti();
+    }
+
+    const bool ok = (after_self == before_self + 1) && resched_set;
+    SerialWrite(ok ? "[sched-aptick-selftest] PASS (per-CPU tick accounting + resched)\n"
+                   : "[sched-aptick-selftest] FAIL\n");
+}
+
 void OnTimerTick(u64 now_ticks)
 {
     g_tick_now = now_ticks;

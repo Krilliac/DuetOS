@@ -703,6 +703,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // wake (e.g. WaitQueueWakeOne firing on the BSP and routing to
     // the AP's runqueue) will pull the IPI trigger.
     duetos::arch::SmpInstallReschedIpiHandler();
+    // AP-timer-tick IPI handler — installed in the same window. On the
+    // PIT-tick fallback path (VirtualBox) the BSP broadcasts this once
+    // per tick so APs get CPU-time accounting + preemption; the AP IDT
+    // clone must already carry the vector when the first broadcast
+    // fires. Inert on healthy boots (the broadcast is gated off).
+    duetos::arch::SmpInstallApTimerIpiHandler();
     // TLB-shootdown IPI must be installed BEFORE APs come online —
     // the moment a peer CPU runs in any AS the BSP could be unmapping
     // a page from, the shootdown IPI is the only thing keeping that
@@ -863,6 +869,17 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                               []()
                                               {
                                                   duetos::sched::HybridPlacementSelfTest();
+                                                  return duetos::core::Result<void>{};
+                                              });
+        // Per-CPU AP-tick accounting test. Verifies OnApTimerTick —
+        // the per-CPU tick the AP-timer IPI runs on the VirtualBox
+        // PIT-fallback path — charges the per-CPU/global counters and
+        // requests preemption. PASSes on every guest (runs on the BSP);
+        // the cross-CPU IPI delivery is confirmed on a live VBox boot.
+        duetos::core::InitcallRegisterOrPanic(duetos::core::Phase::Userland, "sched-aptick-selftest",
+                                              []()
+                                              {
+                                                  duetos::sched::SchedApTickSelfTest();
                                                   return duetos::core::Result<void>{};
                                               });
         // MWAIT-idle feature-gate test. PASSes on every guest

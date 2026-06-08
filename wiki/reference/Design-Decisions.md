@@ -11004,3 +11004,47 @@ fake) anything that needs a subsystem we don't have.** The concrete decisions:
   would corrupt the frame, so the time-driven revert deliberately runs at the
   one point per tick where the lock is held and no compose is in flight.
   See [`Graphics-Drivers`](../drivers/Graphics-Drivers.md) ("Runtime modeset").
+
+---
+
+## 2026-06-08 — VirtualBox AP timer ticks via IPI broadcast, not TSC-deadline
+
+- **Scope:** `kernel/arch/x86_64/timer.cpp`, `kernel/arch/x86_64/smp.{h,cpp}`,
+  `kernel/sched/sched.{h,cpp}`, `kernel/arch/x86_64/traps.cpp`
+- **Context:** On VirtualBox the LAPIC timer counts but never delivers
+  its underflow IRQ, so the kernel falls back to an IOAPIC-routed PIT
+  channel-0 tick — and that PIT IRQ0 reaches **only the BSP**. APs were
+  therefore left with no timer tick at all: their per-CPU
+  `sched_total_ticks` froze at 0 (the system monitor showed every AP
+  idle forever, even under load) and, more seriously, they were never
+  preempted. This was the documented GAP in `LapicTimerStartOnCurrent`.
+- **Decision:** On the PIT-fallback path only, the BSP's `TimerHandler`
+  broadcasts a per-CPU tick to every online AP each tick via a new
+  fixed-vector IPI (`kApTimerIpiVector = 0xF7`); the AP's handler runs
+  `sched::OnApTimerTick`, the per-CPU accounting + preemption half of
+  `OnTimerTick`. Gated on `g_pit_fallback_active` so healthy hardware
+  (each AP gets its own LAPIC tick) never double-counts.
+- **Rules out:** A **per-AP TSC-deadline timer** (the other option named
+  in the former GAP). TSC-deadline delivers through the *same* LAPIC
+  Timer LVT vector VirtualBox fails to raise, so it would be just as
+  dead on the exact platform being fixed. IPIs, by contrast, demonstrably
+  deliver on VBox (TLB-shootdown and reschedule IPIs already work there),
+  which is why the IPI broadcast is the robust mechanism.
+- **Also decided:** `IsDispatchedVector` (the `IrqInstall` legal-vector
+  gate) was converted from a per-vector enumeration (`0xF8 || 0xF9 ||
+  0xFA`) to a bounded band `[0xF7, 0xFA]`. The enumeration was a
+  "whitelist incompleteness" trap — it halted boot on `0xF9` once and on
+  `0xF7` again; the band closes the class while still rejecting
+  truly-out-of-range vectors.
+- **Wall-clock note:** `OnApTimerTick` deliberately does **not** touch
+  `g_ticks` — the global timekeeping counter stays BSP-owned at 100 Hz
+  on the fallback path. It increments the global `g_total_ticks`/`g_idle_ticks`
+  sums and the per-CPU counters, matching what a healthy AP LAPIC tick does.
+- **Revisit when:** A board needs the PIT recovery while running SMT
+  siblings whose tick must be phase-staggered, or when per-CPU dynticks
+  land — at which point per-AP TSC-deadline (on hardware where the LVT
+  *does* deliver) becomes worthwhile.
+- **Verification:** `[sched-aptick-selftest]` self-test pins the per-CPU
+  accounting on every boot (BSP); the cross-CPU IPI delivery is confirmed
+  on a live VirtualBox boot (the only environment that reaches the
+  fallback path).

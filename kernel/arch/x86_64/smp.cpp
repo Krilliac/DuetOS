@@ -381,6 +381,16 @@ void ReschedIpiHandler()
     sched::SetNeedResched();
 }
 
+// AP-timer-tick IPI handler. Runs on an AP when the BSP (on the
+// PIT-tick fallback path) broadcasts a tick. Runs the per-CPU slice of
+// the scheduler tick locally — accounting + preemption. EOI is issued
+// by the generic IRQ dispatcher that wraps every IrqInstall'd handler,
+// same as ReschedIpiHandler.
+void ApTimerIpiHandler()
+{
+    sched::OnApTimerTick();
+}
+
 // TLB-shootdown IPI request. Filled by SmpTlbShootdown{Addr,Range} on
 // the requesting CPU, read by every target CPU's IPI handler. A simple
 // "current request" model is fine for v0 (shootdown is rare), but it
@@ -453,6 +463,11 @@ void TlbShootdownIpiHandler()
 void SmpInstallReschedIpiHandler()
 {
     IrqInstall(kReschedIpiVector, ReschedIpiHandler);
+}
+
+void SmpInstallApTimerIpiHandler()
+{
+    IrqInstall(kApTimerIpiVector, ApTimerIpiHandler);
 }
 
 void SmpInstallTlbShootdownIpiHandler()
@@ -620,6 +635,16 @@ void SmpTlbShootdownRange(mm::AddressSpace* as, u64 virt, u64 len)
                                          reinterpret_cast<u64>(as), start, end);
     }
     SmpTlbShootdownBroadcast(as, start, end);
+}
+
+void SmpBroadcastApTimerTick()
+{
+    // Single ICR write to every online peer. The target set is
+    // provably "every online AP" (the BSP is the sole CPU on PIT IRQ0
+    // in fallback mode, so peers == APs); APs not yet online are
+    // halted with IF=0 and never take a fixed IPI, so the shorthand is
+    // correct here. See SmpSendBroadcastIpiAllExSelf's contract note.
+    SmpSendBroadcastIpiAllExSelf(kApTimerIpiVector);
 }
 
 void SmpSendReschedIpi(u32 cpu_id)

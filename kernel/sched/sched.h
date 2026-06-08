@@ -260,6 +260,15 @@ bool TakeNeedResched(); // read-and-clear
 /// context after the global tick counter is incremented.
 void OnTimerTick(u64 now_ticks);
 
+/// Per-CPU slice of the scheduler tick, invoked on an AP from the
+/// AP-timer IPI handler when the BSP is on the PIT-tick fallback
+/// (VirtualBox), where APs receive no timer tick of their own. Charges
+/// per-CPU CPU-time accounting (what sysmon reads), enforces the
+/// per-process tick budget, and requests preemption. Does NOT touch the
+/// BSP-owned once-per-tick work (global timekeeping, sleep-list drain,
+/// cyclic timers, RCU, heartbeat, NMI watchdog).
+void OnApTimerTick();
+
 /// Pointer to the currently-executing task. Never null after SchedInit.
 Task* CurrentTask();
 
@@ -429,6 +438,14 @@ void AffinityMaskSelfTest();
 /// QEMU). Panics on mismatch; emits one
 /// `[hybrid-placement-selftest] PASS`/`SKIP` line.
 void HybridPlacementSelfTest();
+
+/// Boot self-test for OnApTimerTick. Runs the per-CPU tick with
+/// interrupts off and asserts the per-CPU + global tick counters
+/// advanced by one and that a reschedule was requested. Non-panicking;
+/// emits one `[sched-aptick-selftest] PASS`/`FAIL`/`SKIP` line so CI can
+/// grep for it. The cross-CPU IPI delivery path is confirmed on a live
+/// VirtualBox boot.
+void SchedApTickSelfTest();
 
 /// Verifies the MWAIT-idle feature gate: the cached MONITOR
 /// feature bit must agree with a fresh CPUID.1:ECX[3], and

@@ -46,7 +46,16 @@ landed" section reflects current reality.
   the right TSS.
 - `kernel/arch/x86_64/timer.{h,cpp}` — `LapicTimerStartOnCurrent`
   arms the local LAPIC timer on the calling CPU using the cached
-  calibration from BSP's `TimerInit`.
+  calibration from BSP's `TimerInit`. On the **PIT-tick fallback**
+  path (VirtualBox: the LAPIC timer counts but never delivers, so the
+  scheduler tick is an IOAPIC-routed PIT IRQ0 that reaches only the
+  BSP), arming the AP LVT is skipped — instead the BSP's `TimerHandler`
+  broadcasts a per-CPU tick to every online AP each tick via
+  `SmpBroadcastApTimerTick` (vector `0xF7` → `sched::OnApTimerTick`).
+  Without it, APs on VBox receive no tick at all: their
+  `sched_total_ticks` freeze at 0 and they are never preempted. Gated
+  on `g_pit_fallback_active`, so healthy hardware is unaffected. See
+  Design-Decisions 2026-06-08.
 
 ### AP per-CPU register-state ordering (2026-05-19, resolved)
 
