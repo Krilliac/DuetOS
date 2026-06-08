@@ -27,6 +27,7 @@
 #include "apps/browser/assistant_backend.h"
 #include "apps/browser/dock_surface.h"
 #include "apps/browser/omnibox.h"
+#include "apps/browser/omnibox_classify.h"
 #include "apps/browser/priv_exec.h"
 #include "apps/browser/start_page.h"
 #include "apps/browser/tab_strip.h"
@@ -3443,9 +3444,21 @@ void HandleUrlEditChar(char c)
     const u8 uc = static_cast<u8>(c);
     if (uc == 0x0A) // Enter
     {
-        StrCopyCap(g_state.url, kUrlCap, g_state.url); // no-op, just clarity
         g_state.mode = Mode::View;
-        StartFetch(g_state.url);
+        // Omnibox routing: a URL/host (explicit scheme, dotted host,
+        // localhost, IP) navigates as typed; anything else (a bare word
+        // or a multi-word phrase) becomes a search query instead of
+        // being mis-fetched as a hostname -> DNS-fail -> blank page.
+        if (OmniboxLooksLikeUrl(g_state.url))
+        {
+            StartFetch(g_state.url);
+        }
+        else
+        {
+            char search[kUrlCap];
+            OmniboxBuildSearchUrl(g_state.url, search, kUrlCap);
+            StartFetch(search);
+        }
         return;
     }
     if (uc == 0x1B) // Esc
