@@ -1338,7 +1338,7 @@ void RefreshFooterText()
         }
         else if (g_state.mode == Mode::Trash)
         {
-            hint = (g_state.trash_count == 0) ? "TOOLBAR:VIEW" : "DEL:PERM-DEL  F5:EMPTY  TYPE:JUMP";
+            hint = (g_state.trash_count == 0) ? "TOOLBAR:VIEW" : "F4:RESTORE  DEL:PERM-DEL  F5:EMPTY  TYPE:JUMP";
         }
         else if (g_state.mode == Mode::DuetFs)
         {
@@ -1997,7 +1997,7 @@ u32 FilesListVisibleRows()
     return (content_h > (list_top - content_y) + kRowH) ? (content_h - (list_top - content_y)) / kRowH : 0;
 }
 
-// Home / End / PageUp / PageDown / Delete / F5 for the active list.
+// Home / End / PageUp / PageDown / Delete / F4 / F5 for the active list.
 // Matches the list-navigation surface sibling apps (calendar, hexview,
 // notify-center) already expose. `code` is a VK navigation key.
 //   Delete — arm move-to-trash (Fat32) or perm-delete (Trash).
@@ -2005,6 +2005,9 @@ u32 FilesListVisibleRows()
 //            equivalent to the X-then-Y two-step confirmation. No
 //            toolbar button for destructive delete — kept on a
 //            non-letter key so letters are free for type-ahead.
+//   F4     — restore selected item from Trash back to the FAT32 root.
+//            Non-destructive (no Y-confirm required); letters are
+//            reserved for type-ahead, hence an F-key.
 //   F5     — arm empty-trash in Trash mode (replaces bare 'e').
 //            Kept off letters for the same reason as Delete.
 bool FilesFeedListKey(duetos::u16 code)
@@ -2032,6 +2035,17 @@ bool FilesFeedListKey(duetos::u16 code)
             g_state.pending = Pending::PermDeleteFromTrash;
             g_state.pending_idx = g_state.trash_selection;
             duetos::drivers::video::NotifyShow("press Y to perm-delete");
+        }
+        return true;
+    }
+    // F4 — restore selected trash item back to the FAT32 root.
+    // Non-destructive: no Y-confirm needed (the item just moves
+    // back; the user can re-trash it if they change their mind).
+    if (code == duetos::drivers::input::kKeyF4)
+    {
+        if (g_state.mode == Mode::Trash && g_state.trash_selection < g_state.trash_count)
+        {
+            RestoreSelectedTrash();
         }
         return true;
     }
@@ -2441,6 +2455,22 @@ void FilesSelfTest()
     if (g_state.pending != Pending::None)
         pass = false;
 
+    // F4 Restore key: in Trash mode with no entries it must be a
+    // no-op (no crash / pending change). In Fat32 mode it must
+    // also be a no-op (key is trash-specific). Touch-test only
+    // (the real restore path is exercised by TrashSelfTest).
+    g_state.mode = Mode::Trash;
+    g_state.trash_count = 0;
+    g_state.trash_selection = 0;
+    g_state.pending = Pending::None;
+    FilesFeedListKey(duetos::drivers::input::kKeyF4); // no-op: empty bin
+    if (g_state.pending != Pending::None)
+        pass = false;
+    g_state.mode = Mode::Fat32;
+    FilesFeedListKey(duetos::drivers::input::kKeyF4); // no-op: wrong mode
+    if (g_state.pending != Pending::None)
+        pass = false;
+
     // Home / End list navigation on the ramfs root listing.
     g_state.mode = Mode::Ramfs;
     g_state.ramfs_depth = 1;
@@ -2547,8 +2577,8 @@ void FilesSelfTest()
     if (pass)
     {
         SerialWrite("[files] self-test OK (ramfs descend+back, mode toggle, fat32 subdir descent+back, "
-                    "duetfs descend+back, ctx-dispatch, home/end, ext match, delete-disarm, widget-click, "
-                    "footer-refresh, typeahead, date-format)\n");
+                    "duetfs descend+back, ctx-dispatch, home/end, ext match, delete-disarm, f4-restore-noop, "
+                    "widget-click, footer-refresh, typeahead, date-format)\n");
         SerialWrite("[files-selftest] PASS\n");
     }
     else

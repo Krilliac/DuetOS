@@ -1680,7 +1680,7 @@ void KbdReaderTask(void*)
                 }
                 else if (active == duetos::apps::files::FilesWindow() &&
                          (ev.code == kKeyHome || ev.code == kKeyEnd || ev.code == kKeyPageUp ||
-                          ev.code == kKeyPageDown || ev.code == kKeyDelete || ev.code == kKeyF5))
+                          ev.code == kKeyPageDown || ev.code == kKeyDelete || ev.code == kKeyF4 || ev.code == kKeyF5))
                 {
                     app_consumed = duetos::apps::files::FilesFeedListKey(static_cast<duetos::u16>(ev.code));
                 }
