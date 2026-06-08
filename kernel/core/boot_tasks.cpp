@@ -1763,6 +1763,12 @@ void KbdReaderTask(void*)
                 {
                     app_consumed = duetos::apps::taskman::TaskmanFeedKey(static_cast<duetos::u16>(ev.code));
                 }
+                else if (active == duetos::apps::help::HelpWindow() &&
+                         (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown || ev.code == kKeyPageUp ||
+                          ev.code == kKeyPageDown || ev.code == kKeyHome || ev.code == kKeyEnd))
+                {
+                    app_consumed = duetos::apps::help::HelpFeedArrow(static_cast<duetos::u16>(ev.code));
+                }
                 else
                 {
                     char c = 0;

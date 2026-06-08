@@ -59,6 +59,17 @@ bool HelpSelfTestPassed();
 /// grouped sections.
 bool HelpFeedChar(char c);
 
+/// Arrow / page key feed for scrolling the reference list.
+/// ArrowUp/Down scroll by one logical row; PageUp/PageDown
+/// scroll by one visible page; Home/End jump to the first /
+/// last row. Returns true iff the key was consumed. No-op
+/// (returns true) when the content fits in the window.
+bool HelpFeedArrow(duetos::u16 keycode);
+
+/// Wheel handler — thin shim over HelpFeedArrow. Registered
+/// with WindowSetWheelHandler in HelpInit.
+void HelpOnWheel(duetos::i32 dz, duetos::u8 modifiers);
+
 /// Mouse-event entry point for the Pass D toolbar + labels.
 /// Called from the boot-time mouse-reader thread on every
 /// motion packet. Edge-detects left-button press / release
