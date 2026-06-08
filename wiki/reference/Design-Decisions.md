@@ -11004,3 +11004,57 @@ fake) anything that needs a subsystem we don't have.** The concrete decisions:
   would corrupt the frame, so the time-driven revert deliberately runs at the
   one point per tick where the lock is held and no compose is in flight.
   See [`Graphics-Drivers`](../drivers/Graphics-Drivers.md) ("Runtime modeset").
+
+## 2026-06-08 — Critical-bug batch: real VirtualQuery protection, SMP-atomic counters, integer-truncation guards
+
+A DeepWiki static-analysis pass surfaced nine candidate "critical bugs"; each
+was re-verified against the live tree (excerpt-based analysis over-reports — it
+can't see locks, `&&` short-circuits, or the atomic the racy pre-check sits
+beside). Seven were real and are fixed here; two were false positives, recorded
+below so a future audit doesn't re-chase them.
+
+- **`SYS_PROCESS_VM_QUERY` reports the leaf-PTE protection, not a blanket
+  `PAGE_READWRITE` (`kernel/syscall/syscall.cpp`).** `VirtualQuery` now reads
+  `mm::AddressSpaceProbePteRaw` and maps R/W + NX into `PAGE_READONLY` /
+  `PAGE_READWRITE` / `PAGE_EXECUTE_READ` / `PAGE_EXECUTE_READWRITE` — the same
+  PTE source the cross-AS *write* gate already used 560 lines up. **Rules out**
+  the v0 "every mapped page is RW" shortcut (it misled PEs introspecting
+  protections — JIT W^X guards, stack-guard probes — and undercut W^X). This
+  finally makes the protection bits the 2026-05-10 T5-01 entry claimed
+  "shipped" actually observable through `VirtualQuery`.
+- **`VirtualAlloc` / `VirtualFree` / `VirtualProtect` compute the page count in
+  `u64` before the cap/range check (`vmap_syscall.cpp`).** A huge `size_bytes`
+  whose ceil-div exceeded 2^32 truncated through `static_cast<u32>` to a small
+  in-range value, slipping past `> kWin32VmapRegionPagesMax` and handing back a
+  1-page mapping for a multi-TiB request. **Rules out** narrowing before
+  validating; the `+kPageSize-1` wrap now lands in `pages==0`, caught.
+- **`kernel32!GetTickCount64` captures the full 64-bit tick count.** `long` is
+  32-bit under the LLP64 `x86_64-pc-windows-msvc` target, so `"=a"(long)`
+  truncated the count and wrapped it after ~248 days, breaking the
+  non-wrapping contract. Switched to `long long`, matching the idiom the rest
+  of the DLL already uses.
+- **`kernel32!TerminateProcess` honours `hProcess`.** It now routes through
+  `SYS_PROCESS_TERMINATE` (145) — the `GetCurrentProcess()` pseudo-handle (-1)
+  self-terminates the task group (never returns); a real handle kills the
+  target (kernel-gated on `kCapDebug`) and returns a `BOOL`. **Rules out** the
+  old "always SYS_EXIT the caller" stub, which silently killed *self* when
+  asked to kill a child. No longer `[[noreturn]]`.
+- **PID allocator, live-process count, and sandbox-denial counter are atomic
+  (`kernel/proc/process.cpp`).** `ProcessCreate` runs lock-free on multiple
+  CPUs, so plain `g_next_pid++` could collide PIDs (which gate IPC/event
+  delivery); `sandbox_denials` could tear and delay the malicious-process kill.
+  All now `__atomic_*`, and the kill's single-fire is a `__atomic_exchange_n`
+  test-and-set on `sandbox_kill_flagged` (was a plain bool — double-fire under
+  SMP). Matches the CAS discipline `ProcessRetain`/`Release` already use.
+- **`DoFileRead` rewinds the cursor on a `CopyToUser` fault
+  (`file_syscall.cpp`).** `ReadForProcess` advances the cursor before the
+  user-copy; on a copy fault it now `SeekForProcess(CUR, -got)` so a retry
+  re-reads the same bytes instead of skipping them. `GAP:` non-seekable
+  backings (pipes) can't un-read — inherent to a stream.
+- **False positives (left as-is):** (1) `ProcessRelease` is *not* an underflow
+  bug — `__atomic_sub_fetch` gives a unique zero-witness for any balanced
+  refcount; the racy `prev==0` pre-check is a best-effort assert, and the
+  `Retain` CAS asymmetry is intentional (only `Retain` must reject
+  resurrect-from-0). (2) The `mkfs`/`mkfs.duetfs` `argv[2][5]` "OOB read" is
+  guarded by `&&` short-circuit: index 5 is only reached when `[0..4]=="ERASE"`,
+  so it is always the in-bounds NUL terminator.

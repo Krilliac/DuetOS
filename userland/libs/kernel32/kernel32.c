@@ -118,14 +118,27 @@ __declspec(dllexport) WIN32_NORETURN void ExitProcess(UINT uExitCode)
     DUET_USER_TRAP_UNREACHABLE();
 }
 
-/* TerminateProcess(hProcess, uExitCode) — hProcess is ignored
- * (single-process semantics match the existing stub). uExitCode
- * goes to SYS_EXIT same as ExitProcess. */
-__declspec(dllexport) WIN32_NORETURN BOOL TerminateProcess(HANDLE hProcess, UINT uExitCode)
+/* TerminateProcess(hProcess, uExitCode) — routes through
+ * SYS_PROCESS_TERMINATE (145), which honours the target handle
+ * instead of always killing the caller:
+ *   - The GetCurrentProcess() pseudo-handle (-1) self-terminates the
+ *     whole task group and never returns (kernel SchedExit).
+ *   - A real process handle kills the target (kernel requires the
+ *     caller to hold kCapDebug) and returns the count of tasks
+ *     signalled; an access-denied / invalid-handle failure comes
+ *     back as an NTSTATUS error code (top error bits set), which we
+ *     map to FALSE.
+ * No longer noreturn: the foreign-process path returns a BOOL. */
+__declspec(dllexport) BOOL TerminateProcess(HANDLE hProcess, UINT uExitCode)
 {
-    (void)hProcess;
-    __asm__ volatile("int $0x80" : : "a"((long)0), "D"((long)uExitCode));
-    DUET_USER_TRAP_UNREACHABLE();
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)145), "D"((long long)hProcess), "S"((long long)uExitCode)
+                     : "memory");
+    /* Self path never returns. Foreign path: success = task count
+     * (>= 0); failure = NTSTATUS with the 0xC0000000 error bits set. */
+    return (((unsigned long long)rv & 0xC0000000ULL) == 0xC0000000ULL) ? 0 : 1;
 }
 
 /* ------------------------------------------------------------------
@@ -333,8 +346,15 @@ __declspec(dllexport) BOOL SwitchToThread(void)
  * is just a truncation of GetTickCount64. */
 __declspec(dllexport) ULONGLONG GetTickCount64(void)
 {
-    long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long)13) : "memory");
+    /* `long` is 32-bit under the x86_64-pc-windows-msvc (LLP64)
+     * target, so capturing the 64-bit SYS_PERF_COUNTER result into a
+     * `long` truncated it to the low 32 bits — wrapping the tick
+     * count after ~248 days of uptime and breaking the non-wrapping
+     * contract GetTickCount64 exists to provide. Use `long long`
+     * (64-bit on LLP64) to capture all of rax, matching the idiom
+     * the rest of this DLL already uses for 64-bit syscall returns. */
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)13) : "memory");
     return (ULONGLONG)rv * 10ULL;
 }
 
