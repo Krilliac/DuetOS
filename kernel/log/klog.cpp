@@ -1437,6 +1437,13 @@ void LogMetrics(LogLevel level, const char* subsystem, const char* label)
         WriteDecimal(sched_stats.context_switches);
         arch::SerialWrite("   tasks_live=");
         WriteDecimal(sched_stats.tasks_live);
+        // serial_dropped MUST read 0 on a healthy boot. A non-zero value
+        // means the UART transmitter back-pressured past the bounded
+        // TX-drain spin (serial.cpp WriteByteRaw) — the condition that
+        // used to wedge the kernel (`kboot ticks_in_run=101`) is now
+        // safely absorbed (byte dropped, kernel survived) and observable.
+        arch::SerialWrite("   serial_dropped=");
+        WriteDecimal(arch::SerialBytesDropped());
         arch::SerialWrite("\n");
     }
 

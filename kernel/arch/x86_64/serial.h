@@ -106,6 +106,12 @@ void SerialWriteHex(u64 value);
 /// load is atomic on x86_64 and the writer is the single boot CPU.
 u64 SerialBytesWritten();
 
+/// Count of serial bytes dropped by the bounded TX-drain spin (a UART
+/// backend that back-pressured past kTxDrainSpinBudget). 0 on a healthy
+/// boot; non-zero indicates the once-kernel-wedging stuck-transmitter
+/// condition was hit and safely absorbed (byte dropped, kernel survived).
+u64 SerialBytesDropped();
+
 /// Non-blocking read of one byte from COM1. Returns the received byte
 /// in the low 8 bits, or -1 if the receive buffer is empty. The serial
 /// receive path is intentionally lock-free: only the per-CPU input
