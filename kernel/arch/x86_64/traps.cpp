@@ -314,6 +314,12 @@ constinit u64 g_irq_nest_depth_per_cpu[acpi::kMaxCpus] = {};
 // "serial wedge" hunt, 2026-06).
 constexpr u32 kKernelIrqRipRingLen = 8;
 constinit u64 g_last_kernel_irq_rip[acpi::kMaxCpus][kKernelIrqRipRingLen] = {};
+// Frame-base (RBP) captured alongside each ring RIP. When the spin site
+// is a leaf-ish helper (e.g. HpetReadCounter), the RIP names the helper
+// but not WHO is looping on it; the saved RBP lets the warn path walk one
+// frame up ([rbp+8] = return address into the caller) so the actual spin
+// loop is named, not just the leaf. Parallel to g_last_kernel_irq_rip.
+constinit u64 g_last_kernel_irq_rbp[acpi::kMaxCpus][kKernelIrqRipRingLen] = {};
 constinit u32 g_last_kernel_irq_rip_head[acpi::kMaxCpus] = {};
 
 // Global fault counters by category. Bumped on every CPU
@@ -733,6 +739,54 @@ u32 LastKernelIrqRips(u32 cpu, u64* out, u32 out_len)
         out[k] = g_last_kernel_irq_rip[idx][slot];
     }
     return n;
+}
+
+u32 LastKernelIrqCallers(u32 cpu, u64* out, u32 out_len)
+{
+    if (out == nullptr || out_len == 0)
+    {
+        return 0;
+    }
+    const u64 tlo = reinterpret_cast<u64>(::_text_start);
+    const u64 thi = reinterpret_cast<u64>(::_text_end);
+    const u32 idx = (cpu < acpi::kMaxCpus) ? cpu : 0u;
+    // Backtrace from the NEWEST ring entry: walk the saved-RBP frame chain
+    // upward, collecting return addresses that land in kernel .text. The
+    // interrupted leaf (e.g. arch::HpetReadCounter / sync::SpinLockRelease)
+    // is at the RIP; this names the chain of functions ABOVE it, so the
+    // actual spin loop — several frames up from the leaf — is identified.
+    // Walking ONE newest frame fully is more useful than one-frame-per-ring
+    // because the spin loop sits a few frames above the leaf, not one.
+    const u32 head = g_last_kernel_irq_rip_head[idx];
+    const u32 newest = (head + kKernelIrqRipRingLen - 1u) % kKernelIrqRipRingLen;
+    u64 rbp = g_last_kernel_irq_rbp[idx][newest];
+    u32 produced = 0;
+    constexpr u32 kMaxBtFrames = 16; // bound the walk against a cyclic chain
+    for (u32 frame = 0; frame < kMaxBtFrames && produced < out_len && rbp != 0; ++frame)
+    {
+        // Standard SysV frame: [rbp] = caller's saved rbp, [rbp+8] = return
+        // address into the caller. Read both fault-safely.
+        u64 saved_rbp = 0;
+        u64 ret = 0;
+        if (!::duetos::mm::SafeReadKernel(&saved_rbp, reinterpret_cast<const void*>(rbp), sizeof(saved_rbp)) ||
+            !::duetos::mm::SafeReadKernel(&ret, reinterpret_cast<const void*>(rbp + 8), sizeof(ret)))
+        {
+            break;
+        }
+        if (ret >= tlo && ret < thi)
+        {
+            out[produced++] = ret;
+        }
+        // Frame chain must move monotonically toward higher addresses; a
+        // non-increasing saved_rbp means a corrupt / leaf-without-frame
+        // chain — stop rather than loop on garbage.
+        if (saved_rbp <= rbp)
+        {
+            break;
+        }
+        rbp = saved_rbp;
+    }
+    return produced;
 }
 
 bool PanicInProgress()
@@ -1178,6 +1232,7 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         const u32 rip_idx = (rip_cpu_id < acpi::kMaxCpus) ? rip_cpu_id : 0u;
         const u32 head = g_last_kernel_irq_rip_head[rip_idx];
         g_last_kernel_irq_rip[rip_idx][head] = frame->rip;
+        g_last_kernel_irq_rbp[rip_idx][head] = frame->rbp;
         g_last_kernel_irq_rip_head[rip_idx] = (head + 1u) % kKernelIrqRipRingLen;
     }
 

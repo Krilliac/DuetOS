@@ -219,6 +219,21 @@ void TickInternal(u32 slot, u64 now_ticks, u64 current_tid, const char* current_
                 arch::SerialWrite(",");
             arch::SerialWriteHex(rip_ring[r]);
         }
+        arch::SerialWrite("]");
+        // Backtrace from the newest trap: the chain of kernel-text frames
+        // ABOVE the interrupted leaf. When the spin site is a leaf helper
+        // (HpetReadCounter / SpinLockRelease) the RIP doesn't name the loop;
+        // this backtrace does — the spin loop sits a few frames up. addr2line
+        // each entry, top of the list is closest to the leaf.
+        u64 bt[12] = {};
+        const u32 bt_n = arch::LastKernelIrqCallers(slot, bt, 12);
+        arch::SerialWrite(" caller-bt=[");
+        for (u32 r = 0; r < bt_n; ++r)
+        {
+            if (r != 0)
+                arch::SerialWrite(",");
+            arch::SerialWriteHex(bt[r]);
+        }
         arch::SerialWrite("]\n");
 
         // Broadcast NMI to peer CPUs so they each capture their

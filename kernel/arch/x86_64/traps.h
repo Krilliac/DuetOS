@@ -214,4 +214,15 @@ void PanicInProgressMark();
 /// acceptable for a best-effort spin-site hint.
 u32 LastKernelIrqRips(u32 cpu, u64* out, u32 out_len);
 
+/// Companion to LastKernelIrqRips: a kernel-text backtrace from the NEWEST
+/// recorded trap on `cpu`. Walks the saved-RBP frame chain upward (newest
+/// frame first), filling `out` with return addresses that land in kernel
+/// .text. When the interrupted RIP is a leaf-ish helper (e.g.
+/// HpetReadCounter / SpinLockRelease), the RIP names the helper but not the
+/// loop calling it; this backtrace names the chain ABOVE the leaf so the
+/// actual spin loop (a few frames up) is identified. Reads are fault-safe;
+/// the walk is bounded and stops on a non-monotonic / unreadable frame.
+/// Returns the number of frames written. Diagnostic; best-effort.
+u32 LastKernelIrqCallers(u32 cpu, u64* out, u32 out_len);
+
 } // namespace duetos::arch
