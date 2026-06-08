@@ -479,6 +479,11 @@ constinit u32 g_dbl_click_ticks = 50;
 // feeding the cursor + apps.
 constinit u8 g_mouse_sensitivity = 128;
 
+// Primary/secondary button-swap flag. When true the Left and
+// Right button bits in each MousePacket are exchanged before
+// any click routing. Persisted in SESSION.CFG (mouse.btnswap).
+constinit bool g_mouse_button_swap = false;
+
 // Mouse capture — one system-wide HWND that gets all mouse
 // events regardless of cursor position, or kWindowInvalid when
 // no capture is active.
@@ -914,6 +919,22 @@ WindowHandle WindowRegister(const WindowChrome& chrome, const char* title)
     // registration ends with the last window active, which is
     // what every user expects.
     g_active_window = h;
+    // Greppable sentinel so spawn/teardown balance is measurable
+    // from the serial log (chaos-pe-driver, boot-log-analyze).
+    // Emitted for ALL window creates — both native kernel windows
+    // (registered here at boot) and Win32 PE windows (routed
+    // through DoWinCreate in window_syscall.cpp → WindowRegister).
+    {
+        using duetos::arch::SerialLineGuard;
+        using duetos::arch::SerialWrite;
+        using duetos::arch::SerialWriteHex;
+        SerialLineGuard guard;
+        SerialWrite("[win] create handle=");
+        SerialWriteHex(static_cast<u64>(h));
+        SerialWrite(" title=\"");
+        SerialWrite(title ? title : "");
+        SerialWrite("\"\n");
+    }
     return h;
 }
 
@@ -1996,6 +2017,19 @@ void WindowClose(WindowHandle h)
         return;
     }
     g_windows[h].alive = false;
+    // Greppable sentinel so spawn/teardown balance is measurable
+    // from the serial log (chaos-pe-driver, boot-log-analyze).
+    // Emitted for ALL closes — native teardown via WindowReapForPid
+    // and Win32 DestroyWindow via DoWinDestroy.
+    {
+        using duetos::arch::SerialLineGuard;
+        using duetos::arch::SerialWrite;
+        using duetos::arch::SerialWriteHex;
+        SerialLineGuard guard;
+        SerialWrite("[win] destroy handle=");
+        SerialWriteHex(static_cast<u64>(h));
+        SerialWrite("\n");
+    }
     // Clear the PE-requested cursor shape so the next-allocated
     // window starting in this slot (if/when dynamic re-use lands)
     // doesn't observe stale state. Cheap, deterministic; the
@@ -3526,6 +3560,16 @@ void WindowSetMouseSensitivity(u8 scale)
 u8 WindowMouseSensitivity()
 {
     return g_mouse_sensitivity;
+}
+
+void WindowSetMouseButtonSwap(bool swap)
+{
+    g_mouse_button_swap = swap;
+}
+
+bool WindowMouseButtonSwap()
+{
+    return g_mouse_button_swap;
 }
 
 // --- Cursor accessors ---------------------------------------------

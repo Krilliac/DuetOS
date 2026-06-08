@@ -3261,9 +3261,21 @@ void OnTimerTick(u64 now_ticks)
     {
         ++cur->ticks_run;
         ++g_total_ticks;
-        if (cur->priority == TaskPriority::Idle)
+        const bool cur_idle = (cur->priority == TaskPriority::Idle);
+        if (cur_idle)
         {
             ++g_idle_ticks;
+        }
+        // Per-CPU accounting: same tick incremented on THIS CPU's
+        // PerCpu slot — no cross-CPU races, no lock needed.
+        cpu::PerCpu* self_pcpu = cpu::CurrentCpu();
+        if (self_pcpu != nullptr)
+        {
+            ++self_pcpu->sched_total_ticks;
+            if (cur_idle)
+            {
+                ++self_pcpu->sched_idle_ticks;
+            }
         }
     }
     // Soft-lockup detector (plan D4). Cheap (load + compare).
@@ -4328,6 +4340,25 @@ SchedStats SchedStatsRead()
         .total_ticks = g_total_ticks,
         .idle_ticks = g_idle_ticks,
     };
+}
+
+bool SchedStatsReadCpu(u32 cpu_id, u64* total_ticks, u64* idle_ticks)
+{
+    if (cpu_id >= arch::SmpCpuIdLimit())
+    {
+        return false;
+    }
+    cpu::PerCpu* p = arch::SmpGetPercpu(cpu_id);
+    if (p == nullptr)
+    {
+        return false;
+    }
+    // Counters are written only by OnTimerTick on the owning CPU;
+    // no cross-CPU write races. A one-tick stale read is acceptable
+    // for a 1 Hz monitor — no fence needed.
+    *total_ticks = p->sched_total_ticks;
+    *idle_ticks = p->sched_idle_ticks;
+    return true;
 }
 
 const char* SchedPowerBiasName(PowerBias b)

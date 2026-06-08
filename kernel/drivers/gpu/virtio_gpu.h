@@ -159,6 +159,20 @@ struct VirtioScanoutInfo
 /// subsequent calls are no-ops if the previous setup is live.
 bool VirtioGpuSetupScanout(u32 width, u32 height);
 
+/// Re-establish the scanout at a NEW resolution. Unlike
+/// `VirtioGpuSetupScanout` (which refuses a different size once a
+/// scanout is live), this tears the old resource down first:
+///   RESOURCE_UNREF(id=1)  → free the old contiguous backing frames
+///   RESOURCE_CREATE_2D / ATTACH_BACKING / SET_SCANOUT at (w, h)
+/// On success `VirtioGpuScanoutInfo()` reflects the new geometry +
+/// a freshly-allocated backing; the caller must `FramebufferRebind
+/// External` to the new backing and drop any compose shadow sized to
+/// the old geometry. Returns false (and leaves the previous scanout
+/// intact where possible) if any step fails. A no-op returning true
+/// if the scanout is already live at exactly (w, h). Requires a prior
+/// `VirtioGpuBringUp()` + `VirtioGpuSetupScanout()`.
+bool VirtioGpuResetScanout(u32 width, u32 height);
+
 /// Kernel-VA + geometry of the current scanout backing, if any.
 /// `ready == false` before `VirtioGpuSetupScanout` has run.
 const VirtioScanoutInfo& VirtioGpuScanoutInfo();

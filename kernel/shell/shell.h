@@ -77,6 +77,19 @@ void ShellTabComplete();
 /// ShellInterruptRequested.
 void ShellInterrupt();
 
+/// Cancel the current input line (readline-style Ctrl+C): prints
+/// "^C", clears the edit buffer, and re-draws a fresh prompt.
+/// Called when Ctrl+C fires and no long-running command is holding
+/// the shell (i.e. at the idle prompt). Always safe to call from
+/// the keyboard reader task.
+void ShellInterruptLine();
+
+/// Re-arm the ShellRedrawAfterLogLine suppressor. Called by Prompt()
+/// each time a fresh prompt is drawn so exactly one async klog
+/// interruption is allowed to re-echo the prompt+buffer per prompt.
+/// Not intended for external callers outside the shell TU family.
+void ShellRedrawRearm();
+
 /// Consume + reset the interrupt flag. Returns true if Ctrl+C
 /// has been pressed since the last call. Long-running loops
 /// (seq, sort, grep, find) check this to allow user abort.

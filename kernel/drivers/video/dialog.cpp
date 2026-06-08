@@ -37,6 +37,8 @@ struct State
     const char* body;
     DialogResultFn cb;
     void* user;
+    const char* ok_label;     // null → "OK"
+    const char* cancel_label; // null → "CANCEL"
     char input_buf[kDialogInputMax];
     u32 input_len;
     bool reentry_lock;           // set while firing the callback so the cb can't reopen
@@ -53,6 +55,8 @@ void ResetState()
     g_state.body = nullptr;
     g_state.cb = nullptr;
     g_state.user = nullptr;
+    g_state.ok_label = nullptr;
+    g_state.cancel_label = nullptr;
     g_state.input_buf[0] = '\0';
     g_state.input_len = 0;
     g_state.reentry_lock = false;
@@ -134,7 +138,8 @@ void Resolve(DialogResult r)
 
 } // namespace
 
-bool MessageBoxOpen(const char* title, const char* body, DialogResultFn cb, void* user)
+bool MessageBoxOpen(const char* title, const char* body, DialogResultFn cb, void* user, const char* ok_label,
+                    const char* cancel_label)
 {
     if (g_state.kind != DialogKind::None || g_state.reentry_lock)
         return false;
@@ -143,6 +148,8 @@ bool MessageBoxOpen(const char* title, const char* body, DialogResultFn cb, void
     g_state.body = body;
     g_state.cb = cb;
     g_state.user = user;
+    g_state.ok_label = ok_label;
+    g_state.cancel_label = cancel_label;
     g_state.input_buf[0] = '\0';
     g_state.input_len = 0;
     // Non-intrusive attention chime so an unattended operator hears
@@ -429,7 +436,9 @@ void PaintButton(bool ok, bool focused, u32 fg, u32 fill_normal, u32 fill_focus,
     const u32 fill = focused ? fill_focus : fill_normal;
     FramebufferFillRect(x, y, w, h, fill);
     FramebufferDrawRect(x, y, w, h, border, 1);
-    const char* label = ok ? "OK" : "CANCEL";
+    // Use caller-supplied labels when present; fall back to "OK" / "CANCEL".
+    const char* label = ok ? (g_state.ok_label != nullptr ? g_state.ok_label : "OK")
+                           : (g_state.cancel_label != nullptr ? g_state.cancel_label : "CANCEL");
     // The focused button doubles as the Enter-default in this
     // dialog kit (OK is always focused; see DialogCompose call
     // site) — bold its label to match the macOS / KDE / GNOME
@@ -466,10 +475,15 @@ void DialogCompose()
 
     u32 px = 0, py = 0;
     PanelOrigin(&px, &py);
-    const u32 panel_bg = th.role_client[0]; // first role's client
+    // Use a theme-independent light panel so body text (dark ink) is
+    // always legible regardless of which role_client[0] the active
+    // theme chose (many dark themes set it to near-black, making the
+    // 0x00101020 ink invisible). F-014 root-cause fix.
+    constexpr u32 kPanelBg = 0x00F0F0E8U;
+    const u32 panel_bg = kPanelBg;
     const u32 title_bg = th.taskbar_accent;
     const u32 ink = 0x00101020;
-    const u32 dim_ink = 0x00606078;
+    const u32 dim_ink = 0x00404058;
     const u32 border = th.window_border;
 
     // Tactility lift: paint a 50% larger soft shadow than the

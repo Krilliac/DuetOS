@@ -496,14 +496,51 @@ void SelfTest()
 {
     bool ok = true;
 
+    // Master-gain math (F-030). Host-independent — exercises the pure
+    // ApplyMasterGain scale directly so it proves the gain stage even
+    // when no HDA controller is present (audio is never audible on this
+    // host; this deterministic check is the gain's strongest proof).
+    // 100% = identity, 50% = half (truncating), mute = 0 while the
+    // stored level is retained for un-mute. Restores the live state on
+    // exit so no producer sees a residual scale.
+    {
+        const duetos::u8 saved_vol = g_master_volume;
+        const bool saved_mute = g_muted;
+
+        g_master_volume = 100;
+        g_muted = false;
+        const bool unity_ok = (ApplyMasterGain(10000) == 10000 && ApplyMasterGain(-8000) == -8000);
+
+        g_master_volume = 50;
+        // 10000*50/100 = 5000, -8000*50/100 = -4000.
+        const bool half_ok = (ApplyMasterGain(10000) == 5000 && ApplyMasterGain(-8000) == -4000);
+
+        g_muted = true;
+        const bool mute_ok = (ApplyMasterGain(10000) == 0 && ApplyMasterGain(-8000) == 0);
+        const bool level_kept = (g_master_volume == 50); // mute must not clobber the stored level
+
+        g_master_volume = saved_vol;
+        g_muted = saved_mute;
+
+        if (!unity_ok || !half_ok || !mute_ok || !level_kept)
+        {
+            arch::SerialWrite("[audio-selftest] FAIL master gain\n");
+            ok = false;
+        }
+        else
+        {
+            arch::SerialWrite("[audio-selftest] gain PASS (unity/half/mute/level-kept)\n");
+        }
+    }
+
     if (!g.active)
     {
-        // Not an error — no HDA controller on this host (common in
-        // headless QEMU configs that don't add -device intel-hda).
-        // The selftest is a no-op in that case; emit a "skipped"
-        // line so the boot log still records the path was
-        // reachable.
-        arch::SerialWrite("[audio-selftest] SKIP — backend not active (no HDA on this host)\n");
+        // No HDA controller on this host (common in headless QEMU
+        // configs that don't add -device intel-hda). The DMA/codec
+        // checks below can't run, but the gain-math check above did —
+        // so report its verdict rather than an unconditional SKIP.
+        arch::SerialWrite(ok ? "[audio-selftest] SKIP — backend not active (gain PASS, no HDA on this host)\n"
+                             : "[audio-selftest] FAIL — gain check failed (backend not active)\n");
         return;
     }
 

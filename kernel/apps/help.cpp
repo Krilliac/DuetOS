@@ -1,6 +1,7 @@
 #include "apps/help.h"
 
 #include "arch/x86_64/serial.h"
+#include "drivers/input/ps2kbd.h"
 #include "drivers/input/ps2mouse.h"
 #include "drivers/video/app_widgets/app_button.h"
 #include "drivers/video/app_widgets/app_label.h"
@@ -8,6 +9,7 @@
 #include "drivers/video/app_widgets/widget_group.h"
 #include "drivers/video/chrome_text.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/scrollbar.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
 
@@ -27,6 +29,8 @@ using duetos::drivers::video::ThemeRole;
 using duetos::drivers::video::WindowGetBounds;
 using duetos::drivers::video::WindowHandle;
 using duetos::drivers::video::WindowSetContentDraw;
+using duetos::drivers::video::WindowSetScrollHandler;
+using duetos::drivers::video::WindowSetWheelHandler;
 using duetos::drivers::video::app_widgets::AppButton;
 using duetos::drivers::video::app_widgets::AppLabel;
 using duetos::drivers::video::app_widgets::AppToolbar;
@@ -158,6 +162,11 @@ constinit State g_state = {kWindowInvalid};
 constexpr u32 kFilterCap = 31;
 constinit char g_filter[kFilterCap + 1] = {};
 constinit u32 g_filter_len = 0;
+
+// Scroll offset — number of matching rows skipped at the top.
+// Reset to 0 when the filter changes so the result set always
+// starts at the top of the visible band.
+constinit u32 g_scroll_offset = 0;
 
 char ToUpperAscii(char c)
 {
@@ -399,7 +408,7 @@ void RefreshHelpFilter()
 
 void RefreshHelpFooter()
 {
-    static const char kHint[] = "TYPE to filter  -  BACKSPACE to undo  -  CLEAR to wipe";
+    static const char kHint[] = "TYPE:filter  BKSP:undo  CLEAR:wipe  UP/DN/PG:scroll";
     u32 i = 0;
     for (; kHint[i] != '\0' && i + 1 < sizeof(g_footer_text); ++i)
         g_footer_text[i] = kHint[i];
@@ -417,11 +426,36 @@ void ClickClear()
 {
     g_filter_len = 0;
     g_filter[0] = '\0';
+    g_scroll_offset = 0;
+}
+
+// Count matching rows (section headers that pass because of
+// their children are counted as virtual rows for scroll
+// purposes). Returns the total number of rows that would be
+// drawn if the window were infinitely tall, along with the
+// number of full kRowH slots each match occupies (section
+// headers consume 1 + kSectionGap/kRowH extra logical slots).
+// For simplicity we count each passing entry as 1 row unit;
+// section gaps are treated as fractional and ignored in the
+// scroll ledger — the user scrolls by logical row index, not
+// pixel.
+u32 CountMatchingRows()
+{
+    u32 count = 0;
+    for (u32 i = 0; i < kRowCount; ++i)
+    {
+        if (ShouldRenderRow(i))
+            ++count;
+    }
+    return count;
 }
 
 // Paint the raw reference list (carve-out) inside the band
 // DrawFn carves out between the (toolbar + header + filter row)
 // at the top and the AppLabel footer at the bottom.
+// Supports scrolling via g_scroll_offset (logical row index of
+// the first visible row). A scrollbar is painted at the right
+// edge when the content overflows the band.
 void PaintHelpContent(u32 cx, u32 cy, u32 cw, u32 ch)
 {
     const auto& th = ThemeCurrent();
@@ -436,28 +470,53 @@ void PaintHelpContent(u32 cx, u32 cy, u32 cw, u32 ch)
         return;
     }
 
+    // Count how many rows are visible in the band and how many
+    // rows pass the current filter. The scroll offset is clamped
+    // here so paint + HelpFeedArrow always agree on bounds.
+    const u32 max_rows = ch / kRowH; // full rows that fit
+    const u32 total = CountMatchingRows();
+    if (total == 0)
+    {
+        FramebufferDrawString(cx + 8, cy + 2, "(no match - Backspace to clear)", dim, bg);
+        return;
+    }
+    if (max_rows > 0 && g_scroll_offset + max_rows > total && total > max_rows)
+        g_scroll_offset = total - max_rows;
+    else if (total <= max_rows)
+        g_scroll_offset = 0;
+
+    // Reserve the right edge for the scrollbar when we need one.
+    const bool need_sb = (total > max_rows);
+    const u32 sb_w = need_sb ? duetos::drivers::video::kScrollbarWidth : 0;
+    const u32 content_w = (cw > sb_w) ? cw - sb_w : cw;
+
     u32 y = cy + 2;
-    bool any_drawn = false;
+    u32 logical_row = 0; // index among matching rows
     for (u32 i = 0; i < kRowCount; ++i)
     {
         if (!ShouldRenderRow(i))
             continue;
-        any_drawn = true;
-        if (y + kRowH > cy + ch)
+        if (logical_row < g_scroll_offset)
         {
-            // Truncate cleanly — paint a "..." tail so the user
-            // knows they're missing rows. v0 doesn't paginate.
-            FramebufferDrawString(cx + 8, y, "...", dim, bg);
-            break;
+            ++logical_row;
+            continue;
         }
+        if (y + kRowH > cy + ch)
+            break;
         if (kRows[i].is_section)
         {
             // Small gap before each section header so the list
-            // groups visually.
-            if (i != 0)
+            // groups visually. Only apply when the header is
+            // not the very first visible row.
+            if (logical_row > g_scroll_offset)
+            {
                 y += kSectionGap;
-            if (y + kRowH > cy + ch)
-                break;
+                if (y + kRowH > cy + ch)
+                {
+                    ++logical_row;
+                    continue;
+                }
+            }
             FramebufferDrawString(cx + 6, y, kRows[i].text, dim, bg);
         }
         else
@@ -465,10 +524,30 @@ void PaintHelpContent(u32 cx, u32 cy, u32 cw, u32 ch)
             FramebufferDrawString(cx + 8, y, kRows[i].text, fg, bg);
         }
         y += kRowH;
+        ++logical_row;
     }
-    if (!any_drawn)
+
+    // Scrollbar registration — visual indicator + kernel drag.
+    if (need_sb && cw > sb_w)
     {
-        FramebufferDrawString(cx + 8, y, "(no match - Backspace to clear)", dim, bg);
+        const u32 sb_x = cx + content_w;
+        duetos::drivers::video::ScrollbarPaint(sb_x, cy, sb_w, max_rows * kRowH, {total, max_rows, g_scroll_offset});
+        duetos::drivers::video::WindowScrollbarSurface s{};
+        s.present = true;
+        s.x = sb_x;
+        s.y = cy;
+        s.w = sb_w;
+        s.h = max_rows * kRowH;
+        s.total = total;
+        s.visible = max_rows;
+        s.first = g_scroll_offset;
+        duetos::drivers::video::WindowSetScrollbar(g_state.handle, s);
+    }
+    else
+    {
+        duetos::drivers::video::WindowScrollbarSurface s{};
+        s.present = false;
+        duetos::drivers::video::WindowSetScrollbar(g_state.handle, s);
     }
 }
 
@@ -508,10 +587,77 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
 
 } // namespace
 
+bool HelpFeedArrow(duetos::u16 keycode)
+{
+    using namespace duetos::drivers::input;
+    const u32 total = CountMatchingRows();
+    if (total == 0)
+        return true;
+    // Compute max_rows from the live window geometry. Use a
+    // conservative estimate (window height 280 minus chrome
+    // bands) so the clamp doesn't depend on the compositor
+    // lock being held. PaintHelpContent re-clamps on each
+    // repaint, so a slightly off estimate here is harmless.
+    const u32 top_band = kHelpToolbarH + kHelpHeaderH + kHelpFilterH;
+    const u32 bot_band = kHelpFooterH + 2U;
+    u32 wh = 302U; // default window client height
+    if (g_state.handle != kWindowInvalid)
+    {
+        duetos::u32 wx = 0, wy = 0, ww = 0, wh_raw = 0;
+        if (WindowGetBounds(g_state.handle, &wx, &wy, &ww, &wh_raw))
+        {
+            constexpr u32 kTitleH = 22U;
+            wh = (wh_raw > kTitleH) ? wh_raw - kTitleH : wh_raw;
+        }
+    }
+    const u32 ch = (wh > top_band + bot_band) ? (wh - top_band - bot_band) : 0;
+    const u32 max_rows = (ch > 0) ? ch / kRowH : 1U;
+
+    switch (keycode)
+    {
+    case kKeyArrowUp:
+        if (g_scroll_offset > 0)
+            --g_scroll_offset;
+        return true;
+    case kKeyArrowDown:
+        if (total > max_rows && g_scroll_offset + max_rows < total)
+            ++g_scroll_offset;
+        return true;
+    case kKeyPageUp:
+        g_scroll_offset = (g_scroll_offset > max_rows) ? g_scroll_offset - max_rows : 0;
+        return true;
+    case kKeyPageDown:
+        if (total > max_rows)
+        {
+            const u32 max_off = total - max_rows;
+            g_scroll_offset = (g_scroll_offset + max_rows < max_off) ? g_scroll_offset + max_rows : max_off;
+        }
+        return true;
+    case kKeyHome:
+        g_scroll_offset = 0;
+        return true;
+    case kKeyEnd:
+        g_scroll_offset = (total > max_rows) ? total - max_rows : 0;
+        return true;
+    default:
+        return false;
+    }
+}
+
+void HelpOnWheel(duetos::i32 dz, duetos::u8 /*modifiers*/)
+{
+    const u16 key = (dz > 0) ? duetos::drivers::input::kKeyArrowUp : duetos::drivers::input::kKeyArrowDown;
+    const i32 steps = (dz > 0) ? dz : -dz;
+    for (i32 i = 0; i < steps; ++i)
+        HelpFeedArrow(key);
+}
+
 void HelpInit(WindowHandle handle)
 {
     g_state.handle = handle;
     WindowSetContentDraw(handle, DrawFn, nullptr);
+    WindowSetWheelHandler(handle, HelpOnWheel);
+    WindowSetScrollHandler(handle, [](u32 first) { g_scroll_offset = first; });
     BindHelpOnce();
 }
 
@@ -524,6 +670,7 @@ bool HelpFeedChar(char c)
         {
             --g_filter_len;
             g_filter[g_filter_len] = '\0';
+            g_scroll_offset = 0; // result set changed — reset to top
         }
         return true;
     }
@@ -536,6 +683,7 @@ bool HelpFeedChar(char c)
         {
             g_filter[g_filter_len++] = c;
             g_filter[g_filter_len] = '\0';
+            g_scroll_offset = 0; // result set changed — reset to top
         }
         return true;
     }

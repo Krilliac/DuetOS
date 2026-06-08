@@ -711,6 +711,13 @@ u32 WordCount()
 void RefreshStatusText()
 {
     u32 o = 0;
+    // F-015: show filename (with dirty marker) first so the user
+    // always knows which file is open. kSaveFile is the FAT32 path
+    // defined in detail::kSaveFile ("NOTES.TXT").
+    AppendStr(g_status_text, sizeof(g_status_text), &o, detail::kSaveFile);
+    if (g_dirty)
+        AppendStr(g_status_text, sizeof(g_status_text), &o, "*");
+    AppendStr(g_status_text, sizeof(g_status_text), &o, "  ");
     const LogicalPos lp = LogicalCursor();
     AppendStr(g_status_text, sizeof(g_status_text), &o, "L:");
     AppendU32(g_status_text, sizeof(g_status_text), &o, lp.line);

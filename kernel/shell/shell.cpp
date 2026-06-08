@@ -102,6 +102,7 @@
 #include "util/random.h"
 #include "power/reboot.h"
 #include "diag/runtime_checker.h"
+#include "apps/terminal.h"
 #include "shell/shell_internal.h"
 
 namespace duetos::core
@@ -192,10 +193,19 @@ void ShellInit()
     Prompt();
 }
 
-// Caps ShellRedrawAfterLogLine to ONE input-line refresh per keystroke
-// (see that function). Re-armed on every user edit below; set once a
-// post-keystroke log line has refreshed the prompt.
+// Caps ShellRedrawAfterLogLine to ONE redraw per prompt lifetime.
+// Set to false when Prompt() draws a fresh prompt line (via
+// ShellRedrawRearm); set to true once a log-burst redraw has fired.
+// This ensures async klog chatter causes at most one prompt+buffer
+// re-echo per prompt, preventing the "HDUETOS>HEDUETOS>HEL"
+// prefix-leakage artifact (F-036) where every typed character
+// triggered a re-arm and thus another redraw.
 constinit bool g_redraw_suppressed = false;
+
+void ShellRedrawRearm()
+{
+    g_redraw_suppressed = false;
+}
 
 void ShellFeedChar(char c)
 {
@@ -209,7 +219,10 @@ void ShellFeedChar(char c)
     }
     g_input[g_len++] = c;
     ConsoleWriteChar(c);
-    g_redraw_suppressed = false; // a fresh keystroke re-arms the input-line refresh
+    // Do NOT re-arm g_redraw_suppressed here — re-arming on every
+    // keystroke caused a prompt-prefix to leak into echo whenever
+    // a background klog line fires (which is continuous in DuetOS).
+    // The suppressor is re-armed once at Prompt() time only.
 }
 
 void ShellBackspace()
@@ -221,7 +234,7 @@ void ShellBackspace()
     --g_len;
     g_input[g_len] = '\0';
     ConsoleWriteChar('\b');
-    g_redraw_suppressed = false;
+    // Same reasoning as ShellFeedChar — no re-arm here.
 }
 
 // Returns true if the typed line starts with a verb whose
@@ -286,16 +299,24 @@ void ShellRedrawAfterLogLine()
     // chatter. The recursion guard in klog ensures we never call
     // back into Log* from here (Prompt + ConsoleWrite go straight
     // to console + serial, not through klog).
+    //
+    // When the Terminal window is open, suppress the legacy redraw
+    // entirely: the terminal's VT mirror already feeds every console
+    // byte into its own grid and displays the correct state. Writing
+    // prompt + buffer again just creates the "HDUETOS>H..." prefix-
+    // leakage artifact (F-036) because every klog burst triggers one
+    // re-echo per active prompt lifetime.
+    if (duetos::apps::terminal::TerminalIsOpen())
+        return;
     if (g_len == 0)
         return;
-    // Cap the refresh to ONCE per keystroke. The input-line preservation
+    // Cap the refresh to ONCE per prompt. The input-line preservation
     // is for the occasional async log line; during a burst (e.g. a PE
     // preloading dozens of DLLs at debug log level) klog calls this
     // per-line and it would re-print "duetos>…" hundreds of times, burying
-    // the terminal in repeated echoes of what the user typed. The first
-    // post-keystroke log line refreshes the prompt; the rest are
-    // suppressed until the next edit re-arms the flag. The buffer is intact
-    // and fully shown on the next keystroke / submit.
+    // the raw-console view in repeated echoes of what the user typed.
+    // g_redraw_suppressed is reset at each Prompt() so exactly one
+    // re-echo is allowed per prompt lifetime.
     if (g_redraw_suppressed)
         return;
     g_redraw_suppressed = true;
@@ -352,6 +373,24 @@ void ShellHistoryNext()
 void ShellInterrupt()
 {
     g_interrupt = true;
+}
+
+void ShellInterruptLine()
+{
+    // Discard any partially-typed input and show "^C" on the current
+    // line, then draw a fresh prompt — readline / bash Ctrl+C
+    // behaviour. Also latches g_interrupt so a command that happens
+    // to start executing in the same tick also sees the signal.
+    g_interrupt = true;
+    // Erase the typed characters from the console by backspacing over
+    // each one (ReplaceLine does this, then accepts new text; passing
+    // nullptr clears without writing new input).
+    ReplaceLine(nullptr);
+    ConsoleWriteln("^C");
+    g_len = 0;
+    g_input[0] = '\0';
+    g_redraw_suppressed = false;
+    Prompt();
 }
 
 bool ShellInterruptRequested()

@@ -117,6 +117,13 @@ void UiTickerTask(void*)
         // app hasn't been initialised yet.
         duetos::apps::sysmon::SysmonTick();
         duetos::drivers::video::CompositorLock();
+        // F-029: drive the Display panel's resolution revert-timeout
+        // here — OUTSIDE the compose pass (DesktopCompose below) but
+        // under the compositor lock, so the framebuffer rebind +
+        // compose-shadow drop the revert performs can't race a live
+        // compose. No-op unless a resolution change is awaiting an
+        // unconfirmed Keep past its 10 s deadline.
+        duetos::apps::settings::SettingsDisplayRevertTick();
         // While the login gate is up the full-screen login
         // panel owns the framebuffer. Repaint it from its
         // own canonical state so the 1 Hz compose doesn't
@@ -538,6 +545,9 @@ void KbdReaderTask(void*)
         // Ctrl+C latches the shell interrupt flag. No
         // DesktopCompose here — the long-running command
         // holding the shell will notice next time it polls.
+        // When the terminal is focused and no command is running
+        // (idle prompt), ShellInterruptLine also clears the current
+        // input line and draws a fresh prompt (readline-style).
         // Skipped entirely if Alt is also held (that's a
         // different shortcut like Ctrl+Alt+T) or if Shift is
         // held (Ctrl+Shift+C is the terminal viewport-copy
@@ -555,6 +565,8 @@ void KbdReaderTask(void*)
             const auto active = duetos::drivers::video::WindowActive();
             const bool notes_focused =
                 (active != duetos::drivers::video::kWindowInvalid && active == duetos::apps::notes::NotesWindow());
+            const bool terminal_focused = (active != duetos::drivers::video::kWindowInvalid &&
+                                           active == duetos::apps::terminal::TerminalWindow());
             duetos::drivers::video::CompositorUnlock();
             if (notes_focused)
             {
@@ -563,8 +575,20 @@ void KbdReaderTask(void*)
                 SerialWrite("[ui] ^C copy notes -> clipboard\n");
                 continue;
             }
-            duetos::core::ShellInterrupt();
-            SerialWrite("[ui] ^C\n");
+            if (terminal_focused)
+            {
+                // ShellInterruptLine: clears the typed line, prints
+                // "^C", and redraws the prompt — readline-style. It
+                // also latches g_interrupt so any command starting in
+                // the same tick sees the signal.
+                duetos::core::ShellInterruptLine();
+                SerialWrite("[ui] ^C line-cancel\n");
+            }
+            else
+            {
+                duetos::core::ShellInterrupt();
+                SerialWrite("[ui] ^C\n");
+            }
             continue;
         }
         // Ctrl+Shift+V — rotate the clipboard history one step.
@@ -1530,8 +1554,8 @@ void KbdReaderTask(void*)
                     s_close_target = active;
                     duetos::drivers::video::MessageBoxOpen(
                         "UNSAVED CHANGES",
-                        "The Notes buffer has unsaved edits.\n"
-                        "OK = discard and close. Cancel = keep editing.",
+                        "NOTES.TXT has unsaved changes.\n"
+                        "Discard closes without saving.",
                         [](duetos::drivers::video::DialogResult r, const char* /*text*/, void* /*user*/)
                         {
                             if (r == duetos::drivers::video::DialogResult::Ok &&
@@ -1548,7 +1572,7 @@ void KbdReaderTask(void*)
                             }
                             s_close_target = duetos::drivers::video::kWindowInvalid;
                         },
-                        nullptr);
+                        nullptr, "Discard", "Cancel");
                     duetos::drivers::video::CursorHide();
                     duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
                     duetos::drivers::video::CursorShow();
@@ -1680,7 +1704,7 @@ void KbdReaderTask(void*)
                 }
                 else if (active == duetos::apps::files::FilesWindow() &&
                          (ev.code == kKeyHome || ev.code == kKeyEnd || ev.code == kKeyPageUp ||
-                          ev.code == kKeyPageDown || ev.code == kKeyDelete || ev.code == kKeyF5))
+                          ev.code == kKeyPageDown || ev.code == kKeyDelete || ev.code == kKeyF4 || ev.code == kKeyF5))
                 {
                     app_consumed = duetos::apps::files::FilesFeedListKey(static_cast<duetos::u16>(ev.code));
                 }
@@ -1745,6 +1769,20 @@ void KbdReaderTask(void*)
                           ev.code == kKeyDelete))
                 {
                     app_consumed = duetos::apps::taskman::TaskmanFeedKey(static_cast<duetos::u16>(ev.code));
+                }
+                else if (active == duetos::apps::help::HelpWindow() &&
+                         (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown || ev.code == kKeyPageUp ||
+                          ev.code == kKeyPageDown || ev.code == kKeyHome || ev.code == kKeyEnd))
+                {
+                    app_consumed = duetos::apps::help::HelpFeedArrow(static_cast<duetos::u16>(ev.code));
+                }
+                else if (active == duetos::apps::devicemgr::DeviceMgrWindow() &&
+                         (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown || ev.code == kKeyEnter ||
+                          ev.code == static_cast<duetos::u16>(' ')))
+                {
+                    // F-027: tree navigation. Up/Down move cursor, Enter/Space
+                    // toggle the focused group header. Triggers a redraw.
+                    app_consumed = duetos::apps::devicemgr::DeviceMgrKeyInput(static_cast<duetos::u16>(ev.code));
                 }
                 else
                 {
@@ -2411,12 +2449,29 @@ void MouseReaderTask(void*)
             duetos::drivers::video::CursorSetShape(want);
         }
 
-        const bool left_down = (p.buttons & duetos::drivers::input::kMouseButtonLeft) != 0;
+        // Apply primary/secondary button swap if enabled. When
+        // swapped, the physical right button fires the primary
+        // (left) action and vice versa. Swap is a simple bit
+        // exchange of the L and R bits in the buttons byte;
+        // all downstream code sees the adjusted mask.
+        u8 buttons_eff = p.buttons;
+        if (duetos::drivers::video::WindowMouseButtonSwap())
+        {
+            const bool phys_left = (buttons_eff & duetos::drivers::input::kMouseButtonLeft) != 0;
+            const bool phys_right = (buttons_eff & duetos::drivers::input::kMouseButtonRight) != 0;
+            buttons_eff &= ~(duetos::drivers::input::kMouseButtonLeft | duetos::drivers::input::kMouseButtonRight);
+            if (phys_left)
+                buttons_eff |= duetos::drivers::input::kMouseButtonRight;
+            if (phys_right)
+                buttons_eff |= duetos::drivers::input::kMouseButtonLeft;
+        }
+
+        const bool left_down = (buttons_eff & duetos::drivers::input::kMouseButtonLeft) != 0;
         const bool press_edge = left_down && !prev_left;
         const bool release_edge = !left_down && prev_left;
         prev_left = left_down;
 
-        const bool right_down = (p.buttons & duetos::drivers::input::kMouseButtonRight) != 0;
+        const bool right_down = (buttons_eff & duetos::drivers::input::kMouseButtonRight) != 0;
         const bool right_press = right_down && !prev_right;
         const bool right_release = !right_down && prev_right;
         prev_right = right_down;
@@ -3573,7 +3628,7 @@ void MouseReaderTask(void*)
             // cursor is NOT pinning a window move; this keeps
             // the button widget inert during drag, matching
             // Windows' "modal drag" semantics.
-            const duetos::u32 hit = duetos::drivers::video::WidgetRouteMouse(cx, cy, p.buttons);
+            const duetos::u32 hit = duetos::drivers::video::WidgetRouteMouse(cx, cy, buttons_eff);
             if (hit != duetos::drivers::video::kWidgetInvalid)
             {
                 SerialWrite("[ui] widget event id=");

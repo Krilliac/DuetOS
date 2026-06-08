@@ -33,7 +33,7 @@ using duetos::drivers::video::app_widgets::Rect;
 // CursorGetShape / WindowDoubleClickTicks / WindowMouseSensitivity.
 
 constinit char g_mse_header[16] = "MOUSE";
-constinit char g_mse_footer[64] = "1-9:shape  [/]:dbl-click  -/=:sens  0:reset";
+constinit char g_mse_footer[64] = "1-9:shape  [/]:dbl-click  -/=:sens  B:swap  0:reset";
 
 constinit auto g_settings_mouse = MakeWidgetGroup(AppLabel{}, AppLabel{});
 
@@ -194,10 +194,15 @@ void Draw(u32 x, u32 y, u32 w, u32 h)
     line[o] = '\0';
     ChromeTextDraw(ChromeTextRole::Body, x, y + 128, line, fg, bg);
 
+    // Button-swap row — shows current state; B key toggles.
+    const bool swapped = duetos::drivers::video::WindowMouseButtonSwap();
+    ChromeTextDraw(ChromeTextRole::Body, x, y + 142,
+                   swapped ? "BUTTON SWAP: ON  (right=primary)" : "BUTTON SWAP: OFF (left=primary)", fg, bg);
+
     // Hint lines — Caption role for key-shortcut help.
-    ChromeTextDraw(ChromeTextRole::Caption, x, y + 144, "[ : DC -50ms     ] : DC +50ms", dim, bg);
-    ChromeTextDraw(ChromeTextRole::Caption, x, y + 156, "- : SENS -16     = : SENS +16", dim, bg);
-    ChromeTextDraw(ChromeTextRole::Caption, x, y + 168, "0 : RESET (DC=500ms, SENS=128)", dim, bg);
+    ChromeTextDraw(ChromeTextRole::Caption, x, y + 158, "[ : DC -50ms     ] : DC +50ms", dim, bg);
+    ChromeTextDraw(ChromeTextRole::Caption, x, y + 170, "- : SENS -16     = : SENS +16", dim, bg);
+    ChromeTextDraw(ChromeTextRole::Caption, x, y + 182, "B : SWAP buttons     0 : RESET", dim, bg);
 }
 
 bool Key(char c)
@@ -268,9 +273,18 @@ bool Key(char c)
         duetos::drivers::video::NotifyShow("sensitivity +");
         return true;
     }
+    case 'b':
+    case 'B':
+    {
+        const bool now = !duetos::drivers::video::WindowMouseButtonSwap();
+        duetos::drivers::video::WindowSetMouseButtonSwap(now);
+        duetos::drivers::video::NotifyShow(now ? "button swap: ON" : "button swap: OFF");
+        return true;
+    }
     case '0':
         duetos::drivers::video::WindowSetDoubleClickTicks(50);
         duetos::drivers::video::WindowSetMouseSensitivity(128);
+        duetos::drivers::video::WindowSetMouseButtonSwap(false);
         duetos::drivers::video::NotifyShow("mouse: defaults restored");
         return true;
     default:

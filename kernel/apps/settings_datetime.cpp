@@ -9,6 +9,8 @@
 #include "drivers/video/notify.h"
 #include "drivers/video/sound_cue.h"
 #include "drivers/video/theme.h"
+#include "net/stack.h"
+#include "sched/sched.h"
 #include "time/timezone.h"
 
 namespace duetos::apps::settings
@@ -45,7 +47,19 @@ using duetos::drivers::video::app_widgets::Rect;
 // composer buffer for ~zero readability gain.
 
 constinit char g_dt_header[16] = "DATE & TIME";
-constinit char g_dt_footer[64] = "S : SET RTC (UTC) - opens YYYY-MM-DD HH:MM:SS prompt";
+constinit char g_dt_footer[64] = "S:set RTC  N:NTP sync  [/]:-/+1h  ,/.:+-15m  Z:UTC";
+
+// NTP auto-sync flag — persisted in SESSION.CFG (datetime.ntp).
+// When true pressing N issues one NTP query against the well-known
+// pool address and writes the result to the RTC. When false the
+// flag is stored but no automatic sync fires; a future background
+// sync task would check this flag.
+// NOTE: The NTP client (net/stack.h NetNtpQuery) exists and is
+// wired; this flag gates whether N triggers a live query+RTC write.
+constinit bool g_ntp_enabled = false;
+
+// Last NTP sync status string for display.
+constinit char g_ntp_status[40] = "NTP: OFF";
 
 constinit auto g_settings_datetime = MakeWidgetGroup(AppLabel{}, AppLabel{});
 
@@ -195,10 +209,13 @@ void Draw(u32 x, u32 y, u32 w, u32 h)
     line[o] = '\0';
     ChromeTextDraw(ChromeTextRole::Body, x, y + 30, line, fg, bg);
 
+    // NTP auto-sync row — shows toggle state; N key toggles + triggers.
+    ChromeTextDraw(ChromeTextRole::Body, x, y + 46, g_ntp_status, fg, bg);
+
     // Hint lines — Caption role for the key-shortcut help below the readouts.
-    ChromeTextDraw(ChromeTextRole::Caption, x, y + 50, "[ : -1 hour    ] : +1 hour", dim, bg);
-    ChromeTextDraw(ChromeTextRole::Caption, x, y + 62, ", : -15 min    . : +15 min", dim, bg);
-    ChromeTextDraw(ChromeTextRole::Caption, x, y + 74, "Z : reset to UTC", dim, bg);
+    ChromeTextDraw(ChromeTextRole::Caption, x, y + 62, "[ : -1 hour    ] : +1 hour", dim, bg);
+    ChromeTextDraw(ChromeTextRole::Caption, x, y + 74, ", : -15 min    . : +15 min", dim, bg);
+    ChromeTextDraw(ChromeTextRole::Caption, x, y + 86, "Z : reset to UTC", dim, bg);
 }
 
 // Trim leading whitespace + parse "YYYY-MM-DD HH:MM:SS" or
@@ -351,6 +368,194 @@ bool Key(char c)
                                              nullptr);
         return true;
     }
+    if (c == 'n' || c == 'N')
+    {
+        // Toggle NTP auto-sync. When toggled ON, fire one NTP query
+        // against the well-known Google time server and apply the
+        // result to the RTC. When toggled OFF the flag is cleared
+        // and persisted; no sync fires.
+        g_ntp_enabled = !g_ntp_enabled;
+        if (g_ntp_enabled)
+        {
+            // Well-known Google time server — same as the shell `ntp` command.
+            duetos::net::Ipv4Address srv{{216, 239, 35, 0}};
+            AppendStr(g_ntp_status, sizeof(g_ntp_status), nullptr, ""); // unused; direct write below
+            // Update status to "querying" immediately so the panel
+            // shows activity on the next frame.
+            g_ntp_status[0] = 'N';
+            g_ntp_status[1] = 'T';
+            g_ntp_status[2] = 'P';
+            g_ntp_status[3] = ':';
+            g_ntp_status[4] = ' ';
+            g_ntp_status[5] = 'O';
+            g_ntp_status[6] = 'N';
+            g_ntp_status[7] = ' ';
+            g_ntp_status[8] = '(';
+            g_ntp_status[9] = 'q';
+            g_ntp_status[10] = 'u';
+            g_ntp_status[11] = 'e';
+            g_ntp_status[12] = 'r';
+            g_ntp_status[13] = 'y';
+            g_ntp_status[14] = 'i';
+            g_ntp_status[15] = 'n';
+            g_ntp_status[16] = 'g';
+            g_ntp_status[17] = '.';
+            g_ntp_status[18] = '.';
+            g_ntp_status[19] = '.';
+            g_ntp_status[20] = '\0';
+            duetos::drivers::video::NotifyShow("NTP: querying...");
+            const bool sent = duetos::net::NetNtpQuery(/*iface_index=*/0, srv);
+            if (!sent)
+            {
+                // ARP miss / iface not bound — record but don't crash.
+                g_ntp_status[8] = 'n';
+                g_ntp_status[9] = 'o';
+                g_ntp_status[10] = ' ';
+                g_ntp_status[11] = 'r';
+                g_ntp_status[12] = 'o';
+                g_ntp_status[13] = 'u';
+                g_ntp_status[14] = 't';
+                g_ntp_status[15] = 'e';
+                g_ntp_status[16] = ')';
+                g_ntp_status[17] = '\0';
+                duetos::drivers::video::NotifyShow("NTP: no route to server");
+            }
+            else
+            {
+                // Poll briefly — up to ~1 s in 10 ms steps. The
+                // settings panel runs on the UI tick; we poll
+                // inline so the RTC is updated before we return.
+                // This is a bounded busy-wait (100 x 1 tick = ~1 s);
+                // acceptable for a user-initiated one-shot sync.
+                for (u32 i = 0; i < 100; ++i)
+                {
+                    duetos::sched::SchedSleepTicks(1);
+                    const auto r = duetos::net::NetNtpResultRead();
+                    if (r.synced)
+                    {
+                        // Convert unix_secs → RTC fields.
+                        // unix_secs is seconds since 1970-01-01.
+                        // We compute a rough UTC decomposition:
+                        // year/month/day via Gregorian math,
+                        // time-of-day via modulo.
+                        const u64 secs = r.unix_secs;
+                        const u64 tod = secs % 86400u;
+                        const u8 hr = static_cast<u8>(tod / 3600u);
+                        const u8 mn = static_cast<u8>((tod / 60u) % 60u);
+                        const u8 sc = static_cast<u8>(tod % 60u);
+                        // Days since epoch.
+                        u32 days = static_cast<u32>(secs / 86400u);
+                        // Gregorian year/month/day from days since 1970-01-01.
+                        // Algorithm: civil_from_days (Howard Hinnant).
+                        const i32 z = static_cast<i32>(days) + 719468;
+                        const i32 era = (z >= 0 ? z : z - 146096) / 146097;
+                        const u32 doe = static_cast<u32>(z - era * 146097);
+                        const u32 yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+                        const u32 y = static_cast<u32>(yoe) + static_cast<u32>(era) * 400u;
+                        const u32 doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+                        const u32 mp = (5 * doy + 2) / 153;
+                        const u8 d = static_cast<u8>(doy - (153 * mp + 2) / 5 + 1);
+                        const u8 m = static_cast<u8>(mp < 10 ? mp + 3 : mp - 9);
+                        const u16 yr = static_cast<u16>(y + (m <= 2 ? 1 : 0));
+
+                        duetos::arch::RtcTime t{};
+                        t.year = yr;
+                        t.month = m;
+                        t.day = d;
+                        t.hour = hr;
+                        t.minute = mn;
+                        t.second = sc;
+                        if (duetos::arch::RtcWrite(&t))
+                        {
+                            // Update status: "NTP: ON (synced HH:MM:SS)"
+                            u32 so = 0;
+                            auto cs = [&](char ch)
+                            {
+                                if (so + 1 < sizeof(g_ntp_status))
+                                    g_ntp_status[so++] = ch;
+                            };
+                            cs('N');
+                            cs('T');
+                            cs('P');
+                            cs(':');
+                            cs(' ');
+                            cs('O');
+                            cs('N');
+                            cs(' ');
+                            cs('(');
+                            cs('s');
+                            cs('y');
+                            cs('n');
+                            cs('c');
+                            cs('e');
+                            cs('d');
+                            cs(' ');
+                            cs(static_cast<char>('0' + hr / 10));
+                            cs(static_cast<char>('0' + hr % 10));
+                            cs(':');
+                            cs(static_cast<char>('0' + mn / 10));
+                            cs(static_cast<char>('0' + mn % 10));
+                            cs(':');
+                            cs(static_cast<char>('0' + sc / 10));
+                            cs(static_cast<char>('0' + sc % 10));
+                            cs(' ');
+                            cs('U');
+                            cs('T');
+                            cs('C');
+                            cs(')');
+                            g_ntp_status[so] = '\0';
+                            duetos::drivers::video::NotifyShow("NTP: RTC synced");
+                            duetos::arch::SerialWrite("[settings-datetime] NTP sync ok\n");
+                        }
+                        else
+                        {
+                            g_ntp_status[8] = 'r';
+                            g_ntp_status[9] = 't';
+                            g_ntp_status[10] = 'c';
+                            g_ntp_status[11] = ' ';
+                            g_ntp_status[12] = 'e';
+                            g_ntp_status[13] = 'r';
+                            g_ntp_status[14] = 'r';
+                            g_ntp_status[15] = ')';
+                            g_ntp_status[16] = '\0';
+                            duetos::drivers::video::NotifyShow("NTP: RTC write failed");
+                        }
+                        break;
+                    }
+                }
+                // If still not synced after poll window, status already says "querying".
+                const auto r2 = duetos::net::NetNtpResultRead();
+                if (!r2.synced)
+                {
+                    g_ntp_status[8] = 't';
+                    g_ntp_status[9] = 'i';
+                    g_ntp_status[10] = 'm';
+                    g_ntp_status[11] = 'e';
+                    g_ntp_status[12] = 'o';
+                    g_ntp_status[13] = 'u';
+                    g_ntp_status[14] = 't';
+                    g_ntp_status[15] = ')';
+                    g_ntp_status[16] = '\0';
+                    duetos::drivers::video::NotifyShow("NTP: no response (timeout)");
+                }
+            }
+        }
+        else
+        {
+            // Toggled OFF — update display string.
+            g_ntp_status[0] = 'N';
+            g_ntp_status[1] = 'T';
+            g_ntp_status[2] = 'P';
+            g_ntp_status[3] = ':';
+            g_ntp_status[4] = ' ';
+            g_ntp_status[5] = 'O';
+            g_ntp_status[6] = 'F';
+            g_ntp_status[7] = 'F';
+            g_ntp_status[8] = '\0';
+            duetos::drivers::video::NotifyShow("NTP: disabled");
+        }
+        return true;
+    }
     return false;
 }
 
@@ -389,6 +594,59 @@ void SettingsDateTimeSelfTest()
 bool SettingsDateTimeSelfTestPassed()
 {
     return g_settings_datetime_self_test_passed;
+}
+
+bool DateTimeNtpEnabled()
+{
+    return g_ntp_enabled;
+}
+
+void DateTimeSetNtpEnabled(bool enabled)
+{
+    g_ntp_enabled = enabled;
+    // Sync the display string to match the stored flag without
+    // firing a live query — this path is called by SessionRestoreApply
+    // at boot before the NIC is up.
+    if (!enabled)
+    {
+        g_ntp_status[0] = 'N';
+        g_ntp_status[1] = 'T';
+        g_ntp_status[2] = 'P';
+        g_ntp_status[3] = ':';
+        g_ntp_status[4] = ' ';
+        g_ntp_status[5] = 'O';
+        g_ntp_status[6] = 'F';
+        g_ntp_status[7] = 'F';
+        g_ntp_status[8] = '\0';
+    }
+    else
+    {
+        g_ntp_status[0] = 'N';
+        g_ntp_status[1] = 'T';
+        g_ntp_status[2] = 'P';
+        g_ntp_status[3] = ':';
+        g_ntp_status[4] = ' ';
+        g_ntp_status[5] = 'O';
+        g_ntp_status[6] = 'N';
+        g_ntp_status[7] = ' ';
+        g_ntp_status[8] = '(';
+        g_ntp_status[9] = 'n';
+        g_ntp_status[10] = 'o';
+        g_ntp_status[11] = 't';
+        g_ntp_status[12] = ' ';
+        g_ntp_status[13] = 'y';
+        g_ntp_status[14] = 'e';
+        g_ntp_status[15] = 't';
+        g_ntp_status[16] = ' ';
+        g_ntp_status[17] = 's';
+        g_ntp_status[18] = 'y';
+        g_ntp_status[19] = 'n';
+        g_ntp_status[20] = 'c';
+        g_ntp_status[21] = 'e';
+        g_ntp_status[22] = 'd';
+        g_ntp_status[23] = ')';
+        g_ntp_status[24] = '\0';
+    }
 }
 
 } // namespace duetos::apps::settings

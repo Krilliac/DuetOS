@@ -310,10 +310,9 @@ void PaintNetstatusContent(u32 cx, u32 cy, u32 cw, u32 ch)
     FramebufferFillRect(cx, cy, cw, ch, kBg);
 
     u32 y = cy;
-    FramebufferDrawString(
-        cx + kMargin, y,
-        "IDX  MAC                IPV4             STATE  RX-PKT     RX-BYTE    TX-PKT     TX-BYTE    FW-DROP", kFgDim,
-        kBg);
+    FramebufferDrawString(cx + kMargin, y,
+                          "IDX  MAC                IPV4             STATE   RX-PKT RX-BYTE  TX-PKT TX-BYTE  FW-DRP",
+                          kFgDim, kBg);
     y += kRowH;
 
     // InterfaceCount() spans every bound iface index. Indices are
@@ -375,20 +374,20 @@ void PaintNetstatusContent(u32 cx, u32 cy, u32 cw, u32 ch)
         line[o++] = ' ';
 
         const auto cnt = duetos::net::InterfaceCountersRead(i);
-        U64Col(line + o, 10, cnt.rx_packets);
-        o += 10;
+        U64Col(line + o, 7, cnt.rx_packets);
+        o += 7;
         line[o++] = ' ';
-        U64Col(line + o, 10, cnt.rx_bytes);
-        o += 10;
+        U64Col(line + o, 7, cnt.rx_bytes);
+        o += 7;
         line[o++] = ' ';
-        U64Col(line + o, 10, cnt.tx_packets);
-        o += 10;
+        U64Col(line + o, 7, cnt.tx_packets);
+        o += 7;
         line[o++] = ' ';
-        U64Col(line + o, 10, cnt.tx_bytes);
-        o += 10;
+        U64Col(line + o, 7, cnt.tx_bytes);
+        o += 7;
         line[o++] = ' ';
-        U64Col(line + o, 10, cnt.tx_dropped_firewall);
-        o += 10;
+        U64Col(line + o, 7, cnt.tx_dropped_firewall);
+        o += 7;
         line[o] = '\0';
 
         FramebufferDrawString(cx + kMargin, y, line, bound ? kBound : kUnbound, kBg);
@@ -712,10 +711,10 @@ void NetStatusSelfTest()
     // Wi-Fi scan cache, so this self-test is safe to run
     // unconditionally at boot.
     BindNetstatusOnce();
-    // Anchor the toolbar at (0, 22, 480, 238) — same shape
+    // Anchor the toolbar at (0, 22, 720, 238) — same shape
     // boot_bringup.cpp registers the live netstatus window with
-    // (480x260 minus 22 px title bar). RFRSH is action index 0.
-    RebindNetstatusBounds(0U, 22U, 480U, 238U);
+    // (720x260 minus 22 px title bar). RFRSH is action index 0.
+    RebindNetstatusBounds(0U, 22U, 720U, 238U);
     constexpr u32 kRfrshIdx = 0U;
     const u32 nx = kNsToolbarPadX + kRfrshIdx * (kNsToolbarBtnW + kNsToolbarBtnGap) + kNsToolbarBtnW / 2U;
     const u32 ny = 22U + kNsToolbarPadY + kNsToolbarBtnH / 2U;

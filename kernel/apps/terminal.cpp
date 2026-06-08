@@ -141,7 +141,7 @@ constexpr u32 kTermHeaderH = 14U;
 constexpr u32 kTermFooterH = 12U;
 
 constinit char g_term_header[16] = "TERMINAL";
-constinit char g_term_footer[64] = "Ctrl+Shift+C: copy  Wheel/PgUp/PgDn/Arrows: scroll";
+constinit char g_term_footer[64] = "Ctrl+C: interrupt  Ctrl+Shift+C: copy  Wheel/PgUp/PgDn: scroll";
 
 constinit auto g_term_chrome = MakeWidgetGroup(AppLabel{}, AppLabel{});
 
@@ -911,6 +911,11 @@ WindowHandle TerminalWindow()
     return g_state.handle;
 }
 
+bool TerminalIsOpen()
+{
+    return g_state.handle != kWindowInvalid;
+}
+
 bool TerminalFeedChar(char c)
 {
     // Route every keystroke into the kernel shell's input API.
@@ -1266,6 +1271,33 @@ void TerminalSelfTest()
     {
         arch::SerialWrite("[terminal-selftest] FAIL chrome-label-unbound\n");
         ok = false;
+    }
+
+    // 13. Footer must advertise "Ctrl+C" (F-037 — interrupt hint).
+    //     Inline substring scan; no libc strstr in freestanding kernel.
+    {
+        const char* needle = "Ctrl+C";
+        const char* hay = g_term_footer;
+        bool found = false;
+        for (u32 i = 0; hay[i] != '\0' && !found; ++i)
+        {
+            bool match = true;
+            for (u32 j = 0; needle[j] != '\0'; ++j)
+            {
+                if (hay[i + j] != needle[j])
+                {
+                    match = false;
+                    break;
+                }
+            }
+            if (match)
+                found = true;
+        }
+        if (!found)
+        {
+            arch::SerialWrite("[terminal-selftest] FAIL footer-missing-ctrlc-hint\n");
+            ok = false;
+        }
     }
 
     g_state = saved;

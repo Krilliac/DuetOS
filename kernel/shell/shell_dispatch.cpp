@@ -731,6 +731,12 @@ constinit const u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0])
 
 void Prompt()
 {
+    // Re-arm the log-line redraw suppressor so the first async klog
+    // line after this prompt is allowed to re-echo the prompt+buffer.
+    // One re-arm per prompt; ShellFeedChar no longer re-arms so the
+    // suppressor stays active for the rest of the typed line, blocking
+    // the per-keystroke prompt-prefix leakage (F-036).
+    duetos::core::ShellRedrawRearm();
     // If the user sets $PS1, honour it as the prompt string.
     // Defaults to "$ " — the simplest POSIX-flavour prompt.
     const EnvSlot* s = EnvFind("PS1");

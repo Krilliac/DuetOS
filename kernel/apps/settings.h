@@ -150,6 +150,15 @@ void SettingsDateTimeSelfTest();
 bool SettingsDateTimeSelfTestPassed();
 void SettingsDisplaySelfTest();
 bool SettingsDisplaySelfTestPassed();
+
+/// Drive the Display panel's resolution revert-timeout (F-029). If a
+/// resolution change is pending confirmation and its 10 s window has
+/// lapsed without a Keep, revert to the previous mode. MUST be called
+/// OUTSIDE a compose pass (it re-binds the framebuffer + drops the
+/// compose shadow), under the compositor lock — the UiTickerTask
+/// calls it after CompositorLock and before DesktopCompose. No-op
+/// when nothing is pending. Returns true iff it performed a revert.
+bool SettingsDisplayRevertTick();
 void SettingsKeyboardSelfTest();
 bool SettingsKeyboardSelfTestPassed();
 void SettingsMouseSelfTest();
@@ -170,5 +179,13 @@ u8 KeyboardTypematicDelayIdx();
 /// ranges, then pushed to the controller via the same path the
 /// F/S/D/Q keys take. Idempotent. Used by SessionRestoreApply.
 void KeyboardSetTypematicIdx(u8 rate, u8 delay);
+
+/// NTP auto-sync flag — true means the user has opted in to
+/// NTP-driven RTC synchronisation. Persisted in SESSION.CFG
+/// under `datetime.ntp`. The flag itself does not drive a
+/// background sync task; pressing N on the DateTime panel
+/// fires one live query when the flag is toggled on.
+bool DateTimeNtpEnabled();
+void DateTimeSetNtpEnabled(bool enabled);
 
 } // namespace duetos::apps::settings

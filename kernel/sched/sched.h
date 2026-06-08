@@ -478,6 +478,26 @@ struct SchedStats
 };
 SchedStats SchedStatsRead();
 
+/// Per-CPU tick accounting for `cpu_id`. Writes the CPU's lifetime
+/// timer-tick count into `*total_ticks` and the subset spent in the
+/// idle task into `*idle_ticks`. Returns true on success.
+///
+/// Returns false (and leaves the out-pointers unchanged) when:
+///   - cpu_id >= arch::SmpCpuIdLimit() (out of range)
+///   - the PerCpu slot for that cpu_id is null (AP slot never bound)
+///
+/// The counters are incremented by `OnTimerTick` on the owning CPU
+/// with no locking (each CPU only ever writes its own slot). Readers
+/// on other CPUs may see a one-tick-stale value — acceptable for a
+/// monitor that samples at 1 Hz. There is no cross-CPU fence; callers
+/// that need a stricter consistency model must arrange their own
+/// synchronisation (none of DuetOS's current callers need this).
+///
+/// Reuse the online CPU count from `arch::SmpCpuIdLimit()` — iterate
+/// cpu_id from 0 to SmpCpuIdLimit()-1, skipping entries where this
+/// returns false, to build a per-core display.
+bool SchedStatsReadCpu(u32 cpu_id, u64* total_ticks, u64* idle_ticks);
+
 /// Runtime power/performance bias for the scheduler. A hint, not a
 /// correctness input: it only scales how often the *active* load
 /// balancer fires (PowerSave balances less aggressively → fewer

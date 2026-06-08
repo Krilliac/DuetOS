@@ -950,6 +950,117 @@ bool VirtioGpuSetupScanout(u32 width, u32 height)
     return true;
 }
 
+bool VirtioGpuResetScanout(u32 width, u32 height)
+{
+    if (g_scanout.ready && g_scanout.width == width && g_scanout.height == height)
+        return true;
+    if (!g_scanout.ready)
+        return VirtioGpuSetupScanout(width, height);
+    if (!g_cq.up)
+    {
+        arch::SerialWrite("[virtio-gpu] reset-scanout: bring-up has not run\n");
+        return false;
+    }
+    if (width == 0 || height == 0 || width > 4096 || height > 4096)
+    {
+        arch::SerialWrite("[virtio-gpu] reset-scanout: invalid dimensions\n");
+        return false;
+    }
+
+    // Remember the live geometry so that if the new-size setup fails
+    // AFTER we've torn the old resource down (a device-command failure
+    // the feasibility probe below can't predict), we can rebuild the
+    // PREVIOUS mode instead of leaving the screen bound to freed memory.
+    const u32 old_width = g_scanout.width;
+    const u32 old_height = g_scanout.height;
+
+    // Feasibility probe: confirm the new backing run is allocatable
+    // BEFORE tearing the live scanout down. If the contiguous frames
+    // aren't available we bail with the old scanout fully intact —
+    // the screen never goes dark. The probe-free / setup-alloc window
+    // is single-threaded (modeset runs under the compositor lock), so
+    // the run we just proved free is the run SetupScanout re-takes.
+    {
+        const u64 probe_bytes = static_cast<u64>(width) * 4ULL * height;
+        const u64 probe_pages = (probe_bytes + kPageSize - 1) / kPageSize;
+        auto probe = ::duetos::mm::AllocateContiguousFrames(probe_pages);
+        if (!probe)
+        {
+            arch::SerialWrite("[virtio-gpu] reset-scanout: new backing not allocatable; keeping old mode\n");
+            return false;
+        }
+        ::duetos::mm::FreeContiguousFrames(probe.value(), probe_pages);
+    }
+
+    // Detach scanout 0 from its resource first so the host stops
+    // compositing the old resource the moment we unref it.
+    {
+        ClearIoBuffers(sizeof(SetScanout), sizeof(GpuCtrlHdr));
+        auto* req = reinterpret_cast<volatile SetScanout*>(g_cq.req_buf);
+        FillCtrlHdr(&req->hdr, kCmdSetScanout);
+        req->r.x = 0;
+        req->r.y = 0;
+        req->r.width = g_scanout.width;
+        req->r.height = g_scanout.height;
+        req->scanout_id = g_scanout.scanout_id;
+        req->resource_id = 0u; // detach
+        if (!SubmitHeaderCommand(sizeof(SetScanout), "SET_SCANOUT(detach)"))
+            return false;
+    }
+
+    // RESOURCE_UNREF the old 2D resource. The host drops its backing
+    // reference; we then return the guest frames to the allocator.
+    {
+        ClearIoBuffers(sizeof(ResUnref), sizeof(GpuCtrlHdr));
+        auto* req = reinterpret_cast<volatile ResUnref*>(g_cq.req_buf);
+        FillCtrlHdr(&req->hdr, kCmdResourceUnref);
+        req->resource_id = g_scanout.resource_id;
+        req->padding = 0;
+        if (!SubmitHeaderCommand(sizeof(ResUnref), "RESOURCE_UNREF"))
+            return false;
+    }
+
+    // Return the old backing frames + retire the resource-accountant
+    // handles so the leak detector's snapshot stays honest.
+    const u64 old_pages = (g_scanout.backing_bytes + kPageSize - 1) / kPageSize;
+    ::duetos::mm::FreeContiguousFrames(static_cast<::duetos::mm::PhysAddr>(g_scanout.backing_phys), old_pages);
+    if (g_scanout_surface != kInvalidGpuResource)
+        GpuSurfaceRelease(g_scanout_surface);
+    if (g_scanout_vram != kInvalidGpuResource)
+        GpuVramRelease(g_scanout_vram);
+    g_scanout_surface = kInvalidGpuResource;
+    g_scanout_vram = kInvalidGpuResource;
+
+    // Mark the scanout torn down and rebuild it at the new size via
+    // the canonical create/attach/set path. On a re-setup failure the
+    // scanout is left not-ready — the caller must not rebind the
+    // framebuffer to a stale backing.
+    g_scanout.ready = false;
+    g_scanout_enabled = true;
+    arch::SerialWrite("[virtio-gpu] reset-scanout: torn down old resource, rebuilding at ");
+    arch::SerialWriteHex(width);
+    arch::SerialWrite("x");
+    arch::SerialWriteHex(height);
+    arch::SerialWrite("\n");
+    if (VirtioGpuSetupScanout(width, height))
+        return true;
+
+    // New-size setup failed on a device command AFTER teardown — the old
+    // backing is already freed, so there is no previous scanout left to
+    // fall back to passively. Best-effort: rebuild the PREVIOUS mode from
+    // scratch (its frames were just returned to the allocator, so the
+    // contiguous run is available again) so the display recovers rather
+    // than going dark. Return false either way: the REQUESTED mode was
+    // not applied. The caller rebinds the framebuffer to whatever scanout
+    // is live (recovered old mode, or none) by checking `ready`.
+    arch::SerialWrite("[virtio-gpu] reset-scanout: new-mode setup failed; restoring previous mode\n");
+    if (old_width != 0 && old_height != 0 && VirtioGpuSetupScanout(old_width, old_height))
+        arch::SerialWrite("[virtio-gpu] reset-scanout: previous mode restored\n");
+    else
+        arch::SerialWrite("[virtio-gpu] reset-scanout: RECOVERY FAILED — scanout is down\n");
+    return false;
+}
+
 const VirtioScanoutInfo& VirtioGpuScanoutInfo()
 {
     return g_scanout;

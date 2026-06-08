@@ -95,31 +95,6 @@ u32 HwndToCompositorHandle(u64 hwnd_win32)
     return static_cast<u32>(unbiased);
 }
 
-void SerialWriteDec(u64 v)
-{
-    if (v == 0)
-    {
-        duetos::arch::SerialWrite("0");
-        return;
-    }
-    char buf[24];
-    u32 n = 0;
-    while (v > 0 && n < sizeof(buf))
-    {
-        buf[n++] = static_cast<char>('0' + (v % 10));
-        v /= 10;
-    }
-    // Reverse in place; SerialWrite only accepts NUL-terminated —
-    // reverse into a second buffer and terminate.
-    char out[25];
-    for (u32 i = 0; i < n; ++i)
-    {
-        out[i] = buf[n - 1 - i];
-    }
-    out[n] = '\0';
-    duetos::arch::SerialWrite(out);
-}
-
 // Bounded copy from user space into the caller-supplied kernel
 // buffer. Returns true only when a NUL terminator is present within
 // `cap` bytes. `kdst` is always NUL-terminated on return; short
@@ -279,22 +254,8 @@ void DoWinCreate(arch::TrapFrame* frame)
 
     CompositorUnlock();
 
-    duetos::arch::SerialWrite("[win] create pid=");
-    duetos::arch::SerialWriteHex(proc->pid);
-    duetos::arch::SerialWrite(" hwnd=");
-    SerialWriteDec(h_comp + kHwndBias);
-    duetos::arch::SerialWrite(" rect=(");
-    SerialWriteDec(cx);
-    duetos::arch::SerialWrite(",");
-    SerialWriteDec(cy);
-    duetos::arch::SerialWrite(" ");
-    SerialWriteDec(cw);
-    duetos::arch::SerialWrite("x");
-    SerialWriteDec(ch);
-    duetos::arch::SerialWrite(") title=\"");
-    duetos::arch::SerialWrite(title);
-    duetos::arch::SerialWrite("\"\n");
-
+    // [win] create sentinel is emitted by WindowRegister (widget.cpp)
+    // for all window creates — no duplicate needed here.
     const u64 hwnd_biased = static_cast<u64>(h_comp) + kHwndBias;
     custom::OnHandleAlloc(proc, hwnd_biased, static_cast<u32>(duetos::core::SYS_WIN_CREATE), frame->rip);
     frame->rax = hwnd_biased;
@@ -334,12 +295,8 @@ void DoWinDestroy(arch::TrapFrame* frame)
     CompositorUnlock();
     WindowMsgWakeAll();
 
-    duetos::arch::SerialWrite("[win] destroy pid=");
-    duetos::arch::SerialWriteHex(proc->pid);
-    duetos::arch::SerialWrite(" hwnd=");
-    SerialWriteDec(frame->rdi);
-    duetos::arch::SerialWrite("\n");
-
+    // [win] destroy sentinel is emitted by WindowClose (widget.cpp)
+    // for all window destroys — no duplicate needed here.
     custom::OnHandleClose(proc, frame->rdi);
     frame->rax = 1;
 }

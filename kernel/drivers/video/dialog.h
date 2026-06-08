@@ -63,7 +63,11 @@ using DialogResultFn = void (*)(DialogResult result, const char* text, void* use
 /// was registered, false if another dialog is already active.
 /// The caller's `body` and `title` strings are stored by
 /// reference — they MUST stay alive until `cb` fires.
-bool MessageBoxOpen(const char* title, const char* body, DialogResultFn cb, void* user);
+/// `ok_label` / `cancel_label` override the default "OK" /
+/// "CANCEL" button text. Null means use the default. The strings
+/// must stay alive until `cb` fires (static literals are fine).
+bool MessageBoxOpen(const char* title, const char* body, DialogResultFn cb, void* user, const char* ok_label = nullptr,
+                    const char* cancel_label = nullptr);
 
 /// Open a single-line InputBox. `default_text` (nullable)
 /// pre-populates the edit field; the user can clear / edit /
