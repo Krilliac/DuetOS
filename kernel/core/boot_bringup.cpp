@@ -3590,7 +3590,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         duetos::drivers::video::WindowChrome chrome = theme_chrome(Role::Settings);
         chrome.x = 220;
         chrome.y = 110;
-        chrome.w = 480;
+        chrome.w = 720;
         chrome.h = 260;
         const duetos::drivers::video::WindowHandle h = duetos::drivers::video::WindowRegister(chrome, "NETWORK STATUS");
         duetos::drivers::video::WindowSetVisible(h, false);
