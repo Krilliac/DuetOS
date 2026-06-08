@@ -479,6 +479,11 @@ constinit u32 g_dbl_click_ticks = 50;
 // feeding the cursor + apps.
 constinit u8 g_mouse_sensitivity = 128;
 
+// Primary/secondary button-swap flag. When true the Left and
+// Right button bits in each MousePacket are exchanged before
+// any click routing. Persisted in SESSION.CFG (mouse.btnswap).
+constinit bool g_mouse_button_swap = false;
+
 // Mouse capture — one system-wide HWND that gets all mouse
 // events regardless of cursor position, or kWindowInvalid when
 // no capture is active.
@@ -3526,6 +3531,16 @@ void WindowSetMouseSensitivity(u8 scale)
 u8 WindowMouseSensitivity()
 {
     return g_mouse_sensitivity;
+}
+
+void WindowSetMouseButtonSwap(bool swap)
+{
+    g_mouse_button_swap = swap;
+}
+
+bool WindowMouseButtonSwap()
+{
+    return g_mouse_button_swap;
 }
 
 // --- Cursor accessors ---------------------------------------------

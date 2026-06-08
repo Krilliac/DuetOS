@@ -171,4 +171,12 @@ u8 KeyboardTypematicDelayIdx();
 /// F/S/D/Q keys take. Idempotent. Used by SessionRestoreApply.
 void KeyboardSetTypematicIdx(u8 rate, u8 delay);
 
+/// NTP auto-sync flag — true means the user has opted in to
+/// NTP-driven RTC synchronisation. Persisted in SESSION.CFG
+/// under `datetime.ntp`. The flag itself does not drive a
+/// background sync task; pressing N on the DateTime panel
+/// fires one live query when the flag is toggled on.
+bool DateTimeNtpEnabled();
+void DateTimeSetNtpEnabled(bool enabled);
+
 } // namespace duetos::apps::settings

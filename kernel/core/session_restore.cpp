@@ -387,13 +387,17 @@ void FormatPayload(char* dst, u64 cap, u64* len_out)
         Append(dst, &pos, cap, "\n");
     }
 
-    // Mouse — double-click threshold (in compositor ticks) and
-    // sensitivity (0..255, identity = 128).
+    // Mouse — double-click threshold (in compositor ticks),
+    // sensitivity (0..255, identity = 128), and primary/secondary
+    // button-swap flag.
     Append(dst, &pos, cap, "mouse.dblclick=");
     AppendU32(dst, &pos, cap, v::WindowDoubleClickTicks());
     Append(dst, &pos, cap, "\n");
     Append(dst, &pos, cap, "mouse.sens=");
     AppendU32(dst, &pos, cap, v::WindowMouseSensitivity());
+    Append(dst, &pos, cap, "\n");
+    Append(dst, &pos, cap, "mouse.btnswap=");
+    AppendU32(dst, &pos, cap, v::WindowMouseButtonSwap() ? 1u : 0u);
     Append(dst, &pos, cap, "\n");
 
     // Keyboard — typematic indices + active layout.
@@ -426,6 +430,11 @@ void FormatPayload(char* dst, u64 cap, u64* len_out)
     // Timezone offset in minutes (signed; range -720..+840).
     Append(dst, &pos, cap, "tz.minutes=");
     AppendI32(dst, &pos, cap, time::TimezoneOffsetMinutes());
+    Append(dst, &pos, cap, "\n");
+
+    // NTP auto-sync flag — drives the N-key toggle on the DateTime panel.
+    Append(dst, &pos, cap, "datetime.ntp=");
+    AppendU32(dst, &pos, cap, apps::settings::DateTimeNtpEnabled() ? 1u : 0u);
     Append(dst, &pos, cap, "\n");
 
     // Calculator memory register — only emit when the user has
@@ -482,6 +491,15 @@ bool ApplyOne(const char* key, const char* val)
         if (ParseU32(val, static_cast<u32>(StrLen(val)), &num) && num <= 0xFF)
         {
             v::WindowSetMouseSensitivity(static_cast<u8>(num));
+        }
+        return true;
+    }
+    if (StrEqual(key, "mouse.btnswap"))
+    {
+        u32 num = 0;
+        if (ParseU32(val, static_cast<u32>(StrLen(val)), &num))
+        {
+            v::WindowSetMouseButtonSwap(num != 0);
         }
         return true;
     }
@@ -550,6 +568,15 @@ bool ApplyOne(const char* key, const char* val)
         if (ParseI32(val, static_cast<u32>(StrLen(val)), &num))
         {
             time::SetTimezoneOffsetMinutes(num);
+        }
+        return true;
+    }
+    if (StrEqual(key, "datetime.ntp"))
+    {
+        u32 num = 0;
+        if (ParseU32(val, static_cast<u32>(StrLen(val)), &num))
+        {
+            apps::settings::DateTimeSetNtpEnabled(num != 0);
         }
         return true;
     }
@@ -813,10 +840,11 @@ void SessionRestoreSelfTest()
     // distinguishable from the boot defaults so a sub-check that
     // fails to apply leaves an observable gap.
     Append(synth, &spos, sizeof(synth),
-           "mouse.dblclick=77\nmouse.sens=200\n"
+           "mouse.dblclick=77\nmouse.sens=200\nmouse.btnswap=1\n"
            "kbd.rate=7\nkbd.delay=2\n"
            "sound.cues=0\n"
            "tz.minutes=-330\n"
+           "datetime.ntp=1\n"
            "calc.mem=-12345\ncalc.memset=1\n");
     SerialWrite("[session-selftest] payload assembled\n");
     const v::ThemeId orig_theme = v::ThemeCurrentId();
@@ -833,10 +861,12 @@ void SessionRestoreSelfTest()
     // what the user / boot defaults left behind.
     const u32 orig_dblclick = v::WindowDoubleClickTicks();
     const u8 orig_sens = v::WindowMouseSensitivity();
+    const bool orig_btnswap = v::WindowMouseButtonSwap();
     const u8 orig_kbd_rate = apps::settings::KeyboardTypematicRateIdx();
     const u8 orig_kbd_delay = apps::settings::KeyboardTypematicDelayIdx();
     const bool orig_sound = v::SoundCueIsEnabled();
     const i32 orig_tz = time::TimezoneOffsetMinutes();
+    const bool orig_ntp = apps::settings::DateTimeNtpEnabled();
     const i64 orig_mem = apps::calculator::CalculatorMemoryValue();
     const bool orig_memset = apps::calculator::CalculatorMemorySet();
 
@@ -905,6 +935,11 @@ void SessionRestoreSelfTest()
         knob_ok = false;
         KLOG_DEBUG_V("session", "  mouse sens mismatch", got_sens);
     }
+    if (!v::WindowMouseButtonSwap())
+    {
+        knob_ok = false;
+        KLOG_WARN("session", "  mouse.btnswap=1 line did not enable button swap");
+    }
     const u8 got_kbd_rate = apps::settings::KeyboardTypematicRateIdx();
     const u8 got_kbd_delay = apps::settings::KeyboardTypematicDelayIdx();
     if (got_kbd_rate != 7 || got_kbd_delay != 2)
@@ -924,6 +959,11 @@ void SessionRestoreSelfTest()
         knob_ok = false;
         KLOG_DEBUG_V("session", "  tz.minutes mismatch (expected -330)", static_cast<u32>(got_tz));
     }
+    if (!apps::settings::DateTimeNtpEnabled())
+    {
+        knob_ok = false;
+        KLOG_WARN("session", "  datetime.ntp=1 line did not enable NTP flag");
+    }
     const i64 got_mem = apps::calculator::CalculatorMemoryValue();
     const bool got_memset = apps::calculator::CalculatorMemorySet();
     if (got_mem != -12345 || !got_memset)
@@ -941,9 +981,11 @@ void SessionRestoreSelfTest()
     // no observable side effects.
     v::WindowSetDoubleClickTicks(orig_dblclick);
     v::WindowSetMouseSensitivity(orig_sens);
+    v::WindowSetMouseButtonSwap(orig_btnswap);
     apps::settings::KeyboardSetTypematicIdx(orig_kbd_rate, orig_kbd_delay);
     v::SoundCueSetEnabled(orig_sound);
     time::SetTimezoneOffsetMinutes(orig_tz);
+    apps::settings::DateTimeSetNtpEnabled(orig_ntp);
     apps::calculator::CalculatorMemoryRestore(orig_mem, orig_memset);
 
     // Restore original theme.

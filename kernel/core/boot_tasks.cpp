@@ -2411,12 +2411,29 @@ void MouseReaderTask(void*)
             duetos::drivers::video::CursorSetShape(want);
         }
 
-        const bool left_down = (p.buttons & duetos::drivers::input::kMouseButtonLeft) != 0;
+        // Apply primary/secondary button swap if enabled. When
+        // swapped, the physical right button fires the primary
+        // (left) action and vice versa. Swap is a simple bit
+        // exchange of the L and R bits in the buttons byte;
+        // all downstream code sees the adjusted mask.
+        u8 buttons_eff = p.buttons;
+        if (duetos::drivers::video::WindowMouseButtonSwap())
+        {
+            const bool phys_left = (buttons_eff & duetos::drivers::input::kMouseButtonLeft) != 0;
+            const bool phys_right = (buttons_eff & duetos::drivers::input::kMouseButtonRight) != 0;
+            buttons_eff &= ~(duetos::drivers::input::kMouseButtonLeft | duetos::drivers::input::kMouseButtonRight);
+            if (phys_left)
+                buttons_eff |= duetos::drivers::input::kMouseButtonRight;
+            if (phys_right)
+                buttons_eff |= duetos::drivers::input::kMouseButtonLeft;
+        }
+
+        const bool left_down = (buttons_eff & duetos::drivers::input::kMouseButtonLeft) != 0;
         const bool press_edge = left_down && !prev_left;
         const bool release_edge = !left_down && prev_left;
         prev_left = left_down;
 
-        const bool right_down = (p.buttons & duetos::drivers::input::kMouseButtonRight) != 0;
+        const bool right_down = (buttons_eff & duetos::drivers::input::kMouseButtonRight) != 0;
         const bool right_press = right_down && !prev_right;
         const bool right_release = !right_down && prev_right;
         prev_right = right_down;
@@ -3573,7 +3590,7 @@ void MouseReaderTask(void*)
             // cursor is NOT pinning a window move; this keeps
             // the button widget inert during drag, matching
             // Windows' "modal drag" semantics.
-            const duetos::u32 hit = duetos::drivers::video::WidgetRouteMouse(cx, cy, p.buttons);
+            const duetos::u32 hit = duetos::drivers::video::WidgetRouteMouse(cx, cy, buttons_eff);
             if (hit != duetos::drivers::video::kWidgetInvalid)
             {
                 SerialWrite("[ui] widget event id=");

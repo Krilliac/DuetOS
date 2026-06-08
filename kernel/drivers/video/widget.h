@@ -851,6 +851,15 @@ u32 WindowDoubleClickTicks();
 void WindowSetMouseSensitivity(u8 scale);
 u8 WindowMouseSensitivity();
 
+/// Primary/secondary button-swap flag. When true the driver's
+/// Left and Right button bits are exchanged before any click
+/// routing — pressing the physical right button fires the
+/// primary (left) action and vice versa. Persisted in SESSION.CFG
+/// under the key `mouse.btnswap`. Takes effect immediately on the
+/// next packet read.
+void WindowSetMouseButtonSwap(bool swap);
+bool WindowMouseButtonSwap();
+
 /// Current cursor position in framebuffer coordinates. Pointers
 /// may be null to skip writing that axis.
 void WindowGetCursor(u32* x_out, u32* y_out);
