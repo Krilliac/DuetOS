@@ -10825,6 +10825,41 @@ the offset). Registering only one term left the other check tripping (first the
 parent writes flagged, then — after the naive parent-only fix — the partition
 writes flagged); owning both is the correct model.
 
+## 2026-06-08 — Soft-lockup is log-and-continue; it must NOT NMI-broadcast
+
+The soft-lockup detector (`kernel/diag/soft_lockup.cpp`) is a **non-fatal
+warning** path by contract (`soft_lockup.h`: "Warning, not panic — soft-lockups
+are bugs to investigate, not always reasons to halt"). Its warn leg had been
+calling `arch::PanicBroadcastNmi()` to make each online peer CPU capture a
+`panic_snapshot_*` for "lightweight cross-CPU visibility." That was wrong: the
+peer NMI handler (`arch/traps.cpp` `TrapDispatch`, unclaimed-NMI leg) treats
+**any** unclaimed NMI as a panic broadcast — it snapshots and `cli; hlt`s the
+peer **permanently**. So a soft-lockup *warning* halted every peer CPU, and on
+the 4-CPU smoke boot that stopped all forward progress until the host watchdog
+killed the VM. This was the intermittent "serial wedge": under DEBUG logging
+`kboot` synchronously flushes a large serial burst (exFAT/NTFS/ext4 probe,
+ring3 DLL preload, device bringup) that at 115200 baud takes >1 s on a loaded
+host (every byte drains — `serial_dropped` stayed 0 — just slowly), the
+soft-lockup correctly fires, then the NMI broadcast halts the peers and wedges
+the box. The backtrace instrumentation added in the same session pinned it:
+`Sti <- SpinLockRelease <- SerialWrite <- ExfatProbe <- ExfatScanAll <-
+BootBringupDevices` — a serial flush, not a compute loop.
+
+**Decision.** The soft-lockup warn path logs (now with a `rip-ring` /
+`caller-bt` backtrace) and dispatches a `FaultReact` / `Ereport` only; it does
+**not** broadcast an NMI. Verified: with the threshold forced to 5 ticks the
+warn fires repeatedly during boot and the boot still **completes** (rc=0); at
+the default 100 ticks, 14/14 pe-winkill smokes pass with zero wedges.
+
+**Rules out.** Putting any peer-halting / cross-CPU-snapshot mechanism on a
+log-and-continue path. Genuine hard-hang cross-CPU capture (where even the
+timer IRQ has stopped — a *real* wedge) belongs on the **NMI watchdog**
+(`arch::NmiWatchdog*`), which fires precisely in that condition; it does not
+belong on the soft-lockup detector, whose whole premise is that the CPU is
+still taking timer IRQs and the system is otherwise live. The original
+"snapshots are dead BSS if the lockup clears" rationale was also false — peers
+`cli; hlt` and never resume, so a soft-lockup could not clear once it broadcast.
+
 **Decision — `ownedwrite=advisory|deny` cmdline opt-in, default Off.** Verified
 at boot under both: zero legitimate writes fall outside an owned region, so Deny
 does not break the boot — the chokepoint is proven enforceable, not just latent.
