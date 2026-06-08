@@ -47,6 +47,37 @@ body. **The crypto is real and correct; only the anchor set is test-oriented.**
 | 3 | **Solve the trust store** (real CA bundle, Subject-DN indexed). | `x509_verify.cpp:803+` | L | Unblocks real HTTPS. |
 | 4 | **Disambiguate TLS error codes** (don't collapse connect/verify/handshake to -1). | `tls_socket.cpp`, `browser.cpp:1587` | S | Actionable errors. |
 
+### Trust-store — the Google-specific finding (2026-06-08, autonomous follow-up)
+
+Investigated embedding Google's GTS roots (from the Mozilla bundle in
+`/etc/ssl/certs/GTS_Root_R{1,2,3,4}.pem`). **Embedding the roots alone is not
+enough**, because of their self-signature algorithms:
+
+| Root | Key | Sig algo | Verifier supports? |
+|------|-----|----------|--------------------|
+| GTS Root R1, R2 | RSA-4096 | **sha384WithRSAEncryption** | ❌ verifier is `sha256WithRSA` only |
+| GTS Root R3, R4 | ECDSA P-384 | **ecdsa-with-SHA384** | ✅ (DigiCert G3 / ISRG X2 already exercise it) |
+
+Consequences:
+- **The RSA path to Google (→ GTS R1, the common anchor) requires adding
+  `sha384WithRSAEncryption` to the verifier** (`x509_verify.cpp` sig-algo
+  classification + the RSA-PKCS#1 verify, which already does SHA-256 — SHA-384
+  is the same flow with a different hash + DigestInfo prefix). This is a small,
+  bounded crypto addition but **security-sensitive**, and its end state can only
+  be confirmed by a **live HTTPS fetch to a real host** (the boot self-test only
+  proves a root's *own* self-signature, not a full server chain).
+- The **ECDSA path (GTS R3/R4) would work with the current verifier** *if* the
+  TLS handshake negotiates an ECDSA-capable cipher and Google serves its ECDSA
+  cert — also only confirmable live.
+
+**Recommended bounded slice (needs a live VBox/QEMU-SLIRP fetch to verify):**
+add `sha384WithRSAEncryption` support + embed GTS R1 (RSA) and R4 (ECDSA), then
+confirm against `https://www.google.com` end to end. Generate the DER arrays
+the same way the existing roots were (`openssl x509 -in GTS_Root_R1.pem -outform
+DER | xxd -i`), matching the `kRootXXXDer[]` pattern at `x509_verify.cpp:1063+`
+and the `kTrustStore[]` table at `:1581`. **Not done autonomously** — shipping
+unverified trust-anchor/crypto changes without the live confirmation is unsafe.
+
 ### Trust-store options (recommended order)
 
 1. **Ship a real CA bundle (Mozilla/CCADB, ~150 roots), indexed by Subject-DN** — the
