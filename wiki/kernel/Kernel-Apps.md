@@ -80,7 +80,7 @@ Apps marked **v0** are scaffolded but missing significant functionality
 | App | Source | What it does | Subsystems touched |
 |-----|--------|--------------|--------------------|
 | **about** | [`about.cpp`](../../kernel/apps/about.cpp) | CPU model + memory + uptime banner. | ACPI, [arch/rtc](../kernel/Time.md) |
-| **devicemgr** | [`devicemgr.h`](../../kernel/apps/devicemgr.h) | Device tree from PCI + USB enumeration. Columns: BUS:DV.F, VID:DID, human-readable NAME (vendor + PCI subclass), STATUS (OK / no-driver), DRIVER (class-inferred — there is no driver-binding registry on the device record yet). | [PCI](../drivers/PCIe-Enumeration.md), [USB](../drivers/USB.md) |
+| **devicemgr** | [`devicemgr.h`](../../kernel/apps/devicemgr.h) | Collapsible class-grouped device tree from PCI + USB enumeration. PCI devices are grouped by base class (`BRIDGE`, `DISPLAY`, `STORAGE`, `SERBUS`, etc.); each group shows a `[-]/[+] CLASS (N)` header. Leaf columns: BUS:DV.F, VID:DID, human-readable NAME (vendor + PCI subclass), STATUS (OK / no-driver), DRIVER (class-inferred — no driver-binding registry). Keyboard: Up/Down navigate rows, Enter/Space toggle group expand/collapse. | [PCI](../drivers/PCIe-Enumeration.md), [USB](../drivers/USB.md) |
 | **settings** | [`settings.cpp`](../../kernel/apps/settings.cpp) (+ `settings_datetime`, `settings_display`, `settings_keyboard`, `settings_mouse`, `settings_sound`) | Multi-page settings panel: time + display theme + input + audio. **DateTime (panel 5):** `S` sets the RTC; `N` toggles NTP auto-sync — when enabled, fires one live `NetNtpQuery` and writes the RTC on reply; persisted as `datetime.ntp` in `SESSION.CFG`. **Mouse (panel 4):** `B` toggles primary/secondary button swap — swaps the Left/Right bits in every `MousePacket` before routing, takes effect immediately; persisted as `mouse.btnswap`. **Sound:** master-volume level bar (`+`/`-` ±5%, `V` mute) backed by the audio backend's software gain stage; level + mute persist via `SESSION.CFG`. All knobs (mouse dblclick/sens/btnswap, kbd rate/delay/layout, sound cues/volume/muted, timezone, datetime.ntp, calc memory, imageview last file) round-trip through `SESSION.CFG` via `kernel/core/session_restore.cpp`. | time, net, gpu, input, audio |
 | **sysmon** | [`sysmon.h`](../../kernel/apps/sysmon.h) | CPU % + memory + per-task histogram. | scheduler stats |
 | **taskman** | [`taskman.h`](../../kernel/apps/taskman.h) | Process / thread lister with kill. Columns: PID/NAME/STATE/CPU%/TICKS/**MEM** (per-process mapped KiB via `mm::AddressSpaceUserPageCount`). Clickable column-header sort with asc/desc `^`/`v` indicator (S-key still cycles). | scheduler, [mm](../mm/Memory-Management.md) |
@@ -172,10 +172,10 @@ thread**. That means:
   F-010, see Roadmap). The large-font decimal display does not clip for
   very long values (F-051, Low). Bitwise/sqrt/factorial/memory are all
   present but keyboard-only (no on-screen buttons for them).
-- **devicemgr** — NAME/STATUS/DRIVER columns landed (F-026); DRIVER is
-  class-inferred until a real driver-binding registry exists on the
-  device record. Admin actions (uninstall, NIC reset) are next-slice
-  work.
+- **devicemgr** — Collapsible class tree (F-027) and NAME/STATUS/DRIVER columns
+  (F-026) are both landed. DRIVER is class-inferred until a real driver-binding
+  registry exists on the device record. Admin actions (uninstall, NIC reset)
+  are next-slice work.
 - **sysmon / taskman** — taskman now shows per-process MEM and supports
   column-header sort (F-024/F-025); sysmon has a live CPU sparkline
   (F-022). Per-core CPU% (F-023) still needs a public

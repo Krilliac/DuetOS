@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "diag/log_names.h"
+#include "drivers/input/ps2kbd.h"
 #include "drivers/input/ps2mouse.h"
 #include "drivers/pci/pci.h"
 #include "drivers/usb/usb.h"
@@ -37,6 +38,117 @@ constexpr u32 kSection = 0x00FFD040;
 constexpr u32 kBg = 0x00101820;
 
 constinit WindowHandle g_handle = kWindowInvalid;
+
+// ---------------------------------------------------------------
+// Hierarchical tree state (F-027)
+//
+// PCI devices are grouped by base class code. Each group is a
+// collapsible node in a two-level tree:
+//   [-] CLASS_NAME (N)        ← group header, section-colour
+//     BUS:DV.F  VEND:DEV  NAME  STATUS  DRIVER   ← leaf, indented
+//
+// g_groups[i] holds the class code and device indices for group i.
+// g_group_collapsed[i] is the collapse flag (true = hidden leaves).
+// g_cursor is the currently-highlighted *visible* row (0-based);
+// -1 means no selection. Enter / Space toggles a group header.
+// Arrow Up/Down move the cursor; wrap at top/bottom is suppressed.
+
+constexpr u32 kMaxGroups = 16U; // more PCI base-classes than a real box has
+
+struct TreeGroup
+{
+    u8 class_code;          // PCI base class code
+    u32 device_indices[32]; // indices into PciDevice(i)
+    u32 count;              // number of devices in this group
+};
+
+constinit TreeGroup g_groups[kMaxGroups] = {};
+constinit u32 g_group_count = 0;
+constinit bool g_group_collapsed[kMaxGroups] = {};
+constinit i32 g_cursor = -1; // visible-row cursor; -1 = no selection
+
+// Rebuild the groups array from the live PciDevice table.
+// Called at draw time and after RSCN.
+void RebuildTreeGroups()
+{
+    g_group_count = 0;
+    for (u32 i = 0; i < kMaxGroups; ++i)
+    {
+        g_groups[i] = TreeGroup{};
+    }
+
+    const u64 n = duetos::drivers::pci::PciDeviceCount();
+    for (u64 i = 0; i < n; ++i)
+    {
+        const auto& d = duetos::drivers::pci::PciDevice(i);
+        const u8 cls = d.class_code;
+
+        // Find existing group or create new one.
+        u32 gi = kMaxGroups;
+        for (u32 g = 0; g < g_group_count; ++g)
+        {
+            if (g_groups[g].class_code == cls)
+            {
+                gi = g;
+                break;
+            }
+        }
+        if (gi == kMaxGroups)
+        {
+            if (g_group_count >= kMaxGroups)
+                continue; // overflow guard
+            gi = g_group_count++;
+            g_groups[gi].class_code = cls;
+            g_groups[gi].count = 0;
+        }
+        auto& grp = g_groups[gi];
+        if (grp.count < 32U)
+            grp.device_indices[grp.count++] = static_cast<u32>(i);
+    }
+}
+
+// Total number of visible rows in the tree (header + expanded leaves).
+u32 TreeVisibleRowCount()
+{
+    u32 rows = 0;
+    for (u32 g = 0; g < g_group_count; ++g)
+    {
+        rows += 1; // header row always visible
+        if (!g_group_collapsed[g])
+            rows += g_groups[g].count;
+    }
+    return rows;
+}
+
+// Decode visible row index into (group, leaf_index_or_-1).
+// Returns false if row is out of range.
+bool TreeDecodeRow(u32 row, u32* out_group, i32* out_leaf)
+{
+    u32 cur = 0;
+    for (u32 g = 0; g < g_group_count; ++g)
+    {
+        if (cur == row)
+        {
+            *out_group = g;
+            *out_leaf = -1; // header
+            return true;
+        }
+        cur += 1;
+        if (!g_group_collapsed[g])
+        {
+            for (u32 l = 0; l < g_groups[g].count; ++l, ++cur)
+            {
+                if (cur == row)
+                {
+                    *out_group = g;
+                    *out_leaf = static_cast<i32>(l);
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
 
 void HexN(char* out, u32 v, u32 nibbles)
 {
@@ -247,13 +359,71 @@ void BuildDeviceName(char* buf, u32 buf_max, u16 vendor_id, u8 cls, u8 sub, u8 p
     buf[o] = '\0';
 }
 
+// Draw a single PCI leaf row (a device under its group header).
+// indent_x: extra left offset to show the tree indentation.
+// row_index: the visible-row index used for cursor highlight.
+// visible_row: the running visible-row counter (updated by caller).
+void DrawPciLeafRow(u32 cx, u32 y, u32 dev_idx, bool highlighted)
+{
+    const auto& d = duetos::drivers::pci::PciDevice(dev_idx);
+    // Highlight bar for the selected row.
+    constexpr u32 kHlBg = 0x001C2838U;
+    const u32 row_bg = highlighted ? kHlBg : kBg;
+    // Indent: 16 px for the tree gutter, then the normal margin.
+    constexpr u32 kIndent = 16U;
+    const u32 rx = cx + kMargin + kIndent;
+
+    // Col 0: BUS:DV.F
+    char addr[9];
+    HexN(addr, d.addr.bus, 2);
+    addr[2] = ':';
+    HexN(addr + 3, d.addr.device, 2);
+    addr[5] = '.';
+    addr[6] = static_cast<char>('0' + (d.addr.function & 0x7));
+    addr[7] = '\0';
+    FramebufferDrawString(rx + kColAddr, y, addr, kFg, row_bg);
+
+    // Col 1: VEND:DEV
+    char id[10];
+    HexN(id, d.vendor_id, 4);
+    id[4] = ':';
+    HexN(id + 5, d.device_id, 4);
+    id[9] = '\0';
+    FramebufferDrawString(rx + kColId, y, id, kFg, row_bg);
+
+    // Col 2: human-readable name (vendor + subclass detail), truncated to 14 chars
+    char name[15];
+    BuildDeviceName(name, sizeof(name), d.vendor_id, d.class_code, d.subclass, d.prog_if);
+    FramebufferDrawString(rx + kColName, y, name, kFg, row_bg);
+
+    // Col 3: status — "OK" if a known driver covers this device, else "no driver"
+    const char* drv = PciDriverName(d.class_code, d.subclass, d.prog_if, d.vendor_id);
+    // "no driver" is the only value with a space at [2].
+    const bool has_driver = (drv[2] != ' ');
+    const char* status = has_driver ? "OK" : "no driver";
+    const u32 status_fg = has_driver ? 0x0040C040U : kFgDim;
+    FramebufferDrawString(rx + kColStatus, y, status, status_fg, row_bg);
+
+    // Col 4: bound driver name
+    if (has_driver)
+        FramebufferDrawString(rx + kColDriver, y, drv, kFgDim, row_bg);
+}
+
+// Draw the hierarchical PCI device tree. Groups devices by class code.
+// Each group has a header row showing [-]/[+] + class label + count,
+// plus indented leaf rows for each device when expanded.
+// g_cursor (visible-row index) drives the cursor highlight; -1 = none.
 void DrawPciSection(u32 cx, u32& y, u32 cy, u32 ch)
 {
+    // Rebuild group map before drawing so RSCN reflects live state.
+    RebuildTreeGroups();
+
     FramebufferDrawString(cx + kMargin, y, "PCI DEVICES", kSection, kBg);
     y += kRowH + 4;
 
-    // Column header
-    const u32 hx = cx + kMargin;
+    // Column header (offset by tree indent to align with leaf cols)
+    constexpr u32 kIndent = 16U;
+    const u32 hx = cx + kMargin + kIndent;
     FramebufferDrawString(hx + kColAddr, y, "BUS:DV.F", kFgDim, kBg);
     FramebufferDrawString(hx + kColId, y, "VEND:DEV", kFgDim, kBg);
     FramebufferDrawString(hx + kColName, y, "NAME", kFgDim, kBg);
@@ -261,55 +431,58 @@ void DrawPciSection(u32 cx, u32& y, u32 cy, u32 ch)
     FramebufferDrawString(hx + kColDriver, y, "DRIVER", kFgDim, kBg);
     y += kRowH;
 
-    const u64 n = duetos::drivers::pci::PciDeviceCount();
-    if (n == 0)
+    if (g_group_count == 0)
     {
         FramebufferDrawString(cx + kMargin, y, "  (NO DEVICES — PCI ENUMERATION DID NOT RUN)", kFgDim, kBg);
         y += kRowH;
         return;
     }
 
-    for (u64 i = 0; i < n && y + kRowH < cy + ch; ++i)
+    u32 visible_row = 0; // tracks which visible row we're on
+    for (u32 g = 0; g < g_group_count && y + kRowH < cy + ch; ++g)
     {
-        const auto& d = duetos::drivers::pci::PciDevice(i);
-        const u32 rx = cx + kMargin;
+        const auto& grp = g_groups[g];
+        const bool collapsed = g_group_collapsed[g];
+        const bool header_highlighted = (g_cursor >= 0 && static_cast<u32>(g_cursor) == visible_row);
+        constexpr u32 kHlBg = 0x001C2838U;
+        const u32 hdr_bg = header_highlighted ? kHlBg : kBg;
 
-        // Col 0: BUS:DV.F
-        char addr[9];
-        HexN(addr, d.addr.bus, 2);
-        addr[2] = ':';
-        HexN(addr + 3, d.addr.device, 2);
-        addr[5] = '.';
-        addr[6] = static_cast<char>('0' + (d.addr.function & 0x7));
-        addr[7] = '\0';
-        FramebufferDrawString(rx + kColAddr, y, addr, kFg, kBg);
-
-        // Col 1: VEND:DEV
-        char id[10];
-        HexN(id, d.vendor_id, 4);
-        id[4] = ':';
-        HexN(id + 5, d.device_id, 4);
-        id[9] = '\0';
-        FramebufferDrawString(rx + kColId, y, id, kFg, kBg);
-
-        // Col 2: human-readable name (vendor + subclass detail), truncated to 14 chars
-        char name[15];
-        BuildDeviceName(name, sizeof(name), d.vendor_id, d.class_code, d.subclass, d.prog_if);
-        FramebufferDrawString(rx + kColName, y, name, kFg, kBg);
-
-        // Col 3: status — "OK" if a known driver covers this device, else "no driver"
-        const char* drv = PciDriverName(d.class_code, d.subclass, d.prog_if, d.vendor_id);
-        // "no driver" is the only value with a space at [2].
-        const bool has_driver = (drv[2] != ' ');
-        const char* status = has_driver ? "OK" : "no driver";
-        const u32 status_fg = has_driver ? 0x0040C040U : kFgDim;
-        FramebufferDrawString(rx + kColStatus, y, status, status_fg, kBg);
-
-        // Col 4: bound driver name (from static class→driver map)
-        if (has_driver)
-            FramebufferDrawString(rx + kColDriver, y, drv, kFgDim, kBg);
-
+        // Build group header: "[+] CLASS_NAME (N)" or "[-] CLASS_NAME (N)"
+        // ClassLabel takes (base, sub) but we group by base class only;
+        // use sub=0xFF as a sentinel so it falls through to the base label.
+        const char* cls_name = ClassLabel(grp.class_code, 0xFF);
+        char hdr[32];
+        u32 o = 0;
+        hdr[o++] = '[';
+        hdr[o++] = collapsed ? '+' : '-';
+        hdr[o++] = ']';
+        hdr[o++] = ' ';
+        for (u32 i = 0; cls_name[i] != '\0' && o + 4 < sizeof(hdr); ++i)
+            hdr[o++] = cls_name[i];
+        hdr[o++] = ' ';
+        hdr[o++] = '(';
+        // Append count as decimal (max 2 digits — 32 devices per group max)
+        const u32 cnt = grp.count;
+        if (cnt >= 10)
+            hdr[o++] = static_cast<char>('0' + (cnt / 10) % 10);
+        hdr[o++] = static_cast<char>('0' + cnt % 10);
+        hdr[o++] = ')';
+        hdr[o] = '\0';
+        FramebufferDrawString(cx + kMargin, y, hdr, kSection, hdr_bg);
         y += kRowH;
+        ++visible_row;
+
+        // Draw leaf rows if expanded.
+        if (!collapsed)
+        {
+            for (u32 l = 0; l < grp.count && y + kRowH < cy + ch; ++l)
+            {
+                const bool leaf_highlighted = (g_cursor >= 0 && static_cast<u32>(g_cursor) == visible_row);
+                DrawPciLeafRow(cx, y, grp.device_indices[l], leaf_highlighted);
+                y += kRowH;
+                ++visible_row;
+            }
+        }
     }
 }
 
@@ -585,7 +758,7 @@ void RefreshDevicemgrHeader()
 
 void RefreshDevicemgrFooter()
 {
-    static const char kHint[] = "RSCN=RESCAN PCI + USB  (READ-ONLY)";
+    static const char kHint[] = "UP/DOWN=NAVIGATE  ENTER/SPC=TOGGLE  RSCN=RESCAN";
     u32 i = 0;
     for (; kHint[i] != '\0' && i + 1 < sizeof(g_footer_text); ++i)
         g_footer_text[i] = kHint[i];
@@ -604,6 +777,12 @@ void ClickRescan()
 {
     duetos::drivers::pci::PciTeardown();
     duetos::drivers::pci::PciEnumerate();
+    // Rebuild tree groups from fresh device list; reset collapse state
+    // and cursor so the view starts clean after a rescan.
+    RebuildTreeGroups();
+    for (u32 i = 0; i < kMaxGroups; ++i)
+        g_group_collapsed[i] = false;
+    g_cursor = -1;
     duetos::drivers::video::NotifyShow("devicemgr: rescanned");
 }
 
@@ -744,6 +923,58 @@ void DeviceMgrSelfTest()
             ok = false;
     }
 
+    // Tree model correctness (F-027): RebuildTreeGroups must produce
+    // a consistent group map — every device index stored in a group
+    // must be in-range, and the sum of all group counts must equal
+    // the total device count reported by PciDeviceCount(). Also
+    // verify collapse/expand toggle: collapsing a group removes its
+    // leaves from the visible-row count; re-expanding restores them.
+    {
+        RebuildTreeGroups();
+        const u64 total = duetos::drivers::pci::PciDeviceCount();
+        u64 group_sum = 0;
+        for (u32 g = 0; g < g_group_count; ++g)
+            group_sum += g_groups[g].count;
+        if (group_sum != total)
+            ok = false;
+
+        // All-expanded visible count = group_count + total
+        const u32 all_open = TreeVisibleRowCount();
+        if (all_open != g_group_count + static_cast<u32>(total))
+            ok = false;
+
+        // Collapse all groups and verify visible count equals group_count only
+        if (g_group_count > 0)
+        {
+            for (u32 g = 0; g < g_group_count; ++g)
+                g_group_collapsed[g] = true;
+            const u32 all_closed = TreeVisibleRowCount();
+            if (all_closed != g_group_count)
+                ok = false;
+
+            // Re-expand group 0 and verify its leaves reappear
+            g_group_collapsed[0] = false;
+            const u32 one_open = TreeVisibleRowCount();
+            if (one_open != g_group_count + g_groups[0].count)
+                ok = false;
+
+            // Restore: expand all
+            for (u32 g = 0; g < g_group_count; ++g)
+                g_group_collapsed[g] = false;
+        }
+
+        // TreeDecodeRow must round-trip: row 0 is a group header (leaf == -1)
+        if (g_group_count > 0)
+        {
+            u32 dg = 0;
+            i32 dl = 0;
+            if (!TreeDecodeRow(0, &dg, &dl) || dl != -1)
+                ok = false;
+        }
+
+        g_cursor = -1; // leave cursor neutral
+    }
+
     // Header / footer composers must produce non-empty text
     // after a refresh.
     RefreshDevicemgrHeader();
@@ -836,6 +1067,65 @@ void DeviceMgrMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
         const Event u{EventKind::MouseUp, cx, cy, 0U, 0U};
         g_devicemgr.DispatchEvent(u);
     }
+}
+
+// Keyboard entry point for the tree navigate/toggle feature (F-027).
+// Called from the boot-tasks KbdReaderTask when devicemgr is the
+// active window. Accepts Up/Down (cursor movement) and Enter/Space
+// (group toggle). Returns true if the key was consumed so the caller
+// can skip the shell fall-through and schedule a redraw.
+bool DeviceMgrKeyInput(duetos::u16 key_code)
+{
+    using namespace duetos::drivers::input;
+    if (g_handle == kWindowInvalid)
+        return false;
+
+    // Rebuild groups if not yet populated (first key before first draw).
+    if (g_group_count == 0)
+        RebuildTreeGroups();
+
+    const u32 total_visible = TreeVisibleRowCount();
+    if (total_visible == 0)
+        return false;
+
+    if (key_code == kKeyArrowUp)
+    {
+        if (g_cursor <= 0)
+            g_cursor = 0;
+        else
+            --g_cursor;
+        return true;
+    }
+    if (key_code == kKeyArrowDown)
+    {
+        const i32 max_row = static_cast<i32>(total_visible) - 1;
+        if (g_cursor < max_row)
+            ++g_cursor;
+        else
+            g_cursor = max_row;
+        return true;
+    }
+    // Enter or Space: toggle the group if cursor is on a header row.
+    if (key_code == kKeyEnter || key_code == static_cast<duetos::u16>(' '))
+    {
+        if (g_cursor >= 0)
+        {
+            u32 grp = 0;
+            i32 leaf = 0;
+            if (TreeDecodeRow(static_cast<u32>(g_cursor), &grp, &leaf) && leaf == -1)
+            {
+                g_group_collapsed[grp] = !g_group_collapsed[grp];
+                // If we just collapsed and the cursor would be beyond the
+                // new end, clamp it to the header row of the same group.
+                const u32 new_total = TreeVisibleRowCount();
+                if (g_cursor >= static_cast<i32>(new_total))
+                    g_cursor = static_cast<i32>(new_total) - 1;
+                return true;
+            }
+        }
+        return false;
+    }
+    return false;
 }
 
 } // namespace duetos::apps::devicemgr

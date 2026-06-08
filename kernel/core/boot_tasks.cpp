@@ -1769,6 +1769,14 @@ void KbdReaderTask(void*)
                 {
                     app_consumed = duetos::apps::help::HelpFeedArrow(static_cast<duetos::u16>(ev.code));
                 }
+                else if (active == duetos::apps::devicemgr::DeviceMgrWindow() &&
+                         (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown || ev.code == kKeyEnter ||
+                          ev.code == static_cast<duetos::u16>(' ')))
+                {
+                    // F-027: tree navigation. Up/Down move cursor, Enter/Space
+                    // toggle the focused group header. Triggers a redraw.
+                    app_consumed = duetos::apps::devicemgr::DeviceMgrKeyInput(static_cast<duetos::u16>(ev.code));
+                }
                 else
                 {
                     char c = 0;

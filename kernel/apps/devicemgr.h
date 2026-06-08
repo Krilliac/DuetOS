@@ -14,7 +14,7 @@
  *
  * Scope limits (deliberate v0):
  *   - PCI only — no USB, no virtio child devices, no platform.
- *   - No tree view by class / bridge — flat list.
+ *   - Class-grouped collapsible tree (F-027); no ACPI/USB sub-tree.
  *   - No BAR / interrupt / capability inspector.
  *   - No eject / rescan.
  *
@@ -54,5 +54,12 @@ bool DeviceMgrSelfTestPassed();
 /// in v0 (no selection, no detail). No-op before DeviceMgrInit
 /// has wired a window.
 void DeviceMgrMouseInput(duetos::u32 cursor_x, duetos::u32 cursor_y, duetos::u8 button_mask);
+
+/// Keyboard entry point for the tree navigate/toggle feature (F-027).
+/// Called from the boot-tasks KbdReaderTask when devicemgr is the
+/// active window. Accepts Up/Down (cursor movement) and Enter/Space
+/// (group header toggle). Returns true if the key was consumed.
+/// No-op before DeviceMgrInit has wired a window.
+bool DeviceMgrKeyInput(duetos::u16 key_code);
 
 } // namespace duetos::apps::devicemgr
