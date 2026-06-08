@@ -73,6 +73,218 @@ inline void ClampSelection()
         g_state.selection = CodepointEnd();
 }
 
+// ---------------------------------------------------------------
+// Unicode name lookup for the supported printable range.
+// Covers: U+0020..007E (ASCII printable) + U+00A0..00FF (Latin-1
+// Supplement printable). Returns a static string — caller must
+// not free. Returns nullptr for codepoints outside the supported
+// printable range (C0/C1 controls, etc.).
+// ---------------------------------------------------------------
+
+// ASCII punctuation/symbol names (U+0020..002F, 003A..0040,
+// 005B..0060, 007B..007E). Indexed as offset from the block start.
+// clang-format off
+static const char* const kAsciiPunctNames_0020[] = {
+    "SPACE", "EXCLAMATION MARK", "QUOTATION MARK", "NUMBER SIGN",
+    "DOLLAR SIGN", "PERCENT SIGN", "AMPERSAND", "APOSTROPHE",
+    "LEFT PARENTHESIS", "RIGHT PARENTHESIS", "ASTERISK", "PLUS SIGN",
+    "COMMA", "HYPHEN-MINUS", "FULL STOP", "SOLIDUS",
+};
+// 0x0030..0x0039: DIGIT ZERO..NINE (computed)
+// 0x003A..0x0040
+static const char* const kAsciiPunctNames_003A[] = {
+    "COLON", "SEMICOLON", "LESS-THAN SIGN", "EQUALS SIGN",
+    "GREATER-THAN SIGN", "QUESTION MARK", "COMMERCIAL AT",
+};
+// 0x0041..0x005A: LATIN CAPITAL LETTER A..Z (computed)
+// 0x005B..0x0060
+static const char* const kAsciiPunctNames_005B[] = {
+    "LEFT SQUARE BRACKET", "REVERSE SOLIDUS", "RIGHT SQUARE BRACKET",
+    "CIRCUMFLEX ACCENT", "LOW LINE", "GRAVE ACCENT",
+};
+// 0x0061..0x007A: LATIN SMALL LETTER a..z (computed)
+// 0x007B..0x007E
+static const char* const kAsciiPunctNames_007B[] = {
+    "LEFT CURLY BRACKET", "VERTICAL LINE", "RIGHT CURLY BRACKET", "TILDE",
+};
+
+// Digit word names for DIGIT ZERO .. DIGIT NINE
+static const char* const kDigitWords[10] = {
+    "ZERO", "ONE", "TWO", "THREE", "FOUR",
+    "FIVE", "SIX", "SEVEN", "EIGHT", "NINE",
+};
+
+// Latin-1 Supplement printable range U+00A0..00FF (96 entries).
+// Index = codepoint - 0xA0.
+static const char* const kLatin1Names[96] = {
+    /* A0 */ "NO-BREAK SPACE",
+    /* A1 */ "INVERTED EXCLAMATION MARK",
+    /* A2 */ "CENT SIGN",
+    /* A3 */ "POUND SIGN",
+    /* A4 */ "CURRENCY SIGN",
+    /* A5 */ "YEN SIGN",
+    /* A6 */ "BROKEN BAR",
+    /* A7 */ "SECTION SIGN",
+    /* A8 */ "DIAERESIS",
+    /* A9 */ "COPYRIGHT SIGN",
+    /* AA */ "FEMININE ORDINAL INDICATOR",
+    /* AB */ "LEFT-POINTING DOUBLE ANGLE QUOTATION MARK",
+    /* AC */ "NOT SIGN",
+    /* AD */ "SOFT HYPHEN",
+    /* AE */ "REGISTERED SIGN",
+    /* AF */ "MACRON",
+    /* B0 */ "DEGREE SIGN",
+    /* B1 */ "PLUS-MINUS SIGN",
+    /* B2 */ "SUPERSCRIPT TWO",
+    /* B3 */ "SUPERSCRIPT THREE",
+    /* B4 */ "ACUTE ACCENT",
+    /* B5 */ "MICRO SIGN",
+    /* B6 */ "PILCROW SIGN",
+    /* B7 */ "MIDDLE DOT",
+    /* B8 */ "CEDILLA",
+    /* B9 */ "SUPERSCRIPT ONE",
+    /* BA */ "MASCULINE ORDINAL INDICATOR",
+    /* BB */ "RIGHT-POINTING DOUBLE ANGLE QUOTATION MARK",
+    /* BC */ "VULGAR FRACTION ONE QUARTER",
+    /* BD */ "VULGAR FRACTION ONE HALF",
+    /* BE */ "VULGAR FRACTION THREE QUARTERS",
+    /* BF */ "INVERTED QUESTION MARK",
+    /* C0 */ "LATIN CAPITAL LETTER A WITH GRAVE",
+    /* C1 */ "LATIN CAPITAL LETTER A WITH ACUTE",
+    /* C2 */ "LATIN CAPITAL LETTER A WITH CIRCUMFLEX",
+    /* C3 */ "LATIN CAPITAL LETTER A WITH TILDE",
+    /* C4 */ "LATIN CAPITAL LETTER A WITH DIAERESIS",
+    /* C5 */ "LATIN CAPITAL LETTER A WITH RING ABOVE",
+    /* C6 */ "LATIN CAPITAL LETTER AE",
+    /* C7 */ "LATIN CAPITAL LETTER C WITH CEDILLA",
+    /* C8 */ "LATIN CAPITAL LETTER E WITH GRAVE",
+    /* C9 */ "LATIN CAPITAL LETTER E WITH ACUTE",
+    /* CA */ "LATIN CAPITAL LETTER E WITH CIRCUMFLEX",
+    /* CB */ "LATIN CAPITAL LETTER E WITH DIAERESIS",
+    /* CC */ "LATIN CAPITAL LETTER I WITH GRAVE",
+    /* CD */ "LATIN CAPITAL LETTER I WITH ACUTE",
+    /* CE */ "LATIN CAPITAL LETTER I WITH CIRCUMFLEX",
+    /* CF */ "LATIN CAPITAL LETTER I WITH DIAERESIS",
+    /* D0 */ "LATIN CAPITAL LETTER ETH",
+    /* D1 */ "LATIN CAPITAL LETTER N WITH TILDE",
+    /* D2 */ "LATIN CAPITAL LETTER O WITH GRAVE",
+    /* D3 */ "LATIN CAPITAL LETTER O WITH ACUTE",
+    /* D4 */ "LATIN CAPITAL LETTER O WITH CIRCUMFLEX",
+    /* D5 */ "LATIN CAPITAL LETTER O WITH TILDE",
+    /* D6 */ "LATIN CAPITAL LETTER O WITH DIAERESIS",
+    /* D7 */ "MULTIPLICATION SIGN",
+    /* D8 */ "LATIN CAPITAL LETTER O WITH STROKE",
+    /* D9 */ "LATIN CAPITAL LETTER U WITH GRAVE",
+    /* DA */ "LATIN CAPITAL LETTER U WITH ACUTE",
+    /* DB */ "LATIN CAPITAL LETTER U WITH CIRCUMFLEX",
+    /* DC */ "LATIN CAPITAL LETTER U WITH DIAERESIS",
+    /* DD */ "LATIN CAPITAL LETTER Y WITH ACUTE",
+    /* DE */ "LATIN CAPITAL LETTER THORN",
+    /* DF */ "LATIN SMALL LETTER SHARP S",
+    /* E0 */ "LATIN SMALL LETTER A WITH GRAVE",
+    /* E1 */ "LATIN SMALL LETTER A WITH ACUTE",
+    /* E2 */ "LATIN SMALL LETTER A WITH CIRCUMFLEX",
+    /* E3 */ "LATIN SMALL LETTER A WITH TILDE",
+    /* E4 */ "LATIN SMALL LETTER A WITH DIAERESIS",
+    /* E5 */ "LATIN SMALL LETTER A WITH RING ABOVE",
+    /* E6 */ "LATIN SMALL LETTER AE",
+    /* E7 */ "LATIN SMALL LETTER C WITH CEDILLA",
+    /* E8 */ "LATIN SMALL LETTER E WITH GRAVE",
+    /* E9 */ "LATIN SMALL LETTER E WITH ACUTE",
+    /* EA */ "LATIN SMALL LETTER E WITH CIRCUMFLEX",
+    /* EB */ "LATIN SMALL LETTER E WITH DIAERESIS",
+    /* EC */ "LATIN SMALL LETTER I WITH GRAVE",
+    /* ED */ "LATIN SMALL LETTER I WITH ACUTE",
+    /* EE */ "LATIN SMALL LETTER I WITH CIRCUMFLEX",
+    /* EF */ "LATIN SMALL LETTER I WITH DIAERESIS",
+    /* F0 */ "LATIN SMALL LETTER ETH",
+    /* F1 */ "LATIN SMALL LETTER N WITH TILDE",
+    /* F2 */ "LATIN SMALL LETTER O WITH GRAVE",
+    /* F3 */ "LATIN SMALL LETTER O WITH ACUTE",
+    /* F4 */ "LATIN SMALL LETTER O WITH CIRCUMFLEX",
+    /* F5 */ "LATIN SMALL LETTER O WITH TILDE",
+    /* F6 */ "LATIN SMALL LETTER O WITH DIAERESIS",
+    /* F7 */ "DIVISION SIGN",
+    /* F8 */ "LATIN SMALL LETTER O WITH STROKE",
+    /* F9 */ "LATIN SMALL LETTER U WITH GRAVE",
+    /* FA */ "LATIN SMALL LETTER U WITH ACUTE",
+    /* FB */ "LATIN SMALL LETTER U WITH CIRCUMFLEX",
+    /* FC */ "LATIN SMALL LETTER U WITH DIAERESIS",
+    /* FD */ "LATIN SMALL LETTER Y WITH ACUTE",
+    /* FE */ "LATIN SMALL LETTER THORN",
+    /* FF */ "LATIN SMALL LETTER Y WITH DIAERESIS",
+};
+// clang-format on
+
+// GlyphUnicodeName — returns the Unicode name string for a codepoint
+// in the supported printable range, or nullptr for controls/unsupported.
+// For letter/digit codepoints we build the name into a per-call static
+// buffer (one at a time — only ever used for one selection). This is
+// safe: DrawFn holds the compositor lock and runs single-threaded.
+const char* GlyphUnicodeName(u32 cp)
+{
+    // ASCII printable range
+    if (cp >= 0x20 && cp <= 0x7E)
+    {
+        if (cp >= 0x20 && cp <= 0x2F)
+            return kAsciiPunctNames_0020[cp - 0x20];
+        if (cp >= 0x30 && cp <= 0x39)
+        {
+            // "DIGIT <WORD>"
+            static char s_digit_buf[16];
+            const char* word = kDigitWords[cp - 0x30];
+            s_digit_buf[0] = 'D';
+            s_digit_buf[1] = 'I';
+            s_digit_buf[2] = 'G';
+            s_digit_buf[3] = 'I';
+            s_digit_buf[4] = 'T';
+            s_digit_buf[5] = ' ';
+            u32 i = 6;
+            for (const char* p = word; *p != '\0' && i + 1 < sizeof(s_digit_buf); ++p, ++i)
+                s_digit_buf[i] = *p;
+            s_digit_buf[i] = '\0';
+            return s_digit_buf;
+        }
+        if (cp >= 0x3A && cp <= 0x40)
+            return kAsciiPunctNames_003A[cp - 0x3A];
+        if (cp >= 0x41 && cp <= 0x5A)
+        {
+            // "LATIN CAPITAL LETTER X"
+            static char s_cap_buf[32];
+            const char* prefix = "LATIN CAPITAL LETTER ";
+            u32 i = 0;
+            for (; prefix[i] != '\0'; ++i)
+                s_cap_buf[i] = prefix[i];
+            s_cap_buf[i++] = static_cast<char>(cp); // 'A'..'Z'
+            s_cap_buf[i] = '\0';
+            return s_cap_buf;
+        }
+        if (cp >= 0x5B && cp <= 0x60)
+            return kAsciiPunctNames_005B[cp - 0x5B];
+        if (cp >= 0x61 && cp <= 0x7A)
+        {
+            // "LATIN SMALL LETTER x"
+            static char s_small_buf[32];
+            const char* prefix = "LATIN SMALL LETTER ";
+            u32 i = 0;
+            for (; prefix[i] != '\0'; ++i)
+                s_small_buf[i] = prefix[i];
+            s_small_buf[i++] = static_cast<char>(cp - 0x20); // uppercase letter name
+            s_small_buf[i] = '\0';
+            return s_small_buf;
+        }
+        if (cp >= 0x7B && cp <= 0x7E)
+            return kAsciiPunctNames_007B[cp - 0x7B];
+    }
+    // C1 controls (U+0080..009F) — non-printable
+    if (cp >= 0x80 && cp <= 0x9F)
+        return nullptr;
+    // Latin-1 Supplement printable (U+00A0..00FF)
+    if (cp >= 0xA0 && cp <= 0xFF)
+        return kLatin1Names[cp - 0xA0];
+    return nullptr;
+}
+
 void FormatHexU32(char* out, u32 v, u32 digits)
 {
     static const char kHex[] = "0123456789ABCDEF";
@@ -184,7 +396,11 @@ using duetos::drivers::video::app_widgets::Rect;
 
 // AppLabel stores text by pointer so the buffers must outlive
 // every Paint. DrawFn re-renders them each frame.
-constinit char g_header_text[64] = {};
+// g_header_text holds "U+XX (NNN) = 'c'  UNICODE NAME"; the
+// longest Unicode name in the supported range is ~41 chars
+// ("LEFT-POINTING DOUBLE ANGLE QUOTATION MARK"), so 96 bytes
+// gives comfortable headroom.
+constinit char g_header_text[96] = {};
 constinit char g_mode_text[40] = {};
 constinit char g_footer_text[80] = {};
 
@@ -312,8 +528,10 @@ void RebindCharmapBounds(u32 cx, u32 cy, u32 cw, u32 ch)
     CmFooterLabel().bounds = Rect{cx + kPad, fy, fw, kCmFooterH};
 }
 
-// Re-compose g_header_text from live state. Mirrors the legacy
-// inline "U+XX (NNN) = 'c'" build in DrawFn.
+// Re-compose g_header_text from live state.
+// Format: "U+XX (NNN) = 'c'  UNICODE NAME"
+// The Unicode name is appended for printable codepoints in the
+// supported range; control codepoints get "<control>" instead.
 void RefreshCharmapHeader()
 {
     u32 o = 0;
@@ -350,6 +568,16 @@ void RefreshCharmapHeader()
         g_header_text[o++] = static_cast<char>(g_state.selection);
         if (o + 1 < sizeof(g_header_text))
             g_header_text[o++] = '\'';
+    }
+    // Append two spaces then the Unicode name (or "<control>").
+    const char* name = GlyphUnicodeName(g_state.selection);
+    const char* name_src = (name != nullptr) ? name : "<control>";
+    if (o + 3 < sizeof(g_header_text))
+    {
+        g_header_text[o++] = ' ';
+        g_header_text[o++] = ' ';
+        for (; *name_src != '\0' && o + 1 < sizeof(g_header_text); ++name_src)
+            g_header_text[o++] = *name_src;
     }
     g_header_text[(o < sizeof(g_header_text)) ? o : sizeof(g_header_text) - 1] = '\0';
 }
@@ -615,6 +843,75 @@ void CharMapSelfTest()
     FormatDec(dec, sizeof(dec), 0, &dlen);
     ok = ok && dlen == 1 && dec[0] == '0';
 
+    // Name lookup: spot-check a few codepoints from each
+    // computed/table path so a regression in the lookup tables
+    // surfaces before the UI does.
+    {
+        const char* n_A = GlyphUnicodeName(0x41);
+        // "LATIN CAPITAL LETTER A" — computed path
+        const char* kExpectA = "LATIN CAPITAL LETTER A";
+        if (n_A == nullptr)
+            ok = false;
+        else
+        {
+            u32 i = 0;
+            for (; kExpectA[i] != '\0' && n_A[i] != '\0'; ++i)
+                if (kExpectA[i] != n_A[i])
+                {
+                    ok = false;
+                    break;
+                }
+            if (kExpectA[i] != '\0' || n_A[i] != '\0')
+                ok = false;
+        }
+    }
+    {
+        const char* n_copy = GlyphUnicodeName(0xA9);
+        // "COPYRIGHT SIGN" — Latin-1 table path
+        const char* kExpectCopy = "COPYRIGHT SIGN";
+        if (n_copy == nullptr)
+            ok = false;
+        else
+        {
+            u32 i = 0;
+            for (; kExpectCopy[i] != '\0' && n_copy[i] != '\0'; ++i)
+                if (kExpectCopy[i] != n_copy[i])
+                {
+                    ok = false;
+                    break;
+                }
+            if (kExpectCopy[i] != '\0' || n_copy[i] != '\0')
+                ok = false;
+        }
+    }
+    {
+        // Digit computed path: 0x30 -> "DIGIT ZERO"
+        const char* n_zero = GlyphUnicodeName(0x30);
+        const char* kExpectZero = "DIGIT ZERO";
+        if (n_zero == nullptr)
+            ok = false;
+        else
+        {
+            u32 i = 0;
+            for (; kExpectZero[i] != '\0' && n_zero[i] != '\0'; ++i)
+                if (kExpectZero[i] != n_zero[i])
+                {
+                    ok = false;
+                    break;
+                }
+            if (kExpectZero[i] != '\0' || n_zero[i] != '\0')
+                ok = false;
+        }
+    }
+    {
+        // Control range: 0x01 should return nullptr
+        if (GlyphUnicodeName(0x01) != nullptr)
+            ok = false;
+        // C1 control: 0x85 should return nullptr
+        if (GlyphUnicodeName(0x85) != nullptr)
+            ok = false;
+    }
+
     // Round-trip: ASCII range bounds.
     g_state.full_range = false;
     g_state.selection = kAsciiStart;
@@ -677,7 +974,7 @@ void CharMapSelfTest()
     g_charmap_self_test_passed = ok;
     if (ok)
     {
-        SerialWrite("[charmap] self-test OK (format helpers + widget-click)\n");
+        SerialWrite("[charmap] self-test OK (format helpers + name-lookup + widget-click)\n");
         SerialWrite("[charmap-selftest] PASS\n");
     }
     else
