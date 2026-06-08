@@ -3057,9 +3057,11 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     win_a_chrome.x = 60;
     win_a_chrome.y = 60;
     win_a_chrome.w = 300;
-    // Bumped from 220 to fit the multi-radix preview band that
-    // sits between the main display strip and the 4x4 button grid.
-    win_a_chrome.h = 260;
+    // Sized for the 4x5 keypad (grid top offset 100 + 5*36 buttons +
+    // 4*4 gaps = 296, + title bar). Was 260 for the old 4x4 grid; the
+    // extra row carries the decimal-point + Clear-Entry keys (F-010,
+    // F-012) plus the multi-radix preview band above the grid.
+    win_a_chrome.h = 322;
     const duetos::drivers::video::WindowHandle calc_handle =
         duetos::drivers::video::WindowRegister(win_a_chrome, "CALCULATOR");
     duetos::drivers::video::ThemeRegisterWindow(Role::Calculator, calc_handle);

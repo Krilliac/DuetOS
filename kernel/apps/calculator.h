@@ -4,20 +4,31 @@
 #include "drivers/video/widget.h"
 
 /*
- * DuetOS Calculator — v0.
+ * DuetOS Calculator — v1.
  *
- * A 4x4 keypad calculator wired into the widget system.
+ * A 4x5 keypad calculator wired into the widget system.
  * Layout (left-to-right, top-to-bottom):
  *
- *     7  8  9  +
- *     4  5  6  -
- *     1  2  3  *
- *     C  0  =  /
+ *     C   CE  <   /
+ *     7   8   9   *
+ *     4   5   6   -
+ *     1   2   3   +
+ *     0   .   =   +/-
  *
  * Semantics: flat left-to-right evaluation, no operator
- * precedence (2+3*4 = 20). Integer-only; division by zero
- * clamps to 0 and shows "ERR". The display is a 16-char
- * buffer; over-long inputs truncate.
+ * precedence (2+3*4 = 20). Fixed-point arithmetic with 6
+ * fractional digits (value × 10^6 in an i64 — no FPU in
+ * kernel context), so 1/4 = 0.25 and 0.1+0.2 = 0.3. The
+ * decimal point '.' begins a fractional part; bitwise /
+ * factorial ops operate on the truncated integer part.
+ * Division by zero and overflow show "ERR". The display is
+ * a 16-char buffer; long values are clipped to the strip
+ * width with a trailing '>' on screen (F-051).
+ *
+ * Clear keys are distinct (F-012): 'C' / Esc is a full reset;
+ * 'CE' (keyboard 'e') clears the current operand only, leaving
+ * the accumulator + pending operator intact, so
+ * "5 + 3 CE 4 =" yields 9.
  *
  * Input routes:
  *   - Mouse clicks — `CalculatorOnWidgetEvent(id)` is called
@@ -26,10 +37,12 @@
  *     range.
  *   - Keyboard — `CalculatorFeedChar(c)` is called by the
  *     kbd-reader thread when the active window is the
- *     calculator window. Accepts '0'-'9', '+', '-', '*', '/',
- *     '=' (or Enter), 'c'/'C'/Backspace, plus extended
+ *     calculator window. Accepts '0'-'9', '.', '+', '-', '*',
+ *     '/', '=' (or Enter), 'c'/'C'/Backspace, plus extended
  *     bindings:
  *
+ *       .        decimal point (begin fractional part)
+ *       e        clear entry (current operand only; C is full reset)
  *       %        percent
  *       n / _    sign toggle
  *       m / s    memory recall / store
@@ -55,13 +68,13 @@ namespace duetos::apps::calculator
 {
 
 /// Widget-ID base. Buttons carry `kIdBase + index` where
-/// index ∈ [0, 16). The mouse-reader thread compares hit IDs
+/// index ∈ [0, 20). The mouse-reader thread compares hit IDs
 /// against this range to decide whether to dispatch into
 /// `CalculatorOnWidgetEvent`.
 inline constexpr u32 kIdBase = 0x1000;
-inline constexpr u32 kIdCount = 16;
+inline constexpr u32 kIdCount = 20;
 
-/// Install calculator state on `handle`. Registers 16 buttons
+/// Install calculator state on `handle`. Registers 20 buttons
 /// owned by the window, sets the window's content-draw to the
 /// display renderer, and zeroes internal state.
 void CalculatorInit(duetos::drivers::video::WindowHandle handle);

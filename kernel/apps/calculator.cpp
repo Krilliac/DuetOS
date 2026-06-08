@@ -6,6 +6,7 @@
 #include "drivers/video/app_widgets/app_label.h"
 #include "drivers/video/app_widgets/app_panel.h"
 #include "drivers/video/app_widgets/widget_group.h"
+#include "drivers/video/chrome_text.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/theme.h"
 
@@ -17,37 +18,61 @@ namespace
 
 // Logical key value of each button. Index i in this array is the key
 // fed into DispatchKey when button i fires. Ordering matches the on-
-// screen 4×4 grid row-major, top-to-bottom — same as the legacy
-// pre-app_widgets layout so visual fidelity is preserved.
+// screen 4×5 grid row-major, top-to-bottom. Row 0 carries the two
+// clear keys (full reset 'C' and clear-entry 'e') plus a backspace
+// glyph and the decimal point; the lower four rows are the classic
+// digit/operator keypad. 0x08 is ASCII Backspace (routes to
+// HandleBackspace); 'e' is the Clear-Entry key (F-012); '.' is the
+// decimal-point key (F-010).
 constexpr char kButtonKeys[kIdCount] = {
-    '7', '8', '9', '+', '4', '5', '6', '-', '1', '2', '3', '*', 'C', '0', '=', '/',
+    'C', 'e', static_cast<char>(0x08),
+    '/', // row 0: Clear, CE, ⌫, ÷
+    '7', '8', '9',
+    '*', // row 1
+    '4', '5', '6',
+    '-', // row 2
+    '1', '2', '3',
+    '+', // row 3
+    '0', '.', '=',
+    'n', // row 4: 0, ., =, ±
 };
 
 // Per-button labels. The widget stores the label by pointer, so the
 // strings live in .rodata and outlive every paint.
 constexpr const char* kButtonLabels[kIdCount] = {
-    "7", "8", "9", "+", "4", "5", "6", "-", "1", "2", "3", "*", "C", "0", "=", "/",
+    "C", "CE", "<", "/", //
+    "7", "8",  "9", "*", //
+    "4", "5",  "6", "-", //
+    "1", "2",  "3", "+", //
+    "0", ".",  "=", "+/-",
 };
 
 // Grid layout inside the calculator window. All values are offsets
 // from the window's client-area origin (cx, cy as delivered by the
-// content-draw callback). The display strip takes the first ~60 px
+// content-draw callback). The display strip takes the first ~28 px
 // of vertical space; the multi-radix preview band takes the next 28
-// px; the 4×4 button grid starts at kGridTopOffset and uses
-// 68×36 buttons separated by 4 px gaps.
+// px; the 4×5 button grid starts at kGridTopOffset and uses 68×36
+// buttons separated by 4 px gaps (5 rows now — was 4×4, extended for
+// the decimal-point + Clear-Entry keys).
 constexpr u32 kGridTopOffset = 100;
 constexpr u32 kGridLeftOffset = 8;
 constexpr u32 kBtnW = 68;
 constexpr u32 kBtnH = 36;
 constexpr u32 kBtnGap = 4;
+constexpr u32 kGridCols = 4;
 
 constexpr u32 kDisplayCap = 16;
 
+// Fixed-point scale: values are stored as integer × 10^kFracDigits.
+// 6 fractional digits give us 1/4 = 0.250000, 0.1 + 0.2 = 0.300000,
+// etc. with room to trim trailing zeros for display. No FPU in kernel
+// context, so every "fractional" value is really a scaled i64.
+constexpr u32 kFracDigits = 6;
+constexpr i64 kScale = 1000000; // 10^kFracDigits
+
 // Colour scheme. Light-grey digit keys, orange operators, green
-// equals, red clear. Kept identical to the pre-app_widgets palette
-// so users notice the typography + tactility upgrade rather than a
-// chrome re-tone. The label colour rides on the AppButton fg field;
-// the background overrides AppButton::bg_rgb directly.
+// equals, red clear, amber CE. The label colour rides on the
+// AppButton fg field; the background overrides AppButton::bg_rgb.
 struct KeyColours
 {
     u32 normal;
@@ -57,41 +82,48 @@ constexpr KeyColours kColDigit = {0x00D0D0D0, 0x00101828};
 constexpr KeyColours kColOp = {0x00E08040, 0x00101828};
 constexpr KeyColours kColEq = {0x0060A060, 0x00101828};
 constexpr KeyColours kColClear = {0x00C04040, 0x00FFFFFF};
+constexpr KeyColours kColClearEntry = {0x00B07030, 0x00FFFFFF};
 
 constexpr KeyColours ColoursFor(char k)
 {
-    if (k >= '0' && k <= '9')
+    if ((k >= '0' && k <= '9') || k == '.')
         return kColDigit;
     if (k == 'C')
         return kColClear;
+    if (k == 'e') // Clear-Entry
+        return kColClearEntry;
     if (k == '=')
         return kColEq;
-    return kColOp; // '+' '-' '*' '/'
+    return kColOp; // '+' '-' '*' '/' '±' '⌫'
 }
 
 struct State
 {
     duetos::drivers::video::WindowHandle handle;
     // Displayed string — always NUL-terminated; length <= kDisplayCap.
+    // May contain a single '.' for fractional entry (F-010).
     char display[kDisplayCap + 1];
     u32 display_len;
+    // Clipped view of `display` actually handed to the on-screen label
+    // so a long value never paints past the client rect (F-051). When
+    // the value is too wide the most-significant end is shown with a
+    // leading '<' overflow indicator.
+    char display_view[kDisplayCap + 2];
     // Running evaluation state. When `has_pending` is true,
-    // `accumulator` holds the LHS and `pending_op` the operator;
-    // the digits currently being typed will be combined with these
-    // on the next operator / '='.
-    i64 accumulator;
+    // `accumulator` holds the LHS (fixed-point) and `pending_op` the
+    // operator; the digits currently being typed will be combined with
+    // these on the next operator / '='.
+    i64 accumulator; // fixed-point (× kScale)
     char pending_op; // 0 when no pending op
     bool has_pending;
     bool fresh_entry; // true iff next digit starts a new number (post-op or post-=)
     bool error;       // sticky — cleared by 'C'
-    // Memory register — survives 'C' (only MC clears it). When
-    // `memory_set` is true and `memory != 0` the display gains
-    // an "M" indicator so the user knows there's a stash.
-    i64 memory;
+    // Memory register — survives 'C' (only MC clears it). Fixed-point.
+    i64 memory; // fixed-point (× kScale)
     bool memory_set;
 };
 
-constinit State g_state = {duetos::drivers::video::kWindowInvalid, {}, 0, 0, 0, false, true, false, 0, false};
+constinit State g_state = {duetos::drivers::video::kWindowInvalid, {}, 0, {}, 0, 0, false, true, false, 0, false};
 
 // Copy a literal NUL-terminated string into the display.
 void SetDisplayLiteral(const char* s)
@@ -106,13 +138,19 @@ void SetDisplayLiteral(const char* s)
     g_state.display_len = n;
 }
 
-// Format an i64 into the display. Signed decimal, no thousands
-// separator. If the number doesn't fit in kDisplayCap, sets error
-// state and shows "ERR".
-void SetDisplayI64(i64 v)
+void TripErr()
 {
-    char tmp[24];
-    u32 n = 0;
+    g_state.error = true;
+    SetDisplayLiteral("ERR");
+}
+
+// Format a fixed-point value (× kScale) into the display. Prints the
+// integer part, a '.', and the fractional digits with trailing zeros
+// trimmed (0.25 not 0.250000; 5 not 5.000000). If the integer part
+// doesn't fit in kDisplayCap, trips ERR (mirrors the legacy overflow
+// path).
+void SetDisplayFixed(i64 v)
+{
     bool neg = false;
     u64 abs_v;
     if (v < 0)
@@ -124,39 +162,69 @@ void SetDisplayI64(i64 v)
     {
         abs_v = static_cast<u64>(v);
     }
-    if (abs_v == 0)
+    const u64 int_part = abs_v / static_cast<u64>(kScale);
+    u64 frac_part = abs_v % static_cast<u64>(kScale);
+
+    // Integer-part digits (reversed).
+    char itmp[24];
+    u32 in = 0;
+    if (int_part == 0)
     {
-        tmp[n++] = '0';
+        itmp[in++] = '0';
     }
     else
     {
-        while (abs_v > 0 && n < sizeof(tmp))
+        u64 t = int_part;
+        while (t > 0 && in < sizeof(itmp))
         {
-            tmp[n++] = static_cast<char>('0' + (abs_v % 10));
-            abs_v /= 10;
+            itmp[in++] = static_cast<char>('0' + (t % 10));
+            t /= 10;
         }
     }
-    const u32 total = n + (neg ? 1 : 0);
+
+    // Fractional digits, fixed kFracDigits wide (leading zeros kept),
+    // then trailing zeros trimmed.
+    char ftmp[kFracDigits + 1];
+    for (i32 i = static_cast<i32>(kFracDigits) - 1; i >= 0; --i)
+    {
+        ftmp[i] = static_cast<char>('0' + (frac_part % 10));
+        frac_part /= 10;
+    }
+    u32 fn = kFracDigits;
+    while (fn > 0 && ftmp[fn - 1] == '0')
+        --fn;
+
+    // Assemble: ['-'] int '.' frac
+    const u32 total = (neg ? 1u : 0u) + in + (fn > 0 ? 1u + fn : 0u);
     if (total > kDisplayCap)
     {
-        SetDisplayLiteral("ERR");
-        g_state.error = true;
+        TripErr();
         return;
     }
     u32 o = 0;
     if (neg)
         g_state.display[o++] = '-';
-    for (u32 i = 0; i < n; ++i)
-        g_state.display[o++] = tmp[n - 1 - i];
+    for (u32 i = 0; i < in; ++i)
+        g_state.display[o++] = itmp[in - 1 - i];
+    if (fn > 0)
+    {
+        g_state.display[o++] = '.';
+        for (u32 i = 0; i < fn; ++i)
+            g_state.display[o++] = ftmp[i];
+    }
     g_state.display[o] = '\0';
     g_state.display_len = o;
 }
 
-// Parse the current display string as an i64. Returns 0 on an empty/
-// invalid display (the state machine treats a blank display as zero,
-// which matches most physical calculators).
-i64 ReadDisplayAsI64()
+// Parse the current display string as a fixed-point value (× kScale).
+// Handles an optional sign, an integer part, and an optional '.' plus
+// up to kFracDigits fractional digits (extra fractional digits are
+// truncated). A blank display reads as zero. Sets `*overflow` if the
+// integer magnitude overflows the scaled i64.
+i64 ReadDisplayAsFixed(bool* overflow)
 {
+    if (overflow != nullptr)
+        *overflow = false;
     if (g_state.display_len == 0)
         return 0;
     bool neg = false;
@@ -166,34 +234,102 @@ i64 ReadDisplayAsI64()
         neg = true;
         i = 1;
     }
-    i64 v = 0;
+    i64 int_part = 0;
     for (; i < g_state.display_len; ++i)
     {
         const char c = g_state.display[i];
+        if (c == '.')
+        {
+            ++i;
+            break;
+        }
         if (c < '0' || c > '9')
-            return 0; // defensive — shouldn't happen
-        v = v * 10 + (c - '0');
+            return 0; // defensive
+        if (__builtin_mul_overflow(int_part, static_cast<i64>(10), &int_part) ||
+            __builtin_add_overflow(int_part, static_cast<i64>(c - '0'), &int_part))
+        {
+            if (overflow != nullptr)
+                *overflow = true;
+            return 0;
+        }
     }
-    return neg ? -v : v;
+    // Scale the integer part up by kScale, guarding overflow.
+    i64 scaled = 0;
+    if (__builtin_mul_overflow(int_part, kScale, &scaled))
+    {
+        if (overflow != nullptr)
+            *overflow = true;
+        return 0;
+    }
+    // Fractional digits (up to kFracDigits; extras truncated).
+    i64 place = kScale / 10;
+    for (; i < g_state.display_len && place > 0; ++i)
+    {
+        const char c = g_state.display[i];
+        if (c < '0' || c > '9')
+            break;
+        scaled += static_cast<i64>(c - '0') * place;
+        place /= 10;
+    }
+    return neg ? -scaled : scaled;
 }
 
-// Commit a pending operation against the given RHS, store the result
-// in `accumulator`, and write it to the display.
+// Integer (truncated) read of the display — used by bitwise / shift /
+// factorial ops that are only meaningful on whole numbers, and by the
+// multi-radix preview band. Truncates toward zero.
+i64 ReadDisplayAsI64()
+{
+    bool ovf = false;
+    const i64 f = ReadDisplayAsFixed(&ovf);
+    if (ovf)
+        return 0;
+    return f / kScale;
+}
+
+// Multiply two fixed-point values: (a × b) / kScale, with overflow
+// guards on both the product and the divide-down.
+bool FixedMul(i64 a, i64 b, i64* out)
+{
+    // a, b are each value×kScale. The raw product is value×kScale²,
+    // which overflows i64 for even modest operands — so split: the
+    // integer×fractional cross terms are computed without first
+    // forming the full square. Decompose a = ai*kScale + af.
+    const i64 ai = a / kScale;
+    const i64 af = a - ai * kScale; // signed remainder (matches a's sign)
+    // out = ai*b + (af*b)/kScale, each step overflow-guarded.
+    i64 t1 = 0;
+    if (__builtin_mul_overflow(ai, b, &t1))
+        return false;
+    i64 t2 = 0;
+    if (__builtin_mul_overflow(af, b, &t2))
+        return false;
+    t2 /= kScale;
+    return !__builtin_add_overflow(t1, t2, out);
+}
+
+// Divide two fixed-point values: (a × kScale) / b. Caller guarantees
+// b != 0. Returns false on overflow.
+bool FixedDiv(i64 a, i64 b, i64* out)
+{
+    i64 num = 0;
+    if (__builtin_mul_overflow(a, kScale, &num))
+        return false;
+    *out = num / b;
+    return true;
+}
+
+// Commit a pending operation against the given fixed-point RHS, store
+// the result in `accumulator`, and write it to the display.
 void ApplyPending(i64 rhs)
 {
     if (!g_state.has_pending)
     {
         g_state.accumulator = rhs;
-        SetDisplayI64(g_state.accumulator);
+        SetDisplayFixed(g_state.accumulator);
         return;
     }
-    i64 lhs = g_state.accumulator;
+    const i64 lhs = g_state.accumulator;
     i64 result = 0;
-    // Arithmetic overflow routes to the same sticky ERR state as
-    // divide-by-zero. The bare lhs+rhs / lhs-rhs / lhs*rhs are signed-
-    // overflow UB on large operands (a GUI keystroke fuzz hit the `*`
-    // case); the __builtin_*_overflow forms compute the result and
-    // report overflow without UB.
     bool ovf = false;
     switch (g_state.pending_op)
     {
@@ -204,59 +340,68 @@ void ApplyPending(i64 rhs)
         ovf = __builtin_sub_overflow(lhs, rhs, &result);
         break;
     case '*':
-        ovf = __builtin_mul_overflow(lhs, rhs, &result);
+        ovf = !FixedMul(lhs, rhs, &result);
         break;
     case '/':
         if (rhs == 0)
         {
-            SetDisplayLiteral("ERR");
-            g_state.error = true;
+            TripErr();
             g_state.accumulator = 0;
             g_state.has_pending = false;
+            g_state.pending_op = 0;
             g_state.fresh_entry = true;
             return;
         }
-        result = lhs / rhs;
+        ovf = !FixedDiv(lhs, rhs, &result);
         break;
+    // Bitwise / shift ops are integer-only — operate on the truncated
+    // integer parts and re-scale the integer result back to fixed-point.
     case '&':
-        result = lhs & rhs;
+        result = ((lhs / kScale) & (rhs / kScale)) * kScale;
         break;
     case '|':
-        result = lhs | rhs;
+        result = ((lhs / kScale) | (rhs / kScale)) * kScale;
         break;
     case '^':
-        result = lhs ^ rhs;
+        result = ((lhs / kScale) ^ (rhs / kScale)) * kScale;
         break;
-    case '<': // shift left (unsigned semantics — a signed << that
-              // shifts into/through the sign bit is UB; compute via u64)
-        if (rhs < 0 || rhs >= 64)
+    case '<': // shift left (unsigned semantics to avoid sign-bit UB)
+    {
+        const i64 li = lhs / kScale;
+        const i64 ri = rhs / kScale;
+        if (ri < 0 || ri >= 64)
             result = 0;
         else
-            result = static_cast<i64>(static_cast<u64>(lhs) << rhs);
+            result = static_cast<i64>(static_cast<u64>(li) << ri) * kScale;
         break;
+    }
     case '>': // shift right (arithmetic — keeps sign bit)
-        if (rhs < 0 || rhs >= 64)
-            result = (lhs < 0) ? -1 : 0;
+    {
+        const i64 li = lhs / kScale;
+        const i64 ri = rhs / kScale;
+        if (ri < 0 || ri >= 64)
+            result = (li < 0) ? -kScale : 0;
         else
-            result = lhs >> rhs;
+            result = (li >> ri) * kScale;
         break;
+    }
     default:
         result = rhs;
         break;
     }
     if (ovf)
     {
-        SetDisplayLiteral("ERR");
-        g_state.error = true;
+        TripErr();
         g_state.accumulator = 0;
         g_state.has_pending = false;
+        g_state.pending_op = 0;
         g_state.fresh_entry = true;
         return;
     }
     g_state.accumulator = result;
     g_state.has_pending = false;
     g_state.pending_op = 0;
-    SetDisplayI64(result);
+    SetDisplayFixed(result);
 }
 
 void HandleDigit(char d)
@@ -271,7 +416,50 @@ void HandleDigit(char d)
     }
     if (g_state.display_len >= kDisplayCap)
         return; // silently ignore over-long entry
+    // Cap fractional digits typed at kFracDigits so the scale never
+    // silently drops the user's input.
+    bool seen_dot = false;
+    u32 frac_count = 0;
+    for (u32 i = 0; i < g_state.display_len; ++i)
+    {
+        if (g_state.display[i] == '.')
+            seen_dot = true;
+        else if (seen_dot)
+            ++frac_count;
+    }
+    if (seen_dot && frac_count >= kFracDigits)
+        return;
     g_state.display[g_state.display_len++] = d;
+    g_state.display[g_state.display_len] = '\0';
+}
+
+// Decimal-point entry (F-010). Inserts a '.' to begin a fractional
+// part. A second '.' in the same operand is ignored. On a fresh entry
+// the display becomes "0." so the user sees a leading zero.
+void HandleDot()
+{
+    if (g_state.error)
+        return;
+    if (g_state.fresh_entry)
+    {
+        g_state.display_len = 0;
+        g_state.display[0] = '\0';
+        g_state.fresh_entry = false;
+    }
+    for (u32 i = 0; i < g_state.display_len; ++i)
+    {
+        if (g_state.display[i] == '.')
+            return; // already fractional
+    }
+    if (g_state.display_len == 0)
+    {
+        if (g_state.display_len + 1 >= kDisplayCap)
+            return;
+        g_state.display[g_state.display_len++] = '0';
+    }
+    if (g_state.display_len >= kDisplayCap)
+        return;
+    g_state.display[g_state.display_len++] = '.';
     g_state.display[g_state.display_len] = '\0';
 }
 
@@ -279,10 +467,16 @@ void HandleOp(char op)
 {
     if (g_state.error)
         return;
-    const i64 rhs = ReadDisplayAsI64();
+    bool ovf = false;
+    const i64 rhs = ReadDisplayAsFixed(&ovf);
+    if (ovf)
+    {
+        TripErr();
+        return;
+    }
     ApplyPending(rhs);
     if (g_state.error)
-        return; // ApplyPending may have clamped on divide-by-zero
+        return; // ApplyPending may have clamped on divide-by-zero / overflow
     g_state.pending_op = op;
     g_state.has_pending = true;
     g_state.fresh_entry = true;
@@ -292,7 +486,13 @@ void HandleEquals()
 {
     if (g_state.error)
         return;
-    const i64 rhs = ReadDisplayAsI64();
+    bool ovf = false;
+    const i64 rhs = ReadDisplayAsFixed(&ovf);
+    if (ovf)
+    {
+        TripErr();
+        return;
+    }
     ApplyPending(rhs);
     g_state.has_pending = false;
     g_state.pending_op = 0;
@@ -309,14 +509,29 @@ void HandleClear()
     SetDisplayLiteral("0");
 }
 
+// Clear Entry (F-012) — clears only the current operand / display,
+// leaving the accumulator + pending operator intact. So
+// "5 + 3 CE 4 =" yields 9. Also clears a sticky error without
+// discarding the running expression's accumulator.
+void HandleClearEntry()
+{
+    g_state.error = false;
+    SetDisplayLiteral("0");
+    // Next digit / dot should replace the lone "0", so treat the entry
+    // as fresh. The accumulator + pending_op are deliberately left
+    // untouched so "5 + 3 CE 4 =" yields 9.
+    g_state.fresh_entry = true;
+}
+
 void HandleSignToggle()
 {
     if (g_state.error)
         return;
-    const i64 cur = ReadDisplayAsI64();
-    if (cur == 0)
+    bool ovf = false;
+    const i64 cur = ReadDisplayAsFixed(&ovf);
+    if (ovf || cur == 0)
         return;
-    SetDisplayI64(-cur);
+    SetDisplayFixed(-cur);
 }
 
 void HandleBackspace()
@@ -342,31 +557,34 @@ void HandleBackspace()
 
 // Percent: with a pending op, treat display as a percentage OF the
 // accumulator and combine via the pending op (Win10-calc convention).
-// Without a pending op, divide display by 100 with integer trunc.
+// Without a pending op, divide display by 100. Fixed-point throughout.
 void HandlePercent()
 {
     if (g_state.error)
         return;
-    const i64 cur = ReadDisplayAsI64();
+    bool ovf = false;
+    const i64 cur = ReadDisplayAsFixed(&ovf);
+    if (ovf)
+    {
+        TripErr();
+        return;
+    }
     if (g_state.has_pending)
     {
         const i64 lhs = g_state.accumulator;
-        // lhs and cur are each up to a 16-digit display value, so the
-        // product can reach ~1e32 — guard the multiply (UB otherwise).
+        // pct = lhs * cur / 100 (fixed-point); FixedMul handles the
+        // ×kScale²/kScale collapse, then divide by 100.
         i64 prod = 0;
-        if (__builtin_mul_overflow(lhs, cur, &prod))
+        if (!FixedMul(lhs, cur, &prod))
         {
-            // TripErr() is defined below this function; inline its body.
-            g_state.error = true;
-            SetDisplayLiteral("ERR");
+            TripErr();
             return;
         }
-        const i64 scaled = prod / 100;
-        SetDisplayI64(scaled);
+        SetDisplayFixed(prod / 100);
     }
     else
     {
-        SetDisplayI64(cur / 100);
+        SetDisplayFixed(cur / 100);
     }
     g_state.fresh_entry = false;
 }
@@ -377,7 +595,7 @@ void HandleMemRecall()
         return;
     if (!g_state.memory_set)
         return;
-    SetDisplayI64(g_state.memory);
+    SetDisplayFixed(g_state.memory);
     g_state.fresh_entry = true;
 }
 
@@ -385,7 +603,11 @@ void HandleMemStore()
 {
     if (g_state.error)
         return;
-    g_state.memory = ReadDisplayAsI64();
+    bool ovf = false;
+    const i64 v = ReadDisplayAsFixed(&ovf);
+    if (ovf)
+        return;
+    g_state.memory = v;
     g_state.memory_set = true;
 }
 
@@ -399,7 +621,11 @@ void HandleMemAdd()
 {
     if (g_state.error)
         return;
-    g_state.memory += ReadDisplayAsI64();
+    bool ovf = false;
+    const i64 v = ReadDisplayAsFixed(&ovf);
+    if (ovf)
+        return;
+    g_state.memory += v;
     g_state.memory_set = true;
 }
 
@@ -407,13 +633,16 @@ void HandleMemSub()
 {
     if (g_state.error)
         return;
-    g_state.memory -= ReadDisplayAsI64();
+    bool ovf = false;
+    const i64 v = ReadDisplayAsFixed(&ovf);
+    if (ovf)
+        return;
+    g_state.memory -= v;
     g_state.memory_set = true;
 }
 
 // Integer square root via Newton's method. Returns floor(sqrt(v)) for
-// non-negative input; returns -1 for negative input (caller flips
-// ERR).
+// non-negative input; returns -1 for negative input.
 i64 IntSqrt(i64 v)
 {
     if (v < 0)
@@ -435,24 +664,33 @@ i64 IntSqrt(i64 v)
     return x;
 }
 
-void TripErr()
-{
-    g_state.error = true;
-    SetDisplayLiteral("ERR");
-}
-
+// sqrt of a fixed-point value. sqrt(value) in fixed-point is
+// floor(sqrt(value × kScale²)) / 1 — i.e. sqrt(scaled × kScale).
+// 144 → scaled 144e6 → 144e6 × 1e6 = 144e12, sqrt = 12e6 → 12.000000.
 void HandleSqrt()
 {
     if (g_state.error)
         return;
-    const i64 cur = ReadDisplayAsI64();
-    const i64 r = IntSqrt(cur);
+    bool ovf = false;
+    const i64 cur = ReadDisplayAsFixed(&ovf);
+    if (ovf || cur < 0)
+    {
+        TripErr();
+        return;
+    }
+    i64 radicand = 0;
+    if (__builtin_mul_overflow(cur, kScale, &radicand))
+    {
+        TripErr();
+        return;
+    }
+    const i64 r = IntSqrt(radicand);
     if (r < 0)
     {
         TripErr();
         return;
     }
-    SetDisplayI64(r);
+    SetDisplayFixed(r);
     g_state.fresh_entry = true;
 }
 
@@ -460,13 +698,20 @@ void HandleSquare()
 {
     if (g_state.error)
         return;
-    const i64 cur = ReadDisplayAsI64();
-    if (cur > 3037000499ll || cur < -3037000499ll)
+    bool ovf = false;
+    const i64 cur = ReadDisplayAsFixed(&ovf);
+    if (ovf)
     {
         TripErr();
         return;
     }
-    SetDisplayI64(cur * cur);
+    i64 result = 0;
+    if (!FixedMul(cur, cur, &result))
+    {
+        TripErr();
+        return;
+    }
+    SetDisplayFixed(result);
     g_state.fresh_entry = true;
 }
 
@@ -474,10 +719,16 @@ void HandleAbs()
 {
     if (g_state.error)
         return;
-    i64 cur = ReadDisplayAsI64();
+    bool ovf = false;
+    i64 cur = ReadDisplayAsFixed(&ovf);
+    if (ovf)
+    {
+        TripErr();
+        return;
+    }
     if (cur < 0)
         cur = -cur;
-    SetDisplayI64(cur);
+    SetDisplayFixed(cur);
     g_state.fresh_entry = true;
 }
 
@@ -485,7 +736,7 @@ void HandleFactorial()
 {
     if (g_state.error)
         return;
-    const i64 cur = ReadDisplayAsI64();
+    const i64 cur = ReadDisplayAsI64(); // integer-only operation
     if (cur < 0 || cur > 20)
     {
         TripErr();
@@ -494,7 +745,13 @@ void HandleFactorial()
     i64 r = 1;
     for (i64 i = 2; i <= cur; ++i)
         r *= i;
-    SetDisplayI64(r);
+    i64 scaled = 0;
+    if (__builtin_mul_overflow(r, kScale, &scaled))
+    {
+        TripErr();
+        return;
+    }
+    SetDisplayFixed(scaled);
     g_state.fresh_entry = true;
 }
 
@@ -502,8 +759,8 @@ void HandleBitwiseNot()
 {
     if (g_state.error)
         return;
-    const i64 cur = ReadDisplayAsI64();
-    SetDisplayI64(~cur);
+    const i64 cur = ReadDisplayAsI64(); // integer-only operation
+    SetDisplayFixed((~cur) * kScale);
     g_state.fresh_entry = true;
 }
 
@@ -511,13 +768,21 @@ void HandleReciprocal()
 {
     if (g_state.error)
         return;
-    const i64 cur = ReadDisplayAsI64();
-    if (cur == 0)
+    bool ovf = false;
+    const i64 cur = ReadDisplayAsFixed(&ovf);
+    if (ovf || cur == 0)
     {
         TripErr();
         return;
     }
-    SetDisplayI64(1 / cur);
+    // 1/x in fixed-point: (1×kScale × kScale) / cur = kScale² / cur.
+    i64 num = 0;
+    if (__builtin_mul_overflow(kScale, kScale, &num))
+    {
+        TripErr();
+        return;
+    }
+    SetDisplayFixed(num / cur);
     g_state.fresh_entry = true;
 }
 
@@ -525,13 +790,19 @@ void DispatchKey(char k)
 {
     if (k >= '0' && k <= '9')
         HandleDigit(k);
+    else if (k == '.')
+        HandleDot();
     else if (k == '+' || k == '-' || k == '*' || k == '/' || k == '&' || k == '|' || k == '^' || k == '<' || k == '>')
         HandleOp(k);
     else if (k == '~')
         HandleBitwiseNot();
     else if (k == '=')
         HandleEquals();
-    else if (k == 'C' || k == 'c')
+    else if (k == 'C') // capital C = full reset (button + 'C' keyboard)
+        HandleClear();
+    else if (k == 'e' || k == 'E') // Clear Entry (F-012)
+        HandleClearEntry();
+    else if (k == 'c') // lowercase c also full reset (Esc routes here)
         HandleClear();
     else if (k == '%')
         HandlePercent();
@@ -563,9 +834,7 @@ void DispatchKey(char k)
 
 // One free-function per on-screen button. AppButton::on_click is a
 // plain `void (*)()`, so we can't pack the key value into the
-// callback — each button needs its own trampoline. Trivial wrappers
-// keep the dispatch site honest (one call site per visible key) and
-// they compile to a single tail-call.
+// callback — each button needs its own trampoline.
 void Click0()
 {
     DispatchKey('0');
@@ -606,6 +875,10 @@ void Click9()
 {
     DispatchKey('9');
 }
+void ClickDot()
+{
+    DispatchKey('.');
+}
 void ClickPlus()
 {
     DispatchKey('+');
@@ -630,26 +903,33 @@ void ClickClear()
 {
     DispatchKey('C');
 }
+void ClickClearEntry()
+{
+    DispatchKey('e');
+}
+void ClickBackspace()
+{
+    DispatchKey(static_cast<char>(0x08));
+}
+void ClickSign()
+{
+    DispatchKey('n');
+}
 
 using ClickFn = void (*)();
 constexpr ClickFn kClickFns[kIdCount] = {
-    Click7, Click8, Click9, ClickPlus, Click4,     Click5, Click6,  ClickMinus,
-    Click1, Click2, Click3, ClickMul,  ClickClear, Click0, ClickEq, ClickDiv,
+    ClickClear, ClickClearEntry, ClickBackspace, ClickDiv,   // row 0
+    Click7,     Click8,          Click9,         ClickMul,   // row 1
+    Click4,     Click5,          Click6,         ClickMinus, // row 2
+    Click1,     Click2,          Click3,         ClickPlus,  // row 3
+    Click0,     ClickDot,        ClickEq,        ClickSign,  // row 4
 };
 
 // ----- App-widget composition --------------------------------------
 //
-// The calculator is a panel + a label (display readout) + 16 buttons,
+// The calculator is a panel + a label (display readout) + 20 buttons,
 // laid out in declaration order back-to-front so the panel paints
 // first and the buttons land on top.
-//
-// Bounds are recomputed every paint from the live window client
-// rect — the window can move or resize, so caching screen-absolute
-// bounds in the constinit instance would put buttons in the wrong
-// place after a drag. The display label's text pointer is bound
-// directly to `g_state.display` for the same reason: the display
-// updates every keypress, and a static initialiser would lock us to
-// whatever was visible at boot.
 
 using duetos::drivers::video::ChromeTextRole;
 using duetos::drivers::video::ChromeTextWeight;
@@ -662,18 +942,50 @@ using duetos::drivers::video::app_widgets::EventKind;
 using duetos::drivers::video::app_widgets::MakeWidgetGroup;
 using duetos::drivers::video::app_widgets::Rect;
 
-constinit auto g_calc = MakeWidgetGroup(AppPanel{}, AppLabel{},
-                                        // 4×4 button grid, row-major top-to-bottom — order matches
-                                        // kButtonKeys / kClickFns / kButtonLabels so RebindBounds and
-                                        // self-test stay table-driven.
-                                        AppButton{}, AppButton{}, AppButton{}, AppButton{}, AppButton{}, AppButton{},
-                                        AppButton{}, AppButton{}, AppButton{}, AppButton{}, AppButton{}, AppButton{},
-                                        AppButton{}, AppButton{}, AppButton{}, AppButton{});
+constinit auto g_calc =
+    MakeWidgetGroup(AppPanel{}, AppLabel{},
+                    // 4×5 button grid, row-major top-to-bottom — order matches
+                    // kButtonKeys / kClickFns / kButtonLabels so RebindBounds and
+                    // self-test stay table-driven.
+                    AppButton{}, AppButton{}, AppButton{}, AppButton{}, AppButton{}, AppButton{}, AppButton{},
+                    AppButton{}, AppButton{}, AppButton{}, AppButton{}, AppButton{}, AppButton{}, AppButton{},
+                    AppButton{}, AppButton{}, AppButton{}, AppButton{}, AppButton{}, AppButton{});
 
-// Walk the widget chain by hand to set per-button label / colour /
-// callback once at init. The chain layout matches g_calc's argument
-// list above: head = AppPanel, tail.head = AppLabel, then 16
-// AppButton nodes in row-major order.
+// Advance `Depth` tails into a heterogeneously-typed WidgetChain and
+// return the head at that depth. The chain node type changes at every
+// tail step (recursive inheritance), so this MUST be compile-time
+// recursion — a runtime pointer walk can't be typed. Used to collect
+// the AppButton nodes without hand-spelling a tail.tail.…head chain
+// per button (which drifted out of sync when the grid grew).
+template <u32 Depth, typename Node> auto& ChainHeadAt(Node& node)
+{
+    if constexpr (Depth == 0)
+        return node.head;
+    else
+        return ChainHeadAt<Depth - 1>(node.tail);
+}
+
+// Fill `buttons` with the kIdCount AppButton pointers in declaration
+// order. Chain layout: head = AppPanel, tail.head = AppLabel, then the
+// kIdCount AppButton nodes start at tail.tail. Button i is therefore
+// the head at chain depth (i + 2). Compile-time recursion over the
+// fixed-count grid — no index_sequence helper exists in the kernel.
+template <u32 I> void CollectButtonsFrom(AppButton* (&buttons)[kIdCount])
+{
+    if constexpr (I < kIdCount)
+    {
+        buttons[I] = &ChainHeadAt<I + 2>(g_calc.chain);
+        CollectButtonsFrom<I + 1>(buttons);
+    }
+}
+
+void CollectButtons(AppButton* (&buttons)[kIdCount])
+{
+    CollectButtonsFrom<0>(buttons);
+}
+
+// Walk the widget chain to set per-button label / colour / callback
+// once at init.
 void BindButtonsOnce()
 {
     auto& panel = g_calc.chain.head;
@@ -689,24 +1001,8 @@ void BindButtonsOnce()
     label.bg_rgb = 0x00202830U;
     label.align_left = false;
 
-    auto& b0 = g_calc.chain.tail.tail.head;
-    auto& b1 = g_calc.chain.tail.tail.tail.head;
-    auto& b2 = g_calc.chain.tail.tail.tail.tail.head;
-    auto& b3 = g_calc.chain.tail.tail.tail.tail.tail.head;
-    auto& b4 = g_calc.chain.tail.tail.tail.tail.tail.tail.head;
-    auto& b5 = g_calc.chain.tail.tail.tail.tail.tail.tail.tail.head;
-    auto& b6 = g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.head;
-    auto& b7 = g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
-    auto& b8 = g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
-    auto& b9 = g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
-    auto& b10 = g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
-    auto& b11 = g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
-    auto& b12 = g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
-    auto& b13 = g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
-    auto& b14 = g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
-    auto& b15 = g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
-    AppButton* buttons[kIdCount] = {&b0, &b1, &b2,  &b3,  &b4,  &b5,  &b6,  &b7,
-                                    &b8, &b9, &b10, &b11, &b12, &b13, &b14, &b15};
+    AppButton* buttons[kIdCount];
+    CollectButtons(buttons);
     for (u32 i = 0; i < kIdCount; ++i)
     {
         const KeyColours c = ColoursFor(kButtonKeys[i]);
@@ -714,8 +1010,9 @@ void BindButtonsOnce()
         buttons[i]->on_click = kClickFns[i];
         buttons[i]->bg_rgb = c.normal;
         buttons[i]->fg_rgb = c.label;
-        buttons[i]->weight =
-            (kButtonKeys[i] == '=' || kButtonKeys[i] == 'C') ? ChromeTextWeight::Bold : ChromeTextWeight::Regular;
+        buttons[i]->weight = (kButtonKeys[i] == '=' || kButtonKeys[i] == 'C' || kButtonKeys[i] == 'e')
+                                 ? ChromeTextWeight::Bold
+                                 : ChromeTextWeight::Regular;
     }
 }
 
@@ -726,44 +1023,65 @@ void BindButtonsOnce()
 void RebindBoundsToClient(u32 cx, u32 cy, u32 cw)
 {
     auto& panel = g_calc.chain.head;
-    panel.bounds = Rect{cx, cy, cw, /*h=*/256u};
+    panel.bounds = Rect{cx, cy, cw, /*h=*/300u};
 
     auto& label = g_calc.chain.tail.head;
     label.bounds = Rect{cx + 8u, cy + 4u, (cw >= 16u) ? cw - 16u : cw, 28u};
 
     AppButton* buttons[kIdCount];
-    buttons[0] = &g_calc.chain.tail.tail.head;
-    buttons[1] = &g_calc.chain.tail.tail.tail.head;
-    buttons[2] = &g_calc.chain.tail.tail.tail.tail.head;
-    buttons[3] = &g_calc.chain.tail.tail.tail.tail.tail.head;
-    buttons[4] = &g_calc.chain.tail.tail.tail.tail.tail.tail.head;
-    buttons[5] = &g_calc.chain.tail.tail.tail.tail.tail.tail.tail.head;
-    buttons[6] = &g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.head;
-    buttons[7] = &g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
-    buttons[8] = &g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
-    buttons[9] = &g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
-    buttons[10] = &g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
-    buttons[11] = &g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
-    buttons[12] = &g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
-    buttons[13] = &g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
-    buttons[14] = &g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
-    buttons[15] =
-        &g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
+    CollectButtons(buttons);
     for (u32 i = 0; i < kIdCount; ++i)
     {
-        const u32 row = i / 4;
-        const u32 col = i % 4;
+        const u32 row = i / kGridCols;
+        const u32 col = i % kGridCols;
         buttons[i]->bounds = Rect{cx + kGridLeftOffset + col * (kBtnW + kBtnGap),
                                   cy + kGridTopOffset + row * (kBtnH + kBtnGap), kBtnW, kBtnH};
     }
 }
 
+// Build the clipped display view (F-051). The large Display-role font
+// is wide; a long value would paint past the client rect onto the
+// wallpaper. Cap the rendered string to the chars that fit in
+// `strip_w`; when clipped, show the most-significant end with a
+// trailing '>' overflow marker.
+void BuildDisplayView(u32 strip_w)
+{
+    const char* src = (g_state.display_len == 0) ? "0" : g_state.display;
+    u32 src_len = 0;
+    while (src[src_len] != '\0')
+        ++src_len;
+
+    // Per-char width of the Display role. Measure a single glyph so
+    // the clip tracks the active font (bitmap scale or TTF px).
+    using duetos::drivers::video::ChromeTextMeasure;
+    const u32 per_char = ChromeTextMeasure(ChromeTextRole::Display, "0");
+    u32 max_chars = (per_char > 0 && strip_w > 0) ? strip_w / per_char : src_len;
+    if (max_chars == 0)
+        max_chars = 1;
+
+    if (src_len <= max_chars)
+    {
+        u32 i = 0;
+        for (; i < src_len && i < kDisplayCap; ++i)
+            g_state.display_view[i] = src[i];
+        g_state.display_view[i] = '\0';
+        return;
+    }
+    // Clipped: show the most-significant end (leading digits + sign)
+    // that fits, with a trailing '>' overflow marker so the value
+    // never paints past the client rect.
+    const u32 keep = (max_chars >= 1) ? max_chars - 1 : 0;
+    u32 o = 0;
+    for (u32 i = 0; i < keep && i < src_len && o + 1 < sizeof(g_state.display_view); ++i)
+        g_state.display_view[o++] = src[i];
+    if (o + 1 < sizeof(g_state.display_view))
+        g_state.display_view[o++] = '>';
+    g_state.display_view[o] = '\0';
+}
+
 // Multi-radix preview formatters — preserved as a carve-out below
 // the widget-group paint so the hex / bin / oct strip keeps reading
-// alongside the main decimal display. Carve-out justification per
-// CLAUDE.md: the multi-radix strip is part of the calculator's
-// character; AppLabel(Display) can render the decimal value but
-// can't compose three separate per-radix strings into one band.
+// alongside the main decimal display.
 
 void FmtHex(i64 v, char* out, u32 width)
 {
@@ -876,11 +1194,8 @@ void FmtOct(i64 v, char* out, u32 width)
 }
 
 // Content-draw callback. Paints the app_widgets group (panel +
-// display readout + 16 buttons) first, then overlays the
-// multi-radix preview band carve-out and the "M" memory indicator
-// directly via the framebuffer primitives — neither of those has a
-// clean widget shape yet, and they're load-bearing for the
-// calculator's character (the original v0 design).
+// display readout + buttons) first, then overlays the multi-radix
+// preview band carve-out and the "M" memory indicator directly.
 void DrawFn(u32 cx, u32 cy, u32 cw, u32 /*ch*/, void* /*cookie*/)
 {
     using duetos::drivers::video::FramebufferDrawString;
@@ -889,19 +1204,17 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 /*ch*/, void* /*cookie*/)
         return;
 
     // 1) Re-anchor widgets to the live client rect, then paint the
-    //    widget group. PaintAll runs panel -> label -> 16 buttons in
-    //    declaration order; buttons land on top of the panel.
+    //    widget group. Bind the label to the CLIPPED view so a long
+    //    value never paints past the client rect (F-051).
     RebindBoundsToClient(cx, cy, cw);
-    // Make sure the label sees the live display string (a fresh
-    // calculator boot leaves it pointing at g_state.display, but a
-    // future SessionRestore could swap pointers).
-    g_calc.chain.tail.head.text = (g_state.display_len == 0) ? "0" : g_state.display;
+    const u32 strip_w = (cw >= 16u) ? cw - 16u : cw;
+    BuildDisplayView(strip_w);
+    g_calc.chain.tail.head.text = g_state.display_view;
     Compose c{};
     g_calc.PaintAll(c);
 
     // 2) Memory indicator — small "M" in the top-left of the display
-    //    strip when the register has a non-zero value. Painted after
-    //    the widget label so it sits on top.
+    //    strip when the register has a non-zero value.
     constexpr u32 kDisplayBg = 0x00202830U;
     if (g_state.memory_set && g_state.memory != 0)
     {
@@ -909,9 +1222,9 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 /*ch*/, void* /*cookie*/)
         FramebufferDrawString(cx + 8u + 4u, cy + 4u + 2u, "M", kMemFg, kDisplayBg);
     }
 
-    // 3) Multi-radix preview band — sits between the display strip
-    //    (cy+4..cy+32) and the button grid (cy+100..). Skipped in
-    //    error state to avoid hex-formatting noise.
+    // 3) Multi-radix preview band — sits between the display strip and
+    //    the button grid. Skipped in error state. Built from the
+    //    truncated integer part (radix views are integer-only).
     if (g_state.error)
         return;
     constexpr u32 kAuxFg = 0x0060B0E0U;
@@ -947,10 +1260,7 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 /*ch*/, void* /*cookie*/)
     FramebufferDrawString(lx, aux_y + 12u, low, kAuxFg, kDisplayBg);
 }
 
-// Edge-detection state for mouse input. The legacy widget table
-// kept its own g_prev_left_down; the migrated app needs the same
-// shape so MouseDown / MouseUp event pairs fire per click rather
-// than per packet.
+// Edge-detection state for mouse input.
 constinit bool g_prev_left_down = false;
 
 // Self-test result flag for the Pass D umbrella aggregator.
@@ -973,11 +1283,8 @@ duetos::drivers::video::WindowHandle CalculatorWindow()
 
 bool CalculatorOnWidgetEvent(u32 /*id*/)
 {
-    // Legacy widget-table dispatch path. The migrated calculator
-    // owns its own hit-testing via g_calc.DispatchEvent (see
-    // CalculatorMouseInput) so no IDs in the legacy `kIdBase`
-    // range are ever produced. Kept as a no-op so the boot-time
-    // mouse loop's call site doesn't need a conditional removal.
+    // Legacy widget-table dispatch path — the migrated calculator owns
+    // its own hit-testing via g_calc.DispatchEvent. No-op shim.
     return false;
 }
 
@@ -989,9 +1296,6 @@ void CalculatorMouseInput(u32 cx, u32 cy, u8 button_mask)
     u32 wx = 0, wy = 0, ww = 0, wh = 0;
     if (!duetos::drivers::video::WindowGetBounds(g_state.handle, &wx, &wy, &ww, &wh))
         return;
-    // Translate framebuffer-absolute cursor into client coords
-    // relative to the window's title-bar-below client origin. The
-    // widget bounds set by RebindBoundsToClient use the same origin.
     u32 client_x = cx;
     u32 client_y = cy;
     RebindBoundsToClient(wx, wy + 22u, ww);
@@ -1001,10 +1305,6 @@ void CalculatorMouseInput(u32 cx, u32 cy, u8 button_mask)
     const bool release_edge = !left_down && g_prev_left_down;
     g_prev_left_down = left_down;
 
-    // Always send MouseMove so hover state tracks the cursor on
-    // tactility themes. Hover only matters when the cursor is
-    // actually over the window; ignoring out-of-window motion keeps
-    // hover stickiness from leaking into other windows.
     const bool inside_window = (cx >= wx && cx < wx + ww && cy >= wy + 22u && cy < wy + wh);
     if (inside_window)
     {
@@ -1018,8 +1318,6 @@ void CalculatorMouseInput(u32 cx, u32 cy, u8 button_mask)
     }
     if (release_edge)
     {
-        // Always send MouseUp (even outside the window) so a button
-        // pressed inside and dragged off clears its Pressed flag.
         const Event u{EventKind::MouseUp, client_x, client_y, 0u, 0u};
         g_calc.DispatchEvent(u);
     }
@@ -1028,11 +1326,11 @@ void CalculatorMouseInput(u32 cx, u32 cy, u8 button_mask)
 bool CalculatorFeedChar(char c)
 {
     const u8 uc = static_cast<u8>(c);
-    if ((c >= '0' && c <= '9') || c == '+' || c == '-' || c == '*' || c == '/' || c == '=' || c == 'c' || c == 'C' ||
-        c == '%' || c == 'n' || c == 'N' || c == '_' || uc == 0x08 || c == 'm' || c == 'M' || c == 's' || c == 'S' ||
-        c == 'l' || c == 'L' || c == 'a' || c == 'A' || c == 'b' || c == 'B' || c == 'q' || c == 'Q' || c == 'x' ||
-        c == 'X' || c == 'y' || c == 'Y' || c == '!' || c == 'r' || c == 'R' || c == '&' || c == '|' || c == '^' ||
-        c == '<' || c == '>' || c == '~')
+    if ((c >= '0' && c <= '9') || c == '.' || c == '+' || c == '-' || c == '*' || c == '/' || c == '=' || c == 'c' ||
+        c == 'C' || c == 'e' || c == 'E' || c == '%' || c == 'n' || c == 'N' || c == '_' || uc == 0x08 || c == 'm' ||
+        c == 'M' || c == 's' || c == 'S' || c == 'l' || c == 'L' || c == 'a' || c == 'A' || c == 'b' || c == 'B' ||
+        c == 'q' || c == 'Q' || c == 'x' || c == 'X' || c == 'y' || c == 'Y' || c == '!' || c == 'r' || c == 'R' ||
+        c == '&' || c == '|' || c == '^' || c == '<' || c == '>' || c == '~')
     {
         DispatchKey(c);
         return true;
@@ -1050,19 +1348,15 @@ namespace
 
 // Drive synthetic mouse events through g_calc and verify the click
 // fires the right state mutation. Returns true iff the click chain
-// runs end-to-end. Bounds for g_calc are set to a known rect so we
-// can target each button without having a live window.
+// runs end-to-end.
 bool ClickViaWidget(u32 button_index)
 {
     if (button_index >= kIdCount)
         return false;
-    // Anchor bounds at (0, 22) — same shape as a live window would
-    // hand us through DrawFn (client-area origin under the title
-    // bar). Width 300 matches the boot-time window size.
     RebindBoundsToClient(0u, 22u, 300u);
 
-    const u32 row = button_index / 4u;
-    const u32 col = button_index % 4u;
+    const u32 row = button_index / kGridCols;
+    const u32 col = button_index % kGridCols;
     const u32 bx = 0u + kGridLeftOffset + col * (kBtnW + kBtnGap) + kBtnW / 2u;
     const u32 by = 22u + kGridTopOffset + row * (kBtnH + kBtnGap) + kBtnH / 2u;
 
@@ -1090,6 +1384,16 @@ u32 IndexOfKey(char k)
     return kIdCount;
 }
 
+// Compare the current fixed-point display value against an expected
+// scaled value by formatting both and string-comparing — exercises
+// the full read→format round-trip the user sees.
+bool DisplayEqualsFixed(i64 expected_scaled)
+{
+    bool ovf = false;
+    const i64 got = ReadDisplayAsFixed(&ovf);
+    return !ovf && got == expected_scaled;
+}
+
 } // namespace
 
 void CalculatorSelfTest()
@@ -1102,7 +1406,7 @@ void CalculatorSelfTest()
     struct Case
     {
         const char* keys;
-        i64 expect;
+        i64 expect; // truncated integer expectation (ReadDisplayAsI64)
     };
     const Case cases[] = {
         {"2+3=", 5},       {"9-4=", 5},  {"6*7=", 42},      {"5n=", -5},       {"5nn=", 5},
@@ -1122,7 +1426,74 @@ void CalculatorSelfTest()
         }
     }
 
-    // Memory register walk.
+    // Decimal / fixed-point cases (F-010). Compared against exact
+    // scaled values via DisplayEqualsFixed.
+    struct FixedCase
+    {
+        const char* keys;
+        i64 expect_scaled;
+    };
+    const FixedCase fixed_cases[] = {
+        {"1/4=", kScale / 4},          // 0.25
+        {".1+.2=", (kScale / 10) * 3}, // 0.1 + 0.2 = 0.3
+        {"2.5*2=", kScale * 5},        // 5
+        {"3.14=", 3140000},            // entry round-trips
+        {"10/4=", (kScale * 10) / 4},  // 2.5
+        {"0.5+0.5=", kScale},          // 1
+    };
+    for (const FixedCase& fc : fixed_cases)
+    {
+        HandleClear();
+        for (const char* p = fc.keys; *p != 0; ++p)
+            DispatchKey(*p);
+        if (!DisplayEqualsFixed(fc.expect_scaled) || g_state.error)
+        {
+            all_pass = false;
+            break;
+        }
+    }
+
+    // Decimal-point display formatting: trailing zeros trimmed.
+    HandleClear();
+    DispatchKey('1');
+    DispatchKey('/');
+    DispatchKey('4');
+    DispatchKey('=');
+    if (g_state.display[0] != '0' || g_state.display[1] != '.' || g_state.display[2] != '2' ||
+        g_state.display[3] != '5' || g_state.display[4] != '\0')
+        all_pass = false;
+    HandleClear();
+    DispatchKey('2');
+    DispatchKey('.');
+    DispatchKey('5');
+    DispatchKey('*');
+    DispatchKey('2');
+    DispatchKey('=');
+    if (g_state.display[0] != '5' || g_state.display[1] != '\0') // "5", not "5.000000"
+        all_pass = false;
+
+    // Clear-Entry (F-012): "5 + 3 CE 4 =" yields 9.
+    HandleClear();
+    DispatchKey('5');
+    DispatchKey('+');
+    DispatchKey('3');
+    DispatchKey('e'); // CE — clear current operand only
+    DispatchKey('4');
+    DispatchKey('=');
+    if (ReadDisplayAsI64() != 9 || g_state.error)
+        all_pass = false;
+    // C is a full reset (distinct from CE).
+    HandleClear();
+    DispatchKey('5');
+    DispatchKey('+');
+    DispatchKey('3');
+    DispatchKey('C'); // full reset
+    DispatchKey('4');
+    DispatchKey('=');
+    if (ReadDisplayAsI64() != 4 || g_state.error)
+        all_pass = false;
+
+    // Memory register walk (fixed-point aware).
     HandleClear();
     HandleMemClear();
     if (g_state.memory_set || g_state.memory != 0)
@@ -1130,19 +1501,19 @@ void CalculatorSelfTest()
     DispatchKey('5');
     DispatchKey('0');
     DispatchKey('s');
-    if (!g_state.memory_set || g_state.memory != 50)
+    if (!g_state.memory_set || g_state.memory != 50 * kScale)
         all_pass = false;
     HandleClear();
     DispatchKey('2');
     DispatchKey('5');
     DispatchKey('a');
-    if (g_state.memory != 75)
+    if (g_state.memory != 75 * kScale)
         all_pass = false;
     HandleClear();
     DispatchKey('1');
     DispatchKey('0');
     DispatchKey('b');
-    if (g_state.memory != 65)
+    if (g_state.memory != 65 * kScale)
         all_pass = false;
     DispatchKey('m');
     if (ReadDisplayAsI64() != 65)
@@ -1193,7 +1564,7 @@ void CalculatorSelfTest()
     if (!g_state.error)
         all_pass = false;
 
-    // Bitwise.
+    // Bitwise (integer-only — operate on truncated integer part).
     HandleClear();
     DispatchKey('1');
     DispatchKey('2');
@@ -1244,8 +1615,7 @@ void CalculatorSelfTest()
     HandleClear();
 
     // app_widgets dispatch path — the Pass D acceptance criterion.
-    // Drives synthetic Down/Up events through g_calc and confirms
-    // the same arithmetic engine fires. "2 + 3 ="
+    // Drives synthetic Down/Up events through g_calc. "2 + 3 ="
     HandleClear();
     if (!ClickViaWidget(IndexOfKey('2')))
         all_pass = false;
@@ -1256,6 +1626,18 @@ void CalculatorSelfTest()
     if (!ClickViaWidget(IndexOfKey('=')))
         all_pass = false;
     if (ReadDisplayAsI64() != 5 || g_state.error)
+        all_pass = false;
+    // ...and the decimal-point button via the widget path: "1 / 4 ="
+    HandleClear();
+    if (!ClickViaWidget(IndexOfKey('1')))
+        all_pass = false;
+    if (!ClickViaWidget(IndexOfKey('/')))
+        all_pass = false;
+    if (!ClickViaWidget(IndexOfKey('4')))
+        all_pass = false;
+    if (!ClickViaWidget(IndexOfKey('=')))
+        all_pass = false;
+    if (!DisplayEqualsFixed(kScale / 4) || g_state.error)
         all_pass = false;
     HandleClear();
 
