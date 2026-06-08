@@ -1,6 +1,7 @@
 #include "apps/sysmon.h"
 
 #include "arch/x86_64/serial.h"
+#include "arch/x86_64/smp.h"
 #include "drivers/input/ps2mouse.h"
 #include "drivers/video/app_widgets/app_button.h"
 #include "drivers/video/app_widgets/app_label.h"
@@ -34,6 +35,12 @@ constexpr u32 kRowH = 12;
 constexpr u32 kPad = 4;
 constexpr u32 kPanelGap = 6;
 
+/// Maximum per-core entries captured per sample. Physical CPUs beyond
+/// this are aggregated only into the system-wide cpu_pct. 4 is enough
+/// to show differentiation on a typical SMP=2..4 test guest without
+/// adding unbounded storage to the ring.
+inline constexpr u32 kSysmonMaxCores = 4;
+
 // One ring slot. Fields are sized to the values they hold; the
 // ring uses a flat-array circular buffer indexed by (head + i)
 // modulo kSysmonRingDepth.
@@ -43,6 +50,12 @@ struct Sample
     u8 heap_used_pct;  // 0..100
     u8 frag_score;     // 0..100, clamped from free_chunk_count
     u16 alive_windows; // 0..kMaxWindows (16) but width-friendly
+    // Per-core CPU-busy %, indexed by cpu_id. 0 when the CPU is
+    // offline or the slot is beyond the observed cpu_id_limit.
+    u8 core_pct[kSysmonMaxCores];
+    // Number of valid entries in core_pct (≤ kSysmonMaxCores).
+    u8 core_count;
+    u8 _pad[2];
 };
 
 struct State
@@ -57,11 +70,25 @@ struct State
     // can difference against it. Seeded on first Init.
     u64 prev_total_ticks;
     u64 prev_idle_ticks;
+    // Per-core previous tick snapshots for the same differencing.
+    u64 prev_core_total[kSysmonMaxCores];
+    u64 prev_core_idle[kSysmonMaxCores];
     bool cpu_seeded;
     bool initted;
 };
 
-constinit State g_state = {kWindowInvalid, {}, 0, 0, 0, 0, false, false};
+constinit State g_state = {
+    .handle = kWindowInvalid,
+    .ring = {},
+    .head = 0,
+    .count = 0,
+    .prev_total_ticks = 0,
+    .prev_idle_ticks = 0,
+    .prev_core_total = {},
+    .prev_core_idle = {},
+    .cpu_seeded = false,
+    .initted = false,
+};
 
 // -------------------------------------------------------------------
 // Ring helpers — small + testable.
@@ -112,7 +139,10 @@ Sample CollectSample()
     // window rather than the since-boot average the tray pill shows.
     // busy = total - idle, both deltas; pct = busy_delta / total_delta.
     const auto sched_stats = ::duetos::sched::SchedStatsRead();
-    if (g_state.cpu_seeded)
+    // Save seeded flag before updating so both system-wide and per-core
+    // blocks share the same "was this the first sample?" gate.
+    const bool was_seeded = g_state.cpu_seeded;
+    if (was_seeded)
     {
         const u64 total_delta = (sched_stats.total_ticks > g_state.prev_total_ticks)
                                     ? (sched_stats.total_ticks - g_state.prev_total_ticks)
@@ -129,6 +159,33 @@ Sample CollectSample()
     g_state.prev_total_ticks = sched_stats.total_ticks;
     g_state.prev_idle_ticks = sched_stats.idle_ticks;
     g_state.cpu_seeded = true;
+
+    // Per-core CPU-busy: difference per-CPU lifetime tick counters
+    // the same way the system-wide sparkline does. Uses `was_seeded`
+    // to match the system-wide "skip the very first sample" gate.
+    const u32 cpu_limit = ::duetos::arch::SmpCpuIdLimit();
+    const u32 max_cores = (cpu_limit < kSysmonMaxCores) ? cpu_limit : kSysmonMaxCores;
+    s.core_count = static_cast<u8>(max_cores);
+    for (u32 c = 0; c < max_cores; ++c)
+    {
+        u64 ct = 0, ci = 0;
+        if (::duetos::sched::SchedStatsReadCpu(c, &ct, &ci))
+        {
+            if (was_seeded)
+            {
+                const u64 td = (ct > g_state.prev_core_total[c]) ? (ct - g_state.prev_core_total[c]) : 0;
+                const u64 id = (ci > g_state.prev_core_idle[c]) ? (ci - g_state.prev_core_idle[c]) : 0;
+                if (td > 0)
+                {
+                    const u64 busy = (td > id) ? (td - id) : 0;
+                    const u64 pct = (busy * 100ULL) / td;
+                    s.core_pct[c] = static_cast<u8>(pct > 100 ? 100 : pct);
+                }
+            }
+            g_state.prev_core_total[c] = ct;
+            g_state.prev_core_idle[c] = ci;
+        }
+    }
 
     const auto h = mm::KernelHeapStatsRead();
     if (h.pool_bytes > 0)
@@ -510,6 +567,46 @@ void ClickClear()
     duetos::drivers::video::NotifyShow("sysmon: ring cleared");
 }
 
+// Render a compact per-core CPU% row: one "CN NN%" text badge per
+// CPU, laid out horizontally. Each badge is a fixed-width cell so the
+// row looks tabular regardless of the digit count. Height = kRowH.
+// Called inside PaintSysmonContent after the CPU sparkline chart.
+void PaintPerCoreBars(u32 x, u32 y, u32 w, const Sample& latest, u32 bg)
+{
+    constexpr u32 kCoreColW = 56; // px per core cell (label + 3-digit % + gap)
+    const auto& th = ThemeCurrent();
+    const u32 dim = th.banner_fg;
+
+    const u32 n = (latest.core_count < kSysmonMaxCores) ? latest.core_count : kSysmonMaxCores;
+    if (n == 0)
+        return;
+
+    u32 col_x = x;
+    for (u32 c = 0; c < n && col_x + kCoreColW <= x + w; ++c)
+    {
+        // Build "C<n> NNN%" string.
+        char cell[12];
+        u32 cp = 0;
+        cell[cp++] = 'C';
+        cell[cp++] = static_cast<char>('0' + (c < 9 ? c : 9));
+        cell[cp++] = ' ';
+        const u8 pct = latest.core_pct[c];
+        AppendU64(cell, &cp, sizeof(cell), pct);
+        cell[cp++] = '%';
+        cell[(cp < sizeof(cell)) ? cp : sizeof(cell) - 1] = '\0';
+
+        // Colour: green if <30%, amber if <70%, red if >=70% — gives a
+        // quick at-a-glance read without needing per-core sparklines.
+        u32 fg = (pct >= 70) ? 0x00F06060U : (pct >= 30) ? 0x00E0A040U : 0x0050C050U;
+        // Dim cores that show 0% (offline or never ticked) to grey.
+        if (pct == 0)
+            fg = dim;
+
+        FramebufferDrawString(col_x, y, cell, fg, bg);
+        col_x += kCoreColW;
+    }
+}
+
 // Paint the raw sparkline content (carve-out) inside the band
 // DrawFn carves out between the detail label at the top and the
 // AppLabel footer at the bottom.
@@ -524,18 +621,19 @@ void PaintSysmonContent(u32 cx, u32 cy, u32 cw, u32 ch)
     const u32 trace_frag = 0x00E0A040; // amber — fragmentation trace
     FramebufferFillRect(cx, cy, cw, ch, kBg);
 
-    // Three stacked sparkline panels with a caption row above each:
-    // CPU on top (the System-Monitor headline metric), then the two
-    // heap panels. The live "CPU NN%" numeric readout lives in the
-    // header label so the graph and a precise value sit together.
+    // Layout: three stacked sparkline panels (CPU / HEAP USED / FRAG)
+    // with a caption row above each. The CPU panel also gets a
+    // per-core bar row between its caption and its sparkline so an
+    // operator can see CPU0 vs CPU1 (etc.) differentiation.
     const u32 panels_w = (cw > 2 * kPad) ? cw - 2 * kPad : cw;
     const u32 gaps_total = 2 * kPanelGap;
     const u32 panel_h = (ch > gaps_total) ? (ch - gaps_total) / 3 : 0;
     if (panel_h > 8)
     {
-        // Latest CPU% — also drawn beside the caption so the panel
-        // carries its own numeric readout, not just the header line.
         const Sample latest = (g_state.count > 0) ? RingAt(0) : Sample{};
+
+        // ---- CPU panel ----
+        // Caption line: "CPU NN%"
         char cpu_cap[20];
         u32 cp = 0;
         AppendStr(cpu_cap, &cp, sizeof(cpu_cap), "CPU ");
@@ -545,14 +643,29 @@ void PaintSysmonContent(u32 cx, u32 cy, u32 cw, u32 ch)
 
         const u32 cpu_top = cy;
         FramebufferDrawString(cx + kPad, cpu_top, cpu_cap, dim, kBg);
-        PaintSparkline(cx + kPad, cpu_top + kRowH, panels_w, panel_h - kRowH, trace_cpu, axis_rgb,
-                       [](const Sample& s) -> u8 { return s.cpu_pct; });
 
+        // Per-core bar row (F-023). Sits between the caption and the
+        // sparkline. Consumes kRowH pixels; sparkline claims the rest.
+        const u32 core_row_y = cpu_top + kRowH;
+        PaintPerCoreBars(cx + kPad, core_row_y, panels_w, latest, kBg);
+
+        // Sparkline starts one row lower to make room for the per-core
+        // badges. Guard: only shrink if there's still room for a graph.
+        const u32 sparkline_y = core_row_y + kRowH;
+        const u32 sparkline_h = (panel_h > 2 * kRowH) ? panel_h - 2 * kRowH : 0;
+        if (sparkline_h > 0)
+        {
+            PaintSparkline(cx + kPad, sparkline_y, panels_w, sparkline_h, trace_cpu, axis_rgb,
+                           [](const Sample& s) -> u8 { return s.cpu_pct; });
+        }
+
+        // ---- HEAP USED panel ----
         const u32 panel_top = cpu_top + panel_h + kPanelGap;
         FramebufferDrawString(cx + kPad, panel_top, "HEAP USED %", dim, kBg);
         PaintSparkline(cx + kPad, panel_top + kRowH, panels_w, panel_h - kRowH, trace_used, axis_rgb,
                        [](const Sample& s) -> u8 { return s.heap_used_pct; });
 
+        // ---- FRAGMENTATION panel ----
         const u32 panel2_top = panel_top + panel_h + kPanelGap;
         FramebufferDrawString(cx + kPad, panel2_top, "FRAGMENTATION", dim, kBg);
         PaintSparkline(cx + kPad, panel2_top + kRowH, panels_w, panel_h - kRowH, trace_frag, axis_rgb,
@@ -742,6 +855,28 @@ void SysmonSelfTest()
     RefreshSysmonFooter();
     if (g_footer_text[0] == '\0')
         ok = false;
+
+    // F-023: verify the per-core accessor. CPU 0 (BSP) must always be
+    // reachable. We do NOT require c0_total > 0 here because this
+    // self-test runs before the LAPIC timer fires its first tick —
+    // the structural invariants (accessor returns true, total >= idle)
+    // are sufficient at this point in boot.
+    {
+        u64 c0_total = 0, c0_idle = 0;
+        const bool cpu0_ok = ::duetos::sched::SchedStatsReadCpu(0, &c0_total, &c0_idle);
+        ok = ok && cpu0_ok;
+        // total_ticks >= idle_ticks is the invariant: idle is a
+        // subset of total, so idle can never exceed total.
+        if (cpu0_ok)
+        {
+            ok = ok && (c0_total >= c0_idle);
+        }
+        // A freshly-pushed sample must carry at least CPU0 in core_count.
+        RingClear();
+        PushNewSample();
+        const Sample pushed = (g_state.count > 0) ? RingAt(0) : Sample{};
+        ok = ok && (pushed.core_count >= 1);
+    }
 
     // Restore.
     g_state = save;

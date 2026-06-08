@@ -257,6 +257,17 @@ struct PerCpu
     u64 sched_tasks_created;
     u64 sched_tasks_reaped;
 
+    // Per-CPU CPU-time accounting. Incremented by OnTimerTick on THIS
+    // CPU — no cross-CPU races, no lock required (each CPU only writes
+    // its own slot). `sched_total_ticks` counts every timer tick that
+    // fired on this CPU; `sched_idle_ticks` counts the subset where
+    // the running task had TaskPriority::Idle. Exposed to userland-
+    // visible tools (e.g. sysmon) via `sched::SchedStatsReadCpu` so
+    // the per-core display can difference consecutive reads without
+    // reaching into private per-CPU scheduler structures.
+    u64 sched_total_ticks;
+    u64 sched_idle_ticks;
+
     // This CPU's idle task. Set by `SchedStartIdle` (BSP via
     // `SchedInit`, each AP via `SchedEnterOnAp`). Read by
     // `ScheduleLockedHandoff` as a last-resort fallback when the
