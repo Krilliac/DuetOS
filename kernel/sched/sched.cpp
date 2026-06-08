@@ -422,13 +422,19 @@ using arch::Halt;
 using arch::SerialWrite;
 using arch::SerialWriteHex;
 
-constexpr u64 kKernelStackBytes = 64 * 1024; // 64 KiB per task — bumped from 16 KiB on
-                                             // 2026-04-25 because the PE-loader path
-                                             // (~5 KiB DllImage[48] preload local +
-                                             // recursive page-table walks during
-                                             // AddressSpaceMapUserPage) overflowed the
-                                             // 16 KiB cap on the second PE spawn.
-                                             // See mm/kstack.h.
+constexpr u64 kKernelStackBytes = 128 * 1024; // 128 KiB per task. Bumped 16->64 KiB on
+                                              // 2026-04-25 (PE-loader DllImage[48] preload +
+                                              // recursive page-table walks), then 64->128 KiB
+                                              // on 2026-06-08: the browser-fetch worker's
+                                              // real-network path (DoFetch -> FetchUrl ->
+                                              // TLS handshake -> cert-verify tower -> TCP/IP
+                                              // TX -> firewall conntrack) overran 64 KiB under
+                                              // the debug build's KASAN+UBSAN frame inflation,
+                                              // double-faulting the box on the first fetch to a
+                                              // real host. The on-target browser self-test uses
+                                              // injected transports, so this deep chain was
+                                              // never exercised until a live navigation.
+                                              // See mm/kstack.h.
 
 // Canary planted at the lowest 8 bytes of every task's kernel stack.
 // Stack grows DOWN, so the canary sits at the EDGE of overflow: if
@@ -2741,8 +2747,8 @@ void ScheduleLockedHandoff(sync::IrqFlags lock_flags)
 
     // Trampoline-RA slot integrity check. SchedCreate plants
     // `&SchedTaskTrampoline` at the highest 8 bytes of every fresh
-    // task's stack (slot_top - 8 = stack_base + 0xfff8 within the
-    // 64 KiB usable region of the 68 KiB slot). For a KERNEL-ONLY
+    // task's stack (slot_top - 8 = stack_base + stack_size - 8, i.e.
+    // the top word of the kKernelStackBytes usable region). For a KERNEL-ONLY
     // task, that slot must hold &SchedTaskTrampoline for the
     // task's entire lifetime. The trampoline asm reserves 16 bytes
     // at entry (`sub rsp, 16`) so RSP never sits at slot_top while

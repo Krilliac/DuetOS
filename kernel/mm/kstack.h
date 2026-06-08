@@ -84,15 +84,17 @@ inline constexpr uptr kKernelStackArenaBase = 0xFFFFFFFFE0000000ULL;
 /// happen.
 inline constexpr u64 kKernelStackGuardPages = 1;
 
-/// Usable stack pages per slot. 16 * 4 KiB = 64 KiB. Bumped from
-/// 4 (16 KiB) on 2026-04-25 because the PE-loader path stacks
-/// up: SpawnRing3Pe carries a ~5 KiB local DllImage[48] preload
-/// array, and DllLoad → AddressSpaceMapUserPage walks the page
-/// tables through a deep recursion. 32 KiB still occasionally
-/// overflowed once handle-alloc + close hooks were added across
-/// the file/event/mutex/thread create handlers; 64 KiB gives a
-/// comfortable margin.
-inline constexpr u64 kKernelStackPages = 16;
+/// Usable stack pages per slot. 32 * 4 KiB = 128 KiB. History:
+/// 4 (16 KiB) originally; bumped to 16 (64 KiB) on 2026-04-25 for
+/// the PE-loader path (SpawnRing3Pe's ~5 KiB DllImage[48] preload +
+/// DllLoad → AddressSpaceMapUserPage deep page-table recursion);
+/// bumped to 32 (128 KiB) on 2026-06-08 because the browser-fetch
+/// worker's live-network path (DoFetch → TLS handshake → cert-verify
+/// tower → TCP/IP TX → firewall conntrack) overran 64 KiB under the
+/// debug build's KASAN+UBSAN frame inflation, double-faulting the box
+/// on the first fetch to a real host. This is the "deep cert-verify
+/// tower" the tripwire (below) was added to watch.
+inline constexpr u64 kKernelStackPages = 32;
 
 /// Total bytes consumed by one slot, guard + stack.
 inline constexpr u64 kKernelStackSlotBytes = (kKernelStackGuardPages + kKernelStackPages) * kPageSize;

@@ -1678,7 +1678,8 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         else if (mm::IsKernelStackGuardFault(df_cr2))
         {
             arch::SerialWrite("\n[df] *** KERNEL STACK OVERFLOW *** — cr2 in a kstack-arena guard page.\n"
-                              "[df] a 64 KiB scheduler thread stack overran its slot.\n");
+                              "[df] a scheduler thread overran its kernel stack slot "
+                              "(size = mm/kstack.h kKernelStackPages).\n");
         }
         else
         {
