@@ -48,23 +48,40 @@ timestamps) · F-050 timer livelock (prior).
 **Corrected:** F-011 (misread — display IS decimal) → surfaced F-051 (Low, calc
 display overflow, open).
 
-**Still open (lower-priority, recorded not fixed):** F-001, F-012, F-013, F-014,
-F-015, F-017, F-020, F-021, F-023, F-027, F-031, F-033, F-035, F-036, F-037,
-F-041, F-042, F-051 — none block the daily-driver path; see the evaluation §3.
-
 **Report:** `docs/usability/2026-06-07-evaluation.md`. **Win32-Surface-Status:**
 no rows flipped (all fixes were native apps / kernel subsystems, not the PE
 surface). **DoD scan:** no stale wiki refs, final boot rc=0, STUB/GAP honest
 (F-019 removed the descent stub).
 
-## Remaining (if a future session continues)
+## Backlog fully cleared (2026-06-08)
 
-The open findings above are the backlog (mostly Low cosmetic / observability).
-**Anti-bloat guard still applies:** extend only to a cited rubric bar; file
-(Roadmap) anything needing a real refactor. F-036 (terminal echo) likely already
-resolved by the F-002 keyboard fix — needs a quick re-verify pass.
+A follow-up pass implemented **every** remaining finding — including the four
+previously *filed* "needs-a-subsystem" items, which proved achievable:
+- **F-029** runtime resolution selector — virtio-gpu scanout re-setup + 10s
+  revert-timeout (display is virtio-gpu, not the std-vga the filing assumed;
+  verified 1024×768→1280×720, coherent, auto-revert works).
+- **F-030** software master-volume gain stage + level bar + `SESSION.CFG` persist.
+- **F-010** fixed-point decimal calculator (×10⁶, no FPU); `1/4=0.25`, CE (F-012),
+  display clip (F-051).
+- **F-050** timer-IRQ nesting-defer behind kill-switch `g_timer_nest_defer_enabled`
+  (defer path fired 7–14×/run, 0 recursion panics across soak; honest residual:
+  intermittent bug, can't prove absolute absence — guard caps blast radius).
+
+Plus the Low/Medium tail: F-013, F-014, F-015, F-017, F-019(date col),
+F-020 (trash restore/empty/perm-delete via real FAT32 ops), F-021 (hexview path
+input), F-023 (sysmon per-core via `SchedStatsReadCpu`), F-027 (devicemgr tree),
+F-031 (NTP toggle wired to the real NTP client + mouse button-swap + persist),
+F-035, F-036 (terminal echo — real per-keystroke prompt-leak bug, fixed),
+F-037 (Ctrl+C), F-041 (help scrollbar), F-042 (verified), F-001 (WM sentinels),
+F-033 (verified working).
+
+**Net: 0 open findings.** All 18 follow-up commits boot green together (rc=0,
+233 self-tests OK, 0 non-deliberate failures; every touched app self-test PASS).
+F-040 (intermittent hung-task, likely shares the F-050 root) remains the one
+open Roadmap watch-item, to re-check now that the nesting-defer landed.
 
 ## How to resume
 Everything is committed on `claude/usability-campaign`. The WSL build checkout
-(`/root/source/DuetOS`) is at origin/main + this branch's drivers (port via `/mnt/c`,
-rebuild before boot). MAX_VMS=6. Re-read this file + `findings.md` + `rubric.md`.
+(`/root/source/DuetOS`) holds the synced branch source (port via `/mnt/c`,
+rebuild before boot). MAX_VMS=6. Re-read this file + `findings.md` + the
+evaluation report.

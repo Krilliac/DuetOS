@@ -60,7 +60,7 @@ Apps marked **v0** are scaffolded but missing significant functionality
 
 | App | Source | What it does | Subsystems touched |
 |-----|--------|--------------|--------------------|
-| **calculator** | [`calculator.cpp`](../../kernel/apps/calculator.cpp) | Stack calculator with on-screen keypad. 64-bit integers; FP pending. | UI, keyboard |
+| **calculator** | [`calculator.cpp`](../../kernel/apps/calculator.cpp) | Calculator with on-screen 4×5 keypad. Fixed-point decimals (×10⁶, no FPU) — `.` and `1/4=0.25` work; integer scientific/bitwise/memory functions (keyboard-driven); CE (Clear Entry) distinct from C; multi-radix hex/bin/oct preview band; display clipped to the window. | UI, keyboard |
 | **calendar** | [`calendar.cpp`](../../kernel/apps/calendar.cpp) | Month/week view with the configured timezone. | [time/timezone](Time.md) |
 | **clock** | [`clock.cpp`](../../kernel/apps/clock.cpp) | Real-time clock with uptime side panel. | [timekeeper](Time.md) |
 | **charmap** | [`charmap.cpp`](../../kernel/apps/charmap.cpp) | Unicode glyph picker; click-to-clipboard. | UI, clipboard, [util/unicode](Util.md) |
@@ -167,22 +167,28 @@ thread**. That means:
 - **browser** — HTTP fetch/render pipeline is live; address bar
   auto-focuses on open (F-032). Multi-tab and persistent history UI are
   next-slice work.
-- **calculator** — integer-only (signed `i64`); a decimal-point /
-  fractional engine needs a fixed-point or soft-float rework (filed
-  F-010, see Roadmap). The large-font decimal display does not clip for
-  very long values (F-051, Low). Bitwise/sqrt/factorial/memory are all
-  present but keyboard-only (no on-screen buttons for them).
+- **calculator** — fixed-point decimals (×10⁶, no FPU) landed (F-010):
+  `.` and `1/4=0.25` work, CE distinct from C (F-012), display clipped
+  (F-051). Bitwise/sqrt/factorial operate on the truncated integer part
+  (only meaningful on integers). Scientific functions beyond the 4×5
+  grid remain keyboard-only.
 - **devicemgr** — Collapsible class tree (F-027) and NAME/STATUS/DRIVER columns
   (F-026) are both landed. DRIVER is class-inferred until a real driver-binding
   registry exists on the device record. Admin actions (uninstall, NIC reset)
   are next-slice work.
-- **sysmon / taskman** — taskman now shows per-process MEM and supports
-  column-header sort (F-024/F-025); sysmon has a live CPU sparkline
-  (F-022). Per-core CPU% (F-023) still needs a public
-  `SchedStatsReadCpu(cpu)` accessor. Other admin actions are next-slice.
-- **trash** — UI only; restore / empty wired, true deletion deferred
-  until the FS write path graduates from FAT32 read-mostly to a full
-  read-write profile.
+- **sysmon / taskman** — taskman shows per-process MEM + clickable
+  column sort (F-024/F-025); sysmon has a live system CPU sparkline
+  (F-022) AND per-core CPU% via the public `SchedStatsReadCpu(cpu)`
+  accessor (F-023). Admin actions are next-slice.
+- **settings/display** — runtime resolution selector landed (F-029) via
+  virtio-gpu scanout re-setup + a 10s revert-timeout; mode list
+  800×600 / 1024×768 / 1280×720 / 1280×1024. See
+  [Graphics-Drivers](../drivers/Graphics-Drivers.md).
+- **settings/sound** — software master-volume gain stage (F-030); level
+  + mute persist via `SESSION.CFG`. Gain is write-time (the v0 backend
+  has no DMA-read hook / HDA codec amp control).
+- **trash** — Restore / Permanent-Delete / Empty all wired through real
+  FAT32 rename/delete with Y-confirm (F-020).
 - **notes** — atomic save is best-effort (write then rename); a real
   journal is on the roadmap.
 - **files (ramfs)** — `files.cpp:2343` carries a `GAP:` marker: the

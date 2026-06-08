@@ -11,6 +11,30 @@ Screenshots: `docs/usability/screenshots/<app>/`.
 This document is the Phase-5 synthesis: what the campaign graded, what it fixed,
 extended, filed, and the verdict against peer OSes.
 
+> **Update 2026-06-08 — backlog fully implemented.** The original campaign fixed
+> the high-value findings and *filed* the rest (items needing a subsystem that
+> didn't exist + the long tail of Low cosmetics). A follow-up pass then
+> **implemented the entire remaining backlog** — including the four filed
+> "needs-a-subsystem" items, which turned out to be achievable:
+> - **F-029 resolution selector** — REAL runtime modeset via virtio-gpu scanout
+>   re-setup + 10s revert-timeout (the display is virtio-gpu, not the std-vga the
+>   filing assumed; the tree already had a virtio-gpu driver). Verified:
+>   screendump dims actually changed 1024×768→1280×720, coherent desktop, auto-revert works.
+> - **F-030 master volume** — software gain stage in the audio backend + level
+>   bar + `SESSION.CFG` persist.
+> - **F-010 calculator decimals** — fixed-point (×10⁶, no FPU) engine; `1/4=0.25`.
+> - **F-050 timer livelock** — the nesting-defer fix, shipped behind a runtime
+>   kill-switch (`g_timer_nest_defer_enabled`), defer path exercised 7–14× per run.
+>
+> Plus every Low/Medium item: F-012, F-013, F-014, F-015, F-017, F-019(date),
+> F-020, F-021, F-023, F-027, F-031, F-033, F-035, F-036, F-037, F-041, F-042,
+> F-051, F-001. **Net: 0 open findings remain** (F-033/F-036/F-042 resolved by
+> verification; all others by code). See §3 for the final disposition and
+> `findings.md` for per-finding detail. All 18 follow-up commits boot **green
+> together** (rc=0, 233 self-tests OK, 0 non-deliberate failures). The sections
+> below reflect the original 2026-06-07 state; the disposition table in §3 and
+> the per-app rows in §2 note the post-backlog status.
+
 ---
 
 ## 1. Headline
