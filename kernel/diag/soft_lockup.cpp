@@ -19,6 +19,7 @@
 #include "acpi/acpi.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/smp.h"
+#include "arch/x86_64/traps.h"
 #include "core/panic.h"
 #include "cpu/percpu.h"
 #include "diag/fault_react.h"
@@ -196,7 +197,29 @@ void TickInternal(u32 slot, u64 now_ticks, u64 current_tid, const char* current_
         arch::SerialWrite(current_name != nullptr ? current_name : "<unknown>");
         arch::SerialWrite("\" ticks_in_run=");
         arch::SerialWriteHex(state.same_tid_count);
-        arch::SerialWrite("\n");
+        // Where the hogging task was interrupted on THIS CPU — the recent
+        // kernel-mode RIPs from the timer IRQ's trap frame, newest first.
+        // For a task genuinely spinning in a kernel loop this pins the
+        // spin site: a tight loop shows the same one or two RIPs repeating
+        // across the ring. `addr2line -f -e duetos-kernel.elf <rip>`
+        // resolves each to a function+offset. This is the diagnostic that
+        // turns the intermittent "serial wedge" into a self-pinning bug
+        // report. `rip=` (first/newest) kept for log-grep continuity; the
+        // `rip-ring=[...]` that follows is the distribution that
+        // disambiguates "tick landed right after a sti" from "actually
+        // spinning here".
+        u64 rip_ring[8] = {};
+        const u32 rip_n = arch::LastKernelIrqRips(slot, rip_ring, 8);
+        arch::SerialWrite(" rip=");
+        arch::SerialWriteHex(rip_n > 0 ? rip_ring[0] : 0);
+        arch::SerialWrite(" rip-ring=[");
+        for (u32 r = 0; r < rip_n; ++r)
+        {
+            if (r != 0)
+                arch::SerialWrite(",");
+            arch::SerialWriteHex(rip_ring[r]);
+        }
+        arch::SerialWrite("]\n");
 
         // Broadcast NMI to peer CPUs so they each capture their
         // own panic_snapshot_* state. The peer NMI handler

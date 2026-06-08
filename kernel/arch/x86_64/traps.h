@@ -201,4 +201,17 @@ void PanicInProgressMark();
 /// than to triple-fault.
 [[noreturn]] void HaltOnRecursiveFault(u64 vector, u64 rip);
 
+/// Fill `out` (capacity `out_len`) with the most-recent kernel-mode
+/// interrupted RIPs observed on `cpu`, newest first. TrapDispatch pushes
+/// frame->rip into a small per-CPU ring on every kernel-mode trap/IRQ;
+/// this drains that ring. The soft-lockup detector calls it from the
+/// timer-IRQ tail to report where a CPU-hogging task is spinning — a ring
+/// (not a single value) because one sample lands wherever the tick fired,
+/// while the distribution across the last few ticks pins the spin loop.
+/// Returns the number of entries written (0 if nothing recorded / bad
+/// args; an unrecorded slot reads 0). `cpu` out of range clamps to the
+/// BSP slot. Diagnostic; no synchronisation — a torn read across CPUs is
+/// acceptable for a best-effort spin-site hint.
+u32 LastKernelIrqRips(u32 cpu, u64* out, u32 out_len);
+
 } // namespace duetos::arch
