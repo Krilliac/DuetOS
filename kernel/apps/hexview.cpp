@@ -9,6 +9,7 @@
 #include "drivers/video/app_widgets/widget_group.h"
 #include "drivers/video/chrome_text.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/dialog.h"
 #include "drivers/video/notify.h"
 #include "drivers/video/scrollbar.h"
 #include "drivers/video/theme.h"
@@ -254,6 +255,104 @@ bool LoadCurrent()
     return true;
 }
 
+// Load a file by an explicit path (e.g. "/HELLO.TXT" or
+// "/SUB/INNER.TXT"). Path is interpreted relative to the FAT32
+// volume root; a leading '/' is accepted but not required.
+// On success the bytes pane shows the new file's contents and the
+// index scan is unaffected. On failure a "not found" status line
+// is shown and no bytes are touched.
+bool LoadByPath(const char* path)
+{
+    namespace fat = fs::fat32;
+    FreeBytes();
+    StatusSet("");
+    if (path == nullptr || path[0] == '\0')
+    {
+        StatusSet("(empty path)");
+        return false;
+    }
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        StatusSet("(no FAT32 volume)");
+        return false;
+    }
+    fat::DirEntry e;
+    if (!fat::Fat32LookupPath(v, path, &e))
+    {
+        StatusSet("not found: ");
+        StatusAppendStr(path);
+        arch::SerialWrite("[hexview] open-by-path not found: ");
+        arch::SerialWrite(path);
+        arch::SerialWrite("\n");
+        return false;
+    }
+    if ((e.attributes & 0x10) != 0)
+    {
+        StatusSet("is a directory: ");
+        StatusAppendStr(path);
+        return false;
+    }
+    g_state.file_size = e.size_bytes;
+    const u32 want = (e.size_bytes < kHexViewMaxFileBytes) ? e.size_bytes : kHexViewMaxFileBytes;
+    if (want == 0)
+    {
+        StatusSet(path);
+        StatusAppendStr("  (empty file)");
+        arch::SerialWrite("[hexview] open-by-path empty: ");
+        arch::SerialWrite(path);
+        arch::SerialWrite("\n");
+        return true;
+    }
+    void* alloc = mm::KMalloc(want);
+    if (alloc == nullptr)
+    {
+        StatusSet("out of kheap memory");
+        return false;
+    }
+    const i64 got = fat::Fat32ReadFile(v, &e, alloc, want);
+    if (got <= 0)
+    {
+        mm::KFree(alloc);
+        StatusSet("read FAILED: ");
+        StatusAppendStr(path);
+        return false;
+    }
+    g_state.bytes = static_cast<u8*>(alloc);
+    g_state.bytes_len = static_cast<u32>(got);
+    g_state.row_offset = 0;
+    StatusSet(path);
+    StatusAppendStr("  ");
+    StatusAppendDec(g_state.file_size);
+    StatusAppendStr(" B");
+    if (e.size_bytes > kHexViewMaxFileBytes)
+        StatusAppendStr(" (truncated)");
+    arch::SerialWrite("[hexview] open-by-path ok: ");
+    arch::SerialWrite(path);
+    arch::SerialWrite("\n");
+    return true;
+}
+
+// Static strings for the Open dialog — must outlive the dialog
+// callback (which fires asynchronously from the kbd-reader thread).
+static constexpr char kOpenTitle[] = "OPEN FILE";
+static constexpr char kOpenPrompt[] = "Path (e.g. /HELLO.TXT or /SUB/INNER.TXT):";
+
+// Callback fired by the dialog system once the user presses OK or
+// Cancel. Runs from the kbd-reader thread, outside compositor lock.
+void OnOpenDialogResult(duetos::drivers::video::DialogResult r, const char* text, void* /*user*/)
+{
+    if (r != duetos::drivers::video::DialogResult::Ok || text == nullptr || text[0] == '\0')
+    {
+        if (r != duetos::drivers::video::DialogResult::Ok)
+            StatusSet("open cancelled");
+        return;
+    }
+    LoadByPath(text);
+    // Request a repaint so the new bytes appear immediately.
+    duetos::drivers::video::WindowInvalidate(g_state.handle);
+}
+
 // ---------------------------------------------------------------
 // Pass D chrome: AppToolbar (back) + 3 AppButton entries
 // (PREV / NEXT / RSCN) + 2 AppLabel rows (status line and footer
@@ -485,8 +584,8 @@ void RefreshHexviewHeader()
 // active (J/K/PG/Home/End scroll hints).
 void RefreshHexviewFooter()
 {
-    static const char kEmptyHint[] = "N/P=NEXT/PREV  R=RESCAN  WHEEL=SCROLL";
-    static const char kActiveHint[] = "N/P=FILE  J/K=ROW  PG=PAGE  HOME/END  R=RELOAD  WHEEL=SCROLL";
+    static const char kEmptyHint[] = "O=OPEN  N/P=NEXT/PREV  R=RESCAN  WHEEL=SCROLL";
+    static const char kActiveHint[] = "O=OPEN  N/P=FILE  J/K=ROW  PG=PAGE  HOME/END  R=RELOAD  WHEEL=SCROLL";
     const char* src = (g_state.bytes == nullptr || g_state.bytes_len == 0) ? kEmptyHint : kActiveHint;
     u32 i = 0;
     for (; src[i] != '\0' && i + 1 < sizeof(g_footer_text); ++i)
@@ -728,6 +827,15 @@ WindowHandle HexViewWindow()
 
 bool HexViewFeedChar(char c)
 {
+    if (c == 'o' || c == 'O')
+    {
+        // Open a file by typing its path. The dialog is async:
+        // InputBoxOpen registers the callback and returns; key
+        // routing in boot_tasks.cpp redirects all subsequent
+        // keystrokes to the dialog until OK / Cancel.
+        duetos::drivers::video::InputBoxOpen(kOpenTitle, kOpenPrompt, nullptr, OnOpenDialogResult, nullptr);
+        return true;
+    }
     if (c == 'n' || c == 'N')
     {
         StepIndex(true);
