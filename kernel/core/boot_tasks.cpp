@@ -538,6 +538,9 @@ void KbdReaderTask(void*)
         // Ctrl+C latches the shell interrupt flag. No
         // DesktopCompose here — the long-running command
         // holding the shell will notice next time it polls.
+        // When the terminal is focused and no command is running
+        // (idle prompt), ShellInterruptLine also clears the current
+        // input line and draws a fresh prompt (readline-style).
         // Skipped entirely if Alt is also held (that's a
         // different shortcut like Ctrl+Alt+T) or if Shift is
         // held (Ctrl+Shift+C is the terminal viewport-copy
@@ -555,6 +558,8 @@ void KbdReaderTask(void*)
             const auto active = duetos::drivers::video::WindowActive();
             const bool notes_focused =
                 (active != duetos::drivers::video::kWindowInvalid && active == duetos::apps::notes::NotesWindow());
+            const bool terminal_focused = (active != duetos::drivers::video::kWindowInvalid &&
+                                           active == duetos::apps::terminal::TerminalWindow());
             duetos::drivers::video::CompositorUnlock();
             if (notes_focused)
             {
@@ -563,8 +568,20 @@ void KbdReaderTask(void*)
                 SerialWrite("[ui] ^C copy notes -> clipboard\n");
                 continue;
             }
-            duetos::core::ShellInterrupt();
-            SerialWrite("[ui] ^C\n");
+            if (terminal_focused)
+            {
+                // ShellInterruptLine: clears the typed line, prints
+                // "^C", and redraws the prompt — readline-style. It
+                // also latches g_interrupt so any command starting in
+                // the same tick sees the signal.
+                duetos::core::ShellInterruptLine();
+                SerialWrite("[ui] ^C line-cancel\n");
+            }
+            else
+            {
+                duetos::core::ShellInterrupt();
+                SerialWrite("[ui] ^C\n");
+            }
             continue;
         }
         // Ctrl+Shift+V — rotate the clipboard history one step.

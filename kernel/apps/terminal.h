@@ -95,6 +95,13 @@ void TerminalInit(duetos::drivers::video::WindowHandle handle);
 /// Handle of the Terminal window, or `kWindowInvalid` until Init.
 duetos::drivers::video::WindowHandle TerminalWindow();
 
+/// True once TerminalInit has been called (the terminal window is
+/// open and mirroring the shell). Used by ShellRedrawAfterLogLine
+/// to suppress the legacy console-line redraw — the terminal's own
+/// VT mirror already shows the correct state, so re-echoing the
+/// prompt+buffer just creates visible artifacts (F-036).
+bool TerminalIsOpen();
+
 /// Keyboard handlers — return true iff consumed. Mirrors the
 /// (FeedChar, FeedArrow) shape used by the other in-kernel apps
 /// so the dispatcher in core/main.cpp routes uniformly.
