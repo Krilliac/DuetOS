@@ -297,6 +297,31 @@ constinit u64 g_irq_counts_per_cpu[acpi::kMaxCpus][256] = {};
 // under IF=0; no atomic needed on the slot itself.
 constinit u64 g_irq_nest_depth_per_cpu[acpi::kMaxCpus] = {};
 
+// Per-CPU ring of recent kernel-mode interrupted RIPs. TrapDispatch
+// pushes frame->rip on every kernel-mode ((cs & 3) == 0) dispatch — the
+// saved RIP is the instruction the CPU was executing when the trap/IRQ
+// fired. When the soft-lockup detector (diag::SoftLockupTick, fired from
+// the timer-IRQ tail) decides a task has been hogging the CPU, it reads
+// this ring to print WHERE the task was spinning — turning an
+// intermittent wedge into a self-pinning diagnostic. A RING (not a
+// single slot) because one sample lands wherever the tick happened to
+// fire (often right after a `sti`); the distribution across the last few
+// ticks pins the actual spin loop. Single-CPU writes under IF=0 (we are
+// inside TrapDispatch with interrupts masked); no atomic needed. Cheap:
+// one store + index bump per kernel-mode trap. Kept per the CLAUDE.md
+// diagnostic-logging contract — this is exactly the data a future wedge
+// investigation needs and which was painstakingly re-derived once (the
+// "serial wedge" hunt, 2026-06).
+constexpr u32 kKernelIrqRipRingLen = 8;
+constinit u64 g_last_kernel_irq_rip[acpi::kMaxCpus][kKernelIrqRipRingLen] = {};
+// Frame-base (RBP) captured alongside each ring RIP. When the spin site
+// is a leaf-ish helper (e.g. HpetReadCounter), the RIP names the helper
+// but not WHO is looping on it; the saved RBP lets the warn path walk one
+// frame up ([rbp+8] = return address into the caller) so the actual spin
+// loop is named, not just the leaf. Parallel to g_last_kernel_irq_rip.
+constinit u64 g_last_kernel_irq_rbp[acpi::kMaxCpus][kKernelIrqRipRingLen] = {};
+constinit u32 g_last_kernel_irq_rip_head[acpi::kMaxCpus] = {};
+
 // Global fault counters by category. Bumped on every CPU
 // exception dump (user-mode task-kill or kernel panic). Read
 // only by diagnostic paths (shell health command / log prints);
@@ -695,6 +720,73 @@ u64 IrqNestDepthRaw()
 void IrqNestDepthSet(u64 v)
 {
     IrqNestSlot() = v;
+}
+
+u32 LastKernelIrqRips(u32 cpu, u64* out, u32 out_len)
+{
+    if (out == nullptr || out_len == 0)
+    {
+        return 0;
+    }
+    const u32 idx = (cpu < acpi::kMaxCpus) ? cpu : 0u;
+    const u32 n = (out_len < kKernelIrqRipRingLen) ? out_len : kKernelIrqRipRingLen;
+    // Most-recent-first: head points at the NEXT write slot, so the
+    // newest entry is at (head - 1). Walk backwards.
+    const u32 head = g_last_kernel_irq_rip_head[idx];
+    for (u32 k = 0; k < n; ++k)
+    {
+        const u32 slot = (head + kKernelIrqRipRingLen - 1u - k) % kKernelIrqRipRingLen;
+        out[k] = g_last_kernel_irq_rip[idx][slot];
+    }
+    return n;
+}
+
+u32 LastKernelIrqCallers(u32 cpu, u64* out, u32 out_len)
+{
+    if (out == nullptr || out_len == 0)
+    {
+        return 0;
+    }
+    const u64 tlo = reinterpret_cast<u64>(::_text_start);
+    const u64 thi = reinterpret_cast<u64>(::_text_end);
+    const u32 idx = (cpu < acpi::kMaxCpus) ? cpu : 0u;
+    // Backtrace from the NEWEST ring entry: walk the saved-RBP frame chain
+    // upward, collecting return addresses that land in kernel .text. The
+    // interrupted leaf (e.g. arch::HpetReadCounter / sync::SpinLockRelease)
+    // is at the RIP; this names the chain of functions ABOVE it, so the
+    // actual spin loop — several frames up from the leaf — is identified.
+    // Walking ONE newest frame fully is more useful than one-frame-per-ring
+    // because the spin loop sits a few frames above the leaf, not one.
+    const u32 head = g_last_kernel_irq_rip_head[idx];
+    const u32 newest = (head + kKernelIrqRipRingLen - 1u) % kKernelIrqRipRingLen;
+    u64 rbp = g_last_kernel_irq_rbp[idx][newest];
+    u32 produced = 0;
+    constexpr u32 kMaxBtFrames = 16; // bound the walk against a cyclic chain
+    for (u32 frame = 0; frame < kMaxBtFrames && produced < out_len && rbp != 0; ++frame)
+    {
+        // Standard SysV frame: [rbp] = caller's saved rbp, [rbp+8] = return
+        // address into the caller. Read both fault-safely.
+        u64 saved_rbp = 0;
+        u64 ret = 0;
+        if (!::duetos::mm::SafeReadKernel(&saved_rbp, reinterpret_cast<const void*>(rbp), sizeof(saved_rbp)) ||
+            !::duetos::mm::SafeReadKernel(&ret, reinterpret_cast<const void*>(rbp + 8), sizeof(ret)))
+        {
+            break;
+        }
+        if (ret >= tlo && ret < thi)
+        {
+            out[produced++] = ret;
+        }
+        // Frame chain must move monotonically toward higher addresses; a
+        // non-increasing saved_rbp means a corrupt / leaf-without-frame
+        // chain — stop rather than loop on garbage.
+        if (saved_rbp <= rbp)
+        {
+            break;
+        }
+        rbp = saved_rbp;
+    }
+    return produced;
 }
 
 bool PanicInProgress()
@@ -1124,6 +1216,24 @@ extern "C" void TrapDispatch(TrapFrame* frame)
             for (;;)
                 asm volatile("cli; hlt");
         }
+    }
+
+    // DIAG: capture the interrupted kernel-mode RIP into this CPU's slot.
+    // On a kernel-mode trap/IRQ, frame->rip is the instruction the CPU was
+    // executing when the trap fired (validated sane + canonical by the
+    // wild-RIP forensic above). The soft-lockup detector reads this slot
+    // from the timer-IRQ tail to report WHERE a hogging task is spinning —
+    // making an intermittent wedge self-pinning. User-mode RIPs are not
+    // recorded (we only care about kernel-mode spin sites; a user-mode
+    // hog is a different signal and its RIP is in the process VA range).
+    if ((frame->cs & 0x3) == 0)
+    {
+        const u32 rip_cpu_id = ::duetos::cpu::CurrentCpuIdOrBsp();
+        const u32 rip_idx = (rip_cpu_id < acpi::kMaxCpus) ? rip_cpu_id : 0u;
+        const u32 head = g_last_kernel_irq_rip_head[rip_idx];
+        g_last_kernel_irq_rip[rip_idx][head] = frame->rip;
+        g_last_kernel_irq_rbp[rip_idx][head] = frame->rbp;
+        g_last_kernel_irq_rip_head[rip_idx] = (head + 1u) % kKernelIrqRipRingLen;
     }
 
     // DIAG: runaway fault-loop catcher by tight descent (see kMaxTightRecursion).

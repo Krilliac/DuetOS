@@ -92,6 +92,28 @@ inline bool SerialInProgressOnThisCpu()
 // loads is fine on x86_64 single-CPU.
 constinit u64 g_serial_bytes_written = 0;
 
+// Dropped-byte accounting + a sticky "transmitter degraded" hint for the
+// bounded TX-drain spin in WriteByteRaw. See the WriteByteRaw comment for
+// the full rationale (the intermittent `kboot ticks_in_run=101` CI wedge).
+// Both are plain globals updated only under the serial path's existing
+// serialization (g_serial_lock / panic serializer) or from the lock-free
+// raw path; the degraded flag is a best-effort hint whose worst race is a
+// single byte using the wrong spin budget once — never a correctness bug.
+constinit u64 g_serial_bytes_dropped = 0;
+constinit bool g_serial_tx_degraded = false;
+
+// Per-byte spin budget waiting for the UART transmit-holding register to
+// empty. A healthy 16550 at 115200 baud clears THRE within ~one byte-time
+// (~87 us), i.e. at most a few thousand `inb` reads — so a budget this
+// large is NEVER reached in normal operation and no byte is dropped. It
+// exists purely to convert a *stuck* backend (THRE never clears) from an
+// unbounded kernel-wide hang into a bounded byte drop. Once a drop occurs
+// the degraded hint shrinks the budget so a persistently-stuck backend
+// can't burn the full budget on every subsequent byte; it self-clears the
+// instant the UART drains again.
+constexpr u32 kTxDrainSpinBudget = 2'000'000u;
+constexpr u32 kTxDrainSpinDegraded = 4'096u;
+
 // Panic-emit serializer (2026-05-26). The `g_serial_panic_mode`
 // bypass above keeps a panic dump alive when the lock holder is
 // wedged, but its cost is byte-level interleaving between any two
@@ -185,12 +207,36 @@ void PanicEmitRelease(u32 cpuid)
 // until the previous byte has cleared the THR.
 void WriteByteRaw(u8 byte)
 {
-    while ((Inb(kCom1Port + kRegLineStatus) & kLsrTransmitEmpty) == 0)
+    // BOUNDED wait for the transmit-holding register to empty. An
+    // UNBOUNDED spin here is a kernel-wide hang hazard: under a slow or
+    // back-pressured host serial backend (e.g. a loaded CI runner whose
+    // QEMU 16550 drains at the 115200 baud cap while a debug build floods
+    // hundreds of KB of log during ring3 DLL preload), the THRE bit stays
+    // clear long enough that the heavy-logging task (kboot preloading ~21
+    // DLLs at DEBUG level) spins here >1 s with IRQs on -> soft-lockup
+    // (`kboot ticks_in_run=101`) -> the guest makes no further progress ->
+    // host watchdog kills the VM. This was the intermittent CI PE-smoke /
+    // bringup-tail wedge (boot_bringup.cpp:2582; ~50% of bringup smokes
+    // since PR #336 un-skipped CI), which never reproduced at idle because
+    // it needs a slow/loaded host. Diagnostic output must NEVER be able to
+    // wedge the kernel: cap the wait and DROP the byte if the transmitter
+    // won't drain.
+    const u32 budget = g_serial_tx_degraded ? kTxDrainSpinDegraded : kTxDrainSpinBudget;
+    for (u32 spin = 0; spin < budget; ++spin)
     {
-        // Spin until the transmitter holding register is empty.
+        if ((Inb(kCom1Port + kRegLineStatus) & kLsrTransmitEmpty) != 0)
+        {
+            Outb(kCom1Port + kRegData, byte);
+            ++g_serial_bytes_written;
+            g_serial_tx_degraded = false; // UART drained — restore the generous budget
+            return;
+        }
     }
-    Outb(kCom1Port + kRegData, byte);
-    ++g_serial_bytes_written;
+    // Transmitter did not drain within budget — drop the byte rather than
+    // hang the kernel, and mark degraded so subsequent bytes fast-fail
+    // (a stuck backend can't burn the full budget on every byte).
+    g_serial_tx_degraded = true;
+    ++g_serial_bytes_dropped;
 }
 
 void WriteCharRaw(char c)
@@ -551,11 +597,18 @@ void SerialCom2Init()
 
 void SerialCom2WriteByte(u8 byte)
 {
-    while ((Inb(kCom2Port + kRegLineStatus) & kLsrTransmitEmpty) == 0)
+    // Same bounded-spin discipline as WriteByteRaw (COM1): never let a
+    // stuck secondary UART hang the kernel. Drop the byte if it won't
+    // drain within the generous budget.
+    for (u32 spin = 0; spin < kTxDrainSpinBudget; ++spin)
     {
-        // spin
+        if ((Inb(kCom2Port + kRegLineStatus) & kLsrTransmitEmpty) != 0)
+        {
+            Outb(kCom2Port + kRegData, byte);
+            return;
+        }
     }
-    Outb(kCom2Port + kRegData, byte);
+    ++g_serial_bytes_dropped;
 }
 
 u8 SerialCom2ReadByteBlocking()
@@ -579,6 +632,15 @@ duetos::i32 SerialCom2ReadByteNonblocking()
 u64 SerialBytesWritten()
 {
     return g_serial_bytes_written;
+}
+
+// Count of bytes the bounded TX-drain spin gave up on (a stuck/saturated
+// UART backend). MUST be 0 on a healthy boot — a non-zero value means the
+// serial transmitter back-pressured hard enough to hit kTxDrainSpinBudget,
+// which is the condition that used to wedge the kernel (see WriteByteRaw).
+u64 SerialBytesDropped()
+{
+    return g_serial_bytes_dropped;
 }
 
 } // namespace duetos::arch

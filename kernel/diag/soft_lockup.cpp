@@ -18,7 +18,7 @@
 
 #include "acpi/acpi.h"
 #include "arch/x86_64/serial.h"
-#include "arch/x86_64/smp.h"
+#include "arch/x86_64/traps.h"
 #include "core/panic.h"
 #include "cpu/percpu.h"
 #include "diag/fault_react.h"
@@ -196,23 +196,78 @@ void TickInternal(u32 slot, u64 now_ticks, u64 current_tid, const char* current_
         arch::SerialWrite(current_name != nullptr ? current_name : "<unknown>");
         arch::SerialWrite("\" ticks_in_run=");
         arch::SerialWriteHex(state.same_tid_count);
-        arch::SerialWrite("\n");
+        // Where the hogging task was interrupted on THIS CPU — the recent
+        // kernel-mode RIPs from the timer IRQ's trap frame, newest first.
+        // For a task genuinely spinning in a kernel loop this pins the
+        // spin site: a tight loop shows the same one or two RIPs repeating
+        // across the ring. `addr2line -f -e duetos-kernel.elf <rip>`
+        // resolves each to a function+offset. This is the diagnostic that
+        // turns the intermittent "serial wedge" into a self-pinning bug
+        // report. `rip=` (first/newest) kept for log-grep continuity; the
+        // `rip-ring=[...]` that follows is the distribution that
+        // disambiguates "tick landed right after a sti" from "actually
+        // spinning here".
+        u64 rip_ring[8] = {};
+        const u32 rip_n = arch::LastKernelIrqRips(slot, rip_ring, 8);
+        arch::SerialWrite(" rip=");
+        arch::SerialWriteHex(rip_n > 0 ? rip_ring[0] : 0);
+        arch::SerialWrite(" rip-ring=[");
+        for (u32 r = 0; r < rip_n; ++r)
+        {
+            if (r != 0)
+                arch::SerialWrite(",");
+            arch::SerialWriteHex(rip_ring[r]);
+        }
+        arch::SerialWrite("]");
+        // Backtrace from the newest trap: the chain of kernel-text frames
+        // ABOVE the interrupted leaf. When the spin site is a leaf helper
+        // (HpetReadCounter / SpinLockRelease) the RIP doesn't name the loop;
+        // this backtrace does — the spin loop sits a few frames up. addr2line
+        // each entry, top of the list is closest to the leaf.
+        u64 bt[12] = {};
+        const u32 bt_n = arch::LastKernelIrqCallers(slot, bt, 12);
+        arch::SerialWrite(" caller-bt=[");
+        for (u32 r = 0; r < bt_n; ++r)
+        {
+            if (r != 0)
+                arch::SerialWrite(",");
+            arch::SerialWriteHex(bt[r]);
+        }
+        arch::SerialWrite("]\n");
 
-        // Broadcast NMI to peer CPUs so they each capture their
-        // own panic_snapshot_* state. The peer NMI handler
-        // populates the snapshot and halts; the snapshots
-        // survive into a subsequent panic dump if this lockup
-        // escalates. If the lockup eventually clears on its
-        // own, the snapshots are just dead BSS — no cost. This
-        // is the "lightweight cross-CPU visibility" half of the
-        // NMI-watchdog HPET-fallback proposal — the full
-        // hardware-NMI-on-no-progress lands when the HPET driver
-        // gains per-timer comparator + IOAPIC routing.
+        // DO NOT broadcast an NMI here. A soft-lockup is a NON-FATAL
+        // warning ("log and continue", see soft_lockup.h) — a task hogged
+        // the CPU for >1 s. The peer NMI handler (arch/traps.cpp
+        // TrapDispatch, the unclaimed-NMI leg) treats ANY unclaimed NMI as
+        // a panic broadcast: it captures a snapshot and `cli; hlt`s the
+        // peer PERMANENTLY. So broadcasting here turned a benign warning
+        // into a fatal multi-CPU halt: on a 4-CPU boot the soft-lockup
+        // warn halted the 3 peers, all forward progress stopped, and the
+        // host watchdog killed the VM.
         //
-        // Skipped during self-test (the test exercises the state
-        // machine with synthetic TIDs and shouldn't broadcast).
-        if (!g_self_test_in_progress)
-            ::duetos::arch::PanicBroadcastNmi();
+        // That was the root cause of the intermittent "serial wedge"
+        // (kboot ticks_in_run=101 then total silence then SIGTERM): under
+        // DEBUG logging kboot synchronously flushes >15 KB of serial during
+        // a heavy phase (exFAT/NTFS/ext4 probe, ring3 DLL preload, device
+        // bringup). At 115200 baud that transmit legitimately takes >1 s on
+        // a slow/loaded host — every byte drains (serial_dropped stayed 0,
+        // which is why the earlier "stuck transmitter" theory was a red
+        // herring), just slowly. The soft-lockup fires correctly (kboot IS
+        // hogging the CPU), but its only job is to LOG. The captured
+        // backtrace nailed it: Sti <- SpinLockRelease <- SerialWrite <-
+        // ExfatProbe <- ExfatScanAll <- BootBringupDevices — a serial
+        // flush, not a compute loop. Removing the broadcast lets the warn
+        // fire and the boot continue (kboot finishes the flush and moves
+        // on), which is the documented "warning, not panic" contract.
+        //
+        // The cross-CPU-snapshot rationale this replaced was also simply
+        // wrong: it claimed "if the lockup clears the snapshots are dead
+        // BSS — no cost", but the peers `cli; hlt` and NEVER resume, so a
+        // soft-lockup could not "clear on its own" once it broadcast. A
+        // future hard-hang detector that genuinely needs cross-CPU state
+        // belongs on the NMI WATCHDOG (arch::NmiWatchdog*, which fires only
+        // when the timer IRQ has stopped — a real wedge), not on this
+        // log-and-continue warning path.
 
         ::duetos::diag::FaultEvidence ev = {};
         ev.source = "diag/soft-lockup";
