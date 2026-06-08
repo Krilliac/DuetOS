@@ -10937,3 +10937,35 @@ fake) anything that needs a subsystem we don't have.** The concrete decisions:
   the rare panic; the recursion guard still bounds any residual to a clean
   panic. If a fairness/priority-inversion regression ever surfaces, flip the
   kill-switch to isolate this change.
+
+- **Runtime resolution change is a virtio-gpu scanout re-setup, not a
+  GOP re-`SetMode` (F-029).** The Settings ▸ Display panel can now change
+  resolution at runtime. The desktop boots under QEMU `-vga virtio`, so the
+  framebuffer is a guest-owned BGRA backing bound to virtio-gpu scanout 0 —
+  not a firmware GOP aperture. The modeset therefore tears the old 2D
+  resource + backing down (`SET_SCANOUT(resource=0)` → `RESOURCE_UNREF` →
+  `FreeContiguousFrames`) and rebuilds a fresh resource/backing/scanout at
+  the new size (`VirtioGpuResetScanout`, `kernel/drivers/gpu/virtio_gpu.cpp`),
+  then `FramebufferRebindExternal` points the FB driver at the new backing
+  and `FramebufferDropComposeBuffers` frees the old-sized compose shadow +
+  presented-snapshot so `BeginCompose` re-allocates them at the new geometry.
+  The window manager reads `FramebufferGet()` fresh on every `DesktopCompose`
+  pass, so the desktop relays out (taskbar Y, wallpaper, window clamps) on
+  the next frame with no explicit relayout call. **Rules out** the
+  GOP-re-`SetMode` path the original F-029 filing proposed: GOP boot
+  services are gone after `ExitBootServices`, so a firmware re-mode is
+  impossible from the running kernel — the re-programmable device (virtio-gpu)
+  is the only runtime path on this boot. A std-vga/bochs build could slot a
+  Bochs-VBE `VbeSetMode` + `FramebufferRebind` path behind the same
+  `DisplaySetMode` facade, but std-vga is not the desktop's boot device.
+  **Safety:** `VirtioGpuResetScanout` feasibility-probes the new contiguous
+  backing BEFORE tearing the live scanout down, so an allocation failure
+  leaves the old mode on screen rather than black-screening. The mandatory
+  **revert-timeout** (rubric bar) is the second net: an applied mode
+  auto-reverts after 10 s unless the user confirms with `K`. The revert
+  modeset is driven by `SettingsDisplayRevertTick()` from the `UiTickerTask`
+  **outside** the compose pass but under the compositor lock — rebinding the
+  framebuffer + dropping the compose shadow mid-`BeginCompose`/`EndCompose`
+  would corrupt the frame, so the time-driven revert deliberately runs at the
+  one point per tick where the lock is held and no compose is in flight.
+  See [`Graphics-Drivers`](../drivers/Graphics-Drivers.md) ("Runtime modeset").

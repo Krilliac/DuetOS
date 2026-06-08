@@ -117,6 +117,13 @@ void UiTickerTask(void*)
         // app hasn't been initialised yet.
         duetos::apps::sysmon::SysmonTick();
         duetos::drivers::video::CompositorLock();
+        // F-029: drive the Display panel's resolution revert-timeout
+        // here — OUTSIDE the compose pass (DesktopCompose below) but
+        // under the compositor lock, so the framebuffer rebind +
+        // compose-shadow drop the revert performs can't race a live
+        // compose. No-op unless a resolution change is awaiting an
+        // unconfirmed Keep past its 10 s deadline.
+        duetos::apps::settings::SettingsDisplayRevertTick();
         // While the login gate is up the full-screen login
         // panel owns the framebuffer. Repaint it from its
         // own canonical state so the 1 Hz compose doesn't

@@ -1,7 +1,9 @@
 #include "apps/settings.h"
 
 #include "arch/x86_64/serial.h"
+#include "arch/x86_64/timer.h"
 #include "drivers/gpu/dpms.h"
+#include "drivers/gpu/modeset.h"
 #include "drivers/video/app_widgets/app_label.h"
 #include "drivers/video/app_widgets/widget_group.h"
 #include "drivers/video/chrome_text.h"
@@ -39,6 +41,43 @@ constinit auto g_settings_display = MakeWidgetGroup(AppLabel{}, AppLabel{});
 
 constinit bool g_settings_display_bound = false;
 constinit bool g_settings_display_self_test_passed = false;
+
+// ---------------------------------------------------------------
+// Resolution selector + revert-timeout state (F-029).
+//
+// `g_sel` is the highlighted mode in the modeset list. `Apply`
+// switches to it and arms a confirm window: if the user doesn't
+// press K (keep) within kRevertSeconds, the next Draw() pass
+// auto-reverts to the resolution that was live before Apply. This
+// is the rubric's safety net — a mode that renders garbage (or an
+// input-routing surprise) self-heals without the user being able
+// to confirm a screen they can't see.
+
+constexpr u64 kRevertSeconds = 10;
+
+// Selected list index (0..DisplayModeCount()-1). Initialised lazily
+// to the live mode on first Draw so the highlight starts on "current".
+constinit u32 g_sel = 0;
+constinit bool g_sel_init = false;
+
+// Pending-confirm state. While `g_pending`, a revert is armed for
+// `g_revert_deadline_ticks` and the previous geometry is stashed.
+constinit bool g_pending = false;
+constinit u64 g_revert_deadline_ticks = 0;
+constinit u32 g_prev_w = 0;
+constinit u32 g_prev_h = 0;
+
+// Seconds remaining until auto-revert, clamped to [0, kRevertSeconds].
+u64 RevertSecondsLeft()
+{
+    if (!g_pending)
+        return 0;
+    const u64 now = ::duetos::arch::TimerTicks();
+    if (now >= g_revert_deadline_ticks)
+        return 0;
+    const u64 ticks_left = g_revert_deadline_ticks - now;
+    return (ticks_left + ::duetos::arch::kTickFrequencyHz - 1) / ::duetos::arch::kTickFrequencyHz;
+}
 
 AppLabel& DspHeader()
 {
@@ -154,32 +193,146 @@ void Draw(u32 x, u32 y, u32 w, u32 h)
     line[o] = '\0';
     ChromeTextDraw(ChromeTextRole::Body, x, y + 26, line, dim, bg);
 
+    // Resolution selector (F-029). The actual auto-revert modeset is
+    // driven by SettingsDisplayRevertTick() from the UiTicker OUTSIDE
+    // the compose pass (rebinding the FB mid-compose is unsafe); here
+    // we only render the live state + countdown.
+    using duetos::drivers::gpu::DisplayCurrentModeIndex;
+    using duetos::drivers::gpu::DisplayModeAt;
+    using duetos::drivers::gpu::DisplayModeCount;
+    using duetos::drivers::gpu::DisplayModesetAvailable;
+
+    if (!g_sel_init)
+    {
+        const u32 ci = DisplayCurrentModeIndex();
+        g_sel = (ci < DisplayModeCount()) ? ci : 0;
+        g_sel_init = true;
+    }
+
+    const u32 sel_y = y + 44;
+    if (DisplayModesetAvailable())
+    {
+        ChromeTextDraw(ChromeTextRole::Body, x, sel_y, "RESOLUTION (,/. select  M apply):", fg, bg);
+        const u32 cur_idx = DisplayCurrentModeIndex();
+        for (u32 i = 0; i < DisplayModeCount(); ++i)
+        {
+            const auto& m = DisplayModeAt(i);
+            o = 0;
+            // Marker column: '>' selected, '*' currently-live mode.
+            AppendStr(line, sizeof(line), &o, (i == g_sel) ? "> " : "  ");
+            AppendStr(line, sizeof(line), &o, m.label);
+            if (i == cur_idx)
+                AppendStr(line, sizeof(line), &o, "   (current)");
+            line[o] = '\0';
+            const u32 row_fg = (i == g_sel) ? fg : dim;
+            ChromeTextDraw(ChromeTextRole::Body, x + 8, sel_y + 14 + i * 12, line, row_fg, bg);
+        }
+
+        // Confirm / revert countdown banner while a mode is pending.
+        const u32 after_list = sel_y + 14 + DisplayModeCount() * 12 + 4;
+        if (g_pending)
+        {
+            o = 0;
+            AppendStr(line, sizeof(line), &o, "KEEP THIS MODE? press K  (auto-revert in ");
+            AppendDec(line, sizeof(line), &o, RevertSecondsLeft());
+            AppendStr(line, sizeof(line), &o, "s)");
+            line[o] = '\0';
+            ChromeTextDraw(ChromeTextRole::Body, x, after_list, line, fg, bg);
+        }
+        else
+        {
+            ChromeTextDraw(ChromeTextRole::Caption, x, after_list, "M: APPLY SELECTED  K: KEEP (confirm)  ,/.: SELECT",
+                           dim, bg);
+        }
+    }
+    else
+    {
+        ChromeTextDraw(ChromeTextRole::Caption, x, sel_y, "RESOLUTION: fixed (no re-programmable display backend)", dim,
+                       bg);
+    }
+
     o = 0;
-    AppendStr(line, sizeof(line), &o, "DPMS STATE: ");
+    AppendStr(line, sizeof(line), &o, "DPMS: ");
     AppendStr(line, sizeof(line), &o, duetos::drivers::gpu::DpmsStateName(duetos::drivers::gpu::DpmsGet()));
+    AppendStr(line, sizeof(line), &o, "  (B blank / W wake / Y standby / U suspend)");
     line[o] = '\0';
-    ChromeTextDraw(ChromeTextRole::Body, x, y + 44, line, fg, bg);
-
-    o = 0;
-    AppendStr(line, sizeof(line), &o, "TRANSITIONS: ");
-    AppendDec(line, sizeof(line), &o, duetos::drivers::gpu::DpmsTransitionCount());
-    line[o] = '\0';
-    ChromeTextDraw(ChromeTextRole::Body, x, y + 56, line, dim, bg);
-
-    // Hint lines — Caption role for key-shortcut help under the readouts.
-    // The bottom-pinned AppLabel footer carries the canonical one-liner;
-    // the four expanded rows here document the long-form effect of each
-    // key for a user who hasn't memorised the abbreviations.
-    ChromeTextDraw(ChromeTextRole::Caption, x, y + 80, "B: BLANK MONITOR (DPMS Off)", dim, bg);
-    ChromeTextDraw(ChromeTextRole::Caption, x, y + 92, "W: WAKE MONITOR (DPMS On)", dim, bg);
-    ChromeTextDraw(ChromeTextRole::Caption, x, y + 104, "Y: STANDBY (H-sync off)", dim, bg);
-    ChromeTextDraw(ChromeTextRole::Caption, x, y + 116, "U: SUSPEND (V-sync off)", dim, bg);
+    ChromeTextDraw(ChromeTextRole::Caption, x, y + h - 24, line, dim, bg);
 }
 
 bool Key(char c)
 {
+    using duetos::drivers::gpu::DisplayCurrentModeIndex;
+    using duetos::drivers::gpu::DisplayModeAt;
+    using duetos::drivers::gpu::DisplayModeCount;
+    using duetos::drivers::gpu::DisplayModesetAvailable;
+    using duetos::drivers::gpu::DisplaySetMode;
     using duetos::drivers::gpu::DpmsSetState;
     using duetos::drivers::gpu::DpmsState;
+
+    // Resolution selector controls (F-029). Only active when a
+    // re-programmable backend (virtio-gpu) owns the framebuffer.
+    if (DisplayModesetAvailable())
+    {
+        if (!g_sel_init)
+        {
+            const u32 ci = DisplayCurrentModeIndex();
+            g_sel = (ci < DisplayModeCount()) ? ci : 0;
+            g_sel_init = true;
+        }
+        // ',' / '<' previous mode; '.' / '>' next mode.
+        if (c == ',' || c == '<')
+        {
+            g_sel = (g_sel == 0) ? DisplayModeCount() - 1 : g_sel - 1;
+            return true;
+        }
+        if (c == '.' || c == '>')
+        {
+            g_sel = (g_sel + 1) % DisplayModeCount();
+            return true;
+        }
+        // 'M' applies the selected mode + arms the confirm window.
+        if (c == 'm' || c == 'M')
+        {
+            const auto fb = duetos::drivers::video::FramebufferGet();
+            const auto& m = DisplayModeAt(g_sel);
+            if (m.width == fb.width && m.height == fb.height)
+            {
+                duetos::drivers::video::NotifyShow("already at that resolution");
+                return true;
+            }
+            // Stash the live geometry so a lapsed confirm reverts to
+            // it, THEN switch. If the switch fails the old mode is
+            // still live (reset-scanout is allocation-safe).
+            g_prev_w = fb.width;
+            g_prev_h = fb.height;
+            if (DisplaySetMode(m.width, m.height))
+            {
+                g_pending = true;
+                g_revert_deadline_ticks =
+                    ::duetos::arch::TimerTicks() + kRevertSeconds * ::duetos::arch::kTickFrequencyHz;
+                duetos::drivers::video::NotifyShow("resolution applied — press K to keep");
+            }
+            else
+            {
+                duetos::drivers::video::NotifyShow("resolution change failed");
+            }
+            return true;
+        }
+        // 'K' confirms (keep) the pending mode, disarming the revert.
+        if (c == 'k' || c == 'K')
+        {
+            if (g_pending)
+            {
+                g_pending = false;
+                g_sel = DisplayCurrentModeIndex();
+                if (g_sel >= DisplayModeCount())
+                    g_sel = 0;
+                duetos::drivers::video::NotifyShow("resolution kept");
+            }
+            return true;
+        }
+    }
+
     if (c == 'b' || c == 'B')
     {
         DpmsSetState(DpmsState::Off);
@@ -240,6 +393,28 @@ void SettingsDisplaySelfTest()
 bool SettingsDisplaySelfTestPassed()
 {
     return g_settings_display_self_test_passed;
+}
+
+bool SettingsDisplayRevertTick()
+{
+    if (!g_pending)
+        return false;
+    if (::duetos::arch::TimerTicks() < g_revert_deadline_ticks)
+        return false;
+    // Confirm window lapsed without a Keep — revert to the previous
+    // geometry. The caller guarantees we're OUTSIDE a compose pass +
+    // hold the compositor lock, so the FB rebind + compose-buffer
+    // drop inside DisplaySetMode are safe.
+    g_pending = false;
+    if (duetos::drivers::gpu::DisplaySetMode(g_prev_w, g_prev_h))
+    {
+        g_sel = duetos::drivers::gpu::DisplayCurrentModeIndex();
+        if (g_sel >= duetos::drivers::gpu::DisplayModeCount())
+            g_sel = 0;
+        duetos::drivers::video::NotifyShow("resolution reverted (not confirmed)");
+        return true;
+    }
+    return false;
 }
 
 } // namespace duetos::apps::settings

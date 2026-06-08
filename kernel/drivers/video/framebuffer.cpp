@@ -46,6 +46,15 @@ extern FramebufferPresentFn g_present_hook;
 constinit void* g_shadow_base = nullptr;
 constinit u32 g_shadow_pitch = 0;
 constinit bool g_compose_active = false;
+// Contiguous-frame count the shadow + snapshot were each allocated
+// with (they share one geometry). Tracked so `FramebufferDropCompose
+// Buffers` can return the exact run to the allocator after a runtime
+// resolution change. 0 ⇒ nothing allocated.
+constinit u64 g_shadow_frames = 0;
+// Physical base of the shadow + snapshot runs (needed to free; the
+// public globals hold the kernel-VA alias).
+constinit u64 g_shadow_phys = 0;
+constinit u64 g_presented_phys = 0;
 
 // Presented-frame snapshot — the pixels currently on the live
 // framebuffer (== frame N-1's composite), kept in normal RAM with
@@ -309,6 +318,12 @@ void FramebufferTeardown()
     g_shadow_base = nullptr;
     g_shadow_pitch = 0;
     g_compose_active = false;
+    // Teardown leaks the shadow/snapshot pages (documented "cheap"),
+    // so clear the tracking so a later FramebufferDropComposeBuffers
+    // can't double-free a leaked-then-reused run.
+    g_shadow_frames = 0;
+    g_shadow_phys = 0;
+    g_presented_phys = 0;
     // Presented-frame snapshot — drop it too. Its backing pages
     // leak with the shadow's (same documented "cheap" tradeoff);
     // the next BeginCompose re-allocates at the new geometry, and
@@ -327,6 +342,35 @@ void FramebufferTeardown()
     g_present_hook = nullptr;
     g_init_called = false;
     SerialWrite("[video/fb] teardown — surface offline\n");
+}
+
+void FramebufferDropComposeBuffers()
+{
+    // Refuse mid-frame — the shadow is the live write target then.
+    if (g_compose_active)
+    {
+        SerialWrite("[video/fb] drop-compose-buffers refused: compose active\n");
+        return;
+    }
+    if (g_shadow_frames == 0)
+        return; // nothing allocated yet
+
+    if (g_shadow_phys != 0)
+        mm::FreeContiguousFrames(static_cast<mm::PhysAddr>(g_shadow_phys), g_shadow_frames);
+    if (g_presented_phys != 0)
+        mm::FreeContiguousFrames(static_cast<mm::PhysAddr>(g_presented_phys), g_shadow_frames);
+
+    g_shadow_base = nullptr;
+    g_shadow_pitch = 0;
+    g_shadow_phys = 0;
+    g_shadow_frames = 0;
+    g_presented_base = nullptr;
+    g_presented_phys = 0;
+    g_presented_valid = false;
+    // Damage carries forward as off-surface if geometry shrank; reset.
+    g_damage.Reset();
+    g_damage_rect_count = 0;
+    SerialWrite("[video/fb] compose buffers dropped — re-alloc at new geometry on next compose\n");
 }
 
 void FramebufferReinit()
@@ -617,6 +661,8 @@ void FramebufferBeginCompose()
         const auto phys = phys_r.value();
         g_shadow_base = mm::PhysToVirt(phys);
         g_shadow_pitch = g_info.width * 4U;
+        g_shadow_frames = frames;
+        g_shadow_phys = static_cast<u64>(phys);
         SerialWrite("[video/fb] shadow online bytes=");
         SerialWriteHex(bytes);
         SerialWrite(" virt=");
@@ -639,6 +685,7 @@ void FramebufferBeginCompose()
         else
         {
             g_presented_base = mm::PhysToVirt(snap_phys);
+            g_presented_phys = static_cast<u64>(snap_phys);
             g_presented_valid = false; // not yet synced to the screen
             SerialWrite("[video/fb] presented-snapshot online virt=");
             SerialWriteHex(reinterpret_cast<u64>(g_presented_base));

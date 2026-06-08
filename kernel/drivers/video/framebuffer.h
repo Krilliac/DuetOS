@@ -158,6 +158,19 @@ void FramebufferReinit();
 /// caveat. Idempotent.
 void FramebufferTeardown();
 
+/// Free + drop the offscreen compose shadow + presented-frame
+/// snapshot buffers so the next `FramebufferBeginCompose` re-allocates
+/// them at the CURRENT `FramebufferGet()` geometry. Required after a
+/// runtime resolution change (`FramebufferRebindExternal` to a
+/// different width/height): the shadow + snapshot are sized to the
+/// geometry that was live when compose first ran, and a stale-sized
+/// shadow either reads out-of-bounds (new res larger) or mis-blits
+/// (new res smaller). No-op while a compose pass is active (the
+/// caller must not be mid-frame) and when no shadow exists yet.
+/// Returns the freed pages to the frame allocator — unlike
+/// `FramebufferTeardown`, which leaks them.
+void FramebufferDropComposeBuffers();
+
 /// True if init found a usable framebuffer and drawing is permitted.
 bool FramebufferAvailable();
 

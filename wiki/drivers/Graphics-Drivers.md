@@ -48,8 +48,40 @@ The compositor presents through this scanout: `WindowCompose`
 collects per-window dirty rectangles, paints them into the
 framebuffer-backed back buffer, and a `RESOURCE_FLUSH` IOCTL marks
 the rectangle as the current scanout image. EDID parsing, CVT
-timing, and CEA-861 extension blocks are decoded but mode-set
-negotiation against a vendor-specific GPU driver is roadmap work.
+timing, and CEA-861 extension blocks are decoded; mode-set
+negotiation against a vendor-specific (Intel/AMD/NVIDIA) GPU driver
+is roadmap work, but **runtime resolution change on virtio-gpu**
+landed 2026-06-08 (F-029) — see below.
+
+### Runtime modeset (virtio-gpu, F-029)
+
+`VirtioGpuResetScanout(w, h)` (`kernel/drivers/gpu/virtio_gpu.cpp`)
+changes resolution at runtime by tearing the live scanout down and
+rebuilding it: `SET_SCANOUT(resource=0)` (detach) → `RESOURCE_UNREF`
+→ `FreeContiguousFrames` (old backing) → the canonical
+`RESOURCE_CREATE_2D` / `ATTACH_BACKING` / `SET_SCANOUT` sequence at
+the new size. It feasibility-probes the new contiguous backing
+**before** touching the live resource, so an allocation failure
+leaves the old mode on screen.
+
+The user-facing coordinator is `DisplaySetMode(w, h)`
+(`kernel/drivers/gpu/modeset.{h,cpp}`): reset-scanout →
+`FramebufferRebindExternal` (point the FB driver at the new backing)
+→ `FramebufferDropComposeBuffers` (free the old-sized compose shadow
++ presented-snapshot so `BeginCompose` re-allocates at the new
+geometry). The window manager reads `FramebufferGet()` fresh every
+`DesktopCompose`, so the desktop relays out automatically on the
+next frame. Selectable modes: 800x600 / 1024x768 / 1280x720 /
+1280x1024 (bounded so the BGRA backing is a modest contiguous run).
+
+The Settings ▸ Display panel drives this: `,`/`.` select, `M` apply,
+`K` keep. A mandatory **revert-timeout** auto-reverts an applied mode
+after 10 s unless confirmed; the revert modeset runs from
+`SettingsDisplayRevertTick()` in the `UiTickerTask` outside the
+compose pass (rebinding the FB mid-compose would corrupt the frame).
+A non-virtio backend reports `DisplayModesetAvailable() == false` and
+the panel falls back to the read-only info it always showed. See
+[Design Decisions](../reference/Design-Decisions.md) (F-029 entry).
 
 ## GPU Discovery
 

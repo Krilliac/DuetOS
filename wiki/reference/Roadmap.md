@@ -488,27 +488,18 @@ long-term fix; the guard page still self-diagnoses any future overflow.
 
 ### Usability campaign — app gaps that need a real subsystem (2026-06-07)
 
-These three E-8 findings each cite a concrete rubric bar the app does
+These E-8 findings each cite a concrete rubric bar the app does
 not meet, but closing the gap needs a kernel/driver subsystem that does
 not exist yet — so they are **filed**, not patched (a fake slider /
 read-only "selector" would be worse than the honest read-only panel).
 
-- **F-029 — Settings ▸ Display: runtime resolution selector.** The
-  Display panel (`kernel/apps/settings_display.cpp`) is read-only info
-  (it reads `fb.width`/`fb.height` from the live framebuffer). A
-  working selector needs a **runtime GPU mode-set** path:
-  re-negotiate a UEFI-GOP/VBE mode (or program a real GPU display
-  pipe) and re-bind the framebuffer via the existing
-  `FramebufferRebind(...)` (`kernel/drivers/video/framebuffer.h:496`).
-  Today nothing under `drivers/gpu/` exposes modeset — the mode is
-  fixed at boot from the firmware GOP handoff. **Unblocked by:** a GPU
-  driver modeset entry point (Intel/AMD display pipe, or a GOP
-  re-`SetMode` shim in the boot stub) + a revert-timeout confirm
-  dialog (the rubric's safety bar). Rubric: *Settings ▸ display ▸
-  "Resolution selector applies on confirm (with revert-timeout
-  safety)"*.
+(F-029 — Settings ▸ Display runtime resolution selector — **landed
+2026-06-08**: a real virtio-gpu modeset path + revert-timeout. See
+`wiki/drivers/Graphics-Drivers.md` ("Runtime modeset") and
+`wiki/reference/Design-Decisions.md`.)
+
 - **Evidence:** `docs/usability/findings.md` rows F-019 /
-  F-029 / F-030; campaign screenshots under `docs/usability/screenshots/`.
+  F-030; campaign screenshots under `docs/usability/screenshots/`.
 
 ### Linux CVE audit — invariants to honour before the surface lands
 
