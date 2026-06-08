@@ -21,6 +21,7 @@
 #include "mm/kheap.h"
 #include "sched/sched.h"
 #include "subsystems/linux/syscall_pipe.h"
+#include "time/tick.h"
 
 namespace duetos::net
 {
@@ -133,6 +134,7 @@ i32 SocketAlloc(u16 domain, u16 type)
         s.loopback_pipe_recv_idx = -1;
         s.loopback_pipe_send_idx = -1;
         s.loopback_pending_accept_idx = -1;
+        s.recv_timeout_ticks = 0; // block forever until a caller opts in
         s.read_wq.head = nullptr;
         s.read_wq.tail = nullptr;
         s.accept_wq.head = nullptr;
@@ -744,6 +746,12 @@ i64 SocketRecvStream(u32 idx, u8* out, u32 cap)
     }
     if (s.tcb == tcp::kInvalidTcbId)
         return -107;
+    // Receive-timeout deadline, armed lazily on the first would-block so a
+    // recv that returns data immediately never reads the clock. 0 timeout
+    // = block forever (the default); see SocketSetRecvTimeout.
+    const u64 timeout = s.recv_timeout_ticks;
+    bool deadline_armed = false;
+    u64 deadline = 0;
     while (true)
     {
         const i32 n = tcp::RecvNonblocking(s.tcb, out, cap);
@@ -756,7 +764,22 @@ i64 SocketRecvStream(u32 idx, u8* out, u32 cap)
             return 0; // orderly EOF
         if (n < -1)
         {
-            // -2: would block — wait for data or peer FIN.
+            // -2: would block — wait for data or peer FIN. Bound the wait
+            // by the socket's recv timeout (if set) so an established-but-
+            // silent peer can't hang the caller forever.
+            if (timeout != 0)
+            {
+                const u64 now = ::duetos::time::TickCount();
+                if (!deadline_armed)
+                {
+                    deadline = now + timeout;
+                    deadline_armed = true;
+                }
+                else if (now >= deadline)
+                {
+                    return -110; // -ETIMEDOUT: peer silent past recv timeout
+                }
+            }
             sched::SchedSleepTicks(1);
             if ((s.shutdown_flags & 0x1) != 0)
                 return 0;
@@ -764,6 +787,13 @@ i64 SocketRecvStream(u32 idx, u8* out, u32 cap)
         }
         return -107; // dead TCB
     }
+}
+
+void SocketSetRecvTimeout(u32 idx, u64 ticks)
+{
+    if (idx >= kSocketPoolCap)
+        return;
+    g_pool[idx].recv_timeout_ticks = ticks;
 }
 
 bool SocketShutdown(u32 idx, u32 how)

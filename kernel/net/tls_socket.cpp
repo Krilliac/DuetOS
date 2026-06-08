@@ -469,6 +469,14 @@ i32 TlsSocketConnect(TlsSocketState* s, const char* host, u32 ip_be, u16 port)
         return -1;
     }
 
+    // Bound every blocking recv on this socket — the handshake below AND
+    // later record reads — so an established-but-silent peer (common when
+    // reaching a real host through a VM's NAT) can't hang the caller
+    // forever. 30 s at the 100 Hz scheduler tick: generous for a slow
+    // handshake, finite for a black-holed one.
+    constexpr u64 kTlsRecvTimeoutTicks = 30U * 100U;
+    SocketSetRecvTimeout(static_cast<u32>(idx), kTlsRecvTimeoutTicks);
+
     TlsTransport t{};
     t.read = SocketTransportRead;
     t.write = SocketTransportWrite;

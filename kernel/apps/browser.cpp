@@ -1610,6 +1610,9 @@ FetchStatus OpenTransport(bool scheme_https, const char* host, u16 port, net::ht
         net::SocketRelease(static_cast<u32>(sock));
         return FetchStatus::ConnectFailed;
     }
+    // Bound blocking recv so a silent-but-established peer can't hang the
+    // fetch worker forever (the TLS path sets the same bound internally).
+    net::SocketSetRecvTimeout(static_cast<u32>(sock), 30U * 100U);
     out->read = PlainTransportRead;
     out->write = PlainTransportWrite;
     out->ctx = reinterpret_cast<void*>(static_cast<u64>(static_cast<u32>(sock)));
