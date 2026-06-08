@@ -369,7 +369,7 @@ struct Win32MemoryBasicInfo
 {
     u64 base_address;       // 4 KiB-aligned page start
     u64 allocation_base;    // == base_address in v0
-    u32 allocation_protect; // PAGE_READWRITE for any mapped page
+    u32 allocation_protect; // PAGE_* reflecting the leaf PTE flags
     u32 _pad0;
     u64 region_size; // 4096 in v0 (no coalescing)
     u32 state;       // MEM_COMMIT / MEM_FREE
@@ -382,7 +382,11 @@ static_assert(sizeof(Win32MemoryBasicInfo) == 48, "Win32MemoryBasicInfo layout")
 constexpr u32 kMemCommit = 0x1000;
 constexpr u32 kMemFree = 0x10000;
 constexpr u32 kMemPrivate = 0x20000;
+// Win32 PAGE_* protection constants (subset VirtualQuery reports).
+constexpr u32 kPageReadOnly = 0x02;
 constexpr u32 kPageReadWrite = 0x04;
+constexpr u32 kPageExecuteRead = 0x20;
+constexpr u32 kPageExecuteReadWrite = 0x40;
 
 // Pretty-printer for boot diagnostics — the Warn path for an
 // unrecognised syscall number should be noisy enough to catch during
@@ -772,16 +776,32 @@ void SyscallDispatch(arch::TrapFrame* frame)
         }
 
         const u64 page_va = probe_va & ~0xFFFULL;
-        const mm::PhysAddr frame_pa = mm::AddressSpaceLookupUserFrame(target->as, page_va);
+        // Probe the leaf PTE directly (returns 0 when not present) so
+        // we can report the page's ACTUAL protection rather than a
+        // blanket PAGE_READWRITE. Lying RW for an RX code page or an
+        // RO data page misleads a PE that introspects protections
+        // (JIT W^X guards, stack-guard probes) and undercuts W^X.
+        const u64 pte = mm::AddressSpaceProbePteRaw(target->as, page_va);
         Win32MemoryBasicInfo info{};
         info.base_address = page_va;
         info.allocation_base = page_va;
         info.region_size = mm::kPageSize;
-        if (frame_pa != mm::kNullFrame)
+        if (pte != 0)
         {
+            // Map R/W + NX into the Win32 PAGE_* set. Under our W^X
+            // policy a page is never both writable and executable,
+            // but map that combo too so the query never lies about an
+            // unexpected mapping.
+            const bool writable = (pte & mm::kPageWritable) != 0;
+            const bool executable = (pte & mm::kPageNoExecute) == 0;
+            u32 prot;
+            if (writable)
+                prot = executable ? kPageExecuteReadWrite : kPageReadWrite;
+            else
+                prot = executable ? kPageExecuteRead : kPageReadOnly;
             info.state = kMemCommit;
-            info.allocation_protect = kPageReadWrite;
-            info.protect = kPageReadWrite;
+            info.allocation_protect = prot;
+            info.protect = prot;
             info.type = kMemPrivate;
         }
         else

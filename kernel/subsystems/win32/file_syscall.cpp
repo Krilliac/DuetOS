@@ -119,8 +119,15 @@ void DoFileRead(arch::TrapFrame* frame)
     }
     if (!mm::CopyToUser(reinterpret_cast<void*>(frame->rsi), stage, got))
     {
-        // Already consumed `got` bytes from the handle's cursor —
-        // refund is impossible without a backing-specific seek.
+        // ReadForProcess already advanced the handle cursor by `got`.
+        // Rewind it (CUR-relative, negative delta) so a retry re-reads
+        // the same bytes instead of silently skipping them — closes a
+        // data-loss window on the user-copy fault path. The seek
+        // clamps to >= 0, so the worst case is a no-op.
+        // GAP: a non-seekable backing (pipe) can't un-read; for those
+        //   the bytes are gone, which is inherent to a stream and not
+        //   recoverable here.
+        (void)fs::routing::SeekForProcess(proc, handle, -static_cast<i64>(got), /*whence=CUR*/ 1);
         // Surface the user-copy failure as -1 so the caller
         // doesn't think it received zeros.
         arch::SerialWrite("[sys] file_read CopyToUser FAIL pid=");

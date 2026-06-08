@@ -277,12 +277,21 @@ void DoVirtualAlloc(arch::TrapFrame* frame)
         return;
     }
 
-    const u32 pages = static_cast<u32>((size_bytes + mm::kPageSize - 1) / mm::kPageSize);
-    if (pages == 0 || pages > Process::kWin32VmapRegionPagesMax)
+    // Compute the page count in u64 and validate against the region
+    // cap BEFORE narrowing to u32. A huge size_bytes whose ceil-div
+    // exceeds 2^32 would otherwise truncate to a small in-range value
+    // and slip past this cap, handing back a 1-page mapping for a
+    // multi-terabyte request (the caller then faults past page 0).
+    // The +kPageSize-1 addition can itself wrap only for size_bytes
+    // within kPageSize of 2^64, and every such wrap lands in
+    // [0, kPageSize) -> pages64 == 0, caught here.
+    const u64 pages64 = (size_bytes + mm::kPageSize - 1) / mm::kPageSize;
+    if (pages64 == 0 || pages64 > Process::kWin32VmapRegionPagesMax)
     {
         frame->rax = 0;
         return;
     }
+    const u32 pages = static_cast<u32>(pages64);
 
     u64 page_flags = 0;
     bool is_guard = false;
@@ -436,7 +445,10 @@ void DoVirtualFree(arch::TrapFrame* frame)
 
     // MEM_DECOMMIT — unmap the touched pages, keep the
     // reservation slot.
-    const u32 pages = (size_bytes == 0) ? r.pages : static_cast<u32>((size_bytes + mm::kPageSize - 1) / mm::kPageSize);
+    // u64 page count — a truncating u32 cast on a huge size_bytes
+    // could wrap to a small value that slips past the
+    // first_page+pages>r.pages guard below and under-decommits.
+    const u64 pages = (size_bytes == 0) ? r.pages : (size_bytes + mm::kPageSize - 1) / mm::kPageSize;
     const u64 first_page = (base_va - r.base_va) / mm::kPageSize;
     if (first_page + pages > r.pages)
     {
@@ -485,7 +497,11 @@ void DoVirtualProtect(arch::TrapFrame* frame)
         return;
     }
 
-    const u32 pages = static_cast<u32>((size_bytes + mm::kPageSize - 1) / mm::kPageSize);
+    // u64 page count — see DoVirtualAlloc: a truncating u32 cast on
+    // a huge size_bytes could wrap small and slip past the
+    // first_page+pages>r.pages guard below, re-protecting the wrong
+    // span.
+    const u64 pages = (size_bytes + mm::kPageSize - 1) / mm::kPageSize;
     const u64 first_page = (base_va - r.base_va) / mm::kPageSize;
     if (first_page + pages > r.pages)
     {

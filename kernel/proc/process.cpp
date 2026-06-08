@@ -71,7 +71,13 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     // smoke task slept waiting for a sentinel that never came.
     memset(p, 0, sizeof(Process));
 
-    p->pid = g_next_pid++;
+    // Atomic fetch-add: ProcessCreate can run concurrently on
+    // multiple CPUs (there is no global spawn lock), so a plain
+    // post-increment would race two CPUs onto the SAME pid — and
+    // pids gate IPC / event-ring / handle delivery, so a collision
+    // mis-routes one process's notifications to another. Matches
+    // the CAS discipline the refcount path already uses.
+    p->pid = __atomic_fetch_add(&g_next_pid, 1, __ATOMIC_RELAXED);
     p->name = name;
     p->as = as;
     p->caps = caps;
@@ -257,7 +263,7 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     p->linux_shm_cursor = Process::kLinuxShmArenaBase;
     p->refcount = 1;
 
-    ++g_live_processes;
+    __atomic_add_fetch(&g_live_processes, 1, __ATOMIC_RELAXED);
 
     {
         arch::SerialLineGuard guard;
@@ -495,7 +501,7 @@ void ProcessRelease(Process* p)
     StdinFocusClearIf(p);
 
     mm::KFree(p);
-    --g_live_processes;
+    __atomic_sub_fetch(&g_live_processes, 1, __ATOMIC_RELAXED);
     arch::SerialWrite("[proc] release: done\n");
 }
 
@@ -541,13 +547,20 @@ void RecordSandboxDenial(Cap cap)
         KLOG_ONCE_WARN("proc", "RecordSandboxDenial: kernel-only task hit cap denial (gating bug?)");
         return;
     }
-    ++p->sandbox_denials;
+    // Atomic increment: a multi-threaded hostile PE can drive
+    // denials from several CPUs at once, and a plain read-modify-
+    // write would tear and lose increments — delaying (or, in the
+    // limit, masking) the kill-threshold crossing. Capture the
+    // post-increment value ONCE and use that snapshot for every
+    // decision below so the rate-limit, journal, and kill checks
+    // all agree on the same count.
+    const u64 denials = __atomic_add_fetch(&p->sandbox_denials, 1, __ATOMIC_RELAXED);
 
     // Fire the sandbox-denial probe at the same rate-limit the
     // existing denial logger uses (first hit + every 32nd). Same
     // motivation: a ring-3 hostile task can otherwise flood the
     // probe log with thousands of identical lines per boot.
-    if (ShouldLogDenial(p->sandbox_denials))
+    if (ShouldLogDenial(denials))
     {
         KBP_PROBE_V(::duetos::debug::ProbeId::kSandboxDenialCap, static_cast<u64>(cap));
         // Journal the denial. Pin = `cap/<CapName>` so dedup groups
@@ -578,19 +591,22 @@ void RecordSandboxDenial(Cap cap)
         (void)::duetos::diag::FixJournalRecordSev(
             ::duetos::diag::FixDetector::SoftFaultRecov, pin,
             "sandbox: cap-gated syscall denied; review whether the cap should be granted or the call rejected", p->pid,
-            p->sandbox_denials, /*severity=*/1);
+            denials, /*severity=*/1);
     }
 
     // Threshold-crossing: fire once at the first denial that lands
-    // at-or-past kSandboxDenialKillThreshold. Use `>=` paired with
-    // the threshold-already-fired flag below so a concurrent burst
-    // of denials that jumps the counter from N to N+2 (on SMP, no
-    // atomic on this counter today) still trips the kill — and so
-    // the message itself only prints once because the next-greater
-    // value won't equal the threshold under `==`.
-    if (p->sandbox_denials >= kSandboxDenialKillThreshold && !p->sandbox_kill_flagged)
+    // at-or-past kSandboxDenialKillThreshold. Use `>=` (not `==`)
+    // paired with the threshold-already-fired flag so that even if
+    // two CPUs' atomic increments straddle the threshold (one sees
+    // N, the next sees N+1), exactly one of them trips the kill and
+    // the message prints once.
+    if (denials >= kSandboxDenialKillThreshold &&
+        !__atomic_exchange_n(&p->sandbox_kill_flagged, true, __ATOMIC_RELAXED))
     {
-        p->sandbox_kill_flagged = true;
+        // The atomic test-and-set above is the single-fire gate: the
+        // CPU that flips the flag false->true runs this block; any
+        // peer that already observed it true skips. No separate
+        // assignment needed.
         arch::SerialWrite("[sandbox] pid=");
         arch::SerialWriteHex(p->pid);
         arch::SerialWrite(" hit ");
@@ -600,7 +616,7 @@ void RecordSandboxDenial(Cap cap)
         arch::SerialWrite(") — terminating as malicious\n");
         const u32 pid = static_cast<u32>(p->pid);
         ::duetos::security::EventRingPublishKind(::duetos::security::EventKind::SandboxDenialKill, pid,
-                                                 static_cast<u64>(cap), p->sandbox_denials, CapName(cap));
+                                                 static_cast<u64>(cap), denials, CapName(cap));
         ::duetos::security::IrRunbookEmit(::duetos::security::EventKind::SandboxDenialKill, pid);
         sched::FlagCurrentForKill(sched::KillReason::SandboxDenialThreshold);
     }
@@ -608,7 +624,7 @@ void RecordSandboxDenial(Cap cap)
 
 u64 ProcessLiveCount()
 {
-    return g_live_processes;
+    return __atomic_load_n(&g_live_processes, __ATOMIC_RELAXED);
 }
 
 bool ShouldLogDenial(u64 denial_index)
