@@ -140,6 +140,13 @@ struct State
     u32 render_viewport_w;
     volatile bool render_ready;
 
+    // True when the most recent fetch ENDED IN FAILURE (bad URL, DNS,
+    // connect, TLS/cert, OOM, HTTP error). Distinguishes "nothing fetched
+    // yet" (show the start page) from "a navigation just failed" (show a
+    // clear in-page error). Set pessimistically at the top of DoFetch and
+    // cleared once a fetch succeeds.
+    bool last_fetch_failed;
+
     // Link hit-test table, rebuilt by BuildLinkRects after every
     // RenderPage. Each entry is a rect in DOCUMENT coordinates (the same
     // space the display list lives in, before the scroll offset is
@@ -2276,6 +2283,10 @@ void DoFetch(const char* url)
     g_state.status_code = 0;
     g_state.link_count = 0;
     g_state.focus_link = kNoLink;
+    // Pessimistic: assume this navigation fails until it provably
+    // succeeds (cleared below once FetchUrl returns Ok). Keeps a failed
+    // fetch from silently falling back to the start page.
+    g_state.last_fetch_failed = true;
     // Drop the prior page's interactive context: a download / error /
     // non-HTML response below may not call RenderPage, and a stale ctx
     // would point at a DOM no longer reflected on screen. RenderPage
@@ -2346,6 +2357,9 @@ void DoFetch(const char* url)
 
     g_state.status_code = code;
     g_state.truncated = truncated;
+    // FetchUrl returned Ok — the navigation succeeded (a download or a
+    // rendered page follows). Clear the pessimistic failure flag.
+    g_state.last_fetch_failed = false;
 
     // Download path: an attachment-marked or non-text response is
     // SAVED to disk (raw bytes) instead of rendered. GAP: no resume,
@@ -2440,7 +2454,22 @@ void DrawBody(u32 cx, u32 cy, u32 cw, u32 ch, u32 fg, u32 bg)
 
     if (!g_state.render_ready || g_state.render_dl == nullptr)
     {
-        FramebufferDrawString(cx + 4, cy + top_reserved + 4, "(no content)", fg, bg);
+        if (g_state.last_fetch_failed)
+        {
+            // Clear, in-page failure state instead of a blank "(no content)"
+            // or a silent revert to the start page. g_state.status already
+            // carries the specific reason (DNS / TCP / TLS-cert / HTTP).
+            const u32 ex = cx + 8;
+            const u32 ey = cy + top_reserved + 8;
+            FramebufferDrawString(ex, ey, "Couldn't load this page", fg, bg);
+            FramebufferDrawString(ex, ey + 18, g_state.url, fg, bg);
+            FramebufferDrawString(ex, ey + 36, g_state.status, fg, bg);
+            FramebufferDrawString(ex, ey + 60, "Edit the address bar to try another site.", fg, bg);
+        }
+        else
+        {
+            FramebufferDrawString(cx + 4, cy + top_reserved + 4, "(no content)", fg, bg);
+        }
         duetos::drivers::video::WindowScrollbarSurface s{};
         s.present = false;
         duetos::drivers::video::WindowSetScrollbar(g_state.handle, s);
@@ -2883,7 +2912,10 @@ void DrawPrivConfirm(const Rect& content)
 // (a fresh / new tab), in View mode, not mid-fetch.
 bool ShowStartPage()
 {
-    return g_state.mode == Mode::View && !g_state.fetch_in_flight && !g_state.render_ready;
+    // A failed navigation is NOT the start-page state — show the in-page
+    // error (DrawBody) instead of silently reverting to the search tiles.
+    return g_state.mode == Mode::View && !g_state.fetch_in_flight && !g_state.render_ready &&
+           !g_state.last_fetch_failed;
 }
 
 // Render the new-tab start page (wordmark + Ask/URL prompt + tile row) into
