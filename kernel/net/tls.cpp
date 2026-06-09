@@ -523,27 +523,24 @@ bool DispatchServerHandshake(Connection* c, const HandshakeView& hv)
         }
         if (!parsed.subject_rsa_present)
         {
+            // GAP: RSA-key-exchange only — an ECDSA-leaf server (no RSA
+            // SPKI) needs ECDHE, which this v0 TLS doesn't negotiate yet.
             ConnectionFail(c, "leaf cert has no RSA SPKI");
             return false;
         }
-        // Hostname check: when an expected hostname is set, the
-        // leaf cert's subject CN must match. v0 does CN-only
-        // matching (no Subject Alternative Name walk yet);
-        // wildcard CNs are rejected because CnMatchesHostname is
-        // exact-match.
-        if (c->expected_hostname[0] != '\0')
-        {
-            if (parsed.subject_cn == nullptr || parsed.subject_cn_len == 0)
-            {
-                ConnectionFail(c, "leaf cert has no subject CN");
-                return false;
-            }
-            if (!crypto::x509::CnMatchesHostname(parsed.subject_cn, parsed.subject_cn_len, c->expected_hostname))
-            {
-                ConnectionFail(c, "leaf cert CN does not match expected hostname");
-                return false;
-            }
-        }
+        // Hostname verification is NOT done here. It used to be a CN-only
+        // exact match, which rejected essentially every modern cert —
+        // real leaves carry the hostname in the Subject Alternative Name
+        // (SAN), not the CN, so the CN check failed before trust was even
+        // evaluated ("leaf cert CN does not match expected hostname").
+        // The authoritative check is the cert-verifier hook
+        // (net::x509::Verify, run from tls_socket once the server cert is
+        // seen): it is SAN-aware (dNSName + leftmost-'*.' wildcard, CN
+        // fallback), verifies the chain to a trusted root, AND fails
+        // closed when no verifier is installed (see tls_socket.cpp
+        // RunCertVerifier). Doing a second, weaker hostname match here
+        // only blocked the correct one — so this layer just extracts the
+        // server key and lets the verifier own authentication.
         c->server_rsa = parsed.subject_rsa;
         c->server_cert_seen = true;
         return true;
