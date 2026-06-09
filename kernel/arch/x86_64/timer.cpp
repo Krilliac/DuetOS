@@ -5,6 +5,7 @@
 #include "arch/x86_64/lapic.h"
 #include "arch/x86_64/nmi_watchdog.h"
 #include "arch/x86_64/serial.h"
+#include "arch/x86_64/smp.h"
 #include "arch/x86_64/traps.h"
 
 #include "acpi/acpi.h"
@@ -115,6 +116,18 @@ void TimerHandler()
     // itself internally when the PMU is unavailable.
     NmiWatchdogPet();
     sched::OnTimerTick(g_ticks);
+
+    // VirtualBox PIT-tick fallback: the LAPIC timer never delivers, so
+    // APs were left with no timer of their own and PIT IRQ0 reaches
+    // only the BSP — meaning only the BSP runs this handler. Broadcast
+    // a per-CPU tick to every online AP so they get CPU-time accounting
+    // (sysmon's per-core bars) and, crucially, preemption. Gated on the
+    // fallback flag: on a healthy boot every AP runs its own
+    // LAPIC-timer TimerHandler, so broadcasting would double-count.
+    if (g_pit_fallback_active && SmpCpusOnline() > 1)
+    {
+        SmpBroadcastApTimerTick();
+    }
 
     // Liveness heartbeat at 1 Hz. Debug-level so a release preset's
     // kKlogMinLevel filter can drop the per-second spam while still
@@ -453,23 +466,21 @@ u64 TimerTicks()
 
 void LapicTimerStartOnCurrent()
 {
-    // GAP: SMP — if the BSP fell back to the IOAPIC-routed PIT tick
-    // (g_pit_fallback_active), arming this AP's LAPIC timer LVT is
-    // pointless: on this platform the LVT counts but never delivers,
-    // and the PIT IRQ0 is routed only to the BSP's LAPIC id. APs
-    // would get no tick from either source. DuetOS now boots SMP=8
-    // routinely with LAPIC-timer delivery working — this fallback
-    // path is unreachable on any system the test matrix covers, but
-    // a future board whose LAPIC timer is buggy enough to need the
-    // PIT recovery while running multiple cores needs either (a) an
-    // IPI-broadcast of the BSP's PIT-derived tick to APs, or (b) a
-    // per-AP TSC-deadline timer. Until then, don't arm a known-dead
-    // LVT — warn once and return.
+    // If the BSP fell back to the IOAPIC-routed PIT tick
+    // (g_pit_fallback_active — VirtualBox: the LVT counts but never
+    // delivers its IRQ, and PIT IRQ0 is routed only to the BSP's LAPIC
+    // id), arming this AP's LAPIC timer LVT is pointless — it would
+    // count but never fire. Don't arm a known-dead LVT; warn once and
+    // return. The AP still gets a periodic tick: the BSP's TimerHandler
+    // broadcasts one to every online AP each tick via
+    // SmpBroadcastApTimerTick (option (a) of the former GAP — chosen
+    // over a per-AP TSC-deadline timer, which would re-use the same
+    // LVT delivery path VBox fails to raise). So per-CPU accounting and
+    // preemption work on APs even on the fallback path.
     if (g_pit_fallback_active)
     {
-        KLOG_ONCE_WARN("arch/timer", "AP LAPIC timer skipped — BSP is on PIT-tick fallback (SMP tick GAP)");
-        FIX_NOTE_GAP("arch/x86_64/timer.cpp:LapicTimerStartOnCurrent",
-                     "IPI-broadcast PIT tick OR per-AP TSC-deadline timer");
+        KLOG_ONCE_WARN("arch/timer", "AP LAPIC timer skipped — BSP on PIT-tick fallback; "
+                                     "AP ticks delivered via IPI broadcast");
         return;
     }
     KASSERT(g_lapic_ticks_per_period != 0, "arch/timer", "LapicTimerStartOnCurrent before TimerInit");

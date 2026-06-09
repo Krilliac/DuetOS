@@ -101,6 +101,26 @@ void SmpSendReschedIpi(u32 cpu_id);
 /// check then calls Schedule() before iretq.
 void SmpInstallReschedIpiHandler();
 
+/// AP-timer-tick IPI vector. Sibling of `kReschedIpiVector` /
+/// `kTlbShootdownIpiVector`. Fired by the BSP once per timer tick ONLY
+/// on the PIT-tick fallback path (VirtualBox: the LAPIC timer never
+/// delivers, so APs are left with no tick of their own). The handler
+/// runs `sched::OnApTimerTick` on the receiving AP — per-CPU CPU-time
+/// accounting (what sysmon reads) plus a reschedule request.
+inline constexpr u8 kApTimerIpiVector = 0xF7;
+
+/// Install the IDT handler for `kApTimerIpiVector`. Called once
+/// alongside `SmpInstallReschedIpiHandler` during early boot, before
+/// `SmpStartAps`, so the AP IDT clone inherits the wired vector.
+void SmpInstallApTimerIpiHandler();
+
+/// Broadcast the AP-timer tick to every online peer CPU (one ICR write,
+/// all-excluding-self). Called from the BSP's `TimerHandler` ONLY when
+/// `g_pit_fallback_active` is set and >1 CPU is online — on a healthy
+/// boot each AP gets its own LAPIC timer tick, so broadcasting would
+/// double-count. Fire-and-forget; safe from IRQ context.
+void SmpBroadcastApTimerTick();
+
 /// Broadcast an NMI to every CPU except the calling one. Used by
 /// the panic path to halt peer CPUs before dumping diagnostics so
 /// they can't keep executing against potentially-corrupt shared

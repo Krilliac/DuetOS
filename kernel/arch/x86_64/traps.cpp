@@ -451,17 +451,24 @@ inline bool IsDispatchedVector(u64 vector)
         return false;
     if (vector >= kIrqVectorBase && vector <= kMsixVectorMax)
         return true;
-    // Reschedule-IPI (0xF8): in the 240..254 reserved range. Goes
-    // through the same dispatch + EOI path as a hardware IRQ so
-    // the post-handler need_resched check fires Schedule() before
-    // iretq, matching the timer-tick preemption shape.
-    // TLB-shootdown IPI (0xF9) shares the same shape; both are
-    // installed by SMP bring-up (kernel/arch/x86_64/smp.cpp).
-    // Without the 0xF9 leg the IrqInstall registration path would
-    // halt the kernel mid-boot the moment SMP wires up shootdowns.
-    // IPI-call (0xFA): cross-CPU function-call primitive — same
-    // shape, installed by kernel/cpu/ipi_call.cpp's IpiCallInstall.
-    if (vector == 0xF8 || vector == 0xF9 || vector == 0xFA)
+    // Kernel IPI vectors occupy a contiguous band inside the 240..254
+    // reserved range. Each is installed via IrqInstall during SMP / IPI
+    // bring-up and dispatched through the same EOI + post-handler
+    // need_resched path as a hardware IRQ (so a handler's SetNeedResched
+    // fires Schedule() before iretq, matching the timer-tick shape):
+    //   0xF7 AP-timer tick  (kernel/arch/x86_64/smp.cpp — VBox PIT-fallback)
+    //   0xF8 reschedule     (kernel/arch/x86_64/smp.cpp)
+    //   0xF9 TLB shootdown  (kernel/arch/x86_64/smp.cpp)
+    //   0xFA IPI-call       (kernel/cpu/ipi_call.cpp)
+    // A property check over the band — not a per-vector enumeration —
+    // so a new IPI vector inside the band needs no edit here. This
+    // predicate is the "whitelist incompleteness" class-of-bug from
+    // CLAUDE.md: it halted boot on 0xF9 once, then again on 0xF7. A
+    // bounded band closes the class while still rejecting truly-OOB
+    // vectors. Keep [lo, hi] tight to the vectors actually wired.
+    constexpr u64 kKernelIpiVectorLo = 0xF7;
+    constexpr u64 kKernelIpiVectorHi = 0xFA;
+    if (vector >= kKernelIpiVectorLo && vector <= kKernelIpiVectorHi)
         return true;
     return false;
 }
