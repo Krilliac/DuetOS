@@ -47,14 +47,14 @@ constinit u64 g_high_water_slots = 0;
 // Per-thread deep-usage canary (the "tripwire"). A sentinel word written at
 // the 75%-used line on allocation; downward stack growth that reaches it
 // overwrites it, so a single read at free time (or via the live accessor)
-// tells us the thread consumed >= 75% of its 64 KiB slot — an early warning
+// tells us the thread consumed >= 75% of its 128 KiB slot — an early warning
 // it is approaching the guard page (e.g. the deep TLS->x509->ASN.1->RSA/EC
 // tower run on a worker thread). O(1): one word written at alloc, one read
 // to check — no per-page scan, and re-armed on every alloc so slot reuse is
 // safe. Offset is from the USABLE base (just above the guard); rsp dropping
 // below it means (usable - offset) bytes used.
 constexpr u64 kStackTripwireWord = 0x574952454B435453ULL;         // "STCKWIRE" sentinel
-constexpr u64 kStackTripwireOffset = kKernelStackUsableBytes / 4; // 16 KiB -> trips at 75% (48 KiB) used
+constexpr u64 kStackTripwireOffset = kKernelStackUsableBytes / 4; // 32 KiB -> trips at 75% (96 KiB) used
 
 inline volatile u64* TripwireSlot(uptr usable_base)
 {
@@ -343,12 +343,12 @@ void FreeKernelStack(void* base, u64 stack_bytes)
 
     // Deep-usage canary — read the tripwire BEFORE TearDownStackPages unmaps
     // the slot. If the sentinel was overwritten, this thread's stack crossed
-    // the 48 KiB (75%) line on its way toward the guard page.
+    // the 96 KiB (75%) line on its way toward the guard page.
     if (KernelStackTripwireTripped(base))
     {
-        const u64 peak_floor = kKernelStackUsableBytes - kStackTripwireOffset; // >= 48 KiB used
+        const u64 peak_floor = kKernelStackUsableBytes - kStackTripwireOffset; // >= 96 KiB used
         KBP_PROBE_V(::duetos::debug::ProbeId::kKernelStackDeepUsage, peak_floor);
-        KLOG_WARN_V("mm/kstack", "thread freed after using >=75% of its 64 KiB kernel stack; peak >= bytes",
+        KLOG_WARN_V("mm/kstack", "thread freed after using >=75% of its 128 KiB kernel stack; peak >= bytes",
                     peak_floor);
     }
 

@@ -156,3 +156,6 @@ add_host_test(widget_group)
 # -Wsign-conversion here — they only fire on legitimate char-index math.
 add_host_test(kernel32_nls)
 target_compile_options(test_kernel32_nls PRIVATE -Wno-conversion -Wno-sign-conversion)
+
+# Browser omnibox URL-vs-search classifier (kernel/apps/browser/omnibox_classify.h).
+add_host_test(omnibox_classify)

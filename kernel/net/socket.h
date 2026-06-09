@@ -106,6 +106,15 @@ struct Socket
     i32 loopback_pipe_send_idx;
     i32 loopback_pending_accept_idx;
 
+    // Receive timeout (SO_RCVTIMEO-style), in scheduler ticks. 0 = block
+    // forever (POSIX default). When non-zero, a blocking stream recv that
+    // would otherwise wait indefinitely for a silent-but-established peer
+    // gives up after this many ticks and returns -ETIMEDOUT, so a caller
+    // (e.g. the browser fetch worker) can't hang the system on a stalled
+    // connection. Set via SocketSetRecvTimeout; honoured by
+    // SocketRecvStream's would-block wait.
+    u64 recv_timeout_ticks;
+
     // Blocking primitives — readers wait on this when the queue /
     // TCP state isn't ready; writers / RX paths wake it.
     sched::WaitQueue read_wq;
@@ -192,6 +201,13 @@ i64 SocketSendStream(u32 idx, const u8* data, u32 len);
 /// copied; 0 on orderly EOF (peer FIN + buffer drained); -errno on
 /// error.
 i64 SocketRecvStream(u32 idx, u8* out, u32 cap);
+
+/// Set a receive timeout (SO_RCVTIMEO-style) on a socket, in scheduler
+/// ticks. 0 (the default) blocks forever. A non-zero value bounds how
+/// long a blocking stream recv waits for an established-but-silent peer
+/// before returning -ETIMEDOUT, so a network client cannot hang
+/// indefinitely on a stalled connection. No-op on an invalid index.
+void SocketSetRecvTimeout(u32 idx, u64 ticks);
 
 /// shutdown(2) half-close. how: 0 = SHUT_RD, 1 = SHUT_WR, 2 = SHUT_RDWR.
 bool SocketShutdown(u32 idx, u32 how);
