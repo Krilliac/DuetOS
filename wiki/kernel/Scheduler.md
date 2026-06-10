@@ -106,14 +106,34 @@ RSP and the planted RA are never read or written by trampoline code.
 
 ## Runqueue
 
-Per-CPU singly-linked FIFO, head + tail, in two priority bands
-(Normal + Idle). The four head/tail pointers live in `cpu::PerCpu`
-(`runq_head_normal`, `runq_tail_normal`, `runq_head_idle`,
-`runq_tail_idle`). The running task is **not** on the queue.
-`Schedule()` re-enqueues the previous task (if still `Ready`) on its
-`last_cpu` runqueue before popping the local head. Dead tasks are
-reaped by a reaper thread (`g_reaper_wq`) that frees the stack + Task
-struct.
+Per-CPU singly-linked FIFO, head + tail. The Normal workload is split
+across **four MLFQ priority bands** (band 0 High … band 3 Low) plus a
+separate **Idle band** for the per-CPU idle tasks. The band heads/tails
+live in `cpu::PerCpu` as `runq_head[kSchedBands]` / `runq_tail[kSchedBands]`
+(`kSchedBands = 4`) alongside `runq_head_idle` / `runq_tail_idle`;
+`runq_band_len[]` holds the per-band counts and `runq_normal_len` is the
+aggregate (Σ bands 0–3) that every placement/load consumer reads. The
+running task is **not** on the queue. `Schedule()` re-enqueues the
+previous task (if still `Ready`) on its `last_cpu` runqueue before
+popping the local head. Dead tasks are reaped by a reaper thread
+(`g_reaper_wq`) that frees the stack + Task struct.
+
+**MLFQ band mapping (`SchedBandForProcess`).** Band is derived from the
+owning process's `win32_priority_class` and recomputed on every enqueue
+(so a runtime `SetPriorityClass` takes effect at the task's next
+wake/preemption): REALTIME/HIGH → band 0, ABOVE_NORMAL → band 1,
+NORMAL/default + **every kernel task** (`process == nullptr`) → band 2,
+BELOW_NORMAL/IDLE_PRIORITY_CLASS → band 3. `TaskPriority::Idle` tasks
+bypass banding entirely (Idle band, pinned per-CPU, never stolen, never
+counted in load). `RunqueuePop` scans band 0→3 (then Idle); the wake
+path sets `need_resched` when a woken task outranks the running task's
+band, so a high-priority thread preempts a lower one within one tick.
+**Anti-starvation valve:** every `kLowBandEscapeValve = 8`th pop on a
+CPU with a lower non-empty band dispatches from the lowest non-empty
+band instead — this is also the only mitigation today for the
+priority-inversion hazard (no priority inheritance on `sched::Mutex`,
+GAP-marked). Placement/steal stay band-blind on the aggregate length
+for v0 (steal/balance lift the *highest* band's eligible task).
 
 **Deferred-zombie handoff (the reaper UAF invariant).** A dying task is
 **never** published to the global zombie list while a CPU is still
@@ -314,14 +334,20 @@ must transition `Ready` and re-enqueue.
 
 ## Known Limits / GAPs
 
-- **Single global `g_sched_lock`.** Per-CPU runqueues are in place
-  (`cpu::PerCpu`) but every mutation still serialises on one global
-  ticket spinlock. Per-CPU lock split is Roadmap **B2-followup** —
-  defer until profiles show contention.
-- **No priorities beyond Normal/Idle.** Within Normal every task is
-  equal weight. The Win32 priority class is wired (`Process::win32_priority_class`)
-  but the scheduler ignores it; aging / decay rides on the per-CPU
-  lock split (Roadmap T8-01-followon).
+- **`g_sched_lock` still global for the handoff.** Per-CPU runqueue
+  locks (`g_runq_locks`, class `kLockClassSchedRunq`) landed in the
+  bridge phase and bracket every list mutation, but they're held
+  *under* the global lock — dropping the global from the `Schedule()`
+  path is Roadmap **B2-followup** steps 3-4, deferred until a profile
+  shows contention (rewriting the context-switch UAF handshake isn't
+  worth the risk unprofiled).
+- **MLFQ bands, no decay or inheritance.** Four bands derived from
+  `win32_priority_class` (landed 2026-06-10 — see Runqueue above): a
+  high-priority thread preempts a lower one within one tick. v0 has
+  **no quantum-burn demotion / aging** (band is fixed by priority
+  class, not behaviour) and **no priority inheritance** on
+  `sched::Mutex` — the escape valve is the only inversion mitigation
+  (GAP-marked). Placement is band-blind on the aggregate length.
 - **No userland scheduling specifics in the core yet.** Ring 3 entry
   added TSS + IST stacks and CR3 swap on context switch where the
   target task's `AddressSpace` differs.

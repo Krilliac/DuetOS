@@ -1711,6 +1711,12 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
         // does NOT egress to debugcon, so a clean boot leaves
         // the host's `duetos.dmp` file empty.
         duetos::diag::minidump::MinidumpSelfTest();
+        // MLFQ band-ordering + escape-valve acceptance test
+        // (T8-01-followon). Structural — runs on a scratch per-CPU
+        // runqueue, so it needs no APs/topology and is deterministic
+        // on a 1-CPU TCG guest. Proves high->low band pop order plus
+        // the anti-starvation escape valve.
+        duetos::sched::MlfqPreemptSelfTest();
     }
     // Idle task FIRST so the runqueue is never empty — even if the
     // reaper or any subsequent worker blocks before the boot task

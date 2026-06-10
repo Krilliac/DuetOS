@@ -130,11 +130,20 @@ struct Task
     // that is undefined, since the slot is reused on the next
     // wait.
     bool wake_by_timeout;
-    // Scheduling priority. Normal tasks round-robin on the Normal
-    // runqueue; Idle tasks only run when Normal is empty. Set
-    // once at SchedCreate and never changed — priority inheritance
-    // / real-time class would need a mutable field.
+    // Scheduling priority. Normal tasks live on one of the kSchedBands
+    // MLFQ tiers (see `band` below); Idle tasks live on the unbanded
+    // Idle runqueue and only run when every Normal band is empty. Set
+    // once at SchedCreate and never changed — the Idle-vs-Normal split
+    // is a fixed property of the task, not a runtime priority.
     TaskPriority priority;
+
+    // MLFQ band index for Normal-class tasks (0 = highest, kSchedBands-1
+    // = lowest). Derived from the owning process's win32_priority_class
+    // via SchedBandForProcess: it is set at SchedCreate and RECOMPUTED
+    // at the top of RunqueuePushOn, so a runtime SetPriorityClass takes
+    // effect at the task's next wake/preemption. Meaningless for
+    // TaskPriority::Idle tasks (they bypass banding entirely).
+    u8 band;
 
     // Per-process address space. nullptr means "kernel AS" (the
     // boot PML4) — used by every kernel-only thread (workers,
@@ -462,13 +471,18 @@ constexpr u64 kStackCanary = 0xC0DEB0B0CAFED00DULL;
 //
 // Helper: typed accessor wrappers around the void* slots in PerCpu
 // so call sites don't need to cast on every reference.
-inline Task*& RunqHeadNormal(cpu::PerCpu* p)
+// Band-indexed Normal-runqueue head/tail accessors. `band` must be in
+// [0, cpu::kSchedBands). The reinterpret_cast is the same void*→Task*&
+// trick the old single-band accessors used; the array slot just adds
+// the band index. Callers hold the runqueue lock (asserted at the
+// enqueue/dequeue funnels), so the returned reference is stable.
+inline Task*& RunqHead(cpu::PerCpu* p, u8 band)
 {
-    return reinterpret_cast<Task*&>(p->runq_head_normal);
+    return reinterpret_cast<Task*&>(p->runq_head[band]);
 }
-inline Task*& RunqTailNormal(cpu::PerCpu* p)
+inline Task*& RunqTail(cpu::PerCpu* p, u8 band)
 {
-    return reinterpret_cast<Task*&>(p->runq_tail_normal);
+    return reinterpret_cast<Task*&>(p->runq_tail[band]);
 }
 inline Task*& RunqHeadIdle(cpu::PerCpu* p)
 {
@@ -477,6 +491,53 @@ inline Task*& RunqHeadIdle(cpu::PerCpu* p)
 inline Task*& RunqTailIdle(cpu::PerCpu* p)
 {
     return reinterpret_cast<Task*&>(p->runq_tail_idle);
+}
+
+// MLFQ band identifiers. Band 0 is the highest priority, band 3 the
+// lowest. The aggregate runq_normal_len stays Σ bands 0..kSchedBands-1.
+inline constexpr u8 kSchedBandHigh = 0;        // REALTIME / HIGH
+inline constexpr u8 kSchedBandAboveNormal = 1; // ABOVE_NORMAL
+inline constexpr u8 kSchedBandNormal = 2;      // NORMAL / default / all kernel tasks
+inline constexpr u8 kSchedBandLow = 3;         // BELOW_NORMAL / IDLE_PRIORITY_CLASS
+static_assert(kSchedBandLow + 1 == cpu::kSchedBands, "band ids must cover [0, kSchedBands)");
+
+// Anti-starvation escape valve: every kLowBandEscapeValve-th Normal-band
+// pop services the LOWEST non-empty band instead of the highest, so each
+// band gets at least 1/kLowBandEscapeValve of dispatch slots even under a
+// permanently-saturated higher band. This is ALSO the only mitigation for
+// the priority-inversion hazard (a band-3 task holding a lock a band-0
+// task wants): there is no priority inheritance in v0, so the valve's
+// guaranteed dispatch floor is what eventually lets the low task release.
+// GAP: no priority inheritance — escape-valve floor is the only inversion
+//      mitigation. Revisit when blocking primitives carry a boosting hook.
+inline constexpr u32 kLowBandEscapeValve = 8;
+
+// Map a task's owning process to its MLFQ band, per Microsoft's
+// win32_priority_class contract. Kernel-only tasks (process == nullptr)
+// and the default/NORMAL classes land in the Normal band. A value of 0
+// is the zero-initialised default and is treated as NORMAL. Pure — no
+// side effects, no lock requirement; reads one u32 off the process.
+u8 SchedBandForProcess(const core::Process* p)
+{
+    if (p == nullptr)
+    {
+        return kSchedBandNormal; // every kernel thread runs in the Normal band
+    }
+    switch (p->win32_priority_class)
+    {
+    case 0x100: // REALTIME_PRIORITY_CLASS
+    case 0x80:  // HIGH_PRIORITY_CLASS
+        return kSchedBandHigh;
+    case 0x8000: // ABOVE_NORMAL_PRIORITY_CLASS
+        return kSchedBandAboveNormal;
+    case 0x4000: // BELOW_NORMAL_PRIORITY_CLASS
+    case 0x40:   // IDLE_PRIORITY_CLASS
+        return kSchedBandLow;
+    case 0x20: // NORMAL_PRIORITY_CLASS
+    case 0x0:  // zero-initialised default → Normal behaviour
+    default:
+        return kSchedBandNormal;
+    }
 }
 
 constinit Task* g_sleep_head = nullptr; // sorted by wake_tick (ascending)
@@ -833,8 +894,16 @@ void RunqueuePushOn(cpu::PerCpu* target, Task* t)
     // own lock brackets the list + counter mutation under the global.
     sync::SpinLockGuard rq(RunqLockFor(target));
     t->next = nullptr;
-    Task*& head = (t->priority == TaskPriority::Idle) ? RunqHeadIdle(target) : RunqHeadNormal(target);
-    Task*& tail = (t->priority == TaskPriority::Idle) ? RunqTailIdle(target) : RunqTailNormal(target);
+    const bool is_idle = (t->priority == TaskPriority::Idle);
+    // Recompute the band on every enqueue so a runtime SetPriorityClass
+    // takes effect at the task's next wake/preemption (it doesn't have
+    // to wait for the task to be re-created). Idle tasks bypass banding.
+    if (!is_idle)
+    {
+        t->band = SchedBandForProcess(t->process);
+    }
+    Task*& head = is_idle ? RunqHeadIdle(target) : RunqHead(target, t->band);
+    Task*& tail = is_idle ? RunqTailIdle(target) : RunqTail(target, t->band);
     // Singly-linked-list invariant: head and tail are null together
     // or non-null together. If only one is null the table is already
     // corrupt — taking the `tail == nullptr` branch below would
@@ -851,8 +920,11 @@ void RunqueuePushOn(cpu::PerCpu* target, Task* t)
         tail->next = t;
         tail = t;
     }
-    if (t->priority != TaskPriority::Idle)
+    if (!is_idle)
     {
+        // Aggregate AND per-band counters move together so the two
+        // always agree (runq_normal_len == Σ runq_band_len).
+        ++target->runq_band_len[t->band];
         ++target->runq_normal_len;
     }
 }
@@ -1082,15 +1154,37 @@ void RunqueuePush(Task* t)
     {
         arch::SmpSendReschedIpi(target->cpu_id);
     }
+    else if (self != nullptr && target == self && t->priority != TaskPriority::Idle)
+    {
+        // Local wake: if the freshly-enqueued task outranks the task
+        // currently running on this CPU (lower band number = higher
+        // priority), flag a reschedule so the next tick's Schedule()
+        // — which pops band 0 first — dispatches the higher-priority
+        // task within one 10 ms tick instead of waiting for the
+        // running task to exhaust its slice. RunqueuePushOn just
+        // recomputed t->band; the running task's band was set the
+        // same way on its own last enqueue.
+        const Task* cur = self->current_task;
+        if (cur != nullptr && cur->priority != TaskPriority::Idle && t->band < cur->band)
+        {
+            self->need_resched = true;
+        }
+        else if (cur != nullptr && cur->priority == TaskPriority::Idle)
+        {
+            // A Normal task woke while the CPU was running its idle
+            // thread — always preempt the idle task.
+            self->need_resched = true;
+        }
+    }
 }
 
-// Walk every Task on every CPU's runqueue (Normal then Idle band,
-// per CPU). Caller holds g_sched_lock for the duration. The visitor
-// returns true to stop early (used by find-by-pid / find-by-tid),
-// false to continue. Helper return value mirrors that — true if any
-// visit asked to stop. Centralises the per-CPU iteration so the
-// rest of the file doesn't open-code `for (cpu_id = 0; ...) { for
-// (Task* ...) }` everywhere.
+// Walk every Task on every CPU's runqueue (all Normal bands 0..N-1
+// then the Idle band, per CPU). Caller holds g_sched_lock for the
+// duration. The visitor returns true to stop early (used by
+// find-by-pid / find-by-tid), false to continue. Helper return value
+// mirrors that — true if any visit asked to stop. Centralises the
+// per-CPU iteration so the rest of the file doesn't open-code
+// `for (cpu_id = 0; ...) { for (Task* ...) }` everywhere.
 template <typename F> bool ForEachRunqueueTask(F&& fn)
 {
     const u32 limit = arch::SmpCpuIdLimit();
@@ -1101,11 +1195,14 @@ template <typename F> bool ForEachRunqueueTask(F&& fn)
         {
             continue;
         }
-        for (Task* t = RunqHeadNormal(p); t != nullptr; t = t->next)
+        for (u8 band = 0; band < cpu::kSchedBands; ++band)
         {
-            if (fn(t))
+            for (Task* t = RunqHead(p, band); t != nullptr; t = t->next)
             {
-                return true;
+                if (fn(t))
+                {
+                    return true;
+                }
             }
         }
         for (Task* t = RunqHeadIdle(p); t != nullptr; t = t->next)
@@ -1170,6 +1267,73 @@ inline void RunqueuePoppedSanity(Task* t)
     }
 }
 
+// Sentinel returned by RunqSelectPopBand when every Normal band on the
+// CPU is empty (the caller then falls through to the Idle band).
+inline constexpr u8 kRunqNoBand = 0xFF;
+
+// Pure band-selection for the MLFQ pop path. Picks the highest-priority
+// (lowest-index) non-empty Normal band, EXCEPT every kLowBandEscapeValve-th
+// Normal pop, where it picks the LOWEST non-empty band instead so a
+// starved low band still gets a dispatch slot (anti-starvation valve,
+// also the v0 priority-inversion mitigation — see kLowBandEscapeValve).
+// O(kSchedBands) — a fixed, tiny constant. The pop counter is advanced by
+// the caller (RunqUnlinkBandHead) so a "select but don't pop" probe stays
+// side-effect-free. Returns kRunqNoBand if all Normal bands are empty.
+u8 RunqSelectPopBand(const cpu::PerCpu* p)
+{
+    u8 highest = kRunqNoBand;
+    u8 lowest = kRunqNoBand;
+    for (u8 band = 0; band < cpu::kSchedBands; ++band)
+    {
+        if (p->runq_band_len[band] != 0)
+        {
+            if (highest == kRunqNoBand)
+            {
+                highest = band;
+            }
+            lowest = band;
+        }
+    }
+    if (highest == kRunqNoBand)
+    {
+        return kRunqNoBand; // every Normal band empty
+    }
+    // Escape valve: when the counter is about to land on a valve
+    // multiple AND there is a lower band than the highest-priority one,
+    // service the lowest non-empty band. `runq_pop_counter + 1` is the
+    // value this pop WILL take (RunqUnlinkBandHead bumps it), so the
+    // valve fires on the kLowBandEscapeValve-th pop.
+    const bool valve = ((p->runq_pop_counter + 1) % kLowBandEscapeValve) == 0;
+    if (valve && lowest != highest)
+    {
+        return lowest;
+    }
+    return highest;
+}
+
+// Unlink the head of band `band` on CPU `p`, maintaining the per-band
+// and aggregate counters and the pop cursor. Caller must already hold
+// the CPU's runqueue lock and have verified the band is non-empty.
+// Returns the unlinked Task (never nullptr given the precondition).
+Task* RunqUnlinkBandHead(cpu::PerCpu* p, u8 band)
+{
+    Task* t = RunqHead(p, band);
+    RunqHead(p, band) = t->next;
+    if (RunqHead(p, band) == nullptr)
+    {
+        RunqTail(p, band) = nullptr;
+    }
+    t->next = nullptr;
+    // Mirror the increments in RunqueuePushOn. KASSERT in case of
+    // double-pop / leak: a non-zero counter should never go negative.
+    KASSERT(p->runq_band_len[band] > 0, "sched", "RunqueuePop: band_len underflow");
+    KASSERT(p->runq_normal_len > 0, "sched", "RunqueuePop: normal_len underflow");
+    --p->runq_band_len[band];
+    --p->runq_normal_len;
+    ++p->runq_pop_counter;
+    return t;
+}
+
 Task* RunqueuePop()
 {
     // Dequeue funnel — same documented g_sched_lock precondition as
@@ -1178,24 +1342,14 @@ Task* RunqueuePop()
     cpu::PerCpu* p = cpu::CurrentCpu();
     // Bridge-phase per-CPU lock (see g_runq_locks).
     sync::SpinLockGuard rq(RunqLockFor(p));
-    Task* t = RunqHeadNormal(p);
-    if (t != nullptr)
+    const u8 band = RunqSelectPopBand(p);
+    if (band != kRunqNoBand)
     {
-        RunqHeadNormal(p) = t->next;
-        if (RunqHeadNormal(p) == nullptr)
-        {
-            RunqTailNormal(p) = nullptr;
-        }
-        t->next = nullptr;
-        // Mirror the increment in RunqueuePushOn — Normal-band only.
-        // KASSERT in case of double-pop / leak: a non-zero counter
-        // should never go negative on a real pop path.
-        KASSERT(p->runq_normal_len > 0, "sched", "RunqueuePop: normal_len underflow");
-        --p->runq_normal_len;
+        Task* t = RunqUnlinkBandHead(p, band);
         RunqueuePoppedSanity(t);
         return t;
     }
-    t = RunqHeadIdle(p);
+    Task* t = RunqHeadIdle(p);
     if (t != nullptr)
     {
         RunqHeadIdle(p) = t->next;
@@ -1275,6 +1429,80 @@ bool SuspendedListRemove(Task* t)
     return false;
 }
 
+// Shared band-aware unlink for the work-steal and active-balance paths.
+// Scans `src`'s Normal bands from highest priority (0) to lowest, and
+// within each band walks up to `scan_cap` tasks for the first one whose
+// affinity mask permits execution on `dest_cpu`. Lifts it (maintaining
+// the per-band + aggregate counters and the head/tail pointers exactly
+// as the pop path does) and returns it, retargeting its last_cpu to
+// `dest_cpu`. Returns nullptr if no band holds an affinity-eligible
+// task within the scan cap. Caller holds `src`'s runqueue lock.
+//
+// Stealing the HIGHEST band first is the correct MLFQ direction: an
+// overloaded peer's high-priority work is exactly what an idle CPU
+// should pull, so a band-0 task doesn't sit behind a band-0-saturated
+// peer's queue while a different CPU spins idle.
+Task* LiftHighestBandTaskFrom(cpu::PerCpu* src, u32 dest_cpu, u32 scan_cap)
+{
+    for (u8 band = 0; band < cpu::kSchedBands; ++band)
+    {
+        Task* head = RunqHead(src, band);
+        if (head == nullptr)
+        {
+            continue;
+        }
+        // Single-pass scan with prev-tracking so the chosen task can be
+        // unlinked without re-walking. `prev == nullptr` is the head case.
+        Task* prev = nullptr;
+        Task* victim = nullptr;
+        u32 scanned = 0;
+        for (Task* t = head; t != nullptr && scanned < scan_cap; t = t->next, ++scanned)
+        {
+            if (TaskAllowedOn(t, dest_cpu))
+            {
+                victim = t;
+                break;
+            }
+            prev = t;
+        }
+        if (victim == nullptr)
+        {
+            // Every reachable task in this band is affinity-pinned away
+            // from dest (or the band is deeper than the scan cap). The
+            // lower bands might still hold an eligible task — keep going.
+            continue;
+        }
+        if (prev == nullptr)
+        {
+            RunqHead(src, band) = victim->next;
+        }
+        else
+        {
+            prev->next = victim->next;
+        }
+        if (RunqHead(src, band) == nullptr)
+        {
+            RunqTail(src, band) = nullptr;
+        }
+        else if (victim == RunqTail(src, band))
+        {
+            // Lifted the tail (a deeper-than-head allowed task that
+            // happened to be last); the predecessor becomes the new tail.
+            RunqTail(src, band) = prev;
+        }
+        victim->next = nullptr;
+        KASSERT(src->runq_band_len[band] > 0, "sched", "Lift: src band_len underflow");
+        KASSERT(src->runq_normal_len > 0, "sched", "Lift: src normal_len underflow");
+        --src->runq_band_len[band];
+        --src->runq_normal_len;
+        // Update affinity so the next wake routes to dest — keeps hot
+        // tasks on whichever CPU is actually running them.
+        victim->last_cpu = dest_cpu;
+        return victim;
+    }
+    return nullptr;
+}
+
 // Lift one Normal-band Ready task off a peer CPU's runqueue.
 // Called from RunqueuePopRunnable's empty-local-queue fallback.
 // Walks peers in two passes: pass 0 visits only peers that share
@@ -1334,74 +1562,24 @@ Task* StealNormalFromPeer()
             // successful `return`, so at most ONE runq lock is ever
             // held (rule 2 in the g_runq_locks comment).
             sync::SpinLockGuard rq(RunqLockFor(peer));
-            Task* head = RunqHeadNormal(peer);
-            if (head == nullptr)
-            {
-                continue;
-            }
-            // Walk the peer's Normal queue looking for the first
-            // task whose affinity mask allows execution on `self_id`.
-            // The peer's head might be affinity-pinned away from us
-            // (e.g. a worker pinned to a specific NUMA node); a
-            // deeper task that IS allowed here should still be
-            // stealable. Bounded walk caps worst-case time spent
-            // here under a peer queue that's entirely pinned away —
-            // kStealScanCap (32) covers the vast majority of real
-            // queues; beyond that we accept "no steal this round"
-            // and the next periodic balance picks up the slack.
-            //
-            // Single-pass: track `prev` so the chosen task can be
-            // unlinked without re-walking. `prev == nullptr`
-            // identifies the head case so the head pointer gets
-            // updated.
+            // Scan the peer's bands high→low for the first affinity-
+            // eligible task. The peer's head might be affinity-pinned
+            // away from us (e.g. a worker pinned to a specific NUMA
+            // node); a deeper task that IS allowed here should still be
+            // stealable, and a higher-priority band should be drained
+            // before a lower one. The bounded walk (kStealScanCap = 32)
+            // caps worst-case time under a band pinned entirely away —
+            // beyond it we accept "no steal this round" and the next
+            // periodic balance picks up the slack.
             constexpr u32 kStealScanCap = 32;
-            Task* prev = nullptr;
-            Task* victim = nullptr;
-            u32 scanned = 0;
-            for (Task* t = head; t != nullptr && scanned < kStealScanCap; t = t->next, ++scanned)
-            {
-                if (TaskAllowedOn(t, self_id))
-                {
-                    victim = t;
-                    break;
-                }
-                prev = t;
-            }
+            Task* victim = LiftHighestBandTaskFrom(peer, self_id, kStealScanCap);
             if (victim == nullptr)
             {
-                // Every reachable task in this peer's queue is
-                // affinity-pinned away from us (or the queue is
-                // deeper than the scan cap). Try the next peer.
+                // Every reachable task across this peer's bands is
+                // affinity-pinned away from us (or deeper than the
+                // scan cap). Try the next peer.
                 continue;
             }
-            // Unlink `victim` from the peer's queue.
-            if (prev == nullptr)
-            {
-                // Head case — same fast-path as the original
-                // implementation when the head is the chosen task.
-                RunqHeadNormal(peer) = victim->next;
-            }
-            else
-            {
-                prev->next = victim->next;
-            }
-            if (RunqHeadNormal(peer) == nullptr)
-            {
-                RunqTailNormal(peer) = nullptr;
-            }
-            else if (victim == RunqTailNormal(peer))
-            {
-                // Stole the tail (a deeper-than-head allowed task
-                // happened to be last in the queue). The new tail
-                // is the predecessor we tracked.
-                RunqTailNormal(peer) = prev;
-            }
-            victim->next = nullptr;
-            KASSERT(peer->runq_normal_len > 0, "sched", "Steal: peer normal_len underflow");
-            --peer->runq_normal_len;
-            // Update affinity so the next wake routes to us — keeps
-            // hot tasks on whichever CPU is actually running them.
-            victim->last_cpu = self_id;
             return victim;
         }
     }
@@ -1522,20 +1700,16 @@ Task* BalancePullOnce(cpu::PerCpu* self)
         // nested (rule 2 in the g_runq_locks comment; a nested
         // same-class pair reads as a cycle to lockdep).
         sync::SpinLockGuard rq(RunqLockFor(victim));
-        Task* head = RunqHeadNormal(victim);
-        KASSERT(head != nullptr, "sched", "BalancePullOnce: victim normal_len > 0 but head null");
-        // Walk the victim's Normal queue for the first task whose affinity
-        // mask permits execution on `self`. The heaviest peer's head may be
-        // pinned away from us (NUMA-pinned worker, IRQ-affined task); a
-        // deeper task that IS allowed here should still migrate so the
-        // overloaded peer actually drains rather than staying hot because
-        // its head happens to be pinned. Mirrors `StealNormalFromPeer`'s
-        // bounded single-pass scan + prev-tracking unlink exactly, so the
-        // runqueue invariants (head/tail pointers, intrusive-link nulling,
-        // counter) stay byte-for-byte identical between the two paths.
-        // kBalanceScanCap bounds the worst case under a queue pinned
-        // entirely away from us; beyond it we yield this tick and let the
-        // next period retry.
+        // Lift the highest-priority affinity-eligible task off the
+        // heaviest peer (bands high→low). The heaviest peer's head may
+        // be pinned away from us (NUMA-pinned worker, IRQ-affined task);
+        // a deeper task that IS allowed here should still migrate so the
+        // overloaded peer actually drains. Shares LiftHighestBandTaskFrom
+        // with the steal path so the runqueue invariants (per-band +
+        // aggregate counters, head/tail pointers, intrusive-link nulling,
+        // affinity update) stay byte-for-byte identical between the two.
+        // kBalanceScanCap bounds the worst case under a band pinned
+        // entirely away from us; beyond it we yield this tick.
         //
         // Lock ordering: g_sched_lock (asserted above) still covers the
         // whole walk + unlink + push in the bridge phase; the victim's
@@ -1547,47 +1721,13 @@ Task* BalancePullOnce(cpu::PerCpu* self)
         //      Revisit when the topology layer exposes per-node distances
         //      to the balancer.
         constexpr u32 kBalanceScanCap = 32;
-        Task* prev = nullptr;
-        u32 scanned = 0;
-        for (Task* t = head; t != nullptr && scanned < kBalanceScanCap; t = t->next, ++scanned)
-        {
-            if (TaskAllowedOn(t, self->cpu_id))
-            {
-                victim_task = t;
-                break;
-            }
-            prev = t;
-        }
+        victim_task = LiftHighestBandTaskFrom(victim, self->cpu_id, kBalanceScanCap);
         if (victim_task == nullptr)
         {
             // Every reachable task on the heaviest peer is pinned away from
-            // us (or the queue is deeper than the scan cap). Skip this tick.
+            // us (or its bands are deeper than the scan cap). Skip this tick.
             return nullptr;
         }
-        // Unlink `victim_task` — same head / middle / tail handling as the
-        // steal path. `prev == nullptr` is the head case.
-        if (prev == nullptr)
-        {
-            RunqHeadNormal(victim) = victim_task->next;
-        }
-        else
-        {
-            prev->next = victim_task->next;
-        }
-        if (RunqHeadNormal(victim) == nullptr)
-        {
-            RunqTailNormal(victim) = nullptr;
-        }
-        else if (victim_task == RunqTailNormal(victim))
-        {
-            // Migrated the tail (a deeper-than-head allowed task that
-            // happened to be last); the predecessor becomes the new tail.
-            RunqTailNormal(victim) = prev;
-        }
-        victim_task->next = nullptr;
-        KASSERT(victim->runq_normal_len > 0, "sched", "BalancePullOnce: victim normal_len underflow");
-        --victim->runq_normal_len;
-        victim_task->last_cpu = self->cpu_id;
     }
     RunqueuePushOn(self, victim_task);
     return victim_task;
@@ -2000,6 +2140,7 @@ void SchedInit()
     boot_task->waiting_on = nullptr;
     boot_task->wake_by_timeout = false;
     boot_task->priority = TaskPriority::Normal;
+    boot_task->band = SchedBandForProcess(nullptr);  // kernel task → Normal band
     boot_task->as = nullptr;                         // kernel AS — boot PML4
     boot_task->process = nullptr;                    // kernel-only — no owning process
     boot_task->kill_requested = false;               // kernel tasks never hit a budget
@@ -2104,6 +2245,11 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     t->priority = priority;
     t->as = as;
     t->process = process; // user tasks: caller's Process; kernel tasks: nullptr
+    // Seed the MLFQ band from the owning process's priority class.
+    // RunqueuePushOn recomputes this on every enqueue so a later
+    // SetPriorityClass takes effect — this just gives the first
+    // enqueue (the one inside the locked block below) a valid band.
+    t->band = SchedBandForProcess(process);
     t->kill_requested = false;
     t->kill_reason = KillReason::TickBudget;
     t->hung_task_exempt = false; // default: detector watches every task
@@ -4447,6 +4593,178 @@ void HybridPlacementSelfTest()
     arch::SerialWrite("[hybrid-placement-selftest] PASS\n");
 }
 
+// MLFQ band-ordering + escape-valve acceptance test (T8-01-followon).
+//
+// STRUCTURAL, not timing-based. A fully deterministic cross-task timing
+// test ("band-0 task records the tick it first runs while a band-3 task
+// spins") is too flaky on a 1-CPU TCG guest, where the coordinator, the
+// band-0 task and the band-3 task all serialise onto one core and the
+// observed dispatch ordering depends on tick alignment. Instead we prove
+// the load-bearing invariant directly: the pop path's band selection and
+// the escape valve. This exercises the exact functions Schedule() calls
+// (RunqSelectPopBand → RunqUnlinkBandHead), so a regression in the band
+// ordering or the valve trips here with no scheduling races.
+//
+// The test runs on a SCRATCH cpu::PerCpu on the stack — it never touches
+// the live runqueue, so it is safe to call at any boot phase and needs no
+// lock. The Task stubs are HEAP-allocated (not stack arrays) to keep the
+// boot stack's footprint small; only the runqueue-link fields (`next`,
+// `band`) and the counters the helpers maintain are used.
+void MlfqPreemptSelfTest()
+{
+    cpu::PerCpu scratch;
+    memset(&scratch, 0, sizeof(scratch));
+
+    // kPerBand exceeds kLowBandEscapeValve so the lowest band still has
+    // work queued when the valve fires (otherwise the valve has nothing
+    // to drain and the property is vacuous). Tasks are intrusively linked
+    // via `next`; we enqueue them by hand — the real RunqueuePushOn needs
+    // the live lock + SchedBandForProcess, which we deliberately bypass to
+    // test the POP path in isolation.
+    constexpr u32 kPerBand = 9;
+    constexpr u32 kTaskCount = cpu::kSchedBands * kPerBand;
+    auto* tasks = static_cast<Task*>(mm::KMalloc(sizeof(Task) * kTaskCount));
+    if (tasks == nullptr)
+    {
+        arch::SerialWrite("[mlfq-preempt-selftest] SKIP (KMalloc failed)\n");
+        return;
+    }
+    memset(tasks, 0, sizeof(Task) * kTaskCount);
+
+    auto enqueue = [&](u8 band, Task* t)
+    {
+        t->band = band;
+        t->next = nullptr;
+        if (RunqTail(&scratch, band) == nullptr)
+        {
+            RunqHead(&scratch, band) = t;
+            RunqTail(&scratch, band) = t;
+        }
+        else
+        {
+            RunqTail(&scratch, band)->next = t;
+            RunqTail(&scratch, band) = t;
+        }
+        ++scratch.runq_band_len[band];
+        ++scratch.runq_normal_len;
+    };
+
+    for (u8 band = 0; band < cpu::kSchedBands; ++band)
+    {
+        for (u32 j = 0; j < kPerBand; ++j)
+        {
+            Task* t = &tasks[band * kPerBand + j];
+            t->id = (static_cast<u64>(band) << 8) | j;
+            enqueue(band, t);
+        }
+    }
+
+    bool ordering_ok = true;
+    bool valve_fired = false;
+
+    // Pop everything and verify two properties:
+    //  (1) ABSENT the valve, each pop comes from the highest-priority
+    //      non-empty band (pop band <= previous pop band, monotone while
+    //      higher bands have work).
+    //  (2) The valve fires on every kLowBandEscapeValve-th pop while a
+    //      lower band than the current highest is non-empty, and when it
+    //      fires it services the LOWEST non-empty band.
+    const u32 total = cpu::kSchedBands * kPerBand;
+    for (u32 popped = 0; popped < total; ++popped)
+    {
+        // Snapshot the highest + lowest non-empty band BEFORE the pop so
+        // we can classify what the selector should have done.
+        u8 highest_before = kRunqNoBand;
+        u8 lowest_before = kRunqNoBand;
+        for (u8 band = 0; band < cpu::kSchedBands; ++band)
+        {
+            if (scratch.runq_band_len[band] != 0)
+            {
+                if (highest_before == kRunqNoBand)
+                {
+                    highest_before = band;
+                }
+                lowest_before = band;
+            }
+        }
+        const bool valve_due = ((scratch.runq_pop_counter + 1) % kLowBandEscapeValve) == 0;
+        const bool valve_applicable = valve_due && (lowest_before != highest_before);
+
+        const u8 chosen = RunqSelectPopBand(&scratch);
+        if (chosen == kRunqNoBand)
+        {
+            ordering_ok = false; // should never be empty mid-drain
+            break;
+        }
+        if (valve_applicable)
+        {
+            valve_fired = true;
+            if (chosen != lowest_before)
+            {
+                ordering_ok = false; // valve must hit the lowest band
+            }
+        }
+        else if (chosen != highest_before)
+        {
+            ordering_ok = false; // non-valve pop must hit the highest band
+        }
+        Task* t = RunqUnlinkBandHead(&scratch, chosen);
+        if (t == nullptr)
+        {
+            ordering_ok = false;
+            break;
+        }
+    }
+
+    // Drained exactly: every counter back to zero, every band list empty.
+    bool drained_ok = (scratch.runq_normal_len == 0);
+    for (u8 band = 0; band < cpu::kSchedBands; ++band)
+    {
+        if (scratch.runq_band_len[band] != 0 || RunqHead(&scratch, band) != nullptr ||
+            RunqTail(&scratch, band) != nullptr)
+        {
+            drained_ok = false;
+        }
+    }
+
+    // Every task is now unlinked from `scratch`; the heap block is no
+    // longer referenced. Free it before reporting.
+    mm::KFree(tasks);
+
+    if (ordering_ok && valve_fired && drained_ok)
+    {
+        // Structural sentinel for CI grep. Emitted via raw serial (not
+        // KLOG) because it is a one-shot acceptance proof, not a runtime
+        // diagnostic — same shape as the sibling placement self-tests.
+        // SerialLineGuard: this self-test runs during SMP bringup, so a
+        // peer CPU is often mid-print; the multi-call PASS emission
+        // spliced with a cap-audit line during verification, which would
+        // break the substring grep the CI gate relies on.
+        arch::SerialLineGuard line;
+        arch::SerialWrite("[mlfq-preempt-selftest] PASS (band-order high->low + escape valve every ");
+        arch::SerialWriteHex(kLowBandEscapeValve);
+        arch::SerialWrite(")\n");
+    }
+    else
+    {
+        {
+            arch::SerialLineGuard line;
+            arch::SerialWrite("[mlfq-preempt-selftest] FAIL");
+            arch::SerialWrite(ordering_ok ? "" : " [band-order]");
+            arch::SerialWrite(valve_fired ? "" : " [valve-never-fired]");
+            arch::SerialWrite(drained_ok ? "" : " [counter-leak]");
+            arch::SerialWrite("\n");
+        }
+        // GDB-attachable probe — packs the three failure flags so a
+        // debugger row pins which leg tripped without re-greping. No
+        // panic: a structural self-test fails soft, matching the sibling
+        // self-tests' contract. Outside the SerialLineGuard scope so the
+        // serial lock isn't held (IRQs off) across the probe fire.
+        const u64 fail_value = (ordering_ok ? 0u : 0x1u) | (valve_fired ? 0u : 0x2u) | (drained_ok ? 0u : 0x4u);
+        KBP_PROBE_V(::duetos::debug::ProbeId::kBootSelftestFail, fail_value);
+    }
+}
+
 void IdlePowerSelfTest()
 {
     // Wiring check: the CPU-feature table must be populated and
@@ -5063,10 +5381,10 @@ void SchedEnumerate(SchedEnumCb cb, void* cookie)
     {
         EmitTask(running, cb, cookie, true);
     }
-    // Walk every CPU's Normal then Idle runqueue. EmitList already
-    // skips the running task by pointer comparison, so iterating
-    // every per-CPU queue is safe even though `running` is on this
-    // CPU's currently-active slot, not on a runqueue at all.
+    // Walk every CPU's Normal bands (high→low) then Idle runqueue.
+    // EmitList already skips the running task by pointer comparison, so
+    // iterating every per-CPU queue is safe even though `running` is on
+    // this CPU's currently-active slot, not on a runqueue at all.
     {
         const u32 cpu_limit = arch::SmpCpuIdLimit();
         for (u32 i = 0; i < cpu_limit; ++i)
@@ -5076,7 +5394,10 @@ void SchedEnumerate(SchedEnumCb cb, void* cookie)
             {
                 continue;
             }
-            EmitList(RunqHeadNormal(p), cb, cookie, running);
+            for (u8 band = 0; band < cpu::kSchedBands; ++band)
+            {
+                EmitList(RunqHead(p, band), cb, cookie, running);
+            }
             EmitList(RunqHeadIdle(p), cb, cookie, running);
         }
     }
@@ -5828,6 +6149,7 @@ Task* CreateApBootSentinel(u32 cpu_id)
     t->stack_size = 0;
     t->name = "ap-boot";
     t->priority = TaskPriority::Normal;
+    t->band = SchedBandForProcess(nullptr); // kernel sentinel → Normal band
     t->last_cpu = cpu_id;
     t->affinity_mask = kAffinityAll;
     return t;

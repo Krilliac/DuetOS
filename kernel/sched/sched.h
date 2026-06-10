@@ -454,6 +454,16 @@ void AffinityMaskSelfTest();
 /// `[hybrid-placement-selftest] PASS`/`SKIP` line.
 void HybridPlacementSelfTest();
 
+/// MLFQ band-ordering + escape-valve acceptance test (T8-01-followon).
+/// Structural (not timing-based): exercises the exact pop-path band
+/// selector + escape valve Schedule() relies on, on a scratch per-CPU
+/// runqueue, so it's deterministic on a 1-CPU TCG guest and free of
+/// scheduling races. Proves pops drain bands high->low and that every
+/// kLowBandEscapeValve-th pop services the lowest non-empty band.
+/// Non-panicking; emits one `[mlfq-preempt-selftest] PASS`/`FAIL` line
+/// (+ a kBootSelftestFail probe on failure) so CI can grep for it.
+void MlfqPreemptSelfTest();
+
 /// Boot self-test for OnApTimerTick. Runs the per-CPU tick with
 /// interrupts off and asserts the per-CPU + global tick counters
 /// advanced by one and that a reschedule was requested. Non-panicking;

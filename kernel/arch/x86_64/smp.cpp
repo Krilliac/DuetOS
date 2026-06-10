@@ -1063,11 +1063,19 @@ u64 SmpStartAps()
         ap_pcpu->ctxsw_dying_task_to_zombie = nullptr;
         // Per-CPU runqueue heads — empty until SchedEnterOnAp spawns
         // this AP's idle task and tasks migrate here via wake routing.
-        ap_pcpu->runq_head_normal = nullptr;
-        ap_pcpu->runq_tail_normal = nullptr;
+        // One head/tail pair per MLFQ Normal band, plus the unbanded
+        // Idle band. The memset above already zeroed all of these;
+        // the explicit loop documents the contract.
+        for (u32 band = 0; band < cpu::kSchedBands; ++band)
+        {
+            ap_pcpu->runq_head[band] = nullptr;
+            ap_pcpu->runq_tail[band] = nullptr;
+            ap_pcpu->runq_band_len[band] = 0;
+        }
         ap_pcpu->runq_head_idle = nullptr;
         ap_pcpu->runq_tail_idle = nullptr;
         ap_pcpu->runq_normal_len = 0;
+        ap_pcpu->runq_pop_counter = 0;
         // TSS slot wired by AllocateApGdt below, before the AP runs.
         ap_pcpu->tss = nullptr;
         // Liveness flag — flipped to true at the END of this loop

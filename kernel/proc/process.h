@@ -1257,10 +1257,13 @@ struct Process
     //   ABOVE_NORMAL_PRIORITY_CLASS = 0x8000
     //   HIGH_PRIORITY_CLASS         = 0x80
     //   REALTIME_PRIORITY_CLASS     = 0x100
-    // The scheduler is single-band today; the field is recorded
-    // and surfaced through GetPriorityClass for fidelity but
-    // doesn't yet bias scheduling. A future MLFQ rebuild reads it
-    // to pick a band on enqueue.
+    // The scheduler's MLFQ runqueue reads this on every enqueue:
+    // sched::SchedBandForProcess maps the class to one of the four
+    // Normal priority bands (REALTIME/HIGH -> band 0, ABOVE_NORMAL ->
+    // band 1, NORMAL/default -> band 2, BELOW_NORMAL/IDLE -> band 3),
+    // so a higher-class thread preempts a lower-class one within a
+    // tick. A runtime SetPriorityClass takes effect at the thread's
+    // next wake/preemption (the band is recomputed in RunqueuePushOn).
     u32 win32_priority_class;
     u8 _priority_pad[4];
 

@@ -11339,3 +11339,44 @@ below so a future audit doesn't re-chase them.
 - **Known latent (documented in Vulkan-ICD.md, needs its own
   slice):** several `vulkan_1.c` call sites pass an arg in rsi that
   no kernel handler reads — harmless today, misleading tomorrow.
+
+## 2026-06-10 — MLFQ: 4 fixed priority bands from win32_priority_class, escape valve over priority inheritance
+
+- **Context:** `Process::win32_priority_class` was wired (SetPriorityClass
+  stored it) but the scheduler was single-band — every Normal task ran
+  round-robin regardless of class. T8-01-followon. The per-CPU runqueue
+  locks (B2 bridge phase) had just landed, so the runqueue structure was
+  ready to band.
+- **Decision (4 fixed bands, not behavioural MLFQ):** band is derived
+  purely from `win32_priority_class` (REALTIME/HIGH→0, ABOVE_NORMAL→1,
+  NORMAL+kernel→2, BELOW_NORMAL/IDLE→3) and recomputed on every enqueue.
+  `RunqueuePop` scans band 0→3; the wake path sets `need_resched` when a
+  woken task outranks the running band. **Rules out** classic
+  quantum-burn MLFQ (demote a CPU hog, promote a starved task) for v0 —
+  nothing measures per-task quantum consumption yet, and a fixed mapping
+  is honest + sufficient for the acceptance bar (high-prio preempts low
+  within one tick). Behavioural aging/decay stays a narrowed residual.
+- **Decision (escape valve, not priority inheritance):** anti-starvation
+  is one O(1) counter — every `kLowBandEscapeValve = 8`th pop on a CPU
+  with a lower non-empty band dispatches from the lowest non-empty band,
+  guaranteeing every band ≥1/8 of dispatch slots under saturation.
+  **Rules out** (for now) priority inheritance on `sched::Mutex` — the
+  valve is also the only mitigation for the inversion hazard (a band-0
+  task blocked on a mutex held by a band-3 task makes progress via the
+  valve). PI is a much larger change (donate the blocker's effective
+  band through the wait chain); deferred until a real inversion is
+  observed.
+- **Decision (band arrays in PerCpu, aggregate length preserved):**
+  `runq_head[4]`/`runq_tail[4]`/`runq_band_len[4]` replace the single
+  Normal head/tail; `runq_normal_len` stays as the Σ-bands-0..3
+  aggregate so EVERY placement/load consumer (EffectiveLoad,
+  PickClusterPlacement, PickBalanceVictim, loadavg, the 4 placement
+  selftests) is byte-for-byte unchanged. Placement stays band-blind;
+  steal/balance lift the highest band's eligible task. The Idle band
+  is untouched (pinned per-CPU, never banded/stolen/counted).
+- **Self-test is structural, not timing:** a cross-task "band-0 records
+  its dispatch tick while band-3 spins" test is flaky on a 1-CPU TCG
+  guest (all tasks serialise on one core). `MlfqPreemptSelfTest` drives
+  the exact pop path on a scratch runqueue filled across all 4 bands and
+  asserts high→low drain order + the valve firing on the 8th pop —
+  deterministic, no scheduling races. `[mlfq-preempt-selftest] PASS`.

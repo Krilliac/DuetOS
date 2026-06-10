@@ -44,6 +44,15 @@ namespace duetos::cpu
 // taking the box down on lock-debug overflow.
 inline constexpr u32 kPerCpuMaxHeldLocks = 8;
 
+// Number of Normal-band MLFQ priority tiers in each per-CPU runqueue
+// (the separate Idle band is NOT one of these — it stays pinned in
+// runq_head_idle/tail_idle). Band 0 is the highest priority, band 3
+// the lowest; the mapping from a process's win32_priority_class to a
+// band lives in sched.cpp::SchedBandForProcess. Declared here (rather
+// than in sched.h) so the per-CPU runqueue arrays below can be sized
+// without pulling sched/sched.h's Task definition into percpu.h.
+inline constexpr u32 kSchedBands = 4;
+
 struct PerCpu
 {
     u32 cpu_id;                   // 0 = BSP; APs number 1..N in bring-up order
@@ -162,18 +171,22 @@ struct PerCpu
     // not exit during the just-completed switch.
     void* ctxsw_dying_task_to_zombie;
 
-    // Per-CPU runqueues. Two priority bands (Normal + Idle), each a
-    // FIFO with head + tail pointers. A task enqueued on this CPU's
-    // runqueue is owned by THIS CPU until popped — no migration in
-    // v0 (work-stealing in commit 6 changes that). All four slots
-    // are still protected by the global g_sched_lock; the per-CPU
-    // structure here is the data-layout half of the per-CPU runqueue
-    // refactor — lock-granularity decomposition is deferred until
-    // contention shows up in profiles. Pointers are typed as void*
-    // to avoid pulling sched/sched.h's Task forward decl into every
-    // includer of percpu.h; sched.cpp casts back to Task*.
-    void* runq_head_normal;
-    void* runq_tail_normal;
+    // Per-CPU runqueues. The MLFQ design splits the Normal class into
+    // kSchedBands priority tiers (band 0 = highest, band 3 = lowest),
+    // each a FIFO with its own head + tail; the separate Idle band
+    // (runq_head_idle/tail_idle) is unbanded and only dispatched when
+    // every Normal band is empty. A task enqueued on this CPU's
+    // runqueue is owned by THIS CPU until popped or work-stolen. All
+    // slots are still protected by the global g_sched_lock plus the
+    // bridge-phase per-CPU g_runq_locks; the per-CPU structure here is
+    // the data-layout half of the per-CPU runqueue refactor — lock-
+    // granularity decomposition is deferred until contention shows up
+    // in profiles. Pointers are typed as void* to avoid pulling
+    // sched/sched.h's Task forward decl into every includer of
+    // percpu.h; sched.cpp casts back to Task* via the band-indexed
+    // RunqHead/RunqTail accessors.
+    void* runq_head[kSchedBands];
+    void* runq_tail[kSchedBands];
     void* runq_head_idle;
     void* runq_tail_idle;
 
@@ -226,19 +239,32 @@ struct PerCpu
     bool online;
     u8 _pad_topo[5];
 
-    // Length of this CPU's Normal-band runqueue (does NOT count the
-    // currently-running task). Maintained by the scheduler under
-    // `g_sched_lock` alongside the head/tail pointers; readable
-    // without the lock for placement decisions (a stale read just
-    // costs a slightly suboptimal routing — the next wake corrects).
-    // Exists so wake placement (`RunqueuePush`) can pick the least-
-    // loaded peer in the parent's cluster instead of always routing
-    // to `last_cpu`. Idle-band tasks are pinned per-CPU and never
-    // load-balanced, so they get no counter — counting them would
-    // bias placement toward CPUs whose only "load" is their own
-    // idle thread.
+    // AGGREGATE length of this CPU's Normal-band runqueue (Σ of all
+    // kSchedBands tiers; does NOT count the currently-running task or
+    // the Idle band). Maintained by the scheduler under `g_sched_lock`
+    // + the per-CPU g_runq_lock alongside the head/tail pointers and
+    // the per-band counters below; readable without the lock for
+    // placement decisions (a stale read just costs a slightly
+    // suboptimal routing — the next wake corrects). Exists so wake
+    // placement (`RunqueuePush`) and the active balancer can pick the
+    // least-loaded peer in the parent's cluster instead of always
+    // routing to `last_cpu`. Placement stays band-blind: it reads this
+    // aggregate, not the per-band split, which is sufficient for v0.
+    // Idle-band tasks are pinned per-CPU and never load-balanced, so
+    // they get no counter — counting them would bias placement toward
+    // CPUs whose only "load" is their own idle thread.
     u32 runq_normal_len;
-    u8 _pad_runq_len[4];
+    // Anti-starvation escape-valve cursor. Bumped on every Normal-band
+    // pop; when (runq_pop_counter % kLowBandEscapeValve) == 0 the pop
+    // path services the LOWEST non-empty band instead of the highest,
+    // guaranteeing each band ≥1/kLowBandEscapeValve of dispatch slots
+    // under saturation. Maintained under the same lock as the runqueue.
+    u32 runq_pop_counter;
+    // Per-band Normal-runqueue lengths. runq_normal_len == Σ runq_band_len.
+    // Needed by the pop-path escape valve (find the lowest non-empty
+    // band) and by the steal/balance band scan (lift from the highest
+    // non-empty band first). Same lock discipline as runq_normal_len.
+    u32 runq_band_len[kSchedBands];
 
     // Per-CPU scheduler stat counters. Maintained under
     // g_sched_lock on the CPU that does the state transition,
