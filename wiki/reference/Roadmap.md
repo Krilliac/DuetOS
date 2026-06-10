@@ -400,13 +400,14 @@ heap/frame stats, `cpu_busy_pct≈23%`) to **215 s guest uptime** with
 Pre-fix this faulted byte-identically (incl. on `origin/main`).
 
 **Follow-ups (hardening, not blockers):**
-1. **Boot-stack guard page** — map a 4 KiB not-present page just below
-   `stack_bottom` so a *future* overflow faults at the boundary
-   (attributable `#PF`) instead of silently corrupting low RAM. Needs a
-   2 MiB→4 KiB split in `boot.S` (the page below `stack_bottom` shares the
-   first 2 MiB with `.text.boot`, which is dead after the higher-half
-   jump, so it can double as the guard). This makes the `boot.S`
-   "overflow faults immediately" guarantee actually true.
+1. *(Boot-stack guard page — LANDED.* `boot_stack_guard_page` reservation
+   in `boot.S`, armed late via `mm::InstallBootStackGuard()`
+   (`SplitPsPage` + `UnmapPage` + read-back self-verify,
+   `kernel/mm/paging.cpp`), called from `boot_bringup.cpp` after
+   `ProtectKernelImage()`; attributable `#PF` + `#DF`-escalation
+   diagnostics in `traps.cpp` via `IsBootStackGuardFault`. Known residual:
+   a single stack adjustment >4 KiB can skip over the one-page guard —
+   widen the guard or add stack probes if it's ever observed.)*
 2. **`#PF`/`#GP`/`#DF` on IST stacks** so trap delivery survives a corrupt
    `RSP` and the `[wild-kernel-rip]` forensic can fire on a whole-frame
    scribble (today the nested push on the bad rsp triple-faults first).

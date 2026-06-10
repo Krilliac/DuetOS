@@ -1679,8 +1679,8 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         if (mm::IsBootStackGuardFault(df_cr2))
         {
             arch::SerialWrite("\n[df] *** BOOT STACK OVERFLOW *** — cr2 in boot-stack guard page.\n"
-                              "[df] the boot task's 512 KiB stack overran stack_bottom; grow it or\n"
-                              "[df] move the deep call chain off the boot stack (see boot.S history).\n");
+                              "[df] the boot task's stack (boot.S stack_bottom..stack_top) overran;\n"
+                              "[df] grow it or move the deep call chain off the boot stack.\n");
         }
         else if (mm::IsKernelStackGuardFault(df_cr2))
         {
@@ -1719,9 +1719,9 @@ extern "C" void TrapDispatch(TrapFrame* frame)
             SerialWrite("\n");
             core::PanicWithValue("sched/kstack", "guard-page hit — kernel stack overflow", cr2);
         }
-        // Boot-stack guard-page hit. The BSP boot task's 512 KiB stack
-        // carries its own guard page (the one stack not in the kstack
-        // arena); a kernel-mode #PF with CR2 inside it is an overflow of
+        // Boot-stack guard-page hit. The BSP boot task's stack (sized in
+        // boot.S) carries its own guard page (the one stack not in the
+        // kstack arena); a kernel-mode #PF with CR2 inside it is an overflow of
         // the boot stack — historically the silent low-RAM scribble +
         // wild ret of the 2026-06-05 boot-tail cascade, now caught here.
         if (mm::IsBootStackGuardFault(cr2))
