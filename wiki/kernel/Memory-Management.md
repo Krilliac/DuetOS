@@ -119,8 +119,8 @@ profile demands the per-CPU split.
 | Allocator | Function | IRQ-safe | SMP-safe | Sleeps |
 |-----------|----------|----------|----------|--------|
 | Frame allocator | `AllocateFrame` / `FreeFrame` | yes (irqsave guard) | yes (`g_frame_lock`, reentrant) | no |
-| Kernel heap | `KMalloc` / `KFree` | yes (irqsave guard) | yes (`g_kheap_lock`, reentrant) | no |
-| Slab cache | `SlabAlloc` / `SlabFree` | yes (`IrqOff`) | yes (per-cache `sched::Mutex`) | no |
+| Kernel heap | `KMalloc` / `KFree` | yes (irqsave guard; ≤512 B routes to irq-safe slabs) | yes (`g_kheap_lock`, reentrant) | no |
+| Slab cache | `SlabAlloc` / `SlabFree` | yes (`IrqOff`; irq-safe mode for slow path) | yes (per-cache `sched::Mutex` or irqsave spinlock) | no |
 | Kernel stacks | `KStackAlloc` | no — caller must be in process context | no | no |
 
 Allocators that do NOT sleep are safe to call from any kernel
@@ -226,12 +226,22 @@ slices land.
   `SlabCache` hands out fixed-size objects from 16 KiB slabs
   carved out of the kheap, with a per-cache intrusive freelist
   and freed-object poison. Boot self-test runs in
-  `Phase::Sched`. **Buddy allocator** isn't yet on top — small
-  KMalloc allocations still go through the kheap freelist's
-  size-class bins; the slab is opt-in via direct `SlabAlloc`.
-  See the
-  [Roadmap](../reference/Roadmap.md#slab-allocator--freed-object-poison--real-kasan)
-  for the deferred real KASAN work.
+  `Phase::Sched`. Two slow-path lock modes: the default sleeping
+  `sched::Mutex`, and an irqsave-spinlock mode
+  (`SlabCacheCreateIrqSafe`) for caches that must stay legal in
+  IRQ context.
+- **Automatic KMalloc→slab routing landed (2026-06-10)** —
+  `KMalloc` calls ≤512 B route through eight `kmalloc-N` irq-safe
+  caches (32…512, ×16 steps) ahead of the kheap freelist; >512 B
+  and slab-OOM fall through to the classic path. Discrimination
+  on free is a 16 B route header vs the kheap `ChunkHeader::next
+  == nullptr` live-chunk invariant (now static_assert-pinned) —
+  see `kernel/mm/kmalloc_route.h` and the 2026-06-10
+  Design-Decisions entry. Stats: `mm:kmalloc_routed_live_bytes`
+  / `_cached_bytes`; `heap leaks` attribution covers >512 B
+  only. Boot gate: `[kmalloc-route-selftest] PASS`. See the
+  [Roadmap](../reference/Roadmap.md) for the deferred real
+  KASAN work.
 - **No reclaim or compaction.** `FreeFrame` is the only path frames
   re-enter the pool.
 

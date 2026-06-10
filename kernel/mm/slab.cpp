@@ -34,6 +34,7 @@
 #include "mm/kheap.h"
 #include "mm/poison.h"
 #include "sched/sched.h"
+#include "sync/spinlock.h"
 #include "util/debug_assert.h"
 #include "util/saturating.h"
 #include "util/string.h"
@@ -117,10 +118,12 @@ struct IrqOff
 
 struct SlabCache
 {
-    sched::Mutex lock;
-    const char* name;     ///< Borrowed; outlives the cache.
-    u32 obj_size;         ///< Padded to `alignment`.
-    u32 objects_per_slab; ///< Computed at Create.
+    sched::Mutex lock;        ///< Slow-path lock for default-mode caches (sleeping).
+    sync::SpinLock slow_lock; ///< Slow-path lock for irq-safe caches (irqsave spin).
+    bool irq_safe;            ///< Picks which slow-path lock SlowLockGuard takes.
+    const char* name;         ///< Borrowed; outlives the cache.
+    u32 obj_size;             ///< Padded to `alignment`.
+    u32 objects_per_slab;     ///< Computed at Create.
 
     Slab* slab_head;         ///< Chain of every slab owned by this cache.
     SlabFreeNode* free_head; ///< Cache-wide freelist of unused objects (mutex-protected).
@@ -143,6 +146,45 @@ struct SlabCache
 
 namespace
 {
+
+// Mode-dispatched slow-path lock guard. Default caches sleep on the
+// per-cache mutex (unchanged v0 behaviour); irq-safe caches take the
+// per-cache irqsave spinlock so the slow path is legal from IRQ
+// context. One guard type instead of two code paths keeps every
+// slow-path site (Alloc refill, Free drain, Destroy, invariants,
+// magazine drain) mode-agnostic.
+class SlowLockGuard
+{
+  public:
+    explicit SlowLockGuard(SlabCache* c) : m_cache(c)
+    {
+        if (m_cache->irq_safe)
+        {
+            m_flags = sync::SpinLockAcquire(m_cache->slow_lock);
+        }
+        else
+        {
+            sched::MutexLock(&m_cache->lock);
+        }
+    }
+    ~SlowLockGuard()
+    {
+        if (m_cache->irq_safe)
+        {
+            sync::SpinLockRelease(m_cache->slow_lock, m_flags);
+        }
+        else
+        {
+            sched::MutexUnlock(&m_cache->lock);
+        }
+    }
+    SlowLockGuard(const SlowLockGuard&) = delete;
+    SlowLockGuard& operator=(const SlowLockGuard&) = delete;
+
+  private:
+    SlabCache* m_cache;
+    sync::IrqFlags m_flags{};
+};
 
 // Carve one fresh slab. Allocates a kSlabBytes block, places the
 // Slab struct at offset 0, then slices the remainder into
@@ -261,9 +303,9 @@ void SlabCheckInvariants(SlabCache* c)
     DEBUG_ASSERT_VAL(reachable == free, "mm/slab", "freelist+magazines != obj_free (lost slot)", reachable);
 }
 
-} // namespace
-
-SlabCache* SlabCacheCreate(const char* name, u32 obj_size, u32 alignment)
+// Shared Create worker. `irq_safe` selects the slow-path lock mode;
+// everything else (validation, sizing, bookkeeping) is identical.
+SlabCache* SlabCacheCreateCommon(const char* name, u32 obj_size, u32 alignment, bool irq_safe)
 {
     if (name == nullptr || obj_size == 0)
     {
@@ -285,6 +327,7 @@ SlabCache* SlabCacheCreate(const char* name, u32 obj_size, u32 alignment)
         return nullptr;
     }
     *c = SlabCache{};
+    c->irq_safe = irq_safe;
     c->name = name;
     c->obj_size = padded;
 
@@ -306,45 +349,58 @@ SlabCache* SlabCacheCreate(const char* name, u32 obj_size, u32 alignment)
     return c;
 }
 
+} // namespace
+
+SlabCache* SlabCacheCreate(const char* name, u32 obj_size, u32 alignment)
+{
+    return SlabCacheCreateCommon(name, obj_size, alignment, /*irq_safe=*/false);
+}
+
+SlabCache* SlabCacheCreateIrqSafe(const char* name, u32 obj_size, u32 alignment)
+{
+    return SlabCacheCreateCommon(name, obj_size, alignment, /*irq_safe=*/true);
+}
+
 void SlabCacheDestroy(SlabCache* c)
 {
     if (c == nullptr)
     {
         return;
     }
-    sched::MutexLock(&c->lock);
-
-    // Drain every CPU's magazine back onto the global freelist
-    // BEFORE checking obj_in_use. Magazined objects aren't "in
-    // use" by a caller, so they don't fail the live-allocations
-    // check; but draining is the cleanest way to ensure the
-    // poison invariants hold across destruction and to make the
-    // bookkeeping snapshot below internally consistent.
-    for (u32 cpu = 0; cpu < acpi::kMaxCpus; ++cpu)
     {
-        Magazine& m = c->magazines[cpu];
-        while (m.count > 0)
+        SlowLockGuard guard(c);
+
+        // Drain every CPU's magazine back onto the global freelist
+        // BEFORE checking obj_in_use. Magazined objects aren't "in
+        // use" by a caller, so they don't fail the live-allocations
+        // check; but draining is the cleanest way to ensure the
+        // poison invariants hold across destruction and to make the
+        // bookkeeping snapshot below internally consistent.
+        for (u32 cpu = 0; cpu < acpi::kMaxCpus; ++cpu)
         {
-            auto* node = static_cast<SlabFreeNode*>(m.objs[--m.count]);
-            node->next = c->free_head;
-            c->free_head = node;
+            Magazine& m = c->magazines[cpu];
+            while (m.count > 0)
+            {
+                auto* node = static_cast<SlabFreeNode*>(m.objs[--m.count]);
+                node->next = c->free_head;
+                c->free_head = node;
+            }
+        }
+
+        // Magazines are now empty and the lock is held — a quiescent
+        // point where the full invariant set must hold.
+        SlabCheckInvariants(c);
+
+        const u64 in_use = __atomic_load_n(&c->obj_in_use, __ATOMIC_RELAXED);
+        KASSERT(in_use == 0, "slab", "Destroy with live allocations");
+        Slab* s = c->slab_head;
+        while (s != nullptr)
+        {
+            Slab* next = s->next;
+            KFree(s->base);
+            s = next;
         }
     }
-
-    // Magazines are now empty and the lock is held — a quiescent
-    // point where the full invariant set must hold.
-    SlabCheckInvariants(c);
-
-    const u64 in_use = __atomic_load_n(&c->obj_in_use, __ATOMIC_RELAXED);
-    KASSERT(in_use == 0, "slab", "Destroy with live allocations");
-    Slab* s = c->slab_head;
-    while (s != nullptr)
-    {
-        Slab* next = s->next;
-        KFree(s->base);
-        s = next;
-    }
-    sched::MutexUnlock(&c->lock);
     KFree(c);
 }
 
@@ -374,40 +430,42 @@ void* SlabAlloc(SlabCache* c)
 
     if (obj == nullptr)
     {
-        // ---- Slow path: take cache mutex, pull a batch from the
+        // ---- Slow path: take the cache's slow-path lock (mutex or
+        // irqsave spinlock by cache mode), pull a batch from the
         // global freelist into the magazine, and return the head to
         // the caller. Bulk refill (kMagazineSize / 2 objects) so the
         // next ~half-magazine of allocs on this CPU stay fast-path.
-        sched::MutexLock(&c->lock);
-        if (c->free_head == nullptr)
-        {
-            SlabFreeNode* fresh = GrowOneSlab(c);
-            if (fresh == nullptr)
-            {
-                sched::MutexUnlock(&c->lock);
-                return nullptr;
-            }
-            c->free_head = fresh;
-        }
-
-        SlabFreeNode* head = PopGlobalFreelist(c);
-        // Pull up to kMagazineSize / 2 ADDITIONAL objects into a
-        // refill list. May come up short if the freelist drains; the
-        // splice below copes with any count, including zero.
+        SlabFreeNode* head = nullptr;
         SlabFreeNode* refill = nullptr;
-        u32 refill_count = 0;
-        while (refill_count < kMagazineSize / 2)
         {
-            SlabFreeNode* n = PopGlobalFreelist(c);
-            if (n == nullptr)
+            SlowLockGuard guard(c);
+            if (c->free_head == nullptr)
             {
-                break;
+                SlabFreeNode* fresh = GrowOneSlab(c);
+                if (fresh == nullptr)
+                {
+                    return nullptr;
+                }
+                c->free_head = fresh;
             }
-            n->next = refill;
-            refill = n;
-            ++refill_count;
+
+            head = PopGlobalFreelist(c);
+            // Pull up to kMagazineSize / 2 ADDITIONAL objects into a
+            // refill list. May come up short if the freelist drains; the
+            // splice below copes with any count, including zero.
+            u32 refill_count = 0;
+            while (refill_count < kMagazineSize / 2)
+            {
+                SlabFreeNode* n = PopGlobalFreelist(c);
+                if (n == nullptr)
+                {
+                    break;
+                }
+                n->next = refill;
+                refill = n;
+                ++refill_count;
+            }
         }
-        sched::MutexUnlock(&c->lock);
 
         // Counter updates: caller's object becomes in-use (alloc),
         // refill objects stay free (their location changed, not
@@ -443,7 +501,7 @@ void* SlabAlloc(SlabCache* c)
         // cold path; clarity over micro-optimisation.
         if (refill != nullptr)
         {
-            sched::MutexLock(&c->lock);
+            SlowLockGuard guard(c);
             while (refill != nullptr)
             {
                 SlabFreeNode* next = refill->next;
@@ -451,7 +509,6 @@ void* SlabAlloc(SlabCache* c)
                 c->free_head = refill;
                 refill = next;
             }
-            sched::MutexUnlock(&c->lock);
         }
     }
 
@@ -536,22 +593,68 @@ void SlabFree(SlabCache* c, void* obj)
         }
     }
 
-    sched::MutexLock(&c->lock);
-    auto* node = static_cast<SlabFreeNode*>(obj);
-    node->next = c->free_head;
-    c->free_head = node;
-    while (drain_head != nullptr)
     {
-        SlabFreeNode* next = drain_head->next;
-        drain_head->next = c->free_head;
-        c->free_head = drain_head;
-        drain_head = next;
+        SlowLockGuard guard(c);
+        auto* node = static_cast<SlabFreeNode*>(obj);
+        node->next = c->free_head;
+        c->free_head = node;
+        while (drain_head != nullptr)
+        {
+            SlabFreeNode* next = drain_head->next;
+            drain_head->next = c->free_head;
+            c->free_head = drain_head;
+            drain_head = next;
+        }
     }
-    sched::MutexUnlock(&c->lock);
 
     __atomic_sub_fetch(&c->obj_in_use, 1, __ATOMIC_RELAXED);
     __atomic_add_fetch(&c->obj_free, 1, __ATOMIC_RELAXED);
     util::SatAtomicAdd<u64>(&c->free_count, 1);
+}
+
+void SlabCacheDrainLocalMagazine(SlabCache* c)
+{
+    if (c == nullptr)
+    {
+        return;
+    }
+
+    // Pop the CALLING CPU's magazine into a local list under IrqOff —
+    // a magazine is only ever touched IRQs-off on its owning CPU, so
+    // this is the one magazine we can drain without racing a lock-free
+    // fast path. (Cross-CPU drain needs an IPI; see the GAP note in
+    // slab.h.) Then splice onto the global freelist under the
+    // slow-path lock. Counters don't move: the objects were free in
+    // the magazine and stay free on the freelist — only their
+    // location changes, same as the Alloc-side bulk refill.
+    SlabFreeNode* head = nullptr;
+    {
+        IrqOff guard;
+        const u32 cpu = cpu::CurrentCpuIdOrBsp();
+        if (cpu < acpi::kMaxCpus)
+        {
+            Magazine& m = c->magazines[cpu];
+            while (m.count > 0)
+            {
+                auto* node = static_cast<SlabFreeNode*>(m.objs[--m.count]);
+                node->next = head;
+                head = node;
+            }
+        }
+    }
+    if (head == nullptr)
+    {
+        return;
+    }
+
+    SlowLockGuard guard(c);
+    while (head != nullptr)
+    {
+        SlabFreeNode* next = head->next;
+        head->next = c->free_head;
+        c->free_head = head;
+        head = next;
+    }
 }
 
 SlabStats SlabCacheStatsRead(const SlabCache* c)
@@ -642,11 +745,39 @@ void SlabSelfTest()
     // Single-threaded here: take the lock to satisfy the
     // SlabCheckInvariants contract, then verify all three
     // documented invariants hold after a full alloc/free cycle.
-    sched::MutexLock(&c->lock);
-    SlabCheckInvariants(c);
-    sched::MutexUnlock(&c->lock);
+    {
+        SlowLockGuard guard(c);
+        SlabCheckInvariants(c);
+    }
 
     SlabCacheDestroy(c);
+
+    // IRQ-safe cache mode: same alloc / free / LIFO / destroy
+    // contract, but the slow path serialises on the irqsave spinlock
+    // instead of the sleeping mutex. The battery above already
+    // exercises the shared magazine machinery; this leg pins the
+    // SlowLockGuard mode dispatch (grow under the spinlock, LIFO
+    // reuse via the magazine, drain + invariants + destroy).
+    SlabCache* ic = SlabCacheCreateIrqSafe("slab-st-irq", kObjSize, kAlign);
+    KASSERT(ic != nullptr, "slab", "self-test: CreateIrqSafe failed");
+    void* irq_a = SlabAlloc(ic); // first alloc forces GrowOneSlab under the spinlock
+    void* irq_b = SlabAlloc(ic);
+    KASSERT(irq_a != nullptr && irq_b != nullptr, "slab", "self-test: irq-safe alloc returned null");
+    SlabFree(ic, irq_b);
+    void* irq_b2 = SlabAlloc(ic);
+    KASSERT(irq_b2 == irq_b, "slab", "self-test: irq-safe LIFO ordering broken");
+    SlabFree(ic, irq_b2);
+    SlabFree(ic, irq_a);
+    {
+        const auto s = SlabCacheStatsRead(ic);
+        KASSERT(s.obj_in_use == 0, "slab", "self-test: irq-safe in_use != 0 after drain");
+    }
+    {
+        SlowLockGuard guard(ic);
+        SlabCheckInvariants(ic);
+    }
+    SlabCacheDestroy(ic);
+
     KLOG_INFO("slab", "self-test: passed");
 }
 

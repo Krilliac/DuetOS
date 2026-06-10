@@ -143,6 +143,19 @@ u64 ReadHeapFreeCount(void*)
     return ::duetos::mm::KernelHeapStatsRead().free_count;
 }
 
+// KMalloc slab-route layer (<= 512 B allocations). Both gauges are a
+// BREAKDOWN of heap_used_bytes — slabs are KMalloc-backed — so
+// mm:heap_used_bytes keeps its meaning; these tell "live in routed
+// objects" from "parked free in route caches" without parsing logs.
+u64 ReadHeapRoutedLiveBytes(void*)
+{
+    return ::duetos::mm::KernelHeapStatsRead().routed_live_bytes;
+}
+u64 ReadHeapRoutedCachedBytes(void*)
+{
+    return ::duetos::mm::KernelHeapStatsRead().routed_cached_free_bytes;
+}
+
 u64 ReadFramesFree(void*)
 {
     return ::duetos::mm::FreeFramesCount();
@@ -219,6 +232,8 @@ void RegisterHeartbeatKstats()
     D::KstatRegister("mm", "heap_largest_free_run", K::Gauge, &ReadHeapLargestFreeRun, nullptr);
     D::KstatRegister("mm", "heap_alloc_count", K::Counter, &ReadHeapAllocCount, nullptr);
     D::KstatRegister("mm", "heap_free_count", K::Counter, &ReadHeapFreeCount, nullptr);
+    D::KstatRegister("mm", "kmalloc_routed_live_bytes", K::Gauge, &ReadHeapRoutedLiveBytes, nullptr);
+    D::KstatRegister("mm", "kmalloc_routed_cached_bytes", K::Gauge, &ReadHeapRoutedCachedBytes, nullptr);
     D::KstatRegister("mm", "frames_free", K::Gauge, &ReadFramesFree, nullptr);
 
     D::KstatRegister("cpu", "online", K::Gauge, &ReadCpusOnline, nullptr);

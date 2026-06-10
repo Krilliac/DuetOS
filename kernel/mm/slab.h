@@ -46,28 +46,35 @@
  *     the size classes we target (≤ 2 KiB).
  *
  * THREADING
- *   Each cache has its own `sched::Mutex` guarding the global
- *   freelist + slab chain, AND a per-CPU "magazine" that caches
- *   a small pool of recently-freed objects on the running CPU.
- *   The fast path (alloc when the magazine has objects, free when
- *   the magazine has room) only disables IRQs — no mutex, no
- *   cross-CPU traffic. The slow path (magazine empty on alloc,
- *   magazine full on free) takes the cache mutex and bulk-refills
- *   or bulk-drains so the next ~kMagazineSize/2 ops on this CPU
- *   stay on the fast path.
+ *   Each cache has a slow-path lock guarding the global freelist +
+ *   slab chain, AND a per-CPU "magazine" that caches a small pool
+ *   of recently-freed objects on the running CPU. The fast path
+ *   (alloc when the magazine has objects, free when the magazine
+ *   has room) only disables IRQs — no slow-path lock, no cross-CPU
+ *   traffic. The slow path (magazine empty on alloc, magazine full
+ *   on free) takes the cache's slow-path lock and bulk-refills or
+ *   bulk-drains so the next ~kMagazineSize/2 ops on this CPU stay
+ *   on the fast path.
  *
- *   Cache operations are safe from any kernel context that can
- *   take a sleeping mutex. IRQ-context allocation is OUT OF SCOPE
- *   for v0; the kheap itself isn't IRQ-safe today either, so the
- *   slab inherits the same restriction.
+ *   The slow-path lock comes in two modes, picked at Create time:
+ *     - Default (`SlabCacheCreate`): a sleeping `sched::Mutex`.
+ *       Cache operations are then safe from any kernel context
+ *       that can take a sleeping mutex — NOT from IRQ context.
+ *     - IRQ-safe (`SlabCacheCreateIrqSafe`): a `sync::SpinLock`
+ *       (irqsave). Cache operations are then safe from any kernel
+ *       context, including IRQ handlers — matching the kheap that
+ *       backs the slabs (KMalloc/KFree are IRQ-safe). The KMalloc
+ *       small-allocation route caches use this mode so routing
+ *       never downgrades KMalloc's IRQ-safety.
  *
  * SCOPE LIMITS (v0)
  *   - No object constructor / destructor. Objects are returned
  *     uninitialised; callers placement-new if they need it.
- *   - No KMalloc-replacement integration. Existing KMalloc /
- *     KFree call sites are unchanged. A future slice can add a
- *     "size-classed kheap" that routes small allocations through
- *     pre-built slab caches automatically.
+ *   - KMalloc integration exists but lives in the kheap, not here:
+ *     KMallocSlabRoutingInit (kernel/mm/kheap.cpp) routes small
+ *     KMalloc calls (<= 512 B) through eight pre-built irq-safe
+ *     caches; see kernel/mm/kmalloc_route.h. The slab layer itself
+ *     stays policy-free — it doesn't know it's being routed to.
  *   - Magazine size is fixed (kMagazineSize). Adaptive sizing
  *     based on cache miss rate is a future tuning knob.
  */
@@ -93,6 +100,15 @@ inline constexpr u64 kSlabBytes = 16 * 1024;
 ///
 /// Returns nullptr on invalid arguments or allocation failure.
 SlabCache* SlabCacheCreate(const char* name, u32 obj_size, u32 alignment);
+
+/// As `SlabCacheCreate`, but the cache's slow path serialises on an
+/// irqsave `sync::SpinLock` instead of a sleeping `sched::Mutex`, so
+/// `SlabAlloc` / `SlabFree` on the returned cache are safe from IRQ
+/// context (and from pre-scheduler boot code). The cost: slow-path
+/// contention burns CPU instead of sleeping. Use for caches that
+/// must match KMalloc's IRQ-safety (the kmalloc route caches);
+/// default to `SlabCacheCreate` everywhere else.
+SlabCache* SlabCacheCreateIrqSafe(const char* name, u32 obj_size, u32 alignment);
 
 /// Free every slab the cache holds, then the cache struct
 /// itself. The caller is responsible for ensuring no live
@@ -128,6 +144,16 @@ void* SlabAllocZeroed(SlabCache* c);
 /// allocation). nullptr is a no-op.
 void SlabFree(SlabCache* c, void* obj);
 
+/// Push every object cached in the CALLING CPU's magazine back onto
+/// the cache's global freelist. Memory-pressure helper: magazined
+/// objects are already free, this just consolidates them where any
+/// CPU's slow path can reach them. nullptr is a no-op.
+/// GAP: drains only the calling CPU's magazine — a cross-CPU drain
+/// would race the owners' IRQ-off lock-free fast paths and needs an
+/// IPI; revisit if pressure telemetry shows remote magazines pinning
+/// meaningful bytes.
+void SlabCacheDrainLocalMagazine(SlabCache* c);
+
 struct SlabStats
 {
     u64 obj_size;
@@ -148,8 +174,9 @@ SlabStats SlabCacheStatsRead(const SlabCache* c);
 /// Boot-time self-test. Creates a cache, runs alloc / free /
 /// re-alloc round-trips that span multiple slabs, asserts the
 /// LIFO ordering invariant (last-freed object is the next
-/// allocation), then destroys the cache. Panics on any
-/// mismatch.
+/// allocation), then destroys the cache. Also exercises an
+/// IRQ-safe-mode cache (spinlock slow path) through the same
+/// alloc / LIFO / destroy contract. Panics on any mismatch.
 void SlabSelfTest();
 
 } // namespace duetos::mm

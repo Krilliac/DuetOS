@@ -176,3 +176,7 @@ target_compile_options(test_kernel32_nls PRIVATE -Wno-conversion -Wno-sign-conve
 
 # Browser omnibox URL-vs-search classifier (kernel/apps/browser/omnibox_classify.h).
 add_host_test(omnibox_classify)
+
+# KMalloc small-allocation slab-routing decision logic (kernel/mm/kmalloc_route.h):
+# size-class boundaries, route-header encode/decode, KFree discrimination verdicts.
+add_host_test(kmalloc_route)

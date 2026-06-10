@@ -1,8 +1,10 @@
 #include "mm/kheap.h"
 
 #include "mm/frame_allocator.h"
+#include "mm/kmalloc_route.h"
 #include "mm/page.h"
 #include "mm/poison.h"
+#include "mm/slab.h"
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
@@ -55,6 +57,16 @@ struct alignas(kHeapAlignment) ChunkHeader
 
 static_assert(sizeof(ChunkHeader) == 32, "Header must be 32 bytes");
 static_assert(sizeof(ChunkHeader) % kHeapAlignment == 0, "Header must preserve payload alignment");
+
+// LOAD-BEARING: the small-allocation route discriminator. `next` must
+// sit exactly kSlabRouteHeaderBytes (16) before the payload, because
+// KFree reads the u64 at `ptr - 16` to tell routed slab objects (route
+// magic there) from classic kheap chunks — and KMalloc unconditionally
+// writes `next = nullptr` on every live chunk (both the bin fast path
+// and the freelist path), guaranteeing that word reads 0 for every
+// live classic pointer. Reordering ChunkHeader's fields or letting a
+// live chunk keep a non-null `next` breaks KFree's discrimination.
+static_assert(__builtin_offsetof(ChunkHeader, next) == 16, "KFree discriminator expects next at payload-16");
 
 // IRQ-off scope guard. KMalloc / KFree mutate the global address-
 // ordered freelist + size-class bin pointers; without bracketing,
@@ -155,6 +167,23 @@ constinit util::SatU64 g_bin_alloc_hits = 0;
 constinit util::SatU64 g_bin_free_hits = 0;
 
 constexpr u32 kInvalidBin = 0xFFFFFFFFu;
+
+// ---- KMalloc small-allocation slab routing state -------------------
+// (decision logic lives in mm/kmalloc_route.h; the caches are built by
+// KMallocSlabRoutingInit and never torn down). `g_route_enabled` flips
+// LAST in init, so a true value implies every cache pointer is valid.
+constinit bool g_route_enabled = false;
+constinit SlabCache* g_route_caches[kSlabRouteClassCount] = {};
+constinit util::SatU64 g_routed_alloc_count = 0;
+constinit util::SatU64 g_routed_free_count = 0;
+
+// Route-cache object layout: [16 B route header | class payload | 16 B
+// trailer canary]. All class payloads are multiples of 16, so the
+// payload pointer (obj + 16) keeps kHeapAlignment.
+constexpr u64 RouteCacheObjBytes(u32 route_class)
+{
+    return kSlabRouteHeaderBytes + kSlabRouteClassBytes[route_class] + kHeapTrailerCanaryBytes;
+}
 
 inline u32 BinIndexForChunkSize(u64 chunk_size)
 {
@@ -313,6 +342,37 @@ void KernelHeapInit()
 
 void* KMalloc(u64 bytes)
 {
+    // ---- Small-allocation slab route -------------------------------
+    // BEFORE g_kheap_lock: the route path takes a route-cache spinlock
+    // and, on slab growth, re-enters KMalloc for the 16 KiB backing
+    // block — lock order is route-cache -> kheap. Keeping the route
+    // check outside the kheap lock keeps that order acyclic (the kheap
+    // itself never calls into the slab). No recursion either: both the
+    // grow (16 KiB) and SlabCacheCreate's own allocations are > 512 B,
+    // so re-entrant KMalloc calls always take the classic path below.
+    if (g_route_enabled && bytes != 0 && bytes <= kSlabRouteMaxBytes)
+    {
+        const u32 route_class = SizeToRouteClass(bytes);
+        void* obj = SlabAlloc(g_route_caches[route_class]);
+        if (obj != nullptr)
+        {
+            auto* base = static_cast<u8*>(obj);
+            // 16 B route header: [0..8) the magic+class discriminator
+            // KFree reads at ptr-16; [8..16) caller RIP, mirroring
+            // ChunkHeader::caller_rip for a future routed-leak walker.
+            *reinterpret_cast<u64*>(base) = EncodeRouteHeader(route_class);
+            *reinterpret_cast<u64*>(base + 8) = reinterpret_cast<u64>(__builtin_return_address(0));
+            // Same trailing red zone as the classic path, immediately
+            // after the class payload; KFree's routed leg verifies it.
+            WriteHeapTrailerCanary(base + kSlabRouteHeaderBytes + kSlabRouteClassBytes[route_class]);
+            ++g_routed_alloc_count;
+            return base + kSlabRouteHeaderBytes;
+        }
+        // Route cache couldn't grow (backing KMalloc OOM) — fall
+        // through to the classic first-fit path rather than failing
+        // a request the freelist might still satisfy.
+    }
+
     sync::SpinLockRecursiveGuard g_lock(g_kheap_lock);
     if (bytes == 0 || g_freelist == nullptr)
     {
@@ -468,11 +528,73 @@ void* KMalloc(u64 bytes)
 
 void KFree(void* ptr)
 {
-    sync::SpinLockRecursiveGuard g_lock(g_kheap_lock);
     if (ptr == nullptr)
     {
         return;
     }
+
+    // ---- Small-allocation slab route discriminator ------------------
+    // Read the u64 at ptr-16: 0 = live classic chunk (ChunkHeader::next,
+    // unconditionally nulled by KMalloc — see the static_assert at
+    // ChunkHeader), route magic = routed object, freed tag = routed
+    // double free, anything else = let the classic magic checks panic.
+    // Runs BEFORE g_kheap_lock for the same route-cache -> kheap lock-
+    // order reason as KMalloc's hook (SlabFree may take the route
+    // spinlock). Gated on InsidePool so a wild pointer is still never
+    // dereferenced — every routed object is inside the pool because
+    // slabs are KMalloc-backed. Detection of a RACING double free
+    // (two CPUs freeing the same pointer simultaneously) is best-
+    // effort; the sequential free-free case — the common bug shape —
+    // is what the freed tag catches.
+    if (g_route_enabled && InsidePool(ptr))
+    {
+        u8* route_base = static_cast<u8*>(ptr) - kSlabRouteHeaderBytes;
+        const u64 route_word = *reinterpret_cast<const u64*>(route_base);
+        switch (RouteWordClassify(route_word))
+        {
+        case RouteWord::RoutedLive:
+        {
+            const u32 route_class = DecodeRouteClass(route_word);
+            SlabCache* cache = (route_class < kSlabRouteClassCount) ? g_route_caches[route_class] : nullptr;
+            if (cache == nullptr)
+            {
+                PanicHeap("kmalloc-route: routed pointer but no cache for its class");
+            }
+            // Trailing red zone, mirroring the classic path's check.
+            const u8* canary_at = static_cast<const u8*>(ptr) + kSlabRouteClassBytes[route_class];
+            if (!CheckHeapTrailerCanary(canary_at))
+            {
+                core::PanicWithValue("mm/kheap", "kmalloc-route: trailing red-zone canary corrupt (heap overflow?)",
+                                     reinterpret_cast<u64>(ptr));
+            }
+            // Freed-tag placement (read slab.cpp before touching this):
+            // SlabFree poisons obj[8, obj_size) with 0xCC and — on the
+            // global-freelist leg — writes the freelist link over
+            // obj[0..8). So the ONLY slot that can carry the freed tag
+            // is obj[0..8), and it survives exactly while the object
+            // sits in a per-CPU magazine (the magazine stores the
+            // pointer elsewhere and leaves obj[0..8) alone) — which is
+            // where a just-freed object lands, i.e. precisely the
+            // free();free() window. Once the object migrates to the
+            // global freelist the tag is overwritten by the link and a
+            // second KFree classifies as Garbage -> falls through to
+            // the classic path -> panics on the Live-magic check. Both
+            // halves of the double-free window therefore panic; only
+            // the message differs.
+            *reinterpret_cast<u64*>(route_base) = kSlabRouteMagicFreed;
+            SlabFree(cache, route_base);
+            ++g_routed_free_count;
+            return;
+        }
+        case RouteWord::RoutedFreed:
+            core::PanicWithValue("mm/kheap", "kmalloc-route double free", reinterpret_cast<u64>(ptr));
+        case RouteWord::Kheap:
+        case RouteWord::Garbage:
+            break; // classic path below owns the verdict
+        }
+    }
+
+    sync::SpinLockRecursiveGuard g_lock(g_kheap_lock);
     // IRQ-disable for the duration of the free — same rationale
     // as KMalloc's bracket. The pool-bounds check below doesn't
     // need locking but the freelist/bin-push paths do.
@@ -587,11 +709,74 @@ KernelHeapStats KernelHeapStatsRead()
         }
     }
     stats.used_bytes = stats.pool_bytes - stats.free_bytes;
+
+    // Routed-layer breakdown. The slab BLOCKS are KMalloc-backed, so
+    // these bytes already sit inside used_bytes — used_bytes semantics
+    // are unchanged; the routed gauges let an operator tell "heap used
+    // by big allocations" from "heap parked in route caches".
+    stats.routed_alloc_count = g_routed_alloc_count;
+    stats.routed_free_count = g_routed_free_count;
+    if (g_route_enabled)
+    {
+        for (u32 i = 0; i < kSlabRouteClassCount; ++i)
+        {
+            const SlabStats s = SlabCacheStatsRead(g_route_caches[i]);
+            stats.routed_live_bytes += s.obj_in_use * s.obj_size;
+            stats.routed_cached_free_bytes += s.obj_free * s.obj_size;
+        }
+    }
     return stats;
+}
+
+void KMallocSlabRoutingInit()
+{
+    KASSERT(!g_route_enabled, "mm/kheap", "double KMallocSlabRoutingInit");
+
+    // Names are borrowed by the caches for diagnostics; static
+    // literals outlive everything. Indices mirror kSlabRouteClassBytes.
+    static const char* const kRouteCacheNames[kSlabRouteClassCount] = {"kmalloc-32",  "kmalloc-64",  "kmalloc-96",
+                                                                       "kmalloc-128", "kmalloc-192", "kmalloc-256",
+                                                                       "kmalloc-384", "kmalloc-512"};
+
+    for (u32 i = 0; i < kSlabRouteClassCount; ++i)
+    {
+        // IRQ-safe mode: KMalloc/KFree are IRQ-safe today and routing
+        // must not downgrade that — the route caches' slow path spins
+        // irqsave instead of sleeping on the scheduler mutex.
+        g_route_caches[i] = SlabCacheCreateIrqSafe(kRouteCacheNames[i], static_cast<u32>(RouteCacheObjBytes(i)),
+                                                   static_cast<u32>(kHeapAlignment));
+        if (g_route_caches[i] == nullptr)
+        {
+            PanicHeap("KMallocSlabRoutingInit: route cache create failed");
+        }
+    }
+
+    // Flip LAST: a true g_route_enabled promises every cache pointer
+    // above is valid (KMalloc/KFree index the array unconditionally).
+    g_route_enabled = true;
+    KLOG_INFO("mm/kheap", "kmalloc slab routing online (8 classes, <=512B)");
+}
+
+void KMallocRouteDrain()
+{
+    if (!g_route_enabled)
+    {
+        return;
+    }
+    for (u32 i = 0; i < kSlabRouteClassCount; ++i)
+    {
+        SlabCacheDrainLocalMagazine(g_route_caches[i]);
+    }
 }
 
 void KernelHeapDrainBins()
 {
+    // Drain the route caches' local magazines first, and BEFORE the
+    // kheap lock (route-cache -> kheap order, same as the alloc path).
+    // Existing memory-pressure call sites (env/autonomic MemReclaim)
+    // thereby reclaim both layers with their one existing call.
+    KMallocRouteDrain();
+
     sync::SpinLockRecursiveGuard g_lock(g_kheap_lock);
     for (u32 b = 0; b < kBinCount; ++b)
     {
@@ -887,6 +1072,145 @@ void KernelHeapSelfTest()
     SerialWrite("  red-zone   : trailer canary verified + tamper detection OK\n");
 
     SerialWrite("[mm] kernel heap self-test OK\n");
+}
+
+void KMallocRouteSelfTest()
+{
+    KLOG_TRACE_SCOPE("mm/kheap", "KMallocRouteSelfTest");
+    if (!g_route_enabled)
+    {
+        PanicHeap("route-selftest: routing not enabled (init ordering broken?)");
+    }
+
+    // Counter / in-use baselines. Delta-based: routing has been live
+    // since the previous initcall, so other early allocations may
+    // already sit in the caches — assert OUR round-trips, not absolute
+    // zeros. This initcall runs on the boot task with nothing else
+    // doing small KMallocs concurrently at this phase; if that ever
+    // changes, these equality checks are the canary.
+    const u64 routed_allocs_before = g_routed_alloc_count;
+    const u64 routed_frees_before = g_routed_free_count;
+    u64 in_use_before = 0;
+    for (u32 i = 0; i < kSlabRouteClassCount; ++i)
+    {
+        in_use_before += SlabCacheStatsRead(g_route_caches[i]).obj_in_use;
+    }
+
+    for (u32 i = 0; i < kSlabRouteClassCount; ++i)
+    {
+        const u64 payload = kSlabRouteClassBytes[i];
+
+        // (1) Route + header shape: non-null, 16-aligned, route magic
+        // carrying this exact class at ptr-16.
+        void* p = KMalloc(payload);
+        if (p == nullptr)
+        {
+            PanicHeap("route-selftest: routed alloc returned null");
+        }
+        if ((reinterpret_cast<uptr>(p) & (kHeapAlignment - 1)) != 0)
+        {
+            PanicHeap("route-selftest: routed pointer not aligned");
+        }
+        const u64 live_word = *reinterpret_cast<const u64*>(static_cast<u8*>(p) - kSlabRouteHeaderBytes);
+        if (DecodeRouteClass(live_word) != i)
+        {
+            core::PanicWithValue("mm/kheap", "route-selftest: wrong route header class", live_word);
+        }
+
+        // (2) Free + realloc of the same size: LIFO reuse through the
+        // per-CPU magazine must return the exact pointer, and the slab
+        // freed-object poison (0xCC) must be visible across the whole
+        // payload band before we write anything — proving the object
+        // really took the SlabFree poison trip in between.
+        KFree(p);
+        void* p2 = KMalloc(payload);
+        if (p2 != p)
+        {
+            PanicHeap("route-selftest: LIFO reuse broken (different pointer)");
+        }
+        const auto* poison_band = static_cast<const u8*>(p2);
+        for (u64 b = 0; b < payload; ++b)
+        {
+            if (poison_band[b] != kSlabFreedObjectPoison)
+            {
+                PanicHeap("route-selftest: freed-object poison missing on reuse");
+            }
+        }
+        KFree(p2);
+    }
+
+    // (3) Routing boundary: 512 routes (class 7), 513 takes the
+    // classic path (discriminator word at ptr-16 is ChunkHeader::next
+    // == nullptr on a live classic chunk).
+    void* at_max = KMalloc(kSlabRouteMaxBytes);
+    void* over_max = KMalloc(kSlabRouteMaxBytes + 1);
+    if (at_max == nullptr || over_max == nullptr)
+    {
+        PanicHeap("route-selftest: boundary alloc returned null");
+    }
+    const u64 at_max_word = *reinterpret_cast<const u64*>(static_cast<u8*>(at_max) - kSlabRouteHeaderBytes);
+    if (DecodeRouteClass(at_max_word) != kSlabRouteClassCount - 1)
+    {
+        PanicHeap("route-selftest: 512B alloc did not route to the last class");
+    }
+    const u64 over_max_word = *reinterpret_cast<const u64*>(static_cast<u8*>(over_max) - kSlabRouteHeaderBytes);
+    if (over_max_word != 0)
+    {
+        core::PanicWithValue("mm/kheap", "route-selftest: 513B alloc has non-zero discriminator", over_max_word);
+    }
+    KFree(at_max);
+    KFree(over_max);
+
+    // (4) Counter round-trips: 8 classes x 2 allocs + the 512B probe
+    // = 17 routed allocs, all freed; per-cache in_use back at the
+    // baseline (the freed objects are parked free in magazines).
+    constexpr u64 kExpectedRoutedOps = 2 * kSlabRouteClassCount + 1;
+    if (g_routed_alloc_count != routed_allocs_before + kExpectedRoutedOps)
+    {
+        PanicHeap("route-selftest: routed alloc counter did not move as expected");
+    }
+    if (g_routed_free_count != routed_frees_before + kExpectedRoutedOps)
+    {
+        PanicHeap("route-selftest: routed free counter did not move as expected");
+    }
+    u64 in_use_after = 0;
+    for (u32 i = 0; i < kSlabRouteClassCount; ++i)
+    {
+        in_use_after += SlabCacheStatsRead(g_route_caches[i]).obj_in_use;
+    }
+    if (in_use_after != in_use_before)
+    {
+        core::PanicWithValue("mm/kheap", "route-selftest: routed obj_in_use did not round-trip", in_use_after);
+    }
+
+    // (5) Trailer-canary tamper detection, mirroring the kheap
+    // self-test's red-zone leg: corrupt one byte, detect via the
+    // check helper (NOT via KFree, which would panic the boot),
+    // restore, then free cleanly.
+    void* tamper_probe = KMalloc(64);
+    if (tamper_probe == nullptr)
+    {
+        PanicHeap("route-selftest: tamper-probe alloc failed");
+    }
+    u8* tamper_canary = static_cast<u8*>(tamper_probe) + 64;
+    if (!CheckHeapTrailerCanary(tamper_canary))
+    {
+        PanicHeap("route-selftest: fresh routed allocation has wrong trailer canary");
+    }
+    const u8 saved = tamper_canary[0];
+    tamper_canary[0] = 0xFF; // Simulate one-byte overrun.
+    if (CheckHeapTrailerCanary(tamper_canary))
+    {
+        PanicHeap("route-selftest: corrupted routed canary not detected");
+    }
+    tamper_canary[0] = saved;
+    if (!CheckHeapTrailerCanary(tamper_canary))
+    {
+        PanicHeap("route-selftest: restored routed canary mis-detected");
+    }
+    KFree(tamper_probe);
+
+    SerialWrite("[kmalloc-route-selftest] PASS (8 classes, route+fallback)\n");
 }
 
 } // namespace duetos::mm

@@ -10,20 +10,25 @@
  * higher-half direct map, so the heap's virtual range is always
  * [KERNEL_VIRTUAL_BASE + base_phys .. + base_phys + pool_bytes).
  *
+ * Small allocations (1..512 B) are routed to per-size SlabCaches once
+ * KMallocSlabRoutingInit() runs — O(1) alloc/free with the classic
+ * first-fit walk as fallback. See kernel/mm/kmalloc_route.h for the
+ * pure routing/discrimination logic and its hosted unit test.
+ *
  * Scope limits that will be fixed in later commits:
  *   - Single fixed-size pool. No growth. KernelHeapInit() panics if the pool
  *     can't be obtained; KMalloc returns nullptr when the pool is exhausted.
- *   - Not thread-safe. No lock today; SMP bring-up will add a spinlock.
- *   - First fit, not best fit. Fine for boot-time data structures and the
- *     handful of allocations the early kernel makes.
- *   - 16-byte header per allocation. Payload alignment is 16 bytes (enough
- *     for any scalar or pointer; SSE/AVX state lives in per-thread save areas
- *     allocated separately).
+ *   - First fit, not best fit (above the routed 512 B ceiling). Fine for the
+ *     allocation mix the kernel makes today.
+ *   - 32-byte header per classic allocation (16 B route header on routed
+ *     ones). Payload alignment is 16 bytes (enough for any scalar or
+ *     pointer; SSE/AVX state lives in per-thread save areas allocated
+ *     separately).
  *
  * Context: kernel. Init runs once after FrameAllocatorInit. KMalloc/KFree
- * are then safe to call from any kernel code that is NOT in IRQ context
- * (sleeping in IRQ would need spinlock_irqsave; see [thread safety rules]
- * in CLAUDE.md).
+ * are IRQ-safe and SMP-safe: a recursive irqsave spinlock guards the
+ * freelist + size-class bins (see g_kheap_lock in kheap.cpp), and the
+ * route caches use irq-safe slab mode.
  */
 
 namespace duetos::mm
@@ -63,6 +68,16 @@ struct KernelHeapStats
     u64 binned_chunk_count; ///< Chunks currently parked in size-class bins (also "free").
     u64 bin_alloc_hits;     ///< Allocations satisfied by a size-class bin (no freelist walk).
     u64 bin_free_hits;      ///< Frees absorbed by a size-class bin (no coalesce).
+
+    // KMalloc small-allocation slab routing (kmalloc_route.h). The
+    // routed byte gauges count whole slab objects (16 B route header
+    // + class payload + 16 B trailer canary), i.e. the honest cost,
+    // and live INSIDE used_bytes (slabs are KMalloc-backed) — they
+    // are a breakdown, not an addition.
+    u64 routed_alloc_count;       ///< Lifetime KMalloc calls satisfied by a route cache.
+    u64 routed_free_count;        ///< Lifetime KFree calls returned to a route cache.
+    u64 routed_live_bytes;        ///< Bytes in routed objects currently handed out.
+    u64 routed_cached_free_bytes; ///< Bytes parked free in route caches (freelists + magazines).
 };
 
 /// Carve a contiguous pool out of the physical frame allocator and seed the
@@ -90,6 +105,28 @@ KernelHeapStats KernelHeapStatsRead();
 /// fewer free chunks at the cost of a slower next allocation.
 void KernelHeapDrainBins();
 
+/// Build the eight per-size SlabCaches (irq-safe mode) behind KMalloc
+/// small-allocation routing, then enable routing. After this returns,
+/// KMalloc(1..512) is satisfied O(1) from a route cache (classic
+/// first-fit path remains the fallback when a cache can't grow) and
+/// KFree discriminates routed pointers via the u64 word at ptr-16.
+/// Call once; panics if any cache fails to create — routing half-
+/// initialised would be worse than not at all.
+void KMallocSlabRoutingInit();
+
+/// Memory-pressure helper: push every routed object cached in the
+/// CALLING CPU's per-cache magazines back onto the route caches'
+/// global freelists (see SlabCacheDrainLocalMagazine). Invoked by
+/// KernelHeapDrainBins so existing reclaim call sites cover both
+/// layers. No-op before KMallocSlabRoutingInit.
+void KMallocRouteDrain();
+
+/// Boot self-test for the routing layer: per-class route + header
+/// verification, LIFO reuse + poison visibility, the 512/513 routing
+/// boundary, counter round-trips, and trailer-canary tamper
+/// detection. Panics on failure; emits a PASS sentinel on success.
+void KMallocRouteSelfTest();
+
 /// One row of the heap-leak ranking — a (caller RIP, bytes outstanding,
 /// allocation count) tuple. The reporter sorts descending by `bytes`.
 struct HeapLeakEntry
@@ -104,6 +141,13 @@ struct HeapLeakEntry
 /// sorted descending by `bytes`. Returns the number of distinct RIPs
 /// observed (clipped to `out_capacity`); if more distinct RIPs exist
 /// than capacity, the ones below the cutoff are silently dropped.
+///
+/// Coverage note: slab-routed allocations (<= 512 B) don't appear as
+/// chunks — their slab BLOCKS attribute to the slab grower's RIP, so
+/// this ranking covers >512 B allocations plus aggregate slab growth.
+/// Routed objects do record a caller RIP in their route header; a
+/// routed-object walker is a follow-up if small-object leaks ever
+/// dominate (KernelHeapStats.routed_live_bytes is the cheap tell).
 ///
 /// Takes the kheap's freelist invariants as gospel — does NOT acquire a
 /// lock today (kheap is single-CPU at v0). Cheap O(N_chunks); the
