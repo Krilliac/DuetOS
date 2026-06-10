@@ -54,10 +54,17 @@ filter.
 
 ## Known Limits / GAPs
 
-- **Resident `$INDEX_ROOT` only.** `ntfs.h:151` — a directory whose
-  `$I30` index overflows `INDEX_ROOT` into a non-resident
-  `$INDEX_ALLOCATION` b-tree is only enumerated for its resident
-  slice; the b-tree blocks are not walked.
+- **Linear `$INDEX_ALLOCATION` scan, no b-tree descent.** Large
+  directories (index spilled into a non-resident
+  `$INDEX_ALLOCATION`) are walked since 2026-06-10: the runlist is
+  decoded (multi-run), `$BITMAP` gates which INDX blocks are read,
+  each block gets the "INDX" signature check + USA fixups (same
+  helper as FILE records), and entries stream through the shared
+  walker. The scan is a bounded LINEAR pass over allocated blocks
+  (cap `kMaxIndexBlocks = 16` runs / 256 blocks) — VCN b-tree
+  descent (O(log n) lookups) is the remaining GAP, marked in
+  `ntfs.cpp`. Boot-gated by the `[ntfs-selftest]` 105-entry,
+  2-run, bitmap-gated fixture (incl. a ghost block negative).
 - **Single-run non-resident `$DATA` only.** `ntfs.cpp:548` — the
   non-resident reader follows only the FIRST data run, and
   `ntfs.cpp:542` rejects a run larger than the single scratch
@@ -90,9 +97,10 @@ for the gate locations). There is no write surface to gate.
   `NtfsFindInDir` over each record's resident `$I30` index
   (root MFT record 5 → component → descend into the child record →
   repeat); verified by the `[ntfs-selftest]` "VFS resolve
-  (single + multi-component) verified" boot gate.
-  `$INDEX_ALLOCATION`-spilled large directories are not walked
-  (resident `$INDEX_ROOT` only, at every level).
+  (single + multi-component) verified" boot gate. Large
+  (`$INDEX_ALLOCATION`-spilled) directories are walked at every
+  level since 2026-06-10 — see Known Limits for the linear-scan
+  boundary.
 - [Storage (NVMe + AHCI)](../drivers/Storage.md)
 - [GPT](GPT.md)
 - [DuetFS](DuetFS.md) — the native FS NTFS-typed partitions

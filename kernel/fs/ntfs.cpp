@@ -219,10 +219,13 @@ void NtfsScanAll()
 
 // ---------------------------------------------------------------------------
 // Read path: MFT record read + USA fixup, attribute walk, $DATA resolve,
-// $INDEX_ROOT enumerate, file read. The byte-level magic / span sanity lives
-// in the Rust ntfs_rust crate; the attribute-list walk for $DATA / $INDEX_ROOT
-// and the on-disk USA fixup are done here in C++ because they dispatch real
-// block I/O against scratch and the crate's FFI surface stops at $FILE_NAME.
+// $I30 directory-index walk ($INDEX_ROOT + $INDEX_ALLOCATION INDX blocks),
+// file read. The byte-level magic / span sanity and the mapping-pairs
+// (runlist) decode live in the Rust ntfs_rust crate; the attribute-list walk,
+// the on-disk USA fixup (shared by FILE records and INDX blocks), and the
+// INDX block I/O are done here in C++ because they dispatch real block reads
+// against scratch and the crate's FFI surface stops at $FILE_NAME / runlist
+// entries.
 // ---------------------------------------------------------------------------
 
 namespace
@@ -249,19 +252,25 @@ inline u64 LoadLe64(const u8* p)
     return v;
 }
 
-// Per-volume scratch for a single fixed-up MFT record and for one
-// file-data run. Module-private, single-threaded boot/probe context.
+// Per-volume scratch for a single fixed-up MFT record, one file-data
+// run, and one $INDEX_ALLOCATION INDX block. Module-private,
+// single-threaded boot/probe context (same non-reentrancy contract as
+// the rest of the driver — no per-lookup heap allocation, and no
+// index_block_size buffer ever lands on the caller's stack).
 alignas(16) constinit u8 g_rec_scratch[kMaxMftRecordSize] = {};
 alignas(16) constinit u8 g_data_scratch[kMaxFileReadBytes] = {};
+alignas(16) constinit u8 g_indx_scratch[kMaxIndexBlockSize] = {};
 
 // Apply the NTFS update-sequence-array fixup to a record read into
 // `rec` (length `rec_size`). The USA replaces the last 2 bytes of
 // every `bytes_per_sector`-sized chunk with a check value; the real
 // bytes live in the USA at `usa_off`. Returns false on an
-// inconsistent check value (torn write / corruption).
+// inconsistent check value (torn write / corruption). Shared by FILE
+// (MFT) records and INDX index blocks — both carry the identical
+// usa_offset / usa_count header words.
 bool ApplyUsaFixup(u8* rec, u32 rec_size, u32 bytes_per_sector)
 {
-    // MFT record header: usa_offset @ 4 (u16), usa_count @ 6 (u16).
+    // Record header: usa_offset @ 4 (u16), usa_count @ 6 (u16).
     // usa_count includes the leading update-sequence-number word, so
     // there are (usa_count - 1) protected sectors.
     const u16 usa_off = LoadLe16(rec + 4);
@@ -304,12 +313,15 @@ void DecodeUtf16Name(const u8* utf16, u32 units, char* out, u32 out_cap)
     out[w] = '\0';
 }
 
-// Find the first unnamed attribute of type `want_type` in a fixed-up
-// MFT record. Returns the byte offset of the attribute header, or 0
-// if absent / malformed (offset 0 is never a valid attribute start —
-// the record header occupies it).
-u32 FindAttribute(const u8* rec, u32 rec_size, u32 want_type)
+// Shared attribute-list walk for FindAttribute / FindIndexAttribute.
+// Returns the byte offset of the first matching attribute header, or
+// 0 if absent / malformed (offset 0 is never a valid attribute start
+// — the record header occupies it). `match_i30` additionally accepts
+// attributes named "$I30" (the directory-index stream name real
+// volumes put on $INDEX_ROOT / $INDEX_ALLOCATION / $BITMAP).
+u32 FindAttributeImpl(const u8* rec, u32 rec_size, u32 want_type, bool match_i30)
 {
+    static constexpr char kI30[] = "$I30";
     const u16 first = LoadLe16(rec + 0x14);
     if (first < 0x18 || first >= rec_size)
         return 0;
@@ -322,13 +334,340 @@ u32 FindAttribute(const u8* rec, u32 rec_size, u32 want_type)
         const u32 len = LoadLe32(rec + off + 4);
         if (len < 8 || u64(off) + len > rec_size)
             return 0;
-        // name_length @ +9 (u8); 0 ⇒ unnamed (the stream we want).
+        // name_length @ +9 (u8); 0 ⇒ unnamed. name_offset @ +0x0A
+        // (u16) locates the UTF-16 name within the attribute.
         const u8 name_len = rec[off + 9];
-        if (ty == want_type && name_len == 0)
-            return off;
+        if (ty == want_type)
+        {
+            if (name_len == 0)
+                return off;
+            if (match_i30 && name_len == 4)
+            {
+                const u16 name_off = LoadLe16(rec + off + 0x0A);
+                if (u64(off) + name_off + 8 <= rec_size)
+                {
+                    bool is_i30 = true;
+                    for (u32 i = 0; i < 4; ++i)
+                    {
+                        if (LoadLe16(rec + off + name_off + i * 2) != u16(u8(kI30[i])))
+                            is_i30 = false;
+                    }
+                    if (is_i30)
+                        return off;
+                }
+            }
+        }
         off += len;
     }
     return 0;
+}
+
+// Find the first unnamed attribute of type `want_type` (the main
+// $DATA stream is always unnamed).
+u32 FindAttribute(const u8* rec, u32 rec_size, u32 want_type)
+{
+    return FindAttributeImpl(rec, rec_size, want_type, /*match_i30=*/false);
+}
+
+// Find the first directory-index attribute of `want_type`: named
+// "$I30" on real volumes; unnamed also accepted (legacy synthetic
+// images).
+u32 FindIndexAttribute(const u8* rec, u32 rec_size, u32 want_type)
+{
+    return FindAttributeImpl(rec, rec_size, want_type, /*match_i30=*/true);
+}
+
+// ---------------------------------------------------------------------------
+// $I30 directory-index walk: the resident $INDEX_ROOT slice plus the
+// non-resident $INDEX_ALLOCATION INDX blocks of a large directory.
+// ---------------------------------------------------------------------------
+
+// Visitor for one decoded $I30 index entry. Return true to stop the
+// walk early (e.g. on a name match); false to keep walking.
+using IndexEntryVisitor = bool (*)(void* ctx, const DirEntry& entry);
+
+// Walk the INDEX_ENTRY list spanning [entry, list_end) inside `buf`
+// (a fixed-up MFT record or INDX block of `buf_size` bytes), invoking
+// `visit` per real entry. Returns true if the visitor stopped the
+// walk. Shared by the resident $INDEX_ROOT slice and the INDX-block
+// walk — the on-disk INDEX_ENTRY layout is identical in both:
+//   +0x00 mft_reference (u64; low 48 bits = record number)
+//   +0x08 entry_length  (u16)
+//   +0x0A key_length    (u16)  ($FILE_NAME size)
+//   +0x0C flags         (u16)  0x01 = has sub-node VCN, 0x02 = last
+//   +0x10 key ($FILE_NAME: file-attrs @ +0x38, name_length(u8) @
+//         +0x40, UTF-16 name @ +0x42)
+bool WalkEntryList(const u8* buf, u32 buf_size, u32 entry, u32 list_end, IndexEntryVisitor visit, void* ctx)
+{
+    if (list_end > buf_size)
+        return false;
+    while (entry + 0x10 <= list_end)
+    {
+        const u16 entry_len = LoadLe16(buf + entry + 0x08);
+        const u16 flags = LoadLe16(buf + entry + 0x0C);
+        if (entry_len < 0x10 || u64(entry) + entry_len > buf_size)
+            break;
+        if (flags & 0x02) // last entry — carries no key
+            break;
+        const u32 key = entry + 0x10;
+        if (u64(key) + 0x42 > buf_size)
+            break;
+        const u8 name_len = buf[key + 0x40];
+        if (u64(key) + 0x42 + u64(name_len) * 2 > buf_size)
+            break;
+        DirEntry de{};
+        de.mft_reference = LoadLe64(buf + entry) & 0x0000FFFFFFFFFFFFull;
+        de.is_directory = (LoadLe32(buf + key + 0x38) & 0x10000000u) != 0; // FILE_ATTR_DIRECTORY (index flag)
+        DecodeUtf16Name(buf + key + 0x42, name_len, de.name, sizeof(de.name));
+        if (visit(ctx, de))
+            return true;
+        entry += entry_len;
+    }
+    return false;
+}
+
+// Decoded $INDEX_ALLOCATION stream geometry: cluster extents in VCN
+// order plus the stream's total mapped byte length.
+struct IndexRun
+{
+    u64 lcn;
+    u64 clusters;
+};
+
+struct IndexStream
+{
+    u32 run_count;
+    u64 total_bytes;
+    IndexRun runs[kMaxIndexRuns];
+};
+
+// Decode the $INDEX_ALLOCATION mapping-pairs runlist of the attribute
+// at `attr` into `out`. Reuses the Rust mapping-pair decoder one run
+// at a time (prev_lcn chaining), the same primitive NtfsResolveData
+// uses for $DATA — but walks ALL runs, not just the first.
+::duetos::core::Result<void> DecodeIndexRunlist(const u8* rec, u32 rec_size, u32 attr, u32 bytes_per_cluster,
+                                                IndexStream* out)
+{
+    using ::duetos::core::Err;
+    using ::duetos::core::ErrorCode;
+    out->run_count = 0;
+    out->total_bytes = 0;
+    const u32 attr_len = LoadLe32(rec + attr + 4);
+    if (rec[attr + 8] != 1) // $INDEX_ALLOCATION is non-resident by definition
+        return Err{ErrorCode::Corrupt};
+    const u16 mp_off = LoadLe16(rec + attr + 0x20);
+    if (mp_off < 0x40 || u64(attr) + attr_len > rec_size || mp_off >= attr_len)
+        return Err{ErrorCode::Corrupt};
+    u32 pos = attr + mp_off;
+    const u32 end = attr + attr_len;
+    u64 prev_lcn = 0;
+    while (pos < end)
+    {
+        DuetosNtfsRunlistEntry e{};
+        if (!duetos_ntfs_parse_runlist_entry(rec + pos, end - pos, prev_lcn, &e))
+            return Err{ErrorCode::Corrupt};
+        if (e.ok == 0)
+            break; // end-of-runlist terminator
+        if (e.is_sparse != 0)
+            return Err{ErrorCode::Corrupt}; // GAP: sparse index runs unsupported — revisit with b-tree descent
+        if (out->run_count >= kMaxIndexRuns)
+            return Err{ErrorCode::Corrupt}; // GAP: > kMaxIndexRuns extents — revisit if a real volume hits it
+        out->runs[out->run_count].lcn = e.lcn;
+        out->runs[out->run_count].clusters = e.length_clusters;
+        ++out->run_count;
+        out->total_bytes += e.length_clusters * bytes_per_cluster;
+        prev_lcn = e.lcn;
+        pos += e.bytes_consumed;
+    }
+    if (out->run_count == 0)
+        return Err{ErrorCode::Corrupt};
+    return {};
+}
+
+// Map index block `b` (stream byte offset b * block_size) onto a
+// device LBA via the decoded runs. Returns false if the block falls
+// outside the mapped extents or straddles a run boundary.
+//   GAP: a block straddling two runs is skipped — only possible when
+//   index_block_size > cluster size AND the runlist splits mid-block,
+//   which real formatters don't produce; revisit with b-tree descent.
+bool IndexBlockToLba(const IndexStream& s, const Volume& v, u32 block_size, u32 b, u64* out_lba)
+{
+    const u32 bytes_per_cluster = u32(v.bytes_per_sector) * u32(v.sectors_per_cluster);
+    const u64 want = u64(b) * block_size;
+    u64 acc = 0;
+    for (u32 r = 0; r < s.run_count; ++r)
+    {
+        const u64 run_bytes = s.runs[r].clusters * bytes_per_cluster;
+        if (want >= acc && want + block_size <= acc + run_bytes)
+        {
+            const u64 off_in_run = want - acc;
+            *out_lba = s.runs[r].lcn * v.sectors_per_cluster + off_in_run / v.bytes_per_sector;
+            return true;
+        }
+        acc += run_bytes;
+    }
+    return false;
+}
+
+// Walk every $I30 entry of the directory at `dir_record_num`: the
+// resident $INDEX_ROOT slice first, then every in-use INDX block of
+// the non-resident $INDEX_ALLOCATION attribute (USA fixup per block;
+// $BITMAP gates which blocks are read — absent / non-resident $BITMAP
+// degrades to walking all blocks defensively behind the "INDX"
+// signature check). Stops early when the visitor returns true.
+//   GAP: linear INDX scan — b-tree (VCN sub-node) descent
+//   unimplemented; bounded by kMaxIndexBlocks blocks per directory.
+//   NOTE: non-reentrant (g_rec_scratch / g_indx_scratch); the visitor
+//   must not call back into the NTFS driver.
+::duetos::core::Result<void> WalkDirIndex(const Volume& v, u64 dir_record_num, IndexEntryVisitor visit, void* ctx)
+{
+    using ::duetos::core::Err;
+    using ::duetos::core::ErrorCode;
+    RESULT_TRY(NtfsReadMftRecord(v, dir_record_num, g_rec_scratch));
+    const u32 rec_size = v.mft_record_size;
+    const u32 ir_off = FindIndexAttribute(g_rec_scratch, rec_size, kAttrTypeIndexRoot);
+    if (ir_off == 0)
+        return Err{ErrorCode::NotFound};
+    // $INDEX_ROOT must be resident (it always is by definition).
+    if (g_rec_scratch[ir_off + 8] != 0)
+        return Err{ErrorCode::Corrupt};
+    const u32 val_len = LoadLe32(g_rec_scratch + ir_off + 0x10);
+    const u16 val_off = LoadLe16(g_rec_scratch + ir_off + 0x14);
+    const u32 value = ir_off + val_off;
+    if (u64(value) + val_len > rec_size || val_len < 0x20)
+        return Err{ErrorCode::Corrupt};
+
+    // INDEX_ROOT layout:
+    //   +0x00 attribute type indexed   +0x08 index_block_size (u32)
+    //   +0x10 INDEX_HEADER { entries_offset(u32) @ +0, total_size(u32) @ +4 }
+    // The entry list starts at (value + 0x10 + entries_offset).
+    const u32 hdr = value + 0x10;
+    if (u64(hdr) + 0x10 > rec_size)
+        return Err{ErrorCode::Corrupt};
+    const u32 entries_off = LoadLe32(g_rec_scratch + hdr + 0x00);
+    const u32 index_used = LoadLe32(g_rec_scratch + hdr + 0x04);
+    const u32 entry = hdr + entries_off;
+    const u32 list_end = hdr + index_used;
+    if (list_end > rec_size || entry < hdr)
+        return Err{ErrorCode::Corrupt};
+    if (WalkEntryList(g_rec_scratch, rec_size, entry, list_end, visit, ctx))
+        return {};
+
+    // Small directory: the whole index is resident — done.
+    const u32 ia_off = FindIndexAttribute(g_rec_scratch, rec_size, kAttrTypeIndexAlloc);
+    if (ia_off == 0)
+        return {};
+
+    // Large directory: walk the INDX blocks. Block size comes from
+    // the INDEX_ROOT prefix; extents from the $INDEX_ALLOCATION runlist.
+    const u32 block_size = LoadLe32(g_rec_scratch + value + 0x08);
+    const u32 bps = v.bytes_per_sector;
+    if (block_size < bps || block_size > kMaxIndexBlockSize || (block_size % bps) != 0)
+        return Err{ErrorCode::Corrupt}; // GAP: index blocks > kMaxIndexBlockSize (4 KiB) unsupported
+    const u32 bytes_per_cluster = u32(bps) * u32(v.sectors_per_cluster);
+    IndexStream stream{};
+    RESULT_TRY(DecodeIndexRunlist(g_rec_scratch, rec_size, ia_off, bytes_per_cluster, &stream));
+
+    // $BITMAP ($I30): bit b set ⇒ INDX block b is in use. Points into
+    // g_rec_scratch, which stays intact across the block loop (INDX
+    // reads land in g_indx_scratch).
+    const u8* bitmap = nullptr;
+    u32 bitmap_len = 0;
+    const u32 bm_off = FindIndexAttribute(g_rec_scratch, rec_size, kAttrTypeBitmap);
+    if (bm_off != 0 && g_rec_scratch[bm_off + 8] == 0) // GAP: non-resident $BITMAP treated as absent
+    {
+        const u32 bm_len = LoadLe32(g_rec_scratch + bm_off + 0x10);
+        const u16 bm_val = LoadLe16(g_rec_scratch + bm_off + 0x14);
+        if (u64(bm_off) + bm_val + bm_len <= rec_size)
+        {
+            bitmap = g_rec_scratch + bm_off + bm_val;
+            bitmap_len = bm_len;
+        }
+    }
+
+    u64 total_blocks64 = stream.total_bytes / block_size;
+    if (total_blocks64 > kMaxIndexBlocks)
+        total_blocks64 = kMaxIndexBlocks; // scan cap against corrupt / hostile runlists
+    const u32 total_blocks = u32(total_blocks64);
+    const u32 block_sectors = block_size / bps;
+
+    for (u32 b = 0; b < total_blocks; ++b)
+    {
+        if (bitmap != nullptr)
+        {
+            // Bits beyond the bitmap's byte length read as "not in use".
+            if ((b / 8) >= bitmap_len || (bitmap[b / 8] & (1u << (b % 8))) == 0)
+                continue;
+        }
+        u64 lba = 0;
+        if (!IndexBlockToLba(stream, v, block_size, b, &lba))
+            continue; // unmapped / run-straddling block — see IndexBlockToLba GAP
+        if (drivers::storage::BlockDeviceRead(v.block_handle, lba, block_sectors, g_indx_scratch) < 0)
+            return Err{ErrorCode::IoError};
+        if (LoadLe32(g_indx_scratch) != kIndxRecordMagic)
+        {
+            // An in-use block must carry the "INDX" signature; without
+            // a bitmap, a non-INDX block is just never-initialised.
+            if (bitmap != nullptr)
+                return Err{ErrorCode::Corrupt};
+            continue;
+        }
+        if (!ApplyUsaFixup(g_indx_scratch, block_size, bps))
+        {
+            if (bitmap != nullptr)
+                return Err{ErrorCode::Corrupt}; // torn write in an in-use block
+            continue;
+        }
+        // INDX block layout: "INDX" magic @ +0, USA fields @ +4, LSN
+        // @ +8, this block's VCN @ +0x10, then the INDEX_HEADER @
+        // +0x18 { entries_offset(u32), index_used(u32), allocated(u32),
+        // flags(u32) } with both offsets relative to +0x18.
+        const u32 ihdr = 0x18;
+        const u32 b_entries_off = LoadLe32(g_indx_scratch + ihdr + 0x00);
+        const u32 b_index_used = LoadLe32(g_indx_scratch + ihdr + 0x04);
+        const u32 b_entry = ihdr + b_entries_off;
+        const u32 b_list_end = ihdr + b_index_used;
+        if (b_list_end > block_size || b_entry < ihdr)
+            return Err{ErrorCode::Corrupt};
+        if (WalkEntryList(g_indx_scratch, block_size, b_entry, b_list_end, visit, ctx))
+            return {};
+    }
+    return {};
+}
+
+// Visitor contexts for the public enumerate / find wrappers.
+struct EnumerateCtx
+{
+    DirEntry* out;
+    u32 cap;
+    u32 count;
+};
+
+bool EnumerateVisitor(void* p, const DirEntry& e)
+{
+    auto* c = static_cast<EnumerateCtx*>(p);
+    c->out[c->count++] = e;
+    return c->count >= c->cap; // stop once the caller's array is full
+}
+
+struct FindCtx
+{
+    const char* name;
+    DirEntry* out;
+    bool found;
+};
+
+bool FindVisitor(void* p, const DirEntry& e)
+{
+    auto* c = static_cast<FindCtx*>(p);
+    u32 j = 0;
+    while (e.name[j] != '\0' && c->name[j] != '\0' && e.name[j] == c->name[j])
+        ++j;
+    if (e.name[j] != '\0' || c->name[j] != '\0')
+        return false;
+    *c->out = e;
+    c->found = true;
+    return true;
 }
 
 } // namespace
@@ -418,74 +757,13 @@ u32 FindAttribute(const u8* rec, u32 rec_size, u32 want_type)
     if (out_entries == nullptr || out_count == nullptr || cap == 0)
         return Err{ErrorCode::InvalidArgument};
     *out_count = 0;
-
-    // NOTE: non-reentrant — decodes into the module-static g_rec_scratch.
-    // Callers that walk multiple levels must fully consume each level's
-    // DirEntry results (value copies) before the next NtfsEnumerateDir /
-    // NtfsFindInDir call clobbers the scratch.
-    RESULT_TRY(NtfsReadMftRecord(v, dir_record_num, g_rec_scratch));
-    const u32 rec_size = v.mft_record_size;
-    const u32 ir_off = FindAttribute(g_rec_scratch, rec_size, kAttrTypeIndexRoot);
-    if (ir_off == 0)
-        return Err{ErrorCode::NotFound};
-    // $INDEX_ROOT must be resident (it always is by definition).
-    if (g_rec_scratch[ir_off + 8] != 0)
-        return Err{ErrorCode::Corrupt};
-    const u32 val_len = LoadLe32(g_rec_scratch + ir_off + 0x10);
-    const u16 val_off = LoadLe16(g_rec_scratch + ir_off + 0x14);
-    const u32 value = ir_off + val_off;
-    if (u64(value) + val_len > rec_size || val_len < 0x20)
-        return Err{ErrorCode::Corrupt};
-
-    // INDEX_ROOT layout:
-    //   +0x00 attribute type indexed (we don't re-check)
-    //   +0x10 INDEX_HEADER { entries_offset(u32) @ +0, total_size(u32) @ +4 }
-    // The INDEX_HEADER sits at value + 0x10; entry list starts at
-    // (value + 0x10 + entries_offset).
-    const u32 hdr = value + 0x10;
-    if (u64(hdr) + 0x10 > rec_size)
-        return Err{ErrorCode::Corrupt};
-    const u32 entries_off = LoadLe32(g_rec_scratch + hdr + 0x00);
-    const u32 index_used = LoadLe32(g_rec_scratch + hdr + 0x04);
-    u32 entry = hdr + entries_off;
-    const u32 list_end = hdr + index_used;
-    if (list_end > rec_size || entry < hdr)
-        return Err{ErrorCode::Corrupt};
-
-    u32 produced = 0;
-    // INDEX_ENTRY layout:
-    //   +0x00 mft_reference (u64; low 48 bits = record number)
-    //   +0x08 entry_length  (u16)
-    //   +0x0A key_length    (u16)  ($FILE_NAME size)
-    //   +0x0C flags         (u16)  bit 0x02 = last (end) entry
-    //   +0x10 key ($FILE_NAME: name_length(u8) @ +0x40, name @ +0x42)
-    while (entry + 0x10 <= list_end && produced < cap)
-    {
-        const u16 entry_len = LoadLe16(g_rec_scratch + entry + 0x08);
-        const u16 flags = LoadLe16(g_rec_scratch + entry + 0x0C);
-        if (entry_len < 0x10 || u64(entry) + entry_len > rec_size)
-            break;
-        if (flags & 0x02) // last entry — no key
-            break;
-        const u64 ref = LoadLe64(g_rec_scratch + entry) & 0x0000FFFFFFFFFFFFull;
-        const u32 key = entry + 0x10;
-        // $FILE_NAME key: flags @ +0x38 (u64 attr), file_attributes
-        // @ +0x38 within the FILE_NAME body actually — we only need
-        // name_length @ +0x40 and the UTF-16 name @ +0x42, plus the
-        // directory bit in the FILE_NAME file-attribute flags @ +0x38.
-        if (u64(key) + 0x42 > rec_size)
-            break;
-        const u8 name_len = g_rec_scratch[key + 0x40];
-        if (u64(key) + 0x42 + u64(name_len) * 2 > rec_size)
-            break;
-        const u32 fn_attrs = LoadLe32(g_rec_scratch + key + 0x38);
-        DirEntry& de = out_entries[produced++];
-        de.mft_reference = ref;
-        de.is_directory = (fn_attrs & 0x10000000u) != 0; // FILE_ATTR_DIRECTORY (index flag)
-        DecodeUtf16Name(g_rec_scratch + key + 0x42, name_len, de.name, sizeof(de.name));
-        entry += entry_len;
-    }
-    *out_count = produced;
+    // NOTE: non-reentrant — WalkDirIndex decodes through module-static
+    // scratch. Callers that walk multiple levels must fully consume each
+    // level's DirEntry results (value copies) before the next
+    // NtfsEnumerateDir / NtfsFindInDir call clobbers the scratch.
+    EnumerateCtx ctx{out_entries, cap, 0};
+    RESULT_TRY(WalkDirIndex(v, dir_record_num, &EnumerateVisitor, &ctx));
+    *out_count = ctx.count;
     return {};
 }
 
@@ -500,21 +778,14 @@ u32 FindAttribute(const u8* rec, u32 rec_size, u32 want_type)
     using ::duetos::core::ErrorCode;
     if (name == nullptr || out == nullptr)
         return Err{ErrorCode::InvalidArgument};
-    DirEntry entries[kMaxDirEntries];
-    u32 count = 0;
-    RESULT_TRY(NtfsEnumerateDir(v, dir_record_num, entries, kMaxDirEntries, &count));
-    for (u32 i = 0; i < count; ++i)
-    {
-        u32 j = 0;
-        while (entries[i].name[j] != '\0' && name[j] != '\0' && entries[i].name[j] == name[j])
-            ++j;
-        if (entries[i].name[j] == '\0' && name[j] == '\0')
-        {
-            *out = entries[i];
-            return {};
-        }
-    }
-    return Err{ErrorCode::NotFound};
+    // Streams the walk through a match visitor (stops at the first hit)
+    // instead of materialising an entry array — a large directory's
+    // entry count never lands on the caller's stack.
+    FindCtx ctx{name, out, false};
+    RESULT_TRY(WalkDirIndex(v, dir_record_num, &FindVisitor, &ctx));
+    if (!ctx.found)
+        return Err{ErrorCode::NotFound};
+    return {};
 }
 
 ::duetos::core::Result<void> NtfsFindInRoot(const Volume& v, const char* name, DirEntry* out)

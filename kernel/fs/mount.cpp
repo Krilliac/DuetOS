@@ -508,10 +508,11 @@ constinit VfsBackendOps g_ext4_ops = {&Ext4Lookup};
 // stable handle) plus a size / is-dir snapshot; reads re-read the
 // record + resolve $DATA, then stream NtfsReadFile (see shell_fsio.cpp).
 //
-// GAP: resident $INDEX_ROOT only — a directory whose $I30 index spilled
-//   into a non-resident $INDEX_ALLOCATION b-tree is only enumerated for
-//   the resident slice (same limit as NtfsFindInDir, at every level);
-//   path components longer than 127 chars cannot match.
+// Large directories work: NtfsFindInDir searches the resident
+// $INDEX_ROOT slice and then every allocated $INDEX_ALLOCATION INDX
+// block (linear scan — see the b-tree-descent GAP in fs/ntfs.h).
+//
+// GAP: path components longer than 127 chars cannot match.
 bool NtfsLookup(u32 block_handle, const char* subpath, void* out_node)
 {
     if (subpath == nullptr || out_node == nullptr)

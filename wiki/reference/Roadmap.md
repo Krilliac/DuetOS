@@ -695,8 +695,10 @@ In rough priority:
    ext4 via `Ext4FindInDir`, NTFS via `NtfsFindInDir` over each
    record's resident `$I30` index. ext4 file reads follow depth>0
    extent trees (`MapLogicalBlock`, capped at `kMaxExtentDepth=16`).
-   **Residual:** NTFS does not walk `$INDEX_ALLOCATION`-spilled
-   large directories (resident `$INDEX_ROOT` only); neither follows
+   NTFS large (`$INDEX_ALLOCATION`-spilled) directories are walked
+   since 2026-06-10 (multi-run runlist + `$BITMAP` gating + INDX
+   USA fixups; bounded linear scan — b-tree VCN descent is the
+   remaining GAP in `ntfs.cpp`). **Residual:** neither FS follows
    symlinks/reparse points; ext4 htree directories are unwalked.
    NTFS *write* is a separate item — **T7-04** below.)
 
@@ -1103,27 +1105,9 @@ exercise them; the hosted test is their automated gate):
   `fWaitAll == TRUE` semantics (current impl returns on first
   ready event). (Synchronous BSD subset + the `WSAEvent*` /
   `WSAEventSelect` / `WSAEnumNetworkEvents` async surface +
-  kernel `SocketPollEvents` producer landed.)
-
-### `WSAAsyncSelect` (Win32 socket → window-message delivery)
-
-- **Cost:** ~200 LoC in `userland/libs/ws2_32/ws2_32.c` plus a
-  helper thread per process. Zero kernel change — the existing
-  `kSockOpPollEvents` producer is enough.
-- **Design:** process-global socket→{hwnd, msg, events, armed,
-  fired} registry. One helper thread polls every 10 ms (same
-  cadence as the existing `WSAWaitForMultipleEvents` loop), AND
-  `events & armed`, calls `PostMessageA(hwnd, msg, s,
-  MAKELONG(bit, 0))` for each set bit, then clears that bit from
-  `armed`. Re-arm when `recv`/`send`/`accept` returns
-  `WSAEWOULDBLOCK`.
-- **Reference:** ReactOS `dll/win32/msafd/misc/dllmain.c`
-  (`WSPAsyncSelect`, `SockAsyncThread`). Wine's `server/sock.c`
-  has the kernel-push variant.
-- **Unlocks:** Legacy GUI networked PE apps (FTP/IRC/telnet
-  clients, classic Outlook Express). Implement before IOCP
-  because (a) lower kernel change, (b) broader app coverage.
-- **Owner:** `userland/libs/ws2_32/`, `userland/libs/user32/`.
+  kernel `SocketPollEvents` producer + `WSAAsyncSelect`
+  window-message delivery with DLL-side non-blocking emulation
+  landed.)
 
 ### IOCP for sockets (Win32)
 
@@ -1138,7 +1122,7 @@ exercise them; the hosted test is their automated gate):
   port.
 - **Reference:** Wine `dlls/ws2_32/socket.c` overlapped path +
   `WS_AddCompletion` → `NtRemoveIoCompletion`.
-- **Ordering:** ship `WSAAsyncSelect` first (no kernel change);
+- **Ordering:** `WSAAsyncSelect` shipped (no kernel change);
   IOCP follows when a real overlapped-using PE binary is in test.
 - **Owner:** `kernel/ipc/`, `userland/libs/ws2_32/`.
 

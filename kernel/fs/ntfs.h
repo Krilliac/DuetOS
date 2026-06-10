@@ -29,15 +29,16 @@
  *   - $DATA resolution for a regular file: resident value, plus a
  *     basic single-run non-resident value via the Rust runlist
  *     decoder (NtfsResolveData / NtfsReadFile).
- *   - Root-directory enumeration via the resident $INDEX_ROOT
- *     ($I30) index entries (NtfsEnumerateRoot / NtfsFindInRoot).
+ *   - Directory enumeration via the resident $INDEX_ROOT ($I30)
+ *     index entries PLUS the non-resident $INDEX_ALLOCATION INDX
+ *     blocks (USA-fixed, $BITMAP-gated) for large directories
+ *     (NtfsEnumerateDir / NtfsFindInDir at every walk level).
  *
  * GAP (not in scope):
- *   - $INDEX_ALLOCATION b-trees: a directory whose $I30 index
- *     overflows INDEX_ROOT into non-resident INDEX_ALLOCATION
- *     blocks is only enumerated for the resident slice. This applies
- *     at every directory level of a multi-component path walk
- *     (NtfsEnumerateDir / NtfsFindInDir), not just the root.
+ *   - B-tree descent: $INDEX_ALLOCATION blocks are scanned linearly
+ *     (every allocated INDX block is visited), not descended via the
+ *     entries' VCN sub-node pointers — lookups stay correct, large
+ *     directories just pay O(blocks) instead of O(log n).
  *   - Multi-run / compressed / sparse / encrypted $DATA: the
  *     non-resident decoder follows the FIRST data run only.
  *   - Alternate data streams (named $DATA), reparse points /
@@ -59,16 +60,31 @@ inline constexpr u64 kBootSectorLba = 0;
 inline constexpr u32 kFileRecordMagic = 0x454C4946; // 'FILE'
 
 // NTFS attribute type codes the read path cares about.
-inline constexpr u32 kAttrTypeFileName = 0x30;  // $FILE_NAME
-inline constexpr u32 kAttrTypeData = 0x80;      // $DATA
-inline constexpr u32 kAttrTypeIndexRoot = 0x90; // $INDEX_ROOT
-inline constexpr u32 kAttrTypeEnd = 0xFFFFFFFF; // attribute-list terminator
+inline constexpr u32 kAttrTypeFileName = 0x30;   // $FILE_NAME
+inline constexpr u32 kAttrTypeData = 0x80;       // $DATA
+inline constexpr u32 kAttrTypeIndexRoot = 0x90;  // $INDEX_ROOT
+inline constexpr u32 kAttrTypeIndexAlloc = 0xA0; // $INDEX_ALLOCATION
+inline constexpr u32 kAttrTypeBitmap = 0xB0;     // $BITMAP
+inline constexpr u32 kAttrTypeEnd = 0xFFFFFFFF;  // attribute-list terminator
+
+// INDX block "INDX" signature, little-endian u32.
+inline constexpr u32 kIndxRecordMagic = 0x58444E49; // 'INDX'
 
 // Largest MFT record we will read into scratch (covers the common
 // 1024-byte record plus the 4096-byte modern variant).
 inline constexpr u32 kMaxMftRecordSize = 4096;
 
-// Largest directory we enumerate from a resident $INDEX_ROOT.
+// Largest $INDEX_ALLOCATION index block we read into scratch (4096
+// is the format default on every common cluster size).
+inline constexpr u32 kMaxIndexBlockSize = 4096;
+// Most data runs we decode from one $INDEX_ALLOCATION runlist.
+inline constexpr u32 kMaxIndexRuns = 16;
+// Sanity cap on INDX blocks scanned per directory lookup — bounds
+// the linear scan against corrupt / hostile runlists.
+inline constexpr u32 kMaxIndexBlocks = 256;
+
+// Default caller-side cap for one NtfsEnumerateDir listing (the walk
+// itself visits every entry; enumeration output truncates at `cap`).
 inline constexpr u32 kMaxDirEntries = 32;
 // Largest single-run non-resident file we read back (one scratch
 // cluster-run; the resident-$DATA happy path is much smaller).
@@ -82,7 +98,8 @@ struct MftEntry
     char name[128]; // UTF-16 decoded to ASCII; non-ASCII -> '?'
 };
 
-// One enumerated directory entry from a resident $INDEX_ROOT.
+// One enumerated $I30 directory entry (from the resident $INDEX_ROOT
+// slice or an $INDEX_ALLOCATION INDX block).
 struct DirEntry
 {
     u64 mft_reference; // target MFT record number (low 48 bits)
@@ -147,14 +164,16 @@ void NtfsScanAll();
 ::duetos::core::Result<void> NtfsResolveData(const Volume& v, const u8* rec, DataLocation* out);
 
 /// Enumerate the directory whose MFT record is `dir_record_num` on
-/// volume `v` from its resident $INDEX_ROOT ($I30) index. Writes up to
-/// `kMaxDirEntries` entries into `out_entries[]` and reports the count
-/// via `*out_count`. Used at every level of a multi-component walk.
-///   GAP: resident INDEX_ROOT only — entries that spilled into a
-///   non-resident $INDEX_ALLOCATION b-tree are not walked. Applies at
-///   every directory level, not just the root.
-///   NOTE: non-reentrant — decodes through a module-static scratch
-///   buffer, so each level's DirEntry results (value copies) must be
+/// volume `v`: the resident $INDEX_ROOT ($I30) entries first, then —
+/// for large directories — every allocated INDX block of the
+/// non-resident $INDEX_ALLOCATION attribute ($BITMAP-gated, USA fixup
+/// applied per block). Writes up to `cap` entries into `out_entries[]`
+/// and reports the count via `*out_count`. Used at every level of a
+/// multi-component walk.
+///   GAP: linear INDX scan — b-tree (VCN sub-node) descent
+///   unimplemented; capped at kMaxIndexBlocks blocks per directory.
+///   NOTE: non-reentrant — decodes through module-static scratch
+///   buffers, so each level's DirEntry results (value copies) must be
 ///   consumed before the next NtfsEnumerateDir / NtfsFindInDir call.
 ::duetos::core::Result<void> NtfsEnumerateDir(const Volume& v, u64 dir_record_num, DirEntry* out_entries, u32 cap,
                                               u32* out_count);
@@ -165,9 +184,11 @@ void NtfsScanAll();
 
 /// Find a child named `name` directly under the directory whose MFT
 /// record is `dir_record_num` on `v`, filling `*out` with its directory
-/// entry. Returns NotFound if absent. Re-enumerates the resident index
-/// per call (no cache). The descend primitive for a component walk: the
-/// returned `mft_reference` is the next level's `dir_record_num`.
+/// entry. Returns NotFound if absent. Searches the resident $INDEX_ROOT
+/// slice and (if present) the $INDEX_ALLOCATION INDX blocks, stopping
+/// at the first match; re-walks the index per call (no cache). The
+/// descend primitive for a component walk: the returned `mft_reference`
+/// is the next level's `dir_record_num`.
 ::duetos::core::Result<void> NtfsFindInDir(const Volume& v, u64 dir_record_num, const char* name, DirEntry* out);
 
 /// Find a child named `name` directly under the root directory of
@@ -185,8 +206,9 @@ void NtfsScanAll();
                                           void* buf, u64 len, u64* out_read);
 
 /// Boot self-test: builds a minimal synthetic NTFS volume in a RAM
-/// block device and drives probe → root enumerate → read-file-back
-/// with assertions. Emits `[ntfs-selftest] PASS (...)` on success;
+/// block device and drives probe → root enumerate → read-file-back →
+/// large-directory ($INDEX_ALLOCATION INDX-block) lookups with
+/// assertions. Emits `[ntfs-selftest] PASS (...)` on success;
 /// `[ntfs-selftest] FAIL (<phase>)` + a kBootSelftestFail probe on
 /// failure. Lives in kernel/fs/ntfs_selftest.cpp.
 void NtfsSelfTest();
