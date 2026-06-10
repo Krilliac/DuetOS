@@ -132,6 +132,13 @@ target_sources(test_x509_verify PRIVATE
 # suppress -Wcomment for this target rather than reflow security-critical
 # crypto source.
 target_compile_options(test_x509_verify PRIVATE -Wno-comment)
+
+# X25519 (Curve25519 ECDH) — the TLS 1.3 key-exchange primitive. RFC 7748
+# §5.2 + §6.1 vectors. Pure field arithmetic, no kernel deps.
+add_host_test(x25519)
+target_sources(test_x25519 PRIVATE "${CMAKE_SOURCE_DIR}/../../kernel/crypto/x25519.cpp")
+target_compile_options(test_x25519 PRIVATE -Wno-conversion -Wno-sign-conversion)
+
 add_host_test(wild_address)
 add_host_test(disk_path)
 add_host_test(nospec)
