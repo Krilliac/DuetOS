@@ -855,6 +855,40 @@ void SmpCpuhpRegister()
 
 extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
 {
+    // FIRST — before ANY call that can reach cpu::CurrentCpu(): bring
+    // this AP's IA32_APIC_BASE into the kernel's chosen APIC mode (EN,
+    // plus EXTD when the BSP selected x2APIC). IA32_APIC_BASE is a
+    // per-CPU MSR; the BSP's LapicInit set EXTD only on itself and
+    // flipped the GLOBAL g_x2apic. Everything below may call
+    // cpu::CurrentCpu(), whose GSBASE==0 fallback reads the LAPIC ID —
+    // with g_x2apic set that is `rdmsr 0x802`, which architecturally
+    // #GPs on a CPU whose own EXTD bit is still 0 (SDM Vol 3
+    // §10.12.1.2). This AP has no IDT yet, so the #GP escalates
+    // IDT@0 → #DF → triple fault. The very first such call site is
+    // the SpinLockAcquire(g_state_lock) inside CpuhpBringUp (lockdep
+    // HeldLocksPush → CurrentCpu). Nested KVM models the #GP
+    // faithfully and exposed this as the "SMP wedge" (the triple
+    // fault lands as KVM_EXIT_SHUTDOWN, which -no-reboot turns into a
+    // silently paused VM); QEMU TCG and VirtualBox are lenient about
+    // the read and masked it — but real x2APIC silicon would
+    // triple-fault every AP exactly like nested KVM. The same
+    // programming inside CpuhpStartLapic (step 6) stays as the
+    // idempotent belt-and-braces it always was; step 6 is
+    // structurally too late to be the ONLY site.
+    {
+        u32 lo, hi;
+        asm volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0x1Bu));
+        const u64 apic_base = (static_cast<u64>(hi) << 32) | lo;
+        const u64 want_bits = LapicIsX2apic() ? ((1ULL << 11) | (1ULL << 10)) : (1ULL << 11);
+        if ((apic_base & want_bits) != want_bits)
+        {
+            const u64 enabled = apic_base | want_bits;
+            const u32 elo = static_cast<u32>(enabled & 0xFFFFFFFF);
+            const u32 ehi = static_cast<u32>(enabled >> 32);
+            asm volatile("wrmsr" : : "c"(0x1Bu), "a"(elo), "d"(ehi));
+        }
+    }
+
     // Walk the bring-up chain through every registered startup. The
     // chain runs the historic AP init steps (GDT/GS-base/IDT/CR4/
     // syscall-MSRs/LAPIC/topology) in their original numeric order;

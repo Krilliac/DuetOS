@@ -73,9 +73,34 @@ echo "[babysit] report   -> $REPORT (if boot hangs)"
 # Step 1: run the boot under run.sh, capturing the serial log.
 # Use DUETOS_TIMEOUT so run.sh sets up its own SIGTERM-on-timeout
 # wrapping; on hang, QEMU stays alive until we kill it.
+#
+# While the boot runs, poll QMP query-status every ~10 s. A guest
+# triple fault under run.sh's `-no-reboot -no-shutdown` does NOT
+# exit QEMU — it leaves the VM silently "paused (shutdown)" with
+# every vCPU frozen and no further serial output, which is
+# indistinguishable from a hang in the serial log alone. (This is
+# exactly how the 2026-06-10 nested-KVM AP x2APIC #GP triple fault
+# masqueraded as an SMP wedge.) Detecting the runstate during the
+# run converts that silent shape into an attributable verdict.
 rm -f "$BOOT_LOG"
+triple_fault=0
 DUETOS_TIMEOUT="${TIMEOUT_SECS}" DUETOS_PRESET="${PRESET}" DUETOS_DISPLAY=none \
-    "${SCRIPT_DIR}/run.sh" > "$BOOT_LOG" 2>&1 || true
+    "${SCRIPT_DIR}/run.sh" > "$BOOT_LOG" 2>&1 &
+RUN_PID=$!
+while kill -0 "$RUN_PID" 2>/dev/null; do
+    sleep 10
+    # qmp.sh exits non-zero when the socket isn't up yet (early
+    # launch) or QEMU already exited — both are "not a triple
+    # fault"; keep waiting on the run itself.
+    qstat=$(DUETOS_PRESET="${PRESET}" "${SCRIPT_DIR}/qmp.sh" status 2>/dev/null || true)
+    if printf '%s' "$qstat" | grep -q '"status": *"shutdown"'; then
+        triple_fault=1
+        echo "[babysit] QMP runstate = shutdown — guest TRIPLE FAULT (VM paused under -no-reboot)"
+        kill "$RUN_PID" 2>/dev/null || true
+        break
+    fi
+done
+wait "$RUN_PID" 2>/dev/null || true
 
 # Step 2: check whether the boot reached the completion sentinels.
 # `boot : metrics bringup-complete` is the bringup-tail entry; the
@@ -111,7 +136,13 @@ fi
     echo
 
     echo "## VERDICT"
-    if [ "$bringup_complete" -eq 0 ]; then
+    if [ "$triple_fault" -ne 0 ]; then
+        echo "GUEST TRIPLE FAULT: QMP reported runstate \"shutdown\" while the"
+        echo "boot was still running — under -no-reboot -no-shutdown that means"
+        echo "the guest triple-faulted and QEMU paused every vCPU. The serial"
+        echo "log below simply STOPS at the fault point (no panic banner is"
+        echo "possible — the fault escalated past the kernel's handlers)."
+    elif [ "$bringup_complete" -eq 0 ]; then
         echo "Boot did NOT reach \`boot : metrics bringup-complete\`."
     elif [ "$smp_complete" -eq 0 ]; then
         echo "Boot reached \`bringup-complete\` but NOT \`[smp] online=N/M\`."

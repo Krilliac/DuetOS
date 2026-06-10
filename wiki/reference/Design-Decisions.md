@@ -11193,3 +11193,80 @@ below so a future audit doesn't re-chase them.
   decode, classification) + boot `[kmalloc-route-selftest] PASS
   (8 classes, route+fallback)` (per-class route+reuse+poison, 513-B
   boundary fall-through, counter deltas, canary tamper).
+
+## 2026-06-10 — WSAAsyncSelect: DLL-side poller + non-blocking emulation, no kernel push
+
+- **Context:** `WSAAsyncSelect` (window-message socket notifications —
+  the API classic GUI networked PEs are written against) landed in
+  `userland/libs/ws2_32/ws2_32.c` on top of the existing
+  `kSockOpPollEvents` producer, zero kernel changes.
+- **Decision (delivery):** a single per-process helper thread (lazily
+  spawned via `SYS_THREAD_CREATE` on the first registration) polls the
+  registry every 10 ms — same cadence as `WSAWaitForMultipleEvents` —
+  and posts one message per FD_* event via `SYS_WIN_POST_MSG`, the
+  exact kernel entry user32's `PostMessageA` uses. **Rules out** a
+  user32 import from ws2_32 (the DLLs are freestanding peers; cross-DLL
+  calls would create load-order coupling) and **defers** kernel-push
+  delivery (signal at the moment of socket activity) — a future slice
+  doing kernel-push must replace both this poller and the
+  `WSAWaitForMultipleEvents` loop together, not just one.
+- **Decision (re-arm):** Winsock's real re-enable contract, not pure
+  level-edge detection: each subscribed bit fires once (latched in
+  `fired`), and re-arms when the app calls the matching operation —
+  FD_READ on `recv`/`recvfrom`, FD_ACCEPT on `accept`, FD_WRITE on a
+  send that fails `WSAEWOULDBLOCK`; FD_CONNECT/FD_CLOSE are one-shot.
+  FD_CONNECT has no poll producer and is posted synchronously from the
+  `connect()` hook with the real WSA error in the lParam high word.
+- **Decision (non-blocking):** `FIONBIO` + implicit-on-WSAAsyncSelect
+  non-blocking mode is **emulated DLL-side** (per-socket bit; recv/
+  send/accept consult the poll mask and fail fast `WSAEWOULDBLOCK`)
+  because the kernel socket layer is always-blocking. GAP: wire-TCP
+  sockets have no FD_READ producer in `SocketPollEvents`, so
+  non-blocking wire recv over-reports would-block (loopback + UDP
+  exact); the kernel-side fix is a `tcp::` recv-queue probe, not a
+  DLL change.
+- **Hygiene:** `closesocket` now drops every DLL-side trace of the
+  handle (async registration, `WSAEventSelect` binding, non-blocking
+  bit) — kernel pool indices are reused, and a stale registration
+  would attach to the next socket landing on the index.
+- **Verification:** `winsock_ext_smoke` grew an end-to-end scenario
+  (hidden window + loopback listener/connector; asserts the FD_ACCEPT
+  and FD_READ messages arrive with `wParam` = socket); summary line
+  `[winsock_ext_smoke] WSAAsyncSelect = PASS`.
+
+## 2026-06-10 — AP programs its own IA32_APIC_BASE before ANY CurrentCpu()-reachable call
+
+- **Context:** SMP boots under nested KVM (WSL2) wedged silently at AP
+  bring-up; TCG/VirtualBox booted the same code fine. ftrace pinned the
+  exact chain: the BSP's `LapicInit` sets x2APIC mode on ITSELF and the
+  global `g_x2apic`; the AP enters `ApEntryFromTrampoline` with its own
+  per-CPU `IA32_APIC_BASE.EXTD=0`, and the very first
+  `SpinLockAcquire(g_state_lock)` inside `CpuhpBringUp` reaches
+  `cpu::CurrentCpu()` → GSBASE==0 fallback → `rdmsr 0x802` (x2APIC ID)
+  — an architecturally-mandated #GP when EXTD=0 (SDM Vol 3 §10.12.1.2),
+  taken with no IDT loaded → IDT@0 walk → #DF → triple fault. QEMU's
+  `-no-reboot -no-shutdown` converts the SHUTDOWN exit into a silently
+  paused VM — the "wedge".
+- **Decision:** `ApEntryFromTrampoline` programs IA32_APIC_BASE (EN +
+  EXTD-when-x2APIC) as its FIRST statements, before `CpuhpBringUp`.
+  The identical block inside `CpuhpStartLapic` (cpuhp step 6) stays as
+  idempotent belt-and-braces. **Rules out** "fix it in a cpuhp step":
+  the fatal CurrentCpu() happens inside the state-machine's OWN lock
+  acquisition, before any step body can run — any future early-AP code
+  that can fault must come AFTER this MSR programming.
+- **Not a nested-KVM appeasement:** TCG and VirtualBox are merely
+  lenient about the unprivileged-state rdmsr; real x2APIC silicon
+  raises the same #GP — this was a latent every-AP triple fault on
+  bare-metal x2APIC machines. Nested KVM (which models the #GP
+  faithfully) was the first environment honest enough to fail.
+- **Diagnosability:** `babysit-boot.sh` now polls QMP `query-status`
+  during the boot and reports runstate "shutdown" as GUEST TRIPLE
+  FAULT — under `-no-reboot` a triple fault produces NO serial
+  evidence and previously masqueraded as a hang.
+- **Verification:** nested-KVM SMP=4 went from 100% wedge to 3/3
+  `[smp] online=4/4` (2/3 fully clean; the third hit the PRE-EXISTING
+  idle-task state race — `[sched-fallback] no idle available
+  idle_state=3` — which KVM's true parallelism makes more visible
+  than TCG; tracked by the g_sched_lock split campaign). TCG
+  regression boot clean. Local KVM SMP dev boots are now unblocked
+  (~6x faster than the TCG workaround).
