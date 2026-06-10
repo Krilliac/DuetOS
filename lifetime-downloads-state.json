@@ -1,79 +1,79 @@
 {
   "asset_count": 15,
   "by_asset": {
-    "443963397": {
-      "count": 0,
-      "name": "SHA256SUMS.txt",
-      "release_tag": "latest-debug"
-    },
-    "443963399": {
+    "443995661": {
       "count": 0,
       "name": "duetos-debug.iso",
       "release_tag": "latest-debug"
     },
-    "443963404": {
+    "443995662": {
       "count": 0,
       "name": "duetos-kernel-debug.elf",
       "release_tag": "latest-debug"
     },
-    "443963456": {
+    "443995663": {
+      "count": 0,
+      "name": "SHA256SUMS.txt",
+      "release_tag": "latest-debug"
+    },
+    "443995685": {
       "count": 0,
       "name": "duetos-release.iso",
       "release_tag": "latest-release"
     },
-    "443963458": {
+    "443995688": {
       "count": 0,
       "name": "SHA256SUMS.txt",
       "release_tag": "latest-release"
     },
-    "443963459": {
+    "443995689": {
       "count": 0,
       "name": "duetos-kernel-release.elf",
       "release_tag": "latest-release"
     },
-    "443965323": {
-      "count": 0,
-      "name": "SHA256SUMS.txt",
-      "release_tag": "latest-flavors"
-    },
-    "443965324": {
+    "443998080": {
       "count": 0,
       "name": "duetos-release-asserts.iso",
       "release_tag": "latest-flavors"
     },
-    "443965326": {
-      "count": 0,
-      "name": "duetos-debug-fast.iso",
-      "release_tag": "latest-flavors"
-    },
-    "443965327": {
-      "count": 0,
-      "name": "duetos-kernel-release-lto.elf",
-      "release_tag": "latest-flavors"
-    },
-    "443965328": {
-      "count": 0,
-      "name": "duetos-release-lto.iso",
-      "release_tag": "latest-flavors"
-    },
-    "443965330": {
-      "count": 0,
-      "name": "duetos-kernel-release-audit.elf",
-      "release_tag": "latest-flavors"
-    },
-    "443965331": {
-      "count": 0,
-      "name": "duetos-release-audit.iso",
-      "release_tag": "latest-flavors"
-    },
-    "443965333": {
+    "443998081": {
       "count": 0,
       "name": "duetos-kernel-debug-fast.elf",
       "release_tag": "latest-flavors"
     },
-    "443965334": {
+    "443998082": {
       "count": 0,
       "name": "duetos-kernel-release-asserts.elf",
+      "release_tag": "latest-flavors"
+    },
+    "443998083": {
+      "count": 0,
+      "name": "duetos-release-lto.iso",
+      "release_tag": "latest-flavors"
+    },
+    "443998084": {
+      "count": 0,
+      "name": "duetos-kernel-release-lto.elf",
+      "release_tag": "latest-flavors"
+    },
+    "443998085": {
+      "count": 0,
+      "name": "SHA256SUMS.txt",
+      "release_tag": "latest-flavors"
+    },
+    "443998086": {
+      "count": 0,
+      "name": "duetos-release-audit.iso",
+      "release_tag": "latest-flavors"
+    },
+    "443998087": {
+      "count": 0,
+      "name": "duetos-debug-fast.iso",
+      "release_tag": "latest-flavors"
+    },
+    "443998088": {
+      "count": 0,
+      "name": "duetos-kernel-release-audit.elf",
       "release_tag": "latest-flavors"
     }
   },
@@ -81,5 +81,5 @@
   "lifetime_total": 9,
   "live_assets_total": 0,
   "repo": "Krilliac/DuetOS",
-  "snapshot_at": "2026-06-10T19:20:26+00:00"
+  "snapshot_at": "2026-06-10T20:15:49+00:00"
 }
