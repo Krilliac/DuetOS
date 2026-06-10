@@ -287,32 +287,53 @@ The `gfxdemo` kernel app reads these counters live to render its
 
 ## Boot Self-Test
 
-`graphics_vk_selftest.cpp` runs at boot:
+`graphics_vk_selftest.cpp` runs at boot (under
+`DUETOS_BOOT_SELFTESTS`):
 
-- Create + destroy a `VkInstance`, `VkDevice`, `VkQueue`
-- Allocate a `VkImage` scanout-backed, clear it red, verify
-  framebuffer pixels
-- Allocate a `VkBuffer`, map, write, unmap, verify backing memory
+- Drives the canonical lifecycle: instance → device → queue →
+  pipeline → descriptor → memory/buffer/image → command tape →
+  submit → teardown, asserting every live handle pool returns to
+  zero.
+- Deliberately does NOT clear a scanout-backed image — the boot
+  console owns the framebuffer at this point.
+- Image-backed paint leg: a non-scanout BGRA8 `VkImage` bound to
+  host-visible memory takes a tape-recorded clear + one v0-format
+  triangle draw; the test asserts the clear color at the corners,
+  the triangle color at an interior pixel, and the
+  `kVkStatsImageClearPixels` counter delta, then emits the
+  grep-able `[vk-selftest] PASS (image-backed clear+draw)` line
+  the boot smoke checks. This is the kernel half of the
+  D3D11→Vulkan back-buffer path, proven on every QEMU boot.
 
-A failure here fires `kBootSelftestFail` and panics — graphics is
-foundational enough that booting through a broken ICD will produce
-nonsense for every consumer downstream.
+A failure leaves a `[selftest:graphics]` WARN sentinel and fails
+the boot self-test gate — graphics is foundational enough that
+booting through a broken ICD will produce nonsense for every
+consumer downstream.
 
 ## DirectX Translation Hand-off
 
-D3D11 ([`userland/libs/d3d11/`](../../userland/libs/d3d11/)) and D3D12
-([`userland/libs/d3d12/`](../../userland/libs/d3d12/)) implement their
-`Clear` + `Present` path by:
+D3D11 ([`userland/libs/d3d11/`](../../userland/libs/d3d11/)) routes its
+swap chain through this ICD (v0, since the D3D11→Vulkan thunk slice):
 
-1. Creating a `VkInstance` + `VkDevice` + `VkSwapchainKHR` on first
-   `IDXGISwapChain` creation.
-2. Translating each D3D Clear / Present call into the equivalent
-   Vulkan call.
-3. Routing the D3D resource handles back to Vulkan handles through a
-   per-D3D-device translation table.
+1. `D3D11CreateDeviceAndSwapChain` under driver type UNKNOWN /
+   HARDWARE / REFERENCE builds the `SYS_VK_CALL` ladder
+   (`userland/libs/dx_vk.h`): instance → physical device → device →
+   queue → host-visible memory → non-scanout BGRA8 `VkImage`
+   (bound + mapped) → command pool/buffer → a 64 KiB mapped vertex
+   staging buffer.
+2. `ClearRenderTargetView` records `CmdClearColorImage` and
+   triangle `Draw*` calls record `CmdBindVertexBuffer` + `CmdDraw`
+   over DuetOS v0 vertex records into the kernel command tape; the
+   userland software rasterizer does not run on this path.
+3. `Present` (or a CPU readback `Map`) ends + submits the tape;
+   `vkQueueSubmit` replays it and the KERNEL rasterizer paints the
+   image backing, which the DLL syncs into the user-heap back
+   buffer for the existing `SYS_GDI_BITBLT` present.
 
-That gives the v0 DirectX path real, visible Clear + Present pixels —
-which is exactly what every smoke test currently asserts.
+WARP / SOFTWARE / NULL driver types — and any vk-setup failure —
+stay on the userland software rasterizer (`dx_raster.h`). D3D12
+([`userland/libs/d3d12/`](../../userland/libs/d3d12/)) has not been
+moved onto this path yet; it still paints in userland.
 
 ## Threading and Locking
 
@@ -537,13 +558,20 @@ sane while preserving a stable per-op ABI value — once published,
 neither the syscall number nor the op-code may move.
 
 What a Vulkan-using Win32 PE can do today: load the DLL, resolve
-exports, walk the lifecycle (`vkCreateInstance` -> enumerate ->
-`vkCreateDevice` -> `vkGetDeviceQueue` -> wait/destroy), and
-read any of the 10 diagnostic stats counters. Buffer / image /
-memory creation, command-buffer record + submit, shader module
-create, and WSI surface / swapchain are deferred to the next
-op-code expansion — those need shared-memory marshalling that
-the v0 syscall surface doesn't provide.
+exports, walk the full lifecycle, create + bind + map host-visible
+memory / buffers / images, create shader modules (the kernel
+copies the SPIR-V stream in), record + submit command buffers, and
+read the diagnostic stats counters. The D3D11 DLL exercises this
+surface end-to-end as its Vulkan back end (see "DirectX
+Translation Hand-off" above) — it issues the ops directly from
+`userland/libs/dx_vk.h` rather than importing vulkan-1.dll,
+because the DX DLLs are freestanding single-TU builds.
+
+Two ops worth calling out: `kVkOpCreateImage` masks the
+scanout-backed flag from the userland path (a PE must not be able
+to mint an image whose clears paint the live framebuffer), and
+`kVkOpFreeCommandBuffer` (52) releases the cb slot
+`kVkOpAllocateCommandBuffer` took — destroy-pool alone does not.
 
 ## Known Limits / GAPs
 
@@ -621,19 +649,35 @@ the v0 syscall surface doesn't provide.
   `VkVertexInputAttributeDescription` / `VkVertexInputBindingDescription`.
   A caller whose vertex layout differs gets garbage values fed
   into the VS Input variables.
-- **Userland buffer / image / submit.** `SYS_VK_CALL` v0 only
-  covers the lifecycle subset. Buffer / image / memory / command-
-  buffer / swapchain ops return `VK_ERROR_INITIALIZATION_FAILED`
-  to userland callers until the next op-code expansion adds
-  shared-memory marshalling.
+- **Render targets.** `vkCmdDraw` / `vkCmdDrawIndexed` and clear
+  replay paint scanout-backed images (the framebuffer) and
+  image-backed targets (non-scanout images bound to host-visible
+  memory) — but image-backed paint is **BGRA8-only** and the
+  software depth test is **scanout-only** (the shared depth surface
+  is sized to the framebuffer extent).
+- **`vulkan-1.dll` register misalignment.** Several `vulkan_1.c`
+  call sites pass their first payload argument in `rsi`, which no
+  kernel `SYS_VK_CALL` handler reads (the kernel convention is
+  rdx/r10/r8/r9) — e.g. `vkBeginCommandBuffer`, `vkCreateDevice`,
+  `vkEnumeratePhysicalDevices`, `vkCmdClearColorImage`,
+  `DuetOS_Vk_GetStatsCounter`. Those entries are latently broken
+  for any PE that calls them; `userland/libs/dx_vk.h` binds to the
+  kernel convention and is unaffected. Fixing vulkan_1.c's
+  argument placement is a follow-on slice.
+- **Per-process cleanup.** Kernel handle pools are global with a
+  fixed capacity and no per-process ledger — a PE that exits
+  without destroying its Vulkan handles leaks the slots until
+  reboot. The D3D11 backend tears down on swap-chain destroy; a
+  killed PE doesn't get the chance.
 - **Single queue family.** No async compute, no transfer queue
   separation.
 - **No swapchain resize.** Recreating the swapchain is supported;
   resizing the underlying framebuffer is not.
 - **No multi-monitor.** Single scanout.
-- **D3D9 / DirectDraw** Vulkan-side support stubs only — those D3D
-  libraries are wired but don't yet route their Clear/Present
-  through the Vulkan path; they hit the framebuffer directly.
+- **D3D9 / D3D12 / DirectDraw** don't route through the Vulkan path
+  yet — they paint their back buffers with the userland software
+  rasterizer and BitBlt. D3D11 is the first DX front end on the
+  Vulkan back end (see "DirectX Translation Hand-off").
 
 ## Related Pages
 

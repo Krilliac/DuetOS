@@ -14,16 +14,111 @@
  *   IDXGISwapChain::Present()
  *     → SYS_GDI_BITBLT to the owning HWND
  *
- * Higher-level drawing (vertex/pixel shaders, draw calls) is not
- * implemented in v0; those vtable slots return DX_S_OK via the
- * shared dx_stub_hresult so apps proceed past `if (FAILED(hr))`
- * checks and reach the clear/present path that IS wired.
+ * Rendering back ends (selected per swap chain):
+ *   - Vulkan (default for driver types UNKNOWN / HARDWARE /
+ *     REFERENCE): Clear + triangle Draw* record real VkOps into
+ *     the kernel command tape via SYS_VK_CALL; Present submits and
+ *     the kernel rasterizer paints a host-visible VkImage backing
+ *     that is then synced into the back buffer. See the
+ *     "D3D11→Vulkan back end" block below and ../dx_vk.h.
+ *   - Software (driver types NULL / SOFTWARE / WARP, or any vk
+ *     setup failure): the shared dx_raster.h path, unchanged.
+ *
+ * App-supplied HLSL bytecode is still ignored at draw time on both
+ * back ends — vertices are pass-through position + per-vertex
+ * colour. Unimplemented vtable slots return DX_S_OK via the shared
+ * dx_stub_hresult so apps proceed past `if (FAILED(hr))` checks
+ * and reach the clear/draw/present path that IS wired.
  *
  * Build: tools/build/build-stub-dll.sh (base 0x10130000).
  */
 
 #include "../dx_shared.h"
 #include "../dx_raster.h"
+#include "../dx_vk.h"
+
+/* ---------------------------------------------------------------- *
+ * D3D11→Vulkan back end (v0)                                       *
+ *                                                                  *
+ * One backend per process: the first swap chain created under a   *
+ * vk-eligible driver type (UNKNOWN / HARDWARE / REFERENCE) gets a *
+ * kernel VkImage back buffer. ClearRenderTargetView and           *
+ * triangle Draw* calls record real VkOps into the kernel command  *
+ * tape (SYS_VK_CALL); Present / CPU readback submits the tape and *
+ * the KERNEL rasterizer paints the image backing. The shared      *
+ * software rasterizer (dx_raster.h) stays off this path.          *
+ *                                                                  *
+ * The back buffer keeps its own user-heap pixel buffer: the       *
+ * kernel-mapped image backing is a kernel-half VA that            *
+ * SYS_GDI_BITBLT's CopyFromUser would reject, so after each       *
+ * submit the painted backing is copied into bb->pixels — Present  *
+ * BitBlts and ctx_Map readbacks then see kernel-painted memory    *
+ * through the same pointers as the software path.                 *
+ *                                                                  *
+ * On ANY vk-setup failure the swap chain silently stays on the    *
+ * software rasterizer (one dx_dbg line marks the fallback).       *
+ * ---------------------------------------------------------------- */
+
+static DxVkBackend g_d3d11_vk;             /* zero-init: inactive */
+static DxBackBuffer* g_d3d11_vk_bb = NULL; /* the swap-chain bb the backend paints */
+static int g_d3d11_vk_allowed = 1;         /* set from D3D11CreateDevice's driver_type */
+
+/* Copy the kernel-painted image backing into the back buffer's
+ * user-heap pixels (see header note on SYS_GDI_BITBLT). */
+static void d3d11_vk_sync_pixels(void)
+{
+    if (!g_d3d11_vk.active || !g_d3d11_vk_bb || !g_d3d11_vk_bb->pixels || !g_d3d11_vk.pixels)
+        return;
+    UINT bytes = g_d3d11_vk.width * g_d3d11_vk.height * 4u;
+    if (bytes > g_d3d11_vk_bb->buffer_bytes)
+        bytes = g_d3d11_vk_bb->buffer_bytes;
+    dx_memcpy(g_d3d11_vk_bb->pixels, g_d3d11_vk.pixels, bytes);
+}
+
+/* End + submit any open frame, then pull the kernel-painted pixels
+ * into the user-visible back buffer. Called by Present, by CPU
+ * readback (ctx_Map of the back-buffer texture), and before any
+ * software-path write that must land ON TOP of recorded work. */
+static void d3d11_vk_flush_and_sync(DxBackBuffer* bb)
+{
+    if (!g_d3d11_vk.active || bb != g_d3d11_vk_bb || !g_d3d11_vk.cb_open)
+        return;
+    if (dx_vk_flush(&g_d3d11_vk))
+        d3d11_vk_sync_pixels();
+}
+
+/* Destroy a back buffer owned by this DLL, tearing the vk backend
+ * down with it when the buffer was vk-attached. Every back-buffer
+ * destroy in this file routes through here. */
+static void d3d11_bb_destroy(DxBackBuffer* bb)
+{
+    if (!bb)
+        return;
+    if (bb == g_d3d11_vk_bb)
+    {
+        dx_vk_backend_destroy(&g_d3d11_vk);
+        g_d3d11_vk_bb = NULL;
+    }
+    dx_bb_destroy(bb);
+}
+
+/* Attach the vk backend to a freshly created swap-chain back
+ * buffer. Failure is non-fatal: the swap chain keeps the software
+ * rasterizer it already works with. */
+static void d3d11_vk_try_attach(DxBackBuffer* bb)
+{
+    if (!bb || !g_d3d11_vk_allowed)
+        return;
+    if (g_d3d11_vk.active)
+        return; /* one backend per process in v0 */
+    if (!dx_vk_backend_create(&g_d3d11_vk, bb->width, bb->height))
+    {
+        dx_dbg("[d3d11] vk backend unavailable; software fallback");
+        return;
+    }
+    g_d3d11_vk_bb = bb;
+    dx_dbg("[d3d11] vk backend active");
+}
 
 /* ---------------------------------------------------------------- *
  * IIDs                                                             *
@@ -115,7 +210,7 @@ static ULONG tx_Release(ID3D11Texture2DImpl* self)
     if (--self->refcount == 0)
     {
         if (self->owns_bb && self->bb)
-            dx_bb_destroy(self->bb);
+            d3d11_bb_destroy(self->bb);
         dx_heap_free(self);
         return 0;
     }
@@ -336,7 +431,7 @@ static ULONG d3d11sc_Release(D3D11SwapChainImpl* self)
         if (self->back)
             tx_Release(self->back);
         else if (self->bb)
-            dx_bb_destroy(self->bb);
+            d3d11_bb_destroy(self->bb);
         dx_heap_free(self);
         return 0;
     }
@@ -351,6 +446,11 @@ static HRESULT d3d11sc_Present(D3D11SwapChainImpl* self, UINT sync, UINT flags)
     if (!self->bb)
         return DX_E_INVALIDARG; /* swap chain not bound to a back buffer */
     dx_gfx_trace(1);
+    /* Vulkan path: submit the frame's recorded tape so the kernel
+     * rasterizer paints the image backing, then sync it into the
+     * user-visible pixels the BitBlt below pushes. The next frame's
+     * first Clear lazily re-opens the command buffer. */
+    d3d11_vk_flush_and_sync(self->bb);
     dx_bb_present(self->bb);
     return DX_S_OK;
 }
@@ -410,8 +510,10 @@ static HRESULT d3d11sc_ResizeBuffers(D3D11SwapChainImpl* self, UINT bufs, UINT w
      * still hold refs; tell them to release first. */
     if (self->back)
         return DXGI_ERROR_INVALID_CALL;
-    dx_bb_destroy(self->bb);
+    d3d11_bb_destroy(self->bb);
     self->bb = dx_bb_create(hwnd, w, h);
+    if (self->bb)
+        d3d11_vk_try_attach(self->bb); /* re-attach at the new extent */
     return self->bb ? DX_S_OK : DX_E_OUTOFMEMORY;
 }
 
@@ -450,6 +552,12 @@ static D3D11SwapChainImpl* d3d11_swap_alloc(HWND hwnd, UINT w, UINT h)
         dx_heap_free(s);
         return NULL;
     }
+    /* Try the Vulkan back end: CreateInstance → EnumeratePhysical-
+     * Devices → CreateDevice → GetDeviceQueue → AllocateMemory →
+     * CreateImage → BindImageMemory → MapMemory → CreateCommandPool
+     * → AllocateCommandBuffer → vertex staging buffer. On failure
+     * the swap chain stays on the software rasterizer. */
+    d3d11_vk_try_attach(s->bb);
     return s;
 }
 
@@ -982,7 +1090,42 @@ static void ctx_ClearRenderTargetView(ID3D11ContextImpl* self, ID3D11RTVImpl* rt
     (void)self;
     if (!rtv || !rtv->tex || !rtv->tex->bb || !color)
         return;
-    dx_bb_clear_rgba(rtv->tex->bb, color[0], color[1], color[2], color[3]);
+    DxBackBuffer* bb = rtv->tex->bb;
+    if (bb == g_d3d11_vk_bb && g_d3d11_vk.active)
+    {
+        /* Vulkan path: record CmdClearColorImage into the frame's
+         * command buffer (opened lazily here — one cb per frame,
+         * submitted at Present). Pack the float color exactly like
+         * vulkan-1.dll's vkCmdClearColorImage thunk: clamp, scale
+         * to 0..255, R<<16 G<<8 B A<<24. */
+        DWORD argb = 0;
+        for (int i = 0; i < 4; ++i)
+        {
+            float c = color[i];
+            if (c < 0.f)
+                c = 0.f;
+            else if (c > 1.f)
+                c = 1.f;
+            DWORD q = (DWORD)(c * 255.f);
+            if (q > 255)
+                q = 255;
+            const int sh = (i == 0) ? 16 : (i == 1) ? 8 : (i == 2) ? 0 : 24;
+            argb |= (q << sh);
+        }
+        if (dx_vk_record_clear(&g_d3d11_vk, argb))
+            return;
+        /* Record failed (tape full / kernel resource pressure):
+         * land what's recorded so ordering holds, then take the
+         * software clear on top. */
+        static int g_logged_clear_fallback = 0;
+        if (!g_logged_clear_fallback)
+        {
+            g_logged_clear_fallback = 1;
+            dx_dbg("[d3d11] vk clear record failed; software fallback");
+        }
+        d3d11_vk_flush_and_sync(bb);
+    }
+    dx_bb_clear_rgba(bb, color[0], color[1], color[2], color[3]);
 }
 
 /* OMSetRenderTargets(numRTVs, ppRTV, pDSV) — slot 33. */
@@ -1207,6 +1350,108 @@ static int ctx_read_index(ID3D11ContextImpl* self, UINT idx, INT base_vertex, UI
     return 1;
 }
 
+/* ---------------------------------------------------------------- *
+ * Vulkan draw batching                                             *
+ *                                                                  *
+ * One top-level Draw / DrawIndexed call becomes ONE kernel         *
+ * CmdBindVertexBuffer + CmdDraw pair: every triangle the call      *
+ * produces (lists, strips with corrected winding, expanded         *
+ * indices) appends three 8-byte DuetOS v0 vertex records           *
+ * {i16 x_px; i16 y_px; u32 argb} to the mapped staging buffer and  *
+ * the commit records a TRIANGLELIST draw over the appended range.  *
+ * ctx_read_vertex stays the single source of input-layout decode + *
+ * NDC→pixel mapping for both back ends.                            *
+ * ---------------------------------------------------------------- */
+
+static int g_d3d11_vk_batch_on = 0;
+static UINT g_d3d11_vk_batch_start = 0;
+
+/* Decide whether the current Draw call records through the vk
+ * backend. `vertex_records` is the upper bound of vertices the
+ * call can append. Returns 0 → caller paints via dx_raster.h. */
+static int d3d11_vk_batch_begin(ID3D11ContextImpl* self, UINT vertex_records)
+{
+    if (!g_d3d11_vk.active || vertex_records == 0)
+        return 0;
+    if (!self || !self->current_rtv || !self->current_rtv->tex || self->current_rtv->tex->bb != g_d3d11_vk_bb)
+        return 0;
+    if (!g_d3d11_vk.cb_open)
+    {
+        /* Documented v0 limit: a Draw before the frame's first
+         * Clear has no open command buffer — that frame stays on
+         * the software rasterizer. */
+        static int g_logged_no_cb = 0;
+        if (!g_logged_no_cb)
+        {
+            g_logged_no_cb = 1;
+            dx_dbg("[d3d11] vk draw before clear; software path for this frame");
+        }
+        return 0;
+    }
+    if (g_d3d11_vk.vb_cursor + vertex_records * (UINT)sizeof(DxVkVertexV0) > DX_VK_VB_BYTES)
+    {
+        /* Staging full: submit what's recorded so far so ordering
+         * is preserved, then let the software rasterizer take this
+         * draw on top of the synced pixels. */
+        static int g_logged_vb_full = 0;
+        if (!g_logged_vb_full)
+        {
+            g_logged_vb_full = 1;
+            dx_dbg("[d3d11] vk vertex staging full; software path for this draw");
+        }
+        d3d11_vk_flush_and_sync(g_d3d11_vk_bb);
+        return 0;
+    }
+    g_d3d11_vk_batch_on = 1;
+    g_d3d11_vk_batch_start = g_d3d11_vk.vb_cursor;
+    return 1;
+}
+
+static void d3d11_vk_batch_vertex(int x, int y, DWORD argb)
+{
+    if (g_d3d11_vk.vb_cursor + (UINT)sizeof(DxVkVertexV0) > DX_VK_VB_BYTES)
+        return; /* capacity pre-checked at batch_begin; belt and braces */
+    if (x < -32768)
+        x = -32768;
+    else if (x > 32767)
+        x = 32767;
+    if (y < -32768)
+        y = -32768;
+    else if (y > 32767)
+        y = 32767;
+    DxVkVertexV0 v;
+    v.x_px = (short)x;
+    v.y_px = (short)y;
+    v.argb = argb;
+    dx_memcpy(g_d3d11_vk.vb_map + g_d3d11_vk.vb_cursor, &v, sizeof(v));
+    g_d3d11_vk.vb_cursor += (UINT)sizeof(v);
+}
+
+static void d3d11_vk_batch_commit(void)
+{
+    if (!g_d3d11_vk_batch_on)
+        return;
+    g_d3d11_vk_batch_on = 0;
+    const UINT count = (g_d3d11_vk.vb_cursor - g_d3d11_vk_batch_start) / (UINT)sizeof(DxVkVertexV0);
+    if (count < 3)
+    {
+        g_d3d11_vk.vb_cursor = g_d3d11_vk_batch_start; /* nothing survived clipping */
+        return;
+    }
+    if (!dx_vk_record_draw(&g_d3d11_vk, g_d3d11_vk_batch_start, count))
+    {
+        /* Tape full / record failure: drop this draw, keep the
+         * frame's earlier ops intact. */
+        static int g_logged_draw_record = 0;
+        if (!g_logged_draw_record)
+        {
+            g_logged_draw_record = 1;
+            dx_dbg("[d3d11] vk draw record failed; draw dropped");
+        }
+        g_d3d11_vk.vb_cursor = g_d3d11_vk_batch_start;
+    }
+}
+
 /* Rasterize a single triangle from three vertex indices. */
 static void ctx_emit_tri(ID3D11ContextImpl* self, UINT i0, UINT i1, UINT i2)
 {
@@ -1220,6 +1465,16 @@ static void ctx_emit_tri(ID3D11ContextImpl* self, UINT i0, UINT i1, UINT i2)
         return;
     if (!self->current_rtv || !self->current_rtv->tex || !self->current_rtv->tex->bb)
         return;
+    if (g_d3d11_vk_batch_on)
+    {
+        /* Vulkan path: append the projected, colour-decoded
+         * vertices for the kernel rasterizer. dx_raster.h must NOT
+         * paint on this path. */
+        d3d11_vk_batch_vertex(x0, y0, c0);
+        d3d11_vk_batch_vertex(x1, y1, c1);
+        d3d11_vk_batch_vertex(x2, y2, c2);
+        return;
+    }
     DxBackBuffer* bb = self->current_rtv->tex->bb;
     if (c0 == c1 && c1 == c2)
         dxr_fill_tri(bb, x0, y0, x1, y1, x2, y2, c0);
@@ -1235,6 +1490,15 @@ static void ctx_Draw(ID3D11ContextImpl* self, UINT count, UINT start)
 {
     if (!self || count == 0)
         return;
+    /* Vulkan path: the whole call batches into one kernel draw.
+     * Strips expand to a triangle list below (same winding fix),
+     * so both topologies ride the batch. */
+    UINT vk_tris = 0;
+    if (self->current_topology == 4)
+        vk_tris = count / 3;
+    else if (self->current_topology == 5 && count >= 3)
+        vk_tris = count - 2;
+    const int vk = d3d11_vk_batch_begin(self, vk_tris * 3);
     if (self->current_topology == 4)
     {
         UINT triangles = count / 3;
@@ -1245,7 +1509,11 @@ static void ctx_Draw(ID3D11ContextImpl* self, UINT count, UINT start)
     {
         /* triangle strip: alternating winding */
         if (count < 3)
+        {
+            if (vk)
+                d3d11_vk_batch_commit();
             return;
+        }
         for (UINT t = 0; t + 2 < count; ++t)
         {
             UINT a = start + t, b = start + t + 1, c = start + t + 2;
@@ -1258,6 +1526,8 @@ static void ctx_Draw(ID3D11ContextImpl* self, UINT count, UINT start)
             ctx_emit_tri(self, a, b, c);
         }
     }
+    if (vk)
+        d3d11_vk_batch_commit();
 }
 
 /* DrawIndexed(IndexCount, StartIndexLocation, BaseVertexLocation) — slot 12. */
@@ -1265,6 +1535,16 @@ static void ctx_DrawIndexed(ID3D11ContextImpl* self, UINT count, UINT start, INT
 {
     if (!self || count == 0)
         return;
+    /* Vulkan path: indices are expanded in userland — each
+     * ctx_emit_tri below resolves them through ctx_read_index /
+     * ctx_read_vertex and appends linear v0 records, so the kernel
+     * sees one plain triangle-list draw. */
+    UINT vk_tris = 0;
+    if (self->current_topology == 4)
+        vk_tris = count / 3;
+    else if (self->current_topology == 5 && count >= 3)
+        vk_tris = count - 2;
+    const int vk = d3d11_vk_batch_begin(self, vk_tris * 3);
     if (self->current_topology == 4)
     {
         UINT triangles = count / 3;
@@ -1283,7 +1563,11 @@ static void ctx_DrawIndexed(ID3D11ContextImpl* self, UINT count, UINT start, INT
     else if (self->current_topology == 5)
     {
         if (count < 3)
+        {
+            if (vk)
+                d3d11_vk_batch_commit();
             return;
+        }
         for (UINT t = 0; t + 2 < count; ++t)
         {
             UINT a, b, c;
@@ -1302,6 +1586,8 @@ static void ctx_DrawIndexed(ID3D11ContextImpl* self, UINT count, UINT start, INT
             ctx_emit_tri(self, a, b, c);
         }
     }
+    if (vk)
+        d3d11_vk_batch_commit();
 }
 
 /* DrawInstanced / DrawIndexedInstanced — slots 21 / 20. Per-instance
@@ -1381,6 +1667,11 @@ static HRESULT ctx_Map(ID3D11ContextImpl* self, void* resource, UINT sub, UINT m
         ID3D11Texture2DImpl* t = (ID3D11Texture2DImpl*)resource;
         if (!t->bb)
             return DX_E_INVALIDARG; /* texture is detached from a back-buffer surface */
+        /* Vulkan path: CPU readback must see the recorded frame.
+         * Submit the open tape and sync the kernel-painted backing
+         * into bb->pixels before handing the pointer out (dx_demo
+         * reads the back buffer without ever calling Present). */
+        d3d11_vk_flush_and_sync(t->bb);
         *(void**)(m + 0) = t->bb->pixels;
         *(UINT*)(m + 8) = t->bb->pitch_bytes;
         *(UINT*)(m + 12) = t->bb->buffer_bytes;
@@ -1716,7 +2007,7 @@ static HRESULT dev_CreateTexture2D(ID3D11DeviceImpl* self, const void* desc, con
     ID3D11Texture2DImpl* t = tex_wrap(bb, /*owns_bb=*/1);
     if (!t)
     {
-        dx_bb_destroy(bb);
+        d3d11_bb_destroy(bb);
         return DX_E_OUTOFMEMORY;
     }
     *out = t;
@@ -1829,7 +2120,7 @@ static HRESULT dev_CreateTexture1D(ID3D11DeviceImpl* self, const void* desc, con
     ID3D11Texture2DImpl* t = tex_wrap(bb, /*owns_bb=*/1);
     if (!t)
     {
-        dx_bb_destroy(bb);
+        d3d11_bb_destroy(bb);
         return DX_E_OUTOFMEMORY;
     }
     *out = t;
@@ -1864,7 +2155,7 @@ static HRESULT dev_CreateTexture3D(ID3D11DeviceImpl* self, const void* desc, con
     ID3D11Texture2DImpl* t = tex_wrap(bb, /*owns_bb=*/1);
     if (!t)
     {
-        dx_bb_destroy(bb);
+        d3d11_bb_destroy(bb);
         return DX_E_OUTOFMEMORY;
     }
     *out = t;
@@ -2265,13 +2556,17 @@ __declspec(dllexport) HRESULT D3D11CreateDevice(void* adapter, INT driver_type, 
                                                 void** device, UINT* obtained_fl, void** ctx)
 {
     (void)adapter;
-    (void)driver_type;
     (void)software;
     (void)flags;
     (void)feature_levels;
     (void)num_feature_levels;
     (void)sdk;
     dx_gfx_trace(1);
+    /* D3D_DRIVER_TYPE: UNKNOWN=0, HARDWARE=1, REFERENCE=2, NULL=3,
+     * SOFTWARE=4, WARP=5. The GPU-shaped types try the Vulkan back
+     * end at swap-chain creation; explicit software rasterizers
+     * (NULL / SOFTWARE / WARP) stay on dx_raster.h by contract. */
+    g_d3d11_vk_allowed = (driver_type == 0 || driver_type == 1 || driver_type == 2);
     ID3D11DeviceImpl* d = dev_alloc();
     if (!d)
     {
@@ -2358,4 +2653,19 @@ __declspec(dllexport) UINT DuetOS_D3D11_PeekBufferMapType(void* buffer)
     if (b->lpVtbl != (void* const*)g_buf_vtbl)
         return 0xFFFFFFFFu;
     return b->last_map_type;
+}
+
+/* Non-Win32 introspection helper: which back end paints a swap
+ * chain's buffer. 0 = software rasterizer (dx_raster.h), 1 = the
+ * kernel Vulkan back end. Returns 0xFFFFFFFF when the pointer
+ * isn't one of our swap chains. Used by d3d11_smoke to assert the
+ * vk path actually engaged. */
+__declspec(dllexport) UINT DuetOS_D3D11_PeekBackendKind(void* swapchain)
+{
+    if (!swapchain)
+        return 0xFFFFFFFFu;
+    D3D11SwapChainImpl* sc = (D3D11SwapChainImpl*)swapchain;
+    if (sc->lpVtbl != &g_d3d11sc_vtbl)
+        return 0xFFFFFFFFu;
+    return (sc->bb && sc->bb == g_d3d11_vk_bb && g_d3d11_vk.active) ? 1u : 0u;
 }

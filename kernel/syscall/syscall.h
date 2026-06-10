@@ -2275,6 +2275,13 @@ enum VkOp : u64
     kVkOpDestroyDescriptorPool = 49,
     kVkOpAllocateDescriptorSet = 50, // rdx=device, r10=pool, r8=layout; rax = VkDescriptorSet
     kVkOpCmdBindDescriptorSet = 51,  // rdx=cb, r10=layout, r8=first_set, r9=set
+    // Release the command-buffer slot a kVkOpAllocateCommandBuffer
+    // call took. Without this op a userland ladder that tears down
+    // (e.g. the D3D11 Vulkan backend on swap-chain destroy) leaks
+    // one of the kernel's command-buffer slots per create/destroy
+    // cycle — kVkOpDestroyCommandPool frees only the pool record,
+    // not the buffers allocated from it.
+    kVkOpFreeCommandBuffer = 52, // rdx=device, r10=pool, r8=cb; rax = 1 on success
 };
 
 // Diagnostic counter IDs for kVkOpGetStatsCounter. Exposes the
@@ -2292,6 +2299,11 @@ enum VkStatsCounter : u64
     kVkStatsClearPixelsPainted = 7,
     kVkStatsTrianglesDrawn = 8,
     kVkStatsQueueSubmits = 9,
+    // Pixels written by vkCmdClearColorImage replay against an
+    // image-backed (host-visible, non-scanout) render target — the
+    // path the D3D11→Vulkan back buffer uses. Distinct from
+    // kVkStatsClearPixelsPainted, which counts scanout clears only.
+    kVkStatsImageClearPixels = 10,
 };
 
 // Stable bit assignments for SYS_COMPAT_QUERY's return value.

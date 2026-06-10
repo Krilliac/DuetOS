@@ -3,6 +3,7 @@
 #include "drivers/video/display_info.h"
 #include "drivers/video/framebuffer.h"
 #include "subsystems/graphics/graphics.h"
+#include "subsystems/graphics/graphics_vk_internal.h"
 #include "syscall/syscall.h"
 
 /*
@@ -13,32 +14,31 @@
  * pass in registers, pointers are validated by the existing
  * userland-VA checker before any dereference.
  *
- * v1 surface (the trivial-PE-binding set):
+ * Current surface (ops 0..52):
  *   - Instance / device / queue lifecycle (Create / Destroy /
- *     Wait).
- *   - vkEnumeratePhysicalDevices (count-only or count + array).
- *   - vkEnumerateInstanceVersion.
+ *     Wait), vkEnumeratePhysicalDevices, vkEnumerateInstanceVersion.
+ *   - Memory / buffer / image create + bind + map (host-visible
+ *     coherent memory type; the mapped pointer is directly
+ *     dereferenceable by userland — v0 has no per-process VM
+ *     separation on this surface).
+ *   - Command pool / buffer alloc + free, Begin / End, the
+ *     recording subset (clear, draw, dispatch, binds), QueueSubmit.
+ *   - Pipeline / render-pass / descriptor create paths.
+ *   - WSI: Duet surface + framebuffer-flush present.
  *   - A diagnostic getter that reads one of the
  *     `GraphicsStats` counters by id — used by the userland
- *     stub's smoke test and by `gfx` / `vk` shell commands that
- *     want to display the live counter values without re-walking
- *     the full Stats blob.
+ *     smoke tests and by `gfx` / `vk` shell commands that want
+ *     the live counter values without re-walking the Stats blob.
  *
- * Out of scope for v1 — landed in follow-on slices once a real
- * PE uses them:
- *   - Buffer / image / memory creation (need a shared-memory
- *     bridge so the caller can map device-memory and the kernel
- *     can copy DMA buffers).
- *   - Command buffer record / submit (need pointer arrays of
- *     CmdRecord-shaped operands).
- *   - Shader module create (need to copy the SPIR-V word stream
- *     in from user memory).
- *   - WSI surface / swapchain (needs window-handle mapping).
+ * The D3D11 DLL's Vulkan back end (userland/libs/dx_vk.h) drives
+ * the AllocateMemory → CreateImage → BindImageMemory → MapMemory →
+ * record clear/draw → QueueSubmit ladder through these ops; the
+ * scanout-backed image flag is masked from the userland path in
+ * OpCreateImage (see the SECURITY note there).
  *
- * All deferred ops return 0 (the canonical Vulkan
- * VK_ERROR_INITIALIZATION_FAILED enum value, which the userland
- * stub propagates as a Vulkan-spec-compliant error). Userland
- * sees a clean rejection rather than UB.
+ * Unrecognised ops return kVkBadOp; per-op failures return 0 (the
+ * userland stubs propagate VK_ERROR_INITIALIZATION_FAILED).
+ * Userland sees a clean rejection rather than UB.
  */
 
 namespace duetos::syscall
@@ -265,7 +265,13 @@ u64 OpUnmapMemory(arch::TrapFrame* frame)
 u64 OpCreateImage(arch::TrapFrame* frame)
 {
     vk::VkExtent3D extent{static_cast<u32>(frame->r10), static_cast<u32>(frame->r8), 1};
-    const u32 flags = static_cast<u32>(frame->r9);
+    // SECURITY: never let userland mint a scanout-backed image.
+    // The scanout flag makes every subsequent clear / draw against
+    // the handle paint the live framebuffer — whole-screen takeover
+    // for any PE with syscall access. Kernel-internal callers
+    // (the WSI swapchain) set the flag through the in-kernel API,
+    // not through this syscall.
+    const u32 flags = static_cast<u32>(frame->r9) & ~vk::kImageScanoutBacked;
     vk::VkImage out = 0;
     const vk::VkResult r = vk::VkCreateImage(frame->rdx, extent, flags, &out);
     return (r == vk::VkResult::Success) ? out : 0;
@@ -298,6 +304,12 @@ u64 OpAllocateCommandBuffer(arch::TrapFrame* frame)
 {
     vk::VkCommandBuffer out = 0;
     return (vk::VkAllocateCommandBuffers(frame->rdx, frame->r10, 1, &out) == vk::VkResult::Success) ? out : 0;
+}
+
+u64 OpFreeCommandBuffer(arch::TrapFrame* frame)
+{
+    vk::VkCommandBuffer cb = frame->r8;
+    return (vk::VkFreeCommandBuffers(frame->rdx, frame->r10, 1, &cb) == vk::VkResult::Success) ? 1 : 0;
 }
 
 u64 OpBeginCommandBuffer(arch::TrapFrame* frame)
@@ -502,6 +514,7 @@ u64 OpGetStatsCounter(arch::TrapFrame* frame)
     using ::duetos::core::kVkStatsClearPixelsPainted;
     using ::duetos::core::kVkStatsCommandBufferLive;
     using ::duetos::core::kVkStatsDeviceLive;
+    using ::duetos::core::kVkStatsImageClearPixels;
     using ::duetos::core::kVkStatsInstanceLive;
     using ::duetos::core::kVkStatsQueueSubmits;
     using ::duetos::core::kVkStatsShaderRasterDrawsPainted;
@@ -531,6 +544,11 @@ u64 OpGetStatsCounter(arch::TrapFrame* frame)
         return s.vk_triangles_drawn;
     case kVkStatsQueueSubmits:
         return s.vk_queue_submits;
+    case kVkStatsImageClearPixels:
+        // Not part of the GraphicsStats blob (the struct is shared
+        // with the D3D counter overlay); read the ICD-internal
+        // aggregate through its accessor instead.
+        return vk::internal::ImageClearPixelsCount();
     }
     return kVkBadOp;
 }
@@ -583,6 +601,7 @@ void DoVkCall(arch::TrapFrame* frame)
     using ::duetos::core::kVkOpDeviceWaitIdle;
     using ::duetos::core::kVkOpEndCommandBuffer;
     using ::duetos::core::kVkOpEnumeratePhysicalDevices;
+    using ::duetos::core::kVkOpFreeCommandBuffer;
     using ::duetos::core::kVkOpFreeMemory;
     using ::duetos::core::kVkOpGetDeviceQueue;
     using ::duetos::core::kVkOpGetInstanceVersion;
@@ -682,6 +701,9 @@ void DoVkCall(arch::TrapFrame* frame)
         return;
     case kVkOpAllocateCommandBuffer:
         frame->rax = OpAllocateCommandBuffer(frame);
+        return;
+    case kVkOpFreeCommandBuffer:
+        frame->rax = OpFreeCommandBuffer(frame);
         return;
     case kVkOpBeginCommandBuffer:
         frame->rax = OpBeginCommandBuffer(frame);

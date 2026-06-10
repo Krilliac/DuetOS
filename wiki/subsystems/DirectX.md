@@ -1,10 +1,10 @@
-# DirectX v0.1 Path
+# DirectX v0.2 Path
 
 > **Audience:** PE/Win32 devs, graphics hackers
 >
-> **Execution context:** Userland (D3D DLLs) -> shared software rasterizer -> SYS_GDI_BITBLT -> compositor
+> **Execution context:** Userland (D3D DLLs) -> kernel Vulkan ICD (D3D11) or shared software rasterizer (D3D9/12) -> SYS_GDI_BITBLT -> compositor
 >
-> **Maturity:** v0.1 — `D3D{9,11,12}CreateDevice` -> `Clear` + `Draw*` -> `Present` works on the canonical Win SDK ABI; no real GPU, no shaders, no Z-buffer.
+> **Maturity:** v0.2 — `D3D{9,11,12}CreateDevice` -> `Clear` + `Draw*` -> `Present` works on the canonical Win SDK ABI. D3D11 swap chains record Clear/Draw as real VkOps replayed by the kernel ICD; D3D9/D3D12 stay on the userland software rasterizer. No real GPU, no app-shader execution, no Z-buffer.
 
 ## Overview
 
@@ -15,10 +15,24 @@ d3d12 revisions was fixed in v0.1).
 
 `D3D11CreateDeviceAndSwapChain`, `IDXGIFactory*::CreateSwapChain*`,
 `D3D12CreateDevice`, `Direct3DCreate9`, `D2D1CreateFactory` all work
-end-to-end. Beyond `Clear` + `Present`, v0.1 adds a shared software
+end-to-end. Beyond `Clear` + `Present`, v0.1 added a shared software
 rasterizer (`userland/libs/dx_raster.h`) that lets `Draw*` /
 `DrawIndexed*` / `DrawPrimitive*` actually rasterize triangles into
 the BGRA8 back buffer.
+
+v0.2 puts the D3D11 swap chain on a **Vulkan back end**: under
+driver types UNKNOWN / HARDWARE / REFERENCE the DLL builds a
+`SYS_VK_CALL` ladder (`userland/libs/dx_vk.h`) whose back buffer is
+a kernel `VkImage` with host-visible backing. `ClearRenderTargetView`
+and triangle `Draw*` record real VkOps into the kernel command tape;
+`Present` submits it and the **kernel** rasterizer
+(`kernel/subsystems/graphics/graphics_vk_raster.cpp`) paints the
+pixels, which are then synced into the user-heap back buffer for the
+existing BitBlt present. Driver types NULL / SOFTWARE / WARP — and
+any vk-setup failure (one `[d3d11] vk backend unavailable; software
+fallback` debug line) — keep the software path. The
+`DuetOS_D3D11_PeekBackendKind(swapchain)` export reports which back
+end is live (0 = software, 1 = vulkan).
 
 ## What Works
 
@@ -127,20 +141,35 @@ DLL surface is the scaffolding that makes them possible.
 
 ## Architecture
 
+D3D11 (Vulkan back end, driver type UNKNOWN / HARDWARE / REFERENCE):
+
 ```
 [ PE: D3D11CreateDeviceAndSwapChain ]
         |
-[ d3d11.dll: returns COM device + swap-chain ]    userland/libs/d3d11/
+[ d3d11.dll: COM device + swap-chain; dx_vk.h ladder via SYS_VK_CALL ]
+        |        (instance→device→queue→VkImage(+map)→cmd buf→vertex staging)
+[ Per-frame: ClearRenderTargetView -> CmdClearColorImage on the kernel tape ]
         |
-[ Per-frame: ClearRenderTargetView -> back buffer fill in user memory ]
+[ Per-frame: Draw / DrawIndexed -> v0 vertex records into mapped staging
+        |    + CmdBindVertexBuffer + CmdDraw on the tape (dx_raster.h OFF) ]
+[ Present / CPU Map -> EndCommandBuffer + QueueSubmit ]
         |
-[ Per-frame: Draw / DrawIndexed -> dx_raster.h triangle fill into back buffer ]
+[ Kernel ICD replay: graphics_vk_raster.cpp paints the image backing ]
         |
-[ Present -> SYS_GDI_BITBLT ]
+[ d3d11.dll syncs backing -> user-heap back buffer -> SYS_GDI_BITBLT ]
         |
 [ Kernel compositor BitBlt path ]                  kernel/drivers/video/
         |
 [ Framebuffer / virtio-gpu scanout ]
+```
+
+D3D9 / D3D12 / dxgi-created swap chains (and D3D11 under NULL /
+SOFTWARE / WARP or vk-setup failure) keep the v0.1 software shape:
+
+```
+[ Clear / Draw -> dx_raster.h fills the user-memory back buffer ]
+        |
+[ Present -> SYS_GDI_BITBLT -> compositor -> scanout ]
 ```
 
 The DLLs share infrastructure via:
@@ -150,6 +179,12 @@ The DLLs share infrastructure via:
 - `userland/libs/dx_raster.h` — header-only software rasterizer
   (Pineda triangle fill with top-left rule, Bresenham line, 4x4
   matrix math, NDC -> viewport mapping).
+- `userland/libs/dx_vk.h` — the D3D11 Vulkan back end: SYS_VK_CALL
+  thunks (kernel register convention: op in rdi, args in
+  rdx/r10/r8/r9), the VkOp subset, the `DxVkBackend` ladder, and
+  per-frame record/flush helpers. The DX DLLs are freestanding
+  single-.c builds and cannot import vulkan-1.dll, hence direct
+  syscalls.
 
 DirectX gap-fill landed in v0 also covers DirectInput
 keyboard/mouse via `SYS_WIN_GET_KEYSTATE` / `SYS_WIN_CURSOR`,
@@ -204,7 +239,33 @@ per-feature list (no shader execution, no texture sampling, no
 Z-buffer, no cross-DLL DXGI marriage, no fixed-function D3D9
 lighting). `d3dcompiler.dll` compiles a small HLSL subset to a
 DXBC-shaped blob, but the d3d11/d3d12 draw path ignores the
-bytecode and always uses the pass-through rasterizer.
+bytecode on BOTH back ends — the Vulkan path is fixed-function
+pass-through too (app HLSL is still not executed).
+
+D3D11 Vulkan back-end limits (v0):
+
+- **One backend per process** — the first vk-eligible swap chain
+  takes it; later swap chains in the same process stay software
+  until it's destroyed.
+- **Draw-before-Clear** — a frame whose first recorded op would be
+  a Draw has no open command buffer; that frame falls back to the
+  software rasterizer (one debug line, documented limit).
+- **Triangle topologies only on the tape** — strips are expanded to
+  triangle lists in userland (winding-corrected) and `DrawIndexed`
+  expands indices into the linear vertex stream; points/lines from
+  other entry points never reach the D3D11 draw path. Instancing
+  replays the draw per instance, as the software path does.
+- **Bounded per-frame capacity** — a 64 KiB vertex staging buffer
+  (~2730 triangles) and the kernel's 32-op command tape. Overflow
+  submits what's recorded and finishes the draw in software (kept
+  ordering-correct by the flush-then-sync step).
+- **No texture sampling / SRVs** on either back end.
+- **Pixel sync copy** — the kernel-painted image backing is copied
+  into the user-heap back buffer at flush, because
+  `SYS_GDI_BITBLT` (correctly) rejects kernel-half pointers. One
+  w*h*4 copy per present.
+- **D3D12 next** — d3d12.dll still paints in userland; the DXGI
+  factory's own swap chains are also unchanged.
 
 ## Related Pages
 

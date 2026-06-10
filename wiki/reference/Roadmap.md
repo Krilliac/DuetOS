@@ -1071,17 +1071,19 @@ exercise them; the hosted test is their automated gate):
   multi-stream input, Z-buffer, D3D9 fixed-function lighting,
   real GPU command-ring submission.
 - **Blocks on:** per-vendor GPU drivers landing real
-  command-ring submission; D3D→Vulkan thunk wiring (the Vulkan
-  ICD v1 lifecycle + SPIR-V interpreter + userland `vulkan-1.dll`
-  thunk + `SYS_VK_CALL` syscall all landed; the D3D side still
-  returns `E_FAIL` and must redirect through the Vulkan path.
-  With shaders now executable in-kernel AND the userland
-  vulkan-1.dll bridge live, the thunk slice is "translate
-  D3D11/12 Clear+Draw+Present API into the matching VkCmd* +
-  bind a known-good SPIR-V pipeline" instead of the previous
-  "wait for shader execution to land first.")
-  (D3D9/11/12 COM vtables + shared software rasterizer + DXGI
-  swap-chain present into compositor windows landed.)
+  command-ring submission; DXBC→SPIR-V transpile for app HLSL.
+  (The **D3D11→Vulkan thunk v0 landed 2026-06-10**:
+  HARDWARE/UNKNOWN/REFERENCE swap chains use a kernel `VkImage`
+  back buffer; Clear/Draw record real VkOps via `SYS_VK_CALL`
+  and replay through the kernel ICD's rasterizer into the image
+  backing — `dx_raster.h` no longer runs on that path; boot gate
+  `[vk-selftest] PASS (image-backed clear+draw)`. Remaining on
+  the thunk: bind a SPIR-V passthrough pipeline so draws run the
+  in-kernel interpreter (needs the paint-target refactor in
+  `graphics_vk_shaderraster.cpp`); D3D12 reuses `dx_vk.h` as a
+  follow-on. D3D9/11/12 COM vtables + shared software rasterizer
+  + DXGI swap-chain present into compositor windows landed; the
+  software back end remains for WARP/SOFTWARE + fallback.)
 
 ### Windowing — modal dialogs, common controls
 

@@ -1,6 +1,7 @@
 #include "subsystems/graphics/graphics.h"
 #include "subsystems/graphics/graphics_vk_internal.h"
 
+#include "arch/x86_64/serial.h"
 #include "drivers/video/display_info.h"
 #include "log/klog.h"
 #include "util/soft_float.h"
@@ -945,6 +946,113 @@ bool RunCanonicalLifecycle()
 
         VkFreeCommandBuffers(dev, pool, 1, &primary);
         VkFreeCommandBuffers(dev, pool, 1, &secondary);
+    }
+
+    // Image-backed render-target leg: the D3D11→Vulkan back-buffer
+    // shape. A non-scanout BGRA8 image bound to host-visible memory
+    // takes a tape-recorded clear + one v0-format triangle draw;
+    // the pixels must land in the image backing (NOT the live
+    // framebuffer — the boot console owns that). Asserts the clear
+    // color at two corners, the triangle color at an interior
+    // pixel, and the image-clear pixel counter delta.
+    {
+        constexpr u32 kRtW = 16;
+        constexpr u32 kRtH = 16;
+        VkImage rt_img = 0;
+        VkDeviceMemory rt_mem = 0;
+        if (VkCreateImage(dev, VkExtent3D{kRtW, kRtH, 1}, 0, &rt_img) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] image-rt create failed", 0);
+        // One host-visible allocation backs both the image (offset
+        // 0, 1 KiB) and the vertex staging (offset 1024).
+        if (VkAllocateMemory(dev, 4096, /*memory_type_index=*/1, &rt_mem) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] image-rt AllocateMemory failed", 0);
+        if (VkBindImageMemory(dev, rt_img, rt_mem, 0) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] image-rt BindImageMemory failed", 0);
+        VkBuffer rt_vb = 0;
+        if (VkCreateBuffer(dev, 1024, &rt_vb) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] image-rt vb create failed", 0);
+        if (VkBindBufferMemory(dev, rt_vb, rt_mem, 1024) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] image-rt vb bind failed", 0);
+
+        // Three v0-format vertices ({i16 x, i16 y, u32 argb} LE):
+        // an opaque red triangle covering the image centre.
+        void* mapped = nullptr;
+        if (VkMapMemory(dev, rt_mem, 1024, 24, &mapped) != VkResult::Success || mapped == nullptr)
+            return SelftestFail("[selftest:graphics] image-rt map failed", 0);
+        {
+            auto* v = static_cast<u8*>(mapped);
+            const i16 xs[3] = {2, 13, 7};
+            const i16 ys[3] = {2, 2, 12};
+            for (u32 i = 0; i < 3; ++i)
+            {
+                v[i * 8 + 0] = static_cast<u8>(xs[i] & 0xFF);
+                v[i * 8 + 1] = static_cast<u8>((static_cast<u16>(xs[i]) >> 8) & 0xFF);
+                v[i * 8 + 2] = static_cast<u8>(ys[i] & 0xFF);
+                v[i * 8 + 3] = static_cast<u8>((static_cast<u16>(ys[i]) >> 8) & 0xFF);
+                v[i * 8 + 4] = 0x00; // B
+                v[i * 8 + 5] = 0x00; // G
+                v[i * 8 + 6] = 0xFF; // R
+                v[i * 8 + 7] = 0xFF; // A
+            }
+        }
+        VkUnmapMemory(dev, rt_mem);
+
+        VkCommandBuffer icb = 0;
+        if (VkAllocateCommandBuffers(dev, pool, 1, &icb) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] image-rt cb allocate failed", 0);
+        if (VkBeginCommandBuffer(icb) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] image-rt cb begin failed", 0);
+        VkClearColorValue blue{};
+        blue.uint32[0] = 0x00; // R
+        blue.uint32[1] = 0x00; // G
+        blue.uint32[2] = 0xFF; // B
+        blue.uint32[3] = 0xFF; // A
+        if (VkCmdClearColorImage(icb, rt_img, blue) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] image-rt clear record failed", 0);
+        const u64 ivb_off = 0;
+        if (VkCmdBindVertexBuffers(icb, 0, 1, &rt_vb, &ivb_off) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] image-rt vb bind record failed", 0);
+        if (VkCmdDraw(icb, 3, 1, 0, 0) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] image-rt draw record failed", 0);
+        if (VkEndCommandBuffer(icb) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] image-rt cb end failed", 0);
+
+        const u32 clear_px_before = internal::ImageClearPixelsCount();
+        if (VkQueueSubmit(queue, 1, &icb, 0) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] image-rt submit failed", 0);
+        if (VkQueueWaitIdle(queue) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] image-rt wait failed", 0);
+        if (internal::ImageClearPixelsCount() - clear_px_before != kRtW * kRtH)
+            return SelftestFail("[selftest:graphics] image-clear pixel counter delta wrong",
+                                internal::ImageClearPixelsCount() - clear_px_before);
+
+        // Read the backing through a fresh mapping and assert the
+        // painted words. Clear blue is 0xFF0000FF; the rasterizer's
+        // opaque-flat path writes 0xFF000000 | rgb, so red reads
+        // back as 0xFFFF0000 exactly.
+        if (VkMapMemory(dev, rt_mem, 0, kRtW * kRtH * 4u, &mapped) != VkResult::Success || mapped == nullptr)
+            return SelftestFail("[selftest:graphics] image-rt readback map failed", 0);
+        const auto* px = static_cast<const u32*>(mapped);
+        if (px[0] != 0xFF0000FFu)
+            return SelftestFail("[selftest:graphics] image-rt corner(0,0) not clear color", px[0]);
+        if (px[(kRtH - 1) * kRtW + (kRtW - 1)] != 0xFF0000FFu)
+            return SelftestFail("[selftest:graphics] image-rt corner(15,15) not clear color",
+                                px[(kRtH - 1) * kRtW + (kRtW - 1)]);
+        if (px[5 * kRtW + 7] != 0xFFFF0000u)
+            return SelftestFail("[selftest:graphics] image-rt interior not triangle color", px[5 * kRtW + 7]);
+        VkUnmapMemory(dev, rt_mem);
+
+        if (VkFreeCommandBuffers(dev, pool, 1, &icb) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] image-rt cb free failed", 0);
+        VkDestroyBuffer(dev, rt_vb);
+        VkDestroyImage(dev, rt_img);
+        VkFreeMemory(dev, rt_mem);
+        // Grep-able PASS sentinel for the boot smoke. This is the
+        // QEMU-visible proof of the D3D11→Vulkan kernel paint path
+        // (the d3d11_smoke PE that drives the same path from
+        // ring 3 runs on bare metal only — see ring3_smoke.cpp's
+        // !emulator gate).
+        arch::SerialWrite("[vk-selftest] PASS (image-backed clear+draw)\n");
     }
 
     // WSI leg: surface + swapchain + acquire / present cycle.

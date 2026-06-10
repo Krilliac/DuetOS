@@ -225,6 +225,16 @@ expected=(
     # ESCALATE as forbidden below.
     '[health] baseline cr0='
     '[I] kheartbeat : health_last_scan_issues'
+    # Vulkan ICD image-backed paint leg (D3D11→Vulkan back-buffer
+    # path): a tape-recorded clear + v0 triangle draw against a
+    # non-scanout host-visible image, pixel + counter asserted in
+    # kernel. This is the QEMU-visible proof of the kernel half of
+    # the D3D11 Vulkan backend — the d3d11_smoke PE that drives the
+    # same path from ring 3 (its "backend=vulkan PASS" / "vk pixel
+    # readback" / "vk counter deltas" lines) sits behind
+    # ring3_smoke.cpp's !emulator gate and only runs on bare metal,
+    # so those lines must NOT be listed here.
+    '[vk-selftest] PASS (image-backed clear+draw)'
     # Boot-time pure-helper self-tests. Each panics on first failure,
     # so seeing the trailing PASS / OK line proves every assertion in
     # that block fired clean.
@@ -305,6 +315,7 @@ echo "smoke: selftests_on=${selftests_on}"
 # in debug; absent in plain release / release-asserts / release-lto.
 # Auto-skipped when the banner doesn't show `+selftests`.
 selftest_sigs=(
+    "[vk-selftest] PASS (image-backed clear+draw)"
     "[calculator-selftest] PASS"
     "[files] self-test OK"
     "[clock] self-test OK"

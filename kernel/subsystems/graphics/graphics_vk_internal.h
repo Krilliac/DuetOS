@@ -574,6 +574,11 @@ extern u32 g_secondary_executes;
 extern u32 g_secondary_ops_replayed;
 extern u32 g_push_descriptor_writes;
 extern u32 g_triangles_drawn;
+// Pixels written by clear replay against an image-backed
+// (host-visible, non-scanout) render target — the D3D11→Vulkan
+// back-buffer path. Scanout clears tick g_clear_pixels_painted
+// instead.
+extern u32 g_image_clear_pixels;
 
 // SPIR-V interpreter counters. Bump in graphics_vk_spirv_exec.cpp
 // (per ExecuteEntryPoint call + per step) and in
@@ -590,7 +595,12 @@ extern u32 g_shader_raster_draws_skipped;  // ShaderRasterizeDraw calls that fel
 // -------------------------------------------------------------------
 
 u32 ColorToRgb(const VkClearColorValue& c);
-void PaintScanoutClear(VkImage image, VkClearColorValue color);
+/// Paint a clear against `image`. Scanout-backed images fill the
+/// live framebuffer (bumps g_clear_pixels_painted); non-scanout
+/// images with host-visible BGRA8 backing fill the backing words
+/// with the packed 0xAARRGGBB color (bumps g_image_clear_pixels).
+/// Anything else is a silent no-op.
+void PaintClear(VkImage image, VkClearColorValue color);
 VkResult AppendOp(VkCommandBuffer cb, const CmdRecord& op);
 void ReplayCommandBuffer(VkCommandBuffer cb);
 
@@ -870,6 +880,7 @@ u32 SpirvModulesParsedCount();
 u32 SpirvEntryPointsSeenCount();
 u32 SpirvCapabilitiesSeenCount();
 u32 TrianglesDrawnCount();
+u32 ImageClearPixelsCount();
 
 // ----- leak check ---------------------------------------------------
 

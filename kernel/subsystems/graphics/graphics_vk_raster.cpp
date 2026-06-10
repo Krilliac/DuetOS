@@ -7,9 +7,14 @@
 /*
  * DuetOS — Vulkan ICD software rasterizer.
  *
- * What this paints (v1.1):
+ * What this paints (v1.2):
  *   - Triangles, lines, and points emitted by `vkCmdDraw` and
- *     `vkCmdDrawIndexed` against a scanout-backed render target.
+ *     `vkCmdDrawIndexed` against either a scanout-backed render
+ *     target (pixels land in the live framebuffer) or an
+ *     image-backed render target (a non-scanout VkImage bound to
+ *     host-visible memory in the default BGRA8 format — pixels
+ *     land in the image backing; this is the D3D11→Vulkan
+ *     back-buffer path).
  *   - Topologies: PointList (0), LineList (1), LineStrip (2),
  *     TriangleList (3), TriangleStrip (4), TriangleFan (5).
  *   - Per-vertex colour interpolation (Gouraud shading) for
@@ -47,6 +52,8 @@
  *   - Multi-binding vertex buffers (only binding 0 is read).
  *   - Perspective-correct interpolation (rasterizer is affine).
  *   - Wide / textured lines.
+ *   - Depth test on image-backed targets (the shared depth
+ *     surface is sized to the scanout extent — see RasterizeOne).
  */
 
 namespace duetos::subsystems::graphics::internal
@@ -62,6 +69,94 @@ struct VertexV0
     i32 z_raw; // [-32768, 32767]; 0 for v0 (no depth)
     u32 argb;
 };
+
+// Resolved render-target descriptor. `scanout` targets paint
+// through the framebuffer driver (FramebufferPutPixel /
+// FramebufferBlendPixel + damage tracking); memory targets paint
+// directly into the image's host-visible BGRA8 backing.
+struct RasterTarget
+{
+    bool scanout;
+    u32* base; // non-null iff !scanout — first texel of the backing
+    u32 w;     // image extent (texels)
+    u32 h;
+};
+
+// Drawable surface extent. Scanout targets are additionally
+// clipped by the live framebuffer extent (the image may be
+// declared larger than the mode); memory targets own their full
+// extent.
+inline i32 SurfaceW(const RasterTarget& t, const RasterState& st)
+{
+    if (!t.scanout)
+        return static_cast<i32>(t.w);
+    return static_cast<i32>(t.w < st.fb_w ? t.w : st.fb_w);
+}
+
+inline i32 SurfaceH(const RasterTarget& t, const RasterState& st)
+{
+    if (!t.scanout)
+        return static_cast<i32>(t.h);
+    return static_cast<i32>(t.h < st.fb_h ? t.h : st.fb_h);
+}
+
+// True when the target can't accept any pixel at all (zero extent,
+// or a scanout target without a live framebuffer extent snapshot).
+inline bool TargetUnusable(const RasterTarget& t, const RasterState& st)
+{
+    if (t.w == 0 || t.h == 0)
+        return true;
+    return t.scanout && (st.fb_w == 0 || st.fb_h == 0);
+}
+
+// Opaque store. `rgb` is 0x00RRGGBB; memory targets keep an opaque
+// alpha byte so a later readback compares equal to the packed
+// 0xFFRRGGBB the caller fed in.
+inline void TargetPutPixel(const RasterTarget& t, u32 x, u32 y, u32 rgb)
+{
+    if (t.scanout)
+    {
+        drivers::video::FramebufferPutPixel(x, y, rgb);
+        return;
+    }
+    if (x < t.w && y < t.h)
+        t.base[static_cast<u64>(y) * t.w + x] = 0xFF000000u | rgb;
+}
+
+// Src-over blend. Mirrors FramebufferBlendPixel's integer
+// arithmetic so the two target kinds shade identically.
+inline void TargetBlendPixel(const RasterTarget& t, u32 x, u32 y, u32 argb)
+{
+    if (t.scanout)
+    {
+        drivers::video::FramebufferBlendPixel(x, y, argb);
+        return;
+    }
+    if (x >= t.w || y >= t.h)
+        return;
+    const u32 a = (argb >> 24) & 0xFFu;
+    u32* dst = &t.base[static_cast<u64>(y) * t.w + x];
+    if (a == 0xFFu)
+    {
+        *dst = argb;
+        return;
+    }
+    if (a == 0u)
+        return;
+    const u32 inv = 255u - a;
+    const u32 d = *dst;
+    const u32 r = (((argb >> 16) & 0xFFu) * a + ((d >> 16) & 0xFFu) * inv + 127u) / 255u;
+    const u32 g = (((argb >> 8) & 0xFFu) * a + ((d >> 8) & 0xFFu) * inv + 127u) / 255u;
+    const u32 b = ((argb & 0xFFu) * a + (d & 0xFFu) * inv + 127u) / 255u;
+    *dst = 0xFF000000u | (r << 16) | (g << 8) | b;
+}
+
+// Damage is a compositor concept — only scanout targets track it.
+inline void TargetAddDamage(const RasterTarget& t, u32 x, u32 y, u32 w, u32 h)
+{
+    if (t.scanout)
+        drivers::video::FramebufferAddDamage(x, y, w, h);
+}
 
 // Vulkan spec values for VkPrimitiveTopology.
 inline constexpr u32 kTopologyPointList = 0;
@@ -197,11 +292,9 @@ struct ClippedBBox
     bool empty;
 };
 
-ClippedBBox ComputeClippedBBox(i32 x0, i32 y0, i32 x1, i32 y1, i32 x2, i32 y2, const RasterState& st, u32 rt_w,
-                               u32 rt_h)
+ClippedBBox ComputeClippedBBox(i32 x0, i32 y0, i32 x1, i32 y1, i32 x2, i32 y2, const RasterState& st, i32 surface_w,
+                               i32 surface_h)
 {
-    const i32 surface_w = static_cast<i32>(rt_w < st.fb_w ? rt_w : st.fb_w);
-    const i32 surface_h = static_cast<i32>(rt_h < st.fb_h ? rt_h : st.fb_h);
     i32 min_x = Min3(x0, x1, x2);
     i32 min_y = Min3(y0, y1, y2);
     i32 max_x = Max3(x0, x1, x2);
@@ -235,12 +328,12 @@ ClippedBBox ComputeClippedBBox(i32 x0, i32 y0, i32 x1, i32 y1, i32 x2, i32 y2, c
 // Paint a single Vulkan-Point at the vertex's pixel using the
 // vertex colour. Honours scissor and the rasterizer's per-pixel
 // alpha path. Bumps the damage rect.
-void RasterizePoint(const VertexV0& v, const RasterState& st, u32 rt_w, u32 rt_h)
+void RasterizePoint(const VertexV0& v, const RasterState& st, const RasterTarget& tgt)
 {
-    if (rt_w == 0 || rt_h == 0 || st.fb_w == 0 || st.fb_h == 0)
+    if (TargetUnusable(tgt, st))
         return;
-    const i32 surface_w = static_cast<i32>(rt_w < st.fb_w ? rt_w : st.fb_w);
-    const i32 surface_h = static_cast<i32>(rt_h < st.fb_h ? rt_h : st.fb_h);
+    const i32 surface_w = SurfaceW(tgt, st);
+    const i32 surface_h = SurfaceH(tgt, st);
     const i32 px = v.x_px;
     const i32 py = v.y_px;
     if (px < 0 || py < 0 || px >= surface_w || py >= surface_h)
@@ -257,22 +350,22 @@ void RasterizePoint(const VertexV0& v, const RasterState& st, u32 rt_w, u32 rt_h
     const u32 a = (v.argb >> 24) & 0xFFu;
     const u32 rgb = v.argb & 0x00FFFFFFu;
     if (a == 0xFFu)
-        drivers::video::FramebufferPutPixel(static_cast<u32>(px), static_cast<u32>(py), rgb);
+        TargetPutPixel(tgt, static_cast<u32>(px), static_cast<u32>(py), rgb);
     else if (a > 0)
-        drivers::video::FramebufferBlendPixel(static_cast<u32>(px), static_cast<u32>(py), v.argb);
-    drivers::video::FramebufferAddDamage(static_cast<u32>(px), static_cast<u32>(py), 1, 1);
+        TargetBlendPixel(tgt, static_cast<u32>(px), static_cast<u32>(py), v.argb);
+    TargetAddDamage(tgt, static_cast<u32>(px), static_cast<u32>(py), 1, 1);
 }
 
 // Paint a line from v0 to v1 using DDA / Bresenham at 1-pixel
 // thickness. Honours scissor; flat-shaded with v0's colour
 // (line endpoint interpolation isn't needed for v0). Each plotted
 // pixel goes through the alpha-aware writer like points do.
-void RasterizeLine(const VertexV0& v0, const VertexV0& v1, const RasterState& st, u32 rt_w, u32 rt_h)
+void RasterizeLine(const VertexV0& v0, const VertexV0& v1, const RasterState& st, const RasterTarget& tgt)
 {
-    if (rt_w == 0 || rt_h == 0 || st.fb_w == 0 || st.fb_h == 0)
+    if (TargetUnusable(tgt, st))
         return;
-    const i32 surface_w = static_cast<i32>(rt_w < st.fb_w ? rt_w : st.fb_w);
-    const i32 surface_h = static_cast<i32>(rt_h < st.fb_h ? rt_h : st.fb_h);
+    const i32 surface_w = SurfaceW(tgt, st);
+    const i32 surface_h = SurfaceH(tgt, st);
     i32 sx0 = 0, sy0 = 0, sx1 = surface_w, sy1 = surface_h;
     if (st.has_scissor)
     {
@@ -308,9 +401,9 @@ void RasterizeLine(const VertexV0& v0, const VertexV0& v1, const RasterState& st
         if (x0 >= sx0 && y0 >= sy0 && x0 < sx1 && y0 < sy1)
         {
             if (a == 0xFFu)
-                drivers::video::FramebufferPutPixel(static_cast<u32>(x0), static_cast<u32>(y0), rgb);
+                TargetPutPixel(tgt, static_cast<u32>(x0), static_cast<u32>(y0), rgb);
             else if (a > 0)
-                drivers::video::FramebufferBlendPixel(static_cast<u32>(x0), static_cast<u32>(y0), v0.argb);
+                TargetBlendPixel(tgt, static_cast<u32>(x0), static_cast<u32>(y0), v0.argb);
         }
         if (x0 == x1 && y0 == y1)
             break;
@@ -340,8 +433,8 @@ void RasterizeLine(const VertexV0& v0, const VertexV0& v1, const RasterState& st
     if (max_y >= sy1)
         max_y = sy1 - 1;
     if (min_x <= max_x && min_y <= max_y)
-        drivers::video::FramebufferAddDamage(static_cast<u32>(min_x), static_cast<u32>(min_y),
-                                             static_cast<u32>(max_x - min_x + 1), static_cast<u32>(max_y - min_y + 1));
+        TargetAddDamage(tgt, static_cast<u32>(min_x), static_cast<u32>(min_y), static_cast<u32>(max_x - min_x + 1),
+                        static_cast<u32>(max_y - min_y + 1));
 }
 
 // Decide whether a triangle is culled by the current CullMode +
@@ -369,16 +462,17 @@ bool TriangleCulled(i64 area2, const RasterState& st)
     return false;
 }
 
-void RasterizeOne(const VertexV0& v0, const VertexV0& v1, const VertexV0& v2, const RasterState& st, u32 rt_w, u32 rt_h)
+void RasterizeOne(const VertexV0& v0, const VertexV0& v1, const VertexV0& v2, const RasterState& st,
+                  const RasterTarget& tgt)
 {
-    if (rt_w == 0 || rt_h == 0 || st.fb_w == 0 || st.fb_h == 0)
+    if (TargetUnusable(tgt, st))
         return;
 
     const i32 x0 = v0.x_px, y0 = v0.y_px;
     const i32 x1 = v1.x_px, y1 = v1.y_px;
     const i32 x2 = v2.x_px, y2 = v2.y_px;
 
-    const ClippedBBox bb = ComputeClippedBBox(x0, y0, x1, y1, x2, y2, st, rt_w, rt_h);
+    const ClippedBBox bb = ComputeClippedBBox(x0, y0, x1, y1, x2, y2, st, SurfaceW(tgt, st), SurfaceH(tgt, st));
     if (bb.empty)
         return;
 
@@ -408,7 +502,11 @@ void RasterizeOne(const VertexV0& v0, const VertexV0& v1, const VertexV0& v2, co
     // carries Z (v1) AND depth-test is enabled AND the depth
     // surface can be allocated. Otherwise the rasterizer paints
     // without sampling Z.
-    const bool depth_active = st.depth_test && st.vertex_format == 1;
+    // GAP: depth is scanout-only — the shared depth surface is
+    // lazily sized to the live framebuffer extent, so an
+    // image-backed target (whose extent is unrelated) would index
+    // it out of shape. Revisit when an off-screen caller needs Z.
+    const bool depth_active = st.depth_test && st.vertex_format == 1 && tgt.scanout;
     DepthSurface* dsurf = depth_active ? DepthSurfaceGetOrAlloc() : nullptr;
     const bool depth_enabled = dsurf != nullptr;
     const u32 v0_z = depth_enabled ? EncodeDepthU16(v0.z_raw) : 0;
@@ -456,10 +554,9 @@ void RasterizeOne(const VertexV0& v0, const VertexV0& v1, const VertexV0& v2, co
             if (flat)
             {
                 if (((flat_argb >> 24) & 0xFFu) == 0xFFu)
-                    drivers::video::FramebufferPutPixel(static_cast<u32>(px), static_cast<u32>(py),
-                                                        flat_argb & 0x00FFFFFFu);
+                    TargetPutPixel(tgt, static_cast<u32>(px), static_cast<u32>(py), flat_argb & 0x00FFFFFFu);
                 else
-                    drivers::video::FramebufferBlendPixel(static_cast<u32>(px), static_cast<u32>(py), flat_argb);
+                    TargetBlendPixel(tgt, static_cast<u32>(px), static_cast<u32>(py), flat_argb);
                 continue;
             }
             const u32 r = LerpChannel(v0_r, v1_r, v2_r, w0, w1, w2, area_abs);
@@ -467,16 +564,13 @@ void RasterizeOne(const VertexV0& v0, const VertexV0& v1, const VertexV0& v2, co
             const u32 b = LerpChannel(v0_b, v1_b, v2_b, w0, w1, w2, area_abs);
             const u32 a = LerpChannel(v0_a, v1_a, v2_a, w0, w1, w2, area_abs);
             if (a == 0xFFu)
-                drivers::video::FramebufferPutPixel(static_cast<u32>(px), static_cast<u32>(py),
-                                                    (r << 16) | (g << 8) | b);
+                TargetPutPixel(tgt, static_cast<u32>(px), static_cast<u32>(py), (r << 16) | (g << 8) | b);
             else if (a > 0)
-                drivers::video::FramebufferBlendPixel(static_cast<u32>(px), static_cast<u32>(py),
-                                                      (a << 24) | (r << 16) | (g << 8) | b);
+                TargetBlendPixel(tgt, static_cast<u32>(px), static_cast<u32>(py), (a << 24) | (r << 16) | (g << 8) | b);
         }
     }
-    drivers::video::FramebufferAddDamage(static_cast<u32>(bb.min_x), static_cast<u32>(bb.min_y),
-                                         static_cast<u32>(bb.max_x - bb.min_x + 1),
-                                         static_cast<u32>(bb.max_y - bb.min_y + 1));
+    TargetAddDamage(tgt, static_cast<u32>(bb.min_x), static_cast<u32>(bb.min_y),
+                    static_cast<u32>(bb.max_x - bb.min_x + 1), static_cast<u32>(bb.max_y - bb.min_y + 1));
 }
 
 // Fetch one index from the bound index buffer. Returns the 32-bit
@@ -511,15 +605,36 @@ bool FetchIndex(const RasterState& st, u32 index_pos, u32& out)
     return true;
 }
 
-bool ResolveRenderTarget(const RasterState& st, u32& rt_w_out, u32& rt_h_out)
+// Resolve the bound render-target image into a RasterTarget.
+// Scanout-backed images paint the live framebuffer. Non-scanout
+// images paint their host-visible backing — but only in the
+// default BGRA8 format (0), where one texel is one u32; other
+// formats have no defined paint layout here.
+// GAP: image-backed targets are BGRA8-only — revisit when an
+// off-screen caller renders to an R8/R16/SFLOAT image.
+bool ResolveRenderTarget(const RasterState& st, RasterTarget& out)
 {
     if (!HandleInRange(st.rt_image, kImageBase) || !PoolIsLive(g_image_pool, SlotOf(st.rt_image, kImageBase)))
         return false;
     const auto& img = g_image_data[SlotOf(st.rt_image, kImageBase)];
-    if ((img.flags & kImageScanoutBacked) == 0u)
+    if ((img.flags & kImageScanoutBacked) != 0u)
+    {
+        out.scanout = true;
+        out.base = nullptr;
+        out.w = img.extent.width;
+        out.h = img.extent.height;
+        return true;
+    }
+    if (img.backing == nullptr || img.format != 0u)
         return false;
-    rt_w_out = img.extent.width;
-    rt_h_out = img.extent.height;
+    // The bind offset could land the backing off u32 alignment;
+    // refuse rather than emit unaligned stores.
+    if ((reinterpret_cast<uptr>(img.backing) & 3u) != 0u)
+        return false;
+    out.scanout = false;
+    out.base = static_cast<u32*>(img.backing);
+    out.w = img.extent.width;
+    out.h = img.extent.height;
     return true;
 }
 
@@ -586,16 +701,21 @@ void RasterizeDuetDraw(const RasterState& st, u32 first_vertex, u32 vertex_count
     }
     g_triangles_drawn += tri_count;
 
-    u32 rt_w = 0, rt_h = 0;
-    if (!ResolveRenderTarget(st, rt_w, rt_h))
+    RasterTarget tgt{};
+    if (!ResolveRenderTarget(st, tgt))
         return;
     const u8* vb_base = nullptr;
     u64 vb_size = 0;
     if (!ResolveVertexBuffer(st, vb_base, vb_size))
         return;
-    const auto di = drivers::video::Query();
-    if (!di.available)
-        return;
+    if (tgt.scanout)
+    {
+        // Scanout paint needs a live display; an image-backed
+        // target owns its memory and needs no display at all.
+        const auto di = drivers::video::Query();
+        if (!di.available)
+            return;
+    }
 
     auto fetch = [&](u32 logical_vertex_index, VertexV0& out)
     { return FetchVertex(vb_base, vb_size, logical_vertex_index, st.vertex_format, out); };
@@ -609,7 +729,7 @@ void RasterizeDuetDraw(const RasterState& st, u32 first_vertex, u32 vertex_count
             VertexV0 v;
             if (!fetch(first_vertex + i, v))
                 continue;
-            RasterizePoint(v, st, rt_w, rt_h);
+            RasterizePoint(v, st, tgt);
         }
         return;
     }
@@ -621,7 +741,7 @@ void RasterizeDuetDraw(const RasterState& st, u32 first_vertex, u32 vertex_count
             VertexV0 a, b;
             if (!fetch(first_vertex + i * 2u, a) || !fetch(first_vertex + i * 2u + 1u, b))
                 continue;
-            RasterizeLine(a, b, st, rt_w, rt_h);
+            RasterizeLine(a, b, st, tgt);
         }
         return;
     }
@@ -632,7 +752,7 @@ void RasterizeDuetDraw(const RasterState& st, u32 first_vertex, u32 vertex_count
             VertexV0 a, b;
             if (!fetch(first_vertex + i, a) || !fetch(first_vertex + i + 1u, b))
                 continue;
-            RasterizeLine(a, b, st, rt_w, rt_h);
+            RasterizeLine(a, b, st, tgt);
         }
         return;
     }
@@ -679,7 +799,7 @@ void RasterizeDuetDraw(const RasterState& st, u32 first_vertex, u32 vertex_count
         default:
             continue;
         }
-        RasterizeOne(verts[0], verts[1], verts[2], st, rt_w, rt_h);
+        RasterizeOne(verts[0], verts[1], verts[2], st, tgt);
     }
 }
 
@@ -714,16 +834,21 @@ void RasterizeDuetDrawIndexed(const RasterState& st, u32 first_index, u32 index_
     }
     g_triangles_drawn += tri_count;
 
-    u32 rt_w = 0, rt_h = 0;
-    if (!ResolveRenderTarget(st, rt_w, rt_h))
+    RasterTarget tgt{};
+    if (!ResolveRenderTarget(st, tgt))
         return;
     const u8* vb_base = nullptr;
     u64 vb_size = 0;
     if (!ResolveVertexBuffer(st, vb_base, vb_size))
         return;
-    const auto di = drivers::video::Query();
-    if (!di.available)
-        return;
+    if (tgt.scanout)
+    {
+        // Scanout paint needs a live display; an image-backed
+        // target owns its memory and needs no display at all.
+        const auto di = drivers::video::Query();
+        if (!di.available)
+            return;
+    }
 
     auto fetch_vert_at_index = [&](u32 index_pos, VertexV0& out)
     {
@@ -743,7 +868,7 @@ void RasterizeDuetDrawIndexed(const RasterState& st, u32 first_index, u32 index_
             VertexV0 v;
             if (!fetch_vert_at_index(first_index + i, v))
                 continue;
-            RasterizePoint(v, st, rt_w, rt_h);
+            RasterizePoint(v, st, tgt);
         }
         return;
     }
@@ -755,7 +880,7 @@ void RasterizeDuetDrawIndexed(const RasterState& st, u32 first_index, u32 index_
             VertexV0 a, b;
             if (!fetch_vert_at_index(first_index + i * 2u, a) || !fetch_vert_at_index(first_index + i * 2u + 1u, b))
                 continue;
-            RasterizeLine(a, b, st, rt_w, rt_h);
+            RasterizeLine(a, b, st, tgt);
         }
         return;
     }
@@ -766,7 +891,7 @@ void RasterizeDuetDrawIndexed(const RasterState& st, u32 first_index, u32 index_
             VertexV0 a, b;
             if (!fetch_vert_at_index(first_index + i, a) || !fetch_vert_at_index(first_index + i + 1u, b))
                 continue;
-            RasterizeLine(a, b, st, rt_w, rt_h);
+            RasterizeLine(a, b, st, tgt);
         }
         return;
     }
@@ -809,7 +934,7 @@ void RasterizeDuetDrawIndexed(const RasterState& st, u32 first_index, u32 index_
         default:
             continue;
         }
-        RasterizeOne(verts[0], verts[1], verts[2], st, rt_w, rt_h);
+        RasterizeOne(verts[0], verts[1], verts[2], st, tgt);
     }
 }
 

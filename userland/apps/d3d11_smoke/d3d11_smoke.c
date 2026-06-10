@@ -31,6 +31,25 @@ static void Out(const char* s)
     WriteConsoleA(h, s, len, &n, 0);
 }
 
+/* SYS_VK_CALL (211) — read one Vulkan ICD stats counter by id.
+ * Kernel convention: rdi = op (9 = GetStatsCounter), counter id in
+ * rdx; rsi unused. Used to assert the D3D11→Vulkan back end really
+ * recorded + replayed kernel work (counter deltas), not just that
+ * the COM calls returned. */
+static unsigned long long VkStat(unsigned long long counter_id)
+{
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)211), "D"((long long)9), "S"((long long)0), "d"((long long)counter_id)
+                     : "memory");
+    return (unsigned long long)rv;
+}
+
+#define VKSTAT_TRIANGLES_DRAWN 8ULL
+#define VKSTAT_QUEUE_SUBMITS 9ULL
+#define VKSTAT_IMAGE_CLEAR_PIXELS 10ULL
+
 /* IID_ID3D11Texture2D = {6f15aaf2-d208-4e89-9ab4-489535d34f9c} */
 static const GUID kIidTex2D = {0x6f15aaf2, 0xd208, 0x4e89, {0x9a, 0xb4, 0x48, 0x95, 0x35, 0xd3, 0x4f, 0x9c}};
 
@@ -118,6 +137,12 @@ void __cdecl mainCRTStartup(void)
     typedef void (*PFN_OMSet)(void*, UINT, void* const*, void*);
     ((PFN_OMSet)ctx_vt[33])(ctx, 1, rtvs, NULL);
     Out("[d3d11_smoke] Context::OMSetRT        = PASS (returned)\r\n");
+
+    /* Baseline kernel-ICD counters — deltas asserted after Present
+     * prove the vk back end recorded + replayed real kernel work. */
+    unsigned long long clear_px0 = VkStat(VKSTAT_IMAGE_CLEAR_PIXELS);
+    unsigned long long tris0 = VkStat(VKSTAT_TRIANGLES_DRAWN);
+    unsigned long long submits0 = VkStat(VKSTAT_QUEUE_SUBMITS);
 
     /* slot 50 = ClearRenderTargetView — bright blue */
     float blue[4] = {0.0f, 0.0f, 1.0f, 1.0f};
@@ -211,6 +236,62 @@ void __cdecl mainCRTStartup(void)
     hr = ((PFN_Present)sc_vt[8])(sc, 0, 0);
     Out("[d3d11_smoke] SwapChain::Present      = ");
     Out((hr == 0) ? "PASS\r\n" : "FAIL\r\n");
+
+    /* ----- Vulkan back-end verification --------------------------- *
+     * driver_type 0 (UNKNOWN) must have engaged the kernel Vulkan
+     * back end: the swap chain reports backend kind 1, the pixels
+     * Present synced back were painted by the KERNEL rasterizer
+     * (clear blue at the corner, the triangle's interpolated colour
+     * at the centroid), and the kernel ICD counters moved by
+     * exactly/at-least the work this frame recorded. */
+    HMODULE d11 = GetModuleHandleA("d3d11.dll");
+    if (!d11)
+        d11 = LoadLibraryA("d3d11.dll");
+    typedef UINT (*PFN_PeekBackend)(void*);
+    PFN_PeekBackend peek_backend = d11 ? (PFN_PeekBackend)GetProcAddress(d11, "DuetOS_D3D11_PeekBackendKind") : 0;
+    UINT backend_kind = peek_backend ? peek_backend(sc) : 0xFFFFFFFFu;
+    Out("[d3d11_smoke] backend=");
+    Out((backend_kind == 1) ? "vulkan PASS\r\n" : "software FAIL (expected vulkan)\r\n");
+
+    /* Pixel readback through ctx_Map(READ) of the back buffer.
+     * Corner (0,0) is outside the triangle → clear blue 0xFF0000FF.
+     * (15,18) is inside (verts project to (6,25)/(16,6)/(25,25)) →
+     * Gouraud-interpolated, so anything but the clear colour. */
+    {
+        BYTE mapped[24];
+        for (UINT i = 0; i < sizeof(mapped); ++i)
+            mapped[i] = 0;
+        typedef long (*PFN_Map)(void*, void*, UINT, UINT, UINT, void*);
+        typedef void (*PFN_Unmap)(void*, void*, UINT);
+        long mhr = ((PFN_Map)ctx_vt[14])(ctx, tex, 0, 1 /*READ*/, 0, mapped);
+        int px_ok = 0;
+        if (mhr == 0)
+        {
+            const DWORD* px = *(const DWORD**)(mapped + 0);
+            if (px)
+            {
+                const DWORD corner = px[0];
+                const DWORD centroid = px[18 * 32 + 15];
+                px_ok = (corner == 0xFF0000FFu) && (centroid != 0xFF0000FFu) && (centroid != 0);
+            }
+            ((PFN_Unmap)ctx_vt[15])(ctx, tex, 0);
+        }
+        Out("[d3d11_smoke] vk pixel readback       = ");
+        Out(px_ok ? "PASS\r\n" : "FAIL\r\n");
+    }
+
+    /* Counter deltas: the 32x32 clear replayed exactly w*h image
+     * pixels; the draw rasterized >= 1 triangle; Present queued
+     * >= 1 submit. */
+    {
+        unsigned long long clear_px1 = VkStat(VKSTAT_IMAGE_CLEAR_PIXELS);
+        unsigned long long tris1 = VkStat(VKSTAT_TRIANGLES_DRAWN);
+        unsigned long long submits1 = VkStat(VKSTAT_QUEUE_SUBMITS);
+        int counters_ok =
+            (clear_px1 - clear_px0 == 32ULL * 32ULL) && (tris1 - tris0 >= 1ULL) && (submits1 - submits0 >= 1ULL);
+        Out("[d3d11_smoke] vk counter deltas       = ");
+        Out(counters_ok ? "PASS\r\n" : "FAIL\r\n");
+    }
 
     /* slot 37 = GetFeatureLevel */
     typedef UINT (*PFN_GetFL)(void*);

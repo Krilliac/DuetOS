@@ -140,6 +140,7 @@ u32 g_debug_labels = 0;
 u32 g_secondary_executes = 0;
 u32 g_secondary_ops_replayed = 0;
 u32 g_push_descriptor_writes = 0;
+u32 g_image_clear_pixels = 0;
 
 // Tiny debug-utils name table.  A circular slot table keyed by
 // the (handle, name) tuple — we never need more than a handful
@@ -1643,13 +1644,36 @@ VkResult VkGetPhysicalDeviceImageFormatProperties(VkPhysicalDevice phys, u32 for
 namespace internal
 {
 
-void PaintScanoutClear(VkImage image, VkClearColorValue color)
+void PaintClear(VkImage image, VkClearColorValue color)
 {
     if (!HandleInRange(image, kImageBase) || !PoolIsLive(g_image_pool, SlotOf(image, kImageBase)))
         return;
     const auto& img = g_image_data[SlotOf(image, kImageBase)];
     if ((img.flags & kImageScanoutBacked) == 0)
+    {
+        // Image-backed clear: an off-screen render target whose
+        // storage is host-visible device memory (the D3D11→Vulkan
+        // back buffer). Fill the backing words directly with the
+        // packed 0xAARRGGBB color. Only the BGRA8 default format
+        // (0) has a defined u32-per-texel layout for this path.
+        // GAP: non-BGRA8 image-backed clears are dropped — revisit
+        // when a caller clears an R8/R16/SFLOAT render target.
+        if (img.backing == nullptr || img.format != 0u)
+            return;
+        if ((reinterpret_cast<uptr>(img.backing) & 3u) != 0u)
+            return; // misaligned bind offset — refuse unaligned u32 stores
+        const u32 w = img.extent.width;
+        const u32 h = img.extent.height;
+        if (w == 0 || h == 0)
+            return;
+        const u32 argb = ((color.uint32[3] & 0xFFu) << 24) | ColorToRgb(color);
+        auto* px = static_cast<u32*>(img.backing);
+        const u64 count = static_cast<u64>(w) * h;
+        for (u64 i = 0; i < count; ++i)
+            px[i] = argb;
+        g_image_clear_pixels += w * h;
         return;
+    }
     const auto di = drivers::video::Query();
     if (!di.available)
         return;
@@ -1668,7 +1692,7 @@ void PaintScanoutClear(VkImage image, VkClearColorValue color)
 
 void ReplayClear(const CmdRecord& op)
 {
-    PaintScanoutClear(op.image, op.color);
+    PaintClear(op.image, op.color);
 }
 
 // vkCmdBeginRenderPass replay: trace the framebuffer through its
@@ -1686,7 +1710,7 @@ void ReplayBeginRenderPass(const CmdRecord& op)
         !PoolIsLive(g_imageview_pool, SlotOf(fb.attachment, kImageViewBase)))
         return;
     const auto& view = g_imageview_data[SlotOf(fb.attachment, kImageViewBase)];
-    PaintScanoutClear(view.image, op.color);
+    PaintClear(view.image, op.color);
 }
 
 void ReplayCopyBuffer(const CmdRecord& op)
@@ -1953,7 +1977,7 @@ void ReplayCommandBuffer(VkCommandBuffer cb)
             // the attachment image becomes the active render
             // target for subsequent Draw ops.
             if (op.fill_pattern == 1u)
-                PaintScanoutClear(op.image, op.color);
+                PaintClear(op.image, op.color);
             st.rt_image = op.image;
             ++g_dynamic_renderings;
             break;
@@ -2408,6 +2432,10 @@ u32 SpirvCapabilitiesSeenCount()
 u32 TrianglesDrawnCount()
 {
     return g_triangles_drawn;
+}
+u32 ImageClearPixelsCount()
+{
+    return g_image_clear_pixels;
 }
 
 bool LeakCheckHandlePools()
