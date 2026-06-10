@@ -645,6 +645,7 @@ void LockdepRegisterCanonicalClasses()
     LockdepRegisterClass(kLockClassBreakpoints, "breakpoints", LockKind::Spin);
     LockdepRegisterClass(kLockClassCleanroomTrace, "cleanroom-trace", LockKind::Spin);
     LockdepRegisterClass(kLockClassWifi, "wifi", LockKind::Spin);
+    LockdepRegisterClass(kLockClassSchedRunq, "sched-runq", LockKind::Spin);
     // sched::Mutex-backed classes — may yield, may be held across
     // context switches; tagged as Sleep so the cross-kind rule
     // permits acquiring a Spin lock while one is held but not the

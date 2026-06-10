@@ -190,6 +190,18 @@ inline constexpr LockClass kLockClassFat32 = 0x08;
 /// runs from a kernel task and never holds another global lock
 /// across a flush). Tagged D1-followup, 2026-04-27.
 inline constexpr LockClass kLockClassCompositor = 0x09;
+/// Per-CPU runqueue locks (`sched/sched.cpp::g_runq_locks[]`, one
+/// per possible CPU, all sharing this class). B2 lock-split bridge
+/// phase: acquired briefly INSIDE the runqueue funnels while
+/// g_sched_lock is still held everywhere, validating the
+/// sched → sched-runq ordering before the global lock narrows.
+/// Ordering rules (enforced by construction, recorded here for the
+/// split's later steps): g_sched_lock → runq is the only legal
+/// blocking order; at most one runq lock held at a time via
+/// blocking acquire (two runq locks = sequential or try-lock only,
+/// never nested blocking — a nested pair would be a same-class
+/// edge lockdep treats as a cycle).
+inline constexpr LockClass kLockClassSchedRunq = 0x0A;
 
 /// Maximum simultaneous holders per CPU. A code path that acquires
 /// more than this many locks at once trips a warning and lockdep

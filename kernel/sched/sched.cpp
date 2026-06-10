@@ -37,6 +37,7 @@
 
 #include "sched/sched.h"
 
+#include "acpi/acpi.h"
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/cpu_info.h"
 #include "arch/x86_64/gdt.h"
@@ -679,6 +680,35 @@ constinit u64 g_tasks_exited = 0;
 constinit sync::SpinLock g_sched_lock{
     .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassSched};
 
+// Per-CPU runqueue locks — B2 lock-split BRIDGE PHASE. One lock per
+// possible CPU slot (indexed by cpu_id, parallel to g_ap_percpus),
+// deliberately OUTSIDE cpu::PerCpu: the struct's head fields are
+// consumed by hand-written assembly (kPerCpuKernelRsp static_asserts)
+// and its hot length/online fields are read lock-free by wake-side
+// placement — keeping the ticket lock off those cache lines avoids
+// both the layout hazard and false sharing.
+//
+// Bridge contract (this phase): every runqueue list mutation funnel
+// (RunqueuePushOn / RunqueuePop / StealNormalFromPeer /
+// BalancePullOnce) additionally takes the owning CPU's runq lock for
+// the duration of the mutation while g_sched_lock is STILL held by
+// every caller — semantics unchanged, but the sched → sched-runq
+// lockdep edge and the per-CPU critical sections get exercised on
+// every boot before the global lock narrows. Ordering rules:
+//   1. g_sched_lock → runq lock is the only legal blocking order.
+//   2. Never hold two runq locks via blocking acquire — cross-CPU
+//      moves (steal / balance-pull) release the victim's lock before
+//      the destination push takes its own (sequential, not nested);
+//      a nested same-class pair reads as a cycle to lockdep.
+// All slots share kLockClassSchedRunq (tagged in SchedInit; slots are
+// zero-init unlocked so pre-SchedInit use is safe-by-construction).
+constinit sync::SpinLock g_runq_locks[acpi::kMaxCpus] = {};
+
+inline sync::SpinLock& RunqLockFor(const cpu::PerCpu* p)
+{
+    return g_runq_locks[p->cpu_id];
+}
+
 // Current() and NeedResched() moved to cpu::PerCpu. Per-CPU accessors
 // keep call sites terse and read unambiguously: Current() is the
 // currently-running task on THIS CPU; NeedResched() is THIS CPU's
@@ -799,6 +829,9 @@ void RunqueuePushOn(cpu::PerCpu* target, Task* t)
     // its AS is gone, and the reaper holds the only legitimate
     // reference. Silently accepting it would crash the next Schedule().
     KASSERT(t->state != TaskState::Dead, "sched", "RunqueuePush of Dead task");
+    // Bridge-phase per-CPU lock (see g_runq_locks): the target queue's
+    // own lock brackets the list + counter mutation under the global.
+    sync::SpinLockGuard rq(RunqLockFor(target));
     t->next = nullptr;
     Task*& head = (t->priority == TaskPriority::Idle) ? RunqHeadIdle(target) : RunqHeadNormal(target);
     Task*& tail = (t->priority == TaskPriority::Idle) ? RunqTailIdle(target) : RunqTailNormal(target);
@@ -1143,6 +1176,8 @@ Task* RunqueuePop()
     // RunqueuePushOn; an unlocked pop races every concurrent push.
     sync::SpinLockAssertHeld(g_sched_lock);
     cpu::PerCpu* p = cpu::CurrentCpu();
+    // Bridge-phase per-CPU lock (see g_runq_locks).
+    sync::SpinLockGuard rq(RunqLockFor(p));
     Task* t = RunqHeadNormal(p);
     if (t != nullptr)
     {
@@ -1293,6 +1328,12 @@ Task* StealNormalFromPeer()
             {
                 continue; // already visited in pass 0
             }
+            // Bridge-phase per-CPU lock: bracket the peer-queue
+            // inspection + unlink. The guard's scope is this loop
+            // iteration — released on `continue` and on the
+            // successful `return`, so at most ONE runq lock is ever
+            // held (rule 2 in the g_runq_locks comment).
+            sync::SpinLockGuard rq(RunqLockFor(peer));
             Task* head = RunqHeadNormal(peer);
             if (head == nullptr)
             {
@@ -1473,74 +1514,81 @@ Task* BalancePullOnce(cpu::PerCpu* self)
     {
         return nullptr; // PickBalanceVictim already filtered nulls; defensive belt
     }
-    Task* head = RunqHeadNormal(victim);
-    KASSERT(head != nullptr, "sched", "BalancePullOnce: victim normal_len > 0 but head null");
-    // Walk the victim's Normal queue for the first task whose affinity
-    // mask permits execution on `self`. The heaviest peer's head may be
-    // pinned away from us (NUMA-pinned worker, IRQ-affined task); a
-    // deeper task that IS allowed here should still migrate so the
-    // overloaded peer actually drains rather than staying hot because
-    // its head happens to be pinned. Mirrors `StealNormalFromPeer`'s
-    // bounded single-pass scan + prev-tracking unlink exactly, so the
-    // runqueue invariants (head/tail pointers, intrusive-link nulling,
-    // counter) stay byte-for-byte identical between the two paths.
-    // kBalanceScanCap bounds the worst case under a queue pinned
-    // entirely away from us; beyond it we yield this tick and let the
-    // next period retry.
-    //
-    // Lock ordering: the whole walk + unlink + RunqueuePushOn runs under
-    // the single g_sched_lock (asserted above) that guards every
-    // per-CPU runqueue, so both the victim's and self's queues are
-    // mutated atomically with no second lock to order against — same
-    // convention as StealNormalFromPeer and the rest of this file.
-    //
-    // GAP: NUMA distance weighting — we migrate the first
-    //      affinity-eligible task regardless of memory locality.
-    //      Revisit when the topology layer exposes per-node distances
-    //      to the balancer.
-    constexpr u32 kBalanceScanCap = 32;
-    Task* prev = nullptr;
     Task* victim_task = nullptr;
-    u32 scanned = 0;
-    for (Task* t = head; t != nullptr && scanned < kBalanceScanCap; t = t->next, ++scanned)
     {
-        if (TaskAllowedOn(t, self->cpu_id))
+        // Bridge-phase per-CPU lock: bracket the victim-queue
+        // inspection + unlink, and RELEASE before RunqueuePushOn
+        // takes the destination's lock below — sequential, never
+        // nested (rule 2 in the g_runq_locks comment; a nested
+        // same-class pair reads as a cycle to lockdep).
+        sync::SpinLockGuard rq(RunqLockFor(victim));
+        Task* head = RunqHeadNormal(victim);
+        KASSERT(head != nullptr, "sched", "BalancePullOnce: victim normal_len > 0 but head null");
+        // Walk the victim's Normal queue for the first task whose affinity
+        // mask permits execution on `self`. The heaviest peer's head may be
+        // pinned away from us (NUMA-pinned worker, IRQ-affined task); a
+        // deeper task that IS allowed here should still migrate so the
+        // overloaded peer actually drains rather than staying hot because
+        // its head happens to be pinned. Mirrors `StealNormalFromPeer`'s
+        // bounded single-pass scan + prev-tracking unlink exactly, so the
+        // runqueue invariants (head/tail pointers, intrusive-link nulling,
+        // counter) stay byte-for-byte identical between the two paths.
+        // kBalanceScanCap bounds the worst case under a queue pinned
+        // entirely away from us; beyond it we yield this tick and let the
+        // next period retry.
+        //
+        // Lock ordering: g_sched_lock (asserted above) still covers the
+        // whole walk + unlink + push in the bridge phase; the victim's
+        // runq lock brackets just the victim-queue mutation and is
+        // released before RunqueuePushOn takes the destination's.
+        //
+        // GAP: NUMA distance weighting — we migrate the first
+        //      affinity-eligible task regardless of memory locality.
+        //      Revisit when the topology layer exposes per-node distances
+        //      to the balancer.
+        constexpr u32 kBalanceScanCap = 32;
+        Task* prev = nullptr;
+        u32 scanned = 0;
+        for (Task* t = head; t != nullptr && scanned < kBalanceScanCap; t = t->next, ++scanned)
         {
-            victim_task = t;
-            break;
+            if (TaskAllowedOn(t, self->cpu_id))
+            {
+                victim_task = t;
+                break;
+            }
+            prev = t;
         }
-        prev = t;
+        if (victim_task == nullptr)
+        {
+            // Every reachable task on the heaviest peer is pinned away from
+            // us (or the queue is deeper than the scan cap). Skip this tick.
+            return nullptr;
+        }
+        // Unlink `victim_task` — same head / middle / tail handling as the
+        // steal path. `prev == nullptr` is the head case.
+        if (prev == nullptr)
+        {
+            RunqHeadNormal(victim) = victim_task->next;
+        }
+        else
+        {
+            prev->next = victim_task->next;
+        }
+        if (RunqHeadNormal(victim) == nullptr)
+        {
+            RunqTailNormal(victim) = nullptr;
+        }
+        else if (victim_task == RunqTailNormal(victim))
+        {
+            // Migrated the tail (a deeper-than-head allowed task that
+            // happened to be last); the predecessor becomes the new tail.
+            RunqTailNormal(victim) = prev;
+        }
+        victim_task->next = nullptr;
+        KASSERT(victim->runq_normal_len > 0, "sched", "BalancePullOnce: victim normal_len underflow");
+        --victim->runq_normal_len;
+        victim_task->last_cpu = self->cpu_id;
     }
-    if (victim_task == nullptr)
-    {
-        // Every reachable task on the heaviest peer is pinned away from
-        // us (or the queue is deeper than the scan cap). Skip this tick.
-        return nullptr;
-    }
-    // Unlink `victim_task` — same head / middle / tail handling as the
-    // steal path. `prev == nullptr` is the head case.
-    if (prev == nullptr)
-    {
-        RunqHeadNormal(victim) = victim_task->next;
-    }
-    else
-    {
-        prev->next = victim_task->next;
-    }
-    if (RunqHeadNormal(victim) == nullptr)
-    {
-        RunqTailNormal(victim) = nullptr;
-    }
-    else if (victim_task == RunqTailNormal(victim))
-    {
-        // Migrated the tail (a deeper-than-head allowed task that
-        // happened to be last); the predecessor becomes the new tail.
-        RunqTailNormal(victim) = prev;
-    }
-    victim_task->next = nullptr;
-    KASSERT(victim->runq_normal_len > 0, "sched", "BalancePullOnce: victim normal_len underflow");
-    --victim->runq_normal_len;
-    victim_task->last_cpu = self->cpu_id;
     RunqueuePushOn(self, victim_task);
     return victim_task;
 }
@@ -1918,6 +1966,14 @@ void SchedInit()
 {
     KLOG_TRACE_SCOPE("sched", "SchedInit");
     KLOG_INFO("sched", "SchedInit: bringing scheduler online");
+    // Tag every per-CPU runqueue lock with its lockdep class. One
+    // pass over all possible slots (zero-init = unlocked, so slots
+    // for CPUs that never come online stay inert); APs need no
+    // per-CPU init — the class is already set before SIPI.
+    for (auto& rql : g_runq_locks)
+    {
+        rql.class_id = sync::kLockClassSchedRunq;
+    }
     auto* boot_task = static_cast<Task*>(mm::KMalloc(sizeof(Task)));
     if (boot_task == nullptr)
     {
@@ -2538,16 +2594,24 @@ void ScheduleLockedHandoff(sync::IrqFlags lock_flags)
     // release build was already doing exactly this silently.
     if (__builtin_expect(next->state != TaskState::Ready, 0))
     {
-        arch::SerialWrite("[sched] WARN: popped task not Ready; state=");
-        arch::SerialWriteHex(static_cast<u64>(next->state));
-        arch::SerialWrite(" id=");
-        arch::SerialWriteHex(next->id);
-        arch::SerialWrite(" name=\"");
-        arch::SerialWrite(next->name != nullptr ? next->name : "<unknown>");
-        arch::SerialWrite("\" cpu=");
-        cpu::PerCpu* dbg_self = cpu::CurrentCpu();
-        arch::SerialWriteHex(dbg_self != nullptr ? static_cast<u64>(dbg_self->cpu_id) : 0xFFu);
-        arch::SerialWrite("\n");
+        // SerialLineGuard: this fires on SMP races by definition, so
+        // a peer CPU is often mid-print — without line-level atomicity
+        // the diagnostic splices and loses exactly the task identity
+        // it exists to capture (observed 2026-06-10: the state= value
+        // interleaved with a cpuhp bringup line).
+        {
+            arch::SerialLineGuard line;
+            arch::SerialWrite("[sched] WARN: popped task not Ready; state=");
+            arch::SerialWriteHex(static_cast<u64>(next->state));
+            arch::SerialWrite(" id=");
+            arch::SerialWriteHex(next->id);
+            arch::SerialWrite(" name=\"");
+            arch::SerialWrite(next->name != nullptr ? next->name : "<unknown>");
+            arch::SerialWrite("\" cpu=");
+            cpu::PerCpu* dbg_self = cpu::CurrentCpu();
+            arch::SerialWriteHex(dbg_self != nullptr ? static_cast<u64>(dbg_self->cpu_id) : 0xFFu);
+            arch::SerialWrite("\n");
+        }
         next->state = TaskState::Ready;
     }
 
