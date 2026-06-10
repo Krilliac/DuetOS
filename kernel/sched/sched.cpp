@@ -480,6 +480,9 @@ inline Task*& RunqTailIdle(cpu::PerCpu* p)
 
 constinit Task* g_sleep_head = nullptr; // sorted by wake_tick (ascending)
 constinit u64 g_tick_now = 0;
+// ID dispenser. Bumped via __atomic_fetch_add — SchedCreateInternal
+// assigns the id BEFORE it takes g_sched_lock, and CreateApBootSentinel
+// runs on a bringing-up AP, so the increment has no common lock.
 constinit u64 g_next_task_id = 0;
 constinit u64 g_context_switches = 0;
 // g_tasks_* counters moved to PerCpu::sched_tasks_*. Reads sum
@@ -644,6 +647,10 @@ inline void AllTasksUnlink(Task* t)
     t->all_next = nullptr;
 }
 constinit WaitQueue g_reaper_wq{};
+// Exit counter. Written via __atomic_fetch_add: SchedExit bumps it
+// outside g_sched_lock while Schedule()'s kill branch bumps it
+// inside — atomic increments make the two paths symmetric without
+// widening either lock scope.
 constinit u64 g_tasks_exited = 0;
 
 // Single global scheduler lock protecting every mutation of:
@@ -1924,7 +1931,7 @@ void SchedInit()
     // unset would carry the poison and dereference garbage.
     memset(boot_task, 0, sizeof(Task));
 
-    boot_task->id = g_next_task_id++;
+    boot_task->id = __atomic_fetch_add(&g_next_task_id, 1, __ATOMIC_RELAXED);
     boot_task->state = TaskState::Running;
     boot_task->rsp = 0; // populated on first context switch out
     boot_task->stack_base = nullptr;
@@ -2026,7 +2033,7 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     // page is an unlikely large-frame-skip but cheap to keep covered.
     *reinterpret_cast<u64*>(stack) = kStackCanary;
 
-    t->id = g_next_task_id++;
+    t->id = __atomic_fetch_add(&g_next_task_id, 1, __ATOMIC_RELAXED);
     t->state = TaskState::Ready;
     t->first_run = true; // SchedFinishTaskSwitch flips this to false on first entry
     t->stack_base = stack;
@@ -2552,7 +2559,7 @@ void ScheduleLockedHandoff(sync::IrqFlags lock_flags)
             // machine. Transition Running → Dead and DEFER the
             // zombie-push exactly as SchedExit does.
             prev->state = TaskState::Dead;
-            ++g_tasks_exited;
+            __atomic_fetch_add(&g_tasks_exited, 1, __ATOMIC_RELAXED);
             SchedCpuDecLive();
             // Recovery Class C hook — fired for SchedExit too. Keep the
             // two termination paths symmetric so a budget-killed ring-3
@@ -3177,7 +3184,7 @@ void SchedExit()
     // calls SchedExit and then falls through).
     KASSERT(self->state != TaskState::Dead, "sched", "SchedExit called twice on same task");
     self->state = TaskState::Dead;
-    ++g_tasks_exited;
+    __atomic_fetch_add(&g_tasks_exited, 1, __ATOMIC_RELAXED);
     SchedCpuDecLive();
     KBP_PROBE_V(::duetos::debug::ProbeId::kThreadExit, self->id);
 
@@ -4450,7 +4457,7 @@ SchedStats SchedStatsRead()
         .tasks_sleeping = SchedSumSleeping(),
         .tasks_blocked = SchedSumBlocked(),
         .tasks_created = SchedSumCreated(),
-        .tasks_exited = g_tasks_exited,
+        .tasks_exited = __atomic_load_n(&g_tasks_exited, __ATOMIC_RELAXED),
         .tasks_reaped = SchedSumReaped(),
         .total_ticks = g_total_ticks,
         .idle_ticks = g_idle_ticks,
@@ -4532,7 +4539,7 @@ void EmitTask(const Task* t, SchedEnumCb cb, void* cookie, bool is_running)
     for (u32 i = 0; i < sizeof(info._pad); ++i)
         info._pad[i] = 0;
     // Snapshot the owning AS's mapped user-page count. Safe here
-    // because EmitTask runs under arch::Cli (the SchedEnumerate
+    // because EmitTask runs under g_sched_lock (the SchedEnumerate
     // bracket), so the AS can't be concurrently torn down; we
     // read region_count without holding the AS's regions_lock
     // because we're just sampling a u16 counter for display (not
@@ -4657,7 +4664,13 @@ void SleepQueueRemove(Task* t)
 
 KillResult SchedKillByPid(u64 pid)
 {
-    arch::Cli();
+    // g_sched_lock (not bare Cli): the walk reads peer CPUs'
+    // runqueues, and the Sleeping branch below mutates the sleep
+    // queue + calls RunqueuePush (an assert-held funnel). Bare Cli
+    // only stops THIS CPU's IRQs — a peer could splice the lists
+    // mid-walk. SpinLockAcquire disables IRQs and the guard
+    // restores them on every return path.
+    sync::SpinLockGuard guard(g_sched_lock);
 
     // Walk every possible home of a Task* with this id. Ordered
     // so the hottest cases (running + ready runqueues) hit first.
@@ -4699,22 +4712,18 @@ KillResult SchedKillByPid(u64 pid)
         {
             if (t->id == pid)
             {
-                arch::Sti();
                 return KillResult::AlreadyDead;
             }
         }
-        arch::Sti();
         return KillResult::NotFound;
     }
 
     if (IsProtectedTask(target))
     {
-        arch::Sti();
         return KillResult::Protected;
     }
     if (target->state == TaskState::Dead)
     {
-        arch::Sti();
         return KillResult::AlreadyDead;
     }
     // Blocked tasks sit on a WaitQueue threaded via `next`. We
@@ -4727,7 +4736,6 @@ KillResult SchedKillByPid(u64 pid)
     target->kill_reason = KillReason::UserKill;
     if (target->state == TaskState::Blocked)
     {
-        arch::Sti();
         return KillResult::Blocked;
     }
     // Sleeping: lift off the sleep queue + re-queue Ready so
@@ -4741,7 +4749,6 @@ KillResult SchedKillByPid(u64 pid)
     }
     // Ready / Running tasks don't need repositioning — they'll
     // hit Schedule() naturally and die there.
-    arch::Sti();
     return KillResult::Signaled;
 }
 
@@ -4749,34 +4756,37 @@ u64 SchedKillByProcess(core::Process* target)
 {
     if (target == nullptr)
         return 0;
-    arch::Cli();
-    // Collect TIDs first so we can release the cli window before
-    // calling SchedKillByPid (which takes its own cli). Cap at 32
-    // — the win32 thread-handle table is 8, plus the main task,
-    // plus a generous margin for Linux clone(CLONE_THREAD) work.
+    // Collect TIDs first under g_sched_lock (peer CPUs mutate the
+    // runqueues; bare Cli would only fence this CPU), then release
+    // before calling SchedKillByPid — which takes the same
+    // non-recursive lock itself. Cap at 32 — the win32
+    // thread-handle table is 8, plus the main task, plus a
+    // generous margin for Linux clone(CLONE_THREAD) work.
     constexpr u32 kMaxTidsPerKill = 32;
     u64 tids[kMaxTidsPerKill];
     u32 ntids = 0;
-    auto collect = [&](Task* t)
     {
-        if (t == nullptr || t->process != target)
-            return;
-        if (t->state == TaskState::Dead)
-            return;
-        if (ntids < kMaxTidsPerKill)
-            tids[ntids++] = t->id;
-    };
-    Task* cur = Current();
-    collect(cur);
-    ForEachRunqueueTask(
-        [&](Task* t)
+        sync::SpinLockGuard guard(g_sched_lock);
+        auto collect = [&](Task* t)
         {
+            if (t == nullptr || t->process != target)
+                return;
+            if (t->state == TaskState::Dead)
+                return;
+            if (ntids < kMaxTidsPerKill)
+                tids[ntids++] = t->id;
+        };
+        Task* cur = Current();
+        collect(cur);
+        ForEachRunqueueTask(
+            [&](Task* t)
+            {
+                collect(t);
+                return false;
+            });
+        for (Task* t = g_sleep_head; t != nullptr; t = t->sleep_next)
             collect(t);
-            return false;
-        });
-    for (Task* t = g_sleep_head; t != nullptr; t = t->sleep_next)
-        collect(t);
-    arch::Sti();
+    }
 
     u64 signalled = 0;
     for (u32 i = 0; i < ntids; ++i)
@@ -4794,11 +4804,16 @@ SuspendResult SchedSuspendTask(Task* target, u32* prev_count_out)
     {
         return SuspendResult::NotFound;
     }
-    arch::Cli();
+    // No manual Cli/Sti around the guard: SpinLockAcquire saves +
+    // disables IF itself and the guard's release restores it. The
+    // previous explicit `arch::Sti()` before each return executed
+    // BEFORE the guard's destructor released the lock — a window
+    // where a timer IRQ (whose Schedule()/sleep-drain paths take
+    // g_sched_lock) could fire on this CPU while it still held the
+    // lock, tripping the always-on self-deadlock panic.
     sync::SpinLockGuard guard(g_sched_lock);
     if (target->state == TaskState::Dead)
     {
-        arch::Sti();
         return SuspendResult::AlreadyDead;
     }
     if (target == Current())
@@ -4813,7 +4828,6 @@ SuspendResult SchedSuspendTask(Task* target, u32* prev_count_out)
             *prev_count_out = target->suspend_count;
         }
         ++target->suspend_count;
-        arch::Sti();
         return SuspendResult::Signaled;
     }
     if (prev_count_out != nullptr)
@@ -4826,7 +4840,6 @@ SuspendResult SchedSuspendTask(Task* target, u32* prev_count_out)
     // the suspended list. For Sleeping / Blocked tasks the
     // suspend takes effect at wake time via RunqueueOrSuspendPush.
     // No eager relocation needed in either case.
-    arch::Sti();
     return SuspendResult::Signaled;
 }
 
@@ -4836,11 +4849,12 @@ SuspendResult SchedResumeTask(Task* target, u32* prev_count_out)
     {
         return SuspendResult::NotFound;
     }
-    arch::Cli();
+    // See SchedSuspendTask: the guard owns IF save/restore; a
+    // manual Sti before the guard released g_sched_lock opened an
+    // IRQ-while-holding window.
     sync::SpinLockGuard guard(g_sched_lock);
     if (target->state == TaskState::Dead)
     {
-        arch::Sti();
         return SuspendResult::AlreadyDead;
     }
     if (prev_count_out != nullptr)
@@ -4852,7 +4866,6 @@ SuspendResult SchedResumeTask(Task* target, u32* prev_count_out)
         // Resume on an unsuspended task is a no-op that returns
         // 0 (matching NT — NtResumeThread on a thread with count
         // 0 returns 0 and stays 0).
-        arch::Sti();
         return SuspendResult::Signaled;
     }
     --target->suspend_count;
@@ -4870,7 +4883,6 @@ SuspendResult SchedResumeTask(Task* target, u32* prev_count_out)
             RunqueuePush(target);
         }
     }
-    arch::Sti();
     return SuspendResult::Signaled;
 }
 
@@ -4934,7 +4946,12 @@ StackHealth SchedCheckTaskStacks()
             }
         }
     };
-    arch::Cli();
+    // g_sched_lock, not bare Cli: the walk reads every CPU's
+    // runqueue + the sleep/zombie lists, which peer CPUs mutate
+    // under the lock. The SerialWrite diagnostics above fire only
+    // on findings (a confirmed overflow / scribble), so the
+    // held-time cost of the failure path is irrelevant.
+    sync::SpinLockGuard guard(g_sched_lock);
     check(Current());
     ForEachRunqueueTask(
         [&](Task* t)
@@ -4946,7 +4963,6 @@ StackHealth SchedCheckTaskStacks()
         check(t);
     for (Task* t = g_zombies; t != nullptr; t = t->next)
         check(t);
-    arch::Sti();
     return out;
 }
 
@@ -4959,12 +4975,14 @@ void SchedEnumerate(SchedEnumCb cb, void* cookie)
     // Current() would dereference an uninitialised GSBASE value.
     if (!cpu::BspInstalled())
         return;
-    // Brief CLI window so the timer IRQ + WaitQueueWake* can't
-    // splice the lists mid-walk. The callback runs inside the
-    // critical section — this is fine for Console writes
-    // (byte-sized stores) but would not be for anything that
-    // can block.
-    arch::Cli();
+    // g_sched_lock so neither this CPU's timer IRQ nor a peer
+    // CPU's wake/steal can splice the lists mid-walk (bare Cli
+    // only fenced this CPU). The callback runs inside the
+    // critical section — fine for snapshot-copy callbacks
+    // (taskman / dbg / leak-detector all copy into caller
+    // buffers) but a callback must never block or re-enter
+    // the scheduler.
+    sync::SpinLockGuard guard(g_sched_lock);
     const Task* running = Current();
     if (running != nullptr)
     {
@@ -4996,7 +5014,6 @@ void SchedEnumerate(SchedEnumCb cb, void* cookie)
         EmitTask(t, cb, cookie, false);
     }
     EmitList(g_zombies, cb, cookie, running);
-    arch::Sti();
 }
 
 u64 SchedSnapshotBlockedTasks(SchedBlockedTaskInfo* out, u64 cap)
@@ -5127,18 +5144,17 @@ u64 SchedSelftestRewindBlockStart(const char* match_name, u64 delta_ticks)
 
 bool SchedIsPidZombie(u64 target_pid)
 {
-    arch::Cli();
-    bool hit = false;
+    // g_sched_lock: the reaper (a peer CPU) detaches g_zombies
+    // under it; bare Cli can't exclude that.
+    sync::SpinLockGuard guard(g_sched_lock);
     for (Task* t = g_zombies; t != nullptr; t = t->next)
     {
         if (t->process != nullptr && t->process->pid == target_pid)
         {
-            hit = true;
-            break;
+            return true;
         }
     }
-    arch::Sti();
-    return hit;
+    return false;
 }
 
 bool SchedProcessAlive(u64 target_pid)
@@ -5189,7 +5205,7 @@ u64 SchedCountChildrenOfPid(u64 parent_pid)
         return n;
     };
 
-    arch::Cli();
+    sync::SpinLockGuard guard(g_sched_lock);
     u64 total = 0;
     Task* running = Current();
     if (running != nullptr && running->process != nullptr && running->process->linux_parent_pid == parent_pid)
@@ -5204,7 +5220,6 @@ u64 SchedCountChildrenOfPid(u64 parent_pid)
             return false;
         });
     total += count_in(g_sleep_head, true);
-    arch::Sti();
     return total;
 }
 
@@ -5232,12 +5247,11 @@ core::Process* SchedFindProcessByPid(u64 target_pid)
         return p;
     };
 
-    arch::Cli();
+    sync::SpinLockGuard guard(g_sched_lock);
     core::Process* hit = nullptr;
     Task* running = Current();
     if ((hit = match(running)) != nullptr)
     {
-        arch::Sti();
         return hit;
     }
     ForEachRunqueueTask(
@@ -5260,7 +5274,6 @@ core::Process* SchedFindProcessByPid(u64 target_pid)
             hit = match(t);
         }
     }
-    arch::Sti();
     return hit;
 }
 
@@ -5272,19 +5285,17 @@ Task* SchedFindTaskByTid(u64 target_tid)
     }
     // Same walk shape as SchedFindProcessByPid — every list that
     // can hold a Task. Returns the first task whose id matches.
-    // Caller must hold a stable reference to the task's owning
-    // Process (via ProcessRetain) before SchedFindTaskByTid
-    // returns, otherwise the task could be reaped and the Task*
-    // freed under the caller's hand. The intended caller is
-    // SYS_THREAD_OPEN, which captures the owning Process* via
-    // task->process and ProcessRetains it inside the same
-    // arch::Cli window before this function returns.
-    arch::Cli();
+    // The returned Task* is only reap-stable while the caller can
+    // rule out the task exiting (e.g. same-process targets whose
+    // lifetime the caller controls). A caller that stores the
+    // pointer or the owning Process beyond that window must use
+    // SchedOpenThreadByTid below, which retains the owning
+    // Process under the same lock that found the task.
+    sync::SpinLockGuard guard(g_sched_lock);
     auto match = [&](Task* t) -> Task* { return (t != nullptr && t->id == target_tid) ? t : nullptr; };
     Task* hit = match(Current());
     if (hit != nullptr)
     {
-        arch::Sti();
         return hit;
     }
     ForEachRunqueueTask(
@@ -5305,8 +5316,56 @@ Task* SchedFindTaskByTid(u64 target_tid)
     // the task is in the zombie list (the reaper holds the
     // last refcount), so there'd be no Process to retain
     // even if we tried.
-    arch::Sti();
     return hit;
+}
+
+core::Process* SchedOpenThreadByTid(u64 target_tid, Task** task_out)
+{
+    if (task_out != nullptr)
+    {
+        *task_out = nullptr;
+    }
+    if (!cpu::BspInstalled())
+    {
+        return nullptr;
+    }
+    // Find-and-retain under one g_sched_lock hold. This is the
+    // reap-safe variant SYS_THREAD_OPEN needs: between a plain
+    // SchedFindTaskByTid returning and the caller's ProcessRetain,
+    // the target could exit and be reaped — the retain would then
+    // write freed memory. Retaining the owning Process inside the
+    // same critical section that proved the task alive closes the
+    // window: the reaper can't free a Process whose refcount we
+    // hold, and the Task struct itself is owned by that Process's
+    // lifetime for handle-table purposes. Kernel-only tasks
+    // (process == nullptr) return nullptr — they have no NT
+    // identity to open. Caller owns one ProcessRelease.
+    //
+    // Walks the all-tasks registry, not the runqueue/sleep/zombie
+    // triple SchedFindTaskByTid covers: a task Blocked on a wait
+    // queue is on NONE of those lists (same reasoning as
+    // SchedProcessAlive), and NtOpenThread on a thread parked in
+    // a blocking syscall must still succeed.
+    sync::SpinLockGuard guard(g_sched_lock);
+    Task* hit = nullptr;
+    for (Task* t = g_all_tasks_head; t != nullptr; t = t->all_next)
+    {
+        if (t->id == target_tid)
+        {
+            hit = t;
+            break;
+        }
+    }
+    if (hit == nullptr || hit->state == TaskState::Dead || hit->process == nullptr)
+    {
+        return nullptr;
+    }
+    core::ProcessRetain(hit->process);
+    if (task_out != nullptr)
+    {
+        *task_out = hit;
+    }
+    return hit->process;
 }
 
 // ---------------------------------------------------------------------------
@@ -5679,7 +5738,7 @@ Task* CreateApBootSentinel(u32 cpu_id)
         PanicSched("KMalloc failed for AP boot sentinel");
     }
     memset(t, 0, sizeof(Task));
-    t->id = g_next_task_id++;
+    t->id = __atomic_fetch_add(&g_next_task_id, 1, __ATOMIC_RELAXED);
     t->state = TaskState::Running;
     // NEVER re-enqueue this fake task. Without this, the AP's first
     // Schedule() sees prev==sentinel in state Running and

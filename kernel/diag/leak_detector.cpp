@@ -94,6 +94,23 @@ struct ProcessAggCookie
     static constexpr u64 kSeenCap = 64;
     u64 seen_pids[kSeenCap];
     u64 seen_count;
+    // Per-task samples collected DURING the SchedEnumerate walk.
+    // SchedEnumerate now holds g_sched_lock for the whole walk, so
+    // the callback must not call back into the scheduler (the old
+    // shape called SchedFindProcessByPid from inside the callback —
+    // a self-deadlock on the non-recursive lock). Collect-then-
+    // resolve instead: the callback only copies, and the process
+    // resolution happens after the walk returns. Cap is generous
+    // (a busy desktop boot runs ~60 tasks); overflowed samples are
+    // dropped, slightly under-counting the runaway diagnostic.
+    struct TaskSample
+    {
+        u64 pid;
+        u64 ticks_run;
+    };
+    static constexpr u64 kTaskCap = 128;
+    TaskSample tasks[kTaskCap];
+    u64 task_count;
 };
 
 bool PidAlreadyCounted(ProcessAggCookie& c, u64 pid)
@@ -110,67 +127,81 @@ bool PidAlreadyCounted(ProcessAggCookie& c, u64 pid)
     return false;
 }
 
+// SchedEnumerate callback — pure collector (runs under
+// g_sched_lock; must not re-enter the scheduler).
 void CountTaskAgg(const ::duetos::sched::SchedTaskInfo& info, void* cookie)
 {
     auto* c = static_cast<ProcessAggCookie*>(cookie);
-
-    // Runaway: a user task whose lifetime ticks_run has crossed
-    // 75% of its parent process's tick_budget. Cheap proxy for
-    // "burning CPU without yielding"; the scheduler's own
-    // `KillReason::TickBudget` path already terminates at 100%.
-    if (info.has_process)
+    if (c == nullptr || !info.has_process || info.owner_pid == 0)
+        return;
+    if (c->task_count < ProcessAggCookie::kTaskCap)
     {
-        ::duetos::core::Process* p = ::duetos::sched::SchedFindProcessByPid(info.owner_pid);
-        if (p != nullptr && p->tick_budget > 0)
+        c->tasks[c->task_count].pid = info.owner_pid;
+        c->tasks[c->task_count].ticks_run = info.ticks_run;
+        ++c->task_count;
+    }
+}
+
+// Post-walk resolution: one SchedFindProcessByPid per distinct
+// PID, then per-process handle counts + per-task runaway checks
+// against that process's tick budget.
+//
+// Runaway: a user task whose lifetime ticks_run has crossed 75%
+// of its parent process's tick_budget. Cheap proxy for "burning
+// CPU without yielding"; the scheduler's own
+// `KillReason::TickBudget` path already terminates at 100%.
+void ResolveTaskAgg(ProcessAggCookie& c)
+{
+    for (u64 s = 0; s < c.task_count; ++s)
+    {
+        if (PidAlreadyCounted(c, c.tasks[s].pid))
+            continue;
+
+        ::duetos::core::Process* p = ::duetos::sched::SchedFindProcessByPid(c.tasks[s].pid);
+        if (p == nullptr)
+            continue;
+
+        if (p->tick_budget > 0)
         {
             const u64 threshold = (p->tick_budget * 3) / 4;
-            if (info.ticks_run >= threshold)
+            for (u64 t = 0; t < c.task_count; ++t)
             {
-                ++c->cpu_runaway_count;
-                if (info.ticks_run >= p->tick_budget)
+                if (c.tasks[t].pid != p->pid || c.tasks[t].ticks_run < threshold)
+                    continue;
+                ++c.cpu_runaway_count;
+                if (c.tasks[t].ticks_run >= p->tick_budget)
                 {
-                    c->cpu_runaway_ticks_over += info.ticks_run - p->tick_budget;
+                    c.cpu_runaway_ticks_over += c.tasks[t].ticks_run - p->tick_budget;
                 }
             }
         }
+
+        c.handle_table_live += ::duetos::ipc::HandleTableLiveCount(p->kobj_handles);
+
+        u64 win32 = 0;
+        for (u64 i = 0; i < ::duetos::core::Process::kWin32HandleCap; ++i)
+            if (p->win32_handles[i].kind != ::duetos::core::Process::FsBackingKind::None)
+                ++win32;
+        for (u64 i = 0; i < ::duetos::core::Process::kWin32ThreadCap; ++i)
+            if (p->win32_threads[i].in_use)
+                ++win32;
+        for (u64 i = 0; i < ::duetos::core::Process::kWin32ProcessCap; ++i)
+            if (p->win32_proc_handles[i].in_use)
+                ++win32;
+        for (u64 i = 0; i < ::duetos::core::Process::kWin32ForeignThreadCap; ++i)
+            if (p->win32_foreign_threads[i].in_use)
+                ++win32;
+        for (u64 i = 0; i < ::duetos::core::Process::kWin32SectionCap; ++i)
+            if (p->win32_section_handles[i].in_use)
+                ++win32;
+        for (u64 i = 0; i < ::duetos::core::Process::kWin32DirCap; ++i)
+            if (p->win32_dirs[i].entries != nullptr)
+                ++win32;
+        for (u64 i = 0; i < ::duetos::core::Process::kWin32RegistryCap; ++i)
+            if (p->win32_reg_handles[i].in_use)
+                ++win32;
+        c.win32_handle_live += win32;
     }
-
-    // Per-process counts: only count once per PID. Kernel-only
-    // tasks (no Process) carry no per-process handles, so skip.
-    if (!info.has_process)
-        return;
-    if (PidAlreadyCounted(*c, info.owner_pid))
-        return;
-
-    ::duetos::core::Process* p = ::duetos::sched::SchedFindProcessByPid(info.owner_pid);
-    if (p == nullptr)
-        return;
-
-    c->handle_table_live += ::duetos::ipc::HandleTableLiveCount(p->kobj_handles);
-
-    u64 win32 = 0;
-    for (u64 i = 0; i < ::duetos::core::Process::kWin32HandleCap; ++i)
-        if (p->win32_handles[i].kind != ::duetos::core::Process::FsBackingKind::None)
-            ++win32;
-    for (u64 i = 0; i < ::duetos::core::Process::kWin32ThreadCap; ++i)
-        if (p->win32_threads[i].in_use)
-            ++win32;
-    for (u64 i = 0; i < ::duetos::core::Process::kWin32ProcessCap; ++i)
-        if (p->win32_proc_handles[i].in_use)
-            ++win32;
-    for (u64 i = 0; i < ::duetos::core::Process::kWin32ForeignThreadCap; ++i)
-        if (p->win32_foreign_threads[i].in_use)
-            ++win32;
-    for (u64 i = 0; i < ::duetos::core::Process::kWin32SectionCap; ++i)
-        if (p->win32_section_handles[i].in_use)
-            ++win32;
-    for (u64 i = 0; i < ::duetos::core::Process::kWin32DirCap; ++i)
-        if (p->win32_dirs[i].entries != nullptr)
-            ++win32;
-    for (u64 i = 0; i < ::duetos::core::Process::kWin32RegistryCap; ++i)
-        if (p->win32_reg_handles[i].in_use)
-            ++win32;
-    c->win32_handle_live += win32;
 }
 
 ClassSnapshot SnapshotHandle(const ProcessAggCookie& c)
@@ -258,7 +289,11 @@ void GatherProcessAgg(ProcessAggCookie& cookie)
     cookie.cpu_runaway_count = 0;
     cookie.cpu_runaway_ticks_over = 0;
     cookie.seen_count = 0;
+    cookie.task_count = 0;
+    // Two passes: collect task samples under SchedEnumerate's lock,
+    // then resolve per-process state outside it (see CountTaskAgg).
     ::duetos::sched::SchedEnumerate(&CountTaskAgg, &cookie);
+    ResolveTaskAgg(cookie);
 }
 
 // Case-insensitive C-string compare (no <strings.h> in

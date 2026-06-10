@@ -2878,13 +2878,14 @@ void SyscallDispatch(arch::TrapFrame* frame)
             return;
         }
         const u64 target_tid = frame->rdi;
-        sched::Task* target_task = sched::SchedFindTaskByTid(target_tid);
-        if (target_task == nullptr)
-        {
-            frame->rax = 0;
-            return;
-        }
-        Process* owner = sched::TaskProcess(target_task);
+        // Find-and-retain in one locked step (SchedOpenThreadByTid)
+        // — the previous find-then-retain split left a window where
+        // the target could exit and be reaped between the lookup
+        // and the ProcessRetain, making the retain a write into
+        // freed memory. The owner ref returned here is OURS to
+        // release on every failure path below.
+        sched::Task* target_task = nullptr;
+        Process* owner = sched::SchedOpenThreadByTid(target_tid, &target_task);
         if (owner == nullptr)
         {
             frame->rax = 0;
@@ -2893,8 +2894,6 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // Scan + claim atomically — without arch::Cli the scan
         // and the in_use write can be split by a preemption,
         // letting a concurrent SYS_THREAD_OPEN pick the same slot.
-        // ProcessRetain is delayed until after the claim so two
-        // racing opens can't leak retains.
         u64 idx = Process::kWin32ForeignThreadCap;
         {
             arch::Cli();
@@ -2913,10 +2912,10 @@ void SyscallDispatch(arch::TrapFrame* frame)
         }
         if (idx == Process::kWin32ForeignThreadCap)
         {
-            frame->rax = 0; // table full
+            ProcessRelease(owner); // table full — drop the open's ref
+            frame->rax = 0;
             return;
         }
-        ProcessRetain(owner);
         frame->rax = Process::kWin32ForeignThreadBase + idx;
         return;
     }

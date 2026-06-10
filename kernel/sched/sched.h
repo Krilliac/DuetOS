@@ -122,15 +122,18 @@ bool SchedSehDeliveryAllowed(Task* t, u64 fault_rip);
 
 /// Find the first live `core::Process*` with `pid == target_pid`.
 /// Walks every queue (running, normal-runqueue, idle-runqueue,
-/// sleep-queue, zombies) under arch::Cli to keep the lists stable
-/// during the scan. Returns nullptr if no task with that PID is
-/// alive — including the case where the task exists but is a
-/// kernel-only task (`process == nullptr`).
+/// sleep-queue, zombies) under g_sched_lock to keep the lists
+/// stable during the scan — including against peer CPUs, which
+/// bare arch::Cli never excluded. Returns nullptr if no task with
+/// that PID is alive — including the case where the task exists
+/// but is a kernel-only task (`process == nullptr`).
 ///
 /// Does NOT bump the returned Process's refcount. Callers that
 /// need to hold the reference past the immediate scan window
-/// must call `core::ProcessRetain` while the scheduler is still
-/// CLI-quiet — typically inside the same syscall handler.
+/// must call `core::ProcessRetain` — and accept the residual
+/// race that the process can exit between this returning and
+/// the retain (use a find-and-retain primitive like
+/// SchedOpenThreadByTid where that matters).
 ///
 /// Used by SYS_PROCESS_OPEN (NtOpenProcess) to translate a PID
 /// into a Process pointer the kernel can hand back as a handle.
@@ -140,7 +143,7 @@ core::Process* SchedFindProcessByPid(u64 target_pid);
 /// zombies list (TaskState::Dead, awaiting reap). Used by the
 /// pidfd EPOLLIN-on-exit path to flip a poll without claiming
 /// the process is still scheduling. Walks g_zombies under
-/// arch::Cli.
+/// g_sched_lock.
 bool SchedIsPidZombie(u64 target_pid);
 
 /// True iff the process `target_pid` has at least one non-Dead task
@@ -159,22 +162,34 @@ bool SchedProcessAlive(u64 target_pid);
 /// to enforce RLIMIT_NPROC when the soft cap has been lowered
 /// below the kernel's hard ceiling. Walks the same lists as
 /// SchedFindProcessByPid (running + run-normal + run-idle +
-/// sleep), excluding zombies — a zombie no longer counts
-/// against the live-process limit.
+/// sleep) under g_sched_lock, excluding zombies — a zombie no
+/// longer counts against the live-process limit.
 u64 SchedCountChildrenOfPid(u64 parent_pid);
 
 /// Find the first live Task with `id == target_tid`. Walks the
 /// same lists as SchedFindProcessByPid (running + run-normal +
-/// run-idle + sleep) under arch::Cli. Skips zombies — a
+/// run-idle + sleep) under g_sched_lock. Skips zombies — a
 /// dead task has no live Process to retain, so the cross-
 /// process thread-handle opener would have nothing to refcount.
-/// Returns nullptr if no live task matches.
+/// Misses tasks Blocked on a wait queue (they sit on none of
+/// the walked lists). Returns nullptr if no live task matches.
 ///
-/// Caller is responsible for capturing the task's owning
-/// Process* and calling `core::ProcessRetain` on it before the
-/// CLI window closes — otherwise a concurrent reaper could
-/// free the Task struct under the caller's hand.
+/// The returned Task* is reap-stable only while the caller can
+/// rule out the task exiting. Storing the pointer (or its
+/// owning Process) beyond that needs SchedOpenThreadByTid.
 Task* SchedFindTaskByTid(u64 target_tid);
+
+/// Reap-safe find-and-retain for the cross-process thread-handle
+/// opener (SYS_THREAD_OPEN / NtOpenThread). Walks the global
+/// all-tasks registry under g_sched_lock — so Blocked tasks are
+/// found too — and, when a live user task matches, retains its
+/// owning Process INSIDE the same critical section that proved
+/// the task alive (closing the find→retain reap race a split
+/// lookup has). Returns the retained Process* (caller owns one
+/// `core::ProcessRelease`) and stores the Task* through
+/// `task_out`; returns nullptr (and leaves `*task_out` null) for
+/// no-match, Dead tasks, and kernel-only tasks.
+core::Process* SchedOpenThreadByTid(u64 target_tid, Task** task_out);
 
 /// True iff the task's state is Dead. Used by syscalls that track
 /// thread-handle signaling (WaitForSingleObject on a CreateThread
