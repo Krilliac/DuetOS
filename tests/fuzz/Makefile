@@ -289,9 +289,10 @@ $(BIN)/fuzz_asn1: fuzz_asn1.cpp $(CRYPTO)/asn1.cpp | $(BIN)
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
 # x509.cpp pulls bigint/rsa (RsaPublicKeyFromBE on the parse path,
-# BigIntToBytesBE in the in-TU self-test) — link both.
+# BigIntToBytesBE in the in-TU self-test) — link both. rsa.cpp now also
+# pulls sha256 (RsaPssSha256Verify -> MGF1-SHA256), so link sha256.cpp.
 $(BIN)/fuzz_x509: fuzz_x509.cpp $(CRYPTO)/x509.cpp $(CRYPTO)/asn1.cpp \
-		$(CRYPTO)/bigint.cpp $(CRYPTO)/rsa.cpp | $(BIN)
+		$(CRYPTO)/bigint.cpp $(CRYPTO)/rsa.cpp $(CRYPTO)/sha256.cpp | $(BIN)
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
 # --- firmware-package envelope -----------------------------------
