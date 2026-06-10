@@ -11102,3 +11102,94 @@ below so a future audit doesn't re-chase them.
   accounting on every boot (BSP); the cross-CPU IPI delivery is confirmed
   on a live VirtualBox boot (the only environment that reaches the
   fallback path).
+
+---
+
+## 2026-06-10 — virtio-blk: fixed slot partition for multi-in-flight, MSI-X completion
+
+- **Scope:** `kernel/drivers/virtio/virtio_blk.cpp`,
+  `kernel/drivers/virtio/virtio_queue.cpp`, `kernel/drivers/virtio/virtio_pci.{h,cpp}`,
+  `tools/qemu/run.sh`
+- **Context:** virtio-blk was single-in-flight (one reused descriptor
+  chain, busy-poll completion, sleeping-mutex serialisation). This slice
+  lands the Roadmap item "virtio-blk concurrency + IRQ".
+- **Decision (slot partition):** the 32-entry requestq is statically
+  pre-partitioned into 10 fixed slots of 3 contiguous descriptors
+  (every virtio-blk request shape fits 3 descs; used-ring id / 3 maps a
+  completion back to its slot). The shared 4 KiB scratch page is carved
+  identically (64 B per slot: hdr +0, status +16, discard range +32).
+  **Rules out** a dynamic descriptor allocator (free-list of single
+  descriptors, scatter-gather chains of variable length) — a future
+  slice that wants >3-descriptor SG chains must consciously replace the
+  id/3 mapping, not extend it.
+- **Decision (MSI-X routing is transport-generic):** per-queue vector
+  routing lives in the shared transport (`VirtioQueueMsixVectorSet`,
+  common-cfg 0x1A, called after `VirtioQueueSetup` and before
+  `VirtioMarkDriverOk`), and `VirtioPciProbe` now enables PCI
+  memory-decode + bus-master for every virtio device (QEMU does not
+  deliver MSI-X with BME clear). Remaining classes (net/console/…)
+  only need their own `PciMsixBindSimple` + handler.
+- **Decision (timeout = quarantine, not reuse):** a request that
+  exhausts its completion budget marks its slot `abandoned` instead of
+  freeing it; `ClaimSlot` reclaims the slot only after the device's
+  late completion lands (`done` flips). **Rules out** immediate slot
+  reuse on timeout, which would let a stalled device DMA its late
+  status byte into a successor request's scratch region.
+- **Poll fallback kept fully serialised:** with no IRQ there is no
+  wakeup to parallelise around, so poll mode keeps the stage-1
+  one-at-a-time `req_lock` mutex path — multi-in-flight is an IRQ-mode
+  property only.
+- **Config-change vector parked at NO_VECTOR** (GAP in the driver
+  header): no virtio driver consumes config-change interrupts yet; a
+  runtime capacity resize goes unnoticed until a hot-resize workload
+  demands it.
+- **Verification:** `VirtioBlkSelfTest` (wired after `GptSelfTest`)
+  spawns 3 worker lanes doing interleaved patterned write/read rounds
+  against the new QEMU `vblk0` scratch disk (raw 16 MiB, no GPT —
+  write-mode is gated on the absence of a partition signature) and
+  asserts contents round-trip AND `irq_completions > 0` (completions
+  flowed through the ISR, not a poll loop). Sentinel:
+  `[virtio-blk-selftest] PASS (irq-completion, N requests)`.
+
+## 2026-06-10 — KMalloc ≤512 B routes through irq-safe slab caches; route-header discrimination
+
+- **Context:** small `KMalloc` allocations paid the kheap's first-fit
+  freelist walk + 48-byte fixed overhead; slab usage was opt-in via
+  direct `SlabAlloc`. Lands the routing half of the Roadmap "KMalloc
+  slab routing + real KASAN" item (KASAN half stays open).
+- **Decision (free-path discrimination = route header + kheap `next`
+  invariant):** a routed allocation carries a 16 B header
+  `{magic|class, caller_rip}` ahead of the payload; `KFree` reads
+  `*(u64*)(ptr-16)` — for a kheap pointer that word is exactly
+  `ChunkHeader::next`, which KMalloc unconditionally nulls on every
+  live chunk, so the discriminator is deterministic (0 = kheap,
+  asymmetric magic = routed). A `static_assert(offsetof(ChunkHeader,
+  next) == 16)` pins the now-load-bearing layout. **Rules out** (a)
+  probing the kheap live-magic at `ptr-32` (uncontrolled neighbour
+  bytes can false-positive and corrupt the freelist) and (b) moving
+  slab backing onto naturally-aligned frame blocks Linux-style
+  (`obj & ~(kSlabBytes-1)` page-header lookup) — right long-term but
+  needs an aligned contiguous-frame allocator that doesn't exist yet;
+  a future slice picking (b) must first land that allocator.
+- **Decision (irq-safe slab mode):** route caches use a new
+  `SlabCacheCreateIrqSafe` variant whose slow path takes an irqsave
+  `sync::SpinLock` instead of the sleeping `sched::Mutex` — KMalloc
+  is IRQ-safe (T5-04) and routing must not silently downgrade it.
+  Existing opt-in caches keep the mutex. Lock order: route-cache
+  spinlock → kheap spinlock (acyclic — the route hook runs before
+  `g_kheap_lock` and kheap never calls into slab).
+- **Freed-tag placement:** the double-free tag lives at obj[0..8) —
+  the only word `SlabFree`'s 0xCC poison ([8, obj_size)) spares — and
+  survives exactly the magazine window; after magazine→freelist
+  migration the freelist link overwrites it and a double-free falls
+  through to the kheap path's live-magic panic instead. Both windows
+  panic; only the message differs.
+- **Stats:** `mm:kmalloc_routed_live_bytes` / `_cached_bytes` kstats
+  added; `mm:heap_used_bytes` semantics unchanged (routed slabs are
+  live kheap chunks). `heap leaks` attribution covers >512 B only —
+  the routed-objects walker is a deliberate non-build until a small-
+  alloc leak hunt needs it.
+- **Verification:** hosted `test_kmalloc_route` (boundaries, encode/
+  decode, classification) + boot `[kmalloc-route-selftest] PASS
+  (8 classes, route+fallback)` (per-class route+reuse+poison, 513-B
+  boundary fall-through, counter deltas, canary tamper).

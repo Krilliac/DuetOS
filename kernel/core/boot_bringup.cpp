@@ -1905,6 +1905,33 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
                                               });
     }
 
+    // KMalloc small-allocation slab routing: build the eight irq-safe
+    // route caches and flip routing on. Functionality, not a test —
+    // registered OUTSIDE the kBootSelfTests gate so release boots get
+    // O(1) small allocations too. Same Phase::Sched bucket as the slab
+    // self-test (which runs first by registration order, exercising
+    // the slab machinery unrouted before routing goes live); the
+    // route caches themselves use irq-safe spinlock mode and have no
+    // scheduler dependency.
+    duetos::core::InitcallRegisterOrPanic(duetos::core::Phase::Sched, "kmalloc-slab-routing-init",
+                                          []()
+                                          {
+                                              duetos::mm::KMallocSlabRoutingInit();
+                                              return duetos::core::Result<void>{};
+                                          });
+    if constexpr (duetos::core::kBootSelfTests)
+    {
+        // Immediately after init so the first routed allocations of
+        // the boot are the self-test's own — its LIFO-reuse and
+        // counter-delta assertions see a quiet routing layer.
+        duetos::core::InitcallRegisterOrPanic(duetos::core::Phase::Sched, "kmalloc-route-selftest",
+                                              []()
+                                              {
+                                                  duetos::mm::KMallocRouteSelfTest();
+                                                  return duetos::core::Result<void>{};
+                                              });
+    }
+
     // Adaptive mutex (illumos-style spin-if-owner-running, park
     // otherwise). Exercises the fast path, the TryLock surface, the
     // lockdep round-trip, and the two-task contention park/wake path.
@@ -2379,6 +2406,14 @@ void BootBringupDevices(bool force_net_smoke)
 
     SerialWrite("[boot] Probing GPT on block devices.\n");
     DUETOS_BOOT_SELFTEST(duetos::fs::gpt::GptSelfTest());
+
+    // virtio-blk IRQ-completion + multi-in-flight self-test. Runs
+    // AFTER GptProbe so a partitioned virtio disk is recognisably
+    // foreign (the test goes read-only on one); needs the
+    // scheduler (spawns worker lanes) + the virtio-blk probe,
+    // both long since up. Quiet no-op without a virtio-blk device
+    // or in polling mode.
+    DUETOS_BOOT_SELFTEST(duetos::drivers::virtio::VirtioBlkSelfTest());
 
     // Crash-dump disk-persist self-test runs HERE — after NvmeInit,
     // AhciInit, AND GptSelfTest. It needs all three: the NVMe/AHCI

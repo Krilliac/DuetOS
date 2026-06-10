@@ -65,6 +65,20 @@ bool VirtioInputProbe(const VirtioPciLayout& L);
 /// mismatch and logs `[virtio-input] selftest pass`.
 void VirtioInputSelfTest();
 
+/// Boot-time self-test for the virtio-blk IRQ-driven completion +
+/// multi-in-flight request path. Quiet no-op when no virtio-blk
+/// device attached or it fell back to polling mode. Spawns
+/// concurrent worker tasks doing interleaved patterned
+/// read/write rounds against vblk0 (write-mode only on a disk
+/// with no partition signature), verifies contents + that the
+/// completions flowed through the MSI-X ISR. Emits
+/// `[virtio-blk-selftest] PASS (irq-completion, N requests)`;
+/// on failure fires KBP_PROBE_V(kBootSelftestFail, <sub-check>)
+/// and emits a FAIL line. Needs the scheduler online (spawns
+/// tasks) and runs after GptSelfTest so a partitioned disk is
+/// recognisably foreign.
+void VirtioBlkSelfTest();
+
 /// Forward a byte buffer over the attached virtio-console TX
 /// queue. No-op if the device wasn't found (returns false). The
 /// host renders the bytes on its `-chardev` sink — typically a

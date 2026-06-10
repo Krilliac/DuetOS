@@ -465,14 +465,15 @@ long-term fix; the guard page still self-diagnoses any future overflow.
   [CPU Topology](../kernel/CPU-Topology.md) /
   [Scheduler](../kernel/Scheduler.md).)
 
-### KMalloc slab routing + real KASAN
+### Real KASAN
 
-- **Residual:** (1) route small `KMalloc` calls through pre-built
-  size-classed slab caches automatically (today opt-in via direct
-  `SlabAlloc`); (2) **real KASAN** — shadow-memory mapping,
-  compiler-plugin integration, per-access shadow lookup. Big
-  lift; deferred until a use-after-free hunt needs it. (Slab
-  allocator + freed-object poison landed.)
+- **Residual:** shadow-memory mapping, compiler-plugin
+  integration, per-access shadow lookup. Big lift; deferred until
+  a use-after-free hunt needs it. (Slab allocator + freed-object
+  poison landed; automatic KMalloc→slab routing for ≤512 B
+  allocations landed 2026-06-10 — 8 `kmalloc-N` irq-safe caches,
+  route-header discrimination, `[kmalloc-route-selftest]` boot
+  gate; see `kernel/mm/kmalloc_route.h` + Design-Decisions.)
 
 ### Re-check F-040 hung-task soft-panic under saturation
 
@@ -1675,20 +1676,9 @@ are ABI — do not reuse retired numbers.
 The kernel-side primitive is in tree for each; what's missing is
 the per-call wiring.
 
-### VirtIO — virtio-blk concurrency + IRQ
-
-- **Lands:** (1) IRQ wire-up so consumers don't busy-poll for
-  already-serviced I/O; (2) multiple in-flight descriptor chains
-  so a second caller isn't fully serialised behind the first
-  (depends on IRQ-driven completion first — the poll model
-  tracks one chain). (Read/write/flush/discard + per-device
-  serialising mutex landed; `VIRTIO_BLK_F_DISCARD` negotiated and
-  consumed by FS-layer batch trim, 2026-05-27.)
-
 ### VirtIO — per-class polish
 
-- **Lands:** virtio-blk concurrency + IRQ (above);
-  virtio-console multiport (`VIRTIO_CONSOLE_F_MULTIPORT` +
+- **Lands:** virtio-console multiport (`VIRTIO_CONSOLE_F_MULTIPORT` +
   control-queue protocol); virtio-balloon inflate/deflate policy
   (the "when do we agree to give up memory?" half — spec
   dispatch is straightforward); virtio-input statusq for LED /
@@ -1696,8 +1686,11 @@ the per-call wiring.
   landed — virtio-tablet absolute coordinates are converted to
   `MousePacket` deltas at the driver boundary so the unified
   one-source-of-truth pointer API stays intact);
-  IRQ wire-up across rng/blk/net/console/balloon/input. (Every
-  per-class probe v0 + RX/TX poll tasks landed.)
+  IRQ wire-up across rng/net/console/balloon/input — virtio-blk
+  landed MSI-X IRQ completion + 10 in-flight request slots
+  (2026-06-10); the transport helper (`VirtioQueueMsixVectorSet`)
+  and the BME enable are shared, so per-class wire-up is now the
+  thin part. (Every per-class probe v0 + RX/TX poll tasks landed.)
 
 ### IOCP — primitive consolidation
 

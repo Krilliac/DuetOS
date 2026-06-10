@@ -27,6 +27,12 @@ constexpr u64 kCcDriverFeature = 0x0C;
 constexpr u64 kCcNumQueues = 0x12;
 constexpr u64 kCcDeviceStatus = 0x14;
 
+// PCI command-register bits (offset 0x04). Same values as the
+// NVMe driver's EnablePciBusMaster — memory-space decode + bus
+// mastering.
+constexpr u16 kPciCmdMmio = 1U << 1;
+constexpr u16 kPciCmdBusMaster = 1U << 2;
+
 volatile u8* MapCapRegion(pci::DeviceAddress addr, u8 bir, u32 offset, u32 length, u64* out_phys)
 {
     const pci::Bar bar = pci::PciReadBar(addr, bir);
@@ -176,6 +182,22 @@ VirtioPciLayout VirtioPciProbe(pci::DeviceAddress addr)
     {
         KLOG_WARN("drivers/virtio", "common_cfg capability not found; device skipped");
         return L;
+    }
+
+    // Enable memory-space decode + bus mastering before driving
+    // the device. MSI-X messages are inbound memory writes FROM
+    // the device — QEMU (and real silicon) will not deliver them
+    // while Bus Master Enable is clear, and BAR MMIO needs the
+    // decode bit. Same shape as nvme.cpp's EnablePciBusMaster:
+    // read the 32-bit command/status word, OR the command bits,
+    // write the word back.
+    {
+        const u32 cmd_status = pci::PciConfigRead32(addr, 0x04);
+        const u16 status16 = static_cast<u16>(cmd_status >> 16);
+        u16 cmd = static_cast<u16>(cmd_status & 0xFFFF);
+        cmd |= (kPciCmdMmio | kPciCmdBusMaster);
+        const u32 updated = static_cast<u32>(cmd) | (static_cast<u32>(status16) << 16);
+        pci::PciConfigWrite32(addr, 0x04, updated);
     }
 
     // Reset → wait for status to clear → ACK + DRIVER.

@@ -190,6 +190,12 @@ struct VirtqUsedHdr
 
 inline constexpr u16 kVirtqDefaultSize = 32;
 
+// VIRTIO_MSI_NO_VECTOR (virtio 1.0 §4.1.4.3) — the common-config
+// queue_msix_vector / msix_config value meaning "no MSI-X vector
+// assigned". Written by the driver to unroute, read back from the
+// device as a refusal.
+inline constexpr u16 kVirtioMsiNoVector = 0xFFFF;
+
 struct VirtioQueue
 {
     bool up;
@@ -218,6 +224,16 @@ struct VirtioQueue
 /// true on success, false if alloc failed or the device rejected.
 bool VirtioQueueSetup(VirtioPciLayout* L, VirtioQueue* q, u16 queue_index, u16 want_size);
 
+/// Route queue `q`'s used-buffer notifications at MSI-X table
+/// entry `msix_entry` via the common-config queue_msix_vector
+/// register (virtio 1.0 §4.1.4.3). Caller must have routed the
+/// MSI-X table entry itself first (pci::PciMsixBindSimple) and
+/// must call this after `VirtioQueueSetup` and BEFORE
+/// `VirtioMarkDriverOk`. Returns false when the device answers
+/// the readback with `kVirtioMsiNoVector` (it refused the route);
+/// the caller then releases the IDT vector and polls instead.
+bool VirtioQueueMsixVectorSet(VirtioPciLayout* L, VirtioQueue* q, u16 msix_entry);
+
 /// Final DRIVER_OK transition (spec §3.1.1 step 8). Every probe
 /// calls this exactly once, after all its `VirtioQueueSetup`
 /// calls have succeeded and before it issues any I/O. Idempotent
@@ -235,11 +251,13 @@ void VirtioMarkDriverOk(VirtioPciLayout* L);
 /// `avail->idx`, and the notify write last.
 void VirtioQueuePublish(VirtioPciLayout* L, VirtioQueue* q, u16 desc_head);
 
-/// Poll the used ring for a new completion. Returns true if a
-/// fresh completion was consumed and writes the descriptor head
-/// id + bytes-written into the out parameters. Caller invokes
-/// this in a busy-poll loop with `pause` — IRQ-driven completion
-/// is a future enhancement.
+/// Pop one completion off the used ring. Returns true if a fresh
+/// completion was consumed and writes the descriptor head id +
+/// bytes-written into the out parameters. Two calling shapes:
+/// a busy-poll loop with `pause` (polling-mode drivers), or a
+/// drain loop inside an MSI-X handler (IRQ-completion drivers —
+/// virtio-blk). Not internally locked: concurrent poppers must
+/// serialise on a driver-owned lock.
 bool VirtioQueueTryPop(VirtioQueue* q, u32* out_desc_head, u32* out_used_len);
 
 } // namespace duetos::drivers::virtio

@@ -3,9 +3,10 @@
 > **Audience:** Driver authors, kernel hackers running under QEMU / KVM
 >
 > **Execution context:** Kernel — probe in early driver init; ring drain
-> in IRQ tail when wired, polling in v0
+> in the MSI-X IRQ tail (virtio-blk) or polling (other classes)
 >
-> **Maturity:** v0 — fabric + 7 device classes wired; all polling-based
+> **Maturity:** v0+ — fabric + 7 device classes wired; virtio-blk is
+> IRQ-driven with multi-in-flight requests, the rest poll
 
 ## Overview
 
@@ -80,24 +81,43 @@ device is skipped (with a `KLOG_WARN` for the operator).
 [`virtio_blk.cpp`](../../kernel/drivers/virtio/virtio_blk.cpp). PCI class
 2 (Block).
 
-- **Queues**: single `requestq`.
-- **Descriptor chains**: 3 descriptors per request — header (24 B,
+- **Queues**: single `requestq`, pre-partitioned into 10 fixed
+  request slots of 3 contiguous descriptors each (used-ring id / 3
+  maps a completion back to its slot). The shared 4 KiB scratch
+  page is carved the same way — 64 bytes per slot (header / status
+  byte / discard-range payload).
+- **Descriptor chains**: 3 descriptors per request — header (16 B,
   device-read), data (caller-supplied, device-read or -write), status
-  (1 B, device-write).
-- **Features negotiated**: `SEG_MAX`, `GEOMETRY`, `RO`.
-- **Read/write/flush**: all three wired through the `BlockOps`
-  vtable. Flush routes a real `VIRTIO_BLK_T_FLUSH` request (header +
-  status chain, no data descriptor).
-- **Concurrency**: read/write/flush serialise on a per-device
-  `sched::Mutex` (`req_lock`) around the shared header page +
-  reused descriptor chain. A sleeping mutex (not a spinlock)
-  because the holder busy-polls the device for completion;
-  contending callers sleep rather than starve a CPU. The
-  uncontended boot path pays only a single CAS.
+  (1 B, device-write). Flush drops the middle descriptor; discard's
+  middle descriptor is the 16-byte range payload in the slot region.
+- **Features negotiated**: `SEG_MAX`, `GEOMETRY`, `RO`, `BLK_SIZE`,
+  `DISCARD`.
+- **Read/write/flush/discard**: all wired through the `BlockOps`
+  vtable, all funnelled through one `VirtioBlkSubmitAndWait` helper.
+- **Completion**: IRQ-driven when the probe binds MSI-X table entry 0
+  (`pci::PciMsixBindSimple` + the transport's
+  `VirtioQueueMsixVectorSet`, both before `DRIVER_OK`); the handler
+  drains the used ring, marks slots done and wakes waiters parked on
+  a `WaitQueue`. If MSI-X is unavailable the driver falls back to the
+  fully-serialised polling path.
+- **Concurrency**: up to 10 requests genuinely in flight under IRQ
+  completion. An IRQ-safe spinlock (`vq_lock`) guards slot
+  claim/release, the avail-ring publish and used-ring pops;
+  descriptor/header fills run outside it (the claimed slot is
+  exclusively owned). The old per-device `sched::Mutex` (`req_lock`)
+  survives only as the poll-mode serialiser. A timed-out request
+  quarantines its slot until the late completion lands, so a stalled
+  device degrades capacity instead of corrupting a successor.
+- **Boot self-test**: `VirtioBlkSelfTest` (after `GptSelfTest`)
+  spawns 3 worker lanes doing interleaved patterned write/read
+  rounds against `vblk0`, verifies contents and that completions
+  flowed through the ISR. Write-mode only on a disk with no
+  partition signature; emits
+  `[virtio-blk-selftest] PASS (irq-completion, N requests)`.
 
-GAP: still one in-flight request at a time (one descriptor chain).
-Higher throughput (multiple chains + IRQ-driven completion) is a
-roadmap item; concurrency *safety* is done.
+GAP: config-change interrupts are not consumed (the MSI-X config
+vector stays parked at `NO_VECTOR`) — a runtime capacity resize
+goes unnoticed. Revisit if a hot-resize workload appears.
 
 ### virtio-net — Network Interface
 
@@ -244,9 +264,10 @@ device.
 - **TX path (net, console, blk write)**: each queue has a spinlock
   protecting the descriptor ring submit pointer. IRQ-safe (the lock is
   held with IRQs masked).
-- **IRQ tail**: when wired, the `isr` register is read in the IRQ
-  handler; in v0 we **poll** the used-ring tail from a worker thread
-  or from the caller's context.
+- **IRQ tail**: virtio-blk drains the used ring inside its MSI-X
+  handler under `vq_lock` (no `isr`-register read needed — that
+  register only services INTx). The other classes still **poll**
+  the used-ring tail from a worker thread or the caller's context.
 
 ## Capability Gates
 
@@ -257,10 +278,10 @@ gate (`kCapFsRead` on `read()` against a virtio-blk-backed file,
 
 ## Known Limits / GAPs
 
-- **All paths poll.** IRQ wiring deferred across all device classes.
-- **virtio-blk single in-flight.** Concurrent callers are
-  serialised (safe); multiple in-flight chains for throughput is a
-  near-term follow-up gated on IRQ-driven completion.
+- **Non-blk classes poll.** virtio-blk is IRQ-driven (MSI-X entry 0);
+  IRQ wiring for net/console/balloon/rng/input is still deferred —
+  the transport helper (`VirtioQueueMsixVectorSet`) now exists, so
+  each remaining class only needs its own bind + handler.
 - **virtio-net RX is polled.** Receiveq is posted and a dedicated
   `virtio-net-rx-poll` task drains it every 10 ms; IRQ-driven delivery
   is the next slice.

@@ -15,8 +15,10 @@ namespace
 // exposed in the header because they are an internal detail of
 // the transport; flipping to a different transport (MMIO) would
 // reuse the same struct shapes but different offsets.
+constexpr u64 kCcMsixConfig = 0x10; // device-global config-change MSI-X entry
 constexpr u64 kCcQueueSelect = 0x16;
 constexpr u64 kCcQueueSize = 0x18;
+constexpr u64 kCcQueueMsixVector = 0x1A; // per-queue MSI-X table entry (virtio 1.0 §4.1.4.3)
 constexpr u64 kCcQueueEnable = 0x1C;
 constexpr u64 kCcQueueNotifyOff = 0x1E;
 constexpr u64 kCcQueueDesc = 0x20;
@@ -118,6 +120,30 @@ bool VirtioQueueSetup(VirtioPciLayout* L, VirtioQueue* q, u16 queue_index, u16 w
     KLOG_INFO_2V("drivers/virtio/queue", "queue ready", "qid", static_cast<u64>(queue_index), "size",
                  static_cast<u64>(size));
     return true;
+}
+
+bool VirtioQueueMsixVectorSet(VirtioPciLayout* L, VirtioQueue* q, u16 msix_entry)
+{
+    if (L == nullptr || q == nullptr || !q->up || L->common_cfg == nullptr)
+        return false;
+
+    // Route this queue's used-buffer notifications at MSI-X table
+    // entry `msix_entry` (virtio 1.0 §4.1.4.3 / §4.1.5.1.2). The
+    // device acks by echoing the value on readback; it answers
+    // VIRTIO_MSI_NO_VECTOR (0xFFFF) when it could not map the
+    // vector — the caller falls back to polling in that case.
+    // Must run after VirtioQueueSetup and BEFORE VirtioMarkDriverOk
+    // so the device latches the route before any I/O is possible.
+    //
+    // The config-change vector is explicitly parked at NO_VECTOR:
+    // no DuetOS virtio driver consumes config-change interrupts
+    // yet, and parking it (the reset default, restated) keeps that
+    // contract visible here rather than implicit.
+    Write16(L->common_cfg, kCcMsixConfig, kVirtioMsiNoVector);
+    Write16(L->common_cfg, kCcQueueSelect, q->queue_index);
+    Write16(L->common_cfg, kCcQueueMsixVector, msix_entry);
+    const u16 readback = Read16(L->common_cfg, kCcQueueMsixVector);
+    return readback != kVirtioMsiNoVector;
 }
 
 void VirtioMarkDriverOk(VirtioPciLayout* L)

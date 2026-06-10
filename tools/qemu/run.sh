@@ -247,6 +247,18 @@ SATA_IMAGE="${BUILD_DIR}/sata0.img"
 python3 "${SCRIPT_DIR}/make-gpt-image.py" "${NVME_IMAGE}"
 python3 "${SCRIPT_DIR}/make-gpt-image.py" "${SATA_IMAGE}"
 
+# Raw scratch disk for virtio-blk (IRQ-driven completion +
+# multi-in-flight self-test). Deliberately NOT GPT-formatted: the
+# self-test only writes patterned sectors to a disk carrying no
+# partition signature, so a zero-filled raw file is the fixture.
+# Created once (no per-run regeneration needed — the self-test
+# re-seeds its own patterns every boot and never depends on prior
+# contents).
+VBLK_IMAGE="${BUILD_DIR}/vblk0.img"
+if [[ ! -f "${VBLK_IMAGE}" ]]; then
+    truncate -s 16M "${VBLK_IMAGE}"
+fi
+
 # Use KVM when /dev/kvm is reachable (CI runners on bare metal,
 # Linux dev hosts with the right capability bits), fall through to
 # TCG otherwise. The `kvm:tcg` syntax tells QEMU "try kvm first,
@@ -495,6 +507,13 @@ QEMU_ARGS=(
     # transitional device IDs (0x1000-0x103f).
     -device   "virtio-rng-pci,disable-legacy=on"
     -device   "virtio-balloon-pci,disable-legacy=on"
+    # virtio-blk on the raw scratch image above. Exercises the
+    # driver's MSI-X IRQ-completion + multi-in-flight request path
+    # (the boot self-test spawns concurrent readers/writers against
+    # vblk0). disable-legacy=on is mandatory — VirtioInit skips
+    # transitional device IDs (0x1000-0x103f).
+    -drive    "file=${VBLK_IMAGE},if=none,id=vblk0,format=raw"
+    -device   "virtio-blk-pci,drive=vblk0,disable-legacy=on"
     # Intel HDA controller + output codec so the audio backend's
     # BDL/stream/DMA byte path is exercised every smoke. audiodev
     # `none` = no host audio sink (silent, headless-safe) while the

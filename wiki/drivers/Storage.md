@@ -6,8 +6,8 @@
 >
 > **Maturity:** v0 NVMe (MSI-X completion + Flush + DSM Deallocate);
 > AHCI v1 (read + write + FLUSH CACHE EXT + DSM TRIM); virtio-blk
-> (read + write + Flush + DISCARD). Power-loss durability path live
-> on every backend.
+> (read + write + Flush + DISCARD; MSI-X completion + 10 in-flight
+> request slots). Power-loss durability path live on every backend.
 
 ## Overview
 
@@ -89,9 +89,13 @@ correctness.
   hint to the host filesystem's `FALLOC_FL_PUNCH_HOLE` on
   qcow2/raw backends — TRIM effectively passes through to the
   host SSD.
-- One in-flight request per device (per-device sleeping mutex);
-  IRQ-driven completion + multi-chain parallelism still a
-  roadmap item.
+- **MSI-X IRQ-driven completion + 10 in-flight request slots**
+  (fixed 3-descriptor slots carved from the 32-entry queue;
+  IRQ-safe spinlock around slot claim / avail publish / used pop).
+  Falls back to the fully-serialised polling path (per-device
+  sleeping mutex) when MSI-X is unavailable. Boot self-test
+  drives 3 concurrent patterned read/write lanes against `vblk0`
+  and asserts the completions flowed through the ISR.
 
 ## GPT v0
 
