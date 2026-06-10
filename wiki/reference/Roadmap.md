@@ -22,26 +22,37 @@ cleanup debt: move the residual up and delete the rest.
 
 ### B2-followup — split `g_sched_lock` per-CPU
 
-- **Residual:** per-CPU runqueue head/tail live in `cpu::PerCpu`,
-  but every mutation still serialises on one global
-  `g_sched_lock`. Split it per-CPU so steady-state contention
-  drops to local-only `Schedule()` calls; wake paths take the
-  target CPU's lock briefly; work-stealing uses the existing
-  try-lock primitive (`SpinLockTryAcquire` /
-  `SpinLockTryAcquireFor` / `SpinLockTryGuard`,
-  `kernel/sync/spinlock.h`) to avoid AB/BA deadlock.
-- **Blocks on:** nothing technical — deferred until a profile
-  shows contention on `g_sched_lock`. For most workloads the
-  global lock is acceptable.
-- **Cascading items unlocked when this lands:**
+- **Bridge phase LANDED (2026-06-10, step 2 of 4).** The per-CPU
+  runqueue locks now exist — `g_runq_locks[acpi::kMaxCpus]`
+  (class `kLockClassSchedRunq`, kept OUTSIDE `cpu::PerCpu` to dodge
+  the syscall-stub layout static_asserts + false sharing on the
+  lock-free length/online fields). The four mutation funnels
+  (`RunqueuePushOn` / `RunqueuePop` / `StealNormalFromPeer` /
+  `BalancePullOnce`) take the owning CPU's lock for the duration of
+  the list+counter mutation **under the still-global lock**, so the
+  `g_sched_lock → runq` ordering and lockdep edge are validated on
+  every boot. Step 1 (close the unlocked-walker gap) also landed.
+- **Residual (steps 3-4 — the actual contention win):** (3) make
+  the context-switch lock-pass slot 2-deep + dynamically seed a
+  fresh task's lockdep held-set, then (4) drop `g_sched_lock` from
+  the pure-`Schedule()` path (local `runq_lock` only), keep
+  global+local on the blocking primitives (the no-gap double-run
+  invariant requires the lock the task marked itself Blocked under
+  to ride the switch), and convert steal/balance to `SpinLockTryGuard`.
+- **Blocks on:** a profile showing contention on `g_sched_lock`.
+  This is the deliberate stop: the bridge phase de-risked the split
+  (infrastructure + ordering proven), and steps 3-4 rewrite the
+  hard-won context-switch UAF-prevention handshake — not worth that
+  risk in the kernel's most dangerous code until a workload shows
+  the global lock actually hurts. The full step-3/4 design (31-site
+  lock inventory, 2-deep slot stack, try-lock steal) is captured in
+  the [[expansion-campaign-2026-06-10]] session scoping.
+- **Cascading items unlocked when steps 3-4 land:**
   - Index the lockdep / event-trace / soft-lockup `g_per_cpu`
     arrays by current-CPU ID (currently keyed on `g_per_cpu[0]`
     aliases).
   - SMP-stress versions of the RwLock + SeqLock + KMailbox
     contention self-tests.
-  - MLFQ priority bands (the T8-01-followon row) — band-aware
-    enqueue/steal becomes a one-slice add-on once the lock is
-    per-CPU.
   - Buddy coalescing + per-CPU lock-free allocator fast paths
     (frame warm-pool / slab magazine) — correctness is already
     in place under one global allocator lock; this is the
@@ -49,6 +60,9 @@ cleanup debt: move the residual up and delete the rest.
   - Move LAPIC-divider + tick-frequency programming out of
     `arch::TimerInit` into `time::TimerConfigure(hz)` once an
     ARM64 / generic-timer backend justifies the abstraction.
+  - (MLFQ priority bands no longer block on the lock-drop — the
+    per-CPU runqueue *structure* is enough; tracked as
+    T8-01-followon.)
 
 ### Lockdep held-set must be per-task, not global
 
