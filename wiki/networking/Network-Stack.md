@@ -239,9 +239,21 @@ throughput display.
   side — `kSockOpPollEvents` (op 14 on `SYS_SOCKET_OP = 153`)
   reports the current FD_READ / FD_WRITE / FD_ACCEPT / FD_CLOSE
   bitmask per socket, and the userland Wait loop polls every
-  10 ms to signal event handles. **`WSAAsyncSelect` (window-
-  message delivery) and IOCP overlapped socket reads are still
-  out of scope.**
+  10 ms to signal event handles. **`WSAAsyncSelect` shipped** on
+  the same producer: a lazily-spawned per-process poller thread in
+  `ws2_32.dll` posts `wMsg` to the registered HWND via
+  `SYS_WIN_POST_MSG` (one FD_* event per message, Winsock
+  `WSAMAKESELECTREPLY` shape), with the real re-arm contract —
+  FD_READ re-arms on `recv`, FD_ACCEPT on `accept`, FD_WRITE on a
+  `WSAEWOULDBLOCK` send; FD_CONNECT is posted synchronously from
+  the `connect` hook with the real error in the high word.
+  `WSAAsyncSelect` / `FIONBIO` also put the socket in DLL-emulated
+  non-blocking mode: `recv` / `send` / `accept` consult the poll
+  bitmask first and fail fast with `WSAEWOULDBLOCK` (GAP: wire-TCP
+  sockets have no FD_READ producer in `SocketPollEvents`, so a
+  non-blocking *wire* recv over-reports would-block; loopback +
+  UDP are exact). **IOCP overlapped socket reads are still out of
+  scope.**
 - **TCP NewReno fast retransmit + Reno congestion control;
   receiver-side SACK lands but no CUBIC / BBR** yet. CUBIC is
   ~400 LoC + 56 bytes/TCB and is the next congestion-control

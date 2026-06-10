@@ -1828,8 +1828,10 @@ exports per-process residency telemetry).
 
 ### ws2_32.dll  (~660 LOC, ~50 exports)
 
-> **Status:** synchronous BSD-socket subset is REAL. WSA event-
-> based / overlapped / completion-port async surface is STUB.
+> **Status:** synchronous BSD-socket subset is REAL; the
+> event/message async tier (`WSAEventSelect` family +
+> `WSAAsyncSelect`) is REAL on the `kSockOpPollEvents`
+> producer. Overlapped / completion-port I/O is STUB.
 
 **Real:**
 - `WSAStartup`, `WSACleanup`, `WSAGetLastError`,
@@ -1837,7 +1839,17 @@ exports per-process residency telemetry).
 - `socket`, `closesocket`, `bind`, `listen`, `connect`,
   `accept`, `send`, `recv`, `sendto`, `recvfrom`, `shutdown`
 - `setsockopt`, `getsockopt`, `select`, `__WSAFDIsSet`,
-  `ioctlsocket`, `getsockname`, `getpeername`
+  `ioctlsocket` (`FIONBIO` tracks a real per-socket
+  non-blocking bit, emulated DLL-side via the poll mask),
+  `getsockname`, `getpeername`
+- Async tier: `WSAEventSelect`, `WSAEnumNetworkEvents`,
+  `WSAWaitForMultipleEvents` (10 ms polling loop) +
+  `WSAAsyncSelect` (per-process poller thread posts one FD_*
+  event per window message via `SYS_WIN_POST_MSG`; Winsock
+  re-arm contract; implicit non-blocking; FD_CONNECT posted
+  from the `connect` hook with the real error)
+- `WSACreateEvent`, `WSACloseEvent`, `WSASetEvent`,
+  `WSAResetEvent`
 - Byte order: `htons`, `htonl`, `ntohs`, `ntohl`,
   `htonll`, `ntohll`
 - Address: `inet_addr`, `inet_ntoa`, `inet_pton`, `inet_ntop`,
@@ -1845,12 +1857,13 @@ exports per-process residency telemetry).
   `freeaddrinfo`, `getnameinfo`
 
 **STUB:**
-- `WSAEventSelect`, `WSACreateEvent`, `WSACloseEvent`,
-  `WSASetEvent`, `WSAResetEvent` — exist but never fire
 - `WSARecv`, `WSASend`, `WSARecvFrom`, `WSASendTo` — STUB
   (no overlapped I/O)
 - `WSAIoctl` — GAP (only SIO_GET_INTERFACE_LIST)
 - IPv6 socket API — GAP (sockets create but bind fails)
+- GAP: non-blocking recv on a *wire* TCP socket over-reports
+  `WSAEWOULDBLOCK` (`SocketPollEvents` has no wire FD_READ
+  producer; loopback + UDP are exact)
 
 **Thunked imports (auto-generated from `kernel/subsystems/win32/thunks_table.inc`):**
 
@@ -2809,8 +2822,8 @@ short list:
 
 1. **`SymGetLineFromAddr64`** in dbghelp — would let
    `process_smoke` print real source-line crash dumps.
-2. **`ws2_32!WSAEventSelect`** — back into our message-
-   queue + waitable-event primitives.
+2. **`ws2_32!WSARecv` overlapped path** — needs the IOCP
+   slice (see Roadmap "IOCP for sockets").
 3. **`d2d1!DrawText`** — wire DWrite's monospace metrics
    into the existing FillRect path so single-line text
    renders.

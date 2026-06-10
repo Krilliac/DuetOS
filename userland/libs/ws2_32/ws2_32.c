@@ -113,6 +113,46 @@ static long long ws2_op(long long op, long long a1, long long a2, long long a3, 
     return rv;
 }
 
+/* FD_* network-event bits — shared by the lEvent masks the app passes to
+ * WSAEventSelect / WSAAsyncSelect and by the kernel's kSockOpPollEvents
+ * readiness bitmask (same encoding on both sides by design). */
+#define WS2_FD_READ 0x01L
+#define WS2_FD_WRITE 0x02L
+#define WS2_FD_ACCEPT 0x08L
+#define WS2_FD_CONNECT 0x10L
+#define WS2_FD_CLOSE 0x20L
+
+/* Per-socket non-blocking mode, set by ioctlsocket(FIONBIO) and implicitly
+ * by WSAAsyncSelect (Win32 contract). The kernel socket layer is always-
+ * blocking, so non-blocking semantics are emulated DLL-side: recv / send /
+ * accept consult kSockOpPollEvents first and fail fast with WSAEWOULDBLOCK
+ * when the matching readiness bit is absent. Socket handles are kernel pool
+ * indices (pool cap 8), so one 64-bit mask covers every possible handle. */
+static unsigned long long g_ws2_nonblock_mask;
+
+static int ws2_is_nonblocking(SOCKET s)
+{
+    return (s < 64) && (((g_ws2_nonblock_mask >> s) & 1ULL) != 0);
+}
+
+static void ws2_set_nonblocking(SOCKET s, int on)
+{
+    if (s >= 64)
+        return;
+    if (on)
+        g_ws2_nonblock_mask |= (1ULL << s);
+    else
+        g_ws2_nonblock_mask &= ~(1ULL << s);
+}
+
+/* Defined further down (poll producer + WSAAsyncSelect registry); recv /
+ * send / accept / connect above them need these for the non-blocking gate,
+ * the re-arm hooks, and the FD_CONNECT completion post. */
+static long ws2_poll_events(SOCKET s);
+static void ws2_async_rearm(SOCKET s, long bits);
+static void ws2_async_notify_connect(SOCKET s, int wsa_err);
+static void ws2_drop_socket_state(SOCKET s);
+
 __declspec(dllexport) INT WSAStartup(USHORT req_ver, void* wsa_data)
 {
     /* Touch the optional WSADATA so callers passing a real
@@ -160,6 +200,11 @@ __declspec(dllexport) SOCKET socket(INT af, INT type, INT proto)
 }
 __declspec(dllexport) INT closesocket(SOCKET s)
 {
+    /* Drop DLL-side per-socket state FIRST — the kernel reuses pool
+     * indices, so a stale WSAAsyncSelect / WSAEventSelect registration or
+     * non-blocking bit would silently attach to the next socket that lands
+     * on this index. */
+    ws2_drop_socket_state(s);
     long long rv = ws2_op(9 /* kSockOpClose */, (long long)s, 0, 0, 0, 0);
     if (rv < 0)
     {
@@ -190,16 +235,36 @@ __declspec(dllexport) INT listen(SOCKET s, INT backlog)
 }
 __declspec(dllexport) INT connect(SOCKET s, const void* addr, INT cb)
 {
+    /* The kernel connect is synchronous, so FD_CONNECT completion is known
+     * right here — kSockOpPollEvents has no FD_CONNECT producer, so the
+     * async-select notification for it is posted from this hook instead
+     * (error code in the high word per WSAMAKESELECTREPLY). */
     long long rv = ws2_op(3 /* kSockOpConnect */, (long long)s, (long long)addr, (long long)cb, 0, 0);
     if (rv < 0)
     {
         g_wsa_last_error = wsa_translate_errno(rv);
+        ws2_async_notify_connect(s, g_wsa_last_error);
         return SOCKET_ERROR;
     }
+    ws2_async_notify_connect(s, 0);
     return 0;
 }
 __declspec(dllexport) SOCKET accept(SOCKET s, void* addr, INT* cb)
 {
+    /* Calling accept re-enables FD_ACCEPT for an async-selected listener
+     * (Winsock re-arm contract). Non-blocking gate: fail fast when no
+     * pending connection instead of blocking in the kernel.
+     * GAP: kSockOpPollEvents reports FD_ACCEPT for loopback listeners only
+     *   (wire-side TCB backlog probe missing kernel-side), so a non-blocking
+     *   accept on a wire listener reports WSAEWOULDBLOCK even with a backlog
+     *   child pending. — revisit when SocketPollEvents grows the backlog
+     *   probe its own v1 comment promises. */
+    ws2_async_rearm(s, WS2_FD_ACCEPT);
+    if (ws2_is_nonblocking(s) && (ws2_poll_events(s) & WS2_FD_ACCEPT) == 0)
+    {
+        g_wsa_last_error = WSAEWOULDBLOCK;
+        return INVALID_SOCKET;
+    }
     long long rv = ws2_op(5 /* kSockOpAccept */, (long long)s, (long long)addr, (long long)cb, 0, 0);
     if (rv < 0)
     {
@@ -208,9 +273,30 @@ __declspec(dllexport) SOCKET accept(SOCKET s, void* addr, INT* cb)
     }
     return (SOCKET)rv;
 }
+/* Shared non-blocking gate for send / sendto. A non-blocking socket whose
+ * poll mask is non-zero but lacks FD_WRITE (loopback pipe full) fails fast
+ * with WSAEWOULDBLOCK; per the Winsock contract that is ALSO the moment
+ * FD_WRITE re-arms for an async-selected socket (the buffer-space-available
+ * notification only re-fires after a send has failed with WSAEWOULDBLOCK).
+ * poll == 0 (unbound / unconnected) falls through so the kernel reports the
+ * real errno (WSAENOTCONN et al.) instead of a bogus would-block. */
+static int ws2_send_would_block(SOCKET s)
+{
+    if (!ws2_is_nonblocking(s))
+        return 0;
+    const long ev = ws2_poll_events(s);
+    if (ev == 0 || (ev & (WS2_FD_WRITE | WS2_FD_CLOSE)) != 0)
+        return 0;
+    ws2_async_rearm(s, WS2_FD_WRITE);
+    g_wsa_last_error = WSAEWOULDBLOCK;
+    return 1;
+}
+
 __declspec(dllexport) INT send(SOCKET s, const void* buf, INT len, INT flags)
 {
     (void)flags;
+    if (ws2_send_would_block(s))
+        return SOCKET_ERROR;
     long long rv = ws2_op(6 /* kSockOpSendto */, (long long)s, (long long)buf, (long long)len, 0, 0);
     if (rv < 0)
     {
@@ -219,9 +305,35 @@ __declspec(dllexport) INT send(SOCKET s, const void* buf, INT len, INT flags)
     }
     return (INT)rv;
 }
+/* Shared non-blocking gate for recv / recvfrom. Calling either re-enables
+ * FD_READ for an async-selected socket (Winsock re-arm contract: the next
+ * FD_READ posts only after the app has recv'd — so a drain loop sees one
+ * message per state transition, not a flood). The gate fails fast with
+ * WSAEWOULDBLOCK when neither data (FD_READ) nor EOF (FD_CLOSE, which a
+ * recv must observe as 0) is pending; poll == 0 (unconnected) falls through
+ * so the kernel reports the real errno.
+ * GAP: kSockOpPollEvents has no FD_READ producer for wire-TCP sockets (only
+ *   loopback pairs + UDP), so a non-blocking recv on a wire socket reports
+ *   WSAEWOULDBLOCK even when the TCB holds data. Blocking sockets are
+ *   unaffected. — revisit when SocketPollEvents grows a tcp:: recv-queue
+ *   probe. */
+static int ws2_recv_would_block(SOCKET s)
+{
+    ws2_async_rearm(s, WS2_FD_READ);
+    if (!ws2_is_nonblocking(s))
+        return 0;
+    const long ev = ws2_poll_events(s);
+    if (ev == 0 || (ev & (WS2_FD_READ | WS2_FD_CLOSE)) != 0)
+        return 0;
+    g_wsa_last_error = WSAEWOULDBLOCK;
+    return 1;
+}
+
 __declspec(dllexport) INT recv(SOCKET s, void* buf, INT len, INT flags)
 {
     (void)flags;
+    if (ws2_recv_would_block(s))
+        return SOCKET_ERROR;
     long long rv = ws2_op(7 /* kSockOpRecvfrom */, (long long)s, (long long)buf, (long long)len, 0, 0);
     if (rv < 0)
     {
@@ -233,6 +345,8 @@ __declspec(dllexport) INT recv(SOCKET s, void* buf, INT len, INT flags)
 __declspec(dllexport) INT sendto(SOCKET s, const void* buf, INT len, INT flags, const void* addr, INT cb)
 {
     (void)flags;
+    if (ws2_send_would_block(s))
+        return SOCKET_ERROR;
     long long rv =
         ws2_op(6 /* kSockOpSendto */, (long long)s, (long long)buf, (long long)len, (long long)addr, (long long)cb);
     if (rv < 0)
@@ -245,6 +359,8 @@ __declspec(dllexport) INT sendto(SOCKET s, const void* buf, INT len, INT flags, 
 __declspec(dllexport) INT recvfrom(SOCKET s, void* buf, INT len, INT flags, void* addr, INT* cb)
 {
     (void)flags;
+    if (ws2_recv_would_block(s))
+        return SOCKET_ERROR;
     long long rv =
         ws2_op(7 /* kSockOpRecvfrom */, (long long)s, (long long)buf, (long long)len, (long long)addr, (long long)cb);
     if (rv < 0)
@@ -846,15 +962,14 @@ __declspec(dllexport) INT WSAIoctl(SOCKET s, DWORD ioctl, void* in_buf, DWORD in
 /* ioctlsocket — the Win32 socket I/O-control surface. v0 honours
  * the two control codes every well-behaved client sends at
  * connect time:
- *   FIONBIO   — toggle non-blocking mode. Stored in a per-process
- *               flag that send / recv loops below treat as
- *               advisory; the kernel-side socket layer is
- *               currently always blocking, so non-blocking
- *               semantics are best-effort (recv may still block
- *               briefly while the kernel fills its buffer). The
- *               return value of 0 (= NO_ERROR) is what every
- *               caller checks; setting *argp on the way back is
- *               a Win32 quirk we don't need.
+ *   FIONBIO   — toggle non-blocking mode. Tracked in the per-socket
+ *               g_ws2_nonblock_mask; recv / send / accept emulate
+ *               the non-blocking contract DLL-side by consulting
+ *               kSockOpPollEvents and failing fast with
+ *               WSAEWOULDBLOCK (the kernel socket layer itself is
+ *               always-blocking). The return value of 0 (= NO_ERROR)
+ *               is what every caller checks; setting *argp on the
+ *               way back is a Win32 quirk we don't need.
  *   FIONREAD  — number of bytes ready to read on a socket. v0
  *               returns 0 cleanly because we don't queue ahead
  *               of recv() in the kernel.
@@ -868,14 +983,17 @@ __declspec(dllexport) INT WSAIoctl(SOCKET s, DWORD ioctl, void* in_buf, DWORD in
 
 __declspec(dllexport) INT ioctlsocket(SOCKET s, long cmd, DWORD* argp)
 {
-    (void)s;
     switch ((unsigned long)cmd)
     {
     case DUETOS_FIONBIO:
         /* argp points at a non-zero "set non-blocking" flag or a
-         * zero "clear non-blocking" flag. We accept either and
-         * return success — the kernel-side socket layer is
-         * always-blocking in v0, so the flag is advisory only. */
+         * zero "clear non-blocking" flag. */
+        if (argp == (DWORD*)0)
+        {
+            g_wsa_last_error = WSAEFAULT;
+            return SOCKET_ERROR;
+        }
+        ws2_set_nonblocking(s, *argp != 0);
         return 0;
     case DUETOS_FIONREAD:
     case DUETOS_SIOCATMARK:
@@ -1237,40 +1355,39 @@ __declspec(dllexport) INT WSARecv(SOCKET s, void* buffers, DWORD buffer_count, D
  *
  * Rules implemented:
  *   - Only ONE async registration per socket. A second call for the same
- *     socket replaces the first (and re-arms its edge state).
+ *     socket replaces the first (and re-arms its fired state).
  *   - lEvent == 0 cancels the registration for `s`.
  *   - Calling WSAAsyncSelect implicitly puts the socket in non-blocking
- *     mode in real Win32; our kernel socket layer is always-blocking in
- *     v0, so that side effect is a no-op (see ioctlsocket FIONBIO).
+ *     mode (g_ws2_nonblock_mask — same state FIONBIO toggles). Cancelling
+ *     does NOT restore blocking mode; the app must FIONBIO it back, exactly
+ *     as on real Win32.
  *
  * Mechanism: a single per-process helper thread (spawned lazily on the
  * first live registration) polls every registered socket via
- * `kSockOpPollEvents` (SYS_SOCKET_OP op=14) on a short cadence. For each
- * socket it compares the freshly-observed FD_* bitmask against the bits
- * it last delivered (edge detection) and, for every newly-set subscribed
- * event, posts `wMsg` to the registered HWND through the SAME kernel entry
- * user32's PostMessage uses (SYS_WIN_POST_MSG = 64). One post per distinct
- * event so the caller's WindowProc sees one FD_* per message, matching
- * Winsock's WSAMAKESELECTREPLY contract.
+ * `kSockOpPollEvents` (SYS_SOCKET_OP op=14) on a short cadence. Each
+ * subscribed FD_* bit fires ONCE when it first shows up in the poll mask
+ * (latched in `fired`) and posts `wMsg` to the registered HWND through the
+ * SAME kernel entry user32's PostMessage uses (SYS_WIN_POST_MSG = 64). One
+ * post per distinct event so the caller's WindowProc sees one FD_* per
+ * message, matching Winsock's WSAMAKESELECTREPLY contract.
  *
- * GAP: edge re-arm follows the kernel poll bitmask, not Winsock's exact
- *   level/edge re-enable rules (e.g. FD_READ should re-fire only after a
- *   recv that drains-then-refills). With a level-triggered poll source we
- *   suppress repeats by tracking the last-delivered mask and only posting
- *   on a 0->1 transition; a socket that stays readable without an
- *   intervening recv won't re-post until the kernel mask drops the bit.
- *   — revisit when the kernel grows a true edge-triggered readiness queue.
- * GAP: FD_CONNECT completion error is always reported as 0 (success) — the
- *   kernel poll has no per-event error channel yet, so the high 16 bits of
- *   lParam are 0. — revisit when SocketPollEvents surfaces a pending
- *   SO_ERROR.
+ * Re-arm (Winsock re-enable contract): a fired bit stays latched until the
+ * app calls the matching operation —
+ *   FD_READ   re-arms on recv / recvfrom (ws2_recv_would_block hook);
+ *   FD_ACCEPT re-arms on accept;
+ *   FD_WRITE  re-arms when send / sendto fails with WSAEWOULDBLOCK
+ *             (ws2_send_would_block hook — MSDN: FD_WRITE only re-fires
+ *             after a would-block send);
+ *   FD_CONNECT / FD_CLOSE are one-shot and never re-arm.
+ * If the condition still holds after the re-arm (data left in the buffer),
+ * the next poll cycle posts again — the drain-loop shape Winsock apps are
+ * written against.
+ *
+ * FD_CONNECT has no kSockOpPollEvents producer; connect() is synchronous in
+ * the kernel, so the completion message (with the real WSA error in the
+ * high word of lParam) is posted directly from the connect() hook via
+ * ws2_async_notify_connect.
  * ------------------------------------------------------------------------- */
-
-#define WS2_FD_READ 0x01L
-#define WS2_FD_WRITE 0x02L
-#define WS2_FD_ACCEPT 0x08L
-#define WS2_FD_CONNECT 0x10L
-#define WS2_FD_CLOSE 0x20L
 
 #define WSAMAKESELECTREPLY(event, error) ((long)(((unsigned)(event)) | (((unsigned)(error)) << 16)))
 
@@ -1282,12 +1399,44 @@ typedef struct WsaAsyncReg
     SOCKET socket;
     void* hwnd;
     unsigned wMsg;
-    long eventMask; /* subscribed FD_* bits */
-    long delivered; /* FD_* bits already posted since last clear (edge state) */
+    long eventMask; /* subscribed FD_* bits (armed set) */
+    long fired;     /* FD_* bits posted and not yet re-armed */
 } WsaAsyncReg;
 
 static WsaAsyncReg g_wsa_async[WS2_ASYNC_SLOTS];
 static int g_wsa_async_thread_started = 0;
+
+/* Re-enable `bits` for the socket's async registration so the poller may
+ * post them again on the next readiness observation. Called from the recv /
+ * send / accept hooks above; a socket without a registration is a no-op. */
+static void ws2_async_rearm(SOCKET s, long bits)
+{
+    for (int i = 0; i < WS2_ASYNC_SLOTS; ++i)
+    {
+        if (g_wsa_async[i].in_use && g_wsa_async[i].socket == s)
+        {
+            g_wsa_async[i].fired &= ~bits;
+            break;
+        }
+    }
+}
+
+/* closesocket teardown: forget every DLL-side trace of `s` so the next
+ * socket the kernel hands out on this pool index starts clean. */
+static void ws2_drop_socket_state(SOCKET s)
+{
+    ws2_set_nonblocking(s, 0);
+    for (int i = 0; i < WS2_ASYNC_SLOTS; ++i)
+    {
+        if (g_wsa_async[i].in_use && g_wsa_async[i].socket == s)
+            g_wsa_async[i].in_use = 0;
+    }
+    for (int i = 0; i < WSA_BINDING_SLOTS; ++i)
+    {
+        if (g_wsa_bindings[i].in_use && g_wsa_bindings[i].socket == s)
+            g_wsa_bindings[i].in_use = 0;
+    }
+}
 
 /* SYS_WIN_POST_MSG (64): the exact kernel entry user32's PostMessage
  * routes through. rdi = hwnd, rsi = message, rdx = wParam, r10 = lParam.
@@ -1304,15 +1453,36 @@ static void ws2_post_message(void* hwnd, unsigned msg, unsigned long long wparam
                      : "memory");
 }
 
+/* Post the FD_CONNECT completion message for `s` if its registration
+ * subscribed to it. Fired from the connect() hook (the kernel connect is
+ * synchronous; the poll mask has no FD_CONNECT producer). One-shot: the
+ * fired latch keeps a re-registration from double-posting. */
+static void ws2_async_notify_connect(SOCKET s, int wsa_err)
+{
+    for (int i = 0; i < WS2_ASYNC_SLOTS; ++i)
+    {
+        if (!g_wsa_async[i].in_use || g_wsa_async[i].socket != s)
+            continue;
+        if ((g_wsa_async[i].eventMask & WS2_FD_CONNECT) != 0 && (g_wsa_async[i].fired & WS2_FD_CONNECT) == 0)
+        {
+            g_wsa_async[i].fired |= WS2_FD_CONNECT;
+            ws2_post_message(g_wsa_async[i].hwnd, g_wsa_async[i].wMsg, (unsigned long long)s,
+                             WSAMAKESELECTREPLY(WS2_FD_CONNECT, (unsigned)wsa_err));
+        }
+        break;
+    }
+}
+
 /* Helper-thread body. Polls every live async registration, posts a message
- * for each newly-set subscribed FD_* event, sleeps, repeats. Never returns
- * — the kernel reclaims the thread on process exit. */
+ * for each subscribed FD_* event on its first observation, sleeps, repeats.
+ * Never returns — the kernel reclaims the thread on process exit. */
 static void ws2_async_select_thread(void* arg)
 {
     (void)arg;
     /* Single FD_* event per iteration, posted individually so each
-     * delivered message carries exactly one event in the reply. */
-    static const long kEventBits[5] = {WS2_FD_READ, WS2_FD_WRITE, WS2_FD_ACCEPT, WS2_FD_CONNECT, WS2_FD_CLOSE};
+     * delivered message carries exactly one event in the reply.
+     * FD_CONNECT is absent — it's posted by ws2_async_notify_connect. */
+    static const long kEventBits[4] = {WS2_FD_READ, WS2_FD_WRITE, WS2_FD_ACCEPT, WS2_FD_CLOSE};
     for (;;)
     {
         for (int i = 0; i < WS2_ASYNC_SLOTS; ++i)
@@ -1321,9 +1491,11 @@ static void ws2_async_select_thread(void* arg)
                 continue;
             const long subscribed = g_wsa_async[i].eventMask;
             const long ready = ws2_poll_events(g_wsa_async[i].socket) & subscribed;
-            /* Newly-set bits = ready bits we haven't delivered yet. */
-            const long fresh = ready & ~g_wsa_async[i].delivered;
-            for (int b = 0; b < 5; ++b)
+            /* Fresh bits = ready bits not currently latched. Latch them so
+             * each fires once; the recv / send / accept hooks clear the
+             * latch when the app performs the matching re-arm operation. */
+            const long fresh = ready & ~g_wsa_async[i].fired;
+            for (int b = 0; b < 4; ++b)
             {
                 if (fresh & kEventBits[b])
                 {
@@ -1331,9 +1503,7 @@ static void ws2_async_select_thread(void* arg)
                                      (unsigned long long)g_wsa_async[i].socket, WSAMAKESELECTREPLY(kEventBits[b], 0));
                 }
             }
-            /* Re-arm: a bit that dropped out of `ready` becomes eligible to
-             * re-fire on its next 0->1 transition. */
-            g_wsa_async[i].delivered = ready;
+            g_wsa_async[i].fired |= fresh;
         }
         ws2_sleep_ms(10);
     }
@@ -1356,7 +1526,8 @@ __declspec(dllexport) INT WSAAsyncSelect(SOCKET s, void* hWnd, unsigned wMsg, lo
             g_wsa_async[i].hwnd = hWnd;
             g_wsa_async[i].wMsg = wMsg;
             g_wsa_async[i].eventMask = lEvent;
-            g_wsa_async[i].delivered = 0; /* re-arm edge state */
+            g_wsa_async[i].fired = 0; /* re-arm everything */
+            ws2_set_nonblocking(s, 1);
             return 0;
         }
         if (!g_wsa_async[i].in_use && free_idx < 0)
@@ -1376,8 +1547,12 @@ __declspec(dllexport) INT WSAAsyncSelect(SOCKET s, void* hWnd, unsigned wMsg, lo
     g_wsa_async[free_idx].hwnd = hWnd;
     g_wsa_async[free_idx].wMsg = wMsg;
     g_wsa_async[free_idx].eventMask = lEvent;
-    g_wsa_async[free_idx].delivered = 0;
+    g_wsa_async[free_idx].fired = 0;
     g_wsa_async[free_idx].in_use = 1;
+
+    /* Win32 contract: a successful WSAAsyncSelect puts the socket in
+     * non-blocking mode as a side effect. */
+    ws2_set_nonblocking(s, 1);
 
     /* Spawn the poller lazily on the first live registration — same
      * SYS_THREAD_CREATE (45) path the CRT's _beginthread uses (rdi = start
