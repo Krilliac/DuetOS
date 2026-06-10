@@ -431,11 +431,29 @@ void LineSink(LogLevel /*level*/, LogArea area, const char* line, u32 line_len)
     // The line still hits the klog ring (the producer side runs
     // first and is lock-free), so dropping the persist write
     // loses only the on-disk copy of that one line.
+    //   4. The IDLE task. FlushArea → Fat32AppendAtPath → block
+    //      I/O → WaitQueueBlock parks the idle task on a wait
+    //      queue — but idle must NEVER block: with nothing else
+    //      runnable the handoff panics "no runnable task
+    //      available", and with something runnable the blocked
+    //      idle is later force-dispatched by the scheduler's
+    //      idle fallback while still LINKED on the waitqueue,
+    //      whose eventual wake re-enqueues the now-Running idle
+    //      → "popped task not Ready" → double-dispatch → wild
+    //      resume. Observed live 2026-06-10 under nested-KVM
+    //      SMP=4 (Tee → LineSink → FlushArea → fat32 → NVMe
+    //      SubmitAndWait → WaitQueueBlock backtrace in the
+    //      crash dump). Same consumer-side recovery as 1-3:
+    //      drop the persist write; the ring keeps the line.
     {
         cpu::PerCpu* self = cpu::CurrentCpu();
         if (self != nullptr)
         {
             if (self->held_locks_count != 0 || !self->scheduler_ready)
+            {
+                return;
+            }
+            if (self->idle_task != nullptr && self->current_task == self->idle_task)
             {
                 return;
             }

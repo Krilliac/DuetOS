@@ -11270,3 +11270,72 @@ below so a future audit doesn't re-chase them.
   than TCG; tracked by the g_sched_lock split campaign). TCG
   regression boot clean. Local KVM SMP dev boots are now unblocked
   (~6x faster than the TCG workaround).
+
+## 2026-06-10 — klog persistence never runs on the idle task; idle fallback rejects Blocked idle
+
+- **Context:** intermittent SMP failure cluster, sharply more visible
+  once nested-KVM SMP boots became possible (true parallelism):
+  (a) `[panic] sched: no runnable task available` with
+  `cur == idle, idle_state=Blocked`; (b) `[sched] WARN: popped task
+  not Ready; state=Running id=idle-apN`; (c) one wild-resume panic
+  (`context-switch ret target out of kernel text range`,
+  `resuming_task_id=idle-ap1`). One investigation retired all three.
+- **Root (crash-dump backtrace):** a KLOG line emitted while
+  `Current()==idle` flowed Tee → klog_persist `LineSink` →
+  `FlushArea` → `Fat32AppendAtPath` → NVMe `SubmitAndWait` →
+  `WaitQueueBlock` — the idle task did synchronous disk I/O and
+  BLOCKED. With nothing else runnable that is (a) directly. With
+  other work runnable, the scheduler's idle fallback force-wrote the
+  Blocked idle to Ready and dispatched it while it was still LINKED
+  on the NVMe waitqueue; the IO completion then woke + re-enqueued
+  the already-Running idle → (b) → double-dispatch → (c).
+- **Decision (root fix):** `LineSink` gains a fourth consumer-side
+  drop predicate — never persist from the CPU's idle task (joins the
+  existing held-spinlock / pre-bringup-AP / re-entry drops; the
+  in-memory klog ring keeps the line). The idle loop's only blocking
+  hazard was this path. **Rules out** "make idle's FS write safe"
+  (idle must never block, period) and defers the dedicated
+  persist-flusher task (which would also fix the latency landmine of
+  ANY task paying a synchronous multi-ms FS write inside a log call)
+  until a workload shows the per-task cost matters.
+- **Decision (belt-and-braces):** the idle-dispatch fallback in
+  `ScheduleLockedHandoff` now rejects a Blocked/Sleeping idle
+  alongside nullptr/current/Dead and panics attributably — a blocked
+  idle is linked on a queue, and force-Ready-dispatching it corrupts
+  that queue's view. Any future code path that makes idle block
+  panics AT THE INVARIANT instead of corrupting runqueues.
+
+## 2026-06-10 — D3D11→Vulkan thunk: shadow-pixel present, scanout-flag gate, FreeCommandBuffer op
+
+- **Context:** D3D11 Clear/Draw ran entirely in the userland software
+  rasterizer (`dx_raster.h`); the kernel Vulkan ICD could only paint
+  scanout-backed images at (0,0). v0 thunk landed: vk-eligible swap
+  chains record Clear/Draw as real VkOps via `SYS_VK_CALL`, replayed
+  by the kernel rasterizer into the image's host-visible backing.
+- **Decision (shadow pixels, not zero-copy):** `SYS_GDI_BITBLT` →
+  `CopyFromUser` → `IsUserAddressRange` REJECTS kernel-half VAs, so
+  pointing `DxBackBuffer::pixels` at the vkMapMemory kernel mapping
+  (the scoping plan's design) would break every windowed Present.
+  The bb keeps its user-heap buffer; flush copies kernel backing →
+  user shadow per Present/Map. **Rules out** zero-copy present until
+  a shared-memory bridge exists; also eliminates the
+  user-heap-free-of-a-kernel-pointer hazard.
+- **Decision (flush-on-Map):** ctx_Map of the vk back buffer
+  submits + syncs first — dx_demo asserts face colors via Map
+  without ever Presenting; readback must observe replayed pixels.
+- **Security:** `OpCreateImage` now masks `kImageScanoutBacked` out
+  of userland-supplied flags — a PE could otherwise mint
+  whole-screen images and paint the desktop through tape replay.
+- **ABI appends:** `kVkStatsImageClearPixels = 10`;
+  `kVkOpFreeCommandBuffer = 52` (DestroyCommandPool never freed
+  buffer slots — per-backend-lifecycle pool-slot leak, the classic
+  refcount-asymmetry shape).
+- **Step deferred:** binding a SPIR-V passthrough pipeline (so vk
+  draws execute the in-kernel interpreter) needs the same
+  paint-target refactor in `graphics_vk_shaderraster.cpp` — without
+  a bound pipeline the replay falls back to fixed-function, which
+  is the honest v0. App HLSL remains ignored on BOTH back ends
+  (DXBC→SPIR-V transpile is its own roadmap track).
+- **Known latent (documented in Vulkan-ICD.md, needs its own
+  slice):** several `vulkan_1.c` call sites pass an arg in rsi that
+  no kernel handler reads — harmless today, misleading tomorrow.

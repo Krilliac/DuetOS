@@ -2465,7 +2465,18 @@ void ScheduleLockedHandoff(sync::IrqFlags lock_flags)
             // post-mortem distinguish "fallback fired" (idle dispatched
             // silently — no log) from "fallback whiffed" (one of the
             // guards rejected the idle pointer — line emitted).
-            if (idle == nullptr || idle == Current() || idle->state == TaskState::Dead)
+            // Reject a Blocked/Sleeping idle alongside the existing
+            // whiff cases: a blocked idle is LINKED on a wait/sleep
+            // queue, and the old force-to-Ready dispatch below ripped
+            // the state out from under that linkage — the queue's
+            // eventual wake then re-enqueued the already-Running idle
+            // (→ "popped task not Ready" → double-dispatch → wild
+            // resume; observed 2026-06-10 when klog persistence let
+            // the idle task block on NVMe I/O). Idle must never
+            // block; if a future path makes it block again, panic
+            // attributably here instead of corrupting the queues.
+            if (idle == nullptr || idle == Current() || idle->state == TaskState::Dead ||
+                idle->state == TaskState::Blocked || idle->state == TaskState::Sleeping)
             {
                 // Diagnostic line so the AP-bringup race window is
                 // visible in the boot log (the standard fallback below
