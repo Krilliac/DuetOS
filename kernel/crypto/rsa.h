@@ -92,6 +92,13 @@ bool RsaPkcs1V15Verify(const RsaPublicKey& k, const u8* sig, u32 sig_len, const 
 /// Returns true on a valid v1.5 encoding with matching T.
 bool Pkcs1V15UnwrapAndMatch(const u8* em, u32 em_len, const u8* prefix, u32 prefix_len, const u8* hash, u32 hash_len);
 
+/// Verify an RSASSA-PSS signature with SHA-256 and salt length 32 — the
+/// `rsa_pss_rsae_sha256` SignatureScheme used for an RSA CertificateVerify
+/// in TLS 1.3 (which forbids PKCS#1 v1.5 for handshake signatures).
+/// `mhash` is the 32-byte SHA-256 of the signed message; `mhash_len` must
+/// be 32. Returns true iff the PSS encoding verifies under `k`.
+bool RsaPssSha256Verify(const RsaPublicKey& k, const u8* sig, u32 sig_len, const u8* mhash, u32 mhash_len);
+
 void RsaSelfTest();
 
 } // namespace duetos::crypto

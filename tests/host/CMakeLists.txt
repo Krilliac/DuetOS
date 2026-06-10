@@ -139,6 +139,16 @@ add_host_test(x25519)
 target_sources(test_x25519 PRIVATE "${CMAKE_SOURCE_DIR}/../../kernel/crypto/x25519.cpp")
 target_compile_options(test_x25519 PRIVATE -Wno-conversion -Wno-sign-conversion)
 
+# RSASSA-PSS / SHA-256 verify — the TLS 1.3 RSA CertificateVerify scheme.
+# OpenSSL-generated vector (positive + tamper negatives).
+add_host_test(rsa_pss)
+target_sources(test_rsa_pss PRIVATE
+    "${CMAKE_SOURCE_DIR}/../../kernel/crypto/rsa.cpp"
+    "${CMAKE_SOURCE_DIR}/../../kernel/crypto/bigint.cpp"
+    "${CMAKE_SOURCE_DIR}/../../kernel/crypto/sha256.cpp"
+)
+target_compile_options(test_rsa_pss PRIVATE -Wno-conversion -Wno-sign-conversion)
+
 add_host_test(wild_address)
 add_host_test(disk_path)
 add_host_test(nospec)
