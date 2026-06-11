@@ -218,9 +218,19 @@ void AttackLstar()
     // Classic syscall hook: overwrite IA32_LSTAR with the VA of
     // a rootkit's shim. We don't have a shim; a bogus value
     // trips the detector just fine. The wrmsr is privileged but
-    // legal from ring 0.
+    // legal from ring 0 — PROVIDED the value is canonical. LSTAR
+    // holds the RIP the CPU loads on SYSCALL, so like STAR/CSTAR
+    // (see note below) it cannot hold a non-canonical operand:
+    // WRMSR #GP's on a non-canonical LSTAR *before* the detector
+    // can scan, halting the kernel. A non-canonical poison such
+    // as 0xDEADBEEFCAFE1234 (bits 63:48 != sign-ext of bit 47)
+    // does exactly that. Use a canonical higher-half poison
+    // instead: bits 63:48 all 1 match bit 47, so the WRMSR
+    // succeeds, the detector observes the changed LSTAR, and
+    // RestoreLstar puts the real entry point back before any
+    // SYSCALL can fetch from the bogus VA.
     g_saved_lstar = Rdmsr(kMsrIa32Lstar);
-    Wrmsr(kMsrIa32Lstar, 0xDEADBEEFCAFE1234ULL);
+    Wrmsr(kMsrIa32Lstar, 0xFFFFFFFFDEADBEEFULL);
 }
 void RestoreLstar()
 {
