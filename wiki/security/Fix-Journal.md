@@ -59,7 +59,37 @@ doesn't carry it; this is the convention each producer uses):
 | `UserFault` | `user.fault` | `kernel/arch/x86_64/traps.cpp` ring-3 trap arm. Captures CPU exceptions in ring 3 (the user task is killed; the kernel keeps running). Same `ctx_a` / `ctx_b` shape as `TrapCapture` but `caller_rip` is a USER RIP — addr2line against the kernel ELF won't resolve it. The brief surfaces three triage paths (chronically-broken task vs vtable-smashing task vs broken shared DLL) and decodes the page-fault flag bits / sentinel CR2 values. |
 | `KassertFail` | subsystem name (first arg to `Panic`) | `kernel/core/panic.cpp` `Panic` + `PanicWithValue` entry points (which is where every `KASSERT` macro lands). Recorded after the recursive-panic short-circuit so a panic-during-panic doesn't re-enter. `hint` = assertion message; `caller_rip` = the `Panic` call site (addr2line resolves to the KASSERT statement); `ctx_b` = the value passed to `PanicWithValue` (0 for plain `Panic`). For recurring asserts (`repeat >= --kassert-demote-threshold`) the brief proposes converting the assertion to `if (!(cond)) { KLOG_ONCE_WARN(...); return Err{InvalidState}; }`; with `--enable-kassert-demote` the generator additionally emits a real `kassert-demote-<subsys>.patch` containing that demotion *gated behind `#if 0`* so the reviewer affirmatively flips the switch (a mechanical KASSERT demotion that shipped silently would convert an audible bug into a silent one — the `#if 0` is the safety brake). The synth refuses to generate the patch when the enclosing function isn't `Result<…>`-returning, since the demoted shape needs a typed `Err{}` and there's no safe equivalent for a void return. |
 
+| `AutonomicProposal` | `config:<symbol>` or env policy site | `kernel/env/` — the autonomic learner surfaces a REVIEWABLE proposal as DATA (Decision #016, never a code mutation). A `config:` pin proposes a bounded constant change (`ctx_a` = current, `ctx_b` = proposed); other pins carry learned policy/gate signals. |
+| `InferredGap` | `syscall:0x<num>` | `kernel/syscall/inferred_gap.cpp`, recorded from the `SyscallTrailGuard` destructor (the one point that runs on every `SyscallDispatch` return) when a guest receives `kStatusNotImplemented` for a RECOGNIZED syscall. `ctx_a` = syscall number. Distinct from `UnknownSyscall` (an *unknown* number); this is a known number whose behaviour is unimplemented, discovered at runtime with NO source marker. Per-boot distinct-pin cap (`kInferredGapPinCap`); over-cap drops are the Phase B learner's evidence to raise it. |
+
 Dedup is keyed on `(detector, source_pin)`. A workload that hits the same gap 1000 times produces **one** record with `repeat_count=1000`, not 1000 records.
+
+## Dynamic gap discovery (Phases A/C/B)
+
+The journal's richest input used to be hand-placed `// GAP:` / `// STUB:`
+markers. Three discovery layers (spec:
+[`docs/superpowers/specs/2026-06-11-dynamic-fix-discovery-design.md`](../../docs/superpowers/specs/2026-06-11-dynamic-fix-discovery-design.md))
+find fix-worthy sites *without* a human first annotating them, all feeding this
+same pipeline. Decision #016 is upheld throughout: data in, reviewable patches
+out, a human flips the gate.
+
+- **A — runtime inference (kernel).** The `InferredGap` detector above. Guest
+  hits a recognized-but-unimplemented syscall → one record, zero annotation.
+- **C — static discovery (build-time).**
+  [`tools/build/gap-scan.py`](../../tools/build/gap-scan.py) scans source for
+  un-annotated gap-shaped sites (`kStatusNotImplemented`, `-ENOSYS`,
+  `TODO`/`FIXME`, not-impl `default:` arms), excluding any already carrying a
+  `// GAP:` / `// STUB:` / `FIX_NOTE_` annotation, into `gap-candidates.json`.
+  `gen-fix-patches.py --gap-candidates` joins it with the runtime records: a
+  candidate whose file also has a hit this boot is **confirmed live** (high
+  priority); one never hit is a **cold candidate**.
+- **B — learner config proposals (kernel, data-only).** In Live mode the
+  autonomic learner (`kernel/env/config_proposal.cpp`) emits a bounded,
+  evidence-backed `AutonomicProposal` `config:<symbol>` record when runtime
+  pressure crosses threshold (e.g. inferred-gap discovery dropping pins because
+  the cap is too low). Proposals are limited to an allow-list of tunable
+  symbols, never raise more than 2× or past a hard ceiling, and write only a
+  journal record — the generator renders the diff, a human applies it.
 
 ## On-disk format
 

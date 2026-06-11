@@ -142,6 +142,15 @@ kernel `.text`. That upholds Design-Decision #016 and stays consistent with
 the `runtime_checker`, which treats any code/fn-table drift as an attack.
 Runtime owns learning; the offline patch generator owns committing source.
 
+Beyond action-gate proposals, the learner also emits bounded **config**
+proposals (`kernel/env/config_proposal.cpp`): when runtime pressure on an
+allow-listed tunable crosses an evidence threshold (e.g. inferred-gap discovery
+dropping pins because `kInferredGapPinCap` is too low), it records an
+`AutonomicProposal` `config:<symbol>` with the current value, a bounded
+proposed value (never more than 2× current, never past a hard ceiling), and the
+evidence count. Still pure data — see the
+[Fix Journal](../security/Fix-Journal.md) dynamic-discovery section.
+
 ## Files
 
 - [`kernel/env/policy_shield.h`](../../kernel/env/policy_shield.h) — pure
