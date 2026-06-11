@@ -46,15 +46,80 @@ inline void ShieldSetMaster(ShieldConfig& c, bool on)
     c.forbidden_actions = on;
 }
 
-/// Reconcile the rule floor with the learner's proposal and return the
-/// action set that actually reaches the actuators. Slice 1 has no
-/// learner, so `net_set` is always empty and the rule floor IS the
-/// decision; `cfg`/`in`/`net_set` are the seam later slices reconcile
-/// through (net vs floor, clamps, circuit-breaker) — unused here.
+/// Slice-1 rule-floor passthrough. Live decisions now go through
+/// `ShieldReconcile` (below); this is preserved only as the regression
+/// anchor the Slice-1 self-test still asserts (empty net -> floor passes
+/// through unchanged). Not on any live decision path.
 inline AutoActionSet ShieldApply(const ShieldConfig& /*cfg*/, const AutoInputs& /*in*/, const AutoActionSet& rule_set,
                                  const AutoActionSet& /*net_set*/)
 {
     return rule_set;
+}
+
+/// True for actions that stay rule-only — high-consequence levers the
+/// learned policy must never actuate on its own (kernel-integrity
+/// escalation). The net's output set never includes these; the shield
+/// enforces it defensively under `forbidden_actions`.
+inline bool ShieldActionForbiddenForNet(AutoAction a)
+{
+    return a == AutoAction::SecurityEscalate;
+}
+
+/// Reconcile the rule floor with the learner's proposal (already
+/// explore- and breaker-filtered by the caller) into the set that
+/// actually actuates:
+///   - Off / Shadow: the rule floor actuates; the net is advisory only.
+///   - Live: the net drives. With `rule_floor_veto` the floor's actions
+///     are unioned in as a mandatory safety baseline (nothing the rules
+///     demand is dropped). With `forbidden_actions` a high-consequence
+///     action the net proposed is removed. Master-off (every flag cleared
+///     by ShieldSetMaster) yields the RAW net set — un-shielded data.
+/// Pure value logic — host-tested; no kernel state.
+inline AutoActionSet ShieldReconcile(const ShieldConfig& cfg, PolicyMode mode, const AutoActionSet& rule_set,
+                                     const AutoActionSet& net_set)
+{
+    if (mode != PolicyMode::Live)
+    {
+        return rule_set;
+    }
+
+    AutoActionSet out = {};
+    auto push = [&out](AutoRule r, AutoAction a)
+    {
+        for (u32 i = 0; i < out.count; ++i)
+        {
+            if (out.actions[i] == a)
+            {
+                return; // dedup
+            }
+        }
+        if (out.count < kAutoActionSetCap)
+        {
+            out.rules[out.count] = r;
+            out.actions[out.count] = a;
+            ++out.count;
+        }
+    };
+
+    // The learner's proposal drives first.
+    for (u32 i = 0; i < net_set.count; ++i)
+    {
+        if (cfg.forbidden_actions && ShieldActionForbiddenForNet(net_set.actions[i]))
+        {
+            continue; // high-consequence -> rule-only
+        }
+        push(net_set.rules[i], net_set.actions[i]);
+    }
+
+    // The rule floor is the mandatory safety baseline — never vetoed away.
+    if (cfg.rule_floor_veto)
+    {
+        for (u32 i = 0; i < rule_set.count; ++i)
+        {
+            push(rule_set.rules[i], rule_set.actions[i]);
+        }
+    }
+    return out;
 }
 
 namespace detail

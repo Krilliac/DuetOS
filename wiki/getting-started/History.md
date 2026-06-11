@@ -1240,6 +1240,33 @@ for the subsystem reference and
 for the deferred residuals (VBox visual verification + screenshot
 matrix, same pattern as the Pass A residuals).
 
+## Phase 6.21 — Autonomic neural policy: a shielded online learner drives kernel policy (2026-06-11)
+
+The autonomic engine's hand-written *decide* step gained a learned brain.
+A fixed-point MLP (no FPU — Q16 activations, Q12 `int16` weights) sits behind
+the `PolicyDecide` seam and, in **Live** mode, **drives the actuators while
+adapting online** from the system's own delayed feedback: a three-factor
+reward-modulated Hebbian update credit-assigns each Improved/Worsened outcome
+to the synapses of the action that fired. Every learning knob doubles as a
+**stability shield** — bounded step, weight clamp, decay toward the imitation
+prior, ε-greedy exploration, and a per-action circuit breaker — all behind a
+single **removable** safety envelope with a **master-off** for measuring the
+raw policy. The action surface gained a one-shot scheduler **rebalance**
+actuator, and the learner surfaces the rules it has **learned to avoid** as
+reviewable `fix_journal` proposals (DD#016: data, never a code mutation; a
+master-off **firehose** captures experiments-in-progress). Shell:
+`autonomic mode|shields|weights|proposals`.
+
+Closed the 4-slice arc (design spec
+[`2026-06-10-autonomic-neural-policy-design.md`](../../docs/superpowers/specs/2026-06-10-autonomic-neural-policy-design.md);
+subsystem page [`Autonomic-Policy`](../kernel/Autonomic-Policy.md)). Verified
+on QEMU under `autonomic=live`: all boot self-tests PASS
+(`[neural-policy]`, `[policy-shield]`, `[autonomic]`, `autonomic-feedback`,
+`[sched-activebalance-selftest]`), boot-log-analyze clean (242 self-tests,
+zero non-deliberate failures); host tests pin the learning dynamics
+(reward moves weights, clamp/decay hold, breaker trips, exploration bounded,
+proposal scan) under ASan+UBSan.
+
 ## How to read the rest of the tree
 
 - `CLAUDE.md` — the authoritative project context, coding standards,

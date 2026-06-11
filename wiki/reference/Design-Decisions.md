@@ -11412,3 +11412,39 @@ they constrain every later slice.
   — the shield must be removable as one unit so the *raw* policy's
   behaviour can be measured (a shield that cannot be removed cannot be
   validated as anything more than a mask over a still-broken learner).
+
+## 2026-06-11 — Autonomic policy slices 3–4: online learning wiring, one cadence source, lock-free learner
+
+Slices 3 (online three-factor reward-modulated Hebbian + Live mode) and 4
+(load-balance actuator + reviewable proposals + master-off firehose) closed
+the arc. Three boundaries were fixed.
+
+- **Decision (balance cadence is the `PowerBias` lever, not a new
+  actuator):** the spec listed `SchedBalanceCadence(fast|normal|slow)` as a
+  Slice-4 actuator, but scheduler balance cadence is *already* a kernel knob
+  — `PowerBias` maps directly to `SchedBalancePeriodTicks()`, driven by the
+  PowerTransition rule. **Rules out** adding a second cadence actuator: two
+  sources of truth for one scheduler knob is exactly the duplication the
+  anti-bloat rule forbids. Slice 4 adds only the genuinely-new one-shot
+  `SchedRebalanceNow` (out-of-band active balance); cadence stays folded into
+  `PowerBias`. A runtime-tunable `kStealScanCap`/`kClusterPlacementMargin`
+  remains its own future slice with its own safety argument.
+- **Decision (the learner is lock-free across two tasks, not single-owned):**
+  the original spec assumed the weights were owned by a single task. They are
+  not — `env-monitor` runs the decide (writes the decision-context ring) and
+  `kselfthink` runs the delayed reward (writes the weights). **Rules out**
+  both a kernel spinlock (it would break `neural_policy.cpp`'s host-test
+  linkability and be inconsistent with the adjacent feedback ring, which is
+  already lock-free best-effort) and pretending single-ownership. On x86_64
+  every shared field is naturally aligned ≤8 bytes, so accesses are
+  word-atomic; the only hazard is a transiently stale weight for one
+  decision, which the decay regularizer + repeated rewards absorb. The
+  reward is keyed to the decision's tick (captured once per poll and threaded
+  through `AutonomicApply`/`Enqueue`) so credit assignment matches the exact
+  decision.
+- **Decision (`AutoActionSet` capacity sized for the Live union):** Live mode
+  reconciles `net ∪ floor`, which can exceed the rule floor's historical
+  4-action ceiling. The set was sized to `kAutoActionSetCap = 8` so no
+  actuator is silently truncated out of a reconciled decision. **Rules out**
+  leaving the 4-slot array (a silent drop of a kernel actuator in a busy
+  multi-rule tick is a correctness bug, not an acceptable cap).

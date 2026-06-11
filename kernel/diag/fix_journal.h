@@ -54,68 +54,85 @@ namespace duetos::diag
 /// renumbered, since on-disk records use these as integers.
 enum class FixDetector : u8
 {
-    None = 0,           // sentinel; never appears in a real record
-    StubMarker = 1,     // `// STUB:` site reached; behaviour known incomplete
-    GapMarker = 2,      // `// GAP:` site reached; happy path ok, edge missing
-    UnknownSyscall = 3, // syscall.cpp default arm fired with no GapFill match
-    UnmappedThunk = 4,  // Win32ThunksLookupCatchAll hit (kOffMissLogger)
-    SoftFaultRecov = 5, // RetryWithBackoff success after >=1 retry, page-fault
-                        // fixup recovered, OOM-after-evict succeeded, etc.
-    LoaderReject = 6,   // PE/ELF loader rejected an image
-    CapDenial = 7,      // SyscallGate cap-set check denied a syscall.
-                        // ctx_a = syscall_number, ctx_b = proc_id,
-                        // source_pin = `cap.<MissingCap>`. Persists the
-                        // cap-audit ring's signal across boots so a
-                        // recurring deny pattern survives FAT32/NVMe
-                        // rotation. Dedups per (cap, syscall) pair —
-                        // a deny storm is one record with repeat=N.
-    TrapCapture = 8,    // Hard kernel-mode CPU exception about to
-                        // halt the box (#PF / #GP / #UD / #DE / etc.).
-                        // Recorded from trap context BEFORE the panic
-                        // so the FAT32 / NVMe panic-write tier picks
-                        // up the bytes. caller_rip = the faulting RIP.
-                        // ctx_a = (vector << 32) | (error_code &
-                        // 0xffffffff). ctx_b = faulting address (CR2
-                        // for #PF; 0 for other vectors). source_pin =
-                        // auto-pinned from caller_rip so dedup keys
-                        // on the exact function + offset that took the
-                        // fault. The offline patch generator reads
-                        // these records, resolves the RIP to file:line,
-                        // disassembles the faulting instruction, and
-                        // emits a per-trap brief with the captured
-                        // source context.
-    UserFault = 9,      // Ring-3 CPU exception (the user task is being
-                        // killed; the kernel keeps running). Same
-                        // record shape as TrapCapture (ctx_a packs
-                        // vector + error_code, ctx_b carries CR2 for
-                        // #PF) but the caller_rip is a USER RIP, which
-                        // doesn't symbolize against the kernel ELF.
-                        // source_pin = `user.<task_label>` so a single
-                        // chronically-crashing PE binary collapses to
-                        // one record with repeat_count = crash count.
-                        // The offline brief resolves the RIP against
-                        // the offending PE's debug info when possible
-                        // and falls back to "fault inside <DLL>" when
-                        // we know the import range. Useful for
-                        // spotting wild-jump / vtable-corruption
-                        // patterns in third-party EXEs that ship
-                        // without source.
-    KassertFail = 10,   // `core::Panic` / KASSERT site reached. The
-                        // kernel is on its way to halting — recording
-                        // here is the LAST observability window. Pin
-                        // = subsystem (the first arg to Panic). hint
-                        // = the assertion / panic message. caller_rip
-                        // = the call site of Panic, which addr2line
-                        // resolves to the KASSERT statement (or the
-                        // call that triggered Panic). The brief
-                        // synthesiser reads ±8 lines of source context
-                        // around the assertion AND proposes a
-                        // defensive "convert to graceful return" shape
-                        // for assertions that recur across boots — a
-                        // recurring assert is by definition an
-                        // invariant the upstream caller violates, and
-                        // the right fix is usually to demote the
-                        // assertion + handle the case explicitly.
+    None = 0,               // sentinel; never appears in a real record
+    StubMarker = 1,         // `// STUB:` site reached; behaviour known incomplete
+    GapMarker = 2,          // `// GAP:` site reached; happy path ok, edge missing
+    UnknownSyscall = 3,     // syscall.cpp default arm fired with no GapFill match
+    UnmappedThunk = 4,      // Win32ThunksLookupCatchAll hit (kOffMissLogger)
+    SoftFaultRecov = 5,     // RetryWithBackoff success after >=1 retry, page-fault
+                            // fixup recovered, OOM-after-evict succeeded, etc.
+    LoaderReject = 6,       // PE/ELF loader rejected an image
+    CapDenial = 7,          // SyscallGate cap-set check denied a syscall.
+                            // ctx_a = syscall_number, ctx_b = proc_id,
+                            // source_pin = `cap.<MissingCap>`. Persists the
+                            // cap-audit ring's signal across boots so a
+                            // recurring deny pattern survives FAT32/NVMe
+                            // rotation. Dedups per (cap, syscall) pair —
+                            // a deny storm is one record with repeat=N.
+    TrapCapture = 8,        // Hard kernel-mode CPU exception about to
+                            // halt the box (#PF / #GP / #UD / #DE / etc.).
+                            // Recorded from trap context BEFORE the panic
+                            // so the FAT32 / NVMe panic-write tier picks
+                            // up the bytes. caller_rip = the faulting RIP.
+                            // ctx_a = (vector << 32) | (error_code &
+                            // 0xffffffff). ctx_b = faulting address (CR2
+                            // for #PF; 0 for other vectors). source_pin =
+                            // auto-pinned from caller_rip so dedup keys
+                            // on the exact function + offset that took the
+                            // fault. The offline patch generator reads
+                            // these records, resolves the RIP to file:line,
+                            // disassembles the faulting instruction, and
+                            // emits a per-trap brief with the captured
+                            // source context.
+    UserFault = 9,          // Ring-3 CPU exception (the user task is being
+                            // killed; the kernel keeps running). Same
+                            // record shape as TrapCapture (ctx_a packs
+                            // vector + error_code, ctx_b carries CR2 for
+                            // #PF) but the caller_rip is a USER RIP, which
+                            // doesn't symbolize against the kernel ELF.
+                            // source_pin = `user.<task_label>` so a single
+                            // chronically-crashing PE binary collapses to
+                            // one record with repeat_count = crash count.
+                            // The offline brief resolves the RIP against
+                            // the offending PE's debug info when possible
+                            // and falls back to "fault inside <DLL>" when
+                            // we know the import range. Useful for
+                            // spotting wild-jump / vtable-corruption
+                            // patterns in third-party EXEs that ship
+                            // without source.
+    KassertFail = 10,       // `core::Panic` / KASSERT site reached. The
+                            // kernel is on its way to halting — recording
+                            // here is the LAST observability window. Pin
+                            // = subsystem (the first arg to Panic). hint
+                            // = the assertion / panic message. caller_rip
+                            // = the call site of Panic, which addr2line
+                            // resolves to the KASSERT statement (or the
+                            // call that triggered Panic). The brief
+                            // synthesiser reads ±8 lines of source context
+                            // around the assertion AND proposes a
+                            // defensive "convert to graceful return" shape
+                            // for assertions that recur across boots — a
+                            // recurring assert is by definition an
+                            // invariant the upstream caller violates, and
+                            // the right fix is usually to demote the
+                            // assertion + handle the case explicitly.
+    AutonomicProposal = 11, // Emitted by the env autonomic neural
+                            // policy (`kernel/env/`). Carries a REVIEWABLE
+                            // proposal — never a code mutation. Design-
+                            // Decision #016 forbids the kernel from
+                            // patching its own `.text`; the learner
+                            // proposes from evidence as DATA and a human /
+                            // Claude reviewer converts the proposal into a
+                            // real source fix. Typical records: a rule the
+                            // learner learned to avoid; a persistent net-
+                            // vs-rule disagreement where the net scored
+                            // Improved; a weight pinned at its clamp.
+                            // ctx_a / ctx_b carry a detector-specific
+                            // payload — e.g. a packed (action id + outcome)
+                            // pair, or a (weight index + clamped value)
+                            // pair. source_pin = the env policy site that
+                            // produced the proposal; hint = the one-line
+                            // "what a reviewer should consider" prompt.
 };
 
 /// Stable human label. Always returns a non-null pointer into .rodata.

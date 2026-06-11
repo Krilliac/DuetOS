@@ -843,6 +843,16 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                                   duetos::sched::LoadBalanceSelfTest();
                                                   return duetos::core::Result<void>{};
                                               });
+        // One-shot active-balance request self-test (the autonomic
+        // SchedRebalanceNow actuator's primitive). Topology-independent —
+        // it only exercises the force-balance flag's arm + one-shot
+        // consume — but grouped here with the balancer tests for locality.
+        duetos::core::InitcallRegisterOrPanic(duetos::core::Phase::Userland, "sched-activebalance-selftest",
+                                              []()
+                                              {
+                                                  duetos::sched::SchedActiveBalanceSelfTest();
+                                                  return duetos::core::Result<void>{};
+                                              });
         // SMT-aware placement decision test. Same Phase::Userland
         // rationale: needs SmpStartAps + TopologyAssignClusters
         // (which now also runs AssignCoreGroups) to have finalized

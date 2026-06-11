@@ -19,6 +19,7 @@
 #include "env/autonomic.h"
 #include "env/policy_shield.h"
 
+using duetos::u32;
 using duetos::env::AutoAction;
 using duetos::env::AutoActionSet;
 using duetos::env::AutoInputs;
@@ -28,6 +29,7 @@ using duetos::env::PolicyMode;
 using duetos::env::PolicyModeFromCmdline;
 using duetos::env::ShieldApply;
 using duetos::env::ShieldConfig;
+using duetos::env::ShieldReconcile;
 using duetos::env::ShieldsEnabledFromCmdline;
 using duetos::env::ShieldSetMaster;
 
@@ -116,6 +118,77 @@ int main()
 
         // A prefix collision must NOT match (autonomic= vs autonomicX).
         EXPECT_TRUE(PolicyModeFromCmdline("autonomicx=live") == PolicyMode::Shadow);
+    }
+
+    // ----- ShieldReconcile: live-mode net/floor reconciliation --
+    // Slice 3 gives the learner real authority in Live mode. The shield
+    // reconciles the net's proposal with the rule floor:
+    //   - Off / Shadow      -> the rule floor actuates, net is advisory.
+    //   - Live + floor veto  -> net drives, but the floor's safety actions
+    //                           (e.g. SecurityEscalate) are never dropped.
+    //   - Live + master-off  -> RAW net only, no floor (un-shielded data).
+    //   - Live + forbidden   -> high-consequence actions stay rule-only.
+    {
+        auto has = [](const AutoActionSet& s, AutoAction a)
+        {
+            for (u32 i = 0; i < s.count; ++i)
+            {
+                if (s.actions[i] == a)
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        AutoActionSet net = {};
+        net.count = 1;
+        net.actions[0] = AutoAction::MemReclaim;
+        net.rules[0] = AutoRule::MemPressure;
+
+        AutoActionSet floor = {};
+        floor.count = 1;
+        floor.actions[0] = AutoAction::SecurityEscalate;
+        floor.rules[0] = AutoRule::SecurityIntegrity;
+
+        ShieldConfig c = kShieldDefaults;
+
+        // Shadow: the floor actuates; the net is advisory only.
+        AutoActionSet out = ShieldReconcile(c, PolicyMode::Shadow, floor, net);
+        EXPECT_EQ(out.count, 1u);
+        EXPECT_TRUE(has(out, AutoAction::SecurityEscalate));
+        EXPECT_FALSE(has(out, AutoAction::MemReclaim));
+
+        // Off: same — floor only.
+        out = ShieldReconcile(c, PolicyMode::Off, floor, net);
+        EXPECT_TRUE(has(out, AutoAction::SecurityEscalate));
+        EXPECT_FALSE(has(out, AutoAction::MemReclaim));
+
+        // Live + shields: net drives AND the floor's safety action survives.
+        out = ShieldReconcile(c, PolicyMode::Live, floor, net);
+        EXPECT_EQ(out.count, 2u);
+        EXPECT_TRUE(has(out, AutoAction::MemReclaim));       // learner's proposal actuates
+        EXPECT_TRUE(has(out, AutoAction::SecurityEscalate)); // floor not vetoed away
+
+        // Live + master-off: RAW net only, no floor union.
+        ShieldConfig raw = kShieldDefaults;
+        ShieldSetMaster(raw, false);
+        out = ShieldReconcile(raw, PolicyMode::Live, floor, net);
+        EXPECT_EQ(out.count, 1u);
+        EXPECT_TRUE(has(out, AutoAction::MemReclaim));
+        EXPECT_FALSE(has(out, AutoAction::SecurityEscalate));
+
+        // Live + forbidden_actions: a (defensive) net-proposed high-
+        // consequence action is dropped; shields-off keeps it raw.
+        AutoActionSet net_bad = {};
+        net_bad.count = 1;
+        net_bad.actions[0] = AutoAction::SecurityEscalate;
+        net_bad.rules[0] = AutoRule::SecurityIntegrity;
+        const AutoActionSet empty_floor = {};
+        out = ShieldReconcile(c, PolicyMode::Live, empty_floor, net_bad);
+        EXPECT_FALSE(has(out, AutoAction::SecurityEscalate)); // forbidden -> dropped
+        out = ShieldReconcile(raw, PolicyMode::Live, empty_floor, net_bad);
+        EXPECT_TRUE(has(out, AutoAction::SecurityEscalate)); // master-off -> raw
     }
 
     return duetos_host_test::finish_main("test_policy_shield");

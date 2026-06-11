@@ -101,9 +101,12 @@ static_assert(sizeof(FeedbackEntry) == 48, "FeedbackEntry packing changed");
 PreMetrics CapturePreMetrics();
 
 /// Enqueue a feedback entry. Called once per (rule, action) pair
-/// from `AutonomicApply`. Safe from task context. Wrap-safe — a
-/// full ring overwrites the oldest still-pending entry.
-void Enqueue(AutoRule rule, AutoAction action, const PreMetrics& pre);
+/// from `AutonomicApply`. `fire_tick` is the poll's tick stamp — the
+/// same value the learner recorded its decision context under, so a
+/// Live-mode reward credit-assigns the right synapses. Safe from task
+/// context. Wrap-safe — a full ring overwrites the oldest still-pending
+/// entry.
+void Enqueue(AutoRule rule, AutoAction action, const PreMetrics& pre, u64 fire_tick);
 
 /// Walk the ring, evaluate any entry whose deadline has passed,
 /// and record the outcome through the selfthink causal chain.

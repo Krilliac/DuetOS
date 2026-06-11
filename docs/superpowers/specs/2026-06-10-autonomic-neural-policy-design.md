@@ -1,7 +1,11 @@
 # Autonomic Neural Policy — Design Spec
 
 - **Date:** 2026-06-10
-- **Status:** Approved (brainstorm complete); implementation in progress
+- **Status:** LANDED 2026-06-11 — all 4 slices implemented, host-tested, and
+  verified on a live `autonomic=live` QEMU boot. See
+  [`wiki/kernel/Autonomic-Policy.md`](../../../wiki/kernel/Autonomic-Policy.md)
+  and the 2026-06-11 entry in
+  [`wiki/reference/Design-Decisions.md`](../../../wiki/reference/Design-Decisions.md).
 - **Branch:** `claude/autonomic-neural-policy`
 - **Owning wiki:** `wiki/drivers/Neural-Engine.md` (arc step 3), new `wiki/kernel/Autonomic-Policy.md`
 

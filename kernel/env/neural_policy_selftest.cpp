@@ -39,6 +39,25 @@ void NeuralPolicySelfTest()
         core::PanicWithValue("env/neural_policy", "neural-policy self-test mismatch", s.count);
     }
 
+    // Slice-3 learning path — the on-target echo of the host test's reward
+    // dynamics, and the only place the in-kernel DecideLive→Reward wiring is
+    // exercised deterministically (a live boot only rewards when an action
+    // actually Worsens). A Worsened reward on the action that fired must move
+    // its output weight down. Restore the imitation prior afterward so the
+    // engine starts its first real tick from the baseline.
+    NeuralPolicyResetWeights();
+    (void)NeuralPolicyDecideLive(in, 1);
+    const i16 w_before = NeuralPolicyWeightsSnapshot().w2[0][0];
+    NeuralPolicyReward(1, AutoAction::MemReclaim, -1);
+    const i16 w_after = NeuralPolicyWeightsSnapshot().w2[0][0];
+    NeuralPolicyResetWeights();
+    if (!(w_after < w_before))
+    {
+        arch::SerialWrite("[neural-policy] MISMATCH reward did not move weight\n");
+        core::PanicWithValue("env/neural_policy", "neural-policy learn self-test mismatch",
+                             static_cast<u64>(static_cast<u32>(w_after)));
+    }
+
     arch::SerialWrite("[neural-policy] selftest pass\n");
 }
 

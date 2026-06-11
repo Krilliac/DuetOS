@@ -5,11 +5,11 @@
 > **Execution context:** Kernel — the env-monitor poll (~2 s cadence),
 > task context only.
 >
-> **Maturity:** v0 (Slices 1–2 of 4) — the decision **seam**, the
-> toggleable safety **shield**, and the **fixed-point imitation net**
-> (running in **shadow mode**) are landed and wired into boot. Online
-> learning (Slice 3) and the load-balance actuators + fix-journal proposal
-> tie-in (Slice 4) are deferred.
+> **Maturity:** v1 (all 4 slices landed) — the decision **seam**, the
+> toggleable safety **shield**, the **fixed-point imitation net**, **online
+> three-factor reward-modulated learning** with **Live mode**, the
+> scheduler **load-balance actuator**, and **reviewable fix-journal
+> proposals** (with a master-off **firehose**) are all wired into boot.
 
 ## Overview
 
@@ -23,11 +23,13 @@ Full design + the 4-slice plan:
 [`docs/superpowers/specs/2026-06-10-autonomic-neural-policy-design.md`](../../docs/superpowers/specs/2026-06-10-autonomic-neural-policy-design.md).
 
 ```
-env-monitor tick → SenseInputs() → PolicyDecide(state, in) → AutonomicApply
-                                       │
-                 rule floor ──────────┤  AutonomicEvaluate (safety floor + teacher)
-                 learned proposal ────┤  NeuralPolicyDecide (Slice 1: no-op → empty)
-                 reconcile ───────────┘  ShieldApply (toggleable; Slice 1: passthrough)
+env-monitor tick → SenseInputs() → PolicyDecide(state, in, now) → AutonomicApply → Enqueue(feedback)
+                                       │                                                    │
+                 rule floor ──────────┤  AutonomicEvaluate (safety floor + teacher)        │ (delayed ~10 ticks)
+                 learned proposal ────┤  NeuralPolicyDecideLive (forward + explore + breaker)
+                 reconcile ───────────┘  ShieldReconcile (Off/Shadow→floor; Live→net∪floor)
+                                                                                            ▼
+kselfthink tick → feedback::Tick() → classify outcome → NeuralPolicyReward(tick, action, r)  [Live only]
 ```
 
 ## What's landed (Slices 1–2)
@@ -61,13 +63,67 @@ env-monitor tick → SenseInputs() → PolicyDecide(state, in) → AutonomicAppl
   selftest pass`; the pure logic is covered host-side by
   `tests/host/test_policy_shield.cpp` and `test_neural_policy.cpp`.
 
+## What's landed (Slices 3–4)
+
+- **Online learning — three-factor reward-modulated Hebbian** (Slice 3,
+  `neural_policy.cpp`). Only the output layer (`w2`/`b2`) adapts; the hidden
+  detectors stay the fixed imitation map. The update
+  `dW2_jk = (reward · h_j) >> kLearnShiftW` is credit-assigned to the
+  synapses of the action that fired, weighted by that decision's hidden
+  activations. **Reward** is the delayed `feedback` outcome
+  (Improved=+1, NoChange=0, Worsened=−1; Diagnostic/Pending skipped).
+  Stability shields: bounded step, weight **clamp** (`±kW2Clamp`), **decay**
+  toward the imitation prior every update, and bounded **ε-greedy
+  exploration** (`NeuralPolicyExplore`, widened when `explore_cap` is off).
+- **Live mode** (`ShieldReconcile`, `policy_shield.h`, host-tested). In Live
+  the net **drives** the actuators; `rule_floor_veto` unions the floor's
+  safety actions back in so nothing the rules demand is dropped;
+  `forbidden_actions` keeps `SecurityEscalate` rule-only; **master-off**
+  yields the **raw** net set. A per-action **circuit breaker** vetoes an
+  action that Worsened `kBreakerTrip` times in a row (cooldown-bounded).
+  The decision is recorded under the poll's tick so the delayed reward
+  credit-assigns the right synapses; the feedback entry carries the same
+  tick.
+- **Load-balance actuator** (Slice 4). `SchedRebalanceNow` →
+  `sched::SchedRequestActiveBalance()` — a one-shot out-of-band active
+  balance, fired by the CpuSaturation rule (alongside the health scan).
+  Self-test `[sched-activebalance-selftest] PASS`. (Balance **cadence** is
+  *not* a separate actuator — it is the existing `PowerBias` lever, to keep
+  one source of truth per scheduler knob; see Design-Decisions 2026-06-11.)
+- **Reviewable proposals** (Slice 4, `NeuralPolicyProposalScan` →
+  `FixDetector::AutonomicProposal`). The learner surfaces gates it has
+  **learned to suppress** (a prior-positive synapse driven non-positive) to
+  the fix journal as **data** — never a code mutation (DD#016). Shielded
+  reports only durable flips; the **master-off firehose** also reports gates
+  merely *trending* toward suppression (one record per experiment). Flows
+  ring → FAT32 `KERNEL.FIX` → offline patch generator → human/Claude review.
+- **Shell surface.** `autonomic mode <off|shadow|live>`, `autonomic shields
+  <on|off>`, `autonomic weights` (the learned output layer), `autonomic
+  proposals` (current learned-away gates). No-arg `autonomic` shows
+  `policy=` and `shields=` state.
+- **Boot self-tests** still green end-to-end under `autonomic=live`:
+  `[sched-activebalance-selftest] PASS` + the env/policy quartet; host tests
+  cover the learning dynamics (reward moves weights, clamp/decay hold,
+  breaker trips, exploration bounded, proposal scan).
+
+### Threading (two tasks, lock-free)
+
+The learner's mutable state (`g_net.w2/b2`, the decision-context ring, the
+breakers) is touched by **two** task-context kthreads: `env-monitor` runs the
+decide (writes the ctx ring, reads weights) and `kselfthink` runs the delayed
+reward (writes weights, reads the ctx ring). **No lock** — matching the
+lock-free best-effort contract of the feedback ring it is driven by. On
+x86_64 every shared field is naturally aligned ≤8 bytes, so reads/writes are
+word-atomic; the only cross-task hazard is a transiently stale weight for one
+decision, which the decay regularizer + repeated rewards absorb by design.
+
 ## Policy modes
 
 | Mode | Meaning |
 |------|---------|
 | `Off` | Learner disabled; the rule table alone decides. |
 | `Shadow` | (default) Net infers and is traced, but actuators stay rule-driven — pure data collection, no consequences. |
-| `Live` | Net's gated actions drive the actuators and learn online (Slice 3). |
+| `Live` | Net's gated actions drive the actuators (behind the shield) and learn online from the delayed feedback reward. |
 
 ## Why the shield is removable (and why that matters)
 
@@ -80,8 +136,8 @@ trusted. See [Design-Decisions](../reference/Design-Decisions.md) (2026-06-10).
 
 ## The self-improvement boundary
 
-The learner may rewrite its **weights** (data) and may **propose** source
-patches as reviewable `fix_journal` records (Slice 4) — it never patches
+The learner rewrites its **weights** (data) and **proposes** source patches
+as reviewable `fix_journal` records (`AutonomicProposal`) — it never patches
 kernel `.text`. That upholds Design-Decision #016 and stays consistent with
 the `runtime_checker`, which treats any code/fn-table drift as an attack.
 Runtime owns learning; the offline patch generator owns committing source.
@@ -89,10 +145,15 @@ Runtime owns learning; the offline patch generator owns committing source.
 ## Files
 
 - [`kernel/env/policy_shield.h`](../../kernel/env/policy_shield.h) — pure
-  config + `ShieldApply` + cmdline parse (host-tested).
+  config + `ShieldApply`/`ShieldReconcile` + cmdline parse (host-tested).
 - [`kernel/env/policy_shield.cpp`](../../kernel/env/policy_shield.cpp) —
   live config singletons, cmdline init, self-test.
 - [`kernel/env/neural_policy.{h,cpp}`](../../kernel/env/neural_policy.h) —
-  the learner (Slice 1: no-op).
-- The seam (`PolicyDecide`/`PolicyTrace`) lives in
-  [`kernel/env/autonomic.cpp`](../../kernel/env/autonomic.cpp).
+  the learner: forward pass, online reward update, exploration, breakers,
+  proposal scan.
+- The seam (`PolicyDecide`/`PolicyTrace`/`EmitPolicyProposals`) lives in
+  [`kernel/env/autonomic.cpp`](../../kernel/env/autonomic.cpp); the delayed
+  reward is wired from
+  [`kernel/env/autonomic_feedback.cpp`](../../kernel/env/autonomic_feedback.cpp).
+- The actuator primitive `SchedRequestActiveBalance()` lives in
+  [`kernel/sched/sched.cpp`](../../kernel/sched/sched.cpp).

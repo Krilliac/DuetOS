@@ -425,6 +425,16 @@ void SyscallTrailSelfTest();
 /// line on success so CI can grep for it.
 void LoadBalanceSelfTest();
 
+/// Boot-time check for the autonomic one-shot rebalance poke
+/// (`SchedRequestActiveBalance`). Asserts the force flag is clear
+/// initially, that a request arms it, and that the tick-side
+/// check-and-clear consumes it exactly once (true one-shot, flag
+/// clear again afterwards). Pure flag logic — no lock, no PerCpu
+/// state — so it's deterministic on a 1-CPU TCG guest. Panics on
+/// mismatch; emits one `[sched-activebalance-selftest] PASS` line on
+/// success so CI can grep for it.
+void SchedActiveBalanceSelfTest();
+
 /// Decision-function self-test for SMT-aware placement. Verifies
 /// the EffectiveLoad sibling penalty, that PickClusterPlacement
 /// prefers a fully-idle physical core over an SMT sibling of a
@@ -566,6 +576,20 @@ PowerBias SchedPowerBias();
 u64 SchedBalancePeriodTicks();
 
 const char* SchedPowerBiasName(PowerBias b);
+
+/// Autonomic one-shot rebalance poke (slice-4 actuator). Forces the
+/// periodic active load-balancer to run ONE balance pass on the next
+/// timer tick, regardless of the normal per-bias period counter —
+/// instead of waiting up to `SchedBalancePeriodTicks()` ticks for the
+/// next scheduled pass. The env autonomic engine calls this from task
+/// context when it decides the box needs an immediate cross-CPU
+/// rebalance (e.g. on CPU saturation). Idempotent: calling it twice
+/// before the tick consumes it still yields exactly one forced pass.
+/// Only changes WHEN a pass runs — the placement/affinity logic is
+/// unchanged, and the normal periodic cadence is unaffected (a forced
+/// pass is purely additive). Cheap and lock-free (one relaxed atomic
+/// store); safe from any task context.
+void SchedRequestActiveBalance();
 
 // Read-only view of one task for ps-style enumeration. Fields
 // are snapshots copied at the moment SchedEnumerate visits the

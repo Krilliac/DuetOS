@@ -1513,7 +1513,7 @@ void Dispatch(char* line)
     }
     if (StrEq(cmd, "autonomic") || StrEq(cmd, "auto"))
     {
-        CmdAutonomic();
+        CmdAutonomic(argc, argv);
         return;
     }
     if (StrEq(cmd, "usbnet"))

@@ -24,9 +24,21 @@
  * and grants no privilege — it only proposes actions the kernel already
  * owns, exactly like the rule table it will eventually replace.
  *
- * Threading: kernel task context only (the env-monitor poll). The
- * weights (Slice 2+) are owned by that single task, so there is no SMP
- * contention by construction.
+ * Threading (Slice 3): the learner's mutable state — the learned output
+ * layer (g_net.w2/b2), the decision-context ring, and the per-action
+ * circuit breakers — is touched by TWO task-context kthreads:
+ *   - `env-monitor` runs the decide (NeuralPolicyDecide / DecideLive):
+ *     writes the ctx ring, reads the weights.
+ *   - `kselfthink` runs the delayed reward (feedback::Tick ->
+ *     NeuralPolicyReward): writes the weights, reads the ctx ring.
+ * No lock is taken — matching the lock-free best-effort contract of the
+ * feedback ring this learner is driven by. On x86_64 every shared field
+ * is naturally aligned and <=8 bytes, so reads/writes are word-atomic
+ * (no torn values, no UB); the only cross-task hazard is a transiently
+ * stale weight read for a single decision, which the decay regularizer +
+ * repeated rewards absorb by design. A kernel spinlock would break this
+ * TU's host-linkability and is unnecessary for a noise-tolerant learner.
+ * IRQ context must never call in (it never does — both sites are tasks).
  */
 
 namespace duetos::env
@@ -74,6 +86,93 @@ void ExtractFeatures(const AutoInputs& in, i32 feat[kNetIn]);
 /// empty set; Slice 2+ returns the imitation net's gated actions. A pure
 /// read of `in` — touches no actuator and mutates no kernel state.
 AutoActionSet NeuralPolicyDecide(const AutoInputs& in);
+
+// ---------------------------------------------------------------------
+// Slice 3 — online learning (three-factor reward-modulated Hebbian).
+//
+// Only the output layer (w2/b2) adapts online; the hidden detectors
+// (w1/b1) stay the fixed imitation feature map. The update is gated by
+// the delayed feedback reward and credit-assigned to the synapses of the
+// action that fired, weighted by the decision's hidden activations:
+//   dW2_jk = (reward * h_j) >> kLearnShiftW   (then decay toward prior)
+// Every constant below doubles as a stability shield — bounded step,
+// weight clamp, decay toward the imitation prior, capped exploration.
+// ---------------------------------------------------------------------
+
+inline constexpr int kLearnShiftW = 8;   // w2 step = (reward * h_j) >> this (Q12 nudge)
+inline constexpr i32 kLearnStepB = 256;  // b2 step per reward (Q16, ~0.0039)
+inline constexpr i16 kW2Clamp = 32767;   // |w2| bound — i16 max; the stability clamp
+inline constexpr i32 kB2Clamp = 1 << 20; // |b2| bound — 16.0 (Q16)
+inline constexpr int kDecayShift = 6;    // decay toward prior: w += (prior - w) >> this
+inline constexpr u32 kLearnCtxRing = 16; // retained decisions (hidden activations)
+
+inline constexpr u64 kBreakerTrip = 3;            // consecutive Worsened that opens a breaker
+inline constexpr u64 kBreakerCooldownTicks = 200; // ticks a tripped breaker stays open
+
+/// Reset the learned output layer to the imitation prior and clear all
+/// learning state (decision-context ring + circuit breakers). The boot
+/// state needs no call (g_net is constinit to the prior); this exists for
+/// the `autonomic weights reset` shell command (recover a diverged learner
+/// without a reboot) and to give host tests a clean slate between cases.
+void NeuralPolicyResetWeights();
+
+/// Live-mode decide: forward pass through the *learned* net, gate per
+/// action, AND retain this decision's hidden activations keyed by `tick`
+/// so a later reward (delayed feedback outcome) can credit-assign the
+/// update. `tick` must be the same tick the feedback entry is stamped
+/// with — the engine captures it once per poll.
+AutoActionSet NeuralPolicyDecideLive(const AutoInputs& in, u64 tick);
+
+/// Apply one reward-modulated update for the action that fired at
+/// `decision_tick`. `reward` is +1 (Improved), 0 (NoChange), -1
+/// (Worsened); the caller maps the feedback Outcome (Diagnostic / Pending
+/// are not rewards and must not be passed). No-op if `action` is not a
+/// learned output, or the decision's hidden context has aged out of the
+/// ring — though the circuit breaker still tracks the outcome run.
+void NeuralPolicyReward(u64 decision_tick, AutoAction action, int reward);
+
+/// Bounded epsilon-greedy exploration: when `rand_q16 < epsilon_q16`
+/// (probability epsilon_q16/65536) toggle one learned action's membership
+/// in `set`, so the engine occasionally samples an off-policy move.
+/// `epsilon_q16 == 0` never perturbs the set. Pure — the randomness is
+/// injected by the caller so it is host-test reproducible.
+void NeuralPolicyExplore(AutoActionSet& set, u32 epsilon_q16, u32 rand_q16);
+
+/// Circuit breaker: true while `action`'s breaker is open — it Worsened
+/// `NeuralPolicyBreakerTrip()` times in a row, so the shield vetoes the
+/// net's proposal of it (the rule floor still covers any safety action)
+/// until `NeuralPolicyBreakerCooldownTicks()` have elapsed. `now` = the
+/// current tick.
+bool NeuralPolicyActionBreakerTripped(AutoAction action, u64 now);
+
+/// Snapshot the live learned parameters (for the `autonomic weights`
+/// shell view + host-test assertions). By-value copy.
+NetParams NeuralPolicyWeightsSnapshot();
+
+/// A reviewable proposal the learner surfaces from its own weights: a gate
+/// it has LEARNED TO SUPPRESS — a synapse the imitation prior made positive
+/// (action fires when detector j is active) that online reward drove to or
+/// below zero (action no longer fires there). This is evidence a rule may
+/// be wrong; it is recorded to the fix journal as DATA (DD#016 — the kernel
+/// never patches its own .text), for an offline reviewer to act on.
+/// `detector` is the hidden unit (0=mem, 1=thermal, 2=cpu-load); `learned`
+/// / `prior` are that synapse's Q12 weights.
+struct PolicyProposal
+{
+    AutoAction action;
+    int detector;
+    i32 learned;
+    i32 prior;
+};
+
+/// Scan the learned weights for proposals and fill up to `cap` into `out`,
+/// returning the count. `aggressive=false` (shielded) reports only durable
+/// proposals — prior-positive gates driven fully non-positive. `aggressive
+/// =true` (the master-off firehose) ALSO reports gates merely trending
+/// toward suppression (any downward drift from the prior), capturing the
+/// learner's in-progress experiments, not just settled patterns. Pure read
+/// of the weights — no side effects; host-testable.
+u32 NeuralPolicyProposalScan(PolicyProposal* out, u32 cap, bool aggressive);
 
 /// Boot self-test: drives the imitation net on a known vector and asserts
 /// the expected proposal — the on-target echo of the host test's coverage.

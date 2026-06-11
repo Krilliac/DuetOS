@@ -4,6 +4,8 @@
 #include "diag/resmon.h"
 #include "diag/runtime_checker.h"
 #include "diag/selfthink.h"
+#include "env/neural_policy.h"
+#include "env/policy_shield.h"
 #include "log/klog.h"
 #include "time/tick.h"
 
@@ -81,9 +83,11 @@ Outcome EvaluateAction(AutoAction a, const PreMetrics& pre, const PreMetrics& po
     case AutoAction::SchedPerformance:
     case AutoAction::SchedBalanced:
     case AutoAction::SchedPowerSave:
+    case AutoAction::SchedRebalanceNow:
         // No quantifiable single-metric effect window. The
         // action ran (logged + probe-fired); outcome is
-        // diagnostic-only.
+        // diagnostic-only (a rebalance's effect shows in loadavg
+        // over a longer horizon than the 100 ms feedback window).
         return Outcome::Diagnostic;
     case AutoAction::None:
     case AutoAction::Count:
@@ -122,7 +126,7 @@ PreMetrics CapturePreMetrics()
     return m;
 }
 
-void Enqueue(AutoRule rule, AutoAction action, const PreMetrics& pre)
+void Enqueue(AutoRule rule, AutoAction action, const PreMetrics& pre, u64 fire_tick)
 {
     const u64 idx = g_head++;
     FeedbackEntry& e = g_ring[idx % kFeedbackRingCap];
@@ -133,14 +137,13 @@ void Enqueue(AutoRule rule, AutoAction action, const PreMetrics& pre)
     if (e.live != 0 && e.outcome == static_cast<u8>(Outcome::Pending))
         g_stats.ring_overflows++;
 
-    const u64 now = ::duetos::time::TickCount();
     e.live = 1;
     e.outcome = static_cast<u8>(Outcome::Pending);
     e.rule = static_cast<u8>(rule);
     e.action = static_cast<u8>(action);
     e.reserved = 0;
-    e.tick_fired = now;
-    e.check_at_tick = now + kFeedbackDelayTicks;
+    e.tick_fired = fire_tick;
+    e.check_at_tick = fire_tick + kFeedbackDelayTicks;
     e.pre = pre;
 
     g_stats.enqueued_total++;
@@ -183,6 +186,36 @@ void Tick()
         const u64 packed_value = (static_cast<u64>(o) << 32) | static_cast<u64>(e.rule);
         ::duetos::diag::selfthink::CausalRecord(::duetos::diag::selfthink::CausalKind::AutoAction,
                                                 static_cast<u16>(e.action), packed_value, 0, "autonomic");
+
+        // Live-mode online learning: feed the outcome back to the neural
+        // policy as a reward, keyed to the decision's fire tick so the
+        // synapses that fired THIS action update (credit assignment).
+        // Diagnostic / Pending outcomes are not rewards. Only Live mode
+        // learns — Shadow collects data without touching the weights.
+        if (PolicyModeGet() == PolicyMode::Live)
+        {
+            int reward = 0;
+            bool is_reward = true;
+            switch (o)
+            {
+            case Outcome::Improved:
+                reward = 1;
+                break;
+            case Outcome::Worsened:
+                reward = -1;
+                break;
+            case Outcome::NoChange:
+                reward = 0;
+                break;
+            default:
+                is_reward = false;
+                break;
+            }
+            if (is_reward)
+            {
+                NeuralPolicyReward(e.tick_fired, static_cast<AutoAction>(e.action), reward);
+            }
+        }
 
         // Worsened is the actionable signal — fire the probe so
         // an attached GDB can break at the exact frame where a
@@ -236,7 +269,7 @@ void SelfTest()
     // MemReclaim: heap dropped from 80 to 60 (-25 %, well over
     // 2 % noise).
     const u64 prev_enq = g_stats.enqueued_total;
-    Enqueue(AutoRule::MemPressure, AutoAction::MemReclaim, pre);
+    Enqueue(AutoRule::MemPressure, AutoAction::MemReclaim, pre, ::duetos::time::TickCount());
     if (g_stats.enqueued_total != prev_enq + 1)
     {
         Log(LogLevel::Error, "env/autonomic-feedback", "selftest: enqueue total stuck");
