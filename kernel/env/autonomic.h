@@ -24,7 +24,7 @@
  *   1 MemPressure       free frames < 10%        → heap-drain + pool-drain
  *   2 ThermalPower      thermal_throttle rising  → pool-drain + health scan
  *   3 SecurityIntegrity health issues_total rose → guard Enforce + Production
- *   4 CpuSaturation     loadavg > nCPU rising    → forced health scan
+ *   4 CpuSaturation     loadavg > nCPU rising    → health scan + rebalance
  *   5 PowerTransition   EnvPowerPolicy changed   → scheduler power bias
  *
  * Edge-triggered: an action fires on the rising edge of its
@@ -58,13 +58,14 @@ enum class AutoRule : u8
 enum class AutoAction : u8
 {
     None = 0,
-    MemReclaim,       // KernelHeapDrainBins + FrameAllocatorDrainPools
-    FootprintTrim,    // FrameAllocatorDrainPools (shrink resident set)
-    SecurityEscalate, // SetGuardMode(Enforce) + PolicySet(Production)
-    ForceHealthScan,  // RuntimeCheckerScan()
-    SchedPerformance, // SchedSetPowerBias(Performance)
-    SchedBalanced,    // SchedSetPowerBias(Balanced)
-    SchedPowerSave,   // SchedSetPowerBias(PowerSave)
+    MemReclaim,        // KernelHeapDrainBins + FrameAllocatorDrainPools
+    FootprintTrim,     // FrameAllocatorDrainPools (shrink resident set)
+    SecurityEscalate,  // SetGuardMode(Enforce) + PolicySet(Production)
+    ForceHealthScan,   // RuntimeCheckerScan()
+    SchedPerformance,  // SchedSetPowerBias(Performance)
+    SchedBalanced,     // SchedSetPowerBias(Balanced)
+    SchedPowerSave,    // SchedSetPowerBias(PowerSave)
+    SchedRebalanceNow, // SchedRequestActiveBalance() — one-shot cross-CPU rebalance
     Count,
 };
 
@@ -96,11 +97,17 @@ struct AutonomicState
     u8 last_power_policy;
 };
 
-/// Up to 4 actions can fire in one tick (independent rules).
+/// Distinct-action capacity of one decision. The rule floor alone fires
+/// at most 4 (independent rules), but Live mode reconciles the learner's
+/// proposal WITH the floor (net ∪ floor), so the set must hold the union
+/// of every discretionary + safety + bias + rebalance action that can
+/// co-occur in one tick without silently dropping an actuator.
+inline constexpr u32 kAutoActionSetCap = 8;
+
 struct AutoActionSet
 {
-    AutoAction actions[4];
-    AutoRule rules[4];
+    AutoAction actions[kAutoActionSetCap];
+    AutoRule rules[kAutoActionSetCap];
     u32 count;
 };
 
@@ -115,15 +122,28 @@ struct AutonomicReport
 
 /// Pure decision: rising-edge rule evaluation. No side effects, no
 /// logging, no kernel calls. Updates `st` in place to the new
-/// latched state and returns the actions whose edge fired.
+/// latched state and returns the actions whose edge fired. This is the
+/// rule floor — both the safety baseline and (Slice 2+) the learned
+/// policy's imitation teacher.
 AutoActionSet AutonomicEvaluate(AutonomicState& st, const AutoInputs& in);
 
-/// Perform the real effects of an action set (kernel calls + log +
-/// probe). Task context only. Not exercised by the self-test.
-void AutonomicApply(const AutoActionSet& set);
+/// The full decide step: rule floor (AutonomicEvaluate) + learned policy,
+/// reconciled by the shield (ShieldReconcile) and traced. Routed by
+/// AutonomicTick. `now` is the poll's tick stamp — in Live mode the
+/// learner records the decision under it so the delayed feedback reward
+/// credit-assigns the right synapses. Off/Shadow actuate the rule floor;
+/// Live lets the net drive behind the shield. Pure of actuation — returns
+/// the set AutonomicApply then executes.
+AutoActionSet PolicyDecide(AutonomicState& st, const AutoInputs& in, u64 now);
 
-/// One poll iteration: sense → AutonomicEvaluate → AutonomicApply →
-/// fold into the report. Called from the env-monitor loop.
+/// Perform the real effects of an action set (kernel calls + log +
+/// probe). `now` is the fire tick stamped into each feedback entry so a
+/// later reward matches the decision. Task context only. Not exercised by
+/// the self-test.
+void AutonomicApply(const AutoActionSet& set, u64 now);
+
+/// One poll iteration: sense → PolicyDecide → AutonomicApply → fold into
+/// the report. Called from the env-monitor loop.
 void AutonomicTick();
 
 /// Capture the baseline so the first tick does not false-fire on

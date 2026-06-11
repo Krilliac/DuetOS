@@ -309,6 +309,8 @@ const char* FixDetectorName(FixDetector d)
         return "user_fault";
     case FixDetector::KassertFail:
         return "kassert_fail";
+    case FixDetector::AutonomicProposal:
+        return "autonomic_proposal";
     }
     return "unknown";
 }
@@ -534,14 +536,18 @@ void FixJournalEmitBootSummary()
     // counts + audited count. Counters are bounded by the ring
     // capacity so the loop is O(kFixJournalCapacity) — fine to call
     // at smoke completion.
-    u64 per_detector[11] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    // Sized to (highest FixDetector value + 1) so a newly-appended
+    // detector is tallied without editing a hardcoded bound. Bump
+    // kDetectorSlots whenever FixDetector grows past it.
+    constexpr u8 kDetectorSlots = static_cast<u8>(FixDetector::AutonomicProposal) + 1;
+    u64 per_detector[kDetectorSlots] = {};
     u64 audited = 0;
     {
         ::duetos::sync::SpinLockGuard guard(g_lock);
         for (u64 i = 0; i < g_used; ++i)
         {
             const u8 d = static_cast<u8>(g_ring[i].detector);
-            if (d < 11)
+            if (d < kDetectorSlots)
                 ++per_detector[d];
             if ((g_ring[i].flags & 0x01) != 0)
                 ++audited;
@@ -560,7 +566,7 @@ void FixJournalEmitBootSummary()
     // Per-detector breakdown — six lines is verbose but trivially
     // greppable. The detector names match `FixDetectorName()` and
     // the python report's keys, so a CI script can join them.
-    for (u8 d = 1; d < 11; ++d)
+    for (u8 d = 1; d < kDetectorSlots; ++d)
     {
         KLOG_INFO_V("smoke", FixDetectorName(static_cast<FixDetector>(d)), per_detector[d]);
     }
@@ -598,6 +604,7 @@ void FixJournalSelfTest()
         {FixDetector::TrapCapture, "selftest/trap.cpp:1", "trap capture selftest"},
         {FixDetector::UserFault, "selftest/user.task#0", "user fault selftest"},
         {FixDetector::KassertFail, "selftest/assert.subsys", "kassert selftest"},
+        {FixDetector::AutonomicProposal, "selftest/env.policy", "autonomic proposal selftest"},
     };
     constexpr u64 kInjects = sizeof(injects) / sizeof(injects[0]);
 

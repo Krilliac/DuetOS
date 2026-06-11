@@ -3,10 +3,13 @@
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
 #include "debug/probes.h"
+#include "diag/fix_journal.h"
 #include "diag/runtime_checker.h"
 #include "diag/stress_driver.h"
 #include "env/autonomic_feedback.h"
 #include "env/environment.h"
+#include "env/neural_policy.h"
+#include "env/policy_shield.h"
 #include "log/klog.h"
 #include "mm/frame_allocator.h"
 #include "mm/kheap.h"
@@ -15,6 +18,8 @@
 #include "security/guard.h"
 #include "security/policy.h"
 #include "test/smoke_profile.h"
+#include "time/tick.h"
+#include "util/random.h"
 
 namespace duetos::env
 {
@@ -25,11 +30,20 @@ namespace
 constinit AutonomicState g_state = {};
 constinit AutonomicReport g_report = {};
 
+// Last tick a cross-CPU rebalance actually fired — the state the
+// `action_clamp` shield rate-limits against (0 = never).
+constinit u64 g_last_rebalance_tick = 0;
+
 constexpr u32 kQ11One = 2048; // loadavg fixed-point 1.0
+
+// Minimum ticks between active rebalances under the action_clamp shield.
+// An active balance walks every CPU's runqueue under the scheduler lock;
+// a noisy saturation signal must not be allowed to spam it. ~500 ms @100Hz.
+constexpr u64 kRebalanceMinIntervalTicks = 50;
 
 void Push(AutoActionSet& s, AutoRule r, AutoAction a)
 {
-    if (s.count < 4)
+    if (s.count < kAutoActionSetCap)
     {
         s.rules[s.count] = r;
         s.actions[s.count] = a;
@@ -91,6 +105,8 @@ const char* AutoActionName(AutoAction a)
         return "sched-balanced";
     case AutoAction::SchedPowerSave:
         return "sched-powersave";
+    case AutoAction::SchedRebalanceNow:
+        return "sched-rebalance-now";
     case AutoAction::Count:
         return "?";
     }
@@ -150,11 +166,15 @@ AutoActionSet AutonomicEvaluate(AutonomicState& st, const AutoInputs& in)
     st.health_total = in.health_issues_total;
 
     // Rule 4 — CPU saturation: 1-min loadavg above the online-CPU
-    // count (rising edge). Catches runaway tasks / IRQ storms.
+    // count (rising edge). Catches runaway tasks / IRQ storms. On the
+    // rising edge we both surface health (forced scan) AND poke the
+    // scheduler for an out-of-band cross-CPU rebalance so a lopsided
+    // runqueue spreads without waiting a full balance period.
     const bool cpu_sat = (in.cpu_online != 0) && (in.loadavg_1min_q11 > in.cpu_online * kQ11One);
     if (cpu_sat && !st.cpu_saturated)
     {
         Push(s, AutoRule::CpuSaturation, AutoAction::ForceHealthScan);
+        Push(s, AutoRule::CpuSaturation, AutoAction::SchedRebalanceNow);
     }
     st.cpu_saturated = cpu_sat;
 
@@ -171,7 +191,7 @@ AutoActionSet AutonomicEvaluate(AutonomicState& st, const AutoInputs& in)
     return s;
 }
 
-void AutonomicApply(const AutoActionSet& set)
+void AutonomicApply(const AutoActionSet& set, u64 now)
 {
     // Capture pre-action metrics once for the whole set. Every
     // action in `set` fires at the same logical instant, so they
@@ -253,6 +273,29 @@ void AutonomicApply(const AutoActionSet& set)
         case AutoAction::SchedPowerSave:
             sched::SchedSetPowerBias(sched::PowerBias::PowerSave);
             break;
+        case AutoAction::SchedRebalanceNow:
+        {
+            // One-shot cross-CPU rebalance: poke the scheduler to run an
+            // out-of-band active-balance pass on the next tick instead of
+            // waiting up to a full balance period. Idempotent (a second
+            // request before the tick consumes it still yields one pass).
+            //
+            // action_clamp shield: an active balance is expensive (it walks
+            // every CPU's runqueue under the scheduler lock), so when the
+            // clamp is on we hold the actuator to one pass per
+            // kRebalanceMinIntervalTicks — the "actuator parameter stays
+            // within safe bounds" guard. Toggle the clamp off and a
+            // saturated box rebalances on every poll instead.
+            if (ShieldConfigGet().action_clamp && g_last_rebalance_tick != 0 &&
+                now - g_last_rebalance_tick < kRebalanceMinIntervalTicks)
+            {
+                KLOG_ONCE_WARN("autonomic", "rebalance rate-limited by action_clamp shield");
+                break;
+            }
+            g_last_rebalance_tick = now;
+            sched::SchedRequestActiveBalance();
+            break;
+        }
         case AutoAction::None:
         case AutoAction::Count:
             continue;
@@ -268,10 +311,11 @@ void AutonomicApply(const AutoActionSet& set)
         g_report.last = a;
         g_report.last_rule = r;
 
-        // Enqueue a feedback entry. The kselfthink kthread's
-        // Tick() will evaluate the outcome once the deadline
-        // elapses and write a CausalKind::AutoAction row.
-        ::duetos::env::feedback::Enqueue(r, a, pre);
+        // Enqueue a feedback entry stamped with this poll's tick. The
+        // kselfthink kthread's Tick() evaluates the outcome once the
+        // deadline elapses, writes a CausalKind::AutoAction row, and (in
+        // Live mode) feeds the reward back to the learner keyed by `now`.
+        ::duetos::env::feedback::Enqueue(r, a, pre, now);
     }
 }
 
@@ -296,16 +340,147 @@ AutoInputs SenseInputs()
     return in;
 }
 
+void PolicyTrace(const AutoInputs& in, const AutoActionSet& rule_set, const AutoActionSet& net_set,
+                 const AutoActionSet& final_set)
+{
+    // Verbose per-decision trace. DEBUG-gated so it stays quiet at
+    // default log levels; an operator raises the level to watch the
+    // policy decide tick-by-tick. In shadow mode the net's proposals are
+    // logged but `final` actuates the rule floor — the divergence between
+    // the "net proposes" lines and the actuated set IS the shadow data
+    // the operator (and Slice 3's learner) reads.
+    const u64 free_pct = in.total_frames != 0 ? (in.free_frames * 100u) / in.total_frames : 0u;
+    KLOG_DEBUG_V("policy", "decide free_pct", free_pct);
+    KLOG_DEBUG_V("policy", "decide rule_count", rule_set.count);
+    KLOG_DEBUG_V("policy", "decide net_count", net_set.count);
+    KLOG_DEBUG_V("policy", "decide final_count", final_set.count);
+    for (u32 i = 0; i < net_set.count; ++i)
+    {
+        KLOG_DEBUG_S("policy", "net proposes", "action", AutoActionName(net_set.actions[i]));
+    }
+}
+
+// Epsilon-greedy exploration rate (Q16). Held tight when the explore_cap
+// shield is on; widened for un-shielded collection so a master-off boot
+// samples more off-policy moves ("reel in the data").
+constexpr u32 kExploreEpsilonShieldedQ16 = 655; // ~1.0%
+constexpr u32 kExploreEpsilonRawQ16 = 6554;     // ~10.0%
+
+// Build the learner's actuating proposal for a Live tick: forward the
+// learned net (recording the decision context so the delayed reward can
+// credit-assign it), sample bounded exploration, then drop any action
+// whose circuit breaker is open. Shadow mode instead uses the pure,
+// non-recording NeuralPolicyDecide (advisory only).
+AutoActionSet BuildNetProposal(const AutoInputs& in, u64 now, const ShieldConfig& cfg)
+{
+    AutoActionSet net = NeuralPolicyDecideLive(in, now);
+
+    const u32 eps = cfg.explore_cap ? kExploreEpsilonShieldedQ16 : kExploreEpsilonRawQ16;
+    NeuralPolicyExplore(net, eps, static_cast<u32>(core::RandomU64() & 0xFFFFu));
+
+    if (cfg.circuit_breaker)
+    {
+        AutoActionSet kept = {};
+        for (u32 i = 0; i < net.count; ++i)
+        {
+            if (!NeuralPolicyActionBreakerTripped(net.actions[i], now))
+            {
+                Push(kept, net.rules[i], net.actions[i]);
+            }
+        }
+        net = kept;
+    }
+    return net;
+}
+
+// Stable per-action pin so the fix journal dedups a recurring proposal
+// (repeat_count = how durably the learner has avoided this action).
+const char* ProposalPin(AutoAction a)
+{
+    switch (a)
+    {
+    case AutoAction::MemReclaim:
+        return "env/neural-policy:avoid-mem-reclaim";
+    case AutoAction::FootprintTrim:
+        return "env/neural-policy:avoid-footprint-trim";
+    case AutoAction::ForceHealthScan:
+        return "env/neural-policy:avoid-force-scan";
+    default:
+        return "env/neural-policy:avoid-other";
+    }
+}
+
+// Surface the learner's reviewable proposals to the fix journal as DATA
+// (DD#016 — never a code mutation). Shielded reports only durable
+// learned-away gates; the master-off firehose also reports gates trending
+// toward suppression. Records dedup per action; an offline patch generator
+// reads KERNEL.FIX and a human/Claude reviewer decides whether the rule
+// should change. Called each Live poll (Shadow/Off leave the weights at
+// the prior, so the scan is empty).
+void EmitPolicyProposals(const ShieldConfig& cfg)
+{
+    PolicyProposal pr[kNetOut * kNetHidden];
+    const bool aggressive = !cfg.shields_enabled; // master-off => firehose
+    const u32 n = NeuralPolicyProposalScan(pr, static_cast<u32>(kNetOut * kNetHidden), aggressive);
+    for (u32 i = 0; i < n; ++i)
+    {
+        const u64 ctx_a = (static_cast<u64>(pr[i].action) << 8) | static_cast<u64>(static_cast<u32>(pr[i].detector));
+        const u64 ctx_b =
+            (static_cast<u64>(static_cast<u32>(pr[i].prior)) << 32) | static_cast<u64>(static_cast<u32>(pr[i].learned));
+        (void)::duetos::diag::FixJournalRecord(::duetos::diag::FixDetector::AutonomicProposal,
+                                               ProposalPin(pr[i].action),
+                                               "learner suppressed a rule action — review rule", ctx_a, ctx_b);
+    }
+}
+
 } // namespace
+
+AutoActionSet PolicyDecide(AutonomicState& st, const AutoInputs& in, u64 now)
+{
+    // Rule floor — always evaluated: the safety baseline AND the learner's
+    // imitation teacher. Edge state is updated here.
+    const AutoActionSet rule_set = AutonomicEvaluate(st, in);
+    const PolicyMode mode = PolicyModeGet();
+    const ShieldConfig& cfg = ShieldConfigGet();
+
+    // Learned proposal. Off: none. Shadow: advisory (pure decide, traced,
+    // never actuated). Live: the learner drives — forward + explore +
+    // breaker filter, recording the decision context for the delayed reward.
+    AutoActionSet net_set = {};
+    if (mode == PolicyMode::Live)
+    {
+        net_set = BuildNetProposal(in, now, cfg);
+    }
+    else if (mode == PolicyMode::Shadow)
+    {
+        net_set = NeuralPolicyDecide(in);
+    }
+
+    // Reconcile: Off/Shadow -> the rule floor actuates; Live -> the net
+    // drives with the floor's safety actions preserved (master-off -> raw).
+    const AutoActionSet final_set = ShieldReconcile(cfg, mode, rule_set, net_set);
+    PolicyTrace(in, rule_set, net_set, final_set);
+    return final_set;
+}
 
 void AutonomicTick()
 {
     g_report.ticks++;
+    // One tick stamp for the whole poll: the decision context (for the
+    // delayed reward) and the feedback entry must agree on the fire tick.
+    const u64 now = ::duetos::time::TickCount();
     const AutoInputs in = SenseInputs();
-    const AutoActionSet set = AutonomicEvaluate(g_state, in);
+    const AutoActionSet set = PolicyDecide(g_state, in, now);
     if (set.count != 0)
     {
-        AutonomicApply(set);
+        AutonomicApply(set, now);
+    }
+
+    // Surface any reviewable proposals the learner has accumulated. Only
+    // Live mode learns, so Shadow/Off scan empty — gate to avoid the call.
+    if (PolicyModeGet() == PolicyMode::Live)
+    {
+        EmitPolicyProposals(ShieldConfigGet());
     }
 }
 
@@ -385,12 +560,13 @@ void AutonomicSelfTest()
     Eq(s.count, 1, "tamper fires one");
     Eq(static_cast<u64>(s.actions[0]), static_cast<u64>(AutoAction::SecurityEscalate), "tamper=escalate");
 
-    // Rule 4: loadavg above online-CPU count → ForceHealthScan.
+    // Rule 4: loadavg above online-CPU count → ForceHealthScan + rebalance.
     AutoInputs busy = tamper;
     busy.loadavg_1min_q11 = busy.cpu_online * kQ11One + 1; // > nCPU
     s = AutonomicEvaluate(st, busy);
-    Eq(s.count, 1, "cpu-sat fires one");
-    Eq(static_cast<u64>(s.actions[0]), static_cast<u64>(AutoAction::ForceHealthScan), "cpu-sat=scan");
+    Eq(s.count, 2, "cpu-sat fires two");
+    Eq(static_cast<u64>(s.actions[0]), static_cast<u64>(AutoAction::ForceHealthScan), "cpu-sat[0]=scan");
+    Eq(static_cast<u64>(s.actions[1]), static_cast<u64>(AutoAction::SchedRebalanceNow), "cpu-sat[1]=rebalance");
 
     // Rule 5: policy → PowerSave changes the scheduler bias.
     AutoInputs saver = busy;

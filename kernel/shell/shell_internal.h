@@ -385,7 +385,7 @@ void CmdHdaJacks();
 void CmdMei();
 void CmdMePsp();
 void CmdNpu();
-void CmdAutonomic();
+void CmdAutonomic(u32 argc, char** argv);
 void CmdHeap(u32 argc, char** argv);
 void CmdPaging();
 void CmdVtop(u32 argc, char** argv);

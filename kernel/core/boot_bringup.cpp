@@ -150,6 +150,8 @@
 #include "drivers/power/power.h"
 #include "env/autonomic.h"
 #include "env/environment.h"
+#include "env/neural_policy.h"
+#include "env/policy_shield.h"
 #include "drivers/usb/btusb.h"
 #include "drivers/usb/cdc_ecm.h"
 #include "drivers/usb/hid_descriptor.h"
@@ -491,6 +493,15 @@ void BootBringupEarly(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
         SerialWrite("[boot] debug stub attached — standing down int3/DR boot "
                     "self-tests (host owns #BP/#DB)\n");
     }
+
+    // Parse the learned-autonomic-policy knobs from the same cmdline
+    // (cache is now primed). Sets constinit globals read much later by
+    // the env-monitor tick:
+    //   autonomic=off|shadow|live  — policy participation mode
+    //   shields=on|off             — safety-shield master (off boots
+    //                                straight into un-shielded policy
+    //                                data collection during testing)
+    duetos::env::PolicyConfigInitFromCmdline(duetos::core::FindBootCmdline(multiboot_info));
 
     // klog online as early as Serial. Self-test prints one line at
     // each severity so visual inspection of the early boot log
@@ -2317,6 +2328,14 @@ void BootBringupDevices(bool force_net_smoke)
     // ticks it every poll (sense → decide → act).
     duetos::env::AutonomicInit();
     DUETOS_BOOT_SELFTEST(duetos::env::AutonomicSelfTest());
+    // Learned-policy shield: prove the toggle surface (defaults, master
+    // off/on, cmdline parse, ShieldApply passthrough) before the seam is
+    // ever exercised. The seam (PolicyDecide) is now in AutonomicTick.
+    DUETOS_BOOT_SELFTEST(duetos::env::PolicyShieldSelfTest());
+    // Imitation neural policy (Slice 2): runs in shadow mode every tick
+    // (computed + traced, rule floor still actuates). Self-test echoes the
+    // host test's imitation coverage on-target.
+    DUETOS_BOOT_SELFTEST(duetos::env::NeuralPolicySelfTest());
     // Spawn the env-monitor poller now that the scheduler is online
     // and the first snapshot is published. It re-composes on a
     // timed poll so cached state stays live (the "reactive" half);

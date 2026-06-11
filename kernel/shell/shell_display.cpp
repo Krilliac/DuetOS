@@ -29,6 +29,8 @@
 #include "net/firewall.h"
 #include "security/me_psp_guard.h"
 #include "env/autonomic.h"
+#include "env/neural_policy.h"
+#include "env/policy_shield.h"
 #include "drivers/gpu/bochs_vbe.h"
 #include "drivers/gpu/cea861.h"
 #include "drivers/gpu/cvt.h"
@@ -1204,14 +1206,128 @@ void CmdNpu()
     ConsoleWriteln("  (firmware / command-ring not yet implemented — driver is probe-only)");
 }
 
-void CmdAutonomic()
+void CmdAutonomic(u32 argc, char** argv)
 {
     namespace e = duetos::env;
+
+    // ----- autonomic mode [off|shadow|live] -----
+    if (argc >= 2 && StrEq(argv[1], "mode"))
+    {
+        if (argc >= 3)
+        {
+            if (StrEq(argv[2], "off"))
+                e::PolicyModeSet(e::PolicyMode::Off);
+            else if (StrEq(argv[2], "shadow"))
+                e::PolicyModeSet(e::PolicyMode::Shadow);
+            else if (StrEq(argv[2], "live"))
+                e::PolicyModeSet(e::PolicyMode::Live);
+            else
+            {
+                ConsoleWriteln("usage: autonomic mode <off|shadow|live>");
+                return;
+            }
+        }
+        ConsoleWrite("autonomic mode: ");
+        ConsoleWriteln(e::PolicyModeName(e::PolicyModeGet()));
+        return;
+    }
+
+    // ----- autonomic shields [on|off] (master toggle / "reel in data") --
+    if (argc >= 2 && StrEq(argv[1], "shields"))
+    {
+        if (argc >= 3)
+        {
+            if (StrEq(argv[2], "on"))
+                e::ShieldMasterSet(true);
+            else if (StrEq(argv[2], "off"))
+                e::ShieldMasterSet(false);
+            else
+            {
+                ConsoleWriteln("usage: autonomic shields <on|off>");
+                return;
+            }
+        }
+        ConsoleWrite("autonomic shields: ");
+        ConsoleWriteln(e::ShieldConfigGet().shields_enabled ? "ON (full safety envelope)"
+                                                            : "OFF (raw policy — data collection)");
+        return;
+    }
+
+    // ----- autonomic weights [reset] — the learned output layer -----
+    if (argc >= 2 && StrEq(argv[1], "weights"))
+    {
+        if (argc >= 3 && StrEq(argv[2], "reset"))
+        {
+            e::NeuralPolicyResetWeights();
+            ConsoleWriteln("autonomic: learned weights reset to the imitation prior");
+            return;
+        }
+        const e::NetParams p = e::NeuralPolicyWeightsSnapshot();
+        auto wsigned = [](i32 v)
+        {
+            if (v < 0)
+            {
+                ConsoleWrite("-");
+                WriteU64Dec(static_cast<u64>(-static_cast<i64>(v)));
+            }
+            else
+            {
+                WriteU64Dec(static_cast<u64>(v));
+            }
+        };
+        ConsoleWriteln("AUTONOMIC learned output layer (out: 0=mem-reclaim 1=footprint-trim 2=force-scan)");
+        for (int k = 0; k < e::kNetOut; ++k)
+        {
+            ConsoleWrite("  out[");
+            WriteU64Dec(static_cast<u64>(k));
+            ConsoleWrite("] w2=");
+            for (int j = 0; j < e::kNetHidden; ++j)
+            {
+                wsigned(p.w2[j][k]);
+                ConsoleWrite(j + 1 < e::kNetHidden ? "," : "");
+            }
+            ConsoleWrite(" b2=");
+            wsigned(p.b2[k]);
+            ConsoleWriteln("");
+        }
+        return;
+    }
+
+    // ----- autonomic proposals — reviewable learned-away gates -----
+    if (argc >= 2 && StrEq(argv[1], "proposals"))
+    {
+        e::PolicyProposal pr[e::kNetOut * e::kNetHidden];
+        const bool aggressive = !e::ShieldConfigGet().shields_enabled;
+        const u32 n = e::NeuralPolicyProposalScan(pr, static_cast<u32>(e::kNetOut * e::kNetHidden), aggressive);
+        ConsoleWrite("AUTONOMIC proposals");
+        ConsoleWrite(aggressive ? " (firehose): " : " (durable): ");
+        WriteU64Dec(n);
+        ConsoleWriteln("");
+        for (u32 i = 0; i < n; ++i)
+        {
+            ConsoleWrite("  suppress ");
+            ConsoleWrite(e::AutoActionName(pr[i].action));
+            ConsoleWrite(" (detector ");
+            WriteU64Dec(static_cast<u64>(pr[i].detector));
+            ConsoleWriteln(") — recorded to KERNEL.FIX for review");
+        }
+        if (n == 0)
+        {
+            ConsoleWriteln("  (none — the learner agrees with the rule floor)");
+        }
+        return;
+    }
+
+    // ----- no subcommand: status -----
     const e::AutonomicReport& r = e::AutonomicStatus();
     ConsoleWrite("AUTONOMIC: ticks=");
     WriteU64Dec(r.ticks);
     ConsoleWrite(" actions=");
     WriteU64Dec(r.actions_fired);
+    ConsoleWrite(" policy=");
+    ConsoleWrite(e::PolicyModeName(e::PolicyModeGet()));
+    ConsoleWrite(" shields=");
+    ConsoleWrite(e::ShieldConfigGet().shields_enabled ? "on" : "off");
     ConsoleWrite(" sched-bias=");
     ConsoleWrite(duetos::sched::SchedPowerBiasName(duetos::sched::SchedPowerBias()));
     ConsoleWrite(" balance-period=");
