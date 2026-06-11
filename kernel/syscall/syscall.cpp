@@ -45,6 +45,7 @@
 
 #include "syscall/cap_gate.h"
 #include "syscall/error.h"
+#include "syscall/inferred_gap.h"
 #include "syscall/syscall.h"
 #include "drivers/video/cursor.h"
 #include "drivers/video/widget.h"
@@ -524,6 +525,15 @@ void SyscallDispatch(arch::TrapFrame* frame)
         {
             ::duetos::sched::SyscallTrailRecord(::duetos::sched::kSyscallAbiNative, static_cast<u32>(num), a0, a1, a2,
                                                 a3, f->rax);
+            // Phase A dynamic fix-discovery: if this RECOGNIZED syscall handed
+            // a guest the not-implemented sentinel, record an InferredGap
+            // (dedup per number) — an unimplemented op discovered with no
+            // source marker. Runs on every normal return; SYS_EXIT's noreturn
+            // SchedExit bypasses this (an exiting task is not a gap), and a
+            // cap-denied return carries PermissionDenied (not the sentinel),
+            // so it does not record. See
+            // docs/superpowers/specs/2026-06-11-dynamic-fix-discovery-design.md
+            ::duetos::syscall::InferredGapMaybeRecord(f->rax, num);
         }
     };
     SyscallTrailGuard trail_guard{frame, num, frame->rdi, frame->rsi, frame->rdx, frame->r10};

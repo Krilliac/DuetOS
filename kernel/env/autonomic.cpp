@@ -7,9 +7,11 @@
 #include "diag/runtime_checker.h"
 #include "diag/stress_driver.h"
 #include "env/autonomic_feedback.h"
+#include "env/config_proposal.h"
 #include "env/environment.h"
 #include "env/neural_policy.h"
 #include "env/policy_shield.h"
+#include "syscall/inferred_gap.h"
 #include "log/klog.h"
 #include "mm/frame_allocator.h"
 #include "mm/kheap.h"
@@ -481,6 +483,12 @@ void AutonomicTick()
     if (PolicyModeGet() == PolicyMode::Live)
     {
         EmitPolicyProposals(ShieldConfigGet());
+        // Phase B dynamic fix-discovery: surface a bounded, evidence-backed
+        // CONFIG proposal as DATA when runtime pressure crosses threshold —
+        // here, inferred-gap discovery dropping distinct pins because the
+        // per-boot cap is too low. DD#016: this writes a journal record, never
+        // source. See docs/superpowers/specs/2026-06-11-dynamic-fix-discovery-design.md
+        EmitConfigProposal(ConfigKnob::InferredGapPinCap, ::duetos::syscall::InferredGapDroppedCount());
     }
 }
 

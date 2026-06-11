@@ -311,6 +311,8 @@ const char* FixDetectorName(FixDetector d)
         return "kassert_fail";
     case FixDetector::AutonomicProposal:
         return "autonomic_proposal";
+    case FixDetector::InferredGap:
+        return "inferred_gap";
     }
     return "unknown";
 }

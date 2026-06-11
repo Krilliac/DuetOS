@@ -133,6 +133,17 @@ enum class FixDetector : u8
                             // pair. source_pin = the env policy site that
                             // produced the proposal; hint = the one-line
                             // "what a reviewer should consider" prompt.
+    InferredGap = 12,       // A RECOGNIZED syscall whose handler returned the
+                            // not-implemented sentinel (kStatusNotImplemented,
+                            // 0xC0000002) to a guest. Distinct from
+                            // UnknownSyscall (an UNKNOWN number) — this is a
+                            // known number whose behaviour is unimplemented,
+                            // discovered dynamically with NO source marker.
+                            // source_pin = `syscall:0xNN`, ctx_a = syscall
+                            // number, ctx_b = 0. Dedups per number so a guest
+                            // hammering an unimplemented op becomes one record
+                            // with repeat=N. The offline generator renders a
+                            // "discovered at runtime (unannotated)" note.
 };
 
 /// Stable human label. Always returns a non-null pointer into .rodata.
