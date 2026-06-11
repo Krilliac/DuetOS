@@ -48,6 +48,13 @@ constinit u64 g_deny_count = 0;
 constinit u64 g_sample_cursor = 0;
 constinit bool g_force_next_sample = false;
 
+// When true, the persistent fix-journal mirror in RingPushDenial is skipped.
+// Set by the cap-gate self-test around its table sweep so the EXPECTED
+// empty/nullptr-caps denials don't pollute KERNEL.FIX (and get mis-flagged
+// HIGH by the patch generator). Process-context only; the self-test runs once
+// at boot on the BSP, so a plain bool needs no synchronisation.
+constinit bool g_suppress_journal = false;
+
 // Denial-history ring. Fixed-capacity, newest-overwrites-oldest, all
 // access from the audit hook (which is called with IRQs already
 // inhibited by the gate path). `g_deny_seq` is the monotonic
@@ -81,6 +88,13 @@ void RingPushDenial(const CapAuditEvent& event)
     // does not — it's overwritten by the next deny storm). The
     // journal dedups per (cap, syscall) so a 1000-call storm
     // becomes one record with repeat=1000.
+    //
+    // ...unless the cap-gate self-test is mid-sweep: it deliberately denies
+    // every non-zero-mask row with empty/nullptr caps, and persisting those
+    // would flag the patch generator with spurious "proc 0" cap denials. The
+    // in-RAM ring above already captured this denial for live inspection.
+    if (g_suppress_journal)
+        return;
     //
     // The pin shape is `cap.<CapName>` — dedup keys on the missing
     // cap kind (not the syscall) so the same cap denied across
@@ -218,6 +232,11 @@ void CapAuditResetCounters()
 void CapAuditForceNextSample()
 {
     g_force_next_sample = true;
+}
+
+void CapAuditSuppressJournal(bool suppress)
+{
+    g_suppress_journal = suppress;
 }
 
 duetos::core::CapAuditMode CapAuditGetMode()

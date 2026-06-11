@@ -103,6 +103,12 @@ void SyscallGateSelfTest()
 {
     arch::SerialWrite("[cap-gate] self-test: walking kSyscallCapTable.\n");
 
+    // The sweep below deliberately denies every non-zero-mask row with
+    // empty/nullptr caps. Those denials are EXPECTED — silence the persistent
+    // fix-journal mirror for the duration so they don't pollute KERNEL.FIX
+    // with "proc 0" cap-denial records the patch generator flags as bugs.
+    duetos::security::CapAuditSuppressJournal(true);
+
     // Static-storage so we don't put a full Process on the boot
     // stack — the struct is ~hundreds of bytes and growing.
     static Process empty{};
@@ -182,6 +188,7 @@ void SyscallGateSelfTest()
         Panic("cap-gate", "kSyscallCapTable has no non-zero rows; nothing tested");
     }
 
+    duetos::security::CapAuditSuppressJournal(false);
     arch::SerialWrite("[cap-gate] self-test: empty fails, trusted passes, nullptr respects mask. OK.\n");
 }
 
