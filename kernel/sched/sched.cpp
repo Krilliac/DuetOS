@@ -1622,32 +1622,50 @@ constexpr u32 kBalanceNoVictim = ~0u;
 constexpr u64 kPowerSaveBalanceFactor = 4;
 constinit u8 g_sched_power_bias = static_cast<u8>(PowerBias::Performance);
 
-// One-shot "force an active-balance pass on the next tick" flag — the
-// slice-4 autonomic actuator (`SchedRequestActiveBalance`). Written
-// from task context (the env engine when it decides the box needs an
-// immediate cross-CPU rebalance), read+cleared from timer-IRQ context
-// at the active-balancer gate in OnTimerTick. The exchange-to-clear is
-// atomic so it's a true one-shot: setting it twice before a tick
-// consumes it still yields exactly one forced pass, and the tick-side
-// read never races a concurrent set into a lost wakeup. Relaxed order
-// — the flag carries no data dependency, only the "run a pass" signal;
-// the pass itself takes g_sched_lock for all the state it touches.
-constinit bool g_sched_force_active_balance = false;
+// Per-CPU "force an active-balance pass on the next tick" bitmask — the
+// slice-4 autonomic actuator (`SchedRequestActiveBalance`). Bit N set =
+// CPU N still owes one out-of-band balance pass. Written from task context
+// (the env engine when it decides the box needs an immediate cross-CPU
+// rebalance); each CPU clears ONLY its own bit at the active-balancer gate
+// in OnTimerTick.
+//
+// Per-CPU broadcast, NOT a single global one-shot: the periodic balancer
+// pulls work TOWARD the ticking CPU from a heavier peer, so a forced pass
+// is only USEFUL on an under-loaded CPU. A global flag consumed by
+// whichever CPU ticks first is nondeterministically ineffective — if that
+// CPU is the overloaded one, its pull is a no-op (it won't pull to its own
+// already-long queue) and the flag is gone before a light CPU ticks.
+// Broadcasting one pass to every online CPU guarantees the light ones run
+// the useful pull. (Fixes the bug Codex flagged on PR #415.) u32 mask
+// (acpi::kMaxCpus == 32). Relaxed order — the mask carries no data
+// dependency, only the "run a pass" signal; the pass itself takes
+// g_sched_lock for all the state it touches.
+constinit u32 g_sched_force_balance_mask = 0;
 
-// Task-context setter: arm the one-shot. Idempotent — a second arm
-// before the tick consumes the first is a no-op (the flag is already
-// true). See SchedRequestActiveBalance.
+// Task-context setter: arm one forced pass on every online CPU. Idempotent
+// — re-arming before all CPUs have consumed just re-broadcasts; each CPU
+// still runs exactly one pass per tick on which it sees its bit set. The
+// online→bitmask is computed inline (mirrors OnlineCpuMask, which is
+// defined later in the file) to keep this hot-adjacent setter self-contained.
 void ArmForcedActiveBalance()
 {
-    __atomic_store_n(&g_sched_force_active_balance, true, __ATOMIC_RELAXED);
+    const u32 online = static_cast<u32>(arch::SmpCpusOnline());
+    const u32 mask = (online == 0u) ? 0u : (online >= 32u ? ~0u : ((1u << online) - 1u));
+    __atomic_or_fetch(&g_sched_force_balance_mask, mask, __ATOMIC_RELAXED);
 }
 
-// Tick-context check-and-clear: returns true (and clears the flag) iff
-// a forced pass was armed since the last consume. Single atomic
-// exchange so the one-shot can't double-fire or be lost.
-bool TakeForcedActiveBalance()
+// Tick-context check-and-clear for ONE CPU: atomically clears `cpu_id`'s
+// bit and returns true iff it was set (this CPU owed a forced pass). Single
+// fetch-and so a peer CPU clearing its own bit never races this one, and
+// the per-CPU one-shot can't double-fire.
+bool ConsumeForcedActiveBalance(u32 cpu_id)
 {
-    return __atomic_exchange_n(&g_sched_force_active_balance, false, __ATOMIC_RELAXED);
+    if (cpu_id >= 32u)
+    {
+        return false; // mask is 32 bits wide (acpi::kMaxCpus)
+    }
+    const u32 bit = 1u << cpu_id;
+    return (__atomic_fetch_and(&g_sched_force_balance_mask, ~bit, __ATOMIC_RELAXED) & bit) != 0u;
 }
 
 // Pure decision: returns the cpu_id of the heaviest same-cluster
@@ -3761,12 +3779,12 @@ void OnTimerTick(u64 now_ticks)
             const u64 period = (g_sched_power_bias == static_cast<u8>(PowerBias::PowerSave))
                                    ? (kBalancePeriodTicks * kPowerSaveBalanceFactor)
                                    : kBalancePeriodTicks;
-            // Consume the autonomic one-shot every tick (unconditional
-            // read+clear so it never sits armed past the tick that
-            // sees it). A forced pass ADDS an out-of-band balance on
-            // top of the normal cadence — it never changes the period
+            // Consume THIS CPU's autonomic one-shot every tick
+            // (unconditional read+clear so it never sits armed past the
+            // tick that sees it). A forced pass ADDS an out-of-band balance
+            // on top of the normal cadence — it never changes the period
             // phase, so the next scheduled pass still lands on time.
-            const bool forced = TakeForcedActiveBalance();
+            const bool forced = ConsumeForcedActiveBalance(static_cast<u32>(tick_cpu->cpu_id));
             if (forced || (now_ticks + phase) % period == 0)
             {
                 PeriodicBalanceTick();
@@ -4252,38 +4270,45 @@ void LoadBalanceSelfTest()
 
 void SchedActiveBalanceSelfTest()
 {
-    // Verify the autonomic one-shot rebalance poke: flag clear at
-    // start, set after a request, clear again after the tick-side
-    // consume (true one-shot). Exercises the exact arm + check-and-
-    // clear helpers OnTimerTick uses, so a regression in either the
-    // store or the exchange-to-clear shows up here. Pure flag logic —
-    // no lock, no PerCpu state — so it's deterministic on a 1-CPU TCG
-    // guest.
+    // Verify the autonomic rebalance poke is a per-CPU broadcast: a request
+    // arms THIS CPU's bit, this CPU's tick consumes ONLY its own bit, and a
+    // second consume is a no-op (a true per-CPU one-shot). Per-CPU is the
+    // fix for the global-one-shot bug Codex flagged on PR #415 — whichever
+    // CPU ticked first consumed the flag, so if that was the overloaded CPU
+    // its pull was a no-op and the light CPU that could pull never ran.
+    //
+    // The assertions touch only THIS CPU's bit, because on SMP the live APs
+    // concurrently clear their own bits at their ticks (so an assertion on
+    // the whole mask, e.g. == OnlineCpuMask(), would be racy). This CPU's
+    // bit is cleared only by this CPU, and we run in task context between
+    // ticks, so it is race-free. The broadcast-to-all is by construction
+    // (ArmForcedActiveBalance ORs OnlineCpuMask).
 
-    // Snapshot + force the flag clear so a real poke racing the test
-    // (the env engine runs in task context) can't leave it pre-armed.
-    const bool saved = TakeForcedActiveBalance();
+    cpu::PerCpu* self = cpu::CurrentCpu();
+    KASSERT(self != nullptr, "sched", "SchedActiveBalanceSelfTest: no current CPU");
+    const u32 self_id = static_cast<u32>(self->cpu_id);
+    const u32 self_bit = 1u << self_id;
 
-    KASSERT(__atomic_load_n(&g_sched_force_active_balance, __ATOMIC_RELAXED) == false, "sched",
-            "SchedActiveBalanceSelfTest: flag not clear at start");
+    // Snapshot + clear so a real poke racing the test (the env engine runs
+    // in task context) can't perturb the assertions; restore at exit.
+    const u32 saved = __atomic_exchange_n(&g_sched_force_balance_mask, 0u, __ATOMIC_RELAXED);
 
     SchedRequestActiveBalance();
-    KASSERT(__atomic_load_n(&g_sched_force_active_balance, __ATOMIC_RELAXED) == true, "sched",
-            "SchedActiveBalanceSelfTest: request did not arm flag");
+    KASSERT((__atomic_load_n(&g_sched_force_balance_mask, __ATOMIC_RELAXED) & self_bit) != 0u, "sched",
+            "SchedActiveBalanceSelfTest: request did not arm this CPU's bit");
 
-    // Simulate the tick-side read+clear. Must report armed AND leave
-    // the flag clear afterwards — the one-shot consumes exactly once.
-    const bool took = TakeForcedActiveBalance();
-    KASSERT(took == true, "sched", "SchedActiveBalanceSelfTest: consume did not observe armed flag");
-    KASSERT(__atomic_load_n(&g_sched_force_active_balance, __ATOMIC_RELAXED) == false, "sched",
-            "SchedActiveBalanceSelfTest: flag still set after consume (not one-shot)");
+    // This CPU's tick consumes ONLY its own bit.
+    KASSERT(ConsumeForcedActiveBalance(self_id), "sched",
+            "SchedActiveBalanceSelfTest: consume did not observe this CPU's armed bit");
+    KASSERT((__atomic_load_n(&g_sched_force_balance_mask, __ATOMIC_RELAXED) & self_bit) == 0u, "sched",
+            "SchedActiveBalanceSelfTest: this CPU's bit not cleared after consume");
+    // A second consume on this CPU is a no-op — one forced pass per arm.
+    KASSERT(!ConsumeForcedActiveBalance(self_id), "sched",
+            "SchedActiveBalanceSelfTest: bit re-fired (not one-shot per CPU)");
 
-    // Restore any poke we displaced at the top so a real request
-    // issued just before the self-test still fires on the next tick.
-    if (saved)
-    {
-        ArmForcedActiveBalance();
-    }
+    // Restore any poke we displaced at the top so a real request issued
+    // just before the self-test still fires on the next tick.
+    __atomic_store_n(&g_sched_force_balance_mask, saved, __ATOMIC_RELAXED);
 
     arch::SerialWrite("[sched-activebalance-selftest] PASS\n");
 }
