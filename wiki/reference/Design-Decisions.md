@@ -11448,3 +11448,30 @@ the arc. Three boundaries were fixed.
   actuator is silently truncated out of a reconciled decision. **Rules out**
   leaving the 4-slot array (a silent drop of a kernel actuator in a busy
   multi-rule tick is a correctness bug, not an acceptable cap).
+
+## 2026-06-11 — VK ICD resource-creation ops validate guest pointers/sizes (no exceptions)
+
+Surfaced by the 26-agent adversarial attack campaign. Commit 2267544b
+hardened the scalar `SYS_VK_CALL` store/load helpers to go through
+`mm::CopyFromUser`/`CopyToUser`, but the resource-creation ops still trusted
+the guest, leaving two HIGH guest-reachable holes.
+
+- **Decision (every guest pointer the ICD dereferences is bounced through a
+  fault-recoverable copy, never read in place):** `OpCreateShaderModule`
+  now caps `code_size_bytes` (16 MiB), rejects non-word-multiple sizes,
+  `KMalloc`s a bounce buffer, `CopyFromUser`s the SPIR-V, and feeds the ICD
+  only the kernel copy (the ICD takes its own owning copy, so the bounce is
+  freed immediately). **Rules out** the "read the user pointer directly, it's
+  just a v0 skeleton" shortcut — a bad/oversized/read-only guest pointer is a
+  kernel #PF / heap-exhaustion DoS a native process cannot cause.
+- **Decision (every `Bind*Memory` validates the bound region fits the memory
+  object):** `VkBindImageMemory` now mirrors `VkBindBufferMemory`'s
+  `offset <= mem.size && required <= mem.size - offset` check (overflow-safe
+  subtraction form), with `required` computed from the format-correct
+  `BytesPerTexelForFormat` rather than a hardcoded 4 B/texel;
+  `VkGetImageMemoryRequirements` reports the same stride so compliant guests
+  allocate enough, and `VkAllocateMemory` caps the guest size. **Rules out**
+  per-op ad-hoc validation: the buffer path was checked and the image path
+  was not, which let a guest bind a large image into a small allocation and
+  OOB-write the kernel heap via `OpImageWrite`. Validation is now uniform
+  across the bind ops.

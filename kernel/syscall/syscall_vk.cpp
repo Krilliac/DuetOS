@@ -2,6 +2,7 @@
 
 #include "drivers/video/display_info.h"
 #include "drivers/video/framebuffer.h"
+#include "mm/kheap.h"
 #include "mm/paging.h"
 #include "subsystems/graphics/graphics.h"
 #include "subsystems/graphics/graphics_vk_internal.h"
@@ -199,18 +200,35 @@ u64 OpPresent(arch::TrapFrame* frame)
 u64 OpCreateShaderModule(arch::TrapFrame* frame)
 {
     const u64 dev = frame->rdx;
-    const u32* code = reinterpret_cast<const u32*>(frame->r10);
+    const u64 user_code = frame->r10;
     const u64 code_size_bytes = frame->r8;
-    if (code == nullptr || code_size_bytes == 0)
+    // SPIR-V is a stream of 32-bit words, so a valid module is a non-zero
+    // multiple of 4 bytes. Cap the length so a guest can't force a multi-GB
+    // kernel allocation (heap-exhaustion DoS), and reject the degenerate
+    // sizes up front.
+    constexpr u64 kMaxSpirvBytes = 16ull * 1024 * 1024; // 16 MiB
+    if (user_code == 0 || code_size_bytes == 0 || (code_size_bytes & 3u) != 0 || code_size_bytes > kMaxSpirvBytes)
         return 0;
-    // GAP: `code` is a raw user pointer of user-controlled length read
-    // directly by the ICD — a guest can pass a bad pointer / oversized
-    // length and fault the kernel reading it. Unlike the UserStore/UserLoad
-    // path this needs a bounded copy-in (cap + kmalloc + CopyFromUser) and
-    // an ICD that reads from the kernel copy. Revisit with the SPIR-V
-    // pipeline slice (see wiki/reference/Roadmap.md, vk-syscall hardening).
+    // The ICD walks `code` directly (ParseSpirv reads code[0..n]), so it must
+    // never see a raw user pointer: a bad / unmapped / read-only guest pointer
+    // would #PF the kernel — a halt a native process can't cause. Bounce the
+    // SPIR-V into a kernel buffer through the fault-recoverable mm::CopyFromUser
+    // and hand the ICD only the kernel copy (VkCreateShaderModule takes its own
+    // owning copy, so the bounce buffer is freed immediately after). Mirrors the
+    // UserStore/UserLoad discipline above; closes the user-pointer hole the
+    // resource-creation ops were left with when commit 2267544b hardened the
+    // store/load path.
+    u32* kcode = static_cast<u32*>(mm::KMalloc(code_size_bytes));
+    if (kcode == nullptr)
+        return 0;
+    if (!mm::CopyFromUser(kcode, reinterpret_cast<const void*>(user_code), code_size_bytes))
+    {
+        mm::KFree(kcode);
+        return 0;
+    }
     vk::VkShaderModule out = 0;
-    const vk::VkResult r = vk::VkCreateShaderModule(dev, code, code_size_bytes, &out);
+    const vk::VkResult r = vk::VkCreateShaderModule(dev, kcode, code_size_bytes, &out);
+    mm::KFree(kcode);
     return (r == vk::VkResult::Success) ? out : 0;
 }
 

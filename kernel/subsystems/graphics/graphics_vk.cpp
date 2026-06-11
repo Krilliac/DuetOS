@@ -666,6 +666,14 @@ VkResult VkAllocateMemory(VkDevice dev, u64 size, u32 memory_type_index, VkDevic
         return VkResult::ErrorInitializationFailed;
     if (size == 0)
         return VkResult::ErrorOutOfDeviceMemory;
+    // Cap the guest-controlled allocation size. A host-visible request backs
+    // straight into the kernel heap (mm::KMalloc below); the largest legal
+    // image is 16384x16384x16B (~4 GiB), so anything past that can only be a
+    // heap-exhaustion attempt. KMalloc already null-returns gracefully, but
+    // rejecting up front avoids thrashing the allocator on absurd requests.
+    constexpr u64 kMaxDeviceMemoryBytes = 4ull * 1024 * 1024 * 1024 + (1ull << 20);
+    if (size > kMaxDeviceMemoryBytes)
+        return VkResult::ErrorOutOfDeviceMemory;
     // Memory type 0 = DEVICE_LOCAL, 1 = HOST_VISIBLE+COHERENT.
     // (See VkGetPhysicalDeviceMemoryProperties.)
     if (memory_type_index >= 2)
@@ -857,6 +865,20 @@ VkResult VkBindImageMemory(VkDevice dev, VkImage img, VkDeviceMemory mem, u64 of
         return VkResult::ErrorInitializationFailed;
     const u32 islot = SlotOf(img, kImageBase);
     const u32 mslot = SlotOf(mem, kMemoryBase);
+    const auto& img_rec = g_image_data[islot];
+    const auto& mem_rec = g_memory_data[mslot];
+    // The bound region must lie wholly within the device-memory object.
+    // Without this a guest can bind a large image into a small allocation
+    // and a subsequent OpImageWrite walks `backing` across the full extent,
+    // overrunning the KMalloc slab into adjacent kernel objects (controlled
+    // kernel-heap OOB write). Extent is capped to 16384x16384 at create time
+    // and BytesPerTexelForFormat() <= 16, so `required` is <= ~4.3 GiB and
+    // cannot overflow u64; the subtraction form avoids overflow on a
+    // guest-controlled `offset`. Mirrors VkBindBufferMemory.
+    const u64 required =
+        static_cast<u64>(img_rec.extent.width) * img_rec.extent.height * BytesPerTexelForFormat(img_rec.format);
+    if (offset > mem_rec.size || required > mem_rec.size - offset)
+        return VkResult::ErrorInitializationFailed;
     g_image_data[islot].memory_bound = true;
     // Capture the backing pointer at bind time so the texture-
     // sample path can fetch texels without walking the memory
@@ -864,8 +886,8 @@ VkResult VkBindImageMemory(VkDevice dev, VkImage img, VkDeviceMemory mem, u64 of
     // bound; when the memory wasn't host-visible (host_ptr nullptr)
     // we leave backing as null and the sampler falls back to the
     // diagnostic checkerboard.
-    if (g_memory_data[mslot].host_visible && g_memory_data[mslot].host_ptr != nullptr)
-        g_image_data[islot].backing = static_cast<u8*>(g_memory_data[mslot].host_ptr) + offset;
+    if (mem_rec.host_visible && mem_rec.host_ptr != nullptr)
+        g_image_data[islot].backing = static_cast<u8*>(mem_rec.host_ptr) + offset;
     else
         g_image_data[islot].backing = nullptr;
     return VkResult::Success;
@@ -1254,7 +1276,10 @@ VkResult VkGetImageMemoryRequirements(VkDevice dev, VkImage image, VkMemoryRequi
         return VkResult::ErrorInitializationFailed;
     const auto& img = g_image_data[SlotOf(image, kImageBase)];
     *out = VkMemoryRequirements{};
-    out->size = static_cast<u64>(img.extent.width) * img.extent.height * 4u; // assume B8G8R8A8
+    // Report the format-correct stride (up to 16 B/texel for format 5), not a
+    // hardcoded 4 — otherwise a well-behaved guest under-allocates and the
+    // VkBindImageMemory bounds check correctly rejects its bind.
+    out->size = static_cast<u64>(img.extent.width) * img.extent.height * BytesPerTexelForFormat(img.format);
     out->alignment = 4096;
     out->memoryTypeBits = 0x1; // device-local only
     return VkResult::Success;
