@@ -11380,3 +11380,35 @@ below so a future audit doesn't re-chase them.
   the exact pop path on a scratch runqueue filled across all 4 bands and
   asserts high→low drain order + the valve firing on the 8th pop —
   deterministic, no scheduling races. `[mlfq-preempt-selftest] PASS`.
+
+## 2026-06-10 — Autonomic policy: a learned brain may rewrite its weights, never its code
+
+The autonomic engine's `decide` step (`env::AutonomicEvaluate`) is being
+replaced by a learned, online-adapting neural policy — the 4-slice arc in
+[`docs/superpowers/specs/2026-06-10-autonomic-neural-policy-design.md`](../../docs/superpowers/specs/2026-06-10-autonomic-neural-policy-design.md).
+Slice 1 lands the seam + the toggleable safety shield only (the net,
+learning, and actuators follow). Two boundaries were fixed up front because
+they constrain every later slice.
+
+- **Decision (self-improvement boundary — weights are data, code is
+  sacred):** the policy may mutate its own *weights* (`.bss` data) at
+  runtime and may *propose* source changes as reviewable `fix_journal`
+  records, but it never patches kernel `.text` / dispatch tables. This
+  upholds Design-Decision #016 (no self-modifying code — rootkits exploit
+  it) and stays self-consistent with the kernel's own `runtime_checker`,
+  which already treats any `.text`/fn-table drift as an attack
+  (`KernelTextModified` → Panic). **Rules out** a flag-gated in-kernel
+  "self-patch" mode (explicitly considered and declined): even under the
+  test master-off flag the system emits an *aggressive proposal firehose*
+  (one fix-journal record per divergence/experiment) feeding the OFFLINE
+  patch generator — never an in-kernel code mutation. Runtime owns
+  learning; offline owns committing source.
+- **Decision (strangler-fig seam + removable shield):** the learner is
+  introduced behind a pure-function seam (`PolicyDecide`) that initially
+  delegates to the rule floor with provably zero behaviour change, and the
+  safety envelope is a single removable shield (`ShieldConfig` +
+  `ShieldSetMaster`; master-off via the `shields=off` cmdline token or the
+  shell). **Rules out** baking the safety checks inline into the actuators
+  — the shield must be removable as one unit so the *raw* policy's
+  behaviour can be measured (a shield that cannot be removed cannot be
+  validated as anything more than a mask over a still-broken learner).

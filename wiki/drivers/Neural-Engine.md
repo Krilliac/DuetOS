@@ -117,6 +117,13 @@ control loop, not a conscious one. The honest path:
    policy is learned, kernel-owned, and cap-gated like every other
    effect a workload can have.
 
+   **Update (2026-06-10):** this step is now under construction
+   **CPU-first** — a small **fixed-point** MLP that needs no NPU (the
+   honest "without the NPU" baseline), with a path to GPU/NPU later. See
+   [`wiki/kernel/Autonomic-Policy.md`](../kernel/Autonomic-Policy.md) and
+   the 4-slice spec. Slice 1 (the `PolicyDecide` seam + removable safety
+   shield, zero behaviour change) has landed.
+
 Each step is a separate slice with a nameable caller before it is
 written — the arc is recorded here so the next slice does not have to
 re-derive it, not as licence to build ahead of need.

@@ -115,15 +115,24 @@ struct AutonomicReport
 
 /// Pure decision: rising-edge rule evaluation. No side effects, no
 /// logging, no kernel calls. Updates `st` in place to the new
-/// latched state and returns the actions whose edge fired.
+/// latched state and returns the actions whose edge fired. This is the
+/// rule floor — both the safety baseline and (Slice 2+) the learned
+/// policy's imitation teacher.
 AutoActionSet AutonomicEvaluate(AutonomicState& st, const AutoInputs& in);
+
+/// The full decide step: rule floor (AutonomicEvaluate) + learned policy
+/// (NeuralPolicyDecide), reconciled by the shield (ShieldApply) and
+/// traced. Routed by AutonomicTick. In Slice 1 the learner is a no-op,
+/// so this is behaviourally identical to AutonomicEvaluate. Pure of
+/// actuation — returns the set AutonomicApply then executes.
+AutoActionSet PolicyDecide(AutonomicState& st, const AutoInputs& in);
 
 /// Perform the real effects of an action set (kernel calls + log +
 /// probe). Task context only. Not exercised by the self-test.
 void AutonomicApply(const AutoActionSet& set);
 
-/// One poll iteration: sense → AutonomicEvaluate → AutonomicApply →
-/// fold into the report. Called from the env-monitor loop.
+/// One poll iteration: sense → PolicyDecide → AutonomicApply → fold into
+/// the report. Called from the env-monitor loop.
 void AutonomicTick();
 
 /// Capture the baseline so the first tick does not false-fire on

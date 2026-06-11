@@ -7,6 +7,8 @@
 #include "diag/stress_driver.h"
 #include "env/autonomic_feedback.h"
 #include "env/environment.h"
+#include "env/neural_policy.h"
+#include "env/policy_shield.h"
 #include "log/klog.h"
 #include "mm/frame_allocator.h"
 #include "mm/kheap.h"
@@ -296,13 +298,49 @@ AutoInputs SenseInputs()
     return in;
 }
 
+void PolicyTrace(const AutoInputs& in, const AutoActionSet& rule_set, const AutoActionSet& net_set,
+                 const AutoActionSet& final_set)
+{
+    // Verbose per-decision trace. DEBUG-gated so it stays quiet at
+    // default log levels; an operator raises the level to watch the
+    // policy decide tick-by-tick. Slice 2 enriches this with the net's
+    // activations + the net-vs-rule agreement count.
+    const u64 free_pct = in.total_frames != 0 ? (in.free_frames * 100u) / in.total_frames : 0u;
+    KLOG_DEBUG_V("policy", "decide free_pct", free_pct);
+    KLOG_DEBUG_V("policy", "decide rule_count", rule_set.count);
+    KLOG_DEBUG_V("policy", "decide net_count", net_set.count);
+    KLOG_DEBUG_V("policy", "decide final_count", final_set.count);
+}
+
 } // namespace
+
+AutoActionSet PolicyDecide(AutonomicState& st, const AutoInputs& in)
+{
+    // Rule floor — always evaluated: the safety baseline AND the
+    // learner's imitation teacher. Edge state is updated here.
+    const AutoActionSet rule_set = AutonomicEvaluate(st, in);
+
+    // Learned proposal — empty unless the policy is enabled. Slice 1's
+    // NeuralPolicyDecide is a no-op, so net_set is always empty for now.
+    AutoActionSet net_set = {};
+    if (PolicyModeGet() != PolicyMode::Off)
+    {
+        net_set = NeuralPolicyDecide(in);
+    }
+
+    // Shield reconciles the floor + proposal into what actually
+    // actuates. Slice 1: empty net → the rule floor passes straight
+    // through, so behaviour is byte-identical to the pre-seam engine.
+    const AutoActionSet final_set = ShieldApply(ShieldConfigGet(), in, rule_set, net_set);
+    PolicyTrace(in, rule_set, net_set, final_set);
+    return final_set;
+}
 
 void AutonomicTick()
 {
     g_report.ticks++;
     const AutoInputs in = SenseInputs();
-    const AutoActionSet set = AutonomicEvaluate(g_state, in);
+    const AutoActionSet set = PolicyDecide(g_state, in);
     if (set.count != 0)
     {
         AutonomicApply(set);

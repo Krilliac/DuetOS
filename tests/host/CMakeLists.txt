@@ -180,3 +180,8 @@ add_host_test(omnibox_classify)
 # KMalloc small-allocation slab-routing decision logic (kernel/mm/kmalloc_route.h):
 # size-class boundaries, route-header encode/decode, KFree discrimination verdicts.
 add_host_test(kmalloc_route)
+
+# Autonomic-policy safety shield (kernel/env/policy_shield.h): ShieldConfig
+# defaults, the one-call master toggle, ShieldApply rule-floor passthrough,
+# and the autonomic=/shields= cmdline parse (incl. prefix-collision guard).
+add_host_test(policy_shield)
