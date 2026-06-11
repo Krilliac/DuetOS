@@ -150,6 +150,7 @@
 #include "drivers/power/power.h"
 #include "env/autonomic.h"
 #include "env/environment.h"
+#include "env/neural_policy.h"
 #include "env/policy_shield.h"
 #include "drivers/usb/btusb.h"
 #include "drivers/usb/cdc_ecm.h"
@@ -2331,6 +2332,10 @@ void BootBringupDevices(bool force_net_smoke)
     // off/on, cmdline parse, ShieldApply passthrough) before the seam is
     // ever exercised. The seam (PolicyDecide) is now in AutonomicTick.
     DUETOS_BOOT_SELFTEST(duetos::env::PolicyShieldSelfTest());
+    // Imitation neural policy (Slice 2): runs in shadow mode every tick
+    // (computed + traced, rule floor still actuates). Self-test echoes the
+    // host test's imitation coverage on-target.
+    DUETOS_BOOT_SELFTEST(duetos::env::NeuralPolicySelfTest());
     // Spawn the env-monitor poller now that the scheduler is online
     // and the first snapshot is published. It re-composes on a
     // timed poll so cached state stays live (the "reactive" half);

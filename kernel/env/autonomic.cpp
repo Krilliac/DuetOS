@@ -303,13 +303,19 @@ void PolicyTrace(const AutoInputs& in, const AutoActionSet& rule_set, const Auto
 {
     // Verbose per-decision trace. DEBUG-gated so it stays quiet at
     // default log levels; an operator raises the level to watch the
-    // policy decide tick-by-tick. Slice 2 enriches this with the net's
-    // activations + the net-vs-rule agreement count.
+    // policy decide tick-by-tick. In shadow mode the net's proposals are
+    // logged but `final` actuates the rule floor — the divergence between
+    // the "net proposes" lines and the actuated set IS the shadow data
+    // the operator (and Slice 3's learner) reads.
     const u64 free_pct = in.total_frames != 0 ? (in.free_frames * 100u) / in.total_frames : 0u;
     KLOG_DEBUG_V("policy", "decide free_pct", free_pct);
     KLOG_DEBUG_V("policy", "decide rule_count", rule_set.count);
     KLOG_DEBUG_V("policy", "decide net_count", net_set.count);
     KLOG_DEBUG_V("policy", "decide final_count", final_set.count);
+    for (u32 i = 0; i < net_set.count; ++i)
+    {
+        KLOG_DEBUG_S("policy", "net proposes", "action", AutoActionName(net_set.actions[i]));
+    }
 }
 
 } // namespace

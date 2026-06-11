@@ -5,10 +5,11 @@
 > **Execution context:** Kernel — the env-monitor poll (~2 s cadence),
 > task context only.
 >
-> **Maturity:** v0 (Slice 1 of 4) — the decision **seam** and the
-> toggleable safety **shield** are landed and wired into boot. The neural
-> net, online learning, the load-balance actuators, and the fix-journal
-> proposal tie-in are deferred (Slices 2–4).
+> **Maturity:** v0 (Slices 1–2 of 4) — the decision **seam**, the
+> toggleable safety **shield**, and the **fixed-point imitation net**
+> (running in **shadow mode**) are landed and wired into boot. Online
+> learning (Slice 3) and the load-balance actuators + fix-journal proposal
+> tie-in (Slice 4) are deferred.
 
 ## Overview
 
@@ -29,7 +30,7 @@ env-monitor tick → SenseInputs() → PolicyDecide(state, in) → AutonomicAppl
                  reconcile ───────────┘  ShieldApply (toggleable; Slice 1: passthrough)
 ```
 
-## What Slice 1 landed
+## What's landed (Slices 1–2)
 
 - **The `PolicyDecide` seam** (`env/autonomic.cpp`). `AutonomicTick` now
   routes through it: evaluate the rule floor, ask the (Slice-1 no-op)
@@ -46,12 +47,19 @@ env-monitor tick → SenseInputs() → PolicyDecide(state, in) → AutonomicAppl
   `shields=on|off` (parsed by `PolicyConfigInitFromCmdline` at bringup);
   runtime `ShieldMasterSet` / `PolicyModeSet` for the shell. `shields=off`
   boots straight into un-shielded data collection.
-- **The no-op learner** (`env/neural_policy.{h,cpp}`). `NeuralPolicyDecide`
-  returns an empty set (`// STUB:`) until the fixed-point MLP lands in
-  Slice 2.
-- **Boot self-test** `PolicyShieldSelfTest` → `[policy-shield] selftest
-  pass`; the pure config logic is also covered host-side by
-  `tests/host/test_policy_shield.cpp`.
+- **The imitation net** (`env/neural_policy.{h,cpp}`, Slice 2). A
+  fixed-point MLP (3→3→3; Q16 activations, Q12 `int16` weights, `i64`
+  accumulators, ReLU) whose hand-initialised weights reproduce the rule
+  **level**-predicates — `MemReclaim ⟸ free<10%`, `FootprintTrim ⟸
+  thermal`, `ForceHealthScan ⟸ thermal∨load>1`. It runs every tick in
+  **shadow mode** (computed + traced; the rule floor still actuates), so
+  its proposals are pure data until Slice 3 flips it live. The net governs
+  only these LEVEL-predicate discretionary actions; the *edge* rule
+  (SecurityEscalate ⟸ health **rose**) and the deterministic policy→bias
+  map stay rule-driven (a stateless net can't reproduce a delta).
+- **Boot self-tests** `[policy-shield] selftest pass` + `[neural-policy]
+  selftest pass`; the pure logic is covered host-side by
+  `tests/host/test_policy_shield.cpp` and `test_neural_policy.cpp`.
 
 ## Policy modes
 

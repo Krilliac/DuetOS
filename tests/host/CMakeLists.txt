@@ -185,3 +185,9 @@ add_host_test(kmalloc_route)
 # defaults, the one-call master toggle, ShieldApply rule-floor passthrough,
 # and the autonomic=/shields= cmdline parse (incl. prefix-collision guard).
 add_host_test(policy_shield)
+
+# Fixed-point neural autonomic policy (kernel/env/neural_policy.cpp): the
+# integer forward pass (matmul + >>12 requantize + ReLU), feature
+# extraction, and imitation-by-construction (net == rule level-predicates).
+add_host_test(neural_policy)
+target_sources(test_neural_policy PRIVATE "${CMAKE_SOURCE_DIR}/../../kernel/env/neural_policy.cpp")
