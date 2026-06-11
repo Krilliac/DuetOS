@@ -2,6 +2,7 @@
 
 #include "drivers/video/display_info.h"
 #include "drivers/video/framebuffer.h"
+#include "mm/paging.h"
 #include "subsystems/graphics/graphics.h"
 #include "subsystems/graphics/graphics_vk_internal.h"
 #include "syscall/syscall.h"
@@ -10,9 +11,11 @@
  * DuetOS — SYS_VK_CALL dispatch implementation.
  *
  * Maps `VkOp` enum values from userland into the kernel ICD's
- * native API. Argument marshalling is direct: u64-sized values
- * pass in registers, pointers are validated by the existing
- * userland-VA checker before any dereference.
+ * native API. Argument marshalling: scalar u64 values pass in
+ * registers; user pointers are read/written ONLY through the
+ * fault-recoverable mm::CopyToUser / CopyFromUser helpers (see
+ * UserStore / UserLoad), so a bad or read-only guest pointer yields a
+ * clean failure rather than a kernel #PF panic.
  *
  * Current surface (ops 0..52):
  *   - Instance / device / queue lifecycle (Create / Destroy /
@@ -51,24 +54,30 @@ namespace vk = ::duetos::subsystems::graphics;
 
 constexpr u64 kVkBadOp = 0xFFFFFFFFFFFFFFFFull;
 
-// Copy a u64 from kernel space into a user-supplied pointer.
-// Today the kernel and userland share a single address space (no
-// per-process VA isolation yet in the syscall path), so a direct
-// pointer dereference is correct. When isolation lands this
-// routes through the existing user-copy helper that fault-traps
-// on a bad VA.
-template <typename T> void UserStore(u64 user_va, T value)
+// Copy a T to / from a user-supplied pointer through the kernel's
+// fault-recoverable user-copy helpers (mm::CopyToUser / CopyFromUser):
+// they validate the canonical user-half range, gate SMAP with stac/clac,
+// and trap-fixup a fault inside the copy window, so a bad or read-only
+// user pointer yields a clean failure instead of a kernel #PF panic.
+//
+// A raw dereference here is a GUEST-TRIGGERABLE kernel panic: a userland
+// PE may pass any pointer to SYS_VK_CALL — e.g. one into a read-only DLL
+// page — and the kernel must not crash on it. (Surfaced by the autonomic
+// stress campaign 2026-06-11: a D3D11 demo's device-handle store into a
+// read-only DLL page at 0x1020a090 paniced the old raw `*p = value`.)
+template <typename T> bool UserStore(u64 user_va, T value)
 {
     if (user_va == 0)
-        return;
-    *reinterpret_cast<T*>(user_va) = value;
+        return false;
+    return mm::CopyToUser(reinterpret_cast<void*>(user_va), &value, sizeof(T));
 }
 
 template <typename T> T UserLoad(u64 user_va, T fallback)
 {
-    if (user_va == 0)
+    T out{};
+    if (user_va == 0 || !mm::CopyFromUser(&out, reinterpret_cast<const void*>(user_va), sizeof(T)))
         return fallback;
-    return *reinterpret_cast<T*>(user_va);
+    return out;
 }
 
 u64 OpCreateInstance(arch::TrapFrame* frame)
@@ -100,9 +109,9 @@ u64 OpEnumeratePhysicalDevices(arch::TrapFrame* frame)
     UserStore<u32>(count_ptr, count);
     if (array_ptr != 0)
     {
-        auto* dst = reinterpret_cast<vk::VkPhysicalDevice*>(array_ptr);
-        for (u32 i = 0; i < count; ++i)
-            dst[i] = devs[i];
+        // Fault-safe bulk write — array_ptr is a user pointer (count is
+        // clamped to 4 above, so the copy length is bounded by devs[]).
+        (void)mm::CopyToUser(reinterpret_cast<void*>(array_ptr), devs, count * sizeof(vk::VkPhysicalDevice));
     }
     return (r == vk::VkResult::Success) ? 1 : 0;
 }
@@ -194,6 +203,12 @@ u64 OpCreateShaderModule(arch::TrapFrame* frame)
     const u64 code_size_bytes = frame->r8;
     if (code == nullptr || code_size_bytes == 0)
         return 0;
+    // GAP: `code` is a raw user pointer of user-controlled length read
+    // directly by the ICD — a guest can pass a bad pointer / oversized
+    // length and fault the kernel reading it. Unlike the UserStore/UserLoad
+    // path this needs a bounded copy-in (cap + kmalloc + CopyFromUser) and
+    // an ICD that reads from the kernel copy. Revisit with the SPIR-V
+    // pipeline slice (see wiki/reference/Roadmap.md, vk-syscall hardening).
     vk::VkShaderModule out = 0;
     const vk::VkResult r = vk::VkCreateShaderModule(dev, code, code_size_bytes, &out);
     return (r == vk::VkResult::Success) ? out : 0;
