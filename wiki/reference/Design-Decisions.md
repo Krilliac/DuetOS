@@ -11495,3 +11495,36 @@ markers for its richest input. Three discovery layers were added (runtime
   value to the live constant. **Rules out** the tempting "let the learner edit
   the constant directly" shortcut — that would breach DD#016 (no self-modifying
   `.text`). The generator renders the diff; a human flips the gate.
+
+## 2026-06-12 — SYS_PRIORITY_CLASS: cap-gate band elevation; close SEC-008 `exec` residual
+
+- **Context:** the MLFQ priority bands (2026-06-10) made
+  `Process::win32_priority_class` a real scheduling lever — a HIGH/REALTIME
+  class maps to a band that preempts the kernel's own Normal-band threads.
+  `SYS_PRIORITY_CLASS` (set) wrote the caller-supplied class straight into
+  the process with **no validation and no cap check**, so any ring-3 PE
+  (incl. an untrusted one) could self-promote to the High band and starve
+  the box — a guest-reachable DoS.
+- **Decision:** add `kCapSchedPriority` (cap 10). `SYS_PRIORITY_CLASS` set
+  now (1) accepts only the six documented Windows class constants —
+  anything else is rejected and the current class round-trips back — and
+  (2) requires `kCapSchedPriority` to request a class that maps **above**
+  the Normal band (ABOVE_NORMAL / HIGH / REALTIME). Lowering
+  (Below-Normal / Idle) and Normal stay unprivileged. A denied elevation
+  is a no-op (`RecordSandboxDenial` + leave the class unchanged), so a
+  benign PE that probes `SetPriorityClass(HIGH)` keeps running at its
+  current band rather than faulting. **Rules out** gating on an unrelated
+  existing cap (whitelist-incompleteness fragility) and clamping the
+  effective band at schedule time (the authority belongs at the syscall
+  boundary, kernel-owned, per the subsystem-isolation contract). The cap
+  auto-joins `CapSetTrusted()` via the `[1..kCapCount)` loop and is
+  auto-excluded from `CapSetEmpty()` sandbox profiles.
+- **SEC-008 residual closed:** the 2026-06-06 least-privilege-launch pass
+  fixed the Files-app and `peexec` untrusted-launch sites but missed
+  `CmdExec` (`exec <elf>`), which still spawned an operator-chosen ELF with
+  `CapSetTrusted()` + `RamfsTrustedRoot()` — full caps incl. `kCapDiag`
+  (guest-reachable kernel panic) and `kCapDebug` on untrusted binary
+  content. Now uses the same least-privilege set
+  (SerialConsole + FsRead + SpawnThread) into the sandbox namespace with
+  sandbox budgets. `RequireAdmin` narrows *who* can invoke it; the launched
+  bytes are untrusted regardless of launcher.

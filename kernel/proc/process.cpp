@@ -755,6 +755,8 @@ const char* CapName(Cap c)
         return "NetAdmin";
     case kCapDiag:
         return "Diag";
+    case kCapSchedPriority:
+        return "SchedPriority";
     case kCapCount:
         return "<sentinel>";
     default:
@@ -1066,6 +1068,7 @@ void ProcessSelfTest()
     Expect(StrEqual(CapName(kCapInput), "Input"), "CapName(Input)");
     Expect(StrEqual(CapName(kCapNetAdmin), "NetAdmin"), "CapName(NetAdmin)");
     Expect(StrEqual(CapName(kCapDiag), "Diag"), "CapName(Diag)");
+    Expect(StrEqual(CapName(kCapSchedPriority), "SchedPriority"), "CapName(SchedPriority)");
     Expect(StrEqual(CapName(kCapCount), "<sentinel>"), "CapName(kCapCount) == <sentinel>");
 
     // Catches "added an enum value, forgot the switch arm" — every

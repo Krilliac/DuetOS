@@ -215,3 +215,12 @@ localdev.ps1
 # (each is a full repo checkout). Never commit them into the parent
 # repo — the agent commits live on their own pushed branches.
 .claude/
+
+##########################
+# Untracked local scratch #
+##########################
+
+# Usability/eval screenshots + ad-hoc security-audit working dirs.
+analysis/
+# Local MCP server wiring (machine-specific, not shared).
+.mcp.json
