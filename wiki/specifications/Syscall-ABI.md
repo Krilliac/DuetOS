@@ -1228,6 +1228,7 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 210 | `SYS_AUDIO_WRITE` |
 | 211 | `SYS_VK_CALL` |
 | 212 | `SYS_RANDOM_BYTES` |
+| 213 | `SYS_IOCP_POST` |
 <!-- /AUTO:syscall_list -->
 
 ## Native Syscall Argument / Return Reference
@@ -1464,4 +1465,5 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 209 | `SYS_WAKE_BY_ADDRESS` | `rdi` = user VA; `rsi` = 0 for WakeByAddressSingle (best effort) | — |
 | 211 | `SYS_VK_CALL` | — | is the per-op return value |
 | 212 | `SYS_RANDOM_BYTES` | `rdi` = user buffer VA; `rsi` = length | the number of bytes written (== length on success, a short count if the copy ... |
+| 213 | `SYS_IOCP_POST` | `rdi` = u64 IOCP handle (kWin32IocpBase range; `rsi` = u64 dwNumberOfBytesTransferred rdx = u64 dwCompletionKey ... | — |
 <!-- /AUTO:syscall_args -->

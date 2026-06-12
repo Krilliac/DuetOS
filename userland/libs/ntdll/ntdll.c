@@ -482,11 +482,14 @@ __declspec(dllexport) NTSTATUS NtWaitForSingleObject(HANDLE h, BOOL bAlertable, 
     (void)bAlertable;
     unsigned long long handle = (unsigned long long)h;
     long long syscall_num;
-    if (handle >= 0x200 && handle < 0x208)
+    /* Mutex / event / semaphore handles are base + a kobj_handles
+     * slot (1..63) — the caps grew 8 -> 64 when those objects
+     * migrated to the unified handle table. */
+    if (handle >= 0x200 && handle < 0x240)
         syscall_num = 26; /* SYS_MUTEX_WAIT */
-    else if (handle >= 0x300 && handle < 0x308)
+    else if (handle >= 0x300 && handle < 0x340)
         syscall_num = 33; /* SYS_EVENT_WAIT */
-    else if (handle >= 0x500 && handle < 0x508)
+    else if (handle >= 0x500 && handle < 0x540)
         syscall_num = 53; /* SYS_SEM_WAIT */
     else if (handle >= 0x400 && handle < 0x408)
         syscall_num = 54; /* SYS_THREAD_WAIT */

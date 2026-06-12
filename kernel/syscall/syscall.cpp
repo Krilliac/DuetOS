@@ -98,7 +98,8 @@
 #include "subsystems/win32/pipe_syscall.h"
 #include "subsystems/win32/semaphore_syscall.h"
 #include "subsystems/win32/dir_syscall.h"
-#include "subsystems/win32/iocp_job.h"
+#include "subsystems/win32/iocp_syscall.h"
+#include "subsystems/win32/job_syscall.h"
 #include "subsystems/win32/section.h"
 #include "subsystems/win32/spawn_syscall.h"
 #include "subsystems/win32/token_syscall.h"
@@ -115,6 +116,7 @@
 #include "diag/log_names.h"
 #include "loader/compat_shim.h"
 #include "proc/process.h"
+#include "proc/ring3_smoke.h"
 #include "proc/spawn.h"
 #include "syscall/audio_syscall.h"
 #include "syscall/time_syscall.h"
@@ -466,6 +468,12 @@ i64 DoWrite(u64 fd, const void* user_buf, u64 len)
     {
         return kSysErrnoEFAULT;
     }
+
+    // PE-compat battery tap: while the battery is running, let the
+    // aggregator look for "[<spawn-label>] PASS|FAIL" verdict lines
+    // in the exact bytes about to hit the wire. One branch when the
+    // battery is idle. See kernel/proc/ring3_smoke.cpp.
+    PeCompatSmokeObserve(reinterpret_cast<const char*>(kbuf), to_copy);
 
     // Drive COM1 with one SerialWriteN call — the per-port lock is
     // held for the whole byte run, so no other thread (smoke ticker,
@@ -2548,6 +2556,10 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     case SYS_IOCP_CLOSE:
         frame->rax = static_cast<u64>(::duetos::subsystems::win32::SysIocpClose(frame->rdi));
+        return;
+    case SYS_IOCP_POST:
+        frame->rax =
+            static_cast<u64>(::duetos::subsystems::win32::SysIocpPost(frame->rdi, frame->rsi, frame->rdx, frame->r10));
         return;
     case SYS_JOB_CREATE:
         frame->rax = static_cast<u64>(::duetos::subsystems::win32::SysJobCreate());

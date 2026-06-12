@@ -88,6 +88,8 @@ through the relevant TU. One subsystem per file (CLAUDE.md rule):
 | `mutex_syscall.cpp` | Kernel mutex objects |
 | `event_syscall.cpp` | Kernel event objects |
 | `semaphore_syscall.cpp` | Kernel semaphore objects |
+| `iocp_syscall.cpp` | I/O completion ports (KObject `IocpPort` + `kobj_handles`) |
+| `job_syscall.cpp` | Job objects |
 | `pipe_syscall.cpp` | Anonymous pipes |
 | `named_pipe_syscall.cpp` | Named pipes |
 | `named_kobj_syscall.cpp` | Named kernel objects (open-by-name) |
@@ -99,8 +101,7 @@ through the relevant TU. One subsystem per file (CLAUDE.md rule):
 | `token_syscall.cpp` | Token / privilege facade (probe-satisfying, see below) |
 | `vmap_syscall.cpp` | User virtual-memory mapping |
 
-Supporting handlers in the same directory: `iocp_job.cpp` (I/O
-completion ports + job objects), `proc_env.cpp` (per-process
+Supporting handlers in the same directory: `proc_env.cpp` (per-process
 environment / command-line page the CRT reads at startup),
 `section.cpp` (section / memory-mapped-file objects), and
 `registry.cpp` + `registry_hive.cpp` (the registry tree —

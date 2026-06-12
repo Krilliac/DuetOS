@@ -213,12 +213,20 @@ time a refactor introduces a regression.
 
 ## Known Limits / GAPs / STUBs
 
-- **IOCP ABI is GAP.** The kernel-side queue (`IocpPort`) is wired
-  but `SYS_IOCP_*` syscalls and the Win32-side
+- **IOCP is consolidated onto `IocpPort` + `kobj_handles`.** The
+  `SYS_IOCP_CREATE/SET/REMOVE/CLOSE` syscalls (159–162) route
+  through the KObject-shaped `IocpPort`
+  (`kernel/subsystems/win32/iocp_syscall.cpp`) — handles are
+  `0xB00 + slot`, per-process, reclaimed by handle-table drain at
+  teardown; the legacy 8-port global pool (`iocp_job.cpp`) is
+  deleted. `SYS_IOCP_POST` (213) is the Win32-shaped
+  `PostQueuedCompletionStatus` wrapper over `IocpTryPost`,
+  exported from ntdll. Remaining GAP: kernel32's
   `CreateIoCompletionPort` / `GetQueuedCompletionStatus` /
-  `PostQueuedCompletionStatus` are not. The `OVERLAPPED` lifetime
-  contract (user-side struct addressed by kernel completion) needs
-  careful design before the syscall surface lands.
+  `PostQueuedCompletionStatus` still service an in-process v0 ring
+  (0x8000-range handles) — re-routing them onto the kernel ports
+  (and the `OVERLAPPED`-completion delivery for real async file
+  I/O) is the follow-up consolidation slice.
 - **Named-kobject permission gating** is unimplemented; see
   [`security/Capabilities.md`](../security/Capabilities.md).
 - **Per-process handle-table capacity is 64.** Workloads that need

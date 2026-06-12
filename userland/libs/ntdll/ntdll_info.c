@@ -15,8 +15,8 @@
  * class every malware-shape PE uses to confirm a handle's
  * underlying type. The implementation lives entirely in userland:
  * the kernel's handle bases are stable u64 ranges
- * (0x200..0x208 = Mutant, 0x300..0x308 = Event,
- *  0x400..0x408 = Thread, 0x600..0x608 = Key,
+ * (0x200..0x240 = Mutant, 0x300..0x340 = Event — both 64-slot
+ *  kobj_handles ranges, 0x400..0x408 = Thread, 0x600..0x608 = Key,
  *  0x700..0x708 = Process, 0x800..0x808 = Thread (foreign),
  *  0x900..0x908 = Section), so range-matching produces the
  *  right type name without a syscall.
@@ -35,9 +35,9 @@ static const wchar_t16* HandleRangeToTypeName(unsigned long long handle)
     static const wchar_t16 key[] = {'K', 'e', 'y', 0};
     static const wchar_t16 process[] = {'P', 'r', 'o', 'c', 'e', 's', 's', 0};
     static const wchar_t16 section[] = {'S', 'e', 'c', 't', 'i', 'o', 'n', 0};
-    if (handle >= 0x200 && handle < 0x208)
+    if (handle >= 0x200 && handle < 0x240)
         return mutant;
-    if (handle >= 0x300 && handle < 0x308)
+    if (handle >= 0x300 && handle < 0x340)
         return event;
     if (handle >= 0x400 && handle < 0x408)
         return thread;

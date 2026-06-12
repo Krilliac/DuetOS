@@ -1606,7 +1606,11 @@ enum SyscallNumber : u64
     // SpawnPeFile / SpawnElfFile. Returns the new pid or -1.
     SYS_PROCESS_SPAWN = 158,
 
-    // IOCP — async I/O completion ports.
+    // IOCP — async I/O completion ports. Backed by the KObject-
+    // shaped ipc::IocpPort in the per-process kobj_handles table
+    // (handles = 0xB00 + slot). SYS_IOCP_POST (213) is the
+    // Win32-shaped PostQueuedCompletionStatus entry; SET keeps the
+    // NT-shaped NtSetIoCompletion argument order.
     SYS_IOCP_CREATE = 159,
     SYS_IOCP_SET = 160,
     SYS_IOCP_REMOVE = 161,
@@ -2179,6 +2183,20 @@ enum SyscallNumber : u64
     // Backs userland/libs/bcrypt BCryptGenRandom on RDRAND-absent hardware.
     // ABI stable from this commit.
     SYS_RANDOM_BYTES = 212,
+
+    // SYS_IOCP_POST — backs PostQueuedCompletionStatus: enqueue a
+    // caller-fabricated completion (STATUS_SUCCESS) on an IOCP
+    // handle. Thin Win32-shaped wrapper over the kernel IocpPort's
+    // IocpTryPost; pairs with SYS_IOCP_REMOVE for the dequeue side.
+    //   rdi = u64 IOCP handle (kWin32IocpBase range, 0xB00 + slot)
+    //   rsi = u64 dwNumberOfBytesTransferred
+    //   rdx = u64 dwCompletionKey
+    //   r10 = u64 lpOverlapped (opaque user VA; never dereferenced
+    //         by the kernel — handed back verbatim on dequeue)
+    //   rax = 0 on success, (u64)-1 on bad handle / missing Write
+    //         right / full or closed port.
+    // ABI stable from this commit.
+    SYS_IOCP_POST = 213,
 };
 
 // Vulkan syscall op-codes. Used as the `rdi` value to SYS_VK_CALL
