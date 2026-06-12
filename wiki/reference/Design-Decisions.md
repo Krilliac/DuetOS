@@ -7977,7 +7977,9 @@ doc helps future readers audit the trail.
     `add_custom_command`. New accessors
     `RamfsBootX64EfiBytes()` / `RamfsBootX64EfiSize()` in
     `fs/ramfs.{h,cpp}`.
-  - **`installer.cpp::WriteEspGrubStub`** now also writes
+  - **`installer.cpp::WriteEspGrubStub`** (folded into the A/B-slot
+    `PersistSlotState` flow on 2026-06-12 — grub.cfg is generated
+    from slot state now) at the time also began writing
     `/EFI/BOOT/BOOTX64.EFI` to the freshly-formatted ESP from the
     embedded blob — the canonical UEFI fall-back removable-media
     path. Real-hardware UEFI firmware finds the loader by the
@@ -11558,3 +11560,117 @@ markers for its richest input. Three discovery layers were added (runtime
 - **Verification:** boot self-test module 6 (`add(a,b)` two-param helper called
   from `main`) asserts `add(1.5, 2.25) == 3.75`; the old no-op stub wrote 0.
   `[subsys/graphics/spirv] self-test PASS (6 modules executed)` on clean boot.
+
+## 2026-06-12 — IOCP: one kernel primitive; legacy iocp_job table deleted
+
+- **Decision:** the four legacy `SysIocp*` syscalls (`SYS_IOCP_CREATE/SET/
+  REMOVE/CLOSE` 159–162) now route through the KObject-shaped
+  `ipc::IocpPort` (handles `0xB00 + slot` in the per-process
+  `kobj_handles` table, alongside KMutex/KEvent), and
+  `kernel/subsystems/win32/iocp_job.{h,cpp}` is **deleted** — its IOCP
+  and job-object halves split into `iocp_syscall.{h,cpp}` and
+  `job_syscall.{h,cpp}`. **Rules out** carrying two parallel IOCP
+  implementations (the "one source of truth per resource" rule); any
+  future completion-port feature lands on `IocpPort` only.
+- **ABI:** `SYS_IOCP_POST = 213` added (backs
+  `PostQueuedCompletionStatus`) — a thin wrapper over the kernel's
+  `IocpTryPost`. Syscall numbers are forever; 159–162 keep their
+  numbers and wire shapes (the migration is wire-compatible).
+- **ntdll:** completion-handle range checks widened 8→64 to match
+  `kHandleTableCapacity` (the same class of bug as the 2026-05 PR #355
+  WaitForSingleObject fix).
+
+## 2026-06-12 — TCP sender-side SACK: FreeBSD-style scoreboard in its own TU
+
+- **Decision:** RFC 6675 sender SACK lands as a tail-queue scoreboard
+  (`sackhole {start, end, rxmit}`) in new `kernel/net/tcp_sack.{h,cpp}`,
+  with `IsLost()` / `NextSeg()` per §3 driving fast-recovery
+  retransmission until `Pipe` reaches cwnd. **Rules out** the
+  Linux-style approach of growing the logic inline in the segment-input
+  path (`tcp_input.c`-shaped) — readable in isolation but couples
+  recovery state to input parsing; the scoreboard TU keeps
+  `tcp_segment.cpp` within its size budget.
+- **Also:** `tcp_sack.cpp` is registered in the fuzz host-shim build's
+  explicit source list (`tests/fuzz/Makefile` `fuzz_net`) — the list is
+  explicit, so every new net TU must be added there (known trap,
+  2026-05-29).
+- **Verification:** dedicated boot self-tests cover scoreboard
+  walk/merge and recovery entry; `tcp_selftest.cpp` extended.
+
+## 2026-06-12 — TCP ECN data plane: classic RFC 3168 only; AccECN deferred
+
+- **Decision:** outbound data on `ecn_ok` TCBs carries ECT(0); inbound
+  CE sets a per-TCB echo flag that rides the next ACK as ECE; inbound
+  ECE halves cwnd and answers CWR. AccECN (RFC 9768) did **not** land in
+  the same slice (contra the roadmap's "pairs with" suggestion) — the
+  classic data plane is self-contained and AccECN's 4-counters-per-
+  direction model builds on it without rework; it stays on the roadmap.
+- **IPv6 GAP:** the ECN field threading is IPv4-TOS only today; IPv6
+  traffic-class threading is marked at the call sites.
+
+## 2026-06-12 — Win32 NLS residuals: freestanding-header core + hosted-test gate
+
+- **Decision:** `GetCurrencyFormat{A,W}` honor the caller's
+  `CURRENCYFMT` (the W variant was MISSING), `GetNumberFormatW` handles
+  non-ASCII separator code points (was low-byte truncation),
+  `LCMapStringW` adds `LCMAP_SORTKEY` (upcased ordinal key — valid for
+  en-US/invariant) and standalone `NORM_IGNORECASE`, and
+  `shlwapi!wnsprintf{A,W}` / `StrToIntEx` land on a shared bounded-
+  printf/parse core (`user32_wsprintf_core.h`, `shlwapi_parse.h`).
+- **Pattern locked in:** pure NLS/format logic lives in freestanding
+  headers gated by `tests/host/test_kernel32_nls.cpp` (37→101
+  assertions) because the bare-metal NLS smoke PEs sit behind
+  `if (!emulator)` and QEMU CI never runs them. **Rules out** relying on
+  the PE smokes as the regression gate for this surface.
+
+## 2026-06-12 — USB-net fuzz: CDC-ECM + RNDIS harnesses; rndis rx deframer OOB fixed
+
+- **Decision:** `fuzz_cdcecm` + `fuzz_rndis` follow the established
+  host-shim pattern (`host_shim/usbnet_stubs.cpp`,
+  `seeds/gen_{cdcecm,rndis}_seeds.py`), auto-picked-up by
+  `tools/test/fuzz-all.sh`.
+- **Bug found and fixed:** the `rndis.cpp` rx deframer trusted the
+  device-supplied 32-bit message length; a crafted value wrapped a u32
+  sum and produced a heap-OOB write. The deframer now bounds-checks with
+  wrap-safe arithmetic. This keeps the project's record intact: every
+  memory-safety bug found by fuzzing so far lived in hand-written C++
+  bit/TLV parsers.
+
+## 2026-06-12 — A/B kernel slots: grub.cfg is generated, never hand-edited
+
+- **Decision:** the installer stages the embedded kernel ELF into the
+  **inactive** slot with read-back validation, then `PersistSlotState`
+  writes the slot-state file **and regenerates `/boot/grub/grub.cfg`**
+  from that state — two menuentries (one per slot), `set default`
+  tracking the active slot, `slot=a`/`slot=b` on each `multiboot2`
+  line. **Rules out** treating grub.cfg as an operator-owned file the
+  OS merely seeds once (the old `WriteEspGrubStub` chainload-stub
+  approach): the cfg is now a projection of `boot_slot::State`, so cfg
+  and state can never disagree about which slot boots.
+- **Scope guard:** regeneration only touches volumes carrying a
+  `/boot/grub` directory (i.e. the DuetOS ESP) — consistent with the
+  PR #400 "never write a disk we don't own" rule.
+
+## 2026-06-12 — PE-compat battery: spawn table = expected set; verdict via SYS_WRITE tap
+
+- **Decision:** the ~135-PE surface-coverage zoo is enumerated once in
+  `kPeCompatBattery` (`kernel/proc/ring3_smoke.cpp`); the same row
+  spawns the PE and registers it with the aggregator, so the spawn set
+  and the expected set cannot drift (the per-call-site allow-list bug
+  class). Every battery PE prints one standardized
+  `[<spawn-label>] PASS` / `FAIL <reason>` line; a `pe-compat-report`
+  watchdog emits `[pe-compat-smoke] passed=N failed=M skipped=K` plus
+  one `fail name=… why=reported|no-verdict` detail line per failure.
+- **Tap point:** the verdict scanner reads `DoWrite`'s kernel bounce
+  buffer on `SYS_WRITE(fd=1)` — exactly the bytes that reach the wire.
+  **Rules out** the roadmap's original "watch the klog ring" sketch: PE
+  stdout never enters the klog ring, and a serial-side scrape would be
+  subject to multi-CPU interleaving the line guard only mitigates.
+- **Battery gate:** the zoo spawns under smoke profiles None/Ring3 only;
+  Bringup and the focused Pe* profiles keep their one-scenario
+  contracts. Long-sleeping screenshot PEs (`windowed_hello`,
+  `dx_demo_window`) print the verdict **before** their settle sleep.
+- **Gate wiring:** `tools/test/boot-log-analyze.sh` parses the summary
+  and exits non-zero on `failed > 0`; verified live (ring3 profile:
+  `passed=1 failed=0 skipped=135`, pe32-rich verdict observed through
+  the tap).

@@ -1267,6 +1267,29 @@ zero non-deliberate failures); host tests pin the learning dynamics
 (reward moves weights, clamp/decay hold, breaker trips, exploration bounded,
 proposal scan) under ASan+UBSan.
 
+## Phase 6.22 — Roadmap-clear batch: IOCP unification, TCP SACK+ECN, NLS residuals, USB-net fuzz, A/B slots, PE-compat verdicts (2026-06-12)
+
+Six parallel slices that each closed a standing roadmap section in one
+day. (1) **IOCP** — the legacy `iocp_job` table is gone; all four
+`SysIocp*` syscalls ride the KObject `IocpPort`, and `SYS_IOCP_POST`
+(213) backs `PostQueuedCompletionStatus`. (2) **TCP** — RFC 6675
+sender-side SACK (FreeBSD-style scoreboard, `kernel/net/tcp_sack.*`)
+plus the RFC 3168 ECN data plane (ECT(0)/CE/ECE/CWR); classic ECN is
+now complete end-to-end. (3) **Win32 NLS residuals** — CURRENCYFMT
+honored, `GetCurrencyFormatW` exists, `LCMapStringW` SORTKEY,
+`shlwapi!wnsprintf`/`StrToIntEx`; hosted NLS test grew 37→101
+assertions. (4) **USB-net fuzz** — CDC-ECM + RNDIS harnesses; found and
+fixed a real u32-wrap heap-OOB write in the RNDIS rx deframer.
+(5) **A/B kernel slots** — installer stages the embedded kernel into
+the inactive slot with read-back validation and regenerates a
+dual-menuentry grub.cfg from slot state. (6) **PE-compat battery** —
+all ~135 smoke PEs standardized on `[<label>] PASS|FAIL` verdict lines;
+a kernel aggregator taps `SYS_WRITE(fd=1)` and emits
+`[pe-compat-smoke] passed=N failed=M skipped=K`, which
+`boot-log-analyze.sh` now gates on. Verified: clean WSL build, ctest
+green, fuzzers multi-million execs clean, bringup + ring3 profile boots
+PASS with the aggregator observed live.
+
 ## How to read the rest of the tree
 
 - `CLAUDE.md` — the authoritative project context, coding standards,
