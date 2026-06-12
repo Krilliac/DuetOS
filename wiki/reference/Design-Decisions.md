@@ -11528,3 +11528,33 @@ markers for its richest input. Three discovery layers were added (runtime
   (SerialConsole + FsRead + SpawnThread) into the sandbox namespace with
   sandbox budgets. `RequireAdmin` narrows *who* can invoke it; the launched
   bytes are untrusted regardless of launcher.
+
+## 2026-06-12 — SPIR-V interpreter: OpFunctionCall is a real call, not a no-op
+
+- **Context:** the in-kernel SPIR-V interpreter (`graphics_vk_spirv_exec.cpp`)
+  stubbed `OpFunctionCall` to return 0 with no parameter binding, and a stale
+  header comment claimed it "routes through the callee's first basic block."
+  Any shader whose front-end leaves helper functions un-inlined (DXC routinely
+  does; glslang under `-Od` too) computed wrong results — the call result was
+  always 0.
+- **Decision:** implement a real call. Arguments bind positionally to the
+  callee's `OpFunctionParameter` ids (value params alias the argument's SSA
+  value — params are immutable, so aliasing the composite heap run is safe;
+  pointer/`inout` params synthesize the `(storage_class<<24 | offset)` packed
+  encoding that Load/Store already expect for a non-Variable pointer id). The
+  callee's basic blocks run on the **shared** `ExecContext` — SPIR-V ids are
+  module-unique so the SSA value table needs no per-frame save/restore; only
+  the caller's control-flow cursor (prev/cur block label, jump target,
+  return-value slot) is saved and restored. `OpReturnValue` records the
+  returned id; the caller copies it into the call result via
+  Load/StoreOperandComponents (so vec returns work like scalars).
+- **Why no call-stack model:** Vulkan **forbids** shader recursion, so each
+  function is live at most once on the call stack — a single shared SSA frame
+  is correct, not a shortcut. **Rules out** building a heap-allocated call-frame
+  stack the spec guarantees we never need.
+- **GAP:** an `OpAccessChain` whose base is itself a pointer parameter (chained
+  access through an `inout` struct param) still requires a Variable base in
+  `DoAccessChain` — rare outside hand-written GLSL; marked in `BindParam`.
+- **Verification:** boot self-test module 6 (`add(a,b)` two-param helper called
+  from `main`) asserts `add(1.5, 2.25) == 3.75`; the old no-op stub wrote 0.
+  `[subsys/graphics/spirv] self-test PASS (6 modules executed)` on clean boot.

@@ -516,6 +516,87 @@ void TestDescriptorBinding()
         Fail("samplers: OOB set should return 0", 0);
 }
 
+// ------------------------------------------------------------------
+// Module 6: OpFunctionCall with a real two-parameter helper.
+//
+// GLSL equivalent:
+//   #version 450
+//   layout(location = 0) in  float a;
+//   layout(location = 1) in  float b;
+//   layout(location = 0) out float r;
+//   float add(float x, float y) { return x + y; }
+//   void main() { r = add(a, b); }
+//
+// Exercises the real call path: argument->parameter binding
+// (positional, two params), callee basic-block execution, and the
+// OpReturnValue -> call-result copy. Inputs reuse module 2's
+// known-good constants so the expected sum is identical (3.75).
+constexpr u32 call_add_floats[] = {
+    0x07230203, 0x00010000, 0u, 26u, 0u,                      // header: bound 26
+    (2u << 16) | 17u, 1u,                                     // Capability Shader
+    (3u << 16) | 14u, 0u, 1u,                                 // MemoryModel Logical GLSL450
+    (8u << 16) | 15u, 0u, 4u, 0x6E69616Du, 0u, 10u, 11u, 12u, // EntryPoint Vertex %4 "main" %a %b %r
+    (4u << 16) | 71u, 10u, 30u, 0u,                           // Decorate %a Location 0
+    (4u << 16) | 71u, 11u, 30u, 1u,                           // Decorate %b Location 1
+    (4u << 16) | 71u, 12u, 30u, 0u,                           // Decorate %r Location 0
+    (2u << 16) | 19u, 2u,                                     // TypeVoid %2
+    (3u << 16) | 33u, 3u, 2u,                                 // TypeFunction %3 = void()
+    (3u << 16) | 22u, 6u, 32u,                                // TypeFloat 32 %6
+    (5u << 16) | 33u, 21u, 6u, 6u, 6u,                        // TypeFunction %21 = float(float,float)
+    (4u << 16) | 32u, 7u, 1u, 6u,                             // TypePointer Input %6 -> %7
+    (4u << 16) | 32u, 8u, 3u, 6u,                             // TypePointer Output %6 -> %8
+    (4u << 16) | 59u, 7u, 10u, 1u,                            // Variable %a Input
+    (4u << 16) | 59u, 7u, 11u, 1u,                            // Variable %b Input
+    (4u << 16) | 59u, 8u, 12u, 3u,                            // Variable %r Output
+    // main: r = add(a, b)
+    (5u << 16) | 54u, 2u, 4u, 0u, 3u,         // Function %4 main
+    (2u << 16) | 248u, 15u,                   // Label %15
+    (4u << 16) | 61u, 6u, 16u, 10u,           // %16 = Load %a
+    (4u << 16) | 61u, 6u, 17u, 11u,           // %17 = Load %b
+    (6u << 16) | 57u, 6u, 18u, 20u, 16u, 17u, // %18 = FunctionCall %add %16 %17
+    (3u << 16) | 62u, 12u, 18u,               // Store %r %18
+    (1u << 16) | 253u,                        // Return
+    (1u << 16) | 56u,                         // FunctionEnd
+    // float add(float x, float y) { return x + y; }
+    (5u << 16) | 54u, 6u, 20u, 0u, 21u,   // Function %20 add -> float, type %21
+    (3u << 16) | 55u, 6u, 22u,            // FunctionParameter %6 %x
+    (3u << 16) | 55u, 6u, 23u,            // FunctionParameter %6 %y
+    (2u << 16) | 248u, 24u,               // Label %24
+    (5u << 16) | 129u, 6u, 25u, 22u, 23u, // %25 = FAdd %x %y
+    (2u << 16) | 254u, 25u,               // ReturnValue %25
+    (1u << 16) | 56u,                     // FunctionEnd
+};
+
+void TestCallAddFloats()
+{
+    static Program prog;
+    const u32 wc = sizeof(call_add_floats) / sizeof(call_add_floats[0]);
+    if (!Parse(call_add_floats, wc, &prog))
+        Fail("call_add: Parse rejected", wc);
+    if (prog.function_count != 2)
+        Fail("call_add: expected 2 functions", prog.function_count);
+
+    ResetIO(&prog);
+    const u32 a_bits = 0x3FC00000u; // 1.5
+    const u32 b_bits = 0x40100000u; // 2.25
+    if (!WriteInputLocation(&prog, 0, &a_bits, sizeof(a_bits)))
+        Fail("call_add: WriteInputLocation 0 missing", 0);
+    if (!WriteInputLocation(&prog, 1, &b_bits, sizeof(b_bits)))
+        Fail("call_add: WriteInputLocation 1 missing", 0);
+
+    if (!ExecuteEntryPoint(&prog, "main"))
+        Fail("call_add: ExecuteEntryPoint returned false", 0);
+
+    u32 r_bits = 0;
+    if (!ReadOutputLocation(&prog, 0, &r_bits, sizeof(r_bits)))
+        Fail("call_add: ReadOutputLocation 0 missing", 0);
+    // add(1.5, 2.25) must be 3.75 — proves the call bound both params
+    // and copied the callee's OpReturnValue back. A regressed call
+    // path (the old no-op-returns-0 stub) writes 0 here.
+    if (r_bits != 0x40700000u)
+        Fail("call_add: add(1.5,2.25) should be 3.75", r_bits);
+}
+
 } // namespace
 
 void SelfTest()
@@ -525,7 +606,8 @@ void SelfTest()
     TestMulVec3Scalar();
     TestComputeLocalSize();
     TestDescriptorBinding();
-    arch::SerialWrite("[subsys/graphics/spirv] self-test PASS (5 modules executed)\n");
+    TestCallAddFloats();
+    arch::SerialWrite("[subsys/graphics/spirv] self-test PASS (6 modules executed)\n");
 }
 
 } // namespace duetos::subsystems::graphics::spirv
