@@ -22,15 +22,17 @@
  *
  * Control flow is straight basic-block jumps. Phi is handled by
  * recording the predecessor block id before each branch and
- * consulting it at the next OpPhi. Functions are inlined — v1
- * doesn't model a call stack (no recursion, and shader functions
- * are almost always inlined by the front-end anyway). OpFunctionCall
- * routes through the same execution path against the callee's first
- * basic block; the result is just the value of an OpReturnValue
- * in that callee (the call binds parameters by writing them into
- * the callee's Function-storage variables, but since we treat
- * Function storage as Private, the binding side-effects across
- * calls — fine because we never re-enter a function in flight).
+ * consulting it at the next OpPhi. OpFunctionCall is a real call:
+ * each argument is bound to the matching OpFunctionParameter, the
+ * callee's basic blocks run to completion on the shared ExecContext
+ * (SPIR-V ids are module-unique, so the SSA table needs no per-frame
+ * save/restore beyond the caller's control-flow cursor), and the
+ * callee's OpReturnValue is copied into the call result. Vulkan
+ * forbids shader recursion, so each function is live at most once on
+ * the call stack — no explicit call-stack model is needed. Pointer
+ * (inout) parameters bind by aliasing the argument's storage; an
+ * OpAccessChain whose base is itself a pointer parameter is the one
+ * remaining GAP (see BindParam).
  *
  * The interpreter has a per-shader instruction budget (`kStepBudget`)
  * to bound runaway loops. Exceeding the budget aborts execution
@@ -258,6 +260,13 @@ struct ExecContext
     // killed for the rest of this invocation.
     bool killed;
     u32 step_count;
+    // Set by OpReturnValue to the operand id of the returned value;
+    // read by an OpFunctionCall caller to copy the callee's result
+    // into the call's result id. Zero for void returns / no call in
+    // flight. (No recursion in Vulkan shaders, so a single slot
+    // suffices — the caller reads it immediately after the callee's
+    // block walk completes, before any sibling call can overwrite it.)
+    u32 return_value_id;
 };
 
 const TypeRecord* TypeOf(const Program* p, u32 type_id)
@@ -1067,6 +1076,81 @@ i32 FindBlock(const Program* p, u32 label_id)
     return -1;
 }
 
+// --- OpFunctionCall support ------------------------------------------------
+// SPIR-V helper functions are real here, not inlined-away: a call binds
+// each argument to the matching OpFunctionParameter, runs the callee's
+// basic blocks, and copies the callee's OpReturnValue back into the call
+// result. Vulkan forbids recursion, so each function is live at most once
+// on the call stack and the single shared SSA value table (ids are
+// module-global and unique) needs no per-frame save/restore beyond the
+// caller's control-flow cursor.
+
+// Run a callee function to completion; returns the id of its
+// OpReturnValue operand (0 for a void callee). Defined after
+// ExecuteBlock; forward-declared here so the OpFunctionCall case can
+// reach it.
+u32 ExecuteCallee(ExecContext& ec, u32 fn_id);
+
+// Bind one call argument to one callee parameter id.
+void BindParam(ExecContext& ec, u32 param_id, u32 arg_id)
+{
+    const Program* p = ec.prog;
+    if (param_id == 0 || param_id >= kMaxIds || arg_id == 0 || arg_id >= kMaxIds)
+        return;
+    if (p->id_kinds[arg_id] == IdKind::Variable)
+    {
+        // Pointer argument given as a direct OpVariable. Synthesize the
+        // packed (storage_class<<24 | byte_offset) encoding that DoLoad /
+        // DoStore expect for a non-Variable pointer id, so reads and
+        // writes through the (IdKind::Param) parameter resolve to the
+        // variable's storage. GAP: an OpAccessChain whose base is a
+        // pointer parameter still needs the base to be a Variable
+        // (DoAccessChain), so chained access through an inout struct
+        // parameter is not yet resolved — rare outside hand-written GLSL.
+        const VariableRecord& v = p->variables[p->id_to_index[arg_id]];
+        const u32 packed = (static_cast<u32>(v.storage) << 24) | (v.storage_offset & 0x00FFFFFFu);
+        ec.scalar[param_id].bits = packed;
+        ec.composite_offset[param_id] = 0u;
+        ec.type_of[param_id] = v.type_id;
+        return;
+    }
+    // Value argument (scalar or composite) or an AccessChain pointer
+    // already packed into the scalar slot. Params are immutable SSA
+    // values, so aliasing the composite heap run is safe — the callee
+    // never stores into the parameter id itself.
+    ec.scalar[param_id] = ec.scalar[arg_id];
+    ec.composite_offset[param_id] = ec.composite_offset[arg_id];
+    ec.type_of[param_id] = ec.type_of[arg_id];
+}
+
+// Bind all call arguments (the words after the function id) to the
+// callee's declared parameters, positionally.
+void BindCallArgs(ExecContext& ec, u32 fn_id, const u32* args, u32 arg_count)
+{
+    const Program* p = ec.prog;
+    if (fn_id >= kMaxIds || p->id_kinds[fn_id] != IdKind::Function)
+        return;
+    const FunctionRecord& f = p->functions[p->id_to_index[fn_id]];
+    const u32 n = (arg_count < f.param_count) ? arg_count : f.param_count;
+    for (u32 i = 0; i < n; ++i)
+        BindParam(ec, f.params[i], args[i]);
+}
+
+// Copy a scalar-or-composite value from src_id into dst_id (the call
+// result). Routes through Load/StoreOperandComponents so vec returns
+// are handled the same as scalar ones.
+void CopyValueId(ExecContext& ec, u32 dst_id, u32 dst_type_id, u32 src_id)
+{
+    u32 buf[16]{};
+    const u32 n = LoadOperandComponents(ec, src_id, buf, 16);
+    if (n == 0)
+    {
+        SetScalar(ec, dst_id, dst_type_id, 0u);
+        return;
+    }
+    StoreResultComponents(ec, dst_id, dst_type_id, buf, n);
+}
+
 void ExecuteBlock(ExecContext& ec, u32 block_index)
 {
     const Program* p = ec.prog;
@@ -1546,6 +1630,10 @@ void ExecuteBlock(ExecContext& ec, u32 block_index)
             ec.jump_target = 0;
             return;
         case kOpReturnValue:
+            // Record the returned value's id so an OpFunctionCall caller
+            // can copy it into the call result. Operands: (value-id).
+            if (wc >= 2)
+                ec.return_value_id = w[1];
             ec.returned = true;
             ec.jump_target = 0;
             return;
@@ -1679,13 +1767,27 @@ void ExecuteBlock(ExecContext& ec, u32 block_index)
         }
         case kOpFunctionCall:
         {
-            // Inline call: jump to callee's first basic block.
-            // Parameter binding is skipped (v1 doesn't have a real
-            // call ABI). Caller will continue after the call site.
-            // For now, treat function calls as no-ops returning 0;
-            // a future slice will inline parameter passing.
-            if (rid != 0)
+            // Real call: bind args -> params, run the callee, copy its
+            // OpReturnValue into the call result. Operands:
+            // (result-type, result-id, function-id, arg0, arg1, ...).
+            if (wc >= 4)
+            {
+                const u32 callee_fn = w[3];
+                const u32 arg_count = wc - 4u;
+                BindCallArgs(ec, callee_fn, &w[4], arg_count);
+                const u32 ret_val_id = ExecuteCallee(ec, callee_fn);
+                if (rid != 0)
+                {
+                    if (ret_val_id != 0)
+                        CopyValueId(ec, rid, tid, ret_val_id);
+                    else
+                        SetScalar(ec, rid, tid, 0u); // void callee or no return value
+                }
+            }
+            else if (rid != 0)
+            {
                 SetScalar(ec, rid, tid, 0u);
+            }
             break;
         }
         default:
@@ -1700,6 +1802,62 @@ void ExecuteBlock(ExecContext& ec, u32 block_index)
     // Fell off the end without a terminator — treat as Return.
     ec.returned = true;
     ec.jump_target = 0;
+}
+
+u32 ExecuteCallee(ExecContext& ec, u32 fn_id)
+{
+    Program* p = ec.prog;
+    if (fn_id >= kMaxIds || p->id_kinds[fn_id] != IdKind::Function)
+        return 0;
+    const FunctionRecord& f = p->functions[p->id_to_index[fn_id]];
+    if (f.bb_begin >= p->block_count || f.bb_end > p->block_count || f.bb_begin >= f.bb_end)
+        return 0;
+
+    // Save the caller's control-flow cursor; the callee reuses the
+    // same shared ExecContext (SSA ids are module-unique) but its
+    // block walk would otherwise clobber where the caller resumes.
+    const u32 save_prev = ec.prev_block_label;
+    const u32 save_cur = ec.cur_block_label;
+    const u32 save_jump = ec.jump_target;
+    const u32 save_retval = ec.return_value_id;
+
+    ec.returned = false;
+    ec.jump_target = 0;
+    ec.return_value_id = 0;
+    ec.prev_block_label = 0;
+    ec.cur_block_label = 0;
+
+    u32 cur_bb = f.bb_begin;
+    while (cur_bb < f.bb_end && !ec.returned)
+    {
+        const u32 cur_label = p->blocks[cur_bb].label_id;
+        ec.prev_block_label = ec.cur_block_label;
+        ec.cur_block_label = cur_label;
+        ExecuteBlock(ec, cur_bb); // shares ec.step_count, so the global budget still bounds the call
+        if (ec.returned || ec.killed)
+            break;
+        if (ec.jump_target == 0)
+            break;
+        const i32 next = FindBlock(p, ec.jump_target);
+        // A callee branch must land inside the callee's own block range.
+        if (next < 0 || static_cast<u32>(next) < f.bb_begin || static_cast<u32>(next) >= f.bb_end)
+            break;
+        ec.prev_block_label = cur_label;
+        cur_bb = static_cast<u32>(next);
+        ec.jump_target = 0;
+    }
+
+    const u32 ret_id = ec.return_value_id; // OpReturnValue operand, 0 for void
+
+    // Restore the caller's cursor. ec.returned is cleared so the
+    // caller's block continues after the call site; ec.killed is
+    // sticky (a fragment that discarded inside a callee stays killed).
+    ec.prev_block_label = save_prev;
+    ec.cur_block_label = save_cur;
+    ec.jump_target = save_jump;
+    ec.return_value_id = save_retval;
+    ec.returned = false;
+    return ret_id;
 }
 
 } // namespace

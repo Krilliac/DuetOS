@@ -384,9 +384,25 @@ semantics. 43-vector boot self-test validates the implementation.
 | Conversion | `OpConvertSToF`, `OpConvertUToF`, `OpConvertFToS`, `OpBitcast` |
 | Comparison | `OpIEqual`, `OpINotEqual`, `OpSLessThan`, `OpFOrdLessThan` |
 | Control flow | `OpBranch`, `OpBranchConditional`, `OpPhi`, `OpReturn`, `OpReturnValue`, `OpLoopMerge`, `OpSelectionMerge` |
+| Function call | `OpFunctionCall` — real call: positional arg→`OpFunctionParameter` binding, callee block execution, `OpReturnValue`→result copy |
 | Extended | `OpExtInst` against `GLSL.std.450`: `Sqrt`, `Sin`, `Cos`, `Pow`, `FMin`, `FMax`, `FClamp`, `FMix`, `Step`, `Length`, `Normalize`, `Cross` |
 
 Per-shader step budget (`kStepBudget = 8192`) caps runaway loops.
+
+**Function calls** are real, not inlined-away by assumption: a
+front-end (DXC especially) that leaves helper functions as
+`OpFunctionCall` now executes correctly. Each argument is bound to the
+matching `OpFunctionParameter` (value params alias the argument's SSA
+value; pointer/`inout` params bind the storage-class-packed pointer),
+the callee's basic blocks run on the shared `ExecContext` (SPIR-V ids
+are module-unique, so no per-frame SSA save/restore is needed beyond
+the caller's control-flow cursor), and the callee's `OpReturnValue` is
+copied into the call result. Vulkan forbids shader recursion, so each
+function is live at most once on the call stack. **GAP:** an
+`OpAccessChain` whose base is itself a pointer parameter (chained
+access through an `inout` struct param) still needs a Variable base —
+rare outside hand-written GLSL. Boot self-test module 6
+(`add(a,b)` helper called from `main`) pins the path.
 
 **Transcendental support:** `Sf32Sin` / `Sf32Cos` use a 7th-order
 minimax polynomial after [-pi/2, pi/2] range reduction (~3e-5 max
