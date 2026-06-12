@@ -431,9 +431,18 @@ void RxPollEntry(void*)
                     ++g_state.stats.rx_dropped;
                     break;
                 }
-                const u32 abs = 8 + data_off; // data_off is from offset 8
-                if (abs + data_len <= msg_len && data_len >= 14)
+                // data_off is measured from offset 8 (the DataOffset field);
+                // the [abs, abs+data_len) data span must lie fully inside this
+                // record. A malicious device can set data_off near UINT32_MAX so
+                // `8 + data_off` wraps to a small abs, or data_len near UINT32_MAX
+                // so `abs + data_len` wraps below msg_len — either makes the naive
+                // `abs + data_len <= msg_len` containment check pass and steers a
+                // multi-gigabyte NetStackInjectRx read off the end of rx_buf.
+                // Bound both with subtraction against msg_len (msg_len >= 44 here,
+                // so the subtracts cannot underflow) — neither side can wrap.
+                if (data_off <= msg_len - 8 && data_len >= 14 && data_len <= msg_len - 8 - data_off)
                 {
+                    const u32 abs = 8 + data_off;
                     ++g_state.stats.rx_packets;
                     g_state.stats.rx_bytes += data_len;
                     duetos::net::NetStackInjectRx(g_state.iface_index, hdr + abs, data_len);

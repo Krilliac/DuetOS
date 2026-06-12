@@ -57,6 +57,7 @@ HARNESSES := $(BIN)/fuzz_iwl_fw $(BIN)/fuzz_rtl_fw $(BIN)/fuzz_bcm_fw $(BIN)/fuz
              $(BIN)/fuzz_pe_exports $(BIN)/fuzz_vt $(BIN)/fuzz_disasm \
              $(BIN)/fuzz_edid $(BIN)/fuzz_cea861 \
              $(BIN)/fuzz_usbclass $(BIN)/fuzz_usbhid \
+             $(BIN)/fuzz_cdcecm $(BIN)/fuzz_rndis \
              $(BIN)/fuzz_tls \
              $(BIN)/fuzz_nvidia_gsp_fw $(BIN)/fuzz_amd_gfx_fw \
              $(BIN)/fuzz_acpi $(BIN)/fuzz_aml $(BIN)/fuzz_ec
@@ -224,7 +225,7 @@ $(BIN)/libduetos_net_parsers_fuzz.a: host_shim/net_parsers_fuzz_shim.rs \
 
 $(BIN)/fuzz_net: fuzz_net.cpp $(NET)/stack.cpp $(NET)/firewall.cpp \
 		$(NET)/socket.cpp $(NET)/tcp.cpp $(NET)/tcp_segment.cpp $(NET)/tcp_timer.cpp \
-		$(NET)/tcp_cubic.cpp $(NET)/ipv6.cpp \
+		$(NET)/tcp_cubic.cpp $(NET)/tcp_sack.cpp $(NET)/ipv6.cpp \
 		host_shim/net_stubs.cpp host_shim/fs_stubs.cpp \
 		$(BIN)/libduetos_net_parsers_fuzz.a | $(BIN)
 	$(CXX) $(CXXFLAGS) -I $(NET_PARSERS_RUST)/include $^ -o $@
@@ -408,6 +409,24 @@ $(BIN)/libusbhid_fuzz.a: host_shim/usbhid_fuzz_shim.rs \
 $(BIN)/fuzz_usbhid: fuzz_usbhid.cpp $(USB)/hid_descriptor.cpp \
 		host_shim/usbhid_stubs.cpp $(BIN)/libusbhid_fuzz.a | $(BIN)
 	$(CXX) $(CXXFLAGS) -I $(USBHID_RUST)/include $^ -o $@
+
+# --- USB-net class drivers (CDC-ECM + RNDIS) ---------------------
+#
+# cdc_ecm.cpp / rndis.cpp parse device-supplied bytes the kernel
+# reaches only through the xHCI control-transfer surface. The harness
+# drives the real public CdcEcmProbe() / RndisProbe() entry points;
+# host_shim/usbnet_stubs.cpp serves the fuzz input as the stream of
+# control-IN replies the bring-up consumes (the fuzz_aml model) and
+# resolves the mm/net/sched symbols the TUs drag in. No Rust side —
+# these walkers are plain C++. ASan/UBSan catch any OOB / overflow in
+# the descriptor + RNDIS control-reply length/offset math.
+$(BIN)/fuzz_cdcecm: fuzz_cdcecm.cpp $(USB)/cdc_ecm.cpp \
+		host_shim/usbnet_stubs.cpp | $(BIN)
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+$(BIN)/fuzz_rndis: fuzz_rndis.cpp $(USB)/rndis.cpp \
+		host_shim/usbnet_stubs.cpp | $(BIN)
+	$(CXX) $(CXXFLAGS) $^ -o $@
 
 # --- EDID + CEA-861 EDID extension block -------------------------
 #
