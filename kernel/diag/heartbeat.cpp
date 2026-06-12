@@ -10,7 +10,7 @@
 #include "sched/sched.h"
 #include "subsystems/translation/translate.h"
 #include "fs/boot_slot.h"
-#include "fs/fat32.h"
+#include "fs/installer.h"
 #include "fs/ramfs.h"
 #include "security/fault_domain.h"
 #include "log/klog.h"
@@ -38,29 +38,23 @@ constexpr u64 kTimerHz = 100;
 // FAT32-backed persistence shim for the boot-slot state file. Called
 // once per boot, right after MarkHealthyNow() flips us to healthy, so
 // the next boot sees `last_healthy` + a refilled `tries_remaining`
-// even after a clean shutdown. Failures are logged + swallowed: a
-// freshly-formatted disk without an ESP shouldn't brick the heartbeat,
-// and the next clean boot will re-attempt persistence.
+// even after a clean shutdown. Routes through the shared
+// `installer::PersistSlotState` bridge, which replaces the existing
+// state file (the old local Fat32CreateAtPath writer failed whenever
+// the file already existed — i.e. on every installed disk) and
+// regenerates grub.cfg so `set default` follows the promotion.
+// Failures are logged + swallowed: a freshly-formatted disk without
+// an ESP shouldn't brick the heartbeat, and the next clean boot will
+// re-attempt persistence.
 bool PersistBootSlotState(const ::duetos::fs::boot_slot::State& st)
 {
-    const auto* vol = ::duetos::fs::fat32::Fat32Volume(0);
+    const auto* vol = ::duetos::fs::installer::FindBootSlotVolume();
     if (vol == nullptr)
     {
         LogWithValue(LogLevel::Warn, "kheartbeat", "boot-slot persist: no FAT32 vol", 0);
         return false;
     }
-    struct Ctx
-    {
-        const ::duetos::fs::fat32::Volume* vol;
-    } ctx{vol};
-    auto save_fn = +[](void* c, const u8* buf, u64 len) -> bool
-    {
-        auto* x = static_cast<Ctx*>(c);
-        const i64 wrote =
-            ::duetos::fs::fat32::Fat32CreateAtPath(x->vol, ::duetos::fs::boot_slot::kSlotStateFilePath, buf, len);
-        return wrote == static_cast<i64>(len);
-    };
-    if (!::duetos::fs::boot_slot::SaveVia(save_fn, &ctx, st))
+    if (!::duetos::fs::installer::PersistSlotState(vol, st))
     {
         LogWithValue(LogLevel::Warn, "kheartbeat", "boot-slot persist: write failed", 1);
         return false;

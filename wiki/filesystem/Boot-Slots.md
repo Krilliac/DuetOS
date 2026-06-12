@@ -6,9 +6,10 @@
 > **Execution context:** Kernel — parsing / serialisation are pure
 > functions; in-RAM state setter runs at boot
 >
-> **Maturity:** v0 — state-file format + parser + transition helpers
-> + self-test; grub.cfg generator, watchdog hook, and installer
-> wiring are GAP
+> **Maturity:** v1 — state-file format + parser + transition
+> helpers + grub.cfg generator + installer wiring (stage inactive
+> slot, validate, `BeginInstall`, persist) + heartbeat
+> mark-healthy persistence are all live
 
 ## Overview
 
@@ -137,6 +138,60 @@ bool SaveVia(SaveFn fn, void* ctx, const State& state);
 The caller owns FAT32 read/write, ramfs lookups, or VFS path
 resolution. `boot_slot` only knows the byte-level format.
 
+The single FAT32 bridge every persist site shares is
+`installer::PersistSlotState(vol, state)`
+([`kernel/fs/installer.cpp`](../../kernel/fs/installer.h)): it
+writes the state file through `SaveVia` (same-size in-place
+overwrite, else delete + create — the bounded-write tier), then
+**regenerates `/boot/grub/grub.cfg` from the same state** when the
+volume carries a `/boot/grub` directory, and flushes the volume.
+Its callers: the installer at install time, the heartbeat after
+`MarkHealthyNow`, and the `bootslot` shell subcommands.
+`installer::FindBootSlotVolume()` picks the volume that already
+holds the state file (the ESP), falling back to volume 0 on dev
+boots.
+
+## grub.cfg Generation
+
+`GrubCfgGenerate(state, buf, cap)` emits the full installed-disk
+grub.cfg as a **pure function of the state** — GRUB never parses
+the state file (GRUB script can't tokenise key=value text); instead
+the cfg is regenerated on every persist:
+
+```
+set timeout=3
+set default=1            # entry of pending (install in flight) else active
+set fallback="0 2"       # the other slot, then the legacy entry
+menuentry "DuetOS (slot a)" {        # entry 0
+    ... multiboot2 /boot/duetos-kernel-a.elf slot=a
+}
+menuentry "DuetOS (slot b)" {        # entry 1
+    ... multiboot2 /boot/duetos-kernel-b.elf slot=b
+}
+menuentry "DuetOS (legacy single-kernel, system partition)" {  # entry 2
+    ... multiboot2 /boot/duetos-kernel.elf
+}
+```
+
+`set default` points at `pending` while an install with
+`tries_remaining > 0` is in flight, otherwise `active`. The
+`slot=a` / `slot=b` cmdline arg is parsed at boot
+(`kernel/core/boot_bringup.cpp`) into the in-RAM `CurrentState`,
+so `MarkHealthyNow` promotes the slot the kernel actually booted
+from.
+
+## Installer Integration
+
+`installer::Install` (the shell's `install <handle> INSTALL`)
+stages the embedded kernel ELF (when
+`DUETOS_INSTALLER_KERNEL_EMBED=ON`) into
+`SlotKernelPath(Other(active))` on the fresh ESP, validates it by
+byte-for-byte read-back, then `BeginInstall` + `PersistSlotState`
+— so the first boot of the installed disk tries the staged slot
+with the legacy system-partition kernel as the GRUB fallback
+chain's last resort. A failed stage/validate is non-fatal: the
+state stays `Default()` so GRUB never defaults to an empty slot.
+
 ## Boot Self-Test
 
 `SelfTest` runs at kernel init:
@@ -147,23 +202,30 @@ resolution. `boot_slot` only knows the byte-level format.
 4. `BeginInstall(A)` re-arms A.
 5. `Rollback` rolls back to `last_healthy`.
 6. Serialise / Parse round-trips every state.
+7. `GrubCfgGenerate` invariants: `set default` follows
+   pending-else-active (including the exhausted-tries shape), both
+   slot entries carry their `slot=` cmdline, invalid states and
+   undersized buffers are refused.
 
 Any invariant violation panics. Adding a new transition? Add its
 case to the self-test.
 
 ## Known Limits / GAPs
 
-- **grub.cfg generator unwritten.** The state file alone doesn't
-  boot anything — the bootloader needs to consult the state and
-  pick a menuentry. The generator lands when the installer wires
-  this in.
-- **Watchdog hook unwired.** A real "boot completed" trigger needs
-  a high-confidence point in the boot path (post-login? post-first-
-  shell? post-init-script?) — picking this is a design call that
-  hasn't been made.
-- **Installer integration GAP.** The state-file format and the
-  per-slot kernel paths are stable; the installer's "write to
-  inactive slot + atomically flip" sequence is the residual work.
+- **GRUB does not decrement `tries_remaining`.** The cfg is a
+  static artifact regenerated at persist time; rollback decisions
+  are made by the kernel (`Rollback`, `bootslot force-fail`) and
+  by GRUB's `set fallback` chain for missing/corrupt slot images.
+  A kernel that loads but hangs before the heartbeat's
+  mark-healthy needs a manual menu pick of the other slot.
+- **`(hd0,gptN)` disk assumption.** The generated cfg assumes the
+  install disk enumerates as GRUB's first disk; multi-disk
+  installs need a search-by-UUID line.
+- **State-file replace is non-atomic when the size changes.**
+  Same-size persists go through `Fat32WriteInPlace`; a size change
+  is delete + create, so a power cut in that window leaves the
+  path absent until the next persist (GRUB then falls back to the
+  generated defaults already in the cfg).
 - **Single state file.** No redundancy. A corrupted state file
   forces a manual recovery boot. The bootloader could verify a
   checksum line, but that's a v1 detail.
