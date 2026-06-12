@@ -567,6 +567,30 @@ Translation Hand-off" above) — it issues the ops directly from
 `userland/libs/dx_vk.h` rather than importing vulkan-1.dll,
 because the DX DLLs are freestanding single-TU builds.
 
+### Guest-pointer & bounds validation (security boundary)
+
+`SYS_VK_CALL` is reachable from any Win32 PE, so every op treats its
+trap-frame arguments as hostile. Two disciplines are enforced uniformly:
+
+- **No raw guest-pointer dereference in the ICD.** Scalar out-params go
+  through `mm::CopyToUser` / `CopyFromUser` (`UserStore` / `UserLoad`), and
+  `OpCreateShaderModule` bounces the SPIR-V into a capped (16 MiB) kernel
+  buffer via `CopyFromUser` before the parser ever reads it — the ICD keeps
+  its own owning copy, so the bounce is freed immediately. A bad / unmapped /
+  read-only guest pointer or an oversized length yields a clean failure, not
+  a kernel `#PF` or a multi-GB `KMalloc`.
+- **Every `Bind*Memory` validates the region fits the memory object.** Both
+  `VkBindBufferMemory` and `VkBindImageMemory` require
+  `offset <= mem.size && required <= mem.size - offset`, where `required`
+  uses the format-correct `BytesPerTexelForFormat` stride (also reported by
+  `VkGetImageMemoryRequirements`). `VkAllocateMemory` caps the guest size.
+  Without the image-side check a guest could bind a large image into a small
+  allocation and OOB-write the kernel heap through a SPIR-V `OpImageWrite`.
+
+The signal test ("could a malicious PE do something a native process
+couldn't?") must stay **NO** for this surface — new ops added to the table
+above inherit the same obligation.
+
 Two ops worth calling out: `kVkOpCreateImage` masks the
 scanout-backed flag from the userland path (a PE must not be able
 to mint an image whose clears paint the live framebuffer), and

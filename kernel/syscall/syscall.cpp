@@ -45,6 +45,7 @@
 
 #include "syscall/cap_gate.h"
 #include "syscall/error.h"
+#include "syscall/inferred_gap.h"
 #include "syscall/syscall.h"
 #include "drivers/video/cursor.h"
 #include "drivers/video/widget.h"
@@ -524,6 +525,15 @@ void SyscallDispatch(arch::TrapFrame* frame)
         {
             ::duetos::sched::SyscallTrailRecord(::duetos::sched::kSyscallAbiNative, static_cast<u32>(num), a0, a1, a2,
                                                 a3, f->rax);
+            // Phase A dynamic fix-discovery: if this RECOGNIZED syscall handed
+            // a guest the not-implemented sentinel, record an InferredGap
+            // (dedup per number) — an unimplemented op discovered with no
+            // source marker. Runs on every normal return; SYS_EXIT's noreturn
+            // SchedExit bypasses this (an exiting task is not a gap), and a
+            // cap-denied return carries PermissionDenied (not the sentinel),
+            // so it does not record. See
+            // docs/superpowers/specs/2026-06-11-dynamic-fix-discovery-design.md
+            ::duetos::syscall::InferredGapMaybeRecord(f->rax, num);
         }
     };
     SyscallTrailGuard trail_guard{frame, num, frame->rdi, frame->rsi, frame->rdx, frame->r10};
@@ -776,6 +786,24 @@ void SyscallDispatch(arch::TrapFrame* frame)
         }
 
         const u64 page_va = probe_va & ~0xFFFULL;
+        // User-half VAs only. PML4[256..511] (kernel half) is SHARED from the
+        // boot PML4 into every address space, so a kernel-half probe would
+        // (a) leak the kernel's real leaf-PTE W^X/NX bits — info a native
+        // process can't obtain, undercutting KASLR/W^X — and (b) PanicAs on the
+        // 2 MiB direct-map PS pages (address_space.cpp), a guest-triggerable
+        // halt. Report MEM_FREE without walking. Mirrors the kVmUserMax clamp
+        // the sibling SYS_VM_ALLOCATE/FREE/PROTECT handlers already apply.
+        constexpr u64 kVmUserMax = 0x00007FFFFFFFFFFFULL;
+        if (page_va > kVmUserMax)
+        {
+            Win32MemoryBasicInfo info{};
+            info.base_address = page_va;
+            info.allocation_base = page_va;
+            info.region_size = mm::kPageSize;
+            info.state = kMemFree;
+            frame->rax = mm::CopyToUser(out_user, &info, sizeof(info)) ? kStatusSuccess : kStatusAccessViolation;
+            return;
+        }
         // Probe the leaf PTE directly (returns 0 when not present) so
         // we can report the page's ACTUAL protection rather than a
         // blanket PAGE_READWRITE. Lying RW for an RX code page or an

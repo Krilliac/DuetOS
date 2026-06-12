@@ -72,6 +72,8 @@ DETECTORS = {
     8: "trap_capture",
     9: "user_fault",
     10: "kassert_fail",
+    11: "autonomic_proposal",
+    12: "inferred_gap",
 }
 
 # x86_64 trap vectors that fire as TrapCapture records. The kernel's
@@ -3447,6 +3449,123 @@ def plan_actions(records: list[FixRecord], thunks_index: dict, repo_root: Path,
                             filename=f"kassert-demote-{safe_subsys}.patch",
                         )
                     )
+        elif r.detector_name == "inferred_gap":
+            # Phase A dynamic fix-discovery: a recognized syscall returned the
+            # not-implemented sentinel to a guest, discovered at RUNTIME with no
+            # source marker. Render a note (the fix is to implement/remove the
+            # op — human judgment, like a GAP, so not auto-patched).
+            priority, priority_note = _priority_tier(r.repeat, kind_label="inferred gap (runtime-discovered)")
+            body_lines = [
+                f"**Priority: {priority}** — {priority_note}",
+                "",
+                f"Syscall `{r.source_pin}` (number `0x{r.ctx_a:x}`) returned the "
+                f"not-implemented sentinel to a guest **{r.repeat}** time(s). This gap was "
+                f"discovered at RUNTIME with no `// GAP:` source marker — a guest is "
+                f"exercising an op the kernel recognizes but has not implemented.",
+                "",
+                "**Recommended next step:** implement the op, or — if it should not exist — "
+                "remove its `kSyscallCapTable` / dispatch entry so it reports `UnknownSyscall` "
+                "instead. Unlike a hand-placed marker, nobody annotated this; the runtime hit "
+                "IS the evidence it matters.",
+            ]
+            actions.append(
+                Action(
+                    kind="note",
+                    title=f"Inferred gap [discovered at runtime] `{r.source_pin}` (×{r.repeat}){_new_tag(r)}",
+                    body="\n".join(body_lines),
+                    filename=None,
+                )
+            )
+        elif r.detector_name == "autonomic_proposal":
+            # Phase B dynamic fix-discovery: the learner surfaced a reviewable
+            # proposal as DATA (DD#016 — never a code mutation). A `config:`
+            # pin proposes a bounded constant change (ctx_a=current,
+            # ctx_b=proposed); other pins are policy/gate proposals. Rendered
+            # as a note because applying it is a human judgment call.
+            is_config = r.source_pin.startswith("config:")
+            if is_config:
+                symbol = r.source_pin[len("config:") :]
+                body = [
+                    "**Priority: MEDIUM** — learner config proposal (evidence-backed; review before applying).",
+                    "",
+                    f"The autonomic learner proposes raising `{symbol}` from `{r.ctx_a}` to "
+                    f"`{r.ctx_b}` based on accumulated runtime evidence (`{r.hint}`).",
+                    "",
+                    "**Recommended next step:** confirm the evidence justifies the change, then "
+                    f"edit the `{symbol}` constant in source. DD#016: the learner only proposes "
+                    "this number — a human applies it. The bound is enforced learner-side "
+                    "(never more than 2x current, never past the hard ceiling).",
+                ]
+                title = f"Config proposal [learner] `{symbol}` {r.ctx_a}->{r.ctx_b}{_new_tag(r)}"
+            else:
+                body = [
+                    "**Priority: LOW** — learner policy/gate proposal (informational).",
+                    "",
+                    f"The autonomic learner surfaced a proposal at `{r.source_pin}`: `{r.hint}` "
+                    f"(ctx_a=`{r.ctx_a}`, ctx_b=`{r.ctx_b}`, ×{r.repeat}).",
+                    "",
+                    "**Recommended next step:** review the learned policy signal; no source "
+                    "change is implied unless the pattern is persistent and actionable.",
+                ]
+                title = f"Autonomic proposal [learner] `{r.source_pin}`{_new_tag(r)}"
+            actions.append(Action(kind="note", title=title, body="\n".join(body), filename=None))
+    return actions
+
+
+# ------------------------------------------------ Phase C: gap candidates
+
+
+def load_gap_candidates(path: Path) -> list[dict]:
+    """Load gap-scan.py's gap-candidates.json. Returns [] on any problem."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"# skip gap-candidates {path}: {exc}", file=sys.stderr)
+        return []
+    return data if isinstance(data, list) else []
+
+
+def plan_gap_candidate_actions(candidates: list[dict], records: list["FixRecord"]) -> list[Action]:
+    """Correlate static gap candidates with this boot's runtime records.
+
+    A candidate whose source file is referenced by ANY runtime record's pin
+    (e.g. an InferredGap or a marker hit in the same file) is 'confirmed live'
+    — a real guest exercised an un-annotated gap there. One with no hit is a
+    'cold candidate'. Confirmed-live sites are the high-signal set: a gap that
+    nobody annotated AND a guest actually reached.
+    """
+    hit_files: set[str] = set()
+    for r in records:
+        pin = r.source_pin or ""
+        # marker/trap pins look like "kernel/foo.cpp:NN"; take the file part.
+        if "/" in pin and ":" in pin:
+            hit_files.add(pin.rsplit(":", 1)[0])
+    actions: list[Action] = []
+    for c in candidates:
+        f = c.get("file", "")
+        live = f in hit_files
+        tier = "HIGH" if live else "LOW"
+        status = "confirmed live (a guest hit this file this boot)" if live else "cold (no runtime hit this boot)"
+        body = [
+            f"**Priority: {tier}** — {status}.",
+            "",
+            f"Un-annotated gap-shaped site discovered by static scan: "
+            f"`{f}:{c.get('line')}` in `{c.get('function') or '<unknown fn>'}` "
+            f"(pattern: `{c.get('pattern_kind')}`, guest-reachable guess: "
+            f"`{bool(c.get('guest_reachable_guess'))}`).",
+            "",
+            "**Recommended next step:** either implement the path, or add an explicit "
+            "`// GAP:`/`// STUB:` marker so the omission is intentional and tracked. "
+            "Confirmed-live candidates should be triaged first.",
+        ]
+        actions.append(
+            Action(
+                kind="note",
+                title=f"Gap candidate [{tier}] `{f}:{c.get('line')}` ({c.get('pattern_kind')})",
+                body="\n".join(body),
+                filename=None,
+            )
+        )
     return actions
 
 
@@ -3567,6 +3686,17 @@ def main() -> int:
         type=Path,
         default=None,
         help="optional gen-fix-markers.py JSON manifest; emits observability patches for safe unmacroed markers",
+    )
+    ap.add_argument(
+        "--gap-candidates",
+        type=Path,
+        default=None,
+        help=(
+            "optional gap-scan.py JSON manifest of un-annotated gap-shaped sites (Phase C). "
+            "Each candidate is correlated with the runtime records: a candidate whose file "
+            "also has an InferredGap/marker hit this boot is reported 'confirmed live' (high "
+            "priority); one never hit is a 'cold candidate' (low priority)."
+        ),
     )
     ap.add_argument(
         "--yes", action="store_true",
@@ -3775,6 +3905,15 @@ def main() -> int:
             file=sys.stderr,
         )
         actions.extend(marker_actions)
+    if args.gap_candidates is not None:
+        cands = load_gap_candidates(args.gap_candidates)
+        gap_actions = plan_gap_candidate_actions(cands, all_records)
+        print(
+            f"# loaded {len(cands)} gap candidate(s) from {args.gap_candidates}; "
+            f"generated {len(gap_actions)} note(s)",
+            file=sys.stderr,
+        )
+        actions.extend(gap_actions)
     patch_paths = write_patches(actions, args.out)
     print(render_markdown(actions, patch_paths))
 

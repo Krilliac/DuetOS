@@ -11448,3 +11448,50 @@ the arc. Three boundaries were fixed.
   actuator is silently truncated out of a reconciled decision. **Rules out**
   leaving the 4-slot array (a silent drop of a kernel actuator in a busy
   multi-rule tick is a correctness bug, not an acceptable cap).
+
+## 2026-06-11 — VK ICD resource-creation ops validate guest pointers/sizes (no exceptions)
+
+Surfaced by the 26-agent adversarial attack campaign. Commit 2267544b
+hardened the scalar `SYS_VK_CALL` store/load helpers to go through
+`mm::CopyFromUser`/`CopyToUser`, but the resource-creation ops still trusted
+the guest, leaving two HIGH guest-reachable holes.
+
+- **Decision (every guest pointer the ICD dereferences is bounced through a
+  fault-recoverable copy, never read in place):** `OpCreateShaderModule`
+  now caps `code_size_bytes` (16 MiB), rejects non-word-multiple sizes,
+  `KMalloc`s a bounce buffer, `CopyFromUser`s the SPIR-V, and feeds the ICD
+  only the kernel copy (the ICD takes its own owning copy, so the bounce is
+  freed immediately). **Rules out** the "read the user pointer directly, it's
+  just a v0 skeleton" shortcut — a bad/oversized/read-only guest pointer is a
+  kernel #PF / heap-exhaustion DoS a native process cannot cause.
+- **Decision (every `Bind*Memory` validates the bound region fits the memory
+  object):** `VkBindImageMemory` now mirrors `VkBindBufferMemory`'s
+  `offset <= mem.size && required <= mem.size - offset` check (overflow-safe
+  subtraction form), with `required` computed from the format-correct
+  `BytesPerTexelForFormat` rather than a hardcoded 4 B/texel;
+  `VkGetImageMemoryRequirements` reports the same stride so compliant guests
+  allocate enough, and `VkAllocateMemory` caps the guest size. **Rules out**
+  per-op ad-hoc validation: the buffer path was checked and the image path
+  was not, which let a guest bind a large image into a small allocation and
+  OOB-write the kernel heap via `OpImageWrite`. Validation is now uniform
+  across the bind ops.
+
+## 2026-06-11 — Dynamic fix-discovery is additive to markers; the learner proposes, never patches
+
+The fix-journal → gen-fix-patches pipeline depended on hand-placed `// GAP:`
+markers for its richest input. Three discovery layers were added (runtime
+`InferredGap`, static `gap-scan.py`, learner config proposals).
+
+- **Decision (discover gaps from runtime behaviour, not only from annotations):**
+  a recognized syscall returning `kStatusNotImplemented` to a guest is recorded
+  as an `InferredGap` at the single dispatch-return choke-point, keyed by
+  syscall number. **Rules out** "markers are the only gap signal" — a gap a
+  human never annotated but a guest exercises is now discovered with zero
+  annotation, while hand-placed markers remain valid and unchanged.
+- **Decision (the learner emits config numbers as data, never source):** Phase B
+  config proposals are limited to an allow-list of tunable symbols, bounded
+  (≤2× current, hard ceiling), evidence-gated, and written only as
+  `AutonomicProposal` journal records; a `static_assert` binds each mirrored
+  value to the live constant. **Rules out** the tempting "let the learner edit
+  the constant directly" shortcut — that would breach DD#016 (no self-modifying
+  `.text`). The generator renders the diff; a human flips the gate.

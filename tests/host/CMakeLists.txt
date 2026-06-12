@@ -91,6 +91,12 @@ endfunction()
 add_host_test(result)
 add_host_test(syscall_error)
 target_sources(test_syscall_error PRIVATE "${CMAKE_SOURCE_DIR}/../../kernel/syscall/error.cpp")
+# Phase A dynamic fix-discovery: decision logic is a freestanding header
+# (syscall/inferred_gap_decide.h), so the test needs no kernel TU.
+add_host_test(inferred_gap)
+# Phase B dynamic fix-discovery: config-proposal decision is freestanding
+# (env/config_proposal_decide.h), no kernel TU.
+add_host_test(config_proposal)
 add_host_test(string)
 add_host_test(cvt)
 add_host_test(text_hash)

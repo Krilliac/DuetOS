@@ -106,6 +106,14 @@ void CapAuditForceNextSample();
 /// Cheap (one byte load).
 duetos::core::CapAuditMode CapAuditGetMode();
 
+/// Suppress / re-enable the persistent fix-journal mirror of cap denials.
+/// The cap-gate self-test wraps its table sweep in
+/// `CapAuditSuppressJournal(true) ... CapAuditSuppressJournal(false)` so its
+/// EXPECTED empty/nullptr-caps denials don't land in KERNEL.FIX (where the
+/// patch generator would mis-flag them as "proc 0" cap-denial bugs). The
+/// in-RAM denial ring is unaffected. Process-context only.
+void CapAuditSuppressJournal(bool suppress);
+
 /// A single captured cap-gate denial. Lives in the kernel-owned
 /// ring buffer accessible through `CapAuditCopyRecentDenials`.
 /// All fields are by-value snapshots — no pointers escape the

@@ -20,23 +20,6 @@ cleanup debt: move the residual up and delete the rest.
 
 ## Kernel / runtime
 
-### vk-syscall user-pointer hardening (partial — `OpCreateShaderModule`)
-
-`kernel/syscall/syscall_vk.cpp` marshals user pointers for SYS_VK_CALL.
-The scalar store/load helpers (`UserStore` / `UserLoad`) and the
-`OpEnumeratePhysicalDevices` array write were hardened (2026-06-11) to go
-through the fault-recoverable `mm::CopyToUser` / `CopyFromUser`, after the
-autonomic stress campaign surfaced a guest-triggerable kernel #PF panic (a
-D3D11 demo store into a read-only DLL page). **Still raw:**
-`OpCreateShaderModule` passes a user pointer of user-controlled length
-(`frame->r10` / `frame->r8`) straight into the ICD's `VkCreateShaderModule`
-— a guest can fault the kernel with a bad pointer or oversized length. Fix
-needs a bounded copy-in: cap `code_size_bytes`, `kmalloc` a kernel buffer,
-`CopyFromUser` the SPIR-V, pass the kernel copy to the ICD, free after.
-Best landed with the SPIR-V pipeline slice (the ICD shader path is a v0
-skeleton today). Audit the rest of the ICD's `code`-pointer reads at the
-same time.
-
 ### B2-followup — split `g_sched_lock` per-CPU
 
 - **Bridge phase LANDED (2026-06-10, step 2 of 4).** The per-CPU
