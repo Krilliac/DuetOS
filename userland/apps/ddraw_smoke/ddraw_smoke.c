@@ -28,7 +28,10 @@ void __cdecl mainCRTStartup(void)
     Out("[ddraw_smoke] DirectDrawCreate         = ");
     Out((hr == 0 && dd) ? "PASS\r\n" : "FAIL\r\n");
     if (!dd)
+    {
+        Out("[ring3-ddraw-smoke] FAIL create\r\n");
         ExitProcess(1);
+    }
 
     void** dd_vt = *(void***)dd;
 
@@ -104,5 +107,6 @@ void __cdecl mainCRTStartup(void)
     typedef unsigned long (*PFN_Rel)(void*);
     ((PFN_Rel)dd_vt[2])(dd);
     Out("[ddraw_smoke] done\r\n");
+    Out("[ring3-ddraw-smoke] PASS\r\n");
     ExitProcess(0);
 }

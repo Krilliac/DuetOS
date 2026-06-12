@@ -66,5 +66,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[heap3_smoke] done\r\n");
+    Out("[ring3-heap3-smoke] PASS\r\n");
     ExitProcess(0);
 }

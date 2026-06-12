@@ -55,5 +55,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[locale2_smoke] done\r\n");
+    Out("[ring3-locale2-smoke] PASS\r\n");
     ExitProcess(0);
 }

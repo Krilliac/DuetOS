@@ -78,5 +78,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[version_smoke] done\r\n");
+    Out("[ring3-version-smoke] PASS\r\n");
     ExitProcess(0);
 }

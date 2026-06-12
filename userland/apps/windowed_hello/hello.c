@@ -119,6 +119,8 @@ __declspec(dllimport) COLORREF __stdcall SetPixel(HDC dc, int x, int y, COLORREF
 __declspec(dllimport) void __stdcall Sleep(DWORD dwMilliseconds);
 __declspec(dllimport) void __stdcall ExitProcess(unsigned int uExitCode);
 __declspec(dllimport) void __stdcall OutputDebugStringA(const char* s);
+__declspec(dllimport) HANDLE __stdcall GetStdHandle(DWORD nStdHandle);
+__declspec(dllimport) BOOL __stdcall WriteFile(HANDLE h, const void* buf, DWORD len, DWORD* written, void* ovl);
 
 static void dbg_uint(const char* prefix, unsigned v)
 {
@@ -303,6 +305,16 @@ void mainCRTStartup(void)
         ShowCaret(hwnd);
         MessageBeep(0);
         OutputDebugStringA("[odbg] windowed_hello: caret+beep done\n");
+    }
+
+    /* Standardized pe-compat verdict on stdout (the aggregator taps
+     * SYS_WRITE fd=1, not the odbg channel) — emitted BEFORE the
+     * screenshot-settle Sleep so the verdict scanner does not stall
+     * 17 s on this row. */
+    {
+        static const char verdict[] = "[ring3-windowed-hello] PASS\r\n";
+        DWORD written = 0;
+        WriteFile(GetStdHandle((DWORD)-11), verdict, sizeof(verdict) - 1, &written, 0);
     }
 
     /* Screenshot settle window. */

@@ -29,7 +29,10 @@ void __cdecl mainCRTStartup(void)
     Out("[d2d1_smoke] D2D1CreateFactory       = ");
     Out((hr == 0 && factory) ? "PASS\r\n" : "FAIL\r\n");
     if (!factory)
+    {
+        Out("[ring3-d2d1-smoke] FAIL createfactory\r\n");
         ExitProcess(1);
+    }
 
     void** f_vt = *(void***)factory;
 
@@ -104,5 +107,6 @@ void __cdecl mainCRTStartup(void)
     typedef unsigned long (*PFN_Rel)(void*);
     ((PFN_Rel)f_vt[2])(factory);
     Out("[d2d1_smoke] done\r\n");
+    Out("[ring3-d2d1-smoke] PASS\r\n");
     ExitProcess(0);
 }

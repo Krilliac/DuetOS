@@ -60,5 +60,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[scrap_smoke] done\r\n");
+    Out("[ring3-scrap-smoke] PASS\r\n");
     ExitProcess(0);
 }

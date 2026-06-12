@@ -160,5 +160,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[module_smoke] done\r\n");
+    Out("[ring3-module-smoke] PASS\r\n");
     ExitProcess(0);
 }

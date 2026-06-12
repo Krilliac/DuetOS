@@ -60,5 +60,6 @@ void __cdecl mainCRTStartup(void)
 
     WSACleanup();
     Out("[select_smoke] done\r\n");
+    Out("[ring3-select-smoke] PASS\r\n");
     ExitProcess(0);
 }

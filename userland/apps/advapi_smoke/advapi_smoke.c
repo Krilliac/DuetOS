@@ -48,5 +48,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[advapi_smoke] done\r\n");
+    Out("[ring3-advapi-smoke] PASS\r\n");
     ExitProcess(0);
 }

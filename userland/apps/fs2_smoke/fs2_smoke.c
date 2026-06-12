@@ -32,6 +32,7 @@ void __cdecl mainCRTStartup(void)
     {
         Out("FAIL\r\n");
         Out("[fs2_smoke] done\r\n");
+        Out("[ring3-fs2-smoke] FAIL open\r\n");
         ExitProcess(1);
     }
     Out("PASS\r\n");

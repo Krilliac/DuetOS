@@ -72,5 +72,6 @@ void __cdecl mainCRTStartup(void)
     Out(sps || !sps ? "PASS (returned)\r\n" : "FAIL\r\n");
 
     Out("[sound_smoke] done\r\n");
+    Out("[ring3-sound-smoke] PASS\r\n");
     ExitProcess(0);
 }

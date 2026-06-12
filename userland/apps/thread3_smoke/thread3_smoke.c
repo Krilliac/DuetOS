@@ -66,5 +66,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[thread3_smoke] done\r\n");
+    Out("[ring3-thread3-smoke] PASS\r\n");
     ExitProcess(0);
 }

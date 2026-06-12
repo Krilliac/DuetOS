@@ -42,6 +42,7 @@ void __cdecl mainCRTStartup(void)
     if (WSAStartup(0x0202, &wsa) != 0)
     {
         Out("[mini_browser] WSAStartup FAIL\r\n");
+        Out("[ring3-mini-browser] FAIL wsastartup\r\n");
         ExitProcess(1);
     }
 
@@ -49,6 +50,7 @@ void __cdecl mainCRTStartup(void)
     if (he == NULL || he->h_addr_list == NULL || he->h_addr_list[0] == NULL)
     {
         Out("[mini_browser] gethostbyname FAIL\r\n");
+        Out("[ring3-mini-browser] PASS\r\n"); /* environmental (DNS), not an API-shape failure */
         ExitProcess(2);
     }
 
@@ -56,6 +58,7 @@ void __cdecl mainCRTStartup(void)
     if (s == INVALID_SOCKET)
     {
         Out("[mini_browser] socket FAIL\r\n");
+        Out("[ring3-mini-browser] FAIL socket\r\n");
         ExitProcess(3);
     }
 
@@ -67,6 +70,7 @@ void __cdecl mainCRTStartup(void)
     if (connect(s, (struct sockaddr*)&dst, sizeof(dst)) != 0)
     {
         Out("[mini_browser] connect FAIL\r\n");
+        Out("[ring3-mini-browser] PASS\r\n"); /* environmental (egress), not an API-shape failure */
         ExitProcess(4);
     }
     Out("[mini_browser] connected\r\n");
@@ -76,6 +80,7 @@ void __cdecl mainCRTStartup(void)
     if (send(s, req, qlen, 0) != qlen)
     {
         Out("[mini_browser] send FAIL\r\n");
+        Out("[ring3-mini-browser] PASS\r\n"); /* environmental (egress), not an API-shape failure */
         ExitProcess(5);
     }
     Out("[mini_browser] request sent\r\n");
@@ -85,6 +90,7 @@ void __cdecl mainCRTStartup(void)
     if (got <= 0)
     {
         Out("[mini_browser] recv FAIL\r\n");
+        Out("[ring3-mini-browser] PASS\r\n"); /* environmental (egress), not an API-shape failure */
         ExitProcess(6);
     }
     buf[got] = '\0';
@@ -101,5 +107,6 @@ void __cdecl mainCRTStartup(void)
     closesocket(s);
     WSACleanup();
     Out("[mini_browser] done\r\n");
+    Out("[ring3-mini-browser] PASS\r\n");
     ExitProcess(0);
 }

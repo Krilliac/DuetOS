@@ -39,6 +39,7 @@ void __cdecl mainCRTStartup(void)
     {
         Out("FAIL (NULL)\r\n");
         Out("[winhttp_smoke] done\r\n");
+        Out("[ring3-winhttp-smoke] FAIL open\r\n");
         ExitProcess(1);
     }
     Out("PASS\r\n");
@@ -50,6 +51,7 @@ void __cdecl mainCRTStartup(void)
         Out("FAIL\r\n");
         WinHttpCloseHandle(sess);
         Out("[winhttp_smoke] done\r\n");
+        Out("[ring3-winhttp-smoke] FAIL connect\r\n");
         ExitProcess(2);
     }
     Out("PASS\r\n");
@@ -63,6 +65,7 @@ void __cdecl mainCRTStartup(void)
         WinHttpCloseHandle(conn);
         WinHttpCloseHandle(sess);
         Out("[winhttp_smoke] done\r\n");
+        Out("[ring3-winhttp-smoke] FAIL open-request\r\n");
         ExitProcess(3);
     }
     Out("PASS\r\n");
@@ -109,5 +112,6 @@ void __cdecl mainCRTStartup(void)
     WinHttpCloseHandle(sess);
 
     Out("[winhttp_smoke] done\r\n");
+    Out("[ring3-winhttp-smoke] PASS\r\n");
     ExitProcess(0);
 }

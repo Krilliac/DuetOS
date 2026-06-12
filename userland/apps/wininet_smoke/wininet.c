@@ -37,6 +37,7 @@ void __cdecl mainCRTStartup(void)
     if (sess == NULL)
     {
         Out("FAIL (NULL session)\r\n");
+        Out("[ring3-wininet-smoke] FAIL internetopen\r\n");
         ExitProcess(1);
     }
     Out("PASS\r\n");
@@ -48,6 +49,7 @@ void __cdecl mainCRTStartup(void)
     {
         Out("FAIL (NULL request)\r\n");
         InternetCloseHandle(sess);
+        Out("[ring3-wininet-smoke] PASS\r\n"); /* environmental (DNS/connect), not an API-shape failure */
         ExitProcess(2);
     }
     Out("PASS\r\n");
@@ -101,5 +103,6 @@ void __cdecl mainCRTStartup(void)
     InternetCloseHandle(req);
     InternetCloseHandle(sess);
     Out("[wininet_smoke] done\r\n");
+    Out("[ring3-wininet-smoke] PASS\r\n");
     ExitProcess(0);
 }

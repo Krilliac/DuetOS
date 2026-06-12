@@ -29,7 +29,10 @@ void __cdecl mainCRTStartup(void)
     Out("[dwrite_smoke] DWriteCreateFactory  = ");
     Out((hr == 0 && factory) ? "PASS\r\n" : "FAIL\r\n");
     if (!factory)
+    {
+        Out("[ring3-dwrite-smoke] FAIL create\r\n");
         ExitProcess(1);
+    }
 
     void** f_vt = *(void***)factory;
 
@@ -108,5 +111,6 @@ void __cdecl mainCRTStartup(void)
     ((PFN_Rel)f_vt[2])(factory);
 
     Out("[dwrite_smoke] done\r\n");
+    Out("[ring3-dwrite-smoke] PASS\r\n");
     ExitProcess(0);
 }

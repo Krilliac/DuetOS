@@ -59,6 +59,7 @@ void __cdecl mainCRTStartup(void)
     Out(d3d ? "PASS\r\n" : "FAIL\r\n");
     if (!d3d)
     {
+        Out("[ring3-d3d9-smoke] FAIL create9\r\n");
         ExitProcess(1);
     }
 
@@ -90,6 +91,7 @@ void __cdecl mainCRTStartup(void)
     Out((hr == 0 && dev) ? "PASS\r\n" : "FAIL\r\n");
     if (hr != 0 || !dev)
     {
+        Out("[ring3-d3d9-smoke] FAIL createdevice\r\n");
         ExitProcess(1);
     }
 
@@ -152,5 +154,6 @@ void __cdecl mainCRTStartup(void)
     Out("[d3d9_smoke] Release chain            = PASS\r\n");
 
     Out("[d3d9_smoke] done\r\n");
+    Out("[ring3-d3d9-smoke] PASS\r\n");
     ExitProcess(0);
 }

@@ -68,5 +68,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[wow64_smoke] done\r\n");
+    Out("[ring3-wow64-smoke] PASS\r\n");
     ExitProcess(0);
 }

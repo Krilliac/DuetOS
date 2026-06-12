@@ -45,6 +45,7 @@ void __cdecl mainCRTStartup(void)
     {
         Out("FAIL (out of indexes)\r\n");
         Out("[tls_smoke] done\r\n");
+        Out("[ring3-tls-smoke] FAIL tlsalloc\r\n");
         ExitProcess(1);
     }
     Out("PASS slot=");
@@ -89,5 +90,6 @@ void __cdecl mainCRTStartup(void)
         TlsFree(slot2);
 
     Out("[tls_smoke] done\r\n");
+    Out("[ring3-tls-smoke] PASS\r\n");
     ExitProcess(0);
 }

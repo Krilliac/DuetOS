@@ -46,5 +46,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[wstr2_smoke] done\r\n");
+    Out("[ring3-wstr2-smoke] PASS\r\n");
     ExitProcess(0);
 }

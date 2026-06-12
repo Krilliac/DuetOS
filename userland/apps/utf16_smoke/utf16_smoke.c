@@ -46,5 +46,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[utf16_smoke] done\r\n");
+    Out("[ring3-utf16-smoke] PASS\r\n");
     ExitProcess(0);
 }

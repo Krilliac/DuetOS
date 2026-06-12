@@ -47,5 +47,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[asyn_smoke] done\r\n");
+    Out("[ring3-asyn-smoke] PASS\r\n");
     ExitProcess(0);
 }

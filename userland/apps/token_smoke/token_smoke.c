@@ -51,5 +51,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[token_smoke] done\r\n");
+    Out("[ring3-token-smoke] PASS\r\n");
     ExitProcess(0);
 }

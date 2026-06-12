@@ -64,5 +64,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[dde_smoke] done\r\n");
+    Out("[ring3-dde-smoke] PASS\r\n");
     ExitProcess(0);
 }

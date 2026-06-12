@@ -367,6 +367,10 @@ void __cdecl mainCRTStartup(void)
     int rc = render_cube_to_window(hwnd);
     Out(rc ? "[dx_demo_window] cube rendered to window — PASS\r\n" : "[dx_demo_window] render FAIL\r\n");
 
+    /* Verdict before the screenshot-settle Sleep so the pe-compat
+     * aggregator does not stall 40 s waiting on this row. */
+    Out(rc ? "[ring3-dx-demo-window] PASS\r\n" : "[ring3-dx-demo-window] FAIL render\r\n");
+
     /* Settle window for the screenshot harness. screenshot.sh waits
      * for the kheartbeat task to appear in the serial log (which
      * happens within ~ms of dx_demo_window being spawned), then

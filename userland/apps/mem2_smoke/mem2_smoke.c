@@ -49,5 +49,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[mem2_smoke] done\r\n");
+    Out("[ring3-mem2-smoke] PASS\r\n");
     ExitProcess(0);
 }

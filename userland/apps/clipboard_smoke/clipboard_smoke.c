@@ -51,5 +51,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[clipboard_smoke] done\r\n");
+    Out("[ring3-clipboard-smoke] PASS\r\n");
     ExitProcess(0);
 }

@@ -51,5 +51,6 @@ void __cdecl mainCRTStartup(void)
         RegCloseKey(hk);
 
     Out("[reg2_smoke] done\r\n");
+    Out("[ring3-reg2-smoke] PASS\r\n");
     ExitProcess(0);
 }

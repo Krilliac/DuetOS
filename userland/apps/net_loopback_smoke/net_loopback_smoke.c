@@ -94,6 +94,7 @@ void __cdecl mainCRTStartup(void)
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
     {
         Out("[net_loopback] WSAStartup failed\r\n");
+        Out("[ring3-net-loopback] FAIL wsastartup\r\n");
         ExitProcess(1);
     }
 
@@ -101,6 +102,7 @@ void __cdecl mainCRTStartup(void)
     if (listener == INVALID_SOCKET)
     {
         Out("[net_loopback] FAIL listener socket\r\n");
+        Out("[ring3-net-loopback] FAIL listener-socket\r\n");
         ExitProcess(2);
     }
 
@@ -111,11 +113,13 @@ void __cdecl mainCRTStartup(void)
     if (bind(listener, (struct sockaddr*)&la, sizeof(la)) != 0)
     {
         Out("[net_loopback] FAIL bind\r\n");
+        Out("[ring3-net-loopback] FAIL bind\r\n");
         ExitProcess(3);
     }
     if (listen(listener, 1) != 0)
     {
         Out("[net_loopback] FAIL listen\r\n");
+        Out("[ring3-net-loopback] FAIL listen\r\n");
         ExitProcess(4);
     }
     Out("[net_loopback] listener bound + listening\r\n");
@@ -124,6 +128,7 @@ void __cdecl mainCRTStartup(void)
     if (connector == INVALID_SOCKET)
     {
         Out("[net_loopback] FAIL connector socket\r\n");
+        Out("[ring3-net-loopback] FAIL connector-socket\r\n");
         ExitProcess(5);
     }
     struct sockaddr_in pa = {0};
@@ -133,6 +138,7 @@ void __cdecl mainCRTStartup(void)
     if (connect(connector, (struct sockaddr*)&pa, sizeof(pa)) != 0)
     {
         Out("[net_loopback] FAIL connect\r\n");
+        Out("[ring3-net-loopback] FAIL connect\r\n");
         ExitProcess(6);
     }
     Out("[net_loopback] connect ok\r\n");
@@ -143,6 +149,7 @@ void __cdecl mainCRTStartup(void)
     if (g_accepted == INVALID_SOCKET)
     {
         Out("[net_loopback] FAIL accept\r\n");
+        Out("[ring3-net-loopback] FAIL accept\r\n");
         ExitProcess(7);
     }
     Out("[net_loopback] accept ok\r\n");
@@ -159,6 +166,7 @@ void __cdecl mainCRTStartup(void)
     if (rt == 0)
     {
         Out("[net_loopback] FAIL CreateThread\r\n");
+        Out("[ring3-net-loopback] FAIL create-thread\r\n");
         ExitProcess(8);
     }
 
@@ -180,6 +188,7 @@ void __cdecl mainCRTStartup(void)
         {
             Out("[net_loopback] FAIL send returned 0/error chunk=");
             OutHex((unsigned long)chunk_id);
+            Out("[ring3-net-loopback] FAIL send\r\n");
             ExitProcess(9);
         }
         sent_total += wrote;
@@ -194,6 +203,7 @@ void __cdecl mainCRTStartup(void)
     if (!g_recv_done)
     {
         Out("[net_loopback] FAIL receive timed out\r\n");
+        Out("[ring3-net-loopback] FAIL recv-timeout\r\n");
         ExitProcess(10);
     }
 
@@ -210,8 +220,10 @@ void __cdecl mainCRTStartup(void)
     if (expected != g_observed_checksum)
     {
         Out("[net_loopback] FAIL checksum mismatch\r\n");
+        Out("[ring3-net-loopback] FAIL checksum-mismatch\r\n");
         ExitProcess(11);
     }
     Out("[net_loopback] done OK\r\n");
+    Out("[ring3-net-loopback] PASS\r\n");
     ExitProcess(0);
 }

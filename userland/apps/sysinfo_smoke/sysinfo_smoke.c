@@ -56,5 +56,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[sysinfo_smoke] done\r\n");
+    Out("[ring3-sysinfo-smoke] PASS\r\n");
     ExitProcess(0);
 }

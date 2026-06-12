@@ -53,5 +53,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[userenv_smoke] done\r\n");
+    Out("[ring3-userenv-smoke] PASS\r\n");
     ExitProcess(0);
 }

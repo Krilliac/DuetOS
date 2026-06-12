@@ -41,5 +41,6 @@ void __cdecl mainCRTStartup(void)
     Out(!resume ? "PASS (FALSE, as expected)\r\n" : "FAIL\r\n");
 
     Out("[power_smoke] done\r\n");
+    Out("[ring3-power-smoke] PASS\r\n");
     ExitProcess(0);
 }

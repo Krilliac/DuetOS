@@ -48,5 +48,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[services_smoke] done\r\n");
+    Out("[ring3-services-smoke] PASS\r\n");
     ExitProcess(0);
 }

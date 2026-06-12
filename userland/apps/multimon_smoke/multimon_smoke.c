@@ -71,5 +71,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[multimon_smoke] done\r\n");
+    Out("[ring3-multimon-smoke] PASS\r\n");
     ExitProcess(0);
 }

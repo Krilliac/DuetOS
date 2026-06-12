@@ -35,6 +35,7 @@ void __cdecl mainCRTStartup(void)
     {
         Out("FAIL/STUB\r\n");
         Out("[stdio_smoke] done\r\n");
+        Out("[ring3-stdio-smoke] FAIL fopen\r\n");
         ExitProcess(1);
     }
     Out("PASS\r\n");
@@ -72,5 +73,6 @@ void __cdecl mainCRTStartup(void)
         fclose(nf);
 
     Out("[stdio_smoke] done\r\n");
+    Out("[ring3-stdio-smoke] PASS\r\n");
     ExitProcess(0);
 }

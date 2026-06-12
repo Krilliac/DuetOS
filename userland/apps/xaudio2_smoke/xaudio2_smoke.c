@@ -30,7 +30,10 @@ void __cdecl mainCRTStartup(void)
     Out("[xaudio2_smoke] XAudio2Create        = ");
     Out((hr == 0 && x2) ? "PASS\r\n" : "FAIL\r\n");
     if (!x2)
+    {
+        Out("[ring3-xaudio2-smoke] FAIL create\r\n");
         ExitProcess(1);
+    }
 
     void** x2_vt = *(void***)x2;
 
@@ -92,5 +95,6 @@ void __cdecl mainCRTStartup(void)
     typedef unsigned long (*PFN_Rel)(void*);
     ((PFN_Rel)x2_vt[2])(x2);
     Out("[xaudio2_smoke] done\r\n");
+    Out("[ring3-xaudio2-smoke] PASS\r\n");
     ExitProcess(0);
 }

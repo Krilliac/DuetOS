@@ -56,5 +56,6 @@ void __cdecl mainCRTStartup(void)
 
     WSACleanup();
     Out("[dns_smoke] done\r\n");
+    Out("[ring3-dns-smoke] PASS\r\n");
     ExitProcess(0);
 }

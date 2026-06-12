@@ -51,5 +51,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[drive_smoke] done\r\n");
+    Out("[ring3-drive-smoke] PASS\r\n");
     ExitProcess(0);
 }

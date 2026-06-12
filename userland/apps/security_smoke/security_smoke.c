@@ -59,5 +59,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[security_smoke] done\r\n");
+    Out("[ring3-security-smoke] PASS\r\n");
     ExitProcess(0);
 }

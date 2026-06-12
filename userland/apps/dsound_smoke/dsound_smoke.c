@@ -28,7 +28,10 @@ void __cdecl mainCRTStartup(void)
     Out("[dsound_smoke] DirectSoundCreate8       = ");
     Out((hr == 0 && ds) ? "PASS\r\n" : "FAIL\r\n");
     if (!ds)
+    {
+        Out("[ring3-dsound-smoke] FAIL create\r\n");
         ExitProcess(1);
+    }
 
     void** ds_vt = *(void***)ds;
 
@@ -101,5 +104,6 @@ void __cdecl mainCRTStartup(void)
     typedef unsigned long (*PFN_Rel)(void*);
     ((PFN_Rel)ds_vt[2])(ds);
     Out("[dsound_smoke] done\r\n");
+    Out("[ring3-dsound-smoke] PASS\r\n");
     ExitProcess(0);
 }

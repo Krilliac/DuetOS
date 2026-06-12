@@ -50,5 +50,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[iocp2_smoke] done\r\n");
+    Out("[ring3-iocp2-smoke] PASS\r\n");
     ExitProcess(0);
 }

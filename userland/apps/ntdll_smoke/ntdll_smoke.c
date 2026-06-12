@@ -81,5 +81,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[ntdll_smoke] done\r\n");
+    Out("[ring3-ntdll-smoke] PASS\r\n");
     ExitProcess(0);
 }

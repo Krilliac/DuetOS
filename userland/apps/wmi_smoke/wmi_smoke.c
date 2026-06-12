@@ -38,5 +38,6 @@ void __cdecl mainCRTStartup(void)
 
     CoUninitialize();
     Out("[wmi_smoke] done\r\n");
+    Out("[ring3-wmi-smoke] PASS\r\n");
     ExitProcess(0);
 }

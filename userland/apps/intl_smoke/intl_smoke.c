@@ -44,5 +44,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[intl_smoke] done\r\n");
+    Out("[ring3-intl-smoke] PASS\r\n");
     ExitProcess(0);
 }

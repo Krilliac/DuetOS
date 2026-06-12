@@ -64,6 +64,7 @@ void __cdecl mainCRTStartup(void)
     {
         Out("FAIL\r\n");
         Out("[fs_smoke] done\r\n");
+        Out("[ring3-fs-smoke] FAIL createfile\r\n");
         ExitProcess(1);
     }
     Out("PASS\r\n");
@@ -168,5 +169,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[fs_smoke] done\r\n");
+    Out("[ring3-fs-smoke] PASS\r\n");
     ExitProcess(0);
 }

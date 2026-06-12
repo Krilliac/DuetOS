@@ -104,5 +104,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[handle_smoke] done\r\n");
+    Out("[ring3-handle-smoke] PASS\r\n");
     ExitProcess(0);
 }

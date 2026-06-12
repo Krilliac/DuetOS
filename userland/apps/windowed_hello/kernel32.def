@@ -6,5 +6,7 @@ LIBRARY kernel32.dll
 
 EXPORTS
     ExitProcess
+    GetStdHandle
     OutputDebugStringA
     Sleep
+    WriteFile

@@ -1579,5 +1579,6 @@ void __cdecl mainCRTStartup(void)
     OutDec((unsigned)total);
     Out(" sections passed\r\n");
     Out("[dx_demo] done\r\n");
+    Out(pass == total ? "[ring3-dx-demo] PASS\r\n" : "[ring3-dx-demo] FAIL sections\r\n");
     ExitProcess(pass == total ? 0 : 1);
 }

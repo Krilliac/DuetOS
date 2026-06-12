@@ -40,5 +40,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[fpcontrol_smoke] done\r\n");
+    Out("[ring3-fpcontrol-smoke] PASS\r\n");
     ExitProcess(0);
 }

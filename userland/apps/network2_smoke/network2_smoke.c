@@ -78,5 +78,6 @@ void __cdecl mainCRTStartup(void)
 
     WSACleanup();
     Out("[network2_smoke] done\r\n");
+    Out("[ring3-network2-smoke] PASS\r\n");
     ExitProcess(0);
 }

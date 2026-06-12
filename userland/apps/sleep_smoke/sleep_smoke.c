@@ -50,5 +50,6 @@ void __cdecl mainCRTStartup(void)
     (void)sw;
 
     Out("[sleep_smoke] done\r\n");
+    Out("[ring3-sleep-smoke] PASS\r\n");
     ExitProcess(0);
 }

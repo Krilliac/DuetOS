@@ -42,5 +42,6 @@ void __cdecl mainCRTStartup(void)
     (void)hr2;
 
     Out("[dxgi_smoke] done\r\n");
+    Out("[ring3-dxgi-smoke] PASS\r\n");
     ExitProcess(0);
 }

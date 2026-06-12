@@ -68,5 +68,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[critsec_smoke] done\r\n");
+    Out("[ring3-critsec-smoke] PASS\r\n");
     ExitProcess(0);
 }

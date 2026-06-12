@@ -82,5 +82,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[mathlib_smoke] done\r\n");
+    Out("[ring3-mathlib-smoke] PASS\r\n");
     ExitProcess(0);
 }

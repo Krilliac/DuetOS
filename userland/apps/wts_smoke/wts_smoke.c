@@ -36,5 +36,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[wts_smoke] done\r\n");
+    Out("[ring3-wts-smoke] PASS\r\n");
     ExitProcess(0);
 }

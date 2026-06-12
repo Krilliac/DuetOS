@@ -49,5 +49,6 @@ void __cdecl mainCRTStartup(void)
 
     WSACleanup();
     Out("[sock_opt_smoke] done\r\n");
+    Out("[ring3-sock-opt-smoke] PASS\r\n");
     ExitProcess(0);
 }
