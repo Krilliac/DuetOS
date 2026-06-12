@@ -932,7 +932,34 @@ void SyscallDispatch(arch::TrapFrame* frame)
         const u64 op = frame->rdi;
         const u32 new_class = static_cast<u32>(frame->rsi);
         if (op == 1) // set
-            proc->win32_priority_class = new_class;
+        {
+            // Only the six documented Windows priority-class constants
+            // are accepted; SchedBandForProcess must never see a value
+            // it doesn't recognise. An unknown value is rejected (the
+            // current class is left unchanged and round-tripped back).
+            const bool known = (new_class == 0x40 ||   // IDLE
+                                new_class == 0x4000 || // BELOW_NORMAL
+                                new_class == 0x20 ||   // NORMAL
+                                new_class == 0x8000 || // ABOVE_NORMAL
+                                new_class == 0x80 ||   // HIGH
+                                new_class == 0x100);   // REALTIME
+            // Raising the band above Normal (ABOVE_NORMAL/HIGH/REALTIME)
+            // lets a process preempt the kernel's own Normal-band
+            // threads — a starvation/DoS lever. Gate elevation on
+            // kCapSchedPriority; lowering and Normal are unprivileged.
+            const bool elevates = (new_class == 0x100 || new_class == 0x80 || new_class == 0x8000);
+            if (known && elevates && !CapSetHas(proc->caps, kCapSchedPriority))
+            {
+                RecordSandboxDenial(kCapSchedPriority);
+                // Leave the current class unchanged — a denied elevation
+                // is a no-op, so GetPriorityClass reports the old value
+                // and a benign PE that probed HIGH keeps running.
+            }
+            else if (known)
+            {
+                proc->win32_priority_class = new_class;
+            }
+        }
         frame->rax = static_cast<u64>(proc->win32_priority_class);
         return;
     }

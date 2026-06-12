@@ -435,9 +435,20 @@ void CmdExec(u32 argc, char** argv)
     WriteU64Dec(visited);
     ConsoleWriteln(" PT_LOAD SEGMENTS.");
 
-    const u64 new_pid =
-        duetos::core::SpawnElfFile(argv[1], file, n, duetos::core::CapSetTrusted(), duetos::fs::RamfsTrustedRoot(),
-                                   duetos::mm::kFrameBudgetTrusted, duetos::core::kTickBudgetTrusted);
+    // SEC-008: `exec` runs an operator-chosen ELF — UNTRUSTED binary
+    // content, exactly like PEEXEC above. It must NOT inherit
+    // CapSetTrusted() (every bit, incl. kCapDebug cross-proc VM r/w and
+    // kCapDiag = SYS_DIAG_FAULT_INJECT, a guest-reachable kernel panic).
+    // Grant the same least-privilege set as the PEEXEC site
+    // (SerialConsole + FsRead + SpawnThread) into the SANDBOX namespace
+    // with sandbox-class budgets. The command is still RequireAdmin-gated,
+    // but the launched bytes are untrusted regardless of who launched them.
+    duetos::core::CapSet caps = duetos::core::CapSetEmpty();
+    duetos::core::CapSetAdd(caps, duetos::core::kCapSerialConsole);
+    duetos::core::CapSetAdd(caps, duetos::core::kCapFsRead);
+    duetos::core::CapSetAdd(caps, duetos::core::kCapSpawnThread);
+    const u64 new_pid = duetos::core::SpawnElfFile(argv[1], file, n, caps, duetos::fs::RamfsSandboxRoot(),
+                                                   /*frame_budget=*/512, duetos::core::kTickBudgetSandbox);
     if (new_pid == 0)
     {
         ConsoleWriteln("EXEC: SPAWN FAILED (OOM or bad ELF layout).");

@@ -104,8 +104,9 @@ another PID still hits the cap gate and fails (or succeeds if
 | 5 | `kCapInput` |
 | 6 | `kCapNet` |
 | 7 | `kCapNetAdmin` |
-| 8 | `kCapSerialConsole` |
-| 9 | `kCapSpawnThread` |
+| 8 | `kCapSchedPriority` |
+| 9 | `kCapSerialConsole` |
+| 10 | `kCapSpawnThread` |
 <!-- /AUTO:cap_list -->
 
 _The capability inventory above is auto-synced by

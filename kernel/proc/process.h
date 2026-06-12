@@ -182,6 +182,18 @@ enum Cap : u32
     // every sandboxed profile and from every seed role except root.
     kCapDiag = 9,
 
+    // Raise the calling process's MLFQ scheduling band ABOVE the
+    // Normal band (SYS_PRIORITY_CLASS set to ABOVE_NORMAL / HIGH /
+    // REALTIME). The kernel's own threads run in the Normal band, so
+    // a process that can elevate above it can preempt kernel work and
+    // starve the box — a denial-of-service lever. Without this cap a
+    // SetPriorityClass(HIGH/REALTIME) request is refused (the class is
+    // left unchanged); lowering to Below-Normal / Idle and staying at
+    // Normal are always allowed. Held by the trusted profile (so
+    // kernel-shipped userland keeps its scheduling reach); withheld
+    // from kProfileSandbox so an untrusted PE cannot self-promote.
+    kCapSchedPriority = 10,
+
     // Sentinel: keep this as the last entry so kProfileTrusted can
     // be built by a loop that iterates [1 .. kCapCount). Do NOT
     // use kCapCount as a live cap — it's a boundary marker.
