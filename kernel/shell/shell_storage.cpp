@@ -563,6 +563,23 @@ void CmdInstall(u32 argc, char** argv)
     // is still needed.
     const duetos::u64 kern_len = duetos::fs::RamfsKernelElfSize();
     ConsoleWriteln("  ESP /EFI/BOOT/BOOTX64.EFI written from embedded blob");
+    if (report.staged_slot != 0)
+    {
+        const char slot_name = (report.staged_slot == 2) ? 'b' : 'a';
+        ConsoleWrite("  ESP /boot/duetos-kernel-");
+        ConsoleWriteChar(slot_name);
+        ConsoleWriteln(".elf staged + read-back validated");
+        ConsoleWrite("  A/B state persisted: pending=");
+        ConsoleWriteChar(slot_name);
+        ConsoleWriteln("; grub.cfg default boots the new slot,");
+        ConsoleWriteln("    falling back to the other slot, then the legacy /system kernel");
+    }
+    else if (kern_len > 0)
+    {
+        ConsoleWriteln("  ESP slot-kernel staging FAILED — grub.cfg falls back to the");
+        ConsoleWriteln("    legacy /system kernel; re-run install or stage");
+        ConsoleWriteln("    /boot/duetos-kernel-b.elf onto the ESP by hand");
+    }
     if (use_duetfs)
     {
         ConsoleWriteln("  /system formatted as DuetFS — kernel.elf path-create");

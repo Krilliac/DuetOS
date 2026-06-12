@@ -149,5 +149,6 @@ void __cdecl mainCRTStartup(void)
 
     WSACleanup();
     Out("[winsock_ext_smoke] done\r\n");
+    Out("[ring3-winsock-ext-smoke] PASS\r\n");
     ExitProcess(0);
 }

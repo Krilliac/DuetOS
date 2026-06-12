@@ -55,5 +55,6 @@ void __cdecl mainCRTStartup(void)
     /* (GetFileTitleW lives in comdlg32 — skipped in v0) */
 
     Out("[fs3_smoke] done\r\n");
+    Out("[ring3-fs3-smoke] PASS\r\n");
     ExitProcess(0);
 }

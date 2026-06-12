@@ -62,6 +62,15 @@ void StartRing3SmokeTask();
 /// without waiting for completion.
 bool SpawnOnDemand(const char* kind);
 
+/// PE-compat battery verdict tap. Called by the SYS_WRITE(fd=1)
+/// handler with the kernel bounce buffer (post-CopyFromUser) so the
+/// battery aggregator can observe each smoke PE's standardized
+/// "[<spawn-label>] PASS" / "[<spawn-label>] FAIL <reason>" line on
+/// its way to COM1. Costs a single branch while the battery is not
+/// running; scans only while armed (between the first battery spawn
+/// and the "[pe-compat-smoke] passed=N failed=M skipped=K" summary).
+void PeCompatSmokeObserve(const char* buf, u64 len);
+
 } // namespace duetos::core
 
 // `Ring3UserEntry`, `SpawnElfFile`, `SpawnElfLinux`, and

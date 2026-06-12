@@ -42,14 +42,17 @@ __declspec(dllexport) NTSTATUS NtSignalAndWaitForSingleObject(HANDLE ObjectToSig
 {
     /* Best-effort: signal first object, then wait on second.
      * Atomicity not preserved (sub-GAP). */
+    /* Mutex / event ranges are 0x200/0x300 + a kobj_handles slot
+     * (1..63) — the caps grew 8 -> 64 when those objects migrated
+     * to the unified handle table. */
     unsigned long long sig_handle = (unsigned long long)ObjectToSignal;
     long long sig_status = 0;
-    if (sig_handle >= 0x200 && sig_handle < 0x208)
+    if (sig_handle >= 0x200 && sig_handle < 0x240)
         __asm__ volatile("int $0x80"
                          : "=a"(sig_status)
                          : "a"((long long)27), "D"((long long)ObjectToSignal)
                          : "memory");
-    else if (sig_handle >= 0x300 && sig_handle < 0x308)
+    else if (sig_handle >= 0x300 && sig_handle < 0x340)
         __asm__ volatile("int $0x80"
                          : "=a"(sig_status)
                          : "a"((long long)31), "D"((long long)ObjectToSignal)
@@ -321,6 +324,31 @@ __declspec(dllexport) NTSTATUS NtRemoveIoCompletionEx(HANDLE IoCompletionHandle,
     if (NumEntriesRemoved != (ULONG*)0)
         *NumEntriesRemoved = filled;
     return filled > 0 ? NTSTATUS_SUCCESS : (NTSTATUS)0x00000102;
+}
+
+/* PostQueuedCompletionStatus — Win32-shaped post onto a
+ * kernel-backed IOCP handle (the 0xB00-range handles minted by
+ * NtCreateIoCompletion above). Thin wrapper over SYS_IOCP_POST.
+ *
+ * Exported from ntdll (not kernel32) deliberately: kernel32's
+ * current PostQueuedCompletionStatus services its own in-process
+ * v0 ring (0x8000-range handles) and keeps that export; PEs
+ * importing the name from KERNEL32 bind there, so the two
+ * coexist. When kernel32's IOCP surface consolidates onto the
+ * kernel ports, its wrapper re-routes through this same syscall
+ * and the in-process ring retires. */
+__declspec(dllexport) BOOL PostQueuedCompletionStatus(HANDLE IoCompletionHandle, DWORD NumberOfBytesTransferred,
+                                                      unsigned long long CompletionKey, void* Overlapped)
+{
+    long long rv;
+    __asm__ volatile("mov %4, %%r10\n\t"
+                     "int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)213), /* SYS_IOCP_POST */
+                       "D"((long long)IoCompletionHandle), "S"((long long)NumberOfBytesTransferred),
+                       "d"((long long)CompletionKey), "r"((long long)Overlapped)
+                     : "r10", "memory");
+    return rv == 0 ? 1 : 0;
 }
 
 /* ------------------------------------------------------------------

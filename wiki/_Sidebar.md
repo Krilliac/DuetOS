@@ -28,6 +28,7 @@
 - [Code Path Ledger (KPath)](kernel/Code-Path-Ledger.md)
 - [Diagnostics](kernel/Diagnostics.md)
 - [Self-Thinking and Introspection](kernel/Self-Thinking.md)
+- [Autonomic Policy](kernel/Autonomic-Policy.md)
 - [Fault Injection](kernel/Fault-Injection.md)
 - [Crypto Primitives](kernel/Crypto.md)
 - [Utilities](kernel/Util.md)

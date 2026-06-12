@@ -326,10 +326,23 @@ void IocpSelfTest()
     // Exercise the ring through the heap-allocated port too so
     // the KObject base offset is correct (a misaligned base
     // would corrupt the ring's first slot on the post below).
+    // The post is Win32-shaped — the exact completion SYS_IOCP_POST
+    // (PostQueuedCompletionStatus) fabricates: caller-picked
+    // key / bytes / OVERLAPPED*, ntstatus = STATUS_SUCCESS — and
+    // the drain goes through IocpWait, the SYS_IOCP_REMOVE path.
     IocpCompletion c2 = {};
+    c2.overlapped_user_va = 0xBEEFULL;
     c2.completion_key = 0xCAFE;
+    c2.bytes_transferred = 42;
+    c2.ntstatus = 0;
     if (!IocpTryPost(heap, c2))
         ::duetos::core::Panic("ipc/iocp", "self-test: heap port try-post failed");
+    IocpCompletion posted = {};
+    if (!IocpWait(heap, &posted, /*timeout_ticks=*/1))
+        ::duetos::core::Panic("ipc/iocp", "self-test: heap port IocpWait failed to drain the post");
+    if (posted.overlapped_user_va != 0xBEEFULL || posted.completion_key != 0xCAFE || posted.bytes_transferred != 42 ||
+        posted.ntstatus != 0)
+        ::duetos::core::Panic("ipc/iocp", "self-test: heap port post/wait round-trip corrupted the completion");
     KObjectRelease(&heap->base);
     // heap is now freed — must not be touched again.
 

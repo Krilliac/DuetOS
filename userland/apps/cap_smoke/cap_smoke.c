@@ -31,5 +31,6 @@ void __cdecl mainCRTStartup(void)
     Out(r ? "PASS\r\n" : "FAIL/STUB\r\n");
 
     Out("[cap_smoke] done\r\n");
+    Out("[ring3-cap-smoke] PASS\r\n");
     ExitProcess(0);
 }

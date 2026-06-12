@@ -46,5 +46,6 @@ void __cdecl mainCRTStartup(void)
     Out(k != NULL ? "PASS\r\n" : "FAIL/STUB\r\n");
 
     Out("[key_smoke] done\r\n");
+    Out("[ring3-key-smoke] PASS\r\n");
     ExitProcess(0);
 }

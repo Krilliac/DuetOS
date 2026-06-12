@@ -144,6 +144,28 @@ if [ "$failn" -gt 0 ]; then
 fi
 
 hr
+echo "PE-COMPAT SMOKE (ring3 battery aggregator)"
+# kernel/proc/ring3_smoke.cpp's "pe-compat-report" watchdog emits ONE
+# structural summary once every spawned battery row has reported its
+# standardized "[<label>] PASS|FAIL" verdict or died trying:
+#   [pe-compat-smoke] passed=N failed=M skipped=K
+# followed by one "fail name=<label> why=reported|no-verdict" detail
+# line per failure. failed>0 is a regression gate; an absent summary
+# is advisory only (TTY boots / boots that never start ring3 smoke).
+pec_sum=$(g '\[pe-compat-smoke\] passed=' | tail -1)
+if [ -n "$pec_sum" ]; then
+    echo "  ${pec_sum#*] }"
+    pec_failed=$(printf '%s' "$pec_sum" | grep -oE 'failed=[0-9]+' | cut -d= -f2)
+    if [ "${pec_failed:-0}" -gt 0 ]; then
+        echo "  !! $pec_failed battery PE(s) failed:"
+        g '\[pe-compat-smoke\] fail name=' | head -10 | sed 's/^/     /'
+        rc=1
+    fi
+else
+    echo "  (no [pe-compat-smoke] summary — ring3 smoke battery not run this boot)"
+fi
+
+hr
 echo "TACTILITY (chrome tactility Pass A)"
 # The chrome-tactility plan added four PASS sentinels: per-effect
 # self-tests for blend + shadow + theme-tactility-matrix, plus the

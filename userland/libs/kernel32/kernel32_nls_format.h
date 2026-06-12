@@ -308,17 +308,32 @@ static inline int num_format_core_a(const char* num, const DUETOS_NUMBERFMT_A* n
     return pos;
 }
 
+/* Win32 CURRENCYFMTA layout (narrow separator / symbol strings). */
+typedef struct
+{
+    unsigned int NumDigits;
+    unsigned int LeadingZero;
+    unsigned int Grouping;
+    const char* lpDecimalSep;
+    const char* lpThousandSep;
+    unsigned int NegativeOrder; /* 0..15 — LOCALE_INEGCURR table */
+    unsigned int PositiveOrder; /* 0..3  — LOCALE_ICURRENCY table */
+    const char* lpCurrencySymbol;
+} DUETOS_CURRENCYFMT_A;
+
 /* Currency formatter: formats `num`'s magnitude through the number core
- * (so grouping + rounding match GetNumberFormat) and wraps it with the
- * currency `symbol`, applying the en-US default negative order
- * (parentheses — LOCALE_INEGCURR 0): "$1,234.50" / "($1,234.50)".
- * Returns chars written (excluding NUL). */
-static inline int currency_format_core_a(const char* num, const DUETOS_NUMBERFMT_A* nf, const char* symbol, char* out,
-                                         int out_cap)
+ * (so grouping + rounding match GetNumberFormat), then lays out symbol,
+ * sign and value per the CURRENCYFMT PositiveOrder / NegativeOrder
+ * tables. Returns chars written (excluding NUL). */
+static inline int currency_format_core_a(const char* num, const DUETOS_CURRENCYFMT_A* cf, char* out, int out_cap)
 {
     if (out_cap <= 1)
         return 0;
 
+    const char* symbol = (cf->lpCurrencySymbol) ? cf->lpCurrencySymbol : "$";
+
+    /* Strip the sign here; the magnitude goes through the number core
+     * and the order tables below place the sign. */
     const char* p = num;
     while (*p == ' ' || *p == '\t')
         ++p;
@@ -331,20 +346,115 @@ static inline int currency_format_core_a(const char* num, const DUETOS_NUMBERFMT
     else if (*p == '+')
         ++p;
 
+    DUETOS_NUMBERFMT_A nf;
+    nf.NumDigits = cf->NumDigits;
+    nf.LeadingZero = cf->LeadingZero;
+    nf.Grouping = cf->Grouping;
+    nf.lpDecimalSep = cf->lpDecimalSep;
+    nf.lpThousandSep = cf->lpThousandSep;
+    nf.NegativeOrder = 1; /* magnitude only — never triggers */
+
     char body[128];
-    int blen = num_format_core_a(p, nf, body, (int)sizeof(body));
+    num_format_core_a(p, &nf, body, (int)sizeof(body));
+
+    /* LOCALE_ICURRENCY / LOCALE_INEGCURR pattern tables: '$' stands for
+     * the currency symbol, 'n' for the formatted magnitude, everything
+     * else is emitted literally. Out-of-range orders fall back to 0. */
+    static const char* const pos_pat[4] = {"$n", "n$", "$ n", "n $"};
+    static const char* const neg_pat[16] = {"($n)", "-$n",  "$-n",  "$n-",  "(n$)", "-n$",  "n-$",   "n$-",
+                                            "-n $", "-$ n", "n $-", "$ n-", "$ -n", "n- $", "($ n)", "(n $)"};
+    const char* pat = negative ? neg_pat[(cf->NegativeOrder < 16u) ? cf->NegativeOrder : 0u]
+                               : pos_pat[(cf->PositiveOrder < 4u) ? cf->PositiveOrder : 0u];
 
     int s = 0;
-    if (negative && s < out_cap - 1)
-        out[s++] = '(';
-    for (int i = 0; symbol[i] && s < out_cap - 1; ++i)
-        out[s++] = symbol[i];
-    for (int i = 0; i < blen && s < out_cap - 1; ++i)
-        out[s++] = body[i];
-    if (negative && s < out_cap - 1)
-        out[s++] = ')';
+    for (; *pat != 0 && s < out_cap - 1; ++pat)
+    {
+        if (*pat == '$')
+        {
+            for (int i = 0; symbol[i] && s < out_cap - 1; ++i)
+                out[s++] = symbol[i];
+        }
+        else if (*pat == 'n')
+        {
+            for (int i = 0; body[i] && s < out_cap - 1; ++i)
+                out[s++] = body[i];
+        }
+        else
+            out[s++] = *pat;
+    }
     out[s] = 0;
     return s;
+}
+
+/* Wide-path separator sentinels: GetNumberFormatW / GetCurrencyFormatW
+ * run the narrow core with these single-byte placeholders standing in
+ * for the caller's wide separator / symbol strings, then
+ * nls_widen_expand() substitutes the real wide strings while widening
+ * the result. That is what lets user-supplied NUMBERFMTW / CURRENCYFMTW
+ * separators round-trip without byte truncation. The values are control
+ * characters that can never appear in formatted digit output. */
+#define DUETOS_NLS_SENT_DECIMAL '\x01'
+#define DUETOS_NLS_SENT_THOUSAND '\x02'
+#define DUETOS_NLS_SENT_SYMBOL '\x03'
+
+/* Widen the narrow core output into `out`, replacing each separator
+ * sentinel with the corresponding caller-supplied wide string (a NULL
+ * replacement expands to nothing). Returns chars written (excl. NUL). */
+static inline int nls_widen_expand(const char* src, const unsigned short* dec, const unsigned short* tho,
+                                   const unsigned short* sym, unsigned short* out, int out_cap)
+{
+    if (out_cap <= 0)
+        return 0;
+    int s = 0;
+    for (int i = 0; src[i] != 0; ++i)
+    {
+        const char c = src[i];
+        if (c == DUETOS_NLS_SENT_DECIMAL || c == DUETOS_NLS_SENT_THOUSAND || c == DUETOS_NLS_SENT_SYMBOL)
+        {
+            const unsigned short* rep = (c == DUETOS_NLS_SENT_DECIMAL)    ? dec
+                                        : (c == DUETOS_NLS_SENT_THOUSAND) ? tho
+                                                                          : sym;
+            for (int j = 0; rep != 0 && rep[j] != 0 && s < out_cap - 1; ++j)
+                out[s++] = rep[j];
+        }
+        else if (s < out_cap - 1)
+            out[s++] = (unsigned short)(unsigned char)c;
+    }
+    out[s] = 0;
+    return s;
+}
+
+/* LCMAP_SORTKEY core: ordinal, upcased byte key for the en-US /
+ * invariant locale — key bytes memcmp-order exactly as the upcased
+ * source code units ordinal-order, and case differences never weigh
+ * (valid for NORM_IGNORECASE and an accepted v0 limit without it).
+ * `dst` may be NULL / `dst_cap` 0 for a sizing call. Returns the key
+ * length in bytes (including the 0x00 terminator), or 0 if `dst` is
+ * too small.
+ * GAP: code points above 0xFF all weigh 0xFF and embedded NULs weigh
+ *      0x01 (no Unicode collation table) — revisit with real locale
+ *      tables. */
+static inline int nls_sortkey_core(const unsigned short* src, int src_len, unsigned char* dst, int dst_cap)
+{
+    const int needed = src_len + 1;
+    if (dst == 0 || dst_cap == 0)
+        return needed;
+    if (dst_cap < needed)
+        return 0;
+    for (int i = 0; i < src_len; ++i)
+    {
+        unsigned short c = src[i];
+        if (c >= 'a' && c <= 'z')
+            c = (unsigned short)(c - ('a' - 'A'));
+        if (c == 0)
+            dst[i] = 0x01;
+        else if (c > 0xFF)
+            dst[i] = 0xFF;
+        else
+            dst[i] = (unsigned char)c;
+    }
+    dst[src_len] = 0x00;
+    return needed;
 }
 
 /* GetLocaleInfo LOCALE_RETURN_NUMBER lookup: for the numeric LCTypes,

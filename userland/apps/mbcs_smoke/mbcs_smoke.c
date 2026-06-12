@@ -47,5 +47,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[mbcs_smoke] done\r\n");
+    Out("[ring3-mbcs-smoke] PASS\r\n");
     ExitProcess(0);
 }

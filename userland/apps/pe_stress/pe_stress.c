@@ -209,6 +209,7 @@ void __cdecl mainCRTStartup(void)
     if (g_run_event == 0)
     {
         Out("[pe_stress] CreateEventW failed\r\n");
+        Out("[ring3-pe-stress] FAIL create-event\r\n");
         ExitProcess(1);
     }
 
@@ -224,6 +225,7 @@ void __cdecl mainCRTStartup(void)
         if (workers[i] == 0)
         {
             Out("[pe_stress] CreateThread failed\r\n");
+            Out("[ring3-pe-stress] FAIL create-thread\r\n");
             ExitProcess(2);
         }
     }
@@ -254,8 +256,10 @@ void __cdecl mainCRTStartup(void)
     if (!worker_progress_ok())
     {
         Out("[pe_stress] FAIL: at least one worker stalled\r\n");
+        Out("[ring3-pe-stress] FAIL worker-stalled\r\n");
         ExitProcess(3);
     }
     Out("[pe_stress] done OK\r\n");
+    Out("[ring3-pe-stress] PASS\r\n");
     ExitProcess(0);
 }

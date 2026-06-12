@@ -748,6 +748,20 @@ struct Process
     static constexpr u64 kWin32SemaphoreBase = 0x500;
     static constexpr u64 kWin32SemaphoreCap = ::duetos::ipc::kHandleTableCapacity;
 
+    // Win32 IOCP handle range — backs NtCreateIoCompletion /
+    // NtSetIoCompletion / NtRemoveIoCompletion(Ex) and the
+    // Win32-shaped SYS_IOCP_POST. Migrated to the KObject-shaped
+    // ipc::IocpPort + `kobj_handles` (kernel/ipc/iocp.{h,cpp})
+    // alongside mutexes / events / semaphores; the legacy 8-port
+    // global pool in iocp_job.cpp was retired at the same time.
+    // The Win32 handle is `kWin32IocpBase + ipc_handle`. The base
+    // stays at the legacy 0xB00 (wire-compatible); the cap grows
+    // 8 → kHandleTableCapacity and remains disjoint from the
+    // 0xC00 JobObject range so CloseHandle / NtClose can keep
+    // dispatching by value alone.
+    static constexpr u64 kWin32IocpBase = 0xB00;
+    static constexpr u64 kWin32IocpCap = ::duetos::ipc::kHandleTableCapacity;
+
     // Win32 registry handle table — backs the in-kernel read-only
     // registry exposed via SYS_REGISTRY (NtOpenKey /
     // NtQueryValueKey / NtClose paths in ntdll.dll). Each slot

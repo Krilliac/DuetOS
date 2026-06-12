@@ -3579,135 +3579,19 @@ __declspec(dllexport) UINT GetDpiForWindow(void* hwnd)
  * wsprintf family — user32's restricted printf.
  *
  * Win32 GUI apps build titles / status text with wsprintf instead of
- * the CRT sprintf (it avoids linking the CRT). It was MISSING, so any
- * PE importing it failed to load. Implements the documented restricted
- * conversion set: %d/%i %u %x %X %s %c, the 'l'/'h' length modifiers
- * (ignored — args are promoted to 32-bit either way in v0), '0'/space
- * flags, and a numeric field width. Floats are unsupported, as on
- * Windows. The output buffer is caller-sized (1024-byte convention).
- * Returns the count written, excluding the NUL.
+ * the CRT sprintf (it avoids linking the CRT). The format engine lives
+ * in user32_wsprintf_core.h (shared with shlwapi's bounded wnsprintf
+ * and pinned by tests/host/test_kernel32_nls.cpp); these exports keep
+ * the unbounded legacy contract — wsprintf's documented 1024-char
+ * output convention is the caller's responsibility, so they pass an
+ * effectively-infinite cap. Returns the count written, excluding the
+ * NUL.
  * ------------------------------------------------------------------ */
-typedef __builtin_va_list duetos_valist;
+#include "user32_wsprintf_core.h"
 
-static int duetos_uint_to_dec(unsigned int v, char* out)
-{
-    char rev[16];
-    int n = 0;
-    if (v == 0)
-        rev[n++] = '0';
-    while (v)
-    {
-        rev[n++] = (char)('0' + (v % 10u));
-        v /= 10u;
-    }
-    for (int i = 0; i < n; ++i)
-        out[i] = rev[n - 1 - i];
-    return n;
-}
-
-static int duetos_int_to_dec(int v, char* out)
-{
-    if (v < 0)
-    {
-        out[0] = '-';
-        unsigned int mag = (unsigned int)(-(v + 1)) + 1u; /* INT_MIN-safe */
-        return 1 + duetos_uint_to_dec(mag, out + 1);
-    }
-    return duetos_uint_to_dec((unsigned int)v, out);
-}
-
-static int duetos_uint_to_hex(unsigned int v, char* out, int upper)
-{
-    const char* digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
-    char rev[16];
-    int n = 0;
-    if (v == 0)
-        rev[n++] = '0';
-    while (v)
-    {
-        rev[n++] = digits[v & 0xF];
-        v >>= 4;
-    }
-    for (int i = 0; i < n; ++i)
-        out[i] = rev[n - 1 - i];
-    return n;
-}
-
-/* Convert one %-spec into tmp[]; returns digit count, or -1 for %s
- * (handled by the caller because string width/source differ A vs W),
- * or -2 for a literal/unknown spec emitted into tmp as 1-2 chars. */
 __declspec(dllexport) int wvsprintfA(char* out, const char* fmt, duetos_valist ap)
 {
-    char* o = out;
-    for (const char* p = fmt; *p; ++p)
-    {
-        if (*p != '%')
-        {
-            *o++ = *p;
-            continue;
-        }
-        ++p;
-        if (*p == '%')
-        {
-            *o++ = '%';
-            continue;
-        }
-        int zero = 0, width = 0;
-        if (*p == '0')
-        {
-            zero = 1;
-            ++p;
-        }
-        while (*p >= '0' && *p <= '9')
-        {
-            width = width * 10 + (int)(*p - '0');
-            ++p;
-        }
-        if (*p == 'l' || *p == 'h')
-            ++p;
-        char tmp[32];
-        int n = 0;
-        if (*p == 'd' || *p == 'i')
-            n = duetos_int_to_dec(__builtin_va_arg(ap, int), tmp);
-        else if (*p == 'u')
-            n = duetos_uint_to_dec(__builtin_va_arg(ap, unsigned int), tmp);
-        else if (*p == 'x')
-            n = duetos_uint_to_hex(__builtin_va_arg(ap, unsigned int), tmp, 0);
-        else if (*p == 'X')
-            n = duetos_uint_to_hex(__builtin_va_arg(ap, unsigned int), tmp, 1);
-        else if (*p == 'c')
-        {
-            tmp[0] = (char)__builtin_va_arg(ap, int);
-            n = 1;
-        }
-        else if (*p == 's')
-        {
-            const char* s = __builtin_va_arg(ap, const char*);
-            if (!s)
-                s = "(null)";
-            int sl = 0;
-            while (s[sl])
-                ++sl;
-            for (int i = sl; i < width; ++i)
-                *o++ = ' ';
-            for (int i = 0; i < sl; ++i)
-                *o++ = s[i];
-            continue;
-        }
-        else
-        {
-            *o++ = '%';
-            if (*p)
-                *o++ = *p;
-            continue;
-        }
-        for (int i = n; i < width; ++i)
-            *o++ = zero ? '0' : ' ';
-        for (int i = 0; i < n; ++i)
-            *o++ = tmp[i];
-    }
-    *o = 0;
-    return (int)(o - out);
+    return duetos_wvsnprintf_a(out, 0x7FFFFFFF, fmt, ap);
 }
 
 __declspec(dllexport) int wsprintfA(char* out, const char* fmt, ...)
@@ -3721,75 +3605,7 @@ __declspec(dllexport) int wsprintfA(char* out, const char* fmt, ...)
 
 __declspec(dllexport) int wvsprintfW(wchar_t16* out, const wchar_t16* fmt, duetos_valist ap)
 {
-    wchar_t16* o = out;
-    for (const wchar_t16* p = fmt; *p; ++p)
-    {
-        if (*p != (wchar_t16)'%')
-        {
-            *o++ = *p;
-            continue;
-        }
-        ++p;
-        if (*p == (wchar_t16)'%')
-        {
-            *o++ = (wchar_t16)'%';
-            continue;
-        }
-        int zero = 0, width = 0;
-        if (*p == (wchar_t16)'0')
-        {
-            zero = 1;
-            ++p;
-        }
-        while (*p >= (wchar_t16)'0' && *p <= (wchar_t16)'9')
-        {
-            width = width * 10 + (int)(*p - (wchar_t16)'0');
-            ++p;
-        }
-        if (*p == (wchar_t16)'l' || *p == (wchar_t16)'h')
-            ++p;
-        char tmp[32];
-        int n = 0;
-        if (*p == (wchar_t16)'d' || *p == (wchar_t16)'i')
-            n = duetos_int_to_dec(__builtin_va_arg(ap, int), tmp);
-        else if (*p == (wchar_t16)'u')
-            n = duetos_uint_to_dec(__builtin_va_arg(ap, unsigned int), tmp);
-        else if (*p == (wchar_t16)'x')
-            n = duetos_uint_to_hex(__builtin_va_arg(ap, unsigned int), tmp, 0);
-        else if (*p == (wchar_t16)'X')
-            n = duetos_uint_to_hex(__builtin_va_arg(ap, unsigned int), tmp, 1);
-        else if (*p == (wchar_t16)'c')
-        {
-            tmp[0] = (char)__builtin_va_arg(ap, int);
-            n = 1;
-        }
-        else if (*p == (wchar_t16)'s')
-        {
-            const wchar_t16* s = __builtin_va_arg(ap, const wchar_t16*);
-            int sl = 0;
-            if (s)
-                while (s[sl])
-                    ++sl;
-            for (int i = sl; i < width; ++i)
-                *o++ = (wchar_t16)' ';
-            for (int i = 0; i < sl; ++i)
-                *o++ = s[i];
-            continue;
-        }
-        else
-        {
-            *o++ = (wchar_t16)'%';
-            if (*p)
-                *o++ = *p;
-            continue;
-        }
-        for (int i = n; i < width; ++i)
-            *o++ = zero ? (wchar_t16)'0' : (wchar_t16)' ';
-        for (int i = 0; i < n; ++i)
-            *o++ = (wchar_t16)(unsigned char)tmp[i];
-    }
-    *o = 0;
-    return (int)(o - out);
+    return duetos_wvsnprintf_w(out, 0x7FFFFFFF, fmt, ap);
 }
 
 __declspec(dllexport) int wsprintfW(wchar_t16* out, const wchar_t16* fmt, ...)

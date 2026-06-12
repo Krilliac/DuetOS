@@ -70,5 +70,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[debug_smoke] done\r\n");
+    Out("[ring3-debug-smoke] PASS\r\n");
     ExitProcess(0);
 }

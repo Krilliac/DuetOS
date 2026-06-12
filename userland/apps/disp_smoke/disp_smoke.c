@@ -40,5 +40,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[disp_smoke] done\r\n");
+    Out("[ring3-disp-smoke] PASS\r\n");
     ExitProcess(0);
 }

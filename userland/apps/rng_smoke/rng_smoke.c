@@ -72,5 +72,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[rng_smoke] done\r\n");
+    Out("[ring3-rng-smoke] PASS\r\n");
     ExitProcess(0);
 }

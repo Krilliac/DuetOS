@@ -65,5 +65,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[windowclass_smoke] done\r\n");
+    Out("[ring3-windowclass-smoke] PASS\r\n");
     ExitProcess(0);
 }

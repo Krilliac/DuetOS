@@ -2195,6 +2195,451 @@ bool SpawnOnDemand(const char* kind)
     return false;
 }
 
+// ===================================================================
+// PE-compat smoke battery — spawn table + verdict aggregator.
+//
+// WHAT
+//   The surface-coverage PE zoo is enumerated in kPeCompatBattery.
+//   StartRing3SmokeTask iterates the table (per-row gate), spawns
+//   the gated-on PEs, and arms the verdict scanner. Every battery
+//   PE self-reports ONE standardized verdict line on stdout:
+//
+//       [<spawn-label>] PASS
+//       [<spawn-label>] FAIL <reason>
+//
+//   PE stdout reaches COM1 through SYS_WRITE(fd=1) → DoWrite →
+//   SerialWriteN (it never enters the klog ring), so the scanner
+//   (PeCompatSmokeObserve) taps DoWrite's kernel bounce buffer —
+//   after CopyFromUser, exactly the bytes that reach the wire.
+//   A watchdog task ("pe-compat-report") waits until every spawned
+//   row has reported or its process is gone, then emits the single
+//   structural sentinel the harnesses gate on:
+//
+//       [pe-compat-smoke] passed=N failed=M skipped=K
+//
+//   passed  = rows whose PE printed "[label] PASS".
+//   failed  = explicit FAIL lines + spawn failures + PEs that died
+//             or timed out without a verdict (one detail line per
+//             failure follows the summary).
+//   skipped = rows gated off this boot (emulator / profile / blob
+//             not built) + the no-verdict-by-design images.
+//
+// WHY A TABLE
+//   The spawn set and the aggregator's expected set derive from the
+//   SAME rows, so adding a smoke PE here is the single edit that
+//   both spawns and counts it — no separate whitelist to forget
+//   (the per-call-site allow-list bug class).
+// ===================================================================
+
+namespace
+{
+
+/// When a battery row is allowed to spawn.
+enum class PeCompatGate : u8
+{
+    Always,      // every battery run (emulator and bare metal)
+    BareMetal,   // !arch::IsEmulator() only — the surface-coverage zoo
+    ProfileNone, // smoke-profile None only (screenshot-harness boots)
+};
+
+/// One battery row. `expects_verdict == false` marks images that by
+/// design never print the standardized verdict line — they count as
+/// "skipped" in the summary (see the pe32 trio notes in the table).
+struct PeCompatEntry
+{
+    const char* label; // SpawnPeFile task label == verdict-line tag
+    const u8* bytes;
+    u64 len; // 0 = blob not built (embed-blob --empty) → skipped
+    PeCompatGate gate;
+    bool expects_verdict;
+};
+
+// One row per battery PE; spawn order == table order.
+#define PE_COMPAT(label_, sym_, gate_, verdict_)                                                                       \
+    PeCompatEntry                                                                                                      \
+    {                                                                                                                  \
+        label_, fs::generated::sym_, fs::generated::sym_##_len, PeCompatGate::gate_, verdict_                          \
+    }
+
+constexpr PeCompatEntry kPeCompatBattery[] = {
+    // PE32 (i386) recognition trio — always on, including under
+    // emulator: tiny images, microseconds of CPU, and CI catches any
+    // regression in the Layer 1..3 PE32 recognition path.
+    //   pe32_smoke — loader rejects with Pe32ExecutionNotReady by
+    //                design (no verdict line; counts as skipped).
+    //   pe32_rich  — one import per preloaded i386 DLL; runs for real.
+    //   pe32_miss  — deliberately exits 0xDEAD0042 through an
+    //                unresolved-import thunk (no verdict line).
+    PE_COMPAT("ring3-pe32-smoke", kBinPe32SmokeBytes, Always, false),
+    PE_COMPAT("ring3-pe32-rich", kBinPe32RichBytes, Always, true),
+    PE_COMPAT("ring3-pe32-miss", kBinPe32MissBytes, Always, false),
+    // Surface-coverage zoo — bare metal only. Each Win32-imports PE
+    // pays a ~38-DLL preload + entry-point run; 130+ of them under
+    // TCG would overflow any sane CI wall budget. Each prints its
+    // per-API PASS/FAIL chatter plus the standardized final verdict.
+    PE_COMPAT("ring3-mini-browser", kBinMiniBrowserBytes, BareMetal, true),
+    PE_COMPAT("ring3-crypto-smoke", kBinCryptoSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-paths-smoke", kBinPathsSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-time-smoke", kBinTimeSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-iphlpapi-smoke", kBinIphlpapiSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-wininet-smoke", kBinWininetSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-browser-pe", kBinBrowserPeBytes, BareMetal, true),
+    PE_COMPAT("ring3-string-smoke", kBinStringSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-mem-smoke", kBinMemSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-fs-smoke", kBinFsSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-registry-smoke", kBinRegistrySmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-handle-smoke", kBinHandleSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-process-smoke", kBinProcessSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-module-smoke", kBinModuleSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-env-smoke", kBinEnvSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-debug-smoke", kBinDebugSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-codepage-smoke", kBinCodepageSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-rng-smoke", kBinRngSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-version-smoke", kBinVersionSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-com-smoke", kBinComSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-dbghelp-smoke", kBinDbghelpSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-winhttp-smoke", kBinWinhttpSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-crt-smoke", kBinCrtSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-critsec-smoke", kBinCritsecSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-tls-smoke", kBinTlsSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-atom-smoke", kBinAtomSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-console-smoke", kBinConsoleSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-datetime-smoke", kBinDatetimeSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-locale-smoke", kBinLocaleSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-gdi-smoke", kBinGdiSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-msg-smoke", kBinMsgSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-pipe-smoke", kBinPipeSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-resource-smoke", kBinResourceSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-ntdll-smoke", kBinNtdllSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-shell-smoke", kBinShellSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-userenv-smoke", kBinUserenvSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-interlock-smoke", kBinInterlockSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-fiber-smoke", kBinFiberSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-profile-smoke", kBinProfileSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-clipboard-smoke", kBinClipboardSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-windowclass-smoke", kBinWindowclassSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-wow64-smoke", kBinWow64SmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-mathlib-smoke", kBinMathlibSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-stdio-smoke", kBinStdioSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-nls-smoke", kBinNlsSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-services-smoke", kBinServicesSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-eventlog-smoke", kBinEventlogSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-sound-smoke", kBinSoundSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-multimon-smoke", kBinMultimonSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-power-smoke", kBinPowerSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-heap-smoke", kBinHeapSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-thread2-smoke", kBinThread2SmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-ipc-smoke", kBinIpcSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-jobobj-smoke", kBinJobobjSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-console2-smoke", kBinConsole2SmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-dns-smoke", kBinDnsSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-network2-smoke", kBinNetwork2SmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-dxgi-smoke", kBinDxgiSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-dwm-smoke", kBinDwmSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-uxtheme-smoke", kBinUxthemeSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-token-smoke", kBinTokenSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-security-smoke", kBinSecuritySmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-perf-smoke", kBinPerfSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-accel-smoke", kBinAccelSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-wts-smoke", kBinWtsSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-winerr-smoke", kBinWinerrSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-sleep-smoke", kBinSleepSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-nt-smoke", kBinNtSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-vol-smoke", kBinVolSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-drive-smoke", kBinDriveSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-conio-smoke", kBinConioSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-mbcs-smoke", kBinMbcsSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-fpcontrol-smoke", kBinFpcontrolSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-locale2-smoke", kBinLocale2SmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-gdiplus-smoke", kBinGdiplusSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-dde-smoke", kBinDdeSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-stream-smoke", kBinStreamSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-setupapi-smoke", kBinSetupapiSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-asyn-smoke", kBinAsynSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-wndmsg-smoke", kBinWndmsgSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-scrap-smoke", kBinScrapSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-trace-smoke", kBinTraceSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-wmi-smoke", kBinWmiSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-enviro-smoke", kBinEnviroSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-select-smoke", kBinSelectSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-proc2-smoke", kBinProc2SmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-find-smoke", kBinFindSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-iocp2-smoke", kBinIocp2SmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-signal-smoke", kBinSignalSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-timer-smoke", kBinTimerSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-pe-stress", kBinPeStressBytes, BareMetal, true),
+    PE_COMPAT("ring3-net-loopback", kBinNetLoopbackSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-winsock-ext-smoke", kBinWinsockExtSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-key-smoke", kBinKeySmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-reg2-smoke", kBinReg2SmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-paths2-smoke", kBinPaths2SmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-advapi-smoke", kBinAdvapiSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-heap3-smoke", kBinHeap3SmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-thread3-smoke", kBinThread3SmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-wstr-smoke", kBinWstrSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-intl-smoke", kBinIntlSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-disp-smoke", kBinDispSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-svc-ctrl-smoke", kBinSvcCtrlSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-sysinfo-smoke", kBinSysinfoSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-mem2-smoke", kBinMem2SmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-fs2-smoke", kBinFs2SmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-console3-smoke", kBinConsole3SmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-xml-smoke", kBinXmlSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-reg3-smoke", kBinReg3SmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-proc3-smoke", kBinProc3SmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-com2-smoke", kBinCom2SmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-advmem-smoke", kBinAdvmemSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-wstr2-smoke", kBinWstr2SmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-fs3-smoke", kBinFs3SmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-cap-smoke", kBinCapSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-utf16-smoke", kBinUtf16SmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-handle2-smoke", kBinHandle2SmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-sock-opt-smoke", kBinSockOptSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-prio-smoke", kBinPrioSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-debug2-smoke", kBinDebug2SmokeBytes, BareMetal, true),
+    // DirectX v0 smoke suite — d3d{9,11,12} Clear+Present pipelines
+    // through real COM vtable calls plus the dinput8/xinput/xaudio2/
+    // dsound/ddraw/d2d1/dwrite peripheral DLLs.
+    PE_COMPAT("ring3-d3d11-smoke", kBinD3d11SmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-d3d12-smoke", kBinD3d12SmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-d3d9-smoke", kBinD3d9SmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-dinput8-smoke", kBinDinput8SmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-xinput-smoke", kBinXinputSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-xaudio2-smoke", kBinXaudio2SmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-dsound-smoke", kBinDsoundSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-ddraw-smoke", kBinDdrawSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-d2d1-smoke", kBinD2d1SmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-dwrite-smoke", kBinDwriteSmokeBytes, BareMetal, true),
+    // dx_demo: pre-transforms a 24-vertex cube to clip space,
+    // rasterizes it through D3D9/D3D11/D3D12, reads back the back-
+    // buffer and asserts at least one face is visible per backend.
+    PE_COMPAT("ring3-dx-demo", kBinDxDemoBytes, BareMetal, true),
+    // Windowing v0 proof: user32!CreateWindowExA + ShowWindow +
+    // MessageBoxA become real compositor-managed windows. Emits its
+    // verdict BEFORE the 20 s screenshot-settle Sleep so the
+    // aggregator does not stall on it.
+    PE_COMPAT("ring3-windowed-hello", kBinWindowedHelloBytes, BareMetal, true),
+    // dx_demo_window: visible 3D cube via a D3D11 swap chain bound to
+    // a real HWND; profile=None only (the screenshot harness boots
+    // without a smoke profile and needs the cube on screen). Under a
+    // smoke profile the 17 s Sleep + 38-DLL preload would burn the
+    // whole TCG wall budget without contributing signal.
+    PE_COMPAT("ring3-dx-demo-window", kBinDxDemoWindowBytes, ProfileNone, true),
+};
+
+#undef PE_COMPAT
+
+constexpr u32 kPeCompatBatteryCount = sizeof(kPeCompatBattery) / sizeof(kPeCompatBattery[0]);
+
+/// Longest label considered when scanning a ring-3 write buffer for
+/// "[label]". Bounds the close-bracket scan so a garbled buffer
+/// can't drag it across the whole chunk.
+constexpr u64 kPeCompatLabelMax = 48;
+
+/// Per-row aggregation state. Written by the spawn loop (boot
+/// context), by PeCompatSmokeObserve (any CPU, inside a PE's own
+/// SYS_WRITE), and by the watchdog. Every transition is a single
+/// idempotent byte store, and the only cross-CPU handoff (Awaiting →
+/// FailSilent) happens strictly after the PE's process is dead — its
+/// last write has already completed — so plain volatile bytes are
+/// sufficient: no lock, no atomics.
+enum class PeCompatState : u8
+{
+    Skipped = 0,  // gate off / blob not built — never spawned
+    NoVerdict,    // spawned, but the image never reports by design
+    Awaiting,     // spawned; no verdict line seen yet
+    Pass,         // "[label] PASS" observed
+    FailReported, // "[label] FAIL ..." observed
+    FailSilent,   // spawn failed, or died / timed out without a verdict
+};
+
+volatile u8 g_pe_compat_state[kPeCompatBatteryCount];
+u64 g_pe_compat_pid[kPeCompatBatteryCount];
+
+/// Arms the SYS_WRITE tap. Set when the battery spawns its first
+/// row, cleared by the watchdog once the summary is out, so the
+/// steady-state per-write cost is a single predictable branch.
+volatile bool g_pe_compat_armed = false;
+
+/// Decimal writer for the summary counts (serial.h only carries a
+/// hex writer; the sentinel is parsed by shell scripts that want
+/// plain decimal). Call under a SerialLineGuard.
+void PeCompatWriteDec(u64 value)
+{
+    char digits[20];
+    u32 n = 0;
+    do
+    {
+        digits[n] = static_cast<char>('0' + (value % 10));
+        ++n;
+        value /= 10;
+    } while (value != 0 && n < sizeof(digits));
+    while (n > 0)
+    {
+        --n;
+        arch::SerialWriteByte(static_cast<u8>(digits[n]));
+    }
+}
+
+/// Tally the table and emit the structural sentinel, then one detail
+/// line per failed row. Each line sits under a SerialLineGuard so a
+/// concurrently-printing task can't splice it (the smoke gates
+/// substring-match whole lines).
+void PeCompatEmitSummary()
+{
+    u32 passed = 0;
+    u32 failed = 0;
+    u32 skipped = 0;
+    for (u32 i = 0; i < kPeCompatBatteryCount; ++i)
+    {
+        switch (static_cast<PeCompatState>(g_pe_compat_state[i]))
+        {
+        case PeCompatState::Pass:
+            ++passed;
+            break;
+        case PeCompatState::Awaiting: // watchdog flips these before emitting
+        case PeCompatState::FailReported:
+        case PeCompatState::FailSilent:
+            ++failed;
+            break;
+        case PeCompatState::Skipped:
+        case PeCompatState::NoVerdict:
+            ++skipped;
+            break;
+        }
+    }
+    {
+        arch::SerialLineGuard guard;
+        arch::SerialWrite("[pe-compat-smoke] passed=");
+        PeCompatWriteDec(passed);
+        arch::SerialWrite(" failed=");
+        PeCompatWriteDec(failed);
+        arch::SerialWrite(" skipped=");
+        PeCompatWriteDec(skipped);
+        arch::SerialWrite("\n");
+    }
+    for (u32 i = 0; i < kPeCompatBatteryCount; ++i)
+    {
+        const PeCompatState st = static_cast<PeCompatState>(g_pe_compat_state[i]);
+        if (st != PeCompatState::FailReported && st != PeCompatState::FailSilent)
+        {
+            continue;
+        }
+        arch::SerialLineGuard guard;
+        arch::SerialWrite("[pe-compat-smoke] fail name=");
+        arch::SerialWrite(kPeCompatBattery[i].label);
+        arch::SerialWrite(st == PeCompatState::FailReported ? " why=reported\n" : " why=no-verdict\n");
+    }
+}
+
+/// "pe-compat-report" watchdog body. A battery PE writes its verdict
+/// via SYS_WRITE BEFORE it exits, and the tap runs synchronously
+/// inside that write — so "process dead and row still Awaiting"
+/// means the verdict will never come (crashed, killed, or exited
+/// without the standard line) and the row fails. The tick ceiling is
+/// a backstop for a wedged-but-alive PE.
+void PeCompatReportTask(void*)
+{
+    constexpr u64 kPollTicks = 50;       // 500 ms between sweeps
+    constexpr u64 kCeilingTicks = 60000; // 10 min — bare-metal zoo backstop
+    u64 waited = 0;
+    for (;;)
+    {
+        bool outstanding = false;
+        for (u32 i = 0; i < kPeCompatBatteryCount; ++i)
+        {
+            if (static_cast<PeCompatState>(g_pe_compat_state[i]) != PeCompatState::Awaiting)
+            {
+                continue;
+            }
+            if (sched::SchedProcessAlive(g_pe_compat_pid[i]))
+            {
+                outstanding = true;
+                continue;
+            }
+            g_pe_compat_state[i] = static_cast<u8>(PeCompatState::FailSilent);
+        }
+        if (!outstanding || waited >= kCeilingTicks)
+        {
+            break;
+        }
+        sched::SchedSleepTicks(kPollTicks);
+        waited += kPollTicks;
+    }
+    // Ceiling hit with live-but-silent PEs: they count as failed.
+    for (u32 i = 0; i < kPeCompatBatteryCount; ++i)
+    {
+        if (static_cast<PeCompatState>(g_pe_compat_state[i]) == PeCompatState::Awaiting)
+        {
+            g_pe_compat_state[i] = static_cast<u8>(PeCompatState::FailSilent);
+        }
+    }
+    g_pe_compat_armed = false;
+    PeCompatEmitSummary();
+    sched::SchedExit();
+}
+
+} // namespace
+
+void PeCompatSmokeObserve(const char* buf, u64 len)
+{
+    if (!g_pe_compat_armed || buf == nullptr)
+    {
+        return;
+    }
+    for (u64 pos = 0; pos < len; ++pos)
+    {
+        if (buf[pos] != '[')
+        {
+            continue;
+        }
+        // Bounded scan for the closing bracket of "[<label>] PASS|FAIL".
+        const u64 hard_stop = pos + 1 + kPeCompatLabelMax;
+        const u64 close_limit = (hard_stop < len) ? hard_stop : len;
+        u64 close = pos + 1;
+        while (close < close_limit && buf[close] != ']')
+        {
+            ++close;
+        }
+        if (close >= len || buf[close] != ']')
+        {
+            continue;
+        }
+        const u64 name_len = close - (pos + 1);
+        if (name_len == 0 || close + 5 >= len || buf[close + 1] != ' ')
+        {
+            continue;
+        }
+        const char* tok = buf + close + 2;
+        const bool is_pass = tok[0] == 'P' && tok[1] == 'A' && tok[2] == 'S' && tok[3] == 'S';
+        const bool is_fail = tok[0] == 'F' && tok[1] == 'A' && tok[2] == 'I' && tok[3] == 'L';
+        if (!is_pass && !is_fail)
+        {
+            continue;
+        }
+        for (u32 e = 0; e < kPeCompatBatteryCount; ++e)
+        {
+            if (static_cast<PeCompatState>(g_pe_compat_state[e]) != PeCompatState::Awaiting)
+            {
+                continue;
+            }
+            const char* label = kPeCompatBattery[e].label;
+            u64 k = 0;
+            while (k < name_len && label[k] != '\0' && label[k] == buf[pos + 1 + k])
+            {
+                ++k;
+            }
+            if (k != name_len || label[k] != '\0')
+            {
+                continue;
+            }
+            g_pe_compat_state[e] = static_cast<u8>(is_pass ? PeCompatState::Pass : PeCompatState::FailReported);
+            break;
+        }
+        pos = close;
+    }
+}
+
 void StartRing3SmokeTask()
 {
     // Three ring-3 tasks, all using the SAME user VAs (0x40000000
@@ -2451,425 +2896,71 @@ void StartRing3SmokeTask()
         SpawnPeFile("ring3-module-smoke", fs::generated::kBinModuleSmokeBytes, fs::generated::kBinModuleSmokeBytes_len,
                     CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     }
-    // mini-browser + the surface-coverage PE zoo + dx-demo block
-    // below run alongside the ring3 trio: under profile=None
-    // (local dev / full bare-metal boot) and profile=Ring3 (CI's
-    // ring3 scenario). The Bringup profile's contract is "nothing
-    // user-facing runs; just bringup + sentinel + exit", and
-    // PeHello / PeWinapi / PeWinkill / Linux profiles are meant
-    // to run exactly ONE focused scenario each — none of them
-    // should drag ~70 unrelated surface PEs along. Same gate as
-    // the trio above keeps all those contracts honest.
-    //
-    // Inside the gate the work splits two ways:
-    //   - !emulator: the surface-coverage zoo + windowed-hello.
-    //     Each Win32-imports PE pays ~38-DLL preload (~15s guest)
-    //     + entry-point run; 70+ of them under TCG (no KVM)
-    //     overflows any sane wall budget. Same reasoning the
-    //     existing thread/syscall/customdll/regfopen quartet uses
-    //     a few lines up. Bare metal still runs the full set.
-    //   - profile=None only: dx-demo-window. The screenshot
-    //     harness (tools/qemu/screenshot.sh -> tools/qemu/run.sh)
-    //     boots without a smoke profile and needs the cube on
-    //     screen to BitBlt. CI's profile=Ring3 doesn't check the
-    //     cube and can't afford the 17s Sleep + 38-DLL preload
-    //     under TCG.
+    // The PE-compat battery below runs alongside the ring3 trio:
+    // under profile=None (local dev / full bare-metal boot) and
+    // profile=Ring3 (CI's ring3 scenario). The Bringup profile's
+    // contract is "nothing user-facing runs; just bringup +
+    // sentinel + exit", and PeHello / PeWinapi / PeWinkill / Linux
+    // profiles are meant to run exactly ONE focused scenario each —
+    // none of them should drag ~130 unrelated surface PEs along.
+    // Same gate as the trio above keeps all those contracts honest.
+    bool battery_ran = false;
     if (::duetos::test::SmokeProfileShouldSpawn(::duetos::test::SmokeTarget::Ring3))
     {
-        // pe32_smoke.exe runs in BOTH emulator and bare metal — it's
-        // a single tiny image (~6 KiB) and the loader rejects it
-        // immediately with Pe32ExecutionNotReady, so it costs
-        // microseconds of CPU and adds one diagnostic line to the
-        // boot transcript. Keeping it always-on means CI catches
-        // any regression in the Layer 1..3 PE32 recognition path.
-        SpawnPeFile("ring3-pe32-smoke", fs::generated::kBinPe32SmokeBytes, fs::generated::kBinPe32SmokeBytes_len,
-                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-        // pe32_rich — exercises one import per preloaded i386 DLL.
-        // Boot transcript shows a "[pe-resolve] via-dll" line for
-        // each, plus "[pe32-rich] <dll> ok" runtime confirmation,
-        // proving the full Layer 4 surface works end-to-end.
-        SpawnPeFile("ring3-pe32-rich", fs::generated::kBinPe32RichBytes, fs::generated::kBinPe32RichBytes_len,
-                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-        // pe32_miss — calls an unresolved Win32 import to validate
-        // the 32-bit Win32 thunks page. Process exits with code
-        // 0xDEAD0042 in the boot log.
-        SpawnPeFile("ring3-pe32-miss", fs::generated::kBinPe32MissBytes, fs::generated::kBinPe32MissBytes_len,
-                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-        if (!emulator)
+        // PE-compat battery spawn loop. Rows, gates, and the per-PE
+        // rationale live in kPeCompatBattery above; this loop is the
+        // only spawn site, so the aggregator's expected set and the
+        // spawn set can never drift apart. Per-row gating recap:
+        //   - Always:      pe32 trio — tiny, runs under emulator too.
+        //   - BareMetal:   the surface-coverage zoo. Each Win32 PE
+        //                  pays ~38-DLL preload (~15 s guest under
+        //                  TCG); 130+ of them would overflow any sane
+        //                  CI wall budget. Bare metal runs them all.
+        //   - ProfileNone: dx-demo-window — the screenshot harness
+        //                  boots without a smoke profile and needs
+        //                  the cube on screen; under a smoke profile
+        //                  its 17 s Sleep burns wall for no signal.
+        const bool profile_none = ::duetos::test::SmokeProfileGet() == ::duetos::test::SmokeProfile::None;
+        for (u32 i = 0; i < kPeCompatBatteryCount; ++i)
         {
-            // mini_browser.exe — minimal WinSock 2 PE that does an HTTP/1.0
-            // GET to www.google.com. Imports kernel32 + ws2_32; the
-            // kernel-side ws2_32 thunks route through SYS_SOCKET_OP into
-            // the native net stack.
-            SpawnPeFile("ring3-mini-browser", fs::generated::kBinMiniBrowserBytes,
-                        fs::generated::kBinMiniBrowserBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            // Surface-coverage smoke PEs. Each prints a per-API PASS/FAIL
-            // line on serial; the boot transcript is the gap inventory.
-            SpawnPeFile("ring3-crypto-smoke", fs::generated::kBinCryptoSmokeBytes,
-                        fs::generated::kBinCryptoSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-paths-smoke", fs::generated::kBinPathsSmokeBytes, fs::generated::kBinPathsSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-time-smoke", fs::generated::kBinTimeSmokeBytes, fs::generated::kBinTimeSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-iphlpapi-smoke", fs::generated::kBinIphlpapiSmokeBytes,
-                        fs::generated::kBinIphlpapiSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-wininet-smoke", fs::generated::kBinWininetSmokeBytes,
-                        fs::generated::kBinWininetSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            // browser_pe.exe — WinInet-based browser. Drives the same
-            // Open → Connect → Request → Send → Read → Close flow any
-            // real Win32 browser uses, layered on userland/libs/wininet
-            // (which now performs real HTTP/1.1 GETs over the kernel
-            // socket pool rather than returning a canned response).
-            SpawnPeFile("ring3-browser-pe", fs::generated::kBinBrowserPeBytes, fs::generated::kBinBrowserPeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-string-smoke", fs::generated::kBinStringSmokeBytes,
-                        fs::generated::kBinStringSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-mem-smoke", fs::generated::kBinMemSmokeBytes, fs::generated::kBinMemSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-fs-smoke", fs::generated::kBinFsSmokeBytes, fs::generated::kBinFsSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-registry-smoke", fs::generated::kBinRegistrySmokeBytes,
-                        fs::generated::kBinRegistrySmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-handle-smoke", fs::generated::kBinHandleSmokeBytes,
-                        fs::generated::kBinHandleSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-process-smoke", fs::generated::kBinProcessSmokeBytes,
-                        fs::generated::kBinProcessSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-module-smoke", fs::generated::kBinModuleSmokeBytes,
-                        fs::generated::kBinModuleSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-env-smoke", fs::generated::kBinEnvSmokeBytes, fs::generated::kBinEnvSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-debug-smoke", fs::generated::kBinDebugSmokeBytes, fs::generated::kBinDebugSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-codepage-smoke", fs::generated::kBinCodepageSmokeBytes,
-                        fs::generated::kBinCodepageSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-rng-smoke", fs::generated::kBinRngSmokeBytes, fs::generated::kBinRngSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-version-smoke", fs::generated::kBinVersionSmokeBytes,
-                        fs::generated::kBinVersionSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-com-smoke", fs::generated::kBinComSmokeBytes, fs::generated::kBinComSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-dbghelp-smoke", fs::generated::kBinDbghelpSmokeBytes,
-                        fs::generated::kBinDbghelpSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-winhttp-smoke", fs::generated::kBinWinhttpSmokeBytes,
-                        fs::generated::kBinWinhttpSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-crt-smoke", fs::generated::kBinCrtSmokeBytes, fs::generated::kBinCrtSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-critsec-smoke", fs::generated::kBinCritsecSmokeBytes,
-                        fs::generated::kBinCritsecSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-tls-smoke", fs::generated::kBinTlsSmokeBytes, fs::generated::kBinTlsSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-atom-smoke", fs::generated::kBinAtomSmokeBytes, fs::generated::kBinAtomSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-console-smoke", fs::generated::kBinConsoleSmokeBytes,
-                        fs::generated::kBinConsoleSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-datetime-smoke", fs::generated::kBinDatetimeSmokeBytes,
-                        fs::generated::kBinDatetimeSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-locale-smoke", fs::generated::kBinLocaleSmokeBytes,
-                        fs::generated::kBinLocaleSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-gdi-smoke", fs::generated::kBinGdiSmokeBytes, fs::generated::kBinGdiSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-msg-smoke", fs::generated::kBinMsgSmokeBytes, fs::generated::kBinMsgSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-pipe-smoke", fs::generated::kBinPipeSmokeBytes, fs::generated::kBinPipeSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-resource-smoke", fs::generated::kBinResourceSmokeBytes,
-                        fs::generated::kBinResourceSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-ntdll-smoke", fs::generated::kBinNtdllSmokeBytes, fs::generated::kBinNtdllSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-shell-smoke", fs::generated::kBinShellSmokeBytes, fs::generated::kBinShellSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-userenv-smoke", fs::generated::kBinUserenvSmokeBytes,
-                        fs::generated::kBinUserenvSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-interlock-smoke", fs::generated::kBinInterlockSmokeBytes,
-                        fs::generated::kBinInterlockSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-fiber-smoke", fs::generated::kBinFiberSmokeBytes, fs::generated::kBinFiberSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-profile-smoke", fs::generated::kBinProfileSmokeBytes,
-                        fs::generated::kBinProfileSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-clipboard-smoke", fs::generated::kBinClipboardSmokeBytes,
-                        fs::generated::kBinClipboardSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-windowclass-smoke", fs::generated::kBinWindowclassSmokeBytes,
-                        fs::generated::kBinWindowclassSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-wow64-smoke", fs::generated::kBinWow64SmokeBytes, fs::generated::kBinWow64SmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-mathlib-smoke", fs::generated::kBinMathlibSmokeBytes,
-                        fs::generated::kBinMathlibSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-stdio-smoke", fs::generated::kBinStdioSmokeBytes, fs::generated::kBinStdioSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-nls-smoke", fs::generated::kBinNlsSmokeBytes, fs::generated::kBinNlsSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-services-smoke", fs::generated::kBinServicesSmokeBytes,
-                        fs::generated::kBinServicesSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-eventlog-smoke", fs::generated::kBinEventlogSmokeBytes,
-                        fs::generated::kBinEventlogSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-sound-smoke", fs::generated::kBinSoundSmokeBytes, fs::generated::kBinSoundSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-multimon-smoke", fs::generated::kBinMultimonSmokeBytes,
-                        fs::generated::kBinMultimonSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-power-smoke", fs::generated::kBinPowerSmokeBytes, fs::generated::kBinPowerSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-heap-smoke", fs::generated::kBinHeapSmokeBytes, fs::generated::kBinHeapSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-thread2-smoke", fs::generated::kBinThread2SmokeBytes,
-                        fs::generated::kBinThread2SmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-ipc-smoke", fs::generated::kBinIpcSmokeBytes, fs::generated::kBinIpcSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-jobobj-smoke", fs::generated::kBinJobobjSmokeBytes,
-                        fs::generated::kBinJobobjSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-console2-smoke", fs::generated::kBinConsole2SmokeBytes,
-                        fs::generated::kBinConsole2SmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-dns-smoke", fs::generated::kBinDnsSmokeBytes, fs::generated::kBinDnsSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-network2-smoke", fs::generated::kBinNetwork2SmokeBytes,
-                        fs::generated::kBinNetwork2SmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-dxgi-smoke", fs::generated::kBinDxgiSmokeBytes, fs::generated::kBinDxgiSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-dwm-smoke", fs::generated::kBinDwmSmokeBytes, fs::generated::kBinDwmSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-uxtheme-smoke", fs::generated::kBinUxthemeSmokeBytes,
-                        fs::generated::kBinUxthemeSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-token-smoke", fs::generated::kBinTokenSmokeBytes, fs::generated::kBinTokenSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-security-smoke", fs::generated::kBinSecuritySmokeBytes,
-                        fs::generated::kBinSecuritySmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-perf-smoke", fs::generated::kBinPerfSmokeBytes, fs::generated::kBinPerfSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-accel-smoke", fs::generated::kBinAccelSmokeBytes, fs::generated::kBinAccelSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-wts-smoke", fs::generated::kBinWtsSmokeBytes, fs::generated::kBinWtsSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-winerr-smoke", fs::generated::kBinWinerrSmokeBytes,
-                        fs::generated::kBinWinerrSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-sleep-smoke", fs::generated::kBinSleepSmokeBytes, fs::generated::kBinSleepSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-nt-smoke", fs::generated::kBinNtSmokeBytes, fs::generated::kBinNtSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-vol-smoke", fs::generated::kBinVolSmokeBytes, fs::generated::kBinVolSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-drive-smoke", fs::generated::kBinDriveSmokeBytes, fs::generated::kBinDriveSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-conio-smoke", fs::generated::kBinConioSmokeBytes, fs::generated::kBinConioSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-mbcs-smoke", fs::generated::kBinMbcsSmokeBytes, fs::generated::kBinMbcsSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-fpcontrol-smoke", fs::generated::kBinFpcontrolSmokeBytes,
-                        fs::generated::kBinFpcontrolSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-locale2-smoke", fs::generated::kBinLocale2SmokeBytes,
-                        fs::generated::kBinLocale2SmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-gdiplus-smoke", fs::generated::kBinGdiplusSmokeBytes,
-                        fs::generated::kBinGdiplusSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-dde-smoke", fs::generated::kBinDdeSmokeBytes, fs::generated::kBinDdeSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-stream-smoke", fs::generated::kBinStreamSmokeBytes,
-                        fs::generated::kBinStreamSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-setupapi-smoke", fs::generated::kBinSetupapiSmokeBytes,
-                        fs::generated::kBinSetupapiSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-asyn-smoke", fs::generated::kBinAsynSmokeBytes, fs::generated::kBinAsynSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-wndmsg-smoke", fs::generated::kBinWndmsgSmokeBytes,
-                        fs::generated::kBinWndmsgSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-scrap-smoke", fs::generated::kBinScrapSmokeBytes, fs::generated::kBinScrapSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-trace-smoke", fs::generated::kBinTraceSmokeBytes, fs::generated::kBinTraceSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-wmi-smoke", fs::generated::kBinWmiSmokeBytes, fs::generated::kBinWmiSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-enviro-smoke", fs::generated::kBinEnviroSmokeBytes,
-                        fs::generated::kBinEnviroSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-select-smoke", fs::generated::kBinSelectSmokeBytes,
-                        fs::generated::kBinSelectSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-proc2-smoke", fs::generated::kBinProc2SmokeBytes, fs::generated::kBinProc2SmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-find-smoke", fs::generated::kBinFindSmokeBytes, fs::generated::kBinFindSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-iocp2-smoke", fs::generated::kBinIocp2SmokeBytes, fs::generated::kBinIocp2SmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-signal-smoke", fs::generated::kBinSignalSmokeBytes,
-                        fs::generated::kBinSignalSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-timer-smoke", fs::generated::kBinTimerSmokeBytes, fs::generated::kBinTimerSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-pe-stress", fs::generated::kBinPeStressBytes, fs::generated::kBinPeStressBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-net-loopback", fs::generated::kBinNetLoopbackSmokeBytes,
-                        fs::generated::kBinNetLoopbackSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-winsock-ext-smoke", fs::generated::kBinWinsockExtSmokeBytes,
-                        fs::generated::kBinWinsockExtSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-key-smoke", fs::generated::kBinKeySmokeBytes, fs::generated::kBinKeySmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-reg2-smoke", fs::generated::kBinReg2SmokeBytes, fs::generated::kBinReg2SmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-paths2-smoke", fs::generated::kBinPaths2SmokeBytes,
-                        fs::generated::kBinPaths2SmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-advapi-smoke", fs::generated::kBinAdvapiSmokeBytes,
-                        fs::generated::kBinAdvapiSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-heap3-smoke", fs::generated::kBinHeap3SmokeBytes, fs::generated::kBinHeap3SmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-thread3-smoke", fs::generated::kBinThread3SmokeBytes,
-                        fs::generated::kBinThread3SmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-wstr-smoke", fs::generated::kBinWstrSmokeBytes, fs::generated::kBinWstrSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-intl-smoke", fs::generated::kBinIntlSmokeBytes, fs::generated::kBinIntlSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-disp-smoke", fs::generated::kBinDispSmokeBytes, fs::generated::kBinDispSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-svc-ctrl-smoke", fs::generated::kBinSvcCtrlSmokeBytes,
-                        fs::generated::kBinSvcCtrlSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-sysinfo-smoke", fs::generated::kBinSysinfoSmokeBytes,
-                        fs::generated::kBinSysinfoSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-mem2-smoke", fs::generated::kBinMem2SmokeBytes, fs::generated::kBinMem2SmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-fs2-smoke", fs::generated::kBinFs2SmokeBytes, fs::generated::kBinFs2SmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-console3-smoke", fs::generated::kBinConsole3SmokeBytes,
-                        fs::generated::kBinConsole3SmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-xml-smoke", fs::generated::kBinXmlSmokeBytes, fs::generated::kBinXmlSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-reg3-smoke", fs::generated::kBinReg3SmokeBytes, fs::generated::kBinReg3SmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-proc3-smoke", fs::generated::kBinProc3SmokeBytes, fs::generated::kBinProc3SmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-com2-smoke", fs::generated::kBinCom2SmokeBytes, fs::generated::kBinCom2SmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-advmem-smoke", fs::generated::kBinAdvmemSmokeBytes,
-                        fs::generated::kBinAdvmemSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-wstr2-smoke", fs::generated::kBinWstr2SmokeBytes, fs::generated::kBinWstr2SmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-fs3-smoke", fs::generated::kBinFs3SmokeBytes, fs::generated::kBinFs3SmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-cap-smoke", fs::generated::kBinCapSmokeBytes, fs::generated::kBinCapSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-utf16-smoke", fs::generated::kBinUtf16SmokeBytes, fs::generated::kBinUtf16SmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-handle2-smoke", fs::generated::kBinHandle2SmokeBytes,
-                        fs::generated::kBinHandle2SmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-sock-opt-smoke", fs::generated::kBinSockOptSmokeBytes,
-                        fs::generated::kBinSockOptSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-prio-smoke", fs::generated::kBinPrioSmokeBytes, fs::generated::kBinPrioSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-debug2-smoke", fs::generated::kBinDebug2SmokeBytes,
-                        fs::generated::kBinDebug2SmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            // DirectX v0 smoke suite — exercises the existing d3d{9,11,12}
-            // Clear+Present pipelines through real COM vtable calls plus the
-            // new dinput8/xinput/xaudio2/dsound/ddraw/d2d1/dwrite peripheral
-            // DLLs.
-            SpawnPeFile("ring3-d3d11-smoke", fs::generated::kBinD3d11SmokeBytes, fs::generated::kBinD3d11SmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-d3d12-smoke", fs::generated::kBinD3d12SmokeBytes, fs::generated::kBinD3d12SmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-d3d9-smoke", fs::generated::kBinD3d9SmokeBytes, fs::generated::kBinD3d9SmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-dinput8-smoke", fs::generated::kBinDinput8SmokeBytes,
-                        fs::generated::kBinDinput8SmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-xinput-smoke", fs::generated::kBinXinputSmokeBytes,
-                        fs::generated::kBinXinputSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-xaudio2-smoke", fs::generated::kBinXaudio2SmokeBytes,
-                        fs::generated::kBinXaudio2SmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-dsound-smoke", fs::generated::kBinDsoundSmokeBytes,
-                        fs::generated::kBinDsoundSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-ddraw-smoke", fs::generated::kBinDdrawSmokeBytes, fs::generated::kBinDdrawSmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-d2d1-smoke", fs::generated::kBinD2d1SmokeBytes, fs::generated::kBinD2d1SmokeBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            SpawnPeFile("ring3-dwrite-smoke", fs::generated::kBinDwriteSmokeBytes,
-                        fs::generated::kBinDwriteSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            // dx_demo: the comprehensive DirectX exercise — pre-transforms a
-            // 24-vertex cube to clip space and rasterizes it through D3D9 (FF
-            // transforms), D3D11 and D3D12 (CPU-pretransformed verts), then
-            // reads back the back-buffer pixels and asserts at least one face
-            // is visible per backend.
-            SpawnPeFile("ring3-dx-demo", fs::generated::kBinDxDemoBytes, fs::generated::kBinDxDemoBytes_len,
-                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-            // Windowing v0 proof: a freestanding PE that imports
-            // user32!CreateWindowExA + ShowWindow + MessageBoxA and
-            // calls them. The Win32 → SYS_WIN_CREATE bridge turns
-            // those into real compositor-managed windows. Expected
-            // serial log lines: [msgbox] ... then [win] create pid=...
-            // hwnd=N rect=(500,400 420x220) title="WINDOWED HELLO".
-            // Sleep(20s) keeps the window visible long enough for the
-            // screenshot script's settle window to capture it. The
-            // 20-second Sleep is HPET-real-time even under HLT idle,
-            // and the boot smoke doesn't check the [msgbox] /
-            // [win create] output (the screenshot harness does, on
-            // bare-metal-equivalent runs) — already covered by the
-            // outer `!emulator` gate.
-            SpawnPeFile("ring3-windowed-hello", fs::generated::kBinWindowedHelloBytes,
-                        fs::generated::kBinWindowedHelloBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-        } // end !emulator gate
-        // dx_demo_window: visible 3D cube via D3D11 swap chain bound to
-        // a real HWND. Sleep(17s) keeps the window on-screen long enough
-        // for tools/qemu/screenshot.sh to capture the painted back-buffer
-        // BitBlt. Spawned for profile=None only — that's the screenshot
-        // harness path (tools/qemu/run.sh with no DUETOS_SMOKE_PROFILE),
-        // which boots into emulator + needs the cube on screen. Under a
-        // smoke profile (Ring3 in particular) the cube isn't asserted by
-        // the harness and the 17s Sleep + 38-DLL preload would burn the
-        // whole wall budget on TCG without contributing any signal.
-        if (::duetos::test::SmokeProfileGet() == ::duetos::test::SmokeProfile::None)
-        {
-            SpawnPeFile("ring3-dx-demo-window", fs::generated::kBinDxDemoWindowBytes,
-                        fs::generated::kBinDxDemoWindowBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+            const PeCompatEntry& entry = kPeCompatBattery[i];
+            bool gate_on = false;
+            switch (entry.gate)
+            {
+            case PeCompatGate::Always:
+                gate_on = true;
+                break;
+            case PeCompatGate::BareMetal:
+                gate_on = !emulator;
+                break;
+            case PeCompatGate::ProfileNone:
+                gate_on = profile_none;
+                break;
+            }
+            if (!gate_on || entry.len == 0)
+            {
+                g_pe_compat_state[i] = static_cast<u8>(PeCompatState::Skipped);
+                continue;
+            }
+            battery_ran = true;
+            // Arm the SYS_WRITE tap before the first PE can run so no
+            // early verdict line slips past the scanner.
+            g_pe_compat_armed = true;
+            const u64 pid = SpawnPeFile(entry.label, entry.bytes, entry.len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+            g_pe_compat_pid[i] = pid;
+            if (!entry.expects_verdict)
+            {
+                g_pe_compat_state[i] = static_cast<u8>(PeCompatState::NoVerdict);
+            }
+            else if (pid == 0)
+            {
+                g_pe_compat_state[i] = static_cast<u8>(PeCompatState::FailSilent);
+            }
+            else
+            {
+                g_pe_compat_state[i] = static_cast<u8>(PeCompatState::Awaiting);
+            }
         }
     } // end SmokeProfileShouldSpawn(Ring3) gate
     Log(LogLevel::Info, "core/ring3",
@@ -2878,14 +2969,18 @@ void StartRing3SmokeTask()
         "customdll-test)");
     // Canonical PE-compat smoke battery anchor. ctest's
     // duetos-boot-smoke greps for this exact line to confirm
-    // every surface-coverage PE spawn fired and the battery
-    // completed. The line is intentionally bare-bones — a
-    // single grep-able sentinel beats a structured PASS/FAIL
-    // tally that depends on every PE emitting in a uniform
-    // shape (they don't; each one prints its own PASS/FAIL
-    // per-API). The per-PE pass/fail signal stays in the
-    // existing expected[] list in ctest-boot-smoke.sh.
+    // every battery spawn fired. It marks "all spawns queued",
+    // NOT "all PEs finished" — the structured per-PE tally
+    // arrives later as "[pe-compat-smoke] passed=N failed=M
+    // skipped=K", emitted by the pe-compat-report watchdog once
+    // every spawned row has reported its standardized verdict
+    // line or died trying. Per-API PASS/FAIL chatter stays in
+    // each PE and in ctest-boot-smoke.sh's expected[] list.
     arch::SerialWrite("[pe-compat-smoke] battery complete\n");
+    if (battery_ran)
+    {
+        sched::SchedCreate(&PeCompatReportTask, nullptr, "pe-compat-report");
+    }
 }
 
 } // namespace duetos::core

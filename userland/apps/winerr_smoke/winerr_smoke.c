@@ -127,5 +127,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[winerr_smoke] done\r\n");
+    Out("[ring3-winerr-smoke] PASS\r\n");
     ExitProcess(0);
 }

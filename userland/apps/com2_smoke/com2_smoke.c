@@ -46,5 +46,6 @@ void __cdecl mainCRTStartup(void)
 
     CoUninitialize();
     Out("[com2_smoke] done\r\n");
+    Out("[ring3-com2-smoke] PASS\r\n");
     ExitProcess(0);
 }

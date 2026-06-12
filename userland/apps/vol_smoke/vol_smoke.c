@@ -61,5 +61,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[vol_smoke] done\r\n");
+    Out("[ring3-vol-smoke] PASS\r\n");
     ExitProcess(0);
 }

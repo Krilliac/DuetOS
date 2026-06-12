@@ -22,6 +22,7 @@
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
 #include "drivers/storage/block.h"
+#include "fs/boot_slot.h"
 #include "fs/duetfs.h"
 #include "fs/duetfs/include/duetfs.h"
 #include "fs/fat32.h"
@@ -81,72 +82,6 @@ void Utf16LePartitionName(const char* label, u8 out[72])
     }
 }
 
-// /esp/boot/grub/grub.cfg payload. Tells GRUB (or a chainloaded
-// stage-2 like rEFInd) where to find the kernel ELF on the system
-// partition.
-//
-// A/B layout: two `menuentry` blocks, one per slot. The default
-// menuentry is picked from a GRUB env var `duetos_slot` which is
-// itself read from /boot/duetos-slot.cfg by the small embedded
-// pre-script. If the state file is missing or unreadable, the
-// fall-through default is slot A. tries_remaining is also read from
-// the state file and exposed as the menuentry's `--count`; if it
-// hits zero, GRUB boots last_healthy instead.
-constexpr char kGrubCfgPayload[] =
-    "set timeout=3\n"
-    "set default=0\n"
-    "\n"
-    "# DuetOS A/B boot slots. Default slot read from\n"
-    "# /boot/duetos-slot.cfg; falls through to slot A if the\n"
-    "# state file is missing or unreadable. tries_remaining is\n"
-    "# decremented on each attempt and a zero count forces\n"
-    "# rollback to last_healthy.\n"
-    "set duetos_slot=a\n"
-    "set duetos_last_healthy=a\n"
-    "if [ -f /boot/duetos-slot.cfg ]; then\n"
-    "    # Crude parse: GRUB scripting can't tokenise key=value\n"
-    "    # files natively, so we use `regexp` to extract the\n"
-    "    # active= line. Falls through harmlessly on parse error.\n"
-    "    while read -r line; do\n"
-    "        case \"$line\" in\n"
-    "            active=*)       duetos_slot=\"${line#active=}\";;\n"
-    "            last_healthy=*) duetos_last_healthy=\"${line#last_healthy=}\";;\n"
-    "        esac\n"
-    "    done < /boot/duetos-slot.cfg\n"
-    "fi\n"
-    "\n"
-    "menuentry \"DuetOS (slot ${duetos_slot})\" {\n"
-    "    insmod fat\n"
-    "    set root=(hd0,gpt2)\n"
-    "    multiboot2 /boot/duetos-kernel-${duetos_slot}.elf slot=${duetos_slot}\n"
-    "    boot\n"
-    "}\n"
-    "menuentry \"DuetOS (last healthy: ${duetos_last_healthy}) — rollback\" {\n"
-    "    insmod fat\n"
-    "    set root=(hd0,gpt2)\n"
-    "    multiboot2 /boot/duetos-kernel-${duetos_last_healthy}.elf slot=${duetos_last_healthy}\n"
-    "    boot\n"
-    "}\n"
-    "menuentry \"DuetOS (legacy single-kernel)\" {\n"
-    "    insmod fat\n"
-    "    set root=(hd0,gpt2)\n"
-    "    multiboot2 /boot/duetos-kernel.elf\n"
-    "    boot\n"
-    "}\n"
-    "# DuetOS installer A/B layout. Bootloader bytes (BOOTX64.EFI +\n"
-    "# per-slot kernel ELFs) are staged separately — see\n"
-    "# wiki/reference/Daily-Driver-Readiness.md and\n"
-    "# wiki/kernel/Boot.md (A/B slots).\n";
-
-// Default /boot/duetos-slot.cfg payload — emitted at install time
-// so the bootloader's `active=` parse picks up slot A on first
-// boot. The kernel's heartbeat persists subsequent updates.
-constexpr char kSlotStateInitialPayload[] = "# duetos boot-slot state v1\n"
-                                            "active=a\n"
-                                            "pending=?\n"
-                                            "tries_remaining=3\n"
-                                            "last_healthy=a\n";
-
 // /system/boot/.duetos-installed sentinel. Operators can read it
 // from another OS to confirm the disk really did go through the
 // installer rather than being half-formatted by some other tool.
@@ -154,7 +89,60 @@ constexpr char kSystemSentinelPayload[] = "DuetOS installer v0 — system partit
                                           "Layout: /esp (ESP, FAT32), /system (Microsoft Basic Data, FAT32).\n"
                                           "Crash-dump partition reserved with kDuetCrashDumpTypeGuid.\n";
 
-bool WriteEspGrubStub(const fat32::Volume* vol)
+// Write `len` bytes at `path`, replacing any existing file. A
+// same-size replace goes through Fat32WriteInPlace (pure data-
+// cluster overwrite — no FAT mutation, no remove/create window);
+// anything else is delete-then-create through the bounded-write
+// tier.
+// GAP: delete + create is non-atomic — a power cut between the two
+// leaves the path absent until the next persist; FAT32 v0 has no
+// rename-over-existing to close the window.
+bool WriteFileReplacing(const fat32::Volume* vol, const char* path, const void* buf, u64 len)
+{
+    if (vol == nullptr || path == nullptr || buf == nullptr || len == 0)
+        return false;
+    fat32::DirEntry existing;
+    if (fat32::Fat32LookupPath(vol, path, &existing))
+    {
+        if (static_cast<u64>(existing.size_bytes) == len)
+            return fat32::Fat32WriteInPlace(vol, &existing, 0, buf, len) == static_cast<i64>(len);
+        if (!fat32::Fat32DeleteAtPath(vol, path))
+            return false;
+    }
+    return fat32::Fat32CreateAtPath(vol, path, buf, len) == static_cast<i64>(len);
+}
+
+// Stage a kernel image into a slot path on the ESP and validate
+// the on-disk artifact: directory entry size must match and a
+// chunked read-back must compare byte-for-byte against the source.
+// Polling block I/O — fine in the shell-driven install flow.
+bool StageSlotKernel(const fat32::Volume* vol, const char* path, const u8* bytes, u64 len)
+{
+    if (path == nullptr || bytes == nullptr || len == 0)
+        return false;
+    if (!WriteFileReplacing(vol, path, bytes, len))
+        return false;
+    fat32::DirEntry entry;
+    if (!fat32::Fat32LookupPath(vol, path, &entry) || static_cast<u64>(entry.size_bytes) != len)
+        return false;
+    u8 chunk[4096];
+    u64 off = 0;
+    while (off < len)
+    {
+        const u64 want = (len - off < sizeof(chunk)) ? (len - off) : sizeof(chunk);
+        if (fat32::Fat32ReadAt(vol, &entry, off, chunk, want) != static_cast<i64>(want))
+            return false;
+        for (u64 i = 0; i < want; ++i)
+        {
+            if (chunk[i] != bytes[off + i])
+                return false;
+        }
+        off += want;
+    }
+    return true;
+}
+
+bool WriteEspBootSkeleton(const fat32::Volume* vol)
 {
     if (vol == nullptr)
         return false;
@@ -165,19 +153,6 @@ bool WriteEspGrubStub(const fat32::Volume* vol)
     if (!fat32::Fat32MkdirAtPath(vol, "/boot"))
         return false;
     if (!fat32::Fat32MkdirAtPath(vol, "/boot/grub"))
-        return false;
-    const u64 cfg_len = sizeof(kGrubCfgPayload) - 1;
-    if (fat32::Fat32CreateAtPath(vol, "/boot/grub/grub.cfg", kGrubCfgPayload, cfg_len) != static_cast<i64>(cfg_len))
-        return false;
-    // Seed /boot/duetos-slot.cfg with the canonical default so the
-    // bootloader's first read picks up `active=a` and the running
-    // kernel's heartbeat can update it from there. The state file
-    // path is shared with `kernel/fs/boot_slot.h` —
-    // boot_slot::kSlotStateFilePath — but written as a literal here
-    // to keep installer.cpp dependency-free of boot_slot internals.
-    const u64 slot_len = sizeof(kSlotStateInitialPayload) - 1;
-    if (fat32::Fat32CreateAtPath(vol, "/boot/duetos-slot.cfg", kSlotStateInitialPayload, slot_len) !=
-        static_cast<i64>(slot_len))
         return false;
     // Drop the embedded BOOTX64.EFI bytes at the canonical UEFI
     // fall-back removable-media path. UEFI firmware that boots a
@@ -210,9 +185,9 @@ bool WriteSystemSentinel(const fat32::Volume* vol)
     // in kernel_elf_blob.S, which is the stage-1 kernel ELF when
     // the build option DUETOS_INSTALLER_KERNEL_EMBED is ON. When
     // it's OFF, RamfsKernelElfSize() returns 0 and we skip — the
-    // grub.cfg already on the freshly-formatted ESP points at this
-    // path, so the operator stages the bytes from an out-of-band
-    // source (USB / network) before first install-target boot.
+    // generated grub.cfg's legacy menuentry points at this path,
+    // so the operator stages the bytes from an out-of-band source
+    // (USB / network) before first install-target boot.
     const u8* kern_bytes = RamfsKernelElfBytes();
     const u64 kern_len = RamfsKernelElfSize();
     if (kern_bytes != nullptr && kern_len > 0)
@@ -225,6 +200,56 @@ bool WriteSystemSentinel(const fat32::Volume* vol)
 }
 
 } // namespace
+
+const fat32::Volume* FindBootSlotVolume()
+{
+    namespace bs = fs::boot_slot;
+    for (u32 i = 0; i < fat32::Fat32VolumeCount(); ++i)
+    {
+        const fat32::Volume* v = fat32::Fat32Volume(i);
+        fat32::DirEntry entry;
+        if (v != nullptr && fat32::Fat32LookupPath(v, bs::kSlotStateFilePath, &entry))
+            return v;
+    }
+    return fat32::Fat32Volume(0);
+}
+
+bool PersistSlotState(const fat32::Volume* vol, const boot_slot::State& state)
+{
+    namespace bs = fs::boot_slot;
+    if (vol == nullptr)
+        return false;
+    struct Ctx
+    {
+        const fat32::Volume* vol;
+    } ctx{vol};
+    auto save_fn = +[](void* c, const u8* buf, u64 len) -> bool
+    {
+        auto* x = static_cast<Ctx*>(c);
+        return WriteFileReplacing(x->vol, bs::kSlotStateFilePath, buf, len);
+    };
+    if (!bs::SaveVia(save_fn, &ctx, state))
+    {
+        core::Log(core::LogLevel::Warn, "fs/installer", "boot-slot persist: state-file write failed");
+        return false;
+    }
+    // Regenerate grub.cfg so `set default` tracks the new state.
+    // Only volumes that carry a /boot/grub directory (the ESP the
+    // installer laid down) get a cfg; the QEMU/dev scratch volume
+    // persists the state file alone.
+    fat32::DirEntry grub_dir;
+    if (fat32::Fat32LookupPath(vol, "/boot/grub", &grub_dir))
+    {
+        u8 cfg[bs::kGrubCfgCapacity];
+        const u64 cfg_len = bs::GrubCfgGenerate(state, cfg, sizeof(cfg));
+        if (cfg_len == 0 || !WriteFileReplacing(vol, bs::kGrubCfgPath, cfg, cfg_len))
+        {
+            core::Log(core::LogLevel::Warn, "fs/installer", "boot-slot persist: grub.cfg regenerate failed");
+            return false;
+        }
+    }
+    return fat32::Fat32Sync(vol);
+}
 
 const char* StatusName(Status s)
 {
@@ -417,9 +442,44 @@ Status Install(u32 block_handle, bool use_duetfs_system, Report* out_report)
     // strong proof that the partition is initialised; the sentinel
     // is cosmetic.
 
-    if (!WriteEspGrubStub(fat32::Fat32Volume(esp_vol_idx)))
+    namespace bs = fs::boot_slot;
+    const fat32::Volume* esp_vol = fat32::Fat32Volume(esp_vol_idx);
+    if (!WriteEspBootSkeleton(esp_vol))
     {
-        core::Log(core::LogLevel::Error, "fs/installer", "Install: ESP grub.cfg write failed");
+        core::Log(core::LogLevel::Error, "fs/installer", "Install: ESP boot-skeleton write failed");
+        return Status::EspGrubCfgWriteFailed;
+    }
+
+    // A/B slot staging. The freshly-laid disk starts from the
+    // canonical Default state (active = A); the embedded kernel —
+    // when the build carries one — is staged into the INACTIVE
+    // slot, validated by byte-for-byte read-back, and only then
+    // does BeginInstall flip `pending` so the first boot tries it
+    // (with the legacy system-partition entry as GRUB fallback).
+    bs::State slot_state = bs::Default();
+    bs::Slot staged = bs::Slot::kInvalid;
+    const u8* slot_kern_bytes = RamfsKernelElfBytes();
+    const u64 slot_kern_len = RamfsKernelElfSize();
+    if (slot_kern_bytes != nullptr && slot_kern_len > 0)
+    {
+        const bs::Slot target = bs::Other(slot_state.active);
+        if (StageSlotKernel(esp_vol, bs::SlotKernelPath(target), slot_kern_bytes, slot_kern_len))
+        {
+            slot_state = bs::BeginInstall(slot_state, target);
+            staged = target;
+        }
+        else
+        {
+            // Non-fatal: the legacy menuentry (system-partition
+            // kernel) still boots the disk. State stays Default so
+            // GRUB never defaults to an empty slot.
+            core::Log(core::LogLevel::Warn, "fs/installer",
+                      "Install: slot-kernel stage/validate failed — legacy entry remains the boot path");
+        }
+    }
+    if (!PersistSlotState(esp_vol, slot_state))
+    {
+        core::Log(core::LogLevel::Error, "fs/installer", "Install: ESP grub.cfg/slot-state write failed");
         return Status::EspGrubCfgWriteFailed;
     }
 
@@ -448,6 +508,7 @@ Status Install(u32 block_handle, bool use_duetfs_system, Report* out_report)
     out_report->system_last_lba = sys_last;
     out_report->crashdump_first_lba = crash_first;
     out_report->crashdump_last_lba = crash_last;
+    out_report->staged_slot = static_cast<u32>(staged);
 
     core::Log(core::LogLevel::Info, "fs/installer", "Install: complete");
     return Status::Ok;

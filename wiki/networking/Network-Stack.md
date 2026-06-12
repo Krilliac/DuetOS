@@ -44,24 +44,30 @@ See [Networking Drivers](../drivers/Networking-Drivers.md).
 - **ICMP** (ping)
 - **UDP**
 - **TCP v1** — full RFC-793 state machine, sliding window,
-  retransmit with RFC-6298 RTO, out-of-order reassembly, Reno
-  congestion control. Up to 256 concurrent TCBs per host. See
-  [TCP State Machine](TCP-State-Machine.md) for the design + RFC
-  mapping.
-- **TCP SACK (receiver side)** — when a peer negotiates
-  SACK-Permitted on the SYN, every ACK from us that carries
-  out-of-order RX state emits up to 4 SACK blocks (RFC 2018),
-  most-recent-first, sourced directly from the reassembly queue.
-  Sender-side SACK processing (RFC 6675 scoreboard / NextSeg) is
-  the next slice.
-- **TCP ECN negotiation (RFC 3168 §6.1.1)** — the initial SYN
-  carries ECE+CWR; an ECN-capable peer replies SYN+ACK with
-  ECE=1, CWR=0, and the connection records `ecn_ok = true`. A
-  listener that receives an ECN-Setup-SYN echoes ECE=1, CWR=0 in
-  its SYN+ACK. The IP-layer ECT/CE bit threading (data segments
-  carry ECT(0); received CE → ECE feedback → CWR confirmation)
-  is the next slice and lives in `stack.cpp`'s IPv4 emit/recv
-  path — see GAP below.
+  retransmit with RFC-6298 RTO, out-of-order reassembly, CUBIC
+  congestion control (Reno-floored). Up to 256 concurrent TCBs per
+  host. See [TCP State Machine](TCP-State-Machine.md) for the
+  design + RFC mapping.
+- **TCP SACK (both sides)** — when a peer negotiates SACK-Permitted
+  on the SYN, every ACK from us that carries out-of-order RX state
+  emits up to 4 SACK blocks (RFC 2018), most-recent-first, sourced
+  directly from the reassembly queue. Sender-side, inbound SACK
+  blocks feed the RFC 6675 hole scoreboard
+  (`kernel/net/tcp_sack.{h,cpp}`) that drives pipe-based fast
+  recovery: `IsLost()` / `SetPipe()` / `NextSeg()` per §3–§4,
+  immediate first retransmit + hole filling while
+  `cwnd − pipe ≥ SMSS`, partial-ACK handling to `RecoveryPoint`
+  (§5.1), and a full scoreboard flush on RTO (RFC 2018 §8).
+- **TCP ECN (RFC 3168, negotiation + data plane)** — the initial
+  SYN carries ECE+CWR; an ECN-capable peer replies SYN+ACK with
+  ECE=1, CWR=0, and the connection records `ecn_ok = true`. On
+  `ecn_ok` connections the data plane is live: outbound data
+  segments carry ECT(0) in the IP TOS ECN field; an inbound
+  CE-marked segment schedules the ECE echo on every outgoing ACK
+  until the peer's CWR retires it; an inbound ECE halves cwnd
+  through the same CA hooks as loss (once per window of data) and
+  the next data segment announces CWR. IPv4 only; AccECN
+  (RFC 9768) deliberately omitted.
 - **DHCP client** — gets an IP from the local network
 - **DNS resolver** — `getaddrinfo`-equivalent
 
@@ -254,26 +260,15 @@ throughput display.
   non-blocking *wire* recv over-reports would-block; loopback +
   UDP are exact). **IOCP overlapped socket reads are still out of
   scope.**
-- **TCP NewReno fast retransmit + Reno congestion control;
-  receiver-side SACK lands but no CUBIC / BBR** yet. CUBIC is
-  ~400 LoC + 56 bytes/TCB and is the next congestion-control
-  slice; BBR needs a pacer + delivery-rate estimator and is
-  deferred. See [TCP State Machine](TCP-State-Machine.md#known-limits--gaps-v1)
+- **TCP congestion control: CUBIC (Reno-floored) + full SACK
+  recovery + classic ECN; no BBR.** CUBIC (RFC 9438) is the
+  default CA with a NewReno floor and per-TCB kill switch; RFC 6675
+  SACK fast recovery and the RFC 3168 ECN data plane both route
+  reductions through the same CA hooks. BBR needs a pacer +
+  delivery-rate estimator and is deferred. AccECN (RFC 9768) is
+  deliberately omitted — classic ECN feedback only. See
+  [TCP State Machine](TCP-State-Machine.md#known-limits--gaps-v1)
   for the full v1 GAP list.
-- **TCP SACK sender-side processing** — receiver-side SACK
-  emission lands; sender-side scoreboard + RFC 6675 NextSeg
-  (~600 LoC + ~16 B per outstanding hole) is the next slice.
-  Until then the sender ignores incoming SACK blocks and falls
-  back to NewReno's fast-retransmit on triple-dup-ACK. Reference:
-  FreeBSD `sys/netinet/tcp_sack.c` (hole-list scoreboard, ~1100
-  LoC).
-- **TCP ECN IP-layer ECT/CE threading** — RFC 3168 negotiation
-  is live; the data-plane half (set ECT(0) on outbound IP TOS for
-  `ecn_ok` connections, detect inbound CE, schedule the ECE
-  feedback, halve cwnd + emit CWR on the ECE arrival) wires
-  through `stack.cpp`'s IPv4 path next. Pairs naturally with
-  AccECN (RFC 9768 — the 2024 successor) for L4S / DOCSIS
-  prioritisation.
 - **No TCP Fast Open (RFC 7413).** Middlebox interference (~6%
   of paths drop SYN-data) plus disabled-by-default at major
   CDNs (Cloudflare, Fastly, Google Frontends) means the

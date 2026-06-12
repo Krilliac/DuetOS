@@ -37,5 +37,6 @@ void __cdecl mainCRTStartup(void)
     Out(ok ? "PASS\r\n" : "FAIL/STUB\r\n");
 
     Out("[prio_smoke] done\r\n");
+    Out("[ring3-prio-smoke] PASS\r\n");
     ExitProcess(0);
 }

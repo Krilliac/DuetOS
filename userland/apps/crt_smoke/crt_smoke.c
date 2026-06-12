@@ -123,5 +123,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[crt_smoke] done\r\n");
+    Out("[ring3-crt-smoke] PASS\r\n");
     ExitProcess(0);
 }

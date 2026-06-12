@@ -120,5 +120,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[codepage_smoke] done\r\n");
+    Out("[ring3-codepage-smoke] PASS\r\n");
     ExitProcess(0);
 }

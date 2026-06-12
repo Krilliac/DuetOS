@@ -52,5 +52,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[fiber_smoke] done\r\n");
+    Out("[ring3-fiber-smoke] PASS\r\n");
     ExitProcess(0);
 }

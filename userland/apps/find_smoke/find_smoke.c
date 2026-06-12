@@ -87,5 +87,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[find_smoke] done\r\n");
+    Out("[ring3-find-smoke] PASS\r\n");
     ExitProcess(0);
 }

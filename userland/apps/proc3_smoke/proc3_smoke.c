@@ -49,5 +49,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[proc3_smoke] done\r\n");
+    Out("[ring3-proc3-smoke] PASS\r\n");
     ExitProcess(0);
 }

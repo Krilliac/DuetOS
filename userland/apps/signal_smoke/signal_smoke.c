@@ -44,5 +44,6 @@ void __cdecl mainCRTStartup(void)
     Out(prev3 != SIG_ERR ? "PASS\r\n" : "FAIL/STUB\r\n");
 
     Out("[signal_smoke] done\r\n");
+    Out("[ring3-signal-smoke] PASS\r\n");
     ExitProcess(0);
 }

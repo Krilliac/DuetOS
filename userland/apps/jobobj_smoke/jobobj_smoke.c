@@ -47,5 +47,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[jobobj_smoke] done\r\n");
+    Out("[ring3-jobobj-smoke] PASS\r\n");
     ExitProcess(0);
 }

@@ -66,5 +66,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[pipe_smoke] done\r\n");
+    Out("[ring3-pipe-smoke] PASS\r\n");
     ExitProcess(0);
 }

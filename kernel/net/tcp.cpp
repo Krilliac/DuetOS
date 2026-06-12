@@ -261,9 +261,15 @@ void ResetTcbStorage(Tcb& t)
     t.peer_supports_wscale = false;
     t.peer_supports_timestamps = false;
     t.peer_supports_sack = false;
+    t.sack_high = 0;
+    // RFC 6675 scoreboard: free any holes a previous incarnation of
+    // this slot left behind (no-op on a fresh slot — teardown already
+    // funnels through FreeTcbBuffers).
+    SackScoreboardClear(t);
     t.ecn_ok = false;
     t.peer_ce_pending = false;
     t.sent_cwr = false;
+    t.ecn_react_seq = 0;
     t.ts_recent = 0;
     t.ts_recent_age_ticks = 0;
     t.mss_send = kDefaultMss;
@@ -343,6 +349,7 @@ bool AllocTcbBuffers(Tcb& t)
 
 void FreeTcbBuffers(Tcb& t)
 {
+    SackScoreboardClear(t);
     if (t.sndbuf != nullptr)
     {
         mm::KFree(t.sndbuf);
@@ -539,7 +546,8 @@ TcbId Connect(u32 iface_index, Ipv4Address dst_ip, u16 dst_port, u16 local_port)
     // ML-02 (net-0): RFC 6528 keyed ISN — see GenIsn.
     t.iss = GenIsn(t.local_ip, t.local_port, t.peer_ip, t.peer_port);
     t.snd_una = t.iss;
-    t.snd_nxt = t.iss + 1; // SYN consumes one
+    t.snd_nxt = t.iss + 1;   // SYN consumes one
+    t.ecn_react_seq = t.iss; // ECE reactions armed from the first byte
     t.rcv_wnd = kRcvBufBytes;
     t.mss_send = kDefaultMss;
     BucketInsert(idx);

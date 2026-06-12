@@ -212,9 +212,15 @@ bool SetKeepAlive(TcbId id, bool on);
 // inbound IPv4/TCP segment. The TCB-table dispatcher routes the
 // segment to the matching TCB (or LISTEN parent), runs the state
 // machine, and reschedules the timer task as needed.
+//
+// `ip_ce` is the IP-layer ECN Congestion Experienced mark (TOS ECN
+// field == 0b11, RFC 3168): the IPv4 recv path threads it through so
+// ecn_ok connections can schedule the ECE echo. Callers without an
+// ECN-capable network layer (IPv6 today) leave the default.
 // -------------------------------------------------------------------
 
-void OnSegment(u32 iface_index, const MacAddress& peer_mac, Ipv4Address peer_ip, const u8* tcp, u64 tcp_len);
+void OnSegment(u32 iface_index, const MacAddress& peer_mac, Ipv4Address peer_ip, const u8* tcp, u64 tcp_len,
+               bool ip_ce = false);
 
 // -------------------------------------------------------------------
 // Timer tick. The tcp-timer kernel task calls this every kTimerTickMs

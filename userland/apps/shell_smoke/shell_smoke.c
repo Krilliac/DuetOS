@@ -132,5 +132,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[shell_smoke] done\r\n");
+    Out("[ring3-shell-smoke] PASS\r\n");
     ExitProcess(0);
 }

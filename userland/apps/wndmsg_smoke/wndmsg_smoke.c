@@ -58,5 +58,6 @@ void __cdecl mainCRTStartup(void)
     (void)m;
 
     Out("[wndmsg_smoke] done\r\n");
+    Out("[ring3-wndmsg-smoke] PASS\r\n");
     ExitProcess(0);
 }

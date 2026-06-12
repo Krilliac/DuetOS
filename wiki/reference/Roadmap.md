@@ -705,42 +705,6 @@ Re-derive the full inventory with `git grep -nE "// (STUB|GAP):"`.
 
 ## Win32 / NT subsystem
 
-### Locale / format-picture surface (residual)
-
-Landed 2026-05-29: `kernel32!MulDiv`, `user32!wsprintf{A,W}`/`wvsprintf{A,W}`
-(were MISSING), and `kernel32!GetDateFormat{A,W}`/`GetTimeFormat{A,W}` now
-honor their format-picture string (were `(void)fmt`-ignored).
-
-Landed 2026-06-06: `kernel32!GetNumberFormat{A,W}` now **rounds** the
-fraction to `NumDigits` (half-away-from-zero, carry rippling into the
-integer part) instead of truncating, and implements the full
-`NUMBERFMT.Grouping` digit-stack encoding (3 => repeating-3, 32 => South
--Asian `12,34,567`, 30 => group-once-then-stop). `GetCurrencyFormatA`
-now routes its magnitude through that core (grouping + 2 decimals +
-rounding + parenthesised negatives `($1,234.50)`) instead of a bare `$`
-prefix. `GetLocaleInfoW` now honors `LOCALE_RETURN_NUMBER` (binary DWORD
-for `IDIGITS`/`ILZERO`/`INEGNUMBER`/`ILANGUAGE`/`ICOUNTRY`) and answers
-`S1159`/`S2359` (AM/PM), `SSHORTTIME`, `SDATE`/`STIME`, and `ILANGUAGE`
-(was a bogus `"en"` fallthrough). The pure number/currency/locale-number
-logic moved to the freestanding `kernel32_nls_format.h` and is pinned by
-`tests/host/test_kernel32_nls.cpp` (37 assertions, RED→GREEN).
-
-Remaining, same clean en-US-table pattern (the number/currency/locale
-paths run only in the bare-metal `nls_smoke`/`locale_smoke` PEs — they
-sit behind `if (!emulator)` in `ring3_smoke.cpp`, so QEMU CI does not
-exercise them; the hosted test is their automated gate):
-
-- **`GetCurrencyFormat{A,W}`** — honor the `CURRENCYFMT` struct argument
-  (currently the en-US default is always applied — `// GAP:` in
-  `kernel32_io.c`), and add the missing `GetCurrencyFormatW`.
-- **`GetNumberFormatW`** — non-ASCII separator code points are truncated
-  to their low byte (`// GAP:`); needs Unicode locale tables.
-- **`LCMapStringW`** — add `LCMAP_SORTKEY` (an upcased ordinal key is
-  valid en-US/invariant) and standalone `NORM_IGNORECASE`
-  (`kernel32_io.c` ~`LCMapStringW`, currently case-map only).
-- **`shlwapi!wnsprintf{A,W}`, `StrToIntEx`** — bounded printf + parse;
-  can share the `user32` restricted-printf core.
-
 ### DirectX real device backends
 
 - **Still gated:** HLSL bytecode execution (the `d3dcompiler.dll`
@@ -781,7 +745,7 @@ exercise them; the hosted test is their automated gate):
 
 - **Deferred:** Overlapped I/O + IOCP-backed socket reads
   (kernel32's IOCP plumbing exists but isn't wired into the
-  socket read path — see **IOCP consolidation** below);
+  socket read path — see **IOCP for sockets (Win32)** below);
   kernel-direct event signaling at the moment of socket activity
   (today's `WSAWaitForMultipleEvents` is a 10 ms polling loop);
   `fWaitAll == TRUE` semantics (current impl returns on first
@@ -808,41 +772,15 @@ exercise them; the hosted test is their automated gate):
   IOCP follows when a real overlapped-using PE binary is in test.
 - **Owner:** `kernel/ipc/`, `userland/libs/ws2_32/`.
 
-### TCP sender-side SACK (RFC 6675)
+### TCP AccECN (RFC 9768)
 
-- **Cost:** ~600 LoC sender + ~24 B scoreboard head per TCB +
-  amortised ~16 B per outstanding hole.
-- **Design:** FreeBSD-style tail-queue of `sackhole {start, end,
-  rxmit}` per TCB. On every ACK, walk inbound SACK blocks ↔
-  scoreboard; implement `IsLost()` and `NextSeg()` per RFC 6675
-  §3. On loss → enter fast recovery, set `Pipe`, retransmit
-  `NextSeg()` candidates until `Pipe` hits cwnd.
-- **Reference:** `sys/netinet/tcp_sack.c` (FreeBSD, ~1100 LoC).
-  Linux's equivalent lives inline in `net/ipv4/tcp_input.c`
-  (`tcp_sacktag_write_queue` and friends) — readable but tightly
-  coupled to skb-chain state we don't have.
-- **State:** receiver-side SACK emission already landed; this is
-  the half that turns SACK into a real recovery win on lossy
-  paths.
-- **Owner:** `kernel/net/tcp_segment.cpp`, new
-  `kernel/net/tcp_sack.{h,cpp}` if the scoreboard grows large.
-
-### TCP ECN data plane (IP-layer ECT/CE threading)
-
-- **Cost:** ~200 LoC across `stack.cpp` IPv4 emit/recv +
-  `tcp_segment.cpp` ACK path.
-- **Design:** on outbound IP data segments for `ecn_ok` TCBs, set
-  TOS bits 0..1 to `10` (ECT(0)); on inbound IP CE-marked
-  segments (TOS bits = `11`), flag the receiving TCB
-  `peer_ce_pending = true`; on the next outbound ACK, set
-  ECE=1; on inbound ECE, halve `cwnd`, set `sent_cwr=true`; next
-  outbound data segment carries CWR=1, clears `sent_cwr`.
-- **Reference:** RFC 3168 §6.1.2-§6.1.5; Linux
-  `net/ipv4/tcp_input.c::tcp_ecn_*` family.
-- **State:** SYN-time negotiation landed (per-TCB `ecn_ok` bit
-  set on both sides). Data plane is the missing half.
-- **Pairs with:** AccECN (RFC 9768) — 4 counters per direction
-  for L4S / DOCSIS prioritisation. Land in same slice.
+- **Lands:** 4 ECN counters per direction for L4S / DOCSIS
+  prioritisation, on top of the now-complete classic ECN plumbing.
+- **State:** classic RFC 3168 ECN is done — SYN-time negotiation
+  plus the data plane (ECT(0) marking on outbound data, inbound
+  CE → ECE echo, inbound ECE → cwnd halve + CWR) landed
+  2026-06-12, alongside the RFC 6675 sender-side SACK scoreboard
+  (`kernel/net/tcp_sack.{h,cpp}`).
 - **Owner:** `kernel/net/stack.cpp`, `kernel/net/tcp_segment.cpp`.
 
 ### TCP BBR congestion control
@@ -1269,8 +1207,9 @@ and the device-state save surface. (ACPI S5 soft-off incl.
 
 ### System updater
 
-- **Blocks on:** code-signing infrastructure + A/B kernel-slot
-  layout (state machine landed — see **A/B kernel slots** below).
+- **Blocks on:** code-signing infrastructure. (A/B kernel-slot
+  layout — state machine, installer staging to the inactive slot,
+  and the generated dual-menuentry GRUB cfg — landed 2026-06-12.)
 
 ### Accessibility — screen reader + on-screen keyboard
 
@@ -1354,41 +1293,6 @@ the per-call wiring.
   and the BME enable are shared, so per-class wire-up is now the
   thin part. (Every per-class probe v0 + RX/TX poll tasks landed.)
 
-### IOCP — primitive consolidation
-
-- **Lands:** (1) migrate the legacy
-  `kernel/subsystems/win32/iocp_job.{h,cpp}`
-  (`SYS_IOCP_CREATE/SET/REMOVE/CLOSE` 159–162) onto the newer
-  KObject-shaped `IocpPort` (`kernel/ipc/iocp.{h,cpp}`) so
-  per-process storage sits in `kobj_handles` alongside KMutex /
-  KEvent — a re-routing patch in the four `SysIocp*` syscalls,
-  the shapes are wire-compatible; (2) add `SYS_IOCP_POST`
-  (`PostQueuedCompletionStatus`) — a thin Win32-shaped wrapper
-  over the existing `IocpTryPost`. (The new KObject primitive +
-  blocking `IocpWait` + self-test landed.)
-
-### A/B kernel slots — installer + GRUB cfg
-
-- **Lands:** (1) installer — `CmdInstall` writes the new kernel
-  to `SlotKernelPath(Other(active))`, validates, then
-  `BeginInstall` + `SaveVia(<fat32-writer>, &state)` so the new
-  state persists on the ESP (the FAT32 writer callback is the
-  only new code); (2) GRUB cfg — two menuentries, one per slot,
-  with the active slot as `set default` and the matching
-  `slot=a`/`slot=b` on each `multiboot2` line. (State machine,
-  parser/writer, watchdog mark-healthy, callback-based
-  persistence helpers landed.)
-
-### PE-compat smoke — per-PE structured pass/fail
-
-- **Lands:** a kernel-side aggregator that counts per-PE PASS
-  lines and emits `[pe-compat-smoke] passed=N failed=M
-  skipped=K`. Requires every smoke PE to standardise its PASS
-  line (`[ring3-<n>-smoke] PASS` / `... FAIL <reason>`) — one
-  small per-PE source edit; the aggregator watches the serial
-  stream via the klog ring. (Per-API PASS/FAIL + the
-  `[pe-compat-smoke] battery complete` anchor landed.)
-
 ---
 
 ## Testing / fuzzing
@@ -1428,12 +1332,15 @@ stubs + a `seeds/gen_*_seeds.py`); the codec/cert ones are pure
      got fuzz_acpi in the same series (driving the duetos_acpi Rust
      crate directly, ≈ 440k/s clean). Both auto-picked up by
      tools/test/fuzz-all.sh. -->
-- **CDC-ECM + RNDIS** — `kernel/drivers/usb/cdc_ecm.cpp`,
-  `rndis.cpp`. Device-supplied configuration/data-frame bytes;
-  parser surface beyond the standard class-descriptor walker.
-  (The class-descriptor + HID-report-descriptor walkers under
-  `usb_class_desc.cpp` + `hid_descriptor.cpp` are now both
-  fuzzed via the Rust-backed harnesses landed 2026-05-26.)<!--
+<!-- CDC-ECM + RNDIS bullet retired 2026-06-12: fuzz_cdcecm +
+  fuzz_rndis harnesses (host_shim/usbnet_stubs.cpp +
+  seeds/gen_{cdcecm,rndis}_seeds.py) landed and found + fixed a
+  real u32-wrap heap-OOB write in the rndis.cpp rx deframer.
+  Both run multi-million execs clean and are auto-picked up by
+  tools/test/fuzz-all.sh. (The class-descriptor +
+  HID-report-descriptor walkers under usb_class_desc.cpp +
+  hid_descriptor.cpp were already fuzzed via the Rust-backed
+  harnesses landed 2026-05-26.)
   Retired bullets — seeded + fuzzed 2026-05-26:
   X.509 (seeds/gen_x509_seeds.py — openssl-subprocess + embedded
   RSA-2048 reference cert + 128-byte truncation seed; fuzz_x509

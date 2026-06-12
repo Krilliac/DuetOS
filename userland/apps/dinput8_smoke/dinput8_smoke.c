@@ -29,7 +29,10 @@ void __cdecl mainCRTStartup(void)
     Out("[dinput8_smoke] DirectInput8Create  = ");
     Out((hr == 0 && di) ? "PASS\r\n" : "FAIL\r\n");
     if (!di)
+    {
+        Out("[ring3-dinput8-smoke] FAIL create\r\n");
         ExitProcess(1);
+    }
 
     void** di_vt = *(void***)di;
 
@@ -71,5 +74,6 @@ void __cdecl mainCRTStartup(void)
     ((PFN_Rel)di_vt[2])(di);
 
     Out("[dinput8_smoke] done\r\n");
+    Out("[ring3-dinput8-smoke] PASS\r\n");
     ExitProcess(0);
 }

@@ -38,11 +38,12 @@
  *   - last_healthy     — most recent slot that completed a
  *                        boot and called `BootSlotMarkHealthy`.
  *
- * Today (v0): the parser, writer, and state-transition helpers
- * land. The grub.cfg generator, the actual installer integration
- * (writing to the inactive slot), and the watchdog hook are
- * GAPped — they pick up the state file the helpers below
- * produce.
+ * The parser, writer, state-transition helpers, the grub.cfg
+ * generator (`GrubCfgGenerate`), and the installer integration
+ * (stage the inactive slot, BeginInstall, persist) are all live.
+ * The grub.cfg is regenerated from the state on every persist, so
+ * `set default` always tracks the slot the state machine wants
+ * booted next.
  */
 
 namespace duetos::fs::boot_slot
@@ -143,9 +144,30 @@ State MarkHealthyNow();
 /// truth for the filename convention.
 inline constexpr const char* kSlotStateFilePath = "/boot/duetos-slot.cfg";
 
+/// ESP-relative path of the generated GRUB configuration.
+inline constexpr const char* kGrubCfgPath = "/boot/grub/grub.cfg";
+
+/// `GrubCfgGenerate` never needs more than this many bytes of
+/// output buffer (three static menuentries + header comments).
+inline constexpr u64 kGrubCfgCapacity = 1024;
+
 /// Return the ESP-relative path for a given slot's kernel image.
 /// nullptr for invalid slots.
 const char* SlotKernelPath(Slot s);
+
+/// Generate the full /boot/grub/grub.cfg payload for `state`:
+/// one menuentry per slot (entry 0 = slot A, entry 1 = slot B)
+/// plus a legacy single-kernel entry (entry 2, system partition).
+/// `set default` points at the slot the state machine wants booted
+/// next — `pending` while an install is in flight with tries left,
+/// otherwise `active`. `set fallback` lists the opposite slot and
+/// then the legacy entry, so a missing/corrupt slot image degrades
+/// instead of stranding the operator at a GRUB error.
+///
+/// Returns the number of bytes written (no NUL terminator), or 0
+/// when the state is invalid or `buf_cap` is too small. A buffer
+/// of `kGrubCfgCapacity` always suffices.
+u64 GrubCfgGenerate(const State& state, u8* buf, u64 buf_cap);
 
 // ---------------------------------------------------------------
 // Callback-based persistence. The state-file lives on the ESP

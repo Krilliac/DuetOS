@@ -56,5 +56,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[uxtheme_smoke] done\r\n");
+    Out("[ring3-uxtheme-smoke] PASS\r\n");
     ExitProcess(0);
 }

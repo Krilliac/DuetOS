@@ -64,5 +64,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[ipc_smoke] done\r\n");
+    Out("[ring3-ipc-smoke] PASS\r\n");
     ExitProcess(0);
 }

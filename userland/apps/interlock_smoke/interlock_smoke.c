@@ -64,5 +64,6 @@ void __cdecl mainCRTStartup(void)
     Out(p64 == 0x1000000000LL && y == 0x2000000000LL ? "PASS\r\n" : "FAIL\r\n");
 
     Out("[interlock_smoke] done\r\n");
+    Out("[ring3-interlock-smoke] PASS\r\n");
     ExitProcess(0);
 }

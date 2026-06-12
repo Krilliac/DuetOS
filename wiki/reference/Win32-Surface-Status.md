@@ -368,6 +368,20 @@ syscall routing shows up immediately.
   `CompareStringW`, `CompareStringEx`,
   `CharLowerA/W`, `CharUpperA/W`,
   `IsCharAlphaA/W`, `IsCharAlphaNumericA/W`
+- NLS formatting (en-US/invariant tables only; pure cores live in
+  `kernel32_nls_format.h`, pinned by the hosted test
+  `tests/host/test_kernel32_nls.cpp`): `GetNumberFormatA/W` and
+  `GetCurrencyFormatA/W` honour the full NUMBERFMT / CURRENCYFMT
+  struct (half-up rounding, digit-stack grouping, NegativeOrder,
+  the LOCALE_ICURRENCY / LOCALE_INEGCURR currency order tables and
+  custom symbol); the W paths carry wide separators / symbols
+  end-to-end via sentinel substitution (`nls_widen_expand`), so
+  non-ASCII NUMBERFMTW/CURRENCYFMTW separators round-trip.
+  `GetDateFormatA/W` / `GetTimeFormatA/W` format pictures are real.
+  `LCMapStringW` maps case, treats standalone `NORM_IGNORECASE` as
+  a case-fold, and emits `LCMAP_SORTKEY` upcased-ordinal byte keys
+  (GAP: no Unicode collation table — code points above 0xFF all
+  weigh the same).
 - Registry-style: handled via advapi32 (this DLL forwards a few)
 - Console: `WriteConsoleA/W`, `ReadConsoleA/W`,
   `GetConsoleMode`, `SetConsoleMode`,
@@ -1624,7 +1638,7 @@ every other call accepts. `IsThemeActive` returns TRUE.
 
 ## 3. Path / shell / version helpers
 
-### shlwapi.dll  (~790 LOC, ~40 exports)
+### shlwapi.dll  (~840 LOC, ~44 exports)
 
 > **Status:** path manipulation is REAL. String comparison /
 > regex (`PathMatchSpecW`) is REAL with limited glob support.
@@ -1632,6 +1646,13 @@ every other call accepts. `IsThemeActive` returns TRUE.
 `Path*`, `Str*`, `PathMatchSpecW` — all REAL for the v0
 inventory above. `PathCanonicalizeW` is GAP for `..` walks
 above the drive root.
+
+`wnsprintfA/W` — REAL bounded printf; shares the user32
+restricted-printf engine (`user32_wsprintf_core.h`, one format
+engine for both DLLs) and returns negative on truncation per the
+Win32 contract. `StrToIntExA/W` — REAL decimal / `STIF_SUPPORT_HEX`
+hex parse (core in `shlwapi_parse.h`). Both are pinned by the
+hosted test `tests/host/test_kernel32_nls.cpp`.
 
 **Thunked imports (auto-generated from `kernel/subsystems/win32/thunks_table.inc`):**
 

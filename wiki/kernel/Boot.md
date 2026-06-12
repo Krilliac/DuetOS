@@ -79,27 +79,37 @@ no-longer-mapped low VA).
 ## A/B kernel slots
 
 DuetOS supports redundant A/B kernel images on the ESP so a botched
-kernel update can't brick the box. The installer
-(`kernel/fs/installer.cpp`) writes two `menuentry` blocks into
-`/boot/grub/grub.cfg`, one per slot, and seeds `/boot/duetos-slot.cfg`
-with a small key=value file:
+kernel update can't brick the box. The installed-disk
+`/boot/grub/grub.cfg` is **generated from the slot state**
+(`boot_slot::GrubCfgGenerate`): one `menuentry` per slot (each with
+the matching `slot=a` / `slot=b` cmdline arg), `set default`
+pointing at the slot the state machine wants booted next
+(`pending` while an install is in flight, else `active`), and
+`set fallback` listing the other slot plus a legacy
+system-partition entry. The state itself lives in
+`/boot/duetos-slot.cfg`, a small key=value file:
 
 ```
 active=a
-pending=?
+pending=b
 tries_remaining=3
 last_healthy=a
 ```
 
-GRUB reads `/boot/duetos-slot.cfg` at boot and selects the kernel
-image (`/boot/duetos-kernel-${active}.elf`) accordingly. The
-running kernel calls `boot_slot::MarkHealthyNow()` from the first
-heartbeat tick (`kernel/diag/heartbeat.cpp`) — proving the boot path
-reached steady state — and persists the updated state back to the
-ESP via FAT32. If the kernel never reaches that point (panic during
-boot, hung scheduler), the state file stays as-is, GRUB decrements
-`tries_remaining` on the next attempt, and after `tries_remaining=0`
-falls back to `last_healthy`.
+At install time `kernel/fs/installer.cpp` stages the embedded
+kernel into the inactive slot (byte-for-byte read-back validation),
+flips `pending` via `BeginInstall`, and persists both files through
+the shared `installer::PersistSlotState` bridge. The running kernel
+learns its slot from the `slot=` cmdline arg
+(`kernel/core/boot_bringup.cpp`), calls
+`boot_slot::MarkHealthyNow()` from the first heartbeat tick
+(`kernel/diag/heartbeat.cpp`) — proving the boot path reached
+steady state — and re-persists, which regenerates the cfg so
+`set default` follows the promotion. If the kernel never reaches
+that point, the cfg keeps its previous default/fallback shape and a
+missing/corrupt slot image degrades through the fallback chain;
+GRUB itself does not decrement `tries_remaining` (see
+[Boot Slots](../filesystem/Boot-Slots.md) for the limits).
 
 ### Inspecting + administering slots
 
@@ -119,10 +129,10 @@ The kernel shell exposes:
 
 | File | Purpose |
 |---|---|
-| `kernel/fs/boot_slot.{h,cpp}` | State machine, serialise / parse, `LoadVia` / `SaveVia` callback ABI, self-test. |
-| `kernel/diag/heartbeat.cpp`   | `PersistBootSlotState()` writes the post-`MarkHealthyNow` state to FAT32. |
+| `kernel/fs/boot_slot.{h,cpp}` | State machine, serialise / parse, `LoadVia` / `SaveVia` callback ABI, `GrubCfgGenerate`, self-test. |
+| `kernel/diag/heartbeat.cpp`   | `PersistBootSlotState()` persists the post-`MarkHealthyNow` state (shared FAT32 bridge). |
 | `kernel/shell/shell_bootslot.cpp` | `slotinfo` + `bootslot` shell commands. |
-| `kernel/fs/installer.cpp`     | Emits the A/B `grub.cfg` and seeds `/boot/duetos-slot.cfg` at install time. |
+| `kernel/fs/installer.cpp`     | Stages the inactive-slot kernel, `FindBootSlotVolume` + `PersistSlotState` (state file + generated `grub.cfg`). |
 | `boot/grub/grub.cfg`          | Dev-build (ISO) grub.cfg — appended static slot-a / slot-b entries for QEMU exercises. |
 
 ## Verification

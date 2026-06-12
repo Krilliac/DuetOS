@@ -1,6 +1,7 @@
 #pragma once
 
 #include "net/tcp.h"
+#include "net/tcp_sack.h"
 #include "sched/sched.h"
 #include "util/types.h"
 
@@ -117,27 +118,33 @@ struct Tcb
     u16 mss_send;
 
     // RFC 6675 sender-side SACK scoreboard. `sack_high` is the
-    // highest sequence number the receiver has SACKed (the "HighData"
-    // edge below which NextSeg looks for holes). The per-segment
-    // `sacked` bits live on rtx_queue[]. Reset on a cumulative-ACK
-    // advance that retires the whole window. 0 = no SACK state.
+    // highest sequence number the receiver has SACKed (the edge below
+    // which NextSeg looks for holes). The per-segment `sacked` bits
+    // live on rtx_queue[]; `sack` is the derived hole list + recovery
+    // bookkeeping owned by tcp_sack.cpp (freed on every teardown path
+    // via SackScoreboardClear).
     u32 sack_high;
+    SackScoreboard sack;
 
-    // ECN (RFC 3168). v0 implements the SYN-time negotiation only;
-    // marking IP-layer ECT/CE bits is the next slice and lives in
-    // stack.cpp's IPv4 emit/recv path.
+    // ECN (RFC 3168). Negotiated on the SYN handshake (`ecn_ok`); the
+    // data plane threads IP-layer ECT/CE through stack.cpp's IPv4 recv
+    // path and SendSegment's TOS byte (EcnApplyTx).
     //
-    // ecn_ok       — peer's SYN-ACK echoed (ECE=1, CWR=0) so we may
-    //                use ECN-marked IP packets on this connection.
-    // peer_ce_pending — RX side: we received an IP-layer CE-marked
-    //                   segment and owe the peer an ECE on the next
-    //                   outgoing ACK. (Not threaded yet — see GAP.)
-    // sent_cwr     — TX side: we already lowered cwnd in response
-    //                to the most recent ECE; next data segment
-    //                emits CWR=1 to inform the peer.
+    // ecn_ok       — peer's SYN-ACK echoed (ECE=1, CWR=0) so ECN-
+    //                marked IP packets are in play on this connection.
+    // peer_ce_pending — RX side: an IP-layer CE-marked segment
+    //                   arrived; every outgoing ACK carries ECE until
+    //                   the peer's CWR retires the obligation (§6.1.3).
+    // sent_cwr     — TX side: cwnd was reduced for the most recent
+    //                ECE; the next outgoing data segment emits CWR=1
+    //                and clears this (§6.1.5).
+    // ecn_react_seq — one cwnd reduction per window of data (§6.1.2):
+    //                 further ECEs are ignored until snd_una passes
+    //                 this mark. Seeded to ISS at connection setup.
     bool ecn_ok;
     bool peer_ce_pending;
     bool sent_cwr;
+    u32 ecn_react_seq;
 
     // Congestion control (simplified Reno, RFC-5681).
     u32 cwnd;
@@ -300,9 +307,10 @@ bool PawsReject(const Tcb& t, u32 seg_tsval, u8 flags, bool has_timestamp);
 void ArmRtxTimer(Tcb& t);
 
 // Process an inbound segment. Called from OnSegment after the TCB
-// lookup. `peer_mac`/`peer_ip` come from the L2/L3 headers; the rest
-// is parsed inline. Drops the TCB on Closed.
-void DeliverSegment(u32 idx, const MacAddress& peer_mac, Ipv4Address peer_ip, const u8* tcp, u64 tcp_len);
+// lookup. `peer_mac`/`peer_ip` come from the L2/L3 headers; `ip_ce`
+// is the IP-layer ECN CE mark (RFC 3168); the rest is parsed inline.
+// Drops the TCB on Closed.
+void DeliverSegment(u32 idx, const MacAddress& peer_mac, Ipv4Address peer_ip, const u8* tcp, u64 tcp_len, bool ip_ce);
 
 // Send a one-shot RST in response to a segment that didn't match
 // any TCB. Used as the default reject path.
@@ -338,12 +346,19 @@ u32 ParseSackBlocks(const u8* opts, u32 opts_len, SackBlock* out);
 /// Exposed for the boot self-test.
 bool ApplySackScoreboard(Tcb& t, const SackBlock* blocks, u32 count);
 
-/// RFC 6675 NextSeg(): pick the lowest-sequence rtx_queue segment
-/// that is NOT SACKed and lies below the SACK scoreboard's highest
-/// acknowledged edge (i.e. a genuine hole the receiver is missing).
-/// Returns the slot index, or kRtxQueueMax when there is no hole to
-/// retransmit. Exposed for the boot self-test.
-u32 SackNextSeg(const Tcb& t);
+/// RFC 3168 TX-side ECN transform: folds ECE (CE-echo obligation)
+/// and the one-shot CWR into the outgoing flags, and returns the IP
+/// TOS byte (ECT(0) on data segments of ecn_ok connections, not-ECT
+/// otherwise). SYN-carrying and RST segments are exempt — their ECN
+/// bits are negotiation-owned. Exposed for the boot self-test.
+u8 EcnApplyTx(Tcb& t, u8& flags, u32 payload_len);
+
+/// RFC 3168 §6.1.2 inbound-ECE congestion response: one cwnd
+/// reduction per window of data, routed through the same CA hooks as
+/// the loss path (CUBIC with the Reno fallback) but with no
+/// retransmit. Returns true if a reduction happened. Exposed for the
+/// boot self-test.
+bool EcnOnEce(Tcb& t);
 
 /// Build the TCP option block for an outgoing segment. Same
 /// semantics as the internal call site in tcp_segment.cpp. Exposed

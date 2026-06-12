@@ -3921,6 +3921,14 @@
   },
   {
     "abi": "native",
+    "number": 213,
+    "name": "SYS_IOCP_POST",
+    "status": "implemented",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
     "number": 512,
     "name": "native_gapfill_0x200",
     "status": "translated",

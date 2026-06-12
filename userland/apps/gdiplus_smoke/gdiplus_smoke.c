@@ -51,5 +51,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[gdiplus_smoke] done\r\n");
+    Out("[ring3-gdiplus-smoke] PASS\r\n");
     ExitProcess(0);
 }

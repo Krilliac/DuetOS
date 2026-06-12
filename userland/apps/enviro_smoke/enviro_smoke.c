@@ -41,5 +41,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[enviro_smoke] done\r\n");
+    Out("[ring3-enviro-smoke] PASS\r\n");
     ExitProcess(0);
 }

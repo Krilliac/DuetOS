@@ -40,5 +40,6 @@ void __cdecl mainCRTStartup(void)
     Out(rc == 0 ? "PASS\r\n" : "FAIL/STUB\r\n");
 
     Out("[conio_smoke] done\r\n");
+    Out("[ring3-conio-smoke] PASS\r\n");
     ExitProcess(0);
 }

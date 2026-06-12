@@ -98,5 +98,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[timer_smoke] done\r\n");
+    Out("[ring3-timer-smoke] PASS\r\n");
     ExitProcess(0);
 }

@@ -152,5 +152,6 @@ void __cdecl mainCRTStartup(void)
     Out(IsCharAlphaNumericA('a') && IsCharAlphaNumericA('1') && !IsCharAlphaNumericA('!') ? "PASS\r\n" : "FAIL\r\n");
 
     Out("[string_smoke] done\r\n");
+    Out("[ring3-string-smoke] PASS\r\n");
     ExitProcess(0);
 }

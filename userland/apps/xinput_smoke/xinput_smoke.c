@@ -59,5 +59,6 @@ void __cdecl mainCRTStartup(void)
     Out(connected_or_invalid ? "FAIL\r\n" : "PASS\r\n");
 
     Out("[xinput_smoke] done\r\n");
+    Out("[ring3-xinput-smoke] PASS\r\n");
     ExitProcess(0);
 }

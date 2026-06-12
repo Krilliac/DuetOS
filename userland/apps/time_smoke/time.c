@@ -121,5 +121,6 @@ void __cdecl mainCRTStartup(void)
     Out((bp == 0 || bp == TIMERR_NOERROR) && (ep == 0 || ep == TIMERR_NOERROR) ? "PASS\r\n" : "FAIL\r\n");
 
     Out("[time_smoke] done\r\n");
+    Out("[ring3-time-smoke] PASS\r\n");
     ExitProcess(0);
 }

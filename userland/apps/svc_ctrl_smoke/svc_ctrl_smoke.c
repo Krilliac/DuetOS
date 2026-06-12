@@ -40,5 +40,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[svc_ctrl_smoke] done\r\n");
+    Out("[ring3-svc-ctrl-smoke] PASS\r\n");
     ExitProcess(0);
 }

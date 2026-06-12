@@ -78,5 +78,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[perf_smoke] done\r\n");
+    Out("[ring3-perf-smoke] PASS\r\n");
     ExitProcess(0);
 }

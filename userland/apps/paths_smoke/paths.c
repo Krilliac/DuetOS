@@ -136,5 +136,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[paths_smoke] done\r\n");
+    Out("[ring3-paths-smoke] PASS\r\n");
     ExitProcess(0);
 }

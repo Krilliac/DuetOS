@@ -111,6 +111,7 @@ void __cdecl mainCRTStartup(void)
     if (hr != 0 || !sc || !dev || !ctx)
     {
         Out("[d3d11_smoke] aborting\r\n");
+        Out("[ring3-d3d11-smoke] FAIL createdevice\r\n");
         ExitProcess(1);
     }
 
@@ -318,5 +319,6 @@ void __cdecl mainCRTStartup(void)
     Out("[d3d11_smoke] Release chain           = PASS\r\n");
 
     Out("[d3d11_smoke] done\r\n");
+    Out("[ring3-d3d11-smoke] PASS\r\n");
     ExitProcess(0);
 }

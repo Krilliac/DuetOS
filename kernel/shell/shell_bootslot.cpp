@@ -14,17 +14,19 @@
  *                                   and reboot, so the bootloader path
  *                                   exercises rollback. Requires admin.
  *
- * Persistence: every state-changing subcommand writes the updated
- * state to /boot/duetos-slot.cfg via FAT32 (the canonical on-disk
- * path declared by boot_slot.h). Read-only commands (`slotinfo`)
- * pull from the in-RAM CurrentState only — they don't touch disk.
+ * Persistence: every state-changing subcommand routes through the
+ * shared FAT32 bridge `installer::PersistSlotState`, which writes
+ * /boot/duetos-slot.cfg AND regenerates /boot/grub/grub.cfg (on
+ * ESP volumes) so GRUB's `set default` tracks the change.
+ * Read-only commands (`slotinfo`) pull from the in-RAM
+ * CurrentState only — they don't touch disk.
  */
 
 #include "shell/shell_internal.h"
 
 #include "drivers/video/console.h"
 #include "fs/boot_slot.h"
-#include "fs/fat32.h"
+#include "fs/installer.h"
 #include "power/reboot.h"
 
 namespace duetos::core::shell::internal
@@ -39,23 +41,13 @@ namespace bs = ::duetos::fs::boot_slot;
 
 bool PersistSlotState(const bs::State& st)
 {
-    const auto* vol = ::duetos::fs::fat32::Fat32Volume(0);
+    const auto* vol = ::duetos::fs::installer::FindBootSlotVolume();
     if (vol == nullptr)
     {
-        ConsoleWriteln("BOOTSLOT: no FAT32 ESP volume — state NOT persisted");
+        ConsoleWriteln("BOOTSLOT: no FAT32 volume — state NOT persisted");
         return false;
     }
-    struct Ctx
-    {
-        const ::duetos::fs::fat32::Volume* vol;
-    } ctx{vol};
-    auto save_fn = +[](void* c, const u8* buf, u64 len) -> bool
-    {
-        auto* x = static_cast<Ctx*>(c);
-        const i64 wrote = ::duetos::fs::fat32::Fat32CreateAtPath(x->vol, bs::kSlotStateFilePath, buf, len);
-        return wrote == static_cast<i64>(len);
-    };
-    if (!bs::SaveVia(save_fn, &ctx, st))
+    if (!::duetos::fs::installer::PersistSlotState(vol, st))
     {
         ConsoleWriteln("BOOTSLOT: persist write failed");
         return false;

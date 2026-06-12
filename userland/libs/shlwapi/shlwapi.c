@@ -1,17 +1,24 @@
 /*
  * userland/libs/shlwapi/shlwapi.c
  *
- * Freestanding DuetOS shlwapi.dll. 16 Path* / Str* string
- * helpers — almost all pure-C loops. PathFileExistsA/W is the
- * one exception: it issues SYS_FILE_QUERY_ATTRIBUTES (= 151) so
- * a real existence check works against the kernel's mounted
- * filesystems instead of unconditionally returning FALSE.
+ * Freestanding DuetOS shlwapi.dll. Path* / Str* string helpers,
+ * the bounded wnsprintfA/W printf pair (format engine shared with
+ * user32 via user32_wsprintf_core.h) and the StrToIntExA/W parsers
+ * (core in shlwapi_parse.h, pinned by the hosted test
+ * tests/host/test_kernel32_nls.cpp) — almost all pure-C loops.
+ * PathFileExistsA/W is the one exception: it issues
+ * SYS_FILE_QUERY_ATTRIBUTES (= 151) so a real existence check works
+ * against the kernel's mounted filesystems instead of unconditionally
+ * returning FALSE.
  */
 
 typedef int BOOL;
 typedef unsigned int DWORD;
 typedef unsigned short wchar_t16;
 typedef unsigned long long size_t;
+
+#include "../user32/user32_wsprintf_core.h"
+#include "shlwapi_parse.h"
 
 #define NO_BUILTIN_LOOPS __attribute__((no_builtin("strlen", "strcmp", "strstr")))
 
@@ -788,4 +795,41 @@ __declspec(dllexport) void PathUnquoteSpacesW(wchar_t16* p)
     for (int i = 0; i < n - 2; ++i)
         p[i] = p[i + 1];
     p[n - 2] = 0;
+}
+
+/* ---- Bounded printf + string-to-int ---- */
+
+/* wnsprintfA / wnsprintfW — shlwapi's bounded wsprintf. Shares the
+ * user32 restricted-printf engine (user32_wsprintf_core.h); writes at
+ * most cchDest-1 chars + NUL and returns the count written (excluding
+ * the NUL), or a negative value if the output was truncated, per the
+ * Win32 contract. */
+__declspec(dllexport) int wnsprintfA(char* dst, int cchDest, const char* fmt, ...)
+{
+    duetos_valist ap;
+    __builtin_va_start(ap, fmt);
+    int r = duetos_wvsnprintf_a(dst, cchDest, fmt, ap);
+    __builtin_va_end(ap);
+    return r;
+}
+
+__declspec(dllexport) int wnsprintfW(wchar_t16* dst, int cchDest, const wchar_t16* fmt, ...)
+{
+    duetos_valist ap;
+    __builtin_va_start(ap, fmt);
+    int r = duetos_wvsnprintf_w(dst, cchDest, fmt, ap);
+    __builtin_va_end(ap);
+    return r;
+}
+
+/* StrToIntExA / StrToIntExW — decimal (and, with STIF_SUPPORT_HEX,
+ * "0x"-prefixed hex) string-to-int. Core in shlwapi_parse.h. */
+__declspec(dllexport) BOOL StrToIntExA(const char* s, DWORD flags, int* out)
+{
+    return str_to_int_ex_core_a(s, flags, out);
+}
+
+__declspec(dllexport) BOOL StrToIntExW(const wchar_t16* s, DWORD flags, int* out)
+{
+    return str_to_int_ex_core_w(s, flags, out);
 }

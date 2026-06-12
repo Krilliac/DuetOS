@@ -1108,7 +1108,11 @@ bool Ipv4HandleIncoming(u32 iface_index, const void* frame, u64 len)
         Ipv4Address peer_ip = {};
         for (u64 i = 0; i < 4; ++i)
             peer_ip.octets[i] = ip[12 + i];
-        tcp::OnSegment(iface_index, peer_mac, peer_ip, tcp, total_len - ip_header_bytes);
+        // RFC 3168: thread the IP-layer ECN field (TOS bits 0..1)
+        // through to TCP — CE (0b11) means a router marked this
+        // segment instead of dropping it.
+        const bool ip_ce = (ip[1] & 0x03) == 0x03;
+        tcp::OnSegment(iface_index, peer_mac, peer_ip, tcp, total_len - ip_header_bytes, ip_ce);
         break;
     }
     case kIpProtoIcmp:

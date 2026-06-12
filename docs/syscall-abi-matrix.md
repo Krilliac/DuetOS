@@ -496,6 +496,7 @@ _Auto-generated; do not edit by hand._
 | native | 210 | `SYS_AUDIO_WRITE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
 | native | 211 | `SYS_VK_CALL` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
 | native | 212 | `SYS_RANDOM_BYTES` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 213 | `SYS_IOCP_POST` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
 | native | 512 | `native_gapfill_0x200` | translated | `kernel/subsystems/translation/translate.cpp::NativeClockNs` | linux-self:NowNs |
 | native | 513 | `native_gapfill_0x201` | translated | `kernel/subsystems/translation/translate.cpp::NativeGetRandom` | synthetic:xorshift-from-rdtsc |
 | native | 528 | `native_gapfill_0x210` | translated | `kernel/subsystems/translation/translate.cpp::NativeWin32Alloc` | win32:HeapAlloc |

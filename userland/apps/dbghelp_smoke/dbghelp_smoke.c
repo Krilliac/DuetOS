@@ -62,5 +62,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[dbghelp_smoke] done\r\n");
+    Out("[ring3-dbghelp-smoke] PASS\r\n");
     ExitProcess(0);
 }

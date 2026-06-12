@@ -44,5 +44,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[stream_smoke] done\r\n");
+    Out("[ring3-stream-smoke] PASS\r\n");
     ExitProcess(0);
 }

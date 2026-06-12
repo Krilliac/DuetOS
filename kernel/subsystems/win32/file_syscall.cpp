@@ -10,6 +10,7 @@
 #include "arch/x86_64/traps.h"
 #include "diag/kdbg.h"
 #include "ipc/handle_table.h"
+#include "ipc/iocp.h"
 #include "ipc/kevent.h"
 #include "ipc/kmutex.h"
 #include "ipc/kobject.h"
@@ -228,6 +229,28 @@ void DoFileClose(arch::TrapFrame* frame)
         ipc::KObject* obj = ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h, ipc::KObjectType::Semaphore);
         if (obj != nullptr)
         {
+            (void)ipc::HandleTableRemove(proc->kobj_handles, ipc_h);
+            ipc::KObjectRelease(obj); // drop the lookup ref
+        }
+    }
+    else if (handle >= core::Process::kWin32IocpBase &&
+             handle < core::Process::kWin32IocpBase + core::Process::kWin32IocpCap)
+    {
+        // Migrated to IocpPort + kobj_handles. Same shape as the
+        // event / semaphore arms, plus an explicit IocpClose BEFORE
+        // the table remove: a consumer parked inside IocpWait holds
+        // its own lookup reference, so the destroy callback would
+        // never fire while it sleeps — the explicit close-broadcast
+        // is what wakes it (it then observes `closed` and returns
+        // STATUS_ABANDONED-shaped failure to user mode).
+        // (Pre-migration: this arm did not exist; NtClose on an
+        // IOCP handle silently leaked the legacy pool slot. Fixed
+        // incidentally by routing through the unified handle table.)
+        const ipc::Handle ipc_h = static_cast<ipc::Handle>(handle - core::Process::kWin32IocpBase);
+        ipc::KObject* obj = ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h, ipc::KObjectType::Iocp);
+        if (obj != nullptr)
+        {
+            ipc::IocpClose(reinterpret_cast<ipc::IocpPort*>(obj));
             (void)ipc::HandleTableRemove(proc->kobj_handles, ipc_h);
             ipc::KObjectRelease(obj); // drop the lookup ref
         }

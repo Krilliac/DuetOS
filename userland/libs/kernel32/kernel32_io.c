@@ -764,6 +764,40 @@ static const DUETOS_NUMBERFMT_A k_default_numfmt_a = {
     1,   /* NegativeOrder: -1.1 */
 };
 
+/* Default locale CURRENCYFMT for en-US (used when fmt == NULL):
+ * "$1,234.50" positive, "($1,234.50)" negative. */
+static const DUETOS_CURRENCYFMT_A k_default_curfmt_a = {
+    2,   /* NumDigits */
+    1,   /* LeadingZero */
+    3,   /* Grouping */
+    ".", /* lpDecimalSep */
+    ",", /* lpThousandSep */
+    0,   /* NegativeOrder: ($1.1) */
+    0,   /* PositiveOrder: $1.1 */
+    "$", /* lpCurrencySymbol */
+};
+
+/* W-path plumbing: the narrow core formats with these sentinel
+ * separator strings, and nls_widen_expand() substitutes the caller's
+ * wide separators back in (kernel32_nls_format.h has the contract). */
+static const char k_sent_dec[2] = {DUETOS_NLS_SENT_DECIMAL, 0};
+static const char k_sent_tho[2] = {DUETOS_NLS_SENT_THOUSAND, 0};
+static const char k_sent_sym[2] = {DUETOS_NLS_SENT_SYMBOL, 0};
+static const WCHAR_t k_wdot[2] = {'.', 0};
+static const WCHAR_t k_wcomma[2] = {',', 0};
+static const WCHAR_t k_wdollar[2] = {'$', 0};
+
+/* Narrow a wide digit string for the number core: code points outside
+ * ASCII become '?' (never a digit), so e.g. U+0130 cannot alias '0'. */
+static int narrow_num_str(const WCHAR_t* num, char* out, int out_cap)
+{
+    int ni = 0;
+    for (; num[ni] != 0 && ni < out_cap - 1; ++ni)
+        out[ni] = (num[ni] < 0x80) ? (char)num[ni] : '?';
+    out[ni] = 0;
+    return ni;
+}
+
 __declspec(dllexport) int GetNumberFormatA(unsigned long lcid, DWORD flags, const char* num, void* fmt, char* buf,
                                            int cchData)
 {
@@ -787,10 +821,10 @@ __declspec(dllexport) int GetNumberFormatA(unsigned long lcid, DWORD flags, cons
     return needed;
 }
 
-/* GetNumberFormatW — wide variant.  Narrow the wide separator strings,
- * delegate to the A core, then widen the result back to UTF-16.
- * GAP: separators with non-ASCII code points are truncated to '?'. —
- *      revisit when Unicode locale tables land. */
+/* GetNumberFormatW — wide variant. The numeric fields feed the narrow
+ * core directly; the wide separator strings are carried through as
+ * sentinels and substituted back while widening, so non-ASCII
+ * NUMBERFMTW separators round-trip un-truncated. */
 __declspec(dllexport) int GetNumberFormatW(unsigned long lcid, DWORD flags, const WCHAR_t* num, void* fmt, WCHAR_t* buf,
                                            int cchData)
 {
@@ -799,24 +833,16 @@ __declspec(dllexport) int GetNumberFormatW(unsigned long lcid, DWORD flags, cons
     if (num == (const WCHAR_t*)0)
         return 0;
 
-    /* Narrow num to ASCII scratch. */
     char num_a[128];
-    int ni = 0;
-    for (; num[ni] != 0 && ni < 127; ++ni)
-        num_a[ni] = (char)(num[ni] & 0xFF);
-    num_a[ni] = 0;
+    narrow_num_str(num, num_a, (int)sizeof(num_a));
 
-    DUETOS_NUMBERFMT_A nf_a;
-    char dec_buf[8];
-    char tho_buf[8];
-
-    const DUETOS_NUMBERFMT_A* nf;
+    DUETOS_NUMBERFMT_A nf_a = k_default_numfmt_a;
+    const WCHAR_t* wdec = k_wdot;
+    const WCHAR_t* wtho = k_wcomma;
     if (fmt != (void*)0)
     {
         /* The wide NUMBERFMT mirrors the A one but with LPWSTR
-         * separator fields.  Layout: NumDigits(4) + LeadingZero(4) +
-         * Grouping(4) + lpDecimalSep(ptr) + lpThousandSep(ptr) +
-         * NegativeOrder(4).  We reinterpret as wide and narrow. */
+         * separator fields. */
         typedef struct
         {
             unsigned int NumDigits;
@@ -831,36 +857,25 @@ __declspec(dllexport) int GetNumberFormatW(unsigned long lcid, DWORD flags, cons
         nf_a.LeadingZero = wf->LeadingZero;
         nf_a.Grouping = wf->Grouping;
         nf_a.NegativeOrder = wf->NegativeOrder;
-        /* Narrow separator strings. */
-        int di = 0;
-        if (wf->lpDecimalSep)
-            for (; wf->lpDecimalSep[di] != 0 && di < 7; ++di)
-                dec_buf[di] = (char)(wf->lpDecimalSep[di] & 0xFF);
-        dec_buf[di] = 0;
-        nf_a.lpDecimalSep = dec_buf;
-        int ti = 0;
-        if (wf->lpThousandSep)
-            for (; wf->lpThousandSep[ti] != 0 && ti < 7; ++ti)
-                tho_buf[ti] = (char)(wf->lpThousandSep[ti] & 0xFF);
-        tho_buf[ti] = 0;
-        nf_a.lpThousandSep = tho_buf;
-        nf = &nf_a;
+        if (wf->lpDecimalSep && wf->lpDecimalSep[0]) /* empty/NULL -> locale default, as in the A core */
+            wdec = wf->lpDecimalSep;
+        if (wf->lpThousandSep) /* empty string is legal: grouping with no visible separator */
+            wtho = wf->lpThousandSep;
     }
-    else
-    {
-        nf = &k_default_numfmt_a;
-    }
+    nf_a.lpDecimalSep = k_sent_dec;
+    nf_a.lpThousandSep = k_sent_tho;
 
     char scratch[256];
-    int len = num_format_core_a(num_a, nf, scratch, (int)sizeof(scratch));
+    num_format_core_a(num_a, &nf_a, scratch, (int)sizeof(scratch));
+    WCHAR_t wide[256];
+    int len = nls_widen_expand(scratch, wdec, wtho, (const WCHAR_t*)0, wide, 256);
     int needed = len + 1;
     if (cchData == 0)
         return needed;
     if (buf == (WCHAR_t*)0 || cchData < needed)
         return 0;
-    for (int i = 0; i < len; ++i)
-        buf[i] = (WCHAR_t)(unsigned char)scratch[i];
-    buf[len] = 0;
+    for (int i = 0; i <= len; ++i)
+        buf[i] = wide[i];
     return needed;
 }
 
@@ -985,23 +1000,24 @@ __declspec(dllexport) int FoldStringW(unsigned long flags, const wchar_t16* src,
     return n;
 }
 
-/* GetCurrencyFormatA — en-US: "$1,234.50"; negative "($1,234.50)".
- * Routes the magnitude through the shared NUMBERFMT core (grouping +
- * 2 decimals + half-up rounding), then applies the currency symbol and
- * the en-US default negative order (parentheses — LOCALE_INEGCURR 0).
- * GAP: the CURRENCYFMT struct argument is not honoured; the en-US
- *      locale default is always applied. — revisit with locale tables. */
+/* GetCurrencyFormatA — en-US default: "$1,234.50"; negative
+ * "($1,234.50)". Honours the CURRENCYFMT struct argument (NumDigits /
+ * LeadingZero / Grouping / separators / symbol + the LOCALE_ICURRENCY
+ * and LOCALE_INEGCURR order tables); the magnitude routes through the
+ * shared NUMBERFMT core so grouping + half-up rounding match
+ * GetNumberFormat. */
 __declspec(dllexport) int GetCurrencyFormatA(unsigned long lcid, DWORD flags, const char* num, void* fmt, char* buf,
                                              int cchData)
 {
     (void)lcid;
     (void)flags;
-    (void)fmt;
     if (num == (const char*)0)
         return 0;
 
+    const DUETOS_CURRENCYFMT_A* cf = (fmt != (void*)0) ? (const DUETOS_CURRENCYFMT_A*)fmt : &k_default_curfmt_a;
+
     char scratch[160];
-    int len = currency_format_core_a(num, &k_default_numfmt_a, "$", scratch, (int)sizeof(scratch));
+    int len = currency_format_core_a(num, cf, scratch, (int)sizeof(scratch));
     int needed = len + 1;
     if (cchData == 0)
         return needed;
@@ -1010,6 +1026,71 @@ __declspec(dllexport) int GetCurrencyFormatA(unsigned long lcid, DWORD flags, co
     for (int i = 0; i < len; ++i)
         buf[i] = scratch[i];
     buf[len] = 0;
+    return needed;
+}
+
+/* GetCurrencyFormatW — wide variant. Numeric fields feed the narrow
+ * core; the wide separator / symbol strings travel as sentinels and
+ * are substituted back while widening, so non-ASCII CURRENCYFMTW
+ * separators and symbols round-trip un-truncated. */
+__declspec(dllexport) int GetCurrencyFormatW(unsigned long lcid, DWORD flags, const WCHAR_t* num, void* fmt,
+                                             WCHAR_t* buf, int cchData)
+{
+    (void)lcid;
+    (void)flags;
+    if (num == (const WCHAR_t*)0)
+        return 0;
+
+    char num_a[128];
+    narrow_num_str(num, num_a, (int)sizeof(num_a));
+
+    DUETOS_CURRENCYFMT_A cf_a = k_default_curfmt_a;
+    const WCHAR_t* wdec = k_wdot;
+    const WCHAR_t* wtho = k_wcomma;
+    const WCHAR_t* wsym = k_wdollar;
+    if (fmt != (void*)0)
+    {
+        /* The wide CURRENCYFMT mirrors the A one but with LPWSTR
+         * separator / symbol fields. */
+        typedef struct
+        {
+            unsigned int NumDigits;
+            unsigned int LeadingZero;
+            unsigned int Grouping;
+            const WCHAR_t* lpDecimalSep;
+            const WCHAR_t* lpThousandSep;
+            unsigned int NegativeOrder;
+            unsigned int PositiveOrder;
+            const WCHAR_t* lpCurrencySymbol;
+        } CURRENCYFMT_W;
+        const CURRENCYFMT_W* wf = (const CURRENCYFMT_W*)fmt;
+        cf_a.NumDigits = wf->NumDigits;
+        cf_a.LeadingZero = wf->LeadingZero;
+        cf_a.Grouping = wf->Grouping;
+        cf_a.NegativeOrder = wf->NegativeOrder;
+        cf_a.PositiveOrder = wf->PositiveOrder;
+        if (wf->lpDecimalSep && wf->lpDecimalSep[0])
+            wdec = wf->lpDecimalSep;
+        if (wf->lpThousandSep)
+            wtho = wf->lpThousandSep;
+        if (wf->lpCurrencySymbol)
+            wsym = wf->lpCurrencySymbol;
+    }
+    cf_a.lpDecimalSep = k_sent_dec;
+    cf_a.lpThousandSep = k_sent_tho;
+    cf_a.lpCurrencySymbol = k_sent_sym;
+
+    char scratch[160];
+    currency_format_core_a(num_a, &cf_a, scratch, (int)sizeof(scratch));
+    WCHAR_t wide[256];
+    int len = nls_widen_expand(scratch, wdec, wtho, wsym, wide, 256);
+    int needed = len + 1;
+    if (cchData == 0)
+        return needed;
+    if (buf == (WCHAR_t*)0 || cchData < needed)
+        return 0;
+    for (int i = 0; i <= len; ++i)
+        buf[i] = wide[i];
     return needed;
 }
 
@@ -1635,8 +1716,30 @@ __declspec(dllexport) int LCMapStringW(unsigned long Locale, DWORD dwMapFlags, c
                                        wchar_t16* lpDestStr, int cchDest)
 {
     (void)Locale;
+    const unsigned long NORM_IGNORECASE = 0x00000001;
+    const unsigned long LCMAP_LOWERCASE = 0x00000100;
+    const unsigned long LCMAP_UPPERCASE = 0x00000200;
+    const unsigned long LCMAP_SORTKEY = 0x00000400;
     if (lpSrcStr == (const WCHAR_t*)0)
         return 0;
+
+    if (dwMapFlags & LCMAP_SORTKEY)
+    {
+        /* Sort-key request: dest is a BYTE buffer, cchDest is in bytes,
+         * and the key covers the string content (no source NUL). The
+         * key is upcased-ordinal so it is case-insensitive whether or
+         * not NORM_IGNORECASE is set — a valid en-US/invariant
+         * weighting (see nls_sortkey_core in kernel32_nls_format.h). */
+        int n = cchSrc;
+        if (n < 0)
+        {
+            n = 0;
+            while (lpSrcStr[n] != 0)
+                ++n;
+        }
+        return nls_sortkey_core(lpSrcStr, n, (unsigned char*)lpDestStr, cchDest);
+    }
+
     /* Compute source length. */
     int src_len = cchSrc;
     if (src_len < 0)
@@ -1651,13 +1754,15 @@ __declspec(dllexport) int LCMapStringW(unsigned long Locale, DWORD dwMapFlags, c
         return src_len;
     if (cchDest < src_len)
         return 0;
-    /* Apply the requested transformation, byte-by-byte. */
-    const unsigned long LCMAP_LOWERCASE = 0x00000100;
-    const unsigned long LCMAP_UPPERCASE = 0x00000200;
+    /* Apply the requested transformation. Standalone NORM_IGNORECASE
+     * (no explicit case-map flag) case-folds to lowercase so callers
+     * get a comparison-stable string. */
+    const int fold_lower =
+        (dwMapFlags & LCMAP_LOWERCASE) || ((dwMapFlags & NORM_IGNORECASE) && !(dwMapFlags & LCMAP_UPPERCASE));
     for (int i = 0; i < src_len; ++i)
     {
         wchar_t16 c = lpSrcStr[i];
-        if ((dwMapFlags & LCMAP_LOWERCASE) && c >= 'A' && c <= 'Z')
+        if (fold_lower && c >= 'A' && c <= 'Z')
             c = (wchar_t16)(c + ('a' - 'A'));
         else if ((dwMapFlags & LCMAP_UPPERCASE) && c >= 'a' && c <= 'z')
             c = (wchar_t16)(c - ('a' - 'A'));

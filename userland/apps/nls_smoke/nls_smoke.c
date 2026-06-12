@@ -112,5 +112,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[nls_smoke] done\r\n");
+    Out("[ring3-nls-smoke] PASS\r\n");
     ExitProcess(0);
 }

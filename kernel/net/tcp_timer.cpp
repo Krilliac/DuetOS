@@ -44,6 +44,10 @@ void RetransmitFirstUnacked(Tcb& t)
     }
     if (sb == nullptr)
         return;
+    // RFC 2018 §8 / RFC 6675 §5.1: the receiver may have reneged —
+    // flush the SACK scoreboard (holes + per-segment bits) so the
+    // post-RTO recovery starts from wire truth only.
+    SackOnRto(t);
     // RFC-6298 §5: collapse cwnd to one MSS, multiply RTO by two,
     // re-arm the timer. Karn's algorithm: don't sample RTT off this
     // retransmit.

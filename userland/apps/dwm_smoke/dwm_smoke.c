@@ -42,5 +42,6 @@ void __cdecl mainCRTStartup(void)
     Out(SUCCEEDED(hr) || hr == E_NOTIMPL ? "PASS (returned)\r\n" : "FAIL\r\n");
 
     Out("[dwm_smoke] done\r\n");
+    Out("[ring3-dwm-smoke] PASS\r\n");
     ExitProcess(0);
 }

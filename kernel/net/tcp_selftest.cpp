@@ -275,11 +275,11 @@ bool TestSackSender()
     if (ParseSackBlocks(bad, sizeof(bad), blocks) != 0)
         return false;
 
-    // (2) Scoreboard + NextSeg on a synthetic rtx_queue. Four 0x100-byte
-    // segments at 0x100,0x200,0x300,0x400. SACK [0x200,0x400) covers the
-    // middle two; the hole at 0x100 is below sack_high → NextSeg picks it,
-    // the segment at 0x400 sits at the SACK edge (not yet SACKed, nothing
-    // past it) → not a hole.
+    // (2) Scoreboard bits on a synthetic rtx_queue. Four 0x100-byte
+    // segments at 0x100,0x200,0x300,0x400. SACK [0x200,0x400) covers
+    // the middle two; the edges stay unmarked and sack_high advances
+    // to the block's right edge. (Hole-list / NextSeg behaviour is
+    // exercised by the RFC 6675 scoreboard test.)
     Tcb t = {};
     SegmentBuf rtx[kRtxQueueMax];
     for (u32 i = 0; i < kRtxQueueMax; ++i)
@@ -306,21 +306,221 @@ bool TestSackSender()
     if (t.sack_high != 0x400)
         return false;
 
-    // NextSeg names the lowest un-SACKed hole below sack_high: 0x100.
-    const u32 hole = SackNextSeg(t);
-    if (hole == kRtxQueueMax || rtx[hole].seq != 0x100)
-        return false;
-
-    // Mark the hole SACKed too; now nothing below sack_high is unSACKed
-    // except 0x400 which sits AT the edge (not a hole) → no NextSeg.
-    rtx[0].sacked = true;
-    if (SackNextSeg(t) != kRtxQueueMax)
-        return false;
-
     // Re-applying the same block reports no new progress (idempotent).
     if (ApplySackScoreboard(t, &cover, 1))
         return false;
 
+    return true;
+}
+
+// RFC 6675 sender scoreboard: hole rebuild from the segment bits,
+// IsLost, SetPipe, NextSeg rules (1)/(3), HighRxt-preserving rebuild,
+// cumulative-ACK trim, and clear (the TCB-teardown path). All
+// deterministic — no wire, no NIC; holes come off the live kheap and
+// are freed on every exit through SackScoreboardClear.
+bool TestSack6675()
+{
+    using namespace internal;
+    Tcb t = {};
+    SegmentBuf rtx[kRtxQueueMax];
+    for (u32 i = 0; i < kRtxQueueMax; ++i)
+        rtx[i].len = 0;
+    t.rtx_queue = rtx;
+    t.mss_send = 100;
+    t.snd_una = 1000;
+    t.snd_nxt = 1800;
+    t.sack_high = 1000;
+    // Eight 100-byte segments covering [1000, 1800). The receiver
+    // SACKs [1100,1200), [1300,1400), [1500,1600): holes at 1000,
+    // 1200 and 1400; segments 1600/1700 sit above the SACK edge and
+    // must NOT become holes.
+    for (u32 i = 0; i < 8; ++i)
+    {
+        rtx[i].seq = 1000 + i * 100;
+        rtx[i].len = 100;
+        rtx[i].flags = kFlagAck;
+        rtx[i].sacked = false;
+    }
+    t.rtx_count = 8;
+
+    bool ok = true;
+    do
+    {
+        const SackBlock blocks[] = {{1100, 1200}, {1300, 1400}, {1500, 1600}};
+        if (!ApplySackScoreboard(t, blocks, 3) || !SackScoreboardRebuild(t))
+        {
+            ok = false;
+            break;
+        }
+        // Ascending hole list: [1000,1100) [1200,1300) [1400,1500).
+        SackHole* h0 = t.sack.head;
+        if (t.sack.hole_count != 3 || h0 == nullptr || h0->start != 1000 || h0->end != 1100 || h0->rxmit != 1000 ||
+            h0->next == nullptr || h0->next->start != 1200 || h0->next->end != 1300 || h0->next->next == nullptr ||
+            h0->next->next->start != 1400 || h0->next->next->end != 1500)
+        {
+            ok = false;
+            break;
+        }
+        // IsLost: 3 SACKed runs above 1000 → lost. Above 1200: 2 runs
+        // but 200 SACKed bytes = (DupThresh-1)*SMSS → lost by the byte
+        // rule. Above 1400: 1 run / 100 bytes → NOT lost.
+        if (!SackIsLost(t, 1000) || !SackIsLost(t, 1200) || SackIsLost(t, 1400))
+        {
+            ok = false;
+            break;
+        }
+        // SetPipe: un-SACKed segments 1000/1200 are lost (excluded),
+        // 1400/1600/1700 are in flight, nothing retransmitted yet
+        // → pipe = 300.
+        if (SackSetPipe(t) != 300)
+        {
+            ok = false;
+            break;
+        }
+        // NextSeg rule (1): the lowest lost hole — 1000.
+        SackHole* h = SackNextSeg(t, true);
+        if (h == nullptr || h->rxmit != 1000)
+        {
+            ok = false;
+            break;
+        }
+        // Simulate the recovery engine retransmitting [1000,1100):
+        // rxmit/HighRxt advance, and the retransmitted bytes re-enter
+        // the pipe (1000 is lost-but-resent → +100 → pipe = 400).
+        t.in_fast_recovery = true;
+        h->rxmit = 1100;
+        t.sack.high_rxt = 1100;
+        if (SackSetPipe(t) != 400)
+        {
+            ok = false;
+            break;
+        }
+        // Next rule-(1) candidate: the hole at 1200.
+        h = SackNextSeg(t, true);
+        if (h == nullptr || h->rxmit != 1200)
+        {
+            ok = false;
+            break;
+        }
+        // Exhaust it too; rule (1) runs dry (1400 is not lost), rule
+        // (3) — require_lost off — names 1400.
+        h->rxmit = 1300;
+        t.sack.high_rxt = 1300;
+        if (SackNextSeg(t, true) != nullptr)
+        {
+            ok = false;
+            break;
+        }
+        h = SackNextSeg(t, false);
+        if (h == nullptr || h->rxmit != 1400)
+        {
+            ok = false;
+            break;
+        }
+        // Rebuild (same blocks arriving again) preserves retransmit
+        // progress via HighRxt: holes below 1300 come back exhausted.
+        if (!SackScoreboardRebuild(t) || t.sack.hole_count != 3)
+        {
+            ok = false;
+            break;
+        }
+        if (t.sack.head->rxmit != 1100 || t.sack.head->next->rxmit != 1300 || t.sack.head->next->next->rxmit != 1400)
+        {
+            ok = false;
+            break;
+        }
+        // Partial-ACK trim: ack=1200 retires the first hole entirely.
+        SackOnCumulativeAck(t, 1200);
+        if (t.sack.hole_count != 2 || t.sack.head == nullptr || t.sack.head->start != 1200)
+        {
+            ok = false;
+            break;
+        }
+        // Mid-hole ACK: ack=1450 frees [1200,1300) and shrinks
+        // [1400,1500) to [1450,1500), dragging rxmit up with it.
+        SackOnCumulativeAck(t, 1450);
+        if (t.sack.hole_count != 1 || t.sack.head == nullptr || t.sack.head->start != 1450 ||
+            t.sack.head->rxmit != 1450)
+        {
+            ok = false;
+            break;
+        }
+    } while (false);
+
+    // Teardown path: clear must free every hole, exactly like
+    // FreeTcbBuffers does on TCB close.
+    SackScoreboardClear(t);
+    if (t.sack.head != nullptr || t.sack.hole_count != 0 || t.sack.high_rxt != 0 || t.sack.recovery_point != 0)
+        ok = false;
+    return ok;
+}
+
+// RFC 3168 ECN data plane: CE→ECE echo (until CWR), ECE→cwnd halving
+// through the shared CA hook (once per window), CWR emission exactly
+// once on the next data segment, ECT(0) on data / not-ECT on pure
+// ACKs. Drives the real EcnApplyTx / EcnOnEce helpers — no wire.
+bool TestEcnDataPlane()
+{
+    using namespace internal;
+    Tcb t = {};
+    t.state = State::Established;
+    t.ecn_ok = true;
+    t.mss_send = 1000;
+    t.cwnd = 10000;
+    t.ssthresh = 0x7FFFFFFFu;
+    t.snd_una = 5000;
+    t.snd_nxt = 9000;
+    t.ecn_react_seq = 5000;
+    t.cubic.enabled = false; // Reno leg → deterministic cwnd/2
+
+    // (1) Inbound CE pends an ECE; every outgoing ACK echoes it until
+    // the peer's CWR clears the obligation. Pure ACKs stay not-ECT;
+    // data segments carry ECT(0).
+    t.peer_ce_pending = true; // what DeliverSegment does on ip_ce
+    u8 flags = kFlagAck;
+    if ((EcnApplyTx(t, flags, 0) != 0x00) || (flags & kFlagEce) == 0)
+        return false;
+    flags = kFlagAck;
+    if ((EcnApplyTx(t, flags, 1000) != 0x02) || (flags & kFlagEce) == 0)
+        return false;
+    t.peer_ce_pending = false; // what DeliverSegment does on peer CWR
+    flags = kFlagAck;
+    (void)EcnApplyTx(t, flags, 0);
+    if ((flags & kFlagEce) != 0)
+        return false;
+
+    // (2) Inbound ECE: one halving per window through the CA hook;
+    // sent_cwr latches and the react point pins the window edge.
+    if (!EcnOnEce(t))
+        return false;
+    if (t.cwnd != 5000 || t.ssthresh != 5000 || !t.sent_cwr || t.ecn_react_seq != 9000)
+        return false;
+    if (EcnOnEce(t)) // second ECE in the same window: suppressed
+        return false;
+    if (t.cwnd != 5000)
+        return false;
+
+    // (3) The next data segment announces CWR exactly once.
+    flags = kFlagAck | kFlagPsh;
+    if ((EcnApplyTx(t, flags, 1000) != 0x02) || (flags & kFlagCwr) == 0 || t.sent_cwr)
+        return false;
+    flags = kFlagAck | kFlagPsh;
+    (void)EcnApplyTx(t, flags, 1000);
+    if ((flags & kFlagCwr) != 0)
+        return false;
+
+    // (4) Once snd_una passes the react point, ECE acts again.
+    t.snd_una = t.ecn_react_seq;
+    if (!EcnOnEce(t) || t.cwnd != 2500)
+        return false;
+
+    // (5) Non-ECN connection: the TX transform is inert.
+    Tcb u = {};
+    u.sent_cwr = true;
+    u.peer_ce_pending = true;
+    flags = kFlagAck;
+    if (EcnApplyTx(u, flags, 100) != 0x00 || flags != kFlagAck)
+        return false;
     return true;
 }
 
@@ -610,12 +810,30 @@ void SelfTest()
     }
     if (!TestSackSender())
     {
-        EmitFail("sack sender scoreboard + NextSeg");
+        EmitFail("sack sender scoreboard bits");
+        all_ok = false;
+    }
+    if (TestSack6675())
+    {
+        EmitPass("rfc6675 sack scoreboard");
+    }
+    else
+    {
+        EmitFail("rfc6675 sack scoreboard");
         all_ok = false;
     }
     if (!TestEcnSynFlags())
     {
         EmitFail("ecn syn flags");
+        all_ok = false;
+    }
+    if (TestEcnDataPlane())
+    {
+        EmitPass("rfc3168 ecn data plane");
+    }
+    else
+    {
+        EmitFail("rfc3168 ecn data plane");
         all_ok = false;
     }
     if (!TestPersistTimer())

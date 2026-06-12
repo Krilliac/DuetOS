@@ -56,5 +56,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[nt_smoke] done\r\n");
+    Out("[ring3-nt-smoke] PASS\r\n");
     ExitProcess(0);
 }

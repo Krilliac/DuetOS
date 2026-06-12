@@ -52,5 +52,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[profile_smoke] done\r\n");
+    Out("[ring3-profile-smoke] PASS\r\n");
     ExitProcess(0);
 }

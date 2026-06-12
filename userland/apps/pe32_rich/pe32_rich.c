@@ -177,5 +177,6 @@ void __cdecl mainCRTStartup(void)
     say("[pe32-rich] timer + module ok\r\n");
 
     say("[pe32-rich] all 13 DLLs exercised — exit rc=0x42\r\n");
+    say("[ring3-pe32-rich] PASS\r\n");
     ExitProcess(0x42);
 }

@@ -208,6 +208,52 @@ under `tests/`. These do not require QEMU.
 DuetOS, wait `DUETOS_SETTLE` seconds, snapshot the framebuffer to
 PNG. Used to capture `docs/screenshots/`.
 
+## PE-Compat Smoke Battery
+
+The surface-coverage PE zoo (~135 Win32 smoke executables under
+`userland/apps/`) is enumerated in a single spawn table,
+`kPeCompatBattery` in `kernel/proc/ring3_smoke.cpp`. One row both
+spawns the PE and registers it with the verdict aggregator, so adding
+a smoke PE is a single edit — there is no separate expected-set
+whitelist to forget.
+
+Every battery PE self-reports **one** standardized verdict line on
+stdout (its per-API PASS/FAIL chatter is unaffected):
+
+```
+[<spawn-label>] PASS
+[<spawn-label>] FAIL <reason>
+```
+
+PE stdout reaches COM1 through `SYS_WRITE(fd=1)`, and the verdict
+scanner taps that write path in the kernel — so the verdict cannot be
+lost to log-level filtering. A `pe-compat-report` watchdog task waits
+until every spawned row has reported or its process died, then emits
+the structural summary plus one detail line per failure:
+
+```
+[pe-compat-smoke] passed=N failed=M skipped=K
+[pe-compat-smoke] fail name=<label> why=reported|no-verdict
+```
+
+- **passed** — rows whose PE printed `[label] PASS`.
+- **failed** — explicit FAIL lines, spawn failures, and PEs that died
+  or timed out without a verdict (`why=no-verdict` catches crashes
+  that would otherwise look like silence).
+- **skipped** — rows gated off this boot (emulator / profile / blob
+  not built) plus the no-verdict-by-design images (the PE32
+  recognition trio).
+
+Gating: the surface zoo runs bare-metal only (`PeCompatGate::BareMetal`);
+under QEMU CI the always-on rows still exercise the aggregator
+end-to-end. PEs with long screenshot-settle sleeps
+(`windowed_hello`, `dx_demo_window`) emit their verdict *before* the
+sleep so the watchdog does not stall on them.
+
+`tools/test/boot-log-analyze.sh` parses the summary and exits
+non-zero when `failed > 0`, listing the failing labels; an absent
+summary (a boot that never starts the ring3 smoke) is advisory only.
+
 ## Code Path Coverage
 
 At smoke-profile completion the kernel emits one structured

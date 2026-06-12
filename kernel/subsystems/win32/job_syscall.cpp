@@ -1,33 +1,17 @@
 /*
- * Win32 IOCP (NtCreateIoCompletion family) + Job objects
- * (NtCreateJobObject family).
+ * Win32 Job objects (NtCreateJobObject family).
  *
- * IOCP — async I/O completion ports:
- *   8-port global pool. Each port owns a 16-packet ring of
- *   { CompletionKey, ApcContext, IoStatus, Information } (the
- *   four-tuple a Win32 GetQueuedCompletionStatus caller reads).
- *   Blocking via per-port WaitQueue. SetIoCompletion enqueues;
- *   Remove* dequeues (single packet → NtRemoveIoCompletion;
- *   batch → NtRemoveIoCompletionEx with caller-supplied count).
- *   Handles run kWin32IocpBase + idx (= 0xB00..0xB07).
+ * 8-job global pool. Each job is a refcounted container that
+ * pins a list of Process pointers. AssignProcessToJobObject
+ * pins; QueryInformationJobObject reports basic counters;
+ * TerminateJobObject calls SchedKillByProcess on every member.
+ * Handles run kJobHandleBase + idx (= 0xC00..0xC07).
  *
- * Job objects:
- *   8-job global pool. Each job is a refcounted container that
- *   pins a list of Process pointers. AssignProcessToJobObject
- *   pins; QueryInformationJobObject reports basic counters;
- *   TerminateJobObject calls SchedKillByProcess on every member.
- *   Handles run kWin32JobBase + idx (= 0xC00..0xC07).
+ * (Formerly the job half of iocp_job.cpp — the IOCP half
+ * migrated to the KObject-shaped ipc::IocpPort + kobj_handles;
+ * see iocp_syscall.cpp.)
  *
  * Sub-GAPs:
- *   - IOCP NumberOfConcurrentThreads accepted but ignored
- *     (no thread-affinity model).
- *   - IOCP Timeout argument honoured only as "block forever"
- *     (the timer-driven NtRemoveIoCompletion timeout would
- *     need WaitQueueBlockTimeout integration).
- *   - IOCP file-handle association (associating a completion
- *     port with a file handle so its async I/O auto-enqueues
- *     completion packets) is its own slice — current API
- *     supports manual SetIoCompletion only.
  *   - JobObject information classes other than
  *     BasicProcessIdList / BasicAccountingInformation /
  *     BasicAndIoAccountingInformation return -EINVAL.
@@ -35,7 +19,7 @@
  *     stored but not enforced.
  */
 
-#include "subsystems/win32/iocp_job.h"
+#include "subsystems/win32/job_syscall.h"
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
@@ -50,34 +34,9 @@ namespace duetos::subsystems::win32
 namespace
 {
 
-constexpr u32 kIocpPoolCap = 8;
-constexpr u32 kIocpPacketsPerPort = 16;
-constexpr u64 kIocpHandleBase = 0xB00ULL;
-
 constexpr u32 kJobPoolCap = 8;
 constexpr u32 kJobMaxProcs = 32;
 constexpr u64 kJobHandleBase = 0xC00ULL;
-
-struct IocpPacket
-{
-    u64 completion_key;
-    u64 apc_context;
-    u64 io_status;   // packed into u64 — caller's IO_STATUS_BLOCK[0]
-    u64 information; // bytes_transferred (IO_STATUS_BLOCK[1])
-};
-
-struct IocpPort
-{
-    bool in_use;
-    u8 _pad[3];
-    u32 refs;
-    u32 head;
-    u32 tail;
-    u32 count;
-    u32 _pad2;
-    IocpPacket ring[kIocpPacketsPerPort];
-    sched::WaitQueue read_wq;
-};
 
 struct JobMember
 {
@@ -100,31 +59,7 @@ struct JobObject
     JobMember members[kJobMaxProcs];
 };
 
-IocpPort g_iocp_pool[kIocpPoolCap];
 JobObject g_job_pool[kJobPoolCap];
-
-i32 IocpAlloc()
-{
-    arch::Cli();
-    for (u32 i = 0; i < kIocpPoolCap; ++i)
-    {
-        if (!g_iocp_pool[i].in_use)
-        {
-            IocpPort& p = g_iocp_pool[i];
-            p.in_use = true;
-            p.refs = 1;
-            p.head = 0;
-            p.tail = 0;
-            p.count = 0;
-            p.read_wq.head = nullptr;
-            p.read_wq.tail = nullptr;
-            arch::Sti();
-            return static_cast<i32>(i);
-        }
-    }
-    arch::Sti();
-    return -1;
-}
 
 i32 JobAlloc()
 {
@@ -152,147 +87,6 @@ i32 JobAlloc()
 }
 
 } // namespace
-
-// =====================================================
-// IOCP
-// =====================================================
-
-i64 SysIocpCreate()
-{
-    using ::duetos::core::CapSetHas;
-    using ::duetos::core::kCapSpawnThread;
-    core::Process* proc = core::CurrentProcess();
-    if (proc == nullptr)
-        return -1;
-    if (!CapSetHas(proc->caps, kCapSpawnThread))
-    {
-        core::RecordSandboxDenial(kCapSpawnThread);
-        return -1;
-    }
-    const i32 idx = IocpAlloc();
-    if (idx < 0)
-        return -1;
-    arch::SerialWrite("[win32/iocp] create handle=");
-    arch::SerialWriteHex(static_cast<u64>(idx) + kIocpHandleBase);
-    arch::SerialWrite("\n");
-    return static_cast<i64>(idx) + static_cast<i64>(kIocpHandleBase);
-}
-
-i64 SysIocpSet(u64 handle, u64 completion_key, u64 apc_context, u64 status, u64 information)
-{
-    if (handle < kIocpHandleBase || handle >= kIocpHandleBase + kIocpPoolCap)
-    {
-        // First user-mode IOCP-handle escape lands in the boot
-        // log so a regression in the Win32 thunk's handle-mint
-        // path is visible. Subsequent fires from any user task
-        // are dropped (the user already gets STATUS_INVALID_HANDLE
-        // via the -1 return).
-        KLOG_ONCE_WARN_V("subsystems/win32/iocp", "SysIocpSet handle out of range", handle);
-        return -1;
-    }
-    const u32 idx = static_cast<u32>(handle - kIocpHandleBase);
-    arch::Cli();
-    IocpPort& p = g_iocp_pool[idx];
-    if (!p.in_use)
-    {
-        arch::Sti();
-        return -1;
-    }
-    if (p.count == kIocpPacketsPerPort)
-    {
-        // Drop oldest on overflow (sub-GAP — Linux IOCP has the
-        // same shape; v0 doesn't surface STATUS_BUFFER_OVERFLOW).
-        p.tail = (p.tail + 1) % kIocpPacketsPerPort;
-        --p.count;
-    }
-    IocpPacket& pkt = p.ring[p.head];
-    pkt.completion_key = completion_key;
-    pkt.apc_context = apc_context;
-    pkt.io_status = status;
-    pkt.information = information;
-    p.head = (p.head + 1) % kIocpPacketsPerPort;
-    ++p.count;
-    sched::WaitQueueWakeOne(&p.read_wq);
-    arch::Sti();
-    return 0;
-}
-
-// Returns: 1 packet dequeued, 0 timeout / no packet, -1 bad handle.
-// Writes into the four out-pointers (completion_key, apc_context,
-// io_status, information). All can be null.
-i64 SysIocpRemove(u64 handle, u64 user_key, u64 user_apc, u64 user_iosb, u64 timeout_ms)
-{
-    if (handle < kIocpHandleBase || handle >= kIocpHandleBase + kIocpPoolCap)
-    {
-        KLOG_ONCE_WARN_V("subsystems/win32/iocp", "SysIocpRemove handle out of range", handle);
-        return -1;
-    }
-    const u32 idx = static_cast<u32>(handle - kIocpHandleBase);
-    IocpPort& p = g_iocp_pool[idx];
-    arch::Cli();
-    while (p.in_use && p.count == 0)
-    {
-        if (timeout_ms == 0)
-        {
-            arch::Sti();
-            return 0; // immediate non-blocking probe
-        }
-        sched::WaitQueueBlock(&p.read_wq);
-        arch::Cli();
-        // Sub-GAP: timeout argument other than 0 / infinite (-1)
-        // not honoured precisely; we block until wake.
-    }
-    if (!p.in_use)
-    {
-        arch::Sti();
-        return -1;
-    }
-    IocpPacket pkt = p.ring[p.tail];
-    p.tail = (p.tail + 1) % kIocpPacketsPerPort;
-    --p.count;
-    arch::Sti();
-    if (user_key != 0)
-        if (!mm::CopyToUser(reinterpret_cast<void*>(user_key), &pkt.completion_key, sizeof(pkt.completion_key)))
-            return -1;
-    if (user_apc != 0)
-        if (!mm::CopyToUser(reinterpret_cast<void*>(user_apc), &pkt.apc_context, sizeof(pkt.apc_context)))
-            return -1;
-    if (user_iosb != 0)
-    {
-        u64 iosb[2] = {pkt.io_status, pkt.information};
-        if (!mm::CopyToUser(reinterpret_cast<void*>(user_iosb), iosb, sizeof(iosb)))
-            return -1;
-    }
-    return 1;
-}
-
-i64 SysIocpClose(u64 handle)
-{
-    if (handle < kIocpHandleBase || handle >= kIocpHandleBase + kIocpPoolCap)
-    {
-        KLOG_ONCE_WARN_V("subsystems/win32/iocp", "SysIocpClose handle out of range", handle);
-        return -1;
-    }
-    const u32 idx = static_cast<u32>(handle - kIocpHandleBase);
-    arch::Cli();
-    IocpPort& p = g_iocp_pool[idx];
-    if (p.in_use && p.refs > 0)
-    {
-        --p.refs;
-        if (p.refs == 0)
-        {
-            p.in_use = false;
-            p.count = 0;
-            sched::WaitQueueWakeAll(&p.read_wq);
-        }
-    }
-    arch::Sti();
-    return 0;
-}
-
-// =====================================================
-// JobObject
-// =====================================================
 
 i64 SysJobCreate()
 {

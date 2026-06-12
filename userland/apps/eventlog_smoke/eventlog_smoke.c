@@ -44,5 +44,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[eventlog_smoke] done\r\n");
+    Out("[ring3-eventlog-smoke] PASS\r\n");
     ExitProcess(0);
 }

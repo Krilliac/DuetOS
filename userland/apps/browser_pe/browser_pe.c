@@ -160,6 +160,7 @@ void __cdecl mainCRTStartup(void)
     if (sess == NULL)
     {
         Out("[browser_pe] InternetOpenA FAIL\r\n");
+        Out("[ring3-browser-pe] FAIL internetopen\r\n");
         ExitProcess(1);
     }
 
@@ -169,5 +170,6 @@ void __cdecl mainCRTStartup(void)
 
     InternetCloseHandle(sess);
     Out("[browser_pe] done\r\n");
+    Out("[ring3-browser-pe] PASS\r\n");
     ExitProcess(0);
 }

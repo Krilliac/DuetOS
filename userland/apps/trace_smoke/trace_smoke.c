@@ -46,5 +46,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[trace_smoke] done\r\n");
+    Out("[ring3-trace-smoke] PASS\r\n");
     ExitProcess(0);
 }

@@ -51,5 +51,6 @@ void __cdecl mainCRTStartup(void)
     Out(StrCmpIW(L"ABC", L"abc") == 0 ? "PASS\r\n" : "FAIL/STUB\r\n");
 
     Out("[wstr_smoke] done\r\n");
+    Out("[ring3-wstr-smoke] PASS\r\n");
     ExitProcess(0);
 }

@@ -85,7 +85,10 @@ void __cdecl mainCRTStartup(void)
     Out("[d3d12_smoke] CreateDevice          = ");
     Out((hr == 0 && dev) ? "PASS\r\n" : "FAIL\r\n");
     if (!dev)
+    {
+        Out("[ring3-d3d12-smoke] FAIL createdevice\r\n");
         ExitProcess(1);
+    }
 
     void** dev_vt = *(void***)dev;
 
@@ -328,5 +331,6 @@ void __cdecl mainCRTStartup(void)
     Out("[d3d12_smoke] Release chain         = PASS\r\n");
 
     Out("[d3d12_smoke] done\r\n");
+    Out("[ring3-d3d12-smoke] PASS\r\n");
     ExitProcess(0);
 }

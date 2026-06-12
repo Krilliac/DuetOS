@@ -337,6 +337,81 @@ const char* SlotKernelPath(Slot s)
     }
 }
 
+namespace
+{
+
+// menuentry index inside the generated grub.cfg. Slot A is always
+// entry 0, slot B entry 1; the legacy single-kernel entry is 2.
+char EntryIndexChar(Slot s)
+{
+    return (s == Slot::kB) ? '1' : '0';
+}
+
+} // namespace
+
+u64 GrubCfgGenerate(const State& state, u8* buf, u64 buf_cap)
+{
+    if (buf == nullptr || buf_cap < 512)
+        return 0;
+    if (state.active != Slot::kA && state.active != Slot::kB)
+        return 0;
+
+    // The slot GRUB should try first: a pending install with tries
+    // left wins; otherwise the active slot. `pending` with
+    // tries_remaining == 0 means the install exhausted its attempts
+    // (`bootslot force-fail` writes exactly this shape) — boot the
+    // active slot instead.
+    Slot first = state.active;
+    if ((state.pending == Slot::kA || state.pending == Slot::kB) && state.tries_remaining > 0)
+        first = state.pending;
+    const Slot second = Other(first);
+
+    u64 pos = 0;
+    pos = AppendStr(buf, buf_cap, pos,
+                    "# DuetOS GRUB configuration — generated from the boot-slot state\n"
+                    "# (/boot/duetos-slot.cfg). Regenerated on every slot-state change;\n"
+                    "# do not hand-edit.\n"
+                    "set timeout=3\n"
+                    "set default=");
+    if (pos < buf_cap)
+        buf[pos++] = static_cast<u8>(EntryIndexChar(first));
+    pos = AppendStr(buf, buf_cap, pos, "\nset fallback=\"");
+    if (pos < buf_cap)
+        buf[pos++] = static_cast<u8>(EntryIndexChar(second));
+    pos = AppendStr(buf, buf_cap, pos, " 2\"\n");
+
+    const Slot order[2] = {Slot::kA, Slot::kB};
+    for (u32 i = 0; i < 2; ++i)
+    {
+        const Slot s = order[i];
+        pos = AppendStr(buf, buf_cap, pos, "menuentry \"DuetOS (slot ");
+        pos = AppendStr(buf, buf_cap, pos, Name(s));
+        pos = AppendStr(buf, buf_cap, pos,
+                        ")\" {\n"
+                        "    insmod part_gpt\n"
+                        "    insmod fat\n"
+                        "    set root=(hd0,gpt1)\n"
+                        "    multiboot2 ");
+        pos = AppendStr(buf, buf_cap, pos, SlotKernelPath(s));
+        pos = AppendStr(buf, buf_cap, pos, " slot=");
+        pos = AppendStr(buf, buf_cap, pos, Name(s));
+        pos = AppendStr(buf, buf_cap, pos, "\n    boot\n}\n");
+    }
+    // Legacy single-kernel entry — the system partition's
+    // /boot/duetos-kernel.elf staged by the installer's sentinel
+    // step. Last-resort fallback when both slot images are absent.
+    // GAP: (hd0,gptN) assumes the install disk enumerates as GRUB's
+    // first disk — multi-disk installs need a search-by-UUID line.
+    pos = AppendStr(buf, buf_cap, pos,
+                    "menuentry \"DuetOS (legacy single-kernel, system partition)\" {\n"
+                    "    insmod part_gpt\n"
+                    "    insmod fat\n"
+                    "    set root=(hd0,gpt2)\n"
+                    "    multiboot2 /boot/duetos-kernel.elf\n"
+                    "    boot\n}\n");
+    return (pos >= buf_cap) ? 0 : pos;
+}
+
 bool LoadVia(LoadFn fn, void* ctx, State* out)
 {
     if (out == nullptr)
@@ -362,6 +437,30 @@ bool SaveVia(SaveFn fn, void* ctx, const State& state)
         return false;
     return fn(ctx, buf, n);
 }
+
+namespace
+{
+
+// Substring scan for the self-test's cfg-content assertions.
+bool Contains(const u8* hay, u64 hay_len, const char* needle)
+{
+    u64 needle_len = 0;
+    while (needle[needle_len] != '\0')
+        ++needle_len;
+    if (needle_len == 0 || needle_len > hay_len)
+        return false;
+    for (u64 i = 0; i + needle_len <= hay_len; ++i)
+    {
+        u64 j = 0;
+        while (j < needle_len && hay[i + j] == static_cast<u8>(needle[j]))
+            ++j;
+        if (j == needle_len)
+            return true;
+    }
+    return false;
+}
+
+} // namespace
 
 void SelfTest()
 {
@@ -459,6 +558,33 @@ void SelfTest()
         ::duetos::core::Panic("fs/boot_slot", "self-test: LoadVia rejected round-trip");
     if (loaded.active != Slot::kB || loaded.last_healthy != Slot::kA)
         ::duetos::core::Panic("fs/boot_slot", "self-test: LoadVia lost fields");
+
+    // 9. GrubCfgGenerate: default tracks pending-else-active, both
+    //    slot entries carry their slot= cmdline, invalid input and
+    //    undersized buffers are refused.
+    u8 cfg[kGrubCfgCapacity];
+    const u64 cfg_n = GrubCfgGenerate(Default(), cfg, sizeof(cfg));
+    if (cfg_n == 0)
+        ::duetos::core::Panic("fs/boot_slot", "self-test: GrubCfgGenerate(Default) returned 0");
+    if (!Contains(cfg, cfg_n, "set default=0") || !Contains(cfg, cfg_n, "set fallback=\"1 2\""))
+        ::duetos::core::Panic("fs/boot_slot", "self-test: cfg default/fallback wrong for Default state");
+    if (!Contains(cfg, cfg_n, "/boot/duetos-kernel-a.elf slot=a") ||
+        !Contains(cfg, cfg_n, "/boot/duetos-kernel-b.elf slot=b"))
+        ::duetos::core::Panic("fs/boot_slot", "self-test: cfg slot entries malformed");
+    State pending_b = BeginInstall(Default(), Slot::kB);
+    const u64 cfg_pb = GrubCfgGenerate(pending_b, cfg, sizeof(cfg));
+    if (cfg_pb == 0 || !Contains(cfg, cfg_pb, "set default=1") || !Contains(cfg, cfg_pb, "set fallback=\"0 2\""))
+        ::duetos::core::Panic("fs/boot_slot", "self-test: cfg default didn't follow pending");
+    pending_b.tries_remaining = 0; // exhausted install — boot active again
+    const u64 cfg_exhausted = GrubCfgGenerate(pending_b, cfg, sizeof(cfg));
+    if (cfg_exhausted == 0 || !Contains(cfg, cfg_exhausted, "set default=0"))
+        ::duetos::core::Panic("fs/boot_slot", "self-test: cfg default ignored exhausted tries");
+    State invalid_active = Default();
+    invalid_active.active = Slot::kInvalid;
+    if (GrubCfgGenerate(invalid_active, cfg, sizeof(cfg)) != 0)
+        ::duetos::core::Panic("fs/boot_slot", "self-test: cfg accepted invalid active");
+    if (GrubCfgGenerate(Default(), cfg, 64) != 0)
+        ::duetos::core::Panic("fs/boot_slot", "self-test: cfg accepted undersized buffer");
 
     KLOG_INFO("fs/boot_slot", "self-test PASS");
 }

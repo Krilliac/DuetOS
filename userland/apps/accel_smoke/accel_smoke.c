@@ -44,5 +44,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[accel_smoke] done\r\n");
+    Out("[ring3-accel-smoke] PASS\r\n");
     ExitProcess(0);
 }

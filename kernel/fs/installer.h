@@ -15,17 +15,17 @@
  *      `kDuetCrashDumpTypeGuid` so the panic-time NVMe / AHCI dump
  *      path can find it via `GptFindCrashDumpRegion` instead of
  *      trusting the last 4 MiB of the namespace to be unused
- *   4. Mount ESP at /esp, system at /system, and seed
- *      /esp/EFI/BOOT/grub.cfg with a chainload stub pointing at
- *      /system/boot/duetos-kernel.elf
+ *   4. Stage BOOTX64.EFI (embedded blob) at the UEFI removable-
+ *      media path, stage the embedded kernel ELF (when
+ *      DUETOS_INSTALLER_KERNEL_EMBED is ON) into the inactive A/B
+ *      slot on the ESP with read-back validation, and persist the
+ *      boot-slot state + generated grub.cfg (`PersistSlotState`)
+ *   5. Mount ESP at /esp, system at /system
  *
- * Bootloader-bytes copy (writing a real `BOOTX64.EFI` and
- * `duetos-kernel.elf` into the freshly-formatted ESP) is a
- * follow-on slice — it requires either embedding the running
- * kernel image into the ramfs (a build-time bootstrap problem)
- * or pulling them from an out-of-band source (USB / network).
- * v0 lays down the ESP + the chainload stub so the layout is
- * correct; the operator stages the bootloader in a separate step.
+ * When the kernel-ELF embed is OFF, the slot staging is skipped
+ * and the operator stages kernel bytes out-of-band (USB /
+ * network); the generated grub.cfg's legacy menuentry still
+ * points at /system/boot/duetos-kernel.elf.
  *
  * Pre-conditions enforced by `Install`:
  *   - block handle is registered + writable
@@ -46,6 +46,15 @@
  * Context: kernel. Synchronous (polling block I/O); blocking is
  * acceptable in a shell-driven flow but not from an IRQ handler.
  */
+
+namespace duetos::fs::fat32
+{
+struct Volume;
+}
+namespace duetos::fs::boot_slot
+{
+struct State;
+}
 
 namespace duetos::fs::installer
 {
@@ -86,6 +95,8 @@ struct Report
     u64 system_last_lba;
     u64 crashdump_first_lba;
     u64 crashdump_last_lba;
+    u32 staged_slot; // boot_slot::Slot (as u32) the embedded kernel ELF was staged into on the
+                     // ESP; 0 (kInvalid) when no kernel was embedded or staging failed.
 };
 
 enum class Status : u32
@@ -136,5 +147,29 @@ Status PlanLayout(u64 disk_sectors, Report* out_report);
 /// crash-dump = kCrashDumpSectors, ESP = kEspSectors). Panics on
 /// any mismatch. Cheap — runs once at boot.
 void InstallerSelfTest();
+
+// ---------------------------------------------------------------
+// FAT32-backed boot-slot persistence. boot_slot itself is FS-
+// agnostic (callback-based SaveVia/LoadVia); these two helpers are
+// the single FAT32 bridge every persist site shares — the
+// installer at install time, the heartbeat after MarkHealthyNow,
+// and the `bootslot` shell commands.
+// ---------------------------------------------------------------
+
+/// Locate the FAT32 volume that carries the boot-slot state file
+/// (the ESP the installer laid down). Falls back to volume 0 — the
+/// QEMU/dev scratch volume — when no registered volume has the
+/// file yet, so a dev boot still persists somewhere LoadVia-able.
+/// Returns nullptr when no FAT32 volume is registered at all.
+const fat32::Volume* FindBootSlotVolume();
+
+/// Persist `state` to `/boot/duetos-slot.cfg` on `vol` via
+/// `boot_slot::SaveVia` + the FAT32 bounded-write tier (same-size
+/// in-place overwrite, else delete + create), then regenerate
+/// `/boot/grub/grub.cfg` from the same state — when the volume has
+/// a `/boot/grub` directory (i.e. it is an ESP) — so GRUB's
+/// `set default` always tracks the state machine. Flushes the
+/// volume on success. Returns false on any write failure.
+bool PersistSlotState(const fat32::Volume* vol, const boot_slot::State& state);
 
 } // namespace duetos::fs::installer

@@ -42,5 +42,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[setupapi_smoke] done\r\n");
+    Out("[ring3-setupapi-smoke] PASS\r\n");
     ExitProcess(0);
 }

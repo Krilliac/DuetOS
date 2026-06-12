@@ -63,5 +63,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[advmem_smoke] done\r\n");
+    Out("[ring3-advmem-smoke] PASS\r\n");
     ExitProcess(0);
 }

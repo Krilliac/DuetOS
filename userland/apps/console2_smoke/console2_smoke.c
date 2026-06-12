@@ -71,5 +71,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[console2_smoke] done\r\n");
+    Out("[ring3-console2-smoke] PASS\r\n");
     ExitProcess(0);
 }
