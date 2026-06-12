@@ -220,18 +220,12 @@ ParsedOptions ParseOptions(const u8* opts, u32 opts_len)
 // block count at kMaxSackBlocks — mirroring the Rust walker's hostile-
 // input discipline.
 //
-// Wired here: scoreboard marking (ApplySackScoreboard), fast-retransmit
-// hole selection (SackNextSeg) in the 3-dup-ACK and in-recovery legs of
-// DeliverSegment, and "don't drop SACKed bytes on cumulative ACK"
-// (segments stay marked until snd_una passes them).
-//
-// GAP: on a true RTO the scoreboard should be FLUSHED (RFC 6675 §5.1 /
-// RFC 2018 §8 — the receiver may renege, so every sacked bit becomes
-// untrustworthy). That flush belongs in tcp_timer.cpp's
-// RetransmitFirstUnacked (out of this slice's file scope); until it
-// lands, a post-RTO retransmit can leave stale sacked bits that
-// briefly suppress a fast retransmit of the same range — revisit when
-// the timer TU is next touched.
+// Wired here: scoreboard marking (ApplySackScoreboard) feeds the
+// RFC 6675 hole list (SackScoreboardRebuild, tcp_sack.cpp) which the
+// 3-dup-ACK / in-recovery legs of DeliverSegment drive through
+// SackEnterRecovery / SackRecoveryTransmit. On a true RTO the whole
+// scoreboard is flushed (SackOnRto in tcp_timer.cpp — RFC 2018 §8,
+// the receiver may renege).
 // ------------------------------------------------------------------
 
 u32 ParseSackBlocks(const u8* opts, u32 opts_len, SackBlock* out)
@@ -326,39 +320,81 @@ DUETOS_NO_SANITIZE_WRAP bool ApplySackScoreboard(Tcb& t, const SackBlock* blocks
     return progressed;
 }
 
-DUETOS_NO_SANITIZE_WRAP u32 SackNextSeg(const Tcb& t)
+// ------------------------------------------------------------------
+// ECN data plane (RFC 3168). Negotiation (§6.1.1) lives in the
+// handshake paths; these two helpers are the established-state data
+// plane: the TX transform every outgoing segment passes through, and
+// the once-per-window congestion response to an inbound ECE.
+//
+// GAP: AccECN (RFC 9768) deliberately not implemented — classic ECN
+// feedback only; revisit if/when an L4S/DOCSIS target needs the
+// per-packet CE counting.
+// ------------------------------------------------------------------
+
+u8 EcnApplyTx(Tcb& t, u8& flags, u32 payload_len)
 {
-    if (t.rtx_queue == nullptr)
-        return kRtxQueueMax;
-    // Lowest-sequence un-SACKed segment that sits below the highest
-    // SACKed edge is a confirmed hole: the receiver has data beyond it
-    // but not it, so it was lost. Retransmit that one (RFC 6675 §3, the
-    // (3.2) "there exists ... S2 ... is SACKed" rule, approximated by
-    // sack_high as the upper edge).
-    u32 best_slot = kRtxQueueMax;
-    u32 best_off = 0xFFFFFFFFu;
-    for (u32 i = 0; i < kRtxQueueMax; ++i)
+    if (!t.ecn_ok || (flags & (kFlagSyn | kFlagRst)) != 0)
+        return 0x00;
+    // §6.1.3: a received CE obliges ECE on every outgoing ACK until
+    // the peer's CWR retires the obligation (cleared on CWR receipt
+    // in DeliverSegment, not here).
+    if (t.peer_ce_pending && (flags & kFlagAck) != 0)
+        flags |= kFlagEce;
+    u8 tos = 0x00;
+    if (payload_len > 0)
     {
-        const SegmentBuf& sb = t.rtx_queue[i];
-        if (sb.len == 0 || sb.sacked)
-            continue;
-        // Only a hole if something past it has been SACKed.
-        if (static_cast<i32>(t.sack_high - (sb.seq + sb.len)) < 0)
-            continue;
-        const u32 off = sb.seq - t.snd_una;
-        if (off < best_off)
+        // ECT(0) on data segments only — pure ACKs stay not-ECT
+        // (§6.1.4).
+        // GAP: retransmissions also leave with ECT(0) — §6.1.5 prefers
+        // not-ECT on retransmits; revisit if ECN blackholing shows up
+        // against real middleboxes.
+        tos = 0x02;
+        if (t.sent_cwr)
         {
-            best_off = off;
-            best_slot = i;
+            // §6.1.5: the first data segment after a reduction carries
+            // CWR exactly once.
+            flags |= kFlagCwr;
+            t.sent_cwr = false;
         }
     }
-    return best_slot;
+    return tos;
+}
+
+DUETOS_NO_SANITIZE_WRAP bool EcnOnEce(Tcb& t)
+{
+    // One reduction per window of data (§6.1.2): a loss-recovery
+    // episode already reduced this window, and ecn_react_seq pins the
+    // window edge after an ECN reduction.
+    if (t.in_fast_recovery || static_cast<i32>(t.snd_una - t.ecn_react_seq) < 0)
+        return false;
+    // Same CA hooks as the loss path: CUBIC beta-reduction when
+    // enabled, Reno halving otherwise — but no retransmit (ECE is
+    // congestion-equivalent to loss without the drop).
+    if (t.cubic.enabled)
+    {
+        const u32 mss = t.mss_send ? t.mss_send : 1u;
+        const u32 ssh_pkts = CubicRecalcSsthresh(t, t.cwnd / mss ? t.cwnd / mss : 1u);
+        t.ssthresh = ssh_pkts * mss;
+    }
+    else
+    {
+        t.ssthresh = t.cwnd / 2;
+    }
+    if (t.ssthresh < 2u * t.mss_send)
+        t.ssthresh = 2u * t.mss_send;
+    t.cwnd = t.ssthresh;
+    t.sent_cwr = true;           // next data segment announces CWR
+    t.ecn_react_seq = t.snd_nxt; // ignore further ECEs this window
+    return true;
 }
 
 bool SendSegment(Tcb& t, u8 flags, u32 seq, u32 ack, const u8* payload, u32 payload_len)
 {
     if (payload_len > kSegmentBytes)
         return false;
+    // RFC 3168 data plane: fold ECE/CWR into the flags and pick the
+    // IP TOS ECN codepoint before any byte is laid down.
+    const u8 ip_tos = EcnApplyTx(t, flags, payload_len);
     u8 opt_block[40];
     const u32 opt_len = BuildOptions(t, flags, opt_block);
     const u32 tcp_header_len = 20 + opt_len;
@@ -377,7 +413,7 @@ bool SendSegment(Tcb& t, u8 flags, u32 seq, u32 ack, const u8* payload, u32 payl
     // IPv4.
     u8* ip = frame + 14;
     ip[0] = 0x45;
-    ip[1] = 0x00;
+    ip[1] = ip_tos; // DSCP 0 + ECN codepoint (ECT(0) on ecn_ok data)
     const u16 ip_total = u16(20 + tcp_header_len + payload_len);
     ip[2] = u8(ip_total >> 8);
     ip[3] = u8(ip_total & 0xFF);
@@ -598,7 +634,8 @@ void EnterTimeWait(Tcb& t)
     t.state = State::TimeWait;
     t.timewait_deadline = NowTicks() + MsToTicks(kTimeWaitMs);
     // Drop the retransmit queue — TIME_WAIT only needs to ACK
-    // peer retransmits.
+    // peer retransmits. The SACK scoreboard goes with it.
+    SackScoreboardClear(t);
     t.rtx_count = 0;
     for (u32 i = 0; i < kRtxQueueMax; ++i)
         t.rtx_queue[i].len = 0;
@@ -677,7 +714,10 @@ DUETOS_NO_SANITIZE_WRAP bool AckInWindow(u32 ack, u32 snd_una, u32 snd_nxt)
 
 // Drop segments from the retransmit queue that the peer's ACK has
 // covered. Returns the number of new bytes acked (for RTT sample).
-u32 ProcessAck(Tcb& t, u32 ack, bool has_timestamp, u32 tsecr)
+// `grow_cwnd = false` suppresses the congestion-avoidance growth —
+// used for RFC 6675 partial ACKs, where the episode's cwnd is pinned
+// at ssthresh and SetPipe meters transmission instead.
+u32 ProcessAck(Tcb& t, u32 ack, bool has_timestamp, u32 tsecr, bool grow_cwnd = true)
 {
     u32 acked = 0;
     for (u32 i = 0; i < kRtxQueueMax; ++i)
@@ -736,35 +776,38 @@ u32 ProcessAck(Tcb& t, u32 ack, bool has_timestamp, u32 tsecr)
         // window when enabled, FLOORED to NewReno via max(cubic,reno)
         // so it can never grow slower than the proven Reno path; the
         // kill switch (cubic.enabled) reverts to pure NewReno.
-        if (t.cwnd < t.ssthresh)
-            t.cwnd += t.mss_send;
-        else
+        if (grow_cwnd)
         {
-            const u32 mss = t.mss_send ? t.mss_send : 1u;
-            // NewReno floor candidate (the previous behaviour).
-            const u32 reno_cwnd = t.cwnd + (u32(mss) * mss) / (t.cwnd == 0 ? 1 : t.cwnd);
-            if (t.cubic.enabled)
-            {
-                u32 cwnd_pkts = t.cwnd / mss;
-                if (cwnd_pkts == 0)
-                    cwnd_pkts = 1;
-                const u32 acked_pkts = (acked + mss - 1) / mss;
-                CubicUpdate(t, cwnd_pkts, acked_pkts ? acked_pkts : 1);
-                if (++t.cubic.cwnd_cnt >= t.cubic.cnt)
-                {
-                    cwnd_pkts += 1;
-                    t.cubic.cwnd_cnt = 0;
-                }
-                const u32 cubic_cwnd = cwnd_pkts * mss;
-                t.cwnd = (cubic_cwnd > reno_cwnd) ? cubic_cwnd : reno_cwnd;
-            }
+            if (t.cwnd < t.ssthresh)
+                t.cwnd += t.mss_send;
             else
             {
-                t.cwnd = reno_cwnd;
+                const u32 mss = t.mss_send ? t.mss_send : 1u;
+                // NewReno floor candidate (the previous behaviour).
+                const u32 reno_cwnd = t.cwnd + (u32(mss) * mss) / (t.cwnd == 0 ? 1 : t.cwnd);
+                if (t.cubic.enabled)
+                {
+                    u32 cwnd_pkts = t.cwnd / mss;
+                    if (cwnd_pkts == 0)
+                        cwnd_pkts = 1;
+                    const u32 acked_pkts = (acked + mss - 1) / mss;
+                    CubicUpdate(t, cwnd_pkts, acked_pkts ? acked_pkts : 1);
+                    if (++t.cubic.cwnd_cnt >= t.cubic.cnt)
+                    {
+                        cwnd_pkts += 1;
+                        t.cubic.cwnd_cnt = 0;
+                    }
+                    const u32 cubic_cwnd = cwnd_pkts * mss;
+                    t.cwnd = (cubic_cwnd > reno_cwnd) ? cubic_cwnd : reno_cwnd;
+                }
+                else
+                {
+                    t.cwnd = reno_cwnd;
+                }
             }
+            if (t.cwnd > 0x7FFFFFFFu)
+                t.cwnd = 0x7FFFFFFFu;
         }
-        if (t.cwnd > 0x7FFFFFFFu)
-            t.cwnd = 0x7FFFFFFFu;
         t.retries = 0;
         t.dup_acks = 0;
     }
@@ -865,7 +908,7 @@ bool DeliverPayload(Tcb& t, u32 seq, const u8* data, u32 len)
     return false;
 }
 
-void DeliverSegment(u32 idx, const MacAddress& peer_mac, Ipv4Address peer_ip, const u8* tcp, u64 tcp_len)
+void DeliverSegment(u32 idx, const MacAddress& peer_mac, Ipv4Address peer_ip, const u8* tcp, u64 tcp_len, bool ip_ce)
 {
     Tcb& t = g_tcbs[idx];
     (void)peer_ip;
@@ -920,19 +963,17 @@ void DeliverSegment(u32 idx, const MacAddress& peer_mac, Ipv4Address peer_ip, co
     const u8 ws = t.peer_supports_wscale ? t.snd_wscale : 0;
     t.snd_wnd = u32(win) << ws;
 
-    // Sender-side SACK scoreboard (RFC 2018 receipt). Parse any SACK
-    // blocks the peer attached and mark the matching rtx_queue
-    // segments so ProcessAck won't drop them prematurely and the
-    // fast-retransmit leg can fill the real hole via NextSeg. Only
-    // meaningful once we have something in flight and the peer
-    // negotiated SACK-permitted on the handshake.
-    bool sack_progress = false;
+    // Sender-side SACK scoreboard (RFC 2018 receipt / RFC 6675).
+    // Parse any SACK blocks the peer attached, mark the matching
+    // rtx_queue segments, and refresh the hole list the recovery
+    // engine walks. Only meaningful once we have something in flight
+    // and the peer negotiated SACK-permitted on the handshake.
     if (t.peer_supports_sack && (flags & kFlagAck) != 0 && t.rtx_count > 0)
     {
         SackBlock blocks[kMaxSackBlocks];
         const u32 nblk = ParseSackBlocks(opts, opts_len, blocks);
-        if (nblk > 0)
-            sack_progress = ApplySackScoreboard(t, blocks, nblk);
+        if (nblk > 0 && ApplySackScoreboard(t, blocks, nblk))
+            SackScoreboardRebuild(t);
     }
 
     // SYN_SENT → ESTABLISHED on SYN+ACK.
@@ -998,6 +1039,25 @@ void DeliverSegment(u32 idx, const MacAddress& peer_mac, Ipv4Address peer_ip, co
         }
     }
 
+    // ECN data plane (RFC 3168 §6.1.2–§6.1.5) — synchronized states
+    // only. SYN-carrying segments use ECE/CWR as negotiation, not
+    // congestion feedback, and were handled above.
+    if (t.ecn_ok && (flags & kFlagSyn) == 0)
+    {
+        // §6.1.3: an IP-layer CE mark obliges us to echo ECE on every
+        // outgoing ACK until the peer's CWR confirms it reacted.
+        if (ip_ce)
+            t.peer_ce_pending = true;
+        // §6.1.5: the peer's CWR retires our ECE obligation.
+        if ((flags & kFlagCwr) != 0)
+            t.peer_ce_pending = false;
+        // §6.1.2: inbound ECE is a congestion signal — same CA
+        // reduction as loss, no retransmit, at most once per window
+        // (gated inside EcnOnEce).
+        if ((flags & kFlagEce) != 0)
+            (void)EcnOnEce(t);
+    }
+
     // ESTABLISHED / FIN_WAIT_1 / FIN_WAIT_2 / CLOSE_WAIT / CLOSING /
     // LAST_ACK / TIME_WAIT: process ACK + data + FIN.
     if ((flags & kFlagAck) != 0)
@@ -1006,8 +1066,9 @@ void DeliverSegment(u32 idx, const MacAddress& peer_mac, Ipv4Address peer_ip, co
         {
             if (ack == t.snd_una && payload_len == 0 && t.rtx_count > 0)
             {
-                // Duplicate ACK — accumulate; on third dup, fast
-                // retransmit the first unacked segment.
+                // Duplicate ACK — accumulate; on third dup, enter fast
+                // recovery (RFC 6675 pipe-driven when the scoreboard
+                // holds SACK holes, classic NewReno otherwise).
                 ++t.dup_acks;
                 if (t.dup_acks == 3 && !t.in_fast_recovery)
                 {
@@ -1026,53 +1087,54 @@ void DeliverSegment(u32 idx, const MacAddress& peer_mac, Ipv4Address peer_ip, co
                     {
                         t.ssthresh = (t.cwnd / 2 < 2u * t.mss_send) ? 2u * t.mss_send : t.cwnd / 2;
                     }
-                    t.cwnd = t.ssthresh + 3u * t.mss_send;
-                    // Pick what to retransmit. With SACK state, RFC 6675
-                    // NextSeg names the lowest un-SACKed hole the receiver
-                    // is actually missing; without it (peer not SACKing,
-                    // or no blocks yet), fall back to the classic "first
-                    // unacked at snd_una" NewReno behaviour.
-                    u32 slot = SackNextSeg(t);
-                    if (slot == kRtxQueueMax)
+                    if (t.sack.head != nullptr)
                     {
+                        // RFC 6675 §5: pipe-driven recovery. cwnd holds
+                        // at ssthresh — SetPipe meters what may leave,
+                        // so the NewReno +3·SMSS inflation is not
+                        // needed. SackEnterRecovery records
+                        // RecoveryPoint/HighRxt, retransmits the first
+                        // presumed-lost segment, then fills holes while
+                        // cwnd − pipe ≥ SMSS.
+                        t.cwnd = t.ssthresh;
+                        SackEnterRecovery(t);
+                    }
+                    else
+                    {
+                        // NewReno (no SACK information): inflate by the
+                        // three dup-ACKed segments and retransmit the
+                        // first unacked segment.
+                        t.cwnd = t.ssthresh + 3u * t.mss_send;
+                        t.sack.recovery_point = t.snd_nxt;
+                        t.sack.high_rxt = t.snd_una;
                         for (u32 i = 0; i < kRtxQueueMax; ++i)
                         {
                             SegmentBuf& sb = t.rtx_queue[i];
                             if (sb.len != 0 && !sb.sacked && sb.seq == t.snd_una)
                             {
-                                slot = i;
+                                SendSegment(t, sb.flags, sb.seq, t.rcv_nxt, sb.data, sb.len);
+                                sb.ticks_sent = NowTicks();
+                                ++g_stats.retrans;
                                 break;
                             }
                         }
                     }
-                    if (slot != kRtxQueueMax)
-                    {
-                        SegmentBuf& sb = t.rtx_queue[slot];
-                        SendSegment(t, sb.flags, sb.seq, t.rcv_nxt, sb.data, sb.len);
-                        sb.ticks_sent = NowTicks();
-                        ++g_stats.retrans;
-                    }
                 }
                 else if (t.in_fast_recovery)
                 {
-                    // RFC 6675 §3.5: while in recovery, inflate cwnd by
-                    // one SMSS per dup-ACK (the existing NewReno
-                    // behaviour). If this dup-ACK's SACK blocks exposed a
-                    // *new* hole, also retransmit that hole now rather
-                    // than waiting for the RTO — this is the SACK-driven
-                    // "rescue" leg that keeps recovery moving when
-                    // multiple segments are lost in one window.
-                    t.cwnd += t.mss_send;
-                    if (sack_progress)
+                    if (t.sack.head != nullptr)
                     {
-                        const u32 slot = SackNextSeg(t);
-                        if (slot != kRtxQueueMax)
-                        {
-                            SegmentBuf& sb = t.rtx_queue[slot];
-                            SendSegment(t, sb.flags, sb.seq, t.rcv_nxt, sb.data, sb.len);
-                            sb.ticks_sent = NowTicks();
-                            ++g_stats.retrans;
-                        }
+                        // RFC 6675 §5 step (4): every ACK during
+                        // recovery re-runs the pipe loop — newly SACKed
+                        // data lowers pipe and clocks out the next hole
+                        // (or new data). No artificial cwnd inflation.
+                        SackRecoveryTransmit(t);
+                    }
+                    else
+                    {
+                        // NewReno §3.2: inflate cwnd by one SMSS per
+                        // dup ACK so the window keeps clocking.
+                        t.cwnd += t.mss_send;
                     }
                 }
                 else if (t.dup_acks < 3)
@@ -1094,10 +1156,35 @@ void DeliverSegment(u32 idx, const MacAddress& peer_mac, Ipv4Address peer_ip, co
             {
                 if (t.in_fast_recovery && ack != t.snd_una)
                 {
-                    t.in_fast_recovery = false;
-                    t.cwnd = t.ssthresh;
+                    // SACK-negotiated connections leave recovery only
+                    // at RecoveryPoint (RFC 6675 §5.1); a partial ACK
+                    // keeps the episode open, retires covered holes,
+                    // and keeps filling the rest — without growing
+                    // cwnd. NewReno peers keep the classic exit on the
+                    // first advancing ACK.
+                    const bool partial_ack = t.peer_supports_sack && ack != t.sack.recovery_point &&
+                                             AckInWindow(ack, t.snd_una, t.sack.recovery_point);
+                    if (partial_ack)
+                    {
+                        SackOnCumulativeAck(t, ack);
+                        (void)ProcessAck(t, ack, po.has_timestamp, po.tsecr, /*grow_cwnd=*/false);
+                        SackRecoveryTransmit(t);
+                    }
+                    else
+                    {
+                        t.in_fast_recovery = false;
+                        t.cwnd = t.ssthresh;
+                        SackOnCumulativeAck(t, ack);
+                        (void)ProcessAck(t, ack, po.has_timestamp, po.tsecr);
+                    }
                 }
-                (void)ProcessAck(t, ack, po.has_timestamp, po.tsecr);
+                else
+                {
+                    // Trim any stale scoreboard holes the cumulative
+                    // ACK covered (no-op when the peer isn't SACKing).
+                    SackOnCumulativeAck(t, ack);
+                    (void)ProcessAck(t, ack, po.has_timestamp, po.tsecr);
+                }
             }
             // Did this ACK clear our FIN?
             if (t.state == State::FinWait1 && t.rtx_count == 0)
@@ -1241,6 +1328,7 @@ void HandleListenSyn(u32 listener_idx, u32 iface_index, const MacAddress& peer_m
     // as classic TCP. On match, our SYN-ACK echoes ECE=1, CWR=0.
     const bool ecn_setup = (peer_flags & kFlagEce) != 0 && (peer_flags & kFlagCwr) != 0;
     child.ecn_ok = ecn_setup;
+    child.ecn_react_seq = child.iss; // ECE reactions armed from the first byte
     BucketInsert(idx);
     const u8 synack_flags = u8(kFlagSyn | kFlagAck | (ecn_setup ? kFlagEce : 0));
     SendSegment(child, synack_flags, child.iss, child.rcv_nxt, nullptr, 0);
@@ -1249,7 +1337,7 @@ void HandleListenSyn(u32 listener_idx, u32 iface_index, const MacAddress& peer_m
 
 } // namespace internal
 
-void OnSegment(u32 iface_index, const MacAddress& peer_mac, Ipv4Address peer_ip, const u8* tcp, u64 tcp_len)
+void OnSegment(u32 iface_index, const MacAddress& peer_mac, Ipv4Address peer_ip, const u8* tcp, u64 tcp_len, bool ip_ce)
 {
     using namespace internal;
     if (tcp == nullptr || tcp_len < 20)
@@ -1273,7 +1361,7 @@ void OnSegment(u32 iface_index, const MacAddress& peer_mac, Ipv4Address peer_ip,
     const u32 idx = LookupExact(iface_index, local_ip, dst_port, peer_ip, src_port);
     if (idx != kTcbCap)
     {
-        DeliverSegment(idx, peer_mac, peer_ip, tcp, tcp_len);
+        DeliverSegment(idx, peer_mac, peer_ip, tcp, tcp_len, ip_ce);
         arch::Sti();
         return;
     }

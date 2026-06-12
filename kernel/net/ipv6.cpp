@@ -404,6 +404,9 @@ bool Ipv6HandleIncoming(u32 iface_index, const void* frame, u64 len)
         // table is keyed on Ipv4Address, so a v6 segment is handed to
         // OnSegment with a zero v4 peer. Real v6 TCBs need a tagged
         // address key. Revisit with the v6 socket layer.
+        // GAP: IPv6 traffic-class ECN (CE) is not threaded — the ECN
+        // data plane is IPv4-only for now (ip_ce defaults to false);
+        // revisit with the v6 socket layer.
         const Ipv4Address placeholder = {};
         tcp::OnSegment(iface_index, peer_mac, placeholder, l4, l4_len);
         break;
