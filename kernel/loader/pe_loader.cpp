@@ -422,7 +422,8 @@ PeStatus ParseHeaders(const u8* file, u64 file_len, PeHeaders& out)
 //     file[PointerToRawData..] into memory at
 //     ImageBase + VirtualAddress.
 //   - Characteristics bits pick the mapping flags.
-bool MapSection(const u8* file, const u8* sec, u64 image_base, duetos::mm::AddressSpace* as, LoaderUnwindGuard& guard)
+bool MapSection(const u8* file, const u8* sec, u64 image_base, u64 image_size, duetos::mm::AddressSpace* as,
+                LoaderUnwindGuard& guard)
 {
     using namespace duetos::mm;
     const u32 virt_addr = LeU32(sec + kSectionHeaderVirtualAddress);
@@ -438,6 +439,17 @@ bool MapSection(const u8* file, const u8* sec, u64 image_base, duetos::mm::Addre
     if (in_mem == 0)
         return true; // empty section — skip.
 
+    // Bound the section's virtual extent against the declared image
+    // size. The pre-map validator checks each section's RAW extent vs
+    // file_len but NOT its VirtualAddress vs image_size, so an attacker
+    // can set VirtualAddress to e.g. 0xF0000000; seg_va would then run
+    // past kUserMax and AddressSpaceMapUserPage's PanicAs("virt outside
+    // canonical low half") would HALT the kernel. image_base+image_size
+    // is already validated <= kPeUserMax, so an in-image section is in
+    // the user half. Reject (fail the load) instead of mapping/halting.
+    if (!loader::ImageRangeInBounds(virt_addr, in_mem, image_size))
+        return false;
+
     const u64 seg_va = image_base + virt_addr;
     const u64 start = seg_va & ~kPageMask;
     const u64 end = (seg_va + in_mem + kPageMask) & ~kPageMask;
@@ -445,7 +457,13 @@ bool MapSection(const u8* file, const u8* sec, u64 image_base, duetos::mm::Addre
     u64 flags = kPagePresent | kPageUser;
     if (chars & kScnMemWrite)
         flags |= kPageWritable;
-    if (!(chars & kScnMemExecute))
+    // W^X: a section must never be both writable and executable. A
+    // hostile/packed PE with W+X characteristics would otherwise hand
+    // W+X flags to AddressSpaceMapUserPage → PanicAs("W^X violation")
+    // (kernel halt). Force NX on any writable section — the same
+    // downgrade the shared-page reuse merge below applies — so a W+X
+    // section loads as non-executable rather than crashing the box.
+    if (!(chars & kScnMemExecute) || (flags & kPageWritable))
         flags |= kPageNoExecute;
     // Note: kScnMemRead is implied on x86_64 — every mapped
     // page is readable to ring 3 if the U bit is set. PE bit
@@ -948,10 +966,18 @@ TlsSetupResult SetupStaticTls(const u8* file, u64 file_len, const PeHeaders& h, 
 
     // 4. *_tls_index = 0 (single module). Best-effort: a stripped
     //    image may point this outside a writable section.
+    //    AddressOfIndex is an absolute VA taken raw from the file;
+    //    gate it to within the declared image (like the reloc/IAT
+    //    writes) so a hostile TLS directory can't aim this 4-byte
+    //    zero-write at the image's own R-X .text / TEB / proc-env page.
     if (idx_va != 0)
     {
+        const bool in_image =
+            idx_va >= h.image_base && loader::ImageRangeInBounds(idx_va - h.image_base, 4, h.image_size);
         const u32 zero = 0;
-        if (!AsWrite(as, idx_va, &zero, 4))
+        if (!in_image)
+            arch::SerialWrite("[pe-tls] WARN _tls_index VA outside image — skipped\n");
+        else if (!AsWrite(as, idx_va, &zero, 4))
             arch::SerialWrite("[pe-tls] WARN _tls_index VA unmapped — skipped\n");
     }
 
@@ -1103,6 +1129,15 @@ bool SeedSecurityCookie(const u8* file, u64 file_len, const PeHeaders& h, duetos
     const u64 cookie_va = LeU64(file + lc_off + kLoadConfigSecurityCookie);
     if (cookie_va == 0)
         return true; // /GS disabled at compile time.
+    // cookie_va is an absolute VA taken raw from the LoadConfig; gate it
+    // to within the declared image (like the reloc/IAT/TLS-index writes)
+    // so a hostile LoadConfig can't aim this 8-byte random write at the
+    // image's own R-X .text or the TLS trampoline page.
+    if (cookie_va < h.image_base || !loader::ImageRangeInBounds(cookie_va - h.image_base, 8, h.image_size))
+    {
+        SerialWrite("[pe-load] /GS cookie va outside image — skipping seed\n");
+        return true; // best-effort; keep loading.
+    }
     // Generate a random cookie. Avoid all-zero (the "uninitialised"
     // sentinel MSVC checks for) and the documented default.
     u64 cookie = duetos::core::RandomU64();
@@ -2293,7 +2328,7 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     for (u16 i = 0; i < h.section_count; ++i)
     {
         const u8* sec = file + h.section_base + u64(i) * kSectionHeaderSize;
-        if (!MapSection(file, sec, h.image_base, as, guard))
+        if (!MapSection(file, sec, h.image_base, h.image_size, as, guard))
         {
             SerialWrite("[pe-load] FAIL MapSection idx=");
             SerialWriteHex(i);

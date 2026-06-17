@@ -251,7 +251,7 @@ bool MapHeadersPage(const u8* file, u64 sizeof_headers, u64 base_va, duetos::mm:
     return true;
 }
 
-bool MapSection(const u8* file, const u8* sec, u64 base_va, duetos::mm::AddressSpace* as)
+bool MapSection(const u8* file, const u8* sec, u64 base_va, u64 image_size, duetos::mm::AddressSpace* as)
 {
     using namespace duetos::mm;
     if (file == nullptr || sec == nullptr || as == nullptr)
@@ -266,6 +266,14 @@ bool MapSection(const u8* file, const u8* sec, u64 base_va, duetos::mm::AddressS
     if (in_mem == 0)
         return true;
 
+    // Bound the section's virtual extent against the declared image
+    // size (the validator only checks raw extent vs file_len). An
+    // unbounded VirtualAddress would run seg_va past kDllUserMax and
+    // halt the kernel in AddressSpaceMapUserPage. base_va+image_size is
+    // already validated <= kDllUserMax, so an in-image section is safe.
+    if (!loader::ImageRangeInBounds(virt_addr, in_mem, image_size))
+        return false;
+
     const u64 seg_va = base_va + virt_addr;
     const u64 start = seg_va & ~kPageMask;
     const u64 end = (seg_va + in_mem + kPageMask) & ~kPageMask;
@@ -273,7 +281,10 @@ bool MapSection(const u8* file, const u8* sec, u64 base_va, duetos::mm::AddressS
     u64 flags = kPagePresent | kPageUser;
     if (chars & kScnMemWrite)
         flags |= kPageWritable;
-    if (!(chars & kScnMemExecute))
+    // W^X: force NX on any writable section so a W+X section downgrades
+    // to non-executable instead of handing W+X to AddressSpaceMapUserPage
+    // (which PanicAs("W^X violation") halts the kernel).
+    if (!(chars & kScnMemExecute) || (flags & kPageWritable))
         flags |= kPageNoExecute;
 
     for (u64 page_va = start; page_va < end; page_va += kPageSize)
@@ -282,10 +293,11 @@ bool MapSection(const u8* file, const u8* sec, u64 base_va, duetos::mm::AddressS
         // smaller than the page (or when a section's tail BSS-padding
         // crosses a page boundary into another section's first page).
         // On conflict, copy this section's contents into the existing
-        // frame and skip the AddressSpaceMapUserPage call — the prior
-        // mapping's flags must already cover the union of both
-        // sections, which the loader's section ordering and PE's
-        // FileAlignment normalisation makes structurally true.
+        // frame and re-stamp the page protection with the restrictive
+        // merge of both sections (see the reuse branch below) — a
+        // hostile DLL can make two sections share a page with mismatched
+        // protections, so we must NOT assume the prior flags cover the
+        // union.
         const PhysAddr existing = AddressSpaceLookupUserFrame(as, page_va);
         const bool reusing = existing != kNullFrame;
         const PhysAddr frame = reusing ? existing : AllocateFrame().value_or(kNullFrame);
@@ -312,6 +324,21 @@ bool MapSection(const u8* file, const u8* sec, u64 base_va, duetos::mm::AddressS
         if (!reusing)
         {
             AddressSpaceMapUserPage(as, page_va, frame, flags);
+        }
+        else
+        {
+            // SEC-005 (CWE-281): two DLL sections sharing this page must
+            // not keep only the first section's protection. Re-stamp with
+            // the restrictive merge: writable if EITHER wants write,
+            // executable only if BOTH are (NX set if either had NX), and
+            // force NX on any writable page. Mirrors pe_loader's GS-03.
+            const u64 existing_flags = AddressSpaceProbePteRaw(as, page_va);
+            u64 merged = kPagePresent | kPageUser;
+            if ((existing_flags & kPageWritable) || (flags & kPageWritable))
+                merged |= kPageWritable;
+            if ((existing_flags & kPageNoExecute) || (flags & kPageNoExecute) || (merged & kPageWritable))
+                merged |= kPageNoExecute;
+            AddressSpaceProtectUserPage(as, page_va, merged);
         }
     }
     return true;
@@ -507,7 +534,7 @@ DllLoadResult DllLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as
     for (u16 i = 0; i < h.section_count; ++i)
     {
         const u8* sec = file + h.section_base + u64(i) * kSectionHeaderSize;
-        if (!MapSection(file, sec, base_va, as))
+        if (!MapSection(file, sec, base_va, h.image_size, as))
         {
             SerialWrite("[dll-load] MapSection fail idx=");
             SerialWriteHex(i);

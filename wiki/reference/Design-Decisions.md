@@ -11674,3 +11674,35 @@ markers for its richest input. Three discovery layers were added (runtime
   and exits non-zero on `failed > 0`; verified live (ring3 profile:
   `passed=1 failed=0 skipped=135`, pe32-rich verdict observed through
   the tap).
+
+## 2026-06-17 — PE/DLL loader: a malformed section downgrades or fails the load, never panics the kernel
+
+- **Context:** an adversarial audit of the loaders (which parse fully
+  attacker-controlled `.exe`/`.dll` bytes — the project's #1 pillar)
+  found two crafted-file → kernel-panic DoS paths. The kernel's W^X and
+  user-half guards in `AddressSpaceMapUserPage` are `PanicAs` (halt), and
+  `MapSection` reached them: (1) a section with W+X `Characteristics` on
+  a fresh page handed W+X flags straight to the panic; (2) a section's
+  `VirtualAddress` was never bounded against `image_size`, so a huge VA
+  ran `seg_va` past `kUserMax`. The ELF loader already rejected W+X and
+  bounded its segments; the PE/DLL loaders had drifted.
+- **Decision — downgrade, don't reject, for W+X:** force NX on any
+  writable section (W+X → W, non-executable) rather than failing the
+  whole load. This matches the existing shared-page reuse-merge policy in
+  both loaders and keeps a hostile/packed image loadable-but-inert
+  instead of unrunnable — the invariant that matters (no RWX, no panic)
+  holds either way, and downgrade is the more PE-compatible choice.
+  **Rules out** the "reject the image on W+X" shape the ELF loader uses,
+  for the PE/DLL path specifically.
+- **Decision — bound section VA at `MapSection`, threading `image_size`:**
+  `ImageRangeInBounds(virt_addr, in_mem, image_size)` gates every section;
+  since `image_base + image_size <= kPeUserMax` is already validated, an
+  in-image section is provably in the user half. The same gate now wraps
+  the TLS `AddressOfIndex` and `/GS` `SecurityCookie` writes (both
+  absolute VAs taken raw from the file) so a hostile TLS dir / LoadConfig
+  can't aim those writes at the image's own R-X `.text`. The DLL loader's
+  shared-page reuse branch also gained the protection-merge re-stamp
+  (`AddressSpaceProtectUserPage`) the PE loader's GS-03 fix already had.
+- **Verified:** x86_64-debug boot OK=244, `[pe-compat-smoke] battery
+  complete`, all ELF ring3 spawns succeed — the gates reject only
+  malformed input, not the real PEs/DLLs the battery loads.
