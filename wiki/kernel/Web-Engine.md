@@ -279,6 +279,16 @@ capacity to 0 and driving an out-of-bounds kernel-heap write. Regression
 cases live in `js/selftest.cpp` (snippets 24–26). (Security audit
 SEC-002, CWE-787/190, 2026-06-07.)
 
+**Native-method receiver guard.** The String/Array prototype methods are
+first-class values, so a script can detach one and call it on a wrong-tag
+receiver (`var f = [].push; f(1)`, or stashing `"x".charCodeAt` on a
+plain object). `CallNative` (`js/builtins.cpp`) validates the receiver
+tag up front — String methods require a `String` receiver, Array methods
+an `isArray` object — returning a `BadState` type-error instead of
+blind-casting `recv.as.str`/`recv.as.obj` into a kernel null-deref or
+wild-pointer read. Regression cases: `js/selftest.cpp` snippets 27–29.
+(Security audit SEC-101, CWE-843/476, 2026-06-17.)
+
 ## See also
 
 - [In-Kernel Apps](Kernel-Apps.md) — the `browser` app shell, chrome, and
