@@ -97,6 +97,10 @@ struct SemSet
     i32 key;
     u32 nsems;
     u32 _pad2;
+    // Creating process. Only the owner (or a kCapDebug holder) may
+    // RMID / SETVAL the set, so a co-resident ELF can't brute-force
+    // semid 1..8 and destroy or poison another process's semaphores.
+    u64 owner_pid;
     Semaphore sems[kSemPerSet];
 };
 
@@ -380,7 +384,7 @@ i64 DoShmat(u64 shmid, u64 shmaddr, u64 shmflg)
     arch::SerialWrite(" va=");
     arch::SerialWriteHex(base);
     arch::SerialWrite(" pages=");
-    arch::SerialWriteHex(page_count);
+    arch::SerialWriteHex(pages); // pinned count actually mapped (page_count was the pre-pin snapshot)
     arch::SerialWrite("\n");
     return static_cast<i64>(base);
 }
@@ -417,6 +421,9 @@ i64 DoShmctl(u64 shmid, u64 cmd, u64 user_buf)
     (void)user_buf; // shmid_ds copy-out / copy-in deferred; sub-GAP
     if (shmid == 0 || shmid > kShmPoolCap)
         return -22;
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr)
+        return -22;
     const u32 idx = static_cast<u32>(shmid - 1);
     arch::Cli();
     ShmSegment& seg = g_shm_pool[idx];
@@ -424,6 +431,17 @@ i64 DoShmctl(u64 shmid, u64 cmd, u64 user_buf)
     {
         arch::Sti();
         return -22;
+    }
+    // IPC_RMID / IPC_SET mutate shared state — only the creating
+    // process (or a kCapDebug holder) may. Without this a co-resident
+    // ELF could RMID a segment it never created, dropping the owner's
+    // initial reference (a second RMID then frees the frames while a
+    // peer still has them mapped — a cross-process UAF).
+    const bool is_owner = (seg.owner_pid == p->pid) || core::CapSetHas(p->caps, core::kCapDebug);
+    if ((cmd == kIpcRmid || cmd == kIpcSet) && !is_owner)
+    {
+        arch::Sti();
+        return -1; // -EPERM
     }
     if (cmd == kIpcRmid)
     {
@@ -460,7 +478,7 @@ i32 SemFindByKey(i32 key)
     return -1;
 }
 
-i32 SemAlloc(i32 key, u32 nsems)
+i32 SemAlloc(i32 key, u32 nsems, u64 owner_pid)
 {
     if (nsems == 0 || nsems > kSemPerSet)
         return -1;
@@ -474,6 +492,7 @@ i32 SemAlloc(i32 key, u32 nsems)
         s.marked_destroy = false;
         s.key = key;
         s.nsems = nsems;
+        s.owner_pid = owner_pid;
         for (u32 j = 0; j < kSemPerSet; ++j)
         {
             s.sems[j].value = 0;
@@ -491,6 +510,9 @@ i32 SemAlloc(i32 key, u32 nsems)
 
 i64 DoSemget(u64 key, u64 nsems, u64 semflg)
 {
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr)
+        return -22;
     const i32 ikey = static_cast<i32>(key);
     const bool create = (semflg & kIpcCreat) != 0;
     const bool excl = (semflg & kIpcExcl) != 0;
@@ -506,7 +528,7 @@ i64 DoSemget(u64 key, u64 nsems, u64 semflg)
         if (!create)
             return -2;
     }
-    const i32 idx = SemAlloc(ikey, static_cast<u32>(nsems));
+    const i32 idx = SemAlloc(ikey, static_cast<u32>(nsems), p->pid);
     if (idx < 0)
         return -28;
     arch::SerialWrite("[linux/sem] alloc idx=");
@@ -633,6 +655,9 @@ i64 DoSemctl(u64 semid, u64 semnum, u64 cmd, u64 arg)
 {
     if (semid == 0 || semid > kSemPoolCap)
         return -22;
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr)
+        return -22;
     const u32 idx = static_cast<u32>(semid - 1);
     arch::Cli();
     SemSet& s = g_sem_pool[idx];
@@ -640,6 +665,16 @@ i64 DoSemctl(u64 semid, u64 semnum, u64 cmd, u64 arg)
     {
         arch::Sti();
         return -22;
+    }
+    // Mutating ops (RMID / SETVAL / IPC_SET) require ownership — a
+    // co-resident ELF must not destroy or poison another process's
+    // semaphore set by guessing semid 1..8. Reads stay open.
+    const bool is_owner = (s.owner_pid == p->pid) || core::CapSetHas(p->caps, core::kCapDebug);
+    const bool is_mutating = (cmd == kIpcRmid || cmd == kSemSetval || cmd == kIpcSet);
+    if (is_mutating && !is_owner)
+    {
+        arch::Sti();
+        return -1; // -EPERM
     }
     if (cmd == kIpcRmid)
     {
@@ -670,6 +705,17 @@ i64 DoSemctl(u64 semid, u64 semnum, u64 cmd, u64 arg)
         {
             arch::Sti();
             return -22;
+        }
+        // Clamp to Linux SEMVMX (32767). `arg` is a raw guest u64; an
+        // unchecked static_cast<i32> lets a guest set the kernel
+        // semaphore value to e.g. INT32_MIN, after which a peer's
+        // semop `cur + op` arithmetic in SemTryApplyLocked signed-
+        // overflows (UB) and the set is permanently wedged.
+        constexpr u64 kSemVmx = 32767;
+        if (arg > kSemVmx)
+        {
+            arch::Sti();
+            return -34; // -ERANGE
         }
         s.sems[semnum].value = static_cast<i32>(arg);
         sched::WaitQueueWakeAll(&s.sems[semnum].wq);
