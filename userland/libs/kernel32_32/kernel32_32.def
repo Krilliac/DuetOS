@@ -65,3 +65,5 @@ EXPORTS
     HeapDestroy
     GetEnvironmentVariableA
     GetModuleFileNameA
+    VirtualQuery
+    FlushInstructionCache

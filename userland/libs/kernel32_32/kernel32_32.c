@@ -203,7 +203,18 @@ __declspec(dllexport) BOOL __stdcall WriteConsoleW(HANDLE hConsole, const wchar_
  * post-ASLR base VA for the named module, or 0 if not loaded. */
 __declspec(dllexport) HANDLE __stdcall GetModuleHandleA(const char* lpModuleName)
 {
-    return (HANDLE)(unsigned long)(unsigned)duet_syscall1(79, (unsigned)(unsigned long)lpModuleName);
+    /* SYS_DLL_BASE_BY_NAME (172): rdi = name ptr, rsi = name length.
+     * A NULL/empty name returns the EXE image base, matching
+     * GetModuleHandle(NULL) semantics and the 64-bit kernel32. (This
+     * previously called syscall 79 — SYS_WIN_SET_CURSOR — with the name
+     * pointer and no length, returning a garbage value the caller's CRT
+     * then dereferenced as a module base.) */
+    unsigned len = 0;
+    if (lpModuleName != (const char*)0)
+        while (len < 63 && lpModuleName[len] != 0)
+            ++len;
+    return (HANDLE)(unsigned long)(unsigned)duet_syscall3(172 /* SYS_DLL_BASE_BY_NAME */,
+                                                          (unsigned)(unsigned long)lpModuleName, len, 0);
 }
 
 __declspec(dllexport) HANDLE __stdcall GetModuleHandleW(const wchar_t16* lpModuleName)
@@ -712,4 +723,55 @@ __declspec(dllexport) DWORD __stdcall GetModuleFileNameA(HANDLE hModule, char* l
         lpFilename[i] = path[i];
     lpFilename[i] = 0;
     return i;
+}
+
+/* ------------------------------------------------------------------
+ * Virtual-memory query / instruction cache
+ * ------------------------------------------------------------------ */
+
+/* MEMORY_BASIC_INFORMATION, classic pre-Win10 28-byte layout (no
+ * PartitionId) — the shape a period PE32 passes (dwLength == 0x1c). */
+typedef struct
+{
+    void* BaseAddress;
+    void* AllocationBase;
+    DWORD AllocationProtect;
+    unsigned RegionSize;
+    DWORD State;
+    DWORD Protect;
+    DWORD Type;
+} DUETOS_MBI32;
+
+/* VirtualQuery — fill a MEMORY_BASIC_INFORMATION for the queried
+ * address. v0 reports a synthetic single committed page, mirroring the
+ * 64-bit kernel32 VirtualQuery: enough for callers that probe a
+ * region's state. */
+// GAP: synthetic region info (single committed page), not backed by the
+// kernel's region ledger — AllocationBase is the page-aligned query
+// address, not the true allocation/module base; revisit with a
+// region-query syscall if a guest relies on the real base.
+__declspec(dllexport) unsigned __stdcall VirtualQuery(const void* lpAddress, DUETOS_MBI32* lpBuffer, unsigned dwLength)
+{
+    if (lpBuffer == (DUETOS_MBI32*)0 || dwLength < sizeof(*lpBuffer))
+        return 0;
+    void* base = (void*)((unsigned long)lpAddress & ~0xFFFUL);
+    lpBuffer->BaseAddress = base;
+    lpBuffer->AllocationBase = base;
+    lpBuffer->AllocationProtect = 0x04; /* PAGE_READWRITE */
+    lpBuffer->RegionSize = 0x1000;
+    lpBuffer->State = 0x1000; /* MEM_COMMIT */
+    lpBuffer->Protect = 0x04; /* PAGE_READWRITE */
+    lpBuffer->Type = 0x20000; /* MEM_PRIVATE */
+    return sizeof(*lpBuffer);
+}
+
+/* FlushInstructionCache — x86 keeps the I-cache coherent with normal
+ * D-cache stores, so a self-modifying / JIT caller needs no explicit
+ * flush; succeed. */
+__declspec(dllexport) BOOL __stdcall FlushInstructionCache(HANDLE hProcess, const void* lpBaseAddress, unsigned dwSize)
+{
+    (void)hProcess;
+    (void)lpBaseAddress;
+    (void)dwSize;
+    return 1;
 }
