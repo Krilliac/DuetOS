@@ -7,6 +7,24 @@
  * TerminateJobObject calls SchedKillByProcess on every member.
  * Handles run kJobHandleBase + idx (= 0xC00..0xC07).
  *
+ * Ownership: the job handle space is a tiny global integer range,
+ * not a per-process handle table. Every job records the pid of its
+ * creator (`owner_pid`) and EVERY operation rejects a caller that
+ * is not the owner. Without this, any PE holding kCapSpawnThread
+ * could guess a handle in 0xC00..0xC07 and terminate / inspect /
+ * close a job created by a different process — i.e. kill arbitrary
+ * processes it has no handle to, which a native DuetOS process
+ * cannot do (SYS_PROCESS_TERMINATE requires kCapDebug).
+ *
+ * Locking: `g_job_lock` (a real spinlock) serialises all pool
+ * access. `arch::Cli/Sti` only masks interrupts on the local CPU,
+ * so on SMP a peer CPU running SysJobClose could ProcessRelease a
+ * member's Process* between Terminate's snapshot and its
+ * SchedKillByProcess — a use-after-free. The kill happens OUTSIDE
+ * the lock (SchedKillByProcess may block / take scheduler locks),
+ * with each victim ProcessRetain'd before the lock drops so it
+ * survives the unlocked window.
+ *
  * (Formerly the job half of iocp_job.cpp — the IOCP half
  * migrated to the KObject-shaped ipc::IocpPort + kobj_handles;
  * see iocp_syscall.cpp.)
@@ -21,12 +39,12 @@
 
 #include "subsystems/win32/job_syscall.h"
 
-#include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
 #include "log/klog.h"
 #include "mm/paging.h"
 #include "proc/process.h"
 #include "sched/sched.h"
+#include "sync/spinlock.h"
 
 namespace duetos::subsystems::win32
 {
@@ -54,16 +72,36 @@ struct JobObject
     u32 proc_count; // current member count
     u32 total_terminated_procs;
     u32 _pad2;
+    u64 owner_pid;            // creator pid — only the owner may operate on the job
     u64 active_process_limit; // 0 = unlimited
     u64 cpu_seconds_limit;    // 0 = unlimited
     JobMember members[kJobMaxProcs];
 };
 
 JobObject g_job_pool[kJobPoolCap];
+sync::SpinLock g_job_lock{};
 
-i32 JobAlloc()
+// Resolve a job handle to its pool slot IFF it is live AND owned by
+// `caller`. MUST be called with g_job_lock held. Returns nullptr on a
+// bad handle, a dead slot, or a foreign owner.
+JobObject* ResolveOwnedJobLocked(u64 job_handle, const core::Process* caller)
 {
-    arch::Cli();
+    if (caller == nullptr)
+        return nullptr;
+    if (job_handle < kJobHandleBase || job_handle >= kJobHandleBase + kJobPoolCap)
+        return nullptr;
+    const u32 idx = static_cast<u32>(job_handle - kJobHandleBase);
+    JobObject& j = g_job_pool[idx];
+    if (!j.in_use)
+        return nullptr;
+    if (j.owner_pid != static_cast<u64>(caller->pid))
+        return nullptr;
+    return &j;
+}
+
+i32 JobAlloc(u64 owner_pid)
+{
+    sync::SpinLockGuard guard(g_job_lock);
     for (u32 i = 0; i < kJobPoolCap; ++i)
     {
         if (!g_job_pool[i].in_use)
@@ -74,15 +112,14 @@ i32 JobAlloc()
             j.refs = 1;
             j.proc_count = 0;
             j.total_terminated_procs = 0;
+            j.owner_pid = owner_pid;
             j.active_process_limit = 0;
             j.cpu_seconds_limit = 0;
             for (u32 m = 0; m < kJobMaxProcs; ++m)
                 j.members[m].in_use = false;
-            arch::Sti();
             return static_cast<i32>(i);
         }
     }
-    arch::Sti();
     return -1;
 }
 
@@ -100,7 +137,7 @@ i64 SysJobCreate()
         core::RecordSandboxDenial(kCapSpawnThread);
         return -1;
     }
-    const i32 idx = JobAlloc();
+    const i32 idx = JobAlloc(static_cast<u64>(proc->pid));
     if (idx < 0)
         return -1;
     arch::SerialWrite("[win32/job] create handle=");
@@ -111,12 +148,6 @@ i64 SysJobCreate()
 
 i64 SysJobAssign(u64 job_handle, u64 process_handle)
 {
-    if (job_handle < kJobHandleBase || job_handle >= kJobHandleBase + kJobPoolCap)
-    {
-        KLOG_ONCE_WARN_V("subsystems/win32/job", "SysJobAssign job_handle out of range", job_handle);
-        return -1;
-    }
-    const u32 idx = static_cast<u32>(job_handle - kJobHandleBase);
     core::Process* caller = core::CurrentProcess();
     if (caller == nullptr)
         return -1;
@@ -137,25 +168,21 @@ i64 SysJobAssign(u64 job_handle, u64 process_handle)
         return -1;
     if (target == nullptr)
         return -1;
-    arch::Cli();
-    JobObject& j = g_job_pool[idx];
-    if (!j.in_use || j.terminated)
+
+    sync::SpinLockGuard guard(g_job_lock);
+    JobObject* jp = ResolveOwnedJobLocked(job_handle, caller);
+    if (jp == nullptr || jp->terminated)
     {
-        arch::Sti();
+        KLOG_ONCE_WARN_V("subsystems/win32/job", "SysJobAssign job_handle bad/foreign", job_handle);
         return -1;
     }
+    JobObject& j = *jp;
     if (j.active_process_limit > 0 && j.proc_count >= j.active_process_limit)
-    {
-        arch::Sti();
         return -1;
-    }
     // Check it isn't already a member.
     for (u32 m = 0; m < kJobMaxProcs; ++m)
         if (j.members[m].in_use && j.members[m].proc == target)
-        {
-            arch::Sti();
             return 0;
-        }
     for (u32 m = 0; m < kJobMaxProcs; ++m)
     {
         if (!j.members[m].in_use)
@@ -164,16 +191,9 @@ i64 SysJobAssign(u64 job_handle, u64 process_handle)
             j.members[m].proc = target;
             ++j.proc_count;
             core::ProcessRetain(target);
-            arch::Sti();
-            arch::SerialWrite("[win32/job] assign job=");
-            arch::SerialWriteHex(job_handle);
-            arch::SerialWrite(" pid=");
-            arch::SerialWriteHex(target->pid);
-            arch::SerialWrite("\n");
             return 0;
         }
     }
-    arch::Sti();
     return -1;
 }
 
@@ -186,9 +206,8 @@ i64 SysJobIsProcessIn(u64 job_handle, u64 process_handle, u64 user_out)
         // For v0 we treat this as "no" since real Linux doesn't
         // attach jobs without explicit AssignProcess.
     }
-    else if (job_handle >= kJobHandleBase && job_handle < kJobHandleBase + kJobPoolCap)
+    else
     {
-        const u32 idx = static_cast<u32>(job_handle - kJobHandleBase);
         core::Process* caller = core::CurrentProcess();
         core::Process* target = nullptr;
         if (process_handle == static_cast<u64>(-1) || process_handle == 0)
@@ -202,18 +221,17 @@ i64 SysJobIsProcessIn(u64 job_handle, u64 process_handle, u64 user_out)
         }
         if (target != nullptr)
         {
-            arch::Cli();
-            JobObject& j = g_job_pool[idx];
-            if (j.in_use)
+            sync::SpinLockGuard guard(g_job_lock);
+            JobObject* jp = ResolveOwnedJobLocked(job_handle, caller);
+            if (jp != nullptr)
             {
                 for (u32 m = 0; m < kJobMaxProcs; ++m)
-                    if (j.members[m].in_use && j.members[m].proc == target)
+                    if (jp->members[m].in_use && jp->members[m].proc == target)
                     {
                         in_job = true;
                         break;
                     }
             }
-            arch::Sti();
         }
     }
     const u32 out = in_job ? 1u : 0u;
@@ -226,56 +244,53 @@ i64 SysJobIsProcessIn(u64 job_handle, u64 process_handle, u64 user_out)
 i64 SysJobTerminate(u64 job_handle, u64 exit_code)
 {
     (void)exit_code;
-    if (job_handle < kJobHandleBase || job_handle >= kJobHandleBase + kJobPoolCap)
+    core::Process* caller = core::CurrentProcess();
+
+    // Snapshot the members under the lock, retaining each so it
+    // survives the unlocked SchedKillByProcess window even if a peer
+    // CPU closes the job concurrently.
+    core::Process* snap[kJobMaxProcs];
+    u32 nsnap = 0;
     {
-        KLOG_ONCE_WARN_V("subsystems/win32/job", "SysJobTerminate job_handle out of range", job_handle);
-        return -1;
-    }
-    const u32 idx = static_cast<u32>(job_handle - kJobHandleBase);
-    arch::Cli();
-    JobObject& j = g_job_pool[idx];
-    if (!j.in_use)
-    {
-        arch::Sti();
-        return -1;
-    }
-    j.terminated = true;
-    JobMember snap[kJobMaxProcs];
-    for (u32 m = 0; m < kJobMaxProcs; ++m)
-        snap[m] = j.members[m];
-    arch::Sti();
-    u32 killed = 0;
-    for (u32 m = 0; m < kJobMaxProcs; ++m)
-    {
-        if (!snap[m].in_use)
-            continue;
-        if (snap[m].proc != nullptr)
+        sync::SpinLockGuard guard(g_job_lock);
+        JobObject* jp = ResolveOwnedJobLocked(job_handle, caller);
+        if (jp == nullptr)
         {
-            sched::SchedKillByProcess(snap[m].proc);
-            ++killed;
+            KLOG_ONCE_WARN_V("subsystems/win32/job", "SysJobTerminate job_handle bad/foreign", job_handle);
+            return -1;
+        }
+        jp->terminated = true;
+        for (u32 m = 0; m < kJobMaxProcs; ++m)
+        {
+            if (jp->members[m].in_use && jp->members[m].proc != nullptr)
+            {
+                core::ProcessRetain(jp->members[m].proc);
+                snap[nsnap++] = jp->members[m].proc;
+            }
         }
     }
-    arch::Cli();
-    j.total_terminated_procs += killed;
-    arch::Sti();
+
+    u32 killed = 0;
+    for (u32 m = 0; m < nsnap; ++m)
+    {
+        sched::SchedKillByProcess(snap[m]);
+        ++killed;
+        core::ProcessRelease(snap[m]); // balance the retain above
+    }
+
+    if (killed > 0)
+    {
+        sync::SpinLockGuard guard(g_job_lock);
+        JobObject* jp = ResolveOwnedJobLocked(job_handle, caller);
+        if (jp != nullptr)
+            jp->total_terminated_procs += killed;
+    }
     return 0;
 }
 
 i64 SysJobQuery(u64 job_handle, u64 info_class, u64 user_buf, u64 buf_len)
 {
-    if (job_handle < kJobHandleBase || job_handle >= kJobHandleBase + kJobPoolCap)
-    {
-        KLOG_ONCE_WARN_V("subsystems/win32/job", "SysJobQuery job_handle out of range", job_handle);
-        return -1;
-    }
-    const u32 idx = static_cast<u32>(job_handle - kJobHandleBase);
-    arch::Cli();
-    JobObject& j = g_job_pool[idx];
-    if (!j.in_use)
-    {
-        arch::Sti();
-        return -1;
-    }
+    core::Process* caller = core::CurrentProcess();
     // info_class:
     //   2 = JobObjectBasicProcessIdList
     //   3 = JobObjectBasicAndIoAccountingInformation (subset)
@@ -288,16 +303,25 @@ i64 SysJobQuery(u64 job_handle, u64 info_class, u64 user_buf, u64 buf_len)
         //   ULONG_PTR ProcessIdList[];  // up to NumberOfProcessIdsInList
         // }
         u64 list[2 + kJobMaxProcs];
-        list[0] = j.proc_count;
-        list[1] = 0;
-        for (u32 m = 0; m < kJobMaxProcs; ++m)
-            if (j.members[m].in_use && j.members[m].proc != nullptr)
+        u64 needed = 0;
+        {
+            sync::SpinLockGuard guard(g_job_lock);
+            JobObject* jp = ResolveOwnedJobLocked(job_handle, caller);
+            if (jp == nullptr)
             {
-                list[2 + list[1]] = j.members[m].proc->pid;
-                ++list[1];
+                KLOG_ONCE_WARN_V("subsystems/win32/job", "SysJobQuery job_handle bad/foreign", job_handle);
+                return -1;
             }
-        const u64 needed = (2 + list[1]) * sizeof(u64);
-        arch::Sti();
+            list[0] = jp->proc_count;
+            list[1] = 0;
+            for (u32 m = 0; m < kJobMaxProcs; ++m)
+                if (jp->members[m].in_use && jp->members[m].proc != nullptr)
+                {
+                    list[2 + list[1]] = jp->members[m].proc->pid;
+                    ++list[1];
+                }
+            needed = (2 + list[1]) * sizeof(u64);
+        }
         if (buf_len < needed)
             return -1;
         if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), list, needed))
@@ -324,54 +348,58 @@ i64 SysJobQuery(u64 job_handle, u64 info_class, u64 user_buf, u64 buf_len)
             for (u32 i = 0; i < 4; ++i)
                 stage[off + i] = static_cast<u8>((v >> (i * 8)) & 0xFF);
         };
-        put32(36, j.proc_count); // TotalProcesses (best-effort)
-        put32(40, j.proc_count); // ActiveProcesses
-        put32(44, j.total_terminated_procs);
+        {
+            sync::SpinLockGuard guard(g_job_lock);
+            JobObject* jp = ResolveOwnedJobLocked(job_handle, caller);
+            if (jp == nullptr)
+            {
+                KLOG_ONCE_WARN_V("subsystems/win32/job", "SysJobQuery job_handle bad/foreign", job_handle);
+                return -1;
+            }
+            put32(36, jp->proc_count); // TotalProcesses (best-effort)
+            put32(40, jp->proc_count); // ActiveProcesses
+            put32(44, jp->total_terminated_procs);
+        }
         const u64 needed = (info_class == 3) ? 112 : 48;
-        arch::Sti();
         if (buf_len < needed)
             return -1;
         if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), stage, needed))
             return -1;
         return static_cast<i64>(needed);
     }
-    arch::Sti();
     return -1;
 }
 
 i64 SysJobClose(u64 job_handle)
 {
-    if (job_handle < kJobHandleBase || job_handle >= kJobHandleBase + kJobPoolCap)
+    core::Process* caller = core::CurrentProcess();
+
+    // Release every member's process refcount AFTER dropping the lock
+    // (ProcessRelease may run a destructor that takes other locks).
+    core::Process* snap[kJobMaxProcs];
+    u32 nsnap = 0;
     {
-        KLOG_ONCE_WARN_V("subsystems/win32/job", "SysJobClose job_handle out of range", job_handle);
-        return -1;
+        sync::SpinLockGuard guard(g_job_lock);
+        JobObject* jp = ResolveOwnedJobLocked(job_handle, caller);
+        if (jp == nullptr || jp->refs == 0)
+        {
+            KLOG_ONCE_WARN_V("subsystems/win32/job", "SysJobClose job_handle bad/foreign", job_handle);
+            return -1;
+        }
+        --jp->refs;
+        if (jp->refs == 0)
+        {
+            for (u32 m = 0; m < kJobMaxProcs; ++m)
+                if (jp->members[m].in_use && jp->members[m].proc != nullptr)
+                    snap[nsnap++] = jp->members[m].proc;
+            jp->in_use = false;
+            jp->proc_count = 0;
+            for (u32 m = 0; m < kJobMaxProcs; ++m)
+                jp->members[m].in_use = false;
+        }
     }
-    const u32 idx = static_cast<u32>(job_handle - kJobHandleBase);
-    arch::Cli();
-    JobObject& j = g_job_pool[idx];
-    if (!j.in_use || j.refs == 0)
-    {
-        arch::Sti();
-        return -1;
-    }
-    --j.refs;
-    if (j.refs == 0)
-    {
-        // Release every member's process refcount.
-        JobMember snap[kJobMaxProcs];
-        for (u32 m = 0; m < kJobMaxProcs; ++m)
-            snap[m] = j.members[m];
-        j.in_use = false;
-        j.proc_count = 0;
-        for (u32 m = 0; m < kJobMaxProcs; ++m)
-            j.members[m].in_use = false;
-        arch::Sti();
-        for (u32 m = 0; m < kJobMaxProcs; ++m)
-            if (snap[m].in_use && snap[m].proc != nullptr)
-                core::ProcessRelease(snap[m].proc);
-        return 0;
-    }
-    arch::Sti();
+    for (u32 m = 0; m < nsnap; ++m)
+        core::ProcessRelease(snap[m]);
     return 0;
 }
 

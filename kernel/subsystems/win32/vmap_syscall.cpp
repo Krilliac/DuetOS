@@ -322,9 +322,14 @@ void DoVirtualAlloc(arch::TrapFrame* frame)
             frame->rax = 0;
             return;
         }
+        // commit_mask is u32: the page index must stay < 32 or the
+        // shift is UB. kWin32VmapRegionPagesMax bounds last_page <= 32,
+        // so first_page..last_page-1 are all < 32. The static_assert
+        // pins that invariant against a future cap bump.
+        static_assert(Process::kWin32VmapRegionPagesMax <= 32, "commit_mask bit-shift requires region pages <= 32");
         u32 commit_mask = 0;
         for (u64 i = first_page; i < last_page; ++i)
-            commit_mask |= (1u << i);
+            commit_mask |= (1u << static_cast<u32>(i));
         if (!CommitPages(proc, r, commit_mask, page_flags))
         {
             frame->rax = 0;

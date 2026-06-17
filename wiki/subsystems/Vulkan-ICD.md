@@ -364,6 +364,16 @@ demand — once per vertex (vertex shader) or once per pixel
 `vkCmdDraw` against a pipeline that has parseable VS + FS
 modules bound.
 
+**Untrusted-input hardening (2026-06-17):** the parser stores SPIR-V
+result ids and operand ids raw (no `< kMaxIds` clamp), so every executor
+function that indexes the fixed `[kMaxIds]` `ExecContext` / `Program`
+tables bounds the id at its choke point — `SetScalar`, `AllocComposite`,
+`IsComposite`, `DoLoad`, `DoStore`, `DoAccessChain` all reject
+`id == 0 || id >= kMaxIds` before touching the table. Without this a
+module with `result_id ≥ 512` was a guest-driven OOB write into kernel
+`.bss`. See [Design-Decisions](../reference/Design-Decisions.md)
+(2026-06-17).
+
 Float math goes through [`util/soft_float.{h,cpp}`](../../kernel/util/soft_float.h) —
 an IEEE 754 binary32 implementation in pure integer code, because
 the kernel is compiled `-mno-sse -mno-sse2` and cannot link any
@@ -397,8 +407,12 @@ value; pointer/`inout` params bind the storage-class-packed pointer),
 the callee's basic blocks run on the shared `ExecContext` (SPIR-V ids
 are module-unique, so no per-frame SSA save/restore is needed beyond
 the caller's control-flow cursor), and the callee's `OpReturnValue` is
-copied into the call result. Vulkan forbids shader recursion, so each
-function is live at most once on the call stack. **GAP:** an
+copied into the call result. Vulkan forbids shader recursion, but the
+module is **untrusted** — a crafted self-/mutually-recursive function
+would otherwise recurse `ExecuteCallee→ExecuteBlock→ExecuteCallee` until
+the kernel stack overflows (the per-instruction `kStepBudget` bounds
+work, not native depth). `ExecContext::call_depth` caps recursion at
+`kMaxCallDepth = 16`; over-depth is an immediate void return. **GAP:** an
 `OpAccessChain` whose base is itself a pointer parameter (chained
 access through an `inout` struct param) still needs a Variable base —
 rare outside hand-written GLSL. Boot self-test module 6

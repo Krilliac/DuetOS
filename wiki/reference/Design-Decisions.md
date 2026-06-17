@@ -11674,3 +11674,58 @@ markers for its richest input. Three discovery layers were added (runtime
   and exits non-zero on `failed > 0`; verified live (ring3 profile:
   `passed=1 failed=0 skipped=135`, pe32-rich verdict observed through
   the tap).
+
+## 2026-06-17 — SPIR-V interpreter: bound guest ids at the value choke points, not (only) at parse
+
+- **Context:** a follow-up adversarial audit of the SPIR-V *executor*
+  added with OpFunctionCall found that `result_id` / pointer operands
+  are stored raw by the parser (no `< kMaxIds` clamp) and reach
+  `SetScalar` / `AllocComposite` / `IsComposite` / `DoLoad` / `DoStore`
+  / `DoAccessChain`, which index the fixed `[kMaxIds]` `ExecContext`
+  tables. A module with `result_id ≥ 512` was a guest-driven,
+  arbitrary-offset, arbitrary-value write into kernel `.bss`.
+- **Decision:** bound every id at the *value choke points* —
+  `if (id == 0 || id >= kMaxIds) return;` inside each writer/reader —
+  rather than only rejecting malformed modules at parse time. **Why:**
+  pointer ids come from per-opcode operand words, not just `result_id`,
+  so a single parse-time `result_id` reject would miss the operand
+  paths; the choke-point guards make every table access safe regardless
+  of which operand an id arrived in, and match the discipline the
+  already-safe helpers (`GetScalarBits`, `TypeOf`, `LoadOperandComponents`)
+  use. **Rules out** the "reject at parse, trust in execute" alternative
+  as the *sole* defence.
+- **Recursion:** Vulkan forbids shader recursion, but an untrusted
+  module can still encode a self-call. `kStepBudget` bounds total
+  instructions, not native stack depth, so a self-calling function
+  recurses `ExecuteCallee→ExecuteBlock→ExecuteCallee` ~8192 frames deep
+  → kernel-stack overflow. Added `ExecContext::call_depth` capped at
+  `kMaxCallDepth = 16` in `ExecuteCallee` (over-depth = immediate void
+  return). The shared step-budget comment that claimed it "bounds the
+  call" was corrected.
+- **Verified:** `[subsys/graphics/spirv] self-test PASS (6 modules
+  executed)` + `[vk-selftest] PASS` on the x86_64-debug boot — the
+  guards don't reject legitimate shaders.
+
+## 2026-06-17 — Win32 job objects are owner-scoped; the kernel, not the handle range, gates the kill
+
+- **Context:** the 8-slot global job pool keyed operations on a handle
+  range check (`0xC00..0xC07`) with no record of which process created
+  the job. Any PE holding `kCapSpawnThread` could guess a handle and
+  `TerminateJobObject` a job created by another process — i.e. kill
+  arbitrary processes it has no handle to, which a native process cannot
+  do (`SYS_PROCESS_TERMINATE` requires `kCapDebug`). The `arch::Cli/Sti`
+  "critical section" also only masks the local CPU, leaving an SMP
+  use-after-free: a peer CPU's `SysJobClose` could `ProcessRelease` a
+  member between `SysJobTerminate`'s snapshot and its
+  `SchedKillByProcess`.
+- **Decision:** record `owner_pid` at create and reject every
+  Assign/Terminate/Query/Close/IsProcessIn from a non-owner
+  (`ResolveOwnedJobLocked`). Job handles are **not** duplicatable across
+  processes in v0, so owner-scoping is the correct posture — the kernel
+  owns the auth, not the (guessable, global) handle integer. Replaced
+  `Cli/Sti` with a real `sync::SpinLock g_job_lock`; `SchedKillByProcess`
+  runs *outside* the lock (it can block) with each victim
+  `ProcessRetain`'d before the lock drops so it survives the unlocked
+  window. **Rules out** the "global handle range is the only gate" shape
+  for any future cross-process kernel object — ownership lives in the
+  object, checked against `CurrentProcess()`.

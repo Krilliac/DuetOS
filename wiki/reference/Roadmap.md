@@ -705,6 +705,46 @@ Re-derive the full inventory with `git grep -nE "// (STUB|GAP):"`.
 
 ## Win32 / NT subsystem
 
+### Security follow-ups from the 2026-06-17 adversarial audit
+
+The 2026-06-17 sweep of code merged since the 2026-06-06 audit fixed the
+guest-reachable kernel-memory-corruption + cross-process findings (VK
+SPIR-V id bounds + call-depth cap; Win32 job `owner_pid` + spinlock +
+retain-before-kill; `vmap` shift `static_assert`; TCP `rtx_count`
+underflow guard — all in the same slice). These lower-severity residuals
+were filed rather than rushed, each because the right fix is a design
+choice, not a one-liner:
+
+- **`SYS_SECTION_CREATE` resource-exhaustion DoS (Medium).** Ungated, so
+  a zero-cap PE can `CreateFileMapping` eight 4-MiB sections and exhaust
+  the global pool + 32 MiB of frames. Do **not** gate on
+  `kCapSpawnThread` (semantically wrong — mapping memory ≠ spawning
+  threads, and it would deny a legit capless PE its file mappings).
+  Correct fix: a **per-process section budget** (sections already carry
+  a per-process handle table, so the owner is known) capping how many
+  pool slots / bytes one process can hold. Owner: `win32/section.cpp`.
+- **Cross-process `PostMessage` (`DoWinPostMsg`) (High-ish / design).**
+  Uses the raw `HwndToCompositorHandle` (no owner check), so any PE can
+  post `WM_QUIT`/`WM_CLOSE` to another process's window (DoS) with no
+  cap. Real Win32 *does* allow cross-process posts; the right model is
+  UIPI-style (restrict by integrity/owner for the dangerous system
+  messages while allowing benign ones), not a blanket cap gate that
+  would break shell↔app messaging. Needs the integrity-level surface to
+  exist first. Owner: `win32/window_syscall.cpp`.
+- **Win32 pipe pool calls `linux::internal::Pipe*` directly (Rule 5).**
+  `named_pipe_syscall.cpp` / `pipe_syscall.cpp` reach into the Linux
+  subsystem's pipe pool — a subsystem-to-subsystem coupling that shares
+  resource accounting across ABIs. Fix: extract the pool into a
+  kernel-owned `kernel/ipc/pipe_pool.{h,cpp}` both subsystems call. A
+  refactor, not a patch. Owner: `kernel/ipc/`, both pipe syscall TUs.
+- **TCP ECN reactions not gated on segment acceptability (Low).**
+  `EcnOnEce` (`cwnd/2`) and `peer_ce_pending` (ECE-echo obligation) fire
+  in `tcp_segment.cpp` *before* the in-window/ACK acceptability check, so
+  a single spoofed ECE/CE segment in the 4-tuple can repeatedly collapse
+  throughput. Move the ECN block below the §3.9 acceptability gate.
+  Throughput-DoS only (no memory safety); touches input-processing order
+  so it wants its own careful slice. Owner: `kernel/net/tcp_segment.cpp`.
+
 ### DirectX real device backends
 
 - **Still gated:** HLSL bytecode execution (the `d3dcompiler.dll`

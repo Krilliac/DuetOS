@@ -84,6 +84,10 @@ using ::duetos::core::Sf32ToBits;
 
 constexpr u32 kStepBudget = 8192; // max instructions per ExecuteEntryPoint call
 constexpr u32 kSsaHeapBytes = 8192;
+// Max native recursion depth of OpFunctionCall. Real shader call
+// graphs are shallow; this only bounds a malicious self-/mutually-
+// recursive module so it can't overflow the kernel stack.
+constexpr u32 kMaxCallDepth = 16;
 
 // SPIR-V opcodes the executor switches on. Numbering = SPIRV-Headers.
 constexpr u16 kOpExtInst = 12;
@@ -263,10 +267,18 @@ struct ExecContext
     // Set by OpReturnValue to the operand id of the returned value;
     // read by an OpFunctionCall caller to copy the callee's result
     // into the call's result id. Zero for void returns / no call in
-    // flight. (No recursion in Vulkan shaders, so a single slot
-    // suffices — the caller reads it immediately after the callee's
-    // block walk completes, before any sibling call can overwrite it.)
+    // flight. A single slot suffices because ExecuteCallee saves and
+    // restores it around each nested call, so even a (bounded —
+    // see call_depth) recursive call graph never clobbers a caller's
+    // pending value.
     u32 return_value_id;
+    // Native recursion depth of the SPIR-V function-call interpreter.
+    // Vulkan forbids shader recursion, but an untrusted module can
+    // still encode a self-calling function; without this cap that
+    // recurses ExecuteCallee->ExecuteBlock->ExecuteCallee until the
+    // kernel stack overflows (the per-instruction kStepBudget bounds
+    // total work, NOT native stack depth). Capped in ExecuteCallee.
+    u32 call_depth;
 };
 
 const TypeRecord* TypeOf(const Program* p, u32 type_id)
@@ -316,6 +328,12 @@ u32 ComponentCount(const Program* p, u32 type_id)
 
 bool AllocComposite(ExecContext& ec, u32 id, u32 type_id, u32* out_offset, u32* out_count)
 {
+    // `id` is a SPIR-V result id taken raw from the untrusted module
+    // (the parser does not clamp it). Bound it before indexing the
+    // fixed [kMaxIds] tables — an out-of-range id is a guest-driven
+    // OOB write into the static ExecContext otherwise.
+    if (id == 0 || id >= kMaxIds)
+        return false;
     const u32 n = ComponentCount(ec.prog, type_id);
     if (n == 0)
         return false;
@@ -332,6 +350,8 @@ bool AllocComposite(ExecContext& ec, u32 id, u32 type_id, u32* out_offset, u32* 
 
 bool IsComposite(const ExecContext& ec, u32 id)
 {
+    if (id == 0 || id >= kMaxIds)
+        return false;
     return ec.composite_offset[id] != 0u;
 }
 
@@ -353,6 +373,10 @@ const u32* CompositeDataC(const ExecContext& ec, u32 id)
 
 void SetScalar(ExecContext& ec, u32 id, u32 type_id, u32 bits)
 {
+    // `id` is a guest-supplied result/pointer id; reject out-of-range
+    // before writing the [kMaxIds] tables (see AllocComposite).
+    if (id == 0 || id >= kMaxIds)
+        return;
     ec.scalar[id].bits = bits;
     ec.composite_offset[id] = 0u;
     ec.type_of[id] = type_id;
@@ -625,6 +649,10 @@ void DoBinaryFloatOp(ExecContext& ec, u16 op, u32 type_id, u32 result_id, u32 a_
 
 void DoLoad(ExecContext& ec, u32 type_id, u32 result_id, u32 ptr_id)
 {
+    // `ptr_id` is a raw operand from the untrusted module; bound it
+    // before indexing p->id_kinds[kMaxIds].
+    if (ptr_id == 0 || ptr_id >= kMaxIds)
+        return;
     // Pointer is either an OpVariable id (direct) or an
     // OpAccessChain result (we record the resolved storage offset
     // there). For variables we read from the storage heap; for
@@ -702,6 +730,10 @@ void DoLoad(ExecContext& ec, u32 type_id, u32 result_id, u32 ptr_id)
 
 void DoStore(ExecContext& ec, u32 ptr_id, u32 value_id)
 {
+    // `ptr_id` is a raw operand from the untrusted module; bound it
+    // before indexing p->id_kinds[kMaxIds].
+    if (ptr_id == 0 || ptr_id >= kMaxIds)
+        return;
     Program* p = ec.prog;
     u32 dst_bytes_offset = 0;
     u8* dst_base = nullptr;
@@ -773,6 +805,10 @@ void DoAccessChain(ExecContext& ec, u32 type_id, u32 result_id, u32 base_ptr_id,
     // touching the pointer type system.
     (void)type_id;
     Program* p = ec.prog;
+    // `base_ptr_id` is a raw operand from the untrusted module; bound
+    // it before indexing p->id_kinds[kMaxIds].
+    if (base_ptr_id == 0 || base_ptr_id >= kMaxIds)
+        return;
     if (p->id_kinds[base_ptr_id] != IdKind::Variable)
         return;
     const VariableRecord& v = p->variables[p->id_to_index[base_ptr_id]];
@@ -794,7 +830,7 @@ void DoAccessChain(ExecContext& ec, u32 type_id, u32 result_id, u32 base_ptr_id,
         u32 idx = 0;
         if (idx_id < kMaxIds && p->id_kinds[idx_id] == IdKind::Constant)
             idx = p->constants[p->id_to_index[idx_id]].components[0].bits;
-        else
+        else if (idx_id < kMaxIds)
             idx = ec.scalar[idx_id].bits;
         switch (ct->kind)
         {
@@ -1813,6 +1849,14 @@ u32 ExecuteCallee(ExecContext& ec, u32 fn_id)
     if (f.bb_begin >= p->block_count || f.bb_end > p->block_count || f.bb_begin >= f.bb_end)
         return 0;
 
+    // Bound native recursion so a self-/mutually-recursive module
+    // can't overflow the kernel stack (kStepBudget bounds total
+    // instructions, not stack depth). Treat over-depth as an
+    // immediate void return.
+    if (ec.call_depth >= kMaxCallDepth)
+        return 0;
+    ++ec.call_depth;
+
     // Save the caller's control-flow cursor; the callee reuses the
     // same shared ExecContext (SSA ids are module-unique) but its
     // block walk would otherwise clobber where the caller resumes.
@@ -1833,7 +1877,7 @@ u32 ExecuteCallee(ExecContext& ec, u32 fn_id)
         const u32 cur_label = p->blocks[cur_bb].label_id;
         ec.prev_block_label = ec.cur_block_label;
         ec.cur_block_label = cur_label;
-        ExecuteBlock(ec, cur_bb); // shares ec.step_count, so the global budget still bounds the call
+        ExecuteBlock(ec, cur_bb); // shares ec.step_count (bounds work); ec.call_depth bounds stack depth
         if (ec.returned || ec.killed)
             break;
         if (ec.jump_target == 0)
@@ -1857,6 +1901,7 @@ u32 ExecuteCallee(ExecContext& ec, u32 fn_id)
     ec.jump_target = save_jump;
     ec.return_value_id = save_retval;
     ec.returned = false;
+    --ec.call_depth;
     return ret_id;
 }
 
