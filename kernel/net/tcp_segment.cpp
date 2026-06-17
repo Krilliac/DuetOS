@@ -765,7 +765,12 @@ u32 ProcessAck(Tcb& t, u32 ack, bool has_timestamp, u32 tsecr, bool grow_cwnd = 
                 }
             }
             sb.len = 0;
-            --t.rtx_count;
+            // rtx_count is maintained across DrainSendBuffer / ProcessAck /
+            // SYN-reset paths; guard the decrement so a counter desync from
+            // a crafted ACK/SACK interleave can't underflow u32 to ~4e9 and
+            // wedge the send path (rtx_count < kRtxQueueMax) / FIN close.
+            if (t.rtx_count > 0)
+                --t.rtx_count;
         }
     }
     if (acked > 0)
