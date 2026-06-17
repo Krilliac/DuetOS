@@ -179,6 +179,8 @@ bool ParsePeShape(const u8* file, u64 file_len, PeHeaderShape& out)
 
 u64 RvaToFile(const u8* file, const PeHeaderShape& h, u32 rva)
 {
+    if (file == nullptr)
+        return ~u64(0); // mirror the pe_loader / dll_loader twins' guard
     for (u16 i = 0; i < h.section_count; ++i)
     {
         // section_count / section_base are attacker-controlled and
