@@ -1228,6 +1228,11 @@ __declspec(dllexport) BOOL FillPath(HDC dc)
 
 /* --- Region API ---
  *
+ * The pure rect-list geometry (bbox, point/rect containment, offset,
+ * equality) lives in gdi32_region.h so it can be unit-tested on the
+ * host (tests/host/test_gdi32_region.cpp); this file owns the HRGN
+ * pool and the dllexport wrappers.
+ *
  * Regions are user-mode rectangle lists. CreateRectRgn makes a
  * single-rect region; CombineRgn merges two source regions into a
  * destination per the RGN_* mode. The handle is an index into a
@@ -1258,6 +1263,11 @@ __declspec(dllexport) BOOL FillPath(HDC dc)
 #define RGN_SIMPLEREGION 2
 #define RGN_COMPLEXREGION 3
 #define RGN_ERROR 0
+
+/* Pure rect-list geometry (host-tested freestanding header). RECT and
+ * GdiRgnRect are both four ints in the same order; the wrappers copy
+ * field-by-field rather than pun, so no layout assumption is baked in. */
+#include "gdi32_region.h"
 
 typedef void* HRGN;
 
@@ -1488,4 +1498,124 @@ static int gdi32_region_delete(HGDIOBJ obj)
     rg->used = 0;
     rg->count = 0;
     return 1;
+}
+
+/* Copy a region's live RECTs into a GdiRgnRect[] for the freestanding
+ * geometry helpers. Returns the count copied (clamped to capacity). */
+static int gdi32_rgn_copy_rects(const GdiRegion* rg, GdiRgnRect* out)
+{
+    int n = rg->count;
+    if (n > GDI_RGN_MAX_RECTS)
+        n = GDI_RGN_MAX_RECTS;
+    for (int i = 0; i < n; ++i)
+    {
+        out[i].left = rg->rects[i].left;
+        out[i].top = rg->rects[i].top;
+        out[i].right = rg->rects[i].right;
+        out[i].bottom = rg->rects[i].bottom;
+    }
+    return n;
+}
+
+/* RGN_* complexity code for a region's current rect count. */
+static INT gdi32_rgn_complexity(const GdiRegion* rg)
+{
+    if (rg->count == 0)
+        return RGN_NULLREGION;
+    return rg->count == 1 ? RGN_SIMPLEREGION : RGN_COMPLEXREGION;
+}
+
+/* GetRgnBox — fill *prc with the region bounding box; return the
+ * region complexity (RGN_NULLREGION / SIMPLEREGION / COMPLEXREGION),
+ * or RGN_ERROR for a bad handle / null pointer. */
+__declspec(dllexport) INT GetRgnBox(HRGN hrgn, RECT* prc)
+{
+    GdiRegion* rg = gdi32_rgn_resolve(hrgn);
+    if (!rg || !prc)
+        return RGN_ERROR;
+    GdiRgnRect buf[GDI_RGN_MAX_RECTS];
+    const int n = gdi32_rgn_copy_rects(rg, buf);
+    GdiRgnRect box;
+    GdiRgnBBox(buf, n, &box);
+    prc->left = box.left;
+    prc->top = box.top;
+    prc->right = box.right;
+    prc->bottom = box.bottom;
+    return gdi32_rgn_complexity(rg);
+}
+
+/* PtInRegion — TRUE if point (x,y) is inside the region (half-open). */
+__declspec(dllexport) BOOL PtInRegion(HRGN hrgn, INT x, INT y)
+{
+    GdiRegion* rg = gdi32_rgn_resolve(hrgn);
+    if (!rg)
+        return 0;
+    GdiRgnRect buf[GDI_RGN_MAX_RECTS];
+    const int n = gdi32_rgn_copy_rects(rg, buf);
+    return GdiRgnPtIn(buf, n, x, y) ? 1 : 0;
+}
+
+/* RectInRegion — TRUE if any part of *prc lies within the region. */
+__declspec(dllexport) BOOL RectInRegion(HRGN hrgn, const RECT* prc)
+{
+    GdiRegion* rg = gdi32_rgn_resolve(hrgn);
+    if (!rg || !prc)
+        return 0;
+    GdiRgnRect buf[GDI_RGN_MAX_RECTS];
+    const int n = gdi32_rgn_copy_rects(rg, buf);
+    GdiRgnRect q = {prc->left, prc->top, prc->right, prc->bottom};
+    GdiRgnNormRect(&q); /* a user RECT may be inverted */
+    return GdiRgnRectIn(buf, n, &q) ? 1 : 0;
+}
+
+/* OffsetRgn — translate the region in place; return its complexity. */
+__declspec(dllexport) INT OffsetRgn(HRGN hrgn, INT dx, INT dy)
+{
+    GdiRegion* rg = gdi32_rgn_resolve(hrgn);
+    if (!rg)
+        return RGN_ERROR;
+    for (INT i = 0; i < rg->count; ++i)
+    {
+        rg->rects[i].left += dx;
+        rg->rects[i].right += dx;
+        rg->rects[i].top += dy;
+        rg->rects[i].bottom += dy;
+    }
+    return gdi32_rgn_complexity(rg);
+}
+
+/* SetRectRgn — reset an existing region to a single rectangle. */
+__declspec(dllexport) BOOL SetRectRgn(HRGN hrgn, INT l, INT t, INT r, INT b)
+{
+    GdiRegion* rg = gdi32_rgn_resolve(hrgn);
+    if (!rg)
+        return 0;
+    GdiRgnRect nr = {l, t, r, b};
+    if (GdiRgnNormRect(&nr))
+    {
+        rg->rects[0].left = nr.left;
+        rg->rects[0].top = nr.top;
+        rg->rects[0].right = nr.right;
+        rg->rects[0].bottom = nr.bottom;
+        rg->count = 1;
+    }
+    else
+    {
+        rg->count = 0; /* degenerate rect → empty region */
+    }
+    return 1;
+}
+
+/* EqualRgn — TRUE if the two regions hold the same rectangle list. */
+__declspec(dllexport) BOOL EqualRgn(HRGN h1, HRGN h2)
+{
+    GdiRegion* a = gdi32_rgn_resolve(h1);
+    GdiRegion* b = gdi32_rgn_resolve(h2);
+    if (!a || !b)
+        return 0;
+    GdiRgnRect ba[GDI_RGN_MAX_RECTS];
+    GdiRgnRect bb[GDI_RGN_MAX_RECTS];
+    const int na = gdi32_rgn_copy_rects(a, ba);
+    const int nb = gdi32_rgn_copy_rects(b, bb);
+    return GdiRgnEqual(ba, na, bb, nb) ? 1 : 0;
 }

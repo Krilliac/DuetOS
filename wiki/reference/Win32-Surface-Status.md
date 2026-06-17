@@ -1531,10 +1531,19 @@ WinDbg client API, `SymLoadModuleEx`.
   `ETO_OPAQUE` still STUB), `DrawTextA/W`
 - State: `SetBkColor`, `SetBkMode`, `SetMapMode`,
   `SetTextColor`, `SetTextAlign`
+- Region API (rect-list): `CreateRectRgn`, `CreateRectRgnIndirect`,
+  `CombineRgn`, `SetRectRgn`, `GetRgnBox`, `PtInRegion`,
+  `RectInRegion`, `OffsetRgn`, `EqualRgn` — REAL. Single-rect regions
+  and the rect-list query/manipulation ops are exact; the geometry is
+  host-tested (`tests/host/test_gdi32_region.cpp`).
 
 **STUB / GAP:**
 - Path API: `BeginPath`, `EndPath`, `StrokePath` — STUB
-- Region API: `CreateRectRgn`, `CombineRgn`, etc. — STUB
+- Region set-algebra: `CombineRgn` with `RGN_OR`/`RGN_XOR`/`RGN_DIFF`
+  on multi-rect inputs collapses to the bounding box (no rectangle
+  decomposition) — GAP. Shape regions (`CreateRoundRectRgn`,
+  `CreateEllipticRgn`, `CreatePolygonRgn`) and clip-region selection
+  (`SelectClipRgn`, `ExtSelectClipRgn`) — STUB.
 - Metafiles: `CreateMetaFile`, `PlayMetaFile` — STUB
 - Outline / TrueType fonts: `EnumFontsW`, `GetGlyphOutline`
   — STUB (we render only the kernel's 8x8 bitmap font)
