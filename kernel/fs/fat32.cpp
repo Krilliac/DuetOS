@@ -377,6 +377,16 @@ bool Fat32Probe(u32 block_handle, u32* out_index)
     }
     v.data_start_sector = static_cast<u32>(data_start_u64);
 
+    // A volume whose total_sectors is below where the data region
+    // begins is malformed. Reject it so the `total_sectors -
+    // data_start_sector` cluster-count math (e.g. Fat32Trim) can't
+    // u32-underflow to ~4e9.
+    if (v.total_sectors < v.data_start_sector)
+    {
+        core::Log(core::LogLevel::Warn, "fs/fat32", "BPB total_sectors < data_start_sector — refusing volume");
+        return false;
+    }
+
     // Capture the DuetOS-ownership markers from the BPB (BS_VolID at
     // offset 67, BS_VolLab at offset 71). These tell a volume DuetOS
     // formatted (Fat32Format / make-gpt-image.py both stamp them) from

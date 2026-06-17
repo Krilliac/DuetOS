@@ -147,6 +147,10 @@ bool WalkDirOnDisk(const Volume& v, u32 first_cluster, OnDiskSfnVisitor visit, v
     // divergence" class-of-bug pattern in CLAUDE.md (two paths
     // that claim the same view but diverge on a corner case).
     char pending_long[260];
+    // As in fat32_dir.cpp: the `pending_long[(ord-1)*13 + i]` write is
+    // bounds-safe only because of the `ord <= 20` clamp below. Pin the
+    // coupling so the clamp and buffer can't silently drift apart.
+    static_assert((20u - 1u) * 13u + 13u <= sizeof(pending_long), "LFN ordinal clamp (<=20) must fit pending_long");
     bool pending_any = false;
     u8 pending_checksum = 0;
     bool pending_checksum_set = false;
@@ -701,9 +705,13 @@ i64 AppendInDir(const Volume* v, u32 dir_cluster, const char* name, const void* 
     const u32 new_size = static_cast<u32>(new_size_u64);
 
     // Walk the existing chain to the tail cluster so we know
-    // where to append and whether the tail has slack bytes.
+    // where to append and whether the tail has slack bytes. Bound the
+    // hop count like every read-path chain walk (fat32_read.cpp): a
+    // corrupted/self-looping FAT chain (fat[N]=N) would otherwise spin
+    // this write path forever — the read paths were capped, this one
+    // had been missed.
     u32 tail = e->first_cluster;
-    while (true)
+    for (u32 step = 0; step < 65536; ++step)
     {
         const u32 next = ReadFatEntry(*v, tail);
         if (next < 2 || next >= 0x0FFFFFF8u)

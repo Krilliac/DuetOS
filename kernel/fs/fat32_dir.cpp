@@ -183,6 +183,12 @@ bool WalkDirChain(const Volume& v, u32 first_cluster, DirVisitor visit, void* ct
     // 13 UTF-16 chars = 260 chars; we truncate to DirEntry::name's
     // 128-byte budget at copy-out time.
     char pending_long[260];
+    // The write `pending_long[(ord-1)*13 + i]` below is bounds-safe ONLY
+    // because the ordinal is clamped to `ord <= 20` (max index
+    // (20-1)*13 + 12 = 259). Pin that coupling so raising the clamp to
+    // the spec's nominal 0x3F without growing the buffer can't silently
+    // become a stack overflow (CLAUDE.md "whitelist incompleteness").
+    static_assert((20u - 1u) * 13u + 13u <= sizeof(pending_long), "LFN ordinal clamp (<=20) must fit pending_long");
     bool pending_any = false;
     u8 pending_checksum = 0;
     bool pending_checksum_set = false;

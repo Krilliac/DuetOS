@@ -11789,3 +11789,36 @@ markers for its richest input. Three discovery layers were added (runtime
   `[js-dom-selftest] PASS (41/41)`. SEC-002 array-bound, the parse/eval
   kstack guards, the regexp VM, and the arena allocator were re-audited
   and hold.
+
+## 2026-06-17 — FAT32/GPT parser: close the currently-reachable robustness gaps; defer geometry validation to the interop slice
+
+- **Context:** an adversarial audit of the FAT32 driver + GPT parser
+  (untrusted on-disk structures) found the parser **well-hardened** — the
+  block layer is a hard, overflow-safe LBA backstop, and `g_scratch`
+  reads are length-bounded by `sectors_per_cluster ≤ 8`, so the classic
+  "cluster→LBA points anywhere" and staging-overflow classes are already
+  closed. No live OOB.
+- **Decision — fix the currently-reachable gaps, skip the speculative
+  ones.** Landed: (1) `AppendInDir`'s tail-walk was an unbounded
+  `while(true)` FAT follow while every read path was hop-capped — a
+  self-looping chain on a corrupted owned volume spun forever; bounded it
+  to the same 65536 ceiling. (2) The GPT entry-array extent check
+  `partition_entry_lba + array_sectors > sector_count` could u64-overflow
+  and pass; rewrote subtractive. (3) `static_assert` pinning the LFN
+  `ord ≤ 20` clamp to `pending_long[260]` in both the read and write
+  walkers (the clamp is load-bearing for bounds-safety). (4)
+  `Fat32Probe` now rejects `total_sectors < data_start_sector` (the
+  `Fat32Trim` u32-underflow source).
+- **Deferred (with rationale):** the divide-by-zero guards
+  (`bytes_per_sector`/`sectors_per_cluster == 0`) and a consolidated
+  `ValidateGeometry` are **not** added now — they're only reachable via a
+  `Volume` built WITHOUT `Fat32Probe`'s existing `== 512` / `!= 0` pin,
+  i.e. the foreign-FAT **interop-read mount that doesn't exist yet**.
+  Adding the abstraction speculatively is anti-bloat; instead the
+  precondition is recorded on the Roadmap's "Foreign-FAT interop read"
+  entry so that slice builds `ValidateGeometry` and calls it from every
+  `Volume`-construction path. **Rules out** hardening an unbuilt path
+  ahead of its slice.
+- **Verified:** x86_64-debug boot OK, `[fat32-selftest]` /
+  `[gpt-selftest]` pass, FAT32 read/write + ELF/PE load off the system
+  volume unaffected.
