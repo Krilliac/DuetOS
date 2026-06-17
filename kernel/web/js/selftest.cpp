@@ -426,6 +426,22 @@ void JsSelfTest()
     // 26. SEC-002 regression: in-range dense arrays are unaffected by the bound.
     run(CheckCase("var a=[]; a[5]=7; a[0]=1; a[5] + ',' + a.length;", "7,6", nullptr));
 
+    // 27-28. SEC-101 regression: a String/Array prototype method detached from
+    // its type and re-invoked on a wrong-tag receiver must fail with a type
+    // error, NOT blind-cast recv and deref a null/wild pointer in the kernel.
+    // Before the CallNative receiver guard, snippet 27 null-derefed
+    // (ArrPush(nullptr,...)) and 28 read an Object* as a JsString*.
+    {
+        EvalConfig stcfg;
+        // detached Array.push, bare call -> recv is undefined (null union).
+        run(CheckErr("var f=[].push; f(1);", ErrorCode::BadState, stcfg));
+        // String.charCodeAt stolen onto a plain object -> recv is an Object*.
+        run(CheckErr("var o={}; o.f='x'.charCodeAt; o.f(0);", ErrorCode::BadState, stcfg));
+    }
+    // 29. SEC-101: the guard rejects only mismatches — a method called on the
+    // correct receiver type still works (the happy path is intact).
+    run(CheckCase("var a=[1,2]; a.push(3); a.length + ',' + 'x'.charCodeAt(0);", "3,120", nullptr));
+
     char numBuf[12];
 
     if (failIdx >= 0)

@@ -11674,3 +11674,31 @@ markers for its richest input. Three discovery layers were added (runtime
   and exits non-zero on `failed > 0`; verified live (ring3 profile:
   `passed=1 failed=0 skipped=135`, pe32-rich verdict observed through
   the tap).
+
+## 2026-06-17 — JS native methods: validate the receiver tag in CallNative, centrally
+
+- **Context (SEC-101):** the String/Array prototype methods are
+  first-class `JsFunction` values (`GetMemberImpl` returns them), so a
+  hostile page's JS can detach one and call it on a wrong-tag receiver:
+  `var f = [].push; f(1)` (recv = Undefined → null union) or
+  `o.f = "x".charCodeAt; o.f(0)` (recv = an arbitrary `JsObject*`). The
+  handlers blind-cast `recv.as.str` / `recv.as.obj`, so a mismatch was a
+  **kernel** null-deref / wild-pointer read — the engine runs in kernel
+  space. The Date/RegExp handlers already guarded their receiver tag;
+  String/Array had not.
+- **Decision:** gate centrally at the top of `CallNative` rather than
+  per-handler — `IsStringReceiverNative(id)` requires `recv.type ==
+  String`, `IsArrayReceiverNative(id)` requires an `isArray` object, else
+  `Err{ErrorCode::BadState}` (the engine's uncatchable type-error idiom,
+  same as the non-callable path). The predicates are contiguous-id range
+  checks over the `kStr*` / `kArr*` groups in `NativeFn` (builtins.h),
+  with a comment pinning the grouping contract. Number/Object methods are
+  left type-generic (they read no pointer through `recv`). **Rules out**
+  the per-handler-guard sprawl and keeps every future `kStr*`/`kArr*`
+  method covered by construction.
+- **Verified:** `[js-selftest] PASS (111/111)` (snippets 27/28 are the
+  detached-method regressions — they returned `BadState` instead of
+  crashing; 29 confirms correct-receiver calls still work) +
+  `[js-dom-selftest] PASS (41/41)`. SEC-002 array-bound, the parse/eval
+  kstack guards, the regexp VM, and the arena allocator were re-audited
+  and hold.

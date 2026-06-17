@@ -1803,8 +1803,33 @@ static Result<JsValue> DateToISOString(Interp& I, const JsValue& recv)
     return JsValue::Str(MakeString(I.arena, buf, o));
 }
 
+// SEC-101: receiver type-confusion guard. The String/Array prototype
+// methods are first-class values (GetMemberImpl hands them back as
+// JsFunction), so a script can detach one and re-invoke it on a
+// receiver of the wrong tag — `var f = [].push; f(1)` gives recv =
+// Undefined (null union), and `o.f = "x".charCodeAt; o.f(0)` gives recv
+// = an arbitrary JsObject*. The String handlers blind-cast recv.as.str
+// and the Array handlers recv.as.obj, so a mismatched receiver is a
+// kernel null-deref / wild-pointer read. Reject up front, exactly as
+// the Date/RegExp handlers already do (kObjToString/kNumToString stay
+// type-generic by contract and read no pointer through recv).
+// Contract: the kStr*/kArr* ids are contiguous groups in NativeFn
+// (builtins.h) — keep new members inside their group.
+static inline bool IsStringReceiverNative(u16 id)
+{
+    return id >= kStrCharAt && id <= kStrSearch;
+}
+static inline bool IsArrayReceiverNative(u16 id)
+{
+    return id >= kArrPush && id <= kArrForEach;
+}
+
 Result<JsValue> CallNative(Interp& I, u16 id, const JsValue& recv, const JsValue* args, u32 argc)
 {
+    if (IsStringReceiverNative(id) && recv.type != JsType::String)
+        return Err{::duetos::core::ErrorCode::BadState};
+    if (IsArrayReceiverNative(id) && (recv.type != JsType::Object || recv.as.obj == nullptr || !recv.as.obj->isArray))
+        return Err{::duetos::core::ErrorCode::BadState};
     switch (id)
     {
     case kConsoleLog:
