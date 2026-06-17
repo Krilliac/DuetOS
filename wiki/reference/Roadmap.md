@@ -399,6 +399,22 @@ In rough priority:
   an index ≥1 (never slot 0) and mark it read-only so no sink targets
   it. Not wired at boot today; marked `// GAP:` in
   `kernel/fs/fat32.cpp` (`Fat32Probe` foreign-volume branch).
+- **Precondition (geometry validation) for this slice:** today the
+  divide-by-zero / cluster-size safety of the FAT walkers rests on
+  `Fat32Probe`'s implicit `bytes_per_sector == 512` /
+  `sectors_per_cluster != 0` pin (fat32.cpp), which the adopt path runs
+  before any access. A foreign-volume mount that builds a `Volume`
+  without that screen would expose `ReadFatEntry` (`byte_off /
+  bytes_per_sector`) and the `offset / cluster_bytes` write-path math to
+  a divide-by-zero panic (2026-06-17 audit SEC-001/007). When this slice
+  lands, extract a single `ValidateGeometry(const Volume&)` —
+  power-of-two `bytes_per_sector ≥ 512` with `bytes_per_sector *
+  sectors_per_cluster ≤ sizeof(g_scratch)`, `sectors_per_cluster` a
+  nonzero power of two, `num_fats ≥ 1`, `fat_size_sectors ≥ 1`,
+  `root_cluster ≥ 2`, `total_sectors ≥ data_start_sector` — and call it
+  from EVERY `Volume`-building path, not just adopt. (Widening
+  `bytes_per_sector` past 512 also requires bumping `g_scratch` and the
+  `sizeof(g_scratch)/512` guards in lockstep.)
 - **Owner:** `kernel/fs/fat32.cpp`, `kernel/fs/mount.cpp`.
 
 ### Crash-dump persistence — real-hardware verification

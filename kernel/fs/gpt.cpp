@@ -359,7 +359,12 @@ bool GptProbe(u32 block_handle, u32* out_index)
     constexpr u64 kEntriesBytes = u64(kGptEntryCountStd) * kGptEntrySizeStd;
     static u8 entries[kEntriesBytes];
     const u64 array_sectors = (kEntriesBytes + sector_size - 1) / sector_size;
-    if (hdr.partition_entry_lba + array_sectors > sector_count)
+    // Overflow-safe extent check (subtractive form): a crafted
+    // partition_entry_lba near U64_MAX would wrap `lba + array_sectors`
+    // below sector_count and pass a naive `>` test. The downstream
+    // BlockDeviceRead clamps anyway, but the bound here must actually
+    // guard, not rely on the backstop.
+    if (hdr.partition_entry_lba >= sector_count || array_sectors > sector_count - hdr.partition_entry_lba)
     {
         core::Log(core::LogLevel::Warn, "fs/gpt", "partition entry array past end of disk");
         return false;
