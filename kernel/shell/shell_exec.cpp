@@ -23,6 +23,7 @@
 #include "fs/ramfs.h"
 #include "fs/tmpfs.h"
 #include "mm/address_space.h"
+#include "mm/kheap.h"
 #include "sched/sched.h"
 #include "subsystems/translation/translate.h"
 #include "loader/elf_loader.h"
@@ -229,25 +230,33 @@ void CmdPeexec(u32 argc, char** argv)
         ConsoleWriteln("PEEXEC: PATH IS A DIRECTORY");
         return;
     }
-    // Real console exes run ~32 KB–360 KB; cap the static read buffer
-    // at 1 MiB and refuse anything larger rather than silently
-    // truncate into an invalid image.
-    constexpr u64 kPeExecMaxBytes = 1u << 20;
-    static u8 pe_buf[kPeExecMaxBytes];
-    if (entry.size_bytes > kPeExecMaxBytes)
+    // Real apps run from ~32 KB up to several MiB (a 2006-era game .exe
+    // is ~5 MiB). Size the read buffer to the dir entry and KMalloc it
+    // from the kheap (freed after SpawnPeFile copies the image), capped
+    // so a corrupt size can't try to allocate the whole heap.
+    constexpr u64 kPeExecMaxBytes = 8u << 20; // 8 MiB
+    if (entry.size_bytes == 0 || entry.size_bytes > kPeExecMaxBytes)
     {
-        ConsoleWriteln("PEEXEC: FILE TOO LARGE (>1 MiB)");
+        ConsoleWriteln("PEEXEC: FILE TOO LARGE (>8 MiB) OR EMPTY");
         return;
     }
-    const i64 n = fat::Fat32ReadFile(v, &entry, pe_buf, sizeof(pe_buf));
+    u8* pe_buf = static_cast<u8*>(duetos::mm::KMalloc(entry.size_bytes));
+    if (pe_buf == nullptr)
+    {
+        ConsoleWriteln("PEEXEC: OUT OF MEMORY ALLOCATING READ BUFFER");
+        return;
+    }
+    const i64 n = fat::Fat32ReadFile(v, &entry, pe_buf, entry.size_bytes);
     if (n <= 0)
     {
+        duetos::mm::KFree(pe_buf);
         ConsoleWriteln("PEEXEC: READ ERROR OR EMPTY");
         return;
     }
     const auto st = duetos::core::PeValidate(pe_buf, static_cast<u64>(n));
     if (st != duetos::core::PeStatus::Ok)
     {
+        duetos::mm::KFree(pe_buf);
         ConsoleWrite("PEEXEC: NOT A VALID PE: ");
         ConsoleWriteln(duetos::core::PeStatusName(st));
         return;
@@ -265,6 +274,9 @@ void CmdPeexec(u32 argc, char** argv)
     duetos::core::CapSetAdd(caps, duetos::core::kCapSpawnThread);
     const u64 pid = duetos::core::SpawnPeFile(path, pe_buf, static_cast<u64>(n), caps, duetos::fs::RamfsSandboxRoot(),
                                               /*frame_budget=*/512, duetos::core::kTickBudgetSandbox);
+    // SpawnPeFile copied the image into the child's address space; the
+    // read buffer is no longer needed.
+    duetos::mm::KFree(pe_buf);
     if (pid == 0)
     {
         ConsoleWriteln("PEEXEC: SPAWNPEFILE FAILED (load/import-resolution error — see serial log)");

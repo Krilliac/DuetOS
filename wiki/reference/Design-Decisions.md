@@ -11822,3 +11822,33 @@ markers for its richest input. Three discovery layers were added (runtime
 - **Verified:** x86_64-debug boot OK, `[fat32-selftest]` /
   `[gpt-selftest]` pass, FAT32 read/write + ELF/PE load off the system
   volume unaffected.
+
+## 2026-06-17 — Large-exe support: dynamic peexec read buffer + heap-backed loader unwind guard
+
+- **Context:** the goal of running real desktop apps (driven by World of
+  Warcraft 1.12.1, a 4.77 MB / 9.4 MB-image 32-bit PE) hit two
+  small-exe-only assumptions: (1) `peexec` (shell + `peexec=` boot
+  runner) read into a **1 MiB static buffer** and rejected anything
+  larger; (2) `LoaderUnwindGuard` tracked mapped-page VAs in a **fixed
+  1024-entry inline array** (`u64 vas[1024]`, 8 KiB on the 64 KiB
+  kstack) and `KASSERT`-panicked the kernel when a larger image's page
+  count overflowed it.
+- **Decision — size to the artifact, from the heap:** the peexec read
+  buffer is now `KMalloc`'d to the dir-entry size (cap 8 MiB, freed
+  after `SpawnPeFile` copies the image), not a permanent multi-MiB
+  `.bss` reservation against the tight boot heap. The unwind guard's
+  tracking array is `KMalloc`'d per-image, sized from `SizeOfImage`
+  (image page count + 64 slack for stack/TEB/env/stubs/headers), with a
+  hard 262144-page (1 GiB) ceiling so a crafted `SizeOfImage` can't
+  request an absurd allocation. The `KASSERT` becomes a never-fires
+  invariant tripwire (a valid image's pages always fit its
+  image-size-derived cap) instead of the de-facto load-size limit that
+  **panicked the kernel on any large valid PE** — a robustness/DoS fix
+  as well as a capability one. **Rules out** the fixed-inline-array and
+  fixed-1 MiB-buffer shapes for the loader path.
+- **Verified:** WoW.exe now reads (past the old 1 MiB cap), maps all 5
+  sections (past the guard panic), resolves imports, spawns, and
+  **enters 32-bit ring 3** (`mode=pe32 gs_base=0x70000000`), running CRT
+  init until it calls an import not in the 32-bit DLL export set and
+  cleanly self-terminates via the unresolved-stub `SYS_EXIT(0xDEAD0042)`
+  — no crash. Standard boot remains OK=244 / non-deliberate FAIL=0.

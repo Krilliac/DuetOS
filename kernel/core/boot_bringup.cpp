@@ -2758,7 +2758,16 @@ void PeexecDeferredTask(void*)
     // the full size_bytes the dir entry advertises. This rides out the
     // selection race and the truncating-read flake without changing the
     // FS itself.
-    static duetos::u8 s_peexec_buf[1u << 20];
+    // Real apps are far larger than the old 1 MiB cap — e.g. a 2006-era
+    // game .exe is ~5 MiB on disk. The read buffer is sized to the dir
+    // entry and KMalloc'd from the 64 MiB kheap (then freed right after
+    // SpawnPeFile copies the image into the new address space), rather
+    // than reserving a permanent multi-MiB .bss buffer against the
+    // already-tight boot heap headroom. Capped so a corrupt size can't
+    // try to allocate the whole heap.
+    constexpr duetos::u64 kPeExecMaxBytes = 8u << 20; // 8 MiB
+    duetos::u8* peexec_buf = nullptr;
+    duetos::u64 peexec_cap = 0;
     duetos::i64 rn = 0;
     for (duetos::u32 attempt = 0; attempt < 12 && rn <= 0; ++attempt)
     {
@@ -2775,7 +2784,24 @@ void PeexecDeferredTask(void*)
             {
                 continue;
             }
-            const duetos::i64 got = fat::Fat32ReadFile(vol, &entry, s_peexec_buf, sizeof(s_peexec_buf));
+            // Lazily size + allocate the read buffer to the file the
+            // first time we locate it on any volume.
+            if (peexec_buf == nullptr)
+            {
+                if (entry.size_bytes == 0 || entry.size_bytes > kPeExecMaxBytes)
+                {
+                    SerialWrite("[peexec] FAIL: file too large (>8 MiB) or empty\n");
+                    return;
+                }
+                peexec_buf = static_cast<duetos::u8*>(duetos::mm::KMalloc(entry.size_bytes));
+                if (peexec_buf == nullptr)
+                {
+                    SerialWrite("[peexec] FAIL: KMalloc for read buffer failed (OOM)\n");
+                    return;
+                }
+                peexec_cap = entry.size_bytes;
+            }
+            const duetos::i64 got = fat::Fat32ReadFile(vol, &entry, peexec_buf, peexec_cap);
             // Accept only a complete read. A short read means a FAT
             // chain-walk hiccup truncated the file — retry rather than
             // hand a torn image to the PE loader.
@@ -2799,15 +2825,22 @@ void PeexecDeferredTask(void*)
     }
     if (rn <= 0)
     {
+        if (peexec_buf != nullptr)
+        {
+            duetos::mm::KFree(peexec_buf);
+        }
         SerialWrite("[peexec] FAIL: file not found / unreadable on any FAT volume\n");
         return;
     }
     SerialWrite("[peexec] read bytes=");
     SerialWriteHex(static_cast<duetos::u64>(rn));
     SerialWrite("\n");
-    const auto pid = duetos::core::SpawnPeFile(g_peexec_path, s_peexec_buf, static_cast<duetos::u64>(rn),
+    const auto pid = duetos::core::SpawnPeFile(g_peexec_path, peexec_buf, static_cast<duetos::u64>(rn),
                                                duetos::core::CapSetTrusted(), duetos::fs::RamfsTrustedRoot(),
                                                duetos::mm::kFrameBudgetTrusted, duetos::core::kTickBudgetTrusted);
+    // SpawnPeFile has copied the image into the child's address space;
+    // the read buffer is no longer needed.
+    duetos::mm::KFree(peexec_buf);
     SerialWrite("[peexec] spawn pid=");
     SerialWriteHex(pid);
     SerialWrite(pid != 0 ? "  spawned (see [pe-load]/[dll-load] for import resolution)\n"
