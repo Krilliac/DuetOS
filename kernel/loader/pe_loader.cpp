@@ -48,6 +48,7 @@
 #include "exec_meta_rust.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
+#include "mm/kheap.h"
 #include "mm/page.h"
 #include "mm/paging.h"
 #include "security/guard.h"
@@ -199,29 +200,49 @@ struct PeHeaders
 // frees the underlying frame (see kernel/mm/address_space.cpp:446).
 // PeLoad disarms the guard on success — the destructor then no-ops.
 //
-// Cap sized for the v0 worst case: kV0StackPages (16) + 1 TEB + 1
-// env + 2 stubs + sections (~16 pages typical, ~256 worst case for
-// large images) + headers (1-2 pages). 1024 leaves comfortable
-// headroom; if a future PE legitimately exceeds it, the KASSERT in
-// Track fires at the boundary so the leak doesn't go silent.
+// The tracked-VA array is heap-backed and sized per-image by Init()
+// from SizeOfImage, NOT a fixed inline array: a real app image is
+// several MiB (a 2006-era game is ~9 MiB → ~2300 pages), and an inline
+// `vas[2300]` (~18 KiB) on the 64 KiB kstack would risk a stack
+// overflow. A hard ceiling (kMaxTrackedVas) bounds the allocation so a
+// crafted SizeOfImage can't request an absurd array; a valid image's
+// page count (headers + sections, all within SizeOfImage) plus the
+// fixed stack/TEB/env/stubs slack always fits, so the KASSERT in Track
+// is a never-fires invariant tripwire rather than the load-size limit
+// it used to be (which panicked the kernel on any large valid PE).
 struct LoaderUnwindGuard
 {
-    static constexpr u64 kMaxTrackedVas = 1024;
+    static constexpr u64 kMaxTrackedVas = 262144; // 1 GiB of 4 KiB pages — hard ceiling
     duetos::mm::AddressSpace* as = nullptr;
-    u64 vas[kMaxTrackedVas] = {};
+    u64* vas = nullptr;
+    u64 cap = 0;
     u32 count = 0;
     bool armed = true;
 
+    // Allocate the tracking array for `capacity` page VAs. Returns
+    // false on OOM or an over-ceiling request; the caller must fail the
+    // load (the destructor then no-ops — vas stays null).
+    bool Init(u64 capacity)
+    {
+        if (capacity == 0 || capacity > kMaxTrackedVas)
+            return false;
+        vas = static_cast<u64*>(duetos::mm::KMalloc(capacity * sizeof(u64)));
+        if (vas == nullptr)
+            return false;
+        cap = capacity;
+        return true;
+    }
+
     void Track(u64 va)
     {
-        // Cap exhaustion used to silently no-op, leaving frames
-        // mapped after a failing later step with no record for
-        // the destructor to unmap — a guaranteed leak. The cap is
-        // 4 MiB of mappings; hitting it on a normal PE means the
-        // image is structurally beyond what v0 supports, and
-        // continuing with a half-tracked unwind is worse than a
-        // panic.
-        KASSERT(count < kMaxTrackedVas, "loader/pe", "LoaderUnwindGuard cap exceeded");
+        // cap is sized from SizeOfImage + fixed slack, so a valid image
+        // never exceeds it. If it ever does (a structurally malformed
+        // image mapping pages beyond its declared SizeOfImage), fail
+        // closed: stop tracking rather than write past the array. The
+        // destructor still unwinds everything tracked so far.
+        KASSERT(count < cap, "loader/pe", "LoaderUnwindGuard cap exceeded");
+        if (count >= cap)
+            return;
         vas[count++] = va;
     }
 
@@ -229,12 +250,15 @@ struct LoaderUnwindGuard
 
     ~LoaderUnwindGuard()
     {
-        if (!armed || as == nullptr)
-            return;
-        // Walk in reverse so paging table levels are torn down in
-        // the same order they were built up.
-        for (u32 i = count; i > 0; --i)
-            duetos::mm::AddressSpaceUnmapUserPage(as, vas[i - 1]);
+        if (armed && as != nullptr)
+        {
+            // Walk in reverse so paging table levels are torn down in
+            // the same order they were built up.
+            for (u32 i = count; i > 0; --i)
+                duetos::mm::AddressSpaceUnmapUserPage(as, vas[i - 1]);
+        }
+        if (vas != nullptr)
+            duetos::mm::KFree(vas);
     }
 };
 
@@ -2263,6 +2287,19 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     // unmaps + frees each one. Disarmed at the bottom on success.
     LoaderUnwindGuard guard;
     guard.as = as;
+    // Size the unwind tracker to this image: headers + every section
+    // live within SizeOfImage, plus the fixed extras PeLoad maps later
+    // (stack, TEB, proc-env, Win32 stubs). 64 pages of slack covers
+    // those with margin. Heap-backed so a multi-MiB image (a real app)
+    // doesn't overflow a fixed tracker and panic the kernel.
+    {
+        const u64 image_pages = (u64(h.image_size) + duetos::mm::kPageSize - 1) / duetos::mm::kPageSize;
+        if (!guard.Init(image_pages + 64))
+        {
+            SerialWrite("[pe-load] FAIL unwind-guard alloc (image too large or OOM)\n");
+            return r;
+        }
+    }
 
     // 1. Map PE headers (RO, NX) at ImageBase. Loader
     //    convention — makes __ImageBase usable from ring 3.
