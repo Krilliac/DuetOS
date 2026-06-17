@@ -90,44 +90,25 @@ constexpr u64 AlignDown16(u64 x)
     return x & ~static_cast<u64>(0xF);
 }
 
-// Per-Process top-of-frame pointer recorded by Deliver and
-// consumed by Restore. Not stored in Process directly to keep
-// the signal-delivery state contained — a 1-deep stack is
-// adequate for v0 (no nested delivery).
-//
-// Indexed by pid % kSlots; collisions get a logged warning and
-// fall back to "no saved frame." A real per-Process slot would
-// live in proc/process.h; deferring that until SMP makes the
-// slot-collision risk worth fixing.
-constexpr u32 kSlots = 64;
-struct DeliverySlot
+// Top-of-frame pointer recorded by Deliver and consumed by Restore.
+// Stored per-process in `Process::linux_signal_frame_va` (0 = no
+// delivery in flight) rather than a global pid-hashed slot table: a
+// pid-modular collision in the old `g_slots[pid % 64]` let one
+// process's signal frame VA overwrite another's, so the victim's
+// rt_sigreturn would CopyFromUser an attacker-controlled frame and
+// restore attacker-chosen rip/rsp/registers into its trap frame.
+// 1-deep per process is adequate for v0 (no nested delivery).
+void SlotPut(::duetos::core::Process* p, u64 frame_va)
 {
-    u64 pid;
-    u64 user_frame_va;
-};
-DeliverySlot g_slots[kSlots] = {};
-
-void SlotPut(u64 pid, u64 frame_va)
-{
-    DeliverySlot& s = g_slots[pid % kSlots];
-    if (s.pid != 0 && s.pid != pid)
-    {
-        ::duetos::arch::SerialWrite("[linux/signal] slot collision pid=");
-        ::duetos::arch::SerialWriteHex(pid);
-        ::duetos::arch::SerialWrite(" — overwriting\n");
-    }
-    s.pid = pid;
-    s.user_frame_va = frame_va;
+    p->linux_signal_frame_va = frame_va;
 }
 
-bool SlotTake(u64 pid, u64& out_frame_va)
+bool SlotTake(::duetos::core::Process* p, u64& out_frame_va)
 {
-    DeliverySlot& s = g_slots[pid % kSlots];
-    if (s.pid != pid)
+    if (p->linux_signal_frame_va == 0)
         return false;
-    out_frame_va = s.user_frame_va;
-    s.pid = 0;
-    s.user_frame_va = 0;
+    out_frame_va = p->linux_signal_frame_va;
+    p->linux_signal_frame_va = 0;
     return true;
 }
 
@@ -277,7 +258,7 @@ bool LinuxSignalCheckAndDeliver(::duetos::arch::TrapFrame* frame)
         return false;
     }
 
-    SlotPut(p->pid, frame_va);
+    SlotPut(p, frame_va);
 
     // Mutate the trap frame so iretq lands in the handler.
     frame->rip = handler_va;
@@ -314,7 +295,7 @@ bool LinuxSignalRestoreFrame(::duetos::arch::TrapFrame* frame)
     // misbehaving sa_restorer might have moved rsp; the recorded
     // value is what we wrote and what the magic guards.
     u64 frame_va = 0;
-    if (!SlotTake(p->pid, frame_va))
+    if (!SlotTake(p, frame_va))
     {
         // No saved frame — caller invented an rt_sigreturn.
         // Caller treats this as fatal (the existing DoRtSigreturn

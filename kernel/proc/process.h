@@ -1072,6 +1072,14 @@ struct Process
     // 64-bit width covers signum 1..63, which is the entire
     // POSIX rt-signal range.
     u64 linux_pending_signals;
+    // Top-of-frame VA recorded by LinuxSignalDeliver and consumed by
+    // LinuxSignalRestoreFrame (rt_sigreturn). 0 = no delivery in
+    // flight. Per-process (not a global pid-hashed slot table) so a
+    // pid-modular collision can't let one process's signal frame VA
+    // overwrite another's — which on the victim's rt_sigreturn would
+    // restore attacker-controlled registers into its trap frame.
+    // 1-deep: no nested signal delivery in v0.
+    u64 linux_signal_frame_va;
     // Wait queue for signalfd readers. LinuxSignalDeliver wakes
     // every reader after pushing a pending bit so a blocked
     // signalfd read (post-engine) immediately returns.
