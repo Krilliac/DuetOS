@@ -2782,7 +2782,7 @@ Today's i386 surface (~280 exports, 13 DLLs):
 
 | DLL          | Exports | Source                                |
 |--------------|---------|---------------------------------------|
-| kernel32     | ~40     | `userland/libs/kernel32_32/`         |
+| kernel32     | ~57     | `userland/libs/kernel32_32/`         |
 | msvcrt       | ~50     | `userland/libs/msvcrt_32/`           |
 | user32       | ~60     | `userland/libs/user32_32/`           |
 | gdi32        | ~45     | `userland/libs/gdi32_32/`            |
@@ -2811,6 +2811,21 @@ implementations:
   module surface with real syscall trampolines for the
   syscall-backed entries (GetCurrentProcessId, GetTickCount,
   Sleep, etc.) and sentinel returns for the pseudo-handles.
+  The static-MSVC-CRT startup path is now covered (added
+  2026-06-17, driven by a real 32-bit PE32 application running
+  to its CRT): `OutputDebugStringA` (→ debug sink),
+  `GetVersionExA` (XP/NT), `Tls{Alloc,Free,GetValue,SetValue}`,
+  `GetACP`/`GetOEMCP`/`GetCPInfo`/`IsValidCodePage`,
+  `HeapCreate`/`HeapDestroy` (alias the process heap),
+  `GetEnvironmentVariableA`, `GetModuleFileNameA`,
+  `VirtualQuery` (synthetic MBI), `FlushInstructionCache`.
+  Same slice fixed `GetModuleHandleA`, which had been wired to
+  the wrong syscall (79 = SYS_WIN_SET_CURSOR instead of 172 =
+  SYS_DLL_BASE_BY_NAME) and returned a garbage base — it now
+  returns the real EXE/DLL image base, also fixing
+  `GetModuleHandleW`/`LoadLibraryA`/`LoadLibraryW`. With this
+  surface a static-CRT PE32 clears heap/TLS/locale/SEH-directory
+  init and reaches its own application code.
 - `msvcrt_32` provides real string + memory intrinsics
   (memcpy / strlen / strcmp / etc.) and a bump-allocator
   malloc / free until the proper heap port lands.
