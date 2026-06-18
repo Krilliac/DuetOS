@@ -203,7 +203,18 @@ __declspec(dllexport) BOOL __stdcall WriteConsoleW(HANDLE hConsole, const wchar_
  * post-ASLR base VA for the named module, or 0 if not loaded. */
 __declspec(dllexport) HANDLE __stdcall GetModuleHandleA(const char* lpModuleName)
 {
-    return (HANDLE)(unsigned long)(unsigned)duet_syscall1(79, (unsigned)(unsigned long)lpModuleName);
+    /* SYS_DLL_BASE_BY_NAME (172): rdi = name ptr, rsi = name length.
+     * A NULL/empty name returns the EXE image base, matching
+     * GetModuleHandle(NULL) semantics and the 64-bit kernel32. (This
+     * previously called syscall 79 — SYS_WIN_SET_CURSOR — with the name
+     * pointer and no length, returning a garbage value the caller's CRT
+     * then dereferenced as a module base.) */
+    unsigned len = 0;
+    if (lpModuleName != (const char*)0)
+        while (len < 63 && lpModuleName[len] != 0)
+            ++len;
+    return (HANDLE)(unsigned long)(unsigned)duet_syscall3(172 /* SYS_DLL_BASE_BY_NAME */,
+                                                          (unsigned)(unsigned long)lpModuleName, len, 0);
 }
 
 __declspec(dllexport) HANDLE __stdcall GetModuleHandleW(const wchar_t16* lpModuleName)
@@ -522,4 +533,245 @@ __declspec(dllexport) long __stdcall InterlockedCompareExchange(long volatile* p
     if (old == cmp)
         *p = val;
     return old;
+}
+
+/* ------------------------------------------------------------------
+ * Debug output
+ * ------------------------------------------------------------------ */
+
+/* OutputDebugStringA — route the NUL-terminated string to the kernel
+ * debug sink via SYS_WRITE(fd=1), the same channel WriteFile uses for
+ * stdout. On Windows with no debugger attached the string is simply
+ * discarded; surfacing it on the serial console (the DuetOS debug
+ * sink) is the more useful behaviour and is consistent with
+ * IsDebuggerPresent returning the "no debugger" answer. A guest PE32's
+ * static CRT may call this through an OutputDebugStringf-style wrapper
+ * on its startup/diagnostics path, so a real implementation (not the
+ * unresolved-import stub that SYS_EXITs) is required to clear CRT
+ * init. */
+__declspec(dllexport) void __stdcall OutputDebugStringA(const char* lpOutputString)
+{
+    if (lpOutputString == (const char*)0)
+        return;
+    unsigned n = 0;
+    while (lpOutputString[n] != 0)
+        ++n;
+    if (n != 0)
+        duet_syscall3(2 /* SYS_WRITE */, 1 /* fd = stdout/debug sink */, (unsigned)(unsigned long)lpOutputString, n);
+}
+
+/* ------------------------------------------------------------------
+ * OS version
+ * ------------------------------------------------------------------ */
+
+/* GetVersionExA — fill the caller's OSVERSIONINFO(EX)A. Reports
+ * Windows XP (5.1 build 2600, VER_PLATFORM_WIN32_NT), consistent with
+ * the GetVersion export above and period-appropriate for the
+ * early-2000s PE32 binaries this layer targets. The caller pre-sets
+ * dwOSVersionInfoSize (offset 0) to 148 (OSVERSIONINFOA) or 156 (EX);
+ * we reject anything smaller, then fill the five base DWORDs, zero
+ * szCSDVersion[128], and zero the EX tail when present. A guest that
+ * reads dwPlatformId after the call branches to its NT path on ==2. */
+__declspec(dllexport) BOOL __stdcall GetVersionExA(void* lpVersionInformation)
+{
+    if (lpVersionInformation == (void*)0)
+        return 0;
+    DWORD* p = (DWORD*)lpVersionInformation;
+    if (p[0] < 148) /* smaller than sizeof(OSVERSIONINFOA) — invalid */
+        return 0;
+    p[1] = 5;                                     /* dwMajorVersion */
+    p[2] = 1;                                     /* dwMinorVersion */
+    p[3] = 2600;                                  /* dwBuildNumber */
+    p[4] = 2;                                     /* dwPlatformId = VER_PLATFORM_WIN32_NT */
+    char* csd = (char*)lpVersionInformation + 20; /* szCSDVersion[128] */
+    for (int i = 0; i < 128; ++i)
+        csd[i] = 0;
+    if (p[0] >= 156) /* OSVERSIONINFOEXA — zero the SP/suite/product tail */
+    {
+        unsigned char* ex = (unsigned char*)lpVersionInformation + 148;
+        for (int i = 0; i < 8; ++i)
+            ex[i] = 0;
+    }
+    return 1;
+}
+
+/* ------------------------------------------------------------------
+ * Thread-local storage — SYS_TLS_ALLOC=34 / FREE=35 / GET=36 / SET=37.
+ * The static CRT uses these for its per-thread errno / FPU-state and
+ * its _onexit table. TLS_OUT_OF_INDEXES (0xFFFFFFFF) signals alloc
+ * failure.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) DWORD __stdcall TlsAlloc(void)
+{
+    return (DWORD)duet_syscall0(34 /* SYS_TLS_ALLOC */);
+}
+
+__declspec(dllexport) BOOL __stdcall TlsFree(DWORD slot)
+{
+    return duet_syscall1(35 /* SYS_TLS_FREE */, slot) == 0 ? 1 : 0;
+}
+
+__declspec(dllexport) void* __stdcall TlsGetValue(DWORD slot)
+{
+    const int rv = duet_syscall1(36 /* SYS_TLS_GET */, slot);
+    return (void*)(unsigned long)(unsigned)rv;
+}
+
+__declspec(dllexport) BOOL __stdcall TlsSetValue(DWORD slot, void* value)
+{
+    return duet_syscall3(37 /* SYS_TLS_SET */, slot, (unsigned)(unsigned long)value, 0) == 0 ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------
+ * Locale / code page — fixed en-US / Latin-1. Pure userland, no
+ * syscalls. The static CRT queries the ANSI/OEM code pages during
+ * startup to size its mbtowc tables.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) UINT __stdcall GetACP(void)
+{
+    return 1252; /* Western European (Latin-1) ANSI code page. */
+}
+
+__declspec(dllexport) UINT __stdcall GetOEMCP(void)
+{
+    return 437; /* OEM US. */
+}
+
+__declspec(dllexport) BOOL __stdcall IsValidCodePage(UINT codepage)
+{
+    return (codepage == 437 || codepage == 1252 || codepage == 65001) ? 1 : 0;
+}
+
+/* CPINFO: 32-bit layout is identical (no pointers). MaxCharSize=1 for
+ * the SBCS code pages we report, 4 for UTF-8. */
+typedef struct
+{
+    UINT MaxCharSize;
+    unsigned char DefaultChar[2];
+    unsigned char LeadByte[12];
+} DUETOS_CPINFO32;
+
+__declspec(dllexport) BOOL __stdcall GetCPInfo(UINT CodePage, DUETOS_CPINFO32* lpCPInfo)
+{
+    if (lpCPInfo == (DUETOS_CPINFO32*)0)
+        return 0;
+    for (int i = 0; i < 12; ++i)
+        lpCPInfo->LeadByte[i] = 0; /* no DBCS lead-byte ranges */
+    lpCPInfo->DefaultChar[0] = '?';
+    lpCPInfo->DefaultChar[1] = 0;
+    lpCPInfo->MaxCharSize = (CodePage == 65001) ? 4u : 1u;
+    return 1;
+}
+
+/* ------------------------------------------------------------------
+ * Heap creation / teardown
+ * ------------------------------------------------------------------ */
+
+/* HeapCreate — the static CRT creates its main heap here and then
+ * routes every subsequent HeapAlloc/HeapFree through the returned
+ * handle. Our HeapAlloc/HeapFree ignore the handle and use the single
+ * per-process heap, so we return the same sentinel GetProcessHeap
+ * does: the CRT's "private" heap IS the process heap. Returning NULL
+ * would send the CRT down its abort path. */
+__declspec(dllexport) HANDLE __stdcall HeapCreate(DWORD flOptions, unsigned dwInitialSize, unsigned dwMaximumSize)
+{
+    (void)flOptions;
+    (void)dwInitialSize;
+    (void)dwMaximumSize;
+    return (HANDLE)0x12340000u; /* same per-process-heap sentinel as GetProcessHeap */
+}
+
+/* HeapDestroy — the per-process heap is never torn down; succeed.
+ * Only reached on the CRT's error/teardown path. */
+__declspec(dllexport) BOOL __stdcall HeapDestroy(HANDLE hHeap)
+{
+    (void)hHeap;
+    return 1;
+}
+
+/* ------------------------------------------------------------------
+ * Environment / module path
+ * ------------------------------------------------------------------ */
+
+/* GetEnvironmentVariableA — v0 has no per-process environment table,
+ * so every variable reports "not found". The CRT's getenv tolerates a
+ * 0 (variable absent) return. */
+// STUB: empty environment — every variable reports not-found.
+__declspec(dllexport) DWORD __stdcall GetEnvironmentVariableA(const char* lpName, char* lpBuffer, DWORD nSize)
+{
+    (void)lpName;
+    (void)lpBuffer;
+    (void)nSize;
+    return 0;
+}
+
+/* GetModuleFileNameA — v0 returns a fixed sentinel path, consistent
+ * with the "X:\" drive and "a.exe" program-name sentinels the
+ * GetCurrentDirectoryA / GetCommandLineA exports already use. A guest
+ * CRT uses the result for _pgmptr and to derive its own directory. */
+// GAP: fixed sentinel module path — the real staged path needs the PE32
+// proc-env page (not yet wired); revisit when a guest derives a data
+// directory from its module path.
+__declspec(dllexport) DWORD __stdcall GetModuleFileNameA(HANDLE hModule, char* lpFilename, DWORD nSize)
+{
+    (void)hModule;
+    if (lpFilename == (char*)0 || nSize == 0)
+        return 0;
+    static const char path[] = "X:\\a.exe";
+    DWORD i = 0;
+    for (; i < nSize - 1 && path[i] != 0; ++i)
+        lpFilename[i] = path[i];
+    lpFilename[i] = 0;
+    return i;
+}
+
+/* ------------------------------------------------------------------
+ * Virtual-memory query / instruction cache
+ * ------------------------------------------------------------------ */
+
+/* MEMORY_BASIC_INFORMATION, classic pre-Win10 28-byte layout (no
+ * PartitionId) — the shape a period PE32 passes (dwLength == 0x1c). */
+typedef struct
+{
+    void* BaseAddress;
+    void* AllocationBase;
+    DWORD AllocationProtect;
+    unsigned RegionSize;
+    DWORD State;
+    DWORD Protect;
+    DWORD Type;
+} DUETOS_MBI32;
+
+/* VirtualQuery — fill a MEMORY_BASIC_INFORMATION for the queried
+ * address. v0 reports a synthetic single committed page, mirroring the
+ * 64-bit kernel32 VirtualQuery: enough for callers that probe a
+ * region's state. */
+// GAP: synthetic region info (single committed page), not backed by the
+// kernel's region ledger — AllocationBase is the page-aligned query
+// address, not the true allocation/module base; revisit with a
+// region-query syscall if a guest relies on the real base.
+__declspec(dllexport) unsigned __stdcall VirtualQuery(const void* lpAddress, DUETOS_MBI32* lpBuffer, unsigned dwLength)
+{
+    if (lpBuffer == (DUETOS_MBI32*)0 || dwLength < sizeof(*lpBuffer))
+        return 0;
+    void* base = (void*)((unsigned long)lpAddress & ~0xFFFUL);
+    lpBuffer->BaseAddress = base;
+    lpBuffer->AllocationBase = base;
+    lpBuffer->AllocationProtect = 0x04; /* PAGE_READWRITE */
+    lpBuffer->RegionSize = 0x1000;
+    lpBuffer->State = 0x1000; /* MEM_COMMIT */
+    lpBuffer->Protect = 0x04; /* PAGE_READWRITE */
+    lpBuffer->Type = 0x20000; /* MEM_PRIVATE */
+    return sizeof(*lpBuffer);
+}
+
+/* FlushInstructionCache — x86 keeps the I-cache coherent with normal
+ * D-cache stores, so a self-modifying / JIT caller needs no explicit
+ * flush; succeed. */
+__declspec(dllexport) BOOL __stdcall FlushInstructionCache(HANDLE hProcess, const void* lpBaseAddress, unsigned dwSize)
+{
+    (void)hProcess;
+    (void)lpBaseAddress;
+    (void)dwSize;
+    return 1;
 }

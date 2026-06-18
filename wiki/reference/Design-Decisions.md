@@ -11852,3 +11852,38 @@ markers for its richest input. Three discovery layers were added (runtime
   init until it calls an import not in the 32-bit DLL export set and
   cleanly self-terminates via the unresolved-stub `SYS_EXIT(0xDEAD0042)`
   — no crash. Standard boot remains OK=244 / non-deliberate FAIL=0.
+
+## 2026-06-17 — PE32 import ladder: instrument the unresolved-import stub; climb per-call
+
+- **Context:** a 32-bit PE32 guest binds every unresolved import to a
+  single shared stub at `kWin32Thunks32UnresolvedVa` that does
+  `SYS_EXIT(0xDEAD0042)`. The stub is shared, so a terminal
+  `rc=0xDEAD0042` did not say *which* import the guest actually called —
+  only that it called one. Growing the `_32` DLL export set blindly is
+  the anti-pattern: a wrong return value from a speculatively-added CRT
+  function corrupts a static MSVC CRT (wild pointer), and most of the
+  148-deep KERNEL32 import surface is never reached on the live path.
+- **Decision — instrument, don't guess.** The `SYS_EXIT` handler, gated
+  on the `0xDEAD0042` sentinel, reads the caller's 32-bit return address
+  off the user stack (`[esp] == frame->rsp`, the stub pushes no frame)
+  and logs `[win32-32miss] ret=0x...`. `RVA = ret - image_base` →
+  `i686-w64-mingw32-objdump -d --start-address=<RVA>` names the
+  `call [IAT slot]` and the import. Each rung is then implemented with
+  *real or proven-safe* semantics, never a blind constant, and the guest
+  re-run to confirm it advances. **Rules out** the "bulk-stub the whole
+  DLL" approach for the static-CRT path.
+- **Class-of-bug found:** the existing `kernel32_32::GetModuleHandleA`
+  was wired to syscall **79 (`SYS_WIN_SET_CURSOR`)** instead of **172
+  (`SYS_DLL_BASE_BY_NAME`)** and passed no name length — returning a
+  garbage "module base" the guest CRT fed to
+  `RtlImageDirectoryEntryToData`, faulting at `base+0x3c`. Lesson:
+  hand-written 32-bit thunks carry a literal syscall number that must
+  match the kernel enum; a wrong literal is invisible until a guest
+  exercises it. The 64-bit companion is the reference for the correct
+  number + arg shape.
+- **GAP accepted:** `VirtualQuery` returns a synthetic single-committed-
+  page MBI (not region-ledger-backed); its `AllocationBase` is the
+  page-aligned query address, not the true module base. Tolerated by the
+  current guest; a real region-query syscall is the fix if a guest walks
+  the reported base. The 64-bit `kernel32` VirtualQuery is the same
+  synthetic, so this is consistent, not a regression.

@@ -585,6 +585,25 @@ void SyscallDispatch(arch::TrapFrame* frame)
     {
         const u64 code = frame->rdi;
         LogWithValue(LogLevel::Info, "sys", "exit rc", code);
+        // WoW-climb diagnostic: 0xDEAD0042 is the sentinel the shared 32-bit
+        // unresolved-import stub (win32::kWin32Thunks32UnresolvedVa) passes to
+        // SYS_EXIT when a PE32 calls an import no _32 companion DLL exports.
+        // The stub is bare asm that does not push a frame, so the offending
+        // `call [iat_slot]`'s return address is still on top of the caller's
+        // 32-bit user stack ([esp] == frame->rsp). Logging it lets a climber
+        // map RVA = ret - image_base back to the import call site and name the
+        // missing function. Gated on the sentinel so normal boots stay quiet;
+        // a genuine ExitProcess(0xDEAD0042) collision is vanishingly unlikely
+        // and at worst logs one spurious WARN.
+        if (code == 0xDEAD0042ULL)
+        {
+            u32 ret32 = 0;
+            const void* user_sp = reinterpret_cast<const void*>(frame->rsp & 0xFFFFFFFFULL);
+            if (mm::CopyFromUser(&ret32, user_sp, sizeof(ret32)))
+            {
+                LogWithValue(LogLevel::Warn, "win32-32miss", "ret", ret32);
+            }
+        }
         // Batch 59: if the exiting task owns a Win32 thread-handle
         // slot in its Process, record the exit code there so
         // GetExitCodeThread on that handle can return a real

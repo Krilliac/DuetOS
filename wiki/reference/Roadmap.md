@@ -886,39 +886,49 @@ choice, not a one-liner:
 
 ## End-user features
 
-### Run a real 32-bit game — World of Warcraft 1.12.1 (failure ladder)
+### Run a real 32-bit application — PE32 game executable (failure ladder)
 
-The standing target for the "run real Windows apps" pillar. `World of
-Warcraft.exe` is a **32-bit PE32** (`pei-i386`), 4.77 MB on disk /
+The standing target for the "run real Windows apps" pillar is a
+representative **32-bit PE32** (`pei-i386`) GUI game, ~4.8 MB on disk /
 9.4 MB image, Windows-GUI subsystem, importing KERNEL32, USER32, GDI32,
 ADVAPI32, COMCTL32, SHELL32, IMM32, WININET, WSOCK32, WINMM, **OPENGL32**
-(this build renders via OpenGL, not D3D), plus bundled `fmod.dll`
-(audio), `SDL.dll`, `ijl15.dll`, `DivxDecoder.dll`. Install is 2.7 GB
-(MPQ archives under `Data/`).
+(this build renders via OpenGL, not D3D), plus bundled third-party
+DLLs (`fmod.dll` audio, an image codec, a video codec). Its data lives
+in large bundled archive files (multi-GB).
 
 **Landed (2026-06-17):** large-exe support (dynamic peexec read buffer +
-heap-backed loader unwind guard — see Design-Decisions). WoW now reads,
+heap-backed loader unwind guard — see Design-Decisions); the exe reads,
 maps all sections, resolves imports, spawns, and **executes in 32-bit
-ring 3** (`mode=pe32`), running CRT init until the first uncovered
-import. **Milestone: a 32-bit game exe runs on DuetOS.**
+ring 3** (`mode=pe32`). The **`[win32-32miss]` instrumentation**
+(`SYS_EXIT` handler logs the caller's return address on the
+unresolved-import sentinel `0xDEAD0042`) turns each fatal import into a
+named RVA. The static-MSVC-CRT startup cluster is now covered in
+`kernel32_32` (OutputDebugStringA, GetVersionExA, Tls\*, locale/codepage,
+HeapCreate/Destroy, GetEnvironmentVariableA, GetModuleFileNameA,
+VirtualQuery, FlushInstructionCache) and a **`GetModuleHandleA`
+wrong-syscall bug** (was calling SYS_WIN_SET_CURSOR) was fixed. The exe
+now **clears CRT startup entirely and runs into its own application
+code** without faulting. **Milestone: a 32-bit game exe runs on DuetOS.**
 
 The remaining rungs, in order (each the proven attempt→trace-exact-
-fault→fix→re-run loop, `tools/test/run-exe.sh` + `peexec=`):
+fault→fix→re-run loop, `tools/test/run-exe.sh` + `peexec=`, using the
+`[win32-32miss] ret=` line → `i686-w64-mingw32-objdump -d
+--start-address` to name the import):
 
-1. **32-bit DLL export coverage.** WoW currently self-terminates via the
-   32-bit unresolved-import stub (`SYS_EXIT(0xDEAD0042)`) the moment it
-   calls an import the `_32` DLL set doesn't export. Grow per-call,
-   driven by which fn it called at the fatal RVA (`rip - image_base` →
-   `i686-w64-mingw32-objdump -d --start-address`). This is the long
-   middle of the climb (CRT/init → USER32 window class → message loop).
-2. **MPQ data staging + FAT large volume.** WoW reads `Data/*.MPQ`
-   (multi-GB). Staging needs a much larger disk image than the 16 MiB
-   `make-gpt-image.py` default, exercising the FAT32 large-volume +
-   write paths. NOTE: the run-exe.sh staging-image boot currently trips
-   the screenshot / trash / fix-journal-persist disk-write self-tests
-   and a wild-LBA FAT read (the known transient emulated-block flake) —
-   triage those here, where the FAT image work is.
-3. **OpenGL.** `OPENGL32` is a NO-OP stub; WoW's renderer needs a real
+1. **Post-CRT application init.** The exe currently reaches its own code
+   and settles into a quiet loop (no syscalls) — characterise what it
+   waits on (window creation / a timing or event wait) and continue the
+   import-coverage climb (USER32 window class → message loop). This is
+   the long middle of the climb.
+2. **Large bundled-data staging + FAT large volume.** The exe reads
+   multi-GB archive files. Staging needs a much larger disk image than
+   the 16 MiB `make-gpt-image.py` default, exercising the FAT32
+   large-volume + write paths. NOTE: the run-exe.sh staging-image boot
+   currently trips the screenshot / trash / fix-journal-persist
+   disk-write self-tests and a wild-LBA FAT read (the known transient
+   emulated-block flake) — triage those here, where the FAT image work
+   is.
+3. **OpenGL.** `OPENGL32` is a NO-OP stub; the renderer needs a real
    GL implementation (GL 1.x fixed-function → the in-kernel Vulkan ICD,
    or a software GL). The big rendering-subsystem expansion.
 4. **WSOCK32 / WININET** (realm/login networking) and **FMOD** audio —

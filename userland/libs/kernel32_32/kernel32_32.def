@@ -51,3 +51,19 @@ EXPORTS
     InterlockedDecrement
     InterlockedExchange
     InterlockedCompareExchange
+    OutputDebugStringA
+    GetVersionExA
+    TlsAlloc
+    TlsFree
+    TlsGetValue
+    TlsSetValue
+    GetACP
+    GetOEMCP
+    IsValidCodePage
+    GetCPInfo
+    HeapCreate
+    HeapDestroy
+    GetEnvironmentVariableA
+    GetModuleFileNameA
+    VirtualQuery
+    FlushInstructionCache
