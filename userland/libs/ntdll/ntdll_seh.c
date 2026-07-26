@@ -1,4 +1,5 @@
 #include "ntdll_internal.h"
+#include "../common/pe_unwind_bounds.h"
 
 /* ------------------------------------------------------------------
  * SEH unwind helpers
@@ -60,29 +61,15 @@ __declspec(dllexport) void* RtlLookupFunctionEntry(unsigned long long ControlPc,
     unsigned long long base = ntdll_module_base_by_va(ControlPc);
     if (base == 0)
         base = ntdll_exe_base();
-    if (ImageBase != (unsigned long long*)0)
-        *ImageBase = base;
     if (base == 0 || ControlPc < base)
         return (void*)0;
-    const unsigned char* img = (const unsigned char*)base;
-    if (img[0] != 'M' || img[1] != 'Z')
+    DUET_PE_VIEW view;
+    if (!duet_pe_parse((const void*)base, &view) || ControlPc - base >= view.size)
         return (void*)0;
-    const unsigned int e_lfanew = *(const unsigned int*)(img + 0x3C);
-    const unsigned char* nt = img + e_lfanew;
-    if (nt[0] != 'P' || nt[1] != 'E' || nt[2] != 0 || nt[3] != 0)
-        return (void*)0;
-    const unsigned char* opt = nt + 0x18;
-    if (*(const unsigned short*)opt != 0x20B) /* PE32+ only */
-        return (void*)0;
-    /* DataDirectory[3] = IMAGE_DIRECTORY_ENTRY_EXCEPTION. PE32+
-     * optional header: DataDirectory begins at opt+0x70. */
-    const unsigned int* dd = (const unsigned int*)(opt + 0x70 + 3 * 8);
-    const unsigned int pdata_rva = dd[0];
-    const unsigned int pdata_sz = dd[1];
-    if (pdata_rva == 0 || pdata_sz < sizeof(RUNTIME_FUNCTION))
-        return (void*)0;
-    const RUNTIME_FUNCTION* fns = (const RUNTIME_FUNCTION*)(img + pdata_rva);
-    const unsigned int n = pdata_sz / (unsigned int)sizeof(RUNTIME_FUNCTION);
+    if (ImageBase != (unsigned long long*)0)
+        *ImageBase = base;
+    const RUNTIME_FUNCTION* fns = (const RUNTIME_FUNCTION*)(view.base + view.pdata_rva);
+    const unsigned int n = view.pdata_size / (unsigned int)sizeof(RUNTIME_FUNCTION);
     const unsigned int off = (unsigned int)(ControlPc - base);
     /* .pdata is sorted by BeginAddress — binary search. */
     unsigned int lo = 0, hi = n;
@@ -114,6 +101,142 @@ static unsigned long long* nt_rip(void* c)
 {
     return (unsigned long long*)((unsigned char*)c + 0xF8);
 }
+static void nt_restore_xmm(void* c, int i, const void* saved)
+{
+    /* CONTEXT.Xmm0 begins at 0x1a0; each M128A is 16 bytes.
+     * Copy bytewise because unwind save slots need not satisfy a
+     * native C alignment assumption. */
+    unsigned char* dst = (unsigned char*)c + 0x1A0 + (unsigned)(i & 15) * 16u;
+    const unsigned char* src = (const unsigned char*)saved;
+    for (unsigned j = 0; j < 16u; ++j)
+        dst[j] = src[j];
+}
+static int nt_nonvolatile_gpr(unsigned reg)
+{
+    return reg == 3u || reg == 5u || reg == 6u || reg == 7u || reg >= 12u;
+}
+static int nt_unwind_op_width(unsigned short code, unsigned frreg, unsigned* width)
+{
+    const unsigned op = (code >> 8) & 0x0Fu;
+    const unsigned info = (code >> 12) & 0x0Fu;
+    if (op == 0u)
+    {
+        if (!nt_nonvolatile_gpr(info))
+            return 0;
+        *width = 1u;
+    }
+    else if (op == 1u)
+    {
+        if (info > 1u)
+            return 0;
+        *width = info == 0u ? 2u : 3u;
+    }
+    else if (op == 2u)
+    {
+        *width = 1u;
+    }
+    else if (op == 3u)
+    {
+        if (info != 0u || frreg == 0u || !nt_nonvolatile_gpr(frreg))
+            return 0;
+        *width = 1u;
+    }
+    else if (op == 4u || op == 5u)
+    {
+        if (!nt_nonvolatile_gpr(info))
+            return 0;
+        *width = op == 4u ? 2u : 3u;
+    }
+    else if (op == 8u || op == 9u)
+    {
+        if (info < 6u)
+            return 0;
+        *width = op == 8u ? 2u : 3u;
+    }
+    else if (op == 10u)
+    {
+        if (info > 1u)
+            return 0;
+        *width = 1u;
+    }
+    else
+    {
+        return 0;
+    }
+    return 1;
+}
+static int nt_validate_unwind_chain(const DUET_PE_VIEW* view, const RUNTIME_FUNCTION* first)
+{
+    return duet_pe_validate_unwind_chain(view, first);
+}
+static unsigned nt_prolog_offset(const unsigned char* ui, unsigned long long image_base, const RUNTIME_FUNCTION* rf,
+                                 unsigned long long control_pc)
+{
+    const unsigned long long begin = image_base + rf->BeginAddress;
+    if (control_pc <= begin)
+        return 0u;
+    const unsigned long long offset = control_pc - begin;
+    return offset >= (unsigned long long)ui[1] ? 0xFFu : (unsigned)offset;
+}
+static int nt_chain_frame_established(const DUET_PE_VIEW* view, const RUNTIME_FUNCTION* first,
+                                      unsigned long long image_base, unsigned long long control_pc)
+{
+    return duet_pe_chain_frame_established(view, first, image_base, control_pc);
+}
+
+/* Validated handler/establisher lookup shared by the dispatch and
+ * unwind passes. The returned handler is inside an executable image
+ * section and its first handler-data word is in-bounds. */
+unsigned char RtlpReadUnwindHandler(unsigned long long ImageBase, unsigned long long ControlPc, void* FunctionEntry,
+                                    void* ContextRecord, void** Handler, void** HandlerData,
+                                    unsigned long long* EstablisherFrame)
+{
+    if (Handler != (void**)0)
+        *Handler = (void*)0;
+    if (HandlerData != (void**)0)
+        *HandlerData = (void*)0;
+    if (FunctionEntry == (void*)0 || ContextRecord == (void*)0 || EstablisherFrame == (unsigned long long*)0)
+        return 0;
+
+    DUET_PE_VIEW view;
+    const RUNTIME_FUNCTION* first = (const RUNTIME_FUNCTION*)FunctionEntry;
+    if (ntdll_module_base_by_va(ControlPc) != ImageBase || !duet_pe_parse((const void*)ImageBase, &view) ||
+        ControlPc < ImageBase || ControlPc - ImageBase >= view.size || !nt_validate_unwind_chain(&view, first))
+        return 0;
+
+    DUET_PE_UNWIND_LAYOUT head;
+    if (!duet_pe_unwind_layout(&view, first, &head))
+        return 0;
+    const int frame_established = nt_chain_frame_established(&view, first, ImageBase, ControlPc);
+    *EstablisherFrame = frame_established
+                            ? (*nt_reg(ContextRecord, (int)head.frreg) - (unsigned long long)head.froff * 16ULL)
+                            : *nt_rsp(ContextRecord);
+
+    const RUNTIME_FUNCTION* rf = first;
+    for (unsigned guard = 0; guard < 32u; ++guard)
+    {
+        DUET_PE_UNWIND_LAYOUT layout;
+        if (!duet_pe_unwind_layout(&view, rf, &layout))
+            return 0;
+        if ((layout.flags & 0x4u) != 0u)
+        {
+            rf = (const RUNTIME_FUNCTION*)layout.tail;
+            continue;
+        }
+        if ((layout.flags & 0x3u) != 0u)
+        {
+            const unsigned int handler_rva = duet_pe_u32(layout.tail);
+            if (!duet_pe_rva_executable(&view, handler_rva))
+                return 0;
+            if (Handler != (void**)0)
+                *Handler = (void*)(ImageBase + handler_rva);
+            if (HandlerData != (void**)0)
+                *HandlerData = (void*)(layout.tail + 4u);
+        }
+        return (unsigned char)layout.flags;
+    }
+    return 0;
+}
 
 /* Real x64 table-based RtlVirtualUnwind — see the matching
  * kernel32 copy for the full commentary (Windows forwards this
@@ -126,13 +249,23 @@ __declspec(dllexport) void* RtlVirtualUnwind(unsigned long HandlerType, unsigned
                                              void* ContextPointers)
 {
     (void)HandlerType;
-    (void)ControlPc;
     (void)ContextPointers;
     if (HandlerData != (void**)0)
         *HandlerData = (void*)0;
     if (FunctionEntry == (void*)0 || ContextRecord == (void*)0)
         return (void*)0;
     const RUNTIME_FUNCTION* rf = (const RUNTIME_FUNCTION*)FunctionEntry;
+    DUET_PE_VIEW view;
+    if (ntdll_module_base_by_va(ControlPc) != ImageBase || !duet_pe_parse((const void*)ImageBase, &view) ||
+        ControlPc < ImageBase || ControlPc - ImageBase >= view.size || !nt_validate_unwind_chain(&view, rf))
+        return (void*)0;
+    DUET_PE_UNWIND_LAYOUT head;
+    if (!duet_pe_unwind_layout(&view, rf, &head))
+        return (void*)0;
+    const int frame_established = nt_chain_frame_established(&view, rf, ImageBase, ControlPc);
+    const unsigned long long frame_base =
+        frame_established ? (*nt_reg(ContextRecord, (int)head.frreg) - (unsigned long long)head.froff * 16ULL)
+                          : *nt_rsp(ContextRecord);
     for (int g = 0; g < 32; ++g)
     {
         const unsigned char* ui = (const unsigned char*)(ImageBase + rf->UnwindInfoAddress);
@@ -141,62 +274,62 @@ __declspec(dllexport) void* RtlVirtualUnwind(unsigned long HandlerType, unsigned
         const unsigned char frreg = (unsigned char)(ui[3] & 0x0F);
         const unsigned char froff = (unsigned char)(ui[3] >> 4);
         const unsigned short* codes = (const unsigned short*)(ui + 4);
-        unsigned long long fb =
-            frreg ? (*nt_reg(ContextRecord, frreg) - (unsigned long long)froff * 16ULL) : *nt_rsp(ContextRecord);
+        const unsigned prolog_offset = g == 0 ? nt_prolog_offset(ui, ImageBase, rf, ControlPc) : 0xFFu;
+        const unsigned long long fb = frame_base;
         unsigned i = 0;
         while (i < count)
         {
             const unsigned short cw = codes[i];
             const unsigned op = (cw >> 8) & 0x0F, info = (cw >> 12) & 0x0F;
+            const unsigned code_offset = cw & 0xFFu;
+            unsigned width = 0;
+            if (!nt_unwind_op_width(cw, frreg, &width) || width > count - i)
+                return (void*)0;
+            if (code_offset > prolog_offset)
+            {
+                i += width;
+                continue;
+            }
             unsigned long long* rsp = nt_rsp(ContextRecord);
             if (op == 0)
             {
                 *nt_reg(ContextRecord, (int)info) = *(unsigned long long*)(*rsp);
                 *rsp += 8;
-                i += 1;
             }
             else if (op == 1)
             {
                 if (info == 0)
-                {
                     *rsp += (unsigned long long)codes[i + 1] * 8ULL;
-                    i += 2;
-                }
                 else
-                {
                     *rsp += (unsigned long long)(*(const unsigned int*)&codes[i + 1]);
-                    i += 3;
-                }
             }
             else if (op == 2)
             {
                 *rsp += (unsigned long long)info * 8ULL + 8ULL;
-                i += 1;
             }
             else if (op == 3)
             {
                 *rsp = *nt_reg(ContextRecord, (int)frreg) - (unsigned long long)froff * 16ULL;
-                i += 1;
             }
             else if (op == 4)
             {
                 *nt_reg(ContextRecord, (int)info) =
                     *(unsigned long long*)(fb + (unsigned long long)codes[i + 1] * 8ULL);
-                i += 2;
             }
             else if (op == 5)
             {
                 *nt_reg(ContextRecord, (int)info) =
                     *(unsigned long long*)(fb + (unsigned long long)(*(const unsigned int*)&codes[i + 1]));
-                i += 3;
             }
             else if (op == 8)
             {
-                i += 2;
+                const unsigned long long off = (unsigned long long)codes[i + 1] * 16ULL;
+                nt_restore_xmm(ContextRecord, (int)info, (const void*)(fb + off));
             }
             else if (op == 9)
             {
-                i += 3;
+                const unsigned long long off = (unsigned long long)(*(const unsigned int*)&codes[i + 1]);
+                nt_restore_xmm(ContextRecord, (int)info, (const void*)(fb + off));
             }
             else if (op == 10)
             {
@@ -209,8 +342,9 @@ __declspec(dllexport) void* RtlVirtualUnwind(unsigned long HandlerType, unsigned
             }
             else
             {
-                i += 1;
+                return (void*)0; /* prevalidation makes this unreachable */
             }
+            i += width;
         }
         if (flags & 0x4)
         {
@@ -239,7 +373,7 @@ __declspec(dllexport) unsigned short RtlCaptureStackBackTrace(unsigned long Fram
 {
     if (BackTrace == (void**)0 || FramesToCapture == 0)
         return 0;
-    unsigned char ctxbuf[1232];
+    unsigned char ctxbuf[1232] __attribute__((aligned(16)));
     for (int z = 0; z < 1232; ++z)
         ctxbuf[z] = 0;
     RtlCaptureContext(ctxbuf);

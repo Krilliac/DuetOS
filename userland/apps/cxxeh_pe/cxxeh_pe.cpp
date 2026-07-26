@@ -118,11 +118,15 @@ static int test_catch_all()
 
 extern "C" int mainCRTStartup(void)
 {
-    int ok = 1;
-    ok &= test_int_throw();
-    ok &= test_class_throw();
-    ok &= test_unwind_dtor();
-    ok &= test_catch_all();
+    const int int_ok = test_int_throw();
+    put(int_ok ? "[cxxeh] int-catch: PASS\n" : "[cxxeh] int-catch: FAIL\n");
+    const int class_ok = test_class_throw();
+    put(class_ok ? "[cxxeh] class-ref-catch: PASS\n" : "[cxxeh] class-ref-catch: FAIL\n");
+    const int dtor_ok = test_unwind_dtor();
+    put(dtor_ok ? "[cxxeh] destructor-unwind: PASS\n" : "[cxxeh] destructor-unwind: FAIL\n");
+    const int catch_all_ok = test_catch_all();
+    put(catch_all_ok ? "[cxxeh] catch-all: PASS\n" : "[cxxeh] catch-all: FAIL\n");
+    const int ok = int_ok & class_ok & dtor_ok & catch_all_ok;
 
     if (ok)
     {

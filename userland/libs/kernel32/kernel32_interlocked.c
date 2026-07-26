@@ -1,5 +1,7 @@
 #include "kernel32_internal.h"
 
+#include "../common/pe_unwind_bounds.h"
+
 /* ------------------------------------------------------------------
  * Interlocked* family — atomic read/modify/write primitives.
  *
@@ -103,6 +105,29 @@ __declspec(dllexport) LONG64 InterlockedOr64(LONG64 volatile* dest, LONG64 value
 __declspec(dllexport) LONG64 InterlockedXor64(LONG64 volatile* dest, LONG64 value)
 {
     return __atomic_fetch_xor(dest, value, __ATOMIC_SEQ_CST);
+}
+
+/* GAP: Transitional pointer encoding preserves the legacy thunk's
+ * reversible identity contract. It does not yet use a per-process secret,
+ * so it provides ABI compatibility but no pointer-obfuscation hardening. */
+__declspec(dllexport) void* EncodePointer(void* pointer)
+{
+    return pointer;
+}
+
+__declspec(dllexport) void* DecodePointer(void* pointer)
+{
+    return pointer;
+}
+
+__declspec(dllexport) void* RtlEncodePointer(void* pointer)
+{
+    return EncodePointer(pointer);
+}
+
+__declspec(dllexport) void* RtlDecodePointer(void* pointer)
+{
+    return DecodePointer(pointer);
 }
 
 /* ------------------------------------------------------------------
@@ -376,6 +401,29 @@ __declspec(dllexport) BOOL FreeLibrary(void* hModule)
     return 1; /* Pretend success — we don't refcount mapped DLLs yet. */
 }
 
+/* Resolve directly against the process's registered PE export tables.
+ * GAP: Ordinal lookup is not exposed by SYS_DLL_PROC_ADDRESS yet, so reject
+ * MAKEINTRESOURCE-style ordinal names explicitly instead of asking the
+ * kernel to dereference a low address. */
+__declspec(dllexport) void* GetProcAddress(void* hModule, const char* name)
+{
+    if (hModule == (void*)0 || name == (const char*)0 || (unsigned long long)name <= 0xFFFFULL)
+    {
+        SetLastError(127u); /* ERROR_PROC_NOT_FOUND */
+        return (void*)0;
+    }
+
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)57), "D"((long long)(unsigned long long)hModule),
+                       "S"((long long)(unsigned long long)name)
+                     : "memory");
+    if (rv == 0)
+        SetLastError(127u);
+    return (void*)(unsigned long long)rv;
+}
+
 /* ------------------------------------------------------------------
  * SList family — slim-list intrusive stack. v0 returns NULL /
  * 0, matching the flat kOffReturnZero registration for these.
@@ -444,32 +492,27 @@ typedef struct
     unsigned int UnwindInfoAddress;
 } K32_RUNTIME_FUNCTION;
 
+static unsigned long long k32_module_base_by_va(unsigned long long va)
+{
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)207), "D"(va) : "memory");
+    return (unsigned long long)rv;
+}
+
 __declspec(dllexport) void* RtlLookupFunctionEntry(unsigned long long ControlPc, unsigned long long* ImageBase,
                                                    void* HistoryTable)
 {
     (void)HistoryTable;
-    const unsigned long long base = sys_dll_base_by_name("");
-    if (ImageBase != (unsigned long long*)0)
-        *ImageBase = base;
+    const unsigned long long base = k32_module_base_by_va(ControlPc);
     if (base == 0 || ControlPc < base)
         return (void*)0;
-    const unsigned char* img = (const unsigned char*)base;
-    if (img[0] != 'M' || img[1] != 'Z')
+    DUET_PE_VIEW view;
+    if (!duet_pe_parse((const void*)base, &view) || ControlPc - base >= view.size)
         return (void*)0;
-    const unsigned int e_lfanew = *(const unsigned int*)(img + 0x3C);
-    const unsigned char* nt = img + e_lfanew;
-    if (nt[0] != 'P' || nt[1] != 'E' || nt[2] != 0 || nt[3] != 0)
-        return (void*)0;
-    const unsigned char* opt = nt + 0x18;
-    if (*(const unsigned short*)opt != 0x20B)
-        return (void*)0;
-    const unsigned int* dd = (const unsigned int*)(opt + 0x70 + 3 * 8);
-    const unsigned int pdata_rva = dd[0];
-    const unsigned int pdata_sz = dd[1];
-    if (pdata_rva == 0 || pdata_sz < sizeof(K32_RUNTIME_FUNCTION))
-        return (void*)0;
-    const K32_RUNTIME_FUNCTION* fns = (const K32_RUNTIME_FUNCTION*)(img + pdata_rva);
-    const unsigned int n = pdata_sz / (unsigned int)sizeof(K32_RUNTIME_FUNCTION);
+    if (ImageBase != (unsigned long long*)0)
+        *ImageBase = base;
+    const K32_RUNTIME_FUNCTION* fns = (const K32_RUNTIME_FUNCTION*)(view.base + view.pdata_rva);
+    const unsigned int n = view.pdata_size / (unsigned int)sizeof(K32_RUNTIME_FUNCTION);
     const unsigned int off = (unsigned int)(ControlPc - base);
     unsigned int lo = 0, hi = n;
     while (lo < hi)
@@ -491,12 +534,11 @@ __declspec(dllexport) void* RtlLookupFunctionEntry(unsigned long long ControlPc,
  * Interprets the function's UNWIND_INFO unwind codes to transform
  * ContextRecord from "in this frame" to "in the caller's frame":
  * pops PUSH_NONVOL saves, undoes stack allocs, follows SET_FPREG /
- * SAVE_NONVOL / PUSH_MACHFRAME / chained info, then pops the
- * return address into Rip. Pure computation — no control flow
- * transfer. GAP: prologue/epilogue-precise unwinding (we apply
- * the full code list, correct for fault PCs / call sites in the
- * function body — the only places a backtrace or fault unwinds
- * from); XMM saves are skipped (not needed for return-addr walk).
+ * SAVE_NONVOL / SAVE_XMM128 / PUSH_MACHFRAME / chained info,
+ * then pops the return address into Rip. Pure computation — no
+ * control flow transfer. CodeOffset gates operations for a PC in
+ * the prologue. GAP: epilogue instruction decoding; body/call-site
+ * and partial-prologue unwinds are table-driven.
  * ------------------------------------------------------------------ */
 
 /* CONTEXT GPR offsets, indexed by the x64 unwind register number
@@ -518,6 +560,87 @@ static unsigned long long* k32_ctx_rip(void* ctx)
 {
     return (unsigned long long*)((unsigned char*)ctx + K32_CTX_RIP_OFF);
 }
+static void k32_restore_xmm(void* ctx, int idx, const void* saved)
+{
+    /* CONTEXT.Xmm0 begins at 0x1a0; copy without imposing a C
+     * alignment requirement on the unwind save slot. */
+    unsigned char* dst = (unsigned char*)ctx + 0x1A0 + (unsigned)(idx & 15) * 16u;
+    const unsigned char* src = (const unsigned char*)saved;
+    for (unsigned j = 0; j < 16u; ++j)
+        dst[j] = src[j];
+}
+static int k32_nonvolatile_gpr(unsigned reg)
+{
+    return reg == 3u || reg == 5u || reg == 6u || reg == 7u || reg >= 12u;
+}
+static int k32_unwind_op_width(unsigned short code, unsigned frreg, unsigned* width)
+{
+    const unsigned op = (code >> 8) & 0x0Fu;
+    const unsigned info = (code >> 12) & 0x0Fu;
+    if (op == 0u)
+    {
+        if (!k32_nonvolatile_gpr(info))
+            return 0;
+        *width = 1u;
+    }
+    else if (op == 1u)
+    {
+        if (info > 1u)
+            return 0;
+        *width = info == 0u ? 2u : 3u;
+    }
+    else if (op == 2u)
+    {
+        *width = 1u;
+    }
+    else if (op == 3u)
+    {
+        if (info != 0u || frreg == 0u || !k32_nonvolatile_gpr(frreg))
+            return 0;
+        *width = 1u;
+    }
+    else if (op == 4u || op == 5u)
+    {
+        if (!k32_nonvolatile_gpr(info))
+            return 0;
+        *width = op == 4u ? 2u : 3u;
+    }
+    else if (op == 8u || op == 9u)
+    {
+        if (info < 6u)
+            return 0;
+        *width = op == 8u ? 2u : 3u;
+    }
+    else if (op == 10u)
+    {
+        if (info > 1u)
+            return 0;
+        *width = 1u;
+    }
+    else
+    {
+        return 0;
+    }
+    return 1;
+}
+static int k32_validate_unwind_chain(const DUET_PE_VIEW* view, const K32_RUNTIME_FUNCTION* first)
+{
+    return duet_pe_validate_unwind_chain(view, first);
+}
+static unsigned k32_prolog_offset(const unsigned char* ui, unsigned long long image_base,
+                                  const K32_RUNTIME_FUNCTION* rf, unsigned long long control_pc)
+{
+    const unsigned long long begin = image_base + rf->BeginAddress;
+    if (control_pc <= begin)
+        return 0u;
+    const unsigned long long offset = control_pc - begin;
+    return offset >= (unsigned long long)ui[1] ? 0xFFu : (unsigned)offset;
+}
+static int k32_chain_frame_established(const DUET_PE_VIEW* view, const K32_RUNTIME_FUNCTION* first,
+                                       unsigned long long image_base, unsigned long long control_pc)
+{
+    return duet_pe_chain_frame_established(view, first, image_base, control_pc);
+}
 
 __declspec(dllexport) void* RtlVirtualUnwind(unsigned long HandlerType, unsigned long long ImageBase,
                                              unsigned long long ControlPc, void* FunctionEntry, void* ContextRecord,
@@ -525,13 +648,23 @@ __declspec(dllexport) void* RtlVirtualUnwind(unsigned long HandlerType, unsigned
                                              void* ContextPointers)
 {
     (void)HandlerType;
-    (void)ControlPc;
     (void)ContextPointers;
     if (HandlerData != (void**)0)
         *HandlerData = (void*)0;
     if (FunctionEntry == (void*)0 || ContextRecord == (void*)0)
         return (void*)0;
     const K32_RUNTIME_FUNCTION* rf = (const K32_RUNTIME_FUNCTION*)FunctionEntry;
+    DUET_PE_VIEW view;
+    if (k32_module_base_by_va(ControlPc) != ImageBase || !duet_pe_parse((const void*)ImageBase, &view) ||
+        ControlPc < ImageBase || ControlPc - ImageBase >= view.size || !k32_validate_unwind_chain(&view, rf))
+        return (void*)0;
+    DUET_PE_UNWIND_LAYOUT head;
+    if (!duet_pe_unwind_layout(&view, rf, &head))
+        return (void*)0;
+    const int frame_established = k32_chain_frame_established(&view, rf, ImageBase, ControlPc);
+    const unsigned long long frame_base =
+        frame_established ? (*k32_ctx_reg(ContextRecord, (int)head.frreg) - (unsigned long long)head.froff * 16ULL)
+                          : *k32_ctx_rsp(ContextRecord);
 
     for (int chain_guard = 0; chain_guard < 32; ++chain_guard)
     {
@@ -541,12 +674,8 @@ __declspec(dllexport) void* RtlVirtualUnwind(unsigned long HandlerType, unsigned
         const unsigned char frreg = (unsigned char)(ui[3] & 0x0F);
         const unsigned char froff = (unsigned char)(ui[3] >> 4);
         const unsigned short* codes = (const unsigned short*)(ui + 4);
-
-        unsigned long long fb;
-        if (frreg != 0)
-            fb = *k32_ctx_reg(ContextRecord, frreg) - (unsigned long long)froff * 16ULL;
-        else
-            fb = *k32_ctx_rsp(ContextRecord);
+        const unsigned prolog_offset = chain_guard == 0 ? k32_prolog_offset(ui, ImageBase, rf, ControlPc) : 0xFFu;
+        const unsigned long long fb = frame_base;
 
         unsigned i = 0;
         while (i < count)
@@ -554,55 +683,55 @@ __declspec(dllexport) void* RtlVirtualUnwind(unsigned long HandlerType, unsigned
             const unsigned short cw = codes[i];
             const unsigned op = (cw >> 8) & 0x0F;
             const unsigned info = (cw >> 12) & 0x0F;
+            const unsigned code_offset = cw & 0xFFu;
+            unsigned width = 0;
+            if (!k32_unwind_op_width(cw, frreg, &width) || width > count - i)
+                return (void*)0;
+            if (code_offset > prolog_offset)
+            {
+                i += width;
+                continue;
+            }
             unsigned long long* rsp = k32_ctx_rsp(ContextRecord);
             if (op == 0) /* PUSH_NONVOL */
             {
                 *k32_ctx_reg(ContextRecord, (int)info) = *(unsigned long long*)(*rsp);
                 *rsp += 8;
-                i += 1;
             }
             else if (op == 1) /* ALLOC_LARGE */
             {
                 if (info == 0)
-                {
                     *rsp += (unsigned long long)codes[i + 1] * 8ULL;
-                    i += 2;
-                }
                 else
-                {
                     *rsp += (unsigned long long)(*(const unsigned int*)&codes[i + 1]);
-                    i += 3;
-                }
             }
             else if (op == 2) /* ALLOC_SMALL */
             {
                 *rsp += (unsigned long long)info * 8ULL + 8ULL;
-                i += 1;
             }
             else if (op == 3) /* SET_FPREG */
             {
                 *rsp = *k32_ctx_reg(ContextRecord, (int)frreg) - (unsigned long long)froff * 16ULL;
-                i += 1;
             }
             else if (op == 4) /* SAVE_NONVOL */
             {
                 const unsigned long long off = (unsigned long long)codes[i + 1] * 8ULL;
                 *k32_ctx_reg(ContextRecord, (int)info) = *(unsigned long long*)(fb + off);
-                i += 2;
             }
             else if (op == 5) /* SAVE_NONVOL_FAR */
             {
                 const unsigned long long off = (unsigned long long)(*(const unsigned int*)&codes[i + 1]);
                 *k32_ctx_reg(ContextRecord, (int)info) = *(unsigned long long*)(fb + off);
-                i += 3;
             }
             else if (op == 8) /* SAVE_XMM128 */
             {
-                i += 2;
+                const unsigned long long off = (unsigned long long)codes[i + 1] * 16ULL;
+                k32_restore_xmm(ContextRecord, (int)info, (const void*)(fb + off));
             }
             else if (op == 9) /* SAVE_XMM128_FAR */
             {
-                i += 3;
+                const unsigned long long off = (unsigned long long)(*(const unsigned int*)&codes[i + 1]);
+                k32_restore_xmm(ContextRecord, (int)info, (const void*)(fb + off));
             }
             else if (op == 10) /* PUSH_MACHFRAME */
             {
@@ -615,8 +744,9 @@ __declspec(dllexport) void* RtlVirtualUnwind(unsigned long HandlerType, unsigned
             }
             else
             {
-                i += 1; /* unknown op — best effort skip */
+                return (void*)0;
             }
+            i += width;
         }
 
         if (flags & 0x4) /* UNW_FLAG_CHAININFO */
@@ -646,7 +776,7 @@ __declspec(dllexport) unsigned short RtlCaptureStackBackTrace(unsigned long Fram
 {
     if (BackTrace == (void**)0 || FramesToCapture == 0)
         return 0;
-    unsigned char ctxbuf[1232];
+    unsigned char ctxbuf[1232] __attribute__((aligned(16)));
     for (int z = 0; z < 1232; ++z)
         ctxbuf[z] = 0;
     RtlCaptureContext(ctxbuf);
