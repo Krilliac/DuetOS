@@ -19,3 +19,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: No description provided
 - **Claimed**: 2026-07-26T12:15:23Z
 - **Status**: IN PROGRESS
+
+### 🟢 wiki-stats-sync
+- **Session**: `Nathan-733`
+- **Branch**: `claude/vmm-msr-hardening`
+- **Files**: `wiki/Home.md`
+- **Description**: Regenerate
+- **Claimed**: 2026-07-26T12:15:59Z
+- **Status**: IN PROGRESS
