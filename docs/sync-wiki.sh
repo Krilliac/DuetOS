@@ -126,6 +126,14 @@ collect_inventory() {
             | sort > "$tmpfile"
         while IFS= read -r dlldir; do
             [ -z "$dlldir" ] && continue
+            # Shared implementation/header directories may live beside the
+            # DLLs (for example userland/libs/common).  Only publish entries
+            # that actually contain a DLL translation unit or export file.
+            if ! find "$dlldir" -maxdepth 1 -type f \
+                \( -name '*.c' -o -name '*.S' -o -name '*.def' \) \
+                -print -quit 2>/dev/null | grep -q .; then
+                continue
+            fi
             local dll
             dll=$(basename "$dlldir")
             local exports=0
@@ -160,15 +168,22 @@ collect_inventory() {
     # --- STUB / GAP markers ---
     STUB_COUNT=0
     GAP_COUNT=0
-    # NOTE: test with `git rev-parse`, not `[ -d .git ]`. In a git WORKTREE
-    # (`git worktree add`, which is how the Claude Code sessions run) `.git`
-    # is a regular FILE containing a `gitdir:` pointer, so the directory test
-    # is false and both counters silently stayed 0 — writing "STUB markers 0
-    # / GAP markers 0" into Home.md's AUTO:stats block.
-    if command -v git >/dev/null 2>&1 && (cd "$PROJECT_ROOT" && git rev-parse --is-inside-work-tree >/dev/null 2>&1);
-    then
+    # A worktree's `.git` is a file. Prefer the current environment's Git,
+    # but a Windows-created worktree stores a `C:\...` gitdir path that WSL
+    # Git cannot follow. In that exact case use git.exe with a Windows root.
+    if command -v git >/dev/null 2>&1 &&
+       git -C "$PROJECT_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         STUB_COUNT=$(cd "$PROJECT_ROOT" && git grep -nE '// STUB:' 2>/dev/null | wc -l)
         GAP_COUNT=$(cd "$PROJECT_ROOT" && git grep -nE '// GAP:' 2>/dev/null | wc -l)
+    elif command -v git.exe >/dev/null 2>&1 && command -v wslpath >/dev/null 2>&1; then
+        local windows_root
+        local stub_pattern='// ST''UB:'
+        local gap_pattern='// G''AP:'
+        windows_root=$(wslpath -w "$PROJECT_ROOT")
+        if git.exe -C "$windows_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            STUB_COUNT=$(git.exe -C "$windows_root" grep -nE "$stub_pattern" 2>/dev/null | wc -l)
+            GAP_COUNT=$(git.exe -C "$windows_root" grep -nE "$gap_pattern" 2>/dev/null | wc -l)
+        fi
     fi
 
     # --- Wiki pages ---

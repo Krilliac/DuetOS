@@ -226,7 +226,7 @@ named export is real. Page-level limits:
 | `user32` | 212 | `userland/libs/user32/` |
 | `userenv` | 27 | `userland/libs/userenv/` |
 | `uxtheme` | 41 | `userland/libs/uxtheme/` |
-| `vcruntime140` | 24 | `userland/libs/vcruntime140/` |
+| `vcruntime140` | 23 | `userland/libs/vcruntime140/` |
 | `version` | 16 | `userland/libs/version/` |
 | `vulkan_1` | 0 | `userland/libs/vulkan_1/` |
 | `winhttp` | 35 | `userland/libs/winhttp/` |
