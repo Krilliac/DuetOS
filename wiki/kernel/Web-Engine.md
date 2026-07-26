@@ -241,9 +241,12 @@ live path.
   beyond tRNS.
 - **TLS trust:** HTTPS verifies the server's full chain against x509's
   embedded **real** roots (incl. ISRG Root X1) — see
-  `apps/browser.cpp::BrowserCertVerify`. GAP: no CRL/OCSP revocation, no
-  name constraints, and the root set is a curated subset (sites chaining
-  to any other root fail closed).
+  `apps/browser.cpp::BrowserCertVerify`. Any certificate acting as an
+  issuer must prove it is a CA (basicConstraints cA:TRUE + keyUsage
+  keyCertSign — see [TLS Roadmap](../networking/TLS-Roadmap.md)). GAP: no
+  CRL/OCSP revocation, no name constraints, no critical-extension
+  rejection, and the root set is a curated subset (sites chaining to any
+  other root fail closed).
 
 Re-derive the live inventory with `git grep -nE "// (STUB|GAP):"
 kernel/web`.
