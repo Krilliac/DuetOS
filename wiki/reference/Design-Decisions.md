@@ -11887,3 +11887,71 @@ markers for its richest input. Three discovery layers were added (runtime
   current guest; a real region-query syscall is the fix if a guest walks
   the reported base. The 64-bit `kernel32` VirtualQuery is the same
   synthetic, so this is consistent, not a regression.
+
+## 2026-07-26 — X.509: a certificate must prove it is a CA before it may issue
+
+- **Context:** `net::x509::Verify` built its depth-2 path by accepting any
+  supplied "intermediate" that carried a usable public key, sat inside its
+  validity window, signed the leaf, and itself chained to an embedded trust
+  anchor. It never read basicConstraints. That is the classic Basic
+  Constraints bypass (CVE-2002-0862 class): an ordinary end-entity
+  certificate — which any public CA issues to anyone who proves control of
+  a single domain — can be replayed as an intermediate and used to mint a
+  trusted chain for an arbitrary hostname. Reproduced with a synthetic
+  root → CA:FALSE end-entity → forged leaf chain: `Verify()` returned TRUE
+  for a hostname the attacker never controlled. Re-derive the chain with
+  host OpenSSL 3.x (then add `root.der` to a scratch copy of `kTrustStore`
+  and call `Verify(forged.der, chain=[nonca.der], "bank.duetos.local")`):
+
+  ```sh
+  openssl req -x509 -newkey rsa:2048 -nodes -keyout root.key -out root.pem \
+      -days 7300 -sha256 -subj "/CN=PoC Root CA" \
+      -addext "basicConstraints=critical,CA:TRUE" \
+      -addext "keyUsage=critical,keyCertSign,cRLSign"
+  # An ordinary end-entity cert — what a public CA hands to any domain owner.
+  openssl req -new -newkey rsa:2048 -nodes -keyout nonca.key -out nonca.csr \
+      -subj "/CN=evil.duetos.local"
+  openssl x509 -req -in nonca.csr -CA root.pem -CAkey root.key \
+      -CAcreateserial -out nonca.pem -days 7000 -sha256 -extfile nonca.ext
+      # nonca.ext: basicConstraints=critical,CA:FALSE
+      #            subjectAltName=DNS:evil.duetos.local
+  # The forgery: a cert for someone ELSE's host, signed by that leaf's key.
+  openssl req -new -newkey rsa:2048 -nodes -keyout forged.key -out forged.csr \
+      -subj "/CN=bank.duetos.local"
+  openssl x509 -req -in forged.csr -CA nonca.pem -CAkey nonca.key \
+      -CAcreateserial -out forged.pem -days 7000 -sha256 -extfile forged.ext
+      # forged.ext: subjectAltName=DNS:bank.duetos.local
+  ```
+
+  The durable regression coverage is `X509VerifySelfTest` (hosted mirror
+  `tests/host/test_x509_verify.cpp`), not this rig — the self-test pins the
+  same property against the real embedded fixtures without needing a
+  scratch trust anchor, so the rig is documented rather than committed.
+- **Decision — enforce RFC 5280 §6.1.4(n) / §6.1.3(a)(4) on every issuer,
+  and make "no basicConstraints" mean "not a CA".** `IsUsableIssuer(cert,
+  certs_below)` gates both the supplied intermediate and the trust anchor:
+  basicConstraints must be PRESENT with cA = TRUE, a keyUsage that is
+  present must assert keyCertSign, and pathLenConstraint must admit the
+  certificates below. **Rules out** the "the depth-2 cap is enough of a
+  constraint" reading — the cap bounds path *length*, not issuer
+  *authority*, and the two are independent. It also rules out treating a
+  missing basicConstraints as permissive (the RFC 5280 §4.2.1.9 default for
+  cA is FALSE, and a v1 cert that omits the extension is not a CA).
+- **Deliberately NOT taken: the `critical` flag as an input.** DuetOS
+  honours basicConstraints and keyUsage whether or not they are marked
+  critical, and does not reject a certificate for carrying an unrecognised
+  critical extension (§6.1.4(f)). Honouring a non-critical basicConstraints
+  is the *safe* direction — it can only refuse an issuer, never admit one —
+  and one of our own EC fixtures ships a non-critical CA:FALSE, so keying
+  the decode on criticality would have created a real false-negative. Full
+  critical-extension processing is a separate slice and needs name
+  constraints / EKU first, or it just rejects real certificates.
+- **Inert-by-design leg:** all ten embedded anchors already carry
+  basicConstraints critical CA:TRUE + keyUsage keyCertSign, so gating the
+  anchor changes nothing today. It ships anyway so a future mis-pasted
+  anchor fails closed (and logs a SKIP) instead of anchoring silently.
+- **Duplicate extensions fail closed too.** RFC 5280 §4.2 forbids a
+  second instance of an extension; rather than let the last copy win
+  (cA:FALSE then cA:TRUE), both decoders clear the permissive bit on a
+  duplicate. "Later copy wins" is precisely the ambiguity that turns two
+  disagreeing parsers into a bypass, and closing it costs nothing.

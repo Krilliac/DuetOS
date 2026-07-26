@@ -54,9 +54,18 @@ documents the shipped client and its known limits.
 - `net::tls::TlsSocketConnect` / `TlsSocketHandshake` / read / write
   (`tls_socket.{h,cpp}`) — the socket-backed wrapper most callers use.
   `TlsSocketSetVerifier` installs the chain verifier (see Known Limits).
-- `net::x509_verify::TrustAnchorVerifies` (`x509_verify.cpp:723`) +
-  `IssuerSigns` (`x509_verify.cpp:607`) — RFC 5280 chain building with
-  issuer/subject DN equality short-circuiting before a signature verify.
+- `net::x509_verify::TrustAnchorVerifies` + `IssuerSigns` — RFC 5280
+  chain building with issuer/subject DN equality short-circuiting before
+  a signature verify.
+- `IsUsableIssuer(cert, certs_below)` — the RFC 5280 §6.1.4(n) /
+  §6.1.3(a)(4) issuer gate. Every certificate used to SIGN another
+  (the supplied intermediate; the trust anchor) must carry
+  basicConstraints **cA = TRUE**, must not carry a keyUsage that omits
+  **keyCertSign**, and must satisfy its own pathLenConstraint.
+  basicConstraints **absent** means "not a CA" — fail closed. Without
+  this gate an ordinary end-entity certificate (issued to anyone who
+  controls one domain) can be presented as an intermediate and used to
+  mint a trusted chain for any hostname: the Basic Constraints bypass.
 - Embedded root store (`x509_verify.cpp:1063`–`1209`) — DigiCert, Amazon,
   GlobalSign, GoDaddy/AffirmTrust, and ISRG (Let's Encrypt, incl. the
   RSA-4096 ISRG Root X1) roots, plus P-384 ECDSA roots (DigiCert Global
@@ -105,10 +114,15 @@ Each layer pins a known-answer vector at boot (grep the serial transcript):
 - `[bigint] PASS` (incl. RSA-4096), `[asn1] PASS`, `[rsa] PASS`,
   `[x509] PASS`, `[aes-gcm] PASS`.
 - `[ec-selftest] PASS (P-256+P-384, 4 pos / 4 neg)`.
-- `[x509-verify-selftest] PASS` — parses every embedded anchor and
-  self-signature-verifies one representative per signature family (1 RSA
-  + 1 ECDSA); a full per-anchor public-key verify is too costly under
-  TCG (a single P-384 verify is tens of seconds).
+- `[x509-verify-selftest] PASS (… basicConstraints+keyUsage issuer gate;
+  …)` — parses every embedded anchor and self-signature-verifies one
+  representative per signature family (1 RSA + 1 ECDSA); a full
+  per-anchor public-key verify is too costly under TCG (a single P-384
+  verify is tens of seconds). It also asserts the issuer gate: the real
+  CA:FALSE leaf fixtures are refused as issuers, the CA fixtures are
+  accepted, the pathlen:0 intermediate refuses a deeper path, and
+  hand-built DER vectors pin the basicConstraints / keyUsage decoders.
+  Hosted mirror: `tests/host/test_x509_verify.cpp` (gates every PR).
 - `[tls] PASS (prf + cke + record-aead + transcript + finished +
   srv-fin verify)`.
 
@@ -125,8 +139,13 @@ Sourced from live `// GAP:` markers — re-derive with
     supported.
   - `x509_verify.cpp:627` — RSA-PSS / Ed25519 / sha1WithRSA not
     supported.
-- **Chain depth capped at 2** (`x509_verify.cpp:777`) — an intermediate
-  signed by another intermediate is not followed.
+- **Chain depth capped at 2** — an intermediate signed by another
+  intermediate is not followed. (Grep `// GAP: deeper chains`.)
+- **`critical` extension flags are parsed past, not enforced.** An
+  unrecognised *critical* extension does not reject the certificate
+  (RFC 5280 §6.1.4(f) would). basicConstraints and keyUsage are honoured
+  whether or not they are marked critical, which is the safe direction;
+  name constraints and extendedKeyUsage are not honoured at all.
 - **Compressed EC points rejected** (`ec.cpp:415`) — SEC1 0x02/0x03
   forms fail closed; only 0x04 uncompressed is accepted.
 - **No cert verifier installed by default for non-browser callers**
