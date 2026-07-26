@@ -56,6 +56,7 @@ add_executable(duetos-vmm
     src/guest_memory.cpp
     src/guest_memory_fb.cpp
     src/elf64.cpp
+    src/elf64_parse.cpp
     src/multiboot2.cpp
     src/acpi.cpp
     src/mmio_emulator.cpp
