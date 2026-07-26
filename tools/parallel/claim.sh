@@ -46,18 +46,24 @@ echo "→ Syncing with origin/main..."
 git fetch origin main
 git rebase origin/main 2>/dev/null || echo "  (rebase skipped — resolve manually if behind)"
 
-# Warn if the target files are already claimed by an ACTIVE (🟢) session.
-# Completed (✅) claims have released their files, so they don't count. The
-# Files value is compared exactly (the '*' in a glob is not a regex here).
+# Warn if the target files are already claimed by an active session.
+# Status text is the machine-readable state; heading emoji are presentation
+# only and are not portable matching tokens across the Windows Git toolchain.
+# The Files value is compared exactly (the '*' in a glob is not a regex here).
 if [[ -f "$WORK_FILE" ]]; then
     CONFLICT_BLOCK="$(awk -v f="$FILES" '
-        function flush() { if (show && blk != "") print blk; show = 0 }
-        /^### / { flush(); active = ($0 ~ /🟢/); blk = $0; next }
-        blk != "" { blk = blk "\n" $0 }
-        active && /\*\*Files\*\*:/ {
-            v = $0; sub(/^[^`]*`/, "", v); sub(/`.*/, "", v)
-            if (v == f) show = 1
+        function flush() {
+            if (active && files == f && blk != "") print blk
+            active = 0; files = ""; blk = ""
         }
+        /^### / { flush(); blk = $0; next }
+        blk != "" { blk = blk "\n" $0 }
+        /\*\*Files\*\*:/ {
+            files = $0
+            sub(/^[^`]*`/, "", files)
+            sub(/`.*/, "", files)
+        }
+        /^- \*\*Status\*\*: IN PROGRESS$/ { active = 1 }
         END { flush() }
     ' "$WORK_FILE")"
     if [[ -n "$CONFLICT_BLOCK" ]]; then

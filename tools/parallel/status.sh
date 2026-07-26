@@ -24,10 +24,11 @@ echo "  Parallel Session Status"
 echo "═══════════════════════════════════════"
 echo ""
 
-# grep -c prints "0" AND exits 1 on no match, so a bare '|| echo 0' would
-# emit the count twice. '|| true' keeps grep's own "0" and clears the status.
-ACTIVE="$(grep -c "🟢" "$WORK_FILE" 2>/dev/null || true)"
-DONE="$(grep -c "✅" "$WORK_FILE" 2>/dev/null || true)"
+# Status text is the machine-readable contract. Heading emoji are presentation
+# only; matching them is unreliable in some Git-for-Windows text-tool builds.
+# grep -c prints "0" and exits 1 on no match, so `|| true` preserves one count.
+ACTIVE="$(grep -c '^- \*\*Status\*\*: IN PROGRESS$' "$WORK_FILE" 2>/dev/null || true)"
+DONE="$(grep -c '^- \*\*Status\*\*: COMPLETED @ ' "$WORK_FILE" 2>/dev/null || true)"
 
 echo "  Active: ${ACTIVE}  |  Completed: ${DONE}"
 echo ""
@@ -48,14 +49,22 @@ echo "════════════════════════�
 echo ""
 echo "Conflict check:"
 
-# Collect the Files value of each ACTIVE (🟢) claim and look for duplicates —
-# two live sessions owning the same path is the real conflict. Completed
-# claims have released their files, so they're excluded.
+# Collect the Files value of each active claim and look for duplicates. Two
+# live sessions owning the same path is the real conflict; completed claims
+# have released their files and are excluded.
 FILES_LIST="$(awk '
-    /^### / { active = ($0 ~ /🟢/) }
-    active && /\*\*Files\*\*:/ {
-        v = $0; sub(/^[^`]*`/, "", v); sub(/`.*/, "", v); print v
+    function flush() {
+        if (active && files != "") print files
+        active = 0; files = ""
     }
+    /^### / { flush(); next }
+    /\*\*Files\*\*:/ {
+        files = $0
+        sub(/^[^`]*`/, "", files)
+        sub(/`.*/, "", files)
+    }
+    /^- \*\*Status\*\*: IN PROGRESS$/ { active = 1 }
+    END { flush() }
 ' "$WORK_FILE")"
 DUPES="$(printf '%s\n' "$FILES_LIST" | sort | uniq -d | grep -v '^$' || true)"
 if [[ -n "$DUPES" ]]; then

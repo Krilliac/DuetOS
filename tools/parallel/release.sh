@@ -42,17 +42,35 @@ else
     BRANCH="claude/${SUBSYSTEM}"
 fi
 
-# Flip the subsystem's marker 🟢 → ✅ and stamp completion on its Status line.
-awk -v subsystem="$SUBSYSTEM" -v timestamp="$TIMESTAMP" '
-    /^### 🟢 / && $3 == subsystem { sub(/🟢/, "✅"); found = 1 }
-    found && /- \*\*Status\*\*: IN PROGRESS/ {
-        sub(/IN PROGRESS/, "COMPLETED @ " timestamp); found = 0
+# Stamp completion using ASCII fields as the machine-readable contract.
+# Git for Windows text tools can fail to match an emoji regex even when the
+# UTF-8 bytes are intact. Emit the presentation marker from explicit bytes.
+DONE_MARKER="$(printf '\342\234\205')"
+if awk -v subsystem="$SUBSYSTEM" -v timestamp="$TIMESTAMP" \
+       -v done_marker="$DONE_MARKER" '
+    $1 == "###" && $3 == subsystem {
+        print "### " done_marker " " subsystem
+        target = 1
+        seen = 1
+        next
+    }
+    target && /^- \*\*Status\*\*: IN PROGRESS$/ {
+        sub(/IN PROGRESS/, "COMPLETED @ " timestamp)
+        completed = 1
+        target = 0
     }
     { print }
-' "$WORK_FILE" > "${WORK_FILE}.tmp" && mv "${WORK_FILE}.tmp" "$WORK_FILE"
+    END { if (!seen || !completed) exit 1 }
+' "$WORK_FILE" > "${WORK_FILE}.tmp"; then
+    mv "${WORK_FILE}.tmp" "$WORK_FILE"
+else
+    rm -f "${WORK_FILE}.tmp"
+    echo "❌ '$SUBSYSTEM' is missing or is not IN PROGRESS; nothing released."
+    exit 1
+fi
 
-git add -A
-git commit -m "feat(${SUBSYSTEM}): complete subsystem [session ${SESSION_ID}]" \
+git add "$WORK_FILE"
+git commit -s -m "feat(${SUBSYSTEM}): complete subsystem [session ${SESSION_ID}]" \
     || echo "→ Nothing new to commit."
 
 echo "→ Pushing ${BRANCH}..."
