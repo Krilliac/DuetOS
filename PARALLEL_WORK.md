@@ -43,3 +43,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Keep cross-hypervisor smoke profile documentation synchronized with pe-threads
 - **Claimed**: 2026-07-26T23:53:25Z
 - **Status**: IN PROGRESS
+
+### 🟢 parallel-release-safety
+- **Session**: `Codex-thunk-wave1`
+- **Branch**: `claude/thunk-retirement-wave1`
+- **Files**: `tools/parallel/release.sh`
+- **Description**: Stage only PARALLEL_WORK.md so releasing a claim cannot absorb fleet work
+- **Claimed**: 2026-07-26T23:54:03Z
+- **Status**: IN PROGRESS
