@@ -127,12 +127,14 @@ These DLLs hold **no privilege of their own**. A PE binary reaches
 the kernel only through cap-gated syscalls — a write goes through
 `SYS_FILE_WRITE` (`kCapFsWrite`), a thread spawn through
 `SYS_THREAD_CREATE` (`kCapSpawnThread`), and so on. Any Win32
-privilege surface a DLL exposes (`AdjustTokenPrivileges`,
-`SeDebugPrivilege`, integrity levels, ACL APIs) is a
-**probe-satisfying facade**: it returns plausible success/failure
-shapes so callers proceed, but it grants and revokes nothing. The
-kernel's `Process::caps` (`kCap*`) bitset is the sole authority on
-what a guest binary can do. See
+privilege surface a DLL exposes (`SeDebugPrivilege`, integrity levels,
+ACL APIs) is cosmetic except for mapped `AdjustTokenPrivileges`
+requests. Those requests route through the kernel token syscall, where
+enablement may obtain a bounded broker lease, disablement clears live
+authority, and removal lowers the Process capability ceiling
+permanently. DLL state itself grants nothing; locked kernel Process
+capability helpers are the sole authority over what a guest binary can
+do. See
 [`security/Capabilities.md`](../security/Capabilities.md) and
 [Subsystem Isolation](../kernel/Subsystem-Isolation.md).
 

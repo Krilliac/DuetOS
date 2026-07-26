@@ -137,7 +137,7 @@ gate on the cap.
    the kernel shell's `firewall` command is the v0 edit
    path.
 2. **Per-process socket policy.** Filter keyed off the
-   owning `Process::caps` so a sandboxed Win32 PE can be
+   owning Process's locked effective capability snapshot so a sandboxed Win32 PE can be
    denied network egress entirely regardless of the
    global rule table.
 

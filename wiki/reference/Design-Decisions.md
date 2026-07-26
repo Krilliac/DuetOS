@@ -12259,3 +12259,34 @@ markers for its richest input. Three discovery layers were added (runtime
   least one the kernel accepts. Wiring a real secondary heap needs
   `HeapDestroy`(193) and the CRT teardown ordering checked — its own
   slice.
+
+## 2026-07-26 — Process-owned capability ceilings and lazy broker leases
+
+- **Decision:** effective Process authority is
+  `(durable_caps | unexpired_leases) & monotonic_ceiling`, serialized by
+  `Process::cap_lock`. Published code reads and mutates it only through
+  the Process capability helpers. `SYS_DROPCAPS` and Win32
+  `SE_PRIVILEGE_REMOVED` lower the ceiling before clearing live bits;
+  ordinary token disable clears live durable/leased bits without
+  lowering it. **Rules out** unlocked direct `Process::caps` access and
+  any post-removal regrant by the elevation broker.
+- **Decision:** a broker grant is a generation-tagged Process lease with
+  an absolute monotonic deadline. The fixed grace table is
+  prompt-suppression metadata only: expiry or eviction never performs a
+  scheduler-wide PID lookup, and the next effective snapshot lazily
+  expires overdue authority. Zero-duration policy and absence of a
+  monotonic clock fail closed. Built-in `root` and `netop`
+  `kCapNetAdmin` policy therefore uses a short 30-second sensitive
+  lease; zero is reserved for roles that intentionally cannot elevate
+  that capability. Lock order is grace cache →
+  `Process::cap_lock`; Process helpers never call back into the cache or
+  scheduler. **Rules out** eager global revocation walks and cache-row
+  lifetime as an authority boundary.
+- **Decision:** native, Linux, and Win32 process spawn require exactly
+  `kCapFsRead | kCapSpawnThread`. A temporary lease may authorize spawn,
+  but only durable caps and the monotonic ceiling are inherited.
+  **Rules out** laundering temporary elevation into a durable child.
+- **Enforcement:** `tools/test/capability-access-static.py` rejects
+  direct published capability access and exact-mask drift. Boot
+  self-tests pin renewal generations, lazy expiry, reversible disable,
+  permanent removal, clockless fail-closed behavior, and non-inheritance.

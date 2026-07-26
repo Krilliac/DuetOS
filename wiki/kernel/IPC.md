@@ -155,7 +155,7 @@ create a `KMutex`. **Cross-process reach** is gated:
 
 - `HandleTableDuplicate` requires `kCapDuplicateHandle` on the
   duplicating process (kernel-mediated; ABI front-ends consult
-  `Process::caps` before they call it).
+  `ProcessHasCap` before they call it).
 - `NamedKObjectFind` is currently ungated — a documented residual
   on [`security/Capabilities.md`](../security/Capabilities.md). Any
   process can probe any registered name. Real workloads can rely on

@@ -9,21 +9,26 @@
 ## Overview
 
 DuetOS uses a capability-bit model for privilege gating. Every process
-holds a `CapSet` (u64 bitmask). Every privileged syscall checks
-`CurrentProcess()->caps & (1 << capN)` before proceeding. Denials log
+holds durable caps, generation-tagged temporary leases, and a monotonic
+grant ceiling. Every privileged syscall checks an effective snapshot:
+`(durable | unexpired_leases) & ceiling`. Denials log
 `[sys] denied syscall=<NAME> pid=<P> cap=<NAME>` and return `-1`.
 
-There is no setuid; there is no ambient authority. Capability bits are
-the only privilege model.
+There is no setuid. Capability state is the only privilege model, and
+the elevation broker is the only controlled post-spawn grant bridge.
 
 ## Files
 
 - `kernel/syscall/cap_table.def` — the `CAP_BIT(name, ...)` X-macro
   list (single source of truth for the bit values)
-- `kernel/syscall/cap_gate.{h,cpp}` — `CapGateCheck(cap)` and the
-  denial log path
-- `kernel/proc/process.h` — the `kCap*` enum (source of truth for the
-  bit values), `CapSet`, `CapSetEmpty`, `CapSetTrusted`, `CapName`
+- `kernel/syscall/cap_gate.{h,cpp}` — syscall-to-mask table lookup,
+  effective snapshot check, and denial log path
+- `kernel/proc/process.{h,cpp}` — the `kCap*` enum, `CapSet`, the
+  ceiling/lease state, and the only public capability mutation helpers
+- `kernel/security/{broker,grace}.{h,cpp}` — role/password policy,
+  positive-duration Process leases, and prompt-suppression metadata
+- `tools/test/capability-access-static.py` — rejects direct published
+  `Process` capability access and drift in the exact spawn masks
 
 > A **separate, unrelated** `enum class Cap` lives at
 > `kernel/security/privilege/scope.h:33-41` (5 members: `FsRead`,
@@ -83,16 +88,20 @@ generated case statements per build choice). See
 
 Win32 has its own privilege model — `NtAdjustPrivilegesToken`,
 `SeDebugPrivilege`, integrity levels, ACLs. Per
-[Subsystem Isolation rule 2](../kernel/Subsystem-Isolation.md), those
-are **probe-satisfying facades**. They do not actually grant or revoke
-anything. The kernel's `kCap*` bits are what gate.
+[Subsystem Isolation rule 2](../kernel/Subsystem-Isolation.md), token
+adjustment is a real translation into the kernel capability model:
 
-A PE that calls `NtAdjustPrivilegesToken` and asks for
-`SeDebugPrivilege` gets `STATUS_SUCCESS` back from `userland/libs/ntdll/`,
-but the underlying capability set on the kernel process is unchanged.
-A subsequent attempt to `OpenProcess(PROCESS_VM_READ, ...)` against
-another PID still hits the cap gate and fails (or succeeds if
-`kCapDebug` was already on the calling process).
+- disable clears durable and leased live bits but preserves the ceiling;
+- `SE_PRIVILEGE_REMOVED` clears the bit and permanently lowers the
+  process ceiling;
+- enable of a missing mapped privilege routes through the broker and
+  can install only a positive-duration lease;
+- integrity levels and ACL-shaped probes remain facades.
+
+Current mapped LUIDs are Debug → `kCapDebug`, Backup →
+`kCapFsRead`, Restore → `kCapFsWrite`, and IncreaseBasePriority →
+`kCapSchedPriority`. The next privileged kernel operation still
+performs the authoritative cap check.
 
 <!-- AUTO:cap_list -->
 | # | Capability |
@@ -115,19 +124,21 @@ _The capability inventory above is auto-synced by
 
 ## Threading and Locking
 
-`CapSet` is per-process state, owned by the `Process` struct and only
-mutated at process setup (profile application) before the process runs.
-The cap gate reads `CurrentProcess()->caps` on the calling CPU during
-syscall dispatch — a read of the current process's own field, so no
-lock is taken on the gate path. Caps are not mutated by another CPU
-mid-syscall.
+`Process::cap_lock` serializes durable caps, lease
+generation/deadline state, and the monotonic ceiling. All published
+reads use `ProcessCapsSnapshot` or `ProcessHasCap`; the snapshot lazily
+expires overdue leases under the same lock. The grace cache may be
+evicted or reaped independently because its rows are metadata only.
+Lock order is grace-cache lock → `Process::cap_lock`; Process helpers
+never call back into the cache or scheduler.
 
 ## Performance
 
-The gate is a single bitmask test (`caps & (1 << capN)`) on the hot
-syscall-dispatch path — no allocation, no lock, no branch beyond the
-allow/deny decision. The denial log path runs only on the cold (denied)
-leg.
+The gate takes one per-process spinlock, expires only lease bits that
+are present, computes one bitmask snapshot, and releases the lock
+before dispatch. It performs no allocation, scheduler-wide lookup, or
+grace-cache walk. Processes without live leases take the short expiry
+path.
 
 ## Troubleshooting
 
@@ -135,10 +146,14 @@ leg.
   lacks the required bit. Either it was started with `CapSetEmpty` (or
   a profile missing that bit), or the syscall is gated on a cap the
   workload legitimately needs and the profile should grant it.
-- **A Win32 PE got `STATUS_SUCCESS` from `NtAdjustPrivilegesToken` but
-  still can't do the thing.** Expected — that NT surface is a facade
-  (rule 2). The kernel `kCap*` bit is what gates; grant the cap on the
-  process, not the NT token.
+- **A Win32 PE got success from `NtAdjustPrivilegesToken` but still
+  can't do the thing.** The privilege may be unmapped, its broker
+  request may have returned `STATUS_NOT_ALL_ASSIGNED`, its lease may
+  have expired, or the bit may have been permanently removed from the
+  ceiling. The kernel effective snapshot is authoritative.
+- **Elevation never succeeds on a clockless boot.** Intentional
+  fail-closed behavior: without a monotonic time source the kernel
+  cannot enforce a lease deadline.
 
 ## Related Pages
 

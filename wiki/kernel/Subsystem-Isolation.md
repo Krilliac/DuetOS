@@ -26,11 +26,14 @@ Every subsystem TU and userland DLL must follow these:
    `SYS_THREAD_CREATE` (kCapSpawnThread). The thunk does not get to
    skip the gate.
 
-2. **Auth and privilege are kernel-owned.** `Process::caps` (kCap*)
-   is the source of truth. Any Win32-shaped privilege surface
-   (`NtAdjustPrivilegesToken`, `SeDebugPrivilege`, integrity levels,
-   ACLs) is a probe-satisfying facade — it does not actually grant or
-   revoke anything. The kernel's cap gates are what gate.
+2. **Auth and privilege are kernel-owned.** Effective authority is
+   durable `Process::caps` plus unexpired broker leases, masked by a
+   monotonic `cap_ceiling` and serialized by `Process::cap_lock`.
+   Kernel cap gates consume only `ProcessCapsSnapshot` /
+   `ProcessHasCap`. Win32 token adjustment may reversibly disable a
+   live bit, permanently remove it from the ceiling, or request a
+   positive-duration broker lease; it never mutates capability storage
+   directly. Integrity levels and ACL-shaped probes remain facades.
 
 3. **Userland DLLs (`userland/libs/*`) are freestanding.** They do not
    include kernel headers and they do not assume kernel internals.
@@ -88,8 +91,12 @@ When reviewing a patch that touches `kernel/subsystems/*` or
 - Does the in-kernel subsystem code read or write a kernel-internal
   data structure (anything not exported by `mm::*`, `sched::*`,
   `fs::routing::*`, `core::Cap*`)?
-- Is there a Win32-shaped ACL/integrity/privilege surface that
-  pretends to gate something? It should be a no-op facade.
+- Is there a Win32-shaped ACL/integrity surface that pretends to gate
+  something, or token code that mutates capability storage directly?
+  ACL/integrity probes stay facades; token enable/disable/remove must
+  route through the kernel capability helpers and broker.
+- Does a process spawn copy temporary lease authority into the child?
+  Leases may authorize an operation but never become durable child caps.
 - Is a new stack (TCP, VFS, registry, compositor) being introduced
   parallel to the existing one?
 

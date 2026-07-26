@@ -33,16 +33,20 @@ property at the MMU layer.
 
 Files: `kernel/mm/address_space.{h,cpp}`.
 
-### 2. Capability-gated syscalls — `core::Process::caps`
+### 2. Capability-gated syscalls — effective Process authority
 
 Every syscall that observably affects the world outside the caller's
-AS (`SYS_WRITE`, `SYS_STAT`, `SYS_READ`, ...) checks a bit in the
-process's `CapSet` before proceeding. Unprivileged syscalls
-(`SYS_GETPID`, `SYS_YIELD`, `SYS_EXIT`) run unchecked. Denials log
-`[sys] denied syscall=<NAME> pid=<P> cap=<NAME>`.
+AS (`SYS_WRITE`, `SYS_STAT`, `SYS_READ`, ...) checks a bit in an
+effective Process snapshot before proceeding. The snapshot combines
+durable caps with unexpired broker leases, masks both through a
+monotonic ceiling, and lazily expires leases under `Process::cap_lock`.
+Unprivileged syscalls (`SYS_GETPID`, `SYS_YIELD`, `SYS_EXIT`) run
+unchecked. Denials log `[sys] denied syscall=<NAME> pid=<P> cap=<NAME>`.
 
 Two profiles: `CapSetTrusted` (every defined cap) and `CapSetEmpty`
-(zero caps).
+(zero caps and a zero grant ceiling). Spawn inherits durable authority
+and the ceiling, never temporary lease bits. The three spawn syscalls
+require exactly `kCapFsRead | kCapSpawnThread`.
 
 See [Capabilities](Capabilities.md).
 
