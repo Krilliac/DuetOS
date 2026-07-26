@@ -142,3 +142,59 @@ TEST(mb2_mmap_fb_splits_available_entry)
     CHECK_EQ(entries[2].len,  kRam - kFbAddr);
     CHECK_EQ(entries[2].type, 2u);
 }
+
+// The framebuffer is carved from the top of RAM while reservedEnd grows
+// from the bottom, so a small --mem with a large --res makes them
+// collide. `fbAddr - reservedEnd` then underflows and the available-RAM
+// entry becomes a ~16 EiB span the guest frame allocator would believe.
+// Vmm rejects that configuration up front; this pins the builder's own
+// clamp so no caller can synthesise the bad map.
+TEST(mb2_mmap_fb_below_reserved_end_does_not_underflow)
+{
+    constexpr uint64_t kRam    = 64ull * 1024 * 1024;
+    constexpr uint64_t kResEnd = 0x800000;  // 8 MiB of image+ACPI+MB2
+    constexpr uint64_t kFbAddr = 0x400000;  // 4 MiB — BELOW reservedEnd
+    Mb2Params p;
+    p.ramBytes    = kRam;
+    p.reservedEnd = kResEnd;
+    p.fbAddr      = kFbAddr;
+    p.fbWidth     = 1280;
+    p.fbHeight    = 1024;
+    p.fbPitch     = 1280 * 4;
+    p.fbBpp       = 32;
+
+    auto entries = ParseMmap(BuildMultiboot2Info(p));
+    CHECK(!entries.empty());
+    for (const auto& e : entries)
+    {
+        // No entry may claim more memory than exists, and none may start
+        // past the top of RAM. An underflowed length trips the first.
+        CHECK(e.len <= kRam);
+        CHECK(e.base <= kRam);
+        CHECK(e.base + e.len <= kRam);
+    }
+    // Nothing below the clamp is advertised as available.
+    for (const auto& e : entries)
+    {
+        if (e.type == 1u)
+        {
+            CHECK(e.base >= kResEnd);
+        }
+    }
+}
+
+// reservedEnd itself past RAM top is the same subtraction hazard on the
+// no-framebuffer path.
+TEST(mb2_mmap_reserved_end_past_ram_top_does_not_underflow)
+{
+    Mb2Params p;
+    p.ramBytes    = 4ull * 1024 * 1024;
+    p.reservedEnd = 64ull * 1024 * 1024; // larger than RAM
+    auto entries  = ParseMmap(BuildMultiboot2Info(p));
+    CHECK(!entries.empty());
+    for (const auto& e : entries)
+    {
+        CHECK(e.len <= p.ramBytes);
+        CHECK(e.base + e.len <= p.ramBytes);
+    }
+}
