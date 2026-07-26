@@ -192,6 +192,9 @@ add_host_test(gdi32_region)
 # header (userland/libs/kernel32_32/kernel32_32_paths.h), no kernel TU.
 add_host_test(kernel32_32_paths)
 add_host_test(damage_rect)
+# Banded damage / forced-invalidation fold: freestanding constexpr state
+# on DamageBandSet in kernel/drivers/video/framebuffer.h — no kernel TU.
+add_host_test(damage_bands)
 add_host_test(render_stats)
 target_sources(test_render_stats PRIVATE
     "${CMAKE_SOURCE_DIR}/../../kernel/drivers/video/render_stats.cpp"

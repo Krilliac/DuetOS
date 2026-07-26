@@ -1213,11 +1213,26 @@ The residuals waiting on visual verification or follow-on work:
   WindowRaise` lands a belt-and-suspenders: when `WindowRaise`
   actually reorders, post a full-screen `FramebufferInvalidateSnapshot`
   so the next `EndCompose` unconditionally flushes shadow→live +
-  resyncs the snapshot. Re-verify on the next VBox session WITHOUT
-  triggering a guard prompt; if bleed still observable, the root
-  cause is elsewhere (cursor backing mismatch, a draw path bypassing
-  `MarkDamage`, or a paint primitive writing to `g_info.virt`
-  directly during compose) and a follow-up slice is needed.
+  resyncs the snapshot.
+  **Root cause found 2026-07-26 — that guard was a no-op on any
+  present-hook backend.** `EndCompose` force-blitted the invalidated
+  rects shadow→live and re-synced the snapshot there, then overwrote
+  the damage union with the content-diff result (`g_damage = d`, or
+  `g_damage.Reset()` on an empty diff) — and the re-sync is exactly
+  what makes the diff report those pixels as unchanged. So the forced
+  rects were dropped before `FramebufferPresent` ran: on virtio-gpu the
+  z-order repaint reached the guest's live surface and never reached
+  the host scanout. Same defect stranded a moved cursor's old sprite on
+  the host. Fixed by folding the forced rects back into the published
+  damage (see [`Graphics-Drivers`](../drivers/Graphics-Drivers.md#forced-invalidation--direct-to-live-writers),
+  regression sentinel `tests/host/test_damage_bands.cpp`).
+  Re-verify on the next VBox session WITHOUT triggering a guard
+  prompt. VBox's default VBoxVGA/VBoxSVGA is a direct framebuffer (no
+  present hook), where the blit alone was already sufficient — so if
+  bleed is still observable *there*, a distinct second cause remains
+  (cursor backing mismatch, a draw path bypassing `MarkDamage`, or a
+  paint primitive writing to `g_info.virt` directly during compose).
+  On QEMU `-vga virtio` the fix above is the expected cure.
 
 When a residual ships, delete its bullet here and update the
 [`Compositor`](../subsystems/Compositor.md) subsystem page's

@@ -133,6 +133,110 @@ struct DamageRect
     }
 };
 
+/// Height of one damage band, in scanlines. The surface is sliced
+/// into fixed horizontal bands so vertically-separated changes stay
+/// separate rects instead of fusing into one near-fullscreen flush.
+constexpr u32 kDamageBandHeight = 64;
+/// Band-array capacity — covers surfaces up to 4096 px tall.
+constexpr u32 kDamageMaxRects = 64;
+/// Above this many dirty bands the present path falls back to a
+/// single bbox flush: one large transfer beats dozens of per-band
+/// backend round-trips.
+constexpr u32 kDamageCoalesceBands = 6;
+
+/// Banded damage accumulator — the multi-rect present path's math.
+///
+/// `FramebufferEndCompose` feeds this twice per frame: once with each
+/// changed scanline span found by the shadow-vs-snapshot content diff,
+/// and once with each forced snapshot-invalidation rect (pixels a
+/// direct-to-live writer touched, which the diff cannot see). Both
+/// sources land in the same band array, so the present hook flushes
+/// one tight rect per band that actually changed.
+///
+/// Why bands: before this split, every changed pixel collapsed into
+/// ONE bounding box, so a taskbar clock tick (bottom-right) plus a
+/// centred widget repaint fused into a near-fullscreen virtio-gpu
+/// `TRANSFER_TO_HOST_2D` every compose — the "D1" flicker.
+///
+/// Pure math with no kernel dependencies, so the framebuffer driver
+/// and the host unit test (`tests/host/test_damage_bands.cpp`) share
+/// one implementation — the same contract `DamageRect::Extend` has.
+struct DamageBandSet
+{
+    /// Per-band tight rect. Only the first `Compact()` return value
+    /// entries are meaningful to a consumer.
+    DamageRect bands[kDamageMaxRects];
+    /// Union of everything added since `Reset` — what single-rect
+    /// backends, the coalesce fallback, and RenderStats consume.
+    DamageRect bbox;
+    /// Bands in play for the surface height passed to `Reset`.
+    u32 band_count;
+    /// A rect reached past `band_count` (surface taller than the band
+    /// array covers). Consumers must fall back to a single `bbox`
+    /// flush, because the per-band list no longer covers every pixel.
+    bool overflow;
+
+    /// Re-arm for a surface `surface_height` scanlines tall. Clears
+    /// every band, the union, and the overflow flag.
+    constexpr void Reset(u32 surface_height)
+    {
+        const u32 needed = (surface_height + kDamageBandHeight - 1U) / kDamageBandHeight;
+        band_count = (needed < kDamageMaxRects) ? needed : kDamageMaxRects;
+        for (u32 i = 0; i < kDamageMaxRects; ++i)
+            bands[i].Reset();
+        bbox.Reset();
+        overflow = false;
+    }
+
+    /// Add `(x, y, w, h)` — right/bottom edges exclusive, same as
+    /// `DamageRect::Extend`. The rect is sliced at band boundaries and
+    /// each covered band is extended by its own slice, so a tall rect
+    /// never inflates the bands it only partially crosses. No-op on an
+    /// empty rect. The caller clips to the surface first.
+    constexpr void Add(u32 x, u32 y, u32 w, u32 h)
+    {
+        if (w == 0 || h == 0)
+            return;
+        bbox.Extend(x, y, w, h);
+        const u32 y_end = y + h;
+        const u32 first = y / kDamageBandHeight;
+        const u32 last = (y_end - 1U) / kDamageBandHeight;
+        for (u32 b = first; b <= last; ++b)
+        {
+            if (b >= band_count)
+            {
+                overflow = true;
+                return;
+            }
+            const u32 band_y0 = b * kDamageBandHeight;
+            const u32 band_y1 = band_y0 + kDamageBandHeight;
+            const u32 slice_y0 = (y > band_y0) ? y : band_y0;
+            const u32 slice_y1 = (y_end < band_y1) ? y_end : band_y1;
+            bands[b].Extend(x, slice_y0, w, slice_y1 - slice_y0);
+        }
+    }
+
+    /// Move the dirty bands to the front of `bands` and return how
+    /// many there are. Clears the tail so the call is idempotent —
+    /// a second `Compact()` with no intervening `Add` returns the
+    /// same count and leaves the same array.
+    constexpr u32 Compact()
+    {
+        u32 dirty = 0;
+        for (u32 b = 0; b < band_count; ++b)
+        {
+            if (!bands[b].valid)
+                continue;
+            if (b != dirty)
+                bands[dirty] = bands[b];
+            ++dirty;
+        }
+        for (u32 b = dirty; b < band_count; ++b)
+            bands[b].Reset();
+        return dirty;
+    }
+};
+
 /// Parse the Multiboot2 framebuffer tag from the info struct at
 /// `multiboot_info_phys`, validate that it's a direct-RGB 32-bpp
 /// linear framebuffer, and MapMmio the pixel buffer. Idempotent:
@@ -582,6 +686,23 @@ void FramebufferResetDamage();
 /// blitted wallpaper there and the offscreen now also paints
 /// wallpaper there), so the diff scan elides the blit and the
 /// cursor pixels left on live FB stay.
+///
+/// The forced rects are ALSO folded into the damage the following
+/// `FramebufferPresent` publishes, so a present-hook backend
+/// (virtio-gpu) uploads them too. That fold is load-bearing, not
+/// belt-and-braces: the force-blit re-syncs the snapshot at each
+/// rect, which makes the content diff report those pixels as
+/// unchanged, so without the fold the forced blit would land on the
+/// live surface and never reach the host scanout. A frame whose only
+/// change is a forced rect therefore still presents (it is not a
+/// "clean" frame).
+///
+/// Call this ONLY for writes that actually landed on the live
+/// surface — i.e. while `FramebufferComposeActive()` is false. A
+/// primitive issued during a compose pass targets the shadow, is
+/// already covered by the ordinary damage union + content diff, and
+/// posting an invalidation for it costs a redundant blit + snapshot
+/// sync and defeats idle-frame elision.
 ///
 /// Up to 8 rects accumulate between composes; overflow merges
 /// into the smallest enclosing union. No-op outside compose-aware

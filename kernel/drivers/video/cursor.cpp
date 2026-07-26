@@ -301,6 +301,28 @@ u32 ClampMove(u32 value, i32 delta, u32 max)
 // invisible because RestoreAt for OOR coords no-ops in
 // FramebufferPutPixel anyway.
 
+// Post the sprite rect to the compositor's snapshot-invalidation list,
+// but ONLY when the sprite writes actually landed on the live surface.
+//
+// `FramebufferPutPixel` routes to the offscreen shadow whenever a
+// compose pass is active, so a sprite painted from
+// `CursorOverlayInCompose` never touches live FB — it is already
+// covered by the ordinary damage union and the shadow-vs-snapshot
+// content diff. Invalidating anyway asks EndCompose for a forced blit
+// + snapshot re-sync of the sprite rect on EVERY compose, and (because
+// forced rects are published to the present hook by contract) turns an
+// idle desktop's pixel-identical recompose into a per-frame backend
+// upload of the cursor rect. The invalidation list is for direct-to-
+// live writers only; that is exactly what this predicate encodes.
+void InvalidateIfDirectWrite(u32 x, u32 y)
+{
+    if (FramebufferComposeActive())
+    {
+        return;
+    }
+    FramebufferInvalidateSnapshot(x, y, kCursorWidth, kCursorHeight);
+}
+
 // Save every pixel the cursor sprite covers so a later RestoreAt
 // can put them back exactly — even if a widget painted under the
 // cursor between move events. Only samples pixels the mask will
@@ -343,7 +365,7 @@ void RestoreAt(u32 x, u32 y)
     // erasing any stale cursor pixels the snapshot still thinks are
     // valid. Without this, the compose diff-elision masks the change
     // and cursor trails appear (see framebuffer.h docstring).
-    FramebufferInvalidateSnapshot(x, y, kCursorWidth, kCursorHeight);
+    InvalidateIfDirectWrite(x, y);
 }
 
 void DrawAt(u32 x, u32 y)
@@ -367,7 +389,7 @@ void DrawAt(u32 x, u32 y)
     // offscreen at this position matches the snapshot (very common —
     // wallpaper doesn't change everywhere). See framebuffer.h
     // FramebufferInvalidateSnapshot docstring for the full rationale.
-    FramebufferInvalidateSnapshot(x, y, kCursorWidth, kCursorHeight);
+    InvalidateIfDirectWrite(x, y);
 }
 
 } // namespace
@@ -476,19 +498,22 @@ void CursorOverlayInCompose()
     // of the composed frame — no visual gap, no flash.
     //
     // The trail problem that killed v2-v4 is now fixed by the
-    // snapshot-invalidation hook: MouseReader's RestoreAt/DrawAt
-    // calls FramebufferInvalidateSnapshot, which forces EndCompose
-    // to blit offscreen contents at the cursor's prior positions
-    // (erasing residual cursor pixels left on live FB). The
-    // CURRENT position is also blitted (cursor sprite from this
-    // overlay), so the cursor visibly relocates atomically.
+    // snapshot-invalidation hook: MouseReader's RestoreAt/DrawAt run
+    // OUTSIDE compose, so they write live FB and post a rect via
+    // InvalidateIfDirectWrite. That forces EndCompose to blit offscreen
+    // contents at the cursor's prior positions (erasing residual cursor
+    // pixels left on live FB) and to publish those rects to the present
+    // hook. The CURRENT position needs no invalidation of its own: this
+    // overlay's sprite goes to the shadow, so the ordinary damage union
+    // + content diff carry it, and the cursor visibly relocates
+    // atomically with the rest of the frame.
     //
     // No SaveAt here — backing remains owned by MouseReader's
     // CursorMove. The cursor sprite is composed; the backing
     // tracks what's UNDER the cursor on live FB. Both are correct
     // because the invalidation-driven force-blit puts wallpaper
-    // (not cursor) at the cursor rect into live FB before this
-    // overlay's blit lands the cursor sprite on top.
+    // (not cursor) at the cursor's PRIOR rect into live FB before this
+    // overlay's blit lands the cursor sprite at the new position.
     if (!g_ready)
     {
         return;

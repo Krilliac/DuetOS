@@ -120,6 +120,13 @@ inline void MarkDamage(u32 x, u32 y, u32 w, u32 h)
 // bounding box). Cursor sprite movement at PS/2 rate (~60 Hz) over a
 // ~70 ms compose cycle produces at most ~4-8 invalidations — well
 // within the cap before merging kicks in.
+//
+// The list is drained by every `FramebufferEndCompose`, including the
+// passes that can't honour it rect-by-rect (no snapshot / snapshot not
+// yet representative). Those passes blit the whole primitive-damage
+// rect — which the invalidation entries were folded into — so the
+// coverage is equivalent; leaving the entries queued would replay
+// stale rects on a later frame instead.
 constexpr u32 kMaxInvalidations = 8;
 constinit DamageRect g_invalidations[kMaxInvalidations] = {};
 constinit u32 g_invalidation_count = 0;
@@ -135,15 +142,18 @@ constinit u32 g_invalidation_count = 0;
 // split the surface into horizontal bands and emit one tight rect
 // per band that actually changed: vertically-separated widgets land
 // in different bands and flush as small independent rects. A genuine
-// large repaint dirties many contiguous bands; past `kCoalesceBands`
-// we fall back to the single union bbox so we don't trade one big
-// flush for dozens of virtio round-trips. `g_damage` still carries
-// the union for render-stats + no-present-hook backends, so their
-// behaviour is unchanged.
-constexpr u32 kBandH = 64;
-constexpr u32 kMaxDamageRects = 64; // covers surfaces up to 4096 px tall
-constexpr u32 kCoalesceBands = 6;   // > this many dirty bands -> one union flush
-constinit DamageRect g_damage_rects[kMaxDamageRects] = {};
+// large repaint dirties many contiguous bands; past
+// `kDamageCoalesceBands` we fall back to the single union bbox so we
+// don't trade one big flush for dozens of virtio round-trips.
+// `g_damage` still carries the union for render-stats + no-present-hook
+// backends, so their behaviour is unchanged.
+//
+// The band/slice/compact math lives on `DamageBandSet` in
+// framebuffer.h so the host unit test exercises the same code the
+// driver runs — same arrangement as `DamageRect::Extend`.
+constinit DamageBandSet g_bands = {};
+// Number of leading `g_bands.bands[]` entries the next
+// `FramebufferPresent` should flush. 0 ⇒ single-rect path (`g_damage`).
 constinit u32 g_damage_rect_count = 0;
 
 // Single source of truth for "where do pixel writes go". Called by
@@ -331,11 +341,12 @@ void FramebufferTeardown()
     // content-diff invariant rebuilds from scratch.
     g_presented_base = nullptr;
     g_presented_valid = false;
-    // Damage union + banded rect list — reset so a Reinit at
-    // different geometry doesn't carry forward a rect that's now
-    // off-surface.
+    // Damage union + banded rect list + pending snapshot invalidations
+    // — reset so a Reinit at different geometry doesn't carry forward a
+    // rect that's now off-surface.
     g_damage.Reset();
     g_damage_rect_count = 0;
+    g_invalidation_count = 0;
     // Present hook + the init guard. Re-init re-arms the hook
     // through whatever backend (virtio-gpu, etc.) registers
     // again on its own restart path.
@@ -368,8 +379,12 @@ void FramebufferDropComposeBuffers()
     g_presented_phys = 0;
     g_presented_valid = false;
     // Damage carries forward as off-surface if geometry shrank; reset.
+    // Pending snapshot invalidations go with it — they name rects in the
+    // OLD geometry and their forced blit needs a shadow that no longer
+    // exists.
     g_damage.Reset();
     g_damage_rect_count = 0;
+    g_invalidation_count = 0;
     SerialWrite("[video/fb] compose buffers dropped — re-alloc at new geometry on next compose\n");
 }
 
@@ -518,7 +533,7 @@ void FramebufferPresent()
             rect_count = g_damage_rect_count;
             for (u32 i = 0; i < g_damage_rect_count; ++i)
             {
-                dirty_pixels += static_cast<u64>(g_damage_rects[i].w) * g_damage_rects[i].h;
+                dirty_pixels += static_cast<u64>(g_bands.bands[i].w) * g_bands.bands[i].h;
             }
         }
         else
@@ -536,7 +551,7 @@ void FramebufferPresent()
             // near-fullscreen host transfer (the D1 flicker).
             for (u32 i = 0; i < g_damage_rect_count; ++i)
             {
-                g_present_hook(g_damage_rects[i]);
+                g_present_hook(g_bands.bands[i]);
             }
         }
         else
@@ -751,8 +766,17 @@ void FramebufferEndCompose()
     // writer's pixels (e.g. cursor at an old position) by writing
     // the compose-rendered content over them. Cheap: ~16x16 per
     // cursor invalidation, up to 8 rects per compose.
-    if (g_invalidation_count > 0 && g_presented_base != nullptr && g_presented_valid)
+    //
+    // The clipped rects are retained in `forced` so the post-diff fold
+    // below can put them back into the damage the present hook sees.
+    // Syncing the snapshot here is precisely what hides them from the
+    // content diff, so the fold is what makes the forced blit reach a
+    // virtio-gpu scanout at all.
+    u32 forced_count = 0;
+    DamageRect forced[kMaxInvalidations] = {};
+    if (g_invalidation_count > 0)
     {
+        const bool snapshot_live = (g_presented_base != nullptr && g_presented_valid);
         for (u32 i = 0; i < g_invalidation_count; ++i)
         {
             const auto& r = g_invalidations[i];
@@ -764,20 +788,33 @@ void FramebufferEndCompose()
             const u32 by_end = (r.y + r.h > g_info.height) ? g_info.height : r.y + r.h;
             if (bx >= bx_end || by >= by_end)
                 continue;
-            BlitShadowRectToLive(bx, by, bx_end, by_end);
-            SyncShadowRectToSnapshot(bx, by, bx_end, by_end);
-            // Also extend g_damage so the present hook flushes these
-            // pixels to the backend (virtio-gpu TRANSFER_TO_HOST_2D).
+            if (snapshot_live)
+            {
+                BlitShadowRectToLive(bx, by, bx_end, by_end);
+                SyncShadowRectToSnapshot(bx, by, bx_end, by_end);
+                forced[forced_count].Extend(bx, by, bx_end - bx, by_end - by);
+                ++forced_count;
+            }
+            // Extend g_damage either way: with a live snapshot this
+            // widens the diff-scan window to cover the forced rect;
+            // without one it widens the full-path blit below, which is
+            // how the no-snapshot degradation still erases the writer's
+            // pixels. Both routes make FramebufferPresent flush them.
             g_damage.Extend(bx, by, bx_end - bx, by_end - by);
         }
+        // Drain unconditionally — see kMaxInvalidations.
         g_invalidation_count = 0;
     }
 
     // Nothing was painted at all this pass — leave the screen as-is.
     // `g_damage.valid == false` also makes FramebufferPresent skip
-    // the backend round-trip, so an idle tick costs nothing.
+    // the backend round-trip, so an idle tick costs nothing. Clear the
+    // band count with it: every EndCompose exit must leave the band
+    // list consistent with `g_damage`, so a caller that presents
+    // without an intervening reset can't flush last frame's rects.
     if (!g_damage.valid)
     {
+        g_damage_rect_count = 0;
         g_compose_active = false;
         RenderStatsOnComposeEnd();
         return;
@@ -828,13 +865,7 @@ void FramebufferEndCompose()
     const auto* shadow_bytes = reinterpret_cast<const u8*>(g_shadow_base);
     const auto* snap_bytes = reinterpret_cast<const u8*>(g_presented_base);
 
-    const u32 band_count = (g_info.height + kBandH - 1U) / kBandH;
-    const u32 nbands = (band_count < kMaxDamageRects) ? band_count : kMaxDamageRects;
-    for (u32 b = 0; b < nbands; ++b)
-        g_damage_rects[b].Reset();
-
-    DamageRect d = {};
-    bool band_overflow = false; // a change landed past the rect array
+    g_bands.Reset(g_info.height);
     for (u32 yi = cy; yi < cy_end; ++yi)
     {
         const u64 off = static_cast<u64>(yi) * g_shadow_pitch;
@@ -853,16 +884,24 @@ void FramebufferEndCompose()
         }
         if (first <= last)
         {
-            const u32 w = (last - first) + 1U;
-            d.Extend(first, yi, w, 1U);
-            const u32 band = yi / kBandH;
-            if (band < nbands)
-                g_damage_rects[band].Extend(first, yi, w, 1U);
-            else
-                band_overflow = true;
+            g_bands.Add(first, yi, (last - first) + 1U, 1U);
         }
     }
 
+    // Fold the forced-invalidation rects back in. The pass at the top
+    // already blitted them shadow→live AND re-synced the snapshot, so
+    // the diff above necessarily reports them as unchanged — yet a
+    // present-hook backend has not seen those pixels. Dropping them
+    // here is what made a cursor move invisible on a virtio-gpu
+    // scanout (old sprite erased on the live surface, never uploaded)
+    // and what made `WindowRaise`'s full-surface invalidation — the
+    // z-order bleed-through guard — a no-op on the same backend.
+    for (u32 i = 0; i < forced_count; ++i)
+    {
+        g_bands.Add(forced[i].x, forced[i].y, forced[i].w, forced[i].h);
+    }
+
+    const DamageRect d = g_bands.bbox;
     if (!d.valid)
     {
         // Pixel-identical recompose — screen + snapshot already
@@ -877,18 +916,9 @@ void FramebufferEndCompose()
 
     // Compact the dirty bands to the front of the array, counting
     // them (empty bands stayed valid==false after Reset()).
-    u32 dirty = 0;
-    for (u32 b = 0; b < nbands; ++b)
-    {
-        if (g_damage_rects[b].valid)
-        {
-            if (b != dirty)
-                g_damage_rects[dirty] = g_damage_rects[b];
-            ++dirty;
-        }
-    }
+    const u32 dirty = g_bands.Compact();
 
-    if (band_overflow || dirty > kCoalesceBands)
+    if (g_bands.overflow || dirty > kDamageCoalesceBands)
     {
         // Either a change fell past the rect array (huge surface) or
         // many bands changed (a real large repaint). One union flush
@@ -911,7 +941,7 @@ void FramebufferEndCompose()
     // surface) behave exactly as before.
     for (u32 i = 0; i < dirty; ++i)
     {
-        const DamageRect& r = g_damage_rects[i];
+        const DamageRect& r = g_bands.bands[i];
         BlitShadowRectToLive(r.x, r.y, r.x + r.w, r.y + r.h);
         SyncShadowRectToSnapshot(r.x, r.y, r.x + r.w, r.y + r.h);
     }

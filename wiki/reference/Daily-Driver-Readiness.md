@@ -84,7 +84,7 @@ section) and the relevant subsystem page.
 
 | Topic | Today | What's needed |
 |-------|-------|---------------|
-| **Hosted ctest pillars** | 9 hosted tests pass: `result`, `string`, `syscall_error`, `cvt`, `text_hash`, `d3dcompiler`, `damage_rect`, `wild_address`, `disk_path`. | PE parser + VFS path resolve + registry lookup get hosted shims as their kernel headers stop pulling in transitive kernel-only includes. (See Track 10 → T10-04.) |
+| **Hosted ctest pillars** | 37 hosted tests pass (`ctest --test-dir build/host-tests`) — the live list is the `add_host_test(...)` calls in `tests/host/CMakeLists.txt`. Compositor/render coverage: `damage_rect`, `damage_bands`, `render_stats`, `blend`, `shadow_atlas`, `motion_math`, `chrome_text_measure`, `app_widgets_*`, `widget_group`. | PE parser gets a hosted shim as its kernel headers stop pulling in transitive kernel-only includes. (VFS path resolve + registry lookup landed — `vfs_resolve` / `registry_path`.) (See Track 10 → T10-04.) |
 | **CI smoke ISO** | `tools/test/ctest-boot-smoke.sh` runs the debug ISO under QEMU and asserts **41 sentinel signatures** (PE smoke + boot self-tests + installer layout self-test + the three portable native apps). Inner DUETOS_TIMEOUT default bumped from 90s → 150s; outer CTest TIMEOUT bumped from 120s → 200s so neither flakes when QEMU TCG runs a hair slow on CI. | Convert the harness from "string-search the serial log" to "structured `[smoke] profile=… complete` event + assertions" — single sentinel, no per-signature pattern matching. Out of scope for v0. |
 | **Real-hardware bring-up** | All hardware verification is QEMU-only. | Bring-up runs on at least one Intel-NUC-class machine + one AMD laptop + one ARM64 board (post-port). |
 

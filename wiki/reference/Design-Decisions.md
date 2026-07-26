@@ -12559,3 +12559,57 @@ markers for its richest input. Three discovery layers were added (runtime
   crawl and the window is widest. Measure it on the slow path, not the fast
   one — and confirm each run actually reached AP bring-up (`AP online
   cpu_id` present) before trusting a "0 timeouts" result.
+
+
+## 2026-07-26 — Forced snapshot-invalidation rects are published to the present hook, not just blitted
+
+- **Context:** the compositor's frame elision (`FramebufferEndCompose`)
+  diffs the freshly-composed shadow against a presented-frame snapshot
+  and publishes only the changed pixels. Writers that bypass the
+  compose surface — the cursor sprite's live-FB `DrawAt`/`RestoreAt`,
+  and `WindowRaise`'s full-surface z-order guard — declare their
+  regions with `FramebufferInvalidateSnapshot`; `EndCompose` then
+  force-blits shadow→live at each rect **and re-syncs the snapshot
+  there**. That re-sync is exactly what makes the subsequent content
+  diff report those pixels as *unchanged*.
+- **Bug this settles:** `EndCompose` extended the damage union with the
+  forced rects (the code said so in a comment) and then overwrote it
+  with the diff result — `g_damage = d`, or `g_damage.Reset()` on an
+  empty diff. The forced rects were therefore dropped before
+  `FramebufferPresent` ran. On a direct backend (firmware FB, Bochs
+  VBE) the blit alone is enough and nothing was visibly wrong; on a
+  **present-hook backend (virtio-gpu)** the pixels reached the guest's
+  live surface and never reached the host scanout. Two user-visible
+  consequences: a cursor move whose only damage is the two sprite rects
+  presented nothing (old sprite left on the host), and `WindowRaise`'s
+  full-surface invalidation — landed specifically as the z-order
+  bleed-through guard — was a **no-op** on that backend.
+- **Decision — the forced rects are part of the published damage, by
+  contract.** They are retained through the diff scan and folded into
+  the band set afterwards, so a frame whose only change is a forced
+  rect is *not* a clean frame. **Rules out** the alternative of having
+  the invalidation pass present its rects immediately (a second
+  backend round-trip per frame, and it would double-flush pixels the
+  diff also finds) and the alternative of skipping the snapshot
+  re-sync (which would make every subsequent diff re-report the rect
+  forever).
+- **Paired correction — invalidation is for live-FB writers only.**
+  `CursorOverlayInCompose` paints the sprite *during* compose, where
+  `FramebufferPutPixel` routes to the shadow, yet it still posted an
+  invalidation. Harmless while forced rects were dropped; once they are
+  published it would turn every idle recompose into a per-frame upload
+  of the cursor rect and destroy the `frames_clean` elision. The
+  cursor now posts only when `FramebufferComposeActive()` is false, and
+  the header states that as the contract. **Rules out** enforcing the
+  predicate inside `FramebufferInvalidateSnapshot` itself: a caller may
+  legitimately declare pre-`BeginCompose` writes from inside a pass.
+- **Also landed:** the invalidation list is now drained by every
+  `EndCompose` (previously only by the passes that could honour it
+  rect-by-rect, so entries could survive to a later frame) and cleared
+  by `FramebufferTeardown` / `FramebufferDropComposeBuffers`, where a
+  pending rect names the *old* geometry.
+- **Band math moved to `DamageBandSet` in `framebuffer.h`** — same
+  arrangement `DamageRect::Extend` already uses, so
+  `tests/host/test_damage_bands.cpp` exercises the code the kernel
+  runs (slicing, compaction, coalesce/overflow ladder, and the
+  empty-diff-plus-forced-rect regression) instead of a copy.

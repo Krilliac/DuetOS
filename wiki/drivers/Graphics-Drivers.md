@@ -277,12 +277,24 @@ the live framebuffer.
 when spatially-separated changes are detected.** `FramebufferEndCompose`
 runs the content diff over the union; when it finds that the actual
 changed pixels split into spatially-separated regions, it populates
-`g_damage_rects[]` (count → `g_damage_rect_count`). `FramebufferPresent`
+the band list (count → `g_damage_rect_count`). `FramebufferPresent`
 then takes the banded path: when `g_damage_rect_count > 0` it walks
 the list and fires the registered present hook once per disjoint
 rect; when the count is 0 it falls back to firing the hook once with
 the bbox union. A frame with nothing painted (`damage.valid == false`)
 short-circuits the hook entirely.
+
+The band slicing / compaction / union math lives on **`DamageBandSet`
+in `framebuffer.h`** — header-only `constexpr` state with no kernel
+dependencies, the same arrangement `DamageRect::Extend` uses, so
+`tests/host/test_damage_bands.cpp` exercises the code the kernel runs.
+`Reset(height)` re-arms the band count from the current geometry each
+frame; `Add(x, y, w, h)` slices the rect at band boundaries so a tall
+rect never inflates the bands it only partially crosses; `Compact()`
+moves the dirty bands to the front (idempotent) and returns the count.
+`overflow` (a rect past the array on a surface taller than
+`kDamageMaxRects * kDamageBandHeight`) and `> kDamageCoalesceBands`
+dirty bands both route the consumer to a single bbox flush.
 
 - **Direct backends** (firmware passthrough, Bochs VBE) — present
   hook is null; pixels are already on screen as soon as the shadow
@@ -342,6 +354,41 @@ invariant holds unconditionally thereafter; if the snapshot
 allocation fails the compositor degrades gracefully to a full
 present every frame.
 
+### Forced invalidation — direct-to-live writers
+
+The content diff is blind to any writer that bypasses the compose
+shadow. The cursor sprite is the main one: `MouseReaderTask` drives
+`RestoreAt` / `DrawAt` **outside** a compose pass, so those pixels go
+straight to the live framebuffer. `WindowRaise` is the other: on a
+z-order change it posts a full-surface rect as a repaint guard.
+
+Such writers declare their regions with
+`FramebufferInvalidateSnapshot(x, y, w, h)`. The next `EndCompose`
+force-blits shadow→live at each rect (erasing the writer's pixels with
+the freshly-composed content) and re-syncs the snapshot there.
+
+**The forced rects are then folded back into the published damage.**
+That fold is load-bearing, not belt-and-braces: the snapshot re-sync is
+precisely what makes the content diff report those pixels as
+*unchanged*, so without the fold the forced blit lands on the guest's
+live surface and never reaches a present-hook backend. On virtio-gpu
+that was two visible bugs — a cursor move whose only damage was the two
+sprite rects presented nothing (old sprite stranded on the host), and
+`WindowRaise`'s z-order guard was a complete no-op. A frame whose only
+change is a forced rect therefore counts as `partial`, not `clean`.
+
+The corollary is a call-site contract: **invalidate only for writes
+that actually landed on the live surface** (`FramebufferComposeActive()`
+false). `CursorOverlayInCompose` paints into the shadow, so it does not
+invalidate — doing so would ask for a forced blit + snapshot re-sync +
+backend upload of the cursor rect on every single compose and destroy
+the idle-frame elision.
+
+The list holds 8 rects between composes (overflow merges into the
+nearest existing rect), is drained by every `EndCompose`, and is
+cleared by `FramebufferTeardown` / `FramebufferDropComposeBuffers` —
+a pending rect there names the old geometry.
+
 ## Render statistics
 
 `kernel/drivers/video/render_stats.{h,cpp}` accumulates per-frame
@@ -377,7 +424,7 @@ counters that the `gfx` shell command surfaces:
   a spatially-separated change set in the run (typical for a
   single-app workload).
 - `max_band_count` — high-water mark of disjoint rects in any
-  single present. Caps at `kCoalesceBands` (6) before the
+  single present. Caps at `kDamageCoalesceBands` (6) before the
   framebuffer falls back to a single bbox.
 - `last_damage_*` + `last_rect_count` — the most recently
   presented damage bbox and the rect count behind it, for
@@ -705,7 +752,7 @@ recompose. Four themes ship:
   time.** `FramebufferAddDamage` accumulates a single union bbox
   per the existing `DamageRect::Extend` math, but `FramebufferPresent`
   has a banded path: when `g_damage_rect_count > 0` it walks
-  `g_damage_rects[]` and fires the registered present hook once per
+  the `DamageBandSet` band list and fires the registered present hook once per
   disjoint rect (see `framebuffer.cpp` `FramebufferPresent`). The
   content diff in `FramebufferEndCompose` is what populates the
   rect list when it finds spatially-separated changes, so a frame
