@@ -88,6 +88,16 @@ add_test(
             --root "${CMAKE_SOURCE_DIR}/../.."
 )
 
+add_test(
+    NAME kernel32_32_exports_complete
+    COMMAND Python3::Interpreter
+            "${CMAKE_SOURCE_DIR}/../../tools/test/check-dll-def-exports.py"
+            --root "${CMAKE_SOURCE_DIR}/../.."
+            --lib kernel32_32
+            --warn-unexported
+            --strict
+)
+
 # ---------------------------------------------------------------
 # Test helper. Header-only single-file ASSERT framework — far
 # lighter than gtest/Catch2, which would be the wrong dep for a

@@ -2915,10 +2915,12 @@ checks the number, not the argument registers.
 
 `python3 tools/test/check-dll-def-exports.py`
 cross-checks every `userland/libs/*/*.def` against the definitions
-beside it, so an export added without an implementation — or an
-implementation that never reaches the export table — is caught on
-any host, with no cross-toolchain installed. Hosted unit test for
-the i386 path / seek-resolution core:
+beside it, so an export added without an implementation is caught on
+any host, with no cross-toolchain installed. The focused
+`kernel32_32_exports_complete` CTest also runs the reverse-direction
+check in strict mode for the DLL changed here, catching an implementation
+that never reaches its export table. Hosted unit test for the i386
+path / seek-resolution core:
 `tests/host/test_kernel32_32_paths.cpp`.
 
 What's still GAP for the i386 set:
