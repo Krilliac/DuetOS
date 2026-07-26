@@ -345,8 +345,15 @@ __declspec(dllexport) void __initenv(void)
 
 /* ------------------------------------------------------------------
  * Stubbed I/O. These return failure consistently so callers fall
- * back to whatever error path they expect. File I/O lands when the
- * VFS-aware PE32 spawn slice does.
+ * back to whatever error path they expect.
+ *
+ * The blocker is gone as of 2026-07-26: kernel32_32 now has real
+ * file I/O (CreateFileA / ReadFile / SetFilePointer / GetFileSize,
+ * see userland/libs/kernel32_32/kernel32_32_fs.c), so these can be
+ * rebased onto it the way ucrtbase.c's fopen rides SYS_FILE_OPEN on
+ * the 64-bit side. That is its own slice — a FILE* needs a handle
+ * table, buffering, and the text/binary mode split — so the stubs
+ * stay honest until it lands.
  * ------------------------------------------------------------------ */
 
 __declspec(dllexport) void* fopen(const char* path, const char* mode)

@@ -12135,3 +12135,67 @@ markers for its richest input. Three discovery layers were added (runtime
   requirement is "the CN is not consulted", not "the flag is set" — only
   the latter was observable before. **Rules out** asserting on internal
   state where the externally-visible behaviour is the contract.
+## 2026-07-26 — PE32 file I/O: resolve signed seeks in the DLL; second wrong-syscall find
+
+- **Context:** the PE32 ladder's rung 1 is post-CRT application init,
+  and an application that reaches its own code opens its own data
+  files. The 32-bit surface had none: `kernel32_32::WriteFile` accepted
+  std handles only and `CreateFile*` / `ReadFile` / `SetFilePointer` /
+  `GetFileSize` did not exist. The kernel already had the whole file
+  syscall family (`SYS_FILE_{OPEN,READ,CLOSE,SEEK,FSTAT,WRITE,CREATE}`,
+  `SYS_FILE_QUERY_ATTRIBUTES`), exercised daily by the 64-bit
+  `kernel32_io.c` — nothing kernel-side was missing, only the 32-bit
+  translation layer.
+- **Decision — the i386 syscall ABI zero-extends, so signed arguments
+  must be resolved user-side.** `exceptions.S` moves the 32-bit source
+  slots into the 64-bit target slots verbatim, and the CPU already
+  zero-extended each 32-bit register write. A negative
+  `SetFilePointer` distance therefore reaches the C++ dispatcher as a
+  large positive `u64`: a `SetFilePointer(-4, FILE_END)` would land at
+  EOF instead of four bytes before it, silently. The fix is **not** to
+  sign-extend kernel-side — the kernel cannot tell a genuinely large
+  unsigned offset from a small negative one, and changing the argument
+  interpretation per-caller-bitness would make the syscall ABI
+  bitness-dependent. Instead the DLL probes the anchor (the cursor via
+  `SYS_FILE_SEEK(0, CUR)`, or the size via `SYS_FILE_FSTAT`), applies
+  the signed delta, clamps at 0, and issues an absolute `FILE_BEGIN`
+  seek. Forward moves keep their original whence and pay no probe.
+  **Rules out** sign-extending 32-bit syscall arguments in
+  `exceptions.S`, and rules out passing 64-bit quantities through the
+  i386 argument registers — a non-zero `lpDistanceToMoveHigh` is
+  rejected with ERROR_INVALID_PARAMETER rather than truncated.
+  The arithmetic lives in the freestanding
+  `userland/libs/kernel32_32/kernel32_32_paths.h` so
+  `tests/host/test_kernel32_32_paths.cpp` can pin it without a kernel.
+- **Decision — honour `dwCreationDisposition` against the primitives
+  the kernel actually has.** `SYS_FILE_CREATE` exists and its own
+  documentation names CREATE_NEW / CREATE_ALWAYS as its Win32 caller,
+  so `CreateFileA`/`W` map the dispositions onto open-vs-create instead
+  of ignoring the argument the way the 64-bit `CreateFileW` still does.
+  What the kernel has no primitive for — truncation — is a documented
+  `// GAP:` rather than a silent lie: `CREATE_ALWAYS` and
+  `TRUNCATE_EXISTING` open the existing file with its old contents.
+  **Rules out** faking truncation by delete-then-create, which would
+  turn a failed rewrite into data loss.
+- **Class-of-bug found (second instance):** `kernel32_32::CloseHandle`
+  dispatched syscall **4**, commented `SYS_CLOSE`. There is no
+  `SYS_CLOSE`; **4 is `SYS_STAT`**, whose `rdi` is a user path pointer.
+  Every close therefore ran a path-stat over the handle value
+  reinterpreted as a pointer, returned FALSE, burned a `kCapFsRead`
+  denial on sandboxed callers, and left the file slot allocated until
+  process exit. This is the **same wrong-syscall-number class as
+  `GetModuleHandleA` (2026-06-17)** — hand-written literals in the
+  `_32` DLLs that no compiler can check. Two instances make it a class,
+  not an accident: the remaining hand-written numbers across the `_32`
+  set want an audit, and the 64-bit companion remains the reference for
+  the correct number and argument shape.
+- **Tooling decision — check the `.def` ↔ implementation contract
+  statically.** The `_32` DLLs are `.def`-driven, so a name added to
+  the export list without an implementation (or the reverse) is invisible
+  on a dev host without clang + lld-link.
+  `tools/test/check-dll-def-exports.py` cross-checks every
+  `userland/libs/*/*.def` against the definitions beside it in a second,
+  on any host. It reports libraries whose exports are macro-generated as
+  SKIP rather than guessing at them — a checker that emits false
+  failures gets ignored, which is worse than one with a stated blind
+  spot.
