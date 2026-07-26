@@ -59,6 +59,11 @@ endif()
 include_directories("${CMAKE_SOURCE_DIR}/../../kernel")
 
 enable_testing()
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(
+    NAME cxxeh_context_contract
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/../../tools/test/cxxeh-context-contract.py"
+)
 
 # ---------------------------------------------------------------
 # Test helper. Header-only single-file ASSERT framework — far
@@ -94,6 +99,7 @@ target_sources(test_syscall_error PRIVATE "${CMAKE_SOURCE_DIR}/../../kernel/sysc
 # Phase A dynamic fix-discovery: decision logic is a freestanding header
 # (syscall/inferred_gap_decide.h), so the test needs no kernel TU.
 add_host_test(inferred_gap)
+add_host_test(pe_unwind_bounds)
 # Phase B dynamic fix-discovery: config-proposal decision is freestanding
 # (env/config_proposal_decide.h), no kernel TU.
 add_host_test(config_proposal)
