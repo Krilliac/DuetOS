@@ -148,8 +148,11 @@ __declspec(dllexport) HANDLE __stdcall CreateFileA(const char* lpFileName, DWORD
 
     case DUET32_OPEN_EXISTING:
     case DUET32_TRUNCATE_EXISTING:
-    default:
         return Duet32FileOpen(path, len);
+
+    default:
+        SetLastError(DUET32_ERROR_INVALID_PARAMETER);
+        return DUET32_INVALID_HANDLE_VALUE;
     }
 }
 
@@ -243,12 +246,13 @@ static int Duet32FileSize(unsigned h, unsigned long long* out)
 /*
  * SetFilePointer — resolves every move to a non-negative absolute
  * offset before issuing SYS_FILE_SEEK, because the 32-bit syscall ABI
- * zero-extends its arguments (kernel32_32_internal.h). A backwards
- * FILE_CURRENT / FILE_END move is therefore computed here: query the
- * current position (or the file size), apply the signed delta, clamp
- * at 0, and seek FILE_BEGIN to the result.
+ * zero-extends its arguments (kernel32_32_internal.h). Relative
+ * FILE_CURRENT / FILE_END moves therefore query their live anchor,
+ * apply the signed delta, reject a negative result, and seek FILE_BEGIN.
  *
- * GAP: offsets are limited to the low 4 GiB. lpDistanceToMoveHigh is
+ * GAP: offsets are limited to 0..INT_MAX. The i386 syscall wrapper
+ * returns an `int`, so a successful cursor with bit 31 set is
+ * indistinguishable from negative errno. lpDistanceToMoveHigh is
  * accepted only when it is NULL or points at 0 — a genuinely 64-bit
  * distance cannot be expressed through the i386 `int $0x80` argument
  * registers, so it fails with ERROR_INVALID_PARAMETER rather than
@@ -272,17 +276,17 @@ __declspec(dllexport) DWORD __stdcall SetFilePointer(HANDLE hFile, int lDistance
     }
     const unsigned h = (unsigned)(unsigned long)hFile;
 
-    /* A backwards move needs a live anchor to resolve against; a
-     * forward one does not, so the common case costs one syscall. */
+    /* Every relative move needs a live anchor so it can be issued as
+     * an absolute seek whose result is bounded below INT_MAX. */
     long long anchor = 0;
-    if (lDistanceToMove < 0 && dwMoveMethod == DUET32_FILE_CURRENT)
+    if (dwMoveMethod == DUET32_FILE_CURRENT)
     {
         const int cur = Duet32FileSeek(h, 0u, DUET32_FILE_CURRENT);
         if (cur < 0)
             return DUET32_INVALID_SET_FILE_POINTER;
         anchor = (long long)(unsigned)cur;
     }
-    else if (lDistanceToMove < 0 && dwMoveMethod == DUET32_FILE_END)
+    else if (dwMoveMethod == DUET32_FILE_END)
     {
         unsigned long long size;
         if (!Duet32FileSize(h, &size))

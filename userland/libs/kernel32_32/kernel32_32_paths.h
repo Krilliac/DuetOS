@@ -84,34 +84,24 @@ static inline int Duet32WideToAscii(const unsigned short* src, char* dst, int ds
  * caller has already queried — the current cursor for FILE_CURRENT,
  * the file size for FILE_END.
  *
- * A forward move needs no anchor and keeps its original whence, so
- * the caller only pays for the anchor probe when `distance < 0`.
- * `anchor` is ignored in that case.
- *
  * Returns 1 and writes both out-params when the move resolves; returns
  * 0 when Win32 rejects it (a negative distance from FILE_BEGIN, or an
- * unknown whence). A backwards move past the start clamps to 0,
- * matching the kernel's own [0, size] clamp in SeekForProcess.
+ * unknown whence). Every relative move is converted to FILE_BEGIN so
+ * the returned cursor stays in the unambiguous signed-eax range. This
+ * v0 therefore rejects targets above INT_MAX as well as targets before
+ * byte zero.
  */
 static inline int Duet32ResolveSeekTarget(long long anchor, int distance, unsigned whence,
                                           unsigned long long* out_offset, unsigned* out_whence)
 {
-    long long target;
+    const unsigned long long max_seek_offset = 0x7FFFFFFFULL;
+    long long target = (whence == DUET32_FILE_BEGIN ? 0 : anchor) + (long long)distance;
     if (out_offset == 0 || out_whence == 0)
         return 0;
     if (whence != DUET32_FILE_BEGIN && whence != DUET32_FILE_CURRENT && whence != DUET32_FILE_END)
         return 0;
-    if (distance >= 0)
-    {
-        *out_offset = (unsigned long long)(unsigned)distance;
-        *out_whence = whence;
-        return 1;
-    }
-    if (whence == DUET32_FILE_BEGIN)
-        return 0; /* Win32: negative distance from the start is invalid. */
-    target = anchor + (long long)distance;
-    if (target < 0)
-        target = 0;
+    if (target < 0 || (unsigned long long)target > max_seek_offset)
+        return 0;
     *out_offset = (unsigned long long)target;
     *out_whence = DUET32_FILE_BEGIN;
     return 1;

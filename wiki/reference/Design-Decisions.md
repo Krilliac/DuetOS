@@ -12158,8 +12158,10 @@ markers for its richest input. Three discovery layers were added (runtime
   interpretation per-caller-bitness would make the syscall ABI
   bitness-dependent. Instead the DLL probes the anchor (the cursor via
   `SYS_FILE_SEEK(0, CUR)`, or the size via `SYS_FILE_FSTAT`), applies
-  the signed delta, clamps at 0, and issues an absolute `FILE_BEGIN`
-  seek. Forward moves keep their original whence and pay no probe.
+  the signed delta, rejects targets before byte zero or above INT_MAX,
+  and issues an absolute `FILE_BEGIN` seek. All relative moves probe
+  their live anchor so a successful cursor cannot be confused with a
+  negative errno in signed `eax`.
   **Rules out** sign-extending 32-bit syscall arguments in
   `exceptions.S`, and rules out passing 64-bit quantities through the
   i386 argument registers — a non-zero `lpDistanceToMoveHigh` is

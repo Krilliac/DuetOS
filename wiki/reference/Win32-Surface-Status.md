@@ -2856,7 +2856,7 @@ implementations:
   hardcoded 0) and `HeapReAlloc` (allocated fresh and **did not copy**,
   silently losing data on every CRT realloc) are real now too.
 
-  Guarded by `tools/test/check-syscall-numbers.py` — see below.
+  Guarded by the `win32_syscall_numbers` hosted CTest — see below.
 - `kernel32_32` **file I/O is REAL** (added 2026-07-26, the next
   rung after CRT startup — an application that reaches its own
   code opens its own data files). `userland/libs/kernel32_32/`
@@ -2901,7 +2901,8 @@ and a read on the closed handle fails, which is what pins the
 `[ring3-pe32-rich] FAIL kernel32-fileio` plus a `step=NN` line
 naming the assertion, and the PE-compat verdict scanner counts it.
 
-Static checks (both run on any host, no cross-toolchain needed):
+Static checks (both run on any host, no cross-toolchain needed, and
+both are registered in hosted CTest):
 
 `python3 tools/test/check-syscall-numbers.py` parses the syscall enum
 and verifies every literal in `userland/libs` that NAMES the syscall it
@@ -2943,8 +2944,10 @@ What's still GAP for the i386 set:
     it, so a caller rewriting a shorter payload sees the old
     tail. Needs a kernel `SYS_FILE_TRUNCATE` (or an O_TRUNC flag
     on SYS_FILE_OPEN); the 64-bit path has the same hole.
-  - **Offsets limited to the low 4 GiB.** The i386 `int $0x80`
-    argument registers cannot carry a 64-bit distance, so
+  - **Offsets limited to 0..INT_MAX.** The i386 `int $0x80`
+    wrapper returns a signed `int`, so a cursor with bit 31 set is
+    indistinguishable from negative errno. The argument registers also
+    cannot carry a 64-bit distance, so
     `SetFilePointer` rejects a non-zero
     `lpDistanceToMoveHigh` with ERROR_INVALID_PARAMETER and
     returns the new position's high dword as 0.

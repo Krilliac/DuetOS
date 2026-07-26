@@ -965,7 +965,7 @@ fault→fix→re-run loop, `tools/test/run-exe.sh` + `peexec=`, using the
    sentinel the kernel rejects, and `HeapSize`/`HeapReAlloc` (which
    lost the caller's data on every realloc). See Win32-Surface-Status
    §11b and Design-Decisions. `tools/test/check-syscall-numbers.py`
-   now guards the class.
+   now guards the class as the `win32_syscall_numbers` hosted CTest.
 
    **Landed (2026-07-26):** `kernel32_32` file I/O is real —
    `CreateFileA`/`W`, `ReadFile`, `WriteFile` on kernel file handles,
@@ -1074,12 +1074,12 @@ no 64-bit canonical-address assumption baked in.
   `kVkOpClearFramebufferRgba` in `syscall.h` contradict the kernel
   implementation and are what misled the call sites. **Left alone
   deliberately: adjacent to the concurrent graphics work.**
-- **`iphlpapi.c:52` — `GetAdaptersInfo` swaps two arguments.**
-  `iphlp_sock_op(13, 0, out, sizeof(*out))` puts `0` where the kernel
-  reads the output pointer and `out` where it reads a byte capacity, so
-  `CopyToUser(0, …)` fails and the adapter always reports `0.0.0.0`
-  even when DHCP succeeded.
-- Both are the *right number, wrong register* shape, which
+- **Fixed 2026-07-26: `iphlpapi::GetAdaptersInfo` lease query.**
+  `kSockOpGetLease` now passes `out` in `rsi` and capacity in `rdx`;
+  the trampoline's third argument uses a named asm operand rather than
+  the formerly wrong `%4`. The `iphlpapi_socket_abi` hosted CTest pins
+  the userland call, trampoline mapping, and kernel consumption.
+- These are the *right number, wrong register* shape, which
   `check-syscall-numbers.py` explicitly does not cover — it validates
   numbers, not argument slots. An argument-contract checker would need
   to parse the per-syscall register documentation out of `syscall.h`.
