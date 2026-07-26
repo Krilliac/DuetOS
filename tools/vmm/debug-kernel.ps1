@@ -28,7 +28,8 @@
        so kernel symbols + DWARF source paths are resolved and the guest
        halts pre-first-instruction (matches the stopAtConnect:true
        behaviour the original launch.vs.json was trying to provide).
-    5. Returns. The VMM and gdb each own their own console window.
+    5. Returns. The VMM runs hidden with retained stdout/stderr logs;
+       gdb owns the visible console window.
 
   ONE CLICK FROM WINDOWS
     Drop a shortcut on the desktop pointing at this script:
