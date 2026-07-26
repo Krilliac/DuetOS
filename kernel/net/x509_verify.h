@@ -13,7 +13,7 @@
  *   "Is the certificate this server presented trustworthy for the
  *    hostname I dialed, right now?"
  *
- * That is the conjunction of five independent checks, ALL of which
+ * That is the conjunction of six independent checks, ALL of which
  * must hold for Verify() to return true:
  *
  *   1. Signature(s): every certificate in the path is signed by the
@@ -40,6 +40,21 @@
  *      controls one domain) could be presented as an intermediate and
  *      used to mint a trusted chain for ANY hostname — the classic
  *      Basic Constraints bypass.
+ *   6. Extension-block sanity (RFC 5280 §4.2, §6.1.4(k)): the v3
+ *      extension block parses as exact DER — every extnValue holds
+ *      exactly one encoded value with no trailing and no truncated
+ *      bytes — no extnID appears twice, and no CRITICAL extension
+ *      outside {basicConstraints, keyUsage, subjectAltName} is
+ *      present. A certificate that breaks any of these is rejected
+ *      OUTRIGHT (it never reaches the checks above), because each is
+ *      a way to make one certificate read as two different things:
+ *      a duplicate basicConstraints whose first copy is malformed, a
+ *      truncated inner SEQUENCE that leaves a half-decoded cA = TRUE
+ *      standing, or a critical constraint we would otherwise ignore.
+ *      Extension state is tracked as three separate facts — SEEN,
+ *      syntactically VALID, and the decoded VALUE — precisely so
+ *      "seen but unparseable" can never be mistaken for "absent"
+ *      (which would let a later duplicate win) or for "cA = TRUE".
  *
  * SECURITY POSTURE: a verifier that returns true when it should
  * return false is strictly worse than no verifier at all, because it
@@ -58,9 +73,20 @@
  *     0x04 uncompressed SEC1 form is accepted). A cert signed any other
  *     way fails verification.
  *   - Name constraints and the rest of the keyUsage / extendedKeyUsage
- *     policy surface (only keyCertSign is enforced, on issuers). The
- *     `critical` flag on an extension is not itself acted on: an
- *     unrecognised critical extension does NOT reject the certificate.
+ *     policy surface are not IMPLEMENTED (only keyCertSign is enforced,
+ *     on issuers) — but they are not ignored either: because check 6
+ *     rejects any unrecognised CRITICAL extension, a certificate that
+ *     carries a critical nameConstraints / policyConstraints /
+ *     inhibitAnyPolicy fails closed rather than having its constraint
+ *     silently dropped. The cost is real and worth naming: a server
+ *     whose chain marks extendedKeyUsage (or any other extension we do
+ *     not decode) CRITICAL will not connect until that extension is
+ *     implemented. That is the first thing to check when a site fails
+ *     to verify for no obvious reason — dump its chain with
+ *     `tools/test/x509-embedded-extensions.py`. Widen the recognised
+ *     set only by IMPLEMENTING an extension, never by ignoring it.
+ *   - Only the first 16 subjectAltName dNSName entries are retained; a
+ *     hostname appearing past that point will not match (fails closed).
  *   - CRL / OCSP revocation. A revoked-but-unexpired cert still
  *     verifies. Revisit when the network stack can fetch OCSP.
  *   - The full Mozilla / CCADB root program. The embedded store carries
@@ -132,6 +158,14 @@ using CertVerifyFn = bool (*)(const u8* leaf_der, u32 leaf_len, const u8* const*
 ///   - a wrong hostname verifies FALSE,
 ///   - an out-of-window `now_unix` verifies FALSE,
 ///   - a leaf with no trusted issuer verifies FALSE,
+///   - the extension-policy vectors in net/x509_ext_vectors.h reach the
+///     verdict they declare: a duplicate extension (including when the
+///     FIRST copy is the malformed one), an extnValue with trailing
+///     bytes, a truncated inner SEQUENCE, a BER-encoded BOOLEAN, a
+///     non-minimal pathLenConstraint and an unrecognised CRITICAL
+///     extension each reject the certificate AND leave it unusable as
+///     an issuer, while an unknown NON-critical extension is ignored
+///     and an ordinary cA:TRUE + keyCertSign block stays usable,
 ///   - every embedded REAL root (6 RSA incl the RSA-4096 ISRG Root X1,
 ///     plus 2 P-384 ECDSA) parses, and one representative of each
 ///     signature family additionally self-verifies (RSA+SHA-256 on the

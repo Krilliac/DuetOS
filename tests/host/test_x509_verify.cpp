@@ -10,7 +10,9 @@
 // leaf->root and leaf->intermediate->root paths verify TRUE while a
 // tampered signature, wrong hostname, expired window, untrusted issuer,
 // and a NON-CA certificate offered as an issuer all verify FALSE; it
-// also parses 8 real trust-store roots (6 RSA incl. one RSA-4096 +
+// runs the extension-policy vectors (net/x509_ext_vectors.h) that pin
+// the exact-DER, duplicate-extension and unknown-critical rejections;
+// and it parses 8 real trust-store roots (6 RSA incl. one RSA-4096 +
 // 2 ECDSA) and self-verifies one of each.
 //
 // This is the heaviest of the boot crypto self-tests (~the bulk of the
@@ -46,5 +48,13 @@ int main()
     // a future edit that drops the gate cannot pass this test by simply
     // not running those cases — a shorter PASS line fails the build.
     EXPECT_TRUE(g_crypto_serial.find("basicConstraints+keyUsage issuer gate") != std::string::npos);
+
+    // Same reasoning for the §4.2 / §6.1.4(k) extension-block policy: the
+    // exact-DER, duplicate-extension and unknown-critical rejections are
+    // what stop a malformed or ambiguous extension block from promoting a
+    // certificate to an issuer. Deleting ExtensionPolicyChecks() would
+    // shorten the PASS line, and this assert would catch it.
+    EXPECT_TRUE(g_crypto_serial.find("exact-DER + duplicate-extension + unknown-critical rejection") !=
+                std::string::npos);
     return 0;
 }
