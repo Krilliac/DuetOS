@@ -12195,10 +12195,13 @@ markers for its richest input. Three discovery layers were added (runtime
   statically.** The `_32` DLLs are `.def`-driven, so a name added to
   the export list without an implementation (or the reverse) is invisible
   on a dev host without clang + lld-link.
-  `tools/test/check-dll-def-exports.py` cross-checks every
-  `userland/libs/*/*.def` against the definitions beside it in a second,
-  on any host. It reports libraries whose exports are macro-generated as
-  SKIP rather than guessing at them — a checker that emits false
+  `tools/test/check-dll-def-exports.py` checks every `.def` name has a
+  definition beside it in a second, on any host. A strict focused CTest
+  also checks the reverse direction for `kernel32_32`, the DLL changed
+  here; global reverse-direction strictness remains opt-in because
+  existing libraries carry intentional internal exports. It reports
+  libraries whose exports are macro-generated as SKIP rather than
+  guessing at them — a checker that emits false
   failures gets ignored, which is worse than one with a stated blind
   spot.
 
