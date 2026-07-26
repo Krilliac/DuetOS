@@ -1407,7 +1407,7 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 148 | `SYS_VM_ALLOCATE` | `rdi` = ProcessHandle (-1 = self); `rsi` = base_addr (0 = pick any aligned); `rdx` = size in bytes (rounded up to a page); `r10` = AllocationType (MEM_COMMIT | MEM_RESERVE; `r8` = protect flags (PAGE_*; `r9` = user u64* base out (set on success) | — |
 | 149 | `SYS_VM_FREE` | — | — |
 | 150 | `SYS_VM_PROTECT` | — | — |
-| 151 | `SYS_FILE_QUERY_ATTRIBUTES` | `rdi` = const char* user_path (NUL-terminated; `rsi` = path_len (excluding NUL); `rdx` = u8* user out buffer (FILE_NETWORK_OPEN_INFORMATION layout...; `r10` = buffer cap | — |
+| 151 | `SYS_FILE_QUERY_ATTRIBUTES` | `rdi` = const char* user_path (NUL-terminated); `rsi` = path_len (excluding NUL); `rdx` = u8* user out buffer (FILE_NETWORK_OPEN_INFORMATION layout...; `r10` = buffer cap | — |
 | 152 | `SYS_EXECVE` | `rdi` = const char* user_path (NUL-terminated; `rsi` = path_len | NTSTATUS / -errno on failure |
 | 153 | `SYS_SOCKET_OP` | `rdi` = op (kSockOp* below) rsi/rdx/r10/r8/r9 = op-specific args ...; `rdx` = type (SOCK_STREAM=1 / SOCK_DGRAM=2); `rsi` = sock idx; `r10` = addrlen; `r8` = user dest sockaddr; `r9` = dest addrlen | kernel socket pool index >= 0 on success, negative errno on failure |
 | 154 | `SYS_DIR_OPEN` | `rdi` = const char* user_path | kWin32DirBase + idx (= 0xA00 |
