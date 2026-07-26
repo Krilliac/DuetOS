@@ -26,7 +26,11 @@
  *      single intermediate, root).
  *   3. Hostname: the leaf's subjectAltName dNSName list (with a
  *      leftmost "*." wildcard) matches the dialed hostname, falling
- *      back to the subject CN when no SAN is present. ASCII
+ *      back to the subject CN only when the SAN extension is ABSENT
+ *      (RFC 6125 §6.4.4). A SAN that is present but names no DNS host
+ *      — say it carries only an rfc822Name — still suppresses the CN:
+ *      it means "this certificate names no DNS host", which is a
+ *      refusal, not a reason to look elsewhere. ASCII
  *      case-insensitive.
  *   4. Validity window: `now_unix` lies within [notBefore, notAfter]
  *      for every certificate in the path.
@@ -40,17 +44,32 @@
  *      controls one domain) could be presented as an intermediate and
  *      used to mint a trusted chain for ANY hostname — the classic
  *      Basic Constraints bypass.
- *   6. Extension-block sanity (RFC 5280 §4.2, §6.1.4(k)): the v3
- *      extension block parses as exact DER — every extnValue holds
- *      exactly one encoded value with no trailing and no truncated
- *      bytes — no extnID appears twice, and no CRITICAL extension
- *      outside {basicConstraints, keyUsage, subjectAltName} is
- *      present. A certificate that breaks any of these is rejected
- *      OUTRIGHT (it never reaches the checks above), because each is
- *      a way to make one certificate read as two different things:
- *      a duplicate basicConstraints whose first copy is malformed, a
- *      truncated inner SEQUENCE that leaves a half-decoded cA = TRUE
- *      standing, or a critical constraint we would otherwise ignore.
+ *   6. Extension-block sanity (RFC 5280 §4.1.2.9, §4.2, §6.1.4(k)).
+ *      The governing idea: a certificate must have exactly ONE valid
+ *      encoding, so that no two parsers can read it differently. A
+ *      certificate that breaks any of the following is rejected
+ *      OUTRIGHT — it never reaches the checks above:
+ *        - Canonical DER throughout the extension subtree: minimal
+ *          length encodings (short form below 128), canonical OID
+ *          arcs, no high-tag-number form, and every extnValue holding
+ *          exactly one encoded value with nothing trailing and
+ *          nothing truncated.
+ *        - A DEFAULT value must be OMITTED, never written out: an
+ *          explicit `cA FALSE`, `critical FALSE`, or version v1 is
+ *          refused (X.690 §11.5).
+ *        - No extnID appears twice — ANY extnID, not just the ones
+ *          decoded here.
+ *        - Exactly one [3] extensions block, only as the final field
+ *          of the TBSCertificate, only in a v3 certificate, and never
+ *          empty (Extensions is SIZE (1..MAX)).
+ *        - No CRITICAL extension outside {basicConstraints, keyUsage,
+ *          subjectAltName}.
+ *      Each of these is otherwise a way to make one certificate read
+ *      as two different things: a duplicate basicConstraints whose
+ *      first copy is malformed, a truncated inner SEQUENCE that
+ *      leaves a half-decoded cA = TRUE standing, a second [3] block
+ *      that a last-wins parser would prefer, or a critical constraint
+ *      we would otherwise ignore.
  *      Extension state is tracked as three separate facts — SEEN,
  *      syntactically VALID, and the decoded VALUE — precisely so
  *      "seen but unparseable" can never be mistaken for "absent"
@@ -87,6 +106,14 @@
  *     set only by IMPLEMENTING an extension, never by ignoring it.
  *   - Only the first 16 subjectAltName dNSName entries are retained; a
  *     hostname appearing past that point will not match (fails closed).
+ *   - The structured subjectAltName GeneralNames — otherName [0],
+ *     x400Address [3], directoryName [4], ediPartyName [5] — carry
+ *     nested schemas this layer does not implement, so a certificate
+ *     whose SAN contains one is REFUSED rather than having that entry
+ *     skipped unvalidated. directoryName is the one seen in the wild.
+ *   - At most 32 extensions per certificate (the bound on the
+ *     duplicate-detection table); a 33rd is refused rather than parsed
+ *     with an incomplete duplicate check.
  *   - CRL / OCSP revocation. A revoked-but-unexpired cert still
  *     verifies. Revisit when the network stack can fetch OCSP.
  *   - The full Mozilla / CCADB root program. The embedded store carries
