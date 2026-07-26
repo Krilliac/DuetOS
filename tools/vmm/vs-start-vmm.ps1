@@ -13,7 +13,7 @@
       2. configure+build duetos-vmm.exe natively (MSVC)
       3. reap any orphan VMM from a previous F5 cycle
       4. launch duetos-vmm.exe detached with --gdb <port>
-      5. block ONLY until the GDB port is accepting, then exit 0
+      5. block ONLY until the GDB port is listening, then exit 0
 
   WHY A WINDOWS SCRIPT (vs the bash QEMU starter)
     The VMM links WinHvPlatform and MUST run as a native Windows
@@ -25,22 +25,25 @@
     clang build (VS cannot build the freestanding kernel).
 
   USAGE (manual)
-    powershell -ExecutionPolicy Bypass -File tools\vmm\vs-start-vmm.ps1
+    powershell.exe -NoProfile -File tools\vmm\vs-start-vmm.ps1
   Wired one-button: see the tasks.vs.json snippet documented at the
   top of launch.vs.json.
 
 .PARAMETER Port        GDB stub TCP port (default 1234).
 .PARAMETER Preset      Kernel CMake preset (default x86_64-debug).
-.PARAMETER Mem         Guest RAM in MiB (default 512).
+.PARAMETER Mem         Guest RAM in MiB (default 2048).
 .PARAMETER BuildKernel Also build the kernel via WSL first.
 .PARAMETER WslPath     Repo path as seen inside WSL (for -BuildKernel;
                         default derives from the Windows repo root).
 #>
 [CmdletBinding()]
 param(
+    [ValidateRange(1, 65535)]
     [int]    $Port        = 1234,
+    [ValidatePattern('^[A-Za-z0-9_.-]+$')]
     [string] $Preset      = "x86_64-debug",
-    [int]    $Mem         = 512,
+    [ValidateRange(256, 65536)]
+    [int]    $Mem         = 2048,
     [switch] $BuildKernel,
     [string] $WslPath     = ""
 )
@@ -52,7 +55,10 @@ $RepoRoot  = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $KernelElf = Join-Path $RepoRoot "build\$Preset\kernel\duetos-kernel.elf"
 $VmmBuild  = Join-Path $PSScriptRoot "build"
 $VmmExe    = Join-Path $VmmBuild "Debug\duetos-vmm.exe"
-$PidFile   = Join-Path $env:TEMP "duetos-vmm.pid"
+$repoHashBytes = [System.Security.Cryptography.SHA256]::Create().ComputeHash(
+    [System.Text.Encoding]::UTF8.GetBytes($RepoRoot.ToLowerInvariant()))
+$repoHash = ([BitConverter]::ToString($repoHashBytes) -replace '-', '').Substring(0, 12)
+$PidFile = Join-Path $env:TEMP "duetos-vmm-$repoHash-$Port.pid"
 
 function Say($m) { Write-Host "[duetos-vmm] $m" }
 
@@ -70,7 +76,7 @@ if ($BuildKernel) {
         }
     }
     Say "building kernel in WSL ($WslPath, preset=$Preset)"
-    wsl.exe -- bash -lc "cd '$WslPath' && cmake --build build/$Preset --target duetos-kernel"
+    wsl.exe -- bash -lc "cd '$WslPath' && cmake --preset '$Preset' && cmake --build 'build/$Preset' --target duetos-kernel"
     if ($LASTEXITCODE -ne 0) { throw "WSL kernel build failed" }
 }
 
@@ -94,32 +100,47 @@ if ($LASTEXITCODE -ne 0) { throw "VMM build failed" }
 if (Test-Path $PidFile) {
     $old = Get-Content $PidFile -ErrorAction SilentlyContinue
     if ($old -and ($old -match '^\d+$')) {
-        Get-Process -Id ([int]$old) -ErrorAction SilentlyContinue |
-            Stop-Process -Force -ErrorAction SilentlyContinue
+        $oldProcess = Get-Process -Id ([int]$old) -ErrorAction SilentlyContinue
+        $oldPath = if ($oldProcess) {
+            try { $oldProcess.Path } catch { $null }
+        }
+        if ($oldPath -and
+            ([IO.Path]::GetFullPath($oldPath) -eq [IO.Path]::GetFullPath($VmmExe))) {
+            Say "stopping prior VMM pid $old"
+            $oldProcess | Stop-Process -Force -ErrorAction SilentlyContinue
+        } elseif ($oldProcess) {
+            Say "ignoring stale pid file; pid $old is not this VMM"
+        }
     }
     Remove-Item $PidFile -ErrorAction SilentlyContinue
 }
 
 # 4. Launch the VMM detached; it parks on accept() until VS attaches.
 Say "starting $VmmExe --gdb $Port"
+$quotedKernelElf = '"' + $KernelElf + '"'
+$vmmArguments = "--kernel $quotedKernelElf --mem $Mem --gdb $Port"
 $p = Start-Process -FilePath $VmmExe `
-        -ArgumentList @("--kernel", $KernelElf, "--mem", "$Mem",
-                        "--gdb", "$Port") `
-        -PassThru
+        -ArgumentList $vmmArguments `
+        -PassThru `
+        -WindowStyle Hidden
 Set-Content -Path $PidFile -Value $p.Id
 
-# 5. Return only once the stub is accepting, so the VS attach is
-#    race-free. Do NOT wait on the process — VS needs control back.
-for ($i = 0; $i -lt 60; $i++) {
-    if ($p.HasExited) { throw "VMM exited early (code $($p.ExitCode))" }
-    try {
-        $c = New-Object Net.Sockets.TcpClient
-        $c.Connect("127.0.0.1", $Port)
-        $c.Close()
-        Say "tcp::$Port ready — Visual Studio may attach"
-        exit 0
-    } catch {
-        Start-Sleep -Milliseconds 250
-    }
+# 5. Return only once the stub owns a LISTEN socket without connecting.
+#    A connection probe would consume the GDB server's only client slot.
+#    Do not wait on the process — VS needs control back after readiness.
+if (-not (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue)) {
+    throw "Get-NetTCPConnection is required for a non-consuming GDB readiness check"
 }
-throw "VMM gdb port $Port did not open within 15s"
+$listenDeadline = (Get-Date).AddSeconds(15)
+while ((Get-Date) -lt $listenDeadline) {
+    if ($p.HasExited) { throw "VMM exited early (code $($p.ExitCode))" }
+    $listener = Get-NetTCPConnection -State Listen -LocalPort $Port `
+                    -OwningProcess $p.Id -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+    if ($listener) {
+        Say "tcp:$Port listening - Visual Studio may attach"
+        exit 0
+    }
+    Start-Sleep -Milliseconds 250
+}
+throw "VMM did not reach LISTEN on tcp:$Port within 15 seconds (PID $($p.Id))"

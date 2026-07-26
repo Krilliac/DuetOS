@@ -4,7 +4,7 @@
 >
 > **Execution context:** Host tooling (Windows, native MSVC process) — outside the kernel entirely
 >
-> **Maturity:** v0 — slices 1-6 landed; written to spec, not yet boot-verified on Windows (see [Verification status](#verification-status))
+> **Maturity:** v0 — boot-verified on Windows; see [Verification status](#verification-status) for the current live acceptance boundary.
 
 ## Overview
 
@@ -65,14 +65,25 @@ hardware.
 | 8 (Bridge A) | `Vmm::kernel` of type `GuestKernelView` — host pointers into mapped GPA, populated/refreshed on every guest exit. VS Watch sees `vmm.kernel.g_ticks` as a live, editable `uint64_t*`. Curated list extends trivially. |
 | 9 (Bridge C) | Host-attach session can halt the guest at a guest symbol: `vmm_dbg::Claim()` flips the WHP exception-exit arbiter, `vmm_dbg::Bp("name")` plants `0xCC`, `HandleHostStop()` snapshots regs into `g_stop_state` and calls `__debugbreak()` (under `IsDebuggerPresent` guard); `vmm_dbg::Step()` / `Run()` resume. Coexists with the GDB stub (default off; Claim/Release transfers ownership). |
 | 10 (Bridge D) | `tools/vmm/vmm.natvis` pretty-printers for `GuestKernelView`, `GuestStopState`, `ElfSymbols::Sym`. Embedded via CMake `target_sources` + `VS_TOOL_OVERRIDE "Natvis"`. |
-| 11 | `--break` CLI flag: `__debugbreak()` in `main()` after arg-parse, gated by `IsDebuggerPresent()`, so VS native attach (F5) halts at a known stack frame before the vCPU runs. F5 default args include both `--break` and `--gdb 1234` so the two-window full-coverage debug flow Just Works. |
+| 11 | `--break` CLI flag: `__debugbreak()` in `Vmm::Run()` after construction, gated by `IsDebuggerPresent()`, so the GDB listener and host bridge are both live before the vCPU runs. F5 default args include both `--break` and `--gdb 1234`. |
 
 Source map (all under `tools/vmm/src/`): `whp.*` (partition/vCPU
-RAII), `guest_memory.*`, `elf64.*`, `multiboot2.*`, `acpi.*`,
+RAII), `processor_contract.*` (guest-visible CPUID contract),
+`guest_memory.*`, `elf64.*`, `multiboot2.*`, `acpi.*`,
 `mmio_emulator.*`, `devices/{serial16550,pit8254,ioapic,ps2_i8042}.*`,
 `debug/{gdb_server,elf_symbols,exit_trace,introspect,record,
 vmm_dbg,guest_view,host_stop}.*`, `vmm.*`, `main.cpp`. Visualisers in
 `tools/vmm/vmm.natvis`.
+
+### Guest processor identity contract
+
+Before `WHvSetupPartition`, the VMM enables WHP's synthetic
+`HypervisorPresent` feature and no other synthetic Hyper-V feature.
+WHP therefore exposes CPUID.1.ECX[31] plus leaves `0x40000000` and
+`0x40000001`. DuetOS detects `Microsoft Hv` and takes its
+hypervisor-safe paths instead of probing host-only RAPL, thermal, and
+frequency MSRs. Do not replace this with fake zero-valued MSR reads:
+unsupported architectural accesses must remain visible as faults.
 
 For the full debugger workflow (how to use the GDB stub, the bridge,
 or both at once), see [**VMM Debugging in Visual Studio**](VMM-Debugging.md).
@@ -87,6 +98,7 @@ non-Windows host CMake fails fast by design.
 ```
 cmake -S tools/vmm -B tools/vmm/build -G "Visual Studio 17 2022" -A x64
 cmake --build tools/vmm/build --config Debug
+ctest --test-dir tools/vmm/build -C Debug --output-on-failure
 ```
 
 The kernel ELF is produced by the **WSL clang preset build**
@@ -101,6 +113,9 @@ duetos-vmm.exe --kernel <duetos-kernel.elf>
                [--cmdline "<...>"]      (default "console=ttyS0")
                [--idle <secs>]          (0 = no watchdog; default)
                [--gdb <port>]           (host-side GDB stub; 0 = off)
+               [--res <WxH>]            (default 1280x720)
+               [--no-window]            (serial-only guest)
+               [--break]                (native-debugger startup stop)
                [--record <f> | --replay <f>]
 ```
 
@@ -132,11 +147,15 @@ threads are suppressed; the kernel boots headless on a baked ramfs).
 Attach-style debugging needs the VMM running and parked on `accept()`
 *before* VS connects, and the kernel ELF freshly built (WSL). The
 committed starter [`tools/vmm/vs-start-vmm.ps1`](../../tools/vmm/vs-start-vmm.ps1)
-does all of it (build kernel via WSL → build VMM → reap any orphan →
-launch detached with `--gdb` → return once the port is accepting).
+does all of it (configure/build the kernel via WSL → build VMM →
+reap only a verified prior instance from this repo/port → launch
+detached with `--gdb` → return once that process owns a LISTEN socket).
+The readiness check never connects, because the GDB stub accepts one
+client and a connection probe would consume Visual Studio's slot.
 
 Wire it as a preLaunch task: copy the `tasks.vs.json` snippet
-documented at the top of [`launch.vs.json`](../../launch.vs.json)
+documented at the top of
+[`tools/vmm/launch.vs.json`](../../tools/vmm/launch.vs.json)
 into the per-user (git-ignored) `.vs/tasks.vs.json`, add
 `"preLaunchTask": "start-duetos-vmm"` to the **"DuetOS: Attach
 (in-house VMM, tcp:1234)"** config, and F5. Without the task: run
@@ -161,12 +180,14 @@ cycle-exact. This is a fundamental WHP constraint, not a TODO.
 ## Verification status
 
 Boot-verified on a Ryzen 7840HS Windows 11 host with WHP enabled.
-`duetos-vmm.exe --kernel <elf> --mem 2048` reaches at least
-`[security/module] self-test PASS` and runs the full boot-time
-self-test battery (Result, string, hexdump, va-region, process,
-fs/boot_slot, registry, vt, extable, fault-domain, diag/fault-react,
-…). The MMIO MOV decoder (slice 2), PIT-ch2 calibration (slice 2),
-and the GDB breakpoint step-off dance (slice 3) all clear that path.
+On 2026-07-26, the exact `main` kernel artifact plus the rebuilt VMM
+completed `smoke=bringup` with `[boot-report] selftests pass=51 fail=0`,
+`[boot-report] result=pass`, and `[smoke] profile=bringup complete`.
+The same transcript reports
+`[hv] hypervisor present vendor="Microsoft Hv" kind=Hyper-V`, marks
+the CPU `hyp`, skips RAPL/frequency telemetry safely, and contains no
+unexpected VMM exit. A 30-second idle watchdog ends the host process
+after the guest's `TestExit` halt; that final watchdog line is expected.
 
 Path-specific verification still TBD:
 - Long-running guest stability beyond the self-test battery.
@@ -183,8 +204,7 @@ Path-specific verification still TBD:
   the natvis decorates POD types only. For source-level kernel struct
   inspection, use Path A (GDB stub) which DOES have full DWARF — see
   [VMM-Debugging.md](VMM-Debugging.md).
-- **GDB stub:** no fully-async `^C` interrupt (stop via a breakpoint
-  instead); no hardware watchpoints; guest-originated `int3` (kernel
+- **GDB stub:** no hardware watchpoints; guest-originated `int3` (kernel
   `KBP` probes) surface to the client while attached — run kernel
   probes disarmed under gdb, or use the bridge's `Claim()` to detour
   them into `HandleHostStop` instead.
@@ -195,7 +215,12 @@ Path-specific verification still TBD:
   struct is currently header-exposed with stable named fields — the
   scheduler `Task` is `.cpp`-only. Will land when the first
   non-primitive type genuinely needs a mirror.
-- **No framebuffer / virtio-blk emulation** — intentionally **out of
-  scope**, not deferred-broken: the kernel boots headless on a baked
-  ramfs, so they are unneeded for the run/test/debug goal and would
-  be unwired bloat. Revisit only if a GUI/disk workload needs them.
+- **No accelerated GPU or virtio-blk emulation.** A linear Multiboot2
+  framebuffer and Win32 host window are implemented (disable with
+  `--no-window`); storage remains a baked ramfs. Add a device model only
+  when a concrete GUI-acceleration or disk workload needs it.
+- **Virtualized boot intentionally changes coverage.** `IsEmulator()`
+  now tells the truth, so bare-metal-only long-running security/PE
+  stress rows are skipped. Use explicit smoke profiles or dedicated
+  bare-metal/QEMU jobs when those rows are the target; do not clear the
+  hypervisor bit to obtain coverage.

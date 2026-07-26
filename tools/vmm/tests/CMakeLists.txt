@@ -1,5 +1,5 @@
-# Host unit tests for VMM logic units that have NO WHP/Win32
-# dependency (mb2 builder, iso9660, ps2 encode, vmm_control).
+# Host unit tests for VMM logic units that do not create a live WHP
+# partition (mb2 builder, processor contract, ps2 encode, vmm_control).
 # Sources are added incrementally as tasks land them.
 add_executable(vmm-tests
     test_main.cpp
@@ -9,12 +9,14 @@ add_executable(vmm-tests
     test_ps2_encode.cpp
     test_i8042.cpp
     test_mmio_decode.cpp
+    test_processor_contract.cpp
     test_vmm_dbg.cpp
     ../src/multiboot2.cpp
     ../src/guest_memory_fb.cpp
     ../src/input/ps2_encode.cpp
     ../src/devices/ps2_i8042.cpp
     ../src/mmio_decode.cpp
+    ../src/processor_contract.cpp
     ../src/debug/elf_symbols.cpp
     ../src/debug/vmm_dbg.cpp
 )

@@ -19,7 +19,7 @@ Debugging an OS that runs as a guest under a hypervisor has a fundamental bounda
 
 | Surface | What VS sees as the debuggee | Best for |
 |---|---|---|
-| **GDB-stub attach** (via [`launch.vs.json`](../../launch.vs.json)'s *"DuetOS: Attach (in-house VMM, tcp:1234)"* config) | The kernel ELF, source-level — VS uses `cppdbg`/gdb against the VMM's GDB-remote on tcp:1234 | Source-level **kernel** debugging: click in the gutter to plant kernel breakpoints, F10/F11 step kernel C++, browse kernel symbols/locals like any host program. |
+| **GDB-stub attach** (via [`tools/vmm/launch.vs.json`](../../tools/vmm/launch.vs.json)'s *"DuetOS: Attach (in-house VMM kernel, tcp:1234)"* config) | The kernel ELF, source-level — VS uses `cppdbg`/gdb against the VMM's GDB-remote on tcp:1234 | Source-level **kernel** debugging: click in the gutter to plant kernel breakpoints, F10/F11 step kernel C++, browse kernel symbols/locals like any host program. |
 | **Native attach + host-side bridge** (F5 the `duetos-vmm` CMake target in Open Folder mode) | `duetos-vmm.exe` itself (the VMM process), and via the bridge surface (`vmm_dbg::`, `Vmm::kernel`, `g_stop_state`) the guest's data | Debugging the **VMM**, or co-inspecting host + guest data in one window. Adds the ability to read/write any kernel global by symbol name and to halt at guest breakpoints planted from VS's Immediate window. |
 | **Both at once** | One VS instance per surface; they coexist | Full coverage. Set kernel breakpoints via Path A; peek at VMM internals in Path B; same `duetos-vmm.exe` process backs both. |
 
@@ -39,9 +39,16 @@ Debugging an OS that runs as a guest under a hypervisor has a fundamental bounda
 
 ### Configure VS
 
-1. **Open the repo as an Open-Folder solution** in VS. VS picks up `tools/vmm/CMakeLists.txt` automatically. The default F5 target after CMake configure should be `duetos-vmm` — verify in the toolbar.
+1. **Open `tools/vmm` as an Open-Folder solution** in VS. This selects the
+   Windows-hosted VMM's self-contained CMake project instead of the repo-root
+   freestanding kernel project. The default F5 target after CMake configure
+   should be `duetos-vmm` — verify in the toolbar.
 
-2. **Set the Windows gdb path** for the *Attach (in-house VMM, tcp:1234)* config. Open [`launch.vs.json`](../../launch.vs.json), find the entry, and set `miDebuggerPath` to your real Windows gdb.exe (the placeholder `"gdb.exe"` only works if it's on `PATH`). Example:
+2. **Set the Windows gdb path** for the *Attach (in-house VMM kernel,
+   tcp:1234)* config. Open
+   [`tools/vmm/launch.vs.json`](../../tools/vmm/launch.vs.json), find the
+   entry, and set `miDebuggerPath` to your real Windows gdb.exe (the
+   placeholder `"gdb.exe"` only works if it is on `PATH`). Example:
 
    ```json
    "miDebuggerPath": "C:\\msys64\\ucrt64\\bin\\gdb.exe"
@@ -58,7 +65,7 @@ Debugging an OS that runs as a guest under a hypervisor has a fundamental bounda
        "type": "default",
        "command": "powershell.exe",
        "args": [
-         "-ExecutionPolicy", "Bypass", "-File",
+          "-NoProfile", "-File",
          "${workspaceRoot}\\tools\\vmm\\vs-start-vmm.ps1",
          "-BuildKernel"
        ]
@@ -96,7 +103,7 @@ The script (see [`tools/vmm/debug-kernel.ps1`](../../tools/vmm/debug-kernel.ps1)
 Drop a desktop shortcut on this for genuine one-click:
 
 ```
-Target:   powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\path\to\DuetOS\tools\vmm\debug-kernel.ps1
+Target:   powershell.exe -NoProfile -File C:\path\to\DuetOS\tools\vmm\debug-kernel.ps1
 Start in: C:\path\to\DuetOS
 ```
 
@@ -172,7 +179,10 @@ Through the bridge (added by Slices 1–4 of the debugger-bridge work):
 
 ### How to use (F5 with `--break`)
 
-1. F5 the `duetos-vmm` CMake target. The default launch args include `--break`, which halts the VMM with `__debugbreak()` immediately after CLI arg parse, BEFORE the `Vmm` constructor. VS halts at `main.cpp`.
+1. F5 the `duetos-vmm` CMake target. The default launch args include `--break`.
+   `Vmm::Run()` fires `__debugbreak()` after the VMM has constructed its WHP
+   partition and debugger bridges but before guest execution starts. VS halts
+   at a stable frame with the bridge ready for Immediate-window calls.
 
 2. Open **Debug → Windows → Immediate** (`Ctrl+Alt+I`). The Immediate window evaluates expressions in the debuggee process — this is your control channel for the bridge.
 
@@ -188,7 +198,10 @@ Through the bridge (added by Slices 1–4 of the debugger-bridge work):
    duetos::vmm::vmm_dbg::Bp("kernel_main")
    ```
 
-5. F5 again. The startup `__debugbreak` returns; `Vmm vm(...)` constructs; `vm.Run()` enters the WHP loop; the kernel boots until it hits the planted `0xCC`. WHP returns an exception exit → `HandleHostStop()` snapshots regs into `g_stop_state` → `__debugbreak()` halts VS at that exact frame.
+5. F5 again. The startup `__debugbreak` returns and `Vmm::Run()` enters the
+   WHP loop; the kernel boots until it hits the planted `0xCC`. WHP returns an
+   exception exit → `HandleHostStop()` snapshots regs into `g_stop_state` →
+   `__debugbreak()` halts VS at that exact frame.
 
 6. **Inspect**:
    - Watch `duetos::vmm::g_stop_state` → natvis shows `"guest @ kernel_main+0x0 (reason=3)"`. Expand for full register snapshot.
@@ -213,13 +226,21 @@ This is what the F5 default sets you up for. One `duetos-vmm.exe` process; two V
 
 The F5 default args already include `--gdb 1234 --break`. So:
 
-1. **VS instance #1** — Open the **DuetOS repo root** (`C:\Users\natew\source\repos\DuetOS`), F5 the `duetos-vmm` target (CMake Open Folder mode). The VMM launches, halts at `__debugbreak()` in `main.cpp`. Native-attach session is live.
+1. **VS instance #1** — Open **`<repo>\tools\vmm`** (CMake Open Folder mode),
+   then F5 the `duetos-vmm` target. The VMM launches and halts at the startup
+   `__debugbreak()` in `Vmm::Run()`. The native-debug session is live.
 
 2. From the Immediate window of instance #1, optionally plant any *host-side* C++ breakpoints you want in VMM code, then F5 to continue past the trap.
 
-3. The VMM constructs `Vmm`, calls `Run()`, and blocks at `m_gdb->WaitForConnection()` waiting for a gdb client. (Console shows `[vmm] gdb: waiting for a client on tcp:1234 (VS: F5 the attach config)`.)
+3. After the startup stop resumes, `Vmm::Run()` blocks at
+   `m_gdb->WaitForConnection()` waiting for a gdb client. (Console shows
+   `[vmm] gdb: waiting for a client on tcp:1234 (VS: F5 the attach config)`.)
 
-4. **VS instance #2** — open a **new VS window** (`File → New Window`), then **`File → Open → Open a Local Folder…`** and pick **`C:\Users\natew\source\repos\DuetOS\tools\vmm`** (NOT the repo root). This loads the VMM's self-contained CMake project — no root-CMake failure, launch dropdown populates cleanly. Wait for "CMake generation finished" in the status bar.
+4. **VS instance #2** — open a **new VS window** (`File → New Window`), then
+   **`File → Open → Open a Local Folder…`** and pick
+   **`<repo>\tools\vmm`** (NOT the repo root). This loads the VMM's
+   self-contained CMake project — no root-CMake failure, launch dropdown
+   populates cleanly. Wait for "CMake generation finished" in the status bar.
 
 5. In instance #2's toolbar, click the **▾** arrow next to the green Start button. Pick **"DuetOS: Attach (in-house VMM kernel, tcp:1234)"** (defined in [`tools/vmm/launch.vs.json`](../../tools/vmm/launch.vs.json)). F5.
 
@@ -332,7 +353,7 @@ See [Windows-VMM.md](Windows-VMM.md) for the full flag list. The debugger-releva
 | Flag | Default | Effect |
 |---|---|---|
 | `--gdb <port>` | `0` (off) | Open the host-side GDB stub on `localhost:<port>`. Stops the guest before its first instruction so a client can plant boot breakpoints (analogous to QEMU `-S`). Required for Path A. |
-| `--break` | off | Fire `__debugbreak()` in `main()` after arg parse and `HypervisorPresent()` but BEFORE Vmm construction. Halts the VMM at a known stack frame under VS native attach so the Immediate window is live. `IsDebuggerPresent()` guards the trap — outside a debugger the flag is a no-op (prints `[vmm] --break: no debugger attached, continuing` and proceeds). |
+| `--break` | off | Fire `__debugbreak()` in `Vmm::Run()` after VMM construction and debugger-bridge setup but before guest execution. Halts at a known stack frame so the Immediate window can use the live bridge. `IsDebuggerPresent()` guards the trap — outside a debugger the flag is a no-op (prints `[vmm] --break: no debugger attached, continuing` and proceeds). |
 | `--idle <secs>` | `0` (off) | Optional COM1-idle watchdog. Bound a wedged boot in CI; leave off for interactive debugging (a shell parked at a prompt is legitimately silent for long stretches). |
 | `--no-window` | off | Headless mode: skip FB reservation and Win32 window. Useful for CI smoke; the debugger flow doesn't require this. |
 | `--record <f>` / `--replay <f>` | both off | Deterministic record/replay at exit-seq granularity. Mostly orthogonal to debugging; useful for reproducing flaky bugs once. See [Windows-VMM.md § Record / replay](Windows-VMM.md#record--replay). |
@@ -395,7 +416,8 @@ You opened the **DuetOS repo root** in the second VS. The root `CMakeLists.txt` 
 Fix:
 
 1. **Close the second VS instance.**
-2. Open VS again, `File → Open → Open a Local Folder…`, navigate to **`C:\Users\natew\source\repos\DuetOS\tools\vmm`** (the VMM subfolder, NOT the repo root).
+2. Open VS again, `File → Open → Open a Local Folder…`, navigate to
+   **`<repo>\tools\vmm`** (the VMM subfolder, NOT the repo root).
 3. VS configures the VMM's own `CMakeLists.txt` cleanly (it's MSVC-buildable). The launch dropdown should now contain **"DuetOS: Attach (in-house VMM kernel, tcp:1234)"** from [`tools/vmm/launch.vs.json`](../../tools/vmm/launch.vs.json).
 4. F5 it. gdb attaches to the running first-instance VMM via tcp:1234.
 
@@ -405,7 +427,8 @@ If you really want to use the repo root in instance #2, you can — just dismiss
 
 The VMM is **running**, not stopped. VS native attach on a freely-running target legitimately shows empty inspection windows because there's no current stack frame. Fix one of:
 
-- Use the `--break` default — VS halts at `__debugbreak()` in `main()` and everything populates.
+- Use the `--break` default — VS halts at the startup `__debugbreak()` in
+  `Vmm::Run()` and everything populates.
 - **Debug → Break All** (`Ctrl+Alt+Break`) while running halts wherever the vCPU thread happens to be.
 - Set a host-side C++ breakpoint (F9 in the gutter of any `tools/vmm/src/*.cpp` file).
 - Or use Path A — its GDB stub halts the guest before its first instruction.
@@ -463,7 +486,7 @@ Inherited from the v0 bridge:
 - **Mixed-mode "see the guest inside the GDB-stub session"** isn't a thing — that's the inverse problem and would need a debugger-side extension. The bridge solves the forward direction (see guest from VS native attach).
 - **`Step()` then `Step()` without `Run()`** in between leaves the original BP lifted until the next `Run()` does `ReinsertAllLayerC`. If you really need to step over many instructions, do a `Step()` once then `Run()` with a fresh `Bp` at the next location of interest.
 - **`Bp` planted before the kernel reaches the function will hit when the function is reached.** `Bp` planted *after* the kernel has run past the function does nothing visible until a future call. There's no rewind.
-- **GDB stub: no hardware watchpoints**, no fully-async `^C` interrupt. Software int3 breakpoints only.
+- **GDB stub: no hardware watchpoints.** Software int3 breakpoints only.
 
 ## Source map
 
@@ -473,9 +496,13 @@ Inherited from the v0 bridge:
 - [`tools/vmm/src/debug/gdb_server.{h,cpp}`](../../tools/vmm/src/debug/) — the GDB remote-serial-protocol stub (Path A).
 - [`tools/vmm/src/debug/elf_symbols.{h,cpp}`](../../tools/vmm/src/debug/) — ELF symbol table loader; `Find` (exact) + `FindBySuffix` (Itanium-mangled lenient).
 - [`tools/vmm/vmm.natvis`](../../tools/vmm/vmm.natvis) — Visual Studio pretty-printers for `GuestKernelView`, `GuestStopState`, `ElfSymbols::Sym`.
-- [`tools/vmm/src/main.cpp`](../../tools/vmm/src/main.cpp) — CLI parser, `--break` and `--gdb` wiring.
+- [`tools/vmm/src/main.cpp`](../../tools/vmm/src/main.cpp) — CLI parser and
+  `--gdb` / `--break` option wiring.
+- [`tools/vmm/src/vmm.cpp`](../../tools/vmm/src/vmm.cpp) — startup stop and
+  debugger-bridge ownership inside `Vmm::Run()`.
 - [`tools/vmm/CMakeLists.txt`](../../tools/vmm/CMakeLists.txt) — `VS_DEBUGGER_COMMAND_ARGUMENTS` (the F5 default).
-- [`launch.vs.json`](../../launch.vs.json) — the GDB-stub attach config (Path A).
+- [`tools/vmm/launch.vs.json`](../../tools/vmm/launch.vs.json) — the
+  GDB-stub attach config (Path A).
 
 ## Spec / plan trail
 
