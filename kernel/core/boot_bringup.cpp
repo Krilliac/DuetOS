@@ -357,6 +357,7 @@
 #include "subsystems/win32/gdi_objects.h"
 #include "subsystems/win32/nt_coverage.h"
 #include "subsystems/win32/registry.h"
+#include "subsystems/win32/token_syscall.h"
 #include "subsystems/win32/window_syscall.h"
 #include "loader/apiset_static.h"
 #include "loader/compat_shim.h"
@@ -1980,7 +1981,7 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     DUETOS_BOOT_SELFTEST(duetos::ipc::KObjectSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::ipc::HandleTableSelfTest());
     // Per-handle rights extension — ceiling-vs-floor model on top
-    // of Process::caps. Exercises type-allowed masking,
+    // of effective Process capability snapshots. Exercises type-allowed masking,
     // caps-derived narrowing, dup-with-narrow, escalation refusal,
     // HandleReplace atomicity, and HandleCheckRight gating.
     //
@@ -3856,6 +3857,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     DUETOS_BOOT_SELFTEST(duetos::security::RbacSnapshotSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::security::GraceCacheSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::security::BrokerSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::subsystems::win32::TokenAdjustSelfTest());
     duetos::drivers::video::SplashAdvancePhase("auth ready");
 
     // Shell welcome + initial prompt. Landing here after every

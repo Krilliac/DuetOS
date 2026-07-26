@@ -610,10 +610,11 @@ void SpawnRing3Task(const char* name, CapSet caps, const fs::RamfsNode* root, u6
         SerialWrite(name);
         SerialWrite("\" pid=");
         SerialWriteHex(proc->pid);
+        const CapSet effective_caps = ProcessCapsSnapshot(proc);
         SerialWrite(" caps=");
-        SerialWriteHex(proc->caps.bits);
+        SerialWriteHex(effective_caps.bits);
         SerialWrite("(");
-        duetos::core::SerialWriteCapBits(proc->caps.bits);
+        duetos::core::SerialWriteCapBits(effective_caps.bits);
         SerialWrite(") code_va=");
         SerialWriteHex(code_va);
         SerialWrite(" stack_va=");

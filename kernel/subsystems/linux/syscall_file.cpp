@@ -157,7 +157,7 @@ i64 DoOpen(u64 user_path, u64 flags, u64 mode)
         // only enforced later in DoWrite, letting a cap-less guest
         // get further than a native process would. See
         // wiki/kernel/Subsystem-Isolation.md.
-        if (!core::CapSetHas(p->caps, core::kCapFsWrite))
+        if (!core::ProcessHasCap(p, core::kCapFsWrite))
         {
             // RecordSandboxDenial is the structured denial channel
             // (same one native SYS_FILE_CREATE and Linux write() use);

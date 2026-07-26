@@ -66,6 +66,13 @@ add_test(
 )
 
 add_test(
+    NAME capability_access_static
+    COMMAND Python3::Interpreter
+            "${CMAKE_SOURCE_DIR}/../../tools/test/capability-access-static.py"
+            --root "${CMAKE_SOURCE_DIR}/../.."
+)
+
+add_test(
     NAME iphlpapi_socket_abi
     COMMAND Python3::Interpreter
             "${CMAKE_SOURCE_DIR}/../../tools/test/iphlpapi-socket-abi.py"

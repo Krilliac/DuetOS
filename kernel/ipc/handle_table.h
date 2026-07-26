@@ -17,8 +17,9 @@
  *   its `Handle` in the owning process's table.
  *
  * RIGHTS MODEL (ceiling vs floor)
- *   `Process::caps` (kCap*) is the CEILING — it gates whether the
- *   process can call the syscall family at all. Per-handle rights
+ *   A locked effective Process capability snapshot (kCap*) is the
+ *   authority ceiling — it gates whether the process can call the
+ *   syscall family at all. Per-handle rights
  *   are the FLOOR — they can only NARROW from the ceiling. A handle
  *   can never grant a right the holding process's caps would not
  *   permit; `HandleDuplicate`/`HandleReplace` can produce a strictly
@@ -27,7 +28,8 @@
  *   Default for a fresh handle: `kHandleRightAll`, masked by the
  *   kernel-object's `TypeAllowedRights` (KEvent has no Read/Write
  *   but does have Signal/Wait; KFile has Read/Write/Inspect but no
- *   Signal/Wait) AND by `ProcessCapsToHandleRights(proc->caps)` (a
+ *   Signal/Wait) AND by
+ *   `ProcessCapsToHandleRights(ProcessCapsSnapshot(proc))` (a
  *   process without kCapFsWrite gets handles without Write).
  *
  * INDEX 0 IS RESERVED
@@ -113,7 +115,8 @@ inline constexpr u64 kHandleRightAll = kHandleRightRead | kHandleRightWrite | kH
 /// down to the operations the underlying type actually supports.
 u64 TypeAllowedRights(KObjectType type);
 
-/// Map a `Process::caps` bitmask to the subset of `kHandleRight*`
+/// Map an effective Process capability snapshot to the subset of
+/// `kHandleRight*`
 /// the process is permitted to GRANT on new handles. A process
 /// without kCapFsWrite cannot mint handles carrying Write rights;
 /// without kCapDebug it cannot mint handles carrying Inspect
@@ -155,11 +158,12 @@ struct HandleTable
 /// Insert with an explicit rights mask. The stored rights are
 /// `requested_rights & TypeAllowedRights(obj->type)` — a caller can
 /// only ever NARROW from the type-allowed ceiling. Use this overload
-/// at syscall entry sites where the caller's `Process::caps` is
-/// known and should further narrow the default. Common form:
+/// at syscall entry sites where the caller's effective capability
+/// snapshot is known and should further narrow the default. Common form:
 ///
 ///     HandleTableInsert(table, obj,
-///         kHandleRightAll & ProcessCapsToHandleRights(proc->caps));
+///         kHandleRightAll &
+///             ProcessCapsToHandleRights(ProcessCapsSnapshot(proc)));
 ::duetos::core::Result<Handle> HandleTableInsert(HandleTable& table, KObject* obj, u64 requested_rights);
 
 /// Look up `h` in the table. If `expected_type` is non-Invalid,

@@ -304,17 +304,17 @@ __declspec(dllexport) NTSTATUS ZwQueryInformationToken(HANDLE TokenHandle, ULONG
  *
  * Translates the requested privilege adjustments into kernel
  * CapSet operations. Mappings (kernel/subsystems/win32/token_syscall.h):
- *   SeIncreaseBasePriorityPrivilege (LUID 14) → kCapSpawnThread
+ *   SeIncreaseBasePriorityPrivilege (LUID 14) → kCapSchedPriority
  *   SeBackupPrivilege               (LUID 17) → kCapFsRead
  *   SeRestorePrivilege              (LUID 18) → kCapFsWrite
  *   SeDebugPrivilege                (LUID 20) → kCapDebug
  *
- * Enabling a privilege whose mapped cap isn't held returns
- * STATUS_NOT_ALL_ASSIGNED (0x00000106) — NOT a failure, just an
- * "info" status. The kernel never adds caps from user space.
- * Disable / SE_PRIVILEGE_REMOVED / DisableAllPrivileges all drop
- * the mapped cap. Privileges with no mapping (SeShutdown, etc.)
- * are silently accepted.
+ * Enabling a privilege whose mapped cap isn't held requests a bounded
+ * kernel broker lease. A refused/cancelled request returns
+ * STATUS_NOT_ALL_ASSIGNED (0x00000106), an informational status.
+ * Disable clears live authority reversibly; SE_PRIVILEGE_REMOVED also
+ * lowers the Process ceiling permanently. Privileges with no mapping
+ * (SeShutdown, etc.) are silently accepted.
  *
  * Returns: STATUS_SUCCESS (0), STATUS_NOT_ALL_ASSIGNED (0x106), or
  * STATUS_INVALID_PARAMETER on a malformed blob.

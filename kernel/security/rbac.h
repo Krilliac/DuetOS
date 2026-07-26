@@ -37,9 +37,13 @@ constexpr u32 kRbacRoleNameMax = 24;
 /// for a specific cap. 300 = 5 minutes.
 constexpr u32 kRbacDefaultGraceSeconds = 300;
 
-/// Sentinel grace value meaning "always reprompt; never cache."
-/// A role policy that sets a cap's override to 0 yields no_cache
-/// semantics for that cap.
+/// Short bounded window for destructive capabilities whose built-in
+/// policy should minimize ambient lifetime without making the
+/// operator race a one-second deadline between shell commands.
+constexpr u32 kRbacSensitiveGraceSeconds = 30;
+
+/// Sentinel grace value meaning "no ambient lease." A capability
+/// cannot be granted for zero time, so the broker fails closed.
 constexpr u32 kRbacNoGrace = 0;
 
 /// Maximum per-cap grace override (1 hour). Forever-allow is what a
@@ -63,7 +67,7 @@ struct RolePolicy
     /// Per-cap grace override. `grace_seconds[c]` is the cache
     /// lifetime for cap `c` once elevated under this role. A value
     /// of `0xFFFF` (the sentinel) means "use kRbacDefaultGraceSeconds";
-    /// `kRbacNoGrace` (== 0) means "always reprompt"; any other value
+    /// `kRbacNoGrace` (== 0) means "deny ambient elevation"; any other value
     /// is the literal cache lifetime in seconds (clamped to
     /// kRbacMaxGraceSeconds).
     static constexpr u16 kUseDefault = 0xFFFF;
@@ -90,10 +94,10 @@ struct AccountMembership
 };
 
 /// Seed the built-in role table:
-///   root       — every defined kCap*; no_cache on kCapNetAdmin.
+///   root       — every defined kCap*; 30-second kCapNetAdmin lease.
 ///   developer  — FsRead, FsWrite, SpawnThread, Debug, SerialConsole, Input
 ///                (kCapFsWrite override: 30 min)
-///   netop      — Net, NetAdmin, FsRead (no_cache on kCapNetAdmin)
+///   netop      — Net, NetAdmin, FsRead (30-second kCapNetAdmin lease)
 ///   auditor    — FsRead, SerialConsole, Input
 ///   sandbox    — empty mask (explicit deny role)
 ///

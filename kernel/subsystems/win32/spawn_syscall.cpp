@@ -31,6 +31,7 @@
 #include "proc/spawn.h"
 #include "sched/sched.h"
 #include "subsystems/linux/syscall_pipe.h"
+#include "syscall/cap_gate.h"
 #include "syscall/syscall.h"
 
 namespace duetos::subsystems::win32
@@ -131,14 +132,18 @@ const char* LeafName(const char* path, char (&buf)[32])
 i64 SysProcessSpawn(u64 user_path, u64 flags)
 {
     (void)flags;
-    using ::duetos::core::CapSetHas;
+    using ::duetos::core::kCapFsRead;
     using ::duetos::core::kCapSpawnThread;
     core::Process* caller = core::CurrentProcess();
     if (caller == nullptr)
         return -1;
-    if (!CapSetHas(caller->caps, kCapSpawnThread))
+    core::CapSet child_caps = core::CapSetEmpty();
+    core::CapSet child_ceiling = core::CapSetEmpty();
+    core::CapSet spawn_authority = core::CapSetEmpty();
+    const u64 required_caps = core::RequiredCapMask(core::SYS_PROCESS_SPAWN);
+    if (!core::ProcessCaptureSpawnAuthority(caller, required_caps, &child_caps, &child_ceiling, &spawn_authority))
     {
-        core::RecordSandboxDenial(kCapSpawnThread);
+        core::RecordSandboxDenial(core::CapSetHas(spawn_authority, kCapFsRead) ? kCapSpawnThread : kCapFsRead);
         return -1;
     }
     char path[128];
@@ -167,9 +172,11 @@ i64 SysProcessSpawn(u64 user_path, u64 flags)
     constexpr u64 kFrameBudget = 256;
     u64 pid = 0;
     if (fmt == 1)
-        pid = core::SpawnPeFile(name, bytes, file_len, caller->caps, caller->root, kFrameBudget, caller->tick_budget);
+        pid = core::SpawnPeFile(name, bytes, file_len, child_caps, caller->root, kFrameBudget, caller->tick_budget,
+                                child_ceiling);
     else
-        pid = core::SpawnElfFile(name, bytes, file_len, caller->caps, caller->root, kFrameBudget, caller->tick_budget);
+        pid = core::SpawnElfFile(name, bytes, file_len, child_caps, caller->root, kFrameBudget, caller->tick_budget,
+                                 child_ceiling);
 
     // SpawnPeFile / SpawnElfFile copy the bytes (or load section by
     // section into the new AS); the caller's heap buffer is no
@@ -259,7 +266,7 @@ u64 InheritOneStdHandle(::duetos::core::Process* parent, ::duetos::core::Process
 i64 SysProcessSpawnEx(u64 user_path, u64 flags, u64 user_stdio_bundle)
 {
     (void)flags;
-    using ::duetos::core::CapSetHas;
+    using ::duetos::core::kCapFsRead;
     using ::duetos::core::kCapSpawnThread;
     using ::duetos::core::Process;
     using ::duetos::core::ProcessSpawnStdio;
@@ -267,9 +274,15 @@ i64 SysProcessSpawnEx(u64 user_path, u64 flags, u64 user_stdio_bundle)
     Process* caller = ::duetos::core::CurrentProcess();
     if (caller == nullptr)
         return -1;
-    if (!CapSetHas(caller->caps, kCapSpawnThread))
+    ::duetos::core::CapSet child_caps = ::duetos::core::CapSetEmpty();
+    ::duetos::core::CapSet child_ceiling = ::duetos::core::CapSetEmpty();
+    ::duetos::core::CapSet spawn_authority = ::duetos::core::CapSetEmpty();
+    const u64 required_caps = ::duetos::core::RequiredCapMask(::duetos::core::SYS_PROCESS_SPAWN_EX);
+    if (!::duetos::core::ProcessCaptureSpawnAuthority(caller, required_caps, &child_caps, &child_ceiling,
+                                                      &spawn_authority))
     {
-        ::duetos::core::RecordSandboxDenial(kCapSpawnThread);
+        ::duetos::core::RecordSandboxDenial(::duetos::core::CapSetHas(spawn_authority, kCapFsRead) ? kCapSpawnThread
+                                                                                                   : kCapFsRead);
         return -1;
     }
 
@@ -331,11 +344,11 @@ i64 SysProcessSpawnEx(u64 user_path, u64 flags, u64 user_stdio_bundle)
     constexpr u64 kFrameBudget = 256;
     u64 pid = 0;
     if (fmt == 1)
-        pid = ::duetos::core::SpawnPeFile(name, bytes, file_len, caller->caps, caller->root, kFrameBudget,
-                                          caller->tick_budget);
+        pid = ::duetos::core::SpawnPeFile(name, bytes, file_len, child_caps, caller->root, kFrameBudget,
+                                          caller->tick_budget, child_ceiling);
     else
-        pid = ::duetos::core::SpawnElfFile(name, bytes, file_len, caller->caps, caller->root, kFrameBudget,
-                                           caller->tick_budget);
+        pid = ::duetos::core::SpawnElfFile(name, bytes, file_len, child_caps, caller->root, kFrameBudget,
+                                           caller->tick_budget, child_ceiling);
     ::duetos::mm::KFree(bytes);
 
     if (pid == 0 || pid == static_cast<u64>(-1))

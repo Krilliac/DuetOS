@@ -201,7 +201,7 @@ i64 DoCapset(u64 user_hdr, u64 user_data)
         return kEINVAL;
     }
     // v0 doesn't actually mutate the Linux-ABI capability mask
-    // (we have our own kCap* model on Process::caps). Accept
+    // (we have our own locked effective kCap* model). Accept
     // silently — libcap-using daemons proceed, even if their
     // capability writes are no-ops.
     return 0;

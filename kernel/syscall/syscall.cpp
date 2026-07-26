@@ -427,7 +427,7 @@ i64 DoWrite(u64 fd, const void* user_buf, u64 len)
     }
 
     Process* proc = CurrentProcess();
-    if (proc == nullptr || !CapSetHas(proc->caps, kCapSerialConsole))
+    if (proc == nullptr || !ProcessHasCap(proc, kCapSerialConsole))
     {
         // Emit a single-line denial record. Machine-readable format
         // so a future audit tool can grep boot logs: "[sys] denied
@@ -697,7 +697,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // refcount held on the target keeps it alive past its task's
         // exit; CloseHandle drops it.
         Process* caller = CurrentProcess();
-        if (caller == nullptr || !CapSetHas(caller->caps, kCapDebug))
+        if (caller == nullptr || !ProcessHasCap(caller, kCapDebug))
         {
             RecordSandboxDenial(kCapDebug);
             if (caller != nullptr && ShouldLogDenial(caller->sandbox_denials))
@@ -750,7 +750,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_PROCESS_VM_WRITE:
     {
         Process* caller = CurrentProcess();
-        if (caller == nullptr || !CapSetHas(caller->caps, kCapDebug))
+        if (caller == nullptr || !ProcessHasCap(caller, kCapDebug))
         {
             RecordSandboxDenial(kCapDebug);
             frame->rax = kStatusAccessDenied;
@@ -792,7 +792,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_PROCESS_VM_QUERY:
     {
         Process* caller = CurrentProcess();
-        if (caller == nullptr || !CapSetHas(caller->caps, kCapDebug))
+        if (caller == nullptr || !ProcessHasCap(caller, kCapDebug))
         {
             RecordSandboxDenial(kCapDebug);
             frame->rax = kStatusAccessDenied;
@@ -975,7 +975,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
             // threads — a starvation/DoS lever. Gate elevation on
             // kCapSchedPriority; lowering and Normal are unprivileged.
             const bool elevates = (new_class == 0x100 || new_class == 0x80 || new_class == 0x8000);
-            if (known && elevates && !CapSetHas(proc->caps, kCapSchedPriority))
+            if (known && elevates && !ProcessHasCap(proc, kCapSchedPriority))
             {
                 RecordSandboxDenial(kCapSchedPriority);
                 // Leave the current class unchanged — a denied elevation
@@ -1260,7 +1260,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
             (void)sched::SchedKillByProcess(caller);
             sched::SchedExit();
         }
-        if (!CapSetHas(caller->caps, kCapDebug))
+        if (!ProcessHasCap(caller, kCapDebug))
         {
             RecordSandboxDenial(kCapDebug);
             frame->rax = kStatusAccessDenied;
@@ -1300,7 +1300,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
         if (handle >= Process::kWin32ForeignThreadBase &&
             handle < Process::kWin32ForeignThreadBase + Process::kWin32ForeignThreadCap)
         {
-            if (!CapSetHas(caller->caps, kCapDebug))
+            if (!ProcessHasCap(caller, kCapDebug))
             {
                 RecordSandboxDenial(kCapDebug);
                 frame->rax = kStatusAccessDenied;
@@ -1352,7 +1352,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
         Process* target = caller;
         if (handle != kCurrentProcess)
         {
-            if (!CapSetHas(caller->caps, kCapDebug))
+            if (!ProcessHasCap(caller, kCapDebug))
             {
                 RecordSandboxDenial(kCapDebug);
                 frame->rax = kStatusAccessDenied;
@@ -1666,7 +1666,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
         Process* target = caller;
         if (handle != kCurrentProcess)
         {
-            if (!CapSetHas(caller->caps, kCapDebug))
+            if (!ProcessHasCap(caller, kCapDebug))
             {
                 RecordSandboxDenial(kCapDebug);
                 frame->rax = kStatusAccessDenied;
@@ -1824,7 +1824,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
         Process* target = caller;
         if (handle != kCurrentProcess)
         {
-            if (!CapSetHas(caller->caps, kCapDebug))
+            if (!ProcessHasCap(caller, kCapDebug))
             {
                 RecordSandboxDenial(kCapDebug);
                 frame->rax = kStatusAccessDenied;
@@ -1889,7 +1889,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
         Process* target = caller;
         if (handle != kCurrentProcess)
         {
-            if (!CapSetHas(caller->caps, kCapDebug))
+            if (!ProcessHasCap(caller, kCapDebug))
             {
                 RecordSandboxDenial(kCapDebug);
                 frame->rax = kStatusAccessDenied;
@@ -2813,7 +2813,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
         constexpr u64 kCurrentProcess = static_cast<u64>(-1);
         if (process_handle != kCurrentProcess)
         {
-            if (!CapSetHas(caller->caps, kCapDebug))
+            if (!ProcessHasCap(caller, kCapDebug))
             {
                 RecordSandboxDenial(kCapDebug);
                 frame->rax = kStatusAccessDenied;
@@ -2920,7 +2920,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
         constexpr u64 kCurrentProcess = static_cast<u64>(-1);
         if (process_handle != kCurrentProcess)
         {
-            if (!CapSetHas(caller->caps, kCapDebug))
+            if (!ProcessHasCap(caller, kCapDebug))
             {
                 RecordSandboxDenial(kCapDebug);
                 frame->rax = kStatusAccessDenied;
@@ -2954,7 +2954,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // (target->process == nullptr — those have no NT
         // identity and no Process to refcount).
         Process* caller = CurrentProcess();
-        if (caller == nullptr || !CapSetHas(caller->caps, kCapDebug))
+        if (caller == nullptr || !ProcessHasCap(caller, kCapDebug))
         {
             if (caller != nullptr)
             {
@@ -3019,7 +3019,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // the local-only path is harmless (a process can already
         // self-DoS by other means).
         Process* caller = CurrentProcess();
-        if (caller == nullptr || !CapSetHas(caller->caps, kCapDebug))
+        if (caller == nullptr || !ProcessHasCap(caller, kCapDebug))
         {
             if (caller != nullptr)
             {
@@ -3051,7 +3051,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
     {
         // Cap-gate: same threat class as cross-AS VM ops.
         Process* caller = CurrentProcess();
-        if (caller == nullptr || !CapSetHas(caller->caps, kCapDebug))
+        if (caller == nullptr || !ProcessHasCap(caller, kCapDebug))
         {
             if (caller != nullptr)
             {
@@ -3212,7 +3212,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // Unknown caller / no cap → silent -1 on the first call,
         // then rate-limited denial log like SYS_WRITE.
         Process* proc = CurrentProcess();
-        if (proc == nullptr || !CapSetHas(proc->caps, kCapSerialConsole))
+        if (proc == nullptr || !ProcessHasCap(proc, kCapSerialConsole))
         {
             const u64 pid = (proc != nullptr) ? proc->pid : 0;
             RecordSandboxDenial(kCapSerialConsole);
@@ -3389,7 +3389,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // rdi = user ptr to NUL-terminated UTF-16LE string. Cap
         // gate mirrors SYS_DEBUG_PRINT.
         Process* proc = CurrentProcess();
-        if (proc == nullptr || !CapSetHas(proc->caps, kCapSerialConsole))
+        if (proc == nullptr || !ProcessHasCap(proc, kCapSerialConsole))
         {
             frame->rax = static_cast<u64>(-1);
             return;
@@ -3866,6 +3866,15 @@ void SyscallDispatch(arch::TrapFrame* frame)
             frame->rax = static_cast<u64>(-1);
             return;
         }
+        CapSet child_caps = CapSetEmpty();
+        CapSet child_ceiling = CapSetEmpty();
+        CapSet spawn_authority = CapSetEmpty();
+        const u64 required_caps = RequiredCapMask(SYS_SPAWN);
+        if (!ProcessCaptureSpawnAuthority(proc, required_caps, &child_caps, &child_ceiling, &spawn_authority))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
         char kpath[kSyscallPathMax];
         u64 plen = frame->rsi;
         if (plen >= kSyscallPathMax)
@@ -3896,8 +3905,8 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // Inherit caps + root + trusted budgets. Later slices can
         // differentiate spawn from a sandboxed parent by dropping
         // caps after SpawnElfFile.
-        const u64 child_pid = SpawnElfFile(kpath, n->file_bytes, n->file_size, proc->caps, proc->root,
-                                           mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        const u64 child_pid = SpawnElfFile(kpath, n->file_bytes, n->file_size, child_caps, proc->root,
+                                           mm::kFrameBudgetTrusted, kTickBudgetTrusted, child_ceiling);
         if (child_pid == 0)
         {
             arch::SerialWrite("[sys] spawn fail pid=");
@@ -3923,9 +3932,9 @@ void SyscallDispatch(arch::TrapFrame* frame)
     {
         // rdi = bitmask of caps to remove. No cap check on this
         // syscall itself — anyone can voluntarily deprivilege.
-        // Irreversible: once bits are cleared from proc->caps,
-        // no syscall path can set them back (we never expose a
-        // SYS_GRANTCAPS).
+        // Irreversible: the helper lowers the monotonic ceiling before
+        // clearing durable and leased authority, so neither the broker
+        // nor any syscall path can restore the bits.
         Process* proc = CurrentProcess();
         if (proc == nullptr)
         {
@@ -3933,8 +3942,8 @@ void SyscallDispatch(arch::TrapFrame* frame)
             return;
         }
         const u64 drop_mask = frame->rdi;
-        const u64 before = proc->caps.bits;
-        proc->caps.bits &= ~drop_mask;
+        const CapSet before = ProcessCapsDropMask(proc, drop_mask);
+        const CapSet after = ProcessCapsSnapshot(proc);
         arch::SerialWrite("[sys] dropcaps pid=");
         arch::SerialWriteHex(proc->pid);
         arch::SerialWrite(" mask=");
@@ -3942,13 +3951,13 @@ void SyscallDispatch(arch::TrapFrame* frame)
         arch::SerialWrite("(");
         SerialWriteCapBits(drop_mask);
         arch::SerialWrite(") caps=");
-        arch::SerialWriteHex(before);
+        arch::SerialWriteHex(before.bits);
         arch::SerialWrite("(");
-        SerialWriteCapBits(before);
+        SerialWriteCapBits(before.bits);
         arch::SerialWrite(")->");
-        arch::SerialWriteHex(proc->caps.bits);
+        arch::SerialWriteHex(after.bits);
         arch::SerialWrite("(");
-        SerialWriteCapBits(proc->caps.bits);
+        SerialWriteCapBits(after.bits);
         arch::SerialWrite(")\n");
         frame->rax = 0;
         return;

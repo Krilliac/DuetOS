@@ -113,7 +113,7 @@ i64 CheckTimeSetCap()
     const core::Process* p = core::CurrentProcess();
     if (p == nullptr)
         return kEPERM;
-    if (!core::CapSetHas(p->caps, core::kCapDebug))
+    if (!core::ProcessHasCap(p, core::kCapDebug))
     {
         core::RecordSandboxDenial(core::kCapDebug);
         return kEPERM;

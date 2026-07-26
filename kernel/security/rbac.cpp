@@ -89,10 +89,10 @@ RoleId SeedRoot()
     for (u32 c = 1; c < kCapCount; ++c)
         mask |= (1ULL << c);
     PolicyInitDefaults(p, mask);
-    // Network admin always reprompts even for root — destructive
-    // firewall changes are exactly the surface where stale cache
-    // hurts most.
-    p.grace_seconds[duetos::core::kCapNetAdmin] = kRbacNoGrace;
+    // Destructive firewall changes get a deliberately short window.
+    // Zero would deny ambient elevation entirely, so it is reserved
+    // for custom roles that intend that fail-closed policy.
+    p.grace_seconds[duetos::core::kCapNetAdmin] = kRbacSensitiveGraceSeconds;
     return RbacRegisterRole("root", p);
 }
 
@@ -114,7 +114,7 @@ RoleId SeedNetop()
     const u64 mask =
         (1ULL << duetos::core::kCapNet) | (1ULL << duetos::core::kCapNetAdmin) | (1ULL << duetos::core::kCapFsRead);
     PolicyInitDefaults(p, mask);
-    p.grace_seconds[duetos::core::kCapNetAdmin] = kRbacNoGrace;
+    p.grace_seconds[duetos::core::kCapNetAdmin] = kRbacSensitiveGraceSeconds;
     return RbacRegisterRole("netop", p);
 }
 
@@ -351,11 +351,19 @@ void RbacSelfTest()
     if (grace != kRbacDefaultGraceSeconds)
         Panic("rbac", "self-test: root default grace mismatch");
 
-    // root's no_cache override on kCapNetAdmin.
+    // root's short sensitive-cap override on kCapNetAdmin.
     if (!RbacResolveElevation("admin", duetos::core::kCapNetAdmin, &resolved, &grace))
         Panic("rbac", "self-test: admin/root cannot elevate to kCapNetAdmin");
-    if (grace != kRbacNoGrace)
-        Panic("rbac", "self-test: root kCapNetAdmin override should be no_cache");
+    if (grace != kRbacSensitiveGraceSeconds)
+        Panic("rbac", "self-test: root kCapNetAdmin sensitive grace mismatch");
+
+    // netop independently pins the same short sensitive-cap window.
+    Role netop{};
+    const RoleId netop_id = RbacFindRole("netop");
+    if (netop_id == kRbacRoleInvalid || !RbacGetRole(netop_id, &netop) ||
+        (netop.policy.cap_mask & (1ULL << static_cast<u32>(duetos::core::kCapNetAdmin))) == 0 ||
+        netop.policy.grace_seconds[static_cast<u32>(duetos::core::kCapNetAdmin)] != kRbacSensitiveGraceSeconds)
+        Panic("rbac", "self-test: netop kCapNetAdmin sensitive policy mismatch");
 
     // guest → sandbox means guest cannot elevate to anything.
     if (RbacResolveElevation("guest", duetos::core::kCapFsWrite, nullptr, nullptr))

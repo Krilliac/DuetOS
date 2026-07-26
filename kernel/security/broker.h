@@ -15,9 +15,9 @@
  * a closed door.
  *
  * The broker NEVER:
- *   - mutates kernel state without going through the cap-gate
- *     contract (it adds bits to `proc->caps` for the grant window,
- *     which is the explicit kCap* surface).
+ *   - mutates published capability storage directly. It installs a
+ *     generation-tagged, positive-duration Process lease through the
+ *     locked capability helpers, subject to the monotonic ceiling.
  *   - trusts user-mode to draw the prompt UI or capture keystrokes.
  *     The prompt is drawn by `BrokerPrompt`, which reads keys
  *     directly from `Ps2KeyboardReadEvent` (same input ring the
@@ -39,13 +39,15 @@ namespace duetos::security
 
 enum class BrokerOutcome : u8
 {
-    Granted = 0,    ///< Password verified, grant cached, cap added to proc.
+    Granted = 0,    ///< Authority already effective or a bounded lease was installed.
     Denied,         ///< Role table refused (no role grants this cap).
     BadPassword,    ///< Verify failed N times; broker gives up.
     Cancelled,      ///< User pressed Escape.
     NotInteractive, ///< No keyboard ready (e.g. headless boot smoke).
     NoSession,      ///< No user is currently logged in.
     InvalidCap,     ///< Bad cap argument (kCapNone, out of range).
+    NoLease,        ///< Zero-grace policy cannot back an ambient grant.
+    CeilingDenied,  ///< Process permanently removed this capability.
 };
 
 struct BrokerRequest
@@ -55,15 +57,10 @@ struct BrokerRequest
     const char* reason;          ///< Short string shown in the prompt ("FILE WRITE", etc.).
 };
 
-/// Try to grant `cap` to `req.proc`. Implements:
-///   1. Cache lookup. Hit → Granted (no prompt).
-///   2. Role resolution. Miss → Denied.
-///   3. Prompt (kernel-trusted). Cancel/Bad → Cancelled/BadPassword.
-///   4. Cache insert (skip if role's grace override is kRbacNoGrace).
-///   5. Add cap bit to `req.proc->caps`. Publishes an EventRing entry.
-///
-/// On any non-Granted return the caller's caps are not modified.
-/// Synchronous — blocks on keyboard input until the prompt resolves.
+/// Durable authority and live cached leases return immediately.
+/// Otherwise the broker resolves the role, rejects zero grace, prompts
+/// through the trusted input path, and installs a bounded Process lease.
+/// A permanently lowered Process ceiling always wins.
 BrokerOutcome BrokerRequestElevation(const BrokerRequest& req);
 
 /// Diagnostic helper: convert a BrokerOutcome to a short string.

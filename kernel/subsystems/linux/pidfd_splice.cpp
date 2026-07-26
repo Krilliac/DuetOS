@@ -181,12 +181,11 @@ i64 DoPidfdSendSignal(u64 pidfd, u64 sig, u64 user_info, u64 flags)
 i64 DoPidfdGetfd(u64 pidfd, u64 target_fd, u64 flags)
 {
     (void)flags;
-    using ::duetos::core::CapSetHas;
     using ::duetos::core::kCapDebug;
     core::Process* caller = core::CurrentProcess();
     if (caller == nullptr || pidfd >= 16)
         return kEBADF;
-    if (!CapSetHas(caller->caps, kCapDebug))
+    if (!core::ProcessHasCap(caller, kCapDebug))
     {
         core::RecordSandboxDenial(kCapDebug);
         return kEPERM;

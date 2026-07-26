@@ -93,7 +93,6 @@ ipc::IocpPort* LookupPortRef(core::Process* proc, u64 handle, u64 required_right
 
 i64 SysIocpCreate()
 {
-    using ::duetos::core::CapSetHas;
     using ::duetos::core::kCapSpawnThread;
     core::Process* proc = core::CurrentProcess();
     if (proc == nullptr)
@@ -103,7 +102,7 @@ i64 SysIocpCreate()
     // Same cap gate the legacy pool enforced: a completion port is
     // a cross-thread hand-off primitive, so creating one is tied to
     // the thread-spawning capability.
-    if (!CapSetHas(proc->caps, kCapSpawnThread))
+    if (!core::ProcessHasCap(proc, kCapSpawnThread))
     {
         core::RecordSandboxDenial(kCapSpawnThread);
         return -1;

@@ -342,7 +342,7 @@ i64 DoCopyFileRange(u64 fd_in, u64 user_off_in, u64 fd_out, u64 user_off_out, u6
         return kEINVAL; // both ends must be regular files
     if (len == 0)
         return 0;
-    if (!core::CapSetHas(p->caps, core::kCapFsWrite))
+    if (!core::ProcessHasCap(p, core::kCapFsWrite))
     {
         core::RecordSandboxDenial(core::kCapFsWrite);
         return kEACCES;

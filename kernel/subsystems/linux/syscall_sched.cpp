@@ -81,7 +81,7 @@ sched::Task* ResolveAffinityTarget(u64 pid, core::Process** retained, i64* errno
         // Cross-thread-group affinity requires CAP_SYS_NICE on
         // Linux; kCapDebug is our closest analog.
         core::Process* caller = core::CurrentProcess();
-        if (caller == nullptr || !core::CapSetHas(caller->caps, core::kCapDebug))
+        if (caller == nullptr || !core::ProcessHasCap(caller, core::kCapDebug))
         {
             *errno_out = kEPERM;
             return nullptr;

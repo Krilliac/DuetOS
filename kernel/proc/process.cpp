@@ -26,6 +26,7 @@
 #include "security/event_ring.h"
 #include "security/ir_runbook.h"
 #include "time/tick.h"
+#include "time/timekeeper.h"
 
 namespace duetos::core
 {
@@ -40,10 +41,211 @@ namespace
 constinit u64 g_next_pid = 1;
 constinit u64 g_live_processes = 0;
 
+CapSet AtomicCapsSnapshot(const CapSet& caps)
+{
+    return CapSet{__atomic_load_n(&caps.bits, __ATOMIC_ACQUIRE)};
+}
+
+void AtomicCapsGrant(CapSet& caps, Cap cap)
+{
+    if (cap == kCapNone || cap >= kCapCount)
+        return;
+    __atomic_fetch_or(&caps.bits, 1ULL << static_cast<u32>(cap), __ATOMIC_ACQ_REL);
+}
+
+CapSet AtomicCapsDropMask(CapSet& caps, u64 drop_mask)
+{
+    return CapSet{__atomic_fetch_and(&caps.bits, ~drop_mask, __ATOMIC_ACQ_REL)};
+}
+
+void ExpireCapLeasesLocked(Process* process)
+{
+    sync::SpinLockAssertHeld(process->cap_lock);
+    u64 lease_bits = AtomicCapsSnapshot(process->cap_leases).bits;
+    if (lease_bits == 0)
+        return;
+
+    const u64 now = duetos::time::MonotonicNs();
+    for (u32 cap_index = 1; cap_index < static_cast<u32>(kCapCount); ++cap_index)
+    {
+        const u64 bit = 1ULL << cap_index;
+        if ((lease_bits & bit) == 0)
+            continue;
+
+        u64 deadline = __atomic_load_n(&process->cap_lease_deadline_ns[cap_index], __ATOMIC_ACQUIRE);
+        if (now != 0 && deadline != 0 && now < deadline)
+            continue;
+        if (__atomic_compare_exchange_n(&process->cap_lease_deadline_ns[cap_index], &deadline, 0, false,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        {
+            __atomic_store_n(&process->cap_lease_generation[cap_index], 0, __ATOMIC_RELEASE);
+            AtomicCapsDropMask(process->cap_leases, bit);
+        }
+    }
+}
+
+CapSet EffectiveCapsLocked(Process* process)
+{
+    sync::SpinLockAssertHeld(process->cap_lock);
+    ExpireCapLeasesLocked(process);
+    const CapSet caps = AtomicCapsSnapshot(process->caps);
+    const CapSet leases = AtomicCapsSnapshot(process->cap_leases);
+    const CapSet ceiling = AtomicCapsSnapshot(process->cap_ceiling);
+    return CapSet{(caps.bits | leases.bits) & ceiling.bits};
+}
+
 } // namespace
 
+CapSet ProcessCapsSnapshot(const Process* process)
+{
+    if (process == nullptr)
+        return CapSetEmpty();
+    Process* mutable_process = const_cast<Process*>(process);
+    const sync::IrqFlags flags = sync::SpinLockAcquire(mutable_process->cap_lock);
+    const CapSet effective = EffectiveCapsLocked(mutable_process);
+    sync::SpinLockRelease(mutable_process->cap_lock, flags);
+    return effective;
+}
+
+bool ProcessHasCap(const Process* process, Cap cap)
+{
+    return CapSetHas(ProcessCapsSnapshot(process), cap);
+}
+
+bool ProcessCapsGrant(Process* process, Cap cap)
+{
+    if (process == nullptr || cap == kCapNone || cap >= kCapCount)
+        return false;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(process->cap_lock);
+    const u64 bit = 1ULL << static_cast<u32>(cap);
+    if ((AtomicCapsSnapshot(process->cap_ceiling).bits & bit) == 0)
+    {
+        sync::SpinLockRelease(process->cap_lock, flags);
+        return false;
+    }
+    AtomicCapsGrant(process->caps, cap);
+    sync::SpinLockRelease(process->cap_lock, flags);
+    return true;
+}
+
+bool ProcessCapsGrantLease(Process* process, Cap cap, u64 deadline_ns, u64 generation)
+{
+    if (process == nullptr || cap == kCapNone || cap >= kCapCount || deadline_ns == 0 || generation == 0)
+        return false;
+
+    const sync::IrqFlags flags = sync::SpinLockAcquire(process->cap_lock);
+    const u64 now = duetos::time::MonotonicNs();
+    if (now == 0 || deadline_ns <= now)
+    {
+        sync::SpinLockRelease(process->cap_lock, flags);
+        return false;
+    }
+    const u64 bit = 1ULL << static_cast<u32>(cap);
+    if ((AtomicCapsSnapshot(process->cap_ceiling).bits & bit) == 0)
+    {
+        sync::SpinLockRelease(process->cap_lock, flags);
+        return false;
+    }
+    __atomic_store_n(&process->cap_lease_deadline_ns[static_cast<u32>(cap)], deadline_ns, __ATOMIC_RELEASE);
+    __atomic_store_n(&process->cap_lease_generation[static_cast<u32>(cap)], generation, __ATOMIC_RELEASE);
+    AtomicCapsGrant(process->cap_leases, cap);
+    sync::SpinLockRelease(process->cap_lock, flags);
+    return true;
+}
+
+bool ProcessCapsRevokeLease(Process* process, Cap cap, u64 expected_generation)
+{
+    if (process == nullptr || cap == kCapNone || cap >= kCapCount || expected_generation == 0)
+        return false;
+
+    const sync::IrqFlags flags = sync::SpinLockAcquire(process->cap_lock);
+    const u64 bit = 1ULL << static_cast<u32>(cap);
+    if ((AtomicCapsSnapshot(process->cap_leases).bits & bit) == 0 ||
+        __atomic_load_n(&process->cap_lease_generation[static_cast<u32>(cap)], __ATOMIC_ACQUIRE) != expected_generation)
+    {
+        sync::SpinLockRelease(process->cap_lock, flags);
+        return false;
+    }
+    __atomic_store_n(&process->cap_lease_deadline_ns[static_cast<u32>(cap)], 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&process->cap_lease_generation[static_cast<u32>(cap)], 0, __ATOMIC_RELEASE);
+    AtomicCapsDropMask(process->cap_leases, bit);
+    sync::SpinLockRelease(process->cap_lock, flags);
+    return true;
+}
+
+CapSet ProcessCapCeilingSnapshot(const Process* process)
+{
+    if (process == nullptr)
+        return CapSetEmpty();
+    Process* mutable_process = const_cast<Process*>(process);
+    const sync::IrqFlags flags = sync::SpinLockAcquire(mutable_process->cap_lock);
+    const CapSet ceiling = AtomicCapsSnapshot(mutable_process->cap_ceiling);
+    sync::SpinLockRelease(mutable_process->cap_lock, flags);
+    return ceiling;
+}
+
+CapSet ProcessCapsDisableMask(Process* process, u64 disable_mask)
+{
+    if (process == nullptr)
+        return CapSetEmpty();
+    const sync::IrqFlags flags = sync::SpinLockAcquire(process->cap_lock);
+    const CapSet before = EffectiveCapsLocked(process);
+    AtomicCapsDropMask(process->caps, disable_mask);
+    AtomicCapsDropMask(process->cap_leases, disable_mask);
+    for (u32 cap_index = 1; cap_index < static_cast<u32>(kCapCount); ++cap_index)
+    {
+        if ((disable_mask & (1ULL << cap_index)) == 0)
+            continue;
+        __atomic_store_n(&process->cap_lease_deadline_ns[cap_index], 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&process->cap_lease_generation[cap_index], 0, __ATOMIC_RELEASE);
+    }
+    sync::SpinLockRelease(process->cap_lock, flags);
+    return before;
+}
+
+CapSet ProcessCapsDropMask(Process* process, u64 drop_mask)
+{
+    if (process == nullptr)
+        return CapSetEmpty();
+    const sync::IrqFlags flags = sync::SpinLockAcquire(process->cap_lock);
+    const CapSet before = EffectiveCapsLocked(process);
+    AtomicCapsDropMask(process->cap_ceiling, drop_mask);
+    AtomicCapsDropMask(process->cap_leases, drop_mask);
+    for (u32 cap_index = 1; cap_index < static_cast<u32>(kCapCount); ++cap_index)
+    {
+        if ((drop_mask & (1ULL << cap_index)) == 0)
+            continue;
+        __atomic_store_n(&process->cap_lease_deadline_ns[cap_index], 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&process->cap_lease_generation[cap_index], 0, __ATOMIC_RELEASE);
+    }
+    AtomicCapsDropMask(process->caps, drop_mask);
+    sync::SpinLockRelease(process->cap_lock, flags);
+    return before;
+}
+
+bool ProcessCaptureSpawnAuthority(const Process* process, u64 required_mask, CapSet* child_caps_out,
+                                  CapSet* ceiling_out, CapSet* authority_out)
+{
+    if (process == nullptr || child_caps_out == nullptr || ceiling_out == nullptr || authority_out == nullptr)
+        return false;
+
+    Process* mutable_process = const_cast<Process*>(process);
+    const sync::IrqFlags flags = sync::SpinLockAcquire(mutable_process->cap_lock);
+    const CapSet ceiling = AtomicCapsSnapshot(mutable_process->cap_ceiling);
+    const CapSet authority{EffectiveCapsLocked(mutable_process).bits & ceiling.bits};
+    const CapSet child_caps{AtomicCapsSnapshot(mutable_process->caps).bits & ceiling.bits};
+    *child_caps_out = child_caps;
+    *ceiling_out = ceiling;
+    *authority_out = authority;
+    sync::SpinLockRelease(mutable_process->cap_lock, flags);
+
+    const u64 defined_mask = CapSetTrusted().bits;
+    return required_mask != 0 && (required_mask & ~defined_mask) == 0 &&
+           (authority.bits & required_mask) == required_mask;
+}
+
 Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, const fs::RamfsNode* root, u64 user_code_va,
-                       u64 user_stack_va, u64 tick_budget)
+                       u64 user_stack_va, u64 tick_budget, CapSet cap_ceiling)
 {
     KLOG_TRACE_SCOPE("core/process", "ProcessCreate");
     KASSERT(name != nullptr, "core/process", "ProcessCreate null name");
@@ -80,7 +282,8 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     p->pid = __atomic_fetch_add(&g_next_pid, 1, __ATOMIC_RELAXED);
     p->name = name;
     p->as = as;
-    p->caps = caps;
+    p->cap_ceiling = cap_ceiling;
+    p->caps = CapSet{caps.bits & cap_ceiling.bits};
     p->root = root;
     p->user_code_va = user_code_va;
     p->user_stack_va = user_stack_va;

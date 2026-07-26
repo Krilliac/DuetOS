@@ -98,6 +98,8 @@ namespace duetos::core
 /// Linux dispatcher.
 u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps, const fs::RamfsNode* root,
                  u64 frame_budget, u64 tick_budget);
+u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps, const fs::RamfsNode* root,
+                 u64 frame_budget, u64 tick_budget, CapSet cap_ceiling);
 
 /// Linux-ABI twin of `SpawnElfFile`. Same parse + AS + Process
 /// pipeline, but flips `Process::abi_flavor = kAbiLinux` after
@@ -112,6 +114,8 @@ u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps
 /// this and SpawnElfFile; for now, it's explicit.
 u64 SpawnElfLinux(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps, const fs::RamfsNode* root,
                   u64 frame_budget, u64 tick_budget);
+u64 SpawnElfLinux(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps, const fs::RamfsNode* root,
+                  u64 frame_budget, u64 tick_budget, CapSet cap_ceiling);
 
 /// PE/COFF twin of `SpawnElfFile`. Loads via the v0 PE loader
 /// (freestanding, no imports, no relocations) and queues a
@@ -121,5 +125,7 @@ u64 SpawnElfLinux(const char* name, const u8* elf_bytes, u64 elf_len, CapSet cap
 /// cleanup contract as `SpawnElfFile`.
 u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, const fs::RamfsNode* root,
                 u64 frame_budget, u64 tick_budget);
+u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, const fs::RamfsNode* root,
+                u64 frame_budget, u64 tick_budget, CapSet cap_ceiling);
 
 } // namespace duetos::core
