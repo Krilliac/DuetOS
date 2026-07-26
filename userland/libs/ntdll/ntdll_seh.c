@@ -301,7 +301,7 @@ __declspec(dllexport) void* RtlVirtualUnwind(unsigned long HandlerType, unsigned
                 if (info == 0)
                     *rsp += (unsigned long long)codes[i + 1] * 8ULL;
                 else
-                    *rsp += (unsigned long long)(*(const unsigned int*)&codes[i + 1]);
+                    *rsp += (unsigned long long)duet_pe_u32(&codes[i + 1]);
             }
             else if (op == 2)
             {
@@ -319,7 +319,7 @@ __declspec(dllexport) void* RtlVirtualUnwind(unsigned long HandlerType, unsigned
             else if (op == 5)
             {
                 *nt_reg(ContextRecord, (int)info) =
-                    *(unsigned long long*)(fb + (unsigned long long)(*(const unsigned int*)&codes[i + 1]));
+                    *(unsigned long long*)(fb + (unsigned long long)duet_pe_u32(&codes[i + 1]));
             }
             else if (op == 8)
             {
@@ -328,7 +328,7 @@ __declspec(dllexport) void* RtlVirtualUnwind(unsigned long HandlerType, unsigned
             }
             else if (op == 9)
             {
-                const unsigned long long off = (unsigned long long)(*(const unsigned int*)&codes[i + 1]);
+                const unsigned long long off = (unsigned long long)duet_pe_u32(&codes[i + 1]);
                 nt_restore_xmm(ContextRecord, (int)info, (const void*)(fb + off));
             }
             else if (op == 10)

@@ -101,6 +101,20 @@ void make_chained(Fixture& f)
 int main()
 {
     {
+        // A FAR unwind operand begins in the slot after its opcode.  For an
+        // opcode in an even slot this address is only two-byte aligned, so
+        // exercise the bytewise decoder used by both production mirrors.
+        alignas(4) unsigned short codes[3]{};
+        codes[0] = 0x8901; // SAVE_XMM128_FAR XMM8, CodeOffset 1
+        unsigned char* operand = reinterpret_cast<unsigned char*>(&codes[1]);
+        put32(operand, 0x12345678u);
+        EXPECT_EQ(reinterpret_cast<unsigned long long>(operand) & 3ULL, 2ULL);
+        EXPECT_EQ(duet_pe_u32(operand), 0x12345678u);
+        unsigned int width = 0;
+        EXPECT_TRUE(duet_pe_unwind_op_width(codes[0], 0, &width));
+        EXPECT_EQ(width, 3u);
+    }
+    {
         Fixture f;
         DUET_PE_VIEW view{};
         EXPECT_TRUE(duet_pe_parse(f.image, &view));
