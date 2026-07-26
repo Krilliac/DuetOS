@@ -8,6 +8,7 @@
 #include "crypto/x509.h"
 #include "debug/probes.h"
 #include "net/ec.h"
+#include "net/x509_ext_vectors.h"
 #include "util/datetime.h"
 
 /*
@@ -107,21 +108,41 @@ struct ParsedCert
     u32 san_dns_len[kMaxSan]{};
     u32 san_count = 0;
 
-    // basicConstraints (RFC 5280 §4.2.1.9). `bc_present` is false when
-    // the extension is absent, which — per IsUsableIssuer — means the
-    // cert may NOT sign other certificates. `bc_path_len_present` gates
-    // `bc_path_len` (pathLenConstraint is OPTIONAL and only meaningful
-    // when cA is TRUE).
-    bool bc_present = false;
+    // basicConstraints (RFC 5280 §4.2.1.9), tracked as THREE independent
+    // facts, because collapsing them is a bypass:
+    //   bc_seen   the extnID was observed. Set BEFORE the value is
+    //             parsed, so a malformed first occurrence still counts as
+    //             an occurrence and a following duplicate is caught.
+    //   bc_valid  the value decoded as exact, well-formed DER.
+    //   bc_is_ca / bc_path_len*  the decoded value — meaningful ONLY when
+    //             bc_valid. `bc_path_len_present` gates `bc_path_len`
+    //             (pathLenConstraint is OPTIONAL).
+    // "seen but not valid" must never read as "absent" (which would let a
+    // later copy win) nor as "cA TRUE" (which would promote an issuer).
+    bool bc_seen = false;
+    bool bc_valid = false;
     bool bc_is_ca = false;
     bool bc_path_len_present = false;
     u32 bc_path_len = 0;
 
-    // keyUsage (RFC 5280 §4.2.1.3). `ku_present` is false when absent,
-    // in which case the extension places no restriction (§4.2.1.3: the
-    // constraint applies only when the extension is present).
-    bool ku_present = false;
+    // keyUsage (RFC 5280 §4.2.1.3), same three-state split. An ABSENT
+    // keyUsage places no restriction (§4.2.1.3: the constraint applies
+    // only when the extension is present); a keyUsage that is present but
+    // did not decode is NOT an absent one and never permits signing.
+    bool ku_seen = false;
+    bool ku_valid = false;
     bool ku_key_cert_sign = false;
+
+    // subjectAltName: `san_seen` exists so a duplicate SAN is caught by
+    // the same rule as the other two.
+    bool san_seen = false;
+
+    // Set when the extension block itself is unusable: a malformed
+    // Extension, a duplicate extnID, an extnValue that is not exact DER,
+    // or a CRITICAL extension this verifier does not implement (RFC 5280
+    // §6.1.4(k)). ParseOne() refuses such a certificate outright, so a
+    // cert with `ext_error` neither verifies nor acts as an issuer.
+    bool ext_error = false;
 
     // notBefore / notAfter resolved to Unix seconds. kBadTime marks a
     // value that did not parse — any cert with a bad time fails closed.
@@ -216,45 +237,65 @@ bool ParseTime(const u8* v, u32 len, u8 tag, u64* out)
     return true;
 }
 
-// extnValue OCTET STRING of an Extension, skipping the optional
-// `critical BOOLEAN DEFAULT FALSE` that may sit between extnID and
-// extnValue. Returns false when the extension carries no OCTET STRING
-// (malformed) — callers then leave their parsed fields at the
-// fail-closed defaults.
-bool ExtnValue(const Element& ext, const Element& oid, Element* out)
+// Read exactly ONE TLV of tag `expect_tag` that fills [buf, buf + len)
+// precisely — nothing truncated, nothing left over.
+//
+// This is the rule every extnValue in this file obeys: extnValue is an
+// OCTET STRING whose content is exactly one encoded extension value. A
+// reader that merely parses the FIRST element and ignores the rest lets
+// an attacker append a second encoding that a different parser (or a
+// later version of this one) might prefer, and — worse — lets a
+// truncated tail leave already-decoded fields standing. Both are
+// laundering primitives, so both are rejected here.
+bool ReadExact(const u8* buf, u32 len, u8 expect_tag, Element* out)
 {
     using namespace duetos::crypto::asn1;
-    u32 eo = oid.header_len + oid.len;
-    while (eo < ext.len)
-    {
-        Element fld{};
-        if (Read(ext.value + eo, ext.len - eo, &fld) != Status::Ok)
-            return false;
-        if (fld.tag == kTagOctetString)
-        {
-            *out = fld;
-            return true;
-        }
-        eo += fld.header_len + fld.len;
-    }
-    return false;
+    Element e{};
+    if (Read(buf, len, &e) != Status::Ok || e.tag != expect_tag)
+        return false;
+    // `Read` guarantees header_len + len <= the cap it was given, so this
+    // compares equal-or-short without risk of wrapping.
+    if (e.header_len + e.len != len)
+        return false;
+    *out = e;
+    return true;
 }
 
-// subjectAltName ::= GeneralNames ::= SEQUENCE OF GeneralName. We keep
-// the dNSName entries ([2] context-primitive, tag 0x82) as slices.
-void DecodeSubjectAltName(const Element& extn_value, ParsedCert* pc)
+// A DER BOOLEAN: exactly one content byte, and (X.690 §11.1) TRUE is
+// 0xFF exactly. BER's "any nonzero is TRUE" is NOT accepted — an
+// encoding we would have to guess at is an encoding we reject.
+bool DerBoolean(const Element& e, bool* out)
+{
+    if (e.tag != kDerTagBoolean || e.len != 1)
+        return false;
+    if (e.value[0] != 0x00 && e.value[0] != 0xFF)
+        return false;
+    *out = (e.value[0] == 0xFF);
+    return true;
+}
+
+// subjectAltName ::= GeneralNames ::= SEQUENCE OF GeneralName (SIZE
+// (1..MAX)). We keep the dNSName entries ([2] context-primitive, tag
+// 0x82) as slices. Returns false if the value is not exact DER.
+//
+// GAP: only the first kMaxSan dNSName entries are retained — a hostname
+// that appears past that point will not match, which fails closed.
+// Non-dNSName GeneralNames are bounds-checked and skipped.
+bool DecodeSubjectAltName(const Element& extn_value, ParsedCert* pc)
 {
     using namespace duetos::crypto::asn1;
     Element gn_seq{};
-    if (Read(extn_value.value, extn_value.len, &gn_seq) != Status::Ok || gn_seq.tag != kTagSequence)
-        return;
+    if (!ReadExact(extn_value.value, extn_value.len, kTagSequence, &gn_seq))
+        return false;
     u32 go = 0;
-    while (go < gn_seq.len && pc->san_count < ParsedCert::kMaxSan)
+    u32 entries = 0;
+    while (go < gn_seq.len)
     {
         Element gn{};
         if (Read(gn_seq.value + go, gn_seq.len - go, &gn) != Status::Ok)
-            return;
-        if (gn.tag == 0x82) // [2] dNSName (IA5String, primitive)
+            return false;
+        ++entries;
+        if (gn.tag == 0x82 && pc->san_count < ParsedCert::kMaxSan) // [2] dNSName
         {
             pc->san_dns[pc->san_count] = gn.value;
             pc->san_dns_len[pc->san_count] = gn.len;
@@ -262,80 +303,285 @@ void DecodeSubjectAltName(const Element& extn_value, ParsedCert* pc)
         }
         go += gn.header_len + gn.len;
     }
+    // Every GeneralName must land exactly on the end of the sequence, and
+    // GeneralNames is SIZE (1..MAX) — an empty one is malformed.
+    return go == gn_seq.len && entries > 0;
 }
 
 // BasicConstraints ::= SEQUENCE { cA BOOLEAN DEFAULT FALSE,
 //                                 pathLenConstraint INTEGER (0..MAX) OPTIONAL }
 //
-// An empty SEQUENCE is the DER encoding of "cA = FALSE" (DEFAULT values
-// are omitted), so `bc_is_ca` stays false. A pathLenConstraint wider
-// than a u32, or negative, is treated as "not present" — the depth cap
-// in Verify() is the binding limit either way, and refusing to invent a
-// value keeps the decode honest.
-void DecodeBasicConstraints(const Element& extn_value, ParsedCert* pc)
+// Strict: exactly those two OPTIONAL fields, in that order, and the
+// SEQUENCE must be exactly consumed. An empty SEQUENCE is the DER
+// encoding of "cA = FALSE" (DEFAULT values are omitted), so `bc_is_ca`
+// stays false — that is the ordinary end-entity shape, not an error.
+//
+// Anything else — a trailing field, a non-DER BOOLEAN, a negative or
+// non-minimal or over-wide pathLenConstraint — returns false and the
+// caller marks the whole certificate unusable. Writing partial state and
+// carrying on is what let a truncated tail leave `bc_is_ca = true`
+// standing; the decode now publishes to `pc` only after the value has
+// fully validated.
+//
+// Note: an EXPLICIT `cA FALSE` is technically redundant under DER (the
+// DEFAULT should be omitted) but is accepted, because real certificates
+// emit it and rejecting it would break interop while protecting nothing.
+bool DecodeBasicConstraints(const Element& extn_value, ParsedCert* pc)
 {
     using namespace duetos::crypto::asn1;
-    if (pc->bc_present)
-    {
-        // RFC 5280 §4.2: a certificate MUST NOT carry more than one
-        // instance of an extension. A duplicate is attacker-shaped
-        // ambiguity — refuse to let the later copy win, and refuse the
-        // cert as an issuer outright.
-        pc->bc_is_ca = false;
-        return;
-    }
     Element seq{};
-    if (Read(extn_value.value, extn_value.len, &seq) != Status::Ok || seq.tag != kTagSequence)
-        return;
-    pc->bc_present = true;
+    if (!ReadExact(extn_value.value, extn_value.len, kTagSequence, &seq))
+        return false;
+
+    bool is_ca = false;
+    bool path_len_present = false;
+    u32 path_len = 0;
     u32 off = 0;
-    while (off < seq.len)
+
+    if (off < seq.len)
     {
         Element f{};
         if (Read(seq.value + off, seq.len - off, &f) != Status::Ok)
-            return;
-        if (f.tag == kDerTagBoolean && f.len == 1)
+            return false;
+        if (f.tag == kDerTagBoolean)
         {
-            pc->bc_is_ca = (f.value[0] != 0x00); // DER: TRUE is 0xFF
+            if (!DerBoolean(f, &is_ca))
+                return false;
+            off += f.header_len + f.len;
         }
-        else if (f.tag == kTagInteger && f.len >= 1 && f.len <= 4 && (f.value[0] & 0x80) == 0)
-        {
-            u32 v = 0;
-            for (u32 i = 0; i < f.len; ++i)
-                v = (v << 8) | f.value[i];
-            pc->bc_path_len = v;
-            pc->bc_path_len_present = true;
-        }
+    }
+    if (off < seq.len)
+    {
+        Element f{};
+        if (Read(seq.value + off, seq.len - off, &f) != Status::Ok)
+            return false;
+        if (f.tag != kTagInteger)
+            return false; // an unexpected field, not a basicConstraints
+        // pathLenConstraint is INTEGER (0..MAX): non-negative, DER-minimal,
+        // and it has to fit the u32 the depth comparison uses.
+        if (f.len < 1 || f.len > 4 || (f.value[0] & 0x80) != 0)
+            return false;
+        if (f.len > 1 && f.value[0] == 0x00 && (f.value[1] & 0x80) == 0)
+            return false; // redundant leading zero -> not DER-minimal
+        for (u32 i = 0; i < f.len; ++i)
+            path_len = (path_len << 8) | f.value[i];
+        path_len_present = true;
         off += f.header_len + f.len;
     }
+    if (off != seq.len)
+        return false; // trailing / unexpected field inside BasicConstraints
+
+    pc->bc_is_ca = is_ca;
+    pc->bc_path_len_present = path_len_present;
+    pc->bc_path_len = path_len;
+    return true;
 }
 
 // KeyUsage ::= BIT STRING. Bit 5 (counting from the MSB of the first
 // data byte, RFC 5280 §4.2.1.3) is keyCertSign. The BIT STRING content
-// is [unused-bit-count][data...]; a BIT STRING short enough not to
-// reach bit 5 simply does not assert keyCertSign.
-void DecodeKeyUsage(const Element& extn_value, ParsedCert* pc)
+// is [unused-bit-count][data...]; a BIT STRING whose named bits stop
+// before bit 5 simply does not assert keyCertSign — that is a valid
+// decode of "no keyCertSign", not a parse error.
+//
+// Strict on the encoding itself: the value must be exactly one BIT
+// STRING filling extnValue, the unused-bit count must be 0..7, must be 0
+// when there are no data bytes, and the unused tail bits must be zero as
+// DER requires.
+bool DecodeKeyUsage(const Element& extn_value, ParsedCert* pc)
 {
     using namespace duetos::crypto::asn1;
-    if (pc->ku_present)
-    {
-        // Duplicate extension — same §4.2 rule as basicConstraints.
-        pc->ku_key_cert_sign = false;
-        return;
-    }
     Element bits{};
-    if (Read(extn_value.value, extn_value.len, &bits) != Status::Ok || bits.tag != kTagBitString || bits.len < 1)
-        return;
-    pc->ku_present = true;
+    if (!ReadExact(extn_value.value, extn_value.len, kTagBitString, &bits))
+        return false;
+    if (bits.len < 1)
+        return false;
     const u8 unused = bits.value[0];
-    if (bits.len < 2 || unused > 7)
-        return; // no data bytes / malformed -> asserts nothing
-    // keyCertSign is bit 5 of the first data byte (0x80 >> 5 == 0x04).
-    // It is only meaningful if that bit is not one of the unused tail
-    // bits, which for a 1-byte BIT STRING means unused <= 2.
-    if (bits.len == 2 && unused > 2)
-        return;
-    pc->ku_key_cert_sign = (bits.value[1] & 0x04) != 0;
+    if (unused > 7)
+        return false;
+    if (bits.len == 1 && unused != 0)
+        return false;
+    if (bits.len > 1 && (bits.value[bits.len - 1] & static_cast<u8>((1u << unused) - 1u)) != 0)
+        return false; // DER: unused trailing bits must be zero
+
+    bool key_cert_sign = false;
+    if (bits.len >= 2)
+    {
+        // Bit 5 exists only if the BIT STRING actually carries 6+ bits.
+        const u32 significant_bits = (bits.len - 1) * 8u - unused;
+        if (significant_bits > 5)
+            key_cert_sign = (bits.value[1] & 0x04) != 0; // 0x80 >> 5
+    }
+    pc->ku_key_cert_sign = key_cert_sign;
+    return true;
+}
+
+// Extension ::= SEQUENCE { extnID OBJECT IDENTIFIER,
+//                          critical BOOLEAN DEFAULT FALSE,
+//                          extnValue OCTET STRING }
+//
+// Strict: exactly those fields, in that order, filling the SEQUENCE. The
+// previous reader scanned forward for the first OCTET STRING and ignored
+// everything else, which meant a malformed extension was silently
+// SKIPPED rather than rejected — and a skipped extension is one that
+// never gets marked as seen, so a following duplicate looked like a
+// first occurrence. A shape we do not recognise is malformed DER here,
+// not an extension to step over.
+bool ParseExtension(const Element& ext, Element* oid, bool* critical, Element* extn_value)
+{
+    using namespace duetos::crypto::asn1;
+    if (ext.tag != kTagSequence)
+        return false;
+    if (Read(ext.value, ext.len, oid) != Status::Ok || oid->tag != kTagOid || oid->len == 0)
+        return false;
+    u32 off = oid->header_len + oid->len;
+
+    *critical = false;
+    if (off >= ext.len)
+        return false; // extnValue is mandatory
+    Element f{};
+    if (Read(ext.value + off, ext.len - off, &f) != Status::Ok)
+        return false;
+    if (f.tag == kDerTagBoolean)
+    {
+        // As with cA, an explicit `critical FALSE` is redundant under DER
+        // but common in the wild, so it is accepted.
+        if (!DerBoolean(f, critical))
+            return false;
+        off += f.header_len + f.len;
+        if (off >= ext.len)
+            return false;
+        if (Read(ext.value + off, ext.len - off, &f) != Status::Ok)
+            return false;
+    }
+    if (f.tag != kTagOctetString)
+        return false;
+    if (off + f.header_len + f.len != ext.len)
+        return false; // trailing field after extnValue
+    *extn_value = f;
+    return true;
+}
+
+// Decode an `Extensions ::= SEQUENCE OF Extension` element. Returns
+// false — and sets `pc->ext_error` — when the block is unusable:
+//
+//   - a malformed Extension (see ParseExtension),
+//   - a DUPLICATE extnID (RFC 5280 §4.2: at most one instance of each).
+//     The OID is marked seen BEFORE its value is parsed, so this holds
+//     even when the first copy is the malformed one,
+//   - a CRITICAL extension whose semantics this layer does not implement
+//     (i.e. anything other than the three matched below).
+//
+// GAP: duplicate detection covers the three extensions this layer
+// decodes. A repeated UNKNOWN non-critical extension is not rejected —
+// nothing reads it, so it cannot change a trust decision.
+//
+// Split out from ParseExtensionsFromTbs so the self-test can drive it
+// with hand-built extension blobs (see x509_ext_vectors.h) — the
+// dangerous inputs here are shapes, and shapes need no signing key.
+bool DecodeExtensionSeq(const Element& ext_seq, ParsedCert* pc)
+{
+    using namespace duetos::crypto::asn1;
+    if (ext_seq.tag != kTagSequence)
+    {
+        pc->ext_error = true;
+        return false;
+    }
+    u32 xo = 0;
+    while (xo < ext_seq.len)
+    {
+        Element ext{};
+        if (Read(ext_seq.value + xo, ext_seq.len - xo, &ext) != Status::Ok)
+        {
+            pc->ext_error = true;
+            return false;
+        }
+        Element oid{};
+        Element extn_value{};
+        bool critical = false;
+        if (!ParseExtension(ext, &oid, &critical, &extn_value))
+        {
+            pc->ext_error = true;
+            return false;
+        }
+
+        if (OidEquals(oid, kOidBasicConstraints, sizeof(kOidBasicConstraints)))
+        {
+            if (pc->bc_seen)
+            {
+                pc->ext_error = true;
+                return false;
+            }
+            pc->bc_seen = true; // BEFORE the value is parsed
+            if (!DecodeBasicConstraints(extn_value, pc))
+            {
+                pc->ext_error = true;
+                return false;
+            }
+            pc->bc_valid = true;
+        }
+        else if (OidEquals(oid, kOidKeyUsage, sizeof(kOidKeyUsage)))
+        {
+            if (pc->ku_seen)
+            {
+                pc->ext_error = true;
+                return false;
+            }
+            pc->ku_seen = true; // BEFORE the value is parsed
+            if (!DecodeKeyUsage(extn_value, pc))
+            {
+                pc->ext_error = true;
+                return false;
+            }
+            pc->ku_valid = true;
+        }
+        else if (OidEquals(oid, kOidSubjectAltName, sizeof(kOidSubjectAltName)))
+        {
+            if (pc->san_seen)
+            {
+                pc->ext_error = true;
+                return false;
+            }
+            pc->san_seen = true;
+            if (!DecodeSubjectAltName(extn_value, pc))
+            {
+                pc->ext_error = true;
+                return false;
+            }
+        }
+        else if (critical)
+        {
+            // RFC 5280 §6.1.4(k): a certificate carrying a CRITICAL
+            // extension the verifier does not recognise MUST be rejected.
+            // Silently ignoring one is how a nameConstraints,
+            // policyConstraints or inhibitAnyPolicy restriction gets
+            // laundered away — the issuing CA marked it critical
+            // precisely because honouring it is not optional.
+            //
+            // Every certificate embedded in this file (8 real roots, 2
+            // synthetic roots, 1 intermediate, 3 leaves) carries critical
+            // basicConstraints and/or keyUsage and nothing else critical.
+            // Re-check that with tools/test/x509-embedded-extensions.py
+            // before adding a trust anchor, or the new anchor will fail
+            // closed at boot.
+            pc->ext_error = true;
+            return false;
+        }
+        // An unknown NON-critical extension is ignored, as RFC 5280
+        // §4.2 directs — subjectKeyIdentifier / authorityKeyIdentifier /
+        // certificatePolicies all land here on real-world certificates.
+
+        xo += ext.header_len + ext.len;
+    }
+    // asn1::Read already refuses a child that overruns its cap, so `xo`
+    // can only land exactly on the end. Kept as a cheap invariant guard:
+    // if that guarantee ever weakens, this fails closed rather than
+    // accepting a partially-walked extension block.
+    if (xo != ext_seq.len)
+    {
+        pc->ext_error = true;
+        return false;
+    }
+    return true;
 }
 
 // Walk TBSCertificate to find the v3 extensions block ([3] EXPLICIT,
@@ -346,11 +592,21 @@ void DecodeKeyUsage(const Element& extn_value, ParsedCert* pc)
 // This re-walks the TBS rather than depending on crypto::x509 surfacing
 // extensions (it does not). Every step is bounds-checked against the
 // enclosing element so malformed/oversized lengths fail closed.
-void ParseExtensionsFromTbs(const Element& tbs, ParsedCert* pc)
+//
+// Returns false when the certificate must be rejected outright. A TBS we
+// cannot walk is one whose extension block we cannot rule out, so "I got
+// lost" is a rejection, not a shrug: an absent [3] block is legitimately
+// "no extensions" (v1/v2, or a v3 cert with none) and returns true with
+// nothing seen, which leaves the cert unusable as an ISSUER but still
+// valid as a leaf.
+bool ParseExtensionsFromTbs(const Element& tbs, ParsedCert* pc)
 {
     using namespace duetos::crypto::asn1;
     if (tbs.tag != kTagSequence)
-        return;
+    {
+        pc->ext_error = true;
+        return false;
+    }
 
     // Step over the fixed TBS prefix to reach extensions:
     //   [0] version (opt) | serial | sigAlg | issuer | validity |
@@ -358,17 +614,21 @@ void ParseExtensionsFromTbs(const Element& tbs, ParsedCert* pc)
     u32 off = 0;
     Element e{};
     if (Read(tbs.value, tbs.len, &e) != Status::Ok)
-        return;
+    {
+        pc->ext_error = true;
+        return false;
+    }
     if (e.tag == 0xA0) // [0] EXPLICIT version
         off += e.header_len + e.len;
 
     // Skip serial, sigAlg, issuer, validity, subject, SPKI (6 elements).
     for (u32 i = 0; i < 6; ++i)
     {
-        if (off >= tbs.len)
-            return;
-        if (Read(tbs.value + off, tbs.len - off, &e) != Status::Ok)
-            return;
+        if (off >= tbs.len || Read(tbs.value + off, tbs.len - off, &e) != Status::Ok)
+        {
+            pc->ext_error = true;
+            return false;
+        }
         off += e.header_len + e.len;
     }
 
@@ -376,40 +636,25 @@ void ParseExtensionsFromTbs(const Element& tbs, ParsedCert* pc)
     while (off < tbs.len)
     {
         if (Read(tbs.value + off, tbs.len - off, &e) != Status::Ok)
-            return;
+        {
+            pc->ext_error = true;
+            return false;
+        }
         const u32 step = e.header_len + e.len;
         if (e.tag == 0xA3) // [3] EXPLICIT extensions
         {
-            // Inside: SEQUENCE OF Extension.
+            // The [3] wrapper holds exactly one SEQUENCE OF Extension.
             Element ext_seq{};
-            if (Read(e.value, e.len, &ext_seq) != Status::Ok || ext_seq.tag != kTagSequence)
-                return;
-            u32 xo = 0;
-            while (xo < ext_seq.len)
+            if (!ReadExact(e.value, e.len, kTagSequence, &ext_seq))
             {
-                Element ext{};
-                if (Read(ext_seq.value + xo, ext_seq.len - xo, &ext) != Status::Ok || ext.tag != kTagSequence)
-                    return;
-                // Extension ::= SEQUENCE { extnID OID, critical BOOLEAN
-                //               DEFAULT FALSE, extnValue OCTET STRING }
-                Element oid{};
-                Element extn_value{};
-                if (Read(ext.value, ext.len, &oid) == Status::Ok && oid.tag == kTagOid &&
-                    ExtnValue(ext, oid, &extn_value))
-                {
-                    if (OidEquals(oid, kOidSubjectAltName, sizeof(kOidSubjectAltName)))
-                        DecodeSubjectAltName(extn_value, pc);
-                    else if (OidEquals(oid, kOidBasicConstraints, sizeof(kOidBasicConstraints)))
-                        DecodeBasicConstraints(extn_value, pc);
-                    else if (OidEquals(oid, kOidKeyUsage, sizeof(kOidKeyUsage)))
-                        DecodeKeyUsage(extn_value, pc);
-                }
-                xo += ext.header_len + ext.len;
+                pc->ext_error = true;
+                return false;
             }
-            return;
+            return DecodeExtensionSeq(ext_seq, pc);
         }
         off += step;
     }
+    return true; // no [3] block: no extensions, nothing seen
 }
 
 // Classify the outer signatureAlgorithm OID. The base parser already
@@ -592,7 +837,14 @@ bool ParseOne(const u8* der, u32 der_len, ParsedCert* pc)
         pc->subject_dn_len = subj.header_len + subj.len;
     }
 
-    ParseExtensionsFromTbs(tbs, pc);
+    // An unusable extension block (malformed, duplicated, or carrying an
+    // unrecognised critical extension) rejects the whole certificate.
+    // Doing it HERE rather than only in IsUsableIssuer is what guarantees
+    // such a cert can never be promoted to an issuer: it never reaches
+    // `ok = true`, so Verify() drops it and TrustAnchorVerifies() skips
+    // it, whatever else its bytes claim.
+    if (!ParseExtensionsFromTbs(tbs, pc))
+        return false;
     // EC public key (if this is an ECDSA cert) and outer signature-algo
     // classification (RSA or one of the two ECDSA shapes).
     ParseEcSpki(tbs, pc);
@@ -846,18 +1098,27 @@ bool HostMatches(const ParsedCert& leaf, const char* hostname)
 // what pathLenConstraint bounds.
 //
 // Fail-closed shape:
+//   - any extension-block error -> not an issuer. ParseOne already
+//     rejects these certs; the check is repeated here so the predicate is
+//     correct on its own and stays correct if a future caller reaches it
+//     by another route.
 //   - basicConstraints ABSENT  -> not an issuer. RFC 5280 §4.2.1.9
 //     requires cA certificates to carry it; a cert without it (v1, or a
 //     plain end-entity) never signs another cert here.
+//   - basicConstraints SEEN but not VALID -> not an issuer. A value we
+//     could not decode is not a value that says cA TRUE.
 //   - cA = FALSE               -> not an issuer.
 //   - keyUsage present without keyCertSign -> not an issuer (§4.2.1.3).
-//     keyUsage ABSENT places no restriction, per the same section.
+//     keyUsage ABSENT places no restriction, per the same section; a
+//     keyUsage present but undecodable permits nothing.
 //   - pathLenConstraint < certs_below -> not an issuer.
 bool IsUsableIssuer(const ParsedCert& c, u32 certs_below)
 {
-    if (!c.bc_present || !c.bc_is_ca)
+    if (c.ext_error)
         return false;
-    if (c.ku_present && !c.ku_key_cert_sign)
+    if (!c.bc_seen || !c.bc_valid || !c.bc_is_ca)
+        return false;
+    if (c.ku_seen && (!c.ku_valid || !c.ku_key_cert_sign))
         return false;
     if (c.bc_path_len_present && certs_below > c.bc_path_len)
         return false;
@@ -1925,106 +2186,60 @@ void SelfTestFail(const char* label, u32 code)
     KBP_PROBE_V(duetos::debug::ProbeId::kBootSelftestFail, code);
 }
 
-// Decode a hand-built `extnValue` OCTET STRING TLV and hand the element
-// to `fn`. Returns false if the TLV itself does not read back — a bug in
-// the vector, not in the code under test.
-template <typename Fn> bool DecodeExtnFixture(const u8* tlv, u32 tlv_len, ParsedCert* pc, Fn fn)
+// Extension-policy checks: drive DecodeExtensionSeq() over the hand-built
+// `Extensions ::= SEQUENCE OF Extension` vectors in x509_ext_vectors.h and
+// assert both the accept/reject verdict AND the resulting IsUsableIssuer
+// answer at depth 0 and 1.
+//
+// Why extension blobs and not whole certificates: the inputs that break an
+// issuer gate are SHAPES, not values — a duplicate basicConstraints whose
+// first copy is malformed, an extnValue with trailing bytes, a truncated
+// inner SEQUENCE, an unrecognised critical extension. None of those need a
+// signing key, so a hand-built blob tests them exactly and deterministically
+// where a signed fixture per case would cost a keypair and expire.
+//
+// The rejection cases carry the property that actually matters: a rejected
+// blob must ALSO be an unusable issuer. That is what stops a malformed
+// duplicate or an unknown critical extension from promoting a CA.
+//
+// Returns 0 on success, else a code whose low byte is the failing row index.
+u32 ExtensionPolicyChecks()
 {
     using namespace duetos::crypto::asn1;
-    Element e{};
-    if (Read(tlv, tlv_len, &e) != Status::Ok || e.tag != kTagOctetString)
-        return false;
-    fn(e, pc);
-    return true;
-}
 
-// Unit vectors for the RFC 5280 §4.2.1.9 / §4.2.1.3 decoders that back
-// IsUsableIssuer. Hand-built DER rather than whole certificates: these
-// pin the exact shapes an attacker controls (empty basicConstraints,
-// cA absent, a keyUsage that omits keyCertSign) without needing a
-// signing key per shape. Returns 0 on success, else a failure code.
-u32 IssuerConstraintDecodeChecks()
-{
-    // extnValue OCTET STRING { BasicConstraints SEQUENCE { ... } }
-    static constexpr u8 kBcEmpty[] = {0x04, 0x02, 0x30, 0x00};                        // cA DEFAULT FALSE
-    static constexpr u8 kBcCaTrue[] = {0x04, 0x05, 0x30, 0x03, 0x01, 0x01, 0xFF};     // cA TRUE
-    static constexpr u8 kBcCaFalse[] = {0x04, 0x05, 0x30, 0x03, 0x01, 0x01, 0x00};    // cA FALSE
-    static constexpr u8 kBcCaTruePath2[] = {0x04, 0x08, 0x30, 0x06, 0x01, 0x01, 0xFF, //
-                                            0x02, 0x01, 0x02};                        // + pathLen 2
-    // extnValue OCTET STRING { KeyUsage BIT STRING }
-    static constexpr u8 kKuCertSign[] = {0x04, 0x04, 0x03, 0x02, 0x02, 0x04};       // keyCertSign
-    static constexpr u8 kKuDigitalSigOnly[] = {0x04, 0x04, 0x03, 0x02, 0x07, 0x80}; // digitalSignature
+    constexpr u32 kVectorCount = sizeof(kExtPolicyVectors) / sizeof(kExtPolicyVectors[0]);
+    // The row index is packed into the low nibble of the failure code, so a
+    // 17th vector would alias onto the next code band.
+    static_assert(kVectorCount <= 16, "widen the ExtensionPolicyChecks failure codes");
 
-    // basicConstraints ABSENT: the fail-closed default must not be an issuer.
-    ParsedCert absent{};
-    if (IsUsableIssuer(absent, 0))
-        return 0xF5'40u;
+    // Fail-closed default: a cert with NO extensions at all is not an issuer.
+    ParsedCert none{};
+    if (IsUsableIssuer(none, 0))
+        return 0xF5'60u;
 
-    // Empty SEQUENCE == "cA FALSE" (DER omits DEFAULT values).
-    ParsedCert c{};
-    if (!DecodeExtnFixture(kBcEmpty, sizeof(kBcEmpty), &c, DecodeBasicConstraints))
-        return 0xF5'41u;
-    if (!c.bc_present || c.bc_is_ca || IsUsableIssuer(c, 0))
-        return 0xF5'42u;
+    for (u32 i = 0; i < kVectorCount; ++i)
+    {
+        const ExtPolicyVector& v = kExtPolicyVectors[i];
 
-    // Explicit cA FALSE.
-    c = ParsedCert{};
-    if (!DecodeExtnFixture(kBcCaFalse, sizeof(kBcCaFalse), &c, DecodeBasicConstraints))
-        return 0xF5'43u;
-    if (c.bc_is_ca || IsUsableIssuer(c, 0))
-        return 0xF5'44u;
+        // The vector itself must read back as one exactly-filling SEQUENCE;
+        // if it does not, the vector is wrong, not the code under test.
+        Element seq{};
+        if (!ReadExact(v.der, v.len, kTagSequence, &seq))
+            return 0xF5'70u | i;
 
-    // cA TRUE, no pathLenConstraint -> usable at any depth.
-    c = ParsedCert{};
-    if (!DecodeExtnFixture(kBcCaTrue, sizeof(kBcCaTrue), &c, DecodeBasicConstraints))
-        return 0xF5'45u;
-    if (!c.bc_is_ca || c.bc_path_len_present || !IsUsableIssuer(c, 0) || !IsUsableIssuer(c, 5))
-        return 0xF5'46u;
-
-    // cA TRUE + pathLen 2 -> usable with <= 2 certs below, not 3.
-    c = ParsedCert{};
-    if (!DecodeExtnFixture(kBcCaTruePath2, sizeof(kBcCaTruePath2), &c, DecodeBasicConstraints))
-        return 0xF5'47u;
-    if (!c.bc_path_len_present || c.bc_path_len != 2)
-        return 0xF5'48u;
-    if (!IsUsableIssuer(c, 2) || IsUsableIssuer(c, 3))
-        return 0xF5'49u;
-
-    // keyUsage present WITHOUT keyCertSign vetoes a cA TRUE cert.
-    c = ParsedCert{};
-    if (!DecodeExtnFixture(kBcCaTrue, sizeof(kBcCaTrue), &c, DecodeBasicConstraints) ||
-        !DecodeExtnFixture(kKuDigitalSigOnly, sizeof(kKuDigitalSigOnly), &c, DecodeKeyUsage))
-        return 0xF5'4Au;
-    if (!c.ku_present || c.ku_key_cert_sign || IsUsableIssuer(c, 0))
-        return 0xF5'4Bu;
-
-    // keyUsage WITH keyCertSign keeps a cA TRUE cert usable.
-    c = ParsedCert{};
-    if (!DecodeExtnFixture(kBcCaTrue, sizeof(kBcCaTrue), &c, DecodeBasicConstraints) ||
-        !DecodeExtnFixture(kKuCertSign, sizeof(kKuCertSign), &c, DecodeKeyUsage))
-        return 0xF5'4Cu;
-    if (!c.ku_key_cert_sign || !IsUsableIssuer(c, 0))
-        return 0xF5'4Du;
-
-    // A DUPLICATE basicConstraints (RFC 5280 §4.2 forbids it) must not
-    // let the later copy win: cA FALSE then cA TRUE stays not-an-issuer.
-    c = ParsedCert{};
-    if (!DecodeExtnFixture(kBcCaFalse, sizeof(kBcCaFalse), &c, DecodeBasicConstraints) ||
-        !DecodeExtnFixture(kBcCaTrue, sizeof(kBcCaTrue), &c, DecodeBasicConstraints))
-        return 0xF5'4Eu;
-    if (c.bc_is_ca || IsUsableIssuer(c, 0))
-        return 0xF5'4Fu;
-
-    // Same for a duplicate keyUsage: keyCertSign then not-keyCertSign,
-    // and the reverse, both end up without keyCertSign.
-    c = ParsedCert{};
-    if (!DecodeExtnFixture(kBcCaTrue, sizeof(kBcCaTrue), &c, DecodeBasicConstraints) ||
-        !DecodeExtnFixture(kKuCertSign, sizeof(kKuCertSign), &c, DecodeKeyUsage) ||
-        !DecodeExtnFixture(kKuCertSign, sizeof(kKuCertSign), &c, DecodeKeyUsage))
-        return 0xF5'50u;
-    if (c.ku_key_cert_sign || IsUsableIssuer(c, 0))
-        return 0xF5'51u;
-
+        ParsedCert pc{};
+        const bool accepted = DecodeExtensionSeq(seq, &pc);
+        if (accepted != v.accept)
+            return 0xF5'80u | i;
+        // A rejected block must always be flagged, and a flagged cert must
+        // never be an issuer — the two halves of the fail-closed contract.
+        if (!accepted && !pc.ext_error)
+            return 0xF5'90u | i;
+        if (IsUsableIssuer(pc, 0) != v.issuer_at_0)
+            return 0xF5'A0u | i;
+        if (IsUsableIssuer(pc, 1) != v.issuer_at_1)
+            return 0xF5'B0u | i;
+    }
     return 0;
 }
 
@@ -2154,9 +2369,23 @@ void X509VerifySelfTest()
             return;
         }
         // The CA fixtures are CA:TRUE + keyUsage keyCertSign -> issuers.
+        // This is the "normal valid CA chain" half of the gate: the same
+        // strict parser that rejects the malformed shapes below must still
+        // accept an ordinary, correctly-encoded CA.
         if (!IsUsableIssuer(inter_pc, 0) || !IsUsableIssuer(root_pc, 0))
         {
             SelfTestFail("pos-ca-issuer", 0xF5'18u);
+            return;
+        }
+        // Each fixture's extension block must have parsed cleanly, with
+        // basicConstraints and keyUsage both SEEN and VALID — a silent
+        // "seen but undecodable" would otherwise satisfy the checks above
+        // by accident on the negative fixtures.
+        if (leaf_pc.ext_error || inter_pc.ext_error || root_pc.ext_error || ec_leaf_pc.ext_error ||
+            !(inter_pc.bc_seen && inter_pc.bc_valid && inter_pc.ku_seen && inter_pc.ku_valid) ||
+            !(leaf_pc.bc_seen && leaf_pc.bc_valid))
+        {
+            SelfTestFail("fixture-ext-state", 0xF5'1Au);
             return;
         }
         // kFixtureInterDer is pathlen:0 — it may issue the leaf (0 certs
@@ -2168,12 +2397,15 @@ void X509VerifySelfTest()
         }
     }
 
-    // --- NEGATIVE 5b: the basicConstraints / keyUsage decoders themselves,
-    // over hand-built DER (empty SEQUENCE, cA FALSE, pathLen, keyUsage
-    // without keyCertSign). See IssuerConstraintDecodeChecks.
-    if (const u32 code = IssuerConstraintDecodeChecks(); code != 0)
+    // --- NEGATIVE 5b: the extension-block policy itself — duplicate
+    // extensions (including when the FIRST copy is the malformed one),
+    // extnValue trailing bytes, a truncated inner SEQUENCE, a BER BOOLEAN,
+    // a non-minimal pathLenConstraint, and an unrecognised CRITICAL
+    // extension all reject the certificate; an unknown NON-critical
+    // extension does not. See ExtensionPolicyChecks.
+    if (const u32 code = ExtensionPolicyChecks(); code != 0)
     {
-        SelfTestFail("issuer-constraint-decode", code);
+        SelfTestFail("extension-policy", code);
         return;
     }
 
@@ -2267,7 +2499,8 @@ void X509VerifySelfTest()
     arch::SerialWrite("[x509-verify-selftest] PASS (sig=sha256WithRSA + "
                       "ecdsa-with-SHA256/SHA384 [P-256/P-384], chain<=2, "
                       "SAN+CN+wildcard, validity-window, basicConstraints+keyUsage "
-                      "issuer gate; RSA 3 pos / 8 neg, "
+                      "issuer gate, exact-DER + duplicate-extension + "
+                      "unknown-critical rejection; RSA 3 pos / 9 neg, "
                       "ECDSA 2 pos / 4 neg + ");
     arch::SerialWrite(nbuf);
     arch::SerialWrite(" real roots [6 RSA incl 1 RSA-4096 + 2 ECDSA] parsed; 1 RSA + 1 ECDSA self-verified)\n");
