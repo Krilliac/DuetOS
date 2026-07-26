@@ -31,12 +31,16 @@ def require_xmm_unwind(source: str, label: str, helper: str) -> None:
     )
     require(
         re.search(
-            rf"op == 9.*?\*\(const unsigned int\*\)&codes\[i \+ 1\].*?{helper}\(ContextRecord, \(int\)info,",
+            rf"op == 9.*?duet_pe_u32\(&codes\[i \+ 1\]\).*?{helper}\(ContextRecord, \(int\)info,",
             source,
             re.DOTALL,
         )
         is not None,
-        f"{label}: UWOP_SAVE_XMM128_FAR must restore the unscaled 32-bit slot",
+        f"{label}: UWOP_SAVE_XMM128_FAR must byte-decode the unscaled 32-bit slot",
+    )
+    require(
+        "*(const unsigned int*)&codes[i + 1]" not in source,
+        f"{label}: far unwind operands must not use unaligned aliasing loads",
     )
 
 
@@ -285,6 +289,7 @@ def main() -> int:
         "primary froff differs from secondary",
         "zero characteristics fail closed",
         "non-executable fails closed",
+        "SAVE_XMM128_FAR XMM8",
     ):
         require(token in bounds_test, f"synthetic malformed/boundary coverage missing {token}")
     require(
