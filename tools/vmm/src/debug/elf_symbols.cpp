@@ -38,6 +38,18 @@ struct Sym64
 #pragma pack(pop)
 
 constexpr uint32_t SHT_SYMTAB = 2;
+constexpr uint32_t SHT_STRTAB = 3;
+
+// True iff [off, off+len) lies inside a `size`-byte buffer.
+//
+// Every offset/length pair below comes straight out of the ELF and is
+// therefore attacker-controlled, so the test is written as a SUBTRACTION
+// against `size` rather than the natural `off + len > size`: the latter
+// wraps for a hostile off/len and silently reports "in range".
+bool InFile(uint64_t off, uint64_t len, size_t size)
+{
+    return off <= size && len <= static_cast<uint64_t>(size) - off;
+}
 } // namespace
 
 bool ElfSymbols::Load(const std::string& elfPath)
@@ -53,12 +65,23 @@ bool ElfSymbols::Load(const std::string& elfPath)
     if (std::memcmp(eh.ident, "\x7F"
                               "ELF",
                     4) != 0 ||
-        eh.shentsize != sizeof(Shdr))
+        static_cast<size_t>(eh.shentsize) != sizeof(Shdr))
     {
         return false;
     }
 
-    auto shdr = [&](uint16_t i) {
+    // The WHOLE section-header table must lie inside the file before any
+    // shdr() call indexes into it — e_shoff is unvalidated input. (An
+    // e_shnum of 0 means "the real count lives in section 0's sh_size";
+    // the kernel ELF never has >65280 sections, so declining is safe and
+    // just degrades to address-only introspection.)
+    if (eh.shnum == 0 ||
+        !InFile(eh.shoff, uint64_t(eh.shnum) * eh.shentsize, b.size()))
+    {
+        return false;
+    }
+
+    auto shdr = [&](uint16_t i) { // safe for i < eh.shnum
         Shdr s;
         std::memcpy(&s, b.data() + eh.shoff + uint64_t(i) * eh.shentsize,
                     sizeof(s));
@@ -72,9 +95,22 @@ bool ElfSymbols::Load(const std::string& elfPath)
         {
             continue;
         }
-        Shdr str = shdr(static_cast<uint16_t>(s.link)); // .strtab
+        // A malformed symtab is SKIPPED rather than fatal: a partially
+        // parsable ELF should still yield whatever symbols it does hold.
+        if (s.link >= static_cast<uint32_t>(eh.shnum) ||
+            !InFile(s.offset, s.size, b.size()))
+        {
+            continue;
+        }
+        const Shdr str = shdr(static_cast<uint16_t>(s.link)); // .strtab
+        if (str.type != SHT_STRTAB ||
+            !InFile(str.offset, str.size, b.size()))
+        {
+            continue;
+        }
         const char* strtab =
             reinterpret_cast<const char*>(b.data() + str.offset);
+        const uint64_t strBytes = str.size;
         const uint64_t n = s.size / sizeof(Sym64);
         for (uint64_t k = 0; k < n; ++k)
         {
@@ -87,8 +123,24 @@ bool ElfSymbols::Load(const std::string& elfPath)
             {
                 continue;
             }
+            if (sy.name >= strBytes)
+            {
+                continue; // name offset outside .strtab
+            }
+            // .strtab is not guaranteed NUL-terminated, so the name ends
+            // at the first NUL OR at the end of the section — whichever
+            // comes first. A bare std::string(const char*) here would
+            // scan past the mapping looking for a zero byte.
+            const char*    p      = strtab + sy.name;
+            const uint64_t maxLen = strBytes - sy.name;
+            uint64_t       len    = 0;
+            while (len < maxLen && p[len] != '\0')
+            {
+                ++len;
+            }
             m_syms.push_back(
-                {std::string(strtab + sy.name), sy.value, sy.size});
+                {std::string(p, static_cast<size_t>(len)), sy.value,
+                 sy.size});
         }
     }
 
