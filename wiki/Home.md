@@ -93,7 +93,7 @@ DuetOS is licensed under the terms in [`LICENSE`](../LICENSE).
 | DLL exports (approx) | 0 |
 | Test files | 83 |
 | STUB markers | 48 |
-| GAP markers | 202 |
+| GAP markers | 204 |
 | Wiki pages | 130 |
 | *Last synced* | *2026-07-26 15:28* |
 <!-- /AUTO:stats -->
