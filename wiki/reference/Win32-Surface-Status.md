@@ -2830,6 +2830,33 @@ implementations:
   `GetModuleHandleW`/`LoadLibraryA`/`LoadLibraryW`. With this
   surface a static-CRT PE32 clears heap/TLS/locale/SEH-directory
   init and reaches its own application code.
+- `kernel32_32` **heap / timing / module resolution were calling the
+  wrong syscalls entirely** until 2026-07-26. Six literals across the
+  32-bit and 64-bit kernel32 named one syscall in a comment and called
+  another:
+
+  | export | called | which is | now |
+  |---|---|---|---|
+  | `Sleep` | 11 | `SYS_HEAP_ALLOC` | `SYS_SLEEP_MS` 19 |
+  | `GetTickCount` | 70 | `SYS_WIN_GET_RECT` | `SYS_PERF_COUNTER` 13 |
+  | `HeapAlloc` | 71 | `SYS_WIN_SET_TEXT` | `SYS_HEAPEX_ALLOC` 194 |
+  | `HeapFree` | 72 | `SYS_WIN_TIMER_SET` | `SYS_HEAPEX_FREE` 195 |
+  | `GetProcAddress` | 80 | `SYS_WIN_SET_CAPTURE` | `SYS_DLL_PROC_ADDRESS` 57 |
+  | `CreateWaitableTimerW` (64-bit) | 33 | `SYS_EVENT_WAIT` | `SYS_EVENT_CREATE` 30 |
+
+  None failed loudly — `Sleep` returned instantly while leaking an
+  `ms`-byte allocation per call, `GetTickCount` returned a status flag
+  rather than a time, and `GetProcAddress` returned a captured-window
+  handle cast to `FARPROC`. `GetProcessHeap` also returned a made-up
+  `0x12340000` sentinel that `Win32HeapResolveHandle` rejects; it
+  returns `0x50000000` now, matching the 64-bit sibling. The heap uses
+  the handle-aware **HEAPEX** family (194-197), not the legacy
+  `SYS_HEAP_ALLOC`/`FREE` pair, because only HEAPEX carries the heap
+  handle the static MSVC CRT allocates through. `HeapSize` (was a
+  hardcoded 0) and `HeapReAlloc` (allocated fresh and **did not copy**,
+  silently losing data on every CRT realloc) are real now too.
+
+  Guarded by `tools/test/check-syscall-numbers.py` — see below.
 - `kernel32_32` **file I/O is REAL** (added 2026-07-26, the next
   rung after CRT startup — an application that reaches its own
   code opens its own data files). `userland/libs/kernel32_32/`
@@ -2874,7 +2901,18 @@ and a read on the closed handle fails, which is what pins the
 `[ring3-pe32-rich] FAIL kernel32-fileio` plus a `step=NN` line
 naming the assertion, and the PE-compat verdict scanner counts it.
 
-Static check: `python3 tools/test/check-dll-def-exports.py`
+Static checks (both run on any host, no cross-toolchain needed):
+
+`python3 tools/test/check-syscall-numbers.py` parses the syscall enum
+and verifies every literal in `userland/libs` that NAMES the syscall it
+means, plus every `SYS_FOO = N` assertion in those sources. Against the
+pre-2026-07-26 tree it reports 10 errors covering 7 of the 8 known
+historical instances; against the current tree, 0. It deliberately does
+not flag bare `SYS_FOO` mentions — prose legitimately names wildcards
+(`SYS_WIN_*`) and syscalls that do not exist yet by design — and it
+checks the number, not the argument registers.
+
+`python3 tools/test/check-dll-def-exports.py`
 cross-checks every `userland/libs/*/*.def` against the definitions
 beside it, so an export added without an implementation — or an
 implementation that never reaches the export table — is caught on

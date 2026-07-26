@@ -12199,3 +12199,58 @@ markers for its richest input. Three discovery layers were added (runtime
   SKIP rather than guessing at them — a checker that emits false
   failures gets ignored, which is worse than one with a stated blind
   spot.
+
+## 2026-07-26 — Wrong syscall numbers are a class, not accidents: check them
+
+- **Context:** the 2026-06-17 `GetModuleHandleA` fix and the 2026-07-26
+  `CloseHandle` fix were each treated as a one-off. A systematic sweep
+  of all 381 syscall literals in `userland/libs` found **six more**,
+  five of them in `kernel32_32.c` alone: `Sleep`(11=`SYS_HEAP_ALLOC`),
+  `GetTickCount`(70=`SYS_WIN_GET_RECT`),
+  `HeapAlloc`(71=`SYS_WIN_SET_TEXT`),
+  `HeapFree`(72=`SYS_WIN_TIMER_SET`),
+  `GetProcAddress`(80=`SYS_WIN_SET_CAPTURE`), and 64-bit
+  `CreateWaitableTimerW`(33=`SYS_EVENT_WAIT`). Eight instances is a
+  class. The literals are unreviewable by eye and uncheckable by the
+  compiler, and none of them fail loudly — each silently performs an
+  unrelated kernel operation.
+- **Decision — make the comment load-bearing and check it.**
+  `tools/test/check-syscall-numbers.py` parses the enum from
+  `kernel/syscall/syscall.h` and validates (a) every call site that
+  names its syscall on the call line, and (b) every `SYS_FOO = N`
+  assertion anywhere in `userland/libs`. Naming your syscall is what
+  buys the call site coverage. **Rules out** relying on review to catch
+  these, and rules out a looser "flag any `SYS_*` name not in the enum"
+  sweep: that produced 20+ false positives on a clean tree, because
+  prose legitimately names wildcards (`SYS_WIN_*`) and syscalls that do
+  not exist yet by design (`// GAP: needs SYS_FILE_TRUNCATE`). A check
+  that cries wolf gets ignored, which is worse than one with a stated
+  blind spot. The stated blind spots: bare literals with no named
+  intent, and argument *registers* — a right-number/wrong-register call
+  (see the `vulkan_1.c` and `iphlpapi.c` entries in the Roadmap) is
+  still review-only.
+- **Decision — 32-bit heap goes through HEAPEX, not the legacy pair.**
+  Correcting `HeapAlloc`/`HeapFree` to the obvious
+  `SYS_HEAP_ALLOC`(11)/`SYS_HEAP_FREE`(12) would still have been wrong:
+  that pair takes `rdi = size` with no heap handle, so it cannot honour
+  the `HeapCreate` handle a static MSVC CRT allocates through. The
+  64-bit sibling uses the handle-aware `SYS_HEAPEX_*` family (194-197)
+  for exactly that reason. **The 64-bit thunk, not the plausible enum
+  name, is the reference** — this is the second time in two slices that
+  reading the sibling implementation changed the answer.
+- **Decision — the heap handle is a VA, not an opaque cookie.**
+  `GetProcessHeap` returned a made-up `0x12340000` sentinel with a
+  comment asserting "the kernel doesn't key on this value". It does:
+  `Win32HeapResolveHandle` (`subsystems/win32/heap.cpp:366`) accepts
+  `proc->heap_base`, `0`, or `kWin32HeapVa`, and otherwise matches a
+  `HeapCreate`'d heap by `base_va`. Every HEAPEX call would have been
+  rejected even with the right number. It returns `0x50000000` now, as
+  the 64-bit `GetProcessHeap` does. **Rules out** treating Win32 handle
+  values in this subsystem as arbitrary tokens.
+- **GAP accepted:** 32-bit `HeapCreate` still aliases the process heap
+  rather than allocating a private arena via `SYS_HEAPEX_CREATE`(192),
+  so `HeapDestroy` cannot reclaim the CRT's allocations and two
+  `HeapCreate` callers share one arena. The handle value is now at
+  least one the kernel accepts. Wiring a real secondary heap needs
+  `HeapDestroy`(193) and the CRT teardown ordering checked — its own
+  slice.

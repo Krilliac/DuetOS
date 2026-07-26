@@ -921,6 +921,52 @@ fault→fix→re-run loop, `tools/test/run-exe.sh` + `peexec=`, using the
    import-coverage climb (USER32 window class → message loop). This is
    the long middle of the climb.
 
+   **The quiet loop is characterised (2026-07-26).** It is not a wait
+   the guest is stuck in — it is `user32_32` lying. Every export in
+   `userland/libs/user32_32/user32_32.c` and
+   `userland/libs/gdi32_32/gdi32_32.c` is a hand-written stub that
+   returns a constant; there are **zero syscalls in either file**
+   (928 lines, 0 matches for `int $0x80` / `duet_syscall` / `SYS_`).
+   So `CreateWindowExA` returns NULL, `RegisterClassA` discards
+   `lpfnWndProc` and returns a fake atom 1, and `PeekMessageA` /
+   `GetMessageA` return 0 forever. An app that reaches its own code
+   creates no window, receives no message, and spins — without ever
+   faulting. A present-but-lying export is worse than a missing one:
+   a missing import produces a debuggable `[win32-32miss]` sentinel,
+   this produces silence.
+
+   The 64-bit siblings are real and the kernel already has ~40 working
+   `SYS_WIN_*` / `SYS_GDI_*` handlers (58..100, 65-68/74-76), so this
+   is a **DLL-only port, no kernel slice needed**. Two traps for
+   whoever takes it:
+   - **`MSG` is 28 bytes on i386, and the kernel's wire struct is 32.**
+     `UserMsg` in `kernel/subsystems/win32/window_syscall.cpp` is
+     `{u64 hwnd; u32 message; u32 _pad; u64 wparam; u64 lparam;}` —
+     the first 32 bytes of the **x64** `MSG`. `CopyMsgToUser`
+     blind-writes all 32. A 32-bit `GetMessageA` that passes its
+     caller's real 28-byte `MSG*` straight through gets every field
+     misaligned **and writes 4 bytes past the end of the caller's
+     struct**. Pass a ≥32-byte scratch buffer and repack, the way the
+     64-bit `user32_zero_msg_tail` already does for its tail.
+   - **The WndProc callback needs no kernel mechanism.** The file
+     header of `window_syscall.cpp` claims "the kernel runs the
+     user-supplied WndProc by transferring control back to ring 3 with
+     a synthetic frame on the user stack." That is not what ships:
+     `user32.c:371-385` fetches the pointer with `SYS_WIN_GET_LONG`
+     and calls it in userland, in-process. A 32-bit port does the same
+     thing with a plain 32-bit indirect call. Stale comment; do not
+     build the mechanism it describes.
+
+   **Landed (2026-07-26):** six wrong syscall numbers in the kernel32
+   thunks — `Sleep`, `GetTickCount`, `HeapAlloc`, `HeapFree`,
+   `GetProcAddress` (32-bit) and `CreateWaitableTimerW` (64-bit) — each
+   naming one syscall while calling another, so each silently performed
+   an unrelated kernel operation. Plus `GetProcessHeap` returning a
+   sentinel the kernel rejects, and `HeapSize`/`HeapReAlloc` (which
+   lost the caller's data on every realloc). See Win32-Surface-Status
+   §11b and Design-Decisions. `tools/test/check-syscall-numbers.py`
+   now guards the class.
+
    **Landed (2026-07-26):** `kernel32_32` file I/O is real —
    `CreateFileA`/`W`, `ReadFile`, `WriteFile` on kernel file handles,
    `SetFilePointer`, `GetFileSize`/`Ex`, `GetFileAttributesA`/`W`,
@@ -948,6 +994,95 @@ fault→fix→re-run loop, `tools/test/run-exe.sh` + `peexec=`, using the
    or a software GL). The big rendering-subsystem expansion.
 4. **WSOCK32 / WININET** (realm/login networking) and **FMOD** audio —
    later rungs once it renders.
+
+### Win32 handle lifecycle — teardown + close-dispatch gaps (audited 2026-07-26)
+
+A read-only audit of the PE loader and Win32 handle lifecycle found one
+root shape with several symptoms: the handle **bands** are declared
+across `kernel/proc/process.h` and the per-type pool modules, but the
+two functions that must enumerate them all — `DoFileClose`
+(`kernel/subsystems/win32/file_syscall.cpp`) and `ProcessRelease`
+(`kernel/proc/process.cpp`) — each carry a hand-maintained list that has
+drifted behind the set. Verified against the code, not inferred.
+
+Ranked, with the security one first:
+
+1. **Section handles are never released at process teardown —
+   sandbox-reachable, system-wide.** `Section g_pool[kSectionPoolCap]`
+   (`subsystems/win32/section.cpp:20`) is a **file-scope global**, 8
+   slots shared by every process, and `SYS_SECTION_CREATE` has **no
+   entry in `cap_table.def`** — a zero-capability guest PE can call
+   `NtCreateSection`. `ProcessRelease` walks `kobj_handles` and
+   `win32_dirs[]` only; the sole `SectionRelease` caller is the
+   explicit-`CloseHandle` arm. Eight short-lived sandboxed spawns that
+   each create one section and exit therefore exhaust the pool **for
+   every process on the system until reboot**. This is the reviewable
+   signal from CLAUDE.md — a malicious PE doing something a native
+   DuetOS process could not. Fix: one release loop in `ProcessRelease`.
+2. **Job-object handles cannot be closed by any shipped DLL.**
+   `NtClose`/`CloseHandle` always issue syscall 22, and `DoFileClose`'s
+   band chain has **no arm for `kJobHandleBase` (0xC00..0xC07)**.
+   `SysJobClose` (168) has exactly one caller in the tree — the raw
+   dispatcher — and nothing in `userland/` ever issues 168. So the
+   spec-correct `NtCreateJobObject` → `NtAssignProcessToJobObject` →
+   `NtClose` sequence leaks 100% of the time, and the `ProcessRetain`
+   done at assign pins the target `Process` + its `AddressSpace`
+   forever. Fix: one arm in `DoFileClose`.
+3. **Local thread handles (0x400 band) are never freed** — same
+   `DoFileClose` gap; the chain jumps 0x300 → 0x500. The 9th
+   `CreateThread` in a process fails permanently no matter how
+   correctly the app closes its handles. Fix: one arm.
+4. **`win32_proc_handles[]` / `win32_foreign_threads[]` are not walked
+   at teardown**, so an app that exits without `CloseHandle` on an
+   `OpenProcess` result (normal — real Windows auto-closes) pins the
+   target `Process` + `AddressSpace` for the life of the kernel.
+   `kCapDebug`-gated. Fix: two loops in `ProcessRelease`.
+5. **Mutex ownership is not force-released when the owning task dies.**
+   Only the explicit-`CloseHandle`-while-holding path drops it, so a
+   worker killed while holding a mutex leaves `m->owner` a dead `Task*`
+   and any sibling thread blocks forever, with no `WAIT_ABANDONED`.
+   **Larger refactor** — needs per-task held-lock bookkeeping or a
+   task-death hook; the handle table stores type-erased `KObject*`.
+6. **`SpawnPeFile` leaks a `Process` on one error path.**
+   `spawn.cpp:1419` calls `AddressSpaceRelease(as)` after
+   `ProcessCreate` has already taken ownership of `as`; it should be
+   `ProcessRelease(proc)`. One line, OOM-gated.
+
+Because 1-4 are the same drift, the durable fix is not four more
+hand-edits: give the bands one enumeration both sites share, or add a
+static check that every declared `kWin32*Base` / `kJobHandleBase`
+appears in both — the same "convert the whitelist into a property test"
+move that `tools/test/check-syscall-numbers.py` makes for syscall
+literals. Note `kWin32VmapBase` / `kWin32ExtraHeapArenaBase` are VA
+bases, not handle bands, and must be excluded.
+
+Not audited, out of that audit's fence and still open: whether
+`mm::CopyFromUser`/`CopyToUser` validate a 32-bit process's range with
+no 64-bit canonical-address assumption baked in.
+
+### Other Win32 thunk defects found 2026-07-26 (not yet fixed)
+
+- **`vulkan_1.c` — 20 call sites pass their real argument in the wrong
+  register.** All use the correct multiplexed `SYS_VK_CALL` (211), but
+  the payload lands in `rsi` where `DoVkCall`
+  (`kernel/syscall/syscall_vk.cpp`) reads `rdx`. Worst cases:
+  `vkAllocateMemory` and `vkCreateBuffer` always request size 0;
+  `vkCmdClearColorImage` always clears to 0; `vkCreateComputePipelines`
+  loses the shader handle. `userland/libs/dx_vk.h` already carries a
+  developer warning that these are "latently misaligned". Two stale
+  `rsi = …` comments on `kVkOpGetStatsCounter` /
+  `kVkOpClearFramebufferRgba` in `syscall.h` contradict the kernel
+  implementation and are what misled the call sites. **Left alone
+  deliberately: adjacent to the concurrent graphics work.**
+- **`iphlpapi.c:52` — `GetAdaptersInfo` swaps two arguments.**
+  `iphlp_sock_op(13, 0, out, sizeof(*out))` puts `0` where the kernel
+  reads the output pointer and `out` where it reads a byte capacity, so
+  `CopyToUser(0, …)` fails and the adapter always reports `0.0.0.0`
+  even when DHCP succeeded.
+- Both are the *right number, wrong register* shape, which
+  `check-syscall-numbers.py` explicitly does not cover — it validates
+  numbers, not argument slots. An argument-contract checker would need
+  to parse the per-syscall register documentation out of `syscall.h`.
 
 ### Chrome tactility (Pass A) — residual polish + Pass A verification
 
