@@ -844,6 +844,7 @@ duetos_embed_blob(generated_kernel32_dll.h
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_fs.c"
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_psapi.c"
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/seh_capture.S"
+        "${CMAKE_SOURCE_DIR}/userland/libs/common/pe_unwind_bounds.h"
     COMMENT "Compiling + embedding kernel32.dll (split into per-domain TUs)")
 
 # 32-bit kernel32 companion — PE32 (i386) DLL, preloaded into PE32
@@ -914,6 +915,7 @@ duetos_embed_blob(generated_vcruntime140_dll.h
     EXTRA_DEPS
         "${CMAKE_SOURCE_DIR}/userland/libs/vcruntime140/chkstk.S"
         "${CMAKE_SOURCE_DIR}/userland/libs/vcruntime140/guard_icall.S"
+        "${CMAKE_SOURCE_DIR}/userland/libs/vcruntime140/cxx_throw.S"
         "${CMAKE_CURRENT_BINARY_DIR}/generated_ntdll_dll.h"
     COMMENT "Compiling + embedding vcruntime140.dll (C++ EH personality + memops; links ntdll.lib)")
 
@@ -935,6 +937,7 @@ duetos_embed_blob(generated_ntdll_dll.h
         "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll_facades.c"
         "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll_token.c"
         "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll_bulk.c"
+        "${CMAKE_SOURCE_DIR}/userland/libs/common/pe_unwind_bounds.h"
         "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/chkstk.S"
         "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/seh_trampolines.S"
         "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ki_user_dispatchers.S"
