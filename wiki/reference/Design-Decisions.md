@@ -11937,21 +11937,201 @@ markers for its richest input. Three discovery layers were added (runtime
   *authority*, and the two are independent. It also rules out treating a
   missing basicConstraints as permissive (the RFC 5280 §4.2.1.9 default for
   cA is FALSE, and a v1 cert that omits the extension is not a CA).
-- **Deliberately NOT taken: the `critical` flag as an input.** DuetOS
-  honours basicConstraints and keyUsage whether or not they are marked
-  critical, and does not reject a certificate for carrying an unrecognised
-  critical extension (§6.1.4(f)). Honouring a non-critical basicConstraints
-  is the *safe* direction — it can only refuse an issuer, never admit one —
-  and one of our own EC fixtures ships a non-critical CA:FALSE, so keying
-  the decode on criticality would have created a real false-negative. Full
-  critical-extension processing is a separate slice and needs name
-  constraints / EKU first, or it just rejects real certificates.
+- **Criticality is not an input to the DECODE.** DuetOS honours
+  basicConstraints and keyUsage whether or not they are marked critical.
+  Honouring a non-critical basicConstraints is the *safe* direction — it
+  can only refuse an issuer, never admit one — and one of our own EC
+  fixtures ships a non-critical CA:FALSE, so keying the decode on
+  criticality would have created a real false-negative.
+  (**Superseded in part**: the companion entry below now *rejects* a
+  certificate carrying an unrecognised critical extension, per
+  §6.1.4(k). The decode still ignores the flag; the extension-block
+  policy does not.)
 - **Inert-by-design leg:** all ten embedded anchors already carry
   basicConstraints critical CA:TRUE + keyUsage keyCertSign, so gating the
   anchor changes nothing today. It ships anyway so a future mis-pasted
   anchor fails closed (and logs a SKIP) instead of anchoring silently.
 - **Duplicate extensions fail closed too.** RFC 5280 §4.2 forbids a
   second instance of an extension; rather than let the last copy win
-  (cA:FALSE then cA:TRUE), both decoders clear the permissive bit on a
-  duplicate. "Later copy wins" is precisely the ambiguity that turns two
-  disagreeing parsers into a bypass, and closing it costs nothing.
+  (cA:FALSE then cA:TRUE), a duplicate is refused. "Later copy wins" is
+  precisely the ambiguity that turns two disagreeing parsers into a
+  bypass, and closing it costs nothing. (The first implementation of
+  this cleared the permissive bit inside each value decoder, which had a
+  hole — see the entry below.)
+
+## 2026-07-26 — X.509: the extension block is validated as a whole, not per-field
+
+- **Context:** the issuer gate landed in the entry above was correct about
+  *what* basicConstraints and keyUsage mean, and wrong about *how* it read
+  them. Three defects, all in the same shape — a value that failed to parse
+  was indistinguishable from a value that was absent:
+  1. **Malformed-first duplicate.** `bc_present` was set only *after* the
+     value parsed. A first basicConstraints whose extnValue was garbage
+     left `bc_present == false`, so a *second*, well-formed `cA:TRUE` copy
+     was treated as a first occurrence and won. The duplicate rule the
+     entry above claims to enforce did not fire. The same held for
+     keyUsage, and for an extension whose `extnValue` OCTET STRING was
+     missing entirely (the old reader skipped that extension silently,
+     marking nothing).
+  2. **Truncated / trailing bytes accepted.** The decoders read the first
+     inner element and never checked it exactly filled `extnValue`. A
+     `SEQUENCE { BOOLEAN TRUE, <truncated TLV> }` set `bc_is_ca = true`,
+     *then* hit the parse error and returned — leaving the half-decoded
+     `cA:TRUE` standing. Appending bytes after a valid value was likewise
+     ignored, which is the classic "two parsers disagree" primitive.
+  3. **Unrecognised critical extensions ignored.** A critical
+     nameConstraints or policyConstraints was silently dropped.
+- **Decision — represent SEEN, VALID and VALUE as three separate facts,
+  mark an extension seen BEFORE parsing its value, and reject the whole
+  certificate when the extension block is ambiguous.** `ParsedCert` now
+  carries `bc_seen` / `bc_valid` / `bc_is_ca` (and the keyUsage triple),
+  and `ParseOne()` fails outright on `ext_error`. Rejecting in `ParseOne`
+  rather than only in `IsUsableIssuer` is the load-bearing part: a
+  rejected certificate never reaches `ok = true`, so it cannot be promoted
+  to an issuer by *any* caller, present or future.
+  - **Exact DER everywhere.** `ReadExact()` requires the inner element to
+    exactly fill its container; no decoder publishes to `ParsedCert` until
+    its whole value has validated. `Extension` must be exactly
+    `SEQUENCE { OID, [BOOLEAN], OCTET STRING }` with nothing after it.
+    BOOLEANs must be DER (`0x00`/`0xFF`, not BER's "any nonzero"),
+    pathLenConstraint must be non-negative and DER-minimal, and keyUsage's
+    unused trailing bits must be zero.
+  - **RFC 5280 §6.1.4(k) is now enforced**: an unrecognised *critical*
+    extension rejects the certificate. **Rules out** "ignore what we do
+    not implement" — a constraint the issuing CA marked critical is not
+    optional, and dropping it is how a nameConstraints-limited sub-CA gets
+    laundered into a general-purpose one. The cost is stated plainly: a
+    chain marking extendedKeyUsage (or anything else we do not decode)
+    critical will not connect until that extension is implemented. Widen
+    the recognised set by implementing an extension, never by ignoring it.
+    Verified safe for the shipped store first —
+    `tools/test/x509-embedded-extensions.py` shows all 14 embedded
+    certificates carry only basicConstraints/keyUsage as critical.
+- **A DEFAULT value must be omitted, never written out.** An explicit
+  `cA FALSE`, `critical FALSE`, or version v1 is refused (X.690 §11.5).
+  The first pass accepted these on interop grounds — "the encoding is
+  unambiguous either way" — which was the wrong test. It is not about
+  whether *we* can read it; it is that admitting a second spelling of
+  "absent" gives one certificate two encodings, which is the whole class
+  of defect this path exists to refuse. Checked against the shipped store
+  before enforcing: no embedded certificate writes a DEFAULT longhand.
+- **Testing shape: extension blobs, not signed certificates.** Every
+  input above is a *shape*, so `net/x509_ext_vectors.h` carries 15
+  hand-built `Extensions` blobs, each with the verdict it must produce,
+  generated and self-checked by `tools/test/gen-x509-ext-vectors.py`.
+  **Rules out** minting a signed fixture per case: those cost a keypair
+  each, expire, and would have made the negative cases too expensive to
+  keep exhaustive. The self-test asserts both halves of the contract —
+  a rejected blob is rejected *and* is not a usable issuer.
+
+## 2026-07-26 — X.509: one certificate, one encoding
+
+- **Context:** the extension-block policy above refused the right shapes
+  and still left a certificate with several valid spellings. Two
+  independent audits found ten defects, in three families:
+  1. **Encoding latitude.** The subtree used the permissive `asn1::Read`,
+     which accepts any length encoding that fits — `04 05 ...` and
+     `04 81 05 ...` were the same OCTET STRING to it. extnIDs were not
+     required to be canonical, so 2.5.29.19 could be spelled
+     `55 1D 80 13` and read by a bytewise duplicate check as a
+     *different* extension. Explicit `cA FALSE` / `critical FALSE` /
+     version v1 were accepted as second spellings of "absent".
+  2. **Structural latitude.** Duplicate detection covered only the three
+     decoded extensions; the TBS walk returned at the FIRST `[3]` block
+     and skipped every other tail field; an empty `Extensions` SEQUENCE
+     was accepted; extensions were honoured on v1/v2 certificates.
+  3. **A present-but-empty field reading as absent.** `HostMatches()`
+     gated the CN fallback on `san_count`, so a subjectAltName carrying
+     only non-dNSName entries left the count at zero and fell through to
+     matching the hostname against the CN.
+- **Decision — canonicalise, then compare.** DER is required to admit
+  exactly one encoding of any value, so the verifier requires it:
+  `ReadStrict()` (minimal lengths, no high-tag-number form) everywhere in
+  the extension subtree, `IsCanonicalOid()` on every extnID, and
+  `DerBooleanDefaultFalse()` in place of a general BOOLEAN reader.
+  **Rules out** "accept what we can unambiguously read" — the question is
+  not whether *this* parser can read it, but whether another parser could
+  read it differently. Canonical encoding is what earns the right to
+  compare extension identity by bytes.
+- **Validate the whole TBS tail, not just the field you want.** Skipping
+  every post-SPKI child except an exact `0xA3` looked like a shortcut and
+  was a hole: a PRIMITIVE `0x83` is a malformed extensions block, but the
+  walk stepped over it and the certificate parsed as having *no*
+  extensions — hence no subjectAltName, hence the CN fallback re-enabled.
+  A malformed field silently downgraded which name the certificate was
+  checked against. The tail is now exactly `issuerUniqueID [1]?,
+  subjectUniqueID [2]?, extensions [3]?` in order, each at most once,
+  with the version constraints of §4.1.2.8 / §4.1.2.9. **Rules out**
+  "parse forward to what you need and ignore the rest" for any structure
+  whose absence changes a security decision.
+- **SAN presence, not SAN population, suppresses the CN** (RFC 6125
+  §6.4.4). A subjectAltName that names no DNS host means "this
+  certificate names no DNS host" — a refusal, not a reason to consult the
+  CN. That raises the stakes on every SAN entry, so each `GeneralName` is
+  validated against its OWN content rules rather than recognised by tag:
+  non-empty 7-bit IA5 for `rfc822Name`/`dNSName`/`URI`, 4 or 16 octets
+  for `iPAddress`, a non-empty canonical OID for `registeredID`. The
+  structured alternatives (`otherName [0]`, `x400Address [3]`,
+  `directoryName [4]`, `ediPartyName [5]`) carry nested schemas this
+  layer does not implement and are **refused**, not skipped. **Rules
+  out** "recognise the tag, skip the content" — a reader that waves
+  through entries it cannot check can disagree with another about which
+  hosts a certificate names, and that disagreement now decides whether
+  the CN is consulted at all. The cost is a real interop limit: a chain
+  whose SAN carries a `directoryName` fails closed until its schema
+  lands.
+- **A tag is not a field.** `issuerUniqueID` / `subjectUniqueID` are
+  IMPLICIT-tagged BIT STRINGs, and were originally accepted on tag,
+  order and version alone — waving through a structure whose encoding
+  was never checked, inside a walk whose entire purpose is that every
+  byte of the tail is accounted for. Their BIT STRING content rules are
+  now enforced via `ValidBitStringContent`.
+- **A NAMED bit string is stricter than a bit string.** `keyUsage` is
+  one, so X.690 §11.2.2 forbids encoding its trailing zero bits — but it
+  had only the generic BIT STRING rules, which left `03 02 02 04`,
+  `03 02 00 04` and `03 03 00 04 00` all decoding to keyCertSign.
+  `ValidNamedBitStringContent` now requires a non-zero final octet and an
+  unused-bit count equal to that octet's trailing-zero count. **Rules
+  out** reusing one "valid BIT STRING" predicate for both kinds: the
+  named-bit-string minimality rule is exactly what collapses keyUsage to
+  a single spelling, and keyUsage is the field that decides whether a
+  certificate may sign other certificates.
+- **Generic duplicate detection, bounded.** Every extnID, via a 32-entry
+  table; a 33rd extension is refused rather than parsed with an
+  incomplete duplicate check. **Rules out** "nothing reads it, so a
+  repeat is harmless", which assumed this layer is the certificate's only
+  consumer and made the rule depend on which extensions we happen to
+  implement today.
+- **Generated test data is verified as generated.** `x509_ext_vectors.h`
+  is emitted by `tools/test/gen-x509-ext-vectors.py`, which self-checks
+  every vector's stated verdict against an independent mirror decoder
+  before writing; `tools/test/check-x509-ext-vectors.sh` then proves the
+  committed header reproduces byte-for-byte and is valid UTF-8 with LF
+  endings. That last check exists because the generator had been writing
+  through Windows' cp1252 stdout, leaving a lone `0x97` byte in a header
+  the kernel compiles. **Rules out** treating a generated expectation
+  file as ordinary source: a hand-edited expectation is worse than no
+  test, because it looks like coverage while asserting whatever the
+  editor wanted.
+- **Measured against the real web PKI, not just the fixtures.** The
+  strictness here only narrows what connects, so it was sampled against
+  live chains before integration: `x509-embedded-extensions.py --der`
+  accepted **10/10** certificates across the example.com, github.com and
+  www.google.com chains (2026-07-26) — evidence that canonical-DER, the
+  GeneralName content rules and the critical-extension refusal do not
+  reject ordinary public certificates. **This sample is compatibility
+  evidence, not an authority.** The standards and the fail-closed posture
+  decide what is accepted; a certificate that is invalid or
+  non-canonically encoded is rejected however widely its shape occurs in
+  the wild. What a rejection here earns is an *investigation* — is the
+  certificate genuinely malformed (rejection intended, keep it), or is
+  the rule stricter than the standard requires, or refusing a structure
+  we could validate instead (rule is wrong, fix it)? **Rules out** both
+  failure modes: treating the sample as a spec that forces acceptance,
+  and shipping strictness whose real-world cost was never measured.
+- **Testing shape:** 38 extension-block vectors + 19 whole-TBS vectors.
+  `SanSuppressionChecks()` asserts the SAN/CN rule through
+  `HostMatches()` rather than the `san_seen` flag, because the
+  requirement is "the CN is not consulted", not "the flag is set" — only
+  the latter was observable before. **Rules out** asserting on internal
+  state where the externally-visible behaviour is the contract.
