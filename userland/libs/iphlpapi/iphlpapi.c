@@ -37,19 +37,22 @@ typedef struct
 static long long iphlp_sock_op(long long op, long long a1, long long a2, long long a3)
 {
     long long rv;
-    __asm__ volatile("mov %4, %%r10\n\t"
+    __asm__ volatile("mov %[a3], %%r10\n\t"
                      "xor %%r8, %%r8\n\t"
                      "xor %%r9, %%r9\n\t"
                      "int $0x80"
                      : "=a"(rv)
-                     : "a"((long long)153), "D"(op), "S"(a1), "d"(a2), "r"(a3)
+                     : "a"((long long)153), "D"(op), "S"(a1), "d"(a2), [a3] "r"(a3)
                      : "r10", "r8", "r9", "memory");
     return rv;
 }
 
 static int iphlp_get_lease(IPHLP_LEASE* out)
 {
-    long long rv = iphlp_sock_op(13 /* kSockOpGetLease */, 0, (long long)out, (long long)sizeof(*out));
+    /* kSockOpGetLease: rsi = output buffer, rdx = capacity.
+     * Keep the unused third operand zero so the wrapper maps the
+     * documented ABI directly to a1/a2/a3. */
+    long long rv = iphlp_sock_op(13 /* kSockOpGetLease */, (long long)out, (long long)sizeof(*out), 0);
     return rv == 0 ? 1 : 0;
 }
 
