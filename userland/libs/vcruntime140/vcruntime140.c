@@ -177,6 +177,7 @@ __declspec(dllexport) unsigned long __C_specific_handler(void* ExceptionRecord, 
 #define EH_UNWINDING 0x02u
 #define EH_EXIT_UNWIND 0x04u
 #define EH_TARGET_UNWIND 0x20u
+#define HT_IS_REFERENCE 0x08u
 #define ExceptionContinueSearch 1L
 
 typedef unsigned int u32_;
@@ -299,12 +300,11 @@ typedef struct
 /* ntdll engine (imported — vcruntime140 links ntdll.lib). */
 extern void __attribute__((ms_abi)) RtlUnwindEx(void* TargetFrame, void* TargetIp, void* Rec, void* RetVal, void* Ctx,
                                                 void* Hist);
-extern void __attribute__((ms_abi)) RtlCaptureContext(void* Ctx);
 extern long __attribute__((ms_abi)) NtRaiseException(void* Rec, void* Ctx, int FirstChance);
 extern void* __attribute__((ms_abi)) RtlLookupFunctionEntry(u64_ Pc, u64_* ImageBase, void* Hist);
 
-/* CONTEXT.Rip is at offset 0xF8 (kernel seh_dispatch.cpp layout). */
-#define CXX_CONTEXT_SIZE 1232u
+/* Canonical Windows x64 CONTEXT offset, shared with cxx_throw.S,
+ * ntdll/seh_trampolines.S, and kernel seh_dispatch.cpp. */
 #define CXX_CONTEXT_RIP_OFF 0xF8u
 
 static int cxx_streq(const char* a, const char* b)
@@ -450,12 +450,13 @@ static long __attribute__((ms_abi)) cxx_frame_handler(CXX_EXCEPTION_RECORD* rec,
     const cxx_function_descr* d = (const cxx_function_descr*)(image_base + *(u32_*)disp->HandlerData);
     const int cur_state = cxx_state_from_ip(image_base, d, disp->ControlPc);
 
-    if (rec->ExceptionFlags & (EH_UNWINDING | EH_EXIT_UNWIND))
+    const int is_unwinding = (rec->ExceptionFlags & (EH_UNWINDING | EH_EXIT_UNWIND)) != 0;
+    const int is_target_unwind = (rec->ExceptionFlags & EH_TARGET_UNWIND) != 0;
+    if (is_unwinding && !is_target_unwind)
     {
-        /* Pass 2: run this frame's destructors (down to -1 unless
-         * this is the catch's target frame, handled in the search
-         * frame below). */
-        if (!(rec->ExceptionFlags & EH_TARGET_UNWIND) && d->unwind_count != 0)
+        /* Pass 2, crossed frame: run every cleanup before the
+         * selected catch body is entered at the target frame. */
+        if (d->unwind_count != 0)
             cxx_local_unwind(image_base, d, frame, cur_state, -1);
         return ExceptionContinueSearch;
     }
@@ -482,12 +483,28 @@ static long __attribute__((ms_abi)) cxx_frame_handler(CXX_EXCEPTION_RECORD* rec,
             if (ct == (const catchable_type*)0)
                 continue;
 
-            /* Found the handler. Place the catch object (by ref /
-             * pointer / trivial copy — copy-ctor is a GAP). */
+            if (!is_target_unwind)
+            {
+                /* Search pass only selects the target. RtlUnwindEx
+                 * revisits this personality with TARGET_UNWIND after
+                 * every crossed frame has run its cleanup funclets. */
+                RtlUnwindEx((void*)frame, (void*)0, (void*)rec, thrown_obj, ctx, disp->HistoryTable);
+                return ExceptionContinueSearch;
+            }
+
+            /* Found the handler. Binding kind comes from HandlerType
+             * adjectives, not CatchableType properties:
+             * HT_IsReference says the catch variable is a reference,
+             * while CT_IsSimpleType only describes the thrown type.
+             * Confusing them swaps `catch (int)` and `catch (T&)`. */
             if (cb->disp_catch_obj != 0)
             {
                 void** slot = (void**)(frame + (u32_)cb->disp_catch_obj);
-                if (cb->type_info != 0 && ct->size != 0 && ct->copy_ctor == 0 && (ct->properties & 1) == 0)
+                if ((cb->adjectives & HT_IS_REFERENCE) != 0)
+                {
+                    *slot = thrown_obj;
+                }
+                else if (cb->type_info != 0 && ct->size != 0 && ct->copy_ctor == 0)
                 {
                     /* by value, trivially copyable */
                     unsigned char* dstb = (unsigned char*)slot;
@@ -497,13 +514,14 @@ static long __attribute__((ms_abi)) cxx_frame_handler(CXX_EXCEPTION_RECORD* rec,
                 }
                 else
                 {
-                    *slot = thrown_obj; /* by reference / pointer */
+                    /* Non-trivial by-value construction remains a
+                     * bounded GAP until copy-ctor funclets are wired. */
+                    *slot = thrown_obj;
                 }
             }
 
-            /* Unwind inner frames (between the throw site and this
-             * establisher) running their destructors, then this
-             * frame's dtors down to the try, then enter the catch. */
+            /* Crossed frames are already unwound. Unwind the target
+             * frame down to the selected try, then enter the catch. */
             cxx_local_unwind(image_base, d, frame, cur_state, tb[t].start_level - 1);
 
             void* funclet = (void*)(image_base + (u32_)cb->handler);
@@ -575,11 +593,10 @@ static long __attribute__((ms_abi)) cxx_frame_handler(CXX_EXCEPTION_RECORD* rec,
                 cxxeh_dbg_emit(buf);
             }
 
-            /* Resume after the try/catch: unwind everything down to
-             * (and including) the inner frames and continue at the
-             * address the catch funclet returned. */
-            RtlUnwindEx((void*)frame, cont, (void*)rec, thrown_obj, ctx, (void*)0);
-            /* RtlUnwindEx does not return. */
+            /* Hand the catch continuation back to RtlUnwindEx. It
+             * owns the final restore from the now-fully-unwound
+             * CONTEXT and will not return to this personality. */
+            disp->TargetIp = (u64_)cont;
             return ExceptionContinueSearch;
         }
     }
@@ -602,35 +619,34 @@ __declspec(dllexport) long __attribute__((ms_abi)) __CxxFrameHandler4(void* Exce
                              (CXX_DISPATCHER_CONTEXT*)DispatcherContext);
 }
 
-__declspec(dllexport) SEH_NORETURN void _CxxThrowException(void* object, const void* throwInfo)
+/* The exported assembly entry captures a complete, aligned caller
+ * CONTEXT before any compiler prologue can perturb register state,
+ * then calls this core.  The core remains externally visible only
+ * for that assembly reference; _CxxThrowException is the DLL export. */
+SEH_NORETURN void __attribute__((ms_abi)) _CxxThrowExceptionImpl(void* object, const void* throwInfo,
+                                                                 unsigned char* caller_context)
 {
     /* Image base the throw_info RVAs are relative to = the module
-     * that issued the throw (same module as throwInfo). Derive it
-     * from our return address via the ntdll lookup. */
+     * that owns throwInfo. RtlLookupFunctionEntry sets ImageBase
+     * from the containing image even when that address has no
+     * individual runtime-function entry. */
     u64_ image_base = 0;
-    (void)RtlLookupFunctionEntry((u64_)__builtin_return_address(0), &image_base, (void*)0);
+    (void)RtlLookupFunctionEntry((u64_)throwInfo, &image_base, (void*)0);
+    const u64_ caller_rip = *(const u64_*)(caller_context + CXX_CONTEXT_RIP_OFF);
 
     CXX_EXCEPTION_RECORD rec;
     for (unsigned i = 0; i < sizeof(rec); ++i)
         ((unsigned char*)&rec)[i] = 0;
     rec.ExceptionCode = CXX_EXCEPTION;
     rec.ExceptionFlags = EH_NONCONTINUABLE;
-    rec.ExceptionAddress = (u64_)__builtin_return_address(0);
+    rec.ExceptionAddress = caller_rip;
     rec.NumberParameters = 4;
     rec.ExceptionInformation[0] = CXX_FRAME_MAGIC_VC8;
     rec.ExceptionInformation[1] = (u64_)object;
     rec.ExceptionInformation[2] = (u64_)throwInfo;
     rec.ExceptionInformation[3] = image_base;
 
-    unsigned char ctx[CXX_CONTEXT_SIZE];
-    for (unsigned i = 0; i < CXX_CONTEXT_SIZE; ++i)
-        ctx[i] = 0;
-    RtlCaptureContext(ctx);
-    /* Resume/address points at the throw site for the dispatcher's
-     * first frame lookup. */
-    *(u64_*)(ctx + CXX_CONTEXT_RIP_OFF) = (u64_)__builtin_return_address(0);
-
-    NtRaiseException(&rec, ctx, 1 /* first chance — enter dispatcher */);
+    NtRaiseException(&rec, caller_context, 1 /* first chance — enter dispatcher */);
     /* A handler transferred control and we never get here; if no
      * handler matched, NtRaiseException terminated the process. */
     DUET_USER_TRAP_UNREACHABLE();

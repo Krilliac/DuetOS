@@ -18,18 +18,10 @@
  * here unchanged.
  * ------------------------------------------------------------------ */
 
-/* CONTEXT GPR offsets by x64 unwind register number (RSP=4). */
-static const unsigned short k_ctx_gpr_off[16] = {0x78, 0x80, 0x88, 0x90, 0x98, 0xA0, 0xA8, 0xB0,
-                                                 0xB8, 0xC0, 0xC8, 0xD0, 0xD8, 0xE0, 0xE8, 0xF0};
 #define CTX_RSP 0x98
-#define CTX_RBP 0xA0
 #define CTX_RIP 0xF8
 #define CTX_RAX 0x78
 
-static unsigned long long* ctx_reg(void* c, int i)
-{
-    return (unsigned long long*)((unsigned char*)c + k_ctx_gpr_off[i & 15]);
-}
 static unsigned long long* ctx_rsp(void* c)
 {
     return (unsigned long long*)((unsigned char*)c + CTX_RSP);
@@ -57,7 +49,6 @@ static unsigned int* er_flags(void* r)
 
 #define UNW_FLAG_EHANDLER 0x01
 #define UNW_FLAG_UHANDLER 0x02
-#define UNW_FLAG_CHAININFO 0x04
 
 /* x64 IMAGE_RUNTIME_FUNCTION_ENTRY — three RVAs. */
 typedef struct
@@ -93,6 +84,9 @@ extern void* RtlLookupFunctionEntry(unsigned long long ControlPc, unsigned long 
 extern void* RtlVirtualUnwind(unsigned long HandlerType, unsigned long long ImageBase, unsigned long long ControlPc,
                               void* FunctionEntry, void* ContextRecord, void** HandlerData,
                               unsigned long long* EstablisherFrame, void* ContextPointers);
+extern unsigned char RtlpReadUnwindHandler(unsigned long long ImageBase, unsigned long long ControlPc,
+                                           void* FunctionEntry, void* ContextRecord, void** Handler, void** HandlerData,
+                                           unsigned long long* EstablisherFrame);
 
 /* RtlRestoreContext lives in seh_trampolines.S — see the comment
  * over RtlCaptureContext in ntdll_seh.c for the rationale on
@@ -102,47 +96,6 @@ __declspec(dllexport) __attribute__((noreturn)) void RtlRestoreContext(void* Con
 /* Forward decls. */
 __declspec(dllexport) void RtlUnwindEx(void* TargetFrame, void* TargetIp, void* ExceptionRecord, void* ReturnValue,
                                        void* ContextRecord, void* HistoryTable);
-
-/* Pull (handler-flags, language-handler-VA, handler-data-ptr,
- * establisher-frame) out of a function's UNWIND_INFO given the
- * per-frame context `c`. Returns the UNWIND_INFO flags; *handler
- * and *hdata are set only when an E/U handler is present (and the
- * function is not pure chain-info). */
-static unsigned char read_unwind_handler(unsigned long long ImageBase, RUNTIME_FUNCTION* rf, void* c, void** handler,
-                                         void** hdata, unsigned long long* establisher)
-{
-    const unsigned char* ui = (const unsigned char*)(ImageBase + rf->UnwindInfoAddress);
-    /* Chase chained info to the root for the flag/handler that
-     * actually applies; the frame register lives on the head. */
-    const unsigned char head_frreg = (unsigned char)(ui[3] & 0x0F);
-    const unsigned char head_froff = (unsigned char)(ui[3] >> 4);
-    if (head_frreg)
-        *establisher = *ctx_reg(c, (int)head_frreg) - (unsigned long long)head_froff * 16ULL;
-    else
-        *establisher = *ctx_rsp(c);
-
-    for (int guard = 0; guard < 32; ++guard)
-    {
-        const unsigned char flags = (unsigned char)(ui[0] >> 3);
-        const unsigned char count = ui[2];
-        const unsigned short* codes = (const unsigned short*)(ui + 4);
-        if (flags & UNW_FLAG_CHAININFO)
-        {
-            const RUNTIME_FUNCTION* next = (const RUNTIME_FUNCTION*)(codes + (unsigned)((count + 1) & ~1u));
-            ui = (const unsigned char*)(ImageBase + next->UnwindInfoAddress);
-            continue;
-        }
-        if (flags & (UNW_FLAG_EHANDLER | UNW_FLAG_UHANDLER))
-        {
-            const unsigned char* after = (const unsigned char*)(codes + (unsigned)((count + 1) & ~1u));
-            const unsigned int hrva = *(const unsigned int*)after;
-            *handler = (void*)(ImageBase + hrva);
-            *hdata = (void*)(after + 4);
-        }
-        return flags;
-    }
-    return 0;
-}
 
 /* Advance `c` one frame toward the caller. Handles the leaf case
  * (no .pdata: pop the return address) so the walk doesn't dead-end
@@ -251,7 +204,7 @@ __attribute__((noreturn)) void KiUserExceptionDispatcherImpl(void* ExceptionReco
     if (call_vectored(ExceptionRecord, ContextRecord))
         RtlRestoreContext(ContextRecord, ExceptionRecord); /* noreturn */
 
-    unsigned char work[1232];
+    unsigned char work[1232] __attribute__((aligned(16)));
     for (unsigned i = 0; i < 1232; ++i)
         work[i] = ((unsigned char*)ContextRecord)[i];
 
@@ -274,7 +227,7 @@ __attribute__((noreturn)) void KiUserExceptionDispatcherImpl(void* ExceptionReco
         void* handler = (void*)0;
         void* hdata = (void*)0;
         unsigned long long establisher = 0;
-        unsigned char flags = read_unwind_handler(ib, fe, work, &handler, &hdata, &establisher);
+        unsigned char flags = RtlpReadUnwindHandler(ib, pc, fe, work, &handler, &hdata, &establisher);
 
         if ((flags & UNW_FLAG_EHANDLER) && handler != (void*)0)
         {
@@ -326,7 +279,7 @@ __declspec(dllexport) void RtlUnwindEx(void* TargetFrame, void* TargetIp, void* 
                                        void* ContextRecord, void* HistoryTable)
 {
     (void)HistoryTable;
-    unsigned char c[1232];
+    unsigned char c[1232] __attribute__((aligned(16)));
     for (unsigned i = 0; i < 1232; ++i)
         c[i] = ((unsigned char*)ContextRecord)[i];
 
@@ -349,7 +302,7 @@ __declspec(dllexport) void RtlUnwindEx(void* TargetFrame, void* TargetIp, void* 
         void* handler = (void*)0;
         void* hdata = (void*)0;
         unsigned long long establisher = 0;
-        unsigned char flags = read_unwind_handler(ib, fe, c, &handler, &hdata, &establisher);
+        unsigned char flags = RtlpReadUnwindHandler(ib, pc, fe, c, &handler, &hdata, &establisher);
 
         const int is_target = (establisher == (unsigned long long)TargetFrame);
 
@@ -364,14 +317,16 @@ __declspec(dllexport) void RtlUnwindEx(void* TargetFrame, void* TargetIp, void* 
             dc.FunctionEntry = fe;
             dc.EstablisherFrame = establisher;
             dc.TargetIp = (unsigned long long)TargetIp;
-            dc.ContextRecord = ContextRecord;
+            dc.ContextRecord = c;
             dc.LanguageHandler = handler;
             dc.HandlerData = hdata;
             dc.HistoryTable = (void*)0;
             dc.ScopeIndex = 0;
             dc.Fill0 = 0;
             PEXCEPTION_ROUTINE lang = (PEXCEPTION_ROUTINE)handler;
-            lang(ExceptionRecord, (void*)establisher, ContextRecord, &dc);
+            lang(ExceptionRecord, (void*)establisher, c, &dc);
+            if (is_target)
+                TargetIp = (void*)dc.TargetIp;
             *er_flags(ExceptionRecord) = saved;
         }
 
@@ -382,46 +337,25 @@ __declspec(dllexport) void RtlUnwindEx(void* TargetFrame, void* TargetIp, void* 
             break;
     }
 
-    /* Resume in the target frame at TargetIp. Rebuild the resume
-     * context from the original fault context (registers the
-     * handler block expects) but with Rip = TargetIp and the
-     * unwound Rsp/Rbp of the target frame.
-     *
-     * Critical RSP adjustment: at the throw site, the fault
-     * ContextRecord has rsp pointing AT the return address that
-     * the (call _CxxThrowException) instruction pushed. The
-     * TargetIp lives in the same function as the throw site (a
-     * try/catch within one function), and resumes in the body —
-     * AFTER the throw call's stack effect should be undone.
-     *
-     * The body expects rsp = rsp_at_throw + 8 (the throw call's
-     * return-address slot consumed). Without this `+8`, the
-     * function's epilogue (`add rsp,N; pop rbp; ret`) lands the
-     * `pop rbp` over the saved-rbp's slot, and `ret` jumps to a
-     * value from the wrong stack location — manifesting as
-     * RIP=4 (or any low garbage) at the catch resume.
-     *
-     * For T6-05 fault #2's last leg, this is what restores
-     * cxxeh_pe's `test_int_throw` to a sensible body rsp after
-     * the catch funclet returns. Same pattern Wine + ReactOS use:
-     * after the unwind walk, the resume rsp is the body-rsp of
-     * the catching function, not the throw-site rsp. */
+    /* A target personality may determine its continuation during
+     * TARGET_UNWIND (C++ catch funclets do this after crossed-frame
+     * destructors run). A null continuation fails closed. */
+    if (TargetIp == (void*)0)
     {
-        unsigned char r[1232];
+        long long code = (long long)(*er_code(ExceptionRecord));
+        __asm__ volatile("int $0x80" : : "a"((long long)0), "D"(code) : "memory");
+        DUET_USER_TRAP_UNREACHABLE();
+    }
+
+    /* Resume in the target frame at TargetIp. `c` is the fully
+     * unwound register state and is authoritative for every GPR,
+     * FP/XMM register, flags field, and the target stack. Copy it
+     * wholesale, then apply only the two values RtlUnwindEx is
+     * specified to synthesize for the transfer. */
+    {
+        unsigned char r[1232] __attribute__((aligned(16)));
         for (unsigned i = 0; i < 1232; ++i)
-            r[i] = ((unsigned char*)ContextRecord)[i];
-        unsigned long long resume_rsp = *(unsigned long long*)((unsigned char*)c + CTX_RSP);
-        /* Undo the throwing call's return-address push. Strictly
-         * applies when the catch target is in the SAME function
-         * as the throw (the common case our FH3 personality
-         * generates today). Cross-function catches would need a
-         * full RtlVirtualUnwind to bring c->rsp from the throw
-         * site up past the throwing frame's prologue — not yet
-         * implemented; revisit when a cross-function catch
-         * workload demands it. */
-        resume_rsp += 8;
-        *(unsigned long long*)((unsigned char*)r + CTX_RSP) = resume_rsp;
-        *(unsigned long long*)((unsigned char*)r + CTX_RBP) = *(unsigned long long*)((unsigned char*)c + CTX_RBP);
+            r[i] = c[i];
         *(unsigned long long*)((unsigned char*)r + CTX_RIP) = (unsigned long long)TargetIp;
         *(unsigned long long*)((unsigned char*)r + CTX_RAX) = (unsigned long long)ReturnValue;
         RtlRestoreContext(r, ExceptionRecord);
@@ -433,7 +367,7 @@ __declspec(dllexport) void RtlUnwindEx(void* TargetFrame, void* TargetIp, void* 
  * captured context. */
 __declspec(dllexport) void RtlUnwind(void* TargetFrame, void* TargetIp, void* ExceptionRecord, void* ReturnValue)
 {
-    unsigned char ctx[1232];
+    unsigned char ctx[1232] __attribute__((aligned(16)));
     for (unsigned i = 0; i < 1232; ++i)
         ctx[i] = 0;
     extern void RtlCaptureContext(void* ContextRecord);
