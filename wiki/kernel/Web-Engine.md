@@ -243,10 +243,12 @@ live path.
   embedded **real** roots (incl. ISRG Root X1) — see
   `apps/browser.cpp::BrowserCertVerify`. Any certificate acting as an
   issuer must prove it is a CA (basicConstraints cA:TRUE + keyUsage
-  keyCertSign — see [TLS Roadmap](../networking/TLS-Roadmap.md)). GAP: no
-  CRL/OCSP revocation, no name constraints, no critical-extension
-  rejection, and the root set is a curated subset (sites chaining to any
-  other root fail closed).
+  keyCertSign — see [TLS Roadmap](../networking/TLS-Roadmap.md)), and a
+  certificate carrying an unrecognised **critical** extension is rejected
+  outright rather than having that constraint ignored. GAP: no CRL/OCSP
+  revocation, name constraints are not implemented (so a chain that marks
+  them critical fails closed instead of being honoured), and the root set
+  is a curated subset (sites chaining to any other root fail closed).
 
 Re-derive the live inventory with `git grep -nE "// (STUB|GAP):"
 kernel/web`.
