@@ -41,6 +41,15 @@ using duetos::crypto::asn1::Element;
 
 // SAN id-ce-subjectAltName = 2.5.29.17 -> DER body 0x55 0x1D 0x11.
 constexpr u8 kOidSubjectAltName[] = {0x55, 0x1D, 0x11};
+// id-ce-basicConstraints = 2.5.29.19 -> DER body 0x55 0x1D 0x13.
+constexpr u8 kOidBasicConstraints[] = {0x55, 0x1D, 0x13};
+// id-ce-keyUsage = 2.5.29.15 -> DER body 0x55 0x1D 0x0F.
+constexpr u8 kOidKeyUsage[] = {0x55, 0x1D, 0x0F};
+
+// ASN.1 BOOLEAN (universal 1, primitive). crypto::asn1 does not surface
+// this tag today; the only DuetOS consumer is the basicConstraints `cA`
+// field decoded below, so it lives here rather than widening asn1.h.
+constexpr u8 kDerTagBoolean = 0x01;
 
 // ECDSA OIDs (DER body bytes). The structural parser (crypto::x509)
 // only models RSA SPKI + RSA signature algorithms, so this layer
@@ -97,6 +106,22 @@ struct ParsedCert
     const u8* san_dns[kMaxSan]{};
     u32 san_dns_len[kMaxSan]{};
     u32 san_count = 0;
+
+    // basicConstraints (RFC 5280 §4.2.1.9). `bc_present` is false when
+    // the extension is absent, which — per IsUsableIssuer — means the
+    // cert may NOT sign other certificates. `bc_path_len_present` gates
+    // `bc_path_len` (pathLenConstraint is OPTIONAL and only meaningful
+    // when cA is TRUE).
+    bool bc_present = false;
+    bool bc_is_ca = false;
+    bool bc_path_len_present = false;
+    u32 bc_path_len = 0;
+
+    // keyUsage (RFC 5280 §4.2.1.3). `ku_present` is false when absent,
+    // in which case the extension places no restriction (§4.2.1.3: the
+    // constraint applies only when the extension is present).
+    bool ku_present = false;
+    bool ku_key_cert_sign = false;
 
     // notBefore / notAfter resolved to Unix seconds. kBadTime marks a
     // value that did not parse — any cert with a bad time fails closed.
@@ -191,14 +216,122 @@ bool ParseTime(const u8* v, u32 len, u8 tag, u64* out)
     return true;
 }
 
+// extnValue OCTET STRING of an Extension, skipping the optional
+// `critical BOOLEAN DEFAULT FALSE` that may sit between extnID and
+// extnValue. Returns false when the extension carries no OCTET STRING
+// (malformed) — callers then leave their parsed fields at the
+// fail-closed defaults.
+bool ExtnValue(const Element& ext, const Element& oid, Element* out)
+{
+    using namespace duetos::crypto::asn1;
+    u32 eo = oid.header_len + oid.len;
+    while (eo < ext.len)
+    {
+        Element fld{};
+        if (Read(ext.value + eo, ext.len - eo, &fld) != Status::Ok)
+            return false;
+        if (fld.tag == kTagOctetString)
+        {
+            *out = fld;
+            return true;
+        }
+        eo += fld.header_len + fld.len;
+    }
+    return false;
+}
+
+// subjectAltName ::= GeneralNames ::= SEQUENCE OF GeneralName. We keep
+// the dNSName entries ([2] context-primitive, tag 0x82) as slices.
+void DecodeSubjectAltName(const Element& extn_value, ParsedCert* pc)
+{
+    using namespace duetos::crypto::asn1;
+    Element gn_seq{};
+    if (Read(extn_value.value, extn_value.len, &gn_seq) != Status::Ok || gn_seq.tag != kTagSequence)
+        return;
+    u32 go = 0;
+    while (go < gn_seq.len && pc->san_count < ParsedCert::kMaxSan)
+    {
+        Element gn{};
+        if (Read(gn_seq.value + go, gn_seq.len - go, &gn) != Status::Ok)
+            return;
+        if (gn.tag == 0x82) // [2] dNSName (IA5String, primitive)
+        {
+            pc->san_dns[pc->san_count] = gn.value;
+            pc->san_dns_len[pc->san_count] = gn.len;
+            ++pc->san_count;
+        }
+        go += gn.header_len + gn.len;
+    }
+}
+
+// BasicConstraints ::= SEQUENCE { cA BOOLEAN DEFAULT FALSE,
+//                                 pathLenConstraint INTEGER (0..MAX) OPTIONAL }
+//
+// An empty SEQUENCE is the DER encoding of "cA = FALSE" (DEFAULT values
+// are omitted), so `bc_is_ca` stays false. A pathLenConstraint wider
+// than a u32, or negative, is treated as "not present" — the depth cap
+// in Verify() is the binding limit either way, and refusing to invent a
+// value keeps the decode honest.
+void DecodeBasicConstraints(const Element& extn_value, ParsedCert* pc)
+{
+    using namespace duetos::crypto::asn1;
+    Element seq{};
+    if (Read(extn_value.value, extn_value.len, &seq) != Status::Ok || seq.tag != kTagSequence)
+        return;
+    pc->bc_present = true;
+    u32 off = 0;
+    while (off < seq.len)
+    {
+        Element f{};
+        if (Read(seq.value + off, seq.len - off, &f) != Status::Ok)
+            return;
+        if (f.tag == kDerTagBoolean && f.len == 1)
+        {
+            pc->bc_is_ca = (f.value[0] != 0x00); // DER: TRUE is 0xFF
+        }
+        else if (f.tag == kTagInteger && f.len >= 1 && f.len <= 4 && (f.value[0] & 0x80) == 0)
+        {
+            u32 v = 0;
+            for (u32 i = 0; i < f.len; ++i)
+                v = (v << 8) | f.value[i];
+            pc->bc_path_len = v;
+            pc->bc_path_len_present = true;
+        }
+        off += f.header_len + f.len;
+    }
+}
+
+// KeyUsage ::= BIT STRING. Bit 5 (counting from the MSB of the first
+// data byte, RFC 5280 §4.2.1.3) is keyCertSign. The BIT STRING content
+// is [unused-bit-count][data...]; a BIT STRING short enough not to
+// reach bit 5 simply does not assert keyCertSign.
+void DecodeKeyUsage(const Element& extn_value, ParsedCert* pc)
+{
+    using namespace duetos::crypto::asn1;
+    Element bits{};
+    if (Read(extn_value.value, extn_value.len, &bits) != Status::Ok || bits.tag != kTagBitString || bits.len < 1)
+        return;
+    pc->ku_present = true;
+    const u8 unused = bits.value[0];
+    if (bits.len < 2 || unused > 7)
+        return; // no data bytes / malformed -> asserts nothing
+    // keyCertSign is bit 5 of the first data byte (0x80 >> 5 == 0x04).
+    // It is only meaningful if that bit is not one of the unused tail
+    // bits, which for a 1-byte BIT STRING means unused <= 2.
+    if (bits.len == 2 && unused > 2)
+        return;
+    pc->ku_key_cert_sign = (bits.value[1] & 0x04) != 0;
+}
+
 // Walk TBSCertificate to find the v3 extensions block ([3] EXPLICIT,
-// tag 0xA3) and, within it, the subjectAltName extension. Extracts the
-// dNSName ([2] context-primitive, tag 0x82) entries.
+// tag 0xA3) and decode the three extensions this layer needs:
+// subjectAltName (hostname match), basicConstraints and keyUsage (the
+// RFC 5280 §6.1.4 issuer constraints enforced by IsUsableIssuer).
 //
 // This re-walks the TBS rather than depending on crypto::x509 surfacing
 // extensions (it does not). Every step is bounds-checked against the
 // enclosing element so malformed/oversized lengths fail closed.
-void ParseSanFromTbs(const Element& tbs, ParsedCert* pc)
+void ParseExtensionsFromTbs(const Element& tbs, ParsedCert* pc)
 {
     using namespace duetos::crypto::asn1;
     if (tbs.tag != kTagSequence)
@@ -245,41 +378,16 @@ void ParseSanFromTbs(const Element& tbs, ParsedCert* pc)
                 // Extension ::= SEQUENCE { extnID OID, critical BOOLEAN
                 //               DEFAULT FALSE, extnValue OCTET STRING }
                 Element oid{};
+                Element extn_value{};
                 if (Read(ext.value, ext.len, &oid) == Status::Ok && oid.tag == kTagOid &&
-                    OidEquals(oid, kOidSubjectAltName, sizeof(kOidSubjectAltName)))
+                    ExtnValue(ext, oid, &extn_value))
                 {
-                    // Find the OCTET STRING (skip optional critical BOOLEAN).
-                    u32 eo = oid.header_len + oid.len;
-                    while (eo < ext.len)
-                    {
-                        Element fld{};
-                        if (Read(ext.value + eo, ext.len - eo, &fld) != Status::Ok)
-                            break;
-                        if (fld.tag == kTagOctetString)
-                        {
-                            // extnValue wraps GeneralNames ::= SEQUENCE OF GeneralName.
-                            Element gn_seq{};
-                            if (Read(fld.value, fld.len, &gn_seq) == Status::Ok && gn_seq.tag == kTagSequence)
-                            {
-                                u32 go = 0;
-                                while (go < gn_seq.len && pc->san_count < ParsedCert::kMaxSan)
-                                {
-                                    Element gn{};
-                                    if (Read(gn_seq.value + go, gn_seq.len - go, &gn) != Status::Ok)
-                                        break;
-                                    if (gn.tag == 0x82) // [2] dNSName (IA5String, primitive)
-                                    {
-                                        pc->san_dns[pc->san_count] = gn.value;
-                                        pc->san_dns_len[pc->san_count] = gn.len;
-                                        ++pc->san_count;
-                                    }
-                                    go += gn.header_len + gn.len;
-                                }
-                            }
-                            break;
-                        }
-                        eo += fld.header_len + fld.len;
-                    }
+                    if (OidEquals(oid, kOidSubjectAltName, sizeof(kOidSubjectAltName)))
+                        DecodeSubjectAltName(extn_value, pc);
+                    else if (OidEquals(oid, kOidBasicConstraints, sizeof(kOidBasicConstraints)))
+                        DecodeBasicConstraints(extn_value, pc);
+                    else if (OidEquals(oid, kOidKeyUsage, sizeof(kOidKeyUsage)))
+                        DecodeKeyUsage(extn_value, pc);
                 }
                 xo += ext.header_len + ext.len;
             }
@@ -469,7 +577,7 @@ bool ParseOne(const u8* der, u32 der_len, ParsedCert* pc)
         pc->subject_dn_len = subj.header_len + subj.len;
     }
 
-    ParseSanFromTbs(tbs, pc);
+    ParseExtensionsFromTbs(tbs, pc);
     // EC public key (if this is an ECDSA cert) and outer signature-algo
     // classification (RSA or one of the two ECDSA shapes).
     ParseEcSpki(tbs, pc);
@@ -710,6 +818,37 @@ bool HostMatches(const ParsedCert& leaf, const char* hostname)
     return false;
 }
 
+// RFC 5280 §6.1.4(n) + §6.1.3(a)(4): a certificate may be used to issue
+// ANOTHER certificate only when it is a CA certificate. Without this
+// check any end-entity certificate — one that any public CA will hand
+// to anyone who proves control of a single domain — can be presented as
+// an intermediate and used to mint a chain for an arbitrary hostname.
+// That is the classic "Basic Constraints" bypass (CVE-2002-0862 class),
+// and it is a total defeat of the HTTPS trust decision.
+//
+// `certs_below` is the number of non-self-issued certificates that
+// follow this one in the path (0 for the issuer of the leaf), which is
+// what pathLenConstraint bounds.
+//
+// Fail-closed shape:
+//   - basicConstraints ABSENT  -> not an issuer. RFC 5280 §4.2.1.9
+//     requires cA certificates to carry it; a cert without it (v1, or a
+//     plain end-entity) never signs another cert here.
+//   - cA = FALSE               -> not an issuer.
+//   - keyUsage present without keyCertSign -> not an issuer (§4.2.1.3).
+//     keyUsage ABSENT places no restriction, per the same section.
+//   - pathLenConstraint < certs_below -> not an issuer.
+bool IsUsableIssuer(const ParsedCert& c, u32 certs_below)
+{
+    if (!c.bc_present || !c.bc_is_ca)
+        return false;
+    if (c.ku_present && !c.ku_key_cert_sign)
+        return false;
+    if (c.bc_path_len_present && certs_below > c.bc_path_len)
+        return false;
+    return true;
+}
+
 bool WithinValidity(const ParsedCert& c, u64 now_unix)
 {
     if (c.not_before == ParsedCert::kBadTime || c.not_after == ParsedCert::kBadTime)
@@ -721,13 +860,15 @@ bool WithinValidity(const ParsedCert& c, u64 now_unix)
 
 // ---------------------------------------------------------------------------
 // Embedded trust store (defined below this function). Exposes:
-//   bool TrustAnchorVerifies(cert, now) — true iff `cert`'s signature
-//   verifies under some embedded root's public key AND that root is
-//   itself within its validity window at `now`.
+//   bool TrustAnchorVerifies(cert, now, certs_below) — true iff `cert`'s
+//   signature verifies under some embedded root's public key AND that
+//   root is itself within its validity window at `now` AND that root
+//   passes the RFC 5280 issuer constraints for a path carrying
+//   `certs_below` certificates beneath it.
 // ---------------------------------------------------------------------------
 namespace
 {
-bool TrustAnchorVerifies(const ParsedCert& cert, u64 now_unix);
+bool TrustAnchorVerifies(const ParsedCert& cert, u64 now_unix, u32 certs_below);
 } // namespace
 
 bool Verify(const u8* leaf_der, u32 leaf_len, const u8* const* chain_ders, const u32* chain_lens, u32 chain_count,
@@ -747,7 +888,8 @@ bool Verify(const u8* leaf_der, u32 leaf_len, const u8* const* chain_ders, const
     // Check 1+2: build leaf -> [intermediate] -> trusted root.
     //
     // Path A (depth 1): the leaf is signed directly by a trusted root.
-    if (TrustAnchorVerifies(leaf, now_unix))
+    // certs_below = 0: the leaf is the only certificate under the root.
+    if (TrustAnchorVerifies(leaf, now_unix, 0))
         return true; // root validity is enforced inside the store.
 
     // Path B (depth 2): the leaf is signed by a supplied intermediate
@@ -765,6 +907,12 @@ bool Verify(const u8* leaf_der, u32 leaf_len, const u8* const* chain_ders, const
         // The intermediate must carry a usable issuer key (RSA or EC).
         if (!inter.base.subject_rsa_present && !inter.ec_present)
             continue;
+        // ...and it must actually be a CA. Without this an end-entity
+        // cert (basicConstraints CA:FALSE) issued by any trusted root
+        // could mint a chain for any hostname — see IsUsableIssuer.
+        // certs_below = 0: the leaf is the only cert under it.
+        if (!IsUsableIssuer(inter, 0))
+            continue;
         if (!WithinValidity(inter, now_unix))
             continue;
         // The intermediate must sign the leaf (RSA or ECDSA, per leaf's
@@ -772,7 +920,8 @@ bool Verify(const u8* leaf_der, u32 leaf_len, const u8* const* chain_ders, const
         if (!IssuerSigns(leaf, inter))
             continue;
         // ...and the intermediate must chain to a trusted root.
-        if (TrustAnchorVerifies(inter, now_unix))
+        // certs_below = 1: the intermediate sits under the root.
+        if (TrustAnchorVerifies(inter, now_unix, 1))
             return true;
         // GAP: deeper chains (intermediate signed by another
         // intermediate) are not followed — depth-2 cap.
@@ -1618,7 +1767,7 @@ constexpr u32 CountRealRoots()
 }
 constexpr u32 kRealRootCount = CountRealRoots();
 
-bool TrustAnchorVerifies(const ParsedCert& cert, u64 now_unix)
+bool TrustAnchorVerifies(const ParsedCert& cert, u64 now_unix, u32 certs_below)
 {
     for (const TrustAnchor& anchor : kTrustStore)
     {
@@ -1626,6 +1775,12 @@ bool TrustAnchorVerifies(const ParsedCert& cert, u64 now_unix)
         if (!ParseOne(anchor.der, anchor.der_len, &root))
             continue;
         if (!root.base.subject_rsa_present && !root.ec_present)
+            continue;
+        // Same RFC 5280 §6.1.4 issuer rule as the intermediate leg. Every
+        // embedded anchor is basicConstraints CA:TRUE + keyUsage
+        // keyCertSign today, so this is inert — it exists so a future
+        // mis-pasted anchor fails closed instead of anchoring silently.
+        if (!IsUsableIssuer(root, certs_below))
             continue;
         // The root must itself be valid at `now` — an expired anchor
         // anchors nothing.
@@ -1687,6 +1842,17 @@ u32 ValidateAndSelfVerifyRealRoots(u32* out_total)
             continue;
         }
 
+        // A root that is not a CA (or forbids keyCertSign) can never
+        // anchor a chain — TrustAnchorVerifies rejects it. Say so at
+        // boot rather than letting it look present-but-inert.
+        if (!IsUsableIssuer(root, 1))
+        {
+            arch::SerialWrite("[x509-verify] SKIP non-CA / no-keyCertSign root: ");
+            arch::SerialWrite(anchor.name);
+            arch::SerialWrite("\n");
+            continue;
+        }
+
         // Pick this root as its family's self-verify representative only
         // if we have not yet proven that family. The rest are parse-only.
         const bool is_ec = root.ec_present;
@@ -1742,6 +1908,90 @@ void SelfTestFail(const char* label, u32 code)
     arch::SerialWrite(label);
     arch::SerialWrite(")\n");
     KBP_PROBE_V(duetos::debug::ProbeId::kBootSelftestFail, code);
+}
+
+// Decode a hand-built `extnValue` OCTET STRING TLV and hand the element
+// to `fn`. Returns false if the TLV itself does not read back — a bug in
+// the vector, not in the code under test.
+template <typename Fn> bool DecodeExtnFixture(const u8* tlv, u32 tlv_len, ParsedCert* pc, Fn fn)
+{
+    using namespace duetos::crypto::asn1;
+    Element e{};
+    if (Read(tlv, tlv_len, &e) != Status::Ok || e.tag != kTagOctetString)
+        return false;
+    fn(e, pc);
+    return true;
+}
+
+// Unit vectors for the RFC 5280 §4.2.1.9 / §4.2.1.3 decoders that back
+// IsUsableIssuer. Hand-built DER rather than whole certificates: these
+// pin the exact shapes an attacker controls (empty basicConstraints,
+// cA absent, a keyUsage that omits keyCertSign) without needing a
+// signing key per shape. Returns 0 on success, else a failure code.
+u32 IssuerConstraintDecodeChecks()
+{
+    // extnValue OCTET STRING { BasicConstraints SEQUENCE { ... } }
+    static constexpr u8 kBcEmpty[] = {0x04, 0x02, 0x30, 0x00};                        // cA DEFAULT FALSE
+    static constexpr u8 kBcCaTrue[] = {0x04, 0x05, 0x30, 0x03, 0x01, 0x01, 0xFF};     // cA TRUE
+    static constexpr u8 kBcCaFalse[] = {0x04, 0x05, 0x30, 0x03, 0x01, 0x01, 0x00};    // cA FALSE
+    static constexpr u8 kBcCaTruePath2[] = {0x04, 0x08, 0x30, 0x06, 0x01, 0x01, 0xFF, //
+                                            0x02, 0x01, 0x02};                        // + pathLen 2
+    // extnValue OCTET STRING { KeyUsage BIT STRING }
+    static constexpr u8 kKuCertSign[] = {0x04, 0x04, 0x03, 0x02, 0x02, 0x04};       // keyCertSign
+    static constexpr u8 kKuDigitalSigOnly[] = {0x04, 0x04, 0x03, 0x02, 0x07, 0x80}; // digitalSignature
+
+    // basicConstraints ABSENT: the fail-closed default must not be an issuer.
+    ParsedCert absent{};
+    if (IsUsableIssuer(absent, 0))
+        return 0xF5'40u;
+
+    // Empty SEQUENCE == "cA FALSE" (DER omits DEFAULT values).
+    ParsedCert c{};
+    if (!DecodeExtnFixture(kBcEmpty, sizeof(kBcEmpty), &c, DecodeBasicConstraints))
+        return 0xF5'41u;
+    if (!c.bc_present || c.bc_is_ca || IsUsableIssuer(c, 0))
+        return 0xF5'42u;
+
+    // Explicit cA FALSE.
+    c = ParsedCert{};
+    if (!DecodeExtnFixture(kBcCaFalse, sizeof(kBcCaFalse), &c, DecodeBasicConstraints))
+        return 0xF5'43u;
+    if (c.bc_is_ca || IsUsableIssuer(c, 0))
+        return 0xF5'44u;
+
+    // cA TRUE, no pathLenConstraint -> usable at any depth.
+    c = ParsedCert{};
+    if (!DecodeExtnFixture(kBcCaTrue, sizeof(kBcCaTrue), &c, DecodeBasicConstraints))
+        return 0xF5'45u;
+    if (!c.bc_is_ca || c.bc_path_len_present || !IsUsableIssuer(c, 0) || !IsUsableIssuer(c, 5))
+        return 0xF5'46u;
+
+    // cA TRUE + pathLen 2 -> usable with <= 2 certs below, not 3.
+    c = ParsedCert{};
+    if (!DecodeExtnFixture(kBcCaTruePath2, sizeof(kBcCaTruePath2), &c, DecodeBasicConstraints))
+        return 0xF5'47u;
+    if (!c.bc_path_len_present || c.bc_path_len != 2)
+        return 0xF5'48u;
+    if (!IsUsableIssuer(c, 2) || IsUsableIssuer(c, 3))
+        return 0xF5'49u;
+
+    // keyUsage present WITHOUT keyCertSign vetoes a cA TRUE cert.
+    c = ParsedCert{};
+    if (!DecodeExtnFixture(kBcCaTrue, sizeof(kBcCaTrue), &c, DecodeBasicConstraints) ||
+        !DecodeExtnFixture(kKuDigitalSigOnly, sizeof(kKuDigitalSigOnly), &c, DecodeKeyUsage))
+        return 0xF5'4Au;
+    if (!c.ku_present || c.ku_key_cert_sign || IsUsableIssuer(c, 0))
+        return 0xF5'4Bu;
+
+    // keyUsage WITH keyCertSign keeps a cA TRUE cert usable.
+    c = ParsedCert{};
+    if (!DecodeExtnFixture(kBcCaTrue, sizeof(kBcCaTrue), &c, DecodeBasicConstraints) ||
+        !DecodeExtnFixture(kKuCertSign, sizeof(kKuCertSign), &c, DecodeKeyUsage))
+        return 0xF5'4Cu;
+    if (!c.ku_key_cert_sign || !IsUsableIssuer(c, 0))
+        return 0xF5'4Du;
+
+    return 0;
 }
 
 } // namespace
@@ -1839,6 +2089,60 @@ void X509VerifySelfTest()
         return;
     }
 
+    // --- NEGATIVE 5 (basicConstraints, RFC 5280 §6.1.4(n)): a certificate
+    // that is not a CA must never be usable as an issuer. This is the
+    // attack primitive behind the classic Basic Constraints bypass: an
+    // attacker buys an ordinary leaf certificate, then signs a chain for
+    // someone else's hostname with its key and presents the leaf as the
+    // "intermediate". kFixtureLeafDer is exactly that shape — a real
+    // basicConstraints CA:FALSE end-entity cert, directly signed by a
+    // trusted root, so it clears every OTHER check in Verify(). The one
+    // thing that stops it is IsUsableIssuer.
+    {
+        ParsedCert leaf_pc{};
+        ParsedCert inter_pc{};
+        ParsedCert root_pc{};
+        ParsedCert ec_leaf_pc{};
+        if (!ParseOne(kFixtureLeafDer, leaf_len, &leaf_pc) ||
+            !ParseOne(kFixtureInterDer, static_cast<u32>(sizeof(kFixtureInterDer)), &inter_pc) ||
+            !ParseOne(kFixtureRootDer, static_cast<u32>(sizeof(kFixtureRootDer)), &root_pc) ||
+            !ParseOne(kEcFixtureLeafDer, static_cast<u32>(sizeof(kEcFixtureLeafDer)), &ec_leaf_pc))
+        {
+            SelfTestFail("bc-fixture-parse", 0xF5'16u);
+            return;
+        }
+        // The two end-entity fixtures are CA:FALSE (the EC one carries a
+        // NON-critical basicConstraints, so the decode must not depend on
+        // the critical flag) -> never issuers.
+        if (IsUsableIssuer(leaf_pc, 0) || IsUsableIssuer(ec_leaf_pc, 0))
+        {
+            SelfTestFail("neg-nonca-issuer", 0xF5'17u);
+            return;
+        }
+        // The CA fixtures are CA:TRUE + keyUsage keyCertSign -> issuers.
+        if (!IsUsableIssuer(inter_pc, 0) || !IsUsableIssuer(root_pc, 0))
+        {
+            SelfTestFail("pos-ca-issuer", 0xF5'18u);
+            return;
+        }
+        // kFixtureInterDer is pathlen:0 — it may issue the leaf (0 certs
+        // below it) but must not anchor a deeper path.
+        if (!inter_pc.bc_path_len_present || IsUsableIssuer(inter_pc, 1))
+        {
+            SelfTestFail("neg-pathlen", 0xF5'19u);
+            return;
+        }
+    }
+
+    // --- NEGATIVE 5b: the basicConstraints / keyUsage decoders themselves,
+    // over hand-built DER (empty SEQUENCE, cA FALSE, pathLen, keyUsage
+    // without keyCertSign). See IssuerConstraintDecodeChecks.
+    if (const u32 code = IssuerConstraintDecodeChecks(); code != 0)
+    {
+        SelfTestFail("issuer-constraint-decode", code);
+        return;
+    }
+
     // --- ECDSA POSITIVE: P-256 leaf -> P-256 ECDSA test root, in window.
     const u32 ec_leaf_len = static_cast<u32>(sizeof(kEcFixtureLeafDer));
     if (!Verify(kEcFixtureLeafDer, ec_leaf_len, nullptr, nullptr, 0, "ec.test.duetos.local", kNowInWindow))
@@ -1928,7 +2232,8 @@ void X509VerifySelfTest()
 
     arch::SerialWrite("[x509-verify-selftest] PASS (sig=sha256WithRSA + "
                       "ecdsa-with-SHA256/SHA384 [P-256/P-384], chain<=2, "
-                      "SAN+CN+wildcard, validity-window; RSA 3 pos / 6 neg, "
+                      "SAN+CN+wildcard, validity-window, basicConstraints+keyUsage "
+                      "issuer gate; RSA 3 pos / 8 neg, "
                       "ECDSA 2 pos / 4 neg + ");
     arch::SerialWrite(nbuf);
     arch::SerialWrite(" real roots [6 RSA incl 1 RSA-4096 + 2 ECDSA] parsed; 1 RSA + 1 ECDSA self-verified)\n");
