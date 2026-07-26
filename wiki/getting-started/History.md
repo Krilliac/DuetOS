@@ -1290,6 +1290,21 @@ a kernel aggregator taps `SYS_WRITE(fd=1)` and emits
 green, fuzzers multi-million execs clean, bringup + ring3 profile boots
 PASS with the aggregator observed live.
 
+## Phase 6.23 — Capability authority becomes race-safe and non-launderable (2026-07-26)
+
+Capability state moved from an unlocked spawn-only bitset to a
+Process-owned authority boundary: durable caps, generation-tagged
+temporary broker leases, and a monotonic grant ceiling are serialized
+under `Process::cap_lock`. Effective snapshots lazily expire overdue
+leases, and clockless systems refuse elevation rather than creating an
+unenforceable deadline. Win32 token disable/remove now translate into
+reversible live-bit clearing or permanent ceiling reduction, with
+IncreaseBasePriority mapped to the dedicated scheduler-priority cap.
+All native/Linux/Win32 spawn paths require the exact read+spawn pair;
+leases may authorize spawn but are never inherited as durable child
+authority. A hosted static gate prevents direct capability-storage
+access and spawn-mask drift.
+
 ## How to read the rest of the tree
 
 - `CLAUDE.md` — the authoritative project context, coding standards,

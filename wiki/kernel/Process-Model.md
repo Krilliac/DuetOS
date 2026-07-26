@@ -136,8 +136,8 @@ A process running with `CapSetEmpty` is bounded by **five orthogonal
 walls**:
 
 1. **Per-process address space** — private PML4, kernel half mirrored.
-2. **Capability-gated syscalls** — `Process::caps` checked at every
-   privileged surface.
+2. **Capability-gated syscalls** — the locked effective Process
+   capability snapshot is checked at every privileged surface.
 3. **VFS namespace jail** — `Process::root` rooted at a per-process
    subtree. `..` is rejected outright.
 4. **W^X enforcement** — `AddressSpaceMapUserPage` panics on

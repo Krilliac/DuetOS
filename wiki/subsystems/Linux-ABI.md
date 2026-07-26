@@ -72,8 +72,9 @@ cap-gated native DuetOS syscall — file writes through `kCapFsWrite`,
 thread creation through `kCapSpawnThread`, and so on. Linux
 credential calls (`setuid`, `setgid`, capabilities, `prctl`) are
 facades that satisfy the ABI shape; they do not grant or revoke
-kernel authority. The kernel's `Process::caps` is the source of
-truth. See [Subsystem Isolation](../kernel/Subsystem-Isolation.md)
+kernel authority. The kernel's locked effective Process capability
+snapshot is the source of truth. See
+[Subsystem Isolation](../kernel/Subsystem-Isolation.md)
 and [Capabilities](../security/Capabilities.md).
 
 **Cross-process signal delivery is cap-gated.** `LinuxSignalDeliver`

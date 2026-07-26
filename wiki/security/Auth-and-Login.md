@@ -151,9 +151,9 @@ to a `kCap*` mask. The built-in bundles:
 
 | Role | Caps |
 |------|------|
-| **root** | all caps; `kCapNetAdmin` flagged `no_cache` so grace doesn't suppress prompts |
+| **root** | all caps; short 30-second sensitive lease on `kCapNetAdmin` |
 | **developer** | `kCapFsRead`, `kCapFsWrite`, `kCapSpawnThread`, `kCapDebug`, `kCapSerialConsole`, `kCapInput`; 30-minute grace on `kCapFsWrite` |
-| **netop** | `kCapNet`, `kCapNetAdmin`, `kCapFsRead`; `no_cache` on `kCapNetAdmin` |
+| **netop** | `kCapNet`, `kCapNetAdmin`, `kCapFsRead`; short 30-second sensitive lease on `kCapNetAdmin` |
 | **auditor** | `kCapFsRead`, `kCapSerialConsole`, `kCapInput` |
 | **sandbox** | none; explicit deny — for processes spawned into a hard sandbox |
 
@@ -166,22 +166,26 @@ discussion and how to add a new role.
 ## Elevation and Grace Cache
 
 The broker ([`broker.h`](../../kernel/security/broker.h)) handles
-"this process needs cap X but doesn't currently hold it":
+"this process explicitly requests cap X but doesn't currently hold it":
 
-1. The kernel sees a cap-gate denial in a syscall path.
-2. The broker is invoked with `(pid, cap)`. The grace cache
-   ([`grace.h`](../../kernel/security/grace.h)) is consulted first; if
-   `(pid, cap)` is present and the deadline hasn't expired, the cap is
-   granted silently and the syscall retried.
-3. On a cache miss, the broker prompts the user for the account
+1. A trusted shell command or mapped Win32 token-enable request invokes
+   the broker with `(Process*, cap)`. Ordinary syscall denials never
+   open an ambient prompt or retry themselves.
+2. The broker first checks the Process ceiling and effective snapshot.
+   Live grace-cache metadata can re-publish only the original
+   generation-tagged Process lease and deadline.
+3. On a miss, the broker prompts the user for the account
    password (up to 3 attempts).
-4. On success, the cap is granted to the process and an entry is
-   added to the grace cache for the role's grace window (default 5
-   minutes; per-cap override available).
-5. On failure, the syscall returns `ErrorCode::Forbidden`.
+4. On success, a bounded lease is installed in the Process authority
+   state and prompt-suppression metadata is added for the role's grace
+   window (default 5 minutes; per-cap override available).
+5. On failure, the explicit elevation request reports the broker
+   outcome and later privileged syscalls remain denied.
 
-The grace cache is in-memory only — 64 slots, linear scan, evict
-earliest-deadline on full. Cleared on process exit.
+The grace cache is in-memory metadata only — 64 slots, linear scan,
+evict earliest-deadline on full. Expiry and eviction cannot revoke or
+extend authority; the Process lease deadline is authoritative. Process
+IDs are monotonic, so stale metadata cannot attach to a later process.
 
 Shell command: `elevate <cap>` prompts for elevation up-front (used
 when an operator wants to acquire the cap before running a sequence

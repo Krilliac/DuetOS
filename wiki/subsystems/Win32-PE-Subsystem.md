@@ -204,16 +204,19 @@ the Win32 front-end adds no parallel locking.
 
 ## Capability / Privilege Surface
 
-A PE binary has exactly the capabilities the kernel granted its
-`Process::caps` (`kCap*`) bitset — nothing the Win32 ABI shape
-implies. Every effect crosses a cap-gated syscall: a write needs
+A PE binary has exactly the effective capabilities in its locked
+Process authority snapshot — durable caps plus unexpired broker
+leases, bounded by its monotonic ceiling. Nothing the Win32 ABI shape
+implies grants authority. Every effect crosses a cap-gated syscall: a write needs
 `kCapFsWrite` (`SYS_FILE_WRITE`), a spawn needs `kCapSpawnThread`
 (`SYS_THREAD_CREATE`), and so on. The token / privilege handler
 (`token_syscall.cpp`) and the Win32 privilege APIs above it
 (`NtAdjustPrivilegesToken`, `SeDebugPrivilege`, integrity levels,
-ACLs) are a **probe-satisfying facade** — they return believable
-shapes so real PEs proceed, but they grant and revoke nothing.
-The kernel cap gates are the only authority. See
+ACLs) remain cosmetic except for the mapped
+`NtAdjustPrivilegesToken` path: mapped privilege enablement may request
+a bounded broker lease, disablement clears live authority, and
+`SE_PRIVILEGE_REMOVED` permanently lowers the Process ceiling. Kernel
+capability helpers and syscall gates remain the only authority. See
 [`security/Capabilities.md`](../security/Capabilities.md) and
 [Subsystem Isolation](../kernel/Subsystem-Isolation.md).
 

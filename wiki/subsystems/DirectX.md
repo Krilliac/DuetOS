@@ -226,8 +226,8 @@ system crosses a cap-gated syscall: back-buffer presentation goes
 through `SYS_GDI_BITBLT`, DirectInput through `SYS_WIN_GET_KEYSTATE`
 / `SYS_WIN_CURSOR`. A PE can only present to an HWND it legitimately
 owns, gated by the kernel's window-manager mediation — the D3D ABI
-adds no privilege the PE's `Process::caps` (`kCap*`) did not already
-grant. See [`security/Capabilities.md`](../security/Capabilities.md)
+adds no privilege beyond the PE's locked effective Process capability
+snapshot. See [`security/Capabilities.md`](../security/Capabilities.md)
 and [Subsystem Isolation](../kernel/Subsystem-Isolation.md).
 
 ## Known Limits / GAPs / STUBs

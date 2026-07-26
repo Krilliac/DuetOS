@@ -108,8 +108,9 @@ will list every imported `(dll, func)` pair.
 
 ### `[sys] denied syscall=SYS_FILE_WRITE pid=... cap=FsWrite`
 
-The PE asked to write a file, but its `Process::caps` doesn't have
-`kCapFsWrite`. Either grant the cap (for trusted binaries) or
+The PE asked to write a file, but its locked effective Process
+capability snapshot doesn't have `kCapFsWrite`. Either grant durable
+authority (for trusted binaries), obtain a bounded broker lease, or
 implement the read-only fallback (for sandboxed binaries).
 
 ## Network Failures

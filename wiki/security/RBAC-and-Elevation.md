@@ -30,9 +30,10 @@ Pre-existing — DO NOT confuse:
   `Guest` / `User` / `Admin`. Decided at login. The account row carries
   it. Determines who can *log in* and what their *baseline* shell
   command set is.
-- **`CapSet`** (`kernel/proc/process.h`) is a u64 bitmask on the
-  `Process` struct. The cap gate (`SyscallGate` /
-  `kSyscallCapTable`) reads it on every privileged syscall.
+- **Process capability authority** (`kernel/proc/process.{h,cpp}`)
+  combines durable `CapSet` bits, temporary broker leases, and a
+  monotonic ceiling. The cap gate reads an effective snapshot on every
+  privileged syscall.
 
 This slice adds:
 
@@ -45,7 +46,7 @@ This slice adds:
 | Concept     | Owned by               | Set when?            | Used for?                          |
 |-------------|------------------------|----------------------|------------------------------------|
 | `AuthRole`  | account row            | account create       | who can log in, baseline shell auth|
-| `CapSet`    | `Process` struct       | process spawn        | every privileged syscall           |
+| capability authority | `Process` struct | spawn + broker/voluntary drop | every privileged syscall |
 | `Role`      | global role table      | role registration    | broker: "which caps does X grant?" |
 
 ## Decisions (from the design discussion)
@@ -54,10 +55,11 @@ This slice adds:
    now; UX defaults to single-user (one account, no login prompt past
    first boot). Multi-user is a config flip. *Avoids the cost of
    retrofitting uid/role fields later.*
-2. **Grace cache:** per-process, 5 min default, **per-cap override**
-   in the role policy. `kCapNetAdmin = no_cache` is the canonical
-   "always reprompt" example; `kCapFsWrite = 30 min` is the
-   canonical "long grace" example.
+2. **Grace leases:** per-process, 5 min default, **per-cap override**
+   in role policy. The Process deadline is authoritative; the fixed
+   grace table stores prompt-suppression metadata only. A zero duration
+   cannot back ambient authority and fails closed with `NoLease`;
+   `kCapFsWrite = 30 min` is the canonical long-grace example.
 3. **CLI trusted path:** reuse `LoginFeedKey`. Add `LoginMode::Elevate`
    alongside `Tty` / `Gui` — kernel-trusted keystroke routing already
    exists, no new input path needed.
@@ -65,10 +67,11 @@ This slice adds:
    Same discipline as `LoginStart` (compositor lock + framebuffer
    primitives). No Secure Attention Key yet — reserved as future work
    when a real attack model demands it (see *Future work* below).
-5. **Win32 UAC mapping:** pure facade. `NtAdjustPrivilegesToken` etc.
-   return `STATUS_SUCCESS` and flip no real bit. The actual gate is
-   the `kCap` check the underlying syscall already runs, which now
-   calls the broker on miss. UAC consent dialog is cosmetic.
+5. **Win32 UAC mapping:** `NtAdjustPrivilegesToken` translates mapped
+   privileges into kernel operations. Disable clears live authority,
+   `SE_PRIVILEGE_REMOVED` permanently lowers the Process ceiling, and
+   enable-on-miss requests a positive-duration broker lease. ACL and
+   integrity-level probes remain cosmetic facades.
 6. **Password hashing:** Argon2id (memory-hard, 64 MiB / t=3 / p=1)
    alongside PBKDF2. New password sets use Argon2id; PBKDF2 records
    migrate lazily on next successful verify.
@@ -76,31 +79,26 @@ This slice adds:
    NO.** Only per-cap grace duration is overridable. Forever-allow
    is what a role grants by default, not a one-off knob.
 
-## Flow: cap miss → broker → grant
+## Flow: explicit elevation request → broker → lease
 
 ```
-SYS_FILE_WRITE
-  → SyscallGate(num, proc)             (kernel/syscall/cap_gate.cpp)
-     missing kCapFsWrite
-  → SyscallGate returns Err{PermissionDenied}
-     dispatcher does NOT bail yet — first calls:
-  → BrokerRequest(proc, kCapFsWrite)   (kernel/security/broker.cpp)
-     ├─ GraceCacheLookup(pid, kCapFsWrite)
-     │    hit  → return Granted
-     │    miss → fall through
-     ├─ RolePolicyAllows(account, kCapFsWrite)
-     │    no  → return Denied (role can't elevate to this cap)
-     │    yes → fall through
-     ├─ PromptForPassword(account, "SYS_FILE_WRITE")
-     │    LoginMode::Elevate — reuses LoginFeedKey
-     │    bad / cancel / timeout → return Denied
-     │    good → fall through
-     ├─ GraceCacheInsert(pid, kCapFsWrite, role_grace_for(cap))
-     ├─ EventRingPublish(BrokerElevationGranted, ...)
-     └─ return Granted
-  → if Granted: dispatcher proceeds to handler
-     if Denied:  dispatcher returns -1 (existing behaviour)
+shell `elevate FsWrite` or mapped Win32 token enable
+  → BrokerRequestElevation(proc, kCapFsWrite)
+     ├─ ceiling missing bit → CeilingDenied
+     ├─ effective Process snapshot already has bit → Granted
+     ├─ live cache row → re-publish its original Process lease
+     ├─ role policy denies → Denied
+     ├─ zero grace / no monotonic clock → NoLease
+     ├─ trusted password prompt fails → Cancelled / BadPassword
+     └─ prompt succeeds
+          ├─ install generation-tagged Process lease with absolute deadline
+          ├─ publish prompt-suppression cache metadata
+          └─ Granted
+  → next privileged syscall consumes ProcessCapsSnapshot
 ```
+
+An ordinary syscall denial does not open an ambient prompt. The caller
+must use an explicit trusted elevation surface first.
 
 ## What's wired up today (v0.1)
 
@@ -108,7 +106,7 @@ SYS_FILE_WRITE
 |----------------------------|----------------------------------------------------------------|
 | Broker prompt loop (TTY)   | REAL — reads from `Ps2KeyboardReadEvent` directly              |
 | Broker prompt loop (GUI)   | REAL — kernel-drawn modal under the compositor lock            |
-| Grace cache                | REAL — per-process, per-cap, role-policy lifetime              |
+| Grace leases              | REAL — Process deadline authority + metadata-only fixed cache   |
 | Role table + memberships   | REAL — in-memory; `admin`→`root`, `guest`→`sandbox` seeded     |
 | `elevate <cap>`            | REAL — single-cap prompt + grant                               |
 | `elevate role <name>`      | REAL — one prompt, grants every cap in the role bundle         |
@@ -135,9 +133,9 @@ when:
 
 1. The active session is `AuthRole::Admin` (admin holds every cap
    implicitly), OR
-2. The shell pseudo-process holds the specific `cap` via a live
-   grace-cache grant — i.e. the user ran `elevate <cap>` recently
-   AND the role they elevated under still grants the cap.
+2. The shell pseudo-process holds the specific `cap` in its effective
+   Process snapshot — i.e. the user ran `elevate <cap>` and its
+   positive-duration lease has not expired.
 
 A non-admin `netop` who runs `elevate NetAdmin` can now run
 `firewall` and `fwpolicy` (gated on `kCapNetAdmin`) without being
@@ -196,10 +194,11 @@ and the caller falls through to the legacy denial branch
 | `kernel/security/rbac.cpp`        | Built-in role definitions, lookup                 |
 | `kernel/security/broker.h`        | `BrokerRequest`, `BrokerOutcome`, prompt hooks    |
 | `kernel/security/broker.cpp`      | Cache + role check + prompt orchestration         |
-| `kernel/security/grace.h`         | `GraceCacheLookup` / `Insert` / `Expire`          |
-| `kernel/security/grace.cpp`       | Fixed-size `(pid,cap)→deadline` table             |
+| `kernel/security/grace.h`         | Metadata lookup / lease publish / metadata expiry |
+| `kernel/security/grace.cpp`       | Fixed-size prompt-suppression metadata table      |
+| `kernel/proc/process.{h,cpp}`      | Locked durable caps, leases, deadlines, ceiling   |
 | `kernel/security/login.{h,cpp}`   | **extended** with `LoginMode::Elevate`            |
-| `kernel/syscall/cap_gate.cpp`     | **extended** to call broker on denial             |
+| `kernel/syscall/cap_gate.cpp`     | Effective-snapshot syscall enforcement            |
 | `kernel/security/password_hash.*` | **extended** with Argon2id variant                |
 | `kernel/shell/shell_security.cpp` | **extended** with `elevate` / `roles` commands    |
 
@@ -207,9 +206,9 @@ and the caller falls through to the legacy denial branch
 
 | Role          | Cap bundle                                                       | Grace override            |
 |---------------|------------------------------------------------------------------|---------------------------|
-| `root`        | every `kCap*` bit                                                | `kCapNetAdmin = 0` (none) |
+| `root`        | every `kCap*` bit                                                | `kCapNetAdmin = 30 sec`   |
 | `developer`   | FsRead, FsWrite, SpawnThread, Debug, SerialConsole, Input        | `kCapFsWrite = 30 min`    |
-| `netop`       | Net, NetAdmin, FsRead                                            | `kCapNetAdmin = 0` (none) |
+| `netop`       | Net, NetAdmin, FsRead                                            | `kCapNetAdmin = 30 sec`   |
 | `auditor`     | FsRead, SerialConsole, Input                                     | default 5 min             |
 | `sandbox`     | none — explicit deny role for untrusted PEs                      | n/a                       |
 
@@ -217,6 +216,12 @@ The role table is in-memory v0; persistence is a follow-up tied to a
 writable system filesystem (see *Persistence* below). Adding a role
 at runtime: `RoleRegister(name, cap_mask, grace_overrides)` —
 admin-only via shell.
+
+`kCapNetAdmin` uses a deliberately short positive lease for the
+built-in `root` and `netop` roles. A zero-duration override is reserved
+for policies that intentionally deny ambient elevation; it cannot
+authorize even a momentary capability because the broker fails closed
+rather than publishing an immediately expired lease.
 
 ## Anti-spoofing — CLI v0
 
@@ -253,20 +258,20 @@ implementation has the seams to plug into.
 
 `userland/libs/ntdll/`:
 
-- `NtAdjustPrivilegesToken` — calls `BrokerRequest` for each requested
-  privilege that maps to a `kCap*`, returns `STATUS_SUCCESS` regardless
-  (probe-satisfying) but only adds the cap to the calling process's
-  `CapSet` when the broker granted it.
+- `NtAdjustPrivilegesToken` — maps supported LUIDs to `kCap*`. Disable
+  clears live durable/leased bits, `SE_PRIVILEGE_REMOVED` lowers the
+  monotonic ceiling, and enable-on-miss calls the broker. PreviousState
+  reports the pre-request effective snapshot.
 - `RtlAdjustPrivilege` — same.
-- `OpenProcessToken` / `LookupPrivilegeValue` — pure facade, no
+- `OpenProcessToken` / `LookupPrivilegeValue` — cosmetic facade, no
   broker call. They return believable handles; the actual gate fires
   at the next privileged NT syscall.
 
-A PE that calls `RequestExecutionState(...)` to "run as administrator"
-triggers a real broker prompt drawn by the broker (not the PE's UI),
-with the calling account's password. If granted, the PE inherits the
-elevated caps for the grace window only; once the cache entry expires,
-the next privileged syscall reprompts.
+A mapped token-enable request triggers a real broker prompt drawn by
+the broker (not the PE's UI), with the calling account's password. If
+granted, the calling Process receives a temporary lease. Cache eviction
+does not revoke it; the Process deadline does. Child processes inherit
+durable caps and the ceiling, never lease bits.
 
 ## Persistence
 
