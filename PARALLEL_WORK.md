@@ -19,3 +19,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Add distinguishable-argument FreeLibraryAndExitThread runtime coverage
 - **Claimed**: 2026-07-26T23:38:21Z
 - **Status**: IN PROGRESS
+
+### 🟢 kernel32-retirement-contract
+- **Session**: `Codex-thunk-wave1`
+- **Branch**: `claude/thunk-retirement-wave1`
+- **Files**: `userland/libs/kernel32/kernel32_internal.h`
+- **Description**: Declare cross-TU FreeLibrary contract for FreeLibraryAndExitThread
+- **Claimed**: 2026-07-26T23:48:15Z
+- **Status**: IN PROGRESS
