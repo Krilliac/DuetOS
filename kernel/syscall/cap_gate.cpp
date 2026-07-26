@@ -14,6 +14,7 @@
 #include "log/klog.h"
 #include "proc/process.h"
 #include "security/cap_audit.h"
+#include "time/timekeeper.h"
 #include "util/result.h"
 #include "util/types.h"
 
@@ -73,7 +74,7 @@ Result<void> SyscallGate(u64 syscall_number, const Process* proc)
         return {};
     }
 
-    const CapSet held = (proc != nullptr) ? proc->caps : CapSetEmpty();
+    const CapSet held = ProcessCapsSnapshot(proc);
     const bool allowed = ((held.bits & required) == required);
     const Cap missing = allowed ? kCapNone : FirstMissingCap(required, held);
 
@@ -113,8 +114,63 @@ void SyscallGateSelfTest()
     // stack — the struct is ~hundreds of bytes and growing.
     static Process empty{};
     static Process trusted{};
+    empty.cap_ceiling = CapSetEmpty();
+    trusted.cap_ceiling = CapSetTrusted();
     empty.caps = CapSetEmpty();
     trusted.caps = CapSetTrusted();
+    if (ProcessCapsGrant(&empty, kCapFsRead))
+        Panic("cap-gate", "empty-ceiling sandbox accepted a runtime grant");
+
+    const bool lease_clock_available = duetos::time::MonotonicNs() != 0;
+    if (lease_clock_available)
+    {
+        // Revoking a broker lease must not clobber a durable grant of the
+        // same bit, and a stale generation must not revoke a renewal.
+        static Process promoted{};
+        promoted.cap_ceiling = CapSetTrusted();
+        constexpr u64 kPromotionGeneration = 0xCA501;
+        if (!ProcessCapsGrantLease(&promoted, kCapFsRead, ~0ULL, kPromotionGeneration) ||
+            !ProcessCapsGrant(&promoted, kCapFsRead) ||
+            !ProcessCapsRevokeLease(&promoted, kCapFsRead, kPromotionGeneration) ||
+            !ProcessHasCap(&promoted, kCapFsRead))
+            Panic("cap-gate", "lease revocation clobbered durable authority");
+
+        static Process renewed{};
+        renewed.cap_ceiling = CapSetTrusted();
+        constexpr u64 kOldGeneration = 0xCA503;
+        constexpr u64 kNewGeneration = 0xCA504;
+        if (!ProcessCapsGrantLease(&renewed, kCapFsWrite, ~0ULL - 1, kOldGeneration) ||
+            !ProcessCapsGrantLease(&renewed, kCapFsWrite, ~0ULL, kNewGeneration))
+            Panic("cap-gate", "lease renewal setup failed");
+        if (ProcessCapsRevokeLease(&renewed, kCapFsWrite, kOldGeneration) || !ProcessHasCap(&renewed, kCapFsWrite))
+            Panic("cap-gate", "stale lease generation revoked a renewal");
+        if (!ProcessCapsRevokeLease(&renewed, kCapFsWrite, kNewGeneration) || ProcessHasCap(&renewed, kCapFsWrite))
+            Panic("cap-gate", "current lease generation did not revoke");
+        if (ProcessCapsGrantLease(&renewed, kCapFsWrite, duetos::time::MonotonicNs(), 0xCA505))
+            Panic("cap-gate", "expired lease grant was accepted");
+
+        static Process expiring{};
+        expiring.cap_ceiling = CapSetTrusted();
+        constexpr u64 kExpiringGeneration = 0xCA506;
+        const u64 lease_start = duetos::time::MonotonicNs();
+        const u64 lease_deadline = lease_start + 1000000ull;
+        if (lease_deadline <= lease_start ||
+            !ProcessCapsGrantLease(&expiring, kCapDebug, lease_deadline, kExpiringGeneration))
+            Panic("cap-gate", "lazy-expiry lease setup failed");
+        u32 expiry_spins = 0;
+        while (duetos::time::MonotonicNs() <= lease_deadline && expiry_spins < 1000000)
+            ++expiry_spins;
+        if (duetos::time::MonotonicNs() <= lease_deadline || ProcessHasCap(&expiring, kCapDebug) ||
+            ProcessCapsRevokeLease(&expiring, kCapDebug, kExpiringGeneration))
+            Panic("cap-gate", "effective snapshot did not lazily expire lease");
+    }
+    else
+    {
+        static Process clockless{};
+        clockless.cap_ceiling = CapSetTrusted();
+        if (ProcessCapsGrantLease(&clockless, kCapDebug, 1, 0xCA507))
+            Panic("cap-gate", "clockless lease grant did not fail closed");
+    }
 
     // Every row with a non-zero mask must fail with empty caps and
     // pass with trusted caps. A row with mask == 0 (shouldn't be in
@@ -148,6 +204,48 @@ void SyscallGateSelfTest()
             Panic("cap-gate", "denial returned wrong error code");
         }
     }
+
+    constexpr u64 kSpawnMask = (1ULL << static_cast<u32>(kCapFsRead)) | (1ULL << static_cast<u32>(kCapSpawnThread));
+    constexpr u64 kSpawnSyscalls[] = {SYS_SPAWN, SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX};
+    for (const u64 nr : kSpawnSyscalls)
+    {
+        if (RequiredCapMask(nr) != kSpawnMask)
+            Panic("cap-gate", "spawn row is not exactly FsRead|SpawnThread");
+    }
+
+    CapSet child_caps = CapSetEmpty();
+    CapSet child_ceiling = CapSetEmpty();
+    CapSet authority = CapSetEmpty();
+    empty.cap_ceiling = CapSetTrusted();
+
+    empty.caps = CapSet{1ULL << static_cast<u32>(kCapFsRead)};
+    if (ProcessCaptureSpawnAuthority(&empty, kSpawnMask, &child_caps, &child_ceiling, &authority) ||
+        child_caps.bits != (1ULL << static_cast<u32>(kCapFsRead)))
+        Panic("cap-gate", "FsRead-only spawn authority passed");
+
+    empty.caps = CapSet{1ULL << static_cast<u32>(kCapSpawnThread)};
+    if (ProcessCaptureSpawnAuthority(&empty, kSpawnMask, &child_caps, &child_ceiling, &authority) ||
+        child_caps.bits != (1ULL << static_cast<u32>(kCapSpawnThread)))
+        Panic("cap-gate", "SpawnThread-only spawn authority passed");
+
+    empty.caps = CapSet{kSpawnMask};
+    if (!ProcessCaptureSpawnAuthority(&empty, kSpawnMask, &child_caps, &child_ceiling, &authority) ||
+        child_caps.bits != kSpawnMask || child_ceiling.bits != CapSetTrusted().bits || authority.bits != kSpawnMask)
+        Panic("cap-gate", "exact two-bit spawn authority changed");
+
+    // A temporary lease may authorize spawn but must not become a
+    // durable child capability.
+    empty.caps = CapSet{1ULL << static_cast<u32>(kCapFsRead)};
+    constexpr u64 kSpawnLeaseGeneration = 0xCA502;
+    if (lease_clock_available)
+    {
+        if (!ProcessCapsGrantLease(&empty, kCapSpawnThread, ~0ULL, kSpawnLeaseGeneration) ||
+            !ProcessCaptureSpawnAuthority(&empty, kSpawnMask, &child_caps, &child_ceiling, &authority) ||
+            child_caps.bits != (1ULL << static_cast<u32>(kCapFsRead)) || authority.bits != kSpawnMask)
+            Panic("cap-gate", "spawn lease was rejected or laundered");
+        ProcessCapsRevokeLease(&empty, kCapSpawnThread, kSpawnLeaseGeneration);
+    }
+    empty.caps = CapSetEmpty();
 
     // Gate must be a no-op for an unknown syscall number. Use a
     // value past the current top of the SyscallNumber enum so we

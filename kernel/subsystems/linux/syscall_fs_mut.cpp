@@ -42,7 +42,7 @@ namespace duetos::subsystems::linux::internal
 // wiki/kernel/Subsystem-Isolation.md.
 static inline bool RequireFsWrite(core::Process* p)
 {
-    if (p == nullptr || !core::CapSetHas(p->caps, core::kCapFsWrite))
+    if (p == nullptr || !core::ProcessHasCap(p, core::kCapFsWrite))
     {
         core::RecordSandboxDenial(core::kCapFsWrite);
         return false;

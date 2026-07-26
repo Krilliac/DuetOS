@@ -54,7 +54,6 @@ bool TidIsSelfSentinel(u64 tid)
 
 void DoQueueUserApc(arch::TrapFrame* frame)
 {
-    using ::duetos::core::CapSetHas;
     using ::duetos::core::kCapSpawnThread;
     using ::duetos::core::Process;
 
@@ -64,7 +63,7 @@ void DoQueueUserApc(arch::TrapFrame* frame)
         frame->rax = kBadResult;
         return;
     }
-    if (!CapSetHas(caller->caps, kCapSpawnThread))
+    if (!core::ProcessHasCap(caller, kCapSpawnThread))
     {
         ::duetos::core::RecordSandboxDenial(kCapSpawnThread);
         frame->rax = kBadResult;

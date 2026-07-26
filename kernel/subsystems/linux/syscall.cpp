@@ -1297,7 +1297,7 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         // Reuse the outer-dispatch `proc`; the cap check needs no
         // mutation, just CapSetHas. Avoids shadowing the const
         // proc declared at the top of LinuxSyscallDispatch.
-        if (proc == nullptr || !duetos::core::CapSetHas(proc->caps, duetos::core::kCapNet))
+        if (proc == nullptr || !duetos::core::ProcessHasCap(proc, duetos::core::kCapNet))
         {
             duetos::core::RecordSandboxDenial(duetos::core::kCapNet);
             if (proc != nullptr && duetos::core::ShouldLogDenial(proc->sandbox_denials))

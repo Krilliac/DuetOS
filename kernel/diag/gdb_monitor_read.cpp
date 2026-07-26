@@ -116,14 +116,15 @@ void CmdCaps(u64 pid, MonitorWriter& out)
         NotFound("caps", pid, out);
         return;
     }
+    const core::CapSet caps = core::ProcessCapsSnapshot(p);
     out.Str("pid ");
     out.U64(pid);
     out.Str(" caps=0x");
-    out.Hex(p->caps.bits);
+    out.Hex(caps.bits);
     out.Str("\n");
     for (u32 c = 1; c < static_cast<u32>(core::kCapCount); ++c)
     {
-        const bool has = core::CapSetHas(p->caps, static_cast<core::Cap>(c));
+        const bool has = core::CapSetHas(caps, static_cast<core::Cap>(c));
         out.Str("  ");
         out.Str(has ? "[x] " : "[ ] ");
         if (c < (sizeof(kCapNames) / sizeof(kCapNames[0])))

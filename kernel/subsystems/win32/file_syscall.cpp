@@ -35,7 +35,7 @@ void DoFileOpen(arch::TrapFrame* frame)
     // Returns a Win32 pseudo-handle (kWin32HandleBase + slot_idx)
     // on success or u64(-1) on any failure.
     core::Process* proc = core::CurrentProcess();
-    if (proc == nullptr || !core::CapSetHas(proc->caps, core::kCapFsRead))
+    if (proc == nullptr || !core::ProcessHasCap(proc, core::kCapFsRead))
     {
         const u64 pid = (proc != nullptr) ? proc->pid : 0;
         core::RecordSandboxDenial(core::kCapFsRead);
@@ -495,7 +495,7 @@ void DoFileUnlink(arch::TrapFrame* frame)
     constexpr u64 kStatusAccessDenied = 0xC0000022ULL;
     constexpr u64 kStatusObjectNameNotFound = 0xC0000034ULL;
     core::Process* proc = core::CurrentProcess();
-    if (proc == nullptr || !core::CapSetHas(proc->caps, core::kCapFsWrite))
+    if (proc == nullptr || !core::ProcessHasCap(proc, core::kCapFsWrite))
     {
         core::RecordSandboxDenial(core::kCapFsWrite);
         frame->rax = kStatusAccessDenied;

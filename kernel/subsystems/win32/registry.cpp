@@ -560,7 +560,7 @@ i64 DoSetValue(arch::TrapFrame* frame)
     // FAT32 writes — so a sandboxed PE can't alter the shared
     // kernel-side hive without explicit clearance. See
     // wiki/kernel/Subsystem-Isolation.md.
-    if (!core::CapSetHas(proc->caps, core::kCapFsWrite))
+    if (!core::ProcessHasCap(proc, core::kCapFsWrite))
     {
         core::RecordSandboxDenial(core::kCapFsWrite);
         return static_cast<i64>(static_cast<u32>(0xC0000022)); // STATUS_ACCESS_DENIED
@@ -630,7 +630,7 @@ i64 DoDeleteValue(arch::TrapFrame* frame)
         return kNtStatusInvalidParameter;
     // Subsystem isolation: same cap gate as DoSetValue (registry
     // mutation requires kCapFsWrite).
-    if (!core::CapSetHas(proc->caps, core::kCapFsWrite))
+    if (!core::ProcessHasCap(proc, core::kCapFsWrite))
     {
         core::RecordSandboxDenial(core::kCapFsWrite);
         return static_cast<i64>(static_cast<u32>(0xC0000022));

@@ -1,13 +1,16 @@
 /*
- * DuetOS — elevation grace cache, v0.
+ * DuetOS elevation grace cache.
  *
- * See grace.h for the public contract and design rationale.
+ * Cache rows are prompt-suppression metadata. A Process owns the
+ * authoritative lease deadline and lazily expires it before any
+ * capability snapshot can authorize an operation.
  */
 
 #include "security/grace.h"
 
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "sync/spinlock.h"
 #include "time/timekeeper.h"
 #include "util/types.h"
 
@@ -23,39 +26,60 @@ namespace
 {
 
 GraceEntry g_rows[kGraceCacheCapacity];
-bool g_initialized = false;
+sync::SpinLock g_grace_lock{};
+u64 g_next_generation = 1;
 
-bool IsLive(const GraceEntry& e, u64 now_ns)
+bool IsValidCap(Cap cap)
 {
-    return e.in_use && now_ns < e.deadline_ns;
+    return cap != kCapNone && cap < kCapCount;
 }
 
-// Find an existing row for (pid, cap). Returns kGraceCacheCapacity on
-// miss. Treats expired rows as miss — caller must clear in_use when
-// returning early because of expiry.
-u32 FindRow(u64 pid, Cap cap, u64 now_ns)
+bool IsLive(const GraceEntry& entry, u64 now_ns)
 {
+    return entry.in_use && now_ns < entry.deadline_ns;
+}
+
+void ClearLocked(u32 index)
+{
+    sync::SpinLockAssertHeld(g_grace_lock);
+    g_rows[index] = GraceEntry{};
+}
+
+u32 ReapLocked(u64 now_ns)
+{
+    sync::SpinLockAssertHeld(g_grace_lock);
+    u32 reaped = 0;
     for (u32 i = 0; i < kGraceCacheCapacity; ++i)
     {
-        if (g_rows[i].in_use && g_rows[i].pid == pid && g_rows[i].cap == cap)
+        if (g_rows[i].in_use && (now_ns == 0 || g_rows[i].deadline_ns <= now_ns))
         {
-            if (g_rows[i].deadline_ns > now_ns)
-                return i;
-            // Expired — clear in place so an insert reuses the slot.
-            g_rows[i].in_use = false;
+            ClearLocked(i);
+            ++reaped;
         }
+    }
+    return reaped;
+}
+
+u32 FindLiveRowLocked(u64 pid, Cap cap, u64 now_ns)
+{
+    sync::SpinLockAssertHeld(g_grace_lock);
+    for (u32 i = 0; i < kGraceCacheCapacity; ++i)
+    {
+        if (IsLive(g_rows[i], now_ns) && g_rows[i].pid == pid && g_rows[i].cap == cap)
+            return i;
     }
     return kGraceCacheCapacity;
 }
 
-u32 AllocSlot()
+u32 AllocSlotLocked()
 {
+    sync::SpinLockAssertHeld(g_grace_lock);
     for (u32 i = 0; i < kGraceCacheCapacity; ++i)
     {
         if (!g_rows[i].in_use)
             return i;
     }
-    // Full — evict the row with the earliest deadline.
+
     u32 victim = 0;
     u64 earliest = g_rows[0].deadline_ns;
     for (u32 i = 1; i < kGraceCacheCapacity; ++i)
@@ -66,142 +90,229 @@ u32 AllocSlot()
             victim = i;
         }
     }
-    g_rows[victim].in_use = false;
     return victim;
+}
+
+u64 NextGenerationLocked()
+{
+    sync::SpinLockAssertHeld(g_grace_lock);
+    u64 generation = g_next_generation++;
+    if (generation == 0)
+        generation = g_next_generation++;
+    return generation;
+}
+
+bool InsertMetadataForSelfTest(u64 pid, Cap cap, u32 lifetime_seconds)
+{
+    if (!IsValidCap(cap) || lifetime_seconds == 0)
+        return false;
+
+    const u64 now = duetos::time::MonotonicNs();
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_grace_lock);
+    ReapLocked(now);
+    u32 slot = FindLiveRowLocked(pid, cap, now);
+    if (slot == kGraceCacheCapacity)
+        slot = AllocSlotLocked();
+    g_rows[slot] = GraceEntry{
+        pid, cap, now + static_cast<u64>(lifetime_seconds) * 1000000000ull, NextGenerationLocked(), true,
+    };
+    sync::SpinLockRelease(g_grace_lock, flags);
+    return true;
 }
 
 } // namespace
 
 void GraceCacheInit()
 {
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_grace_lock);
     for (u32 i = 0; i < kGraceCacheCapacity; ++i)
-        g_rows[i].in_use = false;
-    g_initialized = true;
+        ClearLocked(i);
+    sync::SpinLockRelease(g_grace_lock, flags);
 }
 
 bool GraceCacheLookup(u64 pid, Cap cap)
 {
-    if (cap == kCapNone || cap >= kCapCount)
+    if (!IsValidCap(cap))
         return false;
+
     const u64 now = duetos::time::MonotonicNs();
-    return FindRow(pid, cap, now) != kGraceCacheCapacity;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_grace_lock);
+    ReapLocked(now);
+    const bool found = FindLiveRowLocked(pid, cap, now) != kGraceCacheCapacity;
+    sync::SpinLockRelease(g_grace_lock, flags);
+    return found;
 }
 
-bool GraceCacheInsert(u64 pid, Cap cap, u32 lifetime_seconds)
+bool GraceCacheTryGrant(core::Process* process, Cap cap)
 {
-    if (cap == kCapNone || cap >= kCapCount)
+    if (process == nullptr || !IsValidCap(cap))
         return false;
-    if (lifetime_seconds == 0)
-        return false; // no_cache semantics
+
     const u64 now = duetos::time::MonotonicNs();
-    GraceCacheReap();
-    u32 slot = FindRow(pid, cap, now);
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_grace_lock);
+    ReapLocked(now);
+    const u32 slot = FindLiveRowLocked(process->pid, cap, now);
+    bool granted = false;
+    if (slot != kGraceCacheCapacity)
+    {
+        const GraceEntry row = g_rows[slot];
+        granted = core::ProcessCapsGrantLease(process, cap, row.deadline_ns, row.generation);
+        if (!granted)
+            ClearLocked(slot);
+    }
+    sync::SpinLockRelease(g_grace_lock, flags);
+    return granted;
+}
+
+bool GraceCacheGrantLease(core::Process* process, Cap cap, u32 lifetime_seconds)
+{
+    if (process == nullptr || !IsValidCap(cap) || lifetime_seconds == 0)
+        return false;
+
+    const u64 now = duetos::time::MonotonicNs();
+    if (now == 0)
+        return false;
+    const u64 duration_ns = static_cast<u64>(lifetime_seconds) * 1000000000ull;
+    const u64 deadline_ns = now + duration_ns;
+    if (deadline_ns <= now)
+        return false;
+
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_grace_lock);
+    ReapLocked(now);
+    u32 slot = FindLiveRowLocked(process->pid, cap, now);
     if (slot == kGraceCacheCapacity)
-        slot = AllocSlot();
-    // Slot postcondition. AllocSlot always returns a row in
-    // [0, kGraceCacheCapacity) by construction — either an empty
-    // slot or the eviction victim. A regression that broke that
-    // invariant would let the write below silently scribble outside
-    // g_rows[], poisoning the SECURITY-CRITICAL grace cache (a stale
-    // PID/cap row past the array bound could falsely match a future
-    // Lookup and grant a cached privilege the user never validated).
-    KASSERT_WITH_VALUE(slot < kGraceCacheCapacity, "security/grace", "slot exceeds cache capacity",
-                       static_cast<u64>(slot));
-    GraceEntry& e = g_rows[slot];
-    e.pid = pid;
-    e.cap = cap;
-    e.deadline_ns = now + static_cast<u64>(lifetime_seconds) * 1000000000ull;
-    e.in_use = true;
-    return true;
+        slot = AllocSlotLocked();
+    const u64 generation = NextGenerationLocked();
+
+    // Install authority first. A cache row must never claim a grant
+    // that the Process ceiling rejected.
+    const bool granted = core::ProcessCapsGrantLease(process, cap, deadline_ns, generation);
+    if (granted)
+    {
+        g_rows[slot] = GraceEntry{
+            process->pid, cap, deadline_ns, generation, true,
+        };
+    }
+    sync::SpinLockRelease(g_grace_lock, flags);
+    return granted;
+}
+
+void GraceCacheExpire(u64 pid, Cap cap)
+{
+    if (!IsValidCap(cap))
+        return;
+
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_grace_lock);
+    for (u32 i = 0; i < kGraceCacheCapacity; ++i)
+    {
+        if (g_rows[i].in_use && g_rows[i].pid == pid && g_rows[i].cap == cap)
+            ClearLocked(i);
+    }
+    sync::SpinLockRelease(g_grace_lock, flags);
 }
 
 void GraceCacheExpirePid(u64 pid)
 {
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_grace_lock);
     for (u32 i = 0; i < kGraceCacheCapacity; ++i)
     {
         if (g_rows[i].in_use && g_rows[i].pid == pid)
-            g_rows[i].in_use = false;
+            ClearLocked(i);
     }
+    sync::SpinLockRelease(g_grace_lock, flags);
 }
 
 u32 GraceCacheReap()
 {
     const u64 now = duetos::time::MonotonicNs();
-    u32 reaped = 0;
-    for (u32 i = 0; i < kGraceCacheCapacity; ++i)
-    {
-        if (g_rows[i].in_use && g_rows[i].deadline_ns <= now)
-        {
-            g_rows[i].in_use = false;
-            ++reaped;
-        }
-    }
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_grace_lock);
+    const u32 reaped = ReapLocked(now);
+    sync::SpinLockRelease(g_grace_lock, flags);
     return reaped;
 }
 
 u32 GraceCacheLiveCount()
 {
     const u64 now = duetos::time::MonotonicNs();
-    u32 n = 0;
+    u32 count = 0;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_grace_lock);
+    ReapLocked(now);
     for (u32 i = 0; i < kGraceCacheCapacity; ++i)
     {
         if (IsLive(g_rows[i], now))
-            ++n;
+            ++count;
     }
-    return n;
+    sync::SpinLockRelease(g_grace_lock, flags);
+    return count;
 }
 
 bool GraceCacheEntryAt(u32 idx, GraceEntry* out)
 {
     const u64 now = duetos::time::MonotonicNs();
     u32 seen = 0;
+    bool found = false;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_grace_lock);
+    ReapLocked(now);
     for (u32 i = 0; i < kGraceCacheCapacity; ++i)
     {
         if (!IsLive(g_rows[i], now))
             continue;
-        if (seen == idx)
-        {
-            if (out != nullptr)
-                *out = g_rows[i];
-            return true;
-        }
-        ++seen;
+        if (seen++ != idx)
+            continue;
+        if (out != nullptr)
+            *out = g_rows[i];
+        found = true;
+        break;
     }
-    return false;
+    sync::SpinLockRelease(g_grace_lock, flags);
+    return found;
 }
 
 void GraceCacheSelfTest()
 {
-    arch::SerialWrite("[grace] self-test: insert/lookup/expire/reap\n");
+    arch::SerialWrite("[grace] self-test: lock/lazy-lease/eviction\n");
     GraceCacheInit();
 
     constexpr u64 kFakePid = 0x4DC0DE;
-    const Cap kTestCap = duetos::core::kCapFsWrite;
+    const Cap kTestCap = core::kCapFsWrite;
+    static core::Process process{};
+    process.pid = kFakePid;
+    process.cap_ceiling = core::CapSetTrusted();
+    process.caps = core::CapSetEmpty();
 
     if (GraceCacheLookup(kFakePid, kTestCap))
         Panic("grace", "empty cache returned a hit");
+    if (GraceCacheGrantLease(&process, kTestCap, 0) || GraceCacheLookup(kFakePid, kTestCap))
+        Panic("grace", "zero-lifetime lease was not fail-closed");
 
-    if (!GraceCacheInsert(kFakePid, kTestCap, 60))
-        Panic("grace", "insert with positive lifetime failed");
-    if (!GraceCacheLookup(kFakePid, kTestCap))
-        Panic("grace", "lookup missed a fresh insert");
+    if (duetos::time::MonotonicNs() == 0)
+    {
+        if (GraceCacheGrantLease(&process, kTestCap, 60))
+            Panic("grace", "clockless lease grant did not fail closed");
+    }
+    else
+    {
+        if (GraceCacheGrantLease(&process, kTestCap, 60) == false || !GraceCacheLookup(kFakePid, kTestCap) ||
+            !core::ProcessHasCap(&process, kTestCap))
+            Panic("grace", "positive lease was not published");
 
-    // no_cache lifetime → no row written.
-    if (GraceCacheInsert(kFakePid + 1, kTestCap, 0))
-        Panic("grace", "zero-lifetime insert wrote a row");
-    if (GraceCacheLookup(kFakePid + 1, kTestCap))
-        Panic("grace", "zero-lifetime lookup returned a hit");
+        // Cache removal is metadata-only. The Process lease remains
+        // usable only until its original authoritative deadline.
+        GraceCacheExpirePid(kFakePid);
+        if (GraceCacheLookup(kFakePid, kTestCap) || !core::ProcessHasCap(&process, kTestCap))
+            Panic("grace", "metadata expiry changed Process lease authority");
+        core::ProcessCapsDisableMask(&process, 1ULL << static_cast<u32>(kTestCap));
 
-    // ExpirePid drops every row for the pid.
-    GraceCacheExpirePid(kFakePid);
-    if (GraceCacheLookup(kFakePid, kTestCap))
-        Panic("grace", "ExpirePid left a row behind");
-
-    // Capacity sanity: fill then re-fill; we should never overflow.
-    for (u32 i = 0; i < kGraceCacheCapacity + 4; ++i)
-        GraceCacheInsert(0x10000 + i, kTestCap, 600);
-    if (GraceCacheLiveCount() > kGraceCacheCapacity)
-        Panic("grace", "live count exceeded capacity");
+        GraceCacheInit();
+        for (u32 i = 0; i < kGraceCacheCapacity; ++i)
+        {
+            if (!InsertMetadataForSelfTest(0x10000 + i, kTestCap, 600 + i))
+                Panic("grace", "capacity setup insert failed");
+        }
+        if (!InsertMetadataForSelfTest(0x20000, kTestCap, 1200) || GraceCacheLiveCount() != kGraceCacheCapacity ||
+            GraceCacheLookup(0x10000, kTestCap) || !GraceCacheLookup(0x20000, kTestCap))
+            Panic("grace", "earliest metadata eviction failed");
+    }
 
     GraceCacheInit();
     arch::SerialWrite("[grace] self-test: PASS\n");

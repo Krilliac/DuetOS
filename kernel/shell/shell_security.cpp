@@ -74,7 +74,7 @@ inline void EnsureShellProcInitialized()
     if (g_shell_proc_initialized)
         return;
     g_shell_proc.pid = kShellPseudoPid;
-    g_shell_proc.caps = duetos::core::CapSetEmpty();
+    g_shell_proc.cap_ceiling = duetos::core::CapSetTrusted();
     g_shell_proc_initialized = true;
 }
 
@@ -88,14 +88,10 @@ bool RequireCap(::duetos::core::Cap cap, const char* cmd)
     if (AuthIsAdmin())
         return true;
 
-    // Live cap check: the shell's pseudo-process must hold the
-    // specific cap AND that cap's grace grant must still be valid.
-    // ShellIsElevatedNow() lazily reaps expired grants, so checking
-    // CapSetHas after that call gives an accurate read.
+    // Process authority owns the deadline. Grace-cache rows are only
+    // prompt-suppression metadata and may be evicted independently.
     EnsureShellProcInitialized();
-    GraceCacheReap();
-    const bool elevated_for_cap = CapSetHas(g_shell_proc.caps, cap) && GraceCacheLookup(kShellPseudoPid, cap);
-    if (elevated_for_cap)
+    if (ProcessHasCap(&g_shell_proc, cap))
         return true;
 
     ShellSetExit(1);
@@ -582,12 +578,11 @@ void CmdPolicy(u32 argc, char** argv)
 // RBAC + elevation broker surface.
 //
 // `elevate <cap>`   — prompt for the current user's password and,
-//                     on success, add the cap to the kernel shell's
-//                     pseudo-process. Future shell commands that
-//                     consult `g_shell_proc.caps` honour the grant
-//                     for the configured grace window.
-// `elevate off`     — clear every cap held by the pseudo-process
-//                     and drop the broker grants from the cache.
+//                     on success, install a bounded lease on the
+//                     kernel shell's pseudo-process. Future shell
+//                     commands consume its effective snapshot.
+// `elevate off`     — clear durable and leased live authority while
+//                     preserving the pseudo-process grant ceiling.
 // `roles [me]`      — list every registered role (or, with `me`,
 //                     the roles the active session belongs to).
 // `elevations`      — dump the live grace-cache rows so the
@@ -595,7 +590,7 @@ void CmdPolicy(u32 argc, char** argv)
 //                     and how long is left.
 //
 // The pseudo-process is a `core::Process` with a sentinel pid; the
-// broker writes its caps and the grace cache keys against that pid
+// broker installs its lease and keys cache metadata against that pid
 // the same way it would for a real ring-3 process.
 // ---------------------------------------------------------------
 namespace
@@ -644,20 +639,10 @@ void PrintCapBundle(u64 mask)
 bool ShellIsElevatedNow()
 {
     EnsureShellProcInitialized();
-    // A cap held by the pseudo-process whose grace row has expired
-    // should be considered dropped. Sweep the cache, then trim caps
-    // whose grant is no longer cached. v0 keeps the cap bits in
-    // sync with the cache by rechecking on every call.
+    // Cache metadata and Process authority expire independently; the
+    // Process snapshot is authoritative for the shell operation.
     duetos::security::GraceCacheReap();
-    for (u32 c = 1; c < static_cast<u32>(duetos::core::kCapCount); ++c)
-    {
-        const duetos::core::Cap cap = static_cast<duetos::core::Cap>(c);
-        if ((g_shell_proc.caps.bits & (1ULL << c)) == 0)
-            continue;
-        if (!duetos::security::GraceCacheLookup(kShellPseudoPid, cap))
-            g_shell_proc.caps.bits &= ~(1ULL << c);
-    }
-    return g_shell_proc.caps.bits != 0;
+    return duetos::core::ProcessCapsSnapshot(&g_shell_proc).bits != 0;
 }
 
 void CmdElevate(u32 argc, char** argv)
@@ -675,7 +660,7 @@ void CmdElevate(u32 argc, char** argv)
     if (StrEq(argv[1], "off") || StrEq(argv[1], "OFF"))
     {
         duetos::security::GraceCacheExpirePid(kShellPseudoPid);
-        g_shell_proc.caps = duetos::core::CapSetEmpty();
+        duetos::core::ProcessCapsDisableMask(&g_shell_proc, duetos::core::CapSetTrusted().bits);
         ConsoleWriteln("ELEVATE: cleared shell elevation state");
         return;
     }
@@ -695,10 +680,10 @@ void CmdElevate(u32 argc, char** argv)
             ConsoleWriteln("ELEVATE: failed to read role");
             return;
         }
-        // Walk every cap in the role's bundle. The first prompt
-        // populates the grace cache; subsequent caps either hit
-        // the cache or are denied if the active user's roles do
-        // not also grant them.
+        // Walk every cap in the role's bundle. Leases and prompt-
+        // suppression metadata are per-cap, so each missing cap may
+        // prompt independently and is denied if the active user's
+        // roles do not also grant it.
         bool any_granted = false;
         bool any_denied = false;
         for (u32 c = 1; c < static_cast<u32>(duetos::core::kCapCount); ++c)

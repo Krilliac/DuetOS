@@ -127,12 +127,11 @@ i32 JobAlloc(u64 owner_pid)
 
 i64 SysJobCreate()
 {
-    using ::duetos::core::CapSetHas;
     using ::duetos::core::kCapSpawnThread;
     core::Process* proc = core::CurrentProcess();
     if (proc == nullptr)
         return -1;
-    if (!CapSetHas(proc->caps, kCapSpawnThread))
+    if (!core::ProcessHasCap(proc, kCapSpawnThread))
     {
         core::RecordSandboxDenial(kCapSpawnThread);
         return -1;

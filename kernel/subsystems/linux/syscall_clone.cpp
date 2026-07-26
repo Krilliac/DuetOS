@@ -136,7 +136,11 @@ i64 DoFork()
     Process* parent = core::CurrentProcess();
     if (parent == nullptr)
         return kEPERM;
-    if (!core::CapSetHas(parent->caps, core::kCapSpawnThread))
+    core::CapSet child_caps = core::CapSetEmpty();
+    core::CapSet child_ceiling = core::CapSetEmpty();
+    core::CapSet spawn_authority = core::CapSetEmpty();
+    if (!core::ProcessCaptureSpawnAuthority(parent, 1ULL << core::kCapSpawnThread, &child_caps, &child_ceiling,
+                                            &spawn_authority))
     {
         core::RecordSandboxDenial(core::kCapSpawnThread);
         return kEPERM;
@@ -167,8 +171,8 @@ i64 DoFork()
     // Build the child Process. Inherit caps, root, code_va,
     // stack_va, tick_budget. fd table + win32 handle tables
     // start fresh — fd inheritance + CLOEXEC handling deferred.
-    Process* child = core::ProcessCreate(parent->name, child_as, parent->caps, parent->root, parent->user_code_va,
-                                         parent->user_stack_va, parent->tick_budget);
+    Process* child = core::ProcessCreate(parent->name, child_as, child_caps, parent->root, parent->user_code_va,
+                                         parent->user_stack_va, parent->tick_budget, child_ceiling);
     if (child == nullptr)
     {
         mm::AddressSpaceRelease(child_as);
@@ -272,7 +276,7 @@ i64 DoClone(u64 flags, u64 child_stack, u64 ptid_user, u64 ctid_user, u64 tls)
     Process* proc = core::CurrentProcess();
     if (proc == nullptr)
         return kEPERM;
-    if (!core::CapSetHas(proc->caps, core::kCapSpawnThread))
+    if (!core::ProcessHasCap(proc, core::kCapSpawnThread))
     {
         core::RecordSandboxDenial(core::kCapSpawnThread);
         return kEPERM;

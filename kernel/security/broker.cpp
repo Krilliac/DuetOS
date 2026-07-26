@@ -3,13 +3,8 @@
  *
  * See broker.h for the public contract and design rationale.
  *
- * Note on Argon2id: the v0 broker uses whatever KDF the existing
- * `AuthVerify` runs (PBKDF2-HMAC-SHA256). Argon2id is a follow-up
- * tracked in wiki/security/RBAC-and-Elevation.md and the Roadmap.
- *
- * Note on Win32 facade: NtAdjustPrivilegesToken routing to this
- * broker is a follow-up tracked in the same wiki page. The v0
- * Win32 surface is pure-facade per the existing isolation rule.
+ * AuthVerify owns password-KDF selection. Win32 token enablement
+ * reaches this broker only through the kernel token syscall.
  */
 
 #include "security/broker.h"
@@ -27,6 +22,7 @@
 #include "security/event_ring.h"
 #include "security/grace.h"
 #include "security/rbac.h"
+#include "time/timekeeper.h"
 #include "util/types.h"
 
 namespace duetos::security
@@ -38,11 +34,14 @@ using duetos::core::AuthVerify;
 using duetos::core::Cap;
 using duetos::core::CapName;
 using duetos::core::CapSet;
-using duetos::core::CapSetHas;
 using duetos::core::kCapCount;
 using duetos::core::kCapNone;
 using duetos::core::Panic;
 using duetos::core::Process;
+using duetos::core::ProcessCapCeilingSnapshot;
+using duetos::core::ProcessCapsDisableMask;
+using duetos::core::ProcessCapsDropMask;
+using duetos::core::ProcessHasCap;
 
 namespace
 {
@@ -345,6 +344,10 @@ const char* BrokerOutcomeName(BrokerOutcome o)
         return "NoSession";
     case BrokerOutcome::InvalidCap:
         return "InvalidCap";
+    case BrokerOutcome::NoLease:
+        return "NoLease";
+    case BrokerOutcome::CeilingDenied:
+        return "CeilingDenied";
     }
     return "?";
 }
@@ -355,23 +358,16 @@ BrokerOutcome BrokerRequestElevation(const BrokerRequest& req)
         return BrokerOutcome::InvalidCap;
     if (req.proc == nullptr)
         return BrokerOutcome::InvalidCap;
+    const u64 bit = 1ULL << static_cast<u32>(req.cap);
+    if ((ProcessCapCeilingSnapshot(req.proc).bits & bit) == 0)
+        return BrokerOutcome::CeilingDenied;
     if (!AuthIsAuthenticated())
         return BrokerOutcome::NoSession;
 
-    // Fast path: cache hit.
-    const u64 pid = req.proc->pid;
-    if (GraceCacheLookup(pid, req.cap))
+    // Fast path: authority is already effective, or cached metadata
+    // can re-publish the original still-live Process lease.
+    if (ProcessHasCap(req.proc, req.cap) || GraceCacheTryGrant(req.proc, req.cap))
     {
-        // Capability bit-shift bound invariant on a security-critical
-        // privilege-grant. `req.cap` was bound-checked at line 354 but
-        // is read again here; a wild store between the check and the
-        // shift would grant the WRONG cap if `cap >= 64` wraps the
-        // u64 shift, or grant NO cap at all silently. Both outcomes
-        // are silent privilege bugs — pin the invariant at the shift
-        // site itself.
-        KASSERT_WITH_VALUE(static_cast<u32>(req.cap) < 64, "security/broker",
-                           "cap shift width overflow (cache-hit grant)", static_cast<u64>(req.cap));
-        req.proc->caps.bits |= (1ULL << static_cast<u32>(req.cap));
         return BrokerOutcome::Granted;
     }
 
@@ -388,6 +384,12 @@ BrokerOutcome BrokerRequestElevation(const BrokerRequest& req)
     }
 
     // Prompt — up to kBrokerMaxAttempts tries before giving up.
+    if (grace == kRbacNoGrace)
+    {
+        KLOG_WARN("broker", "elevation denied: zero-grace policy cannot back an ambient capability");
+        return BrokerOutcome::NoLease;
+    }
+
     char pw[kPwBufSize] = {};
     for (u32 attempt = 0; attempt < kBrokerMaxAttempts; ++attempt)
     {
@@ -401,14 +403,13 @@ BrokerOutcome BrokerRequestElevation(const BrokerRequest& req)
         if (AuthVerify(user, pw))
         {
             ZeroBuf(pw, sizeof(pw));
-            // Cache the grant unless the role policy says no_cache.
-            if (grace > 0)
-                GraceCacheInsert(pid, req.cap, grace);
-            // Same bound as the cache-hit path above — the password-
-            // verified grant is just as security-critical.
-            KASSERT_WITH_VALUE(static_cast<u32>(req.cap) < 64, "security/broker",
-                               "cap shift width overflow (verified grant)", static_cast<u64>(req.cap));
-            req.proc->caps.bits |= (1ULL << static_cast<u32>(req.cap));
+            // Publish a positive-duration Process lease and retain
+            // only enough cache metadata to reuse its original deadline.
+            if (!GraceCacheGrantLease(req.proc, req.cap, grace))
+            {
+                return (ProcessCapCeilingSnapshot(req.proc).bits & bit) == 0 ? BrokerOutcome::CeilingDenied
+                                                                             : BrokerOutcome::NoLease;
+            }
             KLOG_WARN("broker", "elevation granted");
             return BrokerOutcome::Granted;
         }
@@ -451,10 +452,12 @@ void BrokerSelfTest()
 {
     arch::SerialWrite("[broker] self-test: role gate + verify + cache glue\n");
 
-    // Construct a synthetic process. The broker only touches `pid`
-    // and `caps`, so a stack-allocated Process is fine.
+    // Construct a synthetic process with static storage so the full
+    // Process authority state and lock are zero-initialized without
+    // consuming the boot stack.
     static Process synth{};
     synth.pid = 0x4E1E4A7E;
+    synth.cap_ceiling = duetos::core::CapSetTrusted();
     synth.caps = duetos::core::CapSetEmpty();
 
     // Self-test relies on the seeded admin account (auth.cpp init).
@@ -473,28 +476,59 @@ void BrokerSelfTest()
     req.proc = &synth;
     req.cap = duetos::core::kCapFsWrite;
     req.reason = "FILE WRITE (selftest)";
-    BrokerOutcome o1 = BrokerRequestElevation(req);
-    if (o1 != BrokerOutcome::Granted)
-        Panic("broker", "self-test: first request not granted");
-    if (!CapSetHas(synth.caps, duetos::core::kCapFsWrite))
-        Panic("broker", "self-test: granted but cap bit not set");
+    const bool lease_clock_available = duetos::time::MonotonicNs() != 0;
+    if (!lease_clock_available)
+    {
+        if (BrokerRequestElevation(req) != BrokerOutcome::NoLease || ProcessHasCap(&synth, duetos::core::kCapFsWrite))
+            Panic("broker", "self-test: clockless elevation did not fail closed");
+    }
+    else
+    {
+        BrokerOutcome o1 = BrokerRequestElevation(req);
+        if (o1 != BrokerOutcome::Granted)
+            Panic("broker", "self-test: first request not granted");
+        if (!ProcessHasCap(&synth, duetos::core::kCapFsWrite))
+            Panic("broker", "self-test: granted but cap bit not set");
 
-    // Second call should hit the cache (no prompt). Replace the
-    // hook with the bad-password one — if the cache works the
-    // prompt is never invoked, so the bad password doesn't matter.
-    BrokerSetPromptHook(SelfTestPromptBad);
-    BrokerOutcome o2 = BrokerRequestElevation(req);
-    if (o2 != BrokerOutcome::Granted)
-        Panic("broker", "self-test: cached request not granted");
+        // Second call should hit the cache (no prompt). Replace the
+        // hook with the bad-password one — if the cache works the
+        // prompt is never invoked, so the bad password doesn't matter.
+        BrokerSetPromptHook(SelfTestPromptBad);
+        BrokerOutcome o2 = BrokerRequestElevation(req);
+        if (o2 != BrokerOutcome::Granted)
+            Panic("broker", "self-test: cached request not granted");
 
-    // Drop the cache entry; the next call should reprompt and fail.
-    GraceCacheExpirePid(synth.pid);
-    synth.caps.bits &= ~(1ULL << static_cast<u32>(duetos::core::kCapFsWrite));
-    BrokerOutcome o3 = BrokerRequestElevation(req);
-    if (o3 != BrokerOutcome::BadPassword)
-        Panic("broker", "self-test: bad-password did not BadPassword");
-    if (CapSetHas(synth.caps, duetos::core::kCapFsWrite))
-        Panic("broker", "self-test: bad password granted a cap");
+        // Drop the cache entry; the next call should reprompt and fail.
+        GraceCacheExpirePid(synth.pid);
+        ProcessCapsDisableMask(&synth, 1ULL << static_cast<u32>(duetos::core::kCapFsWrite));
+        BrokerOutcome o3 = BrokerRequestElevation(req);
+        if (o3 != BrokerOutcome::BadPassword)
+            Panic("broker", "self-test: bad-password did not BadPassword");
+        if (ProcessHasCap(&synth, duetos::core::kCapFsWrite))
+            Panic("broker", "self-test: bad password granted a cap");
+    }
+
+    BrokerSetPromptHook(SelfTestPromptOk);
+    req.cap = duetos::core::kCapNetAdmin;
+    req.reason = "NET ADMIN (sensitive-grace selftest)";
+    const BrokerOutcome netadmin_outcome = BrokerRequestElevation(req);
+    if (lease_clock_available)
+    {
+        if (netadmin_outcome != BrokerOutcome::Granted || !ProcessHasCap(&synth, duetos::core::kCapNetAdmin))
+            Panic("broker", "self-test: sensitive capability lease not granted");
+        GraceCacheExpire(synth.pid, duetos::core::kCapNetAdmin);
+        ProcessCapsDisableMask(&synth, 1ULL << static_cast<u32>(duetos::core::kCapNetAdmin));
+    }
+    else if (netadmin_outcome != BrokerOutcome::NoLease || ProcessHasCap(&synth, duetos::core::kCapNetAdmin))
+    {
+        Panic("broker", "self-test: clockless sensitive capability lease did not fail closed");
+    }
+
+    req.cap = duetos::core::kCapFsRead;
+    req.reason = "FILE READ (ceiling selftest)";
+    ProcessCapsDropMask(&synth, 1ULL << static_cast<u32>(duetos::core::kCapFsRead));
+    if (BrokerRequestElevation(req) != BrokerOutcome::CeilingDenied || ProcessHasCap(&synth, duetos::core::kCapFsRead))
+        Panic("broker", "self-test: broker restored a dropped ceiling bit");
 
     BrokerSetPromptHook(nullptr);
 

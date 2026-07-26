@@ -4,35 +4,20 @@
 #include "util/types.h"
 
 /*
- * DuetOS — elevation grace cache, v0.
+ * DuetOS elevation grace cache.
  *
- * After the broker successfully prompts for a password and grants a
- * cap to a process, it inserts a row here so subsequent privileged
- * syscalls by the same process needing the same cap pass through
- * without reprompting. Each row is bounded by a deadline derived
- * from the role's grace policy (kRbacDefaultGraceSeconds, or the
- * per-cap override, or kRbacNoGrace which means "do not cache").
+ * Positive-duration broker grants are generation-tagged Process
+ * leases. This fixed table caches only the metadata needed to reuse
+ * a live lease without prompting again. The Process deadline is the
+ * authority boundary: expiry and table eviction discard cache rows
+ * but never need a scheduler-wide process lookup or eager revocation.
+ * The next effective capability snapshot expires an overdue lease
+ * under that Process's cap lock.
  *
- * The table is a fixed-size in-memory array of
- * `(pid, cap, deadline_ns)` rows. Lookups are linear; the table is
- * small (~64 rows) so this is cheaper than any tree at this scale.
- *
- * Eviction:
- *   - GraceCacheReap() sweeps expired rows. Called by the broker
- *     before any insert, and by the elevation prompt path before
- *     it asks the user a question (so a stale entry doesn't
- *     accidentally silence a legitimate reprompt).
- *   - GraceCacheExpirePid(pid) clears every row for a pid; called
- *     on process exit so a recycled pid does not inherit grants
- *     from its predecessor.
- *
- * Concurrency: same context discipline as the broker — called from
- * the syscall dispatcher (process context, no IRQ), the shell, and
- * the login gate. Serialised by the existing process-syscall
- * sequencing; no extra lock for v0. Promote to a spinlock the day
- * the broker grows multi-CPU-concurrent callers.
- *
- * Context: kernel. Never called from IRQ.
+ * Every cache operation is serialized by one spinlock. When both
+ * locks are needed, the order is grace lock -> Process::cap_lock;
+ * Process capability helpers never call back into this cache.
+ * Task context only; never IRQ context.
  */
 
 namespace duetos::security
@@ -45,42 +30,25 @@ struct GraceEntry
     u64 pid;
     duetos::core::Cap cap;
     u64 deadline_ns;
+    u64 generation;
     bool in_use;
 };
 
-/// Initialize the cache (zero all rows). Idempotent. Called once
-/// from kernel boot.
 void GraceCacheInit();
-
-/// Lookup: does (pid, cap) currently hold a valid grant? Returns
-/// true if a non-expired row exists. Lazy-expires the row on miss
-/// so the next insert can reuse the slot.
 bool GraceCacheLookup(u64 pid, duetos::core::Cap cap);
 
-/// Insert a grant for `(pid, cap)` with lifetime `seconds`. A
-/// lifetime of 0 is treated as "no_cache" and is a no-op — the
-/// broker still grants the syscall, but a future call will
-/// reprompt. Returns true if a row was actually written. On a
-/// full table, evicts the row with the earliest deadline.
-bool GraceCacheInsert(u64 pid, duetos::core::Cap cap, u32 lifetime_seconds);
+/// Reuse a live cached lease while the row remains protected.
+bool GraceCacheTryGrant(duetos::core::Process* process, duetos::core::Cap cap);
 
-/// Drop every row for a pid. Called on process exit.
+/// Install a positive-duration Process lease, then publish its cache row.
+bool GraceCacheGrantLease(duetos::core::Process* process, duetos::core::Cap cap, u32 lifetime_seconds);
+
+/// Discard cache metadata only. The Process deadline remains authoritative.
+void GraceCacheExpire(u64 pid, duetos::core::Cap cap);
 void GraceCacheExpirePid(u64 pid);
-
-/// Sweep expired rows. Idempotent; safe to call from any task
-/// context. Returns the number of rows reaped.
 u32 GraceCacheReap();
-
-/// Current count of live rows (after a reap pass).
 u32 GraceCacheLiveCount();
-
-/// Read-only view: copy the i-th live row out. Returns false on
-/// out-of-range or stale slot. The "elevations" shell command
-/// uses this to print "what's currently elevated."
 bool GraceCacheEntryAt(u32 idx, GraceEntry* out);
-
-/// Boot self-test — exercises insert / lookup / expire / reap on
-/// synthetic pids. Panics on regression.
 void GraceCacheSelfTest();
 
 } // namespace duetos::security

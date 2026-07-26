@@ -323,7 +323,7 @@ i64 DoReadahead(u64 fd, u64 offset, u64 count)
 i64 DoPtrace(u64 request, u64 pid, u64 addr, u64 data)
 {
     core::Process* proc = core::CurrentProcess();
-    if (proc == nullptr || !core::CapSetHas(proc->caps, core::kCapDebug))
+    if (proc == nullptr || !core::ProcessHasCap(proc, core::kCapDebug))
     {
         core::RecordSandboxDenial(core::kCapDebug);
         return kEPERM;

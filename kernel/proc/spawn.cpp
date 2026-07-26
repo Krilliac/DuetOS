@@ -248,6 +248,12 @@ bool MapLinuxVdso(::duetos::mm::AddressSpace* as, Process* proc, u64 base_va)
 u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps, const fs::RamfsNode* root,
                  u64 frame_budget, u64 tick_budget)
 {
+    return SpawnElfFile(name, elf_bytes, elf_len, caps, root, frame_budget, tick_budget, caps);
+}
+
+u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps, const fs::RamfsNode* root,
+                 u64 frame_budget, u64 tick_budget, CapSet cap_ceiling)
+{
     using arch::SerialWrite;
     using arch::SerialWriteHex;
     using namespace duetos::mm;
@@ -265,7 +271,7 @@ u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps
     // `.note.ABI-tag` parsing), add it here.
     if (elf_len > 7 && elf_bytes[7] == 3)
     {
-        return SpawnElfLinux(name, elf_bytes, elf_len, caps, root, frame_budget, tick_budget);
+        return SpawnElfLinux(name, elf_bytes, elf_len, caps, root, frame_budget, tick_budget, cap_ceiling);
     }
     // Fire the `inspect arm` latch if the operator armed it
     // before spawning. No-op when unarmed; one-shot when armed.
@@ -285,7 +291,7 @@ u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps
         AddressSpaceRelease(as);
         return 0;
     }
-    Process* proc = ProcessCreate(name, as, caps, root, r.entry_va, r.stack_va, tick_budget);
+    Process* proc = ProcessCreate(name, as, caps, root, r.entry_va, r.stack_va, tick_budget, cap_ceiling);
     if (proc == nullptr)
     {
         AddressSpaceRelease(as);
@@ -310,6 +316,12 @@ u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps
 u64 SpawnElfLinux(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps, const fs::RamfsNode* root,
                   u64 frame_budget, u64 tick_budget)
 {
+    return SpawnElfLinux(name, elf_bytes, elf_len, caps, root, frame_budget, tick_budget, caps);
+}
+
+u64 SpawnElfLinux(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps, const fs::RamfsNode* root,
+                  u64 frame_budget, u64 tick_budget, CapSet cap_ceiling)
+{
     using arch::SerialWrite;
     using arch::SerialWriteHex;
     using namespace duetos::mm;
@@ -331,7 +343,7 @@ u64 SpawnElfLinux(const char* name, const u8* elf_bytes, u64 elf_len, CapSet cap
         AddressSpaceRelease(as);
         return 0;
     }
-    Process* proc = ProcessCreate(name, as, caps, root, r.entry_va, r.stack_va, tick_budget);
+    Process* proc = ProcessCreate(name, as, caps, root, r.entry_va, r.stack_va, tick_budget, cap_ceiling);
     if (proc == nullptr)
     {
         AddressSpaceRelease(as);
@@ -452,6 +464,12 @@ u64 SpawnElfLinux(const char* name, const u8* elf_bytes, u64 elf_len, CapSet cap
 // is identical.
 u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, const fs::RamfsNode* root,
                 u64 frame_budget, u64 tick_budget)
+{
+    return SpawnPeFile(name, pe_bytes, pe_len, caps, root, frame_budget, tick_budget, caps);
+}
+
+u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, const fs::RamfsNode* root,
+                u64 frame_budget, u64 tick_budget, CapSet cap_ceiling)
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
@@ -1349,7 +1367,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         AddressSpaceRelease(as);
         return 0;
     }
-    Process* proc = ProcessCreate(name, as, caps, root, r.entry_va, r.stack_va, tick_budget);
+    Process* proc = ProcessCreate(name, as, caps, root, r.entry_va, r.stack_va, tick_budget, cap_ceiling);
     if (proc == nullptr)
     {
         AddressSpaceRelease(as);

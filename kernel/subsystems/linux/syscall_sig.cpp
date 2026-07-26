@@ -89,7 +89,7 @@ i64 LinuxSignalDeliver(core::Process* target, u32 signum)
     core::Process* caller = core::CurrentProcess();
     if (target != caller)
     {
-        if (caller == nullptr || !core::CapSetHas(caller->caps, core::kCapDebug))
+        if (caller == nullptr || !core::ProcessHasCap(caller, core::kCapDebug))
         {
             core::RecordSandboxDenial(core::kCapDebug);
             return kEPERM;

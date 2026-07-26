@@ -437,7 +437,7 @@ i64 DoShmctl(u64 shmid, u64 cmd, u64 user_buf)
     // ELF could RMID a segment it never created, dropping the owner's
     // initial reference (a second RMID then frees the frames while a
     // peer still has them mapped — a cross-process UAF).
-    const bool is_owner = (seg.owner_pid == p->pid) || core::CapSetHas(p->caps, core::kCapDebug);
+    const bool is_owner = (seg.owner_pid == p->pid) || core::ProcessHasCap(p, core::kCapDebug);
     if ((cmd == kIpcRmid || cmd == kIpcSet) && !is_owner)
     {
         arch::Sti();
@@ -669,7 +669,7 @@ i64 DoSemctl(u64 semid, u64 semnum, u64 cmd, u64 arg)
     // Mutating ops (RMID / SETVAL / IPC_SET) require ownership — a
     // co-resident ELF must not destroy or poison another process's
     // semaphore set by guessing semid 1..8. Reads stay open.
-    const bool is_owner = (s.owner_pid == p->pid) || core::CapSetHas(p->caps, core::kCapDebug);
+    const bool is_owner = (s.owner_pid == p->pid) || core::ProcessHasCap(p, core::kCapDebug);
     const bool is_mutating = (cmd == kIpcRmid || cmd == kSemSetval || cmd == kIpcSet);
     if (is_mutating && !is_owner)
     {

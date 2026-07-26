@@ -5,6 +5,7 @@
 #include "loader/compat_shim.h"
 #include "loader/dll_loader.h"
 #include "sched/sched.h"
+#include "sync/spinlock.h"
 #include "util/types.h"
 
 // AddressSpace and RamfsNode are used in this header only via
@@ -245,8 +246,8 @@ inline constexpr void CapSetAdd(CapSet& s, Cap c)
 // Drop a single cap from the set. Used by NtAdjustPrivilegesToken's
 // disable / remove paths so a Win32 PE can voluntarily shed
 // privilege at runtime. Adding a cap from user space is deliberately
-// NOT exposed — the kernel's spawn-time inheritance is the only
-// path that grants caps. CapSetRemove is the safe counterpart.
+// NOT exposed directly. Runtime elevation routes through the broker;
+// spawn-time inheritance supplies durable baseline authority.
 inline constexpr void CapSetRemove(CapSet& s, Cap c)
 {
     if (c == kCapNone || c >= kCapCount)
@@ -261,7 +262,22 @@ struct Process
     u64 pid;
     const char* name;
     mm::AddressSpace* as;
+    // Serializes durable caps, broker lease provenance/deadlines, and
+    // the monotonic grant ceiling as one authority state. Capability
+    // helpers never call the grace cache or scheduler while held.
+    sync::SpinLock cap_lock;
     CapSet caps;
+    // Runtime grants may set only bits that remain in this monotonic
+    // ceiling. SYS_DROPCAPS and SE_PRIVILEGE_REMOVED lower it before
+    // clearing live authority, making removal irreversible for this
+    // Process lifetime.
+    CapSet cap_ceiling;
+    // Broker leases stay separate from durable caps so expiry cannot
+    // clobber baseline authority. Effective snapshots lazily expire
+    // overdue leases under cap_lock before returning.
+    CapSet cap_leases;
+    u64 cap_lease_deadline_ns[static_cast<u32>(kCapCount)];
+    u64 cap_lease_generation[static_cast<u32>(kCapCount)];
     // Per-process view of the filesystem root. Path resolution
     // starts here — a process cannot name any node that isn't
     // reachable from `root`. Trusted processes get the rich
@@ -1352,6 +1368,36 @@ struct Process
     u64 refcount;
 };
 
+/// Snapshot effective authority after lazily expiring overdue leases.
+CapSet ProcessCapsSnapshot(const Process* process);
+
+/// Test one capability against the effective snapshot.
+bool ProcessHasCap(const Process* process, Cap cap);
+
+/// Grant one durable capability only while the monotonic ceiling permits it.
+bool ProcessCapsGrant(Process* process, Cap cap);
+
+/// Grant a generation-tagged broker lease until an absolute monotonic deadline.
+bool ProcessCapsGrantLease(Process* process, Cap cap, u64 deadline_ns, u64 generation);
+
+/// Revoke only the matching broker lease; durable authority is untouched.
+bool ProcessCapsRevokeLease(Process* process, Cap cap, u64 expected_generation);
+
+/// Snapshot the monotonic grant ceiling.
+CapSet ProcessCapCeilingSnapshot(const Process* process);
+
+/// Reversibly disable durable and leased bits without lowering the ceiling.
+CapSet ProcessCapsDisableMask(Process* process, u64 disable_mask);
+
+/// Permanently lower the ceiling, then remove durable and leased bits.
+CapSet ProcessCapsDropMask(Process* process, u64 drop_mask);
+
+/// Atomically capture effective spawn authority, durable child caps, and
+/// the inherited ceiling. Leases may authorize spawn but never become
+/// durable child authority.
+bool ProcessCaptureSpawnAuthority(const Process* process, u64 required_mask, CapSet* child_caps_out,
+                                  CapSet* ceiling_out, CapSet* authority_out);
+
 // Canonical ABI flavors. Enum-class would be cleaner but the
 // existing Process fields use plain u8/u32 for ABI stability.
 inline constexpr u8 kAbiNative = 0;
@@ -1409,7 +1455,13 @@ inline constexpr u64 kFsWriteWindowByteCap = kFsWriteWindowByteCapByLevel[0];
 /// fs::RamfsTrustedRoot() / fs::RamfsSandboxRoot() based on the
 /// process's trust level. Returns nullptr on kheap failure.
 Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, const fs::RamfsNode* root, u64 user_code_va,
-                       u64 user_stack_va, u64 tick_budget);
+                       u64 user_stack_va, u64 tick_budget, CapSet cap_ceiling);
+
+inline Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, const fs::RamfsNode* root,
+                              u64 user_code_va, u64 user_stack_va, u64 tick_budget)
+{
+    return ProcessCreate(name, as, caps, root, user_code_va, user_stack_va, tick_budget, caps);
+}
 
 /// Bump refcount. Use when a second holder appears (a future thread
 /// spawn that shares the process, a borrow into a non-owning table).

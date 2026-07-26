@@ -53,7 +53,9 @@ X(SYS_DIR_REWIND, (1ULL << ::duetos::core::kCapFsRead))
 // `CapSetHas(kCapFsRead)` block did the same job; landing the
 // row removes that redundancy. (A4-followup, 2026-04-27.)
 X(SYS_READ, (1ULL << ::duetos::core::kCapFsRead))
-X(SYS_SPAWN, (1ULL << ::duetos::core::kCapFsRead))
+X(SYS_SPAWN, (1ULL << ::duetos::core::kCapFsRead) | (1ULL << ::duetos::core::kCapSpawnThread))
+X(SYS_PROCESS_SPAWN, (1ULL << ::duetos::core::kCapFsRead) | (1ULL << ::duetos::core::kCapSpawnThread))
+X(SYS_PROCESS_SPAWN_EX, (1ULL << ::duetos::core::kCapFsRead) | (1ULL << ::duetos::core::kCapSpawnThread))
 // SYS_DLL_LOAD_FROM_PATH — LoadLibraryW from /lib/<name>. Reads
 // the DLL bytes out of the ramfs, so kCapFsRead gates the read
 // side. The mapping/registration happens in the calling process's

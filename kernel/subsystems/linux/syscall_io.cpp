@@ -126,7 +126,7 @@ i64 DoWrite(u64 fd, u64 user_buf, u64 len)
     // ELF binaries don't get to skip the gate by entering through
     // their ABI front-end. See
     // wiki/kernel/Subsystem-Isolation.md.
-    if (!core::CapSetHas(p->caps, core::kCapFsWrite))
+    if (!core::ProcessHasCap(p, core::kCapFsWrite))
     {
         KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/io", "write: kCapFsWrite gate REFUSED -> EACCES; fd", fd);
         core::RecordSandboxDenial(core::kCapFsWrite);
