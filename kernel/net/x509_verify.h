@@ -13,7 +13,7 @@
  *   "Is the certificate this server presented trustworthy for the
  *    hostname I dialed, right now?"
  *
- * That is the conjunction of four independent checks, ALL of which
+ * That is the conjunction of five independent checks, ALL of which
  * must hold for Verify() to return true:
  *
  *   1. Signature(s): every certificate in the path is signed by the
@@ -30,6 +30,16 @@
  *      case-insensitive.
  *   4. Validity window: `now_unix` lies within [notBefore, notAfter]
  *      for every certificate in the path.
+ *   5. Issuer constraints (RFC 5280 §6.1.4(n), §6.1.3(a)(4)): every
+ *      certificate used to SIGN another certificate — the supplied
+ *      intermediate and the trust anchor — carries basicConstraints
+ *      cA = TRUE, does not carry a keyUsage that omits keyCertSign,
+ *      and satisfies its own pathLenConstraint. basicConstraints
+ *      ABSENT means "not a CA": without this an ordinary end-entity
+ *      certificate (which any public CA will issue to anyone who
+ *      controls one domain) could be presented as an intermediate and
+ *      used to mint a trusted chain for ANY hostname — the classic
+ *      Basic Constraints bypass.
  *
  * SECURITY POSTURE: a verifier that returns true when it should
  * return false is strictly worse than no verifier at all, because it
@@ -47,8 +57,10 @@
  *     brainpool, ecdsa-with-SHA1 / SHA-512, compressed EC points (only the
  *     0x04 uncompressed SEC1 form is accepted). A cert signed any other
  *     way fails verification.
- *   - Name constraints, EKU / KU policy enforcement, basicConstraints
- *     pathLen beyond the hard depth-2 cap.
+ *   - Name constraints and the rest of the keyUsage / extendedKeyUsage
+ *     policy surface (only keyCertSign is enforced, on issuers). The
+ *     `critical` flag on an extension is not itself acted on: an
+ *     unrecognised critical extension does NOT reject the certificate.
  *   - CRL / OCSP revocation. A revoked-but-unexpired cert still
  *     verifies. Revisit when the network stack can fetch OCSP.
  *   - The full Mozilla / CCADB root program. The embedded store carries

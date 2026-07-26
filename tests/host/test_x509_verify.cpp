@@ -8,9 +8,10 @@
 //
 // That self-test embeds real OpenSSL-signed DER fixtures and proves the
 // leaf->root and leaf->intermediate->root paths verify TRUE while a
-// tampered signature, wrong hostname, expired window, and untrusted
-// issuer all verify FALSE; it also parses 8 real trust-store roots
-// (6 RSA incl. one RSA-4096 + 2 ECDSA) and self-verifies one of each.
+// tampered signature, wrong hostname, expired window, untrusted issuer,
+// and a NON-CA certificate offered as an issuer all verify FALSE; it
+// also parses 8 real trust-store roots (6 RSA incl. one RSA-4096 +
+// 2 ECDSA) and self-verifies one of each.
 //
 // This is the heaviest of the boot crypto self-tests (~the bulk of the
 // ~200 s under-TCG crypto block). Hosted, it runs natively in a few
@@ -39,5 +40,11 @@ int main()
     // fixture would trip a Panic shim (→ abort → test failure).
     EXPECT_TRUE(g_crypto_serial.find("FAIL") == std::string::npos);
     EXPECT_TRUE(g_crypto_serial.find("[x509-verify-selftest] PASS") != std::string::npos);
+
+    // The RFC 5280 §6.1.4(n) issuer gate (basicConstraints cA:TRUE +
+    // keyUsage keyCertSign) is named in the PASS line. Assert it here so
+    // a future edit that drops the gate cannot pass this test by simply
+    // not running those cases — a shorter PASS line fails the build.
+    EXPECT_TRUE(g_crypto_serial.find("basicConstraints+keyUsage issuer gate") != std::string::npos);
     return 0;
 }
