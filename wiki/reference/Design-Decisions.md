@@ -11887,3 +11887,24 @@ markers for its richest input. Three discovery layers were added (runtime
   current guest; a real region-query syscall is the fix if a guest walks
   the reported base. The 64-bit `kernel32` VirtualQuery is the same
   synthetic, so this is consistent, not a regression.
+
+## 2026-07-26 — WHP guests advertise virtualization; host-only telemetry is not emulated
+
+- **Context:** the Windows Hypervisor Platform VMM did not set
+  CPUID.1:ECX[31]. DuetOS therefore classified the guest as bare metal and
+  attempted Intel RAPL `RDMSR` telemetry. WHP surfaced that unsupported
+  instruction as an unrecoverable vCPU exit before bring-up completed.
+- **Decision:** request only WHP's `HypervisorPresent` synthetic processor
+  feature before partition setup. The guest now sees the Hyper-V vendor
+  leaves, takes its virtualized-hardware path, and reports optional RAPL
+  telemetry as unavailable. Do not invent RAPL values or globally swallow
+  MSR faults: unsupported privileged state must remain explicit.
+- **Workflow rule:** debugger readiness observes the VMM's owned `LISTEN`
+  socket without connecting to it. A probe connection would consume the
+  GDB stub's single `accept()` and strand the real debugger.
+- **Verified:** a 2 GiB WHP bring-up boot reports vendor `Microsoft Hv`,
+  `RAPL telemetry unavailable`, 51 self-tests passed, and
+  `[smoke] profile=bringup complete`.
+- **Compatibility effect:** this intentionally broadens `IsEmulator()` from
+  QEMU-only detection to the WHP guest too. Any bare-metal-only probe must
+  be capability-gated rather than inferred from a particular vendor string.

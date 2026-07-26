@@ -2,6 +2,8 @@
 
 #include <cstdio>
 
+#include "processor_contract.h"
+
 namespace duetos::vmm
 {
 
@@ -37,6 +39,18 @@ Partition::Partition(uint32_t cpuCount, bool debugExits)
                       m_handle, WHvPartitionPropertyCodeProcessorCount,
                       &prop, sizeof(prop)),
                   "SetPartitionProperty(ProcessorCount)");
+
+    // Advertise the virtualization boundary before the partition is set up.
+    // Without this, WHP exposes the host CPU vendor/features but leaves
+    // CPUID.1.ECX[31] clear. DuetOS then believes it is on bare metal and
+    // probes host telemetry MSRs such as RAPL, which this partition does not
+    // expose and which terminate the VP with an unrecoverable exception.
+    const auto syntheticFeatures = MakeSyntheticProcessorFeatures();
+    ThrowIfFailed(WHvSetPartitionProperty(
+                      m_handle,
+                      WHvPartitionPropertyCodeSyntheticProcessorFeaturesBanks,
+                      &syntheticFeatures, sizeof(syntheticFeatures)),
+                  "SetPartitionProperty(SyntheticProcessorFeaturesBanks)");
 
     if (debugExits)
     {
