@@ -130,7 +130,11 @@ collect_inventory() {
             dll=$(basename "$dlldir")
             local exports=0
             if [ -d "$dlldir" ]; then
-                exports=$(grep -rhE '^\s*DUETOS_EXPORT\b|^\s*WIN32_EXPORT\b' "$dlldir" 2>/dev/null | wc -l)
+                # `__declspec(dllexport)` is what the DLLs actually use.
+                # This counted DUETOS_EXPORT / WIN32_EXPORT until
+                # 2026-07-26 — macros that appear nowhere in the tree, so
+                # the published total was a permanent 0 for 60 DLLs.
+                exports=$(grep -rhoE '__declspec[[:space:]]*\([[:space:]]*dllexport[[:space:]]*\)' "$dlldir" 2>/dev/null | wc -l)
             fi
             DLL_LIST="${DLL_LIST}${dll}|${exports}\n"
             DLL_EXPORT_TOTAL=$((DLL_EXPORT_TOTAL + exports))

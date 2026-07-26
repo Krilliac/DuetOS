@@ -920,6 +920,21 @@ fault→fix→re-run loop, `tools/test/run-exe.sh` + `peexec=`, using the
    waits on (window creation / a timing or event wait) and continue the
    import-coverage climb (USER32 window class → message loop). This is
    the long middle of the climb.
+
+   **Landed (2026-07-26):** `kernel32_32` file I/O is real —
+   `CreateFileA`/`W`, `ReadFile`, `WriteFile` on kernel file handles,
+   `SetFilePointer`, `GetFileSize`/`Ex`, `GetFileAttributesA`/`W`,
+   `GetFileType`, all on the same cap-gated syscalls the 64-bit
+   `kernel32_io.c` uses. An application that reaches its own code
+   opens its own data files, so this was the first thing the rung
+   needed. Same slice fixed `CloseHandle`, which had been dispatching
+   SYS_STAT instead of SYS_FILE_CLOSE (see Design-Decisions —
+   second instance of the wrong-syscall-number class in this DLL, so
+   **audit the remaining hand-written syscall numbers across the
+   `_32` set** before climbing further). Still open on this rung:
+   `msvcrt_32` stdio (`fopen`/`fread`) has not been rebased onto the
+   new surface, and the USER32 window-class → message-loop climb has
+   not started.
 2. **Large bundled-data staging + FAT large volume.** The exe reads
    multi-GB archive files. Staging needs a much larger disk image than
    the 16 MiB `make-gpt-image.py` default, exercising the FAT32

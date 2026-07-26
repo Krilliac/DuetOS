@@ -2786,7 +2786,7 @@ Today's i386 surface (~280 exports, 13 DLLs):
 
 | DLL          | Exports | Source                                |
 |--------------|---------|---------------------------------------|
-| kernel32     | ~57     | `userland/libs/kernel32_32/`         |
+| kernel32     | 69      | `userland/libs/kernel32_32/`         |
 | msvcrt       | ~50     | `userland/libs/msvcrt_32/`           |
 | user32       | ~60     | `userland/libs/user32_32/`           |
 | gdi32        | ~45     | `userland/libs/gdi32_32/`            |
@@ -2830,6 +2830,25 @@ implementations:
   `GetModuleHandleW`/`LoadLibraryA`/`LoadLibraryW`. With this
   surface a static-CRT PE32 clears heap/TLS/locale/SEH-directory
   init and reaches its own application code.
+- `kernel32_32` **file I/O is REAL** (added 2026-07-26, the next
+  rung after CRT startup — an application that reaches its own
+  code opens its own data files). `userland/libs/kernel32_32/`
+  `kernel32_32_fs.c` translates `CreateFileA`/`CreateFileW`
+  (SYS_FILE_OPEN 20 / SYS_FILE_CREATE 44), `ReadFile` (21),
+  `SetFilePointer` (23), `GetFileSize`/`GetFileSizeEx` (24) and
+  `GetFileAttributesA`/`W` (SYS_FILE_QUERY_ATTRIBUTES 151) onto the
+  same cap-gated syscalls the 64-bit `kernel32_io.c` uses;
+  `WriteFile` routes kernel file handles (0x100..0x10F) to
+  SYS_FILE_WRITE (43) and `GetFileType` reports FILE_TYPE_DISK for
+  them. `CreateFile*` honours `dwCreationDisposition` against the
+  two primitives the kernel provides, which is more than the 64-bit
+  `CreateFileW` does today (it ignores the disposition and always
+  opens). Same slice fixed `CloseHandle`, which dispatched syscall
+  4 — SYS_STAT, not SYS_CLOSE (there is no SYS_CLOSE) — so every
+  close stat'ed a wild pointer, returned FALSE, and leaked the
+  handle slot until process exit; it is SYS_FILE_CLOSE (22) now.
+  Per-entry-point GAPs (truncation, 64-bit offsets, overlapped
+  I/O, UTF-16 transcode) are listed below and marked in-source.
 - `msvcrt_32` provides real string + memory intrinsics
   (memcpy / strlen / strcmp / etc.) and a bump-allocator
   malloc / free until the proper heap port lands.
@@ -2842,6 +2861,26 @@ Live verification: `userland/apps/pe32_rich/pe32_rich.c` imports
 one or two functions from each i386 DLL and prints a per-DLL
 `[pe32-rich] <name> ok` line. Every ring3 boot exercises the
 full chain.
+
+Most of those lines only prove the IAT resolved. The
+`[pe32-rich] kernel32-fileio ok` line is the exception: it asserts
+observable kernel state end-to-end against `/etc/version` — the
+returned handle is in the Win32 handle band, `GetFileType` says
+FILE_TYPE_DISK, a backwards `SetFilePointer(-4, FILE_END)` lands
+where it claims (proved by the following short read, not by the
+return value alone), a negative seek from FILE_BEGIN is rejected,
+and a read on the closed handle fails, which is what pins the
+`CloseHandle` fix. A failure emits
+`[ring3-pe32-rich] FAIL kernel32-fileio` plus a `step=NN` line
+naming the assertion, and the PE-compat verdict scanner counts it.
+
+Static check: `python3 tools/test/check-dll-def-exports.py`
+cross-checks every `userland/libs/*/*.def` against the definitions
+beside it, so an export added without an implementation — or an
+implementation that never reaches the export table — is caught on
+any host, with no cross-toolchain installed. Hosted unit test for
+the i386 path / seek-resolution core:
+`tests/host/test_kernel32_32_paths.cpp`.
 
 What's still GAP for the i386 set:
 
@@ -2858,10 +2897,36 @@ What's still GAP for the i386 set:
   `userland/libs/msvcrt_32/chkstk.S` walks ESP page by page,
   probes each page, then adjusts ESP per MSVC's canonical
   i386 chkstk algorithm.
-- File I/O surface stubbed throughout (`fopen` / `fread` /
-  `CreateFileA` etc.). The VFS-aware PE32 spawn slice lands
-  these the same time the 64-bit set gets its FS routing
-  through `mm::AddressSpace`'s permission gate.
+- `kernel32_32` file I/O is REAL (above); the remaining known
+  limits, each carrying a `// GAP:` marker in
+  `kernel32_32_fs.c`:
+  - **No truncation primitive.** `CREATE_ALWAYS` and
+    `TRUNCATE_EXISTING` open the existing file instead of zeroing
+    it, so a caller rewriting a shorter payload sees the old
+    tail. Needs a kernel `SYS_FILE_TRUNCATE` (or an O_TRUNC flag
+    on SYS_FILE_OPEN); the 64-bit path has the same hole.
+  - **Offsets limited to the low 4 GiB.** The i386 `int $0x80`
+    argument registers cannot carry a 64-bit distance, so
+    `SetFilePointer` rejects a non-zero
+    `lpDistanceToMoveHigh` with ERROR_INVALID_PARAMETER and
+    returns the new position's high dword as 0.
+    `GetFileSize`/`GetFileSizeEx` are unaffected — the size comes
+    back through a caller-supplied u64 slot, not a register.
+    First bites on the multi-GB bundled-data rung.
+  - **No overlapped I/O.** `ReadFile` / `WriteFile` reject a
+    non-NULL `lpOverlapped` rather than silently behaving
+    synchronously; the 32-bit set has no IOCP surface.
+  - **UTF-16 paths narrow by low byte**, so a `CreateFileW` with
+    non-Latin-1 characters gets a mangled name and an honest
+    miss. Same as the 64-bit `CreateFileW`.
+  - **`GetFileAttributes*` is FAT32-only**, because the kernel
+    routes SYS_FILE_QUERY_ATTRIBUTES through
+    `fs::routing::StatPathForProcess`. A ramfs path returns
+    INVALID_FILE_ATTRIBUTES even though `CreateFileA` opens it.
+    Fixed kernel-side, not here; identical on 64-bit.
+- `msvcrt_32`'s stdio (`fopen` / `fread` / …) is still stubbed —
+  it has not been rebased onto the now-real `kernel32_32`
+  file surface. That is the natural next 32-bit FS slice.
 
 ## 12. Where to start filling things in
 
