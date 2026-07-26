@@ -195,8 +195,11 @@ __declspec(dllexport) BOOL __stdcall WriteConsoleW(HANDLE hConsole, const wchar_
  * "where am I" / "where's kernel32" boot-time queries.
  * ------------------------------------------------------------------ */
 
-/* SYS_DLL_BASE_BY_NAME = 79 — kernel returns the loaded DLL's
- * post-ASLR base VA for the named module, or 0 if not loaded. */
+/* SYS_DLL_BASE_BY_NAME = 172 — kernel returns the loaded DLL's
+ * post-ASLR base VA for the named module, or 0 if not loaded.
+ * (This header said "= 79" until 2026-07-26 — stale residue from the
+ * 2026-06-17 fix, which corrected the call below but not the comment
+ * above it. 79 is SYS_WIN_SET_CURSOR.) */
 __declspec(dllexport) HANDLE __stdcall GetModuleHandleA(const char* lpModuleName)
 {
     /* SYS_DLL_BASE_BY_NAME (172): rdi = name ptr, rsi = name length.
@@ -230,11 +233,20 @@ __declspec(dllexport) HANDLE __stdcall GetModuleHandleW(const wchar_t16* lpModul
 /* GetProcAddress(hModule, lpProcName) - kernel asks the DLL loader
  * to look up `lpProcName` in `hModule`'s export table. Returns 0 on
  * miss; v0 callers (mostly LoadLibrary chasers) check for NULL.
- * SYS_DLL_PROC_ADDR = 80. */
+ *
+ * SYS_DLL_PROC_ADDRESS = 57: rdi = HMODULE (DLL base VA), rsi = user
+ * VA of the NUL-terminated ASCII name. (This previously called
+ * syscall 80, which is SYS_WIN_SET_CAPTURE, under a made-up name
+ * "SYS_DLL_PROC_ADDR" that no enum entry ever had: every
+ * GetProcAddress grabbed mouse capture for whatever HWND the module
+ * base's bit pattern resembled, then returned the captured-HWND value
+ * cast to FARPROC, so any dynamically-resolved call jumped to
+ * garbage.) */
 typedef void* FARPROC;
 __declspec(dllexport) FARPROC __stdcall GetProcAddress(HANDLE hModule, const char* lpProcName)
 {
-    const int rv = duet_syscall3(80, (unsigned)(unsigned long)hModule, (unsigned)(unsigned long)lpProcName, 0);
+    const int rv = duet_syscall2(57 /* SYS_DLL_PROC_ADDRESS */, (unsigned)(unsigned long)hModule,
+                                 (unsigned)(unsigned long)lpProcName);
     return (FARPROC)(unsigned long)(unsigned)rv;
 }
 
@@ -264,65 +276,136 @@ __declspec(dllexport) BOOL __stdcall FreeLibrary(HANDLE hLibModule)
  * Sleep / timing
  * ------------------------------------------------------------------ */
 
-/* SYS_SLEEP = 11 — caller blocks for the specified number of
- * milliseconds. v0 accepts INFINITE (-1) as "sleep forever". */
+/* SYS_SLEEP_MS = 19 — rdi = milliseconds; the caller is moved to the
+ * sleep queue and woken by the timer tick. rdi == 0 behaves like
+ * SYS_YIELD.
+ *
+ * (This previously called syscall 11 under a made-up name "SYS_SLEEP"
+ * that no enum entry ever had. 11 is SYS_HEAP_ALLOC, whose rdi is a
+ * byte count — so every Sleep(ms) returned immediately without ever
+ * blocking AND leaked an `ms`-byte heap allocation. A guest spin-loop
+ * that paced itself with Sleep therefore burned its whole tick budget
+ * while slowly exhausting its heap.) */
 __declspec(dllexport) void __stdcall Sleep(DWORD dwMilliseconds)
 {
-    duet_syscall1(11 /* SYS_SLEEP */, dwMilliseconds);
+    duet_syscall1(19 /* SYS_SLEEP_MS */, dwMilliseconds);
 }
 
-/* SYS_GETTICKCOUNT = 70 — uptime in ms since boot, low 32 bits. */
+/* SYS_PERF_COUNTER = 13 — no args; returns the kernel tick counter,
+ * which advances at 100 Hz. Win32 GetTickCount is milliseconds, so
+ * scale by 10, exactly as the 64-bit GetTickCount64 does. Truncating
+ * to DWORD is correct: Win32 documents GetTickCount as wrapping every
+ * ~49.7 days.
+ *
+ * (This previously called syscall 70 under a made-up name
+ * "SYS_GETTICKCOUNT" that no enum entry ever had. 70 is
+ * SYS_WIN_GET_RECT, which expects rdi=HWND, rsi=selector, rdx=RECT* —
+ * none of which were supplied, so the call returned a status flag
+ * rather than a time and left the kernel reading a stale register as
+ * the out-pointer.) */
 __declspec(dllexport) DWORD __stdcall GetTickCount(void)
 {
-    return (DWORD)duet_syscall0(70 /* SYS_GETTICKCOUNT */);
+    return (DWORD)((unsigned)duet_syscall0(13 /* SYS_PERF_COUNTER */) * 10u);
 }
 
 /* ------------------------------------------------------------------
- * Heap (v0: forward to the process win32-heap region the kernel
- * sets up at spawn time. Kernel side handles the actual allocation
- * via the SYS_HEAP_ALLOC / SYS_HEAP_FREE syscalls.)
+ * Heap — the handle-aware HEAPEX family, matching the 64-bit
+ * kernel32 (userland/libs/kernel32/kernel32_sync.c) exactly:
+ *
+ *   SYS_HEAPEX_ALLOC   = 194 — rdi = heap handle (0 = default),
+ *                              rsi = size.        Returns VA or 0.
+ *   SYS_HEAPEX_FREE    = 195 — rdi = heap handle, rsi = ptr.
+ *   SYS_HEAPEX_SIZE    = 196 — rdi = heap handle, rsi = ptr.
+ *                              Returns payload bytes, 0 on bad ptr.
+ *   SYS_HEAPEX_REALLOC = 197 — rdi = heap handle, rsi = ptr
+ *                              (0 = alloc), rdx = new size
+ *                              (0 = free). Returns new VA or 0.
+ *
+ * This whole block previously called syscalls 71 and 72 under the
+ * names "SYS_HEAP_ALLOC" / "SYS_HEAP_FREE". Those numbers are
+ * SYS_WIN_SET_TEXT and SYS_WIN_TIMER_SET: every HeapAlloc tried to
+ * retitle a window using the byte count as a string pointer, and
+ * every HeapFree tried to arm a window timer. Allocation always
+ * failed and nothing was ever freed.
+ *
+ * The legacy 2-arg SYS_HEAP_ALLOC(11)/SYS_HEAP_FREE(12) pair would
+ * also have been wrong here: it takes rdi = size with no heap
+ * handle, so it cannot honour the HeapCreate handle the static MSVC
+ * CRT allocates through. The 64-bit sibling uses HEAPEX for exactly
+ * that reason.
  * ------------------------------------------------------------------ */
 
-/* SYS_HEAP_ALLOC = 71 — args: process_heap_handle (ignored), size,
- * flags. Returns user VA of the allocated block, 0 on OOM. */
+#define HEAP_ZERO_MEMORY 0x00000008u
+
+/* The heap handle is the heap's base VA, not an opaque cookie:
+ * Win32HeapResolveHandle (kernel/subsystems/win32/heap.cpp) accepts
+ * proc->heap_base, 0, or kWin32HeapVa, and otherwise matches a
+ * HeapCreate'd secondary heap by base_va.
+ *
+ * This used to return a made-up 0x12340000 sentinel, on the stated
+ * assumption that "the kernel doesn't key on this value" — it does.
+ * 0x50000000 is kWin32HeapVa, the value the 64-bit GetProcessHeap
+ * returns, so every HEAPEX call now resolves instead of being
+ * rejected. */
+#define DUET32_PROCESS_HEAP_VA 0x50000000u
+
 __declspec(dllexport) HANDLE __stdcall GetProcessHeap(void)
 {
-    /* Sentinel handle. The kernel doesn't keyed on this value;
-     * any non-NULL HANDLE routes to the per-process heap. */
-    return (HANDLE)0x12340000u;
+    return (HANDLE)DUET32_PROCESS_HEAP_VA;
 }
 
 __declspec(dllexport) void* __stdcall HeapAlloc(HANDLE hHeap, DWORD dwFlags, unsigned dwBytes)
 {
-    const int rv = duet_syscall3(71 /* SYS_HEAP_ALLOC */, (unsigned)(unsigned long)hHeap, dwBytes, dwFlags);
-    return (void*)(unsigned long)(unsigned)rv;
+    const unsigned rv = (unsigned)duet_syscall2(194 /* SYS_HEAPEX_ALLOC */, (unsigned)(unsigned long)hHeap, dwBytes);
+    /* HEAP_ZERO_MEMORY is honoured in the DLL, as on 64-bit — the
+     * kernel hands back uninitialised heap bytes. */
+    if (rv != 0 && (dwFlags & HEAP_ZERO_MEMORY) != 0)
+    {
+        unsigned char* dst = (unsigned char*)(unsigned long)rv;
+        for (unsigned i = 0; i < dwBytes; ++i)
+            dst[i] = 0;
+    }
+    return (void*)(unsigned long)rv;
 }
 
 __declspec(dllexport) BOOL __stdcall HeapFree(HANDLE hHeap, DWORD dwFlags, void* lpMem)
 {
-    const int rv =
-        duet_syscall3(72 /* SYS_HEAP_FREE */, (unsigned)(unsigned long)hHeap, (unsigned)(unsigned long)lpMem, dwFlags);
-    return rv >= 0 ? 1 : 0;
+    (void)dwFlags;
+    /* Win32 treats HeapFree(NULL) as success; the kernel would
+     * reject it as a bad pointer. Same guard as the 64-bit sibling. */
+    if (lpMem == (void*)0)
+        return 1;
+    duet_syscall2(195 /* SYS_HEAPEX_FREE */, (unsigned)(unsigned long)hHeap, (unsigned)(unsigned long)lpMem);
+    return 1;
 }
 
 __declspec(dllexport) unsigned __stdcall HeapSize(HANDLE hHeap, DWORD dwFlags, const void* lpMem)
 {
-    (void)hHeap;
     (void)dwFlags;
-    (void)lpMem;
-    return 0; /* v0: unknown — caller fallback path expected. */
+    if (lpMem == (const void*)0)
+        return 0;
+    return (unsigned)duet_syscall2(196 /* SYS_HEAPEX_SIZE */, (unsigned)(unsigned long)hHeap,
+                                   (unsigned)(unsigned long)lpMem);
 }
 
-/* HeapReAlloc(hHeap, flags, lpMem, dwBytes): v0 fallback that
- * allocates a fresh block and copies. Doesn't free the old one
- * (no size oracle yet); the caller's pattern is "realloc then
- * stash both" for resilience. */
+/* HeapReAlloc(hHeap, flags, lpMem, dwBytes) — the kernel owns the
+ * grow/shrink and the payload copy.
+ *
+ * The previous implementation allocated a fresh block and returned it
+ * WITHOUT copying the old contents and without freeing the old block,
+ * because no size oracle existed. Every CRT realloc therefore silently
+ * lost the caller's data. HEAPEX_REALLOC has been available all along. */
 __declspec(dllexport) void* __stdcall HeapReAlloc(HANDLE hHeap, DWORD dwFlags, void* lpMem, unsigned dwBytes)
 {
-    void* nb = HeapAlloc(hHeap, dwFlags, dwBytes);
-    (void)lpMem;
-    /* TODO: copy min(old_size, dwBytes) bytes once HeapSize works. */
-    return nb;
+    const unsigned rv = (unsigned)duet_syscall3(197 /* SYS_HEAPEX_REALLOC */, (unsigned)(unsigned long)hHeap,
+                                                (unsigned)(unsigned long)lpMem, dwBytes);
+    if (rv != 0 && (dwFlags & HEAP_ZERO_MEMORY) != 0 && lpMem == (void*)0)
+    {
+        unsigned char* dst = (unsigned char*)(unsigned long)rv;
+        for (unsigned i = 0; i < dwBytes; ++i)
+            dst[i] = 0;
+    }
+    return (void*)(unsigned long)rv;
 }
 
 /* ------------------------------------------------------------------
@@ -682,16 +765,25 @@ __declspec(dllexport) BOOL __stdcall GetCPInfo(UINT CodePage, DUETOS_CPINFO32* l
 
 /* HeapCreate — the static CRT creates its main heap here and then
  * routes every subsequent HeapAlloc/HeapFree through the returned
- * handle. Our HeapAlloc/HeapFree ignore the handle and use the single
- * per-process heap, so we return the same sentinel GetProcessHeap
- * does: the CRT's "private" heap IS the process heap. Returning NULL
- * would send the CRT down its abort path. */
+ * handle. We alias it to the per-process heap: the CRT's "private"
+ * heap IS the process heap. Returning NULL would send the CRT down
+ * its abort path.
+ *
+ * GAP: no private arena — a HeapDestroy on this handle cannot
+ * actually reclaim the CRT's allocations because they live in the
+ * shared process heap, and two HeapCreate callers share one arena
+ * rather than being isolated. SYS_HEAPEX_CREATE (192) exists and
+ * would give a real secondary heap; wiring it is a follow-on slice
+ * because it also needs HeapDestroy (193) and the CRT's teardown
+ * ordering checked. The handle value matters either way — it must be
+ * one Win32HeapResolveHandle accepts, which the previous 0x12340000
+ * sentinel was not. */
 __declspec(dllexport) HANDLE __stdcall HeapCreate(DWORD flOptions, unsigned dwInitialSize, unsigned dwMaximumSize)
 {
     (void)flOptions;
     (void)dwInitialSize;
     (void)dwMaximumSize;
-    return (HANDLE)0x12340000u; /* same per-process-heap sentinel as GetProcessHeap */
+    return (HANDLE)DUET32_PROCESS_HEAP_VA; /* alias of GetProcessHeap */
 }
 
 /* HeapDestroy — the per-process heap is never torn down; succeed.

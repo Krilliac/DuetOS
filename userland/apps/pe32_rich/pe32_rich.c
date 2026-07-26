@@ -30,6 +30,9 @@ __declspec(dllimport) BOOL __stdcall HeapFree(HANDLE, DWORD, void*);
 __declspec(dllimport) DWORD __stdcall GetTickCount(void);
 __declspec(dllimport) void __stdcall Sleep(DWORD);
 __declspec(dllimport) HANDLE __stdcall GetModuleHandleA(const char*);
+__declspec(dllimport) unsigned __stdcall HeapSize(HANDLE, DWORD, const void*);
+__declspec(dllimport) void* __stdcall HeapReAlloc(HANDLE, DWORD, void*, unsigned);
+__declspec(dllimport) void* __stdcall GetProcAddress(HANDLE, const char*);
 
 /* kernel32 file I/O (kernel32_32_fs.c) */
 __declspec(dllimport) HANDLE __stdcall CreateFileA(const char*, DWORD, DWORD, void*, DWORD, DWORD, HANDLE);
@@ -158,6 +161,102 @@ static int FileIoProbe(void)
     return 0;
 }
 
+#define PROCESS_HEAP_VA 0x50000000u
+
+/*
+ * Heap / timing / module-resolution probe.
+ *
+ * Every one of these exports called the WRONG syscall until
+ * 2026-07-26 (Sleep->SYS_HEAP_ALLOC, GetTickCount->SYS_WIN_GET_RECT,
+ * HeapAlloc->SYS_WIN_SET_TEXT, HeapFree->SYS_WIN_TIMER_SET,
+ * GetProcAddress->SYS_WIN_SET_CAPTURE), and the old "kernel32 ok"
+ * line below still printed, because it only did `if (mem) {...}` —
+ * a NULL allocation skipped the body and reported success.
+ *
+ * So every assertion here is written to FAIL against the old
+ * behaviour, not merely to exercise the call.
+ *
+ * Returns 0 on success, or the number of the step that failed.
+ */
+static int HeapTimeProbe(void)
+{
+    HANDLE heap;
+    unsigned char* p;
+    unsigned char* q;
+    unsigned sz;
+    DWORD t0;
+    DWORD t1;
+    void* fn;
+    unsigned i;
+
+    /* The heap handle is the heap's base VA — Win32HeapResolveHandle
+     * only accepts proc->heap_base / 0 / kWin32HeapVa. The old
+     * 0x12340000 sentinel resolved to nothing. */
+    heap = GetProcessHeap();
+    if ((unsigned long)heap != PROCESS_HEAP_VA)
+        return 1;
+
+    /* Real allocation: must be non-NULL and writable. */
+    p = (unsigned char*)HeapAlloc(heap, 0, 256);
+    if (p == (unsigned char*)0)
+        return 2;
+    for (i = 0; i < 256; ++i)
+        p[i] = (unsigned char)(i & 0xFF);
+
+    /* HeapSize used to be hardcoded to 0. */
+    sz = HeapSize(heap, 0, p);
+    if (sz < 256)
+        return 3;
+
+    /* HeapReAlloc used to allocate a fresh block and NOT copy,
+     * silently losing the caller's data on every CRT realloc. */
+    q = (unsigned char*)HeapReAlloc(heap, 0, p, 512);
+    if (q == (unsigned char*)0)
+        return 4;
+    for (i = 0; i < 256; ++i)
+        if (q[i] != (unsigned char)(i & 0xFF))
+            return 5; /* contents did not survive the grow */
+    if (HeapSize(heap, 0, q) < 512)
+        return 6;
+    if (!HeapFree(heap, 0, q))
+        return 7;
+
+    /* HEAP_ZERO_MEMORY (0x8) is honoured in the DLL. */
+    p = (unsigned char*)HeapAlloc(heap, 0x8, 64);
+    if (p == (unsigned char*)0)
+        return 8;
+    for (i = 0; i < 64; ++i)
+        if (p[i] != 0)
+            return 9;
+    HeapFree(heap, 0, p);
+
+    /* Sleep must actually block, and GetTickCount must report
+     * milliseconds that advance. Before the fix Sleep returned
+     * immediately and GetTickCount returned a constant status flag,
+     * so the delta was 0 — this is the discriminating assertion.
+     * Tick granularity is 10 ms, so a 50 ms sleep must show at
+     * least one tick. */
+    t0 = GetTickCount();
+    Sleep(50);
+    t1 = GetTickCount();
+    if (t1 < t0)
+        return 10; /* time went backwards */
+    if (t1 - t0 < 10)
+        return 11; /* Sleep did not block / tick did not advance */
+
+    /* GetProcAddress must resolve a real export from a real module.
+     * Before the fix it grabbed mouse capture and returned an HWND
+     * cast to FARPROC. */
+    fn = GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "Sleep");
+    if (fn == (void*)0)
+        return 12;
+    /* A miss must be an honest NULL, not a captured-window handle. */
+    if (GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "NoSuchExportZZ") != (void*)0)
+        return 13;
+
+    return 0;
+}
+
 static void say(const char* s)
 {
     HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -178,14 +277,20 @@ void __cdecl mainCRTStartup(void)
      * correctly via the 32-bit syscall remap, and the return
      * value comes back. */
 
-    /* kernel32: GetProcessHeap + HeapAlloc + HeapFree round-trip. */
+    /* kernel32: GetProcessHeap + HeapAlloc + HeapFree round-trip.
+     * The allocation must succeed — this used to be wrapped in
+     * `if (mem)`, which let a totally broken HeapAlloc report
+     * success. HeapTimeProbe below asserts the rest. */
     HANDLE heap = GetProcessHeap();
     void* mem = HeapAlloc(heap, 0, 256);
-    if (mem)
+    if (!mem)
     {
-        memset(mem, 0xAA, 256);
-        HeapFree(heap, 0, mem);
+        say("[pe32-rich] kernel32 FAIL HeapAlloc\r\n");
+        say("[ring3-pe32-rich] FAIL kernel32-heap\r\n");
+        ExitProcess(1);
     }
+    memset(mem, 0xAA, 256);
+    HeapFree(heap, 0, mem);
     say("[pe32-rich] kernel32 ok\r\n");
 
     /* msvcrt: strlen + atoi. */
@@ -261,6 +366,22 @@ void __cdecl mainCRTStartup(void)
     HANDLE k32 = GetModuleHandleA("KERNEL32.dll");
     (void)k32;
     say("[pe32-rich] timer + module ok\r\n");
+
+    /* kernel32 heap / timing / module resolution — five exports that
+     * called the wrong syscall until 2026-07-26. */
+    {
+        const int step = HeapTimeProbe();
+        if (step != 0)
+        {
+            char msg[] = "[pe32-rich] kernel32-heaptime FAIL step=NN\r\n";
+            msg[40] = (char)('0' + (step / 10));
+            msg[41] = (char)('0' + (step % 10));
+            say(msg);
+            say("[ring3-pe32-rich] FAIL kernel32-heaptime\r\n");
+            ExitProcess(1);
+        }
+        say("[pe32-rich] kernel32-heaptime ok\r\n");
+    }
 
     /* kernel32 file I/O — the only block here that asserts real
      * kernel semantics rather than "the IAT resolved". */
