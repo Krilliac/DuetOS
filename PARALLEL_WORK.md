@@ -11,3 +11,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Retire CreateThread ExitThread and GetExitCodeThread legacy thunks with linked-export verification
 - **Claimed**: 2026-07-26T23:30:04Z
 - **Status**: IN PROGRESS
+
+### 🟢 thunk-retirement-runtime-test
+- **Session**: `Codex-thunk-wave1`
+- **Branch**: `claude/thunk-retirement-wave1`
+- **Files**: `userland/apps/syscall_stress/* tools/build/build-syscall-stress.sh kernel/CMakeLists.txt`
+- **Description**: Add distinguishable-argument FreeLibraryAndExitThread runtime coverage
+- **Claimed**: 2026-07-26T23:38:21Z
+- **Status**: IN PROGRESS
