@@ -27,3 +27,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Regenerate
 - **Claimed**: 2026-07-26T12:15:59Z
 - **Status**: IN PROGRESS
+
+### 🟢 parallel-coordinator-portability
+- **Session**: `Nathan-395`
+- **Branch**: `claude/vmm-msr-hardening`
+- **Files**: `tools/parallel/claim.sh`
+- **Description**: tools/parallel/release.sh
+- **Claimed**: 2026-07-26T12:21:07Z
+- **Status**: IN PROGRESS
