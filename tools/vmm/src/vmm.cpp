@@ -230,6 +230,10 @@ void Vmm::PumpReplay()
         case EvKind::Pit2Expire:
             m_pit.ForceExpire();
             break;
+        default:
+            // Defence in depth: EventLog::ReadNext already refuses to
+            // hand out a kind that isn't one of the three above.
+            break;
         }
         m_log.Pop();
     }

@@ -61,12 +61,18 @@ public:
     // Replay: consume the peeked event (call after Peek + apply).
     void Pop();
 
+    // Record: true if any frame failed to reach the disk. A short write
+    // silently truncates the log, which would make a later --replay
+    // diverge from the run it claims to reproduce.
+    bool writeFailed() const { return m_writeFailed; }
+
 private:
     RecMode m_mode = RecMode::Off;
     FILE*   m_fp = nullptr;
     Event   m_next;          // replay lookahead
     bool    m_haveNext = false;
-    bool    ReadNext();
+    bool    m_writeFailed = false;
+    bool ReadNext();
 };
 
 } // namespace duetos::vmm
