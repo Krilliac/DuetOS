@@ -156,7 +156,13 @@ collect_inventory() {
     # --- STUB / GAP markers ---
     STUB_COUNT=0
     GAP_COUNT=0
-    if command -v git >/dev/null 2>&1 && [ -d "$PROJECT_ROOT/.git" ]; then
+    # NOTE: test with `git rev-parse`, not `[ -d .git ]`. In a git WORKTREE
+    # (`git worktree add`, which is how the Claude Code sessions run) `.git`
+    # is a regular FILE containing a `gitdir:` pointer, so the directory test
+    # is false and both counters silently stayed 0 — writing "STUB markers 0
+    # / GAP markers 0" into Home.md's AUTO:stats block.
+    if command -v git >/dev/null 2>&1 && (cd "$PROJECT_ROOT" && git rev-parse --is-inside-work-tree >/dev/null 2>&1);
+    then
         STUB_COUNT=$(cd "$PROJECT_ROOT" && git grep -nE '// STUB:' 2>/dev/null | wc -l)
         GAP_COUNT=$(cd "$PROJECT_ROOT" && git grep -nE '// GAP:' 2>/dev/null | wc -l)
     fi
