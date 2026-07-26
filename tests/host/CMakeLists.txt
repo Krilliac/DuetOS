@@ -133,6 +133,15 @@ add_test(
             --strict
 )
 
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+add_test(
+    NAME iphlpapi_socket_abi
+    COMMAND Python3::Interpreter
+            "${CMAKE_SOURCE_DIR}/../../tools/test/iphlpapi-socket-abi.py"
+            --root "${CMAKE_SOURCE_DIR}/../.."
+)
+
 # ---------------------------------------------------------------
 # Test helper. Header-only single-file ASSERT framework — far
 # lighter than gtest/Catch2, which would be the wrong dep for a
