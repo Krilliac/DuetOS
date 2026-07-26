@@ -110,6 +110,9 @@ add_host_test(d3dcompiler)
 # GDI region geometry: freestanding header (userland/libs/gdi32/gdi32_region.h),
 # included by relative path — no extra target_sources needed.
 add_host_test(gdi32_region)
+# i386 kernel32 companion path / seek-resolution core: freestanding
+# header (userland/libs/kernel32_32/kernel32_32_paths.h), no kernel TU.
+add_host_test(kernel32_32_paths)
 add_host_test(damage_rect)
 add_host_test(render_stats)
 target_sources(test_render_stats PRIVATE

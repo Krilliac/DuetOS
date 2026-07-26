@@ -1504,8 +1504,8 @@ enum SyscallNumber : u64
     // SYS_FILE_QUERY_ATTRIBUTES — path-based file metadata
     // lookup (no handle required). Backs NtQueryAttributesFile /
     // NtQueryFullAttributesFile.
-    //   rdi = const char* user_path (NUL-terminated, max 64).
-    //   rsi = path_len (excluding NUL).
+    //   rdi = const char* user_path (NUL-terminated).
+    //   rsi = path_len (excluding NUL); must be in [1, 256).
     //   rdx = u8* user out buffer (FILE_NETWORK_OPEN_INFORMATION
     //         layout = 56 bytes: 4×FILETIME, AllocationSize,
     //         EndOfFile, FileAttributes, Reserved).

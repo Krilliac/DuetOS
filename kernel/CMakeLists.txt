@@ -853,6 +853,10 @@ duetos_embed_blob(generated_kernel32_dll.h
 duetos_embed_blob(generated_kernel32_32_dll.h
     SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-kernel32-32-dll.sh"
     SRC     "${CMAKE_SOURCE_DIR}/userland/libs/kernel32_32/kernel32_32.c"
+    EXTRA_DEPS
+        "${CMAKE_SOURCE_DIR}/userland/libs/kernel32_32/kernel32_32_internal.h"
+        "${CMAKE_SOURCE_DIR}/userland/libs/kernel32_32/kernel32_32_fs.c"
+        "${CMAKE_SOURCE_DIR}/userland/libs/kernel32_32/kernel32_32.def"
     COMMENT "Compiling + embedding kernel32_32.dll (i386 PE32 companion)")
 
 # 32-bit msvcrt companion — string / memory / CRT-startup intrinsics

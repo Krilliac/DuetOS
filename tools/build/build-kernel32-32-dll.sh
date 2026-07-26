@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tools/build/build-kernel32-32-dll.sh
 #
-# Compiles userland/libs/kernel32_32/kernel32_32.c into a
+# Compiles userland/libs/kernel32_32/*.c into a
 # freestanding i386 (PE32) Windows DLL — the 32-bit companion to
 # our PE32+ kernel32.dll. PE32 processes spawned by the kernel
 # preload this DLL into their (low-4GB) address space; their IAT
@@ -26,11 +26,13 @@ REPO_ROOT="$1"
 OUT_HEADER="$2"
 SRC_DIR="${REPO_ROOT}/userland/libs/kernel32_32"
 SRC_C="${SRC_DIR}/kernel32_32.c"
+SRC_FS="${SRC_DIR}/kernel32_32_fs.c"
 EMBED="${REPO_ROOT}/tools/build/embed-blob.py"
 
 WORK_DIR="$(dirname "${OUT_HEADER}")/kernel32_32"
 mkdir -p "${WORK_DIR}"
 OBJ="${WORK_DIR}/kernel32_32.obj"
+OBJ_FS="${WORK_DIR}/kernel32_32_fs.obj"
 # Output filename is "kernel32.dll" (not kernel32_32.dll) because
 # lld-link stamps the basename of /out: into the PE Export Directory's
 # Name field. That's the string the PE32 importer's case-insensitive
@@ -48,6 +50,18 @@ LLD_LINK="${LLD_LINK:-lld-link}"
     -O2 -Wall -Wextra \
     "${SRC_C}" -o "${OBJ}"
 
+# File I/O TU — CreateFile* / ReadFile / SetFilePointer / GetFileSize*
+# / GetFileAttributes*. Split out of kernel32_32.c to keep both TUs
+# under the project's ~500-line guideline; they share
+# kernel32_32_internal.h.
+"${CLANG}" \
+    --target=i686-pc-windows-msvc \
+    -c \
+    -ffreestanding -nostdlib -fno-stack-protector -fno-builtin \
+    -mno-red-zone -fno-asynchronous-unwind-tables \
+    -O2 -Wall -Wextra \
+    "${SRC_FS}" -o "${OBJ_FS}"
+
 rm -f "${DLL}"
 set +e
 # A .def file with `LIBRARY kernel32.dll` sets the PE export-table
@@ -60,7 +74,7 @@ set +e
     /dll /noentry /nodefaultlib /machine:x86 \
     /base:0x10020000 \
     /def:"${SRC_DIR}/kernel32_32.def" \
-    /out:"${DLL}" "${OBJ}" 2>&1 | grep -v "align specified without /driver"
+    /out:"${DLL}" "${OBJ}" "${OBJ_FS}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}
 set -e
 if [[ ${LINK_RC} -ne 0 ]]; then
