@@ -11,3 +11,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: WHP MSR virtualization, GDB readiness, and Windows workflow hardening
 - **Claimed**: 2026-07-26T11:40:11Z
 - **Status**: IN PROGRESS
+
+### 🟢 vmm-root-workflow-sync
+- **Session**: `Nathan-1986`
+- **Branch**: `claude/vmm-msr-hardening`
+- **Files**: `launch.vs.json`
+- **Description**: No description provided
+- **Claimed**: 2026-07-26T12:15:23Z
+- **Status**: IN PROGRESS
