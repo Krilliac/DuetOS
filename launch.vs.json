@@ -34,7 +34,7 @@
   //         "type": "default",
   //         "command": "powershell.exe",
   //         "args": [
-  //           "-ExecutionPolicy", "Bypass", "-File",
+  //           "-NoProfile", "-File",
   //           "${workspaceRoot}\\tools\\vmm\\vs-start-vmm.ps1",
   //           "-BuildKernel"
   //         ]
@@ -47,7 +47,8 @@
   // `tools\vmm\vs-start-vmm.ps1 -BuildKernel` in a PowerShell window
   // first, then F5 that config. The script builds the kernel (WSL),
   // builds the VMM (MSVC), launches it with --gdb, and returns once
-  // the port is accepting so the attach is race-free.
+  // that process owns the port's LISTEN socket. It does not connect:
+  // the stub accepts one client and that slot belongs to the debugger.
   "version": "0.2.1",
   "defaults": {},
   "configurations": [
