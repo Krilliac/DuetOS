@@ -1065,9 +1065,13 @@ focus of any current slice.
 ### vcruntime140.dll  (~330 LOC)
 
 Stack-frame / SEH unwind primitives for MSVC-built code.
-`__C_specific_handler`, `__std_terminate`,
-`memcpy` / `memset` / `memmove` aliases, `__chkstk` — REAL,
-because the bodies are tiny.
+`__C_specific_handler`, `__CxxFrameHandler3`,
+`_CxxThrowException`, `__std_terminate`,
+`memcpy` / `memset` / `memmove` aliases, and `__chkstk` are REAL.
+The x64 C++ path uses bounded table-based unwinding and a two-pass
+target transfer, including by-value catches, reference catches, and
+cross-frame destructor ordering. Copy-ctor catch objects, compressed
+FH4 metadata, ESTypeList, and rethrow remain explicit gaps.
 
 `/GS` stack-cookie facade (T9-02 v0): `__security_cookie`
 holds the documented MSVC default (`0x00002B992DDFA232`),

@@ -107,29 +107,6 @@ __declspec(dllexport) LONG64 InterlockedXor64(LONG64 volatile* dest, LONG64 valu
     return __atomic_fetch_xor(dest, value, __ATOMIC_SEQ_CST);
 }
 
-/* GAP: Transitional pointer encoding preserves the legacy thunk's
- * reversible identity contract. It does not yet use a per-process secret,
- * so it provides ABI compatibility but no pointer-obfuscation hardening. */
-__declspec(dllexport) void* EncodePointer(void* pointer)
-{
-    return pointer;
-}
-
-__declspec(dllexport) void* DecodePointer(void* pointer)
-{
-    return pointer;
-}
-
-__declspec(dllexport) void* RtlEncodePointer(void* pointer)
-{
-    return EncodePointer(pointer);
-}
-
-__declspec(dllexport) void* RtlDecodePointer(void* pointer)
-{
-    return DecodePointer(pointer);
-}
-
 /* ------------------------------------------------------------------
  * Console / system introspection
  *
@@ -399,29 +376,6 @@ __declspec(dllexport) BOOL FreeLibrary(void* hModule)
 {
     (void)hModule;
     return 1; /* Pretend success — we don't refcount mapped DLLs yet. */
-}
-
-/* Resolve directly against the process's registered PE export tables.
- * GAP: Ordinal lookup is not exposed by SYS_DLL_PROC_ADDRESS yet, so reject
- * MAKEINTRESOURCE-style ordinal names explicitly instead of asking the
- * kernel to dereference a low address. */
-__declspec(dllexport) void* GetProcAddress(void* hModule, const char* name)
-{
-    if (hModule == (void*)0 || name == (const char*)0 || (unsigned long long)name <= 0xFFFFULL)
-    {
-        SetLastError(127u); /* ERROR_PROC_NOT_FOUND */
-        return (void*)0;
-    }
-
-    long long rv;
-    __asm__ volatile("int $0x80"
-                     : "=a"(rv)
-                     : "a"((long long)57), "D"((long long)(unsigned long long)hModule),
-                       "S"((long long)(unsigned long long)name)
-                     : "memory");
-    if (rv == 0)
-        SetLastError(127u);
-    return (void*)(unsigned long long)rv;
 }
 
 /* ------------------------------------------------------------------
