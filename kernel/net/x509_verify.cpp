@@ -275,6 +275,15 @@ void DecodeSubjectAltName(const Element& extn_value, ParsedCert* pc)
 void DecodeBasicConstraints(const Element& extn_value, ParsedCert* pc)
 {
     using namespace duetos::crypto::asn1;
+    if (pc->bc_present)
+    {
+        // RFC 5280 §4.2: a certificate MUST NOT carry more than one
+        // instance of an extension. A duplicate is attacker-shaped
+        // ambiguity — refuse to let the later copy win, and refuse the
+        // cert as an issuer outright.
+        pc->bc_is_ca = false;
+        return;
+    }
     Element seq{};
     if (Read(extn_value.value, extn_value.len, &seq) != Status::Ok || seq.tag != kTagSequence)
         return;
@@ -308,6 +317,12 @@ void DecodeBasicConstraints(const Element& extn_value, ParsedCert* pc)
 void DecodeKeyUsage(const Element& extn_value, ParsedCert* pc)
 {
     using namespace duetos::crypto::asn1;
+    if (pc->ku_present)
+    {
+        // Duplicate extension — same §4.2 rule as basicConstraints.
+        pc->ku_key_cert_sign = false;
+        return;
+    }
     Element bits{};
     if (Read(extn_value.value, extn_value.len, &bits) != Status::Ok || bits.tag != kTagBitString || bits.len < 1)
         return;
@@ -1990,6 +2005,25 @@ u32 IssuerConstraintDecodeChecks()
         return 0xF5'4Cu;
     if (!c.ku_key_cert_sign || !IsUsableIssuer(c, 0))
         return 0xF5'4Du;
+
+    // A DUPLICATE basicConstraints (RFC 5280 §4.2 forbids it) must not
+    // let the later copy win: cA FALSE then cA TRUE stays not-an-issuer.
+    c = ParsedCert{};
+    if (!DecodeExtnFixture(kBcCaFalse, sizeof(kBcCaFalse), &c, DecodeBasicConstraints) ||
+        !DecodeExtnFixture(kBcCaTrue, sizeof(kBcCaTrue), &c, DecodeBasicConstraints))
+        return 0xF5'4Eu;
+    if (c.bc_is_ca || IsUsableIssuer(c, 0))
+        return 0xF5'4Fu;
+
+    // Same for a duplicate keyUsage: keyCertSign then not-keyCertSign,
+    // and the reverse, both end up without keyCertSign.
+    c = ParsedCert{};
+    if (!DecodeExtnFixture(kBcCaTrue, sizeof(kBcCaTrue), &c, DecodeBasicConstraints) ||
+        !DecodeExtnFixture(kKuCertSign, sizeof(kKuCertSign), &c, DecodeKeyUsage) ||
+        !DecodeExtnFixture(kKuCertSign, sizeof(kKuCertSign), &c, DecodeKeyUsage))
+        return 0xF5'50u;
+    if (c.ku_key_cert_sign || IsUsableIssuer(c, 0))
+        return 0xF5'51u;
 
     return 0;
 }
