@@ -20,13 +20,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-26T12:15:23Z
 - **Status**: COMPLETED @ 2026-07-26T12:23:31Z
 
-### 🟢 wiki-stats-sync
+### ✅ wiki-stats-sync
 - **Session**: `Nathan-733`
 - **Branch**: `claude/vmm-msr-hardening`
 - **Files**: `wiki/Home.md`
 - **Description**: Regenerate
 - **Claimed**: 2026-07-26T12:15:59Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-26T12:23:32Z
 
 ### 🟢 parallel-coordinator-portability
 - **Session**: `Nathan-395`
