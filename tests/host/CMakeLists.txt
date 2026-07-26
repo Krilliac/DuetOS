@@ -65,8 +65,6 @@ add_test(
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/../../tools/test/cxxeh-context-contract.py"
 )
 
-find_package(Python3 REQUIRED COMPONENTS Interpreter)
-
 add_test(
     NAME iphlpapi_socket_abi
     COMMAND Python3::Interpreter
