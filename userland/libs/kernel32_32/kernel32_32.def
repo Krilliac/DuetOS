@@ -67,3 +67,11 @@ EXPORTS
     GetModuleFileNameA
     VirtualQuery
     FlushInstructionCache
+    CreateFileA
+    CreateFileW
+    ReadFile
+    SetFilePointer
+    GetFileSize
+    GetFileSizeEx
+    GetFileAttributesA
+    GetFileAttributesW

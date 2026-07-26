@@ -27,40 +27,14 @@
  *
  * Layer-4 minimum surface: just the calls pe32_smoke uses. Future
  * slices grow this to the full ~150-export kernel32 footprint.
+ *
+ * File I/O (CreateFile / ReadFile / SetFilePointer / GetFileSize /
+ * GetFileAttributes) lives in the sibling TU kernel32_32_fs.c; the
+ * typedefs and syscall trampolines both TUs use live in
+ * kernel32_32_internal.h.
  */
 
-typedef unsigned int DWORD;
-typedef unsigned int UINT;
-typedef int BOOL;
-typedef void* HANDLE;
-
-#define WIN32_NORETURN __attribute__((noreturn))
-
-/* No-arg syscall trampoline: eax = nr. */
-static inline int duet_syscall0(int nr)
-{
-    int rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"(nr) : "memory");
-    return rv;
-}
-
-/* Single-arg syscall trampoline: eax = nr, ebx = arg1. */
-static inline int duet_syscall1(int nr, unsigned a1)
-{
-    int rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"(nr), "b"(a1) : "memory");
-    return rv;
-}
-
-/* Three-arg syscall trampoline: eax = nr, ebx = arg1, ecx = arg2,
- * edx = arg3. Linux i386 ABI; the kernel's isr_common remaps
- * (ebx,ecx,edx) -> (rdi,rsi,rdx) for the C++ dispatcher. */
-static inline int duet_syscall3(int nr, unsigned a1, unsigned a2, unsigned a3)
-{
-    int rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"(nr), "b"(a1), "c"(a2), "d"(a3) : "memory");
-    return rv;
-}
+#include "kernel32_32_internal.h"
 
 /* ------------------------------------------------------------------
  * Noreturn terminators (SYS_EXIT = 0, ebx = exit code)
@@ -144,17 +118,40 @@ __declspec(dllexport) HANDLE __stdcall GetStdHandle(DWORD nStdHandle)
     return (HANDLE)(unsigned)nStdHandle;
 }
 
+/* WriteFile dispatches by handle range, mirroring the 64-bit
+ * kernel32:
+ *   - kernel file handles (0x100..0x10F, planted by CreateFile* via
+ *     SYS_FILE_OPEN / SYS_FILE_CREATE) → SYS_FILE_WRITE, which walks
+ *     the per-handle cursor under the kCapFsWrite gate.
+ *   - the three std handles → SYS_WRITE(fd=1).
+ *   - anything else → FALSE. No "dump it to stdout anyway" fallback:
+ *     that masks stale-handle bugs in the caller.
+ *
+ * GAP: lpOverlapped is not honoured — the 32-bit set has no IOCP
+ * surface, so an overlapped write would silently behave
+ * synchronously at the current cursor. Rejected rather than faked;
+ * see the matching note in kernel32_32_fs.c::ReadFile. */
 __declspec(dllexport) BOOL __stdcall WriteFile(HANDLE h, const void* buf, DWORD n, DWORD* lpWritten, void* lpOverlapped)
 {
-    (void)lpOverlapped;
     const unsigned h_low = (unsigned)(unsigned long)h;
-    /* Std handles only — no file I/O in the 32-bit kernel32 v0. */
-    if (h_low != 0xFFFFFFF5u && h_low != 0xFFFFFFF4u && h_low != 0xFFFFFFF6u)
+    if (lpWritten != (DWORD*)0)
+        *lpWritten = 0;
+
+    if (Duet32IsFileHandle(h))
     {
+        if (lpOverlapped != (void*)0)
+            return 0;
+        const int frv = duet_syscall3(43 /* SYS_FILE_WRITE */, h_low, (unsigned)(unsigned long)buf, n);
+        if (frv < 0)
+            return 0;
         if (lpWritten != (DWORD*)0)
-            *lpWritten = 0;
-        return 0;
+            *lpWritten = (DWORD)frv;
+        return 1;
     }
+
+    if (h_low != 0xFFFFFFF5u && h_low != 0xFFFFFFF4u && h_low != 0xFFFFFFF6u)
+        return 0;
+
     const int rv = duet_syscall3(2 /* SYS_WRITE */, 1 /* fd=stdout */, (unsigned)(unsigned long)buf, n);
     if (lpWritten != (DWORD*)0)
         *lpWritten = rv >= 0 ? (DWORD)rv : 0;
@@ -169,8 +166,7 @@ __declspec(dllexport) BOOL __stdcall WriteConsoleA(HANDLE hConsole, const void* 
 
 /* WriteConsoleW: same as A but each input char is a wchar_t16. Strip
  * to ASCII by taking the low byte; fine for ASCII/Latin-1 codepoints,
- * approximates the rest. */
-typedef unsigned short wchar_t16;
+ * approximates the rest. (wchar_t16 comes from the internal header.) */
 __declspec(dllexport) BOOL __stdcall WriteConsoleW(HANDLE hConsole, const wchar_t16* buf, DWORD n, DWORD* lpWritten,
                                                    void* lpReserved)
 {
@@ -368,15 +364,20 @@ __declspec(dllexport) void __stdcall GetStartupInfoW(void* lpStartupInfo)
     GetStartupInfoA(lpStartupInfo);
 }
 
-/* GetFileType — type of the named file handle. v0 returns
- *   FILE_TYPE_CHAR (0x2) for the three std handles
- *   FILE_TYPE_UNKNOWN (0x0) otherwise
- * which is enough for MSVC CRT's "is stdout a console?" check. */
+/* GetFileType — type of the named file handle:
+ *   FILE_TYPE_CHAR (0x2) for the three std handles — what MSVC CRT's
+ *     "is stdout a console?" check wants.
+ *   FILE_TYPE_DISK (0x1) for kernel file handles, so a caller that
+ *     gates seeking on "is this seekable?" gets the right answer for
+ *     a CreateFile* handle.
+ *   FILE_TYPE_UNKNOWN (0x0) otherwise. */
 __declspec(dllexport) DWORD __stdcall GetFileType(HANDLE hFile)
 {
     const unsigned h = (unsigned)(unsigned long)hFile;
     if (h == 0xFFFFFFF5u || h == 0xFFFFFFF4u || h == 0xFFFFFFF6u)
         return 0x2; /* FILE_TYPE_CHAR */
+    if (Duet32IsFileHandle(hFile))
+        return 0x1; /* FILE_TYPE_DISK */
     return 0x0;     /* FILE_TYPE_UNKNOWN */
 }
 
@@ -478,12 +479,24 @@ __declspec(dllexport) void __stdcall UnhandledExceptionFilter(void* info)
     (void)info;
 }
 
-/* CloseHandle: kernel handles are per-process; the kernel32 path is
- * a thin wrapper around SYS_CLOSE = 4. */
+/* CloseHandle: kernel handles are per-process; the kernel32 path is a
+ * thin wrapper around SYS_FILE_CLOSE = 22, which frees the handle
+ * slot and treats an unknown handle as a documented no-op.
+ *
+ * (This previously called syscall 4 — SYS_STAT, not SYS_CLOSE; there
+ * is no SYS_CLOSE. Every close therefore issued a path-stat with the
+ * handle value reinterpreted as a user path pointer, leaked a
+ * kCapFsRead denial on sandboxed callers, returned FALSE, and left
+ * the file slot allocated until process exit. Same wrong-syscall-
+ * number class as the GetModuleHandleA bug fixed 2026-06-17; the
+ * 64-bit kernel32 has always used 22.) */
 __declspec(dllexport) BOOL __stdcall CloseHandle(HANDLE hObject)
 {
-    const int rv = duet_syscall1(4 /* SYS_CLOSE */, (unsigned)(unsigned long)hObject);
-    return rv >= 0 ? 1 : 0;
+    duet_syscall1(22 /* SYS_FILE_CLOSE */, (unsigned)(unsigned long)hObject);
+    /* Match the 64-bit kernel32 and the flat-stub contract: always
+     * TRUE. The kernel handles unknown handles as a no-op, and Win32
+     * callers routinely close pseudo-handles. */
+    return 1;
 }
 
 /* GetVersion / GetVersionExA — version pretend. v0 reports a fixed

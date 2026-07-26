@@ -31,6 +31,14 @@ __declspec(dllimport) DWORD __stdcall GetTickCount(void);
 __declspec(dllimport) void __stdcall Sleep(DWORD);
 __declspec(dllimport) HANDLE __stdcall GetModuleHandleA(const char*);
 
+/* kernel32 file I/O (kernel32_32_fs.c) */
+__declspec(dllimport) HANDLE __stdcall CreateFileA(const char*, DWORD, DWORD, void*, DWORD, DWORD, HANDLE);
+__declspec(dllimport) BOOL __stdcall ReadFile(HANDLE, void*, DWORD, DWORD*, void*);
+__declspec(dllimport) DWORD __stdcall SetFilePointer(HANDLE, int, int*, DWORD);
+__declspec(dllimport) DWORD __stdcall GetFileSize(HANDLE, DWORD*);
+__declspec(dllimport) DWORD __stdcall GetFileType(HANDLE);
+__declspec(dllimport) BOOL __stdcall CloseHandle(HANDLE);
+
 /* msvcrt */
 __declspec(dllimport) unsigned __cdecl strlen(const char*);
 __declspec(dllimport) int __cdecl atoi(const char*);
@@ -71,6 +79,84 @@ __declspec(dllimport) USHORT __stdcall htons(USHORT);
 
 /* bcrypt */
 __declspec(dllimport) int __stdcall BCryptGenRandom(HANDLE, unsigned char*, DWORD, DWORD);
+
+#define INVALID_HANDLE_VALUE ((HANDLE)(unsigned long)0xFFFFFFFFu)
+#define INVALID_SET_FILE_POINTER 0xFFFFFFFFu
+#define GENERIC_READ 0x80000000u
+#define OPEN_EXISTING 3u
+#define FILE_BEGIN 0u
+#define FILE_END 2u
+#define FILE_TYPE_DISK 1u
+
+/*
+ * Real file I/O against the ramfs file every trusted-root process
+ * sees. Unlike the rest of this image — which only proves the IAT
+ * resolves — every assertion below pins observable kernel state:
+ * the handle band, the cursor SetFilePointer claims to have moved,
+ * the short read that proves it moved there, and the fact that
+ * CloseHandle actually frees the slot.
+ *
+ * Deliberately relational, not byte-exact: the file's contents are
+ * ramfs.cpp's business, so asserting them here would make this test
+ * fail for the wrong reason when that string changes.
+ *
+ * Returns 0 on success, or the number of the step that failed.
+ */
+static int FileIoProbe(void)
+{
+    const char* kPath = "/etc/version";
+    char buf[16];
+    DWORD hi = 0;
+    DWORD got = 0;
+    DWORD size;
+    HANDLE f;
+
+    f = CreateFileA(kPath, GENERIC_READ, 0, (void*)0, OPEN_EXISTING, 0, (HANDLE)0);
+    if (f == INVALID_HANDLE_VALUE)
+        return 1;
+    /* Win32-shaped kernel file handle: kWin32HandleBase + slot. */
+    if ((unsigned long)f < 0x100u || (unsigned long)f >= 0x110u)
+        return 2;
+    if (GetFileType(f) != FILE_TYPE_DISK)
+        return 3;
+
+    size = GetFileSize(f, &hi);
+    if (size == 0xFFFFFFFFu || size <= 8 || hi != 0)
+        return 4;
+
+    if (!ReadFile(f, buf, 8, &got, (void*)0) || got != 8)
+        return 5;
+
+    /* Backwards seek from EOF. The 32-bit syscall ABI zero-extends
+     * its arguments, so this only lands correctly because the DLL
+     * resolves the negative distance to an absolute offset first. */
+    if (SetFilePointer(f, -4, (int*)0, FILE_END) != size - 4)
+        return 6;
+    /* ...and the short read proves the cursor really is at size-4,
+     * not merely that the call returned a plausible number. */
+    if (!ReadFile(f, buf, 8, &got, (void*)0) || got != 4)
+        return 7;
+
+    if (SetFilePointer(f, 0, (int*)0, FILE_BEGIN) != 0)
+        return 8;
+    /* Win32 rejects a negative distance from the start. */
+    if (SetFilePointer(f, -1, (int*)0, FILE_BEGIN) != INVALID_SET_FILE_POINTER)
+        return 9;
+
+    if (!CloseHandle(f))
+        return 10;
+    /* The handle slot must actually be gone. Before the CloseHandle
+     * wrong-syscall fix (it dispatched SYS_STAT, not SYS_FILE_CLOSE)
+     * this read still succeeded. */
+    if (ReadFile(f, buf, 4, &got, (void*)0))
+        return 11;
+
+    /* A miss must be an honest failure, not a bogus handle. */
+    if (CreateFileA("/no/such/file", GENERIC_READ, 0, (void*)0, OPEN_EXISTING, 0, (HANDLE)0) != INVALID_HANDLE_VALUE)
+        return 12;
+
+    return 0;
+}
 
 static void say(const char* s)
 {
@@ -175,6 +261,22 @@ void __cdecl mainCRTStartup(void)
     HANDLE k32 = GetModuleHandleA("KERNEL32.dll");
     (void)k32;
     say("[pe32-rich] timer + module ok\r\n");
+
+    /* kernel32 file I/O — the only block here that asserts real
+     * kernel semantics rather than "the IAT resolved". */
+    {
+        const int step = FileIoProbe();
+        if (step != 0)
+        {
+            char msg[] = "[pe32-rich] kernel32-fileio FAIL step=NN\r\n";
+            msg[38] = (char)('0' + (step / 10));
+            msg[39] = (char)('0' + (step % 10));
+            say(msg);
+            say("[ring3-pe32-rich] FAIL kernel32-fileio\r\n");
+            ExitProcess(1);
+        }
+        say("[pe32-rich] kernel32-fileio ok\r\n");
+    }
 
     say("[pe32-rich] all 13 DLLs exercised — exit rc=0x42\r\n");
     say("[ring3-pe32-rich] PASS\r\n");
