@@ -237,6 +237,137 @@ bool ParseTime(const u8* v, u32 len, u8 tag, u64* out)
     return true;
 }
 
+// Strict DER TLV read, used for EVERY element in the extension subtree.
+//
+// `asn1::Read` is deliberately permissive — it accepts any length
+// encoding that fits, which is right for a general reader but wrong
+// here. DER (X.690 §10.1) admits exactly ONE encoding of a given length:
+// short form below 128, long form above with no leading zero octets. A
+// permissive reader therefore lets the same extension be spelled several
+// ways — `04 05 ...` and `04 81 05 ...` are the same OCTET STRING to it
+// — which is the "two parsers disagree" primitive all over again, one
+// level down. A verifier that accepts N encodings of one certificate has
+// N chances to disagree with whoever else parses it.
+//
+// So: short form is mandatory below 128, long form must be minimal, and
+// the high-tag-number form (tag 31+, multi-byte) is refused outright —
+// nothing in a certificate extension needs it.
+bool ReadStrict(const u8* buf, u32 cap, Element* out)
+{
+    using namespace duetos::crypto::asn1;
+    if (Read(buf, cap, out) != Status::Ok)
+        return false;
+    // High-tag-number form: the low 5 tag bits all set. Out of scope.
+    if ((out->tag & 0x1F) == 0x1F)
+        return false;
+    if (out->header_len > 2)
+    {
+        // Long form. It may only be used for lengths >= 128, and must
+        // use the fewest possible octets.
+        if (out->len < 128)
+            return false;
+        u32 need = 1;
+        if (out->len > 0xFFFFFFu)
+            need = 4;
+        else if (out->len > 0xFFFFu)
+            need = 3;
+        else if (out->len > 0xFFu)
+            need = 2;
+        if (out->header_len - 2 != need)
+            return false;
+    }
+    return true;
+}
+
+// BIT STRING CONTENT octets: [unused-bit-count][data...].
+//
+// Shared by keyUsage and by the TBS issuerUniqueID / subjectUniqueID,
+// which are IMPLICIT-tagged BIT STRINGs — the tag is [1]/[2] but the
+// content rules are the BIT STRING's, and skipping them would mean
+// accepting a field whose encoding we never actually checked.
+bool ValidBitStringContent(const u8* v, u32 len)
+{
+    if (len < 1)
+        return false; // not even an unused-bit count
+    const u8 unused = v[0];
+    if (unused > 7)
+        return false;
+    if (len == 1)
+        return unused == 0; // no data octets -> nothing may be unused
+    // DER: the unused trailing bits of the final octet must be zero.
+    return (v[len - 1] & static_cast<u8>((1u << unused) - 1u)) == 0;
+}
+
+// A NAMED BIT STRING's content, which is stricter than a plain one.
+//
+// X.690 §11.2.2: where a BIT STRING names its bits — KeyUsage does —
+// the trailing 0 bits are NOT encoded. That leaves exactly one spelling
+// per bit set, and without it keyUsage has several: `03 02 02 04` and
+// `03 02 00 04` both mean keyCertSign, and `03 03 00 04 00` means it a
+// third way. Since keyUsage is what decides whether a certificate may
+// sign other certificates, several spellings of one value is several
+// chances for this verifier and another to read the same certificate
+// differently.
+//
+// So: the final octet must be non-zero (a wholly-zero trailing octet
+// should have been dropped), and the unused-bit count must be exactly
+// the number of trailing zero bits in that octet. The empty bit list
+// canonicalises to a lone 0x00 content octet, which
+// ValidBitStringContent already pins.
+bool ValidNamedBitStringContent(const u8* v, u32 len)
+{
+    if (!ValidBitStringContent(v, len))
+        return false;
+    if (len == 1)
+        return true; // no data octets: the canonical empty bit list
+    const u8 last = v[len - 1];
+    if (last == 0)
+        return false; // trailing all-zero octet must not be encoded
+    u8 trailing_zeros = 0;
+    while (((last >> trailing_zeros) & 1u) == 0)
+        ++trailing_zeros; // terminates: `last` is non-zero
+    return v[0] == trailing_zeros;
+}
+
+// The base-128 body of an OBJECT IDENTIFIER in canonical form. Split out
+// from IsCanonicalOid so it can also validate a registeredID GeneralName,
+// which carries OID content under an IMPLICIT [8] tag rather than 0x06.
+bool IsCanonicalOidBody(const u8* v, u32 len)
+{
+    if (len == 0)
+        return false;
+    // The final octet must terminate a subidentifier.
+    if ((v[len - 1] & 0x80) != 0)
+        return false;
+    bool at_start = true;
+    for (u32 i = 0; i < len; ++i)
+    {
+        // A subidentifier starting with 0x80 has a leading zero — the
+        // one non-minimal shape base-128 allows.
+        if (at_start && v[i] == 0x80)
+            return false;
+        at_start = (v[i] & 0x80) == 0;
+    }
+    return true;
+}
+
+// An OBJECT IDENTIFIER in canonical DER form.
+//
+// This matters because extension identity is decided by comparing OID
+// BYTES. Base-128 subidentifiers can carry leading zero continuation
+// octets (0x80 ...), so 2.5.29.19 can be spelled `55 1D 13` or
+// `55 1D 80 13`. Both name basicConstraints; only the first is DER. If
+// the non-canonical spelling were accepted, a certificate could carry
+// "two different" basicConstraints extensions that are really one — and
+// a bytewise duplicate check would not catch it. Requiring canonical
+// form is what makes bytewise comparison equal to OID comparison.
+bool IsCanonicalOid(const Element& oid)
+{
+    if (oid.tag != duetos::crypto::asn1::kTagOid)
+        return false;
+    return IsCanonicalOidBody(oid.value, oid.len);
+}
+
 // Read exactly ONE TLV of tag `expect_tag` that fills [buf, buf + len)
 // precisely — nothing truncated, nothing left over.
 //
@@ -249,9 +380,8 @@ bool ParseTime(const u8* v, u32 len, u8 tag, u64* out)
 // laundering primitives, so both are rejected here.
 bool ReadExact(const u8* buf, u32 len, u8 expect_tag, Element* out)
 {
-    using namespace duetos::crypto::asn1;
     Element e{};
-    if (Read(buf, len, &e) != Status::Ok || e.tag != expect_tag)
+    if (!ReadStrict(buf, len, &e) || e.tag != expect_tag)
         return false;
     // `Read` guarantees header_len + len <= the cap it was given, so this
     // compares equal-or-short without risk of wrapping.
@@ -261,16 +391,24 @@ bool ReadExact(const u8* buf, u32 len, u8 expect_tag, Element* out)
     return true;
 }
 
-// A DER BOOLEAN: exactly one content byte, and (X.690 §11.1) TRUE is
-// 0xFF exactly. BER's "any nonzero is TRUE" is NOT accepted — an
-// encoding we would have to guess at is an encoding we reject.
-bool DerBoolean(const Element& e, bool* out)
+// A DER BOOLEAN that carries a DEFAULT FALSE.
+//
+// Two rules, both X.690: §11.1 says TRUE is 0xFF exactly (BER's "any
+// nonzero" is refused — an encoding we would have to guess at is one we
+// reject), and §11.5 says a value equal to the DEFAULT must be OMITTED.
+// So an explicitly-encoded FALSE is not valid DER and is refused too:
+// every field this helper reads (`cA`, `critical`) is DEFAULT FALSE, and
+// a certificate that spells "absent" out longhand is a certificate with
+// two encodings of the same meaning — the ambiguity this whole path
+// exists to refuse. `*out` is therefore always true on success; the
+// return value is what callers branch on.
+bool DerBooleanDefaultFalse(const Element& e, bool* out)
 {
     if (e.tag != kDerTagBoolean || e.len != 1)
         return false;
-    if (e.value[0] != 0x00 && e.value[0] != 0xFF)
-        return false;
-    *out = (e.value[0] == 0xFF);
+    if (e.value[0] != 0xFF)
+        return false; // 0x00 = explicit DEFAULT (must be omitted); else BER
+    *out = true;
     return true;
 }
 
@@ -292,8 +430,57 @@ bool DecodeSubjectAltName(const Element& extn_value, ParsedCert* pc)
     while (go < gn_seq.len)
     {
         Element gn{};
-        if (Read(gn_seq.value + go, gn_seq.len - go, &gn) != Status::Ok)
+        if (!ReadStrict(gn_seq.value + go, gn_seq.len - go, &gn))
             return false;
+        // GeneralName ::= CHOICE { otherName [0], rfc822Name [1],
+        //   dNSName [2], x400Address [3], directoryName [4],
+        //   ediPartyName [5], uniformResourceIdentifier [6],
+        //   iPAddress [7], registeredID [8] }
+        //
+        // Only these nine alternatives exist, and each is validated
+        // against its OWN content rules below — not merely recognised by
+        // tag. A tag outside the CHOICE, or a name whose content we did
+        // not check, is not "a name we don't handle": it is a
+        // certificate we do not understand. That matters here more than
+        // it looks, because a present SAN suppresses the CN fallback —
+        // so a reader that waves through entries it cannot check can
+        // disagree with another reader about which hosts this
+        // certificate names, and that disagreement decides which name
+        // the certificate is validated against.
+        switch (gn.tag)
+        {
+        case 0x81: // [1] rfc822Name  (IMPLICIT IA5String, primitive)
+        case 0x82: // [2] dNSName     (IMPLICIT IA5String, primitive)
+        case 0x86: // [6] URI         (IMPLICIT IA5String, primitive)
+            // IA5String is 7-bit: a high bit set means some other
+            // encoding smuggled in under an IA5 tag. Empty names match
+            // nothing and are malformed.
+            if (gn.len == 0)
+                return false;
+            for (u32 i = 0; i < gn.len; ++i)
+                if (gn.value[i] > 0x7F)
+                    return false;
+            break;
+        case 0x87: // [7] iPAddress   (IMPLICIT OCTET STRING, primitive)
+            if (gn.len != 4 && gn.len != 16)
+                return false;
+            break;
+        case 0x88: // [8] registeredID (IMPLICIT OID, primitive)
+            if (!IsCanonicalOidBody(gn.value, gn.len))
+                return false;
+            break;
+        default:
+            // The structured alternatives — otherName [0], x400Address
+            // [3], directoryName [4], ediPartyName [5] — are refused
+            // rather than skipped. They carry nested schemas this layer
+            // does not implement, and accepting one unvalidated would be
+            // exactly the "stepped over a field we didn't check" defect
+            // that let a malformed [3] downgrade a certificate to
+            // no-extensions. GAP: a certificate whose SAN carries one of
+            // these fails closed until the schema is implemented.
+            return false;
+        }
+
         ++entries;
         if (gn.tag == 0x82 && pc->san_count < ParsedCert::kMaxSan) // [2] dNSName
         {
@@ -323,9 +510,11 @@ bool DecodeSubjectAltName(const Element& extn_value, ParsedCert* pc)
 // standing; the decode now publishes to `pc` only after the value has
 // fully validated.
 //
-// Note: an EXPLICIT `cA FALSE` is technically redundant under DER (the
-// DEFAULT should be omitted) but is accepted, because real certificates
-// emit it and rejecting it would break interop while protecting nothing.
+// Note: an EXPLICIT `cA FALSE` is refused (X.690 §11.5 requires a DEFAULT
+// value to be omitted). "cA is FALSE" has exactly one DER spelling — an
+// empty SEQUENCE — and admitting a second one would mean a certificate
+// could say "not a CA" in two ways, which is the ambiguity this decoder
+// exists to remove. See DerBooleanDefaultFalse.
 bool DecodeBasicConstraints(const Element& extn_value, ParsedCert* pc)
 {
     using namespace duetos::crypto::asn1;
@@ -341,11 +530,13 @@ bool DecodeBasicConstraints(const Element& extn_value, ParsedCert* pc)
     if (off < seq.len)
     {
         Element f{};
-        if (Read(seq.value + off, seq.len - off, &f) != Status::Ok)
+        if (!ReadStrict(seq.value + off, seq.len - off, &f))
             return false;
         if (f.tag == kDerTagBoolean)
         {
-            if (!DerBoolean(f, &is_ca))
+            // cA is DEFAULT FALSE: present means TRUE, and an explicit
+            // FALSE is refused rather than read as "not a CA".
+            if (!DerBooleanDefaultFalse(f, &is_ca))
                 return false;
             off += f.header_len + f.len;
         }
@@ -353,7 +544,7 @@ bool DecodeBasicConstraints(const Element& extn_value, ParsedCert* pc)
     if (off < seq.len)
     {
         Element f{};
-        if (Read(seq.value + off, seq.len - off, &f) != Status::Ok)
+        if (!ReadStrict(seq.value + off, seq.len - off, &f))
             return false;
         if (f.tag != kTagInteger)
             return false; // an unexpected field, not a basicConstraints
@@ -393,15 +584,11 @@ bool DecodeKeyUsage(const Element& extn_value, ParsedCert* pc)
     Element bits{};
     if (!ReadExact(extn_value.value, extn_value.len, kTagBitString, &bits))
         return false;
-    if (bits.len < 1)
+    // KeyUsage is a NAMED BIT STRING, so trailing zero bits must not be
+    // encoded — see ValidNamedBitStringContent.
+    if (!ValidNamedBitStringContent(bits.value, bits.len))
         return false;
     const u8 unused = bits.value[0];
-    if (unused > 7)
-        return false;
-    if (bits.len == 1 && unused != 0)
-        return false;
-    if (bits.len > 1 && (bits.value[bits.len - 1] & static_cast<u8>((1u << unused) - 1u)) != 0)
-        return false; // DER: unused trailing bits must be zero
 
     bool key_cert_sign = false;
     if (bits.len >= 2)
@@ -431,7 +618,10 @@ bool ParseExtension(const Element& ext, Element* oid, bool* critical, Element* e
     using namespace duetos::crypto::asn1;
     if (ext.tag != kTagSequence)
         return false;
-    if (Read(ext.value, ext.len, oid) != Status::Ok || oid->tag != kTagOid || oid->len == 0)
+    // extnID must be a CANONICAL OID — extension identity is decided by
+    // comparing these bytes, so a non-minimal arc encoding would let one
+    // extension wear two different byte strings. See IsCanonicalOid.
+    if (!ReadStrict(ext.value, ext.len, oid) || !IsCanonicalOid(*oid))
         return false;
     u32 off = oid->header_len + oid->len;
 
@@ -439,18 +629,18 @@ bool ParseExtension(const Element& ext, Element* oid, bool* critical, Element* e
     if (off >= ext.len)
         return false; // extnValue is mandatory
     Element f{};
-    if (Read(ext.value + off, ext.len - off, &f) != Status::Ok)
+    if (!ReadStrict(ext.value + off, ext.len - off, &f))
         return false;
     if (f.tag == kDerTagBoolean)
     {
-        // As with cA, an explicit `critical FALSE` is redundant under DER
-        // but common in the wild, so it is accepted.
-        if (!DerBoolean(f, critical))
+        // Same rule as cA: `critical` is DEFAULT FALSE, so an explicit
+        // FALSE must have been omitted and is refused here.
+        if (!DerBooleanDefaultFalse(f, critical))
             return false;
         off += f.header_len + f.len;
         if (off >= ext.len)
             return false;
-        if (Read(ext.value + off, ext.len - off, &f) != Status::Ok)
+        if (!ReadStrict(ext.value + off, ext.len - off, &f))
             return false;
     }
     if (f.tag != kTagOctetString)
@@ -471,9 +661,13 @@ bool ParseExtension(const Element& ext, Element* oid, bool* critical, Element* e
 //   - a CRITICAL extension whose semantics this layer does not implement
 //     (i.e. anything other than the three matched below).
 //
-// GAP: duplicate detection covers the three extensions this layer
-// decodes. A repeated UNKNOWN non-critical extension is not rejected —
-// nothing reads it, so it cannot change a trust decision.
+// Duplicate detection is GENERIC: every extnID is checked, not just the
+// three decoded below. "Nothing reads it, so a repeat is harmless" is
+// the wrong test — it assumes this layer is the only consumer of the
+// certificate, and it makes the rule depend on which extensions we
+// happen to implement today. RFC 5280 §4.2 says at most one instance of
+// each, full stop; a certificate that breaks that is ambiguous to
+// SOMEONE, and ambiguity is the thing being refused here.
 //
 // Split out from ParseExtensionsFromTbs so the self-test can drive it
 // with hand-built extension blobs (see x509_ext_vectors.h) — the
@@ -486,11 +680,31 @@ bool DecodeExtensionSeq(const Element& ext_seq, ParsedCert* pc)
         pc->ext_error = true;
         return false;
     }
+    // Extensions ::= SEQUENCE SIZE (1..MAX) OF Extension. An empty one is
+    // not "a certificate with no extensions" — that is spelled by
+    // omitting the [3] block entirely — it is a second encoding of the
+    // same thing, so it is refused.
+    if (ext_seq.len == 0)
+    {
+        pc->ext_error = true;
+        return false;
+    }
+
+    // Every extnID seen so far, as slices into the DER. Because each was
+    // validated canonical, bytewise equality IS OID equality. The cap is
+    // a bound, not a policy: real certificates carry well under a dozen
+    // extensions, and a certificate with more than this many is refused
+    // rather than parsed with an incomplete duplicate check.
+    constexpr u32 kMaxExtensions = 32;
+    const u8* seen_oid[kMaxExtensions] = {};
+    u32 seen_oid_len[kMaxExtensions] = {};
+    u32 seen_count = 0;
+
     u32 xo = 0;
     while (xo < ext_seq.len)
     {
         Element ext{};
-        if (Read(ext_seq.value + xo, ext_seq.len - xo, &ext) != Status::Ok)
+        if (!ReadStrict(ext_seq.value + xo, ext_seq.len - xo, &ext))
         {
             pc->ext_error = true;
             return false;
@@ -504,13 +718,34 @@ bool DecodeExtensionSeq(const Element& ext_seq, ParsedCert* pc)
             return false;
         }
 
-        if (OidEquals(oid, kOidBasicConstraints, sizeof(kOidBasicConstraints)))
+        // Generic duplicate check, BEFORE any value is looked at and for
+        // EVERY extnID — recognised or not. Doing it here rather than in
+        // the per-extension arms is what makes "seen" independent of
+        // "decodable": a malformed first copy is still an occurrence.
+        for (u32 s = 0; s < seen_count; ++s)
         {
-            if (pc->bc_seen)
+            if (seen_oid_len[s] != oid.len)
+                continue;
+            u32 k = 0;
+            while (k < oid.len && seen_oid[s][k] == oid.value[k])
+                ++k;
+            if (k == oid.len)
             {
-                pc->ext_error = true;
+                pc->ext_error = true; // duplicate extnID
                 return false;
             }
+        }
+        if (seen_count >= kMaxExtensions)
+        {
+            pc->ext_error = true; // more extensions than we can dedupe
+            return false;
+        }
+        seen_oid[seen_count] = oid.value;
+        seen_oid_len[seen_count] = oid.len;
+        ++seen_count;
+
+        if (OidEquals(oid, kOidBasicConstraints, sizeof(kOidBasicConstraints)))
+        {
             pc->bc_seen = true; // BEFORE the value is parsed
             if (!DecodeBasicConstraints(extn_value, pc))
             {
@@ -521,11 +756,6 @@ bool DecodeExtensionSeq(const Element& ext_seq, ParsedCert* pc)
         }
         else if (OidEquals(oid, kOidKeyUsage, sizeof(kOidKeyUsage)))
         {
-            if (pc->ku_seen)
-            {
-                pc->ext_error = true;
-                return false;
-            }
             pc->ku_seen = true; // BEFORE the value is parsed
             if (!DecodeKeyUsage(extn_value, pc))
             {
@@ -536,11 +766,6 @@ bool DecodeExtensionSeq(const Element& ext_seq, ParsedCert* pc)
         }
         else if (OidEquals(oid, kOidSubjectAltName, sizeof(kOidSubjectAltName)))
         {
-            if (pc->san_seen)
-            {
-                pc->ext_error = true;
-                return false;
-            }
             pc->san_seen = true;
             if (!DecodeSubjectAltName(extn_value, pc))
             {
@@ -613,18 +838,42 @@ bool ParseExtensionsFromTbs(const Element& tbs, ParsedCert* pc)
     //   subject | SPKI | [3] extensions (opt)
     u32 off = 0;
     Element e{};
-    if (Read(tbs.value, tbs.len, &e) != Status::Ok)
+    if (!ReadStrict(tbs.value, tbs.len, &e))
     {
         pc->ext_error = true;
         return false;
     }
+
+    // Version ::= INTEGER { v1(0), v2(1), v3(2) }, [0] EXPLICIT, DEFAULT
+    // v1 — so an ABSENT [0] means v1. RFC 5280 §4.1.2.9: extensions MUST
+    // appear only in a v3 certificate. Enforced below, once we know
+    // whether a [3] block is present; a v1/v2 certificate carrying
+    // extensions is refused rather than having them honoured, because a
+    // parser that respects the version would not see them at all.
+    u8 version = 1;    // v1 unless [0] says otherwise
     if (e.tag == 0xA0) // [0] EXPLICIT version
+    {
+        Element ver{};
+        // Exactly one INTEGER inside, DER-minimal, in range.
+        if (!ReadExact(e.value, e.len, kTagInteger, &ver) || ver.len != 1 || ver.value[0] > 2)
+        {
+            pc->ext_error = true;
+            return false;
+        }
+        // v1 spelled explicitly is the DEFAULT written longhand.
+        if (ver.value[0] == 0)
+        {
+            pc->ext_error = true;
+            return false;
+        }
+        version = static_cast<u8>(ver.value[0] + 1);
         off += e.header_len + e.len;
+    }
 
     // Skip serial, sigAlg, issuer, validity, subject, SPKI (6 elements).
     for (u32 i = 0; i < 6; ++i)
     {
-        if (off >= tbs.len || Read(tbs.value + off, tbs.len - off, &e) != Status::Ok)
+        if (off >= tbs.len || !ReadStrict(tbs.value + off, tbs.len - off, &e))
         {
             pc->ext_error = true;
             return false;
@@ -632,25 +881,107 @@ bool ParseExtensionsFromTbs(const Element& tbs, ParsedCert* pc)
         off += e.header_len + e.len;
     }
 
-    // Now scan remaining children for the [3] extensions wrapper.
+    // Validate the whole TBS tail, not just the part we want.
+    //
+    //   issuerUniqueID  [1] IMPLICIT UniqueIdentifier OPTIONAL  -- v2/v3
+    //   subjectUniqueID [2] IMPLICIT UniqueIdentifier OPTIONAL  -- v2/v3
+    //   extensions      [3] EXPLICIT Extensions      OPTIONAL   -- v3
+    //
+    // IMPLICIT tagging makes [1] and [2] PRIMITIVE (0x81, 0x82); EXPLICIT
+    // makes [3] CONSTRUCTED (0xA3). Those are the only three fields that
+    // may appear here, in that order, each at most once.
+    //
+    // Skipping anything that is not exactly 0xA3 was a hole, not a
+    // shortcut. A primitive `0x83` is a malformed extensions block — but
+    // the old walk stepped over it, so the certificate parsed as one with
+    // NO extensions. That is not a harmless downgrade: no extensions
+    // means no subjectAltName, and no subjectAltName re-enables the CN
+    // fallback, so the field an attacker controls decides which name the
+    // certificate is checked against. Anything unrecognised here is a
+    // certificate we do not understand.
+    u8 last_rank = 0; // 0 = nothing seen yet; ranks are 1/2/3
     while (off < tbs.len)
     {
-        if (Read(tbs.value + off, tbs.len - off, &e) != Status::Ok)
+        if (!ReadStrict(tbs.value + off, tbs.len - off, &e))
         {
             pc->ext_error = true;
             return false;
         }
         const u32 step = e.header_len + e.len;
-        if (e.tag == 0xA3) // [3] EXPLICIT extensions
+
+        u8 rank = 0;
+        switch (e.tag)
         {
-            // The [3] wrapper holds exactly one SEQUENCE OF Extension.
+        case 0x81: // [1] issuerUniqueID  (IMPLICIT BIT STRING, primitive)
+            rank = 1;
+            break;
+        case 0x82: // [2] subjectUniqueID (IMPLICIT BIT STRING, primitive)
+            rank = 2;
+            break;
+        case 0xA3: // [3] extensions      (EXPLICIT, constructed)
+            rank = 3;
+            break;
+        default:
+            // Includes a primitive 0x83, a constructed 0xA1/0xA2, and any
+            // non-context-specific field.
+            pc->ext_error = true;
+            return false;
+        }
+        // Strictly increasing rank: enforces both the declared order and
+        // uniqueness in one comparison.
+        if (rank <= last_rank)
+        {
+            pc->ext_error = true;
+            return false;
+        }
+        last_rank = rank;
+
+        if (rank <= 2)
+        {
+            // RFC 5280 §4.1.2.8: the unique IDs require v2 or v3.
+            if (version < 2)
+            {
+                pc->ext_error = true;
+                return false;
+            }
+            // UniqueIdentifier ::= BIT STRING, IMPLICIT-tagged — the tag
+            // is [1]/[2] but the CONTENT rules are still the BIT
+            // STRING's. Accepting the field on tag alone would mean
+            // waving through a structure whose encoding we never
+            // checked, in the middle of a walk whose whole purpose is
+            // that every byte of the tail is accounted for.
+            if (!ValidBitStringContent(e.value, e.len))
+            {
+                pc->ext_error = true;
+                return false;
+            }
+        }
+
+        if (rank == 3)
+        {
+            // §4.1.2.9: extensions require v3.
+            if (version != 3)
+            {
+                pc->ext_error = true;
+                return false;
+            }
+            // [3] is the last field, so it must close out the TBS. A
+            // second [3] is already impossible via the rank rule.
+            if (off + step != tbs.len)
+            {
+                pc->ext_error = true;
+                return false;
+            }
+            // The [3] wrapper holds exactly one SEQUENCE OF Extension,
+            // exactly filling it.
             Element ext_seq{};
             if (!ReadExact(e.value, e.len, kTagSequence, &ext_seq))
             {
                 pc->ext_error = true;
                 return false;
             }
-            return DecodeExtensionSeq(ext_seq, pc);
+            if (!DecodeExtensionSeq(ext_seq, pc))
+                return false;
         }
         off += step;
     }
@@ -1069,9 +1400,17 @@ bool HostMatches(const ParsedCert& leaf, const char* hostname)
     while (hostname[hlen] != '\0')
         ++hlen;
 
-    // Prefer SAN. RFC 6125 / 2818: if a SAN dNSName list is present, the
-    // CN is NOT consulted. Only fall back to CN when no SAN dNSName.
-    if (leaf.san_count > 0)
+    // RFC 6125 §6.4.4 / RFC 2818: when a subjectAltName extension is
+    // PRESENT, the CN is not consulted at all.
+    //
+    // The gate is `san_seen`, not `san_count`. Keying it on the number of
+    // dNSName entries reopens the fallback for a SAN that carries only
+    // non-dNSName names (an rfc822Name or iPAddress, say): the extension
+    // is present, we find no dNSName, and the old code would then match
+    // the hostname against the CN — the exact substitution SAN exists to
+    // stop. A SAN with no usable dNSName means "this certificate names no
+    // DNS host", which is a refusal, not a reason to look elsewhere.
+    if (leaf.san_seen)
     {
         for (u32 i = 0; i < leaf.san_count; ++i)
             if (DnsNameMatches(leaf.san_dns[i], leaf.san_dns_len[i], hostname, hlen))
@@ -2208,14 +2547,13 @@ u32 ExtensionPolicyChecks()
     using namespace duetos::crypto::asn1;
 
     constexpr u32 kVectorCount = sizeof(kExtPolicyVectors) / sizeof(kExtPolicyVectors[0]);
-    // The row index is packed into the low nibble of the failure code, so a
-    // 17th vector would alias onto the next code band.
-    static_assert(kVectorCount <= 16, "widen the ExtensionPolicyChecks failure codes");
+    // The row index is packed into the low BYTE of the failure code.
+    static_assert(kVectorCount <= 256, "widen the ExtensionPolicyChecks failure codes");
 
     // Fail-closed default: a cert with NO extensions at all is not an issuer.
     ParsedCert none{};
     if (IsUsableIssuer(none, 0))
-        return 0xF5'60u;
+        return 0xF5'6000u;
 
     for (u32 i = 0; i < kVectorCount; ++i)
     {
@@ -2225,20 +2563,111 @@ u32 ExtensionPolicyChecks()
         // if it does not, the vector is wrong, not the code under test.
         Element seq{};
         if (!ReadExact(v.der, v.len, kTagSequence, &seq))
-            return 0xF5'70u | i;
+            return 0xF5'7000u | i;
 
         ParsedCert pc{};
         const bool accepted = DecodeExtensionSeq(seq, &pc);
         if (accepted != v.accept)
-            return 0xF5'80u | i;
+            return 0xF5'8000u | i;
         // A rejected block must always be flagged, and a flagged cert must
         // never be an issuer — the two halves of the fail-closed contract.
         if (!accepted && !pc.ext_error)
-            return 0xF5'90u | i;
+            return 0xF5'9000u | i;
         if (IsUsableIssuer(pc, 0) != v.issuer_at_0)
-            return 0xF5'A0u | i;
+            return 0xF5'A000u | i;
         if (IsUsableIssuer(pc, 1) != v.issuer_at_1)
-            return 0xF5'B0u | i;
+            return 0xF5'B000u | i;
+    }
+    return 0;
+}
+
+// The property the SAN/CN split actually has to hold: a PRESENT
+// subjectAltName suppresses the CN fallback, even when it names no DNS
+// host at all. Driven through HostMatches() rather than the flag,
+// because "san_seen is true" is not the requirement — "the CN is not
+// consulted" is, and only the former was ever observable before.
+//
+// Returns 0 on success, else a failure code.
+u32 SanSuppressionChecks()
+{
+    using namespace duetos::crypto::asn1;
+    static constexpr char kCn[] = "cn.duetos.local";
+
+    // A leaf whose CN says cn.duetos.local and whose SAN names one
+    // DIFFERENT dNSName: the SAN wins, so the CN must not match.
+    {
+        Element seq{};
+        ParsedCert pc{};
+        if (!ReadExact(kExtSanWithDns, static_cast<u32>(sizeof(kExtSanWithDns)), kTagSequence, &seq) ||
+            !DecodeExtensionSeq(seq, &pc))
+            return 0xF5'2000u;
+        pc.base.subject_cn = reinterpret_cast<const u8*>(kCn);
+        pc.base.subject_cn_len = static_cast<u32>(sizeof(kCn) - 1);
+        if (!pc.san_seen || pc.san_count != 1)
+            return 0xF5'2001u;
+        if (!HostMatches(pc, "a.duetos.local")) // the SAN entry
+            return 0xF5'2002u;
+        if (HostMatches(pc, kCn)) // the CN — must NOT be consulted
+            return 0xF5'2003u;
+    }
+
+    // The regression this exists for: a SAN that is present but carries
+    // only an rfc822Name. san_count is 0, so a count-based gate falls
+    // through to the CN and matches. A presence-based gate refuses.
+    {
+        Element seq{};
+        ParsedCert pc{};
+        if (!ReadExact(kExtSanPresentNoDns, static_cast<u32>(sizeof(kExtSanPresentNoDns)), kTagSequence, &seq) ||
+            !DecodeExtensionSeq(seq, &pc))
+            return 0xF5'2004u;
+        pc.base.subject_cn = reinterpret_cast<const u8*>(kCn);
+        pc.base.subject_cn_len = static_cast<u32>(sizeof(kCn) - 1);
+        if (!pc.san_seen || pc.san_count != 0)
+            return 0xF5'2005u;
+        if (HostMatches(pc, kCn))
+            return 0xF5'2006u;
+    }
+
+    // Control: with NO subjectAltName the CN fallback still works, so the
+    // rule above is a suppression and not a blanket disable.
+    {
+        ParsedCert pc{};
+        pc.base.subject_cn = reinterpret_cast<const u8*>(kCn);
+        pc.base.subject_cn_len = static_cast<u32>(sizeof(kCn) - 1);
+        if (pc.san_seen || !HostMatches(pc, kCn))
+            return 0xF5'2007u;
+    }
+    return 0;
+}
+
+// TBS-level policy: ParseExtensionsFromTbs() must accept exactly one [3]
+// extensions block, and only as the final field of the TBSCertificate.
+// Driven by whole synthetic TBS bodies (kTbsPolicyVectors) because the
+// property under test — "how many [3] blocks, and where" — does not exist
+// at the SEQUENCE-OF-Extension level that ExtensionPolicyChecks covers.
+u32 TbsPolicyChecks()
+{
+    using namespace duetos::crypto::asn1;
+
+    constexpr u32 kVectorCount = sizeof(kTbsPolicyVectors) / sizeof(kTbsPolicyVectors[0]);
+    static_assert(kVectorCount <= 256, "widen the TbsPolicyChecks failure codes");
+
+    for (u32 i = 0; i < kVectorCount; ++i)
+    {
+        const TbsPolicyVector& v = kTbsPolicyVectors[i];
+
+        Element tbs{};
+        if (!ReadExact(v.der, v.len, kTagSequence, &tbs))
+            return 0xF5'C000u | i;
+
+        ParsedCert pc{};
+        const bool accepted = ParseExtensionsFromTbs(tbs, &pc);
+        if (accepted != v.accept)
+            return 0xF5'D000u | i;
+        if (!accepted && !pc.ext_error)
+            return 0xF5'E000u | i;
+        if (IsUsableIssuer(pc, 0) != v.issuer_at_0)
+            return 0xF5'F000u | i;
     }
     return 0;
 }
@@ -2409,6 +2838,23 @@ void X509VerifySelfTest()
         return;
     }
 
+    // --- NEGATIVE 5c: the TBS-level [3] rule — exactly one extensions
+    // block, and it must be the last field. A second block, or a field
+    // after it, rejects the certificate. See TbsPolicyChecks.
+    if (const u32 code = TbsPolicyChecks(); code != 0)
+    {
+        SelfTestFail("tbs-ext-policy", code);
+        return;
+    }
+
+    // --- NEGATIVE 5d: a PRESENT subjectAltName suppresses the CN
+    // fallback even when it names no DNS host. See SanSuppressionChecks.
+    if (const u32 code = SanSuppressionChecks(); code != 0)
+    {
+        SelfTestFail("san-cn-suppression", code);
+        return;
+    }
+
     // --- ECDSA POSITIVE: P-256 leaf -> P-256 ECDSA test root, in window.
     const u32 ec_leaf_len = static_cast<u32>(sizeof(kEcFixtureLeafDer));
     if (!Verify(kEcFixtureLeafDer, ec_leaf_len, nullptr, nullptr, 0, "ec.test.duetos.local", kNowInWindow))
@@ -2500,7 +2946,9 @@ void X509VerifySelfTest()
                       "ecdsa-with-SHA256/SHA384 [P-256/P-384], chain<=2, "
                       "SAN+CN+wildcard, validity-window, basicConstraints+keyUsage "
                       "issuer gate, exact-DER + duplicate-extension + "
-                      "unknown-critical rejection; RSA 3 pos / 9 neg, "
+                      "unknown-critical rejection, canonical-OID + "
+                      "minimal-length + TBS-tail-schema + v3-only, SAN-suppresses-CN; "
+                      "RSA 3 pos / 12 neg, "
                       "ECDSA 2 pos / 4 neg + ");
     arch::SerialWrite(nbuf);
     arch::SerialWrite(" real roots [6 RSA incl 1 RSA-4096 + 2 ECDSA] parsed; 1 RSA + 1 ECDSA self-verified)\n");

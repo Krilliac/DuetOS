@@ -56,5 +56,12 @@ int main()
     // shorten the PASS line, and this assert would catch it.
     EXPECT_TRUE(g_crypto_serial.find("exact-DER + duplicate-extension + unknown-critical rejection") !=
                 std::string::npos);
+
+    // And for the encoding-canonicalisation rules: a permissive length or
+    // OID encoding lets one certificate be spelled several ways, which is
+    // the same "two parsers disagree" hazard one level down. The single
+    // terminal [3] rule is here for the same reason.
+    EXPECT_TRUE(g_crypto_serial.find("canonical-OID + minimal-length + TBS-tail-schema + v3-only, "
+                                     "SAN-suppresses-CN") != std::string::npos);
     return 0;
 }

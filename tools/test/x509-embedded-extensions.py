@@ -96,10 +96,15 @@ class DerError(Exception):
 
 
 def read_tlv(buf, off, end):
-    """Bounded DER TLV read. Returns (tag, vstart, vend, next_off)."""
+    """Strict DER TLV read. Mirrors ReadStrict().
+
+    Returns (tag, vstart, vend, next_off).
+    """
     if off + 2 > end:
         raise DerError("truncated header")
     tag = buf[off]
+    if tag & 0x1F == 0x1F:
+        raise DerError("high-tag-number form not accepted")
     len0 = buf[off + 1]
     if len0 & 0x80:
         n = len0 & 0x7F
@@ -110,6 +115,19 @@ def read_tlv(buf, off, end):
         if off + 2 + n > end:
             raise DerError("truncated long-form length")
         length = int.from_bytes(buf[off + 2 : off + 2 + n], "big")
+        # DER admits exactly one spelling: short form below 128, and long
+        # form with no leading zero octets.
+        if length < 128:
+            raise DerError(f"length {length} must use short form, not long")
+        need = 1
+        if length > 0xFFFFFF:
+            need = 4
+        elif length > 0xFFFF:
+            need = 3
+        elif length > 0xFF:
+            need = 2
+        if n != need:
+            raise DerError(f"non-minimal long-form length ({n} octets, need {need})")
         hdr = 2 + n
     else:
         length = len0
@@ -118,6 +136,35 @@ def read_tlv(buf, off, end):
     if vstart + length > end:
         raise DerError("value overruns parent")
     return tag, vstart, vstart + length, vstart + length
+
+
+def check_canonical_oid(buf, start, end):
+    """Mirrors IsCanonicalOidBody(): minimal base-128 subidentifiers."""
+    if start >= end:
+        raise DerError("empty OID")
+    if buf[end - 1] & 0x80:
+        raise DerError("OID ends mid-subidentifier")
+    at_start = True
+    for i in range(start, end):
+        if at_start and buf[i] == 0x80:
+            raise DerError("non-minimal OID arc (leading 0x80)")
+        at_start = not buf[i] & 0x80
+
+
+def check_bit_string_content(buf, start, end):
+    """Mirrors ValidBitStringContent(): [unused-count][data...]."""
+    n = end - start
+    if n < 1:
+        raise DerError("BIT STRING has no unused-bit count octet")
+    unused = buf[start]
+    if unused > 7:
+        raise DerError(f"unused-bit count {unused} > 7")
+    if n == 1:
+        if unused != 0:
+            raise DerError("no data octets but a nonzero unused-bit count")
+        return
+    if buf[end - 1] & ((1 << unused) - 1):
+        raise DerError("unused trailing bits are not zero")
 
 
 def decode_oid(buf, start, end):
@@ -154,9 +201,11 @@ def decode_basic_constraints(buf, start, end):
     if off < ve:
         tag, cs, ce, nxt = read_tlv(buf, off, ve)
         if tag == 0x01:
-            if ce - cs != 1 or buf[cs] not in (0x00, 0xFF):
-                raise DerError("cA is not a DER BOOLEAN (0x00/0xFF, length 1)")
-            is_ca = buf[cs] == 0xFF
+            # DEFAULT FALSE: present means TRUE. An explicit FALSE should
+            # have been omitted (X.690 11.5); BER nonzero is refused too.
+            if ce - cs != 1 or buf[cs] != 0xFF:
+                raise DerError("cA must be the DER BOOLEAN 0xFF (omit DEFAULT FALSE)")
+            is_ca = True
             off = nxt
     if off < ve:
         tag, ps, pe, nxt = read_tlv(buf, off, ve)
@@ -175,20 +224,28 @@ def decode_basic_constraints(buf, start, end):
 
 
 def decode_key_usage(buf, start, end):
-    """Mirrors DecodeKeyUsage(). Returns key_cert_sign."""
+    """Mirrors DecodeKeyUsage() + ValidNamedBitStringContent().
+
+    KeyUsage is a NAMED BIT STRING, so X.690 11.2.2 additionally forbids
+    encoding trailing zero bits: `03 02 02 04` is the only spelling of
+    keyCertSign, not `03 02 00 04` or `03 03 00 04 00`.
+    """
     vs, ve = read_exact(buf, start, end, 0x03)
+    check_bit_string_content(buf, vs, ve)
     n = ve - vs
-    if n < 1:
-        raise DerError("empty BIT STRING")
     unused = buf[vs]
-    if unused > 7:
-        raise DerError("unused-bit count > 7")
-    if n == 1 and unused != 0:
-        raise DerError("unused-bit count nonzero with no data bytes")
-    if n > 1 and buf[ve - 1] & ((1 << unused) - 1):
-        raise DerError("trailing unused bits are not zero")
-    if n < 2:
-        return False
+    if n == 1:
+        return False  # canonical empty bit list
+    last = buf[ve - 1]
+    if last == 0:
+        raise DerError("trailing all-zero octet must not be encoded")
+    trailing_zeros = 0
+    while not (last >> trailing_zeros) & 1:
+        trailing_zeros += 1
+    if unused != trailing_zeros:
+        raise DerError(
+            f"non-minimal NAMED BIT STRING: unused={unused}, "
+            f"final octet 0x{last:02X} has {trailing_zeros} trailing zero bits")
     significant = (n - 1) * 8 - unused
     return significant > 5 and bool(buf[vs + 1] & 0x04)
 
@@ -201,6 +258,23 @@ def decode_subject_alt_name(buf, start, end):
     count = 0
     while off < ve:
         tag, ns, ne, nxt = read_tlv(buf, off, ve)
+        if tag in (0x81, 0x82, 0x86):  # rfc822Name / dNSName / URI
+            if ne == ns:
+                raise DerError(f"empty IA5String GeneralName [0x{tag:02X}]")
+            for i in range(ns, ne):
+                if buf[i] > 0x7F:
+                    raise DerError(
+                        f"non-IA5 byte 0x{buf[i]:02X} in GeneralName [0x{tag:02X}]")
+        elif tag == 0x87:  # iPAddress
+            if ne - ns not in (4, 16):
+                raise DerError(f"iPAddress is {ne - ns} octets, must be 4 or 16")
+        elif tag == 0x88:  # registeredID
+            check_canonical_oid(buf, ns, ne)
+        else:
+            # otherName [0], x400Address [3], directoryName [4],
+            # ediPartyName [5] carry nested schemas the verifier does not
+            # implement, so it refuses them rather than skip them.
+            raise DerError(f"GeneralName tag 0x{tag:02X} not schema-validated")
         count += 1
         if tag == 0x82:
             names.append(bytes(buf[ns:ne]).decode("ascii", "replace"))
@@ -222,19 +296,54 @@ def extensions_of(der):
 
     off = tstart
     tag, vs, ve, nxt = read_tlv(der, off, tend)
-    if tag == 0xA0:  # [0] version
+    version = 1
+    if tag == 0xA0:  # [0] EXPLICIT version
+        vt, ivs, ive, ivn = read_tlv(der, vs, ve)
+        if vt != 0x02 or ivn != ve:
+            raise DerError("version is not exactly one INTEGER")
+        if ive - ivs != 1 or der[ivs] > 2:
+            raise DerError("version out of range / not DER-minimal")
+        if der[ivs] == 0:
+            raise DerError("version v1 written out; DEFAULT must be omitted")
+        version = der[ivs] + 1
         off = nxt
     for _ in range(6):  # serial, sigAlg, issuer, validity, subject, SPKI
         if off >= tend:
             return
         _, _, _, off = read_tlv(der, off, tend)
 
+    # Legal tail: [1] issuerUniqueID, [2] subjectUniqueID (IMPLICIT, so
+    # primitive), [3] extensions (EXPLICIT, so constructed) — in order,
+    # each at most once, with the version constraints of RFC 5280
+    # 4.1.2.8 / 4.1.2.9.
+    ranks = {0x81: 1, 0x82: 2, 0xA3: 3}
+    last_rank = 0
     while off < tend:
         tag, vs, ve, nxt = read_tlv(der, off, tend)
-        if tag == 0xA3:  # [3] EXPLICIT extensions
-            stag, sstart, send, _ = read_tlv(der, vs, ve)
+        rank = ranks.get(tag)
+        if rank is None:
+            raise DerError(f"tag 0x{tag:02X} is not a legal TBS tail field")
+        if rank <= last_rank:
+            raise DerError(f"tail field 0x{tag:02X} duplicated or out of order")
+        last_rank = rank
+        if rank <= 2:
+            if version < 2:
+                raise DerError("issuer/subjectUniqueID requires v2 or v3")
+            # IMPLICIT BIT STRING: the tag is [1]/[2] but the content
+            # rules are still the BIT STRING's.
+            check_bit_string_content(der, vs, ve)
+        if rank == 3:  # [3] EXPLICIT extensions
+            if version != 3:
+                raise DerError(f"extensions present in a v{version} certificate")
+            if nxt != tend:
+                raise DerError("[3] extensions is not the final TBS field")
+            stag, sstart, send, snxt = read_tlv(der, vs, ve)
             if stag != 0x30:
                 raise DerError("extensions wrapper is not a SEQUENCE")
+            if snxt != ve:
+                raise DerError("[3] wrapper not exactly consumed by Extensions")
+            if send == sstart:
+                raise DerError("empty Extensions SEQUENCE (SIZE 1..MAX)")
             xo = sstart
             while xo < send:
                 etag, estart, eend, xnxt = read_tlv(der, xo, send)
@@ -243,19 +352,21 @@ def extensions_of(der):
                 otag, ostart2, oend2, after_oid = read_tlv(der, estart, eend)
                 if otag != 0x06:
                     raise DerError("extnID is not an OID")
+                check_canonical_oid(der, ostart2, oend2)
                 oid = decode_oid(der, ostart2, oend2)
                 critical = False
                 cur = after_oid
                 if cur < eend:
                     ctag, cstart, cend, after_bool = read_tlv(der, cur, eend)
+                    note = ""
                     if ctag == 0x01:
-                        if cend - cstart != 1:
-                            raise DerError("critical BOOLEAN length != 1")
-                        critical = der[cstart] != 0x00
-                        note = "" if der[cstart] in (0x00, 0xFF) else "non-DER BOOLEAN"
+                        # DEFAULT FALSE: present means TRUE. Explicit
+                        # FALSE (X.690 11.5) and BER nonzero (11.1) are
+                        # both refused.
+                        if cend - cstart != 1 or der[cstart] != 0xFF:
+                            raise DerError("critical must be the DER BOOLEAN 0xFF (omit DEFAULT FALSE)")
+                        critical = True
                         cur = after_bool
-                    else:
-                        note = ""
                 else:
                     note = ""
                 vtag, vstart2, vend2, after_val = read_tlv(der, cur, eend)
@@ -295,14 +406,15 @@ def report(name, der, recognised):
         label = OID_NAMES.get(oid, "?")
         flag = "CRITICAL" if critical else "        "
         detail = ""
-        # The verifier rejects duplicates of the extensions it DECODES; a
-        # repeated unknown non-critical extension changes no trust
-        # decision and is not rejected. Mirror that exactly.
-        if oid in recognised:
-            if oid in seen:
-                print(f"  !! REJECTED — duplicate extension {oid} ({label})")
-                return problems + 1
-            seen.add(oid)
+        # Duplicate detection is generic — every extnID, recognised or
+        # not (RFC 5280 §4.2 allows at most one instance of each).
+        if oid in seen:
+            print(f"  !! REJECTED — duplicate extension {oid} ({label})")
+            return problems + 1
+        seen.add(oid)
+        if len(seen) > 32:
+            print("  !! REJECTED — more than 32 extensions")
+            return problems + 1
         try:
             if oid == "2.5.29.19":
                 bc = decode_basic_constraints(der, vs, ve)
