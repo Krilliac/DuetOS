@@ -1588,13 +1588,22 @@ __declspec(dllexport) HANDLE CreateWaitableTimerW(void* sa, BOOL manualReset, co
 {
     (void)sa;
     (void)name;
-    /* Allocate via SYS_HANDLE_CREATE_EVENT (caller-chosen reset
-     * mode, INITIALLY UNSIGNALED — flips signaled when the timer
-     * fires). */
+    /* Allocate via SYS_EVENT_CREATE = 30 (rdi = bManualReset,
+     * rsi = bInitialState) — caller-chosen reset mode, INITIALLY
+     * UNSIGNALED, flipping signaled when the timer fires. Same
+     * number and arg shape CreateEventW above uses.
+     *
+     * (This called syscall 33 under the name "SYS_HANDLE_CREATE_EVENT",
+     * which does not exist; 33 is SYS_EVENT_WAIT. It therefore waited
+     * on `manualReset` (0 or 1) as if it were an event handle and
+     * returned WAIT_FAILED — and because that is non-zero, the
+     * null-handle bail-out below did not fire, so callers received
+     * (HANDLE)-1 as a "timer" that a later WaitForSingleObject
+     * satisfies immediately instead of at the due time.) */
     long long h;
     __asm__ volatile("int $0x80"
                      : "=a"(h)
-                     : "a"((long long)33),                                      /* SYS_HANDLE_CREATE_EVENT */
+                     : "a"((long long)30),                                      /* SYS_EVENT_CREATE */
                        "D"((long long)(manualReset ? 1 : 0)), "S"((long long)0) /* initially unsignaled */
                      : "memory");
     if (h == 0)
