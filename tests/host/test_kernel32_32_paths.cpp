@@ -19,9 +19,9 @@
 // be resolved to an absolute forward offset in the DLL, so the
 // arithmetic below is load-bearing rather than incidental.
 //
-// Clamping matches the kernel's own SeekForProcess
-// (kernel/fs/file_route.cpp), which clamps the resulting cursor to
-// [0, size].
+// The i386 return path exposes only signed eax for syscall errors.
+// Targets above INT_MAX are therefore rejected instead of being
+// mistaken for negative errno values.
 
 #include "host_test_helper.h"
 
@@ -120,18 +120,15 @@ int main()
     }
 
     // ---------------------------------------------------------------
-    // Duet32ResolveSeekTarget — forward moves pass through unchanged
-    // (with their original whence, resolved kernel-side).
+    // Duet32ResolveSeekTarget — every move becomes an absolute
+    // FILE_BEGIN offset so success stays distinguishable from errno.
     // ---------------------------------------------------------------
     EXPECT_EQ(resolve(0, 0, DUET32_FILE_BEGIN), 0ULL);
     EXPECT_EQ(resolve(0, 64, DUET32_FILE_BEGIN), 64ULL);
-    EXPECT_EQ(resolve(100, 8, DUET32_FILE_CURRENT), 8ULL);
-    EXPECT_EQ(resolve(100, 8, DUET32_FILE_END), 8ULL);
-    // ...and keep the caller's whence, so the kernel does the
-    // relative arithmetic (which is where it belongs — the cursor is
-    // kernel state and may have moved since any probe here).
-    EXPECT_EQ(resolve_whence(100, 8, DUET32_FILE_CURRENT), DUET32_FILE_CURRENT);
-    EXPECT_EQ(resolve_whence(100, 8, DUET32_FILE_END), DUET32_FILE_END);
+    EXPECT_EQ(resolve(100, 8, DUET32_FILE_CURRENT), 108ULL);
+    EXPECT_EQ(resolve(100, 8, DUET32_FILE_END), 108ULL);
+    EXPECT_EQ(resolve_whence(100, 8, DUET32_FILE_CURRENT), DUET32_FILE_BEGIN);
+    EXPECT_EQ(resolve_whence(100, 8, DUET32_FILE_END), DUET32_FILE_BEGIN);
 
     // Backwards from EOF: the case pe32_rich exercises on target.
     EXPECT_EQ(resolve(25, -4, DUET32_FILE_END), 21ULL);
@@ -144,10 +141,9 @@ int main()
     EXPECT_EQ(resolve_whence(25, -4, DUET32_FILE_END), DUET32_FILE_BEGIN);
     EXPECT_EQ(resolve_whence(10, -3, DUET32_FILE_CURRENT), DUET32_FILE_BEGIN);
 
-    // Past the start clamps to 0 — same as SeekForProcess's clamp,
-    // NOT a wrap to a huge offset (the whole point of resolving here).
-    EXPECT_EQ(resolve(4, -100, DUET32_FILE_END), 0ULL);
-    EXPECT_EQ(resolve(0, -1, DUET32_FILE_CURRENT), 0ULL);
+    // Win32 rejects a resulting position before byte zero.
+    EXPECT_EQ(resolve(4, -100, DUET32_FILE_END), kRejected);
+    EXPECT_EQ(resolve(0, -1, DUET32_FILE_CURRENT), kRejected);
 
     // A negative distance from FILE_BEGIN is invalid per Win32, and
     // must be rejected rather than clamped to 0 — a caller that asks
@@ -163,12 +159,14 @@ int main()
 
     // INT_MIN must not overflow the resolution arithmetic: it is
     // widened to long long before the add, so a huge backwards move
-    // clamps to 0 instead of wrapping positive.
-    EXPECT_EQ(resolve(1024, -2147483647 - 1, DUET32_FILE_END), 0ULL);
+    // rejects instead of wrapping positive.
+    EXPECT_EQ(resolve(1024, -2147483647 - 1, DUET32_FILE_END), kRejected);
 
     // The largest forward move a 32-bit distance can express stays
     // positive after the (unsigned) conversion.
     EXPECT_EQ(resolve(0, 2147483647, DUET32_FILE_BEGIN), 2147483647ULL);
+    EXPECT_EQ(resolve(1, 2147483647, DUET32_FILE_CURRENT), kRejected);
+    EXPECT_EQ(resolve(0xFFFFFFFFLL, -1, DUET32_FILE_END), kRejected);
 
     // Null out-pointers are rejected, not dereferenced.
     {

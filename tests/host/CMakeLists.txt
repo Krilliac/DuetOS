@@ -74,6 +74,20 @@ add_test(
             --root "${CMAKE_SOURCE_DIR}/../.."
 )
 
+add_test(
+    NAME win32_syscall_numbers
+    COMMAND Python3::Interpreter
+            "${CMAKE_SOURCE_DIR}/../../tools/test/check-syscall-numbers.py"
+            --root "${CMAKE_SOURCE_DIR}/../.."
+)
+
+add_test(
+    NAME dll_def_exports
+    COMMAND Python3::Interpreter
+            "${CMAKE_SOURCE_DIR}/../../tools/test/check-dll-def-exports.py"
+            --root "${CMAKE_SOURCE_DIR}/../.."
+)
+
 # ---------------------------------------------------------------
 # Test helper. Header-only single-file ASSERT framework — far
 # lighter than gtest/Catch2, which would be the wrong dep for a

@@ -856,6 +856,7 @@ duetos_embed_blob(generated_kernel32_32_dll.h
     EXTRA_DEPS
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32_32/kernel32_32_internal.h"
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32_32/kernel32_32_fs.c"
+        "${CMAKE_SOURCE_DIR}/userland/libs/kernel32_32/kernel32_32_paths.h"
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32_32/kernel32_32.def"
     COMMENT "Compiling + embedding kernel32_32.dll (i386 PE32 companion)")
 

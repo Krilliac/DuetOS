@@ -41,6 +41,7 @@ __declspec(dllimport) DWORD __stdcall SetFilePointer(HANDLE, int, int*, DWORD);
 __declspec(dllimport) DWORD __stdcall GetFileSize(HANDLE, DWORD*);
 __declspec(dllimport) DWORD __stdcall GetFileType(HANDLE);
 __declspec(dllimport) BOOL __stdcall CloseHandle(HANDLE);
+__declspec(dllimport) DWORD __stdcall GetLastError(void);
 
 /* msvcrt */
 __declspec(dllimport) unsigned __cdecl strlen(const char*);
@@ -90,6 +91,7 @@ __declspec(dllimport) int __stdcall BCryptGenRandom(HANDLE, unsigned char*, DWOR
 #define FILE_BEGIN 0u
 #define FILE_END 2u
 #define FILE_TYPE_DISK 1u
+#define ERROR_INVALID_PARAMETER 87u
 
 /*
  * Real file I/O against the ramfs file every trusted-root process
@@ -157,6 +159,13 @@ static int FileIoProbe(void)
     /* A miss must be an honest failure, not a bogus handle. */
     if (CreateFileA("/no/such/file", GENERIC_READ, 0, (void*)0, OPEN_EXISTING, 0, (HANDLE)0) != INVALID_HANDLE_VALUE)
         return 12;
+
+    /* Unknown creation dispositions fail instead of silently behaving
+     * as OPEN_EXISTING. */
+    if (CreateFileA(kPath, GENERIC_READ, 0, (void*)0, 99u, 0, (HANDLE)0) != INVALID_HANDLE_VALUE)
+        return 13;
+    if (GetLastError() != ERROR_INVALID_PARAMETER)
+        return 14;
 
     return 0;
 }
