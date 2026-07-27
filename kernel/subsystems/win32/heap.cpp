@@ -178,6 +178,28 @@ u64 Win32HeapAllocOnBinding(duetos::core::Process* proc, const Win32HeapBinding&
         }
         const u64 block_size = PeekU64(proc, cur + 0);
         const u64 block_next = PeekU64(proc, cur + 8);
+        // block_size is in-band metadata read from a USER-WRITABLE heap page,
+        // so it is guest-controlled. `cur` is bounds-checked above, but the
+        // split below derives its write target from `cur + needed` and gated
+        // that only on `block_size >= needed` — a test the guest passes by
+        // writing a huge block_size. It could then request a large allocation
+        // so `needed` pushed split_va far outside the arena, and PokeU64
+        // stored `leftover = block_size - needed` there: a repeatable
+        // arbitrary 8-byte write, with an attacker-chosen value, into any
+        // mapped page of its own address space — including an executable one,
+        // defeating W^X and code integrity. HeapAlloc/HeapFree pass no
+        // capability gate, so any loaded PE could reach it.
+        //
+        // Require the header to describe a block that fits inside the arena.
+        // With block_size <= heap_end - cur and needed <= block_size,
+        // split_va = cur + needed is <= heap_end; the leftover >= kHeaderSize
+        // guard below then keeps split_va + 16 in range as well, so both
+        // split writes are provably in-arena. A header failing this is
+        // corrupt, so stop the walk rather than trust the rest of the chain.
+        if (block_size < kHeaderSize || block_size > heap_end - cur)
+        {
+            break;
+        }
         if (block_size >= needed && !duetos::subsystems::win32::custom::IsQuarantined(proc, cur + kHeaderSize))
         {
             const u64 leftover = block_size - needed;
