@@ -195,3 +195,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Extend mixed-provider boot coverage to TLS API-set and kernelbase semantics with cross-thread isolation
 - **Claimed**: 2026-07-27T03:31:44Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] thunk-retirement-wave6-tls-smoke
+- **Session**: `Codex-thunk-wave6`
+- **Branch**: `claude/thunk-retirement-wave6`
+- **Files**: `userland/apps/tls_smoke/* tools/build/build-tls-smoke.sh`
+- **Description**: Make TLS smoke failures terminal and require full real-DLL verdict
+- **Claimed**: 2026-07-27T03:31:45Z
+- **Status**: IN PROGRESS
