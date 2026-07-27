@@ -281,6 +281,22 @@ forbidden=(
     # canary / stack-overflow finding fired — treat as a
     # regression worth investigating.
     '[health] ESCALATE:'
+    # Any kernel selftest failure, from any subsystem.
+    #
+    # The kernel has ~370 "[<tag>] FAIL" sites across 105 distinct
+    # selftests, and until this entry existed NOT ONE of them could
+    # fail a boot. expected[] only requires a handful of specific
+    # PASS lines, so every other selftest could print FAIL and the
+    # smoke still exited 0 — the failure was only visible to a human
+    # reading the serial log. A test that cannot fail CI is not a
+    # test.
+    #
+    # Matching is grep -aF (fixed string), so this is a substring
+    # test. That is safe here specifically because no string in
+    # kernel/ or userland/ matches "] FAIL" followed by another
+    # letter — i.e. there is no "] FAILED" / "] FAILURE" to collide
+    # with. Re-check that if a new diagnostic adds one.
+    '] FAIL'
 )
 # Allowed UNRESOLVED sources: windows-kill.exe imports a pile
 # of dbghelp / advapi32 / vcruntime functions we don't stub

@@ -130,6 +130,13 @@ forbidden=(
     "RETIRED import uses unrecognized API-set provider"
     "UNRESOLVED kernel-provider ordinal import"
     "FAIL retired kernel32 export unavailable"
+    # Any kernel selftest failure, from any subsystem. The kernel has
+    # ~370 "[<tag>] FAIL" sites across 105 selftests and none of them
+    # could fail a boot before this entry: expected[] names only a
+    # handful of PASS lines, so every other selftest could fail
+    # silently. Fixed-string match is safe because nothing in kernel/
+    # or userland/ emits "] FAILED" / "] FAILURE" to collide with.
+    "] FAIL"
 )
 
 # `scenario` = the per-profile scenario output (NOT covered by the
