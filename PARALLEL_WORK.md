@@ -403,3 +403,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Resolve APC same-process TID authorization entirely under scheduler lifetime lock
 - **Claimed**: 2026-07-27T06:00:03Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] thread-handle-tid-profile-core
+- **Session**: `Nathan-48040`
+- **Branch**: `claude/thread-handle-tid-isolation`
+- **Files**: `kernel/proc/ring3_smoke.cpp`
+- **Description**: Run thread3 TID and context regression in focused pe-threads profile
+- **Claimed**: 2026-07-27T06:14:29Z
+- **Status**: IN PROGRESS
