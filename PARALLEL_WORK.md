@@ -252,13 +252,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-27T04:57:39Z
 - **Status**: COMPLETED @ 2026-07-27T05:19:56Z
 
-### [ACTIVE] kernel-thread-state
+### [DONE] kernel-thread-state
 - **Session**: `Codex-wave6-thread-wait-fix`
 - **Branch**: `claude/kernel-thread-wait-fix`
 - **Files**: `kernel/proc/process.cpp`
 - **Description**: kernel/proc/process.h
 - **Claimed**: 2026-07-27T04:57:44Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-27T05:20:27Z
 
 ### [ACTIVE] kernel-thread-regression
 - **Session**: `Codex-wave6-thread-wait-fix`
