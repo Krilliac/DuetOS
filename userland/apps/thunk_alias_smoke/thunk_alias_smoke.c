@@ -25,6 +25,7 @@ __declspec(dllimport) HANDLE __stdcall CreateThread(void* attributes, unsigned l
                                                     DWORD creationFlags, DWORD* threadId);
 __declspec(dllimport) HANDLE __stdcall GetStdHandle(DWORD nStdHandle);
 __declspec(dllimport) BOOL __stdcall GetExitCodeThread(HANDLE thread, DWORD* exitCode);
+__declspec(dllimport) void __stdcall Sleep(DWORD milliseconds);
 __declspec(dllimport) DWORD __stdcall WaitForSingleObject(HANDLE handle, DWORD milliseconds);
 __declspec(dllimport) BOOL __stdcall WriteFile(HANDLE hFile, LPCVOID buffer, DWORD bytesToWrite, LPDWORD bytesWritten,
                                                void* overlapped);
@@ -33,6 +34,7 @@ __declspec(dllimport) HANDLE __stdcall GetCurrentProcess(void);
 
 /* kernelbase.dll: provider-convergence routes. */
 __declspec(dllimport) HANDLE __stdcall GetCurrentThread(void);
+__declspec(dllimport) DWORD __stdcall GetTickCount(void);
 __declspec(dllimport) LONG __stdcall InterlockedExchangeAdd(LONG volatile* addend, LONG value);
 
 /* api-ms-win-core-processthreads-l1-1-0.dll: ID queries. */
@@ -47,6 +49,13 @@ __declspec(dllimport) void __stdcall SetLastError(DWORD errorCode);
 __declspec(dllimport) LONG __stdcall InterlockedAnd(LONG volatile* target, LONG value);
 __declspec(dllimport) LONG __stdcall InterlockedOr(LONG volatile* target, LONG value);
 __declspec(dllimport) LONG __stdcall InterlockedXor(LONG volatile* target, LONG value);
+
+/* api-ms-win-core-profile-l1-1-0.dll: high-resolution timing. */
+__declspec(dllimport) BOOL __stdcall QueryPerformanceCounter(long long* counter);
+__declspec(dllimport) BOOL __stdcall QueryPerformanceFrequency(long long* frequency);
+
+/* api-ms-win-core-sysinfo-l1-1-0.dll: non-wrapping uptime. */
+__declspec(dllimport) unsigned long long __stdcall GetTickCount64(void);
 
 static volatile DWORD g_worker_process_id;
 static volatile DWORD g_worker_thread_id;
@@ -72,6 +81,16 @@ static void Fail(const char* message, DWORD exitCode)
 {
     Out(message);
     ExitProcess(exitCode);
+}
+
+static BOOL QueryPerformanceFrequencyPreservesRbx(long long* frequency)
+{
+    const unsigned long long expected = 0xBADC0FFEE0DDF00DULL;
+    register unsigned long long guard __asm__("rbx") = expected;
+    __asm__ volatile("" : "+r"(guard));
+    const BOOL result = QueryPerformanceFrequency(frequency);
+    __asm__ volatile("" : "+r"(guard));
+    return result == 1 && guard == expected;
 }
 
 static DWORD __stdcall IdentityAndLastErrorWorker(void* parameter)
@@ -169,6 +188,41 @@ void __cdecl _start(void)
     if (InterlockedXor(&atomic_value, 0xFF) != 0xA5 || atomic_value != 0x5A)
         Fail("[thunk_alias_smoke] FAIL api-ms-win-core-interlocked-l1-1-0.dll!InterlockedXor\r\n", 0xAFu);
     Out("[thunk_alias_smoke] api-ms-win-core-interlocked-l1-1-0.dll bitwise atomics PASS\r\n");
+
+    long long frequency = 0;
+    long long counter_before = 0;
+    if (!QueryPerformanceFrequencyPreservesRbx(&frequency) || frequency != 1000000000LL ||
+        QueryPerformanceCounter(&counter_before) != 1 || counter_before <= 0)
+    {
+        Fail("[thunk_alias_smoke] FAIL api-ms-win-core-profile-l1-1-0.dll initial timing\r\n", 0xB0u);
+    }
+    const DWORD tick32_before = GetTickCount();
+    const unsigned long long tick64_before = GetTickCount64();
+    if (tick64_before < (unsigned long long)tick32_before || tick64_before - (unsigned long long)tick32_before > 1000u)
+    {
+        Fail("[thunk_alias_smoke] FAIL initial kernelbase/sysinfo tick consistency\r\n", 0xB1u);
+    }
+
+    Sleep(50u);
+
+    long long counter_after = 0;
+    if (QueryPerformanceCounter(&counter_after) != 1 || counter_after <= counter_before)
+        Fail("[thunk_alias_smoke] FAIL api-ms-win-core-profile-l1-1-0.dll counter progression\r\n", 0xB2u);
+    const long long counter_delta = counter_after - counter_before;
+    if (counter_delta < 20000000LL || counter_delta > 5000000000LL)
+        Fail("[thunk_alias_smoke] FAIL api-ms-win-core-profile-l1-1-0.dll counter units\r\n", 0xB3u);
+    const DWORD tick32_after = GetTickCount();
+    const unsigned long long tick64_after = GetTickCount64();
+    const unsigned long long tick_delta = tick64_after - tick64_before;
+    if (tick32_after <= tick32_before || tick64_after <= tick64_before || tick_delta < 30u || tick_delta > 5000u)
+        Fail("[thunk_alias_smoke] FAIL kernelbase/sysinfo tick progression\r\n", 0xB4u);
+    if (tick64_after < (unsigned long long)tick32_after || tick64_after - (unsigned long long)tick32_after > 1000u)
+    {
+        Fail("[thunk_alias_smoke] FAIL final kernelbase/sysinfo tick consistency\r\n", 0xB5u);
+    }
+    Out("[thunk_alias_smoke] api-ms-win-core-profile-l1-1-0.dll QPC/QPF PASS\r\n");
+    Out("[thunk_alias_smoke] kernelbase.dll GetTickCount PASS\r\n");
+    Out("[thunk_alias_smoke] api-ms-win-core-sysinfo-l1-1-0.dll GetTickCount64 PASS\r\n");
 
     Out("[ring3-thunk-alias-smoke] PASS\r\n");
     ExitProcess(0);

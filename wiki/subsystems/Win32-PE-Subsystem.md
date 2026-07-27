@@ -109,6 +109,12 @@ them through kernelbase and the interlocked API-set contract, validates
 returned-old and final values, and joins two contending add workers.
 The underscored vcruntime intrinsic, 64-bit variants, and fixed
 bytecode layout remain deliberately unchanged.
+The fourth wave moved `QueryPerformanceCounter`,
+`QueryPerformanceFrequency`, `GetTickCount`, and `GetTickCount64`.
+Kernelbase plus the profile and sysinfo API-set contracts converge on
+the verified kernel32 timing implementations. The old and upgraded
+QPC/QPF byte spans remain fixed, and the shared `GetTickCount` span
+stays live for `winmm!timeGetTime`.
 PE32 uses its separate i386 companion DLL and unresolved-import
 gateway, so it is intentionally outside this x64 retirement policy.
 For PE32+, a kernel32/kernelbase/API-set ordinal import may bind a real
@@ -126,13 +132,17 @@ The emulator-safe regression coverage is split by workload:
 `smoke=pe-threads` runs the natural-return and explicit-exit thread PEs,
 requires the thread and bitwise-atomic imports to log `via-dll`, and
 checks the corrected combined free-and-exit argument contract.
-`smoke=pe-winapi` asserts the ten wave-2/3 identity, error, and atomic
-contracts and requires their `via-dll` bindings. Its
-`thunk_alias_smoke` PE deliberately splits the ten imports across
-kernel32, kernelbase, and three API-set descriptors. It validates the
-atomic returned-old/final values and a joined 131,072-operation
-contention total, so provider convergence and semantics are both
-covered by the emulator gate.
+`smoke=pe-winapi` asserts the fourteen wave-2-4 identity, error,
+atomic, and timing contracts and requires their `via-dll` bindings.
+Its `thunk_alias_smoke` PE deliberately splits those fourteen imports
+across kernel32, kernelbase, and five API-set descriptors. It validates
+atomic returned-old/final values, a joined 131,072-operation contention
+total, the 1 GHz QPC contract, monotonic counters, and consistent
+progressing 32/64-bit ticks. It also requires exact `BOOL == TRUE` and
+guards Win64's callee-saved RBX around QPF, catching the old
+two-byte-early entry's silent register corruption. Provider
+convergence and semantics are therefore both covered by the emulator
+gate.
 
 ### NT syscall handlers (17 `*_syscall.cpp` TUs)
 

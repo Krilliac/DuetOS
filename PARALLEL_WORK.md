@@ -131,3 +131,27 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Pin the interlocked API-set host used by the mixed-provider retirement fixture
 - **Claimed**: 2026-07-27T01:53:41Z
 - **Status**: COMPLETED @ 2026-07-27T01:59:40Z
+
+### [DONE] thunk-retirement-wave4-core
+- **Session**: `Codex-thunk-wave4`
+- **Branch**: `claude/thunk-retirement-wave4`
+- **Files**: `kernel/subsystems/win32/thunk* tools/build/*fix* tools/build/*verify* tests/host/*thunk* wiki/reference/Win32-Surface-Status.md wiki/reference/Design-Decisions.md wiki/subsystems/Win32-PE-Subsystem.md wiki/getting-started/History.md`
+- **Description**: Retire four verified timing kernel32 thunks while preserving shared and PE32 consumers
+- **Claimed**: 2026-07-27T02:18:38Z
+- **Status**: COMPLETED @ 2026-07-27T02:33:54Z
+
+### [DONE] thunk-retirement-wave4-alias-fixture
+- **Session**: `Codex-thunk-wave4`
+- **Branch**: `claude/thunk-retirement-wave4`
+- **Files**: `userland/apps/thunk_alias_smoke/* kernel/proc/ring3_smoke.cpp tools/build/build-thunk-alias-smoke.sh tools/test/profile-boot-smoke.sh tools/test/bochs-smoke.sh`
+- **Description**: Extend mixed-provider boot coverage to kernelbase profile and sysinfo timing aliases
+- **Claimed**: 2026-07-27T02:18:40Z
+- **Status**: COMPLETED @ 2026-07-27T02:33:57Z
+
+### [DONE] thunk-retirement-wave4-apiset-policy
+- **Session**: `Codex-thunk-wave4`
+- **Branch**: `claude/thunk-retirement-wave4`
+- **Files**: `kernel/loader/apiset_static.cpp`
+- **Description**: Pin profile and sysinfo API-set hosts used by the retirement fixture
+- **Claimed**: 2026-07-27T02:18:42Z
+- **Status**: COMPLETED @ 2026-07-27T02:33:59Z

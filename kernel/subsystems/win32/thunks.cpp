@@ -106,8 +106,8 @@ constexpr u32 kOffReturnThis = 0x298;                        // 4 bytes
 constexpr u32 kOffWiden = 0x29C;                             // 4 bytes
 constexpr u32 kOffPinHresultSOk = 0x2A0;                     // 6 bytes (HRESULT S_OK pin)
 constexpr u32 kOffGetSysTimeFTReal = 0x2A6;                  // 13 bytes
-constexpr u32 kOffQpcNs = 0x2B3;                             // 13 bytes
-constexpr u32 kOffQpfNs = 0x2C0;                             // 10 bytes
+constexpr u32 kOffQpcNs = 0x2B3;                             // 15 bytes (retired; fixed layout)
+constexpr u32 kOffQpfNs = 0x2C2;                             // 13 bytes (retired; fixed layout)
 constexpr u32 kOffSleep = 0x2CF;                             // 12 bytes (push/pop rdi)
 constexpr u32 kOffSwitchToThread = 0x2DB;                    // 10 bytes
 constexpr u32 kOffGetCmdLineW = 0x2E5;                       // 6 bytes
@@ -482,6 +482,7 @@ constexpr u8 kThunksBytes[] = {
 
 static_assert(sizeof(kThunksBytes) <= 8192, "Win32 thunks fit in the two-page mapping");
 static_assert(sizeof(kThunksBytes) == 0x1349, "thunk layout drifted; update kOff* constants");
+static_assert(kOffQpcNs == 0x2B3 && kOffQpfNs == 0x2C2, "retired QPC/QPF instruction boundaries drifted");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The thunk
 // bytes encode 0x65000000 and 0x65000008 directly; if proc_env.h

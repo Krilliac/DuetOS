@@ -1370,6 +1370,29 @@ gate the provider-convergence logs as well as both semantic PASS lines.
 The 64-bit atomic variants, underscored vcruntime intrinsics, and PE32
 path remain unchanged.
 
+## Phase 6.27 — Timing Win32 thunk-retirement wave (2026-07-26)
+
+The fail-closed x64 manifest grew from fourteen to eighteen imports.
+`QueryPerformanceCounter`, `QueryPerformanceFrequency`, `GetTickCount`,
+and `GetTickCount64` now bind only to verified user-mode kernel32
+implementations. The documented kernel32 thunk-table surface drops
+from 399 to 395 rows. Retirement also corrects the legacy QPF metadata:
+its instruction boundary is `0x2C2`, not the prior interior offset
+`0x2C0`, which decoded as `add ebx,eax` before falling through and
+silently violated Win64's callee-saved-register contract.
+
+The mixed-provider PE imports `GetTickCount` through kernelbase,
+`GetTickCount64` through the sysinfo API-set, and QPC/QPF through the
+profile API-set. It requires the exact 1 GHz frequency, monotonic QPC,
+tick progression across a bounded sleep, and consistent 32/64-bit
+tick readings. An RBX guard and exact `BOOL == TRUE` check prove both
+legacy QPF/QPC ABI defects are absent. QEMU and Bochs gate the semantic
+and provider-routing sentinels. No bytecode moved: both QPC/QPF
+generations remain fixed,
+and `kOffGetTickCount` remains live for `winmm!timeGetTime`. The
+distinct ntdll performance-counter gateway and PE32 timing path are
+unchanged.
+
 ## How to read the rest of the tree
 
 - `CLAUDE.md` — the authoritative project context, coding standards,
