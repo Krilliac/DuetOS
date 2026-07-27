@@ -1899,15 +1899,15 @@
     0x5F,                         // 0x7A4 pop rdi
     0xC3,                         // 0x7A5 ret
 
-    // === real TLS (persistent slot storage) ==========
+    // === real TLS (per-task slot storage) =============
     //
-    // Per-process 64-slot table with u64 storage per slot + a
-    // 64-bit bitmap for in-use tracking. Supersedes 's
+    // Per-process 64-bit allocation bitmap and lifetime generations,
+    // with u64 values and matching generation tags on each Task.
+    // Supersedes 's
     // alias-to-kOffReturnMinus1 TlsAlloc which always claimed
-    // TLS_OUT_OF_INDEXES. Single-threaded process in v0 means
-    // "thread-local" == "process-local" — but the CRT uses TLS
-    // for errno / locale / exception state without caring about
-    // multi-thread semantics, so the storage is what matters.
+    // TLS_OUT_OF_INDEXES. Generation mismatch reads as zero, so
+    // freeing and reallocating an index cannot expose another
+    // slot lifetime's value.
 
     // --- TlsAlloc (offset 0x7A6, 8 bytes) ---------------------
     // Win32: DWORD TlsAlloc(void). Returns slot 0..63 or -1.

@@ -245,8 +245,9 @@ __declspec(dllexport) int WideCharToMultiByte(UINT codepage, DWORD dwFlags, cons
  * TLS slots
  *
  * SYS_TLS_ALLOC = 34 / FREE = 35 / GET = 36 / SET = 37.
- * Per-process TLS table backs all four. TLS_OUT_OF_INDEXES =
- * 0xFFFFFFFF returned on alloc failure / invalid slot.
+ * Process-wide allocation and lifetime generations pair with
+ * per-task slot values. TLS_OUT_OF_INDEXES = 0xFFFFFFFF is
+ * returned on allocation failure / invalid slot.
  * ------------------------------------------------------------------ */
 
 __declspec(dllexport) DWORD TlsAlloc(void)

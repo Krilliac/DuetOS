@@ -403,10 +403,10 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
             p->win32_dirs[i].path[j] = 0;
     }
     p->thread_stack_cursor = Process::kV0ThreadStackArenaBase;
-    // Win32 TLS — no slots allocated, all values zero.
+    // Win32 TLS — no slots allocated, all generations zero.
     p->tls_slot_in_use = 0;
     for (u32 i = 0; i < Process::kWin32TlsCap; ++i)
-        p->tls_slot_value[i] = 0;
+        p->tls_slot_generation[i] = 0;
     // Linux signal-handler table — every signal starts at SIG_DFL
     // (handler_va == 0), no flags, no mask.
     for (u32 i = 0; i < Process::kLinuxSignalCount; ++i)

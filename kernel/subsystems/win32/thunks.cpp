@@ -552,6 +552,10 @@ static_assert(HasExactThunkRow("vcruntime140.dll", "_InterlockedIncrement", kOff
 static_assert(HasExactThunkRow("vcruntime140.dll", "_InterlockedDecrement", kOffInterlockedDec));
 static_assert(HasExactThunkRow("vcruntime140.dll", "_InterlockedExchange", kOffInterlockedExchg));
 static_assert(HasExactThunkRow("vcruntime140.dll", "_InterlockedCompareExchange", kOffInterlockedCmpXchg));
+static_assert(HasExactThunkRow("kernel32.dll", "FlsAlloc", kOffTlsAllocReal));
+static_assert(HasExactThunkRow("kernel32.dll", "FlsFree", kOffTlsFreeReal));
+static_assert(HasExactThunkRow("kernel32.dll", "FlsGetValue", kOffTlsGetValueReal));
+static_assert(HasExactThunkRow("kernel32.dll", "FlsSetValue", kOffTlsSetValueReal));
 
 struct ThunkHashEntry
 {

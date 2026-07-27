@@ -6,3 +6,5 @@ EXPORTS
     InterlockedCompareExchange
     InterlockedExchange
     InterlockedExchangeAdd
+    TlsGetValue
+    TlsSetValue

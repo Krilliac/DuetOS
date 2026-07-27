@@ -35,7 +35,7 @@ class RetiredImportManifestTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "no valid entries"):
                 GEN.load_retired_imports(Path(tmp))
 
-    def test_valid_five_wave_manifest_preserves_function_case(self) -> None:
+    def test_valid_six_wave_manifest_preserves_function_case(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = self.manifest_path(Path(tmp))
             path.parent.mkdir(parents=True)
@@ -62,6 +62,10 @@ class RetiredImportManifestTests(unittest.TestCase):
                 "InterlockedDecrement",
                 "InterlockedExchange",
                 "InterlockedCompareExchange",
+                "TlsAlloc",
+                "TlsFree",
+                "TlsGetValue",
+                "TlsSetValue",
             )
             path.write_text(
                 "".join(

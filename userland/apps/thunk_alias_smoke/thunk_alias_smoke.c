@@ -23,6 +23,8 @@ typedef struct AtomicCanary
 
 #define STD_OUTPUT_HANDLE ((DWORD) - 11)
 #define WAIT_OBJECT_0 0u
+#define ERROR_INVALID_PARAMETER 87u
+#define TLS_OUT_OF_INDEXES 0xFFFFFFFFu
 
 /* kernel32.dll: test support plus one retired pseudo-handle API. */
 __declspec(dllimport) BOOL __stdcall CloseHandle(HANDLE object);
@@ -47,10 +49,14 @@ __declspec(dllimport) DWORD __stdcall GetTickCount(void);
 __declspec(dllimport) LONG __stdcall InterlockedCompareExchange(LONG volatile* target, LONG exchange, LONG compare);
 __declspec(dllimport) LONG __stdcall InterlockedExchange(LONG volatile* target, LONG value);
 __declspec(dllimport) LONG __stdcall InterlockedExchangeAdd(LONG volatile* addend, LONG value);
+__declspec(dllimport) void* __stdcall TlsGetValue(DWORD index);
+__declspec(dllimport) BOOL __stdcall TlsSetValue(DWORD index, void* value);
 
-/* api-ms-win-core-processthreads-l1-1-0.dll: ID queries. */
+/* api-ms-win-core-processthreads-l1-1-0.dll: ID queries and TLS allocation. */
 __declspec(dllimport) DWORD __stdcall GetCurrentProcessId(void);
 __declspec(dllimport) DWORD __stdcall GetCurrentThreadId(void);
+__declspec(dllimport) DWORD __stdcall TlsAlloc(void);
+__declspec(dllimport) BOOL __stdcall TlsFree(DWORD index);
 
 /* api-ms-win-core-errorhandling-l1-1-0.dll: thread-local error state. */
 __declspec(dllimport) DWORD __stdcall GetLastError(void);
@@ -77,6 +83,14 @@ static volatile LONG g_atomic_inc_total;
 static HANDLE g_atomic_start_event;
 static volatile LONG g_atomic_cas_winner;
 static volatile LONG g_atomic_cas_observed[2];
+static volatile unsigned long long g_tls_worker_observed;
+static HANDLE g_tls_reuse_ready_event;
+static HANDLE g_tls_reuse_continue_event;
+static volatile unsigned long long g_tls_reuse_observed;
+static HANDLE g_tls_alloc_start_event;
+static HANDLE g_tls_alloc_release_event;
+static volatile DWORD g_tls_alloc_slots[2];
+static volatile LONG g_tls_alloc_ready;
 
 static DWORD StringLength(const char* text)
 {
@@ -134,6 +148,44 @@ static DWORD __stdcall ContendedAtomicAddWorker(void* parameter)
     return 0;
 }
 
+static DWORD __stdcall TlsIsolationWorker(void* parameter)
+{
+    const DWORD slot = (DWORD)(unsigned long long)parameter;
+    const unsigned long long worker_value = 0x00000034FEDCBA90ULL;
+    SetLastError(0xE001u);
+    if (TlsGetValue(slot) != 0 || GetLastError() != 0)
+        return 0xC1u;
+    if (!TlsSetValue(slot, (void*)worker_value))
+        return 0xC2u;
+    g_tls_worker_observed = (unsigned long long)TlsGetValue(slot);
+    return g_tls_worker_observed == worker_value ? 0u : 0xC3u;
+}
+
+static DWORD __stdcall TlsReuseWorker(void* parameter)
+{
+    const DWORD slot = (DWORD)(unsigned long long)parameter;
+    if (!TlsSetValue(slot, (void*)0x00000056A1B2C3D0ULL) || !SetEvent(g_tls_reuse_ready_event))
+        return 0xC4u;
+    if (WaitForSingleObject(g_tls_reuse_continue_event, 5000u) != WAIT_OBJECT_0)
+        return 0xC5u;
+    SetLastError(0xE003u);
+    g_tls_reuse_observed = (unsigned long long)TlsGetValue(slot);
+    return g_tls_reuse_observed == 0 && GetLastError() == 0 ? 0u : 0xC6u;
+}
+
+static DWORD __stdcall TlsConcurrentAllocWorker(void* parameter)
+{
+    const LONG worker_id = (LONG)(unsigned long long)parameter;
+    if (WaitForSingleObject(g_tls_alloc_start_event, 5000u) != WAIT_OBJECT_0)
+        return 0xC7u;
+    const DWORD slot = TlsAlloc();
+    g_tls_alloc_slots[worker_id - 1] = slot;
+    (void)InterlockedIncrement(&g_tls_alloc_ready);
+    if (WaitForSingleObject(g_tls_alloc_release_event, 5000u) != WAIT_OBJECT_0)
+        return 0xC8u;
+    return slot != TLS_OUT_OF_INDEXES && TlsFree(slot) ? 0u : 0xC9u;
+}
+
 void __cdecl _start(void)
 {
     if (GetCurrentProcess() != (HANDLE)(long long)-1)
@@ -180,6 +232,121 @@ void __cdecl _start(void)
         Fail("[thunk_alias_smoke] FAIL api-ms-win-core-errorhandling-l1-1-0.dll last-error isolation\r\n", 0xA8u);
     }
     Out("[thunk_alias_smoke] api-ms-win-core-errorhandling-l1-1-0.dll thread-local last-error PASS\r\n");
+
+    const unsigned long long tls_main_value = 0x00000012ABCDEF80ULL;
+    const unsigned long long tls_worker_value = 0x00000034FEDCBA90ULL;
+    const DWORD tls_slot = TlsAlloc();
+    SetLastError(0xE002u);
+    if (tls_slot == TLS_OUT_OF_INDEXES || TlsGetValue(tls_slot) != 0 || GetLastError() != 0 ||
+        !TlsSetValue(tls_slot, (void*)tls_main_value) || (unsigned long long)TlsGetValue(tls_slot) != tls_main_value)
+    {
+        Fail("[thunk_alias_smoke] FAIL kernelbase/API-set TLS initial/round-trip\r\n", 0xB9u);
+    }
+    g_tls_worker_observed = 0;
+    HANDLE tls_worker = CreateThread(0, 0, TlsIsolationWorker, (void*)(unsigned long long)tls_slot, 0, 0);
+    if (tls_worker == 0 || WaitForSingleObject(tls_worker, 5000u) != WAIT_OBJECT_0)
+        Fail("[thunk_alias_smoke] FAIL kernelbase/API-set TLS worker\r\n", 0xBAu);
+    DWORD tls_worker_exit = 0xFFFFFFFFu;
+    if (!GetExitCodeThread(tls_worker, &tls_worker_exit) || tls_worker_exit != 0u ||
+        g_tls_worker_observed != tls_worker_value || (unsigned long long)TlsGetValue(tls_slot) != tls_main_value)
+    {
+        Fail("[thunk_alias_smoke] FAIL kernelbase/API-set TLS isolation\r\n", 0xBBu);
+    }
+    (void)CloseHandle(tls_worker);
+    SetLastError(0xE004u);
+    const BOOL set_cap_result = TlsSetValue(64u, (void*)1);
+    const DWORD set_cap_error = GetLastError();
+    SetLastError(0xE005u);
+    const BOOL set_max_result = TlsSetValue(TLS_OUT_OF_INDEXES, (void*)1);
+    const DWORD set_max_error = GetLastError();
+    SetLastError(0xE006u);
+    const void* get_cap_result = TlsGetValue(64u);
+    const DWORD get_cap_error = GetLastError();
+    SetLastError(0xE007u);
+    const void* get_max_result = TlsGetValue(TLS_OUT_OF_INDEXES);
+    const DWORD get_max_error = GetLastError();
+    SetLastError(0xE008u);
+    const BOOL first_free_result = TlsFree(tls_slot);
+    const DWORD first_free_error = GetLastError();
+    SetLastError(0xE009u);
+    const BOOL second_free_result = TlsFree(tls_slot);
+    const DWORD second_free_error = GetLastError();
+    if (set_cap_result != 0 || set_cap_error != ERROR_INVALID_PARAMETER || set_max_result != 0 ||
+        set_max_error != ERROR_INVALID_PARAMETER || get_cap_result != 0 || get_cap_error != ERROR_INVALID_PARAMETER ||
+        get_max_result != 0 || get_max_error != ERROR_INVALID_PARAMETER || !first_free_result ||
+        first_free_error != 0xE008u || second_free_result != 0 || second_free_error != ERROR_INVALID_PARAMETER)
+    {
+        Fail("[thunk_alias_smoke] FAIL kernelbase/API-set TLS invalid/free\r\n", 0xBCu);
+    }
+    Out("[thunk_alias_smoke] kernelbase/API-set TLS round-trip PASS\r\n");
+
+    const DWORD reuse_slot = TlsAlloc();
+    g_tls_reuse_ready_event = CreateEventA(0, 1, 0, 0);
+    g_tls_reuse_continue_event = CreateEventA(0, 1, 0, 0);
+    g_tls_reuse_observed = 0xFFFFFFFFFFFFFFFFULL;
+    if (reuse_slot == TLS_OUT_OF_INDEXES || g_tls_reuse_ready_event == 0 || g_tls_reuse_continue_event == 0)
+        Fail("[thunk_alias_smoke] FAIL TLS reuse setup\r\n", 0xBDu);
+    HANDLE reuse_worker = CreateThread(0, 0, TlsReuseWorker, (void*)(unsigned long long)reuse_slot, 0, 0);
+    if (reuse_worker == 0 || WaitForSingleObject(g_tls_reuse_ready_event, 5000u) != WAIT_OBJECT_0)
+    {
+        Fail("[thunk_alias_smoke] FAIL TLS reuse setup\r\n", 0xBDu);
+    }
+    if (!TlsFree(reuse_slot))
+        Fail("[thunk_alias_smoke] FAIL TLS reuse free\r\n", 0xBEu);
+    const DWORD replacement_slot = TlsAlloc();
+    if (replacement_slot != reuse_slot || !SetEvent(g_tls_reuse_continue_event) ||
+        WaitForSingleObject(reuse_worker, 5000u) != WAIT_OBJECT_0)
+    {
+        Fail("[thunk_alias_smoke] FAIL TLS reuse generation\r\n", 0xBEu);
+    }
+    DWORD reuse_exit = 0xFFFFFFFFu;
+    if (!GetExitCodeThread(reuse_worker, &reuse_exit) || reuse_exit != 0u || g_tls_reuse_observed != 0 ||
+        !TlsFree(replacement_slot))
+    {
+        Fail("[thunk_alias_smoke] FAIL TLS stale-value isolation\r\n", 0xBEu);
+    }
+    (void)CloseHandle(reuse_worker);
+    (void)CloseHandle(g_tls_reuse_ready_event);
+    (void)CloseHandle(g_tls_reuse_continue_event);
+
+    g_tls_alloc_start_event = CreateEventA(0, 1, 0, 0);
+    g_tls_alloc_release_event = CreateEventA(0, 1, 0, 0);
+    g_tls_alloc_slots[0] = TLS_OUT_OF_INDEXES;
+    g_tls_alloc_slots[1] = TLS_OUT_OF_INDEXES;
+    g_tls_alloc_ready = 0;
+    if (g_tls_alloc_start_event == 0 || g_tls_alloc_release_event == 0)
+        Fail("[thunk_alias_smoke] FAIL concurrent TLS allocation setup\r\n", 0xBFu);
+    HANDLE alloc_worker_a = CreateThread(0, 0, TlsConcurrentAllocWorker, (void*)1, 0, 0);
+    HANDLE alloc_worker_b = CreateThread(0, 0, TlsConcurrentAllocWorker, (void*)2, 0, 0);
+    if (alloc_worker_a == 0 || alloc_worker_b == 0 || !SetEvent(g_tls_alloc_start_event))
+    {
+        Fail("[thunk_alias_smoke] FAIL concurrent TLS allocation setup\r\n", 0xBFu);
+    }
+    for (DWORD wait_ms = 0; wait_ms < 5000u && g_tls_alloc_ready != 2; ++wait_ms)
+        Sleep(1u);
+    if (g_tls_alloc_ready != 2 || g_tls_alloc_slots[0] == TLS_OUT_OF_INDEXES ||
+        g_tls_alloc_slots[1] == TLS_OUT_OF_INDEXES || g_tls_alloc_slots[0] == g_tls_alloc_slots[1] ||
+        !SetEvent(g_tls_alloc_release_event))
+    {
+        Fail("[thunk_alias_smoke] FAIL concurrent TLS allocation distinctness\r\n", 0xBFu);
+    }
+    if (WaitForSingleObject(alloc_worker_a, 5000u) != WAIT_OBJECT_0 ||
+        WaitForSingleObject(alloc_worker_b, 5000u) != WAIT_OBJECT_0)
+    {
+        Fail("[thunk_alias_smoke] FAIL concurrent TLS allocation wait\r\n", 0xBFu);
+    }
+    DWORD alloc_exit_a = 0xFFFFFFFFu;
+    DWORD alloc_exit_b = 0xFFFFFFFFu;
+    if (!GetExitCodeThread(alloc_worker_a, &alloc_exit_a) || !GetExitCodeThread(alloc_worker_b, &alloc_exit_b) ||
+        alloc_exit_a != 0u || alloc_exit_b != 0u)
+    {
+        Fail("[thunk_alias_smoke] FAIL concurrent TLS allocation exit\r\n", 0xBFu);
+    }
+    (void)CloseHandle(alloc_worker_a);
+    (void)CloseHandle(alloc_worker_b);
+    (void)CloseHandle(g_tls_alloc_start_event);
+    (void)CloseHandle(g_tls_alloc_release_event);
+    Out("[thunk_alias_smoke] TLS generation/concurrent allocation PASS\r\n");
 
     volatile LONG atomic_value = 0x55;
     if (InterlockedExchangeAdd(&atomic_value, 0x10) != 0x55 || atomic_value != 0x65)

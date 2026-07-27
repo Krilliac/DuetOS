@@ -2821,7 +2821,15 @@ void StartRing3SmokeTask()
     {
         SpawnPeFile("ring3-hello-winapi", fs::generated::kBinHelloWinapiBytes, fs::generated::kBinHelloWinapiBytes_len,
                     CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-        // Mixed-provider retirement fixture: the Wave 2-5 APIs are
+        // The focused pe-winapi profile also runs the direct-kernel32
+        // TLS fixture. The full bare-metal profile already gets this
+        // PE from kPeCompatBattery, so avoid double-spawning it there.
+        if (::duetos::test::SmokeProfileGet() == ::duetos::test::SmokeProfile::PeWinapi)
+        {
+            SpawnPeFile("ring3-tls-smoke", fs::generated::kBinTlsSmokeBytes, fs::generated::kBinTlsSmokeBytes_len,
+                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        }
+        // Mixed-provider retirement fixture: the Wave 2-6 APIs are
         // intentionally imported across kernel32, kernelbase, and five
         // API-set contracts. The PE validates their semantics after IAT
         // resolution and prints [ring3-thunk-alias-smoke] PASS.

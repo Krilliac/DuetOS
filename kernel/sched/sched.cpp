@@ -264,6 +264,7 @@ struct Task
     // tasks (idle, workers, reaper) never call TlsAlloc / Set /
     // Get and leave the array zero-initialised.
     u64 win32_tls_slot_value[kWin32TlsCap];
+    u64 win32_tls_slot_generation[kWin32TlsCap];
 
     // Linux-ABI FS.base (MSR_FS_BASE). Meaningful only for tasks
     // whose process has abi_flavor == kAbiLinux — that's where
@@ -3919,7 +3920,7 @@ u32 SetCurrentTaskWin32LastError(u32 err)
     return previous;
 }
 
-u64 CurrentTaskTlsSlotValue(u32 idx)
+u64 CurrentTaskTlsSlotValue(u32 idx, u64 generation)
 {
     Task* self = CurrentTask();
     if (self == nullptr)
@@ -3936,10 +3937,14 @@ u64 CurrentTaskTlsSlotValue(u32 idx)
         KLOG_ONCE_WARN_V("sched", "TlsGetValue idx out of range", idx);
         return 0;
     }
+    if (self->win32_tls_slot_generation[idx] != generation)
+    {
+        return 0;
+    }
     return self->win32_tls_slot_value[idx];
 }
 
-void SetCurrentTaskTlsSlotValue(u32 idx, u64 value)
+void SetCurrentTaskTlsSlotValue(u32 idx, u64 generation, u64 value)
 {
     Task* self = CurrentTask();
     if (self == nullptr)
@@ -3952,6 +3957,7 @@ void SetCurrentTaskTlsSlotValue(u32 idx, u64 value)
         return;
     }
     self->win32_tls_slot_value[idx] = value;
+    self->win32_tls_slot_generation[idx] = generation;
 }
 
 u64 TaskId(const Task* t)

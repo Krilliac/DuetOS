@@ -367,19 +367,21 @@ enum SyscallNumber : u64
 
     // SYS_TLS_FREE: rdi = slot index. Returns 0 on success,
     // u64(-1) on bad index / unallocated slot. Clears the
-    // in-use bit AND zeros the stored value. Backs Win32
-    // TlsFree.
+    // in-use bit and advances the slot's lifetime generation.
+    // Failure sets task-local LastError to ERROR_INVALID_PARAMETER.
+    // Backs Win32 TlsFree.
     SYS_TLS_FREE = 35,
 
-    // SYS_TLS_GET: rdi = slot index. Returns the stored u64
-    // value, or 0 if the index is invalid / unallocated
-    // (Win32 TlsGetValue returns 0 + sets LastError to
-    // ERROR_INVALID_PARAMETER in the bad-index case; v0 skips
-    // the LastError side effect). Backs Win32 TlsGetValue.
+    // SYS_TLS_GET: rdi = slot index. Returns the calling task's
+    // stored u64 value, or 0 for an unset/stale/invalid index.
+    // Sets task-local LastError to ERROR_SUCCESS for an in-range
+    // index or ERROR_INVALID_PARAMETER for an out-of-range index.
+    // Backs Win32 TlsGetValue.
     SYS_TLS_GET = 36,
 
     // SYS_TLS_SET: rdi = slot index, rsi = value. Returns 0
-    // on success, u64(-1) on bad index. Silently succeeds
+    // on success; a bad index returns u64(-1) and sets
+    // ERROR_INVALID_PARAMETER. Silently succeeds
     // even if the slot was allocated and then freed — caller
     // is responsible for tracking which slots are live.
     // Backs Win32 TlsSetValue.

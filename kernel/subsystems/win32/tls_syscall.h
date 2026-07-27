@@ -9,10 +9,11 @@
  *                        unallocated, per Win32 contract).
  *   SYS_TLS_SET   (37) — rdi=idx, rsi=value.
  *
- * Backed by Process::tls_slot_in_use (64-bit bitmap) +
- * tls_slot_value[Process::kWin32TlsCap]. Per-process, single-
- * threaded for v0 — "thread-local" == "process-local" until we
- * grow multiple tasks per process.
+ * Process owns the allocation bitmap, lock, and per-slot lifetime
+ * generations. Each scheduler Task owns its TLS values and matching
+ * generation tags, providing thread isolation and safe slot reuse.
+ * TlsGetValue also updates task-local LastError so callers can
+ * distinguish a valid NULL value from an invalid index.
  */
 
 namespace duetos::arch
