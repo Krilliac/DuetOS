@@ -1125,6 +1125,17 @@ bool DecodeJpeg(const fs::fat32::Volume* v, const fs::fat32::DirEntry* e, const 
     // no channel swap is needed here.
     const u32 dst_w = (info.width <= cw) ? info.width : cw;
     const u32 dst_h = (info.height <= ch) ? info.height : ch;
+    // Allocate the destination before writing through it. DecodeCurrent()
+    // opens with FreePixels(), which sets g_state.pixels = nullptr; the BMP
+    // (:741), TGA (:871) and PNG (:1006) paths each call AllocThumbnail
+    // before their downsample loop, but this one did not — so opening any
+    // baseline JPEG stored through a null pointer, one row stride at a time.
+    if (!AllocThumbnail(dst_w, dst_h))
+    {
+        mm::KFree(inter_alloc);
+        StatusSet("out of kheap memory");
+        return false;
+    }
     const u32* inter = static_cast<const u32*>(inter_alloc);
     u32* dst = g_state.pixels;
     for (u32 dy = 0; dy < dst_h; ++dy)
