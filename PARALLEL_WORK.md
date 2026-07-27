@@ -51,3 +51,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Stage only PARALLEL_WORK.md so releasing a claim cannot absorb fleet work
 - **Claimed**: 2026-07-26T23:54:03Z
 - **Status**: IN PROGRESS
+
+### 🟢 thunk-retirement-kernel-contract
+- **Session**: `Codex-thunk-wave1`
+- **Branch**: `claude/thunk-retirement-wave1`
+- **Files**: `kernel/syscall/syscall.cpp userland/apps/hello_winapi/hello.c userland/apps/thread2_smoke/thread2_smoke.c`
+- **Description**: Correct invalid-handle semantics and make natural-return thread coverage verdict-bearing
+- **Claimed**: 2026-07-27T00:06:53Z
+- **Status**: IN PROGRESS
