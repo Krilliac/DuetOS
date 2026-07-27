@@ -12323,3 +12323,11 @@ markers for its richest input. Three discovery layers were added (runtime
   combined free-and-exit API fixed a pre-existing ABI bug: its second
   argument is the exit code, while the old `ExitThread` alias consumed
   the first module-handle argument.
+- **Second wave:** `GetCurrentProcess`, `GetCurrentThread`,
+  `GetCurrentProcessId`, `GetCurrentThreadId`, `GetLastError`, and
+  `SetLastError`. These process/thread identity and error-slot APIs now
+  use only the verified kernel32 exports. Direct kernelbase imports and
+  API-set contracts converge on that same kernel32 provider before
+  legacy lookup. A mixed-provider PE fixture makes all three routes
+  verdict-bearing in `smoke=pe-winapi`. PE32 remains on its separate
+  i386 path.

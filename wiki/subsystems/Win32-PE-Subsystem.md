@@ -98,6 +98,11 @@ The first wave moved `CreateThread`, `ExitThread`,
 `FreeLibraryAndExitThread`, and `GetExitCodeThread`. It also fixed the
 old `FreeLibraryAndExitThread` alias, which consumed the module handle
 in RCX as the exit code instead of the second argument in RDX.
+The second wave moved `GetCurrentProcess`, `GetCurrentThread`,
+`GetCurrentProcessId`, `GetCurrentThreadId`, `GetLastError`, and
+`SetLastError`. Direct kernelbase imports and API-set aliases of these
+retired names converge on the verified kernel32 provider; they cannot
+fall through to their former fixed-offset thunk entries.
 PE32 uses its separate i386 companion DLL and unresolved-import
 gateway, so it is intentionally outside this x64 retirement policy.
 For PE32+, a kernel32/kernelbase/API-set ordinal import may bind a real
@@ -111,10 +116,14 @@ imports still use diagnostic gateways. Dead per-API byte ranges are
 left in place until a separate offset-compaction wave can prove every
 live absolute gateway.
 
-`smoke=pe-threads` is the focused emulator-safe regression profile:
-it runs the natural-return and explicit-exit thread PEs, requires all
-four imports to log `via-dll`, and checks the corrected combined
-free-and-exit argument contract.
+The emulator-safe regression coverage is split by workload:
+`smoke=pe-threads` runs the natural-return and explicit-exit thread PEs,
+requires the first four imports to log `via-dll`, and checks the
+corrected combined free-and-exit argument contract. `smoke=pe-winapi`
+asserts the six wave-2 identity/error contracts and requires their
+`via-dll` bindings. Its `thunk_alias_smoke` PE deliberately splits the
+six imports across kernel32, kernelbase, and two API-set descriptors,
+so provider convergence is covered by the emulator gate.
 
 ### NT syscall handlers (17 `*_syscall.cpp` TUs)
 

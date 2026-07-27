@@ -35,19 +35,35 @@ class RetiredImportManifestTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "no valid entries"):
                 GEN.load_retired_imports(Path(tmp))
 
-    def test_valid_manifest_preserves_function_case(self) -> None:
+    def test_valid_two_wave_manifest_preserves_function_case(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = self.manifest_path(Path(tmp))
             path.parent.mkdir(parents=True)
+            names = (
+                "CreateThread",
+                "ExitThread",
+                "FreeLibraryAndExitThread",
+                "GetExitCodeThread",
+                "GetCurrentProcess",
+                "GetCurrentThread",
+                "GetCurrentProcessId",
+                "GetCurrentThreadId",
+                "GetLastError",
+                "SetLastError",
+            )
             path.write_text(
-                'DUETOS_RETIRED_KERNEL32_IMPORT("CreateThread")\n',
+                "".join(
+                    f'DUETOS_RETIRED_KERNEL32_IMPORT("{name}")\n'
+                    for name in names
+                ),
                 encoding="utf-8",
             )
             self.assertEqual(
                 GEN.load_retired_imports(Path(tmp)),
                 {
-                    ("kernel32.dll", "CreateThread"),
-                    ("kernelbase.dll", "CreateThread"),
+                    (provider, name)
+                    for name in names
+                    for provider in ("kernel32.dll", "kernelbase.dll")
                 },
             )
 

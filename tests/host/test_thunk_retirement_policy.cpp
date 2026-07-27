@@ -8,6 +8,7 @@
 
 using duetos::win32::IsRetiredKernel32ImportName;
 using duetos::win32::kRetiredKernel32Imports;
+using duetos::win32::RetiredNamedImportWouldFallBack;
 using duetos::win32::ThunkRetirementRequiresRealDll;
 
 int main()
@@ -22,14 +23,24 @@ int main()
         EXPECT_TRUE(ThunkRetirementRequiresRealDll("kernelbase.dll", name));
         EXPECT_TRUE(IsRetiredKernel32ImportName(name));
     }
-    EXPECT_EQ(count, 4u);
+    EXPECT_EQ(count, 10u);
 
     EXPECT_FALSE(ThunkRetirementRequiresRealDll("kernel32.dll", "createthread"));
     EXPECT_FALSE(ThunkRetirementRequiresRealDll("kernel32.dll", "CreateThreadEx"));
     EXPECT_FALSE(ThunkRetirementRequiresRealDll("kernelbase.dll", "CreateThreadEx"));
+    EXPECT_FALSE(ThunkRetirementRequiresRealDll("ntdll.dll", "GetLastError"));
+    EXPECT_FALSE(ThunkRetirementRequiresRealDll("api-ms-win-not-a-contract.dll", "GetLastError"));
     EXPECT_FALSE(ThunkRetirementRequiresRealDll(nullptr, "CreateThread"));
     EXPECT_FALSE(ThunkRetirementRequiresRealDll("kernel32.dll", nullptr));
     EXPECT_FALSE(IsRetiredKernel32ImportName(nullptr));
+
+    EXPECT_TRUE(RetiredNamedImportWouldFallBack(false, false, false, "GetLastError"));
+    EXPECT_FALSE(RetiredNamedImportWouldFallBack(false, false, true, "GetLastError"));
+    EXPECT_FALSE(RetiredNamedImportWouldFallBack(true, false, false, "GetLastError"));
+    EXPECT_FALSE(RetiredNamedImportWouldFallBack(false, true, false, "GetLastError"));
+    EXPECT_FALSE(RetiredNamedImportWouldFallBack(false, false, false, "getlasterror"));
+    EXPECT_FALSE(RetiredNamedImportWouldFallBack(false, false, false, "GetLastErrorEx"));
+    EXPECT_FALSE(RetiredNamedImportWouldFallBack(false, false, false, nullptr));
 
     return duetos_host_test::finish_main("thunk_retirement_policy");
 }

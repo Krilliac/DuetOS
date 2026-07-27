@@ -1,0 +1,11 @@
+LIBRARY kernel32.dll
+
+EXPORTS
+    CloseHandle
+    CreateThread
+    ExitProcess
+    GetExitCodeThread
+    GetCurrentProcess
+    GetStdHandle
+    WaitForSingleObject
+    WriteFile

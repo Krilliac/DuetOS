@@ -67,3 +67,43 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Keep local fix-cycle profile chains synchronized with pe-threads CI coverage
 - **Claimed**: 2026-07-27T00:17:14Z
 - **Status**: COMPLETED @ 2026-07-27T00:31:56Z
+
+### [DONE] thunk-retirement-wave2-core
+- **Session**: `Codex-thunk-wave2`
+- **Branch**: `claude/thunk-retirement-wave2`
+- **Files**: `kernel/subsystems/win32/thunk* kernel/loader/pe_loader.cpp kernel/proc/spawn.cpp tools/build/*fix* tools/build/*verify* tests/host/*thunk* tests/host/CMakeLists.txt wiki/reference/Win32-Surface-Status.md wiki/reference/Design-Decisions.md wiki/subsystems/Win32-PE-Subsystem.md wiki/getting-started/History.md`
+- **Description**: Retire six exact current-process/thread/error-state x64 thunks through the real verified kernel32 export path
+- **Claimed**: 2026-07-27T00:53:14Z
+- **Status**: COMPLETED @ 2026-07-27T01:30:11Z
+
+### [DONE] thunk-retirement-wave2-runtime
+- **Session**: `Codex-thunk-wave2`
+- **Branch**: `claude/thunk-retirement-wave2`
+- **Files**: `userland/apps/hello_winapi/hello.c tools/test/profile-boot-smoke.sh tools/test/bochs-smoke.sh`
+- **Description**: Add verdict-bearing pseudo-handle ID last-error and via-DLL smoke sentinels
+- **Claimed**: 2026-07-27T00:53:16Z
+- **Status**: COMPLETED @ 2026-07-27T01:30:14Z
+
+### [DONE] thunk-retirement-wave2-alias-fixture
+- **Session**: `Codex-thunk-wave2`
+- **Branch**: `claude/thunk-retirement-wave2`
+- **Files**: `userland/apps/thunk_alias_smoke/* kernel/CMakeLists.txt kernel/proc/ring3_smoke.cpp tools/build/build-thunk-alias-smoke.sh`
+- **Description**: Add kernel32 kernelbase and API-set IAT routing boot coverage for retired imports
+- **Claimed**: 2026-07-27T00:53:17Z
+- **Status**: COMPLETED @ 2026-07-27T01:30:17Z
+
+### [DONE] thunk-retirement-wave2-timeout
+- **Session**: `Codex-thunk-wave2`
+- **Branch**: `claude/thunk-retirement-wave2`
+- **Files**: `kernel/test/smoke_profile.cpp`
+- **Description**: Increase pe-winapi guest timeout for the second mixed-provider PE and worker-thread oracle
+- **Claimed**: 2026-07-27T01:08:47Z
+- **Status**: COMPLETED @ 2026-07-27T01:30:19Z
+
+### [DONE] thunk-retirement-wave2-apiset-policy
+- **Session**: `Codex-thunk-wave2`
+- **Branch**: `claude/thunk-retirement-wave2`
+- **Files**: `kernel/loader/apiset_static.cpp`
+- **Description**: Lock known-host mappings and fabricated-contract rejection for retired API-set aliases
+- **Claimed**: 2026-07-27T01:10:30Z
+- **Status**: COMPLETED @ 2026-07-27T01:30:21Z

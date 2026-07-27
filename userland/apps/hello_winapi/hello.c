@@ -397,18 +397,20 @@ void _start(void)
     DWORD written = 0;
     WriteFile(out, kMsg, kMsgLen, &written, 0);
 
-    // Exercise every process/thread-lifecycle stub. The `volatile` sinks keep
-    // the reads from being DCE'd — without them lld-link
-    // could drop the IAT entries as unused and we'd never
-    // see the resolver log the new functions.
-    volatile HANDLE p_sink = GetCurrentProcess();
-    volatile HANDLE t_sink = GetCurrentThread();
-    volatile DWORD pid_sink = GetCurrentProcessId();
-    volatile DWORD tid_sink = GetCurrentThreadId();
-    (void)p_sink;
-    (void)t_sink;
-    (void)pid_sink;
-    (void)tid_sink;
+    // Assert the four process/thread identity contracts. Distinct failure
+    // codes make a regression attributable from the serial log.
+    HANDLE current_process = GetCurrentProcess();
+    HANDLE current_thread = GetCurrentThread();
+    DWORD current_process_id = GetCurrentProcessId();
+    DWORD current_thread_id = GetCurrentThreadId();
+    if (current_process != (HANDLE)-1)
+        ExitProcess(0xE201u);
+    if (current_thread != (HANDLE)-2)
+        ExitProcess(0xE202u);
+    if (current_process_id == 0)
+        ExitProcess(0xE203u);
+    if (current_thread_id == 0)
+        ExitProcess(0xE204u);
 
     // TerminateProcess is [[noreturn]] in practice — can't
     // call it without skipping ExitProcess. Pull its IAT
@@ -1695,11 +1697,11 @@ void _start(void)
     }
 
     // Round-trip: store a distinctive value via
-    // SetLastError, read it back via GetLastError, exit with
-    // whatever came back. If the slot works, the kernel log
-    // shows `[I] sys : exit rc val=0xBEEF`. Any other value
-    // means the round-trip is broken — the serial log
-    // becomes the assertion.
+    // SetLastError, read it back via GetLastError, and assert the
+    // round-trip before preserving 0xBEEF as the successful exit code.
     SetLastError(0xBEEF);
-    ExitProcess(GetLastError());
+    DWORD last_error = GetLastError();
+    if (last_error != 0xBEEF)
+        ExitProcess(0xE205u);
+    ExitProcess(last_error);
 }

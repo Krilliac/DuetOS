@@ -116,6 +116,18 @@ constexpr char Lc(char c)
     return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + ('a' - 'A')) : c;
 }
 
+constexpr bool StringEqual(const char* left, const char* right)
+{
+    if (left == nullptr || right == nullptr)
+        return false;
+    while (*left != '\0' && *right != '\0')
+    {
+        if (*left++ != *right++)
+            return false;
+    }
+    return *left == *right;
+}
+
 // Case-insensitive lexicographic compare of two strings up to
 // `len` bytes. Returns <0 / 0 / >0. Treats NULs in either string
 // as terminators (so `len` is an upper bound, not a strict count).
@@ -283,7 +295,22 @@ void ApiSetSelfTest()
             core::Panic("apiset-selftest", "host length mismatch");
     }
 
-    // (3) Case-insensitive lookup (uppercase variant).
+    // (3) The two contracts used by the thunk-retirement alias
+    // fixture must remain recognized kernelbase-hosted contracts.
+    host = nullptr;
+    if (!ApiSetResolveStatic("api-ms-win-core-errorhandling-l1-1-0.dll", &host) || host == nullptr ||
+        !StringEqual(host, "kernelbase.dll"))
+    {
+        core::Panic("apiset-selftest", "errorhandling host wrong");
+    }
+    host = nullptr;
+    if (!ApiSetResolveStatic("api-ms-win-core-processthreads-l1-1-0.dll", &host) || host == nullptr ||
+        !StringEqual(host, "kernelbase.dll"))
+    {
+        core::Panic("apiset-selftest", "processthreads host wrong");
+    }
+
+    // (4) Case-insensitive lookup (uppercase variant).
     host = nullptr;
     if (!ApiSetResolveStatic("API-MS-WIN-CORE-RTLSUPPORT-L1-1-0.DLL", &host) || host == nullptr)
     {
@@ -294,21 +321,21 @@ void ApiSetSelfTest()
         core::Panic("apiset-selftest", "case-insensitive host wrong");
     }
 
-    // (4) Head-only contract (no version suffix) resolves.
+    // (5) Head-only contract (no version suffix) resolves.
     host = nullptr;
     if (!ApiSetResolveStatic("api-ms-win-core-string-l1", &host) || host == nullptr)
     {
         core::Panic("apiset-selftest", "head-only lookup miss");
     }
 
-    // (5) Trailing ".dll" without version digits is stripped.
+    // (6) Trailing ".dll" without version digits is stripped.
     host = nullptr;
     if (!ApiSetResolveStatic("api-ms-win-core-handle-l1.dll", &host) || host == nullptr)
     {
         core::Panic("apiset-selftest", "dll-only suffix lookup miss");
     }
 
-    // (6) Unknown contract returns false without scribbling.
+    // (7) Unknown contract returns false without scribbling.
     host = reinterpret_cast<const char*>(0xDEADBEEFu);
     if (ApiSetResolveStatic("api-ms-win-fake-nonexistent-l99-0-0.dll", &host))
     {
@@ -320,7 +347,7 @@ void ApiSetSelfTest()
         core::Panic("apiset-selftest", "miss path scribbled out_host");
     }
 
-    // (7) NULL inputs return false.
+    // (8) NULL inputs return false.
     if (ApiSetResolveStatic(nullptr, &host) || ApiSetResolveStatic("api-ms-win-core-misc-l1", nullptr))
     {
         core::Panic("apiset-selftest", "null-input guard regressed");

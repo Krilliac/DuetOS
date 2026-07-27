@@ -1,0 +1,127 @@
+/*
+ * Mixed-provider import fixture for the second legacy-thunk retirement wave.
+ *
+ * Each of the six retired functions is deliberately supplied by a different
+ * import descriptor group.  The declarations stay ordinary dllimports; the
+ * per-provider .def files decide which DLL name lld writes into the PE import
+ * directory.
+ */
+
+typedef void* HANDLE;
+typedef unsigned int DWORD;
+typedef int BOOL;
+typedef const void* LPCVOID;
+typedef DWORD* LPDWORD;
+typedef DWORD(__stdcall* LPTHREAD_START_ROUTINE)(void*);
+
+#define STD_OUTPUT_HANDLE ((DWORD) - 11)
+#define WAIT_OBJECT_0 0u
+
+/* kernel32.dll: test support plus one retired pseudo-handle API. */
+__declspec(dllimport) BOOL __stdcall CloseHandle(HANDLE object);
+__declspec(dllimport) HANDLE __stdcall CreateThread(void* attributes, unsigned long long stackSize,
+                                                    LPTHREAD_START_ROUTINE startAddress, void* parameter,
+                                                    DWORD creationFlags, DWORD* threadId);
+__declspec(dllimport) HANDLE __stdcall GetStdHandle(DWORD nStdHandle);
+__declspec(dllimport) BOOL __stdcall GetExitCodeThread(HANDLE thread, DWORD* exitCode);
+__declspec(dllimport) DWORD __stdcall WaitForSingleObject(HANDLE handle, DWORD milliseconds);
+__declspec(dllimport) BOOL __stdcall WriteFile(HANDLE hFile, LPCVOID buffer, DWORD bytesToWrite, LPDWORD bytesWritten,
+                                               void* overlapped);
+__declspec(dllimport) void __stdcall ExitProcess(DWORD exitCode);
+__declspec(dllimport) HANDLE __stdcall GetCurrentProcess(void);
+
+/* kernelbase.dll: provider-convergence route for the other pseudo-handle. */
+__declspec(dllimport) HANDLE __stdcall GetCurrentThread(void);
+
+/* api-ms-win-core-processthreads-l1-1-0.dll: ID queries. */
+__declspec(dllimport) DWORD __stdcall GetCurrentProcessId(void);
+__declspec(dllimport) DWORD __stdcall GetCurrentThreadId(void);
+
+/* api-ms-win-core-errorhandling-l1-1-0.dll: thread-local error state. */
+__declspec(dllimport) DWORD __stdcall GetLastError(void);
+__declspec(dllimport) void __stdcall SetLastError(DWORD errorCode);
+
+static volatile DWORD g_worker_process_id;
+static volatile DWORD g_worker_thread_id;
+
+static DWORD StringLength(const char* text)
+{
+    DWORD length = 0;
+    while (text[length] != '\0')
+    {
+        ++length;
+    }
+    return length;
+}
+
+static void Out(const char* text)
+{
+    DWORD written = 0;
+    (void)WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), text, StringLength(text), &written, 0);
+}
+
+static void Fail(const char* message, DWORD exitCode)
+{
+    Out(message);
+    ExitProcess(exitCode);
+}
+
+static DWORD __stdcall IdentityAndLastErrorWorker(void* parameter)
+{
+    (void)parameter;
+    g_worker_process_id = GetCurrentProcessId();
+    g_worker_thread_id = GetCurrentThreadId();
+    SetLastError(0xA11A50F2u);
+    return GetLastError() == 0xA11A50F2u ? 0u : 0xA5u;
+}
+
+void __cdecl _start(void)
+{
+    if (GetCurrentProcess() != (HANDLE)(long long)-1)
+    {
+        Fail("[thunk_alias_smoke] FAIL kernel32.dll!GetCurrentProcess\r\n", 0xA1);
+    }
+    Out("[thunk_alias_smoke] kernel32.dll pseudo-handle PASS\r\n");
+
+    if (GetCurrentThread() != (HANDLE)(long long)-2)
+    {
+        Fail("[thunk_alias_smoke] FAIL kernelbase.dll!GetCurrentThread\r\n", 0xA2);
+    }
+    Out("[thunk_alias_smoke] kernelbase.dll pseudo-handle PASS\r\n");
+
+    const DWORD processId = GetCurrentProcessId();
+    const DWORD threadId = GetCurrentThreadId();
+    if (processId == 0 || threadId == 0)
+    {
+        Fail("[thunk_alias_smoke] FAIL api-ms-win-core-processthreads-l1-1-0.dll IDs\r\n", 0xA3);
+    }
+    Out("[thunk_alias_smoke] api-ms-win-core-processthreads-l1-1-0.dll IDs PASS\r\n");
+
+    // A worker must share the process ID, have a distinct thread ID,
+    // and modify only its own LastError slot. These comparisons catch
+    // swapped/constant ID wrappers and process-global error storage.
+    const DWORD expectedError = 0xA11A5002u;
+    SetLastError(expectedError);
+    g_worker_process_id = 0;
+    g_worker_thread_id = 0;
+    HANDLE worker = CreateThread(0, 0, IdentityAndLastErrorWorker, 0, 0, 0);
+    if (worker == 0)
+        Fail("[thunk_alias_smoke] FAIL worker create\r\n", 0xA4u);
+    if (WaitForSingleObject(worker, 5000u) != WAIT_OBJECT_0)
+        Fail("[thunk_alias_smoke] FAIL worker wait\r\n", 0xA5u);
+    DWORD worker_exit = 0xFFFFFFFFu;
+    if (!GetExitCodeThread(worker, &worker_exit) || worker_exit != 0u)
+        Fail("[thunk_alias_smoke] FAIL worker exit\r\n", 0xA6u);
+    const DWORD main_error = GetLastError();
+    (void)CloseHandle(worker);
+    if (g_worker_process_id != processId || g_worker_thread_id == 0 || g_worker_thread_id == threadId)
+        Fail("[thunk_alias_smoke] FAIL process/thread ID isolation\r\n", 0xA7u);
+    if (main_error != expectedError)
+    {
+        Fail("[thunk_alias_smoke] FAIL api-ms-win-core-errorhandling-l1-1-0.dll last-error isolation\r\n", 0xA8u);
+    }
+    Out("[thunk_alias_smoke] api-ms-win-core-errorhandling-l1-1-0.dll thread-local last-error PASS\r\n");
+
+    Out("[ring3-thunk-alias-smoke] PASS\r\n");
+    ExitProcess(0);
+}

@@ -6,14 +6,10 @@
     // small and means any improvement (clamping, error
     // codes, real handle dispatch) lands in both at once.
     {"kernel32.dll", "WriteFile", kOffWriteFile}, {"kernel32.dll", "WriteConsoleA", kOffWriteFile},
-    // process/thread lifecycle
-    {"kernel32.dll", "GetCurrentProcess", kOffGetCurrentProcess},
-    {"kernel32.dll", "GetCurrentThread", kOffGetCurrentThread},
-    {"kernel32.dll", "GetCurrentProcessId", kOffGetCurrentProcessId},
-    {"kernel32.dll", "GetCurrentThreadId", kOffGetCurrentThreadId},
+    // process/thread lifecycle (current process/thread queries are
+    // provided by the real user-mode kernel32)
     {"kernel32.dll", "TerminateProcess", kOffTerminateProcess},
-    // last-error slot
-    {"kernel32.dll", "GetLastError", kOffGetLastError}, {"kernel32.dll", "SetLastError", kOffSetLastError},
+    // The kernel32 last-error APIs are provided by the real DLL.
     // critical sections (v0 no-ops)
     {"kernel32.dll", "InitializeCriticalSection", kOffInitCritSec},
     {"kernel32.dll", "InitializeCriticalSectionEx", kOffInitCritSec},
@@ -825,10 +821,8 @@
     // built against the Win8+ SDK bind directly to kernelbase.
     // Aliasing to the same internal stubs means they work
     // identically.
-    {"kernelbase.dll", "GetLastError", kOffGetLastError}, {"kernelbase.dll", "SetLastError", kOffSetLastError},
-    {"kernelbase.dll", "GetCurrentProcess", kOffGetCurrentProcess},
-    {"kernelbase.dll", "GetCurrentProcessId", kOffGetCurrentProcessId},
-    {"kernelbase.dll", "GetCurrentThreadId", kOffGetCurrentThreadId},
+    // Retired kernelbase current-task and last-error aliases converge
+    // on the verified kernel32 exports before legacy table lookup.
     {"kernelbase.dll", "ExitProcess", kOffExitProcess}, {"kernelbase.dll", "WriteFile", kOffWriteFile},
     {"kernelbase.dll", "ReadFile", kOffReadFile}, {"kernelbase.dll", "CloseHandle", kOffCloseHandle},
     {"kernelbase.dll", "CreateFileW", kOffCreateFileW}, {"kernelbase.dll", "HeapAlloc", kOffHeapAlloc},
