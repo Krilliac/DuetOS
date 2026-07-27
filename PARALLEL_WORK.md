@@ -172,10 +172,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-27T02:53:03Z
 - **Status**: COMPLETED @ 2026-07-27T03:09:10Z
 
-### [ACTIVE] thunk-retirement-wave5-interlock-smoke
+### [DONE] thunk-retirement-wave5-interlock-smoke
 - **Session**: `Codex-thunk-wave5`
 - **Branch**: `claude/thunk-retirement-wave5`
 - **Files**: `userland/apps/interlock_smoke/* tools/build/build-interlock-smoke.sh`
 - **Description**: Make legacy interlock smoke failures terminal instead of printing unconditional PASS
 - **Claimed**: 2026-07-27T02:53:04Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-27T03:09:12Z
