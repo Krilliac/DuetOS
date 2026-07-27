@@ -187,3 +187,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Retire four verified TLS kernel32 and kernelbase rows while preserving FLS shared bytecode
 - **Claimed**: 2026-07-27T03:31:42Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] thunk-retirement-wave6-alias-fixture
+- **Session**: `Codex-thunk-wave6`
+- **Branch**: `claude/thunk-retirement-wave6`
+- **Files**: `userland/apps/thunk_alias_smoke/* kernel/proc/ring3_smoke.cpp tools/build/build-thunk-alias-smoke.sh tools/test/profile-boot-smoke.sh tools/test/bochs-smoke.sh`
+- **Description**: Extend mixed-provider boot coverage to TLS API-set and kernelbase semantics with cross-thread isolation
+- **Claimed**: 2026-07-27T03:31:44Z
+- **Status**: IN PROGRESS
