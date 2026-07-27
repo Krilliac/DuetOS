@@ -1,14 +1,15 @@
 /*
- * Mixed-provider import fixture for the second legacy-thunk retirement wave.
+ * Mixed-provider import fixture for legacy-thunk retirement waves.
  *
- * Each of the six retired functions is deliberately supplied by a different
- * import descriptor group.  The declarations stay ordinary dllimports; the
+ * Retired functions are deliberately split across kernel32, kernelbase, and
+ * API-set import descriptors. The declarations stay ordinary dllimports; the
  * per-provider .def files decide which DLL name lld writes into the PE import
  * directory.
  */
 
 typedef void* HANDLE;
 typedef unsigned int DWORD;
+typedef int LONG;
 typedef int BOOL;
 typedef const void* LPCVOID;
 typedef DWORD* LPDWORD;
@@ -30,8 +31,9 @@ __declspec(dllimport) BOOL __stdcall WriteFile(HANDLE hFile, LPCVOID buffer, DWO
 __declspec(dllimport) void __stdcall ExitProcess(DWORD exitCode);
 __declspec(dllimport) HANDLE __stdcall GetCurrentProcess(void);
 
-/* kernelbase.dll: provider-convergence route for the other pseudo-handle. */
+/* kernelbase.dll: provider-convergence routes. */
 __declspec(dllimport) HANDLE __stdcall GetCurrentThread(void);
+__declspec(dllimport) LONG __stdcall InterlockedExchangeAdd(LONG volatile* addend, LONG value);
 
 /* api-ms-win-core-processthreads-l1-1-0.dll: ID queries. */
 __declspec(dllimport) DWORD __stdcall GetCurrentProcessId(void);
@@ -41,8 +43,14 @@ __declspec(dllimport) DWORD __stdcall GetCurrentThreadId(void);
 __declspec(dllimport) DWORD __stdcall GetLastError(void);
 __declspec(dllimport) void __stdcall SetLastError(DWORD errorCode);
 
+/* api-ms-win-core-interlocked-l1-1-0.dll: 32-bit bitwise atomics. */
+__declspec(dllimport) LONG __stdcall InterlockedAnd(LONG volatile* target, LONG value);
+__declspec(dllimport) LONG __stdcall InterlockedOr(LONG volatile* target, LONG value);
+__declspec(dllimport) LONG __stdcall InterlockedXor(LONG volatile* target, LONG value);
+
 static volatile DWORD g_worker_process_id;
 static volatile DWORD g_worker_thread_id;
+static volatile LONG g_atomic_add_total;
 
 static DWORD StringLength(const char* text)
 {
@@ -73,6 +81,14 @@ static DWORD __stdcall IdentityAndLastErrorWorker(void* parameter)
     g_worker_thread_id = GetCurrentThreadId();
     SetLastError(0xA11A50F2u);
     return GetLastError() == 0xA11A50F2u ? 0u : 0xA5u;
+}
+
+static DWORD __stdcall ContendedAtomicAddWorker(void* parameter)
+{
+    (void)parameter;
+    for (DWORD i = 0; i < 65536u; ++i)
+        (void)InterlockedExchangeAdd(&g_atomic_add_total, 1);
+    return 0;
 }
 
 void __cdecl _start(void)
@@ -121,6 +137,38 @@ void __cdecl _start(void)
         Fail("[thunk_alias_smoke] FAIL api-ms-win-core-errorhandling-l1-1-0.dll last-error isolation\r\n", 0xA8u);
     }
     Out("[thunk_alias_smoke] api-ms-win-core-errorhandling-l1-1-0.dll thread-local last-error PASS\r\n");
+
+    volatile LONG atomic_value = 0x55;
+    if (InterlockedExchangeAdd(&atomic_value, 0x10) != 0x55 || atomic_value != 0x65)
+        Fail("[thunk_alias_smoke] FAIL kernelbase.dll!InterlockedExchangeAdd\r\n", 0xA9u);
+    g_atomic_add_total = 0;
+    HANDLE add_worker_a = CreateThread(0, 0, ContendedAtomicAddWorker, 0, 0, 0);
+    HANDLE add_worker_b = CreateThread(0, 0, ContendedAtomicAddWorker, 0, 0, 0);
+    if (add_worker_a == 0 || add_worker_b == 0)
+        Fail("[thunk_alias_smoke] FAIL contended atomic worker create\r\n", 0xAAu);
+    if (WaitForSingleObject(add_worker_a, 5000u) != WAIT_OBJECT_0 ||
+        WaitForSingleObject(add_worker_b, 5000u) != WAIT_OBJECT_0)
+    {
+        Fail("[thunk_alias_smoke] FAIL contended atomic worker wait\r\n", 0xABu);
+    }
+    DWORD add_exit_a = 0xFFFFFFFFu;
+    DWORD add_exit_b = 0xFFFFFFFFu;
+    if (!GetExitCodeThread(add_worker_a, &add_exit_a) || !GetExitCodeThread(add_worker_b, &add_exit_b) ||
+        add_exit_a != 0 || add_exit_b != 0 || g_atomic_add_total != 131072)
+    {
+        Fail("[thunk_alias_smoke] FAIL contended InterlockedExchangeAdd\r\n", 0xACu);
+    }
+    (void)CloseHandle(add_worker_a);
+    (void)CloseHandle(add_worker_b);
+    Out("[thunk_alias_smoke] kernelbase.dll InterlockedExchangeAdd PASS\r\n");
+
+    if (InterlockedAnd(&atomic_value, 0x3F) != 0x65 || atomic_value != 0x25)
+        Fail("[thunk_alias_smoke] FAIL api-ms-win-core-interlocked-l1-1-0.dll!InterlockedAnd\r\n", 0xADu);
+    if (InterlockedOr(&atomic_value, 0x80) != 0x25 || atomic_value != 0xA5)
+        Fail("[thunk_alias_smoke] FAIL api-ms-win-core-interlocked-l1-1-0.dll!InterlockedOr\r\n", 0xAEu);
+    if (InterlockedXor(&atomic_value, 0xFF) != 0xA5 || atomic_value != 0x5A)
+        Fail("[thunk_alias_smoke] FAIL api-ms-win-core-interlocked-l1-1-0.dll!InterlockedXor\r\n", 0xAFu);
+    Out("[thunk_alias_smoke] api-ms-win-core-interlocked-l1-1-0.dll bitwise atomics PASS\r\n");
 
     Out("[ring3-thunk-alias-smoke] PASS\r\n");
     ExitProcess(0);

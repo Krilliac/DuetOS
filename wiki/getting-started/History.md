@@ -1350,6 +1350,26 @@ distinct thread IDs, and thread-local LastError isolation.
 PE32 remains unchanged on its separate i386 DLL and unresolved-import
 path.
 
+## Phase 6.26 — Atomic Win32 thunk-retirement wave (2026-07-26)
+
+The fail-closed x64 manifest grew from ten to fourteen imports.
+`InterlockedExchangeAdd`, `InterlockedAnd`, `InterlockedOr`, and
+`InterlockedXor` now bind only to the verified user-mode kernel32
+implementations. Their public kernel32 thunk rows are gone, while the
+fixed byte spans remain until the separate compaction audit. The
+`vcruntime140!_InterlockedExchangeAdd` intrinsic still uses its shared
+legacy bytecode and was intentionally preserved. The documented
+kernel32 thunk-table surface drops from 403 to 399 rows.
+
+The mixed-provider PE now imports `InterlockedExchangeAdd` through
+kernelbase and the bitwise operations through
+`api-ms-win-core-interlocked-l1-1-0.dll`. It checks every returned old
+value and final value, then joins two workers that perform 131,072
+contended additions and requires the exact final total. QEMU and Bochs
+gate the provider-convergence logs as well as both semantic PASS lines.
+The 64-bit atomic variants, underscored vcruntime intrinsics, and PE32
+path remain unchanged.
+
 ## How to read the rest of the tree
 
 - `CLAUDE.md` — the authoritative project context, coding standards,

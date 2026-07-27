@@ -571,7 +571,9 @@
     {"kernel32.dll", "InterlockedDecrement", kOffInterlockedDec},
     {"kernel32.dll", "InterlockedCompareExchange", kOffInterlockedCmpXchg},
     {"kernel32.dll", "InterlockedExchange", kOffInterlockedExchg},
-    {"kernel32.dll", "InterlockedExchangeAdd", kOffInterlockedExchgAdd},
+    // InterlockedExchangeAdd is provided by the verified user-mode
+    // kernel32 export. Its bytecode remains live for the distinct
+    // vcruntime140 _InterlockedExchangeAdd intrinsic below.
     // vcruntime140 intrinsic exports (used by MSVC CRT).
     {"vcruntime140.dll", "_InterlockedIncrement", kOffInterlockedInc},
     {"vcruntime140.dll", "_InterlockedDecrement", kOffInterlockedDec},
@@ -595,8 +597,10 @@
     // backed by LOCK CMPXCHG — correct under SMP + timer-tick
     // preemption. Return the ORIGINAL pre-modify value per Win32
     // contract.
-    {"kernel32.dll", "InterlockedAnd", kOffInterlockedAnd}, {"kernel32.dll", "InterlockedOr", kOffInterlockedOr},
-    {"kernel32.dll", "InterlockedXor", kOffInterlockedXor}, {"kernel32.dll", "InterlockedAnd64", kOffInterlockedAnd64},
+    // The 32-bit And/Or/Xor names are provided by the verified user-mode
+    // kernel32. Keep only the 64-bit legacy rows here; the retired 32-bit
+    // bytecode stays in place until the separate layout-compaction wave.
+    {"kernel32.dll", "InterlockedAnd64", kOffInterlockedAnd64},
     {"kernel32.dll", "InterlockedOr64", kOffInterlockedOr64},
     {"kernel32.dll", "InterlockedXor64", kOffInterlockedXor64},
     {"vcruntime140.dll", "_InterlockedIncrement64", kOffInterlockedInc64},

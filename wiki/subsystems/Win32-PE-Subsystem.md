@@ -103,6 +103,12 @@ The second wave moved `GetCurrentProcess`, `GetCurrentThread`,
 `SetLastError`. Direct kernelbase imports and API-set aliases of these
 retired names converge on the verified kernel32 provider; they cannot
 fall through to their former fixed-offset thunk entries.
+The third wave moved `InterlockedExchangeAdd`, `InterlockedAnd`,
+`InterlockedOr`, and `InterlockedXor`. A mixed-provider fixture binds
+them through kernelbase and the interlocked API-set contract, validates
+returned-old and final values, and joins two contending add workers.
+The underscored vcruntime intrinsic, 64-bit variants, and fixed
+bytecode layout remain deliberately unchanged.
 PE32 uses its separate i386 companion DLL and unresolved-import
 gateway, so it is intentionally outside this x64 retirement policy.
 For PE32+, a kernel32/kernelbase/API-set ordinal import may bind a real
@@ -118,12 +124,15 @@ live absolute gateway.
 
 The emulator-safe regression coverage is split by workload:
 `smoke=pe-threads` runs the natural-return and explicit-exit thread PEs,
-requires the first four imports to log `via-dll`, and checks the
-corrected combined free-and-exit argument contract. `smoke=pe-winapi`
-asserts the six wave-2 identity/error contracts and requires their
-`via-dll` bindings. Its `thunk_alias_smoke` PE deliberately splits the
-six imports across kernel32, kernelbase, and two API-set descriptors,
-so provider convergence is covered by the emulator gate.
+requires the thread and bitwise-atomic imports to log `via-dll`, and
+checks the corrected combined free-and-exit argument contract.
+`smoke=pe-winapi` asserts the ten wave-2/3 identity, error, and atomic
+contracts and requires their `via-dll` bindings. Its
+`thunk_alias_smoke` PE deliberately splits the ten imports across
+kernel32, kernelbase, and three API-set descriptors. It validates the
+atomic returned-old/final values and a joined 131,072-operation
+contention total, so provider convergence and semantics are both
+covered by the emulator gate.
 
 ### NT syscall handlers (17 `*_syscall.cpp` TUs)
 

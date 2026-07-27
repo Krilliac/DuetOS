@@ -23,7 +23,7 @@ int main()
         EXPECT_TRUE(ThunkRetirementRequiresRealDll("kernelbase.dll", name));
         EXPECT_TRUE(IsRetiredKernel32ImportName(name));
     }
-    EXPECT_EQ(count, 10u);
+    EXPECT_EQ(count, 14u);
 
     EXPECT_FALSE(ThunkRetirementRequiresRealDll("kernel32.dll", "createthread"));
     EXPECT_FALSE(ThunkRetirementRequiresRealDll("kernel32.dll", "CreateThreadEx"));

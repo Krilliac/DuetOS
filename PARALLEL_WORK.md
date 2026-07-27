@@ -107,3 +107,27 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Lock known-host mappings and fabricated-contract rejection for retired API-set aliases
 - **Claimed**: 2026-07-27T01:10:30Z
 - **Status**: COMPLETED @ 2026-07-27T01:30:21Z
+
+### [DONE] thunk-retirement-wave3-core
+- **Session**: `Codex-thunk-wave3`
+- **Branch**: `claude/thunk-retirement-wave3`
+- **Files**: `kernel/subsystems/win32/thunk* kernel/loader/pe_loader.cpp kernel/proc/spawn.cpp tools/build/*fix* tools/build/*verify* tests/host/*thunk* wiki/reference/Win32-Surface-Status.md wiki/reference/Design-Decisions.md wiki/subsystems/Win32-PE-Subsystem.md wiki/getting-started/History.md`
+- **Description**: Retire four verified 32-bit interlocked kernel32 thunks while preserving shared bytecode consumers
+- **Claimed**: 2026-07-27T01:48:59Z
+- **Status**: COMPLETED @ 2026-07-27T01:59:36Z
+
+### [DONE] thunk-retirement-wave3-alias-fixture
+- **Session**: `Codex-thunk-wave3`
+- **Branch**: `claude/thunk-retirement-wave3`
+- **Files**: `userland/apps/thunk_alias_smoke/* kernel/CMakeLists.txt kernel/proc/ring3_smoke.cpp tools/build/build-thunk-alias-smoke.sh tools/test/profile-boot-smoke.sh tools/test/bochs-smoke.sh`
+- **Description**: Extend mixed-provider boot coverage to kernelbase and API-set interlocked aliases
+- **Claimed**: 2026-07-27T01:49:00Z
+- **Status**: COMPLETED @ 2026-07-27T01:59:38Z
+
+### [DONE] thunk-retirement-wave3-apiset-policy
+- **Session**: `Codex-thunk-wave3`
+- **Branch**: `claude/thunk-retirement-wave3`
+- **Files**: `kernel/loader/apiset_static.cpp`
+- **Description**: Pin the interlocked API-set host used by the mixed-provider retirement fixture
+- **Claimed**: 2026-07-27T01:53:41Z
+- **Status**: COMPLETED @ 2026-07-27T01:59:40Z

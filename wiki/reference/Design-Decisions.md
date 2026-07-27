@@ -12331,3 +12331,11 @@ markers for its richest input. Three discovery layers were added (runtime
   legacy lookup. A mixed-provider PE fixture makes all three routes
   verdict-bearing in `smoke=pe-winapi`. PE32 remains on its separate
   i386 path.
+- **Third wave:** `InterlockedExchangeAdd`, `InterlockedAnd`,
+  `InterlockedOr`, and `InterlockedXor`. Direct kernelbase and
+  `api-ms-win-core-interlocked-l1-1-0.dll` imports converge on the same
+  verified kernel32 code. The mixed-provider fixture checks old-value
+  returns, exact updates, and a joined two-worker contention total.
+  Shared `vcruntime140!_InterlockedExchangeAdd` bytecode and all 64-bit
+  variants remain live. **Rules out** treating API retirement as
+  permission to delete a span that still has a distinct DLL consumer.

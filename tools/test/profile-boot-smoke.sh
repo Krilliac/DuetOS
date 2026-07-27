@@ -168,6 +168,7 @@ case "${PROFILE}" in
             "[heap] calloc zero-fill OK"
             "[advapi] advapi32 + event/wait/time/proc OK"
             "[perf-counter] perf counter + tick count OK"
+            "[interlocked] InterlockedInc/Dec/XAdd/Xchg/CmpXchg OK"
             "[heap-resize] HeapSize + HeapReAlloc + realloc OK"
             "[calculator-selftest] PASS"
             "[files] self-test OK"
@@ -178,6 +179,8 @@ case "${PROFILE}" in
             "[thunk_alias_smoke] kernelbase.dll pseudo-handle PASS"
             "[thunk_alias_smoke] api-ms-win-core-processthreads-l1-1-0.dll IDs PASS"
             "[thunk_alias_smoke] api-ms-win-core-errorhandling-l1-1-0.dll thread-local last-error PASS"
+            "[thunk_alias_smoke] kernelbase.dll InterlockedExchangeAdd PASS"
+            "[thunk_alias_smoke] api-ms-win-core-interlocked-l1-1-0.dll bitwise atomics PASS"
             "[ring3-thunk-alias-smoke] PASS"
             "exit rc   val=0xbeef"
             "via-dll kernel32.dll!GetCurrentProcess"
@@ -186,11 +189,16 @@ case "${PROFILE}" in
             "via-dll kernel32.dll!GetCurrentThreadId"
             "via-dll kernel32.dll!GetLastError"
             "via-dll kernel32.dll!SetLastError"
+            "via-dll kernel32.dll!InterlockedExchangeAdd"
             "via-dll kernelbase.dll!GetCurrentThread"
             "via-dll api-ms-win-core-processthreads-l1-1-0.dll!GetCurrentProcessId"
             "via-dll api-ms-win-core-processthreads-l1-1-0.dll!GetCurrentThreadId"
             "via-dll api-ms-win-core-errorhandling-l1-1-0.dll!GetLastError"
             "via-dll api-ms-win-core-errorhandling-l1-1-0.dll!SetLastError"
+            "via-retired-provider kernelbase.dll!InterlockedExchangeAdd -> kernel32.dll"
+            "via-retired-provider api-ms-win-core-interlocked-l1-1-0.dll!InterlockedAnd -> kernel32.dll"
+            "via-retired-provider api-ms-win-core-interlocked-l1-1-0.dll!InterlockedOr -> kernel32.dll"
+            "via-retired-provider api-ms-win-core-interlocked-l1-1-0.dll!InterlockedXor -> kernel32.dll"
         )
         ;;
     pe-threads)
@@ -209,6 +217,9 @@ case "${PROFILE}" in
             "via-dll kernel32.dll!ExitThread"
             "via-dll kernel32.dll!FreeLibraryAndExitThread"
             "via-dll kernel32.dll!GetExitCodeThread"
+            "via-dll kernel32.dll!InterlockedAnd"
+            "via-dll kernel32.dll!InterlockedOr"
+            "via-dll kernel32.dll!InterlockedXor"
         )
         ;;
     pe-winkill)
