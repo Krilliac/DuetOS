@@ -419,3 +419,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Document thread3 coverage in pe-threads profile
 - **Claimed**: 2026-07-27T06:14:31Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] thread-handle-tid-profile-qemu
+- **Session**: `Nathan-48066`
+- **Branch**: `claude/thread-handle-tid-isolation`
+- **Files**: `tools/test/profile-boot-smoke.sh`
+- **Description**: Require thread3 isolation sentinels in QEMU
+- **Claimed**: 2026-07-27T06:14:32Z
+- **Status**: IN PROGRESS
