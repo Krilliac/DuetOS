@@ -275,3 +275,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: No description provided
 - **Claimed**: 2026-07-27T04:57:54Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] kernel-thread-state-header
+- **Session**: `Codex-wave6-thread-wait-fix`
+- **Branch**: `claude/kernel-thread-wait-fix`
+- **Files**: `kernel/proc/process.h`
+- **Description**: No description provided
+- **Claimed**: 2026-07-27T04:58:04Z
+- **Status**: IN PROGRESS
