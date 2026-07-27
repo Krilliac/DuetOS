@@ -328,7 +328,25 @@ bool LinuxSignalRestoreFrame(::duetos::arch::TrapFrame* frame)
     frame->rbx = stage.saved_rbx;
     frame->rax = stage.saved_rax;
     frame->rip = stage.saved_rip;
-    frame->rflags = stage.saved_rflags;
+    // Sanitise RFLAGS rather than restoring it verbatim.
+    //
+    // `stage` was read back out of the signal frame on the USER stack, so
+    // saved_rflags is fully attacker-controlled, and the Linux entry stub
+    // returns via iretq — which loads IOPL from that value while still at
+    // CPL 0. A sandboxed ELF could raise a signal to itself, poke IOPL=3
+    // into its own saved frame, rt_sigreturn, and then drive every I/O port
+    // directly (disk, PIC, PIT, serial); or clear IF and wedge the CPU. The
+    // lines just below already decline to restore cs/ss for a strictly
+    // weaker version of this same concern.
+    //
+    // Keep only the flags a handler may legitimately have altered on behalf
+    // of the interrupted code — the arithmetic flags and DF — then force
+    // reserved bit 1 and IF on. Everything else is cleared, so IOPL, NT, AC,
+    // RF, VM and TF cannot be set from ring 3. execve sanitises the same
+    // register one directory over with a flat frame->rflags = 0x202.
+    constexpr u64 kUserFlagsMask = 0x0CD5u; // CF PF AF ZF SF DF OF
+    constexpr u64 kForcedFlags = 0x0202u;   // reserved bit 1 + IF
+    frame->rflags = (stage.saved_rflags & kUserFlagsMask) | kForcedFlags;
     frame->rsp = stage.saved_rsp;
     // cs / ss intentionally not restored — they should already be
     // user selectors and re-loading user-controlled values into
