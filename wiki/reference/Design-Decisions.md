@@ -12339,3 +12339,16 @@ markers for its richest input. Three discovery layers were added (runtime
   Shared `vcruntime140!_InterlockedExchangeAdd` bytecode and all 64-bit
   variants remain live. **Rules out** treating API retirement as
   permission to delete a span that still has a distinct DLL consumer.
+- **Fourth wave:** `QueryPerformanceCounter`,
+  `QueryPerformanceFrequency`, `GetTickCount`, and `GetTickCount64`.
+  Kernelbase plus the profile and sysinfo API-set contracts converge on
+  verified kernel32 exports. The fixture requires a 1 GHz frequency,
+  monotonic high-resolution counters, bounded-wait tick progression,
+  and consistent 32/64-bit tick readings. The legacy QPF metadata is
+  corrected from the invalid interior offset `0x2C0` to its real
+  `0x2C2` boundary; the fixture guards RBX and exact `BOOL == TRUE` to
+  prove the old entry's callee-saved-register and partial-AL defects
+  are gone. QPC/QPF bytes remain fixed, while the
+  `GetTickCount` span remains live for `winmm!timeGetTime`. **Rules
+  out** deleting or moving bytecode merely because its kernel32 names
+  have retired.

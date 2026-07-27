@@ -315,6 +315,18 @@ void ApiSetSelfTest()
     {
         core::Panic("apiset-selftest", "interlocked host wrong");
     }
+    host = nullptr;
+    if (!ApiSetResolveStatic("api-ms-win-core-profile-l1-1-0.dll", &host) || host == nullptr ||
+        !StringEqual(host, "kernelbase.dll"))
+    {
+        core::Panic("apiset-selftest", "profile host wrong");
+    }
+    host = nullptr;
+    if (!ApiSetResolveStatic("api-ms-win-core-sysinfo-l1-1-0.dll", &host) || host == nullptr ||
+        !StringEqual(host, "kernelbase.dll"))
+    {
+        core::Panic("apiset-selftest", "sysinfo host wrong");
+    }
 
     // (4) Case-insensitive lookup (uppercase variant).
     host = nullptr;

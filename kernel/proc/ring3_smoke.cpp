@@ -2821,8 +2821,8 @@ void StartRing3SmokeTask()
     {
         SpawnPeFile("ring3-hello-winapi", fs::generated::kBinHelloWinapiBytes, fs::generated::kBinHelloWinapiBytes_len,
                     CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-        // Mixed-provider retirement fixture: the Wave 2 and Wave 3 APIs are
-        // intentionally imported across kernel32, kernelbase, and three
+        // Mixed-provider retirement fixture: the Wave 2-4 APIs are
+        // intentionally imported across kernel32, kernelbase, and five
         // API-set contracts. The PE validates their semantics after IAT
         // resolution and prints [ring3-thunk-alias-smoke] PASS.
         SpawnPeFile("ring3-thunk-alias-smoke", fs::generated::kBinThunkAliasSmokeBytes,

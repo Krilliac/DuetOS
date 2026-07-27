@@ -1016,11 +1016,10 @@
     // program handles failure gracefully per the Win32
     // contract (GetLastError returns the last set
     // error; our stub stack doesn't populate that yet).
-    // QueryPerformance{Counter,Frequency} upgraded to
-    // HPET-backed nanosecond resolution. The old stubs at 0x1F6
-    // / 0x206 stay in the page as dead bytes.
-    {"kernel32.dll", "QueryPerformanceCounter", kOffQpcNs}, {"kernel32.dll", "QueryPerformanceFrequency", kOffQpfNs},
-    {"kernel32.dll", "GetTickCount", kOffGetTickCount}, {"kernel32.dll", "GetTickCount64", kOffGetTickCount},
+    // QueryPerformance{Counter,Frequency} and GetTickCount{,64}
+    // are provided by the verified user-mode kernel32. The upgraded
+    // QPC/QPF spans remain for layout stability; kOffGetTickCount
+    // remains live for winmm.dll!timeGetTime.
 
     // Sleep + SwitchToThread (timer + voluntary yield).
     // Sleep routes to SYS_SLEEP_MS; SwitchToThread routes to
