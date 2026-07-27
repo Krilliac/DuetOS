@@ -60,10 +60,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-27T00:06:53Z
 - **Status**: COMPLETED @ 2026-07-27T00:31:55Z
 
-### 🟢 thunk-retirement-fix-cycle-profiles
+### [DONE] thunk-retirement-fix-cycle-profiles
 - **Session**: `Codex-thunk-wave1`
 - **Branch**: `claude/thunk-retirement-wave1`
 - **Files**: `tools/qemu/run-fix-cycle.sh tools/qemu/chain-fix-boots.sh tools/qemu/run.sh`
 - **Description**: Keep local fix-cycle profile chains synchronized with pe-threads CI coverage
 - **Claimed**: 2026-07-27T00:17:14Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-27T00:31:56Z
