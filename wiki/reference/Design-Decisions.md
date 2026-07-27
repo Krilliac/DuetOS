@@ -12352,3 +12352,15 @@ markers for its richest input. Three discovery layers were added (runtime
   `GetTickCount` span remains live for `winmm!timeGetTime`. **Rules
   out** deleting or moving bytecode merely because its kernel32 names
   have retired.
+- **Fifth wave:** `InterlockedIncrement`, `InterlockedDecrement`,
+  `InterlockedExchange`, and `InterlockedCompareExchange`. Kernel32
+  and kernelbase legacy rows retire together. Real kernelbase
+  forwarders remain a distinct `via-dll` path, while the interlocked
+  API set proves forced provider convergence. New/old return values,
+  CAS hit/miss, carry/borrow width canaries, contended increments, and
+  an independently counted single CAS winner are verdict-bearing. The
+  workers share a start event and publish separate CAS observations;
+  the oracle does not reuse an interlocked counter under test. The
+  underscored vcruntime consumers keep the four byte spans live.
+  **Rules out** equating public Win32 retirement with deletion of
+  compiler-intrinsic support.

@@ -562,15 +562,10 @@
     {"kernel32.dll", "RemoveVectoredExceptionHandler", kOffPinReturn0},
     {"kernel32.dll", "AddVectoredContinueHandler", kOffPinReturn0},
 
-    // Interlocked atomics. Real LOCK-prefixed instr
-    // sequences; correct even if DuetOS gains ring-3 SMP.
-    // Exported under both legacy `InterlockedX` names and the
-    // `_InterlockedX` compiler intrinsic-style names (clang/MSVC
-    // alias them).
-    {"kernel32.dll", "InterlockedIncrement", kOffInterlockedInc},
-    {"kernel32.dll", "InterlockedDecrement", kOffInterlockedDec},
-    {"kernel32.dll", "InterlockedCompareExchange", kOffInterlockedCmpXchg},
-    {"kernel32.dll", "InterlockedExchange", kOffInterlockedExchg},
+    // The public kernel32 Interlocked Increment/Decrement/Exchange/
+    // CompareExchange rows are retired to verified user-mode exports.
+    // Their LOCK-prefixed bytecode remains live for the distinct
+    // underscored vcruntime140 intrinsic imports below.
     // InterlockedExchangeAdd is provided by the verified user-mode
     // kernel32 export. Its bytecode remains live for the distinct
     // vcruntime140 _InterlockedExchangeAdd intrinsic below.
@@ -843,10 +838,6 @@
     {"kernelbase.dll", "GetModuleFileNameW", kOffGetModFileNameW}, {"kernelbase.dll", "TlsAlloc", kOffTlsAllocReal},
     {"kernelbase.dll", "TlsFree", kOffTlsFreeReal}, {"kernelbase.dll", "TlsGetValue", kOffTlsGetValueReal},
     {"kernelbase.dll", "TlsSetValue", kOffTlsSetValueReal},
-    {"kernelbase.dll", "InterlockedIncrement", kOffInterlockedInc},
-    {"kernelbase.dll", "InterlockedDecrement", kOffInterlockedDec},
-    {"kernelbase.dll", "InterlockedCompareExchange", kOffInterlockedCmpXchg},
-    {"kernelbase.dll", "InterlockedExchange", kOffInterlockedExchg},
     {"kernelbase.dll", "VerifyVersionInfoW", kOffPinReturn1}, {"kernelbase.dll", "IsWow64Process", kOffIsWow64},
     {"kernelbase.dll", "GetVersionExW", kOffGetVersionExW}, {"kernelbase.dll", "lstrlenW", kOffLstrlenW},
     {"kernelbase.dll", "lstrcmpW", kOffLstrcmpW}, {"kernelbase.dll", "MultiByteToWideChar", kOffMBtoWC},

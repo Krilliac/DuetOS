@@ -1388,10 +1388,36 @@ tick progression across a bounded sleep, and consistent 32/64-bit
 tick readings. An RBX guard and exact `BOOL == TRUE` check prove both
 legacy QPF/QPC ABI defects are absent. QEMU and Bochs gate the semantic
 and provider-routing sentinels. No bytecode moved: both QPC/QPF
-generations remain fixed,
-and `kOffGetTickCount` remains live for `winmm!timeGetTime`. The
+generations remain fixed, and `kOffGetTickCount` remains live for
+`winmm!timeGetTime`. The
 distinct ntdll performance-counter gateway and PE32 timing path are
 unchanged.
+
+## Phase 6.28 — Core interlocked Win32 thunk-retirement wave (2026-07-26)
+
+The fail-closed x64 manifest grew from eighteen to twenty-two imports.
+`InterlockedIncrement`, `InterlockedDecrement`, `InterlockedExchange`,
+and `InterlockedCompareExchange` now bind through verified real
+kernel32 code. Eight legacy rows are gone—four kernel32 and four
+kernelbase—dropping their documented surfaces from 395 to 391 and 40
+to 36 rows.
+
+The mixed-provider PE splits increment/decrement through the
+interlocked API set and exchange/compare-exchange through real
+kernelbase forwarders. It gates new-value and old-value returns, CAS
+hit and miss behavior, immediate carry/borrow boundary canaries, an
+exact 131,072 contended-increment total, and a single two-worker CAS
+winner. An independent start event and separate observed-result slots
+make the winner verdict independent of any other interlocked primitive.
+Direct kernel32, kernelbase-forwarder, and fail-closed API-set routing
+are all required by QEMU and Bochs.
+
+The four fixed byte spans remain live for
+`vcruntime140!_Interlocked*` compiler-intrinsic imports; every 64-bit
+variant and PE32 path is unchanged. The older `interlock_smoke`
+compatibility test also now reports a terminal failure and nonzero
+exit code if any subcheck fails instead of printing unconditional
+PASS.
 
 ## How to read the rest of the tree
 

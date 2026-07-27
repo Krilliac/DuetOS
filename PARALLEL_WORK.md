@@ -155,3 +155,27 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Pin profile and sysinfo API-set hosts used by the retirement fixture
 - **Claimed**: 2026-07-27T02:18:42Z
 - **Status**: COMPLETED @ 2026-07-27T02:33:59Z
+
+### [DONE] thunk-retirement-wave5-core
+- **Session**: `Codex-thunk-wave5`
+- **Branch**: `claude/thunk-retirement-wave5`
+- **Files**: `kernel/subsystems/win32/thunk* tools/build/*fix* tools/build/*verify* tests/host/*thunk* wiki/reference/Win32-Surface-Status.md wiki/reference/Design-Decisions.md wiki/subsystems/Win32-PE-Subsystem.md wiki/getting-started/History.md`
+- **Description**: Retire four verified core interlocked kernel32 and kernelbase rows while preserving vcruntime shared bytecode
+- **Claimed**: 2026-07-27T02:53:01Z
+- **Status**: COMPLETED @ 2026-07-27T03:09:08Z
+
+### [DONE] thunk-retirement-wave5-alias-fixture
+- **Session**: `Codex-thunk-wave5`
+- **Branch**: `claude/thunk-retirement-wave5`
+- **Files**: `userland/apps/thunk_alias_smoke/* kernel/proc/ring3_smoke.cpp tools/build/build-thunk-alias-smoke.sh tools/test/profile-boot-smoke.sh tools/test/bochs-smoke.sh`
+- **Description**: Extend mixed-provider boot coverage to core interlocked aliases semantics and width canaries
+- **Claimed**: 2026-07-27T02:53:03Z
+- **Status**: COMPLETED @ 2026-07-27T03:09:10Z
+
+### [DONE] thunk-retirement-wave5-interlock-smoke
+- **Session**: `Codex-thunk-wave5`
+- **Branch**: `claude/thunk-retirement-wave5`
+- **Files**: `userland/apps/interlock_smoke/* tools/build/build-interlock-smoke.sh`
+- **Description**: Make legacy interlock smoke failures terminal instead of printing unconditional PASS
+- **Claimed**: 2026-07-27T02:53:04Z
+- **Status**: COMPLETED @ 2026-07-27T03:09:12Z

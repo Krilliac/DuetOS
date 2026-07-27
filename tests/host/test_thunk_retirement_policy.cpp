@@ -23,7 +23,7 @@ int main()
         EXPECT_TRUE(ThunkRetirementRequiresRealDll("kernelbase.dll", name));
         EXPECT_TRUE(IsRetiredKernel32ImportName(name));
     }
-    EXPECT_EQ(count, 18u);
+    EXPECT_EQ(count, 22u);
 
     EXPECT_FALSE(ThunkRetirementRequiresRealDll("kernel32.dll", "createthread"));
     EXPECT_FALSE(ThunkRetirementRequiresRealDll("kernel32.dll", "CreateThreadEx"));
@@ -33,11 +33,15 @@ int main()
     EXPECT_FALSE(ThunkRetirementRequiresRealDll(nullptr, "CreateThread"));
     EXPECT_FALSE(ThunkRetirementRequiresRealDll("kernel32.dll", nullptr));
     EXPECT_FALSE(IsRetiredKernel32ImportName(nullptr));
+    EXPECT_FALSE(IsRetiredKernel32ImportName("interlockedincrement"));
+    EXPECT_FALSE(IsRetiredKernel32ImportName("_InterlockedIncrement"));
+    EXPECT_FALSE(IsRetiredKernel32ImportName("InterlockedIncrement64"));
 
     EXPECT_TRUE(RetiredNamedImportWouldFallBack(false, false, false, "GetLastError"));
     EXPECT_FALSE(RetiredNamedImportWouldFallBack(false, false, true, "GetLastError"));
     EXPECT_FALSE(RetiredNamedImportWouldFallBack(true, false, false, "GetLastError"));
     EXPECT_FALSE(RetiredNamedImportWouldFallBack(true, false, false, "GetTickCount"));
+    EXPECT_FALSE(RetiredNamedImportWouldFallBack(true, false, false, "InterlockedIncrement"));
     EXPECT_FALSE(RetiredNamedImportWouldFallBack(false, true, false, "GetLastError"));
     EXPECT_FALSE(RetiredNamedImportWouldFallBack(false, false, false, "getlasterror"));
     EXPECT_FALSE(RetiredNamedImportWouldFallBack(false, false, false, "GetLastErrorEx"));

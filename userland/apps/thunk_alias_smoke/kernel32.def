@@ -2,11 +2,13 @@ LIBRARY kernel32.dll
 
 EXPORTS
     CloseHandle
+    CreateEventA
     CreateThread
     ExitProcess
     GetExitCodeThread
     GetCurrentProcess
     GetStdHandle
     Sleep
+    SetEvent
     WaitForSingleObject
     WriteFile

@@ -115,6 +115,12 @@ Kernelbase plus the profile and sysinfo API-set contracts converge on
 the verified kernel32 timing implementations. The old and upgraded
 QPC/QPF byte spans remain fixed, and the shared `GetTickCount` span
 stays live for `winmm!timeGetTime`.
+The fifth wave moved `InterlockedIncrement`, `InterlockedDecrement`,
+`InterlockedExchange`, and `InterlockedCompareExchange`. Direct
+kernelbase imports use its real forwarders, while the interlocked
+API-set route is forced through the fail-closed kernel32 provider.
+The underscored vcruntime consumers keep all four shared byte spans
+live, as do the separate 64-bit and PE32 implementations.
 PE32 uses its separate i386 companion DLL and unresolved-import
 gateway, so it is intentionally outside this x64 retirement policy.
 For PE32+, a kernel32/kernelbase/API-set ordinal import may bind a real
@@ -132,9 +138,9 @@ The emulator-safe regression coverage is split by workload:
 `smoke=pe-threads` runs the natural-return and explicit-exit thread PEs,
 requires the thread and bitwise-atomic imports to log `via-dll`, and
 checks the corrected combined free-and-exit argument contract.
-`smoke=pe-winapi` asserts the fourteen wave-2-4 identity, error,
+`smoke=pe-winapi` asserts the eighteen wave-2-5 identity, error,
 atomic, and timing contracts and requires their `via-dll` bindings.
-Its `thunk_alias_smoke` PE deliberately splits those fourteen imports
+Its `thunk_alias_smoke` PE deliberately splits those eighteen imports
 across kernel32, kernelbase, and five API-set descriptors. It validates
 atomic returned-old/final values, a joined 131,072-operation contention
 total, the 1 GHz QPC contract, monotonic counters, and consistent
@@ -143,6 +149,16 @@ guards Win64's callee-saved RBX around QPF, catching the old
 two-byte-early entry's silent register corruption. Provider
 convergence and semantics are therefore both covered by the emulator
 gate.
+
+The core interlocked portion checks increment/decrement new-value
+returns, exchange and compare-exchange old-value returns, CAS hit and
+miss behavior, a neighboring 32-bit canary, an exact two-worker
+increment total, and a single CAS winner. Carry/borrow boundary values
+check the width canary immediately, while an independent start event
+and per-worker CAS observations keep the winner oracle from depending
+on another primitive under test. The older compatibility-zoo
+`interlock_smoke` now exits nonzero on any failed subcheck instead of
+printing an unconditional final PASS.
 
 ### NT syscall handlers (17 `*_syscall.cpp` TUs)
 

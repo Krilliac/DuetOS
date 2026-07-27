@@ -2,5 +2,7 @@ LIBRARY api-ms-win-core-interlocked-l1-1-0.dll
 
 EXPORTS
     InterlockedAnd
+    InterlockedDecrement
+    InterlockedIncrement
     InterlockedOr
     InterlockedXor

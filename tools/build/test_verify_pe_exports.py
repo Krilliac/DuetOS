@@ -218,7 +218,7 @@ class VerifyPeExportsTests(unittest.TestCase):
         with self.assertRaisesRegex(VERIFY.PeError, "overlapping section"):
             self.parse(data)
 
-    def test_manifest_is_exact_four_wave_set(self) -> None:
+    def test_manifest_is_exact_five_wave_set(self) -> None:
         manifest = (
             MODULE_PATH.parents[2]
             / "kernel"
@@ -247,6 +247,10 @@ class VerifyPeExportsTests(unittest.TestCase):
                 "QueryPerformanceFrequency",
                 "GetTickCount",
                 "GetTickCount64",
+                "InterlockedIncrement",
+                "InterlockedDecrement",
+                "InterlockedExchange",
+                "InterlockedCompareExchange",
             ],
         )
 

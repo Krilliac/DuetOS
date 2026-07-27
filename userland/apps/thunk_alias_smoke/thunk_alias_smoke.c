@@ -15,17 +15,26 @@ typedef const void* LPCVOID;
 typedef DWORD* LPDWORD;
 typedef DWORD(__stdcall* LPTHREAD_START_ROUTINE)(void*);
 
+typedef struct AtomicCanary
+{
+    volatile LONG target;
+    volatile DWORD canary;
+} AtomicCanary;
+
 #define STD_OUTPUT_HANDLE ((DWORD) - 11)
 #define WAIT_OBJECT_0 0u
 
 /* kernel32.dll: test support plus one retired pseudo-handle API. */
 __declspec(dllimport) BOOL __stdcall CloseHandle(HANDLE object);
+__declspec(dllimport) HANDLE __stdcall CreateEventA(void* attributes, BOOL manualReset, BOOL initialState,
+                                                    const char* name);
 __declspec(dllimport) HANDLE __stdcall CreateThread(void* attributes, unsigned long long stackSize,
                                                     LPTHREAD_START_ROUTINE startAddress, void* parameter,
                                                     DWORD creationFlags, DWORD* threadId);
 __declspec(dllimport) HANDLE __stdcall GetStdHandle(DWORD nStdHandle);
 __declspec(dllimport) BOOL __stdcall GetExitCodeThread(HANDLE thread, DWORD* exitCode);
 __declspec(dllimport) void __stdcall Sleep(DWORD milliseconds);
+__declspec(dllimport) BOOL __stdcall SetEvent(HANDLE event);
 __declspec(dllimport) DWORD __stdcall WaitForSingleObject(HANDLE handle, DWORD milliseconds);
 __declspec(dllimport) BOOL __stdcall WriteFile(HANDLE hFile, LPCVOID buffer, DWORD bytesToWrite, LPDWORD bytesWritten,
                                                void* overlapped);
@@ -35,6 +44,8 @@ __declspec(dllimport) HANDLE __stdcall GetCurrentProcess(void);
 /* kernelbase.dll: provider-convergence routes. */
 __declspec(dllimport) HANDLE __stdcall GetCurrentThread(void);
 __declspec(dllimport) DWORD __stdcall GetTickCount(void);
+__declspec(dllimport) LONG __stdcall InterlockedCompareExchange(LONG volatile* target, LONG exchange, LONG compare);
+__declspec(dllimport) LONG __stdcall InterlockedExchange(LONG volatile* target, LONG value);
 __declspec(dllimport) LONG __stdcall InterlockedExchangeAdd(LONG volatile* addend, LONG value);
 
 /* api-ms-win-core-processthreads-l1-1-0.dll: ID queries. */
@@ -47,6 +58,8 @@ __declspec(dllimport) void __stdcall SetLastError(DWORD errorCode);
 
 /* api-ms-win-core-interlocked-l1-1-0.dll: 32-bit bitwise atomics. */
 __declspec(dllimport) LONG __stdcall InterlockedAnd(LONG volatile* target, LONG value);
+__declspec(dllimport) LONG __stdcall InterlockedDecrement(LONG volatile* addend);
+__declspec(dllimport) LONG __stdcall InterlockedIncrement(LONG volatile* addend);
 __declspec(dllimport) LONG __stdcall InterlockedOr(LONG volatile* target, LONG value);
 __declspec(dllimport) LONG __stdcall InterlockedXor(LONG volatile* target, LONG value);
 
@@ -60,6 +73,10 @@ __declspec(dllimport) unsigned long long __stdcall GetTickCount64(void);
 static volatile DWORD g_worker_process_id;
 static volatile DWORD g_worker_thread_id;
 static volatile LONG g_atomic_add_total;
+static volatile LONG g_atomic_inc_total;
+static HANDLE g_atomic_start_event;
+static volatile LONG g_atomic_cas_winner;
+static volatile LONG g_atomic_cas_observed[2];
 
 static DWORD StringLength(const char* text)
 {
@@ -104,9 +121,16 @@ static DWORD __stdcall IdentityAndLastErrorWorker(void* parameter)
 
 static DWORD __stdcall ContendedAtomicAddWorker(void* parameter)
 {
-    (void)parameter;
+    const LONG worker_id = (LONG)(unsigned long long)parameter;
+    if (WaitForSingleObject(g_atomic_start_event, 5000u) != WAIT_OBJECT_0)
+        return 0xC0u;
     for (DWORD i = 0; i < 65536u; ++i)
+    {
         (void)InterlockedExchangeAdd(&g_atomic_add_total, 1);
+        (void)InterlockedIncrement(&g_atomic_inc_total);
+    }
+    const LONG observed = InterlockedCompareExchange(&g_atomic_cas_winner, worker_id, 0);
+    g_atomic_cas_observed[worker_id - 1] = observed;
     return 0;
 }
 
@@ -160,11 +184,47 @@ void __cdecl _start(void)
     volatile LONG atomic_value = 0x55;
     if (InterlockedExchangeAdd(&atomic_value, 0x10) != 0x55 || atomic_value != 0x65)
         Fail("[thunk_alias_smoke] FAIL kernelbase.dll!InterlockedExchangeAdd\r\n", 0xA9u);
+
+    AtomicCanary core_atomic = {-1, 0xA5C35A3Cu};
+    if (InterlockedIncrement(&core_atomic.target) != 0 || core_atomic.target != 0 || core_atomic.canary != 0xA5C35A3Cu)
+    {
+        Fail("[thunk_alias_smoke] FAIL api-ms-win-core-interlocked-l1-1-0.dll increment width\r\n", 0xB6u);
+    }
+    core_atomic.target = 0;
+    core_atomic.canary = 0xA5C35A3Cu;
+    if (InterlockedDecrement(&core_atomic.target) != -1 || core_atomic.target != -1 ||
+        core_atomic.canary != 0xA5C35A3Cu)
+    {
+        Fail("[thunk_alias_smoke] FAIL api-ms-win-core-interlocked-l1-1-0.dll decrement width\r\n", 0xB6u);
+    }
+    Out("[thunk_alias_smoke] api-ms-win-core-interlocked-l1-1-0.dll increment/decrement PASS\r\n");
+
+    core_atomic.target = 5;
+    core_atomic.canary = 0xA5C35A3Cu;
+    const LONG exchanged = InterlockedExchange(&core_atomic.target, 42);
+    const LONG cas_hit = InterlockedCompareExchange(&core_atomic.target, 99, 42);
+    const LONG cas_miss = InterlockedCompareExchange(&core_atomic.target, 0, 42);
+    if (exchanged != 5 || cas_hit != 42 || cas_miss != 99 || core_atomic.target != 99 ||
+        core_atomic.canary != 0xA5C35A3Cu)
+    {
+        Fail("[thunk_alias_smoke] FAIL kernelbase.dll exchange/compare-exchange\r\n", 0xB7u);
+    }
+    Out("[thunk_alias_smoke] kernelbase.dll exchange/compare-exchange PASS\r\n");
+
     g_atomic_add_total = 0;
-    HANDLE add_worker_a = CreateThread(0, 0, ContendedAtomicAddWorker, 0, 0, 0);
-    HANDLE add_worker_b = CreateThread(0, 0, ContendedAtomicAddWorker, 0, 0, 0);
+    g_atomic_inc_total = 0;
+    g_atomic_start_event = CreateEventA(0, 1, 0, 0);
+    g_atomic_cas_winner = 0;
+    g_atomic_cas_observed[0] = -1;
+    g_atomic_cas_observed[1] = -1;
+    if (g_atomic_start_event == 0)
+        Fail("[thunk_alias_smoke] FAIL contended atomic start event\r\n", 0xB8u);
+    HANDLE add_worker_a = CreateThread(0, 0, ContendedAtomicAddWorker, (void*)1, 0, 0);
+    HANDLE add_worker_b = CreateThread(0, 0, ContendedAtomicAddWorker, (void*)2, 0, 0);
     if (add_worker_a == 0 || add_worker_b == 0)
         Fail("[thunk_alias_smoke] FAIL contended atomic worker create\r\n", 0xAAu);
+    if (!SetEvent(g_atomic_start_event))
+        Fail("[thunk_alias_smoke] FAIL contended atomic start signal\r\n", 0xB8u);
     if (WaitForSingleObject(add_worker_a, 5000u) != WAIT_OBJECT_0 ||
         WaitForSingleObject(add_worker_b, 5000u) != WAIT_OBJECT_0)
     {
@@ -172,14 +232,19 @@ void __cdecl _start(void)
     }
     DWORD add_exit_a = 0xFFFFFFFFu;
     DWORD add_exit_b = 0xFFFFFFFFu;
+    const BOOL worker_a_won = g_atomic_cas_observed[0] == 0 && g_atomic_cas_observed[1] == 1;
+    const BOOL worker_b_won = g_atomic_cas_observed[1] == 0 && g_atomic_cas_observed[0] == 2;
     if (!GetExitCodeThread(add_worker_a, &add_exit_a) || !GetExitCodeThread(add_worker_b, &add_exit_b) ||
-        add_exit_a != 0 || add_exit_b != 0 || g_atomic_add_total != 131072)
+        add_exit_a != 0 || add_exit_b != 0 || g_atomic_add_total != 131072 || g_atomic_inc_total != 131072 ||
+        !((worker_a_won && g_atomic_cas_winner == 1) || (worker_b_won && g_atomic_cas_winner == 2)))
     {
-        Fail("[thunk_alias_smoke] FAIL contended InterlockedExchangeAdd\r\n", 0xACu);
+        Fail("[thunk_alias_smoke] FAIL contended core interlocked operations\r\n", 0xB8u);
     }
     (void)CloseHandle(add_worker_a);
     (void)CloseHandle(add_worker_b);
+    (void)CloseHandle(g_atomic_start_event);
     Out("[thunk_alias_smoke] kernelbase.dll InterlockedExchangeAdd PASS\r\n");
+    Out("[thunk_alias_smoke] contended core interlocked operations PASS\r\n");
 
     if (InterlockedAnd(&atomic_value, 0x3F) != 0x65 || atomic_value != 0x25)
         Fail("[thunk_alias_smoke] FAIL api-ms-win-core-interlocked-l1-1-0.dll!InterlockedAnd\r\n", 0xADu);
