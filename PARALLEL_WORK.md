@@ -164,13 +164,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-27T02:53:01Z
 - **Status**: COMPLETED @ 2026-07-27T03:09:08Z
 
-### [ACTIVE] thunk-retirement-wave5-alias-fixture
+### [DONE] thunk-retirement-wave5-alias-fixture
 - **Session**: `Codex-thunk-wave5`
 - **Branch**: `claude/thunk-retirement-wave5`
 - **Files**: `userland/apps/thunk_alias_smoke/* kernel/proc/ring3_smoke.cpp tools/build/build-thunk-alias-smoke.sh tools/test/profile-boot-smoke.sh tools/test/bochs-smoke.sh`
 - **Description**: Extend mixed-provider boot coverage to core interlocked aliases semantics and width canaries
 - **Claimed**: 2026-07-27T02:53:03Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-27T03:09:10Z
 
 ### [ACTIVE] thunk-retirement-wave5-interlock-smoke
 - **Session**: `Codex-thunk-wave5`
