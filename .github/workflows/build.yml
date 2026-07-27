@@ -315,9 +315,9 @@ jobs:
     # isa-debug-exit device. The kernel's smoke=<profile> cmdline
     # arg routes to kernel/test/smoke_profile.cpp's per-profile
     # spawn / sleep / sentinel / TestExit chain. Running profiles
-    # in parallel turns the old monolithic 1500s budget into 6 ×
+    # in parallel turns the old monolithic 1500s budget into 7 ×
     # ~180s budgets running concurrently — wall-clock for the
-    # whole matrix is bound by the slowest profile (pe-winapi),
+    # whole matrix is bound by the slowest profile (pe-threads),
     # not the sum, and a single hang in one profile no longer
     # masks the rest.
     name: qemu smoke (${{ matrix.profile }})
@@ -337,6 +337,7 @@ jobs:
           - ring3
           - pe-hello
           - pe-winapi
+          - pe-threads
           - pe-winkill
           - linux
     steps:

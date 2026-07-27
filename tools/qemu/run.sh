@@ -125,7 +125,7 @@ fi
 # rebuild a per-profile ISO with `smoke=<profile>` baked into the
 # grub cmdline so the kernel routes into kernel/test/smoke_profile.cpp's
 # scenario-only path on boot. Each profile runs ONE focused scenario
-# (bringup-only / ring3 / pe-hello / pe-winapi / pe-winkill / linux),
+# (bringup-only / ring3 / pe-hello / pe-winapi / pe-threads / pe-winkill / linux),
 # emits a `[smoke] profile=<name> complete` sentinel, and exits QEMU
 # via the isa-debug-exit device added below. CI runs the profiles in
 # parallel as a job matrix. Keeping the ISO sidecar means the

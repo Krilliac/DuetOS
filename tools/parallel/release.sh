@@ -51,9 +51,15 @@ awk -v subsystem="$SUBSYSTEM" -v timestamp="$TIMESTAMP" '
     { print }
 ' "$WORK_FILE" > "${WORK_FILE}.tmp" && mv "${WORK_FILE}.tmp" "$WORK_FILE"
 
-git add -A
-git commit -m "feat(${SUBSYSTEM}): complete subsystem [session ${SESSION_ID}]" \
-    || echo "→ Nothing new to commit."
+# Releasing a coordinator claim must never absorb implementation files
+# another fleet lane is still writing. Stage and commit only the
+# coordinator record; leave every unrelated staged/unstaged path alone.
+git add -- "$WORK_FILE"
+if ! git diff --cached --quiet -- "$WORK_FILE"; then
+    git commit -s -m "feat(${SUBSYSTEM}): complete subsystem [session ${SESSION_ID}]" -- "$WORK_FILE"
+else
+    echo "→ Nothing new to commit."
+fi
 
 echo "→ Pushing ${BRANCH}..."
 git push -u origin "${BRANCH}" --force-with-lease

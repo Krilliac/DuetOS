@@ -14,13 +14,13 @@
 #   2 — environment skip (Bochs / ROMs missing, kernel not built).
 #
 # Usage: bochs-smoke.sh <profile> <cmake-binary-dir>
-#   profile = bringup | ring3 | pe-hello | pe-winapi | pe-winkill | linux
+#   profile = bringup | ring3 | pe-hello | pe-winapi | pe-threads | pe-winkill | linux
 
 set -eo pipefail
 
 if [[ $# -ne 2 ]]; then
     echo "usage: $0 <profile> <cmake-binary-dir>" >&2
-    echo "   profile = bringup | ring3 | pe-hello | pe-winapi | pe-winkill | linux" >&2
+    echo "   profile = bringup | ring3 | pe-hello | pe-winapi | pe-threads | pe-winkill | linux" >&2
     exit 2
 fi
 
@@ -116,6 +116,25 @@ case "${PROFILE}" in
             "[vcruntime140] memset+memcpy+memmove OK"
             "[heap] HeapAlloc + GetProcessHeap OK"
             "exit rc   val=0xbeef"
+        )
+        ;;
+    pe-threads)
+        expected=(
+            "${common_expected[@]}"
+            'pe spawn name="ring3-thread-stress"'
+            "[thread-stress] main: PASS"
+            'pe spawn name="ring3-thread2-smoke"'
+            "[thread2_smoke] GetExitCodeThread     = PASS (0x42)"
+            "[ring3-thread2-smoke] PASS"
+            'pe spawn name="ring3-syscall-stress"'
+            "[syscall-stress] main: FreeLibraryAndExitThread(childB)"
+            "[syscall-stress] main: PASS"
+            "exit rc   val=0xabcde"
+            "exit rc   val=0xcafe"
+            "via-dll kernel32.dll!CreateThread"
+            "via-dll kernel32.dll!ExitThread"
+            "via-dll kernel32.dll!FreeLibraryAndExitThread"
+            "via-dll kernel32.dll!GetExitCodeThread"
         )
         ;;
     pe-winkill)

@@ -10,6 +10,7 @@ EXPORTS
     WriteFile
     CreateThread
     ExitThread
+    FreeLibraryAndExitThread
     CreateEventW
     SetEvent
     WaitForSingleObject

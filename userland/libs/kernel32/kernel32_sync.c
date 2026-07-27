@@ -1673,24 +1673,33 @@ __declspec(dllexport) BOOL CancelWaitableTimer(HANDLE t)
 
 __declspec(dllexport) BOOL GetExitCodeThread(HANDLE hThread, DWORD* lpExitCode)
 {
+    if (lpExitCode == (DWORD*)0)
+        return 0;
     long long rv;
     __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)55), "D"((long long)hThread) : "memory");
     /* SYS_THREAD_EXIT_CODE returns a negative errno on bad handle
-     * and the actual exit code (or STILL_ACTIVE = 0x103) otherwise.
-     * Win32 contract: BOOL TRUE on success regardless of
-     * STILL_ACTIVE; we always claim success (matches flat
-     * stub's optimism). */
-    if (lpExitCode != (DWORD*)0)
-        *lpExitCode = (rv < 0) ? 0x103 : (DWORD)rv;
+     * and the actual exit code (or STILL_ACTIVE = 0x103) otherwise. */
+    if (rv < 0)
+        return 0;
+    *lpExitCode = (DWORD)rv;
     return 1;
 }
 
 __declspec(dllexport) WIN32_NORETURN void ExitThread(DWORD dwExitCode)
 {
-    /* For our single-thread-per-process model ExitThread ==
-     * ExitProcess. Match the flat stub's behaviour. */
+    /* SYS_EXIT terminates only the current task and records its
+     * thread exit code; other tasks in the process continue. */
     __asm__ volatile("int $0x80" : : "a"((long long)0), "D"((long long)dwExitCode));
     DUET_USER_TRAP_UNREACHABLE();
+}
+
+__declspec(dllexport) WIN32_NORETURN void FreeLibraryAndExitThread(void* hModule, DWORD dwExitCode)
+{
+    /* FreeLibrary is a no-op until DLL refcounts/unloading land, but
+     * call the real contract so this remains correct when they do.
+     * Unlike the legacy alias, the second Win64 argument is the code. */
+    (void)FreeLibrary(hModule);
+    ExitThread(dwExitCode);
 }
 
 __declspec(dllexport) BOOL GetExitCodeProcess(HANDLE hProcess, DWORD* lpExitCode)

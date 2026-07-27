@@ -12290,3 +12290,36 @@ markers for its richest input. Three discovery layers were added (runtime
   direct published capability access and exact-mask drift. Boot
   self-tests pin renewal generations, lazy expiry, reversible disable,
   permanent removal, clockless fail-closed behavior, and non-inheritance.
+
+## 2026-07-26 — Retire Win32 thunks only behind a proven DLL contract
+
+- **Decision:** new Win32 APIs live in user-mode translator DLLs; the
+  kernel-resident x64 thunk table is legacy fallback only. A retired
+  name must appear in the shared manifest, pass a post-link AMD64
+  PE32+ EAT check, resolve from the completed preload set, and be
+  absent from `thunks_table.inc`. **Rules out** deleting a row merely
+  because a C function with the same name exists in source.
+- **Decision:** a manifest-retired x64 named import fails the PE load
+  when the real export is unavailable. The fix-journal generator emits
+  a repair note and cannot recreate the row. **Rules out** silently
+  binding a generic miss logger after the compatibility fallback was
+  declared retired.
+- **Decision:** API-set imports of manifest-retired names resolve only
+  through the exact verified `kernel32.dll` provider. They never use
+  the legacy first-preloaded-export-by-name heuristic, even when the
+  static API-set table names `kernelbase.dll` as the nominal host.
+  **Rules out** accidental same-name binding from an unrelated DLL.
+- **Decision:** a PE32+ kernel32/kernelbase/API-set ordinal miss is
+  fatal. A successfully resolved EAT ordinal remains valid, but an
+  unresolved `#<ordinal>` has no trustworthy manifest/table name and
+  cannot fall into the generic success-returning miss logger.
+- **Decision:** bytecode compaction is independent from API retirement.
+  `ThreadExitTramp` and other public fixed-offset gateways remain until
+  all absolute consumers are audited; dead API spans may remain
+  temporarily. PE32 retains its separate i386 companion and unresolved
+  gateway and is not certified by an x64 manifest.
+- **First wave:** `CreateThread`, `ExitThread`,
+  `FreeLibraryAndExitThread`, and `GetExitCodeThread`. Moving the
+  combined free-and-exit API fixed a pre-existing ABI bug: its second
+  argument is the exit code, while the old `ExitThread` alias consumed
+  the first module-handle argument.

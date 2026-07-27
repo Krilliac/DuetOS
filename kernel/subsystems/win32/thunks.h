@@ -6,6 +6,20 @@
  * DuetOS Win32 subsystem — IAT thunk page.
  *
  * ============================================================
+ *  LEGACY FALLBACK — DO NOT ADD NEW APIS HERE
+ * ============================================================
+ *
+ * Normal PE import resolution binds preloaded user-mode DLL
+ * exports directly. This fixed R-X mapping is now compatibility
+ * fallback code for APIs not yet moved into those DLLs, plus the
+ * thread-return and unresolved-import gateways.
+ *
+ * New Win32 APIs belong in the matching userland DLL. A retirement
+ * manifest is verified against the linked DLL's actual Export
+ * Address Table before embedding; the loader then fails closed if
+ * one of those exports is unavailable instead of restoring a thunk.
+ *
+ * ============================================================
  *  WHAT IS A "THUNK" HERE?
  * ============================================================
  *
@@ -15,10 +29,10 @@
  * in that slot at runtime is what actually executes.
  *
  * On Windows, the loader fills each slot with the address of
- * the real exported function inside `kernel32.dll`. On DuetOS,
- * the PE loader fills each slot with the address of a small
- * piece of hand-assembled x86-64 code we call a *thunk*. The
- * thunk's job is to bridge two ABIs:
+ * the real exported function inside `kernel32.dll`. DuetOS does
+ * the same for preloaded DLL exports. A legacy-table fallback is
+ * a small piece of hand-assembled x86-64 code called a *thunk*.
+ * Its job is to bridge two ABIs:
  *
  *   - Windows x64: first arg in RCX, second in RDX, third in R8,
  *     fourth in R9, rest on the stack at [rsp+0x28+]. RDI/RSI
@@ -53,9 +67,9 @@
  *
  * Three reasons, in order of importance:
  *
- *   1. *One contiguous code page.* All thunks live on a single
- *      R-X page mapped at `kWin32ThunksVa` in every Win32-imports
- *      process. The IAT slots store absolute VAs of the form
+ *   1. *One contiguous code mapping.* All x64 thunks live in a
+ *      contiguous two-page R-X mapping at `kWin32ThunksVa` in every
+ *      Win32-imports process. The IAT slots store absolute VAs of the form
  *      `kWin32ThunksVa + offset`, so the offsets in the
  *      `kOff<Name>` constants below MUST be valid indices into
  *      one byte array. Splitting the array across translation
@@ -91,6 +105,14 @@
  *
  *   PE loader walks each Import Directory entry
  *      |
+ *      v
+ *   preloaded DLL EAT lookup
+ *      |  hit? yes -> bind the real user-mode export
+ *      |  no
+ *      v
+ *   retired manifest lookup
+ *      |  hit? yes -> fail closed (required DLL contract is broken)
+ *      |  no
  *      v
  *   `Win32ThunksLookupKind(dll, func, &va, &is_noop)`
  *      |  hit?  yes -> va = kWin32ThunksVa + kOff<Name>

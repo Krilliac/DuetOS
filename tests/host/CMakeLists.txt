@@ -66,6 +66,16 @@ add_test(
 )
 
 add_test(
+    NAME verify_pe_exports
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/../../tools/build/test_verify_pe_exports.py"
+)
+
+add_test(
+    NAME gen_fix_patches_retirement
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/../../tools/build/test_gen_fix_patches.py"
+)
+
+add_test(
     NAME capability_access_static
     COMMAND Python3::Interpreter
             "${CMAKE_SOURCE_DIR}/../../tools/test/capability-access-static.py"
@@ -137,6 +147,7 @@ target_sources(test_syscall_error PRIVATE "${CMAKE_SOURCE_DIR}/../../kernel/sysc
 # Phase A dynamic fix-discovery: decision logic is a freestanding header
 # (syscall/inferred_gap_decide.h), so the test needs no kernel TU.
 add_host_test(inferred_gap)
+add_host_test(thunk_retirement_policy)
 add_host_test(pe_unwind_bounds)
 # Phase B dynamic fix-discovery: config-proposal decision is freestanding
 # (env/config_proposal_decide.h), no kernel TU.

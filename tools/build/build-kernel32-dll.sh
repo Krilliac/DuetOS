@@ -9,10 +9,9 @@
 # This is the first real retirement of a flat-stubs-page
 # entry into a userland DLL: GetCurrentProcessId now lives
 # in ring-3 code instead of the kernel-hosted stubs page.
-# Future slices extend this DLL with additional exports; the
-# corresponding kStubsTable entries become dead code (still
-# compiled but never reached because the via-DLL path
-# matches first).
+# Future slices extend this DLL with additional exports and remove
+# their public kStubsTable rows. Private live trampoline bytes may
+# remain until a later bytecode-layout compaction.
 #
 # Usage:
 #     build-kernel32-dll.sh <repo_root> <out_header>
@@ -30,6 +29,8 @@ REPO_ROOT="$1"
 OUT_HEADER="$2"
 SRC_DIR="${REPO_ROOT}/userland/libs/kernel32"
 EMBED="${REPO_ROOT}/tools/build/embed-blob.py"
+VERIFY_EXPORTS="${REPO_ROOT}/tools/build/verify-pe-exports.py"
+THUNK_RETIREMENT_MANIFEST="${REPO_ROOT}/kernel/subsystems/win32/thunk_retirement_wave1.inc"
 
 # kernel32.dll is split into per-domain translation units (see
 # kernel32_internal.h). Compile each *.c to its own .obj and
@@ -255,7 +256,6 @@ set +e
     /export:GetConsoleTitleW \
     /export:FoldStringW \
     /export:GetCurrencyFormatA \
-    /export:GetExitCodeThread \
     /export:OpenThread \
     /export:GetPhysicallyInstalledSystemMemory \
     /export:HeapValidate \
@@ -357,6 +357,7 @@ set +e
     /export:SetThreadStackGuarantee \
     /export:GetExitCodeThread \
     /export:ExitThread \
+    /export:FreeLibraryAndExitThread \
     /export:GetExitCodeProcess \
     /export:FindFirstFileA /export:FindFirstFileW \
     /export:FindNextFileA /export:FindNextFileW /export:FindClose \
@@ -397,6 +398,8 @@ if [[ ! -s "${DLL}" ]]; then
     echo "build-kernel32-dll.sh: lld-link produced no output" >&2
     exit 1
 fi
+
+python3 "${VERIFY_EXPORTS}" "${DLL}" "${THUNK_RETIREMENT_MANIFEST}"
 
 python3 "${EMBED}" \
     "${DLL}" \

@@ -425,12 +425,9 @@
     // Pin the offset to make the audit accurate.
     {"kernel32.dll", "GetThreadPriority", kOffPinReturn0}, // 0 = NORMAL
     {"kernel32.dll", "SetThreadPriority", kOffPinReturn1},
-    {"kernel32.dll", "CreateThread", kOffCreateThreadReal},        // real spawn via SYS_THREAD_CREATE
     {"kernel32.dll", "CreateRemoteThread", kOffNoCrossProcThread}, // fallback stays (no cross-proc v0)
-    // ExitThread routes to SYS_EXIT (kills just this
-    // task). FreeLibraryAndExitThread aliases to ExitThread — the
-    // FreeLibrary half is a no-op in v0 (no DLL unload path).
-    {"kernel32.dll", "ExitThread", kOffExitThread}, {"kernel32.dll", "FreeLibraryAndExitThread", kOffExitThread},
+    // Thread exit APIs are provided by the real user-mode kernel32.
+    // Their dead legacy bytes remain only to preserve downstream offsets.
     // WaitForMultipleObjects via SYS_WAIT_MULTI.
     {"kernel32.dll", "WaitForMultipleObjects", kOffWaitForMultipleObjects},
     {"kernel32.dll", "WaitForMultipleObjectsEx", kOffWaitForMultipleObjects},
@@ -1002,9 +999,7 @@
     // value is opaque to callers so this "identity"
     // mapping is fine.
     {"kernel32.dll", "OpenProcess", kOffOpenProcess},
-    // real GetExitCodeThread backed by per-handle
-    // exit_code storage updated at SYS_EXIT time.
-    {"kernel32.dll", "GetExitCodeThread", kOffGetExitCodeThreadReal},
+    // GetExitCodeThread is provided by the real user-mode kernel32.
     {"kernel32.dll", "GenerateConsoleCtrlEvent", kOffPinReturn1},
 
     // performance counters, tick count, and the

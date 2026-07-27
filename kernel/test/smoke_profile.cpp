@@ -122,6 +122,8 @@ u64 ProfileSleepTicks(SmokeProfile profile)
         return kTicksPerSecond * 5; // tiny freestanding PE
     case SmokeProfile::PeWinapi:
         return kTicksPerSecond * 12; // comprehensive PE + many probes
+    case SmokeProfile::PeThreads:
+        return kTicksPerSecond * 25; // three thread-heavy PEs + DLL preloads
     case SmokeProfile::PeWinkill:
         return kTicksPerSecond * 10; // real-world MSVC PE w/ DLL preload
     case SmokeProfile::Linux:
@@ -241,6 +243,10 @@ SmokeProfile SmokeProfileInit(const char* cmdline)
     {
         g_profile = SmokeProfile::PeWinapi;
     }
+    else if (TokenMatches(value, end, "pe-threads"))
+    {
+        g_profile = SmokeProfile::PeThreads;
+    }
     else if (TokenMatches(value, end, "pe-winkill"))
     {
         g_profile = SmokeProfile::PeWinkill;
@@ -287,6 +293,8 @@ const char* SmokeProfileName(SmokeProfile profile)
         return "pe-hello";
     case SmokeProfile::PeWinapi:
         return "pe-winapi";
+    case SmokeProfile::PeThreads:
+        return "pe-threads";
     case SmokeProfile::PeWinkill:
         return "pe-winkill";
     case SmokeProfile::Linux:
@@ -312,14 +320,14 @@ bool SmokeProfileShouldSpawn(SmokeTarget target)
     {
         // Profile=None is "no smoke harness" — full bare-metal coverage.
         // Under an emulator, default-None is the local-dev / `tools/qemu/
-        // run.sh` path; the Linux ABI smokes and the four "other" PEs
-        // (thread-stress, syscall-stress, customdll-test, reg-fopen-test)
+        // run.sh` path; the Linux ABI smokes, the thread-retirement PEs,
+        // and the remaining "other" PEs (customdll-test, reg-fopen-test)
         // are MMIO-emulation-heavy and slow boot to a crawl. Skip them
         // there; bare metal still runs everything.
         //
         // Additional gate: if `boot=desktop` was passed under an
         // emulator and the user did NOT opt back in via `pe-smokes=1`,
-        // skip the four PE/Ring3 smokes too. The desktop boot is for
+        // skip the slow PE/Ring3 smokes too. The desktop boot is for
         // interactive use; the smokes would add ~30 s of TCG-emulated
         // guest time (= many minutes of wall time) before the user
         // can actually click anything. CI invokes the smokes through
@@ -332,6 +340,7 @@ bool SmokeProfileShouldSpawn(SmokeTarget target)
         case SmokeTarget::PeWinapi:
         case SmokeTarget::PeWinkill:
             return !interactive_emu_boot;
+        case SmokeTarget::PeThreads:
         case SmokeTarget::PeOther:
         case SmokeTarget::Linux:
             return !duetos::arch::IsEmulator();
@@ -355,6 +364,8 @@ bool SmokeProfileShouldSpawn(SmokeTarget target)
         return p == SmokeProfile::PeHello;
     case SmokeTarget::PeWinapi:
         return p == SmokeProfile::PeWinapi;
+    case SmokeTarget::PeThreads:
+        return p == SmokeProfile::PeThreads;
     case SmokeTarget::PeWinkill:
         return p == SmokeProfile::PeWinkill;
     case SmokeTarget::PeOther:

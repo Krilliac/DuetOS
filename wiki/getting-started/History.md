@@ -1305,6 +1305,31 @@ leases may authorize spawn but are never inherited as durable child
 authority. A hosted static gate prevents direct capability-storage
 access and spawn-mask drift.
 
+## Phase 6.24 — First fail-closed Win32 thunk-retirement wave (2026-07-26)
+
+Four x64 kernel32 imports now bind exclusively to real user-mode DLL
+exports: `CreateThread`, `ExitThread`, `FreeLibraryAndExitThread`, and
+`GetExitCodeThread`. Their legacy lookup rows are gone. A shared
+manifest drives compile-time row exclusion, post-link AMD64 PE32+ EAT
+verification, spawn-time preload verification, loader fail-closed
+behavior, and a fix-journal guard that cannot resurrect the rows.
+
+The wave also corrected `FreeLibraryAndExitThread`: its old
+`ExitThread` alias interpreted RCX (the module handle) as the exit code,
+but the real two-argument export passes RDX correctly. The
+`syscall_stress` PE uses distinct handle and code values and verifies
+the recorded child exit code. The focused `smoke=pe-threads` QEMU
+profile runs all three thread-focused PEs and gates all four `via-dll` bindings in
+CI. `GetExitCodeThread` now returns FALSE for
+an invalid handle or null output pointer instead of manufacturing
+STILL_ACTIVE success.
+
+This retires public API fallbacks, not the entire mapping. The live
+`ThreadExitTramp` still handles natural returns from Win32 thread
+procedures, and diagnostic unresolved-import gateways remain. PE32 is
+also unchanged: it uses the i386 companion DLL and its own clean-exit
+unresolved gateway.
+
 ## How to read the rest of the tree
 
 - `CLAUDE.md` — the authoritative project context, coding standards,

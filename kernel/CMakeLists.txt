@@ -845,6 +845,8 @@ duetos_embed_blob(generated_kernel32_dll.h
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_psapi.c"
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/seh_capture.S"
         "${CMAKE_SOURCE_DIR}/userland/libs/common/pe_unwind_bounds.h"
+        "${CMAKE_SOURCE_DIR}/kernel/subsystems/win32/thunk_retirement_wave1.inc"
+        "${CMAKE_SOURCE_DIR}/tools/build/verify-pe-exports.py"
     COMMENT "Compiling + embedding kernel32.dll (split into per-domain TUs)")
 
 # 32-bit kernel32 companion — PE32 (i386) DLL, preloaded into PE32

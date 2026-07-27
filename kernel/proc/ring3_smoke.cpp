@@ -2839,16 +2839,10 @@ void StartRing3SmokeTask()
                     CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     }
 
-    // The four PE smokes below cover thread / syscall / DLL /
-    // registry-fopen surface. None of their stdout lines are
-    // checked by the qemu-smoke critical path (only hello-pe,
-    // hello-winapi, and winkill are). On bare metal they're cheap
-    // enough to keep in the always-on set, but each one pays for
-    // a per-process AS, ~38-DLL preload table, and an entry-point
-    // run — under emulator-with-trapping-MMIO that adds tens of
-    // seconds of guest time the boot smoke doesn't have. Gate
-    // them under !emulator alongside the security probes above.
-    if (!emulator)
+    // Thread API retirement profile. Default emulator boots skip
+    // these three expensive preloaded-DLL PEs, but smoke=pe-threads
+    // opts into a focused QEMU run with exact runtime sentinels.
+    if (::duetos::test::SmokeProfileShouldSpawn(::duetos::test::SmokeTarget::PeThreads))
     {
         // Thread-stress PE: CreateThread + CreateEventW + SetEvent +
         // WaitForSingleObject round-trip. Exercises the Win32 →
@@ -2856,6 +2850,16 @@ void StartRing3SmokeTask()
         SpawnPeFile("ring3-thread-stress", fs::generated::kBinThreadStressBytes,
                     fs::generated::kBinThreadStressBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
                     mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        // Thread2 adds a natural-return + recorded 0x42 assertion,
+        // directly exercising ThreadExitTramp after row retirement.
+        // The full bare-metal battery already owns this PE, so spawn it
+        // here only for the explicit focused profile.
+        if (::duetos::test::SmokeProfileGet() == ::duetos::test::SmokeProfile::PeThreads)
+        {
+            SpawnPeFile("ring3-thread2-smoke", fs::generated::kBinThread2SmokeBytes,
+                        fs::generated::kBinThread2SmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        }
         // Syscall-stress PE: coverage — OutputDebugStringA,
         // ExitThread, GetProcessTimes/GetThreadTimes/GetSystemTimes,
         // GlobalMemoryStatusEx, WaitForMultipleObjects. Expected exit:
@@ -2863,6 +2867,11 @@ void StartRing3SmokeTask()
         SpawnPeFile("ring3-syscall-stress", fs::generated::kBinSyscallStressBytes,
                     fs::generated::kBinSyscallStressBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
                     mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    }
+    // The remaining custom-DLL and registry/fopen smokes stay in the
+    // bare-metal full-boot set.
+    if (!emulator)
+    {
         // DLL-loader end-to-end fixture. Imports
         // CustomAdd / CustomMul / CustomVersion from customdll.dll;
         // the kernel DLL loader maps the DLL into the process's AS

@@ -32,6 +32,11 @@
 
 set -euo pipefail
 
+# Windows Python inherits a legacy console code page even when invoked
+# from Git Bash. The generated markdown intentionally contains Unicode
+# arrows, so force deterministic UTF-8 for redirected CI output.
+export PYTHONUTF8=1
+
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
@@ -74,10 +79,9 @@ echo "[rt] preset=${PRESET}" >&2
 #   * gap  (hot)       -> KLOG_ONCE_WARN next to a real FIX_NOTE_GAP
 #   * stub (cold)      -> brief only (verifies the threshold gate)
 #
-# More classes (unmapped_thunk, cap_denial, loader_reject, soft_fault)
-# don't need explicit synthetic records because their auto-patch shapes
-# are exercised by their existing self-tests in the synthesizer module;
-# this rig focuses on the new shapes (syscall stub, marker log).
+# UnmappedThunk includes a retired kernel32 import and a non-retired
+# control. The retired name must produce only a repair note, never a
+# patch that resurrects its legacy thunk row.
 
 python3 - "${FIX_BLOB}" <<'PY'
 import struct
@@ -135,6 +139,8 @@ records = [
     rec(8, 1, "selftest/stub.cpp:1", "stub selftest"),
     rec(9, 8, "selftest/trap.cpp:1", "trap capture selftest"),
     rec(10, 10, "selftest/assert.subsys", "kassert selftest"),
+    rec(11, 4, "kernel32!CreateThread", "real DLL export required"),
+    rec(12, 4, "kernel32!SyntheticRetirementControl", "implement Win32 API"),
 ]
 
 blob = HEADER.pack(FILE_MAGIC, 1, len(records), 0) + b"".join(records)
@@ -170,6 +176,19 @@ if [[ ${PATCH_COUNT} -eq 0 ]]; then
     exit 1
 fi
 
+if compgen -G "${PATCH_DIR}/*thunk-kernel32-CreateThread.patch" > /dev/null; then
+    echo "[rt] FAIL: retired CreateThread thunk was resurrected" >&2
+    exit 1
+fi
+if ! compgen -G "${PATCH_DIR}/*thunk-kernel32-SyntheticRetirementControl.patch" > /dev/null; then
+    echo "[rt] FAIL: non-retired thunk control did not produce a patch" >&2
+    exit 1
+fi
+if ! grep -q 'Retired import `kernel32.dll!CreateThread` requires its real DLL export' "${PLAN_MD}"; then
+    echo "[rt] FAIL: retired import repair note missing from plan" >&2
+    exit 1
+fi
+
 # ---------------------------------------------------------------------
 # 3. `git apply --check` every emitted patch. Track per-patch results.
 # ---------------------------------------------------------------------
@@ -177,7 +196,11 @@ fi
 failed=0
 for patch_path in "${PATCHES[@]}"; do
     patch_name="$(basename "${patch_path}")"
-    if git -C "${REPO_ROOT}" apply --check "${patch_path}" 2> "${PATCH_DIR}/${patch_name}.checkerr"; then
+    # Generated diffs use canonical LF. On an autocrlf Windows
+    # worktree, tolerate only whitespace representation differences
+    # while still requiring every non-whitespace context token.
+    if git -C "${REPO_ROOT}" apply --check --ignore-whitespace "${patch_path}" \
+            2> "${PATCH_DIR}/${patch_name}.checkerr"; then
         echo "  [PASS check] ${patch_name}" >&2
     else
         echo "  [FAIL check] ${patch_name}" >&2
@@ -251,13 +274,13 @@ if [[ ${DO_BUILD} -eq 1 ]]; then
     fi
     applied=()
     for patch_path in "${PATCHES[@]}"; do
-        if git -C "${REPO_ROOT}" apply "${patch_path}"; then
+        if git -C "${REPO_ROOT}" apply --ignore-whitespace "${patch_path}"; then
             applied+=("${patch_path}")
         else
             echo "[rt] FAIL: git apply ${patch_path} failed" >&2
             # Revert anything we already applied.
             for r in "${applied[@]}"; do
-                git -C "${REPO_ROOT}" apply --reverse "${r}" || true
+                git -C "${REPO_ROOT}" apply --reverse --ignore-whitespace "${r}" || true
             done
             exit 1
         fi
@@ -268,13 +291,13 @@ if [[ ${DO_BUILD} -eq 1 ]]; then
         echo "[rt] FAIL: kernel build failed after applying all patches" >&2
         tail -30 "${PATCH_DIR}/build.log" >&2
         for r in "${applied[@]}"; do
-            git -C "${REPO_ROOT}" apply --reverse "${r}" || true
+            git -C "${REPO_ROOT}" apply --reverse --ignore-whitespace "${r}" || true
         done
         exit 1
     fi
     echo "[rt] build OK; reverting all applied patches" >&2
     for r in "${applied[@]}"; do
-        git -C "${REPO_ROOT}" apply --reverse "${r}"
+        git -C "${REPO_ROOT}" apply --reverse --ignore-whitespace "${r}"
     done
 fi
 
