@@ -315,3 +315,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: No description provided
 - **Claimed**: 2026-07-27T05:46:29Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] thread-handle-tid-scheduler
+- **Session**: `Codex-thread-handle-tid-isolation`
+- **Branch**: `claude/thread-handle-tid-isolation`
+- **Files**: `kernel/sched/sched.h`
+- **Description**: No description provided
+- **Claimed**: 2026-07-27T05:46:47Z
+- **Status**: IN PROGRESS
