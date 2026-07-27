@@ -283,3 +283,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: No description provided
 - **Claimed**: 2026-07-27T04:58:04Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] kernel-thread-diagnostics
+- **Session**: `Codex-wave6-thread-wait-fix`
+- **Branch**: `claude/kernel-thread-wait-fix`
+- **Files**: `kernel/diag/leak_detector.cpp`
+- **Description**: No description provided
+- **Claimed**: 2026-07-27T05:02:28Z
+- **Status**: IN PROGRESS
