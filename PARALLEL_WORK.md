@@ -356,13 +356,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-27T05:47:07Z
 - **Status**: COMPLETED @ 2026-07-27T06:39:50Z
 
-### [ACTIVE] thread-handle-tid-doc
+### [DONE] thread-handle-tid-doc
 - **Session**: `Codex-thread-handle-tid-isolation`
 - **Branch**: `claude/thread-handle-tid-isolation`
 - **Files**: `wiki/reference/Roadmap.md`
 - **Description**: Track
 - **Claimed**: 2026-07-27T05:47:12Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-27T06:39:52Z
 
 ### [ACTIVE] thread-handle-tid-state-impl
 - **Session**: `Codex-thread-handle-tid-isolation`
