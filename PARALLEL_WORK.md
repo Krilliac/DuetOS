@@ -76,13 +76,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-27T00:53:14Z
 - **Status**: COMPLETED @ 2026-07-27T01:30:11Z
 
-### [ACTIVE] thunk-retirement-wave2-runtime
+### [DONE] thunk-retirement-wave2-runtime
 - **Session**: `Codex-thunk-wave2`
 - **Branch**: `claude/thunk-retirement-wave2`
 - **Files**: `userland/apps/hello_winapi/hello.c tools/test/profile-boot-smoke.sh tools/test/bochs-smoke.sh`
 - **Description**: Add verdict-bearing pseudo-handle ID last-error and via-DLL smoke sentinels
 - **Claimed**: 2026-07-27T00:53:16Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-27T01:30:14Z
 
 ### [ACTIVE] thunk-retirement-wave2-alias-fixture
 - **Session**: `Codex-thunk-wave2`
