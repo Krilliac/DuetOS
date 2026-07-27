@@ -171,3 +171,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Extend mixed-provider boot coverage to core interlocked aliases semantics and width canaries
 - **Claimed**: 2026-07-27T02:53:03Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] thunk-retirement-wave5-interlock-smoke
+- **Session**: `Codex-thunk-wave5`
+- **Branch**: `claude/thunk-retirement-wave5`
+- **Files**: `userland/apps/interlock_smoke/* tools/build/build-interlock-smoke.sh`
+- **Description**: Make legacy interlock smoke failures terminal instead of printing unconditional PASS
+- **Claimed**: 2026-07-27T02:53:04Z
+- **Status**: IN PROGRESS
