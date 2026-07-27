@@ -299,3 +299,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: No description provided
 - **Claimed**: 2026-07-27T05:05:52Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] kernel-thread-deferred-api
+- **Session**: `Codex-wave6-thread-wait-fix`
+- **Branch**: `claude/kernel-thread-wait-fix`
+- **Files**: `kernel/sched/sched.h`
+- **Description**: No description provided
+- **Claimed**: 2026-07-27T05:06:09Z
+- **Status**: IN PROGRESS
