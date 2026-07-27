@@ -51,14 +51,19 @@ namespace
 // the genuine no-op stubs (constant returners, miss loggers,
 // single-byte `ret`s). Everything else is a real ABI-translation
 // thunk.
-constexpr u32 kOffExitProcess = 0x00;                        // 9 bytes
-constexpr u32 kOffGetStdHandle = 0x09;                       // 3 bytes
-constexpr u32 kOffWriteFile = 0x0C;                          // 44 bytes
-constexpr u32 kOffGetCurrentProcess = 0x38;                  // 8 bytes
-constexpr u32 kOffGetCurrentThread = 0x40;                   // 8 bytes
-constexpr u32 kOffGetCurrentProcessId = 0x48;                // 8 bytes
-constexpr u32 kOffGetCurrentThreadId = 0x50;                 // 8 bytes
-constexpr u32 kOffTerminateProcess = 0x58;                   // 9 bytes
+constexpr u32 kOffExitProcess = 0x00;  // 9 bytes
+constexpr u32 kOffGetStdHandle = 0x09; // 3 bytes
+constexpr u32 kOffWriteFile = 0x0C;    // 44 bytes
+// These four kernel32 entry points now come from the real user-mode
+// DLL. Keep the dead bytes in place until generated offsets make
+// whole-array compaction safe.
+[[maybe_unused]] constexpr u32 kOffGetCurrentProcess = 0x38;   // 8 bytes
+[[maybe_unused]] constexpr u32 kOffGetCurrentThread = 0x40;    // 8 bytes
+[[maybe_unused]] constexpr u32 kOffGetCurrentProcessId = 0x48; // 8 bytes
+[[maybe_unused]] constexpr u32 kOffGetCurrentThreadId = 0x50;  // 8 bytes
+constexpr u32 kOffTerminateProcess = 0x58;                     // 9 bytes
+// The kernel32 names are retired, but ntdll's
+// Rtl{Get,Set}LastWin32Error aliases still consume these gateways.
 constexpr u32 kOffGetLastError = 0x61;                       // 8 bytes
 constexpr u32 kOffSetLastError = 0x69;                       // 10 bytes
 constexpr u32 kOffInitCritSec = 0x74;                        // 18 bytes

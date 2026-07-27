@@ -1330,6 +1330,26 @@ procedures, and diagnostic unresolved-import gateways remain. PE32 is
 also unchanged: it uses the i386 companion DLL and its own clean-exit
 unresolved gateway.
 
+## Phase 6.25 — Identity/error Win32 thunk-retirement wave (2026-07-26)
+
+The fail-closed x64 manifest grew from four to ten kernel32 imports.
+`GetCurrentProcess`, `GetCurrentThread`, `GetCurrentProcessId`,
+`GetCurrentThreadId`, `GetLastError`, and `SetLastError` now bind only
+to verified real-DLL exports; their legacy kernel32 rows and the
+corresponding kernelbase aliases are gone. Direct kernelbase imports
+and API-set aliases converge on the verified kernel32 provider.
+
+The `hello_winapi` PE asserts the process/thread pseudo-handles, nonzero
+IDs, and the last-error round trip. The `smoke=pe-winapi`
+QEMU and Bochs gates require all six wave-2 imports to log `via-dll`.
+A dedicated mixed-provider PE splits those imports across kernel32,
+kernelbase, and process-thread/error-handling API-set descriptors so
+the alias convergence path is exercised at boot rather than only by
+hosted policy tests. Its worker also proves a shared process ID,
+distinct thread IDs, and thread-local LastError isolation.
+PE32 remains unchanged on its separate i386 DLL and unresolved-import
+path.
+
 ## How to read the rest of the tree
 
 - `CLAUDE.md` — the authoritative project context, coding standards,

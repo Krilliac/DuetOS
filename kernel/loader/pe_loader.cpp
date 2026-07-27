@@ -1933,8 +1933,27 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
 
             const bool is_retired_kernel32_name =
                 !h.is_pe32 && !is_ordinal_import && win32::IsRetiredKernel32ImportName(fn_name);
+            const bool is_recognized_retired_api_set_alias = is_retired_kernel32_name && is_api_set_contract &&
+                                                             api_set_host != nullptr &&
+                                                             win32::IsKernel32ProviderDll(api_set_host);
             const bool retired_import_requires_real_dll =
-                is_retired_kernel32_name && (win32::IsKernel32ProviderDll(dll_name) || is_api_set_contract);
+                is_retired_kernel32_name &&
+                (win32::IsKernel32ProviderDll(dll_name) || is_recognized_retired_api_set_alias);
+
+            // API-set prefixes alone are not authority to borrow a kernel32
+            // export. A retired name may use a contract only when the static
+            // schema recognizes it and names kernel32/kernelbase as its host.
+            // This prevents fabricated or wrong-host contracts from turning
+            // a fail-closed retirement entry into an any-name lookup.
+            if (is_retired_kernel32_name && is_api_set_contract && !is_recognized_retired_api_set_alias)
+            {
+                core::CleanroomTraceRecord("pe-loader", "retired-import-invalid-api-set", h.image_base, first_thunk,
+                                           fn_idx);
+                core::LogWithString(core::LogLevel::Error, "pe-resolve",
+                                    "RETIRED import uses unrecognized API-set provider", "fn", fn_name);
+                core::LogWithString(core::LogLevel::Error, "pe-resolve", "  from", "dll", dll_name);
+                return false;
+            }
 
             // All retired aliases converge on the one linked artifact the
             // build verifies. This also handles direct kernelbase imports
@@ -1983,16 +2002,17 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
                     SerialWrite("\n");
                 }
             }
-            // A retired PE32+ thunk is an enforced DLL contract, not
-            // an optional import. If the real export is unavailable,
-            // fail the load rather than silently reintroducing a
-            // legacy row or binding the generic miss logger. PE32 has
-            // a separate companion DLL and unresolved-import path.
-            if (!resolved_via_dll && retired_import_requires_real_dll)
+            // A retired PE32+ named import may use an exact DLL EAT hit or
+            // one of the canonical aliases above. If neither resolves, fail
+            // the load before the legacy table or generic miss logger,
+            // regardless of which DLL name supplied the malformed import.
+            // A successful same-name export from another real DLL remains
+            // valid because PE export names are scoped to their DLL.
+            if (win32::RetiredNamedImportWouldFallBack(h.is_pe32, is_ordinal_import, resolved_via_dll, fn_name))
             {
                 core::CleanroomTraceRecord("pe-loader", "retired-import-unresolved", h.image_base, first_thunk, fn_idx);
-                core::LogWithString(core::LogLevel::Error, "pe-resolve", "RETIRED import requires real DLL export",
-                                    "fn", fn_name);
+                core::LogWithString(core::LogLevel::Error, "pe-resolve",
+                                    "RETIRED import requires exact real DLL export", "fn", fn_name);
                 core::LogWithString(core::LogLevel::Error, "pe-resolve", "  from", "dll", dll_name);
                 return false;
             }

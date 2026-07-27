@@ -1,4 +1,8 @@
-// kernel32 APIs retired from the legacy kernel thunk table in wave 1.
+// kernel32 APIs retired from the legacy kernel thunk table.
+//
+// The filename is retained because wave 1 introduced the fail-closed
+// manifest contract; later retirement waves append to the same source
+// of truth instead of creating policy fragments that can drift apart.
 //
 // This X-macro is the single source of truth for:
 //   - the loader's fail-closed policy;
@@ -11,3 +15,9 @@ DUETOS_RETIRED_KERNEL32_IMPORT("CreateThread")
 DUETOS_RETIRED_KERNEL32_IMPORT("ExitThread")
 DUETOS_RETIRED_KERNEL32_IMPORT("FreeLibraryAndExitThread")
 DUETOS_RETIRED_KERNEL32_IMPORT("GetExitCodeThread")
+DUETOS_RETIRED_KERNEL32_IMPORT("GetCurrentProcess")
+DUETOS_RETIRED_KERNEL32_IMPORT("GetCurrentThread")
+DUETOS_RETIRED_KERNEL32_IMPORT("GetCurrentProcessId")
+DUETOS_RETIRED_KERNEL32_IMPORT("GetCurrentThreadId")
+DUETOS_RETIRED_KERNEL32_IMPORT("GetLastError")
+DUETOS_RETIRED_KERNEL32_IMPORT("SetLastError")

@@ -85,6 +85,10 @@ forbidden=(
     "DUETOS CRASH"
     "triple fault"
     "[health] ESCALATE:"
+    "RETIRED import requires exact real DLL export"
+    "RETIRED import uses unrecognized API-set provider"
+    "UNRESOLVED kernel-provider ordinal import"
+    "FAIL retired kernel32 export unavailable"
 )
 
 case "${PROFILE}" in
@@ -115,7 +119,24 @@ case "${PROFILE}" in
             "[hello-winapi] printed via kernel32.WriteFile!"
             "[vcruntime140] memset+memcpy+memmove OK"
             "[heap] HeapAlloc + GetProcessHeap OK"
+            'pe spawn name="ring3-thunk-alias-smoke"'
+            "[thunk_alias_smoke] kernel32.dll pseudo-handle PASS"
+            "[thunk_alias_smoke] kernelbase.dll pseudo-handle PASS"
+            "[thunk_alias_smoke] api-ms-win-core-processthreads-l1-1-0.dll IDs PASS"
+            "[thunk_alias_smoke] api-ms-win-core-errorhandling-l1-1-0.dll thread-local last-error PASS"
+            "[ring3-thunk-alias-smoke] PASS"
             "exit rc   val=0xbeef"
+            "via-dll kernel32.dll!GetCurrentProcess"
+            "via-dll kernel32.dll!GetCurrentThread"
+            "via-dll kernel32.dll!GetCurrentProcessId"
+            "via-dll kernel32.dll!GetCurrentThreadId"
+            "via-dll kernel32.dll!GetLastError"
+            "via-dll kernel32.dll!SetLastError"
+            "via-dll kernelbase.dll!GetCurrentThread"
+            "via-dll api-ms-win-core-processthreads-l1-1-0.dll!GetCurrentProcessId"
+            "via-dll api-ms-win-core-processthreads-l1-1-0.dll!GetCurrentThreadId"
+            "via-dll api-ms-win-core-errorhandling-l1-1-0.dll!GetLastError"
+            "via-dll api-ms-win-core-errorhandling-l1-1-0.dll!SetLastError"
         )
         ;;
     pe-threads)

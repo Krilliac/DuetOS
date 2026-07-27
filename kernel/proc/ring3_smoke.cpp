@@ -113,6 +113,7 @@
 #include "generated_wtsapi32_dll.h"
 #include "generated_hello_pe.h"
 #include "generated_hello_winapi.h"
+#include "generated_thunk_alias_smoke.h"
 #include "generated_windowed_hello.h"
 #include "generated_syscall_stress.h"
 #include "generated_thread_stress.h"
@@ -2820,6 +2821,13 @@ void StartRing3SmokeTask()
     {
         SpawnPeFile("ring3-hello-winapi", fs::generated::kBinHelloWinapiBytes, fs::generated::kBinHelloWinapiBytes_len,
                     CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        // Mixed-provider retirement fixture: the six Wave 2 APIs are
+        // intentionally imported across kernel32, kernelbase, and two
+        // API-set contracts. The PE validates their semantics after IAT
+        // resolution and prints [ring3-thunk-alias-smoke] PASS.
+        SpawnPeFile("ring3-thunk-alias-smoke", fs::generated::kBinThunkAliasSmokeBytes,
+                    fs::generated::kBinThunkAliasSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                    mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     }
     // Browser profile: the WinInet browser PE then the WinSock
     // browser PE. browser_pe.exe drives InternetOpenA /

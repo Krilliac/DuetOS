@@ -62,4 +62,10 @@ inline constexpr bool ThunkRetirementRequiresRealDll(const char* dll_name, const
     return IsKernel32ProviderDll(dll_name) && IsRetiredKernel32ImportName(function_name);
 }
 
+inline constexpr bool RetiredNamedImportWouldFallBack(bool is_pe32, bool is_ordinal_import, bool resolved_via_dll,
+                                                      const char* function_name)
+{
+    return !is_pe32 && !is_ordinal_import && !resolved_via_dll && IsRetiredKernel32ImportName(function_name);
+}
+
 } // namespace duetos::win32

@@ -272,6 +272,12 @@ duetos_embed_blob(generated_hello_winapi.h
     DEFS_DIR "${CMAKE_SOURCE_DIR}/userland/apps/hello_winapi"
     COMMENT  "Compiling + embedding /bin/hello_winapi.exe (Win32 import path)")
 
+duetos_embed_blob(generated_thunk_alias_smoke.h
+    SCRIPT   "${CMAKE_SOURCE_DIR}/tools/build/build-thunk-alias-smoke.sh"
+    SRC      "${CMAKE_SOURCE_DIR}/userland/apps/thunk_alias_smoke/thunk_alias_smoke.c"
+    DEFS_DIR "${CMAKE_SOURCE_DIR}/userland/apps/thunk_alias_smoke"
+    COMMENT  "Compiling + embedding /bin/thunk_alias_smoke.exe (mixed Win32 provider routing)")
+
 duetos_embed_blob(generated_thread_stress.h
     SCRIPT   "${CMAKE_SOURCE_DIR}/tools/build/build-thread-stress.sh"
     SRC      "${CMAKE_SOURCE_DIR}/userland/apps/thread_stress/hello.c"
