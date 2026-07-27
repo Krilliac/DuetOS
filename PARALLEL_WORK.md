@@ -20,13 +20,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-26T23:38:21Z
 - **Status**: COMPLETED @ 2026-07-27T00:31:44Z
 
-### 🟢 kernel32-retirement-contract
+### [DONE] kernel32-retirement-contract
 - **Session**: `Codex-thunk-wave1`
 - **Branch**: `claude/thunk-retirement-wave1`
 - **Files**: `userland/libs/kernel32/kernel32_internal.h`
 - **Description**: Declare cross-TU FreeLibrary contract for FreeLibraryAndExitThread
 - **Claimed**: 2026-07-26T23:48:15Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-27T00:31:47Z
 
 ### 🟢 thunk-retirement-smoke-profile
 - **Session**: `Codex-thunk-wave1`
