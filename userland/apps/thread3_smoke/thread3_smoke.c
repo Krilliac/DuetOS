@@ -163,7 +163,7 @@ static HANDLE LocalOpenThread(DWORD tid)
     unsigned long long result;
     __asm__ volatile("int $0x80"
                      : "=a"(result)
-                     : "a"((unsigned long long)134), "D"((unsigned long long)tid)
+                     : "a"((unsigned long long)139), "D"((unsigned long long)tid)
                      : "memory");
     return (HANDLE)result;
 }
