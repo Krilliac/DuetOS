@@ -316,13 +316,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-27T05:46:29Z
 - **Status**: COMPLETED @ 2026-07-27T06:39:37Z
 
-### [ACTIVE] thread-handle-tid-scheduler
+### [DONE] thread-handle-tid-scheduler
 - **Session**: `Codex-thread-handle-tid-isolation`
 - **Branch**: `claude/thread-handle-tid-isolation`
 - **Files**: `kernel/sched/sched.h`
 - **Description**: No description provided
 - **Claimed**: 2026-07-27T05:46:47Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-27T06:39:40Z
 
 ### [ACTIVE] thread-handle-tid-syscalls
 - **Session**: `Codex-thread-handle-tid-isolation`
