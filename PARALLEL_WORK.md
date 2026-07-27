@@ -460,10 +460,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-27T06:48:49Z
 - **Status**: COMPLETED @ 2026-07-27T06:49:17Z
 
-### [ACTIVE] thread-handle-tid-abi-fix
+### [DONE] thread-handle-tid-abi-fix
 - **Session**: `Codex-thread-handle-tid-isolation`
 - **Branch**: `claude/thread-handle-tid-isolation`
 - **Files**: `userland/apps/thread3_smoke/thread3_smoke.c kernel/syscall/syscall.h`
 - **Description**: Correct SYS_THREAD_OPEN fixture number and synchronize TID-only handle contract
 - **Claimed**: 2026-07-27T06:51:16Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-27T06:52:05Z
