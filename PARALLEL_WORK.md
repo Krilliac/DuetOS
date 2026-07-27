@@ -220,10 +220,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-27T03:45:44Z
 - **Status**: COMPLETED @ 2026-07-27T03:56:57Z
 
-### [ACTIVE] thunk-retirement-wave6-abi-docs
+### [DONE] thunk-retirement-wave6-abi-docs
 - **Session**: `Codex-thunk-wave6`
 - **Branch**: `claude/thunk-retirement-wave6`
 - **Files**: `kernel/syscall/syscall.h kernel/subsystems/win32/tls_syscall.h`
 - **Description**: Synchronize TLS syscall and runtime contracts with per-task generation and LastError behavior
 - **Claimed**: 2026-07-27T03:54:07Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-27T03:56:59Z
