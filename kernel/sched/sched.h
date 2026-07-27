@@ -313,13 +313,12 @@ inline constexpr u32 kWin32TlsCap = 64;
 /// stays on Process — TlsAlloc returns one shared index. The
 /// VALUE per slot is per-thread: TlsSetValue / TlsGetValue read
 /// and write the calling Task's `win32_tls_slot_value[idx]`. idx
-/// must be < `kWin32TlsCap`; higher indices read 0 / writes
-/// silently drop. The first OOB call at each access shape lands
-/// a klog WARN with the offending idx so a Win32 shim regression
-/// surfaces in the log even though the call itself returns
-/// successfully. Kernel-only callers read 0 and ignore writes.
-u64 CurrentTaskTlsSlotValue(u32 idx);
-void SetCurrentTaskTlsSlotValue(u32 idx, u64 value);
+/// must be < `kWin32TlsCap`; syscall handlers validate public
+/// indices before calling these helpers. A defensive OOB helper
+/// call reads 0 / drops the write and logs the first occurrence.
+/// Kernel-only callers read 0 and ignore writes.
+u64 CurrentTaskTlsSlotValue(u32 idx, u64 generation);
+void SetCurrentTaskTlsSlotValue(u32 idx, u64 generation, u64 value);
 
 /// Read the task ID of an arbitrary `Task*`. Returns 0 for nullptr.
 /// Used by Win32 custom-diagnostics deadlock-detection to record a

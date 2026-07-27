@@ -121,6 +121,14 @@ kernelbase imports use its real forwarders, while the interlocked
 API-set route is forced through the fail-closed kernel32 provider.
 The underscored vcruntime consumers keep all four shared byte spans
 live, as do the separate 64-bit and PE32 implementations.
+The sixth wave moved `TlsAlloc`, `TlsFree`, `TlsGetValue`, and
+`TlsSetValue`. Direct kernelbase imports use its real forwarders, while
+the processthreads API-set route converges on verified kernel32.
+`FlsAlloc`, `FlsFree`, `FlsGetValue`, and `FlsSetValue` keep the four
+fixed byte spans live. The real path now clears LastError on
+`TlsGetValue`, serializes allocation/free across CPUs, and tags
+per-thread values with slot generations so a recycled index cannot
+reveal stale data from an earlier lifetime.
 PE32 uses its separate i386 companion DLL and unresolved-import
 gateway, so it is intentionally outside this x64 retirement policy.
 For PE32+, a kernel32/kernelbase/API-set ordinal import may bind a real
@@ -138,9 +146,9 @@ The emulator-safe regression coverage is split by workload:
 `smoke=pe-threads` runs the natural-return and explicit-exit thread PEs,
 requires the thread and bitwise-atomic imports to log `via-dll`, and
 checks the corrected combined free-and-exit argument contract.
-`smoke=pe-winapi` asserts the eighteen wave-2-5 identity, error,
-atomic, and timing contracts and requires their `via-dll` bindings.
-Its `thunk_alias_smoke` PE deliberately splits those eighteen imports
+`smoke=pe-winapi` asserts the twenty-two wave-2-6 identity, error,
+atomic, timing, and TLS contracts and requires their `via-dll` bindings.
+Its `thunk_alias_smoke` PE deliberately splits those twenty-two imports
 across kernel32, kernelbase, and five API-set descriptors. It validates
 atomic returned-old/final values, a joined 131,072-operation contention
 total, the 1 GHz QPC contract, monotonic counters, and consistent
@@ -149,6 +157,15 @@ guards Win64's callee-saved RBX around QPF, catching the old
 two-byte-early entry's silent register corruption. Provider
 convergence and semantics are therefore both covered by the emulator
 gate.
+
+The TLS portion requires initial-null plus LastError clearing, exact
+64-bit per-thread round trips, joined worker isolation, rejection of
+indices 64 and `0xFFFFFFFF`, valid free, and double-free failure. A
+free/reallocate worker proves generation invalidation, while two
+barrier-synchronized workers hold simultaneous allocations and must
+receive distinct slots. The older `tls_smoke` now makes every subcheck
+contribute to a terminal nonzero failure instead of printing
+unconditional PASS.
 
 The core interlocked portion checks increment/decrement new-value
 returns, exchange and compare-exchange old-value returns, CAS hit and

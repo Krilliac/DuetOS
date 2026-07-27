@@ -949,19 +949,19 @@ struct Process
     u64 thread_stack_cursor;
 
     // Win32 TLS (Thread-Local Storage) slots — backs TlsAlloc /
-    // TlsGetValue / TlsSetValue / TlsFree. v0 is
-    // single-threaded per process, so "thread-local" is just
-    // "process-local" — but the slot allocator + per-slot
-    // storage give MSVC CRT's TLS-using startup paths (errno,
-    // locale, uncaught_exception tracking) something real to
-    // point at instead of TLS_OUT_OF_INDEXES.
+    // TlsGetValue / TlsSetValue / TlsFree. Allocation and lifetime
+    // generations are process-wide; values live on each Task so
+    // one thread cannot observe another thread's slot contents.
     //
     // 64 slots is plenty for any CRT — typical MSVC CRT
     // uses 3-5 TLS slots. FLS (Fiber-Local Storage) aliases
     // to the same API in v0 since we have no fibers.
     static constexpr u64 kWin32TlsCap = 64;
+    sync::SpinLock tls_lock;
     u64 tls_slot_in_use; // bitmap: bit N = slot N allocated
-    u64 tls_slot_value[kWin32TlsCap];
+    // Every free/allocate transition advances the slot generation.
+    // Per-task values stamped with an older generation read as zero.
+    u64 tls_slot_generation[kWin32TlsCap];
 
     // Static-TLS template descriptor (T6-01 per-thread half).
     // Populated by the PE loader's SetupStaticTls when the image

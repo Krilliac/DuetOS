@@ -12364,3 +12364,14 @@ markers for its richest input. Three discovery layers were added (runtime
   underscored vcruntime consumers keep the four byte spans live.
   **Rules out** equating public Win32 retirement with deletion of
   compiler-intrinsic support.
+- **Sixth wave:** `TlsAlloc`, `TlsFree`, `TlsGetValue`, and
+  `TlsSetValue`. Kernel32 and kernelbase legacy rows retire together;
+  the processthreads API set proves fail-closed convergence and real
+  kernelbase forwarders remain a distinct route. Initial-null and
+  LastError behavior, 64-bit per-thread values, joined worker
+  isolation, invalid indices, free/double-free, concurrent allocation,
+  and free/reallocate generation invalidation are verdict-bearing.
+  `FlsAlloc`, `FlsFree`, `FlsGetValue`, and `FlsSetValue` retain the
+  shared fixed byte spans. **Rules out** CPU-local interrupt masking as
+  cross-CPU allocator synchronization and rules out reusing a TLS slot
+  without invalidating stale per-task values.

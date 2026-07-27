@@ -51,11 +51,13 @@ void __cdecl mainCRTStartup(void)
     Out("PASS slot=");
     OutHex((unsigned long long)slot);
     Out("\r\n");
+    BOOL all_ok = TRUE;
 
     /* TlsSetValue + TlsGetValue round-trip. */
     BOOL set_ok = TlsSetValue(slot, (void*)0xDEADBEEFCAFEBABE);
     Out("[tls_smoke] TlsSetValue         = ");
     Out(set_ok ? "PASS\r\n" : "FAIL\r\n");
+    all_ok = all_ok && set_ok;
 
     void* got = TlsGetValue(slot);
     Out("[tls_smoke] TlsGetValue         = ");
@@ -66,30 +68,46 @@ void __cdecl mainCRTStartup(void)
         Out("FAIL got=");
         OutHex((unsigned long long)got);
         Out("\r\n");
+        all_ok = FALSE;
     }
 
     /* TlsSetValue(NULL) on a valid slot — should round-trip too. */
-    TlsSetValue(slot, NULL);
+    BOOL null_set_ok = TlsSetValue(slot, NULL);
     void* got2 = TlsGetValue(slot);
     Out("[tls_smoke] TlsSetValue(NULL)   = ");
-    Out(got2 == NULL ? "PASS\r\n" : "FAIL\r\n");
+    Out(null_set_ok && got2 == NULL ? "PASS\r\n" : "FAIL\r\n");
+    all_ok = all_ok && null_set_ok && got2 == NULL;
 
     /* TlsFree. */
     BOOL free_ok = TlsFree(slot);
     Out("[tls_smoke] TlsFree             = ");
     Out(free_ok ? "PASS\r\n" : "FAIL\r\n");
+    all_ok = all_ok && free_ok;
 
     /* Allocate two slots — they should be distinct. */
     DWORD slot1 = TlsAlloc();
     DWORD slot2 = TlsAlloc();
+    BOOL distinct_ok = slot1 != TLS_OUT_OF_INDEXES && slot2 != TLS_OUT_OF_INDEXES && slot1 != slot2;
     Out("[tls_smoke] TlsAlloc x2 distinct= ");
-    Out(slot1 != TLS_OUT_OF_INDEXES && slot2 != TLS_OUT_OF_INDEXES && slot1 != slot2 ? "PASS\r\n" : "FAIL\r\n");
+    Out(distinct_ok ? "PASS\r\n" : "FAIL\r\n");
+    all_ok = all_ok && distinct_ok;
     if (slot1 != TLS_OUT_OF_INDEXES)
-        TlsFree(slot1);
+    {
+        BOOL slot1_free_ok = TlsFree(slot1);
+        all_ok = all_ok && slot1_free_ok;
+    }
     if (slot2 != TLS_OUT_OF_INDEXES)
-        TlsFree(slot2);
+    {
+        BOOL slot2_free_ok = TlsFree(slot2);
+        all_ok = all_ok && slot2_free_ok;
+    }
 
     Out("[tls_smoke] done\r\n");
+    if (!all_ok)
+    {
+        Out("[ring3-tls-smoke] FAIL\r\n");
+        ExitProcess(1);
+    }
     Out("[ring3-tls-smoke] PASS\r\n");
     ExitProcess(0);
 }

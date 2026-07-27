@@ -195,11 +195,8 @@
     {"kernel32.dll", "CreateEventExA", kOffCreateEventReal}, {"kernel32.dll", "SetEvent", kOffSetEventReal},
     {"kernel32.dll", "ResetEvent", kOffResetEventReal},
 
-    // real TLS. Replaces 's alias-to-
-    // TLS_OUT_OF_INDEXES TlsAlloc. Per-process 64-slot table.
-    // Fls* aliases to the same storage (v0 has no fibers).
-    {"kernel32.dll", "TlsAlloc", kOffTlsAllocReal}, {"kernel32.dll", "TlsFree", kOffTlsFreeReal},
-    {"kernel32.dll", "TlsGetValue", kOffTlsGetValueReal}, {"kernel32.dll", "TlsSetValue", kOffTlsSetValueReal},
+    // The public Tls* names are retired to the verified kernel32 DLL.
+    // Fls* retains the shared fixed byte spans (v0 has no fibers).
     {"kernel32.dll", "FlsAlloc", kOffTlsAllocReal}, {"kernel32.dll", "FlsFree", kOffTlsFreeReal},
     {"kernel32.dll", "FlsGetValue", kOffTlsGetValueReal}, {"kernel32.dll", "FlsSetValue", kOffTlsSetValueReal},
 
@@ -835,9 +832,7 @@
     {"kernelbase.dll", "SwitchToThread", kOffSwitchToThread}, {"kernelbase.dll", "GetCommandLineW", kOffGetCmdLineW},
     {"kernelbase.dll", "GetCommandLineA", kOffGetCmdLineA},
     {"kernelbase.dll", "GetModuleHandleW", kOffGetModuleHandleW},
-    {"kernelbase.dll", "GetModuleFileNameW", kOffGetModFileNameW}, {"kernelbase.dll", "TlsAlloc", kOffTlsAllocReal},
-    {"kernelbase.dll", "TlsFree", kOffTlsFreeReal}, {"kernelbase.dll", "TlsGetValue", kOffTlsGetValueReal},
-    {"kernelbase.dll", "TlsSetValue", kOffTlsSetValueReal},
+    {"kernelbase.dll", "GetModuleFileNameW", kOffGetModFileNameW},
     {"kernelbase.dll", "VerifyVersionInfoW", kOffPinReturn1}, {"kernelbase.dll", "IsWow64Process", kOffIsWow64},
     {"kernelbase.dll", "GetVersionExW", kOffGetVersionExW}, {"kernelbase.dll", "lstrlenW", kOffLstrlenW},
     {"kernelbase.dll", "lstrcmpW", kOffLstrcmpW}, {"kernelbase.dll", "MultiByteToWideChar", kOffMBtoWC},

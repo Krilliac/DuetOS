@@ -3,3 +3,5 @@ LIBRARY api-ms-win-core-processthreads-l1-1-0.dll
 EXPORTS
     GetCurrentProcessId
     GetCurrentThreadId
+    TlsAlloc
+    TlsFree

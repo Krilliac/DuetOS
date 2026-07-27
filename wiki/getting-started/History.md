@@ -1419,6 +1419,29 @@ compatibility test also now reports a terminal failure and nonzero
 exit code if any subcheck fails instead of printing unconditional
 PASS.
 
+## Phase 6.29 — TLS Win32 thunk-retirement and SMP hardening (2026-07-26)
+
+The fail-closed x64 manifest grew from twenty-two to twenty-six imports.
+`TlsAlloc`, `TlsFree`, `TlsGetValue`, and `TlsSetValue` now bind through
+verified real kernel32 code. Eight legacy rows are gone—four kernel32
+and four kernelbase—dropping their documented surfaces from 391 to 387
+and 36 to 32 rows.
+
+The mixed-provider PE allocates/frees through the processthreads API
+set and gets/sets through real kernelbase forwarders. It gates
+initial-null behavior with LastError clearing, exact 64-bit round
+trips, cross-thread isolation, out-of-range rejection, valid free, and
+double-free failure. A held-slot two-worker test proves concurrent
+allocations remain distinct, and a free/reallocate worker proves stale
+per-thread values cannot cross slot generations.
+
+The kernel TLS allocator now uses a per-process spinlock rather than
+CPU-local interrupt masking, and every slot lifetime has a generation
+stamped onto per-task values. The four fixed byte spans remain live for
+the `Fls*` aliases and are pinned by exact compile-time table checks.
+PE32 remains on its independent DLL path. `tls_smoke` also now exits
+nonzero if any semantic subcheck fails.
+
 ## How to read the rest of the tree
 
 - `CLAUDE.md` — the authoritative project context, coding standards,
