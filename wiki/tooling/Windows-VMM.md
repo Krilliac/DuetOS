@@ -102,6 +102,9 @@ duetos-vmm.exe --kernel <duetos-kernel.elf>
                [--idle <secs>]          (0 = no watchdog; default)
                [--gdb <port>]           (host-side GDB stub; 0 = off)
                [--record <f> | --replay <f>]
+               [--res WxH]              (default: primary monitor)
+               [--no-window]            (headless; skips the FB entirely)
+               [--break]                (__debugbreak() before the vCPU runs)
 ```
 
 Guest COM1 streams to stdout; stdin is fed to COM1 RX. `--gdb` stops
@@ -195,7 +198,19 @@ Path-specific verification still TBD:
   struct is currently header-exposed with stable named fields — the
   scheduler `Task` is `.cpp`-only. Will land when the first
   non-primitive type genuinely needs a mirror.
-- **No framebuffer / virtio-blk emulation** — intentionally **out of
-  scope**, not deferred-broken: the kernel boots headless on a baked
-  ramfs, so they are unneeded for the run/test/debug goal and would
-  be unwired bloat. Revisit only if a GUI/disk workload needs them.
+- **No virtio-blk emulation** — intentionally **out of scope**, not
+  deferred-broken: the kernel boots from a baked ramfs, so a block
+  device is unneeded for the run/test/debug goal and would be unwired
+  bloat. Revisit only if a disk workload needs it.
+- **Framebuffer is built** (it is no longer out of scope). The FB is
+  carved from the top of guest RAM and published to the guest through
+  Multiboot2 tag 8 as 32bpp direct RGB (BGRA); the host window
+  defaults to the primary monitor's resolution, `--res WxH` overrides
+  it, and `--no-window` skips both the reservation and the window.
+  Known limits: no 2D acceleration and no mode-setting after boot —
+  the guest gets one fixed mode for the life of the VM. A `--res` too
+  large for `--mem` is **rejected at boot** with the offending
+  numbers, because the FB grows down from the top of RAM while the
+  loaded image grows up: an unchecked overlap would both corrupt
+  kernel bytes and underflow the derived available-RAM span into a
+  ~16 EiB region handed to the guest frame allocator.
