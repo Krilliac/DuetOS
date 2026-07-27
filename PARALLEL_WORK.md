@@ -123,3 +123,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Extend mixed-provider boot coverage to kernelbase and API-set interlocked aliases
 - **Claimed**: 2026-07-27T01:49:00Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] thunk-retirement-wave3-apiset-policy
+- **Session**: `Codex-thunk-wave3`
+- **Branch**: `claude/thunk-retirement-wave3`
+- **Files**: `kernel/loader/apiset_static.cpp`
+- **Description**: Pin the interlocked API-set host used by the mixed-provider retirement fixture
+- **Claimed**: 2026-07-27T01:53:41Z
+- **Status**: IN PROGRESS
