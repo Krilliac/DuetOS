@@ -332,13 +332,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-27T05:46:52Z
 - **Status**: COMPLETED @ 2026-07-27T06:39:43Z
 
-### [ACTIVE] thread-handle-tid-close
+### [DONE] thread-handle-tid-close
 - **Session**: `Codex-thread-handle-tid-isolation`
 - **Branch**: `claude/thread-handle-tid-isolation`
 - **Files**: `kernel/subsystems/win32/file_syscall.cpp`
 - **Description**: Serialize
 - **Claimed**: 2026-07-27T05:46:57Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-27T06:39:45Z
 
 ### [ACTIVE] thread-handle-tid-create
 - **Session**: `Codex-thread-handle-tid-isolation`
