@@ -372,13 +372,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-27T05:47:26Z
 - **Status**: COMPLETED @ 2026-07-27T06:39:55Z
 
-### [ACTIVE] thread-handle-tid-scheduler-impl
+### [DONE] thread-handle-tid-scheduler-impl
 - **Session**: `Codex-thread-handle-tid-isolation`
 - **Branch**: `claude/thread-handle-tid-isolation`
 - **Files**: `kernel/sched/sched.cpp`
 - **Description**: Implement_scheduler_owned_by_TID_operations
 - **Claimed**: 2026-07-27T05:47:32Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-27T06:39:57Z
 
 ### [ACTIVE] thread-handle-tid-regression3
 - **Session**: `Codex-thread-handle-tid-isolation`
