@@ -124,10 +124,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-27T01:49:00Z
 - **Status**: COMPLETED @ 2026-07-27T01:59:38Z
 
-### [ACTIVE] thunk-retirement-wave3-apiset-policy
+### [DONE] thunk-retirement-wave3-apiset-policy
 - **Session**: `Codex-thunk-wave3`
 - **Branch**: `claude/thunk-retirement-wave3`
 - **Files**: `kernel/loader/apiset_static.cpp`
 - **Description**: Pin the interlocked API-set host used by the mixed-provider retirement fixture
 - **Claimed**: 2026-07-27T01:53:41Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-27T01:59:40Z
