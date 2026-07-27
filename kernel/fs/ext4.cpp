@@ -463,9 +463,22 @@ void ReadGroup0AndRootInode(Volume& v)
         return Err{ErrorCode::BadState};
     if (block_handle >= drivers::storage::BlockDeviceCount())
         return Err{ErrorCode::InvalidArgument};
-    // Read enough to cover offset 1024 + 1024-byte superblock = 2048
+    // Read enough to cover offset 1024 + the 1024-byte superblock = 2048
     // bytes, which is exactly our scratch.
-    const i32 rc = drivers::storage::BlockDeviceRead(block_handle, 0, 4, g_scratch);
+    //
+    // BlockDeviceRead's `count` is in DEVICE-NATIVE sectors, and block.h
+    // makes buffer sizing the caller's problem. The old literal 4 hardcoded a
+    // 512-byte sector; NVMe and virtio-blk legitimately report 4096 (NVMe
+    // Identify LBAF LBADS=12, or -device nvme,logical_block_size=4096), which
+    // made this a 4 x 4096 = 16 KiB read into a 2 KiB .bss buffer — a 14 KiB
+    // overflow filled with attacker-supplied disk bytes, at boot, before any
+    // of the superblock is validated. Derive the count from the real sector
+    // size and refuse a device whose sector does not even fit the scratch.
+    const u32 sector_size = drivers::storage::BlockDeviceSectorSize(block_handle);
+    if (sector_size == 0 || sector_size > sizeof(g_scratch))
+        return Err{ErrorCode::NotFound};
+    const u32 sector_count = static_cast<u32>((sizeof(g_scratch) + sector_size - 1) / sector_size);
+    const i32 rc = drivers::storage::BlockDeviceRead(block_handle, 0, sector_count, g_scratch);
     if (rc < 0)
         return Err{ErrorCode::IoError};
 

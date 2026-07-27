@@ -161,6 +161,14 @@ bool ExfatVolumeIsDuetOsOwned(const Volume* v)
         return Err{ErrorCode::BadState};
     if (block_handle >= drivers::storage::BlockDeviceCount())
         return Err{ErrorCode::InvalidArgument};
+    // BlockDeviceRead's `count` is in DEVICE-NATIVE sectors and block.h makes
+    // buffer sizing the caller's problem. One sector is all we need, but on a
+    // 4Kn NVMe or virtio-blk device one sector is 4096 bytes read into this
+    // 512-byte .bss scratch — a 3.5 KiB overflow of attacker-supplied disk
+    // bytes, at boot, before any of the boot sector is validated.
+    const u32 sector_size = drivers::storage::BlockDeviceSectorSize(block_handle);
+    if (sector_size == 0 || sector_size > sizeof(g_scratch))
+        return Err{ErrorCode::NotFound};
     const i32 rc = drivers::storage::BlockDeviceRead(block_handle, kBootSectorLba, 1, g_scratch);
     if (rc < 0)
         return Err{ErrorCode::IoError};
