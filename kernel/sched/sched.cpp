@@ -5952,6 +5952,25 @@ bool SchedTaskBelongsToProcessByTid(u64 target_tid, const core::Process* process
     return hit != nullptr && hit->state != TaskState::Dead && hit->process == process;
 }
 
+u64 SchedCountTasksForProcess(const core::Process* process)
+{
+    // Count live (non-Dead) tasks sharing `process`. SYS_EXECVE uses this to
+    // refuse an exec that would tear an address space down underneath sibling
+    // threads still executing in it.
+    if (!cpu::BspInstalled() || process == nullptr)
+    {
+        return 0;
+    }
+    sync::SpinLockGuard guard(g_sched_lock);
+    u64 count = 0;
+    for (const Task* task = g_all_tasks_head; task != nullptr; task = task->all_next)
+    {
+        if (task->process == process && task->state != TaskState::Dead)
+            ++count;
+    }
+    return count;
+}
+
 // ---------------------------------------------------------------------------
 // Dead-task reaper
 //

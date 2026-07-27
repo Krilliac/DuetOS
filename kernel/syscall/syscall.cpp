@@ -2098,6 +2098,28 @@ void SyscallDispatch(arch::TrapFrame* frame)
             return;
         }
 
+        // Refuse exec in a multithreaded process, for EVERY ABI.
+        //
+        // AddressSpaceClearUserMappings below unmaps the whole user half of
+        // an address space sibling tasks may still be executing in. Win32
+        // processes are genuinely multithreaded (Process::kWin32ThreadCap
+        // == 8; DoThreadCreate spawns real sibling Tasks sharing proc->as),
+        // and SYS_EXECVE is a native syscall gated only on kCapFsRead +
+        // kCapSpawnThread, not on abi_flavor. So a PE could CreateThread
+        // twice and then exec, unmapping the code its siblings were
+        // mid-instruction on and remapping arbitrary content at those VAs —
+        // a shared-AS use-after-unmap driven entirely from ring 3.
+        //
+        // Sibling teardown does not exist yet, so fail closed rather than
+        // race. Checked before the point of no return, and the read buffer is
+        // freed on this path.
+        if (sched::SchedCountTasksForProcess(caller) != 1)
+        {
+            mm::KFree(buf);
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+
         // Tear down the AS user mappings, then ElfLoad into the
         // same AS. Past this point any failure is fatal — the
         // caller's address space is already gone.

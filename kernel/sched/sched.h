@@ -202,6 +202,11 @@ bool SchedThreadExistsByTid(u64 target_tid);
 /// false for missing, dead, kernel-only, or foreign-process tasks.
 bool SchedTaskBelongsToProcessByTid(u64 target_tid, const core::Process* process);
 
+/// Number of live (non-Dead) tasks sharing `process`. Returns 0 when the
+/// scheduler is not up or `process` is null. Used by SYS_EXECVE to refuse an
+/// exec that would tear an address space down under sibling threads.
+u64 SchedCountTasksForProcess(const core::Process* process);
+
 /// True iff the task's state is Dead. Used by syscalls that track
 /// thread-handle signaling (WaitForSingleObject on a CreateThread
 /// handle, WaitForMultipleObjects, GetExitCodeThread) — the
