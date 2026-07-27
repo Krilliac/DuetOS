@@ -108,13 +108,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-27T01:10:30Z
 - **Status**: COMPLETED @ 2026-07-27T01:30:21Z
 
-### [ACTIVE] thunk-retirement-wave3-core
+### [DONE] thunk-retirement-wave3-core
 - **Session**: `Codex-thunk-wave3`
 - **Branch**: `claude/thunk-retirement-wave3`
 - **Files**: `kernel/subsystems/win32/thunk* kernel/loader/pe_loader.cpp kernel/proc/spawn.cpp tools/build/*fix* tools/build/*verify* tests/host/*thunk* wiki/reference/Win32-Surface-Status.md wiki/reference/Design-Decisions.md wiki/subsystems/Win32-PE-Subsystem.md wiki/getting-started/History.md`
 - **Description**: Retire four verified 32-bit interlocked kernel32 thunks while preserving shared bytecode consumers
 - **Claimed**: 2026-07-27T01:48:59Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-27T01:59:36Z
 
 ### [ACTIVE] thunk-retirement-wave3-alias-fixture
 - **Session**: `Codex-thunk-wave3`
