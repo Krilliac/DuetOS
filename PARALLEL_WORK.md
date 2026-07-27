@@ -227,3 +227,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Synchronize TLS syscall and runtime contracts with per-task generation and LastError behavior
 - **Claimed**: 2026-07-27T03:54:07Z
 - **Status**: COMPLETED @ 2026-07-27T03:56:59Z
+
+### [ACTIVE] kernel-thread-wait-fix
+- **Session**: `Codex-wave6-thread-wait-fix`
+- **Branch**: `claude/kernel-thread-wait-fix`
+- **Files**: `kernel/syscall/syscall.cpp`
+- **Description**: No description provided
+- **Claimed**: 2026-07-27T04:57:08Z
+- **Status**: IN PROGRESS
