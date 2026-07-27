@@ -371,3 +371,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Implement_TID_based_thread_handle_state
 - **Claimed**: 2026-07-27T05:47:26Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] thread-handle-tid-scheduler-impl
+- **Session**: `Codex-thread-handle-tid-isolation`
+- **Branch**: `claude/thread-handle-tid-isolation`
+- **Files**: `kernel/sched/sched.cpp`
+- **Description**: Implement_scheduler_owned_by_TID_operations
+- **Claimed**: 2026-07-27T05:47:32Z
+- **Status**: IN PROGRESS
