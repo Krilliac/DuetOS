@@ -286,18 +286,38 @@ void LoadSegment(LoadCtx& ctx, const ElfSegment& seg)
 
     for (u64 page_va = start; page_va < end; page_va += kPageSize)
     {
-        auto frame_r = AllocateFrame();
-        if (!frame_r)
+        // Two PT_LOADs may legitimately share a 4 KiB page (small p_align,
+        // or one segment's BSS tail spilling into the next segment's first
+        // page), and a hostile ELF may declare two PT_LOADs at the same
+        // p_vaddr outright. ElfForEachPtLoad invokes this callback once per
+        // PT_LOAD with no dedupe, and the Rust validator checks each header
+        // only in isolation, so nothing upstream rejects the overlap. Mapping
+        // the same VA twice reaches AddressSpaceMapUserPage's "virt already
+        // mapped" PanicAs — a kernel panic from a crafted file, reachable by
+        // anything that can exec.
+        //
+        // Reuse the existing mapping on conflict, exactly as the PE loader
+        // does at pe_loader.cpp:505: copy this segment's bytes into the frame
+        // already mapped there and skip the duplicate map call.
+        const PhysAddr existing = AddressSpaceLookupUserFrame(ctx.as, page_va);
+        const bool reusing = existing != kNullFrame;
+        PhysAddr frame = existing;
+        if (!reusing)
         {
-            KBP_PROBE_V(::duetos::debug::ProbeId::kElfLoaderOom, page_va);
-            ctx.ok = false;
-            return;
+            auto frame_r = AllocateFrame();
+            if (!frame_r)
+            {
+                KBP_PROBE_V(::duetos::debug::ProbeId::kElfLoaderOom, page_va);
+                ctx.ok = false;
+                return;
+            }
+            frame = frame_r.value();
         }
-        const PhysAddr frame = frame_r.value();
         // AllocateFrame zeroes the page for us (frame allocator
         // contract for frames under the direct map). Still safe to
         // rely on: the ELF bytes we copy below overwrite the
-        // filesz region; the tail stays zero.
+        // filesz region; the tail stays zero. On the reuse path the
+        // earlier segment's bytes already live there — leave them.
         auto* frame_direct = static_cast<u8*>(PhysToVirt(frame));
 
         // Intersect [seg.vaddr, seg.vaddr + seg.filesz) with this
@@ -318,9 +338,29 @@ void LoadSegment(LoadCtx& ctx, const ElfSegment& seg)
             }
         }
 
-        AddressSpaceMapUserPage(ctx.as, page_va, frame, flags);
-        if (ctx.guard != nullptr)
-            ctx.guard->Track(page_va);
+        if (!reusing)
+        {
+            AddressSpaceMapUserPage(ctx.as, page_va, frame, flags);
+            if (ctx.guard != nullptr)
+                ctx.guard->Track(page_va);
+        }
+        else
+        {
+            // Same W^X-safe merge the PE loader applies to shared section
+            // pages (pe_loader.cpp:536, GS-03 / CWE-281). Keeping only the
+            // FIRST segment's protection would let a later segment's bytes
+            // land in an executable or read-only page, or give a writable
+            // page the execute bit. Writable if EITHER segment wants write;
+            // executable only if BOTH are executable; any writable page is
+            // forced NX. AddressSpaceProtectUserPage rejects RWX outright.
+            const u64 existing_flags = AddressSpaceProbePteRaw(ctx.as, page_va);
+            u64 merged = kPagePresent | kPageUser;
+            if ((existing_flags & kPageWritable) || (flags & kPageWritable))
+                merged |= kPageWritable;
+            if ((existing_flags & kPageNoExecute) || (flags & kPageNoExecute) || (merged & kPageWritable))
+                merged |= kPageNoExecute;
+            AddressSpaceProtectUserPage(ctx.as, page_va, merged);
+        }
     }
 }
 
