@@ -139,3 +139,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Retire four verified timing kernel32 thunks while preserving shared and PE32 consumers
 - **Claimed**: 2026-07-27T02:18:38Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] thunk-retirement-wave4-alias-fixture
+- **Session**: `Codex-thunk-wave4`
+- **Branch**: `claude/thunk-retirement-wave4`
+- **Files**: `userland/apps/thunk_alias_smoke/* kernel/proc/ring3_smoke.cpp tools/build/build-thunk-alias-smoke.sh tools/test/profile-boot-smoke.sh tools/test/bochs-smoke.sh`
+- **Description**: Extend mixed-provider boot coverage to kernelbase profile and sysinfo timing aliases
+- **Claimed**: 2026-07-27T02:18:40Z
+- **Status**: IN PROGRESS
