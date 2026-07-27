@@ -218,7 +218,7 @@ class VerifyPeExportsTests(unittest.TestCase):
         with self.assertRaisesRegex(VERIFY.PeError, "overlapping section"):
             self.parse(data)
 
-    def test_manifest_is_exact_two_wave_set(self) -> None:
+    def test_manifest_is_exact_three_wave_set(self) -> None:
         manifest = (
             MODULE_PATH.parents[2]
             / "kernel"
@@ -239,6 +239,10 @@ class VerifyPeExportsTests(unittest.TestCase):
                 "GetCurrentThreadId",
                 "GetLastError",
                 "SetLastError",
+                "InterlockedExchangeAdd",
+                "InterlockedAnd",
+                "InterlockedOr",
+                "InterlockedXor",
             ],
         )
 

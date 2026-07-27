@@ -295,7 +295,7 @@ void ApiSetSelfTest()
             core::Panic("apiset-selftest", "host length mismatch");
     }
 
-    // (3) The two contracts used by the thunk-retirement alias
+    // (3) The contracts used by the thunk-retirement alias
     // fixture must remain recognized kernelbase-hosted contracts.
     host = nullptr;
     if (!ApiSetResolveStatic("api-ms-win-core-errorhandling-l1-1-0.dll", &host) || host == nullptr ||
@@ -308,6 +308,12 @@ void ApiSetSelfTest()
         !StringEqual(host, "kernelbase.dll"))
     {
         core::Panic("apiset-selftest", "processthreads host wrong");
+    }
+    host = nullptr;
+    if (!ApiSetResolveStatic("api-ms-win-core-interlocked-l1-1-0.dll", &host) || host == nullptr ||
+        !StringEqual(host, "kernelbase.dll"))
+    {
+        core::Panic("apiset-selftest", "interlocked host wrong");
     }
 
     // (4) Case-insensitive lookup (uppercase variant).

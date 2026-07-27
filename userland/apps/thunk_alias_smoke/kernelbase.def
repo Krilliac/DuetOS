@@ -2,3 +2,4 @@ LIBRARY kernelbase.dll
 
 EXPORTS
     GetCurrentThread
+    InterlockedExchangeAdd

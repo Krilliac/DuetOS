@@ -237,12 +237,12 @@ constexpr u32 kOffGetStartupInfo = 0xAC1; // 24 bytes (zero-fill + cb=104)
 // === Interlocked{And,Or,Xor} (+64-bit). LOCK CMPXCHG
 // loops so SMP future-proofing + timer-tick preemption safety
 // hold today.
-constexpr u32 kOffInterlockedAnd = 0xAED;   // 16 bytes
-constexpr u32 kOffInterlockedOr = 0xAFD;    // 16 bytes
-constexpr u32 kOffInterlockedXor = 0xB0D;   // 16 bytes
-constexpr u32 kOffInterlockedAnd64 = 0xB1D; // 17 bytes
-constexpr u32 kOffInterlockedOr64 = 0xB2E;  // 17 bytes
-constexpr u32 kOffInterlockedXor64 = 0xB3F; // 17 bytes
+[[maybe_unused]] constexpr u32 kOffInterlockedAnd = 0xAED; // retired public row; bytes retained for layout stability
+[[maybe_unused]] constexpr u32 kOffInterlockedOr = 0xAFD;  // retired public row; bytes retained for layout stability
+[[maybe_unused]] constexpr u32 kOffInterlockedXor = 0xB0D; // retired public row; bytes retained for layout stability
+constexpr u32 kOffInterlockedAnd64 = 0xB1D;                // 17 bytes
+constexpr u32 kOffInterlockedOr64 = 0xB2E;                 // 17 bytes
+constexpr u32 kOffInterlockedXor64 = 0xB3F;                // 17 bytes
 
 // === real critical sections ======================
 // Until now EnterCriticalSection / LeaveCriticalSection were
