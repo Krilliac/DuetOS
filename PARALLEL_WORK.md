@@ -163,3 +163,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Retire four verified core interlocked kernel32 and kernelbase rows while preserving vcruntime shared bytecode
 - **Claimed**: 2026-07-27T02:53:01Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] thunk-retirement-wave5-alias-fixture
+- **Session**: `Codex-thunk-wave5`
+- **Branch**: `claude/thunk-retirement-wave5`
+- **Files**: `userland/apps/thunk_alias_smoke/* kernel/proc/ring3_smoke.cpp tools/build/build-thunk-alias-smoke.sh tools/test/profile-boot-smoke.sh tools/test/bochs-smoke.sh`
+- **Description**: Extend mixed-provider boot coverage to core interlocked aliases semantics and width canaries
+- **Claimed**: 2026-07-27T02:53:03Z
+- **Status**: IN PROGRESS
