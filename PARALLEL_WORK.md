@@ -379,3 +379,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Implement_scheduler_owned_by_TID_operations
 - **Claimed**: 2026-07-27T05:47:32Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] thread-handle-tid-regression3
+- **Session**: `Codex-thread-handle-tid-isolation`
+- **Branch**: `claude/thread-handle-tid-isolation`
+- **Files**: `userland/apps/thread3_smoke`
+- **Description**: Foreign_stale_handle_and_context_quiescence_regressions
+- **Claimed**: 2026-07-27T05:47:37Z
+- **Status**: IN PROGRESS
