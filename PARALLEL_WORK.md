@@ -99,3 +99,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Increase pe-winapi guest timeout for the second mixed-provider PE and worker-thread oracle
 - **Claimed**: 2026-07-27T01:08:47Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] thunk-retirement-wave2-apiset-policy
+- **Session**: `Codex-thunk-wave2`
+- **Branch**: `claude/thunk-retirement-wave2`
+- **Files**: `kernel/loader/apiset_static.cpp`
+- **Description**: Lock known-host mappings and fabricated-contract rejection for retired API-set aliases
+- **Claimed**: 2026-07-27T01:10:30Z
+- **Status**: IN PROGRESS
