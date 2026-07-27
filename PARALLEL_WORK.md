@@ -348,13 +348,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-27T05:47:02Z
 - **Status**: COMPLETED @ 2026-07-27T06:39:47Z
 
-### [ACTIVE] thread-handle-tid-regression
+### [DONE] thread-handle-tid-regression
 - **Session**: `Codex-thread-handle-tid-isolation`
 - **Branch**: `claude/thread-handle-tid-isolation`
 - **Files**: `userland/apps/thread2_smoke`
 - **Description**: No description provided
 - **Claimed**: 2026-07-27T05:47:07Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-27T06:39:50Z
 
 ### [ACTIVE] thread-handle-tid-doc
 - **Session**: `Codex-thread-handle-tid-isolation`
