@@ -323,3 +323,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: No description provided
 - **Claimed**: 2026-07-27T05:46:47Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] thread-handle-tid-syscalls
+- **Session**: `Codex-thread-handle-tid-isolation`
+- **Branch**: `claude/thread-handle-tid-isolation`
+- **Files**: `kernel/syscall/syscall.cpp`
+- **Description**: Resolve
+- **Claimed**: 2026-07-27T05:46:52Z
+- **Status**: IN PROGRESS
