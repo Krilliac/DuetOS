@@ -318,18 +318,24 @@ static BOOL TestForeignThreadHandleLifecycle(void)
     while (g_foreign_a.heartbeat == frozen && progress_budget-- != 0)
         Sleep(1);
     controlled = controlled && previous_resume == 1 && g_foreign_a.heartbeat != frozen;
+    Out(controlled ? "[thread3_smoke] foreign live control     = PASS\r\n"
+                   : "[thread3_smoke] foreign live control     = FAIL\r\n");
 
     g_foreign_a.stop = 1;
     BOOL exited = WaitForSingleObject(local_a, 5000) == WAIT_OBJECT_0 && g_foreign_a.returned == FOREIGN_RETURNED &&
                   ForeignCanariesIntact(&g_foreign_a);
     CloseHandle(local_a);
     Sleep(20);
+    Out(exited ? "[thread3_smoke] foreign target exit      = PASS\r\n"
+               : "[thread3_smoke] foreign target exit      = FAIL\r\n");
 
     ContextProbe stale_context;
     InitializeContextProbe(&stale_context);
     DWORD stale_get = LocalGetThreadContext(foreign_a, &stale_context.context);
     BOOL stale_rejected = LocalSuspendThread(foreign_a) == (DWORD)-1 && stale_get == DUET_STATUS_INVALID_HANDLE &&
                           ContextCanariesIntact(&stale_context);
+    Out(stale_rejected ? "[thread3_smoke] foreign stale rejected   = PASS\r\n"
+                       : "[thread3_smoke] foreign stale rejected   = FAIL\r\n");
     HANDLE stale_numeric = foreign_a;
     CloseHandle(foreign_a);
 
@@ -340,6 +346,9 @@ static BOOL TestForeignThreadHandleLifecycle(void)
     BOOL reused = foreign_b != NULL && foreign_b == stale_numeric;
     DWORD second_suspend = foreign_b != NULL ? LocalSuspendThread(foreign_b) : (DWORD)-1;
     DWORD second_resume = second_suspend != (DWORD)-1 ? LocalResumeThread(foreign_b) : (DWORD)-1;
+    BOOL fresh_controlled = reused && second_suspend == 0 && second_resume == 1;
+    Out(fresh_controlled ? "[thread3_smoke] foreign slot reuse       = PASS\r\n"
+                         : "[thread3_smoke] foreign slot reuse       = FAIL\r\n");
     g_foreign_b.stop = 1;
     BOOL second_exited = local_b != NULL && WaitForSingleObject(local_b, 5000) == WAIT_OBJECT_0 &&
                          g_foreign_b.returned == FOREIGN_RETURNED && ForeignCanariesIntact(&g_foreign_b);
@@ -348,8 +357,7 @@ static BOOL TestForeignThreadHandleLifecycle(void)
     if (foreign_b != NULL)
         CloseHandle(foreign_b);
 
-    return controlled && exited && stale_rejected && reused && second_suspend == 0 && second_resume == 1 &&
-           second_exited;
+    return controlled && exited && stale_rejected && fresh_controlled && second_exited;
 }
 
 static BOOL TestLocalThreadContext(void)
