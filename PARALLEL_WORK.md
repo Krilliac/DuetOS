@@ -131,3 +131,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Pin the interlocked API-set host used by the mixed-provider retirement fixture
 - **Claimed**: 2026-07-27T01:53:41Z
 - **Status**: COMPLETED @ 2026-07-27T01:59:40Z
+
+### [ACTIVE] thunk-retirement-wave4-core
+- **Session**: `Codex-thunk-wave4`
+- **Branch**: `claude/thunk-retirement-wave4`
+- **Files**: `kernel/subsystems/win32/thunk* tools/build/*fix* tools/build/*verify* tests/host/*thunk* wiki/reference/Win32-Surface-Status.md wiki/reference/Design-Decisions.md wiki/subsystems/Win32-PE-Subsystem.md wiki/getting-started/History.md`
+- **Description**: Retire four verified timing kernel32 thunks while preserving shared and PE32 consumers
+- **Claimed**: 2026-07-27T02:18:38Z
+- **Status**: IN PROGRESS
