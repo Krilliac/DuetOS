@@ -574,6 +574,22 @@ void CookieSetFromHeader(const char* host, const char* req_path, const char* set
         // Unknown attributes silently ignored per RFC 6265 §5.2.6.
     }
 
+    // RFC 6265 §5.3 step 6: if the request host does not domain-match the
+    // Domain attribute, ignore the cookie entirely.
+    //
+    // This file already implements §5.1.3 matching and applies it on the READ
+    // path (DomainMatches, used by CookieBuildHeader), but the write path
+    // took attr_domain verbatim. So any origin could answer with
+    // `Set-Cookie: session=x; Domain=bank.com` and store an entry whose
+    // m_domain is bank.com and m_host_only is false — which CookieBuildHeader
+    // then attaches to genuine bank.com requests. That is cross-origin cookie
+    // planting / session fixation from any page the in-kernel browser loads,
+    // including a subresource.
+    if (has_domain && attr_domain[0] != '\0' && !DomainMatches(attr_domain, /*host_only=*/false, host))
+    {
+        return;
+    }
+
     // Finalise domain.
     bool host_only = false;
     if (!has_domain || attr_domain[0] == '\0')
@@ -1054,6 +1070,32 @@ void CookieSelfTest()
     if (contains(out, "shared="))
     {
         STFAIL("domain-suffix-mismatch");
+    }
+
+    // Test 8b: RFC 6265 §5.3 step 6 — a response may not set a cookie for a
+    // domain that does not domain-match the request host. evil.com claiming
+    // Domain=bank.com must be dropped at parse time, not merely filtered on
+    // read, or evil.com can plant a session cookie on bank.com.
+    JarClear();
+    CookieSetFromHeader("evil.com", "/", "planted=1; Domain=bank.com; Path=/", kNow);
+    get("bank.com", "/", false);
+    if (contains(out, "planted="))
+    {
+        STFAIL("cross-domain-set-accepted");
+    }
+    // ...and the attacker must not have stored it against its own host either.
+    get("evil.com", "/", false);
+    if (contains(out, "planted="))
+    {
+        STFAIL("cross-domain-set-stored");
+    }
+    // A legitimate parent-domain set from a subdomain still works.
+    JarClear();
+    CookieSetFromHeader("app.example.com", "/", "ok=1; Domain=example.com; Path=/", kNow);
+    get("app.example.com", "/", false);
+    if (!contains(out, "ok=1"))
+    {
+        STFAIL("parent-domain-set-rejected");
     }
 
     // Test 9: longest-path-first ordering.
