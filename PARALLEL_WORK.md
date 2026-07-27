@@ -148,10 +148,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-27T02:18:40Z
 - **Status**: COMPLETED @ 2026-07-27T02:33:57Z
 
-### [ACTIVE] thunk-retirement-wave4-apiset-policy
+### [DONE] thunk-retirement-wave4-apiset-policy
 - **Session**: `Codex-thunk-wave4`
 - **Branch**: `claude/thunk-retirement-wave4`
 - **Files**: `kernel/loader/apiset_static.cpp`
 - **Description**: Pin profile and sysinfo API-set hosts used by the retirement fixture
 - **Claimed**: 2026-07-27T02:18:42Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-27T02:33:59Z
