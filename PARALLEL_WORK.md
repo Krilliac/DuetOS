@@ -204,13 +204,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-27T03:31:45Z
 - **Status**: COMPLETED @ 2026-07-27T03:56:52Z
 
-### [ACTIVE] thunk-retirement-wave6-tls-runtime
+### [DONE] thunk-retirement-wave6-tls-runtime
 - **Session**: `Codex-thunk-wave6`
 - **Branch**: `claude/thunk-retirement-wave6`
 - **Files**: `userland/libs/kernel32/kernel32_sync.c kernel/subsystems/win32/tls_syscall.cpp kernel/proc/process.h kernel/sched/sched.h kernel/sched/sched.cpp`
 - **Description**: Harden TLS LastError, SMP allocation, and slot generation semantics used by retired real DLL exports
 - **Claimed**: 2026-07-27T03:35:44Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-27T03:56:55Z
 
 ### [ACTIVE] thunk-retirement-wave6-tls-init
 - **Session**: `Codex-thunk-wave6`
