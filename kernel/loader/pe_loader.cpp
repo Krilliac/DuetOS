@@ -2380,6 +2380,46 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
         }
     }
 
+    // Reject an image that would land on the loader's reserved fixed VAs.
+    //
+    // MapHeaders/MapSection tolerate an already-mapped VA (they reuse the
+    // frame), but the subsystem regions mapped afterwards do not: the stack,
+    // TEB, TLS array/block/trampoline, proc-env, KUSER_SHARED_DATA and both
+    // thunk pages all call AddressSpaceMapUserPage unconditionally. If the
+    // image already covers one of those VAs, that call hits the "virt already
+    // mapped" PanicAs — a kernel panic from a crafted PE, reachable by
+    // anything that can exec one. duetos_exec_meta_pe_validate_image does not
+    // catch it because such a base is perfectly well-formed.
+    //
+    // Every one of those fixed VAs lives in a single contiguous band that
+    // ends exactly at kV0StackTop:
+    //   kWin32ThunksVa      0x60000000   kWin32Thunks32Va  0x60100000
+    //   kProcEnvVa          0x65000000   kV0TebVa          0x70000000
+    //   kV0TlsArrayVa       0x71000000   kV0TlsBlockVa     0x72000000
+    //   kV0TlsTrampVa       0x73000000   kKuserSharedDataVa 0x7FFE0000
+    //   kV0StackVa          0x7FFF0000 .. kV0StackTop
+    // so rejecting an overlap with the whole band is both simpler and safer
+    // than enumerating each span — notably kV0TlsBlockVa's length is derived
+    // from the image's own TLS directory, so it has no fixed extent to list.
+    // Any fixed VA added inside the band in future is covered automatically.
+    {
+        constexpr u64 kLoaderReservedLo = win32::kWin32ThunksVa; // 0x60000000
+        constexpr u64 kLoaderReservedHi = kV0StackTop;           // 0x80000000
+        static_assert(kLoaderReservedLo < kLoaderReservedHi, "reserved band inverted");
+        const u64 img_lo = h.image_base;
+        // image_size is validated non-overflowing against kPeUserMax above.
+        const u64 img_hi = h.image_base + (h.image_size > 0 ? u64(h.image_size) : 1u);
+        if (img_lo < kLoaderReservedHi && img_hi > kLoaderReservedLo)
+        {
+            SerialWrite("[pe-load] FAIL ImageBase overlaps loader-reserved VA band base=");
+            SerialWriteHex(img_lo);
+            SerialWrite(" size=");
+            SerialWriteHex(u64(h.image_size));
+            SerialWrite("\n");
+            return r;
+        }
+    }
+
     SerialWrite("[pe-load] begin status=");
     SerialWrite(PeStatusName(ps));
     SerialWrite(" preferred_base=");
