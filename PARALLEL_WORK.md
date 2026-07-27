@@ -179,3 +179,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Make legacy interlock smoke failures terminal instead of printing unconditional PASS
 - **Claimed**: 2026-07-27T02:53:04Z
 - **Status**: COMPLETED @ 2026-07-27T03:09:12Z
+
+### [ACTIVE] thunk-retirement-wave6-core
+- **Session**: `Codex-thunk-wave6`
+- **Branch**: `claude/thunk-retirement-wave6`
+- **Files**: `kernel/subsystems/win32/thunk* tools/build/*fix* tools/build/*verify* tests/host/*thunk* wiki/reference/Win32-Surface-Status.md wiki/reference/Design-Decisions.md wiki/subsystems/Win32-PE-Subsystem.md wiki/getting-started/History.md`
+- **Description**: Retire four verified TLS kernel32 and kernelbase rows while preserving FLS shared bytecode
+- **Claimed**: 2026-07-27T03:31:42Z
+- **Status**: IN PROGRESS
