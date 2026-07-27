@@ -36,13 +36,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-26T23:49:28Z
 - **Status**: COMPLETED @ 2026-07-27T00:31:48Z
 
-### 🟢 smoke-profile-docs
+### [DONE] smoke-profile-docs
 - **Session**: `Codex-thunk-wave1`
 - **Branch**: `claude/thunk-retirement-wave1`
 - **Files**: `tools/test/bochs-smoke.sh tools/test/diff-boot-smoke.sh`
 - **Description**: Keep cross-hypervisor smoke profile documentation synchronized with pe-threads
 - **Claimed**: 2026-07-26T23:53:25Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-27T00:31:51Z
 
 ### 🟢 parallel-release-safety
 - **Session**: `Codex-thunk-wave1`
