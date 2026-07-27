@@ -387,3 +387,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Foreign_stale_handle_and_context_quiescence_regressions
 - **Claimed**: 2026-07-27T05:47:37Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] thread-handle-tid-diagnostics
+- **Session**: `Codex-thread-handle-tid-isolation`
+- **Branch**: `claude/thread-handle-tid-isolation`
+- **Files**: `kernel/diag/leak_detector.cpp`
+- **Description**: serialize_thread_handle_diagnostics
+- **Claimed**: 2026-07-27T05:49:34Z
+- **Status**: IN PROGRESS
