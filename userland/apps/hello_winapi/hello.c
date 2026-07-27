@@ -610,7 +610,8 @@ void _start(void)
     //   * SetEvent / ResetEvent return TRUE.
     //   * WaitForSingleObject returns WAIT_OBJECT_0 (0) —
     //     no actual blocking, but the ret path fires.
-    //   * GetExitCodeThread writes STILL_ACTIVE (0x103).
+    //   * GetExitCodeThread rejects a process handle with FALSE and
+    //     leaves the caller's output value untouched.
     //   * InitializeSListHead + GetSystemTimeAsFileTime
     //     don't crash on a stack-local out-buffer.
     HANDLE token = 0;
@@ -655,8 +656,8 @@ void _start(void)
     // has several non-zero bytes in the upper half.
     BOOL ft_nonzero = (ft[4] != 0) || (ft[5] != 0) || (ft[6] != 0) || (ft[7] != 0);
     BOOL advapi_pass = token != 0 && se_debug.LowPart == 1 && se_debug.HighPart == 0 && evt != 0 && wait_rc == 0 &&
-                       thr_exit == 0x103 && slist[0] == 0 && slist[8] == 0 // InitializeSListHead zeroed it
-                       && ft_nonzero;                                      // RTC-backed FILETIME is populated
+                       get_ok == 0 && thr_exit == 0 && slist[0] == 0 && slist[8] == 0 // InitializeSListHead zeroed it
+                       && ft_nonzero; // RTC-backed FILETIME is populated
     DWORD advapi_written = 0;
     if (advapi_pass)
         WriteFile(out, advapi_ok, sizeof(advapi_ok) - 1, &advapi_written, 0);

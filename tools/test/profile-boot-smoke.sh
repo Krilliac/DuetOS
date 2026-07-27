@@ -9,7 +9,7 @@
 #   0 — full pass, every expected signature found, none forbidden.
 #   1 — real regression: one or more expected signatures missing,
 #       or a forbidden signature (PANIC / DUETOS CRASH / triple
-#       fault / unexpected UNRESOLVED) appeared. Crashes are NEVER
+#       fault / retired-import resolution failure) appeared. Crashes are NEVER
 #       retried — a kernel that crashed once on a clean boot path
 #       has a real bug, even if the next attempt happens to land
 #       all the signatures.
@@ -28,6 +28,8 @@
 #                 Carries the [vcruntime140] / [strings] / [heap] /
 #                 [advapi] / [perf-counter] / [calc] / [files] /
 #                 [clock] / [block] signatures.
+#   pe-threads  — spawn thread_stress + thread2_smoke + syscall_stress; verify
+#                 real-DLL thread imports and exit-code contracts.
 #   pe-winkill  — spawn ring3-winkill (real-world MSVC PE).
 #                 "pe spawn name=ring3-winkill" + "Windows Kill ".
 #   linux       — spawn the seven Linux ABI smokes.
@@ -38,7 +40,7 @@ set -eo pipefail
 
 if [[ $# -ne 2 ]]; then
     echo "usage: $0 <profile> <cmake-binary-dir>" >&2
-    echo "   profile = bringup | ring3 | pe-hello | pe-winapi | pe-winkill | linux" >&2
+    echo "   profile = bringup | ring3 | pe-hello | pe-winapi | pe-threads | pe-winkill | linux" >&2
     exit 2
 fi
 
@@ -123,6 +125,9 @@ forbidden=(
     "DUETOS CRASH"
     "triple fault"
     "[health] ESCALATE:"
+    "RETIRED import requires real DLL export"
+    "UNRESOLVED kernel-provider ordinal import"
+    "FAIL retired kernel32 export unavailable"
 )
 
 # `scenario` = the per-profile scenario output (NOT covered by the
@@ -170,6 +175,24 @@ case "${PROFILE}" in
             "exit rc   val=0xbeef"
         )
         ;;
+    pe-threads)
+        scenario=(
+            'pe spawn name="ring3-thread-stress"'
+            "[thread-stress] main: PASS"
+            'pe spawn name="ring3-thread2-smoke"'
+            "[thread2_smoke] GetExitCodeThread     = PASS (0x42)"
+            "[ring3-thread2-smoke] PASS"
+            'pe spawn name="ring3-syscall-stress"'
+            "[syscall-stress] main: FreeLibraryAndExitThread(childB)"
+            "[syscall-stress] main: PASS"
+            "exit rc   val=0xabcde"
+            "exit rc   val=0xcafe"
+            "via-dll kernel32.dll!CreateThread"
+            "via-dll kernel32.dll!ExitThread"
+            "via-dll kernel32.dll!FreeLibraryAndExitThread"
+            "via-dll kernel32.dll!GetExitCodeThread"
+        )
+        ;;
     pe-winkill)
         scenario=(
             'pe spawn name="ring3-winkill"'
@@ -186,7 +209,7 @@ case "${PROFILE}" in
         ;;
     *)
         echo "error: unknown profile '${PROFILE}'" >&2
-        echo "  valid: bringup ring3 pe-hello pe-winapi pe-winkill linux" >&2
+        echo "  valid: bringup ring3 pe-hello pe-winapi pe-threads pe-winkill linux" >&2
         exit 2
         ;;
 esac

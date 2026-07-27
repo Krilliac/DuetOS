@@ -74,6 +74,48 @@ sockets.
 | Translator DLLs | `userland/libs/{kernel32,ntdll,user32,gdi32,...}` | 44 production DLLs, ~1100 exports |
 | Flat-stubs page (legacy) | `kernel/subsystems/win32/thunks.cpp` | Fallback for anything not yet ported to a real DLL |
 
+### Retiring the legacy thunk page
+
+New Win32 APIs belong in the user-mode translator DLLs. The x64 PE
+loader resolves those Export Address Tables before consulting the
+legacy thunk table, so retirement is a row-removal operation once the
+real DLL implementation is proven.
+
+Each retirement wave is fail-closed:
+
+1. an X-macro manifest names the APIs that require real DLL exports;
+2. the kernel32 build verifies the linked AMD64 PE32+ EAT entries are
+   present, non-forwarded, mapped, and executable before embedding;
+3. spawn verifies the complete preload set satisfies the manifest;
+4. direct kernel32/kernelbase imports and API-set contracts for a
+   retired name must bind the exact verified kernel32 provider; the
+   loader refuses a miss instead of using the API-set any-name
+   heuristic, a miss logger, or a regenerated legacy row; and
+5. a compile-time scan rejects any manifest name restored to
+   `thunks_table.inc`.
+
+The first wave moved `CreateThread`, `ExitThread`,
+`FreeLibraryAndExitThread`, and `GetExitCodeThread`. It also fixed the
+old `FreeLibraryAndExitThread` alias, which consumed the module handle
+in RCX as the exit code instead of the second argument in RDX.
+PE32 uses its separate i386 companion DLL and unresolved-import
+gateway, so it is intentionally outside this x64 retirement policy.
+For PE32+, a kernel32/kernelbase/API-set ordinal import may bind a real
+preloaded EAT ordinal, but an ordinal miss is fatal: `#<ordinal>` has no
+trustworthy name for either the manifest or the legacy table and must
+not become a success-returning generic miss thunk.
+
+The fixed mapping cannot disappear yet: a naturally returning Win32
+thread still enters `ThreadExitTramp` at offset `0x8A6`, and unresolved
+imports still use diagnostic gateways. Dead per-API byte ranges are
+left in place until a separate offset-compaction wave can prove every
+live absolute gateway.
+
+`smoke=pe-threads` is the focused emulator-safe regression profile:
+it runs the natural-return and explicit-exit thread PEs, requires all
+four imports to log `via-dll`, and checks the corrected combined
+free-and-exit argument contract.
+
 ### NT syscall handlers (17 `*_syscall.cpp` TUs)
 
 Each TU owns one resource family; the kernel routes each `SYS_*`

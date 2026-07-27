@@ -26,8 +26,8 @@ echo ""
 
 # grep -c prints "0" AND exits 1 on no match, so a bare '|| echo 0' would
 # emit the count twice. '|| true' keeps grep's own "0" and clears the status.
-ACTIVE="$(grep -c "🟢" "$WORK_FILE" 2>/dev/null || true)"
-DONE="$(grep -c "✅" "$WORK_FILE" 2>/dev/null || true)"
+ACTIVE="$(grep -cF -- "- **Status**: IN PROGRESS" "$WORK_FILE" 2>/dev/null || true)"
+DONE="$(grep -cF -- "- **Status**: COMPLETED @" "$WORK_FILE" 2>/dev/null || true)"
 
 echo "  Active: ${ACTIVE}  |  Completed: ${DONE}"
 echo ""
@@ -52,9 +52,15 @@ echo "Conflict check:"
 # two live sessions owning the same path is the real conflict. Completed
 # claims have released their files, so they're excluded.
 FILES_LIST="$(awk '
-    /^### / { active = ($0 ~ /🟢/) }
-    active && /\*\*Files\*\*:/ {
-        v = $0; sub(/^[^`]*`/, "", v); sub(/`.*/, "", v); print v
+    /^### / { files = ""; next }
+    /\*\*Files\*\*:/ {
+        files = $0
+        sub(/^[^`]*`/, "", files)
+        sub(/`.*/, "", files)
+    }
+    /\*\*Status\*\*: IN PROGRESS/ {
+        if (files != "")
+            print files
     }
 ' "$WORK_FILE")"
 DUPES="$(printf '%s\n' "$FILES_LIST" | sort | uniq -d | grep -v '^$' || true)"

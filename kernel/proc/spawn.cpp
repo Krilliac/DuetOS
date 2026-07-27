@@ -37,6 +37,7 @@
 #include "proc/process.h"
 #include "sched/sched.h"
 #include "subsystems/win32/heap.h"
+#include "subsystems/win32/thunk_retirement_policy.h"
 #include "test/smoke_profile.h"
 #include "util/random.h"
 
@@ -1338,6 +1339,26 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         if (img.file == nullptr || img.file_len == 0)
             continue;
         (void)duetos::core::PeResolveImportsForLoadedImage(img.file, img.file_len, as, preloaded_dlls, preloaded_count);
+    }
+    // Import-free and TLS-only PEs do not preload any DLLs and remain
+    // valid freestanding executables. Imported PE32+ images must prove
+    // that every retired thunk is callable through the real kernel32
+    // EAT before the main image can bind its IAT.
+    if (vs == PeStatus::ImportsPresent && !pe_is_pe32)
+    {
+        for (const char* retired : win32::kRetiredKernel32Imports)
+        {
+            u64 export_va = 0;
+            if (!duetos::core::PeResolveViaDlls("kernel32.dll", retired, preloaded_dlls, preloaded_count, &export_va))
+            {
+                arch::SerialLineGuard guard;
+                SerialWrite("[ring3] FAIL retired kernel32 export unavailable: ");
+                SerialWrite(retired);
+                SerialWrite("\n");
+                AddressSpaceRelease(as);
+                return 0;
+            }
+        }
     }
     {
         arch::SerialLineGuard guard;

@@ -1,0 +1,69 @@
+# Parallel Work Coordinator
+
+Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
+
+## Active Sessions
+
+### [DONE] thunk-retirement-wave1
+- **Session**: `Codex-thunk-wave1`
+- **Branch**: `claude/thunk-retirement-wave1`
+- **Files**: `kernel/subsystems/win32/thunks* kernel/loader/pe_loader.cpp kernel/proc/spawn.cpp kernel/CMakeLists.txt userland/libs/kernel32/kernel32_sync.c tools/build/*verify* tools/build/build-kernel32-dll.sh tools/build/gen-fix-patches.py tools/test/fix-patch-roundtrip.sh tests/host/*thunk* tests/host/CMakeLists.txt wiki/reference/Win32-Surface-Status.md wiki/getting-started/History.md wiki/reference/Design-Decisions.md wiki/subsystems/Win32-PE-Subsystem.md`
+- **Description**: Retire CreateThread ExitThread and GetExitCodeThread legacy thunks with linked-export verification
+- **Claimed**: 2026-07-26T23:30:04Z
+- **Status**: COMPLETED @ 2026-07-27T00:31:42Z
+
+### [DONE] thunk-retirement-runtime-test
+- **Session**: `Codex-thunk-wave1`
+- **Branch**: `claude/thunk-retirement-wave1`
+- **Files**: `userland/apps/syscall_stress/* tools/build/build-syscall-stress.sh kernel/CMakeLists.txt`
+- **Description**: Add distinguishable-argument FreeLibraryAndExitThread runtime coverage
+- **Claimed**: 2026-07-26T23:38:21Z
+- **Status**: COMPLETED @ 2026-07-27T00:31:44Z
+
+### [DONE] kernel32-retirement-contract
+- **Session**: `Codex-thunk-wave1`
+- **Branch**: `claude/thunk-retirement-wave1`
+- **Files**: `userland/libs/kernel32/kernel32_internal.h`
+- **Description**: Declare cross-TU FreeLibrary contract for FreeLibraryAndExitThread
+- **Claimed**: 2026-07-26T23:48:15Z
+- **Status**: COMPLETED @ 2026-07-27T00:31:47Z
+
+### [DONE] thunk-retirement-smoke-profile
+- **Session**: `Codex-thunk-wave1`
+- **Branch**: `claude/thunk-retirement-wave1`
+- **Files**: `kernel/test/smoke_profile.h kernel/test/smoke_profile.cpp kernel/proc/ring3_smoke.cpp tools/test/profile-boot-smoke.sh .github/workflows/build.yml`
+- **Description**: Add focused emulator-safe PE thread/thunk retirement runtime profile and CI gate
+- **Claimed**: 2026-07-26T23:49:28Z
+- **Status**: COMPLETED @ 2026-07-27T00:31:48Z
+
+### [DONE] smoke-profile-docs
+- **Session**: `Codex-thunk-wave1`
+- **Branch**: `claude/thunk-retirement-wave1`
+- **Files**: `tools/test/bochs-smoke.sh tools/test/diff-boot-smoke.sh`
+- **Description**: Keep cross-hypervisor smoke profile documentation synchronized with pe-threads
+- **Claimed**: 2026-07-26T23:53:25Z
+- **Status**: COMPLETED @ 2026-07-27T00:31:51Z
+
+### [DONE] parallel-release-safety
+- **Session**: `Codex-thunk-wave1`
+- **Branch**: `claude/thunk-retirement-wave1`
+- **Files**: `tools/parallel/release.sh`
+- **Description**: Stage only PARALLEL_WORK.md so releasing a claim cannot absorb fleet work
+- **Claimed**: 2026-07-26T23:54:03Z
+- **Status**: COMPLETED @ 2026-07-27T00:31:53Z
+
+### [DONE] thunk-retirement-kernel-contract
+- **Session**: `Codex-thunk-wave1`
+- **Branch**: `claude/thunk-retirement-wave1`
+- **Files**: `kernel/syscall/syscall.cpp userland/apps/hello_winapi/hello.c userland/apps/thread2_smoke/thread2_smoke.c`
+- **Description**: Correct invalid-handle semantics and make natural-return thread coverage verdict-bearing
+- **Claimed**: 2026-07-27T00:06:53Z
+- **Status**: COMPLETED @ 2026-07-27T00:31:55Z
+
+### [DONE] thunk-retirement-fix-cycle-profiles
+- **Session**: `Codex-thunk-wave1`
+- **Branch**: `claude/thunk-retirement-wave1`
+- **Files**: `tools/qemu/run-fix-cycle.sh tools/qemu/chain-fix-boots.sh tools/qemu/run.sh`
+- **Description**: Keep local fix-cycle profile chains synchronized with pe-threads CI coverage
+- **Claimed**: 2026-07-27T00:17:14Z
+- **Status**: COMPLETED @ 2026-07-27T00:31:56Z

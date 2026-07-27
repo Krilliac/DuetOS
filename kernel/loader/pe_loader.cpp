@@ -53,6 +53,7 @@
 #include "mm/paging.h"
 #include "security/guard.h"
 #include "subsystems/win32/proc_env.h"
+#include "subsystems/win32/thunk_retirement_policy.h"
 #include "subsystems/win32/thunks.h"
 #include "diag/cleanroom_trace.h"
 #include "diag/fix_journal.h"
@@ -707,10 +708,10 @@ u64 PeImageSizeOf(const u8* file, u64 file_len)
 // Resolve every entry in the import table by patching the IAT
 // in place. For each import descriptor:
 //   1. Read the DLL name from its Name RVA.
-//   2. For each function entry (by-name; ordinal imports get
-//      rejected in v0), read the hint/name from the IBN, look
-//      up the stub VA in win32::Win32ThunksLookup.
-//   3. Write the stub VA to the corresponding IAT slot by
+//   2. Resolve named or ordinal imports from the preloaded DLL EAT.
+//      Named misses may use API-set routing and the legacy thunk
+//      table; unresolved PE32+ kernel-provider ordinals fail closed.
+//   3. Write the resolved VA to the corresponding IAT slot by
 //      finding the user page's physical frame and poking
 //      through the kernel's direct map (the user-level
 //      mapping is read-only; the kernel's mapping isn't).
@@ -1925,12 +1926,37 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
             //      log says `via-apiset-heuristic` so a new
             //      contract is grep-able and can be added to the
             //      table in a follow-on slice.
-            if (!resolved_via_dll && !is_ordinal_import && IsApiSetContract(dll_name))
+            const bool is_api_set_contract = IsApiSetContract(dll_name);
+            const char* api_set_host = nullptr;
+            if (is_api_set_contract)
+                (void)::duetos::loader::ApiSetResolveStatic(dll_name, &api_set_host);
+
+            const bool is_retired_kernel32_name =
+                !h.is_pe32 && !is_ordinal_import && win32::IsRetiredKernel32ImportName(fn_name);
+            const bool retired_import_requires_real_dll =
+                is_retired_kernel32_name && (win32::IsKernel32ProviderDll(dll_name) || is_api_set_contract);
+
+            // All retired aliases converge on the one linked artifact the
+            // build verifies. This also handles direct kernelbase imports
+            // and API-set contracts whose nominal host is kernelbase.
+            if (!resolved_via_dll && retired_import_requires_real_dll &&
+                TryResolveViaPreloadedDlls("kernel32.dll", fn_name, preloaded_dlls, preloaded_dll_count, &stub_va))
             {
-                const char* host = nullptr;
-                if (::duetos::loader::ApiSetResolveStatic(dll_name, &host) && host != nullptr)
+                resolved_via_dll = true;
+                SerialLineGuard guard;
+                SerialWrite("[pe-resolve] via-retired-provider ");
+                SerialWrite(dll_name);
+                SerialWrite("!");
+                SerialWrite(fn_name);
+                SerialWrite(" -> kernel32.dll\n");
+            }
+
+            if (!resolved_via_dll && !is_ordinal_import && is_api_set_contract && !retired_import_requires_real_dll)
+            {
+                if (api_set_host != nullptr)
                 {
-                    if (TryResolveViaPreloadedDlls(host, fn_name, preloaded_dlls, preloaded_dll_count, &stub_va))
+                    if (TryResolveViaPreloadedDlls(api_set_host, fn_name, preloaded_dlls, preloaded_dll_count,
+                                                   &stub_va))
                     {
                         resolved_via_dll = true;
                         SerialLineGuard guard;
@@ -1939,10 +1965,12 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
                         SerialWrite("!");
                         SerialWrite(fn_name);
                         SerialWrite(" -> ");
-                        SerialWrite(host);
+                        SerialWrite(api_set_host);
                         SerialWrite("\n");
                     }
                 }
+                // A retired kernel32 contract must never bind a coincidental
+                // same-name export from some other preloaded DLL.
                 if (!resolved_via_dll &&
                     TryResolveViaPreloadedDllsAnyName(fn_name, preloaded_dlls, preloaded_dll_count, &stub_va))
                 {
@@ -1954,6 +1982,34 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
                     SerialWrite(fn_name);
                     SerialWrite("\n");
                 }
+            }
+            // A retired PE32+ thunk is an enforced DLL contract, not
+            // an optional import. If the real export is unavailable,
+            // fail the load rather than silently reintroducing a
+            // legacy row or binding the generic miss logger. PE32 has
+            // a separate companion DLL and unresolved-import path.
+            if (!resolved_via_dll && retired_import_requires_real_dll)
+            {
+                core::CleanroomTraceRecord("pe-loader", "retired-import-unresolved", h.image_base, first_thunk, fn_idx);
+                core::LogWithString(core::LogLevel::Error, "pe-resolve", "RETIRED import requires real DLL export",
+                                    "fn", fn_name);
+                core::LogWithString(core::LogLevel::Error, "pe-resolve", "  from", "dll", dll_name);
+                return false;
+            }
+            // A missing PE32+ ordinal from a kernel provider has no
+            // trustworthy name to match against the retirement manifest
+            // or legacy table. Reject it instead of turning "#<ordinal>"
+            // into a generic success-returning miss thunk. Valid ordinals
+            // have already resolved through the preloaded DLL EAT above.
+            if (!resolved_via_dll && !h.is_pe32 && is_ordinal_import &&
+                (win32::IsKernel32ProviderDll(dll_name) || is_api_set_contract))
+            {
+                core::CleanroomTraceRecord("pe-loader", "kernel-provider-ordinal-unresolved", h.image_base, first_thunk,
+                                           fn_idx);
+                core::LogWithString(core::LogLevel::Error, "pe-resolve", "UNRESOLVED kernel-provider ordinal import",
+                                    "fn", fn_name);
+                core::LogWithString(core::LogLevel::Error, "pe-resolve", "  from", "dll", dll_name);
+                return false;
             }
             if (resolved_via_dll)
             {

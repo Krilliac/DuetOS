@@ -3441,29 +3441,23 @@ void SyscallDispatch(arch::TrapFrame* frame)
 
     case SYS_THREAD_EXIT_CODE:
     {
-        // Win32 contract: GetExitCodeThread on an unknown or
-        // foreign handle (e.g. a process pseudo-handle passed by
-        // mistake) should still succeed with BOOL TRUE and a
-        // benign STILL_ACTIVE (0x103) payload — that's what the
-        // stub did before this set, and the
-        // hello_winapi test pins this behavior. So: return
-        // STILL_ACTIVE for any handle outside our own thread
-        // range, return the real exit_code only for handles we
-        // actually own.
-        constexpr u64 kStillActive = 0x103;
+        // Invalid or foreign handles must remain distinguishable from
+        // a valid running thread. The user-mode kernel32 wrapper maps
+        // this negative return to BOOL FALSE; valid slots contain either
+        // STILL_ACTIVE or the recorded exit code.
         const u64 handle = frame->rdi;
         Process* proc = CurrentProcess();
         if (proc == nullptr || handle < Process::kWin32ThreadBase ||
             handle >= Process::kWin32ThreadBase + Process::kWin32ThreadCap)
         {
-            frame->rax = kStillActive;
+            frame->rax = static_cast<u64>(-1);
             return;
         }
         // Spectre v1 nospec — see LookupThreadHandle for the rationale.
         const u64 slot = util::MaskedIndex(handle - Process::kWin32ThreadBase, Process::kWin32ThreadCap);
         if (!proc->win32_threads[slot].in_use)
         {
-            frame->rax = kStillActive;
+            frame->rax = static_cast<u64>(-1);
             return;
         }
         frame->rax = static_cast<u64>(proc->win32_threads[slot].exit_code);

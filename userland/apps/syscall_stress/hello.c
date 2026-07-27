@@ -22,9 +22,10 @@
  *     - WaitForMultipleObjects(2, events, TRUE, INFINITE)  // wait-all
  *     - Print verdict, ExitProcess(0xCAFE)
  *
- * Each child thread calls ExitThread(0x42) to exit explicitly
- * (exercises the ExitThread stub — the thread-exit trampoline
- *  fallback is the non-explicit path).
+ * ChildA calls ExitThread(0x42). ChildB calls
+ * FreeLibraryAndExitThread(0x11223344, 0x43), pinning the second
+ * Win64 argument as the exit code. Natural return is covered by
+ * thread2_smoke through the private thread-exit trampoline.
  */
 
 typedef void* HANDLE;
@@ -111,6 +112,7 @@ __declspec(dllimport) HANDLE __stdcall CreateThread(void* lpThreadAttributes, SI
                                                     LPTHREAD_START_ROUTINE lpStartAddress, LPVOID lpParameter,
                                                     DWORD dwCreationFlags, LPDWORD lpThreadId);
 __declspec(dllimport) void __stdcall ExitThread(DWORD dwExitCode);
+__declspec(dllimport) void __stdcall FreeLibraryAndExitThread(void* hModule, DWORD dwExitCode);
 __declspec(dllimport) HANDLE __stdcall CreateEventW(void* lpEventAttributes, BOOL bManualReset, BOOL bInitialState,
                                                     const unsigned short* lpName);
 __declspec(dllimport) BOOL __stdcall SetEvent(HANDLE hEvent);
@@ -219,7 +221,9 @@ static DWORD __stdcall ChildB(LPVOID param)
     (void)param;
     WriteString("[syscall-stress] childB: running\n");
     SetEvent(g_events[1]);
-    ExitThread(0x43);
+    /* Distinct arguments catch the old broken thunk alias, which
+     * incorrectly treated the module handle in RCX as the exit code. */
+    FreeLibraryAndExitThread((void*)0x11223344, 0x43);
     return 0;
 }
 
@@ -347,7 +351,7 @@ int __stdcall _start(void)
     // === Batch 57 coverage: WaitForSingleObject on a thread handle ===
     // Both child threads have already completed (the WaitForMultipleObjects
     // above returned only after both signaled + child code reached
-    // ExitThread). So a WaitForSingleObject on hA should return
+    // its explicit thread-exit API). So a WaitForSingleObject on hA should return
     // WAIT_OBJECT_0 essentially immediately via the thread-dead
     // branch of SYS_THREAD_WAIT.
     WriteString("[syscall-stress] main: WaitForSingleObject(thread, INFINITE)\n");
@@ -375,6 +379,20 @@ int __stdcall _start(void)
         WriteString("[syscall-stress] FAIL GetExitCodeThread got wrong code\n");
         WriteHex64(childA_rc);
         ExitProcess(24);
+    }
+
+    WriteString("[syscall-stress] main: FreeLibraryAndExitThread(childB)\n");
+    if (WaitForSingleObject(hB, INFINITE) != WAIT_OBJECT_0)
+    {
+        WriteString("[syscall-stress] FAIL childB thread wait\n");
+        ExitProcess(28);
+    }
+    DWORD childB_rc = 0xDEADBEEF;
+    if (!GetExitCodeThread(hB, &childB_rc) || childB_rc != 0x43)
+    {
+        WriteString("[syscall-stress] FAIL FreeLibraryAndExitThread used wrong exit-code argument\n");
+        WriteHex64(childB_rc);
+        ExitProcess(29);
     }
 
     // === Batch 60 coverage: InterlockedAnd/Or/Xor ===

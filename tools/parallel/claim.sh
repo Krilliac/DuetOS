@@ -51,13 +51,19 @@ git rebase origin/main 2>/dev/null || echo "  (rebase skipped — resolve manual
 # Files value is compared exactly (the '*' in a glob is not a regex here).
 if [[ -f "$WORK_FILE" ]]; then
     CONFLICT_BLOCK="$(awk -v f="$FILES" '
-        function flush() { if (show && blk != "") print blk; show = 0 }
-        /^### / { flush(); active = ($0 ~ /🟢/); blk = $0; next }
-        blk != "" { blk = blk "\n" $0 }
-        active && /\*\*Files\*\*:/ {
-            v = $0; sub(/^[^`]*`/, "", v); sub(/`.*/, "", v)
-            if (v == f) show = 1
+        function flush() {
+            if (active && file_match && blk != "")
+                print blk
+            active = 0
+            file_match = 0
         }
+        /^### / { flush(); blk = $0; next }
+        blk != "" { blk = blk "\n" $0 }
+        /\*\*Files\*\*:/ {
+            v = $0; sub(/^[^`]*`/, "", v); sub(/`.*/, "", v)
+            if (v == f) file_match = 1
+        }
+        /\*\*Status\*\*: IN PROGRESS/ { active = 1 }
         END { flush() }
     ' "$WORK_FILE")"
     if [[ -n "$CONFLICT_BLOCK" ]]; then
@@ -82,7 +88,7 @@ fi
 # Append the claim entry.
 cat >> "$WORK_FILE" <<EOF
 
-### 🟢 ${SUBSYSTEM}
+### [ACTIVE] ${SUBSYSTEM}
 - **Session**: \`${SESSION_ID}\`
 - **Branch**: \`${BRANCH}\`
 - **Files**: \`${FILES}\`
@@ -103,7 +109,7 @@ if [[ "$BRANCH" != "$CURRENT_BRANCH" ]]; then
 fi
 
 git add "$WORK_FILE"
-git commit -m "chore: claim subsystem '${SUBSYSTEM}' [session ${SESSION_ID}]" || true
+git commit -s -m "chore: claim subsystem '${SUBSYSTEM}' [session ${SESSION_ID}]" || true
 
 echo ""
 echo "✅ Claimed: ${SUBSYSTEM}"

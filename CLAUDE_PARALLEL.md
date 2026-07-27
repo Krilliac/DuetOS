@@ -84,7 +84,9 @@ If two sessions edited the same file:
 1. Do **not** blind force-push over the other session's work.
 2. Scope the delta: `git diff origin/main...HEAD`.
 3. If the other session merged first, rebase: `git rebase origin/main`.
-4. Resolve conflicts, `git add` the files, then re-run `release.sh`.
+4. Resolve conflicts, stage the files, and commit the resolved implementation
+   with `git commit -s`. Re-run `release.sh` only after that commit succeeds;
+   the release helper intentionally commits only its `PARALLEL_WORK.md` record.
 
 `release.sh` pushes with `--force-with-lease`, which refuses to clobber commits
 you haven't seen — if it rejects the push, fetch and rebase before retrying.

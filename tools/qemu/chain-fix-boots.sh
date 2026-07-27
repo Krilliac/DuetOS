@@ -13,7 +13,7 @@
 #   tools/qemu/chain-fix-boots.sh <profile> [<profile> ...]
 #
 # Example:
-#   tools/qemu/chain-fix-boots.sh pe-hello pe-winapi pe-winkill ring3 linux
+#   tools/qemu/chain-fix-boots.sh pe-hello pe-winapi pe-threads pe-winkill ring3 linux
 #
 # After the chain runs, gather every FIXJ blob the kernel left in
 # the NVMe image:
@@ -58,7 +58,7 @@ readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 if [[ $# -lt 1 ]]; then
     echo "usage: $0 <profile> [<profile> ...]" >&2
-    echo "       profiles: bringup ring3 pe-hello pe-winapi pe-winkill linux browser" >&2
+    echo "       profiles: bringup ring3 pe-hello pe-winapi pe-threads pe-winkill linux browser" >&2
     exit 2
 fi
 

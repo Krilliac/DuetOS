@@ -50,7 +50,7 @@ for arg in "$@"; do
     case "$arg" in
         --baseline=*) BASELINE_ARG="$arg" ;;
         --chain=*) CHAIN_PROFILES="${arg#*=}" ;;
-        --chain) CHAIN_PROFILES="bringup ring3 pe-hello pe-winapi pe-winkill linux browser" ;;
+        --chain) CHAIN_PROFILES="bringup ring3 pe-hello pe-winapi pe-threads pe-winkill linux browser" ;;
         *) echo "warning: ignoring unknown arg '$arg'" >&2 ;;
     esac
 done

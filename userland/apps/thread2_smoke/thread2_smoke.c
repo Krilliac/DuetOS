@@ -42,12 +42,15 @@ static BOOL CALLBACK init_once_fn(PINIT_ONCE io, PVOID p, PVOID* ctx)
 
 void __cdecl mainCRTStartup(void)
 {
+    BOOL retirement_ok = TRUE;
     Out("[thread2_smoke] starting\r\n");
 
     /* Spawn a worker, wait, check exit code. */
     HANDLE t = CreateThread(NULL, 0, worker, NULL, 0, NULL);
     Out("[thread2_smoke] CreateThread          = ");
     Out(t != NULL ? "PASS\r\n" : "FAIL\r\n");
+    if (t == NULL)
+        retirement_ok = FALSE;
 
     if (t != NULL)
     {
@@ -65,12 +68,16 @@ void __cdecl mainCRTStartup(void)
         DWORD r = WaitForSingleObject(t, 5000);
         Out("[thread2_smoke] WaitForSingleObject(t)= ");
         Out(r == WAIT_OBJECT_0 ? "PASS\r\n" : "FAIL/STUB\r\n");
+        if (r != WAIT_OBJECT_0)
+            retirement_ok = FALSE;
 
         /* GetExitCodeThread. */
         DWORD ec = 0;
         BOOL gec = GetExitCodeThread(t, &ec);
         Out("[thread2_smoke] GetExitCodeThread     = ");
         Out(gec && ec == 0x42 ? "PASS (0x42)\r\n" : "FAIL/STUB\r\n");
+        if (!gec || ec != 0x42 || g_ran == 0)
+            retirement_ok = FALSE;
 
         CloseHandle(t);
     }
@@ -93,6 +100,6 @@ void __cdecl mainCRTStartup(void)
     }
 
     Out("[thread2_smoke] done\r\n");
-    Out("[ring3-thread2-smoke] PASS\r\n");
-    ExitProcess(0);
+    Out(retirement_ok ? "[ring3-thread2-smoke] PASS\r\n" : "[ring3-thread2-smoke] FAIL\r\n");
+    ExitProcess(retirement_ok ? 0 : 1);
 }

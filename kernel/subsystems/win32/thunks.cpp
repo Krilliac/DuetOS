@@ -3,6 +3,7 @@
 #include "arch/x86_64/serial.h"
 #include "ipc/handle_table.h"
 #include "subsystems/win32/proc_env.h"
+#include "subsystems/win32/thunk_retirement_policy.h"
 #include "util/compiler.h"
 
 namespace duetos::win32
@@ -26,7 +27,7 @@ namespace
 //
 // Future entries append at the current end. IAT slots point
 // at (kWin32ThunksVa + entry.offset), so stable offsets matter
-// only within a single boot — we regenerate + re-map the page
+// only within a single boot — we regenerate + re-map the region
 // per process anyway, no persistence between runs.
 //
 // The assembly is hand-assembled rather than emitted from a
@@ -156,36 +157,38 @@ constexpr u32 kOffReturnStatusNotImpl = 0x72E;               // 6 bytes (STATUS_
 constexpr u32 kOffCreateEventReal = 0x734;                   // 18 bytes (real event-backed)
 constexpr u32 kOffSetEventReal = 0x746;                      // 15 bytes
 constexpr u32 kOffResetEventReal = 0x755;                    // 15 bytes
-// NOTE: kOffWaitForObj2 is retired as of . All imports
-// now route through kOffWaitForObj3 which adds the semaphore
-// range. The v2 bytes remain inside kThunksBytes (dead code) for
-// a follow-up that wants to diff the two; unused constant is
-// marked [[maybe_unused]] to suppress the warning.
-[[maybe_unused]] constexpr u32 kOffWaitForObj2 = 0x764; // 66 bytes (mutex+event-aware)
-constexpr u32 kOffTlsAllocReal = 0x7A6;                 // 8 bytes
-constexpr u32 kOffTlsFreeReal = 0x7AE;                  // 24 bytes
-constexpr u32 kOffTlsGetValueReal = 0x7C6;              // 13 bytes
-constexpr u32 kOffTlsSetValueReal = 0x7D3;              // 20 bytes
-constexpr u32 kOffNtAllocateVirtualMemory = 0x7E7;      // 36 bytes
-constexpr u32 kOffNtFreeVirtualMemory = 0x80B;          // 33 bytes
-constexpr u32 kOffGetSystemTimeSt = 0x82C;              // 11 bytes
-constexpr u32 kOffSystemTimeToFileTime = 0x837;         // 14 bytes
-constexpr u32 kOffFileTimeToSystemTime = 0x845;         // 14 bytes
-constexpr u32 kOffNtQuerySystemTimeReal = 0x853;        // 16 bytes
-constexpr u32 kOffNtQueryPerfCounterReal = 0x863;       // 28 bytes
-constexpr u32 kOffCreateThreadReal = 0x87F;             // 39 bytes (saves rdi+rsi)
+// NOTE: kOffWaitForObj2 is retired. All imports now route through
+// kOffWaitForObj3, which adds the semaphore range. The v2 bytes
+// remain in place to preserve every downstream fixed offset until
+// a dedicated whole-array compaction; the unused constant is marked
+// [[maybe_unused]] to suppress the warning.
+[[maybe_unused]] constexpr u32 kOffWaitForObj2 = 0x764;      // 66 bytes (mutex+event-aware)
+constexpr u32 kOffTlsAllocReal = 0x7A6;                      // 8 bytes
+constexpr u32 kOffTlsFreeReal = 0x7AE;                       // 24 bytes
+constexpr u32 kOffTlsGetValueReal = 0x7C6;                   // 13 bytes
+constexpr u32 kOffTlsSetValueReal = 0x7D3;                   // 20 bytes
+constexpr u32 kOffNtAllocateVirtualMemory = 0x7E7;           // 36 bytes
+constexpr u32 kOffNtFreeVirtualMemory = 0x80B;               // 33 bytes
+constexpr u32 kOffGetSystemTimeSt = 0x82C;                   // 11 bytes
+constexpr u32 kOffSystemTimeToFileTime = 0x837;              // 14 bytes
+constexpr u32 kOffFileTimeToSystemTime = 0x845;              // 14 bytes
+constexpr u32 kOffNtQuerySystemTimeReal = 0x853;             // 16 bytes
+constexpr u32 kOffNtQueryPerfCounterReal = 0x863;            // 28 bytes
+[[maybe_unused]] constexpr u32 kOffCreateThreadReal = 0x87F; // retired; dead bytes pending compaction
 // ThreadExitTramp: offset 0x8A6, 6 bytes. Public VA exported as
 // duetos::win32::kWin32ThreadExitTrampVa in thunks.h — keep in sync.
 
 // === ExitThread + OutputDebugStringA + GetProcessTimes
 // + GetThreadTimes + GetSystemTimes + GlobalMemoryStatusEx +
 // WaitForMultipleObjects.
-constexpr u32 kOffExitThread = 0x8AC;             // 9 bytes (noreturn, no save)
-constexpr u32 kOffOutputDebugStringA = 0x8B5;     // 13 bytes (saves rdi)
-constexpr u32 kOffGetProcessTimes = 0x8C2;        // 44 bytes (also GetThreadTimes)
-constexpr u32 kOffGetSystemTimes = 0x8EE;         // 30 bytes
-constexpr u32 kOffGlobalMemoryStatusEx = 0x90C;   // 16 bytes (saves rdi)
-constexpr u32 kOffWaitForMultipleObjects = 0x91C; // 24 bytes (saves rdi+rsi)
+// The retired ExitThread bytes remain in place only to preserve every
+// downstream fixed offset until a dedicated whole-array compaction.
+[[maybe_unused]] constexpr u32 kOffExitThread = 0x8AC; // 9 bytes (noreturn, no save)
+constexpr u32 kOffOutputDebugStringA = 0x8B5;          // 13 bytes (saves rdi)
+constexpr u32 kOffGetProcessTimes = 0x8C2;             // 44 bytes (also GetThreadTimes)
+constexpr u32 kOffGetSystemTimes = 0x8EE;              // 30 bytes
+constexpr u32 kOffGlobalMemoryStatusEx = 0x90C;        // 16 bytes (saves rdi)
+constexpr u32 kOffWaitForMultipleObjects = 0x91C;      // 24 bytes (saves rdi+rsi)
 
 // === GetSystemInfo / OutputDebugStringW / FormatMessageA /
 // GetConsoleScreenBufferInfo.
@@ -224,7 +227,7 @@ static_assert(::duetos::ipc::kHandleTableCapacity <= 64,
 constexpr u32 kOffGetStartupInfo = 0xAC1; // 24 bytes (zero-fill + cb=104)
 
 // === real GetExitCodeThread (exit-code tracking).
-constexpr u32 kOffGetExitCodeThreadReal = 0xAD9; // 20 bytes (saves rdi)
+[[maybe_unused]] constexpr u32 kOffGetExitCodeThreadReal = 0xAD9; // retired; dead bytes pending compaction
 
 // === Interlocked{And,Or,Xor} (+64-bit). LOCK CMPXCHG
 // loops so SMP future-proofing + timer-tick preemption safety
@@ -472,7 +475,7 @@ constexpr u8 kThunksBytes[] = {
 #include "subsystems/win32/thunks_bytecode.inc"
 };
 
-static_assert(sizeof(kThunksBytes) <= 8192, "Win32 thunks page fits in two 4 KiB pages");
+static_assert(sizeof(kThunksBytes) <= 8192, "Win32 thunks fit in the two-page mapping");
 static_assert(sizeof(kThunksBytes) == 0x1349, "thunk layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The thunk
@@ -509,6 +512,22 @@ struct ThunkEntry
 constexpr ThunkEntry kThunksTable[] = {
 #include "subsystems/win32/thunks_table.inc"
 };
+
+consteval bool RetiredImportsAreAbsentFromThunkTable()
+{
+    for (const char* retired : kRetiredKernel32Imports)
+    {
+        for (const ThunkEntry& entry : kThunksTable)
+        {
+            if (IsKernel32ProviderDll(entry.dll) && ThunkRetirementStringEqual(entry.func, retired))
+                return false;
+        }
+    }
+    return true;
+}
+
+static_assert(RetiredImportsAreAbsentFromThunkTable(),
+              "a retired kernel32 import was restored to the legacy thunk table");
 
 struct ThunkHashEntry
 {

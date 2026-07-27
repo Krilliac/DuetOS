@@ -374,6 +374,7 @@ def load_markers(path: Path) -> list[FixMarker]:
 _THUNKS_TABLE_PATH = "kernel/subsystems/win32/thunks_table.inc"
 _THUNKS_CPP_PATH = "kernel/subsystems/win32/thunks.cpp"
 _THUNKS_BYTECODE_PATH = "kernel/subsystems/win32/thunks_bytecode.inc"
+_RETIRED_IMPORTS_PATH = "kernel/subsystems/win32/thunk_retirement_wave1.inc"
 
 # Generic noop offsets: an entry resolving to one of these is a
 # placeholder, not a real implementation. Mirrors the runtime
@@ -425,6 +426,33 @@ def load_thunks_table(repo_root: Path) -> dict[tuple[str, str], str]:
             key = (m.group(1).lower(), m.group(2))
             table.setdefault(key, m.group(3))
     return table
+
+
+def load_retired_imports(repo_root: Path) -> set[tuple[str, str]]:
+    """Load kernel32 names that may never be regenerated as thunks."""
+    path = repo_root / _RETIRED_IMPORTS_PATH
+    if not path.exists():
+        raise FileNotFoundError(f"retired-import safety manifest is missing: {path}")
+    pattern = re.compile(r'DUETOS_RETIRED_KERNEL32_IMPORT\("([^"]+)"\)')
+    retired: set[tuple[str, str]] = set()
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("//"):
+            continue
+        match = pattern.fullmatch(stripped)
+        if match is not None:
+            entries = {
+                ("kernel32.dll", match.group(1)),
+                ("kernelbase.dll", match.group(1)),
+            }
+            if retired.intersection(entries):
+                raise ValueError(f"duplicate retired-import manifest entry at {path}:{line_number}")
+            retired.update(entries)
+            continue
+        raise ValueError(f"malformed retired-import safety manifest line at {path}:{line_number}")
+    if not retired:
+        raise ValueError(f"retired-import safety manifest has no valid entries: {path}")
+    return retired
 
 
 # ---------------------------------------------------------------- pin parsing
@@ -3202,6 +3230,7 @@ def plan_actions(records: list[FixRecord], thunks_index: dict, repo_root: Path,
                  enable_trap_guards: bool = False,
                  enable_oom_nullcheck: bool = False) -> list[Action]:
     actions: list[Action] = []
+    retired_imports = load_retired_imports(repo_root)
     seen: set[tuple[str, str]] = set()
     fault_react_probe_done = False
     for r in records:
@@ -3219,6 +3248,20 @@ def plan_actions(records: list[FixRecord], thunks_index: dict, repo_root: Path,
             if not parsed:
                 continue
             dll, fn = parsed
+            if (dll.lower(), fn) in retired_imports:
+                actions.append(
+                    Action(
+                        kind="note",
+                        title=f"Retired import `{dll}!{fn}` requires its real DLL export",
+                        body=(
+                            "This import is in the fail-closed retirement manifest. "
+                            "Do not restore a legacy thunk or generic miss-logger row; "
+                            "repair the user-mode DLL export or preload path."
+                        ),
+                        filename=None,
+                    )
+                )
+                continue
             existing = thunks_index.get((dll.lower(), fn))
             if existing is None:
                 diff = synth_thunk_patch(dll, fn, r.seq, repo_root)

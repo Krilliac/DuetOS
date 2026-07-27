@@ -39,7 +39,7 @@
 #
 # Usage: diff-boot-smoke.sh <profile> <cmake-binary-dir>
 #   profile: any value profile-boot-smoke.sh accepts
-#            (bringup | ring3 | pe-hello | pe-winapi | pe-winkill | linux)
+#            (bringup | ring3 | pe-hello | pe-winapi | pe-threads | pe-winkill | linux)
 
 set -eo pipefail
 
