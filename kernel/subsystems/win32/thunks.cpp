@@ -535,6 +535,24 @@ consteval bool RetiredImportsAreAbsentFromThunkTable()
 static_assert(RetiredImportsAreAbsentFromThunkTable(),
               "a retired kernel32 import was restored to the legacy thunk table");
 
+consteval bool HasExactThunkRow(const char* dll, const char* function, u32 offset)
+{
+    for (const ThunkEntry& entry : kThunksTable)
+    {
+        if (ThunkRetirementDllEqual(entry.dll, dll) && ThunkRetirementStringEqual(entry.func, function) &&
+            entry.offset == offset)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static_assert(HasExactThunkRow("vcruntime140.dll", "_InterlockedIncrement", kOffInterlockedInc));
+static_assert(HasExactThunkRow("vcruntime140.dll", "_InterlockedDecrement", kOffInterlockedDec));
+static_assert(HasExactThunkRow("vcruntime140.dll", "_InterlockedExchange", kOffInterlockedExchg));
+static_assert(HasExactThunkRow("vcruntime140.dll", "_InterlockedCompareExchange", kOffInterlockedCmpXchg));
+
 struct ThunkHashEntry
 {
     u64 key_hash;

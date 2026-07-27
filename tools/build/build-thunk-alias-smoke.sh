@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compile and embed the mixed-provider Wave 2-4 thunk-retirement fixture.
+# Compile and embed the mixed-provider Wave 2-5 thunk-retirement fixture.
 #
 # Usage: build-thunk-alias-smoke.sh <repo_root> <out_header>
 

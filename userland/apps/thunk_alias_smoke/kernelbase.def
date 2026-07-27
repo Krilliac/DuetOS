@@ -3,4 +3,6 @@ LIBRARY kernelbase.dll
 EXPORTS
     GetCurrentThread
     GetTickCount
+    InterlockedCompareExchange
+    InterlockedExchange
     InterlockedExchangeAdd
