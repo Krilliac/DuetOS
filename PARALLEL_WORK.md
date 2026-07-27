@@ -28,13 +28,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-26T23:48:15Z
 - **Status**: COMPLETED @ 2026-07-27T00:31:47Z
 
-### 🟢 thunk-retirement-smoke-profile
+### [DONE] thunk-retirement-smoke-profile
 - **Session**: `Codex-thunk-wave1`
 - **Branch**: `claude/thunk-retirement-wave1`
 - **Files**: `kernel/test/smoke_profile.h kernel/test/smoke_profile.cpp kernel/proc/ring3_smoke.cpp tools/test/profile-boot-smoke.sh .github/workflows/build.yml`
 - **Description**: Add focused emulator-safe PE thread/thunk retirement runtime profile and CI gate
 - **Claimed**: 2026-07-26T23:49:28Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-27T00:31:48Z
 
 ### 🟢 smoke-profile-docs
 - **Session**: `Codex-thunk-wave1`
