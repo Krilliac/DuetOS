@@ -395,3 +395,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: serialize_thread_handle_diagnostics
 - **Claimed**: 2026-07-27T05:49:34Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] thread-handle-tid-apc
+- **Session**: `Nathan-47566`
+- **Branch**: `claude/thread-handle-tid-isolation`
+- **Files**: `kernel/subsystems/win32/apc_syscall.cpp`
+- **Description**: Resolve APC same-process TID authorization entirely under scheduler lifetime lock
+- **Claimed**: 2026-07-27T06:00:03Z
+- **Status**: IN PROGRESS
