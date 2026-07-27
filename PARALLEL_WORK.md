@@ -243,3 +243,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: No description provided
 - **Claimed**: 2026-07-27T04:57:34Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] kernel-thread-close
+- **Session**: `Codex-wave6-thread-wait-fix`
+- **Branch**: `claude/kernel-thread-wait-fix`
+- **Files**: `kernel/subsystems/win32/file_syscall.cpp`
+- **Description**: No description provided
+- **Claimed**: 2026-07-27T04:57:39Z
+- **Status**: IN PROGRESS
