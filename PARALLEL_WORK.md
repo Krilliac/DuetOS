@@ -236,13 +236,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-27T04:57:08Z
 - **Status**: COMPLETED @ 2026-07-27T05:18:41Z
 
-### [ACTIVE] kernel-thread-lifecycle
+### [DONE] kernel-thread-lifecycle
 - **Session**: `Codex-wave6-thread-wait-fix`
 - **Branch**: `claude/kernel-thread-wait-fix`
 - **Files**: `kernel/subsystems/win32/thread_syscall.cpp`
 - **Description**: No description provided
 - **Claimed**: 2026-07-27T04:57:34Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-27T05:19:26Z
 
 ### [ACTIVE] kernel-thread-close
 - **Session**: `Codex-wave6-thread-wait-fix`
