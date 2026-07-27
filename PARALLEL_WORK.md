@@ -87,7 +87,7 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 ### [ACTIVE] thunk-retirement-wave2-alias-fixture
 - **Session**: `Codex-thunk-wave2`
 - **Branch**: `claude/thunk-retirement-wave2`
-- **Files**: `userland/apps/thunk_alias_smoke/* kernel/CMakeLists.txt kernel/proc/ring3_smoke.cpp tools/build/build-thunk-alias-smoke.sh tools/test/profile-boot-smoke.sh tools/test/bochs-smoke.sh`
+- **Files**: `userland/apps/thunk_alias_smoke/* kernel/CMakeLists.txt kernel/proc/ring3_smoke.cpp tools/build/build-thunk-alias-smoke.sh`
 - **Description**: Add kernel32 kernelbase and API-set IAT routing boot coverage for retired imports
 - **Claimed**: 2026-07-27T00:53:17Z
 - **Status**: IN PROGRESS
