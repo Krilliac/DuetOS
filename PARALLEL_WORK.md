@@ -363,3 +363,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Track
 - **Claimed**: 2026-07-27T05:47:12Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] thread-handle-tid-state-impl
+- **Session**: `Codex-thread-handle-tid-isolation`
+- **Branch**: `claude/thread-handle-tid-isolation`
+- **Files**: `kernel/proc/process.cpp`
+- **Description**: Implement_TID_based_thread_handle_state
+- **Claimed**: 2026-07-27T05:47:26Z
+- **Status**: IN PROGRESS
