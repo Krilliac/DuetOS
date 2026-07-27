@@ -404,13 +404,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-27T06:00:03Z
 - **Status**: COMPLETED @ 2026-07-27T06:40:04Z
 
-### [ACTIVE] thread-handle-tid-profile-core
+### [DONE] thread-handle-tid-profile-core
 - **Session**: `Nathan-48040`
 - **Branch**: `claude/thread-handle-tid-isolation`
 - **Files**: `kernel/proc/ring3_smoke.cpp`
 - **Description**: Run thread3 TID and context regression in focused pe-threads profile
 - **Claimed**: 2026-07-27T06:14:29Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-27T06:40:06Z
 
 ### [ACTIVE] thread-handle-tid-profile-api
 - **Session**: `Nathan-48053`
