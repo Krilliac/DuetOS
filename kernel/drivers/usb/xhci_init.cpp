@@ -211,7 +211,13 @@ void HidPollEntry(void* raw)
                 duetos::arch::Sti();
                 continue;
             }
+            // TIMED, not untimed: an ISR-woken wait that misses its wake
+            // would otherwise block the HID poll loop forever.
             duetos::sched::WaitQueueBlockTimeout(&arg->wait, /*ticks=*/1);
+            // Resume IF state is the switching-out peer's, not ours — see the
+            // note in virtio_blk.cpp:320-323. Without this the HID poll loop
+            // continues with interrupts disabled.
+            duetos::arch::Sti();
         }
         else
         {

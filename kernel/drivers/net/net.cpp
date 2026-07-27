@@ -597,6 +597,15 @@ void E1000RxPollEntry(void* arg)
             // path tick-poll as a safety net while still benefiting
             // from real IRQ wakeups when they fire.
             duetos::sched::WaitQueueBlockTimeout(&ctx->rx_wait, /*ticks=*/1);
+            // Resume IF state is the switching-out peer's, not ours:
+            // ScheduleLockedHandoff stashes the caller's rflags in the
+            // PER-CPU slot PerCpu::ctxsw_lock_flags, and SchedFinishTaskSwitch
+            // restores that peer-written value onto whichever task resumes.
+            // WaitQueueBlock's own contract requires IF=0 on entry, so we
+            // reliably come back IRQs-off. Without this the RX task runs
+            // E1000DrainRx -> NetStackInjectRx -> the whole IPv4/TCP stack
+            // with interrupts disabled. Mirrors virtio_blk.cpp:320-323.
+            duetos::arch::Sti();
         }
         else
         {

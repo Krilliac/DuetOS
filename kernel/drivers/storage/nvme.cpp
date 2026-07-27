@@ -609,7 +609,14 @@ bool SubmitAndWait(Queue& q, SqEntry entry)
                 duetos::arch::Sti();
                 continue;
             }
+            // TIMED, not untimed: an ISR-woken wait that misses its wake
+            // (lost MSI-X completion) would otherwise block forever and
+            // defeat this function's own deadline loop.
             duetos::sched::WaitQueueBlockTimeout(&g_ctrl.cq_wait, /*ticks=*/1);
+            // Resume IF state is the switching-out peer's, not ours — see the
+            // note in virtio_blk.cpp:320-323. Without this, SubmitAndWait
+            // returns IRQs-off to the block and VFS layers above it.
+            duetos::arch::Sti();
         }
         else
         {
