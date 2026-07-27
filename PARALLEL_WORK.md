@@ -388,13 +388,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-27T05:47:37Z
 - **Status**: COMPLETED @ 2026-07-27T06:39:59Z
 
-### [ACTIVE] thread-handle-tid-diagnostics
+### [DONE] thread-handle-tid-diagnostics
 - **Session**: `Codex-thread-handle-tid-isolation`
 - **Branch**: `claude/thread-handle-tid-isolation`
 - **Files**: `kernel/diag/leak_detector.cpp`
 - **Description**: serialize_thread_handle_diagnostics
 - **Claimed**: 2026-07-27T05:49:34Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-27T06:40:02Z
 
 ### [ACTIVE] thread-handle-tid-apc
 - **Session**: `Nathan-47566`
