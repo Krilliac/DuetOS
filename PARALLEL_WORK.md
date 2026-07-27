@@ -211,3 +211,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Harden TLS LastError, SMP allocation, and slot generation semantics used by retired real DLL exports
 - **Claimed**: 2026-07-27T03:35:44Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] thunk-retirement-wave6-tls-init
+- **Session**: `Codex-thunk-wave6`
+- **Branch**: `claude/thunk-retirement-wave6`
+- **Files**: `kernel/proc/process.cpp`
+- **Description**: Initialize TLS slot generations after replacing process-global value storage
+- **Claimed**: 2026-07-27T03:45:44Z
+- **Status**: IN PROGRESS
