@@ -259,3 +259,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: kernel/proc/process.h
 - **Claimed**: 2026-07-27T04:57:44Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] kernel-thread-regression
+- **Session**: `Codex-wave6-thread-wait-fix`
+- **Branch**: `claude/kernel-thread-wait-fix`
+- **Files**: `userland/apps/thunk_alias_smoke/thunk_alias_smoke.c`
+- **Description**: No description provided
+- **Claimed**: 2026-07-27T04:57:49Z
+- **Status**: IN PROGRESS
