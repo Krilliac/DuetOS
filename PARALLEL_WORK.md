@@ -308,13 +308,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-27T05:06:09Z
 - **Status**: COMPLETED @ 2026-07-27T05:23:04Z
 
-### [ACTIVE] thread-handle-tid-state
+### [DONE] thread-handle-tid-state
 - **Session**: `Codex-thread-handle-tid-isolation`
 - **Branch**: `claude/thread-handle-tid-isolation`
 - **Files**: `kernel/proc/process.h`
 - **Description**: No description provided
 - **Claimed**: 2026-07-27T05:46:29Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-27T06:39:37Z
 
 ### [ACTIVE] thread-handle-tid-scheduler
 - **Session**: `Codex-thread-handle-tid-isolation`
