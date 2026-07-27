@@ -182,9 +182,7 @@ void ResolveTaskAgg(ProcessAggCookie& c)
         for (u64 i = 0; i < ::duetos::core::Process::kWin32HandleCap; ++i)
             if (p->win32_handles[i].kind != ::duetos::core::Process::FsBackingKind::None)
                 ++win32;
-        for (u64 i = 0; i < ::duetos::core::Process::kWin32ThreadCap; ++i)
-            if (p->win32_threads[i].in_use)
-                ++win32;
+        win32 += ::duetos::core::ProcessWin32ThreadHandleCount(p);
         for (u64 i = 0; i < ::duetos::core::Process::kWin32ProcessCap; ++i)
             if (p->win32_proc_handles[i].in_use)
                 ++win32;
@@ -384,9 +382,7 @@ bool LeakDetectorSnapshotPid(u64 pid, ClassSnapshot* out)
     for (u64 i = 0; i < ::duetos::core::Process::kWin32HandleCap; ++i)
         if (p->win32_handles[i].kind != ::duetos::core::Process::FsBackingKind::None)
             ++w32;
-    for (u64 i = 0; i < ::duetos::core::Process::kWin32ThreadCap; ++i)
-        if (p->win32_threads[i].in_use)
-            ++w32;
+    w32 += ::duetos::core::ProcessWin32ThreadHandleCount(p);
     for (u64 i = 0; i < ::duetos::core::Process::kWin32ProcessCap; ++i)
         if (p->win32_proc_handles[i].in_use)
             ++w32;
@@ -455,9 +451,7 @@ void LeakDetectorReportProcessExit(const ::duetos::core::Process& p)
     for (u64 i = 0; i < ::duetos::core::Process::kWin32HandleCap; ++i)
         if (p.win32_handles[i].kind != ::duetos::core::Process::FsBackingKind::None)
             ++w32;
-    for (u64 i = 0; i < ::duetos::core::Process::kWin32ThreadCap; ++i)
-        if (p.win32_threads[i].in_use)
-            ++w32;
+    w32 += ::duetos::core::ProcessWin32ThreadHandleCount(&p);
     for (u64 i = 0; i < ::duetos::core::Process::kWin32ProcessCap; ++i)
         if (p.win32_proc_handles[i].in_use)
             ++w32;

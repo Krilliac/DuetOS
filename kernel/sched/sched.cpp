@@ -211,6 +211,12 @@ struct Task
     // default to false.
     bool no_requeue;
 
+    // True once the fully-initialized task is linked into the global
+    // task list and a runqueue. Deferred user-task creation keeps
+    // this false while the caller publishes ABI metadata that must
+    // exist before the entry can run.
+    bool published;
+
     // First-run flag. True from SchedCreate until SchedFinishTaskSwitch
     // runs for the first time on this task — i.e. true while the
     // SchedCreate-primed stack layout (planted &SchedTaskTrampoline at
@@ -2193,6 +2199,7 @@ void SchedInit()
     boot_task->kill_requested = false;               // kernel tasks never hit a budget
     boot_task->kill_reason = KillReason::TickBudget; // unused when kill_requested=false
     boot_task->hung_task_exempt = false;             // default: detector watches every task
+    boot_task->published = true;                     // task 0 is live immediately
     boot_task->suspend_count = 0;                    // boot/kernel tasks never get suspended
     boot_task->win32_last_error = 0;                 // ERROR_SUCCESS, per-thread Win32 slot
     boot_task->last_cpu = cpu::CurrentCpu()->cpu_id; // BSP pin — boot task only ever runs here
@@ -2232,8 +2239,24 @@ namespace
 // can pull it off the queue and start running it. If `t->process`
 // is still nullptr at that point, Ring3UserEntry's `CurrentProcess()`
 // returns null and panics with "Ring3UserEntry without a Process".
+void PublishCreatedTask(Task* task)
+{
+    KASSERT(task != nullptr, "sched", "PublishCreatedTask null task");
+    KASSERT(!task->published, "sched", "PublishCreatedTask called twice");
+    sync::SpinLockGuard guard(g_sched_lock);
+    task->published = true;
+    RunqueuePush(task);
+    // Add the new task to the global "all live tasks" list under
+    // the same lock as the runqueue push. The hung-task detector
+    // can observe it only after every caller-owned field is ready.
+    AllTasksLink(task);
+    SchedCpuIncCreated();
+    SchedCpuIncLive();
+}
+
 Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPriority priority, mm::AddressSpace* as,
-                          core::Process* process = nullptr)
+                          core::Process* process = nullptr, TaskPrepareFn prepare = nullptr,
+                          void* prepare_context = nullptr)
 {
     KASSERT(entry != nullptr, "sched", "SchedCreate null entry fn");
     KASSERT(name != nullptr, "sched", "SchedCreate null name");
@@ -2300,6 +2323,7 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     t->kill_requested = false;
     t->kill_reason = KillReason::TickBudget;
     t->hung_task_exempt = false; // default: detector watches every task
+    t->published = false;
     t->ticks_run = 0;
     t->schedin_tick = 0;
     t->win32_last_error = 0; // ERROR_SUCCESS, per-thread Win32 slot
@@ -2390,18 +2414,12 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
 
     t->rsp = reinterpret_cast<u64>(sp);
 
-    {
-        sync::SpinLockGuard guard(g_sched_lock);
-        RunqueuePush(t);
-        // Add the new task to the global "all live tasks" list
-        // under the same lock as the runqueue push. The hung-task
-        // detector walks this list under g_sched_lock; pushing
-        // here makes the new task observable to the very next
-        // detector pass.
-        AllTasksLink(t);
-        SchedCpuIncCreated();
-        SchedCpuIncLive();
-    }
+    // Let a subsystem attach metadata that the entry must observe
+    // (for example a Win32 handle row and per-thread GSBASE) before
+    // the runqueue publish makes this Task executable on a peer CPU.
+    // The Task never escapes in an untracked deferred state.
+    if (prepare != nullptr)
+        prepare(t, prepare_context);
 
     // Multi-write sentinel — bracket so two concurrent SchedCreates
     // on different CPUs don't split each other's lines at the UART
@@ -2421,6 +2439,10 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
         SerialWrite("\n");
     }
 
+    // Publish last. Once this releases g_sched_lock, a peer may run
+    // and reap an immediate-return task, so no caller-independent
+    // Task field may be dereferenced below this point.
+    PublishCreatedTask(t);
     return t;
 }
 
@@ -2441,9 +2463,14 @@ Task* SchedCreate(TaskEntry entry, void* arg, const char* name, TaskPriority pri
     return SchedCreateInternal(entry, arg, name, priority, /*as=*/nullptr);
 }
 
-Task* SchedCreateUser(TaskEntry entry, void* arg, const char* name, core::Process* process)
+namespace
 {
-    KLOG_INFO_S("sched", "SchedCreateUser: ring-3 task", "name", name);
+
+Task* CreateUserTask(TaskEntry entry, void* arg, const char* name, core::Process* process, TaskPrepareFn prepare,
+                     void* prepare_context)
+{
+    KLOG_INFO_S("sched", prepare != nullptr ? "SchedCreateUserPrepared: ring-3 task" : "SchedCreateUser: ring-3 task",
+                "name", name);
     KASSERT(process != nullptr, "sched", "SchedCreateUser without Process");
     KASSERT(process->as != nullptr, "sched", "SchedCreateUser Process has no AS");
 
@@ -2464,7 +2491,8 @@ Task* SchedCreateUser(TaskEntry entry, void* arg, const char* name, core::Proces
     // SchedCreateInternal returning and the assignment landing —
     // the new task then enters Ring3UserEntry, hits the
     // `CurrentProcess() == nullptr` gate, and panics.
-    Task* t = SchedCreateInternal(entry, arg, name, TaskPriority::Normal, process->as, process);
+    Task* t =
+        SchedCreateInternal(entry, arg, name, TaskPriority::Normal, process->as, process, prepare, prepare_context);
     if (t == nullptr)
     {
         // SchedCreateInternal failed (Task/kstack OOM — warn, not
@@ -2484,6 +2512,20 @@ Task* SchedCreateUser(TaskEntry entry, void* arg, const char* name, core::Proces
     // to share the Process (future thread spawn) must ProcessRetain
     // before calling SchedCreateUser with an already-owned process.
     return t;
+}
+
+} // namespace
+
+Task* SchedCreateUser(TaskEntry entry, void* arg, const char* name, core::Process* process)
+{
+    return CreateUserTask(entry, arg, name, process, nullptr, nullptr);
+}
+
+Task* SchedCreateUserPrepared(TaskEntry entry, void* arg, const char* name, core::Process* process,
+                              TaskPrepareFn prepare, void* context)
+{
+    KASSERT(prepare != nullptr, "sched", "SchedCreateUserPrepared without initializer");
+    return CreateUserTask(entry, arg, name, process, prepare, context);
 }
 
 core::Process* TaskProcess(Task* t)
@@ -2827,6 +2869,7 @@ void ScheduleLockedHandoff(sync::IrqFlags lock_flags)
             // machine. Transition Running → Dead and DEFER the
             // zombie-push exactly as SchedExit does.
             prev->state = TaskState::Dead;
+            core::ProcessPublishWin32ThreadExit(prev->process, prev, 1);
             __atomic_fetch_add(&g_tasks_exited, 1, __ATOMIC_RELAXED);
             SchedCpuDecLive();
             // Recovery Class C hook — fired for SchedExit too. Keep the
@@ -3451,6 +3494,11 @@ void SchedExit()
     // any future path that forgets (e.g., a syscall handler that
     // calls SchedExit and then falls through).
     KASSERT(self->state != TaskState::Dead, "sched", "SchedExit called twice on same task");
+    // SYS_EXIT may already have published the application-supplied
+    // code. Other termination paths (NtTerminateThread, process kill,
+    // tick/cap budget) converge here without one; publish a generic
+    // non-zero fallback exactly once so handle waits cannot hang.
+    core::ProcessPublishWin32ThreadExit(self->process, self, 1);
     self->state = TaskState::Dead;
     __atomic_fetch_add(&g_tasks_exited, 1, __ATOMIC_RELAXED);
     SchedCpuDecLive();

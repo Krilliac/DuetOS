@@ -282,6 +282,37 @@ void DoFileClose(arch::TrapFrame* frame)
             core::ProcessRelease(target);
         }
     }
+    else if (handle >= core::Process::kWin32ThreadBase &&
+             handle < core::Process::kWin32ThreadBase + core::Process::kWin32ThreadCap)
+    {
+        // Local CreateThread handles are metadata references, not
+        // ownership of the scheduler Task itself: closing a live
+        // handle must hide the handle without terminating the
+        // thread. Reclaim the table slot only when the task exits.
+        // Serialize against SYS_EXIT publication and the next
+        // CreateThread claim so an old task can never publish its
+        // exit code into a newly-reused slot. A row in `creating`
+        // state is not yet a caller-visible handle, so a guessed
+        // close cannot steal the creator's reservation.
+        const u64 slot = handle - core::Process::kWin32ThreadBase;
+        const sync::IrqFlags flags = sync::SpinLockAcquire(proc->win32_thread_lock);
+        auto& h = proc->win32_threads[slot];
+        if (h.in_use && h.handle_open && !h.creating)
+        {
+            h.handle_open = false;
+            if (h.exited)
+            {
+                // The task no longer needs its fixed per-slot
+                // TEB/static-TLS pages. Only now is reuse safe.
+                h.in_use = false;
+                h.exited = false;
+                h.exit_code = 0x103;
+                h.task = nullptr;
+                h.user_stack_va = 0;
+            }
+        }
+        sync::SpinLockRelease(proc->win32_thread_lock, flags);
+    }
     else if (handle >= core::Process::kWin32ForeignThreadBase &&
              handle < core::Process::kWin32ForeignThreadBase + core::Process::kWin32ForeignThreadCap)
     {

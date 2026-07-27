@@ -287,6 +287,30 @@ bool CrossAsTransfer(Process* target, u64 target_va, void* caller_buf, u64 len, 
     return true;
 }
 
+// Snapshot a local Win32 thread slot's durable exit state. The
+// process lock is required even for a u32: SYS_EXIT can publish on
+// another CPU while a waiter polls, and CloseHandle can recycle the
+// slot for a later thread.
+bool ReadLocalThreadState(Process* process, u64 slot, u32* exit_code, bool* exited)
+{
+    if (process == nullptr || (exit_code == nullptr && exited == nullptr) || slot >= Process::kWin32ThreadCap)
+    {
+        return false;
+    }
+    const sync::IrqFlags flags = sync::SpinLockAcquire(process->win32_thread_lock);
+    const bool in_use = process->win32_threads[slot].in_use && process->win32_threads[slot].handle_open &&
+                        !process->win32_threads[slot].creating;
+    if (in_use)
+    {
+        if (exit_code != nullptr)
+            *exit_code = process->win32_threads[slot].exit_code;
+        if (exited != nullptr)
+            *exited = process->win32_threads[slot].exited;
+    }
+    sync::SpinLockRelease(process->win32_thread_lock, flags);
+    return in_use;
+}
+
 // Resolve a Win32 thread handle to the kernel Task it refers to.
 // Accepts BOTH ranges: local thread handles (kWin32ThreadBase +
 // idx, returned by CreateThread / SYS_THREAD_CREATE — these
@@ -310,11 +334,13 @@ sched::Task* LookupThreadHandle(Process* caller, u64 handle)
         // mask the index so a misprediction can't speculate a load
         // past the win32_threads[] table.
         const u64 idx = util::MaskedIndex(handle - Process::kWin32ThreadBase, Process::kWin32ThreadCap);
-        if (caller->win32_threads[idx].in_use)
-        {
-            return caller->win32_threads[idx].task;
-        }
-        return nullptr;
+        const sync::IrqFlags flags = sync::SpinLockAcquire(caller->win32_thread_lock);
+        const auto& row = caller->win32_threads[idx];
+        sched::Task* task = (row.in_use && row.handle_open && !row.creating && !row.exited) ? row.task : nullptr;
+        sync::SpinLockRelease(caller->win32_thread_lock, flags);
+        // This is only a synchronized snapshot; the broader foreign/local
+        // Task lifetime pinning audit remains tracked in the isolation queue.
+        return task;
     }
     if (handle >= Process::kWin32ForeignThreadBase &&
         handle < Process::kWin32ForeignThreadBase + Process::kWin32ForeignThreadCap)
@@ -612,14 +638,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
         sched::Task* self = sched::CurrentTask();
         if (proc != nullptr && self != nullptr)
         {
-            for (u32 i = 0; i < Process::kWin32ThreadCap; ++i)
-            {
-                if (proc->win32_threads[i].in_use && proc->win32_threads[i].task == self)
-                {
-                    proc->win32_threads[i].exit_code = static_cast<u32>(code & 0xFFFFFFFFu);
-                    break;
-                }
-            }
+            ProcessPublishWin32ThreadExit(proc, self, static_cast<u32>(code & 0xFFFFFFFFu));
         }
         // SchedExit is [[noreturn]] — it marks the current task Dead,
         // wakes the reaper, and Schedule()s away forever. The trap
@@ -1541,11 +1560,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
                     ++count;
             }
             // win32_threads, win32_foreign_threads — thread handles.
-            for (u64 i = 0; i < Process::kWin32ThreadCap; ++i)
-            {
-                if (target->win32_threads[i].in_use)
-                    ++count;
-            }
+            count += ProcessWin32ThreadHandleCount(target);
             for (u64 i = 0; i < Process::kWin32ForeignThreadCap; ++i)
             {
                 if (target->win32_foreign_threads[i].in_use)
@@ -3455,12 +3470,13 @@ void SyscallDispatch(arch::TrapFrame* frame)
         }
         // Spectre v1 nospec — see LookupThreadHandle for the rationale.
         const u64 slot = util::MaskedIndex(handle - Process::kWin32ThreadBase, Process::kWin32ThreadCap);
-        if (!proc->win32_threads[slot].in_use)
+        u32 exit_code = 0;
+        if (!ReadLocalThreadState(proc, slot, &exit_code, nullptr))
         {
             frame->rax = static_cast<u64>(-1);
             return;
         }
-        frame->rax = static_cast<u64>(proc->win32_threads[slot].exit_code);
+        frame->rax = static_cast<u64>(exit_code);
         return;
     }
 
@@ -3477,25 +3493,25 @@ void SyscallDispatch(arch::TrapFrame* frame)
         }
         // Spectre v1 nospec — see LookupThreadHandle for the rationale.
         const u64 slot = util::MaskedIndex(handle - Process::kWin32ThreadBase, Process::kWin32ThreadCap);
-        const auto& th = proc->win32_threads[slot];
-        if (!th.in_use)
-        {
-            frame->rax = static_cast<u64>(-1);
-            return;
-        }
-        // Use exit_code != STILL_ACTIVE as the authoritative
+        // Use the explicit completion bit as the authoritative
         // "thread is done" signal instead of dereferencing
-        // th.task, which the reaper may have KFree'd already
+        // the Task pointer, which the reaper may have KFree'd already
         // after the task died. The SYS_EXIT path writes the
-        // real exit code into this slot before SchedExit runs,
-        // so the slot is valid as long as in_use remains true.
-        constexpr u64 kStillActive = 0x103;
+        // real exit code under win32_thread_lock before SchedExit
+        // runs. Each poll takes that same lock so an optimized SMP
+        // build cannot retain STILL_ACTIVE after a peer publishes.
         constexpr u64 kInfinite = 0xFFFFFFFFu;
         const u64 start = sched::SchedNowTicks();
         const u64 deadline = (timeout_ms == kInfinite) ? u64(-1) : start + ((timeout_ms + 9) / 10);
         for (;;)
         {
-            if (th.exit_code != kStillActive)
+            bool exited = false;
+            if (!ReadLocalThreadState(proc, slot, nullptr, &exited))
+            {
+                frame->rax = static_cast<u64>(-1); // WAIT_FAILED / closed handle
+                return;
+            }
+            if (exited)
             {
                 frame->rax = 0; // WAIT_OBJECT_0
                 return;
@@ -3591,8 +3607,8 @@ void SyscallDispatch(arch::TrapFrame* frame)
                         // pointer). Valid as long as in_use holds.
                         // Spectre v1 nospec — see LookupThreadHandle.
                         const u64 slot = util::MaskedIndex(h - Process::kWin32ThreadBase, Process::kWin32ThreadCap);
-                        const auto& th = proc->win32_threads[slot];
-                        if (th.in_use && th.exit_code != 0x103)
+                        bool exited = false;
+                        if (ReadLocalThreadState(proc, slot, nullptr, &exited) && exited)
                             sig = true;
                     }
                     else if (h >= Process::kWin32SemaphoreBase &&

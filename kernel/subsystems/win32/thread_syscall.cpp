@@ -38,6 +38,34 @@ struct ThreadDesc
     u64 user_gs_base; // usually the Process's shared TEB VA (v0 scope)
 };
 
+struct ThreadPrepareContext
+{
+    core::Process* process;
+    u64 slot;
+    u64 generation;
+    u64 user_stack_va;
+    u64 user_gs_base;
+};
+
+void PrepareWin32ThreadTask(sched::Task* task, void* raw_context)
+{
+    auto* context = static_cast<ThreadPrepareContext*>(raw_context);
+    KASSERT(task != nullptr && context != nullptr && context->process != nullptr, "win32/thread",
+            "invalid prepared-task context");
+
+    if (context->user_gs_base != 0)
+        sched::SchedSetUserGsOverride(task, context->user_gs_base);
+
+    core::Process* process = context->process;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(process->win32_thread_lock);
+    auto& row = process->win32_threads[context->slot];
+    KASSERT(row.in_use && row.creating && row.generation == context->generation && row.task == nullptr, "win32/thread",
+            "prepared task lost reserved handle slot");
+    row.task = task;
+    row.user_stack_va = context->user_stack_va;
+    sync::SpinLockRelease(process->win32_thread_lock, flags);
+}
+
 } // namespace
 
 [[noreturn]] void Ring3ThreadEntry(void* arg)
@@ -347,27 +375,41 @@ void DoThreadCreate(arch::TrapFrame* frame)
     }
 
     // Find and CLAIM a free thread-table slot. The scan + claim must
-    // be a single critical section: KMalloc / AllocateFrame /
-    // SchedCreateUser further down can sleep or yield, and a
-    // concurrent SYS_THREAD_CREATE on this same process must not
-    // pick the same slot. Mark `in_use = true` while still under the
-    // IRQ-off window so the second caller's scan sees this slot busy.
+    // be a single process-wide critical section: KMalloc /
+    // AllocateFrame / SchedCreateUser further down can sleep or
+    // yield, and a concurrent SYS_THREAD_CREATE on another CPU must
+    // not pick the same slot. Disabling local interrupts alone does
+    // not serialize that peer.
     // The handle metadata (task, user_stack_va) gets filled in further
     // down once SchedCreateUser succeeds.
     u32 slot = Process::kWin32ThreadCap;
+    u64 claim_generation = 0;
+    u64 stack_base_va = 0;
+    const u64 stack_pages = Process::kV0ThreadStackPages;
     {
-        arch::Cli();
+        const sync::IrqFlags flags = sync::SpinLockAcquire(proc->win32_thread_lock);
         for (u32 i = 0; i < Process::kWin32ThreadCap; ++i)
         {
             if (!proc->win32_threads[i].in_use)
             {
                 slot = i;
                 proc->win32_threads[i].in_use = true;
+                proc->win32_threads[i].creating = true;
+                proc->win32_threads[i].handle_open = false;
+                proc->win32_threads[i].exited = false;
+                proc->win32_threads[i].exit_code = 0x103; // STILL_ACTIVE for this generation
+                ++proc->win32_threads[i].generation;
+                if (proc->win32_threads[i].generation == 0)
+                    ++proc->win32_threads[i].generation;
+                claim_generation = proc->win32_threads[i].generation;
                 proc->win32_threads[i].task = nullptr;
+                proc->win32_threads[i].user_stack_va = 0;
+                stack_base_va = proc->thread_stack_cursor;
+                proc->thread_stack_cursor += stack_pages * mm::kPageSize;
                 break;
             }
         }
-        arch::Sti();
+        sync::SpinLockRelease(proc->win32_thread_lock, flags);
     }
     if (slot == Process::kWin32ThreadCap)
     {
@@ -377,20 +419,35 @@ void DoThreadCreate(arch::TrapFrame* frame)
         frame->rax = static_cast<u64>(-1);
         return;
     }
+    auto release_claimed_slot = [&]()
+    {
+        const sync::IrqFlags flags = sync::SpinLockAcquire(proc->win32_thread_lock);
+        auto& th = proc->win32_threads[slot];
+        if (th.in_use && th.creating && th.generation == claim_generation)
+        {
+            th.in_use = false;
+            th.creating = false;
+            th.handle_open = false;
+            th.exited = false;
+            th.exit_code = 0x103;
+            th.task = nullptr;
+            th.user_stack_va = 0;
+        }
+        sync::SpinLockRelease(proc->win32_thread_lock, flags);
+    };
 
     // Carve a fresh stack range off the process's thread-stack
     // cursor. N pages, writable + NX + user. Stack grows down,
     // so rsp starts at (base + N*4096 - 8).
     //
-    // On partial-OOM we bump the cursor by the FULL requested range
-    // even though only `p` pages made it in — same pattern as
-    // vmap_syscall's partial-OOM path. Without this the next
+    // The slot-claim critical section already reserves the FULL
+    // requested range before any allocation, even if only `p`
+    // pages make it in — same pattern as vmap_syscall's partial-OOM
+    // path. Without this the next
     // DoThreadCreate would try to re-map the successfully-allocated
     // pages' VAs and AddressSpaceMapUserPage would panic on
     // "virt already mapped". Leak is bounded; frames get reclaimed
     // when the process dies (AS destructor walks regions).
-    const u64 stack_base_va = proc->thread_stack_cursor;
-    const u64 stack_pages = Process::kV0ThreadStackPages;
     mm::PhysAddr top_frame_phys = mm::kNullFrame;
     for (u64 p = 0; p < stack_pages; ++p)
     {
@@ -404,9 +461,8 @@ void DoThreadCreate(arch::TrapFrame* frame)
             SerialWrite("/");
             SerialWriteHex(stack_pages);
             SerialWrite("\n");
-            proc->thread_stack_cursor += stack_pages * mm::kPageSize;
             // Release the slot we claimed above; no task ever attaches.
-            proc->win32_threads[slot].in_use = false;
+            release_claimed_slot();
             frame->rax = static_cast<u64>(-1);
             return;
         }
@@ -416,7 +472,6 @@ void DoThreadCreate(arch::TrapFrame* frame)
         if (p == stack_pages - 1)
             top_frame_phys = frame_phys;
     }
-    proc->thread_stack_cursor += stack_pages * mm::kPageSize;
     const u64 stack_top = stack_base_va + stack_pages * mm::kPageSize;
     // Microsoft x64 ABI at function entry:
     //   rsp % 16 == 8                — `call` pushed 8 bytes
@@ -451,7 +506,7 @@ void DoThreadCreate(arch::TrapFrame* frame)
     if (desc == nullptr)
     {
         SerialWrite("[thread] create FAIL heap alloc for ThreadDesc\n");
-        proc->win32_threads[slot].in_use = false;
+        release_claimed_slot();
         frame->rax = static_cast<u64>(-1);
         return;
     }
@@ -514,7 +569,9 @@ void DoThreadCreate(arch::TrapFrame* frame)
     hexd(static_cast<u8>(slot));
     s_name[nlen] = '\0';
 
-    sched::Task* t = sched::SchedCreateUser(&Ring3ThreadEntry, desc, s_name, proc);
+    ThreadPrepareContext prepare_context{proc, slot, claim_generation, stack_base_va, per_thread_teb};
+    sched::Task* t = sched::SchedCreateUserPrepared(&Ring3ThreadEntry, desc, s_name, proc, &PrepareWin32ThreadTask,
+                                                    &prepare_context);
     if (t == nullptr)
     {
         SerialWrite("[thread] create FAIL SchedCreateUser\n");
@@ -522,24 +579,10 @@ void DoThreadCreate(arch::TrapFrame* frame)
         // ProcessRetain was consumed by SchedCreateUser's
         // gate-denial branch (ProcessRelease there) on nullptr
         // return. No manual release here — see sched.cpp.
-        proc->win32_threads[slot].in_use = false;
+        release_claimed_slot();
         frame->rax = static_cast<u64>(-1);
         return;
     }
-
-    // Pin the per-thread TEB as this Task's GSBASE override so the
-    // scheduler restores IT (not the process's shared TEB) into
-    // KERNEL_GS_BASE on every resume — without this the worker's
-    // return-to-user swapgs would load the main thread's TEB and
-    // its __declspec(thread) reads would hit the wrong block.
-    if (per_thread_teb != 0)
-        sched::SchedSetUserGsOverride(t, per_thread_teb);
-
-    // The pre-claim above already set in_use=true; the (slot,task)
-    // pair is now finalised so future Lookup hits this row.
-    proc->win32_threads[slot].in_use = true;
-    proc->win32_threads[slot].task = t;
-    proc->win32_threads[slot].user_stack_va = stack_base_va;
 
     const u64 handle = Process::kWin32ThreadBase + slot;
     SerialWrite("[thread] create ok pid=");
@@ -554,7 +597,16 @@ void DoThreadCreate(arch::TrapFrame* frame)
     SerialWriteHex(stack_base_va);
     SerialWrite("\n");
     custom::OnHandleAlloc(proc, handle, static_cast<u32>(core::SYS_THREAD_CREATE), frame->rip);
-    frame->rax = handle;
+    {
+        const sync::IrqFlags flags = sync::SpinLockAcquire(proc->win32_thread_lock);
+        auto& th = proc->win32_threads[slot];
+        KASSERT(th.in_use && th.creating && th.generation == claim_generation && th.task == t, "win32/thread",
+                "published task lost reserved handle slot");
+        th.handle_open = true;
+        th.creating = false;
+        frame->rax = handle;
+        sync::SpinLockRelease(proc->win32_thread_lock, flags);
+    }
 }
 
 } // namespace duetos::subsystems::win32

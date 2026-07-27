@@ -97,6 +97,18 @@ Task* SchedCreate(TaskEntry entry, void* arg, const char* name, TaskPriority pri
 /// holder).
 Task* SchedCreateUser(TaskEntry entry, void* arg, const char* name, core::Process* process);
 
+/// Pre-publication initializer for ABI metadata that must be attached
+/// after Task allocation but before the task can become runnable.
+using TaskPrepareFn = void (*)(Task* task, void* context);
+
+/// Create a process-bound user task, invoke `prepare(task, context)`
+/// while the task is still scheduler-private, then atomically publish
+/// it to enumeration and a runqueue. No deferred/untracked Task
+/// escapes this call. Ownership and failure semantics match
+/// SchedCreateUser.
+Task* SchedCreateUserPrepared(TaskEntry entry, void* arg, const char* name, core::Process* process,
+                              TaskPrepareFn prepare, void* context);
+
 /// Accessor for the Task's owning process pointer. nullptr for
 /// kernel-only tasks (workers, reaper, idle). Used by syscall
 /// handlers via `core::CurrentProcess()` to cap-check.

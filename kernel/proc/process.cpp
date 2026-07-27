@@ -107,6 +107,55 @@ CapSet ProcessCapsSnapshot(const Process* process)
     return effective;
 }
 
+u32 ProcessWin32ThreadHandleCount(const Process* process)
+{
+    if (process == nullptr)
+        return 0;
+    Process* mutable_process = const_cast<Process*>(process);
+    const sync::IrqFlags flags = sync::SpinLockAcquire(mutable_process->win32_thread_lock);
+    u32 count = 0;
+    for (u32 i = 0; i < Process::kWin32ThreadCap; ++i)
+    {
+        if (mutable_process->win32_threads[i].in_use && mutable_process->win32_threads[i].handle_open)
+            ++count;
+    }
+    sync::SpinLockRelease(mutable_process->win32_thread_lock, flags);
+    return count;
+}
+
+void ProcessPublishWin32ThreadExit(Process* process, sched::Task* task, u32 exit_code)
+{
+    if (process == nullptr || task == nullptr)
+        return;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(process->win32_thread_lock);
+    for (u32 i = 0; i < Process::kWin32ThreadCap; ++i)
+    {
+        auto& row = process->win32_threads[i];
+        if (row.in_use && row.task == task)
+        {
+            if (!row.exited)
+            {
+                row.exit_code = exit_code;
+                row.exited = true;
+            }
+            // CloseHandle on a running thread hides the public
+            // handle but cannot recycle its TEB/TLS resource slot.
+            // Actual task death is the point where that closed row
+            // becomes reusable.
+            if (!row.handle_open && !row.creating)
+            {
+                row.in_use = false;
+                row.exited = false;
+                row.exit_code = 0x103;
+                row.task = nullptr;
+                row.user_stack_va = 0;
+            }
+            break;
+        }
+    }
+    sync::SpinLockRelease(process->win32_thread_lock, flags);
+}
+
 bool ProcessHasCap(const Process* process, Cap cap)
 {
     return CapSetHas(ProcessCapsSnapshot(process), cap);
@@ -357,13 +406,16 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     // path. Nothing to init here for those surfaces.
     // Win32 thread table — every slot starts free with exit_code
     // = STILL_ACTIVE (matches Win32 GetExitCodeThread semantics on
-    // a running thread).
+    // a running thread). `memset` above zero-initialized the
+    // accompanying win32_thread_lock.
     for (u32 i = 0; i < Process::kWin32ThreadCap; ++i)
     {
         p->win32_threads[i].in_use = false;
-        for (u32 j = 0; j < sizeof(p->win32_threads[i]._pad); ++j)
-            p->win32_threads[i]._pad[j] = 0;
+        p->win32_threads[i].creating = false;
+        p->win32_threads[i].handle_open = false;
+        p->win32_threads[i].exited = false;
         p->win32_threads[i].exit_code = 0x103; // STILL_ACTIVE
+        p->win32_threads[i].generation = 0;
         p->win32_threads[i].task = nullptr;
         p->win32_threads[i].user_stack_va = 0;
     }
