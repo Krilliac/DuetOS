@@ -42,14 +42,31 @@ else
     BRANCH="claude/${SUBSYSTEM}"
 fi
 
-# Flip the subsystem's marker 🟢 → ✅ and stamp completion on its Status line.
-awk -v subsystem="$SUBSYSTEM" -v timestamp="$TIMESTAMP" '
-    /^### 🟢 / && $3 == subsystem { sub(/🟢/, "✅"); found = 1 }
-    found && /- \*\*Status\*\*: IN PROGRESS/ {
-        sub(/IN PROGRESS/, "COMPLETED @ " timestamp); found = 0
+# Match the stable ASCII structure, not a display marker whose encoding
+# varies between Windows PowerShell, Git Bash, and CI locales.
+if ! awk -v subsystem="$SUBSYSTEM" -v timestamp="$TIMESTAMP" '
+    $1 == "###" && $3 == subsystem {
+        print "### [DONE] " subsystem
+        matched = 1
+        in_target = 1
+        next
+    }
+    in_target && /- \*\*Status\*\*: IN PROGRESS/ {
+        sub(/IN PROGRESS/, "COMPLETED @ " timestamp)
+        updated = 1
+        in_target = 0
     }
     { print }
-' "$WORK_FILE" > "${WORK_FILE}.tmp" && mv "${WORK_FILE}.tmp" "$WORK_FILE"
+    END {
+        if (!matched || !updated)
+            exit 3
+    }
+' "$WORK_FILE" > "${WORK_FILE}.tmp"; then
+    rm -f -- "${WORK_FILE}.tmp"
+    echo "Error: active subsystem '${SUBSYSTEM}' was not found; nothing released." >&2
+    exit 1
+fi
+mv "${WORK_FILE}.tmp" "$WORK_FILE"
 
 # Releasing a coordinator claim must never absorb implementation files
 # another fleet lane is still writing. Stage and commit only the
