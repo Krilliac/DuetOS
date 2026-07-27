@@ -16,6 +16,7 @@
 #include "mm/kheap.h"
 #include "net/socket.h"
 #include "util/string.h"
+#include "subsystems/linux/syscall_internal.h"
 #include "subsystems/win32/custom.h"
 #include "subsystems/win32/window_syscall.h"
 #include "sched/sched.h"
@@ -684,6 +685,13 @@ void ProcessRelease(Process* p)
             arch::Sti();
         }
     }
+
+    // Release any SysV SHM attachments still held. DoShmat takes a refcount
+    // that only shmdt(2) dropped, so a process exiting while attached used to
+    // strand the segment and its pool slot for the rest of the boot. Runs
+    // before the AS goes away for ordering clarity, though the drain itself
+    // does not touch p->as (SHM pages are borrowed, not AS-owned).
+    ::duetos::subsystems::linux::internal::LinuxShmDrainProcess(p);
 
     // Drop the AS reference we took at create. If this was the last
     // process/task holding that AS (v0: always true — one task per

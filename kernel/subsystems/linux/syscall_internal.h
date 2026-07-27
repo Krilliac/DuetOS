@@ -664,6 +664,12 @@ i64 DoRseq(u64 rseq, u64 rseq_len, u64 flags, u64 sig);
 // signal-deliver pass picks it up on this same syscall return.
 void LinuxAlarmCheckAndRaise(::duetos::core::Process* p);
 
+// SysV SHM exit-time drain (sysv_ipc.cpp) — called from ProcessRelease.
+// Drops the refcount DoShmat took for every attachment the process still
+// holds, so exiting without shmdt(2) cannot strand a segment and its pool
+// slot forever. Does not touch p->as, so it is safe anywhere in teardown.
+void LinuxShmDrainProcess(::duetos::core::Process* p);
+
 // Vector forms of socket recv/send (syscall_socket.cpp).
 i64 DoRecvmmsg(u64 fd, u64 user_mmsgvec, u64 vlen, u64 flags, u64 user_timeout);
 i64 DoSendmmsg(u64 fd, u64 user_mmsgvec, u64 vlen, u64 flags);

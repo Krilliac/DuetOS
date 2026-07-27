@@ -416,6 +416,52 @@ i64 DoShmdt(u64 shmaddr)
     return -22; // -EINVAL: shmaddr not an active attach
 }
 
+void LinuxShmDrainProcess(core::Process* p)
+{
+    // Release every SHM attachment this process still holds at exit.
+    //
+    // DoShmat pins the segment with ++refcount and records the attach in
+    // p->linux_shm_attaches[]. Before this drain existed, the only path that
+    // dropped that reference was an explicit shmdt(2) — so a process that
+    // exited while still attached, normally or by fault, leaked the reference
+    // permanently. ShmMaybeFreeLocked frees a segment only at refcount == 0,
+    // so the segment could never be collected and its pool slot never
+    // returned. With kShmPoolCap == 8, eight such exits exhaust SysV SHM for
+    // the rest of the boot, along with the backing frames.
+    //
+    // Deliberately does NOT unmap the borrowed pages. ProcessRelease calls
+    // this immediately before mm::AddressSpaceRelease, which tears down the
+    // whole user half anyway, and SHM pages are mapped via
+    // AddressSpaceMapBorrowedPage, so they are not in the AS owned-frame
+    // ledger: the AS neither frees them nor requires them unmapped first.
+    // Skipping the unmap also keeps this safe to call at any point in
+    // teardown, including after p->as has been cleared.
+    if (p == nullptr)
+        return;
+    for (u32 i = 0; i < core::Process::kLinuxShmAttachCap; ++i)
+    {
+        auto& att = p->linux_shm_attaches[i];
+        if (!att.in_use)
+            continue;
+        // Validate against the pool BEFORE clearing the record, so a corrupt
+        // slot is dropped without indexing g_shm_pool out of range.
+        const bool indexable = att.shmid != 0 && (att.shmid - 1) < kShmPoolCap;
+        const u32 idx = indexable ? (att.shmid - 1) : 0;
+        att.in_use = false;
+        att.shmid = 0;
+        att.base_va = 0;
+        att.page_count = 0;
+        if (!indexable)
+            continue;
+        arch::Cli();
+        ShmSegment& seg = g_shm_pool[idx];
+        if (seg.refcount > 0)
+            --seg.refcount;
+        ShmMaybeFreeLocked(seg);
+        arch::Sti();
+    }
+}
+
 i64 DoShmctl(u64 shmid, u64 cmd, u64 user_buf)
 {
     (void)user_buf; // shmid_ds copy-out / copy-in deferred; sub-GAP
