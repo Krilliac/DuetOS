@@ -444,10 +444,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-27T06:15:47Z
 - **Status**: COMPLETED @ 2026-07-27T06:40:16Z
 
-### [ACTIVE] thread-handle-tid-doc-sync
+### [DONE] thread-handle-tid-doc-sync
 - **Session**: `Codex-thread-handle-tid-isolation`
 - **Branch**: `claude/thread-handle-tid-isolation`
 - **Files**: `wiki/getting-started/History.md wiki/subsystems/Win32-PE-Subsystem.md .github/workflows/build.yml`
 - **Description**: Synchronize thread3 profile coverage and fixed-duration CI contract
 - **Claimed**: 2026-07-27T06:29:54Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-27T06:40:19Z
