@@ -452,10 +452,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-27T06:29:54Z
 - **Status**: COMPLETED @ 2026-07-27T06:40:19Z
 
-### [ACTIVE] thread-handle-tid-regression-debug
+### [DONE] thread-handle-tid-regression-debug
 - **Session**: `Codex-thread-handle-tid-isolation`
 - **Branch**: `claude/thread-handle-tid-isolation`
 - **Files**: `userland/apps/thread3_smoke/thread3_smoke.c`
 - **Description**: Expose foreign-handle lifecycle stage verdicts in runtime smoke
 - **Claimed**: 2026-07-27T06:48:49Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-27T06:49:17Z
