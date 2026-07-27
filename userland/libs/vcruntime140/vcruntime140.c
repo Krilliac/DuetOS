@@ -390,8 +390,19 @@ static void cxx_local_unwind(u64_ image_base, const cxx_function_descr* d, u64_ 
     if (d->unwind_map == 0)
         return;
     const unwind_map_entry* um = (const unwind_map_entry*)(image_base + (u32_)d->unwind_map);
-    while (cur != target && cur >= 0 && cur < d->unwind_count)
+    /* Bound the walk by unwind_count. `prev_state` comes straight out of
+     * the image's .xdata, so the chain is attacker-controlled and is NOT
+     * guaranteed to strictly decrease toward -1. A self-loop
+     * (um[3].prev_state == 3) or a cycle would otherwise re-run the same
+     * destructor funclet forever — a double-free / use-after-free of
+     * whatever it releases, and an unwind that never returns to
+     * RtlUnwindEx. A well-formed chain visits each state at most once, so
+     * unwind_count iterations is a sufficient bound; matches the bounded
+     * frame walks in ntdll_dispatch.c. */
+    for (int steps = 0; steps < d->unwind_count; ++steps)
     {
+        if (cur == target || cur < 0 || cur >= d->unwind_count)
+            break;
         const int next = um[cur].prev_state;
         if (um[cur].action != 0)
             (void)cxx_call_funclet((void*)(image_base + (u32_)um[cur].action), frame);

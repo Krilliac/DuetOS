@@ -244,5 +244,53 @@ int main()
         EXPECT_FALSE(duet_pe_validate_unwind_chain(&view, secondary));
     }
 
+    // duet_pe_mapped_span_from / duet_pe_scope_records_capacity.
+    //
+    // These back the SCOPE_TABLE clamp in __C_specific_handler. A SCOPE_TABLE's
+    // record count is read straight out of attacker-controlled .xdata, so the
+    // handler needs the real available extent to clamp against rather than a
+    // yes/no on a length it cannot trust.
+    //
+    // Fixture layout: headers [0, 0x200), .text [0x1000, 0x1400),
+    // metadata [0x2000, 0x2500), SizeOfImage 0x3000.
+    {
+        Fixture f;
+        DUET_PE_VIEW view{};
+        EXPECT_TRUE(duet_pe_parse(f.image, &view));
+
+        // Start of a section => that section's full span.
+        EXPECT_EQ(duet_pe_mapped_span_from(&view, 0x2000), 0x500u);
+        EXPECT_EQ(duet_pe_mapped_span_from(&view, 0x1000), 0x400u);
+        // Partway in => remainder of that section.
+        EXPECT_EQ(duet_pe_mapped_span_from(&view, 0x2100), 0x400u);
+        // Headers are mapped too.
+        EXPECT_EQ(duet_pe_mapped_span_from(&view, 0u), 0x200u);
+        // Exactly at a section end => mapped, but zero bytes available.
+        EXPECT_EQ(duet_pe_mapped_span_from(&view, 0x2500), 0u);
+        EXPECT_EQ(duet_pe_mapped_span_from(&view, 0x1400), 0u);
+        // Gaps between sections are not mapped.
+        EXPECT_EQ(duet_pe_mapped_span_from(&view, 0x800), 0u);
+        EXPECT_EQ(duet_pe_mapped_span_from(&view, 0x1800), 0u);
+        // Past SizeOfImage, and the null view.
+        EXPECT_EQ(duet_pe_mapped_span_from(&view, 0x3001), 0u);
+        EXPECT_EQ(duet_pe_mapped_span_from(nullptr, 0x2000), 0u);
+
+        // Capacity = (available - 4 count bytes) / 16 bytes per record.
+        EXPECT_EQ(duet_pe_scope_records_capacity(&view, 0x2000), (0x500u - 4u) / 16u);
+        EXPECT_EQ(duet_pe_scope_records_capacity(&view, 0x2100), (0x400u - 4u) / 16u);
+        // Not enough room for even the count word => no records.
+        EXPECT_EQ(duet_pe_scope_records_capacity(&view, 0x24FE), 0u);
+        EXPECT_EQ(duet_pe_scope_records_capacity(&view, 0x2500), 0u);
+        EXPECT_EQ(duet_pe_scope_records_capacity(&view, 0x800), 0u);
+
+        // The point of the clamp: a hostile Count is cut down to what exists,
+        // and every surviving record is provably inside the image.
+        const unsigned int cap = duet_pe_scope_records_capacity(&view, 0x2000);
+        EXPECT_TRUE(cap < 0xFFFFFFFFu);
+        EXPECT_TRUE(duet_pe_span_mapped(&view, 0x2000, 4u + cap * 16u));
+        // One record more would not be.
+        EXPECT_FALSE(duet_pe_span_mapped(&view, 0x2000, 4u + (cap + 1u) * 16u));
+    }
+
     return duetos_host_test::finish_main("pe_unwind_bounds");
 }
