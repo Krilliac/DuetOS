@@ -147,3 +147,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Extend mixed-provider boot coverage to kernelbase profile and sysinfo timing aliases
 - **Claimed**: 2026-07-27T02:18:40Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] thunk-retirement-wave4-apiset-policy
+- **Session**: `Codex-thunk-wave4`
+- **Branch**: `claude/thunk-retirement-wave4`
+- **Files**: `kernel/loader/apiset_static.cpp`
+- **Description**: Pin profile and sysinfo API-set hosts used by the retirement fixture
+- **Claimed**: 2026-07-27T02:18:42Z
+- **Status**: IN PROGRESS
