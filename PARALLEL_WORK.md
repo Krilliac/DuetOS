@@ -155,3 +155,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Pin profile and sysinfo API-set hosts used by the retirement fixture
 - **Claimed**: 2026-07-27T02:18:42Z
 - **Status**: COMPLETED @ 2026-07-27T02:33:59Z
+
+### [ACTIVE] thunk-retirement-wave5-core
+- **Session**: `Codex-thunk-wave5`
+- **Branch**: `claude/thunk-retirement-wave5`
+- **Files**: `kernel/subsystems/win32/thunk* tools/build/*fix* tools/build/*verify* tests/host/*thunk* wiki/reference/Win32-Surface-Status.md wiki/reference/Design-Decisions.md wiki/subsystems/Win32-PE-Subsystem.md wiki/getting-started/History.md`
+- **Description**: Retire four verified core interlocked kernel32 and kernelbase rows while preserving vcruntime shared bytecode
+- **Claimed**: 2026-07-27T02:53:01Z
+- **Status**: IN PROGRESS
