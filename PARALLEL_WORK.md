@@ -339,3 +339,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Serialize
 - **Claimed**: 2026-07-27T05:46:57Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] thread-handle-tid-create
+- **Session**: `Codex-thread-handle-tid-isolation`
+- **Branch**: `claude/thread-handle-tid-isolation`
+- **Files**: `kernel/subsystems/win32/thread_syscall.cpp`
+- **Description**: Publish
+- **Claimed**: 2026-07-27T05:47:02Z
+- **Status**: IN PROGRESS
