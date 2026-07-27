@@ -316,17 +316,17 @@ bool ReadLocalThreadState(Process* process, u64 slot, u32* exit_code, bool* exit
 // idx, returned by CreateThread / SYS_THREAD_CREATE — these
 // back the caller's own threads) and foreign thread handles
 // (kWin32ForeignThreadBase + idx, returned by NtOpenThread —
-// these back a target task in a different process, with the
-// target's owning Process refcount-pinned by the open call).
-// Returns nullptr on any out-of-range / not-in-use handle.
+// these back a target task in a different process). Rows store
+// only immutable, non-reused scheduler TIDs. Returns zero on any
+// out-of-range / not-in-use / completed local handle.
 //
 // Used by SYS_THREAD_SUSPEND / RESUME / GET_CONTEXT /
 // SET_CONTEXT — every cross-task thread op flows through here.
-sched::Task* LookupThreadHandle(Process* caller, u64 handle)
+u64 LookupThreadHandleTid(Process* caller, u64 handle)
 {
     if (caller == nullptr)
     {
-        return nullptr;
+        return 0;
     }
     if (handle >= Process::kWin32ThreadBase && handle < Process::kWin32ThreadBase + Process::kWin32ThreadCap)
     {
@@ -336,23 +336,20 @@ sched::Task* LookupThreadHandle(Process* caller, u64 handle)
         const u64 idx = util::MaskedIndex(handle - Process::kWin32ThreadBase, Process::kWin32ThreadCap);
         const sync::IrqFlags flags = sync::SpinLockAcquire(caller->win32_thread_lock);
         const auto& row = caller->win32_threads[idx];
-        sched::Task* task = (row.in_use && row.handle_open && !row.creating && !row.exited) ? row.task : nullptr;
+        const u64 tid = (row.in_use && row.handle_open && !row.creating && !row.exited) ? row.tid : 0;
         sync::SpinLockRelease(caller->win32_thread_lock, flags);
-        // This is only a synchronized snapshot; the broader foreign/local
-        // Task lifetime pinning audit remains tracked in the isolation queue.
-        return task;
+        return tid;
     }
     if (handle >= Process::kWin32ForeignThreadBase &&
         handle < Process::kWin32ForeignThreadBase + Process::kWin32ForeignThreadCap)
     {
         const u64 idx = util::MaskedIndex(handle - Process::kWin32ForeignThreadBase, Process::kWin32ForeignThreadCap);
-        if (caller->win32_foreign_threads[idx].in_use)
-        {
-            return caller->win32_foreign_threads[idx].task;
-        }
-        return nullptr;
+        const sync::IrqFlags flags = sync::SpinLockAcquire(caller->win32_thread_lock);
+        const u64 tid = caller->win32_foreign_threads[idx].in_use ? caller->win32_foreign_threads[idx].tid : 0;
+        sync::SpinLockRelease(caller->win32_thread_lock, flags);
+        return tid;
     }
-    return nullptr;
+    return 0;
 }
 
 // Resolve a Win32 process handle (kWin32ProcessBase + idx) on
@@ -369,7 +366,7 @@ Process* LookupProcessHandle(Process* caller, u64 handle)
     {
         return nullptr;
     }
-    // Spectre v1 nospec — see LookupThreadHandle for the rationale.
+    // Spectre v1 nospec — see LookupThreadHandleTid for the rationale.
     idx = util::MaskedIndex(idx, Process::kWin32ProcessCap);
     if (!caller->win32_proc_handles[idx].in_use)
     {
@@ -638,7 +635,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
         sched::Task* self = sched::CurrentTask();
         if (proc != nullptr && self != nullptr)
         {
-            ProcessPublishWin32ThreadExit(proc, self, static_cast<u32>(code & 0xFFFFFFFFu));
+            ProcessPublishWin32ThreadExit(proc, sched::TaskId(self), static_cast<u32>(code & 0xFFFFFFFFu));
         }
         // SchedExit is [[noreturn]] — it marks the current task Dead,
         // wakes the reaper, and Schedule()s away forever. The trap
@@ -1311,7 +1308,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
             // Self-thread-exit. Same SchedExit path as SYS_EXIT.
             sched::SchedExit();
         }
-        // LookupThreadHandle handles BOTH local thread handles
+        // LookupThreadHandleTid handles BOTH local thread handles
         // (caller->win32_threads[]) and foreign-process thread
         // handles (caller->win32_foreign_threads[] populated by
         // NtOpenThread). The foreign-handle case requires
@@ -1326,13 +1323,13 @@ void SyscallDispatch(arch::TrapFrame* frame)
                 return;
             }
         }
-        sched::Task* t = LookupThreadHandle(caller, handle);
-        if (t == nullptr)
+        const u64 target_tid = LookupThreadHandleTid(caller, handle);
+        if (target_tid == 0)
         {
             frame->rax = kStatusInvalidHandle;
             return;
         }
-        const sched::KillResult r = sched::SchedKillByPid(sched::TaskId(t));
+        const sched::KillResult r = sched::SchedKillByPid(target_tid);
         if (r == sched::KillResult::Signaled || r == sched::KillResult::Blocked)
         {
             frame->rax = kStatusSuccess;
@@ -1559,13 +1556,9 @@ void SyscallDispatch(arch::TrapFrame* frame)
                 if (target->win32_section_handles[i].in_use)
                     ++count;
             }
-            // win32_threads, win32_foreign_threads — thread handles.
+            // Local + foreign thread handles are counted under their
+            // shared lifecycle lock.
             count += ProcessWin32ThreadHandleCount(target);
-            for (u64 i = 0; i < Process::kWin32ForeignThreadCap; ++i)
-            {
-                if (target->win32_foreign_threads[i].in_use)
-                    ++count;
-            }
             WriteInfo(&count, sizeof(count));
             return;
         }
@@ -2979,41 +2972,34 @@ void SyscallDispatch(arch::TrapFrame* frame)
             return;
         }
         const u64 target_tid = frame->rdi;
-        // Find-and-retain in one locked step (SchedOpenThreadByTid)
-        // — the previous find-then-retain split left a window where
-        // the target could exit and be reaped between the lookup
-        // and the ProcessRetain, making the retain a write into
-        // freed memory. The owner ref returned here is OURS to
-        // release on every failure path below.
-        sched::Task* target_task = nullptr;
-        Process* owner = sched::SchedOpenThreadByTid(target_tid, &target_task);
-        if (owner == nullptr)
+        // Validate inside the scheduler lifetime lock, then store
+        // only the immutable, non-reused TID. A Task* or owning
+        // Process reference must never escape into the handle row.
+        if (!sched::SchedThreadExistsByTid(target_tid))
         {
             frame->rax = 0;
             return;
         }
-        // Scan + claim atomically — without arch::Cli the scan
-        // and the in_use write can be split by a preemption,
-        // letting a concurrent SYS_THREAD_OPEN pick the same slot.
+        // Scan + claim under the process-wide handle lock. Local
+        // IRQ masking cannot serialize another CPU opening or
+        // closing a row in this same process.
         u64 idx = Process::kWin32ForeignThreadCap;
         {
-            arch::Cli();
+            const sync::IrqFlags flags = sync::SpinLockAcquire(caller->win32_thread_lock);
             for (u64 i = 0; i < Process::kWin32ForeignThreadCap; ++i)
             {
                 if (!caller->win32_foreign_threads[i].in_use)
                 {
                     idx = i;
                     caller->win32_foreign_threads[idx].in_use = true;
-                    caller->win32_foreign_threads[idx].task = target_task;
-                    caller->win32_foreign_threads[idx].owner = owner;
+                    caller->win32_foreign_threads[idx].tid = target_tid;
                     break;
                 }
             }
-            arch::Sti();
+            sync::SpinLockRelease(caller->win32_thread_lock, flags);
         }
         if (idx == Process::kWin32ForeignThreadCap)
         {
-            ProcessRelease(owner); // table full — drop the open's ref
             frame->rax = 0;
             return;
         }
@@ -3043,15 +3029,15 @@ void SyscallDispatch(arch::TrapFrame* frame)
             frame->rax = static_cast<u64>(-1);
             return;
         }
-        sched::Task* target = LookupThreadHandle(caller, frame->rdi);
-        if (target == nullptr)
+        const u64 target_tid = LookupThreadHandleTid(caller, frame->rdi);
+        if (target_tid == 0)
         {
             frame->rax = static_cast<u64>(-1);
             return;
         }
         u32 prev_count = 0;
-        const sched::SuspendResult rc = (num == SYS_THREAD_SUSPEND) ? sched::SchedSuspendTask(target, &prev_count)
-                                                                    : sched::SchedResumeTask(target, &prev_count);
+        const sched::SuspendResult rc = (num == SYS_THREAD_SUSPEND) ? sched::SchedSuspendByTid(target_tid, &prev_count)
+                                                                    : sched::SchedResumeByTid(target_tid, &prev_count);
         if (rc != sched::SuspendResult::Signaled)
         {
             frame->rax = static_cast<u64>(-1);
@@ -3075,26 +3061,10 @@ void SyscallDispatch(arch::TrapFrame* frame)
             frame->rax = kStatusAccessDenied;
             return;
         }
-        sched::Task* target = LookupThreadHandle(caller, frame->rdi);
-        if (target == nullptr)
+        const u64 target_tid = LookupThreadHandleTid(caller, frame->rdi);
+        if (target_tid == 0)
         {
             frame->rax = kStatusInvalidHandle;
-            return;
-        }
-        // Get/SetContext is only well-defined on a suspended target.
-        // A running target's TrapFrame is being actively pushed/
-        // popped; reading or writing it would race.
-        if (sched::TaskIsDead(target))
-        {
-            frame->rax = kStatusInvalidHandle;
-            return;
-        }
-        arch::TrapFrame* tf = sched::SchedFindUserTrapFrame(target);
-        if (tf == nullptr)
-        {
-            // No user trap frame — target hasn't entered user mode
-            // yet, or the stack is corrupt.
-            frame->rax = kStatusInvalidParameter;
             return;
         }
         const u64 user_ctx_va = frame->rsi;
@@ -3115,37 +3085,54 @@ void SyscallDispatch(arch::TrapFrame* frame)
         const u32 caller_flags = static_cast<u32>(frame->rdx);
         const bool want_integer = (caller_flags & kContextInteger) == kContextInteger;
         const bool want_control = (caller_flags & kContextControl) == kContextControl;
+        auto context_status = [](sched::ThreadContextResult result) -> u64
+        {
+            if (result == sched::ThreadContextResult::Success)
+                return kStatusSuccess;
+            if (result == sched::ThreadContextResult::NotFound || result == sched::ThreadContextResult::AlreadyDead)
+            {
+                return kStatusInvalidHandle;
+            }
+            return kStatusInvalidParameter;
+        };
 
         if (num == SYS_THREAD_GET_CONTEXT)
         {
+            arch::TrapFrame task_frame{};
+            const auto result = sched::SchedReadUserTrapFrameByTid(target_tid, &task_frame);
+            if (result != sched::ThreadContextResult::Success)
+            {
+                frame->rax = context_status(result);
+                return;
+            }
             Win32Context ctx;
             __builtin_memset(&ctx, 0, sizeof(ctx));
             ctx.ContextFlags = caller_flags;
             if (want_integer)
             {
-                ctx.Rax = tf->rax;
-                ctx.Rcx = tf->rcx;
-                ctx.Rdx = tf->rdx;
-                ctx.Rbx = tf->rbx;
-                ctx.Rbp = tf->rbp;
-                ctx.Rsi = tf->rsi;
-                ctx.Rdi = tf->rdi;
-                ctx.R8 = tf->r8;
-                ctx.R9 = tf->r9;
-                ctx.R10 = tf->r10;
-                ctx.R11 = tf->r11;
-                ctx.R12 = tf->r12;
-                ctx.R13 = tf->r13;
-                ctx.R14 = tf->r14;
-                ctx.R15 = tf->r15;
+                ctx.Rax = task_frame.rax;
+                ctx.Rcx = task_frame.rcx;
+                ctx.Rdx = task_frame.rdx;
+                ctx.Rbx = task_frame.rbx;
+                ctx.Rbp = task_frame.rbp;
+                ctx.Rsi = task_frame.rsi;
+                ctx.Rdi = task_frame.rdi;
+                ctx.R8 = task_frame.r8;
+                ctx.R9 = task_frame.r9;
+                ctx.R10 = task_frame.r10;
+                ctx.R11 = task_frame.r11;
+                ctx.R12 = task_frame.r12;
+                ctx.R13 = task_frame.r13;
+                ctx.R14 = task_frame.r14;
+                ctx.R15 = task_frame.r15;
             }
             if (want_control)
             {
-                ctx.Rip = tf->rip;
-                ctx.Rsp = tf->rsp;
-                ctx.EFlags = static_cast<u32>(tf->rflags);
-                ctx.SegCs = static_cast<u16>(tf->cs);
-                ctx.SegSs = static_cast<u16>(tf->ss);
+                ctx.Rip = task_frame.rip;
+                ctx.Rsp = task_frame.rsp;
+                ctx.EFlags = static_cast<u32>(task_frame.rflags);
+                ctx.SegCs = static_cast<u16>(task_frame.cs);
+                ctx.SegSs = static_cast<u16>(task_frame.ss);
             }
             if (!mm::CopyToUser(reinterpret_cast<void*>(user_ctx_va), &ctx, sizeof(ctx)))
             {
@@ -3163,28 +3150,35 @@ void SyscallDispatch(arch::TrapFrame* frame)
             frame->rax = kStatusAccessViolation;
             return;
         }
+        arch::TrapFrame task_frame{};
+        auto result = sched::SchedReadUserTrapFrameByTid(target_tid, &task_frame);
+        if (result != sched::ThreadContextResult::Success)
+        {
+            frame->rax = context_status(result);
+            return;
+        }
         if (want_integer)
         {
-            tf->rax = ctx.Rax;
-            tf->rcx = ctx.Rcx;
-            tf->rdx = ctx.Rdx;
-            tf->rbx = ctx.Rbx;
-            tf->rbp = ctx.Rbp;
-            tf->rsi = ctx.Rsi;
-            tf->rdi = ctx.Rdi;
-            tf->r8 = ctx.R8;
-            tf->r9 = ctx.R9;
-            tf->r10 = ctx.R10;
-            tf->r11 = ctx.R11;
-            tf->r12 = ctx.R12;
-            tf->r13 = ctx.R13;
-            tf->r14 = ctx.R14;
-            tf->r15 = ctx.R15;
+            task_frame.rax = ctx.Rax;
+            task_frame.rcx = ctx.Rcx;
+            task_frame.rdx = ctx.Rdx;
+            task_frame.rbx = ctx.Rbx;
+            task_frame.rbp = ctx.Rbp;
+            task_frame.rsi = ctx.Rsi;
+            task_frame.rdi = ctx.Rdi;
+            task_frame.r8 = ctx.R8;
+            task_frame.r9 = ctx.R9;
+            task_frame.r10 = ctx.R10;
+            task_frame.r11 = ctx.R11;
+            task_frame.r12 = ctx.R12;
+            task_frame.r13 = ctx.R13;
+            task_frame.r14 = ctx.R14;
+            task_frame.r15 = ctx.R15;
         }
         if (want_control)
         {
-            tf->rip = ctx.Rip;
-            tf->rsp = ctx.Rsp;
+            task_frame.rip = ctx.Rip;
+            task_frame.rsp = ctx.Rsp;
             // RFLAGS sanitisation: keep IF on (otherwise the
             // target wakes with interrupts disabled and the
             // kernel deadlocks at the next timer tick), force
@@ -3199,13 +3193,14 @@ void SyscallDispatch(arch::TrapFrame* frame)
             u64 new_flags = static_cast<u64>(ctx.EFlags);
             new_flags |= kRflagsIf;
             new_flags &= ~(kRflagsTf | kRflagsNt | kRflagsIoplMask);
-            tf->rflags = new_flags;
+            task_frame.rflags = new_flags;
             // Force ring-3 selectors. A malicious caller passing
             // kernel selectors would otherwise iretq into ring 0.
-            tf->cs = 0x2B; // kUserCodeSelector
-            tf->ss = 0x33; // kUserDataSelector
+            task_frame.cs = 0x2B; // kUserCodeSelector
+            task_frame.ss = 0x33; // kUserDataSelector
         }
-        frame->rax = kStatusSuccess;
+        result = sched::SchedWriteUserTrapFrameByTid(target_tid, &task_frame);
+        frame->rax = context_status(result);
         return;
     }
 
@@ -3468,7 +3463,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
             frame->rax = static_cast<u64>(-1);
             return;
         }
-        // Spectre v1 nospec — see LookupThreadHandle for the rationale.
+        // Spectre v1 nospec — see LookupThreadHandleTid for the rationale.
         const u64 slot = util::MaskedIndex(handle - Process::kWin32ThreadBase, Process::kWin32ThreadCap);
         u32 exit_code = 0;
         if (!ReadLocalThreadState(proc, slot, &exit_code, nullptr))
@@ -3491,7 +3486,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
             frame->rax = static_cast<u64>(-1);
             return;
         }
-        // Spectre v1 nospec — see LookupThreadHandle for the rationale.
+        // Spectre v1 nospec — see LookupThreadHandleTid for the rationale.
         const u64 slot = util::MaskedIndex(handle - Process::kWin32ThreadBase, Process::kWin32ThreadCap);
         // Use the explicit completion bit as the authoritative
         // "thread is done" signal instead of dereferencing
@@ -3602,10 +3597,9 @@ void SyscallDispatch(arch::TrapFrame* frame)
                     }
                     else if (h >= Process::kWin32ThreadBase && h < Process::kWin32ThreadBase + Process::kWin32ThreadCap)
                     {
-                        // Use exit_code (set by SYS_EXIT) instead
-                        // of TaskIsDead (th.task may be a reaped
-                        // pointer). Valid as long as in_use holds.
-                        // Spectre v1 nospec — see LookupThreadHandle.
+                        // Use the durable completion row instead of
+                        // resolving scheduler state during the wait.
+                        // Spectre v1 nospec — see LookupThreadHandleTid.
                         const u64 slot = util::MaskedIndex(h - Process::kWin32ThreadBase, Process::kWin32ThreadCap);
                         bool exited = false;
                         if (ReadLocalThreadState(proc, slot, nullptr, &exited) && exited)

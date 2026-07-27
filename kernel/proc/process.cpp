@@ -119,19 +119,24 @@ u32 ProcessWin32ThreadHandleCount(const Process* process)
         if (mutable_process->win32_threads[i].in_use && mutable_process->win32_threads[i].handle_open)
             ++count;
     }
+    for (u32 i = 0; i < Process::kWin32ForeignThreadCap; ++i)
+    {
+        if (mutable_process->win32_foreign_threads[i].in_use)
+            ++count;
+    }
     sync::SpinLockRelease(mutable_process->win32_thread_lock, flags);
     return count;
 }
 
-void ProcessPublishWin32ThreadExit(Process* process, sched::Task* task, u32 exit_code)
+void ProcessPublishWin32ThreadExit(Process* process, u64 tid, u32 exit_code)
 {
-    if (process == nullptr || task == nullptr)
+    if (process == nullptr || tid == 0)
         return;
     const sync::IrqFlags flags = sync::SpinLockAcquire(process->win32_thread_lock);
     for (u32 i = 0; i < Process::kWin32ThreadCap; ++i)
     {
         auto& row = process->win32_threads[i];
-        if (row.in_use && row.task == task)
+        if (row.in_use && row.tid == tid)
         {
             if (!row.exited)
             {
@@ -147,7 +152,7 @@ void ProcessPublishWin32ThreadExit(Process* process, sched::Task* task, u32 exit
                 row.in_use = false;
                 row.exited = false;
                 row.exit_code = 0x103;
-                row.task = nullptr;
+                row.tid = 0;
                 row.user_stack_va = 0;
             }
             break;
@@ -416,7 +421,7 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
         p->win32_threads[i].exited = false;
         p->win32_threads[i].exit_code = 0x103; // STILL_ACTIVE
         p->win32_threads[i].generation = 0;
-        p->win32_threads[i].task = nullptr;
+        p->win32_threads[i].tid = 0;
         p->win32_threads[i].user_stack_va = 0;
     }
     // Win32 foreign-thread table — every slot starts free.
@@ -427,8 +432,7 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
         p->win32_foreign_threads[i].in_use = false;
         for (u32 j = 0; j < sizeof(p->win32_foreign_threads[i]._pad); ++j)
             p->win32_foreign_threads[i]._pad[j] = 0;
-        p->win32_foreign_threads[i].task = nullptr;
-        p->win32_foreign_threads[i].owner = nullptr;
+        p->win32_foreign_threads[i].tid = 0;
     }
     // Win32 section handle table — every slot starts free.
     // Populated by NtCreateSection (SYS_SECTION_CREATE), drained

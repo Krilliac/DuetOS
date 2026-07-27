@@ -56,9 +56,10 @@ enum class SmokeProfile : duetos::u8
     PeWinapi,
 
     /// `smoke=pe-threads`: spawn thread_stress + thread2_smoke +
-    /// syscall_stress.
+    /// thread3_smoke + syscall_stress.
     /// Pins real-DLL thread API resolution, explicit/natural thread
-    /// exits, exit-code tracking, and the retirement contract.
+    /// exits, exit-code tracking, TID/context isolation, and the
+    /// retirement contract.
     PeThreads,
 
     /// `smoke=pe-winkill`: spawn ring3-winkill (real-world MSVC PE).
@@ -88,7 +89,7 @@ enum class SmokeTarget : duetos::u8
     Ring3,     // ring3-smoke-A/B/sandbox
     PeHello,   // ring3-hello-pe
     PeWinapi,  // ring3-hello-winapi
-    PeThreads, // ring3-thread-stress + thread2-smoke + syscall-stress
+    PeThreads, // thread-stress + thread2/thread3-smoke + syscall-stress
     PeWinkill, // ring3-winkill
     PeOther,   // ring3-customdll-test, reg-fopen-test, etc.
                //   (only enabled in profile=None bare-metal full boot)

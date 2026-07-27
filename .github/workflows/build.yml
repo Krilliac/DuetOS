@@ -401,9 +401,9 @@ jobs:
           # a per-profile grub.cfg by tools/qemu/run.sh. Per-profile
           # wall budget is 480s — leaves headroom for the observed
           # ~12:1 wall:guest ratio plus runner variance. Kernel
-          # SmokeProfileSleepAndExit polls tasks_live and exits
-          # within milliseconds of scenario completion; the timeout
-          # only fires on a real wedge.
+          # SmokeProfileSleepAndExit uses the profile's fixed guest
+          # duration before emitting its sentinel; this outer timeout
+          # catches a guest or harness wedge.
           set +e
           echo "::group::smoke profile=${{ matrix.profile }}"
           DUETOS_TIMEOUT=480 \

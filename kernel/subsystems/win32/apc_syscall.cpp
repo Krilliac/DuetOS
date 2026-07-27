@@ -93,36 +93,27 @@ void DoQueueUserApc(arch::TrapFrame* frame)
     // Resolve the target tid to a live task and verify same-process.
     // Cross-process is GAP — drop with -1 so the caller's fallback
     // path (synchronous polling) runs.
-    Process* target_proc = caller;
     if (target_tid != ::duetos::sched::CurrentTaskId())
     {
-        ::duetos::sched::Task* t = ::duetos::sched::SchedFindTaskByTid(target_tid);
-        if (t == nullptr)
-        {
-            frame->rax = kBadResult;
-            return;
-        }
-        Process* t_proc = ::duetos::sched::TaskProcess(t);
-        if (t_proc == nullptr || t_proc != caller)
+        if (!::duetos::sched::SchedTaskBelongsToProcessByTid(target_tid, caller))
         {
             // Cross-process or kernel-only task — refuse.
             frame->rax = kBadResult;
             return;
         }
-        target_proc = t_proc;
     }
 
     // Find a free slot in the target process's queue.
     for (u32 i = 0; i < Process::kApcSlotCap; ++i)
     {
-        if (target_proc->apc_slots[i].in_use == 0)
+        if (caller->apc_slots[i].in_use == 0)
         {
-            target_proc->apc_slots[i].target_tid = target_tid;
-            target_proc->apc_slots[i].pfn = pfn;
-            target_proc->apc_slots[i].data = data;
-            target_proc->apc_slots[i].arg1 = arg1;
-            target_proc->apc_slots[i].arg2 = arg2;
-            target_proc->apc_slots[i].in_use = 1;
+            caller->apc_slots[i].target_tid = target_tid;
+            caller->apc_slots[i].pfn = pfn;
+            caller->apc_slots[i].data = data;
+            caller->apc_slots[i].arg1 = arg1;
+            caller->apc_slots[i].arg2 = arg2;
+            caller->apc_slots[i].in_use = 1;
             frame->rax = 0;
             return;
         }

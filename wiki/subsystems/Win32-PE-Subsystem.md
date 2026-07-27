@@ -145,7 +145,13 @@ live absolute gateway.
 The emulator-safe regression coverage is split by workload:
 `smoke=pe-threads` runs the natural-return and explicit-exit thread PEs,
 requires the thread and bitwise-atomic imports to log `via-dll`, and
-checks the corrected combined free-and-exit argument contract.
+checks the corrected combined free-and-exit argument contract. Its
+`thread3_smoke` PE also suspends a live worker, round-trips the integer
+context only after the task is off-CPU, resumes it, and verifies that an
+exited context stays quiescent after local-row close/reuse. A retained
+`SYS_THREAD_OPEN` foreign handle must reject the reaped TID, and closing
+that handle must allow clean numeric-slot reuse without inheriting the
+prior TID.
 `smoke=pe-winapi` asserts the twenty-two wave-2-6 identity, error,
 atomic, timing, and TLS contracts and requires their `via-dll` bindings.
 Its `thunk_alias_smoke` PE deliberately splits those twenty-two imports

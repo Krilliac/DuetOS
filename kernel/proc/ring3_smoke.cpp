@@ -2856,7 +2856,7 @@ void StartRing3SmokeTask()
     }
 
     // Thread API retirement profile. Default emulator boots skip
-    // these three expensive preloaded-DLL PEs, but smoke=pe-threads
+    // these four expensive preloaded-DLL PEs, but smoke=pe-threads
     // opts into a focused QEMU run with exact runtime sentinels.
     if (::duetos::test::SmokeProfileShouldSpawn(::duetos::test::SmokeTarget::PeThreads))
     {
@@ -2874,6 +2874,12 @@ void StartRing3SmokeTask()
         {
             SpawnPeFile("ring3-thread2-smoke", fs::generated::kBinThread2SmokeBytes,
                         fs::generated::kBinThread2SmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                        mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+            // Thread3 exercises the TID-native suspend/context/resume
+            // path and proves an exited thread's saved context cannot
+            // become runnable again during scheduler/handle churn.
+            SpawnPeFile("ring3-thread3-smoke", fs::generated::kBinThread3SmokeBytes,
+                        fs::generated::kBinThread3SmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
                         mm::kFrameBudgetTrusted, kTickBudgetTrusted);
         }
         // Syscall-stress PE: coverage — OutputDebugStringA,

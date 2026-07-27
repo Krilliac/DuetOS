@@ -123,7 +123,7 @@ u64 ProfileSleepTicks(SmokeProfile profile)
     case SmokeProfile::PeWinapi:
         return kTicksPerSecond * 18; // comprehensive PE + mixed-provider worker fixture
     case SmokeProfile::PeThreads:
-        return kTicksPerSecond * 25; // three thread-heavy PEs + DLL preloads
+        return kTicksPerSecond * 25; // four concurrent thread-heavy PEs + DLL preloads
     case SmokeProfile::PeWinkill:
         return kTicksPerSecond * 10; // real-world MSVC PE w/ DLL preload
     case SmokeProfile::Linux:

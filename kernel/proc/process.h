@@ -712,9 +712,11 @@ struct Process
     static constexpr u64 kWin32EventBase = 0x300;
     static constexpr u64 kWin32EventCap = ::duetos::ipc::kHandleTableCapacity;
 
-    // Win32 thread table — backs CreateThread. Each
-    // slot carries a pointer to the scheduler Task that was
-    // spawned for the thread + a small bit of lifecycle state.
+    // Win32 thread table — backs CreateThread. Each slot carries
+    // the immutable scheduler TID of the spawned thread plus a
+    // small bit of durable lifecycle state. Task pointers are
+    // deliberately never stored here: the scheduler reaper owns
+    // Task lifetime independently of Process lifetime.
     // Handles run kWin32ThreadBase + idx (= 0x400..0x407),
     // disjoint from every other Win32 handle range so a single
     // CloseHandle dispatch can pick the right table by value.
@@ -761,7 +763,7 @@ struct Process
         // ABI compatibility, but creator cleanup/publication must
         // match the exact row generation it reserved.
         u64 generation;
-        sched::Task* task; // scheduler Task spawned for this thread
+        u64 tid;           // monotonic scheduler identity; never reused
         u64 user_stack_va; // base VA of the thread's user stack
     };
     static constexpr u64 kWin32ThreadCap = 8;
@@ -854,12 +856,13 @@ struct Process
     Win32ProcessHandle win32_proc_handles[kWin32ProcessCap];
 
     // Cross-process Win32 thread handles produced by
-    // NtOpenThread(tid). Each entry pins a Task* (the target
-    // thread) AND a Process* (the owner) — the owner ref is
-    // ProcessRetained at open time so the foreign Task can't
-    // be reaped under the inspector's hand. Disjoint from the
-    // local win32_threads[] handle range (kWin32ThreadBase +
-    // idx = 0x400..0x407) so the by-range dispatch in
+    // NtOpenThread(tid). Each entry stores only the target's
+    // immutable, non-reused scheduler TID. Every operation
+    // resolves that identity inside the scheduler lock; neither a
+    // raw Task pointer nor an owning Process reference escapes the
+    // scheduler lifetime boundary. Disjoint from the local
+    // win32_threads[] handle range (kWin32ThreadBase + idx =
+    // 0x400..0x407) so the by-range dispatch in
     // SYS_THREAD_SUSPEND / RESUME / GET_CONTEXT / SET_CONTEXT
     // and DoFileClose can pick the right table by handle
     // value alone.
@@ -881,8 +884,7 @@ struct Process
     {
         bool in_use;
         u8 _pad[7];
-        sched::Task* task; // borrowed
-        Process* owner;    // refcount held while in_use
+        u64 tid; // monotonic scheduler identity; never reused
     };
     static constexpr u64 kWin32ForeignThreadCap = 8;
     static constexpr u64 kWin32ForeignThreadBase = 0x800;
@@ -1625,15 +1627,15 @@ u64 ProcessFindModuleBaseByVa(const Process* proc, u64 va);
 /// by ProcessCreate / ProcessRelease.
 u64 ProcessLiveCount();
 
-/// Count currently-open local Win32 thread handles under the
-/// process's lifecycle lock. Diagnostic and process-information
-/// readers use this instead of racing CreateThread / CloseHandle.
+/// Count currently-open local and foreign Win32 thread handles
+/// under the process's lifecycle lock. Diagnostic and process-
+/// information readers use this instead of racing open/close.
 u32 ProcessWin32ThreadHandleCount(const Process* process);
 
 /// Publish a Win32 thread's terminal state exactly once. The normal
 /// SYS_EXIT path supplies the application code; scheduler kill paths
 /// call it with a fallback and cannot overwrite an earlier result.
-void ProcessPublishWin32ThreadExit(Process* process, sched::Task* task, u32 exit_code);
+void ProcessPublishWin32ThreadExit(Process* process, u64 tid, u32 exit_code);
 
 /// Self-test of the process model's pure helpers: CapSet bitmap
 /// operations, CapName lookup, the denial rate-limit predicate, and

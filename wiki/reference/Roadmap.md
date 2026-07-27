@@ -1028,27 +1028,41 @@ Ranked, with the security one first:
    `NtClose` sequence leaks 100% of the time, and the `ProcessRetain`
    done at assign pins the target `Process` + its `AddressSpace`
    forever. Fix: one arm in `DoFileClose`.
-3. **Fixed 2026-07-26 — local thread handles (0x400 band) are now
-   reclaimed.** `DoFileClose` has the missing local-thread arm, and
-   slot claim, task/exit publication, wait polling, and close/reuse
-   are serialized by the per-process `win32_thread_lock` instead of
-   local-CPU `cli`. This also fixes the optimized SMP failure where
+3. **Fixed 2026-07-27 — local thread handles (0x400 band) now have
+   stable identity and lifecycle.** `DoFileClose` has the missing
+   local-thread arm, and slot claim, identity/exit publication, wait
+   polling, and close/reuse are serialized by the per-process
+   `win32_thread_lock` instead of local-CPU `cli`. Local and foreign
+   thread-handle rows record the scheduler's immutable, non-reused TID
+   rather than retaining a raw, non-owning `Task*`; operations resolve
+   that ID through the scheduler's locked task-lifetime boundary.
+   Reaping can therefore never leave a dereferenceable stale task
+   pointer in either public handle table. This also fixes the
+   optimized SMP failure where
    `SYS_THREAD_WAIT` retained `STILL_ACTIVE` after a peer CPU had
-   exited and been reaped. User tasks now use a prepared
-   pre-publication initializer: their handle and per-thread GS/TLS
-   metadata are complete before the scheduler can run them, and
-   closing the returned handle before the first timeslice no longer
-   suppresses entry. An internal row generation prevents
-   creator-cleanup ABA. A separate completion bit also makes an actual
-   thread exit code of `STILL_ACTIVE` (259) waitable. The
-   mixed-provider PE fixture covers close-before-first-run, runs twelve
-   create/wait/exit-code/close cycles against the eight-slot table, and
-   checks the 259-valued exit case.
-4. **`win32_proc_handles[]` / `win32_foreign_threads[]` are not walked
-   at teardown**, so an app that exits without `CloseHandle` on an
-   `OpenProcess` result (normal — real Windows auto-closes) pins the
-   target `Process` + `AddressSpace` for the life of the kernel.
-   `kCapDebug`-gated. Fix: two loops in `ProcessRelease`.
+   exited and been reaped. User tasks use a prepared pre-publication
+   initializer: their TID and per-thread GS/TLS metadata are complete
+   before the scheduler can run them, and closing the returned handle
+   before the first timeslice no longer suppresses entry. An internal
+   row generation prevents creator-cleanup ABA. A separate completion
+   bit also makes an actual thread exit code of `STILL_ACTIVE` (259)
+   waitable. The mixed-provider PE fixture covers
+   close-before-first-run, runs twelve create/wait/exit-code/close
+   cycles against the eight-slot table, and checks the 259-valued exit
+   case.
+   **Still queued:** `TerminateThread` cancellation is not yet a full
+   asynchronous unwind contract. A target blocked on a wait queue
+   remains kill-requested until its normal producer wakes it, and an
+   in-flight asynchronous syscall has no general cancellation hook
+   that unwinds its subsystem-owned reservations. Add cancellable
+   wait/async-syscall cleanup before treating forced termination as
+   immediate or resource-complete.
+4. **`win32_proc_handles[]` is not walked at teardown**, so an app that
+   exits without `CloseHandle` on an `OpenProcess` result (normal —
+   real Windows auto-closes) pins the target `Process` + `AddressSpace`
+   for the life of the kernel. `kCapDebug`-gated. Foreign thread rows
+   now retain only immutable TIDs and need no teardown release. Fix:
+   one `win32_proc_handles[]` loop in `ProcessRelease`.
 5. **Mutex ownership is not force-released when the owning task dies.**
    Only the explicit-`CloseHandle`-while-holding path drops it, so a
    worker killed while holding a mutex leaves `m->owner` a dead `Task*`
@@ -1071,6 +1085,21 @@ bases, not handle bands, and must be excluded.
 Not audited, out of that audit's fence and still open: whether
 `mm::CopyFromUser`/`CopyToUser` validate a 32-bit process's range with
 no 64-bit canonical-address assumption baked in.
+
+The focused `thread3_smoke` regression now opens a live worker by TID
+through `SYS_THREAD_OPEN`, exercises suspend/context/resume through the
+foreign-handle row, then proves exit/reaping rejects the retained stale
+handle and that closing it permits a clean numeric-slot reuse.
+
+A local KVM-backed x86_64-debug validation run also exposed an older
+socket IRQ-state livelock before any PE fixture launched: `SocketAlloc`
+executes a raw `sti` inside the `int 0x80` trap, so the timer repeatedly
+enters at nesting depth two and the debug defer log can starve the
+instruction after `sti`. Replace the socket table's raw `Cli`/`Sti`
+pairs with an IRQ-save lock contract; separately make interrupt nesting
+distinguish hardware IRQ frames from syscall/exception frames and
+rate-limit the defer diagnostic. Do not weaken the nested-IRQ scheduling
+guard.
 
 ### Other Win32 thunk defects found 2026-07-26 (not yet fixed)
 

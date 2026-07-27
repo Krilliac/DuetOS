@@ -2869,7 +2869,7 @@ void ScheduleLockedHandoff(sync::IrqFlags lock_flags)
             // machine. Transition Running → Dead and DEFER the
             // zombie-push exactly as SchedExit does.
             prev->state = TaskState::Dead;
-            core::ProcessPublishWin32ThreadExit(prev->process, prev, 1);
+            core::ProcessPublishWin32ThreadExit(prev->process, prev->id, 1);
             __atomic_fetch_add(&g_tasks_exited, 1, __ATOMIC_RELAXED);
             SchedCpuDecLive();
             // Recovery Class C hook — fired for SchedExit too. Keep the
@@ -3498,7 +3498,7 @@ void SchedExit()
     // code. Other termination paths (NtTerminateThread, process kill,
     // tick/cap budget) converge here without one; publish a generic
     // non-zero fallback exactly once so handle waits cannot hang.
-    core::ProcessPublishWin32ThreadExit(self->process, self, 1);
+    core::ProcessPublishWin32ThreadExit(self->process, self->id, 1);
     self->state = TaskState::Dead;
     __atomic_fetch_add(&g_tasks_exited, 1, __ATOMIC_RELAXED);
     SchedCpuDecLive();
@@ -5183,6 +5183,17 @@ bool IsProtectedTask(const Task* t)
     return false;
 }
 
+Task* FindTaskByTidLocked(u64 tid)
+{
+    sync::SpinLockAssertHeld(g_sched_lock);
+    for (Task* task = g_all_tasks_head; task != nullptr; task = task->all_next)
+    {
+        if (task->id == tid)
+            return task;
+    }
+    return nullptr;
+}
+
 // Detach `t` from g_sleep_head. O(1) via the sleep_prev back-
 // pointer; no-op if t isn't on the list (both links nullptr).
 // Caller holds CLI.
@@ -5225,49 +5236,12 @@ KillResult SchedKillByPid(u64 pid)
     // restores them on every return path.
     sync::SpinLockGuard guard(g_sched_lock);
 
-    // Walk every possible home of a Task* with this id. Ordered
-    // so the hottest cases (running + ready runqueues) hit first.
-    Task* target = nullptr;
-    Task* cur = Current();
-    if (cur != nullptr && cur->id == pid)
-    {
-        target = cur;
-    }
+    // Resolve from the scheduler-owned all-tasks registry. Unlike
+    // the old runqueue/sleep walk this includes tasks parked on a
+    // WaitQueue and keeps the Task pointer inside this lock hold.
+    Task* target = FindTaskByTidLocked(pid);
     if (target == nullptr)
     {
-        ForEachRunqueueTask(
-            [&](Task* t)
-            {
-                if (t->id == pid)
-                {
-                    target = t;
-                    return true;
-                }
-                return false;
-            });
-    }
-    if (target == nullptr)
-    {
-        for (Task* t = g_sleep_head; t != nullptr; t = t->sleep_next)
-        {
-            if (t->id == pid)
-            {
-                target = t;
-                break;
-            }
-        }
-    }
-    if (target == nullptr)
-    {
-        // Zombie list is linked via `next`; walking it just for
-        // a report-as-dead case keeps the caller's model clean.
-        for (Task* t = g_zombies; t != nullptr; t = t->next)
-        {
-            if (t->id == pid)
-            {
-                return KillResult::AlreadyDead;
-            }
-        }
         return KillResult::NotFound;
     }
 
@@ -5320,25 +5294,11 @@ u64 SchedKillByProcess(core::Process* target)
     u32 ntids = 0;
     {
         sync::SpinLockGuard guard(g_sched_lock);
-        auto collect = [&](Task* t)
+        for (Task* task = g_all_tasks_head; task != nullptr; task = task->all_next)
         {
-            if (t == nullptr || t->process != target)
-                return;
-            if (t->state == TaskState::Dead)
-                return;
-            if (ntids < kMaxTidsPerKill)
-                tids[ntids++] = t->id;
-        };
-        Task* cur = Current();
-        collect(cur);
-        ForEachRunqueueTask(
-            [&](Task* t)
-            {
-                collect(t);
-                return false;
-            });
-        for (Task* t = g_sleep_head; t != nullptr; t = t->sleep_next)
-            collect(t);
+            if (task->process == target && task->state != TaskState::Dead && ntids < kMaxTidsPerKill)
+                tids[ntids++] = task->id;
+        }
     }
 
     u64 signalled = 0;
@@ -5437,6 +5397,96 @@ SuspendResult SchedResumeTask(Task* target, u32* prev_count_out)
         }
     }
     return SuspendResult::Signaled;
+}
+
+SuspendResult SchedSuspendByTid(u64 target_tid, u32* prev_count_out)
+{
+    sync::SpinLockGuard guard(g_sched_lock);
+    Task* target = FindTaskByTidLocked(target_tid);
+    if (target == nullptr)
+        return SuspendResult::NotFound;
+    if (target->state == TaskState::Dead)
+        return SuspendResult::AlreadyDead;
+    if (prev_count_out != nullptr)
+        *prev_count_out = target->suspend_count;
+    ++target->suspend_count;
+    return SuspendResult::Signaled;
+}
+
+SuspendResult SchedResumeByTid(u64 target_tid, u32* prev_count_out)
+{
+    sync::SpinLockGuard guard(g_sched_lock);
+    Task* target = FindTaskByTidLocked(target_tid);
+    if (target == nullptr)
+        return SuspendResult::NotFound;
+    if (target->state == TaskState::Dead)
+        return SuspendResult::AlreadyDead;
+    if (prev_count_out != nullptr)
+        *prev_count_out = target->suspend_count;
+    if (target->suspend_count == 0)
+        return SuspendResult::Signaled;
+    --target->suspend_count;
+    if (target->suspend_count == 0 && SuspendedListRemove(target))
+    {
+        target->state = TaskState::Ready;
+        RunqueuePush(target);
+    }
+    return SuspendResult::Signaled;
+}
+
+namespace
+{
+
+ThreadContextResult ResolveContextFrameLocked(u64 target_tid, arch::TrapFrame** frame_out)
+{
+    sync::SpinLockAssertHeld(g_sched_lock);
+    Task* target = FindTaskByTidLocked(target_tid);
+    if (target == nullptr)
+        return ThreadContextResult::NotFound;
+    if (target->state == TaskState::Dead)
+        return ThreadContextResult::AlreadyDead;
+    if (target->suspend_count == 0)
+        return ThreadContextResult::NotSuspended;
+    if (__atomic_load_n(&target->on_cpu, __ATOMIC_ACQUIRE) != 0)
+        return ThreadContextResult::Running;
+    arch::TrapFrame* frame = SchedFindUserTrapFrame(target);
+    if (frame == nullptr)
+        return ThreadContextResult::NoUserFrame;
+    if (frame_out != nullptr)
+        *frame_out = frame;
+    return ThreadContextResult::Success;
+}
+
+} // namespace
+
+ThreadContextResult SchedReadUserTrapFrameByTid(u64 target_tid, arch::TrapFrame* frame_out)
+{
+    if (frame_out == nullptr)
+        return ThreadContextResult::NoUserFrame;
+    sync::SpinLockGuard guard(g_sched_lock);
+    arch::TrapFrame* source = nullptr;
+    const ThreadContextResult result = ResolveContextFrameLocked(target_tid, &source);
+    if (result == ThreadContextResult::Success)
+        *frame_out = *source;
+    return result;
+}
+
+ThreadContextResult SchedWriteUserTrapFrameByTid(u64 target_tid, const arch::TrapFrame* frame)
+{
+    if (frame == nullptr)
+        return ThreadContextResult::NoUserFrame;
+    sync::SpinLockGuard guard(g_sched_lock);
+    arch::TrapFrame* target = nullptr;
+    const ThreadContextResult result = ResolveContextFrameLocked(target_tid, &target);
+    if (result != ThreadContextResult::Success)
+        return result;
+
+    // This is a lifetime/quiescence primitive, not an ABI-policy
+    // layer. The syscall builds this frame from a scheduler-owned
+    // snapshot and sanitizes only the register classes requested
+    // by the caller (including PE32-compatible selectors).
+    *target = *frame;
+    return ThreadContextResult::Success;
 }
 
 // Walk every list that holds a Task and check two invariants:
@@ -5841,12 +5891,9 @@ Task* SchedFindTaskByTid(u64 target_tid)
     }
     // Same walk shape as SchedFindProcessByPid — every list that
     // can hold a Task. Returns the first task whose id matches.
-    // The returned Task* is only reap-stable while the caller can
-    // rule out the task exiting (e.g. same-process targets whose
-    // lifetime the caller controls). A caller that stores the
-    // pointer or the owning Process beyond that window must use
-    // SchedOpenThreadByTid below, which retains the owning
-    // Process under the same lock that found the task.
+    // The returned Task* is only transiently valid. User-visible
+    // handles must store the immutable TID and use scheduler-owned
+    // by-TID operations instead of retaining this pointer.
     sync::SpinLockGuard guard(g_sched_lock);
     auto match = [&](Task* t) -> Task* { return (t != nullptr && t->id == target_tid) ? t : nullptr; };
     Task* hit = match(Current());
@@ -5875,53 +5922,34 @@ Task* SchedFindTaskByTid(u64 target_tid)
     return hit;
 }
 
-core::Process* SchedOpenThreadByTid(u64 target_tid, Task** task_out)
+bool SchedThreadExistsByTid(u64 target_tid)
 {
-    if (task_out != nullptr)
-    {
-        *task_out = nullptr;
-    }
     if (!cpu::BspInstalled())
     {
-        return nullptr;
+        return false;
     }
-    // Find-and-retain under one g_sched_lock hold. This is the
-    // reap-safe variant SYS_THREAD_OPEN needs: between a plain
-    // SchedFindTaskByTid returning and the caller's ProcessRetain,
-    // the target could exit and be reaped — the retain would then
-    // write freed memory. Retaining the owning Process inside the
-    // same critical section that proved the task alive closes the
-    // window: the reaper can't free a Process whose refcount we
-    // hold, and the Task struct itself is owned by that Process's
-    // lifetime for handle-table purposes. Kernel-only tasks
-    // (process == nullptr) return nullptr — they have no NT
-    // identity to open. Caller owns one ProcessRelease.
-    //
-    // Walks the all-tasks registry, not the runqueue/sleep/zombie
-    // triple SchedFindTaskByTid covers: a task Blocked on a wait
-    // queue is on NONE of those lists (same reasoning as
-    // SchedProcessAlive), and NtOpenThread on a thread parked in
-    // a blocking syscall must still succeed.
+    // Validate identity entirely inside the scheduler lifetime
+    // lock. The caller stores only the monotonic TID; Task and
+    // Process pointers never escape. The all-tasks registry finds
+    // Blocked tasks that are absent from run/sleep queues.
     sync::SpinLockGuard guard(g_sched_lock);
-    Task* hit = nullptr;
-    for (Task* t = g_all_tasks_head; t != nullptr; t = t->all_next)
-    {
-        if (t->id == target_tid)
-        {
-            hit = t;
-            break;
-        }
-    }
+    Task* hit = FindTaskByTidLocked(target_tid);
     if (hit == nullptr || hit->state == TaskState::Dead || hit->process == nullptr)
     {
-        return nullptr;
+        return false;
     }
-    core::ProcessRetain(hit->process);
-    if (task_out != nullptr)
+    return true;
+}
+
+bool SchedTaskBelongsToProcessByTid(u64 target_tid, const core::Process* process)
+{
+    if (!cpu::BspInstalled() || process == nullptr)
     {
-        *task_out = hit;
+        return false;
     }
-    return hit->process;
+    sync::SpinLockGuard guard(g_sched_lock);
+    Task* hit = FindTaskByTidLocked(target_tid);
+    return hit != nullptr && hit->state != TaskState::Dead && hit->process == process;
 }
 
 // ---------------------------------------------------------------------------
