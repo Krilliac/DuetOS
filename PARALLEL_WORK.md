@@ -436,13 +436,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-27T06:14:34Z
 - **Status**: COMPLETED @ 2026-07-27T06:40:14Z
 
-### [ACTIVE] thread-handle-tid-profile-timing
+### [DONE] thread-handle-tid-profile-timing
 - **Session**: `Nathan-48094`
 - **Branch**: `claude/thread-handle-tid-isolation`
 - **Files**: `kernel/test/smoke_profile.cpp`
 - **Description**: Keep pe-threads timing documentation synchronized with four PE fixtures
 - **Claimed**: 2026-07-27T06:15:47Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-27T06:40:16Z
 
 ### [ACTIVE] thread-handle-tid-doc-sync
 - **Session**: `Codex-thread-handle-tid-isolation`
