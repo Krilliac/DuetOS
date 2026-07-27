@@ -435,3 +435,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Require thread3 isolation sentinels in Bochs
 - **Claimed**: 2026-07-27T06:14:34Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] thread-handle-tid-profile-timing
+- **Session**: `Nathan-48094`
+- **Branch**: `claude/thread-handle-tid-isolation`
+- **Files**: `kernel/test/smoke_profile.cpp`
+- **Description**: Keep pe-threads timing documentation synchronized with four PE fixtures
+- **Claimed**: 2026-07-27T06:15:47Z
+- **Status**: IN PROGRESS
