@@ -307,7 +307,7 @@ void DoFileClose(arch::TrapFrame* frame)
                 h.in_use = false;
                 h.exited = false;
                 h.exit_code = 0x103;
-                h.task = nullptr;
+                h.tid = 0;
                 h.user_stack_va = 0;
             }
         }
@@ -316,27 +316,19 @@ void DoFileClose(arch::TrapFrame* frame)
     else if (handle >= core::Process::kWin32ForeignThreadBase &&
              handle < core::Process::kWin32ForeignThreadBase + core::Process::kWin32ForeignThreadCap)
     {
-        // Cross-process thread handles (NtOpenThread results)
-        // pin a Task* + a refcount on its owning Process. Drop
-        // the refcount on close. The Task* itself isn't reaped
-        // here — that's the scheduler's job once the task hits
-        // Dead and the reaper picks it up. Closing the last
-        // foreign-thread handle on a dead task's owner Process
-        // simply lets the Process get reaped per the same
-        // contract as the win32_proc_handles arm above.
+        // Cross-process thread handles store only an immutable
+        // scheduler TID. Serialize close against OpenThread and
+        // every lookup snapshot; no Task or Process ownership is
+        // carried by the row.
         const u64 slot = handle - core::Process::kWin32ForeignThreadBase;
-        core::Process::Win32ForeignThreadHandle& h = proc->win32_foreign_threads[slot];
+        const sync::IrqFlags flags = sync::SpinLockAcquire(proc->win32_thread_lock);
+        auto& h = proc->win32_foreign_threads[slot];
         if (h.in_use)
         {
-            core::Process* owner = h.owner;
             h.in_use = false;
-            h.task = nullptr;
-            h.owner = nullptr;
-            if (owner != nullptr)
-            {
-                core::ProcessRelease(owner);
-            }
+            h.tid = 0;
         }
+        sync::SpinLockRelease(proc->win32_thread_lock, flags);
     }
     else if (handle >= core::Process::kWin32DirBase &&
              handle < core::Process::kWin32DirBase + core::Process::kWin32DirCap)

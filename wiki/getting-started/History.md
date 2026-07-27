@@ -1319,8 +1319,8 @@ The wave also corrected `FreeLibraryAndExitThread`: its old
 but the real two-argument export passes RDX correctly. The
 `syscall_stress` PE uses distinct handle and code values and verifies
 the recorded child exit code. The focused `smoke=pe-threads` QEMU
-profile runs all three thread-focused PEs and gates all four `via-dll` bindings in
-CI. `GetExitCodeThread` now returns FALSE for
+profile runs four thread-focused PEs and gates all four `via-dll`
+bindings in CI. `GetExitCodeThread` now returns FALSE for
 an invalid handle or null output pointer instead of manufacturing
 STILL_ACTIVE success.
 

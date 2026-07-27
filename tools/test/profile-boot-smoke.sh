@@ -28,8 +28,9 @@
 #                 Carries the [vcruntime140] / [strings] / [heap] /
 #                 [advapi] / [perf-counter] / [calc] / [files] /
 #                 [clock] / [block] signatures.
-#   pe-threads  — spawn thread_stress + thread2_smoke + syscall_stress; verify
-#                 real-DLL thread imports and exit-code contracts.
+#   pe-threads  — spawn thread_stress + thread2_smoke + thread3_smoke +
+#                 syscall_stress; verify real-DLL thread imports, TID-native
+#                 context isolation, and exit-code contracts.
 #   pe-winkill  — spawn ring3-winkill (real-world MSVC PE).
 #                 "pe spawn name=ring3-winkill" + "Windows Kill ".
 #   linux       — spawn the seven Linux ABI smokes.
@@ -243,6 +244,11 @@ case "${PROFILE}" in
             'pe spawn name="ring3-thread2-smoke"'
             "[thread2_smoke] GetExitCodeThread     = PASS (0x42)"
             "[ring3-thread2-smoke] PASS"
+            'pe spawn name="ring3-thread3-smoke"'
+            "[thread3_smoke] local context round-trip= PASS"
+            "[thread3_smoke] foreign close/reuse      = PASS"
+            "[thread3_smoke] exited context quiescent= PASS"
+            "[ring3-thread3-smoke] PASS"
             'pe spawn name="ring3-syscall-stress"'
             "[syscall-stress] main: FreeLibraryAndExitThread(childB)"
             "[syscall-stress] main: PASS"

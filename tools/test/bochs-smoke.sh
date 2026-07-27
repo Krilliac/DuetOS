@@ -191,6 +191,11 @@ case "${PROFILE}" in
             'pe spawn name="ring3-thread2-smoke"'
             "[thread2_smoke] GetExitCodeThread     = PASS (0x42)"
             "[ring3-thread2-smoke] PASS"
+            'pe spawn name="ring3-thread3-smoke"'
+            "[thread3_smoke] local context round-trip= PASS"
+            "[thread3_smoke] foreign close/reuse      = PASS"
+            "[thread3_smoke] exited context quiescent= PASS"
+            "[ring3-thread3-smoke] PASS"
             'pe spawn name="ring3-syscall-stress"'
             "[syscall-stress] main: FreeLibraryAndExitThread(childB)"
             "[syscall-stress] main: PASS"

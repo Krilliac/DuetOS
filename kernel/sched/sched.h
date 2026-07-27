@@ -144,8 +144,8 @@ bool SchedSehDeliveryAllowed(Task* t, u64 fault_rip);
 /// need to hold the reference past the immediate scan window
 /// must call `core::ProcessRetain` — and accept the residual
 /// race that the process can exit between this returning and
-/// the retain (use a find-and-retain primitive like
-/// SchedOpenThreadByTid where that matters).
+/// the retain. Persistent process handles require a dedicated
+/// scheduler-owned find-and-retain primitive.
 ///
 /// Used by SYS_PROCESS_OPEN (NtOpenProcess) to translate a PID
 /// into a Process pointer the kernel can hand back as a handle.
@@ -186,22 +186,21 @@ u64 SchedCountChildrenOfPid(u64 parent_pid);
 /// Misses tasks Blocked on a wait queue (they sit on none of
 /// the walked lists). Returns nullptr if no live task matches.
 ///
-/// The returned Task* is reap-stable only while the caller can
-/// rule out the task exiting. Storing the pointer (or its
-/// owning Process) beyond that needs SchedOpenThreadByTid.
+/// The returned Task* is a transient diagnostic/legacy lookup
+/// only. It must never be stored in a user-visible handle or used
+/// after a scheduler lifetime boundary.
 Task* SchedFindTaskByTid(u64 target_tid);
 
-/// Reap-safe find-and-retain for the cross-process thread-handle
-/// opener (SYS_THREAD_OPEN / NtOpenThread). Walks the global
-/// all-tasks registry under g_sched_lock — so Blocked tasks are
-/// found too — and, when a live user task matches, retains its
-/// owning Process INSIDE the same critical section that proved
-/// the task alive (closing the find→retain reap race a split
-/// lookup has). Returns the retained Process* (caller owns one
-/// `core::ProcessRelease`) and stores the Task* through
-/// `task_out`; returns nullptr (and leaves `*task_out` null) for
-/// no-match, Dead tasks, and kernel-only tasks.
-core::Process* SchedOpenThreadByTid(u64 target_tid, Task** task_out);
+/// Validate an immutable TID for SYS_THREAD_OPEN while holding the
+/// scheduler lifetime lock. Finds Blocked tasks through the global
+/// all-tasks registry and rejects Dead/kernel-only tasks. No Task*
+/// or Process ownership escapes the call.
+bool SchedThreadExistsByTid(u64 target_tid);
+
+/// Authorize a TID-scoped operation against an owning process without
+/// letting a scheduler-owned Task* escape the lifetime lock. Returns
+/// false for missing, dead, kernel-only, or foreign-process tasks.
+bool SchedTaskBelongsToProcessByTid(u64 target_tid, const core::Process* process);
 
 /// True iff the task's state is Dead. Used by syscalls that track
 /// thread-handle signaling (WaitForSingleObject on a CreateThread
@@ -800,6 +799,28 @@ SuspendResult SchedSuspendTask(Task* target, u32* prev_count_out);
 /// is a no-op (matching NT — NtResumeThread returns 0 and stays
 /// at 0 in that case).
 SuspendResult SchedResumeTask(Task* target, u32* prev_count_out);
+
+/// TID-native variants used by Win32 handles. They resolve the
+/// immutable, non-reused identity and perform the whole operation
+/// under g_sched_lock, so a reaped Task* can never escape.
+SuspendResult SchedSuspendByTid(u64 target_tid, u32* prev_count_out);
+SuspendResult SchedResumeByTid(u64 target_tid, u32* prev_count_out);
+
+enum class ThreadContextResult : u8
+{
+    Success = 0,
+    NotFound = 1,
+    AlreadyDead = 2,
+    NotSuspended = 3,
+    Running = 4,
+    NoUserFrame = 5,
+};
+
+/// Snapshot or replace the outermost user TrapFrame of a suspended,
+/// off-CPU task. Resolution, quiescence checks, and the copy happen
+/// in one scheduler-lock hold; no stack pointer escapes.
+ThreadContextResult SchedReadUserTrapFrameByTid(u64 target_tid, arch::TrapFrame* frame_out);
+ThreadContextResult SchedWriteUserTrapFrameByTid(u64 target_tid, const arch::TrapFrame* frame);
 
 /// Start the dead-task reaper kernel thread. Run once after SchedInit +
 /// the keyboard/driver init pass. The reaper sleeps on a WaitQueue;

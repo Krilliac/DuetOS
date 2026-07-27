@@ -45,6 +45,7 @@ struct ThreadPrepareContext
     u64 generation;
     u64 user_stack_va;
     u64 user_gs_base;
+    u64 tid;
 };
 
 void PrepareWin32ThreadTask(sched::Task* task, void* raw_context)
@@ -57,11 +58,13 @@ void PrepareWin32ThreadTask(sched::Task* task, void* raw_context)
         sched::SchedSetUserGsOverride(task, context->user_gs_base);
 
     core::Process* process = context->process;
+    context->tid = sched::TaskId(task);
+    KASSERT(context->tid != 0, "win32/thread", "prepared task has invalid TID");
     const sync::IrqFlags flags = sync::SpinLockAcquire(process->win32_thread_lock);
     auto& row = process->win32_threads[context->slot];
-    KASSERT(row.in_use && row.creating && row.generation == context->generation && row.task == nullptr, "win32/thread",
+    KASSERT(row.in_use && row.creating && row.generation == context->generation && row.tid == 0, "win32/thread",
             "prepared task lost reserved handle slot");
-    row.task = task;
+    row.tid = context->tid;
     row.user_stack_va = context->user_stack_va;
     sync::SpinLockRelease(process->win32_thread_lock, flags);
 }
@@ -380,7 +383,7 @@ void DoThreadCreate(arch::TrapFrame* frame)
     // yield, and a concurrent SYS_THREAD_CREATE on another CPU must
     // not pick the same slot. Disabling local interrupts alone does
     // not serialize that peer.
-    // The handle metadata (task, user_stack_va) gets filled in further
+    // The handle metadata (tid, user_stack_va) gets filled in further
     // down once SchedCreateUser succeeds.
     u32 slot = Process::kWin32ThreadCap;
     u64 claim_generation = 0;
@@ -402,7 +405,7 @@ void DoThreadCreate(arch::TrapFrame* frame)
                 if (proc->win32_threads[i].generation == 0)
                     ++proc->win32_threads[i].generation;
                 claim_generation = proc->win32_threads[i].generation;
-                proc->win32_threads[i].task = nullptr;
+                proc->win32_threads[i].tid = 0;
                 proc->win32_threads[i].user_stack_va = 0;
                 stack_base_va = proc->thread_stack_cursor;
                 proc->thread_stack_cursor += stack_pages * mm::kPageSize;
@@ -430,7 +433,7 @@ void DoThreadCreate(arch::TrapFrame* frame)
             th.handle_open = false;
             th.exited = false;
             th.exit_code = 0x103;
-            th.task = nullptr;
+            th.tid = 0;
             th.user_stack_va = 0;
         }
         sync::SpinLockRelease(proc->win32_thread_lock, flags);
@@ -569,7 +572,7 @@ void DoThreadCreate(arch::TrapFrame* frame)
     hexd(static_cast<u8>(slot));
     s_name[nlen] = '\0';
 
-    ThreadPrepareContext prepare_context{proc, slot, claim_generation, stack_base_va, per_thread_teb};
+    ThreadPrepareContext prepare_context{proc, slot, claim_generation, stack_base_va, per_thread_teb, 0};
     sched::Task* t = sched::SchedCreateUserPrepared(&Ring3ThreadEntry, desc, s_name, proc, &PrepareWin32ThreadTask,
                                                     &prepare_context);
     if (t == nullptr)
@@ -600,8 +603,9 @@ void DoThreadCreate(arch::TrapFrame* frame)
     {
         const sync::IrqFlags flags = sync::SpinLockAcquire(proc->win32_thread_lock);
         auto& th = proc->win32_threads[slot];
-        KASSERT(th.in_use && th.creating && th.generation == claim_generation && th.task == t, "win32/thread",
-                "published task lost reserved handle slot");
+        KASSERT(th.in_use && th.creating && th.generation == claim_generation && th.tid == prepare_context.tid &&
+                    th.tid != 0,
+                "win32/thread", "published task lost reserved handle slot");
         th.handle_open = true;
         th.creating = false;
         frame->rax = handle;
