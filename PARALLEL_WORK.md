@@ -196,13 +196,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-27T03:31:44Z
 - **Status**: COMPLETED @ 2026-07-27T03:56:50Z
 
-### [ACTIVE] thunk-retirement-wave6-tls-smoke
+### [DONE] thunk-retirement-wave6-tls-smoke
 - **Session**: `Codex-thunk-wave6`
 - **Branch**: `claude/thunk-retirement-wave6`
 - **Files**: `userland/apps/tls_smoke/* tools/build/build-tls-smoke.sh`
 - **Description**: Make TLS smoke failures terminal and require full real-DLL verdict
 - **Claimed**: 2026-07-27T03:31:45Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-27T03:56:52Z
 
 ### [ACTIVE] thunk-retirement-wave6-tls-runtime
 - **Session**: `Codex-thunk-wave6`
