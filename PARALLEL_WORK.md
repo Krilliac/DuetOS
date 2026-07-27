@@ -420,13 +420,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-27T06:14:31Z
 - **Status**: COMPLETED @ 2026-07-27T06:40:09Z
 
-### [ACTIVE] thread-handle-tid-profile-qemu
+### [DONE] thread-handle-tid-profile-qemu
 - **Session**: `Nathan-48066`
 - **Branch**: `claude/thread-handle-tid-isolation`
 - **Files**: `tools/test/profile-boot-smoke.sh`
 - **Description**: Require thread3 isolation sentinels in QEMU
 - **Claimed**: 2026-07-27T06:14:32Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-27T06:40:11Z
 
 ### [ACTIVE] thread-handle-tid-profile-bochs
 - **Session**: `Nathan-48079`
