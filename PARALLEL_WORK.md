@@ -91,3 +91,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Add kernel32 kernelbase and API-set IAT routing boot coverage for retired imports
 - **Claimed**: 2026-07-27T00:53:17Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] thunk-retirement-wave2-timeout
+- **Session**: `Codex-thunk-wave2`
+- **Branch**: `claude/thunk-retirement-wave2`
+- **Files**: `kernel/test/smoke_profile.cpp`
+- **Description**: Increase pe-winapi guest timeout for the second mixed-provider PE and worker-thread oracle
+- **Claimed**: 2026-07-27T01:08:47Z
+- **Status**: IN PROGRESS
