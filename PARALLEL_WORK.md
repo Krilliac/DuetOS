@@ -300,10 +300,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-27T05:05:52Z
 - **Status**: COMPLETED @ 2026-07-27T05:22:34Z
 
-### [ACTIVE] kernel-thread-deferred-api
+### [DONE] kernel-thread-deferred-api
 - **Session**: `Codex-wave6-thread-wait-fix`
 - **Branch**: `claude/kernel-thread-wait-fix`
 - **Files**: `kernel/sched/sched.h`
 - **Description**: No description provided
 - **Claimed**: 2026-07-27T05:06:09Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-27T05:23:04Z
