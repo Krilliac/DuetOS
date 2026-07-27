@@ -1303,29 +1303,16 @@ enum SyscallNumber : u64
     // SYS_THREAD_SUSPEND — increment the target thread's
     // suspend count. Backs ntdll.dll's NtSuspendThread (and
     // kernel32.dll's SuspendThread once that DLL is rewritten).
-    //   rdi = thread handle (kWin32ThreadBase + idx in caller's
-    //         own win32_threads[] table — v0 only supports
-    //         caller-local thread handles; cross-process suspend
-    //         needs NtOpenThread which doesn't exist yet).
+    //   rdi = local CreateThread handle or a foreign handle
+    //         returned by SYS_THREAD_OPEN.
     //   rax = previous suspend count on success (a small
     //         non-negative number) or u64(-1) on any error
     //         (handle not in caller's table, target dead, etc.).
     //
-    // No cap-gate today: spawning a thread (kCapSpawnThread) is
-    // already a privileged operation and a process can only
-    // suspend its OWN threads in v0, so the spawn cap is the
-    // implicit gate — a sandboxed process that doesn't have
-    // kCapSpawnThread has no thread handles to suspend in the
-    // first place. When cross-process thread suspend lands
-    // (NtOpenThread + a foreign thread handle table), the cap
-    // gate moves to the OPEN op and this stays cap-free for
-    // the same reason NtSuspendThread is cap-free in NT once
-    // you have the handle.
-    //
-    // Single-CPU correctness: the suspender is the running task
-    // by definition; the target cannot also be running; no IPI
-    // is needed. SMP follow-up will need an IPI to evict a
-    // running-on-another-core target.
+    // Cap-gated on kCapDebug because the same operation accepts a
+    // foreign handle. The scheduler resolves the row's immutable
+    // TID under its lifetime lock; no Task pointer escapes into
+    // the process handle table.
     SYS_THREAD_SUSPEND = 135,
 
     // SYS_THREAD_RESUME — decrement the target thread's
@@ -1392,11 +1379,11 @@ enum SyscallNumber : u64
     // SUSPEND / RESUME / GET / SET_CONTEXT against a target
     // outside the caller's process.
     //
-    // Refcount semantics: on open, ProcessRetain on the
-    // target's owning Process so the foreign Task can't be
-    // reaped under the inspector's hand. NtClose on the
-    // returned handle drops the refcount (the file_syscall
-    // close-dispatch grew an arm for this range).
+    // Lifetime semantics: the row stores only the immutable,
+    // non-reused scheduler TID. Every operation re-resolves that
+    // TID under the scheduler lock, so exit/reaping cannot leave
+    // a stale Task or Process pointer. NtClose clears the row and
+    // permits its numeric slot to be reused.
     SYS_THREAD_OPEN = 139,
 
     // Win32 section objects (kernel-resident pools of physical
