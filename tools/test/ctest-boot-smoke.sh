@@ -121,20 +121,27 @@ fi
 # the kernel has no orderly shutdown path and run.sh will time
 # out after DUETOS_TIMEOUT seconds) doesn't mask our own
 # assertions. run.sh exits 124 on timeout.
-# Pick the inner timeout from the acceleration mode the run will
-# actually use. KVM completes the full smoke (kernel boot + PE
-# spawn + native-app spawns + signature emission) in well under
-# 60 s; TCG on the same host takes ~5-10× longer because the
-# JIT can't keep up with the storage stack's MMIO chatter. A
-# single 150 s budget was comfortable for KVM but routinely
-# timed out for TCG-only hosts (no /dev/kvm — dev workstations,
-# unprivileged sandboxes); split it explicitly so each path
-# gets headroom without the other paying for it.
-if [[ -r /dev/kvm && -w /dev/kvm ]]; then
-    DEFAULT_INNER_TIMEOUT=150
-else
-    DEFAULT_INNER_TIMEOUT=600
-fi
+# Inner timeout: one budget sized for the slowest path.
+#
+# This used to branch on /dev/kvm — 150 s when present, 600 s when not — on
+# the assumption that "/dev/kvm exists" implies "KVM makes this fast". That
+# assumption does not hold. Under WSL2 nested virt, /dev/kvm is present and
+# QEMU accepts -accel kvm, but the guest runs at roughly TCG speed: booting
+# this ISO for 40 s produced 197 KB of serial under KVM versus 183 KB under
+# TCG on the same host, about 8% apart rather than the expected 5-10×. Such a
+# host took the 150 s "fast" budget for a run that needs the 600 s one, so the
+# smoke timed out every time — including on a pristine main, which is what
+# proved it was the harness and not the kernel.
+#
+# The branch was not buying much anyway: this is an UPPER BOUND, not a fixed
+# wait. A real KVM host still emits its last signature in well under 60 s and
+# exits then, whatever the budget says. The only thing a larger budget costs
+# is how long a genuinely hung run takes to be declared dead. Trading that
+# against false failures on every slow-KVM host is not a good trade, so use
+# the slow-path budget unconditionally.
+#
+# DUETOS_TIMEOUT still overrides, which is how CI pins its own value.
+DEFAULT_INNER_TIMEOUT=600
 # DUETOS_SMOKE_ISO is consumed by run.sh as an override of the
 # canonical ISO_IMAGE; this lets us swap in the pe-smokes=1
 # sidecar without forking the run-launch helper.
