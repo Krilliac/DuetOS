@@ -428,13 +428,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-27T06:14:32Z
 - **Status**: COMPLETED @ 2026-07-27T06:40:11Z
 
-### [ACTIVE] thread-handle-tid-profile-bochs
+### [DONE] thread-handle-tid-profile-bochs
 - **Session**: `Nathan-48079`
 - **Branch**: `claude/thread-handle-tid-isolation`
 - **Files**: `tools/test/bochs-smoke.sh`
 - **Description**: Require thread3 isolation sentinels in Bochs
 - **Claimed**: 2026-07-27T06:14:34Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-27T06:40:14Z
 
 ### [ACTIVE] thread-handle-tid-profile-timing
 - **Session**: `Nathan-48094`
