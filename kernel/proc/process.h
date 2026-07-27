@@ -719,18 +719,18 @@ struct Process
     // disjoint from every other Win32 handle range so a single
     // CloseHandle dispatch can pick the right table by value.
     //
+    // `win32_thread_lock` serializes slot claim, task publication,
+    // exit-code publication, waits, and CloseHandle reclamation.
+    // A plain IRQ-off region is insufficient here: a worker may
+    // exit on another CPU while its creator is polling the handle.
+    //
     // v0 SCOPE (honest about what's not done):
-    //   - All threads share the Process's single TEB page
-    //     (kV0TebVa). Real Windows gives each thread its own
-    //     TEB with per-thread TLS slots; that's a follow-up.
-    //     Multi-threaded Win32 apps that key per-thread state
-    //     off gs:[...] will see cross-thread bleeding. Apps
-    //     that just want concurrent worker tasks over shared
-    //     memory (the common case) work today.
-    //   - No join / wait-for-thread primitive yet. CloseHandle
-    //     frees the slot but doesn't block for exit. A future
-    //     SYS_THREAD_JOIN / WaitForSingleObject(thread_handle)
-    //     path lands the blocking side.
+    //   - WaitForSingleObject(thread) polls the durable exit code
+    //     with bounded scheduler sleeps rather than blocking on a
+    //     per-slot wait queue.
+    //   - Handles are slot-only values, without a generation in
+    //     the public value. A stale closed handle can therefore
+    //     alias a later thread that reuses the same slot.
     //   - Thread exit is via SYS_EXIT (same as process exit);
     //     the scheduler's single-task-dies-cleanly path handles
     //     it. Exiting the LAST task in the process implicitly
@@ -739,18 +739,34 @@ struct Process
     struct Win32ThreadHandle
     {
         bool in_use;
-        u8 _pad[3];
+        // Set only between slot reservation and scheduler
+        // publication. Guessed/predicted CloseHandle calls cannot
+        // recycle a row while its creator still owns the claim.
+        bool creating;
+        // User-visible handle lifetime is distinct from the row's
+        // task/TEB/TLS resource lifetime. Closing a live thread
+        // clears this bit but retains `in_use` until task exit.
+        bool handle_open;
+        // Separate completion state is required because 0x103 is
+        // both STILL_ACTIVE and a legal application exit code.
+        bool exited;
         // Win32 exit-code tracking. Starts at
         // STILL_ACTIVE (0x103); overwritten by the SYS_EXIT
         // path when the owning task dies. GetExitCodeThread
-        // reads this field via SYS_THREAD_EXIT_CODE and
-        // returns it as the DWORD exit code.
+        // reads this field via SYS_THREAD_EXIT_CODE and returns it
+        // as the DWORD exit code. Waits consult `exited`, not the
+        // sentinel value.
         u32 exit_code;
+        // Internal ABA guard. Public handles remain slot-only for
+        // ABI compatibility, but creator cleanup/publication must
+        // match the exact row generation it reserved.
+        u64 generation;
         sched::Task* task; // scheduler Task spawned for this thread
         u64 user_stack_va; // base VA of the thread's user stack
     };
     static constexpr u64 kWin32ThreadCap = 8;
     static constexpr u64 kWin32ThreadBase = 0x400;
+    sync::SpinLock win32_thread_lock;
     Win32ThreadHandle win32_threads[kWin32ThreadCap];
 
     // Win32 counting-semaphore handle range — backs
@@ -1608,6 +1624,16 @@ u64 ProcessFindModuleBaseByVa(const Process* proc, u64 va);
 /// counts, while this exposes the process-lifetime counter maintained
 /// by ProcessCreate / ProcessRelease.
 u64 ProcessLiveCount();
+
+/// Count currently-open local Win32 thread handles under the
+/// process's lifecycle lock. Diagnostic and process-information
+/// readers use this instead of racing CreateThread / CloseHandle.
+u32 ProcessWin32ThreadHandleCount(const Process* process);
+
+/// Publish a Win32 thread's terminal state exactly once. The normal
+/// SYS_EXIT path supplies the application code; scheduler kill paths
+/// call it with a fallback and cannot overwrite an earlier result.
+void ProcessPublishWin32ThreadExit(Process* process, sched::Task* task, u32 exit_code);
 
 /// Self-test of the process model's pure helpers: CapSet bitmap
 /// operations, CapName lookup, the denial rate-limit predicate, and

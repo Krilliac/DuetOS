@@ -1028,10 +1028,22 @@ Ranked, with the security one first:
    `NtClose` sequence leaks 100% of the time, and the `ProcessRetain`
    done at assign pins the target `Process` + its `AddressSpace`
    forever. Fix: one arm in `DoFileClose`.
-3. **Local thread handles (0x400 band) are never freed** — same
-   `DoFileClose` gap; the chain jumps 0x300 → 0x500. The 9th
-   `CreateThread` in a process fails permanently no matter how
-   correctly the app closes its handles. Fix: one arm.
+3. **Fixed 2026-07-26 — local thread handles (0x400 band) are now
+   reclaimed.** `DoFileClose` has the missing local-thread arm, and
+   slot claim, task/exit publication, wait polling, and close/reuse
+   are serialized by the per-process `win32_thread_lock` instead of
+   local-CPU `cli`. This also fixes the optimized SMP failure where
+   `SYS_THREAD_WAIT` retained `STILL_ACTIVE` after a peer CPU had
+   exited and been reaped. User tasks now use a prepared
+   pre-publication initializer: their handle and per-thread GS/TLS
+   metadata are complete before the scheduler can run them, and
+   closing the returned handle before the first timeslice no longer
+   suppresses entry. An internal row generation prevents
+   creator-cleanup ABA. A separate completion bit also makes an actual
+   thread exit code of `STILL_ACTIVE` (259) waitable. The
+   mixed-provider PE fixture covers close-before-first-run, runs twelve
+   create/wait/exit-code/close cycles against the eight-slot table, and
+   checks the 259-valued exit case.
 4. **`win32_proc_handles[]` / `win32_foreign_threads[]` are not walked
    at teardown**, so an app that exits without `CloseHandle` on an
    `OpenProcess` result (normal — real Windows auto-closes) pins the

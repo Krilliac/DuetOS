@@ -91,6 +91,7 @@ static HANDLE g_tls_alloc_start_event;
 static HANDLE g_tls_alloc_release_event;
 static volatile DWORD g_tls_alloc_slots[2];
 static volatile LONG g_tls_alloc_ready;
+static volatile LONG g_close_before_run_observed;
 
 static DWORD StringLength(const char* text)
 {
@@ -131,6 +132,18 @@ static DWORD __stdcall IdentityAndLastErrorWorker(void* parameter)
     g_worker_thread_id = GetCurrentThreadId();
     SetLastError(0xA11A50F2u);
     return GetLastError() == 0xA11A50F2u ? 0u : 0xA5u;
+}
+
+static DWORD __stdcall ImmediateExitWorker(void* parameter)
+{
+    return (DWORD)(unsigned long long)parameter;
+}
+
+static DWORD __stdcall CloseBeforeRunWorker(void* parameter)
+{
+    (void)parameter;
+    (void)InterlockedExchange(&g_close_before_run_observed, 1);
+    return 0;
 }
 
 static DWORD __stdcall ContendedAtomicAddWorker(void* parameter)
@@ -347,6 +360,40 @@ void __cdecl _start(void)
     (void)CloseHandle(g_tls_alloc_start_event);
     (void)CloseHandle(g_tls_alloc_release_event);
     Out("[thunk_alias_smoke] TLS generation/concurrent allocation PASS\r\n");
+
+    g_close_before_run_observed = 0;
+    HANDLE close_before_run_worker = CreateThread(0, 0, CloseBeforeRunWorker, 0, 0, 0);
+    if (close_before_run_worker == 0 || !CloseHandle(close_before_run_worker))
+        Fail("[thunk_alias_smoke] FAIL close-before-first-run setup\r\n", 0xCFu);
+    for (DWORD wait_ms = 0; wait_ms < 5000u && g_close_before_run_observed == 0; ++wait_ms)
+        Sleep(1u);
+    if (g_close_before_run_observed != 1)
+        Fail("[thunk_alias_smoke] FAIL close-before-first-run execution\r\n", 0xCFu);
+
+    /*
+     * The kernel has eight local thread-handle slots. Twelve
+     * create/wait/close cycles make CloseHandle reclamation
+     * verdict-bearing and repeatedly exercise exit publication
+     * after the waiter has already started polling.
+     */
+    for (DWORD i = 0; i < 12u; ++i)
+    {
+        HANDLE churn_worker = CreateThread(0, 0, ImmediateExitWorker, (void*)(unsigned long long)i, 0, 0);
+        if (churn_worker == 0 || WaitForSingleObject(churn_worker, 5000u) != WAIT_OBJECT_0)
+            Fail("[thunk_alias_smoke] FAIL thread handle close/reuse wait\r\n", 0xD0u);
+        DWORD churn_exit = 0xFFFFFFFFu;
+        if (!GetExitCodeThread(churn_worker, &churn_exit) || churn_exit != i || !CloseHandle(churn_worker))
+            Fail("[thunk_alias_smoke] FAIL thread handle close/reuse exit\r\n", 0xD1u);
+    }
+    HANDLE sentinel_exit_worker = CreateThread(0, 0, ImmediateExitWorker, (void*)(unsigned long long)0x103u, 0, 0);
+    DWORD sentinel_exit = 0;
+    if (sentinel_exit_worker == 0 || WaitForSingleObject(sentinel_exit_worker, 5000u) != WAIT_OBJECT_0 ||
+        !GetExitCodeThread(sentinel_exit_worker, &sentinel_exit) || sentinel_exit != 0x103u ||
+        !CloseHandle(sentinel_exit_worker))
+    {
+        Fail("[thunk_alias_smoke] FAIL thread STILL_ACTIVE-valued exit\r\n", 0xD2u);
+    }
+    Out("[thunk_alias_smoke] thread handle close/reuse PASS\r\n");
 
     volatile LONG atomic_value = 0x55;
     if (InterlockedExchangeAdd(&atomic_value, 0x10) != 0x55 || atomic_value != 0x65)
