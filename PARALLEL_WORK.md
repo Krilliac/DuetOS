@@ -67,3 +67,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Keep local fix-cycle profile chains synchronized with pe-threads CI coverage
 - **Claimed**: 2026-07-27T00:17:14Z
 - **Status**: COMPLETED @ 2026-07-27T00:31:56Z
+
+### [ACTIVE] thunk-retirement-wave2-core
+- **Session**: `Codex-thunk-wave2`
+- **Branch**: `claude/thunk-retirement-wave2`
+- **Files**: `kernel/subsystems/win32/thunk* kernel/loader/pe_loader.cpp kernel/proc/spawn.cpp tools/build/*fix* tools/build/*verify* tests/host/*thunk* tests/host/CMakeLists.txt wiki/reference/Win32-Surface-Status.md wiki/reference/Design-Decisions.md wiki/subsystems/Win32-PE-Subsystem.md wiki/getting-started/History.md`
+- **Description**: Retire six exact current-process/thread/error-state x64 thunks through the real verified kernel32 export path
+- **Claimed**: 2026-07-27T00:53:14Z
+- **Status**: IN PROGRESS
