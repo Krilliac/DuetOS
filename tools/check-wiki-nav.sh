@@ -39,11 +39,25 @@ log_info "Checking wiki navigation consistency..."
 # subfolder paths like `kernel/Memory-Management.md` — keep only the basename
 # (slug) so we can compare against file slugs regardless of which category
 # folder a page lives in. External links (http://, ../docs/...) are skipped.
-sidebar_pages=$(grep -oP '\]\([^)]+\)' "$SIDEBAR" \
+#
+# Use -oE, not -oP: the pattern needs no PCRE features, and GNU grep's -P
+# aborts with "supports only unibyte and UTF-8 locales" under the non-UTF-8
+# locales Git Bash on Windows commonly runs with. That abort produced an
+# EMPTY sidebar list, which made every page look orphaned — the checker
+# reported all 130 pages as navigation issues on a wiki that was fine.
+sidebar_pages=$(grep -oE '\]\([^)]+\)' "$SIDEBAR" \
     | sed 's/\](//;s/)$//' \
     | grep -vE '^(https?:|\.\./|#)' \
     | sed -E 's|.*/||; s/\.md$//' \
     | sort -u)
+
+# Fail loudly rather than reporting a false wiki-wide orphan list if the
+# extraction ever comes back empty again (broken grep, renamed sidebar
+# format, etc.). A populated _Sidebar.md can never yield zero links.
+if [ -z "$sidebar_pages" ]; then
+    log_warning "Extracted 0 links from $SIDEBAR — the checker is broken, not the wiki."
+    exit 2
+fi
 
 # List actual wiki .md files (recursive into category subfolders), excluding
 # internal helper docs prefixed with "_" at the wiki root.
