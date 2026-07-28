@@ -123,7 +123,6 @@ void user32_msg_unpack(const struct user32_msg_wire* wire, struct user32_msg32* 
  * ------------------------------------------------------------------ */
 
 #define USER32_CLASS_CAP 32
-#define USER32_CLASS_NAME_MAX 64
 
 struct user32_wndclass_entry
 {
@@ -133,7 +132,7 @@ struct user32_wndclass_entry
 };
 static struct user32_wndclass_entry s_classes[USER32_CLASS_CAP];
 
-static void user32_strcpy_ascii(char* dst, unsigned cap, const char* src)
+void user32_strcpy_ascii(char* dst, unsigned cap, const char* src)
 {
     unsigned i = 0;
     if (src)
@@ -338,7 +337,13 @@ static HWND user32_create_core(int x, int y, int w, int h, const char* title)
  * GWLP_WNDPROC slot, and record style/ex-style so GetWindowLong can
  * read them back. No-op when the class has no registered proc — such
  * a window still pumps, DispatchMessage just returns 0 for it. */
-static void user32_install_create_state(HWND hwnd, const char* cls, DWORD style, DWORD ex)
+/* WS_CHILD — when set, CreateWindowEx's `hMenu` argument is the
+ * control id, not a menu handle (Win32 convention). That id is what
+ * makes GetDlgItem a real lookup. */
+#define WS_CHILD 0x40000000u
+
+static void user32_install_create_state(HWND hwnd, const char* cls, const char* title, DWORD style, DWORD ex,
+                                        HWND parent, HMENU menu)
 {
     if (!hwnd)
         return;
@@ -349,18 +354,25 @@ static void user32_install_create_state(HWND hwnd, const char* cls, DWORD style,
     }
     (void)user32_set_long(hwnd, USER32_LONG_STYLE, (unsigned)style);
     (void)user32_set_long(hwnd, USER32_LONG_EXSTYLE, (unsigned)ex);
+    if (parent)
+    {
+        (void)duet_syscall2(SYS_WIN_SET_PARENT, (unsigned)(unsigned long)hwnd, (unsigned)(unsigned long)parent);
+    }
+    /* A MAKEINTATOM class is an integer, not text — record the empty
+     * string rather than dereferencing it. */
+    const unsigned cls_raw = (unsigned)(unsigned long)cls;
+    const int ctrl_id = (style & WS_CHILD) ? (int)(unsigned)(unsigned long)menu : 0;
+    user32_record_create(hwnd, (cls_raw >= 0x10000u) ? cls : "", title, parent, ctrl_id);
 }
 
 __declspec(dllexport) HWND __stdcall CreateWindowExA(DWORD ex, const char* cls, const char* name, DWORD style, int x,
                                                      int y, int w, int h, HWND parent, HMENU menu, HINSTANCE inst,
                                                      void* param)
 {
-    (void)parent;
-    (void)menu;
     (void)inst;
     (void)param;
     HWND hwnd = user32_create_core(x, y, w, h, name);
-    user32_install_create_state(hwnd, cls, style, ex);
+    user32_install_create_state(hwnd, cls, name, style, ex, parent, menu);
     return hwnd;
 }
 
@@ -368,8 +380,6 @@ __declspec(dllexport) HWND __stdcall CreateWindowExW(DWORD ex, const wchar_t16* 
                                                      int x, int y, int w, int h, HWND parent, HMENU menu,
                                                      HINSTANCE inst, void* param)
 {
-    (void)parent;
-    (void)menu;
     (void)inst;
     (void)param;
     char title[WIN_TITLE_MAX];
@@ -382,17 +392,18 @@ __declspec(dllexport) HWND __stdcall CreateWindowExW(DWORD ex, const wchar_t16* 
     if (cls_raw != 0 && cls_raw < 0x10000u)
     {
         HWND hwnd = user32_create_core(x, y, w, h, title);
-        user32_install_create_state(hwnd, (const char*)cls, style, ex);
+        user32_install_create_state(hwnd, (const char*)cls, title, style, ex, parent, menu);
         return hwnd;
     }
     user32_w_to_ascii(cls, class_a, USER32_CLASS_NAME_MAX);
     HWND hwnd = user32_create_core(x, y, w, h, title);
-    user32_install_create_state(hwnd, class_a, style, ex);
+    user32_install_create_state(hwnd, class_a, title, style, ex, parent, menu);
     return hwnd;
 }
 
 __declspec(dllexport) BOOL __stdcall DestroyWindow(HWND h)
 {
+    user32_record_destroy(h);
     return duet_syscall1(SYS_WIN_DESTROY, (unsigned)(unsigned long)h) ? 1 : 0;
 }
 

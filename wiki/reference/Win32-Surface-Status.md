@@ -2962,15 +2962,15 @@ They are companions to the 44 PE32+ (x86_64) DLLs listed in section
 i386 importer's descriptor). Sources live in
 `userland/libs/<dll>_32/`.
 
-Today's i386 surface (~280 exports, 13 DLLs):
+Today's i386 surface (~415 exports, 13 DLLs):
 
 | DLL          | Exports | Source                                |
 |--------------|---------|---------------------------------------|
 | kernel32     | 69      | `userland/libs/kernel32_32/`         |
 | msvcrt       | ~50     | `userland/libs/msvcrt_32/`           |
-| user32       | 87      | `userland/libs/user32_32/`           |
+| user32       | 155     | `userland/libs/user32_32/`           |
 | gdi32        | 45      | `userland/libs/gdi32_32/`            |
-| advapi32     | 24      | `userland/libs/advapi32_32/`         |
+| advapi32     | 71      | `userland/libs/advapi32_32/`         |
 | comctl32     | 5       | `userland/libs/comctl32_32/`         |
 | comdlg32     | 1       | `userland/libs/comdlg32_32/`         |
 | crypt32      | 10      | `userland/libs/crypt32_32/`          |
@@ -3116,6 +3116,148 @@ implementations:
   the pointer in the `GWLP_WNDPROC` long slot and hands it back, and
   `DispatchMessage` makes a plain in-process indirect call in ring 3.
   That stale comment is corrected.
+- `advapi32_32`'s **registry family is REAL** as of 2026-07-28, and it
+  is the first Win32 front-end to reach the kernel-owned registry
+  instead of carrying its own tree. Before this slice the DLL shipped
+  four registry exports and all four were constant-returners:
+  `RegOpenKeyExA` always reported ERROR_FILE_NOT_FOUND,
+  `RegQueryValueExA` always reported a zero-byte REG_NONE, and
+  `RegEnumKeyExA` always reported ERROR_NO_MORE_ITEMS. A PE32 that
+  keeps settings in the registry saw an empty, unwritable hive.
+
+  All 28 `Reg*` entry points now drive **SYS_REGISTRY (130)** —
+  open / close / flush, query / set / delete value, key enumeration,
+  value enumeration, and `RegQueryInfoKey`, in both A and W flavours,
+  plus the `RegGetValue` convenience wrapper. That is the kernel's
+  mutable tree: values persist through the sidecar pool to
+  `REGISTRY.HIV`, and every mutation is cap-gated on `kCapFsWrite`
+  inside `DoSetValue` / `DoDeleteValue`, so a sandboxed PE32 gets
+  ERROR_ACCESS_DENIED rather than a silent write.
+
+  Note this deliberately does NOT follow the PE32+
+  `userland/libs/advapi32/advapi32.c`, which carries a private static
+  registry that `kernel/subsystems/win32/registry.cpp` is kept in sync
+  with by hand. CLAUDE.md's "one source of truth per resource" rule
+  and the kernel tree's extra capabilities (mutability, persistence,
+  cap-gating) both argue for the syscall; growing a third copy of the
+  tree would have been the wrong direction. Unifying the 64-bit
+  sibling onto SYS_REGISTRY is the obvious follow-on.
+
+  Three limits, all marked in-source:
+
+  1. **The kernel stores REG_SZ as NARROW ASCII** (`kRegKeys` spells
+     `"DuetOS\0"` as 7 bytes, not 14). The W entry points therefore
+     transcode on both edges — wide in on set, wide out on query — so
+     an A caller and a W caller each see their own encoding and the
+     stored form stays uniform. Non-ASCII is lossy. The 64-bit
+     `RegQueryValueExW` hands its narrow bytes straight to a W caller
+     and does not do this.
+  2. **No key creation or deletion.** `registry.h` states NtCreateKey /
+     NtDeleteKey are unimplemented — only VALUES on existing keys are
+     mutable. `RegCreateKeyEx` degrades to an open (reporting
+     `REG_OPENED_EXISTING_KEY` when the well-known key exists) and
+     otherwise fails with ERROR_ACCESS_DENIED rather than inventing a
+     handle. An app writing values under an existing well-known key
+     works end to end; one that wants its own new subkey does not.
+  3. **Eight open keys per process** (`Process::kWin32RegistryCap`).
+     A caller that closes what it opens is unaffected.
+
+  An i386 codegen trap is pinned in the source and is worth knowing
+  before touching any six-argument syscall site in a `_32` DLL: an
+  `unsigned long long` local wants 8-byte alignment, the incoming
+  `__stdcall` frame guarantees only 4, and clang realigns the stack —
+  which pins EBP as a frame pointer. `duet_syscall6` needs EBP for
+  arg6 once EAX/EBX/ECX/EDX/ESI/EDI are bound, so the whole TU fails
+  to compile with "inline assembly requires more registers than
+  available". Every u64 the kernel writes is staged as a pair of
+  4-byte-aligned u32s instead; the kernel copies those slots with
+  `CopyToUser`, which is a byte copy with no alignment expectation.
+- `advapi32_32`'s **token / SID tier is a deliberate facade**, and the
+  reasons are written into `advapi32_32_sec.c`'s header rather than
+  left to be re-derived. One call touches real authority:
+  `AdjustTokenPrivileges` hands the caller's TOKEN_PRIVILEGES blob
+  verbatim to **SYS_TOKEN_ADJUST (169)**, which maps privilege LUIDs
+  to caps and refuses to ADD a cap the process does not hold — so the
+  only directions it can move authority are "no change" and "less".
+  `LookupPrivilegeValue` is a real name-to-LUID table whose values are
+  the same ones `token_syscall.cpp`'s `LuidLowToCap` switches on.
+  (The PE32+ sibling's `AdjustTokenPrivileges` returns TRUE without
+  calling anything, and its `LookupPrivilegeValueW` returns LUID 1 for
+  every name; the 32-bit pair is the more honest of the two.)
+
+  Everything that would REPORT authority answers in the direction that
+  cannot be parlayed into any: `GetTokenInformation` reports not
+  elevated / TokenElevationTypeDefault and fails outright on
+  TokenIntegrityLevel, and `CheckTokenMembership` always reports not a
+  member. `OpenProcessToken` / `OpenThreadToken` hand back the same
+  `0x1000` sentinel the 64-bit sibling uses. The SID and ACL builders
+  (`AllocateAndInitializeSid` from a bounded 8-slot pool, `FreeSid`,
+  `GetLengthSid`, `IsValidSid`, `EqualSid`, `InitializeAcl`, …) are
+  exact structure work on caller memory — nothing in DuetOS consumes a
+  SID or an ACL to grant authority, so building one is a data
+  operation, not a privilege operation. ETW (`EventRegister` /
+  `EventWriteTransfer` / …) succeeds and drops every event; there is
+  no trace sink.
+- `user32_32` grew the **computation + window-query tier** in the same
+  2026-07-28 batch (155 exports, up from 87). Real: the `Char*`
+  family, the whole RECT algebra (`PtInRect`, `IntersectRect`,
+  `UnionRect`, …), `GetSysColor` / `GetSysColorBrush`, `IsWindow`,
+  `GetWindow` (→ SYS_WIN_GET_RELATED), `FindWindowA/W` (→
+  SYS_WIN_FIND), `SetParent` (→ SYS_WIN_SET_PARENT),
+  `MapWindowPoints`, and `SystemParametersInfo`'s SPI_GETWORKAREA.
+  `CreateWindowEx` now installs the real parent link instead of
+  discarding its `hWndParent`.
+
+  `GetWindowText` / `GetClassName` / `GetDlgItem` are backed by a new
+  per-window record table, because the compositor stores a title but
+  exposes no read-back op and has no class concept at all. The table
+  also records a child's control id — `CreateWindowEx`'s `hMenu`
+  argument under WS_CHILD — which makes the **dialog ITEM surface
+  real**: `GetDlgItem`, `SetDlgItemText`, `GetDlgItemText`,
+  `SendDlgItemMessage`, `CheckDlgButton`, `IsDlgButtonChecked`,
+  `CheckRadioButton`, `SetDlgItemInt`, `GetDlgItemInt`,
+  `GetDlgCtrlID`. GAP: the records are per-process, so a title set by
+  another process reads back empty.
+
+  The dividing line for the dialog surface, stated once: **anything
+  that needs a resource TEMPLATE is stubbed; anything that needs only
+  a CONTROL ID is real.** `DialogBoxParam`, `CreateDialogParam`,
+  `EndDialog` and `TranslateAccelerator` are STUBs returning the
+  documented Win32 failure value, and `LoadStringW` / `LoadImageW` are
+  **not exported at all** rather than faked. All of them block on the
+  same missing thing — see the `.rsrc` note below.
+
+  `EnableWindow` / `IsWindowEnabled` round-trip a per-window flag and
+  fire WM_ENABLE, but the compositor does not consult it: a disabled
+  window still receives input. Closing that needs an enabled bit in
+  the kernel window record and a check in the input router.
+
+  One ABI trap: `GetSysColorBrush` must NOT call
+  SYS_GDI_GET_SYS_COLOR_BRUSH (128). That op returns a handle from the
+  kernel's GDI object table, which is what the PE32+ `gdi32` consumes;
+  the i386 pair uses the self-describing encoding in
+  `userland/libs/common/duet32_gdi_abi.h`, where a brush IS its
+  colour. Handing an i386 caller a kernel-table handle would make
+  `FillRect` decode a garbage colour. The brush is minted locally from
+  the palette colour returned by SYS_GDI_GET_SYS_COLOR (127).
+- **No PE resource (`.rsrc`) parser exists anywhere in the tree** —
+  nothing under `kernel/loader/` or `userland/libs/` walks
+  `IMAGE_DIRECTORY_ENTRY_RESOURCE`. That single gap blocks, across
+  both the 32- and 64-bit surfaces: `LoadStringW` (the single
+  highest-demand user32 import measured across SysWOW64 binaries),
+  `LoadImageW`, `LoadIcon` / `LoadCursor` returning real pixels,
+  `TranslateAccelerator`, and the entire template half of the dialog
+  manager (`DialogBoxParam` / `CreateDialogParam`). The 64-bit
+  `user32.c` fakes `LoadStringW` with a `"DuetOS"` placeholder behind
+  a GAP marker; the 32-bit port does not, on the grounds that a
+  present-but-lying export is worse than a missing one.
+
+  The parser itself is tractable **entirely in user space** and needs
+  no kernel change: `pe_loader.cpp` maps the PE headers read-only at
+  ImageBase (`MapHeaders`) and maps every section, `.rsrc` included,
+  so a DLL can walk DOS header → PE header → data directory[2] →
+  `IMAGE_RESOURCE_DIRECTORY` with plain pointer arithmetic against a
+  base it gets from `GetModuleHandle`. That is the next rung.
 - `msvcrt_32` provides real string + memory intrinsics
   (memcpy / strlen / strcmp / etc.) and a bump-allocator
   malloc / free until the proper heap port lands.
