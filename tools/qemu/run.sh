@@ -395,8 +395,33 @@ SMP_ARGS=(-smp "${DUETOS_SMP:-4,sockets=1,cores=2,threads=2}")
 # framebuffer screendump, or quit the VM cleanly without SIGKILL.
 # Disable with DUETOS_QMP=0.
 QMP_ARGS=()
-QMP_SOCK="${BUILD_DIR}/qmp.sock"
+# DUETOS_QMP_SOCK is the same override tools/qemu/qmp.sh already honours;
+# run.sh used to ignore it, so pointing the client at a custom path could
+# not actually move the server's socket.
+QMP_SOCK="${DUETOS_QMP_SOCK:-${BUILD_DIR}/qmp.sock}"
 if [[ "${DUETOS_QMP:-1}" != "0" ]]; then
+    # A unix socket cannot be bound on every filesystem a build dir might
+    # live on. Under WSL the tree is commonly on a Windows drive mounted as
+    # v9fs/drvfs, where bind() fails with EOPNOTSUPP; network and DOS
+    # filesystems have the same limitation. QEMU treats that as a fatal
+    # startup error, so the whole boot dies with
+    #   "Failed to bind socket to <path>: Operation not supported"
+    # even though QMP is an optional convenience. Fall back to a local
+    # runtime dir instead of taking the boot down with it.
+    qmp_sock_dir="$(dirname -- "${QMP_SOCK}")"
+    qmp_fstype="$(stat -f -c '%T' "${qmp_sock_dir}" 2>/dev/null || echo unknown)"
+    case "${qmp_fstype}" in
+        v9fs|9p|drvfs|cifs|smb|smb2|nfs|nfs4|fuseblk|msdos|vfat|exfat|ntfs)
+            qmp_fallback_dir="${XDG_RUNTIME_DIR:-/tmp}"
+            # Key the name to the build dir so concurrent runs of different
+            # presets never collide on one socket.
+            qmp_tag="$(echo -n "${BUILD_DIR}" | cksum | cut -d' ' -f1)"
+            QMP_SOCK="${qmp_fallback_dir}/duetos-qmp-${qmp_tag}.sock"
+            echo "[run.sh] qmp: ${qmp_sock_dir} is ${qmp_fstype}, which cannot host a" >&2
+            echo "[run.sh]      unix socket; using ${QMP_SOCK} instead." >&2
+            echo "[run.sh]      Point the client at it with DUETOS_QMP_SOCK=${QMP_SOCK}" >&2
+            ;;
+    esac
     rm -f "${QMP_SOCK}"
     QMP_ARGS=(-qmp "unix:${QMP_SOCK},server=on,wait=off")
 fi
