@@ -712,15 +712,53 @@ void WindowDraw(const WindowChrome& w)
     // under a corner mid-compose, and `FramebufferPunchCorners`
     // would have to approximate the wallpaper with a flat colour.
     // Never painting the corner in the first place is exact.
+    //
+    // Aurora glass: when the palette publishes a `glass_alpha` the body
+    // is composited over the backdrop instead of stamped over it, so the
+    // wallpaper's aurora glow reads through the chrome
+    // (IMPLEMENTATION.md §4 "minimum viable version"). The blend is a
+    // real Porter-Duff `over` against whatever the compositor has
+    // already painted into the shadow surface this pass — windows are
+    // drawn back-to-front, so an overlapping sibling shows through too.
+    //
+    // GAP: no backdrop blur — the design's 36 px blur-behind is not
+    // implemented, so the glass tints but does not frost. Revisit when
+    // the compositor grows a cached per-window blur (IMPLEMENTATION.md
+    // §4 "full version").
+    const u8 body_alpha = glass ? theme.glass_alpha : 0U;
+    const bool body_translucent = body_alpha != 0U && body_alpha != 255U;
     if (w.h > tbh_eff)
     {
         const u32 body_y = w.y + tbh_eff;
         const u32 body_h = w.h - tbh_eff;
-        FramebufferFillRoundRect(w.x, body_y, w.w, body_h, radius, w.colour_client);
-        if (radius > 0 && body_h > radius)
+        if (body_translucent)
         {
-            // Square the two corners that abut the title bar.
-            FramebufferFillRect(w.x, body_y, w.w, radius, w.colour_client);
+            // The rounded-corner primitive has no alpha variant, so the
+            // corners are cut by blending the body as three bands: a
+            // full-width middle plus two inset caps. `radius` is small
+            // (8 px at 1024) so a single inset per cap is within a
+            // pixel of the true arc and costs three blends instead of a
+            // per-row loop.
+            const u32 argb = (static_cast<u32>(body_alpha) << 24) | (w.colour_client & 0x00FFFFFFU);
+            if (radius > 0 && body_h > radius)
+            {
+                FramebufferBlendFill(w.x, body_y, w.w, body_h - radius, argb);
+                FramebufferBlendFill(w.x + radius, body_y + body_h - radius, (w.w > 2 * radius) ? w.w - 2 * radius : 0,
+                                     radius, argb);
+            }
+            else
+            {
+                FramebufferBlendFill(w.x, body_y, w.w, body_h, argb);
+            }
+        }
+        else
+        {
+            FramebufferFillRoundRect(w.x, body_y, w.w, body_h, radius, w.colour_client);
+            if (radius > 0 && body_h > radius)
+            {
+                // Square the two corners that abut the title bar.
+                FramebufferFillRect(w.x, body_y, w.w, radius, w.colour_client);
+            }
         }
     }
 
@@ -741,11 +779,32 @@ void WindowDraw(const WindowChrome& w)
     // look proper, which needs a per-pixel wallpaper read pass
     // (deferred — fb API is write-only today).
     const u32 title_top = LightenRgb(w.colour_title, 24);
-    FramebufferFillRoundRect(w.x, w.y, w.w, tbh_eff, radius, w.colour_title);
-    if (radius > 0 && tbh_eff > radius)
+    if (body_translucent)
     {
-        // Square the two corners that abut the client area.
-        FramebufferFillRect(w.x, w.y + tbh_eff - radius, w.w, radius, w.colour_title);
+        // Design §2: the title bar is `--bg-3 @70% -> transparent` over
+        // the same glass the body uses, so it sits a shade denser than
+        // the client area — dense enough for the 13 px title to read,
+        // sheer enough that the wallpaper's glow still comes through.
+        const u32 title_a = static_cast<u32>(body_alpha) + (255U - body_alpha) / 2U;
+        const u32 argb = (title_a << 24) | (w.colour_title & 0x00FFFFFFU);
+        if (radius > 0 && tbh_eff > radius)
+        {
+            FramebufferBlendFill(w.x + radius, w.y, (w.w > 2 * radius) ? w.w - 2 * radius : 0, radius, argb);
+            FramebufferBlendFill(w.x, w.y + radius, w.w, tbh_eff - radius, argb);
+        }
+        else
+        {
+            FramebufferBlendFill(w.x, w.y, w.w, tbh_eff, argb);
+        }
+    }
+    else
+    {
+        FramebufferFillRoundRect(w.x, w.y, w.w, tbh_eff, radius, w.colour_title);
+        if (radius > 0 && tbh_eff > radius)
+        {
+            // Square the two corners that abut the client area.
+            FramebufferFillRect(w.x, w.y + tbh_eff - radius, w.w, radius, w.colour_title);
+        }
     }
     if (tbh_eff > 4)
     {
@@ -2900,9 +2959,15 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
     else
     {
         const auto info = FramebufferGet();
-        const u32 top = LightenRgb(desktop_rgb, 18);
-        const u32 bot = DarkenRgb(desktop_rgb, 22);
-        FramebufferFillRectGradient(0, 0, info.width, info.height, top, bot);
+        // The Aurora backdrop blits every pixel of the framebuffer, so
+        // the base gradient underneath it would be pure wasted work —
+        // a full-screen fill is ~800 k stores per compose.
+        if (!ThemeCurrent().aurora_wallpaper)
+        {
+            const u32 top = LightenRgb(desktop_rgb, 18);
+            const u32 bot = DarkenRgb(desktop_rgb, 22);
+            FramebufferFillRectGradient(0, 0, info.width, info.height, top, bot);
+        }
         // Theme-dispatched wallpaper layer (duet-arcs on the
         // Duet theme; no-op on the other three for now).
         WallpaperPaint(desktop_rgb);

@@ -1,6 +1,7 @@
 #include "drivers/video/desktop_icons.h"
 
 #include "arch/x86_64/serial.h"
+#include "drivers/video/blend_math.h"
 #include "drivers/video/chrome_text.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/theme.h"
@@ -45,6 +46,71 @@ constexpr u32 kLabelChip = 0x00141A20u;
 constexpr u32 kTermGreen = 0x0050E060u;
 constexpr u32 kPaperRed = 0x00C04848u;
 
+// Aurora tile metrics — docs/aurora-theme/README.md §1 "Desktop icon",
+// scaled to the 1024x768 column of IMPLEMENTATION.md §7 (52 -> 40 px
+// tile, radius 14 -> 10).
+constexpr u32 kAuroraTile = 40;
+constexpr u32 kAuroraRadius = 10;
+
+u32 IsqrtU32(u32 v)
+{
+    u32 r = 0;
+    while ((r + 1) * (r + 1) <= v)
+    {
+        ++r;
+    }
+    return r;
+}
+
+// Horizontal inset of a rounded rectangle's row `row` (0-based from the
+// top of an `h`-tall box with corner radius `radius`). Rows in the
+// straight middle return 0.
+u32 RoundInset(u32 row, u32 h, u32 radius)
+{
+    u32 dy = 0;
+    if (row < radius)
+    {
+        dy = radius - row;
+    }
+    else if (row >= h - radius)
+    {
+        dy = row - (h - radius) + 1;
+    }
+    else
+    {
+        return 0;
+    }
+    if (dy > radius)
+    {
+        dy = radius;
+    }
+    return radius - IsqrtU32(radius * radius - dy * dy);
+}
+
+// Blend a rounded rectangle filled with a vertical alpha ramp of `rgb`,
+// from `a_top` at the first row to `a_bot` at the last. This is the one
+// primitive the Aurora icon tile needs that the framebuffer doesn't
+// already have: FillRoundRect is opaque, BlendFill is square, and the
+// design's tile is both rounded AND translucent so the wallpaper's glow
+// reads through it.
+void BlendRoundRectVGradient(u32 x, u32 y, u32 w, u32 h, u32 radius, u32 rgb, u32 a_top, u32 a_bot)
+{
+    if (w == 0 || h == 0)
+    {
+        return;
+    }
+    for (u32 row = 0; row < h; ++row)
+    {
+        const u32 inset = RoundInset(row, h, radius);
+        if (2 * inset >= w)
+        {
+            continue;
+        }
+        const u32 a = a_top - ((a_top - a_bot) * row) / h;
+        FramebufferBlendFill(x + inset, y + row, w - 2 * inset, 1, (a << 24) | (rgb & 0x00FFFFFFu));
+    }
+}
+
 void IconCell(u32 index, u32* out_x, u32* out_y)
 {
     const FramebufferInfo fb = FramebufferGet();
@@ -61,14 +127,18 @@ void IconCell(u32 index, u32* out_x, u32* out_y)
 // Draw the iconographic glyph for `kind` inside the kTileW x kTileH tile
 // at (tx, ty). `fg` is the stroke colour (white); `accent` is the tile
 // fill (used where the glyph wants the tile colour to show through).
-void DrawGlyph(IconGlyph kind, u32 tx, u32 ty, u32 fg, u32 accent)
+void DrawGlyph(IconGlyph kind, u32 tx, u32 ty, u32 tile, u32 fg, u32 accent)
 {
-    const u32 m = 12;
+    // Every glyph below is hand-plotted against a 32-px art box (the
+    // original 56-px tile's 12-px margin), so the box stays 32 on any
+    // tile that can hold it and the margin absorbs the difference.
+    // Rescaling the plots instead would mean re-tuning nine glyphs.
+    const u32 s = (tile > 36) ? 32 : tile - 4;
+    const u32 m = (tile - s) / 2;
     const u32 ox = tx + m;
     const u32 oy = ty + m;
-    const u32 s = kTileW - 2 * m; // 32
-    const i32 cx = static_cast<i32>(tx + kTileW / 2);
-    const i32 cy = static_cast<i32>(ty + kTileH / 2);
+    const i32 cx = static_cast<i32>(tx + tile / 2);
+    const i32 cy = static_cast<i32>(ty + tile / 2);
 
     switch (kind)
     {
@@ -219,16 +289,41 @@ void DesktopIconsPaint()
             FramebufferFillRoundRect(cell_x, cell_y - 2, kCellW, kCellH, 6, 0x002A3442u);
         }
 
-        const u32 tile_x = cell_x + (kCellW - kTileW) / 2u;
+        // Aurora tile (README §1 "Desktop icon"): a rounded, translucent
+        // accent wash with a gloss dome on the upper half, an accent
+        // border, and the glyph stroked in the accent rather than a
+        // white-on-solid-accent chip. Palettes that don't ship the
+        // Aurora vocabulary (surface_radius == 0) keep the flat tile.
+        const bool aurora = ThemeCurrent().surface_radius != 0 && ThemeTactilityEffective();
+        const u32 tile_side = aurora ? kAuroraTile : kTileW;
+        const u32 tile_x = cell_x + (kCellW - tile_side) / 2u;
         const u32 tile_y = cell_y + 2u;
 
-        FramebufferFillRect(tile_x - 1u, tile_y - 1u, kTileW + 2u, kTileH + 2u, kTileBorder);
-        FramebufferFillRect(tile_x, tile_y, kTileW, kTileH, accent);
-        DrawGlyph(g_icons[i].glyph, tile_x, tile_y, kWhite, accent);
+        if (aurora)
+        {
+            // linear-gradient(160deg, accent 30%, accent 8%) -> 77..20.
+            BlendRoundRectVGradient(tile_x, tile_y, tile_side, tile_side, kAuroraRadius, accent, 77u, 20u);
+            // Gloss dome: white .30 -> .06 at 44 %, gone by 52 %.
+            const u32 dome_h = (tile_side * 52u) / 100u;
+            BlendRoundRectVGradient(tile_x, tile_y, tile_side, dome_h, kAuroraRadius, kWhite, 76u, 8u);
+            // Border at accent 38 %. DrawRoundRect has no alpha form, so
+            // the stroke is pre-blended against the theme's desktop
+            // ground — the tiles always sit on the wallpaper's darkest
+            // band, where that ground is within a step or two of truth.
+            FramebufferDrawRoundRect(tile_x, tile_y, tile_side, tile_side, kAuroraRadius,
+                                     BlendOver(ThemeCurrent().desktop_bg, accent, 97));
+            DrawGlyph(g_icons[i].glyph, tile_x, tile_y, tile_side, accent, kDark);
+        }
+        else
+        {
+            FramebufferFillRect(tile_x - 1u, tile_y - 1u, tile_side + 2u, tile_side + 2u, kTileBorder);
+            FramebufferFillRect(tile_x, tile_y, tile_side, tile_side, accent);
+            DrawGlyph(g_icons[i].glyph, tile_x, tile_y, tile_side, kWhite, accent);
+        }
 
         const u32 lw = ChromeTextMeasure(ChromeTextRole::Caption, g_icons[i].label);
         const u32 lx = cell_x + (kCellW > lw ? (kCellW - lw) / 2u : 0u);
-        const u32 ly = tile_y + kTileH + 4u;
+        const u32 ly = tile_y + tile_side + 6u;
         ChromeTextDraw(ChromeTextRole::Caption, lx, ly, g_icons[i].label, kWhite, kLabelChip, ChromeTextWeight::Bold);
     }
 }
