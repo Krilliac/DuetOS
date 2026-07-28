@@ -817,7 +817,9 @@ void PrintProcessTriage(const duetos::core::Process* p, u64 pid)
         ConsoleWrite("  slot=");
         WriteU64Hex(p->win32_iat_misses[i].slot_va);
         ConsoleWrite("  fn=\"");
-        ConsoleWrite(p->win32_iat_misses[i].name != nullptr ? p->win32_iat_misses[i].name : "(unmapped)");
+        // `name` is now an owned inline array, never null — an empty
+        // first byte is what "no name recorded" looks like.
+        ConsoleWrite(p->win32_iat_misses[i].name[0] != '\0' ? p->win32_iat_misses[i].name : "(unmapped)");
         ConsoleWriteln("\"");
     }
 }

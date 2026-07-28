@@ -1179,7 +1179,10 @@ void SyscallDispatch(arch::TrapFrame* frame)
             {
                 if (proc->win32_iat_misses[i].slot_va == slot_va)
                 {
-                    name = proc->win32_iat_misses[i].name;
+                    // Owned inline array — never null; an empty first
+                    // byte means no name was recorded for this slot.
+                    if (proc->win32_iat_misses[i].name[0] != '\0')
+                        name = proc->win32_iat_misses[i].name;
                     break;
                 }
             }

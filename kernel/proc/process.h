@@ -551,12 +551,31 @@ struct Process
     // maps to — telling us, in real time, which unstubbed import
     // the CRT just tried to call. Cap at 128 entries: winkill has
     // ~24 catch-alls, any PE with a full CRT will stay under 100.
+    /// Longest import name retained. Win32 export names are short --
+    /// even verbose ones like "GetQueuedCompletionStatusEx" are 27
+    /// chars -- so this truncates essentially nothing while keeping the
+    /// per-Process table bounded.
+    static constexpr u64 kWin32IatMissNameMax = 48;
+
     struct Win32IatMiss
     {
-        u64 slot_va;      // VA of the IAT slot (user-space).
-        const char* name; // kernel-direct-map pointer into the PE's
-                          // on-disk byte buffer (RAM-fs'd), valid
-                          // for the life of the Process.
+        u64 slot_va; // VA of the IAT slot (user-space).
+        // OWNED, NUL-terminated copy of the import name.
+        //
+        // This used to be a `const char*` documented as pointing into
+        // the PE's on-disk byte buffer and "valid for the life of the
+        // Process". That was true only for NAMED imports. An import by
+        // ORDINAL has no name in the file, so the loader synthesised
+        // "#123" into a FUNCTION-LOCAL `char ordinal_name_buf[32]` and
+        // stored a pointer to it here -- a dangling stack pointer that
+        // both readers (the `pemiss` shell command and the
+        // SYS_WIN32_MISS_REPORT diagnostic) then dereferenced. A PE
+        // chooses whether to import by ordinal, so that was reachable
+        // straight from ring 3.
+        //
+        // Copying sidesteps the lifetime question for both cases and
+        // costs 48 bytes per entry.
+        char name[kWin32IatMissNameMax];
     };
     static constexpr u64 kWin32IatMissCap = 128;
     Win32IatMiss win32_iat_misses[kWin32IatMissCap];

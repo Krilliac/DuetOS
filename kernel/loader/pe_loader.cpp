@@ -737,7 +737,11 @@ namespace
 struct StagedMiss
 {
     u64 slot_va;
-    const char* name;
+    // OWNED copy, taken at stage time. Must NOT be a borrowed pointer:
+    // an import by ordinal has no name in the file, so the caller
+    // synthesises "#123" into a function-local buffer and that buffer
+    // is gone long before PeLoadDrainIatMisses runs.
+    char name[Process::kWin32IatMissNameMax];
 };
 constexpr u64 kStagedMissCap = 128;
 StagedMiss g_staged_misses[kStagedMissCap];
@@ -810,7 +814,17 @@ void StagedMissAppend(u64 slot_va, const char* name)
         return;
     }
     g_staged_misses[g_staged_miss_count].slot_va = slot_va;
-    g_staged_misses[g_staged_miss_count].name = name;
+    // COPY the name now — `name` may point at the caller's stack (the
+    // synthesised "#<ordinal>" buffer), which is invalid by the time
+    // PeLoadDrainIatMisses publishes these into the Process.
+    char* dst = g_staged_misses[g_staged_miss_count].name;
+    u64 i = 0;
+    if (name != nullptr)
+    {
+        for (; i + 1 < Process::kWin32IatMissNameMax && name[i] != '\0'; ++i)
+            dst[i] = name[i];
+    }
+    dst[i] = '\0';
     ++g_staged_miss_count;
 }
 
@@ -2886,7 +2900,9 @@ void PeLoadDrainIatMisses(Process* proc)
     for (u64 i = 0; i < n; ++i)
     {
         proc->win32_iat_misses[i].slot_va = g_staged_misses[i].slot_va;
-        proc->win32_iat_misses[i].name = g_staged_misses[i].name;
+        // Array-to-array copy; both sides own their storage.
+        for (u64 c = 0; c < Process::kWin32IatMissNameMax; ++c)
+            proc->win32_iat_misses[i].name[c] = g_staged_misses[i].name[c];
     }
     proc->win32_iat_miss_count = n;
     if (g_staged_miss_dropped != 0)
