@@ -10,6 +10,7 @@
 
 #include "acpi/acpi.h"
 #include "core/panic.h"
+#include "cpu/percpu.h"
 #include "debug/probes.h"
 #include "diag/boot_observe.h"
 #include "diag/fix_journal.h"
@@ -104,17 +105,48 @@ constexpr u64 kWedgeBytesIgnore = 96; // length of "[tick-irq] g_ticks=0x...\n" 
 
 void TimerHandler()
 {
-    // C++23 deprecates `++x;` on a volatile object; do the load/add/store
-    // explicitly. Single-CPU, IRQ-handler-only writer, so there's no race
-    // with a concurrent writer — the volatile is purely to prevent the
-    // compiler from caching reads in spin loops elsewhere.
-    g_ticks = g_ticks + 1;
     // Pet the NMI watchdog. If this handler ever stops firing,
     // the watchdog's PMU overflow will catch it via NMI even
     // while IF is cleared. Cheap (single store) so it stays in
     // the hot path unconditionally — the watchdog disables
-    // itself internally when the PMU is unavailable.
+    // itself internally when the PMU is unavailable. Done on EVERY
+    // CPU (the pet counter is global, so any live CPU keeps it fed).
     NmiWatchdogPet();
+
+    // THIS HANDLER RUNS ON EVERY CPU, not just the BSP.
+    // `LapicTimerStartOnCurrent` arms each AP's LAPIC timer LVT with
+    // kTimerVector — the very vector this handler is installed on — so
+    // on a healthy SMP boot every AP lands here each tick.
+    //
+    // The original code advanced `g_ticks` unconditionally, justified by
+    // a comment claiming a "Single-CPU, IRQ-handler-only writer, so
+    // there's no race". That stopped being true when per-AP LAPIC timers
+    // landed, and the same function's own fallback comment below already
+    // said as much. The consequences were twofold and both real:
+    //   * `g_ticks` advanced ~N times per wall tick on an N-CPU box, so
+    //     every tick-derived sleep/timeout expired N times too early;
+    //   * the increment was a non-atomic read-modify-write racing across
+    //     CPUs, so updates were also silently LOST — making the observed
+    //     rate somewhere between 1x and Nx and nondeterministic.
+    //
+    // Global time must advance exactly once per wall tick, so the BSP
+    // alone owns `g_ticks` and the global work below (sleep queue,
+    // heartbeat, wedge detection). APs do per-CPU accounting and
+    // preemption through OnApTimerTick — the identical path the
+    // PIT-fallback IPI broadcast already drives them with, so both
+    // delivery routes now have the same semantics.
+    const cpu::PerCpu* self = cpu::CurrentCpu();
+    if (self != nullptr && self->cpu_id != 0)
+    {
+        sched::OnApTimerTick();
+        return;
+    }
+
+    // C++23 deprecates `++x;` on a volatile object; do the load/add/store
+    // explicitly. BSP-only writer now, so there is genuinely no race —
+    // the volatile is purely to stop the compiler caching reads in spin
+    // loops elsewhere.
+    g_ticks = g_ticks + 1;
     sched::OnTimerTick(g_ticks);
 
     // VirtualBox PIT-tick fallback: the LAPIC timer never delivers, so
