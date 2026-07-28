@@ -2055,87 +2055,125 @@ void LinuxFdSetStatusFlags(Process* p, u32 fd, u32 status_flags)
     g_ofd_pool[lf.ofd - 1].status_flags = status_flags;
 }
 
+bool LinuxFdCopyAcrossProcesses(Process* dst, u32 dst_fd, Process* src, u32 src_fd)
+{
+    if (dst == nullptr || src == nullptr || dst_fd >= 16 || src_fd >= 16)
+        return false;
+    Process::LinuxFd& s = src->linux_fds[src_fd];
+    if (s.state == 0)
+        return false;
+    Process::LinuxFd& d = dst->linux_fds[dst_fd];
+
+    // Per-fd payload copies verbatim. FD_CLOEXEC rides along in
+    // `flags`: fork() preserves it (only execve drops it); callers
+    // that must force it on or off do so with `LinuxFdSetCloexec`
+    // after this returns.
+    d.state = s.state;
+    d.flags = s.flags;
+    d.first_cluster = s.first_cluster;
+    d.size = s.size;
+    d.offset = s.offset;
+    for (u32 j = 0; j < sizeof(d.path); ++j)
+        d.path[j] = s.path[j];
+
+    // Open-file-description SHARING. `ofd` is a 1-based index into
+    // the kernel-wide g_ofd_pool, so the raw value IS meaningful in
+    // another process — but it is refcounted, and a copy that skips
+    // the retain leaves the destination's eventual close dropping a
+    // reference it never took. If the source held the only one, the
+    // description is freed while the source fd still points at it:
+    // its cursor silently resets and then aliases whatever fd next
+    // allocates that pool slot.
+    //
+    // Reserved-tty slots (state 1) carry no offset semantics — leave
+    // them OFD-less rather than burn a pool slot per fork on the
+    // three standard streams.
+    u16 shared_ofd = 0;
+    if (s.state != 1)
+    {
+        sync::SpinLockGuard g(g_ofd_lock);
+        if (s.ofd == 0)
+        {
+            s.ofd = OfdAllocLocked(s.offset, /*status_flags=*/0);
+        }
+        // A no-op when the pool was exhausted just above (s.ofd
+        // stays 0): both sides keep their independent inline offset
+        // mirror — degraded but safe.
+        // GAP: offset sharing is lost for that fd under OFD-pool
+        // pressure — revisit by growing kOfdPoolCap or making the
+        // pool KMalloc-backed if real workloads exhaust 64 live
+        // descriptions.
+        OfdRetainLocked(s.ofd);
+        shared_ofd = s.ofd;
+    }
+    d.ofd = shared_ofd;
+
+    // KFile sidecar. `kf_handle` is a DENSE INDEX INTO THE SOURCE'S
+    // OWN handle table — no owner tag, no generation counter — so
+    // copying the raw value across names whatever object sits at
+    // that index in the DESTINATION's table. Both tables allocate
+    // from index 0 upward, which makes collision with one of the
+    // destination's own live fds the common case: the destination's
+    // close would then destroy an unrelated object it still has an
+    // open fd on. Duplicating through the handle table is the only
+    // correct transfer — it installs a real second reference on the
+    // same KObject, and that reference IS the per-pool reference, so
+    // no explicit `*Retain` belongs at any caller of this helper.
+    if (s.kf_handle != ::duetos::ipc::kHandleInvalid)
+    {
+        auto h_r = ::duetos::ipc::HandleTableDuplicate(src->kobj_handles, dst->kobj_handles, s.kf_handle);
+        if (!h_r.has_value())
+        {
+            // Destination handle table full. Roll the whole copy
+            // back — including the OFD retain taken above — so we
+            // never leave a populated slot with no reference behind
+            // it (refcount-asymmetry discipline, mirroring
+            // `LinuxFdDup`'s rollback).
+            if (shared_ofd != 0)
+            {
+                sync::SpinLockGuard g(g_ofd_lock);
+                OfdReleaseLocked(shared_ofd);
+            }
+            d.state = 0;
+            d.flags = 0;
+            d.first_cluster = 0;
+            d.size = 0;
+            d.offset = 0;
+            d.ofd = 0;
+            d.kf_handle = ::duetos::ipc::kHandleInvalid;
+            for (u32 j = 0; j < sizeof(d.path); ++j)
+                d.path[j] = 0;
+            KLOG_ONCE_WARN("proc/linux-fd", "cross-process fd copy: HandleTableDuplicate failed (dst table full)");
+            return false;
+        }
+        d.kf_handle = h_r.value();
+    }
+    else
+    {
+        d.kf_handle = ::duetos::ipc::kHandleInvalid;
+    }
+    return true;
+}
+
 void LinuxFdInheritFromParent(Process* parent, Process* child)
 {
     if (parent == nullptr || child == nullptr)
         return;
     for (u32 fd = 0; fd < 16; ++fd)
     {
-        const Process::LinuxFd& src = parent->linux_fds[fd];
-        if (src.state == 0)
+        if (parent->linux_fds[fd].state == 0)
             continue;
-        Process::LinuxFd& dst = child->linux_fds[fd];
-        // Reserved-tty slots (fd 0/1/2 in a freshly-created child)
-        // start at state=1; just leave them alone if the parent
-        // also has state=1 there. For a truly inherited fd, mirror
-        // the parent's state including FD_CLOEXEC.
-        dst.state = src.state;
-        dst.flags = src.flags; // keeps cloexec; execve drops it later
-        dst.first_cluster = src.first_cluster;
-        dst.size = src.size;
-        dst.offset = src.offset;
-        for (u32 j = 0; j < sizeof(dst.path); ++j)
-            dst.path[j] = src.path[j];
-
-        // Open-file-description inheritance. POSIX fork(): the child
-        // SHARES the parent's open file descriptions, so a seek in
-        // the child moves the parent's cursor too (both fds point at
-        // one description). Reserved-tty slots (state 1) carry no
-        // offset semantics — leave them OFD-less to avoid burning a
-        // pool slot per fork on the three standard streams. Already-
-        // described slots share their existing OFD; a slot that has a
-        // real backing (state >= 2) but no OFD yet gets one lazily so
-        // both sides share it. The child's `ofd` references the same
-        // pool slot; its refcount counts both the parent fd and the
-        // child fd, so either side's close drops exactly one ref.
-        if (src.state != 1)
-        {
-            sync::SpinLockGuard g(g_ofd_lock);
-            // NB: `src` is const above; re-fetch the parent slot
-            // mutably here to allow the lazy materialise to stick.
-            Process::LinuxFd& psrc = parent->linux_fds[fd];
-            if (psrc.ofd == 0)
-            {
-                psrc.ofd = OfdAllocLocked(psrc.offset, /*status_flags=*/0);
-                // On pool exhaustion the parent stays OFD-less and
-                // the child inherits no OFD either (dst.ofd left 0);
-                // both keep their independent inline offset mirror —
-                // degraded but safe.
-                // GAP: fork under OFD-pool pressure loses offset
-                // sharing for that fd — revisit by growing kOfdPoolCap
-                // or making the pool KMalloc-backed if real workloads
-                // exhaust 64 live descriptions.
-            }
-            OfdRetainLocked(psrc.ofd);
-            dst.ofd = psrc.ofd;
-        }
-
-        // KFile sidecar inheritance — duplicate the parent's
-        // handle into the child's table. Each side now holds one
-        // KFile ref; the per-pool release callback fires only when
-        // both have closed the fd.
-        if (src.kf_handle != ::duetos::ipc::kHandleInvalid)
-        {
-            auto h_r = ::duetos::ipc::HandleTableDuplicate(parent->kobj_handles, child->kobj_handles, src.kf_handle);
-            if (h_r.has_value())
-            {
-                dst.kf_handle = h_r.value();
-            }
-            else
-            {
-                // Child's table is full or duplication otherwise
-                // failed. Best-effort: leave the slot's data
-                // populated but with no KFile ref — close-side
-                // will skip the HandleTableRemove. Pool will leak
-                // (sub-GAP — fork failure under handle-table
-                // pressure is exotic, and v0 forks are rare).
-                dst.kf_handle = ::duetos::ipc::kHandleInvalid;
-            }
-        }
-        else
-        {
-            dst.kf_handle = ::duetos::ipc::kHandleInvalid;
-        }
+        // POSIX fork(): the child gets the same fd numbers, SHARES
+        // the parent's open file descriptions, holds its own KFile
+        // reference on each pool object, and keeps FD_CLOEXEC —
+        // exactly `LinuxFdCopyAcrossProcesses`' contract, so fork
+        // and pidfd_getfd run one implementation. Reserved-tty slots
+        // (state 1) in the freshly-created child are simply
+        // overwritten with the parent's equivalent. A failed copy
+        // leaves the child's slot unused (state 0) rather than
+        // populated-but-unreferenced, which is what the old
+        // best-effort arm did (and leaked the pool ref for).
+        (void)LinuxFdCopyAcrossProcesses(child, fd, parent, fd);
     }
 }
 
@@ -2296,6 +2334,73 @@ void LinuxFdSelfTest()
     if (g_ofd_pool[leaked_ofd - 1].refcount != 0)
         core::Panic("proc/linux-fd", "self-test: exit drain leaked an open-file description");
 
+
+    // 8) Cross-process copy (the shape fork inheritance and
+    // pidfd_getfd share). `kf_handle` is a dense index into the
+    // SOURCE's own handle table with no owner tag, so a verbatim
+    // struct copy would name whatever object sits at that index in
+    // the DESTINATION's table — typically one of the destination's
+    // own live fds, which its next close would then destroy.
+    auto* q = static_cast<Process*>(mm::KMalloc(sizeof(Process)));
+    if (q == nullptr)
+    {
+        mm::KFree(p);
+        arch::SerialWrite("[proc] linux-fd-table self-test: cross-process leg skipped (no kheap)\n");
+        return;
+    }
+    memset(q, 0, sizeof(Process));
+    q->linux_rlimit_nofile_cur = 0xFFFFFFFFFFFFFFFFull;
+    for (u32 i = 0; i < 16; ++i)
+    {
+        q->linux_fds[i].state = (i < 3) ? 1 : 0;
+        q->linux_fds[i].kf_handle = ::duetos::ipc::kHandleInvalid;
+    }
+
+    // Source fd in `p`, and a DIFFERENT object already parked at
+    // the destination's low handle — the value a verbatim copy
+    // would have aliased.
+    p->linux_fds[5].state = 5;
+    p->linux_fds[5].first_cluster = 0xBEEF;
+    if (!LinuxFdAttachKFile(p, 5, /*kind=*/5, /*pool_index=*/0xBEEF, &LinuxFdSelfTestRelease))
+        core::Panic("proc/linux-fd", "self-test: AttachKFile(src) failed");
+    q->linux_fds[3].state = 5;
+    q->linux_fds[3].first_cluster = 0xC0DE;
+    if (!LinuxFdAttachKFile(q, 3, /*kind=*/5, /*pool_index=*/0xC0DE, &LinuxFdSelfTestRelease))
+        core::Panic("proc/linux-fd", "self-test: AttachKFile(dst-occupant) failed");
+    const ::duetos::ipc::Handle collide = q->linux_fds[3].kf_handle;
+
+    g_lfd_selftest_release_calls = 0;
+    g_lfd_selftest_release_idx = 0;
+    if (!LinuxFdCopyAcrossProcesses(q, 4, p, 5))
+        core::Panic("proc/linux-fd", "self-test: cross-process copy failed");
+    if (q->linux_fds[4].kf_handle == collide)
+        core::Panic("proc/linux-fd", "self-test: cross-process copy aliased the destination's own handle");
+    if (q->linux_fds[4].ofd == 0 || q->linux_fds[4].ofd != p->linux_fds[5].ofd)
+        core::Panic("proc/linux-fd", "self-test: cross-process copy did not SHARE the open-file description");
+    const u16 x_ofd = q->linux_fds[4].ofd;
+    if (g_ofd_pool[x_ofd - 1].refcount != 2)
+        core::Panic("proc/linux-fd", "self-test: cross-process copy did not retain the shared OFD");
+
+    // Closing the copy must not release the source's pool ref, must
+    // not disturb the destination's pre-existing fd, and must give
+    // back exactly the OFD ref it took.
+    LinuxFdClose(q, 4);
+    if (g_lfd_selftest_release_calls != 0)
+        core::Panic("proc/linux-fd", "self-test: closing a cross-process copy fired the pool release early");
+    if (q->linux_fds[3].state != 5)
+        core::Panic("proc/linux-fd", "self-test: closing a cross-process copy clobbered an unrelated fd");
+    if (g_ofd_pool[x_ofd - 1].refcount != 1)
+        core::Panic("proc/linux-fd", "self-test: cross-process copy did not balance its OFD ref");
+
+    // Each owner's close releases its OWN pool index, once.
+    LinuxFdClose(p, 5);
+    if (g_lfd_selftest_release_calls != 1 || g_lfd_selftest_release_idx != 0xBEEF)
+        core::Panic("proc/linux-fd", "self-test: source close did not release the source pool index");
+    LinuxFdClose(q, 3);
+    if (g_lfd_selftest_release_calls != 2 || g_lfd_selftest_release_idx != 0xC0DE)
+        core::Panic("proc/linux-fd", "self-test: destination close did not release its own pool index");
+
+    mm::KFree(q);
     mm::KFree(p);
     arch::SerialWrite("[proc] linux-fd-table self-test OK\n");
 }

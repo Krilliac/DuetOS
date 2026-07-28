@@ -40,11 +40,8 @@
  * which is its own slice — sub-GAP.
  */
 
-#include "subsystems/linux/inotify.h"
-#include "subsystems/linux/syscall_async_io.h"
 #include "subsystems/linux/syscall_internal.h"
 #include "subsystems/linux/syscall_pipe.h"
-#include "subsystems/linux/syscall_socket.h"
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
@@ -183,18 +180,23 @@ i64 DoPidfdSendSignal(u64 pidfd, u64 sig, u64 user_info, u64 flags)
 }
 
 // pidfd_getfd(pidfd, target_fd, flags) — dup an fd from a target
-// process into the caller's fd table. v0 implementation supports
-// pool-backed states (pipe / eventfd / socket / timerfd / signalfd /
-// epoll / inotify / pidfd / mq) by copying the slot verbatim and
-// bumping the corresponding refcount. Regular files (state 2) and
+// process into the caller's fd table. The copy itself goes through
+// core::LinuxFdCopyAcrossProcesses — the same helper fork uses —
+// because `kf_handle` is table-local and `ofd` is refcounted, so a
+// raw slot copy would alias one of the CALLER's own live objects
+// and leak/over-release pool references. Regular files (state 2),
 // directories (state 11) and memfd (state 14) are not currently
-// shareable across processes — sub-GAP. Cap-gated on kCapDebug
+// shareable across processes — sub-GAP (see
+// wiki/reference/Design-Decisions.md). Cap-gated on kCapDebug
 // (cross-process fd inspection is the same threat class as
 // PROCESS_VM_READ).
 i64 DoPidfdGetfd(u64 pidfd, u64 target_fd, u64 flags)
 {
-    (void)flags;
     using ::duetos::core::kCapDebug;
+    // pidfd_getfd(2): "flags is reserved for future use; currently
+    // it must be zero." The returned descriptor is close-on-exec.
+    if (flags != 0)
+        return kEINVAL;
     core::Process* caller = core::CurrentProcess();
     if (caller == nullptr || pidfd >= 16)
         return kEBADF;
@@ -230,33 +232,30 @@ i64 DoPidfdGetfd(u64 pidfd, u64 target_fd, u64 flags)
     if (caller_slot < 0)
         return kEMFILE;
 
-    const auto& src = target->linux_fds[target_fd];
-    const u8 state = src.state;
     // Refuse states that aren't safe to share across processes.
+    const u8 state = target->linux_fds[target_fd].state;
     if (state == 2 || state == 11 || state == 14)
         return kEINVAL; // regular file / dirfd / memfd
-    // Copy slot verbatim and bump the relevant refcount.
-    caller->linux_fds[caller_slot] = src;
-    if (state == 3)
-        PipeRetainRead(src.first_cluster);
-    else if (state == 4)
-        PipeRetainWrite(src.first_cluster);
-    else if (state == 5)
-        EventfdRetain(src.first_cluster);
-    else if (state == 6)
-        SocketFdRetain(src.first_cluster);
-    else if (state == 7)
-        TimerfdRetain(src.first_cluster);
-    else if (state == 8)
-        SignalfdRetain(src.first_cluster);
-    else if (state == 9)
-        EpollRetain(src.first_cluster);
-    else if (state == 10)
-        InotifyRetain(src.first_cluster);
-    // state == 12 (pidfd) needs no retain at all — a pidfd is a
-    // weak, pid-keyed reference (see the file banner).
-    else if (state == 13)
-        PosixMqRetain(src.first_cluster);
+
+    // The pidfd is a WEAK reference — take a transient retain so the
+    // target Process cannot be freed while we read its fd table
+    // (same idiom as ResolveAffinityTarget in syscall_sched.cpp).
+    core::ProcessRetain(target);
+    // GAP: the target's fd table is read without a per-process fd
+    // lock, so this races a concurrent close(2) on another CPU —
+    // revisit when the Linux fd table grows a lock.
+    //
+    // No per-pool *Retain here: the duplicated KFile handle IS the
+    // pool reference (process.h `LinuxFdCopyAcrossProcesses`), so
+    // the caller's close(2) balances it through LinuxFdClose.
+    const bool copied =
+        core::LinuxFdCopyAcrossProcesses(caller, static_cast<u32>(caller_slot), target, static_cast<u32>(target_fd));
+    core::ProcessRelease(target);
+    if (!copied)
+        return kEMFILE;
+    // pidfd_getfd(2) always returns a close-on-exec descriptor.
+    core::LinuxFdSetCloexec(caller, static_cast<u32>(caller_slot), true);
+
     arch::SerialWrite("[linux/pidfd_getfd] caller=");
     arch::SerialWriteHex(caller->pid);
     arch::SerialWrite(" target=");

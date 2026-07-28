@@ -1838,15 +1838,38 @@ void LinuxFdSetOffset(Process* p, u32 fd, u64 offset);
 u32 LinuxFdGetStatusFlags(const Process* p, u32 fd);
 void LinuxFdSetStatusFlags(Process* p, u32 fd, u32 status_flags);
 
+/// THE single implementation of copying one Linux fd from one
+/// process's table into another's. Both fork inheritance and
+/// `pidfd_getfd` route through it — never hand-roll a raw
+/// `dst->linux_fds[i] = src->linux_fds[j]` struct copy, because
+/// two of the fields are NOT process-portable:
+///   - `kf_handle` is a dense index into the SOURCE's own handle
+///     table (no owner tag, no generation counter), so the raw
+///     value names an unrelated object in the destination. This
+///     helper duplicates it with `HandleTableDuplicate`, which is
+///     also what takes the per-pool reference — callers must NOT
+///     add an explicit `*Retain`.
+///   - `ofd` is a refcounted kernel-wide open-file-description
+///     index; this helper retains it so both fds share one
+///     description (POSIX fork/dup semantics) and neither side's
+///     close frees it out from under the other.
+/// `flags` (incl. FD_CLOEXEC) copies verbatim; callers needing
+/// Linux's per-API cloexec rule call `LinuxFdSetCloexec` after.
+/// Overwrites `dst_fd` without closing it — the caller owns
+/// releasing an occupied destination slot first. Returns false
+/// (leaving `dst_fd` unused and the OFD retain rolled back) when
+/// the destination handle table is full.
+bool LinuxFdCopyAcrossProcesses(Process* dst, u32 dst_fd, Process* src, u32 src_fd);
+
 /// Copy parent's fd table into `child` at fork time. Each
-/// occupied slot in `parent` is mirrored into `child`; KFile
-/// sidecars are duplicated via `HandleTableDuplicate` so the
-/// child shares the parent's per-pool ref counts (each side
-/// drops one ref on close). FD_CLOEXEC is preserved on the
-/// inherited slot — Linux semantics: fork copies cloexec
-/// fds; only execve drops them. Caller (DoFork / DoClone)
-/// must have already initialised `child`'s fd table to all-
-/// unused via `ProcessCreate`.
+/// occupied slot in `parent` is mirrored into `child` through
+/// `LinuxFdCopyAcrossProcesses`, so the child shares the parent's
+/// open file descriptions and holds its own KFile reference on
+/// each pool object (each side drops one ref on close).
+/// FD_CLOEXEC is preserved on the inherited slot — Linux
+/// semantics: fork copies cloexec fds; only execve drops them.
+/// Caller (DoFork / DoClone) must have already initialised
+/// `child`'s fd table to all-unused via `ProcessCreate`.
 void LinuxFdInheritFromParent(Process* parent, Process* child);
 
 /// Walk the fd table and close every slot with FD_CLOEXEC set.

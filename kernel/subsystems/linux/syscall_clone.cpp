@@ -208,11 +208,11 @@ i64 DoFork()
     // path: each side gets a fresh ipc handle pointing at the
     // same KFile, and the KObject refcount drives the per-pool
     // release callback (which fires once when the last handle
-    // closes). For pidfd specifically, the target Process's
-    // refcount is held by the single shared KFile — both fork-
-    // parent and fork-child contribute one KObject ref each;
-    // the underlying ProcessRetain is taken once at open and
-    // dropped once at last-close.
+    // closes). A pidfd (state 12) holds NO Process reference at
+    // all — it is a weak, pid-keyed handle, so the inherited copy
+    // costs nothing beyond the KFile ref (see the banner in
+    // `pidfd_splice.cpp` for why a strong ref would deadlock
+    // process teardown).
     //
     // Dirfd (state 11) is on the owner-aware KFile path. The
     // snapshot lives on the *parent's* `win32_dirs[]` table and
