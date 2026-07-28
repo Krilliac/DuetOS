@@ -12668,3 +12668,36 @@ markers for its richest input. Three discovery layers were added (runtime
   slot nobody reuses is what makes a late wake harmless — `online` is
   never set and `g_cpu_id_limit` never bumped for it, so the scheduler
   routes no work there and it simply idles.
+
+## 2026-07-28 — An AP installs its boot sentinel BEFORE any allocating bring-up step
+
+- **Context:** `SchedEnterOnAp` called `SchedStartIdle` first and minted
+  the boot sentinel afterwards. The existing comment shows the ordering
+  had been reasoned about — "install as current_task BEFORE arming the
+  LAPIC timer, once the timer fires the IRQ handler enters Schedule()
+  and dereferences `Current()`" — and that reasoning is correct about
+  the timer. It missed a nearer consumer sitting two lines above:
+  `SchedStartIdle` itself allocates (`SchedCreate` -> `KMalloc`) and
+  takes locks. A fresh AP's PerCpu is memset-zeroed, so `current_task`
+  was nullptr for that entire window.
+- **Decision:** the sentinel is minted and installed as `current_task`
+  as the FIRST thing an AP does in `SchedEnterOnAp`, before anything
+  that can allocate, lock, or block. `CreateApBootSentinel` only
+  allocates and fills fields — it never reads `current_task` — so it is
+  safe to run first, and it sets `state = Running`, which is exactly
+  the predicate the blocking paths assert on.
+- **Rules out** gating wake routing on `PerCpu::scheduler_ready` as the
+  fix for this fault. That was tried first and MEASURED not to work: 5
+  KASSERTs across 3 TCG boots with it in tree, versus 1 in a single
+  control boot. The faulting task is already ON the AP, not routed to
+  it, so no routing predicate can help. The change was reverted rather
+  than kept as speculative hardening.
+- **Leaves open** that `scheduler_ready` is still read by nothing in the
+  scheduler, despite its declaration comment claiming to gate exactly
+  the wake/balance/steal path. Wiring it up may still be correct, but it
+  must be justified by its own evidence — not by this bug.
+- **Verification standard worth keeping:** this fault is intermittent
+  and reproduces under WSL/TCG but not WHPX, because fast virtualised
+  bring-up narrows the window. One clean boot proves nothing — the
+  first (wrong) fix produced a clean 412 s run on its very first
+  attempt. Measure a RATE across repeated boots.

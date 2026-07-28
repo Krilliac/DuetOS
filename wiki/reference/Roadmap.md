@@ -123,11 +123,44 @@ cleanup debt: move the residual up and delete the rest.
   The `vec=0x   __  rip=0x   __` interleaving symptom is suppressed.
   Re-run `tools/test/smp-stress-sweep.sh 20 8 5` with this fix in
   tree to read the real first-fault site in the now-clean log.
-- **Root cause still open:** the underlying AP-bringup fault (likely
-  KASAN/UBSAN shadow-map race on first timer IRQ with a sentinel
-  `Current()`) has not been identified. See GAP marker in
-  `SerialWriteNRecursiveFault` (serial.cpp). Blocks on: clean log
-  from the harness pointing at the actual first-fault RIP.
+- **An AP-bringup `Current()` fault WAS found and fixed (2026-07-28)**
+  — `sched: install the AP boot sentinel before SchedStartIdle`. The
+  clean first-fault log this item was blocked on finally arrived from a
+  full-device TCG smoke:
+
+  ```
+  SchedEnterOnAp begin cpu_id=1
+  SchedCreate: kernel task name="idle-ap1"
+  sched/idle : idle task online          <- tail of SchedStartIdle
+  [ubsan] tm-detail member-access null-deref ptr=0x0 ty='Task'
+  [panic] KASSERT: WaitQueueBlockTimeout on non-Running task cpu=1
+  ```
+
+  `SchedEnterOnAp` ran `SchedStartIdle` (which allocates via
+  `SchedCreate` -> `KMalloc` and takes locks) BEFORE minting the boot
+  sentinel and installing it as `current_task`. A fresh AP's PerCpu is
+  memset-zeroed, so `current_task` was **nullptr** for that whole
+  window — anything reaching `Current()` got a null `Task`, and
+  anything blocking failed the Running-state assert. Moving the
+  sentinel ahead of `SchedStartIdle` closes it.
+
+  Note this item's hypothesis was *nearly* right and off by one step:
+  it guessed a race involving "a sentinel `Current()`". The sentinel
+  was not the problem — the window BEFORE the sentinel existed was.
+
+  Measured over full-device TCG smokes: **0 KASSERTs across 3 boots**
+  with the fix, versus the pre-fix control panicking at t≈20 s. Every
+  fixed run reached t≈412 s (20x further) and brought up a
+  deterministic 3/3/3 APs.
+
+- **Still open — the SMP=8 stress symptom specifically.** The fix above
+  was measured against the SMP=4 boot smoke. The recursive `#`-fault
+  this item was originally filed for reproduces under
+  `tools/qemu/run-stress.sh cpu` at `DUETOS_SMP=8,sockets=1,cores=4,threads=2`,
+  which has NOT been re-run since. They plausibly share the root cause
+  — both are AP-bringup `Current()` faults — but that is an inference,
+  not a measurement. Re-run `tools/test/smp-stress-sweep.sh 20 8 5`
+  before closing this item.
 
 ### Topology — cluster-scoped IPI fan-out
 
