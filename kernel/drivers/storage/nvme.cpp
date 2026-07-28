@@ -172,6 +172,26 @@ struct Queue
     u32 cq_head;
     u32 expected_phase; // 1 on first pass; flips on wrap
     u32 id;             // queue id (0 = admin, >=1 = I/O)
+
+    // Serialises one submitter at a time over this queue pair.
+    //
+    // SubmitAndWait claims an SQ slot, writes 12 fields into it, bumps
+    // sq_tail, rings the doorbell, then polls/advances cq_head. NONE of
+    // that was synchronised, on a kernel where the block layer is
+    // reachable from any CPU. Two concurrent submitters therefore:
+    //   * read the same `sq_tail` and write the SAME slot, so one
+    //     command is silently overwritten before the device fetches it;
+    //   * both advance cq_head, so a completion is consumed by the
+    //     wrong waiter and the other spins until its deadline;
+    //   * share `g_ctrl.next_cid++`, a non-atomic RMW, so two in-flight
+    //     commands can carry the SAME command ID -- which is precisely
+    //     the field used to tell their completions apart.
+    // The 64 KiB DMA staging buffer is shared the same way, so the data
+    // itself interleaves even when the queue survives.
+    //
+    // A SLEEPING mutex, not a spinlock: SubmitAndWait blocks on
+    // `cq_wait` for the MSI-X completion.
+    sched::Mutex lock;
 };
 
 struct Controller
@@ -463,8 +483,42 @@ struct PanicWriteScope
 // fields are logged so a real-disk error is triageable from the
 // boot log alone. Poll deadline is driven by CAP.TO (via HPET) with
 // a pause-count fallback for hosts that missed HPET init.
+// Holds `q.lock` for the submit->complete window, EXCEPT in panic
+// context.
+//
+// Skipping it there is deliberate and necessary, not a shortcut:
+// PanicBroadcastNmi has already halted every peer CPU, so there is no
+// concurrency left to guard against; the scheduler is not running, so a
+// sleeping mutex could never be acquired; and if some task happened to
+// hold this lock when the box panicked, waiting for it would wedge the
+// handler and silently lose the crash dump — the exact failure
+// g_panic_write_active exists to prevent on the completion path.
+struct QueueSubmitScope
+{
+    sched::Mutex* m;
+    bool held;
+
+    explicit QueueSubmitScope(sched::Mutex& mu) : m(&mu), held(!g_panic_write_active)
+    {
+        if (held)
+            sched::MutexLock(m);
+    }
+    ~QueueSubmitScope()
+    {
+        if (held)
+            sched::MutexUnlock(m);
+    }
+    QueueSubmitScope(const QueueSubmitScope&) = delete;
+    QueueSubmitScope& operator=(const QueueSubmitScope&) = delete;
+};
+
 bool SubmitAndWait(Queue& q, SqEntry entry)
 {
+    // Covers slot claim, the 12 field stores, the doorbell, and the
+    // completion poll — the whole sequence must be atomic with respect
+    // to another submitter or the queue state desynchronises.
+    QueueSubmitScope guard(q.lock);
+
     const u16 cid = static_cast<u16>(g_ctrl.next_cid++ & 0xFFFF);
     // Preserve caller-supplied opcode; fuse = 0; CID in upper 16.
     entry.cdw0 = (entry.cdw0 & 0x0000FFFFu) | (static_cast<u32>(cid) << 16);
