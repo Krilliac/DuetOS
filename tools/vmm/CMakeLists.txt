@@ -69,6 +69,7 @@ add_executable(duetos-vmm
     src/input/ps2_encode.cpp
     src/debug/elf_symbols.cpp
     src/debug/exit_trace.cpp
+    src/debug/gdb_packet.cpp
     src/debug/gdb_server.cpp
     src/debug/guest_view.cpp
     src/debug/host_stop.cpp
