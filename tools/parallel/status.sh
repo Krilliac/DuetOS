@@ -26,8 +26,12 @@ echo ""
 
 # grep -c prints "0" AND exits 1 on no match, so a bare '|| echo 0' would
 # emit the count twice. '|| true' keeps grep's own "0" and clears the status.
-ACTIVE="$(grep -cF -- "- **Status**: IN PROGRESS" "$WORK_FILE" 2>/dev/null || true)"
-DONE="$(grep -cF -- "- **Status**: COMPLETED @" "$WORK_FILE" 2>/dev/null || true)"
+#
+# Anchored, because the status text is the machine-readable contract that
+# claim.sh writes and release.sh rewrites. An unanchored match also counts a
+# Description that happens to quote the phrase.
+ACTIVE="$(grep -c '^- \*\*Status\*\*: IN PROGRESS$' "$WORK_FILE" 2>/dev/null || true)"
+DONE="$(grep -c '^- \*\*Status\*\*: COMPLETED @ ' "$WORK_FILE" 2>/dev/null || true)"
 
 echo "  Active: ${ACTIVE}  |  Completed: ${DONE}"
 echo ""
@@ -51,17 +55,24 @@ echo "Conflict check:"
 # Collect the Files value of each ACTIVE (🟢) claim and look for duplicates —
 # two live sessions owning the same path is the real conflict. Completed
 # claims have released their files, so they're excluded.
+#
+# Accumulate per block and emit at the block boundary rather than printing
+# eagerly on the Status line: that way a block whose Status precedes its
+# Files is still detected. END flushes the final block, which has no
+# following '### ' to close it.
 FILES_LIST="$(awk '
-    /^### / { files = ""; next }
+    function flush() {
+        if (active && files != "") print files
+        active = 0; files = ""
+    }
+    /^### / { flush(); next }
     /\*\*Files\*\*:/ {
         files = $0
         sub(/^[^`]*`/, "", files)
         sub(/`.*/, "", files)
     }
-    /\*\*Status\*\*: IN PROGRESS/ {
-        if (files != "")
-            print files
-    }
+    /^- \*\*Status\*\*: IN PROGRESS$/ { active = 1 }
+    END { flush() }
 ' "$WORK_FILE")"
 DUPES="$(printf '%s\n' "$FILES_LIST" | sort | uniq -d | grep -v '^$' || true)"
 if [[ -n "$DUPES" ]]; then
