@@ -659,6 +659,12 @@ void NotifyParentAccept(Tcb& child)
     parent->backlog_ring[parent->backlog_head] = MakeId(u32(&child - &g_tcbs[0]), child.generation);
     parent->backlog_head = (parent->backlog_head + 1) % kListenBacklogMax;
     ++parent->backlog_count;
+    // The child graduates from half-open to accept-queued, so it stops
+    // counting against the SYN backlog. Note the early return above
+    // (accept ring full) deliberately does NOT do this: that child is
+    // established but unaccepted and still occupies a listener slot.
+    if (parent->syn_backlog_count > 0)
+        --parent->syn_backlog_count;
     child.parent_listener = 0; // one-shot push
     sched::WaitQueueWakeAll(&parent->accept_wq);
 }
@@ -670,6 +676,22 @@ void DropTcb(u32 idx)
         return;
     if (!t.is_listener)
         BucketRemove(idx);
+    // Release the listener backlog slot if this Tcb is still a
+    // half-open child. A non-zero parent_listener is exactly that
+    // condition: NotifyParentAccept clears it on a successful push, so
+    // anything still carrying one never graduated to the accept ring.
+    //
+    // Without this, every SYN that times out, gets RST, or is closed
+    // mid-handshake would leak a slot, and the listener would wedge at
+    // its backlog limit permanently -- turning the new SYN-flood bound
+    // into a denial of service of its own.
+    if (!t.is_listener && t.parent_listener != 0)
+    {
+        Tcb* parent = TcbFromId(t.parent_listener);
+        if (parent != nullptr && parent->is_listener && parent->syn_backlog_count > 0)
+            --parent->syn_backlog_count;
+        t.parent_listener = 0;
+    }
     sched::WaitQueueWakeAll(&t.read_wq);
     sched::WaitQueueWakeAll(&t.write_wq);
     sched::WaitQueueWakeAll(&t.connect_wq);
@@ -1336,7 +1358,15 @@ void HandleListenSyn(u32 listener_idx, u32 iface_index, const MacAddress& peer_m
                      u16 local_port, u32 peer_seq, u8 peer_flags, const ParsedOptions& po)
 {
     Tcb& parent = g_tcbs[listener_idx];
-    if (parent.backlog_count >= parent.backlog_max)
+    // Gate on completed-awaiting-accept AND still-handshaking children.
+    //
+    // This used to test backlog_count alone, which is only incremented
+    // once a handshake COMPLETES. During the SYN phase it is still
+    // zero, so every inbound SYN allocated a Tcb with no per-listener
+    // bound at all -- the only limit was the global kTcbCap, meaning a
+    // flood against one listener exhausted the shared table and starved
+    // every other socket on the machine.
+    if (parent.backlog_count + parent.syn_backlog_count >= parent.backlog_max)
     {
         ++g_stats.backlog_drops;
         // SYN-flood defense — drop silently. Future: SYN cookies.
@@ -1368,6 +1398,10 @@ void HandleListenSyn(u32 listener_idx, u32 iface_index, const MacAddress& peer_m
     child.peer_mac = peer_mac;
     child.refs = 1;
     child.parent_listener = MakeId(listener_idx, parent.generation);
+    // This child now occupies one of the listener's backlog slots and
+    // holds it until the handshake completes (NotifyParentAccept) or
+    // the Tcb is torn down (DropTcb). Both of those release it.
+    ++parent.syn_backlog_count;
     // ML-02 (net-0): RFC 6528 keyed ISN — see GenIsn (tcp.cpp).
     child.iss = GenIsn(child.local_ip, child.local_port, child.peer_ip, child.peer_port);
     child.snd_una = child.iss;

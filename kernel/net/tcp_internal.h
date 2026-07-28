@@ -88,6 +88,20 @@ struct Tcb
     // LISTEN-only: backlog ring of TcbIds for accepted children.
     u32 backlog_max;
     u32 backlog_count;
+    // LISTEN-only: children still mid-handshake (SYN_RCVD), i.e. those
+    // that have consumed a Tcb but have not yet been pushed onto the
+    // accept ring above.
+    //
+    // Without this the backlog gate only ever counted COMPLETED
+    // connections awaiting accept(), so the half-open set was bounded
+    // by nothing but the GLOBAL kTcbCap: a SYN flood against one
+    // listener could exhaust the whole table and starve every other
+    // socket on the machine, not merely that listener. Tracked
+    // separately from backlog_count (rather than folded into it)
+    // because the two have genuinely different lifetimes -- a child
+    // moves from this counter to that one when its handshake
+    // completes.
+    u32 syn_backlog_count;
     u32 backlog_head;
     u32 backlog_tail;
     u32 backlog_ring[kListenBacklogMax];

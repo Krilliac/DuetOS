@@ -152,6 +152,56 @@ bool TestRstAcceptability()
     return true;
 }
 
+// SYN-backlog slot accounting.
+//
+// The gate now counts half-open (SYN_RCVD) children as well as
+// accept-queued ones, so the RELEASE path matters as much as the
+// bound: a slot leaked by a child that dies mid-handshake would wedge
+// the listener at its limit forever, converting a SYN-flood defence
+// into a self-inflicted denial of service. This pins that release.
+bool TestSynBacklogAccounting()
+{
+    using namespace internal;
+    Tcb& parent = g_tcbs[5];
+    Tcb& child = g_tcbs[6];
+    ResetTcbStorage(parent);
+    ResetTcbStorage(child);
+
+    parent.in_use = true;
+    parent.is_listener = true;
+    parent.backlog_max = 4;
+    parent.backlog_count = 0;
+    parent.syn_backlog_count = 1; // one child mid-handshake
+
+    child.in_use = true;
+    child.is_listener = false;
+    child.state = State::SynRcvd;
+    child.iface_index = 0;
+    child.local_ip = {{10, 0, 0, 1}};
+    child.peer_ip = {{10, 0, 0, 2}};
+    child.local_port = 8080;
+    child.peer_port = 40000;
+    child.parent_listener = MakeId(5, parent.generation);
+    if (!AllocTcbBuffers(child))
+    {
+        parent.in_use = false;
+        child.in_use = false;
+        return false;
+    }
+    BucketInsert(6);
+
+    // A half-open child dying must hand its slot back.
+    DropTcb(6);
+    const bool released = (parent.syn_backlog_count == 0);
+    // ...and must not double-release if torn down again.
+    DropTcb(6);
+    const bool no_underflow = (parent.syn_backlog_count == 0);
+
+    parent.in_use = false;
+    child.in_use = false;
+    return released && no_underflow;
+}
+
 bool TestReassembly()
 {
     using namespace internal;
@@ -858,6 +908,11 @@ void SelfTest()
     if (!TestRstAcceptability())
     {
         EmitFail("rst acceptability (RFC 5961)");
+        all_ok = false;
+    }
+    if (!TestSynBacklogAccounting())
+    {
+        EmitFail("syn backlog slot release");
         all_ok = false;
     }
     if (!TestRtoBackoff())
