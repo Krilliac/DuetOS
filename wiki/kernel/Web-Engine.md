@@ -56,8 +56,9 @@ RGBA canvas, then blits to the window.
 The JavaScript interpreter recurses on the **C++ kernel stack** — each JS
 call level costs several native frames (measured ~15 KiB per level in the
 debug build, with its no-inline + sanitizer-padded frames). The kernel's
-arena stack is only **64 KiB usable** (16 pages + 1 guard page, see
-[`kernel/mm/kstack.h`](../../kernel/mm/kstack.h)), so the logical
+arena stack is only **128 KiB usable** (32 pages + 1 guard page, see
+[`kernel/mm/kstack.h`](../../kernel/mm/kstack.h) — it was 64 KiB until the
+2026-06-08 bump for the fetch worker's cert-verify tower), so the logical
 `maxCallDepth` cap **cannot** keep recursion from smashing the stack: a
 deep `function rec(){ return rec(); }` would guard-fault long before the
 count cap fires.
@@ -89,6 +90,48 @@ coarse `kMaxParseDepth` backstop covers boot-context (non-arena) stacks.
 This stops untrusted `(((…)))` / `{{{…}}}` from guard-faulting the
 kernel. (Security audit SEC-007, CWE-674, 2026-06-07.)
 
+### The same guard, engine-wide (2026-07-28)
+
+The JS engine was for a while the *only* part of `kernel/web/` carrying
+that guard, while the CSS parser, the selector matcher, the style walk
+and the layout walk all recursed on the same stack over the same
+page-supplied input. [`web/stack_guard.h`](../../kernel/web/stack_guard.h)
+now exports the shared `WebStackExhausted()` (plus
+`kWebMaxWalkDepth`, the coarse backstop for boot-context threads whose
+stack is not an arena slot) and every one of those walkers uses it:
+
+| Walker | File | Bail |
+|---|---|---|
+| `ParseCompound` ⇄ `ParsePseudo` (`:not()` nesting) | `css_parse.cpp` | drop the negation (over-match) |
+| `MatchFrom` (combinator chain) | `css.cpp` | report no-match |
+| `CountElements`, `StyleSubtree` | `css.cpp` | partial count / unstyled subtree |
+| `ContainsBlockDescendant`, `LayoutBlock` ⇄ `LayoutBlockInInline` | `layout.cpp` | no boxes for the subtree |
+| `CollectInlineRuns` | `layout_inline.cpp` | text not collected into runs |
+| `FindById`, `CollectByTag`, `LiteFindFirst`, `LiteCollect`, `SerializeNode`/`SerializeChildren` | `js_dom.cpp` | miss / truncated string |
+
+Every bail is a **visual degradation, never a fault**.
+
+Two known-limits worth keeping in mind:
+
+- **`:not()` nesting depth is capped at 32** (`kMaxSelectorNestDepth`).
+  Per-level input cost was only ~6 bytes of stylesheet text, so a
+  2–4 KB `<style>` block used to be enough to reach the guard page.
+- **Selector backtracking is budgeted** at `kMaxMatchSteps` (20 000)
+  candidates per `Matches()` call. `MatchFrom`'s descendant and
+  general-sibling arms retry *every* candidate, so an N-compound chain
+  against a depth-D tree explores C(D, N) states — `q x x … x p` with
+  D=200, N=12 is ~1e18. Exceeding the budget makes the rule
+  non-matching, so pathological selectors under-style rather than peg
+  the browser worker.
+
+Separately, **`AppendChild` now enforces the DOM's
+`HierarchyRequestError`** (`js_dom.cpp`). It previously had *no*
+hierarchy check, so `a.appendChild(a)` built a cyclic node graph that
+every element-scoped walker then recursed into **infinitely** — a
+guaranteed guard-page overflow from one line of page JS. A depth guard
+alone would not have retired that; the cycle had to be refused at the
+mutation.
+
 ## Self-tests
 
 Every stage boots a self-test, registered in
@@ -111,8 +154,11 @@ Every stage boots a self-test, registered in
 - `[css-selftest]` — cascade, specificity, inline, inheritance, UA,
   `display:none`, colour, the structural pseudo-class families (incl. the
   `:nth-child` vs `:nth-of-type` divergence on mixed-tag siblings).
+  Also pins the `:not()` nesting bound: a 200-level `:not(` stylesheet
+  must parse without faulting (check 22).
 - `[js-dom-selftest]` — DOM queries and the `innerHTML` get/set round
-  trip (14 checks).
+  trip, plus the cyclic-`appendChild` refusal (self-append and two-node
+  cycle rejected; a legitimate append still succeeds).
 - `[layout-selftest]` — bg rect, bold heading, wrap, stacked-y,
   `display:none`, center-align, anon-block-wrap.
 - `[paint-selftest]` — fill, glyph pixels, borders, image blit, clip,

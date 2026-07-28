@@ -12755,3 +12755,42 @@ markers for its richest input. Three discovery layers were added (runtime
   >1024-page path no longer panics; the load must return `ok=false` and
   `FreeFramesCount` must still balance, which only holds if the refused
   65th page's frame was freed.
+
+## 2026-07-28 — Web engine: one shared frame-address guard, plus a cycle refusal at the DOM mutation
+
+- **Decision:** `kernel/web/stack_guard.h` exports a single
+  `WebStackExhausted()` (the `__builtin_frame_address`-vs-guard-page
+  check already used by `js/parser.cpp` and `js/interp.cpp` for SEC-007)
+  and every recursive walker in `kernel/web/` uses it: the CSS parser's
+  `ParseCompound` ⇄ `ParsePseudo` `:not()` recursion, `MatchFrom`,
+  `CountElements` / `StyleSubtree`, `ContainsBlockDescendant`, the
+  `LayoutBlock` ⇄ `LayoutBlockInInline` pair, `CollectInlineRuns`, and
+  the `js_dom.cpp` query / serialization walkers. **Rules out** a
+  per-walker logical depth cap as the primary bound: per-level frame cost
+  differs by an order of magnitude across those paths, so one cap is
+  either rejecting or unsafe. The logical cap (`kWebMaxWalkDepth`)
+  survives only as the boot-context backstop, where the arena range check
+  is false.
+- **Decision:** every guard bail is a graceful degradation with a `GAP:`
+  marker — an unmatched rule, an unstyled or unlaid subtree, a truncated
+  `innerHTML` string, a dropped `:not()`. **Rules out** panicking, and
+  rules out returning an error that a caller would have to plumb through
+  the whole render pipeline.
+- **Decision:** selector backtracking gets an explicit per-`Matches()`
+  step budget (`kMaxMatchSteps`) charged **per candidate tried**, not per
+  call. `MatchFrom`'s descendant / general-sibling arms retry every
+  candidate, so the state count is C(D, N) in tree depth and chain
+  length — both page-supplied. **Rules out** relying on the stack guard
+  alone: the pathological case is exponential *time* at shallow depth,
+  which no depth bound sees. Budget exhaustion reports no-match, so a
+  hostile selector under-styles rather than pegging the browser worker.
+- **Decision:** `AppendChild` (`js_dom.cpp`) enforces the DOM's
+  `HierarchyRequestError` by walking the prospective parent's ancestors,
+  with a hop cap so the check itself terminates against a pre-existing
+  cycle. **Rules out** treating this as a depth problem: a cyclic node
+  graph makes the element-scoped walkers recurse *infinitely*, so no
+  depth cap and no stack guard placement retires it — the cycle has to be
+  refused at the mutation. It also rules out a `void` `AppendChild`:
+  `SetInnerHtml`'s `while (Node* child = frag->firstChild)` loop relies
+  on the append unlinking the child, so a silent refusal there would spin
+  forever.
