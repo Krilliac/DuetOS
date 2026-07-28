@@ -18,15 +18,8 @@
  * Geometry + metrics
  * ------------------------------------------------------------------ */
 
-/* RECT is four int32s on every Win32 ABI, so the kernel's 16-byte
- * write lands correctly on i386 without repacking — unlike MSG. */
-struct user32_rect
-{
-    INT left;
-    INT top;
-    INT right;
-    INT bottom;
-};
+/* struct user32_rect lives in user32_32_internal.h — both this TU and
+ * user32_32_util.c decode the kernel's rect writes. */
 
 static BOOL user32_get_rect(HWND h, unsigned selector, void* rect)
 {
@@ -88,6 +81,7 @@ __declspec(dllexport) BOOL __stdcall SetWindowPos(HWND h, HWND after, int x, int
 
 __declspec(dllexport) BOOL __stdcall SetWindowTextA(HWND h, const char* text)
 {
+    user32_record_set_title(h, text);
     return duet_syscall2(SYS_WIN_SET_TEXT, (unsigned)(unsigned long)h, (unsigned)(unsigned long)text) ? 1 : 0;
 }
 
