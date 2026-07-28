@@ -133,6 +133,13 @@ constexpr u32 kEdgePad = 4;
 constexpr u32 kTabW = 170;
 constexpr u32 kTabGap = 4;
 
+// Show-desktop rail: the rightmost cell of the strip. Hoisted out of
+// the paint block because the time card has to anchor LEFT of it —
+// both used to measure back from the same right edge, so the rail
+// painted over the last few pixels of the date row.
+constexpr u32 kRailW = 4;
+constexpr u32 kRailGap = 4;
+
 // Horizontal room the right-hand cluster needs: time card + tray
 // icons + chevron + (Duet only) the CPU/FPS pill + the show-desktop
 // rail + the gaps between them. Sized so tabs never get clipped by
@@ -426,8 +433,12 @@ void TaskbarReanchor()
     // the framebuffer minus an inset on each side, so a desktop with
     // many windows degrades to a near-full-width island rather than
     // running off the screen.
+    // The rounded corners eat into the first and last `radius`
+    // columns, so the content pad has to clear them or the START
+    // button and the time card get sliced by the curve.
+    const u32 pad = kEdgePad + theme.surface_radius;
     const u32 tabs_w = VisibleTabCount() * (kTabW + kTabGap);
-    const u32 content = kEdgePad + kStartW + kStartGap + tabs_w + RightReserve() + kEdgePad;
+    const u32 content = 2 * pad + kStartW + kStartGap + tabs_w + RightReserve();
     const u32 max_w = (info.width > 2 * inset) ? info.width - 2 * inset : info.width;
     const u32 w = (content < max_w) ? content : max_w;
 
@@ -507,6 +518,12 @@ void TaskbarRedraw()
     const u32 bar_w = (g_bar_w != 0) ? g_bar_w : info.width;
     const u32 bar_right = bar_x + bar_w;
     const u32 bar_radius = g_bar_radius;
+    // Left / right content pad. On a full-width strip the chrome sits
+    // 4 px off the framebuffer edge; on an island it must additionally
+    // clear the corner curve. `bar_content_right` is the right-hand
+    // anchor every right-aligned cell measures back from.
+    const u32 bar_pad = kEdgePad + bar_radius;
+    const u32 bar_content_right = (bar_w > 2 * bar_pad) ? bar_right - bar_pad : bar_right;
 
     // Tactility lift: a faint 6-px shadow bleeds upward from the
     // strip's top edge so the taskbar reads as a piece of chrome
@@ -591,7 +608,7 @@ void TaskbarRedraw()
     // window-chrome highlight band.
     constexpr u32 start_w = kStartW;
     constexpr u32 start_radius = 4;
-    const u32 start_x = bar_x + kEdgePad;
+    const u32 start_x = bar_x + bar_pad;
     const u32 start_h = (g_h > 8) ? g_h - 8 : g_h;
     FramebufferFillRoundRect(start_x, g_y + 4, start_w, start_h, start_radius, g_accent);
     FramebufferDrawRoundRect(start_x, g_y + 4, start_w, start_h, start_radius, g_border);
@@ -676,7 +693,8 @@ void TaskbarRedraw()
     //                 gaps (~14) = ~170
     const u32 right_reserve = RightReserve();
     u32 tab_x = start_x + start_w + kStartGap;
-    const u32 tabs_right_limit = (bar_w > right_reserve) ? bar_right - right_reserve : bar_right;
+    const u32 tabs_right_limit =
+        (bar_content_right > bar_x + right_reserve) ? bar_content_right - right_reserve : bar_content_right;
 
     g_tab_count = 0;
     const u32 count = WindowRegistryCount();
@@ -904,7 +922,12 @@ void TaskbarRedraw()
     // inset, anchored to the framebuffer's right edge.
     const u32 block_text_w = (clk_text_w > date_text_w) ? clk_text_w : date_text_w;
     const u32 block_w = block_text_w + 12;
-    const u32 block_x = (bar_w > block_w) ? bar_right - block_w : bar_x;
+    // Anchor left of the show-desktop rail, not of the strip edge:
+    // the rail is painted last and would otherwise overwrite the
+    // right-hand few pixels of the date row.
+    const u32 cluster_right =
+        (bar_content_right > bar_x + kRailW + kRailGap) ? bar_content_right - kRailW - kRailGap : bar_content_right;
+    const u32 block_x = (cluster_right > bar_x + block_w) ? cluster_right - block_w : bar_x;
     // Two-row stack inside the taskbar height — top row above the
     // strip's vertical centre, bottom row below.
     const u32 row_top_y = g_y + (g_h / 2) - 8;
@@ -1296,8 +1319,8 @@ void TaskbarRedraw()
     // the desktop is showing — gives the user a visible
     // "armed" cue that a click would restore the windows.
     {
-        constexpr u32 rail_w = 4;
-        const u32 rail_x = (bar_w > rail_w + 1) ? bar_right - rail_w - 1 : bar_x;
+        constexpr u32 rail_w = kRailW;
+        const u32 rail_x = (bar_content_right > bar_x + rail_w + 1) ? bar_content_right - rail_w - 1 : bar_x;
         const u32 rail_y = g_y + 4;
         const u32 rail_h = (g_h > 8) ? g_h - 8 : g_h;
         const u8 rail_alpha = WindowShowDesktopActive() ? 0xC0 : 0x60;
@@ -1445,7 +1468,7 @@ void TaskbarStartBounds(u32* x_out, u32* y_out, u32* w_out, u32* h_out)
     // an update there must update these constants too. Small
     // static layout, so a centralised constant would be over-
     // engineering at v0 scale.
-    const u32 start_x = g_bar_x + kEdgePad;
+    const u32 start_x = g_bar_x + kEdgePad + g_bar_radius;
     constexpr u32 start_w = kStartW;
     const u32 start_y = g_y + 4;
     const u32 start_h = (g_h > 8) ? g_h - 8 : g_h;

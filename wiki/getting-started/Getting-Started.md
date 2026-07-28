@@ -83,9 +83,10 @@ during the QEMU smoke boot.
 
 ## Reproduce the Screenshots
 
-See [README.md > Screenshots](../../README.md#screenshots) for the exact
-`screenshot-theme.sh` invocations used to capture each screenshot in
-`docs/screenshots/`.
+See [QEMU Smoke > Screenshot Capture](../tooling/QEMU-Smoke.md#screenshot-capture)
+for the exact `screenshot-theme.sh` invocations used to capture each
+screenshot in `docs/screenshots/`, including the `demo-windows=1` boot
+flag that makes app windows visible to a headless capture.
 
 ## Next Steps
 
