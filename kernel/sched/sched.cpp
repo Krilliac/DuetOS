@@ -5848,6 +5848,25 @@ u64 SchedCountChildrenOfPid(u64 parent_pid)
     return total;
 }
 
+// Resolve a pid to its owning Process.
+//
+// The AUTHORITATIVE list here is `g_all_tasks_head` — the global
+// live-task registry, which holds every task in every state and is
+// only unlinked at reap. The runqueue / sleep / zombie walks below
+// are a fast path for the common cases; they are NOT sufficient on
+// their own, because a task parked in a blocking syscall
+// (`WaitQueueBlockCurrentLocked` sets state=Blocked and links the
+// task onto the WaitQueue, off every scheduler list) appears in the
+// registry and nowhere else. `SchedProcessAlive` already documents
+// that gap; before the registry fallback existed, a pidfd on a
+// process sitting in read()/wait4()/futex resolved to nullptr, so
+// `pidfd_send_signal` returned -ESRCH to a perfectly live process
+// and the pidfd epoll path reported it as "exited".
+//
+// Do NOT filter on task state: a Dead-but-unreaped task must still
+// resolve so exit bookkeeping can find its Process. Any future
+// scheduler list must be reachable through the registry, not added
+// as another walk here (whitelist-incompleteness class).
 core::Process* SchedFindProcessByPid(u64 target_pid)
 {
     if (!cpu::BspInstalled())
@@ -5895,6 +5914,17 @@ core::Process* SchedFindProcessByPid(u64 target_pid)
     if (hit == nullptr)
     {
         for (Task* t = g_zombies; t != nullptr && hit == nullptr; t = t->next)
+        {
+            hit = match(t);
+        }
+    }
+    if (hit == nullptr)
+    {
+        // Authoritative walk — catches Blocked tasks (parked on a
+        // WaitQueue, on none of the lists above) and anything a
+        // future scheduler list would otherwise hide. Same anchor
+        // and same lock as `SchedProcessAlive`.
+        for (Task* t = g_all_tasks_head; t != nullptr && hit == nullptr; t = t->all_next)
         {
             hit = match(t);
         }
