@@ -1780,10 +1780,16 @@ void LinuxFdSetStatusFlags(Process* p, u32 fd, u32 status_flags);
 void LinuxFdInheritFromParent(Process* parent, Process* child);
 
 /// Walk the fd table and close every slot with FD_CLOEXEC set.
-/// Called from the future execve handler before the new image
-/// is mapped in. v0 has no execve, so this is currently
-/// invoked only by the boot-time self-test that exercises the
-/// CLOEXEC bit's plumbing.
+///
+/// Called by the native SYS_EXECVE handler at its point of no return,
+/// immediately before `AddressSpaceClearUserMappings` replaces the
+/// image — so it covers every ABI that routes through execve, not just
+/// the Linux one. Invoked there and by the boot-time self-test that
+/// exercises the CLOEXEC bit's plumbing.
+///
+/// Firing at the commit point is deliberate: POSIX closes these fds
+/// only when exec actually SUCCEEDS, and every execve failure path
+/// returns with the caller's fd table untouched.
 void LinuxFdCloseOnExec(Process* p);
 
 /// Self-test for the Linux fd-table helpers. Boot-time only;

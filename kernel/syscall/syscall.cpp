@@ -2120,6 +2120,24 @@ void SyscallDispatch(arch::TrapFrame* frame)
             return;
         }
 
+        // exec has COMMITTED — close every fd carrying FD_CLOEXEC.
+        //
+        // The bit was tracked (LinuxFdSetCloexec / LinuxFdGetCloexec),
+        // honoured by F_SETFD / O_CLOEXEC / F_DUPFD_CLOEXEC, documented,
+        // and even proven correct by a boot self-test — but nothing ever
+        // invoked the helper on a REAL exec. Every descriptor therefore
+        // survived execve regardless of its cloexec bit (CWE-403), so a
+        // process that had opened a privileged file, socket or pipe
+        // leaked it straight into the exec'd image. That is precisely
+        // the leak FD_CLOEXEC exists to prevent, and the reason a
+        // process drops privilege by exec'ing in the first place.
+        //
+        // Deliberately placed at the point of no return rather than
+        // earlier: POSIX closes these only when exec actually SUCCEEDS,
+        // and every failure path above still returns with the caller's
+        // fd table intact.
+        LinuxFdCloseOnExec(caller);
+
         // Tear down the AS user mappings, then ElfLoad into the
         // same AS. Past this point any failure is fatal — the
         // caller's address space is already gone.
