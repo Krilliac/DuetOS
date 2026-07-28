@@ -464,43 +464,10 @@ __declspec(dllexport) DWORD __stdcall GetFileType(HANDLE hFile)
     return 0x0;     /* FILE_TYPE_UNKNOWN */
 }
 
-/* ------------------------------------------------------------------
- * Critical sections (v0: lockless on single-threaded entry; CS struct
- * is opaque + 24 bytes for x86, populated by InitializeCriticalSection).
- * MSVC CRT initialises a handful of these before main() and the v0
- * implementation needs to at least accept them.
- * ------------------------------------------------------------------ */
-
-__declspec(dllexport) void __stdcall InitializeCriticalSection(void* lpCriticalSection)
-{
-    if (lpCriticalSection == (void*)0)
-        return;
-    unsigned char* p = (unsigned char*)lpCriticalSection;
-    for (int i = 0; i < 24; ++i)
-        p[i] = 0;
-}
-
-__declspec(dllexport) void __stdcall EnterCriticalSection(void* lpCriticalSection)
-{
-    (void)lpCriticalSection;
-}
-
-__declspec(dllexport) void __stdcall LeaveCriticalSection(void* lpCriticalSection)
-{
-    (void)lpCriticalSection;
-}
-
-__declspec(dllexport) void __stdcall DeleteCriticalSection(void* lpCriticalSection)
-{
-    (void)lpCriticalSection;
-}
-
-__declspec(dllexport) BOOL __stdcall InitializeCriticalSectionAndSpinCount(void* lpCriticalSection, DWORD dwSpinCount)
-{
-    (void)dwSpinCount;
-    InitializeCriticalSection(lpCriticalSection);
-    return 1;
-}
+/* Critical sections, SRW locks, mutexes/events/semaphores, waits and
+ * CreateThread live in the sibling TU kernel32_32_sync.c — including
+ * the i386 struct-layout note that governs every caller-owned lock
+ * struct in this DLL. */
 
 /* ------------------------------------------------------------------
  * Per-process app-compat policy cache (mirrors kernel32.c)

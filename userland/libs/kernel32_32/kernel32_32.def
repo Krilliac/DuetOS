@@ -75,3 +75,63 @@ EXPORTS
     GetFileSizeEx
     GetFileAttributesA
     GetFileAttributesW
+
+; --- Wall clock / performance counter (kernel32_32_time.c) ---------
+    GetSystemTime
+    GetSystemTimeAsFileTime
+    QueryPerformanceCounter
+    QueryPerformanceFrequency
+
+; --- Synchronisation (kernel32_32_sync.c) -------------------------
+    CreateMutexA
+    CreateMutexW
+    CreateMutexExW
+    OpenMutexW
+    ReleaseMutex
+    CreateEventA
+    CreateEventW
+    SetEvent
+    ResetEvent
+    CreateSemaphoreA
+    CreateSemaphoreW
+    CreateSemaphoreExW
+    OpenSemaphoreW
+    ReleaseSemaphore
+    WaitForSingleObject
+    WaitForSingleObjectEx
+    InitializeCriticalSection
+    InitializeCriticalSectionAndSpinCount
+    InitializeCriticalSectionEx
+    DeleteCriticalSection
+    EnterCriticalSection
+    TryEnterCriticalSection
+    LeaveCriticalSection
+    InitializeSRWLock
+    AcquireSRWLockExclusive
+    ReleaseSRWLockExclusive
+    TryAcquireSRWLockExclusive
+    AcquireSRWLockShared
+    ReleaseSRWLockShared
+    CreateThread
+
+; --- Code page / collation (kernel32_32_nls.c) --------------------
+    MultiByteToWideChar
+    WideCharToMultiByte
+    CompareStringW
+
+; --- Local heap, debug, modules, resources (kernel32_32_misc.c) ---
+    LocalAlloc
+    LocalFree
+    OutputDebugStringW
+    DebugBreak
+    RaiseException
+    HeapSetInformation
+    GetModuleHandleExA
+    GetModuleHandleExW
+    GetModuleFileNameW
+    LoadLibraryExA
+    LoadLibraryExW
+    FindClose
+    LoadResource
+    FormatMessageA
+    FormatMessageW
