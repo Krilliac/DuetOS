@@ -94,8 +94,18 @@ bool FindCmapFormat4(const u8* bytes, u32 size, u32 cmap_off, u32& fmt4_off, u32
         const u8* rec = bytes + cmap_off + 4 + static_cast<u32>(i) * 8u;
         const u16 platform = ReadU16(rec);
         const u16 encoding = ReadU16(rec + 2);
-        const u32 sub_off = cmap_off + ReadU32(rec + 4);
-        if (sub_off + 6 > size) // need at least format + length + lang
+        // The subtable offset comes straight from the font, and both
+        // `cmap_off + off` and the `+ 6` span check used to be computed
+        // in u32 -- so they WRAP. A font declaring an offset near 4 GiB
+        // made `sub_off + 6` wrap to a small value, the span check
+        // passed, and the ReadU16 below then read ~4 GiB past the
+        // buffer. Do the arithmetic in u64 and route the span through
+        // BoundsOk, which is already written overflow-safe.
+        const u64 sub_off64 = static_cast<u64>(cmap_off) + static_cast<u64>(ReadU32(rec + 4));
+        if (sub_off64 > size)
+            continue;
+        const u32 sub_off = static_cast<u32>(sub_off64);
+        if (!BoundsOk(sub_off, 6, size)) // need at least format + length + lang
             continue;
         const u16 fmt = ReadU16(bytes + sub_off);
         if (fmt != 4)
@@ -418,6 +428,25 @@ Result<TtfGlyph> TtfDecodeGlyph(const TtfFont& font, u16 glyph_index, TtfPoint* 
     {
         const u16 ep = ReadU16(g + cur);
         cur += 2u;
+        // endPtsOfContours MUST be strictly increasing (TrueType spec).
+        // Nothing checked it, and the rasteriser cannot survive a font
+        // that violates it:
+        //
+        //   * WalkContour derives each contour's span as
+        //     [prev_end + 1, end] and computes `count = end - start + 1`
+        //     in u16. A non-increasing endpoint wraps that, and an
+        //     endpoint exactly one BELOW the start makes count == 0 --
+        //     which its `% count` index step turns into a
+        //     DIVIDE-BY-ZERO.
+        //   * total_pts below is derived from the LAST endpoint, so a
+        //     decreasing sequence leaves it smaller than the highest
+        //     index the rasteriser visits, and points[] is read out of
+        //     bounds.
+        //
+        // Enforcing it here also makes `last_endpoint` provably the
+        // maximum, which is what lets total_pts bound every index.
+        if (i > 0 && ep <= last_endpoint)
+            return Err{ErrorCode::Corrupt};
         endpoints_scratch[i] = ep;
         last_endpoint = ep;
     }
