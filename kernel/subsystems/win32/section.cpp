@@ -11,6 +11,7 @@
 #include "mm/kheap.h"
 #include "mm/page.h"
 #include "proc/process.h"
+#include "sync/spinlock.h"
 
 namespace duetos::subsystems::win32::section
 {
@@ -19,25 +20,32 @@ namespace
 {
 Section g_pool[kSectionPoolCap];
 
+// Guards the pool's SLOT-OWNERSHIP state — `in_use` and `refcount` —
+// on an SMP kernel. Nothing synchronised these before, which left two
+// concrete races:
+//
+//   * SectionCreate scanned for `!in_use` and only set `in_use = true`
+//     AFTER the frames-table KMalloc and every AllocateFrame + page
+//     zeroing. Two CPUs in NtCreateSection therefore selected the SAME
+//     slot with near-certainty under load, and the loser's frames table
+//     was leaked while both processes were handed the same section.
+//   * SectionRelease did a non-atomic `--refcount` and then tore the
+//     section down at zero. Two concurrent releases could both observe
+//     zero and both tear the section down — a double free of every
+//     physical frame in the section, handing those frames to two future
+//     owners at once.
+//
+// Scope is deliberately narrow: the claim and the refcount transitions
+// only. The heavy work in SectionCreate (KMalloc + per-page
+// AllocateFrame + zeroing) runs OUTSIDE the lock, so this never holds a
+// spinlock across an allocation. Lock order is section -> frame
+// allocator / kheap; nothing in mm takes this lock, so that edge cannot
+// invert.
+constinit duetos::sync::SpinLock g_section_lock{};
+
 inline u64 PageUp(u64 v)
 {
     return (v + (mm::kPageSize - 1)) & ~(mm::kPageSize - 1);
-}
-
-void FreeSectionFrames(Section* s)
-{
-    if (s->frames == nullptr)
-        return;
-    for (u32 i = 0; i < s->num_pages; ++i)
-    {
-        if (s->frames[i] != mm::kNullFrame)
-        {
-            mm::FreeFrame(s->frames[i]);
-            s->frames[i] = mm::kNullFrame;
-        }
-    }
-    mm::KFree(s->frames);
-    s->frames = nullptr;
 }
 
 // Translate a Win32 PAGE_* value into mm::kPage* PTE flags.
@@ -97,13 +105,27 @@ i32 SectionCreate(u64 size_bytes, u32 page_protect)
     const u64 aligned = PageUp(size_bytes);
     const u32 num_pages = static_cast<u32>(aligned / mm::kPageSize);
 
+    // Find AND claim a free slot under the lock, so no peer CPU can
+    // pick the same one while we allocate. `refcount = 0` marks the
+    // slot as reserved-but-not-yet-live; it becomes 1 only once the
+    // section is fully constructed below, and Retain/Release both
+    // refuse to act on a zero-refcount slot.
     u32 idx = kSectionPoolCap;
-    for (u32 i = 0; i < kSectionPoolCap; ++i)
     {
-        if (!g_pool[i].in_use)
+        duetos::sync::SpinLockGuard guard(g_section_lock);
+        for (u32 i = 0; i < kSectionPoolCap; ++i)
         {
-            idx = i;
-            break;
+            if (!g_pool[i].in_use)
+            {
+                idx = i;
+                g_pool[i].in_use = true;
+                g_pool[i].refcount = 0;
+                g_pool[i].frames = nullptr;
+                g_pool[i].num_pages = 0;
+                g_pool[i].has_writable_view = false;
+                g_pool[i].has_executable_view = false;
+                break;
+            }
         }
     }
     if (idx == kSectionPoolCap)
@@ -119,6 +141,10 @@ i32 SectionCreate(u64 size_bytes, u32 page_protect)
     {
         KLOG_ERROR_V("subsystems/win32/section", "SectionCreate: KMalloc for frames table failed (OOM); pages",
                      static_cast<u64>(num_pages));
+        // Release the slot we claimed above, or this failure leaks it
+        // out of the pool permanently.
+        duetos::sync::SpinLockGuard guard(g_section_lock);
+        s.in_use = false;
         return -1;
     }
     for (u32 i = 0; i < num_pages; ++i)
@@ -135,6 +161,10 @@ i32 SectionCreate(u64 size_bytes, u32 page_protect)
                 mm::FreeFrame(s.frames[j]);
             mm::KFree(s.frames);
             s.frames = nullptr;
+            // Same as the KMalloc failure above: hand the claimed slot
+            // back, otherwise an OOM here burns a pool entry forever.
+            duetos::sync::SpinLockGuard guard(g_section_lock);
+            s.in_use = false;
             return -1;
         }
         // Zero the frame — Windows guarantees fresh sections
@@ -146,12 +176,17 @@ i32 SectionCreate(u64 size_bytes, u32 page_protect)
             dst[k] = 0;
         s.frames[i] = f;
     }
-    s.in_use = true;
-    s.num_pages = num_pages;
-    s.refcount = 1; // new handle
-    s.page_protect = page_protect;
-    s.has_writable_view = false;
-    s.has_executable_view = false;
+    // Publish the finished section. `in_use` was already set when the
+    // slot was claimed; flipping refcount 0 -> 1 under the lock is what
+    // makes it live to Retain/Release.
+    {
+        duetos::sync::SpinLockGuard guard(g_section_lock);
+        s.num_pages = num_pages;
+        s.refcount = 1; // new handle
+        s.page_protect = page_protect;
+        s.has_writable_view = false;
+        s.has_executable_view = false;
+    }
     return static_cast<i32>(idx);
 }
 
@@ -168,7 +203,10 @@ void SectionRetain(u32 idx)
         return;
     }
     Section& s = g_pool[idx];
-    if (!s.in_use)
+    duetos::sync::SpinLockGuard guard(g_section_lock);
+    // refcount == 0 with in_use set means the slot is CLAIMED but still
+    // being constructed by SectionCreate — not a live section yet.
+    if (!s.in_use || s.refcount == 0)
         return;
     ++s.refcount;
 }
@@ -181,18 +219,44 @@ void SectionRelease(u32 idx)
         return;
     }
     Section& s = g_pool[idx];
-    if (!s.in_use)
-        return;
-    if (s.refcount > 0)
-        --s.refcount;
-    if (s.refcount == 0)
+
+    // Decide the teardown under the lock, but PERFORM it outside.
+    //
+    // Deciding under the lock is what makes the double free impossible:
+    // exactly one caller can observe the 1 -> 0 transition, and it
+    // clears `in_use` before releasing, so a concurrent release sees a
+    // free slot and bails. Performing it outside keeps up to
+    // kSectionMaxBytes/4K == 1024 FreeFrame calls off an IRQs-disabled
+    // spinlock hold.
+    mm::PhysAddr* doomed_frames = nullptr;
+    u32 doomed_pages = 0;
     {
-        FreeSectionFrames(&s);
+        duetos::sync::SpinLockGuard guard(g_section_lock);
+        if (!s.in_use || s.refcount == 0)
+            return;
+        --s.refcount;
+        if (s.refcount != 0)
+            return;
+        // Last reference: take exclusive ownership of the frames table
+        // and retire the slot in the same critical section.
+        doomed_frames = s.frames;
+        doomed_pages = s.num_pages;
+        s.frames = nullptr;
         s.in_use = false;
         s.num_pages = 0;
         s.page_protect = 0;
         s.has_writable_view = false;
         s.has_executable_view = false;
+    }
+
+    if (doomed_frames != nullptr)
+    {
+        for (u32 i = 0; i < doomed_pages; ++i)
+        {
+            if (doomed_frames[i] != mm::kNullFrame)
+                mm::FreeFrame(doomed_frames[i]);
+        }
+        mm::KFree(doomed_frames);
     }
 }
 
