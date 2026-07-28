@@ -438,6 +438,26 @@ chrome for the debug / screenshot workflow.
   a cached per-window box blur of the compose surface
   (`IMPLEMENTATION.md` §4 "full version"); the glass tints but does not
   frost.
+- **Rounded corners are punched, not painted.** The chrome rounds the
+  body, then the display list and `content_fn` fill the client rect
+  square and square the corners straight back off. After all content
+  lands, `AuroraWallpaperRestoreCorners` replays the exact wallpaper
+  pixels outside each corner arc from the cached backdrop — the cache
+  is what makes this exact rather than a flat-colour punch, since
+  `FramebufferReadPixel` cannot see the compose surface. Skipped on
+  maximized windows.
+  **GAP:** the replay is of the *wallpaper*, so a corner overlapping a
+  lower window shows wallpaper rather than that window (~14 px per
+  corner at radius 8).
+- **No seam.** On glass the title/client divider and the inner client
+  highlight are suppressed: the design's window is one continuous
+  surface, and those two lines are what made the title strip read as a
+  separate contrasting band.
+- **Chrome type.** `ChromeTextRole::Title` is the design's 13 px, not
+  16, and window titles paint `--ink` (active) / `--ink-2` (unfocused)
+  rather than pure white. Window titles are registered in title case.
+  `bitmap_scale` is unchanged, so the non-TTF palettes keep their
+  existing metrics.
 - **Neutral title strip.** On glass the title bar paints a single
   neutral `--bg-3` shade for every window rather than the per-role hue,
   matching the reference desktop; the role colour survives in the
