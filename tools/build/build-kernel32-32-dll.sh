@@ -25,14 +25,10 @@ fi
 REPO_ROOT="$1"
 OUT_HEADER="$2"
 SRC_DIR="${REPO_ROOT}/userland/libs/kernel32_32"
-SRC_C="${SRC_DIR}/kernel32_32.c"
-SRC_FS="${SRC_DIR}/kernel32_32_fs.c"
 EMBED="${REPO_ROOT}/tools/build/embed-blob.py"
 
 WORK_DIR="$(dirname "${OUT_HEADER}")/kernel32_32"
 mkdir -p "${WORK_DIR}"
-OBJ="${WORK_DIR}/kernel32_32.obj"
-OBJ_FS="${WORK_DIR}/kernel32_32_fs.obj"
 # Output filename is "kernel32.dll" (not kernel32_32.dll) because
 # lld-link stamps the basename of /out: into the PE Export Directory's
 # Name field. That's the string the PE32 importer's case-insensitive
@@ -42,25 +38,32 @@ DLL="${WORK_DIR}/kernel32.dll"
 CLANG="${CLANG:-clang}"
 LLD_LINK="${LLD_LINK:-lld-link}"
 
-"${CLANG}" \
-    --target=i686-pc-windows-msvc \
-    -c \
-    -ffreestanding -nostdlib -fno-stack-protector -fno-builtin \
-    -mno-red-zone -fno-asynchronous-unwind-tables \
-    -O2 -Wall -Wextra \
-    "${SRC_C}" -o "${OBJ}"
+# Every .c in the directory is a TU of this DLL. The list is globbed
+# rather than enumerated because kernel32_32 is split across several
+# TUs to stay under the project's ~500-line guideline (base, file I/O,
+# time, sync, NLS, misc) and that split grows: an enumerated list
+# silently drops a new TU, and the failure surfaces as a wall of
+# lld-link "undefined symbol" errors naming every export the missing
+# TU defined. Sorted so the link order — and therefore the embedded
+# blob — is identical across hosts; boot-determinism sweeps diff it.
+mapfile -t SRC_LIST < <(find "${SRC_DIR}" -maxdepth 1 -name '*.c' -print | sort)
+if [[ ${#SRC_LIST[@]} -eq 0 ]]; then
+    echo "build-kernel32-32-dll.sh: no .c sources under ${SRC_DIR}" >&2
+    exit 1
+fi
 
-# File I/O TU — CreateFile* / ReadFile / SetFilePointer / GetFileSize*
-# / GetFileAttributes*. Split out of kernel32_32.c to keep both TUs
-# under the project's ~500-line guideline; they share
-# kernel32_32_internal.h.
-"${CLANG}" \
-    --target=i686-pc-windows-msvc \
-    -c \
-    -ffreestanding -nostdlib -fno-stack-protector -fno-builtin \
-    -mno-red-zone -fno-asynchronous-unwind-tables \
-    -O2 -Wall -Wextra \
-    "${SRC_FS}" -o "${OBJ_FS}"
+OBJS=()
+for src in "${SRC_LIST[@]}"; do
+    obj="${WORK_DIR}/$(basename "${src}" .c).obj"
+    "${CLANG}" \
+        --target=i686-pc-windows-msvc \
+        -c \
+        -ffreestanding -nostdlib -fno-stack-protector -fno-builtin \
+        -mno-red-zone -fno-asynchronous-unwind-tables \
+        -O2 -Wall -Wextra \
+        "${src}" -o "${obj}"
+    OBJS+=("${obj}")
+done
 
 rm -f "${DLL}"
 set +e
@@ -74,7 +77,7 @@ set +e
     /dll /noentry /nodefaultlib /machine:x86 \
     /base:0x10020000 \
     /def:"${SRC_DIR}/kernel32_32.def" \
-    /out:"${DLL}" "${OBJ}" "${OBJ_FS}" 2>&1 | grep -v "align specified without /driver"
+    /out:"${DLL}" "${OBJS[@]}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}
 set -e
 if [[ ${LINK_RC} -ne 0 ]]; then

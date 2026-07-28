@@ -897,23 +897,35 @@ duetos_embed_blob(generated_kernel32_dll.h
 # 32-bit kernel32 companion — PE32 (i386) DLL, preloaded into PE32
 # processes' address spaces so their IAT entries to KERNEL32.dll
 # resolve. Layer 4 of 32-bit PE support.
+#
+# Both builders below glob every .c in their DLL's directory, so the
+# dependency lists are globbed too (CONFIGURE_DEPENDS re-runs the glob
+# when a file appears). An enumerated list here would leave a newly
+# added TU out of the DEPENDS while the builder still compiled it —
+# the DLL would silently keep its previous contents on an incremental
+# build, which is a far worse failure than a link error.
+file(GLOB _kernel32_32_srcs CONFIGURE_DEPENDS
+    "${CMAKE_SOURCE_DIR}/userland/libs/kernel32_32/*.c"
+    "${CMAKE_SOURCE_DIR}/userland/libs/kernel32_32/*.h")
 duetos_embed_blob(generated_kernel32_32_dll.h
     SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-kernel32-32-dll.sh"
     SRC     "${CMAKE_SOURCE_DIR}/userland/libs/kernel32_32/kernel32_32.c"
     EXTRA_DEPS
-        "${CMAKE_SOURCE_DIR}/userland/libs/kernel32_32/kernel32_32_internal.h"
-        "${CMAKE_SOURCE_DIR}/userland/libs/kernel32_32/kernel32_32_fs.c"
-        "${CMAKE_SOURCE_DIR}/userland/libs/kernel32_32/kernel32_32_paths.h"
+        ${_kernel32_32_srcs}
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32_32/kernel32_32.def"
         "${CMAKE_SOURCE_DIR}/userland/libs/common/duet32_syscall.h"
     COMMENT "Compiling + embedding kernel32_32.dll (i386 PE32 companion)")
 
 # 32-bit msvcrt companion — string / memory / CRT-startup intrinsics
 # every MSVC-built PE32 calls during boot.
+file(GLOB _msvcrt_32_srcs CONFIGURE_DEPENDS
+    "${CMAKE_SOURCE_DIR}/userland/libs/msvcrt_32/*.c"
+    "${CMAKE_SOURCE_DIR}/userland/libs/msvcrt_32/*.h")
 duetos_embed_blob(generated_msvcrt_32_dll.h
     SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-msvcrt-32-dll.sh"
     SRC     "${CMAKE_SOURCE_DIR}/userland/libs/msvcrt_32/msvcrt_32.c"
     EXTRA_DEPS
+        ${_msvcrt_32_srcs}
         "${CMAKE_SOURCE_DIR}/userland/libs/msvcrt_32/msvcrt_32.def"
         "${CMAKE_SOURCE_DIR}/userland/libs/msvcrt_32/chkstk.S"
     COMMENT "Compiling + embedding msvcrt_32.dll (i386 PE32 companion)")

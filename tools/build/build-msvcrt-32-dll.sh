@@ -22,26 +22,39 @@ fi
 REPO_ROOT="$1"
 OUT_HEADER="$2"
 SRC_DIR="${REPO_ROOT}/userland/libs/msvcrt_32"
-SRC_C="${SRC_DIR}/msvcrt_32.c"
 SRC_S="${SRC_DIR}/chkstk.S"
 EMBED="${REPO_ROOT}/tools/build/embed-blob.py"
 
 WORK_DIR="$(dirname "${OUT_HEADER}")/msvcrt_32"
 mkdir -p "${WORK_DIR}"
-OBJ_C="${WORK_DIR}/msvcrt_32.obj"
 OBJ_S="${WORK_DIR}/chkstk.obj"
 DLL="${WORK_DIR}/msvcrt.dll"
 
 CLANG="${CLANG:-clang}"
 LLD_LINK="${LLD_LINK:-lld-link}"
 
-"${CLANG}" \
-    --target=i686-pc-windows-msvc \
-    -c \
-    -ffreestanding -nostdlib -fno-stack-protector -fno-builtin \
-    -mno-red-zone -fno-asynchronous-unwind-tables \
-    -O2 -Wall -Wextra \
-    "${SRC_C}" -o "${OBJ_C}"
+# Every .c in the directory is a TU of this DLL — globbed, not
+# enumerated, so a new TU (the CRT-startup and wide-string splits that
+# keep each file under the ~500-line guideline) cannot be silently
+# dropped from the link. Sorted for a reproducible blob.
+mapfile -t SRC_LIST < <(find "${SRC_DIR}" -maxdepth 1 -name '*.c' -print | sort)
+if [[ ${#SRC_LIST[@]} -eq 0 ]]; then
+    echo "build-msvcrt-32-dll.sh: no .c sources under ${SRC_DIR}" >&2
+    exit 1
+fi
+
+OBJS_C=()
+for src in "${SRC_LIST[@]}"; do
+    obj="${WORK_DIR}/$(basename "${src}" .c).obj"
+    "${CLANG}" \
+        --target=i686-pc-windows-msvc \
+        -c \
+        -ffreestanding -nostdlib -fno-stack-protector -fno-builtin \
+        -mno-red-zone -fno-asynchronous-unwind-tables \
+        -O2 -Wall -Wextra \
+        "${src}" -o "${obj}"
+    OBJS_C+=("${obj}")
+done
 
 # Assemble the i386 chkstk family (real page-probing helper)
 # alongside the C source. clang's integrated assembler handles
@@ -59,7 +72,7 @@ set +e
     /dll /noentry /nodefaultlib /machine:x86 \
     /base:0x10040000 \
     /def:"${SRC_DIR}/msvcrt_32.def" \
-    /out:"${DLL}" "${OBJ_C}" "${OBJ_S}" 2>&1 | grep -v "align specified without /driver"
+    /out:"${DLL}" "${OBJS_C[@]}" "${OBJ_S}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}
 set -e
 if [[ ${LINK_RC} -ne 0 ]]; then
