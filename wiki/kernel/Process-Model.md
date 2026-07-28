@@ -43,6 +43,41 @@ context switch remains a single pointer load.
    `AddressSpace`. AS destructor unmaps every user-half page and
    returns frames.
 
+### Exit-time reclamation
+
+The destructor is the last chance to reclaim anything the guest holds
+out of a **kernel-wide, fixed-size** pool — a slot leaked there is not
+a per-process leak, it is gone for the rest of the boot. `ProcessRelease`
+therefore drains, in this order:
+
+| Table | Owns | Released via |
+|-------|------|--------------|
+| `win32_section_views[8]` | one section-pool ref per mapped view | `SectionUnmap` + `SectionRelease` — **before** `AddressSpaceRelease`, which cannot see views (they are borrowed pages with no AS region entry) |
+| `linux_fds[16]` | one ref on a shared open-file description (64 global OFD slots) | `LinuxFdClose` — **before** `HandleTableDrain`, so KFile teardown stays on its normal path |
+| `kobj_handles` | KMutex / KEvent / KSemaphore / IOCP / KFile | `HandleTableDrain` |
+| kernel sockets | pool slot + bound port | `SocketReleaseByOwner` |
+| `win32_handles[16]` | pipe-pool ref (Pipe slots only; FS slots own nothing) | `fs::routing::CloseForProcess` |
+| `win32_section_handles[8]` | one section-pool ref per open handle | `SectionRelease` |
+| `win32_dirs[8]` | KMalloc'd directory snapshot | `KFree` |
+
+`win32_reg_handles[]` (borrowed `RegKey*`) and `win32_foreign_threads[]`
+(an immutable TID) own nothing and need no drain.
+
+**`win32_proc_handles[8]` is the exception and is NOT drained here.**
+Each slot holds a `ProcessRetain` on its target, and `Process::refcount`
+is live tasks *plus* handle holders — so the retained reference is
+precisely what keeps the refcount above 0 and makes the destructor
+unreachable. `NtOpenProcess` does not refuse the caller's own pid, so a
+self-handle pins a process forever and a mutual pair forms a cycle. The
+drop therefore runs at **last-task exit**, an earlier event than
+last-reference-drop: the reaper calls
+`core::ProcessDropOwnedProcessHandles` once
+`sched::SchedCountLiveTasksForProcess` reaches 0.
+
+One consequence at the syscall surface: `NtMapViewOfSection` now returns
+`STATUS_NO_MEMORY` when the target's 8-entry view table is full, rather
+than installing a view whose reference nothing could ever drop.
+
 ## Process Spawn
 
 `kernel/proc/spawn.{h,cpp}` is the actual process-creation entry
