@@ -21,11 +21,11 @@ namespace
 struct Palette
 {
     u32 bg0, bg1, bg2;
-    u32 hairline;        // --line, pre-opacity
-    u8 hairline_alpha;   // --line alpha * layer opacity
-    u32 ink2;            // hex-dump band ink
-    u32 vignette;        // --vignette colour
-    u8 vignette_alpha;   // --vignette alpha
+    u32 hairline;      // --line, pre-opacity
+    u8 hairline_alpha; // --line alpha * layer opacity
+    u32 ink2;          // hex-dump band ink
+    u32 vignette;      // --vignette colour
+    u8 vignette_alpha; // --vignette alpha
 };
 
 constexpr Palette kDark = {
@@ -149,8 +149,8 @@ void PaintBlob(u32 w, u32 h, u32 rgb, u32 cx_pct, u32 cy_pct, u32 rx_pct, u32 ry
             {
                 continue;
             }
-            const i64 f = kOne - d2;               // Q12, 1.0 at the centre
-            const i64 falloff = (f * f) >> 12;     // squared shoulder
+            const i64 f = kOne - d2;           // Q12, 1.0 at the centre
+            const i64 falloff = (f * f) >> 12; // squared shoulder
             const u32 a = static_cast<u32>((static_cast<i64>(peak) * falloff) >> 12);
             CacheBlend(static_cast<u32>(x), static_cast<u32>(y), rgb, a);
         }

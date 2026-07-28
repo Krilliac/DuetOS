@@ -402,6 +402,9 @@ chrome (not type) scales by ≈ 0.53.
 | `gloss_alpha` | 38 (26 light) | 0 | top of the title-bar specular ramp |
 | `taskbar_island` | true | false | taskbar floats as a centred island |
 | `taskbar_inset` | 12 | 0 | gap from the screen edge when island |
+| `accent_peer` | `#ffc046` | 0 | second accent — "Win32 PE peer" amber |
+| `aurora_wallpaper` | true | false | six-layer backdrop instead of the flat painter |
+| `glass_alpha` | 148 | 0 | window body / title-bar composite alpha |
 
 All of them ride `ThemeTactilityEffective()`, so `tactility=off` on the
 cmdline (or `tactility off` at the shell) still yields genuinely flat
@@ -422,6 +425,68 @@ chrome for the debug / screenshot workflow.
   fade reads as a generic gradient.
 - **Sheen hairline.** 1-px white line on the very top edge, fading to
   nothing at both ends, approximated with 16 constant-alpha segments.
+- **Glass body.** With `glass_alpha` set, the body and title bar are
+  `FramebufferBlendFill`ed over the compose surface rather than stamped
+  opaque, so the wallpaper's glow reads through the chrome. Windows are
+  already drawn back-to-front, so an overlapping sibling shows through
+  too. The title bar runs denser than the body (`a + (255-a)/2`) so a
+  13-px title still reads. Corners are cut by splitting the blend into
+  a full-width band plus an inset cap — `BlendFill` is square and
+  `FillRoundRect` is opaque, and at radius 8 a single inset is within a
+  pixel of the true arc.
+  **GAP:** no backdrop blur. The design's 36-px blur-behind would need
+  a cached per-window box blur of the compose surface
+  (`IMPLEMENTATION.md` §4 "full version"); the glass tints but does not
+  frost.
+- **Neutral title strip.** On glass the title bar paints a single
+  neutral `--bg-3` shade for every window rather than the per-role hue,
+  matching the reference desktop; the role colour survives in the
+  client fill, the taskbar glyph and the indicator pill. The close box
+  likewise sits in the strip and only floods `--danger` on hover.
+
+### Wallpaper (`wallpaper_aurora.cpp`)
+
+`README.md` §1 specifies a six-layer backdrop that no flat per-theme
+painter can express. `AuroraWallpaperPaint` builds it:
+
+1. `linear-gradient(158deg, --bg-2, --bg-1 52%, --bg-0)`
+2. three radial accent blobs (teal 74%/20%, amber 16%/86%, teal 22%/14%)
+3. a 32-px hairline grid under a radial mask
+4. the hex-dump band — `((r*40+c)*1103515245+12345) & 0xff`, 24 bytes a
+   row, under a 105° linear mask
+5. the counter-rotating arcs watermark at 56% / 46%
+6. the vignette
+
+Layers 1–4 and 6 are static for a given (geometry, palette) pair and
+cost roughly 800 k per-pixel blends, so they are generated once into a
+cached full-screen surface (`AllocateContiguousFrames`, ~3 MB at
+1024 × 768) and blitted per compose; `DesktopCompose` skips its own
+base gradient when `aurora_wallpaper` is set, since the blit covers
+every pixel. Layer 5 rides the ambient-motion phase and is painted
+live on top by `wallpaper.cpp`. A failed cache allocation logs
+`[video/aurora] backdrop cache alloc failed` and falls back to the
+pre-Aurora topo + arcs + brand-strap painter, so the desktop is never
+left unpainted.
+
+Two honest approximations, both because the framebuffer's arc and
+round-rect primitives take an opaque RGB:
+
+- the arcs watermark pre-blends the accent against `--bg-1` instead of
+  blending per pixel (it only ever sits on the smooth part of the base
+  gradient, where the two agree to well under one 8-bit step);
+- the blob peak alphas run hotter than the design's literal
+  .34 / .22 / .14, because the squared falloff concentrates the wash
+  into the middle of each ellipse.
+
+### Desktop icons (`desktop_icons.cpp`)
+
+Aurora tiles are 40 × 40 at radius 10: a translucent accent wash
+(`accent` 30% → 8%) under a white gloss dome (.30 → .06, gone by 52% of
+the tile), an accent border, and the glyph stroked in the accent rather
+than white-on-solid-accent. `BlendRoundRectVGradient` is the one
+primitive this needed — `FillRoundRect` is opaque and `BlendFill` is
+square, and the tile is both rounded and translucent. Palettes with
+`surface_radius == 0` keep the flat solid tile.
 
 ### Taskbar island (`taskbar.cpp`)
 
@@ -433,6 +498,25 @@ framebuffer minus one inset per side, so a busy desktop degrades to a
 near-full-width island rather than running off screen. Every anchor in
 the redraw path (START, tabs, tray, time card, show-desktop rail)
 measures from that rect.
+
+"Content-derived" is only as good as the content. The island's first
+landing measured 170-px title-text tabs, an 88-px "DUET" START word and
+the full-width strip's 400-px right reserve, which came to 1000 px of
+1024 — visually a full-width strip that had simply moved 12 px inward.
+Per `README.md` §10 the island's content is different from the strip's:
+
+- tabs are fixed 36 × 36 icon buttons (52 at 1920) carrying the role
+  glyph, with a running / focused indicator pill underneath — 8 px wide
+  at rest, 16 px plus a halo when focused (the design's 10-px CSS glow
+  has no framebuffer equivalent, so the halo is a hard 1-px accent
+  ring);
+- START drops its label and paints the arcs mark alone at 44 px;
+- the right-hand reserve is 270 px, not 400 — the island's cells pack
+  tighter than the strip's.
+
+Together those put the island near the reference's ~65% of screen
+width. Hit rects follow the painted geometry, so click dispatch is
+unchanged.
 
 - `TaskbarContains` hit-tests the island rect on **both** axes, so a
   click in the desktop margin either side falls through to the
@@ -447,14 +531,19 @@ measures from that rect.
 
 ### Self-test
 
-`ThemeSelfTest` gained two invariants, reported as
+`ThemeSelfTest` gained three invariants, reported as
 `[theme-selftest] aurora-tokens PASS`:
 
 1. A theme with `tactility_enabled == false` must carry no Aurora
-   tokens — one posture, rather than two that can drift apart.
+   tokens — one posture, rather than two that can drift apart. The
+   check covers `accent_peer`, `aurora_wallpaper` and `glass_alpha`
+   alongside the geometry tokens.
 2. `taskbar_island` without a radius or an inset is a silent
    regression: the strip stops reaching the screen edges while still
    painting square corners flush against them.
+3. `aurora_wallpaper` without a **distinct** `accent_peer`, or with a
+   `glass_alpha` of 0 or 255, is a silent opt-in: the backdrop would
+   paint both blobs in one hue and the glass would composite opaque.
 
 ## Chrome Tactility (Pass A)
 
