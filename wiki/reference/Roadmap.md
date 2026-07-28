@@ -145,6 +145,52 @@ cleanup debt: move the residual up and delete the rest.
   [CPU Topology](../kernel/CPU-Topology.md) /
   [Scheduler](../kernel/Scheduler.md).)
 
+### AddressSpace region table — synchronise reads against the swap-with-last compaction
+
+- **Finding (audit R1-14, high):** `AddressSpace::regions_lock` is
+  acquired in exactly ONE place — `AddressSpaceMapUserPage`
+  (`mm/address_space.cpp:396`). `AddressSpaceUnmapUserPage`,
+  `AddressSpaceClearUserMappings`, `AddressSpaceFork`,
+  `AddressSpaceLookupUserFrame` and `AddressSpaceRelease` all
+  read or mutate `regions[]` / `region_count` with no
+  synchronisation at all. Two threads in the SAME address space
+  reach these concurrently — Win32 processes are genuinely
+  multithreaded (`kWin32ThreadCap == 8`) and Linux `clone` shares
+  the AS — so this is reachable, not theoretical.
+- **Why it corrupts rather than merely races:**
+  `UnmapUserPageByIndex` compacts the table by SWAP-WITH-LAST
+  (`regions[idx] = regions[last]; --region_count`). A concurrent
+  `AddressSpaceLookupUserFrame` scanning upward can therefore miss
+  a live entry that was just moved *behind* its cursor, or observe
+  a half-copied row. The failure mode is "a mapped page reports as
+  unmapped", which the loaders treat as "safe to map here".
+- **The naive fix is WRONG, and this is the part the finding does
+  not capture.** `regions_lock` is a SLEEPING lock — `RwLock` is
+  built on `sched::MutexLock` + `sched::CondvarWait`
+  (`sync/rwlock.cpp:81`). But `AddressSpaceLookupUserFrame` has a
+  caller that runs holding a SPINLOCK:
+  `debug/breakpoints.cpp:848 ResolveStoppedUserByte(...)` is
+  annotated `/* MUST hold g_lock */`, and `g_lock` is a
+  `sync::SpinLock` (`breakpoints.cpp:105`). Adding a shared
+  acquire to the read path would sleep while holding a spinlock —
+  a worse defect than the race being fixed.
+- **Shape a real fix has to take.** Separate the table's
+  STRUCTURAL integrity from the long operations around it: a short
+  IRQ-safe spinlock covering only the scan / swap / count update,
+  with frame allocation, page-table edits and TLB shootdowns kept
+  outside it. `AddressSpaceMapUserPage` allocates while holding
+  the current lock, so it cannot simply be converted in place. The
+  alternative is to stop compacting — tombstone the dying row and
+  reclaim separately — which keeps readers correct without any new
+  lock on the read path.
+- **Blocks on:** deciding between those two, since it changes an
+  mm-core invariant. Not attempted as a drive-by: `address_space.cpp`
+  is the highest-blast-radius file in the tree and a partial fix here
+  (locking writers only, leaving the spinlock-holding reader
+  unsynchronised) would buy very little while looking like a
+  resolution.
+
+
 ### Real KASAN
 
 - **Residual:** shadow-memory mapping, compiler-plugin
