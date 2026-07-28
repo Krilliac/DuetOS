@@ -476,12 +476,26 @@ constexpr u32 kOffPWenviron = 0x1337;         // 6 bytes — &_wenviron (-> wenv
 constexpr u32 kOffGetInitialWideEnv = 0x133D; // 6 bytes — wide env block (valid \0\0)
 constexpr u32 kOffGetInitialEnv = 0x1343;     // 6 bytes — narrow env block (valid \0\0)
 
+// === x64 msvcrt CRT surface =================================
+// kOffPinEmptyCStr returns a pointer to the always-zero data-miss
+// pad, i.e. the empty C string — the safe degenerate answer for
+// `exception::what()`, whose result callers pass straight to
+// printf("%s"). The two `_s` copy helpers need their own bytes
+// because the Annex K argument order (dst, dstsz, src[, count])
+// does not match any existing copy thunk; aliasing them to
+// kOffMemmove / kOffLstrcpyW would read the size argument as a
+// pointer. See thunks_bytecode.inc for the per-instruction
+// listing and the documented GAPs.
+constexpr u32 kOffPinEmptyCStr = 0x1349; // 6 bytes  — const char* "" (proc-env zero pad)
+constexpr u32 kOffMemcpyS = 0x134F;      // 66 bytes — memcpy_s / memmove_s (overlap-safe, bounded)
+constexpr u32 kOffWcscpyS = 0x1391;      // 63 bytes — wcscpy_s (bounded wide copy)
+
 constexpr u8 kThunksBytes[] = {
 #include "subsystems/win32/thunks_bytecode.inc"
 };
 
 static_assert(sizeof(kThunksBytes) <= 8192, "Win32 thunks fit in the two-page mapping");
-static_assert(sizeof(kThunksBytes) == 0x1349, "thunk layout drifted; update kOff* constants");
+static_assert(sizeof(kThunksBytes) == 0x13D0, "thunk layout drifted; update kOff* constants");
 static_assert(kOffQpcNs == 0x2B3 && kOffQpfNs == 0x2C2, "retired QPC/QPF instruction boundaries drifted");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The thunk
@@ -495,6 +509,7 @@ static_assert(kProcEnvWargvPtrOff == 0x700, "wargv-ptr offset no longer matches 
 static_assert(kProcEnvWenvironPtrOff == 0x710, "wenviron-ptr offset no longer matches __p___wenviron thunk bytes");
 static_assert(kProcEnvEnvBlockWOff == 0x400, "wide-env offset no longer matches _get_initial_wide_environment bytes");
 static_assert(kProcEnvNarrowEnvBlockOff == 0x760, "narrow-env offset no longer matches _get_initial_environment bytes");
+static_assert(kProcEnvDataMissOff == 0x800, "data-miss pad offset no longer matches the empty-C-string thunk bytes");
 static_assert(kProcEnvCommodeOff == 0x200, "commode offset no longer matches __p__commode thunk bytes");
 static_assert(kProcEnvUnhandledFilterOff == 0x600,
               "unhandled-filter offset no longer matches SetUnhandledExceptionFilter stub bytes");
@@ -627,6 +642,49 @@ template <u64 N> consteval ThunkHashTable<N> BuildThunkHashTable(const ThunkEntr
 constexpr auto kSortedThunkHashes = BuildThunkHashTable(kThunksTable);
 constexpr u64 kSortedThunkHashCount = sizeof(kSortedThunkHashes.entries) / sizeof(kSortedThunkHashes.entries[0]);
 static_assert(kSortedThunkHashCount == (sizeof(kThunksTable) / sizeof(kThunksTable[0])), "hash table size mismatch");
+
+// Contradictory-duplicate guard.
+//
+// The hashed lookup returns whichever row for a given <dll>!<func>
+// sorted first, so a SECOND row naming the same import with a
+// DIFFERENT offset is silently dead — editing it changes nothing,
+// and a reader who finds it believes the wrong binding. Four such
+// pairs had accumulated before this check landed, including
+// kernel32!CreateFileW registered as both the real thunk and
+// INVALID_HANDLE_VALUE, and vcruntime140!__C_specific_handler
+// registered as both SYS_EXIT(3) and ExceptionContinueSearch.
+//
+// Exact duplicates (identical offset) stay legal: several DLL
+// groupings repeat a row for readability and cannot diverge.
+//
+// Runs over the hash-sorted index, so equal-key rows are adjacent
+// and the inner loop only walks a collision run — O(n), not O(n^2).
+consteval bool NoContradictoryDuplicateRows()
+{
+    for (u64 i = 0; i < kSortedThunkHashCount; ++i)
+    {
+        for (u64 j = i + 1; j < kSortedThunkHashCount; ++j)
+        {
+            if (kSortedThunkHashes.entries[j].key_hash != kSortedThunkHashes.entries[i].key_hash)
+                break;
+            const ThunkEntry& first = kThunksTable[kSortedThunkHashes.entries[i].stub_index];
+            const ThunkEntry& later = kThunksTable[kSortedThunkHashes.entries[j].stub_index];
+            if (first.offset == later.offset)
+                continue;
+            // Different offsets are fine when the names differ —
+            // that is an ordinary (astronomically rare) hash
+            // collision, which the runtime lookup resolves by
+            // string compare.
+            if (ThunkRetirementDllEqual(first.dll, later.dll) && ThunkRetirementStringEqual(first.func, later.func))
+                return false;
+        }
+    }
+    return true;
+}
+
+static_assert(NoContradictoryDuplicateRows(),
+              "two thunk-table rows name the same <dll>!<func> with different offsets; the later row is dead — "
+              "delete it or reconcile the two bindings");
 
 // Case-insensitive strcmp for ASCII. Win32 DLL name
 // capitalisation is inconsistent (lld-link writes
@@ -887,6 +945,17 @@ bool Win32ThunksLookupDataNamed(const char* func, u64* out_va)
     if (strEq(func, "_wcmdln"))
     {
         *out_va = kProcEnvVa + kProcEnvWcmdlnPtrOff;
+        return true;
+    }
+    // _commode is an `int` VARIABLE (the default file-commit mode).
+    // Point it at the same proc-env slot `__p__commode` hands back
+    // (kOffPCommode), so a PE that writes the global directly and a
+    // PE that goes through the accessor observe one value. Without
+    // this the global lands on the shared data-miss pad, where any
+    // other unnamed data import aliases it.
+    if (strEq(func, "_commode"))
+    {
+        *out_va = kProcEnvVa + kProcEnvCommodeOff;
         return true;
     }
     // MSVCP140 well-known C++ stream globals. These are CLASS

@@ -736,7 +736,9 @@
     {"kernel32.dll", "FlushViewOfFile", kOffPinReturn1}, {"kernel32.dll", "ExpandEnvironmentStringsW", kOffPinReturn0},
     {"kernel32.dll", "ExpandEnvironmentStringsA", kOffPinReturn0},
     {"kernel32.dll", "GetEnvironmentStringsA", kOffPinReturn0},
-    {"kernel32.dll", "FreeEnvironmentStringsA", kOffPinReturn1}, {"kernel32.dll", "SetStdHandle", kOffPinReturn1},
+    // FreeEnvironmentStringsA lives with its W sibling below, on
+    // the named kOffFreeEnvStringsW pin.
+    {"kernel32.dll", "SetStdHandle", kOffPinReturn1},
     {"kernel32.dll", "GetConsoleScreenBufferInfo", kOffGetConsoleScreenBufferInfo},
     {"kernel32.dll", "GetNumberOfConsoleInputEvents", kOffPinReturn0},
     {"kernel32.dll", "PeekConsoleInputW", kOffPinReturn0}, {"kernel32.dll", "ReadConsoleInputW", kOffPinReturn0},
@@ -1082,7 +1084,10 @@
     // the log (rc=0x3) rather than a silent #PF. Non-terminal
     // ones return 0.
     {"vcruntime140.dll", "__CxxFrameHandler3", kOffTerminate},
-    {"vcruntime140.dll", "__C_specific_handler", kOffTerminate},
+    // __C_specific_handler is NOT here — see the SEH-disposition
+    // block further down. It is a personality routine the unwinder
+    // calls, not a call the program makes, so it must return an
+    // EXCEPTION_DISPOSITION rather than kill the process.
     {"vcruntime140.dll", "_CxxThrowException", kOffTerminate}, {"vcruntime140.dll", "_purecall", kOffTerminate},
     {"vcruntime140.dll", "__std_terminate", kOffTerminate},
     {"vcruntime140.dll", "__std_exception_copy", kOffPinReturn0},
@@ -1482,8 +1487,13 @@
 
     // ---- KERNEL32 file / directory / volume ----
     {"kernel32.dll", "AreFileApisANSI", kOffPinReturn1},    // ANSI assumed
-    {"kernel32.dll", "CreateFileA", kOffReturnMinus1},      // INVALID_HANDLE_VALUE
-    {"kernel32.dll", "CreateFileW", kOffReturnMinus1},      // belt-and-suspenders
+    {"kernel32.dll", "CreateFileA", kOffReturnMinus1}, // INVALID_HANDLE_VALUE
+    // NOTE: CreateFileW is deliberately NOT repeated here. It is
+    // bound to the real kOffCreateFileW thunk above; a second row
+    // pinning it to INVALID_HANDLE_VALUE was dead (the earlier row
+    // wins the hash lookup) and read as though file opens were
+    // stubbed out. NoContradictoryDuplicateRows() now rejects that
+    // shape at compile time.
     {"kernel32.dll", "FindFirstFileExW", kOffReturnMinus1}, // INVALID_HANDLE_VALUE
     {"kernel32.dll", "FindFirstFileExA", kOffReturnMinus1}, {"kernel32.dll", "FindResourceW", kOffPinReturn0},
     {"kernel32.dll", "FindResourceA", kOffPinReturn0}, {"kernel32.dll", "FindResourceExW", kOffPinReturn0},
@@ -1515,7 +1525,11 @@
     {"kernel32.dll", "FillConsoleOutputAttribute", kOffPinReturn1},
     {"kernel32.dll", "FillConsoleOutputCharacterA", kOffPinReturn1},
     {"kernel32.dll", "FillConsoleOutputCharacterW", kOffPinReturn1},
-    {"kernel32.dll", "GetNumberOfConsoleInputEvents", kOffPinReturn1},
+    // NOTE: GetNumberOfConsoleInputEvents keeps its kOffPinReturn0
+    // (FALSE) binding above. A second row pinning it to TRUE was
+    // dead AND wrong: reporting success without writing the out
+    // *lpcNumberOfEvents leaves the caller reading an uninitialised
+    // count and looping over that many phantom input records.
 
     // ---- KERNEL32 misc helpers ----
     // IsBadXPtr family: pin "not bad" (0). v0 has no way to probe
@@ -1663,19 +1677,46 @@
     {"api-ms-win-crt-runtime-l1-1-0.dll", "_get_initial_environment", kOffGetInitialEnv},
     {"ucrtbase.dll", "_get_initial_environment", kOffGetInitialEnv},
     {"msvcrt.dll", "_get_initial_environment", kOffGetInitialEnv},
-    {"api-ms-win-crt-runtime-l1-1-0.dll", "__C_specific_handler", kOffPinReturn0}, // ExceptionContinueSearch
+    // SEH language-handler disposition.
+    //
+    // __C_specific_handler is the x64 personality routine the
+    // unwinder calls for a frame with __try/__except; its return
+    // value is an EXCEPTION_DISPOSITION, where
+    // ExceptionContinueExecution == 0 and ExceptionContinueSearch
+    // == 1. These rows previously returned 0, telling ntdll's
+    // dispatcher to RESUME AT THE FAULTING INSTRUCTION — an
+    // unbounded fault loop on any real exception. 1 is the honest
+    // "this frame does not handle it, keep walking" answer, and
+    // matches the userland vcruntime140 shim.
+    //
+    // STUB: the frame's __except filters and handlers never run;
+    // every exception walks past to the unhandled path.
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "__C_specific_handler", kOffPinReturn1},
     {"ucrtbase.dll", "abort", kOffTerminate}, {"ucrtbase.dll", "_set_invalid_parameter_handler", kOffPinReturn0},
     {"ucrtbase.dll", "_clearfp", kOffPinReturn0}, {"ucrtbase.dll", "_statusfp", kOffPinReturn0},
-    {"ucrtbase.dll", "__C_specific_handler", kOffPinReturn0},
-    {"vcruntime140.dll", "__C_specific_handler", kOffPinReturn0}, {"msvcrt.dll", "abort", kOffTerminate},
+    {"ucrtbase.dll", "__C_specific_handler", kOffPinReturn1},
+    {"vcruntime140.dll", "__C_specific_handler", kOffPinReturn1}, {"msvcrt.dll", "abort", kOffTerminate},
     {"msvcrt.dll", "_set_invalid_parameter_handler", kOffPinReturn0}, {"msvcrt.dll", "_clearfp", kOffPinReturn0},
     {"msvcrt.dll", "_statusfp", kOffPinReturn0}, {"msvcrt.dll", "_controlfp", kOffPinReturn0},
 
     // ---- UCRT string helpers (case-insensitive -> case-sensitive sub) ----
     {"api-ms-win-crt-string-l1-1-0.dll", "_stricmp", kOffStrcmp},
     {"api-ms-win-crt-string-l1-1-0.dll", "_strnicmp", kOffStrcmp},
-    {"api-ms-win-crt-string-l1-1-0.dll", "_wcsicmp", kOffStrcmp},
-    {"api-ms-win-crt-string-l1-1-0.dll", "_wcsnicmp", kOffStrcmp}, {"ucrtbase.dll", "_stricmp", kOffStrcmp},
+    // Wide comparators must NOT alias kOffStrcmp. That stub walks
+    // BYTES, so on UTF-16LE it stops at the high (zero) byte of the
+    // first ASCII character and reports every pair of wide strings
+    // as equal. kOffLstrcmpW is the ordinal UTF-16 comparator with
+    // the same (a=rcx, b=rdx) shape and the same <0/0/>0 contract.
+    //
+    // GAP: no case folding — these compare case-SENSITIVELY, so
+    // `_wcsicmp(L"AB", L"ab")` reports a difference. Revisit when a
+    // wide case-fold table lands (see the NLS slice).
+    // GAP: `_wcsnicmp`'s length limit (r8) is ignored — it compares
+    // the whole strings. Prefix-match callers see a difference the
+    // n-bounded compare would have masked; revisit alongside the
+    // case-fold work.
+    {"api-ms-win-crt-string-l1-1-0.dll", "_wcsicmp", kOffLstrcmpW},
+    {"api-ms-win-crt-string-l1-1-0.dll", "_wcsnicmp", kOffLstrcmpW}, {"ucrtbase.dll", "_stricmp", kOffStrcmp},
     {"ucrtbase.dll", "_strnicmp", kOffStrcmp}, {"msvcrt.dll", "_stricmp", kOffStrcmp},
     {"msvcrt.dll", "_strnicmp", kOffStrcmp},
 
@@ -1792,3 +1833,106 @@
     {"ntdll.dll", "RtlCaptureContext", kOffMissLogger},
     {"ntdll.dll", "RtlLookupFunctionEntry", kOffMissLogger},
     {"ntdll.dll", "RtlUnwindEx", kOffMissLogger},
+
+    // ---- x64 msvcrt.dll CRT surface ----
+    //
+    // Measured against every 64-bit .exe in a stock Windows
+    // System32: these are the msvcrt.dll imports the most binaries
+    // ask for and DuetOS did not answer under that DLL name. Most
+    // already had a correct thunk registered under vcruntime140 /
+    // ucrtbase / an apiset contract, so the bulk below is alias
+    // rows onto those existing offsets — no new bytecode.
+    //
+    // Note on the DATA exports in the same demand set: `_fmode`,
+    // `_commode` and `_wcmdln` are int / char* VARIABLES, not
+    // functions. They deliberately have NO row here — the flat
+    // table is consulted before the data path, so a function thunk
+    // would make the CRT execute (or store into) code bytes. They
+    // are served by IsLikelyDataImport + Win32ThunksLookupDataNamed
+    // in thunks.cpp instead.
+
+    // Process-terminating CRT paths. These are honest: each one
+    // aborts the process on real Windows too.
+    {"msvcrt.dll", "?terminate@@YAXXZ", kOffTerminate},
+    {"msvcrt.dll", "_purecall", kOffTerminate}, // pure-virtual dispatch -> abort
+    // GAP: _amsg_exit(rterrnum) prints a CRT diagnostic ("R6002 —
+    // floating point support not loaded" and friends) before
+    // exiting. We exit without the message; the exit code still
+    // marks the failure. Revisit when the CRT error-table lands.
+    {"msvcrt.dll", "_amsg_exit", kOffTerminate},
+
+    // SEH / C++ EH. See the __C_specific_handler block above for
+    // why the personality routines return ExceptionContinueSearch
+    // (1) rather than 0 or a terminate.
+    {"msvcrt.dll", "__C_specific_handler", kOffPinReturn1},
+    // STUB: __CxxFrameHandler3/4 are the MSVC C++ personality. The
+    // real FH3 decoder lives in the preloaded userland
+    // vcruntime140.dll and a thunk-table row cannot forward to it,
+    // so a PE that reaches THIS binding gets no catch blocks and no
+    // destructor unwind — every C++ exception walks the frame
+    // untouched to the unhandled path.
+    {"msvcrt.dll", "__CxxFrameHandler3", kOffPinReturn1},
+    {"msvcrt.dll", "__CxxFrameHandler4", kOffPinReturn1},
+    // STUB: a throw terminates instead of unwinding to its handler.
+    // Routed to SYS_EXIT(3) rather than a silent return, precisely
+    // so the failure is visible: a no-op _CxxThrowException would
+    // let `throw` fall through and continue past the throw site
+    // with the program's invariants already broken.
+    {"msvcrt.dll", "_CxxThrowException", kOffTerminate},
+
+    // std::exception / type_info members. kOffReturnThis leaves the
+    // object's bytes untouched and hands `this` back, which is what
+    // the MSVC x64 ctor/dtor convention expects in rax.
+    //
+    // STUB: the constructors do NOT store the message pointer or
+    // the vtable, so the object is left uninitialised. Anything
+    // that virtual-dispatches through such an object (rather than
+    // calling ?what@ through the IAT) reads a garbage vptr. This is
+    // still strictly better than the catch-all, which returns NULL
+    // and faults the caller immediately. Real construction needs a
+    // proc-env-backed exception object + vtable — its own slice.
+    {"msvcrt.dll", "??0exception@@QEAA@XZ", kOffReturnThis},
+    {"msvcrt.dll", "??0exception@@QEAA@AEBV0@@Z", kOffReturnThis},
+    {"msvcrt.dll", "??0exception@@QEAA@AEBQEBD@Z", kOffReturnThis},
+    {"msvcrt.dll", "??0exception@@QEAA@AEBQEBDH@Z", kOffReturnThis},
+    // GAP: the destructors skip the message-buffer free the real
+    // CRT does. Nothing was allocated by our ctors, so there is
+    // nothing to leak today; revisit together with real ctors.
+    {"msvcrt.dll", "??1exception@@UEAA@XZ", kOffReturnThis},
+    {"msvcrt.dll", "??1type_info@@UEAA@XZ", kOffReturnThis},
+    // STUB: what() reports "" for every exception. Real msvcrt
+    // returns the ctor-supplied message (or "Unknown exception"),
+    // never NULL — hence the empty-string pin rather than
+    // kOffPinReturn0, whose NULL would fault a caller's printf.
+    {"msvcrt.dll", "?what@exception@@UEBAPEBDXZ", kOffPinEmptyCStr},
+
+    // operator delete(void*) — a real implementation: the argument
+    // shape is identical to free(ptr=rcx) and our operator-new path
+    // allocates from the same heap.
+    {"msvcrt.dll", "??3@YAXPEAX@Z", kOffFree},
+
+    // Annex K bounded copies. Own bytecode (see thunks_bytecode.inc)
+    // because the (dst, dstsz, src[, count]) order matches no
+    // existing copy thunk. Registered under ucrtbase too — same
+    // functions, same signatures, different DLL name on newer PEs.
+    {"msvcrt.dll", "memcpy_s", kOffMemcpyS}, {"msvcrt.dll", "memmove_s", kOffMemcpyS},
+    {"msvcrt.dll", "wcscpy_s", kOffWcscpyS}, {"ucrtbase.dll", "memcpy_s", kOffMemcpyS},
+    {"ucrtbase.dll", "memmove_s", kOffMemcpyS}, {"ucrtbase.dll", "wcscpy_s", kOffWcscpyS},
+
+    // Wide case-insensitive compares — same GAPs as the apiset rows
+    // above (ordinal compare, no folding; _wcsnicmp ignores its n).
+    {"msvcrt.dll", "_wcsicmp", kOffLstrcmpW}, {"msvcrt.dll", "_wcsnicmp", kOffLstrcmpW},
+
+    // STUB: _lock / _unlock are the CRT's internal per-subsystem
+    // locks (stdio, heap, locale). A void no-op is correct only
+    // while a process is single-threaded; with SYS_THREAD_CREATE
+    // live, concurrent CRT calls race on that shared state. Wiring
+    // these to a real lock needs a per-process array of CRT lock
+    // slots in the proc-env page.
+    {"msvcrt.dll", "_lock", kOffPinVoidNop}, {"msvcrt.dll", "_unlock", kOffPinVoidNop},
+
+    // GAP: _ismbblead reports "not a lead byte" unconditionally.
+    // That is the CORRECT answer for every single-byte code page,
+    // which is all DuetOS exposes today (en-US / CP1252). It only
+    // becomes wrong if a DBCS locale (932/936/949/950) is added.
+    {"msvcrt.dll", "_ismbblead", kOffPinReturn0},
