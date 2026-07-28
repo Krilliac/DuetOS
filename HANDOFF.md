@@ -1,126 +1,153 @@
-# DuetOS handoff — 2026-07-28
+# DuetOS handoff — 2026-07-28 (PE32 USER32 rung)
 
-`main` is at `6289a692`. 52 commits merged (fast-forward, CI was green on
-that exact SHA before the merge). Working tree clean.
+Branch `claude/duetos-pe32-game-ladder-4f2vhy` is pushed at `cc2597c`,
+one commit ahead of `main` (`b7f01564`). Working tree clean.
 
 ---
 
 ## Paste this into a new session
 
-> Continue DuetOS work. `main` is at `6289a692` — 52 commits just landed
-> closing the entire audit backlog (38/38 findings) and the C-series
-> sweep items. Read `HANDOFF.md` at the repo root first, then
+> Continue DuetOS work. The PE32 ladder's USER32 rung landed on
+> `claude/duetos-pe32-game-ladder-4f2vhy` (`cc2597c`) — `user32_32` and
+> `gdi32_32` are real surfaces now and `ring3-pe32-window` passes on a
+> live boot. Read `HANDOFF.md` at the repo root first, then
 > `wiki/reference/Roadmap.md`.
 >
-> **Highest-value next slice: the PE32 game ladder (Roadmap "Run a real
-> 32-bit application").** The diagnosis is already done and recorded: the
-> exe clears CRT startup and reaches its own code, then settles into a
-> quiet loop because `userland/libs/user32_32/user32_32.c` and
-> `gdi32_32/gdi32_32.c` are hand-written stubs returning constants with
-> **zero syscalls in either file**. The next rung is a real USER32
-> surface — window class registration + message loop wired to the
-> kernel's window manager — not more import coverage.
+> **Two pre-existing failures are open and neither is mine** — both
+> reproduce identically on unmodified `main`, verified by booting a
+> worktree of `b7f01564` side by side. See "Open, pre-existing" below.
+> `ring3-dx-demo-window` is the one with real substance.
 >
-> **Second candidate: build the WaitQueue detach primitive.** Three
-> independent findings (R1-14 AddressSpace `regions_lock`, R1-15 PS/2
-> ring, C4 unkillable blocked threads) all block on the same missing
-> scheduler ABI — a lock spanning enqueue and detach, i.e.
-> `WaitQueueBlockLocked(wq, lock)`. Each is filed in the Roadmap with
-> its constraint. Building it once unblocks all three; that is why none
-> of them were force-fixed.
+> **Next rung candidates, in order:**
+> 1. **`msvcrt_32` stdio** (`fopen`/`fread`/`fwrite`) rebased onto the
+>    real `kernel32_32` file-I/O surface that landed 2026-07-26. Small,
+>    well-scoped, and the next thing a real game exe touches after it
+>    has a window.
+> 2. **The WaitQueue detach primitive** — still unbuilt. Three
+>    independent findings (R1-14 AddressSpace `regions_lock`, R1-15
+>    PS/2 ring, C4 unkillable blocked threads) all block on the same
+>    missing scheduler ABI: a lock spanning enqueue and detach, i.e.
+>    `WaitQueueBlockLocked(wq, lock)`. Each is filed in the Roadmap
+>    with its constraint. Building it once unblocks all three.
+> 3. **Off-screen surfaces for the display list.** Nearly every
+>    remaining `user32_32` / `gdi32_32` STUB traces to this one missing
+>    thing — memory DCs, bitmaps, BitBlt and DIB sections are all
+>    blocked on it, on both the 32- and 64-bit sides.
 >
-> Before pushing anything, read the "verification gotchas" section of
-> `HANDOFF.md` — the local kernel build does NOT cover host-tests or
-> fuzz, and two CI gates broke unnoticed for ~10 pushes last session.
+> Before pushing, read "Verification gotchas" below — the local kernel
+> build covers neither host-tests nor fuzz.
 
 ---
 
-## What landed (52 commits)
+## What landed (1 commit)
 
-**All 38 audit findings resolved** — 36 fixed and boot-verified, 2 filed
-with design constraints. Highlights, several materially worse than the
-audit reported:
+`user32_32` and `gdi32_32` went from **hand-written stubs with zero
+syscalls between them** to real surfaces on the same ~40 `SYS_WIN_*` /
+`SYS_GDI_*` handlers the 64-bit siblings use. No kernel work was
+needed — the handlers already existed; this was the port.
 
-- `arch/timer` — every AP was advancing the global tick counter.
-  **Measured 617 Hz vs an intended 100 Hz at SMP=8** (6.17x), so every
-  tick-derived timeout fired ~6x early. Non-atomic RMW also lost
-  updates, making the rate nondeterministic.
-- `sched` — AP bring-up ran `SchedStartIdle` (which allocates and locks)
-  BEFORE installing the boot sentinel, so a fresh AP ran with
-  `current_task == nullptr`. This was the intermittent
-  `WaitQueueBlockTimeout on non-Running task` panic the Roadmap had
-  carried as "root cause still open" since May. 0 KASSERTs across 3 TCG
-  boots after the fix, vs the control panicking at t≈20 s.
-- `arch/smp` — TLB shootdown counted CPUs that could not yet service an
-  IPI (25 timeouts across 11 control boots -> 0 after).
-- `arch/smp` — a timed-out AP's `cpu_id` was reused, so a late-waking AP
-  could share one PerCpu, GDT/TSS **and kernel stack** with another CPU.
-- `net/tcp` — RST accepted on 4-tuple match alone: a one-packet blind
-  reset. Now RFC 5961 with a challenge-ACK, pinned by a boot self-test.
-- `net/tcp` — SYN backlog counted only completed handshakes, so
-  half-open TCBs were bounded by the GLOBAL Tcb table; a flood against
-  one listener starved every socket on the box.
-- `core/menu` — `/APPS` shortcuts spawned FAT32-volume binaries with
-  `CapSetTrusted()` (every bit, incl. `kCapDebug`). Now
-  `CapSetUserLaunch()`, promoted to `proc/process.h` so the two launch
-  paths cannot drift apart again.
-- `syscall` — FD_CLOEXEC was fully plumbed, observable via `F_GETFD`,
-  self-tested, and **never called on a real exec**.
-- `linux/signal` — a 1-deep signal-frame slot meant any process able to
-  signal a target could KILL it by signalling twice mid-handler.
-- `time` — HPET tick->ns overflowed u64 at 5.12 h uptime, reversing
-  `MonotonicNs()`. Now host-tested.
+The old symptom was a 32-bit exe that cleared CRT startup, reached its
+own code, and settled into a quiet loop. Not a wait it was stuck in:
+`RegisterClassA` discarded `lpfnWndProc` and returned a fake atom,
+`CreateWindowExA` returned NULL, `GetMessageA` returned 0 forever. A
+present-but-lying export is worse than a missing one — a missing import
+leaves a `[win32-32miss]` sentinel; this left silence.
 
-**Tooling added:** `tools/qemu/run-whpx-repro.ps1` (repeat-boot under
-WHPX with a validity gate), `tests/host/test_hpet_scale.cpp`,
-`tests/host/test_damage_bands.cpp`, plus TCP RST / SYN-backlog boot
-self-tests.
+Three i386-specific traps, each a silent-corruption bug if missed, all
+written up in Win32-Surface-Status §11b and Design-Decisions:
+
+1. **`MSG` is 28 bytes on i386; the kernel's wire struct is 32** and
+   `CopyMsgToUser` blind-writes all of it. A pass-through misaligns
+   every field AND writes 4 bytes past the caller's struct.
+2. **`WNDCLASS` and `WNDCLASSEX` have different i386 offsets.** On
+   x86_64 the prepended `cbSize` packs into `style`'s 8-byte slot, so
+   the 64-bit `RegisterClassExW` can legitimately forward to
+   `RegisterClassW`. Do not copy that forwarding to 32-bit.
+3. **`FillRect` / `FrameRect` / `DrawText` / `GetDC` / `BeginPaint` are
+   USER32 exports, not GDI32.** Homed only in `gdi32_32`, `FillRect`
+   sent a real importer to the NO-OP catch-all — it painted nothing
+   while every call reported success. Both DLLs export them now and
+   share `userland/libs/common/duet32_gdi_abi.h`.
+
+Proof is a live boot, not a compile: `userland/apps/pe32_window/`
+registers a class, creates a window, and runs post → peek → dispatch →
+WndProc → paint → quit, asserting 22 conditions including a canary
+immediately after its `MSG`. It is an `Always` battery row
+(`ring3-pe32-window`), so every ring3 boot exercises it. Two
+independent TCG boots: PASS both times, 0 panics, 0 non-deliberate
+`[E]`, 241 self-tests OK.
+
+**Tooling / hygiene picked up along the way:**
+
+- `check-syscall-numbers.py` now treats `#define SYS_FOO 42` as an
+  assertion, not just `SYS_FOO = 42`. The `=`-only pattern left the
+  `#define` blocks opening `user32.c`, `gdi32.c` and every `_32` header
+  **entirely unchecked** — where a wrong number does the most damage,
+  since one bad `#define` mis-aims every caller of that name at once.
+  134 → 239 asserted numbers, all correct; the check was verified to
+  fail on a deliberately corrupted define.
+- `build-stub-32-dll.sh` globs every `.c` in a companion DLL's
+  directory (sorted, for reproducible link order) and gained `-Werror`.
+  A `_32` DLL that outgrows one TU needs no build-system edit.
+- The i386 syscall trampolines moved to
+  `userland/libs/common/duet32_syscall.h`, shared by all three real
+  `_32` DLLs, and gained the 5- and 6-arg forms. arg6 travels in `ebp`,
+  which cannot be an asm operand, so it is swapped in with `xchg` — a
+  `push` would shift any esp-relative memory operand the compiler chose
+  for the other inputs.
+- Two stale comments corrected: `window_syscall.cpp` claimed the kernel
+  runs the WndProc on a synthetic ring-3 frame (it never has — the
+  pointer lives in `GWLP_WNDPROC` and `DispatchMessage` calls it
+  in-process), and `spawn.cpp` said "today just one entry" over a
+  13-entry preload table.
 
 ---
 
-## Still open
+## Open, pre-existing (verified against a `main` worktree boot)
 
-| item | why |
+Both of these fail identically on unmodified `b7f01564`. I booted a
+worktree of `main` side by side specifically to establish this, rather
+than assume it. PE-compat goes **1 passed → 2 passed** with this
+branch, same 1 failure.
+
+| item | detail |
 |---|---|
-| **PE32 ladder** | `user32_32`/`gdi32_32` are stubs with zero syscalls — needs a real USER32 slice |
-| **Roadmap (~60 sections)** | ongoing project backlog, not a finishable list |
-| **R1-14** AddressSpace `regions_lock` | needs the WaitQueue detach primitive; the obvious fix sleeps under a spinlock |
-| **R1-15** PS/2 ring two-writer race | same primitive, or switch ring-full policy to drop-newest |
-| **C4** unkillable blocked threads | same primitive. Win32 half already fixed (`NtTerminateThread` now returns `STATUS_PENDING`, not a false SUCCESS) |
-| **Branch cleanup** | 19 verified-redundant branches; SHAs in `D:\DuetOS-Snapshots\branch-deletion-manifest.txt`. Bulk `git branch -D` was blocked by the auto-mode classifier — run it yourself |
-| **`wip/preserved-worktree-2026-07-27`** | 144 files preserved from the OneDrive checkout. **Do NOT merge** — it measures +10,263/-18,362 vs main and would delete the X.509 extension hardening. Reference only |
-| **Defender** | reports real-time protection ON despite intent to disable |
+| **`ring3-dx-demo-window`** | Exits `0xc0000005` with `why=no-verdict`. It is a **64-bit** PE (`image_base=0x1403…`), crashing *after* `D3D11CreateDevice` returns `DX_S_OK` — so the demo passes its own `if (hr != 0 \|\| !sc \|\| !dev \|\| !ctx)` guard and faults downstream in the vtable / Vulkan back-end path. Its `ScDesc11` offsets check out against the DLL's `d + 0 / d + 4 / d + 48` reads, so the desc marshalling is **not** it. Start at `d3d11_swap_alloc` and the vk back end. This is the one worth real time. |
+| **`ring3-hello-pe`** | The security guard raises `PE_NO_IMPORTS` and puts up an **interactive modal with a 10 s default-deny** that nothing answers in a headless boot, so `[hello-pe] Hello from a PE executable!` never prints and the smoke gate reports it MISSING. `autonomic.cpp` already suppresses the escalation when a smoke profile is set, but `ctest-boot-smoke.sh` boots with `profile=None` + `pe-smokes=1`, so the suppression does not apply. **Timing-dependent**: the escalation needs a UBSAN/KASAN kernel-integrity finding ~30 s in, which slow TCG reaches before the ring3 battery and fast KVM (CI) does not — which is why CI was green on `b7f01564`. I did not widen the suppression: that is a security-policy call about when the guard may auto-escalate to Enforce and block a PE behind an unanswerable modal, and it deserves its own slice rather than a one-boot judgement. |
+
+Still carried from the previous handoff: the ~60-section Roadmap
+backlog, the 19 verified-redundant branches awaiting a manual
+`git branch -D`, and `wip/preserved-worktree-2026-07-27` (**do not
+merge** — reference only).
 
 ---
 
-## Verification gotchas (these cost real time)
+## Verification gotchas
 
-1. **The local kernel build covers neither host-tests nor fuzz.** Both
-   broke unnoticed for ~10 pushes. Before pushing, run:
-   - `cmake -S tests/host -B /tmp/ht` (~5 s)
-   - `cd tests/fuzz && make -j4` (~2 min, 37 targets)
-   `tests/fuzz/host_shim/` must mirror kernel APIs **including struct
-   field names** (`SpinLock` is a ticket lock: `next_ticket`/
-   `now_serving`), because `-I host_shim` precedes `-I kernel`.
-2. **CI runs on every `claude/**` push — no PR needed.** It is the only
-   place the full 7-smoke signature gate completes (KVM runners). Poll:
-   `gh run list --branch <b> --json databaseId,status,conclusion` with
-   `GH_TOKEN` from `git credential fill`.
-3. **One clean boot proves nothing for intermittent faults.** A WRONG
-   fix produced a clean 412 s boot on its first try. Measure a RATE over
-   >=3 runs. Intermittent SMP races reproduce under WSL/TCG but often
-   NOT under WHPX (fast bring-up narrows the window).
-4. **Never set `DUETOS_SERIAL_FILE` when running the smoke driver** — it
-   captures run.sh's stdout, so the override makes it grade an empty log
-   and report ALL signatures missing. A guard now exits 2 on a missing
-   banner.
-5. **Kill stray QEMU before any smoke.** A held `nvme0.img` makes the
-   next run die pre-boot with a ~550-byte log that reads as zero
-   failures.
-6. **Do not trust the audit reports' mechanisms.** Of 11 findings
-   re-verified by a multi-agent pass, **10 were worse than reported** and
-   3 had mechanisms that were simply wrong. Read the current code first;
-   "MISFRAMED" is a valid, useful outcome.
-
-Durable notes are in `~/.claude/projects/C--Users-natew-source-repos-DuetOS/memory/`
-(`duetos-verification-discipline`, `whpx-boot-repro-workflow`).
+1. **The local kernel build covers neither host-tests nor fuzz.** Run
+   both before pushing:
+   - `cmake -S tests/host -B /tmp/ht && cmake --build /tmp/ht && (cd /tmp/ht && ctest)`
+     — 51 tests. `include_tracked` is the one that catches a new header
+     you forgot to `git add`; it caught exactly that this session.
+   - `cd tests/fuzz && make -j4` — 37 targets, ~2 min.
+2. **`tests/fuzz` needs `libclang-rt-18-dev`.** Without it every target
+   fails at link with `cannot find …/libclang_rt.asan-x86_64.a`, which
+   reads like a code break. Now in `wiki/tooling/Dev-Host-Setup.md`.
+3. **`ctest-boot-smoke.sh` requires the *debug* build.** It exits 2
+   with a SKIP on `x86_64-release` ("expects Info-level signatures").
+   The bare `tools/qemu/run.sh` also defaults to `x86_64-debug` and
+   runs the battery with everything gated off — you get
+   `[pe-compat-smoke] battery complete` and nothing else. Use the ctest
+   driver, which bakes `pe-smokes=1` into its own ISO.
+4. **`boot-log-analyze.sh <serial.log>` is the triage entrypoint** and
+   doubles as a gate. The driver's own stdout is buffered until it
+   exits; the serial log at
+   `build/<preset>/ctest-smoke-serial.log` is readable live, so grep
+   that while a run is still going.
+5. **A TCG boot takes ~10 min.** Budget for it; run it in the
+   background and do docs meanwhile.
+6. **One clean boot proves nothing for intermittent faults.** Measure a
+   rate over ≥3 runs. TCG and KVM expose different bugs — `hello-pe`
+   above is exactly that.
+7. **Do not trust an audit report's mechanism.** Read the current code
+   first; "MISFRAMED" is a valid outcome.
