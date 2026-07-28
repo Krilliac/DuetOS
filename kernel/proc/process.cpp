@@ -12,12 +12,14 @@
 #include "debug/probes.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
+#include "fs/file_route.h"
 #include "mm/address_space.h"
 #include "mm/kheap.h"
 #include "net/socket.h"
 #include "util/string.h"
 #include "subsystems/linux/syscall_internal.h"
 #include "subsystems/win32/custom.h"
+#include "subsystems/win32/section.h"
 #include "subsystems/win32/window_syscall.h"
 #include "sched/sched.h"
 #include "sync/spinlock.h"
@@ -445,6 +447,17 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
             p->win32_section_handles[i]._pad[j] = 0;
         p->win32_section_handles[i].pool_index = 0;
     }
+    // Win32 section VIEW records — every slot free. Populated by
+    // NtMapViewOfSection, cleared by NtUnmapViewOfSection, drained
+    // by ProcessRelease before the address space is torn down.
+    for (u32 i = 0; i < Process::kWin32SectionCap; ++i)
+    {
+        p->win32_section_views[i].in_use = false;
+        for (u32 j = 0; j < sizeof(p->win32_section_views[i]._pad); ++j)
+            p->win32_section_views[i]._pad[j] = 0;
+        p->win32_section_views[i].pool_index = 0;
+        p->win32_section_views[i].base_va = 0;
+    }
     // Win32 directory handles — every slot empty; entries pointer
     // null until SYS_DIR_OPEN allocates a snapshot.
     for (u64 i = 0; i < Process::kWin32DirCap; ++i)
@@ -693,6 +706,33 @@ void ProcessRelease(Process* p)
     // does not touch p->as (SHM pages are borrowed, not AS-owned).
     ::duetos::subsystems::linux::internal::LinuxShmDrainProcess(p);
 
+    // Tear down every section view still installed in this AS.
+    // MUST run BEFORE the AddressSpaceRelease below — SectionUnmap
+    // dereferences `p->as`, and after the release that pointer is
+    // dangling.
+    //
+    // A view holds its own section-pool reference and its frames
+    // are borrowed, not AS-owned, so AS teardown neither drops the
+    // reference nor returns the frames. Unmap-then-release matches
+    // the ordering SYS_SECTION_UNMAP uses (see the 0x900 arm in
+    // kernel/syscall/syscall.cpp). The unmap is book-keeping only
+    // at this point — the page tables are about to be freed
+    // wholesale — but it keeps the one code path that clears a
+    // borrowed PTE the same on both the syscall and the exit legs.
+    for (u64 i = 0; i < Process::kWin32SectionCap; ++i)
+    {
+        if (p->win32_section_views[i].in_use)
+        {
+            const u32 pool_idx = p->win32_section_views[i].pool_index;
+            const u64 base_va = p->win32_section_views[i].base_va;
+            p->win32_section_views[i].in_use = false;
+            p->win32_section_views[i].pool_index = 0;
+            p->win32_section_views[i].base_va = 0;
+            (void)subsystems::win32::section::SectionUnmap(pool_idx, p->as, base_va);
+            subsystems::win32::section::SectionRelease(pool_idx);
+        }
+    }
+
     // Drop the AS reference we took at create. If this was the last
     // process/task holding that AS (v0: always true — one task per
     // process, one process per AS), the AS destroy path runs inline:
@@ -770,6 +810,47 @@ void ProcessRelease(Process* p)
     // ticks-over-budget, future GPU residue). Silent on a clean
     // exit; logs WARN + fires kLeakAttributable on residue.
     ::duetos::diag::LeakDetectorReportProcessExit(*p);
+
+    // Close every Win32 file handle the process left open. Ramfs /
+    // Fat32 / DuetFs / RamVol slots own nothing (a borrowed node or
+    // an open-time snapshot), so this is only load-bearing for
+    // FsBackingKind::Pipe slots — those hold a pipe-pool reference,
+    // and `CloseForProcess` is the only code path that releases it
+    // (plus NamedPipeOnServerClose for a server end). Without the
+    // sweep, a Win32 PE that calls CreatePipe / CreateNamedPipe and
+    // exits without CloseHandle permanently burns one of the 16
+    // g_pipe_pool slots plus its 4 KiB buffer, and, for a server
+    // end, a named-pipe registry slot.
+    //
+    // CloseForProcess is idempotent, clears the slot itself, takes
+    // no reference on `p`, and wakes pipe waiters — all fine here:
+    // ProcessRelease runs in reaper / syscall task context with
+    // interrupts on, not in an IRQ handler.
+    for (u64 i = 0; i < Process::kWin32HandleCap; ++i)
+    {
+        if (p->win32_handles[i].kind != Process::FsBackingKind::None)
+        {
+            (void)fs::routing::CloseForProcess(p, Process::kWin32HandleBase + i);
+        }
+    }
+
+    // Drop the section-pool reference held by every section handle
+    // the process left open. Mirrors DoFileClose's 0x900 arm
+    // (kernel/subsystems/win32/file_syscall.cpp). Without it a
+    // leaked handle keeps Section.refcount above 0 forever, so
+    // SectionRelease never reaches its frames-free branch — up to
+    // kSectionMaxBytes of physical frames stranded per section, out
+    // of a global pool of only 8 sections.
+    for (u64 i = 0; i < Process::kWin32SectionCap; ++i)
+    {
+        if (p->win32_section_handles[i].in_use)
+        {
+            const u32 pool_idx = p->win32_section_handles[i].pool_index;
+            p->win32_section_handles[i].in_use = false;
+            p->win32_section_handles[i].pool_index = 0;
+            subsystems::win32::section::SectionRelease(pool_idx);
+        }
+    }
 
     // Free any directory-iteration snapshots the process leaked
     // by exiting without CloseHandle on its FindFirstFile pairs.

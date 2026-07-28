@@ -2909,12 +2909,42 @@ void SyscallDispatch(arch::TrapFrame* frame)
             return;
         }
 
+        // Reserve the view record BEFORE installing the mapping.
+        // Every retained view must be recorded in the TARGET
+        // process, because the reference this map takes on the
+        // section pool is dropped by exactly two things:
+        // SYS_SECTION_UNMAP, or ProcessRelease draining this table.
+        // An untracked view would strand the section's frames for
+        // the rest of the boot — AS teardown cannot see them, since
+        // section views are borrowed pages with no AS region entry.
+        // Refusing the map is the honest failure: the alternative
+        // is a silent, unreclaimable leak out of a global pool of
+        // only 8 sections.
+        u64 view_idx = Process::kWin32SectionCap;
+        for (u64 i = 0; i < Process::kWin32SectionCap; ++i)
+        {
+            if (!target->win32_section_views[i].in_use)
+            {
+                view_idx = i;
+                break;
+            }
+        }
+        if (view_idx == Process::kWin32SectionCap)
+        {
+            KLOG_ONCE_WARN("syscall", "NtMapViewOfSection: target's section-view table full");
+            frame->rax = kStatusNoMemory;
+            return;
+        }
+
         if (!subsystems::win32::section::SectionMap(static_cast<u32>(pool_idx), target->as, base_va, view_protect))
         {
             frame->rax = kStatusConflictingAddresses;
             return;
         }
         subsystems::win32::section::SectionRetain(static_cast<u32>(pool_idx));
+        target->win32_section_views[view_idx].in_use = true;
+        target->win32_section_views[view_idx].pool_index = static_cast<u32>(pool_idx);
+        target->win32_section_views[view_idx].base_va = base_va;
 
         const u64 view_size = subsystems::win32::section::SectionViewSize(static_cast<u32>(pool_idx));
         if (base_va == target->linux_mmap_cursor)
@@ -2925,7 +2955,12 @@ void SyscallDispatch(arch::TrapFrame* frame)
         if (base_user_ptr != 0 && !mm::CopyToUser(reinterpret_cast<void*>(base_user_ptr), &base_va, sizeof(base_va)))
         {
             // Map installed but caller can't see the base —
-            // tear it down so we don't leak the view.
+            // tear it down so we don't leak the view. The view
+            // record has to go with it, or the exit drain would
+            // release a second, unmatched reference.
+            target->win32_section_views[view_idx].in_use = false;
+            target->win32_section_views[view_idx].pool_index = 0;
+            target->win32_section_views[view_idx].base_va = 0;
             subsystems::win32::section::SectionUnmap(static_cast<u32>(pool_idx), target->as, base_va);
             subsystems::win32::section::SectionRelease(static_cast<u32>(pool_idx));
             frame->rax = kStatusAccessViolation;
@@ -2934,6 +2969,9 @@ void SyscallDispatch(arch::TrapFrame* frame)
         if (size_user_ptr != 0 &&
             !mm::CopyToUser(reinterpret_cast<void*>(size_user_ptr), &view_size, sizeof(view_size)))
         {
+            target->win32_section_views[view_idx].in_use = false;
+            target->win32_section_views[view_idx].pool_index = 0;
+            target->win32_section_views[view_idx].base_va = 0;
             subsystems::win32::section::SectionUnmap(static_cast<u32>(pool_idx), target->as, base_va);
             subsystems::win32::section::SectionRelease(static_cast<u32>(pool_idx));
             frame->rax = kStatusAccessViolation;
@@ -2989,6 +3027,20 @@ void SyscallDispatch(arch::TrapFrame* frame)
         {
             frame->rax = kStatusInvalidParameter;
             return;
+        }
+        // Retire the target's view record for this (section, VA)
+        // pair so the exit drain in ProcessRelease doesn't release
+        // a second, unmatched reference on the same view.
+        for (u64 i = 0; i < Process::kWin32SectionCap; ++i)
+        {
+            auto& view = target->win32_section_views[i];
+            if (view.in_use && view.pool_index == static_cast<u32>(hit) && view.base_va == base_va)
+            {
+                view.in_use = false;
+                view.pool_index = 0;
+                view.base_va = 0;
+                break;
+            }
         }
         subsystems::win32::section::SectionRelease(static_cast<u32>(hit));
         frame->rax = kStatusSuccess;

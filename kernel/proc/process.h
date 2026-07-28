@@ -946,6 +946,34 @@ struct Process
     static constexpr u64 kWin32SectionBase = 0x900;
     Win32SectionHandle win32_section_handles[kWin32SectionCap];
 
+    // Live section VIEWS installed into THIS process's address
+    // space. Distinct from the handle table above: a view carries
+    // its own section-pool reference (NtMapViewOfSection retains,
+    // NtUnmapViewOfSection releases), so closing every handle is
+    // not enough to reclaim a section's frames.
+    //
+    // The record exists because nothing else can reconstruct the
+    // set at exit. Views are installed with
+    // `mm::AddressSpaceMapBorrowedPage`, which deliberately does
+    // NOT register the frame in the AS region table (the section
+    // pool owns those frames, not the AS) — so AS teardown frees
+    // page tables and cannot know a view was ever there. Without
+    // this table a process that maps a view and exits strands the
+    // section's frames even if it closed its handle correctly.
+    //
+    // Populated by SYS_SECTION_MAP into the TARGET process (a
+    // kCapDebug caller may map into a foreign AS), cleared by
+    // SYS_SECTION_UNMAP, drained by ProcessRelease before the AS
+    // goes away.
+    struct Win32SectionView
+    {
+        bool in_use;
+        u8 _pad[3];
+        u32 pool_index; // index into g_win32_sections
+        u64 base_va;    // view base in the owning process's AS
+    };
+    Win32SectionView win32_section_views[kWin32SectionCap];
+
     // Win32 directory iteration handles — backs FindFirstFile /
     // FindNextFile / NtQueryDirectoryFile via SYS_DIR_OPEN +
     // SYS_DIR_NEXT. Each open snapshots the directory's entries

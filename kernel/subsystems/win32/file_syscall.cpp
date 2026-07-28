@@ -344,10 +344,12 @@ void DoFileClose(arch::TrapFrame* frame)
         // Section handles drop one section-pool refcount per
         // close. The pool entry frees its frames + slot only
         // when refcount hits 0 (every handle AND every active
-        // mapping has gone away). If the caller forgot to
-        // unmap the view, the mapping refcount stays — closing
-        // the handle won't tear the view down. v0 GAP for
-        // ranks-of-leaks tests.
+        // mapping has gone away). Closing a handle deliberately
+        // does NOT tear down a still-mapped view — that matches
+        // Windows, where the view outlives the handle. The view's
+        // own reference is dropped by NtUnmapViewOfSection, or,
+        // if the process never unmaps, by ProcessRelease draining
+        // `win32_section_views[]` at exit.
         const u64 slot = handle - core::Process::kWin32SectionBase;
         core::Process::Win32SectionHandle& h = proc->win32_section_handles[slot];
         if (h.in_use)
