@@ -607,7 +607,9 @@ void _start(void)
     //
     // Invariants checked:
     //   * OpenProcessToken writes a non-null HANDLE.
-    //   * LookupPrivilegeValueW writes {LowPart=1, HighPart=0}.
+    //   * LookupPrivilegeValueW("SeDebugPrivilege") returns TRUE and
+    //     writes the well-known LUID {LowPart=20, HighPart=0}, and an
+    //     unknown privilege name is REJECTED instead of inventing one.
     //   * CreateEventW returns a non-null HANDLE.
     //   * SetEvent / ResetEvent return TRUE.
     //   * WaitForSingleObject returns WAIT_OBJECT_0 (0) —
@@ -618,8 +620,22 @@ void _start(void)
     //     don't crash on a stack-local out-buffer.
     HANDLE token = 0;
     volatile BOOL opt_ok = OpenProcessToken(GetCurrentProcess(), 0x28, &token);
+    // LookupPrivilegeValueW does a REAL name -> LUID lookup now, so ask for
+    // a privilege BY NAME and check the documented well-known value comes
+    // back. The old invariant passed a NULL name and asserted LowPart == 1,
+    // which was asserting the STUB's "every privilege is LUID 1"
+    // placeholder — precisely the behaviour that left SE_PRIVILEGE_REMOVED
+    // unable to drop the right capability, because every name aliased onto
+    // the same LUID. An unknown name must now FAIL rather than invent one:
+    // a caller that passes the invented LUID to AdjustTokenPrivileges would
+    // otherwise adjust a privilege it never named.
+    static const WCHAR kSeDebug[17] = {'S', 'e', 'D', 'e', 'b', 'u', 'g', 'P', 'r',
+                                       'i', 'v', 'i', 'l', 'e', 'g', 'e', 0};
+    static const WCHAR kNotAPrivilege[13] = {'S', 'e', 'N', 'o', 'S', 'u', 'c', 'h', 'S', 'u', 'c', 'h', 0};
     LUID se_debug = {0, 0};
-    volatile BOOL lpv_ok = LookupPrivilegeValueW(0, 0, &se_debug);
+    volatile BOOL lpv_ok = LookupPrivilegeValueW(0, kSeDebug, &se_debug);
+    LUID unknown_luid = {0xFFFFFFFFu, -1};
+    volatile BOOL lpv_reject = LookupPrivilegeValueW(0, kNotAPrivilege, &unknown_luid);
     volatile BOOL atp_ok = AdjustTokenPrivileges(token, 0, 0, 0, 0, 0);
     HANDLE evt = CreateEventW(0, 1, 0, 0);
     volatile BOOL set_ok = SetEvent(evt);
@@ -636,6 +652,7 @@ void _start(void)
     // Sink all results so the compiler can't DCE them.
     (void)opt_ok;
     (void)lpv_ok;
+    (void)lpv_reject;
     (void)atp_ok;
     (void)set_ok;
     (void)wait_rc;
@@ -657,8 +674,9 @@ void _start(void)
     // Windows epoch, which for any realistic date is > 2^60 and
     // has several non-zero bytes in the upper half.
     BOOL ft_nonzero = (ft[4] != 0) || (ft[5] != 0) || (ft[6] != 0) || (ft[7] != 0);
-    BOOL advapi_pass = token != 0 && se_debug.LowPart == 1 && se_debug.HighPart == 0 && evt != 0 && wait_rc == 0 &&
-                       get_ok == 0 && thr_exit == 0 && slist[0] == 0 && slist[8] == 0 // InitializeSListHead zeroed it
+    BOOL advapi_pass = token != 0 && lpv_ok != 0 && se_debug.LowPart == 20 && se_debug.HighPart == 0 &&
+                       lpv_reject == 0 && evt != 0 && wait_rc == 0 && get_ok == 0 && thr_exit == 0 && slist[0] == 0 &&
+                       slist[8] == 0  // InitializeSListHead zeroed it
                        && ft_nonzero; // RTC-backed FILETIME is populated
     DWORD advapi_written = 0;
     if (advapi_pass)
