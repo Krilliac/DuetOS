@@ -65,6 +65,7 @@
 #include "ipc/kevent.h"
 #include "ipc/kobject.h"
 #include "ipc/ksemaphore.h"
+#include "loader/apiset_static.h"
 #include "loader/dll_loader.h"
 #include "loader/elf_loader.h"
 #include "loader/pe_loader.h"
@@ -4325,6 +4326,43 @@ void SyscallDispatch(arch::TrapFrame* frame)
         {
             frame->rax = existing;
             return;
+        }
+
+        // API-set contracts (`api-ms-win-*` / `ext-ms-win-*`) name a
+        // contract, not a file: no such DLL exists on Windows either,
+        // and the loader is expected to rewrite the name to the host
+        // DLL that actually exports the functions. The IMPORT binder
+        // already does this via the same static table; until now the
+        // RUNTIME LoadLibrary path did not, so a contract name fell
+        // straight through to the ramfs lookup and missed.
+        //
+        // That divergence is not cosmetic: MSVC's UCRT builds its
+        // internal thunk tables at startup by LoadLibrary-ing several
+        // contracts (`-core-synch-`, `-core-fibers-`, ...). A miss
+        // makes __vcrt_initialize fail, which makes
+        // __scrt_initialize_crt fail, and the CRT then aborts with
+        // __fastfail(FAST_FAIL_FATAL_APP_EXIT) before main() — so
+        // every MSVC-linked binary died in startup for want of a name
+        // rewrite the kernel already knew how to do.
+        //
+        // Resolution order matches Windows: the literal name wins if
+        // something by that name is genuinely loaded, and only then
+        // does the contract get rewritten to its host.
+        const char* apiset_host = nullptr;
+        if (duetos::loader::ApiSetResolveStatic(kname, &apiset_host) && apiset_host != nullptr)
+        {
+            const u64 host_base = ProcessFindDllBaseByName(proc, apiset_host);
+            if (host_base != 0)
+            {
+                // Windows returns the HOST module's handle for a
+                // contract, so a subsequent GetProcAddress on it
+                // resolves against the host's EAT. Matching that
+                // keeps the CRT's probe-then-GetProcAddress pattern
+                // working without a per-contract shim.
+                KLOG_DEBUG_S("dll-load", "api-set contract resolved", "host", apiset_host);
+                frame->rax = host_base;
+                return;
+            }
         }
 
         // Compose `/lib/<name>` and look it up in the trusted ramfs.

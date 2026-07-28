@@ -51,4 +51,33 @@ namespace duetos::subsystems::win32
 ///   `fault_va`  — for a #PF, the faulting linear address (cr2).
 bool Win32DeliverException(arch::TrapFrame* frame, u32 ntstatus, bool is_pf, bool pf_write, u64 fault_va);
 
+/// STATUS_STACK_BUFFER_OVERRUN — the code Windows raises for
+/// `__fastfail`. The name is a historical misnomer: since Windows 8
+/// every fail-fast reason (not just /GS) is reported under it, with
+/// the actual reason in ExceptionInformation[0].
+constexpr u32 kStatusStackBufferOverrun = 0xC0000409;
+
+/// Decode a ring-3 #GP that was really an `int 0x29` — the x64
+/// `__fastfail` intrinsic MSVC's CRT uses to abort unrecoverably.
+///
+/// There is no IDT gate for vector 0x29, so the instruction faults as
+/// #GP(0x29*8+2) and, without this decode, is delivered as a generic
+/// STATUS_ACCESS_VIOLATION at a RIP inside the CRT — which reads like
+/// a loader bug when it is actually the CRT reporting, deliberately
+/// and by contract, that one of its own invariants failed. The reason
+/// code lives in ECX (`__fastfail`'s single argument); recovering it
+/// is the difference between "the app crashed somewhere" and "the app
+/// said FAST_FAIL_<reason>".
+///
+/// Returns true only when `frame` is a ring-3 #GP whose faulting
+/// instruction bytes are literally `CD 29`, in which case `out_code`
+/// receives the fail-fast reason from ECX. The instruction bytes are
+/// read through CopyFromUser, so an unmapped or hostile RIP simply
+/// yields false rather than faulting the kernel.
+bool Win32DecodeFastFail(const arch::TrapFrame* frame, u32* out_code);
+
+/// Human-readable name for a `__fastfail` reason code, or nullptr if
+/// the code is not one of the documented set. Used for logging only.
+const char* Win32FastFailName(u32 code);
+
 } // namespace duetos::subsystems::win32

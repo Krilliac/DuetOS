@@ -180,6 +180,95 @@ bool Win32ProtToPageFlags(u64 prot, u64& out_flags)
     return Win32ProtToPageFlags(prot, out_flags, unused);
 }
 
+// Derive the Win32 protection constant a page's live PTE flags
+// correspond to, for VirtualProtect's lpflOldProtect out-param on
+// pages the vmap region tracker knows nothing about. Only the
+// non-executable shapes can occur: Win32ProtToPageFlags refuses every
+// PAGE_EXECUTE_* request, so no page we protect ever carries X.
+u32 PageFlagsToWin32Prot(u64 pte)
+{
+    if ((pte & mm::kPagePresent) == 0)
+        return kPageNoAccess;
+    return ((pte & mm::kPageWritable) != 0) ? kPageReadWrite : kPageReadOnly;
+}
+
+// VirtualProtect on pages outside any VirtualAlloc region — the loaded
+// image, the thread stack, a preloaded DLL. Windows allows this on any
+// committed page in the process; we only ever tracked VirtualAlloc
+// regions, so every such call used to fail.
+//
+// That was not a cosmetic gap. MSVC's UCRT caches its resolved Win32
+// thunks in a table inside its own .data, and guards each write with
+// VirtualProtect(PAGE_READWRITE) / VirtualProtect(PAGE_READONLY),
+// bailing out if either fails. A failure there makes
+// __acrt_initialize_winapi_thunks fail, which fails __acrt_initialize,
+// which fails __scrt_initialize_crt — and the CRT then aborts with
+// __fastfail(FAST_FAIL_FATAL_APP_EXIT) before reaching main(). So this
+// one missing fallback stopped essentially every MSVC-linked binary,
+// however complete its imports were.
+//
+// Security: the range is gated to the user half and to pages already
+// mapped in THIS process's address space (so a PE can only re-protect
+// memory it already owns), and the flags still go through
+// Win32ProtToPageFlags, which refuses every executable protection.
+// Re-protecting a code page PAGE_READWRITE therefore drops it to
+// writable+NX data — a downgrade, exactly as on Windows — and never
+// yields a W+X page.
+bool ProtectMappedRange(::duetos::core::Process* proc, u64 base_va, u64 size_bytes, u64 new_prot, u64 user_old_prot)
+{
+    if (proc == nullptr || proc->as == nullptr)
+        return false;
+
+    u64 new_flags = 0;
+    bool is_guard = false;
+    if (!Win32ProtToPageFlags(new_prot, new_flags, is_guard))
+        return false;
+    // Guard pages are bookkept per vmap region (r.guard_bits); outside
+    // one there is nowhere to record the arming, and Win32VmapPageGuardClear
+    // would never fire to un-arm it. Refuse rather than silently hand
+    // back a page that traps once and never recovers.
+    if (is_guard)
+        return false;
+
+    const u64 first = base_va & ~(mm::kPageSize - 1);
+    const u64 end = base_va + size_bytes; // caller already rejected size 0
+    if (end <= base_va)
+        return false; // wrapped
+    const u64 last = (end - 1) & ~(mm::kPageSize - 1);
+    const u64 pages = ((last - first) / mm::kPageSize) + 1;
+
+    // Bound the walk. 16 Ki pages = 64 MiB, comfortably above any real
+    // VirtualProtect while keeping a bogus multi-GiB size from spinning
+    // the kernel through millions of page-table probes.
+    constexpr u64 kMaxPages = 16384;
+    if (pages > kMaxPages)
+        return false;
+    if (!::duetos::mm::IsUserAddressRange(first, pages * mm::kPageSize))
+        return false;
+
+    // Two passes: probe every page first so a partially-applied
+    // protection change is impossible. Windows fails the whole call if
+    // any page in the range is not committed.
+    for (u64 i = 0; i < pages; ++i)
+    {
+        if (::duetos::mm::AddressSpaceProbePteRaw(proc->as, first + i * mm::kPageSize) == 0)
+            return false;
+    }
+
+    if (user_old_prot != 0)
+    {
+        u32 old = PageFlagsToWin32Prot(::duetos::mm::AddressSpaceProbePteRaw(proc->as, first));
+        if (!::duetos::mm::CopyToUser(reinterpret_cast<void*>(user_old_prot), &old, sizeof(old)))
+            return false;
+    }
+
+    for (u64 i = 0; i < pages; ++i)
+    {
+        ::duetos::mm::AddressSpaceProtectUserPage(proc->as, first + i * mm::kPageSize, new_flags);
+    }
+    return true;
+}
+
 // Find an existing region whose [base_va, base_va + pages*4096)
 // covers `va`. Returns the slot index or kCap on miss.
 u64 FindRegionContaining(const ::duetos::core::Process* proc, u64 va)
@@ -489,7 +578,11 @@ void DoVirtualProtect(arch::TrapFrame* frame)
     const u64 idx = FindRegionContaining(proc, base_va);
     if (idx == Process::kWin32VmapRegionCap)
     {
-        frame->rax = 0;
+        // Not a VirtualAlloc region — the loaded image, the thread
+        // stack or a preloaded DLL. Protect it through the process
+        // address space directly; see ProtectMappedRange for why
+        // failing here broke every MSVC CRT's startup.
+        frame->rax = ProtectMappedRange(proc, base_va, size_bytes, new_prot, user_old_prot) ? 1 : 0;
         return;
     }
     auto& r = proc->vmap_regions[idx];

@@ -1963,11 +1963,36 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         // they are claimed earlier by the breakpoint / GDB subsystems
         // under LogAndContinue policy and never reach this block.
         {
-            const u32 seh_status = VectorToUserNtStatus(frame->vector);
+            // A ring-3 `int 0x29` arrives here as a #GP, and the
+            // table below would call it STATUS_ACCESS_VIOLATION at a
+            // RIP inside the CRT — indistinguishable from a loader or
+            // mapping bug. It is neither: it is MSVC's __fastfail,
+            // i.e. the CRT deliberately aborting and naming its
+            // reason in ECX. Recover that reason and report the code
+            // Windows reports, so a __try/__except filtering on
+            // STATUS_STACK_BUFFER_OVERRUN sees the right value and the
+            // boot log names the failure instead of hiding it.
+            u32 seh_status = VectorToUserNtStatus(frame->vector);
+            u32 fastfail_code = 0;
+            const bool is_fastfail = ::duetos::subsystems::win32::Win32DecodeFastFail(frame, &fastfail_code);
+            if (is_fastfail)
+            {
+                seh_status = ::duetos::subsystems::win32::kStatusStackBufferOverrun;
+                const char* name = ::duetos::subsystems::win32::Win32FastFailName(fastfail_code);
+                KLOG_WARN("win32/seh", "ring-3 __fastfail (int 0x29) — the CRT aborted deliberately");
+                KLOG_WARN_V("win32/seh", "  fail-fast code", fastfail_code);
+                if (name != nullptr)
+                {
+                    KLOG_WARN_S("win32/seh", "  fail-fast reason", "name", name);
+                }
+            }
             const bool seh_dispatchable = (seh_status != 0);
             const bool seh_is_pf = (frame->vector == 14);
             const bool seh_pf_write = seh_is_pf && ((frame->error_code & 0x2) != 0);
-            const u64 seh_fault_va = seh_is_pf ? ReadCr2() : 0;
+            // For a __fastfail the "extra word" slot carries the
+            // reason code instead of a faulting address; see
+            // Win32DeliverException's ExceptionInformation fill.
+            const u64 seh_fault_va = seh_is_pf ? ReadCr2() : (is_fastfail ? u64(fastfail_code) : 0);
             if (seh_dispatchable && ::duetos::subsystems::win32::Win32DeliverException(frame, seh_status, seh_is_pf,
                                                                                        seh_pf_write, seh_fault_va))
             {

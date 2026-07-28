@@ -1477,6 +1477,53 @@ along the way — including a canary immediately after its `MSG` that the
 `ring3-pe32-window` battery row, and the boot log now carries
 `[win] create handle=... title="DuetOS PE32"` from a 32-bit PE.
 
+## Phase 6.31 - off-the-shelf Windows executables run (2026-07-28)
+
+The first binaries DuetOS runs that nobody wrote for DuetOS. A stock
+`hello.c` compiled with MSVC (`cl /MT`) reaches `main()`, prints through
+the CRT's own stdio, and exits 0; `C:\Windows\System32\clip.exe`
+starts, runs and returns an exit code instead of faulting.
+
+What stood in the way was not import coverage. A 12-line program with
+**100%** of its imports resolved failed exactly like a 2.4 MB
+`vulkaninfo.exe`: `VirtualProtect` returned FALSE for any address that
+was not part of a `VirtualAlloc` region, and the loaded image is not.
+MSVC's UCRT brackets each write to its cached Win32 thunk table with
+`VirtualProtect(PAGE_READWRITE)` / `(PAGE_READONLY)` and checks both, so
+the failure walked all the way up - `try_get_function_slow` ->
+`__acrt_initialize_winapi_thunks` -> `__acrt_initialize` ->
+`__scrt_initialize_crt` - and the CRT aborted before `main()`. One
+missing fallback path was stopping every MSVC-linked binary on the
+system.
+
+Finding it needed two diagnostics first. A ring-3 `int 0x29` was being
+reported as `STATUS_ACCESS_VIOLATION` at a RIP inside the CRT, which
+looks like a loader bug; decoding it as `__fastfail` turned that into
+`FATAL_APP_EXIT` and pointed at CRT init rather than at the loader. And
+the `/GS` security cookie had never been seeded for any ASLR'd image -
+`SeedSecurityCookie` bounds-checked a link-time VA read from the raw
+file against the already-relocated `image_base`, so the check failed for
+every non-zero ASLR delta and the seed was silently skipped.
+
+The measurement rig landed with the fix, because "which app should we
+try next" was guesswork before it.
+`tools/test/pe-compat-survey.py` parses any host binary's import
+directory and diffs it against DuetOS's live export surface - the
+userland DLL `.def`s and `dllexport`s **and** the kernel thunk table,
+which is where `GetProcAddress` and `RaiseException` actually live and
+omitting which under-reported 64-bit coverage badly.
+`tools/test/pe-corpus-run.sh` then boots a whole corpus and grades each
+one onto a rung (LOADFAIL / NOSPAWN / FASTFAIL / FAULT / EXIT-rc /
+CLEAN), so a slice's effect is measured against a fixed corpus instead
+of one hand-run boot.
+
+The survey's other finding is the next rung: the Unity launchers on this
+machine (`BattleBit.exe`, `Black Ice.exe`, `Cult Of The Lamb.exe`) sit
+at 98.5% coverage with exactly one unresolved import each -
+`UnityPlayer.dll!UnityMain`. Loading a DLL that ships beside the .exe,
+rather than one embedded in the kernel image, is what stands between
+DuetOS and a real game.
+
 ## How to read the rest of the tree
 
 - `CLAUDE.md` — the authoritative project context, coding standards,

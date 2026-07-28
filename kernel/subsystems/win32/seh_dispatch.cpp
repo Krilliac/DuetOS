@@ -46,7 +46,92 @@ u64 AlignDown16(u64 v)
     return v & ~static_cast<u64>(0xF);
 }
 
+// `int 0x29` — the two bytes MSVC emits for the `__fastfail`
+// intrinsic. Vector 0x29 has no IDT gate, so the CPU raises
+// #GP with error_code = 0x29 * 8 + 2 (IDT-relative selector,
+// external = 0). Both the opcode and the error code are checked:
+// the opcode alone would misread a #GP raised on some other
+// instruction that merely happens to sit next to those bytes.
+constexpr u8 kIntImm8Opcode = 0xCD;
+constexpr u8 kFastFailVector = 0x29;
+constexpr u64 kFastFailGpErrorCode = (u64(kFastFailVector) << 3) | 0x2;
+
 } // namespace
+
+bool Win32DecodeFastFail(const arch::TrapFrame* frame, u32* out_code)
+{
+    if (frame == nullptr || out_code == nullptr)
+    {
+        return false;
+    }
+    // Ring-3 #GP only. A kernel-mode `int 0x29` is not a Win32
+    // fail-fast — it would be a kernel bug, and must keep taking
+    // the panic path rather than being reinterpreted as a guest
+    // exception.
+    if (frame->vector != 13 || (frame->cs & 0x3) != 0x3)
+    {
+        return false;
+    }
+    if (frame->error_code != kFastFailGpErrorCode)
+    {
+        return false;
+    }
+
+    // Read the faulting instruction from user memory. CopyFromUser
+    // gates on the user half + SMAP and fails closed via the
+    // extable, so an unmapped RIP returns false instead of
+    // double-faulting the kernel inside the fault handler.
+    u8 insn[2] = {0, 0};
+    if (!duetos::mm::CopyFromUser(insn, reinterpret_cast<const void*>(frame->rip), sizeof(insn)))
+    {
+        return false;
+    }
+    if (insn[0] != kIntImm8Opcode || insn[1] != kFastFailVector)
+    {
+        return false;
+    }
+
+    // `__fastfail(code)` passes the reason in ECX per the x64
+    // calling convention. Only the low 32 bits are meaningful.
+    *out_code = static_cast<u32>(frame->rcx & 0xFFFFFFFFULL);
+    return true;
+}
+
+const char* Win32FastFailName(u32 code)
+{
+    // The documented subset the MSVC CRT and our own PE corpus
+    // actually raise. Anything else logs as a bare number rather
+    // than being guessed at.
+    switch (code)
+    {
+    case 0:
+        return "LEGACY_GS_VIOLATION";
+    case 1:
+        return "VTGUARD_CHECK_FAILURE";
+    case 2:
+        return "STACK_COOKIE_CHECK_FAILURE";
+    case 3:
+        return "CORRUPT_LIST_ENTRY";
+    case 4:
+        return "INCORRECT_STACK";
+    case 5:
+        return "INVALID_ARG";
+    case 6:
+        return "GS_COOKIE_INIT";
+    case 7:
+        return "FATAL_APP_EXIT";
+    case 8:
+        return "RANGE_CHECK_FAILURE";
+    case 9:
+        return "UNSAFE_REGISTRY_ACCESS";
+    case 18:
+        return "INVALID_FAST_FAIL_CODE";
+    case 29:
+        return "INVALID_SET_OF_CONTEXT";
+    default:
+        return nullptr;
+    }
+}
 
 bool Win32DeliverException(arch::TrapFrame* frame, u32 ntstatus, bool is_pf, bool pf_write, u64 fault_va)
 {
@@ -157,6 +242,17 @@ bool Win32DeliverException(arch::TrapFrame* frame, u32 ntstatus, bool is_pf, boo
         rec.NumberParameters = 2;
         rec.ExceptionInformation[0] = pf_write ? 1u : 0u;
         rec.ExceptionInformation[1] = fault_va;
+    }
+    else if (ntstatus == kStatusStackBufferOverrun)
+    {
+        // __fastfail: Windows reports the reason code as the single
+        // ExceptionInformation element. The caller passes it in
+        // `fault_va` — the generic "extra word" slot for the
+        // non-#PF codes, unused by every other status we deliver.
+        // A debugger or an __except filter reads the reason from
+        // here, not from our boot log.
+        rec.NumberParameters = 1;
+        rec.ExceptionInformation[0] = fault_va;
     }
     else
     {

@@ -1149,7 +1149,7 @@ TlsSetupResult SetupStaticTls(const u8* file, u64 file_len, const PeHeaders& h, 
 // page, so a one-frame lookup + 8-byte write is enough. We
 // still handle the page-straddle case using the same pattern
 // as ApplyRelocations.
-bool SeedSecurityCookie(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm::AddressSpace* as)
+bool SeedSecurityCookie(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm::AddressSpace* as, u64 aslr_delta)
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
@@ -1165,9 +1165,16 @@ bool SeedSecurityCookie(const u8* file, u64 file_len, const PeHeaders& h, duetos
         return true; // Pre-/GS load config layout — skip.
     if (lc_off + kLoadConfigSecurityCookie + 8 > file_len)
         return true; // Truncated — skip.
-    const u64 cookie_va = LeU64(file + lc_off + kLoadConfigSecurityCookie);
-    if (cookie_va == 0)
+    const u64 link_cookie_va = LeU64(file + lc_off + kLoadConfigSecurityCookie);
+    if (link_cookie_va == 0)
         return true; // /GS disabled at compile time.
+    // The LoadConfig is read from the RAW FILE, so its SecurityCookie is an
+    // absolute VA against the image's *preferred* base — relocations have not
+    // been applied to it. `h.image_base` is the *actual* load base (the caller
+    // already added the ASLR delta). Comparing the two directly made the bounds
+    // check below fail for every image loaded at a non-zero delta, i.e. every
+    // ASLR'd PE, so the cookie was silently never seeded. Rebase first.
+    const u64 cookie_va = link_cookie_va + aslr_delta;
     // cookie_va is an absolute VA taken raw from the LoadConfig; gate it
     // to within the declared image (like the reloc/IAT/TLS-index writes)
     // so a hostile LoadConfig can't aim this 8-byte random write at the
@@ -2521,7 +2528,7 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     // 3a. /GS cookie randomisation (T9-02 follow-on). Best-effort:
     //     SeedSecurityCookie always returns true (silently skips on
     //     no-load-config / pre-/GS layout / unmapped cookie VA).
-    (void)SeedSecurityCookie(file, file_len, h, as);
+    (void)SeedSecurityCookie(file, file_len, h, as, aslr_delta);
 
     // 3b. TLS (T6-01) is now fully supported: static-TLS template
     //     copy, TEB.ThreadLocalStoragePointer wiring, and a

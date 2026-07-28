@@ -27,6 +27,9 @@
 #                      Defaults to basename upper-cased + truncated to 8.3.
 #
 # ENV:
+#   DUETOS_LOGDIR    where to write the serial log (default /tmp). Set this
+#                    to a persistent path on hosts where /tmp is volatile
+#                    (WSL wipes it once the instance goes idle).
 #   DUETOS_TIMEOUT   seconds to let QEMU run before TERM (default 45).
 #   DUETOS_PRESET    build preset (passed through to run.sh; default its own).
 #   Any other run.sh env var is honoured (DUETOS_SMP, DUETOS_ACCEL, ...).
@@ -88,7 +91,14 @@ else
     SFN="$(derive_sfn "${HOST_EXE}")"
 fi
 
-LOG="/tmp/run-exe-${SFN}.log"
+# Serial logs default to /tmp, but on a Windows-hosted WSL dev box /tmp is
+# wiped whenever the WSL instance goes idle between `wsl.exe` invocations —
+# so a log written by one command is gone by the time the next one greps it,
+# which reads as "the run produced nothing". Point DUETOS_LOGDIR at a
+# persistent directory (e.g. ~/duet-logs) to keep logs across invocations.
+LOGDIR="${DUETOS_LOGDIR:-/tmp}"
+mkdir -p "${LOGDIR}"
+LOG="${LOGDIR}/run-exe-${SFN}.log"
 
 echo "[run-exe] host exe : ${HOST_EXE}"
 echo "[run-exe] SFN      : ${SFN}"

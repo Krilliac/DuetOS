@@ -12944,3 +12944,80 @@ markers for its richest input. Three discovery layers were added (runtime
   is where a wrong number does the most damage, since one bad `#define`
   mis-aims every caller of that name at once. Coverage went from 134 to
   239 asserted numbers on a clean tree, all correct.
+
+## 2026-07-28 - VirtualProtect covers every mapped user page, not just VirtualAlloc regions
+
+- **Context:** `DoVirtualProtect` resolved its target through
+  `FindRegionContaining`, which only searches `Process::vmap_regions` —
+  the bookkeeping array for pages handed out by `VirtualAlloc`. Any
+  other address in the process (the loaded PE image, the thread stack, a
+  preloaded DLL) matched no region, so the call returned FALSE.
+- **Why it mattered far more than it looked:** MSVC's UCRT caches its
+  resolved Win32 thunks in a table inside its own `.data`, and brackets
+  each write with `VirtualProtect(PAGE_READWRITE)` /
+  `VirtualProtect(PAGE_READONLY)`, checking both return values. A
+  failure propagates: `try_get_function_slow` returns null ->
+  `__acrt_initialize_winapi_thunks` fails -> `__acrt_initialize` fails
+  -> `__scrt_initialize_crt` fails -> the CRT calls
+  `__fastfail(FAST_FAIL_FATAL_APP_EXIT)` before `main()`. Every
+  MSVC-linked binary died in startup regardless of how complete its
+  imports were — a 12-line `hello.c` with **100% import coverage**
+  failed identically to a 2.4 MB `vulkaninfo.exe`.
+- **Decision:** a VA outside every vmap region falls back to
+  `ProtectMappedRange`, which re-protects the pages directly in the
+  process address space. **Rules out** the alternative of registering
+  the loaded image as a synthetic vmap region at spawn: the region
+  array is a small fixed-capacity table sized for real `VirtualAlloc`
+  traffic, an image can hold more sections than it has slots, and the
+  protection state would then have two owners (the PE loader's section
+  flags and the region's `protection` field) — the one-source-of-truth
+  rule says the page tables win.
+- **Security:** the fallback is not a W^X relaxation. The range must lie
+  in the user half (`IsUserAddressRange`), every page must already be
+  mapped in *this* process's address space (so a PE can only re-protect
+  memory it already owns), and the flags still go through
+  `Win32ProtToPageFlags`, which refuses every `PAGE_EXECUTE_*` request.
+  `PAGE_READWRITE` on a code page therefore yields writable+NX data — a
+  downgrade, matching Windows — and never a W+X page. `PAGE_GUARD` is
+  refused outside a vmap region because `guard_bits` (and so
+  `Win32VmapPageGuardClear`) has nowhere to record the arming; silently
+  ignoring it would arm a page that traps once and never recovers.
+
+## 2026-07-28 - A ring-3 `int 0x29` is __fastfail, not an access violation
+
+- **Context:** vector 0x29 has no IDT gate, so MSVC's `__fastfail`
+  intrinsic raises `#GP(0x29*8+2)`, which the vector->NTSTATUS table
+  reported as `STATUS_ACCESS_VIOLATION` at a RIP inside the CRT. That
+  reads exactly like a loader or mapping bug, and it hid the real event:
+  the CRT deliberately aborting and naming its reason in `ECX`.
+- **Decision:** decode the two faulting instruction bytes in the Win32
+  SEH path (`Win32DecodeFastFail`) and deliver
+  `STATUS_STACK_BUFFER_OVERRUN (0xC0000409)` with the reason code in
+  `ExceptionInformation[0]`, plus a named WARN line. **Rules out**
+  installing a real IDT gate for vector 0x29: that would spend an
+  interrupt vector, and put a Win32 ABI convention in the arch layer,
+  to learn something the `#GP` error code plus two bytes already tell
+  us. The decode is gated on ring 3 **and** on
+  `error_code == 0x29*8+2`, so a kernel-mode `int 0x29` still panics
+  rather than being reinterpreted as a guest exception.
+- **Diagnostic value, concretely:** this is what turned "vulkaninfo
+  crashes with 0xC0000005 somewhere in its CRT" into "the CRT reports
+  FATAL_APP_EXIT", which is what made the VirtualProtect root cause
+  findable at all.
+
+## 2026-07-28 - Runtime LoadLibrary resolves api-set contracts through the same table as the import binder
+
+- **Context:** `kernel/loader/apiset_static.cpp` maps `api-ms-win-*` /
+  `ext-ms-win-*` contract names to host DLLs, and the PE import binder
+  already used it. The runtime `SYS_DLL_LOAD_FROM_PATH` path did not, so
+  `LoadLibraryExA("api-ms-win-core-synch-l1-2-0.dll")` fell through to a
+  `/lib/<name>` ramfs lookup and missed.
+- **Decision:** the syscall consults `ApiSetResolveStatic` after the
+  literal-name lookup fails, and returns the **host** module's base —
+  matching Windows, where a contract's HMODULE is the host's, so a
+  following `GetProcAddress` resolves against the host EAT. Literal name
+  first, contract rewrite second, so a real DLL that happens to be named
+  like a contract still wins. **Rules out** a second, LoadLibrary-only
+  contract table: one source of truth per resource, and a divergence
+  between bind-time and run-time name resolution is precisely the
+  sentinel-divergence bug class.
