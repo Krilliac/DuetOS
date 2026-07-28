@@ -130,6 +130,9 @@ constexpr Theme kClassic = {
     .gloss_alpha = 0,
     .taskbar_island = false,
     .taskbar_inset = 0,
+    .accent_peer = 0,
+    .aurora_wallpaper = false,
+    .glass_alpha = 0,
 };
 
 // Amber is a deliberate retro exercise — a single-hue amber palette
@@ -232,6 +235,9 @@ constexpr Theme kAmber = {
     .gloss_alpha = 0,
     .taskbar_island = false,
     .taskbar_inset = 0,
+    .accent_peer = 0,
+    .aurora_wallpaper = false,
+    .glass_alpha = 0,
 };
 
 constexpr Theme kSlate10 = {
@@ -337,6 +343,9 @@ constexpr Theme kSlate10 = {
     .gloss_alpha = 0,
     .taskbar_island = false,
     .taskbar_inset = 0,
+    .accent_peer = 0,
+    .aurora_wallpaper = false,
+    .glass_alpha = 0,
 };
 
 // Duet — the redesigned palette. Slate-charcoal canvas, dual-accent
@@ -941,6 +950,9 @@ constexpr Theme kDuetClassic = {
     .gloss_alpha = 0,
     .taskbar_island = false,
     .taskbar_inset = 0,
+    .accent_peer = 0,
+    .aurora_wallpaper = false,
+    .glass_alpha = 0,
 };
 
 // HighContrast — accessibility-first theme. Pure black bg,
@@ -1039,6 +1051,9 @@ constexpr Theme kHighContrast = {
     .gloss_alpha = 0,
     .taskbar_island = false,
     .taskbar_inset = 0,
+    .accent_peer = 0,
+    .aurora_wallpaper = false,
+    .glass_alpha = 0,
 };
 
 const Theme* const kThemes[static_cast<u32>(ThemeId::kCount)] = {

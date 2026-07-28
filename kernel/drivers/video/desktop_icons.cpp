@@ -35,7 +35,6 @@ constexpr u32 kRowPitch = 92;
 constexpr u32 kCellW = 84;
 constexpr u32 kCellH = 84;
 constexpr u32 kTileW = 56;
-constexpr u32 kTileH = 56;
 constexpr u32 kBottomReserve = 52;
 
 // 0x00RRGGBB, matching the rest of the chrome.
