@@ -51,8 +51,26 @@ typedef unsigned long LSTATUS; /* 32-bit Win32 error code */
 #define ERROR_SUCCESS 0UL
 #define ERROR_FILE_NOT_FOUND 2UL
 #define ERROR_INVALID_HANDLE 6UL
+#define ERROR_INVALID_FUNCTION 1UL
+#define ERROR_INVALID_PARAMETER 87UL
+#define ERROR_INSUFFICIENT_BUFFER 122UL
+#define ERROR_UNSUPPORTED_TYPE 1630UL
+#define ERROR_NONE_MAPPED 1332UL
+#define ERROR_NO_TOKEN 1008UL
+#define ERROR_NOT_SUPPORTED 50UL
 #define ERROR_MORE_DATA 234UL
 #define ERROR_NO_MORE_ITEMS 259UL
+
+/* Per-thread last-error is kernel-owned (SYS_SETLASTERROR = 10),
+ * the same slot kernel32!SetLastError writes. advapi32.dll links
+ * /nodefaultlib with no import table, so it issues the syscall
+ * itself rather than calling across to kernel32 — one source of
+ * truth, no second error slot. */
+static void adv_set_last_error(DWORD err)
+{
+    long discard;
+    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long)10), "D"((long)err) : "memory");
+}
 
 /* Standard predefined HKEY values (per Win32 API). Casting a
  * sentinel integer to HKEY matches what Windows hands out and
@@ -1151,6 +1169,219 @@ __declspec(dllexport) LSTATUS RegSetValueExW(HANDLE hKey, const wchar_t16* name,
 }
 
 /* ------------------------------------------------------------------
+ * RegGetValueW / RegCreateKeyExA / RegDeleteTreeW /
+ * RegNotifyChangeKeyValue
+ *
+ * RegGetValueW is the single most-imported missing advapi32 export
+ * across the x64 System32 set, and it is a composition of calls
+ * this DLL already answers for real: open the subkey, query the
+ * value, enforce the caller's type restriction, then guarantee the
+ * string terminator that RegQueryValueEx does not.
+ * ------------------------------------------------------------------ */
+
+/* RRF_RT_* type-restriction flags. RRF_RT_ANY (0xFFFF) accepts
+ * everything; the individual bits map 1 << REG_<type>. */
+#define RRF_RT_REG_NONE 0x00000001UL
+#define RRF_RT_REG_SZ 0x00000002UL
+#define RRF_RT_REG_EXPAND_SZ 0x00000004UL
+#define RRF_RT_REG_BINARY 0x00000008UL
+#define RRF_RT_REG_DWORD 0x00000010UL
+#define RRF_RT_REG_MULTI_SZ 0x00000020UL
+#define RRF_RT_REG_QWORD 0x00000040UL
+#define RRF_RT_ANY 0x0000FFFFUL
+#define RRF_ZEROONFAILURE 0x20000000UL
+
+static DWORD rrf_bit_for_type(DWORD type)
+{
+    switch (type)
+    {
+    case REG_NONE:
+        return RRF_RT_REG_NONE;
+    case REG_SZ:
+        return RRF_RT_REG_SZ;
+    case REG_EXPAND_SZ:
+        return RRF_RT_REG_EXPAND_SZ;
+    case REG_BINARY:
+        return RRF_RT_REG_BINARY;
+    case REG_DWORD:
+        return RRF_RT_REG_DWORD;
+    case REG_MULTI_SZ:
+        return RRF_RT_REG_MULTI_SZ;
+    case REG_QWORD:
+        return RRF_RT_REG_QWORD;
+    default:
+        return 0;
+    }
+}
+
+/* RegGetValueW — open + query + type-check in one call.
+ *
+ * Win32 guarantees three things RegQueryValueExW does not, and all
+ * three are implemented here: a NULL/empty lpSubKey queries hkey
+ * itself, the returned REG_SZ / REG_EXPAND_SZ / REG_MULTI_SZ data
+ * is always null-terminated (the stored data may not be), and
+ * *pcbData reports the terminated length. */
+// GAP: RRF_NOEXPAND is irrelevant here because we never expand — a
+// REG_EXPAND_SZ value is returned with its %VAR% tokens intact, matching
+// RRF_NOEXPAND semantics whether or not the caller asked for them.
+__declspec(dllexport) LSTATUS RegGetValueW(HANDLE hkey, const wchar_t16* lpSubKey, const wchar_t16* lpValue,
+                                           DWORD dwFlags, DWORD* pdwType, void* pvData, DWORD* pcbData)
+{
+    HANDLE key = hkey;
+    HANDLE opened = (HANDLE)0;
+
+    if (lpSubKey != (const wchar_t16*)0 && lpSubKey[0] != 0)
+    {
+        const LSTATUS st = RegOpenKeyExW(hkey, lpSubKey, 0, 0, &opened);
+        if (st != ERROR_SUCCESS)
+            return st;
+        key = opened;
+    }
+
+    /* Query into a scratch buffer first: we may need to append a
+     * terminator the stored data does not carry, and we must not
+     * disturb the caller's buffer on a type-restriction failure. */
+    unsigned char scratch[512];
+    DWORD scratch_cb = (DWORD)sizeof(scratch);
+    DWORD type = REG_NONE;
+    LSTATUS st = RegQueryValueExW(key, lpValue, (DWORD*)0, &type, scratch, &scratch_cb);
+    if (opened != (HANDLE)0)
+        RegCloseKey(opened);
+    if (st != ERROR_SUCCESS)
+        return st;
+
+    /* Type restriction. dwFlags with no RRF_RT_* bit set is treated
+     * as RRF_RT_ANY, which is what callers passing only
+     * RRF_ZEROONFAILURE expect. */
+    const DWORD wanted = dwFlags & RRF_RT_ANY;
+    if (wanted != 0 && (wanted & rrf_bit_for_type(type)) == 0)
+    {
+        if ((dwFlags & RRF_ZEROONFAILURE) != 0 && pvData != (void*)0 && pcbData != (DWORD*)0)
+        {
+            unsigned char* b = (unsigned char*)pvData;
+            for (DWORD i = 0; i < *pcbData; ++i)
+                b[i] = 0;
+        }
+        return ERROR_UNSUPPORTED_TYPE;
+    }
+
+    /* String types must come back terminated. The stored bytes are
+     * UTF-16 code units, so the terminator is two zero bytes. */
+    DWORD out_cb = scratch_cb;
+    if (type == REG_SZ || type == REG_EXPAND_SZ || type == REG_MULTI_SZ)
+    {
+        const int terminated = (out_cb >= 2 && scratch[out_cb - 1] == 0 && scratch[out_cb - 2] == 0);
+        if (!terminated && out_cb + 2 <= (DWORD)sizeof(scratch))
+        {
+            scratch[out_cb] = 0;
+            scratch[out_cb + 1] = 0;
+            out_cb += 2;
+        }
+    }
+
+    if (pdwType != (DWORD*)0)
+        *pdwType = type;
+    if (pcbData == (DWORD*)0)
+        return ERROR_SUCCESS; /* type-only probe */
+
+    const DWORD cap = *pcbData;
+    *pcbData = out_cb;
+    if (pvData == (void*)0)
+        return ERROR_SUCCESS; /* size probe */
+    if (cap < out_cb)
+        return ERROR_MORE_DATA;
+    unsigned char* dst = (unsigned char*)pvData;
+    for (DWORD i = 0; i < out_cb; ++i)
+        dst[i] = scratch[i];
+    return ERROR_SUCCESS;
+}
+
+/* RegCreateKeyExA — the ANSI face of the volatile-key creator. */
+__declspec(dllexport) LSTATUS RegCreateKeyExA(HANDLE hKey, const char* subkey, DWORD reserved, const char* cls,
+                                              DWORD opts, DWORD access, void* sec, HANDLE* out, DWORD* disp)
+{
+    wchar_t16 wsub[192];
+    DWORD n = 0;
+    if (subkey != (const char*)0)
+    {
+        while (subkey[n] != 0 && n < (DWORD)(sizeof(wsub) / sizeof(wsub[0])) - 1)
+        {
+            wsub[n] = (wchar_t16)(unsigned char)subkey[n];
+            ++n;
+        }
+    }
+    wsub[n] = 0;
+    (void)cls; /* class strings are not tracked; RegCreateKeyExW ignores it too */
+    return RegCreateKeyExW(hKey, wsub, reserved, (const wchar_t16*)0, opts, access, sec, out, disp);
+}
+
+/* RegDeleteTreeW — remove `hKey`\`lpSubKey` and everything under it.
+ *
+ * A volatile key owns its values inline, so freeing the key's slot
+ * (RegDeleteKeyW) drops the key and its values in one step — there
+ * is no separate value-deletion pass to run. Static keys are
+ * const tree data and cannot be deleted at all; RegDeleteKeyW
+ * already reports the Win32-idempotent success for those.
+ *
+ * A NULL / empty lpSubKey means "empty hKey but keep it", which
+ * for the volatile tier means dropping its values. */
+// GAP: volatile descendant keys are stored as independent full-path slots
+// and the tier has no child enumeration, so a grandchild survives its
+// parent's deletion. Revisit when the volatile registry grows a real
+// parent/child index — a static (const-tree) key is not deletable at all.
+__declspec(dllexport) LSTATUS RegDeleteTreeW(HANDLE hKey, const wchar_t16* lpSubKey)
+{
+    if (lpSubKey != (const wchar_t16*)0 && lpSubKey[0] != 0)
+    {
+        /* Prove the key exists before claiming we deleted it. */
+        HANDLE opened = (HANDLE)0;
+        const LSTATUS st = RegOpenKeyExW(hKey, lpSubKey, 0, 0, &opened);
+        if (st != ERROR_SUCCESS)
+            return st;
+        RegCloseKey(opened);
+        return RegDeleteKeyW(hKey, lpSubKey);
+    }
+
+    /* Empty hKey in place: drop each value, index 0 repeatedly —
+     * deleting one renumbers the rest, so an advancing index would
+     * skip every other entry. The cap bounds the loop if a delete
+     * ever stops making progress. */
+    vol_key* vk = vol_from_handle(hKey);
+    if (vk == (vol_key*)0)
+        return ERROR_SUCCESS; /* static tree — nothing to remove */
+    for (int guard = 0; guard < 256 && vk->value_count > 0; ++guard)
+    {
+        wchar_t16 name[64];
+        DWORD n = 0;
+        while (vk->values[0].name[n] != 0 && n < (DWORD)(sizeof(name) / sizeof(name[0])) - 1)
+        {
+            name[n] = (wchar_t16)(unsigned char)vk->values[0].name[n];
+            ++n;
+        }
+        name[n] = 0;
+        if (RegDeleteValueW(hKey, name) != ERROR_SUCCESS)
+            break;
+    }
+    return ERROR_SUCCESS;
+}
+
+// STUB: DuetOS has no registry change-notification channel, so there is no
+// way to ever signal hEvent or return from a blocking wait. Reporting
+// ERROR_INVALID_FUNCTION lets a caller fall back to polling; returning
+// success would strand it waiting on an event that never fires. The marker
+// stays until the registry grows a watch list.
+__declspec(dllexport) LSTATUS RegNotifyChangeKeyValue(HANDLE hKey, BOOL bWatchSubtree, DWORD dwNotifyFilter,
+                                                      HANDLE hEvent, BOOL fAsynchronous)
+{
+    (void)hKey;
+    (void)bWatchSubtree;
+    (void)dwNotifyFilter;
+    (void)hEvent;
+    (void)fAsynchronous;
+    return ERROR_INVALID_FUNCTION;
+}
+
+/* ------------------------------------------------------------------
  * Tokens / privileges — pretend success. GetUserName +
  * SystemFunction036 likewise.
  * ------------------------------------------------------------------ */
@@ -1162,6 +1393,23 @@ __declspec(dllexport) BOOL OpenProcessToken(HANDLE hProcess, DWORD access, HANDL
     if (token != (HANDLE*)0)
         *token = (HANDLE)0x1000;
     return 1;
+}
+
+/* OpenThreadToken — a thread only has a token of its own while it
+ * is impersonating. DuetOS never impersonates (RevertToSelf is the
+ * only state), so the correct answer is FALSE + ERROR_NO_TOKEN,
+ * which is exactly what a Windows thread that is not impersonating
+ * returns. Callers written against Win32 respond by falling back
+ * to OpenProcessToken, which is the path we want them on. */
+__declspec(dllexport) BOOL OpenThreadToken(HANDLE thread, DWORD access, BOOL open_as_self, HANDLE* token)
+{
+    (void)thread;
+    (void)access;
+    (void)open_as_self;
+    if (token != (HANDLE*)0)
+        *token = (HANDLE)0;
+    adv_set_last_error(ERROR_NO_TOKEN);
+    return 0;
 }
 
 __declspec(dllexport) BOOL AdjustTokenPrivileges(HANDLE token, BOOL disable_all, void* new_state, DWORD buf_len,
@@ -1433,13 +1681,55 @@ __declspec(dllexport) BOOL ConvertSidToStringSidW(void* sid, wchar_t16** str)
     return 0;
 }
 
+/* Defined with the well-known SID table at the end of this file. */
+static void sid_emit(unsigned char* buf, unsigned char authority, unsigned char count, const DWORD* subs);
+
+/* The one interactive account. DuetOS has a single user (see
+ * GetUserNameW) and no account database, so its SID is a fixed
+ * synthetic one rather than a per-install random machine SID.
+ * This is the ONLY spelling of it — GetTokenInformation hands it
+ * out and LookupAccountSidW resolves it, so they cannot drift. */
+static const DWORD k_local_user_subs[5] = {21, 1, 1, 1, 1000}; /* S-1-5-21-1-1-1-1000 */
+#define DUETOS_LOCAL_USER_SID_BYTES (8u + 4u * 5u)
+static const char k_local_domain[] = "DUETOS";
+static const char k_local_user[] = "user";
+
+#define TokenUser 1UL
+
 __declspec(dllexport) BOOL GetTokenInformation(HANDLE token, DWORD info_class, void* info, DWORD info_len, DWORD* used)
 {
     (void)token;
-    (void)info_class;
-    /* Zero-fill the supplied buffer and report it as the size used,
-     * so callers that just want a TokenUser-style "is the call OK"
-     * sentinel get a TRUE return without trapping. */
+
+    if (info_class == TokenUser)
+    {
+        /* TOKEN_USER is a SID_AND_ATTRIBUTES { PSID Sid; DWORD
+         * Attributes; } — 16 bytes on x64 — followed, by
+         * convention, by the SID itself in the same buffer, which
+         * is what the Sid pointer must point at. Callers such as
+         * whoami round-trip that pointer straight into
+         * LookupAccountSid / ConvertSidToStringSid, so it has to be
+         * a real SID, not a zero-filled hole. */
+        const DWORD need = 16u + DUETOS_LOCAL_USER_SID_BYTES;
+        if (used != (DWORD*)0)
+            *used = need;
+        if (info == (void*)0 || info_len < need)
+        {
+            adv_set_last_error(ERROR_INSUFFICIENT_BUFFER);
+            return 0;
+        }
+        unsigned char* b = (unsigned char*)info;
+        for (DWORD i = 0; i < need; ++i)
+            b[i] = 0;
+        sid_emit(b + 16, 5, 5, k_local_user_subs);
+        *(void**)(b + 0) = (void*)(b + 16); /* SID_AND_ATTRIBUTES.Sid */
+        *(DWORD*)(b + 8) = 0;               /* .Attributes */
+        return 1;
+    }
+
+    // STUB: every class other than TokenUser is answered with a zero-filled
+    // buffer. Groups, privileges, integrity level and elevation state are all
+    // kernel-owned in DuetOS and have no Win32-token projection, so a caller
+    // reading these fields reads zeroes, not this process's real authority.
     if (info != (void*)0)
     {
         unsigned char* b = (unsigned char*)info;
@@ -1684,4 +1974,589 @@ __declspec(dllexport) BOOL CryptGenRandom(unsigned long long h, DWORD len, unsig
 {
     (void)h;
     return SystemFunction036(buf, len);
+}
+
+/* ==================================================================
+ * Security descriptors, ACLs and account lookup
+ *
+ * READ THIS BEFORE EXTENDING THE BLOCK.
+ *
+ * Nothing below is an access-control decision, and none of it may
+ * ever become one. DuetOS authority is kernel-owned: a process's
+ * rights are its durable capabilities plus unexpired broker
+ * leases, masked by a monotonic grant ceiling, and every gate
+ * consumes that snapshot inside the kernel. A SECURITY_DESCRIPTOR
+ * built here is inert caller-owned memory — the kernel never reads
+ * it, so a PE cannot widen its own authority by writing a
+ * permissive DACL, and cannot narrow anyone else's by writing a
+ * restrictive one. That is why the permissive fallbacks below are
+ * safe: they are display and round-trip data, not a policy.
+ *
+ * The corollary is the rule: if a future slice makes the kernel
+ * consult one of these structures, these functions stop being
+ * facades and the parsing has to become real first.
+ * ================================================================== */
+
+/* ACE header + the fixed part of an ACCESS_ALLOWED_ACE, which is
+ * where GetAce indexes. */
+typedef struct
+{
+    unsigned char AceType;
+    unsigned char AceFlags;
+    unsigned short AceSize;
+} DUETOS_ACE_HEADER;
+
+/* SetSecurityDescriptorDacl / GetSecurityDescriptorDacl /
+ * SetSecurityDescriptorOwner — field accessors over the absolute
+ * SECURITY_DESCRIPTOR that InitializeSecurityDescriptor produces.
+ * The stores and loads are exact, including the SE_DACL_PRESENT /
+ * SE_OWNER_DEFAULTED control bits Win32 callers round-trip. */
+#define SE_OWNER_DEFAULTED 0x0001
+#define SE_DACL_PRESENT 0x0004
+#define SE_DACL_DEFAULTED 0x0008
+
+__declspec(dllexport) BOOL SetSecurityDescriptorDacl(DUETOS_SECURITY_DESCRIPTOR* sd, BOOL dacl_present, void* dacl,
+                                                     BOOL dacl_defaulted)
+{
+    if (!IsValidSecurityDescriptor(sd))
+    {
+        adv_set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    if (dacl_present)
+    {
+        sd->Control = (unsigned short)(sd->Control | SE_DACL_PRESENT);
+        sd->Dacl = dacl;
+    }
+    else
+    {
+        /* Win32 clears the pointer with the flag: "no DACL present"
+         * is not the same as "present but NULL". */
+        sd->Control = (unsigned short)(sd->Control & (unsigned short)~SE_DACL_PRESENT);
+        sd->Dacl = (void*)0;
+    }
+    if (dacl_defaulted)
+        sd->Control = (unsigned short)(sd->Control | SE_DACL_DEFAULTED);
+    else
+        sd->Control = (unsigned short)(sd->Control & (unsigned short)~SE_DACL_DEFAULTED);
+    return 1;
+}
+
+__declspec(dllexport) BOOL GetSecurityDescriptorDacl(DUETOS_SECURITY_DESCRIPTOR* sd, BOOL* dacl_present, void** dacl,
+                                                     BOOL* dacl_defaulted)
+{
+    if (!IsValidSecurityDescriptor(sd) || dacl_present == (BOOL*)0 || dacl == (void**)0 || dacl_defaulted == (BOOL*)0)
+    {
+        adv_set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    *dacl_present = (sd->Control & SE_DACL_PRESENT) ? 1 : 0;
+    *dacl = *dacl_present ? sd->Dacl : (void*)0;
+    *dacl_defaulted = (sd->Control & SE_DACL_DEFAULTED) ? 1 : 0;
+    return 1;
+}
+
+__declspec(dllexport) BOOL SetSecurityDescriptorOwner(DUETOS_SECURITY_DESCRIPTOR* sd, void* owner, BOOL owner_defaulted)
+{
+    if (!IsValidSecurityDescriptor(sd))
+    {
+        adv_set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    sd->Owner = owner;
+    if (owner_defaulted)
+        sd->Control = (unsigned short)(sd->Control | SE_OWNER_DEFAULTED);
+    else
+        sd->Control = (unsigned short)(sd->Control & (unsigned short)~SE_OWNER_DEFAULTED);
+    return 1;
+}
+
+/* GetAce — hand back a pointer to the index'th ACE. InitializeAcl
+ * produces an ACL with AceCount == 0, so every index is out of
+ * range and the ERROR_INVALID_PARAMETER return below is the
+ * correct, real answer for it. When an ACL does carry ACEs (one a
+ * caller built by hand), the walk is a genuine one: each ACE
+ * header carries its own size, so stepping AceSize bytes at a time
+ * is how Windows itself iterates. */
+__declspec(dllexport) BOOL GetAce(DUETOS_ACL* acl, DWORD ace_index, void** ace)
+{
+    if (acl == (DUETOS_ACL*)0 || ace == (void**)0 || acl->AclRevision == 0 || ace_index >= acl->AceCount)
+    {
+        adv_set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    unsigned char* p = (unsigned char*)acl + sizeof(DUETOS_ACL);
+    unsigned char* end = (unsigned char*)acl + acl->AclSize;
+    for (DWORD i = 0; i < ace_index; ++i)
+    {
+        if (p + sizeof(DUETOS_ACE_HEADER) > end)
+        {
+            adv_set_last_error(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        const unsigned short sz = ((DUETOS_ACE_HEADER*)p)->AceSize;
+        if (sz == 0 || p + sz > end)
+        {
+            adv_set_last_error(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        p += sz;
+    }
+    if (p + sizeof(DUETOS_ACE_HEADER) > end)
+    {
+        adv_set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    *ace = (void*)p;
+    return 1;
+}
+
+/* ------------------------------------------------------------------
+ * Well-known SIDs
+ *
+ * A well-known SID is a constant defined by the Win32 spec, not a
+ * fact about the machine, so this table is a real implementation:
+ * the bytes it emits are byte-for-byte the SIDs Windows emits. The
+ * WELL_KNOWN_SID_TYPE ordinals are the winnt.h enumeration values.
+ *
+ * IdentifierAuthority is 6 bytes big-endian; every entry here uses
+ * a single-byte value, so only the last byte is non-zero.
+ * ------------------------------------------------------------------ */
+typedef struct
+{
+    unsigned short type;     /* WELL_KNOWN_SID_TYPE ordinal */
+    unsigned char authority; /* low byte of IdentifierAuthority */
+    unsigned char sub_count; /* 0..2 for the entries we carry */
+    DWORD subs[2];
+    const char* account; /* canonical account name */
+    const char* domain;  /* canonical domain name */
+    DWORD use;           /* SID_NAME_USE */
+} DUETOS_WELL_KNOWN_SID;
+
+#define SidTypeUser 1UL
+#define SidTypeGroup 2UL
+#define SidTypeDomain 3UL
+#define SidTypeAlias 4UL
+#define SidTypeWellKnownGroup 5UL
+
+static const DUETOS_WELL_KNOWN_SID k_well_known_sids[] = {
+    {0, 0, 1, {0, 0}, "NULL SID", "", SidTypeWellKnownGroup},                          /* S-1-0-0 */
+    {1, 1, 1, {0, 0}, "Everyone", "", SidTypeWellKnownGroup},                          /* S-1-1-0 */
+    {2, 2, 1, {0, 0}, "LOCAL", "", SidTypeWellKnownGroup},                             /* S-1-2-0 */
+    {3, 3, 1, {0, 0}, "CREATOR OWNER", "", SidTypeWellKnownGroup},                     /* S-1-3-0 */
+    {4, 3, 1, {1, 0}, "CREATOR GROUP", "", SidTypeWellKnownGroup},                     /* S-1-3-1 */
+    {7, 5, 0, {0, 0}, "NT AUTHORITY", "", SidTypeDomain},                              /* S-1-5   */
+    {9, 5, 1, {2, 0}, "NETWORK", "NT AUTHORITY", SidTypeWellKnownGroup},               /* S-1-5-2 */
+    {10, 5, 1, {3, 0}, "BATCH", "NT AUTHORITY", SidTypeWellKnownGroup},                /* S-1-5-3 */
+    {11, 5, 1, {4, 0}, "INTERACTIVE", "NT AUTHORITY", SidTypeWellKnownGroup},          /* S-1-5-4 */
+    {12, 5, 1, {6, 0}, "SERVICE", "NT AUTHORITY", SidTypeWellKnownGroup},              /* S-1-5-6 */
+    {13, 5, 1, {7, 0}, "ANONYMOUS LOGON", "NT AUTHORITY", SidTypeWellKnownGroup},      /* S-1-5-7 */
+    {16, 5, 1, {10, 0}, "SELF", "NT AUTHORITY", SidTypeWellKnownGroup},                /* S-1-5-10 */
+    {17, 5, 1, {11, 0}, "Authenticated Users", "NT AUTHORITY", SidTypeWellKnownGroup}, /* S-1-5-11 */
+    {18, 5, 1, {12, 0}, "RESTRICTED", "NT AUTHORITY", SidTypeWellKnownGroup},          /* S-1-5-12 */
+    {22, 5, 1, {18, 0}, "SYSTEM", "NT AUTHORITY", SidTypeWellKnownGroup},              /* S-1-5-18 */
+    {23, 5, 1, {19, 0}, "LOCAL SERVICE", "NT AUTHORITY", SidTypeWellKnownGroup},       /* S-1-5-19 */
+    {24, 5, 1, {20, 0}, "NETWORK SERVICE", "NT AUTHORITY", SidTypeWellKnownGroup},     /* S-1-5-20 */
+    {26, 5, 2, {32, 544}, "Administrators", "BUILTIN", SidTypeAlias},                  /* S-1-5-32-544 */
+    {27, 5, 2, {32, 545}, "Users", "BUILTIN", SidTypeAlias},                           /* S-1-5-32-545 */
+    {28, 5, 2, {32, 546}, "Guests", "BUILTIN", SidTypeAlias},                          /* S-1-5-32-546 */
+};
+
+#define DUETOS_WELL_KNOWN_SID_COUNT ((DWORD)(sizeof(k_well_known_sids) / sizeof(k_well_known_sids[0])))
+
+/* Write a SID with the given authority + sub-authorities into
+ * `buf`, which must have room for 8 + 4*count bytes. */
+static void sid_emit(unsigned char* buf, unsigned char authority, unsigned char count, const DWORD* subs)
+{
+    buf[0] = 1; /* SID_REVISION */
+    buf[1] = count;
+    buf[2] = 0;
+    buf[3] = 0;
+    buf[4] = 0;
+    buf[5] = 0;
+    buf[6] = 0;
+    buf[7] = authority; /* 6-byte big-endian authority, low byte last */
+    for (unsigned char i = 0; i < count; ++i)
+    {
+        buf[8 + i * 4 + 0] = (unsigned char)((subs[i] >> 0) & 0xFF);
+        buf[8 + i * 4 + 1] = (unsigned char)((subs[i] >> 8) & 0xFF);
+        buf[8 + i * 4 + 2] = (unsigned char)((subs[i] >> 16) & 0xFF);
+        buf[8 + i * 4 + 3] = (unsigned char)((subs[i] >> 24) & 0xFF);
+    }
+}
+
+static int sid_bytes_equal(const unsigned char* a, const unsigned char* b, DWORD n)
+{
+    for (DWORD i = 0; i < n; ++i)
+    {
+        if (a[i] != b[i])
+            return 0;
+    }
+    return 1;
+}
+
+/* CreateWellKnownSid — emit the constant SID for `type`.
+ *
+ * pDomainSid is only consulted for the domain-relative types
+ * (WinAccountAdministratorSid and above), which DuetOS has no
+ * domain to build; those are refused rather than answered wrong. */
+// GAP: only the machine-independent well-known types are carried; the
+// domain-relative ones (WELL_KNOWN_SID_TYPE >= WinAccountAdministratorSid)
+// fail with ERROR_INVALID_PARAMETER because DuetOS is not domain-joined.
+__declspec(dllexport) BOOL CreateWellKnownSid(DWORD WellKnownSidType, void* pDomainSid, void* pSid, DWORD* cbSid)
+{
+    (void)pDomainSid;
+    if (cbSid == (DWORD*)0)
+    {
+        adv_set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    for (DWORD i = 0; i < DUETOS_WELL_KNOWN_SID_COUNT; ++i)
+    {
+        if (k_well_known_sids[i].type != (unsigned short)WellKnownSidType)
+            continue;
+        const DWORD need = 8u + 4u * (DWORD)k_well_known_sids[i].sub_count;
+        const DWORD cap = *cbSid;
+        *cbSid = need;
+        if (pSid == (void*)0 || cap < need)
+        {
+            adv_set_last_error(ERROR_INSUFFICIENT_BUFFER);
+            return 0;
+        }
+        sid_emit((unsigned char*)pSid, k_well_known_sids[i].authority, k_well_known_sids[i].sub_count,
+                 k_well_known_sids[i].subs);
+        return 1;
+    }
+    adv_set_last_error(ERROR_INVALID_PARAMETER);
+    return 0;
+}
+
+/* Copy an ASCII literal into a caller's wide buffer using the
+ * Win32 lookup convention: *cch is in/out, and a short buffer
+ * fails with ERROR_INSUFFICIENT_BUFFER after reporting the size
+ * needed INCLUDING the terminator. */
+static BOOL lookup_emit_w(const char* src, wchar_t16* dst, DWORD* cch)
+{
+    DWORD len = 0;
+    while (src[len] != 0)
+        ++len;
+    if (cch == (DWORD*)0)
+    {
+        adv_set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const DWORD cap = *cch;
+    *cch = len + 1;
+    if (dst == (wchar_t16*)0 || cap < len + 1)
+    {
+        adv_set_last_error(ERROR_INSUFFICIENT_BUFFER);
+        return 0;
+    }
+    for (DWORD i = 0; i < len; ++i)
+        dst[i] = (wchar_t16)(unsigned char)src[i];
+    dst[len] = 0;
+    *cch = len;
+    return 1;
+}
+
+static int lookup_name_matches(const wchar_t16* w, const char* a)
+{
+    DWORD i = 0;
+    for (; a[i] != 0; ++i)
+    {
+        wchar_t16 lw = w[i];
+        char la = a[i];
+        if (lw >= 'A' && lw <= 'Z')
+            lw = (wchar_t16)(lw + ('a' - 'A'));
+        if (la >= 'A' && la <= 'Z')
+            la = (char)(la + ('a' - 'A'));
+        if (lw != (wchar_t16)(unsigned char)la)
+            return 0;
+    }
+    return w[i] == 0;
+}
+
+/* LookupAccountSidW — SID to (account, domain, use).
+ *
+ * Resolves the local user's SID and every entry in the well-known
+ * table; anything else is ERROR_NONE_MAPPED, which is the correct
+ * Win32 answer for a SID this machine does not know. */
+// GAP: the account database is the single local user plus the well-known
+// table — there is no directory to search, so a SID from another machine
+// maps to nothing.
+__declspec(dllexport) BOOL LookupAccountSidW(const wchar_t16* lpSystemName, void* Sid, wchar_t16* Name, DWORD* cchName,
+                                             wchar_t16* ReferencedDomainName, DWORD* cchReferencedDomainName,
+                                             DWORD* peUse)
+{
+    (void)lpSystemName;
+    if (Sid == (void*)0 || !IsValidSid(Sid))
+    {
+        adv_set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    const unsigned char* s = (const unsigned char*)Sid;
+    const DWORD sid_len = GetLengthSid(Sid);
+
+    const char* account = (const char*)0;
+    const char* domain = (const char*)0;
+    DWORD use = SidTypeUser;
+
+    /* The local user first — it is the SID callers actually hold. */
+    unsigned char local[DUETOS_LOCAL_USER_SID_BYTES];
+    sid_emit(local, 5, 5, k_local_user_subs);
+    if (sid_len == sizeof(local) && sid_bytes_equal(s, local, sizeof(local)))
+    {
+        account = k_local_user;
+        domain = k_local_domain;
+        use = SidTypeUser;
+    }
+    else
+    {
+        unsigned char wk[8 + 4 * 2];
+        for (DWORD i = 0; i < DUETOS_WELL_KNOWN_SID_COUNT; ++i)
+        {
+            const DWORD n = 8u + 4u * (DWORD)k_well_known_sids[i].sub_count;
+            if (sid_len != n)
+                continue;
+            sid_emit(wk, k_well_known_sids[i].authority, k_well_known_sids[i].sub_count, k_well_known_sids[i].subs);
+            if (!sid_bytes_equal(s, wk, n))
+                continue;
+            account = k_well_known_sids[i].account;
+            domain = k_well_known_sids[i].domain;
+            use = k_well_known_sids[i].use;
+            break;
+        }
+    }
+
+    if (account == (const char*)0)
+    {
+        adv_set_last_error(ERROR_NONE_MAPPED);
+        return 0;
+    }
+    if (peUse != (DWORD*)0)
+        *peUse = use;
+    /* Both out-params are sized before either is written, so a
+     * caller probing with two NULL buffers learns both sizes. */
+    const BOOL name_ok = lookup_emit_w(account, Name, cchName);
+    const BOOL domain_ok = lookup_emit_w(domain, ReferencedDomainName, cchReferencedDomainName);
+    return (name_ok && domain_ok) ? 1 : 0;
+}
+
+/* LookupAccountNameW — the inverse mapping. */
+// GAP: same single-user account database as LookupAccountSidW.
+__declspec(dllexport) BOOL LookupAccountNameW(const wchar_t16* lpSystemName, const wchar_t16* lpAccountName, void* Sid,
+                                              DWORD* cbSid, wchar_t16* ReferencedDomainName,
+                                              DWORD* cchReferencedDomainName, DWORD* peUse)
+{
+    (void)lpSystemName;
+    if (lpAccountName == (const wchar_t16*)0 || cbSid == (DWORD*)0)
+    {
+        adv_set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    unsigned char authority;
+    unsigned char count;
+    const DWORD* subs;
+    const char* domain;
+    DWORD use;
+
+    if (lookup_name_matches(lpAccountName, k_local_user))
+    {
+        authority = 5;
+        count = 5;
+        subs = k_local_user_subs;
+        domain = k_local_domain;
+        use = SidTypeUser;
+    }
+    else
+    {
+        DWORD hit = DUETOS_WELL_KNOWN_SID_COUNT;
+        for (DWORD i = 0; i < DUETOS_WELL_KNOWN_SID_COUNT; ++i)
+        {
+            if (lookup_name_matches(lpAccountName, k_well_known_sids[i].account))
+            {
+                hit = i;
+                break;
+            }
+        }
+        if (hit == DUETOS_WELL_KNOWN_SID_COUNT)
+        {
+            adv_set_last_error(ERROR_NONE_MAPPED);
+            return 0;
+        }
+        authority = k_well_known_sids[hit].authority;
+        count = k_well_known_sids[hit].sub_count;
+        subs = k_well_known_sids[hit].subs;
+        domain = k_well_known_sids[hit].domain;
+        use = k_well_known_sids[hit].use;
+    }
+
+    const DWORD need = 8u + 4u * (DWORD)count;
+    const DWORD cap = *cbSid;
+    *cbSid = need;
+    if (Sid == (void*)0 || cap < need)
+    {
+        adv_set_last_error(ERROR_INSUFFICIENT_BUFFER);
+        return 0;
+    }
+    sid_emit((unsigned char*)Sid, authority, count, subs);
+    if (peUse != (DWORD*)0)
+        *peUse = use;
+    return lookup_emit_w(domain, ReferencedDomainName, cchReferencedDomainName);
+}
+
+// STUB: the SDDL string is not parsed. The descriptor handed back is a
+// valid, initialised SECURITY_DESCRIPTOR with no DACL, which every caller
+// can round-trip through Get/SetSecurityDescriptor* and free, but it does
+// NOT express what the caller asked for. This cannot widen anyone's
+// authority (see the block header: DuetOS gates on kernel capabilities and
+// never reads a descriptor), yet a caller that believes it built a
+// restrictive DACL is wrong. The marker stays until an SDDL parser lands.
+__declspec(dllexport) BOOL
+ConvertStringSecurityDescriptorToSecurityDescriptorW(const wchar_t16* StringSecurityDescriptor, DWORD StringSDRevision,
+                                                     void** SecurityDescriptor, DWORD* SecurityDescriptorSize)
+{
+    if (StringSecurityDescriptor == (const wchar_t16*)0 || SecurityDescriptor == (void**)0 || StringSDRevision != 1)
+    {
+        adv_set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)11), /* SYS_HEAP_ALLOC */
+                       "D"((long long)sizeof(DUETOS_SECURITY_DESCRIPTOR))
+                     : "memory");
+    if (rv == 0)
+    {
+        *SecurityDescriptor = (void*)0;
+        adv_set_last_error(ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    InitializeSecurityDescriptor((DUETOS_SECURITY_DESCRIPTOR*)rv, 1);
+    *SecurityDescriptor = (void*)rv;
+    if (SecurityDescriptorSize != (DWORD*)0)
+        *SecurityDescriptorSize = (DWORD)sizeof(DUETOS_SECURITY_DESCRIPTOR);
+    return 1;
+}
+
+// STUB: the EXPLICIT_ACCESS array is not encoded into an ACL. Returning
+// ERROR_NOT_SUPPORTED and a NULL ACL is the loud answer — a caller that
+// checks the return value learns its ACL was not built, instead of
+// attaching an empty ACL it believes carries its entries. The marker stays
+// until ACE construction lands alongside a consumer that reads ACEs.
+__declspec(dllexport) DWORD SetEntriesInAclW(DWORD cCountOfExplicitEntries, void* pListOfExplicitEntries, void* OldAcl,
+                                             void** NewAcl)
+{
+    (void)cCountOfExplicitEntries;
+    (void)pListOfExplicitEntries;
+    (void)OldAcl;
+    if (NewAcl != (void**)0)
+        *NewAcl = (void*)0;
+    return ERROR_NOT_SUPPORTED;
+}
+
+/* ==================================================================
+ * ETW / WMI trace provider surface
+ *
+ * DuetOS has no event-tracing session infrastructure, and on
+ * Windows that is a state these APIs are specified for: a provider
+ * registers, asks whether anyone is listening, is told "enable
+ * level 0", and emits nothing. Every function below implements
+ * that state honestly rather than failing — a provider that gets
+ * ERROR_SUCCESS + level 0 takes exactly the code path it takes on
+ * a Windows box with no trace session running.
+ *
+ * The one thing that must never happen here is claiming a session
+ * IS enabled, which would send providers down their emit path to
+ * a logger handle that cannot accept events.
+ * ================================================================== */
+
+// GAP: no ETW session infrastructure exists, so a provider registered here
+// can never be enabled by an external controller and its events are never
+// recorded. Revisit if DuetOS grows a trace session manager.
+__declspec(dllexport) DWORD RegisterTraceGuidsW(void* RequestAddress, void* RequestContext, const void* ControlGuid,
+                                                DWORD GuidCount, void* TraceGuidReg, const wchar_t16* MofImagePath,
+                                                const wchar_t16* MofResourceName,
+                                                unsigned long long* RegistrationHandle)
+{
+    (void)RequestAddress;
+    (void)RequestContext;
+    (void)ControlGuid;
+    (void)MofImagePath;
+    (void)MofResourceName;
+    /* TRACE_GUID_REGISTRATION is { LPCGUID Guid; TRACEHANDLE RegHandle; }
+     * = 16 bytes on x64. Zero each RegHandle: "registered, not
+     * enabled" is what the caller must observe. */
+    if (TraceGuidReg != (void*)0)
+    {
+        unsigned char* p = (unsigned char*)TraceGuidReg;
+        for (DWORD i = 0; i < GuidCount; ++i)
+            *(unsigned long long*)(p + i * 16 + 8) = 0ULL;
+    }
+    if (RegistrationHandle != (unsigned long long*)0)
+        *RegistrationHandle = 0ULL;
+    return ERROR_SUCCESS;
+}
+
+__declspec(dllexport) DWORD UnregisterTraceGuids(unsigned long long RegistrationHandle)
+{
+    (void)RegistrationHandle;
+    return ERROR_SUCCESS;
+}
+
+/* GetTraceEnableLevel / GetTraceEnableFlags — 0 is the documented
+ * "no controller has enabled this provider" answer, and it is the
+ * truth here. Providers gate their emit path on it. */
+__declspec(dllexport) unsigned char GetTraceEnableLevel(unsigned long long TraceHandle)
+{
+    (void)TraceHandle;
+    return 0;
+}
+
+__declspec(dllexport) DWORD GetTraceEnableFlags(unsigned long long TraceHandle)
+{
+    (void)TraceHandle;
+    return 0;
+}
+
+/* GetTraceLoggerHandle — extracts the logger handle from a
+ * WNODE_HEADER handed to the provider's enable callback. That
+ * callback never fires here, so any buffer a caller passes cannot
+ * be one we produced; Win32 specifies INVALID_HANDLE_VALUE plus a
+ * last-error for that failure. */
+__declspec(dllexport) unsigned long long GetTraceLoggerHandle(void* Buffer)
+{
+    (void)Buffer;
+    adv_set_last_error(ERROR_INVALID_PARAMETER);
+    return (unsigned long long)-1LL; /* INVALID_HANDLE_VALUE */
+}
+
+/* TraceMessage — with no enabled session there is nothing to write,
+ * and ERROR_SUCCESS is what Windows returns when a provider emits
+ * to a logger nobody is consuming. The variadic argument list is
+ * intentionally never walked. */
+__declspec(dllexport) DWORD TraceMessage(unsigned long long LoggerHandle, DWORD MessageFlags, const void* MessageGuid,
+                                         unsigned short MessageNumber, ...)
+{
+    (void)LoggerHandle;
+    (void)MessageFlags;
+    (void)MessageGuid;
+    (void)MessageNumber;
+    return ERROR_SUCCESS;
+}
+
+/* EventSetInformation — sets provider traits on a registration
+ * handle. Accepting the call is correct for an unenabled provider;
+ * there is no enabled session whose behaviour the traits could
+ * change. */
+__declspec(dllexport) DWORD EventSetInformation(unsigned long long RegHandle, int InformationClass,
+                                                void* EventInformation, DWORD InformationLength)
+{
+    (void)RegHandle;
+    (void)InformationClass;
+    (void)EventInformation;
+    (void)InformationLength;
+    return ERROR_SUCCESS;
 }
