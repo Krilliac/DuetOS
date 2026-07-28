@@ -248,7 +248,11 @@ def _load_shell_commands(repo_root: Path) -> list[tuple[str, str]]:
     for cpp in sorted(sh_dir.glob("*.cpp")):
         text = cpp.read_text(encoding="utf-8")
         for m in cmd_re.finditer(text):
-            out.append((m.group(1), str(cpp.relative_to(repo_root))))
+            # as_posix(), not str(): the path is written INTO the wiki, and
+            # str() yields `kernel\shell\foo.cpp` on Windows. A generator
+            # whose output depends on the host OS makes every cross-platform
+            # run show spurious drift and corrupts the committed page.
+            out.append((m.group(1), cpp.relative_to(repo_root).as_posix()))
     return out
 
 
@@ -373,7 +377,11 @@ def main() -> int:
             print(f"# DRIFT: {rel} ({blocks} block(s) would change)", file=sys.stderr)
             drift += 1
             continue
-        path.write_text(new_text, encoding="utf-8")
+        # newline="\n" pins LF. Python's default translates "\n" to the
+        # platform separator on write, so a Windows run rewrote every
+        # generated block with CRLF — the repo is LF-only (.gitattributes),
+        # so that shows up as whole-block churn in the diff.
+        path.write_text(new_text, encoding="utf-8", newline="\n")
         print(f"# wrote: {rel} ({blocks} block(s) regenerated)", file=sys.stderr)
         rewritten += 1
 

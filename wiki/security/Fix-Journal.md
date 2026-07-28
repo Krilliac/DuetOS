@@ -41,6 +41,8 @@ Source: `kernel/diag/fix_journal.h` — the on-disk record format. These values 
 | 8 | `TrapCapture` | Hard kernel-mode CPU exception about to |
 | 9 | `UserFault` | Ring-3 CPU exception (the user task is being |
 | 10 | `KassertFail` | `core::Panic` / KASSERT site reached. The |
+| 11 | `AutonomicProposal` | Emitted by the env autonomic neural |
+| 12 | `InferredGap` | A RECOGNIZED syscall whose handler returned the |
 <!-- AUTO:journal-detectors END -->
 
 **Source pin shape per detector** (handwritten — the on-disk format
