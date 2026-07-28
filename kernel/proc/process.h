@@ -701,6 +701,14 @@ struct Process
         // Stored as i8 because the registry has 16 slots; a wider
         // table needs only a typedef bump.
         i8 named_pipe_registry_slot;
+        // Identity stamp for the registration named by
+        // `named_pipe_registry_slot`. NamedPipeRegisterServer bumps
+        // a slot's generation on every claim, so a copy of the pair
+        // that outlived its registration fails the identity check in
+        // NamedPipeOnServerClose instead of tearing down whatever
+        // registration recycled the slot index. Meaningless (0) when
+        // named_pipe_registry_slot < 0.
+        u32 named_pipe_registry_gen;
     };
     static constexpr u64 kWin32HandleCap = 16;
     static constexpr u64 kWin32HandleBase = 0x100;

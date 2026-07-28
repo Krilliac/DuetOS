@@ -37,7 +37,7 @@
  * Lifetime: the registry entry maps name → pool_idx. The pipe
  * pool's read_refs / write_refs track end lifetime. When the
  * server-side handle closes, the kernel calls
- * NamedPipeOnServerClose(pool_idx) which:
+ * NamedPipeOnServerClose(slot, generation) which:
  *   - releases the registry's reservation for the opposite end
  *     if no client ever connected (avoids leaking the pool slot)
  *   - clears the registry entry so future clients can't find it
@@ -55,9 +55,15 @@ constexpr u32 kNamedPipeMaxNameLen = 64;
 /// server_is_writer) tuple. Caller has already allocated the
 /// pipe pool slot.
 ///
+/// Writes the claimed slot's generation to `*out_generation` on
+/// success; the caller must keep it alongside the slot index and
+/// hand both back to NamedPipeOnServerClose. `out_generation` is
+/// mandatory — a null pointer is refused, because a caller with no
+/// generation cannot close its registration safely.
+///
 /// Returns the registry slot index (>= 0) on success, -1 if the
 /// table is full or the name is already registered.
-i32 NamedPipeRegisterServer(const char* name, u32 pool_idx, bool server_is_writer);
+i32 NamedPipeRegisterServer(const char* name, u32 pool_idx, bool server_is_writer, u32* out_generation);
 
 /// Client side of CreateFile against `\\.\pipe\NAME`. Looks up an
 /// existing registration. If found, marks the client as connected
@@ -81,9 +87,16 @@ bool NamedPipeUnconnectClient(const char* name);
 /// Drops the unused opposite-end reservation if no client connected,
 /// and clears the registry entry so future clients can't find it.
 ///
-/// Safe to call with `slot >= kNamedPipeSlots` or with a slot that
-/// no longer matches any registration — no-op in those cases.
-void NamedPipeOnServerClose(i32 slot);
+/// `generation` is the value NamedPipeRegisterServer handed back for
+/// THIS registration; the call is a no-op unless the slot still
+/// holds it. That identity check is what makes a stale pair safe:
+/// a bare slot index is NOT safe on its own, because FindFreeSlot
+/// hands out the lowest free index and an unrelated CreateNamedPipe
+/// recycles a torn-down slot immediately.
+///
+/// No-op when `slot >= kNamedPipeSlots`, when the slot is free, or
+/// when the slot's generation has moved on.
+void NamedPipeOnServerClose(i32 slot, u32 generation);
 
 /// Boot-time self-test — register / lookup / lifecycle drift checks.
 void NamedPipeSelfTest();

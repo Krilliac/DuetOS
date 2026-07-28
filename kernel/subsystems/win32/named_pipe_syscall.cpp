@@ -38,7 +38,8 @@ u64 FindFreeFileSlot(::duetos::core::Process* proc)
     return Process::kWin32HandleCap;
 }
 
-void StampPipeHandle(::duetos::core::Process::Win32FileHandle& h, u32 pool_idx, bool is_write_end, i8 registry_slot)
+void StampPipeHandle(::duetos::core::Process::Win32FileHandle& h, u32 pool_idx, bool is_write_end, i8 registry_slot,
+                     u32 registry_gen)
 {
     using ::duetos::core::Process;
     h.kind = Process::FsBackingKind::Pipe;
@@ -53,6 +54,7 @@ void StampPipeHandle(::duetos::core::Process::Win32FileHandle& h, u32 pool_idx, 
     h.pipe_pool_idx = pool_idx;
     h.pipe_is_write_end = is_write_end;
     h.named_pipe_registry_slot = registry_slot;
+    h.named_pipe_registry_gen = registry_gen;
 }
 
 bool CopyUserName(::duetos::core::Process* proc, const void* user_src, u64 cap_in, char* dst, u64 dst_cap)
@@ -123,7 +125,9 @@ void DoNamedPipeCreate(arch::TrapFrame* frame)
 
     // Register the name. On collision (name already in use), free
     // both pool refs and bail out.
-    const i32 registry_slot = NamedPipeRegisterServer(name, static_cast<u32>(pool_idx), server_is_writer);
+    u32 registry_gen = 0;
+    const i32 registry_slot =
+        NamedPipeRegisterServer(name, static_cast<u32>(pool_idx), server_is_writer, &registry_gen);
     if (registry_slot < 0)
     {
         ::duetos::subsystems::linux::internal::PipeReleaseRead(static_cast<u32>(pool_idx));
@@ -139,7 +143,7 @@ void DoNamedPipeCreate(arch::TrapFrame* frame)
     // closes before a client connects, NamedPipeOnServerClose
     // drops this orphan ref.
     StampPipeHandle(proc->win32_handles[file_slot], static_cast<u32>(pool_idx),
-                    /*is_write_end=*/server_is_writer, static_cast<i8>(registry_slot));
+                    /*is_write_end=*/server_is_writer, static_cast<i8>(registry_slot), registry_gen);
 
     frame->rax = Process::kWin32HandleBase + file_slot;
 }
@@ -201,7 +205,7 @@ void DoNamedPipeOpen(arch::TrapFrame* frame)
     // it's an ordinary pipe-pool end (slot = -1).
     StampPipeHandle(proc->win32_handles[file_slot], pool_idx,
                     /*is_write_end=*/client_is_writer,
-                    /*registry_slot=*/-1);
+                    /*registry_slot=*/-1, /*registry_gen=*/0);
 
     frame->rax = Process::kWin32HandleBase + file_slot;
 }

@@ -909,7 +909,7 @@ u64 CloseForProcess(::duetos::core::Process* proc, u64 handle)
         // ever connected) before the slot is reused. Client
         // ends and anonymous pipes keep slot == -1 and skip.
         if (h.named_pipe_registry_slot >= 0)
-            ::duetos::ipc::NamedPipeOnServerClose(h.named_pipe_registry_slot);
+            ::duetos::ipc::NamedPipeOnServerClose(h.named_pipe_registry_slot, h.named_pipe_registry_gen);
     }
     h.kind = Process::FsBackingKind::None;
     h.ramfs_node = nullptr;
@@ -918,6 +918,7 @@ u64 CloseForProcess(::duetos::core::Process* proc, u64 handle)
     h.pipe_pool_idx = 0;
     h.pipe_is_write_end = false;
     h.named_pipe_registry_slot = -1;
+    h.named_pipe_registry_gen = 0;
     (void)CopyPathInto(h.fat32_path, nullptr);
     return 0;
 }
