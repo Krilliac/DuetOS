@@ -378,6 +378,12 @@ Process* LookupProcessHandle(Process* caller, u64 handle)
 // Win32 NTSTATUS values used by the cross-process VM family.
 // Matches winnt.h conventions for the few statuses we surface.
 constexpr u64 kStatusSuccess = 0;
+// STATUS_PENDING — request accepted, completion deferred. Still
+// SUCCESS-class (< 0x80000000), so NT_SUCCESS() callers behave as
+// before, but a caller comparing against STATUS_SUCCESS can tell the
+// difference. Used by NtTerminateThread when the kernel could only
+// MARK a blocked thread rather than terminate it.
+constexpr u64 kStatusPending = 0x00000103ULL;
 constexpr u64 kStatusAccessViolation = 0xC0000005ULL;
 constexpr u64 kStatusInvalidHandle = 0xC0000008ULL;
 constexpr u64 kStatusInvalidParameter = 0xC000000DULL;
@@ -1333,9 +1339,27 @@ void SyscallDispatch(arch::TrapFrame* frame)
             return;
         }
         const sched::KillResult r = sched::SchedKillByPid(target_tid);
-        if (r == sched::KillResult::Signaled || r == sched::KillResult::Blocked)
+        if (r == sched::KillResult::Signaled)
         {
             frame->rax = kStatusSuccess;
+            return;
+        }
+        if (r == sched::KillResult::Blocked)
+        {
+            // The kernel could only MARK this thread. It sits on a
+            // WaitQueue and SchedKillByPid has no safe cross-queue
+            // detach primitive (see its comment), so it dies on its
+            // next wake — which, for an UNTIMED wait whose producer
+            // never fires, may be never.
+            //
+            // Reporting STATUS_SUCCESS here discarded that distinction
+            // and told the caller a thread was terminated when it was
+            // still running. STATUS_PENDING is the honest answer and
+            // the idiomatic NT one for "accepted, completion deferred";
+            // it stays SUCCESS-class, so NT_SUCCESS() callers are
+            // unaffected while an exact STATUS_SUCCESS check can now
+            // observe the truth.
+            frame->rax = kStatusPending;
             return;
         }
         if (r == sched::KillResult::AlreadyDead)

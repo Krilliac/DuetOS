@@ -263,6 +263,41 @@ cleanup debt: move the residual up and delete the rest.
   lock-free invariant.
 
 
+### Cancelling an untimed-blocked thread — needs a WaitQueue detach primitive
+
+- **Finding (sweep C4):** `SchedKillByPid` cannot terminate a thread that
+  is Blocked. It sets `kill_requested` and returns
+  `KillResult::Blocked`, relying on the task's normal producer to wake
+  it so it can take the kill path. For a thread on an UNTIMED wait whose
+  producer never fires, that wake never comes and the thread is
+  effectively unkillable — and `SchedKillByProcess` inherits the problem,
+  which is why its sweep is now pass-bounded rather than
+  loop-until-empty (a naive retry would spin forever on exactly this).
+- **The kernel is already honest about it.** `SchedKillByPid`'s own
+  comment states the constraint: "Blocked tasks sit on a WaitQueue
+  threaded via `next`. We don't have a safe cross-queue detach primitive
+  in v0 — the producer that owns the WaitQueue might be mid-enqueue."
+  That is a real hazard, not laziness: detaching a task from a queue
+  another CPU may be mid-enqueue on corrupts the list.
+- **Fixed already — the half that was lying.** `NtTerminateThread`
+  mapped `KillResult::Blocked` to `STATUS_SUCCESS`, so a Win32 caller was
+  told a thread had been terminated while it was still running. It now
+  returns `STATUS_PENDING`, which is SUCCESS-class (so `NT_SUCCESS()`
+  callers are unchanged) but distinguishable by an exact comparison.
+  `SchedKillByProcess` likewise now WARNs with a live-task count instead
+  of returning a plausible number in silence.
+- **What a real fix needs:** a safe detach — either a per-WaitQueue lock
+  held across both enqueue and detach, or an epoch/tombstone scheme
+  where the killer marks the entry and the owning producer drops it on
+  its next pass. The first is the same scheduler-ABI addition that
+  `WaitQueueBlockLocked(wq, lock)` needs (see the AddressSpace
+  regions_lock and PS/2 ring entries); doing them together is likely
+  cheaper than either alone.
+- **Blocks on:** that primitive. Deliberately not attempted piecemeal —
+  a detach that races an in-flight enqueue trades an unkillable thread
+  for a corrupted wait queue.
+
+
 ### Real KASAN
 
 - **Residual:** shadow-memory mapping, compiler-plugin
