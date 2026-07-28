@@ -103,6 +103,15 @@ add_test(
             --root "${CMAKE_SOURCE_DIR}/../.."
 )
 
+# The VMM's own vmm-tests target only builds on a WHP-capable
+# Windows host; this models the same GDB packet length rules in
+# Python so the untrusted-socket contract is checked everywhere.
+add_test(
+    NAME vmm_gdb_packet_vectors
+    COMMAND Python3::Interpreter
+            "${CMAKE_SOURCE_DIR}/../../tools/test/vmm-gdb-packet-vectors.py"
+)
+
 add_test(
     NAME kernel32_32_exports_complete
     COMMAND Python3::Interpreter

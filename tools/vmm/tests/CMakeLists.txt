@@ -1,5 +1,6 @@
 # Host unit tests for VMM logic units that do not create a live WHP
-# partition (mb2 builder, processor contract, ps2 encode, vmm_control).
+# partition (mb2 builder, processor contract, ps2 encode, vmm_control,
+# ELF/symbol/record parsers, gdb packet decode).
 # Sources are added incrementally as tasks land them.
 add_executable(vmm-tests
     test_main.cpp
@@ -14,6 +15,7 @@ add_executable(vmm-tests
     test_elf64_parse.cpp
     test_elf_symbols_load.cpp
     test_record.cpp
+    test_gdb_packet.cpp
     ../src/multiboot2.cpp
     ../src/guest_memory_fb.cpp
     ../src/input/ps2_encode.cpp
@@ -23,6 +25,7 @@ add_executable(vmm-tests
     ../src/processor_contract.cpp
     ../src/debug/elf_symbols.cpp
     ../src/debug/record.cpp
+    ../src/debug/gdb_packet.cpp
     ../src/debug/vmm_dbg.cpp
 )
 target_include_directories(vmm-tests PRIVATE

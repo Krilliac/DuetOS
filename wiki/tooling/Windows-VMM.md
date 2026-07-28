@@ -71,7 +71,7 @@ Source map (all under `tools/vmm/src/`): `whp.*` (partition/vCPU
 RAII), `processor_contract.*` (guest-visible CPUID contract),
 `guest_memory.*`, `elf64.*`, `multiboot2.*`, `acpi.*`,
 `mmio_emulator.*`, `devices/{serial16550,pit8254,ioapic,ps2_i8042}.*`,
-`debug/{gdb_server,elf_symbols,exit_trace,introspect,record,
+`debug/{gdb_server,gdb_packet,elf_symbols,exit_trace,introspect,record,
 vmm_dbg,guest_view,host_stop}.*`, `vmm.*`, `main.cpp`. Visualisers in
 `tools/vmm/vmm.natvis`.
 
@@ -207,10 +207,14 @@ Path-specific verification still TBD:
   the natvis decorates POD types only. For source-level kernel struct
   inspection, use Path A (GDB stub) which DOES have full DWARF — see
   [VMM-Debugging.md](VMM-Debugging.md).
-- **GDB stub:** no hardware watchpoints; guest-originated `int3` (kernel
-  `KBP` probes) surface to the client while attached — run kernel
-  probes disarmed under gdb, or use the bridge's `Claim()` to detour
-  them into `HandleHostStop` instead.
+- **GDB stub:** no hardware watchpoints; guest-originated `int3`
+  (kernel `KBP` probes) surface to the client while attached — run
+  kernel probes disarmed under gdb, or use the bridge's `Claim()` to
+  detour them into `HandleHostStop` instead. (Async `^C` / Pause is
+  implemented — `GdbServer::IrqWatcherLoop`; this entry used to claim
+  it wasn't.) The stub's socket is untrusted input, so malformed
+  packets are rejected with `E22` by the length-checked decoders in
+  `debug/gdb_packet.{h,cpp}` rather than parsed.
 - **Bilateral mirror drift guard deferred.** Slice 2's plan called
   for kernel-side `sizeof_report.h` + `static_assert` + a
   `KernelTaskMirror` POD in the VMM, both verifying layout against

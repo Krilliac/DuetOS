@@ -18,6 +18,13 @@
 // returns with Canceled; the main loop sees IrqPending, sends a
 // proactive stop reply, and enters ServeStopped.
 //
+// Packet validation: the socket is untrusted input, so every
+// variable-length operand ('G' register block, 'm'/'M' addr,len,
+// 'Z0'/'z0' address) is decoded by the length-checked parsers in
+// debug/gdb_packet.h and a malformed packet gets an E22 reply. The
+// packet body itself is capped (gdb::kMaxPacketBody) so a peer that
+// never sends '#' can't grow it without bound.
+//
 // Thread-safety: all socket I/O on m_conn is serialised by
 // m_socketMtx. The watcher uses try_lock so a long RecvPacket /
 // SendPacket from the main thread never starves it; it goes dormant
@@ -118,7 +125,10 @@ private:
     void IrqWatcherLoop();
 
     std::string ReadRegisters(uint32_t vp);
-    void WriteRegisters(uint32_t vp, const std::string& hex);
+    // False when `hex` is too short / not hex for a full 17-register
+    // block — the caller replies E22 instead of writing garbage into
+    // the guest. Decoding lives in debug/gdb_packet.h.
+    bool WriteRegisters(uint32_t vp, const std::string& hex);
     std::string ReadMem(uint64_t gva, uint64_t len);
     bool WriteMem(uint64_t gva, const std::string& hexData);
 

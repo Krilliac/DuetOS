@@ -1,5 +1,7 @@
 #include "debug/gdb_server.h"
 
+#include "debug/gdb_packet.h"
+
 #include <ws2tcpip.h>
 
 #include <chrono>
@@ -25,13 +27,7 @@ const char* kTargetXml =
     "</target>";
 
 char Nyb(uint8_t v) { return "0123456789abcdef"[v & 0xF]; }
-uint8_t Unhex(char c)
-{
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return 0;
-}
+using gdb::Unhex; // decode side lives in gdb_packet.{h,cpp}
 void HexByte(std::string& s, uint8_t b)
 {
     s += Nyb(b >> 4);
@@ -153,12 +149,31 @@ std::string GdbServer::RecvPacket()
         if (c == 0x03) return "\x03"; // ctrl-C (best-effort)
         if (c == '$') break;
     }
+    // The body is peer-controlled and had no cap: a client that never
+    // sends '#' grew this string until the VMM died of allocation.
+    // Bound it at kMaxPacketBody — four times the PacketSize we
+    // advertise, so no conforming client can reach it — and treat a
+    // mid-packet '$' as the client restarting, which is the standard
+    // resync point.
     std::string body;
     for (;;)
     {
         int n = recv(m_conn, &c, 1, 0);
         if (n <= 0) return {};
+        if (c == '$')
+        {
+            body.clear();
+            continue;
+        }
         if (c == '#') break;
+        if (body.size() >= gdb::kMaxPacketBody)
+        {
+            std::printf("[vmm] gdb: packet body exceeded %zu bytes — "
+                        "dropping the client\n",
+                        gdb::kMaxPacketBody);
+            std::fflush(stdout);
+            return {}; // empty -> ServeStopped detaches
+        }
         body += c;
     }
     char cs[2];
@@ -266,28 +281,23 @@ std::string GdbServer::ReadRegisters(uint32_t vp)
     return s;
 }
 
-void GdbServer::WriteRegisters(uint32_t vp, const std::string& hex)
+bool GdbServer::WriteRegisters(uint32_t vp, const std::string& hex)
 {
-    auto rd = [&](size_t off, int bytes) {
-        uint64_t x = 0;
-        for (int i = 0; i < bytes; ++i)
-        {
-            uint8_t b = (Unhex(hex[off + i * 2]) << 4) |
-                        Unhex(hex[off + i * 2 + 1]);
-            x |= uint64_t(b) << (8 * i);
-        }
-        return x;
-    };
+    // Length-checked in gdb_packet: a short or non-hex block is
+    // rejected here rather than read past the end of `hex`.
+    uint64_t r[gdb::kRegBlockRegs] = {};
+    if (!gdb::ParseRegBlock(hex, r)) return false;
     WHV_REGISTER_NAME n[17];
     WHV_REGISTER_VALUE v[17] = {};
     for (int i = 0; i < 16; ++i)
     {
         n[i] = kRegs[i];
-        v[i].Reg64 = rd(i * 16, 8);
+        v[i].Reg64 = r[i];
     }
     n[16] = WHvX64RegisterRip;
-    v[16].Reg64 = rd(16 * 16, 8);
+    v[16].Reg64 = r[16];
     m_part.SetRegisters(vp, n, 17, v);
+    return true;
 }
 
 std::string GdbServer::ReadMem(uint64_t gva, uint64_t len)
@@ -490,40 +500,51 @@ GdbServer::Resume GdbServer::ServeStopped(int sig)
         }
         else if (cmd == 'G')
         {
-            WriteRegisters(0, pkt.substr(1));
-            SendPacket("OK");
+            // E22 (EINVAL) on a truncated register block — the old
+            // path indexed 272 chars into whatever arrived.
+            SendPacket(WriteRegisters(0, pkt.substr(1)) ? "OK" : "E22");
         }
         else if (cmd == 'm')
         {
             uint64_t a = 0, l = 0;
-            std::sscanf(pkt.c_str() + 1, "%llx,%llx",
-                        (unsigned long long*)&a,
-                        (unsigned long long*)&l);
-            SendPacket(ReadMem(a, l));
+            if (gdb::ParseMemSpec(pkt, a, l))
+                SendPacket(ReadMem(a, l));
+            else
+                SendPacket("E22");
         }
         else if (cmd == 'M')
         {
             uint64_t a = 0, l = 0;
-            int off = 0;
-            std::sscanf(pkt.c_str() + 1, "%llx,%llx:%n",
-                        (unsigned long long*)&a,
-                        (unsigned long long*)&l, &off);
-            bool ok = WriteMem(a, pkt.substr(1 + off));
-            SendPacket(ok ? "OK" : "E14");
+            size_t   off = 0;
+            if (gdb::ParseMemSpec(pkt, a, l, &off) && off != 0)
+            {
+                bool ok = WriteMem(a, pkt.substr(off));
+                SendPacket(ok ? "OK" : "E14");
+            }
+            else
+            {
+                SendPacket("E22");
+            }
         }
         else if (cmd == 'Z' && pkt[1] == '0')
         {
             uint64_t a = 0;
-            std::sscanf(pkt.c_str() + 3, "%llx",
-                        (unsigned long long*)&a);
+            if (!gdb::ParseBpSpec(pkt, a))
+            {
+                SendPacket("E22");
+                continue;
+            }
             InsertBreakpoint(a);
             SendPacket("OK");
         }
         else if (cmd == 'z' && pkt[1] == '0')
         {
             uint64_t a = 0;
-            std::sscanf(pkt.c_str() + 3, "%llx",
-                        (unsigned long long*)&a);
+            if (!gdb::ParseBpSpec(pkt, a))
+            {
+                SendPacket("E22");
+                continue;
+            }
             RemoveBreakpoint(a);
             SendPacket("OK");
         }

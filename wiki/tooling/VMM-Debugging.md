@@ -156,6 +156,7 @@ These also work without VS — any gdb client (Eclipse, CLion, command-line gdb)
 - **Use Windows gdb, not WSL gdb.** WSL2 can't reach the Windows host via `localhost`.
 - **Source-hardcoded `int3` (kernel traps self-test, in-kernel KBP probes)** surface as one-shot SIGTRAPs while gdb is attached — the host stub catches the `#BP` before the guest IDT does, so the kernel's own `#BP` handler can't run under gdb. Press Continue once per stop; the next instruction runs normally. (If you specifically need to validate the in-kernel `#BP` handler path itself, boot without `--gdb`.) Historical note: an earlier unconditional rewind in `OnException` turned these into infinite re-trap loops; that's fixed — see `tools/vmm/src/debug/gdb_server.cpp` `OnException` and `tools/vmm/src/vmm.cpp`'s exception-exit handler.
 - **No hardware watchpoints** in v0 of the stub. Software breakpoints (`Z0`/`z0`) only.
+- **The stub's port is untrusted input.** It binds `INADDR_LOOPBACK` and only opens with `--gdb`, but any process on the host can connect and it speaks to whatever arrives. Every variable-length operand is therefore length-checked before it is decoded — `tools/vmm/src/debug/gdb_packet.{h,cpp}`, unit-tested by `tools/vmm/tests/test_gdb_packet.cpp` and modelled compiler-free by `tools/test/vmm-gdb-packet-vectors.py`. A malformed packet gets `E22`; a packet body over 64 KiB drops the client. Historical note: before that split, a 2-char `$G00#xx` made the stub read ~270 bytes past the end of the received string and write them into the guest's `RAX`..`RIP`.
 - **Async Pause / Break-All works.** A background watcher thread in the stub (`GdbServer::IrqWatcherLoop` in `tools/vmm/src/debug/gdb_server.cpp`) consumes `\x03` from the gdb socket while the guest is running and calls `WHvCancelRunVirtualProcessor` to break the main thread out of the WHP run loop; the main loop sends a proactive `S05` and enters interactive stopped mode. Earlier versions of this stub did NOT implement this — the result was that hitting VS's Pause while the guest was running froze the IDE (UI thread blocked waiting for a stop reply that never came). If you're on an old build and see that symptom, rebuild.
 
 ---
@@ -486,7 +487,8 @@ Inherited from the v0 bridge:
 - **Mixed-mode "see the guest inside the GDB-stub session"** isn't a thing — that's the inverse problem and would need a debugger-side extension. The bridge solves the forward direction (see guest from VS native attach).
 - **`Step()` then `Step()` without `Run()`** in between leaves the original BP lifted until the next `Run()` does `ReinsertAllLayerC`. If you really need to step over many instructions, do a `Step()` once then `Run()` with a fresh `Bp` at the next location of interest.
 - **`Bp` planted before the kernel reaches the function will hit when the function is reached.** `Bp` planted *after* the kernel has run past the function does nothing visible until a future call. There's no rewind.
-- **GDB stub: no hardware watchpoints.** Software int3 breakpoints only.
+- **GDB stub: no hardware watchpoints.** Software int3 breakpoints only. (Async `^C` / Pause *does* work — see the Path A caveats above; this line used to claim otherwise.)
+- **GDB stub: malformed packets get `E22`, they don't crash the VMM.** The stub's port is untrusted input (see the Path A caveats), so a short `G`, an `m`/`M` with no `,`, a bare `Z0`/`z0`, or a body that never terminates is rejected rather than parsed. A conforming client never sees this.
 
 ## Source map
 
@@ -494,6 +496,7 @@ Inherited from the v0 bridge:
 - [`tools/vmm/src/debug/guest_view.{h,cpp}`](../../tools/vmm/src/debug/) — `GuestKernelView`, `MapSym`, refresh loop.
 - [`tools/vmm/src/debug/host_stop.{h,cpp}`](../../tools/vmm/src/debug/) — `g_stop_state`, `HandleHostStop`, the bridge arbiter.
 - [`tools/vmm/src/debug/gdb_server.{h,cpp}`](../../tools/vmm/src/debug/) — the GDB remote-serial-protocol stub (Path A).
+- [`tools/vmm/src/debug/gdb_packet.{h,cpp}`](../../tools/vmm/src/debug/) — pure, length-checked decoders for the stub's packet operands (no WHP dependency, so `vmm-tests` covers them).
 - [`tools/vmm/src/debug/elf_symbols.{h,cpp}`](../../tools/vmm/src/debug/) — ELF symbol table loader; `Find` (exact) + `FindBySuffix` (Itanium-mangled lenient).
 - [`tools/vmm/vmm.natvis`](../../tools/vmm/vmm.natvis) — Visual Studio pretty-printers for `GuestKernelView`, `GuestStopState`, `ElfSymbols::Sym`.
 - [`tools/vmm/src/main.cpp`](../../tools/vmm/src/main.cpp) — CLI parser and
