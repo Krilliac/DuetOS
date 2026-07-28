@@ -1,0 +1,89 @@
+/* ============================================================================
+   TYPOGRAPHY — scale, weights, and treatments
+   ----------------------------------------------------------------------------
+   Two voices: ENGRAVED display (Cinzel, tracked uppercase) for titles, item
+   names, panel headers and banners; and a compact UI/body voice (system-ui)
+   for HUD chrome, stats and dense panels — matching the shipped renderer. Lore
+   text uses the Spectral serif. Numerals lean on the mono face for tabular
+   alignment (damage rolls, stat lines, debug).
+   ========================================================================== */
+
+:root {
+  /* ---- Type scale (px) — HUD is dense; titles are grand ------------------- */
+  --text-2xs: 10px; /* hotkey caption, micro-labels */
+  --text-xs: 11px; /* footnotes, stat sub-lines */
+  --text-sm: 12px; /* dense panel body, tags */
+  --text-base: 13px; /* default HUD body (item-icons / panels) */
+  --text-md: 15px; /* panel header (Inventory N/30) */
+  --text-lg: 18px;
+  --text-xl: 22px;
+  --text-2xl: 28px;
+  --text-3xl: 38px;
+  --text-4xl: 52px;
+  --text-display: 72px; /* title-screen wordmark */
+
+  /* ---- Weights ------------------------------------------------------------ */
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+  --weight-black: 900; /* Cinzel black — main title */
+
+  /* ---- Line heights ------------------------------------------------------- */
+  --leading-tight: 1.1;
+  --leading-snug: 1.25;
+  --leading-normal: 1.4; /* HUD default */
+  --leading-relaxed: 1.6; /* lore / chat log */
+
+  /* ---- Letter spacing — display caps are widely tracked ------------------- */
+  --tracking-display: 0.14em; /* hero title */
+  --tracking-heading: 0.08em; /* panel headers, banners */
+  --tracking-label: 0.16em; /* uppercase section labels */
+  --tracking-body: 0;
+}
+
+/* ---- Reusable type treatments (opt-in utility classes) -------------------- */
+.ds-title {
+  font-family: var(--font-display);
+  font-weight: var(--weight-black);
+  letter-spacing: var(--tracking-display);
+  text-transform: uppercase;
+  color: var(--text-display);
+  line-height: var(--leading-tight);
+}
+.ds-heading {
+  font-family: var(--font-display);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-heading);
+  text-transform: uppercase;
+  color: var(--text-display);
+}
+.ds-label {
+  font-family: var(--font-body);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  font-size: var(--text-2xs);
+  color: var(--text-label);
+}
+.ds-body {
+  font-family: var(--font-body);
+  font-weight: var(--weight-regular);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  color: var(--text-body);
+}
+.ds-lore {
+  font-family: var(--font-lore);
+  font-weight: var(--weight-regular);
+  font-style: italic;
+  font-size: var(--text-base);
+  line-height: var(--leading-relaxed);
+  color: var(--text-muted);
+}
+.ds-stat {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-sm);
+  color: var(--text-stat);
+}

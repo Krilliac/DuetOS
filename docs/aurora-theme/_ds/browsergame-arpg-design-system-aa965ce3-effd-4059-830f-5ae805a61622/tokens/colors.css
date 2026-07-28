@@ -1,0 +1,120 @@
+/* ============================================================================
+   COLORS — the Gloomwood palette
+   ----------------------------------------------------------------------------
+   Every value here is lifted from the live BrowserGame client (src/client +
+   src/shared) so the design system and the running game agree to the hex. The
+   world is dark, gritty and torch-lit: near-black obsidian surfaces, warm gold
+   metal as the single brand accent, parchment text, and a blood/mana duo for
+   resources. The loot-rarity ladder is the emotional core of the UI and is
+   reproduced verbatim from src/shared/items.ts.
+   ========================================================================== */
+
+:root {
+  /* ---- INK / surfaces — the dark world ------------------------------------ */
+  --ink-950: #08090d; /* deepest — panel fill base (rgba 8,9,13) */
+  --ink-900: #0e0f13; /* app background (styles/main.css --bg) */
+  --ink-850: #121319;
+  --ink-800: #16171d;
+  --ink-750: #1b1d24;
+  --ink-700: #1f2128;
+  --ink-600: #2a2d36;
+  --ink-500: #3a3e4a;
+  --ink-400: #4d5260;
+
+  /* ---- GOLD — the one brand metal (warm WC3/Diablo gold) ------------------ */
+  --gold-200: #f0e6c4;
+  --gold-300: #e7d9b0; /* parchment / panel header text (#e7d9b0) */
+  --gold-400: #d8bd78;
+  --gold-500: #c9a24b; /* PRIMARY ACCENT — borders, hotkeys, links (--accent) */
+  --gold-600: #a8853a;
+  --gold-700: #6b5226;
+  --gold-800: #44341a;
+  --cork: #caa46a; /* potion cork / wood trim */
+
+  /* ---- TEXT neutrals — bone, ash, steel ----------------------------------- */
+  --bone: #d7dbe3; /* primary body text (--fg) */
+  --bone-bright: #e8eef7;
+  --ash: #9aa3b2; /* muted / secondary */
+  --ash-dim: #6b707a; /* faint / disabled / footnote */
+  --steel: #9fb0c0; /* stat-line text */
+  --slate-label: #8fa3bf; /* section labels (uppercase) */
+  --char-shadow: #05060a;
+
+  /* ---- RESOURCES — blood & mana ------------------------------------------- */
+  --hp: #d23b3b; /* health (belt flask red) */
+  --hp-glow: #f08a8a; /* health highlight / orb sheen */
+  --hp-deep: #6e1414; /* health orb bottom */
+  --mana: #3b6fd2; /* mana (belt flask blue) */
+  --mana-glow: #7fa3ec; /* mana highlight / orb sheen */
+  --mana-deep: #14306a; /* mana orb bottom */
+  --essence: #6fbf5e; /* stamina / vigor / regen green */
+  --xp: #c9a24b; /* experience uses the gold accent */
+  --coin: #ffcf5c; /* gold currency */
+
+  /* ---- LOOT RARITY ladder — verbatim from src/shared/items.ts ------------- */
+  --rarity-common: #c9c9c9; /* Common  — plain stone-white */
+  --rarity-magic: #6ea8ff; /* Magic   — affixed, cold blue */
+  --rarity-rare: #ffd24a; /* Rare    — gold-yellow */
+  --rarity-epic: #c06bff; /* Epic    — violet */
+  --rarity-legendary: #ff7a1a; /* Legendary — molten orange */
+  --rarity-corrupted: #ff2d6f; /* Corrupted — only born of corruption; hot pink-red */
+  --rarity-unique: #bfa05a; /* Unique  — hand-authored tan-gold */
+
+  /* ---- STATUS / feedback -------------------------------------------------- */
+  --danger: #ff6b6b; /* debuff / damage / negative stat */
+  --danger-dim: #e06a6a;
+  --warn: #ffae5c; /* warm warning (atmosphere WARM_COLOR) */
+  --ok: #7fd17f; /* success / connected */
+  --info: #6ea8ff;
+
+  /* ---- ELEMENTAL / FX glows — projectile & spell tints -------------------- */
+  --fx-fire: #ff8a3a; /* ember / fireball */
+  --fx-frost: #7fc4ff; /* ice lance / frost */
+  --fx-arcane: #b07ae8; /* arcane / void bolt */
+  --fx-poison: #aef07a; /* blight / poison */
+  --fx-holy: #ffe9a8; /* sacred / light */
+  --fx-blood: #ff2d6f; /* gore / lifesteal */
+
+  /* ---- BIOME accents — per-area mood key (src/shared/areas.ts AREA_THEMES) */
+  --biome-town: #ffdca8; /* Aldermere — warm hearth */
+  --biome-wild: #bfff8a; /* Gloomwood — sickly forest green */
+  --biome-crypt: #7d93c6; /* Shadow Crypt — cold blue gloom */
+  --biome-marsh: #9fd86a; /* Rotfen Marsh — poison green */
+  --biome-mines: #ff8a3a; /* Emberdeep Mines — molten ember */
+  --biome-frost: #bcd0ee; /* Frostpeak — pale ice */
+  --biome-void: #b07ae8; /* Sundered Wastes / Voidmarch — bruised violet */
+  --biome-abyss: #ff5a3a; /* Abyssal Throne — hell-red */
+
+  /* ---- CORRUPTION wash — creeping crimson pall ---------------------------- */
+  --corrupt-wash: #3a0810; /* atmosphere CORRUPT_COLOR */
+  --night-wash: #0a1430; /* atmosphere NIGHT_COLOR */
+
+  /* ====================================================================== */
+  /* SEMANTIC ALIASES — author UI against these, not the raw ramps          */
+  /* ====================================================================== */
+  --bg-app: var(--ink-900);
+  --surface-panel: rgba(8, 9, 13, 0.94); /* the canonical HUD window fill */
+  --surface-panel-solid: #0c0d12;
+  --surface-raised: #15171e;
+  --surface-slot: rgba(255, 255, 255, 0.05); /* inventory / hotbar cell */
+  --surface-slot-hover: rgba(201, 162, 75, 0.12);
+  --surface-overlay: rgba(0, 0, 0, 0.5); /* cooldown / modal scrim */
+  --surface-inset: rgba(0, 0, 0, 0.45); /* topbar / recessed chips */
+
+  --border-accent: var(--gold-500);
+  --border-accent-soft: rgba(201, 162, 75, 0.25); /* slot edges */
+  --border-accent-mid: rgba(201, 162, 75, 0.5); /* inputs */
+  --border-subtle: #2a3344; /* neutral hairline (inspector) */
+  --border-strong: var(--gold-600);
+
+  --text-display: var(--gold-300);
+  --text-heading: var(--bone-bright);
+  --text-body: var(--bone);
+  --text-muted: var(--ash);
+  --text-faint: var(--ash-dim);
+  --text-stat: var(--steel);
+  --text-label: var(--slate-label);
+  --text-on-gold: #1a1206;
+
+  --focus-ring: var(--gold-500);
+}

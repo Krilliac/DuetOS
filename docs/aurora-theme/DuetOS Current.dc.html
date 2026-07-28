@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="_ds/browsergame-arpg-design-system-aa965ce3-effd-4059-830f-5ae805a61622/styles.css">
+<script src="_ds/browsergame-arpg-design-system-aa965ce3-effd-4059-830f-5ae805a61622/_ds_bundle.js"></script>
+<style>
+  html,body{margin:0;padding:0;background:#000;overflow:auto}
+  *{box-sizing:border-box}
+  a{color:#2dd4bf}
+  a:hover{color:#f5b73a}
+  @keyframes duet-cursor{50%{opacity:0}}
+</style>
+</helmet>
+
+<div data-screen-label="Current Duet desktop (recreation)" style="position:relative; width:1920px; height:1080px; overflow:hidden; background:#0b0e13; color:#e8edf2; font-family:'Inter',ui-sans-serif,system-ui,sans-serif; font-size:14px; line-height:1.4">
+
+  <div style="position:absolute; inset:0; overflow:hidden; background:#0b0e13; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:12px; line-height:22px; opacity:.85">
+    <div style="position:absolute; inset:0; padding:40px 56px; letter-spacing:1.5px; white-space:pre; color:#6f7886; opacity:.35">
+      <sc-for list="{{ hexRows }}" as="row" hint-placeholder-count="32"><div>{{ row }}</div></sc-for>
+    </div>
+    <div style="position:absolute; inset:0; background:radial-gradient(ellipse at 50% 55%, transparent 0%, #0b0e13 75%)"></div>
+    <svg style="position:absolute; left:50%; top:50%; transform:translate(-50%,-50%)" width="520" height="520" viewBox="0 0 520 520">
+      <g transform="translate(260,260)" opacity=".9">
+        <circle r="180" fill="none" stroke="#2dd4bf" stroke-width="2" stroke-dasharray="237.5 9999" transform="rotate(-30) translate(-40,0)"></circle>
+        <circle r="180" fill="none" stroke="#f5b73a" stroke-width="2" stroke-dasharray="237.5 9999" transform="rotate(150) translate(-40,0)"></circle>
+      </g>
+    </svg>
+  </div>
+
+  <div style="position:absolute; top:0; left:0; right:0; bottom:44px">
+
+    <div style="position:absolute; top:18px; left:18px; display:grid; grid-template-columns:86px; gap:6px">
+      <sc-for list="{{ deskIcons }}" as="it" hint-placeholder-count="5">
+        <div style="border:1px solid transparent; background:transparent; border-radius:4px; padding:8px 4px; display:flex; flex-direction:column; align-items:center; gap:6px; color:#fff; text-shadow:0 1px 2px rgba(0,0,0,.55)">
+          <div style="width:40px; height:40px; border-radius:8px; display:flex; align-items:center; justify-content:center; background:color-mix(in oklab, #2dd4bf 18%, transparent); color:#2dd4bf; border:1px solid color-mix(in oklab, #2dd4bf 35%, transparent); box-shadow:0 2px 8px rgba(0,0,0,.35)">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><g>{{ it.path }}</g></svg>
+          </div>
+          <span style="font-size:11px; font-weight:500; text-align:center; line-height:1.2">{{ it.label }}</span>
+        </div>
+      </sc-for>
+    </div>
+
+    <div style="position:absolute; right:24px; top:22px; width:170px; padding:14px 14px 12px; background:color-mix(in oklab, #161b23 78%, transparent); border:1px solid rgba(255,255,255,.12); border-radius:10px; backdrop-filter:blur(18px) saturate(140%); -webkit-backdrop-filter:blur(18px) saturate(140%); color:#e8edf2; box-shadow:0 16px 36px -14px rgba(0,0,0,.5)">
+      <div style="display:flex; gap:12px; align-items:center">
+        <div style="width:64px; height:64px; border-radius:999px; position:relative; background:radial-gradient(circle at 50% 40%, #1c222b, #0f1319); border:1px solid rgba(255,255,255,.12)">
+          <span style="position:absolute; left:50%; top:50%; width:1px; height:6px; background:#6f7886; transform:translate(-50%,-100%) rotate(0deg) translateY(-22px); transform-origin:50% 100%"></span>
+          <span style="position:absolute; left:50%; top:50%; width:1px; height:3px; background:#6f7886; transform:translate(-50%,-100%) rotate(30deg) translateY(-22px); transform-origin:50% 100%"></span>
+          <span style="position:absolute; left:50%; top:50%; width:1px; height:3px; background:#6f7886; transform:translate(-50%,-100%) rotate(60deg) translateY(-22px); transform-origin:50% 100%"></span>
+          <span style="position:absolute; left:50%; top:50%; width:1px; height:6px; background:#6f7886; transform:translate(-50%,-100%) rotate(90deg) translateY(-22px); transform-origin:50% 100%"></span>
+          <span style="position:absolute; left:50%; top:50%; width:1px; height:3px; background:#6f7886; transform:translate(-50%,-100%) rotate(120deg) translateY(-22px); transform-origin:50% 100%"></span>
+          <span style="position:absolute; left:50%; top:50%; width:1px; height:3px; background:#6f7886; transform:translate(-50%,-100%) rotate(150deg) translateY(-22px); transform-origin:50% 100%"></span>
+          <span style="position:absolute; left:50%; top:50%; width:1px; height:6px; background:#6f7886; transform:translate(-50%,-100%) rotate(180deg) translateY(-22px); transform-origin:50% 100%"></span>
+          <span style="position:absolute; left:50%; top:50%; width:1px; height:3px; background:#6f7886; transform:translate(-50%,-100%) rotate(210deg) translateY(-22px); transform-origin:50% 100%"></span>
+          <span style="position:absolute; left:50%; top:50%; width:1px; height:3px; background:#6f7886; transform:translate(-50%,-100%) rotate(240deg) translateY(-22px); transform-origin:50% 100%"></span>
+          <span style="position:absolute; left:50%; top:50%; width:1px; height:6px; background:#6f7886; transform:translate(-50%,-100%) rotate(270deg) translateY(-22px); transform-origin:50% 100%"></span>
+          <span style="position:absolute; left:50%; top:50%; width:1px; height:3px; background:#6f7886; transform:translate(-50%,-100%) rotate(300deg) translateY(-22px); transform-origin:50% 100%"></span>
+          <span style="position:absolute; left:50%; top:50%; width:1px; height:3px; background:#6f7886; transform:translate(-50%,-100%) rotate(330deg) translateY(-22px); transform-origin:50% 100%"></span>
+          <div style="position:absolute; left:50%; top:50%; width:2px; height:18px; background:#e8edf2; border-radius:1px; transform-origin:50% 100%; transform:translate(-50%,-100%) rotate(38deg)"></div>
+          <div style="position:absolute; left:50%; top:50%; width:1.5px; height:24px; background:#e8edf2; border-radius:1px; transform-origin:50% 100%; transform:translate(-50%,-100%) rotate(96deg)"></div>
+          <div style="position:absolute; left:50%; top:50%; width:1px; height:26px; background:#f5b73a; transform-origin:50% 100%; transform:translate(-50%,-100%) rotate(222deg)"></div>
+          <div style="position:absolute; left:50%; top:50%; width:5px; height:5px; border-radius:99px; background:#2dd4bf; transform:translate(-50%,-50%)"></div>
+        </div>
+        <div style="font-family:'JetBrains Mono',ui-monospace,monospace">
+          <div style="font-size:18px; font-weight:600; font-variant-numeric:tabular-nums">02:31</div>
+          <div style="font-size:10.5px; color:#6f7886">Tue, May 26</div>
+          <div style="font-size:10px; color:#6f7886; margin-top:2px">UTC+0 · uptime 14m</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="position:absolute; right:24px; top:228px; width:198px; padding:10px 12px; background:color-mix(in oklab, #161b23 78%, transparent); border:1px solid rgba(255,255,255,.12); border-radius:10px; backdrop-filter:blur(18px) saturate(140%); -webkit-backdrop-filter:blur(18px) saturate(140%); color:#e8edf2; box-shadow:0 16px 36px -14px rgba(0,0,0,.5)">
+      <div style="display:flex; align-items:center; gap:6px; margin-bottom:6px">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+          <circle cx="5.88" cy="7" r="4.76" stroke="#2dd4bf" stroke-width="1.6" stroke-linecap="round" stroke-dasharray="15.7 29.9" transform="rotate(-30 5.88 7)"></circle>
+          <circle cx="8.12" cy="7" r="4.76" stroke="#f5b73a" stroke-width="1.6" stroke-linecap="round" stroke-dasharray="15.7 29.9" transform="rotate(150 8.12 7)"></circle>
+        </svg>
+        <span style="font-size:11px; font-weight:700; letter-spacing:.6px; text-transform:uppercase; color:#aeb7c2">Kernel</span>
+      </div>
+      <sc-for list="{{ kernelRows }}" as="r" hint-placeholder-count="6">
+        <div style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; padding:2px 0; color:#aeb7c2">
+          <span>{{ r.k }}</span><span style="color:#e8edf2">{{ r.v }}</span>
+        </div>
+      </sc-for>
+    </div>
+
+    <div style="position:absolute; left:36px; top:80px; width:680px; height:440px; background:#161b23; color:#e8edf2; border:1px solid rgba(255,255,255,.12); border-radius:6px; box-shadow:0 12px 28px -16px rgba(0,0,0,.45), 0 0 0 1px rgba(255,255,255,.07); opacity:.97; display:flex; flex-direction:column; overflow:hidden; z-index:1">
+      <div style="height:30px; flex:0 0 30px; display:flex; align-items:center; gap:8px; padding:0 0 0 10px; background:#161b23; border-bottom:1px solid rgba(255,255,255,.07); color:#aeb7c2; user-select:none">
+        <div style="display:flex; align-items:center; gap:8px; flex:1; min-width:0">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#aeb7c2" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M6 8h12M6 12h8M6 16h10"></path></svg>
+          <div style="font-size:12px; font-weight:600; letter-spacing:.1px; white-space:nowrap">Kernel Log</div>
+          <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:#6f7886; white-space:nowrap">/sys/klog · live</div>
+        </div>
+        <div style="display:flex">
+          <div style="height:30px; width:46px; display:flex; align-items:center; justify-content:center; color:#aeb7c2"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M5 12h14"></path></svg></div>
+          <div style="height:30px; width:46px; display:flex; align-items:center; justify-content:center; color:#aeb7c2"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="5" y="5" width="14" height="14"></rect></svg></div>
+          <div style="height:30px; width:46px; display:flex; align-items:center; justify-content:center; color:#aeb7c2"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M6 6l12 12M18 6l-12 12"></path></svg></div>
+        </div>
+      </div>
+      <div style="display:flex; align-items:center; gap:8px; padding:6px 10px; background:#161b23; border-bottom:1px solid rgba(255,255,255,.07)">
+        <div style="flex:1; height:24px; padding:0 8px; font-size:11px; font-family:'JetBrains Mono',ui-monospace,monospace; background:#0f1319; border:1px solid rgba(255,255,255,.07); color:#6f7886; border-radius:3px; display:flex; align-items:center">Filter (tag or text)…</div>
+        <div style="border:1px solid rgba(255,255,255,.07); background:color-mix(in oklab, #2dd4bf 16%, transparent); color:#2dd4bf; font-size:10px; font-weight:700; padding:3px 8px; border-radius:3px; letter-spacing:.5px">I</div>
+        <div style="border:1px solid rgba(255,255,255,.07); background:color-mix(in oklab, #f5b73a 16%, transparent); color:#f5b73a; font-size:10px; font-weight:700; padding:3px 8px; border-radius:3px; letter-spacing:.5px">W</div>
+        <div style="border:1px solid rgba(255,255,255,.07); background:color-mix(in oklab, #e87575 16%, transparent); color:#e87575; font-size:10px; font-weight:700; padding:3px 8px; border-radius:3px; letter-spacing:.5px">E</div>
+      </div>
+      <div style="flex:1; min-height:0; overflow:auto; padding:8px 0; background:#0f1319; color:#aeb7c2; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11.5px; line-height:18px">
+        <sc-for list="{{ logLines }}" as="l" hint-placeholder-count="21">
+          <div style="display:flex; padding:0 12px; white-space:pre">
+            <span style="color:#6f7886; width:96px; flex:0 0 auto">[{{ l.ts }}]</span>
+            <span style="width:18px; flex:0 0 auto; font-weight:700; color:{{ l.lvlColor }}">{{ l.lvl }}</span>
+            <span style="color:#aeb7c2; width:80px; flex:0 0 auto">{{ l.tag }}</span>
+            <span style="color:{{ l.msgColor }}">{{ l.msg }}</span>
+          </div>
+        </sc-for>
+        <div style="display:flex; padding:4px 12px; color:#2dd4bf">
+          <span style="width:96px"></span><span style="width:18px">▸</span>
+          <span style="border-left:7px solid #2dd4bf; height:13px; margin-left:2px; animation:duet-cursor 1s steps(2,end) infinite"></span>
+        </div>
+      </div>
+      <div style="flex:0 0 24px; height:24px; display:flex; align-items:center; border-top:1px solid rgba(255,255,255,.07); background:#0f1319; padding:0 12px; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:#6f7886">
+        <span>21 / 21 lines</span><span style="width:1px; height:12px; background:rgba(255,255,255,.12); margin:0 12px"></span>
+        <span>tail -F /sys/klog</span><span style="width:1px; height:12px; background:rgba(255,255,255,.12); margin:0 12px"></span>
+        <span>ring=64 KiB</span><span style="width:1px; height:12px; background:rgba(255,255,255,.12); margin:0 12px"></span>
+        <span>drops=0</span>
+      </div>
+    </div>
+
+    <div style="position:absolute; left:240px; top:140px; width:780px; height:520px; background:#161b23; color:#e8edf2; border:1px solid rgba(255,255,255,.12); border-radius:6px; box-shadow:0 12px 28px -16px rgba(0,0,0,.45), 0 0 0 1px rgba(255,255,255,.07); opacity:.97; display:flex; flex-direction:column; overflow:hidden; z-index:2">
+      <div style="height:30px; flex:0 0 30px; display:flex; align-items:center; gap:8px; padding:0 0 0 10px; background:#161b23; border-bottom:1px solid rgba(255,255,255,.07); color:#aeb7c2; user-select:none">
+        <div style="display:flex; align-items:center; gap:8px; flex:1; min-width:0">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#aeb7c2" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 19h18"></path><rect x="5" y="11" width="3" height="8"></rect><rect x="10.5" y="7" width="3" height="12"></rect><rect x="16" y="13" width="3" height="6"></rect></svg>
+          <div style="font-size:12px; font-weight:600; letter-spacing:.1px; white-space:nowrap">Task Manager</div>
+        </div>
+        <div style="display:flex">
+          <div style="height:30px; width:46px; display:flex; align-items:center; justify-content:center; color:#aeb7c2"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M5 12h14"></path></svg></div>
+          <div style="height:30px; width:46px; display:flex; align-items:center; justify-content:center; color:#aeb7c2"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="5" y="5" width="14" height="14"></rect></svg></div>
+          <div style="height:30px; width:46px; display:flex; align-items:center; justify-content:center; color:#aeb7c2"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M6 6l12 12M18 6l-12 12"></path></svg></div>
+        </div>
+      </div>
+      <div style="display:flex; padding:0 10px; gap:2px; border-bottom:1px solid rgba(255,255,255,.07); background:#161b23">
+        <div style="padding:10px 12px 9px; color:#e8edf2; font-size:12px; font-weight:600; border-bottom:2px solid #2dd4bf; margin-bottom:-1px">Processes</div>
+        <div style="padding:10px 12px 9px; color:#aeb7c2; font-size:12px; font-weight:500; border-bottom:2px solid transparent; margin-bottom:-1px">Performance</div>
+        <div style="padding:10px 12px 9px; color:#aeb7c2; font-size:12px; font-weight:500; border-bottom:2px solid transparent; margin-bottom:-1px">ABI peers</div>
+        <div style="padding:10px 12px 9px; color:#aeb7c2; font-size:12px; font-weight:500; border-bottom:2px solid transparent; margin-bottom:-1px">Startup</div>
+      </div>
+      <div style="flex:1; min-height:0; overflow:auto">
+        <table style="width:100%; border-collapse:collapse; font-size:12px">
+          <thead style="position:sticky; top:0; background:#161b23; z-index:1">
+            <tr style="text-align:left; color:#aeb7c2">
+              <th style="padding:8px 12px; border-bottom:1px solid rgba(255,255,255,.07); font-weight:500; text-align:left">Name</th>
+              <th style="padding:8px 12px; border-bottom:1px solid rgba(255,255,255,.07); font-weight:500; text-align:left">PID</th>
+              <th style="padding:8px 12px; border-bottom:1px solid rgba(255,255,255,.07); font-weight:500; text-align:left">ABI</th>
+              <th style="padding:8px 12px; border-bottom:1px solid rgba(255,255,255,.07); font-weight:500; text-align:right">CPU</th>
+              <th style="padding:8px 12px; border-bottom:1px solid rgba(255,255,255,.07); font-weight:500; text-align:right">Memory</th>
+              <th style="padding:8px 12px; border-bottom:1px solid rgba(255,255,255,.07); font-weight:500; text-align:right">Threads</th>
+              <th style="padding:8px 12px; border-bottom:1px solid rgba(255,255,255,.07); font-weight:500; text-align:left">St</th>
+            </tr>
+          </thead>
+          <tbody style="font-family:'JetBrains Mono',ui-monospace,monospace">
+            <sc-for list="{{ procs }}" as="p" hint-placeholder-count="14">
+              <tr style="background:{{ p.zebra }}">
+                <td style="padding:7px 12px; border-bottom:1px solid rgba(255,255,255,.07); color:#aeb7c2">
+                  <div style="display:flex; align-items:center; gap:8px">
+                    <span style="width:6px; height:6px; border-radius:6px; display:inline-block; background:{{ p.dot }}"></span>
+                    <span style="font-family:Inter,sans-serif; font-weight:500">{{ p.name }}</span>
+                  </div>
+                </td>
+                <td style="padding:7px 12px; border-bottom:1px solid rgba(255,255,255,.07); color:#aeb7c2">{{ p.pidHex }}</td>
+                <td style="padding:7px 12px; border-bottom:1px solid rgba(255,255,255,.07); color:#aeb7c2">
+                  <span style="font-size:10px; font-weight:600; letter-spacing:.5px; padding:1px 6px; border-radius:3px; background:{{ p.badgeBg }}; color:{{ p.badgeFg }}">{{ p.badgeText }}</span>
+                </td>
+                <td style="padding:7px 12px; border-bottom:1px solid rgba(255,255,255,.07); text-align:right; font-variant-numeric:tabular-nums; color:{{ p.cpuColor }}">{{ p.cpu }}%</td>
+                <td style="padding:7px 12px; border-bottom:1px solid rgba(255,255,255,.07); text-align:right; font-variant-numeric:tabular-nums; color:#e8edf2">{{ p.mem }}</td>
+                <td style="padding:7px 12px; border-bottom:1px solid rgba(255,255,255,.07); text-align:right; font-variant-numeric:tabular-nums; color:#e8edf2">{{ p.thr }}</td>
+                <td style="padding:7px 12px; border-bottom:1px solid rgba(255,255,255,.07); font-weight:600; color:{{ p.stColor }}">{{ p.status }}</td>
+              </tr>
+            </sc-for>
+          </tbody>
+        </table>
+      </div>
+      <div style="flex:0 0 24px; height:24px; display:flex; align-items:center; border-top:1px solid rgba(255,255,255,.07); background:#0f1319; padding:0 12px; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:#6f7886">
+        <span>14 processes</span><span style="width:1px; height:12px; background:rgba(255,255,255,.12); margin:0 12px"></span>
+        <span>77 threads</span><span style="width:1px; height:12px; background:rgba(255,255,255,.12); margin:0 12px"></span>
+        <span>CPU 17.5%</span><span style="width:1px; height:12px; background:rgba(255,255,255,.12); margin:0 12px"></span>
+        <span>Memory 412 / 8128 MiB</span>
+      </div>
+    </div>
+
+    <div style="position:absolute; left:520px; top:90px; width:840px; height:520px; background:#161b23; color:#e8edf2; border:1px solid rgba(255,255,255,.12); border-radius:6px; box-shadow:0 24px 48px -16px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.12), 0 1px 0 rgba(255,255,255,.04) inset; display:flex; flex-direction:column; overflow:hidden; z-index:3">
+      <div style="height:30px; flex:0 0 30px; display:flex; align-items:center; gap:8px; padding:0 0 0 10px; background:linear-gradient(180deg, #1c222b, #161b23); border-bottom:1px solid rgba(255,255,255,.07); color:#e8edf2; user-select:none">
+        <div style="display:flex; align-items:center; gap:8px; flex:1; min-width:0">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#aeb7c2" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6"></circle><path d="M20 20l-3.5-3.5"></path><path d="M8.5 11h5M11 8.5v5"></path></svg>
+          <div style="font-size:12px; font-weight:600; letter-spacing:.1px; white-space:nowrap">Inspect — windows-kill.exe</div>
+          <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:#6f7886; white-space:nowrap">PE32+ · x86_64</div>
+        </div>
+        <div style="display:flex">
+          <div style="height:30px; width:46px; display:flex; align-items:center; justify-content:center; color:#aeb7c2"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M5 12h14"></path></svg></div>
+          <div style="height:30px; width:46px; display:flex; align-items:center; justify-content:center; color:#aeb7c2"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="5" y="5" width="14" height="14"></rect></svg></div>
+          <div style="height:30px; width:46px; display:flex; align-items:center; justify-content:center; background:#e3413c; color:#fff"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M6 6l12 12M18 6l-12 12"></path></svg></div>
+        </div>
+      </div>
+      <div style="display:flex; align-items:center; gap:8px; padding:6px 10px; background:#161b23; border-bottom:1px solid rgba(255,255,255,.07)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#f5b73a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="1"></rect><path d="M8 8h4a2 2 0 0 1 0 4H8V8Zm0 0v8"></path></svg>
+        <span style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:#aeb7c2">/bin/windows-kill.exe</span>
+        <span style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:10.5px; color:#6f7886">· PE32+ · x86_64 · GUI=N · imports 4 dlls</span>
+        <span style="flex:1"></span>
+        <div style="font-family:'JetBrains Mono',ui-monospace,monospace; padding:3px 9px; font-size:11px; font-weight:600; border:1px solid rgba(255,255,255,.12); background:#0f1319; color:#aeb7c2; border-radius:3px">Decode</div>
+        <div style="font-family:'JetBrains Mono',ui-monospace,monospace; padding:3px 9px; font-size:11px; font-weight:600; border:1px solid rgba(255,255,255,.12); background:#0f1319; color:#aeb7c2; border-radius:3px">Trace</div>
+        <div style="font-family:'JetBrains Mono',ui-monospace,monospace; padding:3px 9px; font-size:11px; font-weight:600; border:1px solid #2dd4bf; background:color-mix(in oklab, #2dd4bf 18%, transparent); color:#2dd4bf; border-radius:3px">Run in sandbox</div>
+      </div>
+      <div style="flex:1; min-height:0; display:grid; grid-template-columns:180px 1fr 240px">
+        <div style="border-right:1px solid rgba(255,255,255,.07); background:#0f1319; display:flex; flex-direction:column; min-height:0">
+          <div style="padding:8px 12px 6px; font-size:10px; font-weight:700; letter-spacing:.7px; text-transform:uppercase; color:#6f7886">PE Sections</div>
+          <div style="flex:1; overflow:auto">
+            <sc-for list="{{ sections }}" as="s" hint-placeholder-count="5">
+              <div style="width:100%; text-align:left; padding:7px 12px; display:flex; flex-direction:column; gap:1px; background:{{ s.bg }}; border-left:2px solid {{ s.rail }}; color:#e8edf2">
+                <span style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11.5px; font-weight:600">{{ s.name }}</span>
+                <span style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:10.5px; color:#6f7886">{{ s.meta }}</span>
+              </div>
+            </sc-for>
+          </div>
+          <div style="padding:8px 12px 6px; font-size:10px; font-weight:700; letter-spacing:.7px; text-transform:uppercase; color:#6f7886">Imports</div>
+          <div style="font-family:'JetBrains Mono',ui-monospace,monospace; padding:6px 12px 10px; font-size:11px; color:#aeb7c2; line-height:18px">
+            <div>kernel32.dll <span style="color:#6f7886">· 6</span></div>
+            <div>ntdll.dll <span style="color:#6f7886">· 3</span></div>
+            <div>user32.dll <span style="color:#6f7886">· 2</span></div>
+            <div>ucrtbase.dll <span style="color:#6f7886">· 4</span></div>
+          </div>
+        </div>
+        <div style="min-height:0; overflow:auto; padding:8px 0; background:#0f1319; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11.5px; line-height:19px">
+          <div style="padding:4px 14px 8px; color:#6f7886; font-size:11px">;  .text @ 0x1000 (0x1c00, R-X)</div>
+          <sc-for list="{{ disasm }}" as="d" hint-placeholder-count="18">
+            <div style="display:flex; gap:14px; padding:0 14px; background:{{ d.rowBg }}">
+              <span style="color:#6f7886; width:96px; flex:0 0 auto">{{ d.addr }}</span>
+              <span style="color:#f5b73a; width:160px; flex:0 0 auto; opacity:.85">{{ d.bytes }}</span>
+              <span style="flex:1; white-space:pre; color:{{ d.asmColor }}">{{ d.asm }}</span>
+              <span style="color:#2dd4bf; font-size:10.5px; align-self:center; white-space:nowrap">{{ d.annot }}</span>
+            </div>
+          </sc-for>
+        </div>
+        <div style="border-left:1px solid rgba(255,255,255,.07); background:#161b23; display:flex; flex-direction:column; min-height:0">
+          <div style="padding:8px 12px 6px; font-size:10px; font-weight:700; letter-spacing:.7px; text-transform:uppercase; color:#6f7886">Syscall sites</div>
+          <div style="flex:1; overflow:auto">
+            <sc-for list="{{ syscalls }}" as="s" hint-placeholder-count="5">
+              <div style="padding:8px 12px; border-bottom:1px solid rgba(255,255,255,.07)">
+                <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:#2dd4bf; font-weight:600">{{ s.name }} <span style="color:#6f7886; font-weight:400">{{ s.num }}</span></div>
+                <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:10.5px; color:#6f7886; margin-top:2px">{{ s.addr }}</div>
+                <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:#aeb7c2; margin-top:2px">{{ s.caller }}</div>
+              </div>
+            </sc-for>
+          </div>
+          <div style="padding:8px 12px 6px; font-size:10px; font-weight:700; letter-spacing:.7px; text-transform:uppercase; color:#6f7886">Hashes</div>
+          <div style="font-family:'JetBrains Mono',ui-monospace,monospace; padding:6px 12px 12px; font-size:10.5px; color:#6f7886; line-height:16px">
+            <div>md5  29c4…7e</div><div>sha1 4f12…aa</div><div>sha256 a1b2…9f</div>
+          </div>
+        </div>
+      </div>
+      <div style="flex:0 0 24px; height:24px; display:flex; align-items:center; border-top:1px solid rgba(255,255,255,.07); background:#0f1319; padding:0 12px; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:#6f7886">
+        <span>windows-kill.exe</span><span style="width:1px; height:12px; background:rgba(255,255,255,.12); margin:0 12px"></span>
+        <span>PE32+ · 4 imports</span><span style="width:1px; height:12px; background:rgba(255,255,255,.12); margin:0 12px"></span>
+        <span>5 syscall sites</span><span style="width:1px; height:12px; background:rgba(255,255,255,.12); margin:0 12px"></span>
+        <span>no anti-debug</span>
+      </div>
+    </div>
+  </div>
+
+  <div style="position:absolute; left:0; right:0; bottom:0; height:44px; padding:0 8px; background:#1c222b; border-top:1px solid rgba(255,255,255,.12); box-shadow:0 -8px 24px -8px rgba(0,0,0,.45); backdrop-filter:blur(20px) saturate(140%); -webkit-backdrop-filter:blur(20px) saturate(140%); z-index:900; display:flex; align-items:center; gap:2px">
+    <div style="height:34px; min-width:46px; padding:0 10px; display:flex; align-items:center; gap:8px; background:transparent; color:#e8edf2; border-radius:6px">
+      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+        <circle cx="8.4" cy="10" r="6.8" stroke="#2dd4bf" stroke-width="2.2" stroke-linecap="round" stroke-dasharray="22.4 42.7" transform="rotate(-30 8.4 10)"></circle>
+        <circle cx="11.6" cy="10" r="6.8" stroke="#f5b73a" stroke-width="2.2" stroke-linecap="round" stroke-dasharray="22.4 42.7" transform="rotate(150 11.6 10)"></circle>
+      </svg>
+      <span style="font-size:12px; font-weight:600; letter-spacing:.2px">Duet</span>
+    </div>
+    <div style="display:flex; align-items:center; gap:8px; height:30px; padding:0 12px; background:#0f1319; border:1px solid rgba(255,255,255,.07); border-radius:999px; color:#6f7886; min-width:220px">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6"></circle><path d="M20 20l-3.5-3.5"></path></svg>
+      <span style="font-size:11.5px">Search apps · syscalls · pids</span>
+    </div>
+    <span style="width:6px"></span>
+    <div style="display:flex; flex-direction:row; gap:2px; align-items:center">
+      <sc-for list="{{ pinned }}" as="p" hint-placeholder-count="6">
+        <div style="width:34px; height:34px; border-radius:6px; display:flex; align-items:center; justify-content:center; position:relative; background:{{ p.bg }}; color:{{ p.fg }}">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><g>{{ p.path }}</g></svg>
+          <span style="position:absolute; bottom:1px; left:50%; transform:translateX(-50%); height:2px; border-radius:1px; width:{{ p.indW }}; background:{{ p.indBg }}"></span>
+        </div>
+      </sc-for>
+    </div>
+    <span style="flex:1"></span>
+    <div style="display:flex; align-items:center; gap:10px; height:30px; padding:0 12px; margin-right:6px; background:#0f1319; border:1px solid rgba(255,255,255,.07); border-radius:999px">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#2dd4bf" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"></rect><rect x="9" y="9" width="6" height="6"></rect><path d="M9 3v2M12 3v2M15 3v2M9 19v2M12 19v2M15 19v2M3 9h2M3 12h2M3 15h2M19 9h2M19 12h2M19 15h2"></path></svg>
+      <span style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:#aeb7c2">CPU 14%</span>
+      <span style="width:1px; height:12px; background:rgba(255,255,255,.12)"></span>
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#f5b73a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h2l2-6 3 12 3-9 2 6h6"></path></svg>
+      <span style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:#aeb7c2">60.0 fps</span>
+    </div>
+    <div style="display:flex; flex-direction:row; align-items:center; gap:2px; padding:0 4px; border-left:1px solid rgba(255,255,255,.07); margin-left:6px; padding-left:10px">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#6f7886" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"></path></svg>
+      <span style="width:4px"></span>
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#aeb7c2" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8c5-5 15-5 20 0"></path><path d="M5 12c4-4 10-4 14 0"></path><path d="M8 16c2-2 6-2 8 0"></path><circle cx="12" cy="20" r=".8" fill="currentColor"></circle></svg>
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#aeb7c2" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10v4h3l5 4V6L7 10H4Z"></path><path d="M16 9c1 1 1 5 0 6"></path><path d="M19 7c2 2 2 8 0 10"></path></svg>
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#2dd4bf" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="8" width="16" height="8" rx="1.5"></rect><path d="M21 11v2"></path><rect x="5" y="10" width="10" height="4" fill="currentColor" stroke="none"></rect></svg>
+    </div>
+    <div style="display:flex; flex-direction:column; align-items:flex-end; padding:0 12px 0 8px; line-height:1.15; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11.5px; color:#e8edf2">
+      <div style="font-weight:600">02:31</div>
+      <div style="font-size:10px; color:#6f7886">May 26</div>
+    </div>
+    <div style="width:6px; align-self:stretch; margin-left:2px; background:linear-gradient(180deg, #2dd4bf, #f5b73a); opacity:.65; border-radius:2px"></div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1920,&quot;height&quot;:1080}}">
+const A = "#2dd4bf", A2 = "#f5b73a";
+
+const KERNEL_LOG = [
+  ["I","boot","DuetOS multiboot2 entry, 4-level paging armed"],
+  ["I","mm","frame allocator: 8128 MiB usable, 32 MiB reserved"],
+  ["I","mm","kheap: 64 MiB carved, slab buckets [16,32,64,128,256,512,1k,2k,4k]"],
+  ["I","smp","BSP=0 APs=[1,2,3] LAPIC calibrated against HPET (3.20 GHz)"],
+  ["I","sec","W^X SMEP SMAP ASLR retpoline kstack-canaries armed"],
+  ["I","pci","enumerated 17 devices, 1 NIC (e1000), 1 NVMe, 1 xHCI, 1 HDA"],
+  ["I","vfs","rootfs mounted (ramfs), bind /bin /etc /sys /proc"],
+  ["I","reg","registry hive opened, 2814 keys, 41 hives"],
+  ["I","ring3","registered 0x26 DLL(s) pid=0x13"],
+  ["I","pe","loader: validated MZ+PE32+, mapped 12 sections, ASLR slide=0x6c00"],
+  ["I","win32","kernel32:155 ntdll:114 user32:73 gdi32:44 ucrtbase:72 …"],
+  ["I","comp","compositor up, kMaxWindows=16, present cadence 60.00 Hz"],
+  ["I","win","create pid=0x16 hwnd=7 rect=(500,400 420x220) title=\"WINDOWED HELLO\""],
+  ["W","net","ws2_32: socket() returns INVALID_SOCKET — stack is skeleton"],
+  ["I","msgbox","pid=0x16 caption=\"Windowed Hello\" text=\"Running on DuetOS!\""],
+  ["I","reg","ProductName=\"DuetOS\" (type=1, size=7)"],
+  ["I","loader","/bin/hello.exe first two bytes: 0x4d 0x5a  — MZ ok"],
+  ["I","test","all checks passed (lkm:24 reg:31 io:18 win32:9)"],
+  ["I","exec","Windows Kill 1.1.4 | Library 3.1.3"],
+  ["I","exec","Not enough argument. Use -h for help."],
+  ["I","sys","exit rc val=0x1234"],
+];
+
+const PROCESSES = [
+  { pid:0x01, name:"kernel", abi:"native", cpu:1.4, mem:"148 MiB", thr:24, status:"R" },
+  { pid:0x02, name:"compositor", abi:"native", cpu:3.1, mem:"62 MiB", thr:4, status:"R" },
+  { pid:0x03, name:"vfs.svc", abi:"native", cpu:0.2, mem:"18 MiB", thr:3, status:"S" },
+  { pid:0x04, name:"reg.svc", abi:"native", cpu:0.0, mem:"11 MiB", thr:2, status:"S" },
+  { pid:0x05, name:"audiod (HDA)", abi:"native", cpu:0.4, mem:"14 MiB", thr:3, status:"S" },
+  { pid:0x10, name:"shell", abi:"native", cpu:0.1, mem:"7 MiB", thr:1, status:"S" },
+  { pid:0x12, name:"taskmgr.duet", abi:"native", cpu:1.7, mem:"22 MiB", thr:2, status:"R" },
+  { pid:0x13, name:"klog.duet", abi:"native", cpu:0.0, mem:"6 MiB", thr:1, status:"S" },
+  { pid:0x14, name:"inspect.duet", abi:"native", cpu:0.6, mem:"19 MiB", thr:1, status:"R" },
+  { pid:0x16, name:"windowed_hello.exe", abi:"win32", cpu:0.0, mem:"4 MiB", thr:1, status:"S" },
+  { pid:0x17, name:"windows-kill.exe", abi:"win32", cpu:0.0, mem:"3 MiB", thr:1, status:"Z" },
+  { pid:0x18, name:"hello_pe.exe", abi:"win32", cpu:0.0, mem:"2 MiB", thr:1, status:"Z" },
+  { pid:0x1a, name:"thread_stress.exe", abi:"win32", cpu:8.4, mem:"31 MiB", thr:32, status:"R" },
+  { pid:0x20, name:"linux-bridge", abi:"linux", cpu:0.1, mem:"9 MiB", thr:2, status:"S" },
+];
+
+const DISASM = [
+  ["0x140001000","48 83 ec 28","sub    rsp, 0x28"],
+  ["0x140001004","48 8d 0d e5 1f 00 00","lea    rcx, [rip+0x1fe5]   ; \"Windows Kill 1.1.4\""],
+  ["0x14000100b","ff 15 ef 20 00 00","call   [rip+0x20ef]        ; ucrtbase!printf"],
+  ["0x140001011","b9 01 00 00 00","mov    ecx, 1"],
+  ["0x140001016","ff 15 e4 20 00 00","call   [rip+0x20e4]        ; kernel32!ExitProcess"],
+  ["0x14000101c","cc cc cc cc","int3                       ; padding"],
+  ["0x140001020","40 53","push   rbx"],
+  ["0x140001022","48 83 ec 20","sub    rsp, 0x20"],
+  ["0x140001026","48 8b d9","mov    rbx, rcx"],
+  ["0x140001029","e8 c2 00 00 00","call   0x1400010f0         ; helper"],
+  ["0x14000102e","85 c0","test   eax, eax"],
+  ["0x140001030","74 09","je     0x14000103b"],
+  ["0x140001032","48 8b cb","mov    rcx, rbx"],
+  ["0x140001035","ff 15 c5 20 00 00","call   [rip+0x20c5]        ; kernel32!CloseHandle"],
+  ["0x14000103b","33 c0","xor    eax, eax"],
+  ["0x14000103d","48 83 c4 20","add    rsp, 0x20"],
+  ["0x140001041","5b","pop    rbx"],
+  ["0x140001042","c3","ret"],
+];
+
+const SYSCALL_SITES = [
+  { addr:"0x140001016", num:"0x01", name:"SYS_EXIT", caller:"kernel32!ExitProcess" },
+  { addr:"0x14000100b", num:"0x04", name:"SYS_WRITE", caller:"ucrtbase!printf → fwrite" },
+  { addr:"0x140001235", num:"0x3a", name:"SYS_WIN_CREATE", caller:"user32!CreateWindowExA" },
+  { addr:"0x14000128c", num:"0x3c", name:"SYS_WIN_SHOW", caller:"user32!ShowWindow" },
+  { addr:"0x1400012f0", num:"0x3d", name:"SYS_WIN_MSGBOX", caller:"user32!MessageBoxA" },
+];
+
+const PE_SECTIONS = [
+  { name:".text", rva:"0x1000", size:"0x1c00", flags:"R-X" },
+  { name:".rdata", rva:"0x3000", size:"0x0a00", flags:"R--" },
+  { name:".data", rva:"0x4000", size:"0x0200", flags:"RW-" },
+  { name:".pdata", rva:"0x5000", size:"0x0180", flags:"R--" },
+  { name:".reloc", rva:"0x6000", size:"0x0080", flags:"R--" },
+];
+
+// Icon path fragments lifted verbatim from docs/duet-theme/prototype/desktop-icons.jsx
+const P = {
+  TaskMgr: ['path','M3 19h18','rect','5 11 3 8','rect','10.5 7 3 12','rect','16 13 3 6'],
+};
+const el = React.createElement;
+const mk = (...nodes) => el(React.Fragment, null, ...nodes.map((n,i) => el(n[0], Object.assign({key:i}, n[1]))));
+
+const ICONS = {
+  taskmgr: mk(['path',{d:'M3 19h18'}],['rect',{x:5,y:11,width:3,height:8}],['rect',{x:10.5,y:7,width:3,height:12}],['rect',{x:16,y:13,width:3,height:6}]),
+  klog:    mk(['rect',{x:3,y:4,width:18,height:16,rx:2}],['path',{d:'M6 8h12M6 12h8M6 16h10'}]),
+  inspect: mk(['circle',{cx:11,cy:11,r:6}],['path',{d:'M20 20l-3.5-3.5'}],['path',{d:'M8.5 11h5M11 8.5v5'}]),
+  files:   mk(['path',{d:'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z'}]),
+  gfx:     mk(['rect',{x:3,y:5,width:18,height:14,rx:2}],['path',{d:'M3 16l5-5 4 4 3-3 6 6'}],['circle',{cx:9,cy:10,r:1.4}]),
+  calc:    mk(['rect',{x:5,y:3,width:14,height:18,rx:2}],['path',{d:'M8 7h8M8 12h.01M12 12h.01M16 12h.01M8 16h.01M12 16h.01M16 16h.01'}]),
+  note:    mk(['path',{d:'M5 4h10l4 4v12a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Z'}],['path',{d:'M14 4v5h5M8 13h8M8 17h6'}]),
+};
+
+class Component extends DCLogic {
+  renderVals() {
+    const hexRows = Array.from({ length: 32 }, (_, r) => {
+      const bytes = Array.from({ length: 48 }, (_, c) => (((r * 48 + c) * 1103515245 + 12345) & 0xff).toString(16).padStart(2, "0")).join(" ");
+      return (r * 0x10).toString(16).padStart(8, "0") + ": " + bytes;
+    });
+
+    const logLines = KERNEL_LOG.map(([lvl, tag, msg], i) => ({
+      lvl, tag, msg,
+      ts: (i * 0.027 + 0.184).toFixed(6).padStart(11, "0"),
+      lvlColor: lvl === "W" ? A2 : lvl === "E" ? "#e87575" : A,
+      msgColor: lvl === "W" ? A2 : "#e8edf2",
+    }));
+
+    const badge = {
+      native: { bg: "color-mix(in oklab, " + A + " 18%, transparent)", fg: A, t: "NATIVE" },
+      win32:  { bg: "color-mix(in oklab, " + A2 + " 18%, transparent)", fg: A2, t: "WIN32 PE" },
+      linux:  { bg: "rgba(154,163,175,.18)", fg: "#cfd5dd", t: "LINUX" },
+    };
+    const procs = PROCESSES.map((p, i) => ({
+      name: p.name, mem: p.mem, thr: p.thr, status: p.status,
+      cpu: p.cpu.toFixed(1),
+      pidHex: "0x" + p.pid.toString(16).padStart(2, "0"),
+      zebra: i % 2 ? "transparent" : "rgba(255,255,255,.015)",
+      dot: p.abi === "native" ? A : p.abi === "win32" ? A2 : "#9aa3af",
+      badgeBg: badge[p.abi].bg, badgeFg: badge[p.abi].fg, badgeText: badge[p.abi].t,
+      cpuColor: p.cpu > 5 ? A2 : "#e8edf2",
+      stColor: p.status === "R" ? A : p.status === "Z" ? "#e87575" : "#6f7886",
+    }));
+
+    const disasm = DISASM.map(([addr, bytes, asm], i) => {
+      const annot = SYSCALL_SITES.find(s => s.addr === addr);
+      return {
+        addr, bytes, asm,
+        annot: annot ? "⟶ " + annot.name : "",
+        rowBg: i === 4 ? "color-mix(in oklab, " + A + " 10%, transparent)" : "transparent",
+        asmColor: asm.startsWith("call") ? A : asm.startsWith("ret") ? "#e87575"
+          : (asm.startsWith("je") || asm.startsWith("jmp")) ? A2 : "#e8edf2",
+      };
+    });
+
+    const sections = PE_SECTIONS.map((s, i) => ({
+      name: s.name,
+      meta: s.rva + " · " + s.size + " · " + s.flags,
+      bg: i === 0 ? "color-mix(in oklab, " + A + " 14%, transparent)" : "transparent",
+      rail: i === 0 ? A : "transparent",
+    }));
+
+    const deskIcons = [
+      { label: "Task Manager", path: ICONS.taskmgr },
+      { label: "Kernel Log", path: ICONS.klog },
+      { label: "Inspect", path: ICONS.inspect },
+      { label: "Files", path: ICONS.files },
+      { label: "GFX Demo", path: ICONS.gfx },
+    ];
+
+    const run = { klog: "run", taskmgr: "run", inspect: "focused" };
+    const pinned = [
+      { id: "klog", path: ICONS.klog }, { id: "taskmgr", path: ICONS.taskmgr },
+      { id: "inspect", path: ICONS.inspect }, { id: "calc", path: ICONS.calc },
+      { id: "note", path: ICONS.note }, { id: "files", path: ICONS.files },
+    ].map(p => {
+      const st = run[p.id];
+      return {
+        path: p.path,
+        bg: st === "focused" ? "color-mix(in oklab, " + A + " 18%, transparent)" : "transparent",
+        fg: st === "focused" ? A : "#aeb7c2",
+        indW: st ? (st === "focused" ? "14px" : "8px") : "0px",
+        indBg: st ? A : "transparent",
+      };
+    });
+
+    return {
+      hexRows, logLines, procs, disasm, sections, deskIcons, pinned,
+      syscalls: SYSCALL_SITES,
+      kernelRows: [
+        { k: "syscalls", v: "57" }, { k: "dlls", v: "29" }, { k: "exports", v: "760" },
+        { k: "processes", v: "14" }, { k: "compositor", v: "60.0 fps" }, { k: "heap", v: "412 / 8128 MiB" },
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

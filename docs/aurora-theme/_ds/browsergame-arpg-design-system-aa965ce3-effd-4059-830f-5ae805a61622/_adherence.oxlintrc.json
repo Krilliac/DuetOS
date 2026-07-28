@@ -1,0 +1,496 @@
+{
+  "plugins": [
+    "react",
+    "import"
+  ],
+  "rules": {
+    "react/forbid-elements": [
+      "warn",
+      {
+        "forbid": []
+      }
+    ],
+    "no-restricted-imports": [
+      "warn",
+      {
+        "patterns": [
+          {
+            "group": [
+              "components/core/**",
+              "components/hud/**",
+              "components/loot/**",
+              "tools/assetgen/**",
+              "ui_kits/gloomwood-hud/**"
+            ],
+            "message": "Import design-system components from 'index.js', not component internals."
+          }
+        ]
+      }
+    ],
+    "no-restricted-syntax": [
+      "warn",
+      {
+        "selector": "Literal[value=/#[0-9a-fA-F]{3,8}\\b/]",
+        "message": "Raw hex color — use a design-system color token via var()."
+      },
+      {
+        "selector": "Literal[value=/\\b\\d+px\\b/]",
+        "message": "Raw px value — use a design-system spacing token via var()."
+      },
+      {
+        "selector": "Literal[value=/font-family\\s*:\\s*(?!['\\\"]?(?:Cinzel|Spectral))/i]",
+        "message": "Font not provided by the design system. Available: Cinzel, Spectral."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='AbilitySlot'] > JSXAttribute > JSXIdentifier[name!=/^(?:src|children|hotkey|size|cooldown|cooldownText|ready|disabled|onClick|style|key|ref|className|style|children)$/]",
+        "message": "<AbilitySlot> doesn't accept that prop. Declared props: src, children, hotkey, size, cooldown, cooldownText, ready, disabled, onClick, style."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='Badge'] > JSXAttribute > JSXIdentifier[name!=/^(?:tone|rarity|outline|children|key|ref|className|style|children)$/]",
+        "message": "<Badge> doesn't accept that prop. Declared props: tone, rarity, outline, children."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='Badge'] > JSXAttribute[name.name='tone'] > Literal[value!=/^(?:gold|neutral|danger|ok)$/]",
+        "message": "<Badge> tone must be one of 'gold' | 'neutral' | 'danger' | 'ok'."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='Button'] > JSXAttribute > JSXIdentifier[name!=/^(?:variant|size|block|iconLeft|disabled|children|key|ref|className|style|children)$/]",
+        "message": "<Button> doesn't accept that prop. Declared props: variant, size, block, iconLeft, disabled, children."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='Button'] > JSXAttribute[name.name='variant'] > Literal[value!=/^(?:primary|secondary|ghost|danger)$/]",
+        "message": "<Button> variant must be one of 'primary' | 'secondary' | 'ghost' | 'danger'."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='Button'] > JSXAttribute[name.name='size'] > Literal[value!=/^(?:sm|md|lg)$/]",
+        "message": "<Button> size must be one of 'sm' | 'md' | 'lg'."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='IconSlot'] > JSXAttribute > JSXIdentifier[name!=/^(?:src|alt|children|rarity|size|count|hotkey|empty|selected|onClick|key|ref|className|style|children)$/]",
+        "message": "<IconSlot> doesn't accept that prop. Declared props: src, alt, children, rarity, size, count, hotkey, empty, selected, onClick."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='TooltipStat'] > JSXAttribute > JSXIdentifier[name!=/^(?:label|value|key|ref|className|style|children)$/]",
+        "message": "<TooltipStat> doesn't accept that prop. Declared props: label, value."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='Nameplate'] > JSXAttribute > JSXIdentifier[name!=/^(?:name|tier|level|hp|maxHp|style|key|ref|className|style|children)$/]",
+        "message": "<Nameplate> doesn't accept that prop. Declared props: name, tier, level, hp, maxHp, style."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='Nameplate'] > JSXAttribute[name.name='tier'] > Literal[value!=/^(?:normal|elite|champion|boss)$/]",
+        "message": "<Nameplate> tier must be one of 'normal' | 'elite' | 'champion' | 'boss'."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='OrbGauge'] > JSXAttribute > JSXIdentifier[name!=/^(?:type|value|max|size|showValue|style|key|ref|className|style|children)$/]",
+        "message": "<OrbGauge> doesn't accept that prop. Declared props: type, value, max, size, showValue, style."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='OrbGauge'] > JSXAttribute[name.name='type'] > Literal[value!=/^(?:health|mana)$/]",
+        "message": "<OrbGauge> type must be one of 'health' | 'mana'."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='Panel'] > JSXAttribute > JSXIdentifier[name!=/^(?:title|subtitle|onClose|footer|width|children|key|ref|className|style|children)$/]",
+        "message": "<Panel> doesn't accept that prop. Declared props: title, subtitle, onClose, footer, width, children."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='RarityName'] > JSXAttribute > JSXIdentifier[name!=/^(?:rarity|size|glow|children|key|ref|className|style|children)$/]",
+        "message": "<RarityName> doesn't accept that prop. Declared props: rarity, size, glow, children."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='RarityName'] > JSXAttribute[name.name='size'] > Literal[value!=/^(?:sm|base|lg)$/]",
+        "message": "<RarityName> size must be one of 'sm' | 'base' | 'lg'."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='ResourceBar'] > JSXAttribute > JSXIdentifier[name!=/^(?:kind|value|max|label|showValue|height|style|key|ref|className|style|children)$/]",
+        "message": "<ResourceBar> doesn't accept that prop. Declared props: kind, value, max, label, showValue, height, style."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='ResourceBar'] > JSXAttribute[name.name='kind'] > Literal[value!=/^(?:health|mana|xp|essence)$/]",
+        "message": "<ResourceBar> kind must be one of 'health' | 'mana' | 'xp' | 'essence'."
+      }
+    ]
+  },
+  "overrides": [
+    {
+      "files": [
+        "**/index.js"
+      ],
+      "rules": {
+        "no-restricted-imports": "off"
+      }
+    }
+  ],
+  "x-omelette": {
+    "components": {
+      "AbilitySlot": {
+        "replaces": []
+      },
+      "Badge": {
+        "replaces": []
+      },
+      "Button": {
+        "replaces": []
+      },
+      "IconSlot": {
+        "replaces": []
+      },
+      "TooltipStat": {
+        "replaces": []
+      },
+      "Nameplate": {
+        "replaces": []
+      },
+      "OrbGauge": {
+        "replaces": []
+      },
+      "Panel": {
+        "replaces": []
+      },
+      "RarityName": {
+        "replaces": []
+      },
+      "ResourceBar": {
+        "replaces": []
+      }
+    },
+    "tokens": [
+      "--ash",
+      "--ash-dim",
+      "--bg-app",
+      "--biome-abyss",
+      "--biome-crypt",
+      "--biome-frost",
+      "--biome-marsh",
+      "--biome-mines",
+      "--biome-town",
+      "--biome-void",
+      "--biome-wild",
+      "--bone",
+      "--bone-bright",
+      "--border-accent",
+      "--border-accent-mid",
+      "--border-accent-soft",
+      "--border-frame",
+      "--border-hair",
+      "--border-heavy",
+      "--border-strong",
+      "--border-subtle",
+      "--char-shadow",
+      "--coin",
+      "--cork",
+      "--corrupt-wash",
+      "--danger",
+      "--danger-dim",
+      "--dur-base",
+      "--dur-fast",
+      "--dur-pulse",
+      "--dur-slow",
+      "--ease-in-out",
+      "--ease-out",
+      "--essence",
+      "--focus-ring",
+      "--font-body",
+      "--font-display",
+      "--font-lore",
+      "--font-mono",
+      "--fx-arcane",
+      "--fx-blood",
+      "--fx-fire",
+      "--fx-frost",
+      "--fx-holy",
+      "--fx-poison",
+      "--glow-corrupted",
+      "--glow-epic",
+      "--glow-gold",
+      "--glow-gold-strong",
+      "--glow-hp",
+      "--glow-legendary",
+      "--glow-magic",
+      "--glow-mana",
+      "--glow-rare",
+      "--glow-unique",
+      "--gold-200",
+      "--gold-300",
+      "--gold-400",
+      "--gold-500",
+      "--gold-600",
+      "--gold-700",
+      "--gold-800",
+      "--hp",
+      "--hp-deep",
+      "--hp-glow",
+      "--hud-edge",
+      "--info",
+      "--ink-400",
+      "--ink-500",
+      "--ink-600",
+      "--ink-700",
+      "--ink-750",
+      "--ink-800",
+      "--ink-850",
+      "--ink-900",
+      "--ink-950",
+      "--leading-normal",
+      "--leading-relaxed",
+      "--leading-snug",
+      "--leading-tight",
+      "--mana",
+      "--mana-deep",
+      "--mana-glow",
+      "--nameplate-w",
+      "--night-wash",
+      "--ok",
+      "--orb-size",
+      "--orb-size-sm",
+      "--radius-lg",
+      "--radius-md",
+      "--radius-none",
+      "--radius-pill",
+      "--radius-slot",
+      "--radius-sm",
+      "--rarity-common",
+      "--rarity-corrupted",
+      "--rarity-epic",
+      "--rarity-legendary",
+      "--rarity-magic",
+      "--rarity-rare",
+      "--rarity-unique",
+      "--shadow-float",
+      "--shadow-panel",
+      "--shadow-slot-inset",
+      "--shadow-text",
+      "--slate-label",
+      "--slot-belt",
+      "--slot-gap",
+      "--slot-gap-tight",
+      "--slot-hotbar",
+      "--slot-inv",
+      "--space-0",
+      "--space-1",
+      "--space-10",
+      "--space-12",
+      "--space-16",
+      "--space-2",
+      "--space-3",
+      "--space-4",
+      "--space-5",
+      "--space-6",
+      "--space-8",
+      "--steel",
+      "--surface-inset",
+      "--surface-overlay",
+      "--surface-panel",
+      "--surface-panel-solid",
+      "--surface-raised",
+      "--surface-slot",
+      "--surface-slot-hover",
+      "--text-2xl",
+      "--text-2xs",
+      "--text-3xl",
+      "--text-4xl",
+      "--text-base",
+      "--text-body",
+      "--text-display",
+      "--text-faint",
+      "--text-heading",
+      "--text-label",
+      "--text-lg",
+      "--text-md",
+      "--text-muted",
+      "--text-on-gold",
+      "--text-sm",
+      "--text-stat",
+      "--text-xl",
+      "--text-xs",
+      "--tracking-body",
+      "--tracking-display",
+      "--tracking-heading",
+      "--tracking-label",
+      "--warn",
+      "--weight-black",
+      "--weight-bold",
+      "--weight-medium",
+      "--weight-regular",
+      "--weight-semibold",
+      "--xp",
+      "--z-chrome",
+      "--z-hud",
+      "--z-inspector",
+      "--z-panel",
+      "--z-tooltip",
+      "--z-world"
+    ],
+    "tokenKinds": {
+      "--font-display": "font",
+      "--font-lore": "font",
+      "--font-body": "font",
+      "--font-mono": "font",
+      "--ink-950": "color",
+      "--ink-900": "color",
+      "--ink-850": "color",
+      "--ink-800": "color",
+      "--ink-750": "color",
+      "--ink-700": "color",
+      "--ink-600": "color",
+      "--ink-500": "color",
+      "--ink-400": "color",
+      "--gold-200": "color",
+      "--gold-300": "color",
+      "--gold-400": "color",
+      "--gold-500": "color",
+      "--gold-600": "color",
+      "--gold-700": "color",
+      "--gold-800": "color",
+      "--cork": "color",
+      "--bone": "color",
+      "--bone-bright": "color",
+      "--ash": "color",
+      "--ash-dim": "color",
+      "--steel": "color",
+      "--slate-label": "color",
+      "--char-shadow": "shadow",
+      "--hp": "color",
+      "--hp-glow": "color",
+      "--hp-deep": "color",
+      "--mana": "color",
+      "--mana-glow": "color",
+      "--mana-deep": "color",
+      "--essence": "color",
+      "--xp": "color",
+      "--coin": "color",
+      "--rarity-common": "color",
+      "--rarity-magic": "color",
+      "--rarity-rare": "color",
+      "--rarity-epic": "color",
+      "--rarity-legendary": "color",
+      "--rarity-corrupted": "color",
+      "--rarity-unique": "color",
+      "--danger": "color",
+      "--danger-dim": "color",
+      "--warn": "color",
+      "--ok": "color",
+      "--info": "color",
+      "--fx-fire": "color",
+      "--fx-frost": "color",
+      "--fx-arcane": "color",
+      "--fx-poison": "color",
+      "--fx-holy": "color",
+      "--fx-blood": "color",
+      "--biome-town": "color",
+      "--biome-wild": "color",
+      "--biome-crypt": "color",
+      "--biome-marsh": "color",
+      "--biome-mines": "color",
+      "--biome-frost": "color",
+      "--biome-void": "color",
+      "--biome-abyss": "color",
+      "--corrupt-wash": "color",
+      "--night-wash": "color",
+      "--bg-app": "color",
+      "--surface-panel": "color",
+      "--surface-panel-solid": "color",
+      "--surface-raised": "color",
+      "--surface-slot": "color",
+      "--surface-slot-hover": "color",
+      "--surface-overlay": "color",
+      "--surface-inset": "color",
+      "--border-accent": "color",
+      "--border-accent-soft": "color",
+      "--border-accent-mid": "color",
+      "--border-subtle": "color",
+      "--border-strong": "color",
+      "--text-display": "font",
+      "--text-heading": "font",
+      "--text-body": "font",
+      "--text-muted": "font",
+      "--text-faint": "font",
+      "--text-stat": "font",
+      "--text-label": "font",
+      "--text-on-gold": "font",
+      "--focus-ring": "color",
+      "--text-2xs": "font",
+      "--text-xs": "font",
+      "--text-sm": "font",
+      "--text-base": "font",
+      "--text-md": "font",
+      "--text-lg": "font",
+      "--text-xl": "font",
+      "--text-2xl": "font",
+      "--text-3xl": "font",
+      "--text-4xl": "font",
+      "--weight-regular": "font",
+      "--weight-medium": "font",
+      "--weight-semibold": "font",
+      "--weight-bold": "font",
+      "--weight-black": "font",
+      "--leading-tight": "font",
+      "--leading-snug": "font",
+      "--leading-normal": "font",
+      "--leading-relaxed": "font",
+      "--tracking-display": "font",
+      "--tracking-heading": "font",
+      "--tracking-label": "font",
+      "--tracking-body": "font",
+      "--space-0": "spacing",
+      "--space-1": "spacing",
+      "--space-2": "spacing",
+      "--space-3": "spacing",
+      "--space-4": "spacing",
+      "--space-5": "spacing",
+      "--space-6": "spacing",
+      "--space-8": "spacing",
+      "--space-10": "spacing",
+      "--space-12": "spacing",
+      "--space-16": "spacing",
+      "--slot-belt": "spacing",
+      "--slot-hotbar": "spacing",
+      "--slot-inv": "spacing",
+      "--slot-gap": "spacing",
+      "--slot-gap-tight": "spacing",
+      "--orb-size": "spacing",
+      "--orb-size-sm": "spacing",
+      "--nameplate-w": "spacing",
+      "--hud-edge": "spacing",
+      "--radius-none": "radius",
+      "--radius-sm": "radius",
+      "--radius-slot": "radius",
+      "--radius-md": "radius",
+      "--radius-lg": "radius",
+      "--radius-pill": "radius",
+      "--border-hair": "spacing",
+      "--border-frame": "spacing",
+      "--border-heavy": "spacing",
+      "--shadow-panel": "shadow",
+      "--shadow-float": "shadow",
+      "--shadow-slot-inset": "shadow",
+      "--shadow-text": "shadow",
+      "--glow-gold": "shadow",
+      "--glow-gold-strong": "shadow",
+      "--glow-hp": "shadow",
+      "--glow-mana": "shadow",
+      "--glow-magic": "shadow",
+      "--glow-rare": "shadow",
+      "--glow-epic": "shadow",
+      "--glow-legendary": "shadow",
+      "--glow-corrupted": "shadow",
+      "--glow-unique": "shadow",
+      "--ease-out": "other",
+      "--ease-in-out": "other",
+      "--dur-fast": "other",
+      "--dur-base": "other",
+      "--dur-slow": "other",
+      "--dur-pulse": "other",
+      "--z-world": "other",
+      "--z-hud": "other",
+      "--z-chrome": "other",
+      "--z-panel": "other",
+      "--z-tooltip": "other",
+      "--z-inspector": "other"
+    },
+    "fontFamilies": [
+      "Cinzel",
+      "Spectral"
+    ]
+  }
+}

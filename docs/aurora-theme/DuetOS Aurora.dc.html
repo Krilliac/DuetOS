@@ -1,0 +1,1926 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="_ds/browsergame-arpg-design-system-aa965ce3-effd-4059-830f-5ae805a61622/styles.css">
+<script src="_ds/browsergame-arpg-design-system-aa965ce3-effd-4059-830f-5ae805a61622/_ds_bundle.js"></script>
+<style>
+  /* Token layer — mirrors docs/duet-theme/prototype/desktop.html, refined. */
+  :root{
+    --bg-0:#04060a; --bg-1:#080c12; --bg-2:#0e141d; --bg-3:#131b25;
+    --glass:rgba(19,26,35,.46); --glass-2:rgba(11,16,22,.58); --glass-3:rgba(255,255,255,.06);
+    --recess:rgba(4,7,11,.42);
+    --line:rgba(255,255,255,.1); --line-2:rgba(255,255,255,.2); --sheen:rgba(255,255,255,.34);
+    --gloss:linear-gradient(180deg, rgba(255,255,255,.11) 0%, rgba(255,255,255,.03) 34%, rgba(255,255,255,0) 46%, rgba(255,255,255,.02) 100%);
+    --gloss-strong:linear-gradient(180deg, rgba(255,255,255,.2) 0%, rgba(255,255,255,.05) 40%, rgba(255,255,255,0) 60%, rgba(255,255,255,.03) 100%);
+    --ink:#eef3f9; --ink-2:#a7b3c2; --ink-3:#68737f;
+    --accent:#31e0c0; --accent-2:#ffc046; --danger:#ff5f57;
+    --hover:rgba(255,255,255,.07); --press:rgba(255,255,255,.12);
+    --shadow-win:0 44px 90px -28px rgba(0,0,0,.78);
+    --shadow-float:0 24px 60px -20px rgba(0,0,0,.6);
+    --vignette:rgba(0,0,0,.35);
+    --label-shadow:0 1px 3px rgba(0,0,0,.5);
+  }
+  :root[data-duet="light"]{
+    --bg-0:#dfe5ee; --bg-1:#eaeef4; --bg-2:#f2f5f9; --bg-3:#ffffff;
+    --glass:rgba(255,255,255,.56); --glass-2:rgba(255,255,255,.68); --glass-3:rgba(9,20,38,.03);
+    --recess:rgba(9,20,38,.045);
+    --line:rgba(9,20,38,.10); --line-2:rgba(9,20,38,.14); --sheen:rgba(255,255,255,1);
+    --gloss:linear-gradient(180deg, rgba(255,255,255,.7) 0%, rgba(255,255,255,.22) 34%, rgba(255,255,255,0) 48%, rgba(255,255,255,.14) 100%);
+    --gloss-strong:linear-gradient(180deg, rgba(255,255,255,.92) 0%, rgba(255,255,255,.34) 42%, rgba(255,255,255,0) 62%, rgba(255,255,255,.2) 100%);
+    --ink:#111a24; --ink-2:#4b5765; --ink-3:#7b8794;
+    --hover:rgba(9,20,38,.05); --press:rgba(9,20,38,.09);
+    --shadow-win:0 34px 70px -26px rgba(16,28,48,.34);
+    --shadow-float:0 20px 44px -18px rgba(16,28,48,.28);
+    --vignette:rgba(24,44,80,.12);
+    --label-shadow:0 1px 2px rgba(255,255,255,.7);
+  }
+  html,body{margin:0;padding:0;background:#04060a;color:#eef3f9;font-family:'Instrument Sans',ui-sans-serif,system-ui,sans-serif}
+  *{box-sizing:border-box}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{color:var(--accent-2)}
+  input{font-family:inherit}
+  .dz{scrollbar-width:thin;scrollbar-color:rgba(140,160,185,.28) transparent}
+  .dz::-webkit-scrollbar{width:10px;height:10px}
+  .dz::-webkit-scrollbar-track{background:transparent}
+  .dz::-webkit-scrollbar-thumb{background:rgba(140,160,185,.22);border-radius:99px;border:3px solid transparent;background-clip:padding-box}
+  .dz::-webkit-scrollbar-thumb:hover{background:rgba(140,160,185,.4);background-clip:padding-box;border:3px solid transparent}
+  input[type=range]{-webkit-appearance:none;appearance:none}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;border-radius:99px;background:#fff;border:2px solid rgba(0,0,0,.4);box-shadow:0 1px 5px rgba(0,0,0,.55);cursor:pointer}
+  input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:99px;background:#fff;border:2px solid rgba(0,0,0,.4);cursor:pointer}
+  input[type=color]{-webkit-appearance:none;appearance:none}
+  input[type=color]::-webkit-color-swatch-wrapper{padding:2px}
+  input[type=color]::-webkit-color-swatch{border:0;border-radius:5px}
+  @keyframes duet-drift{0%{transform:translate(0,0) rotate(0deg)}50%{transform:translate(-18px,12px) rotate(1.4deg)}100%{transform:translate(0,0) rotate(0deg)}}
+  @keyframes duet-breathe{0%,100%{opacity:.5}50%{opacity:.95}}
+  @keyframes duet-caret{50%{opacity:0}}
+  @keyframes duet-load{0%{transform:translateX(-100%)}100%{transform:translateX(320%)}}
+</style>
+</helmet>
+
+<div style="width:100%; overflow:hidden; background:#04060a; height:{{ fitH }}px">
+<div style="width:1920px; transform-origin:top left; transform:scale({{ fit }}); background:#04060a; padding:0 0 40px">
+
+  <div style="display:flex; align-items:center; gap:14px; height:64px; padding:0 28px; background:#04060a; border-bottom:1px solid rgba(255,255,255,.07)">
+    <div style="display:flex; align-items:center; gap:10px; padding-right:14px; border-right:1px solid rgba(255,255,255,.09)">
+      <svg width="22" height="22" viewBox="0 0 22 22" fill="none" aria-hidden="true">
+        <circle cx="9.2" cy="11" r="7.5" stroke="var(--accent)" stroke-width="2.4" stroke-linecap="round" stroke-dasharray="24.7 47.1" transform="rotate(-30 9.2 11)"></circle>
+        <circle cx="12.8" cy="11" r="7.5" stroke="var(--accent-2)" stroke-width="2.4" stroke-linecap="round" stroke-dasharray="24.7 47.1" transform="rotate(150 12.8 11)"></circle>
+      </svg>
+      <div style="font-size:13px; font-weight:600; letter-spacing:.2px; color:#eef3f9">DuetOS <span style="color:#68737f; font-weight:500">Aurora shell</span></div>
+    </div>
+    <sc-for list="{{ screens }}" as="s" hint-placeholder-count="4">
+      <button onClick="{{ s.go }}" style="appearance:none; height:32px; padding:0 14px; border-radius:8px; font-size:12.5px; font-weight:600; cursor:pointer; border:1px solid {{ s.border }}; background:{{ s.bg }}; color:{{ s.fg }}" style-hover="border-color:rgba(255,255,255,.22)">{{ s.label }}</button>
+    </sc-for>
+    <span style="flex:1"></span>
+    <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:#68737f; letter-spacing:.4px">1920 × 1080 · 60 Hz</div>
+    <button onClick="{{ toggleTheme }}" style="appearance:none; display:flex; align-items:center; gap:8px; height:32px; padding:0 14px; border-radius:8px; border:1px solid rgba(255,255,255,.14); background:rgba(255,255,255,.05); color:#eef3f9; font-size:12.5px; font-weight:600; cursor:pointer" style-hover="background:rgba(255,255,255,.1)">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"></circle><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6L17 7M7 17l-1.4 1.4"></path></svg>
+      {{ themeLabel }}
+    </button>
+  </div>
+
+  <div data-screen-label="Aurora screen" style="position:relative; width:1920px; height:1080px; overflow:hidden; background:var(--bg-1); color:var(--ink); font-size:14px; line-height:1.4">
+
+    <div style="position:absolute; inset:0; overflow:hidden; background:linear-gradient(158deg, var(--bg-2) 0%, var(--bg-1) 52%, var(--bg-0) 100%)">
+      <div style="position:absolute; inset:-10%; background:radial-gradient(46% 44% at 74% 20%, color-mix(in oklab, var(--accent) 34%, transparent) 0%, transparent 70%), radial-gradient(42% 40% at 16% 86%, color-mix(in oklab, var(--accent-2) 22%, transparent) 0%, transparent 72%), radial-gradient(34% 32% at 22% 14%, color-mix(in oklab, var(--accent) 14%, transparent) 0%, transparent 70%); filter:blur(10px); animation:duet-drift 34s ease-in-out infinite"></div>
+      <div style="position:absolute; inset:0; opacity:.5; background-image:linear-gradient(to right, var(--line) 1px, transparent 1px), linear-gradient(to bottom, var(--line) 1px, transparent 1px); background-size:60px 60px; mask-image:radial-gradient(80% 70% at 50% 45%, #000 30%, transparent 100%); -webkit-mask-image:radial-gradient(80% 70% at 50% 45%, #000 30%, transparent 100%)"></div>
+      <div style="position:absolute; left:0; right:0; top:0; bottom:0; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:12px; line-height:26px; letter-spacing:2px; white-space:pre; color:var(--ink-3); opacity:.13; padding:56px 72px; mask-image:linear-gradient(105deg, #000 0%, transparent 46%); -webkit-mask-image:linear-gradient(105deg, #000 0%, transparent 46%)">
+        <sc-for list="{{ hexRows }}" as="row" hint-placeholder-count="24"><div>{{ row }}</div></sc-for>
+      </div>
+      <svg style="position:absolute; left:56%; top:46%; transform:translate(-50%,-50%); animation:duet-drift 46s ease-in-out infinite" width="1240" height="1240" viewBox="0 0 1240 1240" fill="none">
+        <g transform="translate(620,620)">
+          <circle r="470" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-dasharray="620 9999" transform="rotate(-30) translate(-90,0)" opacity=".22"></circle>
+          <circle r="470" stroke="var(--accent-2)" stroke-width="2" stroke-linecap="round" stroke-dasharray="620 9999" transform="rotate(150) translate(-90,0)" opacity=".18"></circle>
+          <circle r="360" stroke="var(--accent)" stroke-width="1.4" stroke-linecap="round" stroke-dasharray="474 9999" transform="rotate(-24) translate(-70,0)" opacity=".14"></circle>
+          <circle r="360" stroke="var(--accent-2)" stroke-width="1.4" stroke-linecap="round" stroke-dasharray="474 9999" transform="rotate(156) translate(-70,0)" opacity=".12"></circle>
+          <circle r="250" stroke="var(--accent)" stroke-width="1" stroke-linecap="round" stroke-dasharray="330 9999" transform="rotate(-18) translate(-50,0)" opacity=".1"></circle>
+          <circle r="250" stroke="var(--accent-2)" stroke-width="1" stroke-linecap="round" stroke-dasharray="330 9999" transform="rotate(162) translate(-50,0)" opacity=".09"></circle>
+        </g>
+      </svg>
+      <div style="position:absolute; inset:0; background:radial-gradient(120% 100% at 50% 50%, transparent 40%, var(--vignette) 100%)"></div>
+    </div>
+
+    <sc-if value="{{ isDesktop }}" hint-placeholder-val="{{ true }}">
+    <div style="position:absolute; inset:0">
+
+      <div style="position:absolute; left:44px; top:44px; display:grid; grid-template-columns:repeat(2, 104px); gap:10px">
+        <sc-for list="{{ deskIcons }}" as="it" hint-placeholder-count="6">
+          <button onClick="{{ it.open }}" style="appearance:none; border:1px solid transparent; background:transparent; border-radius:12px; padding:10px 6px 8px; display:flex; flex-direction:column; align-items:center; gap:8px; color:var(--ink); cursor:pointer; text-shadow:var(--label-shadow)" style-hover="background:var(--glass-3); border-color:var(--line)">
+            <span style="width:52px; height:52px; border-radius:14px; display:flex; align-items:center; justify-content:center; background:linear-gradient(180deg, rgba(255,255,255,.3) 0%, rgba(255,255,255,.06) 44%, rgba(255,255,255,0) 52%), linear-gradient(160deg, color-mix(in oklab, var(--accent) 30%, transparent), color-mix(in oklab, var(--accent) 8%, transparent)); border:1px solid color-mix(in oklab, var(--accent) 38%, transparent); box-shadow:0 12px 24px -12px rgba(0,0,0,.75), inset 0 1px 0 rgba(255,255,255,.5), inset 0 -6px 12px rgba(0,0,0,.18); color:var(--accent)">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><g>{{ it.path }}</g></svg>
+            </span>
+            <span style="font-size:12px; font-weight:500; text-align:center; line-height:1.25; letter-spacing:.1px">{{ it.label }}</span>
+          </button>
+        </sc-for>
+      </div>
+
+      <div style="position:absolute; right:44px; top:44px; width:300px; display:flex; flex-direction:column; gap:14px">
+        <div style="padding:20px 22px; border-radius:18px; background:var(--gloss-strong), var(--glass); border:1px solid var(--line-2); backdrop-filter:blur(32px) saturate(190%); -webkit-backdrop-filter:blur(32px) saturate(190%); box-shadow:var(--shadow-float), inset 0 1px 0 var(--sheen), inset 0 0 40px rgba(255,255,255,.03)">
+          <div style="display:flex; align-items:flex-end; justify-content:space-between; gap:12px">
+            <div>
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:44px; font-weight:600; letter-spacing:-1px; line-height:1; font-variant-numeric:tabular-nums; color:var(--ink)">{{ clock.hm }}</div>
+              <div style="font-size:12.5px; color:var(--ink-2); margin-top:8px; letter-spacing:.2px">{{ clock.date }}</div>
+            </div>
+            <div style="width:66px; height:66px; border-radius:999px; position:relative; background:radial-gradient(circle at 50% 36%, var(--glass-3), var(--recess)); border:1px solid var(--line-2); flex:0 0 auto">
+              <span style="position:absolute; left:50%; top:50%; width:2px; height:6px; background:var(--ink-3); transform:translate(-50%,-100%) rotate(0deg) translateY(-23px); transform-origin:50% 100%"></span>
+              <span style="position:absolute; left:50%; top:50%; width:2px; height:6px; background:var(--ink-3); transform:translate(-50%,-100%) rotate(90deg) translateY(-23px); transform-origin:50% 100%"></span>
+              <span style="position:absolute; left:50%; top:50%; width:2px; height:6px; background:var(--ink-3); transform:translate(-50%,-100%) rotate(180deg) translateY(-23px); transform-origin:50% 100%"></span>
+              <span style="position:absolute; left:50%; top:50%; width:2px; height:6px; background:var(--ink-3); transform:translate(-50%,-100%) rotate(270deg) translateY(-23px); transform-origin:50% 100%"></span>
+              <div style="position:absolute; left:50%; top:50%; width:2.5px; height:17px; border-radius:2px; background:var(--ink); transform-origin:50% 100%; transform:translate(-50%,-100%) rotate({{ clock.hDeg }}deg)"></div>
+              <div style="position:absolute; left:50%; top:50%; width:2px; height:24px; border-radius:2px; background:var(--ink); transform-origin:50% 100%; transform:translate(-50%,-100%) rotate({{ clock.mDeg }}deg)"></div>
+              <div style="position:absolute; left:50%; top:50%; width:1px; height:26px; background:var(--accent-2); transform-origin:50% 100%; transform:translate(-50%,-100%) rotate({{ clock.sDeg }}deg)"></div>
+              <div style="position:absolute; left:50%; top:50%; width:6px; height:6px; border-radius:99px; background:var(--accent); transform:translate(-50%,-50%); box-shadow:0 0 10px color-mix(in oklab, var(--accent) 70%, transparent)"></div>
+            </div>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px; margin-top:16px; padding-top:14px; border-top:1px solid var(--line); font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:var(--ink-3)">
+            <span style="width:6px; height:6px; border-radius:99px; background:var(--accent); box-shadow:0 0 8px var(--accent)"></span>
+            <span>uptime 00:14:22</span><span style="color:var(--line-2)">|</span><span>UTC+0</span>
+          </div>
+        </div>
+
+        <div style="padding:16px 18px 18px; border-radius:18px; background:var(--gloss-strong), var(--glass); border:1px solid var(--line-2); backdrop-filter:blur(32px) saturate(190%); -webkit-backdrop-filter:blur(32px) saturate(190%); box-shadow:var(--shadow-float), inset 0 1px 0 var(--sheen), inset 0 0 40px rgba(255,255,255,.03)">
+          <div style="display:flex; align-items:center; gap:8px; margin-bottom:12px">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+              <circle cx="5.9" cy="7" r="4.8" stroke="var(--accent)" stroke-width="1.7" stroke-linecap="round" stroke-dasharray="15.8 30.1" transform="rotate(-30 5.9 7)"></circle>
+              <circle cx="8.1" cy="7" r="4.8" stroke="var(--accent-2)" stroke-width="1.7" stroke-linecap="round" stroke-dasharray="15.8 30.1" transform="rotate(150 8.1 7)"></circle>
+            </svg>
+            <span style="font-size:11px; font-weight:700; letter-spacing:.9px; text-transform:uppercase; color:var(--ink-2)">Kernel</span>
+            <span style="flex:1"></span>
+            <span style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:10.5px; color:var(--accent)">healthy</span>
+          </div>
+          <svg width="100%" height="46" viewBox="0 0 100 100" preserveAspectRatio="none" style="display:block; margin-bottom:12px">
+            <path d="{{ spark.area }}" fill="color-mix(in oklab, var(--accent) 20%, transparent)"></path>
+            <path d="{{ spark.line }}" fill="none" stroke="var(--accent)" stroke-width="1.6" vector-effect="non-scaling-stroke"></path>
+          </svg>
+          <sc-for list="{{ kernelRows }}" as="r" hint-placeholder-count="5">
+            <div style="display:flex; justify-content:space-between; align-items:baseline; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11.5px; padding:3px 0; color:var(--ink-3)">
+              <span>{{ r.k }}</span><span style="color:var(--ink); font-weight:500">{{ r.v }}</span>
+            </div>
+          </sc-for>
+        </div>
+
+        <div style="padding:16px 18px 18px; border-radius:18px; background:var(--gloss-strong), var(--glass); border:1px solid var(--line-2); backdrop-filter:blur(32px) saturate(190%); -webkit-backdrop-filter:blur(32px) saturate(190%); box-shadow:var(--shadow-float), inset 0 1px 0 var(--sheen), inset 0 0 40px rgba(255,255,255,.03)">
+          <div style="font-size:11px; font-weight:700; letter-spacing:.9px; text-transform:uppercase; color:var(--ink-2); margin-bottom:12px">ABI peers</div>
+          <sc-for list="{{ abiRows }}" as="r" hint-placeholder-count="3">
+            <div style="display:flex; align-items:center; gap:10px; padding:6px 0">
+              <span style="width:8px; height:8px; border-radius:99px; background:{{ r.dot }}; box-shadow:0 0 8px {{ r.dot }}"></span>
+              <span style="font-size:12.5px; font-weight:500; color:var(--ink)">{{ r.label }}</span>
+              <span style="flex:1"></span>
+              <span style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:var(--ink-3)">{{ r.meta }}</span>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+
+      <sc-if value="{{ kl.shown }}" hint-placeholder-val="{{ true }}">
+      <div onMouseDown="{{ kl.focus }}" style="position:absolute; left:{{ kl.left }}px; top:{{ kl.top }}px; width:{{ kl.width }}px; height:{{ kl.height }}px; z-index:{{ kl.z }}; border-radius:14px; overflow:hidden; display:flex; flex-direction:column; background:var(--gloss), var(--glass-2); border:1px solid var(--line-2); backdrop-filter:blur(36px) saturate(185%); -webkit-backdrop-filter:blur(36px) saturate(185%); box-shadow:var(--shadow-win), inset 0 1px 0 var(--sheen), inset 0 -1px 0 rgba(255,255,255,.05)">
+        <div onMouseDown="{{ kl.drag }}" onDoubleClick="{{ kl.max }}" style="flex:0 0 44px; height:44px; display:flex; align-items:center; gap:10px; padding:0 0 0 16px; background:linear-gradient(180deg, rgba(255,255,255,.1), rgba(255,255,255,.03) 50%, rgba(255,255,255,0) 51%), linear-gradient(180deg, color-mix(in oklab, var(--bg-3) 56%, transparent), transparent); border-bottom:1px solid var(--line); user-select:none; cursor:default; position:relative">
+          <div style="position:absolute; left:0; right:0; top:0; height:1px; background:linear-gradient(90deg, transparent, var(--sheen), transparent)"></div>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M6 8h12M6 12h8M6 16h10"></path></svg>
+          <div style="font-size:13px; font-weight:600; letter-spacing:.1px; color:var(--ink)">Kernel Log</div>
+          <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11.5px; color:var(--ink-3); white-space:nowrap">/sys/klog · live</div>
+          <span style="flex:1"></span>
+          <button onClick="{{ kl.min }}" style="appearance:none; border:0; background:transparent; width:46px; height:44px; display:flex; align-items:center; justify-content:center; color:var(--ink-2); cursor:pointer" style-hover="background:var(--hover)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M5 12h14"></path></svg></button>
+          <button onClick="{{ kl.max }}" style="appearance:none; border:0; background:transparent; width:46px; height:44px; display:flex; align-items:center; justify-content:center; color:var(--ink-2); cursor:pointer" style-hover="background:var(--hover)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="4.5" y="4.5" width="15" height="15" rx="2"></rect></svg></button>
+          <button onClick="{{ kl.close }}" style="appearance:none; border:0; background:transparent; width:52px; height:44px; display:flex; align-items:center; justify-content:center; color:var(--ink-2); cursor:pointer" style-hover="background:var(--danger); color:#fff"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px; padding:10px 14px; border-bottom:1px solid var(--line)">
+          <div style="flex:1; display:flex; align-items:center; gap:8px; height:30px; padding:0 12px; border-radius:99px; background:var(--recess); border:1px solid var(--line); box-shadow:inset 0 2px 5px rgba(0,0,0,.32), inset 0 -1px 0 rgba(255,255,255,.07)">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--ink-3)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6"></circle><path d="M20 20l-3.5-3.5"></path></svg>
+            <input value="{{ filter }}" onInput="{{ onFilter }}" placeholder="Filter by tag or text…" style="flex:1; border:0; outline:none; background:transparent; color:var(--ink); font-size:12px; font-family:'JetBrains Mono',ui-monospace,monospace">
+          </div>
+          <sc-for list="{{ levels }}" as="l" hint-placeholder-count="3">
+            <button onClick="{{ l.toggle }}" style="appearance:none; border:1px solid {{ l.border }}; background:{{ l.bg }}; color:{{ l.fg }}; font-size:10.5px; font-weight:700; letter-spacing:.6px; padding:5px 11px; border-radius:99px; cursor:pointer">{{ l.id }}</button>
+          </sc-for>
+        </div>
+        <div class="dz" style="flex:1; min-height:0; overflow-y:auto; overflow-x:hidden; padding:10px 0; background:var(--recess); font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11.5px; line-height:20px">
+          <sc-for list="{{ logLines }}" as="l" hint-placeholder-count="18">
+            <div style="display:flex; gap:6px; padding:1px 16px">
+              <span style="color:var(--ink-3); width:92px; flex:0 0 auto">[{{ l.ts }}]</span>
+              <span style="width:12px; flex:0 0 auto; font-weight:700; color:{{ l.lvlColor }}">{{ l.lvl }}</span>
+              <span style="color:var(--ink-3); width:62px; flex:0 0 auto">{{ l.tag }}</span>
+              <span style="flex:1; min-width:0; white-space:pre-wrap; word-break:break-word; color:{{ l.msgColor }}">{{ l.msg }}</span>
+            </div>
+          </sc-for>
+          <div style="display:flex; gap:6px; padding:5px 16px; color:var(--accent)">
+            <span style="width:92px"></span><span style="width:12px">▸</span>
+            <span style="border-left:7px solid var(--accent); height:14px; animation:duet-caret 1.05s steps(2,end) infinite"></span>
+          </div>
+        </div>
+        <div style="flex:0 0 30px; height:30px; display:flex; align-items:center; gap:14px; padding:0 16px; border-top:1px solid var(--line); font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:var(--ink-3)">
+          <span>{{ logCount }}</span><span style="color:var(--line-2)">|</span><span>tail -F /sys/klog</span><span style="flex:1"></span><span>drops=0</span>
+        </div>
+      </div>
+      </sc-if>
+
+      <sc-if value="{{ tm.shown }}" hint-placeholder-val="{{ true }}">
+      <div onMouseDown="{{ tm.focus }}" style="position:absolute; left:{{ tm.left }}px; top:{{ tm.top }}px; width:{{ tm.width }}px; height:{{ tm.height }}px; z-index:{{ tm.z }}; border-radius:14px; overflow:hidden; display:flex; flex-direction:column; background:var(--gloss), var(--glass-2); border:1px solid var(--line-2); backdrop-filter:blur(36px) saturate(185%); -webkit-backdrop-filter:blur(36px) saturate(185%); box-shadow:var(--shadow-win), inset 0 1px 0 var(--sheen), inset 0 -1px 0 rgba(255,255,255,.05)">
+        <sc-if value="{{ tm.focused }}" hint-placeholder-val="{{ true }}">
+          <div style="position:absolute; inset:0; border-radius:14px; pointer-events:none; box-shadow:inset 0 0 0 1px color-mix(in oklab, var(--accent) 30%, transparent), 0 0 60px -10px color-mix(in oklab, var(--accent) 22%, transparent); z-index:9"></div>
+        </sc-if>
+        <div onMouseDown="{{ tm.drag }}" onDoubleClick="{{ tm.max }}" style="flex:0 0 44px; height:44px; display:flex; align-items:center; gap:10px; padding:0 0 0 16px; background:linear-gradient(180deg, rgba(255,255,255,.15), rgba(255,255,255,.04) 50%, rgba(255,255,255,0) 51%), linear-gradient(180deg, color-mix(in oklab, var(--bg-3) 70%, transparent), transparent); border-bottom:1px solid var(--line); user-select:none; cursor:default; position:relative">
+          <div style="position:absolute; left:0; right:0; top:0; height:1px; background:linear-gradient(90deg, transparent, var(--sheen), transparent)"></div>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 19h18"></path><rect x="5" y="11" width="3" height="8"></rect><rect x="10.5" y="7" width="3" height="12"></rect><rect x="16" y="13" width="3" height="6"></rect></svg>
+          <div style="font-size:13px; font-weight:600; letter-spacing:.1px; color:var(--ink)">Task Manager</div>
+          <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11.5px; color:var(--ink-3)">14 processes · 3 ABIs</div>
+          <span style="flex:1"></span>
+          <button onClick="{{ tm.min }}" style="appearance:none; border:0; background:transparent; width:46px; height:44px; display:flex; align-items:center; justify-content:center; color:var(--ink-2); cursor:pointer" style-hover="background:var(--hover)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M5 12h14"></path></svg></button>
+          <button onClick="{{ tm.max }}" style="appearance:none; border:0; background:transparent; width:46px; height:44px; display:flex; align-items:center; justify-content:center; color:var(--ink-2); cursor:pointer" style-hover="background:var(--hover)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="4.5" y="4.5" width="15" height="15" rx="2"></rect></svg></button>
+          <button onClick="{{ tm.close }}" style="appearance:none; border:0; background:transparent; width:52px; height:44px; display:flex; align-items:center; justify-content:center; color:var(--ink-2); cursor:pointer" style-hover="background:var(--danger); color:#fff"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+        </div>
+        <div style="display:flex; align-items:center; gap:4px; padding:0 14px; border-bottom:1px solid var(--line)">
+          <sc-for list="{{ tabs }}" as="t" hint-placeholder-count="4">
+            <button onClick="{{ t.go }}" style="appearance:none; border:0; background:transparent; padding:13px 14px 11px; font-size:12.5px; cursor:pointer; font-weight:{{ t.weight }}; color:{{ t.fg }}; border-bottom:2px solid {{ t.rail }}; margin-bottom:-1px">{{ t.label }}</button>
+          </sc-for>
+          <span style="flex:1"></span>
+          <div style="display:flex; align-items:center; gap:6px; padding:4px 10px; border-radius:99px; background:var(--recess); border:1px solid var(--line); font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:var(--ink-3)">
+            <span style="width:6px; height:6px; border-radius:99px; background:var(--accent)"></span>live · 1 s
+          </div>
+        </div>
+
+        <sc-if value="{{ tabPerf }}" hint-placeholder-val="{{ true }}">
+        <div style="flex:1; min-height:0; display:grid; grid-template-columns:264px 1fr">
+          <div style="border-right:1px solid var(--line); padding:8px 0; background:var(--recess); overflow:auto" class="dz">
+            <sc-for list="{{ perfRows }}" as="r" hint-placeholder-count="5">
+              <div style="display:flex; align-items:center; gap:12px; padding:12px 16px; background:{{ r.bg }}; border-left:2px solid {{ r.rail }}">
+                <svg width="60" height="26" viewBox="0 0 100 100" preserveAspectRatio="none" style="display:block; flex:0 0 auto">
+                  <path d="{{ r.area }}" fill="{{ r.fill }}"></path>
+                  <path d="{{ r.line }}" fill="none" stroke="{{ r.stroke }}" stroke-width="1.4" vector-effect="non-scaling-stroke"></path>
+                </svg>
+                <div style="min-width:0">
+                  <div style="font-size:12.5px; font-weight:600; color:var(--ink)">{{ r.k }}</div>
+                  <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:var(--ink-3); margin-top:2px">{{ r.v }}</div>
+                </div>
+              </div>
+            </sc-for>
+          </div>
+          <div style="padding:22px 26px; display:flex; flex-direction:column; gap:20px; min-height:0">
+            <div style="display:flex; align-items:baseline; gap:12px">
+              <div style="font-size:17px; font-weight:600; letter-spacing:-.2px">CPU</div>
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11.5px; color:var(--ink-3)">4 logical · x86_64 · 3.20 GHz · HPET-calibrated LAPIC</div>
+              <span style="flex:1"></span>
+              <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:24px; font-weight:600; color:var(--accent); font-variant-numeric:tabular-nums">14%</div>
+            </div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px">
+              <sc-for list="{{ cores }}" as="c" hint-placeholder-count="4">
+                <div style="border:1px solid var(--line); border-radius:12px; padding:14px 16px; background:var(--glass-3)">
+                  <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:10px">
+                    <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11.5px; color:var(--ink-3)">Core {{ c.idx }}</div>
+                    <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:13px; font-weight:600; color:var(--ink); font-variant-numeric:tabular-nums">{{ c.last }}%</div>
+                  </div>
+                  <svg width="100%" height="52" viewBox="0 0 100 100" preserveAspectRatio="none" style="display:block">
+                    <path d="{{ c.area }}" fill="color-mix(in oklab, var(--accent) 18%, transparent)"></path>
+                    <path d="{{ c.line }}" fill="none" stroke="var(--accent)" stroke-width="1.5" vector-effect="non-scaling-stroke"></path>
+                  </svg>
+                </div>
+              </sc-for>
+            </div>
+            <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:16px; border-top:1px solid var(--line); padding-top:18px">
+              <sc-for list="{{ perfStats }}" as="s" hint-placeholder-count="4">
+                <div>
+                  <div style="font-size:10.5px; color:var(--ink-3); text-transform:uppercase; letter-spacing:.8px; font-weight:600">{{ s.label }}</div>
+                  <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:22px; font-weight:600; margin-top:4px; font-variant-numeric:tabular-nums; color:var(--ink)">{{ s.v }}</div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+        </div>
+        </sc-if>
+
+        <sc-if value="{{ tabProc }}" hint-placeholder-val="{{ false }}">
+        <div class="dz" style="flex:1; min-height:0; overflow:auto">
+          <table style="width:100%; border-collapse:collapse; font-size:12.5px">
+            <thead style="position:sticky; top:0; background:var(--glass-2); backdrop-filter:blur(20px); z-index:1">
+              <tr>
+                <th style="padding:11px 18px; border-bottom:1px solid var(--line); font-weight:600; text-align:left; color:var(--ink-3); font-size:11px; letter-spacing:.6px; text-transform:uppercase">Name</th>
+                <th style="padding:11px 18px; border-bottom:1px solid var(--line); font-weight:600; text-align:left; color:var(--ink-3); font-size:11px; letter-spacing:.6px; text-transform:uppercase">PID</th>
+                <th style="padding:11px 18px; border-bottom:1px solid var(--line); font-weight:600; text-align:left; color:var(--ink-3); font-size:11px; letter-spacing:.6px; text-transform:uppercase">ABI</th>
+                <th style="padding:11px 18px; border-bottom:1px solid var(--line); font-weight:600; text-align:right; color:var(--ink-3); font-size:11px; letter-spacing:.6px; text-transform:uppercase">CPU</th>
+                <th style="padding:11px 18px; border-bottom:1px solid var(--line); font-weight:600; text-align:right; color:var(--ink-3); font-size:11px; letter-spacing:.6px; text-transform:uppercase">Memory</th>
+                <th style="padding:11px 18px; border-bottom:1px solid var(--line); font-weight:600; text-align:right; color:var(--ink-3); font-size:11px; letter-spacing:.6px; text-transform:uppercase">Threads</th>
+                <th style="padding:11px 18px; border-bottom:1px solid var(--line); font-weight:600; text-align:left; color:var(--ink-3); font-size:11px; letter-spacing:.6px; text-transform:uppercase">State</th>
+              </tr>
+            </thead>
+            <tbody>
+              <sc-for list="{{ procs }}" as="p" hint-placeholder-count="14">
+                <tr style="background:{{ p.zebra }}" style-hover="background:var(--hover)">
+                  <td style="padding:10px 18px; border-bottom:1px solid var(--line)">
+                    <div style="display:flex; align-items:center; gap:10px">
+                      <span style="width:7px; height:7px; border-radius:99px; background:{{ p.dot }}; box-shadow:0 0 7px {{ p.dot }}"></span>
+                      <span style="font-weight:500; color:var(--ink)">{{ p.name }}</span>
+                    </div>
+                  </td>
+                  <td style="padding:10px 18px; border-bottom:1px solid var(--line); font-family:'JetBrains Mono',ui-monospace,monospace; color:var(--ink-3)">{{ p.pidHex }}</td>
+                  <td style="padding:10px 18px; border-bottom:1px solid var(--line)">
+                    <span style="font-size:10px; font-weight:700; letter-spacing:.7px; padding:3px 8px; border-radius:99px; background:{{ p.badgeBg }}; color:{{ p.badgeFg }}">{{ p.badgeText }}</span>
+                  </td>
+                  <td style="padding:10px 18px; border-bottom:1px solid var(--line); text-align:right; font-family:'JetBrains Mono',ui-monospace,monospace; font-variant-numeric:tabular-nums; color:{{ p.cpuColor }}">{{ p.cpu }}%</td>
+                  <td style="padding:10px 18px; border-bottom:1px solid var(--line); text-align:right; font-family:'JetBrains Mono',ui-monospace,monospace; font-variant-numeric:tabular-nums; color:var(--ink-2)">{{ p.mem }}</td>
+                  <td style="padding:10px 18px; border-bottom:1px solid var(--line); text-align:right; font-family:'JetBrains Mono',ui-monospace,monospace; font-variant-numeric:tabular-nums; color:var(--ink-2)">{{ p.thr }}</td>
+                  <td style="padding:10px 18px; border-bottom:1px solid var(--line); font-size:11.5px; color:{{ p.stColor }}; font-weight:600">{{ p.stLabel }}</td>
+                </tr>
+              </sc-for>
+            </tbody>
+          </table>
+        </div>
+        </sc-if>
+
+        <sc-if value="{{ tabAbi }}" hint-placeholder-val="{{ false }}">
+        <div style="flex:1; min-height:0; padding:16px; display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px">
+          <sc-for list="{{ abiCols }}" as="c" hint-placeholder-count="3">
+            <div style="border:1px solid var(--line); border-radius:12px; background:var(--glass-3); display:flex; flex-direction:column; min-height:0; overflow:hidden">
+              <div style="padding:12px 14px; border-bottom:1px solid var(--line)">
+                <div style="display:flex; align-items:center; gap:8px">
+                  <span style="width:8px; height:8px; border-radius:99px; background:{{ c.dot }}; box-shadow:0 0 8px {{ c.dot }}"></span>
+                  <div style="font-size:12.5px; font-weight:600; color:var(--ink)">{{ c.title }}</div>
+                </div>
+                <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:10.5px; color:var(--ink-3); margin-top:4px">{{ c.sub }}</div>
+              </div>
+              <div class="dz" style="flex:1; overflow-y:auto; overflow-x:hidden">
+                <sc-for list="{{ c.rows }}" as="r" hint-placeholder-count="4">
+                  <div style="display:flex; align-items:baseline; gap:8px; padding:8px 14px; border-bottom:1px solid var(--line); font-size:12px">
+                    <span style="flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--ink-2)">{{ r.name }}</span>
+                    <span style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:var(--ink-3)">{{ r.pidHex }}</span>
+                  </div>
+                </sc-for>
+              </div>
+              <div style="padding:9px 14px; border-top:1px solid var(--line); font-family:'JetBrains Mono',ui-monospace,monospace; font-size:10.5px; color:var(--ink-3)">{{ c.count }}</div>
+            </div>
+          </sc-for>
+        </div>
+        </sc-if>
+
+        <sc-if value="{{ tabStartup }}" hint-placeholder-val="{{ false }}">
+        <div style="flex:1; min-height:0; padding:20px 22px">
+          <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11.5px; color:var(--ink-3); margin-bottom:14px">last boot 184 ms · BSP → user @ 96 ms</div>
+          <div style="border:1px solid var(--line); border-radius:12px; overflow:hidden">
+            <sc-for list="{{ startupRows }}" as="r" hint-placeholder-count="6">
+              <div style="display:grid; grid-template-columns:1fr 96px 96px; align-items:center; padding:12px 16px; font-size:12.5px; background:{{ r.zebra }}; border-bottom:1px solid var(--line)">
+                <span style="color:var(--ink)">{{ r.name }}</span>
+                <span style="justify-self:start; font-size:10px; font-weight:700; letter-spacing:.7px; padding:3px 8px; border-radius:99px; background:{{ r.badgeBg }}; color:{{ r.badgeFg }}">{{ r.impact }}</span>
+                <span style="text-align:right; font-family:'JetBrains Mono',ui-monospace,monospace; color:var(--ink-2)">{{ r.t }}</span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+        </sc-if>
+
+        <div style="flex:0 0 30px; height:30px; display:flex; align-items:center; gap:14px; padding:0 16px; border-top:1px solid var(--line); font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:var(--ink-3)">
+          <span>14 processes</span><span style="color:var(--line-2)">|</span><span>77 threads</span><span style="color:var(--line-2)">|</span><span>CPU 17.5%</span><span style="color:var(--line-2)">|</span><span>Memory 412 / 8128 MiB</span><span style="flex:1"></span><span style="color:var(--accent)">compositor 60.0 fps</span>
+        </div>
+      </div>
+      </sc-if>
+
+      <sc-if value="{{ files.shown }}" hint-placeholder-val="{{ true }}">
+      <div onMouseDown="{{ files.focus }}" style="position:absolute; left:{{ files.left }}px; top:{{ files.top }}px; width:{{ files.width }}px; height:{{ files.height }}px; z-index:{{ files.z }}; border-radius:14px; overflow:hidden; display:flex; flex-direction:column; background:var(--gloss), var(--glass-2); border:1px solid var(--line-2); backdrop-filter:blur(36px) saturate(185%); -webkit-backdrop-filter:blur(36px) saturate(185%); box-shadow:var(--shadow-win), inset 0 1px 0 var(--sheen), inset 0 -1px 0 rgba(255,255,255,.05)">
+        <sc-if value="{{ files.focused }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute; inset:0; border-radius:14px; pointer-events:none; box-shadow:inset 0 0 0 1px color-mix(in oklab, var(--accent) 30%, transparent), 0 0 60px -10px color-mix(in oklab, var(--accent) 22%, transparent); z-index:9"></div>
+        </sc-if>
+        <div onMouseDown="{{ files.drag }}" onDoubleClick="{{ files.max }}" style="flex:0 0 44px; height:44px; display:flex; align-items:center; gap:10px; padding:0 0 0 16px; background:linear-gradient(180deg, rgba(255,255,255,.15), rgba(255,255,255,.04) 50%, rgba(255,255,255,0) 51%), linear-gradient(180deg, color-mix(in oklab, var(--bg-3) 70%, transparent), transparent); border-bottom:1px solid var(--line); user-select:none; position:relative">
+          <div style="position:absolute; left:0; right:0; top:0; height:1px; background:linear-gradient(90deg, transparent, var(--sheen), transparent)"></div>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent-2)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"></path></svg>
+          <div style="font-size:13px; font-weight:600; color:var(--ink)">Files</div>
+          <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11.5px; color:var(--ink-3); white-space:nowrap">/bin · ramfs</div>
+          <span style="flex:1"></span>
+          <button onClick="{{ files.min }}" style="appearance:none; border:0; background:transparent; width:46px; height:44px; display:flex; align-items:center; justify-content:center; color:var(--ink-2); cursor:pointer" style-hover="background:var(--hover)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M5 12h14"></path></svg></button>
+          <button onClick="{{ files.max }}" style="appearance:none; border:0; background:transparent; width:46px; height:44px; display:flex; align-items:center; justify-content:center; color:var(--ink-2); cursor:pointer" style-hover="background:var(--hover)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="4.5" y="4.5" width="15" height="15" rx="2"></rect></svg></button>
+          <button onClick="{{ files.close }}" style="appearance:none; border:0; background:transparent; width:52px; height:44px; display:flex; align-items:center; justify-content:center; color:var(--ink-2); cursor:pointer" style-hover="background:var(--danger); color:#fff"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px; padding:10px 14px; border-bottom:1px solid var(--line)">
+          <button style="appearance:none; width:28px; height:28px; border-radius:8px; border:1px solid var(--line); background:transparent; color:var(--ink-2); display:flex; align-items:center; justify-content:center; cursor:pointer" style-hover="background:var(--hover)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"></path></svg></button>
+          <button style="appearance:none; width:28px; height:28px; border-radius:8px; border:1px solid var(--line); background:transparent; color:var(--ink-3); display:flex; align-items:center; justify-content:center; cursor:pointer" style-hover="background:var(--hover)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg></button>
+          <div style="flex:1; display:flex; align-items:center; gap:7px; height:30px; padding:0 12px; border-radius:99px; background:var(--recess); border:1px solid var(--line); font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11.5px; color:var(--ink-2)">
+            <span style="color:var(--ink-3)">duetos</span><span style="color:var(--ink-3)">/</span><span style="color:var(--ink); font-weight:600">bin</span>
+          </div>
+          <div style="display:flex; align-items:center; gap:7px; width:150px; height:30px; padding:0 12px; border-radius:99px; background:var(--recess); border:1px solid var(--line); color:var(--ink-3)">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6"></circle><path d="M20 20l-3.5-3.5"></path></svg>
+            <span style="font-size:11.5px">Search /bin</span>
+          </div>
+        </div>
+        <div style="flex:1; min-height:0; display:grid; grid-template-columns:172px 1fr">
+          <div style="border-right:1px solid var(--line); background:var(--recess); padding:12px 0">
+            <div style="padding:0 16px 8px; font-size:10px; font-weight:700; letter-spacing:.9px; text-transform:uppercase; color:var(--ink-3)">Quick access</div>
+            <sc-for list="{{ filePlaces }}" as="p" hint-placeholder-count="5">
+              <div style="display:flex; align-items:center; gap:10px; padding:8px 16px; background:{{ p.bg }}; border-left:2px solid {{ p.rail }}; color:{{ p.fg }}; font-size:12.5px; font-weight:500">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><g>{{ p.path }}</g></svg>
+                {{ p.label }}
+              </div>
+            </sc-for>
+            <div style="padding:16px 16px 8px; font-size:10px; font-weight:700; letter-spacing:.9px; text-transform:uppercase; color:var(--ink-3)">Devices</div>
+            <div style="padding:0 16px; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:var(--ink-3); line-height:20px">
+              <div>nvme0 · 1.9 TiB</div>
+              <div>ramfs · 512 MiB</div>
+            </div>
+          </div>
+          <div class="dz" style="min-height:0; overflow-y:auto; overflow-x:hidden">
+            <div style="display:grid; grid-template-columns:minmax(0,1fr) 68px 96px; gap:10px; padding:9px 16px; border-bottom:1px solid var(--line); font-size:10.5px; font-weight:600; letter-spacing:.7px; text-transform:uppercase; color:var(--ink-3); position:sticky; top:0; background:var(--glass-2); backdrop-filter:blur(20px)">
+              <span>Name</span><span style="text-align:right">Size</span><span style="text-align:right">Modified</span>
+            </div>
+            <sc-for list="{{ fileRows }}" as="f" hint-placeholder-count="10">
+              <div style="display:grid; grid-template-columns:minmax(0,1fr) 68px 96px; gap:10px; align-items:center; padding:9px 16px; border-bottom:1px solid var(--line); background:{{ f.zebra }}; font-size:12.5px" style-hover="background:var(--hover)">
+                <div style="display:flex; align-items:center; gap:10px; min-width:0">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="{{ f.fg }}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto"><g>{{ f.icon }}</g></svg>
+                  <span style="color:var(--ink); font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis">{{ f.name }}</span>
+                  <span style="font-size:9.5px; font-weight:700; letter-spacing:.6px; padding:2px 7px; border-radius:99px; white-space:nowrap; background:{{ f.badgeBg }}; color:{{ f.badgeFg }}; flex:0 0 auto">{{ f.badge }}</span>
+                </div>
+                <span style="text-align:right; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11.5px; color:var(--ink-2)">{{ f.size }}</span>
+                <span style="text-align:right; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:var(--ink-3)">{{ f.mod }}</span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+        <div style="flex:0 0 30px; height:30px; display:flex; align-items:center; gap:14px; padding:0 16px; border-top:1px solid var(--line); font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:var(--ink-3)">
+          <span>10 items</span><span style="color:var(--line-2)">|</span><span>1 selected · 80 KB</span><span style="flex:1"></span><span style="color:var(--accent-2)">4 Win32 PE</span>
+        </div>
+      </div>
+      </sc-if>
+
+      <sc-if value="{{ ins.shown }}" hint-placeholder-val="{{ false }}">
+      <div onMouseDown="{{ ins.focus }}" style="position:absolute; left:{{ ins.left }}px; top:{{ ins.top }}px; width:{{ ins.width }}px; height:{{ ins.height }}px; z-index:{{ ins.z }}; border-radius:14px; overflow:hidden; display:flex; flex-direction:column; background:var(--gloss), var(--glass-2); border:1px solid var(--line-2); backdrop-filter:blur(36px) saturate(185%); -webkit-backdrop-filter:blur(36px) saturate(185%); box-shadow:var(--shadow-win), inset 0 1px 0 var(--sheen), inset 0 -1px 0 rgba(255,255,255,.05)">
+        <sc-if value="{{ ins.focused }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute; inset:0; border-radius:14px; pointer-events:none; box-shadow:inset 0 0 0 1px color-mix(in oklab, var(--accent) 30%, transparent), 0 0 60px -10px color-mix(in oklab, var(--accent) 22%, transparent); z-index:9"></div>
+        </sc-if>
+        <div onMouseDown="{{ ins.drag }}" onDoubleClick="{{ ins.max }}" style="flex:0 0 44px; height:44px; display:flex; align-items:center; gap:10px; padding:0 0 0 16px; background:linear-gradient(180deg, rgba(255,255,255,.15), rgba(255,255,255,.04) 50%, rgba(255,255,255,0) 51%), linear-gradient(180deg, color-mix(in oklab, var(--bg-3) 70%, transparent), transparent); border-bottom:1px solid var(--line); user-select:none; position:relative">
+          <div style="position:absolute; left:0; right:0; top:0; height:1px; background:linear-gradient(90deg, transparent, var(--sheen), transparent)"></div>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6"></circle><path d="M20 20l-3.5-3.5"></path><path d="M8.5 11h5M11 8.5v5"></path></svg>
+          <div style="font-size:13px; font-weight:600; color:var(--ink)">Inspect — windows-kill.exe</div>
+          <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11.5px; color:var(--ink-3); white-space:nowrap">PE32+ · x86_64 · GUI=N</div>
+          <span style="flex:1"></span>
+          <button onClick="{{ ins.min }}" style="appearance:none; border:0; background:transparent; width:46px; height:44px; display:flex; align-items:center; justify-content:center; color:var(--ink-2); cursor:pointer" style-hover="background:var(--hover)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M5 12h14"></path></svg></button>
+          <button onClick="{{ ins.max }}" style="appearance:none; border:0; background:transparent; width:46px; height:44px; display:flex; align-items:center; justify-content:center; color:var(--ink-2); cursor:pointer" style-hover="background:var(--hover)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="4.5" y="4.5" width="15" height="15" rx="2"></rect></svg></button>
+          <button onClick="{{ ins.close }}" style="appearance:none; border:0; background:transparent; width:52px; height:44px; display:flex; align-items:center; justify-content:center; color:var(--ink-2); cursor:pointer" style-hover="background:var(--danger); color:#fff"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+        </div>
+        <div style="display:flex; align-items:center; gap:10px; padding:10px 14px; border-bottom:1px solid var(--line)">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--accent-2)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="1"></rect><path d="M8 8h4a2 2 0 0 1 0 4H8V8Zm0 0v8"></path></svg>
+          <span style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11.5px; color:var(--ink-2)">/bin/windows-kill.exe</span>
+          <span style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:var(--ink-3)">· 80 KB · imports 4 dlls · 52 symbols</span>
+          <span style="flex:1"></span>
+          <button style="appearance:none; font-family:'JetBrains Mono',ui-monospace,monospace; padding:6px 12px; font-size:11px; font-weight:600; border:1px solid var(--line-2); background:var(--recess); color:var(--ink-2); border-radius:99px; cursor:pointer" style-hover="background:var(--hover)">Decode</button>
+          <button style="appearance:none; font-family:'JetBrains Mono',ui-monospace,monospace; padding:6px 12px; font-size:11px; font-weight:600; border:1px solid var(--line-2); background:var(--recess); color:var(--ink-2); border-radius:99px; cursor:pointer" style-hover="background:var(--hover)">Trace</button>
+          <button style="appearance:none; font-family:'JetBrains Mono',ui-monospace,monospace; padding:6px 12px; font-size:11px; font-weight:600; border:1px solid color-mix(in oklab, var(--accent) 50%, transparent); background:color-mix(in oklab, var(--accent) 18%, transparent); color:var(--accent); border-radius:99px; cursor:pointer" style-hover="background:color-mix(in oklab, var(--accent) 30%, transparent)">Run in sandbox</button>
+        </div>
+        <div style="flex:1; min-height:0; display:grid; grid-template-columns:212px 1fr 268px">
+          <div style="border-right:1px solid var(--line); background:var(--recess); display:flex; flex-direction:column; min-height:0">
+            <div style="padding:12px 16px 8px; font-size:10px; font-weight:700; letter-spacing:.9px; text-transform:uppercase; color:var(--ink-3)">PE sections</div>
+            <div class="dz" style="flex:1; overflow-y:auto; overflow-x:hidden">
+              <sc-for list="{{ sections }}" as="s" hint-placeholder-count="5">
+                <div style="padding:9px 16px; display:flex; flex-direction:column; gap:2px; background:{{ s.bg }}; border-left:2px solid {{ s.rail }}">
+                  <span style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:12px; font-weight:600; color:var(--ink)">{{ s.name }}</span>
+                  <span style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:10.5px; color:var(--ink-3)">{{ s.meta }}</span>
+                </div>
+              </sc-for>
+            </div>
+            <div style="padding:12px 16px 8px; font-size:10px; font-weight:700; letter-spacing:.9px; text-transform:uppercase; color:var(--ink-3); border-top:1px solid var(--line)">Imports</div>
+            <div style="padding:0 16px 14px; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11.5px; color:var(--ink-2); line-height:20px">
+              <div>kernel32.dll <span style="color:var(--ink-3)">· 6</span></div>
+              <div>ntdll.dll <span style="color:var(--ink-3)">· 3</span></div>
+              <div>user32.dll <span style="color:var(--ink-3)">· 2</span></div>
+              <div>ucrtbase.dll <span style="color:var(--ink-3)">· 4</span></div>
+            </div>
+          </div>
+          <div class="dz" style="min-height:0; overflow-y:auto; overflow-x:hidden; padding:10px 0; background:var(--recess); font-family:'JetBrains Mono',ui-monospace,monospace; font-size:12px; line-height:21px">
+            <div style="padding:4px 18px 10px; color:var(--ink-3); font-size:11px">;  .text @ 0x1000 (0x1c00, R-X) — 18 of 1792 instructions</div>
+            <sc-for list="{{ disasm }}" as="d" hint-placeholder-count="18">
+              <div style="display:flex; gap:16px; padding:0 18px; background:{{ d.rowBg }}">
+                <span style="color:var(--ink-3); width:100px; flex:0 0 auto">{{ d.addr }}</span>
+                <span style="color:var(--accent-2); width:168px; flex:0 0 auto; opacity:.8">{{ d.bytes }}</span>
+                <span style="flex:1; white-space:pre; color:{{ d.asmColor }}">{{ d.asm }}</span>
+                <span style="color:var(--accent); font-size:11px; align-self:center; white-space:nowrap">{{ d.annot }}</span>
+              </div>
+            </sc-for>
+          </div>
+          <div style="border-left:1px solid var(--line); display:flex; flex-direction:column; min-height:0">
+            <div style="padding:12px 16px 8px; font-size:10px; font-weight:700; letter-spacing:.9px; text-transform:uppercase; color:var(--ink-3)">Syscall sites</div>
+            <div class="dz" style="flex:1; overflow-y:auto; overflow-x:hidden">
+              <sc-for list="{{ syscalls }}" as="s" hint-placeholder-count="5">
+                <div style="padding:10px 16px; border-bottom:1px solid var(--line)">
+                  <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11.5px; color:var(--accent); font-weight:600">{{ s.name }} <span style="color:var(--ink-3); font-weight:400">{{ s.num }}</span></div>
+                  <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:10.5px; color:var(--ink-3); margin-top:3px">{{ s.addr }}</div>
+                  <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:var(--ink-2); margin-top:3px">{{ s.caller }}</div>
+                </div>
+              </sc-for>
+            </div>
+            <div style="padding:12px 16px 8px; font-size:10px; font-weight:700; letter-spacing:.9px; text-transform:uppercase; color:var(--ink-3); border-top:1px solid var(--line)">Hashes</div>
+            <div style="padding:0 16px 14px; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:var(--ink-3); line-height:18px">
+              <div>md5    29c4…7e</div><div>sha1   4f12…aa</div><div>sha256 a1b2…9f</div>
+            </div>
+          </div>
+        </div>
+        <div style="flex:0 0 30px; height:30px; display:flex; align-items:center; gap:14px; padding:0 16px; border-top:1px solid var(--line); font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:var(--ink-3)">
+          <span>windows-kill.exe</span><span style="color:var(--line-2)">|</span><span>5 syscall sites</span><span style="color:var(--line-2)">|</span><span>no anti-debug</span><span style="flex:1"></span><span style="color:var(--accent)">sandbox ready</span>
+        </div>
+      </div>
+      </sc-if>
+
+      <sc-if value="{{ set.shown }}" hint-placeholder-val="{{ false }}">
+      <div onMouseDown="{{ set.focus }}" style="position:absolute; left:{{ set.left }}px; top:{{ set.top }}px; width:{{ set.width }}px; height:{{ set.height }}px; z-index:{{ set.z }}; border-radius:14px; overflow:hidden; display:flex; flex-direction:column; background:var(--gloss), var(--glass-2); border:1px solid var(--line-2); backdrop-filter:blur(36px) saturate(185%); -webkit-backdrop-filter:blur(36px) saturate(185%); box-shadow:var(--shadow-win), inset 0 1px 0 var(--sheen), inset 0 -1px 0 rgba(255,255,255,.05)">
+        <sc-if value="{{ set.focused }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute; inset:0; border-radius:14px; pointer-events:none; box-shadow:inset 0 0 0 1px color-mix(in oklab, var(--accent) 30%, transparent), 0 0 60px -10px color-mix(in oklab, var(--accent) 22%, transparent); z-index:9"></div>
+        </sc-if>
+        <div onMouseDown="{{ set.drag }}" onDoubleClick="{{ set.max }}" style="flex:0 0 44px; height:44px; display:flex; align-items:center; gap:10px; padding:0 0 0 16px; background:linear-gradient(180deg, rgba(255,255,255,.15), rgba(255,255,255,.04) 50%, rgba(255,255,255,0) 51%), linear-gradient(180deg, color-mix(in oklab, var(--bg-3) 70%, transparent), transparent); border-bottom:1px solid var(--line); user-select:none; position:relative">
+          <div style="position:absolute; left:0; right:0; top:0; height:1px; background:linear-gradient(90deg, transparent, var(--sheen), transparent)"></div>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 14a1.6 1.6 0 0 0 .3 1.7l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.7-.3 1.6 1.6 0 0 0-1 1.5V20a2 2 0 0 1-4 0v-.1a1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.7.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.7 1.6 1.6 0 0 0-1.5-1H4a2 2 0 0 1 0-4h.1a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.7l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.7.3H10a1.6 1.6 0 0 0 1-1.5V4a2 2 0 0 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.7-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.7V10a1.6 1.6 0 0 0 1.5 1H20a2 2 0 0 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1Z"></path></svg>
+          <div style="font-size:13px; font-weight:600; color:var(--ink)">Settings</div>
+          <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11.5px; color:var(--ink-3)">Personalization</div>
+          <span style="flex:1"></span>
+          <button onClick="{{ set.min }}" style="appearance:none; border:0; background:transparent; width:46px; height:44px; display:flex; align-items:center; justify-content:center; color:var(--ink-2); cursor:pointer" style-hover="background:var(--hover)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M5 12h14"></path></svg></button>
+          <button onClick="{{ set.max }}" style="appearance:none; border:0; background:transparent; width:46px; height:44px; display:flex; align-items:center; justify-content:center; color:var(--ink-2); cursor:pointer" style-hover="background:var(--hover)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="4.5" y="4.5" width="15" height="15" rx="2"></rect></svg></button>
+          <button onClick="{{ set.close }}" style="appearance:none; border:0; background:transparent; width:52px; height:44px; display:flex; align-items:center; justify-content:center; color:var(--ink-2); cursor:pointer" style-hover="background:var(--danger); color:#fff"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+        </div>
+        <div style="flex:1; min-height:0; display:grid; grid-template-columns:248px 1fr">
+          <div style="border-right:1px solid var(--line); background:var(--recess); padding:16px 0">
+            <div style="display:flex; align-items:center; gap:11px; padding:0 18px 16px">
+              <div style="width:38px; height:38px; border-radius:99px; display:flex; align-items:center; justify-content:center; font-size:14px; font-weight:700; background:linear-gradient(150deg, color-mix(in oklab, var(--accent) 42%, transparent), color-mix(in oklab, var(--accent-2) 26%, transparent)); border:1px solid var(--line-2); color:var(--ink)">K</div>
+              <div>
+                <div style="font-size:12.5px; font-weight:600; color:var(--ink)">krilliac</div>
+                <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:10.5px; color:var(--ink-3)">DuetOS 0.9.4</div>
+              </div>
+            </div>
+            <sc-for list="{{ setNav }}" as="n" hint-placeholder-count="8">
+              <div style="display:flex; align-items:center; gap:11px; padding:10px 18px; background:{{ n.bg }}; border-left:2px solid {{ n.rail }}; color:{{ n.fg }}; font-size:12.5px; font-weight:500; white-space:nowrap">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><g>{{ n.path }}</g></svg>
+                {{ n.label }}
+              </div>
+            </sc-for>
+          </div>
+          <div class="dz" style="min-height:0; overflow-y:auto; overflow-x:hidden; padding:22px 26px 26px">
+            <div style="font-size:19px; font-weight:600; letter-spacing:-.2px; color:var(--ink)">Personalization</div>
+            <div style="font-size:12.5px; color:var(--ink-3); margin-top:6px">Themes publish into the window registry, taskbar, console and cursor backing on switch — <span style="font-family:'JetBrains Mono',ui-monospace,monospace">Ctrl+Alt+Y</span> cycles.</div>
+
+            <div style="font-size:10.5px; font-weight:700; letter-spacing:.9px; text-transform:uppercase; color:var(--ink-3); margin:22px 0 12px">Theme family</div>
+            <div style="display:grid; grid-template-columns:repeat(5, 1fr); gap:10px">
+              <sc-for list="{{ themeCards }}" as="t" hint-placeholder-count="10">
+                <div style="border:1px solid {{ t.border }}; box-shadow:{{ t.glow }}; border-radius:12px; overflow:hidden; background:var(--glass-3)">
+                  <div style="height:58px; position:relative; background:{{ t.c1 }}">
+                    <div style="position:absolute; left:10px; top:10px; width:44px; height:9px; border-radius:3px; background:{{ t.c2 }}"></div>
+                    <div style="position:absolute; left:10px; top:24px; width:26px; height:6px; border-radius:3px; background:{{ t.c3 }}"></div>
+                    <div style="position:absolute; left:0; right:0; bottom:0; height:12px; background:{{ t.c2 }}; opacity:.25"></div>
+                  </div>
+                  <div style="padding:9px 10px 10px">
+                    <div style="font-size:11.5px; font-weight:600; color:var(--ink); display:flex; align-items:center; gap:6px">{{ t.name }}<span style="font-size:9px; font-weight:700; letter-spacing:.5px; color:var(--accent)">{{ t.badge }}</span></div>
+                    <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:10px; color:var(--ink-3); margin-top:3px">{{ t.note }}</div>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="display:flex; align-items:center; gap:10px; margin:26px 0 12px">
+              <div style="font-size:10.5px; font-weight:700; letter-spacing:.9px; text-transform:uppercase; color:var(--ink-3)">Accent</div>
+              <span style="flex:1"></span>
+              <span style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:10.5px; color:var(--ink-3)">{{ customCount }}</span>
+              <button onClick="{{ resetPresets }}" style="appearance:none; height:26px; padding:0 10px; border-radius:99px; border:1px solid var(--line); background:transparent; color:var(--ink-3); font-size:11px; font-weight:600; cursor:pointer" style-hover="background:var(--hover); color:var(--ink-2)">Reset all</button>
+            </div>
+
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px">
+              <div style="border:1px solid var(--line); border-radius:14px; padding:16px; background:var(--glass-3)">
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px">
+                  <sc-for list="{{ accentChannels }}" as="c" hint-placeholder-count="2">
+                    <button onClick="{{ c.pick }}" style="appearance:none; text-align:left; padding:0; border-radius:12px; overflow:hidden; cursor:pointer; border:1px solid {{ c.border }}; box-shadow:{{ c.ring }}; background:var(--glass-3)">
+                      <div style="height:52px; background:linear-gradient(180deg, rgba(255,255,255,.34), rgba(255,255,255,.05) 46%, rgba(255,255,255,0) 54%), {{ c.hex }}"></div>
+                      <div style="padding:9px 11px 11px">
+                        <div style="font-size:11.5px; font-weight:600; color:var(--ink)">{{ c.label }}</div>
+                        <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:10px; color:var(--ink-3); margin-top:3px">{{ c.role }}</div>
+                        <div style="display:flex; align-items:center; gap:6px; margin-top:9px">
+                          <input type="color" value="{{ c.hex }}" onInput="{{ c.onColor }}" title="Pick any colour" style="width:26px; height:26px; padding:0; border:1px solid var(--line-2); border-radius:7px; background:transparent; cursor:pointer">
+                          <input value="{{ c.hex }}" onInput="{{ c.onHex }}" spellcheck="false" style="flex:1; min-width:0; height:26px; padding:0 8px; border-radius:7px; border:1px solid var(--line); background:var(--recess); color:var(--ink); font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; outline:none">
+                        </div>
+                      </div>
+                    </button>
+                  </sc-for>
+                </div>
+
+                <div style="display:flex; align-items:center; gap:8px; margin:16px 0 10px">
+                  <span style="font-size:11px; font-weight:600; color:var(--ink-2)">{{ editingLabel }}</span>
+                  <span style="flex:1"></span>
+                  <span style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:var(--ink-3)">{{ editHex }} · hsl {{ editH }} {{ editS }} {{ editL }}</span>
+                </div>
+                <input type="range" min="0" max="359" value="{{ editH }}" onInput="{{ onHue }}" style="width:100%; height:14px; margin:0 0 10px; appearance:none; border-radius:99px; background:{{ hueTrack }}; border:1px solid var(--line); cursor:pointer">
+                <input type="range" min="0" max="100" value="{{ editS }}" onInput="{{ onSat }}" style="width:100%; height:14px; margin:0 0 10px; appearance:none; border-radius:99px; background:{{ satTrack }}; border:1px solid var(--line); cursor:pointer">
+                <input type="range" min="0" max="100" value="{{ editL }}" onInput="{{ onLit }}" style="width:100%; height:14px; margin:0 0 14px; appearance:none; border-radius:99px; background:{{ litTrack }}; border:1px solid var(--line); cursor:pointer">
+                <div style="display:flex; gap:6px; align-items:center">
+                  <span style="font-size:10px; font-weight:700; letter-spacing:.7px; text-transform:uppercase; color:var(--ink-3); width:56px">Shades</span>
+                  <sc-for list="{{ shadeRamp }}" as="s" hint-placeholder-count="5">
+                    <button onClick="{{ s.apply }}" style="appearance:none; flex:1; height:22px; border-radius:6px; border:1px solid var(--line); cursor:pointer; background:{{ s.c }}"></button>
+                  </sc-for>
+                </div>
+                <div style="display:flex; gap:6px; align-items:center; margin-top:8px">
+                  <span style="font-size:10px; font-weight:700; letter-spacing:.7px; text-transform:uppercase; color:var(--ink-3); width:56px">Pair</span>
+                  <sc-for list="{{ harmonies }}" as="h" hint-placeholder-count="4">
+                    <button onClick="{{ h.apply }}" title="Apply to the other channel" style="appearance:none; flex:1; height:22px; display:flex; align-items:center; justify-content:center; gap:5px; border-radius:6px; border:1px solid var(--line); background:transparent; color:var(--ink-3); font-size:9.5px; font-weight:600; cursor:pointer" style-hover="color:var(--ink); border-color:var(--line-2)">
+                      <span style="width:9px; height:9px; border-radius:99px; background:{{ h.c }}"></span>{{ h.label }}
+                    </button>
+                  </sc-for>
+                </div>
+              </div>
+
+              <div style="border:1px solid var(--line); border-radius:14px; padding:16px; background:var(--glass-3); display:flex; flex-direction:column">
+                <div style="font-size:11px; font-weight:600; color:var(--ink-2); margin-bottom:10px">Presets</div>
+                <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:8px">
+                  <sc-for list="{{ presetCards }}" as="p" hint-placeholder-count="6">
+                    <div style="border:1px solid {{ p.border }}; border-radius:11px; overflow:hidden; background:var(--glass-3); position:relative">
+                      <button onClick="{{ p.apply }}" style="appearance:none; display:block; width:100%; padding:0; border:0; background:transparent; cursor:pointer; text-align:left">
+                        <div style="height:34px; display:flex">
+                          <div style="flex:1; background:linear-gradient(180deg, rgba(255,255,255,.3), rgba(255,255,255,0) 60%), {{ p.c1 }}"></div>
+                          <div style="flex:1; background:linear-gradient(180deg, rgba(255,255,255,.3), rgba(255,255,255,0) 60%), {{ p.c2 }}"></div>
+                        </div>
+                        <div style="padding:7px 9px 8px">
+                          <div style="font-size:11px; font-weight:600; color:var(--ink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis">{{ p.name }}</div>
+                          <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:9.5px; color:var(--ink-3); margin-top:2px">{{ p.kind }} {{ p.badge }}</div>
+                        </div>
+                      </button>
+                      <sc-if value="{{ p.canDelete }}" hint-placeholder-val="{{ false }}">
+                        <button onClick="{{ p.remove }}" title="Delete preset" style="appearance:none; position:absolute; right:4px; top:4px; width:18px; height:18px; border-radius:99px; border:1px solid var(--line-2); background:rgba(0,0,0,.45); color:#fff; font-size:10px; line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center">×</button>
+                        <button onClick="{{ p.overwrite }}" title="Save current colours into this preset" style="appearance:none; position:absolute; right:26px; top:4px; height:18px; padding:0 6px; border-radius:99px; border:1px solid var(--line-2); background:rgba(0,0,0,.45); color:#fff; font-size:9px; font-weight:600; cursor:pointer">set</button>
+                      </sc-if>
+                    </div>
+                  </sc-for>
+                </div>
+                <span style="flex:1; min-height:12px"></span>
+                <div style="display:flex; gap:8px; margin-top:12px">
+                  <input value="{{ presetName }}" onInput="{{ onPresetName }}" placeholder="Name this combination…" style="flex:1; min-width:0; height:34px; padding:0 12px; border-radius:10px; border:1px solid var(--line); background:var(--recess); color:var(--ink); font-size:12px; outline:none">
+                  <button onClick="{{ savePreset }}" style="appearance:none; height:34px; padding:0 16px; border-radius:10px; cursor:pointer; border:1px solid color-mix(in oklab, var(--accent) 50%, transparent); background:color-mix(in oklab, var(--accent) 20%, transparent); color:var(--accent); font-size:12px; font-weight:600" style-hover="background:color-mix(in oklab, var(--accent) 32%, transparent)">Save preset</button>
+                </div>
+                <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:10px; color:var(--ink-3); margin-top:8px">Presets persist per user · applied live to every window, badge and orb</div>
+              </div>
+            </div>
+
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:24px; margin-top:26px">
+              <div>
+                <div style="font-size:10.5px; font-weight:700; letter-spacing:.9px; text-transform:uppercase; color:var(--ink-3); margin-bottom:12px">Wallpaper</div>
+                <div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:8px">
+                  <sc-for list="{{ wallpaperThumbs }}" as="w" hint-placeholder-count="4">
+                    <div>
+                      <div style="height:56px; border-radius:10px; border:2px solid {{ w.border }}; background:{{ w.bg }}"></div>
+                      <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:10px; color:var(--ink-3); margin-top:6px; text-align:center">{{ w.label }}</div>
+                    </div>
+                  </sc-for>
+                </div>
+                <div style="font-size:10.5px; font-weight:700; letter-spacing:.9px; text-transform:uppercase; color:var(--ink-3); margin:22px 0 12px">Taskbar</div>
+                <div style="display:flex; gap:8px; margin-bottom:10px">
+                  <div style="flex:1; height:34px; border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:600; border:1px solid color-mix(in oklab, var(--accent) 44%, transparent); background:color-mix(in oklab, var(--accent) 18%, transparent); color:var(--accent)">Island</div>
+                  <div style="flex:1; height:34px; border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:600; border:1px solid var(--line); color:var(--ink-2)">Full width</div>
+                </div>
+                <div style="display:flex; gap:8px">
+                  <div style="flex:1; height:34px; border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:600; border:1px solid var(--line); color:var(--ink-2)">Compact 38</div>
+                  <div style="flex:1; height:34px; border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:600; border:1px solid color-mix(in oklab, var(--accent) 44%, transparent); background:color-mix(in oklab, var(--accent) 18%, transparent); color:var(--accent)">Regular 68</div>
+                </div>
+              </div>
+              <div>
+                <div style="display:flex; align-items:center; gap:10px; margin-bottom:14px">
+                  <div style="font-size:10.5px; font-weight:700; letter-spacing:.9px; text-transform:uppercase; color:var(--ink-3)">Chrome tactility</div>
+                  <span style="flex:1"></span>
+                  <div style="display:flex; align-items:center; gap:8px; padding:4px 10px; border-radius:99px; border:1px solid color-mix(in oklab, var(--accent) 40%, transparent); background:color-mix(in oklab, var(--accent) 14%, transparent); font-size:11px; font-weight:600; color:var(--accent)">
+                    <span style="width:6px; height:6px; border-radius:99px; background:var(--accent); box-shadow:0 0 8px var(--accent)"></span>enabled
+                  </div>
+                </div>
+                <sc-for list="{{ tactility }}" as="t" hint-placeholder-count="5">
+                  <div style="margin-bottom:14px">
+                    <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px">
+                      <span style="font-size:12px; color:var(--ink-2)">{{ t.label }}</span>
+                      <span style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:var(--ink-3)">{{ t.v }}</span>
+                    </div>
+                    <div style="height:6px; border-radius:99px; background:var(--recess); position:relative">
+                      <div style="position:absolute; left:0; top:0; bottom:0; width:{{ t.pct }}; border-radius:99px; background:linear-gradient(90deg, var(--accent), color-mix(in oklab, var(--accent) 55%, var(--accent-2)))"></div>
+                    </div>
+                  </div>
+                </sc-for>
+                <div style="margin-top:18px; padding:12px 14px; border-radius:12px; border:1px solid var(--line); background:var(--glass-3); font-family:'JetBrains Mono',ui-monospace,monospace; font-size:10.5px; color:var(--ink-3); line-height:18px">
+                  <div>tactility=on · motion=auto</div>
+                  <div>title_bar_height 44 · taskbar_height 68</div>
+                  <div>font_kind Ttf · title_text_scale 2</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      </sc-if>
+
+      <sc-if value="{{ term.shown }}" hint-placeholder-val="{{ false }}">
+      <div onMouseDown="{{ term.focus }}" style="position:absolute; left:{{ term.left }}px; top:{{ term.top }}px; width:{{ term.width }}px; height:{{ term.height }}px; z-index:{{ term.z }}; border-radius:14px; overflow:hidden; display:flex; flex-direction:column; background:var(--gloss), var(--glass-2); border:1px solid var(--line-2); backdrop-filter:blur(36px) saturate(185%); -webkit-backdrop-filter:blur(36px) saturate(185%); box-shadow:var(--shadow-win), inset 0 1px 0 var(--sheen), inset 0 -1px 0 rgba(255,255,255,.05)">
+        <sc-if value="{{ term.focused }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute; inset:0; border-radius:14px; pointer-events:none; box-shadow:inset 0 0 0 1px color-mix(in oklab, var(--accent) 30%, transparent), 0 0 60px -10px color-mix(in oklab, var(--accent) 22%, transparent); z-index:9"></div>
+        </sc-if>
+        <div onMouseDown="{{ term.drag }}" onDoubleClick="{{ term.max }}" style="flex:0 0 44px; height:44px; display:flex; align-items:center; gap:10px; padding:0 0 0 16px; background:linear-gradient(180deg, rgba(255,255,255,.15), rgba(255,255,255,.04) 50%, rgba(255,255,255,0) 51%), linear-gradient(180deg, color-mix(in oklab, var(--bg-3) 70%, transparent), transparent); border-bottom:1px solid var(--line); user-select:none; position:relative">
+          <div style="position:absolute; left:0; right:0; top:0; height:1px; background:linear-gradient(90deg, transparent, var(--sheen), transparent)"></div>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M7 9l3 3-3 3M12 15h5"></path></svg>
+          <div style="font-size:13px; font-weight:600; color:var(--ink)">Terminal</div>
+          <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11.5px; color:var(--ink-3)">drsh · VT/ANSI</div>
+          <span style="flex:1"></span>
+          <button onClick="{{ term.min }}" style="appearance:none; border:0; background:transparent; width:46px; height:44px; display:flex; align-items:center; justify-content:center; color:var(--ink-2); cursor:pointer" style-hover="background:var(--hover)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M5 12h14"></path></svg></button>
+          <button onClick="{{ term.max }}" style="appearance:none; border:0; background:transparent; width:46px; height:44px; display:flex; align-items:center; justify-content:center; color:var(--ink-2); cursor:pointer" style-hover="background:var(--hover)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="4.5" y="4.5" width="15" height="15" rx="2"></rect></svg></button>
+          <button onClick="{{ term.close }}" style="appearance:none; border:0; background:transparent; width:52px; height:44px; display:flex; align-items:center; justify-content:center; color:var(--ink-2); cursor:pointer" style-hover="background:var(--danger); color:#fff"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+        </div>
+        <div class="dz" style="flex:1; min-height:0; overflow-y:auto; overflow-x:hidden; padding:16px 18px; background:var(--recess); font-family:'JetBrains Mono',ui-monospace,monospace; font-size:12.5px; line-height:22px">
+          <sc-for list="{{ termLines }}" as="l" hint-placeholder-count="12">
+            <div style="white-space:pre-wrap; color:{{ l.color }}; font-weight:{{ l.weight }}">{{ l.text }}</div>
+          </sc-for>
+          <div style="display:flex; align-items:center; gap:8px; color:var(--accent); font-weight:600">
+            duetos:/ $
+            <span style="width:9px; height:15px; background:var(--accent); animation:duet-caret 1.05s steps(2,end) infinite"></span>
+          </div>
+        </div>
+        <div style="flex:0 0 30px; height:30px; display:flex; align-items:center; gap:14px; padding:0 16px; border-top:1px solid var(--line); font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:var(--ink-3)">
+          <span>ring 3</span><span style="color:var(--line-2)">|</span><span>80×24</span><span style="color:var(--line-2)">|</span><span>utf-8</span><span style="flex:1"></span><span>Ctrl+Shift+C copy</span>
+        </div>
+      </div>
+      </sc-if>
+
+      <sc-if value="{{ note.shown }}" hint-placeholder-val="{{ false }}">
+      <div onMouseDown="{{ note.focus }}" style="position:absolute; left:{{ note.left }}px; top:{{ note.top }}px; width:{{ note.width }}px; height:{{ note.height }}px; z-index:{{ note.z }}; border-radius:14px; overflow:hidden; display:flex; flex-direction:column; background:var(--gloss), var(--glass-2); border:1px solid var(--line-2); backdrop-filter:blur(36px) saturate(185%); -webkit-backdrop-filter:blur(36px) saturate(185%); box-shadow:var(--shadow-win), inset 0 1px 0 var(--sheen), inset 0 -1px 0 rgba(255,255,255,.05)">
+        <sc-if value="{{ note.focused }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute; inset:0; border-radius:14px; pointer-events:none; box-shadow:inset 0 0 0 1px color-mix(in oklab, var(--accent-2) 30%, transparent), 0 0 60px -10px color-mix(in oklab, var(--accent-2) 20%, transparent); z-index:9"></div>
+        </sc-if>
+        <div onMouseDown="{{ note.drag }}" onDoubleClick="{{ note.max }}" style="flex:0 0 44px; height:44px; display:flex; align-items:center; gap:10px; padding:0 0 0 16px; background:linear-gradient(180deg, rgba(255,255,255,.15), rgba(255,255,255,.04) 50%, rgba(255,255,255,0) 51%), linear-gradient(180deg, color-mix(in oklab, var(--bg-3) 70%, transparent), transparent); border-bottom:1px solid var(--line); user-select:none; position:relative">
+          <div style="position:absolute; left:0; right:0; top:0; height:1px; background:linear-gradient(90deg, transparent, var(--sheen), transparent)"></div>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent-2)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h10l4 4v12a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Z"></path><path d="M14 4v5h5M8 13h8M8 17h6"></path></svg>
+          <div style="font-size:13px; font-weight:600; color:var(--ink)">duet-theme-spec.md — Notepad</div>
+          <span style="flex:1"></span>
+          <button onClick="{{ note.min }}" style="appearance:none; border:0; background:transparent; width:46px; height:44px; display:flex; align-items:center; justify-content:center; color:var(--ink-2); cursor:pointer" style-hover="background:var(--hover)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M5 12h14"></path></svg></button>
+          <button onClick="{{ note.max }}" style="appearance:none; border:0; background:transparent; width:46px; height:44px; display:flex; align-items:center; justify-content:center; color:var(--ink-2); cursor:pointer" style-hover="background:var(--hover)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="4.5" y="4.5" width="15" height="15" rx="2"></rect></svg></button>
+          <button onClick="{{ note.close }}" style="appearance:none; border:0; background:transparent; width:52px; height:44px; display:flex; align-items:center; justify-content:center; color:var(--ink-2); cursor:pointer" style-hover="background:var(--danger); color:#fff"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+        </div>
+        <div style="display:flex; align-items:center; gap:18px; padding:0 18px; height:34px; border-bottom:1px solid var(--line); font-size:12px; color:var(--ink-2)">
+          <span>File</span><span>Edit</span><span>Format</span><span>View</span><span>Help</span>
+        </div>
+        <div class="dz" style="flex:1; min-height:0; overflow-y:auto; overflow-x:hidden; padding:18px 22px; background:var(--recess); font-family:'JetBrains Mono',ui-monospace,monospace; font-size:12.5px; line-height:23px; color:var(--ink-2)">
+          <sc-for list="{{ noteLines }}" as="l" hint-placeholder-count="11">
+            <div style="white-space:pre-wrap">{{ l }}</div>
+          </sc-for>
+          <span style="display:inline-block; width:8px; height:15px; background:var(--accent-2); animation:duet-caret 1.05s steps(2,end) infinite"></span>
+        </div>
+        <div style="flex:0 0 30px; height:30px; display:flex; align-items:center; gap:14px; padding:0 16px; border-top:1px solid var(--line); font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:var(--ink-3)">
+          <span>Ln 12, Col 1</span><span style="flex:1"></span><span>UTF-8</span><span style="color:var(--line-2)">|</span><span>LF</span><span style="color:var(--line-2)">|</span><span>100%</span>
+        </div>
+      </div>
+      </sc-if>
+
+      <sc-if value="{{ calc.shown }}" hint-placeholder-val="{{ false }}">
+      <div onMouseDown="{{ calc.focus }}" style="position:absolute; left:{{ calc.left }}px; top:{{ calc.top }}px; width:{{ calc.width }}px; height:{{ calc.height }}px; z-index:{{ calc.z }}; border-radius:14px; overflow:hidden; display:flex; flex-direction:column; background:var(--gloss), var(--glass-2); border:1px solid var(--line-2); backdrop-filter:blur(36px) saturate(185%); -webkit-backdrop-filter:blur(36px) saturate(185%); box-shadow:var(--shadow-win), inset 0 1px 0 var(--sheen), inset 0 -1px 0 rgba(255,255,255,.05)">
+        <sc-if value="{{ calc.focused }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute; inset:0; border-radius:14px; pointer-events:none; box-shadow:inset 0 0 0 1px color-mix(in oklab, var(--accent) 30%, transparent), 0 0 60px -10px color-mix(in oklab, var(--accent) 22%, transparent); z-index:9"></div>
+        </sc-if>
+        <div onMouseDown="{{ calc.drag }}" onDoubleClick="{{ calc.max }}" style="flex:0 0 44px; height:44px; display:flex; align-items:center; gap:10px; padding:0 0 0 16px; background:linear-gradient(180deg, rgba(255,255,255,.15), rgba(255,255,255,.04) 50%, rgba(255,255,255,0) 51%), linear-gradient(180deg, color-mix(in oklab, var(--bg-3) 70%, transparent), transparent); border-bottom:1px solid var(--line); user-select:none; position:relative">
+          <div style="position:absolute; left:0; right:0; top:0; height:1px; background:linear-gradient(90deg, transparent, var(--sheen), transparent)"></div>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="3" width="14" height="18" rx="2"></rect><path d="M8 7h8M8 12h.01M12 12h.01M16 12h.01M8 16h.01M12 16h.01M16 16h.01"></path></svg>
+          <div style="font-size:13px; font-weight:600; color:var(--ink)">Calculator</div>
+          <span style="flex:1"></span>
+          <button onClick="{{ calc.min }}" style="appearance:none; border:0; background:transparent; width:42px; height:44px; display:flex; align-items:center; justify-content:center; color:var(--ink-2); cursor:pointer" style-hover="background:var(--hover)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M5 12h14"></path></svg></button>
+          <button onClick="{{ calc.close }}" style="appearance:none; border:0; background:transparent; width:48px; height:44px; display:flex; align-items:center; justify-content:center; color:var(--ink-2); cursor:pointer" style-hover="background:var(--danger); color:#fff"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+        </div>
+        <div style="padding:18px 18px 14px; border-bottom:1px solid var(--line)">
+          <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:var(--ink-3); text-align:right">0x4d5a × 2 +</div>
+          <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:34px; font-weight:600; color:var(--ink); text-align:right; margin-top:6px; font-variant-numeric:tabular-nums">39,860</div>
+          <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:10px; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:10.5px; color:var(--ink-3)">
+            <span>DEC</span><span style="color:var(--accent)">HEX 9BB4</span><span>BIN 1001…</span>
+          </div>
+        </div>
+        <div style="flex:1; min-height:0; padding:12px; display:grid; grid-template-columns:repeat(4, 1fr); grid-auto-rows:1fr; gap:6px">
+          <sc-for list="{{ calcKeys }}" as="k" hint-placeholder-count="28">
+            <button style="appearance:none; border:1px solid {{ k.border }}; background:{{ k.bg }}; color:{{ k.fg }}; border-radius:10px; font-size:14px; font-weight:600; cursor:pointer; font-family:'JetBrains Mono',ui-monospace,monospace" style-hover="filter:brightness(1.35)" style-active="transform:translateY(1px) scale(.985)">{{ k.label }}</button>
+          </sc-for>
+        </div>
+      </div>
+      </sc-if>
+
+      <sc-if value="{{ gfx.shown }}" hint-placeholder-val="{{ false }}">
+      <div onMouseDown="{{ gfx.focus }}" style="position:absolute; left:{{ gfx.left }}px; top:{{ gfx.top }}px; width:{{ gfx.width }}px; height:{{ gfx.height }}px; z-index:{{ gfx.z }}; border-radius:14px; overflow:hidden; display:flex; flex-direction:column; background:var(--gloss), var(--glass-2); border:1px solid var(--line-2); backdrop-filter:blur(36px) saturate(185%); -webkit-backdrop-filter:blur(36px) saturate(185%); box-shadow:var(--shadow-win), inset 0 1px 0 var(--sheen), inset 0 -1px 0 rgba(255,255,255,.05)">
+        <sc-if value="{{ gfx.focused }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute; inset:0; border-radius:14px; pointer-events:none; box-shadow:inset 0 0 0 1px color-mix(in oklab, var(--accent) 30%, transparent), 0 0 60px -10px color-mix(in oklab, var(--accent) 22%, transparent); z-index:9"></div>
+        </sc-if>
+        <div onMouseDown="{{ gfx.drag }}" onDoubleClick="{{ gfx.max }}" style="flex:0 0 44px; height:44px; display:flex; align-items:center; gap:10px; padding:0 0 0 16px; background:linear-gradient(180deg, rgba(255,255,255,.15), rgba(255,255,255,.04) 50%, rgba(255,255,255,0) 51%), linear-gradient(180deg, color-mix(in oklab, var(--bg-3) 70%, transparent), transparent); border-bottom:1px solid var(--line); user-select:none; position:relative">
+          <div style="position:absolute; left:0; right:0; top:0; height:1px; background:linear-gradient(90deg, transparent, var(--sheen), transparent)"></div>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"></rect><path d="M3 16l5-5 4 4 3-3 6 6"></path><circle cx="9" cy="10" r="1.4"></circle></svg>
+          <div style="font-size:13px; font-weight:600; color:var(--ink)">GFX Demo</div>
+          <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11.5px; color:var(--ink-3)">mode 3 · plasma</div>
+          <span style="flex:1"></span>
+          <button onClick="{{ gfx.min }}" style="appearance:none; border:0; background:transparent; width:46px; height:44px; display:flex; align-items:center; justify-content:center; color:var(--ink-2); cursor:pointer" style-hover="background:var(--hover)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M5 12h14"></path></svg></button>
+          <button onClick="{{ gfx.max }}" style="appearance:none; border:0; background:transparent; width:46px; height:44px; display:flex; align-items:center; justify-content:center; color:var(--ink-2); cursor:pointer" style-hover="background:var(--hover)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="4.5" y="4.5" width="15" height="15" rx="2"></rect></svg></button>
+          <button onClick="{{ gfx.close }}" style="appearance:none; border:0; background:transparent; width:52px; height:44px; display:flex; align-items:center; justify-content:center; color:var(--ink-2); cursor:pointer" style-hover="background:var(--danger); color:#fff"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+        </div>
+        <div style="flex:1; min-height:0; position:relative; overflow:hidden; background:#05070b">
+          <div style="position:absolute; inset:0; background:radial-gradient(30% 42% at 26% 32%, color-mix(in oklab, var(--accent) 78%, transparent), transparent 70%), radial-gradient(34% 40% at 72% 60%, color-mix(in oklab, var(--accent-2) 62%, transparent), transparent 72%), radial-gradient(28% 34% at 52% 82%, #7c5cff 0%, transparent 70%), radial-gradient(40% 46% at 84% 18%, #1b6bd6 0%, transparent 74%); filter:blur(2px) saturate(150%); animation:duet-drift 12s ease-in-out infinite"></div>
+          <div style="position:absolute; inset:0; background-image:repeating-linear-gradient(0deg, rgba(0,0,0,.42) 0 1px, transparent 1px 3px), repeating-linear-gradient(90deg, rgba(0,0,0,.32) 0 1px, transparent 1px 3px)"></div>
+          <div style="position:absolute; left:16px; top:14px; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11.5px; line-height:19px; color:#dff7f2; text-shadow:0 1px 3px rgba(0,0,0,.8)">
+            <div>FramebufferPutPixel · 720×430 client</div>
+            <div>present 60.00 fps · 0 dropped</div>
+            <div style="color:var(--accent-2)">d3d11 ClearRenderTargetView → Present</div>
+          </div>
+          <div style="position:absolute; right:16px; bottom:14px; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:#dff7f2; text-shadow:0 1px 3px rgba(0,0,0,.8)">press E for next mode</div>
+        </div>
+      </div>
+      </sc-if>
+
+      <sc-if value="{{ ncOpen }}" hint-placeholder-val="{{ false }}">
+      <div onClick="{{ closeAll }}" style="position:absolute; inset:0; z-index:1000"></div>
+      <div style="position:absolute; right:44px; bottom:112px; width:420px; z-index:1001; padding:18px; border-radius:20px; background:var(--gloss-strong), var(--glass); border:1px solid var(--line-2); backdrop-filter:blur(40px) saturate(200%); -webkit-backdrop-filter:blur(40px) saturate(200%); box-shadow:0 40px 90px -24px rgba(0,0,0,.8), inset 0 1px 0 var(--sheen), inset 0 -1px 0 rgba(255,255,255,.06)">
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:14px">
+          <div style="font-size:11px; font-weight:700; letter-spacing:.9px; text-transform:uppercase; color:var(--ink-3)">Notifications</div>
+          <span style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:10.5px; color:var(--accent)">3 new</span>
+          <span style="flex:1"></span>
+          <span style="font-size:11.5px; color:var(--ink-3)">Clear all</span>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:8px">
+          <sc-for list="{{ notifications }}" as="n" hint-placeholder-count="3">
+            <div style="display:flex; gap:12px; padding:12px 13px; border-radius:12px; background:{{ n.bg }}; border:1px solid {{ n.border }}">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="{{ n.fg }}" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto; margin-top:2px"><g>{{ n.path }}</g></svg>
+              <div style="min-width:0">
+                <div style="font-size:10.5px; font-weight:700; letter-spacing:.7px; text-transform:uppercase; color:{{ n.fg }}">{{ n.app }}</div>
+                <div style="font-size:12.5px; color:var(--ink); margin-top:3px; line-height:1.35">{{ n.t }}</div>
+                <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:10.5px; color:var(--ink-3); margin-top:4px">{{ n.s }}</div>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="margin-top:18px; padding-top:16px; border-top:1px solid var(--line)">
+          <div style="display:flex; align-items:baseline; gap:10px; margin-bottom:10px">
+            <div style="font-size:13px; font-weight:600; color:var(--ink)">{{ calMonth }}</div>
+            <span style="flex:1"></span>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:var(--ink-3)">{{ clock.hm }}</div>
+          </div>
+          <div style="display:grid; grid-template-columns:repeat(7, 1fr); gap:2px; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:10px; color:var(--ink-3); margin-bottom:4px; text-align:center">
+            <span>M</span><span>T</span><span>W</span><span>T</span><span>F</span><span>S</span><span>S</span>
+          </div>
+          <div style="display:grid; grid-template-columns:repeat(7, 1fr); gap:2px">
+            <sc-for list="{{ calDays }}" as="d" hint-placeholder-count="35">
+              <div style="height:26px; display:flex; align-items:center; justify-content:center; border-radius:8px; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; background:{{ d.bg }}; color:{{ d.fg }}; font-weight:{{ d.weight }}">{{ d.n }}</div>
+            </sc-for>
+          </div>
+        </div>
+      </div>
+      </sc-if>
+
+      <sc-if value="{{ startOpen }}" hint-placeholder-val="{{ false }}">
+      <div onClick="{{ closeAll }}" style="position:absolute; inset:0; z-index:1000"></div>
+      <div style="position:absolute; left:50%; transform:translateX(-50%); bottom:112px; width:760px; z-index:1001; border-radius:20px; overflow:hidden; background:var(--gloss-strong), var(--glass); border:1px solid var(--line-2); backdrop-filter:blur(40px) saturate(200%); -webkit-backdrop-filter:blur(40px) saturate(200%); box-shadow:0 40px 90px -24px rgba(0,0,0,.8), inset 0 1px 0 var(--sheen), inset 0 -1px 0 rgba(255,255,255,.06)">
+        <div style="padding:20px 22px 16px; border-bottom:1px solid var(--line)">
+          <div style="display:flex; align-items:center; gap:10px; height:40px; padding:0 16px; border-radius:99px; background:var(--recess); border:1px solid var(--line); box-shadow:inset 0 2px 5px rgba(0,0,0,.32), inset 0 -1px 0 rgba(255,255,255,.07)">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--ink-3)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6"></circle><path d="M20 20l-3.5-3.5"></path></svg>
+            <span style="font-size:13px; color:var(--ink-3)">Search apps, syscalls, pids and PE imports</span>
+            <span style="flex:1"></span>
+            <span style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:10.5px; color:var(--ink-3); border:1px solid var(--line); border-radius:5px; padding:2px 6px">Ctrl Esc</span>
+          </div>
+        </div>
+        <div style="padding:18px 22px 8px; display:flex; align-items:center; gap:10px">
+          <div style="font-size:11px; font-weight:700; letter-spacing:.9px; text-transform:uppercase; color:var(--ink-3)">Pinned</div>
+          <span style="flex:1"></span>
+          <div style="font-size:11.5px; color:var(--ink-3)">All apps →</div>
+        </div>
+        <div style="padding:0 16px 18px; display:grid; grid-template-columns:repeat(6, 1fr); gap:4px">
+          <sc-for list="{{ startApps }}" as="a" hint-placeholder-count="12">
+            <button onClick="{{ a.open }}" style="appearance:none; border:1px solid transparent; background:transparent; border-radius:12px; padding:14px 6px 12px; display:flex; flex-direction:column; align-items:center; gap:9px; color:var(--ink); cursor:pointer" style-hover="background:var(--hover); border-color:var(--line)">
+              <span style="width:44px; height:44px; border-radius:12px; display:flex; align-items:center; justify-content:center; background:{{ a.tileBg }}; border:1px solid {{ a.tileBorder }}; color:{{ a.tileFg }}; box-shadow:inset 0 1px 0 var(--sheen)">
+                <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><g>{{ a.path }}</g></svg>
+              </span>
+              <span style="font-size:11.5px; font-weight:500; text-align:center; line-height:1.2">{{ a.label }}</span>
+            </button>
+          </sc-for>
+        </div>
+        <div style="padding:4px 22px 6px; font-size:11px; font-weight:700; letter-spacing:.9px; text-transform:uppercase; color:var(--ink-3)">Recommended</div>
+        <div style="padding:8px 18px 18px; display:grid; grid-template-columns:1fr 1fr; gap:8px">
+          <sc-for list="{{ recommended }}" as="r" hint-placeholder-count="4">
+            <div style="display:flex; align-items:center; gap:12px; padding:11px 12px; border-radius:10px; border:1px solid var(--line); background:var(--glass-3)" style-hover="background:var(--hover)">
+              <span style="width:30px; height:30px; border-radius:8px; display:flex; align-items:center; justify-content:center; background:{{ r.bg }}; color:{{ r.fg }}; flex:0 0 auto">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><g>{{ r.path }}</g></svg>
+              </span>
+              <div style="min-width:0">
+                <div style="font-size:12.5px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:var(--ink)">{{ r.t }}</div>
+                <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:10.5px; color:var(--ink-3); margin-top:2px">{{ r.s }}</div>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="height:64px; display:flex; align-items:center; padding:0 20px; gap:12px; border-top:1px solid var(--line); background:var(--glass-3)">
+          <div style="width:34px; height:34px; border-radius:99px; display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:700; background:linear-gradient(150deg, color-mix(in oklab, var(--accent) 42%, transparent), color-mix(in oklab, var(--accent-2) 26%, transparent)); border:1px solid var(--line-2); color:var(--ink)">K</div>
+          <div>
+            <div style="font-size:13px; font-weight:600">krilliac</div>
+            <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:10.5px; color:var(--ink-3)">uid=1000 · ring 3</div>
+          </div>
+          <span style="flex:1"></span>
+          <button onClick="{{ openSettings }}" style="appearance:none; display:flex; align-items:center; gap:7px; height:34px; padding:0 14px; border-radius:99px; border:1px solid var(--line); background:transparent; color:var(--ink-2); font-size:12px; font-weight:600; cursor:pointer" style-hover="background:var(--hover); color:var(--ink)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 14a1.6 1.6 0 0 0 .3 1.7l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.7-.3 1.6 1.6 0 0 0-1 1.5V20a2 2 0 0 1-4 0v-.1a1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.7.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.7 1.6 1.6 0 0 0-1.5-1H4a2 2 0 0 1 0-4h.1a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.7l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.7.3H10a1.6 1.6 0 0 0 1-1.5V4a2 2 0 0 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.7-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.7V10a1.6 1.6 0 0 0 1.5 1H20a2 2 0 0 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1Z"></path></svg>
+            Settings
+          </button>
+          <button onClick="{{ goLogin }}" style="appearance:none; display:flex; align-items:center; gap:7px; height:34px; padding:0 14px; border-radius:99px; border:1px solid color-mix(in oklab, var(--accent-2) 40%, transparent); background:color-mix(in oklab, var(--accent-2) 14%, transparent); color:var(--accent-2); font-size:12px; font-weight:600; cursor:pointer" style-hover="background:color-mix(in oklab, var(--accent-2) 22%, transparent)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v8"></path><path d="M7.5 7.5a7 7 0 1 0 9 0"></path></svg>
+            Power
+          </button>
+        </div>
+      </div>
+      </sc-if>
+
+      <sc-if value="{{ qsOpen }}" hint-placeholder-val="{{ false }}">
+      <div onClick="{{ closeAll }}" style="position:absolute; inset:0; z-index:1000"></div>
+      <div style="position:absolute; right:44px; bottom:112px; width:400px; z-index:1001; padding:20px 20px 18px; border-radius:20px; background:var(--gloss-strong), var(--glass); border:1px solid var(--line-2); backdrop-filter:blur(40px) saturate(200%); -webkit-backdrop-filter:blur(40px) saturate(200%); box-shadow:0 40px 90px -24px rgba(0,0,0,.8), inset 0 1px 0 var(--sheen), inset 0 -1px 0 rgba(255,255,255,.06)">
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:16px">
+          <sc-for list="{{ quickToggles }}" as="q" hint-placeholder-count="4">
+            <div style="display:flex; align-items:center; gap:10px; padding:11px 12px; border-radius:12px; background:{{ q.bg }}; border:1px solid {{ q.border }}; color:{{ q.fg }}">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><g>{{ q.path }}</g></svg>
+              <div style="min-width:0">
+                <div style="font-size:12px; font-weight:600; white-space:nowrap">{{ q.label }}</div>
+                <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:10px; color:var(--ink-3); white-space:nowrap">{{ q.sub }}</div>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:12px">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--ink-2)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10v4h3l5 4V6L7 10H4Z"></path><path d="M16 9c1 1 1 5 0 6"></path></svg>
+          <div style="flex:1; height:6px; border-radius:99px; background:var(--recess); position:relative">
+            <div style="position:absolute; left:0; top:0; bottom:0; width:62%; border-radius:99px; background:linear-gradient(90deg, var(--accent), color-mix(in oklab, var(--accent) 60%, var(--accent-2)))"></div>
+            <div style="position:absolute; left:62%; top:50%; width:14px; height:14px; margin-left:-7px; transform:translateY(-50%); border-radius:99px; background:var(--ink); box-shadow:0 2px 6px rgba(0,0,0,.5)"></div>
+          </div>
+          <span style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:var(--ink-3); width:30px; text-align:right">62</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:18px">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--ink-2)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6L7 7M17 17l1.4 1.4M18.4 5.6L17 7M7 17l-1.4 1.4"></path></svg>
+          <div style="flex:1; height:6px; border-radius:99px; background:var(--recess); position:relative">
+            <div style="position:absolute; left:0; top:0; bottom:0; width:84%; border-radius:99px; background:linear-gradient(90deg, var(--accent-2), color-mix(in oklab, var(--accent-2) 70%, #fff))"></div>
+            <div style="position:absolute; left:84%; top:50%; width:14px; height:14px; margin-left:-7px; transform:translateY(-50%); border-radius:99px; background:var(--ink); box-shadow:0 2px 6px rgba(0,0,0,.5)"></div>
+          </div>
+          <span style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; color:var(--ink-3); width:30px; text-align:right">84</span>
+        </div>
+        <div style="font-size:11px; font-weight:700; letter-spacing:.9px; text-transform:uppercase; color:var(--ink-3); margin-bottom:10px">Personalization</div>
+        <div style="display:flex; gap:8px; margin-bottom:12px">
+          <sc-for list="{{ modeOptions }}" as="m" hint-placeholder-count="2">
+            <button onClick="{{ m.go }}" style="appearance:none; flex:1; height:34px; border-radius:10px; font-size:12px; font-weight:600; cursor:pointer; border:1px solid {{ m.border }}; background:{{ m.bg }}; color:{{ m.fg }}">{{ m.label }}</button>
+          </sc-for>
+        </div>
+        <div style="padding:12px; border-radius:12px; border:1px solid var(--line); background:var(--glass-3)">
+          <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px">
+            <div style="font-size:12px; color:var(--ink-2)">Accent — <span style="color:var(--accent); font-weight:600">native</span> / <span style="color:var(--accent-2); font-weight:600">Win32 peer</span></div>
+            <span style="flex:1"></span>
+            <button onClick="{{ openSettings }}" style="appearance:none; height:24px; padding:0 10px; border-radius:99px; border:1px solid var(--line-2); background:transparent; color:var(--ink-3); font-size:11px; font-weight:600; cursor:pointer" style-hover="color:var(--ink); background:var(--hover)">Customise…</button>
+          </div>
+          <div style="display:flex; gap:6px; align-items:center">
+            <sc-for list="{{ accentOptions }}" as="a" hint-placeholder-count="6">
+              <button onClick="{{ a.go }}" title="{{ a.name }}" style="appearance:none; flex:1; height:28px; border-radius:8px; cursor:pointer; border:2px solid {{ a.ring }}; background:linear-gradient(135deg, {{ a.c1 }} 0 50%, {{ a.c2 }} 50% 100%)"></button>
+            </sc-for>
+            <sc-for list="{{ accentChannels }}" as="c" hint-placeholder-count="2">
+              <input type="color" value="{{ c.hex }}" onInput="{{ c.onColor }}" title="{{ c.label }}" style="width:28px; height:28px; padding:0; border:1px solid var(--line-2); border-radius:8px; background:transparent; cursor:pointer; flex:0 0 auto">
+            </sc-for>
+          </div>
+        </div>
+      </div>
+      </sc-if>
+
+      <div style="position:absolute; left:50%; transform:translateX(-50%); bottom:22px; height:68px; padding:8px 12px; display:flex; align-items:center; gap:6px; border-radius:20px; background:var(--gloss-strong), var(--glass); border:1px solid var(--line-2); backdrop-filter:blur(38px) saturate(200%); -webkit-backdrop-filter:blur(38px) saturate(200%); box-shadow:0 26px 60px -20px rgba(0,0,0,.7), inset 0 1px 0 var(--sheen), inset 0 -1px 0 rgba(255,255,255,.07); z-index:900">
+        <button onClick="{{ toggleStart }}" title="Start — Ctrl+Esc" style="appearance:none; width:56px; height:52px; border-radius:14px; display:flex; align-items:center; justify-content:center; cursor:pointer; border:1px solid {{ startBtn.border }}; background:{{ startBtn.bg }}" style-hover="background:var(--hover)">
+          <svg width="26" height="26" viewBox="0 0 26 26" fill="none" aria-hidden="true">
+            <circle cx="11" cy="13" r="8.8" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round" stroke-dasharray="29 55.3" transform="rotate(-30 11 13)"></circle>
+            <circle cx="15" cy="13" r="8.8" stroke="var(--accent-2)" stroke-width="2.6" stroke-linecap="round" stroke-dasharray="29 55.3" transform="rotate(150 15 13)"></circle>
+          </svg>
+        </button>
+        <div style="display:flex; align-items:center; gap:9px; height:40px; padding:0 16px 0 14px; margin:0 4px; border-radius:99px; background:var(--recess); border:1px solid var(--line); color:var(--ink-3); width:250px">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6"></circle><path d="M20 20l-3.5-3.5"></path></svg>
+          <span style="font-size:12.5px">Search</span>
+        </div>
+        <div style="width:1px; height:34px; background:var(--line); margin:0 6px"></div>
+        <div style="display:flex; align-items:center; gap:4px">
+          <sc-for list="{{ taskbarApps }}" as="a" hint-placeholder-count="7">
+            <button onClick="{{ a.click }}" title="{{ a.label }}" style="appearance:none; width:52px; height:52px; border-radius:14px; display:flex; align-items:center; justify-content:center; position:relative; cursor:pointer; border:1px solid {{ a.border }}; background:{{ a.bg }}; color:{{ a.fg }}" style-hover="background:var(--hover)">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><g>{{ a.path }}</g></svg>
+              <span style="position:absolute; bottom:4px; left:50%; transform:translateX(-50%); height:3px; border-radius:99px; width:{{ a.indW }}; background:{{ a.indBg }}; box-shadow:{{ a.indGlow }}"></span>
+            </button>
+          </sc-for>
+        </div>
+        <div style="width:1px; height:34px; background:var(--line); margin:0 6px"></div>
+        <div style="display:flex; align-items:center; gap:12px; height:40px; padding:0 14px; border-radius:99px; background:var(--recess); border:1px solid var(--line); box-shadow:inset 0 2px 5px rgba(0,0,0,.32), inset 0 -1px 0 rgba(255,255,255,.07)">
+          <div style="display:flex; align-items:center; gap:7px">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"></rect><rect x="9.5" y="9.5" width="5" height="5"></rect><path d="M9 3v2M12 3v2M15 3v2M9 19v2M12 19v2M15 19v2M3 9h2M3 12h2M3 15h2M19 9h2M19 12h2M19 15h2"></path></svg>
+            <span style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11.5px; color:var(--ink-2)">14%</span>
+          </div>
+          <svg width="52" height="18" viewBox="0 0 100 100" preserveAspectRatio="none" style="display:block">
+            <path d="{{ spark.line }}" fill="none" stroke="var(--accent)" stroke-width="1.4" vector-effect="non-scaling-stroke" opacity=".8"></path>
+          </svg>
+          <span style="width:1px; height:14px; background:var(--line-2)"></span>
+          <span style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11.5px; color:var(--ink-2)">60.0 fps</span>
+        </div>
+        <button onClick="{{ toggleQs }}" style="appearance:none; display:flex; align-items:center; gap:10px; height:52px; padding:0 14px; border-radius:14px; cursor:pointer; border:1px solid {{ qsBtn.border }}; background:{{ qsBtn.bg }}" style-hover="background:var(--hover)">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--ink-2)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8c5-5 15-5 20 0"></path><path d="M5 12c4-4 10-4 14 0"></path><path d="M8 16c2-2 6-2 8 0"></path><circle cx="12" cy="20" r=".9" fill="currentColor"></circle></svg>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--ink-2)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10v4h3l5 4V6L7 10H4Z"></path><path d="M16 9c1 1 1 5 0 6"></path><path d="M19 7c2 2 2 8 0 10"></path></svg>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="8" width="16" height="8" rx="2"></rect><path d="M21 11v2"></path><rect x="5" y="10" width="10" height="4" fill="currentColor" stroke="none"></rect></svg>
+        </button>
+        <button onClick="{{ toggleNc }}" title="Notifications" style="appearance:none; display:flex; flex-direction:column; align-items:flex-end; gap:2px; height:52px; justify-content:center; padding:0 12px 0 8px; border-radius:14px; cursor:pointer; font-family:'JetBrains Mono',ui-monospace,monospace; border:1px solid {{ ncBtn.border }}; background:{{ ncBtn.bg }}" style-hover="background:var(--hover)">
+          <span style="font-size:13px; font-weight:600; color:var(--ink); font-variant-numeric:tabular-nums">{{ clock.hm }}</span>
+          <span style="font-size:10.5px; color:var(--ink-3)">{{ clock.short }}</span>
+        </button>
+        <div title="Show desktop" style="width:4px; height:44px; border-radius:99px; background:linear-gradient(180deg, var(--accent), var(--accent-2)); opacity:.7"></div>
+      </div>
+    </div>
+    </sc-if>
+
+    <sc-if value="{{ isLogin }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute; inset:0; display:flex; flex-direction:column">
+      <div style="position:absolute; left:72px; top:64px">
+        <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:96px; font-weight:600; letter-spacing:-4px; line-height:1; color:var(--ink); text-shadow:0 6px 40px rgba(0,0,0,.5)">{{ clock.hm }}</div>
+        <div style="font-size:19px; color:var(--ink-2); margin-top:12px; letter-spacing:.2px">{{ clock.dateLong }}</div>
+      </div>
+      <div style="margin:auto; width:420px; padding:36px 34px 30px; border-radius:24px; text-align:center; background:var(--glass); border:1px solid var(--line-2); backdrop-filter:blur(38px) saturate(160%); -webkit-backdrop-filter:blur(38px) saturate(160%); box-shadow:0 48px 100px -30px rgba(0,0,0,.8), inset 0 1px 0 var(--sheen)">
+        <div style="width:104px; height:104px; margin:0 auto 18px; border-radius:99px; display:flex; align-items:center; justify-content:center; font-size:38px; font-weight:700; color:var(--ink); background:linear-gradient(150deg, color-mix(in oklab, var(--accent) 40%, transparent), color-mix(in oklab, var(--accent-2) 26%, transparent)); border:1px solid var(--line-2); box-shadow:inset 0 1px 0 var(--sheen), 0 0 50px -14px color-mix(in oklab, var(--accent) 60%, transparent)">K</div>
+        <div style="font-size:21px; font-weight:600; letter-spacing:-.2px">krilliac</div>
+        <div style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11.5px; color:var(--ink-3); margin-top:6px">uid=1000 · ring 3 · capability set: full</div>
+        <div style="display:flex; align-items:center; gap:10px; height:46px; margin-top:24px; padding:0 6px 0 18px; border-radius:99px; background:var(--recess); border:1px solid var(--line-2)">
+          <span style="font-family:'JetBrains Mono',ui-monospace,monospace; font-size:15px; letter-spacing:5px; color:var(--ink-2)">••••••••</span>
+          <span style="width:1px; height:16px; background:var(--accent); animation:duet-caret 1.05s steps(2,end) infinite"></span>
+          <span style="flex:1"></span>
+          <button onClick="{{ goDesktop }}" style="appearance:none; width:34px; height:34px; border-radius:99px; display:flex; align-items:center; justify-content:center; cursor:pointer; border:1px solid color-mix(in oklab, var(--accent) 50%, transparent); background:color-mix(in oklab, var(--accent) 20%, transparent); color:var(--accent)" style-hover="background:color-mix(in oklab, var(--accent) 34%, transparent)">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13M12 6l6 6-6 6"></path></svg>
+          </button>
+        </div>
+        <div style="font-size:12px; color:var(--ink-3); margin-top:16px">Sign-in options · Reset via recovery hive</div>
+      </div>
+      <div style="position:absolute; left:72px; bottom:56px; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11.5px; color:var(--ink-3); line-height:20px">
+        <div>DuetOS 0.9.4 · x86_64 · UEFI</div>
+        <div>44 Win32 translator DLLs preloaded · 760 exports</div>
+      </div>
+      <div style="position:absolute; right:64px; bottom:52px; display:flex; align-items:center; gap:22px; color:var(--ink-2)">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8c5-5 15-5 20 0"></path><path d="M5 12c4-4 10-4 14 0"></path><path d="M8 16c2-2 6-2 8 0"></path><circle cx="12" cy="20" r=".9" fill="currentColor"></circle></svg>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4a5 5 0 0 1 5 5v3l1.5 3H5.5L7 12V9a5 5 0 0 1 5-5Z"></path><path d="M10 18a2 2 0 0 0 4 0"></path></svg>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v8"></path><path d="M7.5 7.5a7 7 0 1 0 9 0"></path></svg>
+      </div>
+    </div>
+    </sc-if>
+
+    <sc-if value="{{ isBoot }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute; inset:0; background:#04060a; display:flex; flex-direction:column; align-items:center; justify-content:center">
+      <div style="position:relative; width:180px; height:180px; display:flex; align-items:center; justify-content:center">
+        <div style="position:absolute; inset:-20px; border-radius:99px; background:radial-gradient(circle, color-mix(in oklab, var(--accent) 26%, transparent), transparent 68%); animation:duet-breathe 2.6s ease-in-out infinite"></div>
+        <svg width="150" height="150" viewBox="0 0 150 150" fill="none">
+          <circle cx="63" cy="75" r="51" stroke="var(--accent)" stroke-width="6" stroke-linecap="round" stroke-dasharray="168 320" transform="rotate(-30 63 75)"></circle>
+          <circle cx="87" cy="75" r="51" stroke="var(--accent-2)" stroke-width="6" stroke-linecap="round" stroke-dasharray="168 320" transform="rotate(150 87 75)"></circle>
+        </svg>
+      </div>
+      <div style="margin-top:26px; font-size:34px; font-weight:600; letter-spacing:10px; color:#eef3f9">DUETOS</div>
+      <div style="margin-top:10px; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:12px; letter-spacing:2.5px; color:#68737f">BUILD 0.9.4 · X86_64 · UEFI</div>
+      <div style="margin-top:40px; width:320px; height:3px; border-radius:99px; background:rgba(255,255,255,.08); overflow:hidden">
+        <div style="width:30%; height:100%; border-radius:99px; background:linear-gradient(90deg, transparent, var(--accent), var(--accent-2), transparent); animation:duet-load 1.5s linear infinite"></div>
+      </div>
+      <div style="margin-top:44px; width:640px; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11.5px; line-height:22px; color:#4d5866">
+        <sc-for list="{{ bootLines }}" as="b" hint-placeholder-count="6">
+          <div style="display:flex; gap:14px">
+            <span style="color:{{ b.c }}; width:16px">{{ b.mark }}</span><span style="width:64px">{{ b.tag }}</span><span style="color:#68737f">{{ b.msg }}</span>
+          </div>
+        </sc-for>
+      </div>
+      <div style="position:absolute; bottom:44px; font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11px; letter-spacing:1.6px; color:#39424e">4-LEVEL PAGING · SMP 4 CORES · W^X SMEP SMAP ASLR RETPOLINE</div>
+    </div>
+    </sc-if>
+
+  </div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1920,&quot;height&quot;:1160},&quot;mode&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;dark&quot;,&quot;light&quot;],&quot;default&quot;:&quot;dark&quot;,&quot;tsType&quot;:&quot;'dark' | 'light'&quot;,&quot;section&quot;:&quot;Theme&quot;},&quot;accentNative&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#31e0c0&quot;,&quot;options&quot;:[&quot;#31e0c0&quot;,&quot;#4da3ff&quot;,&quot;#a78bfa&quot;,&quot;#3fd68a&quot;],&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Theme&quot;},&quot;accentPeer&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#ffc046&quot;,&quot;options&quot;:[&quot;#ffc046&quot;,&quot;#ff7a4d&quot;,&quot;#f0abfc&quot;,&quot;#e2c66b&quot;],&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Theme&quot;}}">
+const KERNEL_LOG = [
+  ["I","boot","DuetOS multiboot2 entry, 4-level paging armed"],
+  ["I","mm","frame allocator: 8128 MiB usable, 32 MiB reserved"],
+  ["I","mm","kheap: 64 MiB carved, slab buckets [16,32,64,128,256,512,1k,2k,4k]"],
+  ["I","smp","BSP=0 APs=[1,2,3] LAPIC calibrated against HPET (3.20 GHz)"],
+  ["I","sec","W^X SMEP SMAP ASLR retpoline kstack-canaries armed"],
+  ["I","pci","enumerated 17 devices, 1 NIC (e1000), 1 NVMe, 1 xHCI, 1 HDA"],
+  ["I","vfs","rootfs mounted (ramfs), bind /bin /etc /sys /proc"],
+  ["I","reg","registry hive opened, 2814 keys, 41 hives"],
+  ["I","ring3","registered 0x26 DLL(s) pid=0x13"],
+  ["I","pe","loader: validated MZ+PE32+, mapped 12 sections, ASLR slide=0x6c00"],
+  ["I","win32","kernel32:155 ntdll:114 user32:73 gdi32:44 ucrtbase:72 …"],
+  ["I","comp","compositor up, kMaxWindows=16, present cadence 60.00 Hz"],
+  ["I","win","create pid=0x16 hwnd=7 rect=(500,400 420x220) title=\"WINDOWED HELLO\""],
+  ["W","net","ws2_32: socket() returns INVALID_SOCKET — stack is skeleton"],
+  ["I","msgbox","pid=0x16 caption=\"Windowed Hello\" text=\"Running on DuetOS!\""],
+  ["I","reg","ProductName=\"DuetOS\" (type=1, size=7)"],
+  ["I","loader","/bin/hello.exe first two bytes: 0x4d 0x5a  — MZ ok"],
+  ["I","test","all checks passed (lkm:24 reg:31 io:18 win32:9)"],
+  ["I","exec","Windows Kill 1.1.4 | Library 3.1.3"],
+  ["W","exec","Not enough argument. Use -h for help."],
+  ["I","sys","exit rc val=0x1234"],
+];
+
+const PROCESSES = [
+  { pid:0x01, name:"kernel", abi:"native", cpu:1.4, mem:"148 MiB", thr:24, status:"R" },
+  { pid:0x02, name:"compositor", abi:"native", cpu:3.1, mem:"62 MiB", thr:4, status:"R" },
+  { pid:0x03, name:"vfs.svc", abi:"native", cpu:0.2, mem:"18 MiB", thr:3, status:"S" },
+  { pid:0x04, name:"reg.svc", abi:"native", cpu:0.0, mem:"11 MiB", thr:2, status:"S" },
+  { pid:0x05, name:"audiod (HDA)", abi:"native", cpu:0.4, mem:"14 MiB", thr:3, status:"S" },
+  { pid:0x10, name:"shell", abi:"native", cpu:0.1, mem:"7 MiB", thr:1, status:"S" },
+  { pid:0x12, name:"taskmgr.duet", abi:"native", cpu:1.7, mem:"22 MiB", thr:2, status:"R" },
+  { pid:0x13, name:"klog.duet", abi:"native", cpu:0.0, mem:"6 MiB", thr:1, status:"S" },
+  { pid:0x14, name:"inspect.duet", abi:"native", cpu:0.6, mem:"19 MiB", thr:1, status:"R" },
+  { pid:0x16, name:"windowed_hello.exe", abi:"win32", cpu:0.0, mem:"4 MiB", thr:1, status:"S" },
+  { pid:0x17, name:"windows-kill.exe", abi:"win32", cpu:0.0, mem:"3 MiB", thr:1, status:"Z" },
+  { pid:0x18, name:"hello_pe.exe", abi:"win32", cpu:0.0, mem:"2 MiB", thr:1, status:"Z" },
+  { pid:0x1a, name:"thread_stress.exe", abi:"win32", cpu:8.4, mem:"31 MiB", thr:32, status:"R" },
+  { pid:0x20, name:"linux-bridge", abi:"linux", cpu:0.1, mem:"9 MiB", thr:2, status:"S" },
+];
+
+// Disasm / sections / syscall sites: docs/duet-theme/prototype/desktop-data.jsx
+const DISASM = [
+  ["0x140001000","48 83 ec 28","sub    rsp, 0x28"],
+  ["0x140001004","48 8d 0d e5 1f 00 00","lea    rcx, [rip+0x1fe5]   ; \"Windows Kill 1.1.4\""],
+  ["0x14000100b","ff 15 ef 20 00 00","call   [rip+0x20ef]        ; ucrtbase!printf"],
+  ["0x140001011","b9 01 00 00 00","mov    ecx, 1"],
+  ["0x140001016","ff 15 e4 20 00 00","call   [rip+0x20e4]        ; kernel32!ExitProcess"],
+  ["0x14000101c","cc cc cc cc","int3                       ; padding"],
+  ["0x140001020","40 53","push   rbx"],
+  ["0x140001022","48 83 ec 20","sub    rsp, 0x20"],
+  ["0x140001026","48 8b d9","mov    rbx, rcx"],
+  ["0x140001029","e8 c2 00 00 00","call   0x1400010f0         ; helper"],
+  ["0x14000102e","85 c0","test   eax, eax"],
+  ["0x140001030","74 09","je     0x14000103b"],
+  ["0x140001032","48 8b cb","mov    rcx, rbx"],
+  ["0x140001035","ff 15 c5 20 00 00","call   [rip+0x20c5]        ; kernel32!CloseHandle"],
+  ["0x14000103b","33 c0","xor    eax, eax"],
+  ["0x14000103d","48 83 c4 20","add    rsp, 0x20"],
+  ["0x140001041","5b","pop    rbx"],
+  ["0x140001042","c3","ret"],
+];
+const SYSCALL_SITES = [
+  { addr:"0x140001016", num:"0x01", name:"SYS_EXIT", caller:"kernel32!ExitProcess" },
+  { addr:"0x14000100b", num:"0x04", name:"SYS_WRITE", caller:"ucrtbase!printf → fwrite" },
+  { addr:"0x140001235", num:"0x3a", name:"SYS_WIN_CREATE", caller:"user32!CreateWindowExA" },
+  { addr:"0x14000128c", num:"0x3c", name:"SYS_WIN_SHOW", caller:"user32!ShowWindow" },
+  { addr:"0x1400012f0", num:"0x3d", name:"SYS_WIN_MSGBOX", caller:"user32!MessageBoxA" },
+];
+const PE_SECTIONS = [
+  { name:".text", rva:"0x1000", size:"0x1c00", flags:"R-X" },
+  { name:".rdata", rva:"0x3000", size:"0x0a00", flags:"R--" },
+  { name:".data", rva:"0x4000", size:"0x0200", flags:"RW-" },
+  { name:".pdata", rva:"0x5000", size:"0x0180", flags:"R--" },
+  { name:".reloc", rva:"0x6000", size:"0x0080", flags:"R--" },
+];
+
+const FILES = [
+  { n:"hello.exe", s:"4 KB", k:"Win32 PE", m:"today 02:14", abi:"win32" },
+  { n:"windowed_hello.exe", s:"6 KB", k:"Win32 PE", m:"today 02:14", abi:"win32" },
+  { n:"windows-kill.exe", s:"80 KB", k:"Win32 PE · 52 imports", m:"today 02:31", abi:"win32" },
+  { n:"thread_stress.exe", s:"12 KB", k:"Win32 PE", m:"today 02:18", abi:"win32" },
+  { n:"taskmgr.duet", s:"22 KB", k:"Native app", m:"today 02:02", abi:"native" },
+  { n:"klog.duet", s:"6 KB", k:"Native app", m:"today 02:02", abi:"native" },
+  { n:"inspect.duet", s:"19 KB", k:"Native app", m:"today 02:02", abi:"native" },
+  { n:"shell", s:"7 KB", k:"Native app", m:"today 02:01", abi:"native" },
+  { n:"registry.hive", s:"1.4 MB", k:"Registry hive · 2814 keys", m:"today 02:01", abi:"" },
+  { n:"klog.txt", s:"64 KB", k:"Ring buffer dump", m:"today 02:31", abi:"" },
+];
+
+// Theme family per kernel/drivers/video/theme.h (ThemeId)
+const THEMES = [
+  { n:"Duet", d:"slate · dual accent", c1:"#0e141d", c2:"#31e0c0", c3:"#ffc046" },
+  { n:"DuetLight", d:"near-white canvas", c1:"#eef1f6", c2:"#0aa58f", c3:"#b6791a" },
+  { n:"DuetBlue", d:"Win10 blue accent", c1:"#0e141d", c2:"#4da3ff", c3:"#ffc046" },
+  { n:"DuetViolet", d:"modern violet", c1:"#0e141d", c2:"#a78bfa", c3:"#ffc046" },
+  { n:"DuetGreen", d:"forest green", c1:"#0e141d", c2:"#3fd68a", c3:"#ffc046" },
+  { n:"DuetClassic", d:"Win9x grey panels", c1:"#c0c0c0", c2:"#0f7f7f", c3:"#f5b73a" },
+  { n:"Slate10", d:"Win10 × Slate", c1:"#1b1b1b", c2:"#0078d4", c3:"#e81123" },
+  { n:"Amber", d:"retro CRT", c1:"#0a0700", c2:"#ffb000", c3:"#7a5200" },
+  { n:"Classic", d:"first GUI slice", c1:"#0f3b4a", c2:"#2f7f8f", c3:"#c0c0c0" },
+  { n:"HighContrast", d:"tactility off", c1:"#000000", c2:"#ffffff", c3:"#ffff00" },
+];
+
+const TERM_LINES = [
+  ["p","duetos:/ $ ls /bin"],
+  ["o","hello.exe   windowed_hello.exe   windows-kill.exe   thread_stress.exe"],
+  ["o","taskmgr.duet   klog.duet   inspect.duet   shell"],
+  ["p","duetos:/ $ ./windows-kill.exe"],
+  ["o","Windows Kill 1.1.4 | Windows Kill Library 3.1.3"],
+  ["o","Not enough argument. Use -h for help."],
+  ["d","[I] sys : exit rc val=0x1234"],
+  ["p","duetos:/ $ theme duet"],
+  ["o","theme -> duet  (taskbar 36px · titlebar 30px · tactility on)"],
+  ["p","duetos:/ $ pe imports windows-kill.exe"],
+  ["o","kernel32.dll 6   ntdll.dll 3   user32.dll 2   ucrtbase.dll 4"],
+  ["w","warn: ws2_32!socket returns INVALID_SOCKET — net stack is a skeleton"],
+];
+
+const NOTE_LINES = [
+  "duet-theme-spec.md — chrome tokens",
+  "",
+  "titlebar      44 px  (was 30) · sheen hairline on the top edge",
+  "taskbar       68 px island, 22 px inset from the screen edge",
+  "radius        14 px windows · 20 px floating surfaces",
+  "accent        native  #31e0c0   ·   win32 peer  #ffc046",
+  "glass         blur 30 px + saturate 150% over the wallpaper",
+  "",
+  "Every surface that used a flat ARGB fill now samples a token so",
+  "the compositor can blend it: window_border, taskbar_bg, role_title.",
+  "Tactility bytes stay per-theme — HighContrast keeps them at 0.",
+];
+
+const CALC_KEYS = [
+  ["MC","f"],["MR","f"],["M+","f"],["M−","f"],
+  ["%","f"],["CE","f"],["C","f"],["⌫","f"],
+  ["1/x","f"],["x²","f"],["√x","f"],["÷","n"],
+  ["7","n"],["8","n"],["9","n"],["×","n"],
+  ["4","n"],["5","n"],["6","n"],["−","n"],
+  ["1","n"],["2","n"],["3","n"],["+","n"],
+  ["±","n"],["0","n"],[".","n"],["=","a"],
+];
+
+function series(seed) {
+  let s = seed; const out = [];
+  for (let i = 0; i < 60; i++) {
+    s = (s * 9301 + 49297) % 233280;
+    const base = 18 + 30 * Math.abs(Math.sin((i + seed) / 7));
+    out.push(Math.max(2, Math.min(96, base + (s / 233280) * 25 - 12)));
+  }
+  return out;
+}
+const CPU_SERIES = [series(11), series(53), series(97), series(31)];
+
+function paths(data) {
+  const n = data.length;
+  const line = data.map((v, i) => (i === 0 ? "M" : "L") + (i / (n - 1)) * 100 + " " + (100 - v)).join(" ");
+  return { line, area: line + " L100 100 L0 100 Z" };
+}
+
+const el = React.createElement;
+const g = (...nodes) => el(React.Fragment, null, ...nodes.map((n, i) => el(n[0], Object.assign({ key: i }, n[1]))));
+
+// SVG geometry lifted from docs/duet-theme/prototype/desktop-icons.jsx
+const ICON = {
+  taskmgr: g(['path',{d:'M3 19h18'}],['rect',{x:5,y:11,width:3,height:8}],['rect',{x:10.5,y:7,width:3,height:12}],['rect',{x:16,y:13,width:3,height:6}]),
+  klog:    g(['rect',{x:3,y:4,width:18,height:16,rx:2}],['path',{d:'M6 8h12M6 12h8M6 16h10'}]),
+  inspect: g(['circle',{cx:11,cy:11,r:6}],['path',{d:'M20 20l-3.5-3.5'}],['path',{d:'M8.5 11h5M11 8.5v5'}]),
+  files:   g(['path',{d:'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z'}]),
+  gfx:     g(['rect',{x:3,y:5,width:18,height:14,rx:2}],['path',{d:'M3 16l5-5 4 4 3-3 6 6'}],['circle',{cx:9,cy:10,r:1.4}]),
+  term:    g(['rect',{x:3,y:4,width:18,height:16,rx:2}],['path',{d:'M7 9l3 3-3 3M12 15h5'}]),
+  calc:    g(['rect',{x:5,y:3,width:14,height:18,rx:2}],['path',{d:'M8 7h8M8 12h.01M12 12h.01M16 12h.01M8 16h.01M12 16h.01M16 16h.01'}]),
+  note:    g(['path',{d:'M5 4h10l4 4v12a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Z'}],['path',{d:'M14 4v5h5M8 13h8M8 17h6'}]),
+  reg:     g(['path',{d:'M4 6h16M4 12h16M4 18h16'}],['circle',{cx:8,cy:6,r:1.4}],['circle',{cx:14,cy:12,r:1.4}],['circle',{cx:10,cy:18,r:1.4}]),
+  cog:     g(['circle',{cx:12,cy:12,r:3}],['path',{d:'M19.4 14a1.6 1.6 0 0 0 .3 1.7l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.7-.3 1.6 1.6 0 0 0-1 1.5V20a2 2 0 0 1-4 0v-.1a1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.7.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.7 1.6 1.6 0 0 0-1.5-1H4a2 2 0 0 1 0-4h.1a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.7l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.7.3H10a1.6 1.6 0 0 0 1-1.5V4a2 2 0 0 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.7-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.7V10a1.6 1.6 0 0 0 1.5 1H20a2 2 0 0 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1Z'}]),
+  pe:      g(['rect',{x:4,y:4,width:16,height:16,rx:1}],['path',{d:'M8 8h4a2 2 0 0 1 0 4H8V8Zm0 0v8'}]),
+  net:     g(['path',{d:'M2 8c5-5 15-5 20 0'}],['path',{d:'M5 12c4-4 10-4 14 0'}],['path',{d:'M8 16c2-2 6-2 8 0'}],['circle',{cx:12,cy:20,r:.9,fill:'currentColor'}]),
+  vol:     g(['path',{d:'M4 10v4h3l5 4V6L7 10H4Z'}],['path',{d:'M16 9c1 1 1 5 0 6'}]),
+  moon:    g(['path',{d:'M20 14a8 8 0 1 1-10-10 7 7 0 0 0 10 10Z'}]),
+  shield:  g(['path',{d:'M12 3l7 3v6c0 4-3 7-7 9-4-2-7-5-7-9V6l7-3Z'}],['path',{d:'M9 12l2.2 2.2L15.5 10'}]),
+  sparkle: g(['path',{d:'M12 4l1.8 4.7L18.5 10l-4.7 1.8L12 16.5l-1.8-4.7L5.5 10l4.7-1.3L12 4Z'}]),
+};
+
+const BUILTIN_PRESETS = [
+  { id: "duet", name: "Duet", a: "#31e0c0", b: "#ffc046", locked: true },
+  { id: "cobalt", name: "Cobalt", a: "#4da3ff", b: "#ffc046", locked: true },
+  { id: "violet", name: "Violet", a: "#a78bfa", b: "#f0abfc", locked: true },
+  { id: "forest", name: "Forest", a: "#3fd68a", b: "#e2c66b", locked: true },
+  { id: "ember", name: "Ember", a: "#ff7a4d", b: "#ffd166", locked: true },
+  { id: "ice", name: "Ice", a: "#7fd7ff", b: "#c9b8ff", locked: true },
+];
+const ACCENT_STORE = "duetos-aurora-accents";
+
+function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
+function hex2rgb(h) {
+  const s = String(h || "").replace("#", "").trim();
+  const f = s.length === 3 ? s.split("").map(c => c + c).join("") : s.padEnd(6, "0").slice(0, 6);
+  return [parseInt(f.slice(0, 2), 16) || 0, parseInt(f.slice(2, 4), 16) || 0, parseInt(f.slice(4, 6), 16) || 0];
+}
+function rgb2hex(r, g, b) {
+  return "#" + [r, g, b].map(v => clamp(Math.round(v), 0, 255).toString(16).padStart(2, "0")).join("");
+}
+function hex2hsl(hex) {
+  const [r, g, b] = hex2rgb(hex).map(v => v / 255);
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+  let h = 0;
+  if (d) {
+    if (max === r) h = ((g - b) / d) % 6;
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h *= 60; if (h < 0) h += 360;
+  }
+  const l = (max + min) / 2;
+  const s = d ? d / (1 - Math.abs(2 * l - 1)) : 0;
+  return { h: Math.round(h), s: Math.round(s * 100), l: Math.round(l * 100) };
+}
+function hsl2hex(h, s, l) {
+  const S = clamp(s, 0, 100) / 100, L = clamp(l, 0, 100) / 100;
+  const c = (1 - Math.abs(2 * L - 1)) * S, hp = (((h % 360) + 360) % 360) / 60;
+  const x = c * (1 - Math.abs((hp % 2) - 1));
+  const seg = [[c, x, 0], [x, c, 0], [0, c, x], [0, x, c], [x, 0, c], [c, 0, x]][Math.floor(hp) % 6];
+  const m = L - c / 2;
+  return rgb2hex((seg[0] + m) * 255, (seg[1] + m) * 255, (seg[2] + m) * 255);
+}
+function isHex(v) { return /^#?[0-9a-f]{6}$/i.test(String(v || "").trim()); }
+function normHex(v) { const s = String(v).trim(); return (s[0] === "#" ? s : "#" + s).toLowerCase(); }
+
+class Component extends DCLogic {
+  state = {
+    screen: "desktop",
+    mode: null,
+    accents: null,
+    presets: null,
+    activePreset: "duet",
+    editing: "a",
+    presetName: "",
+    startOpen: false,
+    qsOpen: false,
+    tab: "performance",
+    filter: "",
+    levels: { I: true, W: true, E: true },
+    focus: "tm",
+    ncOpen: false,
+    wins: {
+      tm:    { x: 760, y: 90,  w: 800,  h: 560, z: 9, min: false, max: false },
+      files: { x: 44,  y: 368, w: 690,  h: 578, z: 7, min: false, max: false },
+      kl:    { x: 760, y: 680, w: 800,  h: 266, z: 8, min: false, max: false },
+      ins:   { x: 300, y: 140, w: 1160, h: 660, z: 6, min: true,  max: false },
+      set:   { x: 420, y: 120, w: 1060, h: 700, z: 5, min: true,  max: false },
+      term:  { x: 520, y: 300, w: 820,  h: 440, z: 4, min: true,  max: false },
+      note:  { x: 360, y: 200, w: 760,  h: 520, z: 3, min: true,  max: false },
+      calc:  { x: 1450,y: 230, w: 350,  h: 520, z: 2, min: true,  max: false },
+      gfx:   { x: 640, y: 180, w: 720,  h: 520, z: 1, min: true,  max: false },
+    },
+  };
+
+  accentPair() {
+    if (this.state.accents) return this.state.accents;
+    return {
+      a: isHex(this.props.accentNative) ? normHex(this.props.accentNative) : "#31e0c0",
+      b: isHex(this.props.accentPeer) ? normHex(this.props.accentPeer) : "#ffc046",
+    };
+  }
+  presetList() { return this.state.presets || BUILTIN_PRESETS; }
+
+  persist(next) {
+    try {
+      localStorage.setItem(ACCENT_STORE, JSON.stringify({
+        accents: next.accents || this.accentPair(),
+        presets: next.presets || this.presetList(),
+        activePreset: "activePreset" in next ? next.activePreset : this.state.activePreset,
+      }));
+    } catch (e) { /* storage unavailable — in-memory only */ }
+  }
+
+  restore() {
+    try {
+      const raw = localStorage.getItem(ACCENT_STORE);
+      if (!raw) return;
+      const v = JSON.parse(raw);
+      if (v && v.accents && isHex(v.accents.a) && isHex(v.accents.b)) {
+        this.setState({
+          accents: { a: normHex(v.accents.a), b: normHex(v.accents.b) },
+          presets: Array.isArray(v.presets) && v.presets.length ? v.presets : BUILTIN_PRESETS,
+          activePreset: v.activePreset || null,
+        });
+      }
+    } catch (e) { /* ignore malformed */ }
+  }
+
+  setAccent(ch, hex, opts) {
+    const pair = Object.assign({}, this.accentPair(), { [ch]: normHex(hex) });
+    this.setState({ accents: pair, activePreset: (opts && opts.keepPreset) ? this.state.activePreset : null });
+    // Debounced: dragging a slider fires input on every pixel — write once the drag settles.
+    clearTimeout(this._accentSave);
+    this._accentSave = setTimeout(() => this.persist({ accents: pair, activePreset: null }), 500);
+  }
+
+  componentDidMount() {
+    this.restore();
+    this.publish();
+    this.timer = setInterval(() => this.forceUpdate(), 15000);
+    this.onResize = () => this.setState({ vw: document.documentElement.clientWidth });
+    window.addEventListener("resize", this.onResize);
+    this.onResize();
+  }
+  componentWillUnmount() { clearInterval(this.timer); window.removeEventListener("resize", this.onResize); }
+
+  fit() { return Math.min(1, (this.state.vw || 1920) / 1920); }
+  componentDidUpdate() { this.publish(); }
+
+  publish() {
+    const root = document.documentElement;
+    const mode = this.state.mode ?? this.props.mode ?? "dark";
+    const pair = this.accentPair();
+    root.dataset.duet = mode;
+    root.style.setProperty("--accent", pair.a);
+    root.style.setProperty("--accent-2", pair.b);
+  }
+
+  win(id) { return this.state.wins[id]; }
+
+  focusWin = (id) => this.setState(s => {
+    const z = Math.max(...Object.values(s.wins).map(w => w.z));
+    const wins = Object.assign({}, s.wins);
+    wins[id] = Object.assign({}, wins[id], { z: z + 1, min: false });
+    return { wins, focus: id };
+  });
+
+  patch = (id, p) => this.setState(s => {
+    const wins = Object.assign({}, s.wins);
+    wins[id] = Object.assign({}, wins[id], p);
+    return { wins };
+  });
+
+  drag = (id) => (e) => {
+    if (e.button !== 0 || this.win(id).max) return;
+    this.focusWin(id);
+    const sx = e.clientX, sy = e.clientY, ox = this.win(id).x, oy = this.win(id).y;
+    const k = this.fit() || 1;
+    const move = (ev) => this.patch(id, { x: ox + (ev.clientX - sx) / k, y: oy + (ev.clientY - sy) / k });
+    const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
+    window.addEventListener("mousemove", move); window.addEventListener("mouseup", up);
+  };
+
+  winVals(id) {
+    const w = this.win(id);
+    const focused = this.state.focus === id && !w.min;
+    return {
+      left: w.max ? 0 : w.x, top: w.max ? 0 : w.y,
+      width: w.max ? 1920 : w.w, height: w.max ? 968 : w.h,
+      z: w.z, focused, shown: !w.min,
+      focus: () => this.focusWin(id),
+      drag: this.drag(id),
+      min: (e) => { if (e) e.stopPropagation(); this.patch(id, { min: true }); },
+      max: (e) => { if (e) e.stopPropagation(); this.patch(id, { max: !w.max }); },
+      close: (e) => { if (e) e.stopPropagation(); this.patch(id, { min: true, max: false }); },
+    };
+  }
+
+  renderVals() {
+    const S = this.state;
+    const mode = S.mode ?? this.props.mode ?? "dark";
+    const pair = this.accentPair();
+    const acc = { a: pair.a, b: pair.b };
+    const presets = this.presetList();
+    const editing = S.editing;
+    const editHex = pair[editing];
+    const editHsl = hex2hsl(editHex);
+    const A = "var(--accent)", A2 = "var(--accent-2)";
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, "0");
+
+    const chip = (on) => ({
+      bg: on ? "color-mix(in oklab, var(--accent) 20%, transparent)" : "transparent",
+      border: on ? "color-mix(in oklab, var(--accent) 42%, transparent)" : "var(--line)",
+      fg: on ? "var(--accent)" : "var(--ink-2)",
+    });
+
+    const taskbarApps = [
+      { id: "tm", label: "Task Manager", path: ICON.taskmgr },
+      { id: "files", label: "Files", path: ICON.files },
+      { id: "kl", label: "Kernel Log", path: ICON.klog },
+      { id: "ins", label: "Inspect", path: ICON.inspect },
+      { id: "term", label: "Terminal", path: ICON.term },
+      { id: "note", label: "Notepad", path: ICON.note },
+      { id: "calc", label: "Calculator", path: ICON.calc },
+      { id: "set", label: "Settings", path: ICON.cog },
+      { id: "gfx", label: "GFX Demo", path: ICON.gfx },
+    ].map(a => {
+      const isWin = !!S.wins[a.id];
+      const minimized = isWin && S.wins[a.id].min;
+      const focused = isWin && S.focus === a.id && !minimized;
+      return {
+        label: a.label, path: a.path,
+        click: () => {
+          if (!isWin) return;
+          if (minimized || !focused) this.focusWin(a.id);
+          else this.patch(a.id, { min: true });
+        },
+        bg: focused ? "color-mix(in oklab, var(--accent) 18%, transparent)" : "transparent",
+        border: focused ? "color-mix(in oklab, var(--accent) 34%, transparent)" : "transparent",
+        fg: focused ? A : "var(--ink-2)",
+        indW: isWin ? (focused ? "22px" : "10px") : "0px",
+        indBg: isWin ? (minimized ? "var(--ink-3)" : A) : "transparent",
+        indGlow: focused ? "0 0 10px color-mix(in oklab, var(--accent) 80%, transparent)" : "none",
+      };
+    });
+
+    const badge = {
+      native: { bg: "color-mix(in oklab, var(--accent) 18%, transparent)", fg: A, t: "NATIVE" },
+      win32: { bg: "color-mix(in oklab, var(--accent-2) 18%, transparent)", fg: A2, t: "WIN32 PE" },
+      linux: { bg: "rgba(154,163,175,.18)", fg: "var(--ink-2)", t: "LINUX" },
+    };
+
+    const logLines = KERNEL_LOG
+      .map(([lvl, tag, msg], i) => ({ lvl, tag, msg, i }))
+      .filter(l => S.levels[l.lvl] && (!S.filter || (l.tag + l.msg).toLowerCase().includes(S.filter.toLowerCase())))
+      .map(l => ({
+        lvl: l.lvl, tag: l.tag, msg: l.msg,
+        ts: (l.i * 0.027 + 0.184).toFixed(6).padStart(11, "0"),
+        lvlColor: l.lvl === "W" ? A2 : l.lvl === "E" ? "var(--danger)" : A,
+        msgColor: l.lvl === "W" ? A2 : "var(--ink)",
+      }));
+
+    const perfSeries = [
+      { k: "CPU", v: "14% · 3.20 GHz", d: CPU_SERIES[0], sel: true },
+      { k: "Memory", v: "412 / 8128 MiB", d: CPU_SERIES[1].map(x => 20 + x * 0.4) },
+      { k: "NVMe0", v: "0% · 4 KB/s", d: CPU_SERIES[2].map(x => x * 0.2) },
+      { k: "e1000", v: "skeleton — no link", d: CPU_SERIES[3].map(() => 1), warn: true },
+      { k: "Compositor", v: "60.0 fps", d: CPU_SERIES[0].map(x => x * 0.5 + 30) },
+    ];
+
+    const fit = this.fit();
+
+    return {
+      fit, fitH: Math.round(1184 * fit),
+      screens: [
+        { id: "desktop", label: "Desktop" },
+        { id: "login", label: "Sign in" },
+        { id: "boot", label: "Boot" },
+      ].map(s => ({
+        label: s.label, go: () => this.setState({ screen: s.id, startOpen: false, qsOpen: false }),
+        bg: S.screen === s.id ? "rgba(255,255,255,.1)" : "transparent",
+        border: S.screen === s.id ? "rgba(255,255,255,.24)" : "rgba(255,255,255,.1)",
+        fg: S.screen === s.id ? "#eef3f9" : "#8e9aa8",
+      })),
+      isDesktop: S.screen === "desktop",
+      isLogin: S.screen === "login",
+      isBoot: S.screen === "boot",
+      goDesktop: () => this.setState({ screen: "desktop" }),
+      goLogin: () => this.setState({ screen: "login", startOpen: false }),
+      themeLabel: mode === "dark" ? "Slate" : "Light",
+      toggleTheme: () => this.setState({ mode: mode === "dark" ? "light" : "dark" }),
+
+      hexRows: Array.from({ length: 24 }, (_, r) =>
+        (r * 0x10).toString(16).padStart(8, "0") + ": " +
+        Array.from({ length: 40 }, (_, c) => (((r * 40 + c) * 1103515245 + 12345) & 0xff).toString(16).padStart(2, "0")).join(" ")),
+
+      clock: {
+        hm: pad(now.getHours()) + ":" + pad(now.getMinutes()),
+        short: now.toLocaleDateString(undefined, { month: "short", day: "numeric" }),
+        date: now.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" }),
+        dateLong: now.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric" }),
+        hDeg: ((now.getHours() % 12) + now.getMinutes() / 60) * 30 - 90,
+        mDeg: (now.getMinutes() + now.getSeconds() / 60) * 6 - 90,
+        sDeg: now.getSeconds() * 6 - 90,
+      },
+
+      deskIcons: [
+        { label: "Task Manager", path: ICON.taskmgr, id: "tm" },
+        { label: "Kernel Log", path: ICON.klog, id: "kl" },
+        { label: "Inspect", path: ICON.inspect, id: "ins" },
+        { label: "Files", path: ICON.files, id: "files" },
+        { label: "Terminal", path: ICON.term, id: "term" },
+        { label: "GFX Demo", path: ICON.gfx, id: "gfx" },
+      ].map(i => ({ label: i.label, path: i.path, open: () => { if (i.id) this.focusWin(i.id); } })),
+
+      kernelRows: [
+        { k: "syscalls", v: "190" }, { k: "translator dlls", v: "44" },
+        { k: "exports", v: "1100" }, { k: "heap", v: "412 / 8128 MiB" },
+        { k: "present cadence", v: "60.00 Hz" },
+      ],
+      abiRows: [
+        { label: "Native DuetOS", meta: "9 procs", dot: A },
+        { label: "Win32 PE peer", meta: "4 procs", dot: A2 },
+        { label: "Linux bridge", meta: "1 proc", dot: "var(--ink-3)" },
+      ],
+      spark: paths(CPU_SERIES[0]),
+
+      tm: this.winVals("tm"),
+      kl: this.winVals("kl"),
+      ins: this.winVals("ins"),
+      files: this.winVals("files"),
+      set: this.winVals("set"),
+      term: this.winVals("term"),
+      note: this.winVals("note"),
+      calc: this.winVals("calc"),
+      gfx: this.winVals("gfx"),
+      taskbarApps,
+
+      fileRows: FILES.map((f, i) => ({
+        name: f.n, size: f.s, kind: f.k, mod: f.m,
+        icon: f.dir ? ICON.files : f.abi === "win32" ? ICON.pe : f.abi === "native" ? ICON.term : ICON.note,
+        fg: f.dir ? A2 : f.abi === "win32" ? A2 : f.abi === "native" ? A : "var(--ink-3)",
+        badge: f.abi === "win32" ? "WIN32 PE" : f.abi === "native" ? "NATIVE" : "",
+        badgeBg: f.abi === "win32" ? "color-mix(in oklab, var(--accent-2) 18%, transparent)" : "color-mix(in oklab, var(--accent) 18%, transparent)",
+        badgeFg: f.abi === "win32" ? A2 : A,
+        zebra: i === 2 ? "color-mix(in oklab, var(--accent) 14%, transparent)" : i % 2 ? "transparent" : "var(--glass-3)",
+      })),
+      filePlaces: [
+        { label: "Home", path: ICON.files, sel: false },
+        { label: "/bin", path: ICON.term, sel: true },
+        { label: "/etc", path: ICON.cog, sel: false },
+        { label: "/sys", path: ICON.klog, sel: false },
+        { label: "/proc", path: ICON.taskmgr, sel: false },
+      ].map(p => Object.assign({}, p, {
+        bg: p.sel ? "color-mix(in oklab, var(--accent) 16%, transparent)" : "transparent",
+        rail: p.sel ? A : "transparent",
+        fg: p.sel ? A : "var(--ink-2)",
+      })),
+
+      sections: PE_SECTIONS.map((s, i) => ({
+        name: s.name, meta: s.rva + " · " + s.size + " · " + s.flags,
+        bg: i === 0 ? "color-mix(in oklab, var(--accent) 14%, transparent)" : "transparent",
+        rail: i === 0 ? A : "transparent",
+      })),
+      disasm: DISASM.map(([addr, bytes, asm], i) => {
+        const annot = SYSCALL_SITES.find(s => s.addr === addr);
+        return {
+          addr, bytes, asm, annot: annot ? "⟶ " + annot.name : "",
+          rowBg: i === 4 ? "color-mix(in oklab, var(--accent) 12%, transparent)" : "transparent",
+          asmColor: asm.startsWith("call") ? A : asm.startsWith("ret") ? "var(--danger)"
+            : (asm.startsWith("je") || asm.startsWith("jmp")) ? A2 : "var(--ink)",
+        };
+      }),
+      syscalls: SYSCALL_SITES,
+
+      setNav: [
+        { label: "System", path: ICON.cog }, { label: "Personalization", path: ICON.sparkle, sel: true },
+        { label: "Display", path: ICON.gfx }, { label: "Sound", path: ICON.vol },
+        { label: "Network", path: ICON.net }, { label: "ABI peers", path: ICON.pe },
+        { label: "Security", path: ICON.shield }, { label: "About", path: ICON.klog },
+      ].map(n => Object.assign({}, n, {
+        bg: n.sel ? "color-mix(in oklab, var(--accent) 16%, transparent)" : "transparent",
+        rail: n.sel ? A : "transparent",
+        fg: n.sel ? "var(--ink)" : "var(--ink-2)",
+      })),
+      themeCards: THEMES.map(t => ({
+        name: t.n, note: t.d, c1: t.c1, c2: t.c2, c3: t.c3,
+        border: t.n === "Duet" ? "color-mix(in oklab, var(--accent) 50%, transparent)" : "var(--line)",
+        glow: t.n === "Duet" ? "0 0 0 1px color-mix(in oklab, var(--accent) 40%, transparent)" : "none",
+        badge: t.n === "Duet" ? "active" : "",
+      })),
+      tactility: [
+        { label: "Shadow — active window", v: "255", pct: "100%" },
+        { label: "Shadow — inactive", v: "160", pct: "63%" },
+        { label: "Hover lift", v: "96", pct: "38%" },
+        { label: "Press", v: "128", pct: "50%" },
+        { label: "Motion intensity", v: "220", pct: "86%" },
+      ],
+      wallpaperThumbs: [
+        { label: "aurora", sel: true, bg: "radial-gradient(60% 60% at 70% 25%, color-mix(in oklab, var(--accent) 60%, transparent), transparent 70%), radial-gradient(60% 60% at 20% 80%, color-mix(in oklab, var(--accent-2) 45%, transparent), transparent 70%), #0a0f16" },
+        { label: "duet-arcs", sel: false, bg: "radial-gradient(70% 70% at 50% 50%, #131b25, #080c12)" },
+        { label: "topo", sel: false, bg: "repeating-radial-gradient(circle at 50% 55%, color-mix(in oklab, var(--accent) 26%, transparent) 0 1px, transparent 1px 7px), #0a0f16" },
+        { label: "syscalls", sel: false, bg: "repeating-linear-gradient(0deg, rgba(255,255,255,.08) 0 1px, transparent 1px 5px), #0a0f16" },
+      ].map(w => Object.assign({}, w, {
+        border: w.sel ? "color-mix(in oklab, var(--accent) 60%, transparent)" : "var(--line)",
+      })),
+
+      termLines: TERM_LINES.map(l => ({
+        text: l[1],
+        color: l[0] === "p" ? A : l[0] === "w" ? A2 : l[0] === "d" ? "var(--ink-3)" : "var(--ink-2)",
+        weight: l[0] === "p" ? 600 : 400,
+      })),
+      noteLines: NOTE_LINES,
+
+      calcKeys: CALC_KEYS.map(k => ({
+        label: k[0],
+        bg: k[1] === "a" ? "color-mix(in oklab, var(--accent) 20%, transparent)" : k[1] === "f" ? "var(--glass-3)" : "var(--recess)",
+        fg: k[1] === "a" ? A : k[1] === "f" ? "var(--ink-3)" : "var(--ink)",
+        border: k[1] === "a" ? "color-mix(in oklab, var(--accent) 42%, transparent)" : "var(--line)",
+      })),
+
+      ncOpen: S.ncOpen,
+      toggleNc: (e) => { if (e) e.stopPropagation(); this.setState(s => ({ ncOpen: !s.ncOpen, startOpen: false, qsOpen: false })); },
+      notifications: [
+        { app: "Kernel", t: "ws2_32: socket() returned INVALID_SOCKET", s: "net stack is a skeleton · 2 min ago", path: ICON.net, fg: A2, tone: "warn" },
+        { app: "PE loader", t: "windows-kill.exe mapped and run to clean exit", s: "52 imports across 6 DLLs · 3 min ago", path: ICON.pe, fg: A2, tone: "info" },
+        { app: "Compositor", t: "present cadence steady at 60.00 Hz", s: "16 window slots · 4 min ago", path: ICON.gfx, fg: A, tone: "info" },
+      ].map(n => Object.assign({}, n, {
+        bg: n.tone === "warn" ? "color-mix(in oklab, var(--accent-2) 12%, transparent)" : "var(--glass-3)",
+        border: n.tone === "warn" ? "color-mix(in oklab, var(--accent-2) 32%, transparent)" : "var(--line)",
+      })),
+      calDays: (() => {
+        const d = new Date(now.getFullYear(), now.getMonth(), 1);
+        const start = (d.getDay() + 6) % 7;
+        const len = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+        const cells = [];
+        for (let i = 0; i < start; i++) cells.push({ n: "", bg: "transparent", fg: "transparent", weight: 400 });
+        for (let i = 1; i <= len; i++) {
+          const today = i === now.getDate();
+          cells.push({
+            n: String(i),
+            bg: today ? A : "transparent",
+            fg: today ? "var(--bg-0)" : "var(--ink-2)",
+            weight: today ? 700 : 400,
+          });
+        }
+        return cells;
+      })(),
+      calMonth: now.toLocaleDateString(undefined, { month: "long", year: "numeric" }),
+
+      tabs: [
+        { id: "processes", label: "Processes" },
+        { id: "performance", label: "Performance" },
+        { id: "abi", label: "ABI peers" },
+        { id: "startup", label: "Startup" },
+      ].map(t => ({
+        label: t.label, go: () => this.setState({ tab: t.id }),
+        fg: S.tab === t.id ? "var(--ink)" : "var(--ink-3)",
+        weight: S.tab === t.id ? 600 : 500,
+        rail: S.tab === t.id ? A : "transparent",
+      })),
+      tabPerf: S.tab === "performance",
+      tabProc: S.tab === "processes",
+      tabAbi: S.tab === "abi",
+      tabStartup: S.tab === "startup",
+      abiCols: [
+        { title: "Native (DuetOS)", sub: "ELF · /sys/abi/native", dot: A, rows: PROCESSES.filter(p => p.abi === "native") },
+        { title: "Win32 PE peer", sub: "MZ+PE32+ · 44 DLLs · 1100 exports", dot: A2, rows: PROCESSES.filter(p => p.abi === "win32") },
+        { title: "Linux peer", sub: "skeleton — bridge active", dot: "var(--ink-3)", rows: PROCESSES.filter(p => p.abi === "linux") },
+      ].map(c => Object.assign({}, c, {
+        rows: c.rows.map(p => ({ name: p.name, pidHex: "0x" + p.pid.toString(16).padStart(2, "0") })),
+        count: c.rows.length + " processes",
+      })),
+      startupRows: [
+        { name: "compositor", impact: "HIGH", t: "+12 ms" },
+        { name: "shell", impact: "MED", t: "+8 ms" },
+        { name: "vfs.svc", impact: "MED", t: "+6 ms" },
+        { name: "linux-bridge", impact: "LOW", t: "+4 ms" },
+        { name: "audiod (HDA)", impact: "LOW", t: "+3 ms" },
+        { name: "reg.svc", impact: "LOW", t: "+2 ms" },
+      ].map((r, i) => Object.assign({}, r, {
+        zebra: i % 2 ? "transparent" : "var(--glass-3)",
+        badgeBg: r.impact === "HIGH" ? "color-mix(in oklab, var(--accent-2) 22%, transparent)"
+          : r.impact === "MED" ? "color-mix(in oklab, var(--accent) 18%, transparent)" : "rgba(154,163,175,.16)",
+        badgeFg: r.impact === "HIGH" ? A2 : r.impact === "MED" ? A : "var(--ink-2)",
+      })),
+
+      procs: PROCESSES.map((p, i) => ({
+        name: p.name, mem: p.mem, thr: p.thr,
+        cpu: p.cpu.toFixed(1),
+        pidHex: "0x" + p.pid.toString(16).padStart(2, "0"),
+        zebra: i % 2 ? "transparent" : "var(--glass-3)",
+        dot: p.abi === "native" ? A : p.abi === "win32" ? A2 : "var(--ink-3)",
+        badgeBg: badge[p.abi].bg, badgeFg: badge[p.abi].fg, badgeText: badge[p.abi].t,
+        cpuColor: p.cpu > 5 ? A2 : "var(--ink)",
+        stLabel: p.status === "R" ? "running" : p.status === "Z" ? "zombie" : "sleeping",
+        stColor: p.status === "R" ? A : p.status === "Z" ? "var(--danger)" : "var(--ink-3)",
+      })),
+
+      perfRows: perfSeries.map(r => {
+        const p = paths(r.d);
+        return {
+          k: r.k, v: r.v, line: p.line, area: p.area,
+          stroke: r.warn ? A2 : A,
+          fill: r.warn ? "color-mix(in oklab, var(--accent-2) 18%, transparent)" : "color-mix(in oklab, var(--accent) 18%, transparent)",
+          bg: r.sel ? "var(--glass-3)" : "transparent",
+          rail: r.sel ? A : "transparent",
+        };
+      }),
+      cores: CPU_SERIES.map((d, i) => Object.assign({ idx: i, last: Math.round(d[d.length - 1]) }, paths(d))),
+      perfStats: [
+        { label: "Utilization", v: "14%" }, { label: "Processes", v: "14" },
+        { label: "Threads", v: "77" }, { label: "Up time", v: "00:14" },
+      ],
+
+      filter: S.filter,
+      onFilter: (e) => this.setState({ filter: e.target.value }),
+      levels: ["I", "W", "E"].map(id => {
+        const on = S.levels[id];
+        const c = id === "W" ? A2 : id === "E" ? "var(--danger)" : A;
+        return {
+          id, toggle: () => this.setState(s => ({ levels: Object.assign({}, s.levels, { [id]: !s.levels[id] }) })),
+          bg: on ? "color-mix(in oklab, " + (id === "W" ? "var(--accent-2)" : id === "E" ? "var(--danger)" : "var(--accent)") + " 18%, transparent)" : "transparent",
+          border: on ? "color-mix(in oklab, " + (id === "W" ? "var(--accent-2)" : id === "E" ? "var(--danger)" : "var(--accent)") + " 40%, transparent)" : "var(--line)",
+          fg: on ? c : "var(--ink-3)",
+        };
+      }),
+      logLines,
+      logCount: logLines.length + " / " + KERNEL_LOG.length + " lines",
+
+      startOpen: S.startOpen,
+      qsOpen: S.qsOpen,
+      toggleStart: (e) => { if (e) e.stopPropagation(); this.setState(s => ({ startOpen: !s.startOpen, qsOpen: false })); },
+      toggleQs: (e) => { if (e) e.stopPropagation(); this.setState(s => ({ qsOpen: !s.qsOpen, startOpen: false })); },
+      closeAll: () => this.setState({ startOpen: false, qsOpen: false, ncOpen: false }),
+      openSettings: () => { this.focusWin("set"); this.setState({ startOpen: false }); },
+      startBtn: {
+        bg: S.startOpen ? "color-mix(in oklab, var(--accent) 22%, transparent)" : "transparent",
+        border: S.startOpen ? "color-mix(in oklab, var(--accent) 44%, transparent)" : "transparent",
+      },
+      qsBtn: {
+        bg: S.qsOpen ? "color-mix(in oklab, var(--accent) 18%, transparent)" : "transparent",
+        border: S.qsOpen ? "color-mix(in oklab, var(--accent) 34%, transparent)" : "transparent",
+      },
+      ncBtn: {
+        bg: S.ncOpen ? "color-mix(in oklab, var(--accent) 18%, transparent)" : "transparent",
+        border: S.ncOpen ? "color-mix(in oklab, var(--accent) 34%, transparent)" : "transparent",
+      },
+
+      startApps: [
+        { label: "Task Manager", path: ICON.taskmgr, id: "tm" },
+        { label: "Kernel Log", path: ICON.klog, id: "kl" },
+        { label: "Inspect", path: ICON.inspect, id: "ins" },
+        { label: "Files", path: ICON.files, id: "files" },
+        { label: "Terminal", path: ICON.term, id: "term" },
+        { label: "Calculator", path: ICON.calc, id: "calc" },
+        { label: "Notepad", path: ICON.note, id: "note" },
+        { label: "Registry", path: ICON.reg },
+        { label: "GFX Demo", path: ICON.gfx, id: "gfx" },
+        { label: "Settings", path: ICON.cog, id: "set" },
+        { label: "Firewall", path: ICON.shield },
+        { label: "PE Sandbox", path: ICON.pe, peer: true, id: "ins" },
+      ].map(a => ({
+        label: a.label, path: a.path,
+        open: () => { if (a.id) this.focusWin(a.id); this.setState({ startOpen: false }); },
+        tileBg: "linear-gradient(180deg, rgba(255,255,255,.3) 0%, rgba(255,255,255,.06) 44%, rgba(255,255,255,0) 52%), " + (a.peer
+          ? "linear-gradient(160deg, color-mix(in oklab, var(--accent-2) 30%, transparent), color-mix(in oklab, var(--accent-2) 8%, transparent))"
+          : "linear-gradient(160deg, color-mix(in oklab, var(--accent) 28%, transparent), color-mix(in oklab, var(--accent) 7%, transparent))"),
+        tileBorder: a.peer ? "color-mix(in oklab, var(--accent-2) 34%, transparent)" : "color-mix(in oklab, var(--accent) 32%, transparent)",
+        tileFg: a.peer ? A2 : A,
+      })),
+      recommended: [
+        { t: "Inspect — windows-kill.exe", s: "5 syscall sites · 4 imports", path: ICON.inspect, bg: "color-mix(in oklab, var(--accent) 16%, transparent)", fg: A },
+        { t: "Kernel Log", s: "21 lines since boot", path: ICON.klog, bg: "color-mix(in oklab, var(--accent) 16%, transparent)", fg: A },
+        { t: "thread_stress.exe", s: "32 threads · 8.4% cpu", path: ICON.pe, bg: "color-mix(in oklab, var(--accent-2) 16%, transparent)", fg: A2 },
+        { t: "GFX Demo", s: "present cadence 60 Hz", path: ICON.gfx, bg: "color-mix(in oklab, var(--accent) 16%, transparent)", fg: A },
+      ],
+
+      quickToggles: [
+        Object.assign({ label: "Network", sub: "e1000 · skeleton", path: ICON.net }, chip(false)),
+        Object.assign({ label: "Audio", sub: "Intel HDA", path: ICON.vol }, chip(true)),
+        Object.assign({ label: "Night light", sub: "off", path: ICON.moon }, chip(false)),
+        Object.assign({ label: "Tactility", sub: "shadows + motion", path: ICON.sparkle }, chip(true)),
+      ],
+      modeOptions: [
+        { id: "dark", label: "Slate" }, { id: "light", label: "Light" },
+      ].map(m => ({
+        label: m.label, go: () => this.setState({ mode: m.id }),
+        bg: mode === m.id ? "color-mix(in oklab, var(--accent) 20%, transparent)" : "transparent",
+        border: mode === m.id ? "color-mix(in oklab, var(--accent) 44%, transparent)" : "var(--line)",
+        fg: mode === m.id ? A : "var(--ink-2)",
+      })),
+      accentOptions: presets.slice(0, 6).map(p => ({
+        name: p.name, c1: p.a, c2: p.b,
+        ring: S.activePreset === p.id ? "var(--ink)" : "transparent",
+        go: () => { this.setState({ accents: { a: p.a, b: p.b }, activePreset: p.id }); this.persist({ accents: { a: p.a, b: p.b }, activePreset: p.id }); },
+      })),
+
+      accentChannels: [
+        { id: "a", label: "Native ABI", role: "windows · ready state · indicators", hex: pair.a },
+        { id: "b", label: "Win32 PE peer", role: "peer badges · warnings · PE chrome", hex: pair.b },
+      ].map(c => ({
+        id: c.id, label: c.label, role: c.role, hex: c.hex,
+        sel: editing === c.id,
+        border: editing === c.id ? "var(--ink-2)" : "var(--line-2)",
+        ring: editing === c.id ? "0 0 0 2px color-mix(in oklab, " + c.hex + " 55%, transparent)" : "none",
+        pick: () => this.setState({ editing: c.id }),
+        onColor: (e) => this.setAccent(c.id, e.target.value),
+        onHex: (e) => { const v = e.target.value; if (isHex(v)) this.setAccent(c.id, v); },
+      })),
+      editingLabel: editing === "a" ? "Native ABI accent" : "Win32 PE peer accent",
+      editHex: editHex,
+      editH: editHsl.h, editS: editHsl.s, editL: editHsl.l,
+      hueTrack: "linear-gradient(90deg,#ff0000,#ffff00,#00ff00,#00ffff,#0000ff,#ff00ff,#ff0000)",
+      satTrack: "linear-gradient(90deg," + hsl2hex(editHsl.h, 0, editHsl.l) + "," + hsl2hex(editHsl.h, 100, editHsl.l) + ")",
+      litTrack: "linear-gradient(90deg,#000000," + hsl2hex(editHsl.h, editHsl.s, 50) + ",#ffffff)",
+      onHue: (e) => this.setAccent(editing, hsl2hex(+e.target.value, editHsl.s, editHsl.l)),
+      onSat: (e) => this.setAccent(editing, hsl2hex(editHsl.h, +e.target.value, editHsl.l)),
+      onLit: (e) => this.setAccent(editing, hsl2hex(editHsl.h, editHsl.s, +e.target.value)),
+      shadeRamp: [88, 74, 60, 46, 32].map(l => ({ c: hsl2hex(editHsl.h, editHsl.s, l), apply: () => this.setAccent(editing, hsl2hex(editHsl.h, editHsl.s, l)) })),
+      harmonies: [
+        { label: "complement", h: (editHsl.h + 180) % 360 },
+        { label: "split", h: (editHsl.h + 150) % 360 },
+        { label: "triad", h: (editHsl.h + 120) % 360 },
+        { label: "analogue", h: (editHsl.h + 30) % 360 },
+      ].map(x => {
+        const other = editing === "a" ? "b" : "a";
+        const c = hsl2hex(x.h, editHsl.s, editHsl.l);
+        return { label: x.label, c, apply: () => this.setAccent(other, c) };
+      }),
+
+      presetCards: presets.map(p => ({
+        name: p.name, c1: p.a, c2: p.b,
+        kind: p.locked ? "built-in" : "custom",
+        border: S.activePreset === p.id ? "color-mix(in oklab, var(--accent) 60%, transparent)" : "var(--line)",
+        badge: S.activePreset === p.id ? "in use" : "",
+        canDelete: !p.locked,
+        apply: () => { this.setState({ accents: { a: p.a, b: p.b }, activePreset: p.id }); this.persist({ accents: { a: p.a, b: p.b }, activePreset: p.id }); },
+        overwrite: (e) => {
+          if (e) e.stopPropagation();
+          const next = presets.map(q => q.id === p.id ? Object.assign({}, q, { a: pair.a, b: pair.b }) : q);
+          this.setState({ presets: next, activePreset: p.id });
+          this.persist({ presets: next, activePreset: p.id });
+        },
+        remove: (e) => {
+          if (e) e.stopPropagation();
+          const next = presets.filter(q => q.id !== p.id);
+          this.setState({ presets: next, activePreset: S.activePreset === p.id ? null : S.activePreset });
+          this.persist({ presets: next, activePreset: S.activePreset === p.id ? null : S.activePreset });
+        },
+      })),
+      presetName: S.presetName,
+      onPresetName: (e) => this.setState({ presetName: e.target.value }),
+      savePreset: () => {
+        const name = (S.presetName || "").trim() || "Custom " + (presets.filter(p => !p.locked).length + 1);
+        const id = "u" + Date.now().toString(36);
+        const next = presets.concat([{ id, name, a: pair.a, b: pair.b }]);
+        this.setState({ presets: next, activePreset: id, presetName: "" });
+        this.persist({ presets: next, activePreset: id });
+      },
+      resetPresets: () => {
+        this.setState({ presets: BUILTIN_PRESETS, accents: { a: "#31e0c0", b: "#ffc046" }, activePreset: "duet" });
+        this.persist({ presets: BUILTIN_PRESETS, accents: { a: "#31e0c0", b: "#ffc046" }, activePreset: "duet" });
+      },
+      customCount: presets.filter(p => !p.locked).length + " custom · " + presets.filter(p => p.locked).length + " built-in",
+
+      bootLines: [
+        { mark: "✓", tag: "uefi", msg: "long mode entered · 4-level paging armed", c: acc.a },
+        { mark: "✓", tag: "mm", msg: "8128 MiB usable · kheap 64 MiB", c: acc.a },
+        { mark: "✓", tag: "smp", msg: "BSP=0 APs=[1,2,3] · LAPIC calibrated", c: acc.a },
+        { mark: "✓", tag: "sec", msg: "W^X SMEP SMAP ASLR retpoline armed", c: acc.a },
+        { mark: "✓", tag: "win32", msg: "44 translator DLLs · 1100 exports", c: acc.b },
+        { mark: "▸", tag: "comp", msg: "starting compositor …", c: acc.a },
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>
