@@ -97,18 +97,37 @@ constexpr u64 AlignDown16(u64 x)
 // process's signal frame VA overwrite another's, so the victim's
 // rt_sigreturn would CopyFromUser an attacker-controlled frame and
 // restore attacker-chosen rip/rsp/registers into its trap frame.
-// 1-deep per process is adequate for v0 (no nested delivery).
-void SlotPut(::duetos::core::Process* p, u64 frame_va)
+// A BOUNDED STACK, not one slot. The old single-slot form carried the
+// comment "1-deep per process is adequate for v0 (no nested delivery)",
+// but nothing enforced that premise: no guard refuses delivery while a
+// handler is running, and LinuxSignalDeliver is reachable from kill(2),
+// tgkill(2) and pidfd_send_signal(2). A second signal overwrote the
+// saved frame VA, so the OUTER handler's rt_sigreturn found an empty
+// slot — which Restore reports as "caller invented an rt_sigreturn" and
+// the caller treats as fatal. Any process able to signal a target could
+// therefore kill it by signalling twice while it sat in a handler.
+//
+// Returns false when the stack is full. Deliver MUST honour that and
+// refuse the signal rather than proceed: dropping a signal is
+// recoverable, clobbering a live handler's return frame is not.
+bool SlotPush(::duetos::core::Process* p, u64 frame_va)
 {
-    p->linux_signal_frame_va = frame_va;
+    if (p->linux_signal_frame_depth >= ::duetos::core::Process::kLinuxSignalFrameDepth)
+        return false;
+    p->linux_signal_frame_va[p->linux_signal_frame_depth] = frame_va;
+    ++p->linux_signal_frame_depth;
+    return true;
 }
 
+// Pops the MOST RECENT frame. Handlers unwind last-in-first-out, so the
+// rt_sigreturn now running always belongs to the innermost delivery.
 bool SlotTake(::duetos::core::Process* p, u64& out_frame_va)
 {
-    if (p->linux_signal_frame_va == 0)
+    if (p->linux_signal_frame_depth == 0)
         return false;
-    out_frame_va = p->linux_signal_frame_va;
-    p->linux_signal_frame_va = 0;
+    --p->linux_signal_frame_depth;
+    out_frame_va = p->linux_signal_frame_va[p->linux_signal_frame_depth];
+    p->linux_signal_frame_va[p->linux_signal_frame_depth] = 0;
     return true;
 }
 
@@ -258,7 +277,25 @@ bool LinuxSignalCheckAndDeliver(::duetos::arch::TrapFrame* frame)
         return false;
     }
 
-    SlotPut(p, frame_va);
+    // Push the frame BEFORE mutating the trap frame. If the nesting
+    // stack is full, DEFER exactly as the CopyToUser failures above do:
+    // re-pend the signal, restore the mask, and leave the trap frame
+    // untouched so the interrupted code resumes normally. The signal is
+    // retried at the next delivery point, by which time an inner
+    // handler has usually returned and freed a slot.
+    //
+    // The old code could not fail here — it overwrote whatever was
+    // saved — which is precisely how an outer handler lost its return
+    // frame and got the process killed.
+    if (!SlotPush(p, frame_va))
+    {
+        Cli();
+        p->linux_pending_signals |= (1ULL << sig);
+        p->linux_signal_mask = prev_mask;
+        Sti();
+        ::duetos::arch::SerialWrite("[linux/signal] nesting depth exhausted; deferring sig\n");
+        return false;
+    }
 
     // Mutate the trap frame so iretq lands in the handler.
     frame->rip = handler_va;

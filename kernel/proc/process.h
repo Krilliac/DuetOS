@@ -1167,8 +1167,30 @@ struct Process
     // pid-modular collision can't let one process's signal frame VA
     // overwrite another's — which on the victim's rt_sigreturn would
     // restore attacker-controlled registers into its trap frame.
-    // 1-deep: no nested signal delivery in v0.
-    u64 linux_signal_frame_va;
+    // A BOUNDED STACK, not a single slot.
+    //
+    // This was one u64 with the comment "1-deep: no nested signal
+    // delivery in v0". That premise is false: nothing guards delivery
+    // against a handler already running, and LinuxSignalDeliver is
+    // reachable from kill(2), tgkill(2) and pidfd_send_signal(2). A
+    // second signal arriving while the first handler runs OVERWROTE the
+    // saved frame VA, so the outer handler's rt_sigreturn then found an
+    // empty slot — which the restore path treats as "caller invented an
+    // rt_sigreturn" and kills the process.
+    //
+    // That made it a ring-3 denial-of-service: any process permitted to
+    // signal a target could kill it outright simply by signalling twice
+    // while it was mid-handler, and a process can do it to itself by
+    // raising from inside its own handler.
+    //
+    // Depth 8 comfortably covers real nesting (Linux programs rarely go
+    // past 2-3) while staying a fixed, bounded cost per Process. When
+    // the stack is FULL, delivery is REFUSED rather than clobbering an
+    // older frame — losing a signal is recoverable, corrupting a live
+    // handler's return path is not.
+    static constexpr u32 kLinuxSignalFrameDepth = 8;
+    u64 linux_signal_frame_va[kLinuxSignalFrameDepth];
+    u32 linux_signal_frame_depth;
     // Wait queue for signalfd readers. LinuxSignalDeliver wakes
     // every reader after pushing a pending bit so a blocked
     // signalfd read (post-engine) immediately returns.

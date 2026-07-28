@@ -44,6 +44,7 @@
 #include "mm/page.h"
 #include "mm/paging.h"
 #include "proc/process.h"
+#include "security/canary.h"
 #include "util/nospec.h"
 #include "sched/sched.h"
 
@@ -873,10 +874,40 @@ i64 DoOpenByHandleAt(u64 mount_fd, u64 user_handle, u64 flags)
                     p->linux_fds[fd].first_cluster = entries[i].first_cluster;
                     p->linux_fds[fd].size = entries[i].size_bytes;
                     p->linux_fds[fd].offset = 0;
-                    // Path can't be reconstructed without the
-                    // dir-walk parent context; leave empty (writes
-                    // that need it will fail — sub-GAP).
-                    p->linux_fds[fd].path[0] = '\0';
+
+                    // Reconstruct the path and stamp the canary flag.
+                    //
+                    // The old code left `path` empty with the note that
+                    // it "can't be reconstructed without the dir-walk
+                    // parent context". That is true in general but NOT
+                    // here: this loop walks the VOLUME ROOT, so every
+                    // entry it can match is a root-level file and its
+                    // name is right there in `entries[i].name`.
+                    //
+                    // The empty path was not merely a usability gap. The
+                    // canary flag is stamped at open time from
+                    // CanaryMatchesPath (fs/file_route.cpp:370,444), and
+                    // sys_write consults ONLY that cached flag — it does
+                    // not re-evaluate the path. So an fd minted here
+                    // carried no canary bit, and open_by_handle_at
+                    // became a way to overwrite a canary file IN PLACE
+                    // without tripping the wall: the handle is just
+                    // {first_cluster, size}, both discoverable, and the
+                    // detection this subsystem exists to provide was
+                    // silently bypassed.
+                    char full[64];
+                    full[0] = '/';
+                    u32 pi = 1;
+                    for (u32 c = 0; entries[i].name[c] != '\0' && pi + 1 < sizeof(full); ++c, ++pi)
+                        full[pi] = entries[i].name[c];
+                    full[pi] = '\0';
+
+                    for (u32 c = 0; c < sizeof(p->linux_fds[fd].path); ++c)
+                        p->linux_fds[fd].path[c] = (c < pi) ? full[c] : '\0';
+
+                    if (::duetos::security::CanaryMatchesPath(full))
+                        p->linux_fds[fd].flags |= core::Process::kLinuxFdFlagCanary;
+
                     return static_cast<i64>(fd);
                 }
             }
