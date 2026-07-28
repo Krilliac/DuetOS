@@ -12944,3 +12944,31 @@ markers for its richest input. Three discovery layers were added (runtime
   is where a wrong number does the most damage, since one bad `#define`
   mis-aims every caller of that name at once. Coverage went from 134 to
   239 asserted numbers on a clean tree, all correct.
+- **Decision:** Aurora's rounded chrome is produced by never painting
+  the corner — `FramebufferFillRoundRect` for the body, then a small
+  square-off fill on the single edge where the title bar meets the
+  client area. **Rules out** the two obvious alternatives.
+  `FramebufferPunchCorners` needs one flat colour to approximate
+  whatever is behind the window; over the Duet wallpaper gradient that
+  reads as dark notches on every corner. Snapshot-and-restore is not
+  available at all: `FramebufferReadPixel` documents that it bypasses
+  the compose shadow buffer, so mid-compose it returns front-buffer
+  pixels from the *previous* frame. A future real compositor mask would
+  supersede both, but until then "paint the shape you want" is the only
+  exact option.
+- **Decision:** the Aurora glass tokens (`window_radius`,
+  `surface_radius`, `sheen_alpha`, `gloss_alpha`, `taskbar_island`,
+  `taskbar_inset`) are gated by `ThemeTactilityEffective()` and
+  self-tested to be zero on every theme with `tactility_enabled ==
+  false`. **Rules out** treating translucency / gloss as an independent
+  axis from tactility. Amber and HighContrast refuse soft shadows for
+  reasons — CRT aesthetic, legibility budget — that apply identically
+  to gloss and rounding, and two separate opt-outs would eventually
+  disagree.
+- **Decision:** `TaskbarHeight()` returns the bottom **reserve**
+  (`height + 2 × taskbar_inset` under an island), not the painted strip
+  height. **Rules out** adding a second `TaskbarReserve()` accessor:
+  all four existing callers (`WindowMaximize`, `WorkArea`, the minimize
+  target, the toast anchor) want the unusable-edge figure, so a second
+  accessor would exist only for callers to forget to prefer it — the
+  whitelist-incompleteness shape.
