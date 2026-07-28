@@ -208,7 +208,7 @@ named export is real. Page-level limits:
 | `iphlpapi_32` | 4 | `userland/libs/iphlpapi_32/` |
 | `iphlpapi` | 56 | `userland/libs/iphlpapi/` |
 | `kernel32_32` | 69 | `userland/libs/kernel32_32/` |
-| `kernel32` | 394 | `userland/libs/kernel32/` |
+| `kernel32` | 396 | `userland/libs/kernel32/` |
 | `kernelbase` | 0 | `userland/libs/kernelbase/` |
 | `msvcp140` | 6 | `userland/libs/msvcp140/` |
 | `msvcrt_32` | 46 | `userland/libs/msvcrt_32/` |
@@ -224,7 +224,7 @@ named export is real. Page-level limits:
 | `shlwapi_32` | 1 | `userland/libs/shlwapi_32/` |
 | `shlwapi` | 44 | `userland/libs/shlwapi/` |
 | `ucrtbase` | 136 | `userland/libs/ucrtbase/` |
-| `user32_32` | 64 | `userland/libs/user32_32/` |
+| `user32_32` | 85 | `userland/libs/user32_32/` |
 | `user32` | 212 | `userland/libs/user32/` |
 | `userenv` | 27 | `userland/libs/userenv/` |
 | `uxtheme` | 41 | `userland/libs/uxtheme/` |

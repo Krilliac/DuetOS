@@ -87,7 +87,16 @@ _NAME_IN_COMMENT = re.compile(r"/\*[^*]*?(SYS_[A-Z0-9_]+)[^*]*?\*/|//[^\n]*?(SYS
 # this very file's sibling comments — the wrong names of already-fixed
 # bugs. Flagging those produced 20+ false positives on a clean tree,
 # and a check that cries wolf gets ignored.
-_NAME_EQ_NUM = re.compile(r"\b(SYS_[A-Z0-9_]+)\s*=\s*(\d+)\b")
+#
+# `#define SYS_FOO 42` is the same factual claim in the form the DLLs
+# that call through a named constant actually write it — user32.c,
+# gdi32.c and the _32 companion headers each open with a block of
+# them, and every call site downstream inherits whatever the block
+# says. An `=` -only pattern left those blocks entirely unchecked,
+# which is precisely where a wrong number does the most damage: one
+# bad #define mis-aims every caller of that name at once.
+_NAME_EQ_NUM = re.compile(r"\b(SYS_[A-Z0-9_]+)\s*=\s*(\d+)\b"
+                          r"|^\s*#\s*define\s+(SYS_[A-Z0-9_]+)\s+(\d+)\b")
 
 
 def parse_enum(syscall_h):
@@ -172,7 +181,10 @@ def main():
                 blines = fh.readlines()
             for lineno, line in enumerate(blines, start=1):
                 for m in _NAME_EQ_NUM.finditer(line):
-                    nm, asserted = m.group(1), int(m.group(2))
+                    # Group 1/2 = the `SYS_FOO = 42` prose form,
+                    # group 3/4 = the `#define SYS_FOO 42` form.
+                    nm = m.group(1) or m.group(3)
+                    asserted = int(m.group(2) or m.group(4))
                     name_checked += 1
                     if nm not in by_name:
                         print("BAD-ASSERTION %s:%d: asserts '%s = %d', but '%s' is not in the syscall enum "

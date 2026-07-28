@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # tools/build/build-stub-32-dll.sh — generic i386 (PE32) DLL builder.
 #
-# Compiles userland/libs/<dll_name>_32/<dll_name>_32.c into a
+# Compiles every .c under userland/libs/<dll_name>_32/ into a
 # freestanding PE32 Windows DLL using clang --target=i686-pc-windows-msvc
 # + lld-link /machine:x86. The output basename is "<dll_name>.dll"
 # (NOT "<dll_name>_32.dll") so the PE Export Directory's Name field
 # matches the i386 importer's descriptor.
+#
+# A DLL that outgrows one translation unit just adds a .c to its
+# directory — no build-system edit. The CMake side globs the same
+# set for its DEPENDS list (see duetos_embed_32bit_stub_dll).
 #
 # Usage:
 #     build-stub-32-dll.sh <repo_root> <out_header> <dll_name> <base_va> <symbol_name>
@@ -28,25 +32,37 @@ BASE_VA="$4"
 SYMBOL_NAME="$5"
 
 SRC_DIR="${REPO_ROOT}/userland/libs/${DLL_NAME}_32"
-SRC_C="${SRC_DIR}/${DLL_NAME}_32.c"
 DEF_FILE="${SRC_DIR}/${DLL_NAME}_32.def"
 EMBED="${REPO_ROOT}/tools/build/embed-blob.py"
 
 WORK_DIR="$(dirname "${OUT_HEADER}")/${DLL_NAME}_32"
 mkdir -p "${WORK_DIR}"
-OBJ="${WORK_DIR}/${DLL_NAME}_32.obj"
 DLL="${WORK_DIR}/${DLL_NAME}.dll"
 
 CLANG="${CLANG:-clang}"
 LLD_LINK="${LLD_LINK:-lld-link}"
 
-"${CLANG}" \
-    --target=i686-pc-windows-msvc \
-    -c \
-    -ffreestanding -nostdlib -fno-stack-protector -fno-builtin \
-    -mno-red-zone -fno-asynchronous-unwind-tables \
-    -O2 -Wall -Wextra \
-    "${SRC_C}" -o "${OBJ}"
+# Sorted so the link order — and therefore the emitted DLL bytes —
+# are identical across hosts; the blob is embedded into the kernel
+# image and boot-determinism sweeps diff it.
+mapfile -t SRC_LIST < <(find "${SRC_DIR}" -maxdepth 1 -name '*.c' -print | sort)
+if [[ ${#SRC_LIST[@]} -eq 0 ]]; then
+    echo "build-stub-32-dll.sh: no .c sources under ${SRC_DIR}" >&2
+    exit 1
+fi
+
+OBJS=()
+for src in "${SRC_LIST[@]}"; do
+    obj="${WORK_DIR}/$(basename "${src}" .c).obj"
+    "${CLANG}" \
+        --target=i686-pc-windows-msvc \
+        -c \
+        -ffreestanding -nostdlib -fno-stack-protector -fno-builtin \
+        -mno-red-zone -fno-asynchronous-unwind-tables \
+        -O2 -Wall -Wextra -Werror \
+        "${src}" -o "${obj}"
+    OBJS+=("${obj}")
+done
 
 rm -f "${DLL}"
 set +e
@@ -54,7 +70,7 @@ set +e
     /dll /noentry /nodefaultlib /machine:x86 \
     "/base:${BASE_VA}" \
     "/def:${DEF_FILE}" \
-    /out:"${DLL}" "${OBJ}" 2>&1 | grep -v "align specified without /driver"
+    /out:"${DLL}" "${OBJS[@]}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}
 set -e
 if [[ ${LINK_RC} -ne 0 ]]; then

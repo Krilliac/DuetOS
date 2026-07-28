@@ -33,6 +33,13 @@ sudo apt-get install -y gdb strace ltrace lsof tcpdump
 # host-side trace harness; `valgrind` doesn't run kernel code but
 # is invaluable for the cross-built userland tools under tools/.
 sudo apt-get install -y binutils binutils-x86-64-linux-gnu gdbserver valgrind
+# Fuzz-target link runtime. `tests/fuzz` builds with
+# -fsanitize=fuzzer,address,undefined; clang ships the compiler
+# drivers but NOT libclang_rt.asan*.a, so without this every one of
+# the 37 targets fails at link with "cannot find
+# .../libclang_rt.asan-x86_64.a" — a missing-package error that
+# reads like a code break until you look closely.
+sudo apt-get install -y libclang-rt-18-dev
 # Disk / FS forensics: GPT/MBR/ISO inspection during the boot-
 # image plumbing (`fdisk -l`, `parted print`, `losetup`, `dumpe2fs`,
 # `mtools` already covered above). `hexdump` ships with bsdmainutils

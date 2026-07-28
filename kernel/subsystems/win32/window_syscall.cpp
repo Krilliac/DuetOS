@@ -20,16 +20,22 @@
  *
  *   Message dispatch: WM_TIMER / WM_PAINT / input events get
  *   posted into the per-window queue; the user-space Win32
- *   message loop drains the queue via SYS_WIN_GETMSG, the
- *   kernel runs the user-supplied WndProc by transferring
- *   control back to ring 3 with a synthetic frame on the
- *   user stack.
+ *   message loop drains the queue via SYS_WIN_GET_MSG.
+ *
+ *   The kernel does NOT run the WndProc. It stores the
+ *   user-supplied pointer in the window's GWLP_WNDPROC long
+ *   slot (SYS_WIN_SET_LONG, slot 0) and hands it back on
+ *   request; user32's DispatchMessage reads it out and makes a
+ *   plain in-process indirect call, in ring 3, on the caller's
+ *   own stack. There is no synthetic frame and no ring
+ *   transition — see userland/libs/user32/user32.c
+ *   (user32_dispatch_core) and its i386 twin in
+ *   userland/libs/user32_32/user32_32.c.
  *
  * WHY THIS FILE IS LARGE
  *   ~30 user32 entry points + the paint lifecycle + the GDI
  *   primitive routing live here. Each is short but they
- *   accumulate, and the message-loop trampoline plumbing
- *   spans several hundred lines on its own.
+ *   accumulate.
  */
 
 #include "subsystems/win32/window_syscall.h"

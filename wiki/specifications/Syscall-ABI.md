@@ -1292,8 +1292,8 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 33 | `SYS_EVENT_WAIT` | `rdi` = event handle; `rsi` = timeout_ms | WAIT_OBJECT_0 (0) on success, WAIT_TIMEOUT (0x102) on timeout, or u64(-1) on ... |
 | 34 | `SYS_TLS_ALLOC` | — | the lowest unused TLS slot index (0 |
 | 35 | `SYS_TLS_FREE` | `rdi` = slot index | 0 on success, u64(-1) on bad index / unallocated slot |
-| 36 | `SYS_TLS_GET` | `rdi` = slot index | the stored u64 value, or 0 if the index is invalid / unallocated (Win32 TlsGe... |
-| 37 | `SYS_TLS_SET` | `rdi` = slot index; `rsi` = value | 0 on success, u64(-1) on bad index |
+| 36 | `SYS_TLS_GET` | `rdi` = slot index | the calling task's stored u64 value, or 0 for an unset/stale/invalid index |
+| 37 | `SYS_TLS_SET` | `rdi` = slot index; `rsi` = value | 0 on success |
 | 38 | `SYS_BP_INSTALL` | `rdi` = va; `rsi` = BpKind (1=exec; `rdx` = length (1/2/4/8) | a non-zero breakpoint id on success, or u64(-1) on error |
 | 39 | `SYS_BP_REMOVE` | `rdi` = id | 0 on success, u64(-1) on unknown id |
 | 40 | `SYS_GETTIME_ST` | `rdi` = user pointer to a 16-byte SYSTEMTIME struct | 0 on success, u64(-1) on EFAULT |
@@ -1391,7 +1391,7 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 132 | `SYS_PROCESS_VM_READ` | `rdi` = target process handle (kWin32ProcessBase + idx) rsi = tar... | STATUS_PARTIAL_COPY (0x8000000D) with the byte count populated |
 | 133 | `SYS_PROCESS_VM_WRITE` | `rdi` = target process handle rsi = target VA (in the target's us... | — |
 | 134 | `SYS_PROCESS_VM_QUERY` | `rdi` = target process handle rsi = target VA to probe rdx = call... | a single-page region: BaseAddress = the 4 KiB-aligned start of the page conta... |
-| 135 | `SYS_THREAD_SUSPEND` | `rdi` = thread handle (kWin32ThreadBase + idx in caller's own win... | — |
+| 135 | `SYS_THREAD_SUSPEND` | `rdi` = local CreateThread handle or a foreign handle returned by... | — |
 | 136 | `SYS_THREAD_RESUME` | — | shape as SYS_THREAD_SUSPEND |
 | 137 | `SYS_THREAD_GET_CONTEXT` | `rdi` = thread handle (caller's win32_threads[] entry); `rsi` = user pointer to a Win32Context buffer (defined in this he...; `rdx` = ContextFlags filter (CONTEXT_INTEGER / CONTEXT_CONTROL / ... | — |
 | 138 | `SYS_THREAD_SET_CONTEXT` | — | — |

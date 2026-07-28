@@ -1099,72 +1099,41 @@ fault→fix→re-run loop, `tools/test/run-exe.sh` + `peexec=`, using the
 `[win32-32miss] ret=` line → `i686-w64-mingw32-objdump -d
 --start-address` to name the import):
 
-1. **Post-CRT application init.** The exe currently reaches its own code
-   and settles into a quiet loop (no syscalls) — characterise what it
-   waits on (window creation / a timing or event wait) and continue the
-   import-coverage climb (USER32 window class → message loop). This is
-   the long middle of the climb.
+1. **Post-CRT application init.** The exe clears CRT startup and reaches
+   its own code; the climb from there is import coverage plus the
+   surfaces those imports need to be real. This is the long middle.
 
-   **The quiet loop is characterised (2026-07-26).** It is not a wait
-   the guest is stuck in — it is `user32_32` lying. Every export in
-   `userland/libs/user32_32/user32_32.c` and
-   `userland/libs/gdi32_32/gdi32_32.c` is a hand-written stub that
-   returns a constant; there are **zero syscalls in either file**
-   (928 lines, 0 matches for `int $0x80` / `duet_syscall` / `SYS_`).
-   So `CreateWindowExA` returns NULL, `RegisterClassA` discards
-   `lpfnWndProc` and returns a fake atom 1, and `PeekMessageA` /
-   `GetMessageA` return 0 forever. An app that reaches its own code
-   creates no window, receives no message, and spins — without ever
-   faulting. A present-but-lying export is worse than a missing one:
-   a missing import produces a debuggable `[win32-32miss]` sentinel,
-   this produces silence.
+   **Landed (2026-07-28): the USER32 rung.** The quiet loop was
+   `user32_32` lying — every export in `userland/libs/user32_32/` and
+   `userland/libs/gdi32_32/` returned a constant and neither file
+   issued a single syscall. Both are real surfaces now, on the same
+   ~40 `SYS_WIN_*` / `SYS_GDI_*` handlers (58..100, 65-68/74-76) the
+   64-bit siblings use: class registration storing a live WNDPROC,
+   window create/destroy/show/move, the full pump (Get / Peek / Post /
+   Dispatch / Send / PostQuitMessage), per-window long slots,
+   invalidate + BeginPaint/EndPaint, rects and metrics from the
+   compositor, focus/activation, key state, cursor, capture, timers,
+   clipboard, and the fill / rect / ellipse / line / text / pixel
+   primitives. `user32_32` split into `user32_32.c` + `user32_32_misc.c`;
+   the shared i386 syscall trampolines and the HDC / brush / pen
+   encodings moved to `userland/libs/common/`. See Win32-Surface-Status
+   §11b for the full inventory and the three i386-specific traps
+   (28-byte MSG, divergent WNDCLASSEX offsets, USER32-homed FillRect).
 
-   The 64-bit siblings are real and the kernel already has ~40 working
-   `SYS_WIN_*` / `SYS_GDI_*` handlers (58..100, 65-68/74-76), so this
-   is a **DLL-only port, no kernel slice needed**. Two traps for
-   whoever takes it:
-   - **`MSG` is 28 bytes on i386, and the kernel's wire struct is 32.**
-     `UserMsg` in `kernel/subsystems/win32/window_syscall.cpp` is
-     `{u64 hwnd; u32 message; u32 _pad; u64 wparam; u64 lparam;}` —
-     the first 32 bytes of the **x64** `MSG`. `CopyMsgToUser`
-     blind-writes all 32. A 32-bit `GetMessageA` that passes its
-     caller's real 28-byte `MSG*` straight through gets every field
-     misaligned **and writes 4 bytes past the end of the caller's
-     struct**. Pass a ≥32-byte scratch buffer and repack, the way the
-     64-bit `user32_zero_msg_tail` already does for its tail.
-   - **The WndProc callback needs no kernel mechanism.** The file
-     header of `window_syscall.cpp` claims "the kernel runs the
-     user-supplied WndProc by transferring control back to ring 3 with
-     a synthetic frame on the user stack." That is not what ships:
-     `user32.c:371-385` fetches the pointer with `SYS_WIN_GET_LONG`
-     and calls it in userland, in-process. A 32-bit port does the same
-     thing with a plain 32-bit indirect call. Stale comment; do not
-     build the mechanism it describes.
+   Proved live, not by compile: `userland/apps/pe32_window/` registers
+   a class, creates a window, and drives post → peek → dispatch →
+   WndProc → paint → quit, asserting 22 conditions including a canary
+   immediately after its 28-byte MSG. It is an `Always` row in the
+   PE-compat battery (`ring3-pe32-window`), so every ring3 boot
+   exercises it.
 
-   **Landed (2026-07-26):** six wrong syscall numbers in the kernel32
-   thunks — `Sleep`, `GetTickCount`, `HeapAlloc`, `HeapFree`,
-   `GetProcAddress` (32-bit) and `CreateWaitableTimerW` (64-bit) — each
-   naming one syscall while calling another, so each silently performed
-   an unrelated kernel operation. Plus `GetProcessHeap` returning a
-   sentinel the kernel rejects, and `HeapSize`/`HeapReAlloc` (which
-   lost the caller's data on every realloc). See Win32-Surface-Status
-   §11b and Design-Decisions. `tools/test/check-syscall-numbers.py`
-   now guards the class as the `win32_syscall_numbers` hosted CTest.
+   **Still open on this rung:** `msvcrt_32` stdio (`fopen`/`fread`) has
+   not been rebased onto the new file-I/O surface. The remaining
+   `user32_32` / `gdi32_32` STUBs all trace to one missing thing — an
+   off-screen surface the compositor's display list has no concept of,
+   which blocks memory DCs, bitmaps, blits and DIB sections. Icon and
+   cursor resources need a `.rsrc` parser. Fonts need a font pipeline.
 
-   **Landed (2026-07-26):** `kernel32_32` file I/O is real —
-   `CreateFileA`/`W`, `ReadFile`, `WriteFile` on kernel file handles,
-   `SetFilePointer`, `GetFileSize`/`Ex`, `GetFileAttributesA`/`W`,
-   `GetFileType`, all on the same cap-gated syscalls the 64-bit
-   `kernel32_io.c` uses. An application that reaches its own code
-   opens its own data files, so this was the first thing the rung
-   needed. Same slice fixed `CloseHandle`, which had been dispatching
-   SYS_STAT instead of SYS_FILE_CLOSE (see Design-Decisions —
-   second instance of the wrong-syscall-number class in this DLL, so
-   **audit the remaining hand-written syscall numbers across the
-   `_32` set** before climbing further). Still open on this rung:
-   `msvcrt_32` stdio (`fopen`/`fread`) has not been rebased onto the
-   new surface, and the USER32 window-class → message-loop climb has
-   not started.
 2. **Large bundled-data staging + FAT large volume.** The exe reads
    multi-GB archive files. Staging needs a much larger disk image than
    the 16 MiB `make-gpt-image.py` default, exercising the FAT32

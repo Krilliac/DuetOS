@@ -2778,8 +2778,8 @@ Today's i386 surface (~280 exports, 13 DLLs):
 |--------------|---------|---------------------------------------|
 | kernel32     | 69      | `userland/libs/kernel32_32/`         |
 | msvcrt       | ~50     | `userland/libs/msvcrt_32/`           |
-| user32       | ~60     | `userland/libs/user32_32/`           |
-| gdi32        | ~45     | `userland/libs/gdi32_32/`            |
+| user32       | 87      | `userland/libs/user32_32/`           |
+| gdi32        | 45      | `userland/libs/gdi32_32/`            |
 | advapi32     | 24      | `userland/libs/advapi32_32/`         |
 | comctl32     | 5       | `userland/libs/comctl32_32/`         |
 | comdlg32     | 1       | `userland/libs/comdlg32_32/`         |
@@ -2866,6 +2866,66 @@ implementations:
   handle slot until process exit; it is SYS_FILE_CLOSE (22) now.
   Per-entry-point GAPs (truncation, 64-bit offsets, overlapped
   I/O, UTF-16 transcode) are listed below and marked in-source.
+- `user32_32` and `gdi32_32` are **REAL** as of 2026-07-28 — the
+  USER32 rung of the PE32 ladder. Before that slice, every export in
+  both files returned a constant and **neither file issued a single
+  syscall**: `RegisterClassA` discarded `lpfnWndProc` and returned a
+  fake atom 1, `CreateWindowExA` returned NULL, and `GetMessageA`
+  returned 0 forever. A PE32 that cleared CRT startup created no
+  window, received no message, and spun quietly without ever
+  faulting. A present-but-lying export is worse than a missing one:
+  a missing import leaves a debuggable `[win32-32miss]` sentinel,
+  this left silence.
+
+  Both now drive the same ~40 `SYS_WIN_*` / `SYS_GDI_*` handlers
+  (58..100, 65-68/74-76) their 64-bit siblings do. `user32_32` splits
+  across `user32_32.c` (class table, window lifecycle, message pump,
+  long slots) and `user32_32_misc.c` (geometry, paint, focus, input,
+  caret, clipboard, timers); `gdi32_32` gained the objects and draw
+  calls. What is real: class registration storing a live WNDPROC,
+  window create/destroy/show/move, the full pump (Get / Peek / Post /
+  Dispatch / Send / PostQuitMessage), per-window long slots,
+  invalidate/validate + BeginPaint/EndPaint, rects and metrics from
+  the compositor, focus/activation, key state, cursor, capture,
+  timers, clipboard, and the fill / frame / rect / ellipse / line /
+  polyline / text / pixel primitives. The remaining STUBs — icon and
+  cursor resources, memory DCs, bitmaps, blits, DIB sections, fonts,
+  arcs, regions — are marked in-source and all trace to one missing
+  thing: an off-screen surface the compositor's display list has no
+  concept of.
+
+  Three i386-specific traps this port had to get right, each a
+  silent-corruption bug if missed:
+
+  1. **`MSG` is 28 bytes on i386; the kernel's wire struct is 32.**
+     `CopyMsgToUser` blind-writes all 32 bytes to whatever pointer it
+     is handed, so passing the caller's real `MSG*` through misaligns
+     every field AND scribbles 4 bytes past the end of the caller's
+     struct. Both pump entrypoints pass a local wire buffer and
+     repack. `pe32_window` plants a canary immediately after its MSG
+     and re-checks it on every drain iteration.
+  2. **`WNDCLASS` and `WNDCLASSEX` have different i386 offsets.** On
+     x86_64 the prepended `cbSize` shares the first 8-byte slot with
+     `style`, so `lpfnWndProc` lands at offset 8 in both and the
+     64-bit `RegisterClassExW` can legitimately forward to
+     `RegisterClassW`. With 4-byte pointers there is no such padding:
+     `cbSize` shifts every subsequent field by 4. The 32-bit port
+     carries two structs.
+  3. **`FillRect`, `FrameRect`, `DrawText`, `GetDC` and `BeginPaint`
+     are USER32 exports, not GDI32.** Windows splits the drawing
+     surface across the two DLLs by history, not by layer, and an
+     importer resolves against whichever DLL Windows homes the symbol
+     in. `FillRect` living only in `gdi32_32` sent `pe32_window`'s
+     import to the NO-OP catch-all. Both DLLs now speak the shared
+     handle ABI in `userland/libs/common/duet32_gdi_abi.h` — one
+     definition of the HDC / brush / pen encodings, because both
+     sides mint AND consume them.
+
+  The WndProc callback needs no kernel mechanism, despite what
+  `window_syscall.cpp`'s file header used to claim: the kernel stores
+  the pointer in the `GWLP_WNDPROC` long slot and hands it back, and
+  `DispatchMessage` makes a plain in-process indirect call in ring 3.
+  That stale comment is corrected.
 - `msvcrt_32` provides real string + memory intrinsics
   (memcpy / strlen / strcmp / etc.) and a bump-allocator
   malloc / free until the proper heap port lands.

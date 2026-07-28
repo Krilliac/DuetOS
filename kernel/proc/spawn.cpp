@@ -792,10 +792,10 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     constexpr u64 kPreloadEntryCount = sizeof(preload_set) / sizeof(preload_set[0]);
     static_assert(kPreloadEntryCount <= kPreloadSlotCap, "Preload DLL list exceeds stack-local cap");
 
-    // 32-bit (PE32) preload set. Today just one entry —
-    // kernel32_32.dll — enough for pe32_smoke's ExitProcess
-    // import. Grows as PE32 callers need more. Mapped at the same
-    // ImageBase the DLL was built with (low 4 GiB).
+    // 32-bit (PE32) preload set — 13 companion DLLs, each mapped at
+    // the same ImageBase it was built with (low 4 GiB). kernel32,
+    // msvcrt, user32 and gdi32 carry real implementations; the rest
+    // are still safe-ignore stubs. Grows as PE32 callers need more.
     static const PreloadDllEntry preload_set_pe32[] = {
         {"kernel32.dll", fs::generated::kBinKernel32_32DllBytes, fs::generated::kBinKernel32_32DllBytes_len,
          /*essential=*/true},

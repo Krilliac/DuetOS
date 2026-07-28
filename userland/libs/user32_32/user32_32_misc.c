@@ -1,0 +1,590 @@
+/*
+ * userland/libs/user32_32/user32_32_misc.c
+ *
+ * The WM-adjacent half of the i386 (PE32) user32 companion DLL:
+ * geometry, metrics, paint, focus/activation, input state, caret,
+ * clipboard, timers and the resource-loader shims. The window
+ * lifecycle, class table and message pump live in user32_32.c.
+ *
+ * Everything here that a SYS_WIN_* handler backs is a real call.
+ * The handful of exports with no kernel surface behind them
+ * (icons, cursors, coordinate mapping for child windows) carry a
+ * STUB or GAP marker naming what is missing.
+ */
+
+#include "user32_32_internal.h"
+
+/* ------------------------------------------------------------------
+ * Geometry + metrics
+ * ------------------------------------------------------------------ */
+
+/* RECT is four int32s on every Win32 ABI, so the kernel's 16-byte
+ * write lands correctly on i386 without repacking — unlike MSG. */
+struct user32_rect
+{
+    INT left;
+    INT top;
+    INT right;
+    INT bottom;
+};
+
+static BOOL user32_get_rect(HWND h, unsigned selector, void* rect)
+{
+    if (!rect)
+        return 0;
+    return duet_syscall3(SYS_WIN_GET_RECT, (unsigned)(unsigned long)h, selector, (unsigned)(unsigned long)rect) ? 1 : 0;
+}
+
+__declspec(dllexport) BOOL __stdcall GetClientRect(HWND h, void* rect)
+{
+    return user32_get_rect(h, 1 /* client */, rect);
+}
+
+__declspec(dllexport) BOOL __stdcall GetWindowRect(HWND h, void* rect)
+{
+    return user32_get_rect(h, 0 /* window */, rect);
+}
+
+__declspec(dllexport) INT __stdcall GetSystemMetrics(int index)
+{
+    return duet_syscall1(SYS_WIN_GET_METRIC, (unsigned)index);
+}
+
+/* SYS_WIN_MOVE flags — bit 0 = SWP_NOMOVE, bit 1 = SWP_NOSIZE. */
+#define WIN_MOVE_NOMOVE 0x1
+#define WIN_MOVE_NOSIZE 0x2
+
+__declspec(dllexport) BOOL __stdcall MoveWindow(HWND h, int x, int y, int w, int ht, BOOL repaint)
+{
+    const int rv =
+        duet_syscall6(SYS_WIN_MOVE, (unsigned)(unsigned long)h, (unsigned)x, (unsigned)y, (unsigned)w, (unsigned)ht, 0);
+    if (rv && repaint)
+    {
+        (void)duet_syscall2(SYS_WIN_INVALIDATE, (unsigned)(unsigned long)h, 0);
+    }
+    return rv ? 1 : 0;
+}
+
+/* Win32 SWP_* bits, in the caller's flag word. */
+#define SWP_NOSIZE 0x0001
+#define SWP_NOMOVE 0x0002
+
+__declspec(dllexport) BOOL __stdcall SetWindowPos(HWND h, HWND after, int x, int y, int w, int ht, UINT flags)
+{
+    /* Z-order (`after`) is the compositor's to decide; the only
+     * ordering control ring 3 has is SetActiveWindow, which
+     * SetForegroundWindow already exposes. */
+    (void)after;
+    unsigned kflags = 0;
+    if (flags & SWP_NOMOVE)
+        kflags |= WIN_MOVE_NOMOVE;
+    if (flags & SWP_NOSIZE)
+        kflags |= WIN_MOVE_NOSIZE;
+    return duet_syscall6(SYS_WIN_MOVE, (unsigned)(unsigned long)h, (unsigned)x, (unsigned)y, (unsigned)w, (unsigned)ht,
+                         kflags)
+               ? 1
+               : 0;
+}
+
+__declspec(dllexport) BOOL __stdcall SetWindowTextA(HWND h, const char* text)
+{
+    return duet_syscall2(SYS_WIN_SET_TEXT, (unsigned)(unsigned long)h, (unsigned)(unsigned long)text) ? 1 : 0;
+}
+
+__declspec(dllexport) BOOL __stdcall SetWindowTextW(HWND h, const wchar_t16* text)
+{
+    char flat[WIN_TITLE_MAX];
+    user32_w_to_ascii(text, flat, WIN_TITLE_MAX);
+    return SetWindowTextA(h, flat);
+}
+
+__declspec(dllexport) HWND __stdcall GetParent(HWND h)
+{
+    return (HWND)(unsigned long)(unsigned)duet_syscall1(SYS_WIN_GET_PARENT, (unsigned)(unsigned long)h);
+}
+
+/* The compositor's client area is the window rect inset by the
+ * chrome, and SYS_WIN_GET_RECT reports both, so the two coordinate
+ * spaces differ by the window origin plus the title bar. */
+static BOOL user32_map_point(HWND h, void* pt, int to_client)
+{
+    if (!pt)
+        return 0;
+    struct user32_rect wr = {0, 0, 0, 0};
+    struct user32_rect cr = {0, 0, 0, 0};
+    if (!user32_get_rect(h, 0, &wr) || !user32_get_rect(h, 1, &cr))
+        return 0;
+    /* Client height is smaller than window height by exactly the
+     * chrome; the horizontal border is the residual width. */
+    const INT border = ((wr.right - wr.left) - (cr.right - cr.left)) / 2;
+    const INT origin_x = wr.left + border;
+    const INT origin_y = wr.bottom - (cr.bottom - cr.top);
+    INT* p = (INT*)pt;
+    if (to_client)
+    {
+        p[0] -= origin_x;
+        p[1] -= origin_y;
+    }
+    else
+    {
+        p[0] += origin_x;
+        p[1] += origin_y;
+    }
+    return 1;
+}
+
+__declspec(dllexport) BOOL __stdcall ScreenToClient(HWND h, void* pt)
+{
+    return user32_map_point(h, pt, 1);
+}
+
+__declspec(dllexport) BOOL __stdcall ClientToScreen(HWND h, void* pt)
+{
+    return user32_map_point(h, pt, 0);
+}
+
+/* STUB: the compositor has no desktop-window registration, so there
+ * is no HWND that names the root surface. Callers get a non-zero
+ * sentinel so "did it succeed?" probes pass, but every SYS_WIN_*
+ * call against it is rejected as a foreign handle. */
+__declspec(dllexport) HWND __stdcall GetDesktopWindow(void)
+{
+    return (HWND)0x10001;
+}
+
+/* ------------------------------------------------------------------
+ * Paint
+ * ------------------------------------------------------------------ */
+
+__declspec(dllexport) BOOL __stdcall InvalidateRect(HWND h, const void* rect, BOOL erase)
+{
+    /* GAP: the kernel invalidates the whole client area; a partial
+     * rect is widened to the full window — revisit when the
+     * compositor grows per-rect damage tracking for PE windows. */
+    (void)rect;
+    return duet_syscall2(SYS_WIN_INVALIDATE, (unsigned)(unsigned long)h, (unsigned)erase) ? 1 : 0;
+}
+
+__declspec(dllexport) BOOL __stdcall ValidateRect(HWND h, const void* rect)
+{
+    (void)rect;
+    return duet_syscall1(SYS_WIN_VALIDATE, (unsigned)(unsigned long)h) ? 1 : 0;
+}
+
+/* PAINTSTRUCT on i386: { HDC hdc; BOOL fErase; RECT rcPaint;
+ * BOOL fRestore; BOOL fIncUpdate; BYTE rgbReserved[32]; } — 64
+ * bytes, versus 72 on x86_64. Only the first three fields carry
+ * meaning; rgbReserved is left untouched. */
+struct user32_paintstruct32
+{
+    HDC hdc;
+    BOOL fErase;
+    struct user32_rect rcPaint;
+    BOOL fRestore;
+    BOOL fIncUpdate;
+    unsigned char rgbReserved[32];
+};
+
+__declspec(dllexport) HDC __stdcall GetDC(HWND h)
+{
+    /* The HDC is the HWND with the GDI tag folded in, so a later
+     * draw call can recover the target window from the DC alone.
+     * Mirrors the 64-bit pair's encoding, narrowed to fit a 32-bit
+     * handle. */
+    return (HDC)(unsigned long)((unsigned)(unsigned long)h | DUET32_GDI_HDC_TAG);
+}
+
+__declspec(dllexport) HDC __stdcall GetWindowDC(HWND h)
+{
+    return GetDC(h);
+}
+
+__declspec(dllexport) INT __stdcall ReleaseDC(HWND h, HDC dc)
+{
+    /* Window DCs are pure handle arithmetic — nothing to release. */
+    (void)h;
+    (void)dc;
+    return 1;
+}
+
+__declspec(dllexport) HDC __stdcall BeginPaint(HWND h, void* ps)
+{
+    HDC hdc = GetDC(h);
+    if (ps)
+    {
+        struct user32_paintstruct32* p = (struct user32_paintstruct32*)ps;
+        p->hdc = hdc;
+        p->fErase = 1;
+        p->rcPaint.left = 0;
+        p->rcPaint.top = 0;
+        p->rcPaint.right = 0;
+        p->rcPaint.bottom = 0;
+        (void)user32_get_rect(h, 1 /* client */, &p->rcPaint);
+        p->fRestore = 0;
+        p->fIncUpdate = 0;
+    }
+    /* The caller has promised to paint, so drop the dirty bit now —
+     * otherwise the next pump drain posts a second WM_PAINT and the
+     * app repaints forever. */
+    (void)duet_syscall1(SYS_WIN_VALIDATE, (unsigned)(unsigned long)h);
+    return hdc;
+}
+
+__declspec(dllexport) BOOL __stdcall EndPaint(HWND h, const void* ps)
+{
+    /* BeginPaint already validated; the display list the paint
+     * recorded is replayed by the compositor on its own schedule. */
+    (void)h;
+    (void)ps;
+    return 1;
+}
+
+/* ------------------------------------------------------------------
+ * The drawing calls Windows homes in USER32
+ *
+ * FillRect / FrameRect / DrawText are USER32 exports, so an importer
+ * resolves them here and never reaches gdi32. They record the same
+ * display-list primitives gdi32_32 does, decoding the shared brush
+ * and HDC encodings from duet32_gdi_abi.h.
+ * ------------------------------------------------------------------ */
+
+static BOOL user32_rect_primitive(int nr, HDC dc, const struct user32_rect* rc, unsigned colour)
+{
+    const unsigned hwnd = Duet32HwndFromHdc(dc);
+    if (!hwnd || !rc)
+        return 0;
+    const INT w = rc->right - rc->left;
+    const INT h = rc->bottom - rc->top;
+    if (w <= 0 || h <= 0)
+        return 1;
+    return duet_syscall6(nr, hwnd, (unsigned)rc->left, (unsigned)rc->top, (unsigned)w, (unsigned)h, colour) ? 1 : 0;
+}
+
+__declspec(dllexport) INT __stdcall FillRect(HDC dc, const void* rect, HANDLE brush)
+{
+    return user32_rect_primitive(SYS_GDI_FILL_RECT, dc, (const struct user32_rect*)rect,
+                                 Duet32GdiObjectColour(brush, DUET32_GDI_BRUSH_TAG));
+}
+
+__declspec(dllexport) INT __stdcall FrameRect(HDC dc, const void* rect, HANDLE brush)
+{
+    return user32_rect_primitive(SYS_GDI_RECTANGLE, dc, (const struct user32_rect*)rect,
+                                 Duet32GdiObjectColour(brush, DUET32_GDI_BRUSH_TAG));
+}
+
+/* DrawText anchors at the rect's top-left. GAP: no word wrap, no
+ * alignment flags, no multi-line layout — mirrors gdi32_32's
+ * DrawText and lifts when the display list grows a text layout
+ * primitive. */
+static BOOL user32_draw_text(HDC dc, const char* text, unsigned len, const struct user32_rect* rc)
+{
+    const unsigned hwnd = Duet32HwndFromHdc(dc);
+    if (!hwnd || !text || !rc)
+        return 0;
+    return duet_syscall6(SYS_GDI_TEXT_OUT, hwnd, (unsigned)rc->left, (unsigned)rc->top, (unsigned)(unsigned long)text,
+                         len, 0x00FFFFFFu)
+               ? 1
+               : 0;
+}
+
+__declspec(dllexport) INT __stdcall DrawTextA(HDC dc, const char* text, int len, void* rect, UINT format)
+{
+    (void)format;
+    if (!text)
+        return 0;
+    unsigned n = 0;
+    if (len >= 0)
+    {
+        n = (unsigned)len;
+    }
+    else
+    {
+        while (text[n])
+            ++n;
+    }
+    return user32_draw_text(dc, text, n, (const struct user32_rect*)rect) ? 1 : 0;
+}
+
+__declspec(dllexport) INT __stdcall DrawTextW(HDC dc, const wchar_t16* text, int len, void* rect, UINT format)
+{
+    (void)format;
+    char flat[256];
+    const unsigned cap = sizeof(flat) - 1;
+    const unsigned limit = (len < 0) ? cap : ((unsigned)len < cap ? (unsigned)len : cap);
+    unsigned n = 0;
+    if (text)
+    {
+        for (; n < limit && text[n] != 0; ++n)
+        {
+            wchar_t16 c = text[n];
+            flat[n] = (c > 0 && c < 0x7F) ? (char)c : '?';
+        }
+    }
+    flat[n] = '\0';
+    return user32_draw_text(dc, flat, n, (const struct user32_rect*)rect) ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------
+ * Focus / activation
+ * ------------------------------------------------------------------ */
+
+__declspec(dllexport) HWND __stdcall GetFocus(void)
+{
+    return (HWND)(unsigned long)(unsigned)duet_syscall0(SYS_WIN_GET_FOCUS);
+}
+
+__declspec(dllexport) HWND __stdcall SetFocus(HWND h)
+{
+    return (HWND)(unsigned long)(unsigned)duet_syscall1(SYS_WIN_SET_FOCUS, (unsigned)(unsigned long)h);
+}
+
+__declspec(dllexport) HWND __stdcall GetActiveWindow(void)
+{
+    return (HWND)(unsigned long)(unsigned)duet_syscall0(SYS_WIN_GET_ACTIVE);
+}
+
+__declspec(dllexport) HWND __stdcall SetActiveWindow(HWND h)
+{
+    return (HWND)(unsigned long)(unsigned)duet_syscall1(SYS_WIN_SET_ACTIVE, (unsigned)(unsigned long)h);
+}
+
+__declspec(dllexport) HWND __stdcall GetForegroundWindow(void)
+{
+    return GetActiveWindow();
+}
+
+__declspec(dllexport) BOOL __stdcall SetForegroundWindow(HWND h)
+{
+    (void)SetActiveWindow(h);
+    return 1;
+}
+
+/* ------------------------------------------------------------------
+ * Input state
+ * ------------------------------------------------------------------ */
+
+__declspec(dllexport) SHORT __stdcall GetKeyState(int vk)
+{
+    return (SHORT)duet_syscall1(SYS_WIN_GET_KEYSTATE, (unsigned)vk);
+}
+
+__declspec(dllexport) SHORT __stdcall GetAsyncKeyState(int vk)
+{
+    return GetKeyState(vk);
+}
+
+__declspec(dllexport) BOOL __stdcall GetCursorPos(void* pt)
+{
+    if (!pt)
+        return 0;
+    return duet_syscall1(SYS_WIN_GET_CURSOR, (unsigned)(unsigned long)pt) ? 1 : 0;
+}
+
+__declspec(dllexport) BOOL __stdcall SetCursorPos(int x, int y)
+{
+    return duet_syscall2(SYS_WIN_SET_CURSOR, (unsigned)x, (unsigned)y) ? 1 : 0;
+}
+
+__declspec(dllexport) HWND __stdcall SetCapture(HWND h)
+{
+    return (HWND)(unsigned long)(unsigned)duet_syscall1(SYS_WIN_SET_CAPTURE, (unsigned)(unsigned long)h);
+}
+
+__declspec(dllexport) BOOL __stdcall ReleaseCapture(void)
+{
+    return duet_syscall0(SYS_WIN_RELEASE_CAPTURE) ? 1 : 0;
+}
+
+__declspec(dllexport) HWND __stdcall GetCapture(void)
+{
+    return (HWND)(unsigned long)(unsigned)duet_syscall0(SYS_WIN_GET_CAPTURE);
+}
+
+/* STUB: cursor shapes are the compositor's, not the app's — there
+ * is no per-window cursor selection to set, so the previous cursor
+ * reported back is always NULL. */
+__declspec(dllexport) HCURSOR __stdcall SetCursor(HCURSOR cursor)
+{
+    (void)cursor;
+    return (HCURSOR)0;
+}
+
+/* ------------------------------------------------------------------
+ * Timers
+ * ------------------------------------------------------------------ */
+
+__declspec(dllexport) UINT __stdcall SetTimer(HWND h, UINT id, UINT interval_ms, void* proc)
+{
+    /* GAP: a non-null TIMERPROC is ignored — WM_TIMER is posted to
+     * the window queue and the pump dispatches it through the
+     * WNDPROC instead. Revisit if a PE is seen relying on the
+     * callback form. */
+    (void)proc;
+    return (UINT)duet_syscall3(SYS_WIN_TIMER_SET, (unsigned)(unsigned long)h, id, interval_ms);
+}
+
+__declspec(dllexport) BOOL __stdcall KillTimer(HWND h, UINT id)
+{
+    return duet_syscall2(SYS_WIN_TIMER_KILL, (unsigned)(unsigned long)h, id) ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------
+ * Caret
+ * ------------------------------------------------------------------ */
+
+static BOOL user32_caret_op(unsigned op, unsigned a1, unsigned a2, unsigned a3)
+{
+    return duet_syscall4(SYS_WIN_CARET, op, a1, a2, a3) ? 1 : 0;
+}
+
+__declspec(dllexport) BOOL __stdcall CreateCaret(HWND h, HANDLE bitmap, int w, int ht)
+{
+    /* A bitmap caret would need a GDI object the compositor can
+     * blit; the kernel draws a solid block instead. */
+    (void)bitmap;
+    return user32_caret_op(0, (unsigned)w, (unsigned)ht, (unsigned)(unsigned long)h);
+}
+
+__declspec(dllexport) BOOL __stdcall DestroyCaret(void)
+{
+    return user32_caret_op(1, 0, 0, 0);
+}
+
+__declspec(dllexport) BOOL __stdcall SetCaretPos(int x, int y)
+{
+    return user32_caret_op(2, (unsigned)x, (unsigned)y, 0);
+}
+
+__declspec(dllexport) BOOL __stdcall ShowCaret(HWND h)
+{
+    (void)h;
+    return user32_caret_op(3, 0, 0, 0);
+}
+
+__declspec(dllexport) BOOL __stdcall HideCaret(HWND h)
+{
+    (void)h;
+    return user32_caret_op(4, 0, 0, 0);
+}
+
+/* The caret blink rate is a fixed compositor property; there is no
+ * per-process setting to read back or change. */
+__declspec(dllexport) UINT __stdcall GetCaretBlinkTime(void)
+{
+    return 500;
+}
+
+__declspec(dllexport) BOOL __stdcall SetCaretBlinkTime(UINT msec)
+{
+    // STUB: the compositor's blink period is fixed; the request is
+    // accepted and discarded.
+    (void)msec;
+    return 1;
+}
+
+/* ------------------------------------------------------------------
+ * Clipboard
+ *
+ * The kernel owns one system-wide text clipboard. Open/Close/Empty
+ * exist only to satisfy the Win32 protocol — there is no ownership
+ * to arbitrate with a single clipboard and no other claimant.
+ * ------------------------------------------------------------------ */
+
+#define CF_TEXT 1
+
+__declspec(dllexport) BOOL __stdcall OpenClipboard(HWND owner)
+{
+    (void)owner;
+    return 1;
+}
+
+__declspec(dllexport) BOOL __stdcall CloseClipboard(void)
+{
+    return 1;
+}
+
+__declspec(dllexport) BOOL __stdcall EmptyClipboard(void)
+{
+    static const char empty[1] = {'\0'};
+    return duet_syscall1(SYS_WIN_CLIP_SET_TEXT, (unsigned)(unsigned long)empty) ? 1 : 0;
+}
+
+/* GetClipboardData hands back an HGLOBAL the caller may read. The
+ * shadow buffer is refilled on every call, matching Win32's
+ * "copy it out before the next call, do not free it" convention. */
+static char s_clipboard_shadow[1024];
+
+__declspec(dllexport) HANDLE __stdcall GetClipboardData(UINT fmt)
+{
+    if (fmt != CF_TEXT)
+        return (HANDLE)0;
+    s_clipboard_shadow[0] = '\0';
+    (void)duet_syscall2(SYS_WIN_CLIP_GET_TEXT, (unsigned)(unsigned long)s_clipboard_shadow,
+                        (unsigned)sizeof(s_clipboard_shadow));
+    /* An empty clipboard reads back as an empty C string, which is
+     * what a strlen-style caller expects. */
+    return (HANDLE)s_clipboard_shadow;
+}
+
+__declspec(dllexport) HANDLE __stdcall SetClipboardData(UINT fmt, HANDLE data)
+{
+    if (fmt != CF_TEXT || !data)
+        return (HANDLE)0;
+    (void)duet_syscall1(SYS_WIN_CLIP_SET_TEXT, (unsigned)(unsigned long)data);
+    return data;
+}
+
+/* ------------------------------------------------------------------
+ * Message box + resources
+ * ------------------------------------------------------------------ */
+
+__declspec(dllexport) INT __stdcall MessageBoxA(HWND owner, const char* text, const char* caption, UINT type)
+{
+    (void)owner;
+    (void)type;
+    /* No modal dialog is drawn: the kernel records the text as a
+     * [msgbox] serial line and reports IDOK so the caller continues
+     * down its "user clicked OK" path. */
+    (void)duet_syscall2(SYS_WIN_MSGBOX, (unsigned)(unsigned long)text, (unsigned)(unsigned long)caption);
+    return 1; /* IDOK */
+}
+
+__declspec(dllexport) INT __stdcall MessageBoxW(HWND owner, const wchar_t16* text, const wchar_t16* caption, UINT type)
+{
+    char flat_text[256];
+    char flat_caption[WIN_TITLE_MAX];
+    user32_w_to_ascii(text, flat_text, sizeof(flat_text));
+    user32_w_to_ascii(caption, flat_caption, sizeof(flat_caption));
+    return MessageBoxA(owner, flat_text, flat_caption, type);
+}
+
+/* STUB: there is no icon or cursor resource pipeline — the PE's
+ * .rsrc is never parsed for them. Non-null sentinels keep the
+ * caller's NULL-on-failure path from firing; nothing draws. */
+__declspec(dllexport) HICON __stdcall LoadIconA(HINSTANCE inst, const char* name)
+{
+    (void)inst;
+    (void)name;
+    return (HICON)1;
+}
+
+__declspec(dllexport) HICON __stdcall LoadIconW(HINSTANCE inst, const wchar_t16* name)
+{
+    (void)inst;
+    (void)name;
+    return (HICON)1;
+}
+
+__declspec(dllexport) HCURSOR __stdcall LoadCursorA(HINSTANCE inst, const char* name)
+{
+    (void)inst;
+    (void)name;
+    return (HCURSOR)2;
+}
+
+__declspec(dllexport) HCURSOR __stdcall LoadCursorW(HINSTANCE inst, const wchar_t16* name)
+{
+    (void)inst;
+    (void)name;
+    return (HCURSOR)2;
+}

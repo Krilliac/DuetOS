@@ -65,3 +65,25 @@ EXPORTS
     SetActiveWindow
     GetForegroundWindow
     SetForegroundWindow
+    GetWindowLongA
+    GetWindowLongW
+    SetWindowLongA
+    SetWindowLongW
+    MoveWindow
+    SetWindowPos
+    SetWindowTextA
+    SetWindowTextW
+    GetParent
+    GetKeyState
+    GetAsyncKeyState
+    GetCursorPos
+    SetCapture
+    ReleaseCapture
+    GetCapture
+    SetTimer
+    KillTimer
+    GetWindowDC
+    FillRect
+    FrameRect
+    DrawTextA
+    DrawTextW

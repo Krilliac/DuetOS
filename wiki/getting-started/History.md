@@ -1442,6 +1442,41 @@ the `Fls*` aliases and are pinned by exact compile-time table checks.
 PE32 remains on its independent DLL path. `tls_smoke` also now exits
 nonzero if any semantic subcheck fails.
 
+## Phase 6.30 — a PE32 window on the screen (2026-07-28)
+
+The 32-bit ladder's standing milestone had been "a 32-bit game exe runs
+on DuetOS": the image cleared CRT startup and reached its own code. What
+it then did was settle into a quiet loop and never fault. The cause was
+not a wait the guest was stuck in — it was `user32_32` and `gdi32_32`
+lying. Every export in both files returned a constant, and between them
+they issued **zero syscalls**. `RegisterClassA` threw away the
+`lpfnWndProc` it was handed and returned a fake atom, `CreateWindowExA`
+returned NULL, `GetMessageA` returned 0 forever. An application that got
+that far created no window, received no message, and spun quietly.
+
+That is worse than a missing import. A missing import lands on the
+unresolved-import sentinel and leaves a `[win32-32miss]` line naming the
+RVA; a present-but-lying export leaves silence.
+
+Both DLLs are real surfaces now, driving the same ~40 `SYS_WIN_*` /
+`SYS_GDI_*` handlers the 64-bit siblings have used since the windowing
+v1 slice — no kernel work was needed, only the port. Three things were
+i386-specific and each would have corrupted memory silently: `MSG` is 28
+bytes here against the kernel's 32-byte wire struct (a pass-through
+scribbles past the caller's struct); `WNDCLASSEX` shifts every field by
+4 relative to `WNDCLASS` on i386, where on x86_64 the two shapes happen
+to coincide; and `FillRect` is a USER32 export in Windows, not GDI32, so
+homing it only in `gdi32_32` sent a real importer to the NO-OP
+catch-all.
+
+The proof is a live boot, not a compile. `userland/apps/pe32_window/`
+registers a class, creates a window, and runs post → peek → dispatch →
+WndProc → paint → quit against the compositor, asserting 22 conditions
+along the way — including a canary immediately after its `MSG` that the
+32-byte wire write would clobber. It runs on every ring3 boot as the
+`ring3-pe32-window` battery row, and the boot log now carries
+`[win] create handle=... title="DuetOS PE32"` from a 32-bit PE.
+
 ## How to read the rest of the tree
 
 - `CLAUDE.md` — the authoritative project context, coding standards,

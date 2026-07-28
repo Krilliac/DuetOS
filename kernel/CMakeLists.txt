@@ -535,6 +535,45 @@ else()
 endif()
 list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_PE32_RICH_HEADER}")
 
+# pe32_window.exe — PE32 GUI test for the USER32 rung: registers a
+# window class, creates a window, and drives post → peek → dispatch →
+# WndProc → paint → quit against the kernel window manager. Guards the
+# 28-byte-MSG repack with a canary the kernel's 32-byte wire write
+# would clobber. Built the same way as pe32_rich.
+set(DUETOS_PE32_WINDOW_SRC "${CMAKE_SOURCE_DIR}/userland/apps/pe32_window/pe32_window.c")
+set(DUETOS_PE32_WINDOW_EXE "${CMAKE_CURRENT_BINARY_DIR}/pe32_window.exe")
+set(DUETOS_PE32_WINDOW_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_pe32_window_pe.h")
+if(MINGW_W64_I686_GCC)
+    add_custom_command(
+        OUTPUT "${DUETOS_PE32_WINDOW_EXE}"
+        COMMAND "${MINGW_W64_I686_GCC}"
+                -nostdlib -ffreestanding -fno-stack-protector -mno-stack-arg-probe
+                -e _mainCRTStartup -Wl,--subsystem,console -Wl,--entry,_mainCRTStartup
+                -o "${DUETOS_PE32_WINDOW_EXE}" "${DUETOS_PE32_WINDOW_SRC}"
+                -lkernel32 -luser32 -lgdi32
+        DEPENDS "${DUETOS_PE32_WINDOW_SRC}"
+        COMMENT "Cross-compiling pe32_window.exe (i386 PE32 GUI message loop)"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${DUETOS_PE32_WINDOW_HEADER}"
+        COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
+                "${DUETOS_PE32_WINDOW_EXE}" "${DUETOS_PE32_WINDOW_HEADER}"
+                kBinPe32WindowBytes --namespace "duetos::fs::generated"
+        DEPENDS "${DUETOS_PE32_WINDOW_EXE}" "${DUETOS_EMBED_BLOB_SCRIPT}"
+        COMMENT "Embedding pe32_window PE"
+        VERBATIM)
+else()
+    add_custom_command(
+        OUTPUT "${DUETOS_PE32_WINDOW_HEADER}"
+        COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}" --empty
+                "${DUETOS_PE32_WINDOW_HEADER}"
+                kBinPe32WindowBytes --namespace "duetos::fs::generated"
+        DEPENDS "${DUETOS_EMBED_BLOB_SCRIPT}"
+        COMMENT "Emitting pe32_window PE stub (i686 mingw absent)"
+        VERBATIM)
+endif()
+list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_PE32_WINDOW_HEADER}")
+
 # pe32_miss.exe — PE32 that calls an unresolved Win32 import to
 # validate the 32-bit Win32 thunks page. The import (user32!
 # SetWindowsHookExA) is NOT in our v0 user32_32 stubs, so the
@@ -866,6 +905,7 @@ duetos_embed_blob(generated_kernel32_32_dll.h
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32_32/kernel32_32_fs.c"
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32_32/kernel32_32_paths.h"
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32_32/kernel32_32.def"
+        "${CMAKE_SOURCE_DIR}/userland/libs/common/duet32_syscall.h"
     COMMENT "Compiling + embedding kernel32_32.dll (i386 PE32 companion)")
 
 # 32-bit msvcrt companion — string / memory / CRT-startup intrinsics
@@ -890,19 +930,27 @@ duetos_embed_blob(generated_linux_vdso.h
         "${CMAKE_SOURCE_DIR}/kernel/subsystems/linux/vdso/vdso.lds"
     COMMENT "Assembling + embedding Linux vDSO blob (rt_sigreturn trampoline)")
 
-# 32-bit stub DLLs. Each takes (dll_name, base_va, symbol_name) and
-# produces a PE32 (i386) DLL whose Export Name field matches the
-# i386 importer's descriptor. The bodies are safe-ignore stubs;
-# real implementations land slice-by-slice as Layer 4 grows.
+# 32-bit companion DLLs. Each takes (dll_name, base_va, symbol_name)
+# and produces a PE32 (i386) DLL whose Export Name field matches the
+# i386 importer's descriptor. user32 and gdi32 are real surfaces on
+# the kernel's SYS_WIN_* / SYS_GDI_* handlers; the rest are still
+# safe-ignore stubs, and real implementations land slice-by-slice as
+# Layer 4 grows.
 macro(duetos_embed_32bit_stub_dll name base_va symbol)
-    set(_src "${CMAKE_SOURCE_DIR}/userland/libs/${name}_32/${name}_32.c")
+    # The builder globs every .c in the DLL's directory, so a DLL that
+    # outgrows one TU needs no edit here — CONFIGURE_DEPENDS makes the
+    # dependency list follow it.
+    file(GLOB _srcs CONFIGURE_DEPENDS
+        "${CMAKE_SOURCE_DIR}/userland/libs/${name}_32/*.c"
+        "${CMAKE_SOURCE_DIR}/userland/libs/${name}_32/*.h")
     set(_def "${CMAKE_SOURCE_DIR}/userland/libs/${name}_32/${name}_32.def")
     set(_hdr "${CMAKE_CURRENT_BINARY_DIR}/generated_${name}_32_dll.h")
     add_custom_command(
         OUTPUT "${_hdr}"
         COMMAND "${CMAKE_SOURCE_DIR}/tools/build/build-stub-32-dll.sh"
                 "${CMAKE_SOURCE_DIR}" "${_hdr}" "${name}" "${base_va}" "${symbol}"
-        DEPENDS "${_src}" "${_def}"
+        DEPENDS ${_srcs} "${_def}"
+                "${CMAKE_SOURCE_DIR}/userland/libs/common/duet32_syscall.h"
                 "${CMAKE_SOURCE_DIR}/tools/build/build-stub-32-dll.sh"
                 "${DUETOS_EMBED_BLOB_SCRIPT}"
         COMMENT "Compiling + embedding ${name}_32.dll (i386 PE32 stub DLL)"

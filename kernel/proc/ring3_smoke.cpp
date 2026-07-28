@@ -76,6 +76,7 @@
 #include "generated_msvcrt_32_dll.h"
 #include "generated_pe32_miss_pe.h"
 #include "generated_pe32_rich_pe.h"
+#include "generated_pe32_window_pe.h"
 #include "generated_shell32_32_dll.h"
 #include "generated_shlwapi_32_dll.h"
 #include "generated_user32_32_dll.h"
@@ -2272,9 +2273,13 @@ constexpr PeCompatEntry kPeCompatBattery[] = {
     //   pe32_rich  — one import per preloaded i386 DLL; runs for real.
     //   pe32_miss  — deliberately exits 0xDEAD0042 through an
     //                unresolved-import thunk (no verdict line).
+    //   pe32_window — the USER32 rung: class registration, window
+    //                creation, and a real message loop (post → peek →
+    //                dispatch → WndProc → paint → quit).
     PE_COMPAT("ring3-pe32-smoke", kBinPe32SmokeBytes, Always, false),
     PE_COMPAT("ring3-pe32-rich", kBinPe32RichBytes, Always, true),
     PE_COMPAT("ring3-pe32-miss", kBinPe32MissBytes, Always, false),
+    PE_COMPAT("ring3-pe32-window", kBinPe32WindowBytes, Always, true),
     // Surface-coverage zoo — bare metal only. Each Win32-imports PE
     // pays a ~38-DLL preload + entry-point run; 130+ of them under
     // TCG would overflow any sane CI wall budget. Each prints its

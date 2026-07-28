@@ -12895,3 +12895,52 @@ markers for its richest input. Three discovery layers were added (runtime
   its low handle and asserts the copy does not reuse that handle value,
   shares and retains the OFD, does not fire the pool release on its own
   close, and does not disturb the destination's pre-existing fd.
+- **Decision:** the i386 (PE32) `user32` / `gdi32` companions repack the
+  kernel message into the caller's `MSG` rather than passing the
+  caller's pointer through. `SYS_WIN_{PEEK,GET}_MSG` blind-write 32
+  bytes — the first 32 of the *x86_64* `MSG` — to whatever pointer they
+  are handed, and an i386 `MSG` is 28. A pass-through misaligns every
+  field AND writes 4 bytes past the end of the caller's struct.
+  **Rules out** widening the kernel's wire struct or adding a bitness
+  parameter to the syscall: the wire format is a published ABI the
+  64-bit DLLs already consume correctly, and the mismatch is entirely a
+  property of the caller. **Rules out** narrowing the kernel write to 28
+  bytes for 32-bit callers, which would silently truncate the 64-bit
+  path if the branch were ever mis-taken. **Enforcement:**
+  `userland/apps/pe32_window/` plants a canary immediately after its
+  `MSG` and re-checks it on every pump iteration; the image is an
+  `Always` row in the PE-compat battery.
+- **Decision:** i386 `WNDCLASS` and `WNDCLASSEX` get two separate
+  structs in `user32_32`, and `RegisterClassEx*` does NOT forward to
+  `RegisterClass*`. On x86_64 the prepended `cbSize` packs into the same
+  8-byte slot as `style`, so `lpfnWndProc` lands at offset 8 and
+  `lpszClassName` at 64 in both shapes — which is why the 64-bit
+  `user32.c` forwarding is correct there and must not be copied. With
+  4-byte pointers `cbSize` shifts every subsequent field by 4, so the
+  forwarded read would take `lpfnWndProc` from `cbClsExtra` and register
+  a garbage callback that `DispatchMessage` would later call.
+- **Decision:** `FillRect`, `FrameRect`, `DrawText`, `GetDC`,
+  `GetWindowDC` and `BeginPaint` are exported from **both**
+  `user32_32` and `gdi32_32`, and the handle encodings they share live
+  in `userland/libs/common/duet32_gdi_abi.h`. Windows homes those
+  symbols in USER32 despite their being drawing calls, so an importer
+  resolves them against user32.dll and never reaches gdi32 — with
+  `FillRect` in `gdi32_32` only, a real PE32's import fell through to
+  the NO-OP catch-all and its window painted nothing while every call
+  reported success. **Rules out** giving each DLL its own copy of the
+  HDC / brush / pen tag constants: both sides mint AND consume those
+  handles, so two definitions is the sentinel-divergence class of bug
+  waiting to happen.
+- **Decision:** `tools/build/build-stub-32-dll.sh` globs every `.c` in
+  a companion DLL's directory (sorted, for reproducible link order)
+  instead of compiling one fixed filename, and the CMake side globs the
+  same set with `CONFIGURE_DEPENDS`. A `_32` DLL that outgrows one
+  translation unit now needs no build-system edit. The per-TU compile
+  also gained `-Werror`, which the single-file form never had.
+- **Decision:** `tools/test/check-syscall-numbers.py` treats
+  `#define SYS_FOO 42` as an assertion, not just `SYS_FOO = 42`. The
+  `=`-only pattern left the `#define` blocks that open `user32.c`,
+  `gdi32.c` and the `_32` companion headers entirely unchecked — which
+  is where a wrong number does the most damage, since one bad `#define`
+  mis-aims every caller of that name at once. Coverage went from 134 to
+  239 asserted numbers on a clean tree, all correct.
