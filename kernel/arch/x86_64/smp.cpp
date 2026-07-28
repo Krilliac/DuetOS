@@ -1060,7 +1060,14 @@ u64 SmpStartAps()
     // x2APIC MSR for x2APIC). xAPIC and x2APIC processors compare
     // cleanly in the same MADT enumeration loop.
     const u32 bsp_apic_id = LapicCurrentId();
+    // Count of APs that actually came online — the return value, and
+    // what the boot banner reports.
     u64 aps_started = 0;
+    // Next per-AP slot index to hand out. Tracked SEPARATELY from
+    // `aps_started` so a failed bring-up burns its slot instead of
+    // letting the next AP reuse it — see the rationale at the point of
+    // use below. cpu_id 0 is the BSP, so APs start at 1.
+    u32 next_cpu_id = 1;
 
     for (u64 i = 0; i < acpi::CpuCount(); ++i)
     {
@@ -1075,13 +1082,37 @@ u64 SmpStartAps()
                                static_cast<u64>(rec.apic_id));
             continue;
         }
-        if (aps_started >= kMaxAps)
+        if (next_cpu_id > kMaxAps)
         {
             core::Log(core::LogLevel::Warn, "arch/smp", "AP slot limit reached; skipping remainder");
             break;
         }
 
-        const u32 cpu_id = static_cast<u32>(aps_started + 1);
+        // Slot index for the AP we are ABOUT TO START. This must be
+        // monotonic across ATTEMPTS, which is why it is no longer
+        // derived from `aps_started` (a count of SUCCESSES).
+        //
+        // With the old `aps_started + 1`, an AP that failed to signal
+        // within the bounded WaitForApOnline window left `aps_started`
+        // unchanged, so the NEXT MADT entry was handed the very same
+        // cpu_id -- overwriting g_ap_percpus[id] and g_ap_gdt_bundles[id]
+        // and reusing the same 16 KiB AP stack.
+        //
+        // That is not merely a leak. The reason the retry path exists at
+        // all is that a first SIPI can be slow to take (Intel recommends
+        // the second SIPI precisely for this), so the timed-out AP may
+        // still wake up afterwards -- and when it does it reads the
+        // trampoline parameters, which now describe the NEXT AP. Two
+        // physical CPUs would then run as the same cpu_id, sharing one
+        // PerCpu, one GDT/TSS/IST set, and ONE KERNEL STACK. That is
+        // immediate, unrecoverable memory corruption.
+        //
+        // Burning the slot instead is cheap (kMaxAps is 31 and real
+        // machines use far fewer) and leaves a late AP with its own
+        // exclusively-owned state. Such an AP is harmless: `online` was
+        // never set and `g_cpu_id_limit` was never bumped for it, so the
+        // scheduler routes no work to it and it simply idles.
+        const u32 cpu_id = next_cpu_id++;
 
         // Allocate per-AP PerCpu struct.
         auto* ap_pcpu = static_cast<cpu::PerCpu*>(mm::KMalloc(sizeof(cpu::PerCpu)));
