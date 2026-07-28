@@ -100,6 +100,28 @@ Vmm::Vmm(VmConfig cfg)
     if (!m_cfg.noWindow)
     {
         uint64_t fbGpa  = m_mem->ReserveFramebuffer(m_cfg.fbW, m_cfg.fbH);
+        // The framebuffer is carved from the TOP of guest RAM while
+        // reservedEnd grows from the bottom (kernel image + ACPI + MB2
+        // info). ReserveFramebuffer only checks the region FITS in RAM,
+        // so a small --mem with a large --res lets the two collide: the
+        // FB would overlap loaded kernel bytes, and the available-RAM
+        // entry BuildMultiboot2Info derives from (fbAddr - reservedEnd)
+        // would underflow into a ~16 EiB span handed to the guest frame
+        // allocator. Fail loudly with the numbers instead.
+        if (fbGpa < reservedEnd)
+        {
+            char msg[256];
+            std::snprintf(
+                msg, sizeof(msg),
+                "framebuffer %ux%u (0x%llx bytes) collides with the "
+                "loaded image: fb base 0x%llx < reserved end 0x%llx. "
+                "Increase --mem or lower --res (or pass --no-window).",
+                m_cfg.fbW, m_cfg.fbH,
+                (unsigned long long)m_mem->FramebufferBytes(),
+                (unsigned long long)fbGpa,
+                (unsigned long long)reservedEnd);
+            throw std::runtime_error(msg);
+        }
         mp.fbAddr       = fbGpa;
         mp.fbWidth      = m_cfg.fbW;
         mp.fbHeight     = m_cfg.fbH;
@@ -229,6 +251,10 @@ void Vmm::PumpReplay()
             break;
         case EvKind::Pit2Expire:
             m_pit.ForceExpire();
+            break;
+        default:
+            // Defence in depth: EventLog::ReadNext already refuses to
+            // hand out a kind that isn't one of the three above.
             break;
         }
         m_log.Pop();

@@ -16,7 +16,12 @@
 // USAGE
 //   duetos-vmm.exe --kernel <duetos-kernel.elf>
 //                  [--mem <MiB>] [--cmdline "<kernel cmdline>"]
-//   Defaults: --mem 512, --cmdline "console=ttyS0".
+//                  [--idle <secs>] [--gdb <port>]
+//                  [--record <f> | --replay <f>]
+//                  [--res WxH] [--no-window] [--break]
+//   Defaults: --mem 512, --cmdline "console=ttyS0", --idle 0
+//   (unbounded), --gdb 0 (disabled), --res = primary monitor.
+//   --record and --replay are mutually exclusive.
 //   Guest COM1 output streams to this process's stdout.
 //
 // BUILD
@@ -32,11 +37,18 @@
 //   (--record <f> / --replay <f>) keyed by exit-seq — serial RX,
 //   IOAPIC line raises, PIT-ch2 calibration edge. Reproduces the
 //   exit stream at exit-seq granularity (NOT cycle-exact: WHP owns
-//   the LAPIC timer internally). Framebuffer / virtio-blk are
-//   intentionally NOT built — the kernel boots headless with a
-//   baked ramfs, so they are unneeded for the run/test/debug goal
-//   and would be unwired bloat; revisit only if a GUI/disk
-//   workload actually needs them.
+//   the LAPIC timer internally).
+//   Slice 6: framebuffer + host window. The FB is carved from the
+//   top of guest RAM, published via Multiboot2 tag 8 (32bpp direct
+//   RGB), and defaults to the primary monitor's resolution; --res
+//   overrides it and --no-window skips both the reservation and the
+//   window for headless/CI runs. A --res too large for --mem is
+//   rejected at boot rather than silently overlapping the loaded
+//   kernel image.
+//   virtio-blk remains intentionally NOT built — the kernel boots
+//   from a baked ramfs, so a block device is unneeded for the
+//   run/test/debug goal and would be unwired bloat; revisit only if
+//   a disk workload actually needs it.
 // ===========================================================================
 #include <cstdio>
 #include <cstring>

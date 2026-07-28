@@ -64,8 +64,11 @@ std::vector<uint8_t> BuildMultiboot2Info(const Mb2Params& p)
     {
         size_t s = BeginTag(v, 4);
         Push32(v, 640);                                   // mem_lower
-        Push32(v, static_cast<uint32_t>(
-                       (p.ramBytes - 0x100000) / 1024));   // mem_upper
+        // Same underflow class as the mmap below: guard the subtraction
+        // rather than trusting ramBytes >= 1 MiB.
+        const uint64_t extBytes =
+            (p.ramBytes > 0x100000) ? (p.ramBytes - 0x100000) : 0;
+        Push32(v, static_cast<uint32_t>(extBytes / 1024));  // mem_upper
         EndTag(v, s);
     }
 
@@ -80,18 +83,36 @@ std::vector<uint8_t> BuildMultiboot2Info(const Mb2Params& p)
             Push32(v, type);
             Push32(v, 0);
         };
+
+        // Every length below is a DIFFERENCE between two of these
+        // addresses, so each has to be clamped into [0, ramBytes] and
+        // ordered first. An unclamped pair underflows into a ~16 EiB
+        // span that the guest frame allocator would take at face value.
+        // The reachable instance is a framebuffer that collides with the
+        // loaded image (fbAddr < reservedEnd, i.e. a small --mem with a
+        // large --res); Vmm rejects that configuration up front, and
+        // clamping here keeps any future caller from synthesising the
+        // bad map. A clamped fbBase yields a zero-length available entry
+        // — the guest sees no free RAM and fails visibly rather than
+        // corrupting itself.
+        const uint64_t resEnd =
+            (p.reservedEnd < p.ramBytes) ? p.reservedEnd : p.ramBytes;
+        uint64_t fbBase = p.fbAddr;
+        if (fbBase < resEnd) fbBase = resEnd;
+        if (fbBase > p.ramBytes) fbBase = p.ramBytes;
+
         // type 2 = reserved, type 1 = available RAM.
-        entry(0, p.reservedEnd, 2);
+        entry(0, resEnd, 2);
         if (p.fbAddr != 0)
         {
             // Framebuffer sits flush at the top of RAM; mark [fbAddr, ramTop)
             // reserved so the kernel frame allocator never reclaims it.
-            entry(p.reservedEnd, p.fbAddr - p.reservedEnd, 1);
-            entry(p.fbAddr, p.ramBytes - p.fbAddr, 2);
+            entry(resEnd, fbBase - resEnd, 1);
+            entry(fbBase, p.ramBytes - fbBase, 2);
         }
         else
         {
-            entry(p.reservedEnd, p.ramBytes - p.reservedEnd, 1);
+            entry(resEnd, p.ramBytes - resEnd, 1);
         }
         EndTag(v, s);
     }

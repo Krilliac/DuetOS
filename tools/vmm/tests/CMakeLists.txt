@@ -11,13 +11,18 @@ add_executable(vmm-tests
     test_mmio_decode.cpp
     test_processor_contract.cpp
     test_vmm_dbg.cpp
+    test_elf64_parse.cpp
+    test_elf_symbols_load.cpp
+    test_record.cpp
     ../src/multiboot2.cpp
     ../src/guest_memory_fb.cpp
     ../src/input/ps2_encode.cpp
     ../src/devices/ps2_i8042.cpp
     ../src/mmio_decode.cpp
+    ../src/elf64_parse.cpp
     ../src/processor_contract.cpp
     ../src/debug/elf_symbols.cpp
+    ../src/debug/record.cpp
     ../src/debug/vmm_dbg.cpp
 )
 target_include_directories(vmm-tests PRIVATE
