@@ -9,6 +9,11 @@
 #   table rather than N boots read by hand.
 #
 #   Grades, in ladder order — each rung strictly further than the last:
+#     TIMEOUT     QEMU was killed before the PE ran. NOT a failure of the
+#                 binary — the boot simply ran out of wall clock, which
+#                 under TCG is routine. Graded separately from NOTFOUND
+#                 because conflating "ran out of time" with "file missing"
+#                 sends you hunting a staging bug that does not exist.
 #     NOTFOUND    the kernel never found the staged file on FAT32
 #     LOADFAIL    [pe-load] never reached OK (bad image / rejected)
 #     NOSPAWN     image loaded but no ring-3 task was created
@@ -101,6 +106,23 @@ for exe in "${exes[@]}"; do
     grade="NOTFOUND"
     detail="-"
     if [[ -f "${log}" ]]; then
+        # Order matters. The kernel says so explicitly when it looked for
+        # the file and could not find it — that is a REAL staging failure
+        # and outranks the fact that QEMU was later killed on its wall
+        # clock. Only when there is no such verdict at all does a kill mean
+        # "ran out of time before the PE ran", which is routine under TCG.
+        # Checking the kill first would relabel every genuine staging miss
+        # as TIMEOUT and send the next reader hunting a clock problem.
+        if grep -q '\[peexec\] FAIL' "${log}"; then
+            grade="NOTFOUND"
+            detail="peexec: not found on any FAT volume"
+        elif grep -q 'terminating on signal 15' "${log}" &&
+            ! grep -qE '\[ring3\] pe spawn|\[peexec\] read bytes=' "${log}"; then
+            grade="TIMEOUT"
+            detail="killed before the PE ran"
+        fi
+    fi
+    if [[ -f "${log}" && "${grade}" != "TIMEOUT" && "${detail}" != "peexec: not found on any FAT volume" ]]; then
         if grep -q '\[pe-load\] OK' "${log}"; then
             grade="NOSPAWN"
         elif grep -q '\[peexec\] read bytes=' "${log}"; then
