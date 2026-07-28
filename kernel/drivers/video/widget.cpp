@@ -941,14 +941,26 @@ void WindowDraw(const WindowChrome& w)
             { return hover_x >= bx && hover_x < bx + btn_w && hover_y >= by && hover_y < by + btn_h; };
             const u32 ctrl_fill = title_rgb;
             const u32 ctrl_fill_hot = LightenRgb(ctrl_fill, 48);
-            const u32 close_fill = w.colour_close_btn;
-            const u32 close_fill_hot = LightenRgb(close_fill, 48);
+            // Aurora inverts the close box: idle it is part of the
+            // title strip and only floods `--danger` on hover (design
+            // §2 "close hover --danger #ff5f57 with white glyph"). Six
+            // permanently-red blocks is a Win9x tell, and the reference
+            // desktop has none. Non-Aurora palettes keep the standing
+            // red they have always had.
+            const u32 close_fill = body_translucent ? ctrl_fill : w.colour_close_btn;
+            const u32 close_fill_hot = body_translucent ? w.colour_close_btn : LightenRgb(close_fill, 48);
             FramebufferFillRect(min_x, btn_y, btn_w, btn_h, inside(min_x, btn_y) ? ctrl_fill_hot : ctrl_fill);
-            FramebufferDrawRect(min_x, btn_y, btn_w, btn_h, w.colour_border, 1);
             FramebufferFillRect(max_x, btn_y, btn_w, btn_h, inside(max_x, btn_y) ? ctrl_fill_hot : ctrl_fill);
-            FramebufferDrawRect(max_x, btn_y, btn_w, btn_h, w.colour_border, 1);
             FramebufferFillRect(close_x, btn_y, btn_w, btn_h, inside(close_x, btn_y) ? close_fill_hot : close_fill);
-            FramebufferDrawRect(close_x, btn_y, btn_w, btn_h, w.colour_border, 1);
+            if (!body_translucent)
+            {
+                // The outline is what separates a flat theme's three
+                // boxes; on glass the specular ramp already does it and
+                // a border reads as three drawn buttons in a row.
+                FramebufferDrawRect(min_x, btn_y, btn_w, btn_h, w.colour_border, 1);
+                FramebufferDrawRect(max_x, btn_y, btn_w, btn_h, w.colour_border, 1);
+                FramebufferDrawRect(close_x, btn_y, btn_w, btn_h, w.colour_border, 1);
+            }
 
             // Glyph dimensions use the smaller of width/height so
             // the inner mark stays centred + symmetric whether the
