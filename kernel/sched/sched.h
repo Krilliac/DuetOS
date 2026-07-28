@@ -756,6 +756,18 @@ KillResult SchedKillByPid(u64 pid);
 /// the same per-task contract as SchedKillByPid).
 u64 SchedKillByProcess(core::Process* target);
 
+/// Count the tasks owned by `process` that have not yet reached
+/// TaskState::Dead. Walks the global all-tasks registry under the
+/// scheduler lock, so Blocked tasks (absent from run/sleep queues)
+/// are included. No Task* escapes.
+///
+/// The reaper uses this to recognise a process's LAST task exit,
+/// which is a strictly earlier event than its last reference drop:
+/// a Win32 process handle held on the process keeps its refcount
+/// above 0, so ProcessRelease's destroy body can be unreachable
+/// while every task is already gone.
+u64 SchedCountLiveTasksForProcess(const core::Process* process);
+
 /// Locate the outermost user→kernel TrapFrame on a target task's
 /// kernel stack. Returns nullptr when the task has no kernel
 /// stack (boot / idle), never entered user mode (cs.rpl != 3),

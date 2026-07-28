@@ -5311,6 +5311,25 @@ u64 SchedKillByProcess(core::Process* target)
     return signalled;
 }
 
+u64 SchedCountLiveTasksForProcess(const core::Process* process)
+{
+    if (process == nullptr)
+        return 0;
+    // Same walk as SchedKillByProcess: the all-tasks registry is the
+    // only structure that sees Blocked tasks (they sit on per-
+    // WaitQueue lists with no central anchor), and g_sched_lock is
+    // what serialises it against SchedCreate and the reaper's
+    // AllTasksUnlink.
+    u64 live = 0;
+    sync::SpinLockGuard guard(g_sched_lock);
+    for (Task* task = g_all_tasks_head; task != nullptr; task = task->all_next)
+    {
+        if (task->process == process && task->state != TaskState::Dead)
+            ++live;
+    }
+    return live;
+}
+
 SuspendResult SchedSuspendTask(Task* target, u32* prev_count_out)
 {
     if (target == nullptr)
@@ -6064,6 +6083,34 @@ namespace
             // switched away).
             if (dead->process != nullptr)
             {
+                // Last task of this process? Then drop the
+                // references its Win32 process-handle table
+                // (NtOpenProcess) holds on other processes — and
+                // possibly on itself.
+                //
+                // This has to happen HERE and not inside
+                // ProcessRelease. A retained process handle is
+                // counted in Process::refcount, so it is precisely
+                // what stops the refcount reaching 0: a self-handle
+                // pins the process forever and an A<->B pair forms
+                // a cycle, and in both cases ProcessRelease's
+                // destroy body — the obvious place for a sweep —
+                // never runs. Everything in that body is skipped
+                // for a pinned process: the whole address space
+                // (every user frame, every intermediate page table,
+                // the PML4), compositor windows, popup menus, the
+                // kobject handle table, and its bound sockets,
+                // which is how one leaked 0x7xx handle wedges a
+                // restart=Always service out of its listener port.
+                //
+                // `dead` is already Dead and still linked into the
+                // all-tasks registry (AllTasksUnlink runs further
+                // down), so a count of 0 means this was the last
+                // task.
+                if (SchedCountLiveTasksForProcess(dead->process) == 0)
+                {
+                    core::ProcessDropOwnedProcessHandles(dead->process);
+                }
                 core::ProcessRelease(dead->process);
                 dead->process = nullptr;
                 dead->as = nullptr; // process owned it; pointer is now dangling, clear it

@@ -599,6 +599,32 @@ void ProcessRetain(Process* p)
     }
 }
 
+void ProcessDropOwnedProcessHandles(Process* p)
+{
+    if (p == nullptr)
+    {
+        return;
+    }
+    for (u64 i = 0; i < Process::kWin32ProcessCap; ++i)
+    {
+        Process::Win32ProcessHandle& h = p->win32_proc_handles[i];
+        if (!h.in_use)
+        {
+            continue;
+        }
+        Process* target = h.target;
+        // Clear the slot BEFORE releasing. `target` may be `p`
+        // itself (SYS_PROCESS_OPEN does not refuse the caller's own
+        // PID), in which case the release below can run p's whole
+        // destroy path — it must not re-enter a half-cleared table.
+        // For an A<->B cycle the same ordering makes each side a
+        // plain refcount drop.
+        h.in_use = false;
+        h.target = nullptr;
+        ProcessRelease(target);
+    }
+}
+
 void ProcessRelease(Process* p)
 {
     if (p == nullptr)

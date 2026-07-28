@@ -1548,6 +1548,21 @@ void ProcessRetain(Process* p);
 /// this path unchanged.
 void ProcessRelease(Process* p);
 
+/// Drop every reference this process's Win32 process-handle table
+/// (`win32_proc_handles`, backing NtOpenProcess) holds on another
+/// Process — or on itself.
+///
+/// This CANNOT live in ProcessRelease. `Process::refcount` counts
+/// live tasks plus handle holders, so a retained process handle is
+/// exactly what keeps the refcount above 0 and makes
+/// ProcessRelease's destroy body unreachable: a process that opens
+/// a handle on itself pins itself forever, and two processes that
+/// open handles on each other form a cycle neither can break. The
+/// drop therefore has to happen on the LAST TASK EXIT — a strictly
+/// earlier event than the last reference drop — which is why the
+/// scheduler's reaper is the caller.
+void ProcessDropOwnedProcessHandles(Process* p);
+
 /// Current Task's Process, or nullptr if the current Task is
 /// kernel-only. Used by syscall handlers to check caps.
 Process* CurrentProcess();
