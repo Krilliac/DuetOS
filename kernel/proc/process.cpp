@@ -717,6 +717,31 @@ void ProcessRelease(Process* p)
     subsystems::win32::custom::CleanupProcess(p);
     arch::SerialWrite("[proc] release: post-CleanupProcess\n");
 
+    // Close every Linux fd slot BEFORE the KObject drain below.
+    //
+    // The drain alone is not enough: it reclaims each fd's KFile
+    // sidecar (pipe / eventfd / dirfd pool refs), but an fd slot
+    // ALSO holds a reference on its shared open-file description
+    // (`LinuxFd::ofd`), and nothing but `LinuxFdClose` drops that.
+    // The OFD pool is kernel-wide and 64 slots deep, so an
+    // unreleased reference is a machine-wide leak, not a per-
+    // process one: every fork() retains one OFD ref per inherited
+    // fd and every dup() retains one more, so a Linux guest that
+    // forks with a few files open and exits permanently burns
+    // those slots. Once all 64 are gone `OfdAllocLocked` returns 0
+    // for the rest of the boot — dup() fails outright and fork()
+    // silently degrades to unshared offsets.
+    //
+    // Running this BEFORE `HandleTableDrain` keeps KFile teardown
+    // on its normal path (LinuxFdClose → HandleTableRemove →
+    // KFileDestroy → per-pool release); the drain below then finds
+    // those slots already empty and stays the belt-and-braces
+    // sweep for handles that were never attached to an fd.
+    for (u32 fd = 0; fd < 16; ++fd)
+    {
+        LinuxFdClose(p, fd);
+    }
+
     // Drain the unified KObject handle table (plan A3). Calls
     // KObjectRelease on every live slot so any object whose final
     // reference was held by this process gets destroyed cleanly,
@@ -1718,10 +1743,6 @@ bool LinuxFdDup(Process* p, u32 oldfd, u32 newfd)
     Process::LinuxFd& src = p->linux_fds[oldfd];
     if (src.state == 0)
         return false;
-    // Close any existing slot at newfd FIRST. Drops the dst's
-    // KFile ref via the unified path.
-    LinuxFdClose(p, newfd);
-
     // Open-file-description sharing (POSIX dup semantics). The new
     // fd must reference the SAME description as the source so a
     // seek / F_SETFL through one is visible through the other. If
@@ -1730,6 +1751,15 @@ bool LinuxFdDup(Process* p, u32 oldfd, u32 newfd)
     // materialise one from its current inline offset/flags so both
     // fds end up sharing it. Do this BEFORE touching dst so a pool-
     // exhaustion failure leaves the whole table untouched.
+    //
+    // "BEFORE touching dst" includes the close of any slot already
+    // sitting at newfd: POSIX requires a FAILED dup2() to leave
+    // newfd exactly as it was, so the OFD materialise — the only
+    // step here that can fail before dst is written — has to run
+    // ahead of it. (This block used to sit after the close, which
+    // meant an exhausted pool destroyed newfd and then reported
+    // failure.) An fd already sharing src's description simply
+    // sees refcount go up here and back down in the close below.
     u16 shared_ofd = 0;
     {
         sync::SpinLockGuard g(g_ofd_lock);
@@ -1751,6 +1781,11 @@ bool LinuxFdDup(Process* p, u32 oldfd, u32 newfd)
         OfdRetainLocked(src.ofd);
         shared_ofd = src.ofd;
     }
+
+    // Close any existing slot at newfd. Drops the dst's KFile ref
+    // via the unified path. Everything past this point either
+    // succeeds or rolls dst back explicitly.
+    LinuxFdClose(p, newfd);
 
     Process::LinuxFd& dst = p->linux_fds[newfd];
     dst.state = src.state;
@@ -2131,6 +2166,28 @@ void LinuxFdSelfTest()
         core::Panic("proc/linux-fd", "self-test: pool release got wrong index");
     if (g_ofd_pool[shared_ofd - 1].refcount != 0)
         core::Panic("proc/linux-fd", "self-test: OFD not freed on last close (refcount asymmetry)");
+
+    // 7) Exit drain. `ProcessRelease` closes the whole fd table on
+    // the way out precisely so an fd the guest never close()d does
+    // not strand its open-file description in the kernel-wide OFD
+    // pool. Exercise that same whole-table loop here: two fds
+    // sharing one description, neither closed, must leave the pool
+    // slot free once the loop has run — and the loop must be a
+    // no-op on the empty slots it walks past.
+    p->linux_fds[5].state = 5;
+    p->linux_fds[5].first_cluster = 0xBBBB;
+    p->linux_fds[5].offset = 0x99;
+    if (!LinuxFdDup(p, 5, 6))
+        core::Panic("proc/linux-fd", "self-test: Dup(5, 6) failed");
+    const u16 leaked_ofd = p->linux_fds[5].ofd;
+    if (leaked_ofd == 0 || g_ofd_pool[leaked_ofd - 1].refcount != 2)
+        core::Panic("proc/linux-fd", "self-test: dup(5,6) did not take two OFD refs");
+    for (u32 fd = 0; fd < 16; ++fd)
+    {
+        LinuxFdClose(p, fd);
+    }
+    if (g_ofd_pool[leaked_ofd - 1].refcount != 0)
+        core::Panic("proc/linux-fd", "self-test: exit drain leaked an open-file description");
 
     mm::KFree(p);
     arch::SerialWrite("[proc] linux-fd-table self-test OK\n");
