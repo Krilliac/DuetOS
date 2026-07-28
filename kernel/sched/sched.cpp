@@ -5283,30 +5283,69 @@ u64 SchedKillByProcess(core::Process* target)
 {
     if (target == nullptr)
         return 0;
-    // Collect TIDs first under g_sched_lock (peer CPUs mutate the
-    // runqueues; bare Cli would only fence this CPU), then release
-    // before calling SchedKillByPid — which takes the same
-    // non-recursive lock itself. Cap at 32 — the win32
-    // thread-handle table is 8, plus the main task, plus a
-    // generous margin for Linux clone(CLONE_THREAD) work.
-    constexpr u32 kMaxTidsPerKill = 32;
-    u64 tids[kMaxTidsPerKill];
-    u32 ntids = 0;
+    // Collect TIDs under g_sched_lock (peer CPUs mutate the runqueues;
+    // bare Cli would only fence this CPU), then release before calling
+    // SchedKillByPid — which takes the same non-recursive lock itself.
+    //
+    // The batch array is stack-bounded, but the SWEEP is not: this used
+    // to collect at most 32 TIDs in a single pass and silently drop the
+    // rest, so a process with more threads than that survived SIGKILL
+    // with the excess still running. The comment justified 32 as "win32
+    // thread table is 8 + main + margin for Linux clone(CLONE_THREAD)",
+    // which is an assumption about callers, not a bound the kernel
+    // enforces. Batching in a loop removes the cliff without growing the
+    // frame.
+    //
+    // The pass count IS bounded, deliberately. A naive "repeat until
+    // empty" would spin forever on a thread SchedKillByPid cannot
+    // actually terminate — an untimed-blocked task is signalled but not
+    // cancelled, so it stays non-Dead and would be re-collected every
+    // pass. Bounding the sweep converts that into a WARN plus a live
+    // residue count instead of a wedged kernel.
+    constexpr u32 kTidBatch = 32;
+    constexpr u32 kMaxSweepPasses = 8; // 8 * 32 = 256 threads per kill
+    u64 signalled = 0;
+    u32 passes = 0;
+
+    for (; passes < kMaxSweepPasses; ++passes)
     {
-        sync::SpinLockGuard guard(g_sched_lock);
-        for (Task* task = g_all_tasks_head; task != nullptr; task = task->all_next)
+        u64 tids[kTidBatch];
+        u32 ntids = 0;
         {
-            if (task->process == target && task->state != TaskState::Dead && ntids < kMaxTidsPerKill)
-                tids[ntids++] = task->id;
+            sync::SpinLockGuard guard(g_sched_lock);
+            for (Task* task = g_all_tasks_head; task != nullptr && ntids < kTidBatch; task = task->all_next)
+            {
+                if (task->process == target && task->state != TaskState::Dead)
+                    tids[ntids++] = task->id;
+            }
         }
+        if (ntids == 0)
+            break;
+
+        u64 progressed = 0;
+        for (u32 i = 0; i < ntids; ++i)
+        {
+            const KillResult r = SchedKillByPid(tids[i]);
+            if (r == KillResult::Signaled || r == KillResult::Blocked)
+            {
+                ++signalled;
+                ++progressed;
+            }
+        }
+        // No task in this batch could even be signalled — another pass
+        // would re-collect the same set and achieve nothing.
+        if (progressed == 0)
+            break;
     }
 
-    u64 signalled = 0;
-    for (u32 i = 0; i < ntids; ++i)
+    // Surface anything still alive. Silence here is what let the old
+    // 32-thread truncation hide: a caller that asked to kill a process
+    // got a plausible non-zero count back while threads kept running.
+    const u64 residue = SchedCountLiveTasksForProcess(target);
+    if (residue != 0)
     {
-        const KillResult r = SchedKillByPid(tids[i]);
-        if (r == KillResult::Signaled || r == KillResult::Blocked)
-            ++signalled;
+        KLOG_WARN_V("sched", "SchedKillByProcess left live tasks (blocked and uncancellable, or > sweep bound)",
+                    residue);
     }
     return signalled;
 }
