@@ -12846,3 +12846,52 @@ markers for its richest input. Three discovery layers were added (runtime
   lets pipe D recycle the slot, replays C's close, and asserts D is
   still registered and its reservation ref is intact (via
   `PipeReadReady`, which only turns true once every writer is gone).
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                
+## 2026-07-28 — pidfd is a weak pid-key; cross-process fd copying has ONE path
+
+- **Decision:** an fd never holds a strong `core::Process` reference. A
+  pidfd stores only the target pid in `LinuxFd::first_cluster` and every
+  consumer re-resolves it. **Rules out** the `ProcessRetain`-at-open /
+  release-at-close model: process teardown is what drains the fd table
+  (`ipc::HandleTableDrain` is called from *inside* `ProcessRelease`'s
+  refcount-zero body), so any strong Process ref parked on an fd is an
+  unbreakable cycle. `pidfd_open(getpid())` — a supported, exercised
+  path — pinned the caller forever, leaking its entire address space,
+  its bound sockets and its exit-status publication (which blocks the
+  parent's `wait4` indefinitely). A `fork()` + `pidfd_open(getpid())` +
+  `exit()` loop was an uncapped memory-exhaustion primitive.
+- **Rules out** the narrower "reject `pidfd_open` on self" fix: two
+  processes `pidfd_open`ing each other form the identical cycle, so a
+  self-check leaves the bug live. Also **rules out** the
+  `LinuxFdAttachKFileOwned` + skip-when-`owner->pid == pool_index`
+  variant, for the same reason.
+- **Safe because** pids are monotonic and never reused (`g_next_pid` in
+  `process.cpp`) — the property `ProcessRelease` already relies on when
+  it resolves a dying child's parent by pid. Pointer safety comes from a
+  *transient* retain around each use, the idiom `ResolveAffinityTarget`
+  established in `syscall_sched.cpp`.
+- **Decision:** `sched::SchedFindProcessByPid` must resolve Blocked
+  tasks, via the global `g_all_tasks_head` registry — the same anchor
+  `SchedProcessAlive` walks. A task parked on a WaitQueue is on none of
+  the runqueue / sleep / zombie lists, so without the registry
+  `pidfd_send_signal` returned `-ESRCH` to a live process and the pidfd
+  epoll arm reported that process as exited. **Rules out** adding
+  another per-call-site list walk when a new scheduler list appears:
+  the registry is the single superset.
+- **Decision:** cross-process fd copying goes through
+  `core::LinuxFdCopyAcrossProcesses` — never a raw
+  `dst->linux_fds[i] = src->linux_fds[j]` struct copy. `kf_handle` is a
+  dense index into the *source's* handle table (no owner tag, no
+  generation counter), so a verbatim copy names a live unrelated object
+  in the destination's table and the destination's `close` destroys it —
+  a use-after-free inside the pipe / socket / epoll pools. `ofd` is a
+  refcounted kernel-wide open-file description that must be retained,
+  not merely copied. **Rules out** the per-state `PipeRetainRead` /
+  `EventfdRetain` / … ladder at cross-process copy sites: the
+  duplicated KFile reference *is* the pool reference, so an explicit
+  retain there can never be balanced by any close path.
+- **Enforcement:** `core::LinuxFdSelfTest` step 7 (boot self-test)
+  copies a source fd into a destination that already owns an object at
+  its low handle and asserts the copy does not reuse that handle value,
+  shares and retains the OFD, does not fire the pool release on its own
+  close, and does not disturb the destination's pre-existing fd.

@@ -99,7 +99,33 @@ syscall table:
 | SysV IPC | [`sysv_ipc.cpp`](../../kernel/subsystems/linux/sysv_ipc.cpp) | `shmget`/`shmat`, `semget`/`semop`, `msgget`/`msgsnd` System V IPC. |
 | POSIX mqueues | [`msg_queues.cpp`](../../kernel/subsystems/linux/msg_queues.cpp) | `mq_open` / `mq_timedsend` / `mq_timedreceive` message queues. |
 | async I/O | [`syscall_async_io.cpp`](../../kernel/subsystems/linux/syscall_async_io.cpp) | `io_setup` / `io_submit` and the `io_uring_*` setup/enter surface. |
-| pidfd / splice | [`pidfd_splice.cpp`](../../kernel/subsystems/linux/pidfd_splice.cpp) | `pidfd_open` / `pidfd_send_signal` plus `splice` / `tee` / `vmsplice`. |
+| pidfd / splice | [`pidfd_splice.cpp`](../../kernel/subsystems/linux/pidfd_splice.cpp) | `pidfd_open` / `pidfd_send_signal` / `pidfd_getfd` plus `splice` / `tee` / `vmsplice`. |
+
+**A pidfd is a weak, pid-keyed reference.** The fd carries nothing but
+the target pid; no `ProcessRetain` is taken. A strong Process reference
+held by an fd is an unbreakable cycle, because process teardown is what
+drains the fd table — `ipc::HandleTableDrain` runs *inside*
+`ProcessRelease`'s refcount-zero body, so `pidfd_open(getpid())` would
+pin the caller forever (leaking its whole address space, its bound
+sockets, and its exit status, which hangs the parent's `wait4`). Two
+processes `pidfd_open`ing each other cycle the same way, so refusing
+self-pidfds would not fix it. Weak is unambiguous because pids are
+monotonic and never reused. Consumers re-resolve through
+`sched::SchedFindProcessByPid` and take a *transient* retain around
+each use. `SchedFindProcessByPid` walks the global all-tasks registry,
+so a target parked in a blocking syscall resolves — without that,
+`pidfd_send_signal` returned `-ESRCH` to a live process.
+
+**`pidfd_getfd` copies fds through `core::LinuxFdCopyAcrossProcesses`**,
+the same helper `fork` inheritance uses — never a raw slot copy.
+`LinuxFd::kf_handle` is a dense index into the *source's* handle table,
+so a verbatim copy names an unrelated object in the destination's
+table; and `LinuxFd::ofd` is a refcounted kernel-wide open-file
+description that must be retained, not just copied. The duplicated
+KFile reference *is* the per-pool reference, so no explicit `*Retain`
+belongs at the call site. `flags` must be zero and the returned
+descriptor is close-on-exec, matching `pidfd_getfd(2)`. States 2
+(regular file), 11 (dirfd) and 14 (memfd) stay unshareable.
 
 **SysV shm isolation.** An `IPC_PRIVATE` (`key == 0`) shared-memory segment
 carries no sharing token, so `shmat` refuses attach from any pid other than
