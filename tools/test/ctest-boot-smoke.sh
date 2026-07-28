@@ -333,6 +333,32 @@ fi
 echo "smoke: detected banner: ${banner:-<missing>}"
 echo "smoke: selftests_on=${selftests_on}"
 
+# A missing banner means we never captured the kernel's serial stream at
+# all. Grading signatures against that log reports EVERY expected
+# signature as MISSING, which reads like a catastrophic regression when
+# the kernel in fact booted perfectly — a false alarm that costs an
+# investigation every time it happens. Fail as an environment error
+# (exit 2) instead, and name the usual cause.
+#
+# That cause is `DUETOS_SERIAL_FILE`: this driver captures run.sh's
+# STDOUT into ${SERIAL_LOG} (see the redirect above), but run.sh honours
+# DUETOS_SERIAL_FILE by writing COM1 to that file instead of stdout. Set
+# it and ${SERIAL_LOG} receives only run.sh's own status lines. Anyone
+# wanting the serial stream at a custom path should read ${SERIAL_LOG}
+# after the run rather than redirect the kernel away from the harness.
+if [[ -z "${banner}" ]] && ! grep -aqF '[boot]' "${SERIAL_LOG}"; then
+    echo "SMOKE ENVIRONMENT ERROR: no kernel boot output captured in ${SERIAL_LOG}" >&2
+    echo "  size=$(wc -c < "${SERIAL_LOG}" 2>/dev/null || echo 0) bytes; no '[boot]' line found." >&2
+    if [[ -n "${DUETOS_SERIAL_FILE:-}" ]]; then
+        echo "  CAUSE: DUETOS_SERIAL_FILE=${DUETOS_SERIAL_FILE} redirected COM1 away from this driver." >&2
+        echo "  FIX: unset DUETOS_SERIAL_FILE and read ${SERIAL_LOG} instead." >&2
+    else
+        echo "  Check that QEMU started at all (see the tail below)." >&2
+    fi
+    tail -20 "${SERIAL_LOG}" >&2 || true
+    exit 2
+fi
+
 # Signatures emitted only when DUETOS_BOOT_SELFTESTS is on
 # (boot self-tests gated on `kBootSelfTests`). Always present
 # in debug; absent in plain release / release-asserts / release-lto.
