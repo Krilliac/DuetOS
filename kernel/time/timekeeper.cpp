@@ -17,6 +17,7 @@
 #include "core/panic.h"
 #include "log/klog.h"
 #include "time/clocksource.h"
+#include "time/hpet_scale.h"
 #include "util/types.h"
 
 namespace duetos::time
@@ -36,7 +37,11 @@ u64 HpetClocksourceReadNs()
     {
         return 0;
     }
-    return (counter * period_fs) / 1'000'000ULL;
+    // Overflow-safe scaling. The naive `counter * period_fs / 1e6`
+    // wraps u64 after ~5.12 hours of uptime on a 14.318 MHz HPET; see
+    // time/hpet_scale.h for the identity used and its bounds. Kept in a
+    // freestanding header so tests/host/test_hpet_scale.cpp can pin it.
+    return HpetTicksToNs(counter, period_fs);
 }
 
 u64 HpetClocksourceResolutionNs()

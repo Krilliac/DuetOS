@@ -176,6 +176,9 @@ target_sources(test_syscall_error PRIVATE "${CMAKE_SOURCE_DIR}/../../kernel/sysc
 # Phase A dynamic fix-discovery: decision logic is a freestanding header
 # (syscall/inferred_gap_decide.h), so the test needs no kernel TU.
 add_host_test(inferred_gap)
+# HPET tick->ns scaling is a freestanding header (time/hpet_scale.h),
+# so this needs no kernel TU. Pins the u64-overflow-at-5.12h fix.
+add_host_test(hpet_scale)
 add_host_test(thunk_retirement_policy)
 add_host_test(pe_unwind_bounds)
 # Phase B dynamic fix-discovery: config-proposal decision is freestanding
