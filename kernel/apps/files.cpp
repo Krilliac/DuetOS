@@ -44,13 +44,14 @@ namespace
 // model (kernel/apps/browser/priv_exec.cpp::DeriveChildCaps): grant only
 // the minimum a console/GUI binary needs and NEVER kCapDebug/kCapDiag/
 // kCapNetAdmin/kCapNet/kCapInput/kCapFsWrite.
+// Promoted to core::CapSetUserLaunch (proc/process.h) so the /APPS
+// Start-menu launcher shares ONE definition of this policy instead of
+// re-deriving it — core/menu_dispatch.cpp was written without this
+// helper and passed CapSetTrusted(), which is exactly the drift a
+// per-call-site security policy invites.
 inline duetos::core::CapSet UserLaunchCaps()
 {
-    duetos::core::CapSet caps = duetos::core::CapSetEmpty();
-    duetos::core::CapSetAdd(caps, duetos::core::kCapSerialConsole);
-    duetos::core::CapSetAdd(caps, duetos::core::kCapFsRead);
-    duetos::core::CapSetAdd(caps, duetos::core::kCapSpawnThread);
-    return caps;
+    return duetos::core::CapSetUserLaunch();
 }
 
 // SEC-008: PE import preload pulls in ~44 DLLs, so kFrameBudgetSandbox (8)

@@ -69,6 +69,15 @@
 namespace duetos::core
 {
 
+// SEC-008: frame budget for an /APPS shortcut launch.
+//
+// kFrameBudgetSandbox (8) is too tight for a PE — import preload pulls
+// in ~44 DLLs — so grant bounded headroom while staying far below the
+// trusted region table. Same value and rationale as
+// apps/files.cpp::kUserLaunchFrames, which covers the other path that
+// launches an operator-chosen binary off disk.
+constexpr duetos::u64 kAppsLaunchFrames = 512;
+
 void PrintShortcutHelp()
 {
     using duetos::drivers::video::ConsoleWriteln;
@@ -581,12 +590,12 @@ void DispatchMenuAction(duetos::u32 action, duetos::u32 ctx)
                                     (sk == duetos::drivers::video::ShortcutKind::Pe)
                                         ? duetos::core::SpawnPeFile(
                                               "/apps/launch", staging, static_cast<duetos::u64>(got),
-                                              duetos::core::CapSetTrusted(), duetos::fs::RamfsTrustedRoot(),
-                                              duetos::mm::kFrameBudgetTrusted, duetos::core::kTickBudgetTrusted)
+                                              duetos::core::CapSetUserLaunch(), duetos::fs::RamfsSandboxRoot(),
+                                              kAppsLaunchFrames, duetos::core::kTickBudgetTrusted)
                                         : duetos::core::SpawnElfFile(
                                               "/apps/launch", staging, static_cast<duetos::u64>(got),
-                                              duetos::core::CapSetTrusted(), duetos::fs::RamfsTrustedRoot(),
-                                              duetos::mm::kFrameBudgetTrusted, duetos::core::kTickBudgetTrusted);
+                                              duetos::core::CapSetUserLaunch(), duetos::fs::RamfsSandboxRoot(),
+                                              kAppsLaunchFrames, duetos::core::kTickBudgetTrusted);
                                 duetos::drivers::video::ConsoleWrite(pid != 0 ? "-> /APPS LAUNCH OK pid="
                                                                               : "-> /APPS LAUNCH FAIL");
                                 if (pid != 0)

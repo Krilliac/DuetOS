@@ -225,6 +225,29 @@ inline constexpr CapSet CapSetTrusted()
     return CapSet{bits};
 }
 
+/// SEC-008 least-privilege cap set for launching a binary the operator
+/// CHOSE off a disk — a Files double-click, a Start-menu /APPS shortcut,
+/// anything whose bytes came from the FAT32 interop volume.
+///
+/// Such a binary is UNTRUSTED. It must never inherit CapSetTrusted(),
+/// which sets every bit including kCapDebug (cross-process VM read/write
+/// + SetContext) and kCapDiag (SYS_DIAG_FAULT_INJECT, a guest-reachable
+/// kernel panic). Grants only what a console/GUI binary needs, and
+/// deliberately withholds kCapDebug / kCapDiag / kCapNet / kCapNetAdmin
+/// / kCapInput / kCapFsWrite.
+///
+/// Lives HERE, next to CapSetTrusted, rather than being duplicated per
+/// call site — the policy previously existed only as a file-local helper
+/// in apps/files.cpp, and the /APPS launcher in core/menu_dispatch.cpp
+/// was written without it and passed CapSetTrusted() instead. A
+/// security policy copied per call site is a policy that drifts, and
+/// that drift was the bug.
+inline constexpr CapSet CapSetUserLaunch()
+{
+    return CapSet{(1ULL << static_cast<u32>(kCapSerialConsole)) | (1ULL << static_cast<u32>(kCapFsRead)) |
+                  (1ULL << static_cast<u32>(kCapSpawnThread))};
+}
+
 inline constexpr bool CapSetHas(CapSet s, Cap c)
 {
     if (c == kCapNone || c >= kCapCount)
