@@ -4176,3 +4176,114 @@
     // (0x65000760) — a "\0\0" block.
     0xB8, 0x60, 0x07, 0x00, 0x65, // 0x1343 mov eax, 0x65000760
     0xC3,                         // 0x1348 ret
+
+    // === x64 msvcrt CRT surface ===============================
+
+    // --- empty-C-string pin (offset 0x1349, 6 bytes) ----------
+    // Returns `const char*` to kProcEnvVa + kProcEnvDataMissOff
+    // (0x65000800) — the data-miss landing pad, which
+    // Win32ProcEnvPopulate never writes, so it reads as an empty
+    // NUL-terminated string forever.
+    //
+    // Used by `exception::what()`. Real msvcrt never returns NULL
+    // from what() (it substitutes "Unknown exception"), and
+    // callers routinely feed the result straight to printf("%s")
+    // — so a kOffPinReturn0 (NULL) binding would fault inside the
+    // caller's formatter. "" is the safe degenerate answer.
+    0xB8, 0x00, 0x08, 0x00, 0x65, // 0x1349 mov eax, 0x65000800
+    0xC3,                         // 0x134E ret
+
+    // --- memcpy_s / memmove_s (offset 0x134F, 66 bytes) -------
+    // errno_t memcpy_s(void* dst=rcx, rsize_t dstsz=rdx,
+    //                  const void* src=r8, rsize_t count=r9).
+    // memmove_s has the identical signature and a strictly weaker
+    // contract (overlap permitted), so both bind here: the copy
+    // below is overlap-safe, exactly as memcpy aliases memmove.
+    //
+    // These CANNOT alias kOffMemmove — memmove takes (dst, src,
+    // n) in (rcx, rdx, r8), so a memmove-bound memcpy_s would
+    // read `dstsz` as the source pointer and `src` as the length.
+    // That is a wild read plus a wrong-length write, which is why
+    // this gets its own bytes rather than an alias row.
+    //
+    // Returns 0 on success, EINVAL (22) on a NULL dst/src, or
+    // ERANGE (34) when count exceeds the destination size.
+    // GAP: on ERANGE the C11 Annex K contract also zero-fills the
+    // destination buffer; we leave it untouched (the caller sees
+    // the non-zero errno_t either way).
+    //
+    // Saves nonvolatile rsi + rdi, and restores DF=0 per the
+    // Win64 ABI on the backward-copy path.
+    0x56,                         // 0x134F push rsi
+    0x57,                         // 0x1350 push rdi
+    0xB8, 0x16, 0x00, 0x00, 0x00, // 0x1351 mov eax, 22 ; EINVAL
+    0x48, 0x85, 0xC9,             // 0x1356 test rcx, rcx ; dst NULL?
+    0x74, 0x33,                   // 0x1359 je +0x33 -> 0x138E .out
+    0x4D, 0x85, 0xC0,             // 0x135B test r8, r8 ; src NULL?
+    0x74, 0x2E,                   // 0x135E je +0x2E -> 0x138E .out
+    0xB8, 0x22, 0x00, 0x00, 0x00, // 0x1360 mov eax, 34 ; ERANGE
+    0x49, 0x39, 0xD1,             // 0x1365 cmp r9, rdx ; count > dstsz?
+    0x77, 0x24,                   // 0x1368 ja +0x24 -> 0x138E .out
+    0x48, 0x89, 0xCF,             // 0x136A mov rdi, rcx ; dst
+    0x4C, 0x89, 0xC6,             // 0x136D mov rsi, r8 ; src
+    0x4C, 0x89, 0xC9,             // 0x1370 mov rcx, r9 ; count
+    0x48, 0x39, 0xF7,             // 0x1373 cmp rdi, rsi
+    0x76, 0x12,                   // 0x1376 jbe +0x12 -> 0x138A .fwd
+    // backward-copy path (dst > src, overlap-safe)
+    0x48, 0x01, 0xCF, // 0x1378 add rdi, rcx
+    0x48, 0xFF, 0xCF, // 0x137B dec rdi
+    0x48, 0x01, 0xCE, // 0x137E add rsi, rcx
+    0x48, 0xFF, 0xCE, // 0x1381 dec rsi
+    0xFD,             // 0x1384 std
+    0xF3, 0xA4,       // 0x1385 rep movsb
+    0xFC,             // 0x1387 cld
+    0xEB, 0x02,       // 0x1388 jmp +2 -> 0x138C .ok
+    // .fwd:
+    0xF3, 0xA4, // 0x138A rep movsb
+    // .ok:
+    0x31, 0xC0, // 0x138C xor eax, eax ; success
+    // .out:
+    0x5F, // 0x138E pop rdi
+    0x5E, // 0x138F pop rsi
+    0xC3, // 0x1390 ret
+
+    // --- wcscpy_s (offset 0x1391, 63 bytes) -------------------
+    // errno_t wcscpy_s(wchar_t* dst=rcx, rsize_t dstsz=rdx,
+    //                  const wchar_t* src=r8).
+    // dstsz counts wide CHARACTERS, not bytes.
+    //
+    // Cannot alias kOffLstrcpyW: that one is (dst=rcx, src=rdx)
+    // with no bound, so it would copy from the *count* as if it
+    // were a pointer. Hence its own bytes.
+    //
+    // Copies src (including the terminating NUL) while i < dstsz.
+    // Returns 0 on success, EINVAL (22) for a NULL dst/src or a
+    // zero dstsz, ERANGE (34) if src does not fit — in which case
+    // dst[0] is set to NUL, matching the C11 Annex K contract.
+    // Touches only volatile registers (rax, rcx, rdx, r8-r10).
+    0xB8, 0x16, 0x00, 0x00, 0x00, // 0x1391 mov eax, 22 ; EINVAL
+    0x48, 0x85, 0xC9,             // 0x1396 test rcx, rcx ; dst NULL?
+    0x74, 0x34,                   // 0x1399 je +0x34 -> 0x13CF .out
+    0x4D, 0x85, 0xC0,             // 0x139B test r8, r8 ; src NULL?
+    0x74, 0x2F,                   // 0x139E je +0x2F -> 0x13CF .out
+    0x48, 0x85, 0xD2,             // 0x13A0 test rdx, rdx ; dstsz == 0?
+    0x74, 0x2A,                   // 0x13A3 je +0x2A -> 0x13CF .out
+    0x45, 0x31, 0xC9,             // 0x13A5 xor r9d, r9d ; i = 0
+    // .loop:
+    0x49, 0x39, 0xD1,             // 0x13A8 cmp r9, rdx ; i >= dstsz?
+    0x73, 0x14,                   // 0x13AB jae +0x14 -> 0x13C1 .erange
+    0x47, 0x0F, 0xB7, 0x14, 0x48, // 0x13AD movzx r10d, word [r8+r9*2]
+    0x66, 0x46, 0x89, 0x14, 0x49, // 0x13B2 mov word [rcx+r9*2], r10w
+    0x45, 0x85, 0xD2,             // 0x13B7 test r10d, r10d ; copied NUL?
+    0x74, 0x10,                   // 0x13BA je +0x10 -> 0x13CC .ok
+    0x49, 0xFF, 0xC1,             // 0x13BC inc r9
+    0xEB, 0xE7,                   // 0x13BF jmp -0x19 -> 0x13A8 .loop
+    // .erange:
+    0x66, 0xC7, 0x01, 0x00, 0x00, // 0x13C1 mov word [rcx], 0
+    0xB8, 0x22, 0x00, 0x00, 0x00, // 0x13C6 mov eax, 34 ; ERANGE
+    0xC3,                         // 0x13CB ret
+    // .ok:
+    0x31, 0xC0, // 0x13CC xor eax, eax ; success
+    0xC3,       // 0x13CE ret
+    // .out:
+    0xC3, // 0x13CF ret ; eax still EINVAL
