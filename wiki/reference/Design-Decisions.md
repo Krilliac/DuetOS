@@ -12701,3 +12701,57 @@ markers for its richest input. Three discovery layers were added (runtime
   bring-up narrows the window. One clean boot proves nothing — the
   first (wrong) fix produced a clean 412 s run on its very first
   attempt. Measure a RATE across repeated boots.
+## 2026-07-28 — ELF loader gets the PE loader's heap-backed unwind guard, plus a fail-closed map-refusal path
+
+- **Context:** the 2026-06-17 large-exe slice heap-backed
+  `LoaderUnwindGuard` in `pe_loader.cpp` but left the ELF twin on a fixed
+  `u64 vas[1024]` inline array with an unconditional
+  `KASSERT(count < kMaxTrackedVas)` and no fail-closed clamp. `KASSERT`
+  compiles in always and routes to `core::Panic`, so **4 MiB of mapped
+  image was a hard, box-halting limit** on the ELF path — far below the
+  loader's own 256 MiB per-segment bound and the AS's 8192-page frame
+  budget. Guest-reachable via `SYS_EXECVE` (arbitrary ELF off FAT32,
+  past the point of no return) and `SpawnElfFile`; also hit by any
+  legitimate statically-linked binary over 4 MiB.
+- **Decision — port the PE shape verbatim, size it from a pre-walk:**
+  the tracker is `KMalloc`'d per-image under the same 262144-page
+  ceiling, `Track()` gains the PE loader's `if (count >= cap) return;`
+  clamp (so a future `release-asserts` demotion of `KASSERT` cannot turn
+  the store into an out-of-bounds write of attacker-chosen page VAs),
+  and the destructor `KFree`s. PE derives its page count from
+  `SizeOfImage`; **ELF has no equivalent header field**, so `ElfLoad`
+  runs one counting pre-walk over the PT_LOAD extents before mapping
+  anything, re-applying `kMaxSegmentSpanBytes` inside the counter so a
+  hostile `p_memsz` is rejected *before* it can drive a large `KMalloc`.
+  Overlapping PT_LOADs are double-counted, which only over-allocates.
+  **Rules out** deriving the ELF tracker size from a fixed constant or
+  from the file length (neither bounds `p_memsz`-driven .bss pages).
+- **Decision — probe the PTE instead of trusting `MapUserPage`:**
+  `AddressSpaceMapUserPage` returns `void` and has three *silent,
+  non-fatal* refusal paths (frame budget exhausted, region-table grow
+  OOM, page-table walker OOM). Each `return`s without taking ownership
+  of the caller's frame and without appending a regions row, while
+  `address_space.h` tells callers not to `FreeFrame` a frame they handed
+  over — so the old unconditional `Track()` leaked one frame per refused
+  page *permanently* and recorded a VA the unwind walk could never
+  reclaim (`UnmapUserPage` finds no row, returns false). The loader now
+  reads the leaf PTE with `AddressSpaceProbePteRaw` (O(1) walk;
+  `LookupUserFrame` would be a linear regions scan) after every map:
+  absent ⇒ refused ⇒ `FreeFrame` + fail the load. Failing is correct — a
+  half-mapped image is not loadable, and every caller (`spawn.cpp`,
+  `syscall.cpp` execve) already handles the false path. **Rules out**
+  widening `AddressSpaceMapUserPage` to return a status as part of this
+  slice (it has many callers across mm/loader/subsystems); the probe is
+  the local, caller-side fix.
+- **Not changed:** the same unchecked-`MapUserPage`/unconditional-`Track`
+  shape exists at ~12 sites in `pe_loader.cpp` (sections, headers, TEB,
+  proc-env, KUSER_SHARED_DATA, thunks pages). The refusal paths are
+  shared, so the leak is real there too, but fixing 2 of 12 sites would
+  leave a worse, half-consistent state than fixing none. Recorded on the
+  Roadmap instead.
+- **Verified:** `ElfLoaderUnwindSelfTest` extended with a second case — a
+  5 MiB `p_memsz` image (1280 pages, past the old 1024 tracker) against
+  a 64-frame-budget AS. Reaching the assertion at all proves the
+  >1024-page path no longer panics; the load must return `ok=false` and
+  `FreeFramesCount` must still balance, which only holds if the refused
+  65th page's frame was freed.

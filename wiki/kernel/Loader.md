@@ -70,14 +70,41 @@ maps a fixed v0 stack page and returns the entry RIP, stack VA, and
 stack top in `ElfLoadResult`.
 
 Allocation is fully unwound on failure: an internal
-`LoaderUnwindGuard` ([`elf_loader.cpp:172`](../../kernel/loader/elf_loader.cpp))
+`LoaderUnwindGuard` ([`elf_loader.cpp`](../../kernel/loader/elf_loader.cpp))
 tracks every page mapped during the call and rolls them back via
 `AddressSpaceUnmapUserPage` on any early return (invalid ELF, OOM), so a
-partial load leaks no frames. `ElfLoaderUnwindSelfTest`
-([`elf_loader.cpp:508`](../../kernel/loader/elf_loader.cpp)) drives a
-synthetic load with the test-only OOM injection
-(`FrameAllocatorSetFailAfter`) and asserts `FreeFramesCount` returns to
-its pre-test value — i.e. the guard freed every frame it mapped.
+partial load leaks no frames.
+
+The tracker is **heap-backed and sized per-image**, matching the PE
+loader's guard. PE gets its page count free from `SizeOfImage`; ELF has
+no equivalent header field, so `ElfLoad` does one counting pre-walk over
+the PT_LOAD extents (applying the same 256 MiB per-segment span bound, so
+a hostile `p_memsz` can't inflate the allocation) and `Init()`s the
+tracker to that count plus slack, under a hard 262144-page ceiling.
+`Track()` fails closed (`if (count >= cap) return;`) so a softened assert
+can never turn into an out-of-bounds write. The previous fixed
+`u64 vas[1024]` made **4 MiB the hard image-size limit**: the always-on
+`KASSERT` halted the kernel on the 1025th page, reachable from
+`SYS_EXECVE` with any on-disk ELF and from any legitimate >4 MiB static
+binary.
+
+`AddressSpaceMapUserPage` returns `void` and has three *silent, non-fatal*
+refusal paths (frame budget exhausted, region-table grow OOM, page-table
+walker OOM). None of them takes ownership of the frame the caller passed
+in, so the loader **probes the leaf PTE** (`AddressSpaceProbePteRaw`,
+O(1)) after every map: present means the AS took the frame and the VA is
+tracked; absent means the map was refused, so the loader `FreeFrame`s it
+and fails the load rather than leaking one frame per refused page and
+handing back a half-mapped image.
+
+`ElfLoaderUnwindSelfTest`
+([`elf_loader.cpp`](../../kernel/loader/elf_loader.cpp)) covers both
+properties: case 1 drives a synthetic load with the test-only OOM
+injection (`FrameAllocatorSetFailAfter`) and asserts `FreeFramesCount`
+returns to its pre-test value; case 2 declares a 5 MiB `p_memsz`
+(1280 pages, past the old 1024 tracker) against a 64-frame budget and
+asserts the load fails cleanly, without a panic, with the frame count
+still balanced.
 
 `ElfLoad` is the segment-mapping path the
 [process spawn](Process-Model.md#process-spawn) entry points

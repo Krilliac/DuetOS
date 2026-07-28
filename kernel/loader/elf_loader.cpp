@@ -6,6 +6,7 @@
 #include "exec_meta_rust.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
+#include "mm/kheap.h"
 #include "mm/page.h"
 #include "mm/paging.h"
 #include "security/guard.h"
@@ -169,31 +170,69 @@ namespace
 
 constexpr u64 kV0StackVa = 0x7FFFE000ULL;
 
+// Defensive per-segment span bound. ElfValidate (the Rust crate)
+// checks p_filesz against the file but a *valid* ELF may still
+// declare an enormous p_memsz (legitimate .bss is small; a malformed
+// or hostile header is not). 256 MiB is orders of magnitude above any
+// real test/userland image yet far below the frame pool. Shared by the
+// page-counting pre-walk and the mapping walk so both reject the same
+// pathological segment — the pre-walk's copy is what stops a hostile
+// p_memsz driving a multi-megabyte unwind-tracker KMalloc before the
+// mapping walk ever runs.
+constexpr u64 kMaxSegmentSpanBytes = 256ULL * 1024 * 1024;
+
 // Allocation-ladder unwind for ElfLoad. PT_LOAD segments and the
 // stack page each AllocateFrame + map; a partial failure leaves the
 // pages mapped before the failing leg leaked. Track every successful
 // map and unmap+free on early-return. Disarmed on full success.
 //
-// Cap: typical small ELFs map a handful of pages; large statically-
-// linked binaries can run into the hundreds. 1024 covers the v0
-// workloads with headroom; if a future binary blows past it the log
-// line in Track flags the leak hazard at the boundary.
+// The tracked-VA array is heap-backed and sized per-image by Init(),
+// NOT a fixed inline array — same shape as the PE loader's guard
+// (kernel/loader/pe_loader.cpp:214). The previous `u64 vas[1024]`
+// made 1024 the hard IMAGE-SIZE limit, not a tripwire: Track's
+// KASSERT is compile-in-always (kernel/core/panic.h) and routes to
+// core::Panic, so any image mapping more than 4 MiB — well below the
+// loader's own 256 MiB per-segment bound and below the AS's 8192-page
+// frame budget — halted the kernel. Reachable from SYS_EXECVE with an
+// arbitrary on-disk ELF, and from any legitimate >4 MiB static binary.
+//
+// A hard ceiling (kMaxTrackedVas) bounds the allocation so a crafted
+// p_memsz cannot request an absurd array, and Track fails CLOSED
+// (`if (count >= cap) return;`) so a softened assert can never turn
+// into an out-of-bounds write of attacker-chosen page VAs.
 struct LoaderUnwindGuard
 {
-    static constexpr u64 kMaxTrackedVas = 1024;
+    static constexpr u64 kMaxTrackedVas = 262144; // 1 GiB of 4 KiB pages — hard ceiling
     duetos::mm::AddressSpace* as = nullptr;
-    u64 vas[kMaxTrackedVas] = {};
+    u64* vas = nullptr;
+    u64 cap = 0;
     u32 count = 0;
     bool armed = true;
 
+    // Allocate the tracking array for `capacity` page VAs. Returns
+    // false on OOM or an over-ceiling request; the caller must fail
+    // the load (the destructor then no-ops — vas stays null).
+    bool Init(u64 capacity)
+    {
+        if (capacity == 0 || capacity > kMaxTrackedVas)
+            return false;
+        vas = static_cast<u64*>(duetos::mm::KMalloc(capacity * sizeof(u64)));
+        if (vas == nullptr)
+            return false;
+        cap = capacity;
+        return true;
+    }
+
     void Track(u64 va)
     {
-        // Same shape as the PE loader — a silent return here used
-        // to leak frames mapped after the cap if a later step then
-        // failed. 1024 entries is 4 MiB of mappings; an ELF that
-        // legitimately exceeds it is structurally beyond v0 scope
-        // and should crash loudly, not leak.
-        KASSERT(count < kMaxTrackedVas, "loader/elf", "LoaderUnwindGuard cap exceeded");
+        // cap is sized from the image's own PT_LOAD page count plus
+        // fixed slack, so a well-formed image never exceeds it. If it
+        // ever does, fail closed: stop tracking rather than write past
+        // the array. The destructor still unwinds everything tracked
+        // so far.
+        KASSERT(count < cap, "loader/elf", "LoaderUnwindGuard cap exceeded");
+        if (count >= cap)
+            return;
         vas[count++] = va;
     }
 
@@ -201,10 +240,13 @@ struct LoaderUnwindGuard
 
     ~LoaderUnwindGuard()
     {
-        if (!armed || as == nullptr)
-            return;
-        for (u32 i = count; i > 0; --i)
-            duetos::mm::AddressSpaceUnmapUserPage(as, vas[i - 1]);
+        if (armed && as != nullptr)
+        {
+            for (u32 i = count; i > 0; --i)
+                duetos::mm::AddressSpaceUnmapUserPage(as, vas[i - 1]);
+        }
+        if (vas != nullptr)
+            duetos::mm::KFree(vas);
     }
 };
 
@@ -249,8 +291,8 @@ void LoadSegment(LoadCtx& ctx, const ElfSegment& seg)
     // 256 MiB is orders of magnitude above any real test/userland
     // image yet far below the frame pool, so a pathological segment
     // now takes the graceful ctx.ok=false bail the rest of the
-    // loader already handles.
-    constexpr u64 kMaxSegmentSpanBytes = 256ULL * 1024 * 1024;
+    // loader already handles. (Constant hoisted to namespace scope —
+    // the page-counting pre-walk in ElfLoad applies the same bound.)
     if (end - start > kMaxSegmentSpanBytes)
     {
         KLOG_WARN_AV(::duetos::core::LogArea::Loader, "elf-loader",
@@ -341,6 +383,29 @@ void LoadSegment(LoadCtx& ctx, const ElfSegment& seg)
         if (!reusing)
         {
             AddressSpaceMapUserPage(ctx.as, page_va, frame, flags);
+            // MapUserPage returns void and has THREE silent non-fatal
+            // refusal paths (address_space.cpp: frame budget exhausted,
+            // region-table grow OOM, page-table walker OOM). Each one
+            // `return`s WITHOUT taking ownership of `frame` and without
+            // appending a regions row — but the header contract
+            // (address_space.h:205-208) tells callers not to FreeFrame a
+            // frame they handed to MapUserPage, so an unconditional
+            // Track() would leak the frame permanently AND record a VA
+            // the unwind walk could never reclaim (UnmapUserPage finds no
+            // regions row and returns false). Probe the leaf PTE to learn
+            // which happened: present == the AS took ownership.
+            //
+            // ProbePteRaw is an O(1) table walk; LookupUserFrame would be
+            // a linear scan of the regions ledger (address_space.h:336).
+            if ((AddressSpaceProbePteRaw(ctx.as, page_va) & kPagePresent) == 0)
+            {
+                FreeFrame(frame);
+                KLOG_WARN_AV(::duetos::core::LogArea::Loader, "elf-loader",
+                             "MapUserPage refused (frame budget / OOM) — rejecting load", page_va);
+                KBP_PROBE_V(::duetos::debug::ProbeId::kElfLoaderOom, page_va);
+                ctx.ok = false;
+                return;
+            }
             if (ctx.guard != nullptr)
                 ctx.guard->Track(page_va);
         }
@@ -353,6 +418,10 @@ void LoadSegment(LoadCtx& ctx, const ElfSegment& seg)
             // page the execute bit. Writable if EITHER segment wants write;
             // executable only if BOTH are executable; any writable page is
             // forced NX. AddressSpaceProtectUserPage rejects RWX outright.
+            //
+            // No Track() here: the page was already mapped and tracked by
+            // the segment that first claimed it, and this arm allocates no
+            // frame of its own.
             const u64 existing_flags = AddressSpaceProbePteRaw(ctx.as, page_va);
             u64 merged = kPagePresent | kPageUser;
             if ((existing_flags & kPageWritable) || (flags & kPageWritable))
@@ -362,6 +431,34 @@ void LoadSegment(LoadCtx& ctx, const ElfSegment& seg)
             AddressSpaceProtectUserPage(ctx.as, page_va, merged);
         }
     }
+}
+
+// Page-count pre-walk. The unwind tracker is sized per-image, and the
+// PE loader gets that count free from SizeOfImage — ELF has no
+// equivalent header field, so count the PT_LOAD pages before the
+// mapping walk. Overlapping PT_LOADs are double-counted here, which
+// only over-allocates the tracker (safe). Applying kMaxSegmentSpanBytes
+// here too keeps a hostile p_memsz from inflating the count into a
+// multi-megabyte KMalloc; `over` makes ElfLoad reject before allocating.
+struct PageCountCtx
+{
+    u64 pages;
+    bool over;
+};
+
+void CountSegmentPages(PageCountCtx& ctx, const ElfSegment& seg)
+{
+    const u64 page_mask = duetos::mm::kPageSize - 1;
+    const u64 start = seg.vaddr & ~page_mask;
+    const u64 end = (seg.vaddr + seg.memsz + page_mask) & ~page_mask;
+    if (end <= start)
+        return; // zero-length memsz, or a vaddr+memsz wrap
+    if (end - start > kMaxSegmentSpanBytes)
+    {
+        ctx.over = true;
+        return;
+    }
+    ctx.pages += (end - start) / duetos::mm::kPageSize;
 }
 
 } // namespace
@@ -398,6 +495,23 @@ ElfLoadResult ElfLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as
 
     LoaderUnwindGuard guard;
     guard.as = as;
+    // Size the unwind tracker to THIS image before mapping anything.
+    // 8 pages of slack covers the stack page with margin. Heap-backed,
+    // so a multi-MiB static binary no longer panics the kernel on the
+    // 1025th tracked page (the old inline `vas[1024]` + always-on
+    // KASSERT made 4 MiB a hard, box-halting image-size limit).
+    {
+        PageCountCtx pc{0, false};
+        ElfForEachPtLoad(
+            file, file_len, [](const ElfSegment& seg, void* cookie)
+            { CountSegmentPages(*static_cast<PageCountCtx*>(cookie), seg); }, &pc);
+        if (pc.over || !guard.Init(pc.pages + 8))
+        {
+            KLOG_WARN_AV(LogArea::Loader, "elf-loader", "unwind-guard alloc failed (image too large or OOM)", pc.pages);
+            KBP_PROBE_V(::duetos::debug::ProbeId::kElfLoaderOom, pc.pages);
+            return r; // r.ok is already false
+        }
+    }
     LoadCtx ctx{file, as, &guard, true};
     ElfForEachPtLoad(
         file, file_len, [](const ElfSegment& seg, void* cookie) { LoadSegment(*static_cast<LoadCtx*>(cookie), seg); },
@@ -420,6 +534,19 @@ ElfLoadResult ElfLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as
     }
     const PhysAddr stack_frame = stack_frame_r.value();
     AddressSpaceMapUserPage(as, kV0StackVa, stack_frame, kPagePresent | kPageUser | kPageWritable | kPageNoExecute);
+    // Same unchecked-map/unconditional-Track shape as the segment loop
+    // above: MapUserPage can silently refuse (budget / OOM) without
+    // taking ownership of `stack_frame`. Probe before tracking so a
+    // refusal frees the frame instead of leaking it, and fails the load
+    // rather than handing back a stackless image. The guard is still
+    // armed here, so the destructor unwinds the segment pages.
+    if ((AddressSpaceProbePteRaw(as, kV0StackVa) & kPagePresent) == 0)
+    {
+        FreeFrame(stack_frame);
+        KLOG_WARN_AV(LogArea::Loader, "elf-loader", "stack-page MapUserPage refused (frame budget / OOM)", kV0StackVa);
+        KBP_PROBE_V(::duetos::debug::ProbeId::kElfLoaderOom, kV0StackVa);
+        return r;
+    }
     guard.Track(kV0StackVa);
 
     r.ok = true;
@@ -436,11 +563,24 @@ ElfLoadResult ElfLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as
 // ---------------------------------------------------------------
 // LoaderUnwindGuard self-test
 //
-// Builds a minimal in-memory ELF64 image with one PT_LOAD segment
-// covering a few pages, primes FrameAllocatorSetFailAfter to fail
-// partway through the segment loop, and asserts that ElfLoad's
-// LoaderUnwindGuard rolled back every prior page so the global
-// free-frame count matches the pre-test baseline.
+// Case 1 — OOM mid-segment: builds a minimal in-memory ELF64 image
+// with one PT_LOAD segment covering a few pages, primes
+// FrameAllocatorSetFailAfter to fail partway through the segment
+// loop, and asserts that ElfLoad's LoaderUnwindGuard rolled back
+// every prior page so the global free-frame count matches the
+// pre-test baseline.
+//
+// Case 2 — oversize image + budget refusal: re-declares the same
+// segment with a 5 MiB p_memsz (1280 pages, past the old fixed
+// 1024-entry tracker) against a 64-frame address space. This pins
+// two properties at once:
+//   - tracking past 1024 pages no longer panics the box (the old
+//     inline `vas[1024]` + always-on KASSERT halted here);
+//   - when AddressSpaceMapUserPage silently refuses the 65th page
+//     (frame budget exhausted), the loader frees the frame the AS
+//     did NOT take ownership of and fails the load — so the
+//     free-frame count still balances instead of leaking one frame
+//     per refused page.
 // ---------------------------------------------------------------
 
 void ElfLoaderUnwindSelfTest()
@@ -509,6 +649,38 @@ void ElfLoaderUnwindSelfTest()
     write_u64(ph + 32, 0x1000); // p_filesz: 4 KiB
     write_u64(ph + 40, 0x4000); // p_memsz: 16 KiB → 4 mapped pages
     write_u64(ph + 48, 0x1000); // p_align
+
+    // Shared leak check for both cases. The unwind guard's invariant
+    // is "no frames go missing": a real leak leaves `after < before`
+    // (some user page or page-table frame stayed allocated forever). A
+    // POSITIVE drift just means background activity (the timer tick's
+    // wake path, the reaper consuming a zombie's stack) freed more
+    // frames than it allocated during the test window. That's not a
+    // leak — it's bookkeeping noise from the running kernel. Enforce
+    // direction-only: fail loudly on missing frames, tolerate gains.
+    auto check_no_leak = [](u64 before, u64 after, const char* tag)
+    {
+        if (after >= before)
+            return;
+        SerialWrite("[elf-test] FAIL frame leak (");
+        SerialWrite(tag);
+        SerialWrite(") before=");
+        auto write_hex = [](u64 v)
+        {
+            for (int i = 60; i >= 0; i -= 4)
+            {
+                const u64 nibble = (v >> i) & 0xF;
+                char c = static_cast<char>(nibble < 10 ? '0' + nibble : 'a' + nibble - 10);
+                char buf[2] = {c, 0};
+                SerialWrite(buf);
+            }
+        };
+        write_hex(before);
+        SerialWrite(" after=");
+        write_hex(after);
+        SerialWrite("\n");
+        core::Panic("elf-loader", "ElfLoaderUnwindSelfTest: frame leak detected");
+    };
 
     // Sample free-frame count BEFORE AddressSpaceCreate so the post-
     // release balance includes the PML4 frame returned by Release.
@@ -583,36 +755,54 @@ void ElfLoaderUnwindSelfTest()
     // pool (instead of the bitmap) show up in the free count.
     FrameAllocatorDrainPools();
     const u64 free_after = FreeFramesCount();
-    // The unwind guard's invariant is "no frames go missing": a
-    // real leak would leave `free_after < free_before` (some user
-    // page or page-table frame stayed allocated forever). A
-    // POSITIVE drift just means background activity (the timer
-    // tick's wake path, the reaper consuming a zombie's stack)
-    // freed more frames than it allocated during the test window.
-    // That's not a leak — it's bookkeeping noise from the
-    // running kernel. Enforce direction-only: fail loudly on
-    // missing frames, tolerate background gains.
-    if (free_after < free_before)
+    check_no_leak(free_before, free_after, "oom-midsegment");
+
+    // -----------------------------------------------------------
+    // Case 2 — image larger than the old fixed 1024-VA tracker,
+    // loaded into an AS whose frame budget refuses partway through.
+    //
+    // p_memsz = 5 MiB → 1280 pages. Under the old inline `vas[1024]`
+    // the 1025th Track() hit an always-on KASSERT and panicked the
+    // kernel; now the tracker is sized from the image's own page
+    // count. p_filesz stays 4 KiB (the rest is .bss), so the test
+    // image on the stack/bss stays 8 KiB.
+    //
+    // The AS budget is 64 frames, so AddressSpaceMapUserPage starts
+    // silently refusing at the 65th page. ElfLoad must free the frame
+    // that refusal did NOT take ownership of, fail the load, and
+    // unwind — leaving the free-frame count balanced.
+    // -----------------------------------------------------------
+    write_u64(ph + 40, 0x500000); // p_memsz: 5 MiB → 1280 mapped pages
+
+    FrameAllocatorDrainPools();
+    const u64 free_before_big = FreeFramesCount();
+
+    auto as_big_r = AddressSpaceCreate(/*frame_budget=*/64);
+    if (!as_big_r)
     {
-        SerialWrite("[elf-test] FAIL frame leak: before=");
-        for (int i = 60; i >= 0; i -= 4)
-        {
-            const u64 nibble = (free_before >> i) & 0xF;
-            char c = static_cast<char>(nibble < 10 ? '0' + nibble : 'a' + nibble - 10);
-            char buf[2] = {c, 0};
-            SerialWrite(buf);
-        }
-        SerialWrite(" after=");
-        for (int i = 60; i >= 0; i -= 4)
-        {
-            const u64 nibble = (free_after >> i) & 0xF;
-            char c = static_cast<char>(nibble < 10 ? '0' + nibble : 'a' + nibble - 10);
-            char buf[2] = {c, 0};
-            SerialWrite(buf);
-        }
-        SerialWrite("\n");
-        core::Panic("elf-loader", "ElfLoaderUnwindSelfTest: frame leak detected");
+        // Same contract as case 1's skip: a legitimate kheap-pressure
+        // OOM is not the regression this test exists to catch. Emit the
+        // greppable SKIP sentinel and do NOT claim a PASS for a case
+        // that never ran.
+        SerialWrite("[elf-test] SKIP oversize case: AddressSpaceCreate OOM (kheap pressure)\n");
+        return;
     }
+    AddressSpace* as_big = as_big_r.value();
+
+    // No OOM injection here — the refusal comes from the AS frame
+    // budget, which is the guest-reachable path (a >4 MiB ELF via
+    // SYS_EXECVE or SpawnElfFile). Reaching this line at all proves
+    // the >1024-page tracking no longer panics.
+    const ElfLoadResult big = ElfLoad(file, kFileLen, as_big);
+    if (big.ok)
+    {
+        SerialWrite("[elf-test] FAIL oversize ElfLoad returned ok despite budget refusal\n");
+        core::Panic("elf-loader", "ElfLoaderUnwindSelfTest: budget-refused load reported success");
+    }
+
+    AddressSpaceRelease(as_big);
+    FrameAllocatorDrainPools();
+    check_no_leak(free_before_big, FreeFramesCount(), "oversize-budget-refusal");
 
     SerialWrite("[elf-test] unwind-guard PASS\n");
 }

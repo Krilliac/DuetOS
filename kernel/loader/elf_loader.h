@@ -96,13 +96,18 @@ inline constexpr u8 kElfPfR = 0x4;
 // (0x7FFFE000, top of canonical low half minus a guard). Future:
 // per-process stack base, growable stacks.
 //
-// On any failure (invalid ELF, AllocateFrame OOM) returns
-// {ok=false}; an internal `LoaderUnwindGuard` walks every page
-// successfully mapped by this call and rolls back via
-// AddressSpaceUnmapUserPage so the address space is left in the
-// same shape it had at entry. The caller still owns the AS and
-// can AddressSpaceRelease it; the guard just means a partial-load
-// failure doesn't leak frames.
+// On any failure (invalid ELF, AllocateFrame OOM, a refused
+// AddressSpaceMapUserPage) returns {ok=false}; an internal
+// `LoaderUnwindGuard` walks every page successfully mapped by this
+// call and rolls back via AddressSpaceUnmapUserPage so the address
+// space is left in the same shape it had at entry. The caller still
+// owns the AS and can AddressSpaceRelease it; the guard just means a
+// partial-load failure doesn't leak frames.
+//
+// The guard's tracking array is heap-backed and sized per-image from
+// a PT_LOAD page-count pre-walk (see the comment above
+// LoaderUnwindGuard in elf_loader.cpp) — image size is NOT capped at
+// a fixed tracker length.
 // ---------------------------------------------------------------
 
 struct ElfLoadResult
@@ -119,11 +124,17 @@ struct ElfLoadResult
 ElfLoadResult ElfLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as);
 
 /// Boot-time self-test for the ElfLoad allocation-ladder unwind
-/// guard. Drives a synthetic load against a fresh AddressSpace with
-/// the test-only OOM injection (FrameAllocatorSetFailAfter) primed
-/// so the guard fires on a partial-load failure. Asserts that
-/// FreeFramesCount returns to its pre-test value — i.e. the guard
-/// freed every frame it mapped before the OOM. Panics on regression.
+/// guard. Two synthetic loads against fresh AddressSpaces:
+///   1. OOM mid-segment via the test-only injection
+///      (FrameAllocatorSetFailAfter) — asserts FreeFramesCount
+///      returns to its pre-test value, i.e. the guard freed every
+///      frame it mapped before the OOM.
+///   2. A 5 MiB p_memsz image (1280 pages, past the old fixed
+///      1024-entry tracker) against a 64-frame budget — asserts the
+///      load fails cleanly without panicking and the frame count
+///      still balances, i.e. a refused MapUserPage frees its frame
+///      instead of leaking it.
+/// Panics on regression.
 void ElfLoaderUnwindSelfTest();
 
 } // namespace duetos::core
