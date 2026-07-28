@@ -709,9 +709,29 @@ i64 DoPrctl(u64 option, u64 arg2, u64 arg3, u64 arg4, u64 arg5)
         return 0;
     case 19:      // PR_GET_SECCOMP — companion to kPrSetSeccomp
         return 0; // SECCOMP_MODE_DISABLED
-    case 23:      // PR_CAPBSET_READ — bounding-set introspection
-        return 1; // pretend the cap is in the set
-    case 24:      // PR_CAPBSET_DROP
+    // --- Security-affecting options: FACADES, by design ---------------
+    //
+    // These report success while enforcing nothing. That is deliberate
+    // and safe here for one specific reason: in DuetOS the Linux
+    // credential surface is not the authority. `Process::caps` (kCap*)
+    // is, and the kernel's cap gates never consult a Linux bounding
+    // set, securebits word, or no-new-privs bit. Even `setuid` itself
+    // is a no-op (syscall_cred.cpp), so there is no uid-based
+    // escalation for these to guard against.
+    //
+    // They are marked STUB rather than left bare because a caller
+    // CANNOT tell from the return value that it did not get what it
+    // asked for, and CLAUDE.md's greppable inventory is the only place
+    // that fact is recorded. If a real uid/capability model ever lands,
+    // every marker below becomes a required implementation.
+    case 23: // PR_CAPBSET_READ — bounding-set introspection
+        // STUB: always claims the capability is present. A caller
+        // probing which caps survive exec gets a uniformly permissive
+        // answer that reflects nothing about the real cap set.
+        return 1;
+    case 24: // PR_CAPBSET_DROP
+        // STUB: reports success; drops nothing. A caller that trims its
+        // bounding set to harden a child does not actually restrict it.
         return 0;
     case 25:      // PR_GET_TSC — process TSC access
         return 0; // PR_TSC_ENABLE
@@ -720,6 +740,7 @@ i64 DoPrctl(u64 option, u64 arg2, u64 arg3, u64 arg4, u64 arg5)
     case 27: // PR_GET_SECUREBITS
         return 0;
     case 28: // PR_SET_SECUREBITS
+        // STUB: reports success; no securebit is recorded or honoured.
         return 0;
     case 29: // PR_SET_TIMERSLACK
         return 0;
@@ -732,8 +753,18 @@ i64 DoPrctl(u64 option, u64 arg2, u64 arg3, u64 arg4, u64 arg5)
     case 37: // PR_SET_CHILD_SUBREAPER
         return 0;
     case 38: // PR_SET_NO_NEW_PRIVS
+        // STUB: reports success; the bit is not recorded or enforced.
+        // Harmless in DuetOS today because the setuid path it exists to
+        // block is itself a no-op, but a caller relying on it to harden
+        // an exec gets nothing.
         return 0;
     case 39: // PR_GET_NO_NEW_PRIVS
+        // Deliberately NOT made to round-trip with case 38. Reporting 0
+        // ("not set") after a successful set is inconsistent, but it is
+        // inconsistent in the SAFE direction: a caller that sets the bit
+        // and then verifies it can detect that the guarantee is absent.
+        // Making GET echo SET would erase the only signal a careful
+        // program has.
         return 0;
     case 40: // PR_GET_TID_ADDRESS
         return 0;
@@ -742,6 +773,8 @@ i64 DoPrctl(u64 option, u64 arg2, u64 arg3, u64 arg4, u64 arg5)
     case 42: // PR_GET_THP_DISABLE
         return 0;
     case 47: // PR_CAP_AMBIENT — ambient capability set
+        // STUB: reports success for raise/lower/clear alike; no ambient
+        // set exists.
         return 0;
     case 53: // PR_SET_VMA — name a VMA. Accepted no-op.
         return 0;
