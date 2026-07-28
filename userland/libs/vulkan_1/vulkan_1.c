@@ -215,6 +215,39 @@ VkResult vkEnumerateInstanceVersion(UINT32* pApiVersion)
     return (ok == 1) ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
 }
 
+/* vkEnumerateInstanceExtensionProperties / ...LayerProperties — the
+ * two calls a Vulkan app makes BEFORE vkCreateInstance, to discover
+ * what it may ask for. The v0 ICD negotiates no instance extensions
+ * and exposes no layers, so both report a count of zero and succeed.
+ *
+ * They must EXIST even though they report nothing. Stock
+ * `vulkaninfo.exe` resolves them with GetProcAddress and calls the
+ * result without a NULL check (as the Vulkan loader contract permits
+ * for core entry points) — with them absent from the export list it
+ * called address 0 and died with an access violation at rip=0, on a
+ * kernel whose Vulkan ICD was online and self-tested. Reporting zero
+ * is both truthful and the shape every caller already handles: the
+ * documented two-call idiom is "ask for the count, then allocate",
+ * and a count of zero ends it. */
+VkResult vkEnumerateInstanceExtensionProperties(const char* pLayerName, UINT32* pPropertyCount, void* pProperties)
+{
+    (void)pLayerName;
+    (void)pProperties; /* never written — the count below is always 0 */
+    if (pPropertyCount == NULL)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    *pPropertyCount = 0;
+    return VK_SUCCESS;
+}
+
+VkResult vkEnumerateInstanceLayerProperties(UINT32* pPropertyCount, void* pProperties)
+{
+    (void)pProperties;
+    if (pPropertyCount == NULL)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    *pPropertyCount = 0;
+    return VK_SUCCESS;
+}
+
 /* The Vulkan `VkInstanceCreateInfo` struct is a tagged union with
  * a pNext chain. For v0 we ignore both — the kernel ICD has no
  * extensions to negotiate and the instance is a no-arg create. */
@@ -384,6 +417,13 @@ PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance instance, const char* pName)
         return (PFN_vkVoidFunction)vkQueueWaitIdle;
     if (dv_streq(pName, "vkEnumerateInstanceVersion"))
         return (PFN_vkVoidFunction)vkEnumerateInstanceVersion;
+    /* The pre-instance discovery pair. A loader is allowed to ask for
+     * these through vkGetInstanceProcAddr with a NULL instance, so the
+     * table must answer them as well as the export table. */
+    if (dv_streq(pName, "vkEnumerateInstanceExtensionProperties"))
+        return (PFN_vkVoidFunction)vkEnumerateInstanceExtensionProperties;
+    if (dv_streq(pName, "vkEnumerateInstanceLayerProperties"))
+        return (PFN_vkVoidFunction)vkEnumerateInstanceLayerProperties;
     if (dv_streq(pName, "vkGetInstanceProcAddr"))
         return (PFN_vkVoidFunction)vkGetInstanceProcAddr;
     if (dv_streq(pName, "vkGetDeviceProcAddr"))

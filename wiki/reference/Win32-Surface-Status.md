@@ -357,6 +357,17 @@ syscall routing shows up immediately.
 - TLS: `TlsAlloc`, `TlsFree`, `TlsGetValue`, `TlsSetValue`
 - Memory: `VirtualAlloc`, `VirtualFree`, `VirtualProtect`,
   `VirtualQuery`, `HeapCreate`, `HeapDestroy`, `HeapAlloc`,
+  <!-- 2026-07-28 -->
+  **`VirtualProtect` covers every mapped user page**, not only
+  `VirtualAlloc` regions. Until 2026-07-28 it resolved solely through
+  the per-process vmap region table, so the loaded image, the thread
+  stack and preloaded DLLs all returned FALSE — which stopped the MSVC
+  UCRT dead, since it brackets each write to its cached Win32 thunk
+  table with `VirtualProtect(PAGE_READWRITE)`/`(PAGE_READONLY)` and
+  aborts startup if either fails. Non-region addresses now re-protect
+  through the address space, gated to the user half and to already-
+  mapped pages, and still refuse every `PAGE_EXECUTE_*` (W^X) and
+  `PAGE_GUARD` outside a region.
   `HeapFree`, `HeapSize`, `HeapReAlloc`, `GetProcessHeap`,
   `GlobalAlloc`, `GlobalFree`, `GlobalLock`, `GlobalUnlock`,
   `LocalAlloc`, `LocalFree`

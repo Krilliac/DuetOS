@@ -54,6 +54,11 @@ constexpr ApiSetEntry kApiSetTable[] = {
     {"api-ms-win-core-libraryloader-l2", "kernelbase.dll"},
     {"api-ms-win-core-localization-l1", "kernelbase.dll"},
     {"api-ms-win-core-localization-l2", "kernelbase.dll"},
+    // The "obsolete" localization set is a separate contract head, not a
+    // version of the one above — the sort below keys on the whole head, so
+    // "-obsolete-l1" does NOT fall out of "-localization-l1". Stock
+    // vulkaninfo.exe LoadLibrary's it during CRT locale setup.
+    {"api-ms-win-core-localization-obsolete-l1", "kernelbase.dll"},
     {"api-ms-win-core-memory-l1", "kernelbase.dll"},
     {"api-ms-win-core-misc-l1", "kernelbase.dll"},
     {"api-ms-win-core-namedpipe-l1", "kernelbase.dll"},

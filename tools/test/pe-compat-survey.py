@@ -11,6 +11,14 @@ WHAT:
          the x86_64 fallback consulted after the preloaded DLLs' EATs. Omitting
          it under-reports 64-bit coverage badly (it is where GetProcAddress,
          RaiseException and SetStdHandle actually live).
+       - `kernel/loader/apiset_static.cpp` -> the api-set contract table, plus
+         the binder's any-preloaded-name fallback for contracts the table does
+         not know. Modelling api-sets as unresolvable scored hello_md.exe at
+         42% -- it then ran to a clean exit.
+
+     Both extra sources exist because the number this prints is only useful if
+     it predicts what the loader will actually do. Treat it as a close lower
+     bound, not a guarantee: a resolved import can still be a NO-OP stub.
   2. Walks one or more host directories, parses every PE's import directory
      (stdlib only — no pefile dependency), and diffs the imports against the
      surface for that PE's bitness.

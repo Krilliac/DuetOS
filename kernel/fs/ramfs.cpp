@@ -38,6 +38,7 @@
 // subsystem) but PeReport still dumps the full gap on boot.
 #include "generated_customdll.h"
 #include "generated_customdll2.h"
+#include "generated_vulkan_1_dll.h"
 #include "generated_winkill_pe.h"
 
 // UEFI loader bytes (PE32+ EFI Application). Embedded so the
@@ -864,6 +865,22 @@ constinit RamfsNode k_trusted_lib_customdll2 = {
     .file_size = generated::kBinCustomDll2Bytes_len,
 };
 
+// /lib/vulkan-1.dll — reachable at RUNTIME, not just via the spawn
+// preload. spawn.cpp marks vulkan-1 non-essential, so under
+// arch::IsEmulator() the preload trim skips it — and a real Vulkan app
+// does not import it statically, it LoadLibrary's it by name. Stock
+// `vulkaninfo.exe` did exactly that, missed, and threw an unhandled C++
+// exception (exit 0xE06D7363) on a kernel whose Vulkan ICD was up and
+// self-tested. Publishing the same embedded blob here gives the dynamic
+// path something to find without making every PE pay the preload.
+constinit RamfsNode k_trusted_lib_vulkan1 = {
+    .name = "vulkan-1.dll",
+    .type = RamfsNodeType::kFile,
+    .children = nullptr,
+    .file_bytes = generated::kBinVulkan_1DllBytes,
+    .file_size = generated::kBinVulkan_1DllBytes_len,
+};
+
 // /lib/firmware is generated from DUETOS_FIRMWARE_STAGING_DIR.
 // The directory exists even when no firmware was staged so the
 // firmware loader's VFS path is stable across installer images.
@@ -871,6 +888,7 @@ constinit const RamfsNode* const k_trusted_lib_children[] = {
     &generated::kFirmwareRamfsNode,
     &k_trusted_lib_customdll,
     &k_trusted_lib_customdll2,
+    &k_trusted_lib_vulkan1,
     nullptr,
 };
 

@@ -1148,6 +1148,72 @@ fault→fix→re-run loop, `tools/test/run-exe.sh` + `peexec=`, using the
 4. **WSOCK32 / WININET** (realm/login networking) and **FMOD** audio —
    later rungs once it renders.
 
+### Run a real 64-bit application - side-by-side DLL loading (next rung)
+
+**Landed 2026-07-28:** off-the-shelf x86_64 MSVC binaries start. A stock
+`cl /MT` build reaches `main()` and exits 0, and System32's `clip.exe`,
+`sort.exe` and `timeout.exe` run to an exit code -- `timeout.exe`
+returns **1 with no arguments, matching real Windows exactly**. The
+blocker was `VirtualProtect` failing on every page outside a
+`VirtualAlloc` region (see Design-Decisions, same date); import coverage
+was never the issue.
+
+The measured next blocker is **loading a DLL that ships beside the
+.exe**. `tools/test/pe-compat-survey.py` puts the Unity launchers on
+this dev host (`BattleBit.exe`, `Black Ice.exe`, `Cult Of The Lamb.exe`)
+at 98.5% coverage with exactly **one** unresolved import each --
+`UnityPlayer.dll!UnityMain`. Every DLL DuetOS can bind is embedded in
+the kernel image via the `spawn.cpp` preload set; a PE that imports a
+DLL sitting next to it on the volume has no path at all.
+
+What the rung needs:
+
+1. The spawn path must remember the directory the PE was read from, so
+   an import miss has somewhere to look. `peexec=` reads a bare 8.3 name
+   off FAT32 vol 0 today.
+2. A read-DLL-from-volume helper, and recursive import resolution for
+   the loaded DLL (its own imports may pull further side-by-side DLLs).
+3. The security guard must scan a disk-loaded DLL the way it scans a
+   disk-loaded PE -- this is the reviewable signal, since a DLL loaded
+   from a guest-writable volume executes in the process's address space.
+4. `SYS_DLL_LOAD_FROM_PATH` should share that path so runtime
+   `LoadLibrary` of a bundled DLL works too, rather than only the
+   `/lib/<name>` ramfs lookup.
+
+Sizing the rung honestly: side-by-side loading is necessary but nowhere
+near sufficient for a real game. `UnityPlayer.dll` itself measures 68.6%
+coverage with **163** unresolved imports plus three DLLs that do not
+exist here at all (`hid.dll`, `imm32.dll`, `opengl32.dll`), and the
+bundled `mono-2.0-bdwgc.dll` adds 72 more. The managed assemblies all
+import `mscoree.dll`. Expect the ladder above this rung to be import
+coverage, then OpenGL, then audio/input -- the same long middle the
+PE32 ladder describes.
+
+### Runtime LoadLibrary sees only a hand-picked subset of the shipped DLLs
+
+`spawn.cpp`'s preload set is the authoritative list of ~44 DLLs the
+kernel embeds, but the **runtime** `SYS_DLL_LOAD_FROM_PATH` path resolves
+against ramfs `/lib/`, which `kernel/fs/ramfs.cpp` populates with a
+hand-written `constinit` node per DLL - `customdll`, `customdll2` and
+(2026-07-28) `vulkan-1`. Every other embedded DLL is unreachable by name
+at runtime, even though its bytes are already linked into the image and
+the node costs nothing (the node borrows the blob pointer).
+
+This bit for real: stock `vulkaninfo.exe` `LoadLibrary`s `vulkan-1.dll`
+rather than importing it, missed, and died with an unhandled C++
+exception on a kernel whose Vulkan ICD was online and self-tested. It
+was only reachable at all because `vulkan-1` is marked non-essential and
+the `arch::IsEmulator()` preload trim skips it - so the preload fast path
+did not paper over the gap.
+
+Adding one node per observed miss is the whitelist-incompleteness bug
+class: the next app to `LoadLibrary` a shipped DLL by name hits the same
+wall. The fix is to derive the `/lib` node set from the SAME list
+`spawn.cpp` uses, so a DLL cannot be preloadable-but-not-loadable. Doing
+that needs the preload table hoisted out of its enclosing function to
+file scope (it is a function-local `static const` today) and exposed
+through `proc/spawn.h`; that refactor is the whole item.
+
 ### Win32 handle lifecycle — teardown + close-dispatch gaps (audited 2026-07-26)
 
 A read-only audit of the PE loader and Win32 handle lifecycle found one
