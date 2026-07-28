@@ -1,57 +1,19 @@
-/* advapi32_32.c — i386 advapi32.dll v0 stubs. */
+/*
+ * advapi32_32.c — i386 advapi32.dll: CryptoAPI + event-log tier.
+ *
+ * The Reg* family moved to advapi32_32_reg.c when it stopped being a
+ * set of constant-returners and started driving the kernel-owned
+ * registry over SYS_REGISTRY; the security / token / SID tier lives
+ * in advapi32_32_sec.c. What is left here is still v0 stub tier and
+ * carries its markers inline.
+ */
 typedef unsigned int DWORD;
 typedef int BOOL;
 typedef void* HANDLE;
 typedef HANDLE HCRYPTPROV;
 typedef HANDLE HCRYPTHASH;
 typedef HANDLE HCRYPTKEY;
-typedef HANDLE HKEY;
-typedef long LONG;
 typedef unsigned char BYTE;
-
-/* Registry stubs. Return ERROR_FILE_NOT_FOUND (2) — caller falls back. */
-__declspec(dllexport) LONG __stdcall RegCloseKey(HKEY h)
-{
-    (void)h;
-    return 0;
-}
-__declspec(dllexport) LONG __stdcall RegOpenKeyExA(HKEY h, const char* sub, DWORD opt, DWORD sam, HKEY* out)
-{
-    (void)h;
-    (void)sub;
-    (void)opt;
-    (void)sam;
-    if (out)
-        *out = 0;
-    return 2; /* ERROR_FILE_NOT_FOUND */
-}
-__declspec(dllexport) LONG __stdcall RegEnumKeyExA(HKEY h, DWORD idx, char* name, DWORD* nlen, DWORD* rsv, char* cls,
-                                                   DWORD* clen, void* ft)
-{
-    (void)h;
-    (void)idx;
-    (void)name;
-    (void)nlen;
-    (void)rsv;
-    (void)cls;
-    (void)clen;
-    (void)ft;
-    return 259; /* ERROR_NO_MORE_ITEMS */
-}
-__declspec(dllexport) LONG __stdcall RegQueryValueExA(HKEY h, const char* name, DWORD* rsv, DWORD* type, BYTE* data,
-                                                      DWORD* sz)
-{
-    (void)h;
-    (void)name;
-    (void)rsv;
-    if (type)
-        *type = 0;
-    if (data)
-        ; /* leave alone */
-    if (sz)
-        *sz = 0;
-    return 2;
-}
 
 /* CryptoAPI stubs. v0 returns FALSE so caller's NULL-on-fail path runs. */
 __declspec(dllexport) BOOL __stdcall CryptAcquireContextA(HCRYPTPROV* h, const char* n, const char* p, DWORD type,

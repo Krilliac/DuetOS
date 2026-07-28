@@ -1,9 +1,56 @@
 LIBRARY advapi32.dll
 EXPORTS
     RegCloseKey
+    RegFlushKey
+    RegOpenKeyA
+    RegOpenKeyW
     RegOpenKeyExA
-    RegEnumKeyExA
+    RegOpenKeyExW
+    RegCreateKeyA
+    RegCreateKeyW
+    RegCreateKeyExA
+    RegCreateKeyExW
+    RegDeleteKeyA
+    RegDeleteKeyW
     RegQueryValueExA
+    RegQueryValueExW
+    RegGetValueA
+    RegGetValueW
+    RegSetValueExA
+    RegSetValueExW
+    RegDeleteValueA
+    RegDeleteValueW
+    RegEnumKeyA
+    RegEnumKeyW
+    RegEnumKeyExA
+    RegEnumKeyExW
+    RegEnumValueA
+    RegEnumValueW
+    RegQueryInfoKeyA
+    RegQueryInfoKeyW
+    OpenProcessToken
+    OpenThreadToken
+    AdjustTokenPrivileges
+    GetTokenInformation
+    CheckTokenMembership
+    LookupPrivilegeValueA
+    LookupPrivilegeValueW
+    AllocateAndInitializeSid
+    FreeSid
+    InitializeSid
+    IsValidSid
+    EqualSid
+    GetLengthSid
+    GetSidLengthRequired
+    GetSidIdentifierAuthority
+    GetSidSubAuthority
+    GetSidSubAuthorityCount
+    InitializeAcl
+    EventRegister
+    EventUnregister
+    EventWrite
+    EventWriteTransfer
+    EventEnabled
     CryptAcquireContextA
     CryptAcquireContextW
     CryptCreateHash
