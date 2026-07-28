@@ -55,7 +55,8 @@ constinit PerCpu g_bsp_percpu = {
     .runq_tail_idle = nullptr,
     .tss = nullptr,
     .cluster_id = 0,
-    .online = false, // PerCpuInitBsp flips this to true after the BSP installs itself
+    .online = false,        // PerCpuInitBsp flips this to true after the BSP installs itself
+    .tlb_ipi_ready = false, // PerCpuInitBsp flips this to true — see the comment there
     ._pad_topo = {},
     .runq_normal_len = 0,
     .runq_pop_counter = 0,
@@ -120,6 +121,14 @@ void PerCpuInitBsp()
     // (`PickClusterPlacement`) honours this so the BSP slot is
     // always a legal target.
     g_bsp_percpu.online = true;
+    // The BSP never needs the deferred SmpTlbShootdownJoin() handshake
+    // the APs use. The window that handshake closes is "a CPU is a
+    // shootdown ack target before it services IPIs" — but the BSP is
+    // the CPU that brings every AP up, so no peer capable of issuing a
+    // shootdown exists until long after the BSP is running with
+    // interrupts enabled. There is correspondingly no bring-up TLB
+    // state for it to flush: it is the CPU that built the mappings.
+    g_bsp_percpu.tlb_ipi_ready = true;
     g_bsp_installed = true;
 
     arch::SerialWrite("[cpu] BSP PerCpu installed: cpu_id=0 lapic_id=");

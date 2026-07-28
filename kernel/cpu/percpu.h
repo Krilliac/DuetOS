@@ -237,7 +237,28 @@ struct PerCpu
     // schedule (the flag flip races a one-tick gap), which means
     // the runqueue is being drained — no deadlock risk.
     bool online;
-    u8 _pad_topo[5];
+
+    // "This CPU will actually SERVICE a fixed-vector IPI."
+    //
+    // Distinct from `online`, and the distinction is the whole point:
+    // `online` is set by the BSP as soon as the AP signals through the
+    // trampoline flag, but at that instant the AP is still running with
+    // IF=0 and does not reach its first `sti` until SchedEnterOnAp's
+    // idle loop — several serial writes and an allocating scheduler
+    // join later. Its LAPIC is already enabled by then, so an IPI is
+    // ACCEPTED and left PENDING but never serviced.
+    //
+    // A TLB shootdown that counts such a CPU as an ack target therefore
+    // waits for an ack that cannot arrive until the AP runs `sti`. The
+    // bounded spin (kSpinLimit, ~17ms at 3GHz) is the same order of
+    // magnitude as that window, which is exactly why the resulting
+    // "tlb shootdown timeout" is intermittent rather than deterministic.
+    //
+    // Set by the CPU ITSELF in SmpTlbShootdownJoin() once it is running
+    // with interrupts enabled — never by the BSP on the AP's behalf.
+    // Read with acquire ordering when building a shootdown target mask.
+    bool tlb_ipi_ready;
+    u8 _pad_topo[4];
 
     // AGGREGATE length of this CPU's Normal-band runqueue (Σ of all
     // kSchedBands tiers; does NOT count the currently-running task or

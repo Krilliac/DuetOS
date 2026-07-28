@@ -156,6 +156,55 @@ pairs provide the per-CPU plumbing the scheduler and SMP paths build on:
   16-slot MPSC mailbox ring. The callee `fn` runs in IRQ context with
   IF=0 on the target CPU and must not sleep. Unblocks correct per-CPU
   TLB shootdown and future stop-machine / live-patch primitives.
+
+### Shootdown readiness: `tlb_ipi_ready`, not `online`
+
+A CPU becomes a legal TLB-shootdown **ack target** only when it sets its
+own `PerCpu::tlb_ipi_ready`, via `SmpTlbShootdownJoin()` — called from
+`SchedEnterOnAp` as the last step of bring-up, immediately *before* the
+idle loop's first `sti` and deliberately still at IF=0.
+
+That ordering is load-bearing in both directions. It cannot happen
+earlier, because from the moment the flag flips peers count this CPU as
+an ack target. It equally must not `sti` first: the stretch between an
+AP's trampoline signal and its first scheduled task is the fragile
+fresh-AP window, and running code at IF=1 there is what forced the
+lockdep per-task held-set behind the `SchedFinishTaskSwitch` fresh-AP
+guard (attempt 1 crashed 3/6 boots with `WaitQueueBlock on non-Running
+task`). Flipping the flag at IF=0 is safe anyway: a shootdown arriving
+in the few instructions before that `sti` leaves its IPI pending on the
+already-enabled LAPIC and is acked nanoseconds later, far inside the
+requestor's ~17 ms spin budget.
+
+`PerCpu::online` is **not** a usable predicate here, and reaching for it
+reintroduces a real bug. `CpuhpBringUp` loads the AP's IDT and enables its
+LAPIC, so a fixed-vector IPI aimed at a mid-bring-up AP is *accepted and
+left pending* — but the AP still runs with IF=0 until `SchedEnterOnAp`
+reaches `sti`, two serial writes and an allocating scheduler join later.
+The BSP sets `online = true` well before that (`smp.cpp:1206`), so an
+`online`-gated mask counts a CPU that cannot ack. The requestor then burns
+its bounded spin (`kSpinLimit = 1e6` `pause`, ~17 ms at 3 GHz), logs
+`tlb shootdown timeout`, and proceeds on a stale writable TLB entry.
+
+Excluding a not-yet-ready CPU is sound because `SmpTlbShootdownJoin`
+flushes that CPU's entire TLB — under `g_tlb_shootdown_lock`, so it cannot
+straddle an in-flight shootdown — *before* flipping the flag. Every
+shootdown it was excluded from is subsumed by that flush. The flush is a
+CR3 reload, which is sufficient only while this kernel creates no global
+pages (CR4.PGE is never enabled; `kPageGlobal` is only ever rejected). If
+that changes it must become a CR4.PGE toggle.
+
+Consequently the all-excluding-self ICR shorthand is used only once every
+firmware-reported CPU is both started and ready: it reaches every LAPIC in
+the system, including APs still parked in the trampoline, which would
+service the pending IPI later and falsely ack an unrelated request.
+
+**Measuring this:** the race does *not* reproduce under WHPX/KVM, which
+narrow the window; it needs a slow path (TCG, or a debug build with serial
+logging). Any repro run must be long enough to actually reach AP bring-up
+— confirm `AP online cpu_id` appears in the log before believing a
+"0 timeouts" result. Observed rate on the pre-fix kernel: 12 timeouts
+across 6 boots at SMP=8; 0 across 6 after the fix.
 - **`percpu_counter.{h,cpp}`** — a split per-CPU counter with bounded
   slop. Hot writers (`Add`) bump only their CPU's stash and fold into
   the 64-bit global under a short spinlock when the stash exceeds

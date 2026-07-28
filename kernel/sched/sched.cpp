@@ -6436,6 +6436,30 @@ void FormatIdleApName(char (&out)[16], u32 cpu_id)
     //    never returns to this stack frame.
     const bool use_mwait = MwaitUsable();
     volatile u8 monitor_cell = 0;
+
+    // Join the TLB-shootdown domain while still at IF=0, i.e. in the
+    // same interrupt state as every bring-up step above, and leave the
+    // `sti`/idle loop below byte-identical to what it was.
+    //
+    // Deliberately NOT `sti` first. Everything between the AP's
+    // trampoline signal and its first scheduled task is the fragile
+    // fresh-AP window: task state is not yet fully established, and
+    // running code with IF=1 there is what made the lockdep per-task
+    // held-set land only on attempt 2, behind the fresh-AP guard in
+    // SchedFinishTaskSwitch (attempt 1 crashed 3/6 boots with
+    // "WaitQueueBlock on non-Running task"). Enabling interrupts early
+    // just to satisfy this join would widen exactly that window.
+    //
+    // Setting the flag at IF=0 is nonetheless safe. A shootdown that
+    // targets us in the handful of instructions before the loop's `sti`
+    // leaves its IPI PENDING on our already-enabled LAPIC; we enable
+    // interrupts immediately after, so the ack lands nanoseconds later
+    // -- vastly inside the requestor's ~17ms spin budget. The window
+    // this whole mechanism closes was MILLISECONDS wide (two serial
+    // writes plus an allocating scheduler join), so trading it for a
+    // few instructions is the entire point.
+    arch::SmpTlbShootdownJoin();
+
     for (;;)
     {
         arch::Sti();

@@ -212,6 +212,32 @@ void SmpTlbShootdownAddr(mm::AddressSpace* as, u64 virt);
 /// Same locality rules as SmpTlbShootdownAddr.
 void SmpTlbShootdownRange(mm::AddressSpace* as, u64 virt, u64 len);
 
+/// Join this CPU to the TLB-shootdown domain: flush its entire TLB,
+/// then mark it a legal shootdown ack target (`PerCpu::tlb_ipi_ready`).
+///
+/// MUST be called by the CPU itself, exactly once, as the LAST step of
+/// its bring-up — immediately before the idle loop's first `sti`, and
+/// deliberately still at IF=0. Two constraints pin that placement:
+///
+///  - Not EARLIER: from the moment the flag flips, peers count this CPU
+///    as an ack target, so it must otherwise be fully brought up.
+///  - Not with interrupts already ENABLED: the stretch between an AP's
+///    trampoline signal and its first scheduled task is the fragile
+///    fresh-AP window, and running code at IF=1 there is what forced
+///    the lockdep per-task held-set behind the SchedFinishTaskSwitch
+///    fresh-AP guard (attempt 1 crashed 3/6 boots with "WaitQueueBlock
+///    on non-Running task"). Do not widen it to satisfy this call.
+///
+/// Flipping the flag at IF=0 is safe: a shootdown arriving in the few
+/// instructions before that `sti` leaves its IPI pending on the
+/// already-enabled LAPIC and is acked nanoseconds later, far inside the
+/// requestor's ~17ms spin budget. The window this closes is
+/// milliseconds wide, so the trade is overwhelmingly favourable.
+///
+/// Idempotent — the flag is monotonic, so repeat calls are no-ops.
+/// The BSP is marked ready at PerCpuInitBsp and never calls this.
+void SmpTlbShootdownJoin();
+
 /// Install the IDT handler for `kTlbShootdownIpiVector`. Called once
 /// alongside `SmpInstallReschedIpiHandler` during early boot, before
 /// any AP could fire the IPI.

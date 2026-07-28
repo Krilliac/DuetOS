@@ -536,27 +536,61 @@ void SmpTlbShootdownBroadcast(mm::AddressSpace* as, u64 virt_start, u64 virt_end
     // `as == nullptr` (kernel-AS shootdown) falls back to a full
     // broadcast since the boot PML4 has no per-AS tracking.
     u32 mask = 0;
-    // Kernel-AS shootdowns (as == nullptr) provably target every
-    // online peer, so they can fan out in one ICR write via the
-    // all-but-self shorthand instead of one SmpSendIpi per peer.
-    // Per-AS shootdowns stay targeted: the shorthand can't be
-    // narrowed to the subset that holds this AS.
-    const bool full_broadcast = (as == nullptr);
+    // Kernel-AS shootdowns (as == nullptr) target every peer that can
+    // service an IPI. Per-AS shootdowns stay targeted: the shorthand
+    // can't be narrowed to the subset that holds this AS.
     if (as != nullptr)
     {
         mask = __atomic_load_n(&as->active_cpu_mask, __ATOMIC_ACQUIRE);
     }
+
+    // Peers that will actually SERVICE a fixed IPI, and can therefore
+    // ack. A CPU inside its bring-up window has its LAPIC enabled — so
+    // the IPI is accepted and left PENDING — but runs with IF=0 until
+    // SchedEnterOnAp reaches its first `sti`. Counting such a CPU as an
+    // ack target guarantees the bounded spin below expires, which is
+    // the "tlb shootdown timeout" this mask fixes.
+    //
+    // Excluding it is safe, not merely expedient: SmpTlbShootdownJoin()
+    // flushes that CPU's ENTIRE TLB before it sets tlb_ipi_ready, under
+    // this same g_tlb_shootdown_lock — so every shootdown it was
+    // excluded from is subsumed by that flush.
+    u32 ready = 0;
+    u32 present = 0;
+    for (u32 id = 0; id < limit; ++id)
+    {
+        cpu::PerCpu* peer = SmpGetPercpu(id);
+        if (peer == nullptr)
+            continue;
+        present |= (1u << (id & 31u));
+        if (__atomic_load_n(&peer->tlb_ipi_ready, __ATOMIC_ACQUIRE))
+            ready |= (1u << (id & 31u));
+    }
+    if (as == nullptr)
+    {
+        mask = ready;
+    }
     else
     {
-        for (u32 id = 0; id < limit; ++id)
-        {
-            cpu::PerCpu* peer = SmpGetPercpu(id);
-            if (peer != nullptr)
-                mask |= (1u << (id & 31u));
-        }
+        mask &= ready;
     }
     // Don't IPI ourselves.
-    mask &= ~(1u << (self_id & 31u));
+    const u32 self_bit = (1u << (self_id & 31u));
+    mask &= ~self_bit;
+
+    // The all-excluding-self shorthand reaches EVERY LAPIC in the
+    // system — including APs still parked in the trampoline, which are
+    // not in `limit` at all. Such a CPU leaves the IPI pending and
+    // services it much later, at which point it would `lock inc`
+    // whatever g_tlb_request points at THEN — falsely acking an
+    // unrelated later request and letting that requestor proceed on a
+    // genuinely stale TLB. So the shorthand is only sound once every
+    // CPU the firmware reported is both started and ready; otherwise
+    // enumerate exact LAPIC IDs. That steady state is the common case,
+    // so the optimisation survives where it actually pays.
+    const bool all_cpus_started = (static_cast<u64>(limit) == acpi::CpuCount());
+    const bool full_broadcast =
+        (as == nullptr) && all_cpus_started && (ready == present) && (mask == (present & ~self_bit));
     if (mask == 0)
     {
         return;
@@ -609,6 +643,48 @@ void SmpTlbShootdownBroadcast(mm::AddressSpace* as, u64 virt_start, u64 virt_end
     g_tlb_request = nullptr;
 }
 } // namespace
+
+void SmpTlbShootdownJoin()
+{
+    cpu::PerCpu* self = cpu::CurrentCpu();
+    if (self == nullptr)
+    {
+        return;
+    }
+    // The flag is monotonic — never cleared — so a second call is a
+    // cheap no-op rather than a redundant full TLB flush.
+    if (__atomic_load_n(&self->tlb_ipi_ready, __ATOMIC_ACQUIRE))
+    {
+        return;
+    }
+
+    // Serialise against every in-flight shootdown: while we hold this
+    // lock no requestor is between publishing g_tlb_request and
+    // clearing it, so the transition below cannot straddle one. The
+    // caller is at IF=0 (see the header for why); the guard saves and
+    // restores that state, so this neither enables nor requires
+    // interrupts.
+    duetos::sync::SpinLockGuard guard(g_tlb_shootdown_lock);
+
+    // Discard every entry cached during bring-up. This is what makes
+    // excluding a not-yet-ready CPU from the target mask SOUND rather
+    // than merely convenient: any shootdown that completed while we
+    // were excluded is subsumed by this flush.
+    //
+    // A CR3 reload suffices because this kernel creates no global
+    // pages — CR4.PGE is never enabled, and kPageGlobal is only ever
+    // rejected, never set (mm/address_space.cpp). If either changes
+    // this MUST become a CR4.PGE toggle: a CR3 reload does not evict
+    // global entries, and kernel mappings are exactly what the
+    // as == nullptr shootdown path targets.
+    u64 cr3 = 0;
+    asm volatile("mov %%cr3, %0" : "=r"(cr3) : : "memory");
+    asm volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
+
+    // Only now may peers count us as an ack target. Release-ordered so
+    // the flush is globally visible before the flag flips.
+    __atomic_store_n(&self->tlb_ipi_ready, true, __ATOMIC_RELEASE);
+}
 
 void SmpTlbShootdownAddr(mm::AddressSpace* as, u64 virt)
 {

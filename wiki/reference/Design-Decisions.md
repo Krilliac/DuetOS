@@ -12502,3 +12502,60 @@ markers for its richest input. Three discovery layers were added (runtime
   function holds only `arch::Cli()`. Baseline recorded at 26 after this
   slice retired the 27th (`SocketRecvDgram`); every remaining entry is a
   real SMP lost-wake, not noise.
+
+## 2026-07-27 — TLB-shootdown ack targets gate on a self-set `tlb_ipi_ready`, never on `online`
+
+- **Context:** `SmpTlbShootdownBroadcast` built its kernel-AS ack mask from
+  `peer != nullptr`, which counts a CPU the moment its `PerCpu` slot exists.
+  That is strictly earlier than the point a CPU can *service* a fixed-vector
+  IPI. `CpuhpBringUp` loads the AP's IDT and enables its LAPIC, so an IPI is
+  ACCEPTED and left PENDING; the AP then signals the trampoline flag
+  (`smp.cpp:911`), the BSP sets `online = true` and bumps `g_cpu_id_limit`
+  (`smp.cpp:1206-1210`), and only afterwards does the AP reach its first
+  `sti` — two serial writes and an allocating `SchedEnterOnAp` later. In
+  that window the AP is an ack target that physically cannot ack. The
+  bounded spin is `kSpinLimit = 1e6` `pause`, ~17 ms at 3 GHz — the same
+  order as the window itself, which is why the resulting
+  `tlb shootdown timeout` is intermittent rather than deterministic. On
+  timeout the requestor logged a WARN and PROCEEDED, which `smp.cpp:419-421`
+  itself describes as leaving a stale writable TLB entry on a peer pointing
+  at a frame that may already be recycled into another process.
+- **Decision:** add `PerCpu::tlb_ipi_ready`, set by each CPU **itself** via
+  `SmpTlbShootdownJoin()` as the last step of its bring-up — immediately
+  before the idle loop's first `sti`, and deliberately still at IF=0. The
+  helper takes
+  `g_tlb_shootdown_lock` (so it cannot straddle an in-flight shootdown),
+  flushes the CPU's entire TLB, then flips the flag release-ordered. The
+  flush is what makes excluding a not-yet-ready CPU *sound* rather than
+  merely convenient: every shootdown it was excluded from is subsumed by it.
+- **Rules out** enabling interrupts early just to satisfy that join. The
+  first draft did `sti(); SmpTlbShootdownJoin();`, which put an `sti` plus
+  a lock-acquire inside the fresh-AP window — strictly more exposure than
+  the `sti; hlt` it replaced, and the same mistake that made the lockdep
+  per-task held-set crash 3/6 boots on attempt 1 with `WaitQueueBlock on
+  non-Running task`. A full-device smoke on that draft panicked once with
+  `WaitQueueBlockTimeout on non-Running task` on an AP. The join is now
+  done at IF=0 and the idle loop is byte-identical to before.
+- **Rules out** gating on `PerCpu::online`, which is the obvious candidate
+  and is **wrong**: `online` is set by the BSP at step 3 above, i.e. already
+  `true` throughout the failing window. Any future slice reaching for
+  `online` as a shootdown-readiness predicate is reintroducing this bug.
+- **Rules out** the unconditional all-excluding-self ICR shorthand for
+  kernel-AS shootdowns. That shorthand reaches every LAPIC in the system,
+  including APs still parked in the trampoline which are not in `limit` at
+  all; such a CPU services the pending IPI much later and `lock inc`s
+  whatever `g_tlb_request` points at *then*, falsely acking an unrelated
+  request. It is now used only once every firmware-reported CPU is both
+  started and ready; exact LAPIC IDs are enumerated otherwise.
+- **Depends on this kernel creating no global pages.** `SmpTlbShootdownJoin`
+  flushes via a CR3 reload, which does NOT evict global TLB entries. That is
+  safe only because CR4.PGE is never enabled and `kPageGlobal` is only ever
+  *rejected*, never set (`mm/address_space.cpp:385,584,722`). If either
+  changes, the join flush must become a CR4.PGE toggle — kernel mappings are
+  exactly what the `as == nullptr` path targets.
+- **Verification note:** this race does NOT reproduce under WHPX, which
+  narrows the very window that causes it (bring-up is fast under real
+  virtualisation). It was originally seen under WSL TCG, where serial writes
+  crawl and the window is widest. Measure it on the slow path, not the fast
+  one — and confirm each run actually reached AP bring-up (`AP online
+  cpu_id` present) before trusting a "0 timeouts" result.
