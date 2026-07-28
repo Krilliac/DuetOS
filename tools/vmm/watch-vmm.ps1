@@ -17,10 +17,9 @@
     maximum detail (driver probes, IRQ wiring, scheduler, init).
 
   WHAT IT DOES
-    1. reap any orphan duetos-vmm from a previous run
-    2. (optional) build duetos-vmm.exe (MSVC) with -Build
-    3. run it foreground, cmdline "console=ttyS0 loglevel <L>"
-    4. tee serial to console + tools\vmm\logs\vmm-<timestamp>.log
+    1. (optional) build duetos-vmm.exe (MSVC) with -Build
+    2. run it foreground, cmdline "console=ttyS0 loglevel <L>"
+    3. tee serial to console + tools\vmm\logs\vmm-<timestamp>.log
 
   Kernel ELF is produced by the WSL clang build (MSVC cannot build
   the freestanding kernel) — point -Kernel at a staged ELF.
@@ -37,9 +36,9 @@
 .PARAMETER Build    Configure+build duetos-vmm.exe before running.
 
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File tools\vmm\watch-vmm.ps1
+  powershell.exe -NoProfile -File tools\vmm\watch-vmm.ps1
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File tools\vmm\watch-vmm.ps1 -LogLevel t -Build
+  powershell.exe -NoProfile -File tools\vmm\watch-vmm.ps1 -LogLevel t -Build
 #>
 [CmdletBinding()]
 param(
@@ -61,7 +60,9 @@ $exe = "tools\vmm\build\Debug\duetos-vmm.exe"
 if ($Build)
 {
     cmake -S tools\vmm -B tools\vmm\build -G "Visual Studio 17 2022" -A x64
+    if ($LASTEXITCODE -ne 0) { throw "VMM configure failed" }
     cmake --build tools\vmm\build --config Debug --target duetos-vmm
+    if ($LASTEXITCODE -ne 0) { throw "VMM build failed" }
 }
 
 if (-not (Test-Path $exe))
@@ -72,10 +73,6 @@ if (-not (Test-Path $Kernel))
 {
     throw "kernel ELF not found at $Kernel - stage it from the WSL build first."
 }
-
-# Reap an orphan from a previous run so WHP/the window is free.
-Get-Process duetos-vmm -ErrorAction SilentlyContinue |
-    Stop-Process -Force -ErrorAction SilentlyContinue
 
 $logDir = "tools\vmm\logs"
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }
@@ -93,5 +90,25 @@ Write-Host "=== serial -> console + $log"
 Write-Host "=== (Ctrl+C or close the framebuffer window to stop)" -ForegroundColor Cyan
 Write-Host ""
 
-# Foreground + tee: every serial line shows here AND lands in $log.
-& $exe @vmmArgs 2>&1 | Tee-Object -FilePath $log
+# Foreground + UTF-8 tee: every serial line shows here and is flushed to
+# disk immediately. Windows PowerShell 5.1's Tee-Object writes UTF-16LE,
+# which makes the repository's Bash boot-log analyzer treat the log as
+# binary and miss every sentinel.
+$utf8 = [System.Text.UTF8Encoding]::new($false)
+$writer = [System.IO.StreamWriter]::new($log, $false, $utf8)
+$vmmExit = 1
+try
+{
+    & $exe @vmmArgs 2>&1 | ForEach-Object {
+        $line = [string]$_
+        Write-Host $line
+        $writer.WriteLine($line)
+        $writer.Flush()
+    }
+    $vmmExit = $LASTEXITCODE
+}
+finally
+{
+    $writer.Dispose()
+}
+if ($vmmExit -ne 0) { exit $vmmExit }

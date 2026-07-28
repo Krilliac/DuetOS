@@ -13,9 +13,9 @@
     dropdown entirely.
 
   WHAT IT DOES
-    1. Resolves duetos-vmm.exe (Windows MSVC build under
-       tools/vmm/out/build/x64-Debug/) and duetos-kernel.elf (WSL clang
-       build under build/x86_64-debug/kernel/).
+    1. Resolves duetos-vmm.exe from the canonical Windows MSVC build under
+       tools/vmm/build/Debug/ (with the Visual Studio Open-Folder output as
+       a fallback) and duetos-kernel.elf from build/x86_64-debug/kernel/.
     2. Launches the VMM with --gdb 1234 (no --break — this script is not
        a native-attach workflow; gdb is the debugger).
     3. Polls the VMM's redirected stdout for the gdb-stub-ready sentinel
@@ -28,13 +28,14 @@
        so kernel symbols + DWARF source paths are resolved and the guest
        halts pre-first-instruction (matches the stopAtConnect:true
        behaviour the original launch.vs.json was trying to provide).
-    5. Returns. The VMM and gdb each own their own console window.
+    5. Returns. The VMM runs hidden with retained stdout/stderr logs;
+       gdb owns the visible console window.
 
   ONE CLICK FROM WINDOWS
     Drop a shortcut on the desktop pointing at this script:
-      Target:   powershell.exe -NoProfile -ExecutionPolicy Bypass -File
-                C:\Users\natew\source\repos\DuetOS\tools\vmm\debug-kernel.ps1
-      Run in:   C:\Users\natew\source\repos\DuetOS
+      Target:   powershell.exe -NoProfile -File
+                C:\path\to\DuetOS\tools\vmm\debug-kernel.ps1
+      Run in:   C:\path\to\DuetOS
     Double-clicking that shortcut is the one-click experience.
 
   ALSO USABLE FROM A POWERSHELL PROMPT
@@ -73,8 +74,15 @@ $ErrorActionPreference = 'Stop'
 $scriptDir = $PSScriptRoot
 $repoRoot  = (Resolve-Path (Join-Path $scriptDir '..\..')).Path
 
-$vmmExe    = Join-Path $scriptDir 'out\build\x64-Debug\duetos-vmm.exe'
 $kernelElf = Join-Path $repoRoot  'build\x86_64-debug\kernel\duetos-kernel.elf'
+$vmmCandidates = @(
+  (Join-Path $scriptDir 'build\Debug\duetos-vmm.exe'),
+  (Join-Path $scriptDir 'out\build\x64-Debug\duetos-vmm.exe')
+)
+$vmmExe = $vmmCandidates |
+  Where-Object { Test-Path -LiteralPath $_ } |
+  Select-Object -First 1
+if (-not $vmmExe) { $vmmExe = $vmmCandidates[0] }
 
 if (-not (Test-Path -LiteralPath $vmmExe)) {
   Write-Host ""
@@ -84,7 +92,8 @@ duetos-vmm.exe not found at:
 
 Build it first via Visual Studio (Open Folder tools/vmm/ → build the
 duetos-vmm CMake target), or from a Dev Cmd Prompt:
-  cmake --build $scriptDir\out\build\x64-Debug --target duetos-vmm
+  cmake -S $scriptDir -B $scriptDir\build -G "Visual Studio 17 2022" -A x64
+  cmake --build $scriptDir\build --config Debug --target duetos-vmm
 "@
   exit 1
 }
@@ -111,35 +120,22 @@ foreach ($f in @($vmmStdoutLog, $vmmStderrLog)) {
   if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force }
 }
 
-$vmmArgs = @(
-  '--kernel', $kernelElf,
-  '--mem',    $MemMB,
-  '--gdb',    $GdbPort
-)
-if ($NoWindow) { $vmmArgs += '--no-window' }
+$quotedKernelElf = '"' + $kernelElf + '"'
+$vmmArguments = "--kernel $quotedKernelElf --mem $MemMB --gdb $GdbPort"
+if ($NoWindow) { $vmmArguments += ' --no-window' }
 
 Write-Host "[debug-kernel] Starting VMM..." -ForegroundColor Cyan
 Write-Host "  exe:    $vmmExe"
 Write-Host "  kernel: $kernelElf"
-Write-Host "  args:   $($vmmArgs -join ' ')"
+Write-Host "  args:   $vmmArguments"
 
 $vmmProc = Start-Process -FilePath $vmmExe `
-                         -ArgumentList $vmmArgs `
+                         -ArgumentList $vmmArguments `
                          -WorkingDirectory $repoRoot `
                          -RedirectStandardOutput $vmmStdoutLog `
                          -RedirectStandardError  $vmmStderrLog `
                          -PassThru `
                          -WindowStyle Hidden
-
-if ($NoGdb) {
-  Write-Host ""
-  Write-Host "[debug-kernel] VMM running, no gdb attached." -ForegroundColor Green
-  Write-Host "  PID:    $($vmmProc.Id)"
-  Write-Host "  gdb:    localhost:$GdbPort"
-  Write-Host "  stdout: $vmmStdoutLog"
-  Write-Host "  stderr: $vmmStderrLog"
-  exit 0
-}
 
 # ----- Wait for the gdb stub to advertise readiness ---------------------
 # gdb_server.cpp's WaitForConnection prints exactly this line right
@@ -185,6 +181,16 @@ if (-not $ready) {
 
 Write-Host "[debug-kernel] gdb stub up on localhost:$GdbPort" -ForegroundColor Green
 
+if ($NoGdb) {
+  Write-Host ""
+  Write-Host "[debug-kernel] VMM ready, no gdb auto-launched." -ForegroundColor Green
+  Write-Host "  PID:    $($vmmProc.Id)"
+  Write-Host "  gdb:    localhost:$GdbPort"
+  Write-Host "  stdout: $vmmStdoutLog"
+  Write-Host "  stderr: $vmmStderrLog"
+  exit 0
+}
+
 # ----- Spawn gdb in a new console window --------------------------------
 # Convert backslashes to forward slashes in paths we pass to gdb — gdb
 # tolerates both on Windows but forward slashes avoid escaping headaches
@@ -216,7 +222,7 @@ $gdbCmds = @(
   'echo \  info reg          dump registers\n',
   'echo \  monitor help      VMM-side introspection (sym, lookup, read, rip, trace)\n',
   'echo \  detach            disconnect (leaves VMM running)\n',
-  'echo \  q                 quit gdb (kills the VMM)\n***\n'
+  'echo \  q                 quit gdb (the VMM continues)\n***\n'
 )
 # gdb is picky about CRLF in command files on Windows — write with LF
 # endings explicitly via [IO.File]::WriteAllText (Set-Content would
@@ -245,4 +251,4 @@ Write-Host "  VMM PID:  $($vmmProc.Id)  (stdout: $vmmStdoutLog)"
 Write-Host "  gdb PID:  $($gdbProc.Id)  (new console window)"
 Write-Host ""
 Write-Host "Set breakpoints in the gdb window, then 'c' to start the kernel."
-Write-Host "Quit gdb with 'q' to also kill the VMM; or 'detach' to leave VMM running."
+Write-Host "Quit or detach from gdb to leave the VMM running; stop the VMM separately when finished."

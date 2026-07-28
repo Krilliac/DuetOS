@@ -53,6 +53,7 @@ add_executable(duetos-vmm
     src/main.cpp
     src/vmm.cpp
     src/whp.cpp
+    src/processor_contract.cpp
     src/guest_memory.cpp
     src/guest_memory_fb.cpp
     src/elf64.cpp

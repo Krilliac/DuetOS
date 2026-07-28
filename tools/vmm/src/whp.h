@@ -25,7 +25,9 @@ class Partition
 {
 public:
     // Creates + sets up a partition with `cpuCount` vCPUs and the
-    // local-APIC emulation mode required for timer/IRQ delivery.
+    // local-APIC emulation mode required for timer/IRQ delivery. The
+    // guest-visible CPU contract advertises CPUID hypervisor presence so
+    // the kernel does not execute bare-metal-only telemetry MSRs.
     // When `debugExits` is set, #DB/#BP raise Exception exits so the
     // GDB stub can own them — left OFF otherwise so the kernel's own
     // int3-based probes keep trapping into the kernel, not the VMM.
