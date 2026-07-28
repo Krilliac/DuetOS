@@ -953,11 +953,53 @@ void DeliverSegment(u32 idx, const MacAddress& peer_mac, Ipv4Address peer_ip, co
         t.ts_recent = po.tsval;
         t.ts_recent_age_ticks = NowTicks();
     }
-    // RST processing — drop the connection unconditionally if the
-    // 4-tuple matched (we've already filtered by exact lookup).
+    // RST processing — RFC 9293 §3.10.7.4 and RFC 5961 §3.2.
+    //
+    // This used to tear the connection down unconditionally as soon as
+    // the 4-tuple matched, ignoring the sequence number entirely. That
+    // is the classic blind-reset: anyone who knows or can spray the
+    // 4-tuple kills an established connection with a SINGLE packet,
+    // because they never have to land inside the receive window. An
+    // off-path attacker only needs the ports, and the client port is
+    // often guessable or observable.
+    //
+    // The spec's three-way rule closes it:
+    //   * outside the receive window -> not acceptable, ignore silently;
+    //   * inside the window but NOT exactly rcv_nxt -> do not reset;
+    //     send a challenge ACK, which forces a genuine peer to prove it
+    //     can see our sequence space before we act on it;
+    //   * exactly rcv_nxt -> acceptable, drop the connection.
     if ((flags & kFlagRst) != 0)
     {
         ++g_stats.rst_rx;
+
+        // SYN_SENT is the documented exception (RFC 9293 §3.10.7.3):
+        // there is no receive window yet, so acceptability is judged on
+        // the ACK field instead — a reset is only credible from someone
+        // who echoed the ISN we just sent.
+        if (t.state == State::SynSent)
+        {
+            if ((flags & kFlagAck) == 0 || ack != t.snd_nxt)
+            {
+                ++g_stats.rst_unacceptable;
+                return;
+            }
+            DropTcb(idx);
+            return;
+        }
+
+        // Wraparound-safe window test, same idiom as DeliverPayload.
+        if (u32(seq - t.rcv_nxt) > t.rcv_wnd)
+        {
+            ++g_stats.rst_unacceptable;
+            return;
+        }
+        if (seq != t.rcv_nxt)
+        {
+            ++g_stats.rst_challenge_ack;
+            SendSegment(t, kFlagAck, t.snd_nxt, t.rcv_nxt, nullptr, 0);
+            return;
+        }
         DropTcb(idx);
         return;
     }

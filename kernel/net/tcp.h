@@ -108,6 +108,13 @@ struct Stats
     u64 segs_tx;
     u64 rst_rx;
     u64 rst_tx;
+    // RST acceptability outcomes (RFC 9293 §3.10.7.4 / RFC 5961 §3.2).
+    // A non-zero `rst_unacceptable` or `rst_challenge_ack` on a healthy
+    // network is a signal in itself: it means something sent us a reset
+    // that did not sit at rcv_nxt, which is what a blind-reset attempt
+    // looks like from the receiver's side.
+    u64 rst_unacceptable;  // outside the receive window — ignored
+    u64 rst_challenge_ack; // in-window but != rcv_nxt — challenged
     u64 retrans;
     u64 listens;
     u64 connects;

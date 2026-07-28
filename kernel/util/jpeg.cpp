@@ -810,11 +810,34 @@ u64 JpegEstimateScratch(const JpegInfo& info)
         return 0;
     if (info.width > kJpegMaxDimension || info.height > kJpegMaxDimension)
         return 0;
-    // Worst case: each component plane the full image size
-    // (4:4:4 subsampling); add 16 KiB headroom for the Decoder
-    // struct + per-block working arrays.
-    const u64 plane = static_cast<u64>(info.width) * static_cast<u64>(info.height);
-    return plane * info.components + 16 * 1024;
+    // The DECODER carves each component plane MCU-ALIGNED --
+    // `plane_stride = width_in_blocks * 8` with
+    // `width_in_blocks = mcu_w * sampling_h` -- so every plane is
+    // padded up to a whole number of MCUs in BOTH dimensions.
+    // Estimating from the raw width*height under-counts that padding,
+    // and JpegDecode's own per-plane bounds check then rejects a
+    // perfectly valid baseline image with BufferTooSmall.
+    //
+    // Concretely: a 4:4:4 image at 1025x1025 pads to 1032x1032 and
+    // needs 3'195'072 plane bytes, against an estimate of 3'151'875
+    // plus the 16 KiB headroom -- roughly 27 KiB short. The headroom
+    // hid this for small images, which is why it survived: the shortfall
+    // grows with the perimeter while the headroom is fixed.
+    //
+    // JpegInfo does not carry the sampling factors, so bound the worst
+    // case instead. The decoder clamps sampling_h/v to 1..2, so the MCU
+    // is at most 16x16 and align-16 is an upper bound for every
+    // configuration it will accept:
+    //   * 4:4:4  (MCU 8x8)   align8(W)*align8(H)*3    <= aw*ah*3
+    //   * 4:2:0  (MCU 16x16) align16(W)*align16(H)*1.5 <= aw*ah*3
+    //   * 4:2:2  (MCU 16x8)  align16(W)*align8(H)*2    <= aw*ah*3
+    //
+    // width/height are already capped at kJpegMaxDimension above, so
+    // aw*ah*components cannot overflow u64.
+    constexpr u64 kMcuAlign = 16;
+    const u64 aw = (static_cast<u64>(info.width) + (kMcuAlign - 1)) & ~(kMcuAlign - 1);
+    const u64 ah = (static_cast<u64>(info.height) + (kMcuAlign - 1)) & ~(kMcuAlign - 1);
+    return aw * ah * info.components + 16 * 1024;
 }
 
 Result<u64> JpegDecode(const u8* src, u32 src_len, const JpegInfo& info, u8* scratch, u64 scratch_len, u32* out_pixels)
