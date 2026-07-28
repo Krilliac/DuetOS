@@ -501,13 +501,19 @@ __declspec(dllexport) BOOL FindNextFileW(HANDLE h, void* find_data)
     return 1;
 }
 
-/* FindClose — calls SYS_FILE_CLOSE (= 9), which already routes the
+/* FindClose — calls SYS_FILE_CLOSE (= 22), which already routes the
  * kWin32DirBase range to the directory snapshot teardown. Releases
- * the per-handle pattern slot regardless of the kernel return. */
+ * the per-handle pattern slot regardless of the kernel return.
+ *
+ * This issued syscall 9 (SYS_GETLASTERROR) under a comment claiming it
+ * was SYS_FILE_CLOSE, so the directory snapshot was NEVER torn down and
+ * the kernel handle slot leaked until process exit. Reading last-error
+ * with the handle in rdi is harmless, which is exactly why it went
+ * unnoticed: FindClose returned 1 and nothing complained. */
 __declspec(dllexport) BOOL FindClose(HANDLE h)
 {
     long long discard;
-    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)9), "D"((long long)h) : "memory");
+    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)22), "D"((long long)h) : "memory");
     FindSlotRelease((long long)h);
     return 1;
 }

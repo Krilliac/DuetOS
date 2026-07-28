@@ -1412,35 +1412,135 @@ __declspec(dllexport) BOOL OpenThreadToken(HANDLE thread, DWORD access, BOOL ope
     return 0;
 }
 
+/* ------------------------------------------------------------------
+ * Privilege names -> LUIDs
+ *
+ * The LUID lows are the well-known Windows values, and they are the
+ * same numbers `kernel/subsystems/win32/token_syscall.cpp`'s
+ * LuidLowToCap switches on. A LUID this table does not know maps to
+ * kCapNone kernel-side — accepted, no effect.
+ *
+ * This table exists because the previous implementation returned LUID
+ * 1 for EVERY privilege name and AdjustTokenPrivileges returned TRUE
+ * without calling the kernel at all. That is not an escalation — the
+ * kernel gate is what grants authority, and it refuses to add a cap a
+ * process does not hold — but it silently broke the other direction: a
+ * process trying to DROP a privilege (ordinary defensive hardening)
+ * was told it succeeded while keeping the capability. Mirrors the i386
+ * companion in `userland/libs/advapi32_32/advapi32_32_sec.c`, which is
+ * the reference for the shape.
+ * ------------------------------------------------------------------ */
+struct adv_privilege
+{
+    const char* name;
+    unsigned luid_low;
+};
+
+static const struct adv_privilege k_adv_privileges[] = {
+    {"SeSecurityPrivilege", 8},
+    {"SeTakeOwnershipPrivilege", 9},
+    {"SeLoadDriverPrivilege", 10},
+    {"SeSystemtimePrivilege", 12},
+    {"SeIncreaseBasePriorityPrivilege", 14},
+    {"SeBackupPrivilege", 17},
+    {"SeRestorePrivilege", 18},
+    {"SeShutdownPrivilege", 19},
+    {"SeDebugPrivilege", 20},
+    {"SeChangeNotifyPrivilege", 23},
+    {"SeUndockPrivilege", 25},
+    {"SeImpersonatePrivilege", 29},
+    {"SeCreateGlobalPrivilege", 30},
+    {"SeTimeZonePrivilege", 34},
+};
+
+static int adv_priv_streq(const char* a, const char* b)
+{
+    if (a == (const char*)0 || b == (const char*)0)
+        return 0;
+    while (*a != '\0' && *a == *b)
+    {
+        ++a;
+        ++b;
+    }
+    return *a == *b;
+}
+
+static BOOL adv_lookup_priv(const char* name, long long* luid)
+{
+    if (luid == (long long*)0 || name == (const char*)0)
+    {
+        adv_set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    for (unsigned i = 0; i < sizeof(k_adv_privileges) / sizeof(k_adv_privileges[0]); ++i)
+    {
+        if (adv_priv_streq(name, k_adv_privileges[i].name))
+        {
+            *luid = (long long)k_adv_privileges[i].luid_low;
+            return 1;
+        }
+    }
+    /* Windows fails an unknown privilege name rather than inventing a
+     * LUID; a caller that then passes the uninitialised LUID to
+     * AdjustTokenPrivileges would otherwise adjust something it never
+     * named. */
+    adv_set_last_error(ERROR_NOT_SUPPORTED);
+    return 0;
+}
+
 __declspec(dllexport) BOOL AdjustTokenPrivileges(HANDLE token, BOOL disable_all, void* new_state, DWORD buf_len,
                                                  void* prev_state, DWORD* ret_len)
 {
-    (void)token;
-    (void)disable_all;
-    (void)new_state;
+    (void)token; /* SYS_TOKEN_ADJUST acts on the calling process. */
     (void)buf_len;
-    (void)prev_state;
-    if (ret_len != (DWORD*)0)
+    /* GAP: PreviousState is not reported — the kernel call returns no
+     * prior-state blob, so a caller cannot restore exactly what it
+     * changed. Report zero length rather than leaving a stale count. */
+    if (prev_state != (void*)0 && ret_len != (DWORD*)0)
         *ret_len = 0;
+    else if (ret_len != (DWORD*)0)
+        *ret_len = 0;
+
+    /* The blob goes to the kernel verbatim. SYS_TOKEN_ADJUST maps each
+     * LUID to a capability and refuses to ADD one the process does not
+     * already hold, so the only directions authority can move here are
+     * "unchanged" and "less". */
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)169), /* SYS_TOKEN_ADJUST */
+                       "D"((long long)(disable_all ? 1 : 0)), "S"((long long)(disable_all ? 0 : (long long)new_state))
+                     : "memory");
+    if (rv < 0)
+    {
+        adv_set_last_error(ERROR_NOT_SUPPORTED);
+        return 0;
+    }
     return 1;
 }
 
 __declspec(dllexport) BOOL LookupPrivilegeValueA(const char* system, const char* name, long long* luid)
 {
     (void)system;
-    (void)name;
-    if (luid != (long long*)0)
-        *luid = 1;
-    return 1;
+    return adv_lookup_priv(name, luid);
 }
 
 __declspec(dllexport) BOOL LookupPrivilegeValueW(const wchar_t16* system, const wchar_t16* name, long long* luid)
 {
     (void)system;
-    (void)name;
-    if (luid != (long long*)0)
-        *luid = 1;
-    return 1;
+    /* Privilege names are ASCII by definition, so a narrow copy of the
+     * low byte is lossless for every legal input. */
+    char narrow[64];
+    unsigned i = 0;
+    if (name == (const wchar_t16*)0)
+    {
+        adv_set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    for (; i < sizeof(narrow) - 1 && name[i] != 0; ++i)
+        narrow[i] = (char)(name[i] & 0x7F);
+    narrow[i] = '\0';
+    return adv_lookup_priv(narrow, luid);
 }
 
 __declspec(dllexport) BOOL GetUserNameA(char* buffer, DWORD* cb)

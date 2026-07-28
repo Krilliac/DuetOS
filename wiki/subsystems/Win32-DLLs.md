@@ -179,8 +179,8 @@ named export is real. Page-level limits:
 
 | DLL | Exports (approx) | Path |
 |-----|------------------|------|
-| `advapi32_32` | 24 | `userland/libs/advapi32_32/` |
-| `advapi32` | 69 | `userland/libs/advapi32/` |
+| `advapi32_32` | 71 | `userland/libs/advapi32_32/` |
+| `advapi32` | 90 | `userland/libs/advapi32/` |
 | `bcrypt_32` | 1 | `userland/libs/bcrypt_32/` |
 | `bcrypt` | 13 | `userland/libs/bcrypt/` |
 | `comctl32_32` | 5 | `userland/libs/comctl32_32/` |
@@ -207,11 +207,11 @@ named export is real. Page-level limits:
 | `gdi32` | 77 | `userland/libs/gdi32/` |
 | `iphlpapi_32` | 4 | `userland/libs/iphlpapi_32/` |
 | `iphlpapi` | 56 | `userland/libs/iphlpapi/` |
-| `kernel32_32` | 69 | `userland/libs/kernel32_32/` |
-| `kernel32` | 396 | `userland/libs/kernel32/` |
+| `kernel32_32` | 122 | `userland/libs/kernel32_32/` |
+| `kernel32` | 423 | `userland/libs/kernel32/` |
 | `kernelbase` | 0 | `userland/libs/kernelbase/` |
 | `msvcp140` | 6 | `userland/libs/msvcp140/` |
-| `msvcrt_32` | 46 | `userland/libs/msvcrt_32/` |
+| `msvcrt_32` | 70 | `userland/libs/msvcrt_32/` |
 | `msvcrt` | 87 | `userland/libs/msvcrt/` |
 | `ntdll` | 609 | `userland/libs/ntdll/` |
 | `ole32` | 32 | `userland/libs/ole32/` |
@@ -224,7 +224,7 @@ named export is real. Page-level limits:
 | `shlwapi_32` | 1 | `userland/libs/shlwapi_32/` |
 | `shlwapi` | 44 | `userland/libs/shlwapi/` |
 | `ucrtbase` | 136 | `userland/libs/ucrtbase/` |
-| `user32_32` | 85 | `userland/libs/user32_32/` |
+| `user32_32` | 155 | `userland/libs/user32_32/` |
 | `user32` | 212 | `userland/libs/user32/` |
 | `userenv` | 27 | `userland/libs/userenv/` |
 | `uxtheme` | 41 | `userland/libs/uxtheme/` |

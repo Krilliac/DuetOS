@@ -720,9 +720,21 @@ __declspec(dllexport) BOOL ReleaseSemaphore(HANDLE h, long releaseCount, long* l
                      : "=a"(rv)
                      : "a"((long long)52), "D"((long long)h), "S"((long long)releaseCount)
                      : "memory");
+    /* SYS_SEM_RELEASE returns the PREVIOUS count on success and -1 on
+     * failure (see DoSemRelease). Treating "not zero" as failure meant
+     * every release of a semaphore whose count was already non-zero
+     * reported FALSE to the caller even though the release succeeded —
+     * and lpPreviousCount, which the kernel had computed and returned,
+     * was thrown away and overwritten with 0. */
+    if (rv < 0)
+    {
+        if (lpPreviousCount != (long*)0)
+            *lpPreviousCount = 0;
+        return 0;
+    }
     if (lpPreviousCount != (long*)0)
-        *lpPreviousCount = 0; /* v0 doesn't track previous count. */
-    return rv == 0 ? 1 : 0;
+        *lpPreviousCount = (long)rv;
+    return 1;
 }
 
 /* ------------------------------------------------------------------

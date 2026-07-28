@@ -12416,7 +12416,7 @@ markers for its richest input. Three discovery layers were added (runtime
   own strictness.** `ParseBoundedDiskPath(path, max_volumes, &idx,
   &rest)` in `kernel/fs/disk_path_policy.h` is the one implementation:
   prefix match, digit accumulation with an overflow-safe bound against
-  `max_volumes`, and a terminator of `/` or ` `. `ParseDiskPath`
+  `max_volumes`, and a terminator of `/` or `\0`. `ParseDiskPath`
   calls it and then re-imposes its own requirement — `rest[0] == '/'`
   — because it hands `rest` to `Fat32LookupPath`, which needs an
   absolute in-volume path; a bare `/disk/3` names the volume, not a
@@ -12846,7 +12846,7 @@ markers for its richest input. Three discovery layers were added (runtime
   lets pipe D recycle the slot, replays C's close, and asserts D is
   still registered and its reservation ref is intact (via
   `PipeReadReady`, which only turns true once every writer is gone).
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                
+
 ## 2026-07-28 — pidfd is a weak pid-key; cross-process fd copying has ONE path
 
 - **Decision:** an fd never holds a strong `core::Process` reference. A
@@ -13021,3 +13021,61 @@ markers for its richest input. Three discovery layers were added (runtime
   contract table: one source of truth per resource, and a divergence
   between bind-time and run-time name resolution is precisely the
   sentinel-divergence bug class.
+
+## 2026-07-28 - A syscall that returns 64 bits in rax is unusable from PE32
+
+- **Context:** `exceptions.S`'s compat-mode un-remap restores the
+  caller's `edi`/`esi` and leaves `edx` holding the caller's own arg3,
+  so only `eax` reaches an i386 caller. Any syscall whose contract is
+  "return a u64 in `rax`" therefore delivers just the low 32 bits to a
+  PE32 guest.
+- **Decision:** i386 companions must not call such syscalls; they use the
+  out-pointer form instead. `GetSystemTimeAsFileTime` avoids
+  `SYS_GETTIME_FT` (17) — its low half alone wraps every ~7 minutes and
+  decodes to a nonsense date — and goes through `SYS_GETTIME_ST` (40) +
+  `SYS_ST_TO_FT` (41), which pass user pointers. `QueryPerformanceCounter`
+  has no out-pointer form at all, so `SYS_NOW_NS` truncates and rolls
+  over every ~4.295 s; `kernel32_32_qpc.h` rebuilds the epoch in user
+  space (monotonic always; exact while polled faster than the wrap).
+  **Rules out** widening the i386 syscall return path to a register pair:
+  that would change the compat-mode ABI for every existing `_32` caller
+  to fix a handful of call sites, and the out-pointer form is already
+  the kernel's own convention elsewhere.
+- Same reason `SYS_NAMED_KOBJ_OPEN_OR_CREATE` (185) cannot create named
+  semaphores from i386: it reads `init` as a u64 with `maximum` packed
+  in the high half, and arg4 arrives zero-extended, so `max_count` would
+  be 0 and every release would be rejected.
+
+## 2026-07-28 - i386 lock structs are HALF the size of their x86_64 siblings
+
+- **Context:** `SRWLOCK` is 4 bytes on i386 and 8 on x86_64;
+  `CRITICAL_SECTION` is 24 vs 40; `INIT_ONCE` 4 vs 8. The x86_64
+  companions store their bookkeeping in `long long` slots.
+- **Decision:** every slot in `kernel32_32_sync.c` is a 32-bit `int`, and
+  a `_32` DLL may never copy an x86_64 sibling's struct shape. Writing
+  8 bytes into a 4-byte guest `SRWLOCK` silently corrupts whatever the
+  guest put next to it — a corruption with no proximate symptom, which
+  is the worst kind to debug.
+- **This is the third instance of one class**, after the 28-byte `MSG`
+  (vs the kernel's 32-byte wire struct) and `WNDCLASSEX`'s 4-byte field
+  shift. The rule generalises: **any struct crossing the i386 boundary
+  needs its size checked against the x86_64 form before the code is
+  written**, not after a corruption is chased. Where a fixture can hold
+  a canary immediately after the struct (as `pe32_window` does for
+  `MSG`), it should.
+
+## 2026-07-28 - The i386 registry drives SYS_REGISTRY, not a second static tree
+
+- **Context:** the x86_64 `advapi32` answers `Reg*` from a private static
+  key/value tree compiled into the DLL and hand-synced with
+  `kernel/subsystems/win32/registry.cpp`. The i386 companion needed the same surface.
+- **Decision:** `advapi32_32` calls `SYS_REGISTRY` (130) — the kernel's
+  real hive, which is mutable, persists through the sidecar pool to
+  `REGISTRY.HIV`, and is cap-gated on `kCapFsWrite` at write time.
+  **Rules out** mirroring the 64-bit sibling's static tree: that would be
+  a *third* copy of the same data, and one-source-of-truth-per-resource
+  says the kernel's hive wins. It also means the i386 surface can write,
+  which the static-tree 64-bit one structurally cannot.
+- Follow-on this exposes: the x86_64 `RegQueryValueExW` hands the stored
+  narrow bytes straight to a wide caller without transcoding. The i386
+  entry points transcode on both edges so the stored form stays uniform.
