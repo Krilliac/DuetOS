@@ -130,6 +130,20 @@ same kernel object.
   syscall boundary (would need two pool slots).
 - Server-side close clears the registry entry so future
   `CreateFile` opens on the same name miss cleanly.
+- **Registry ownership is per-handle and non-transferable.** Only
+  the `Win32FileHandle` that `CreateNamedPipe` stamped carries a
+  `named_pipe_registry_slot`; every other reference to the same
+  pipe (a client open, a handle inherited across `CreateProcess`)
+  is an ordinary pipe-pool end. A second owner would run the whole
+  teardown — unregistering a name whose server is still serving,
+  and dropping the opposite-end reservation the server still needs.
+- **Closes are identity-checked, not index-checked.** The registry
+  hands back a `(slot, generation)` pair; `FindFreeSlot` returns
+  the lowest free index, so a torn-down slot is recycled by the
+  very next `CreateNamedPipe`. `NamedPipeOnServerClose` ignores any
+  pair whose generation has moved on — a bare slot index alone is
+  never safe to act on. Pinned by the `aba-replay` leg of
+  `NamedPipeSelfTest`.
 
 ## Syscall Surface
 

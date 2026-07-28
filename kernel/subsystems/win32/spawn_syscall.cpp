@@ -249,7 +249,33 @@ u64 InheritOneStdHandle(::duetos::core::Process* parent, ::duetos::core::Process
     auto& dst = child->win32_handles[child_slot];
     dst = src;      // copy-by-value — fat32_path / pipe_pool_idx / cursor follow
     dst.cursor = 0; // child reads from start (Win32 contract: inherited handles don't share cursor)
-    dst.is_canary = false;
+    // Registry ownership does NOT ride along. Only the handle that
+    // CreateNamedPipe stamped is the server-end owner; the child
+    // holds an ordinary pipe end, exactly like a client opened via
+    // DoNamedPipeOpen (named_pipe_syscall.cpp, registry_slot=-1).
+    //
+    // Copying the slot made the child a second, co-equal owner: its
+    // FIRST CloseHandle ran the WHOLE server teardown while the
+    // parent still held a live server handle — unregistering the
+    // name so no client could ever connect, and (when no client had
+    // connected yet) dropping the opposite-end reservation ref, so
+    // the parent's own WriteFile on its own untouched handle
+    // returned kEpipe forever. A recycled slot index made it worse
+    // still: the teardown then landed on an UNRELATED process's
+    // registration.
+    //
+    // Refcounting needs no other change — the retain below is
+    // per-end, and the child's CloseForProcess does exactly one
+    // matching per-end release. Only the registry housekeeping must
+    // not be duplicated.
+    dst.named_pipe_registry_slot = -1;
+    dst.named_pipe_registry_gen = 0;
+    // `is_canary` deliberately rides along with the copy above. The
+    // by-handle canary wall (fs/file_route.cpp WriteForProcess) is
+    // the only tripwire an in-place overwrite has, because the write
+    // syscall carries no path string. Clearing it here let a parent
+    // disarm the wall by opening a canary-stamped file and handing
+    // the handle to a child as stdout.
 
     if (src.kind == Process::FsBackingKind::Pipe)
     {
@@ -362,12 +388,31 @@ i64 SysProcessSpawnEx(u64 user_path, u64 flags, u64 user_stdio_bundle)
         Process* child = ::duetos::sched::SchedFindProcessByPid(pid);
         if (child != nullptr)
         {
-            const u64 inherited_in = InheritOneStdHandle(caller, child, bundle.stdin_handle);
-            const u64 inherited_out = InheritOneStdHandle(caller, child, bundle.stdout_handle);
-            const u64 inherited_err = InheritOneStdHandle(caller, child, bundle.stderr_handle);
-            child->std_handles[0] = inherited_in;
-            child->std_handles[1] = inherited_out;
-            child->std_handles[2] = inherited_err;
+            // Aliased streams share ONE child slot. `si.hStdOutput =
+            // si.hStdError = hPipe` is the canonical Win32 idiom and
+            // kernel32's CreateProcess copies both STARTUPINFO fields
+            // verbatim, so inheriting each stream independently burned
+            // two of the 16 kWin32HandleCap slots and took two per-end
+            // pool refs for what user mode sees as a single handle.
+            const u64 parent_std[3] = {bundle.stdin_handle, bundle.stdout_handle, bundle.stderr_handle};
+            u64 inherited[3] = {0, 0, 0};
+            for (u64 i = 0; i < 3; ++i)
+            {
+                bool aliased = false;
+                for (u64 j = 0; j < i && !aliased; ++j)
+                {
+                    if (parent_std[i] != 0 && parent_std[j] == parent_std[i])
+                    {
+                        inherited[i] = inherited[j];
+                        aliased = true;
+                    }
+                }
+                if (!aliased)
+                    inherited[i] = InheritOneStdHandle(caller, child, parent_std[i]);
+            }
+            child->std_handles[0] = inherited[0];
+            child->std_handles[1] = inherited[1];
+            child->std_handles[2] = inherited[2];
         }
     }
 

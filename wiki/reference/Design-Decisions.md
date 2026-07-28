@@ -12794,3 +12794,55 @@ markers for its richest input. Three discovery layers were added (runtime
   `SetInnerHtml`'s `while (Node* child = frag->firstChild)` loop relies
   on the append unlinking the child, so a silent refusal there would spin
   forever.
+## 2026-07-28 — Named-pipe registry ownership is per-handle; closes carry an identity, not just a slot
+
+- **Decision:** `InheritOneStdHandle`
+  (`kernel/subsystems/win32/spawn_syscall.cpp`) clears
+  `named_pipe_registry_slot` on the child's copy. Byte-copying the
+  parent's `Win32FileHandle` had made an inherited stdio handle a
+  second, co-equal registry owner: the child's first `CloseHandle`
+  ran the full server teardown — unregistering the name while the
+  parent was still serving it, and (with no client yet connected)
+  dropping the opposite-end reservation, after which the parent's
+  own `WriteFile` on its own untouched handle returned `kEpipe`
+  forever. Per-end refcounting already balances without further
+  change; only the registry housekeeping must be single-owner.
+  **Rules out** treating a `Win32FileHandle` as a value type that
+  can be duplicated wholesale — fields naming kernel-side ownership
+  have to be re-derived per copy.
+- **Decision:** `NamedPipeOnServerClose` takes `(slot, generation)`
+  and no-ops unless the slot still holds that generation, which
+  `NamedPipeRegisterServer` bumps on every claim and hands back
+  through an out-parameter. `FindFreeSlot` returns the lowest free
+  index, so a torn-down registration is recycled by the very next
+  `CreateNamedPipe` — an `in_use` check alone cannot tell a stale
+  close from a legitimate one, and the entry carries no other
+  identity ({name, pool_idx} are both recycled). Without this, a
+  stale copy of a slot index let one process unregister an
+  unrelated process's pipe and force a premature `PipeRelease*` on
+  a pool slot it was never granted. **Rules out** any future API
+  that hands out a bare registry index as a close token, and
+  supersedes the header's former claim that a stale slot was
+  already a safe no-op.
+- **Decision:** an inherited handle keeps its `is_canary` stamp
+  instead of being reset to `false`. The by-handle canary wall in
+  `WriteForProcess` (`kernel/fs/file_route.cpp`) is the only
+  tripwire an in-place overwrite has, because `SYS_FILE_WRITE`
+  carries no path string; clearing the stamp let a parent open a
+  canary file and hand the disarmed handle to a child as stdout.
+  **Rules out** scrubbing security-relevant handle state as part of
+  "child starts fresh" normalisation — only positional state
+  (`cursor`) resets.
+- **Decision:** aliased stdio streams (`si.hStdOutput ==
+  si.hStdError`, the canonical Win32 idiom, copied verbatim by
+  kernel32's `CreateProcess`) map to ONE child handle slot rather
+  than one per stream. The child sees the same value from
+  `GetStdHandle` for both, matching Windows, and one slot means one
+  retain paired with one release. **Rules out** per-stream
+  inheritance, which burned two of the 16 `kWin32HandleCap` slots
+  and took two pool refs for a single user-visible handle.
+- **Enforcement:** the `aba-replay` leg of `NamedPipeSelfTest`
+  (`kernel/ipc/named_pipes.cpp`) registers pipe C, tears it down,
+  lets pipe D recycle the slot, replays C's close, and asserts D is
+  still registered and its reservation ref is intact (via
+  `PipeReadReady`, which only turns true once every writer is gone).
