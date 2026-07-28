@@ -69,6 +69,16 @@ core::Result<PhysAddr> AllocateFrame()
 {
     Trap("AllocateFrame");
 }
+// ElfLoad calls this on the MapUserPage-refused path (the frame was
+// never taken over by the AS, so the loader hands it back). fuzz_elf
+// links elf_loader.cpp directly, so the shim must mirror it or the
+// link fails — the recurring "host shim drifts behind kernel API"
+// trap. Trap() rather than a silent no-op: the fuzzer should stop at
+// an unmodelled call instead of pretending it succeeded.
+void FreeFrame(PhysAddr)
+{
+    Trap("FreeFrame");
+}
 core::Result<PhysAddr> AllocateContiguousFrames(u64)
 {
     Trap("AllocateContiguousFrames");
