@@ -33,6 +33,7 @@
 #include "util/string.h"
 #include "web/css_arena.h"
 #include "web/css_internal.h"
+#include "web/stack_guard.h"
 
 namespace duetos::web
 {
@@ -473,6 +474,20 @@ const Node* ParentElement(const Node* el)
     return nullptr;
 }
 
+// Backtracking budget for ONE Matches() call. The Descendant and General
+// arms below each retry every candidate, so the explored state count for an
+// N-compound chain against a depth-D tree is C(D, N) — `q x x x … x p` with
+// D=200 and N=12 is ~1e18 states. Both halves of that input (the selector
+// text and the DOM shape) are page-supplied, and Matches() runs once per
+// rule per element inside RelayoutFromDoc on the browser worker, so an
+// unbudgeted matcher lets a page peg a CPU and never paint.
+struct MatchBudget
+{
+    u32 steps;
+};
+
+inline constexpr u32 kMaxMatchSteps = 20000;
+
 // Recursively satisfy the combinator chain to the LEFT of `right`, given
 // that `right` has already matched `cur`. Returns true when the whole chain
 // from `right->ancestor` leftward can be satisfied starting from `cur`.
@@ -486,7 +501,21 @@ const Node* ParentElement(const Node* el)
 // makes "a b a c"-shaped selectors resolve correctly: a greedy walk that
 // committed to the first matching candidate could foreclose a valid match
 // further left, whereas the recursion re-tries the remaining candidates.
-bool MatchFrom(const SimpleSelector* right, const Node* cur)
+//
+// Two independent bounds keep that safe against hostile input:
+//   * `b.steps` charges one step per CANDIDATE tried (not per call), so a
+//     single wide-fanout level is charged too. Exhaustion returns false —
+//     the rule simply does not apply.
+//   * `depth` + WebStackExhausted() bound the NATIVE recursion. Chain length
+//     is bounded only by stylesheet size (~8000 compounds in a 16 KiB
+//     css_buf) and the candidate chain only by Arena::kMaxNodes = 4096, so
+//     without this a page can recurse thousands of levels on the 128 KiB
+//     kstack-arena slot.
+//
+// GAP: a selector whose backtracking exceeds kMaxMatchSteps, or whose chain
+// is deeper than the stack guard allows, is treated as non-matching —
+// pathological selectors under-style rather than wedge the render.
+bool MatchFrom(const SimpleSelector* right, const Node* cur, MatchBudget& b, u32 depth)
 {
     const SimpleSelector* left = right->ancestor;
     if (left == nullptr)
@@ -494,19 +523,33 @@ bool MatchFrom(const SimpleSelector* right, const Node* cur)
         // Reached the leftmost compound — the whole chain is satisfied.
         return true;
     }
+    if (depth >= kWebMaxWalkDepth || WebStackExhausted())
+    {
+        return false;
+    }
     switch (right->combinator)
     {
     case Combinator::Child:
     {
         // Exactly one candidate: the direct parent element.
         const Node* parent = ParentElement(cur);
-        return parent != nullptr && MatchesCompound(left, parent) && MatchFrom(left, parent);
+        if (b.steps == 0)
+        {
+            return false;
+        }
+        --b.steps;
+        return parent != nullptr && MatchesCompound(left, parent) && MatchFrom(left, parent, b, depth + 1);
     }
     case Combinator::Adjacent:
     {
         // Exactly one candidate: the immediately-preceding element sibling.
         const Node* prev = PreviousElementSibling(cur);
-        return prev != nullptr && MatchesCompound(left, prev) && MatchFrom(left, prev);
+        if (b.steps == 0)
+        {
+            return false;
+        }
+        --b.steps;
+        return prev != nullptr && MatchesCompound(left, prev) && MatchFrom(left, prev, b, depth + 1);
     }
     case Combinator::General:
     {
@@ -514,7 +557,12 @@ bool MatchFrom(const SimpleSelector* right, const Node* cur)
         // rest of the chain resolve satisfies it; try each in turn.
         for (const Node* prev = PreviousElementSibling(cur); prev != nullptr; prev = PreviousElementSibling(prev))
         {
-            if (MatchesCompound(left, prev) && MatchFrom(left, prev))
+            if (b.steps == 0)
+            {
+                return false;
+            }
+            --b.steps;
+            if (MatchesCompound(left, prev) && MatchFrom(left, prev, b, depth + 1))
             {
                 return true;
             }
@@ -528,7 +576,12 @@ bool MatchFrom(const SimpleSelector* right, const Node* cur)
         // resolve satisfies it; try each ancestor walking upward.
         for (const Node* anc = ParentElement(cur); anc != nullptr; anc = ParentElement(anc))
         {
-            if (MatchesCompound(left, anc) && MatchFrom(left, anc))
+            if (b.steps == 0)
+            {
+                return false;
+            }
+            --b.steps;
+            if (MatchesCompound(left, anc) && MatchFrom(left, anc, b, depth + 1))
             {
                 return true;
             }
@@ -548,7 +601,9 @@ bool MatchFrom(const SimpleSelector* right, const Node* cur)
 // (each ancestor / each preceding element sibling) via MatchFrom, so an
 // earlier greedy choice can no longer foreclose a valid leftward match —
 // "a b a c" shapes resolve correctly. Child and adjacent steps remain
-// deterministic (a single candidate each) and exact.
+// deterministic (a single candidate each) and exact. That backtracking is
+// bounded per call — see MatchFrom's kMaxMatchSteps / depth guard; a
+// selector that exhausts either bound reports no-match.
 //
 // GAP: :has() and other relational pseudo-classes are not parsed, so the
 // matcher only ever looks leftward/upward — never at descendants of `el`.
@@ -558,7 +613,10 @@ bool Matches(const SimpleSelector* sel, const Node* el)
     {
         return false;
     }
-    return MatchFrom(sel, el);
+    // A fresh budget per selector: one pathological rule must not starve
+    // the rules that follow it in the same cascade.
+    MatchBudget budget{kMaxMatchSteps};
+    return MatchFrom(sel, el, budget, 0);
 }
 
 // Seed a child's style from its parent's: copy ONLY the inherited
@@ -634,9 +692,21 @@ void CascadeInto(ComputedStyle& cs, const StyleSheet& sheet, const Node* el, Mat
 
 // Recursive walk; styles[*idx] is filled and *idx advanced for each
 // element. `parentStyle` carries the computed style to inherit from.
+//
+// The map-full check below bounds the total NODE count but not the tree's
+// DEPTH — a page can build a 4000-deep chain via JS appendChild (bounded
+// only by Arena::kMaxNodes, not by the HTML parser's 256-level cap), and
+// each level here carries a ComputedStyle. The native-stack guard is what
+// keeps that off the kstack-arena guard page.
+// GAP: a subtree below the depth guard is left unstyled (initial values)
+// rather than faulting the box.
 void StyleSubtree(const Node* node, const ComputedStyle& parentStyle, const StyleSheet& sheet, StyleMap& map,
-                  Arena& arena, MatchEntry* scratch, u32 scratchCap)
+                  Arena& arena, MatchEntry* scratch, u32 scratchCap, u32 depth)
 {
+    if (depth >= kWebMaxWalkDepth || WebStackExhausted())
+    {
+        return;
+    }
     for (const Node* child = node->firstChild; child != nullptr; child = child->nextSibling)
     {
         if (child->kind != NodeKind::Element)
@@ -665,20 +735,31 @@ void StyleSubtree(const Node* node, const ComputedStyle& parentStyle, const Styl
         map.styles[slot] = cs;
         ++map.count;
 
-        StyleSubtree(child, cs, sheet, map, arena, scratch, scratchCap);
+        StyleSubtree(child, cs, sheet, map, arena, scratch, scratchCap, depth + 1);
     }
 }
 
 // Count elements in the subtree so we can size the StyleMap arrays.
-u32 CountElements(const Node* node)
+//
+// This runs BEFORE the StyleMap exists, so it has no map-full backstop at
+// all — on a JS-built deep chain it is the FIRST recursion to reach the
+// stack guard page. Bail to the partial count; a short count only sizes the
+// StyleMap small, which StyleSubtree already handles gracefully.
+// GAP: a tree deeper than the guard allows is under-counted, so its deepest
+// elements go unstyled — a visual degradation, never a fault.
+u32 CountElements(const Node* node, u32 depth)
 {
+    if (depth >= kWebMaxWalkDepth || WebStackExhausted())
+    {
+        return 0;
+    }
     u32 n = 0;
     for (const Node* c = node->firstChild; c != nullptr; c = c->nextSibling)
     {
         if (c->kind == NodeKind::Element)
         {
             ++n;
-            n += CountElements(c);
+            n += CountElements(c, depth + 1);
         }
     }
     return n;
@@ -706,7 +787,7 @@ StyleMap ComputeStyles(const Node* doc, const StyleSheet& sheet, Arena& arena)
         return map;
     }
 
-    u32 nEls = CountElements(doc);
+    u32 nEls = CountElements(doc, 0);
     if (nEls == 0)
     {
         return map;
@@ -736,7 +817,7 @@ StyleMap ComputeStyles(const Node* doc, const StyleSheet& sheet, Arena& arena)
     // html/body UA rules will set the real document defaults as they
     // match.
     ComputedStyle rootInitial{};
-    StyleSubtree(doc, rootInitial, sheet, map, arena, scratch, kScratchCap);
+    StyleSubtree(doc, rootInitial, sheet, map, arena, scratch, kScratchCap, 0);
     return map;
 }
 
