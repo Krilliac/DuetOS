@@ -381,6 +381,56 @@ bool AuroraWallpaperPaint(u32 accent_native, u32 accent_peer, bool light)
     return true;
 }
 
+void AuroraWallpaperRestoreCorners(u32 x, u32 y, u32 w, u32 h, u32 radius)
+{
+    if (g_cache == nullptr || !g_cache_valid || radius == 0 || w < 2 * radius || h < 2 * radius)
+    {
+        return;
+    }
+    // On row `row` of a corner block, the arc leaves
+    // `radius - sqrt(radius^2 - dy^2)` columns uncovered on each side.
+    // Replay exactly those columns from the cache.
+    for (u32 row = 0; row < radius; ++row)
+    {
+        const u32 dy = radius - row;
+        u32 span = 0;
+        while ((span + 1) * (span + 1) <= (radius * radius) - (dy * dy))
+        {
+            ++span;
+        }
+        const u32 inset = radius - span;
+        const u32 top = y + row;
+        const u32 bottom = y + h - 1 - row;
+        for (u32 i = 0; i < inset; ++i)
+        {
+            const u32 lx = x + i;
+            const u32 rx = x + w - 1 - i;
+            if (top < g_cache_h)
+            {
+                if (lx < g_cache_w)
+                {
+                    FramebufferPutPixel(lx, top, g_cache[static_cast<u64>(top) * g_cache_w + lx]);
+                }
+                if (rx < g_cache_w)
+                {
+                    FramebufferPutPixel(rx, top, g_cache[static_cast<u64>(top) * g_cache_w + rx]);
+                }
+            }
+            if (bottom < g_cache_h)
+            {
+                if (lx < g_cache_w)
+                {
+                    FramebufferPutPixel(lx, bottom, g_cache[static_cast<u64>(bottom) * g_cache_w + lx]);
+                }
+                if (rx < g_cache_w)
+                {
+                    FramebufferPutPixel(rx, bottom, g_cache[static_cast<u64>(bottom) * g_cache_w + rx]);
+                }
+            }
+        }
+    }
+}
+
 void AuroraWallpaperInvalidate()
 {
     g_cache_valid = false;

@@ -61,6 +61,7 @@
 #include "security/guard.h"
 #include "security/login.h"
 #include "drivers/video/theme.h"
+#include "drivers/video/wallpaper_aurora.h"
 #include "drivers/video/tray_flyout.h"
 #include "drivers/video/volume_flyout.h"
 #include "drivers/video/wallpaper.h"
@@ -863,14 +864,19 @@ void WindowDraw(const WindowChrome& w)
     // light from the title-bar gradient above and gives the
     // client a slight "recessed" feel without blowing the
     // theme's flat aesthetic.
-    if (tbh_eff + 3 <= w.h && w.w > 6)
+    //
+    // Both are suppressed on glass: the design's window is ONE
+    // continuous surface, and a border-coloured divider plus a
+    // highlight ridge is exactly the seam that made the title strip
+    // read as a separate, contrasting band bolted onto the body.
+    if (!body_translucent && tbh_eff + 3 <= w.h && w.w > 6)
     {
         FramebufferFillRect(w.x + 3, w.y + tbh_eff + 1, w.w - 6, 1, LightenRgb(w.colour_client, 16));
     }
 
     // Title / client divider — 1-pixel line where the title
     // bar ends. Helps the eye separate chrome from content.
-    if (tbh_eff + 2 <= w.h)
+    if (!body_translucent && tbh_eff + 2 <= w.h)
     {
         FramebufferFillRect(w.x + 2, w.y + tbh_eff, w.w - 4, 1, w.colour_border);
     }
@@ -2470,7 +2476,13 @@ void WindowDrawAllOrdered()
             // windows stay regular. The dispatcher handles
             // TTF-vs-bitmap fallback internally based on the
             // active theme's font_kind + chrome-font registration.
-            ChromeTextDraw(ChromeTextRole::Title, drawn.x + 8, title_y, g_windows[h].title, 0x00FFFFFF,
+            // Design section 2: the title is `--ink` at 13/600, not pure
+            // white — on glass a full-white title reads as a label
+            // stuck onto the chrome instead of part of it. Unfocused
+            // windows drop to `--ink-2`. Flat palettes keep white.
+            const bool aurora_type = ThemeCurrent().glass_alpha != 0 && ThemeTactilityEffective();
+            const u32 title_ink = aurora_type ? (is_active ? 0x00EEF3F9u : 0x00A7B3C2u) : 0x00FFFFFFu;
+            ChromeTextDraw(ChromeTextRole::Title, drawn.x + 8, title_y, g_windows[h].title, title_ink,
                            drawn.colour_title, is_active ? ChromeTextWeight::Bold : ChromeTextWeight::Regular);
             // Measure the title via the chrome-text dispatcher so
             // the subtitle anchor below is correct under both TTF
@@ -2864,6 +2876,24 @@ void WindowDrawAllOrdered()
         // backbuffers and is the next-tier item in the plan; this
         // is the v0 stand-in. Skipped when opacity is fully opaque
         // (the common case).
+        // Corner punch. The chrome painted a rounded body, then the
+        // display list and content_fn filled the client rect square and
+        // squared the corners straight back off — which is why the
+        // windows still had hard corners with `window_radius` set. The
+        // cached Aurora backdrop lets us replay the exact wallpaper
+        // pixels outside each corner arc once everything else has
+        // landed. Skipped on maximized windows (their corners are the
+        // screen's) and when the backdrop is unavailable.
+        {
+            const Theme& th = ThemeCurrent();
+            const u32 corner_r = (th.aurora_wallpaper && ThemeTactilityEffective()) ? th.window_radius : 0U;
+            if (corner_r > 0 && !g_windows[h].maximized)
+            {
+                AuroraWallpaperRestoreCorners(g_windows[h].chrome.x, g_windows[h].chrome.y, g_windows[h].chrome.w,
+                                              g_windows[h].chrome.h, corner_r);
+            }
+        }
+
         if (g_windows[h].opacity < 0xFF)
         {
             const u32 overlay_alpha = static_cast<u32>(0xFFu - g_windows[h].opacity);

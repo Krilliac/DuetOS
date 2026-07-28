@@ -41,6 +41,24 @@ namespace duetos::drivers::video
 /// cooler, weaker vignette.
 bool AuroraWallpaperPaint(u32 accent_native, u32 accent_peer, bool light);
 
+/// Restore the cached backdrop into the four corner regions of the
+/// rectangle (x, y, w, h) that fall OUTSIDE a `radius` corner arc.
+///
+/// This is what makes an Aurora window's corners genuinely round: the
+/// chrome can paint a rounded body, but an app's content drawer fills
+/// the client rect square and squares the corners straight back off.
+/// Because the backdrop is a cached surface, the exact wallpaper pixels
+/// under a corner can be replayed after the content lands - no flat
+/// approximation, and no read-back of the compose surface (which
+/// FramebufferReadPixel cannot do anyway).
+///
+/// GAP: replays the WALLPAPER, so a corner overlapping a lower window
+/// shows wallpaper rather than that window. At an 8-px radius that is
+/// ~14 px per corner; a correct fix needs per-window backbuffers.
+///
+/// No-op when the cache is cold.
+void AuroraWallpaperRestoreCorners(u32 x, u32 y, u32 w, u32 h, u32 radius);
+
 /// Drop the cached surface so the next AuroraWallpaperPaint call
 /// regenerates it. Called on framebuffer rebind; a palette change is
 /// detected automatically from the accent pair.
