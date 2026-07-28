@@ -378,6 +378,84 @@ Recent compositor work:
 - Round-rect outline primitive
 - Filled circle primitive
 
+## Aurora Shell
+
+The Aurora redesign (handoff bundle: `docs/aurora-theme/`) layers a
+glossy-glass vocabulary over the Duet family — Aero-lineage window
+chrome and a floating island taskbar. It is opt-in per theme: Classic,
+Slate10, Amber, DuetClassic and HighContrast zero every Aurora token
+and paint exactly what they painted before. DuetClassic opts out
+deliberately — its Win9x-grey contrast against the modern Duet story is
+the point of the variant.
+
+Metrics come from `IMPLEMENTATION.md` §7's **1024 × 768** column, not
+the 1920 × 1080 design canvas: the shipped framebuffer is 1024 × 768, so
+chrome (not type) scales by ≈ 0.53.
+
+### Tokens (`Theme`, `kernel/drivers/video/theme.h`)
+
+| Field | Duet family | Flat themes | What it drives |
+|---|---|---|---|
+| `window_radius` | 8 | 0 | window body corner radius |
+| `surface_radius` | 12 | 0 | floating surface radius (the island) |
+| `sheen_alpha` | 87 (140 light) | 0 | 1-px specular hairline on a top edge |
+| `gloss_alpha` | 38 (26 light) | 0 | top of the title-bar specular ramp |
+| `taskbar_island` | true | false | taskbar floats as a centred island |
+| `taskbar_inset` | 12 | 0 | gap from the screen edge when island |
+
+All of them ride `ThemeTactilityEffective()`, so `tactility=off` on the
+cmdline (or `tactility off` at the shell) still yields genuinely flat
+chrome for the debug / screenshot workflow.
+
+### Window chrome (`widget.cpp::WindowDraw`)
+
+- **Rounded body.** Painted as a round rect and then squared off on the
+  one edge where the title bar meets the client area. It is *not*
+  punched afterwards: `FramebufferReadPixel` bypasses the compose
+  shadow buffer, so a corner cannot be snapshotted and restored
+  mid-compose, and `FramebufferPunchCorners` would have to approximate
+  the wallpaper with a single flat colour. Never painting the corner is
+  exact. The 2-px border becomes two nested `DrawRoundRect` passes.
+- **Title-bar specular.** White wash from `gloss_alpha` at the top edge,
+  decaying to a quarter of that at the vertical midpoint, then stopping
+  dead. That hard terminator is what reads as Aero; a smooth full-height
+  fade reads as a generic gradient.
+- **Sheen hairline.** 1-px white line on the very top edge, fading to
+  nothing at both ends, approximated with 16 constant-alpha segments.
+
+### Taskbar island (`taskbar.cpp`)
+
+`TaskbarReanchor()` publishes an island rect (`g_bar_x` / `g_bar_w` /
+`g_bar_radius`) instead of assuming a full-width strip. Width is
+content-derived — left pad + START + gap + the tabs that will actually
+paint + the right-hand cluster reserve + right pad — clamped to the
+framebuffer minus one inset per side, so a busy desktop degrades to a
+near-full-width island rather than running off screen. Every anchor in
+the redraw path (START, tabs, tray, time card, show-desktop rail)
+measures from that rect.
+
+- `TaskbarContains` hit-tests the island rect on **both** axes, so a
+  click in the desktop margin either side falls through to the
+  wallpaper.
+- `TaskbarHeight()` returns the **reserve**, not the painted strip
+  height: `g_h + 2 × taskbar_inset` under an island. Otherwise a
+  maximized window tucks under the island and its shadow. Every caller
+  (`WindowMaximize`, `WorkArea`, the minimize target, the toast anchor)
+  wants the unusable-edge figure, so one accessor carries it.
+- Island layout is defined for the Bottom and Top docks only; there is
+  no left/right dock in v0.
+
+### Self-test
+
+`ThemeSelfTest` gained two invariants, reported as
+`[theme-selftest] aurora-tokens PASS`:
+
+1. A theme with `tactility_enabled == false` must carry no Aurora
+   tokens — one posture, rather than two that can drift apart.
+2. `taskbar_island` without a radius or an inset is a silent
+   regression: the strip stops reaching the screen edges while still
+   painting square corners flush against them.
+
 ## Chrome Tactility (Pass A)
 
 The chrome tactility lift (Pass A of a 4-pass UX initiative) adds

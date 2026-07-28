@@ -4,14 +4,14 @@
 
 **A from-scratch operating system that boots on real PC hardware and runs Windows `.exe` files natively** — not under a VM, not through Wine, not as an emulator on top of Linux. The PE loader, the NT syscall layer, and 44 reimplemented Win32 DLLs (`kernel32`, `ntdll`, `user32`, `gdi32`, `ucrtbase`, `msvcp140`, `d3d11`, …) live in this repo as a peer ABI alongside the native one.
 
-![DuetOS desktop, Duet theme — Calculator, Notepad, Files, Task Manager, Kernel Log, Clock, GFX Demo, System Monitor, themed taskbar](docs/screenshots/06-desktop-duet.png)
+![DuetOS desktop, Duet theme — Calculator, Notepad, Files, Task Manager, Kernel Log, Clock, GFX Demo, island taskbar](docs/screenshots/06-desktop-duet.png)
 
 Everything in that screenshot is painted in a single compose pass by our kernel-side compositor:
 
 - **Calculator, Notepad, Files, Task Manager, Kernel Log, Clock** — native DuetOS apps.
 - **GFX Demo** (top right) — a native app computing every pixel in its client area on every frame; the same `FramebufferPutPixel` / `FramebufferFillRect` primitive set our `d3d11` / `d3d12` / `dxgi` DLLs call into when a Windows PE goes `D3D11CreateDeviceAndSwapChain → ClearRenderTargetView → Present`.
-- **System Monitor** — live heap usage, fragmentation, syscalls/sec, FPS, window count — taken straight from kernel counters.
-- **Taskbar** — Start menu, pinned apps, tray, clock, Duet theme. `Ctrl+Alt+Y` hot-swaps to Classic / Slate10 / Amber. `theme=<name>` on the kernel cmdline picks one at boot.
+- **Window chrome** — the "Aurora" glass look: rounded bodies, an Aero-lineage specular ramp on each title bar that terminates hard at the midpoint, and a sheen hairline on the top edge. Design bundle: [`docs/aurora-theme/`](docs/aurora-theme/).
+- **Taskbar** — a centred, inset, rounded island carrying the Start button, pinned apps, tray, and clock, with the desktop showing on every side. `Ctrl+Alt+Y` hot-swaps to Classic / Slate10 / Amber, which keep their flat, full-width, square chrome. `theme=<name>` on the kernel cmdline picks one at boot.
 
 ---
 

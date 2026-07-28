@@ -208,6 +208,34 @@ under `tests/`. These do not require QEMU.
 DuetOS, wait `DUETOS_SETTLE` seconds, snapshot the framebuffer to
 PNG. Used to capture `docs/screenshots/`.
 
+`screenshot-theme.sh` takes an **absolute** GRUB menu-entry index into
+`boot/grub/grub.cfg` (counting `menuentry` blocks from 0) and pins it
+as the default in a one-shot sidecar ISO, so no keystroke navigation is
+needed.
+
+**Every app window registers hidden** — it is a launcher, not a running
+task — so a plain desktop boot photographs an empty desktop with no
+window chrome at all. `demo-windows=1` raises a representative set
+(Calculator, Notepad, Task Manager, Files, Kernel Log, Clock, GFX Demo)
+at boot. GFX Demo is raised last on purpose: it only renders pixels
+while it is the active window, and paints a static "idle card"
+otherwise.
+
+The two Duet-family screenshots are captured from the
+`duetos-demo-windows-duet` entry, which carries that flag:
+
+```bash
+# 06-desktop-duet.png — the README hero
+DUETOS_SETTLE=22 tools/qemu/screenshot-theme.sh 19 docs/screenshots/06-desktop-duet.png
+
+# 09-duet-pixel-render.png — same desktop, later in the GFX demo's
+# auto mode cycle, so it lands on a different pixel renderer
+DUETOS_SETTLE=45 tools/qemu/screenshot-theme.sh 19 docs/screenshots/09-duet-pixel-render.png
+```
+
+Re-derive the index with `grep -n '^menuentry' boot/grub/grub.cfg` if
+entries are ever inserted rather than appended.
+
 ## PE-Compat Smoke Battery
 
 The surface-coverage PE zoo (~135 Win32 smoke executables under

@@ -1,0 +1,12 @@
+/* ============================================================================
+   BrowserGame ARPG — Design System global entry point
+   ----------------------------------------------------------------------------
+   Consumers link THIS one file. It is an import manifest only — every token,
+   font and foundation lives in a dedicated file under tokens/. Order matters:
+   fonts first (so @import is at the top), then the value layers.
+   ========================================================================== */
+
+@import url('./tokens/fonts.css');
+@import url('./tokens/colors.css');
+@import url('./tokens/typography.css');
+@import url('./tokens/spacing.css');

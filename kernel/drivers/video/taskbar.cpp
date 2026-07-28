@@ -23,6 +23,19 @@ namespace
 
 constinit u32 g_y = 0;
 constinit u32 g_h = 0;
+
+// Painted strip rect on the x axis. On a classic full-width strip
+// these are `0` and the framebuffer width. Under the Aurora island
+// layout (Theme::taskbar_island) the strip becomes a centred,
+// content-width, rounded surface inset from every screen edge, and
+// every anchor in the redraw path — START, tabs, tray, time card,
+// show-desktop rail — measures from these instead of from the
+// framebuffer edges. Recomputed by TaskbarReanchor.
+constinit u32 g_bar_x = 0;
+constinit u32 g_bar_w = 0;
+// Radius the island body was last painted with; 0 for the classic
+// strip. Cached so the hit-test and the body paint agree.
+constinit u32 g_bar_radius = 0;
 constinit u32 g_bg = 0x00202020;
 constinit u32 g_fg = 0x00FFFFFF;
 constinit u32 g_accent = 0x00406080;
@@ -98,6 +111,69 @@ constinit u32 g_tab_count = 0;
 u32 TextRowY()
 {
     return (g_h > 8) ? g_y + (g_h - 8) / 2 : g_y + 2;
+}
+
+// Is the active theme a Duet-family palette? Several layout
+// decisions (DuetMark on START, the CPU/FPS pill, the reserve that
+// pays for it) key off this. Single definition so a new Duet
+// variant can't light up in one place and stay dark in another —
+// the whitelist-incompleteness shape CLAUDE.md warns about.
+bool IsDuetFamily(ThemeId id)
+{
+    return id == ThemeId::Duet || id == ThemeId::DuetLight || id == ThemeId::DuetBlue || id == ThemeId::DuetViolet ||
+           id == ThemeId::DuetGreen || id == ThemeId::DuetClassic;
+}
+
+// START button + tab metrics. Shared by the paint pass and by the
+// island's content-width measurement, which has to agree with the
+// paint pass exactly or the rightmost cell falls off the surface.
+constexpr u32 kStartW = 88;
+constexpr u32 kStartGap = 16;
+constexpr u32 kEdgePad = 4;
+constexpr u32 kTabW = 170;
+constexpr u32 kTabGap = 4;
+
+// Show-desktop rail: the rightmost cell of the strip. Hoisted out of
+// the paint block because the time card has to anchor LEFT of it —
+// both used to measure back from the same right edge, so the rail
+// painted over the last few pixels of the date row.
+constexpr u32 kRailW = 4;
+constexpr u32 kRailGap = 4;
+
+// Horizontal room the right-hand cluster needs: time card + tray
+// icons + chevron + (Duet only) the CPU/FPS pill + the show-desktop
+// rail + the gaps between them. Sized so tabs never get clipped by
+// the rightmost paint pass.
+//
+//   Duet family: pill (~180) + tray (~100) + time (~80) +
+//                rail (~6) + gaps (~30) = ~400
+//   Other themes: tray (~70) + time (~80) + rail (~6) +
+//                 gaps (~14) = ~170
+u32 RightReserve()
+{
+    const ThemeId id = ThemeCurrentId();
+    // DuetClassic keeps the Duet identity but not the pill — it is
+    // deliberately absent from the pill list below.
+    const bool pill = id == ThemeId::Duet || id == ThemeId::DuetLight || id == ThemeId::DuetBlue ||
+                      id == ThemeId::DuetViolet || id == ThemeId::DuetGreen;
+    return pill ? 400u : 180u;
+}
+
+// Number of windows that will actually render a tab this pass.
+// Mirrors the filter in the tab loop (alive + visible + capacity).
+u32 VisibleTabCount()
+{
+    u32 n = 0;
+    const u32 count = WindowRegistryCount();
+    for (u32 i = 0; i < count && n < kMaxTabs; ++i)
+    {
+        const WindowHandle h = i;
+        if (WindowIsAlive(h) && WindowIsVisible(h))
+        {
+            ++n;
+        }
+    }
+    return n;
 }
 
 // Lighten an 0x00RRGGBB colour by `amount` per channel, saturating
@@ -331,10 +407,44 @@ void TaskbarReanchor()
     const auto info = FramebufferGet();
     if (info.height == 0 || g_h == 0)
         return;
+
+    // Aurora island layout: the strip lifts off the screen edge and
+    // becomes a centred, content-width, rounded surface. Only defined
+    // for the two horizontal docks — there is no left/right dock in
+    // v0, so no fallback is needed here (see taskbar.h).
+    const Theme& theme = ThemeCurrent();
+    const u32 inset = (theme.taskbar_island && ThemeTactilityEffective()) ? theme.taskbar_inset : 0U;
+
     if (g_dock == TaskbarDock::Top)
-        g_y = 0;
+        g_y = inset;
     else
-        g_y = (info.height > g_h) ? info.height - g_h : 0;
+        g_y = (info.height > g_h + inset) ? info.height - g_h - inset : 0;
+
+    if (inset == 0)
+    {
+        g_bar_x = 0;
+        g_bar_w = info.width;
+        g_bar_radius = 0;
+        return;
+    }
+
+    // Content width: left pad + START + gap + the tabs that will
+    // actually paint + the right-hand cluster + right pad. Clamped to
+    // the framebuffer minus an inset on each side, so a desktop with
+    // many windows degrades to a near-full-width island rather than
+    // running off the screen.
+    // The rounded corners eat into the first and last `radius`
+    // columns, so the content pad has to clear them or the START
+    // button and the time card get sliced by the curve.
+    const u32 pad = kEdgePad + theme.surface_radius;
+    const u32 tabs_w = VisibleTabCount() * (kTabW + kTabGap);
+    const u32 content = 2 * pad + kStartW + kStartGap + tabs_w + RightReserve();
+    const u32 max_w = (info.width > 2 * inset) ? info.width - 2 * inset : info.width;
+    const u32 w = (content < max_w) ? content : max_w;
+
+    g_bar_w = w;
+    g_bar_x = (info.width > w) ? (info.width - w) / 2 : 0;
+    g_bar_radius = theme.surface_radius;
 }
 
 void TaskbarSetDock(TaskbarDock edge)
@@ -399,7 +509,21 @@ void TaskbarRedraw()
     // pre-rebind dimensions.
     TaskbarReanchor();
     const auto info = FramebufferGet();
-    const u32 fbw = info.width;
+    // Every anchor below measures from the painted strip rect, not
+    // from the framebuffer edges: under the Aurora island layout the
+    // strip is a centred, inset surface and the desktop shows either
+    // side of it. `g_bar_w == 0` only happens if a caller painted
+    // before the first reanchor; fall back to full width.
+    const u32 bar_x = g_bar_x;
+    const u32 bar_w = (g_bar_w != 0) ? g_bar_w : info.width;
+    const u32 bar_right = bar_x + bar_w;
+    const u32 bar_radius = g_bar_radius;
+    // Left / right content pad. On a full-width strip the chrome sits
+    // 4 px off the framebuffer edge; on an island it must additionally
+    // clear the corner curve. `bar_content_right` is the right-hand
+    // anchor every right-aligned cell measures back from.
+    const u32 bar_pad = kEdgePad + bar_radius;
+    const u32 bar_content_right = (bar_w > 2 * bar_pad) ? bar_right - bar_pad : bar_right;
 
     // Tactility lift: a faint 6-px shadow bleeds upward from the
     // strip's top edge so the taskbar reads as a piece of chrome
@@ -415,7 +539,7 @@ void TaskbarRedraw()
         const u8 opacity = static_cast<u8>(base / 2U);
         if (opacity > 0)
         {
-            RenderSoftShadow(0, static_cast<i32>(g_y) - 6, fbw, 6U, 8U, opacity, 0x00000000U);
+            RenderSoftShadow(static_cast<i32>(bar_x), static_cast<i32>(g_y) - 6, bar_w, 6U, 8U, opacity, 0x00000000U);
         }
     }
 
@@ -424,10 +548,55 @@ void TaskbarRedraw()
     // at the bottom. Reads as a coherent toolbar surface rather
     // than a flat coloured stripe. Keep the lift small so themes
     // that picked a near-black bg still read as near-black.
-    FramebufferFillRectGradient(0, g_y, fbw, g_h, LightenRgb(g_bg, 12), g_bg);
-    // Thin accent line on the top edge — preserves the "the
-    // taskbar starts here" cue the original flat bar had.
-    FramebufferFillRect(0, g_y, fbw, 1, g_accent);
+    //
+    // Under the island layout the body is a rounded surface instead:
+    // FillRoundRect leaves the corner pixels alone, so the desktop
+    // shows through them without needing a punch colour that only
+    // approximates the wallpaper. The gradient is traded for a flat
+    // fill plus the Aurora specular below — there is no rounded
+    // gradient primitive, and painting a square gradient first would
+    // put four hard corners back on the surface.
+    if (bar_radius > 0)
+    {
+        FramebufferFillRoundRect(bar_x, g_y, bar_w, g_h, bar_radius, g_bg);
+        FramebufferDrawRoundRect(bar_x, g_y, bar_w, g_h, bar_radius, g_border);
+    }
+    else
+    {
+        FramebufferFillRectGradient(bar_x, g_y, bar_w, g_h, LightenRgb(g_bg, 12), g_bg);
+    }
+
+    // Top-edge treatment. The classic strip paints a 1-px accent line
+    // ("the taskbar starts here"). The island already reads as a
+    // separate surface thanks to its shadow and radius, so it takes
+    // the Aurora specular instead: a white wash decaying across the
+    // upper half with a hard terminator at the midpoint, plus a sheen
+    // hairline along the very top. Both are inset by the radius so
+    // they never spill into a corner that was left unpainted.
+    if (bar_radius == 0)
+    {
+        FramebufferFillRect(bar_x, g_y, bar_w, 1, g_accent);
+    }
+    else if (bar_w > 2 * bar_radius)
+    {
+        const Theme& theme = ThemeCurrent();
+        const u32 wash_x = bar_x + bar_radius;
+        const u32 wash_w = bar_w - 2 * bar_radius;
+        const u8 gloss = ThemeIntensityEffective(theme.gloss_alpha);
+        const u32 band_h = g_h / 2;
+        for (u32 row = 0; row < band_h && gloss > 0; ++row)
+        {
+            const u32 top = gloss;
+            const u32 bottom = top / 4U;
+            const u32 a = top - ((top - bottom) * row) / band_h;
+            FramebufferBlendFill(wash_x, g_y + row, wash_w, 1U, (a << 24) | 0x00FFFFFFU);
+        }
+        const u8 sheen = ThemeIntensityEffective(theme.sheen_alpha);
+        if (sheen > 0)
+        {
+            FramebufferBlendFill(wash_x, g_y, wash_w, 1U, (static_cast<u32>(sheen) << 24) | 0x00FFFFFFU);
+        }
+    }
 
     const u32 text_y = TextRowY();
 
@@ -437,14 +606,15 @@ void TaskbarRedraw()
     // rather than a coloured rectangle. A 2-px highlight strip on
     // the top edge gives it a subtle raised look matching the
     // window-chrome highlight band.
-    constexpr u32 start_w = 88;
+    constexpr u32 start_w = kStartW;
     constexpr u32 start_radius = 4;
+    const u32 start_x = bar_x + bar_pad;
     const u32 start_h = (g_h > 8) ? g_h - 8 : g_h;
-    FramebufferFillRoundRect(4, g_y + 4, start_w, start_h, start_radius, g_accent);
-    FramebufferDrawRoundRect(4, g_y + 4, start_w, start_h, start_radius, g_border);
+    FramebufferFillRoundRect(start_x, g_y + 4, start_w, start_h, start_radius, g_accent);
+    FramebufferDrawRoundRect(start_x, g_y + 4, start_w, start_h, start_radius, g_border);
     if (start_h > 4)
     {
-        FramebufferFillRect(4 + start_radius, g_y + 5, start_w - 2 * start_radius, 1, LightenRgb(g_accent, 40));
+        FramebufferFillRect(start_x + start_radius, g_y + 5, start_w - 2 * start_radius, 1, LightenRgb(g_accent, 40));
     }
     // On the Duet theme the START button paints the DuetMark — two
     // interlocking rings (teal + amber) glyphing the dual-ABI
@@ -454,10 +624,7 @@ void TaskbarRedraw()
     // rather than the prototype's partial-arc strokes; partial-arc
     // rasterization is a follow-on once a proper path stroker
     // lands in the framebuffer.
-    const ThemeId tid_start = ThemeCurrentId();
-    const bool is_duet_family = tid_start == ThemeId::Duet || tid_start == ThemeId::DuetLight ||
-                                tid_start == ThemeId::DuetBlue || tid_start == ThemeId::DuetViolet ||
-                                tid_start == ThemeId::DuetGreen || tid_start == ThemeId::DuetClassic;
+    const bool is_duet_family = IsDuetFamily(ThemeCurrentId());
     if (is_duet_family)
     {
         // "DUET" label width comes from the chrome-text dispatcher
@@ -467,7 +634,7 @@ void TaskbarRedraw()
         constexpr u32 mark_diameter = 14;
         constexpr u32 mark_overlap = 6; // shared horizontal overlap between rings
         const u32 mark_total_w = 2 * mark_diameter - mark_overlap + 6 + mark_label_w;
-        const u32 mark_origin_x = 4 + (start_w - mark_total_w) / 2;
+        const u32 mark_origin_x = start_x + (start_w - mark_total_w) / 2;
         const i32 ring_cy = static_cast<i32>(g_y + g_h / 2);
         const i32 ring_a_cx = static_cast<i32>(mark_origin_x + mark_diameter / 2);
         const i32 ring_b_cx = static_cast<i32>(mark_origin_x + mark_diameter - mark_overlap + mark_diameter / 2);
@@ -505,7 +672,7 @@ void TaskbarRedraw()
         // against the button. Width comes from the chrome-text
         // dispatcher so the label stays centred under TTF themes.
         const u32 start_label_w = ChromeTextMeasure(ChromeTextRole::Body, "START");
-        const u32 start_label_x = 4 + ((start_w > start_label_w) ? (start_w - start_label_w) / 2 : 0);
+        const u32 start_label_x = start_x + ((start_w > start_label_w) ? (start_w - start_label_w) / 2 : 0);
         ChromeTextDraw(ChromeTextRole::Body, start_label_x, text_y, "START", g_border, g_accent);
     }
 
@@ -513,8 +680,8 @@ void TaskbarRedraw()
     // alive, render a dark tab with its title. Advance x with a
     // small gap between tabs. Clip when we'd overflow the right-
     // side uptime reserve.
-    constexpr u32 tab_w = 170;
-    constexpr u32 tab_gap = 4;
+    constexpr u32 tab_w = kTabW;
+    constexpr u32 tab_gap = kTabGap;
     // Reserve space on the right for the cluster of widgets that
     // sits beyond the tabs — time card + tray icons + chevron +
     // (Duet only) the CPU/FPS pill. Sized so tabs never get
@@ -524,13 +691,10 @@ void TaskbarRedraw()
     //                rail (~6) + gaps (~30) = ~400
     //   Other themes: tray (~70) + time (~80) + rail (~6) +
     //                 gaps (~14) = ~170
-    const ThemeId tid_reserve = ThemeCurrentId();
-    const bool reserve_for_pill = tid_reserve == ThemeId::Duet || tid_reserve == ThemeId::DuetLight ||
-                                  tid_reserve == ThemeId::DuetBlue || tid_reserve == ThemeId::DuetViolet ||
-                                  tid_reserve == ThemeId::DuetGreen;
-    const u32 right_reserve = reserve_for_pill ? 400u : 180u;
-    u32 tab_x = start_w + 16;
-    const u32 tabs_right_limit = (fbw > right_reserve) ? fbw - right_reserve : fbw;
+    const u32 right_reserve = RightReserve();
+    u32 tab_x = start_x + start_w + kStartGap;
+    const u32 tabs_right_limit =
+        (bar_content_right > bar_x + right_reserve) ? bar_content_right - right_reserve : bar_content_right;
 
     g_tab_count = 0;
     const u32 count = WindowRegistryCount();
@@ -758,7 +922,12 @@ void TaskbarRedraw()
     // inset, anchored to the framebuffer's right edge.
     const u32 block_text_w = (clk_text_w > date_text_w) ? clk_text_w : date_text_w;
     const u32 block_w = block_text_w + 12;
-    const u32 block_x = (fbw > block_w) ? fbw - block_w : 0;
+    // Anchor left of the show-desktop rail, not of the strip edge:
+    // the rail is painted last and would otherwise overwrite the
+    // right-hand few pixels of the date row.
+    const u32 cluster_right =
+        (bar_content_right > bar_x + kRailW + kRailGap) ? bar_content_right - kRailW - kRailGap : bar_content_right;
+    const u32 block_x = (cluster_right > bar_x + block_w) ? cluster_right - block_w : bar_x;
     // Two-row stack inside the taskbar height — top row above the
     // strip's vertical centre, bottom row below.
     const u32 row_top_y = g_y + (g_h / 2) - 8;
@@ -1150,8 +1319,8 @@ void TaskbarRedraw()
     // the desktop is showing — gives the user a visible
     // "armed" cue that a click would restore the windows.
     {
-        constexpr u32 rail_w = 4;
-        const u32 rail_x = (fbw > rail_w + 1) ? fbw - rail_w - 1 : 0;
+        constexpr u32 rail_w = kRailW;
+        const u32 rail_x = (bar_content_right > bar_x + rail_w + 1) ? bar_content_right - rail_w - 1 : bar_x;
         const u32 rail_y = g_y + 4;
         const u32 rail_h = (g_h > 8) ? g_h - 8 : g_h;
         const u8 rail_alpha = WindowShowDesktopActive() ? 0xC0 : 0x60;
@@ -1190,8 +1359,20 @@ bool TaskbarContains(u32 x, u32 y)
     {
         return false;
     }
-    (void)x;
-    return y >= g_y && y < g_y + g_h;
+    if (y < g_y || y >= g_y + g_h)
+    {
+        return false;
+    }
+    // Under the island layout the strip no longer spans the screen,
+    // so a click in the desktop margin either side of it must fall
+    // through to the wallpaper rather than being swallowed as a
+    // taskbar click. `g_bar_w == 0` means "not laid out yet"; treat
+    // that as the historical full-width strip.
+    if (g_bar_w == 0)
+    {
+        return true;
+    }
+    return x >= g_bar_x && x < g_bar_x + g_bar_w;
 }
 
 void TaskbarClockBounds(u32* x_out, u32* y_out, u32* w_out, u32* h_out)
@@ -1266,7 +1447,19 @@ void TaskbarShowDesktopBounds(u32* x_out, u32* y_out, u32* w_out, u32* h_out)
 
 u32 TaskbarHeight()
 {
-    return g_h;
+    // Reserve, not just the painted strip. Under the island layout
+    // the strip floats `taskbar_inset` pixels off the screen edge, so
+    // a maximized window sized against the raw strip height would
+    // tuck under the island and its shadow (IMPLEMENTATION.md §3).
+    // Every caller wants the unusable-edge figure, so the reserve is
+    // what this returns rather than adding a second accessor that
+    // three of four call sites would have to remember to prefer.
+    if (g_bar_w == 0 || g_bar_radius == 0)
+    {
+        return g_h;
+    }
+    const Theme& theme = ThemeCurrent();
+    return g_h + 2 * theme.taskbar_inset;
 }
 
 void TaskbarStartBounds(u32* x_out, u32* y_out, u32* w_out, u32* h_out)
@@ -1275,8 +1468,8 @@ void TaskbarStartBounds(u32* x_out, u32* y_out, u32* w_out, u32* h_out)
     // an update there must update these constants too. Small
     // static layout, so a centralised constant would be over-
     // engineering at v0 scale.
-    constexpr u32 start_x = 4;
-    constexpr u32 start_w = 88;
+    const u32 start_x = g_bar_x + kEdgePad + g_bar_radius;
+    constexpr u32 start_w = kStartW;
     const u32 start_y = g_y + 4;
     const u32 start_h = (g_h > 8) ? g_h - 8 : g_h;
     if (x_out)

@@ -1,0 +1,83 @@
+/* ============================================================================
+   SPACING, SIZING, RADII, BORDERS, SHADOWS & MOTION
+   ----------------------------------------------------------------------------
+   The HUD is built on a tight 4px rhythm. Interactive slot sizes are taken
+   straight from the renderer (belt slot 44px, hotbar slot 52px, 10px gaps) so
+   mockups line up with the running game. Diablo-lineage chrome is mostly sharp
+   and beveled — radii are small; the drama comes from gold borders and inner
+   shadow, not rounding.
+   ========================================================================== */
+
+:root {
+  /* ---- Spacing scale (4px base) ------------------------------------------- */
+  --space-0: 0;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  /* ---- HUD-specific metrics (from the renderer) --------------------------- */
+  --slot-belt: 44px; /* potion belt slot (belt.ts SLOT) */
+  --slot-hotbar: 52px; /* ability hotbar slot (main.ts HOTBAR_SLOT) */
+  --slot-inv: 56px; /* inventory grid cell */
+  --slot-gap: 10px; /* hotbar gap (HOTBAR_GAP_INNER) */
+  --slot-gap-tight: 6px; /* belt gap */
+  --orb-size: 128px; /* health / mana globe diameter */
+  --orb-size-sm: 92px;
+  --nameplate-w: 64px; /* monster health bar width */
+  --hud-edge: 8px; /* viewport edge inset (topbar/chat/hint) */
+
+  /* ---- Corner radii — sharp by default ------------------------------------ */
+  --radius-none: 0;
+  --radius-sm: 4px;
+  --radius-slot: 7px; /* belt/hotbar slot (belt.ts roundRect 7) */
+  --radius-md: 8px; /* panels, topbar chips */
+  --radius-lg: 12px;
+  --radius-pill: 999px;
+
+  /* ---- Border widths ------------------------------------------------------ */
+  --border-hair: 1px; /* slot edges, inputs */
+  --border-frame: 2px; /* the canonical panel frame (strokeRect 2) */
+  --border-heavy: 3px; /* elite / unique emphasis */
+
+  /* ---- Shadows & glows ---------------------------------------------------- */
+  --shadow-panel: 0 12px 40px rgba(0, 0, 0, 0.6), 0 2px 0 rgba(0, 0, 0, 0.5);
+  --shadow-float: 0 18px 60px rgba(0, 0, 0, 0.7);
+  --shadow-slot-inset: inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    inset 0 -10px 18px rgba(0, 0, 0, 0.55);
+  --shadow-text: 0 1px 2px rgba(0, 0, 0, 0.9); /* legibility over busy terrain */
+  --glow-gold: 0 0 12px rgba(201, 162, 75, 0.45);
+  --glow-gold-strong: 0 0 18px rgba(201, 162, 75, 0.7);
+  --glow-hp: 0 0 16px rgba(210, 59, 59, 0.55);
+  --glow-mana: 0 0 16px rgba(59, 111, 210, 0.55);
+
+  /* Rarity glow rings — for item slots & ground-drop beacons */
+  --glow-magic: 0 0 12px rgba(110, 168, 255, 0.6);
+  --glow-rare: 0 0 12px rgba(255, 210, 74, 0.6);
+  --glow-epic: 0 0 14px rgba(192, 107, 255, 0.65);
+  --glow-legendary: 0 0 16px rgba(255, 122, 26, 0.7);
+  --glow-corrupted: 0 0 18px rgba(255, 45, 111, 0.75);
+  --glow-unique: 0 0 14px rgba(191, 160, 90, 0.65);
+
+  /* ---- Motion — terse and weighty; no bouncy easing ----------------------- */
+  --ease-out: cubic-bezier(0.2, 0.7, 0.3, 1); /* @kind other */
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1); /* @kind other */
+  --dur-fast: 90ms; /* @kind other */ /* press feedback */
+  --dur-base: 160ms; /* @kind other */ /* hover, tooltip fade */
+  --dur-slow: 320ms; /* @kind other */ /* panel open */
+  --dur-pulse: 1100ms; /* @kind other */ /* legendary / corruption pulse */
+
+  /* ---- Z-layers (mirrors styles/main.css) --------------------------------- */
+  --z-world: 1; /* @kind other */
+  --z-hud: 5; /* @kind other */
+  --z-chrome: 10; /* @kind other */
+  --z-panel: 40; /* @kind other */
+  --z-tooltip: 60; /* @kind other */
+  --z-inspector: 10000; /* @kind other */
+}

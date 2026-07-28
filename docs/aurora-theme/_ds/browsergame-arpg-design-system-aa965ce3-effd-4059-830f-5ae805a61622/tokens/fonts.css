@@ -1,0 +1,28 @@
+/* ============================================================================
+   FONTS — Gloomwood typographic palette
+   ----------------------------------------------------------------------------
+   The live game currently renders all HUD text in `system-ui` (Canvas2D). This
+   design system introduces a branded display face for titles, item names and
+   headings — Cinzel, an engraved Roman-capital serif that is the closest free
+   stand-in for the Exocet / blackletter lineage of classic ARPG title art.
+   Spectral is a dark literary serif for lore & flavour text. Body / HUD text
+   stays on the native UI stack to match the shipped renderer exactly.
+
+   ⚠ SUBSTITUTION FLAG: no original brand font files were provided. Cinzel and
+   Spectral are Google-Fonts substitutes chosen for fidelity. If the team has a
+   licensed display face (e.g. an Exocet-style font), drop the .woff2 here and
+   replace the @import below with local @font-face rules.
+   ========================================================================== */
+
+@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;500;600;700;800;900&family=Spectral:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap');
+
+:root {
+  /* Display — engraved caps: title screen, item names, panel headers, banners */
+  --font-display: 'Cinzel', 'Trajan Pro', Georgia, 'Times New Roman', serif;
+  /* Lore / flavour — quest text, item descriptions, NPC dialogue */
+  --font-lore: 'Spectral', Georgia, 'Iowan Old Style', serif;
+  /* Body / HUD — matches the shipped renderer's system-ui exactly */
+  --font-body: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  /* Numerals / stats / debug — tabular monospace (the inspector's native stack) */
+  --font-mono: ui-monospace, Menlo, Consolas, 'Courier New', monospace;
+}

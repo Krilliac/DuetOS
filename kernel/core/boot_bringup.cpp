@@ -3943,6 +3943,17 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // effect on normal boots.
     const bool demo_browser = CmdlineMatches(cmdline, "demo-browser", "1");
 
+    // demo-windows=1 unhides a representative set of app windows at
+    // boot so a headless screenshot can capture live window chrome.
+    // Every app window otherwise registers hidden — it is a launcher,
+    // not a running task — which leaves the screenshot harness unable
+    // to photograph chrome at all without injecting Start-menu clicks.
+    // Windows are looked up by ThemeRole rather than by captured
+    // handle so this stays a single block that cannot drift out of
+    // sync with the registration order above. No effect on normal
+    // boots.
+    const bool demo_windows = CmdlineMatches(cmdline, "demo-windows", "1");
+
     if (want_tty)
     {
         duetos::drivers::video::SetDisplayMode(duetos::drivers::video::DisplayMode::Tty);
@@ -3954,6 +3965,27 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     {
         duetos::drivers::video::DesktopCompose(theme0.desktop_bg, nullptr);
         duetos::drivers::video::CursorInit(theme0.desktop_bg);
+        if (demo_windows)
+        {
+            // WindowRaise is the single "make it visible and active"
+            // entry point (the Start menu's role-raise handler uses
+            // it too), so raising in order leaves the LAST role
+            // focused. GfxDemo is last deliberately: it only renders
+            // while it is the active window — otherwise it paints a
+            // static "idle card" — so this is what makes the pixel
+            // render capturable headlessly.
+            static constexpr Role kDemoRoles[] = {Role::Calculator, Role::Notes, Role::TaskManager, Role::Files,
+                                                  Role::LogView,    Role::Clock, Role::GfxDemo};
+            for (const Role role : kDemoRoles)
+            {
+                const duetos::drivers::video::WindowHandle h = duetos::drivers::video::ThemeRoleWindow(role);
+                if (h != duetos::drivers::video::kWindowInvalid)
+                {
+                    duetos::drivers::video::WindowRaise(h);
+                }
+            }
+            duetos::drivers::video::DesktopCompose(theme0.desktop_bg, nullptr);
+        }
         if (demo_calendar)
         {
             duetos::u32 kx = 0, ky = 0, kw = 0, kh = 0;
