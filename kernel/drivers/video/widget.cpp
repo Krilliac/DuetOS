@@ -618,6 +618,57 @@ u32 DarkenRgb(u32 rgb, u32 amount)
     return (r << 16) | (g << 8) | b;
 }
 
+// Aurora title-bar specular (design README §2): a white wash that
+// starts at `top_alpha` on the very first row, decays to a quarter
+// of that by the last row of `h`, and is simply not painted below —
+// the caller passes `h = title_height / 2` so the ramp terminates
+// hard at the vertical midpoint. Painted a row at a time; a title
+// bar is ~30 rows, so this is ~30 blend-fills per window per
+// compose, which sits well inside the budget DesktopCompose already
+// spends on the per-window dim overlay.
+void PaintTitleSpecular(u32 x, u32 y, u32 w, u32 h, u8 top_alpha)
+{
+    if (w == 0 || h == 0)
+    {
+        return;
+    }
+    const u32 bottom_alpha = static_cast<u32>(top_alpha) / 4U;
+    const u32 span = static_cast<u32>(top_alpha) - bottom_alpha;
+    for (u32 row = 0; row < h; ++row)
+    {
+        // Linear decay across the band; integer math, no float.
+        const u32 a = static_cast<u32>(top_alpha) - (span * row) / h;
+        FramebufferBlendFill(x, y + row, w, 1U, (a << 24) | 0x00FFFFFFU);
+    }
+}
+
+// Aurora sheen hairline (design README §2): a 1-px white line along
+// the very top edge whose alpha fades to nothing at both ends —
+// `linear-gradient(90deg, transparent, --sheen, transparent)`.
+// Approximated with a fixed number of constant-alpha segments
+// rather than a per-pixel loop; at 1 px tall the banding is not
+// resolvable and the cost stays at a handful of fills per window.
+void PaintSheenHairline(u32 x, u32 y, u32 w, u8 peak_alpha)
+{
+    constexpr u32 kSegments = 16;
+    if (w < kSegments || peak_alpha == 0)
+    {
+        return;
+    }
+    const u32 seg_w = w / kSegments;
+    for (u32 i = 0; i < kSegments; ++i)
+    {
+        // Triangular envelope: 0 at both ends, peak in the middle.
+        const u32 from_centre = (i * 2U < kSegments) ? (kSegments / 2U - i) : (i + 1U - kSegments / 2U);
+        const u32 a = (static_cast<u32>(peak_alpha) * (kSegments / 2U - from_centre + 1U)) / (kSegments / 2U + 1U);
+        if (a == 0)
+        {
+            continue;
+        }
+        FramebufferBlendFill(x + i * seg_w, y, seg_w, 1U, (a << 24) | 0x00FFFFFFU);
+    }
+}
+
 } // namespace
 
 void WindowDraw(const WindowChrome& w)
@@ -630,6 +681,22 @@ void WindowDraw(const WindowChrome& w)
     const u32 tbh = EffectiveTitleHeight(w);
     const u32 tbh_eff = (tbh > w.h) ? w.h : tbh;
 
+    // ----- Aurora glass chrome (docs/aurora-theme/) -----
+    //
+    // `window_radius` rounds the window body; `gloss_alpha` drives
+    // the title bar's specular ramp; `sheen_alpha` drives the 1-px
+    // hairline along the very top edge. All three ride the tactility
+    // gate — the flat themes (Amber / HighContrast / Classic /
+    // Slate10 / DuetClassic) zero them anyway, but honouring the
+    // runtime `tactility off` override keeps the debug workflow
+    // producing genuinely flat chrome.
+    const Theme& theme = ThemeCurrent();
+    const bool glass = ThemeTactilityEffective();
+    // Radius is clamped so a small window (or a short title bar)
+    // never gets corners that eat more than they round.
+    const u32 radius_cap = ((w.w < w.h ? w.w : w.h) / 4U < tbh_eff / 2U) ? (w.w < w.h ? w.w : w.h) / 4U : tbh_eff / 2U;
+    const u32 radius = glass ? ((theme.window_radius < radius_cap) ? theme.window_radius : radius_cap) : 0U;
+
     // Client area paint — only the area BELOW the title bar gets
     // the opaque client fill. The title-bar strip is filled
     // separately with an alpha-blended gradient so the wallpaper
@@ -637,37 +704,91 @@ void WindowDraw(const WindowChrome& w)
     // macOS BigSur "frosted title" idiom). Previously the entire
     // window was painted opaque first; that gave a flat-coloured
     // title with no awareness of what's behind the window.
+    //
+    // Rounded bodies are painted as a round rect and then squared
+    // off on the edge that meets the title bar, rather than punched
+    // afterwards: `FramebufferReadPixel` bypasses the compose shadow
+    // buffer, so there is no way to snapshot-and-restore what was
+    // under a corner mid-compose, and `FramebufferPunchCorners`
+    // would have to approximate the wallpaper with a flat colour.
+    // Never painting the corner in the first place is exact.
     if (w.h > tbh_eff)
     {
-        FramebufferFillRect(w.x, w.y + tbh_eff, w.w, w.h - tbh_eff, w.colour_client);
+        const u32 body_y = w.y + tbh_eff;
+        const u32 body_h = w.h - tbh_eff;
+        FramebufferFillRoundRect(w.x, body_y, w.w, body_h, radius, w.colour_client);
+        if (radius > 0 && body_h > radius)
+        {
+            // Square the two corners that abut the title bar.
+            FramebufferFillRect(w.x, body_y, w.w, radius, w.colour_client);
+        }
     }
 
-    // Title bar — three-stage paint:
+    // Title bar — four-stage paint:
     //   1. Solid base fill at the title colour so the gradient
     //      below reads even when the window covers a near-black
     //      patch of wallpaper.
     //   2. Alpha-blended brighter band over the top half (the
     //      "glass shine" that simulates light catching the chrome).
-    //   3. 1-pixel highlight ridge along the very top edge.
+    //   3. Aurora specular ramp: white, brightest at the top edge,
+    //      fading to a quarter of that at the vertical midpoint and
+    //      then STOPPING dead. That hard terminator at 50% is what
+    //      reads as Aero (design README §2) — a smooth fade all the
+    //      way down reads as a generic gradient instead.
+    //   4. 1-pixel highlight ridge / sheen hairline along the top.
     // The 0xA0 alpha on the shine reads as "obviously chrome,
     // subtly modern" without crossing into the see-through Mica
     // look proper, which needs a per-pixel wallpaper read pass
     // (deferred — fb API is write-only today).
     const u32 title_top = LightenRgb(w.colour_title, 24);
-    FramebufferFillRect(w.x, w.y, w.w, tbh_eff, w.colour_title);
+    FramebufferFillRoundRect(w.x, w.y, w.w, tbh_eff, radius, w.colour_title);
+    if (radius > 0 && tbh_eff > radius)
+    {
+        // Square the two corners that abut the client area.
+        FramebufferFillRect(w.x, w.y + tbh_eff - radius, w.w, radius, w.colour_title);
+    }
     if (tbh_eff > 4)
     {
         const u32 shine_h = tbh_eff / 2;
         const u32 shine_argb = (0xA0U << 24) | (title_top & 0x00FFFFFFU);
-        FramebufferBlendFill(w.x, w.y, w.w, shine_h, shine_argb);
+        // Inset by the radius so the wash never spills into a
+        // rounded corner that was deliberately left unpainted.
+        const u32 wash_x = w.x + radius;
+        const u32 wash_w = (w.w > 2 * radius) ? w.w - 2 * radius : 0;
+        FramebufferBlendFill(wash_x, w.y, wash_w, shine_h, shine_argb);
+
+        const u8 gloss = glass ? ThemeIntensityEffective(theme.gloss_alpha) : 0;
+        if (gloss > 0 && wash_w > 0)
+        {
+            PaintTitleSpecular(wash_x, w.y, wash_w, shine_h, gloss);
+        }
     }
     if (tbh_eff > 0)
     {
-        FramebufferFillRect(w.x + 2, w.y + 1, (w.w > 4) ? w.w - 4 : 0, 1, LightenRgb(w.colour_title, 56));
+        const u8 sheen = glass ? ThemeIntensityEffective(theme.sheen_alpha) : 0;
+        if (sheen > 0 && w.w > 2 * radius + 8U)
+        {
+            PaintSheenHairline(w.x + radius, w.y, w.w - 2 * radius, sheen);
+        }
+        else
+        {
+            FramebufferFillRect(w.x + 2, w.y + 1, (w.w > 4) ? w.w - 4 : 0, 1, LightenRgb(w.colour_title, 56));
+        }
     }
 
     // Outer border — 2-pixel dark frame over the whole window.
-    FramebufferDrawRect(w.x, w.y, w.w, w.h, w.colour_border, 2);
+    if (radius > 0)
+    {
+        FramebufferDrawRoundRect(w.x, w.y, w.w, w.h, radius, w.colour_border);
+        if (w.w > 2 && w.h > 2)
+        {
+            FramebufferDrawRoundRect(w.x + 1, w.y + 1, w.w - 2, w.h - 2, radius - 1, w.colour_border);
+        }
+    }
+    else
+    {
+        FramebufferDrawRect(w.x, w.y, w.w, w.h, w.colour_border, 2);
+    }
 
     // Inner client highlight: 1-pixel line just inside the
     // border at the top of the client area. Catches incoming
