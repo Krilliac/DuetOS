@@ -703,6 +703,33 @@ void DropTcb(u32 idx)
 // Compute the SEQ field of an inbound ACK relative to snd_una/snd_nxt.
 // Returns false on a duplicate or out-of-window ACK (i.e. caller
 // should drop the ACK without advancing state).
+DUETOS_NO_SANITIZE_WRAP RstAction ClassifyRst(const Tcb& t, u32 seq, u32 ack, u8 flags)
+{
+    // SYN_SENT is the documented exception (RFC 9293 §3.10.7.3): there
+    // is no receive window yet, so acceptability is judged on the ACK
+    // field instead — a reset is only credible from someone who echoed
+    // the ISN we just sent.
+    if (t.state == State::SynSent)
+    {
+        if ((flags & kFlagAck) == 0 || ack != t.snd_nxt)
+            return RstAction::Ignore;
+        return RstAction::Accept;
+    }
+
+    // Wraparound-safe window test, the same idiom DeliverPayload uses.
+    // Outside the receive window the RST is not acceptable at all.
+    if (u32(seq - t.rcv_nxt) > t.rcv_wnd)
+        return RstAction::Ignore;
+
+    // In-window but not the next byte we expect: RFC 5961 says do NOT
+    // reset. Challenge the sender to prove it can see our sequence
+    // space, which an off-path spoofer cannot.
+    if (seq != t.rcv_nxt)
+        return RstAction::ChallengeAck;
+
+    return RstAction::Accept;
+}
+
 DUETOS_NO_SANITIZE_WRAP bool AckInWindow(u32 ack, u32 snd_una, u32 snd_nxt)
 {
     // unsigned wrap: ack is "newer" iff (ack - snd_una) <
@@ -972,35 +999,19 @@ void DeliverSegment(u32 idx, const MacAddress& peer_mac, Ipv4Address peer_ip, co
     if ((flags & kFlagRst) != 0)
     {
         ++g_stats.rst_rx;
-
-        // SYN_SENT is the documented exception (RFC 9293 §3.10.7.3):
-        // there is no receive window yet, so acceptability is judged on
-        // the ACK field instead — a reset is only credible from someone
-        // who echoed the ISN we just sent.
-        if (t.state == State::SynSent)
+        switch (ClassifyRst(t, seq, ack, flags))
         {
-            if ((flags & kFlagAck) == 0 || ack != t.snd_nxt)
-            {
-                ++g_stats.rst_unacceptable;
-                return;
-            }
-            DropTcb(idx);
-            return;
-        }
-
-        // Wraparound-safe window test, same idiom as DeliverPayload.
-        if (u32(seq - t.rcv_nxt) > t.rcv_wnd)
-        {
+        case RstAction::Ignore:
             ++g_stats.rst_unacceptable;
             return;
-        }
-        if (seq != t.rcv_nxt)
-        {
+        case RstAction::ChallengeAck:
             ++g_stats.rst_challenge_ack;
             SendSegment(t, kFlagAck, t.snd_nxt, t.rcv_nxt, nullptr, 0);
             return;
+        case RstAction::Accept:
+            DropTcb(idx);
+            return;
         }
-        DropTcb(idx);
         return;
     }
     // Refresh peer MAC (might've changed if the router learned a

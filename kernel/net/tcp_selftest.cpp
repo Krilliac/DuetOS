@@ -95,6 +95,63 @@ bool TestWindowMath()
     return true;
 }
 
+// RST acceptability — RFC 9293 §3.10.7.4 / RFC 5961 §3.2.
+//
+// Exists because the pre-fix code accepted ANY RST whose 4-tuple
+// matched, which is a one-packet blind reset. Each branch is pinned
+// here so a future refactor cannot quietly restore that behaviour.
+bool TestRstAcceptability()
+{
+    using namespace internal;
+    Tcb t{};
+    ResetTcbStorage(t);
+    t.state = State::Established;
+    t.rcv_nxt = 10'000;
+    t.rcv_wnd = 4096;
+    t.snd_nxt = 500;
+
+    // Exactly rcv_nxt -> the only sequence that may tear us down.
+    if (ClassifyRst(t, 10'000, 0, kFlagRst) != RstAction::Accept)
+        return false;
+
+    // In-window but not rcv_nxt -> challenge, never reset. This is the
+    // case a blind-reset attacker lands on when they guess badly but
+    // still hit the window.
+    if (ClassifyRst(t, 10'001, 0, kFlagRst) != RstAction::ChallengeAck)
+        return false;
+    if (ClassifyRst(t, 10'000 + 4095, 0, kFlagRst) != RstAction::ChallengeAck)
+        return false;
+
+    // Outside the window -> ignored outright.
+    if (ClassifyRst(t, 10'000 + 4097, 0, kFlagRst) != RstAction::Ignore)
+        return false;
+    if (ClassifyRst(t, 9'999, 0, kFlagRst) != RstAction::Ignore)
+        return false;
+
+    // Sequence-space wraparound must not turn an out-of-window RST into
+    // an acceptable one.
+    t.rcv_nxt = 0xFFFFFFF0u;
+    if (ClassifyRst(t, 0xFFFFFFF0u, 0, kFlagRst) != RstAction::Accept)
+        return false;
+    if (ClassifyRst(t, 0x00000004u, 0, kFlagRst) != RstAction::ChallengeAck)
+        return false;
+    if (ClassifyRst(t, 0xFFFFFFEFu, 0, kFlagRst) != RstAction::Ignore)
+        return false;
+
+    // SYN_SENT judges on the ACK field instead (no receive window yet).
+    Tcb s{};
+    ResetTcbStorage(s);
+    s.state = State::SynSent;
+    s.snd_nxt = 777;
+    if (ClassifyRst(s, 0, 777, u8(kFlagRst | kFlagAck)) != RstAction::Accept)
+        return false;
+    if (ClassifyRst(s, 0, 776, u8(kFlagRst | kFlagAck)) != RstAction::Ignore)
+        return false;
+    if (ClassifyRst(s, 0, 0, kFlagRst) != RstAction::Ignore) // bare RST, no ACK
+        return false;
+    return true;
+}
+
 bool TestReassembly()
 {
     using namespace internal;
@@ -796,6 +853,11 @@ void SelfTest()
     if (!TestWindowMath())
     {
         EmitFail("ack window wrap");
+        all_ok = false;
+    }
+    if (!TestRstAcceptability())
+    {
+        EmitFail("rst acceptability (RFC 5961)");
         all_ok = false;
     }
     if (!TestRtoBackoff())

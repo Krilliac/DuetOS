@@ -321,6 +321,21 @@ void SendStandaloneRst(u32 iface_index, const MacAddress& peer_mac, Ipv4Address 
 // tcp_selftest.cpp. Production callers go through OnSegment /
 // Send / Recv on the public surface.
 bool AckInWindow(u32 ack, u32 snd_una, u32 snd_nxt);
+
+/// What to do with an inbound RST, per RFC 9293 §3.10.7.4 and the
+/// RFC 5961 §3.2 challenge-ACK hardening.
+enum class RstAction : u8
+{
+    Ignore,       ///< Not acceptable — drop the segment, connection lives.
+    ChallengeAck, ///< In-window but not at rcv_nxt — make the peer prove it.
+    Accept,       ///< At rcv_nxt (or a credible SYN_SENT ack) — tear down.
+};
+
+/// Classify an inbound RST. Split out of DeliverSegment so the three
+/// branches can be pinned by the boot self-test — the previous code
+/// accepted ANY RST whose 4-tuple matched, which is a one-packet blind
+/// reset, and that is not a property to leave untested.
+RstAction ClassifyRst(const Tcb& t, u32 seq, u32 ack, u8 flags);
 bool DeliverPayload(Tcb& t, u32 seq, const u8* data, u32 len);
 
 // One inbound SACK block (RFC 2018), host byte order, half-open
