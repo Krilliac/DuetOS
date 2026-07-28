@@ -8,6 +8,7 @@
 #include "web/js/lexer.h"
 #include "web/js/object.h"
 #include "web/priv_binding.h"
+#include "web/stack_guard.h"
 
 /*
  * DuetOS — kernel/web: JavaScript ⇄ DOM bindings (see js_dom.h).
@@ -160,8 +161,19 @@ const char* JsCopyStr(js::Arena& a, const char* s, u32 n)
 // ---------------------------------------------------------------------------
 
 // Recursive id search, depth-first.
-Node* FindById(Node* n, const char* id)
+//
+// Depth here is bounded only by Arena::kMaxNodes (4096) -- NOT by the HTML
+// parser's 256-level Builder::kMaxDepth, because JS appendChild can build a
+// deeper chain than the parser ever would. 4096 frames do not fit the
+// 128 KiB kstack-arena slot, so every recursive walker in this file carries
+// the shared native-stack guard (web/stack_guard.h) plus a coarse logical
+// cap for boot-context threads, per the js/engine.h SEC-007 pattern.
+// GAP: a subtree below the depth guard is not searched -- the query reports
+// a miss rather than faulting the box.
+Node* FindById(Node* n, const char* id, u32 depth)
 {
+    if (depth >= kWebMaxWalkDepth || WebStackExhausted())
+        return nullptr;
     for (Node* c = n->firstChild; c; c = c->nextSibling)
     {
         if (c->kind == NodeKind::Element)
@@ -170,7 +182,7 @@ Node* FindById(Node* n, const char* id)
             if (cid && duetos::core::StrEqual(cid, id))
                 return c;
         }
-        Node* hit = FindById(c, id);
+        Node* hit = FindById(c, id, depth + 1);
         if (hit)
             return hit;
     }
@@ -178,8 +190,10 @@ Node* FindById(Node* n, const char* id)
 }
 
 // Recursive tag collection into a flat list (snapshot, document order).
-void CollectByTag(Node* n, const char* tag, Node** out, u32 cap, u32& count)
+void CollectByTag(Node* n, const char* tag, Node** out, u32 cap, u32& count, u32 depth)
 {
+    if (depth >= kWebMaxWalkDepth || WebStackExhausted())
+        return;
     for (Node* c = n->firstChild; c; c = c->nextSibling)
     {
         if (c->kind == NodeKind::Element && c->tag && duetos::core::StrEqual(c->tag, tag))
@@ -188,7 +202,7 @@ void CollectByTag(Node* n, const char* tag, Node** out, u32 cap, u32& count)
                 out[count] = c;
             ++count;
         }
-        CollectByTag(c, tag, out, cap, count);
+        CollectByTag(c, tag, out, cap, count, depth + 1);
     }
 }
 
@@ -341,13 +355,15 @@ bool LiteMatch(const Node* el, const LiteSelector& ls)
 }
 
 // First descendant of `root` matching `ls` (document order), or null.
-Node* LiteFindFirst(Node* root, const LiteSelector& ls)
+Node* LiteFindFirst(Node* root, const LiteSelector& ls, u32 depth)
 {
+    if (depth >= kWebMaxWalkDepth || WebStackExhausted())
+        return nullptr;
     for (Node* c = root->firstChild; c; c = c->nextSibling)
     {
         if (LiteMatch(c, ls))
             return c;
-        Node* hit = LiteFindFirst(c, ls);
+        Node* hit = LiteFindFirst(c, ls, depth + 1);
         if (hit)
             return hit;
     }
@@ -355,8 +371,10 @@ Node* LiteFindFirst(Node* root, const LiteSelector& ls)
 }
 
 // Collect every descendant of `root` matching `ls` (snapshot, doc order).
-void LiteCollect(Node* root, const LiteSelector& ls, Node** out, u32 cap, u32& count)
+void LiteCollect(Node* root, const LiteSelector& ls, Node** out, u32 cap, u32& count, u32 depth)
 {
+    if (depth >= kWebMaxWalkDepth || WebStackExhausted())
+        return;
     for (Node* c = root->firstChild; c; c = c->nextSibling)
     {
         if (LiteMatch(c, ls))
@@ -365,7 +383,7 @@ void LiteCollect(Node* root, const LiteSelector& ls, Node** out, u32 cap, u32& c
                 out[count] = c;
             ++count;
         }
-        LiteCollect(c, ls, out, cap, count);
+        LiteCollect(c, ls, out, cap, count, depth + 1);
     }
 }
 
@@ -420,8 +438,42 @@ void RemoveAttribute(Node* el, const char* name)
 }
 
 // Append `child` to `parent`, unlinking it from any current parent.
-void AppendChild(Node* parent, Node* child)
+// Returns false (the DOM's HierarchyRequestError) when the append would
+// make a node its own descendant.
+//
+// This check is not cosmetic spec conformance. Without it,
+//   var a = document.createElement('div'), b = document.createElement('div');
+//   a.appendChild(b); b.appendChild(a);
+// leaves a->firstChild == b and b->firstChild == a — a cyclic graph.
+// `a.appendChild(a)` does it in one line. The unlink step below detaches
+// the cycle from the document, so RelayoutFromDoc happens not to reach it,
+// but JS still holds a live reference and every element-scoped recursive
+// walker takes it as a ROOT: a.querySelector() -> LiteFindFirst,
+// a.querySelectorAll() / getElementsByTagName() -> LiteCollect / CollectByTag.
+// Those recurse INFINITELY — not to some node cap — for a guaranteed
+// guard-page kernel stack overflow from three lines of page JS.
+bool AppendChild(Node* parent, Node* child)
 {
+    if (parent == nullptr || child == nullptr || parent == child)
+    {
+        return false;
+    }
+    // Walk `parent`'s ancestors: if `child` is among them, the append would
+    // close a loop. The hop cap keeps this check itself terminating even if
+    // a cycle somehow already exists.
+    u32 hops = 0;
+    for (Node* a = parent; a != nullptr; a = a->parent)
+    {
+        if (a == child)
+        {
+            return false;
+        }
+        if (++hops > Arena::kMaxNodes)
+        {
+            return false;
+        }
+    }
+
     // Unlink from a prior parent first.
     if (child->parent)
     {
@@ -448,6 +500,7 @@ void AppendChild(Node* parent, Node* child)
     else
         parent->firstChild = child;
     parent->lastChild = child;
+    return true;
 }
 
 // Remove `child` from `parent`. Returns true if it was a child.
@@ -525,7 +578,8 @@ bool SetTextContent(DomCtx& ctx, Node* el, const char* text, u32 len)
     if (!t)
         return false;
     ClearChildren(el);
-    AppendChild(el, t);
+    if (!AppendChild(el, t))
+        return false; // t is freshly made, so only a null `el` gets here
     ctx.domMutated = true;
     return true;
 }
@@ -547,9 +601,15 @@ bool SetInnerHtml(DomCtx& ctx, Node* el, const char* html, u32 len)
     ClearChildren(el);
     // Move each top-level fragment child under `el`. AppendChild unlinks
     // each from the scratch container first, so iterate by re-reading
-    // `frag->firstChild` rather than caching nextSibling.
+    // `frag->firstChild` rather than caching nextSibling. A refused append
+    // would NOT unlink, so the loop must break on it or spin forever;
+    // fragment children are freshly parsed nodes and cannot be ancestors of
+    // `el`, so this is a can't-happen guard, not an expected path.
     while (Node* child = frag->firstChild)
-        AppendChild(el, child);
+    {
+        if (!AppendChild(el, child))
+            break;
+    }
     ctx.domMutated = true;
     return true;
 }
@@ -566,10 +626,18 @@ void SerOut(char* out, u32 cap, u32& o, const char* s, u32 n)
         out[o++] = s[i];
 }
 
-void SerializeChildren(const Node* el, char* out, u32 cap, u32& o);
+void SerializeChildren(const Node* el, char* out, u32 cap, u32& o, u32 depth);
 
-void SerializeNode(const Node* n, char* out, u32 cap, u32& o)
+// The `o < cap` truncation in SerOut bounds the OUTPUT, not the descent:
+// once the buffer is full SerOut silently drops bytes while this pair keeps
+// recursing to the bottom of the tree. Depth is bounded only by
+// Arena::kMaxNodes (4096) on a JS-built chain, so guard the native stack.
+// GAP: a subtree below the depth guard is omitted from the serialization —
+// innerHTML returns a truncated string rather than faulting the box.
+void SerializeNode(const Node* n, char* out, u32 cap, u32& o, u32 depth)
 {
+    if (depth >= kWebMaxWalkDepth || WebStackExhausted())
+        return;
     if (n->kind == NodeKind::Text)
     {
         SerOut(out, cap, o, n->text ? n->text : "", Slen(n->text));
@@ -595,16 +663,16 @@ void SerializeNode(const Node* n, char* out, u32 cap, u32& o)
         SerOut(out, cap, o, "\"", 1);
     }
     SerOut(out, cap, o, ">", 1);
-    SerializeChildren(n, out, cap, o);
+    SerializeChildren(n, out, cap, o, depth + 1);
     SerOut(out, cap, o, "</", 2);
     SerOut(out, cap, o, n->tag, Slen(n->tag));
     SerOut(out, cap, o, ">", 1);
 }
 
-void SerializeChildren(const Node* el, char* out, u32 cap, u32& o)
+void SerializeChildren(const Node* el, char* out, u32 cap, u32& o, u32 depth)
 {
     for (const Node* c = el->firstChild; c; c = c->nextSibling)
-        SerializeNode(c, out, cap, o);
+        SerializeNode(c, out, cap, o, depth);
 }
 
 // ---------------------------------------------------------------------------
@@ -734,7 +802,10 @@ Result<JsValue> MAppendChild(Interp&, const JsValue& recv, const JsValue* args, 
     NodeBind* child = BindOf(ArgOr(args, argc, 0));
     if (!parent || !child)
         return Err{ErrorCode::BadState};
-    AppendChild(parent->node, child->node);
+    // A refused append is the DOM's HierarchyRequestError — surface it as a
+    // JS error rather than silently no-op'ing, matching the spec's throw.
+    if (!AppendChild(parent->node, child->node))
+        return Err{ErrorCode::BadState};
     return args[0]; // DOM appendChild returns the appended node
 }
 
@@ -761,7 +832,7 @@ Result<JsValue> MQuerySelector(Interp&, const JsValue& recv, const JsValue* args
     LiteSelector ls = ParseLiteSelector(sel, sl);
     if (!ls.valid)
         return JsValue::Null();
-    return WrapNode(*nb->ctx, LiteFindFirst(nb->node, ls));
+    return WrapNode(*nb->ctx, LiteFindFirst(nb->node, ls, 0));
 }
 
 Result<JsValue> MQuerySelectorAll(Interp&, const JsValue& recv, const JsValue* args, u32 argc, void*)
@@ -775,7 +846,7 @@ Result<JsValue> MQuerySelectorAll(Interp&, const JsValue& recv, const JsValue* a
     Node* hits[256];
     u32 count = 0;
     if (ls.valid)
-        LiteCollect(nb->node, ls, hits, 256, count);
+        LiteCollect(nb->node, ls, hits, 256, count, 0);
     u32 n = count < 256 ? count : 256;
     return WrapNodeList(*nb->ctx, hits, n);
 }
@@ -798,11 +869,11 @@ Result<JsValue> MGetElementsByTagName(Interp&, const JsValue& recv, const JsValu
         LiteSelector ls{};
         ls.universal = true;
         ls.valid = true;
-        LiteCollect(nb->node, ls, hits, 256, count);
+        LiteCollect(nb->node, ls, hits, 256, count, 0);
     }
     else
     {
-        CollectByTag(nb->node, tag, hits, 256, count);
+        CollectByTag(nb->node, tag, hits, 256, count, 0);
     }
     u32 n = count < 256 ? count : 256;
     return WrapNodeList(*nb->ctx, hits, n);
@@ -1346,7 +1417,7 @@ Result<JsValue> DGetElementById(Interp&, const JsValue&, const JsValue* args, u3
     DomCtx* ctx = CtxOf(ctxp);
     char id[128];
     ValToCStr(ArgOr(args, argc, 0), id, sizeof(id));
-    Node* hit = FindById(ctx->doc, id);
+    Node* hit = FindById(ctx->doc, id, 0);
     return WrapNode(*ctx, hit); // Null when not found
 }
 
@@ -1360,7 +1431,7 @@ Result<JsValue> DGetElementsByTagName(Interp&, const JsValue&, const JsValue* ar
             tag[i] = char(tag[i] + 32);
     Node* hits[256];
     u32 count = 0;
-    CollectByTag(ctx->doc, tag, hits, 256, count);
+    CollectByTag(ctx->doc, tag, hits, 256, count, 0);
     u32 n = count < 256 ? count : 256;
     return WrapNodeList(*ctx, hits, n);
 }
@@ -1388,7 +1459,7 @@ Result<JsValue> DQuerySelector(Interp&, const JsValue&, const JsValue* args, u32
     LiteSelector ls = ParseLiteSelector(sel, sl);
     if (!ls.valid)
         return JsValue::Null();
-    return WrapNode(*ctx, LiteFindFirst(ctx->doc, ls));
+    return WrapNode(*ctx, LiteFindFirst(ctx->doc, ls, 0));
 }
 
 // querySelectorAll: a JS array of every descendant matching the selector.
@@ -1401,7 +1472,7 @@ Result<JsValue> DQuerySelectorAll(Interp&, const JsValue&, const JsValue* args, 
     Node* hits[256];
     u32 count = 0;
     if (ls.valid)
-        LiteCollect(ctx->doc, ls, hits, 256, count);
+        LiteCollect(ctx->doc, ls, hits, 256, count, 0);
     u32 n = count < 256 ? count : 256;
     return WrapNodeList(*ctx, hits, n);
 }
@@ -1459,7 +1530,7 @@ Node* DocumentBody(Node* doc)
     }
     Node* hits[1];
     u32 count = 0;
-    CollectByTag(doc, "body", hits, 1, count);
+    CollectByTag(doc, "body", hits, 1, count, 0);
     return count > 0 ? hits[0] : nullptr;
 }
 
@@ -1557,7 +1628,7 @@ Result<JsValue> ElemHostGet(Interp& I, JsObject* self, const char* key, u32 keyL
         {
             char buf[4096];
             u32 o = 0;
-            SerializeChildren(node, buf, sizeof(buf), o);
+            SerializeChildren(node, buf, sizeof(buf), o, 0);
             return JsValue::Str(js::MakeString(I.arena, buf, o));
         }
         if (KeyIs(key, keyLen, "getAttribute"))

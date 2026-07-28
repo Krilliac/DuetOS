@@ -890,11 +890,56 @@ void CssSelfTest()
         return;
     }
 
+    // --- Check 22: deeply-nested :not() terminates ---------------------
+    // ParseCompound and ParsePseudo are mutually recursive over :not(), and
+    // the per-level input cost is only ~6 bytes — a couple of KB of CSS used
+    // to drive enough native frames to hit the kstack guard page. This
+    // fixture pins the bound: 200 levels must parse and cascade WITHOUT
+    // faulting. On this boot-context thread the frame-address guard's range
+    // check is false, so what fires here is specifically the coarse
+    // kMaxSelectorNestDepth backstop — the half that a kstack-arena-only
+    // guard would have left untested.
+    {
+        static char s_deepNot[2048];
+        u32 o = 0;
+        const u32 kLevels = 200;
+        for (u32 i = 0; i < kLevels; ++i)
+        {
+            s_deepNot[o++] = ':';
+            s_deepNot[o++] = 'n';
+            s_deepNot[o++] = 'o';
+            s_deepNot[o++] = 't';
+            s_deepNot[o++] = '(';
+        }
+        s_deepNot[o++] = 'p';
+        for (u32 i = 0; i < kLevels; ++i)
+        {
+            s_deepNot[o++] = ')';
+        }
+        const char* tail = " { color: red; }";
+        for (u32 i = 0; tail[i] != '\0'; ++i)
+        {
+            s_deepNot[o++] = tail[i];
+        }
+        s_deepNot[o] = '\0';
+
+        // Parsing (not cascading) is the property under test, and it is
+        // arena-light at the capped depth — asserting on a StyleMap here
+        // would instead be asserting on the shared arena's leftover room.
+        StyleSheet sheetDeep{};
+        ParseStyleSheet(sheetDeep, s_deepNot, o, /*userAgent=*/false, arena);
+        if (sheetDeep.rules == nullptr)
+        {
+            Fail(124); // the rule must still be produced, just with the
+            return;    // over-deep negations dropped
+        }
+    }
+
     arch::SerialWrite("[css-selftest] PASS (cascade specificity inline inherit UA display-none color "
                       "first-child last-child nth-child attr-selectors child-combinator "
                       "sibling-combinators not nth-formula of-type nth-of-type "
                       "first/last-of-type only-child only-of-type nth-last-child nth-last-of-type "
-                      "combinator-backtracking)\n");
+                      "combinator-backtracking deep-not-bound)\n");
 }
 
 } // namespace duetos::web

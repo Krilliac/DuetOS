@@ -17,6 +17,7 @@
 
 #include "util/string.h"
 #include "web/css_arena.h"
+#include "web/stack_guard.h"
 
 namespace duetos::web
 {
@@ -73,8 +74,19 @@ const Node* NearestElement(const Node* n)
 // contribute their text children carrying the element's own style.
 // display:none subtrees are skipped. (GAP: inline images.)
 u32 CollectInlineRuns(const LayoutCtx& ctx, const Node* parent, const ComputedStyle* inheritedStyle,
-                      const char* inheritedHref, InlineRun* runs, u32 cap, u32 count)
+                      const char* inheritedHref, InlineRun* runs, u32 cap, u32 count, u32 depth)
 {
+    // The `count >= cap` break below bounds the number of RUNS collected,
+    // not the descent: a deep chain of empty elements (<span><span>...)
+    // emits no runs at all, so `count` never grows and the recursion runs
+    // the full DOM depth — bounded only by Arena::kMaxNodes (4096), which a
+    // page can reach via JS appendChild. Guard the native stack too.
+    // GAP: text below the depth guard is not collected into runs, so it does
+    // not render — a visual degradation, never a fault.
+    if (depth >= kWebMaxWalkDepth || WebStackExhausted())
+    {
+        return count;
+    }
     for (const Node* c = parent->firstChild; c != nullptr; c = c->nextSibling)
     {
         if (count >= cap)
@@ -112,7 +124,7 @@ u32 CollectInlineRuns(const LayoutCtx& ctx, const Node* parent, const ComputedSt
             {
                 childHref = inheritedHref;
             }
-            count = CollectInlineRuns(ctx, c, childStyle, childHref, runs, cap, count);
+            count = CollectInlineRuns(ctx, c, childStyle, childHref, runs, cap, count, depth + 1);
         }
     }
     return count;
@@ -202,7 +214,9 @@ u32 CollectInlineSiblings(const LayoutCtx& ctx, const ComputedStyle* inheritedSt
             {
                 childHref = inheritedHref;
             }
-            count = CollectInlineRuns(ctx, c, childStyle, childHref, runs, cap, count);
+            // Sibling slice: each inline element begins a fresh descent, so
+            // this is depth 0 for CollectInlineRuns' own guard.
+            count = CollectInlineRuns(ctx, c, childStyle, childHref, runs, cap, count, 0);
         }
     }
     return count;
@@ -410,7 +424,7 @@ i32 LayoutInline(LayoutCtx& ctx, const Node* parent, const ComputedStyle& parent
         {
             selfHref = parentHref;
         }
-        const u32 nRuns = CollectInlineRuns(ctx, parent, &parentStyle, selfHref, runs, kMaxRuns, 0);
+        const u32 nRuns = CollectInlineRuns(ctx, parent, &parentStyle, selfHref, runs, kMaxRuns, 0, 0);
         if (nRuns != 0)
         {
             result = LayInlineRuns(ctx, runs, nRuns, parentStyle, contentX, contentW, originY);

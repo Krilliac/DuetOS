@@ -39,6 +39,7 @@
 #include "util/string.h"
 #include "web/css_arena.h"
 #include "web/layout_internal.h"
+#include "web/stack_guard.h"
 
 namespace duetos::web
 {
@@ -88,10 +89,22 @@ bool IsBlockLevelChild(const LayoutCtx& ctx, const Node* c)
 // "block-in-inline" case). This predicate lets the parent's
 // formatting-context decision treat such an inline child as
 // block-breaking even though the child itself is inline-level. Skips
-// display:none subtrees (they generate no box). Bounded by the DOM depth
-// the arena already caps (Arena::kMaxNodes), so plain recursion is safe.
-bool ContainsBlockDescendant(const LayoutCtx& ctx, const Node* node)
+// display:none subtrees (they generate no box).
+//
+// Recursion is bounded by the shared native-stack guard (web/stack_guard.h),
+// NOT by Arena::kMaxNodes as this comment used to claim: 4096 frames were
+// never going to fit a 128 KiB kstack-arena slot, and JS appendChild can
+// build a chain that deep (the HTML parser's 256-level Builder::kMaxDepth,
+// which is what actually held in practice, does not bound the DOM).
+// GAP: below the guard the predicate reports "no block descendant", so a
+// pathologically deep inline nest lays out without the block-in-inline
+// split — a visual degradation, never a fault.
+bool ContainsBlockDescendant(const LayoutCtx& ctx, const Node* node, u32 depth)
 {
+    if (depth >= kWebMaxWalkDepth || WebStackExhausted())
+    {
+        return false;
+    }
     for (const Node* c = node->firstChild; c != nullptr; c = c->nextSibling)
     {
         if (c->kind != NodeKind::Element)
@@ -108,7 +121,7 @@ bool ContainsBlockDescendant(const LayoutCtx& ctx, const Node* node)
             return true;
         }
         // Recurse only through inline-level element children.
-        if (ContainsBlockDescendant(ctx, c))
+        if (ContainsBlockDescendant(ctx, c, depth + 1))
         {
             return true;
         }
@@ -137,7 +150,7 @@ bool BreaksInlineFlow(const LayoutCtx& ctx, const Node* c)
     {
         return false;
     }
-    return ContainsBlockDescendant(ctx, c);
+    return ContainsBlockDescendant(ctx, c, 0);
 }
 
 // Does `node` contain any direct child that breaks its inline flow?
@@ -298,6 +311,16 @@ i32 LayoutBlockInInline(LayoutCtx& ctx, const Node* inlineEl, const ComputedStyl
 i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 originY, const char* linkHref,
                 i32* carryMargin)
 {
+    // Native-stack guard for the LayoutBlock <-> LayoutBlockInInline mutual
+    // recursion, which descends once per DOM level with a large frame. Tree
+    // depth is bounded only by Arena::kMaxNodes (4096) — reachable via JS
+    // appendChild — so without this a page can walk into the kstack guard
+    // page. GAP: a subtree below the guard generates no boxes (it lays out
+    // as empty) rather than faulting the box.
+    if (ctx.depth >= kWebMaxWalkDepth || WebStackExhausted())
+    {
+        return originY;
+    }
     const ComputedStyle* sp = StyleOf(ctx, node);
     if (sp == nullptr)
     {
@@ -504,13 +527,17 @@ i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 orig
                 if (IsBlockLevelChild(ctx, c))
                 {
                     // A genuine block-level child: lay it out directly.
+                    ++ctx.depth;
                     childY = LayoutBlock(ctx, c, contentX, contentW, childY, selfHref, &childCarry);
+                    --ctx.depth;
                 }
                 else
                 {
                     // An inline element carrying a block descendant: split
                     // the inline box around the block (block-in-inline).
+                    ++ctx.depth;
                     childY = LayoutBlockInInline(ctx, c, s, contentX, contentW, childY, selfHref, &childCarry);
+                    --ctx.depth;
                 }
             }
             else
@@ -652,6 +679,12 @@ i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 orig
 i32 LayoutBlockInInline(LayoutCtx& ctx, const Node* inlineEl, const ComputedStyle& cbStyle, i32 cbX, i32 cbWidth,
                         i32 originY, const char* linkHref, i32* carryMargin)
 {
+    // Same native-stack guard as LayoutBlock — this is the other half of
+    // the mutual recursion, and it can re-enter itself directly (below).
+    if (ctx.depth >= kWebMaxWalkDepth || WebStackExhausted())
+    {
+        return originY;
+    }
     const ComputedStyle* sp = StyleOf(ctx, inlineEl);
     // The inline element's own style drives its text runs; fall back to
     // the containing block's style if (defensively) it has none.
@@ -687,13 +720,17 @@ i32 LayoutBlockInInline(LayoutCtx& ctx, const Node* inlineEl, const ComputedStyl
             inlineStart = nullptr;
             if (IsBlockLevelChild(ctx, c))
             {
+                ++ctx.depth;
                 y = LayoutBlock(ctx, c, cbX, cbWidth, y, selfHref, carryMargin);
+                --ctx.depth;
             }
             else
             {
                 // A nested inline element that itself carries a block
                 // descendant: recurse to split it too.
+                ++ctx.depth;
                 y = LayoutBlockInInline(ctx, c, cbStyle, cbX, cbWidth, y, selfHref, carryMargin);
+                --ctx.depth;
             }
         }
         else

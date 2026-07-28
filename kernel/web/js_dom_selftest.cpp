@@ -523,6 +523,39 @@ void JsDomSelfTest()
         run(okN && JsDomContextDispatchClick(ctxN, lnkN) == false);
     }
 
+    // 33. HierarchyRequestError: a cyclic appendChild is REFUSED. Without
+    // the ancestor check in AppendChild, `a.appendChild(a)` builds a
+    // self-loop, and every element-scoped walker (querySelector →
+    // LiteFindFirst, querySelectorAll / getElementsByTagName → LiteCollect
+    // / CollectByTag) then recurses into it FOREVER — a guaranteed
+    // guard-page kernel stack overflow from one line of page JS. The
+    // refusal surfaces as a failed script run (the DOM spec's throw).
+    {
+        char consoleH[128];
+        const char* selfLoop = "var a=document.createElement('div'); a.appendChild(a);";
+        JsDomResult rSelf =
+            JsRunOnDocument(doc, selfLoop, u32(duetos::core::StrLen(selfLoop)), dom, consoleH, sizeof(consoleH));
+        run(!rSelf.status);
+
+        // Two-node cycle: the first append is legal, the one that would
+        // close the loop is not.
+        const char* twoLoop = "var a=document.createElement('div');"
+                              "var b=document.createElement('div');"
+                              "a.appendChild(b); b.appendChild(a);";
+        JsDomResult rTwo =
+            JsRunOnDocument(doc, twoLoop, u32(duetos::core::StrLen(twoLoop)), dom, consoleH, sizeof(consoleH));
+        run(!rTwo.status);
+
+        // Positive control: a legitimate append still works, so the guard
+        // rejects cycles and nothing else.
+        run(RunExpectConsole(doc, dom,
+                             "var p=document.createElement('div');"
+                             "var c=document.createElement('div');"
+                             "p.appendChild(c);"
+                             "console.log(p.childNodes.length);",
+                             "1\n"));
+    }
+
     char numBuf[12];
     if (failIdx >= 0)
     {

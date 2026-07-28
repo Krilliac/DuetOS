@@ -46,6 +46,14 @@ struct LayoutCtx
     const TextMetrics& metrics;
     DisplayList* out;
     Arena& arena;
+
+    /// Current LayoutBlock/LayoutBlockInInline recursion depth. The box
+    /// walk descends once per DOM level over a tree whose depth is bounded
+    /// only by Arena::kMaxNodes (4096) — a page can build that chain via JS
+    /// appendChild — so the walk needs the web engine's native-stack guard
+    /// (web/stack_guard.h). This counter is the coarse backstop for
+    /// boot-context threads, where the frame-address range check is false.
+    u32 depth = 0;
 };
 
 /// Computed line-box height (device px) for a style: explicit
