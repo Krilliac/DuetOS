@@ -121,6 +121,15 @@ constexpr Theme kClassic = {
 
     // Pass B - motion_intensity: Classic is subdued (≈ 0.3 × 255, see spec §7)
     .motion_intensity = 77,
+
+    // Aurora shell — opt out. Classic is preserved bit-for-bit from the
+    // first GUI slice; square chrome is the whole point.
+    .window_radius = 0,
+    .surface_radius = 0,
+    .sheen_alpha = 0,
+    .gloss_alpha = 0,
+    .taskbar_island = false,
+    .taskbar_inset = 0,
 };
 
 // Amber is a deliberate retro exercise — a single-hue amber palette
@@ -214,6 +223,15 @@ constexpr Theme kAmber = {
 
     // Pass B - motion_intensity: full (tactility_enabled=false gates motion at runtime)
     .motion_intensity = 255,
+
+    // Aurora shell — opt out. The amber-CRT tribute reads wrong with soft
+    // glass, exactly as it does with tactility.
+    .window_radius = 0,
+    .surface_radius = 0,
+    .sheen_alpha = 0,
+    .gloss_alpha = 0,
+    .taskbar_island = false,
+    .taskbar_inset = 0,
 };
 
 constexpr Theme kSlate10 = {
@@ -310,6 +328,15 @@ constexpr Theme kSlate10 = {
 
     // Pass B - motion_intensity: full
     .motion_intensity = 255,
+
+    // Aurora shell — opt out. Win10 x Slate is a deliberately flat, square
+    // language; gloss would fight it.
+    .window_radius = 0,
+    .surface_radius = 0,
+    .sheen_alpha = 0,
+    .gloss_alpha = 0,
+    .taskbar_island = false,
+    .taskbar_inset = 0,
 };
 
 // Duet — the redesigned palette. Slate-charcoal canvas, dual-accent
@@ -414,6 +441,17 @@ constexpr Theme kDuet = {
 
     // Pass B - motion_intensity: full
     .motion_intensity = 255,
+
+    // Aurora shell (docs/aurora-theme/) — 1024x768 metrics from
+    // IMPLEMENTATION.md 7: window radius 8, surface radius 12, island
+    // inset 12. Duet is the Aurora reference palette: --sheen .34 -> 87,
+    // titlebar specular top .15 -> 38.
+    .window_radius = 8,
+    .surface_radius = 12,
+    .sheen_alpha = 87,
+    .gloss_alpha = 38,
+    .taskbar_island = true,
+    .taskbar_inset = 12,
 };
 
 // DuetLight — light-mode sibling of Duet, sourced from the
@@ -510,6 +548,18 @@ constexpr Theme kDuetLight = {
 
     // Pass B - motion_intensity: full
     .motion_intensity = 255,
+
+    // Aurora shell (docs/aurora-theme/) — 1024x768 metrics from
+    // IMPLEMENTATION.md 7: window radius 8, surface radius 12, island
+    // inset 12. Light mode: the design's --sheen is opaque #ffffff, so the
+    // hairline needs more alpha to read, while a white gloss ramp over
+    // near-white chrome needs less.
+    .window_radius = 8,
+    .surface_radius = 12,
+    .sheen_alpha = 140,
+    .gloss_alpha = 26,
+    .taskbar_island = true,
+    .taskbar_inset = 12,
 };
 
 // Duet accent variants. Each one duplicates the slate Duet
@@ -591,6 +641,17 @@ constexpr Theme kDuetBlue = {
 
     // Pass B - motion_intensity: full
     .motion_intensity = 255,
+
+    // Aurora shell (docs/aurora-theme/) — 1024x768 metrics from
+    // IMPLEMENTATION.md 7: window radius 8, surface radius 12, island
+    // inset 12. Accent variant of Duet; glass vocabulary is identical,
+    // only the accent hue differs.
+    .window_radius = 8,
+    .surface_radius = 12,
+    .sheen_alpha = 87,
+    .gloss_alpha = 38,
+    .taskbar_island = true,
+    .taskbar_inset = 12,
 };
 
 constexpr Theme kDuetViolet = {
@@ -661,6 +722,17 @@ constexpr Theme kDuetViolet = {
 
     // Pass B - motion_intensity: full
     .motion_intensity = 255,
+
+    // Aurora shell (docs/aurora-theme/) — 1024x768 metrics from
+    // IMPLEMENTATION.md 7: window radius 8, surface radius 12, island
+    // inset 12. Accent variant of Duet; glass vocabulary is identical,
+    // only the accent hue differs.
+    .window_radius = 8,
+    .surface_radius = 12,
+    .sheen_alpha = 87,
+    .gloss_alpha = 38,
+    .taskbar_island = true,
+    .taskbar_inset = 12,
 };
 
 constexpr Theme kDuetGreen = {
@@ -731,6 +803,17 @@ constexpr Theme kDuetGreen = {
 
     // Pass B - motion_intensity: full
     .motion_intensity = 255,
+
+    // Aurora shell (docs/aurora-theme/) — 1024x768 metrics from
+    // IMPLEMENTATION.md 7: window radius 8, surface radius 12, island
+    // inset 12. Accent variant of Duet; glass vocabulary is identical,
+    // only the accent hue differs.
+    .window_radius = 8,
+    .surface_radius = 12,
+    .sheen_alpha = 87,
+    .gloss_alpha = 38,
+    .taskbar_island = true,
+    .taskbar_inset = 12,
 };
 
 // DuetClassic — the prototype's "classic mode" sibling.
@@ -833,6 +916,16 @@ constexpr Theme kDuetClassic = {
 
     // Pass B - motion_intensity: full (Duet variant)
     .motion_intensity = 255,
+
+    // Aurora shell — opt out. Duet's Win9x-grey sibling. The retro-grey
+    // contrast against the modern Duet story is the point of the variant,
+    // so it keeps square, flat chrome (IMPLEMENTATION.md 1).
+    .window_radius = 0,
+    .surface_radius = 0,
+    .sheen_alpha = 0,
+    .gloss_alpha = 0,
+    .taskbar_island = false,
+    .taskbar_inset = 0,
 };
 
 // HighContrast — accessibility-first theme. Pure black bg,
@@ -922,6 +1015,15 @@ constexpr Theme kHighContrast = {
 
     // Pass B - motion_intensity: 0 (double-gated: tactility_enabled=false + motion=0)
     .motion_intensity = 0,
+
+    // Aurora shell — opt out. The high-contrast use-case cannot afford the
+    // legibility hit any translucency or gloss costs.
+    .window_radius = 0,
+    .surface_radius = 0,
+    .sheen_alpha = 0,
+    .gloss_alpha = 0,
+    .taskbar_island = false,
+    .taskbar_inset = 0,
 };
 
 const Theme* const kThemes[static_cast<u32>(ThemeId::kCount)] = {
@@ -942,10 +1044,30 @@ const Theme* const kThemes[static_cast<u32>(ThemeId::kCount)] = {
 // but a fresh boot lands in the dual-accent slate world the
 // prototype calls home.
 constinit ThemeId g_current = ThemeId::Duet;
-constinit WindowHandle g_role_window[static_cast<u32>(ThemeRole::kCount)] = {
-    kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid,
-    kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid, kWindowInvalid,
+
+// Role -> window handle table. Every slot MUST start at
+// `kWindowInvalid`; a brace-elided tail would zero-fill instead, and
+// 0 is a perfectly valid WindowHandle (WindowRegister hands out
+// `g_window_count`, so the first window registered IS handle 0).
+// A short initializer therefore made ThemeApplyToAll re-chrome
+// window 0 once per unpopulated role and ThemeRoleForWindow report a
+// bogus role for it. The list used to carry 12 entries against
+// ThemeRole::kCount == 18. Building the table from a constexpr
+// constructor makes the count impossible to get wrong when a role is
+// added.
+struct RoleWindowTable
+{
+    WindowHandle h[static_cast<u32>(ThemeRole::kCount)];
+
+    constexpr RoleWindowTable()
+    {
+        for (auto& slot : h)
+        {
+            slot = kWindowInvalid;
+        }
+    }
 };
+constinit RoleWindowTable g_role_window{};
 
 } // namespace
 
@@ -1001,7 +1123,7 @@ WindowHandle ThemeRoleWindow(ThemeRole role)
     const u32 idx = static_cast<u32>(role);
     if (idx >= static_cast<u32>(ThemeRole::kCount))
         return kWindowInvalid;
-    const WindowHandle h = g_role_window[idx];
+    const WindowHandle h = g_role_window.h[idx];
     if (h == kWindowInvalid || !WindowIsAlive(h))
         return kWindowInvalid;
     return h;
@@ -1015,7 +1137,7 @@ bool ThemeRoleForWindow(WindowHandle h, ThemeRole* out)
     }
     for (u32 i = 0; i < static_cast<u32>(ThemeRole::kCount); ++i)
     {
-        if (g_role_window[i] == h)
+        if (g_role_window.h[i] == h)
         {
             *out = static_cast<ThemeRole>(i);
             return true;
@@ -1029,7 +1151,7 @@ void ThemeRegisterWindow(ThemeRole role, WindowHandle h)
     const u32 idx = static_cast<u32>(role);
     if (idx >= static_cast<u32>(ThemeRole::kCount))
         return;
-    g_role_window[idx] = h;
+    g_role_window.h[idx] = h;
     // Role-tracked windows are the kernel's permanent boot apps —
     // Calculator / Notes / TaskManager / LogView / Files / Clock /
     // GfxDemo. These are always-present from the user's
@@ -1048,7 +1170,7 @@ void ThemeApplyToAll()
     // Windows: each registered role gets its chrome re-published.
     for (u32 i = 0; i < static_cast<u32>(ThemeRole::kCount); ++i)
     {
-        const WindowHandle h = g_role_window[i];
+        const WindowHandle h = g_role_window.h[i];
         if (h == kWindowInvalid || !WindowIsAlive(h))
             continue;
         WindowSetColours(h, t.window_border, t.role_title[i], t.role_client[i], t.window_close);
@@ -1297,11 +1419,55 @@ void ThemeSelfTest()
         }
     }
 
+    // Aurora invariants (docs/aurora-theme/IMPLEMENTATION.md §1).
+    //
+    // (1) A theme that opts out of tactility must also opt out of the
+    //     glass vocabulary. Amber's CRT tribute and HighContrast's
+    //     legibility budget both break under gloss / sheen / rounding
+    //     for exactly the reasons they already refuse soft shadows —
+    //     so the two flags are checked as one posture rather than
+    //     drifting apart the next time a palette is edited.
+    if (pass)
+    {
+        for (u32 i = 0; i < static_cast<u32>(ThemeId::kCount); ++i)
+        {
+            const Theme& t = *kThemes[i];
+            if (t.tactility_enabled)
+                continue;
+            if (t.window_radius != 0 || t.surface_radius != 0 || t.sheen_alpha != 0 || t.gloss_alpha != 0 ||
+                t.taskbar_island)
+            {
+                SerialWrite("[theme-selftest] FAIL flat theme carries Aurora glass tokens\n");
+                KBP_PROBE_V(debug::ProbeId::kTactilityThemeMismatch, i);
+                mark_fail(11);
+                break;
+            }
+        }
+    }
+    // (2) An island taskbar without a radius or an inset is a silent
+    //     regression: the strip would stop reaching the screen edges
+    //     while still painting square corners flush against them.
+    if (pass)
+    {
+        for (u32 i = 0; i < static_cast<u32>(ThemeId::kCount); ++i)
+        {
+            const Theme& t = *kThemes[i];
+            if (t.taskbar_island && (t.surface_radius == 0 || t.taskbar_inset == 0))
+            {
+                SerialWrite("[theme-selftest] FAIL island taskbar without radius/inset\n");
+                KBP_PROBE_V(debug::ProbeId::kTactilityThemeMismatch, i);
+                mark_fail(12);
+                break;
+            }
+        }
+    }
+
     if (pass)
     {
         SerialWrite("[theme] self-test OK (palette table + name round-trip + cycle)\n");
         SerialWrite("[theme-selftest] tactility-matrix PASS (10/10, hc-amber-opt-out=verified)\n");
         SerialWrite("[theme-selftest] motion-intensity PASS (hc-double-gate + classic-subdued + others-full)\n");
+        SerialWrite("[theme-selftest] aurora-tokens PASS (flat-themes-opt-out + island-radius-inset)\n");
         s_theme_passed = true;
     }
     else

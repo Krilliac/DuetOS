@@ -255,6 +255,57 @@ struct Theme
     //
     // See docs/superpowers/specs/2026-05-24-duetos-pass-b-design.md §7.
     u8 motion_intensity;
+
+    // ----- Aurora shell (docs/aurora-theme/) -----
+    //
+    // The Aurora redesign layers a glossy-glass vocabulary on top of
+    // the Duet family: rounded window bodies, a floating rounded
+    // taskbar island, and a two-band specular ramp on the title bar.
+    // Non-Duet palettes (Classic / Slate10 / Amber / DuetClassic /
+    // HighContrast) zero every field below and keep their existing
+    // square, flat chrome — the tokens are opt-in, not a global
+    // restyle. See docs/aurora-theme/IMPLEMENTATION.md §1-§3.
+    //
+    // Metrics are the 1024×768 column of IMPLEMENTATION.md §7, not the
+    // 1920×1080 design canvas: the shipped framebuffer is 1024×768, so
+    // the chrome (not the type) scales by ≈0.53.
+
+    // Corner radius of a window body, in pixels. 0 keeps the historical
+    // square chrome. The paint path restores the pre-paint pixels
+    // outside each corner arc, so rounding is exact rather than an
+    // approximate punch against a flat colour.
+    u32 window_radius;
+
+    // Corner radius of a floating surface — the taskbar island today.
+    // Larger than `window_radius` per the design's radius scale
+    // (windows 14 / floating surfaces 20 at 1920, i.e. 8 / 12 here).
+    u32 surface_radius;
+
+    // Alpha (0..255) of the 1-px specular hairline along the top edge
+    // of a title bar / island. The design's `--sheen`
+    // (rgba(255,255,255,.34) dark mode) is 87. 0 = no hairline.
+    u8 sheen_alpha;
+
+    // Alpha (0..255) at the TOP of the title-bar specular ramp — the
+    // white wash that decays across the upper half of the bar and
+    // then stops dead at the midpoint. That hard terminator is what
+    // reads as Aero; a smooth full-height fade reads as a generic
+    // gradient. The design's ramp starts at .15 ≈ 38.
+    // 0 = no specular (the pre-Aurora flat/shine chrome stands).
+    u8 gloss_alpha;
+
+    // When true the taskbar detaches from the screen edge and paints
+    // as a centred, content-width, rounded island with `taskbar_inset`
+    // pixels of desktop showing on every side. Clicks in the margin
+    // fall through to the wallpaper. Only defined for the Bottom /
+    // Top docks; there is no left/right dock in v0.
+    bool taskbar_island;
+
+    // Gap in pixels between the island and the screen edge. Ignored
+    // when `taskbar_island` is false. `WindowMaximize`'s bottom
+    // reserve is `taskbar_height + 2 * taskbar_inset` under an island
+    // so a maximized window doesn't tuck under it.
+    u32 taskbar_inset;
 };
 
 /// Read-only snapshot of the active theme. Valid for as long as
