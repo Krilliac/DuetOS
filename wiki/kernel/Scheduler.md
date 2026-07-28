@@ -318,6 +318,24 @@ invariants:
 - `WaitQueueBlockTimeout(deadline_ticks)` couples the two: woken
   whichever fires first (signal vs timeout). Used by driver
   command-completion paths.
+- **A wait queue woken by a device ISR must be blocked on with a
+  timeout — never `WaitQueueBlock`.** The "re-check the condition
+  under `arch::Cli`, then block" idiom closes the lost-wakeup race
+  only on a uniprocessor: the ISR runs on whichever CPU its
+  MSI-X / IOAPIC vector is routed to, so `Cli` on the submitting CPU
+  excludes nothing, and a wake landing between the re-check and the
+  enqueue inside the block finds an empty queue. The driver then
+  sleeps forever on a live, healthy device — and because an untimed
+  block never returns, the driver's own timeout and device-gone
+  checks never get to run again either. `WaitQueueBlockTimeout(wq,
+  /*ticks=*/1)` restores both: a real wake is still immediate, and a
+  timeout wake is a free retry through the loop the driver already
+  has. The Cli re-check stays, demoted to what it actually is — a
+  fast path that skips the deschedule. A queue woken by a peer
+  *task* is out of scope: that waker takes `g_sched_lock`, and
+  blocking untimed there is the ordinary condition-variable
+  contract. `tools/test/untimed-waitqueue-audit.py` is the static
+  gate (exit 1 on a violation, so it doubles as a CI check).
 - `WorkPool` (`kernel/sched/workpool.h`) is the consolidating
   primitive on top of `Mutex` + `Condvar`: N worker tasks pulling
   `(fn, arg)` items from a shared bounded FIFO. Subsystems that

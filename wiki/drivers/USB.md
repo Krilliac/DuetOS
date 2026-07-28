@@ -30,6 +30,13 @@
 - Allocates command ring + event ring + transfer rings.
 - Address Device + Get Descriptor(Device) on enumeration.
 - Bulk-transfer API shared with class drivers.
+- The HID poll task (`HidPollEntry`, `xhci_init.cpp`) drains the
+  event ring and then parks on the MSI-X-signalled wait queue with a
+  1-tick timeout. The timeout is load-bearing on SMP: the event ISR
+  runs on the CPU its vector is routed to, so an untimed block could
+  lose the wake and kill USB input on a live controller. Idle cost
+  matches the no-MSI-X fallback (`SchedSleepTicks(1)`). See
+  [Scheduler → Blocking Primitives](../kernel/Scheduler.md#blocking-primitives-sister-doc).
 
 ## Rust Descriptor Parsers
 

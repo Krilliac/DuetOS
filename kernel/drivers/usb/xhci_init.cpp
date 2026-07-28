@@ -99,10 +99,13 @@ void HidPollEntry(void* raw)
     Runtime& rt = *arg->rt;
     const bool have_msix = (arg->irq_vector != 0);
     // Opt out of the hung-task detector — a HID poller in MSI-X
-    // mode parks on the event-ring KEvent until the next USB
-    // event, which is unbounded on a QEMU smoke with no input
-    // devices generating traffic. The detector would otherwise
-    // correctly flag this as "blocked > 30s" every minute.
+    // mode parks on the event-ring wait queue between USB events,
+    // and on a QEMU smoke with no input devices there is nothing
+    // to wake it. The per-block wait is capped at one tick below,
+    // so this is belt-and-braces rather than load-bearing; it stays
+    // because the detector measures from the block entry and a
+    // future retune of that cap must not re-arm the false "blocked
+    // > 30s" report the exemption was added for.
     ::duetos::sched::SchedExemptCurrentFromHungTask();
     for (;;)
     {
@@ -176,25 +179,39 @@ void HidPollEntry(void* raw)
         }
         if (have_msix)
         {
-            // Block until the IRQ handler signals us. WaitQueueBlock
+            // Block until the IRQ handler signals us. The block
             // requires interrupts disabled on entry; the scheduler
             // re-enables them across the context switch. Spurious
             // wakes are fine — the drain-loop above handles them.
             //
-            // Lost-wakeup guard: if an event arrived between the
-            // above `while (TryReadEvent)` returning false and our
-            // Cli, the handler's WakeOne fired into an unparked
-            // task. Re-check the event ring once under Cli before
-            // committing to the block. If something's there we
-            // fall through to the next iteration, Sti-free (the
+            // Re-check the event ring once under Cli: if an event
+            // arrived between the above `while (TryReadEvent)`
+            // returning false and our Cli, the handler's WakeOne
+            // fired into an unparked task, and we skip the
+            // deschedule entirely. If something's there we fall
+            // through to the next iteration, Sti-free (the
             // scheduler's Schedule path re-enables on switch).
+            //
+            // That re-check is a fast path, NOT a lost-wakeup
+            // guard: the event ISR runs on whichever CPU the MSI-X
+            // vector is routed to, so Cli on this CPU excludes
+            // nothing on SMP and a wake can still land in the
+            // window between the re-check and the enqueue. The wait
+            // is therefore TIMED — an untimed block would park this
+            // poller forever on a live controller and silently kill
+            // USB input, with the hung-task detector opted out
+            // above. One tick of latency buys a free retry; the
+            // drain-loop re-reads the ring either way, so the
+            // return value carries nothing new. The idle cost is
+            // exactly the no-MSI-X fallback below (SchedSleepTicks(1)),
+            // and a real event still wakes us immediately.
             duetos::arch::Cli();
             if ((rt.evt_ring[rt.evt_idx].control & 1u) == (rt.evt_cycle & 1u))
             {
                 duetos::arch::Sti();
                 continue;
             }
-            duetos::sched::WaitQueueBlock(&arg->wait);
+            duetos::sched::WaitQueueBlockTimeout(&arg->wait, /*ticks=*/1);
         }
         else
         {

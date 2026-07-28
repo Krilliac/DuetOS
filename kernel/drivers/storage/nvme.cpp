@@ -581,8 +581,21 @@ bool SubmitAndWait(Queue& q, SqEntry entry)
         // the IRQ-signalled wait queue instead of burning CPU. The
         // admin queue stays strictly polled — it's only used for
         // bring-up, and blocking on a wait queue before the task
-        // scheduler is fully running would deadlock. Lost-wakeup
-        // guard: re-check the phase bit under Cli before blocking.
+        // scheduler is fully running would deadlock. The phase
+        // re-check under Cli is a fast path only: it skips the
+        // deschedule when the completion landed while we were
+        // deciding. It is NOT a lost-wakeup guard — the completion
+        // ISR runs on whichever CPU the MSI-X vector is routed to,
+        // so Cli on this CPU excludes nothing on SMP, and a wake
+        // landing between the re-check and the enqueue inside the
+        // block would find an empty queue. Hence the wait is TIMED:
+        // an untimed block would sleep forever on a live controller,
+        // and because it never returns, the CSTS surprise-removal
+        // escape and the CAP.TO+500 ms deadline above would never
+        // get to run again either. A timeout wake costs one tick and
+        // is a free retry — this loop re-reads the phase bit, CSTS
+        // and the deadline on every iteration — so the return value
+        // carries nothing we don't re-derive.
         // Panic-time writes must NEVER block here: the scheduler is
         // not running and the completion ISR cannot wake us, so we
         // fall through to the CpuPause() busy-wait path instead.
@@ -596,7 +609,7 @@ bool SubmitAndWait(Queue& q, SqEntry entry)
                 duetos::arch::Sti();
                 continue;
             }
-            duetos::sched::WaitQueueBlock(&g_ctrl.cq_wait);
+            duetos::sched::WaitQueueBlockTimeout(&g_ctrl.cq_wait, /*ticks=*/1);
         }
         else
         {

@@ -12436,3 +12436,27 @@ markers for its richest input. Three discovery layers were added (runtime
   it, days later. **Rules out** flagging includes that resolve
   nowhere — generated cbindgen and CMake-configured headers live in
   the build tree, and a gate that cries wolf gets ignored.
+
+## 2026-07-27 — An ISR-woken wait is always a timed wait
+
+- **Decision:** a driver that parks on a `sched::WaitQueue` signalled
+  by a device ISR uses `WaitQueueBlockTimeout(wq, /*ticks=*/1)`, never
+  `WaitQueueBlock`. The "re-check the condition under `arch::Cli`,
+  then block" idiom is a fast path that skips the deschedule, not a
+  lost-wakeup guard: the ISR runs on whichever CPU its MSI-X / IOAPIC
+  vector is routed to, so `Cli` on the submitting CPU excludes
+  nothing, and a wake landing between the re-check and the enqueue
+  finds an empty queue. **Rules out** closing an ISR/task race with
+  local interrupt masking, and rules out an untimed block anywhere the
+  caller also owns a deadline — the untimed block never returns, so
+  the deadline and the device-gone escape it guards become
+  unreachable. NVMe `SubmitAndWait` (CAP.TO+500 ms budget, CSTS
+  surprise-removal check) and the xHCI HID poller are the two sites
+  this landed on; the retry costs at most one tick and the enclosing
+  loops re-derive everything the discarded return value would say.
+- **Enforcement:** `tools/test/untimed-waitqueue-audit.py` — rule A
+  flags an untimed block inside a deadline-bounded function, rule B
+  flags one behind a `Cli` + `continue` re-check guard. Scoped to
+  translation units that bind an interrupt, so a queue woken by a peer
+  task (which takes `g_sched_lock`) stays out: blocking untimed there
+  is the ordinary condition-variable contract. Exit 1 on a violation.

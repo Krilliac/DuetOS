@@ -36,7 +36,11 @@ sectors at LBA" interface.
 - Polling admin queue (used only during bring-up); **MSI-X
   vector for the I/O completion queue** so I/O blocks on a wait
   queue instead of burning CPU. Polling fallback preserved for
-  controllers that don't expose MSI-X.
+  controllers that don't expose MSI-X. The block is timed
+  (1 tick) — the completion ISR lands on whichever CPU the vector
+  is routed to, so an untimed block could lose the wake on SMP and
+  hang the I/O past its CAP.TO deadline. See
+  [Scheduler → Blocking Primitives](../kernel/Scheduler.md#blocking-primitives-sister-doc).
 - Identify Controller + Identify Namespace at probe time. MDTS
   honoured; CAP.MPS validated against host page size; CAP.TO is
   the upper bound on every CSTS.RDY transition.
