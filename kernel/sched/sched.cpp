@@ -6427,6 +6427,32 @@ void FormatIdleApName(char (&out)[16], u32 cpu_id)
         arch::SerialWriteHex(static_cast<u64>(cpu_id));
         arch::SerialWrite("\n");
     }
+    // 1b. Mint the boot sentinel and install it as current_task BEFORE
+    //     anything else on this AP can reach Current().
+    //
+    //     This used to sit AFTER SchedStartIdle, ordered only against
+    //     the LAPIC timer ("install before arming the timer — once it
+    //     fires, the IRQ handler enters Schedule() and dereferences
+    //     Current()"). That reasoning was correct about the timer and
+    //     missed a nearer consumer: SchedStartIdle itself runs first,
+    //     and it allocates (SchedCreate -> KMalloc) and takes locks. On
+    //     a fresh AP the PerCpu is memset-zeroed, so current_task was
+    //     still NULLPTR for that entire window.
+    //
+    //     That is the intermittent AP-bringup fault:
+    //         [ubsan] tm-detail member-access null-deref ty='Task'
+    //         [panic] KASSERT: WaitQueueBlockTimeout on non-Running task
+    //     which fires right after "[sched/idle] idle task online" — the
+    //     tail of SchedStartIdle — because Current() was null and so
+    //     was not in state Running.
+    //
+    //     CreateApBootSentinel only allocates and fills fields; it never
+    //     reads current_task, so it is safe to run first. It sets
+    //     state = Running, which is exactly the predicate the blocking
+    //     paths assert on.
+    Task* sentinel = CreateApBootSentinel(cpu_id);
+    cpu::CurrentCpu()->current_task = sentinel;
+
     SchedStartIdle(name);
     {
         arch::SerialLineGuard guard;
@@ -6434,13 +6460,6 @@ void FormatIdleApName(char (&out)[16], u32 cpu_id)
         arch::SerialWriteHex(static_cast<u64>(cpu_id));
         arch::SerialWrite("\n");
     }
-
-    // 2. Mint a boot sentinel so Schedule() has a non-null `prev`
-    //    on its first call. Install as current_task BEFORE arming
-    //    the LAPIC timer — once the timer fires, the IRQ handler
-    //    enters Schedule() and dereferences Current().
-    Task* sentinel = CreateApBootSentinel(cpu_id);
-    cpu::CurrentCpu()->current_task = sentinel;
 
     // 3. Arm THIS CPU's LAPIC timer at 100 Hz. Vector 0x20 is
     //    already wired in the shared IDT; this just programs the
