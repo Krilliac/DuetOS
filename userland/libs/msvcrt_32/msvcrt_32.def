@@ -51,3 +51,35 @@ EXPORTS
     _chkstk
     __chkstk
     _alloca_probe
+
+; --- CRT startup cluster (msvcrt_32_crt.c) -------------------------
+; The symbols an MSVC-built PE32 touches between its entry point and
+; main(). ?terminate@@YAXXZ is renamed onto an ordinary C identifier
+; because no C name can spell the MSVC C++ mangling.
+    _lock
+    _unlock
+    _onexit
+    atexit
+    __dllonexit
+    _cexit
+    _c_exit
+    ?terminate@@YAXXZ = msvcrt32_cxx_terminate
+    _purecall
+    _callnewh
+    _XcptFilter
+    _except_handler4_common
+    _controlfp
+    __wgetmainargs
+    _wcmdln DATA
+
+; --- Wide strings / safe memory / wide formatting (msvcrt_32_wide.c)
+    wcslen
+    wcschr
+    wcsrchr
+    _wcsicmp
+    _wcsnicmp
+    _ismbblead
+    memcpy_s
+    memmove_s
+    __iob_func
+    _vsnwprintf

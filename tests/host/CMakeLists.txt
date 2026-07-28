@@ -185,6 +185,13 @@ add_host_test(gdi32_region)
 # i386 kernel32 companion path / seek-resolution core: freestanding
 # header (userland/libs/kernel32_32/kernel32_32_paths.h), no kernel TU.
 add_host_test(kernel32_32_paths)
+# i386 kernel32 companion QueryPerformanceCounter epoch extension:
+# freestanding header (kernel32_32_qpc.h). The 32-bit syscall return
+# path truncates SYS_NOW_NS, so the wrap fixup is load-bearing.
+add_host_test(kernel32_32_time)
+# i386 kernel32 companion code-page / collation core: freestanding
+# header (kernel32_32_nls.h), no kernel TU.
+add_host_test(kernel32_32_nls)
 add_host_test(damage_rect)
 # Banded damage / forced-invalidation fold: freestanding constexpr state
 # on DamageBandSet in kernel/drivers/video/framebuffer.h — no kernel TU.

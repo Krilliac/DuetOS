@@ -2962,14 +2962,15 @@ They are companions to the 44 PE32+ (x86_64) DLLs listed in section
 i386 importer's descriptor). Sources live in
 `userland/libs/<dll>_32/`.
 
-Today's i386 surface (~415 exports, 13 DLLs):
+Today's i386 surface (532 exports, 13 DLLs) — counted from the
+`.def` EXPORTS sections, not estimated:
 
 | DLL          | Exports | Source                                |
 |--------------|---------|---------------------------------------|
-| kernel32     | 69      | `userland/libs/kernel32_32/`         |
-| msvcrt       | ~50     | `userland/libs/msvcrt_32/`           |
+| kernel32     | 121     | `userland/libs/kernel32_32/`         |
+| msvcrt       | 74      | `userland/libs/msvcrt_32/`           |
 | user32       | 155     | `userland/libs/user32_32/`           |
-| gdi32        | 45      | `userland/libs/gdi32_32/`            |
+| gdi32        | 46      | `userland/libs/gdi32_32/`            |
 | advapi32     | 71      | `userland/libs/advapi32_32/`         |
 | comctl32     | 5       | `userland/libs/comctl32_32/`         |
 | comdlg32     | 1       | `userland/libs/comdlg32_32/`         |
@@ -2977,7 +2978,7 @@ Today's i386 surface (~415 exports, 13 DLLs):
 | iphlpapi     | 4       | `userland/libs/iphlpapi_32/`         |
 | shell32      | 2       | `userland/libs/shell32_32/`          |
 | shlwapi      | 1       | `userland/libs/shlwapi_32/`          |
-| ws2_32       | ~40     | `userland/libs/ws2_32_32/`           |
+| ws2_32       | 41      | `userland/libs/ws2_32_32/`           |
 | bcrypt       | 1       | `userland/libs/bcrypt_32/`           |
 
 The set was sized to cover NetSurf 3.11's 446-import surface; the
@@ -3261,6 +3262,105 @@ implementations:
 - `msvcrt_32` provides real string + memory intrinsics
   (memcpy / strlen / strcmp / etc.) and a bump-allocator
   malloc / free until the proper heap port lands.
+- **The CRT-startup cluster and the sync / time / NLS surface landed
+  2026-07-28**, sized off the measured demand across every 32-bit
+  `.exe` under a stock `C:\Windows\SysWOW64` (count = distinct
+  binaries importing a symbol the i386 set did not provide). The
+  five heaviest are all CRT startup — `_except_handler4_common`,
+  `_cexit`, `_XcptFilter`, `_controlfp` and `?terminate@@YAXXZ`, at
+  ~228 importers each — and nothing 32-bit reaches `main()` without
+  them. Because the kernel's flat Win32 thunk page is NOT mapped for
+  PE32 images (`spawn.cpp` maps it for x86_64 only), the `_32` DLLs
+  cannot alias a thunk; each of these is real code in the DLL.
+
+  REAL (implements its contract):
+  - `msvcrt_32`: `_cexit` / `_c_exit` walk a DLL-local LIFO atexit
+    table that `_onexit` / `__dllonexit` / `atexit` register into
+    (the x86_64 msvcrt thunk rows pin return-0, i.e. registration
+    always fails, so `_cexit` had nothing to walk); `_lock` /
+    `_unlock` are a 64-slot recursive TID-keyed spin lock;
+    `?terminate@@YAXXZ` and `_purecall` abort; `_callnewh` reports
+    "no new-handler"; `__wgetmainargs`; `_wcmdln`; `__iob_func`;
+    `wcslen` / `wcschr` / `wcsrchr` / `_wcsicmp` / `_wcsnicmp` /
+    `_ismbblead`; `memcpy_s` / `memmove_s` (including the
+    zero-the-destination-on-violation half most reimplementations
+    drop).
+  - `kernel32_32`: `GetSystemTime` / `GetSystemTimeAsFileTime`;
+    `QueryPerformanceCounter` / `QueryPerformanceFrequency`;
+    `LocalAlloc` / `LocalFree`; the mutex / event / semaphore /
+    wait set; real recursive `CRITICAL_SECTION` and `SRWLOCK`
+    primitives (previously `Enter`/`LeaveCriticalSection` were
+    no-ops); `CreateThread`; `MultiByteToWideChar` /
+    `WideCharToMultiByte` / `CompareStringW`; `FindClose`;
+    `GetModuleHandleEx{A,W}` / `GetModuleFileNameW` /
+    `LoadLibraryEx{A,W}` / `OutputDebugStringW`.
+
+  STUB (marked `// STUB:` in-tree, and deliberate — an import the
+  loader cannot bind is wired to a stub that SYS_EXITs on first
+  call, so a defined export that reports failure is what buys the
+  caller its own error branch):
+  - `msvcrt_32::_except_handler4_common` returns
+    `ExceptionContinueSearch` with no SEH4 scope-table walk, no
+    cookie validation and no filter / finally execution. MSVC emits
+    the IAT slot in static data for every 32-bit image with a
+    try/finally, so the symbol must exist whether or not an
+    exception is ever raised — but a guest's `try/except` blocks do
+    not run. Needs a kernel-side 32-bit exception dispatcher first.
+  - `kernel32_32::RaiseException` terminates the process carrying
+    the exception code (same as the x86_64 `kOffRaiseException`
+    thunk) because there is nothing to dispatch to.
+  - `kernel32_32::LoadResource` returns NULL — no PE
+    resource-directory walker on the i386 path.
+
+  GAP (correct on the happy path, documented limit):
+  - `QueryPerformanceCounter` reports nanoseconds with a 1 GHz
+    frequency, matching the x86_64 sibling, but the i386 syscall
+    return path is 32 bits wide: `exceptions.S` hands a compat-mode
+    caller back only `eax`, so `SYS_NOW_NS`'s 64-bit counter arrives
+    truncated and wraps every ~4.295 s. `kernel32_32_qpc.h` rebuilds
+    the high half in user space; the sequence is always monotonic
+    and exact while the caller polls faster than the wrap period,
+    but a process that lets more than ~4.295 s pass between two QPC
+    calls under-reports by 4.295 s per missed wrap. Host-tested:
+    `tests/host/test_kernel32_32_time.cpp`.
+  - `GetSystemTimeAsFileTime` avoids the same truncation by NOT
+    using `SYS_GETTIME_FT` (17), whose whole payload is in `rax`.
+    It goes through `SYS_GETTIME_ST` (40) + `SYS_ST_TO_FT` (41),
+    which move their payload through user pointers, so all 64 bits
+    survive. This is the general rule for the i386 set: **a syscall
+    that returns a 64-bit value in `rax` is unusable from PE32; use
+    the out-pointer form or the value silently truncates.**
+  - Named semaphores are process-local on i386.
+    `SYS_NAMED_KOBJ_OPEN_OR_CREATE` (185) reads its `init` word as a
+    u64 and the semaphore encoding packs `maximum` in the HIGH half;
+    arg4 arrives zero-extended from `esi`, so a named semaphore
+    created that way would have `max_count == 0` and reject every
+    release. `CreateSemaphore*` therefore takes the unnamed
+    `SYS_SEM_CREATE` (51) path plus a 16-entry process-local name
+    table. Named mutexes and events (32-bit init words) do reach
+    the kernel namespace and are shared across processes correctly.
+  - `_controlfp` tracks the control word so the CRT's read-back is
+    coherent but does not reprogram the x87 / SSE registers;
+    `_XcptFilter` selects the caller's terminate path without
+    running any unhandled-exception reporting; `HeapSetInformation`
+    accepts and ignores the policy; `DebugBreak` is a no-op (no
+    `int3` — the trap would be unhandled and kill the guest, which
+    is also what the x86_64 thunk table chose);
+    `WaitForSingleObjectEx` ignores `bAlertable` (no 32-bit
+    `QueueUserAPC` exists to be alerted by); `_vsnwprintf` consumes
+    but does not render `%f` / `%e` / `%g`.
+
+  **i386 struct-layout hazard, stated for the whole `_32` set.**
+  Every caller-owned Win32 lock struct is half the size on i386
+  because its fields are pointer-sized: `CRITICAL_SECTION` is 24
+  bytes (40 on x86_64), `SRWLOCK` and `INIT_ONCE` are 4 bytes (8 on
+  x86_64). The x86_64 siblings keep their private bookkeeping in
+  `long long` slots; copying that shape would write 8 bytes into a
+  4-byte `SRWLOCK` and corrupt whatever the guest placed after it —
+  compiling clean and surfacing later as a wild fault. Every slot in
+  `kernel32_32_sync.c` is a 32-bit `int`. This is the same class as
+  the `MSG` (28 vs 32) and `WNDCLASSEX` offset traps recorded for
+  `user32_32` above.
 - `shlwapi_32::PathAppendA` walks the path and appends a
   separator — the only non-stub in the rest of the surface.
 - `advapi32_32::SystemFunction036` and `bcrypt_32::BCryptGenRandom`
@@ -3301,9 +3401,22 @@ beside it, so an export added without an implementation is caught on
 any host, with no cross-toolchain installed. The focused
 `kernel32_32_exports_complete` CTest also runs the reverse-direction
 check in strict mode for the DLL changed here, catching an implementation
-that never reaches its export table. Hosted unit test for the i386
-path / seek-resolution core:
-`tests/host/test_kernel32_32_paths.cpp`.
+that never reaches its export table. Hosted unit tests for the i386
+pure cores: `tests/host/test_kernel32_32_paths.cpp` (path /
+seek-resolution), `tests/host/test_kernel32_32_time.cpp` (the QPC
+wrap-epoch extension in `kernel32_32_qpc.h`) and
+`tests/host/test_kernel32_32_nls.cpp` (the code-page / collation core
+in `kernel32_32_nls.h`).
+
+Both i386 companion builders (`tools/build/build-kernel32-32-dll.sh`,
+`build-msvcrt-32-dll.sh`) now glob every `.c` in their directory
+rather than enumerating two sources, matching the generic
+`build-stub-32-dll.sh`. Adding a TU to either DLL needs no
+build-system edit; before this, a new TU compiled nowhere and every
+export it defined came back as an `lld-link` "undefined symbol". The
+CMake `DEPENDS` lists are globbed with `CONFIGURE_DEPENDS` for the
+same reason — an enumerated dependency list would let an incremental
+build keep a stale DLL, which is a quieter failure than a link error.
 
 What's still GAP for the i386 set:
 

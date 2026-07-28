@@ -43,4 +43,16 @@ static inline int Duet32IsFileHandle(HANDLE h)
     return raw >= DUET32_FILE_HANDLE_MIN && raw < DUET32_FILE_HANDLE_MAX;
 }
 
+/* Cross-TU exports. These are defined in kernel32_32.c and reused by
+ * the sibling TUs (kernel32_32_misc.c builds its W spellings on top of
+ * the A ones so the sentinel strings and the syscall numbers are
+ * spelled exactly once). Declared rather than re-derived — two copies
+ * of a sentinel is how the "X:\ vs C:\" divergence class starts. */
+__declspec(dllexport) HANDLE __stdcall GetModuleHandleA(const char* lpModuleName);
+__declspec(dllexport) HANDLE __stdcall GetModuleHandleW(const wchar_t16* lpModuleName);
+__declspec(dllexport) DWORD __stdcall GetModuleFileNameA(HANDLE hModule, char* lpFilename, DWORD nSize);
+__declspec(dllexport) HANDLE __stdcall LoadLibraryA(const char* lpLibFileName);
+__declspec(dllexport) HANDLE __stdcall LoadLibraryW(const wchar_t16* lpLibFileName);
+__declspec(dllexport) void __stdcall OutputDebugStringA(const char* lpOutputString);
+
 #endif /* DUETOS_KERNEL32_32_INTERNAL_H */
