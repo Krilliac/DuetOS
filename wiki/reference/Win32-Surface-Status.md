@@ -423,8 +423,72 @@ syscall routing shows up immediately.
   (no debugger surface); `SetThreadStackGuarantee` returns TRUE
   iff `fake_ok_stack_guarantee=1` is set on the sidecar,
   otherwise FALSE + `ERROR_INVALID_PARAMETER`.
+- Path resolution: `SearchPathW` walks the documented safe search
+  order (EXE dir, cwd, system dir, Windows dir, then each `PATH`
+  element; an explicit `lpPath` replaces the walk) probing with
+  `GetFileAttributesW`, appends `lpExt` only when the name has no
+  extension of its own, and fills `lpFilePart`. `GetVolumePathNameW`
+  returns the drive root that owns a path. `GetLongPathNameW`
+  validates existence and returns the path — correct on a
+  filesystem with no 8.3 alias namespace (GAP: a short name
+  authored on a Windows volume round-trips unchanged).
+- Local time: `FileTimeToLocalFileTime` and
+  `SystemTimeToTzSpecificLocalTime` apply `Bias + StandardBias`
+  exactly, over the caller's `TIME_ZONE_INFORMATION` or the active
+  one (GAP: DST transition rules are not evaluated, so the result
+  is always the zone's *standard* time).
+- `CompareStringOrdinal` — code-unit comparison with invariant
+  upper-case folding. Ordinal is exactly the contract, so this one
+  carries no collation caveat.
+- `LCIDToLocaleName` / `SetThreadUILanguage` — en-US and the
+  invariant / neutral / system-default pseudo-LCIDs resolve;
+  anything else fails with `ERROR_INVALID_PARAMETER`.
+  `SetThreadUILanguage` returns the LANGID actually in effect,
+  which is always en-US (the single installed UI language) — the
+  same shape Windows shows on a single-language install.
+- Threadpool timers: `CreateThreadpoolTimer`, `SetThreadpoolTimer`,
+  `WaitForThreadpoolTimerCallbacks`, `CloseThreadpoolTimer` are
+  backed by a real 32-slot table plus a lazily-spawned 10 ms
+  polling service thread that *invokes the caller's callback* —
+  not a fake handle. Close/Wait drain an in-flight callback before
+  returning, so the caller's context is safe to free. GAP: one
+  shared service thread runs every callback (a blocking callback
+  delays the others), 10 ms is the resolution floor, and
+  `TP_CALLBACK_ENVIRON` is accepted but not honoured.
+- `QueryFullProcessImageNameW` — real, via `GetModuleFileNameW`.
+  The `K32GetModuleFileNameExW` / `K32GetProcessImageFileNameA/W`
+  family now routes through the same source instead of returning
+  three divergent canned strings (`C:\bin\ring3.exe` vs
+  `X:\bin\ring3.exe` vs the bare base name `ring3`).
+- `GetFileInformationByHandleEx` — `FileStandardInfo` (sizes from
+  the real `GetFileSizeEx`) and `FileBasicInfo`. Every other
+  `FILE_INFO_BY_HANDLE_CLASS` fails with
+  `ERROR_INVALID_PARAMETER` rather than returning zeroes a caller
+  would consume as data.
 
 **STUB / GAP:**
+- `SetFileInformationByHandle` — STUB. Every class returns FALSE +
+  `ERROR_NOT_SUPPORTED` (unknown classes `ERROR_INVALID_PARAMETER`):
+  there is no by-handle truncate, set-times or delete-on-close
+  syscall to route a write to.
+- `HeapSetInformation` — GAP. Both documented classes
+  (`HeapCompatibilityInformation`,
+  `HeapEnableTerminationOnCorruption`) are accepted and recorded
+  nowhere; the heap has neither an LFH tier nor block-header
+  corruption detection. Unknown classes are refused.
+- `GetProductInfo` — GAP. DuetOS has no edition concept; reports
+  `PRODUCT_PROFESSIONAL`, consistent with the version
+  `GetVersionExW` already reports.
+- Deliberately **not** provided (absent is more honest than
+  present): `ResolveDelayLoadedAPI` / `DelayLoadFailureHook` —
+  resolution needs `GetProcAddress`, which lives only in the
+  kernel thunk page and is not linkable from `kernel32.dll`; a
+  version that loaded the library but could not bind the export
+  would hand back a bogus pointer and crash at the call site.
+  `RtlUnwind` — the real unwinder is `ntdll!RtlUnwindEx`;
+  `kernel32.dll` links `/nodefaultlib` with no import table, so it
+  cannot forward, and a kernel32-local copy would be a second
+  divergent unwinder.
 - File: `LockFile`, `UnlockFile`, `LockFileEx`, `UnlockFileEx`
   return success without locking (no FS write contention in v0)
 - Process: `CreateProcessA/W` is structurally working but
@@ -861,19 +925,71 @@ focus of any current slice.
 - Registry (Reg*): `RegOpenKeyExA/W`, `RegOpenKeyExA`,
   `RegCloseKey`, `RegQueryValueExA/W`, `RegSetValueExA/W`,
   `RegEnumKeyExA/W`, `RegEnumValueA/W`, `RegQueryInfoKeyA/W`,
-  `RegCreateKeyExW`, `RegDeleteKeyW`, `RegDeleteValueW`,
+  `RegCreateKeyExA/W`, `RegDeleteKeyW`, `RegDeleteValueW`,
   `RegFlushKey`, `RegSaveKeyW`, `RegLoadKeyW`
+- `RegGetValueW` — open + query + `RRF_RT_*` type check in one
+  call, and it delivers the three guarantees `RegQueryValueExW`
+  does not: an empty `lpSubKey` queries the key itself, returned
+  `REG_SZ` / `REG_EXPAND_SZ` / `REG_MULTI_SZ` data is always
+  null-terminated even when the stored bytes are not, and
+  `*pcbData` reports the terminated length.  `RRF_ZEROONFAILURE`
+  is honoured on a type mismatch.
+- `RegDeleteTreeW` — deletes a volatile key and the values it owns
+  inline. GAP: volatile descendants are stored as independent
+  full-path slots with no child index, so a grandchild survives
+  its parent's deletion; static (const-tree) keys are not
+  deletable at all and report the Win32-idempotent success.
 - Token / SID basics: `OpenProcessToken`,
-  `GetTokenInformation` (TokenUser / TokenStatistics),
-  `LookupAccountSidA/W`, `ConvertSidToStringSidW`,
-  `ConvertStringSidToSidW`, `IsValidSid`, `EqualSid`,
-  `AllocateAndInitializeSid`, `FreeSid`,
-  `GetLengthSid`, `GetSidLengthRequired`,
-  `GetSidIdentifierAuthority`, `GetSidSubAuthority`,
-  `GetSidSubAuthorityCount`, `CopySid`
-- ACL/security descriptor scaffolding: real layout, queries
-  return canned ACL bits. `SetSecurityDescriptorOwner` etc.
-  store but don't enforce.
+  `GetTokenInformation` (**TokenUser only** — returns a real
+  `TOKEN_USER` whose `Sid` points at a well-formed
+  `S-1-5-21-1-1-1-1000`; every other class is STUB, see below),
+  `OpenThreadToken` (FALSE + `ERROR_NO_TOKEN` — DuetOS never
+  impersonates, which is the correct Win32 answer and puts callers
+  on their `OpenProcessToken` fallback), `IsValidSid`, `EqualSid`,
+  `AllocateAndInitializeSid`, `FreeSid`, `GetLengthSid`,
+  `GetSidLengthRequired`, `GetSidIdentifierAuthority`,
+  `GetSidSubAuthority`, `GetSidSubAuthorityCount`, `CopySid`
+- `CreateWellKnownSid` — a well-known SID is a constant defined by
+  the spec, not a fact about the machine, so the 20-entry table
+  emits byte-for-byte the SIDs Windows emits (`S-1-1-0`,
+  `S-1-5-18`, `S-1-5-32-544`, …). GAP: the domain-relative types
+  (`>= WinAccountAdministratorSid`) are refused — DuetOS is not
+  domain-joined.
+- `LookupAccountSidW` / `LookupAccountNameW` — resolve the single
+  local user and every well-known SID both directions, with the
+  canonical `NT AUTHORITY` / `BUILTIN` domain names and
+  `SID_NAME_USE`. Anything else is `ERROR_NONE_MAPPED`, the
+  correct answer for a SID this machine does not know.
+- Security-descriptor field accessors:
+  `SetSecurityDescriptorDacl`, `GetSecurityDescriptorDacl`,
+  `SetSecurityDescriptorOwner`, `GetAce`. The stores, loads and
+  `SE_DACL_PRESENT` / `SE_*_DEFAULTED` control bits are exact and
+  round-trip; `GetAce` walks real ACE headers by `AceSize`.
+  **They store, and nothing enforces** — see the security note
+  below.
+- ETW / WMI trace provider surface: `RegisterTraceGuidsW`,
+  `UnregisterTraceGuids`, `GetTraceEnableLevel`,
+  `GetTraceEnableFlags`, `GetTraceLoggerHandle`, `TraceMessage`,
+  `EventSetInformation`. DuetOS has no trace session
+  infrastructure, and "no session enabled" is a state these APIs
+  are *specified* for: register succeeds with a zero registration
+  handle, enable level and flags are 0, and providers therefore
+  take exactly the code path they take on a Windows box with no
+  session running. GAP: nothing can ever enable a provider here.
+  The one thing this must never do is claim a session IS enabled.
+
+> **Security note — why the descriptor/ACL block cannot be a
+> privilege-escalation path.** None of it is an access-control
+> decision. DuetOS authority is kernel-owned (durable capabilities
+> plus unexpired broker leases, masked by a monotonic grant
+> ceiling, evaluated inside the kernel), and the kernel never reads
+> a userland `SECURITY_DESCRIPTOR`. A descriptor built here is
+> inert caller-owned memory, so a PE cannot widen its own authority
+> by writing a permissive DACL nor narrow anyone else's by writing
+> a restrictive one — which is what makes the permissive fallbacks
+> safe. The corollary is the rule: **if a future slice makes the
+> kernel consult one of these structures, these functions stop
+> being facades and the parsing has to become real first.**
 - Event log facade: `RegisterEventSourceA/W`,
   `DeregisterEventSource`, `ReportEventA/W` —
   collect in serial log, no real EVTX.
@@ -896,6 +1012,25 @@ focus of any current slice.
   legacy CAPI) — GAP for non-SHA2 algorithms
 - Eventing: `EvtOpenLog`, `EvtNext`, etc. — STUB
 - WMI client: every Wmi* call — STUB
+- `GetTokenInformation` for **every class except TokenUser** —
+  STUB. Groups, privileges, integrity level and elevation state
+  are kernel-owned in DuetOS and have no Win32-token projection,
+  so a caller reading those fields reads zeroes, not this
+  process's real authority.
+- `ConvertStringSecurityDescriptorToSecurityDescriptorW` — STUB.
+  The SDDL string is **not parsed**; the descriptor returned is a
+  valid, initialised `SECURITY_DESCRIPTOR` with no DACL that a
+  caller can round-trip and free, but it does not express what the
+  caller asked for. Cannot escalate (see the security note above),
+  but a caller that believes it built a restrictive DACL is wrong.
+- `SetEntriesInAclW` — STUB. Returns `ERROR_NOT_SUPPORTED` and a
+  NULL ACL. Deliberately the loud answer: a caller that checks the
+  return value learns its ACL was not built, rather than attaching
+  an empty ACL it believes carries its entries.
+- `RegNotifyChangeKeyValue` — STUB. Returns
+  `ERROR_INVALID_FUNCTION`; there is no registry change-
+  notification channel, so signalling `hEvent` is impossible and
+  reporting success would strand the caller waiting forever.
 
 **Thunked imports (auto-generated from `kernel/subsystems/win32/thunks_table.inc`):**
 
