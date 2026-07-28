@@ -82,6 +82,8 @@
 #include "subsystems/graphics/graphics.h"
 #include "subsystems/translation/translate.h"
 #include "subsystems/win32/gdi_objects.h"
+#include "subsystems/win32/thunks.h"
+#include "subsystems/win32/thunk_retirement_policy.h"
 #include "subsystems/win32/heap_syscall.h"
 #include "subsystems/win32/vmap_syscall.h"
 #include "util/debug_assert.h"
@@ -4852,7 +4854,66 @@ void SyscallDispatch(arch::TrapFrame* frame)
             frame->rax = 0;
             return;
         }
-        const u64 va = ProcessResolveDllExportByBase(proc, frame->rdi, name_buf);
+        u64 va = ProcessResolveDllExportByBase(proc, frame->rdi, name_buf);
+
+        // Export tables are not the only place DuetOS implements a Win32
+        // API. The PE IMPORT binder resolves against the preloaded DLLs'
+        // EATs *and* the kernel thunk page; this syscall only ever consulted
+        // the EATs. So a function DuetOS genuinely implements — but
+        // implements as a thunk rather than a DLL export — was invisible to
+        // a runtime GetProcAddress. Measured on stock vulkaninfo.exe: 15
+        // misses, 13 of which are live thunk-table entries (FlsAlloc,
+        // LCMapStringEx, GetLocaleInfoEx, InitializeCriticalSectionEx, ...).
+        // The MSVC UCRT caches those NULLs and later calls through one.
+        //
+        // ONLY non-no-op thunks are returned. Many thunks are safe-ignore
+        // stubs that return a constant without doing the job (the loader
+        // already Warns when an IMPORT lands on one). Applications routinely
+        // use `GetProcAddress(h, "Foo") != NULL` as a feature/OS-version
+        // probe; handing back a no-op stub would turn "this OS lacks Foo,
+        // take the fallback path" into "Foo exists" followed by a silent
+        // no-op — trading a loud failure for a quiet wrong answer. Keeping
+        // the miss for stubs preserves the probe's meaning.
+        if (va == 0 && frame->rdi != 0 && !proc->user_is_pe32)
+        {
+            // PE32 images never get the thunk page mapped (see spawn.cpp),
+            // so offering them a thunk VA would hand back an unmapped
+            // address — worse than the miss.
+            const char* module_name = nullptr;
+            for (u64 j = 0; j < proc->dll_image_count; ++j)
+            {
+                const auto& img = proc->dll_images[j];
+                if (img.base_va == frame->rdi && img.has_exports)
+                {
+                    module_name = ::duetos::core::PeExportsDllName(img.exports);
+                    break;
+                }
+            }
+            if (module_name != nullptr)
+            {
+                u64 thunk_va = 0;
+                bool is_noop = true;
+                bool hit = ::duetos::win32::Win32ThunksLookupKind(module_name, name_buf, &thunk_va, &is_noop);
+                // kernelbase.dll is a declared pure forwarder to kernel32
+                // (see its .def — every entry forwards). Consulting
+                // kernel32's thunks for a kernelbase handle is exactly that
+                // forwarding relationship, extended to the thunk-provided
+                // subset, and matters because the api-set contracts resolve
+                // to kernelbase.
+                if (!hit && (::duetos::win32::ThunkRetirementDllEqual(module_name, "kernelbase.dll") ||
+                             ::duetos::win32::ThunkRetirementDllEqual(module_name, "kernelbase")))
+                {
+                    hit = ::duetos::win32::Win32ThunksLookupKind("kernel32.dll", name_buf, &thunk_va, &is_noop);
+                }
+                if (hit && !is_noop && thunk_va != 0)
+                {
+                    KLOG_DEBUG_S("dll-load", "GetProcAddress via thunk page", "fn", name_buf);
+                    frame->rax = thunk_va;
+                    return;
+                }
+            }
+        }
+
         if (va == 0)
         {
             // Name the miss. Returning 0 is correct GetProcAddress

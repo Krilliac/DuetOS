@@ -2023,6 +2023,44 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
                     SerialWrite("\n");
                 }
             }
+            // UCRT `_o_` alias set. `api-ms-win-crt-private-l1-1-0.dll`
+            // re-exports the CRT entry points a second time under an `_o_`
+            // prefix — `_o__initialize_onexit_table` IS
+            // `_initialize_onexit_table`, `_o_exit` IS `exit`. The prefix is
+            // an internal UCRT convention for the ordinal-stable private
+            // contract, not a distinct function, so nothing implements the
+            // prefixed spelling anywhere and the exact-name lookups above
+            // always miss.
+            //
+            // This is high-volume, not exotic: a survey of every 64-bit .exe
+            // in System32 counted ~241 binaries importing each of ~15 `_o_`
+            // names. Every base name they want is already provided by
+            // ucrtbase and by the thunk table; only the spelling stood in
+            // the way.
+            //
+            // `_o_` is a reserved UCRT-internal prefix — no shipping Win32
+            // DLL exports an unrelated symbol starting with it — so the
+            // retry cannot shadow a legitimate export. It is gated behind
+            // every earlier attempt having failed, and behind the retired-
+            // name rules, so it can only ever turn a miss into a hit.
+            if (!resolved_via_dll && !is_ordinal_import && !retired_import_requires_real_dll && fn_name[0] == '_' &&
+                fn_name[1] == 'o' && fn_name[2] == '_' && fn_name[3] != '\0')
+            {
+                const char* alias_base = fn_name + 3;
+                if (TryResolveViaPreloadedDllsAnyName(alias_base, preloaded_dlls, preloaded_dll_count, &stub_va))
+                {
+                    resolved_via_dll = true;
+                    SerialLineGuard guard;
+                    SerialWrite("[pe-resolve] via-ucrt-o-alias ");
+                    SerialWrite(dll_name);
+                    SerialWrite("!");
+                    SerialWrite(fn_name);
+                    SerialWrite(" -> ");
+                    SerialWrite(alias_base);
+                    SerialWrite("\n");
+                }
+            }
+
             // A retired PE32+ named import may use an exact DLL EAT hit or
             // one of the canonical aliases above. If neither resolves, fail
             // the load before the legacy table or generic miss logger,
