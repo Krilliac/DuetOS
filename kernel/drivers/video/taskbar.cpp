@@ -173,6 +173,12 @@ u32 RightReserve()
     // deliberately absent from the pill list below.
     const bool pill = id == ThemeId::Duet || id == ThemeId::DuetLight || id == ThemeId::DuetBlue ||
                       id == ThemeId::DuetViolet || id == ThemeId::DuetGreen;
+    // Under the island the cells pack tighter than on a full-width
+    // strip: stats pill ~110 + tray ~54 + clock ~56 + rail 6 + gaps ~24.
+    // Measuring the strip's looser 400 there is what left a dead gap
+    // between the last app button and the stats pill.
+    if (pill && ThemeCurrent().taskbar_island && ThemeTactilityEffective())
+        return 270u;
     return pill ? 400u : 180u;
 }
 

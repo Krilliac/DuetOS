@@ -727,6 +727,15 @@ void WindowDraw(const WindowChrome& w)
     // §4 "full version").
     const u8 body_alpha = glass ? theme.glass_alpha : 0U;
     const bool body_translucent = body_alpha != 0U && body_alpha != 255U;
+
+    // Aurora title bars are a NEUTRAL glass strip (design §2: specular
+    // over `--bg-3 @70%`), not a per-role hue. The role colour survives
+    // in the client fill, the taskbar glyph and the indicator pill, so
+    // nothing loses its identity — but nine saturated 30-px title bars
+    // side by side is the single loudest way the shipped desktop failed
+    // to read as the reference, which paints every window the same
+    // shade and lets the app glyph carry the ABI.
+    const u32 title_rgb = body_translucent ? LightenRgb(theme.desktop_bg, 10) : w.colour_title;
     if (w.h > tbh_eff)
     {
         const u32 body_y = w.y + tbh_eff;
@@ -778,7 +787,7 @@ void WindowDraw(const WindowChrome& w)
     // subtly modern" without crossing into the see-through Mica
     // look proper, which needs a per-pixel wallpaper read pass
     // (deferred — fb API is write-only today).
-    const u32 title_top = LightenRgb(w.colour_title, 24);
+    const u32 title_top = LightenRgb(title_rgb, 24);
     if (body_translucent)
     {
         // Design §2: the title bar is `--bg-3 @70% -> transparent` over
@@ -786,7 +795,7 @@ void WindowDraw(const WindowChrome& w)
         // the client area — dense enough for the 13 px title to read,
         // sheer enough that the wallpaper's glow still comes through.
         const u32 title_a = static_cast<u32>(body_alpha) + (255U - body_alpha) / 2U;
-        const u32 argb = (title_a << 24) | (w.colour_title & 0x00FFFFFFU);
+        const u32 argb = (title_a << 24) | (title_rgb & 0x00FFFFFFU);
         if (radius > 0 && tbh_eff > radius)
         {
             FramebufferBlendFill(w.x + radius, w.y, (w.w > 2 * radius) ? w.w - 2 * radius : 0, radius, argb);
@@ -799,11 +808,11 @@ void WindowDraw(const WindowChrome& w)
     }
     else
     {
-        FramebufferFillRoundRect(w.x, w.y, w.w, tbh_eff, radius, w.colour_title);
+        FramebufferFillRoundRect(w.x, w.y, w.w, tbh_eff, radius, title_rgb);
         if (radius > 0 && tbh_eff > radius)
         {
             // Square the two corners that abut the client area.
-            FramebufferFillRect(w.x, w.y + tbh_eff - radius, w.w, radius, w.colour_title);
+            FramebufferFillRect(w.x, w.y + tbh_eff - radius, w.w, radius, title_rgb);
         }
     }
     if (tbh_eff > 4)
@@ -831,7 +840,7 @@ void WindowDraw(const WindowChrome& w)
         }
         else
         {
-            FramebufferFillRect(w.x + 2, w.y + 1, (w.w > 4) ? w.w - 4 : 0, 1, LightenRgb(w.colour_title, 56));
+            FramebufferFillRect(w.x + 2, w.y + 1, (w.w > 4) ? w.w - 4 : 0, 1, LightenRgb(title_rgb, 56));
         }
     }
 
@@ -875,7 +884,7 @@ void WindowDraw(const WindowChrome& w)
     // gradient rather than competing with the title text.
     if (tbh_eff >= 14 && w.w > 240)
     {
-        const u32 dot_rgb = LightenRgb(w.colour_title, 64);
+        const u32 dot_rgb = LightenRgb(title_rgb, 64);
         const u32 dimple_cols = 2;
         const u32 dimple_rows = 3;
         const u32 dimple_step = 3;
@@ -930,7 +939,7 @@ void WindowDraw(const WindowChrome& w)
             CursorPosition(&hover_x, &hover_y);
             auto inside = [&](u32 bx, u32 by) -> bool
             { return hover_x >= bx && hover_x < bx + btn_w && hover_y >= by && hover_y < by + btn_h; };
-            const u32 ctrl_fill = w.colour_title;
+            const u32 ctrl_fill = title_rgb;
             const u32 ctrl_fill_hot = LightenRgb(ctrl_fill, 48);
             const u32 close_fill = w.colour_close_btn;
             const u32 close_fill_hot = LightenRgb(close_fill, 48);

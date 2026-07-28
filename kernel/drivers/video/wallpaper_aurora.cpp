@@ -29,7 +29,7 @@ struct Palette
 };
 
 constexpr Palette kDark = {
-    0x0004060A, 0x00080C12, 0x000E141D, 0x00FFFFFF, 13, 0x00A7B3C2, 0x00000000, 89,
+    0x0004060A, 0x00080C12, 0x000E141D, 0x00FFFFFF, 13, 0x00A7B3C2, 0x00000000, 56,
 };
 
 constexpr Palette kLight = {
@@ -123,7 +123,11 @@ void PaintBaseGradient(u32 w, u32 h, const Palette& pal)
 // ----- Layer 2: the aurora blobs -----------------------------------
 //
 // Each blob is a radial gradient that reaches `peak` alpha at its
-// centre and zero on the ellipse boundary. The design blurs the layer
+// centre and zero on the ellipse boundary. `peak` runs hotter than the
+// design's literal .34 / .22 / .14: the squared falloff concentrates
+// the wash into the middle third of the ellipse, so matching the CSS
+// alpha at the centre is what actually matches the CSS *appearance*
+// over the same area. The design blurs the layer
 // by 10 px; a squared falloff (1 - d^2)^2 produces the same soft
 // shoulder without a separate blur pass.
 void PaintBlob(u32 w, u32 h, u32 rgb, u32 cx_pct, u32 cy_pct, u32 rx_pct, u32 ry_pct, u32 peak)
@@ -344,9 +348,9 @@ bool EnsureCache(u32 w, u32 h, u32 accent, u32 peer, bool light)
     // README §1 layer 2: 46% 44% at 74% 20% accent 34%,
     //                    42% 40% at 16% 86% accent-2 22%,
     //                    34% 32% at 22% 14% accent 14%.
-    PaintBlob(w, h, accent, 74, 20, 46, 44, 87);
-    PaintBlob(w, h, peer, 16, 86, 42, 40, 56);
-    PaintBlob(w, h, accent, 22, 14, 34, 32, 36);
+    PaintBlob(w, h, accent, 74, 20, 46, 44, 120);
+    PaintBlob(w, h, peer, 16, 86, 42, 40, 105);
+    PaintBlob(w, h, accent, 22, 14, 34, 32, 48);
     PaintGrid(w, h, pal);
     PaintHexBand(w, h, pal);
     PaintVignette(w, h, pal);
