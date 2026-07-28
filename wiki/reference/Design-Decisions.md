@@ -12613,3 +12613,58 @@ markers for its richest input. Three discovery layers were added (runtime
   `tests/host/test_damage_bands.cpp` exercises the code the kernel
   runs (slicing, compaction, coalesce/overflow ladder, and the
   empty-diff-plus-forced-rect regression) instead of a copy.
+
+## 2026-07-27 — Global tick time is BSP-owned; APs never advance `g_ticks`
+
+- **Context:** `arch::TimerHandler` incremented the global `g_ticks`
+  unconditionally, justified by a comment claiming a "Single-CPU,
+  IRQ-handler-only writer, so there's no race". That ceased to be true
+  when per-AP LAPIC timers landed: `LapicTimerStartOnCurrent` arms every
+  AP's LVT with `kTimerVector`, the same vector the handler is installed
+  on, so on a healthy SMP boot every CPU ran it. The same function's own
+  PIT-fallback comment already said as much — the file contradicted
+  itself, which is the tell for this class of bug.
+- **Measured** at SMP=8 under WHPX, comparing the heartbeat's logged
+  `g_ticks` against klog's `[t=..ms]` stamp (sourced from
+  `HpetReadCounter`, so independent of `g_ticks`):
+  `origin/main` ran at **617.0 Hz / 610.6 Hz** against an intended
+  100 Hz — 6.17x / 6.11x. Falling short of a clean 8x, and differing
+  between two runs of the same binary, is the non-atomic
+  read-modify-write losing updates.
+- **Decision:** the BSP alone advances `g_ticks` and runs the global
+  work (sleep queue, 1 Hz heartbeat, init-wedge detection). APs take
+  `sched::OnApTimerTick` — per-task `ticks_run`, per-CPU
+  `sched_total/idle_ticks`, per-process CPU budget — which is the same
+  path the PIT-fallback IPI broadcast already drove them with, so both
+  delivery routes now have identical semantics.
+- **Rules out** making `g_ticks` atomic and letting every CPU bump it.
+  That fixes the lost updates but not the *rate*: global tick time would
+  still advance N times per wall tick on an N-CPU box. The counter
+  denominates WALL time, so exactly one CPU may own it.
+- **Rules out** deriving klog timestamps from `g_ticks`. They come from
+  the HPET, which is what made the measurement above possible at all; a
+  `g_ticks`-derived stamp would have scaled with the bug and hidden it.
+
+## 2026-07-27 — A failed AP bring-up burns its `cpu_id` slot
+
+- **Context:** `SmpStartAps` derived each AP's slot from `aps_started`,
+  a count of SUCCESSES, so an AP that missed the bounded
+  `WaitForApOnline` window left the counter unchanged and the next MADT
+  entry reused its `cpu_id` — overwriting `g_ap_percpus[id]`,
+  `g_ap_gdt_bundles[id]` and that slot's 16 KiB stack.
+- **Why that is not just a leak:** the retry path exists because a first
+  SIPI can be slow to take (Intel recommends the second SIPI for exactly
+  that), so a timed-out AP may still wake afterwards. It then reads
+  trampoline parameters that now describe a different AP, and two
+  physical CPUs run as the same `cpu_id` — sharing one PerCpu, one
+  GDT/TSS/IST set, and one kernel stack.
+- **Decision:** track the next slot index separately from the success
+  count, so a failed attempt burns its slot. `kMaxAps` is 31 and real
+  machines use far fewer, so the waste is irrelevant next to the
+  failure mode.
+- **Rules out** freeing the timed-out AP's PerCpu / GDT bundle / stack
+  on the failure path. That looks tidier and is strictly worse: a late
+  AP would then run on freed memory. Leaving the allocation owned by a
+  slot nobody reuses is what makes a late wake harmless — `online` is
+  never set and `g_cpu_id_limit` never bumped for it, so the scheduler
+  routes no work there and it simply idles.
