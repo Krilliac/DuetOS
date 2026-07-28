@@ -31,6 +31,7 @@
 
 #include "util/string.h"
 #include "web/css_arena.h"
+#include "web/stack_guard.h"
 
 namespace duetos::web
 {
@@ -105,9 +106,18 @@ bool IsFragBoundary(char c)
     return c == '.' || c == '#' || c == ':' || c == '[';
 }
 
+// Deepest :not() nesting the parser will descend into. ParseCompound and
+// ParsePseudo are mutually recursive over page-supplied stylesheet text
+// (`:not(:not(...))`), and the per-level input cost is only ~6 bytes, so a
+// 2 KB stylesheet can drive hundreds of native frames. `depth` is the
+// coarse backstop for boot-context threads; WebStackExhausted() is the real
+// limit on kstack-arena workers (see web/stack_guard.h).
+inline constexpr u32 kMaxSelectorNestDepth = 32;
+
 // Forward declaration: ParsePseudo's :not() handling needs to parse a
 // simple-selector argument, which ParseCompound provides (defined below).
-SimpleSelector* ParseCompound(const char* b, const char* e, Arena& arena, u32& aIds, u32& bClasses, u32& cTypes);
+SimpleSelector* ParseCompound(const char* b, const char* e, Arena& arena, u32& aIds, u32& bClasses, u32& cTypes,
+                              u32 depth);
 
 // Parse the An+B microsyntax of :nth-child into (a, b). Accepts forms like
 // "2n+1", "2n-1", "-n+3", "n", "+n", "3n", "-3n", "+5", "5". Returns true
@@ -225,7 +235,7 @@ bool ParseAnPlusB(const char* b, const char* e, i32& aOut, i32& bOut)
 // setting anything (still consume their token + any parenthesised arg) so
 // a `:hover` etc. doesn't break the parse.
 void ParsePseudo(const char*& p, const char* e, SimpleSelector* sel, Arena& arena, u32& aIdsFromNot, u32& bClasses,
-                 u32& cTypesFromNot)
+                 u32& cTypesFromNot, u32 depth)
 {
     const char* ns = p;
     while (p < e && !IsFragBoundary(*p) && *p != '(')
@@ -241,8 +251,26 @@ void ParsePseudo(const char*& p, const char* e, SimpleSelector* sel, Arena& aren
     {
         ++p;
         argB = p;
-        while (p < e && *p != ')')
+        // Paren-BALANCED scan: a nested functional pseudo (`:not(:not(x))`)
+        // must hand its whole argument down, not the prefix up to the first
+        // ')'. Stopping at the first ')' fed each recursion level a range
+        // one `:not(` shorter than its caller's, which is what made deep
+        // nesting cost ~6 bytes of stylesheet per native frame.
+        u32 parenDepth = 1;
+        while (p < e)
         {
+            if (*p == '(')
+            {
+                ++parenDepth;
+            }
+            else if (*p == ')')
+            {
+                --parenDepth;
+                if (parenDepth == 0)
+                {
+                    break;
+                }
+            }
             ++p;
         }
         argE = p;
@@ -349,8 +377,21 @@ void ParsePseudo(const char*& p, const char* e, SimpleSelector* sel, Arena& aren
         // counters directly (correct for a single simple selector). GAP:
         // a compound/complex argument is parsed but only its first
         // compound is honored, and only one simple component is matched.
+        //
+        // ParseCompound recurses straight back into ParsePseudo, so this is
+        // the mutual-recursion edge and the only place the nesting guard has
+        // to sit. GAP: :not() nested deeper than kMaxSelectorNestDepth (or
+        // reached with the native stack near its guard page) is parsed-past,
+        // not honored — revisit if a real page needs it. Dropping the
+        // negation degrades to over-matching, the same failure class as the
+        // compound-argument GAP above, so no new correctness surprise.
+        if (depth >= kMaxSelectorNestDepth || WebStackExhausted())
+        {
+            ++bClasses; // keep :not's class-level specificity contribution
+            return;     // token + arg already consumed
+        }
         u32 negA = 0, negB = 0, negC = 0;
-        SimpleSelector* neg = ParseCompound(argB, argE, arena, negA, negB, negC);
+        SimpleSelector* neg = ParseCompound(argB, argE, arena, negA, negB, negC, depth + 1);
         if (neg != nullptr)
         {
             // Append to the host compound's negation list.
@@ -513,7 +554,8 @@ void ParseAttr(const char*& p, const char* e, SimpleSelector* sel, Arena& arena,
 // Reads the rightmost-or-only compound (no spaces inside). Folds the
 // specificity contribution into the a/b/c counters. nullptr on OOM /
 // empty.
-SimpleSelector* ParseCompound(const char* b, const char* e, Arena& arena, u32& aIds, u32& bClasses, u32& cTypes)
+SimpleSelector* ParseCompound(const char* b, const char* e, Arena& arena, u32& aIds, u32& bClasses, u32& cTypes,
+                              u32 depth)
 {
     Trim(b, e);
     if (b >= e)
@@ -551,7 +593,7 @@ SimpleSelector* ParseCompound(const char* b, const char* e, Arena& arena, u32& a
         if (kind == ':')
         {
             ++p;
-            ParsePseudo(p, e, sel, arena, aIds, bClasses, cTypes);
+            ParsePseudo(p, e, sel, arena, aIds, bClasses, cTypes, depth);
             continue;
         }
         if (kind == '[')
@@ -677,7 +719,7 @@ SimpleSelector* ParseComplex(const char* b, const char* e, Arena& arena, u32& sp
             }
             ++p;
         }
-        SimpleSelector* comp = ParseCompound(cs, p, arena, aIds, bClasses, cTypes);
+        SimpleSelector* comp = ParseCompound(cs, p, arena, aIds, bClasses, cTypes, 0);
         if (comp == nullptr)
         {
             return nullptr;
