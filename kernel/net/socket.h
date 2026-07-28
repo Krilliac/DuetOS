@@ -30,8 +30,27 @@
  * close() drops refs; pool entry is freed and any RX queue drained
  * when refs hit 0.
  *
- * Threading model: every pool mutation runs under arch::Cli; SMP
- * needs a per-pool spinlock, same shape as the pipe/eventfd pools.
+ * Threading model: the pool and the stats counters are guarded by a
+ * file-local `sync::SpinLock` in socket.cpp. Acquiring it disables
+ * interrupts, so the same lock serialises the netif RX tail
+ * (SocketUdpDispatch) against task-context socket calls on every CPU.
+ * The v0 scheme was `arch::Cli` alone, which only excluded the local
+ * CPU — with per-CPU runqueues and work-stealing live, that let
+ * SocketRelease on one CPU free a socket's UDP RX ring while a
+ * SocketRecvDgram on another was still copying out of it.
+ *
+ * The lock is never held across a scheduling point (see spinlock.h's
+ * scope limits). A recv that has to wait drops the lock, parks on
+ * `read_wq` with a bounded timeout, then re-acquires and re-tests its
+ * condition — so a wake that lands in the drop→park window costs one
+ * extra tick instead of stalling until the next datagram.
+ *
+ * GAP: SocketRecvStream / SocketSendStream / SocketPollEvents /
+ * SocketGet still touch pool fields outside the lock — they sleep or
+ * call into the pipe pool inside their loops, so they need per-socket
+ * refcount pinning rather than a spinlock. Revisit when kernel/sched
+ * exports a release-and-block primitive (WaitQueueBlockCurrentLocked
+ * is file-local to sched.cpp today).
  *
  * RX delivery: NetUdpDispatch in stack.cpp checks the socket pool
  * via SocketUdpDispatch BEFORE the legacy UdpBinding table — once

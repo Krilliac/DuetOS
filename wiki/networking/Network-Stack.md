@@ -161,9 +161,18 @@ See [Shell Commands](../reference/Shell-Commands.md) for the full list.
   context. Blocking ops (`kSockOpConnect`, `kSockOpAccept`,
   `kSockOpRecvfrom`, `kSockOpResolveA`) park the thread on a wait queue;
   `kSockOpPollEvents` never blocks.
-- The TCB table, socket table, ARP cache, and DHCP lease are guarded by
-  per-table spinlocks taken IRQ-off, because the IRQ RX path and the
-  process-context syscall path both touch them.
+- The **socket pool** (`kernel/net/socket.cpp`) is guarded by one
+  file-local `sync::SpinLock` taken IRQ-off, because the IRQ RX path
+  (`SocketUdpDispatch`) and the process-context syscall path both touch
+  it. It covers the pool array and the stats counters; it is never held
+  across a scheduling point, so a blocking recv drops it, parks on the
+  socket's wait queue with a bounded timeout, and re-tests.
+- The **TCB table** (`kernel/net/tcp*.cpp`) is still on the older
+  `arch::Cli` / `arch::Sti` scheme, which excludes only the local CPU —
+  see [TCP State Machine → Known limits](TCP-State-Machine.md). The ARP
+  cache and DHCP lease ride the same IRQ-off convention. Converting
+  those to real spinlocks is outstanding work, not a documented
+  property of the current tree.
 - **TLS / HTTP / cookies** run entirely in the caller's process context
   on top of a socket — they may block on socket reads and never run from
   IRQ.

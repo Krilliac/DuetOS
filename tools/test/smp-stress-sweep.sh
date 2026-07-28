@@ -8,7 +8,11 @@
 #     fan-out, and AP-bring-up storm all get exercised in one boot.
 #   - x86_64-debug preset by default (UBSAN/KASAN/red-zone audit
 #     active) — surfaces both real races and instrumentation faults.
-#   - boot-time `stress=cpu` driver with N workers for SECS seconds.
+#   - boot-time `stress=<mode>` driver with N workers for SECS
+#     seconds. Mode defaults to `cpu`; `spin` is the one to reach for
+#     when the suspect is lock contention / a cross-CPU data race
+#     rather than raw runqueue churn (e.g. the 2026-07-27 socket-pool
+#     spinlock conversion in kernel/net/socket.cpp).
 #   - Repeats the scenario REPEATS times so intermittent races
 #     (ASLR-dependent collisions, cross-CPU per-task pickup, AP
 #     bring-up timing) get N chances to fire.
@@ -24,6 +28,8 @@
 #   secs=20  workers=8  repeats=5
 # Env:
 #   DUETOS_PRESET   build preset under build/<preset> (default x86_64-debug)
+#   DUETOS_STRESS_MODE  stress driver mode: cpu | mem | mix | spin
+#                   (default cpu — see kernel/diag/stress_driver.h)
 #   DUETOS_SMP      override -smp string
 #                   (default 8,sockets=1,cores=4,threads=2)
 #   DUETOS_TIMEOUT  outer wallclock cap in seconds
@@ -55,6 +61,14 @@ WORKERS="${2:-8}"
 REPEATS="${3:-5}"
 
 PRESET="${DUETOS_PRESET:-x86_64-debug}"
+MODE="${DUETOS_STRESS_MODE:-cpu}"
+case "$MODE" in
+cpu | mem | mix | spin) ;;
+*)
+    echo "error: DUETOS_STRESS_MODE='${MODE}' is not one of cpu|mem|mix|spin" >&2
+    exit 1
+    ;;
+esac
 SMP_STR="${DUETOS_SMP:-8,sockets=1,cores=4,threads=2}"
 TIMEOUT_DEFAULT=$((SECS * 8 + 120))
 TIMEOUT_SECS="${DUETOS_TIMEOUT:-${TIMEOUT_DEFAULT}}"
@@ -70,7 +84,7 @@ if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "[smp-stress-sweep] preset=${PRESET} smp=${SMP_STR} secs=${SECS} workers=${WORKERS} repeats=${REPEATS} timeout=${TIMEOUT_SECS}s"
+echo "[smp-stress-sweep] preset=${PRESET} mode=${MODE} smp=${SMP_STR} secs=${SECS} workers=${WORKERS} repeats=${REPEATS} timeout=${TIMEOUT_SECS}s"
 
 # Sequence of per-repeat outcomes. Filled in as we go.
 PASS=0
@@ -79,16 +93,16 @@ FIRST_FAIL_LOG=""
 
 for ((i = 1; i <= REPEATS; ++i)); do
     echo "[smp-stress-sweep] === repeat ${i}/${REPEATS} ==="
-    PER_LOG="${BUILD_DIR}/smp-stress-${i}.log"
+    PER_LOG="${BUILD_DIR}/smp-stress-${MODE}-${i}.log"
     # run-stress.sh writes to ${BUILD_DIR}/stress-${MODE}.log; tee
     # that to the per-repeat slot so each invocation has its own
     # captured log to analyze (the analyzer wants distinct files;
     # also lets a failed run be archived for the next session).
     DUETOS_PRESET="${PRESET}" DUETOS_SMP="${SMP_STR}" DUETOS_TIMEOUT="${TIMEOUT_SECS}" \
-        "${REPO_ROOT}/tools/qemu/run-stress.sh" cpu "${SECS}" "${WORKERS}" 0 \
+        "${REPO_ROOT}/tools/qemu/run-stress.sh" "${MODE}" "${SECS}" "${WORKERS}" 0 \
         2>&1 | tail -10
-    if [ -f "${BUILD_DIR}/stress-cpu.log" ]; then
-        cp "${BUILD_DIR}/stress-cpu.log" "${PER_LOG}"
+    if [ -f "${BUILD_DIR}/stress-${MODE}.log" ]; then
+        cp "${BUILD_DIR}/stress-${MODE}.log" "${PER_LOG}"
     else
         echo "[smp-stress-sweep] warn: per-mode log not produced; analyzer will skip" >&2
         continue
@@ -113,7 +127,7 @@ if [ "${FAIL}" -gt 0 ]; then
 fi
 
 if [ "${DUETOS_KEEP_LOGS:-1}" = "0" ] && [ "${FAIL}" -eq 0 ]; then
-    rm -f "${BUILD_DIR}"/smp-stress-*.log
+    rm -f "${BUILD_DIR}"/smp-stress-"${MODE}"-*.log
 fi
 
 [ "${FAIL}" -eq 0 ]

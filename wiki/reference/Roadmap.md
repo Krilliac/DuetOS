@@ -1093,13 +1093,23 @@ handle and that closing it permits a clean numeric-slot reuse.
 
 A local KVM-backed x86_64-debug validation run also exposed an older
 socket IRQ-state livelock before any PE fixture launched: `SocketAlloc`
-executes a raw `sti` inside the `int 0x80` trap, so the timer repeatedly
-enters at nesting depth two and the debug defer log can starve the
-instruction after `sti`. Replace the socket table's raw `Cli`/`Sti`
-pairs with an IRQ-save lock contract; separately make interrupt nesting
-distinguish hardware IRQ frames from syscall/exception frames and
-rate-limit the defer diagnostic. Do not weaken the nested-IRQ scheduling
-guard.
+executed a raw `sti` inside the `int 0x80` trap, so the timer repeatedly
+entered at nesting depth two and the debug defer log could starve the
+instruction after `sti`.
+
+**Landed 2026-07-27:** `kernel/net/socket.cpp` is off raw `Cli`/`Sti`
+entirely — one file-local `sync::SpinLock` guards the pool and the
+stats, and `SpinLockRelease` restores the caller's saved RFLAGS instead
+of unconditionally re-enabling. That is the IRQ-save lock contract, and
+it also closes the cross-CPU use-after-free on a released socket's UDP
+RX ring.
+
+**Still open:** make interrupt nesting distinguish hardware IRQ frames
+from syscall/exception frames and rate-limit the defer diagnostic. Do
+not weaken the nested-IRQ scheduling guard. Separately, the TCB table
+(`kernel/net/tcp*.cpp`, 18 remaining `arch::Cli` sites), the ARP
+cache, and the DHCP lease are still on the UP-only scheme; the socket
+pool is the worked example to copy.
 
 ### Other Win32 thunk defects found 2026-07-26 (not yet fixed)
 

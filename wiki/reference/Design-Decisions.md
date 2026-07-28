@@ -12460,3 +12460,45 @@ markers for its richest input. Three discovery layers were added (runtime
   translation units that bind an interrupt, so a queue woken by a peer
   task (which takes `g_sched_lock`) stays out: blocking untimed there
   is the ordinary condition-variable contract. Exit 1 on a violation.
+
+## 2026-07-27 — The socket pool takes a real spinlock; the untimed park stays out of kernel/sched
+
+- **Decision:** `kernel/net/socket.cpp` guards `g_pool` and `g_stats`
+  with one file-local `sync::SpinLock`, replacing every `arch::Cli()` /
+  `arch::Sti()` pair in the file. `Cli` masks interrupts on the calling
+  CPU only; with SMP live (`g_cpus_online`, per-CPU runqueues,
+  `StealNormalFromPeer`) that excluded nothing, so `SocketRelease` on
+  one CPU could `KFree` a socket's UDP RX ring while `SocketRecvDgram`
+  on another was mid-copy into a caller's buffer. Acquire is IRQ-save,
+  so the netif RX tail (`SocketUdpDispatch`) and process-context socket
+  syscalls serialize correctly, and release restores the caller's
+  RFLAGS instead of unconditionally re-enabling — which also retires the
+  `SocketAlloc`-inside-`int 0x80` IRQ-nesting livelock. **Rules out**
+  CPU-local interrupt masking as socket-pool mutual exclusion, and rules
+  out reading a socket's heap-allocated RX ring outside the lock that
+  publishes its lifetime.
+- **Decision:** a blocking recv drops the lock, parks with the bounded
+  `sched::WaitQueueBlockTimeout(..., 5)`, then re-acquires and re-tests —
+  including the socket's `type`, since the slot can be re-allocated as a
+  SOCK_STREAM socket while the reader waits. A spinlock must not be held
+  across a scheduling point, so the drop-then-park window is real; the
+  timeout is what bounds the residual lost-wake to one tick instead of
+  "until the next datagram." **Rules out** the untimed
+  `sched::WaitQueueBlock` on any path this lock guards.
+- **Decision:** calls that run their own `arch::Cli` / `arch::Sti` pair
+  (`tcp::Close`) stay outside the lock. Their unconditional `Sti` would
+  re-enable interrupts while a non-recursive lock the RX path also takes
+  is held, which self-deadlocks the CPU. **Rules out** nesting a
+  Cli/Sti-era API inside a spinlock hold to save a line of unwinding.
+- **Deferred, deliberately:** the correct long-term fix is an exported
+  release-and-block primitive (`WaitQueueBlockLocked(wq, lock)`) built on
+  sched.cpp's file-local `WaitQueueBlockCurrentLocked` /
+  `WaitQueueWakeOneLocked`. Not landed here: it is a scheduler ABI
+  addition, and `kernel/sched/sched.{h,cpp}` carried unstaged work at the
+  time. **Rules out** open-coding a private copy of that pairing in a
+  subsystem TU as a substitute.
+- **Enforcement:** `tools/test/waitqueue-block-lock-audit.py` ratchets the
+  per-file count of untimed `WaitQueueBlock` call sites whose enclosing
+  function holds only `arch::Cli()`. Baseline recorded at 26 after this
+  slice retired the 27th (`SocketRecvDgram`); every remaining entry is a
+  real SMP lost-wake, not noise.

@@ -21,6 +21,7 @@
 #include "mm/kheap.h"
 #include "sched/sched.h"
 #include "subsystems/linux/syscall_pipe.h"
+#include "sync/spinlock.h"
 #include "time/tick.h"
 
 namespace duetos::net
@@ -32,11 +33,31 @@ namespace
 Socket g_pool[kSocketPoolCap] = {};
 SocketStats g_stats = {};
 
+// Guards `g_pool` and `g_stats`. Acquire disables interrupts, so the
+// same lock serialises the NIC RX dispatch (SocketUdpDispatch, which
+// runs from the netif IRQ tail) against task-context socket calls on
+// every CPU. The v0 scheme was `arch::Cli` alone, which only excludes
+// the local CPU: with per-CPU runqueues and work-stealing live, a
+// SocketRelease on CPU 1 could free a socket's UDP RX ring while a
+// SocketRecvDgram on CPU 0 was still copying out of it.
+//
+// Never held across a scheduling point (see spinlock.h's scope
+// limits): a path that must wait drops the lock, blocks on the
+// socket's wait queue with a bounded timeout, then re-acquires and
+// re-tests its condition.
+//
+// Left unclassified for lockdep — the only lock nested inside it is
+// the scheduler's (via WaitQueueWake{One,All}), and nothing in
+// kernel/sched reaches back into the socket pool.
+constinit sync::SpinLock g_sock_lock = {
+    .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
+
 bool IpZero(Ipv4Address a)
 {
     return a.octets[0] == 0 && a.octets[1] == 0 && a.octets[2] == 0 && a.octets[3] == 0;
 }
 
+// Caller holds g_sock_lock.
 u32 FindUdpBoundPort(u16 port)
 {
     for (u32 i = 0; i < kSocketPoolCap; ++i)
@@ -49,6 +70,7 @@ u32 FindUdpBoundPort(u16 port)
 }
 
 u16 g_ephemeral_cursor = 49152;
+// Caller holds g_sock_lock.
 u16 AllocEphemeralUdpPort()
 {
     for (u32 attempts = 0; attempts < 65536; ++attempts)
@@ -83,13 +105,15 @@ i32 SocketAlloc(u16 domain, u16 type)
         return -1;
     }
 
-    arch::Cli();
+    auto flags = sync::SpinLockAcquire(g_sock_lock);
     for (u32 i = 0; i < kSocketPoolCap; ++i)
     {
         if (g_pool[i].in_use)
             continue;
         Socket& s = g_pool[i];
-        arch::Sti();
+        // KMalloc may not run under a spinlock — drop it and re-test
+        // the slot on the way back in.
+        sync::SpinLockRelease(g_sock_lock, flags);
         SocketDgram* rx = nullptr;
         if (type == kSocketTypeDgram)
         {
@@ -103,10 +127,10 @@ i32 SocketAlloc(u16 domain, u16 type)
                 return -1;
             }
         }
-        arch::Cli();
+        flags = sync::SpinLockAcquire(g_sock_lock);
         if (g_pool[i].in_use)
         {
-            arch::Sti();
+            sync::SpinLockRelease(g_sock_lock, flags);
             if (rx != nullptr)
                 mm::KFree(rx);
             return -1;
@@ -140,10 +164,10 @@ i32 SocketAlloc(u16 domain, u16 type)
         s.accept_wq.head = nullptr;
         s.accept_wq.tail = nullptr;
         ++g_stats.allocs;
-        arch::Sti();
+        sync::SpinLockRelease(g_sock_lock, flags);
         return static_cast<i32>(i);
     }
-    arch::Sti();
+    sync::SpinLockRelease(g_sock_lock, flags);
     return -1;
 }
 
@@ -151,20 +175,18 @@ void SocketRetain(u32 idx)
 {
     if (idx >= kSocketPoolCap)
         return;
-    arch::Cli();
+    sync::SpinLockGuard guard(g_sock_lock);
     if (g_pool[idx].in_use)
         ++g_pool[idx].refs;
-    arch::Sti();
 }
 
 void SocketSetOwner(u32 idx, u64 pid)
 {
     if (idx >= kSocketPoolCap)
         return;
-    arch::Cli();
+    sync::SpinLockGuard guard(g_sock_lock);
     if (g_pool[idx].in_use)
         g_pool[idx].owner_pid = pid;
-    arch::Sti();
 }
 
 void SocketReleaseByOwner(u64 pid)
@@ -173,7 +195,7 @@ void SocketReleaseByOwner(u64 pid)
         return; // kernel-owned sockets are never swept by a process exit
     for (u32 i = 0; i < kSocketPoolCap; ++i)
     {
-        arch::Cli();
+        auto flags = sync::SpinLockAcquire(g_sock_lock);
         const bool match = g_pool[i].in_use && g_pool[i].owner_pid == pid;
         if (match)
         {
@@ -185,7 +207,9 @@ void SocketReleaseByOwner(u64 pid)
             g_pool[i].refs = 1;
             g_pool[i].owner_pid = 0;
         }
-        arch::Sti();
+        // SocketRelease takes g_sock_lock itself, and the lock is not
+        // recursive — drop it before the teardown call.
+        sync::SpinLockRelease(g_sock_lock, flags);
         if (match)
             SocketRelease(i);
     }
@@ -195,17 +219,17 @@ void SocketRelease(u32 idx)
 {
     if (idx >= kSocketPoolCap)
         return;
-    arch::Cli();
+    auto flags = sync::SpinLockAcquire(g_sock_lock);
     Socket& s = g_pool[idx];
     if (!s.in_use || s.refs == 0)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_sock_lock, flags);
         return;
     }
     --s.refs;
     if (s.refs > 0)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_sock_lock, flags);
         return;
     }
     sched::WaitQueueWakeAll(&s.read_wq);
@@ -234,7 +258,10 @@ void SocketRelease(u32 idx)
     s.loopback_pipe_send_idx = -1;
     s.loopback_pending_accept_idx = -1;
     ++g_stats.releases;
-    arch::Sti();
+    // Only now is the ring unreachable: every reader either holds the
+    // lock (and sees `in_use == false` / `udp_rx == nullptr`) or is
+    // parked on read_wq, which was drained above.
+    sync::SpinLockRelease(g_sock_lock, flags);
     if (rx != nullptr)
         mm::KFree(rx);
     if (tcb != tcp::kInvalidTcbId)
@@ -263,33 +290,24 @@ bool SocketBind(u32 idx, Ipv4Address local_ip, u16 local_port)
 {
     if (idx >= kSocketPoolCap)
         return false;
-    arch::Cli();
+    sync::SpinLockGuard guard(g_sock_lock);
     Socket& s = g_pool[idx];
     if (!s.in_use || s.bound)
-    {
-        arch::Sti();
         return false;
-    }
     if (s.type == kSocketTypeDgram)
     {
         u16 port = local_port;
         if (port == 0)
             port = AllocEphemeralUdpPort();
         if (port == 0)
-        {
-            arch::Sti();
             return false;
-        }
         for (u32 i = 0; i < kSocketPoolCap; ++i)
         {
             if (i == idx)
                 continue;
             const Socket& other = g_pool[i];
             if (other.in_use && other.type == kSocketTypeDgram && other.bound && other.local_port == port)
-            {
-                arch::Sti();
                 return false;
-            }
         }
         s.local_port = port;
     }
@@ -303,7 +321,6 @@ bool SocketBind(u32 idx, Ipv4Address local_ip, u16 local_port)
     s.local_ip = local_ip;
     s.bound = true;
     ++g_stats.binds;
-    arch::Sti();
     return true;
 }
 
@@ -311,16 +328,16 @@ bool SocketListen(u32 idx, u32 backlog)
 {
     if (idx >= kSocketPoolCap)
         return false;
-    arch::Cli();
+    auto flags = sync::SpinLockAcquire(g_sock_lock);
     Socket& s = g_pool[idx];
     if (!s.in_use || s.type != kSocketTypeStream || !s.bound)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_sock_lock, flags);
         return false;
     }
     if (s.listening)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_sock_lock, flags);
         return true;
     }
     if (backlog == 0)
@@ -328,14 +345,23 @@ bool SocketListen(u32 idx, u32 backlog)
     const u32 cap = (backlog > tcp::kListenBacklogMax) ? tcp::kListenBacklogMax : backlog;
     const u16 port = s.local_port;
     const Ipv4Address ip = s.local_ip;
-    arch::Sti();
+    sync::SpinLockRelease(g_sock_lock, flags);
     const tcp::TcbId tcb = tcp::Listen(/*iface_index=*/0, ip, port, cap);
     if (tcb == tcp::kInvalidTcbId)
         return false;
-    arch::Cli();
+    flags = sync::SpinLockAcquire(g_sock_lock);
+    // The pool lock was dropped across tcp::Listen — a close or a
+    // racing listen on another CPU may have landed meanwhile, and
+    // overwriting s.tcb here would strand the other TCB.
+    if (!s.in_use || s.listening)
+    {
+        sync::SpinLockRelease(g_sock_lock, flags);
+        tcp::Release(tcb);
+        return false;
+    }
     s.tcb = tcb;
     s.listening = true;
-    arch::Sti();
+    sync::SpinLockRelease(g_sock_lock, flags);
     return true;
 }
 
@@ -343,11 +369,11 @@ bool SocketConnect(u32 idx, Ipv4Address peer_ip, u16 peer_port)
 {
     if (idx >= kSocketPoolCap)
         return false;
-    arch::Cli();
+    auto flags = sync::SpinLockAcquire(g_sock_lock);
     Socket& s = g_pool[idx];
     if (!s.in_use)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_sock_lock, flags);
         return false;
     }
     if (s.type == kSocketTypeDgram)
@@ -357,7 +383,7 @@ bool SocketConnect(u32 idx, Ipv4Address peer_ip, u16 peer_port)
             const u16 ephem = AllocEphemeralUdpPort();
             if (ephem == 0)
             {
-                arch::Sti();
+                sync::SpinLockRelease(g_sock_lock, flags);
                 return false;
             }
             s.local_port = ephem;
@@ -367,7 +393,7 @@ bool SocketConnect(u32 idx, Ipv4Address peer_ip, u16 peer_port)
         s.peer_port = peer_port;
         s.connected = true;
         ++g_stats.connects;
-        arch::Sti();
+        sync::SpinLockRelease(g_sock_lock, flags);
         return true;
     }
 
@@ -387,15 +413,17 @@ bool SocketConnect(u32 idx, Ipv4Address peer_ip, u16 peer_port)
         }
         if (listener_idx < 0)
         {
-            arch::Sti();
+            sync::SpinLockRelease(g_sock_lock, flags);
             return false;
         }
         if (g_pool[listener_idx].loopback_pending_accept_idx != -1)
         {
-            arch::Sti();
+            sync::SpinLockRelease(g_sock_lock, flags);
             return false;
         }
-        arch::Sti();
+        // SocketAlloc / PipeAlloc both allocate, so the lock has to go
+        // before either; the pairing below re-validates both ends.
+        sync::SpinLockRelease(g_sock_lock, flags);
         const i32 accepted_idx = SocketAlloc(kSocketDomainInet, kSocketTypeStream);
         if (accepted_idx < 0)
             return false;
@@ -413,7 +441,20 @@ bool SocketConnect(u32 idx, Ipv4Address peer_ip, u16 peer_port)
             SocketRelease(static_cast<u32>(accepted_idx));
             return false;
         }
-        arch::Cli();
+        flags = sync::SpinLockAcquire(g_sock_lock);
+        if (!g_pool[idx].in_use || !g_pool[listener_idx].in_use ||
+            g_pool[listener_idx].loopback_pending_accept_idx != -1)
+        {
+            // Either end went away (or another connector won the
+            // listener's single pending slot) while the lock was down.
+            sync::SpinLockRelease(g_sock_lock, flags);
+            ::duetos::subsystems::linux::internal::PipeReleaseRead(static_cast<u32>(c2s_pipe));
+            ::duetos::subsystems::linux::internal::PipeReleaseWrite(static_cast<u32>(c2s_pipe));
+            ::duetos::subsystems::linux::internal::PipeReleaseRead(static_cast<u32>(s2c_pipe));
+            ::duetos::subsystems::linux::internal::PipeReleaseWrite(static_cast<u32>(s2c_pipe));
+            SocketRelease(static_cast<u32>(accepted_idx));
+            return false;
+        }
         Socket& cs = g_pool[idx];
         Socket& as = g_pool[accepted_idx];
         cs.peer_ip = peer_ip;
@@ -435,21 +476,22 @@ bool SocketConnect(u32 idx, Ipv4Address peer_ip, u16 peer_port)
         g_pool[listener_idx].loopback_pending_accept_idx = accepted_idx;
         sched::WaitQueueWakeAll(&g_pool[listener_idx].accept_wq);
         ++g_stats.connects;
-        arch::Sti();
+        sync::SpinLockRelease(g_sock_lock, flags);
         return true;
     }
 
     // On-wire SOCK_STREAM via tcp::Connect.
-    arch::Sti();
+    sync::SpinLockRelease(g_sock_lock, flags);
     const tcp::TcbId tcb = tcp::Connect(/*iface_index=*/0, peer_ip, peer_port, /*local_port=*/0);
     if (tcb == tcp::kInvalidTcbId)
         return false;
     // Wait up to 10 s for the handshake to complete.
     const bool ok = tcp::WaitConnected(tcb, /*timeout_ticks=*/1000);
-    arch::Cli();
-    if (!ok)
+    flags = sync::SpinLockAcquire(g_sock_lock);
+    // The handshake wait is long; the socket can be closed under us.
+    if (!ok || !s.in_use)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_sock_lock, flags);
         tcp::Abort(tcb);
         tcp::Release(tcb);
         return false;
@@ -467,7 +509,7 @@ bool SocketConnect(u32 idx, Ipv4Address peer_ip, u16 peer_port)
         s.bound = true;
     }
     ++g_stats.connects;
-    arch::Sti();
+    sync::SpinLockRelease(g_sock_lock, flags);
     return true;
 }
 
@@ -475,11 +517,11 @@ i32 SocketAcceptLoopback(u32 listener_idx, Ipv4Address* out_peer_ip, u16* out_pe
 {
     if (listener_idx >= kSocketPoolCap)
         return -1;
-    arch::Cli();
+    auto flags = sync::SpinLockAcquire(g_sock_lock);
     Socket& l = g_pool[listener_idx];
     if (!l.in_use || l.type != kSocketTypeStream || !l.listening || l.loopback_pending_accept_idx == -1)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_sock_lock, flags);
         return -1;
     }
     const i32 accepted = l.loopback_pending_accept_idx;
@@ -491,7 +533,7 @@ i32 SocketAcceptLoopback(u32 listener_idx, Ipv4Address* out_peer_ip, u16* out_pe
         peer_ip = g_pool[accepted].peer_ip;
         peer_port = g_pool[accepted].peer_port;
     }
-    arch::Sti();
+    sync::SpinLockRelease(g_sock_lock, flags);
     if (out_peer_ip != nullptr)
         *out_peer_ip = peer_ip;
     if (out_peer_port != nullptr)
@@ -510,15 +552,15 @@ i32 SocketAccept(u32 listener_idx, Ipv4Address* out_peer_ip, u16* out_peer_port)
         if (lb >= 0)
             return lb;
         // On-wire: ask the TCB table.
-        arch::Cli();
+        auto flags = sync::SpinLockAcquire(g_sock_lock);
         Socket& l = g_pool[listener_idx];
         if (!l.in_use || l.type != kSocketTypeStream || !l.listening || l.tcb == tcp::kInvalidTcbId)
         {
-            arch::Sti();
+            sync::SpinLockRelease(g_sock_lock, flags);
             return -1;
         }
         const tcp::TcbId listener_tcb = l.tcb;
-        arch::Sti();
+        sync::SpinLockRelease(g_sock_lock, flags);
         Ipv4Address peer_ip;
         u16 peer_port;
         const tcp::TcbId child = tcp::AcceptNonblocking(listener_tcb, &peer_ip, &peer_port);
@@ -531,7 +573,7 @@ i32 SocketAccept(u32 listener_idx, Ipv4Address* out_peer_ip, u16* out_peer_port)
                 tcp::Release(child);
                 return -1;
             }
-            arch::Cli();
+            flags = sync::SpinLockAcquire(g_sock_lock);
             Socket& cs = g_pool[new_idx];
             cs.tcb = child;
             cs.peer_ip = peer_ip;
@@ -545,7 +587,7 @@ i32 SocketAccept(u32 listener_idx, Ipv4Address* out_peer_ip, u16* out_peer_port)
                 cs.local_port = le_port;
                 cs.bound = true;
             }
-            arch::Sti();
+            sync::SpinLockRelease(g_sock_lock, flags);
             if (out_peer_ip != nullptr)
                 *out_peer_ip = peer_ip;
             if (out_peer_port != nullptr)
@@ -561,12 +603,20 @@ i32 SocketAccept(u32 listener_idx, Ipv4Address* out_peer_ip, u16* out_peer_port)
         sched::WaitQueue* wq = tcp::AcceptWaitQueue(listener_tcb);
         if (wq != nullptr)
         {
-            arch::Cli();
-            // Re-check under the lock so we don't lose a wake that
-            // arrived between the AcceptNonblocking check and now.
-            if (l.in_use && l.loopback_pending_accept_idx == -1)
+            // Re-check under the pool lock so we don't lose a wake that
+            // arrived between the AcceptNonblocking check and now. The
+            // park itself runs after the lock is dropped — a spinlock
+            // must not be held across a scheduling point — so the
+            // timeout, not the lock, is what bounds the residual race.
+            flags = sync::SpinLockAcquire(g_sock_lock);
+            const bool park = l.in_use && l.loopback_pending_accept_idx == -1;
+            sync::SpinLockRelease(g_sock_lock, flags);
+            if (park)
+            {
+                arch::Cli();
                 sched::WaitQueueBlockTimeout(wq, /*ticks=*/5);
-            arch::Sti();
+                arch::Sti();
+            }
         }
         else
         {
@@ -597,14 +647,16 @@ i64 SocketSendDgram(u32 idx, Ipv4Address dst_ip, u16 dst_port, const u8* data, u
         return -39;
     if (!s.bound)
     {
+        // Claim + record under one lock hold: AllocEphemeralUdpPort
+        // scans the pool for a free port, so splitting the two halves
+        // lets a peer on another CPU bind the same port in between.
+        sync::SpinLockGuard guard(g_sock_lock);
         const u16 ephem = AllocEphemeralUdpPort();
         if (ephem == 0)
             return -98;
-        arch::Cli();
         s.local_port = ephem;
         s.local_ip = {};
         s.bound = true;
-        arch::Sti();
     }
     if (drivers::net::NicCount() == 0)
         return -100;
@@ -622,7 +674,10 @@ i64 SocketSendDgram(u32 idx, Ipv4Address dst_ip, u16 dst_port, const u8* data, u
     }
     if (!NetUdpSend(/*iface_index=*/0, dst_mac, dst, port, src, s.local_port, data, len))
         return -101;
-    ++g_stats.dgram_tx;
+    {
+        sync::SpinLockGuard guard(g_sock_lock);
+        ++g_stats.dgram_tx;
+    }
     return static_cast<i64>(len);
 }
 
@@ -635,22 +690,38 @@ i64 SocketRecvDgram(u32 idx, u8* out, u32 cap, u32* out_len, Ipv4Address* out_sr
     Socket& s = g_pool[idx];
     if (!s.in_use || s.type != kSocketTypeDgram)
         return -88;
-    arch::Cli();
-    while (s.in_use && s.udp_count == 0)
+    auto flags = sync::SpinLockAcquire(g_sock_lock);
+    // The type re-test matters on every pass: the slot can be released
+    // and re-allocated as a SOCK_STREAM socket while we wait, which
+    // leaves udp_rx null and udp_count pinned at 0 forever.
+    while (s.in_use && s.type == kSocketTypeDgram && s.udp_count == 0)
     {
         if ((s.shutdown_flags & 0x1) != 0)
         {
-            arch::Sti();
+            sync::SpinLockRelease(g_sock_lock, flags);
             return 0;
         }
-        sched::WaitQueueBlock(&s.read_wq);
+        // A spinlock must not be held across a scheduling point, so
+        // drop it before parking. That leaves a window in which
+        // SocketUdpDispatch on another CPU can push a datagram and
+        // wake an empty queue, so the park is bounded rather than
+        // untimed: the worst case is one late tick, not a reader
+        // stuck until the NEXT datagram arrives.
+        sync::SpinLockRelease(g_sock_lock, flags);
         arch::Cli();
-    }
-    if (!s.in_use)
-    {
+        sched::WaitQueueBlockTimeout(&s.read_wq, /*ticks=*/5);
         arch::Sti();
+        flags = sync::SpinLockAcquire(g_sock_lock);
+    }
+    if (!s.in_use || s.type != kSocketTypeDgram || s.udp_rx == nullptr)
+    {
+        sync::SpinLockRelease(g_sock_lock, flags);
         return -9;
     }
+    // The copy-out stays under the lock: SocketRelease frees udp_rx
+    // the moment it can observe the slot free, and `out` is the
+    // syscall handler's kernel staging buffer, so the copy can't
+    // fault or block.
     SocketDgram& d = s.udp_rx[s.udp_tail];
     s.udp_tail = (s.udp_tail + 1) % kSocketUdpRxQueueCap;
     --s.udp_count;
@@ -663,8 +734,8 @@ i64 SocketRecvDgram(u32 idx, u8* out, u32 cap, u32* out_len, Ipv4Address* out_sr
         *out_src_ip = d.src_ip;
     if (out_src_port != nullptr)
         *out_src_port = d.src_port;
-    arch::Sti();
     ++g_stats.dgram_rx;
+    sync::SpinLockRelease(g_sock_lock, flags);
     return static_cast<i64>(to_copy);
 }
 
@@ -691,7 +762,10 @@ i64 SocketSendStream(u32 idx, const u8* data, u32 len)
         const i64 wrote = ::duetos::subsystems::linux::internal::PipeWriteKernel(
             static_cast<u32>(s.loopback_pipe_send_idx), data, len);
         if (wrote > 0)
+        {
+            sync::SpinLockGuard guard(g_sock_lock);
             ++g_stats.stream_tx;
+        }
         return wrote;
     }
     if (s.tcb == tcp::kInvalidTcbId)
@@ -716,7 +790,10 @@ i64 SocketSendStream(u32 idx, const u8* data, u32 len)
         break;
     }
     if (sent_total > 0)
+    {
+        sync::SpinLockGuard guard(g_sock_lock);
         ++g_stats.stream_tx;
+    }
     return static_cast<i64>(sent_total);
 }
 
@@ -741,7 +818,10 @@ i64 SocketRecvStream(u32 idx, u8* out, u32 cap)
         const i64 got =
             ::duetos::subsystems::linux::internal::PipeReadKernel(static_cast<u32>(s.loopback_pipe_recv_idx), out, cap);
         if (got > 0)
+        {
+            sync::SpinLockGuard guard(g_sock_lock);
             ++g_stats.stream_rx;
+        }
         return got;
     }
     if (s.tcb == tcp::kInvalidTcbId)
@@ -757,6 +837,7 @@ i64 SocketRecvStream(u32 idx, u8* out, u32 cap)
         const i32 n = tcp::RecvNonblocking(s.tcb, out, cap);
         if (n > 0)
         {
+            sync::SpinLockGuard guard(g_sock_lock);
             ++g_stats.stream_rx;
             return n;
         }
@@ -800,24 +881,27 @@ bool SocketShutdown(u32 idx, u32 how)
 {
     if (idx >= kSocketPoolCap)
         return false;
-    arch::Cli();
-    Socket& s = g_pool[idx];
-    if (!s.in_use)
+    tcp::TcbId half_close = tcp::kInvalidTcbId;
     {
-        arch::Sti();
-        return false;
+        sync::SpinLockGuard guard(g_sock_lock);
+        Socket& s = g_pool[idx];
+        if (!s.in_use)
+            return false;
+        if (how == 0 || how == 2)
+            s.shutdown_flags |= 0x1;
+        if (how == 1 || how == 2)
+        {
+            s.shutdown_flags |= 0x2;
+            half_close = s.tcb;
+        }
+        sched::WaitQueueWakeAll(&s.read_wq);
     }
-    if (how == 0 || how == 2)
-        s.shutdown_flags |= 0x1;
-    if (how == 1 || how == 2)
-    {
-        s.shutdown_flags |= 0x2;
-        // Half-close the TCB — sends FIN.
-        if (s.tcb != tcp::kInvalidTcbId)
-            tcp::Close(s.tcb);
-    }
-    sched::WaitQueueWakeAll(&s.read_wq);
-    arch::Sti();
+    // Half-close the TCB — sends FIN. Deliberately outside the pool
+    // lock: tcp::Close runs its own arch::Cli/Sti pair, and that
+    // unconditional Sti would re-enable interrupts while we still
+    // held a non-recursive spinlock the RX path also takes.
+    if (half_close != tcp::kInvalidTcbId)
+        tcp::Close(half_close);
     return true;
 }
 
@@ -846,24 +930,19 @@ bool SocketUdpDispatch(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 ds
     (void)iface_index;
     if (payload == nullptr && len > 0)
         return false;
-    arch::Cli();
+    sync::SpinLockGuard guard(g_sock_lock);
     const u32 owner_idx = FindUdpBoundPort(dst_port);
     if (owner_idx == kSocketPoolCap)
-    {
-        arch::Sti();
         return false;
-    }
     Socket& s = g_pool[owner_idx];
     if ((s.shutdown_flags & 0x1) != 0 || s.udp_rx == nullptr)
     {
         ++g_stats.dgram_dropped;
-        arch::Sti();
         return true;
     }
     if (s.udp_count == kSocketUdpRxQueueCap)
     {
         ++g_stats.dgram_dropped;
-        arch::Sti();
         return true;
     }
     SocketDgram& d = s.udp_rx[s.udp_head];
@@ -877,12 +956,12 @@ bool SocketUdpDispatch(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 ds
     for (u32 i = 0; i < to_copy; ++i)
         d.payload[i] = p[i];
     sched::WaitQueueWakeOne(&s.read_wq);
-    arch::Sti();
     return true;
 }
 
 SocketStats SocketStatsRead()
 {
+    sync::SpinLockGuard guard(g_sock_lock);
     return g_stats;
 }
 
