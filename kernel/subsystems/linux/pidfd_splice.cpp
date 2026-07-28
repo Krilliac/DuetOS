@@ -3,12 +3,34 @@
  *
  * pidfd_open / pidfd_send_signal / pidfd_getfd are the modern
  * race-free signaling API. v0 implementation: a pidfd is a
- * LinuxFd (state 12) that pins a target Process via
- * ProcessRetain at open and drops the ref at close. Read /
- * write reject pidfds with EBADF (the only operation Linux
- * supports on a pidfd is poll/epoll for "process exited" and
+ * LinuxFd (state 12) carrying nothing but the target pid in
+ * `first_cluster` — a WEAK reference. Read / write reject
+ * pidfds with EBADF (the only operation Linux supports on a
+ * pidfd is poll/epoll for "process exited" and
  * pidfd_send_signal — v0 supports the send_signal path; the
  * exit-poll integration is a sub-GAP).
+ *
+ * WHY WEAK, NOT A ProcessRetain: process teardown is what drains
+ * the fd table. `ipc::HandleTableDrain(p->kobj_handles)` — the
+ * only thing that closes an fd a process never close(2)'d — runs
+ * INSIDE ProcessRelease's refcount==0 body. So a strong Process
+ * ref held by an fd is an unbreakable cycle: pidfd_open(getpid())
+ * takes 1->2, exit drops 2->1, the destruction body (and with it
+ * the drain that would have dropped the other ref) never runs.
+ * The process, its whole address space, its sockets and its
+ * child-exit publication to a waiting parent all leak forever;
+ * a fork()+pidfd_open(getpid())+exit() loop is an unbounded
+ * memory-exhaustion primitive. Two processes pidfd_open'ing each
+ * other pin each other the same way, so refusing self-pidfds
+ * would not have fixed it.
+ *
+ * Weak is safe because pids are monotonic and never reused
+ * (process.cpp `g_next_pid`), so a pid names at most one Process
+ * for the life of the boot — the property process.cpp already
+ * relies on when it resolves a dying child's parent by pid. Every
+ * consumer re-resolves through SchedFindProcessByPid and takes a
+ * TRANSIENT retain across its use (same idiom as
+ * ResolveAffinityTarget in syscall_sched.cpp).
  *
  * splice / tee / vmsplice route bytes between fds without a
  * userland round-trip. v0 bounces through a 1 KiB on-stack
@@ -38,10 +60,11 @@ namespace
 {
 
 // Pidfd allocation pool. Per-process instead of a global pool —
-// each pidfd needs to live in the caller's linux_fds[] slot table
-// and pin ITS view of the target. The first_cluster slot of the
-// LinuxFd carries the target PID; ProcessRetain is performed on
-// the live Process at open time and Released at close.
+// each pidfd lives in the caller's linux_fds[] slot table. The
+// first_cluster slot of the LinuxFd carries the target PID and
+// that is the WHOLE of a pidfd's state; no Process reference is
+// held (see the file banner for why a strong ref would deadlock
+// teardown).
 //
 // Zero-copy claim: NOT pidfds — those don't transfer pages, they
 // just hold a process handle. The "zero-copy" comment lives on
@@ -78,30 +101,14 @@ sched::WaitQueue* LinuxPidfdExitWq()
     return &g_pidfd_exit_wq;
 }
 
-// Pidfd KFile release adapter — invoked by `KFileDestroy` when
-// the last reference on a pidfd's KFile drops. `pool_index`
-// carries the target pid (matches `LinuxFd::first_cluster` for
-// state-12 slots). Looks the target up in the global PID
-// registry and drops the `ProcessRetain` that `DoPidfdOpen`
-// took. Tolerates the "target already reaped" case — the
-// lookup returns null and we simply do nothing (no ref to drop;
-// the missed Release is benign because the target's last
-// reference has already been dropped by another path).
-//
-// Symmetry with the legacy DoClose arm preserved: same lookup
-// + same Release call, just routed through the unified KObject
-// refcount path instead of the per-state-tag dispatch in DoClose.
-void PidfdRelease(u32 pid)
-{
-    core::Process* target = sched::SchedFindProcessByPid(pid);
-    if (target != nullptr)
-        core::ProcessRelease(target);
-}
-
 // =========================================================
 // pidfd_open / pidfd_send_signal
 // =========================================================
 
+// pidfd_open(pid, flags) — a weak, pid-keyed handle on a live
+// process. No Process reference is taken: the fd stores the pid
+// and every consumer re-resolves it. See the file banner for the
+// teardown cycle a strong reference would create.
 i64 DoPidfdOpen(u64 pid, u64 flags)
 {
     constexpr u64 kPIDFD_NONBLOCK = 0x800;
@@ -122,22 +129,21 @@ i64 DoPidfdOpen(u64 pid, u64 flags)
     const i32 fd = core::LinuxFdAllocLowest(caller, 3);
     if (fd < 0)
         return kEMFILE;
-    core::ProcessRetain(target);
     caller->linux_fds[fd].state = 12;
     caller->linux_fds[fd].flags = 0;
     caller->linux_fds[fd].first_cluster = static_cast<u32>(pid);
     caller->linux_fds[fd].size = 0;
     caller->linux_fds[fd].offset = 0;
     caller->linux_fds[fd].path[0] = '\0';
-    if (!core::LinuxFdAttachKFile(caller, static_cast<u32>(fd), /*kind=*/12, static_cast<u32>(pid), &PidfdRelease))
+    // No release callback: a pidfd owns no pool slot and no
+    // Process reference, so there is nothing for KFileDestroy to
+    // drop. `kfile.cpp` KFileDestroy explicitly supports a null
+    // pool-release callback ("for kinds with no pool ref to drop
+    // ... the callback is nullptr and we just free").
+    if (!core::LinuxFdAttachKFile(caller, static_cast<u32>(fd), /*kind=*/12, static_cast<u32>(pid),
+                                  /*release=*/nullptr))
     {
-        // KFile attach failed — drop the ProcessRetain we just
-        // took (the legacy DoClose arm won't fire because it
-        // checks `kf_handle == invalid` for legacy release; here
-        // kf_handle is also invalid but the slot is being torn
-        // down immediately so explicit release is required).
         caller->linux_fds[fd].state = 0;
-        core::ProcessRelease(target);
         return kENOMEM;
     }
     arch::SerialWrite("[linux/pidfd] open fd=");
@@ -166,7 +172,14 @@ i64 DoPidfdSendSignal(u64 pidfd, u64 sig, u64 user_info, u64 flags)
     core::Process* target = sched::SchedFindProcessByPid(target_pid);
     if (target == nullptr)
         return kESRCH; // target may have already exited
-    return LinuxSignalDeliver(target, static_cast<u32>(sig));
+    // The pidfd is a WEAK reference — nothing keeps `target` alive
+    // between the lookup and the delivery. Take a transient retain
+    // across the call, exactly the idiom ResolveAffinityTarget uses
+    // in syscall_sched.cpp.
+    core::ProcessRetain(target);
+    const i64 rc = LinuxSignalDeliver(target, static_cast<u32>(sig));
+    core::ProcessRelease(target);
+    return rc;
 }
 
 // pidfd_getfd(pidfd, target_fd, flags) — dup an fd from a target
@@ -240,14 +253,8 @@ i64 DoPidfdGetfd(u64 pidfd, u64 target_fd, u64 flags)
         EpollRetain(src.first_cluster);
     else if (state == 10)
         InotifyRetain(src.first_cluster);
-    else if (state == 12)
-    {
-        // pidfd: the pid in first_cluster is independent of the
-        // target's reference; bump our own retain.
-        core::Process* tgt = sched::SchedFindProcessByPid(src.first_cluster);
-        if (tgt != nullptr)
-            core::ProcessRetain(tgt);
-    }
+    // state == 12 (pidfd) needs no retain at all — a pidfd is a
+    // weak, pid-keyed reference (see the file banner).
     else if (state == 13)
         PosixMqRetain(src.first_cluster);
     arch::SerialWrite("[linux/pidfd_getfd] caller=");
@@ -260,18 +267,6 @@ i64 DoPidfdGetfd(u64 pidfd, u64 target_fd, u64 flags)
     arch::SerialWriteHex(static_cast<u64>(caller_slot));
     arch::SerialWrite("\n");
     return static_cast<i64>(caller_slot);
-}
-
-// Called from syscall_file.cpp's DoClose state==12 arm.
-void PidfdRelease(core::Process* p, u64 target_pid)
-{
-    if (p == nullptr)
-        return;
-    core::Process* target = sched::SchedFindProcessByPid(target_pid);
-    if (target != nullptr)
-        core::ProcessRelease(target);
-    // If target is already gone, no ref to drop — exited tasks
-    // already released their own refs through the reaper.
 }
 
 // =========================================================
