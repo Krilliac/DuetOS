@@ -654,7 +654,21 @@ jobs:
           sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
           sudo ln -sf /usr/bin/clang++-18 /usr/local/bin/clang++
       - name: Configure (host-tests, ASan + UBSan)
-        run: cmake -S tests/host -B build/host-tests -G Ninja
+        # Pin the compiler explicitly. Installing clang-18 and symlinking it
+        # into /usr/local/bin is NOT enough: CMake's default C/CXX search
+        # probes `cc`/`c++` first, which on ubuntu-24.04 resolve to GCC — so
+        # this job silently built with GCC despite the step above. That
+        # mattered, because the two compilers do not agree on what is an
+        # error here: GCC ignores unused `static inline` functions while
+        # clang's -Wunused-function + the suite's -Werror makes them fatal.
+        # The kernel itself is built with clang, so the host tests must be
+        # too, or they green-light code the real toolchain rejects.
+        run: >
+          cmake -S tests/host -B build/host-tests -G Ninja
+          -DCMAKE_C_COMPILER=clang-18
+          -DCMAKE_CXX_COMPILER=clang++-18
+      - name: Show resolved compiler
+        run: grep -E '^CMAKE_(C|CXX)_COMPILER:' build/host-tests/CMakeCache.txt
       - name: Build
         run: cmake --build build/host-tests --parallel $(nproc)
       - name: Test

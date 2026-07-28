@@ -83,6 +83,61 @@ DUET_PE_INLINE int duet_pe_span_mapped(const DUET_PE_VIEW* view, unsigned int rv
     return 0;
 }
 
+/* Contiguous mapped bytes available starting at `rva`, or 0 if `rva` is not
+ * mapped at all.
+ *
+ * duet_pe_span_mapped answers "does this exact span fit", which is the wrong
+ * question when the span's length is itself read out of the image. A
+ * SCOPE_TABLE's record count and a cxx_function_descr's sub-table counts are
+ * attacker-controlled u32s, so the caller needs the available extent in order
+ * to clamp them rather than a yes/no on a length it cannot trust.
+ *
+ * Uses the same section-membership convention as duet_pe_span_mapped: an rva
+ * exactly at a section's end is "mapped" with zero bytes available. Returns
+ * the largest extent when sections overlap, matching span_mapped's accept-any
+ * behaviour. */
+DUET_PE_INLINE unsigned int duet_pe_mapped_span_from(const DUET_PE_VIEW* view, unsigned int rva)
+{
+    if (view == (const DUET_PE_VIEW*)0 || rva > view->size)
+        return 0u;
+    unsigned int best = 0u;
+    if (rva <= view->headers_size)
+        best = view->headers_size - rva;
+    for (unsigned int i = 0; i < view->section_count; ++i)
+    {
+        const unsigned char* section = view->base + view->sections_rva + i * 40u;
+        const unsigned int section_rva = duet_pe_u32(section + 12u);
+        const unsigned int section_span = duet_pe_section_span(section);
+        if (rva >= section_rva && rva - section_rva <= section_span)
+        {
+            const unsigned int avail = section_span - (rva - section_rva);
+            if (avail > best)
+                best = avail;
+        }
+    }
+    /* No clamp against view->size is needed: duet_pe_parse rejects the image
+     * unless headers_size <= image_size and every section satisfies
+     * duet_pe_range(virtual_rva, span, image_size), so for any view that
+     * parsed, neither branch above can exceed the image. A clamp here would
+     * be unreachable, and would wrongly suggest that invariant is not
+     * already guaranteed. */
+    return best;
+}
+
+/* How many SCOPE_TABLE records actually fit in the image at `rva`.
+ *
+ * SCOPE_TABLE layout is `u32 Count` followed by Count records of 4 u32 each.
+ * __C_specific_handler must clamp the Count it reads to this, or a hostile
+ * image can drive the scope loop off the end of the last mapped section and
+ * then transfer control to `ImageBase + <whatever was read>`. */
+DUET_PE_INLINE unsigned int duet_pe_scope_records_capacity(const DUET_PE_VIEW* view, unsigned int rva)
+{
+    const unsigned int avail = duet_pe_mapped_span_from(view, rva);
+    if (avail < 4u)
+        return 0u;
+    return (avail - 4u) / 16u;
+}
+
 DUET_PE_INLINE int duet_pe_span_executable(const DUET_PE_VIEW* view, unsigned int rva, unsigned int span)
 {
     if (view == (const DUET_PE_VIEW*)0 || span == 0u || !duet_pe_range(rva, span, view->size))

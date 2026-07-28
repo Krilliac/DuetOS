@@ -89,29 +89,37 @@ typedef const DxGuid* REFIID;
 
 #define DX_NO_BUILTIN
 
-static inline void dx_memzero(void* p, SIZE_T n)
+// These shims stand in for the whole `userland/libs/dx_shared.h` surface
+// (its include guard is short-circuited below), so the set defined here is
+// dictated by that header — not by which ones d3dcompiler.c happens to call
+// today. Any shim the current d3dcompiler.c does not reference is therefore
+// legitimately unused, and clang's -Wunused-function turns that into a hard
+// -Werror failure. GCC does not warn for unused `static inline`, so this only
+// breaks under clang; mark every shim [[maybe_unused]] so the suite keeps
+// building under both compilers as d3dcompiler.c evolves.
+[[maybe_unused]] static inline void dx_memzero(void* p, SIZE_T n)
 {
     std::memset(p, 0, n);
 }
-static inline void dx_memset(void* p, int v, SIZE_T n)
+[[maybe_unused]] static inline void dx_memset(void* p, int v, SIZE_T n)
 {
     std::memset(p, v, n);
 }
-static inline void dx_memcpy(void* dst, const void* src, SIZE_T n)
+[[maybe_unused]] static inline void dx_memcpy(void* dst, const void* src, SIZE_T n)
 {
     std::memcpy(dst, src, n);
 }
-static inline int dx_guid_eq(const DxGuid* a, const DxGuid* b)
+[[maybe_unused]] static inline int dx_guid_eq(const DxGuid* a, const DxGuid* b)
 {
     if (!a || !b)
         return 0;
     return std::memcmp(a, b, sizeof(DxGuid)) == 0;
 }
-static inline void* dx_heap_alloc(SIZE_T n)
+[[maybe_unused]] static inline void* dx_heap_alloc(SIZE_T n)
 {
     return std::malloc(n);
 }
-static inline void dx_heap_free(void* p)
+[[maybe_unused]] static inline void dx_heap_free(void* p)
 {
     std::free(p);
 }

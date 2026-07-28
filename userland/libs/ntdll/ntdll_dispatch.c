@@ -1,5 +1,7 @@
 #include "ntdll_internal.h"
 
+#include "../common/pe_unwind_bounds.h"
+
 /* ------------------------------------------------------------------
  * T6-02 slice 3 — kernel fault → user SEH dispatch (user half).
  *
@@ -389,9 +391,32 @@ __declspec(dllexport) long __C_specific_handler(void* ExceptionRecord, void* Est
 {
     DISPATCHER_CONTEXT* dc = (DISPATCHER_CONTEXT*)DispatcherContext;
     const unsigned int* st = (const unsigned int*)dc->HandlerData; /* SCOPE_TABLE */
-    const unsigned int count = st[0];
-    const unsigned int* recs = st + 1; /* 4 u32 per record */
+    const unsigned int* recs = st + 1;                             /* 4 u32 per record */
     const unsigned long long IB = dc->ImageBase;
+    /* Clamp the record count to what is actually mapped.
+     *
+     * st[0] comes straight out of the image's .xdata. RtlpReadUnwindHandler
+     * only proves the 8 bytes at the handler-data slot are in-bounds, so
+     * nothing downstream bounded this: a hostile PE setting Count=0xFFFFFFFF
+     * walked 16 bytes per iteration off the end of the last mapped section
+     * and then called `IB + haddr` with whatever garbage it read. Clamping
+     * here bounds both the reads and, transitively, the filter/handler
+     * targets to records that really exist. */
+    unsigned int count = st[0];
+    {
+        DUET_PE_VIEW view;
+        const unsigned long long table_off = (unsigned long long)(const unsigned char*)st - IB;
+        if (IB == 0ull || table_off > 0xFFFFFFFFull || !duet_pe_parse((const void*)IB, &view))
+        {
+            count = 0u;
+        }
+        else
+        {
+            const unsigned int cap = duet_pe_scope_records_capacity(&view, (unsigned int)table_off);
+            if (count > cap)
+                count = cap;
+        }
+    }
     const unsigned long long pc = dc->ControlPc;
     const int unwinding = (*er_flags(ExceptionRecord) & EXCEPTION_UNWINDING) != 0;
 
