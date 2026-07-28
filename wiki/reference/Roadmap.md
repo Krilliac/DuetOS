@@ -1189,6 +1189,48 @@ import `mscoree.dll`. Expect the ladder above this rung to be import
 coverage, then OpenGL, then audio/input -- the same long middle the
 PE32 ladder describes.
 
+### GetProcAddress cannot see the kernel thunk page
+
+Bind-time and run-time symbol resolution use **different surfaces**. The
+PE import binder resolves against the preloaded DLLs' export tables AND
+`Win32ThunksLookup` (the fixed R-X thunk page at `kWin32ThunksVa`).
+`SYS_DLL_PROC_ADDRESS` resolves only through
+`ProcessResolveDllExportByBase`, i.e. export tables. A symbol DuetOS
+genuinely implements, but implements as a thunk rather than a DLL
+export, is therefore **invisible to a runtime `GetProcAddress`**.
+
+Measured, not inferred (2026-07-28, stock `vulkaninfo.exe`, with the new
+`[dll-load] GetProcAddress miss` diagnostic): 15 misses, of which 13 are
+present in `thunks_table.inc` right now -
+`InitializeCriticalSectionEx`, `FlsAlloc`, `FlsSetValue`,
+`LCMapStringEx`, `CompareStringEx`, `EnumSystemLocalesEx`,
+`GetDateFormatEx`, `GetLocaleInfoEx`, `GetTimeFormatEx`,
+`GetUserDefaultLocaleName`, `IsValidLocaleName`, `AreFileApisANSI`,
+`LocaleNameToLCID`. Only `FlsGetValue2` and `LCIDToLocaleName` are
+genuinely absent. The MSVC UCRT caches those NULLs and later calls
+through one, giving an access violation at `rip=0`.
+
+**Why this was NOT force-fixed.** The obvious fix - fall back to
+`Win32ThunksLookup` on an export-table miss - changes `GetProcAddress`
+semantics in a way one boot cannot validate. Many thunks are
+*safe-ignore stubs* returning a constant; the loader already emits a
+Warn when an IMPORT lands on one, precisely because the caller will
+silently misbehave. Applications routinely use
+`GetProcAddress(h, "Foo") != NULL` as a **feature/OS-version probe** and
+branch on the answer. Handing back a no-op stub converts "this OS lacks
+Foo, use the fallback path" into "Foo exists" followed by a silent
+no-op - trading a loud failure for a quiet wrong answer.
+
+So the fix needs a policy decision first: return only NON-no-op thunks
+(`Win32ThunksLookupKind`'s `out_is_noop` already distinguishes them), or
+return all and accept probe breakage. The former is almost certainly
+right and is a small change - but it deserves a corpus re-run across all
+nine binaries, not a single vulkaninfo boot. Note also that the module
+handle must be mapped back to a DLL name for the lookup, and that
+`kernelbase.dll` is a declared pure forwarder to `kernel32.dll`, so a
+kernelbase handle should consult kernel32's thunks - which is exactly
+what its `.def` already does for the exported subset.
+
 ### Runtime LoadLibrary sees only a hand-picked subset of the shipped DLLs
 
 `spawn.cpp`'s preload set is the authoritative list of ~44 DLLs the

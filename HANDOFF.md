@@ -145,16 +145,35 @@ exist and report a count of zero (the v0 ICD negotiates no instance
 extensions and exposes no layers), added to the export list, the
 function bodies, and `vkGetInstanceProcAddr`'s own name table.
 
-**Still open:** `vulkaninfo` continues to fault at `rip=0`, so it is
-resolving at least one more symbol that does not exist. Rather than
-keep guessing, a permanent diagnostic now names every miss:
-`SYS_DLL_PROC_ADDRESS` emits `[dll-load] GetProcAddress miss ... fn="X"`
-at DEBUG level. Returning 0 is correct GetProcAddress semantics and apps
-legitimately probe for optional APIs, which is why it is DEBUG and not a
-warning — but a caller that does not null-check then executes `call 0`,
-and the fault handler can only report "access violation at rip=0" with
-nothing saying which symbol. **Read that line in the next run's log and
-the remaining diagnosis is one grep.**
+**Root-caused, deliberately not fixed:** `vulkaninfo` still faults at
+`rip=0`, and the new diagnostic names exactly why. `SYS_DLL_PROC_ADDRESS`
+now emits `[dll-load] GetProcAddress miss ... fn="X"` at DEBUG level, and
+the run reports **15 misses, 13 of which DuetOS already implements** — as
+entries in the kernel thunk page rather than as DLL exports:
+`InitializeCriticalSectionEx`, `FlsAlloc`, `FlsSetValue`,
+`LCMapStringEx`, `CompareStringEx`, `EnumSystemLocalesEx`,
+`GetDateFormatEx`, `GetLocaleInfoEx`, `GetTimeFormatEx`,
+`GetUserDefaultLocaleName`, `IsValidLocaleName`, `AreFileApisANSI`,
+`LocaleNameToLCID`. Only `FlsGetValue2` and `LCIDToLocaleName` are truly
+absent.
+
+So the real defect is the **general** form of the api-set divergence
+already fixed once this session: the import binder resolves against DLL
+export tables *and* `Win32ThunksLookup`; runtime `GetProcAddress`
+resolves against export tables only. The UCRT caches those NULLs and
+later calls one.
+
+It is filed rather than force-fixed — see the Roadmap section
+"GetProcAddress cannot see the kernel thunk page" — because the fix
+carries a real semantic risk that one boot cannot settle: many thunks are
+*safe-ignore stubs* returning a constant (the loader already Warns when
+an import lands on one), and applications commonly use
+`GetProcAddress(h,"Foo") != NULL` as a feature probe. Returning a no-op
+stub turns "this OS lacks Foo, take the fallback" into "Foo exists"
+followed by a silent no-op — trading a loud failure for a quiet wrong
+answer. `Win32ThunksLookupKind` already reports `out_is_noop`, so
+returning only non-no-op thunks is very likely the right policy; it needs
+a full nine-binary corpus re-run to confirm, not one vulkaninfo boot.
 
 ### The bug class, stated accurately
 

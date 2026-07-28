@@ -4853,6 +4853,18 @@ void SyscallDispatch(arch::TrapFrame* frame)
             return;
         }
         const u64 va = ProcessResolveDllExportByBase(proc, frame->rdi, name_buf);
+        if (va == 0)
+        {
+            // Name the miss. Returning 0 is correct GetProcAddress
+            // semantics and apps legitimately probe for optional APIs,
+            // so this is DEBUG-gated rather than a warning — but a
+            // caller that does NOT null-check goes on to `call 0`, and
+            // then all the fault handler can report is "access
+            // violation at rip=0", with nothing saying which symbol.
+            // That exact dead end cost a whole debugging cycle on
+            // vulkaninfo.exe; the symbol name is the entire diagnosis.
+            KLOG_DEBUG_S("dll-load", "GetProcAddress miss (caller may call 0)", "fn", name_buf);
+        }
         frame->rax = va;
         return;
     }
