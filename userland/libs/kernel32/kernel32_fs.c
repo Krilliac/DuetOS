@@ -1679,12 +1679,46 @@ __declspec(dllexport) BOOL GetVersionExW(void* info)
     return 1;
 }
 
+// STUB: no OSVERSIONINFOEX field is compared and no condition is evaluated —
+// every version test is answered TRUE, so a caller gating on "at least
+// Windows N" runs its newest-OS path unconditionally.
 __declspec(dllexport) BOOL VerifyVersionInfoW(void* info, DWORD type_mask, unsigned long long cond_mask)
 {
     (void)info;
     (void)type_mask;
     (void)cond_mask;
     return 1;
+}
+
+/* VerSetConditionMask — build the condition mask VerifyVersionInfo
+ * consumes. Pure bit arithmetic with a fully specified contract, so
+ * this is exact: the 3-bit condition is placed in the slot that
+ * belongs to the *lowest* set type bit, and the caller ORs one type
+ * at a time (that is what the VER_SET_CONDITION macro does).
+ *
+ * Slot order is the VER_* bit order:
+ *   MINORVERSION 0x01 -> shift 0     SERVICEPACKMINOR 0x10 -> shift 12
+ *   MAJORVERSION 0x02 -> shift 3     SERVICEPACKMAJOR 0x20 -> shift 15
+ *   BUILDNUMBER  0x04 -> shift 6     SUITENAME        0x40 -> shift 18
+ *   PLATFORMID   0x08 -> shift 9     PRODUCT_TYPE     0x80 -> shift 21
+ *
+ * Our VerifyVersionInfoW is a STUB that never reads the mask, but a
+ * caller that builds one and compares it against a value it cached
+ * still gets the right bits. */
+__declspec(dllexport) unsigned long long VerSetConditionMask(unsigned long long cond_mask, DWORD type_mask,
+                                                             unsigned char condition)
+{
+    const unsigned long long cond = (unsigned long long)(condition & 0x07u);
+    if (type_mask == 0 || cond == 0)
+        return cond_mask;
+    for (unsigned shift_index = 0; shift_index < 8; ++shift_index)
+    {
+        if ((type_mask & (1u << shift_index)) == 0)
+            continue;
+        cond_mask |= cond << (shift_index * 3u);
+        break; /* only the lowest set type bit is assigned */
+    }
+    return cond_mask;
 }
 
 /* CheckRemoteDebuggerPresent — always FALSE. */
@@ -1864,4 +1898,469 @@ __declspec(dllexport) DWORD GetMaximumProcessorCount(unsigned short group)
 {
     (void)group;
     return 1;
+}
+
+/* ------------------------------------------------------------------
+ * Path resolution — SearchPathW / GetLongPathNameW /
+ * GetVolumePathNameW.
+ *
+ * These three are the highest-demand path helpers among the x64
+ * System32 binaries and all three are answerable on DuetOS today:
+ * we have a real GetFileAttributesW to probe with, a real current
+ * directory, and a drive-letter namespace with no mount points
+ * below the root.
+ * ------------------------------------------------------------------ */
+
+/* Owned by kernel32_env.c. */
+__declspec(dllexport) DWORD GetEnvironmentVariableW(const wchar_t16* name, wchar_t16* buf, DWORD size);
+__declspec(dllexport) DWORD GetModuleFileNameW(HANDLE hModule, wchar_t16* buf, DWORD nSize);
+
+static int pathw_len(const wchar_t16* s)
+{
+    int n = 0;
+    while (s[n] != 0)
+        ++n;
+    return n;
+}
+
+static int pathw_is_sep(wchar_t16 c)
+{
+    return c == '\\' || c == '/';
+}
+
+/* Append `src` to `dst` at `pos`, capped at `cap` code units
+ * (terminator included). Returns the new position, or -1 if it
+ * would overflow. */
+static int pathw_append(wchar_t16* dst, int pos, int cap, const wchar_t16* src, int src_len)
+{
+    if (pos < 0 || pos + src_len + 1 > cap)
+        return -1;
+    for (int i = 0; i < src_len; ++i)
+        dst[pos + i] = src[i];
+    dst[pos + src_len] = 0;
+    return pos + src_len;
+}
+
+/* Join `dir` + '\\' + `file` into `out` (cap code units incl. the
+ * terminator). Returns the joined length, or -1 on overflow. A
+ * `dir` that already ends in a separator does not get a second
+ * one — "X:\" + "cmd.exe" must be "X:\cmd.exe", not "X:\\cmd.exe". */
+static int pathw_join(wchar_t16* out, int cap, const wchar_t16* dir, int dir_len, const wchar_t16* file, int file_len)
+{
+    int pos = pathw_append(out, 0, cap, dir, dir_len);
+    if (pos < 0)
+        return -1;
+    if (pos > 0 && !pathw_is_sep(out[pos - 1]))
+    {
+        if (pos + 2 > cap)
+            return -1;
+        out[pos++] = '\\';
+        out[pos] = 0;
+    }
+    return pathw_append(out, pos, cap, file, file_len);
+}
+
+/* Copy `src` into the caller's buffer per the Win32 path-API
+ * convention shared by SearchPathW / GetLongPathNameW /
+ * GetVolumePathNameW-style calls: on success return the length
+ * WITHOUT the terminator; when the buffer is too small return the
+ * length WITH the terminator and write nothing. */
+static DWORD pathw_return(const wchar_t16* src, int src_len, wchar_t16* out, DWORD out_cch)
+{
+    if (out == (wchar_t16*)0 || out_cch < (DWORD)(src_len + 1))
+        return (DWORD)(src_len + 1);
+    for (int i = 0; i < src_len; ++i)
+        out[i] = src[i];
+    out[src_len] = 0;
+    return (DWORD)src_len;
+}
+
+static int pathw_exists(const wchar_t16* path)
+{
+    return GetFileAttributesW(path) != 0xFFFFFFFFu;
+}
+
+/* Try one search directory; on a hit fill `out` and return the
+ * Win32 return value, else return 0. `file_part` receives a
+ * pointer into `out` at the final component, as Win32 requires. */
+static DWORD searchpath_try(const wchar_t16* dir, int dir_len, const wchar_t16* file, int file_len, wchar_t16* out,
+                            DWORD out_cch, wchar_t16** file_part)
+{
+    wchar_t16 candidate[520];
+    const int joined =
+        pathw_join(candidate, (int)(sizeof(candidate) / sizeof(candidate[0])), dir, dir_len, file, file_len);
+    if (joined < 0 || !pathw_exists(candidate))
+        return 0;
+    const DWORD rv = pathw_return(candidate, joined, out, out_cch);
+    if (file_part != (wchar_t16**)0 && out != (wchar_t16*)0 && rv != 0 && rv <= out_cch)
+    {
+        *file_part = out;
+        for (int i = joined - 1; i >= 0; --i)
+        {
+            if (pathw_is_sep(out[i]))
+            {
+                *file_part = out + i + 1;
+                break;
+            }
+        }
+    }
+    return rv;
+}
+
+/* SearchPathW — walk the documented search order looking for
+ * `file` (+ `ext` when `file` has no extension of its own):
+ *   explicit lpPath, else: EXE directory, current directory,
+ *   system directory, Windows directory, then each PATH entry.
+ *
+ * A `file` that is already absolute (drive-qualified or rooted) is
+ * probed as-is, matching Win32.
+ *
+ * The EXE directory is deliberately probed FIRST and the current
+ * directory second, which is the safe (SetDllDirectory-hardened)
+ * order Windows uses. Reversing it would let a file dropped in the
+ * working directory shadow a system binary. */
+__declspec(dllexport) DWORD SearchPathW(const wchar_t16* lpPath, const wchar_t16* lpFileName, const wchar_t16* lpExt,
+                                        DWORD nBufferLength, wchar_t16* lpBuffer, wchar_t16** lpFilePart)
+{
+    if (lpFileName == (const wchar_t16*)0)
+    {
+        SetLastError(87 /* ERROR_INVALID_PARAMETER */);
+        return 0;
+    }
+    if (lpFilePart != (wchar_t16**)0)
+        *lpFilePart = (wchar_t16*)0;
+
+    /* Compose the name we actually probe: lpExt is only appended
+     * when the name carries no extension of its own. */
+    wchar_t16 name[280];
+    int name_len = pathw_len(lpFileName);
+    if (name_len + 1 > (int)(sizeof(name) / sizeof(name[0])))
+    {
+        SetLastError(206 /* ERROR_FILENAME_EXCED_RANGE */);
+        return 0;
+    }
+    for (int i = 0; i < name_len; ++i)
+        name[i] = lpFileName[i];
+    name[name_len] = 0;
+
+    int has_ext = 0;
+    for (int i = name_len - 1; i >= 0; --i)
+    {
+        if (pathw_is_sep(name[i]))
+            break;
+        if (name[i] == '.')
+        {
+            has_ext = 1;
+            break;
+        }
+    }
+    if (!has_ext && lpExt != (const wchar_t16*)0)
+    {
+        const int ext_len = pathw_len(lpExt);
+        const int grown = pathw_append(name, name_len, (int)(sizeof(name) / sizeof(name[0])), lpExt, ext_len);
+        if (grown < 0)
+        {
+            SetLastError(206 /* ERROR_FILENAME_EXCED_RANGE */);
+            return 0;
+        }
+        name_len = grown;
+    }
+
+    /* Already absolute — probe it directly, no search. */
+    const int rooted = (name_len >= 2 && name[1] == ':') || (name_len >= 1 && pathw_is_sep(name[0]));
+    if (rooted)
+    {
+        if (!pathw_exists(name))
+        {
+            SetLastError(2 /* ERROR_FILE_NOT_FOUND */);
+            return 0;
+        }
+        const DWORD rv = pathw_return(name, name_len, lpBuffer, nBufferLength);
+        if (lpFilePart != (wchar_t16**)0 && lpBuffer != (wchar_t16*)0 && rv != 0 && rv <= nBufferLength)
+        {
+            *lpFilePart = lpBuffer;
+            for (int i = name_len - 1; i >= 0; --i)
+            {
+                if (pathw_is_sep(lpBuffer[i]))
+                {
+                    *lpFilePart = lpBuffer + i + 1;
+                    break;
+                }
+            }
+        }
+        return rv;
+    }
+
+    wchar_t16 dir[280];
+    DWORD hit;
+
+    if (lpPath != (const wchar_t16*)0)
+    {
+        /* Caller-supplied path list: semicolon-separated, same as
+         * the PATH walk below. */
+        int i = 0;
+        while (lpPath[i] != 0)
+        {
+            int d = 0;
+            while (lpPath[i] != 0 && lpPath[i] != ';' && d < (int)(sizeof(dir) / sizeof(dir[0])) - 1)
+                dir[d++] = lpPath[i++];
+            dir[d] = 0;
+            while (lpPath[i] != 0 && lpPath[i] != ';')
+                ++i; /* skip an over-long element */
+            if (lpPath[i] == ';')
+                ++i;
+            if (d == 0)
+                continue;
+            hit = searchpath_try(dir, d, name, name_len, lpBuffer, nBufferLength, lpFilePart);
+            if (hit != 0)
+                return hit;
+        }
+        SetLastError(2 /* ERROR_FILE_NOT_FOUND */);
+        return 0;
+    }
+
+    /* 1. Directory of the running EXE. */
+    {
+        wchar_t16 exe[280];
+        const DWORD exe_len = GetModuleFileNameW((HANDLE)0, exe, (DWORD)(sizeof(exe) / sizeof(exe[0])));
+        if (exe_len != 0 && exe_len < (DWORD)(sizeof(exe) / sizeof(exe[0])))
+        {
+            int cut = -1;
+            for (int i = (int)exe_len - 1; i >= 0; --i)
+            {
+                if (pathw_is_sep(exe[i]))
+                {
+                    cut = i;
+                    break;
+                }
+            }
+            if (cut > 0)
+            {
+                hit = searchpath_try(exe, cut, name, name_len, lpBuffer, nBufferLength, lpFilePart);
+                if (hit != 0)
+                    return hit;
+            }
+        }
+    }
+
+    /* 2. Current directory. 3. System directory. 4. Windows directory. */
+    if (GetCurrentDirectoryW((DWORD)(sizeof(dir) / sizeof(dir[0])), dir) != 0)
+    {
+        hit = searchpath_try(dir, pathw_len(dir), name, name_len, lpBuffer, nBufferLength, lpFilePart);
+        if (hit != 0)
+            return hit;
+    }
+    if (GetSystemDirectoryW(dir, (UINT)(sizeof(dir) / sizeof(dir[0]))) != 0)
+    {
+        hit = searchpath_try(dir, pathw_len(dir), name, name_len, lpBuffer, nBufferLength, lpFilePart);
+        if (hit != 0)
+            return hit;
+    }
+    if (GetWindowsDirectoryW(dir, (UINT)(sizeof(dir) / sizeof(dir[0]))) != 0)
+    {
+        hit = searchpath_try(dir, pathw_len(dir), name, name_len, lpBuffer, nBufferLength, lpFilePart);
+        if (hit != 0)
+            return hit;
+    }
+
+    /* 5. Each PATH element. */
+    {
+        wchar_t16 path_env[1024];
+        static const wchar_t16 k_path[] = {'P', 'A', 'T', 'H', 0};
+        const DWORD got = GetEnvironmentVariableW(k_path, path_env, (DWORD)(sizeof(path_env) / sizeof(path_env[0])));
+        if (got != 0 && got < (DWORD)(sizeof(path_env) / sizeof(path_env[0])))
+        {
+            DWORD i = 0;
+            while (i < got)
+            {
+                int d = 0;
+                while (i < got && path_env[i] != ';' && d < (int)(sizeof(dir) / sizeof(dir[0])) - 1)
+                    dir[d++] = path_env[i++];
+                dir[d] = 0;
+                while (i < got && path_env[i] != ';')
+                    ++i;
+                if (i < got && path_env[i] == ';')
+                    ++i;
+                if (d == 0)
+                    continue;
+                hit = searchpath_try(dir, d, name, name_len, lpBuffer, nBufferLength, lpFilePart);
+                if (hit != 0)
+                    return hit;
+            }
+        }
+    }
+
+    SetLastError(2 /* ERROR_FILE_NOT_FOUND */);
+    return 0;
+}
+
+/* GetLongPathNameW — expand a path's 8.3 short components.
+ *
+ * DuetOS never generates 8.3 aliases: the FAT32 layer reads and
+ * writes long names directly and no other backend has a short-name
+ * namespace at all. The long form of any DuetOS path is therefore
+ * the path itself, so the correct implementation is "verify the
+ * path exists, then hand it back". That is a real answer, not a
+ * placeholder — it is what the contract asks for on a filesystem
+ * with no alias table. */
+// GAP: no 8.3 alias table exists to consult, so a genuine short name
+// authored elsewhere (an image copied off a Windows volume) round-trips
+// unchanged instead of expanding — revisit if a short-name tier lands.
+__declspec(dllexport) DWORD GetLongPathNameW(const wchar_t16* lpszShortPath, wchar_t16* lpszLongPath, DWORD cchBuffer)
+{
+    if (lpszShortPath == (const wchar_t16*)0)
+    {
+        SetLastError(87 /* ERROR_INVALID_PARAMETER */);
+        return 0;
+    }
+    if (!pathw_exists(lpszShortPath))
+    {
+        SetLastError(2 /* ERROR_FILE_NOT_FOUND */);
+        return 0;
+    }
+    return pathw_return(lpszShortPath, pathw_len(lpszShortPath), lpszLongPath, cchBuffer);
+}
+
+/* GetVolumePathNameW — the mount point that owns `lpszFileName`.
+ *
+ * DuetOS mounts every volume at a drive letter and has no volume
+ * mounted into a directory, so the owning mount point of any path
+ * is its drive root. A rooted path with no drive letter belongs to
+ * the current drive. */
+// GAP: no directory-mounted (junction-style) volumes exist, so the walk
+// stops at the drive root instead of probing each ancestor for a mount
+// point — revisit when the VFS grows nested mounts.
+__declspec(dllexport) BOOL GetVolumePathNameW(const wchar_t16* lpszFileName, wchar_t16* lpszVolumePathName,
+                                              DWORD cchBufferLength)
+{
+    if (lpszFileName == (const wchar_t16*)0 || lpszVolumePathName == (wchar_t16*)0 || cchBufferLength < 4)
+    {
+        SetLastError(87 /* ERROR_INVALID_PARAMETER */);
+        return 0;
+    }
+
+    wchar_t16 drive;
+    if (lpszFileName[0] != 0 && lpszFileName[1] == ':')
+    {
+        drive = lpszFileName[0];
+    }
+    else
+    {
+        wchar_t16 cwd[280];
+        if (GetCurrentDirectoryW((DWORD)(sizeof(cwd) / sizeof(cwd[0])), cwd) == 0 || cwd[0] == 0 || cwd[1] != ':')
+        {
+            SetLastError(3 /* ERROR_PATH_NOT_FOUND */);
+            return 0;
+        }
+        drive = cwd[0];
+    }
+
+    lpszVolumePathName[0] = drive;
+    lpszVolumePathName[1] = ':';
+    lpszVolumePathName[2] = '\\';
+    lpszVolumePathName[3] = 0;
+    return 1;
+}
+
+/* ------------------------------------------------------------------
+ * GetFileInformationByHandleEx / SetFileInformationByHandle
+ * ------------------------------------------------------------------ */
+
+/* Owned by kernel32_io.c. */
+__declspec(dllexport) BOOL GetFileSizeEx(HANDLE h, long long* lpFileSize);
+__declspec(dllexport) BOOL GetFileTime(HANDLE f, void* create, void* access, void* write);
+
+/* FILE_INFO_BY_HANDLE_CLASS values we answer. */
+#define DUETOS_FileBasicInfo 0
+#define DUETOS_FileStandardInfo 1
+
+/* GetFileInformationByHandleEx — the two classes that carry the
+ * information DuetOS actually holds about an open handle.
+ *
+ * FileStandardInfo's sizes come from the real GetFileSizeEx, and
+ * FileBasicInfo's timestamps and attributes come from the same
+ * source GetFileTime / GetFileInformationByHandle use. Every other
+ * class is refused with ERROR_INVALID_PARAMETER rather than
+ * zero-filled, so a caller that needs FileIdInfo or
+ * FileStreamInfo finds out instead of consuming zeroes as data. */
+// GAP: only FileBasicInfo and FileStandardInfo are answered; the remaining
+// FILE_INFO_BY_HANDLE_CLASS values fail loudly — add a class here when the
+// kernel gains a query that can back it.
+__declspec(dllexport) BOOL GetFileInformationByHandleEx(HANDLE hFile, int FileInformationClass, void* lpFileInformation,
+                                                        DWORD dwBufferSize)
+{
+    if (lpFileInformation == (void*)0)
+    {
+        SetLastError(87 /* ERROR_INVALID_PARAMETER */);
+        return 0;
+    }
+
+    if (FileInformationClass == DUETOS_FileBasicInfo)
+    {
+        /* FILE_BASIC_INFO: 4 * LARGE_INTEGER + DWORD FileAttributes
+         * (+ 4 bytes tail padding) = 40 bytes. */
+        if (dwBufferSize < 40)
+        {
+            SetLastError(87 /* ERROR_INVALID_PARAMETER */);
+            return 0;
+        }
+        unsigned char* b = (unsigned char*)lpFileInformation;
+        for (DWORD i = 0; i < 40; ++i)
+            b[i] = 0;
+        long long created = 0, accessed = 0, written = 0;
+        if (!GetFileTime(hFile, &created, &accessed, &written))
+            return 0;
+        *(long long*)(b + 0) = created;
+        *(long long*)(b + 8) = accessed;
+        *(long long*)(b + 16) = written;
+        *(long long*)(b + 24) = written; /* ChangeTime */
+        *(DWORD*)(b + 32) = 0x80;        /* FILE_ATTRIBUTE_NORMAL */
+        return 1;
+    }
+
+    if (FileInformationClass == DUETOS_FileStandardInfo)
+    {
+        /* FILE_STANDARD_INFO: AllocationSize + EndOfFile (LARGE_INTEGER),
+         * NumberOfLinks (DWORD), DeletePending + Directory (BOOLEAN),
+         * padded to 24 bytes. */
+        if (dwBufferSize < 24)
+        {
+            SetLastError(87 /* ERROR_INVALID_PARAMETER */);
+            return 0;
+        }
+        long long size = 0;
+        if (!GetFileSizeEx(hFile, &size))
+            return 0;
+        unsigned char* b = (unsigned char*)lpFileInformation;
+        for (DWORD i = 0; i < 24; ++i)
+            b[i] = 0;
+        *(long long*)(b + 0) = size; /* AllocationSize */
+        *(long long*)(b + 8) = size; /* EndOfFile */
+        *(DWORD*)(b + 16) = 1;       /* NumberOfLinks */
+        b[20] = 0;                   /* DeletePending */
+        b[21] = 0;                   /* Directory */
+        return 1;
+    }
+
+    SetLastError(87 /* ERROR_INVALID_PARAMETER */);
+    return 0;
+}
+
+// STUB: every FILE_INFO_BY_HANDLE_CLASS is refused — DuetOS has no
+// by-handle truncate, no set-times and no delete-on-close syscall, so there
+// is nothing to route a write to. Returning FALSE + ERROR_NOT_SUPPORTED is
+// what a caller can act on; the marker stays until those syscalls exist.
+__declspec(dllexport) BOOL SetFileInformationByHandle(HANDLE hFile, int FileInformationClass, void* lpFileInformation,
+                                                      DWORD dwBufferSize)
+{
+    (void)hFile;
+    (void)lpFileInformation;
+    (void)dwBufferSize;
+    /* Distinguish "I know this class and cannot do it" from "I do not
+     * know this class at all" so a caller's diagnostics stay useful. */
+    if (FileInformationClass >= 0 && FileInformationClass <= 22)
+        SetLastError(50 /* ERROR_NOT_SUPPORTED */);
+    else
+        SetLastError(87 /* ERROR_INVALID_PARAMETER */);
+    return 0;
 }

@@ -153,6 +153,35 @@ __declspec(dllexport) BOOL HeapDestroy(HANDLE hHeap)
     return rv != 0;
 }
 
+/* HeapSetInformation — the two documented information classes are
+ * both *hints*, which is why this is the single most-imported
+ * missing kernel32 export across the x64 System32 set: the CRT
+ * startup path calls it before main and ignores nothing else.
+ *
+ *   HeapCompatibilityInformation (0) — asks for the low-fragmentation
+ *     allocator. A hint about allocator strategy; the caller cannot
+ *     observe the difference except through timing.
+ *   HeapEnableTerminationOnCorruption (1) — asks the heap to
+ *     terminate rather than continue once it notices corruption.
+ *
+ * An unrecognised class is refused, so a caller probing for a
+ * newer class learns the truth instead of getting a blind TRUE. */
+// GAP: both classes are accepted and recorded nowhere — the DuetOS heap has
+// neither an LFH tier nor block-header corruption detection, so
+// HeapEnableTerminationOnCorruption buys no extra safety. Revisit when the
+// kernel heap grows guarded headers.
+__declspec(dllexport) BOOL HeapSetInformation(HANDLE HeapHandle, int HeapInformationClass, void* HeapInformation,
+                                              SIZE_T HeapInformationLength)
+{
+    (void)HeapHandle;
+    (void)HeapInformation;
+    (void)HeapInformationLength;
+    if (HeapInformationClass == 0 || HeapInformationClass == 1)
+        return 1;
+    SetLastError(87 /* ERROR_INVALID_PARAMETER */);
+    return 0;
+}
+
 /* ------------------------------------------------------------------
  * Locale / code page
  *

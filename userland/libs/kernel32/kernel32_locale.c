@@ -646,3 +646,293 @@ __declspec(dllexport) BOOL GetNumberOfConsoleInputEvents(HANDLE h, DWORD* count)
         *count = 0; /* No queued console input under emulator. */
     return 1;
 }
+
+/* ------------------------------------------------------------------
+ * Local-time conversion
+ *
+ * Both entry points below are exact arithmetic over whatever
+ * TIME_ZONE_INFORMATION they are handed. The only thing DuetOS
+ * cannot supply is a zoneinfo database, so the *current* zone
+ * (GetTimeZoneInformation, above) is UTC with a zero bias — a
+ * caller that passes its own TIME_ZONE_INFORMATION gets a correct
+ * conversion for that zone's standard time.
+ * ------------------------------------------------------------------ */
+
+/* Win32 SYSTEMTIME. Layout must match kernel32_io.c's copy —
+ * FileTimeToSystemTime / SystemTimeToFileTime are the workhorses
+ * this slice composes with. */
+typedef struct
+{
+    unsigned short y, m, dow, d, h, min, s, ms;
+} DUETOS_SYSTEMTIME_TZ;
+
+__declspec(dllexport) BOOL SystemTimeToFileTime(const DUETOS_SYSTEMTIME_TZ* st, void* ft);
+__declspec(dllexport) BOOL FileTimeToSystemTime(const void* ft, DUETOS_SYSTEMTIME_TZ* st);
+
+/* FileTimeToLocalFileTime — UTC FILETIME to local FILETIME.
+ * Win32 subtracts the active zone's bias (which is expressed as
+ * "UTC = local + Bias" minutes, so local = UTC - Bias). */
+__declspec(dllexport) BOOL FileTimeToLocalFileTime(const void* utc, void* local)
+{
+    if (utc == (const void*)0 || local == (void*)0)
+        return 0;
+    DUETOS_TZ_INFORMATION tzi;
+    if (GetTimeZoneInformation(&tzi) == 0xFFFFFFFFUL)
+        return 0;
+    const long long bias_100ns = (long long)tzi.Bias * 60LL * 10000000LL;
+    *(long long*)local = *(const long long*)utc - bias_100ns;
+    return 1;
+}
+
+/* SystemTimeToTzSpecificLocalTime — UTC SYSTEMTIME to the local
+ * SYSTEMTIME of `tzi` (NULL = the active zone). Bias and
+ * StandardBias are applied exactly. */
+// GAP: DaylightDate/StandardDate transition rules are not evaluated, so
+// DaylightBias never applies and the result is always the zone's standard
+// time — revisit when a zoneinfo database and a DST-aware clock land.
+__declspec(dllexport) BOOL SystemTimeToTzSpecificLocalTime(const DUETOS_TZ_INFORMATION* tzi,
+                                                           const DUETOS_SYSTEMTIME_TZ* utc, DUETOS_SYSTEMTIME_TZ* local)
+{
+    if (utc == (const DUETOS_SYSTEMTIME_TZ*)0 || local == (DUETOS_SYSTEMTIME_TZ*)0)
+        return 0;
+
+    DUETOS_TZ_INFORMATION active;
+    if (tzi == (const DUETOS_TZ_INFORMATION*)0)
+    {
+        if (GetTimeZoneInformation(&active) == 0xFFFFFFFFUL)
+            return 0;
+        tzi = &active;
+    }
+
+    long long ticks = 0;
+    if (!SystemTimeToFileTime(utc, &ticks))
+        return 0;
+    const long long bias_100ns = ((long long)tzi->Bias + (long long)tzi->StandardBias) * 60LL * 10000000LL;
+    ticks -= bias_100ns;
+    if (ticks < 0)
+        return 0;
+    return FileTimeToSystemTime(&ticks, local);
+}
+
+/* ------------------------------------------------------------------
+ * Ordinal comparison + locale-name mapping
+ * ------------------------------------------------------------------ */
+
+/* CompareStringOrdinal — code-unit comparison, no collation. This
+ * is the one string comparison whose Win32 contract asks for
+ * exactly what a from-scratch OS can deliver: compare UTF-16 code
+ * units, optionally after an invariant upper-case fold.
+ *
+ * Returns CSTR_LESS_THAN(1) / CSTR_EQUAL(2) / CSTR_GREATER_THAN(3),
+ * or 0 with ERROR_INVALID_PARAMETER on a bad argument. */
+__declspec(dllexport) int CompareStringOrdinal(const wchar_t16* lhs, int cchLhs, const wchar_t16* rhs, int cchRhs,
+                                               BOOL bIgnoreCase)
+{
+    if (lhs == (const wchar_t16*)0 || rhs == (const wchar_t16*)0)
+    {
+        SetLastError(87 /* ERROR_INVALID_PARAMETER */);
+        return 0;
+    }
+    int n1 = cchLhs;
+    if (n1 < 0)
+    {
+        n1 = 0;
+        while (lhs[n1] != 0)
+            ++n1;
+    }
+    int n2 = cchRhs;
+    if (n2 < 0)
+    {
+        n2 = 0;
+        while (rhs[n2] != 0)
+            ++n2;
+    }
+    const int n = n1 < n2 ? n1 : n2;
+    for (int i = 0; i < n; ++i)
+    {
+        wchar_t16 a = lhs[i];
+        wchar_t16 b = rhs[i];
+        if (bIgnoreCase)
+        {
+            /* Win32 folds to UPPER case here (OrdinalIgnoreCase is
+             * defined as an invariant upper-case map), which matters
+             * for the ASCII range where '_' (0x5F) sorts between the
+             * upper and lower alphabets. */
+            if (a >= 'a' && a <= 'z')
+                a = (wchar_t16)(a - ('a' - 'A'));
+            if (b >= 'a' && b <= 'z')
+                b = (wchar_t16)(b - ('a' - 'A'));
+        }
+        if (a < b)
+            return 1;
+        if (a > b)
+            return 3;
+    }
+    if (n1 < n2)
+        return 1;
+    if (n1 > n2)
+        return 3;
+    return 2;
+}
+
+/* FindStringOrdinal — ordinal substring search, the natural sibling
+ * of CompareStringOrdinal above and the other half of the pair the
+ * ordinal-comparison APIs come in.
+ *
+ * Returns the 0-based index of the match in lpStringSource, or -1
+ * when there is no match (and -1 + ERROR_INVALID_PARAMETER on a bad
+ * argument, which the caller distinguishes via GetLastError).
+ * A negative cch means "null-terminated". */
+__declspec(dllexport) int FindStringOrdinal(DWORD dwFindStringOrdinalFlags, const wchar_t16* lpStringSource,
+                                            int cchSource, const wchar_t16* lpStringValue, int cchValue,
+                                            BOOL bIgnoreCase)
+{
+    const DWORD FIND_STARTSWITH = 0x00100000UL;
+    const DWORD FIND_ENDSWITH = 0x00200000UL;
+    const DWORD FIND_FROMSTART = 0x00400000UL;
+    const DWORD FIND_FROMEND = 0x00800000UL;
+
+    if (lpStringSource == (const wchar_t16*)0 || lpStringValue == (const wchar_t16*)0)
+    {
+        SetLastError(87 /* ERROR_INVALID_PARAMETER */);
+        return -1;
+    }
+    if ((dwFindStringOrdinalFlags & (FIND_STARTSWITH | FIND_ENDSWITH | FIND_FROMSTART | FIND_FROMEND)) == 0)
+    {
+        SetLastError(87 /* ERROR_INVALID_PARAMETER */);
+        return -1;
+    }
+
+    int n_src = cchSource;
+    if (n_src < 0)
+    {
+        n_src = 0;
+        while (lpStringSource[n_src] != 0)
+            ++n_src;
+    }
+    int n_val = cchValue;
+    if (n_val < 0)
+    {
+        n_val = 0;
+        while (lpStringValue[n_val] != 0)
+            ++n_val;
+    }
+
+    /* An empty needle matches at the anchor the search direction
+     * implies — Win32 reports 0 searching forward and cchSource
+     * searching backward. */
+    if (n_val == 0)
+        return (dwFindStringOrdinalFlags & (FIND_FROMEND | FIND_ENDSWITH)) ? n_src : 0;
+    if (n_val > n_src)
+        return -1;
+
+    if (dwFindStringOrdinalFlags & FIND_STARTSWITH)
+        return CompareStringOrdinal(lpStringSource, n_val, lpStringValue, n_val, bIgnoreCase) == 2 ? 0 : -1;
+    if (dwFindStringOrdinalFlags & FIND_ENDSWITH)
+    {
+        const int at = n_src - n_val;
+        return CompareStringOrdinal(lpStringSource + at, n_val, lpStringValue, n_val, bIgnoreCase) == 2 ? at : -1;
+    }
+
+    const int last = n_src - n_val;
+    if (dwFindStringOrdinalFlags & FIND_FROMEND)
+    {
+        for (int at = last; at >= 0; --at)
+        {
+            if (CompareStringOrdinal(lpStringSource + at, n_val, lpStringValue, n_val, bIgnoreCase) == 2)
+                return at;
+        }
+        return -1;
+    }
+    for (int at = 0; at <= last; ++at)
+    {
+        if (CompareStringOrdinal(lpStringSource + at, n_val, lpStringValue, n_val, bIgnoreCase) == 2)
+            return at;
+    }
+    return -1;
+}
+
+/* LCIDToLocaleName — LCID to BCP-47 name. An LCID with no installed
+ * locale fails with ERROR_INVALID_PARAMETER, which is the documented
+ * Win32 behaviour, so callers branch correctly. */
+// GAP: only en-US (the one installed locale) and the invariant / neutral /
+// system-default pseudo-LCIDs resolve — extend the table when a second
+// locale ships.
+__declspec(dllexport) int LCIDToLocaleName(unsigned long lcid, wchar_t16* name, int cchName, DWORD dwFlags)
+{
+    (void)dwFlags;
+    static const wchar_t16 k_en_us[] = {'e', 'n', '-', 'U', 'S', 0};
+    static const wchar_t16 k_invariant[] = {0};
+
+    const wchar_t16* pick;
+    int len;
+    if (lcid == 0x007F) /* LOCALE_INVARIANT */
+    {
+        pick = k_invariant;
+        len = 0;
+    }
+    else if (lcid == DUETOS_LCID_EN_US || lcid == 0x0400 /* USER_DEFAULT */
+             || lcid == 0x0800 /* SYSTEM_DEFAULT */ || lcid == 0x0C00 /* CUSTOM_DEFAULT */)
+    {
+        pick = k_en_us;
+        len = 5;
+    }
+    else
+    {
+        SetLastError(87 /* ERROR_INVALID_PARAMETER */);
+        return 0;
+    }
+
+    /* cchName == 0 is the documented "how big a buffer do I need"
+     * probe; it returns the length including the terminator. */
+    if (cchName == 0)
+        return len + 1;
+    if (name == (wchar_t16*)0 || cchName < len + 1)
+    {
+        SetLastError(122 /* ERROR_INSUFFICIENT_BUFFER */);
+        return 0;
+    }
+    for (int i = 0; i < len; ++i)
+        name[i] = pick[i];
+    name[len] = 0;
+    return len + 1;
+}
+
+/* SetThreadUILanguage — Win32 returns the LANGID actually selected,
+ * which may differ from the request when the asked-for language is
+ * not installed (0 means "pick the best match for the console
+ * code page"). Callers that check the return value behave
+ * correctly — this is the same shape Windows exhibits on a
+ * single-language install. */
+// GAP: en-US is the only installed UI language, so every request resolves
+// to it and a caller that assumes its request was honoured renders en-US —
+// revisit when a second UI language ships.
+__declspec(dllexport) unsigned short SetThreadUILanguage(unsigned short LangId)
+{
+    (void)LangId;
+    return DUETOS_LANGID_EN_US;
+}
+
+/* GetProductInfo — the Windows *edition* selector. Win32 requires
+ * FALSE + PRODUCT_UNDEFINED when the caller asks about a newer OS
+ * than the one running, which we honour. */
+// GAP: DuetOS has no edition concept — we answer PRODUCT_PROFESSIONAL, the
+// edition consistent with the version GetVersionExW already reports, so a
+// feature gated on "not Home / not Server" sees the same answer everywhere.
+__declspec(dllexport) BOOL GetProductInfo(DWORD dwOSMajor, DWORD dwOSMinor, DWORD dwSpMajor, DWORD dwSpMinor,
+                                          DWORD* pdwReturnedProductType)
+{
+    (void)dwSpMajor;
+    (void)dwSpMinor;
+    if (pdwReturnedProductType == (DWORD*)0)
+        return 0;
+    /* We report ourselves as 10.0; anything above that is a query
+     * about a future OS. */
+    if (dwOSMajor > 10 || (dwOSMajor == 10 && dwOSMinor > 0))
+    {
+        *pdwReturnedProductType = 0x00000000; /* PRODUCT_UNDEFINED */
+        return 0;
+    }
+    *pdwReturnedProductType = 0x00000030; /* PRODUCT_PROFESSIONAL */
+    return 1;
+}

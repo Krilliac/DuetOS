@@ -56,39 +56,59 @@ __declspec(dllexport) DWORD K32GetMappedFileNameW(HANDLE hProcess, void* addr, w
     return 0;
 }
 
+/* The image-path family below used to hand back three different
+ * canned strings — "C:\bin\ring3.exe" from the W form,
+ * "X:\bin\ring3.exe" from the A form, and the bare base name
+ * "ring3" — none of which matched the running EXE or each other.
+ * GetModuleFileName[AW] already derives the real path from argv[0]
+ * in the proc-env page, so every one of these now routes through
+ * it and they agree by construction. */
+
+/* Owned by kernel32_env.c. */
+__declspec(dllexport) DWORD GetModuleFileNameW(HANDLE hModule, wchar_t16* buf, DWORD nSize);
+__declspec(dllexport) DWORD GetModuleFileNameA(HANDLE hModule, char* buf, DWORD nSize);
+
 __declspec(dllexport) DWORD K32GetModuleBaseNameW(HANDLE hProcess, HANDLE mod, wchar_t16* name, DWORD cch)
 {
     (void)hProcess;
     (void)mod;
-    static const wchar_t16 base[] = {'r', 'i', 'n', 'g', '3', 0};
     if (name == (wchar_t16*)0 || cch == 0)
         return 0;
-    int i = 0;
-    while (i < (int)cch - 1 && base[i] != 0)
+    wchar_t16 full[260];
+    const DWORD len = GetModuleFileNameW((HANDLE)0, full, (DWORD)(sizeof(full) / sizeof(full[0])));
+    if (len == 0 || len >= (DWORD)(sizeof(full) / sizeof(full[0])))
     {
-        name[i] = base[i];
+        name[0] = 0;
+        return 0;
+    }
+    /* Base name = everything past the last separator. */
+    DWORD start = 0;
+    for (DWORD i = len; i > 0; --i)
+    {
+        if (full[i - 1] == '\\' || full[i - 1] == '/')
+        {
+            start = i;
+            break;
+        }
+    }
+    DWORD i = 0;
+    while (i < cch - 1 && start + i < len)
+    {
+        name[i] = full[start + i];
         ++i;
     }
     name[i] = 0;
-    return (DWORD)i;
+    return i;
 }
 
+// GAP: only the calling process is modelled — hProcess and the module
+// handle are ignored, so a cross-process query answers with the caller's
+// own image. Revisit when a process-snapshot syscall lands.
 __declspec(dllexport) DWORD K32GetModuleFileNameExW(HANDLE hProcess, HANDLE mod, wchar_t16* name, DWORD cch)
 {
     (void)hProcess;
     (void)mod;
-    static const wchar_t16 path[] = {'C', ':', '\\', 'b', 'i', 'n', '\\', 'r', 'i',
-                                     'n', 'g', '3',  '.', 'e', 'x', 'e',  0};
-    if (name == (wchar_t16*)0 || cch == 0)
-        return 0;
-    int i = 0;
-    while (i < (int)cch - 1 && path[i] != 0)
-    {
-        name[i] = path[i];
-        ++i;
-    }
-    name[i] = 0;
-    return (DWORD)i;
+    return GetModuleFileNameW((HANDLE)0, name, cch);
 }
 
 __declspec(dllexport) DWORD K32GetProcessImageFileNameW(HANDLE hProcess, wchar_t16* name, DWORD cch)
@@ -99,17 +119,45 @@ __declspec(dllexport) DWORD K32GetProcessImageFileNameW(HANDLE hProcess, wchar_t
 __declspec(dllexport) DWORD K32GetProcessImageFileNameA(HANDLE hProcess, char* name, DWORD cch)
 {
     (void)hProcess;
-    static const char path[] = "X:\\bin\\ring3.exe";
-    if (name == (char*)0 || cch == 0)
-        return 0;
-    int i = 0;
-    while (i < (int)cch - 1 && path[i] != 0)
+    return GetModuleFileNameA((HANDLE)0, name, cch);
+}
+
+/* QueryFullProcessImageNameW — the Vista+ replacement for
+ * GetProcessImageFileNameW. Same answer, different out-param
+ * convention: *pdwSize is in/out (capacity in, length-written out)
+ * and the return value is a BOOL.
+ *
+ * dwFlags PROCESS_NAME_NATIVE (1) asks for the \Device\Harddisk...
+ * form; DuetOS has no NT device namespace, so we answer the
+ * drive-letter path for both flag values. */
+// GAP: only the calling process is modelled (hProcess is ignored) and
+// PROCESS_NAME_NATIVE returns the Win32 drive-letter path because DuetOS
+// has no \Device object namespace to name.
+__declspec(dllexport) BOOL QueryFullProcessImageNameW(HANDLE hProcess, DWORD dwFlags, wchar_t16* lpExeName,
+                                                      DWORD* pdwSize)
+{
+    (void)hProcess;
+    (void)dwFlags;
+    if (lpExeName == (wchar_t16*)0 || pdwSize == (DWORD*)0 || *pdwSize == 0)
     {
-        name[i] = path[i];
-        ++i;
+        SetLastError(87 /* ERROR_INVALID_PARAMETER */);
+        return 0;
     }
-    name[i] = 0;
-    return (DWORD)i;
+    const DWORD cap = *pdwSize;
+    const DWORD len = GetModuleFileNameW((HANDLE)0, lpExeName, cap);
+    if (len == 0)
+    {
+        SetLastError(3 /* ERROR_PATH_NOT_FOUND */);
+        return 0;
+    }
+    if (len >= cap)
+    {
+        /* GetModuleFileNameW returns nSize on truncation. */
+        SetLastError(122 /* ERROR_INSUFFICIENT_BUFFER */);
+        return 0;
+    }
+    *pdwSize = len;
+    return 1;
 }
 
 __declspec(dllexport) BOOL K32GetProcessMemoryInfo(HANDLE hProcess, void* info, DWORD cb)

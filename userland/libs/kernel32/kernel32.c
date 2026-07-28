@@ -381,3 +381,187 @@ void syscall_yield(void)
     long long discard;
     __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)3) : "memory");
 }
+
+/* ------------------------------------------------------------------
+ * Threadpool timers — CreateThreadpoolTimer / SetThreadpoolTimer /
+ * WaitForThreadpoolTimerCallbacks / CloseThreadpoolTimer.
+ *
+ * These are backed by a real timer, not a fake handle: a single
+ * lazily-spawned service thread polls the table below every 10 ms
+ * and invokes each armed timer's callback when its due time has
+ * arrived — the same shape (and the same cadence floor) as the
+ * waitable-timer service in kernel32_sync.c. A caller that arms a
+ * timer and waits gets its callback; a caller that closes one is
+ * blocked until any in-flight callback has returned, so the
+ * context it owns is safe to free afterwards.
+ *
+ * The block lives in the common TU rather than beside the
+ * waitable timers because kernel32_sync.c is already the largest
+ * translation unit in the DLL.
+ * ------------------------------------------------------------------ */
+
+/* PTP_TIMER_CALLBACK: void (*)(PTP_CALLBACK_INSTANCE, PVOID, PTP_TIMER). */
+typedef void (*DUETOS_TP_TIMER_CALLBACK)(void*, void*, void*);
+
+typedef struct
+{
+    DUETOS_TP_TIMER_CALLBACK callback;
+    void* context;
+    unsigned long long due_ms;    /* absolute boot-relative ms */
+    unsigned long long period_ms; /* 0 = single-shot */
+    volatile int in_use;
+    volatile int armed;
+    volatile int running; /* callback currently executing */
+} DUETOS_TP_TIMER;
+
+#define DUETOS_TP_TIMER_MAX 32
+static DUETOS_TP_TIMER g_tp_timers[DUETOS_TP_TIMER_MAX];
+static volatile int g_tp_thread_started = 0;
+
+static DWORD tp_timer_service_thread(void* arg)
+{
+    (void)arg;
+    for (;;)
+    {
+        const ULONGLONG now = GetTickCount64();
+        for (int i = 0; i < DUETOS_TP_TIMER_MAX; ++i)
+        {
+            DUETOS_TP_TIMER* t = &g_tp_timers[i];
+            if (!t->in_use || !t->armed || now < t->due_ms)
+                continue;
+
+            /* Re-arm (or disarm) BEFORE the callback runs so a
+             * callback that calls SetThreadpoolTimer on its own
+             * timer wins over the periodic re-arm below. */
+            if (t->period_ms > 0)
+                t->due_ms = now + t->period_ms;
+            else
+                t->armed = 0;
+
+            DUETOS_TP_TIMER_CALLBACK cb = t->callback;
+            void* ctx = t->context;
+            if (cb == (DUETOS_TP_TIMER_CALLBACK)0)
+                continue;
+            t->running = 1;
+            cb((void*)0, ctx, (void*)t);
+            t->running = 0;
+        }
+        Sleep(10);
+    }
+    return 0;
+}
+
+static void tp_timer_ensure_service(void)
+{
+    /* Same single-flag race the waitable-timer service accepts:
+     * two service threads would still be correct, only wasteful. */
+    if (g_tp_thread_started)
+        return;
+    g_tp_thread_started = 1;
+    DWORD tid = 0;
+    HANDLE h = CreateThread((void*)0, 0, tp_timer_service_thread, (void*)0, 0, &tid);
+    (void)h;
+}
+
+// GAP: one shared service thread runs every callback, so a long-running or
+// blocking callback delays every other threadpool timer in the process, and
+// the 10 ms poll is the resolution floor. The pcbe (TP_CALLBACK_ENVIRON)
+// argument is accepted but not honoured — there is no pool to assign to.
+// Revisit when a real worker pool lands.
+__declspec(dllexport) void* CreateThreadpoolTimer(DUETOS_TP_TIMER_CALLBACK pfnti, void* pv, void* pcbe)
+{
+    (void)pcbe;
+    if (pfnti == (DUETOS_TP_TIMER_CALLBACK)0)
+    {
+        SetLastError(87 /* ERROR_INVALID_PARAMETER */);
+        return (void*)0;
+    }
+    for (int i = 0; i < DUETOS_TP_TIMER_MAX; ++i)
+    {
+        if (g_tp_timers[i].in_use)
+            continue;
+        g_tp_timers[i].callback = pfnti;
+        g_tp_timers[i].context = pv;
+        g_tp_timers[i].due_ms = 0;
+        g_tp_timers[i].period_ms = 0;
+        g_tp_timers[i].armed = 0;
+        g_tp_timers[i].running = 0;
+        g_tp_timers[i].in_use = 1;
+        return (void*)&g_tp_timers[i];
+    }
+    SetLastError(8 /* ERROR_NOT_ENOUGH_MEMORY */);
+    return (void*)0;
+}
+
+/* SetThreadpoolTimer — pftDueTime NULL disarms the timer (and, per
+ * the Win32 contract, leaves already-queued callbacks alone).
+ * Otherwise it is a FILETIME: negative means relative 100-ns
+ * intervals from now, positive means an absolute time.
+ *
+ * msWindowLength is the coalescing slack the caller will tolerate;
+ * a 10 ms poll is already coarser than any window a caller would
+ * ask for, so honouring it would not change when we fire. */
+__declspec(dllexport) void SetThreadpoolTimer(void* pti, const void* pftDueTime, DWORD msPeriod, DWORD msWindowLength)
+{
+    (void)msWindowLength;
+    if (pti == (void*)0)
+        return;
+    DUETOS_TP_TIMER* t = (DUETOS_TP_TIMER*)pti;
+    if (!t->in_use)
+        return;
+
+    if (pftDueTime == (const void*)0)
+    {
+        t->armed = 0;
+        return;
+    }
+
+    const long long due = *(const long long*)pftDueTime;
+    unsigned long long delay_ms;
+    if (due < 0)
+    {
+        delay_ms = (unsigned long long)(-due) / 10000ULL;
+    }
+    else
+    {
+        /* Absolute FILETIME. The waitable-timer slice made the same
+         * call: without a FILETIME-to-boot-ms mapping the honest
+         * choice is to fire at the next poll rather than hang. */
+        delay_ms = 0;
+    }
+    t->period_ms = (unsigned long long)msPeriod;
+    t->due_ms = GetTickCount64() + delay_ms;
+    t->armed = 1;
+    tp_timer_ensure_service();
+}
+
+/* WaitForThreadpoolTimerCallbacks — block until no callback for
+ * this timer is executing. fCancelPendingCallbacks additionally
+ * disarms it so a callback that has not started never will. */
+__declspec(dllexport) void WaitForThreadpoolTimerCallbacks(void* pti, BOOL fCancelPendingCallbacks)
+{
+    if (pti == (void*)0)
+        return;
+    DUETOS_TP_TIMER* t = (DUETOS_TP_TIMER*)pti;
+    if (fCancelPendingCallbacks)
+        t->armed = 0;
+    while (t->running)
+        Sleep(1);
+}
+
+/* CloseThreadpoolTimer — release the slot. Win32 requires the
+ * caller to have stopped the timer first, but a caller that did
+ * not would otherwise leave the service thread calling into a
+ * context it has freed, so disarm and drain here too. */
+__declspec(dllexport) void CloseThreadpoolTimer(void* pti)
+{
+    if (pti == (void*)0)
+        return;
+    DUETOS_TP_TIMER* t = (DUETOS_TP_TIMER*)pti;
+    t->armed = 0;
+    while (t->running)
+        Sleep(1);
+    t->callback = (DUETOS_TP_TIMER_CALLBACK)0;
+    t->context = (void*)0;
+    t->in_use = 0;
+}
