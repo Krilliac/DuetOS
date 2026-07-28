@@ -63,7 +63,12 @@ struct RoleSpec
 
 constexpr RoleSpec kRoles[] = {
     {72, 8}, // Display — hero numerals (clock, hero metrics)
-    {16, 2}, // Title   — window titlebars, modal titles, card names
+    // Title is the design's 13 px window-title size (README
+    // "Typography"). It was 16, which on a 30-px title bar made the
+    // title the loudest object on the desktop; the reference's chrome
+    // type is deliberately small and quiet. bitmap_scale stays 2 so
+    // the non-TTF palettes are unaffected.
+    {13, 2}, // Title   — window titlebars, modal titles, card names
     {13, 1}, // Body    — menu rows, button labels, dialog text
     {11, 1}, // Caption — hints, status, tooltips, timestamps
 };

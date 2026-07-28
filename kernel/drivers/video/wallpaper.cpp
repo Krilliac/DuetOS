@@ -4,11 +4,13 @@
 #include "arch/x86_64/timer.h"
 #include "debug/probes.h"
 #include "log/klog.h"
+#include "drivers/video/blend_math.h"
 #include "drivers/video/chrome_text.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/shadow.h"
 #include "drivers/video/svg.h"
 #include "drivers/video/theme.h"
+#include "drivers/video/wallpaper_aurora.h"
 #include "drivers/video/widget.h"
 #include "generated_svg_duet-mark.h"
 #include "generated_svg_syscalls-grid.h"
@@ -359,6 +361,45 @@ void PaintDuetBrandText(u32 desktop_rgb, u32 fb_w, u32 fb_h)
     }
 }
 
+// Aurora arcs watermark — docs/aurora-theme/README.md §1 layer 5.
+//
+// A 1240-px mark anchored at 56 % / 46 %, carrying six counter-rotating
+// partial circles at radii 470 / 360 / 250 (design canvas) with stroke
+// weights 2 / 1.4 / 1 and opacity fading .22 -> .09 outward-in. Scaled
+// here by 1024/1920 ≈ 0.533.
+//
+// The framebuffer's arc primitive takes an opaque RGB, so the design's
+// per-ring alpha is folded in by pre-blending the accent against the
+// backdrop's mid-tone (`--bg-1`) instead of blending per pixel. The
+// watermark only ever sits over the smooth part of the base gradient,
+// where the true backdrop is within a couple of levels of that
+// mid-tone, so the two agree to well under one 8-bit step.
+void PaintAuroraArcs(u32 accent, u32 backdrop, u32 fb_w, u32 fb_h, double rot_deg)
+{
+    const u32 short_side = (fb_w < fb_h) ? fb_w : fb_h;
+    if (short_side < 240U)
+        return;
+
+    const i32 cx = static_cast<i32>((fb_w * 56u) / 100u);
+    const i32 cy = static_cast<i32>((fb_h * 46u) / 100u);
+    // Radii scale off the framebuffer width so the mark keeps its
+    // proportion of the canvas at any mode.
+    const i32 r_outer = static_cast<i32>((fb_w * 245u) / 1000u);
+    const i32 radii[3] = {r_outer, (r_outer * 766) / 1000, (r_outer * 532) / 1000};
+    const u32 thickness[3] = {2u, 2u, 1u};
+    const u8 alpha_a[3] = {56, 38, 23}; // .22 / .15 / .09
+    const u8 alpha_b[3] = {46, 31, 18}; // the counter-rotating family
+
+    for (u32 i = 0; i < 3; ++i)
+    {
+        const u32 ink_a = BlendOver(backdrop, accent, alpha_a[i]);
+        const u32 ink_b = BlendOver(backdrop, accent, alpha_b[i]);
+        const double wobble = static_cast<double>(i) * 7.0;
+        FramebufferStrokeArcFloat(cx, cy, radii[i], 18.0 + wobble + rot_deg, 168.0, thickness[i], ink_a);
+        FramebufferStrokeArcFloat(cx, cy, radii[i], 198.0 - wobble - rot_deg, 168.0, thickness[i], ink_b);
+    }
+}
+
 // SVG-backed wallpaper layer. The 3 embedded assets parse once at
 // boot via WallpaperSvgInit(); subsequent WallpaperPaint passes
 // just call SvgRender(image, ...). Each SvgImage borrows the
@@ -443,6 +484,22 @@ void WallpaperPaint(u32 desktop_rgb)
     case ThemeId::DuetViolet:
     case ThemeId::DuetGreen:
     case ThemeId::DuetClassic:
+        // Aurora backdrop (docs/aurora-theme/README.md §1). The six
+        // static layers come out of the cached surface in one blit;
+        // the arcs watermark rides the ambient-motion phase and so is
+        // painted live on top. Palettes that don't opt in — and a boot
+        // where the cache allocation failed — fall through to the
+        // pre-Aurora topo + arcs + brand-strap painter below.
+        if (ThemeCurrent().aurora_wallpaper)
+        {
+            const Theme& theme = ThemeCurrent();
+            const u32 peer = (theme.accent_peer != 0) ? theme.accent_peer : theme.taskbar_accent;
+            if (AuroraWallpaperPaint(theme.taskbar_accent, peer, ThemeCurrentId() == ThemeId::DuetLight))
+            {
+                PaintAuroraArcs(theme.taskbar_accent, desktop_rgb, info.width, info.height, g_motion.arc_rot_deg);
+                break;
+            }
+        }
         // Refined Duet wallpaper:
         //   1. Concentric partial arcs in teal + amber, mirroring
         //      the prototype's `ArcsWallpaper` motif.
@@ -616,11 +673,20 @@ void WallpaperTick()
     // into this module. When the region IS visible the dirty-mark fires
     // and the compositor's content-diff layer (Pass A) still elides the
     // actual blit if the pixels didn't change.
-    const u32 arcs_x = (info.width > 170U) ? info.width / 2U - 170U : 0U;
-    const u32 arcs_y = (info.height > 170U) ? (info.height * 48U) / 100U - 170U : 0U;
-    if (!AnyOpaqueWindowCoversRect(arcs_x, arcs_y, 340U, 340U))
+    // Under the Aurora backdrop the watermark moves to 56 % / 46 % and
+    // grows to a radius of 0.245 * width, so its damage box has to
+    // follow it — the pre-Aurora 340x340 box centred on the midline
+    // would leave the outer ring smearing across the desktop.
+    const bool aurora = ThemeCurrent().aurora_wallpaper;
+    const u32 arcs_half = aurora ? ((info.width * 250U) / 1000U) : 170U;
+    const u32 arcs_cx = aurora ? (info.width * 56U) / 100U : info.width / 2U;
+    const u32 arcs_cy = (info.height * (aurora ? 46U : 48U)) / 100U;
+    const u32 arcs_x = (arcs_cx > arcs_half) ? arcs_cx - arcs_half : 0U;
+    const u32 arcs_y = (arcs_cy > arcs_half) ? arcs_cy - arcs_half : 0U;
+    const u32 arcs_side = 2U * arcs_half;
+    if (!AnyOpaqueWindowCoversRect(arcs_x, arcs_y, arcs_side, arcs_side))
     {
-        FramebufferAddDamage(arcs_x, arcs_y, 340U, 340U);
+        FramebufferAddDamage(arcs_x, arcs_y, arcs_side, arcs_side);
     }
 
     if (topo_moved && info.height > 280U)

@@ -133,6 +133,23 @@ constexpr u32 kEdgePad = 4;
 constexpr u32 kTabW = 170;
 constexpr u32 kTabGap = 4;
 
+// Aurora island metrics (docs/aurora-theme/README.md §10, scaled by
+// IMPLEMENTATION.md §7's 1024x768 column). On the island the tabs stop
+// being title-text slots and become fixed square icon buttons with a
+// running/focused indicator pill underneath, and START drops its
+// "DUET" label so the arcs mark stands alone. Both changes are what
+// take the island from a 98 %-wide strip to the design's centred pill:
+// the width is content-derived, so 170-px text tabs made "content"
+// mean "the whole screen".
+constexpr u32 kIslandStartW = 44;
+constexpr u32 kIslandStartGap = 12;
+constexpr u32 kIconTabW = 36;
+constexpr u32 kIconTabGap = 6;
+constexpr u32 kIconTabGlyph = 16;
+constexpr u32 kPillH = 3;
+constexpr u32 kPillRunW = 8;
+constexpr u32 kPillFocusW = 16;
+
 // Show-desktop rail: the rightmost cell of the strip. Hoisted out of
 // the paint block because the time card has to anchor LEFT of it —
 // both used to measure back from the same right edge, so the rail
@@ -156,6 +173,12 @@ u32 RightReserve()
     // deliberately absent from the pill list below.
     const bool pill = id == ThemeId::Duet || id == ThemeId::DuetLight || id == ThemeId::DuetBlue ||
                       id == ThemeId::DuetViolet || id == ThemeId::DuetGreen;
+    // Under the island the cells pack tighter than on a full-width
+    // strip: stats pill ~110 + tray ~54 + clock ~56 + rail 6 + gaps ~24.
+    // Measuring the strip's looser 400 there is what left a dead gap
+    // between the last app button and the stats pill.
+    if (pill && ThemeCurrent().taskbar_island && ThemeTactilityEffective())
+        return 270u;
     return pill ? 400u : 180u;
 }
 
@@ -437,8 +460,8 @@ void TaskbarReanchor()
     // columns, so the content pad has to clear them or the START
     // button and the time card get sliced by the curve.
     const u32 pad = kEdgePad + theme.surface_radius;
-    const u32 tabs_w = VisibleTabCount() * (kTabW + kTabGap);
-    const u32 content = 2 * pad + kStartW + kStartGap + tabs_w + RightReserve();
+    const u32 tabs_w = VisibleTabCount() * (kIconTabW + kIconTabGap);
+    const u32 content = 2 * pad + kIslandStartW + kIslandStartGap + tabs_w + RightReserve();
     const u32 max_w = (info.width > 2 * inset) ? info.width - 2 * inset : info.width;
     const u32 w = (content < max_w) ? content : max_w;
 
@@ -606,8 +629,9 @@ void TaskbarRedraw()
     // rather than a coloured rectangle. A 2-px highlight strip on
     // the top edge gives it a subtle raised look matching the
     // window-chrome highlight band.
-    constexpr u32 start_w = kStartW;
-    constexpr u32 start_radius = 4;
+    const bool island = bar_radius > 0;
+    const u32 start_w = island ? kIslandStartW : kStartW;
+    const u32 start_radius = island ? 10U : 4U;
     const u32 start_x = bar_x + bar_pad;
     const u32 start_h = (g_h > 8) ? g_h - 8 : g_h;
     FramebufferFillRoundRect(start_x, g_y + 4, start_w, start_h, start_radius, g_accent);
@@ -625,7 +649,18 @@ void TaskbarRedraw()
     // rasterization is a follow-on once a proper path stroker
     // lands in the framebuffer.
     const bool is_duet_family = IsDuetFamily(ThemeCurrentId());
-    if (is_duet_family)
+    if (is_duet_family && island)
+    {
+        // Island START is icon-only (design §10: 56x52 tile carrying a
+        // 26 px arcs mark). Dropping the word buys 44 px of island.
+        const i32 ring_cy = static_cast<i32>(g_y + g_h / 2);
+        const i32 mark_cx = static_cast<i32>(start_x + start_w / 2);
+        constexpr i32 kArcSweep = 189;
+        constexpr u32 kAmberMark = 0x00F0B040;
+        FramebufferStrokeArc(mark_cx - 4, ring_cy, 7, -30, kArcSweep, 2U, g_accent);
+        FramebufferStrokeArc(mark_cx + 4, ring_cy, 7, 150, kArcSweep, 2U, kAmberMark);
+    }
+    else if (is_duet_family)
     {
         // "DUET" label width comes from the chrome-text dispatcher
         // so the DuetMark centring stays correct under TTF themes
@@ -680,8 +715,8 @@ void TaskbarRedraw()
     // alive, render a dark tab with its title. Advance x with a
     // small gap between tabs. Clip when we'd overflow the right-
     // side uptime reserve.
-    constexpr u32 tab_w = kTabW;
-    constexpr u32 tab_gap = kTabGap;
+    const u32 tab_w = island ? kIconTabW : kTabW;
+    const u32 tab_gap = island ? kIconTabGap : kTabGap;
     // Reserve space on the right for the cluster of widgets that
     // sits beyond the tabs — time card + tray icons + chevron +
     // (Duet only) the CPU/FPS pill. Sized so tabs never get
@@ -692,7 +727,7 @@ void TaskbarRedraw()
     //   Other themes: tray (~70) + time (~80) + rail (~6) +
     //                 gaps (~14) = ~170
     const u32 right_reserve = RightReserve();
-    u32 tab_x = start_x + start_w + kStartGap;
+    u32 tab_x = start_x + start_w + (island ? kIslandStartGap : kStartGap);
     const u32 tabs_right_limit =
         (bar_content_right > bar_x + right_reserve) ? bar_content_right - right_reserve : bar_content_right;
 
@@ -729,109 +764,162 @@ void TaskbarRedraw()
         // tab visibly pops out of the strip; inactive tabs stay
         // flat to recede into the surface.
         const u32 tab_bg = is_active ? g_accent : g_tab_inactive;
-        constexpr u32 tab_radius = 3;
-        const u32 tab_h_eff = g_h - 8;
-        if (is_active)
+        const u32 tab_h_eff = island ? kIconTabW : g_h - 8;
+        const u32 tab_y = island ? g_y + 3 : g_y + 4;
+        if (island)
         {
-            FramebufferFillRectGradient(tab_x, g_y + 4, tab_w, tab_h_eff, LightenRgb(g_accent, 32), g_accent);
-        }
-        else
-        {
-            FramebufferFillRoundRect(tab_x, g_y + 4, tab_w, tab_h_eff, tab_radius, tab_bg);
-        }
-        FramebufferDrawRoundRect(tab_x, g_y + 4, tab_w, tab_h_eff, tab_radius, g_border);
-
-        // Tactility lift: per-tab hover overlay + faint ambient
-        // shadow. Cursor-position hit-test mirrors the titlebar
-        // control buttons' inline `inside()` lambda (widget.cpp
-        // L748). No press-overlay yet — per-tab pressed state
-        // isn't tracked at paint time (the mouse loop transitions
-        // straight from press to dispatch); a future input-state
-        // refactor that surfaces per-widget pressed-bits will
-        // light it up. Skip the lift for the active tab — its
-        // accent gradient already reads as elevated.
-        if (!is_active && ThemeTactilityEffective())
-        {
-            const u8 hover_alpha = ThemeIntensityEffective(ThemeCurrent().hover_lift_alpha);
-            if (hover_alpha > 0)
+            // Aurora icon button (design 10): 52x52 at 1920, 36x36
+            // here, radius 14 -> 10. Focused buttons take an accent
+            // wash + accent border + accent glyph; everything else
+            // stays sheer so the island reads as one surface.
+            constexpr u32 kIconRadius = 10;
+            if (is_active)
+            {
+                FramebufferBlendFill(tab_x, tab_y, tab_h_eff, tab_h_eff, (46U << 24) | (g_accent & 0x00FFFFFFU));
+                FramebufferDrawRoundRect(tab_x, tab_y, tab_h_eff, tab_h_eff, kIconRadius, g_accent);
+            }
+            else
             {
                 u32 cursor_x = 0;
                 u32 cursor_y = 0;
                 CursorPosition(&cursor_x, &cursor_y);
-                const bool hovered = cursor_x >= tab_x && cursor_x < tab_x + tab_w && cursor_y >= g_y + 4 &&
-                                     cursor_y < g_y + 4 + tab_h_eff;
-                if (hovered)
+                const bool hovered = cursor_x >= tab_x && cursor_x < tab_x + tab_h_eff && cursor_y >= tab_y &&
+                                     cursor_y < tab_y + tab_h_eff;
+                if (hovered && ThemeTactilityEffective())
                 {
-                    const u32 wash = ScaleAlpha(0x1AFFFFFFU, hover_alpha);
-                    FramebufferBlendFill(tab_x, g_y + 4, tab_w, tab_h_eff, wash);
-                    const u8 shadow_base = ThemeIntensityEffective(ThemeCurrent().shadow_intensity_active);
-                    RenderSoftShadow(static_cast<i32>(tab_x), static_cast<i32>(g_y + 4), tab_w, tab_h_eff, 8U,
-                                     static_cast<u8>(shadow_base / 2U), 0x00000000U);
+                    const u8 hover_alpha = ThemeIntensityEffective(ThemeCurrent().hover_lift_alpha);
+                    FramebufferBlendFill(tab_x, tab_y, tab_h_eff, tab_h_eff, ScaleAlpha(0x1AFFFFFFU, hover_alpha));
                 }
             }
+            ThemeRole role{};
+            const bool have_role = ThemeRoleForWindow(h, &role);
+            const u32 glyph_x = tab_x + (tab_h_eff - kIconTabGlyph) / 2;
+            const u32 glyph_y = tab_y + (tab_h_eff - kIconTabGlyph) / 2;
+            DrawTaskbarGlyph(glyph_x, glyph_y, kIconTabGlyph, is_active ? g_accent : g_fg, tab_bg, have_role, role);
+
+            // Indicator pill: 10 px running / 22 px focused at 1920,
+            // scaled here. The focused pill gets a 1-px accent halo in
+            // place of the design's 10-px CSS glow - the framebuffer
+            // has no blur primitive, and a hard halo still separates
+            // "focused" from "running" at a glance.
+            const u32 pill_w = is_active ? kPillFocusW : kPillRunW;
+            const u32 pill_x = tab_x + (tab_h_eff - pill_w) / 2;
+            const u32 pill_y = g_y + g_h - kPillH - 2;
+            const u32 pill_rgb = is_active ? g_accent : g_tab_inactive;
+            if (is_active && pill_x >= 1)
+            {
+                FramebufferBlendFill(pill_x - 1, pill_y - 1, pill_w + 2, kPillH + 2,
+                                     (90U << 24) | (g_accent & 0x00FFFFFFU));
+            }
+            FramebufferFillRect(pill_x, pill_y, pill_w, kPillH, pill_rgb);
         }
-        // 1-px highlight ridge across the top edge of the active
-        // tab. Matches the window-chrome highlight band so the
-        // tab reads as a small piece of chrome lifted off the strip.
-        if (is_active && tab_w > 2 * tab_radius)
+        else
         {
-            FramebufferFillRect(tab_x + tab_radius, g_y + 5, tab_w - 2 * tab_radius, 1, LightenRgb(g_accent, 56));
+            constexpr u32 tab_radius = 3;
+            const u32 legacy_h = g_h - 8;
+            if (is_active)
+            {
+                FramebufferFillRectGradient(tab_x, g_y + 4, tab_w, legacy_h, LightenRgb(g_accent, 32), g_accent);
+            }
+            else
+            {
+                FramebufferFillRoundRect(tab_x, g_y + 4, tab_w, legacy_h, tab_radius, tab_bg);
+            }
+            FramebufferDrawRoundRect(tab_x, g_y + 4, tab_w, legacy_h, tab_radius, g_border);
+
+            // Tactility lift: per-tab hover overlay + faint ambient
+            // shadow. Cursor-position hit-test mirrors the titlebar
+            // control buttons' inline `inside()` lambda (widget.cpp
+            // L748). No press-overlay yet — per-tab pressed state
+            // isn't tracked at paint time (the mouse loop transitions
+            // straight from press to dispatch); a future input-state
+            // refactor that surfaces per-widget pressed-bits will
+            // light it up. Skip the lift for the active tab — its
+            // accent gradient already reads as elevated.
+            if (!is_active && ThemeTactilityEffective())
+            {
+                const u8 hover_alpha = ThemeIntensityEffective(ThemeCurrent().hover_lift_alpha);
+                if (hover_alpha > 0)
+                {
+                    u32 cursor_x = 0;
+                    u32 cursor_y = 0;
+                    CursorPosition(&cursor_x, &cursor_y);
+                    const bool hovered = cursor_x >= tab_x && cursor_x < tab_x + tab_w && cursor_y >= g_y + 4 &&
+                                         cursor_y < g_y + 4 + legacy_h;
+                    if (hovered)
+                    {
+                        const u32 wash = ScaleAlpha(0x1AFFFFFFU, hover_alpha);
+                        FramebufferBlendFill(tab_x, g_y + 4, tab_w, legacy_h, wash);
+                        const u8 shadow_base = ThemeIntensityEffective(ThemeCurrent().shadow_intensity_active);
+                        RenderSoftShadow(static_cast<i32>(tab_x), static_cast<i32>(g_y + 4), tab_w, legacy_h, 8U,
+                                         static_cast<u8>(shadow_base / 2U), 0x00000000U);
+                    }
+                }
+            }
+            // 1-px highlight ridge across the top edge of the active
+            // tab. Matches the window-chrome highlight band so the
+            // tab reads as a small piece of chrome lifted off the strip.
+            if (is_active && tab_w > 2 * tab_radius)
+            {
+                FramebufferFillRect(tab_x + tab_radius, g_y + 5, tab_w - 2 * tab_radius, 1, LightenRgb(g_accent, 56));
+            }
+            // Focus dot under the active tab. Per the spec the dot
+            // is 14 px wide for running-but-not-pinned active apps
+            // and 8 px wide for pinned-and-active apps — the size
+            // difference encodes "session-bound vs always-here"
+            // without adding ink.
+            if (is_active && legacy_h > 4)
+            {
+                const bool pinned = WindowIsPinned(h);
+                const u32 dot_w = pinned ? 8U : 14U;
+                constexpr u32 dot_h = 2;
+                const u32 strip_rgb = LightenRgb(g_accent, 56);
+                const u32 dot_x = tab_x + (tab_w - dot_w) / 2;
+                const u32 dot_y = g_y + g_h - 4 - dot_h;
+                FramebufferFillRect(dot_x, dot_y, dot_w, dot_h, strip_rgb);
+            }
+            // Per-role app glyph in the tab's left gutter, before the
+            // title text. Gives each running app a visual identity beyond
+            // the truncated bitmap title — the same affordance the Win11
+            // taskbar / macOS Dock / GNOME panel have. Glyphs are drawn
+            // with the framebuffer's existing primitives (no SVG / TTF
+            // dependency at boot), 10×10 px so they fit comfortably
+            // inside the 20-px tab height without competing with the
+            // title text's 8×8 cell. Untagged windows (ring-3 PEs that
+            // skip ThemeRegisterWindow) get a neutral square placeholder.
+            const u32 glyph_x = tab_x + 6;
+            const u32 glyph_y = g_y + (g_h - 10) / 2;
+            constexpr u32 kGlyphSize = 10;
+            const u32 glyph_ink = g_fg;
+            ThemeRole role{};
+            const bool have_role = ThemeRoleForWindow(h, &role);
+            DrawTaskbarGlyph(glyph_x, glyph_y, kGlyphSize, glyph_ink, tab_bg, have_role, role);
+            const u32 text_x = tab_x + 6 + kGlyphSize + 6;
+            const char* title = WindowTitle(h);
+            if (title != nullptr)
+            {
+                // Pass C: tab labels through the unified chrome-text
+                // dispatcher. The active tab renders bold to reinforce
+                // the focus signal already carried by the accent
+                // gradient + focus dot; inactive tabs stay regular.
+                // Tab slot width is a fixed 170 px (kGlyphSize + label
+                // run + padding) so labels are truncated to fit rather
+                // than sizing-to-fit — the slot rect doubles as the
+                // hit rect, so click-targeting is decoupled from the
+                // rendered label width.
+                ChromeTextDraw(ChromeTextRole::Body, text_x, text_y, title, g_fg, tab_bg,
+                               is_active ? ChromeTextWeight::Bold : ChromeTextWeight::Regular);
+            }
         }
-        // Focus dot under the active tab. Per the spec the dot
-        // is 14 px wide for running-but-not-pinned active apps
-        // and 8 px wide for pinned-and-active apps — the size
-        // difference encodes "session-bound vs always-here"
-        // without adding ink.
-        if (is_active && tab_h_eff > 4)
-        {
-            const bool pinned = WindowIsPinned(h);
-            const u32 dot_w = pinned ? 8U : 14U;
-            constexpr u32 dot_h = 2;
-            const u32 strip_rgb = LightenRgb(g_accent, 56);
-            const u32 dot_x = tab_x + (tab_w - dot_w) / 2;
-            const u32 dot_y = g_y + g_h - 4 - dot_h;
-            FramebufferFillRect(dot_x, dot_y, dot_w, dot_h, strip_rgb);
-        }
-        // Per-role app glyph in the tab's left gutter, before the
-        // title text. Gives each running app a visual identity beyond
-        // the truncated bitmap title — the same affordance the Win11
-        // taskbar / macOS Dock / GNOME panel have. Glyphs are drawn
-        // with the framebuffer's existing primitives (no SVG / TTF
-        // dependency at boot), 10×10 px so they fit comfortably
-        // inside the 20-px tab height without competing with the
-        // title text's 8×8 cell. Untagged windows (ring-3 PEs that
-        // skip ThemeRegisterWindow) get a neutral square placeholder.
-        const u32 glyph_x = tab_x + 6;
-        const u32 glyph_y = g_y + (g_h - 10) / 2;
-        constexpr u32 kGlyphSize = 10;
-        const u32 glyph_ink = g_fg;
-        ThemeRole role{};
-        const bool have_role = ThemeRoleForWindow(h, &role);
-        DrawTaskbarGlyph(glyph_x, glyph_y, kGlyphSize, glyph_ink, tab_bg, have_role, role);
-        const u32 text_x = tab_x + 6 + kGlyphSize + 6;
-        const char* title = WindowTitle(h);
-        if (title != nullptr)
-        {
-            // Pass C: tab labels through the unified chrome-text
-            // dispatcher. The active tab renders bold to reinforce
-            // the focus signal already carried by the accent
-            // gradient + focus dot; inactive tabs stay regular.
-            // Tab slot width is a fixed 170 px (kGlyphSize + label
-            // run + padding) so labels are truncated to fit rather
-            // than sizing-to-fit — the slot rect doubles as the
-            // hit rect, so click-targeting is decoupled from the
-            // rendered label width.
-            ChromeTextDraw(ChromeTextRole::Body, text_x, text_y, title, g_fg, tab_bg,
-                           is_active ? ChromeTextWeight::Bold : ChromeTextWeight::Regular);
-        }
+
         // Record the slot so subsequent hit-tests can map a
         // click back to a window without re-running the layout.
         if (g_tab_count < kMaxTabs)
         {
             g_tabs[g_tab_count].x = tab_x;
-            g_tabs[g_tab_count].y = g_y + 4;
+            g_tabs[g_tab_count].y = island ? g_y + 3 : g_y + 4;
             g_tabs[g_tab_count].w = tab_w;
-            g_tabs[g_tab_count].h = g_h - 8;
+            g_tabs[g_tab_count].h = island ? kIconTabW : g_h - 8;
             g_tabs[g_tab_count].window = h;
             ++g_tab_count;
         }

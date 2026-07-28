@@ -13107,3 +13107,40 @@ markers for its richest input. Three discovery layers were added (runtime
   target, the toast anchor) want the unusable-edge figure, so a second
   accessor would exist only for callers to forget to prefer it — the
   whitelist-incompleteness shape.
+
+### DD — Aurora backdrop is a cached surface, not a per-compose painter
+
+- **Context:** the Aurora wallpaper is six layers, five of which are
+  static for a given (framebuffer geometry, palette) pair. Producing
+  them costs roughly 800 k per-pixel blends at 1024 × 768 — comparable
+  to an entire `DesktopCompose`.
+- **Decision:** generate the static layers once into a dedicated
+  full-screen RGB cache (`AllocateContiguousFrames`, ~3 MB) and blit it
+  per compose; keep only the motion-bearing arcs watermark live.
+- **Rules out:** painting the backdrop procedurally each frame (would
+  roughly triple compose cost and drop the desktop below its 60 fps
+  cadence), and folding the arcs into the cache (they carry the ambient
+  motion phase, and rebuilding a 3 MB surface per rotation step is
+  worse than re-stroking six arcs).
+- **Fallback is mandatory, not optional:** a failed allocation must
+  fall through to the pre-Aurora flat painter. A wallpaper layer that
+  can fail is a layer that can leave the desktop unpainted.
+
+### DD — the Aurora title strip is neutral, not per-role
+
+- **Context:** `IMPLEMENTATION.md` §1 says `role_title` "stays
+  per-role", which was read as "keep painting each window's title bar
+  in its role hue". The reference screenshots paint every window the
+  same neutral `--bg-3` and carry the app's identity in a 16-px accent
+  glyph.
+- **Decision:** on palettes that publish `glass_alpha`, the title strip
+  paints one neutral shade for every window. The role colour survives
+  in the client fill, the taskbar glyph and the indicator pill. The
+  close box joins the strip and only floods `--danger` on hover.
+- **Rules out:** per-role title hues on the Aurora palettes. Nine
+  saturated 30-px title bars side by side was the single loudest way
+  the shipped desktop failed to read as the reference; §1's sentence is
+  about the `Theme` struct not changing shape, not about paint.
+- **Scope:** flat palettes (Classic / Slate10 / Amber / DuetClassic /
+  HighContrast) keep their per-role title bars and their standing red
+  close box unchanged.

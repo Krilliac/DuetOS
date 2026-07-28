@@ -3157,7 +3157,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // F-012) plus the multi-radix preview band above the grid.
     win_a_chrome.h = 322;
     const duetos::drivers::video::WindowHandle calc_handle =
-        duetos::drivers::video::WindowRegister(win_a_chrome, "CALCULATOR");
+        duetos::drivers::video::WindowRegister(win_a_chrome, "Calculator");
     duetos::drivers::video::ThemeRegisterWindow(Role::Calculator, calc_handle);
     duetos::apps::calculator::CalculatorInit(calc_handle);
     duetos::drivers::video::WindowSetVisible(calc_handle, false);
@@ -3173,7 +3173,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // thread below routes keystrokes here when this window
     // is active (focus == keyboard owner).
     const duetos::drivers::video::WindowHandle notes_handle =
-        duetos::drivers::video::WindowRegister(win_b_chrome, "NOTEPAD");
+        duetos::drivers::video::WindowRegister(win_b_chrome, "Notepad");
     duetos::drivers::video::ThemeRegisterWindow(Role::Notes, notes_handle);
     duetos::apps::notes::NotesInit(notes_handle);
     duetos::drivers::video::WindowSetVisible(notes_handle, false);
@@ -3191,7 +3191,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     taskman_chrome.w = 520;
     taskman_chrome.h = 260;
     const duetos::drivers::video::WindowHandle taskman_handle =
-        duetos::drivers::video::WindowRegister(taskman_chrome, "TASK MANAGER");
+        duetos::drivers::video::WindowRegister(taskman_chrome, "Task Manager");
     duetos::drivers::video::ThemeRegisterWindow(Role::TaskManager, taskman_handle);
     duetos::drivers::video::WindowSetVisible(taskman_handle, false);
 
@@ -3205,7 +3205,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     logview_chrome.w = 420;
     logview_chrome.h = 180;
     const duetos::drivers::video::WindowHandle logview_handle =
-        duetos::drivers::video::WindowRegister(logview_chrome, "KERNEL LOG");
+        duetos::drivers::video::WindowRegister(logview_chrome, "Kernel Log");
     duetos::drivers::video::ThemeRegisterWindow(Role::LogView, logview_handle);
     duetos::drivers::video::WindowSetVisible(logview_handle, false);
     // Subtitle for Duet-era chrome to render next to the title.
@@ -3325,7 +3325,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     files_chrome.w = 400;
     files_chrome.h = 200;
     const duetos::drivers::video::WindowHandle files_handle =
-        duetos::drivers::video::WindowRegister(files_chrome, "FILES");
+        duetos::drivers::video::WindowRegister(files_chrome, "Files");
     duetos::drivers::video::ThemeRegisterWindow(Role::Files, files_handle);
     duetos::apps::files::FilesInit(files_handle);
     duetos::drivers::video::WindowSetVisible(files_handle, false);
@@ -3340,7 +3340,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     clock_chrome.w = 240;
     clock_chrome.h = 110;
     const duetos::drivers::video::WindowHandle clock_handle =
-        duetos::drivers::video::WindowRegister(clock_chrome, "CLOCK");
+        duetos::drivers::video::WindowRegister(clock_chrome, "Clock");
     duetos::drivers::video::ThemeRegisterWindow(Role::Clock, clock_handle);
     duetos::apps::clock::ClockInit(clock_handle);
     duetos::drivers::video::WindowSetVisible(clock_handle, false);
@@ -3363,7 +3363,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     gfx_chrome.w = 340;
     gfx_chrome.h = 280;
     const duetos::drivers::video::WindowHandle gfx_handle =
-        duetos::drivers::video::WindowRegister(gfx_chrome, "GFX DEMO");
+        duetos::drivers::video::WindowRegister(gfx_chrome, "GFX Demo");
     duetos::drivers::video::ThemeRegisterWindow(Role::GfxDemo, gfx_handle);
     duetos::apps::gfxdemo::GfxDemoInit(gfx_handle);
     duetos::drivers::video::WindowSetVisible(gfx_handle, false);
@@ -3389,7 +3389,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     settings_chrome.w = 380;
     settings_chrome.h = 340;
     const duetos::drivers::video::WindowHandle settings_handle =
-        duetos::drivers::video::WindowRegister(settings_chrome, "SETTINGS");
+        duetos::drivers::video::WindowRegister(settings_chrome, "Settings");
     duetos::drivers::video::ThemeRegisterWindow(Role::Settings, settings_handle);
     duetos::apps::settings::SettingsInit(settings_handle);
     duetos::drivers::video::WindowSetVisible(settings_handle, false);
@@ -3406,7 +3406,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     image_chrome.w = 460;
     image_chrome.h = 360;
     const duetos::drivers::video::WindowHandle image_handle =
-        duetos::drivers::video::WindowRegister(image_chrome, "IMAGE VIEWER");
+        duetos::drivers::video::WindowRegister(image_chrome, "Image Viewer");
     duetos::drivers::video::ThemeRegisterWindow(Role::ImageView, image_handle);
     duetos::apps::imageview::ImageViewInit(image_handle);
     duetos::drivers::video::WindowSetVisible(image_handle, false);
@@ -3422,7 +3422,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     about_chrome.w = 360;
     about_chrome.h = 220;
     const duetos::drivers::video::WindowHandle about_handle =
-        duetos::drivers::video::WindowRegister(about_chrome, "ABOUT DUETOS");
+        duetos::drivers::video::WindowRegister(about_chrome, "About DuetOS");
     duetos::drivers::video::ThemeRegisterWindow(Role::About, about_handle);
     duetos::apps::about::AboutInit(about_handle);
     duetos::drivers::video::WindowSetVisible(about_handle, false);
@@ -3439,7 +3439,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     help_chrome.w = 380;
     help_chrome.h = 480;
     const duetos::drivers::video::WindowHandle help_handle =
-        duetos::drivers::video::WindowRegister(help_chrome, "HELP");
+        duetos::drivers::video::WindowRegister(help_chrome, "Help");
     duetos::drivers::video::ThemeRegisterWindow(Role::Help, help_handle);
     duetos::apps::help::HelpInit(help_handle);
     // Start hidden like every other app window (ABOUT / Terminal / Device
@@ -3459,7 +3459,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     browser_chrome.w = 640;
     browser_chrome.h = 460;
     const duetos::drivers::video::WindowHandle browser_handle =
-        duetos::drivers::video::WindowRegister(browser_chrome, "BROWSER");
+        duetos::drivers::video::WindowRegister(browser_chrome, "Browser");
     duetos::drivers::video::ThemeRegisterWindow(Role::Browser, browser_handle);
     duetos::apps::browser::BrowserInit(browser_handle);
     duetos::drivers::video::WindowSetVisible(browser_handle, false);
@@ -3585,7 +3585,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     calendar_chrome.w = 360;
     calendar_chrome.h = 280;
     const duetos::drivers::video::WindowHandle calendar_handle =
-        duetos::drivers::video::WindowRegister(calendar_chrome, "CALENDAR");
+        duetos::drivers::video::WindowRegister(calendar_chrome, "Calendar");
     duetos::drivers::video::ThemeRegisterWindow(Role::Calendar, calendar_handle);
     duetos::apps::calendar::CalendarInit(calendar_handle);
     duetos::drivers::video::WindowSetVisible(calendar_handle, false);
@@ -3601,7 +3601,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     notify_chrome.w = 380;
     notify_chrome.h = 240;
     const duetos::drivers::video::WindowHandle notify_handle =
-        duetos::drivers::video::WindowRegister(notify_chrome, "NOTIFICATIONS");
+        duetos::drivers::video::WindowRegister(notify_chrome, "Notifications");
     duetos::drivers::video::ThemeRegisterWindow(Role::NotifyCenter, notify_handle);
     duetos::apps::notify_center::NotifyCenterInit(notify_handle);
     duetos::drivers::video::WindowSetVisible(notify_handle, false);
@@ -3616,7 +3616,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     sysmon_chrome.w = 380;
     sysmon_chrome.h = 280;
     const duetos::drivers::video::WindowHandle sysmon_handle =
-        duetos::drivers::video::WindowRegister(sysmon_chrome, "SYSTEM MONITOR");
+        duetos::drivers::video::WindowRegister(sysmon_chrome, "System Monitor");
     duetos::drivers::video::ThemeRegisterWindow(Role::Sysmon, sysmon_handle);
     duetos::apps::sysmon::SysmonInit(sysmon_handle);
     duetos::drivers::video::WindowSetVisible(sysmon_handle, false);
@@ -3633,7 +3633,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     hex_chrome.w = 640;
     hex_chrome.h = 360;
     const duetos::drivers::video::WindowHandle hex_handle =
-        duetos::drivers::video::WindowRegister(hex_chrome, "HEX VIEWER");
+        duetos::drivers::video::WindowRegister(hex_chrome, "Hex Viewer");
     duetos::drivers::video::ThemeRegisterWindow(Role::HexView, hex_handle);
     duetos::apps::hexview::HexViewInit(hex_handle);
     duetos::drivers::video::WindowSetVisible(hex_handle, false);
@@ -3648,7 +3648,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     charmap_chrome.w = 400;
     charmap_chrome.h = 320;
     const duetos::drivers::video::WindowHandle charmap_handle =
-        duetos::drivers::video::WindowRegister(charmap_chrome, "CHARACTER MAP");
+        duetos::drivers::video::WindowRegister(charmap_chrome, "Character Map");
     duetos::drivers::video::ThemeRegisterWindow(Role::CharMap, charmap_handle);
     duetos::apps::charmap::CharMapInit(charmap_handle);
     duetos::drivers::video::WindowSetVisible(charmap_handle, false);
@@ -3664,7 +3664,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     term_chrome.w = 680;
     term_chrome.h = 280;
     const duetos::drivers::video::WindowHandle term_handle =
-        duetos::drivers::video::WindowRegister(term_chrome, "TERMINAL");
+        duetos::drivers::video::WindowRegister(term_chrome, "Terminal");
     duetos::drivers::video::ThemeRegisterWindow(Role::Terminal, term_handle);
     duetos::apps::terminal::TerminalInit(term_handle);
     duetos::drivers::video::WindowSetVisible(term_handle, false);
@@ -3686,7 +3686,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         chrome.y = 110;
         chrome.w = 720;
         chrome.h = 260;
-        const duetos::drivers::video::WindowHandle h = duetos::drivers::video::WindowRegister(chrome, "NETWORK STATUS");
+        const duetos::drivers::video::WindowHandle h = duetos::drivers::video::WindowRegister(chrome, "Network Status");
         duetos::drivers::video::WindowSetVisible(h, false);
         duetos::apps::netstatus::NetStatusInit(h);
         DUETOS_BOOT_SELFTEST(duetos::apps::netstatus::NetStatusSelfTest());
@@ -3702,7 +3702,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         chrome.y = 130;
         chrome.w = 460;
         chrome.h = 320;
-        const duetos::drivers::video::WindowHandle h = duetos::drivers::video::WindowRegister(chrome, "DEVICE MANAGER");
+        const duetos::drivers::video::WindowHandle h = duetos::drivers::video::WindowRegister(chrome, "Device Manager");
         duetos::drivers::video::WindowSetVisible(h, false);
         duetos::apps::devicemgr::DeviceMgrInit(h);
         DUETOS_BOOT_SELFTEST(duetos::apps::devicemgr::DeviceMgrSelfTest());
@@ -3717,7 +3717,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         chrome.y = 150;
         chrome.w = 440;
         chrome.h = 240;
-        const duetos::drivers::video::WindowHandle h = duetos::drivers::video::WindowRegister(chrome, "FIREWALL");
+        const duetos::drivers::video::WindowHandle h = duetos::drivers::video::WindowRegister(chrome, "Firewall");
         duetos::drivers::video::WindowSetVisible(h, false);
         duetos::apps::firewall::FirewallInit(h);
         DUETOS_BOOT_SELFTEST(duetos::apps::firewall::FirewallSelfTest());

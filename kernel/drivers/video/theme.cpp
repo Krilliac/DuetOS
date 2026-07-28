@@ -130,6 +130,9 @@ constexpr Theme kClassic = {
     .gloss_alpha = 0,
     .taskbar_island = false,
     .taskbar_inset = 0,
+    .accent_peer = 0,
+    .aurora_wallpaper = false,
+    .glass_alpha = 0,
 };
 
 // Amber is a deliberate retro exercise — a single-hue amber palette
@@ -232,6 +235,9 @@ constexpr Theme kAmber = {
     .gloss_alpha = 0,
     .taskbar_island = false,
     .taskbar_inset = 0,
+    .accent_peer = 0,
+    .aurora_wallpaper = false,
+    .glass_alpha = 0,
 };
 
 constexpr Theme kSlate10 = {
@@ -337,6 +343,9 @@ constexpr Theme kSlate10 = {
     .gloss_alpha = 0,
     .taskbar_island = false,
     .taskbar_inset = 0,
+    .accent_peer = 0,
+    .aurora_wallpaper = false,
+    .glass_alpha = 0,
 };
 
 // Duet — the redesigned palette. Slate-charcoal canvas, dual-accent
@@ -452,6 +461,9 @@ constexpr Theme kDuet = {
     .gloss_alpha = 38,
     .taskbar_island = true,
     .taskbar_inset = 12,
+    .accent_peer = 0x00FFC046,
+    .aurora_wallpaper = true,
+    .glass_alpha = 148,
 };
 
 // DuetLight — light-mode sibling of Duet, sourced from the
@@ -560,6 +572,9 @@ constexpr Theme kDuetLight = {
     .gloss_alpha = 26,
     .taskbar_island = true,
     .taskbar_inset = 12,
+    .accent_peer = 0x00FFC046,
+    .aurora_wallpaper = true,
+    .glass_alpha = 148,
 };
 
 // Duet accent variants. Each one duplicates the slate Duet
@@ -652,6 +667,9 @@ constexpr Theme kDuetBlue = {
     .gloss_alpha = 38,
     .taskbar_island = true,
     .taskbar_inset = 12,
+    .accent_peer = 0x00FFC046,
+    .aurora_wallpaper = true,
+    .glass_alpha = 148,
 };
 
 constexpr Theme kDuetViolet = {
@@ -733,6 +751,9 @@ constexpr Theme kDuetViolet = {
     .gloss_alpha = 38,
     .taskbar_island = true,
     .taskbar_inset = 12,
+    .accent_peer = 0x00FFC046,
+    .aurora_wallpaper = true,
+    .glass_alpha = 148,
 };
 
 constexpr Theme kDuetGreen = {
@@ -814,6 +835,9 @@ constexpr Theme kDuetGreen = {
     .gloss_alpha = 38,
     .taskbar_island = true,
     .taskbar_inset = 12,
+    .accent_peer = 0x00FFC046,
+    .aurora_wallpaper = true,
+    .glass_alpha = 148,
 };
 
 // DuetClassic — the prototype's "classic mode" sibling.
@@ -926,6 +950,9 @@ constexpr Theme kDuetClassic = {
     .gloss_alpha = 0,
     .taskbar_island = false,
     .taskbar_inset = 0,
+    .accent_peer = 0,
+    .aurora_wallpaper = false,
+    .glass_alpha = 0,
 };
 
 // HighContrast — accessibility-first theme. Pure black bg,
@@ -1024,6 +1051,9 @@ constexpr Theme kHighContrast = {
     .gloss_alpha = 0,
     .taskbar_island = false,
     .taskbar_inset = 0,
+    .accent_peer = 0,
+    .aurora_wallpaper = false,
+    .glass_alpha = 0,
 };
 
 const Theme* const kThemes[static_cast<u32>(ThemeId::kCount)] = {
@@ -1435,7 +1465,7 @@ void ThemeSelfTest()
             if (t.tactility_enabled)
                 continue;
             if (t.window_radius != 0 || t.surface_radius != 0 || t.sheen_alpha != 0 || t.gloss_alpha != 0 ||
-                t.taskbar_island)
+                t.taskbar_island || t.aurora_wallpaper || t.glass_alpha != 0 || t.accent_peer != 0)
             {
                 SerialWrite("[theme-selftest] FAIL flat theme carries Aurora glass tokens\n");
                 KBP_PROBE_V(debug::ProbeId::kTactilityThemeMismatch, i);
@@ -1462,12 +1492,37 @@ void ThemeSelfTest()
         }
     }
 
+    // (3) The Aurora backdrop is a dual-accent composition: its warm
+    //     blob is `accent_peer`. A palette that opts into the wallpaper
+    //     without publishing the second channel would paint both blobs
+    //     in the same hue and silently lose the "duet" the design is
+    //     named for. The same check pins `glass_alpha` inside the range
+    //     that actually composites — 0 and 255 both mean "opaque", so a
+    //     palette that meant to ship glass and typo'd either value would
+    //     otherwise look like a working opt-in.
+    if (pass)
+    {
+        for (u32 i = 0; i < static_cast<u32>(ThemeId::kCount); ++i)
+        {
+            const Theme& t = *kThemes[i];
+            if (!t.aurora_wallpaper)
+                continue;
+            if (t.accent_peer == 0 || t.accent_peer == t.taskbar_accent || t.glass_alpha == 0 || t.glass_alpha == 255)
+            {
+                SerialWrite("[theme-selftest] FAIL aurora wallpaper without a distinct accent pair / glass\n");
+                KBP_PROBE_V(debug::ProbeId::kTactilityThemeMismatch, i);
+                mark_fail(13);
+                break;
+            }
+        }
+    }
+
     if (pass)
     {
         SerialWrite("[theme] self-test OK (palette table + name round-trip + cycle)\n");
         SerialWrite("[theme-selftest] tactility-matrix PASS (10/10, hc-amber-opt-out=verified)\n");
         SerialWrite("[theme-selftest] motion-intensity PASS (hc-double-gate + classic-subdued + others-full)\n");
-        SerialWrite("[theme-selftest] aurora-tokens PASS (flat-themes-opt-out + island-radius-inset)\n");
+        SerialWrite("[theme-selftest] aurora-tokens PASS (flat-themes-opt-out + island-radius-inset + accent-pair)\n");
         s_theme_passed = true;
     }
     else

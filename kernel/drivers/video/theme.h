@@ -306,6 +306,26 @@ struct Theme
     // reserve is `taskbar_height + 2 * taskbar_inset` under an island
     // so a maximized window doesn't tuck under it.
     u32 taskbar_inset;
+
+    // Second accent — "Win32 PE peer" amber in the design's dual-accent
+    // vocabulary (`--accent-2`). `taskbar_accent` is the first channel
+    // ("native ABI"). Used by the wallpaper's warm blob, the desktop
+    // icon tiles, and the taskbar indicator pills. 0 = the palette has
+    // no second channel; consumers then fall back to `taskbar_accent`.
+    u32 accent_peer;
+
+    // Opt into the six-layer Aurora backdrop (README §1 "Wallpaper").
+    // False keeps whatever wallpaper.cpp's per-theme painter draws.
+    bool aurora_wallpaper;
+
+    // Alpha (0..255) of a window's client-area fill when the body is
+    // composited rather than stamped. 0 (and 255) keep the historical
+    // opaque body; any value in between makes the body a real
+    // Porter-Duff blend over the already-painted backdrop, which is
+    // what lets the wallpaper's aurora glow read through the chrome
+    // (IMPLEMENTATION.md §4). Rides the tactility gate. The design's
+    // `--glass-2` rgba(11,16,22,.58) is 148.
+    u8 glass_alpha;
 };
 
 /// Read-only snapshot of the active theme. Valid for as long as
