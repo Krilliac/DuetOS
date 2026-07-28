@@ -82,6 +82,17 @@ add_test(
             --root "${CMAKE_SOURCE_DIR}/../.."
 )
 
+# A tracked TU that includes an untracked header compiles for the
+# session that wrote both and for nobody else. Targeted-path staging
+# (CLAUDE_PARALLEL.md forbids `git add -A`) is exactly how a new
+# header gets left behind, so gate it here rather than in CI-only.
+add_test(
+    NAME include_tracked
+    COMMAND Python3::Interpreter
+            "${CMAKE_SOURCE_DIR}/../../tools/test/include-tracked-audit.py"
+            --root "${CMAKE_SOURCE_DIR}/../.."
+)
+
 add_test(
     NAME iphlpapi_socket_abi
     COMMAND Python3::Interpreter

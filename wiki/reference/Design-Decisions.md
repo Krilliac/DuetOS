@@ -12395,3 +12395,44 @@ markers for its richest input. Three discovery layers were added (runtime
 - **Compatibility effect:** this intentionally broadens `IsEmulator()` from
   QEMU-only detection to the WHP guest too. Any bare-metal-only probe must
   be capability-gated rather than inferred from a particular vendor string.
+
+---
+
+## 2026-07-27 — One `/disk/<idx>` grammar, and a gate for untracked includes
+
+- **Context:** the bounded `/disk/<idx>[/rest]` parser existed twice.
+  `routing::ParseDiskPath` (`kernel/fs/file_route.cpp`) open-coded it
+  as the compatibility fallback for the pre-auto-mount window; the
+  Win32 spawn path grew a second copy in a new
+  `kernel/fs/disk_path_policy.h`. The two accept sets already
+  disagreed — the router required a `/` after the index, the header
+  also accepted end-of-string — and only the header's copy was
+  covered by `tests/host/test_disk_path.cpp`. Worse, the header was
+  **untracked** while two tracked files included it: a commit staged
+  by explicit path (which `CLAUDE_PARALLEL.md` mandates — `git add -A`
+  is forbidden during fleet work) would have published a kernel TU
+  and a host test that reference a file no clean checkout has.
+- **Decision — the header is the single grammar; callers own their
+  own strictness.** `ParseBoundedDiskPath(path, max_volumes, &idx,
+  &rest)` in `kernel/fs/disk_path_policy.h` is the one implementation:
+  prefix match, digit accumulation with an overflow-safe bound against
+  `max_volumes`, and a terminator of `/` or ` `. `ParseDiskPath`
+  calls it and then re-imposes its own requirement — `rest[0] == '/'`
+  — because it hands `rest` to `Fat32LookupPath`, which needs an
+  absolute in-volume path; a bare `/disk/3` names the volume, not a
+  file in it. Accept sets stay identical where they should be and
+  diverge only at a call site that says why. **Rules out** deleting
+  the router's fallback (still needed for boots where auto-mount has
+  not run — see the 2026 entry on `VfsMountResolve`) and rules out
+  loosening `Fat32LookupPath` to tolerate an empty path.
+- **Decision — untracked includes are a gate, not a code review.**
+  `tools/test/include-tracked-audit.py` walks every tracked
+  `.c/.cc/.cpp/.h/.hpp`, resolves each `#include "..."` against the
+  build's `-I` roots, and fails when the resolved file exists in the
+  working tree but is absent from `git ls-files`. Registered as the
+  `include_tracked` ctest. The failure it catches is invisible to a
+  local build (the header is right there) and invisible in a diff
+  (the include line looks correct); only a clean checkout surfaces
+  it, days later. **Rules out** flagging includes that resolve
+  nowhere — generated cbindgen and CMake-configured headers live in
+  the build tree, and a gate that cries wolf gets ignored.

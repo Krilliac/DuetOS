@@ -27,6 +27,7 @@
 #include "arch/x86_64/hypervisor.h"
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "fs/disk_path_policy.h"
 #include "fs/duetfs.h"
 #include "fs/duetfs/include/duetfs.h"
 #include "fs/fat32.h"
@@ -48,9 +49,7 @@ namespace duetos::fs::routing
 namespace
 {
 
-constexpr const char* kDiskPrefix = "/disk/";
-constexpr u64 kDiskPrefixLen = 6; // strlen("/disk/")
-constexpr u64 kPathMax = 256;     // mirror SyscallPathMax for the in-kernel callers
+constexpr u64 kPathMax = 256; // mirror SyscallPathMax for the in-kernel callers
 
 // Field-wise DirEntry copy. The struct is ~140 bytes; a default
 // `=` assignment makes the freestanding compiler emit a memcpy
@@ -124,7 +123,9 @@ bool CopyPathInto(char (&dst)[::duetos::core::Process::Win32FileHandle::kFat32Pa
 //      FAT32 volume index.
 //   2. Hardcoded "/disk/<idx>/<rest>" parse — fallback for callers
 //      that hit before auto-mount has run, or when mounts are
-//      cleared between fault-domain restarts.
+//      cleared between fault-domain restarts. The grammar itself
+//      lives in fs/disk_path_policy.h, shared with the Win32 spawn
+//      path so the two accept sets cannot drift.
 bool ParseDiskPath(const RamfsNode* root, const char* path, u32* out_idx, const char** out_rest)
 {
     if (root == nullptr || path == nullptr)
@@ -144,38 +145,23 @@ bool ParseDiskPath(const RamfsNode* root, const char* path, u32* out_idx, const 
         }
     }
 
-    // (2) Hardcoded "/disk/<idx>/<rest>" fallback.
-    for (u64 i = 0; i < kDiskPrefixLen; ++i)
-    {
-        if (path[i] == '\0')
-            return false;
-        if (path[i] != kDiskPrefix[i])
-            return false;
-    }
-    u64 cursor = kDiskPrefixLen;
+    // (2) Hardcoded "/disk/<idx>/<rest>" fallback — one shared grammar,
+    // bounded to the FAT32 volume cap.
     u32 idx = 0;
-    bool any_digit = false;
-    while (path[cursor] >= '0' && path[cursor] <= '9')
-    {
-        idx = idx * 10 + u32(path[cursor] - '0');
-        any_digit = true;
-        ++cursor;
-        if (cursor > kDiskPrefixLen + 4) // bound: at most 4 digits, FAT32 cap is 16
-            return false;
-    }
-    if (!any_digit)
+    const char* rest = nullptr;
+    if (!ParseBoundedDiskPath(path, fat32::kMaxVolumes, &idx, &rest))
         return false;
-    // After the index we expect a '/'. The remainder (which may be
-    // empty meaning "the volume root") starts at cursor + 1.
-    if (path[cursor] != '/')
-        return false;
-    if (idx >= fat32::kMaxVolumes)
+    // The shared grammar also accepts a bare "/disk/<idx>", which names
+    // the volume itself and leaves `rest` empty. This caller hands
+    // `rest` to Fat32LookupPath, which needs an absolute in-volume
+    // path, so the router keeps requiring the separator.
+    if (rest[0] != '/')
         return false;
     char mount_point[16] = {};
     if (!VfsFormatDiskMountPoint(idx, mount_point, sizeof(mount_point)) || !VfsMountVisibleFromRoot(root, mount_point))
         return false;
     *out_idx = idx;
-    *out_rest = path + cursor; // include the leading '/' so Fat32LookupPath sees an absolute path
+    *out_rest = rest; // includes the leading '/' so Fat32LookupPath sees an absolute path
     return true;
 }
 

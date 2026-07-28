@@ -277,6 +277,16 @@ cd build/x86_64-debug && ctest --output-on-failure && cd -
 Hosted unit tests live under `tests/`. The on-target self-tests run
 during the QEMU smoke boot.
 
+`tests/host/CMakeLists.txt` also registers the compiler-free static
+gates from `tools/test/` and `tools/build/` as ctest entries, so
+`ctest` is the one entrypoint for both kinds of check. Among them
+`include_tracked` (`tools/test/include-tracked-audit.py`) fails when a
+tracked source `#include`s a file that exists in the working tree but
+is missing from `git ls-files` — the shape a targeted-path commit
+produces when it forgets a brand-new header. It compiles fine locally
+and breaks every clean checkout, so it is worth catching before the
+push, not in CI.
+
 ## CI
 
 CI is wired in `.github/workflows/`:
