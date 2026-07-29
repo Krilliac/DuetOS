@@ -565,6 +565,56 @@ unchanged.
    `glass_alpha` of 0 or 255, is a silent opt-in: the backdrop would
    paint both blobs in one hue and the glass would composite opaque.
 
+### App interiors — `app_widgets/app_palette.{h,cpp}`
+
+The shell chrome speaking Aurora was not enough: every in-kernel app
+baked its own saturated literals (a red calculator key, cyan file-list
+headers, green-on-black process rows), so a desktop screenshot read as
+"same desktop, different applications". `AppPaletteMake` is the one
+place the design's interior tokens (`--ink` / `--ink-2` / `--ink-3`,
+`--recess`, `--glass-3`, `--line`, the accent selection tint) become
+concrete `0x00RRGGBB`.
+
+Two properties keep it honest:
+
+- **Opt-in.** `AppPalette::aurora` mirrors the theme's
+  `aurora_wallpaper`, so it is false for exactly the palettes the
+  self-test above already pins as flat. Each restyled call site picks
+  `aurora ? pal.<token> : <its historical literal>`, which is why
+  Classic / Slate10 / Amber / DuetClassic / HighContrast still paint
+  what they painted before the module existed. Riding the existing
+  opt-in rather than a fresh theme-id whitelist is deliberate — a
+  whitelist rots the next time a palette lands.
+- **Relative to the surface.** The framebuffer has no per-pixel alpha
+  and `FramebufferDrawString` stamps an opaque cell behind every
+  glyph, so a zebra row cannot be a live blend. `AppPaletteFor(body)`
+  resolves every token against the app's own client fill — and, when
+  the theme publishes `glass_alpha`, first flattens that fill over
+  `desktop_bg` so the app's opaque interior seams into its own glass
+  chrome instead of stamping a darker patch inside it. The ink ramp
+  inverts when the surface is light (Notes' cream paper, the whole
+  DuetLight family).
+
+Math is constexpr and kernel-free; `tests/host/test_app_palette.cpp`
+pins the ramp ordering, the light-mode flip and the single-accent
+collapse without a boot.
+
+`AppButton` resolves the documented `bg_rgb == 0` "theme default"
+sentinel through the same palette: a `--recess` chip with muted ink
+under Aurora, the historical role-title hue under the flat palettes.
+That is what quiets the app toolbars that never opted in individually.
+
+### Bitmap font lowercase
+
+`Font8x8Lookup` used to fold `a..z` onto the uppercase glyphs. Every
+app interior renders its content through that font, so the fold turned
+every file name, process name and log line into shouty all-caps — the
+loudest remaining difference from a reference that sets all of it
+mixed-case. `font8x8.cpp` now carries real 5 × 7 lowercase shapes with
+ascenders (`b d f h k l t`) and descenders (`g j p q y`). The cell and
+the 8-px advance are unchanged, so every column layout derived from
+them is untouched.
+
 ## Chrome Tactility (Pass A)
 
 The chrome tactility lift (Pass A of a 4-pass UX initiative) adds

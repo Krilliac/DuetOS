@@ -13197,3 +13197,38 @@ markers for its richest input. Three discovery layers were added (runtime
   (`bochs_vbe`, `virtio_gpu`) — those must render "not applicable". A
   real number requires a periodic sampler, and none of it is verifiable
   under QEMU, which models no GPU.
+### DD — Aurora app interiors are opt-in per palette, not a global restyle
+
+- **Context:** the app interiors (`kernel/apps/*`) each carried their
+  own saturated RGB literals. Routing them through the Aurora tokens is
+  what the design asks for, but the flat palettes — Classic, Slate10,
+  Amber, DuetClassic, HighContrast — must keep the look they had.
+- **Decision:** `AppPaletteMake` publishes an `aurora` flag mirroring
+  the theme's existing `aurora_wallpaper` opt-in, and each restyled
+  call site branches `aurora ? token : <its historical literal>`. The
+  historical constants stay in the source next to their Aurora
+  counterpart rather than being deleted.
+- **Rules out:** (a) replacing the literals outright, which would
+  regress five palettes that the theme self-test deliberately keeps
+  flat; (b) deriving "is this Aurora" from a `ThemeId` whitelist —
+  that is the whitelist-incompleteness bug shape, and it would go stale
+  the next time a palette is added.
+- **Also rules out** resolving interior tokens against a fixed dark
+  ground: they are resolved against the app's own client fill, so a
+  light client (Notes' cream paper, the DuetLight family) inverts the
+  ink ramp instead of painting dark-on-dark.
+
+### DD — the 8x8 ROM font carries real lowercase
+
+- **Context:** `Font8x8Lookup` folded `a..z` onto the uppercase glyphs
+  with a "grow this table in a follow-up slice" note. Every app
+  interior renders content through that font.
+- **Decision:** ship real 5 x 7 lowercase shapes with ascenders and
+  descenders inside the existing 8 x 8 cell.
+- **Rules out:** treating the fold as permanent and instead moving app
+  content onto the proportional TTF chrome path. That would have been a
+  far larger change — every column in Files and Task Manager is laid
+  out in 8-px cells and hit-tested from the same arithmetic — for a
+  smaller fidelity gain than the glyphs themselves buy.
+- **Scope:** the cell size and the 8-px advance are unchanged, so no
+  column layout, scrollbar metric or hit-test moves.
