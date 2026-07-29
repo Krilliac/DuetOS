@@ -374,31 +374,48 @@ u32 AmlNamespaceCountByKind(AmlObjectKind k)
     return n;
 }
 
-// Read the two-byte SLP_TYP values encoded in `\_S5` /  `\_S5_`.
+// Read the two-byte SLP_TYP values encoded in a sleep-state package
+// `\_Sx` / `\_Sx_` (`name3` is the 3-char form, e.g. "_S3").
 // Two firmware shapes are recognised:
 //
-//   1. Name(_S5_, Package(4) { SLP_TYPa, SLP_TYPb, ... })  — the
+//   1. Name(_Sx_, Package(4) { SLP_TYPa, SLP_TYPb, ... })  — the
 //      classic UEFI / QEMU shape. The namespace builder records
 //      this with `kind == Name` and aml_offset pointing at the
-//      4-char "_S5_" NameString.
+//      4-char "_Sx_" NameString.
 //
-//   2. Method(_S5_, 0, NotSerialized) { Return(Package(4)
+//   2. Method(_Sx_, 0, NotSerialized) { Return(Package(4)
 //      { SLP_TYPa, SLP_TYPb, ... }) }  — used by some consumer
 //      firmware (notably older OEM-modified UEFIs). The namespace
 //      builder records this with `kind == Method` and aml_offset
 //      pointing at the 0x14 MethodOp byte.
 //
+// A state the firmware does not support simply has no package —
+// that is the ONLY signal that S3 is unavailable on this board, and
+// it must stay distinguishable from "supported, SLP_TYP happens to
+// be 0" (which is a legal encoding). Hence bool-return + out-params,
+// never a sentinel value.
+//
 // Returns true on a clean extract. On any shape deviation the
-// caller stays in "shutdown unsupported" — we don't guess bits.
-bool AmlReadS5(u8* slp_typa, u8* slp_typb)
+// caller stays in "state unsupported" — we don't guess bits.
+bool AmlReadSleepPackage(const char* name3, u8* slp_typa, u8* slp_typb)
 {
-    if (slp_typa == nullptr || slp_typb == nullptr)
+    if (name3 == nullptr || slp_typa == nullptr || slp_typb == nullptr)
         return false;
-    const AmlNamespaceEntry* entry = AmlNamespaceFind("\\_S5_");
+    if (name3[0] != '_' || name3[1] != 'S' || name3[2] < '0' || name3[2] > '5' || name3[3] != '\0')
+        return false;
+
+    // Padded ("\_S3_") then unpadded ("\_S3") — the namespace builder
+    // records whichever spelling the firmware's bytecode used.
+    const char padded[6] = {'\\', name3[0], name3[1], name3[2], '_', '\0'};
+    const char plain[5] = {'\\', name3[0], name3[1], name3[2], '\0'};
+    const AmlNamespaceEntry* entry = AmlNamespaceFind(padded);
     if (entry == nullptr)
-        entry = AmlNamespaceFind("\\_S5");
+        entry = AmlNamespaceFind(plain);
     if (entry == nullptr || (entry->kind != AmlObjectKind::Name && entry->kind != AmlObjectKind::Method))
+    {
+        KLOG_DEBUG_V("acpi/aml", "sleep package: namespace lookup missed", entry == nullptr ? 0u : 1u);
         return false;
+    }
 
     const u8* aml = nullptr;
     u32 aml_len = 0;
@@ -439,7 +456,26 @@ bool AmlReadS5(u8* slp_typa, u8* slp_typb)
     u32 p = 0;
     if (entry->kind == AmlObjectKind::Name)
     {
-        p = entry->aml_offset + 4; // past the 4-char "_S5_" name
+        // The namespace walker records `aml_offset` at the DEFINING
+        // OPCODE, not at the name — the Method branch below relies on
+        // exactly that (it checks for MethodOp there). So the Name
+        // form is `08 "_Sx_" 12 <PkgLength> ...` and the package
+        // starts 5 bytes in, not 4.
+        //
+        // This was `+ 4` from the day the `_S5` reader landed, which
+        // left `p` on the NameSeg's trailing '_' and made every
+        // sleep-package decode fail. It went unnoticed because the
+        // only consumer was AcpiShutdown, whose caller
+        // (power/reboot.cpp) falls back to a hardcoded PM1A write that
+        // happens to work on QEMU — so the failure never surfaced as a
+        // symptom, just as a silently unused code path.
+        if (entry->aml_offset >= aml_len || aml[entry->aml_offset] != 0x08 /* NameOp */)
+        {
+            KLOG_DEBUG_V("acpi/aml", "sleep package: Name entry does not start at a NameOp, saw",
+                         entry->aml_offset < aml_len ? aml[entry->aml_offset] : 0xFFu);
+            return false;
+        }
+        p = entry->aml_offset + 1 + 4; // past NameOp + the 4-char "_Sx_" name
     }
     else
     {
@@ -485,7 +521,7 @@ bool AmlReadS5(u8* slp_typa, u8* slp_typb)
         u32 r = q + 1 + pkg_extra; // past PkgLength
         if (r + 4 + 1 > method_end_off)
             return false;
-        r += 4; // past "_S5_"
+        r += 4; // past the 4-char "_Sx_" name
         ++r;    // past MethodFlags
         // Scan body for ReturnOp (0xA4) followed by PackageOp (0x12).
         // 16-byte cap on scan span: real method bodies for _S5_ are
@@ -511,7 +547,10 @@ bool AmlReadS5(u8* slp_typa, u8* slp_typb)
                    // below sees the 0x12 byte.
     }
     if (p + 2 > aml_len || aml[p] != 0x12 /* PackageOp */)
+    {
+        KLOG_DEBUG_V("acpi/aml", "sleep package: no PackageOp at the name's offset, saw", p < aml_len ? aml[p] : 0xFFu);
         return false;
+    }
     ++p;
     // PkgLength: top two bits of the first byte = how many extra
     // bytes follow. For _S5 the package is tiny so usually just
@@ -558,6 +597,11 @@ bool AmlReadS5(u8* slp_typa, u8* slp_typb)
     if (!read_byte(slp_typb))
         return false;
     return true;
+}
+
+bool AmlReadS5(u8* slp_typa, u8* slp_typb)
+{
+    return AmlReadSleepPackage("_S5", slp_typa, slp_typb);
 }
 
 u32 AmlRegionCount()

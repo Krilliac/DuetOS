@@ -318,6 +318,13 @@ constinit u32 g_pm1a_cnt = 0;
 constinit u32 g_pm1b_cnt = 0;
 constinit u8 g_pm1_cnt_len = 0;
 
+// FACS (Firmware ACPI Control Structure) physical base, from the
+// FADT's FIRMWARE_CTRL field. 0 when the FADT is absent or declared
+// no FACS (legal on hardware-reduced ACPI, which has no S3 at all).
+// The FACS carries the firmware waking vector the S3 resume path
+// must populate before writing SLP_TYP — see AcpiSetWakingVector.
+constinit u64 g_facs_address = 0;
+
 // PM1 event block + GPE blocks + ACPI-enable handshake, from FADT.
 // All zero when the FADT didn't populate them (hardware-reduced
 // ACPI, or QEMU with no GPEs). Consumed by kernel/acpi/acpi_sci.cpp
@@ -872,6 +879,15 @@ void ParseFadt(const Fadt& fadt)
     g_pm1a_cnt = fadt.pm1a_cnt_blk;
     g_pm1b_cnt = fadt.pm1b_cnt_blk;
     g_pm1_cnt_len = fadt.pm1_cnt_len;
+    // FIRMWARE_CTRL is the 32-bit FACS pointer. Firmware that parks
+    // the FACS above 4 GiB clears it and populates X_FIRMWARE_CTRL
+    // instead — a trailing field this overlay deliberately does not
+    // declare. In that case we report "no FACS" rather than guess,
+    // and the suspend path refuses S3 (see AcpiSetWakingVector).
+    // GAP: X_FIRMWARE_CTRL (64-bit FACS pointer) is not read — a
+    // board that parks the FACS above 4 GiB gets S3 refused rather
+    // than mis-resumed. Revisit when such a board is in the lab.
+    g_facs_address = fadt.firmware_ctrl;
     g_pm1a_evt = fadt.pm1a_evt_blk;
     g_pm1b_evt = fadt.pm1b_evt_blk;
     g_pm1_evt_len = fadt.pm1_evt_len;
@@ -1571,6 +1587,125 @@ u32 AcpiRunSleepPrep(u8 sleep_type)
     return ran;
 }
 
+u64 FacsAddress()
+{
+    return g_facs_address;
+}
+
+// FACS field offsets, ACPI 6.4 §5.2.10. The FACS is NOT an SdtHeader
+// table: no length-checksum pair to validate, only a signature and a
+// self-declared length. Anything shorter than 64 bytes (the ACPI 1.0
+// size) is a firmware bug and we refuse it rather than write into it.
+constexpr u32 kFacsOffLength = 4;
+constexpr u32 kFacsOffFirmwareWakingVector = 12;
+constexpr u32 kFacsOffXFirmwareWakingVector = 24;
+constexpr u32 kFacsOffVersion = 32;
+constexpr u32 kFacsMinLength = 64;
+
+bool AcpiSetWakingVector(u32 real_mode_entry_phys)
+{
+    if (g_facs_address == 0)
+        return false;
+    // The real-mode waking vector must be addressable as a 16-bit
+    // CS:IP pair, i.e. below 1 MiB, and paragraph-aligned so firmware
+    // can build the segment. Refuse anything else instead of writing
+    // a vector the firmware will jump into and mis-decode.
+    if (real_mode_entry_phys >= 0x100000 || (real_mode_entry_phys & 0xF) != 0)
+        return false;
+
+    // Map the header first to learn the real length, then re-map the
+    // whole structure. Mapping a fixed 64 bytes up front would read
+    // past the end of a truncated FACS.
+    const auto* probe = static_cast<const u8*>(AcpiMapTable(g_facs_address, kFacsMinLength));
+    if (probe == nullptr)
+        return false;
+    if (probe[0] != 'F' || probe[1] != 'A' || probe[2] != 'C' || probe[3] != 'S')
+    {
+        KLOG_WARN("acpi", "FADT FIRMWARE_CTRL does not point at a FACS — S3 unavailable");
+        return false;
+    }
+    u32 facs_len = 0;
+    __builtin_memcpy(&facs_len, probe + kFacsOffLength, sizeof(facs_len));
+    if (facs_len < kFacsMinLength)
+    {
+        KLOG_WARN_V("acpi", "FACS length below the ACPI 1.0 minimum — S3 unavailable", facs_len);
+        return false;
+    }
+
+    // Const-cast is deliberate and confined: AcpiMapTable's contract
+    // is read-oriented, but the FACS is the one ACPI structure the OS
+    // is *required* to write (§5.2.10 — the waking vector is an OSPM
+    // output field). Nothing else in the kernel writes firmware tables.
+    auto* facs = const_cast<u8*>(static_cast<const u8*>(AcpiMapTable(g_facs_address, facs_len)));
+    if (facs == nullptr)
+        return false;
+
+    const u8 version = facs[kFacsOffVersion];
+    // X_FIRMWARE_WAKING_VECTOR only exists from FACS version 1. When it
+    // does, it MUST be zeroed: a non-zero X vector tells firmware to
+    // resume in protected/long mode at that address instead of the
+    // real-mode vector, and our trampoline is a real-mode entry.
+    if (version >= 1 && facs_len > kFacsOffXFirmwareWakingVector + 8)
+    {
+        const u64 zero = 0;
+        __builtin_memcpy(facs + kFacsOffXFirmwareWakingVector, &zero, sizeof(zero));
+    }
+    __builtin_memcpy(facs + kFacsOffFirmwareWakingVector, &real_mode_entry_phys, sizeof(real_mode_entry_phys));
+
+    // Read back. Firmware can map the FACS read-only or in a region
+    // our own mapping got wrong; a silent no-op here would resume into
+    // whatever stale vector the previous OS left, which is a jump to
+    // arbitrary code. Verify or refuse.
+    u32 readback = 0;
+    __builtin_memcpy(&readback, facs + kFacsOffFirmwareWakingVector, sizeof(readback));
+    if (readback != real_mode_entry_phys)
+    {
+        KLOG_WARN("acpi", "FACS waking-vector write did not stick — S3 unavailable");
+        return false;
+    }
+    return true;
+}
+
+bool AcpiSleepTypeFor(u8 state, u8* slp_typa, u8* slp_typb)
+{
+    if (slp_typa == nullptr || slp_typb == nullptr || state > 5)
+        return false;
+    // "_S0" .. "_S5"; the AML namespace stores the padded 4-char form
+    // ("_S3_") but AmlReadSleepPackage tries both spellings.
+    char name[4] = {'_', 'S', static_cast<char>('0' + state), '\0'};
+    if (::duetos::acpi::AmlReadSleepPackage(name, slp_typa, slp_typb))
+        return true;
+
+    // Refusal diagnostic. "No such sleep state" has two very different
+    // causes and the caller cannot tell them apart from a bool:
+    //   - firmware really does not declare the package (QEMU without
+    //     `-global ICH9-LPC.disable_s3=0`, most hardware-reduced ACPI)
+    //   - firmware declares it but our namespace walker did not index
+    //     it, which is OUR bug
+    // A raw substring scan of the AML separates the two. Debug-gated:
+    // a platform that simply has no S3 must not log on every boot.
+    const char padded[4] = {'_', 'S', static_cast<char>('0' + state), '_'};
+    KLOG_DEBUG_V("acpi", "sleep package not in the namespace; raw AML contains the name?",
+                 AmlContainsName(padded) ? 1u : 0u);
+    return false;
+}
+
+void AcpiSleepWriteControl(u8 slp_typa, u8 slp_typb)
+{
+    // PM1 control register: bit 13 = SLP_EN (write-only, write 1 to
+    // initiate the sleep transition), bits 10..12 = SLP_TYP.
+    // Per ACPI §4.8.3.2.1.
+    constexpr u16 kSlpEn = 1U << 13;
+    const u16 pm1a_val = static_cast<u16>(((slp_typa & 0x7) << 10) | kSlpEn);
+    const u16 pm1b_val = static_cast<u16>(((slp_typb & 0x7) << 10) | kSlpEn);
+    // Write is 16-bit on every FADT we've seen (pm1_cnt_len == 2).
+    arch::Outw(static_cast<u16>(g_pm1a_cnt), pm1a_val);
+    if (g_pm1b_cnt != 0)
+    {
+        arch::Outw(static_cast<u16>(g_pm1b_cnt), pm1b_val);
+    }
+}
+
 bool AcpiShutdown()
 {
     u8 slp_typa = 0;
@@ -1591,18 +1726,7 @@ bool AcpiShutdown()
     // is a no-op there and a correctness fix on real hardware.
     AcpiRunSleepPrep(5);
 
-    // PM1 control register: bit 13 = SLP_EN (write-only, write 1
-    // to initiate the sleep transition), bits 10..12 = SLP_TYP.
-    // Per ACPI §4.8.3.2.1.
-    constexpr u16 kSlpEn = 1U << 13;
-    const u16 pm1a_val = static_cast<u16>(((slp_typa & 0x7) << 10) | kSlpEn);
-    const u16 pm1b_val = static_cast<u16>(((slp_typb & 0x7) << 10) | kSlpEn);
-    // Write is 16-bit on every FADT we've seen (pm1_cnt_len == 2).
-    arch::Outw(static_cast<u16>(g_pm1a_cnt), pm1a_val);
-    if (g_pm1b_cnt != 0)
-    {
-        arch::Outw(static_cast<u16>(g_pm1b_cnt), pm1b_val);
-    }
+    AcpiSleepWriteControl(slp_typa, slp_typb);
     // If we're still executing, the transition didn't take
     // effect (real hardware requires the OS to have executed
     // _PTS, _GTS etc. first). Return false so the caller knows
