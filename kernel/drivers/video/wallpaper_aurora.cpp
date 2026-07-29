@@ -123,13 +123,11 @@ void PaintBaseGradient(u32 w, u32 h, const Palette& pal)
 // ----- Layer 2: the aurora blobs -----------------------------------
 //
 // Each blob is a radial gradient that reaches `peak` alpha at its
-// centre and zero on the ellipse boundary. `peak` runs hotter than the
-// design's literal .34 / .22 / .14: the squared falloff concentrates
-// the wash into the middle third of the ellipse, so matching the CSS
-// alpha at the centre is what actually matches the CSS *appearance*
-// over the same area. The design blurs the layer
+// centre and zero on the ellipse boundary. The design blurs the layer
 // by 10 px; a squared falloff (1 - d^2)^2 produces the same soft
-// shoulder without a separate blur pass.
+// shoulder without a separate blur pass. Peaks are the design's literal
+// CSS alphas — see the call site in EnsureCache for why they are no
+// longer scaled up.
 void PaintBlob(u32 w, u32 h, u32 rgb, u32 cx_pct, u32 cy_pct, u32 rx_pct, u32 ry_pct, u32 peak)
 {
     const i32 cx = static_cast<i32>((w * cx_pct) / 100);
@@ -348,9 +346,25 @@ bool EnsureCache(u32 w, u32 h, u32 accent, u32 peer, bool light)
     // README §1 layer 2: 46% 44% at 74% 20% accent 34%,
     //                    42% 40% at 16% 86% accent-2 22%,
     //                    34% 32% at 22% 14% accent 14%.
-    PaintBlob(w, h, accent, 74, 20, 46, 44, 120);
-    PaintBlob(w, h, peer, 16, 86, 42, 40, 105);
-    PaintBlob(w, h, accent, 22, 14, 34, 32, 48);
+    //
+    // Those percentages are NOT viewport percentages, which is why the
+    // literal transcription read as an overall teal-green field instead
+    // of the reference's near-black-with-two-glows. Two corrections, both
+    // read off the design's own CSS in `DuetOS Aurora.dc.html`:
+    //
+    //  * the blob layer is `inset:-10%`, so its box is 120 % of the
+    //    viewport on each axis. A centre at 74 % of that box is 74 x 1.2
+    //    - 10 = 79 % of the screen, and a radius is 1.2x what it looks.
+    //  * each gradient ends at `transparent 70%` (72 % for the amber),
+    //    not at 100 %, so the visible radius is 0.70x the stated size.
+    //
+    // Net: centre = pct x 1.2 - 10, radius = pct x 0.84. Peaks are the
+    // literal CSS alphas (.34/.22/.14 -> 87/56/36); the squared falloff
+    // tracks the CSS ramp closely enough in the mid-range that it needs
+    // no compensation once the geometry is right.
+    PaintBlob(w, h, accent, 79, 14, 39, 37, 87);
+    PaintBlob(w, h, peer, 9, 93, 36, 35, 56);
+    PaintBlob(w, h, accent, 16, 7, 29, 27, 36);
     PaintGrid(w, h, pal);
     PaintHexBand(w, h, pal);
     PaintVignette(w, h, pal);

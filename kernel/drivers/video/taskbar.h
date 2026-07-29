@@ -66,6 +66,13 @@ bool TaskbarContains(u32 x, u32 y);
 /// non-null out pointer; all four may be null to skip.
 void TaskbarStartBounds(u32* x, u32* y, u32* w, u32* h);
 
+/// Bounds of the island's search pill. Width is 0 when the active
+/// layout paints no pill (every non-island theme), which callers must
+/// treat as "no hit target" rather than as a zero-width rect at the
+/// origin. Clicking it opens the Start menu — see the GAP note in
+/// taskbar.cpp: there is no free-text search behind it yet.
+void TaskbarSearchBounds(u32* x, u32* y, u32* w, u32* h);
+
 /// Live taskbar strip height in pixels — what `TaskbarInit`
 /// last consumed. Returns 0 before init. Callers (e.g.
 /// `WindowMaximize`) use this as the bottom-edge reserve so

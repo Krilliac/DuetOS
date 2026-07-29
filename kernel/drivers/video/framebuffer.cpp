@@ -1408,6 +1408,56 @@ void FramebufferFillRoundRect(u32 x, u32 y, u32 w, u32 h, u32 radius, u32 rgb)
     }
 }
 
+void FramebufferBlendRoundRect(u32 x, u32 y, u32 w, u32 h, u32 radius, u32 argb)
+{
+    // Same corner solve as FramebufferFillRoundRect — see the comments
+    // there for why the indent is computed against (radius - 1). The
+    // only difference is the per-row painter, so keeping the two bodies
+    // side by side is cheaper to keep honest than a shared template
+    // parameterised on a function pointer would be in a hot path.
+    if (!g_available || w == 0 || h == 0)
+    {
+        return;
+    }
+    const u32 max_r = (w < h ? w : h) / 2U;
+    if (radius > max_r)
+    {
+        radius = max_r;
+    }
+    if (radius == 0)
+    {
+        FramebufferBlendFill(x, y, w, h, argb);
+        return;
+    }
+
+    FramebufferBlendFill(x, y + radius, w, h - 2U * radius, argb);
+
+    const u32 r1 = radius - 1U;
+    const u32 r1_sq = r1 * r1;
+    for (u32 dy = 0; dy < radius; ++dy)
+    {
+        const u32 vy = r1 - dy;
+        const u32 vy_sq = vy * vy;
+        u32 dx = 0;
+        while (dx < radius)
+        {
+            const u32 vx = r1 - dx;
+            if (vx * vx + vy_sq <= r1_sq)
+            {
+                break;
+            }
+            ++dx;
+        }
+        const u32 row_w = (2U * dx >= w) ? 0U : (w - 2U * dx);
+        if (row_w == 0)
+        {
+            continue;
+        }
+        FramebufferBlendFill(x + dx, y + dy, row_w, 1U, argb);
+        FramebufferBlendFill(x + dx, y + h - 1U - dy, row_w, 1U, argb);
+    }
+}
+
 // Safety cap on the per-line iteration count so a malicious caller
 // passing absurd endpoints can't spin the compositor. 8K covers any
 // plausible diagonal at 4K resolution; anything larger is a bug.

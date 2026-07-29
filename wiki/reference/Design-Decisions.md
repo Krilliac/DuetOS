@@ -13817,3 +13817,74 @@ The log line distinguishes the two cases, because reporting
 `miss path="/lib/api-ms-win-..."` made a correct refusal look like a
 missing file and invited exactly the wrong fix.
 
+### DD - the desktop icon set is one list for every theme
+
+`kernel/core/boot_bringup.cpp` registers exactly four desktop icons —
+Task Manager, Kernel Log, Inspect, Files — and every palette gets the
+same four. The alternative considered, and rejected, was keeping the
+nine-item Windows-shaped set (Computer, Trash, Browser, Help, Terminal,
+Calculator, Notepad, Settings, Device Mgr) under Classic and showing the
+Aurora four only under the Duet family.
+
+Two reasons it is rejected rather than deferred:
+
+- **A theme is a palette, not a different operating system.** Making the
+  launcher set follow the colour scheme means switching theme silently
+  adds or removes destinations. That is a functional change driven by a
+  cosmetic control, and there is no way for a user to predict it.
+- **The registration is boot-time; the theme is not.** Icons are
+  registered once in bringup, while `ThemeSet` runs from the `theme`
+  shell command, the Settings app and session restore. A theme-conditional
+  set would need re-registration on every theme switch, which means
+  invalidating the hover index and the hit-test table from a path that
+  today only re-publishes colours.
+
+The nine entries were also not a neutral list to keep: "Computer" and
+"Trash" both bound to `ThemeRoleWindow(Role::Files)` — two icons, one
+destination — and every one of the nine is already in the Start menu.
+
+"Inspect" binds to `duetos::apps::dbg::DbgWindow()`. There is no separate
+PE-inspector app; the debugger's Disasm / Memory / Symbols tabs are the
+binary-inspection surface the design's Inspect screen depicts.
+
+### DD - pinned taskbar launchers are scaled by island budget, not transcribed
+
+`docs/aurora-theme/README.md` §10 pins nine app buttons on the taskbar
+island. `kernel/drivers/video/taskbar.cpp` pins five.
+
+The design's nine is a 1920-canvas figure, and the island's cells do not
+all scale together. `IMPLEMENTATION.md` §7 is explicit that type does not
+scale below 11 px, so the text-bearing cells on the right — `CPU nn%`,
+`60.0 FPS`, the clock and the date — keep their 1920 widths while the
+chrome around them halves. The right-hand reserve is therefore a much
+larger share of a 1024 island than of a 1920 one. Measured: nine buttons
+plus the search pill put the island at 86 % of the framebuffer, which is
+the near-full-width strip the island was introduced to avoid; five lands
+at ~69 %, against the reference's 65 %.
+
+So the pinned count is a function of the framebuffer, not a constant
+transcribed from the design. A future 1920 mode should widen the list
+rather than treat five as the ceiling — hence `kPinnedRoles` is a table
+and `BuildButtonRoster` is shared by the width measurement and the paint
+pass, so the two can never disagree about how many cells exist.
+
+### DD - Aurora blob percentages are viewport-corrected, not transcribed
+
+The wallpaper's three accent blobs are specified in the design CSS as
+percentages of a layer that is `inset:-10%` and whose gradients end at
+`transparent 70%`. `kernel/drivers/video/wallpaper_aurora.cpp` stores the
+corrected figures — centre `= pct x 1.2 - 10`, radius `= pct x 0.84` —
+not the literal ones.
+
+Transcribing the literals is what made the desktop read as an overall
+teal-green field instead of the reference's near-black with two localised
+glows: the blobs were ~19 % too large and their centres ~5 points too far
+from the screen edges, so all three overlapped across the middle. The
+earlier attempt to compensate by running the peak alphas hot
+(120/105/48 against the CSS's 87/56/36) treated the symptom and made the
+wash broader still.
+
+The correction is recorded here because the raw percentages are still the
+ones written in `README.md` §1, and a future slice reading only that file
+would "fix" these constants back to the literals.
+

@@ -240,6 +240,7 @@
 #include "generated_chrome_font.h"
 #include "generated_chrome_font_bold.h"
 #include "drivers/video/calendar.h"
+#include "drivers/video/desktop_gadgets.h"
 #include "drivers/video/desktop_icons.h"
 #include "drivers/video/magnifier.h"
 #include "drivers/video/dialog.h"
@@ -3833,10 +3834,9 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         DUETOS_BOOT_SELFTEST(duetos::apps::netstatus::NetStatusSelfTest());
     }
 
-    // DEVICE MANAGER — read-only PCI device list. Handle captured for the
-    // desktop-icon registration below (Device Manager has no ThemeRole, so
-    // its icon binds to the window handle directly).
-    duetos::drivers::video::WindowHandle devicemgr_win = duetos::drivers::video::kWindowInvalid;
+    // DEVICE MANAGER — read-only PCI device list. Reached from the Start
+    // menu's system group (menu action 61); it has no ThemeRole and no
+    // desktop icon.
     {
         duetos::drivers::video::WindowChrome chrome = theme_chrome(Role::TaskManager);
         chrome.x = 260;
@@ -3847,7 +3847,6 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         duetos::drivers::video::WindowSetVisible(h, false);
         duetos::apps::devicemgr::DeviceMgrInit(h);
         DUETOS_BOOT_SELFTEST(duetos::apps::devicemgr::DeviceMgrSelfTest());
-        devicemgr_win = h;
     }
 
     // FIREWALL — empty-state placeholder; honest about the absent
@@ -3864,28 +3863,35 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         DUETOS_BOOT_SELFTEST(duetos::apps::firewall::FirewallSelfTest());
     }
 
-    // DESKTOP ICONS — surface the canonical destinations on the bare
-    // desktop (double-click to launch), the way every other OS does.
-    // Targets are window handles: themed apps resolve via ThemeRoleWindow,
-    // Device Manager uses the handle captured above. "Computer" and "Trash"
-    // both open the Files manager — it shows drives in its disk view, which
-    // is also where deleted items live (/TRASH); a standalone trash window
-    // is a follow-up.
+    // DESKTOP ICONS — the four launchers docs/aurora-theme/README.md §1
+    // puts on the bare desktop, in the reference's reading order (Task
+    // Manager / Kernel Log across the top row, Inspect / Files below).
+    // Double-click raises the bound window.
+    //
+    // This set is NOT theme-conditional. See Design-Decisions "Desktop
+    // icon set is one list for every theme": the palette decides how the
+    // shell looks, never which destinations the OS offers, and the icon
+    // array is populated once here while `theme` can be switched at any
+    // time from the shell or a restored session.
+    //
+    // "Inspect" opens the native debugger — its Disasm / Memory / Symbols
+    // tabs are DuetOS's binary-inspection surface, which is the job the
+    // design's Inspect screen does. There is no separate PE-inspector app.
     {
         using duetos::drivers::video::DesktopIconRegister;
         using duetos::drivers::video::IconGlyph;
         using duetos::drivers::video::ThemeRoleWindow;
-        DesktopIconRegister("Computer", IconGlyph::Computer, ThemeRoleWindow(Role::Files));
-        DesktopIconRegister("Browser", IconGlyph::Browser, ThemeRoleWindow(Role::Browser));
-        DesktopIconRegister("Terminal", IconGlyph::Terminal, ThemeRoleWindow(Role::Terminal));
-        DesktopIconRegister("Calculator", IconGlyph::Calculator, ThemeRoleWindow(Role::Calculator));
-        DesktopIconRegister("Notepad", IconGlyph::Notepad, ThemeRoleWindow(Role::Notes));
-        DesktopIconRegister("Settings", IconGlyph::Settings, ThemeRoleWindow(Role::Settings));
-        DesktopIconRegister("Device Mgr", IconGlyph::DeviceMgr, devicemgr_win);
-        DesktopIconRegister("Trash", IconGlyph::Trash, ThemeRoleWindow(Role::Files));
-        DesktopIconRegister("Help", IconGlyph::Help, ThemeRoleWindow(Role::Help));
+        DesktopIconRegister("Task Manager", IconGlyph::TaskManager, ThemeRoleWindow(Role::TaskManager));
+        DesktopIconRegister("Kernel Log", IconGlyph::KernelLog, ThemeRoleWindow(Role::LogView));
+        DesktopIconRegister("Inspect", IconGlyph::Inspect, duetos::apps::dbg::DbgWindow());
+        DesktopIconRegister("Files", IconGlyph::Files, ThemeRoleWindow(Role::Files));
         DUETOS_BOOT_SELFTEST(duetos::drivers::video::DesktopIconsSelfTest());
     }
+
+    // DESKTOP GADGETS — the clock/date glass panel down the right edge
+    // (README §1's gadget column). Painted from DesktopCompose; nothing
+    // to register, so this is just the layout self-test.
+    DUETOS_BOOT_SELFTEST(duetos::drivers::video::DesktopGadgetsSelfTest());
 
     // Framebuffer text console. 80x40 chars of boot log at the
     // bottom of the desktop, under the windows in z-order. Dragging
