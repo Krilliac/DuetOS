@@ -271,6 +271,31 @@ void __cdecl mainCRTStartup(void)
     DeleteObject(bmp);
     DeleteDC(mem_dc);
 
+    /* --- 8. Deliberate leak ------------------------------------ */
+    /* Everything above is released properly, which means it proves
+     * nothing about teardown. The GDI tables are system-wide, so a
+     * process that exits still holding objects used to strand both
+     * the pixel bytes and the table slots for the rest of the boot.
+     *
+     * These four are intentionally NOT deleted. ProcessRelease has to
+     * reclaim them, and it says so on the wire:
+     *
+     *     [gdi] reap pid=<pid> objects=0x4 bytes=0x...
+     *
+     * The absence of that line on a boot is the regression signal.
+     * Sized 64x64 (16 KiB) so the byte count is unmistakable. */
+    {
+        HDC leak_dc = CreateCompatibleDC(NULL);
+        HBITMAP leak_bmp = CreateCompatibleBitmap(NULL, 64, 64);
+        HBRUSH leak_brush = CreateSolidBrush(RGB(1, 2, 3));
+        HPEN leak_pen = CreatePen(0, 1, RGB(4, 5, 6));
+        if (leak_dc && leak_bmp)
+            SelectObject(leak_dc, leak_bmp);
+        Check("leak fixture allocated (reaper input)",
+              leak_dc != NULL && leak_bmp != NULL && leak_brush != NULL && leak_pen != NULL);
+        /* No DeleteObject / DeleteDC here. That is the point. */
+    }
+
     /* The one line the battery aggregator scans for. Label must match
      * this fixture's kPeCompatBattery row exactly. */
     if (g_fail == 0)

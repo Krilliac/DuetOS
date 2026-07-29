@@ -63,6 +63,7 @@ typedef struct
 #define SYS_GDI_BITBLT_DC 113
 #define SYS_GDI_STRETCH_BLT_DC 117
 #define SYS_GDI_CREATE_SOLID_BRUSH 108
+#define SYS_GDI_CREATE_PEN 118
 /* Pixel-DATA transfer (as opposed to draw commands). Six register
  * arguments, no struct — see kernel/subsystems/win32/gdi_dib.cpp. */
 #define SYS_GDI_SET_DIBITS 214
@@ -616,12 +617,16 @@ __declspec(dllexport) HBRUSH CreateSolidBrush(COLORREF clr)
     }
     return (HBRUSH)(0xB0000000ULL | (unsigned long long)clr);
 }
+/* CreatePen — a REAL kernel pen. Same story as CreateSolidBrush: the
+ * kernel has backed SYS_GDI_CREATE_PEN since it landed, but this
+ * returned NULL, so SelectObject had nothing to select and every
+ * LineTo / Rectangle outline into a memory DC drew in the implicit
+ * BLACK_PEN whatever colour the app chose. */
 __declspec(dllexport) HPEN CreatePen(INT style, INT width, COLORREF clr)
 {
-    (void)style;
-    (void)width;
-    (void)clr;
-    return (HPEN)0;
+    long long h =
+        gdi32_syscall3(SYS_GDI_CREATE_PEN, (long long)style, (long long)width, (long long)(unsigned long long)clr);
+    return (HPEN)(unsigned long long)h;
 }
 __declspec(dllexport) HFONT CreateFontA(INT h, INT w, INT esc, INT orient, INT weight, DWORD italic, DWORD underline,
                                         DWORD strikeout, DWORD charset, DWORD out_prec, DWORD clip_prec, DWORD quality,
