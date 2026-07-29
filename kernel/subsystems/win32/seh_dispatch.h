@@ -57,6 +57,13 @@ bool Win32DeliverException(arch::TrapFrame* frame, u32 ntstatus, bool is_pf, boo
 /// the actual reason in ExceptionInformation[0].
 constexpr u32 kStatusStackBufferOverrun = 0xC0000409;
 
+/// STATUS_STACK_OVERFLOW — raised when a thread's access lands in
+/// the guard page below its stack reservation, i.e. the stack ran
+/// out rather than a pointer went wild. Delivering the right code
+/// matters: a CRT's __except filter distinguishes this from a
+/// generic access violation to run _resetstkoflw.
+constexpr u32 kStatusStackOverflow = 0xC00000FDu;
+
 /// Decode a ring-3 #GP that was really an `int 0x29` — the x64
 /// `__fastfail` intrinsic MSVC's CRT uses to abort unrecoverably.
 ///

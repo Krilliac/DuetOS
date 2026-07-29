@@ -1275,6 +1275,11 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     proc->user_rsp_init = r.stack_top - 0x48;
     proc->user_gs_base = r.teb_va;
     proc->user_is_pe32 = r.is_pe32;
+    // Publish the demand-grown stack reservation. Until this line
+    // runs the process has an all-zero UserStackRange and every
+    // ring-3 #PF classifies as NotStack — i.e. exactly the
+    // pre-growth behaviour.
+    proc->stack = r.stack;
     // T6-01 per-thread half: stash the static-TLS template so
     // SYS_THREAD_CREATE can give each new thread its own TEB +
     // TLS block + DLL_THREAD_ATTACH.

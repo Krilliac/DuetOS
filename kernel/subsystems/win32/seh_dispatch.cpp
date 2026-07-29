@@ -277,6 +277,17 @@ bool Win32DeliverException(arch::TrapFrame* frame, u32 ntstatus, bool is_pf, boo
         return false;
     }
 
+    // Exception delivery can itself be the thing that needs a page:
+    // the records land ~0x600 bytes below rsp, which on a
+    // demand-grown stack may be past the committed edge. CopyToUser
+    // pre-checks accessibility and returns false rather than
+    // faulting, so nothing would grow the stack for us — commit the
+    // range explicitly first. Returns false (leaving the range
+    // uncommitted) when it is outside the reservation or the stack
+    // is genuinely exhausted, in which case CopyToUser below fails
+    // and we fall back to the task-kill path exactly as before.
+    (void)core::UserStackCommitRange(new_rsp, region_top);
+
     if (!mm::CopyToUser(reinterpret_cast<void*>(ctx_addr), &ctx, sizeof(ctx)))
     {
         KLOG_WARN_V("win32/seh", "CopyToUser(CONTEXT) failed — task-kill fallback addr", ctx_addr);

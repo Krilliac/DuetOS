@@ -1,6 +1,7 @@
 #pragma once
 
 #include "loader/dll_loader.h"
+#include "proc/user_stack.h"
 #include "util/types.h"
 
 namespace duetos::mm
@@ -49,9 +50,12 @@ struct Process;
  *     every raw offset equals the RVA. A future slice will
  *     handle real filealign=0x200 PEs with cross-page copies.
  *
- * Stack handling mirrors ElfLoad: one writable, NX ring-3 page
- * mapped at kV0StackVa (0x7FFFE000). v0 does not honour the
- * Optional Header's SizeOfStackReserve / SizeOfStackCommit.
+ * Stack handling honours the Optional Header: the image's
+ * SizeOfStackReserve / SizeOfStackCommit (both clamped) lay out a
+ * demand-grown reservation ending at core::kUserStackTopVa, of
+ * which only the top is committed at load. The #PF handler grows
+ * it a page at a time and a guard page below the reservation
+ * keeps a runaway fatal — see kernel/proc/user_stack.h.
  *
  * Context: kernel task. Safe from any caller that can hold the
  * AS creation lock.
@@ -218,8 +222,14 @@ struct PeLoadResult
                            // PE32 enters via EnterUserMode32 (compat mode,
                            // CS=0x3B), PE32+ via EnterUserModeWithGs.
     u64 entry_va;          // ImageBase + AddressOfEntryPoint
-    u64 stack_va;          // Lowest VA of the stack page.
-    u64 stack_top;         // rsp at ring-3 entry (stack_va + kPageSize).
+    u64 stack_va;          // Lowest COMMITTED VA of the ring-3 stack.
+    u64 stack_top;         // One-past-last byte of the reservation; rsp at
+                           // ring-3 entry is derived from it by the spawn path.
+    // Full reservation descriptor (top / reserve_lo / commit_lo /
+    // guard_lo). SpawnPeFile copies this onto the Process so the
+    // #PF handler can grow the stack on demand. See
+    // kernel/proc/user_stack.h.
+    UserStackRange stack;
     u64 image_base;
     u64 image_size;
     u64 teb_va; // VA of the per-task TEB page (0 if PE has no
