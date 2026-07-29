@@ -77,6 +77,7 @@ __declspec(dllexport) DWORD GetCurrentThreadId(void);
 __declspec(dllexport) HANDLE GetCurrentProcess(void);
 __declspec(dllexport) HANDLE GetCurrentThread(void);
 __declspec(dllexport) BOOL FreeLibrary(void* hModule);
+__declspec(dllexport) void* GetModuleHandleW(const wchar_t16* name);
 __declspec(dllexport) void SetLastError(DWORD err);
 __declspec(dllexport) void Sleep(DWORD ms);
 __declspec(dllexport) ULONGLONG GetTickCount64(void);

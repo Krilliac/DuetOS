@@ -46,6 +46,7 @@ SRC_FILES=(
     "${SRC_DIR}/kernel32_fs.c"
     "${SRC_DIR}/kernel32_psapi.c"
     "${SRC_DIR}/kernel32_seh.c"
+    "${SRC_DIR}/kernel32_resource.c"
     "${SRC_DIR}/seh_capture.S"
     "${SRC_DIR}/raise_exception.S"
 )
@@ -171,6 +172,16 @@ set +e
     /export:GetModuleHandleExW \
     /export:GetModuleHandleExA \
     /export:FreeLibrary \
+    /export:FindResourceW \
+    /export:FindResourceA \
+    /export:FindResourceExW \
+    /export:FindResourceExA \
+    /export:LoadResource \
+    /export:LockResource \
+    /export:SizeofResource \
+    /export:FreeResource \
+    /export:EnumResourceTypesW \
+    /export:EnumResourceNamesW \
     /export:InterlockedPushEntrySList \
     /export:InterlockedPopEntrySList \
     /export:InterlockedFlushSList \

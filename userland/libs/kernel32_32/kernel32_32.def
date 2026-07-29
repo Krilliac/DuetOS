@@ -132,6 +132,15 @@ EXPORTS
     LoadLibraryExA
     LoadLibraryExW
     FindClose
+    FindResourceW
+    FindResourceA
+    FindResourceExW
+    FindResourceExA
     LoadResource
+    LockResource
+    SizeofResource
+    FreeResource
+    EnumResourceTypesW
+    EnumResourceNamesW
     FormatMessageA
     FormatMessageW

@@ -216,22 +216,8 @@ __declspec(dllexport) BOOL __stdcall FindClose(HANDLE hFindFile)
     return 1;
 }
 
-/* ------------------------------------------------------------------
- * Resources
- * ------------------------------------------------------------------ */
-
-/* LoadResource needs a mapped-image resource-directory walk that
- * nothing in the 32-bit set provides yet (there is no FindResource
- * either). Returning NULL is the documented "resource not found"
- * answer and lets the caller fall back. */
-// STUB: always returns NULL - no PE resource-directory walker on the
-// i386 path. Real callers get no resource data.
-__declspec(dllexport) HANDLE __stdcall LoadResource(HANDLE hModule, HANDLE hResInfo)
-{
-    (void)hModule;
-    (void)hResInfo;
-    return (HANDLE)0;
-}
+/* Resources moved to kernel32_32_resource.c when the shared `.rsrc`
+ * walker landed. LoadResource used to be a return-NULL STUB here. */
 
 /* ------------------------------------------------------------------
  * Error-message formatting
