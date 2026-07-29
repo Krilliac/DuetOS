@@ -1594,7 +1594,39 @@ entry point and into MSVC CRT startup, and the thing that stops it is
 no longer an import at all: it overruns the fixed 64 KiB ring-3 stack
 and is killed on a `#PF` 0x930 bytes below `stack_va`. The blocker moved
 from the loader to the process model, which is progress of a different
-kind.
+kind. (Closed the next day — see below.)
+
+### 2026-07-29 — the stack stops being the ceiling
+
+The blocker the side-by-side slice handed over is closed. The ring-3
+main-thread stack is no longer a fixed 64 KiB: `PeLoad` reads the
+image's own `SizeOfStackReserve` / `SizeOfStackCommit`, clamps both,
+reserves the address space, and commits only the top two pages. The
+ring-3 `#PF` handler commits one more page each time the thread walks
+into the page below the committed edge — decided BEFORE the
+task-isolation policy and before Win32 SEH delivery, because a growable
+fault is not an error.
+
+Per-spawn cost went DOWN while the ceiling went up 16x: 64 KiB
+committed unconditionally became 8 KiB committed with 1 MiB reserved.
+Across the 138-row PE-compat battery that is ~7.7 MiB of frames that no
+longer get allocated at spawn.
+
+The safety net it replaced is still there and is still fatal. A fault in
+the guard region below the reservation is never grown into; the kernel
+names it (`*** RING-3 STACK OVERFLOW ***`), fires a probe, and delivers
+`STATUS_STACK_OVERFLOW` — committing the guard region once, as Windows
+does, so the thread's `__except` has somewhere to run. Both halves are
+live battery rows: `ring3-stackgrow-smoke` walks 512 KiB and passes;
+`ring3-stackguard-smoke` recurses until it dies, by design.
+
+`BattleBit.exe` gets measurably further — through `FlsAlloc`,
+`InitializeCriticalSectionEx` and `LCMapStringEx` in the CRT — and then
+stops on `api-ms-win-appmodel-runtime-l1-1-2`, an API-set contract DLL
+we do not ship, after which its CRT calls `ExitProcess(0)`. The blocker
+moved again, from the process model to the apiset surface, and it moved
+somewhere quieter: the process now exits with status 0 instead of
+crashing.
 
 ## How to read the rest of the tree
 

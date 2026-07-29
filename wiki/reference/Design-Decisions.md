@@ -13561,3 +13561,63 @@ markers for its richest input. Three discovery layers were added (runtime
   in PCR 4 - the boot image, which the QEMU harness rebuilds per
   command line. The per-PCR values are logged at DEBUG during the fold,
   which is how this was localised in one boot rather than by bisection.
+
+### DD - ring-3 stack growth is classified, not locked
+
+- **Context:** demand-grown ring-3 stacks need the `#PF` handler to
+  decide "grow this" vs "kill this task" for an untrusted PE. Mutating
+  the commit edge looks like shared state that wants a lock, and the
+  commit itself calls `mm::AddressSpaceMapUserPage`, whose regions lock
+  is an `RwLock` over a sleeping `sched::Mutex`.
+- **Decision:** no lock. The growth condition requires the FAULTING
+  THREAD'S OWN `rsp` to be inside the reservation, and every other
+  thread in a Win32 process runs on the thread-stack arena at
+  0x68000000, far below `reserve_lo` - so no other thread can ever
+  satisfy the condition against the main-thread reservation, making the
+  main thread the sole writer of `commit_lo`. The present-probe inside
+  the commit helper is the remaining net against a double map.
+- **Rules out:** guarding the reservation with a `sync::SpinLock`. That
+  path is actively unsafe here, not merely redundant: `SpinLockAcquire`
+  does `Cli()`, and parking on the mm regions lock with interrupts off
+  while another CPU spins on the same spinlock is a deadlock. It also
+  rules out a future per-thread growable stack reusing the same
+  per-process `UserStackRange` without revisiting this argument - the
+  no-concurrency proof is a property of the ADDRESS-SPACE LAYOUT, and
+  it evaporates the moment two growable reservations coexist.
+- **Cost, accepted knowingly:** the argument is load-bearing and
+  invisible at the call site. It is written out in
+  `kernel/proc/user_stack.h` next to the condition it depends on, and
+  the condition is pinned by a hosted test
+  (`tests/host/test_user_stack.cpp`) that asserts a wild pointer from a
+  thread-arena `rsp` does NOT grow the reservation.
+- **Evidence:** live boot - the growth path commits page-by-page down a
+  512 KiB walk with no lock and no double-map panic, under SMP4.
+
+### DD - the ring-3 stack guard region is committed once, not never
+
+- **Context:** the point of a guard region below the reservation is that
+  overflow stays detectable. The strict reading is "never commit it".
+  But the STATUS_STACK_OVERFLOW that reports the overflow is delivered
+  by writing an `EXCEPTION_RECORD` + `CONTEXT` onto the very stack that
+  just ran out, so a never-committed guard means the report itself
+  faults and the thread dies as a generic access violation instead.
+- **Decision:** on the first guard hit, commit the whole guard region
+  (4 pages) and deliver `STATUS_STACK_OVERFLOW`, exactly as Windows
+  does. It is a one-shot flag on the reservation: the classifier still
+  returns `Guard` and never `Grow`, so the overflowing recursion dies;
+  a second runaway walks below `guard_lo` into unmapped space and takes
+  the ordinary task-kill.
+- **Rules out:** treating the guard as a pure hole. It also rules out a
+  one-page guard: measured live, one page ran out inside
+  `KiUserExceptionDispatcher` and the second fault task-killed the
+  thread before the exception could be reported.
+- **Cost, accepted knowingly:** a process that overflows its stack ends
+  up with 16 KiB of address space below its declared reservation
+  committed. Bounded, once per process, and it buys a nameable failure
+  instead of an anonymous one.
+- **Evidence:** live boot - `ring3-stackguard-smoke` recurses through a
+  128 KiB reservation, hits the guard, and the kernel logs
+  `*** RING-3 STACK OVERFLOW *** verdict="Guard"`, fires
+  `mm.user_stack_guard_hit`, delivers `0xC00000FD`, and the process
+  exits with that status. No task-kill, no panic.
+
