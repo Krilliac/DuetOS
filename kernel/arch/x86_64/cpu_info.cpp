@@ -212,6 +212,36 @@ bool CpuHas(CpuFeature feat)
     return (g_info.feature_bits & (1u << feat)) != 0;
 }
 
+namespace
+{
+
+// The CPUID vendor string is exactly 12 bytes plus a NUL, and
+// `CpuInfo::vendor` is zero-initialised, so a plain fixed-length
+// compare is safe even before CpuInfoProbe has run (it then compares
+// against all-zero and returns false).
+bool VendorIs(const char (&want)[13])
+{
+    const char* v = g_info.vendor;
+    for (u32 i = 0; i < 12; ++i)
+    {
+        if (v[i] != want[i])
+            return false;
+    }
+    return true;
+}
+
+} // namespace
+
+bool CpuVendorIsIntel()
+{
+    return VendorIs("GenuineIntel");
+}
+
+bool CpuVendorIsAmd()
+{
+    return VendorIs("AuthenticAMD");
+}
+
 [[noreturn]] void CpuMinimumFeatureGateFail(const char* missing)
 {
     // Use raw serial because the panic system relies on serial

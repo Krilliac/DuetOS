@@ -13232,3 +13232,61 @@ markers for its richest input. Three discovery layers were added (runtime
   smaller fidelity gain than the glyphs themselves buy.
 - **Scope:** the cell size and the 8-px advance are unchanged, so no
   column layout, scrollbar metric or hit-test moves.
+
+### DD — probe MSRs, do not predict them
+
+- **Context:** a `rdmsr` against an MSR the part does not implement
+  raises `#GP`, which was unrecoverable. Every MSR consumer therefore
+  guarded itself with a static "recognised vendor AND
+  `!IsEmulator()`" prediction.
+- **Decision:** add `arch::ReadMsrSafe` — an extable-guarded `rdmsr`
+  mirroring the existing `WriteMsrSafe` — and make thermal, cpufreq
+  and RAPL ask the hardware per MSR, caching the answer.
+- **Rules out:** (a) keeping the vendor+hypervisor gate, which was
+  wrong in both directions (it suppressed frequency telemetry on
+  hypervisors that DO expose the counters, and it was why an AMD dev
+  box reported no CPU temperature at all); (b) widening the gate with
+  a per-hypervisor allow-list, which is the same prediction with more
+  rows to keep stale; (c) probing on every read — a declined probe
+  costs a trap and one recovered-trap log line, so the result is
+  cached per consumer.
+- **Evidence:** `MsrSafeSelfTest` asserts both extable rows resolve to
+  their own fixups and reads `IA32_APIC_BASE` live. The bogus-MSR case
+  deliberately asserts only that the call RETURNS, because QEMU TCG
+  answers 0 for unknown MSRs while hardware and KVM `#GP`.
+
+### DD — AMD CPU temperature comes from SMN, not an MSR
+
+- **Context:** the Intel `IA32_THERM_STATUS` path cannot work on AMD,
+  which reports core temperature over the System Management Network.
+- **Decision:** read `THM_TCON_CUR_TMP` (SMN `0x00059800`) through the
+  index/data pair at PCI config `0x60`/`0x64` on device `0:0.0`,
+  gated to families 17h/19h/1Ah, and refuse the index write unless the
+  host bridge answers vendor `0x1022`.
+- **Rules out:** (a) hunting for an AMD thermal MSR — there is none at
+  a stable architectural number; (b) applying the Zen decode to pre-Zen
+  families, whose register lives at a different PCI function with a
+  different layout and would decode into a confident wrong number;
+  (c) writing the SMN index unconditionally — on an Intel MCH that
+  offset is a DRAM-configuration register; (d) synthesising a TJMax for
+  AMD, which the register does not carry.
+- **Evidence:** decode is pinned in
+  `tests/host/test_cpu_sensor_math.cpp`. The read itself is NOT
+  verifiable under QEMU, which models no SMN aperture — the boot only
+  proves it reports "unsupported" without faulting.
+
+### DD — unsupported is a flag, never a zero
+
+- **Context:** thermal, frequency and power records all previously used
+  a zero value to mean "no reading". 0 C and 0 MHz are legal values,
+  and a UI showing them looks broken rather than honest.
+- **Decision:** every sensor record carries an explicit validity flag
+  per field (`ThermalReading::source` + `tj_max_valid`,
+  `CpuFreqReading::{current,ratios,counters}_valid`,
+  `PowerSnapshot::cpu_temp_valid`, `EnvSnapshot::cpu_temp_valid`,
+  `TelemetryCpuInfo::{current,base}_mhz_valid`), and an unsupported
+  read returns the entirely empty record so a caller testing only the
+  top-level flag cannot pick a plausible zero out of it.
+- **Rules out:** zero-sentinels, and "valid" flags that coexist with
+  populated-but-meaningless fields. The self-tests assert both
+  directions.

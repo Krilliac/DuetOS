@@ -3,7 +3,7 @@
 #include "util/types.h"
 
 /*
- * DuetOS — Fault-recoverable wrmsr.
+ * DuetOS — Fault-recoverable wrmsr / rdmsr.
  *
  * `WriteMsrSafe(msr, value)` writes `value` to MSR `msr` and
  * returns true on success, false if the wrmsr instruction faulted
@@ -30,10 +30,60 @@ namespace duetos::arch
 
 extern "C" bool WriteMsrSafe(u32 msr, u64 value);
 
-/// Register the kernel-extable row that covers the `wrmsr`
-/// instruction inside `WriteMsrSafe`. Must be called once, after
-/// `KernelExtableRegister` is alive (post-paging, post-IDT). Safe
-/// to call before LAPIC init; the table just records the row.
+/*
+ * `ReadMsrSafe(msr, out)` reads MSR `msr` into `*out` and returns
+ * true on success, false if the `rdmsr` faulted (#GP — the part
+ * does not implement that MSR, or a hypervisor declines to expose
+ * it). `*out` is untouched on failure, so a caller that ignores
+ * the bool reads its own initialiser rather than garbage.
+ *
+ * This is the PROBE primitive. Before it existed, every MSR
+ * consumer in the tree (thermal.cpp, rapl.cpp, cpufreq.cpp) had to
+ * PREDICT whether an MSR was present from the CPUID vendor string
+ * plus an "are we under a hypervisor" heuristic, and bail
+ * pessimistically whenever the prediction was uncertain — which is
+ * why an AMD dev box reported no CPU temperature at all and why
+ * every hypervisor reported no CPU frequency. With this, a caller
+ * asks the hardware and believes the answer.
+ *
+ * Honesty contract: a false return means "unsupported", which is a
+ * DIFFERENT fact from a successful read of 0. Callers must
+ * propagate that distinction to their own callers rather than
+ * collapsing both into a zeroed field — a UI showing "0 C" looks
+ * broken, "unsupported on this CPU" is the truth.
+ *
+ * `out` must be non-null. The store into `*out` is deliberately
+ * outside the extable-protected range, so a null/bad pointer
+ * faults loudly instead of being silently swallowed as an
+ * "unsupported MSR".
+ *
+ * Cost note: a faulting probe takes the whole trap path and the
+ * trap dispatcher logs one `[extable] recovered kernel trap` line.
+ * Probe once and cache the answer; do not call this in a loop
+ * against an MSR you already know is absent.
+ *
+ * Boot-order note: this returns false for EVERY MSR until
+ * `RegisterMsrSafeExtable` has run, because before that a fault has
+ * no row to recover through and the #GP would be the unrecoverable
+ * one this primitive exists to prevent. A caller that runs too early
+ * therefore sees "unsupported" rather than wedging the boot. If a
+ * sensor reports unsupported on hardware you expect it to work on,
+ * check that its probe runs after the extable bring-up block.
+ */
+bool ReadMsrSafe(u32 msr, u64* out);
+
+/// Register the kernel-extable rows that cover the `wrmsr` inside
+/// `WriteMsrSafe` and the `rdmsr` inside `ReadMsrSafe`. Must be
+/// called once, after `KernelExtableRegister` is alive (post-paging,
+/// post-IDT). Safe to call before LAPIC init; the table just records
+/// the rows.
 void RegisterMsrSafeExtable();
+
+/// Boot self-test. Asserts both extable rows are registered and
+/// resolve to their fixups, then exercises `ReadMsrSafe` against an
+/// architectural MSR (must succeed) and an MSR no CPU implements
+/// (must return without taking the kernel down). Panics on
+/// mismatch; emits one "[msr-safe-selftest] PASS" line.
+void MsrSafeSelfTest();
 
 } // namespace duetos::arch

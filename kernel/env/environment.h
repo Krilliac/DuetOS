@@ -108,8 +108,11 @@ struct SystemEnvironment
     u8 battery_percent; // 0..100; 255 = unknown / no battery
     bool lid_present;
     bool lid_open; // valid iff lid_present
-    // Thermal
-    u8 cpu_temp_c; // 0 = not available
+    // Thermal. `cpu_temp_valid` is the honest "does this machine have
+    // a readable sensor" flag — 0 C is a legal reading, so the value
+    // alone cannot carry that fact.
+    bool cpu_temp_valid;
+    u8 cpu_temp_c;
     u8 pkg_temp_c;
     bool thermal_throttle;
     // Derived

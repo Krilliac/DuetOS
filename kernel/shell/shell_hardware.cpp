@@ -1311,7 +1311,7 @@ void CmdPower()
     ConsoleWrite("BATTERY:      ");
     ConsoleWriteln(duetos::drivers::power::BatteryStateName(snap.battery.state));
     ConsoleWrite("CPU TEMP:     ");
-    if (snap.cpu_temp_c != 0)
+    if (snap.cpu_temp_valid)
     {
         WriteU64Dec(snap.cpu_temp_c);
         ConsoleWriteln("C");
@@ -1321,7 +1321,7 @@ void CmdPower()
         ConsoleWriteln("(not available)");
     }
     ConsoleWrite("PACKAGE TEMP: ");
-    if (snap.package_temp_c != 0)
+    if (snap.package_temp_valid)
     {
         WriteU64Dec(snap.package_temp_c);
         ConsoleWriteln("C");
@@ -1331,8 +1331,15 @@ void CmdPower()
         ConsoleWriteln("(not available)");
     }
     ConsoleWrite("TJ MAX:       ");
-    WriteU64Dec(snap.tj_max_c);
-    ConsoleWriteln("C");
+    if (snap.tj_max_valid)
+    {
+        WriteU64Dec(snap.tj_max_c);
+        ConsoleWriteln("C");
+    }
+    else
+    {
+        ConsoleWriteln("(unknown)");
+    }
     ConsoleWrite("THROTTLE HIT: ");
     ConsoleWriteln(snap.thermal_throttle_hit ? "YES" : "NO");
     if (snap.backend_is_stub)
@@ -1346,18 +1353,41 @@ void CmdThermal()
     const auto r = duetos::arch::ThermalRead();
     if (!r.valid)
     {
-        ConsoleWriteln("THERMAL: sensors report invalid (likely emulator)");
+        ConsoleWriteln("THERMAL: unsupported on this CPU (no readable temperature sensor)");
         return;
     }
+    ConsoleWrite("SENSOR:       ");
+    ConsoleWriteln(r.source == duetos::arch::ThermalSource::AmdSmn ? "AMD SMN (Tctl)" : "Intel MSR");
     ConsoleWrite("CORE TEMP:    ");
-    WriteU64Dec(r.core_temp_c);
-    ConsoleWriteln("C");
+    if (r.core_valid)
+    {
+        WriteU64Dec(r.core_temp_c);
+        ConsoleWriteln("C");
+    }
+    else
+    {
+        ConsoleWriteln("(unsupported)");
+    }
     ConsoleWrite("PACKAGE TEMP: ");
-    WriteU64Dec(r.package_temp_c);
-    ConsoleWriteln("C");
+    if (r.package_valid)
+    {
+        WriteU64Dec(r.package_temp_c);
+        ConsoleWriteln("C");
+    }
+    else
+    {
+        ConsoleWriteln("(unsupported)");
+    }
     ConsoleWrite("TJ MAX:       ");
-    WriteU64Dec(r.tj_max_c);
-    ConsoleWriteln("C");
+    if (r.tj_max_valid)
+    {
+        WriteU64Dec(r.tj_max_c);
+        ConsoleWriteln("C");
+    }
+    else
+    {
+        ConsoleWriteln("(unknown)");
+    }
     ConsoleWrite("THROTTLE:     ");
     ConsoleWriteln(r.thermal_throttle_hit ? "HIT" : "clear");
 }
@@ -1394,21 +1424,42 @@ void CmdHwmon()
     }
 
     ConsoleWriteln("-- thermal --");
-    if (snap.cpu_temp_c != 0 || snap.package_temp_c != 0 || snap.tj_max_c != 0)
+    if (snap.cpu_temp_valid || snap.package_temp_valid)
     {
         ConsoleWrite("CORE TEMP:    ");
-        WriteU64Dec(snap.cpu_temp_c);
-        ConsoleWrite("C  PKG: ");
-        WriteU64Dec(snap.package_temp_c);
-        ConsoleWrite("C  TJ_MAX: ");
-        WriteU64Dec(snap.tj_max_c);
-        ConsoleWriteln("C");
+        if (snap.cpu_temp_valid)
+        {
+            WriteU64Dec(snap.cpu_temp_c);
+            ConsoleWrite("C  PKG: ");
+        }
+        else
+        {
+            ConsoleWrite("(unsupported)  PKG: ");
+        }
+        if (snap.package_temp_valid)
+        {
+            WriteU64Dec(snap.package_temp_c);
+            ConsoleWrite("C  TJ_MAX: ");
+        }
+        else
+        {
+            ConsoleWrite("(unsupported)  TJ_MAX: ");
+        }
+        if (snap.tj_max_valid)
+        {
+            WriteU64Dec(snap.tj_max_c);
+            ConsoleWriteln("C");
+        }
+        else
+        {
+            ConsoleWriteln("(unknown)");
+        }
         ConsoleWrite("THROTTLE:     ");
         ConsoleWriteln(snap.thermal_throttle_hit ? "HIT" : "clear");
     }
     else
     {
-        ConsoleWriteln("CORE TEMP:    (MSR thermal sensors unavailable — QEMU TCG / old CPU)");
+        ConsoleWriteln("CORE TEMP:    (unsupported — no readable CPU temperature sensor)");
     }
 
     ConsoleWriteln("-- power --");
@@ -1489,13 +1540,20 @@ void CmdHwmon()
     const auto freq = duetos::arch::CpuFreqRead();
     if (!freq.valid)
     {
-        ConsoleWriteln("FREQ:         (unavailable — hypervisor / unknown vendor / no MSR)");
+        ConsoleWriteln("FREQ:         (unsupported — no readable frequency interface)");
     }
     else
     {
         ConsoleWrite("CURRENT:      ");
-        WriteU64Dec(freq.current_mhz);
-        ConsoleWriteln(" MHz");
+        if (freq.current_valid)
+        {
+            WriteU64Dec(freq.current_mhz);
+            ConsoleWriteln(" MHz");
+        }
+        else
+        {
+            ConsoleWriteln("(unsupported)");
+        }
         if (freq.ratios_valid)
         {
             ConsoleWrite("BASE / MIN:   ");

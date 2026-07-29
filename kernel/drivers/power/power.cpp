@@ -20,9 +20,12 @@ PowerSnapshot g_snapshot = {};
 void PopulateThermal(PowerSnapshot& s)
 {
     const arch::ThermalReading t = arch::ThermalRead();
-    s.tj_max_c = t.tj_max_c;
+    s.cpu_temp_valid = t.core_valid;
     s.cpu_temp_c = t.core_valid ? t.core_temp_c : 0;
+    s.package_temp_valid = t.package_valid;
     s.package_temp_c = t.package_valid ? t.package_temp_c : 0;
+    s.tj_max_valid = t.tj_max_valid;
+    s.tj_max_c = t.tj_max_valid ? t.tj_max_c : 0;
     s.thermal_throttle_hit = t.thermal_throttle_hit;
 }
 

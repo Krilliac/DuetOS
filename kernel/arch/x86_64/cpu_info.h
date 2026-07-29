@@ -99,6 +99,13 @@ const CpuInfo& CpuInfoGet();
 /// hasn't run or the bit is out of range.
 bool CpuHas(CpuFeature feat);
 
+/// Vendor-string predicates. One home each — thermal.cpp, rapl.cpp
+/// and cpufreq.cpp each carried their own byte-by-byte copy of these
+/// twelve-character comparisons, which is three chances to typo a
+/// letter and silently take the wrong vendor's decode path.
+bool CpuVendorIsIntel();
+bool CpuVendorIsAmd();
+
 /// Verify every CPU feature this kernel depends on at runtime is
 /// actually advertised by CPUID. Anything missing is a hard-stop —
 /// the kernel cannot run safely on the box. Panics with a clear

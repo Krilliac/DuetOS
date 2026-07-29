@@ -1509,12 +1509,22 @@ done, it is merely written.
 23. **Power management.** `kernel/power/` contains only `reboot.cpp`. S3 /
     S0ix suspend-resume and the wake path. ACPI is already parsed. A laptop
     that cannot sleep is not a daily driver.
-24. **CPU frequency scaling.** P-states, EPP, idle governors.
-25. **`ReadMsrSafe`.** A ~20-line fault-tolerant `rdmsr` mirroring the
-    existing `wrmsr` template in `msr_safe.S`. Every MSR consumer currently
-    defends with static vendor+hypervisor gating because a bad `rdmsr` is
-    unrecoverable. Cheap unlock for AMD CPU temperature on this dev box.
-26. **Thermal + battery policy.** [dep: 25]
+24. **CPU frequency scaling.** P-states, EPP, idle governors. The
+    READ half has landed — Intel ratios, AMD Zen P-state decode
+    (`MSR_PSTATE_DEF` / `MSR_PSTATE_STATUS`) and APERF/MPERF effective
+    frequency, all probed rather than predicted. What remains is
+    *control*: selecting a P-state, EPP hints, and idle governors,
+    which per the Hardware-Safety contract must sit behind a kernel
+    capability and an explicit tune mode.
+25. ~~**`ReadMsrSafe`.**~~ LANDED. Extable-guarded `rdmsr` beside the
+    existing `wrmsr` template; every MSR consumer now probes instead of
+    predicting, and the static vendor+hypervisor gates are gone from
+    thermal, cpufreq and RAPL.
+26. **Thermal + battery policy.** [dep: 25 — cleared] The CPU
+    temperature READ exists for both vendors now (AMD via SMN, still
+    unvalidated on hardware). What remains is the policy: periodic
+    resampling into the heartbeat, throttle thresholds, and battery
+    `_BST`/`_BIF` evaluation.
 27. **TPM 2.0 — sealing half only.** Seal / unseal / PCR-measure / hardware
     RNG, and deliberately NO endorsement-key export, NO quote signing, NO
     attestation protocol. Enforced by capability, so a guest PE is

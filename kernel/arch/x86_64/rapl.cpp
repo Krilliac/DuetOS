@@ -1,7 +1,7 @@
 #include "arch/x86_64/rapl.h"
 
 #include "arch/x86_64/cpu_info.h"
-#include "arch/x86_64/hypervisor.h"
+#include "arch/x86_64/msr_safe.h"
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
 #include "log/klog.h"
@@ -23,29 +23,17 @@ constexpr u32 kMsrIntelDramEnergyStatus = 0x619;
 constexpr u32 kMsrAmdRaplPwrUnit = 0xC0010299;
 constexpr u32 kMsrAmdPkgEnergyStat = 0xC001029B;
 
-// rdmsr wrapper. Mirrors thermal.cpp — we only issue these against
-// MSRs the vendor gate below has confirmed the platform implements,
-// because an unimplemented-MSR rdmsr raises a #GP the trap dispatcher
-// does not recover from.
-u64 Rdmsr(u32 msr)
+// Read an MSR, answering 0 when the part does not implement it.
+// Callers here treat 0 and all-ones as "not really there" anyway (a
+// zero energy-unit register is not a plausible reading), so folding
+// the fault into 0 loses no information — the presence decision is
+// made on the units register below.
+u64 RdmsrOrZero(u32 msr)
 {
-    u32 lo, hi;
-    asm volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
-    return (u64(hi) << 32) | lo;
-}
-
-bool VendorIsIntel()
-{
-    const char* v = CpuInfoGet().vendor;
-    return v[0] == 'G' && v[1] == 'e' && v[2] == 'n' && v[3] == 'u' && v[4] == 'i' && v[5] == 'n' && v[6] == 'e' &&
-           v[7] == 'I' && v[8] == 'n' && v[9] == 't' && v[10] == 'e' && v[11] == 'l';
-}
-
-bool VendorIsAmd()
-{
-    const char* v = CpuInfoGet().vendor;
-    return v[0] == 'A' && v[1] == 'u' && v[2] == 't' && v[3] == 'h' && v[4] == 'e' && v[5] == 'n' && v[6] == 't' &&
-           v[7] == 'i' && v[8] == 'c' && v[9] == 'A' && v[10] == 'M' && v[11] == 'D';
+    u64 value = 0;
+    if (!ReadMsrSafe(msr, &value))
+        return 0;
+    return value;
 }
 
 // Energy unit = 1 / 2^EU joules. Convert a raw RAPL energy count to
@@ -69,6 +57,13 @@ constinit bool g_baseline_valid = false;
 constinit u64 g_baseline_energy_uj = 0;
 constinit u64 g_baseline_ns = 0;
 
+// Presence of the RAPL MSR block, resolved on first use. Same reason
+// cpufreq caches: a declined read costs a trap plus one recovered-trap
+// log line, and RaplRead sits on the `hwmon` / power-sampling path.
+// Only presence is cached; the energy counters are re-read every call.
+constinit bool g_presence_resolved = false;
+constinit bool g_rapl_present = false;
+
 } // namespace
 
 RaplReading RaplRead()
@@ -76,37 +71,40 @@ RaplReading RaplRead()
     RaplReading r = {};
     if (!CpuHas(kCpuFeatMsr))
         return r;
-    // KVM/TCG do not reliably expose RAPL; a rdmsr there either #GPs
-    // (KVM) or returns 0 (TCG). Bail under any hypervisor — same
-    // envelope as ThermalRead.
-    if (IsEmulator())
+    if (g_presence_resolved && !g_rapl_present)
         return r;
-
-    const bool intel = VendorIsIntel();
-    const bool amd = VendorIsAmd();
+    // No hypervisor gate. Every read below goes through
+    // `arch::ReadMsrSafe`, so a platform that does not implement RAPL
+    // answers with a recovered #GP instead of wedging the boot — we
+    // ask rather than predict, and a hypervisor that DOES expose the
+    // counters now yields real numbers.
+    const bool intel = CpuVendorIsIntel();
+    const bool amd = CpuVendorIsAmd();
     if (!intel && !amd)
         return r;
     r.is_intel = intel;
 
     const u32 unit_msr = intel ? kMsrIntelRaplPowerUnit : kMsrAmdRaplPwrUnit;
-    const u64 units = Rdmsr(unit_msr);
+    const u64 units = RdmsrOrZero(unit_msr);
     // POWER_UNIT layout (both vendors): PU = bits 3:0, EU = bits 12:8,
     // time unit = bits 19:16. A units register that reads back all-zero
     // or all-ones means the MSR is not really there (returned garbage).
-    if (units == 0 || units == ~0ULL)
+    g_presence_resolved = true;
+    g_rapl_present = (units != 0 && units != ~0ULL);
+    if (!g_rapl_present)
         return r;
     r.power_unit_exp = static_cast<u8>(units & 0xF);
     r.energy_unit_exp = static_cast<u8>((units >> 8) & 0x1F);
 
     const u32 energy_msr = intel ? kMsrIntelPkgEnergyStatus : kMsrAmdPkgEnergyStat;
-    const u64 pkg_raw = Rdmsr(energy_msr) & 0xFFFFFFFFULL; // 32-bit counter
+    const u64 pkg_raw = RdmsrOrZero(energy_msr) & 0xFFFFFFFFULL; // 32-bit counter
     r.pkg_energy_uj = EnergyToMicrojoules(pkg_raw, r.energy_unit_exp);
 
     if (intel)
     {
         // PKG_POWER_INFO: TSP bits 14:0, min bits 30:16, max bits 46:32,
         // all in power units. Absent on some SKUs (reads 0).
-        const u64 info = Rdmsr(kMsrIntelPkgPowerInfo);
+        const u64 info = RdmsrOrZero(kMsrIntelPkgPowerInfo);
         if (info != 0 && info != ~0ULL)
         {
             r.tdp_valid = true;
@@ -115,7 +113,7 @@ RaplReading RaplRead()
             r.max_power_mw = PowerFieldToMilliwatts(static_cast<u32>((info >> 32) & 0x7FFF), r.power_unit_exp);
         }
         // DRAM domain is present on server parts + some client SKUs.
-        const u64 dram_raw = Rdmsr(kMsrIntelDramEnergyStatus) & 0xFFFFFFFFULL;
+        const u64 dram_raw = RdmsrOrZero(kMsrIntelDramEnergyStatus) & 0xFFFFFFFFULL;
         if (dram_raw != 0)
         {
             r.dram_valid = true;
@@ -159,7 +157,7 @@ void RaplProbe()
     const RaplReading r = RaplRead();
     if (!r.valid)
     {
-        KLOG_DEBUG("arch/rapl", "RAPL telemetry unavailable (no MSR / unknown vendor / hypervisor)");
+        KLOG_DEBUG("arch/rapl", "RAPL telemetry unavailable - no MSR, unknown vendor, or POWER_UNIT declined");
         return;
     }
     g_baseline_valid = true;
