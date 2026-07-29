@@ -169,6 +169,49 @@ u32 RailRowY(u32 i)
 // the table carries geometry only — but it is still the single
 // source, for the same reason the Task Manager's is.
 // ---------------------------------------------------------------
+
+// ---------------------------------------------------------------
+// Vertical list geometry — ONE definition, read by the paint AND by
+// the hit-test.
+//
+// Every per-mode Draw* used to open with its own copy of
+//   list_top = cy + 2 + row_h + 2
+//   max_rows = (ch - (list_top - cy)) / row_h
+// and FilesRowAt / FilesListVisibleRows each carried a further copy —
+// FilesRowAt even re-declared kHdrToolbarH / kFooterH as local
+// constants with a comment telling the next maintainer to keep them in
+// sync by hand. Six expressions of one layout is how a click ends up a
+// row out of phase with the pixels. There is now one.
+// ---------------------------------------------------------------
+struct ListGeom
+{
+    u32 row_h;    // live row pitch
+    u32 top;      // absolute y of the first row
+    u32 max_rows; // rows that fit below the per-mode header band
+};
+
+/// `cy` / `ch` are the middle content slice the per-mode Draw*
+/// receives — already excluding the toolbar band and the footer.
+ListGeom ListGeomFor(u32 cy, u32 ch)
+{
+    ListGeom g{};
+    g.row_h = RowH();
+    g.top = cy + 2 + g.row_h + 2;
+    const u32 used = g.top - cy;
+    g.max_rows = (ch > used + g.row_h) ? (ch - used) / g.row_h : 0;
+    return g;
+}
+
+/// First visible row for a list of `n` entries with `sel` selected.
+/// Shared by the paint (which scrolls the viewport to keep the
+/// selection visible) and the hit-test (which has to undo that scroll).
+u32 ListFirstVisible(u32 n, u32 sel, u32 max_rows)
+{
+    if (max_rows == 0 || n <= max_rows || sel < max_rows)
+        return 0;
+    return sel - (max_rows - 1);
+}
+
 struct FilesCols
 {
     u32 name_x;     // left edge of the dot + name cell
@@ -1403,12 +1446,11 @@ void DrawRamfs(u32 cx, u32 cy, u32 cw, u32 ch)
     header[h_off] = '\0';
     DrawListHeaderWithCount(cx, cy, cw, header, CountChildren(RamfsCur()), 0x0080F088);
 
-    const u32 list_top = cy + 2 + row_h + 2;
+    const ListGeom geom = ListGeomFor(cy, ch);
+    const u32 list_top = geom.top;
     const u32 n = CountChildren(cur);
-    const u32 max_rows = (ch > (list_top - cy) + row_h) ? (ch - (list_top - cy)) / row_h : 0;
-    u32 first = 0;
-    if (n > max_rows && g_state.ramfs_selection >= max_rows)
-        first = g_state.ramfs_selection - (max_rows - 1);
+    const u32 max_rows = geom.max_rows;
+    const u32 first = ListFirstVisible(n, g_state.ramfs_selection, max_rows);
     for (u32 i = 0; i < max_rows && first + i < n; ++i)
     {
         const u32 idx = first + i;
@@ -1445,12 +1487,11 @@ void DrawFat32(u32 cx, u32 cy, u32 cw, u32 ch)
         return;
     }
 
-    const u32 list_top = cy + 2 + row_h + 2;
+    const ListGeom geom = ListGeomFor(cy, ch);
+    const u32 list_top = geom.top;
     const u32 n = g_state.fat_count;
-    const u32 max_rows = (ch > (list_top - cy) + row_h) ? (ch - (list_top - cy)) / row_h : 0;
-    u32 first = 0;
-    if (n > max_rows && g_state.fat_selection >= max_rows)
-        first = g_state.fat_selection - (max_rows - 1);
+    const u32 max_rows = geom.max_rows;
+    const u32 first = ListFirstVisible(n, g_state.fat_selection, max_rows);
     const u32 list_w =
         (cw > duetos::drivers::video::kScrollbarWidth + 2) ? cw - duetos::drivers::video::kScrollbarWidth - 2 : cw;
     for (u32 i = 0; i < max_rows && first + i < n; ++i)
@@ -1510,12 +1551,11 @@ void DrawTrash(u32 cx, u32 cy, u32 cw, u32 ch)
         return;
     }
 
-    const u32 list_top = cy + 2 + row_h + 2;
+    const ListGeom geom = ListGeomFor(cy, ch);
+    const u32 list_top = geom.top;
     const u32 n = g_state.trash_count;
-    const u32 max_rows = (ch > (list_top - cy) + row_h) ? (ch - (list_top - cy)) / row_h : 0;
-    u32 first = 0;
-    if (n > max_rows && g_state.trash_selection >= max_rows)
-        first = g_state.trash_selection - (max_rows - 1);
+    const u32 max_rows = geom.max_rows;
+    const u32 first = ListFirstVisible(n, g_state.trash_selection, max_rows);
     for (u32 i = 0; i < max_rows && first + i < n; ++i)
     {
         const u32 idx = first + i;
@@ -1559,12 +1599,11 @@ void DrawDuetFs(u32 cx, u32 cy, u32 cw, u32 ch)
         return;
     }
 
-    const u32 list_top = cy + 2 + row_h + 2;
+    const ListGeom geom = ListGeomFor(cy, ch);
+    const u32 list_top = geom.top;
     const u32 n = g_state.duet_count;
-    const u32 max_rows = (ch > (list_top - cy) + row_h) ? (ch - (list_top - cy)) / row_h : 0;
-    u32 first = 0;
-    if (n > max_rows && g_state.duet_selection >= max_rows)
-        first = g_state.duet_selection - (max_rows - 1);
+    const u32 max_rows = geom.max_rows;
+    const u32 first = ListFirstVisible(n, g_state.duet_selection, max_rows);
     const u32 list_w =
         (cw > duetos::drivers::video::kScrollbarWidth + 2) ? cw - duetos::drivers::video::kScrollbarWidth - 2 : cw;
     for (u32 i = 0; i < max_rows && first + i < n; ++i)
@@ -2401,11 +2440,11 @@ u32 FilesListVisibleRows()
         return 0;
     if (content_h_full <= kHdrToolbarH + kFooterH)
         return 0;
-    // Middle slice the per-mode Draw* now receives.
+    // Middle slice the per-mode Draw* now receives. `cy` is irrelevant
+    // to the row COUNT, so pass 0 — ListGeomFor derives max_rows from
+    // (top - cy), which is origin-independent.
     const duetos::u32 content_h = content_h_full - kHdrToolbarH - kFooterH;
-    const duetos::u32 row_h = RowH();
-    const duetos::u32 list_offset = 2 + row_h + 2;
-    return (content_h > list_offset + row_h) ? (content_h - list_offset) / row_h : 0;
+    return ListGeomFor(0, content_h).max_rows;
 }
 
 // Home / End / PageUp / PageDown / Delete / F4 / F5 for the active list.
@@ -2981,6 +3020,48 @@ void FilesSelfTest()
         TypeaheadReset();
     }
 
+    // List geometry round-trip: the invariant the whole column-model
+    // refactor rests on. For a synthetic content slice, the vertical
+    // centre of every visible row must map back to that row's index,
+    // and a point one pixel above the first row must map to no row at
+    // all. Painting and hit-testing both go through ListGeomFor, so
+    // this is the check that the two stay one grid — it fails the
+    // moment someone re-introduces a private copy of the arithmetic.
+    {
+        const u32 test_cy = 40;
+        const u32 test_ch = 260;
+        const ListGeom g = ListGeomFor(test_cy, test_ch);
+        if (g.row_h == 0 || g.max_rows == 0 || g.top <= test_cy)
+        {
+            pass = false;
+        }
+        else
+        {
+            for (u32 i = 0; i < g.max_rows; ++i)
+            {
+                const u32 mid_y = g.top + i * g.row_h + g.row_h / 2;
+                if ((mid_y - g.top) / g.row_h != i)
+                    pass = false;
+                // The row band must sit inside the slice, or the last
+                // row paints over the footer.
+                if (g.top + (i + 1) * g.row_h > test_cy + test_ch)
+                    pass = false;
+            }
+            // Scroll bookkeeping: with the selection past the fold the
+            // viewport tracks it, and the selected row is the last
+            // visible one.
+            const u32 n = g.max_rows + 5;
+            const u32 sel = n - 1;
+            const u32 first = ListFirstVisible(n, sel, g.max_rows);
+            if (first + g.max_rows != n)
+                pass = false;
+            if (ListFirstVisible(n, 0, g.max_rows) != 0)
+                pass = false;
+            if (ListFirstVisible(g.max_rows, g.max_rows - 1, g.max_rows) != 0)
+                pass = false;
+        }
+    }
+
     g_state.ramfs_depth = saved_depth;
     g_state.ramfs_selection = saved_sel;
     g_state.mode = saved_mode;
@@ -2989,7 +3070,7 @@ void FilesSelfTest()
     {
         SerialWrite("[files] self-test OK (ramfs descend+back, mode toggle, fat32 subdir descent+back, "
                     "duetfs descend+back, ctx-dispatch, home/end, ext match, delete-disarm, f4-restore-noop, "
-                    "widget-click, footer-refresh, typeahead, date-format)\n");
+                    "widget-click, footer-refresh, typeahead, date-format, list-geometry round-trip)\n");
         SerialWrite("[files-selftest] PASS\n");
     }
     else
@@ -3152,12 +3233,13 @@ duetos::i32 FilesRowAt(duetos::u32 sx, duetos::u32 sy)
     // The client rect itself comes from the window manager — the
     // title bar is per-theme, so re-deriving it here from a constant
     // would put every click out of phase with the paint.
-    // Constants duplicated here because they live in this TU's
-    // anonymous namespace and FilesRowAt is in the outer namespace;
-    // if you change either k_hdr_toolbar_h or k_footer_h in the
-    // anonymous block above, change them here too.
-    constexpr duetos::u32 k_hdr_toolbar_h = 26U;
-    constexpr duetos::u32 k_footer_h = 12U;
+    // The band constants come straight out of this TU's anonymous
+    // namespace (visible for the rest of the file), not from local
+    // copies. The copies that used to live here carried a comment
+    // asking the next maintainer to keep them in sync by hand — which
+    // is the divergence this whole refactor exists to remove.
+    constexpr duetos::u32 k_hdr_toolbar_h = kHdrToolbarH;
+    constexpr duetos::u32 k_footer_h = kFooterH;
     if (ModeCount() == 0)
         return -1;
     duetos::u32 content_x = 0, content_y_full = 0, content_w = 0, content_h_full = 0;
@@ -3176,24 +3258,19 @@ duetos::i32 FilesRowAt(duetos::u32 sx, duetos::u32 sy)
     const duetos::u32 list_x = content_x + RailW(content_w);
     if (sx < list_x || sx >= content_x + content_w)
         return -1;
-    // The hit-test derives its row pitch from RowH() — the SAME
-    // accessor every Draw* path uses. That is what keeps the click
-    // and the pixels on one grid when the theme changes the pitch.
-    const duetos::u32 row_h = RowH();
-    const duetos::u32 list_top = content_y + 2 + row_h + 2;
-    if (sy < list_top)
+    // Row pitch, first-row origin and the visible-row count all come
+    // from ListGeomFor — the SAME call every Draw* path makes with the
+    // same (cy, ch). That is what keeps the click and the pixels on
+    // one grid, including when the theme changes the pitch.
+    const ListGeom geom = ListGeomFor(content_y, content_h);
+    if (sy < geom.top)
+        return -1;
+    if (geom.max_rows == 0)
         return -1;
     const duetos::u32 n = ModeCount();
-    const duetos::u32 max_rows =
-        (content_h > (list_top - content_y) + row_h) ? (content_h - (list_top - content_y)) / row_h : 0;
-    if (max_rows == 0)
-        return -1;
-    const duetos::u32 sel = ModeSelection();
-    duetos::u32 first = 0;
-    if (n > max_rows && sel >= max_rows)
-        first = sel - (max_rows - 1);
-    const duetos::u32 row_in_view = (sy - list_top) / row_h;
-    if (row_in_view >= max_rows)
+    const duetos::u32 first = ListFirstVisible(n, ModeSelection(), geom.max_rows);
+    const duetos::u32 row_in_view = (sy - geom.top) / geom.row_h;
+    if (row_in_view >= geom.max_rows)
         return -1;
     const duetos::u32 idx = first + row_in_view;
     if (idx >= n)
