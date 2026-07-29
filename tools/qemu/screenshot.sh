@@ -18,6 +18,12 @@
 #   DUETOS_SETTLE   seconds to wait AFTER the boot marker appears
 #                     so long-running self-tests have time to paint
 #                     the full compose (default 5)
+#   DUETOS_PRE_DUMP file of HMP commands streamed into the monitor
+#                     just before the screendump — lets a capture
+#                     reach a view that needs input (raised window,
+#                     non-default tab). See the block that reads it.
+#   DUETOS_PRE_DUMP_SETTLE
+#                   seconds after the last pre-dump command (default 3)
 
 set -euo pipefail
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -199,6 +205,62 @@ fi
 # Give the compositor a second pass so tray + clock have a chance
 # to paint the second time (first pass is pre-heartbeat).
 sleep "${SETTLE}"
+
+# Optional: stream a file of HMP commands into the monitor BEFORE the
+# screendump, so a capture can show a view that needs input to reach —
+# a raised window, a non-default tab, an opened menu. Without this the
+# rig can only ever photograph whatever the boot profile happens to
+# leave on screen, which is why the Task Manager's Performance rail
+# went three rounds without ever being seen.
+#
+#   DUETOS_PRE_DUMP=/path/to/cmds.hmp
+#
+# One HMP command per line; blank lines and '#' comments are skipped.
+# Useful commands: `mouse_move DX DY` (RELATIVE — reset to the origin
+# with a large negative delta first), `mouse_button 1` / `mouse_button
+# 0`, `sendkey <name>`. A `sleep <secs>` pseudo-command pauses the
+# stream so the guest can repaint between steps.
+#
+#   mouse_move -2000 -2000
+#   mouse_move 205 321
+#   mouse_button 1
+#   mouse_button 0
+#   sleep 2
+#   sendkey tab
+#
+# DUETOS_PRE_DUMP_SETTLE (default 3) is the pause after the last
+# command, before the dump.
+if [[ -n "${DUETOS_PRE_DUMP:-}" ]]; then
+    if [[ ! -f "${DUETOS_PRE_DUMP}" ]]; then
+        echo "error: DUETOS_PRE_DUMP file not found: ${DUETOS_PRE_DUMP}" >&2
+        exit 1
+    fi
+    python3 - "${MON_SOCK}" "${DUETOS_PRE_DUMP}" <<'PY'
+import socket, sys, time
+sock_path, script = sys.argv[1:3]
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+for _ in range(30):
+    try:
+        s.connect(sock_path)
+        break
+    except (FileNotFoundError, ConnectionRefusedError):
+        time.sleep(0.2)
+else:
+    sys.exit("could not connect to monitor socket")
+with open(script, "r", encoding="utf-8") as fh:
+    for raw in fh:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("sleep "):
+            time.sleep(float(line.split(None, 1)[1]))
+            continue
+        s.sendall((line + "\n").encode())
+        time.sleep(0.4)
+s.close()
+PY
+    sleep "${DUETOS_PRE_DUMP_SETTLE:-3}"
+fi
 
 # Drive the monitor via the Unix socket. QEMU prints a banner and a
 # prompt; we just stream commands and close.
