@@ -93,6 +93,7 @@
 ### Security
 - [Auth and Login](security/Auth-and-Login.md)
 - [Sandboxing](security/Sandboxing.md)
+- [Security Exceptions (guard + firewall)](security/Security-Exceptions.md)
 - [Capabilities](security/Capabilities.md)
 - [RBAC and Elevation](security/RBAC-and-Elevation.md)
 - [Driver and Fault Domains](security/Driver-Domains.md)

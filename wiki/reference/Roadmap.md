@@ -1732,13 +1732,30 @@ done, it is merely written.
     - OVMF never re-enters the waking vector (SeaBIOS does), so UEFI S3
       resume is unproven.
     - S0ix is untouched.
-24. **CPU frequency scaling.** P-states, EPP, idle governors. The
-    READ half has landed — Intel ratios, AMD Zen P-state decode
-    (`MSR_PSTATE_DEF` / `MSR_PSTATE_STATUS`) and APERF/MPERF effective
-    frequency, all probed rather than predicted. What remains is
-    *control*: selecting a P-state, EPP hints, and idle governors,
-    which per the Hardware-Safety contract must sit behind a kernel
-    capability and an explicit tune mode.
+24. **CPU frequency scaling — EPP + idle governors.** [PARTIAL — the
+    P-state *selection* half LANDED 2026-07-29] Reading (Intel ratios,
+    AMD Zen `MSR_PSTATE_DEF` decode, APERF/MPERF effective frequency)
+    and *selecting* an operating point are both in tree: Intel HWP
+    (`IA32_HWP_REQUEST`) preferred where firmware enabled it, legacy
+    `IA32_PERF_CTL` otherwise, AMD `MSR_PSTATE_CTL` index select,
+    all behind `cpufreq=tune` + `kCapPowerTune` + a
+    platform-advertised window, never voltage, never a syscall. See
+    [Power-Management](../drivers/Power-Management.md) "CPU P-state
+    Control". What remains:
+    - **EPP / energy-performance preference.** The HWP path preserves
+      firmware's EPP and never chooses one. Needs its own policy
+      rationale before it becomes a knob.
+    - **Enabling HWP where firmware left it off.** `IA32_PM_ENABLE`
+      bit 0 is write-once until reset, so the decision belongs with
+      the EPP work rather than with a single set-the-ratio call.
+    - **Idle governors / C-state selection.** Untouched; idle stays at
+      firmware default.
+    - **Broadcast to all CPUs.** `CpuFreqSetTarget` writes the MSR on
+      the calling CPU only; per-core P-state parts keep their other
+      cores unchanged.
+    - **Hardware validation.** QEMU answers none of these MSRs under
+      TCG or KVM, so the write path has never executed. It needs a
+      real-silicon first boot.
 25. ~~**`ReadMsrSafe`.**~~ LANDED. Extable-guarded `rdmsr` beside the
     existing `wrmsr` template; every MSR consumer now probes instead of
     predicting, and the static vendor+hypervisor gates are gone from

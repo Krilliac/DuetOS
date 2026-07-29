@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/cpu_info.h"
 #include "arch/x86_64/cpu_sensor_math.h"
+#include "arch/x86_64/cpufreq_msr.h"
 #include "arch/x86_64/msr_safe.h"
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
@@ -15,33 +16,8 @@ namespace
 {
 
 namespace csm = ::duetos::arch::cpu_sensor_math;
+namespace msr = ::duetos::arch::cpufreq_msr;
 
-constexpr u32 kMsrPlatformInfo = 0xCE;
-constexpr u32 kMsrIa32PerfStatus = 0x198;
-constexpr u32 kMsrIa32Mperf = 0xE7;
-constexpr u32 kMsrIa32Aperf = 0xE8;
-
-// AMD family 17h+ P-state interface.
-constexpr u32 kMsrAmdPstateStatus = 0xC0010063; // bits 2:0 = live index
-constexpr u32 kMsrAmdPstateDef0 = 0xC0010064;   // +n for P-state n
-constexpr u32 kAmdPstateCount = 8;
-
-// Reference clock. 100 MHz BCLK on every Nehalem-and-later Intel part.
-// The AMD path decodes MHz directly out of the P-state FID/DID and
-// never touches this.
-constexpr u32 kBclkMhz = 100;
-
-struct CpuidRegs
-{
-    u32 eax, ebx, ecx, edx;
-};
-
-CpuidRegs DoCpuid(u32 leaf)
-{
-    CpuidRegs r;
-    asm volatile("cpuid" : "=a"(r.eax), "=b"(r.ebx), "=c"(r.ecx), "=d"(r.edx) : "a"(leaf), "c"(0));
-    return r;
-}
 
 /// Does this part ADVERTISE readable APERF/MPERF?
 ///
@@ -81,12 +57,12 @@ bool CountersAdvertised()
     {
         // Leaf 6 ECX bit 0 — "hardware coordination feedback
         // capability" (IA32_MPERF / IA32_APERF).
-        return (DoCpuid(6).ecx & 0x1u) != 0;
+        return (msr::Cpuid(6).ecx & 0x1u) != 0;
     }
     if (CpuVendorIsAmd())
     {
         // CPUID 0x80000007 EDX bit 10 — EffFreqRO.
-        return (DoCpuid(0x80000007).edx & (1u << 10)) != 0;
+        return (msr::Cpuid(0x80000007).edx & (1u << 10)) != 0;
     }
     return false;
 }
@@ -96,18 +72,18 @@ void ResolveAvail(bool intel, bool amd)
     u64 scratch = 0;
     if (intel)
     {
-        g_avail.perf_status = ReadMsrSafe(kMsrIa32PerfStatus, &scratch);
-        g_avail.platform_info = ReadMsrSafe(kMsrPlatformInfo, &scratch);
+        g_avail.perf_status = ReadMsrSafe(msr::kIa32PerfStatus, &scratch);
+        g_avail.platform_info = ReadMsrSafe(msr::kPlatformInfo, &scratch);
     }
     else if (amd && csm::ZenFamilySupported(CpuInfoGet().family))
     {
         // One probe covers the whole P-state block: the definitions
         // and the status register live in the same MSR range, so a
         // platform either models them or it does not.
-        g_avail.pstate = ReadMsrSafe(kMsrAmdPstateDef0, &scratch);
+        g_avail.pstate = ReadMsrSafe(msr::kAmdPstateDef0, &scratch);
     }
     g_avail.counters =
-        CountersAdvertised() && ReadMsrSafe(kMsrIa32Mperf, &scratch) && ReadMsrSafe(kMsrIa32Aperf, &scratch);
+        CountersAdvertised() && ReadMsrSafe(msr::kIa32Mperf, &scratch) && ReadMsrSafe(msr::kIa32Aperf, &scratch);
     g_avail.resolved = true;
 }
 
@@ -119,32 +95,32 @@ void EnsureAvailResolved(bool intel, bool amd)
 
 void ReadIntel(CpuFreqReading& r)
 {
-    r.bclk_mhz = kBclkMhz;
+    r.bclk_mhz = msr::kBclkMhz;
 
     // IA32_PERF_STATUS bits 15:8 = current operating ratio.
     u64 perf = 0;
-    if (g_avail.perf_status && ReadMsrSafe(kMsrIa32PerfStatus, &perf))
+    if (g_avail.perf_status && ReadMsrSafe(msr::kIa32PerfStatus, &perf))
     {
-        const u32 cur_ratio = static_cast<u32>((perf >> 8) & 0xFF);
+        const u32 cur_ratio = csm::IntelPerfStatusRatio(perf);
         if (cur_ratio != 0)
         {
             r.current_valid = true;
-            r.current_mhz = cur_ratio * kBclkMhz;
+            r.current_mhz = cur_ratio * msr::kBclkMhz;
         }
     }
 
     // MSR_PLATFORM_INFO bits 15:8 = base ratio, bits 47:40 =
     // max-efficiency (lowest) ratio. Absent SKUs read 0.
     u64 info = 0;
-    if (g_avail.platform_info && ReadMsrSafe(kMsrPlatformInfo, &info) && info != 0 && info != ~0ULL)
+    if (g_avail.platform_info && ReadMsrSafe(msr::kPlatformInfo, &info) && info != 0 && info != ~0ULL)
     {
-        const u32 base_ratio = static_cast<u32>((info >> 8) & 0xFF);
-        const u32 min_ratio = static_cast<u32>((info >> 40) & 0xFF);
+        const u32 base_ratio = csm::IntelPlatformInfoBaseRatio(info);
+        const u32 min_ratio = csm::IntelPlatformInfoMinRatio(info);
         if (base_ratio != 0)
         {
             r.ratios_valid = true;
-            r.base_mhz = base_ratio * kBclkMhz;
-            r.min_mhz = min_ratio * kBclkMhz;
+            r.base_mhz = base_ratio * msr::kBclkMhz;
+            r.min_mhz = min_ratio * msr::kBclkMhz;
         }
     }
 }
@@ -161,10 +137,10 @@ void ReadAmd(CpuFreqReading& r)
     // P0 is the base (guaranteed) frequency; walk the rest to find the
     // lowest enabled state, which is the max-efficiency point.
     u32 lowest = 0;
-    for (u32 i = 0; i < kAmdPstateCount; ++i)
+    for (u32 i = 0; i < msr::kAmdPstateCount; ++i)
     {
         u64 def = 0;
-        if (!ReadMsrSafe(kMsrAmdPstateDef0 + i, &def))
+        if (!ReadMsrSafe(msr::kAmdPstateDef0 + i, &def))
             break;
         const u32 mhz = csm::ZenPstateMhz(def);
         if (mhz == 0)
@@ -182,11 +158,11 @@ void ReadAmd(CpuFreqReading& r)
     // MSR_PSTATE_STATUS bits 2:0 name the state the core is running in
     // right now — the AMD equivalent of IA32_PERF_STATUS.
     u64 status = 0;
-    if (ReadMsrSafe(kMsrAmdPstateStatus, &status))
+    if (ReadMsrSafe(msr::kAmdPstateStatus, &status))
     {
         const u32 idx = static_cast<u32>(status & 0x7u);
         u64 def = 0;
-        if (ReadMsrSafe(kMsrAmdPstateDef0 + idx, &def))
+        if (ReadMsrSafe(msr::kAmdPstateDef0 + idx, &def))
         {
             const u32 mhz = csm::ZenPstateMhz(def);
             if (mhz != 0)
@@ -245,7 +221,7 @@ u32 CpuFreqSampleEffectiveMhz(u32 window_ms)
 
     u64 mperf0 = 0;
     u64 aperf0 = 0;
-    if (!ReadMsrSafe(kMsrIa32Mperf, &mperf0) || !ReadMsrSafe(kMsrIa32Aperf, &aperf0))
+    if (!ReadMsrSafe(msr::kIa32Mperf, &mperf0) || !ReadMsrSafe(msr::kIa32Aperf, &aperf0))
         return 0;
 
     const u64 start_ns = time::MonotonicNs();
@@ -255,7 +231,7 @@ u32 CpuFreqSampleEffectiveMhz(u32 window_ms)
 
     u64 mperf1 = 0;
     u64 aperf1 = 0;
-    if (!ReadMsrSafe(kMsrIa32Mperf, &mperf1) || !ReadMsrSafe(kMsrIa32Aperf, &aperf1))
+    if (!ReadMsrSafe(msr::kIa32Mperf, &mperf1) || !ReadMsrSafe(msr::kIa32Aperf, &aperf1))
         return 0;
     return csm::EffectiveMhz(first.base_mhz, mperf0, aperf0, mperf1, aperf1);
 }
@@ -263,12 +239,27 @@ u32 CpuFreqSampleEffectiveMhz(u32 window_ms)
 void CpuFreqProbe()
 {
     const CpuFreqReading r = CpuFreqRead();
+
+    // The control probe runs on EVERY boot, including one where no
+    // telemetry MSR answered and one with tune mode locked. Two
+    // reasons: an operator can see whether `cpufreq=tune` would give
+    // them anything before rebooting with it, and the control read
+    // path gets exercised under emulation, where it would otherwise
+    // never run at all (QEMU answers none of these MSRs, so the write
+    // side stays silicon-unverified either way — but a fault in the
+    // READ path would still show up here).
+    const CpuFreqControlCaps caps = CpuFreqControlRead();
+
     if (!r.valid)
     {
         KLOG_WARN("arch/cpufreq", "no readable frequency interface - reporting unsupported, not 0 MHz");
-        SerialWrite("[cpufreq] source=none freq=unsupported\n");
+        SerialLineGuard unsupported_guard;
+        SerialWrite("[cpufreq] source=none freq=unsupported control=");
+        SerialWrite(CpuFreqMechanismName(caps.mechanism));
+        SerialWrite(CpuFreqTuneEnabled() ? " tune=on\n" : " tune=off\n");
         return;
     }
+
     SerialLineGuard guard;
     SerialWrite("[cpufreq] ");
     SerialWrite(r.is_intel ? "Intel" : "AMD");
@@ -287,7 +278,18 @@ void CpuFreqProbe()
         SerialWriteHex(r.min_mhz);
     else
         SerialWrite("unsupported");
-    SerialWrite(r.counters_valid ? " aperf_mperf=live\n" : " aperf_mperf=absent\n");
+    SerialWrite(r.counters_valid ? " aperf_mperf=live" : " aperf_mperf=absent");
+
+    SerialWrite(" control=");
+    SerialWrite(CpuFreqMechanismName(caps.mechanism));
+    if (caps.valid)
+    {
+        SerialWrite(" window=");
+        SerialWriteHex(caps.lowest);
+        SerialWrite("..");
+        SerialWriteHex(caps.highest);
+    }
+    SerialWrite(CpuFreqTuneEnabled() ? " tune=on\n" : " tune=off\n");
 }
 
 void CpuFreqSelfTest()
@@ -295,7 +297,7 @@ void CpuFreqSelfTest()
     using core::PanicWithValue;
 
     // Ratio decode: a base ratio of 0x1C (28) at 100 MHz BCLK is 2.8 GHz.
-    const u32 base = 28u * kBclkMhz;
+    const u32 base = 28u * msr::kBclkMhz;
     if (base != 2800u)
         PanicWithValue("arch/cpufreq", "base ratio decode != 2800", base);
 

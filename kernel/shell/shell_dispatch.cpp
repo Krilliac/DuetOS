@@ -124,6 +124,7 @@ void CmdHelp()
     ConsoleWriteln("  POWER        AC / BATTERY / THERMAL SNAPSHOT");
     ConsoleWriteln("  THERMAL      RE-READ MSR THERMAL SENSORS");
     ConsoleWriteln("  HWMON        UNIFIED SENSORS VIEW (SMBIOS + THERMAL + POWER + FANS)");
+    ConsoleWriteln("  CPUFREQ      P-STATE WINDOW; `CPUFREQ SET <N>` NEEDS CAP PowerTune + cpufreq=tune");
     ConsoleWriteln("  GPU          LIST DISCOVERED GPUS");
     ConsoleWriteln("  VBE [W H [B]]  QUERY / SET BOCHS-VBE DISPLAY MODE");
     ConsoleWriteln("  FBDUMP [SCALED]  FRAMEBUFFER -> BASE64 PPM ON SERIAL (^C ABORT)");
@@ -1317,6 +1318,16 @@ void Dispatch(char* line)
     if (StrEq(cmd, "thermal") || StrEq(cmd, "temp"))
     {
         CmdThermal();
+        return;
+    }
+    if (StrEq(cmd, "cpufreq"))
+    {
+        // The read arm is ungated, symmetric with the rest of the
+        // sensor surface. The `set` arm takes kCapPowerTune INSIDE
+        // CmdCpuFreq, so that showing the window costs nothing while
+        // driving the hardware still needs the cap plus a
+        // `cpufreq=tune` boot.
+        CmdCpuFreq(argc, argv);
         return;
     }
     if (StrEq(cmd, "hw") || StrEq(cmd, "hardware"))

@@ -29,7 +29,10 @@
 
 #include "arch/x86_64/cpu.h"
 #include "security/event_ring.h"
+#include "security/exception_id.h"
 #include "security/ir_runbook.h"
+#include "core/boot_cmdline.h"
+#include "debug/probes.h"
 #include "arch/x86_64/hpet.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/timer.h"
@@ -82,19 +85,69 @@ constinit bool g_init_done = false;
 // normally).
 constinit bool g_prompt_active = false;
 
-// Persistent allow-list, keyed by SHA-256 image digest. A hash
-// that landed here during a previous boot (because the user
-// answered "yes" at a prompt) short-circuits Inspect -> Allow.
-// Capacity is static so the allowlist survives the life of the
-// kernel without depending on kmalloc. 256 entries * 32 bytes =
-// 8 KiB BSS.
+// Operator exception list, keyed by SHA-256 image digest. A digest
+// that landed here — because the user answered "always" at a
+// prompt, or because the operator seeded it on the boot cmdline —
+// short-circuits Inspect -> Allow.
+//
+// Scoped to the digest, never the path: `/UNITYPLA.DLL` is a label
+// an attacker can reuse by dropping a different file at that path,
+// whereas the digest names the exact bytes the operator saw. See
+// `security/exception_id.h` and wiki/security/Security-Exceptions.md.
+//
+// Capacity is static so the list works without kmalloc.
+// 256 entries * 32 bytes = 8 KiB BSS.
 constexpr u32 kMaxAllowed = 256;
 constinit u8 g_allowed_hashes[kMaxAllowed][32] = {};
 constinit u32 g_allowed_count = 0;
 
-// Path the persistent allowlist lives at inside tmpfs. Flat-name
-// space, no subdirectories (matches existing tmpfs conventions).
-constexpr const char* kAllowlistPath = "guard-allowed";
+// True once a cmdline-seeded exception is in force. `guard status`
+// and the boot log surface this so an operator can never mistake a
+// pre-authorised boot for a clean one.
+constinit u32 g_cmdline_seeded = 0;
+
+// Where the exception list is stored: RamVol, not the legacy flat
+// tmpfs tier.
+//
+// tmpfs slots cap at kTmpFsContentMax (512 bytes) — seven 65-byte
+// digest lines — while this table holds 256. The previous code
+// handed `TmpFsWrite` a 16 KiB buffer and let it truncate, which
+// silently dropped every entry past the seventh AND cut the last
+// surviving line mid-digest, so the reload skipped it too. RamVol
+// is the project's designated un-capped writable RAM tier (see the
+// RamVol block in `fs/tmpfs.h`, which says in as many words that
+// the legacy cap can never grow and RamVol is the path instead),
+// it is quota'd, and `RamVolInit` runs long before `GuardInit`.
+//
+// NOT durable across a reboot: RamVol is RAM, and DuetOS writes to
+// disk only on a DuetOS-owned partition, which does not exist until
+// the installer has run. Cross-boot persistence is therefore the
+// cmdline seed (`guard-allow=`) until an installed system exists.
+constexpr const char* kAllowlistPath = "/run/guard-allowed";
+
+// Boot cmdline token that pre-authorises images without a human at
+// the console. Repeatable, and each occurrence takes a comma-
+// separated list of 64-char hex SHA-256 digests:
+//
+//   guard-allow=<hex64>[,<hex64>...]
+//
+// Deliberately NOT a blanket "allow everything" switch: every
+// digest names one exact image, unknown images still hit the
+// normal heuristics, and a Warn image with no matching digest is
+// still default-denied on prompt timeout.
+constexpr const char* kCmdlineAllowKey = "guard-allow";
+
+// Prompt deadline, in scheduler ticks. Ten seconds at kTickHz is the
+// operator-facing value and the only value production ever uses.
+//
+// It is a variable rather than a constant purely so `GuardSelfTest`
+// can prove the timeout leg without adding ten seconds to every
+// boot: the self-test drops it, exercises the real default-deny
+// path, and restores it. File-static with no setter, so nothing
+// outside this TU — and in particular no guest — can shorten the
+// window an operator gets to answer.
+constexpr u64 kPromptTimeoutSecs = 10;
+constinit u64 g_prompt_timeout_ticks = 0; // 0 => use kPromptTimeoutSecs
 
 // ---------------------------------------------------------------
 // Policy tables.
@@ -214,19 +267,11 @@ void HashImage(const u8* data, u64 len, u8 out[32])
     crypto::Sha256Hash(data != nullptr ? data : reinterpret_cast<const u8*>(""), static_cast<u32>(len), out);
 }
 
-bool HashEq(const u8 a[32], const u8 b[32])
-{
-    // Linear compare — fine because the allowlist is small and
-    // the loop ends at the first byte mismatch on the common
-    // miss path. Not constant-time; the persistent allowlist is
-    // not a secret (the user installed every entry themselves)
-    // so timing side-channels don't add up to a meaningful
-    // attacker advantage here.
-    for (u32 i = 0; i < 32; ++i)
-        if (a[i] != b[i])
-            return false;
-    return true;
-}
+// Digest compare lives in exception_id.h so the hosted tests cover
+// the same code the kernel runs. Not constant-time, and it does not
+// need to be — see the header for why an allowlist has no secret to
+// leak.
+using duetos::security::DigestEqual;
 
 // ---------------------------------------------------------------
 // Heuristic implementations. Each appends at most one finding
@@ -265,7 +310,7 @@ Verdict CheckHashDeny(const ImageDescriptor& desc, Report& r)
     HashImage(desc.bytes, desc.size, h);
     for (u32 i = 0; kDeniedHashes[i].label != nullptr; ++i)
     {
-        if (HashEq(kDeniedHashes[i].hash, h))
+        if (DigestEqual(kDeniedHashes[i].hash, h))
         {
             AppendFinding(r, kFindingHashDeny, kDeniedHashes[i].label);
             return Verdict::Deny;
@@ -491,14 +536,14 @@ u8 SerialRxChar()
 // itself is dead.
 
 // ---------------------------------------------------------------
-// Persistent allowlist (tmpfs-backed).
+// Operator exception list (RamVol-backed; see kAllowlistPath).
 // ---------------------------------------------------------------
 
 bool IsHashAllowed(const u8 h[32])
 {
     for (u32 i = 0; i < g_allowed_count; ++i)
     {
-        if (HashEq(g_allowed_hashes[i], h))
+        if (DigestEqual(g_allowed_hashes[i], h))
             return true;
     }
     return false;
@@ -521,102 +566,81 @@ void AppendAllowedHash(const u8 h[32])
     ++g_allowed_count;
 }
 
-// Parse one hex digit into 0..15. Accepts lower or upper hex.
-// Returns -1 on any non-hex character.
-i32 HexNibble(char c)
-{
-    if (c >= '0' && c <= '9')
-        return c - '0';
-    if (c >= 'a' && c <= 'f')
-        return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F')
-        return c - 'A' + 10;
-    return -1;
-}
-
-// One line of the allowlist file: 64 hex chars + '\n'. Returns
-// the parsed 32-byte digest in `out`. False on malformed line.
-// Stale FNV-1a lines from previous builds (16 hex chars) hit the
-// len<64 path and get skipped silently, which is the right
-// migration behaviour — they'd never match a SHA-256 digest
-// anyway and trying to keep them would just clutter the table.
-bool ParseHashLine(const char* line, u64 len, u8 out[32])
-{
-    if (len < 64)
-        return false;
-    for (u32 i = 0; i < 32; ++i)
-    {
-        const i32 hi = HexNibble(line[2 * i]);
-        const i32 lo = HexNibble(line[2 * i + 1]);
-        if (hi < 0 || lo < 0)
-            return false;
-        out[i] = static_cast<u8>((hi << 4) | lo);
-    }
-    return true;
-}
+// One stored line: 64 hex chars + '\n'.
+constexpr u32 kAllowlistLineBytes = kImageDigestHexChars + 1;
 
 void LoadAllowlist()
 {
-    const char* bytes = nullptr;
-    u32 len = 0;
-    if (!duetos::fs::TmpFsRead(kAllowlistPath, &bytes, &len))
+    // Read the whole file. Sized for the full table so a saturated
+    // list round-trips intact — the old tmpfs path silently truncated
+    // at 512 bytes, dropping every entry past the seventh.
+    static char buf[kMaxAllowed * kAllowlistLineBytes];
+    const i64 got = duetos::fs::RamVolRead(kAllowlistPath, 0, buf, sizeof(buf));
+    if (got <= 0)
     {
-        arch::SerialWrite("[guard] no persistent allowlist (first boot or cleared)\n");
+        arch::SerialWrite("[guard] no stored exception list (first boot or cleared)\n");
         return;
     }
+    const u32 len = static_cast<u32>(got);
+
+    u32 malformed = 0;
     u32 i = 0;
-    u32 skipped_legacy = 0;
     while (i < len)
     {
-        // Find end of line.
         u32 j = i;
-        while (j < len && bytes[j] != '\n')
+        while (j < len && buf[j] != '\n')
             ++j;
-        u8 h[32];
-        if (ParseHashLine(bytes + i, j - i, h))
+        u8 h[kImageDigestBytes];
+        if (ParseHexDigest(buf + i, j - i, h))
         {
             AppendAllowedHash(h);
         }
         else if (j > i)
         {
-            ++skipped_legacy;
+            // A line that is not a bare 64-char digest: a truncated
+            // write from an older build, or hand-editing. Skipping is
+            // the fail-closed choice — a half-parsed digest would
+            // vouch for an image nobody approved.
+            ++malformed;
         }
         i = j + 1;
     }
-    arch::SerialWrite("[guard] loaded allowlist: ");
+    arch::SerialWrite("[guard] loaded exception list: ");
     arch::SerialWriteHex(g_allowed_count);
     arch::SerialWrite(" entries");
-    if (skipped_legacy > 0)
+    if (malformed > 0)
     {
         arch::SerialWrite(" (");
-        arch::SerialWriteHex(skipped_legacy);
-        arch::SerialWrite(" pre-SHA256 lines retired)");
+        arch::SerialWriteHex(malformed);
+        arch::SerialWrite(" malformed lines skipped)");
     }
     arch::SerialWrite("\n");
 }
 
 void SaveAllowlist()
 {
-    // Render the whole list back out. 64 hex chars + '\n' per
-    // entry = 65 bytes; cap at kMaxAllowed so the buffer is
-    // bounded. tmpfs writes are cheap; we rewrite the whole file
-    // rather than tracking diffs. kMaxAllowed * 65 ≈ 16 KiB BSS.
-    static char buf[kMaxAllowed * 65 + 1];
+    // Rewrite the whole list; RamVol writes are cheap and diff
+    // tracking would buy nothing at this size.
+    static char buf[kMaxAllowed * kAllowlistLineBytes];
     u32 w = 0;
     for (u32 i = 0; i < g_allowed_count; ++i)
     {
-        for (u32 k = 0; k < 32; ++k)
-        {
-            const u8 byte = g_allowed_hashes[i][k];
-            const u8 hi = byte >> 4;
-            const u8 lo = byte & 0xF;
-            buf[w++] = static_cast<char>(hi < 10 ? '0' + hi : 'a' + hi - 10);
-            buf[w++] = static_cast<char>(lo < 10 ? '0' + lo : 'a' + lo - 10);
-        }
+        FormatHexDigest(g_allowed_hashes[i], buf + w);
+        w += kImageDigestHexChars;
         buf[w++] = '\n';
     }
-    duetos::fs::TmpFsTouch(kAllowlistPath);
-    duetos::fs::TmpFsWrite(kAllowlistPath, buf, w);
+    duetos::fs::RamVolCreate(kAllowlistPath);
+    // Truncate first: a shorter list must not leave a stale tail
+    // behind, which would resurrect a revoked exception on reload.
+    duetos::fs::RamVolTruncate(kAllowlistPath, 0);
+    const i64 wrote = duetos::fs::RamVolWrite(kAllowlistPath, 0, buf, w);
+    if (wrote != static_cast<i64>(w))
+    {
+        // Quota exhaustion or a sealed file. The in-memory list is
+        // still authoritative for this boot; say so loudly rather
+        // than letting the operator believe it was stored.
+        KLOG_WARN("security/guard", "exception list not fully stored (quota or sealed) — in-memory only");
+    }
 }
 
 // ---------------------------------------------------------------
@@ -665,7 +689,8 @@ void DrawModal(const ImageDescriptor& desc, const Report& r)
         fb::FramebufferDrawString(mx + 32, line_y, FindingName(r.findings[i].code), kTextRgb, kBodyRgb);
     }
 
-    fb::FramebufferDrawString(mx + 16, my + mh - 40, "Allow [y]   Deny [n]   (10s default-deny)", kHeaderRgb, kBodyRgb);
+    fb::FramebufferDrawString(mx + 16, my + mh - 40, "Allow once [y]   Always [a]   Deny [n]   (10s default-deny)",
+                              kHeaderRgb, kBodyRgb);
 }
 
 void DrawModalDecision(const char* what, u32 rgb)
@@ -680,7 +705,22 @@ void DrawModalDecision(const char* what, u32 rgb)
     fb::FramebufferDrawString(mx + 16, my + mh - 20, what, rgb, 0x101418);
 }
 
-bool PromptUser(const ImageDescriptor& desc, const Report& r)
+// What the operator chose at the prompt.
+//
+// `AllowOnce` and `AllowAlways` are deliberately separate keys. The
+// old prompt had only "allow", and it silently added a permanent
+// exception — so an operator who just wanted to get past one load
+// left a standing exception behind without ever being asked. Making
+// "add an exception" its own keystroke means the durable grant is
+// always something the operator typed on purpose.
+enum class PromptChoice : u8
+{
+    Deny,
+    AllowOnce,
+    AllowAlways,
+};
+
+PromptChoice PromptUser(const ImageDescriptor& desc, const Report& r)
 {
     // Unified prompt: draws the modal dialog (if framebuffer is
     // live) AND emits the serial text. Answer accepted from
@@ -714,7 +754,7 @@ bool PromptUser(const ImageDescriptor& desc, const Report& r)
         SerialWrite(FindingName(r.findings[i].code));
         SerialWrite("\n");
     }
-    SerialWrite("[guard]  Allow [y] / Deny [n] — 10s default-deny. > ");
+    SerialWrite("[guard]  Allow once [y] / Always — add exception [a] / Deny [n] — 10s default-deny. > ");
 
     DrawModal(desc, r);
 
@@ -731,43 +771,60 @@ bool PromptUser(const ImageDescriptor& desc, const Report& r)
     // every platform regardless of HPET presence. At kTickHz = 100,
     // 10s == 1000 ticks.
     const u64 start_ticks = arch::TimerTicks();
-    const u64 deadline_ticks = start_ticks + 10ULL * ::duetos::time::kTickHz;
+    const u64 window =
+        (g_prompt_timeout_ticks != 0) ? g_prompt_timeout_ticks : (kPromptTimeoutSecs * ::duetos::time::kTickHz);
+    const u64 deadline_ticks = start_ticks + window;
     for (;;)
     {
+        // Both channels feed the same decision table. `channel` only
+        // colours the log line; the mapping from key to choice is
+        // identical either way.
+        char key = 0;
+        const char* channel = "";
         if (SerialRxReady())
         {
-            const u8 c = SerialRxChar();
-            if (c == 'y' || c == 'Y')
-            {
-                SerialWrite("y (serial)\n[guard] user ALLOWED override\n");
-                DrawModalDecision("*** ALLOWED BY USER ***", 0x66EE66);
-                return true;
-            }
-            if (c == 'n' || c == 'N')
-            {
-                SerialWrite("n (serial)\n[guard] user DENIED\n");
-                DrawModalDecision("*** DENIED BY USER ***", 0xEE6666);
-                return false;
-            }
+            key = static_cast<char>(SerialRxChar());
+            channel = " (serial)\n";
         }
-        const char k = duetos::drivers::input::Ps2KeyboardTryReadChar();
-        if (k == 'y' || k == 'Y')
+        else
         {
-            SerialWrite("y (keyboard)\n[guard] user ALLOWED override\n");
-            DrawModalDecision("*** ALLOWED BY USER ***", 0x66EE66);
-            return true;
+            key = duetos::drivers::input::Ps2KeyboardTryReadChar();
+            channel = " (keyboard)\n";
         }
-        if (k == 'n' || k == 'N')
+
+        if (key == 'y' || key == 'Y')
         {
-            SerialWrite("n (keyboard)\n[guard] user DENIED\n");
+            SerialWrite("y");
+            SerialWrite(channel);
+            SerialWrite("[guard] user ALLOWED once (no exception stored)\n");
+            DrawModalDecision("*** ALLOWED ONCE ***", 0x66EE66);
+            return PromptChoice::AllowOnce;
+        }
+        if (key == 'a' || key == 'A')
+        {
+            SerialWrite("a");
+            SerialWrite(channel);
+            SerialWrite("[guard] user ALLOWED and added a persistent exception\n");
+            DrawModalDecision("*** ALLOWED — EXCEPTION ADDED ***", 0x66EE66);
+            return PromptChoice::AllowAlways;
+        }
+        if (key == 'n' || key == 'N')
+        {
+            SerialWrite("n");
+            SerialWrite(channel);
+            SerialWrite("[guard] user DENIED\n");
             DrawModalDecision("*** DENIED BY USER ***", 0xEE6666);
-            return false;
+            return PromptChoice::Deny;
         }
         if (arch::TimerTicks() >= deadline_ticks)
         {
+            // Default-deny on timeout is the whole point of the
+            // feature: an unattended boot must not inherit an
+            // approval nobody gave. Pre-authorisation is explicit
+            // (`guard-allow=`), never implicit.
             SerialWrite("\n[guard] prompt timeout: default-deny\n");
             DrawModalDecision("*** TIMEOUT: DEFAULT-DENY ***", 0xEE6666);
-            return false;
+            return PromptChoice::Deny;
         }
         // `pause` not SchedYield: this loop runs in kboot context
         // (during early image-load gates), and kboot must NEVER
@@ -777,6 +834,184 @@ bool PromptUser(const ImageDescriptor& desc, const Report& r)
         // preempts us, which is what advances TimerTicks() above.
         asm volatile("pause" ::: "memory");
     }
+}
+
+// Run the prompt and apply the operator's choice. Shared by the
+// Warn and Deny legs so the two can never drift apart on what
+// "allow" stores.
+bool PromptAndApply(const ImageDescriptor& desc, const Report& r)
+{
+    const PromptChoice choice = PromptUser(desc, r);
+    if (choice == PromptChoice::Deny)
+        return false;
+
+    if (choice == PromptChoice::AllowAlways)
+    {
+        if (desc.bytes != nullptr && desc.size > 0)
+        {
+            u8 h[kImageDigestBytes];
+            HashImage(desc.bytes, desc.size, h);
+            GuardRememberAllow(h);
+        }
+        else
+        {
+            // A thread gate has no image bytes, so there is no
+            // digest to key an exception on. Allow this one load
+            // and say why nothing was stored, rather than silently
+            // discarding the operator's "always".
+            arch::SerialWrite("[guard] no image bytes to hash — allowed once, no exception stored\n");
+        }
+    }
+    return true;
+}
+
+// Seed exceptions from `guard-allow=` cmdline tokens. Returns the
+// number of digests installed.
+u32 SeedFromCmdline(const char* cmdline)
+{
+    u32 installed = 0;
+    u32 rejected = 0;
+    const char* value = nullptr;
+    u32 value_len = 0;
+    for (u32 tok = 0; CmdlineFindNthValue(cmdline, kCmdlineAllowKey, tok, &value, &value_len); ++tok)
+    {
+        const u32 fields = CsvFieldCount(value, value_len);
+        for (u32 f = 0; f < fields; ++f)
+        {
+            const char* field = nullptr;
+            u32 field_len = 0;
+            if (!CsvField(value, value_len, f, &field, &field_len))
+                continue;
+            u8 h[kImageDigestBytes];
+            if (!ParseHexDigest(field, field_len, h))
+            {
+                ++rejected;
+                continue;
+            }
+            if (IsHashAllowed(h))
+                continue;
+            AppendAllowedHash(h);
+            ++installed;
+
+            // Echo every seeded digest. An operator reading the boot
+            // log must be able to see exactly which images were
+            // pre-authorised — an exception that is in force but
+            // invisible is indistinguishable from a disabled gate.
+            char hex[kImageDigestHexChars + 1];
+            FormatHexDigest(h, hex);
+            hex[kImageDigestHexChars] = '\0';
+            arch::SerialWrite("[guard] cmdline exception seeded: sha256=");
+            arch::SerialWrite(hex);
+            arch::SerialWrite("\n");
+        }
+    }
+
+    if (rejected > 0)
+    {
+        // A malformed digest is an operator typo, and a typo means an
+        // image they meant to pre-authorise will be denied instead.
+        // Warn rather than pass over it.
+        KLOG_WARN_V("security/guard", "guard-allow= entries rejected as malformed", rejected);
+    }
+    return installed;
+}
+
+// Fill `pe` with a synthetic PE whose bytes trip the injection-combo
+// heuristic (Deny), made unique by `tag` so two calls produce two
+// different SHA-256 digests.
+void MakeSuspiciousPe(u8* pe, u32 len, u8 tag)
+{
+    VZero(pe, len);
+    pe[0] = 'M';
+    pe[1] = 'Z';
+    pe[2] = tag; // the only differing byte: distinct digest, same verdict
+    const char* crt = "CreateRemoteThread";
+    const char* wpm = "WriteProcessMemory";
+    for (u32 i = 0; crt[i] != 0; ++i)
+        pe[64 + i] = static_cast<u8>(crt[i]);
+    for (u32 i = 0; wpm[i] != 0; ++i)
+        pe[128 + i] = static_cast<u8>(wpm[i]);
+}
+
+// Prove BOTH directions of the exception mechanism through the real
+// `Gate()` in Enforce mode.
+//
+// A test that only shows the excepted image loading cannot tell a
+// working exception apart from a disabled gate — so the excepted
+// image and a NON-excepted one of the same verdict are gated on the
+// same boot, in the same mode, and the second must still be denied.
+// That second half is also the regression test for the constraint
+// that matters most: an unattended boot default-denies on timeout.
+void ExceptionSelfTest()
+{
+    using arch::SerialWrite;
+
+    // `static` so these land in bss rather than inviting a memset
+    // lowering on a 512-byte stack array (same reasoning as the
+    // injection-combo buffer above).
+    static u8 pe_excepted[512];
+    static u8 pe_control[512];
+    MakeSuspiciousPe(pe_excepted, sizeof(pe_excepted), 0xA1);
+    MakeSuspiciousPe(pe_control, sizeof(pe_control), 0xB2);
+
+    const ImageDescriptor excepted{ImageKind::WindowsPE, "test-excepted-pe", pe_excepted, sizeof(pe_excepted)};
+    const ImageDescriptor control{ImageKind::WindowsPE, "test-control-pe", pe_control, sizeof(pe_control)};
+
+    // Both must be Deny on the merits, or the comparison proves
+    // nothing about the exception.
+    if (Inspect(excepted).verdict != Verdict::Deny || Inspect(control).verdict != Verdict::Deny)
+    {
+        SerialWrite("[guard-exception-selftest] FAIL: fixtures are not both Deny\n");
+        KBP_PROBE_V(duetos::debug::ProbeId::kBootSelftestFail, 1);
+        return;
+    }
+
+    // GAP: the Enforce flip below is process-global for ~200 ms — no image
+    // loader runs this early (GuardSelfTest is on kboot during bringup,
+    // well before the ring-3 spawn path), but a future caller that gates
+    // an image concurrently would see Enforce. Revisit if the self-test
+    // ever moves after the loaders come up.
+    const Mode saved_mode = g_mode;
+    const u64 saved_timeout = g_prompt_timeout_ticks;
+    const u32 saved_count = g_allowed_count;
+
+    // Shorten the prompt window so the control image's default-deny
+    // costs ~200 ms instead of 10 s. The leg under test is the
+    // timeout leg itself, not its duration.
+    g_prompt_timeout_ticks = ::duetos::time::kTickHz / 5;
+    g_mode = Mode::Enforce;
+
+    u8 h[kImageDigestBytes];
+    HashImage(pe_excepted, sizeof(pe_excepted), h);
+    AppendAllowedHash(h); // in-memory only: do not disturb the stored list
+
+    const bool excepted_allowed = Gate(excepted);
+    const bool control_allowed = Gate(control);
+
+    g_allowed_count = saved_count;
+    g_mode = saved_mode;
+    g_prompt_timeout_ticks = saved_timeout;
+
+    if (!excepted_allowed)
+    {
+        SerialWrite("[guard-exception-selftest] FAIL: excepted image was denied\n");
+        KBP_PROBE_V(duetos::debug::ProbeId::kBootSelftestFail, 2);
+        return;
+    }
+    if (control_allowed)
+    {
+        // The dangerous failure: the gate let a Warn/Deny image with
+        // NO exception through. That is indistinguishable from the
+        // guard being off, and it is exactly what must never regress.
+        SerialWrite("[guard-exception-selftest] FAIL: non-excepted image was ALLOWED (gate is not enforcing)\n");
+        KBP_PROBE_V(duetos::debug::ProbeId::kBootSelftestFail, 3);
+        return;
+    }
+
+    // Explicit PASS line: the absence of a FAIL is not proof the
+    // self-test ran. This one sentence is the grep-able evidence that
+    // both directions held on this boot.
+    SerialWrite("[guard-exception-selftest] PASS (excepted image allowed; non-excepted image still default-denied)\n");
 }
 
 } // namespace
@@ -857,17 +1092,7 @@ bool Gate(const ImageDescriptor& desc)
         ++g_warn_count;
         if (g_mode == Mode::Advisory)
             return true;
-        // Enforce: prompt, and remember on allow.
-        {
-            const bool allowed = PromptUser(desc, r);
-            if (allowed && desc.bytes != nullptr && desc.size > 0)
-            {
-                u8 h[32];
-                HashImage(desc.bytes, desc.size, h);
-                GuardRememberAllow(h);
-            }
-            return allowed;
-        }
+        return PromptAndApply(desc, r);
 
     case Verdict::Deny:
         ++g_deny_count;
@@ -876,16 +1101,7 @@ bool Gate(const ImageDescriptor& desc)
             arch::SerialWrite("[guard] advisory: would DENY (mode=Advisory, allowing)\n");
             return true;
         }
-        {
-            const bool allowed = PromptUser(desc, r);
-            if (allowed && desc.bytes != nullptr && desc.size > 0)
-            {
-                u8 h[32];
-                HashImage(desc.bytes, desc.size, h);
-                GuardRememberAllow(h);
-            }
-            return allowed;
-        }
+        return PromptAndApply(desc, r);
 
     default:
         // Verdict enum extension would land here; treat as advisory pass.
@@ -926,7 +1142,69 @@ void GuardRememberAllow(const u8 hash[32])
         return;
     AppendAllowedHash(hash);
     SaveAllowlist();
-    arch::SerialWrite("[guard] allow-remembered: hash added to persistent allowlist\n");
+
+    char hex[kImageDigestHexChars + 1];
+    FormatHexDigest(hash, hex);
+    hex[kImageDigestHexChars] = '\0';
+    arch::SerialWrite("[guard] exception added: sha256=");
+    arch::SerialWrite(hex);
+    arch::SerialWrite("\n");
+    // Also on klog so the addition lands in dmesg and the panic-dump
+    // replay, not only on the boot-time serial stream.
+    KLOG_WARN_S("security/guard", "operator added an image exception", "sha256", hex);
+}
+
+void GuardSeedExceptionsFromCmdline(const char* cmdline)
+{
+    const u32 n = SeedFromCmdline(cmdline);
+    g_cmdline_seeded = n;
+    if (n == 0)
+        return;
+
+    // Loud on purpose. This is the one path that grants an exception
+    // with nobody at the console, so it must be impossible to read a
+    // boot log and miss that it happened.
+    arch::SerialWrite("[guard] NOTICE: boot cmdline pre-authorised images — guard exceptions ARE in force\n");
+    KLOG_WARN_V("security/guard", "cmdline-seeded image exceptions in force (guard-allow=)", n);
+}
+
+u32 GuardExceptionCount()
+{
+    return g_allowed_count;
+}
+
+u32 GuardCmdlineSeededCount()
+{
+    return g_cmdline_seeded;
+}
+
+bool GuardExceptionGet(u32 index, u8 out[32])
+{
+    if (index >= g_allowed_count || out == nullptr)
+        return false;
+    for (u32 i = 0; i < kImageDigestBytes; ++i)
+        out[i] = g_allowed_hashes[index][i];
+    return true;
+}
+
+bool GuardForgetException(u32 index)
+{
+    if (index >= g_allowed_count)
+        return false;
+    // Compact the tail down over the removed slot; order carries no
+    // meaning, but keeping the array dense keeps the match loop's
+    // bound honest.
+    for (u32 i = index; i + 1 < g_allowed_count; ++i)
+    {
+        for (u32 k = 0; k < kImageDigestBytes; ++k)
+            g_allowed_hashes[i][k] = g_allowed_hashes[i + 1][k];
+    }
+    --g_allowed_count;
+    for (u32 k = 0; k < kImageDigestBytes; ++k)
+        g_allowed_hashes[g_allowed_count][k] = 0;
+    SaveAllowlist();
+    KLOG_WARN_V("security/guard", "operator removed an image exception (index)", index);
+    return true;
 }
 
 Mode GuardMode()
@@ -1002,8 +1280,14 @@ void GuardInit()
     g_deny_count = 0;
     VZero(&g_last_report, sizeof(g_last_report));
     g_allowed_count = 0;
+    g_cmdline_seeded = 0;
     arch::SerialWrite("[guard] init (mode=advisory)\n");
     LoadAllowlist();
+    // Cmdline seeding runs after the stored list so a `guard-allow=`
+    // digest that is already stored is a no-op rather than a
+    // duplicate. FindBootCmdline(0) reads the cache populated in
+    // early boot — the low Multiboot mapping is long gone by now.
+    GuardSeedExceptionsFromCmdline(duetos::core::FindBootCmdline(0));
 }
 
 void GuardSelfTest()
@@ -1046,6 +1330,8 @@ void GuardSelfTest()
         return;
     }
     SerialWrite("[guard] self-test OK (clean-elf allowed; injection-pe denied)\n");
+
+    ExceptionSelfTest();
 }
 
 } // namespace duetos::security

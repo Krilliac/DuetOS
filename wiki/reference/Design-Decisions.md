@@ -13942,3 +13942,150 @@ alone is also the safer half of the trade — the guest's helper then
 goes through `GetProcAddress`, which has its own gates, rather than the
 kernel binding a name a static import was refused.
 
+## 2026-07-29 - P-state control is gated three ways and never touches voltage
+
+The project owner approved writing the P-state selection MSRs on
+2026-07-29, reversing the read-only stance
+[Hardware-Safety](../security/Hardware-Safety.md) row 89 had held since
+2026-06-06. That row was amended in the same commit as the code: a live
+safety rule that contradicts the tree is worse than either alone,
+because a later session cannot tell which one is authoritative.
+
+Approval to write these MSRs is not approval to write them carelessly,
+and the shape below rules out several alternatives a future slice might
+otherwise reach for.
+
+**Three gates, not one.** `cpufreq=tune` on the boot cmdline,
+`kCapPowerTune` on the caller, and membership of a window read from the
+part's own registers on the same call. Any one of them alone would be
+weaker than it looks: a cap alone still lets a default boot write
+hardware; a cmdline flag alone gives every shell session the authority;
+a window check alone constrains the *value* but not *who* may set it.
+
+**Refuse, never clamp.** `cpu_sensor_math::RatioAdmit` returns 0 for an
+out-of-window request rather than pinning it to the nearest bound. A
+silent clamp would apply a ratio nobody chose, to real silicon, with no
+error for the operator to notice. This also makes "never write a ratio
+you did not read back from the part" mechanically enforceable rather
+than aspirational, and the same rule applies to a *missing* bound: a
+zero or inverted window means a read failed, which is not a licence to
+guess a range.
+
+**No syscall — the gate is the absence of a path, not a check on one.**
+A guest PE/ELF cannot request a frequency change at all. This is
+stronger than cap-gating a syscall would be, and it is the right
+strength for two reasons: an unattended thermal load is a physical
+hazard, and a workload that can modulate the clock has both a
+cross-isolation signalling channel and a Hertzbleed-class timing
+amplifier. Rules out "add `SYS_CPUFREQ_SET` gated on `kCapPowerTune`" —
+if a future slice needs userland control, it needs a fresh argument
+about the side channel first, not just a cap.
+
+**AMD selects an index, never a (ratio, voltage) pair.** `MSR_PSTATE_DEF`
+carries `CpuVid` alongside `CpuFid`/`CpuDfsId`, so composing a P-state
+definition means choosing a voltage — the Plundervolt surface. Writing
+only `MSR_PSTATE_CTL` selects among the entries AMD's own firmware
+validated, so the voltage that goes with a ratio is never ours. This
+rules out the "synthesise a P-state entry to get a ratio the table does
+not offer" approach outright.
+
+**DuetOS does not enable HWP.** `IA32_PM_ENABLE` bit 0 is write-once
+until reset, and flipping it changes how the whole platform manages
+power, not just the operating point we were asked for. So HWP is used
+where firmware already chose it (where `IA32_PERF_CTL` is ignored by
+the part anyway) and legacy `IA32_PERF_CTL` otherwise. A future EPP /
+idle-governor slice owns that decision; a set-the-ratio call does not
+get to make it as a side effect.
+
+**Read-modify-write, not compose-from-scratch.** Both Intel splices
+preserve everything they were not asked to change — bit 32 (IDA/turbo
+disengage) on `IA32_PERF_CTL`, and EPP / activity window / package
+control on `IA32_HWP_REQUEST`. Composing a fresh value silently reverts
+whatever else firmware put there.
+
+**Verify the write, and separately measure the delivery.** Every write
+is read back from the same register and compared; a mismatch is
+`NotVerified`. That proves the *request* landed. It does not prove the
+silicon delivered it, which is what the APERF/MPERF sample after
+`cpufreq set` is for. Presenting "the wrmsr returned without faulting"
+as evidence that frequency control works would be exactly the false
+green an emulator hands you — QEMU models no real P-states.
+
+**RBAC snapshot format v2.** Adding `kCapPowerTune` took `kCapCount`
+from 11 to 12 and pushed the RBAC role record from 55 to 57 bytes, past
+its 56-byte envelope. The record widened to 64 (headroom to
+`kCapCount == 15`) and the snapshot version bumped to 2, so a v1
+snapshot is refused by `RbacImportSnapshot` rather than mis-parsed with
+every `grace_seconds` entry shifted. Any future cap addition past 15
+must widen it again and bump the version again — silently reusing the
+version is the failure mode this pins.
+
+## 2026-07-29 - Security exceptions: what an operator vouches for, and how
+
+### DD — an exception names an image digest, never a path
+
+- **Context:** the image guard blocks `UnityPlayer.dll` on
+  `PE_SUSPICIOUS`, and the operator needs a way to say "this one is
+  fine" that survives more than the current prompt. The obvious key is
+  the path the guard already prints (`/UNITYPLA.DLL`).
+- **Decision:** an exception is keyed on the SHA-256 of the image
+  bytes. The path is carried alongside as a human-readable label only,
+  and is never consulted when matching. `Gate()` already hashes every
+  image for the deny list, so this costs nothing extra.
+- **Rules out:** a path-keyed allowlist. Under one, any writer who can
+  place a file at an excepted path inherits that exception — on a FAT32
+  volume a guest can write, that is a full bypass of the image gate for
+  the price of a rename. The digest names the exact bytes the operator
+  inspected, so substituting the file revokes the exception
+  automatically, which is the behaviour a reviewer expects.
+- **Accepted cost:** an exception does not survive a legitimate update.
+  Patching an approved binary changes its digest and the operator is
+  prompted again. That is the correct default for a security decision —
+  the new bytes are genuinely a different thing to vouch for — but it
+  does mean the mechanism is unsuitable as a general "trust this
+  vendor" facility. Publisher-level trust needs code signing, which is
+  a separate subsystem and is not what this is.
+- **Evidence:** identity parsing is pinned in
+  `tests/host/test_exception_id.cpp`; the live both-directions proof is
+  the `[guard-exception-selftest]` line in any boot log.
+
+### DD — unattended pre-authorisation is per-image, never a mode
+
+- **Context:** the prompt default-denies on timeout, so a headless boot
+  (CI, a smoke run, a server) can never answer it. Something has to let
+  a known-good image through without a human.
+- **Decision:** a repeatable `guard-allow=<sha256>[,...]` boot token
+  seeds the exception list. Every seeded digest is echoed to the boot
+  log and summarised by a `NOTICE` line and a `guard` status field.
+- **Rules out:** flipping the timeout default to allow, and any
+  `guard=permissive` style switch. Both would make an unattended boot
+  silently weaker than an attended one, which inverts the property that
+  makes the gate worth having. It also rules out treating "no operator
+  present" as consent.
+- **Accepted cost:** whoever controls the bootloader configuration can
+  pre-authorise images. That is already true of anyone who can set the
+  kernel cmdline — they can equally pass `guard=off` — so the token
+  grants no authority that was not already there, and unlike `guard=off`
+  it is narrow and itemised in the log.
+
+### DD — the firewall surfaces denials asynchronously; it does not prompt
+
+- **Context:** the request was "the security guard pops up which you can
+  add an exception, same should be done with firewall". The guard's
+  prompt is a synchronous modal that blocks the loading thread.
+- **Decision:** the firewall keeps the same three ways to add an
+  exception, the same cap gate, and the same loud logging, but replaces
+  the synchronous modal with a rate-limited notification toast naming
+  the blocked packet and the command that would allow it. The operator
+  converts a logged denial into a standing rule afterwards
+  (`firewall except <seq>`).
+- **Rules out:** a modal on the packet path. `FwEvaluate` runs inside
+  `Ipv4HandleIncoming` / `IfaceTx`; blocking it for a ten-second
+  decision would let any port scan stall the network stack, turning the
+  prompt itself into the denial of service it was meant to report. It
+  also rules out queueing denials for a later batch prompt, which has
+  the same unbounded-growth problem in slower motion.
+- **Accepted cost:** the blocked packet is lost. TCP retries and the
+  exception applies to the retransmit; a single UDP datagram is not
+  recovered. This is the same behaviour as any stateful firewall whose
+  rule is added after the fact.

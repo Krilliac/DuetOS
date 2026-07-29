@@ -8,8 +8,10 @@
 // are included for exact signatures (they compile in the
 // stack.cpp TU already).
 
+#include "core/boot_cmdline.h"
 #include "debug/probes.h"
 #include "drivers/net/net.h"
+#include "drivers/video/notify.h"
 #include "net/wifi.h"
 #include "sched/sched.h"
 #include "subsystems/linux/syscall_pipe.h"
@@ -113,4 +115,25 @@ u64 RandomU64()
     s = s * 6364136223846793005ull + 1442695040888963407ull;
     return s;
 }
+
+// firewall.cpp's FwInit seeds operator exceptions from the
+// `fw-allow=` boot cmdline. There is no Multiboot info page under the
+// fuzzer, so nullptr means "no cmdline": FwSeedExceptionsFromCmdline
+// installs nothing and the fuzzer drives the RX parse path against the
+// default (empty) rule table, which is the state it should cover.
+const char* FindBootCmdline(duetos::uptr)
+{
+    return nullptr;
+}
 } // namespace duetos::core
+
+namespace duetos::drivers::video
+{
+// A firewall denial raises a desktop toast naming the blocked packet —
+// the asynchronous stand-in for the image guard's synchronous modal.
+// The fuzzer has no framebuffer and no compositor, so swallowing the
+// toast keeps the denial path in scope while satisfying the link. The
+// denial ring, which is what the fuzzer can actually observe, is
+// written before this is reached.
+void NotifyShowKind(const char*, NotifyKind) {}
+} // namespace duetos::drivers::video
