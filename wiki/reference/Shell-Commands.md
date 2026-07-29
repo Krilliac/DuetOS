@@ -244,7 +244,7 @@ All write-side FAT operations are admin-gated.
 | `mousestats` | PS/2 mouse IRQ counters |
 | `smbios` | BIOS / system / chassis info |
 | `power`, `battery` | AC / battery / thermal snapshot |
-| `thermal`, `temp` | Re-read MSR thermal sensors |
+| `thermal`, `temp` | Re-read the CPU temperature sensor (Intel MSR or AMD SMN); prints `unsupported` where there is none |
 | `hwmon` | Unified sensor view |
 | `hw`, `hardware` | Hardware-wide status / activation / serial capture (`status`, `activate`, `capture`) |
 | `gpu`, `lsgpu` | List discovered GPUs |
