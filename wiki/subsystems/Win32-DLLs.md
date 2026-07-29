@@ -175,7 +175,7 @@ named export is real. Page-level limits:
    and refresh `docs/sync-wiki.sh` output.
 
 <!-- AUTO:dll_list -->
-*60 DLLs preloaded into every Win32 PE process.*
+*61 DLLs preloaded into every Win32 PE process.*
 
 | DLL | Exports (approx) | Path |
 |-----|------------------|------|
@@ -223,6 +223,7 @@ named export is real. Page-level limits:
 | `shell32` | 27 | `userland/libs/shell32/` |
 | `shlwapi_32` | 1 | `userland/libs/shlwapi_32/` |
 | `shlwapi` | 44 | `userland/libs/shlwapi/` |
+| `sxslib` | 2 | `userland/libs/sxslib/` |
 | `ucrtbase` | 136 | `userland/libs/ucrtbase/` |
 | `user32_32` | 157 | `userland/libs/user32_32/` |
 | `user32` | 212 | `userland/libs/user32/` |

@@ -362,6 +362,7 @@
 #include "subsystems/win32/token_syscall.h"
 #include "subsystems/win32/window_syscall.h"
 #include "loader/apiset_static.h"
+#include "loader/sxs_dll.h"
 #include "loader/compat_shim.h"
 #include "loader/dll_loader.h"
 #include "loader/elf_loader.h"
@@ -683,6 +684,9 @@ void BootBringupEarly(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
 
     SerialWrite("[boot] Exercising API-set contract table.\n");
     DUETOS_BOOT_SELFTEST(duetos::loader::ApiSetSelfTest());
+
+    SerialWrite("[boot] Exercising side-by-side DLL path resolution.\n");
+    DUETOS_BOOT_SELFTEST(duetos::loader::SxsSelfTest());
 
     SerialWrite("[boot] Exercising A/B boot-slot state machine.\n");
     DUETOS_BOOT_SELFTEST(duetos::fs::boot_slot::SelfTest());
@@ -2807,6 +2811,11 @@ void PeexecDeferredTask(void*)
     duetos::u8* peexec_buf = nullptr;
     duetos::u64 peexec_cap = 0;
     duetos::i64 rn = 0;
+    // Which volume the image actually came off. The scan below tries
+    // every mounted FAT volume, and the winner is the one whose
+    // directory a side-by-side DLL has to be looked up in — searching
+    // volume 0 unconditionally would look in the wrong place.
+    duetos::u32 peexec_volume = 0;
     for (duetos::u32 attempt = 0; attempt < 12 && rn <= 0; ++attempt)
     {
         const duetos::u32 vc = fat::Fat32VolumeCount();
@@ -2846,6 +2855,7 @@ void PeexecDeferredTask(void*)
             if (got > 0 && static_cast<duetos::u64>(got) >= entry.size_bytes)
             {
                 rn = got;
+                peexec_volume = vi;
                 break;
             }
         }
@@ -2873,9 +2883,11 @@ void PeexecDeferredTask(void*)
     SerialWrite("[peexec] read bytes=");
     SerialWriteHex(static_cast<duetos::u64>(rn));
     SerialWrite("\n");
+    // Pass the on-disk origin so DLLs shipped beside the .exe resolve.
     const auto pid = duetos::core::SpawnPeFile(g_peexec_path, peexec_buf, static_cast<duetos::u64>(rn),
                                                duetos::core::CapSetTrusted(), duetos::fs::RamfsTrustedRoot(),
-                                               duetos::mm::kFrameBudgetTrusted, duetos::core::kTickBudgetTrusted);
+                                               duetos::mm::kFrameBudgetTrusted, duetos::core::kTickBudgetTrusted,
+                                               duetos::core::CapSetTrusted(), peexec_volume, g_peexec_path);
     // SpawnPeFile has copied the image into the child's address space;
     // the read buffer is no longer needed.
     duetos::mm::KFree(peexec_buf);

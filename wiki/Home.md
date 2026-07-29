@@ -96,6 +96,13 @@ DuetOS is licensed under the terms in [`LICENSE`](../LICENSE).
 | GAP markers | 255 |
 | Wiki pages | 131 |
 | *Last synced* | *2026-07-28 22:48* |
+| Userland DLLs | 61 |
+| DLL exports (approx) | 2984 |
+| Test files | 93 |
+| STUB markers | 86 |
+| GAP markers | 257 |
+| Wiki pages | 130 |
+| *Last synced* | *2026-07-29 00:47* |
 <!-- /AUTO:stats -->
 
 _Run `docs/sync-wiki.sh sync` to refresh this block from the live tree._

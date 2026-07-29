@@ -1683,43 +1683,6 @@ bool TryResolveViaPreloadedDllsByOrdinal(const char* dll_name, u32 ordinal, cons
     return TryResolveViaPreloadedDllsByOrdinalImpl(dll_name, ordinal, dlls, count, /*depth=*/0, out_va);
 }
 
-// True if `dll_name` is a Windows API-set contract name —
-// "api-ms-win-..." or "ext-ms-win-..." (case-insensitive). These
-// are not real DLLs: they are name contracts whose implementation
-// lives in one of the base DLLs the loader already preloads
-// (kernel32 / kernelbase / ntdll / ...). mingw's import libs
-// (e.g. -lsynchronization) emit imports against these contract
-// names for modern APIs (WaitOnAddress, condition variables, …),
-// and Chrome links the same way.
-bool IsApiSetContract(const char* dll_name)
-{
-    if (dll_name == nullptr)
-        return false;
-    auto lc = [](char c) -> char { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c; };
-    const char* a = "api-ms-win-";
-    const char* e = "ext-ms-win-";
-    bool ma = true, me = true;
-    for (u64 i = 0; a[i] != '\0'; ++i)
-    {
-        if (lc(dll_name[i]) != a[i])
-        {
-            ma = false;
-            break;
-        }
-    }
-    if (ma)
-        return true;
-    for (u64 i = 0; e[i] != '\0'; ++i)
-    {
-        if (lc(dll_name[i]) != e[i])
-        {
-            me = false;
-            break;
-        }
-    }
-    return me;
-}
-
 // Resolve `fn_name` by NAME across every preloaded DLL, ignoring
 // the (contract) DLL name. This is the api-set host-resolution
 // FALLBACK: `ResolveImports` consults `ApiSetResolveStatic`
@@ -2260,6 +2223,78 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
 }
 
 } // namespace
+
+bool IsApiSetContract(const char* dll_name)
+{
+    if (dll_name == nullptr)
+        return false;
+    auto lc = [](char c) -> char { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c; };
+    const char* a = "api-ms-win-";
+    const char* e = "ext-ms-win-";
+    bool ma = true, me = true;
+    for (u64 i = 0; a[i] != '\0'; ++i)
+    {
+        if (lc(dll_name[i]) != a[i])
+        {
+            ma = false;
+            break;
+        }
+    }
+    if (ma)
+        return true;
+    for (u64 i = 0; e[i] != '\0'; ++i)
+    {
+        if (lc(dll_name[i]) != e[i])
+        {
+            me = false;
+            break;
+        }
+    }
+    return me;
+}
+
+u32 PeEnumImportDlls(const u8* file, u64 file_len, PeImportDllFn fn, void* ctx)
+{
+    if (file == nullptr || file_len == 0 || fn == nullptr)
+        return 0;
+    PeHeaders h{};
+    const PeStatus s = ParseHeaders(file, file_len, h);
+    if (s != PeStatus::Ok && s != PeStatus::ImportsPresent && s != PeStatus::TlsPresent)
+        return 0;
+    const PeDataDir imp = ReadDataDir(file, file_len, h, kDirEntryImport);
+    if (imp.rva == 0 || imp.size == 0)
+        return 0;
+    const u64 tbl_off = RvaToFile(file, file_len, h, imp.rva);
+    // Same subtractive bound as ResolveImports: `tbl_off + imp.size`
+    // would wrap on a hostile RVA near UINT64_MAX.
+    if (tbl_off == ~u64(0) || tbl_off > file_len || imp.size > file_len - tbl_off)
+        return 0;
+
+    // Mirrors ResolveImports' descriptor cap so the two walks agree
+    // on how much of a malformed table they are willing to read.
+    constexpr u32 kMaxDll = 64;
+    u32 visited = 0;
+    for (u32 d = 0; d < kMaxDll; ++d)
+    {
+        const u64 desc_off = tbl_off + u64(d) * 20;
+        if (desc_off + 20 > file_len)
+            break;
+        const u8* desc = file + desc_off;
+        const u32 orig_thunk = LeU32(desc + 0);
+        const u32 name_rva = LeU32(desc + 12);
+        const u32 first_thunk = LeU32(desc + 16);
+        if (orig_thunk == 0 && name_rva == 0 && first_thunk == 0)
+            break; // terminator
+        const u64 name_off = RvaToFile(file, file_len, h, name_rva);
+        const char* dll_name = (name_off == ~u64(0)) ? nullptr : BoundedCString(file, file_len, name_off);
+        if (dll_name == nullptr || dll_name[0] == '\0')
+            continue; // malformed descriptor: skip it, don't abort the walk
+        ++visited;
+        if (!fn(dll_name, ctx))
+            break;
+    }
+    return visited;
+}
 
 bool PeResolveImportsForLoadedImage(const u8* file, u64 file_len, duetos::mm::AddressSpace* as,
                                     const DllImage* preloaded_dlls, u64 preloaded_dll_count)

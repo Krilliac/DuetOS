@@ -69,6 +69,7 @@
 #include "loader/dll_loader.h"
 #include "loader/elf_loader.h"
 #include "loader/pe_loader.h"
+#include "loader/sxs_dll.h"
 #include "util/random.h"
 #include "mm/kheap.h"
 #include "fs/vfs.h"
@@ -4384,6 +4385,35 @@ void SyscallDispatch(arch::TrapFrame* frame)
         const fs::RamfsNode* n = fs::VfsLookup(proc->root, kpath, sizeof(kpath));
         if (n == nullptr || n->type != fs::RamfsNodeType::kFile || n->file_bytes == nullptr || n->file_size == 0)
         {
+            // Side-by-side: a DLL shipped beside the process's own
+            // .exe. Same resolver, same security gate, and the SAME
+            // search directory the import binder used at spawn time
+            // (`Process::sxs_dir`) — a bind-time / run-time
+            // divergence here is exactly the bug class that has bitten
+            // this loader twice already.
+            if (proc->sxs_dir[0] != '\0')
+            {
+                ::duetos::loader::SxsSource src{};
+                src.volume = proc->sxs_volume;
+                src.valid = true;
+                u64 di = 0;
+                for (; proc->sxs_dir[di] != '\0' && di + 1 < sizeof(src.dir); ++di)
+                    src.dir[di] = proc->sxs_dir[di];
+                src.dir[di] = '\0';
+
+                const ::duetos::loader::DllSet set{proc->dll_images, &proc->dll_image_count, Process::kDllImageCap};
+                const u64 base = ::duetos::loader::SxsLoadNamed(src, kname, proc->as, set);
+                if (base != 0)
+                {
+                    arch::SerialWrite("[dll-load] OK (side-by-side) name=\"");
+                    arch::SerialWrite(kname);
+                    arch::SerialWrite("\" base=");
+                    arch::SerialWriteHex(base);
+                    arch::SerialWrite("\n");
+                    frame->rax = base;
+                    return;
+                }
+            }
             arch::SerialWrite("[dll-load] miss path=\"");
             arch::SerialWrite(kpath);
             arch::SerialWrite("\"\n");

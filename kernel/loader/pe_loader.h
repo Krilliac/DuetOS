@@ -170,6 +170,40 @@ void PeQuickSummaryTo(PeReportFn writer, const u8* file, u64 file_len);
 bool PeResolveImportsForLoadedImage(const u8* file, u64 file_len, duetos::mm::AddressSpace* as,
                                     const DllImage* preloaded_dlls, u64 preloaded_dll_count);
 
+/// True iff `dll_name` is a Windows API-set contract name —
+/// "api-ms-win-..." or "ext-ms-win-..." (case-insensitive). These
+/// are not real DLLs: they are name contracts whose implementation
+/// lives in one of the base DLLs the loader already preloads
+/// (kernel32 / kernelbase / ntdll / ...). mingw's import libs
+/// (e.g. -lsynchronization) emit imports against these contract
+/// names for modern APIs (WaitOnAddress, condition variables, ...),
+/// and Chrome links the same way.
+///
+/// Exposed because every code path that might otherwise go looking
+/// for a FILE by that name must not — no filesystem, here or on
+/// Windows, has one.
+bool IsApiSetContract(const char* dll_name);
+
+/// Callback for `PeEnumImportDlls`. `dll_name` is a bounds-checked
+/// pointer INTO the caller's file buffer (never null, always NUL
+/// terminated inside the buffer) and is only valid for the duration
+/// of the call. Return false to stop the walk early.
+using PeImportDllFn = bool (*)(const char* dll_name, void* ctx);
+
+/// Enumerate the DLL names in a PE's import directory without
+/// touching an address space. Every RVA is validated against
+/// `file_len` before it is dereferenced, so a hostile / truncated
+/// image stops the walk instead of reading out of bounds.
+///
+/// Returns the number of descriptors visited. A PE with no import
+/// directory returns 0 — that is not an error.
+///
+/// The side-by-side DLL resolver (`loader/sxs_dll.h`) uses this to
+/// learn WHICH DLLs an image wants before deciding what to read off
+/// the volume; the import binder itself still walks the directory
+/// again inside `ResolveImports`.
+u32 PeEnumImportDlls(const u8* file, u64 file_len, PeImportDllFn fn, void* ctx);
+
 struct PeLoadResult
 {
     bool ok;

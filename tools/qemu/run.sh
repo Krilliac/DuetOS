@@ -244,6 +244,25 @@ fi
 # nothing meaningful for determinism.
 NVME_IMAGE="${BUILD_DIR}/nvme0.img"
 SATA_IMAGE="${BUILD_DIR}/sata0.img"
+
+# Side-by-side DLL fixture. SXSTEST.EXE imports SXSLIB.DLL, and neither
+# is embedded in the kernel image — the ring3 PE-compat battery row can
+# only pass if the loader reads the DLL off the volume next to the .exe.
+# Staged automatically whenever the build produced them, and APPENDED to
+# whatever the caller already asked for (run-exe.sh sets its own entry).
+# Set DUETOS_NO_SXS_FIXTURE=1 to leave them off the image.
+SXS_FIXTURE_DIR="${BUILD_DIR}/sxs-fixture"
+if [[ -z "${DUETOS_NO_SXS_FIXTURE:-}" \
+      && -f "${SXS_FIXTURE_DIR}/SXSTEST.EXE" && -f "${SXS_FIXTURE_DIR}/SXSLIB.DLL" ]]; then
+    SXS_SPEC="SXSTEST.EXE=${SXS_FIXTURE_DIR}/SXSTEST.EXE;SXSLIB.DLL=${SXS_FIXTURE_DIR}/SXSLIB.DLL"
+    if [[ -n "${DUETOS_STAGE_FILES:-}" ]]; then
+        export DUETOS_STAGE_FILES="${DUETOS_STAGE_FILES};${SXS_SPEC}"
+    else
+        export DUETOS_STAGE_FILES="${SXS_SPEC}"
+    fi
+    echo "[run.sh] staging side-by-side DLL fixture (SXSTEST.EXE + SXSLIB.DLL)" >&2
+fi
+
 python3 "${SCRIPT_DIR}/make-gpt-image.py" "${NVME_IMAGE}"
 python3 "${SCRIPT_DIR}/make-gpt-image.py" "${SATA_IMAGE}"
 

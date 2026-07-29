@@ -47,6 +47,7 @@
 #include "arch/x86_64/usermode.h"
 #include "cpu/percpu.h"
 #include "debug/inspect.h"
+#include "fs/fat32.h"
 #include "fs/ramfs.h"
 #include "generated_advapi32_dll.h"
 #include "generated_bcrypt_dll.h"
@@ -260,6 +261,7 @@
 #include "generated_xinput_smoke_pe.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
+#include "mm/kheap.h"
 #include "mm/page.h"
 #include "mm/paging.h"
 #include "sched/sched.h"
@@ -2256,13 +2258,28 @@ struct PeCompatEntry
     u64 len; // 0 = blob not built (embed-blob --empty) → skipped
     PeCompatGate gate;
     bool expects_verdict;
+    // Non-null => the image is NOT embedded in the kernel: read it off
+    // FAT32 at this path instead. `bytes`/`len` are unused for such a
+    // row. Reserved for fixtures whose whole point is that they live on
+    // a volume — the side-by-side DLL row cannot be embedded without
+    // destroying what it tests. Handled by `PeCompatDiskTask` because
+    // storage enumerates asynchronously, long after this table is
+    // walked on the boot thread.
+    const char* fat_path;
 };
 
 // One row per battery PE; spawn order == table order.
 #define PE_COMPAT(label_, sym_, gate_, verdict_)                                                                       \
     PeCompatEntry                                                                                                      \
     {                                                                                                                  \
-        label_, fs::generated::sym_, fs::generated::sym_##_len, PeCompatGate::gate_, verdict_                          \
+        label_, fs::generated::sym_, fs::generated::sym_##_len, PeCompatGate::gate_, verdict_, nullptr                 \
+    }
+
+// A row whose image is staged on the FAT32 volume rather than embedded.
+#define PE_COMPAT_DISK(label_, path_, gate_, verdict_)                                                                 \
+    PeCompatEntry                                                                                                      \
+    {                                                                                                                  \
+        label_, nullptr, 0, PeCompatGate::gate_, verdict_, path_                                                       \
     }
 
 constexpr PeCompatEntry kPeCompatBattery[] = {
@@ -2288,6 +2305,15 @@ constexpr PeCompatEntry kPeCompatBattery[] = {
     //                tests/host/test_pe_resources.cpp. Cheap enough for
     //                the emulator gate (one small image, no window).
     PE_COMPAT("ring3-rsrc-pe", kBinRsrcPeBytes, Always, true),
+    // Side-by-side DLL loading. SXSTEST.EXE imports SxsAnswer/SxsDouble
+    // from SXSLIB.DLL; both are staged on the FAT32 volume root by
+    // tools/qemu/run.sh and NEITHER is embedded in the kernel. A PASS
+    // therefore means the loader found a DLL shipped beside the .exe,
+    // read it off the volume, ran it past the security guard, mapped it
+    // and bound the import — none of which the embedded preload set
+    // could have supplied. Skipped (not failed) when the fixture is not
+    // on the volume, so a bare-metal disk without it stays quiet.
+    PE_COMPAT_DISK("ring3-sxs", "SXSTEST.EXE", Always, true),
     // Surface-coverage zoo — bare metal only. Each Win32-imports PE
     // pays a ~38-DLL preload + entry-point run; 130+ of them under
     // TCG would overflow any sane CI wall budget. Each prints its
@@ -2466,6 +2492,11 @@ enum class PeCompatState : u8
     Pass,         // "[label] PASS" observed
     FailReported, // "[label] FAIL ..." observed
     FailSilent,   // spawn failed, or died / timed out without a verdict
+    // A disk-sourced row whose loader task is still waiting for storage
+    // to enumerate. Distinct from Awaiting because there is no pid yet
+    // — the watchdog's "process dead => verdict will never come" rule
+    // would otherwise fail the row instantly against pid 0.
+    Pending,
 };
 
 volatile u8 g_pe_compat_state[kPeCompatBatteryCount];
@@ -2513,6 +2544,7 @@ void PeCompatEmitSummary()
             ++passed;
             break;
         case PeCompatState::Awaiting: // watchdog flips these before emitting
+        case PeCompatState::Pending:  // ditto — a loader task that never resolved
         case PeCompatState::FailReported:
         case PeCompatState::FailSilent:
             ++failed;
@@ -2547,6 +2579,97 @@ void PeCompatEmitSummary()
     }
 }
 
+/// Deferred loader for the disk-sourced battery rows. Storage
+/// enumerates asynchronously — long after `StartRing3SmokeTask` walks
+/// the table on the boot thread — so the read cannot happen inline
+/// without blocking boot on a device that may never appear.
+///
+/// Polls for the volume + the file, then spawns with the image's
+/// ON-DISK ORIGIN so its side-by-side DLLs resolve. A file that never
+/// shows up leaves the row Skipped: a disk without the fixture staged
+/// is a legitimate configuration, not a regression.
+void PeCompatDiskTask(void* arg)
+{
+    namespace fat = ::duetos::fs::fat32;
+    const u32 index = static_cast<u32>(reinterpret_cast<u64>(arg));
+    if (index >= kPeCompatBatteryCount)
+    {
+        sched::SchedExit();
+        return;
+    }
+    const PeCompatEntry& entry = kPeCompatBattery[index];
+
+    constexpr u32 kMaxTries = 200; // ~20 s at 100 ms
+    const fat::Volume* found_vol = nullptr;
+    u32 found_index = 0;
+    fat::DirEntry found_entry{};
+    for (u32 tries = 0; tries < kMaxTries && found_vol == nullptr; ++tries)
+    {
+        const u32 volumes = fat::Fat32VolumeCount();
+        for (u32 vi = 0; vi < volumes; ++vi)
+        {
+            const fat::Volume* v = fat::Fat32Volume(vi);
+            if (v == nullptr)
+                continue;
+            if (fat::Fat32LookupPath(v, entry.fat_path, &found_entry))
+            {
+                found_vol = v;
+                found_index = vi;
+                break;
+            }
+        }
+        if (found_vol == nullptr)
+        {
+            sched::SchedSleepTicks(10); // ~100 ms; yields so storage can come online
+        }
+    }
+    if (found_vol == nullptr || found_entry.size_bytes == 0)
+    {
+        arch::SerialWrite("[pe-compat-smoke] disk fixture absent name=");
+        arch::SerialWrite(entry.label);
+        arch::SerialWrite(" (row skipped)\n");
+        g_pe_compat_state[index] = static_cast<u8>(PeCompatState::Skipped);
+        sched::SchedExit();
+        return;
+    }
+
+    // Cap the read the same way the peexec runner does: the size comes
+    // off a directory entry we do not control.
+    constexpr u64 kMaxBytes = 8u << 20;
+    if (found_entry.size_bytes > kMaxBytes)
+    {
+        g_pe_compat_state[index] = static_cast<u8>(PeCompatState::FailSilent);
+        sched::SchedExit();
+        return;
+    }
+    auto* buf = static_cast<u8*>(mm::KMalloc(found_entry.size_bytes));
+    if (buf == nullptr)
+    {
+        g_pe_compat_state[index] = static_cast<u8>(PeCompatState::FailSilent);
+        sched::SchedExit();
+        return;
+    }
+    const i64 got = fat::Fat32ReadFile(found_vol, &found_entry, buf, found_entry.size_bytes);
+    if (got <= 0 || static_cast<u64>(got) < found_entry.size_bytes)
+    {
+        mm::KFree(buf);
+        g_pe_compat_state[index] = static_cast<u8>(PeCompatState::FailSilent);
+        sched::SchedExit();
+        return;
+    }
+
+    g_pe_compat_armed = true;
+    const u64 pid =
+        SpawnPeFile(entry.label, buf, static_cast<u64>(got), CapSetTrusted(), fs::RamfsTrustedRoot(),
+                    mm::kFrameBudgetTrusted, kTickBudgetTrusted, CapSetTrusted(), found_index, entry.fat_path);
+    mm::KFree(buf); // SpawnPeFile copied the image into the child's AS
+    g_pe_compat_pid[index] = pid;
+    g_pe_compat_state[index] =
+        static_cast<u8>(pid == 0 ? PeCompatState::FailSilent
+                                 : (entry.expects_verdict ? PeCompatState::Awaiting : PeCompatState::NoVerdict));
+    sched::SchedExit();
+}
+
 /// "pe-compat-report" watchdog body. A battery PE writes its verdict
 /// via SYS_WRITE BEFORE it exits, and the tap runs synchronously
 /// inside that write — so "process dead and row still Awaiting"
@@ -2563,7 +2686,16 @@ void PeCompatReportTask(void*)
         bool outstanding = false;
         for (u32 i = 0; i < kPeCompatBatteryCount; ++i)
         {
-            if (static_cast<PeCompatState>(g_pe_compat_state[i]) != PeCompatState::Awaiting)
+            const PeCompatState st = static_cast<PeCompatState>(g_pe_compat_state[i]);
+            if (st == PeCompatState::Pending)
+            {
+                // A disk-sourced row still waiting on storage. There is
+                // no pid to liveness-check; its loader task owns the
+                // transition out of this state (or the ceiling does).
+                outstanding = true;
+                continue;
+            }
+            if (st != PeCompatState::Awaiting)
             {
                 continue;
             }
@@ -2581,10 +2713,12 @@ void PeCompatReportTask(void*)
         sched::SchedSleepTicks(kPollTicks);
         waited += kPollTicks;
     }
-    // Ceiling hit with live-but-silent PEs: they count as failed.
+    // Ceiling hit with live-but-silent PEs (or a loader task that never
+    // resolved): they count as failed.
     for (u32 i = 0; i < kPeCompatBatteryCount; ++i)
     {
-        if (static_cast<PeCompatState>(g_pe_compat_state[i]) == PeCompatState::Awaiting)
+        const PeCompatState st = static_cast<PeCompatState>(g_pe_compat_state[i]);
+        if (st == PeCompatState::Awaiting || st == PeCompatState::Pending)
         {
             g_pe_compat_state[i] = static_cast<u8>(PeCompatState::FailSilent);
         }
@@ -2982,9 +3116,20 @@ void StartRing3SmokeTask()
                 gate_on = profile_none;
                 break;
             }
-            if (!gate_on || entry.len == 0)
+            if (!gate_on || (entry.fat_path == nullptr && entry.len == 0))
             {
                 g_pe_compat_state[i] = static_cast<u8>(PeCompatState::Skipped);
+                continue;
+            }
+            if (entry.fat_path != nullptr)
+            {
+                // Disk-sourced: hand it to a task that can wait for
+                // storage. Mark Pending so the watchdog keeps the
+                // summary open until that task decides.
+                battery_ran = true;
+                g_pe_compat_state[i] = static_cast<u8>(PeCompatState::Pending);
+                (void)sched::SchedCreate(PeCompatDiskTask, reinterpret_cast<void*>(static_cast<u64>(i)),
+                                         "pe-compat-disk");
                 continue;
             }
             battery_ran = true;
