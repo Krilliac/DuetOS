@@ -291,6 +291,13 @@ add_host_test(widget_group)
 add_host_test(kernel32_nls)
 target_compile_options(test_kernel32_nls PRIVATE -Wno-conversion -Wno-sign-conversion)
 
+# PE `.rsrc` resource-directory walker (userland/libs/common/pe_resources.h):
+# the three-level tree, string-table bundling, and the malformed-input
+# cases that must fail closed. Same header-only warning-gate reasoning as
+# kernel32_nls above — the synthetic-image builder is dense index math.
+add_host_test(pe_resources)
+target_compile_options(test_pe_resources PRIVATE -Wno-conversion -Wno-sign-conversion)
+
 # Browser omnibox URL-vs-search classifier (kernel/apps/browser/omnibox_classify.h).
 add_host_test(omnibox_classify)
 

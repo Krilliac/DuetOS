@@ -398,6 +398,10 @@ __declspec(dllexport) BOOL TranslateMessage(const void* msg)
     (void)msg;
     return 0;
 }
+// STUB: returns 0 (nothing translated) - LoadAccelerators never hands
+// out a table, and WM_KEYDOWN wParam is a DuetOS KeyCode rather than a
+// Win32 VK, so there is nothing to match against. See the Load* family
+// comment for the two prerequisites.
 __declspec(dllexport) BOOL TranslateAcceleratorA(HANDLE h, HANDLE accel, void* msg)
 {
     (void)h;
@@ -405,6 +409,7 @@ __declspec(dllexport) BOOL TranslateAcceleratorA(HANDLE h, HANDLE accel, void* m
     (void)msg;
     return 0;
 }
+// STUB: returns 0 - see TranslateAcceleratorA.
 __declspec(dllexport) BOOL TranslateAcceleratorW(HANDLE h, HANDLE accel, void* msg)
 {
     (void)h;
@@ -1439,25 +1444,51 @@ __declspec(dllexport) UINT GetDlgItemInt(HANDLE hDlg, int nIDDlgItem, BOOL* tran
     return 0;
 }
 
-/* --- Load* family --- */
+/* --- Load* family ---
+ *
+ * LoadStringA/W below are REAL as of the `.rsrc` parser slice. The rest
+ * of this family stays stubbed, and the reason is NOT a missing parser —
+ * it is a missing consumer for what the parser would produce. Walking
+ * RT_ACCELERATOR / RT_GROUP_ICON / RT_BITMAP today would build a
+ * decoder with no sink, which is worse than an honest NULL:
+ *
+ *   accelerators — the kernel does post WM_KEYDOWN to the active PE
+ *     window (kernel/core/boot_tasks.cpp), but wParam carries a DuetOS
+ *     KeyCode (ps2kbd.h: kKeyF1 == 0x10A, kKeyEnter == 0x0A), not a
+ *     Win32 virtual-key code (VK_F1 == 0x70, VK_RETURN == 0x0D).
+ *     RT_ACCELERATOR entries store VKs, so every FVIRTKEY accelerator
+ *     would mis-compare. The prerequisite is a KeyCode -> VK translation
+ *     on the kernel side of the message post.
+ *   icons / cursors / bitmaps — the compositor has no off-screen
+ *     surface and no icon concept; SYS_GDI_CREATE_CURSOR takes a fixed
+ *     12x20 three-level mask, not a DIB. Backlog item 12 (off-screen
+ *     surfaces) is the prerequisite.
+ *
+ * Both prerequisites are recorded in wiki/reference/Roadmap.md. */
+// STUB: returns NULL - RT_ACCELERATOR is parseable but WM_KEYDOWN
+// wParam is a DuetOS KeyCode, not a Win32 VK, so nothing could match.
 __declspec(dllexport) HANDLE LoadAcceleratorsA(HANDLE h, const char* name)
 {
     (void)h;
     (void)name;
     return (HANDLE)0;
 }
+// STUB: returns NULL - see LoadAcceleratorsA.
 __declspec(dllexport) HANDLE LoadAcceleratorsW(HANDLE h, const wchar_t16* name)
 {
     (void)h;
     (void)name;
     return (HANDLE)0;
 }
+// STUB: returns NULL - no off-screen surface for the decoded DIB to
+// live in (backlog item 12).
 __declspec(dllexport) HANDLE LoadBitmapA(HANDLE h, const char* name)
 {
     (void)h;
     (void)name;
     return (HANDLE)0;
 }
+// STUB: returns NULL - see LoadBitmapA.
 __declspec(dllexport) HANDLE LoadBitmapW(HANDLE h, const wchar_t16* name)
 {
     (void)h;
@@ -1488,18 +1519,25 @@ __declspec(dllexport) HANDLE LoadCursorW(HANDLE h, const wchar_t16* name)
         return (HANDLE)(unsigned long long)IDC_ARROW;
     return (HANDLE)(unsigned long long)id;
 }
+/* LoadIcon returns a non-NULL sentinel rather than NULL because
+ * RegisterClassEx callers routinely treat a NULL hIcon as a fatal
+ * startup error, and the class's icon is never drawn anywhere. */
+// STUB: returns a constant sentinel, not a decoded icon - the
+// compositor has no icon sink (backlog item 12).
 __declspec(dllexport) HANDLE LoadIconA(HANDLE h, const char* name)
 {
     (void)h;
     (void)name;
     return (HANDLE)1;
 }
+// STUB: returns a constant sentinel - see LoadIconA.
 __declspec(dllexport) HANDLE LoadIconW(HANDLE h, const wchar_t16* name)
 {
     (void)h;
     (void)name;
     return (HANDLE)1;
 }
+// STUB: returns NULL - see LoadBitmapA.
 __declspec(dllexport) HANDLE LoadImageA(HANDLE h, const char* name, UINT t, int w, int ht, UINT flags)
 {
     (void)h;
@@ -1510,6 +1548,7 @@ __declspec(dllexport) HANDLE LoadImageA(HANDLE h, const char* name, UINT t, int 
     (void)flags;
     return (HANDLE)0;
 }
+// STUB: returns NULL - see LoadBitmapA.
 __declspec(dllexport) HANDLE LoadImageW(HANDLE h, const wchar_t16* name, UINT t, int w, int ht, UINT flags)
 {
     (void)h;
@@ -1532,37 +1571,102 @@ __declspec(dllexport) HANDLE LoadMenuW(HANDLE h, const wchar_t16* name)
     (void)name;
     return (HANDLE)0;
 }
-/* LoadStringA/W — no PE resource (.rsrc) loader yet, so we can't return
- * the app's real string-table entry. Returning an EMPTY string (len 0)
- * is a STUB that breaks GUI apps which gate behaviour on a non-empty
- * result — e.g. winver's wWinMain loads its caption / "Version" text via
- * LoadStringW and only proceeds to ShellAboutW when the load returns >0.
- * Synthesize a short non-empty placeholder so resource-string-gated code
- * advances. GAP: not the app's real string — a .rsrc string-table loader
- * is the proper fix (Roadmap). */
-static const char kLoadStringPlaceholder[] = "DuetOS";
+/* LoadStringA/W — real RT_STRING lookup through the shared `.rsrc`
+ * walker.
+ *
+ * This used to return a fixed "DuetOS" placeholder because there was no
+ * resource parser. That was a present-but-lying export: every caller got
+ * the same six characters whatever id it asked for, so a menu, a caption
+ * and an error message all rendered identically. The walker in
+ * ../common/pe_resources.h makes the real string reachable — the whole
+ * image is already mapped by the kernel loader, so no syscall is needed
+ * beyond resolving the module base.
+ *
+ * user32.dll links with /nodefaultlib and imports nothing, so it cannot
+ * call kernel32!GetModuleHandleW; it issues SYS_DLL_BASE_BY_NAME itself,
+ * exactly as kernel32 does. */
+#include "../common/pe_resources.h"
 
-__declspec(dllexport) int LoadStringA(HANDLE h, UINT id, char* buf, int len)
+#define SYS_DLL_BASE_BY_NAME 172
+
+/* Base VA of the calling process's EXE image. An empty name is the
+ * kernel's documented request for Process::pe_image_base. */
+static const void* user32_exe_base(void)
 {
-    (void)h;
-    (void)id;
-    if (!buf || len <= 0)
+    static const char kEmpty[1] = {0};
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_DLL_BASE_BY_NAME), "D"((long long)(unsigned long long)kEmpty),
+                       "S"((long long)0)
+                     : "memory");
+    return (const void*)(unsigned long long)rv;
+}
+
+static int user32_string_view(HANDLE h, DUET_RES_VIEW* view)
+{
+    const void* base = (const void*)h;
+    if (base == (const void*)0)
+        base = user32_exe_base();
+    if (base == (const void*)0)
         return 0;
-    int i = 0;
-    for (; kLoadStringPlaceholder[i] && i < len - 1; ++i)
-        buf[i] = kLoadStringPlaceholder[i];
+    return duet_res_init(base, view);
+}
+
+/* LoadStringW. Honours the documented cchBufferMax == 0 contract: the
+ * caller gets a read-only pointer to the (unterminated) resource string
+ * written through lpBuffer, and the return value is its length. */
+__declspec(dllexport) int LoadStringW(HANDLE h, UINT id, wchar_t16* buf, int len)
+{
+    DUET_RES_VIEW view;
+    const unsigned short* chars;
+    unsigned int chars_len;
+    int i;
+
+    if (!buf || len < 0)
+        return 0;
+    if (!user32_string_view(h, &view))
+        return 0;
+    if (!duet_res_find_string(&view, id, 0, 0, &chars, &chars_len))
+        return 0;
+
+    if (len == 0)
+    {
+        /* Documented pointer-return form: lpBuffer is treated as a
+         * LPWSTR* and receives the address of the resource itself. */
+        *(const wchar_t16**)(void*)buf = (const wchar_t16*)chars;
+        return (int)chars_len;
+    }
+
+    for (i = 0; i < len - 1 && (unsigned int)i < chars_len; ++i)
+        buf[i] = (wchar_t16)chars[i];
     buf[i] = 0;
     return i;
 }
-__declspec(dllexport) int LoadStringW(HANDLE h, UINT id, wchar_t16* buf, int len)
+
+/* LoadStringA — same lookup, narrowed. The cchBufferMax == 0 pointer
+ * form is W-only on Win32 (there is no ANSI copy to point at), so a
+ * zero-length buffer returns 0 here.
+ *
+ * GAP: narrowing is Latin-1 truncation, not a codepage conversion —
+ * a code unit above 0xFF becomes '?'. Revisit when the NLS layer grows
+ * a real WideCharToMultiByte the DLLs can share. */
+__declspec(dllexport) int LoadStringA(HANDLE h, UINT id, char* buf, int len)
 {
-    (void)h;
-    (void)id;
+    DUET_RES_VIEW view;
+    const unsigned short* chars;
+    unsigned int chars_len;
+    int i;
+
     if (!buf || len <= 0)
         return 0;
-    int i = 0;
-    for (; kLoadStringPlaceholder[i] && i < len - 1; ++i)
-        buf[i] = (wchar_t16)(unsigned char)kLoadStringPlaceholder[i];
+    if (!user32_string_view(h, &view))
+        return 0;
+    if (!duet_res_find_string(&view, id, 0, 0, &chars, &chars_len))
+        return 0;
+
+    for (i = 0; i < len - 1 && (unsigned int)i < chars_len; ++i)
+        buf[i] = (chars[i] < 0x100u) ? (char)(unsigned char)chars[i] : '?';
     buf[i] = 0;
     return i;
 }

@@ -552,9 +552,16 @@ __declspec(dllexport) INT __stdcall MessageBoxW(HWND owner, const wchar_t16* tex
     return MessageBoxA(owner, flat_text, flat_caption, type);
 }
 
-/* STUB: there is no icon or cursor resource pipeline — the PE's
- * .rsrc is never parsed for them. Non-null sentinels keep the
- * caller's NULL-on-failure path from firing; nothing draws. */
+/* LoadString below is REAL — it walks the PE's own `.rsrc`. Icons and
+ * cursors stay stubbed, and the blocker is the consumer, not the
+ * parser: the compositor has no icon concept and no off-screen surface
+ * for a decoded DIB, and SYS_GDI_CREATE_CURSOR takes a fixed 12x20
+ * three-level mask rather than image bits. Backlog item 12 (off-screen
+ * surfaces) is the prerequisite; see the matching note in
+ * userland/libs/user32/user32.c. */
+/* STUB: returns a non-null sentinel, not a decoded icon/cursor. The
+ * sentinel keeps the caller's NULL-on-failure path from firing;
+ * nothing draws. */
 __declspec(dllexport) HICON __stdcall LoadIconA(HINSTANCE inst, const char* name)
 {
     (void)inst;
@@ -581,4 +588,85 @@ __declspec(dllexport) HCURSOR __stdcall LoadCursorW(HINSTANCE inst, const wchar_
     (void)inst;
     (void)name;
     return (HCURSOR)2;
+}
+
+/* ------------------------------------------------------------------
+ * String resources
+ *
+ * The i386 half of LoadString, over the shared `.rsrc` walker. See
+ * userland/libs/user32/user32.c for why user32 resolves the module
+ * base itself rather than importing kernel32!GetModuleHandleW: these
+ * DLLs link with /nodefaultlib and import nothing.
+ * ------------------------------------------------------------------ */
+
+#include "../common/pe_resources.h"
+
+#define SYS_DLL_BASE_BY_NAME 172
+
+static const void* user32_exe_base(void)
+{
+    static const char kEmpty[1] = {0};
+    const unsigned rv = (unsigned)duet_syscall2(SYS_DLL_BASE_BY_NAME, (unsigned)(unsigned long)kEmpty, 0u);
+    return (const void*)(unsigned long)rv;
+}
+
+static int user32_string_view(HINSTANCE inst, DUET_RES_VIEW* view)
+{
+    const void* base = (const void*)inst;
+    if (base == (const void*)0)
+        base = user32_exe_base();
+    if (base == (const void*)0)
+        return 0;
+    return duet_res_init(base, view);
+}
+
+/* LoadStringW. cchBufferMax == 0 is the documented pointer-return
+ * form: lpBuffer is treated as an LPWSTR* and receives the address of
+ * the (unterminated) resource string. */
+__declspec(dllexport) INT __stdcall LoadStringW(HINSTANCE inst, UINT id, wchar_t16* buf, INT len)
+{
+    DUET_RES_VIEW view;
+    const unsigned short* chars;
+    unsigned int chars_len;
+    INT i;
+
+    if (!buf || len < 0)
+        return 0;
+    if (!user32_string_view(inst, &view))
+        return 0;
+    if (!duet_res_find_string(&view, id, 0, 0, &chars, &chars_len))
+        return 0;
+
+    if (len == 0)
+    {
+        *(const wchar_t16**)(void*)buf = (const wchar_t16*)chars;
+        return (INT)chars_len;
+    }
+    for (i = 0; i < len - 1 && (unsigned int)i < chars_len; ++i)
+        buf[i] = (wchar_t16)chars[i];
+    buf[i] = 0;
+    return i;
+}
+
+/* GAP: narrowing is Latin-1 truncation, not a codepage conversion — a
+ * code unit above 0xFF becomes '?'. Revisit when the NLS layer grows a
+ * shared WideCharToMultiByte. */
+__declspec(dllexport) INT __stdcall LoadStringA(HINSTANCE inst, UINT id, char* buf, INT len)
+{
+    DUET_RES_VIEW view;
+    const unsigned short* chars;
+    unsigned int chars_len;
+    INT i;
+
+    if (!buf || len <= 0)
+        return 0;
+    if (!user32_string_view(inst, &view))
+        return 0;
+    if (!duet_res_find_string(&view, id, 0, 0, &chars, &chars_len))
+        return 0;
+
+    for (i = 0; i < len - 1 && (unsigned int)i < chars_len; ++i)
+        buf[i] = (chars[i] < 0x100u) ? (char)(unsigned char)chars[i] : '?';
+    buf[i] = 0;
+    return i;
 }

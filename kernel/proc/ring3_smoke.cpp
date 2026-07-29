@@ -77,6 +77,7 @@
 #include "generated_pe32_miss_pe.h"
 #include "generated_pe32_rich_pe.h"
 #include "generated_pe32_window_pe.h"
+#include "generated_rsrc_pe_pe.h"
 #include "generated_shell32_32_dll.h"
 #include "generated_shlwapi_32_dll.h"
 #include "generated_user32_32_dll.h"
@@ -2280,6 +2281,13 @@ constexpr PeCompatEntry kPeCompatBattery[] = {
     PE_COMPAT("ring3-pe32-rich", kBinPe32RichBytes, Always, true),
     PE_COMPAT("ring3-pe32-miss", kBinPe32MissBytes, Always, false),
     PE_COMPAT("ring3-pe32-window", kBinPe32WindowBytes, Always, true),
+    //   rsrc_pe    — the .rsrc rung: reads strings and binary resources
+    //                out of its own windres-built resource section, so
+    //                the walker is proven against real toolchain output
+    //                and not only against the synthetic blobs in
+    //                tests/host/test_pe_resources.cpp. Cheap enough for
+    //                the emulator gate (one small image, no window).
+    PE_COMPAT("ring3-rsrc-pe", kBinRsrcPeBytes, Always, true),
     // Surface-coverage zoo — bare metal only. Each Win32-imports PE
     // pays a ~38-DLL preload + entry-point run; 130+ of them under
     // TCG would overflow any sane CI wall budget. Each prints its

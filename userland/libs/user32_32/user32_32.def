@@ -33,6 +33,8 @@ EXPORTS
     LoadIconW
     LoadCursorA
     LoadCursorW
+    LoadStringA
+    LoadStringW
     GetDC
     ReleaseDC
     GetClientRect

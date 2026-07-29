@@ -1,0 +1,49 @@
+/*
+ * userland/apps/rsrc_pe/rsrc_pe.rc — the resource script compiled into
+ * the rsrc_pe.exe battery fixture by windres.
+ *
+ * The point of this file is that NOTHING in DuetOS produces it. windres
+ * lays out the three-level .rsrc tree, the string bundling and the
+ * IMAGE_RESOURCE_DATA_ENTRYs the way a real Windows toolchain does, so
+ * the fixture proves the walker against a genuine resource section
+ * rather than against bytes DuetOS wrote for itself.
+ *
+ * String ids are chosen to land in three different 16-string bundles
+ * and at telling slots within them:
+ *
+ *   id 1     -> bundle 1, slot  1   (an off-by-one in (id/16)+1 misses)
+ *   id 15    -> bundle 1, slot 15   (last slot of its bundle)
+ *   id 16    -> bundle 2, slot  0   (first slot of the NEXT bundle)
+ *   id 4242  -> bundle 266, slot 2  (a far-out id, so the bundle
+ *                                    lookup is a real tree search)
+ *
+ * Every string is distinct so a wrong index shows up as the wrong text,
+ * not as a near miss.
+ */
+
+#define IDS_FIRST 1
+#define IDS_LAST_IN_BUNDLE 15
+#define IDS_NEXT_BUNDLE 16
+#define IDS_FAR 4242
+
+STRINGTABLE
+BEGIN
+    IDS_FIRST           "duetos-string-one"
+    IDS_LAST_IN_BUNDLE  "bundle1-slot15"
+    IDS_NEXT_BUNDLE     "bundle2-slot0"
+    IDS_FAR             "far-bundle-4242"
+END
+
+/* A named RT_RCDATA resource, so FindResourceW exercises the named
+ * (high-bit) entry path and the IMAGE_RESOURCE_DIR_STRING_U decode
+ * rather than only integer ordinals. */
+DUETPAYLOAD RCDATA
+BEGIN
+    "DUETOS-RCDATA-OK\0"
+END
+
+/* An integer-id RT_RCDATA, so the same walk is proven for ordinals. */
+101 RCDATA
+BEGIN
+    "DUETOS-ID101\0"
+END

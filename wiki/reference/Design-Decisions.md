@@ -13290,3 +13290,47 @@ markers for its richest input. Three discovery layers were added (runtime
 - **Rules out:** zero-sentinels, and "valid" flags that coexist with
   populated-but-meaningless fields. The self-tests assert both
   directions.
+
+### DD - the PE resource walker is userland-only, with no syscall
+
+- **Context:** `LoadStringW` was the highest-demand missing i386 import
+  (282 of 3121 32-bit SysWOW64 PEs; 82 counting `.exe` only) and needed
+  a `.rsrc` parser. The intuitive shape is a kernel service: the kernel
+  owns the image, so ask it for the resource.
+- **Decision:** the walker (`userland/libs/common/pe_resources.h`) is a
+  freestanding userland header. No syscall was added. `MapHeaders`
+  already maps `SizeOfHeaders` at `ImageBase` and `MapSection` maps
+  every section, so a DLL holding an `HMODULE` reaches the tree with
+  pointer arithmetic on pages the guest already owns.
+- **Rules out:** (a) a `SYS_RESOURCE_*` family - it would add kernel
+  attack surface for reading memory the guest can already read, and put
+  an attacker-controlled tree walk inside the kernel; (b) widening
+  `pe_unwind_bounds.h`'s `DUET_PE_VIEW` to serve both - that view is
+  PE32+ only and requires a well-formed `.pdata`, which i386
+  resource-only images lack, so widening it would weaken the unwinder's
+  preconditions to serve an unrelated caller.
+- **Also rules out:** sharing the Win32 translation layer between the
+  two bitnesses. Calling convention, pointer width and the
+  `IS_INTRESOURCE` high-half test all differ; only the walker is shared.
+- **Evidence:** `tests/host/test_pe_resources.cpp` (including two
+  negative controls on the bounds gates) plus the `ring3-rsrc-pe`
+  battery row, which reads a real `windres`-built `.rsrc` from ring 3.
+
+### DD - `.rsrc` consumers ship only when they have a sink
+
+- **Context:** with the parser in hand, `LoadIcon` / `LoadCursor` /
+  `LoadBitmap` / `LoadImage` and `LoadAccelerators` /
+  `TranslateAccelerator` are all "just" more resource types.
+- **Decision:** none of them were implemented. Each stub carries a
+  `// STUB:` marker naming its specific prerequisite instead.
+- **Rules out:** decoding `RT_GROUP_ICON` -> `RT_ICON` DIBs now and
+  returning a handle. The compositor has no icon concept and no
+  off-screen surface, and `SYS_GDI_CREATE_CURSOR` takes a fixed 12x20
+  three-level mask, not image bits - the decoder would have no sink,
+  which is the "built but not wired in" antipattern.
+- **Rules out:** parsing `RT_ACCELERATOR` now. `WM_KEYDOWN`'s `wParam`
+  carries a DuetOS `KeyCode` (`kKeyF1 == 0x10A`), not a Win32 VK
+  (`VK_F1 == 0x70`), so every `FVIRTKEY` entry would mis-compare. The
+  prerequisite is a KeyCode -> VK translation on the kernel side of the
+  message post - recorded as its own backlog item, because it is a
+  defect in the `WM_KEYDOWN` contract independent of accelerators.
