@@ -48,6 +48,13 @@ namespace duetos::drivers::input
 /// data port of any leftover bytes, then unmask. Safe to call once.
 void Ps2KeyboardInit();
 
+/// Re-run the full controller bring-up after an ACPI S3 resume. The
+/// platform reset powered the 8042 down and IoApicInit rebuilt the
+/// redirection table masked, so both the device dialogue and the IRQ
+/// route have to be re-established. Panics if called before the
+/// matching Init — resume is a re-entry, not an alternative entry.
+void Ps2KeyboardResume();
+
 /// Block the calling task until at least one scan-code byte is
 /// available, then return it. If the buffer has multiple queued bytes
 /// the oldest is returned; the next call returns the next. Never
