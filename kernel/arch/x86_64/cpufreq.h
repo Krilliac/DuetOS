@@ -55,14 +55,14 @@ namespace duetos::arch
 
 struct CpuFreqReading
 {
-    bool valid;        // at least one real figure was obtained
-    bool is_intel;     // which vendor decode was used
-    u32 bclk_mhz;      // reference clock (100; 0 on the AMD path)
-    bool current_valid; // `current_mhz` carries a live operating point
-    u32 current_mhz;   // current operating point
-    bool ratios_valid; // static base/min figures present
-    u32 base_mhz;      // base (guaranteed) frequency
-    u32 min_mhz;       // max-efficiency (lowest) frequency
+    bool valid;          // at least one real figure was obtained
+    bool is_intel;       // which vendor decode was used
+    u32 bclk_mhz;        // reference clock (100; 0 on the AMD path)
+    bool current_valid;  // `current_mhz` carries a live operating point
+    u32 current_mhz;     // current operating point
+    bool ratios_valid;   // static base/min figures present
+    u32 base_mhz;        // base (guaranteed) frequency
+    u32 min_mhz;         // max-efficiency (lowest) frequency
     bool counters_valid; // APERF/MPERF are readable on this machine
 };
 

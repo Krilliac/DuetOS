@@ -53,14 +53,14 @@ enum class ThermalSource : u8
 
 struct ThermalReading
 {
-    bool valid;            // true iff a real reading was obtained
-    ThermalSource source;  // which path answered
-    bool core_valid;       // per-core figure present
-    bool package_valid;    // package figure present (Intel only)
-    bool tj_max_valid;     // `tj_max_c` carries a real junction limit
-    u8 tj_max_c;           // junction-max temp (C) — Intel only
-    u8 core_temp_c;        // current core temperature (AMD: Tctl)
-    u8 package_temp_c;     // package temperature
+    bool valid;           // true iff a real reading was obtained
+    ThermalSource source; // which path answered
+    bool core_valid;      // per-core figure present
+    bool package_valid;   // package figure present (Intel only)
+    bool tj_max_valid;    // `tj_max_c` carries a real junction limit
+    u8 tj_max_c;          // junction-max temp (C) — Intel only
+    u8 core_temp_c;       // current core temperature (AMD: Tctl)
+    u8 package_temp_c;    // package temperature
     bool thermal_throttle_hit;
 };
 

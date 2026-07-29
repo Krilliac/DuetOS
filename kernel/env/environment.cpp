@@ -159,9 +159,9 @@ bool SameObservable(const SystemEnvironment& a, const SystemEnvironment& b)
            a.cpu_hybrid == b.cpu_hybrid && a.ram_bytes == b.ram_bytes && a.numa == b.numa &&
            a.numa_nodes == b.numa_nodes && a.form_factor == b.form_factor && a.ac == b.ac &&
            a.battery_state == b.battery_state && a.battery_percent == b.battery_percent &&
-           a.lid_present == b.lid_present && a.lid_open == b.lid_open &&
-           a.cpu_temp_valid == b.cpu_temp_valid && a.cpu_temp_c == b.cpu_temp_c &&
-           a.pkg_temp_c == b.pkg_temp_c && a.thermal_throttle == b.thermal_throttle && a.power_policy == b.power_policy;
+           a.lid_present == b.lid_present && a.lid_open == b.lid_open && a.cpu_temp_valid == b.cpu_temp_valid &&
+           a.cpu_temp_c == b.cpu_temp_c && a.pkg_temp_c == b.pkg_temp_c && a.thermal_throttle == b.thermal_throttle &&
+           a.power_policy == b.power_policy;
 }
 
 void EmitBanner(const SystemEnvironment& e)
