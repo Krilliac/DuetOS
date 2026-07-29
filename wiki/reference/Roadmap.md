@@ -1159,12 +1159,9 @@ detail lives in [`Compositor`](../subsystems/Compositor.md).
 All 21 planned tasks landed, plus 5 settings sub-panel migrations.
 `chrome-text-selftest` PASSes every boot.
 
-**Residual: proportional metrics for list CONTENT.** The Aurora work
-(2026-07-28) took chrome type to the design's sizes, but Files and Task
-Manager still lay out and hit-test columns in 8 px cells, so their rows
-are fixed-pitch. Moving to measured proportional widths is a refactor of
-the column model, not a font change - it is the dominant remaining
-visual gap against the Aurora reference.
+**Residual: none known.** Proportional metrics for list CONTENT landed
+2026-07-29 (`app_widgets/app_text.{h,cpp}` plus the Files / Task Manager
+column-model refactor); `[app-text-selftest]` PASSes every boot.
 
 ### App widgets (Pass D) - residual
 
@@ -1175,10 +1172,15 @@ The widget library landed (`app_button`, `app_label`, `app_panel`,
 Aurora (2026-07-28) added `app_palette` on top, so interiors now theme
 from one owner.
 
-**Residuals:** ABI pills / per-row ABI dots (neither Files nor Task
-Manager records ABI per row - the data does not exist yet); Files has no
-quick-access rail; Task Manager Performance has no resource rail or
-per-core tiles. See [`AppWidgets`](../subsystems/AppWidgets.md).
+**Residuals:** the Task Manager Performance resource rail is wired and
+boot-clean but has never been photographed - the demo-windows profile
+opens Task Manager on the Processes tab and the headless QMP harness
+could not drive a tab switch, so its per-core tiles are compile- and
+boot-verified only. ABI pills, per-row dots and the Files quick-access
+rail landed 2026-07-29. Files shows an ABI badge only where the image
+bytes are already resident (ramfs); FAT32 rows deliberately show none
+rather than inherit the launch path's extension guess. See
+[`AppWidgets`](../subsystems/AppWidgets.md).
 
 ### RBAC + elevation broker — v1 follow-ups
 

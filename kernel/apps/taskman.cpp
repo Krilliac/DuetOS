@@ -8,6 +8,7 @@
 #include "drivers/video/app_widgets/app_button.h"
 #include "drivers/video/app_widgets/app_label.h"
 #include "drivers/video/app_widgets/app_palette.h"
+#include "diag/telemetry.h"
 #include "drivers/video/app_widgets/app_text.h"
 #include "drivers/video/app_widgets/app_toolbar.h"
 #include "drivers/video/app_widgets/widget_group.h"
@@ -1348,6 +1349,86 @@ void DrawSparkline(duetos::u32 x, duetos::u32 y, duetos::u32 w, duetos::u32 h, d
     }
 }
 
+// ---------------------------------------------------------------
+// Performance-tab resource rail (Aurora only).
+//
+// One tile per logical CPU plus the aggregate, from the telemetry
+// surface. The window is caller-owned by contract — this is the Task
+// Manager's own, so a shell `top` polling at a different cadence
+// cannot consume our delta and leave both readings wrong. The first
+// sample against a fresh window reports valid == false; the rail then
+// prints the core rows with no figure rather than a fabricated 0 %.
+// ---------------------------------------------------------------
+constexpr duetos::u32 kPerfRailW = 118;
+constexpr duetos::u32 kPerfTileH = 26;
+
+// This app's own rolling window. Zero-initialised once and kept —
+// never re-zeroed per paint, or every sample would be the "first"
+// one and the rail would never show a number.
+constinit duetos::diag::TelemetryCpuWindow g_cpu_window{};
+
+void DrawPerfRail(duetos::u32 x, duetos::u32 y, duetos::u32 w, duetos::u32 h,
+                  const duetos::drivers::video::app_widgets::AppPalette& p)
+{
+    using duetos::drivers::video::ChromeTextRole;
+    using duetos::drivers::video::FramebufferFillRect;
+    using duetos::drivers::video::app_widgets::AppTextCell;
+    using duetos::drivers::video::app_widgets::AppTextCellRight;
+
+    FramebufferFillRect(x, y, w, h, p.recess);
+    FramebufferFillRect(x + w - 1, y, 1, h, p.line);
+
+    const duetos::diag::TelemetryCpuUsage usage = duetos::diag::TelemetryCpuUsageSample(g_cpu_window);
+
+    duetos::u32 row_y = y;
+    auto tile = [&](const char* label, bool has_value, duetos::u8 pct, bool accent)
+    {
+        if (row_y + kPerfTileH > y + h)
+            return;
+        // A busy meter behind the label: the tile's own fill scaled to
+        // the reading, which is what makes the rail readable at a
+        // glance without four more sparklines.
+        if (has_value && pct > 0)
+        {
+            const duetos::u32 bar_w = (w - 2U) * pct / 100U;
+            FramebufferFillRect(x + 1, row_y + kPerfTileH - 4, bar_w, 2, accent ? p.accent : p.ink_3);
+        }
+        AppTextCell(ChromeTextRole::Caption, x + 8, row_y, kPerfTileH - 6, label, p.ink_2, p.recess);
+        if (has_value)
+        {
+            char num[8];
+            duetos::u32 n = 0;
+            if (pct >= 100)
+                num[n++] = '1';
+            if (pct >= 10)
+                num[n++] = static_cast<char>('0' + (pct / 10) % 10);
+            num[n++] = static_cast<char>('0' + pct % 10);
+            num[n++] = '%';
+            num[n] = '\0';
+            AppTextCellRight(ChromeTextRole::Caption, x + w - 8, x, row_y, kPerfTileH - 6, num,
+                             accent ? p.accent : p.ink_2, p.recess);
+        }
+        row_y += kPerfTileH;
+    };
+
+    tile("CPU", usage.valid, usage.aggregate_busy_pct, true);
+    for (duetos::u32 i = 0; i < usage.core_count && i < duetos::diag::kTelemetryMaxCpus; ++i)
+    {
+        char label[12];
+        label[0] = 'C';
+        label[1] = 'o';
+        label[2] = 'r';
+        label[3] = 'e';
+        label[4] = ' ';
+        duetos::u32 n = 5;
+        if (i >= 10)
+            label[n++] = static_cast<char>('0' + i / 10);
+        label[n++] = static_cast<char>('0' + i % 10);
+        label[n] = '\0';
+        tile(label, usage.valid && usage.core_valid[i], usage.core_busy_pct[i], false);
+    }
+}
+
 void DrawPerformance(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, duetos::u32 fg, duetos::u32 fg_cpu,
                      duetos::u32 fg_mem, duetos::u32 grid, duetos::u32 frame, duetos::u32 fill, duetos::u32 bg)
 {
@@ -1361,6 +1442,21 @@ void DrawPerformance(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32
     FramebufferFillRect(cx, list_y, cw, list_h, list_bg);
     if (list_h < 60)
         return;
+
+    // Aurora: the reference puts a resource rail down the left of the
+    // Performance view, one tile per CPU core. The per-core numbers
+    // come from the telemetry surface, whose window is CALLER-owned —
+    // g_cpu_window below is this app's, so the shell's `top` polling
+    // at a different cadence can't eat our delta. The first sample
+    // against a fresh window is `valid == false` by contract; the rail
+    // shows the core rows with no number until a second sample lands
+    // rather than printing a fabricated 0 %.
+    const duetos::u32 rail_w = (p.aurora && cw >= 340) ? kPerfRailW : 0U;
+    if (rail_w != 0)
+        DrawPerfRail(cx, list_y, rail_w, list_h, p);
+    // Everything below paints into the slice right of the rail.
+    const duetos::u32 gx = cx + rail_w;
+    const duetos::u32 gw = cw - rail_w;
 
     // Two equal-height graph stacks with a 12-px label band each.
     const duetos::u32 stack_h = list_h / 2;
@@ -1434,8 +1530,8 @@ void DrawPerformance(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32
     append(peak_buf);
     append("  (60 s)");
     line[o] = '\0';
-    FramebufferDrawString(cx + kColPad, list_y + 2, line, p.aurora ? p.ink_2 : fg_cpu, list_bg);
-    DrawSparkline(cx + kColPad, list_y + lbl_h, cw - 2 * kColPad, graph_h, fg_cpu, grid, frame, fill, true);
+    FramebufferDrawString(gx + kColPad, list_y + 2, line, p.aurora ? p.ink_2 : fg_cpu, list_bg);
+    DrawSparkline(gx + kColPad, list_y + lbl_h, gw - 2 * kColPad, graph_h, fg_cpu, grid, frame, fill, true);
 
     // MEM header.
     o = 0;
@@ -1458,8 +1554,8 @@ void DrawPerformance(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32
     append(num_total);
     append(" MIB");
     line[o] = '\0';
-    FramebufferDrawString(cx + kColPad, list_y + stack_h + 2, line, p.aurora ? p.ink_2 : fg_mem, list_bg);
-    DrawSparkline(cx + kColPad, list_y + stack_h + lbl_h, cw - 2 * kColPad, graph_h, fg_mem, grid, frame, fill, false);
+    FramebufferDrawString(gx + kColPad, list_y + stack_h + 2, line, p.aurora ? p.ink_2 : fg_mem, list_bg);
+    DrawSparkline(gx + kColPad, list_y + stack_h + lbl_h, gw - 2 * kColPad, graph_h, fg_mem, grid, frame, fill, false);
 
     // Below the graphs (inside the footer band — the actual
     // footer is `OPENS / GRAPH / TASKS` below this) we draw
@@ -1484,7 +1580,7 @@ void DrawPerformance(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32
     append(buf15);
     line[o] = '\0';
     if (ch >= kFooterH + 12)
-        FramebufferDrawString(cx + kColPad, cy + ch - kFooterH - 12, line, p.aurora ? p.ink_3 : fg, list_bg);
+        FramebufferDrawString(gx + kColPad, cy + ch - kFooterH - 12, line, p.aurora ? p.ink_3 : fg, list_bg);
 }
 
 void DrawFn(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, void* /*cookie*/)

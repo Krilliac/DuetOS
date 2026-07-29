@@ -122,6 +122,45 @@ u32 RowH()
 }
 
 // ---------------------------------------------------------------
+// Quick-access rail (Aurora only).
+//
+// The reference puts the view switcher down the left edge as a
+// places rail rather than across the top as a button row. Rather
+// than growing a *second* set of RAM/DISK/TRASH/DRIVE affordances —
+// two controls for one action is exactly the duplication the
+// anti-bloat rules forbid — the four mode buttons that already live
+// in the toolbar are simply rebound into the rail under Aurora.
+// Same widgets, same on_click, same hit-test; only their bounds move.
+// REFRESH / SORT stay in the toolbar, which is where the reference
+// keeps its non-navigation actions too.
+//
+// `RailW` is the single accessor. DrawFn subtracts it from the list
+// slice and FilesRowAt adds it to the list's left bound, so the rail
+// can never eat a click the list thinks it owns.
+// ---------------------------------------------------------------
+constexpr u32 kRailW = 108;
+constexpr u32 kRailRowH = 20;
+constexpr u32 kRailRowGap = 2;
+constexpr u32 kRailCapH = 15; // section caption band
+constexpr u32 kRailPad = 8;
+
+u32 RailW(u32 content_w)
+{
+    // Below ~300 px of client the rail would leave the list unusable,
+    // so it folds away and the buttons go back to the toolbar.
+    if (!Pal().aurora || content_w < 300)
+        return 0;
+    return kRailW;
+}
+
+// Y offset of the i-th quick-access row inside the rail, relative to
+// the rail's top. Read by both the button rebind and the rail paint.
+u32 RailRowY(u32 i)
+{
+    return kRailCapH + i * (kRailRowH + kRailRowGap);
+}
+
+// ---------------------------------------------------------------
 // Column model for the list views. One table, read by the header
 // painter and by the row painter, so a column can't move for the
 // labels without moving for the values.
@@ -364,6 +403,10 @@ constexpr u32 kFooterPadX = 4U;
 
 // Number of toolbar buttons (RAM/DISK/TRASH/DRIVE/REFRESH/SORT).
 constexpr u32 kHdrBtnCount = 6U;
+// The first four toolbar slots are the view switcher (RAM / DISK /
+// TRASH / DRIVE); slots 4-5 are REFRESH / SORT. Only the switcher
+// migrates into the Aurora quick-access rail.
+constexpr u32 kFilesModeBtnCount = 4U;
 
 // Index of the REFRESH button — used by the self-test to target a
 // known mid-toolbar slot. The mode buttons (0..3 RAM/DISK/TRASH/
@@ -454,6 +497,15 @@ void ApplyFilesPalette()
         // not filled chips — the accent is reserved for selection.
         btn->bg_rgb = p.aurora ? p.recess : 0U; // 0 = theme role_title[0]
         btn->fg_rgb = p.aurora ? p.ink_2 : 0x00101828U;
+        // The four view-switcher slots double as the quick-access
+        // rail's rows, so the active view is marked the way the
+        // reference marks it: accent-tinted fill, accent ink. Button
+        // order matches the Mode enum (RAM/DISK/TRASH/DRIVE).
+        if (p.aurora && i < kFilesModeBtnCount && i == static_cast<u32>(g_state.mode))
+        {
+            btn->bg_rgb = p.sel;
+            btn->fg_rgb = p.accent;
+        }
     }
 
     auto& label = g_files.chain.tail.tail.tail.tail.tail.tail.tail.head;
@@ -493,9 +545,25 @@ void RebindFilesBounds(u32 cx, u32 cy, u32 cw, u32 ch)
     auto& toolbar = g_files.chain.head;
     toolbar.bounds = Rect{cx, cy, cw, kHdrToolbarH};
 
+    // Under Aurora the four mode buttons move into the quick-access
+    // rail; REFRESH / SORT stay in the toolbar and close up the gap
+    // they left. Without a rail every button keeps its historical
+    // toolbar slot, so the flat palettes are untouched.
+    const u32 rail = RailW(cw);
     for (u32 i = 0; i < kHdrBtnCount; ++i)
     {
-        HdrButton(i)->bounds = Rect{cx + kHdrPadX + i * (kHdrBtnW + kHdrBtnGap), cy + kHdrPadY, kHdrBtnW, kHdrBtnH};
+        const bool is_mode_btn = i < kFilesModeBtnCount;
+        if (rail != 0 && is_mode_btn)
+        {
+            const u32 ry = cy + kHdrToolbarH + RailRowY(i);
+            HdrButton(i)->bounds = Rect{cx + kRailPad / 2, ry, rail - kRailPad, kRailRowH};
+            // Rail rows read as list items, so their labels sit left.
+            HdrButton(i)->align_left = true;
+            continue;
+        }
+        const u32 slot = (rail != 0) ? i - kFilesModeBtnCount : i;
+        HdrButton(i)->align_left = false;
+        HdrButton(i)->bounds = Rect{cx + kHdrPadX + slot * (kHdrBtnW + kHdrBtnGap), cy + kHdrPadY, kHdrBtnW, kHdrBtnH};
     }
 
     auto& label = g_files.chain.tail.tail.tail.tail.tail.tail.tail.head;
@@ -1609,6 +1677,71 @@ void RefreshFooterText()
         g_footer_text[sizeof(g_footer_text) - 1] = '\0';
 }
 
+// Paint the quick-access rail's ground, its section captions and the
+// DEVICES list. The four navigation rows themselves are the toolbar's
+// own AppButtons, rebound into the rail by RebindFilesBounds and
+// painted by g_files.PaintAll — this only paints what sits around
+// them.
+//
+// DEVICES reports what is actually mounted: the FAT32 volume's own
+// BPB label + size when one is mounted, and the ramfs. Nothing is
+// listed that the kernel cannot name.
+void DrawSideRail(u32 x, u32 y, u32 w, u32 h, const duetos::drivers::video::app_widgets::AppPalette& p)
+{
+    using duetos::drivers::video::ChromeTextRole;
+    using duetos::drivers::video::FramebufferFillRect;
+    using duetos::drivers::video::app_widgets::AppTextCell;
+    if (w == 0 || h == 0)
+        return;
+
+    FramebufferFillRect(x, y, w, h, p.recess);
+    FramebufferFillRect(x + w - 1, y, 1, h, p.line);
+
+    AppTextCell(ChromeTextRole::Caption, x + kRailPad, y, kRailCapH, "QUICK ACCESS", p.ink_3, p.recess);
+
+    const u32 dev_y = y + RailRowY(kFilesModeBtnCount) + 6;
+    if (dev_y + kRailCapH >= y + h)
+        return;
+    AppTextCell(ChromeTextRole::Caption, x + kRailPad, dev_y, kRailCapH, "DEVICES", p.ink_3, p.recess);
+
+    u32 row_y = dev_y + kRailCapH;
+    auto put_device = [&](const char* text)
+    {
+        if (row_y + kRailCapH >= y + h)
+            return;
+        AppTextCell(ChromeTextRole::Caption, x + kRailPad, row_y, kRailCapH, text, p.ink_2, p.recess);
+        row_y += kRailCapH;
+    };
+
+    const auto* vol = duetos::fs::fat32::Fat32Volume(0);
+    if (vol != nullptr)
+    {
+        // "<LABEL> NNN MiB" from the volume's own BPB — never a
+        // placeholder. A volume with a blank BS_VolLab prints just
+        // the size.
+        char line[32];
+        u32 o = 0;
+        for (u32 i = 0; i < sizeof(vol->volume_label) && vol->volume_label[i] != '\0' && o + 1 < sizeof(line); ++i)
+        {
+            if (vol->volume_label[i] != ' ')
+                line[o++] = vol->volume_label[i];
+        }
+        if (o + 1 < sizeof(line))
+            line[o++] = ' ';
+        char num[16];
+        const u64 mib = (static_cast<u64>(vol->total_sectors) * vol->bytes_per_sector) / (1024ull * 1024ull);
+        WriteU64Dec(num, sizeof(num), mib);
+        for (u32 i = 0; num[i] != '\0' && o + 1 < sizeof(line); ++i)
+            line[o++] = num[i];
+        const char* unit = " MiB";
+        for (u32 i = 0; unit[i] != '\0' && o + 1 < sizeof(line); ++i)
+            line[o++] = unit[i];
+        line[o] = '\0';
+        put_device(line);
+    }
+    put_device("ramfs");
+}
+
 void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
 {
     using duetos::drivers::video::FramebufferFillRect;
@@ -1634,23 +1767,34 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
             FramebufferFillRect(cx, cy + ch - kFooterH, cw, kFooterH, 0x00C8C8B8U);
         }
     }
-    Compose compose_ctx{};
-    g_files.PaintAll(compose_ctx);
-    // Per-mode list paint into the middle slice. Mode-specific
-    // draw functions still own their own background fill +
-    // header-line + row rendering — chrome separation only.
+    // The rail's ground goes down before PaintAll so the mode buttons
+    // (which live in the rail under Aurora) land on it rather than on
+    // whatever the compositor left behind.
     const u32 my = cy + kHdrToolbarH;
     const u32 mh = (ch > kHdrToolbarH + kFooterH) ? ch - kHdrToolbarH - kFooterH : 0U;
+    const u32 rail = RailW(cw);
+    if (mh != 0 && rail != 0)
+        DrawSideRail(cx, my, rail, mh, p);
+
+    Compose compose_ctx{};
+    g_files.PaintAll(compose_ctx);
+    // Per-mode list paint into the middle slice, right of the rail.
+    // Mode-specific draw functions still own their own background
+    // fill + header-line + row rendering — chrome separation only.
     if (mh == 0)
         return;
+    const u32 lx = cx + rail;
+    const u32 lw = (cw > rail) ? cw - rail : 0U;
+    if (lw == 0)
+        return;
     if (g_state.mode == Mode::Fat32)
-        DrawFat32(cx, my, cw, mh);
+        DrawFat32(lx, my, lw, mh);
     else if (g_state.mode == Mode::Trash)
-        DrawTrash(cx, my, cw, mh);
+        DrawTrash(lx, my, lw, mh);
     else if (g_state.mode == Mode::DuetFs)
-        DrawDuetFs(cx, my, cw, mh);
+        DrawDuetFs(lx, my, lw, mh);
     else
-        DrawRamfs(cx, my, cw, mh);
+        DrawRamfs(lx, my, lw, mh);
 }
 
 // Spawn a PE / ELF directly from a ramfs node's embedded bytes.
@@ -3026,7 +3170,11 @@ duetos::i32 FilesRowAt(duetos::u32 sx, duetos::u32 sy)
         return -1;
     const duetos::u32 content_y = content_y_full + k_hdr_toolbar_h;
     const duetos::u32 content_h = content_h_full - k_hdr_toolbar_h - k_footer_h;
-    if (sx < content_x || sx >= content_x + content_w)
+    // The list starts right of the quick-access rail. Same RailW()
+    // the paint used, so a click in the rail can never be read as a
+    // click on row 0 of the list.
+    const duetos::u32 list_x = content_x + RailW(content_w);
+    if (sx < list_x || sx >= content_x + content_w)
         return -1;
     // The hit-test derives its row pitch from RowH() — the SAME
     // accessor every Draw* path uses. That is what keeps the click
