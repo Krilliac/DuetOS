@@ -3334,8 +3334,13 @@ implementations:
     exception is ever raised — but a guest's `try/except` blocks do
     not run. Needs a kernel-side 32-bit exception dispatcher first.
   - `kernel32_32::RaiseException` terminates the process carrying
-    the exception code (same as the x86_64 `kOffRaiseException`
-    thunk) because there is nothing to dispatch to.
+    the exception code because there is nothing to dispatch to. The
+    x86_64 sibling no longer does this — it builds a real
+    `EXCEPTION_RECORD` and enters ntdll's two-pass engine — but that
+    engine is x64-shaped (an x64 `CONTEXT`, `.pdata` unwind tables,
+    an x64 resume entry point). i386 SEH uses the `fs:[0]`
+    registration chain instead, so none of it is reusable and the
+    32-bit path stays blocked on its own dispatcher.
   - `kernel32_32::LoadResource` returns NULL — no PE
     resource-directory walker on the i386 path.
 

@@ -526,7 +526,8 @@ static long __attribute__((ms_abi)) cxx_frame_handler(CXX_EXCEPTION_RECORD* rec,
              *                  If this equals cb->handler, image_base
              *                  was 0 and the call would fault at a
              *                  bare RVA in .rdata (the reported 0x23d8). */
-            if (s_cxxeh_dbg_armed)
+            const int dbg_this_dispatch = s_cxxeh_dbg_armed;
+            if (dbg_this_dispatch)
             {
                 s_cxxeh_dbg_armed = 0;
                 char buf[80];
@@ -564,13 +565,18 @@ static long __attribute__((ms_abi)) cxx_frame_handler(CXX_EXCEPTION_RECORD* rec,
 
             void* cont = cxx_call_funclet(funclet, frame);
 
-            if (!s_cxxeh_dbg_armed)
+            if (dbg_this_dispatch)
             {
-                /* Re-armed-to-zero state. Print the post-funclet
-                 * continuation. If the funclet faulted (jumped to
+                /* Closes the one-shot block above: the post-funclet
+                 * continuation. If the funclet faulted (jumped to a
                  * bare RVA), we never reach this line — the absence
                  * of `[cxxeh-dbg] co=` in the log AFTER the `fu=`
-                 * line confirms `call *funclet` was the fault site. */
+                 * line confirms `call *funclet` was the fault site.
+                 *
+                 * Keyed off the SAME dispatch, not off "the flag has
+                 * been cleared at some point", which fired on every
+                 * catch in the process forever and buried the one
+                 * line that carries meaning under N that don't. */
                 char buf[80];
                 buf[0] = 'c';
                 buf[1] = 'o';
