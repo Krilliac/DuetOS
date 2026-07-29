@@ -78,6 +78,14 @@ struct Rule
     PortRange dst_port;
     Action action;
     u64 hits;
+    /// True for rules an operator installed as an *exception* — via
+    /// `firewall except`, or a `fw-allow=` boot token. Only these
+    /// are written to the exception store; rules a subsystem
+    /// installs for itself (the AMT/IPMI blocks in
+    /// `security/me_psp_guard.cpp`, say) are re-derived every boot
+    /// and must not be persisted, or removing the subsystem would
+    /// leave its rules behind forever.
+    bool exception;
 };
 
 /// Reset the rule table and default policies to v0 boot
@@ -233,8 +241,52 @@ u32 ConntrackSnapshot(ConntrackEntry* out, u32 cap);
 /// and the `firewall reset` shell command.
 void ConntrackReset();
 
+// -------------------------------------------------------------
+// Operator exceptions.
+//
+// The image guard prompts synchronously because an image load can
+// afford to block. A packet cannot: `FwEvaluate` runs on the
+// receive path, and blocking it for a ten-second modal would turn
+// any port scan into a system-wide stall. So the firewall's
+// "prompt" is asynchronous — a denial raises a notification toast
+// naming what was blocked, and the operator converts that denial
+// into a standing allow afterwards. Same three ways in as the
+// guard, same cap gate, same loud logging; only the timing of the
+// question differs. See `wiki/security/Security-Exceptions.md`.
+//
+//   1. `firewall except <seq>` promotes a logged denial.
+//   2. `firewall except add <spec>` takes a textual spec.
+//   3. `fw-allow=<spec>[,<spec>...]` on the boot cmdline.
+//
+// Spec grammar lives in `net/fw_exception.h`.
+// -------------------------------------------------------------
+
+/// Promote the denial with the given 1-based `sequence` (as shown
+/// by `FwLogSnapshot` / `firewall log`) into a standing allow rule
+/// matching that exact 5-tuple. Returns false if the sequence has
+/// already been overwritten in the ring, or the rule table is full.
+/// On success `*out_index` receives the new rule's slot.
+bool FwExceptionFromDenial(u64 sequence, u32* out_index);
+
+/// Install an exception from a textual spec (see fw_exception.h).
+/// Returns false on a malformed spec or a full rule table.
+bool FwExceptionAdd(const char* spec, u32 len, u32* out_index);
+
+/// Parse `fw-allow=` tokens out of `cmdline` and install them.
+/// Called from `FwInit`. A nullptr cmdline installs nothing.
+/// Logs loudly when anything is seeded — an operator reading the
+/// boot log must be able to see that exceptions were in force.
+void FwSeedExceptionsFromCmdline(const char* cmdline);
+
+/// How many active rules are operator exceptions, and how many of
+/// those came from the boot cmdline.
+u32 FwExceptionCount();
+u32 FwCmdlineSeededCount();
+
 /// Boot-time self-test. Exercises add / match / miss / default
-/// / hit-counter / mask matching. Logs PASS/FAIL through
+/// / hit-counter / mask matching, and both directions of the
+/// exception path (an excepted tuple passes, a neighbouring
+/// non-excepted one is still denied). Logs PASS/FAIL through
 /// klog so a regression surfaces in the boot log.
 void FwSelfTest();
 

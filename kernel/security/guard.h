@@ -8,8 +8,10 @@
  * Every loadable image — native ELF, Windows PE, kernel thread,
  * user thread — passes through `Gate()` before it gets to run.
  * The guard applies a small, explicit set of heuristics, produces
- * a Verdict, and (in Enforce mode) prompts the user to allow/deny
- * if the result is Warn or Deny.
+ * a Verdict, and (in Enforce mode) prompts the user to allow once,
+ * allow always (adding a persistent exception), or deny if the
+ * result is Warn or Deny. Images matching an existing exception
+ * skip the heuristics entirely.
  *
  * Not a signature-verification / code-signing subsystem yet —
  * the hash denylist is a hook for the future "known-bad SHA-256"
@@ -130,22 +132,60 @@ const Report* GuardLastReport();
 /// have to construct an ImageDescriptor.
 bool GateThread(ImageKind kind, const char* name);
 
-/// Load the persistent allow-list from tmpfs (one hex SHA-256
-/// digest per line, 64 chars). Called from GuardInit. Safe if
-/// the file is absent — missing file means an empty allowlist.
-/// Lines that don't parse as 64 hex chars are skipped, so an
-/// allow-list left over from the previous FNV-1a layout is
-/// quietly retired on first boot.
+// -------------------------------------------------------------
+// Operator exceptions.
+//
+// An exception is scoped to the SHA-256 digest of the image, never
+// to its path — see `security/exception_id.h` for why, and
+// `wiki/security/Security-Exceptions.md` for the operator-facing
+// story. Three ways in, all of them explicit:
+//
+//   1. Answer `a` ("always") at an Enforce-mode prompt.
+//   2. `guard except add <sha256>` from the kernel shell (root /
+//      kCapSecurity — a guest PE has no route to either).
+//   3. `guard-allow=<sha256>[,<sha256>...]` on the boot cmdline,
+//      for unattended boots and CI. Repeatable. NOT a blanket
+//      allow: unknown images still hit the full heuristic path,
+//      and an unmatched Warn image is still denied on timeout.
+//
+// Storage is RamVol (`/run/guard-allowed`), which survives for the
+// life of the boot but NOT across a reboot: DuetOS writes to disk
+// only on a DuetOS-owned partition, and none exists until the
+// installer has run. Until then the boot cmdline is the durable
+// channel. See the store comment in guard.cpp.
+// -------------------------------------------------------------
+
+/// Load the stored exception list (one 64-char hex SHA-256 digest
+/// per line). Called from GuardInit. Safe if the file is absent —
+/// that just means no exceptions. Lines that are not exactly a
+/// 64-char digest are skipped rather than partially parsed.
 void GuardLoadAllowlist();
 
-/// Append a hash (SHA-256, 32 raw bytes) to the persistent
-/// allowlist. Called by the prompter when the user answers "yes"
-/// so the same image is pre-allowed on the next boot.
+/// Add a digest (SHA-256, 32 raw bytes) to the exception list and
+/// store it. Called when the operator answers "always" at a prompt
+/// and by the shell's `guard except add`. Idempotent.
 void GuardRememberAllow(const u8 hash[32]);
 
+/// Parse `guard-allow=` tokens out of `cmdline` and install them.
+/// Called from GuardInit with the cached boot cmdline. A nullptr
+/// cmdline installs nothing. Logs loudly when anything is seeded.
+void GuardSeedExceptionsFromCmdline(const char* cmdline);
+
+/// Exception-list accessors for the shell `guard except` surface.
+/// `GuardCmdlineSeededCount` is how many of them came from the boot
+/// cmdline — non-zero means this boot ran pre-authorised.
+u32 GuardExceptionCount();
+u32 GuardCmdlineSeededCount();
+bool GuardExceptionGet(u32 index, u8 out[32]);
+
+/// Drop the exception at `index` and rewrite the store. Returns
+/// false if the index is out of range.
+bool GuardForgetException(u32 index);
+
 /// Boot-time init: zero counters, seed the allow/deny tables,
-/// load the persistent allowlist from tmpfs, drop into Advisory
-/// mode. Safe to call twice; second call is a no-op with a Warn log.
+/// load the stored exception list, apply `guard-allow=` cmdline
+/// seeds, drop into Advisory mode. Safe to call twice; second call
+/// is a no-op with a Warn log.
 void GuardInit();
 
 /// Boot-time self-test: synthesise a few fake images (clean ELF,

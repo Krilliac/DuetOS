@@ -218,6 +218,16 @@ add_host_test(telemetry_cpu)
 # AMD SMN aperture nor the Zen P-state MSRs), so the decode half is
 # pinned here against synthetic register values instead.
 add_host_test(cpu_sensor_math)
+# Security-exception identity + boot-token parsing: freestanding header
+# (kernel/security/exception_id.h), no kernel TU. This decides WHICH
+# image an operator vouched for, so the lenient-direction failures
+# (short digest accepted, key prefix mis-matched) are the ones worth
+# pinning here rather than by booting.
+add_host_test(exception_id)
+# Firewall exception spec grammar: freestanding header
+# (kernel/net/fw_exception.h), no kernel TU. Fail-closed parser — the
+# rejection cases are the load-bearing half.
+add_host_test(fw_exception)
 add_host_test(damage_rect)
 # Banded damage / forced-invalidation fold: freestanding constexpr state
 # on DamageBandSet in kernel/drivers/video/framebuffer.h — no kernel TU.

@@ -21,6 +21,7 @@
 #include "security/cap_audit.h"
 #include "security/event_ring.h"
 #include "security/grace.h"
+#include "security/exception_id.h"
 #include "security/guard.h"
 #include "security/policy.h"
 #include "security/purple_team.h"
@@ -391,6 +392,91 @@ void CmdIdleLock(u32 argc, char** argv)
     ConsoleWriteln("IDLELOCK: usage: idlelock <show|set <seconds>|off>");
 }
 
+// `guard except` — the operator-facing exception surface.
+//
+//   guard except              list current exceptions
+//   guard except add <sha256> pre-approve an image by digest
+//   guard except del <index>  revoke one
+//
+// Listing is unprivileged (an allowlist is configuration, not a
+// secret, and an operator being able to SEE what is excepted is
+// what makes the mechanism auditable). Mutation is capability-
+// gated: adding an exception is exactly "let this image past the
+// image-load gate", so it carries the same cap as flipping the
+// guard mode. A guest PE has no route to either — the shell is a
+// kernel-side console, and every mutating branch below re-checks
+// the cap rather than trusting the caller's earlier check.
+void CmdGuardExcept(u32 argc, char** argv)
+{
+    namespace sec = duetos::security;
+
+    if (argc < 3 || StrEq(argv[2], "list"))
+    {
+        ConsoleWrite("GUARD EXCEPTIONS: ");
+        WriteU64Dec(sec::GuardExceptionCount());
+        ConsoleWrite(" (");
+        WriteU64Dec(sec::GuardCmdlineSeededCount());
+        ConsoleWriteln(" from boot cmdline)");
+        for (u32 i = 0; i < sec::GuardExceptionCount(); ++i)
+        {
+            u8 h[32];
+            if (!sec::GuardExceptionGet(i, h))
+                continue;
+            char hex[sec::kImageDigestHexChars + 1];
+            sec::FormatHexDigest(h, hex);
+            hex[sec::kImageDigestHexChars] = '\0';
+            ConsoleWrite("  [");
+            WriteU64Dec(i);
+            ConsoleWrite("] ");
+            ConsoleWriteln(hex);
+        }
+        ConsoleWriteln("USAGE: GUARD EXCEPT [LIST | ADD <sha256> | DEL <index>]");
+        return;
+    }
+
+    if (StrEq(argv[2], "add"))
+    {
+        if (!RequireCap(duetos::core::kCapDebug, "GUARD EXCEPT ADD"))
+            return;
+        if (argc < 4)
+        {
+            ConsoleWriteln("USAGE: GUARD EXCEPT ADD <64-hex-sha256>");
+            return;
+        }
+        u8 h[32];
+        const u32 len = static_cast<u32>(duetos::core::StrLen(argv[3]));
+        if (!sec::ParseHexDigest(argv[3], len, h))
+        {
+            ConsoleWriteln("GUARD EXCEPT: NOT A 64-CHAR SHA-256 DIGEST");
+            return;
+        }
+        sec::GuardRememberAllow(h);
+        ConsoleWriteln("GUARD EXCEPT: ADDED");
+        return;
+    }
+
+    if (StrEq(argv[2], "del"))
+    {
+        if (!RequireCap(duetos::core::kCapDebug, "GUARD EXCEPT DEL"))
+            return;
+        if (argc < 4)
+        {
+            ConsoleWriteln("USAGE: GUARD EXCEPT DEL <index>");
+            return;
+        }
+        u64 idx = 0;
+        if (!ParseU64Str(argv[3], &idx) || !sec::GuardForgetException(static_cast<u32>(idx)))
+        {
+            ConsoleWriteln("GUARD EXCEPT: NO SUCH INDEX");
+            return;
+        }
+        ConsoleWriteln("GUARD EXCEPT: REMOVED");
+        return;
+    }
+
+    ConsoleWriteln("USAGE: GUARD EXCEPT [LIST | ADD <sha256> | DEL <index>]");
+}
+
 void CmdGuard(u32 argc, char** argv)
 {
     // Show / control the security guard.
@@ -423,7 +509,19 @@ void CmdGuard(u32 argc, char** argv)
             WriteU64Hex(last->finding_count, 0);
             ConsoleWriteln("");
         }
-        ConsoleWriteln("USAGE: GUARD [ON|ADVISORY|ENFORCE|OFF|TEST]");
+        ConsoleWrite("EXCEPT : ");
+        WriteU64Dec(sec::GuardExceptionCount());
+        if (sec::GuardCmdlineSeededCount() > 0)
+        {
+            // A boot that ran pre-authorised must say so on the
+            // status line, not only in the boot log an operator may
+            // never scroll back to.
+            ConsoleWrite(" (");
+            WriteU64Dec(sec::GuardCmdlineSeededCount());
+            ConsoleWrite(" SEEDED FROM BOOT CMDLINE)");
+        }
+        ConsoleWriteln("");
+        ConsoleWriteln("USAGE: GUARD [ON|ADVISORY|ENFORCE|OFF|TEST|EXCEPT]");
         return;
     }
     // Mutating subcommands change the kernel's security posture
@@ -463,6 +561,11 @@ void CmdGuard(u32 argc, char** argv)
             return;
         sec::GuardSelfTest();
         ConsoleWriteln("(self-test output on COM1)");
+        return;
+    }
+    if (StrEq(argv[1], "except"))
+    {
+        CmdGuardExcept(argc, argv);
         return;
     }
     ConsoleWriteln("GUARD: UNKNOWN SUBCOMMAND");

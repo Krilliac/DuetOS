@@ -29,7 +29,7 @@ constexpr IrRunbookEntry kEntries[] = {
         {
             "Run `secevents 50` to see the cluster of events around this trip.",
             "Run `imagelog pid=<actor>` to identify the binary (path, hash, signer).",
-            "Cross-check `guard show` for the image's load-time verdict.",
+            "Cross-check `guard` for the image's load-time verdict.",
             "If image was recently installed, treat as untrusted until reviewed.",
             nullptr,
             nullptr,
@@ -44,7 +44,7 @@ constexpr IrRunbookEntry kEntries[] = {
         {
             "Run `secevents kind=PersistenceDrop` to see all related drops.",
             "Inspect the path; if not from a legitimate installer, the writer is suspect.",
-            "Check `guard show` for any recent Warn verdicts on the writer.",
+            "Check `guard` for any recent Warn verdicts on the writer.",
             "Switch persistence to Deny if Advisory and the trips repeat.",
             nullptr,
             nullptr,
@@ -293,8 +293,8 @@ constexpr IrRunbookEntry kEntries[] = {
         "ImageRejected — loader denied an image at load",
         "Guard's static analysis flagged the image as Deny. The image did not run.",
         {
-            "Check `guard show` for the rejection reason.",
-            "If false-positive, hash the image and use `guard remember-allow`.",
+            "Check `guard` for the rejection reason.",
+            "If false-positive, add an exception: `guard except add <sha256>`.",
             nullptr,
             nullptr,
             nullptr,
@@ -308,7 +308,7 @@ constexpr IrRunbookEntry kEntries[] = {
         "Image had suspicious static-analysis findings but was not denied (Advisory mode "
         "or Warn verdict in Enforce). It is running, monitor for downstream trips.",
         {
-            "Check `guard show` for the finding details.",
+            "Check `guard` for the finding details.",
             "Watch for canary / persistence trips by this image's pid.",
             nullptr,
             nullptr,
