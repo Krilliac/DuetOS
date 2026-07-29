@@ -1622,11 +1622,51 @@ live battery rows: `ring3-stackgrow-smoke` walks 512 KiB and passes;
 
 `BattleBit.exe` gets measurably further — through `FlsAlloc`,
 `InitializeCriticalSectionEx` and `LCMapStringEx` in the CRT — and then
-stops on `api-ms-win-appmodel-runtime-l1-1-2`, an API-set contract DLL
-we do not ship, after which its CRT calls `ExitProcess(0)`. The blocker
-moved again, from the process model to the apiset surface, and it moved
-somewhere quieter: the process now exits with status 0 instead of
-crashing.
+exits with status 0. The blocker moved again, and it moved somewhere
+quieter: the process now exits cleanly instead of crashing. (Where it
+moved *to* was misread at the time — see the correction below.)
+
+### 2026-07-29 — a miss you cannot name is worth less than no miss
+
+The previous entry recorded `BattleBit.exe` as stopping on
+`api-ms-win-appmodel-runtime-l1-1-2`, an API-set contract we do not
+ship. That was wrong, and the reason it was wrong is instructive.
+
+The other half of the same symptom was a line the loader could not
+explain: `[win32-miss] slot=0x1436b192b called fn="<unmapped>"`. That
+address is outside the image and not even 8-byte aligned, so it was
+never a real IAT slot. The miss-logger trampoline decoded its caller's
+call site in hand-assembled bytes, recognised exactly one instruction
+shape, and validated it with a single byte compare — one byte of
+entropy on a diagnostic whose entire job is to be trustworthy. It was
+reporting a confident guess.
+
+The decode now lives in the kernel, where it can read the call site
+through the checked user-copy path, recognise both shapes MSVC emits
+for an IAT-bound call (`FF 15 disp32`, and `E8 rel32` into a
+`[48] FF 25` jump thunk — in both the 6- and 7-byte thunk widths, the
+wide one being what real MSVC output uses), validate every step
+including pointer alignment, and say *why* a decode failed instead of
+inventing an address. The same boot now reads:
+
+```
+[win32-miss] fn="UnityMain" slot=0x140edb210 called-from=0x140ed11f2 in-module=0x140ed0000
+```
+
+which is verifiable against `objdump`: BattleBit's one import thunk
+sits at `.text+0` as `48 ff 25 09 a2 00 00`, targeting `0x14000b210`.
+
+With the miss named, the real chain fell out immediately. The image
+guard flags `UnityPlayer.dll` for importing injection-family APIs,
+prompts for allow/deny, and default-denies when an unattended boot does
+not answer. `UnityMain` therefore binds to the catch-all no-op,
+`main` calls it, gets 0, and returns 0. The api-set probe happens
+*after* that decision — it is the UCRT's exit path asking whether it is
+a packaged app — and answering NULL is the correct Windows behaviour,
+not a shortfall.
+
+The blocker was never the loader. It was a security prompt with nobody
+to answer it, hidden behind a diagnostic that guessed.
 
 ## How to read the rest of the tree
 

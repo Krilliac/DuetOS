@@ -1027,32 +1027,66 @@ node list:
    but it removes the "the app must ask us to embed it" pressure that
    made this item urgent.
 
-### BattleBit's next blocker: missing api-ms-win-* apisets (observed 2026-07-29)
+### BattleBit's next blocker: the guard default-denies UnityPlayer.dll
 
-With demand-grown ring-3 stacks landed, `BattleBit.exe` + its 26 MiB
-`UnityPlayer.dll` no longer stops on the stack. It now binds all 66
-imports, enters ring 3, and runs MSVC CRT startup measurably further —
-`InitializeCriticalSectionEx`, two `FlsAlloc` slots, `FlsGetValue` /
-`FlsSetValue`, `LCMapStringEx` — and then stops on two things in the
-same breath:
+**This item replaces an earlier one that named the api-set surface as
+the blocker. That diagnosis was wrong, and the thing that made it wrong
+is now fixed — see the correction below before acting on it.**
 
-- `[win32-miss] slot=0x1436b192b called fn="<unmapped>"` — an IAT slot
-  the miss-decoder cannot even name, i.e. an import bound to a thunk
-  page with no backing stub. The decoder needs to resolve the slot back
-  to its `(dll, function)` pair before this is actionable.
-- `[dll-load] miss path="/lib/api-ms-win-appmodel-runtime-l1-1-2"` —
-  the CRT reaches for an API-set contract DLL we do not ship. The
-  static apiset table (`kernel/loader/apiset_static.cpp`) covers the
-  contracts we have hosts for; `appmodel-runtime` is not one of them.
+`BattleBit.exe` exits with status **0** and no fault. Grading a run of
+it by "did anything crash" scores this as a success. It is not one.
 
-The CRT then calls `ExitProcess(0)` — so the process exits *cleanly*
-with status 0 rather than crashing, which makes this failure quieter
-than the stack one it replaced. Note the exit status is 0 and not an
-error: a run-exe report that only greps for faults will call this a
-success.
+What actually happens, read off a live boot
+(`tools/test/run-exe.sh`, `DUETOS_IMAGE_MB=48`,
+`DUETOS_STAGE_EXTRA=UNITYPLA.DLL=<path>`):
 
-Next step is to decide whether `appmodel-runtime` gets a real host or a
-refusing stub, and to make the win32-miss decoder name unmapped slots.
+```
+[guard] WARN kind=pe name="/UNITYPLA.DLL" findings=0x1
+[guard]   - PE_SUSPICIOUS: 2+ injection-family APIs
+[guard]  Allow [y] / Deny [n] — 10s default-deny. >
+[guard] prompt timeout: default-deny
+[sxs] security guard blocked path="/UNITYPLA.DLL"
+[pe-resolve] unknown import -> catch-all NO-OP fn="UnityMain"
+[win32-miss] fn="UnityMain" slot=0x140edb210 called-from=0x140ed11f2 in-module=0x140ed0000
+[dll-load] api-set contract has no host (returning NULL, as Windows does) name="api-ms-win-appmodel-runtime-l1-1-2"
+[sys] exit rc val=0x0
+```
+
+The chain is: the image guard flags a 26 MiB game engine for importing
+two or more injection-family APIs (which every game engine does), opens
+an **interactive** allow/deny prompt, and in an unattended boot nobody
+answers, so it default-denies. `UnityPlayer.dll` therefore never loads,
+`UnityMain` binds to the catch-all no-op, `BattleBit.exe`'s `main`
+calls it, gets 0 back, and returns 0. `exit(0)` is the honest
+consequence of a `main` that returned 0.
+
+**The api-set line is a red herring.** It happens *after* the process
+has already decided to exit: the MSVC UCRT's exit path probes
+`api-ms-win-appmodel-runtime-l1-1-2` for
+`AppPolicyGetProcessTerminationMethod`, and takes the NULL branch to
+plain `ExitProcess`. Returning NULL there is the correct Windows answer
+for a non-packaged app — it is what any Windows build predating the
+contract does. Mapping that contract onto a host DLL that does not
+export its functions would convert a correct refusal into a confusing
+"function missing from a DLL that claims to exist". Do not do it. The
+contract now says so in the log rather than reporting
+`miss path=/lib/...`, which is what made it look like a missing file.
+
+So the open work is the guard, not the loader:
+
+- An unattended PE run cannot load **any** WARN-verdict side-by-side
+  DLL, because the prompt always times out to deny. That is correct as
+  a default and must stay the default.
+- What is missing is a deliberate operator opt-in — a boot-time
+  pre-authorisation for a named image, so an automated run can consent
+  in advance instead of relying on a human at a serial console.
+  Flipping the timeout default to allow is **not** an acceptable
+  substitute; it would silently weaken the gate for every image.
+
+Until that exists, a BattleBit run measures the guard's default, not
+the loader's. Whoever picks this up should confirm with
+`grep -n "sxs. security guard blocked" <log>` before drawing any
+conclusion about import coverage.
 
 ### Win32 CreateThread stacks are still fixed-size
 

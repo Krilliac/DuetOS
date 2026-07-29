@@ -13693,3 +13693,72 @@ markers for its richest input. Three discovery layers were added (runtime
   `mm.user_stack_guard_hit`, delivers `0xC00000FD`, and the process
   exits with that status. No task-kill, no panic.
 
+### DD - an unresolved-import miss is decoded in the kernel, and never guessed
+
+The miss-logger trampoline that catches a call to an unresolved import
+used to decode the caller's call site itself, in hand-assembled bytes
+inside the R-X Win32 stubs page. It recognised one instruction shape —
+`E8 rel32` into a 6-byte `FF 25` import thunk — and gated the whole
+decode on a single byte compare (`[ret-5] == 0xE8`).
+
+That is not enough entropy to be trusted. A call site using the other
+shape MSVC emits (`FF 15 disp32`, a direct indirect call through the
+IAT) lands on a displacement byte that reads 0xE8 roughly once in 256,
+and the decoder then "succeeded" and printed a slot address that was
+outside the image and not pointer-aligned. A real `BattleBit.exe` boot
+did exactly this and reported `slot=0x1436b192b fn="<unmapped>"` for an
+import (`UnityPlayer.dll!UnityMain`) the loader had staged correctly all
+along. The wrong answer sent a subsequent investigation to the api-set
+surface, which had nothing to do with it.
+
+The decode now lives in `SYS_WIN32_MISS_LOG`; the trampoline passes only
+its own return address. This rules out three alternatives a later slice
+could otherwise pick:
+
+- **Extending the in-page decoder to more shapes.** Rejected. Growing
+  hand-assembled bytes inside a fixed-offset stub page means shifting
+  every later stub offset, and the decoder still could not read a
+  faulting page safely or explain a failure. The kernel side gets
+  `mm::CopyFromUser` and arbitrary control flow for free.
+- **Keeping a best-effort guess when validation fails.** Rejected. A
+  miss you cannot name costs one investigation; a miss named wrongly
+  costs an investigation plus whatever the wrong name implicates. The
+  handler now reports an explicit `undecoded="<reason>"` and no
+  address. Shapes genuinely unrecoverable from a return address alone —
+  a tail `jmp` through the IAT, `call rax` — are reported as such
+  rather than approximated.
+- **Trusting opcodes without a structural check.** Rejected. A decoded
+  slot that is not 8-byte aligned is not an IAT slot whatever the
+  opcodes said, and is discarded.
+
+Both thunk widths are recognised (`48 FF 25 rel32`, 7 bytes, and
+`FF 25 rel32`, 6). The wide REX.W form is what real MSVC output uses;
+supporting only the narrow one was why the first attempt at this fix
+still could not name `UnityMain`.
+
+### DD - an api-set contract with no host returns NULL, not a fabricated mapping
+
+`kernel/loader/apiset_static.cpp` maps `api-ms-win-*` / `ext-ms-win-*`
+contract names onto the host DLL that really exports their functions.
+Contracts absent from that table resolve to nothing, and
+`SYS_DLL_LOAD_FROM_PATH` returns 0.
+
+That is the correct answer, not a gap to be closed by widening the
+table. A caller probing a contract with `LoadLibrary` +
+`GetProcAddress` is required to handle NULL — that is how one binary
+runs on a Windows build predating the contract. `BattleBit.exe`
+exercises this: the MSVC UCRT's exit path probes
+`api-ms-win-appmodel-runtime-l1-1-2` for
+`AppPolicyGetProcessTerminationMethod`, takes the NULL branch, and calls
+plain `ExitProcess` — the documented non-packaged-app path.
+
+So a contract joins the table only when we ship a host that actually
+exports its functions. Mapping a contract onto a host that does not
+would trade a clean, correct refusal for a confusing "function missing
+from a DLL that claims to exist", and would move the failure from a load
+the caller expects to handle to a call it does not.
+
+The log line distinguishes the two cases, because reporting
+`miss path="/lib/api-ms-win-..."` made a correct refusal look like a
+missing file and invited exactly the wrong fix.
+
