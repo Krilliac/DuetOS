@@ -169,17 +169,33 @@ enum SyscallNumber : u64
     // ucrt realloc, msvcrt realloc.
     SYS_HEAP_REALLOC = 15,
 
-    // SYS_WIN32_MISS_LOG: rdi = VA of the IAT slot that was just
-    // called (produced by the miss-logger trampoline in the
-    // Win32 stubs page, which reads its own `call [rip+disp32]`
-    // return address to compute the slot). No arguments beyond
-    // that; no meaningful return value (the trampoline zeroes
-    // rax itself). The handler looks up the IAT slot VA in
-    // `CurrentProcess()->win32_iat_misses` and emits a
-    // `[win32-miss] called <fn>` line so the boot log tells us,
-    // in real time, exactly which unstubbed import the PE just
-    // reached. Unprivileged — the trampoline is our own code
-    // and the lookup reads only this process's own table.
+    // SYS_WIN32_MISS_LOG: rdi = the miss-logger trampoline's own
+    // RETURN ADDRESS (the byte just past the call that reached
+    // it). No arguments beyond that; no meaningful return value
+    // (the trampoline zeroes rax itself).
+    //
+    // The handler decodes that return address back to the IAT
+    // slot VA — recognising both `FF 15 disp32`
+    // (call qword [rip+disp32]) and `E8 rel32` into an
+    // `FF 25` import thunk — looks the slot up in
+    // `CurrentProcess()->win32_iat_misses`, and emits a
+    // `[win32-miss] fn=... slot=... called-from=... in-module=...`
+    // line so the boot log tells us, in real time, exactly which
+    // unstubbed import the PE just reached and from where.
+    //
+    // rdi used to carry the already-decoded slot VA, with the
+    // decode done in the trampoline's hand-assembled bytes. That
+    // version knew only the `E8` shape and validated it with a
+    // single byte compare, so a release-built DLL using the `FF 15`
+    // shape produced a confidently wrong address roughly once every
+    // 256 imports. Decoding here keeps the arithmetic next to the
+    // checked user-copy path and lets a shape we cannot read be
+    // reported as unread rather than guessed at.
+    //
+    // Unprivileged — the trampoline is our own code, the decode
+    // reads only this process's own mappings through
+    // `mm::CopyFromUser`, and the lookup reads only this process's
+    // own table.
     SYS_WIN32_MISS_LOG = 16,
 
     // SYS_GETTIME_FT: returns the current wall-clock time as a

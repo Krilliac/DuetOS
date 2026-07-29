@@ -1272,7 +1272,7 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 13 | `SYS_PERF_COUNTER` | — | the kernel tick counter from arch::TimerTicks() — a monotonically increasing ... |
 | 14 | `SYS_HEAP_SIZE` | `rdi` = user pointer previously returned by SYS_HEAP_ALLOC | the block's payload capacity in bytes (the rounded-up allocation size recorde... |
 | 15 | `SYS_HEAP_REALLOC` | `rdi` = existing user pointer (may be 0 to request a fresh alloca...; `rsi` = new requested size in bytes | the new user VA (possibly equal to rdi if the existing block already fit) or ... |
-| 16 | `SYS_WIN32_MISS_LOG` | `rdi` = VA of the IAT slot that was just called (produced by the ... | address to compute the slot) |
+| 16 | `SYS_WIN32_MISS_LOG` | `rdi` = the miss-logger trampoline's own RETURN ADDRESS (the byte... | ADDRESS (the byte just past the call that reached it) |
 | 17 | `SYS_GETTIME_FT` | — | the current wall-clock time as a Windows FILETIME — a u64 count of 100-nanose... |
 | 18 | `SYS_NOW_NS` | — | nanoseconds since boot in rax |
 | 19 | `SYS_SLEEP_MS` | `rdi` = milliseconds to block | 0 on wake |

@@ -168,6 +168,70 @@ with `// STUB:` or `// GAP:`. See
 [Logging and Tracing](../kernel/Logging-And-Tracing.md) for the
 convention.
 
+## Naming an Unresolved Import at Call Time
+
+An import the loader cannot resolve is bound to the shared miss-logger
+thunk in the Win32 stubs page: called as a function it returns 0, and
+emits one line naming what was called and from where.
+
+```
+[win32-miss] fn="UnityMain" slot=0x140edb210 called-from=0x140ed11f2 in-module=0x140ed0000
+```
+
+The thunk itself does nothing but pass its own return address to
+`SYS_WIN32_MISS_LOG`. **The decode from that return address back to an
+IAT slot lives in the kernel**, not in the stub page's hand-assembled
+bytes, so it can read the call site through `mm::CopyFromUser`, validate
+each step, and report a failure instead of guessing. Recognised shapes:
+
+| Call site (ends at return address) | IAT slot |
+|---|---|
+| `[48] FF 15 disp32` — `call qword [rip+disp32]` | `ret + disp32` |
+| `E8 rel32` — `call rel32` into a jump thunk | decode the thunk (below) |
+
+| Import thunk | IAT slot |
+|---|---|
+| `48 FF 25 rel32` (7 bytes — what real MSVC output uses) | `thunk + 7 + rel32` |
+| `FF 25 rel32` (6 bytes) | `thunk + 6 + rel32` |
+
+A decoded slot must be 8-byte aligned or it is discarded — an
+unaligned result is not an IAT slot whatever the opcodes said.
+
+When no shape matches, the line carries `undecoded="<reason>"` and
+**no** slot address. That is deliberate: some shapes are genuinely
+unrecoverable from a return address alone (a tail `jmp` through the
+IAT leaves the caller's caller's return address on the stack;
+`call rax` leaves no displacement to read). Reporting them as
+unrecoverable is worth more than a plausible wrong address — a wrong
+one previously sent an investigation to an unrelated subsystem. See
+Design-Decisions, "an unresolved-import miss is decoded in the kernel,
+and never guessed".
+
+A decoded slot that is absent from the process's staged-miss table is
+also called out explicitly rather than collapsing into `<unmapped>`;
+the usual cause is a slot belonging to a DLL whose imports were staged
+under a different `PeLoad`, or a staging buffer that overflowed
+(`Process::kWin32IatMissCap`, 128).
+
+## API-Set Contracts
+
+`api-ms-win-*` and `ext-ms-win-*` names are contracts, not files — no
+such DLL exists on Windows either. `kernel/loader/apiset_static.cpp`
+rewrites them to the host DLL that really exports the functions, on
+both the import-binding path and the runtime `LoadLibrary` path.
+
+A contract that is **not** in the table returns NULL, and says so:
+
+```
+[dll-load] api-set contract has no host (returning NULL, as Windows does) name="api-ms-win-appmodel-runtime-l1-1-2"
+```
+
+That is the correct answer rather than a shortfall — callers probe
+contracts precisely so they can run on Windows builds that predate
+them. A contract is added to the table only when we ship a host that
+actually exports its functions; see Design-Decisions, "an api-set
+contract with no host returns NULL, not a fabricated mapping".
+
 ## Ring-3 Stacks
 
 The main thread's ring-3 stack is a **demand-grown reservation**, laid
