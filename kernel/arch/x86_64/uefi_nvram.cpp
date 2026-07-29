@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "log/klog.h"
 #include "mm/frame_allocator.h"
 #include "mm/multiboot2.h"
 #include "mm/paging.h"
@@ -62,6 +63,26 @@ constexpr u16 kBootOrderName[] = {'B', 'o', 'o', 't', 'O', 'r', 'd', 'e', 'r', 0
 constexpr u64 kRtGetVariableIndex = 9;
 constexpr u64 kIdentityMapLimit = 0x40000000ULL; // low 1 GiB identity map (RWX)
 
+// EFI_CONFIGURATION_TABLE = { EFI_GUID (16) ; VOID* VendorTable (8) }.
+constexpr u64 kEfiConfigTableEntryBytes = 24;
+
+// Sanity cap on NumberOfTableEntries before we trust it as a mapping
+// span. Real firmware publishes a few dozen; OVMF is ~15. A corrupt or
+// mis-parsed count would otherwise ask MapMmio for gigabytes.
+constexpr u64 kMaxConfigTableEntries = 256;
+
+bool GuidEquals(const EfiGuid& a, const EfiGuid& b)
+{
+    if (a.data1 != b.data1 || a.data2 != b.data2 || a.data3 != b.data3)
+        return false;
+    for (u64 i = 0; i < 8; ++i)
+    {
+        if (a.data4[i] != b.data4[i])
+            return false;
+    }
+    return true;
+}
+
 } // namespace
 
 u64 FindEfiSystemTablePhys(const void* mb_info, u64 size)
@@ -113,6 +134,63 @@ UefiNvramReading UefiNvramRead()
     r.firmware_revision = st->firmware_revision;
     r.runtime_services_present = (st->runtime_services != 0);
     return r;
+}
+
+u64 UefiFindConfigTable(const EfiGuid& guid)
+{
+    const u64 st_phys = FindEfiSystemTablePhys(mm::MultibootInfoSnapshot(), mm::MultibootInfoSnapshotSize());
+    if (st_phys == 0)
+    {
+        // Either a legacy-BIOS boot, or this ran before
+        // FrameAllocatorInit captured the Multiboot2 snapshot.
+        KLOG_DEBUG_V("arch/uefi", "config-table: no EFI system table (snapshot bytes)",
+                     mm::MultibootInfoSnapshotSize());
+        return 0;
+    }
+
+    void* st_virt = mm::MapMmio(st_phys, sizeof(EfiSystemTable));
+    if (st_virt == nullptr)
+    {
+        KLOG_DEBUG_V("arch/uefi", "config-table: system table unmappable at phys", st_phys);
+        return 0;
+    }
+    const auto* st = static_cast<const volatile EfiSystemTable*>(st_virt);
+    if (st->hdr.signature != kEfiSystemTableSignature)
+    {
+        KLOG_DEBUG_V("arch/uefi", "config-table: bad system-table signature", st->hdr.signature);
+        return 0;
+    }
+
+    const u64 count = st->number_of_table_entries;
+    const u64 array_phys = st->configuration_table;
+    KLOG_DEBUG_V("arch/uefi", "config-table entries", count);
+    if (count == 0 || count > kMaxConfigTableEntries || array_phys == 0)
+        return 0;
+
+    // EFI_CONFIGURATION_TABLE is { EFI_GUID VendorGuid; VOID* VendorTable; }
+    // — 16 + 8 = 24 bytes per entry on x86_64.
+    const u64 span = count * kEfiConfigTableEntryBytes;
+    const auto* entries = static_cast<const u8*>(mm::MapMmio(array_phys, span));
+    if (entries == nullptr)
+        return 0;
+
+    for (u64 i = 0; i < count; ++i)
+    {
+        const u8* e = entries + (i * kEfiConfigTableEntryBytes);
+        EfiGuid candidate = {};
+        // Byte-copy rather than reinterpret_cast: the firmware array has
+        // no alignment guarantee we control, and EfiGuid is packed.
+        for (u64 b = 0; b < sizeof(EfiGuid); ++b)
+            reinterpret_cast<u8*>(&candidate)[b] = e[b];
+        if (GuidEquals(candidate, guid))
+        {
+            u64 vendor_table = 0;
+            for (u64 b = 0; b < sizeof(u64); ++b)
+                reinterpret_cast<u8*>(&vendor_table)[b] = e[sizeof(EfiGuid) + b];
+            return vendor_table;
+        }
+    }
+    return 0;
 }
 
 // Hand-written SysV->MS-x64 thunk that issues a RAW indirect call,
