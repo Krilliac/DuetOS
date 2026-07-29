@@ -226,19 +226,22 @@ struct FilesCols
 
 // Widest values each right-hand column has to hold, measured rather
 // than assumed so the layout tracks whatever face the theme loaded.
-constexpr const char* kWidestSize = "999999 BYTES";
+constexpr const char* kWidestSize = "999.9 MB";
 constexpr const char* kWidestDate = "2026-06-08";
 
 FilesCols BuildCols(u32 x, u32 w)
 {
     using duetos::drivers::video::ChromeTextRole;
     using duetos::drivers::video::app_widgets::AppPillWidth;
-    using duetos::drivers::video::app_widgets::AppRowDotWidth;
+    using duetos::drivers::video::app_widgets::AppRowIconWidth;
     using duetos::drivers::video::app_widgets::AppTextMeasure;
 
     constexpr u32 kPad = 6;
     constexpr u32 kGap = 10;
-    const u32 dot = AppRowDotWidth();
+    // The name cell leads with the row's type tile, so the tile's cell
+    // (tile + gap) comes off the name's budget here — the same width
+    // the row paint advances the name by.
+    const u32 dot = AppRowIconWidth();
     const u32 size_w = AppTextMeasure(ChromeTextRole::Body, kWidestSize);
     const u32 date_w = AppTextMeasure(ChromeTextRole::Body, kWidestDate);
     const u32 abi_w = AppPillWidth("WIN32 PE");
@@ -444,8 +447,13 @@ constexpr u32 kHdrPadY = 3U;
 constexpr u32 kFooterH = 12U;
 constexpr u32 kFooterPadX = 4U;
 
-// Number of toolbar buttons (RAM/DISK/TRASH/DRIVE/REFRESH/SORT).
-constexpr u32 kHdrBtnCount = 6U;
+// Number of buttons in the widget group: the six toolbar slots
+// (RAM/DISK/TRASH/DRIVE/REFRESH/SORT) plus the Aurora breadcrumb
+// bar's back / forward pair, which fold to zero width on the flat
+// palettes and therefore neither paint nor take a click there.
+constexpr u32 kHdrBtnCount = 8U;
+constexpr u32 kBtnNavBack = 6U;
+constexpr u32 kBtnNavForward = 7U;
 // The first four toolbar slots are the view switcher (RAM / DISK /
 // TRASH / DRIVE); slots 4-5 are REFRESH / SORT. Only the switcher
 // migrates into the Aurora quick-access rail.
@@ -485,6 +493,8 @@ void ClickModeTrash();
 void ClickModeDrive();
 void ClickRefresh();
 void ClickSort();
+void ClickNavBack();
+void ClickNavForward();
 
 using duetos::drivers::video::ChromeTextRole;
 using duetos::drivers::video::ChromeTextWeight;
@@ -503,9 +513,18 @@ using duetos::drivers::video::app_widgets::Rect;
 // declaration order is the dispatch order, so buttons get first
 // refusal on the click — exactly what we want.
 constinit auto g_files = MakeWidgetGroup(AppToolbar{}, AppButton{}, AppButton{}, AppButton{}, AppButton{}, AppButton{},
-                                         AppButton{}, AppLabel{});
+                                         AppButton{}, AppButton{}, AppButton{}, AppLabel{});
 
 constinit bool g_files_bound = false;
+
+/// The footer AppLabel sits at the tail of the chain. One accessor
+/// instead of a hand-counted `.tail` ladder repeated at four call
+/// sites — adding the two nav buttons above already made every one of
+/// those ladders wrong once.
+AppLabel& FooterLabel()
+{
+    return g_files.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
+}
 
 // Walk the recursive WidgetChain by hand to grab a stable pointer
 // to each button. The chain order matches the MakeWidgetGroup
@@ -519,9 +538,90 @@ AppButton* HdrButton(u32 i)
     auto& d = c2.tail;            // btn[2] -> btn[3]
     auto& e = d.tail;             // btn[3] -> btn[4]
     auto& f = e.tail;             // btn[4] -> btn[5]
-    AppButton* btns[kHdrBtnCount] = {&a.head, &b.head, &c2.head, &d.head, &e.head, &f.head};
+    auto& g = f.tail;             // btn[5] -> btn[6]
+    auto& h = g.tail;             // btn[6] -> btn[7]
+    AppButton* btns[kHdrBtnCount] = {&a.head, &b.head, &c2.head, &d.head, &e.head, &f.head, &g.head, &h.head};
     return btns[i];
 }
+
+// ---------------------------------------------------------------
+// Breadcrumb bar (Aurora only) — `19-files.png`.
+//
+// A band under the toolbar carrying back / forward, the current path,
+// and a search field. All four rects come out of `CrumbGeomFor`, and
+// so does the height every other layout site offsets past. Two of the
+// four are clickable, so the accessor is read by the button bind (the
+// hit-test) and by the paint — same contract `ListGeomFor` holds for
+// the rows below.
+//
+// The band folds to zero height on the flat palettes, which is what
+// keeps Classic / Slate10 / Amber / DuetClassic / HighContrast
+// pixel-identical: `CrumbBarH()` is 0 there, so every offset below
+// collapses to the arithmetic those themes have always used.
+// ---------------------------------------------------------------
+constexpr u32 kCrumbBarH = 26U;
+constexpr u32 kCrumbPad = 5U;
+constexpr u32 kCrumbNavW = 24U;
+constexpr u32 kCrumbFieldH = 20U;
+constexpr u32 kCrumbSearchW = 150U;  // the design's width, at 1024 wide
+constexpr u32 kCrumbSearchMin = 70U; // below this it folds away
+constexpr u32 kCrumbPathMin = 90U;   // path field never shrinks past this
+
+u32 CrumbBarH()
+{
+    return Pal().aurora ? kCrumbBarH : 0U;
+}
+
+struct CrumbGeom
+{
+    Rect back;   // w == 0 = folded away
+    Rect fwd;    // w == 0 = folded away
+    Rect path;   // read-only path field
+    Rect search; // search field
+};
+
+CrumbGeom CrumbGeomFor(u32 cx, u32 cy, u32 cw)
+{
+    CrumbGeom g{};
+    if (CrumbBarH() == 0)
+        return g;
+
+    const u32 by = cy + kHdrToolbarH + (kCrumbBarH - kCrumbFieldH) / 2;
+    u32 x = cx + kCrumbPad + 1;
+    // Below this the nav pair plus a usable path field no longer fit;
+    // the whole bar keeps its height (so the list does not jump) but
+    // the controls fold rather than overlap.
+    if (cw < 2 * kCrumbNavW + 120)
+        return g;
+
+    g.back = Rect{x, by, kCrumbNavW, kCrumbFieldH};
+    x += kCrumbNavW + 4;
+    g.fwd = Rect{x, by, kCrumbNavW, kCrumbFieldH};
+    x += kCrumbNavW + 8;
+
+    // The search field takes what is left after the nav pair and a
+    // readable path field, capped at the design's width. Below
+    // kCrumbSearchMin there is no room for a placeholder plus a typed
+    // prefix, so it folds and the path takes the whole remainder.
+    const u32 right = cx + cw - kCrumbPad;
+    const u32 remaining = (right > x) ? right - x : 0U;
+    u32 search_w = (remaining > kCrumbPathMin + 8) ? (remaining - kCrumbPathMin - 8) : 0U;
+    if (search_w > kCrumbSearchW)
+        search_w = kCrumbSearchW;
+    if (search_w < kCrumbSearchMin)
+        search_w = 0;
+    if (search_w != 0)
+        g.search = Rect{right - search_w, by, search_w, kCrumbFieldH};
+    const u32 path_right = (search_w != 0) ? g.search.x - 8 : right;
+    g.path = Rect{x, by, (path_right > x) ? path_right - x : 0U, kCrumbFieldH};
+    return g;
+}
+
+// Current location, composed once per frame by DrawListHeaderWithCount
+// (the one place that already knows each mode's path) and rendered by
+// the breadcrumb bar. One composer, one buffer — the bar does not
+// re-derive a path the list header just built.
+constinit char g_crumb_path[64] = {};
 
 // Resolve every widget colour against the active theme. Split out of
 // BindFilesOnce (which is one-shot) so a runtime theme cycle recolours
@@ -551,7 +651,7 @@ void ApplyFilesPalette()
         }
     }
 
-    auto& label = g_files.chain.tail.tail.tail.tail.tail.tail.tail.head;
+    auto& label = FooterLabel();
     label.fg_rgb = p.aurora ? p.ink_3 : 0x00181828U;
     label.bg_rgb = p.aurora ? p.wash : 0x00C8C8B8U; // status band tone
 }
@@ -562,10 +662,10 @@ void BindFilesOnce()
         return;
     g_files_bound = true;
 
-    static const char* const kLabels[kHdrBtnCount] = {"RAM", "DISK", "TRASH", "DRIVE", "REFRESH", "SORT"};
+    static const char* const kLabels[kHdrBtnCount] = {"RAM", "DISK", "TRASH", "DRIVE", "REFRESH", "SORT", "<", ">"};
     using ClickFn = void (*)();
-    static constexpr ClickFn kClicks[kHdrBtnCount] = {ClickModeRam,   ClickModeDisk, ClickModeTrash,
-                                                      ClickModeDrive, ClickRefresh,  ClickSort};
+    static constexpr ClickFn kClicks[kHdrBtnCount] = {ClickModeRam, ClickModeDisk, ClickModeTrash, ClickModeDrive,
+                                                      ClickRefresh, ClickSort,     ClickNavBack,   ClickNavForward};
     for (u32 i = 0; i < kHdrBtnCount; ++i)
     {
         AppButton* btn = HdrButton(i);
@@ -574,7 +674,7 @@ void BindFilesOnce()
         btn->weight = ChromeTextWeight::Regular;
     }
 
-    auto& label = g_files.chain.tail.tail.tail.tail.tail.tail.tail.head;
+    auto& label = FooterLabel();
     label.text = g_footer_text;
     label.role = ChromeTextRole::Caption;
     label.weight = ChromeTextWeight::Regular;
@@ -593,12 +693,23 @@ void RebindFilesBounds(u32 cx, u32 cy, u32 cw, u32 ch)
     // they left. Without a rail every button keeps its historical
     // toolbar slot, so the flat palettes are untouched.
     const u32 rail = RailW(cw);
+    const CrumbGeom crumb = CrumbGeomFor(cx, cy, cw);
     for (u32 i = 0; i < kHdrBtnCount; ++i)
     {
+        // The breadcrumb nav pair lives in its own band, from the same
+        // table the bar is painted from. On the flat palettes
+        // CrumbGeomFor returns zero rects, so neither button paints
+        // nor takes a click and those themes are untouched.
+        if (i == kBtnNavBack || i == kBtnNavForward)
+        {
+            HdrButton(i)->align_left = false;
+            HdrButton(i)->bounds = (i == kBtnNavBack) ? crumb.back : crumb.fwd;
+            continue;
+        }
         const bool is_mode_btn = i < kFilesModeBtnCount;
         if (rail != 0 && is_mode_btn)
         {
-            const u32 ry = cy + kHdrToolbarH + RailRowY(i);
+            const u32 ry = cy + kHdrToolbarH + CrumbBarH() + RailRowY(i);
             HdrButton(i)->bounds = Rect{cx + kRailPad / 2, ry, rail - kRailPad, kRailRowH};
             // Rail rows read as list items, so their labels sit left.
             HdrButton(i)->align_left = true;
@@ -609,7 +720,7 @@ void RebindFilesBounds(u32 cx, u32 cy, u32 cw, u32 ch)
         HdrButton(i)->bounds = Rect{cx + kHdrPadX + slot * (kHdrBtnW + kHdrBtnGap), cy + kHdrPadY, kHdrBtnW, kHdrBtnH};
     }
 
-    auto& label = g_files.chain.tail.tail.tail.tail.tail.tail.tail.head;
+    auto& label = FooterLabel();
     const u32 fy = (ch > kFooterH) ? cy + ch - kFooterH : cy;
     const u32 fw = (cw > 2 * kFooterPadX) ? cw - 2 * kFooterPadX : cw;
     label.bounds = Rect{cx + kFooterPadX, fy, fw, kFooterH};
@@ -1207,6 +1318,17 @@ void WriteU64Dec(char* dst, u32 cap, u64 v)
 void DrawListHeaderWithCount(u32 cx, u32 cy, u32 cw, const char* path, u32 count, u32 color,
                              const char* sort_by = nullptr)
 {
+    // Record the location for the breadcrumb bar, which paints after
+    // the list and so sees this frame's path, not the last one's.
+    // This is the only place all four views name their location, so
+    // the bar reads it here rather than re-deriving four path walks.
+    {
+        u32 c = 0;
+        for (; path != nullptr && path[c] != '\0' && c + 1 < sizeof(g_crumb_path); ++c)
+            g_crumb_path[c] = path[c];
+        g_crumb_path[c] = '\0';
+    }
+
     char line[96];
     u32 o = 0;
     auto put = [&](const char* s)
@@ -1245,8 +1367,12 @@ void DrawListHeaderWithCount(u32 cx, u32 cy, u32 cw, const char* path, u32 count
         // right-hand column labels flush over the columns they name.
         // Both read the same BuildCols table the rows do, so a label
         // can't sit over a different column than its values.
+        // The path moved to the breadcrumb bar, so the header band
+        // carries what the reference's does: the column labels and
+        // nothing else. `line` still composes for the flat branch
+        // below, which keeps its single path+count header.
         const FilesCols c = BuildCols(cx, cw);
-        AppTextCell(ChromeTextRole::Caption, cx + 6, cy, band_h, line, p.ink_3, p.wash);
+        AppTextCell(ChromeTextRole::Caption, c.name_x, cy, band_h, "NAME", p.ink_3, p.wash);
         AppTextCellRight(ChromeTextRole::Caption, c.size_right, c.size_min, cy, band_h, "SIZE", p.ink_3, p.wash);
         AppTextCellRight(ChromeTextRole::Caption, c.date_right, c.date_min, cy, band_h, "MODIFIED", p.ink_3, p.wash);
         return;
@@ -1322,39 +1448,44 @@ void DrawRowGeneric(u32 x, u32 y, u32 w, u32 row_index, bool is_dir, const char*
         // muted ink; the ABI chip is the only other colour spent.
         using duetos::drivers::video::ChromeTextRole;
         using duetos::drivers::video::app_widgets::AppPillDraw;
-        using duetos::drivers::video::app_widgets::AppRowDotDraw;
-        using duetos::drivers::video::app_widgets::AppRowDotWidth;
+        using duetos::drivers::video::app_widgets::AppRowIconDraw;
+        using duetos::drivers::video::app_widgets::AppRowIconWidth;
         using duetos::drivers::video::app_widgets::AppTextCell;
         using duetos::drivers::video::app_widgets::AppTextCellRight;
         using duetos::drivers::video::app_widgets::AppTextFit;
 
         const FilesCols c = BuildCols(x, w);
-        AppRowDotDraw(c.name_x, y, row_h, is_dir ? p.accent : p.ink_3);
+        // Rounded-square type tile, per the reference's file rows. The
+        // glyph is read from the same signature the ABI badge is read
+        // from — never from the extension, which is a guess. A file
+        // whose bytes aren't resident gets an empty tile rather than an
+        // invented letter.
+        const char* badge = is_dir ? nullptr : ResidentAbiBadge(resident_bytes, resident_len);
+        const bool pe = badge != nullptr && badge[0] == 'W';
+        char tile_glyph = '\0';
+        if (is_dir)
+            tile_glyph = 'D';
+        else if (badge != nullptr)
+            tile_glyph = pe ? 'P' : 'E';
+        const u32 tile_ink = is_dir ? p.accent : (pe ? p.accent_peer : (badge != nullptr ? p.accent : p.ink_3));
+        AppRowIconDraw(c.name_x, y, row_h, tile_glyph, tile_ink, bg);
 
         char fitted[48];
         const char* dn = (name != nullptr && name[0] != '\0') ? name : "(root)";
         AppTextFit(ChromeTextRole::Body, dn, fitted, sizeof(fitted), c.name_w);
-        AppTextCell(ChromeTextRole::Body, c.name_x + AppRowDotWidth(), y, row_h, fitted, fg, bg);
+        AppTextCell(ChromeTextRole::Body, c.name_x + AppRowIconWidth(), y, row_h, fitted, fg, bg);
 
         if (c.abi_w != 0)
         {
-            const char* badge = is_dir ? nullptr : ResidentAbiBadge(resident_bytes, resident_len);
-            const bool pe = badge != nullptr && badge[0] == 'W';
             AppPillDraw(c.abi_x, y, row_h, badge, pe ? p.accent_peer : p.accent, bg);
         }
 
         if (!is_dir)
         {
-            char num[24];
-            WriteU64Dec(num, sizeof(num), size_bytes);
-            char sizetext[32];
-            u32 so = 0;
-            for (; num[so] != '\0' && so + 7 < sizeof(sizetext); ++so)
-                sizetext[so] = num[so];
-            const char* unit = " BYTES";
-            for (u32 i = 0; unit[i] != '\0' && so + 1 < sizeof(sizetext); ++i)
-                sizetext[so++] = unit[i];
-            sizetext[so] = '\0';
+            // "4 KB" / "1.4 MB" — the reference's shape. The raw byte
+            // count stays on the flat-palette branch below.
+            char sizetext[16];
+            duetos::drivers::video::app_widgets::AppFormatSize(size_bytes, sizetext, sizeof(sizetext));
             AppTextCellRight(ChromeTextRole::Body, c.size_right, c.size_min, y, row_h, sizetext, dim, bg);
         }
         if (mtime_date != 0)
@@ -1781,6 +1912,57 @@ void DrawSideRail(u32 x, u32 y, u32 w, u32 h, const duetos::drivers::video::app_
     put_device("ramfs");
 }
 
+// Breadcrumb bar, phase 1: the band and the two field grounds. Runs
+// BEFORE the widget group paints so the back / forward buttons land on
+// the band rather than being erased by it.
+void DrawCrumbGround(u32 cx, u32 cy, u32 cw, const duetos::drivers::video::app_widgets::AppPalette& p)
+{
+    using duetos::drivers::video::FramebufferFillRect;
+    using duetos::drivers::video::FramebufferFillRoundRect;
+    const CrumbGeom g = CrumbGeomFor(cx, cy, cw);
+    FramebufferFillRect(cx, cy + kHdrToolbarH, cw, kCrumbBarH, p.body);
+    if (g.path.w != 0)
+        FramebufferFillRoundRect(g.path.x, g.path.y, g.path.w, g.path.h, 6, p.recess);
+    if (g.search.w != 0)
+        FramebufferFillRoundRect(g.search.x, g.search.y, g.search.w, g.search.h, 6, p.recess);
+}
+
+// Breadcrumb bar, phase 2: the text. Runs AFTER the per-mode list
+// paint, because that is what fills g_crumb_path for this frame.
+void DrawCrumbText(u32 cx, u32 cy, u32 cw, const duetos::drivers::video::app_widgets::AppPalette& p)
+{
+    using duetos::drivers::video::ChromeTextRole;
+    using duetos::drivers::video::ChromeTextWeight;
+    using duetos::drivers::video::app_widgets::AppTextCell;
+    using duetos::drivers::video::app_widgets::AppTextFit;
+    const CrumbGeom g = CrumbGeomFor(cx, cy, cw);
+
+    if (g.path.w != 0)
+    {
+        char fitted[64];
+        const u32 budget = (g.path.w > 2 * kCrumbPad) ? g.path.w - 2 * kCrumbPad : 0;
+        AppTextFit(ChromeTextRole::Body, g_crumb_path, fitted, sizeof(fitted), budget);
+        AppTextCell(ChromeTextRole::Body, g.path.x + kCrumbPad, g.path.y, g.path.h, fitted, p.ink, p.recess,
+                    ChromeTextWeight::Bold);
+    }
+
+    if (g.search.w != 0)
+    {
+        // Wired to the live type-ahead prefix rather than being inert
+        // chrome: typing a name jumps the selection to the first match
+        // and the field shows what has been typed so far.
+        // GAP: type-ahead jumps the selection, it does not filter the
+        // list the way the reference's field implies - revisit when
+        // Files grows a real filter.
+        const bool typing = g_state.typeahead_len != 0;
+        char fitted[40];
+        const u32 budget = (g.search.w > 2 * kCrumbPad) ? g.search.w - 2 * kCrumbPad : 0;
+        AppTextFit(ChromeTextRole::Body, typing ? g_state.typeahead_buf : "Search", fitted, sizeof(fitted), budget);
+        AppTextCell(ChromeTextRole::Body, g.search.x + kCrumbPad, g.search.y, g.search.h, fitted,
+                    typing ? p.ink : p.ink_3, p.recess);
+    }
+}
+
 void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
 {
     using duetos::drivers::video::FramebufferFillRect;
@@ -1809,9 +1991,12 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     // The rail's ground goes down before PaintAll so the mode buttons
     // (which live in the rail under Aurora) land on it rather than on
     // whatever the compositor left behind.
-    const u32 my = cy + kHdrToolbarH;
-    const u32 mh = (ch > kHdrToolbarH + kFooterH) ? ch - kHdrToolbarH - kFooterH : 0U;
+    const u32 chrome_h = kHdrToolbarH + CrumbBarH();
+    const u32 my = cy + chrome_h;
+    const u32 mh = (ch > chrome_h + kFooterH) ? ch - chrome_h - kFooterH : 0U;
     const u32 rail = RailW(cw);
+    if (p.aurora)
+        DrawCrumbGround(cx, cy, cw, p);
     if (mh != 0 && rail != 0)
         DrawSideRail(cx, my, rail, mh, p);
 
@@ -1834,6 +2019,10 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
         DrawDuetFs(lx, my, lw, mh);
     else
         DrawRamfs(lx, my, lw, mh);
+    // Last: the breadcrumb's text, now that the list header has named
+    // this frame's location.
+    if (p.aurora)
+        DrawCrumbText(cx, cy, cw, p);
 }
 
 // Spawn a PE / ELF directly from a ramfs node's embedded bytes.
@@ -2216,6 +2405,22 @@ void ClickRefresh()
         duetos::drivers::video::NotifyShow("files: rescan");
     }
 }
+// Breadcrumb navigation. Both route through the keyboard surface that
+// already owns the semantics — Backspace is the mode-agnostic
+// "go up", ']' is FAT32's forward-history step — so the click and the
+// key can never drift apart. Forward is a genuine no-op outside FAT32
+// (only that mode keeps a visit history), which is why the button is
+// painted disabled there rather than silently doing nothing.
+void ClickNavBack()
+{
+    duetos::apps::files::FilesFeedChar(static_cast<char>(0x08));
+}
+
+void ClickNavForward()
+{
+    duetos::apps::files::FilesFeedChar(']');
+}
+
 void ClickSort()
 {
     // Cycle sort mode. Mirrors the sort logic previously in
@@ -2438,12 +2643,16 @@ u32 FilesListVisibleRows()
     duetos::u32 clx = 0, cly = 0, clw = 0, content_h_full = 0;
     if (!duetos::drivers::video::WindowGetClientRect(g_state.handle, &clx, &cly, &clw, &content_h_full))
         return 0;
-    if (content_h_full <= kHdrToolbarH + kFooterH)
+    // Chrome above the list: the toolbar, plus the Aurora breadcrumb
+    // band (CrumbBarH() is 0 on the flat palettes, so their arithmetic
+    // is unchanged).
+    const duetos::u32 chrome_h = kHdrToolbarH + CrumbBarH();
+    if (content_h_full <= chrome_h + kFooterH)
         return 0;
     // Middle slice the per-mode Draw* now receives. `cy` is irrelevant
     // to the row COUNT, so pass 0 — ListGeomFor derives max_rows from
     // (top - cy), which is origin-independent.
-    const duetos::u32 content_h = content_h_full - kHdrToolbarH - kFooterH;
+    const duetos::u32 content_h = content_h_full - chrome_h - kFooterH;
     return ListGeomFor(0, content_h).max_rows;
 }
 
@@ -2942,36 +3151,59 @@ void FilesSelfTest()
     BindFilesOnce();
     RebindFilesBounds(0U, 22U, 400U, 200U);
     g_state.mode = Mode::DuetFs;
-    // Centre of the RAM button (index 0 — the first slot the
-    // BindFilesOnce loop wires up). Bounds are {kHdrPadX,
-    // 22+kHdrPadY, kHdrBtnW, kHdrBtnH}.
-    const duetos::u32 rx = kHdrPadX + kHdrBtnW / 2U;
-    const duetos::u32 ry = 22U + kHdrPadY + kHdrBtnH / 2U;
-    const Event m_move{EventKind::MouseMove, rx, ry, 0U, 0U};
-    const Event m_down{EventKind::MouseDown, rx, ry, 0U, 0U};
-    const Event m_up{EventKind::MouseUp, rx, ry, 0U, 0U};
-    if (g_files.DispatchEvent(m_move) != EventResult::Consumed)
+    // Every synthetic click aims at the bounds RebindFilesBounds just
+    // installed, never at a re-derived toolbar pitch. The hard-coded
+    // {kHdrPadX, 22+kHdrPadY} coordinates this used to carry were only
+    // ever right for the flat toolbar: under Aurora the mode buttons
+    // live in the quick-access rail and the nav pair in the breadcrumb
+    // band, so the test would have aimed at empty space and blamed the
+    // dispatch chain for it.
+    auto click_button = [&](u32 i) -> bool
+    {
+        const Rect& r = HdrButton(i)->bounds;
+        if (r.w == 0)
+            return true; // folded away on this branch
+        const duetos::u32 px = r.x + r.w / 2U;
+        const duetos::u32 py = r.y + r.h / 2U;
+        const Event mv{EventKind::MouseMove, px, py, 0U, 0U};
+        const Event dn{EventKind::MouseDown, px, py, 0U, 0U};
+        const Event up{EventKind::MouseUp, px, py, 0U, 0U};
+        return g_files.DispatchEvent(mv) == EventResult::Consumed &&
+               g_files.DispatchEvent(dn) == EventResult::Consumed && g_files.DispatchEvent(up) == EventResult::Consumed;
+    };
+    // Slot 0 is RAM on both branches — in the toolbar without a rail,
+    // in the rail with one.
+    if (!click_button(0) || g_state.mode != Mode::Ramfs)
         pass = false;
-    if (g_files.DispatchEvent(m_down) != EventResult::Consumed)
+    // REFRESH (kBtnRefresh) is idempotent; the click chain returning
+    // Consumed end-to-end is the test.
+    if (!click_button(kBtnRefresh))
         pass = false;
-    if (g_files.DispatchEvent(m_up) != EventResult::Consumed)
-        pass = false;
-    if (g_state.mode != Mode::Ramfs)
-        pass = false;
-    // REFRESH button click (index kBtnRefresh=4). NotifyShow is
-    // the visible side effect; check the dispatch path runs end-
-    // to-end (the click chain returning Consumed is the test).
-    const duetos::u32 fx = kHdrPadX + kBtnRefresh * (kHdrBtnW + kHdrBtnGap) + kHdrBtnW / 2U;
-    const duetos::u32 fy = 22U + kHdrPadY + kHdrBtnH / 2U;
-    const Event r_move{EventKind::MouseMove, fx, fy, 0U, 0U};
-    const Event r_down{EventKind::MouseDown, fx, fy, 0U, 0U};
-    const Event r_up{EventKind::MouseUp, fx, fy, 0U, 0U};
-    if (g_files.DispatchEvent(r_move) != EventResult::Consumed)
-        pass = false;
-    if (g_files.DispatchEvent(r_down) != EventResult::Consumed)
-        pass = false;
-    if (g_files.DispatchEvent(r_up) != EventResult::Consumed)
-        pass = false;
+    // Breadcrumb geometry: the nav pair, the path field and the search
+    // field must sit inside the band DrawFn reserves and must not
+    // overlap each other. The bar is folded on the flat palettes, where
+    // every rect is zero and the checks are vacuous.
+    {
+        const CrumbGeom cg = CrumbGeomFor(0U, 22U, 400U);
+        const duetos::u32 band_top = 22U + kHdrToolbarH;
+        const Rect* rects[4] = {&cg.back, &cg.fwd, &cg.path, &cg.search};
+        duetos::u32 prev_right = 0;
+        for (const Rect* r : rects)
+        {
+            if (r->w == 0)
+                continue;
+            if (r->y < band_top || r->y + r->h > band_top + CrumbBarH())
+                pass = false;
+            if (r->x < prev_right)
+                pass = false;
+            prev_right = r->x + r->w;
+        }
+        // The nav buttons must be exactly where the bar paints them.
+        if (HdrButton(kBtnNavBack)->bounds.x != cg.back.x || HdrButton(kBtnNavBack)->bounds.w != cg.back.w)
+            pass = false;
+        if (HdrButton(kBtnNavForward)->bounds.x != cg.fwd.x || HdrButton(kBtnNavForward)->bounds.w != cg.fwd.w)
+            pass = false;
+    }
     // Footer-text refresh: each per-mode hint must compose non-
     // empty into g_footer_text. Cycle the four modes and check.
     g_state.pending = Pending::None;
@@ -3238,7 +3470,10 @@ duetos::i32 FilesRowAt(duetos::u32 sx, duetos::u32 sy)
     // copies. The copies that used to live here carried a comment
     // asking the next maintainer to keep them in sync by hand — which
     // is the divergence this whole refactor exists to remove.
-    constexpr duetos::u32 k_hdr_toolbar_h = kHdrToolbarH;
+    // Chrome above the list: the toolbar band, plus the Aurora
+    // breadcrumb band. CrumbBarH() is the SAME accessor DrawFn offsets
+    // its middle slice by, so the click and the pixels move together.
+    const duetos::u32 k_hdr_toolbar_h = kHdrToolbarH + CrumbBarH();
     constexpr duetos::u32 k_footer_h = kFooterH;
     if (ModeCount() == 0)
         return -1;
