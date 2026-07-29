@@ -45,12 +45,26 @@ SRC_FILES=(
     "${SRC_DIR}/kernel32_sync.c"
     "${SRC_DIR}/kernel32_fs.c"
     "${SRC_DIR}/kernel32_psapi.c"
+    "${SRC_DIR}/kernel32_seh.c"
     "${SRC_DIR}/seh_capture.S"
+    "${SRC_DIR}/raise_exception.S"
 )
 
 WORK_DIR="$(dirname "${OUT_HEADER}")/kernel32"
 mkdir -p "${WORK_DIR}"
 DLL="${WORK_DIR}/kernel32.dll"
+
+# ntdll import lib (built by build-ntdll-dll.sh into the sibling
+# ntdll/ work tree). kernel32!RaiseException builds the
+# EXCEPTION_RECORD and hands it to ntdll's dispatcher, exactly as
+# kernelbase!RaiseException defers to ntdll!RtlRaiseException on
+# Windows — the two-pass engine stays in one place. The CMake
+# dependency edge guarantees ntdll.lib exists first.
+NTDLL_LIB="$(dirname "${OUT_HEADER}")/ntdll/ntdll.lib"
+if [[ ! -s "${NTDLL_LIB}" ]]; then
+    echo "build-kernel32-dll.sh: missing import lib ${NTDLL_LIB}" >&2
+    exit 1
+fi
 
 CLANG="${CLANG:-clang}"
 LLD_LINK="${LLD_LINK:-lld-link}"
@@ -73,7 +87,7 @@ for src in "${SRC_FILES[@]}"; do
         -fno-stack-protector \
         -fno-builtin \
         -mno-red-zone \
-        -fno-asynchronous-unwind-tables \
+        -fasynchronous-unwind-tables \
         -O2 \
         -Wall -Wextra \
         "${src}" \
@@ -105,6 +119,18 @@ set +e
     /export:RtlLookupFunctionEntry \
     /export:RtlVirtualUnwind \
     /export:RtlCaptureStackBackTrace \
+    `# The unwind half of the same family has exactly one body, in` \
+    `# ntdll. A PE forwarder is what Windows publishes here and what` \
+    `# our loader's forwarder chaser resolves, so kernel32 importers` \
+    `# land on the same engine vcruntime140 and ntdll importers use` \
+    `# instead of the old no-op SEH thunk.` \
+    /export:RtlUnwindEx=ntdll.RtlUnwindEx \
+    /export:RtlUnwind=ntdll.RtlUnwind \
+    /export:RtlRestoreContext=ntdll.RtlRestoreContext \
+    `# RaiseException: real software-exception dispatch (see` \
+    `# kernel32_seh.c + raise_exception.S). Replaces the v0 thunk` \
+    `# that routed it to SYS_EXIT(dwExceptionCode).` \
+    /export:RaiseException \
     /export:TerminateProcess \
     /export:IsDebuggerPresent \
     /export:IsProcessorFeaturePresent \
@@ -386,7 +412,8 @@ set +e
     /export:OpenProcess \
     /export:GenerateConsoleCtrlEvent \
     /out:"${DLL}" \
-    "${OBJS[@]}" 2>&1 | grep -v "align specified without /driver"
+    "${OBJS[@]}" \
+    "${NTDLL_LIB}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}
 set -e
 if [[ ${LINK_RC} -ne 0 ]]; then

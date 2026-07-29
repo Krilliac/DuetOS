@@ -424,10 +424,16 @@
     // WaitForMultipleObjects via SYS_WAIT_MULTI.
     {"kernel32.dll", "WaitForMultipleObjects", kOffWaitForMultipleObjects},
     {"kernel32.dll", "WaitForMultipleObjectsEx", kOffWaitForMultipleObjects},
-    // RaiseException → SYS_EXIT. DecodePointer /
-    // EncodePointer → identity (round-trip preserved).
-    {"kernel32.dll", "RaiseException", kOffRaiseException}, {"kernel32.dll", "DecodePointer", kOffDecodePointer},
-    {"kernel32.dll", "EncodePointer", kOffDecodePointer}, {"kernel32.dll", "RtlDecodePointer", kOffDecodePointer},
+    // RaiseException is NOT here. The real user-mode kernel32
+    // builds the EXCEPTION_RECORD and enters ntdll's dispatcher
+    // (kernel32_seh.c + raise_exception.S), so a __except / C++
+    // catch actually sees the software exception. The old fallback
+    // routed it to SYS_EXIT(dwExceptionCode), which is why a
+    // statically-linked MSVC CRT's `throw` used to surface as a
+    // process exit with status 0xE06D7363 instead of unwinding.
+    // DecodePointer / EncodePointer → identity (round-trip preserved).
+    {"kernel32.dll", "DecodePointer", kOffDecodePointer}, {"kernel32.dll", "EncodePointer", kOffDecodePointer},
+    {"kernel32.dll", "RtlDecodePointer", kOffDecodePointer},
     {"kernel32.dll", "RtlEncodePointer", kOffDecodePointer},
     // Semaphore family — CreateSemaphore(W/A/ExW) route
     // through SYS_SEM_CREATE; ReleaseSemaphore through SYS_SEM_RELEASE;
@@ -1047,10 +1053,12 @@
     {"kernel32.dll", "RtlCaptureStackBackTrace", kOffSehNoUnwind},
     {"kernel32.dll", "RtlCaptureContext", kOffSehNoUnwind}, {"kernel32.dll", "RtlLookupFunctionEntry", kOffSehNoUnwind},
     {"kernel32.dll", "RtlVirtualUnwind", kOffSehNoUnwind},
-    // RtlUnwindEx (no-op): VOID, ignores all args, never actually
-    // unwinds. The caller (CRT exception dispatcher) treats the
-    // return as "unwind completed silently" and continues.
-    {"kernel32.dll", "RtlUnwindEx", kOffSehNoUnwind},
+    // RtlUnwindEx / RtlUnwind / RtlRestoreContext are NOT here.
+    // kernel32.dll forwards all three to ntdll's real two-pass
+    // engine, so the via-DLL resolve always wins and a fallback row
+    // could only ever mean "silently skip the unwind" — which reads
+    // to the CRT dispatcher as "unwind completed" and loses the
+    // exception. Failing to resolve is the honest outcome.
     // RtlPcToFileHeader: distinct from the others above because
     // it has an out *BaseOfImage param. Plain return-0 leaves
     // *BaseOfImage uninitialised, which crashes the MSVC CRT
@@ -1695,7 +1703,10 @@
     {"ucrtbase.dll", "abort", kOffTerminate}, {"ucrtbase.dll", "_set_invalid_parameter_handler", kOffPinReturn0},
     {"ucrtbase.dll", "_clearfp", kOffPinReturn0}, {"ucrtbase.dll", "_statusfp", kOffPinReturn0},
     {"ucrtbase.dll", "__C_specific_handler", kOffPinReturn1},
-    {"vcruntime140.dll", "__C_specific_handler", kOffPinReturn1}, {"msvcrt.dll", "abort", kOffTerminate},
+    // vcruntime140.dll!__C_specific_handler is a PE forwarder to
+    // ntdll's real walker now, so no fallback row (see the msvcrt
+    // SEH block below for why ContinueSearch is the wrong fallback).
+    {"msvcrt.dll", "abort", kOffTerminate},
     {"msvcrt.dll", "_set_invalid_parameter_handler", kOffPinReturn0}, {"msvcrt.dll", "_clearfp", kOffPinReturn0},
     {"msvcrt.dll", "_statusfp", kOffPinReturn0}, {"msvcrt.dll", "_controlfp", kOffPinReturn0},
 
@@ -1861,23 +1872,22 @@
     // marks the failure. Revisit when the CRT error-table lands.
     {"msvcrt.dll", "_amsg_exit", kOffTerminate},
 
-    // SEH / C++ EH. See the __C_specific_handler block above for
-    // why the personality routines return ExceptionContinueSearch
-    // (1) rather than 0 or a terminate.
-    {"msvcrt.dll", "__C_specific_handler", kOffPinReturn1},
-    // STUB: __CxxFrameHandler3/4 are the MSVC C++ personality. The
-    // real FH3 decoder lives in the preloaded userland
-    // vcruntime140.dll and a thunk-table row cannot forward to it,
-    // so a PE that reaches THIS binding gets no catch blocks and no
-    // destructor unwind — every C++ exception walks the frame
-    // untouched to the unhandled path.
-    {"msvcrt.dll", "__CxxFrameHandler3", kOffPinReturn1},
-    {"msvcrt.dll", "__CxxFrameHandler4", kOffPinReturn1},
-    // STUB: a throw terminates instead of unwinding to its handler.
-    // Routed to SYS_EXIT(3) rather than a silent return, precisely
-    // so the failure is visible: a no-op _CxxThrowException would
-    // let `throw` fall through and continue past the throw site
-    // with the program's invariants already broken.
+    // SEH / C++ EH. msvcrt.dll now publishes PE forwarders for all
+    // four names — __C_specific_handler to ntdll's scope-table
+    // walker, __CxxFrameHandler3/4 and _CxxThrowException to
+    // vcruntime140's FH3 personality and throw entry — so a PE that
+    // links its EH surface against msvcrt reaches the same engine
+    // as one that links vcruntime140 or ntdll.
+    //
+    // The personality rows are gone rather than kept as dead
+    // fallbacks: they returned ExceptionContinueSearch, the silent
+    // failure mode — the handler claims "not my frame" and the
+    // exception walks past every catch block to the unhandled path
+    // with nothing in the log. An unresolved import is louder.
+    // _CxxThrowException keeps its terminate fallback for the
+    // opposite reason: if the forwarder ever fails to bind, ending
+    // the process is visible, whereas letting `throw` return would
+    // continue past the throw site with invariants already broken.
     {"msvcrt.dll", "_CxxThrowException", kOffTerminate},
 
     // std::exception / type_info members. kOffReturnThis leaves the
