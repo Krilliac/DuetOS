@@ -1524,6 +1524,33 @@ at 98.5% coverage with exactly one unresolved import each -
 rather than one embedded in the kernel image, is what stands between
 DuetOS and a real game.
 
+### 2026-07-29 — an app can ship its own DLLs
+
+That rung is climbed. `kernel/loader/sxs_dll.cpp` resolves an import
+miss against the directory the `.exe` was read from: it reads the DLL
+off the volume, passes it through the same security guard a disk-sourced
+`.exe` gets, maps it, and binds the import — recursively, so a
+side-by-side DLL's own side-by-side dependencies resolve too.
+
+The measurement that motivated it now reads differently. With the real
+26 MiB `UnityPlayer.dll` staged beside it, `BattleBit.exe` resolves all
+67 imports:
+
+```
+[sxs] loaded name="/UNITYPLA.DLL" base=0x180006000 size=0x19e0000
+[pe-resolve] via-dll UnityPlayer.dll!UnityMain -> 0x18055af10
+[ring3] pe spawn name="BATTLEB.EXE" pid=0x8 entry=0x143001260
+```
+
+It does not run a game — `UnityPlayer.dll` itself measures 68.6%
+coverage with 163 unresolved imports and three DLLs that do not exist
+here (`hid`, `imm32`, `opengl32`). But the launcher gets past its
+entry point and into MSVC CRT startup, and the thing that stops it is
+no longer an import at all: it overruns the fixed 64 KiB ring-3 stack
+and is killed on a `#PF` 0x930 bytes below `stack_va`. The blocker moved
+from the loader to the process model, which is progress of a different
+kind.
+
 ## How to read the rest of the tree
 
 - `CLAUDE.md` — the authoritative project context, coding standards,

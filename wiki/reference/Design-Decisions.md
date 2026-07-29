@@ -13232,3 +13232,49 @@ markers for its richest input. Three discovery layers were added (runtime
   smaller fidelity gain than the glyphs themselves buy.
 - **Scope:** the cell size and the 8-px advance are unchanged, so no
   column layout, scrollbar metric or hit-test moves.
+
+### DD — side-by-side DLLs are import-driven, and disk-sourced DLLs are gated
+
+- **Context:** every DLL DuetOS could bind came from inside the kernel
+  image. Supporting "the app ships its own DLLs" needed a way to read a
+  DLL off the volume the `.exe` came from.
+- **Decision:** resolution is driven by the image's IMPORT TABLE, not by
+  enumerating the directory. `SpawnPeFile` learns the on-disk origin,
+  records the derived directory on the `Process`, and the resolver reads
+  only DLLs that some image actually names — recursively, bounded by
+  depth 4 and 16 loads per spawn.
+- **Rules out:** loading every `*.dll` in the `.exe`'s directory the way
+  the fixed FAT32 `/LIB` path does. A real application directory holds
+  DLLs the program never loads (BattleBit ships a 74 MiB
+  `GameAssembly.dll` alongside the 26 MiB `UnityPlayer.dll`); a
+  speculative scan would map both and exhaust the heap to bind neither.
+- **Decision:** every DLL read off a volume passes `security::Gate` with
+  `ImageKind::WindowsPE`, the same gate `PeLoad` applies to a
+  disk-sourced `.exe`. Blobs in the kernel image and files under the
+  trusted ramfs root are NOT re-gated.
+- **Rules out:** gating uniformly. 44 guard scans per spawn is pure cost
+  against bytes that are already part of the TCB — if those are
+  compromised the guard is compromised too. It also rules out the
+  reverse (gating nothing on disk), which was the pre-existing state of
+  the FAT32 `/LIB` loader and let unvetted disk code into a process's
+  address space without a verdict.
+- **Decision:** the bind-time and run-time search paths read the SAME
+  `Process::sxs_dir` field.
+- **Rules out:** letting `SYS_DLL_LOAD_FROM_PATH` keep its own notion of
+  where to look. A bind-time / run-time divergence in this loader is a
+  bug class that has already been fixed twice; one field with one writer
+  makes the divergence unrepresentable rather than merely unlikely.
+
+### DD — the side-by-side fixture is staged on disk, never embedded
+
+- **Context:** every other PE fixture in the tree is compiled into the
+  kernel image by `embed-blob.py` and spawned from a `constexpr` array.
+- **Decision:** `SXSTEST.EXE` and its companion `SXSLIB.DLL` are built
+  by `tools/build/build-sxs-fixture.sh` and staged onto the FAT32 volume
+  by `tools/qemu/run.sh`. Neither half is embedded.
+- **Rules out:** embedding either half. An embedded DLL is reachable
+  through the preload set, so an embedded fixture would pass whether or
+  not the side-by-side path works — it would prove nothing. This is why
+  `PeCompatEntry` grew a `fat_path` column and a `Pending` state: a
+  disk-sourced row cannot be read on the boot thread, because storage
+  enumerates asynchronously.

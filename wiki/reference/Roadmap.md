@@ -1003,6 +1003,55 @@ that needs the preload table hoisted out of its enclosing function to
 file scope (it is a function-local `static const` today) and exposed
 through `proc/spawn.h`; that refactor is the whole item.
 
+**Amendment (2026-07-29, side-by-side DLL slice).** Two corrections to
+the diagnosis above, from reading the live path rather than the `/lib`
+node list:
+
+1. The exposure is narrower than "every other embedded DLL is
+   unreachable". `SYS_DLL_LOAD_FROM_PATH` consults
+   `ProcessFindDllBaseByName` FIRST, and `SpawnPeFile` registers every
+   preloaded DLL into `proc->dll_images[]` — so for an import-bearing PE
+   a runtime `LoadLibrary("user32.dll")` already hits the process image
+   table and never reaches `/lib`. The real hole is exactly the case the
+   `vulkaninfo` story describes: a DLL that the `arch::IsEmulator()`
+   preload trim skipped (`essential = false`) was never registered, so
+   there was nothing in the table to find. Deriving `/lib` from the
+   preload list still fixes it; so would not trimming.
+2. There is now a third answer for the same shape: a DLL shipped on the
+   volume beside the `.exe` is reachable at runtime via the same
+   syscall, because `SYS_DLL_LOAD_FROM_PATH` falls through to the
+   side-by-side resolver using `Process::sxs_dir`. That does not close
+   this item — it covers app-supplied DLLs, not kernel-shipped ones —
+   but it removes the "the app must ask us to embed it" pressure that
+   made this item urgent.
+
+### Ring-3 stack is a fixed 64 KiB — the first blocker a real app hits
+
+`kV0StackPages = 16` (`kernel/loader/pe_loader.cpp:137`) maps 64 KiB of
+ring-3 stack for every PE. The constant's own comment says a larger
+budget should come from "an explicit override at spawn time (path not
+wired yet)".
+
+This is now the *observed* stopping point for a real application, which
+is new information: with side-by-side DLL loading landed,
+`BattleBit.exe` resolves all 67 imports including
+`UnityPlayer.dll!UnityMain`, spawns, and runs its MSVC CRT startup —
+then takes a ring-3 `#PF` at `0x7ffef6d0`, which is 0x930 bytes below
+`stack_va = 0x7fff0000`. It surfaces as
+`win32/seh: CopyToUser(CONTEXT) failed - task-kill fallback addr`
+(`kernel/subsystems/win32/seh_dispatch.cpp:282`) because the SEH
+dispatcher tries to write a CONTEXT record onto the overrun stack.
+
+Windows gives a process 1 MiB by default (the optional header's
+`SizeOfStackReserve`). Simply raising the constant to match multiplies
+per-PE frame cost 16x across ~12 boot PE spawns and 138 PE-compat
+battery rows, which is why this is a slice and not a one-line change.
+The shape that fits DuetOS: reserve the region from
+`SizeOfStackReserve`, commit only the top pages, and grow on `#PF` below
+`rsp` with a guard page below the reservation — i.e. demand growth,
+which also needs the `#PF` handler to distinguish "stack growth" from
+"wild pointer".
+
 ### Win32 handle lifecycle — teardown + close-dispatch gaps (audited 2026-07-26)
 
 A read-only audit of the PE loader and Win32 handle lifecycle found one
