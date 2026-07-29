@@ -197,6 +197,11 @@ add_host_test(kernel32_32_nls)
 # encoding's KB-vs-MB unit bit and Extended-Size escape, which a boot on
 # any single machine only exercises one branch of.
 add_host_test(smbios_type17)
+# Telemetry percentage math: freestanding header
+# (kernel/diag/telemetry_math.h), no kernel TU. Pins the summed-delta
+# aggregate against the mean-of-percentages formula they get confused
+# with, plus the torn-read clamps.
+add_host_test(telemetry_cpu)
 add_host_test(damage_rect)
 # Banded damage / forced-invalidation fold: freestanding constexpr state
 # on DamageBandSet in kernel/drivers/video/framebuffer.h — no kernel TU.

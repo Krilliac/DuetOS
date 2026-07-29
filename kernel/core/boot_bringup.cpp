@@ -267,6 +267,7 @@
 #include "diag/fault_inject.h"
 #include "diag/fault_react.h"
 #include "diag/panic_wait.h"
+#include "diag/telemetry.h"
 #include "diag/fix_journal.h"
 #include "diag/kpath.h"
 #include "diag/kpath_persist.h"

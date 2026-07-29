@@ -231,6 +231,7 @@
 #include "diag/fault_inject.h"
 #include "diag/fault_react.h"
 #include "diag/fix_journal.h"
+#include "diag/telemetry.h"
 #include "diag/fix_journal_persist.h"
 #include "diag/gdb_server.h"
 #include "diag/minidump.h"
@@ -747,6 +748,19 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // rule (NUMA-node, package, or single) and propagate to PerCpu.
     duetos::cpu::TopologyAssignClusters();
     duetos::cpu::TopologyDump();
+
+    // Telemetry query surface (kernel/diag/telemetry.h) — the CPU /
+    // memory / NIC / graphics / board readers a Task Manager's
+    // performance view calls.
+    //
+    // MUST run after SmpStartAps + TopologyAssignClusters: before them
+    // SmpCpuIdLimit() is 1 and TopologyForCpu() has no core_group, so
+    // the sampler would report a single core on a 4-way box and the
+    // self-test would be validating the uniprocessor path only. The
+    // per-CPU lines it emits are also the live evidence that per-core
+    // accounting is genuinely per-core — the BSP has run the whole
+    // bring-up while the APs idled, so the rows must differ.
+    DUETOS_BOOT_SELFTEST(duetos::diag::TelemetrySelfTest());
 
     // Cross-CPU function-call primitive self-test. Drives:
     //   - IpiCallOne to self (wait=true / wait=false).
