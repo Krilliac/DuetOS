@@ -93,6 +93,7 @@
 #include "drivers/iommu/dmar.h"
 #include "drivers/iommu/iommu.h"
 #include "drivers/iommu/ivrs.h"
+#include "drivers/tpm/tpm.h"
 #include "drivers/iommu/vtd.h"
 #include "drivers/iommu/vtd_paging.h"
 #include "drivers/input/ps2mouse.h"
@@ -1428,6 +1429,16 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     // IOMMU register here either.
     duetos::drivers::iommu::IvrsInit();
     DUETOS_BOOT_SELFTEST(duetos::drivers::iommu::IvrsSelfTest());
+
+    // TPM 2.0 over the FIFO/TIS window. Sits here because it needs
+    // ACPI (to learn whether the platform is FIFO or CRB) and MMIO,
+    // but nothing else — it polls with TSC-bounded waits, so it does
+    // not need the timer or the scheduler. Absent on most of the test
+    // fleet, in which case it prints present=no and gets out of the
+    // way. DuetOS implements the SEALING half of TPM only; see
+    // kernel/drivers/tpm/tpm_wire.h for what is deliberately refused.
+    duetos::drivers::tpm::TpmInit();
+    DUETOS_BOOT_SELFTEST(duetos::drivers::tpm::TpmSelfTest());
 
     // VT-d identity-passthrough page tables. Builds root + shared
     // context + identity-mapping PDPT (3 frames = 12 KiB). The
