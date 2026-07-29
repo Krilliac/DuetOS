@@ -1,4 +1,5 @@
 #include "drivers/video/app_widgets/app_button.h"
+#include "drivers/video/blend_math.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/shadow.h"
 #include "drivers/video/theme.h"
@@ -12,12 +13,22 @@ void AppButton::PaintSelf(Compose& /*c*/) const
         return;
     const auto& theme = ThemeCurrent();
     const u32 base_bg = (bg_rgb == 0) ? theme.role_title[0] : bg_rgb;
+
+    // Aurora keys are quiet: a rounded flat fill, no 1-px hard border,
+    // no per-key drop shadow. The old paint stamped all three on every
+    // button, which is what made a keypad read as a heavy grid rather
+    // than a surface (docs/aurora-theme/README.md §9 "Calculator").
+    // Flat palettes keep the historical square-bordered-and-shadowed
+    // key verbatim.
+    const bool aurora = theme.aurora_wallpaper;
+
     u32 bg = base_bg;
     if (HasFlag(state.flags, WidgetStateFlags::Pressed))
-        bg = base_bg & 0x00C0C0C0U;
+        bg = aurora ? BlendOver(base_bg, 0x00000000U, 46U) : (base_bg & 0x00C0C0C0U);
     else if (HasFlag(state.flags, WidgetStateFlags::Hover))
-        bg = base_bg | 0x00202020U;
-    if (ThemeTactilityEffective() && !HasFlag(state.flags, WidgetStateFlags::Pressed))
+        bg = aurora ? BlendOver(base_bg, 0x00FFFFFFU, 18U) : (base_bg | 0x00202020U);
+
+    if (!aurora && ThemeTactilityEffective() && !HasFlag(state.flags, WidgetStateFlags::Pressed))
     {
         const u8 opacity = ThemeIntensityEffective(theme.shadow_intensity_active);
         if (opacity > 0)
@@ -26,8 +37,22 @@ void AppButton::PaintSelf(Compose& /*c*/) const
                              0x00000000U);
         }
     }
-    FramebufferFillRect(bounds.x, bounds.y, bounds.w, bounds.h, bg);
-    FramebufferDrawRect(bounds.x, bounds.y, bounds.w, bounds.h, theme.window_border, 1);
+
+    if (aurora)
+    {
+        // Radius scale: the design puts controls at 10-12 px on the
+        // 1920 canvas, i.e. ~6 here. Clamp so a short button still gets
+        // a sane arc instead of a lozenge.
+        const u32 shortest = (bounds.w < bounds.h) ? bounds.w : bounds.h;
+        const u32 radius = (shortest / 3 < 6U) ? shortest / 3 : 6U;
+        FramebufferFillRoundRect(bounds.x, bounds.y, bounds.w, bounds.h, radius, bg);
+    }
+    else
+    {
+        FramebufferFillRect(bounds.x, bounds.y, bounds.w, bounds.h, bg);
+        FramebufferDrawRect(bounds.x, bounds.y, bounds.w, bounds.h, theme.window_border, 1);
+    }
+
     if (label != nullptr && label[0] != '\0')
     {
         const u32 lw = ChromeTextMeasure(ChromeTextRole::Body, label);
