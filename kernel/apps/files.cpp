@@ -2976,9 +2976,19 @@ void FilesSelfTest()
     // volume is mounted; either way, switching back to ram mode
     // must succeed. Call the mode-switch helpers directly — bare
     // letter keys now drive type-ahead, not view switches.
+    // A profile with no FAT32 volume attached (the `bringup` smoke is
+    // one: both block devices probe "not FAT32") can never enter disk
+    // mode, so demanding it here failed the whole app self-test for a
+    // configuration that is perfectly legal. Skip the disk tier when
+    // there is no volume, the way the calendar's persist self-test
+    // already does — the round-trip back to ram mode below is the part
+    // that must hold either way.
+    const bool fat_available = duetos::fs::fat32::Fat32Volume(0) != nullptr;
     SwitchToDisk();
-    if (g_state.mode != Mode::Fat32)
+    if (fat_available && g_state.mode != Mode::Fat32)
         pass = false;
+    if (!fat_available)
+        SerialWrite("[files] disk-mode checks SKIP (no FAT32)\n");
 
     // FAT32 subdir descent+ascent. Scan the root listing for a
     // directory entry; if one exists, descend into it, check that
