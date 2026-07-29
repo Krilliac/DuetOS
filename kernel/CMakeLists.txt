@@ -427,6 +427,28 @@ else()
 endif()
 add_custom_target(duetos-smoke-pes DEPENDS "${DUETOS_SMOKE_PE_STAMP}")
 
+# Side-by-side DLL fixture (SXSTEST.EXE + SXSLIB.DLL). Unlike every
+# other PE fixture here these are deliberately NOT embedded into the
+# kernel image: tools/qemu/run.sh stages both onto the FAT32 volume
+# root, and the .exe can only run if the loader found the DLL sitting
+# beside it on disk. Embedding either half would make the fixture
+# prove nothing. Output lands at the TOP of the build tree because
+# run.sh looks for it relative to build/<preset>, not build/<preset>/kernel.
+set(DUETOS_SXS_FIXTURE_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build/build-sxs-fixture.sh")
+set(DUETOS_SXS_FIXTURE_DIR    "${CMAKE_BINARY_DIR}/sxs-fixture")
+set(DUETOS_SXS_FIXTURE_STAMP  "${DUETOS_SXS_FIXTURE_DIR}/.stamp")
+add_custom_command(
+    OUTPUT "${DUETOS_SXS_FIXTURE_STAMP}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${DUETOS_SXS_FIXTURE_DIR}"
+    COMMAND "${DUETOS_SXS_FIXTURE_SCRIPT}" --out-dir "${DUETOS_SXS_FIXTURE_DIR}"
+    COMMAND "${CMAKE_COMMAND}" -E touch "${DUETOS_SXS_FIXTURE_STAMP}"
+    DEPENDS "${DUETOS_SXS_FIXTURE_SCRIPT}"
+            "${CMAKE_SOURCE_DIR}/userland/libs/sxslib/sxslib.c"
+            "${CMAKE_SOURCE_DIR}/userland/apps/sxs_test/sxs_test.c"
+    COMMENT "Compiling side-by-side DLL fixture (SXSTEST.EXE + SXSLIB.DLL)"
+    VERBATIM)
+add_custom_target(duetos-sxs-fixture ALL DEPENDS "${DUETOS_SXS_FIXTURE_STAMP}")
+
 # mini_browser.exe — minimal WinSock 2 PE that does an HTTP/1.0 GET to
 # www.google.com. Source is userland/apps/mini_browser/browser.c and
 # CMake now embeds the build-tree PE produced by build-smokes.sh.
