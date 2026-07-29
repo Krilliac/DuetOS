@@ -196,8 +196,8 @@ Badges are never inferred from a file extension or a task name:
   It occupies a byte of the struct's existing padding. Kernel-only
   tasks report `kTaskAbiNone` and render **no** badge.
 - **Files** sniffs the image header only where the bytes are already
-  resident in kernel memory (`RamfsNode::file_bytes`): `ELF` →
-  `NATIVE`, `MZ` + a valid `PE  ` at `e_lfanew` → `WIN32 PE`.
+  resident in kernel memory (`RamfsNode::file_bytes`): `\x7fELF` →
+  `NATIVE`, `MZ` + a valid `PE\0\0` at `e_lfanew` → `WIN32 PE`.
   FAT32 rows show **nothing**. The launch path has to guess from
   `.EXE`, and a badge that inherited that guess would confidently
   mislabel any file whose name happens to end in the wrong four
