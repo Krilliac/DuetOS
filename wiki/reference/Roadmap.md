@@ -924,6 +924,41 @@ this is decided, visual-fidelity work must be verified with
 `DUETOS_EXTRA_CMDLINE="theme=duet"`.
 
 
+
+### Aurora desktop-shell fidelity deltas (first valid comparison, 2026-07-29)
+
+Measured by capturing `theme=duet` with the now-fixed `tools/qemu/screenshot.sh`
+and diffing against `docs/aurora-theme` screenshot 01-desktop-overview. Every
+earlier comparison was invalid -- the tool ignored the theme flag and captured
+Classic -- so this is the first delta list that describes the real gap. The
+shell itself (teal gradient, ring motif, hex-dump texture, proportional label
+font, rounded icon tiles, floating centred taskbar pill) **is implemented and
+matches**; what follows is what remains.
+
+1. **Desktop icon set is the wrong list.** The design puts four DuetOS-native
+   app launchers on the desktop -- Task Manager, Kernel Log, Inspect, Files --
+   in a 2x2 grid. The implementation shows a nine-item Windows-like set
+   (Computer, Trash, Browser, Help, Terminal, Calculator, Notepad, Settings,
+   Device Mgr) in a single tall column. This is the largest single visual
+   difference and is pure data, not layout work.
+2. **Taskbar pill is missing its centre section.** The design's pill carries,
+   left to right: a refresh/logo affordance, a **Search box**, a row of pinned
+   app icons, then the CPU sparkline + fps + tray + clock. The implementation
+   has the logo, the CPU/fps readout, tray and clock, but no search box and no
+   pinned-app row.
+3. **No desktop widgets.** The design's right edge carries a clock/date widget,
+   a graph panel and a stats panel floating over the wallpaper. Nothing
+   equivalent exists.
+4. **Wallpaper is more saturated than the design.** The reference is near-black
+   with two localised glows (teal top-right, amber bottom-left); the
+   implementation reads as an overall teal-green field with the amber glow
+   confined to the lower-left corner. Same motif, different value range --
+   a palette/falloff tune, not new geometry.
+
+Note the taskbar's "60.0 FPS" is a hard-coded string literal, not a measured
+figure; the CPU percentage beside it is real.
+
+
 ### Run a real 32-bit application — PE32 game executable (failure ladder)
 
 The standing target for the "run real Windows apps" pillar is a
