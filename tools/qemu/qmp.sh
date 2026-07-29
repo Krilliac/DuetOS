@@ -9,6 +9,7 @@
 #   qmp.sh status                 — run-state (running / paused / ...)
 #   qmp.sh screenshot <out.ppm>   — dump the guest framebuffer
 #   qmp.sh powerdown              — raise the ACPI power button
+#   qmp.sh wakeup                 — wake a guest suspended in ACPI S3
 #   qmp.sh quit                   — ask QEMU to exit cleanly
 #
 # The socket path defaults to build/<preset>/qmp.sock; override with
@@ -23,7 +24,7 @@ PRESET="${DUETOS_PRESET:-x86_64-debug}"
 SOCK="${DUETOS_QMP_SOCK:-${REPO_ROOT}/build/${PRESET}/qmp.sock}"
 
 if [[ $# -lt 1 ]]; then
-    echo "usage: $0 status | screenshot <out.ppm> | powerdown | quit" >&2
+    echo "usage: $0 status | screenshot <out.ppm> | powerdown | wakeup | quit" >&2
     exit 2
 fi
 
@@ -44,6 +45,12 @@ case "${CMD}" in
     # powers off (QEMU exits); one that doesn't keeps running. Used
     # by tools/test/env-powerbtn-smoke.sh.
     powerdown)  QMP_EXEC='{"execute":"system_powerdown"}' ;;
+    # Deliver a wake event to a guest that is suspended in ACPI S3.
+    # QEMU parks the VM on the SLP_TYP=S3 write and only resumes it on
+    # this command, so it is the wake source the S3 cycle harness
+    # (tools/test/s3-cycle-smoke.sh) uses in place of a lid switch or
+    # an RTC alarm. A guest that is NOT suspended ignores it.
+    wakeup)     QMP_EXEC='{"execute":"system_wakeup"}' ;;
     screenshot)
         if [[ $# -ne 1 ]]; then
             echo "usage: $0 screenshot <out.ppm>" >&2

@@ -10,6 +10,8 @@
 # Flags chosen for early-boot diagnosis:
 #   -serial stdio          : pipe COM1 to this terminal
 #   -no-reboot             : halt on triple fault instead of resetting
+#                            (dropped by DUETOS_ALLOW_REBOOT=1 — S3 resume
+#                             legitimately goes through a platform reset)
 #   -no-shutdown           : leave QEMU alive so `info registers` works
 #   -d int,cpu_reset       : trace interrupts + reset causes
 #   -D qemu.log            : dump that trace to qemu.log
@@ -447,6 +449,19 @@ fi
 # remapping only, intremap=off) plus the split irqchip QEMU requires for
 # it; the kernel then programs VT-d identity translation at boot. Used to
 # verify DMA-remapping enforcement under QEMU.
+# `-no-reboot` turns a guest reset into a QEMU exit, which is what you
+# want when diagnosing a triple fault. It is exactly wrong for ACPI S3,
+# though: waking from S3 goes THROUGH a platform reset (QEMU resets the
+# machine, firmware re-runs and jumps to the FACS waking vector), so
+# -no-reboot converts a healthy resume into a shutdown before the guest
+# executes an instruction. DUETOS_ALLOW_REBOOT=1 drops the flag; the S3
+# cycle harness (tools/test/s3-cycle-smoke.sh) sets it.
+REBOOT_ARGS=(-no-reboot)
+if [[ "${DUETOS_ALLOW_REBOOT:-0}" != "0" ]]; then
+    REBOOT_ARGS=()
+    echo "[run.sh] -no-reboot dropped (DUETOS_ALLOW_REBOOT=1): a guest reset will restart, not exit" >&2
+fi
+
 MACHINE_OPTS="q35,accel=${ACCEL}"
 IOMMU_DEVICE_ARGS=()
 if [[ "${DUETOS_IOMMU_DEVICE:-0}" != "0" ]]; then
@@ -478,7 +493,7 @@ QEMU_ARGS=(
     # until the debugger actually attaches. Separate from QEMU's
     # `-gdb` flag (which is QEMU's hypervisor-side debugger).
     -serial   "${DUETOS_GDB_TRANSPORT_QEMU}"
-    -no-reboot
+    "${REBOOT_ARGS[@]}"
     -no-shutdown
     -d        int,cpu_reset
     -D        qemu.log
