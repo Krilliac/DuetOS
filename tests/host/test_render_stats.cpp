@@ -41,6 +41,9 @@
 using duetos::u32;
 using duetos::u64;
 using duetos::drivers::video::DamageRect;
+using duetos::drivers::video::RenderFps;
+using duetos::drivers::video::RenderFpsSample;
+using duetos::drivers::video::RenderFpsWindow;
 using duetos::drivers::video::RenderStats;
 using duetos::drivers::video::RenderStatsOnComposeEnd;
 using duetos::drivers::video::RenderStatsOnPresent;
@@ -255,6 +258,52 @@ int main()
         const RenderStats rs = RenderStatsRead();
         EXPECT_EQ(rs.frames_composed, 3ull);
         EXPECT_EQ(rs.frames_presented, 0ull);
+    }
+
+    // ----- present-rate window --------------------------------------
+    // Driven with a synthetic clock, which is the whole reason
+    // RenderFpsSample takes the tick reading as a parameter.
+    {
+        RenderStatsReset();
+        RenderFpsWindow w{};
+
+        // A fresh window has no rate: one reading of a monotonic
+        // counter carries none.
+        const RenderFps first = RenderFpsSample(w, 1000, 100);
+        EXPECT_EQ(first.valid, false);
+
+        // A poll inside the minimum window must NOT consume the
+        // baseline. This is the regression that pinned the Task
+        // Manager's CPU tiles to 0%/100%: advancing prev_* on every
+        // call meant the window could never grow long enough to carry
+        // a rate. Same failure mode would apply here, so assert the
+        // snapshot survives.
+        const RenderFps early = RenderFpsSample(w, 1010, 100);
+        EXPECT_EQ(early.valid, false); // nothing held yet
+        EXPECT_EQ(w.prev_ticks, 1000ull);
+
+        // 60 presents over a full qualifying second == 60.0 fps.
+        for (int i = 0; i < 60; ++i)
+        {
+            const DamageRect d{10, 10, 100, 100, true};
+            RenderStatsOnPresent(d, 10000, 1, 800, 600);
+        }
+        const RenderFps ok = RenderFpsSample(w, 1100, 100);
+        EXPECT_EQ(ok.valid, true);
+        EXPECT_EQ(ok.fps_x10, 600u);
+        EXPECT_EQ(w.prev_ticks, 1100ull); // qualifying window DID advance
+
+        // A short poll after a good reading repeats the held figure
+        // rather than reporting a fresh, quantised one.
+        const RenderFps held = RenderFpsSample(w, 1105, 100);
+        EXPECT_EQ(held.valid, true);
+        EXPECT_EQ(held.fps_x10, 600u);
+        EXPECT_EQ(w.prev_ticks, 1100ull); // still not consumed
+
+        // An idle second is a real 0.0, distinct from "no reading".
+        const RenderFps idle = RenderFpsSample(w, 1200, 100);
+        EXPECT_EQ(idle.valid, true);
+        EXPECT_EQ(idle.fps_x10, 0u);
     }
 
     return duetos_host_test::finish_main("render_stats");

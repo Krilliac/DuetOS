@@ -74,6 +74,54 @@ RenderStats RenderStatsRead();
 /// critical observable).
 void RenderStatsReset();
 
+/// Minimum window before a present rate means anything, in scheduler
+/// ticks. `frames_presented` advances at most once per compose, and
+/// the pump idles at ~1 Hz, so a window shorter than this can easily
+/// contain zero presents and would render a true-but-useless "0.0
+/// FPS" beside a desktop that is plainly alive.
+inline constexpr u64 kRenderFpsMinWindowTicks = 100; // 1s at 100Hz
+
+/// Caller-owned sampling window for the present rate.
+///
+/// Owned by the caller for the same reason `TelemetryCpuWindow` is:
+/// two consumers polling at different cadences sharing one global
+/// window would consume each other's deltas and both read wrong.
+struct RenderFpsWindow
+{
+    u64 prev_frames;
+    u64 prev_ticks;
+    bool seeded;
+    u32 held_fps_x10;
+    bool held_valid;
+};
+
+struct RenderFps
+{
+    u32 fps_x10; ///< tenths of a frame per second
+    bool valid;  ///< false == no reading yet; render the unavailable state
+};
+
+/// Sample the present rate over `window`.
+///
+/// Same contract as `TelemetryCpuUsageSample`, and for the same
+/// reason: a poll landing inside the minimum window returns the last
+/// figure computed over a window that DID qualify and leaves the
+/// window's baseline untouched, so the window keeps growing instead of
+/// resetting on every call. Advancing the baseline every call is what
+/// pinned the Task Manager's CPU tiles to 0%/100%; a frame counter
+/// read once per paint would fail the same way.
+///
+/// `valid == false` until a qualifying window has elapsed. Callers
+/// MUST render an unavailable state then -- a fabricated number is
+/// exactly the defect this replaces.
+///
+/// `now_ticks` / `tick_hz` are passed in rather than read from
+/// `arch::TimerTicks()` inside: taking the clock as a parameter keeps
+/// this translation unit free of an arch dependency, which is what
+/// lets `tests/host/test_render_stats.cpp` drive the window with a
+/// synthetic clock and assert the short-window behaviour directly.
+RenderFps RenderFpsSample(RenderFpsWindow& window, u64 now_ticks, u32 tick_hz);
+
 // -------------------------------------------------------------------
 // Bump points — called from `framebuffer.cpp` at the end of each
 // compose / present pass. Not part of the public draw API.

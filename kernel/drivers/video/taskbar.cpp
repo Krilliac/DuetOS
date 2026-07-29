@@ -1,6 +1,7 @@
 #include "drivers/video/taskbar.h"
 
 #include "arch/x86_64/rtc.h"
+#include "arch/x86_64/timer.h"
 #include "drivers/net/net.h"
 #include "drivers/power/power.h"
 #include "mm/frame_allocator.h"
@@ -11,6 +12,7 @@
 #include "drivers/video/chrome_text.h"
 #include "drivers/video/cursor.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/render_stats.h"
 #include "drivers/video/shadow.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
@@ -33,6 +35,12 @@ constinit u32 g_h = 0;
 // framebuffer edges. Recomputed by TaskbarReanchor.
 constinit u32 g_bar_x = 0;
 constinit u32 g_bar_w = 0;
+
+// Present-rate window for the CPU/FPS pill. File-scope because the
+// pill is painted from one place on one path; the window has to
+// outlive a single paint or it could never accumulate a measurable
+// interval (RenderFpsSample refuses windows shorter than 1s).
+constinit RenderFpsWindow g_fps_window{};
 // Radius the island body was last painted with; 0 for the classic
 // strip. Cached so the hit-test and the body paint agree.
 constinit u32 g_bar_radius = 0;
@@ -1473,8 +1481,57 @@ void TaskbarRedraw()
             left[6] = '%';
             left[7] = '\0';
             const u32 left_w = ChromeTextMeasure(ChromeTextRole::Caption, left);
+            // FPS: a real present-rate read, differenced over a
+            // window that is long enough to carry a rate. The compose
+            // pump idles at ~1 Hz and bursts under cursor activity, so
+            // the figure genuinely moves. Until the window has
+            // accumulated (RenderFpsSample reports !valid for the
+            // first second) the pill shows "--.-" rather than a
+            // fabricated number -- the same honesty contract the
+            // telemetry surface uses, and the reason this replaced a
+            // hard-coded "60.0".
+            char fps_txt[8];
+            {
+                const RenderFps fps = RenderFpsSample(g_fps_window, ::duetos::arch::TimerTicks(),
+                                                      static_cast<u32>(::duetos::arch::kTickFrequencyHz));
+                if (!fps.valid)
+                {
+                    fps_txt[0] = '-';
+                    fps_txt[1] = '-';
+                    fps_txt[2] = '.';
+                    fps_txt[3] = '-';
+                    fps_txt[4] = '\0';
+                }
+                else
+                {
+                    u32 whole = fps.fps_x10 / 10u;
+                    const u32 frac = fps.fps_x10 % 10u;
+                    u32 n = 0;
+                    if (whole >= 100u)
+                    {
+                        fps_txt[n++] = static_cast<char>('0' + whole / 100u);
+                        whole %= 100u;
+                        fps_txt[n++] = static_cast<char>('0' + whole / 10u);
+                    }
+                    else if (whole >= 10u)
+                    {
+                        fps_txt[n++] = static_cast<char>('0' + whole / 10u);
+                    }
+                    fps_txt[n++] = static_cast<char>('0' + whole % 10u);
+                    fps_txt[n++] = '.';
+                    fps_txt[n++] = static_cast<char>('0' + frac);
+                    fps_txt[n] = '\0';
+                }
+            }
             const u32 sep_w = ChromeTextMeasure(ChromeTextRole::Caption, "  "); // 2-glyph gap around divider
-            const u32 right_w = ChromeTextMeasure(ChromeTextRole::Caption, "60.0 FPS");
+            // Floor the reservation at the design's "60.0 FPS" width so
+            // the pill keeps a stable size across the common 2-digit
+            // range instead of twitching every second, but still grows
+            // if the value is genuinely wider (3 digits, or "--.-").
+            const u32 fps_measured = ChromeTextMeasure(ChromeTextRole::Caption, fps_txt) +
+                                     ChromeTextMeasure(ChromeTextRole::Caption, " FPS");
+            const u32 fps_design_w = ChromeTextMeasure(ChromeTextRole::Caption, "60.0 FPS");
+            const u32 right_w = (fps_measured > fps_design_w) ? fps_measured : fps_design_w;
             constexpr u32 pill_pad_x = 12;
             const u32 pill_w = left_w + sep_w + right_w + 2 * pill_pad_x;
             constexpr u32 pill_pad_y = 4;
@@ -1505,14 +1562,15 @@ void TaskbarRedraw()
                 {
                     FramebufferFillRect(div_x, pill_y + 4, 1, pill_h - 8, g_border);
                 }
-                // Right half: "60.0 FPS" in amber, the secondary
+                // Right half: the live rate in amber, the secondary
                 // accent. Together with the teal "CPU" label the
                 // pill carries the dual-accent duet narrative in
                 // the smallest cell of the chrome too.
                 constexpr u32 kAmberInk = 0x00F5B73A;
                 const u32 right_x = pill_x + pill_pad_x + left_w + sep_w;
-                const u32 num_w = ChromeTextMeasure(ChromeTextRole::Caption, "60.0 ");
-                ChromeTextDraw(ChromeTextRole::Caption, right_x, text_y, "60.0", kAmberInk, g_tab_inactive);
+                const u32 num_w = ChromeTextMeasure(ChromeTextRole::Caption, fps_txt) +
+                                  ChromeTextMeasure(ChromeTextRole::Caption, " ");
+                ChromeTextDraw(ChromeTextRole::Caption, right_x, text_y, fps_txt, kAmberInk, g_tab_inactive);
                 ChromeTextDraw(ChromeTextRole::Caption, right_x + num_w, text_y, "FPS", g_fg, g_tab_inactive);
                 tray_right = (pill_x >= tray_gap) ? pill_x - tray_gap : 0;
             }

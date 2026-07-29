@@ -96,4 +96,30 @@ inline u8 UsedPercent(u64 used, u64 total)
     return static_cast<u8>(pct > 100 ? 100 : pct);
 }
 
+/// Present rate in tenths of a frame per second, from a frame-count
+/// delta over a tick delta.
+///
+/// Returned scaled by 10 because the pill renders one decimal ("59.4
+/// FPS") and the kernel has no floating point in this path.
+///
+/// `tick_hz` is the scheduler tick rate, so the elapsed seconds are
+/// `tick_delta / tick_hz` and the rate is
+/// `frame_delta * tick_hz / tick_delta`, times ten for the decimal.
+/// The multiply is done before the divide to keep the precision;
+/// `frame_delta` is a frame count, so `frame_delta * tick_hz * 10`
+/// cannot realistically approach 2^64.
+///
+/// Returns 0 for a zero-length window rather than dividing — callers
+/// must treat a zero-length window as "no reading", not as "0 FPS".
+/// Clamped at 9999 (999.9 FPS) so a torn read of the frame counter
+/// cannot render a number wider than the pill reserved space for; the
+/// clamp is a display contract, not a plausibility claim.
+inline u32 PresentFpsX10(u64 frame_delta, u64 tick_delta, u32 tick_hz)
+{
+    if (tick_delta == 0 || tick_hz == 0)
+        return 0;
+    const u64 x10 = (frame_delta * static_cast<u64>(tick_hz) * 10ULL) / tick_delta;
+    return static_cast<u32>(x10 > 9999ULL ? 9999ULL : x10);
+}
+
 } // namespace duetos::diag::telemetry_math

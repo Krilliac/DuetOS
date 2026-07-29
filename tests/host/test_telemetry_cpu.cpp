@@ -136,6 +136,30 @@ int main()
     // used > total clamps instead of exceeding 100.
     EXPECT_EQ(static_cast<int>(tm::UsedPercent(2048, 1024)), 100);
 
+    // --- PresentFpsX10 -------------------------------------------------
+    // 60 frames over 100 ticks at 100Hz == exactly 1s == 60.0 fps.
+    EXPECT_EQ(static_cast<int>(tm::PresentFpsX10(60, 100, 100)), 600);
+    // Half a second's worth of window still reports the rate, not the
+    // raw count: 30 frames in 50 ticks is still 60.0 fps.
+    EXPECT_EQ(static_cast<int>(tm::PresentFpsX10(30, 50, 100)), 600);
+    // The tenth actually resolves: 1 frame in 100 ticks == 1.0.
+    EXPECT_EQ(static_cast<int>(tm::PresentFpsX10(1, 100, 100)), 10);
+    // 1 frame in 200 ticks == 0.5 fps -- the idle pump, and the case a
+    // whole-number rate would have flattened to 0.
+    EXPECT_EQ(static_cast<int>(tm::PresentFpsX10(1, 200, 100)), 5);
+    // An idle window with no presents is a real 0.0, distinct from the
+    // no-window case below.
+    EXPECT_EQ(static_cast<int>(tm::PresentFpsX10(0, 100, 100)), 0);
+    // Zero-length window / zero tick rate must not divide.
+    EXPECT_EQ(static_cast<int>(tm::PresentFpsX10(60, 0, 100)), 0);
+    EXPECT_EQ(static_cast<int>(tm::PresentFpsX10(60, 100, 0)), 0);
+    // Clamped so a torn counter read cannot render wider than the pill
+    // reserved for. 10000 frames in 1s would be 1000.0.
+    EXPECT_EQ(static_cast<int>(tm::PresentFpsX10(10000, 100, 100)), 9999);
+    // The multiply happens before the divide, so a large-but-real
+    // frame count keeps its precision rather than truncating to 0.
+    EXPECT_EQ(static_cast<int>(tm::PresentFpsX10(3, 400, 100)), 7); // 0.75 -> 0.7
+
     std::printf("[telemetry-cpu-host] PASS\n");
     return 0;
 }

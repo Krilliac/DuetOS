@@ -8,7 +8,10 @@
 
 #include "drivers/video/render_stats.h"
 
+#include "diag/telemetry_math.h"
 #include "util/saturating.h"
+
+namespace tm = ::duetos::diag::telemetry_math;
 
 namespace duetos::drivers::video
 {
@@ -83,6 +86,47 @@ void RenderStatsReset()
     g_last_h = 0;
     g_last_rect_count = 0;
     g_last_valid = false;
+}
+
+RenderFps RenderFpsSample(RenderFpsWindow& window, u64 now_ticks, u32 tick_hz)
+{
+    RenderFps out = {};
+    const u64 frames = g_frames_presented;
+    const u64 ticks = now_ticks;
+
+    if (!window.seeded)
+    {
+        // One reading of a monotonic counter carries no rate.
+        window.prev_frames = frames;
+        window.prev_ticks = ticks;
+        window.seeded = true;
+        return out;
+    }
+
+    const u64 tick_delta = tm::CounterDelta(ticks, window.prev_ticks);
+    if (tick_delta < kRenderFpsMinWindowTicks)
+    {
+        // Deliberately does NOT advance prev_*: the taskbar samples
+        // once per paint, far faster than this window, so consuming
+        // the baseline here would reset it every call and the window
+        // could never reach a length that carries a rate.
+        if (window.held_valid)
+        {
+            out.fps_x10 = window.held_fps_x10;
+            out.valid = true;
+        }
+        return out;
+    }
+
+    const u64 frame_delta = tm::CounterDelta(frames, window.prev_frames);
+    out.fps_x10 = tm::PresentFpsX10(frame_delta, tick_delta, tick_hz);
+    out.valid = true;
+
+    window.prev_frames = frames;
+    window.prev_ticks = ticks;
+    window.held_fps_x10 = out.fps_x10;
+    window.held_valid = true;
+    return out;
 }
 
 void RenderStatsOnComposeEnd()

@@ -943,11 +943,10 @@ clock/date gadget, and the wallpaper glow geometry. See
    panels beneath the clock at the same column width. Do not ship either
    panel before the ring exists -- a sparkline drawn from one sample is a
    decoration that claims to be a measurement.
-2. **"60.0 FPS" is still a hard-coded string literal**, in both the taskbar
-   stats pill and (by omission) the gadget column. The CPU percentage beside
-   it is real. Either wire it to a real present counter or drop the cell;
-   leaving a fabricated number in the chrome is the worse of the three
-   options.
+2. **The gadget column has no fps figure.** The taskbar pill's is now real
+   (`RenderFpsSample` over `RenderStats::frames_presented`); the gadget
+   column still omits one. Reuse the same sampler rather than adding a
+   second rate derivation.
 3. **The taskbar's stats pill has no sparkline.** README §10 puts a 52-px
    sparkline between the CPU percentage and the fps figure. Blocked on the
    same sample ring as item 1.
