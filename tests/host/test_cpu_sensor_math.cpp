@@ -7,6 +7,10 @@
 //   MilliCToWholeC      — millidegrees -> u8 Celsius, clamped
 //   ZenPstateMhz        — AMD P-state FID/DID -> MHz
 //   EffectiveMhz        — APERF/MPERF ratio x base -> MHz
+//   Intel*Ratio / IntelTurboRatioLimit1C — control-window decode
+//   RatioAdmit          — the refuse-don't-clamp admission test
+//   IntelPerfCtlWithRatio / HwpRequestWithPerf — read-modify-write splices
+//   Hwp* / AmdPstateCtlIndex — HWP capability + read-back decode
 //
 // Why this test exists rather than a boot assertion: neither decode is
 // observable off the target. QEMU models no SMN aperture, so the AMD
@@ -163,6 +167,90 @@ int main()
     // A large but realistic delta pair must not overflow the
     // multiply: 4 GHz base with counters in the tens of billions.
     EXPECT_EQ(static_cast<int>(csm::EffectiveMhz(4000, 0, 0, 40000000000ULL, 40000000000ULL)), 4000);
+
+    // --- Intel control-window decode -----------------------------------
+    // These four all pull a ratio out of a different MSR. A shift
+    // mix-up here writes a wrong ratio to real silicon, which is
+    // exactly the failure QEMU cannot catch (it models none of these
+    // registers), so the whole check lives on the host.
+    //
+    // A plausible desktop part: base 0x2C (44) => 4.4 GHz, min
+    // efficiency ratio 0x08 (8) => 800 MHz, current 0x24 (36).
+    EXPECT_EQ(static_cast<int>(csm::IntelPerfStatusRatio(0x2400ULL)), 36);
+    EXPECT_EQ(static_cast<int>(csm::IntelPlatformInfoBaseRatio(0x0800'0000'2C00ULL)), 44);
+    EXPECT_EQ(static_cast<int>(csm::IntelPlatformInfoMinRatio(0x0800'0000'2C00ULL)), 8);
+    // Bits above 47 and below 8 must not leak into either field.
+    EXPECT_EQ(static_cast<int>(csm::IntelPlatformInfoBaseRatio(~0ULL)), 255);
+    EXPECT_EQ(static_cast<int>(csm::IntelPlatformInfoMinRatio(~0ULL)), 255);
+    // MSR_TURBO_RATIO_LIMIT packs the 1-, 2-, 3-, 4-core ceilings into
+    // successive bytes; only the 1-core field (bits 7:0) is the
+    // absolute ceiling.
+    EXPECT_EQ(static_cast<int>(csm::IntelTurboRatioLimit1C(0x2C2D2E2FULL)), 0x2F);
+
+    // --- ratio admission (refuse, never silently clamp) -----------------
+    // In-window requests pass through unchanged.
+    EXPECT_EQ(static_cast<int>(csm::RatioAdmit(28, 8, 44)), 28);
+    EXPECT_EQ(static_cast<int>(csm::RatioAdmit(8, 8, 44)), 8);   // floor is inclusive
+    EXPECT_EQ(static_cast<int>(csm::RatioAdmit(44, 8, 44)), 44); // ceiling is inclusive
+    // Out-of-window requests are REFUSED. If this ever clamped
+    // instead, asking for 60x on a 44x part would silently apply 44x —
+    // a number nobody chose, with no error to notice.
+    EXPECT_EQ(static_cast<int>(csm::RatioAdmit(45, 8, 44)), 0);
+    EXPECT_EQ(static_cast<int>(csm::RatioAdmit(60, 8, 44)), 0);
+    EXPECT_EQ(static_cast<int>(csm::RatioAdmit(7, 8, 44)), 0);
+    EXPECT_EQ(static_cast<int>(csm::RatioAdmit(255, 8, 44)), 0);
+    // A zero request is not a frequency.
+    EXPECT_EQ(static_cast<int>(csm::RatioAdmit(0, 8, 44)), 0);
+    // A zero bound means the platform did not answer, which is not a
+    // licence to guess a window.
+    EXPECT_EQ(static_cast<int>(csm::RatioAdmit(28, 0, 44)), 0);
+    EXPECT_EQ(static_cast<int>(csm::RatioAdmit(28, 8, 0)), 0);
+    // An inverted window means one of the two reads is garbage.
+    EXPECT_EQ(static_cast<int>(csm::RatioAdmit(28, 44, 8)), 0);
+    // Degenerate but coherent single-point window still works.
+    EXPECT_EQ(static_cast<int>(csm::RatioAdmit(28, 28, 28)), 28);
+
+    // --- IA32_PERF_CTL splice ------------------------------------------
+    // Bit 32 is IDA/turbo disengage: firmware may have set it, and it
+    // is not ours to clear. Everything except bits 15:8 must survive.
+    EXPECT_TRUE(csm::IntelPerfCtlWithRatio((1ULL << 32) | 0x1400ULL, 28) == ((1ULL << 32) | 0x1C00ULL));
+    EXPECT_TRUE(csm::IntelPerfCtlWithRatio(~0ULL, 28) == ((~0ULL & ~0xFF00ULL) | 0x1C00ULL));
+    // The ratio field is one byte; a caller passing something wider
+    // must not bleed into bit 16 and up.
+    EXPECT_TRUE(csm::IntelPerfCtlWithRatio(0, 0x1FF) == 0xFF00ULL);
+    // Round-trip: what goes in comes back out of the same field the
+    // write path's read-back verification reads. This pair IS the
+    // verification — if the splice and the extract ever disagree, a
+    // successful write reports NotVerified on real hardware.
+    EXPECT_EQ(static_cast<int>(csm::IntelPerfCtlRatio(csm::IntelPerfCtlWithRatio(0, 44))), 44);
+    EXPECT_EQ(static_cast<int>(csm::IntelPerfCtlRatio(csm::IntelPerfCtlWithRatio(~0ULL, 8))), 8);
+    EXPECT_EQ(static_cast<int>(csm::IntelPerfCtlRatio(0x1C00ULL)), 28);
+
+    // --- HWP capabilities + request ------------------------------------
+    // highest 0x2C, guaranteed 0x24, most-efficient 0x0C, lowest 0x08.
+    constexpr duetos::u64 kHwpCaps = (0x08ULL << 24) | (0x0CULL << 16) | (0x24ULL << 8) | 0x2CULL;
+    EXPECT_EQ(static_cast<int>(csm::HwpCapHighest(kHwpCaps)), 0x2C);
+    EXPECT_EQ(static_cast<int>(csm::HwpCapGuaranteed(kHwpCaps)), 0x24);
+    EXPECT_EQ(static_cast<int>(csm::HwpCapMostEfficient(kHwpCaps)), 0x0C);
+    EXPECT_EQ(static_cast<int>(csm::HwpCapLowest(kHwpCaps)), 0x08);
+    // The splice pins min == max == desired while preserving EPP
+    // (31:24), the activity window (41:32) and package control (42).
+    constexpr duetos::u64 kPriorRequest = (1ULL << 42) | (0x0AULL << 32) | (0x80ULL << 24) | 0x00112233ULL;
+    const duetos::u64 hwp_out = csm::HwpRequestWithPerf(kPriorRequest, 30, 30, 30);
+    EXPECT_EQ(static_cast<int>(csm::HwpRequestDesired(hwp_out)), 30);
+    EXPECT_EQ(static_cast<int>(hwp_out & 0xFFULL), 30);            // minimum
+    EXPECT_EQ(static_cast<int>((hwp_out >> 8) & 0xFFULL), 30);     // maximum
+    EXPECT_EQ(static_cast<int>((hwp_out >> 24) & 0xFFULL), 0x80);  // EPP untouched
+    EXPECT_EQ(static_cast<int>((hwp_out >> 32) & 0x3FFULL), 0x0A); // activity window untouched
+    EXPECT_TRUE((hwp_out & (1ULL << 42)) != 0);                    // package control untouched
+
+    // --- AMD P-state index read-back ------------------------------------
+    // Only the low three bits are the requested index; a read-back
+    // that carries reserved bits must still compare equal to what was
+    // asked for.
+    EXPECT_EQ(static_cast<int>(csm::AmdPstateCtlIndex(0x5ULL)), 5);
+    EXPECT_EQ(static_cast<int>(csm::AmdPstateCtlIndex(0xFFFF'FFFF'FFFF'FFF5ULL)), 5);
+    EXPECT_EQ(static_cast<int>(csm::AmdPstateCtlIndex(0)), 0);
 
     return finish_main("cpu_sensor_math");
 }

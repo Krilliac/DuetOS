@@ -19,8 +19,12 @@ the elevation broker is the only controlled post-spawn grant bridge.
 
 ## Files
 
-- `kernel/syscall/cap_table.def` — the `CAP_BIT(name, ...)` X-macro
-  list (single source of truth for the bit values)
+- `kernel/proc/process.h` — the `kCap*` enum. **This is the single
+  source of truth for the bit values**; `docs/sync-wiki.sh sync`
+  regenerates the inventory below from it
+- `kernel/syscall/cap_table.def` — the `X(SYS_NAME, REQUIRED_MASK)`
+  syscall-to-cap rows. It maps syscalls onto bits; it does not define
+  them (there is no `CAP_BIT` macro)
 - `kernel/syscall/cap_gate.{h,cpp}` — syscall-to-mask table lookup,
   effective snapshot check, and denial log path
 - `kernel/proc/process.{h,cpp}` — the `kCap*` enum, `CapSet`, the
@@ -74,8 +78,24 @@ Last enum entry, not a live cap. `CapSetTrusted` loops
 ## Cap Numbering is ABI
 
 A process image with a "requested caps" manifest stored on disk would
-break if we renumbered bits. Always **add at the end** of
-`cap_table.def`; never reuse a retired number.
+break if we renumbered bits. Always **add at the end** of the `kCap*`
+enum in `kernel/proc/process.h`, immediately before `kCapCount`; never
+reuse a retired number.
+
+Adding one is not free — walk this list:
+
+- Add a `CapName()` arm and a matching `Expect` in `ProcessSelfTest`
+  (`kernel/proc/process.cpp`), or the boot self-test's
+  "every enumerator has a name" loop panics.
+- Check anything sized by `kCapCount`. `RolePolicy::grace_seconds`
+  grows, which grew the RBAC snapshot's role record past its envelope
+  when `kCapPowerTune` landed — see `kRoleRecordBytes` and the format
+  version beside it in `kernel/security/rbac.cpp`.
+- Decide whether the new bit belongs in the SEC-008 least-privilege
+  spawn set. `CapSetTrusted` picks it up automatically from the
+  `[1 .. kCapCount)` loop; the untrusted sets enumerate explicitly and
+  will silently withhold it, which is the safe default.
+- Re-run `docs/sync-wiki.sh sync` for the inventory below.
 
 ## Syscall <-> Cap Mapping
 
@@ -83,6 +103,27 @@ break if we renumbered bits. Always **add at the end** of
 checks. The dispatcher consults this table during dispatch (or via
 generated case statements per build choice). See
 [Syscalls](../kernel/Syscalls.md).
+
+### A cap with no syscall: `kCapPowerTune`
+
+`kCapPowerTune` (added 2026-07-29) has **no row in `cap_table.def`, on
+purpose.** It gates writing the CPU P-state MSRs
+(`IA32_PERF_CTL` / `IA32_HWP_REQUEST` / `MSR_PSTATE_CTL`) via the shell's
+`cpufreq set`, and there is deliberately no syscall that reaches that
+path — so no Win32 or Linux thunk can drive the clock regardless of what
+caps the guest holds. Driving frequency is both a thermal hazard and a
+side-channel lever (Hertzbleed), so the containment here is the
+*absence of a path*, not a check on one.
+
+Two consequences worth knowing before extending it:
+
+- The cap check lives at the caller (`RequireCap` in the shell), not in
+  `arch::CpuFreqSetTarget` — `arch` has no view of the process model.
+  Any new caller must take the cap itself.
+- It is additionally gated on a `cpufreq=tune` boot cmdline, so holding
+  the cap on a default boot still writes nothing. See
+  [Power-Management](../drivers/Power-Management.md) and
+  [Hardware-Safety](Hardware-Safety.md).
 
 ## Win32 / NT Privilege Surface
 
@@ -113,9 +154,10 @@ performs the authoritative cap check.
 | 5 | `kCapInput` |
 | 6 | `kCapNet` |
 | 7 | `kCapNetAdmin` |
-| 8 | `kCapSchedPriority` |
-| 9 | `kCapSerialConsole` |
-| 10 | `kCapSpawnThread` |
+| 8 | `kCapPowerTune` |
+| 9 | `kCapSchedPriority` |
+| 10 | `kCapSerialConsole` |
+| 11 | `kCapSpawnThread` |
 <!-- /AUTO:cap_list -->
 
 _The capability inventory above is auto-synced by

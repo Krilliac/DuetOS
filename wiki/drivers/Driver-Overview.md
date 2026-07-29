@@ -115,7 +115,7 @@ userland. See [Subsystem Isolation](../kernel/Subsystem-Isolation.md).
 | `storage` | 3 | `kernel/drivers/storage/` |
 | `tpm` | 3 | `kernel/drivers/tpm/` |
 | `usb` | 21 | `kernel/drivers/usb/` |
-| `video` | 42 | `kernel/drivers/video/` |
+| `video` | 43 | `kernel/drivers/video/` |
 | `virtio` | 9 | `kernel/drivers/virtio/` |
 <!-- /AUTO:driver_list -->
 

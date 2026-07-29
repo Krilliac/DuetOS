@@ -1589,4 +1589,151 @@ void CmdHwmon()
     }
 }
 
+// Display half of `cpufreq`, split from the mutate half so the cut in
+// the code follows the cut in authority: everything here is a read any
+// session may do, and nothing below the caller's RequireCap is.
+static void PrintCpuFreqCaps(const duetos::arch::CpuFreqControlCaps& caps)
+{
+    ConsoleWrite("MECHANISM:    ");
+    switch (caps.mechanism)
+    {
+    case duetos::arch::CpuFreqMechanism::Hwp:
+        ConsoleWriteln("Intel HWP (IA32_HWP_REQUEST)");
+        break;
+    case duetos::arch::CpuFreqMechanism::PerfCtl:
+        ConsoleWriteln("Intel legacy (IA32_PERF_CTL)");
+        break;
+    case duetos::arch::CpuFreqMechanism::AmdPstate:
+        ConsoleWriteln("AMD P-state select (MSR_PSTATE_CTL)");
+        break;
+    case duetos::arch::CpuFreqMechanism::None:
+        ConsoleWriteln("(none)");
+        break;
+    }
+
+    // Intel counts up (bus ratio, or an abstract HWP performance unit);
+    // AMD counts down (P-state index). Spell out which, because a user
+    // who guesses wrong asks for the opposite of what they want.
+    ConsoleWrite("UNIT:         ");
+    if (!caps.unit_is_ratio)
+    {
+        ConsoleWriteln("P-state index (LOWER = faster)");
+    }
+    else if (caps.mechanism == duetos::arch::CpuFreqMechanism::Hwp)
+    {
+        ConsoleWriteln("HWP performance unit (higher = faster; not MHz)");
+    }
+    else
+    {
+        ConsoleWriteln("bus ratio (higher = faster; x100 MHz)");
+    }
+    ConsoleWrite("WINDOW:       ");
+    WriteU64Dec(caps.unit_is_ratio ? caps.lowest : caps.highest);
+    ConsoleWrite(" .. ");
+    WriteU64Dec(caps.unit_is_ratio ? caps.highest : caps.lowest);
+    ConsoleWriteln("  (read from this part's own registers)");
+
+    // Reference points inside the window. They do not constrain what
+    // `set` accepts — the window does — but they are what an operator
+    // needs to pick a value: above GUARANTEED is opportunistic turbo,
+    // and EFFICIENT is the best perf-per-watt point, which is not
+    // necessarily the bottom of the window.
+    if (caps.guaranteed != 0)
+    {
+        ConsoleWrite("GUARANTEED:   ");
+        WriteU64Dec(caps.guaranteed);
+        ConsoleWriteln("  (sustained; above this is turbo)");
+    }
+    if (caps.most_efficient != 0)
+    {
+        ConsoleWrite("EFFICIENT:    ");
+        WriteU64Dec(caps.most_efficient);
+        ConsoleWriteln("  (best perf-per-watt point)");
+    }
+
+    ConsoleWrite("CURRENT:      ");
+    if (caps.current != 0)
+    {
+        WriteU64Dec(caps.current);
+        ConsoleWriteln("");
+    }
+    else
+    {
+        ConsoleWriteln("(hardware-managed / not reported)");
+    }
+}
+
+// `cpufreq` — show the P-state control window; `cpufreq set <n>`
+// selects an operating point.
+//
+// This is the ONLY caller of arch::CpuFreqSetTarget, and it is the
+// place the kCapPowerTune gate lives (the arch layer has no view of
+// the process model). The set arm is deliberately unreachable from any
+// syscall: no Win32 or Linux thunk can drive the clock, which keeps
+// both the thermal hazard and the frequency side-channel off the guest
+// surface entirely.
+void CmdCpuFreq(u32 argc, char** argv)
+{
+    const auto caps = duetos::arch::CpuFreqControlRead();
+
+    ConsoleWriteln("=== CPUFREQ ===");
+    ConsoleWrite("TUNE MODE:    ");
+    ConsoleWriteln(duetos::arch::CpuFreqTuneEnabled() ? "on (booted with cpufreq=tune)"
+                                                      : "off (boot with cpufreq=tune to unlock writes)");
+
+    if (!caps.valid)
+    {
+        ConsoleWriteln("CONTROL:      (unsupported — no writable P-state interface on this part)");
+        return;
+    }
+    PrintCpuFreqCaps(caps);
+
+    if (argc < 3 || !StrEq(argv[1], "set"))
+    {
+        ConsoleWriteln("USAGE:        cpufreq set <value>   (requires cap PowerTune + cpufreq=tune)");
+        return;
+    }
+
+    // Gate 2 of the three in cpufreq.h. Gate 1 (tune mode) and gate 3
+    // (the platform-advertised window) are enforced inside
+    // CpuFreqSetTarget, which re-reads the window rather than trusting
+    // the copy printed above.
+    if (!RequireCap(::duetos::core::kCapPowerTune, "CPUFREQ SET"))
+        return;
+
+    u64 want = 0;
+    if (!ParseU64Str(argv[2], &want) || want == 0 || want > 0xFF)
+    {
+        ConsoleWriteln("ERROR: value must be 1..255");
+        ShellSetExit(1);
+        return;
+    }
+
+    const auto status = duetos::arch::CpuFreqSetTarget(static_cast<u32>(want));
+    ConsoleWrite("SET:          ");
+    ConsoleWriteln(duetos::arch::CpuFreqSetStatusName(status));
+    if (status != duetos::arch::CpuFreqSetStatus::Ok)
+    {
+        ShellSetExit(1);
+        return;
+    }
+
+    // Proof, not assertion: APERF/MPERF measures what the silicon
+    // actually delivered over the window, which is a different claim
+    // from "the request register holds the value we wrote". Emulators
+    // accept the write and deliver nothing; this is how you tell.
+    const u32 eff = duetos::arch::CpuFreqSampleEffectiveMhz(200);
+    ConsoleWrite("DELIVERED:    ");
+    if (eff != 0)
+    {
+        WriteU64Dec(eff);
+        ConsoleWriteln(" MHz (200ms APERF/MPERF sample)");
+    }
+    else
+    {
+        ConsoleWriteln("(unmeasurable — APERF/MPERF absent; the write landed but "
+                       "delivery is unproven)");
+    }
+}
+
 } // namespace duetos::core::shell::internal
