@@ -182,6 +182,11 @@ add_host_test(d3dcompiler)
 # GDI region geometry: freestanding header (userland/libs/gdi32/gdi32_region.h),
 # included by relative path — no extra target_sources needed.
 add_host_test(gdi32_region)
+# Off-screen GDI surface arithmetic: freestanding header
+# (kernel/subsystems/win32/gdi_surface_math.h). Pins the guest-controlled
+# allocation math (32-bit pixel-count wrap, DIB DWORD row padding,
+# INT32_MIN biHeight) and the two-surface blit clip.
+add_host_test(gdi_surface)
 # i386 kernel32 companion path / seek-resolution core: freestanding
 # header (userland/libs/kernel32_32/kernel32_32_paths.h), no kernel TU.
 add_host_test(kernel32_32_paths)
