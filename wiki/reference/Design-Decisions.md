@@ -13604,3 +13604,32 @@ markers for its richest input. Three discovery layers were added (runtime
 - **Rules out:** making `AppTextCellRight` clip instead of skip. A
   clipped right-aligned number is a *wrong* number; refusing to draw is
   the safer contract. The bound is what has to be right.
+
+### DD - a usage window refuses to report rather than report a quantised rate
+
+- **Context:** `TelemetryCpuUsageSample` differences two readings of a
+  monotonic tick counter. The scheduler ticks at 100 Hz; Task Manager
+  samples once per **paint**, which is far faster. Differencing two
+  readings taken 0 or 1 ticks apart gives `dt` in `{0, 1}`, and
+  `(dt - di) / dt` can then only evaluate to 0% or 100%. The rail shipped
+  reading "CPU 0% / Core 0 0%" beside an aggregate graph showing 59% —
+  the aggregate sums deltas across CPUs so it usually found one non-zero
+  `dt`, while each per-core tile did not.
+- **Decision:** a window shorter than `kTelemetryMinWindowTicks` (25
+  ticks / 250 ms) is refused. The last figure computed over a window that
+  *did* qualify is returned in its place, and until one exists the sample
+  reports `valid == false` so the pane renders its unavailable state.
+  A refused sample does **not** advance `prev_total` / `prev_idle`.
+- **Rules out:** reporting the instantaneous value and letting the UI
+  smooth it. The input is quantised, not noisy — no amount of downstream
+  averaging recovers a rate from a one-tick window, and a smoothed 0%/100%
+  square wave is a *more* convincing wrong answer than the raw one.
+- **Rules out:** enforcing the minimum length by clamping the poll rate
+  at the caller. The window is caller-owned precisely so consumers at
+  different cadences don't consume each other's deltas; pushing the floor
+  into each caller would have to be re-derived by every future consumer.
+- **Rules out:** adding the minimum-length check alone. Advancing the
+  baseline on every call is what stopped the window growing past one tick
+  in the first place, so a length check that still consumed `prev_*` would
+  refuse forever and report nothing. Not consuming on refusal is the load
+  bearing half of the fix, and `TelemetrySelfTest` asserts it directly.
