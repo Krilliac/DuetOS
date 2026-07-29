@@ -233,6 +233,74 @@ Runtime-exercisable via `fault-inject mce` (or `FaultClass::MachineCheck`)
 routes → decodes → halts without itself triple-faulting on the IST2
 machine-check stack. See [Fault Injection](Fault-Injection.md).
 
+## Hardware Telemetry Query Surface
+
+`kernel/diag/telemetry.h` is the single place a UI (Task Manager's
+Performance view, a future telemetry sink) asks *"what is this machine
+and what is it doing"*. It **adds no counters** — every field is a read
+over state another subsystem already owns.
+
+| Sampler | Returns | Sources |
+|---|---|---|
+| `TelemetryCpuSample()` | identity, topology, per-core lifetime ticks | `sched::SchedStatsReadCpu`, `cpu::TopologyForCpu`, `arch::CpuInfoGet`, `arch::CpuFreqRead` |
+| `TelemetryCpuUsageSample(TelemetryCpuWindow&)` | per-core + aggregate busy % | the above, differenced over a caller-owned window |
+| `TelemetryMemorySample()` | total/used/free, kernel heap, per-DIMM | `mm::TotalFrames`/`FreeFramesCount`, `mm::KernelHeapStatsRead`, `arch::SmbiosGet` |
+| `TelemetryNetSample()` | NIC inventory, kind, link, byte counters | `drivers::net::Nic*`, `net::InterfaceCountersRead` |
+| `TelemetryGraphicsSample()` | compositor + Vulkan ICD activity | `RenderStatsRead`, `GraphicsStatsRead` |
+| `TelemetryBoardSample()` | board / firmware identity | `arch::SmbiosGet` (Types 0/1/2/3) |
+
+Percentage arithmetic lives in the freestanding
+`kernel/diag/telemetry_math.h` and is covered by
+`tests/host/test_telemetry_cpu.cpp`.
+
+### The honesty contract
+
+Every field that can be unavailable is gated by a `*_valid` /
+`*_present` flag. **False means "no data", never "zero".** A pane that
+renders 0% for a quantity it cannot measure is indistinguishable from a
+real idle reading, so callers must render the unavailable state:
+
+- `modules_available == false` → no SMBIOS at all. Distinct from
+  `modules_available && module_count == 0` (SMBIOS present, no Type 17).
+- A NIC enumerated but not stack-bound has `stack_bound == false` and
+  carries **no** counters — "present but not carrying traffic" is not
+  the same fact as "zero bytes", and `count == 0` (no adapter at all) is
+  a third distinct state.
+- `freq_valid == false` under a hypervisor, rather than passing the
+  host's MSR ratios off as the guest's.
+- `TelemetryCpuUsage::valid == false` on the first sample against a
+  fresh window — one reading of a monotonic counter carries no rate.
+
+### Why the window is caller-owned
+
+`TelemetryCpuWindow` is held by the caller, not by the module. Two
+consumers polling at different cadences (a 1 Hz graph and an on-demand
+shell command) sharing one global window would consume each other's
+deltas and both read wrong.
+
+### Why there is no `gpu_busy_pct`
+
+DuetOS cannot currently measure GPU engine busy, so the struct does not
+pretend to: Intel exposes no RC6-residency or `RING_TIMESTAMP` read in
+this tree, NVIDIA only an identity register, and AMD's `mmGRBM_STATUS`
+`GUI_ACTIVE` bit is read **once at probe** — a single sample of a
+level-triggered bit is not a duty cycle. Virtual adapters
+(`bochs_vbe`, `virtio_gpu`) have no engine at all, so the correct answer
+there is *not applicable*, never `0%`. What is real is compositor and
+Vulkan ICD activity, and those fields are named for what they measure.
+Turning the AMD bit into a real percentage needs a periodic sampler.
+
+### Wiring
+
+`TelemetrySelfTest()` runs on the boot path from `kernel/core/main.cpp`,
+**after** `SmpStartAps` + `TopologyAssignClusters`. Before those,
+`SmpCpuIdLimit()` is 1 and `TopologyForCpu()` has no `core_group`, so
+the sampler reports a single core on a 4-way box and the self-test only
+validates the uniprocessor path. It emits one `[telemetry] cpuN …` row
+per logical CPU plus a `[telemetry-selftest] PASS` sentinel; the rows
+differing per CPU is the live proof the accounting is genuinely per-CPU
+rather than one shared slot.
+
 ## Known Limits / GAPs
 
 - **No #MC recovery path.** Even when the bank decode returns
@@ -243,6 +311,24 @@ machine-check stack. See [Fault Injection](Fault-Injection.md).
   Revisit when `mm` grows a poison list.
 - **UBSAN off by default.** Enable with `ubsan=on` cmdline; rate-limited
   reports otherwise drown the log.
+- **No GPU engine-busy source.** `TelemetryGraphics` carries no
+  utilisation percentage — see the section above. Closing this needs a
+  periodic sampler over AMD `mmGRBM_STATUS` bit 31 (the only busy
+  register already mapped), plus new register work for Intel
+  (RC6 residency) and NVIDIA (`NV_PGRAPH_STATUS`). None of it is
+  verifiable under QEMU, which models no GPU.
+- **CPU frequency and temperature are hypervisor-suppressed.**
+  `TelemetryCpuInfo::freq_valid` is false under QEMU by design.
+  Separately, `arch::ThermalRead` is **Intel-only** — there is no AMD
+  SMN / `THM_TCON_CUR_TMP` path, so CPU temperature is unavailable on
+  AMD hardware. Both are gated statically because there is no
+  `ReadMsrSafe` (only `WriteMsrSafe` exists); an exception-tolerant
+  `rdmsr` would let these probe speculatively instead of bailing out.
+- **Telemetry NIC↔interface correlation is positional.** The driver
+  `NicInfo[i]` registry and the stack's `Interface[i]` table are matched
+  by index, which holds today because both cap at 4 slots. A future
+  driver that binds a non-matching interface index would mis-attribute
+  counters; the real fix is an explicit binding field on `NicInfo`.
 - **`blake2b.cpp` / `argon2id.cpp` `RotR64` shift-exponent UB
   (fixed).** Under the max-diagnostics debug build the auth/hash
   path tripped `[ubsan] shift-out-of-bounds at blake2b.cpp:38`

@@ -13144,3 +13144,56 @@ markers for its richest input. Three discovery layers were added (runtime
 - **Scope:** flat palettes (Classic / Slate10 / Amber / DuetClassic /
   HighContrast) keep their per-role title bars and their standing red
   close box unchanged.
+
+### DD — SMBIOS entry point comes from the EFI config table first
+
+- **Context:** `SmbiosInit` only scanned the legacy BIOS window
+  `0xF0000..0xFFFFF`. Pure UEFI firmware never populates that area, and
+  `tools/qemu/run.sh` boots OVMF by default, so every local boot logged
+  "no SMBIOS entry point". The absence was read as "QEMU provides no
+  SMBIOS", and both Type 2 and Type 17 work was assumed to need bare
+  metal.
+- **Decision:** discovery tries the EFI Configuration Table by GUID
+  (`SMBIOS3_TABLE_GUID`, then `SMBIOS_TABLE_GUID`) via
+  `arch::UefiFindConfigTable`, and falls back to the legacy scan. The
+  call site moved out of `BootBringupEarly` into `BootBringupMemPaging`,
+  after `FrameAllocatorInit` (Multiboot2 snapshot) and `PagingInit`.
+- **Rules out:** treating SMBIOS as bare-metal-only, and treating the
+  legacy scan as sufficient on a UEFI-first project. It also rules out
+  the early call site: the legacy scan's own `PhysToVirt` needed the
+  direct map, so running before `PagingInit` was already wrong — the
+  header comment claimed otherwise.
+- **Evidence:** QEMU/OVMF now reports SMBIOS v3.0, EDK II 2024.02, and a
+  real Type 17 record. Per-DIMM and baseboard data are testable locally.
+
+### DD — telemetry percentages use a caller-owned window and a derived aggregate
+
+- **Context:** CPU-busy percent was re-derived in `diag/resmon.cpp`,
+  `apps/sysmon.cpp` and the taskbar pill, each with its own clamping and
+  first-sample handling, and the taskbar's system figure came from a
+  global counter independent of the per-core ones.
+- **Decision:** the arithmetic lives once in
+  `kernel/diag/telemetry_math.h`. `TelemetryCpuWindow` is owned by the
+  caller, and the aggregate is the sum of per-core busy deltas over the
+  sum of per-core total deltas.
+- **Rules out:** (a) a module-global rolling window — two consumers
+  polling at different cadences would consume each other's deltas;
+  (b) computing the aggregate as the mean of per-core percentages, which
+  lets a CPU with two ticks of history swing the system figure as hard
+  as one with a thousand; (c) reporting utilisation from lifetime
+  counters, which averages since boot and goes stale-flat within minutes.
+- **Evidence:** both formulas are pinned against each other in
+  `tests/host/test_telemetry_cpu.cpp`.
+
+### DD — no fabricated GPU utilisation number
+
+- **Context:** a Task Manager Performance view is expected to show GPU
+  load, and the GPU drivers do map BARs.
+- **Decision:** `TelemetryGraphics` carries no `gpu_busy_pct`. It
+  exposes compositor frame/present counts and Vulkan ICD op counts,
+  named for what they measure.
+- **Rules out:** deriving a percentage from AMD's one-shot probe-time
+  `mmGRBM_STATUS` read, and reporting `0%` for adapters with no engine
+  (`bochs_vbe`, `virtio_gpu`) — those must render "not applicable". A
+  real number requires a periodic sampler, and none of it is verifiable
+  under QEMU, which models no GPU.
