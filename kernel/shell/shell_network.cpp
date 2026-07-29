@@ -1706,6 +1706,9 @@ void FirewallUsage()
     ConsoleWriteln("  firewall toggle <idx>");
     ConsoleWriteln("  firewall default <in|out> <allow|deny>");
     ConsoleWriteln("  firewall reset");
+    ConsoleWriteln("  firewall except                    list operator exceptions");
+    ConsoleWriteln("  firewall except <seq>              allow the denial with that log sequence");
+    ConsoleWriteln("  firewall except add <dir:proto:addr/mask:port>");
 }
 
 } // namespace
@@ -1843,6 +1846,84 @@ void CmdFirewall(u32 argc, char** argv)
             return;
         }
         ConsoleWrite("FIREWALL: rule added at index ");
+        WriteU64Dec(idx);
+        ConsoleWriteln("");
+        return;
+    }
+    if (StrEq(argv[1], "except"))
+    {
+        namespace fw = duetos::net::firewall;
+
+        // Bare `firewall except` lists what is currently excepted.
+        // The whole verb already sits behind kCapNetAdmin at the
+        // dispatch site (shell_dispatch.cpp), so a guest PE cannot
+        // reach any of this — installing an exception is exactly the
+        // "steer traffic" power that gate exists to withhold.
+        if (argc < 3)
+        {
+            ConsoleWrite("FIREWALL EXCEPTIONS: ");
+            WriteU64Dec(fw::FwExceptionCount());
+            ConsoleWrite(" (");
+            WriteU64Dec(fw::FwCmdlineSeededCount());
+            ConsoleWriteln(" from boot cmdline)");
+            fw::Rule snap[fw::kFwMaxRules];
+            const u32 n = fw::FwSnapshot(snap, fw::kFwMaxRules);
+            for (u32 i = 0; i < n; ++i)
+            {
+                if (!snap[i].active || !snap[i].exception)
+                    continue;
+                ConsoleWrite("  [");
+                WriteU64Dec(i);
+                ConsoleWrite("] ");
+                ConsoleWrite(snap[i].dir == fw::Direction::Ingress ? "in " : "out ");
+                WriteFwPrefix(snap[i].dir == fw::Direction::Ingress ? snap[i].src : snap[i].dst);
+                ConsoleWrite(" dport ");
+                WriteU64Dec(snap[i].dst_port.lo);
+                ConsoleWrite("-");
+                WriteU64Dec(snap[i].dst_port.hi);
+                ConsoleWriteln("");
+            }
+            ConsoleWriteln("USAGE: FIREWALL EXCEPT [<seq> | ADD <dir:proto:addr/mask:port>]");
+            return;
+        }
+
+        if (StrEq(argv[2], "add"))
+        {
+            if (argc < 4)
+            {
+                ConsoleWriteln("USAGE: FIREWALL EXCEPT ADD <dir:proto:addr/mask:port>");
+                return;
+            }
+            u32 idx = 0;
+            const u32 len = static_cast<u32>(duetos::core::StrLen(argv[3]));
+            if (!fw::FwExceptionAdd(argv[3], len, &idx))
+            {
+                ConsoleWriteln("FIREWALL EXCEPT: BAD SPEC OR RULE TABLE FULL");
+                ConsoleWriteln("  example: in:tcp:10.0.2.2/32:8080");
+                return;
+            }
+            ConsoleWrite("FIREWALL EXCEPT: added at index ");
+            WriteU64Dec(idx);
+            ConsoleWriteln("");
+            return;
+        }
+
+        // `firewall except <seq>` — promote a logged denial.
+        u64 seq = 0;
+        if (!ParseU64Str(argv[2], &seq))
+        {
+            ConsoleWriteln("FIREWALL EXCEPT: EXPECTED A DENIAL SEQUENCE OR 'ADD'");
+            return;
+        }
+        u32 idx = 0;
+        if (!fw::FwExceptionFromDenial(seq, &idx))
+        {
+            ConsoleWriteln("FIREWALL EXCEPT: NO SUCH DENIAL (aged out of the log?) OR TABLE FULL");
+            return;
+        }
+        ConsoleWrite("FIREWALL EXCEPT: denial ");
+        WriteU64Dec(seq);
+        ConsoleWrite(" allowed via rule index ");
         WriteU64Dec(idx);
         ConsoleWriteln("");
         return;

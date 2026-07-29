@@ -14019,3 +14019,73 @@ snapshot is refused by `RbacImportSnapshot` rather than mis-parsed with
 every `grace_seconds` entry shifted. Any future cap addition past 15
 must widen it again and bump the version again — silently reusing the
 version is the failure mode this pins.
+
+## 2026-07-29 - Security exceptions: what an operator vouches for, and how
+
+### DD — an exception names an image digest, never a path
+
+- **Context:** the image guard blocks `UnityPlayer.dll` on
+  `PE_SUSPICIOUS`, and the operator needs a way to say "this one is
+  fine" that survives more than the current prompt. The obvious key is
+  the path the guard already prints (`/UNITYPLA.DLL`).
+- **Decision:** an exception is keyed on the SHA-256 of the image
+  bytes. The path is carried alongside as a human-readable label only,
+  and is never consulted when matching. `Gate()` already hashes every
+  image for the deny list, so this costs nothing extra.
+- **Rules out:** a path-keyed allowlist. Under one, any writer who can
+  place a file at an excepted path inherits that exception — on a FAT32
+  volume a guest can write, that is a full bypass of the image gate for
+  the price of a rename. The digest names the exact bytes the operator
+  inspected, so substituting the file revokes the exception
+  automatically, which is the behaviour a reviewer expects.
+- **Accepted cost:** an exception does not survive a legitimate update.
+  Patching an approved binary changes its digest and the operator is
+  prompted again. That is the correct default for a security decision —
+  the new bytes are genuinely a different thing to vouch for — but it
+  does mean the mechanism is unsuitable as a general "trust this
+  vendor" facility. Publisher-level trust needs code signing, which is
+  a separate subsystem and is not what this is.
+- **Evidence:** identity parsing is pinned in
+  `tests/host/test_exception_id.cpp`; the live both-directions proof is
+  the `[guard-exception-selftest]` line in any boot log.
+
+### DD — unattended pre-authorisation is per-image, never a mode
+
+- **Context:** the prompt default-denies on timeout, so a headless boot
+  (CI, a smoke run, a server) can never answer it. Something has to let
+  a known-good image through without a human.
+- **Decision:** a repeatable `guard-allow=<sha256>[,...]` boot token
+  seeds the exception list. Every seeded digest is echoed to the boot
+  log and summarised by a `NOTICE` line and a `guard` status field.
+- **Rules out:** flipping the timeout default to allow, and any
+  `guard=permissive` style switch. Both would make an unattended boot
+  silently weaker than an attended one, which inverts the property that
+  makes the gate worth having. It also rules out treating "no operator
+  present" as consent.
+- **Accepted cost:** whoever controls the bootloader configuration can
+  pre-authorise images. That is already true of anyone who can set the
+  kernel cmdline — they can equally pass `guard=off` — so the token
+  grants no authority that was not already there, and unlike `guard=off`
+  it is narrow and itemised in the log.
+
+### DD — the firewall surfaces denials asynchronously; it does not prompt
+
+- **Context:** the request was "the security guard pops up which you can
+  add an exception, same should be done with firewall". The guard's
+  prompt is a synchronous modal that blocks the loading thread.
+- **Decision:** the firewall keeps the same three ways to add an
+  exception, the same cap gate, and the same loud logging, but replaces
+  the synchronous modal with a rate-limited notification toast naming
+  the blocked packet and the command that would allow it. The operator
+  converts a logged denial into a standing rule afterwards
+  (`firewall except <seq>`).
+- **Rules out:** a modal on the packet path. `FwEvaluate` runs inside
+  `Ipv4HandleIncoming` / `IfaceTx`; blocking it for a ten-second
+  decision would let any port scan stall the network stack, turning the
+  prompt itself into the denial of service it was meant to report. It
+  also rules out queueing denials for a later batch prompt, which has
+  the same unbounded-growth problem in slower motion.
+- **Accepted cost:** the blocked packet is lost. TCP retries and the
+  exception applies to the retransmit; a single UDP datagram is not
+  recovered. This is the same behaviour as any stateful firewall whose
+  rule is added after the fact.

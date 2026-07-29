@@ -277,6 +277,8 @@ All write-side FAT operations are admin-gated.
 | `ntp [ip]` | NTP query (default 216.239.35.0) | |
 | `http <ip> [port [path]]` | TCP connect + GET, prints 16 lines | |
 | `net <up\|status\|test>` | Bring up / status / end-to-end smoke | |
+| `firewall <sub>` | Rule table / stats / denial log / conntrack / default policy. Whole verb gated on `kCapNetAdmin` | |
+| `firewall except [<seq>\|add <spec>]` | Allow a logged denial (`<seq>` from `firewall log`), or install a spec `<in\|out>:<proto>:<addr>/<mask>:<port>`. See [Security Exceptions](../security/Security-Exceptions.md) | |
 | `usbnet [args...]` | USB-network helpers | |
 | `drshd <sub>` | DRSH remote-access service control | `status` shows state / counters / port / lockout; `start [port]`, `stop`, `passwd <pw>`, and `unlock` (clear a brute-force lockout) are admin-gated. Listener refuses to start without a pre-shared key set |
 | `svc [list\|start\|stop\|restart <name>]` | Service manager front-end | `list` (default) shows each manifest service's state / policy / pid / restart count (any user); `start`/`stop`/`restart <name>` are admin-gated |
@@ -342,6 +344,7 @@ All write-side FAT operations are admin-gated.
 | `groups` | Active role | |
 | `attacksim`, `redteam` | Run red-team attack suite (admin) | |
 | `guard [sub]` | Security guard: status / on / enforce / off / test | |
+| `guard except [list\|add <sha256>\|del <idx>]` | Image-load exceptions, keyed on SHA-256. List is unprivileged; add/del need `kCapDebug`. See [Security Exceptions](../security/Security-Exceptions.md) | |
 | `secevents`, `events <args>` | Security event ring | |
 | `policy <args>` | Security policy view / edit | |
 | `purple`, `purpleteam` | Purple-team scenario runner | |

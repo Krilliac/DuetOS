@@ -1,6 +1,10 @@
 #include "net/firewall.h"
 
+#include "core/boot_cmdline.h"
+#include "drivers/video/notify.h"
 #include "log/klog.h"
+#include "net/fw_exception.h"
+#include "security/exception_id.h"
 #include "time/tick.h"
 #include "util/compiler.h"
 
@@ -28,6 +32,28 @@ constinit u64 g_log_total = 0;
 // more code than it saves. Eviction picks the entry with the
 // oldest `last_use_ticks`.
 constinit ConntrackEntry g_conntrack[kConntrackCap] = {};
+
+// How many active exceptions came from `fw-allow=` boot tokens.
+// Surfaced by `firewall status` so a pre-authorised boot is never
+// mistaken for a clean one.
+constinit u32 g_cmdline_seeded = 0;
+
+// Boot token that installs firewall exceptions without an operator
+// present. Repeatable; each occurrence carries a comma-separated
+// list of specs (grammar in net/fw_exception.h). Every spec names a
+// direction, protocol, peer prefix and port — there is deliberately
+// no "allow everything" spelling.
+constexpr const char* kCmdlineAllowKey = "fw-allow";
+
+// Rate limit for the denial toast. A blocked port scan produces one
+// denial per probe; without this the toast slot would thrash and the
+// operator would see only the last packet of a burst. One toast per
+// this many scheduler ticks is enough to say "something is being
+// blocked, go look at `firewall log`" without becoming the noise it
+// is warning about.
+constexpr u64 kDenialToastCooldownTicks = 5 * 100; // ~5s at kSchedulerHz
+constinit u64 g_last_toast_ticks = 0;
+constinit bool g_toast_armed = false;
 
 constexpr u32 kSchedulerHz = 100;
 
@@ -247,6 +273,70 @@ bool ConntrackLookupReverse(Proto proto, Ipv4Address ingress_src_ip, u16 ingress
     return false;
 }
 
+// Append `v` as decimal to `buf` at `*w`, bounded by `cap`.
+void AppendDecimal(char* buf, u32* w, u32 cap, u32 v)
+{
+    char digits[6];
+    u32 n = 0;
+    do
+    {
+        digits[n++] = static_cast<char>('0' + (v % 10));
+        v /= 10;
+    } while (v != 0 && n < sizeof(digits));
+    while (n > 0 && *w < cap)
+        buf[(*w)++] = digits[--n];
+}
+
+void AppendLiteral(char* buf, u32* w, u32 cap, const char* s)
+{
+    for (u32 i = 0; s[i] != '\0' && *w < cap; ++i)
+        buf[(*w)++] = s[i];
+}
+
+/// Surface a blocked packet to the desktop.
+///
+/// This is the firewall's answer to the guard's modal. It cannot be
+/// a modal: `FwEvaluate` sits on the packet path, so blocking here
+/// for an operator decision would stall the network stack for every
+/// probe an attacker cares to send. A toast instead tells the
+/// operator that something is being dropped and names it; the
+/// exception itself is added afterwards, out of band, via
+/// `firewall except <seq>`.
+///
+/// Rate-limited (see kDenialToastCooldownTicks) so a scan cannot
+/// turn the notification surface into a denial-of-service of its
+/// own.
+void RaiseDenialToast(const DenialRecord& r)
+{
+    const u64 now = ::duetos::time::TickCount();
+    if (g_toast_armed && (now - g_last_toast_ticks) < kDenialToastCooldownTicks)
+        return;
+    g_toast_armed = true;
+    g_last_toast_ticks = now;
+
+    // "firewall blocked in 10.0.2.2:445 (#7 — firewall except 7)"
+    char text[duetos::drivers::video::kNotifyMaxText];
+    u32 w = 0;
+    const u32 cap = static_cast<u32>(sizeof(text)) - 1;
+    AppendLiteral(text, &w, cap, "firewall blocked ");
+    AppendLiteral(text, &w, cap, r.dir == Direction::Ingress ? "in " : "out ");
+    const Ipv4Address& peer = (r.dir == Direction::Ingress) ? r.src_ip : r.dst_ip;
+    for (u32 i = 0; i < 4; ++i)
+    {
+        if (i != 0)
+            AppendLiteral(text, &w, cap, ".");
+        AppendDecimal(text, &w, cap, peer.octets[i]);
+    }
+    AppendLiteral(text, &w, cap, ":");
+    AppendDecimal(text, &w, cap, r.dst_port);
+    AppendLiteral(text, &w, cap, " — 'firewall except ");
+    AppendDecimal(text, &w, cap, static_cast<u32>(r.sequence));
+    AppendLiteral(text, &w, cap, "' to allow");
+    text[w] = '\0';
+
+    duetos::drivers::video::NotifyShowKind(text, duetos::drivers::video::NotifyKind::Warning);
+}
+
 void LogDenial(Direction dir, Proto proto, Ipv4Address src_ip, Ipv4Address dst_ip, u16 src_port, u16 dst_port,
                u32 matched_rule)
 {
@@ -261,6 +351,8 @@ void LogDenial(Direction dir, Proto proto, Ipv4Address src_ip, Ipv4Address dst_i
     r.src_port = src_port;
     r.dst_port = dst_port;
     r.matched_rule = matched_rule;
+
+    RaiseDenialToast(r);
 }
 
 bool RuleMatches(const Rule& r, Direction dir, Proto proto, Ipv4Address src_ip, Ipv4Address dst_ip, u16 src_port,
@@ -320,8 +412,18 @@ void FwInit()
         g_log[i] = DenialRecord{};
     }
     g_log_total = 0;
+    g_cmdline_seeded = 0;
+    g_toast_armed = false;
+    g_last_toast_ticks = 0;
     ConntrackReset();
     KLOG_INFO("net/firewall", "rule-table reset; defaults=allow/allow");
+
+    // Seed operator exceptions from the boot cmdline. Runs after the
+    // reset so the table is empty and the seeded rules occupy the
+    // lowest slots — first-match-wins, so an exception the operator
+    // asked for is evaluated before anything a later subsystem adds.
+    // FindBootCmdline(0) reads the cache warmed during early boot.
+    FwSeedExceptionsFromCmdline(duetos::core::FindBootCmdline(0));
 }
 
 void ConntrackReset()
@@ -432,6 +534,163 @@ void FwRemove(u32 index)
     }
     g_rules[index].active = false;
     g_rules[index].hits = 0;
+}
+
+namespace
+{
+
+/// Turn a parsed spec into a rule. The peer prefix binds to the
+/// source for ingress and the destination for egress; the local
+/// side stays wildcard because a host that has not been assigned
+/// its address yet (DHCP still in flight) would otherwise fail to
+/// match its own exception.
+Rule RuleFromSpec(const ExceptionSpec& spec)
+{
+    Rule r{};
+    r.active = true;
+    r.exception = true;
+    r.action = Action::Allow;
+    r.dir = spec.egress ? Direction::Egress : Direction::Ingress;
+    r.proto = static_cast<Proto>(spec.proto);
+
+    Ipv4Prefix peer{};
+    for (u32 i = 0; i < 4; ++i)
+        peer.addr.octets[i] = spec.addr[i];
+    peer.mask_bits = spec.mask_bits;
+    const Ipv4Prefix any{{{0, 0, 0, 0}}, 0};
+
+    r.src = spec.egress ? any : peer;
+    r.dst = spec.egress ? peer : any;
+
+    // Source port is always wildcard: it is ephemeral, so pinning it
+    // would produce an exception that matches exactly one connection
+    // and then never again.
+    r.src_port = PortRange{0, 0xFFFF};
+    r.dst_port = spec.any_port ? PortRange{0, 0xFFFF} : PortRange{spec.port, spec.port};
+    return r;
+}
+
+/// Install a parsed spec. `origin` names where the operator's
+/// instruction came from and is logged verbatim — a reader working
+/// out why a hole exists needs to know whether a human typed it at
+/// the shell or a boot token installed it unattended.
+bool InstallException(const char* spec_text, u32 len, u32* out_index, const char* origin)
+{
+    ExceptionSpec spec{};
+    if (!ParseExceptionSpec(spec_text, len, &spec))
+        return false;
+    const u32 idx = FwAdd(RuleFromSpec(spec));
+    if (idx >= kFwMaxRules)
+        return false;
+    if (out_index != nullptr)
+        *out_index = idx;
+    KLOG_WARN_V("net/firewall", "operator firewall exception installed (rule index)", idx);
+    KLOG_WARN_S("net/firewall", "firewall exception origin", "origin", origin);
+    return true;
+}
+
+} // namespace
+
+bool FwExceptionFromDenial(u64 sequence, u32* out_index)
+{
+    // Sequences are 1-based externally (0 is the empty-slot
+    // sentinel). Reject anything the ring has already overwritten
+    // rather than promoting whatever now occupies that slot — the
+    // operator asked to allow a specific packet they saw, not
+    // whatever landed in its place.
+    if (sequence == 0 || sequence > g_log_total)
+        return false;
+    if (g_log_total > kFwLogCap && sequence <= g_log_total - kFwLogCap)
+        return false;
+
+    const DenialRecord& d = g_log[(sequence - 1) % kFwLogCap];
+    if (d.sequence != sequence)
+        return false;
+
+    ExceptionSpec spec{};
+    spec.egress = (d.dir == Direction::Egress);
+    spec.proto = static_cast<u8>(d.proto);
+    const Ipv4Address& peer = (d.dir == Direction::Ingress) ? d.src_ip : d.dst_ip;
+    for (u32 i = 0; i < 4; ++i)
+        spec.addr[i] = peer.octets[i];
+    // /32: promoting a denial allows exactly the host that was
+    // blocked. Widening to a subnet is a separate, deliberate act
+    // through `firewall except add <spec>`.
+    spec.mask_bits = 32;
+    spec.any_port = (d.proto != Proto::Tcp && d.proto != Proto::Udp);
+    spec.port = d.dst_port;
+
+    const u32 idx = FwAdd(RuleFromSpec(spec));
+    if (idx >= kFwMaxRules)
+        return false;
+    if (out_index != nullptr)
+        *out_index = idx;
+    KLOG_WARN_V("net/firewall", "operator firewall exception installed (rule index)", idx);
+    KLOG_WARN_S("net/firewall", "firewall exception origin", "origin", "denial-log");
+    return true;
+}
+
+bool FwExceptionAdd(const char* spec_text, u32 len, u32* out_index)
+{
+    return InstallException(spec_text, len, out_index, "shell");
+}
+
+void FwSeedExceptionsFromCmdline(const char* cmdline)
+{
+    using duetos::security::CmdlineFindNthValue;
+    using duetos::security::CsvField;
+    using duetos::security::CsvFieldCount;
+
+    u32 installed = 0;
+    u32 rejected = 0;
+    const char* value = nullptr;
+    u32 value_len = 0;
+    for (u32 tok = 0; CmdlineFindNthValue(cmdline, kCmdlineAllowKey, tok, &value, &value_len); ++tok)
+    {
+        const u32 fields = CsvFieldCount(value, value_len);
+        for (u32 f = 0; f < fields; ++f)
+        {
+            const char* field = nullptr;
+            u32 field_len = 0;
+            if (!CsvField(value, value_len, f, &field, &field_len))
+                continue;
+            u32 idx = 0;
+            if (!InstallException(field, field_len, &idx, "boot-cmdline"))
+            {
+                ++rejected;
+                continue;
+            }
+            ++installed;
+        }
+    }
+
+    g_cmdline_seeded = installed;
+    if (rejected > 0)
+    {
+        // A rejected spec means traffic the operator meant to permit
+        // will be dropped instead. Never silent.
+        KLOG_WARN_V("net/firewall", "fw-allow= entries rejected (malformed or table full)", rejected);
+    }
+    if (installed > 0)
+    {
+        KLOG_WARN_V("net/firewall", "cmdline-seeded firewall exceptions in force (fw-allow=)", installed);
+    }
+}
+
+u32 FwExceptionCount()
+{
+    u32 n = 0;
+    for (u32 i = 0; i < kFwMaxRules; ++i)
+    {
+        if (g_rules[i].active && g_rules[i].exception)
+            ++n;
+    }
+    return n;
+}
+
+u32 FwCmdlineSeededCount()
+{
+    return g_cmdline_seeded;
 }
 
 void FwToggle(u32 index)
@@ -726,6 +985,106 @@ void FwSelfTest()
         Expect(n >= 1, "denial log captured at least one entry");
         Expect(FwLogTotalCount() >= 1, "denial total monotone");
     }
+
+    // ---------- Exceptions: BOTH directions ----------
+    //
+    // The point of these checks is that an exception is narrow. A
+    // test that only shows the excepted tuple passing cannot tell a
+    // working exception apart from a disabled firewall, so every
+    // allow below is paired with a neighbouring tuple that must
+    // still be denied under the same default policy.
+    FwInit();
+    FwSetDefaultPolicy(Direction::Ingress, Action::Deny);
+    ConntrackReset();
+    {
+        // `FwInit` re-seeds `fw-allow=` boot tokens, so the table is
+        // NOT necessarily empty here. Compare against a captured
+        // baseline rather than absolute counts — an absolute
+        // `== 1` passes only on boots with no seed, which is exactly
+        // the kind of test that quietly stops meaning anything.
+        const u32 base_exceptions = FwExceptionCount();
+
+        // Addresses chosen to sit outside any plausible fw-allow=
+        // seed a developer would type, so a seeded rule cannot mask
+        // the deny half of the comparison below.
+        constexpr Ipv4Address kPeer = {{198, 51, 100, 7}};
+        constexpr Ipv4Address kOtherPeer = {{198, 51, 100, 8}};
+        constexpr Ipv4Address kLocal = {{198, 51, 100, 1}};
+
+        // Baseline: with inbound default-deny and no exception, the
+        // target tuple is refused.
+        {
+            const Action a = FwEvaluate(Direction::Ingress, Proto::Tcp, kPeer, kLocal, 40000, 8080, kTcpSyn, nullptr);
+            Expect(a == Action::Deny, "exception baseline: tuple denied before the exception exists");
+        }
+
+        // Install the exception via the textual spec path.
+        u32 eidx = kFwMaxRules;
+        const char kSpec[] = "in:tcp:198.51.100.7/32:8080";
+        Expect(FwExceptionAdd(kSpec, sizeof(kSpec) - 1, &eidx), "FwExceptionAdd accepts a well-formed spec");
+        Expect(eidx < kFwMaxRules, "exception occupies a rule slot");
+        Expect(FwExceptionCount() == base_exceptions + 1, "exception counted as an exception");
+
+        // ALLOW direction: the excepted tuple now passes.
+        {
+            const Action a = FwEvaluate(Direction::Ingress, Proto::Tcp, kPeer, kLocal, 40000, 8080, kTcpSyn, nullptr);
+            Expect(a == Action::Allow, "exception allows the tuple it names");
+        }
+
+        // STILL-DENIED direction 1: a different peer.
+        {
+            const Action a =
+                FwEvaluate(Direction::Ingress, Proto::Tcp, kOtherPeer, kLocal, 40000, 8080, kTcpSyn, nullptr);
+            Expect(a == Action::Deny, "exception does not generalise to another peer");
+        }
+        // STILL-DENIED direction 2: a different port on the same peer.
+        {
+            const Action a = FwEvaluate(Direction::Ingress, Proto::Tcp, kPeer, kLocal, 40000, 8081, kTcpSyn, nullptr);
+            Expect(a == Action::Deny, "exception does not generalise to another port");
+        }
+        // STILL-DENIED direction 3: a different protocol.
+        {
+            const Action a = FwEvaluate(Direction::Ingress, Proto::Udp, kPeer, kLocal, 40000, 8080, 0, nullptr);
+            Expect(a == Action::Deny, "exception does not generalise to another protocol");
+        }
+
+        // Malformed specs must be rejected outright, never applied
+        // partially — a half-understood exception is a hole of
+        // unknown shape.
+        const char kBadProto[] = "in:sctp:198.51.100.7/32:8080";
+        const char kBadMask[] = "in:tcp:198.51.100.7/33:8080";
+        const char kBadPort[] = "in:tcp:198.51.100.7/32:70000";
+        const char kBadShape[] = "in:tcp:198.51.100.7/32";
+        Expect(!FwExceptionAdd(kBadProto, sizeof(kBadProto) - 1, nullptr), "unknown proto rejected");
+        Expect(!FwExceptionAdd(kBadMask, sizeof(kBadMask) - 1, nullptr), "mask > 32 rejected");
+        Expect(!FwExceptionAdd(kBadPort, sizeof(kBadPort) - 1, nullptr), "port > 65535 rejected");
+        Expect(!FwExceptionAdd(kBadShape, sizeof(kBadShape) - 1, nullptr), "missing field rejected");
+        Expect(FwExceptionCount() == base_exceptions + 1, "rejected specs installed nothing");
+
+        // Promoting a logged denial produces a working exception for
+        // that exact host, and only that host.
+        ConntrackReset();
+        const u64 before = FwLogTotalCount();
+        (void)FwEvaluate(Direction::Ingress, Proto::Tcp, kOtherPeer, kLocal, 40000, 9090, kTcpSyn, nullptr);
+        Expect(FwLogTotalCount() == before + 1, "denial recorded for the promote test");
+        u32 pidx = kFwMaxRules;
+        Expect(FwExceptionFromDenial(FwLogTotalCount(), &pidx), "FwExceptionFromDenial promotes a live denial");
+        {
+            const Action a =
+                FwEvaluate(Direction::Ingress, Proto::Tcp, kOtherPeer, kLocal, 40000, 9090, kTcpSyn, nullptr);
+            Expect(a == Action::Allow, "promoted denial now allowed");
+        }
+        {
+            constexpr Ipv4Address kThirdPeer = {{198, 51, 100, 9}};
+            const Action a =
+                FwEvaluate(Direction::Ingress, Proto::Tcp, kThirdPeer, kLocal, 40000, 9090, kTcpSyn, nullptr);
+            Expect(a == Action::Deny, "promoted denial did not widen to other hosts");
+        }
+        // A sequence that never existed must not promote anything.
+        Expect(!FwExceptionFromDenial(0, nullptr), "sequence 0 rejected");
+        Expect(!FwExceptionFromDenial(FwLogTotalCount() + 100, nullptr), "future sequence rejected");
+    }
+    FwSetDefaultPolicy(Direction::Ingress, Action::Allow);
 
     // Reset back to clean v0 state.
     FwInit();
