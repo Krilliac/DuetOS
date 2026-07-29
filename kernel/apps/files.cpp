@@ -11,6 +11,7 @@
 #include "drivers/input/ps2mouse.h"
 #include "drivers/video/app_widgets/app_button.h"
 #include "drivers/video/app_widgets/app_label.h"
+#include "drivers/video/app_widgets/app_palette.h"
 #include "drivers/video/app_widgets/app_toolbar.h"
 #include "drivers/video/app_widgets/widget_group.h"
 #include "drivers/video/framebuffer.h"
@@ -68,12 +69,45 @@ constexpr u32 kFatHistMax = 16;
 // Type-ahead inter-key idle gap: 100 ticks @ 100 Hz = 1 second.
 constexpr u64 kTypeaheadTimeoutTicks = 100;
 constexpr u32 kGlyphW = 8;
-constexpr u32 kRowH = 10;
+// 12-px rows: an 8-px glyph with 2 px of air above and below. The
+// design's list rows are generous (10 px padding at 1920); this is the
+// closest the 1024-wide framebuffer gets without halving the row count.
+// Every list geometry — Draw*, FilesListVisibleRows, FilesRowAt — is
+// derived from this constant, so it moves as one.
+constexpr u32 kRowH = 12;
+// Historical (flat-theme) ink ramp. Classic / Slate10 / Amber /
+// DuetClassic / HighContrast keep exactly these; the Aurora palettes
+// take the muted ramp from AppPaletteFor instead.
 constexpr u32 kInkFg = 0x00D0D8E0;
 constexpr u32 kInkDim = 0x00707880;
 constexpr u32 kInkSel = 0x00101020;
 constexpr u32 kBg = 0x00101828;
 constexpr u32 kSelBg = 0x00C0C888;
+
+// Live app-interior palette for the Files client area. Sampled per
+// paint so a runtime theme cycle (Ctrl+Alt+Y) recolours the list.
+duetos::drivers::video::app_widgets::AppPalette Pal()
+{
+    using duetos::drivers::video::ThemeCurrent;
+    using duetos::drivers::video::ThemeRole;
+    const u32 body = ThemeCurrent().role_client[static_cast<u32>(ThemeRole::Files)];
+    return duetos::drivers::video::app_widgets::AppPaletteFor(body);
+}
+
+// List-pane ground and muted ink. Under Aurora the list ground IS the
+// window's client fill, so the pane seams into the glass body instead
+// of sitting on it as a second, differently-toned panel.
+u32 ListBg()
+{
+    const auto p = Pal();
+    return p.aurora ? p.body : kBg;
+}
+
+u32 ListDim()
+{
+    const auto p = Pal();
+    return p.aurora ? p.ink_3 : kInkDim;
+}
 
 enum class Mode : u8
 {
@@ -302,14 +336,35 @@ AppButton* HdrButton(u32 i)
     return btns[i];
 }
 
+// Resolve every widget colour against the active theme. Split out of
+// BindFilesOnce (which is one-shot) so a runtime theme cycle recolours
+// the toolbar and the status strip.
+void ApplyFilesPalette()
+{
+    const auto p = Pal();
+
+    auto& toolbar = g_files.chain.head;
+    toolbar.bg_rgb = p.aurora ? p.wash : 0U; // 0 = theme.taskbar_bg
+
+    for (u32 i = 0; i < kHdrBtnCount; ++i)
+    {
+        AppButton* btn = HdrButton(i);
+        // Aurora toolbar buttons are `--glass-3` pills with muted ink,
+        // not filled chips — the accent is reserved for selection.
+        btn->bg_rgb = p.aurora ? p.recess : 0U; // 0 = theme role_title[0]
+        btn->fg_rgb = p.aurora ? p.ink_2 : 0x00101828U;
+    }
+
+    auto& label = g_files.chain.tail.tail.tail.tail.tail.tail.tail.head;
+    label.fg_rgb = p.aurora ? p.ink_3 : 0x00181828U;
+    label.bg_rgb = p.aurora ? p.wash : 0x00C8C8B8U; // status band tone
+}
+
 void BindFilesOnce()
 {
     if (g_files_bound)
         return;
     g_files_bound = true;
-
-    auto& toolbar = g_files.chain.head;
-    toolbar.bg_rgb = 0; // theme.taskbar_bg
 
     static const char* const kLabels[kHdrBtnCount] = {"RAM", "DISK", "TRASH", "DRIVE", "REFRESH", "SORT"};
     using ClickFn = void (*)();
@@ -321,17 +376,15 @@ void BindFilesOnce()
         btn->label = kLabels[i];
         btn->on_click = kClicks[i];
         btn->weight = ChromeTextWeight::Regular;
-        btn->bg_rgb = 0; // theme role_title[0]
-        btn->fg_rgb = 0x00101828U;
     }
 
     auto& label = g_files.chain.tail.tail.tail.tail.tail.tail.tail.head;
     label.text = g_footer_text;
     label.role = ChromeTextRole::Caption;
     label.weight = ChromeTextWeight::Regular;
-    label.fg_rgb = 0x00181828U;
-    label.bg_rgb = 0x00C8C8B8U; // status band tone
     label.align_left = true;
+
+    ApplyFilesPalette();
 }
 
 void RebindFilesBounds(u32 cx, u32 cy, u32 cw, u32 ch)
@@ -939,7 +992,8 @@ void WriteU64Dec(char* dst, u32 cap, u64 v)
 // `sort_by` (nullable) appends ", by <mode>" so the user can see
 // the active sort order — only the FAT32 / Trash views sort, so
 // ramfs / DuetFS pass nullptr.
-void DrawListHeaderWithCount(u32 cx, u32 cy, const char* path, u32 count, u32 color, const char* sort_by = nullptr)
+void DrawListHeaderWithCount(u32 cx, u32 cy, u32 cw, const char* path, u32 count, u32 color,
+                             const char* sort_by = nullptr)
 {
     char line[96];
     u32 o = 0;
@@ -961,6 +1015,19 @@ void DrawListHeaderWithCount(u32 cx, u32 cy, const char* path, u32 count, u32 co
     }
     put(")");
     line[o] = '\0';
+
+    // Aurora: the header is a sticky band, not a coloured line — a
+    // `--glass-3` wash with a hairline under it and muted uppercase
+    // ink. The per-view `color` (green / orange) is spent only on the
+    // flat palettes, which keep the historical single-line header.
+    const auto p = Pal();
+    if (p.aurora)
+    {
+        duetos::drivers::video::FramebufferFillRect(cx, cy, cw, 2 + kRowH, p.wash);
+        duetos::drivers::video::FramebufferFillRect(cx, cy + 2 + kRowH - 1, cw, 1, p.line);
+        duetos::drivers::video::FramebufferDrawString(cx + 4, cy + 3, line, p.ink_3, p.wash);
+        return;
+    }
     duetos::drivers::video::FramebufferDrawString(cx + 4, cy + 2, line, color, kBg);
 }
 
@@ -996,23 +1063,42 @@ void FormatFatDate(u16 date, char* out)
 }
 
 // Generic row painter — takes the type tag, name, size, and optional FAT
-// date word. `mtime_date==0` suppresses the date column. The per-mode
-// draw paths assemble these from their entry types; non-FAT modes pass 0.
-void DrawRowGeneric(u32 x, u32 y, u32 w, bool is_dir, const char* name, u64 size_bytes, bool selected,
+// date word. `mtime_date==0` suppresses the date column. `row_index` is
+// the row's position in the visible list, used only for the zebra
+// stripe. The per-mode draw paths assemble these from their entry
+// types; non-FAT modes pass 0 for the date.
+void DrawRowGeneric(u32 x, u32 y, u32 w, u32 row_index, bool is_dir, const char* name, u64 size_bytes, bool selected,
                     u16 mtime_date = 0)
 {
     using duetos::drivers::video::FramebufferDrawString;
     using duetos::drivers::video::FramebufferFillRect;
-    if (selected)
-        FramebufferFillRect(x, y, w, kRowH, kSelBg);
-    else
-        FramebufferFillRect(x, y, w, kRowH, kBg);
-    const u32 fg = selected ? kInkSel : kInkFg;
-    const u32 bg = selected ? kSelBg : kBg;
+    const auto p = Pal();
+
+    // Aurora rows are quiet: the body fill with a `--glass-3` zebra
+    // stripe, selection carried by an accent tint plus a 2-px accent
+    // rail rather than by a high-chroma fill. Flat palettes keep the
+    // historical olive selection bar.
+    u32 fg = selected ? kInkSel : kInkFg;
+    u32 bg = selected ? kSelBg : kBg;
+    u32 dim = selected ? kInkSel : kInkDim;
+    if (p.aurora)
+    {
+        bg = selected ? p.sel : ((row_index & 1u) ? p.wash : p.body);
+        fg = p.ink;
+        dim = p.ink_3;
+    }
+    FramebufferFillRect(x, y, w, kRowH, bg);
+    if (p.aurora && selected)
+        FramebufferFillRect(x, y, 2, kRowH, p.accent);
+
+    const u32 text_y = y + (kRowH - 8) / 2;
+    // Directories take the native accent, files the peer accent: the
+    // design's ABI colouring, reused here as the type glyph's hue.
+    const u32 tag_fg = p.aurora ? (is_dir ? p.accent : p.ink_3) : fg;
     const char* tag = is_dir ? "[D] " : "[F] ";
-    FramebufferDrawString(x + 4, y + 1, tag, fg, bg);
+    FramebufferDrawString(x + 4, text_y, tag, tag_fg, bg);
     const char* dn = (name != nullptr && name[0] != '\0') ? name : "(root)";
-    FramebufferDrawString(x + 4 + 4 * kGlyphW, y + 1, dn, fg, bg);
+    FramebufferDrawString(x + 4 + 4 * kGlyphW, text_y, dn, fg, bg);
 
     // Right-aligned columns: modified date (if available) then size (if file).
     // Layout: right edge → [size] ← [space] ← [date] ← ...
@@ -1032,8 +1118,8 @@ void DrawRowGeneric(u32 x, u32 y, u32 w, bool is_dir, const char* name, u64 size
         if (right_cursor > size_col_w + 8)
         {
             const u32 nx = right_cursor - size_col_w;
-            FramebufferDrawString(nx, y + 1, num, fg, bg);
-            FramebufferDrawString(nx + len * kGlyphW, y + 1, " BYTES", selected ? kInkSel : kInkDim, bg);
+            FramebufferDrawString(nx, text_y, num, p.aurora ? p.ink_2 : fg, bg);
+            FramebufferDrawString(nx + len * kGlyphW, text_y, " BYTES", dim, bg);
             right_cursor = nx - kGlyphW; // one-glyph gap before next column
         }
     }
@@ -1047,7 +1133,7 @@ void DrawRowGeneric(u32 x, u32 y, u32 w, bool is_dir, const char* name, u64 size
         if (right_cursor > date_col_w + 4)
         {
             const u32 dx = right_cursor - date_col_w;
-            FramebufferDrawString(dx, y + 1, date_str, selected ? kInkSel : kInkDim, bg);
+            FramebufferDrawString(dx, text_y, date_str, dim, bg);
         }
     }
 }
@@ -1056,11 +1142,11 @@ void DrawRamfs(u32 cx, u32 cy, u32 cw, u32 ch)
 {
     using duetos::drivers::video::FramebufferDrawString;
     using duetos::drivers::video::FramebufferFillRect;
-    FramebufferFillRect(cx, cy, cw, ch, kBg);
+    FramebufferFillRect(cx, cy, cw, ch, ListBg());
     const duetos::fs::RamfsNode* cur = RamfsCur();
     if (cur == nullptr)
     {
-        FramebufferDrawString(cx + 4, cy + 4, "(no root)", kInkDim, kBg);
+        FramebufferDrawString(cx + 4, cy + 4, "(no root)", ListDim(), ListBg());
         return;
     }
 
@@ -1083,7 +1169,7 @@ void DrawRamfs(u32 cx, u32 cy, u32 cw, u32 ch)
         }
     }
     header[h_off] = '\0';
-    DrawListHeaderWithCount(cx, cy, header, CountChildren(RamfsCur()), 0x0080F088);
+    DrawListHeaderWithCount(cx, cy, cw, header, CountChildren(RamfsCur()), 0x0080F088);
 
     const u32 list_top = cy + 2 + kRowH + 2;
     const u32 n = CountChildren(cur);
@@ -1098,7 +1184,7 @@ void DrawRamfs(u32 cx, u32 cy, u32 cw, u32 ch)
         if (child == nullptr)
             break;
         const bool is_dir = (child->type == duetos::fs::RamfsNodeType::kDir);
-        DrawRowGeneric(cx, list_top + i * kRowH, cw, is_dir, child->name, is_dir ? 0 : child->file_size,
+        DrawRowGeneric(cx, list_top + i * kRowH, cw, i, is_dir, child->name, is_dir ? 0 : child->file_size,
                        idx == g_state.ramfs_selection);
     }
     // Footer hint line moved to the AppLabel painted by DrawFn —
@@ -1110,15 +1196,15 @@ void DrawFat32(u32 cx, u32 cy, u32 cw, u32 ch)
 {
     using duetos::drivers::video::FramebufferDrawString;
     using duetos::drivers::video::FramebufferFillRect;
-    FramebufferFillRect(cx, cy, cw, ch, kBg);
+    FramebufferFillRect(cx, cy, cw, ch, ListBg());
 
     char header[80];
     Fat32BuildPathHeader(header, sizeof(header));
-    DrawListHeaderWithCount(cx, cy, header, g_state.fat_count, 0x0080F088, SortModeName(g_state.sort));
+    DrawListHeaderWithCount(cx, cy, cw, header, g_state.fat_count, 0x0080F088, SortModeName(g_state.sort));
 
     if (g_state.fat_count == 0)
     {
-        FramebufferDrawString(cx + 4, cy + 2 + kRowH + 4, "(no FAT32 volume mounted)", kInkDim, kBg);
+        FramebufferDrawString(cx + 4, cy + 2 + kRowH + 4, "(no FAT32 volume mounted)", ListDim(), ListBg());
         // Footer hint -> AppLabel (RefreshFooterText / DrawFn).
         return;
     }
@@ -1136,7 +1222,7 @@ void DrawFat32(u32 cx, u32 cy, u32 cw, u32 ch)
         const u32 idx = first + i;
         const auto& e = g_state.fat_entries[idx];
         const bool is_dir = (e.attributes & 0x10) != 0;
-        DrawRowGeneric(cx, list_top + i * kRowH, list_w, is_dir, e.name, e.size_bytes, idx == g_state.fat_selection,
+        DrawRowGeneric(cx, list_top + i * kRowH, list_w, i, is_dir, e.name, e.size_bytes, idx == g_state.fat_selection,
                        e.mtime_date);
     }
     // Scrollbar at the right edge of the row area.
@@ -1177,12 +1263,12 @@ void DrawTrash(u32 cx, u32 cy, u32 cw, u32 ch)
 {
     using duetos::drivers::video::FramebufferDrawString;
     using duetos::drivers::video::FramebufferFillRect;
-    FramebufferFillRect(cx, cy, cw, ch, kBg);
-    DrawListHeaderWithCount(cx, cy, "TRASH:/", g_state.trash_count, 0x00FFA060, SortModeName(g_state.sort));
+    FramebufferFillRect(cx, cy, cw, ch, ListBg());
+    DrawListHeaderWithCount(cx, cy, cw, "TRASH:/", g_state.trash_count, 0x00FFA060, SortModeName(g_state.sort));
 
     if (g_state.trash_count == 0)
     {
-        FramebufferDrawString(cx + 4, cy + 2 + kRowH + 4, "(trash is empty)", kInkDim, kBg);
+        FramebufferDrawString(cx + 4, cy + 2 + kRowH + 4, "(trash is empty)", ListDim(), ListBg());
         // Footer hint -> AppLabel (RefreshFooterText / DrawFn).
         return;
     }
@@ -1197,7 +1283,7 @@ void DrawTrash(u32 cx, u32 cy, u32 cw, u32 ch)
     {
         const u32 idx = first + i;
         const auto& e = g_state.trash_entries[idx];
-        DrawRowGeneric(cx, list_top + i * kRowH, cw, false, e.name, e.size_bytes, idx == g_state.trash_selection);
+        DrawRowGeneric(cx, list_top + i * kRowH, cw, i, false, e.name, e.size_bytes, idx == g_state.trash_selection);
     }
 
     // Footer hint + pending-prompt overlays moved to the AppLabel
@@ -1210,7 +1296,7 @@ void DrawDuetFs(u32 cx, u32 cy, u32 cw, u32 ch)
 {
     using duetos::drivers::video::FramebufferDrawString;
     using duetos::drivers::video::FramebufferFillRect;
-    FramebufferFillRect(cx, cy, cw, ch, kBg);
+    FramebufferFillRect(cx, cy, cw, ch, ListBg());
 
     // Header breadcrumb: "DRIVE:/a/b/" from the name stack.
     char header[80];
@@ -1226,11 +1312,11 @@ void DrawDuetFs(u32 cx, u32 cy, u32 cw, u32 ch)
             header[h++] = '/';
     }
     header[h] = '\0';
-    DrawListHeaderWithCount(cx, cy, header, g_state.duet_count, 0x0080F088);
+    DrawListHeaderWithCount(cx, cy, cw, header, g_state.duet_count, 0x0080F088);
 
     if (g_state.duet_count == 0)
     {
-        FramebufferDrawString(cx + 4, cy + 2 + kRowH + 4, "(empty directory)", kInkDim, kBg);
+        FramebufferDrawString(cx + 4, cy + 2 + kRowH + 4, "(empty directory)", ListDim(), ListBg());
         // Footer hint -> AppLabel (RefreshFooterText / DrawFn).
         return;
     }
@@ -1253,7 +1339,7 @@ void DrawDuetFs(u32 cx, u32 cy, u32 cw, u32 ch)
         for (u32 k = 0; k < nl; ++k)
             nm[k] = static_cast<char>(e.name[k]);
         nm[nl] = '\0';
-        DrawRowGeneric(cx, list_top + i * kRowH, list_w, is_dir, nm, e.size_bytes, idx == g_state.duet_selection);
+        DrawRowGeneric(cx, list_top + i * kRowH, list_w, i, is_dir, nm, e.size_bytes, idx == g_state.duet_selection);
     }
     if (max_rows > 0 && cw > duetos::drivers::video::kScrollbarWidth)
     {
@@ -1359,14 +1445,24 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     // Pass D chrome: AppToolbar at top (kHdrToolbarH), per-mode
     // list paint in the middle, AppLabel footer at the bottom.
     BindFilesOnce();
+    ApplyFilesPalette();
     RebindFilesBounds(cx, cy, cw, ch);
     RefreshFooterText();
     // Pre-paint the footer band tone so the AppLabel glyphs sit
     // on a uniform bg (AppLabel paints only its glyphs, not a
     // full-width band).
+    const auto p = Pal();
     if (ch > kFooterH)
     {
-        FramebufferFillRect(cx, cy + ch - kFooterH, cw, kFooterH, 0x00C8C8B8U);
+        if (p.aurora)
+        {
+            using duetos::drivers::video::app_widgets::AppStatusBarDraw;
+            AppStatusBarDraw(cx, cy + ch - kFooterH, cw, kFooterH, p);
+        }
+        else
+        {
+            FramebufferFillRect(cx, cy + ch - kFooterH, cw, kFooterH, 0x00C8C8B8U);
+        }
     }
     Compose compose_ctx{};
     g_files.PaintAll(compose_ctx);
@@ -1977,25 +2073,24 @@ bool FilesFeedArrow(bool up)
 }
 
 // Visible list rows for the current window size. Mirrors the
-// max_rows formula in every Draw* path / FilesRowAt. Title bar
-// 22 px + 2-px borders + Pass D AppToolbar (kHdrToolbarH) at the
-// top, AppLabel footer (kFooterH) reserved at the bottom, then
-// the per-mode header line (2 + kRowH + 2) above the first row.
+// max_rows formula in every Draw* path / FilesRowAt. The client rect
+// comes from the window manager (the title bar is per-theme: 22 on
+// the flat palettes, 30 across the Duet family), then the Pass D
+// AppToolbar (kHdrToolbarH) at the top, the AppLabel footer
+// (kFooterH) at the bottom, and the per-mode header line
+// (2 + kRowH + 2) above the first row.
 // Used to make PageUp/PageDown step exactly one screenful.
 u32 FilesListVisibleRows()
 {
-    duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
-    if (!duetos::drivers::video::WindowGetBounds(g_state.handle, &wx, &wy, &ww, &wh) || wh < 26)
+    duetos::u32 clx = 0, cly = 0, clw = 0, content_h_full = 0;
+    if (!duetos::drivers::video::WindowGetClientRect(g_state.handle, &clx, &cly, &clw, &content_h_full))
         return 0;
-    const duetos::u32 content_y_full = wy + 22 + 2;
-    const duetos::u32 content_h_full = wh - 22 - 4;
     if (content_h_full <= kHdrToolbarH + kFooterH)
         return 0;
     // Middle slice the per-mode Draw* now receives.
-    const duetos::u32 content_y = content_y_full + kHdrToolbarH;
     const duetos::u32 content_h = content_h_full - kHdrToolbarH - kFooterH;
-    const duetos::u32 list_top = content_y + 2 + kRowH + 2;
-    return (content_h > (list_top - content_y) + kRowH) ? (content_h - (list_top - content_y)) / kRowH : 0;
+    const duetos::u32 list_offset = 2 + kRowH + 2;
+    return (content_h > list_offset + kRowH) ? (content_h - list_offset) / kRowH : 0;
 }
 
 // Home / End / PageUp / PageDown / Delete / F4 / F5 for the active list.
@@ -2735,10 +2830,13 @@ duetos::i32 FilesRowAt(duetos::u32 sx, duetos::u32 sy)
     // needs the per-mode count + selection (via ModeCount /
     // ModeSelection) — no per-mode whitelist.
     //
-    // Pass D layout: title bar 22 px + 2-px content inset, then a
-    // 26-px AppToolbar (mirrors `kHdrToolbarH`), then the per-mode
-    // header line (2 + kRowH + 2), then the first row. 12-px footer
-    // (mirrors `kFooterH`) reserved at the bottom for the AppLabel.
+    // Pass D layout inside the client rect: a 26-px AppToolbar
+    // (mirrors `kHdrToolbarH`), then the per-mode header line
+    // (2 + kRowH + 2), then the first row. 12-px footer (mirrors
+    // `kFooterH`) reserved at the bottom for the AppLabel.
+    // The client rect itself comes from the window manager — the
+    // title bar is per-theme, so re-deriving it here from a constant
+    // would put every click out of phase with the paint.
     // Constants duplicated here because they live in this TU's
     // anonymous namespace and FilesRowAt is in the outer namespace;
     // if you change either k_hdr_toolbar_h or k_footer_h in the
@@ -2747,18 +2845,12 @@ duetos::i32 FilesRowAt(duetos::u32 sx, duetos::u32 sy)
     constexpr duetos::u32 k_footer_h = 12U;
     if (ModeCount() == 0)
         return -1;
-    duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
-    if (!duetos::drivers::video::WindowGetBounds(g_state.handle, &wx, &wy, &ww, &wh))
+    duetos::u32 content_x = 0, content_y_full = 0, content_w = 0, content_h_full = 0;
+    if (!duetos::drivers::video::WindowGetClientRect(g_state.handle, &content_x, &content_y_full, &content_w,
+                                                     &content_h_full))
         return -1;
-    if (ww < 4 || wh < 26)
+    if (content_w == 0)
         return -1;
-    // Full content area first (matches DrawFn's cy / ch), then
-    // carve out the toolbar top + footer bottom to get the middle
-    // slice the per-mode Draw* function received.
-    const duetos::u32 content_x = wx + 2;
-    const duetos::u32 content_y_full = wy + 22 + 2;
-    const duetos::u32 content_w = ww - 4;
-    const duetos::u32 content_h_full = wh - 22 - 4;
     if (content_h_full <= k_hdr_toolbar_h + k_footer_h)
         return -1;
     const duetos::u32 content_y = content_y_full + k_hdr_toolbar_h;

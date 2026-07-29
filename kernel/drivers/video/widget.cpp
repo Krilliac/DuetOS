@@ -1322,6 +1322,29 @@ bool WindowGetBounds(WindowHandle h, u32* x_out, u32* y_out, u32* w_out, u32* h_
     return true;
 }
 
+bool WindowGetClientRect(WindowHandle h, u32* x_out, u32* y_out, u32* w_out, u32* h_out)
+{
+    if (!WindowValid(h))
+    {
+        return false;
+    }
+    // Must stay bit-identical to the client rect DesktopCompose hands
+    // the content-draw callback, or an app's hit-test drifts off its
+    // own paint.
+    const auto& c = g_windows[h].chrome;
+    const u32 tbh = EffectiveTitleHeight(c);
+    const u32 tbh_eff = (tbh > c.h) ? c.h : tbh;
+    if (x_out)
+        *x_out = c.x + 2;
+    if (y_out)
+        *y_out = c.y + tbh_eff + 2;
+    if (w_out)
+        *w_out = (c.w > 4) ? c.w - 4 : 0;
+    if (h_out)
+        *h_out = (c.h > tbh_eff + 4) ? c.h - tbh_eff - 4 : 0;
+    return true;
+}
+
 void WindowSetColours(WindowHandle h, u32 border_rgb, u32 title_rgb, u32 client_rgb, u32 close_rgb)
 {
     if (!WindowValid(h))

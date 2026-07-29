@@ -206,6 +206,18 @@ void WindowMoveTo(WindowHandle h, u32 x, u32 y);
 /// Returns false if the handle is invalid.
 bool WindowGetBounds(WindowHandle h, u32* x_out, u32* y_out, u32* w_out, u32* h_out);
 
+/// Read back the CLIENT rectangle — the exact rect the window's
+/// content-draw callback is handed (inside the 2-px border, under
+/// the title bar). All four out-params are nullable; returns false
+/// if the handle is invalid.
+///
+/// Apps that hit-test their own client area must use this rather
+/// than re-deriving `y + 22 + 2`: the title bar height is per-theme
+/// (22 on the flat palettes, 30 across the Duet family), so a
+/// hardcoded constant silently puts every click 8 px out of phase
+/// with what was painted.
+bool WindowGetClientRect(WindowHandle h, u32* x_out, u32* y_out, u32* w_out, u32* h_out);
+
 /// Update the chrome colours of an existing window in place.
 /// Used by the theme module when the user cycles themes — the
 /// window's bounds, title pointer, and z-order position all

@@ -14,7 +14,8 @@
  *   - ASCII 0x20 (space)
  *   - Digits 0x30..0x39
  *   - Uppercase A..Z (0x41..0x5A)
- *   - Lowercase a..z aliased to uppercase at lookup time
+ *   - Lowercase a..z (0x61..0x7A) — real x-height shapes with
+ *     ascenders (b d f h k l t) and descenders (g j p q y)
  *   - Common punctuation: . , : ; - _ / \ ! ? ( ) [ ] < > = + * "
  *   - Latin-1 Supplement printable range U+00A0..U+00FF (accented
  *     letters, guillemets, © ® ° ± ÷ × £ ¥ ¢ § µ ¶ ½ … etc.)
@@ -34,8 +35,7 @@ namespace duetos::drivers::video
 constexpr u32 kGlyphWidth = 8;
 constexpr u32 kGlyphHeight = 8;
 
-/// Return a pointer to the 8-byte glyph bitmap for `ch`. Lowercase
-/// ASCII letters map to their uppercase equivalents. Unmapped
+/// Return a pointer to the 8-byte glyph bitmap for `ch`. Unmapped
 /// codes return a "filled box" placeholder. Never returns nullptr.
 const u8* Font8x8Lookup(char ch);
 
