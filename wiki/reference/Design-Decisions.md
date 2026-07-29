@@ -13693,3 +13693,58 @@ markers for its richest input. Three discovery layers were added (runtime
   `mm.user_stack_guard_hit`, delivers `0xC00000FD`, and the process
   exits with that status. No task-kill, no panic.
 
+
+### DD - GDI handle ownership is enforced in the lookup, not at the call sites
+
+- **Context:** the GDI object tables (memory DCs, bitmaps, brushes,
+  pens) are system-wide, and a handle is `tag | index` with the index in
+  0..63. Those values are trivially guessable from ring 3. Before
+  2026-07-29 nothing recorded who created an object, so a PE could
+  select another process's HBITMAP into its own memory DC and blit that
+  process's off-screen pixels into its own window, or delete it. There
+  are already a dozen lookup call sites across `gdi_objects.cpp` and
+  `window_syscall.cpp`.
+- **Decision:** every non-stock object records its creating pid, and
+  `GdiLookupMemDC` / `GdiLookupBitmap` / `GdiLookupBrush` /
+  `GdiLookupPen` return `nullptr` for a handle owned by anyone else. The
+  check lives inside the lookup. Kernel-context callers (pid 0) see
+  everything, and pid 0 doubles as the shared owner for the stock and
+  sys-colour objects every process legitimately selects.
+- **Rules out:** adding the owner check per syscall handler. That is the
+  whitelist-incompleteness bug class this repo has already been bitten
+  by: a new call site that forgets the check is a silent cross-process
+  read, and nothing in the build would notice. It also rules out using a
+  pid of 0 to mean "unowned but private" - 0 is shared, and anything
+  private must carry a real pid.
+- **Cost, accepted knowingly:** the leak detector can no longer
+  enumerate the tables through the public accessors, because it needs to
+  see every slot regardless of owner. It takes an explicit unfiltered
+  census (`GdiSnapshotUsage`) instead. Any future system-wide accounting
+  pass has to do the same rather than reaching for `GdiLookup*`.
+- **Evidence:** `[gdi] reap pid=0x10 objects=0x4 bytes=0x4000` on a live
+  ring3 boot - the four objects `surface_smoke` deliberately leaks, and
+  the exact byte count of its 64x64 bitmap. A boot with no reap line is
+  the regression signal.
+
+### DD - DIB sections flush on blit rather than on write
+
+- **Context:** `CreateDIBSection` hands the caller a pointer and lets it
+  write pixels directly, with no GDI call in between. The kernel surface
+  therefore cannot be kept in sync as the writes happen.
+- **Decision:** `gdi32` allocates the user-side pixel buffer with
+  `SYS_VIRTUAL_ALLOC`, keeps a small table of live sections, and pushes
+  every live section's bytes down through `SYS_GDI_SET_DIBITS` at the
+  start of `BitBlt` / `StretchBlt` - the first moment the kernel has any
+  reason to care what the caller wrote.
+- **Rules out:** dirty-tracking the section by making its pages
+  read-only and catching the fault. That needs a user-mode fault hook
+  the DLL cannot install, and it would put a page-fault round trip in
+  the middle of an app's inner drawing loop.
+- **Cost, accepted knowingly:** sections the caller never touched are
+  re-pushed on every blit. That is cheap next to the blit itself at v0
+  sizes, but it is linear in live sections, so a future workload with
+  many large sections wants real dirty tracking rather than a bigger
+  table.
+- **Evidence:** `surface_smoke` writes a colour straight through the
+  `CreateDIBSection` pointer with no intervening GDI call, blits, and
+  reads the exact pixel back with `GetDIBits`.

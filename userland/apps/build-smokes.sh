@@ -74,6 +74,7 @@ declare -A APPS=(
     [datetime_smoke]="-lkernel32"
     [locale_smoke]="-lkernel32"
     [gdi_smoke]="-lkernel32 -luser32 -lgdi32"
+    [surface_smoke]="-lkernel32 -luser32 -lgdi32"
     [msg_smoke]="-lkernel32 -luser32"
     [pipe_smoke]="-lkernel32"
     [resource_smoke]="-lkernel32 -luser32"

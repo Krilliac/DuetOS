@@ -30,6 +30,8 @@
 
 #include "subsystems/win32/gdi_objects.h"
 
+#include "subsystems/win32/gdi_surface_math.h"
+
 #include "arch/x86_64/serial.h"
 #include "proc/process.h"
 #include "drivers/video/font8x8.h"
@@ -68,6 +70,50 @@ u64 MakeHandle(u64 tag, u32 index)
     return tag | static_cast<u64>(index);
 }
 
+// The pid GDI objects created on this call belong to. Kernel-context
+// callers (no current process) own pid 0, which is also the "shared"
+// owner used by the stock and sys-colour objects.
+u64 CallerPid()
+{
+    const duetos::core::Process* proc = duetos::core::CurrentProcess();
+    return (proc == nullptr) ? 0u : proc->pid;
+}
+
+// May the caller resolve an object owned by `owner_pid`?
+//
+// pid 0 means "shared / kernel-owned" — the stock brushes and pens,
+// which every process legitimately selects. Everything else is
+// strictly private to its creator. A kernel-context caller (pid 0)
+// sees everything, which is what the compositor's own draw paths and
+// the reaper need.
+bool OwnerVisible(u64 owner_pid)
+{
+    if (owner_pid == 0)
+        return true;
+    const u64 caller = CallerPid();
+    return caller == 0 || caller == owner_pid;
+}
+
+// How much of its per-process budget `pid` is already using. Walking
+// the tables beats maintaining a parallel counter: they are 64 slots
+// each, this runs only on object creation, and a counter is one more
+// thing that can drift out of sync with the reaper.
+void OwnerBitmapUsage(u64 pid, u32* out_count, u64* out_bytes)
+{
+    u32 count = 0;
+    u64 bytes = 0;
+    for (u32 i = 0; i < kMaxBitmaps; ++i)
+    {
+        if (g_bitmaps[i].alive && g_bitmaps[i].owner_pid == pid)
+        {
+            ++count;
+            bytes += static_cast<u64>(g_bitmaps[i].pitch) * g_bitmaps[i].height;
+        }
+    }
+    *out_count = count;
+    *out_bytes = bytes;
+}
+
 } // namespace
 
 u64 GdiHandleType(u64 h)
@@ -94,6 +140,8 @@ MemDC* GdiLookupMemDC(u64 h)
     idx = util::MaskedIndex32(idx, kMaxMemDcs);
     if (!g_mem_dcs[idx].alive)
         return nullptr;
+    if (!OwnerVisible(g_mem_dcs[idx].owner_pid))
+        return nullptr;
     return &g_mem_dcs[idx];
 }
 
@@ -106,6 +154,8 @@ Bitmap* GdiLookupBitmap(u64 h)
         return nullptr;
     idx = util::MaskedIndex32(idx, kMaxBitmaps);
     if (!g_bitmaps[idx].alive)
+        return nullptr;
+    if (!OwnerVisible(g_bitmaps[idx].owner_pid))
         return nullptr;
     return &g_bitmaps[idx];
 }
@@ -120,6 +170,8 @@ Brush* GdiLookupBrush(u64 h)
     idx = util::MaskedIndex32(idx, kMaxBrushes);
     if (!g_brushes[idx].alive)
         return nullptr;
+    if (!OwnerVisible(g_brushes[idx].owner_pid))
+        return nullptr;
     return &g_brushes[idx];
 }
 
@@ -132,6 +184,8 @@ Pen* GdiLookupPen(u64 h)
         return nullptr;
     idx = util::MaskedIndex32(idx, kMaxPens);
     if (!g_pens[idx].alive)
+        return nullptr;
+    if (!OwnerVisible(g_pens[idx].owner_pid))
         return nullptr;
     return &g_pens[idx];
 }
@@ -229,10 +283,17 @@ u64 GdiSysColorBrush(u32 index)
     const u64 h = GdiCreateSolidBrush(kSysColorMap[index]);
     if (h == 0)
         return 0;
-    // Mark it stock so DeleteObject is a no-op.
+    // Mark it stock so DeleteObject is a no-op, and hand it to the
+    // shared owner. This brush is created lazily inside whichever
+    // process asks for the colour first, so without the owner reset
+    // it would carry that pid — and every OTHER process would then
+    // fail to resolve a handle that is documented as system-wide.
     Brush* b = GdiLookupBrush(h);
     if (b != nullptr)
+    {
         b->stock = true;
+        b->owner_pid = 0;
+    }
     g_sys_color_brushes[index] = h;
     return h;
 }
@@ -245,9 +306,12 @@ void GdiInit()
 
     // Stock brushes. Indices 0..5 reserved — later CreateSolidBrush
     // allocations start at 6.
+    // owner_pid 0 == the shared owner: every process may select a
+    // stock object, and GdiReapByOwner never touches them.
     auto stock = [](u32 slot, u32 rgb, bool present)
     {
         g_brushes[slot].alive = present;
+        g_brushes[slot].owner_pid = 0;
         g_brushes[slot].rgb = rgb;
         g_brushes[slot].stock = true;
     };
@@ -264,6 +328,7 @@ void GdiInit()
         // their GetStockObject codes (6..8). Non-stock CreatePen
         // calls start from slot 9.
         g_pens[slot].alive = present;
+        g_pens[slot].owner_pid = 0;
         g_pens[slot].rgb = rgb;
         g_pens[slot].width = 1;
         g_pens[slot].stock = true;
@@ -277,11 +342,28 @@ void GdiInit()
 
 u64 GdiCreateCompatibleDC()
 {
+    const u64 pid = CallerPid();
+
+    // Per-process ceiling: count what this owner already holds before
+    // handing out one more slot from the system-wide table.
+    if (pid != 0)
+    {
+        u32 held = 0;
+        for (u32 i = 0; i < kMaxMemDcs; ++i)
+        {
+            if (g_mem_dcs[i].alive && g_mem_dcs[i].owner_pid == pid)
+                ++held;
+        }
+        if (held >= kMaxMemDcsPerProcess)
+            return 0;
+    }
+
     for (u32 i = 0; i < kMaxMemDcs; ++i)
     {
         if (!g_mem_dcs[i].alive)
         {
             g_mem_dcs[i].alive = true;
+            g_mem_dcs[i].owner_pid = pid;
             g_mem_dcs[i].selected_bitmap = 0;
             // Win32 DC defaults: text = black, bk = white, bk_mode =
             // OPAQUE. (Our boot-time compositor paints glyphs white
@@ -303,17 +385,31 @@ u64 GdiCreateCompatibleDC()
 
 u64 GdiCreateCompatibleBitmap(u32 width, u32 height)
 {
-    if (width == 0 || height == 0)
+    // Overflow-checked against the per-surface ceiling. `width` and
+    // `height` are guest-supplied 32-bit integers, so this must not be
+    // computed in 32-bit math — see gdi_surface_math.h.
+    const u64 bytes = SurfaceByteSize(width, height);
+    if (bytes == 0)
         return 0;
-    const u64 pixels = static_cast<u64>(width) * static_cast<u64>(height);
-    if (pixels > kMaxBitmapPixels)
-        return 0;
-    const u64 bytes = pixels * 4;
+
+    // Per-process budget, checked BEFORE the allocation so a guest
+    // that is already at its ceiling never touches the kernel heap.
+    const u64 pid = CallerPid();
+    if (pid != 0)
+    {
+        u32 held_count = 0;
+        u64 held_bytes = 0;
+        OwnerBitmapUsage(pid, &held_count, &held_bytes);
+        if (!BudgetAdmits(held_count, held_bytes, bytes, kMaxBitmapsPerProcess, kMaxBitmapBytesPerProcess))
+            return 0;
+    }
+
     u32* buf = static_cast<u32*>(duetos::mm::KMalloc(bytes));
     if (buf == nullptr)
         return 0;
     // Zero-init so new bitmaps start fully black/transparent; avoids
     // leaking kernel heap bytes.
+    const u64 pixels = bytes / 4;
     for (u64 i = 0; i < pixels; ++i)
         buf[i] = 0;
 
@@ -322,6 +418,7 @@ u64 GdiCreateCompatibleBitmap(u32 width, u32 height)
         if (!g_bitmaps[i].alive)
         {
             g_bitmaps[i].alive = true;
+            g_bitmaps[i].owner_pid = pid;
             g_bitmaps[i].width = width;
             g_bitmaps[i].height = height;
             g_bitmaps[i].pitch = width * 4;
@@ -335,12 +432,26 @@ u64 GdiCreateCompatibleBitmap(u32 width, u32 height)
 
 u64 GdiCreateSolidBrush(u32 rgb)
 {
+    const u64 pid = CallerPid();
+    if (pid != 0)
+    {
+        u32 held = 0;
+        for (u32 i = 6; i < kMaxBrushes; ++i)
+        {
+            if (g_brushes[i].alive && !g_brushes[i].stock && g_brushes[i].owner_pid == pid)
+                ++held;
+        }
+        if (held >= kMaxBrushesPerProcess)
+            return 0;
+    }
+
     // Search from slot 6 — 0..5 are reserved for stock brushes.
     for (u32 i = 6; i < kMaxBrushes; ++i)
     {
         if (!g_brushes[i].alive)
         {
             g_brushes[i].alive = true;
+            g_brushes[i].owner_pid = pid;
             g_brushes[i].rgb = rgb;
             g_brushes[i].stock = false;
             return MakeHandle(kGdiTagBrush, i);
@@ -372,11 +483,25 @@ u64 GdiGetStockObject(u32 index)
 u64 GdiCreatePen(u32 style, u32 width, u32 rgb)
 {
     (void)style; // styles (PS_DASH / PS_DOT / etc.) ignored in v0
+    const u64 pid = CallerPid();
+    if (pid != 0)
+    {
+        u32 held = 0;
+        for (u32 i = 9; i < kMaxPens; ++i)
+        {
+            if (g_pens[i].alive && !g_pens[i].stock && g_pens[i].owner_pid == pid)
+                ++held;
+        }
+        if (held >= kMaxPensPerProcess)
+            return 0;
+    }
+
     for (u32 i = 9; i < kMaxPens; ++i)
     {
         if (!g_pens[i].alive)
         {
             g_pens[i].alive = true;
+            g_pens[i].owner_pid = pid;
             g_pens[i].rgb = rgb;
             g_pens[i].width = (width == 0) ? 1 : width;
             g_pens[i].stock = false;
@@ -553,6 +678,108 @@ bool GdiDeleteObject(u64 hobj)
         return true;
     }
     return false;
+}
+
+u32 GdiReapByOwner(u64 pid)
+{
+    // pid 0 is the shared/kernel owner: the stock brushes and pens
+    // live there and must survive every process exit.
+    if (pid == 0)
+        return 0;
+
+    u32 reaped = 0;
+    u64 freed_bytes = 0;
+
+    for (u32 i = 0; i < kMaxMemDcs; ++i)
+    {
+        if (g_mem_dcs[i].alive && g_mem_dcs[i].owner_pid == pid)
+        {
+            g_mem_dcs[i].alive = false;
+            g_mem_dcs[i].owner_pid = 0;
+            g_mem_dcs[i].selected_bitmap = 0;
+            g_mem_dcs[i].selected_pen = 0;
+            g_mem_dcs[i].selected_brush = 0;
+            ++reaped;
+        }
+    }
+    for (u32 i = 0; i < kMaxBitmaps; ++i)
+    {
+        if (g_bitmaps[i].alive && g_bitmaps[i].owner_pid == pid)
+        {
+            freed_bytes += static_cast<u64>(g_bitmaps[i].pitch) * g_bitmaps[i].height;
+            if (g_bitmaps[i].pixels != nullptr)
+            {
+                duetos::mm::KFree(g_bitmaps[i].pixels);
+                g_bitmaps[i].pixels = nullptr;
+            }
+            g_bitmaps[i].alive = false;
+            g_bitmaps[i].owner_pid = 0;
+            g_bitmaps[i].width = 0;
+            g_bitmaps[i].height = 0;
+            g_bitmaps[i].pitch = 0;
+            ++reaped;
+        }
+    }
+    for (u32 i = 0; i < kMaxBrushes; ++i)
+    {
+        if (g_brushes[i].alive && !g_brushes[i].stock && g_brushes[i].owner_pid == pid)
+        {
+            g_brushes[i].alive = false;
+            g_brushes[i].owner_pid = 0;
+            ++reaped;
+        }
+    }
+    for (u32 i = 0; i < kMaxPens; ++i)
+    {
+        if (g_pens[i].alive && !g_pens[i].stock && g_pens[i].owner_pid == pid)
+        {
+            g_pens[i].alive = false;
+            g_pens[i].owner_pid = 0;
+            ++reaped;
+        }
+    }
+
+    if (reaped > 0)
+    {
+        arch::SerialLineGuard guard;
+        arch::SerialWrite("[gdi] reap pid=");
+        arch::SerialWriteHex(pid);
+        arch::SerialWrite(" objects=");
+        arch::SerialWriteHex(reaped);
+        arch::SerialWrite(" bytes=");
+        arch::SerialWriteHex(freed_bytes);
+        arch::SerialWrite("\n");
+    }
+    return reaped;
+}
+
+GdiUsage GdiSnapshotUsage()
+{
+    GdiUsage u{0, 0, 0, 0, 0};
+    for (u32 i = 0; i < kMaxMemDcs; ++i)
+    {
+        if (g_mem_dcs[i].alive)
+            ++u.mem_dcs;
+    }
+    for (u32 i = 0; i < kMaxBitmaps; ++i)
+    {
+        if (g_bitmaps[i].alive)
+        {
+            ++u.bitmaps;
+            u.bitmap_bytes += static_cast<u64>(g_bitmaps[i].pitch) * g_bitmaps[i].height;
+        }
+    }
+    for (u32 i = 0; i < kMaxBrushes; ++i)
+    {
+        if (g_brushes[i].alive && !g_brushes[i].stock)
+            ++u.brushes;
+    }
+    for (u32 i = 0; i < kMaxPens; ++i)
+    {
+        if (g_pens[i].alive && !g_pens[i].stock)
+            ++u.pens;
+    }
+    return u;
 }
 
 // --- Bitmap paint helpers ----------------------------------------

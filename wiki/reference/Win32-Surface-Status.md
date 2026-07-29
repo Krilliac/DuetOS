@@ -1757,10 +1757,22 @@ WinDbg client API, `SymLoadModuleEx`.
 
 > **Status:** GDI primitives that show up in the compositor's
 > display list (FillRect, Rectangle, Ellipse, Line, TextOut,
-> SetPixel, BitBlt) are real. Bitmap creation / DC management
-> have minimal but working bookkeeping. Brushes/pens/fonts
-> are tag-based handles. **No anti-aliasing, no outline fonts,
-> no path API.**
+> SetPixel, BitBlt) are real. Off-screen surfaces are real:
+> memory DCs, compatible bitmaps, blits, DIB upload/readback and
+> DIB sections all move actual pixels, proven per-boot by
+> `userland/apps/surface_smoke` (see below). Fonts are tag-based
+> handles. **No anti-aliasing, no outline fonts, no path API.**
+>
+> **Corrected 2026-07-29.** This section previously listed
+> `CreateBitmap`, `CreateDIBSection`, `CreateDIBitmap`,
+> `CreatePen` and `StretchBlt` under **Real**. They were not:
+> the first four returned NULL unconditionally and `StretchBlt`
+> returned success without drawing. `CreateSolidBrush` returned
+> a userland sentinel the kernel could not resolve, so every
+> fill into a memory DC painted white regardless of the brush.
+> All are now genuinely wired. The lesson for this page: an
+> export existing is not evidence it works — only a fixture that
+> compares pixels is.
 
 **Real:**
 - DC: `GetDC`, `ReleaseDC`, `CreateCompatibleDC`,
@@ -1770,9 +1782,16 @@ WinDbg client API, `SymLoadModuleEx`.
   `CreateBitmap`, `CreateCompatibleBitmap`,
   `CreateDIBSection`, `CreateDIBitmap`, `GetStockObject`,
   `SelectObject`, `DeleteObject`, `GetObjectA/W`
+- Off-screen surfaces: `CreateCompatibleBitmap`, `CreateBitmap`,
+  `CreateDIBSection`, `CreateDIBitmap`, `SetDIBits`, `GetDIBits`,
+  `BitBlt`, `StretchBlt`. Surfaces are kernel-owned BGRA8888
+  buffers reached through `SYS_GDI_SET_DIBITS` / `_GET_DIBITS`
+  (214 / 215). Each is owned by its creating process and reaped
+  at exit; per-process ceiling is 16 objects per kind and 8 MiB
+  of pixels.
 - Drawing: `FillRect`, `FrameRect`, `Rectangle`,
   `Ellipse`, `LineTo`, `MoveToEx`,
-  `Polygon`, `Polyline`, `BitBlt`, `StretchBlt`,
+  `Polygon`, `Polyline`,
   `SetPixel`, `SetPixelV`, `GetPixel`,
   `TextOutA/W`, `ExtTextOutA/W` (honours `ETO_CLIPPED` + the
   `lprc` clip-rect by trimming the (text, x) pair to the
@@ -1787,6 +1806,18 @@ WinDbg client API, `SymLoadModuleEx`.
   host-tested (`tests/host/test_gdi32_region.cpp`).
 
 **STUB / GAP:**
+- DIB depths: 16 / 24 / 32bpp only. Palettised (<= 8bpp) DIBs are
+  refused rather than mis-rendered — GAP. 16bpp is read as
+  X1-R5-G5-B5; `BI_BITFIELDS` 5-6-5 is not parsed — GAP.
+- `SetDIBits` / `GetDIBits` transfer whole images only; a partial
+  scanline band (`start != 0`, or `scans` short of the height) is
+  refused — GAP.
+- `CreateBitmap` with initial bits accepts 32bpp only; a 24bpp DDB's
+  WORD-aligned rows do not match the DWORD DIB stride — GAP.
+- `CreateDIBSection` ignores `section` / `offset` (no file-mapping
+  backing store) — GAP. Its user-side pixels reach the kernel
+  surface on the next `BitBlt` / `StretchBlt`, not on write.
+- `GetObjectA/W` returns 0 (no BITMAP/LOGBRUSH introspection) — STUB.
 - Path API: `BeginPath`, `EndPath`, `StrokePath` — STUB
 - Region set-algebra: `CombineRgn` with `RGN_OR`/`RGN_XOR`/`RGN_DIFF`
   on multi-rect inputs collapses to the bounding box (no rectangle

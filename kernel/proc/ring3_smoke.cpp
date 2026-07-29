@@ -157,6 +157,7 @@
 #include "generated_crt_smoke_pe.h"
 #include "generated_datetime_smoke_pe.h"
 #include "generated_gdi_smoke_pe.h"
+#include "generated_surface_smoke_pe.h"
 #include "generated_locale_smoke_pe.h"
 #include "generated_msg_smoke_pe.h"
 #include "generated_ntdll_smoke_pe.h"
@@ -2364,6 +2365,11 @@ constexpr PeCompatEntry kPeCompatBattery[] = {
     PE_COMPAT("ring3-datetime-smoke", kBinDatetimeSmokeBytes, BareMetal, true),
     PE_COMPAT("ring3-locale-smoke", kBinLocaleSmokeBytes, BareMetal, true),
     PE_COMPAT("ring3-gdi-smoke", kBinGdiSmokeBytes, BareMetal, true),
+    // Always: this row is the only proof that an off-screen
+    // surface stores what was drawn into it. Gating it to bare
+    // metal would mean CI never runs the one check that would
+    // catch a regression in the blit / DIB transfer path.
+    PE_COMPAT("ring3-surface-smoke", kBinSurfaceSmokeBytes, Always, true),
     PE_COMPAT("ring3-msg-smoke", kBinMsgSmokeBytes, BareMetal, true),
     PE_COMPAT("ring3-pipe-smoke", kBinPipeSmokeBytes, BareMetal, true),
     PE_COMPAT("ring3-resource-smoke", kBinResourceSmokeBytes, BareMetal, true),

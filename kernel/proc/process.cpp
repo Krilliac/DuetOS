@@ -20,6 +20,7 @@
 #include "subsystems/linux/syscall_internal.h"
 #include "subsystems/win32/custom.h"
 #include "subsystems/win32/section.h"
+#include "subsystems/win32/gdi_objects.h"
 #include "subsystems/win32/window_syscall.h"
 #include "sched/sched.h"
 #include "sync/spinlock.h"
@@ -690,6 +691,15 @@ void ProcessRelease(Process* p)
     // Done OUTSIDE the compositor lock — TrackPopupCancelByOwner
     // takes both locks itself (in lock order tp_lock → compositor).
     duetos::subsystems::win32::TrackPopupCancelByOwner(p->pid);
+
+    // Reclaim the GDI objects this process still holds. Memory DCs,
+    // compatible bitmaps, brushes and pens all live in system-wide
+    // tables; without this an exiting PE strands both its pixel bytes
+    // and its table slots for the rest of the boot, and a PE that
+    // exhausted its per-process ceiling before exiting would deny
+    // those slots to everything that starts afterwards. Stock and
+    // sys-colour objects (owner 0) are untouched.
+    duetos::subsystems::win32::GdiReapByOwner(p->pid);
 
     {
         arch::SerialLineGuard guard;

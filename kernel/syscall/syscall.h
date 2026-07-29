@@ -2186,6 +2186,30 @@ enum SyscallNumber : u64
     //         right / full or closed port.
     // ABI stable from this commit.
     SYS_IOCP_POST = 213,
+
+    // Upload device-independent bitmap bits INTO a kernel GDI
+    // surface. Backs gdi32!SetDIBits, !CreateBitmap (when the caller
+    // supplies initial bits), !CreateDIBitmap, and the flush half of
+    // !CreateDIBSection.
+    //   rdi = HBITMAP (owner-checked; another process's handle fails)
+    //   rsi = user pointer to the DIB pixel array
+    //   rdx = width in pixels
+    //   r10 = height; NEGATIVE means top-down, positive bottom-up
+    //   r8  = bits per pixel (16 / 24 / 32 only)
+    //   r9  = size in bytes of the buffer at rsi, per the caller
+    //   rax = rows transferred, 0 on refusal
+    // Rows are DWORD-padded per the Win32 DIB convention. The r9
+    // claim must cover the image the other arguments describe, or
+    // nothing is read. Six register arguments, no struct — the i386
+    // stub uses the same numbers through duet_syscall6.
+    // ABI stable from this commit.
+    SYS_GDI_SET_DIBITS = 214,
+
+    // Download a kernel GDI surface back out as DIB bits. Same
+    // argument shape as SYS_GDI_SET_DIBITS, with rsi as the
+    // destination. Backs gdi32!GetDIBits.
+    // ABI stable from this commit.
+    SYS_GDI_GET_DIBITS = 215,
 };
 
 // Vulkan syscall op-codes. Used as the `rdi` value to SYS_VK_CALL
