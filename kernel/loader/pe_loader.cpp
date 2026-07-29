@@ -124,19 +124,25 @@ constexpr u64 kDirEntryLoadConfig = 10;
 constexpr u64 kLoadConfigSizeOffset = 0;        // u32 — Size of struct
 constexpr u64 kLoadConfigSecurityCookie = 0x58; // u64 — VA of __security_cookie
 
-// Stack layout: kV0StackTop is the one-past-last byte (initial rsp
-// is kV0StackTop - 8), kV0StackPages is how many 4 KiB pages we
-// actually map ending just below it. One page is enough for the
-// freestanding hello_pe and hello_winapi tests but not for a real
-// MSVC PE — the CRT's __chkstk walks the stack a page at a time
-// during startup and a cold PE like windows-kill.exe needs ~tens
-// of KiB of it mapped up front. 16 pages (64 KiB) is the committed
-// v0 default; workloads that want more get a larger budget via an
-// explicit override at spawn time (path not wired yet).
-constexpr u64 kV0StackTop = 0x80000000ULL;
-constexpr u64 kV0StackPages = 16;
-constexpr u64 kV0StackVa = kV0StackTop - kV0StackPages * duetos::mm::kPageSize;
+// Stack layout: the ring-3 main-thread stack is a demand-grown
+// reservation owned by kernel/proc/user_stack.h. This loader
+// reads the image's own SizeOfStackReserve / SizeOfStackCommit,
+// hands them to core::UserStackPlan (which clamps both), commits
+// only the top of the plan, and publishes the reservation onto
+// the Process so the #PF handler can grow it a page at a time.
+//
+// The top sits at core::kUserStackTopVa (0x7FFE0000) — immediately
+// below KUSER_SHARED_DATA — so the reservation can grow down
+// through the empty span above the TLS trampoline page without
+// meeting another fixed loader VA.
 constexpr u64 kPageMask = kPageAlign - 1;
+
+// Optional-header offsets for the stack sizes. Identical in PE32
+// and PE32+ (both sit right after DllCharacteristics); the width
+// differs — 4 bytes for PE32, 8 for PE32+.
+constexpr u64 kOptHeaderSizeOfStackReserve = 72;
+constexpr u64 kOptHeaderSizeOfStackCommitPe32Plus = 80;
+constexpr u64 kOptHeaderSizeOfStackCommitPe32 = 76;
 
 // Minimal TEB (Thread Environment Block) page for Win32 PEs.
 // Placed between the Win32 stubs (0x60000000) and the user stack
@@ -2486,19 +2492,24 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     // catch it because such a base is perfectly well-formed.
     //
     // Every one of those fixed VAs lives in a single contiguous band that
-    // ends exactly at kV0StackTop:
+    // ends at 0x80000000:
     //   kWin32ThunksVa      0x60000000   kWin32Thunks32Va  0x60100000
     //   kProcEnvVa          0x65000000   kV0TebVa          0x70000000
     //   kV0TlsArrayVa       0x71000000   kV0TlsBlockVa     0x72000000
-    //   kV0TlsTrampVa       0x73000000   kKuserSharedDataVa 0x7FFE0000
-    //   kV0StackVa          0x7FFF0000 .. kV0StackTop
+    //   kV0TlsTrampVa       0x73000000
+    //   ring-3 stack reservation .. core::kUserStackTopVa 0x7FFE0000
+    //   kKuserSharedDataVa  0x7FFE0000
     // so rejecting an overlap with the whole band is both simpler and safer
     // than enumerating each span — notably kV0TlsBlockVa's length is derived
-    // from the image's own TLS directory, so it has no fixed extent to list.
+    // from the image's own TLS directory and the stack reservation's from the
+    // image's own SizeOfStackReserve, so neither has a fixed extent to list.
     // Any fixed VA added inside the band in future is covered automatically.
     {
         constexpr u64 kLoaderReservedLo = win32::kWin32ThunksVa; // 0x60000000
-        constexpr u64 kLoaderReservedHi = kV0StackTop;           // 0x80000000
+        constexpr u64 kLoaderReservedHi = 0x80000000ULL;
+        static_assert(::duetos::core::kUserStackTopVa - ::duetos::core::kUserStackReserveMax >
+                          kV0TlsTrampVa + duetos::mm::kPageSize,
+                      "stack reservation at max reserve would collide with the TLS trampoline page");
         static_assert(kLoaderReservedLo < kLoaderReservedHi, "reserved band inverted");
         const u64 img_lo = h.image_base;
         // image_size is validated non-overflowing against kPeUserMax above.
@@ -2611,30 +2622,63 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     //     since a callback may call into an imported DLL). No
     //     pre-gate / reject here any more.
 
-    // 4. Stack: kV0StackPages pages, writable + NX, mapped
-    //    ending at kV0StackTop. MSVC's __chkstk probes the
-    //    stack a page at a time during CRT startup, so a real
-    //    PE needs several pages up front (1 page was enough
-    //    for hello_winapi but not for windows-kill.exe, which
-    //    blew out at rsp+0x1000 inside the CRT).
-    for (u64 p = 0; p < kV0StackPages; ++p)
+    // 4. Stack. The image's Optional Header says how much stack it
+    //    wants; core::UserStackPlan clamps both numbers and lays
+    //    out the reservation. We commit ONLY the top of it here —
+    //    the rest is address space the #PF handler commits a page
+    //    at a time as the thread's stack pointer walks down (see
+    //    kernel/proc/user_stack.h). A guard page sits below the
+    //    reservation and is never committed, so a runaway still
+    //    dies instead of quietly consuming the reservation.
+    u64 want_reserve = 0;
+    u64 want_commit = 0;
+    {
+        const u64 commit_off = h.is_pe32 ? kOptHeaderSizeOfStackCommitPe32 : kOptHeaderSizeOfStackCommitPe32Plus;
+        const u64 field_width = h.is_pe32 ? 4u : 8u;
+        if (file_len >= h.opt_base + kOptHeaderSizeOfStackReserve + field_width)
+        {
+            want_reserve = h.is_pe32 ? u64(LeU32(file + h.opt_base + kOptHeaderSizeOfStackReserve))
+                                     : LeU64(file + h.opt_base + kOptHeaderSizeOfStackReserve);
+        }
+        if (file_len >= h.opt_base + commit_off + field_width)
+        {
+            want_commit =
+                h.is_pe32 ? u64(LeU32(file + h.opt_base + commit_off)) : LeU64(file + h.opt_base + commit_off);
+        }
+    }
+
+    bool stack_clamped = false;
+    const ::duetos::core::UserStackRange plan =
+        ::duetos::core::UserStackPlan(want_reserve, want_commit, &stack_clamped);
+    if (stack_clamped)
+    {
+        KLOG_WARN_V("pe-load", "SizeOfStackReserve clamped — image asked for", want_reserve);
+        KLOG_WARN_V("pe-load", "  reservation granted (bytes)", plan.top - plan.reserve_lo);
+    }
+
+    for (u64 page_va = plan.commit_lo; page_va < plan.top; page_va += kPageSize)
     {
         auto stack_frame_r = AllocateFrame();
         if (!stack_frame_r)
         {
-            SerialWrite("[pe-load] FAIL stack frame alloc idx=");
-            SerialWriteHex(p);
+            SerialWrite("[pe-load] FAIL stack frame alloc va=");
+            SerialWriteHex(page_va);
             SerialWrite("\n");
-            KBP_PROBE_V(::duetos::debug::ProbeId::kPeLoaderOom, p);
+            KBP_PROBE_V(::duetos::debug::ProbeId::kPeLoaderOom, page_va);
             return r;
         }
         const PhysAddr stack_frame = stack_frame_r.value();
-        const u64 page_va = kV0StackVa + p * kPageSize;
         AddressSpaceMapUserPage(as, page_va, stack_frame, kPagePresent | kPageUser | kPageWritable | kPageNoExecute);
         guard.Track(page_va);
     }
-    SerialWrite("[pe-load] step4 stack mapped pages=");
-    SerialWriteHex(kV0StackPages);
+    SerialWrite("[pe-load] step4 stack reserve=");
+    SerialWriteHex(plan.top - plan.reserve_lo);
+    SerialWrite(" commit=");
+    SerialWriteHex(plan.top - plan.commit_lo);
+    SerialWrite(" lo=");
+    SerialWriteHex(plan.reserve_lo);
+    SerialWrite(" guard=");
+    SerialWriteHex(plan.guard_lo);
     SerialWrite("\n");
 
     // 4b. TEB page. PE32+ (64-bit) reads via gs:[0x30] (self),
@@ -2763,8 +2807,15 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
             for (u64 b = 0; b < 4; ++b)
                 teb_direct[0x00 + b] = static_cast<u8>((kSehSentinel >> (b * 8)) & 0xFF);
             // StackBase / StackLimit (low 32 bits of the user VAs).
-            const u32 stack_top32 = static_cast<u32>(kV0StackTop);
-            const u32 stack_va32 = static_cast<u32>(kV0StackVa);
+            // GAP: Windows keeps StackLimit at the LIVE lowest committed
+            // page and rewrites it on every stack growth. We publish the
+            // spawn-time commit edge and never update it, so a long-running
+            // 32-bit PE reads a StackLimit that is conservatively high
+            // (it under-reports how much stack is already committed).
+            // Nothing in our CRT surface reads it today — revisit when a
+            // 32-bit PE is observed depending on it.
+            const u32 stack_top32 = static_cast<u32>(plan.top);
+            const u32 stack_va32 = static_cast<u32>(plan.commit_lo);
             for (u64 b = 0; b < 4; ++b)
             {
                 teb_direct[kTeb32OffStackBase + b] = static_cast<u8>((stack_top32 >> (b * 8)) & 0xFF);
@@ -2960,8 +3011,9 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     r.imports_resolved = (ps == PeStatus::ImportsPresent);
     r.is_pe32 = h.is_pe32;
     r.entry_va = tls_entry_override != 0 ? tls_entry_override : (h.image_base + h.entry_rva);
-    r.stack_va = kV0StackVa;
-    r.stack_top = kV0StackTop;
+    r.stack_va = plan.commit_lo;
+    r.stack_top = plan.top;
+    r.stack = plan;
     r.image_base = h.image_base;
     r.image_size = h.image_size;
     r.teb_va = teb_va;

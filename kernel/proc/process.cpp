@@ -346,6 +346,9 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     p->user_stack_va = user_stack_va;
     p->user_rsp_init = 0; // loader overrides if it wants a custom rsp
     p->user_gs_base = 0;  // PE loader sets this to the TEB VA
+    // No growable stack until a loader publishes a reservation
+    // (SpawnPeFile does; ELF / native smoke payloads do not).
+    p->stack = UserStackRange{};
     p->win32_iat_miss_count = 0;
     // DLL image table — every slot starts empty. `has_exports`
     // = false marks a free slot (matches DllLoad's post-state

@@ -172,6 +172,11 @@ add_host_test(inferred_gap)
 add_host_test(hpet_scale)
 add_host_test(thunk_retirement_policy)
 add_host_test(pe_unwind_bounds)
+# Demand-grown ring-3 stacks: the reservation planner and the #PF
+# classifier are both freestanding (proc/user_stack.h), so the decision
+# that gates committing memory for an untrusted PE is pinned here
+# rather than only observed in a boot log.
+add_host_test(user_stack)
 # Phase B dynamic fix-discovery: config-proposal decision is freestanding
 # (env/config_proposal_decide.h), no kernel TU.
 add_host_test(config_proposal)

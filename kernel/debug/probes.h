@@ -367,6 +367,14 @@ enum class ProbeId : u8
     // the observed peak usage in bytes as `value`.
     kKernelStackDeepUsage,
 
+    // Fired from the ring-3 #PF path when a fault lands in the guard
+    // page below a PE's demand-grown stack reservation (or when the
+    // growth commit itself failed on OOM). ArmedLog: a workload whose
+    // recursion stays inside its SizeOfStackReserve never trips it, so
+    // any fire is a real ring-3 stack overflow. Caller passes cr2 as
+    // `value`. See kernel/proc/user_stack.h.
+    kUserStackGuardHit,
+
     kCount, // sentinel
 };
 

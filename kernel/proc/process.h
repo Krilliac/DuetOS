@@ -4,6 +4,7 @@
 #include "ipc/handle_table.h"
 #include "loader/compat_shim.h"
 #include "loader/dll_loader.h"
+#include "proc/user_stack.h"
 #include "sched/sched.h"
 #include "sync/spinlock.h"
 #include "util/types.h"
@@ -318,6 +319,13 @@ struct Process
     // the base.
     u64 user_code_va;
     u64 user_stack_va; // stack base; top = user_stack_va + kPageSize
+
+    // Demand-grown ring-3 main-thread stack (PE spawns only; all
+    // zero elsewhere, which makes every ring-3 fault classify as
+    // NotStack). Unlocked by design — only the main thread can
+    // satisfy the growth condition against it; see the concurrency
+    // note in kernel/proc/user_stack.h.
+    UserStackRange stack;
     // When non-zero, Ring3UserEntry enters ring 3 with rsp = this
     // value instead of the default `user_stack_va + kPageSize`.
     // Used by SpawnElfLinux to land the user task on a pre-

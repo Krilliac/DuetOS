@@ -130,7 +130,9 @@ layer does not expose yet.
    - **If the export is a forwarder** (`Dll.Func` or `Dll.#N`),
      recurse through the per-process DLL table. Bounded depth.
    - Patch the IAT slot with the absolute VA of the resolved entry.
-8. **Bootstrap heap + main thread**.
+8. **Bootstrap heap + main thread**. The main thread's stack is a
+   demand-grown reservation sized from the Optional Header — see
+   [Ring-3 Stacks](#ring-3-stacks).
 9. **Entry**: schedule first user task at
    `ImageBase + AddressOfEntryPoint`.
 
@@ -166,19 +168,86 @@ with `// STUB:` or `// GAP:`. See
 [Logging and Tracing](../kernel/Logging-And-Tracing.md) for the
 convention.
 
+## Ring-3 Stacks
+
+The main thread's ring-3 stack is a **demand-grown reservation**, laid
+out and clamped by `core::UserStackPlan`
+(`kernel/proc/user_stack.h`) from the image's own Optional Header:
+
+| Field | Source | Clamp |
+|-------|--------|-------|
+| reservation size | `SizeOfStackReserve` (offset 72; u32 for PE32, u64 for PE32+) | `[64 KiB, 4 MiB]` |
+| initial commit | `SizeOfStackCommit` (offset 76 / 80) | `[2, 16]` pages |
+
+The layout grows downward from `core::kUserStackTopVa` (0x7FFE0000,
+immediately below `KUSER_SHARED_DATA`):
+
+```
+guard_lo        reserve_lo         commit_lo            top
+   |                 |                  |                |
+   [  guard region ][ reserved, uncommitted ][ committed ]
+    4 pages, fatal    grows a page per #PF     mapped at load
+```
+
+`PeLoad` commits only `[commit_lo, top)`. Everything below is address
+space until the thread touches it. The ring-3 `#PF` path in
+`kernel/arch/x86_64/traps.cpp` calls `core::UserStackServiceFault`
+BEFORE the `IsolateTask` policy and before Win32 SEH delivery, because
+a growable fault is not an error.
+
+**The growth condition is deliberately narrow.** All four must hold:
+
+1. the fault is not-present (a protection fault on a committed stack
+   page is a real error);
+2. `reserve_lo <= cr2 < commit_lo`;
+3. `commit_lo - cr2 <= 4096` — the fault names the page *immediately*
+   below the committed edge. A fault that skips uncommitted pages is a
+   wild pointer, not a stack probe;
+4. `reserve_lo <= rsp <= top` — the faulting thread is the one running
+   on this stack.
+
+Anything else falls through to the existing behaviour untouched. The
+tempting phrasing of (4) is "the access is below rsp", and it is
+**wrong**: only `push`/`call` fault below rsp; a prologue that has
+already done `sub rsp, N` writes at `[rsp + k]`, so cr2 is at or above
+rsp. Condition (4) as written is also what makes the whole path
+lock-free — every other thread runs on the thread-stack arena at
+0x68000000, far below `reserve_lo`, so no other thread can ever
+satisfy it and the main thread is the sole writer of `commit_lo`.
+
+**The guard region stays fatal.** A fault in `[guard_lo, reserve_lo)`
+returns `Guard`, never `Grow`: the kernel emits
+`[W] mm/ustack : *** RING-3 STACK OVERFLOW ***`, fires the
+`mm.user_stack_guard_hit` probe, and delivers `STATUS_STACK_OVERFLOW`
+(0xC00000FD) rather than a generic access violation. As Windows does,
+the guard region is committed *once* at that moment so the thread's
+`__except` handler has somewhere to run — it is a one-shot, the
+overflowing recursion still dies, and a second runaway walks below
+`guard_lo` into unmapped space and takes the ordinary task-kill. Four
+pages, because a single page ran out inside
+`KiUserExceptionDispatcher` and the second fault killed the thread
+before the exception could be reported.
+
+Exception delivery can itself be the thing that needs a page:
+`Win32DeliverException` writes the `EXCEPTION_RECORD` + `CONTEXT` onto
+the faulting thread's own user stack via `mm::CopyToUser`, which
+pre-checks accessibility and returns false rather than faulting. It
+therefore calls `core::UserStackCommitRange` first.
+
+Proofs: `tests/host/test_user_stack.cpp` (classifier, exhaustive),
+`userland/apps/stackgrow_smoke` (live growth past 512 KiB, battery row
+`ring3-stackgrow-smoke`), and `userland/apps/stackguard_smoke` (live
+guard hit; battery row `ring3-stackguard-smoke`, `expects_verdict =
+false` because it dies by design).
+
 ## Known Limits / GAPs
 
-- **Ring-3 stack is 64 KiB, fixed** (`kV0StackPages = 16`,
-  `pe_loader.cpp:137`). This is now the first blocker a real
-  application hits, not an import gap: with `UnityPlayer.dll` bound,
-  `BattleBit.exe` runs its CRT startup and then takes a ring-3 `#PF` at
-  `0x7ffef6d0` — 0x930 bytes *below* `stack_va = 0x7fff0000` — which
-  surfaces as `win32/seh: CopyToUser(CONTEXT) failed` followed by
-  `[task-kill] ring-3 task took #PF`. Windows gives a process 1 MiB by
-  default. Raising the constant naively multiplies the per-PE frame
-  cost 16x across every boot PE spawn and every battery row, so the
-  real fix is demand growth (guard page + a `#PF` handler that extends
-  the region), tracked in the Roadmap.
+- **Only the main thread's stack grows on demand.** Win32
+  `CreateThread` stacks still come off the fixed-size thread-stack
+  arena (`Process::thread_stack_cursor`, 0x68000000,
+  `Process::kV0ThreadStackPages` each) and overflow into the next
+  thread's slot with no guard region. The main-thread reservation is
+  demand-grown — see [Ring-3 Stacks](#ring-3-stacks) below.
 - **Side-by-side DLL bytes are never freed.** `DllImage` borrows its
   `file` pointer and the parsed export table points into that buffer,
   so the bytes must outlive every process that mapped them. The cache

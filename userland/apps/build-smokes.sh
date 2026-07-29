@@ -177,6 +177,15 @@ declare -A APPS=(
     [dwrite_smoke]="-lkernel32 -ldwrite"
     [dx_demo]="-lkernel32 -ld3d9 -ld3d11 -ld3d12 -ldxgi -ld2d1 -ldwrite -ldinput8 -lxinput1_4"
     [dx_demo_window]="-lkernel32 -luser32 -ld3d11"
+    # Demand-grown ring-3 stack proof. --stack pins the Optional Header
+    # SizeOfStackReserve/Commit to the Windows default (1 MiB / 4 KiB) so
+    # the fixture exercises a known reservation rather than the mingw
+    # default.
+    [stackgrow_smoke]="-lkernel32 -Xlinker --stack -Xlinker 1048576,4096"
+    # Guard-region proof. A SMALL reservation (128 KiB) keeps the runaway
+    # short: it reaches the guard in ~60 frames instead of ~500, so the
+    # boot cost of the row is negligible.
+    [stackguard_smoke]="-lkernel32 -Xlinker --stack -Xlinker 131072,4096"
 )
 
 for app in "${!APPS[@]}"; do

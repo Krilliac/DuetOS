@@ -1027,32 +1027,43 @@ node list:
    but it removes the "the app must ask us to embed it" pressure that
    made this item urgent.
 
-### Ring-3 stack is a fixed 64 KiB — the first blocker a real app hits
+### BattleBit's next blocker: missing api-ms-win-* apisets (observed 2026-07-29)
 
-`kV0StackPages = 16` (`kernel/loader/pe_loader.cpp:137`) maps 64 KiB of
-ring-3 stack for every PE. The constant's own comment says a larger
-budget should come from "an explicit override at spawn time (path not
-wired yet)".
+With demand-grown ring-3 stacks landed, `BattleBit.exe` + its 26 MiB
+`UnityPlayer.dll` no longer stops on the stack. It now binds all 66
+imports, enters ring 3, and runs MSVC CRT startup measurably further —
+`InitializeCriticalSectionEx`, two `FlsAlloc` slots, `FlsGetValue` /
+`FlsSetValue`, `LCMapStringEx` — and then stops on two things in the
+same breath:
 
-This is now the *observed* stopping point for a real application, which
-is new information: with side-by-side DLL loading landed,
-`BattleBit.exe` resolves all 67 imports including
-`UnityPlayer.dll!UnityMain`, spawns, and runs its MSVC CRT startup —
-then takes a ring-3 `#PF` at `0x7ffef6d0`, which is 0x930 bytes below
-`stack_va = 0x7fff0000`. It surfaces as
-`win32/seh: CopyToUser(CONTEXT) failed - task-kill fallback addr`
-(`kernel/subsystems/win32/seh_dispatch.cpp:282`) because the SEH
-dispatcher tries to write a CONTEXT record onto the overrun stack.
+- `[win32-miss] slot=0x1436b192b called fn="<unmapped>"` — an IAT slot
+  the miss-decoder cannot even name, i.e. an import bound to a thunk
+  page with no backing stub. The decoder needs to resolve the slot back
+  to its `(dll, function)` pair before this is actionable.
+- `[dll-load] miss path="/lib/api-ms-win-appmodel-runtime-l1-1-2"` —
+  the CRT reaches for an API-set contract DLL we do not ship. The
+  static apiset table (`kernel/loader/apiset_static.cpp`) covers the
+  contracts we have hosts for; `appmodel-runtime` is not one of them.
 
-Windows gives a process 1 MiB by default (the optional header's
-`SizeOfStackReserve`). Simply raising the constant to match multiplies
-per-PE frame cost 16x across ~12 boot PE spawns and 138 PE-compat
-battery rows, which is why this is a slice and not a one-line change.
-The shape that fits DuetOS: reserve the region from
-`SizeOfStackReserve`, commit only the top pages, and grow on `#PF` below
-`rsp` with a guard page below the reservation — i.e. demand growth,
-which also needs the `#PF` handler to distinguish "stack growth" from
-"wild pointer".
+The CRT then calls `ExitProcess(0)` — so the process exits *cleanly*
+with status 0 rather than crashing, which makes this failure quieter
+than the stack one it replaced. Note the exit status is 0 and not an
+error: a run-exe report that only greps for faults will call this a
+success.
+
+Next step is to decide whether `appmodel-runtime` gets a real host or a
+refusing stub, and to make the win32-miss decoder name unmapped slots.
+
+### Win32 CreateThread stacks are still fixed-size
+
+Demand growth covers the PE main thread only. `SYS_THREAD_CREATE`
+carves `Process::kV0ThreadStackPages` off the thread-stack arena at
+0x68000000 with no guard region between slots, so a worker thread that
+recurses overflows into its neighbour's stack silently. The machinery
+to fix it already exists (`core::UserStackPlan` / `UserStackClassify`
+in `kernel/proc/user_stack.h`); what it needs is a per-thread
+`UserStackRange` instead of the single per-process one, and an arena
+that leaves guard gaps between slots.
 
 ### Win32 handle lifecycle — teardown + close-dispatch gaps (audited 2026-07-26)
 
