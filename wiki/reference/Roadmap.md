@@ -1530,9 +1530,27 @@ done, it is merely written.
 
 ### Tier 3 — hardware needed to be a daily driver
 
-23. **Power management.** `kernel/power/` contains only `reboot.cpp`. S3 /
-    S0ix suspend-resume and the wake path. ACPI is already parsed. A laptop
-    that cannot sleep is not a daily driver.
+23. **Power management.** The S3 core LANDED 2026-07-29: real-mode wake
+    trampoline at physical 0x9000 (`arch/x86_64/acpi_wakeup.{S,cpp}`),
+    CPU architectural save/restore across the power loss, the FACS
+    waking-vector handshake, generic `\_Sx` sleep-package decode, and
+    the per-driver Suspend/Resume + veto contract in
+    `kernel/power/suspend.{h,cpp}`. A full cycle is proven under QEMU +
+    SeaBIOS by `tools/test/s3-cycle-smoke.sh`. What remains:
+    - `ResumePlatform` re-MAPS MMIO as well as re-programming the
+      controllers (LapicInit / IoApicInit / HpetInit each call
+      `mm::MapMmio` again). The arena is a bump allocator with no free,
+      so every cycle leaks arena and strands cached pointers to the old
+      VA; an `s3test=1` boot faults later in the VirtIO probe. Fix by
+      splitting a re-program-only entry point out of each Init.
+    - NVMe / AHCI / e1000 register `PowerSuspendVeto` at attach, so a
+      machine that probed them declines S3. Each needs a quiesce +
+      controller re-init pair to become a participant.
+    - SMP: `PowerSuspendCheck` refuses with more than one CPU online —
+      no AP park/resume path exists.
+    - OVMF never re-enters the waking vector (SeaBIOS does), so UEFI S3
+      resume is unproven.
+    - S0ix is untouched.
 24. **CPU frequency scaling.** P-states, EPP, idle governors. The
     READ half has landed — Intel ratios, AMD Zen P-state decode
     (`MSR_PSTATE_DEF` / `MSR_PSTATE_STATUS`) and APERF/MPERF effective
