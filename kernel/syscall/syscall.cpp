@@ -4587,11 +4587,10 @@ void SyscallDispatch(arch::TrapFrame* frame)
             // host DLL that does not export its functions would turn
             // this clean, correct refusal into a confusing
             // "function missing from a DLL that claims to exist".
-            const bool is_contract =
-                (kname[0] == 'a' && kname[1] == 'p' && kname[2] == 'i' && kname[3] == '-' && kname[4] == 'm' &&
-                 kname[5] == 's' && kname[6] == '-') ||
-                (kname[0] == 'e' && kname[1] == 'x' && kname[2] == 't' && kname[3] == '-' && kname[4] == 'm' &&
-                 kname[5] == 's' && kname[6] == '-');
+            const bool is_contract = (kname[0] == 'a' && kname[1] == 'p' && kname[2] == 'i' && kname[3] == '-' &&
+                                      kname[4] == 'm' && kname[5] == 's' && kname[6] == '-') ||
+                                     (kname[0] == 'e' && kname[1] == 'x' && kname[2] == 't' && kname[3] == '-' &&
+                                      kname[4] == 'm' && kname[5] == 's' && kname[6] == '-');
             if (is_contract)
             {
                 // GAP: no host implemented behind this contract — the
