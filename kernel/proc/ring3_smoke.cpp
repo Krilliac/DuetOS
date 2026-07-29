@@ -150,6 +150,8 @@
 #include "generated_wininet_smoke_pe.h"
 #include "generated_winkill_pe.h"
 #include "generated_atom_smoke_pe.h"
+#include "generated_stackgrow_smoke_pe.h"
+#include "generated_stackguard_smoke_pe.h"
 #include "generated_console_smoke_pe.h"
 #include "generated_critsec_smoke_pe.h"
 #include "generated_crt_smoke_pe.h"
@@ -2344,6 +2346,20 @@ constexpr PeCompatEntry kPeCompatBattery[] = {
     PE_COMPAT("ring3-critsec-smoke", kBinCritsecSmokeBytes, BareMetal, true),
     PE_COMPAT("ring3-tls-smoke", kBinTlsSmokeBytes, BareMetal, true),
     PE_COMPAT("ring3-atom-smoke", kBinAtomSmokeBytes, BareMetal, true),
+    // Demand-grown ring-3 stack: recurses ~512 KiB deep on a 1 MiB
+    // reservation whose spawn-time commit is 2 pages, so it can only
+    // finish if the #PF handler committed pages along the way. Always
+    // on — this is the gate on the loader's stack path, cheap, and the
+    // failure mode it catches (a fixed-size stack) is silent otherwise.
+    PE_COMPAT("ring3-stackgrow-smoke", kBinStackgrowSmokeBytes, Always, true),
+    // The other half of the same guarantee: a runaway recursion must
+    // still DIE at the guard region rather than grow through it. It
+    // exits via ntdll's unhandled STATUS_STACK_OVERFLOW path, so it
+    // prints no verdict line by design (expects_verdict = false, same
+    // shape as ring3-pe32-miss). The observable evidence is the
+    // kernel's "*** RING-3 STACK OVERFLOW ***" warn plus the
+    // mm.user_stack_guard_hit probe.
+    PE_COMPAT("ring3-stackguard-smoke", kBinStackguardSmokeBytes, Always, false),
     PE_COMPAT("ring3-console-smoke", kBinConsoleSmokeBytes, BareMetal, true),
     PE_COMPAT("ring3-datetime-smoke", kBinDatetimeSmokeBytes, BareMetal, true),
     PE_COMPAT("ring3-locale-smoke", kBinLocaleSmokeBytes, BareMetal, true),
