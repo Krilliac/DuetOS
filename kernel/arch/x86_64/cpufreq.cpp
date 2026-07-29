@@ -51,6 +51,30 @@ CpuidRegs DoCpuid(u32 leaf)
 /// that are permanently frozen at zero. Requiring the advertisement
 /// too means we only claim the counters where the platform says they
 /// are real.
+// Which of this platform's frequency MSRs actually answered, resolved
+// on first use and then believed.
+//
+// Caching is not an optimisation. A declined read costs a full trap
+// plus one `[extable] recovered kernel trap` line, and CpuFreqRead is
+// on the Task Manager sampling path — re-probing per call would emit
+// several of those lines per second on any host that declines the
+// MSRs. Observed live: a KVM boot on a Zen host logged two recovered
+// traps for every CpuFreqRead, because KVM exposes neither the AMD
+// P-state MSRs nor APERF/MPERF.
+//
+// What is cached is availability, never a VALUE: the operating point
+// and the counters are re-read every call.
+struct MsrAvail
+{
+    bool resolved;
+    bool perf_status;   // Intel IA32_PERF_STATUS
+    bool platform_info; // Intel MSR_PLATFORM_INFO
+    bool pstate;        // AMD MSR_PSTATE_DEF / MSR_PSTATE_STATUS
+    bool counters;      // IA32_MPERF / IA32_APERF
+};
+
+constinit MsrAvail g_avail = {};
+
 bool CountersAdvertised()
 {
     if (CpuVendorIsIntel())
@@ -67,13 +91,39 @@ bool CountersAdvertised()
     return false;
 }
 
+void ResolveAvail(bool intel, bool amd)
+{
+    u64 scratch = 0;
+    if (intel)
+    {
+        g_avail.perf_status = ReadMsrSafe(kMsrIa32PerfStatus, &scratch);
+        g_avail.platform_info = ReadMsrSafe(kMsrPlatformInfo, &scratch);
+    }
+    else if (amd && csm::ZenFamilySupported(CpuInfoGet().family))
+    {
+        // One probe covers the whole P-state block: the definitions
+        // and the status register live in the same MSR range, so a
+        // platform either models them or it does not.
+        g_avail.pstate = ReadMsrSafe(kMsrAmdPstateDef0, &scratch);
+    }
+    g_avail.counters =
+        CountersAdvertised() && ReadMsrSafe(kMsrIa32Mperf, &scratch) && ReadMsrSafe(kMsrIa32Aperf, &scratch);
+    g_avail.resolved = true;
+}
+
+void EnsureAvailResolved(bool intel, bool amd)
+{
+    if (!g_avail.resolved)
+        ResolveAvail(intel, amd);
+}
+
 void ReadIntel(CpuFreqReading& r)
 {
     r.bclk_mhz = kBclkMhz;
 
     // IA32_PERF_STATUS bits 15:8 = current operating ratio.
     u64 perf = 0;
-    if (ReadMsrSafe(kMsrIa32PerfStatus, &perf))
+    if (g_avail.perf_status && ReadMsrSafe(kMsrIa32PerfStatus, &perf))
     {
         const u32 cur_ratio = static_cast<u32>((perf >> 8) & 0xFF);
         if (cur_ratio != 0)
@@ -86,7 +136,7 @@ void ReadIntel(CpuFreqReading& r)
     // MSR_PLATFORM_INFO bits 15:8 = base ratio, bits 47:40 =
     // max-efficiency (lowest) ratio. Absent SKUs read 0.
     u64 info = 0;
-    if (ReadMsrSafe(kMsrPlatformInfo, &info) && info != 0 && info != ~0ULL)
+    if (g_avail.platform_info && ReadMsrSafe(kMsrPlatformInfo, &info) && info != 0 && info != ~0ULL)
     {
         const u32 base_ratio = static_cast<u32>((info >> 8) & 0xFF);
         const u32 min_ratio = static_cast<u32>((info >> 40) & 0xFF);
@@ -103,8 +153,9 @@ void ReadAmd(CpuFreqReading& r)
 {
     // The FID/DID encoding below is Zen-specific; pre-Zen parts use a
     // different one, so an unrecognised family reports nothing rather
-    // than a confidently-wrong MHz.
-    if (!csm::ZenFamilySupported(CpuInfoGet().family))
+    // than a confidently-wrong MHz. `pstate` also folds in whether the
+    // platform answered the probe at all.
+    if (!g_avail.pstate)
         return;
 
     // P0 is the base (guaranteed) frequency; walk the rest to find the
@@ -160,6 +211,7 @@ CpuFreqReading CpuFreqRead()
     if (!intel && !amd)
         return r;
     r.is_intel = intel;
+    EnsureAvailResolved(intel, amd);
 
     if (intel)
         ReadIntel(r);
@@ -169,12 +221,7 @@ CpuFreqReading CpuFreqRead()
     // Counters are a separate capability from the static ratios: a
     // machine can expose one without the other, and the effective-
     // frequency path needs both.
-    if (CountersAdvertised())
-    {
-        u64 mperf = 0;
-        u64 aperf = 0;
-        r.counters_valid = ReadMsrSafe(kMsrIa32Mperf, &mperf) && ReadMsrSafe(kMsrIa32Aperf, &aperf);
-    }
+    r.counters_valid = g_avail.counters;
 
     // `valid` means "something real came back". Reporting valid with
     // every field zero is exactly the lie a UI renders as an idle

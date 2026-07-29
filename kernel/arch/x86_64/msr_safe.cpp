@@ -31,6 +31,10 @@ extern "C"
     extern const duetos::u8 rdmsr_safe_start[];
     extern const duetos::u8 rdmsr_safe_end[];
     extern const duetos::u8 rdmsr_safe_fault[];
+
+    // Raw asm entry. Callers use `arch::ReadMsrSafe` below, which
+    // gates on the extable row actually being registered.
+    bool ReadMsrSafeRaw(duetos::u32 msr, duetos::u64* out);
 }
 
 namespace duetos::arch
@@ -56,20 +60,43 @@ constexpr duetos::u32 kNonexistentMsr = 0xDEADBEEFu;
 // safe-read plumbing is broken rather than the hardware being odd.
 constexpr duetos::u32 kMsrIa32ApicBase = 0x1B;
 
+// Set by RegisterMsrSafeExtable. Until then a `rdmsr` fault has no
+// row to recover through, so issuing one would be the unrecoverable
+// #GP this whole file exists to prevent.
+//
+// This is not defensive decoration. The cpufreq boot self-test was
+// briefly ordered ahead of the registration, and under KVM (where an
+// unimplemented MSR really does #GP, unlike QEMU TCG which answers 0)
+// the boot wedged silently with no panic dump. A caller that runs too
+// early now gets "unsupported", which is at worst a missing reading
+// and is caught by MsrSafeSelfTest running immediately after
+// registration.
+constinit bool g_rdmsr_recoverable = false;
+
 } // namespace
+
+bool ReadMsrSafe(u32 msr, u64* out)
+{
+    if (!g_rdmsr_recoverable)
+        return false;
+    return ReadMsrSafeRaw(msr, out);
+}
 
 void RegisterMsrSafeExtable()
 {
     if (!::duetos::debug::KernelExtableRegister(Addr(wrmsr_safe_start), Addr(wrmsr_safe_end), Addr(wrmsr_safe_fault),
-                                               "arch/wrmsr_safe"))
+                                                "arch/wrmsr_safe"))
     {
         SerialWrite("[arch/msr-safe] wrmsr extable registration failed\n");
     }
     if (!::duetos::debug::KernelExtableRegister(Addr(rdmsr_safe_start), Addr(rdmsr_safe_end), Addr(rdmsr_safe_fault),
-                                               "arch/rdmsr_safe"))
+                                                "arch/rdmsr_safe"))
     {
         SerialWrite("[arch/msr-safe] rdmsr extable registration failed\n");
+        return;
     }
+    // Only now may a rdmsr issue: the fault has somewhere to land.
+    g_rdmsr_recoverable = true;
 }
 
 void MsrSafeSelfTest()
@@ -94,6 +121,12 @@ void MsrSafeSelfTest()
     // and then never match at trap time.
     if (Addr(rdmsr_safe_end) <= Addr(rdmsr_safe_start))
         PanicWithValue("arch/msr-safe", "rdmsr protected range is empty", Addr(rdmsr_safe_end));
+
+    // The wrapper's own gate. If this is clear, every ReadMsrSafe in
+    // the kernel is silently answering "unsupported" and no sensor
+    // will ever report a figure.
+    if (!g_rdmsr_recoverable)
+        PanicWithValue("arch/msr-safe", "rdmsr reads still gated off after registration", 0);
 
     if (!CpuHas(kCpuFeatMsr))
     {

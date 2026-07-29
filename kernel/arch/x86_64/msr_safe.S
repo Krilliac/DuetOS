@@ -31,11 +31,17 @@
  *   rsi = u64   value
  *   ret eax = 1 on success, 0 on #GP
  *
- * `ReadMsrSafe(msr, u64* out) -> bool` is the mirror image, with
- * its own label triple (rdmsr_safe_start / _end / _fault). It is
- * the primitive that lets a caller PROBE an MSR instead of
- * predicting whether the part implements it: every MSR consumer in
- * the tree used to defend with a static vendor + hypervisor gate
+ * `ReadMsrSafeRaw(msr, u64* out) -> bool` is the mirror image, with
+ * its own label triple (rdmsr_safe_start / _end / _fault). Callers
+ * use the `arch::ReadMsrSafe` wrapper in msr_safe.cpp rather than
+ * this symbol directly; the wrapper refuses to issue the rdmsr
+ * until the extable row is actually registered, so a caller that
+ * runs too early in boot gets `false` instead of an unrecoverable
+ * #GP. (That is not hypothetical: the cpufreq self-test hit exactly
+ * that ordering under KVM.) It is the primitive that lets a caller
+ * PROBE an MSR instead of predicting whether the part implements
+ * it: every MSR consumer in the tree used to defend with a static
+ * vendor + hypervisor gate
  * precisely because a bad `rdmsr` was unrecoverable. On the fault
  * path `*out` is left untouched and the function returns 0.
  *
@@ -80,9 +86,9 @@ wrmsr_safe_fault:
 .size WriteMsrSafe, . - WriteMsrSafe
 
 .align 16
-.global ReadMsrSafe
-.type ReadMsrSafe, @function
-ReadMsrSafe:
+.global ReadMsrSafeRaw
+.type ReadMsrSafeRaw, @function
+ReadMsrSafeRaw:
     endbr64
     /* rcx = MSR selector. rdmsr returns edx:eax; zero both first so
        a fault leaves no stale register state for a debugger to
@@ -107,4 +113,4 @@ rdmsr_safe_end:
 rdmsr_safe_fault:
     xor     eax, eax
     ret
-.size ReadMsrSafe, . - ReadMsrSafe
+.size ReadMsrSafeRaw, . - ReadMsrSafeRaw

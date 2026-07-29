@@ -57,12 +57,21 @@ constinit bool g_baseline_valid = false;
 constinit u64 g_baseline_energy_uj = 0;
 constinit u64 g_baseline_ns = 0;
 
+// Presence of the RAPL MSR block, resolved on first use. Same reason
+// cpufreq caches: a declined read costs a trap plus one recovered-trap
+// log line, and RaplRead sits on the `hwmon` / power-sampling path.
+// Only presence is cached; the energy counters are re-read every call.
+constinit bool g_presence_resolved = false;
+constinit bool g_rapl_present = false;
+
 } // namespace
 
 RaplReading RaplRead()
 {
     RaplReading r = {};
     if (!CpuHas(kCpuFeatMsr))
+        return r;
+    if (g_presence_resolved && !g_rapl_present)
         return r;
     // No hypervisor gate. Every read below goes through
     // `arch::ReadMsrSafe`, so a platform that does not implement RAPL
@@ -80,7 +89,9 @@ RaplReading RaplRead()
     // POWER_UNIT layout (both vendors): PU = bits 3:0, EU = bits 12:8,
     // time unit = bits 19:16. A units register that reads back all-zero
     // or all-ones means the MSR is not really there (returned garbage).
-    if (units == 0 || units == ~0ULL)
+    g_presence_resolved = true;
+    g_rapl_present = (units != 0 && units != ~0ULL);
+    if (!g_rapl_present)
         return r;
     r.power_unit_exp = static_cast<u8>(units & 0xF);
     r.energy_unit_exp = static_cast<u8>((units >> 8) & 0x1F);
@@ -146,7 +157,7 @@ void RaplProbe()
     const RaplReading r = RaplRead();
     if (!r.valid)
     {
-        KLOG_DEBUG("arch/rapl", "RAPL telemetry unavailable (no MSR / unknown vendor / platform declined the units register)");
+        KLOG_DEBUG("arch/rapl", "RAPL telemetry unavailable - no MSR, unknown vendor, or POWER_UNIT declined");
         return;
     }
     g_baseline_valid = true;

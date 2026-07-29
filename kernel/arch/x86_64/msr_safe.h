@@ -61,8 +61,16 @@ extern "C" bool WriteMsrSafe(u32 msr, u64 value);
  * trap dispatcher logs one `[extable] recovered kernel trap` line.
  * Probe once and cache the answer; do not call this in a loop
  * against an MSR you already know is absent.
+ *
+ * Boot-order note: this returns false for EVERY MSR until
+ * `RegisterMsrSafeExtable` has run, because before that a fault has
+ * no row to recover through and the #GP would be the unrecoverable
+ * one this primitive exists to prevent. A caller that runs too early
+ * therefore sees "unsupported" rather than wedging the boot. If a
+ * sensor reports unsupported on hardware you expect it to work on,
+ * check that its probe runs after the extable bring-up block.
  */
-extern "C" bool ReadMsrSafe(u32 msr, u64* out);
+bool ReadMsrSafe(u32 msr, u64* out);
 
 /// Register the kernel-extable rows that cover the `wrmsr` inside
 /// `WriteMsrSafe` and the `rdmsr` inside `ReadMsrSafe`. Must be

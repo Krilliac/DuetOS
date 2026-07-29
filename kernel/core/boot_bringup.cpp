@@ -706,7 +706,9 @@ void BootBringupEarly(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
     DUETOS_BOOT_SELFTEST(duetos::util::vt::VtParserSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::core::Sf32SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::arch::RaplSelfTest());
-    DUETOS_BOOT_SELFTEST(duetos::arch::CpuFreqSelfTest());
+    // CpuFreqSelfTest deliberately runs later, with the sensor probes,
+    // because it now asserts an invariant on a LIVE reading and the
+    // live path needs the rdmsr extable row registered first.
     DUETOS_BOOT_SELFTEST(duetos::arch::SpiFlashSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::GpuTelemetrySelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::net::NicTelemetrySelfTest());
@@ -811,6 +813,7 @@ void BootBringupEarly(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
 
     SerialWrite("[boot] Reading CPU frequency telemetry.\n");
     duetos::arch::CpuFreqProbe();
+    DUETOS_BOOT_SELFTEST(duetos::arch::CpuFreqSelfTest());
 
     // Fault-domain registry self-test. Registers a toy domain,
     // restarts it twice, checks counters. Real driver domains are
