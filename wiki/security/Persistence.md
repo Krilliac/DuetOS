@@ -92,9 +92,15 @@ The salt is generated once at first-boot install, stored in
 memory is 64 MiB; the emulator profile drops to 4 MiB so QEMU
 boot stays fast.
 
-When TPM driver lands: a random 32-byte session key encrypts the
+When TPM sealing lands: a random 32-byte session key encrypts the
 account/role files; the KEK derived from the user password wraps
-the session key; the wrap is TPM-sealed to PCR 0..7. Operators who
+the session key; the wrap is TPM-sealed to a PCR policy. The TPM
+driver itself is in — TIS transport, PCR extend/read and the
+hardware RNG are live (see [TPM](TPM.md)) — so what this waits on
+is the `TPM2_Create` / `Load` / `Unseal` marshalling, not the
+driver. Note that DuetOS implements the sealing half of TPM only:
+sealing a KEK is in scope, remote attestation of the result never
+will be. Operators who
 swap the disk into a different machine see "sealed wrap mismatch"
 and can choose to re-key with the recovery password.
 
@@ -174,7 +180,7 @@ shell uses today.
 | Lazy V1→V2 (PBKDF2→Argon2id) upgrade | REAL — fires on `AuthVerify` success; boot self-test pins behaviour    |
 | `/system/secrets/` layout (on FS)    | MISSING — no writable system FS yet (next dependent slice)             |
 | Installer flow                       | MISSING — needs the writable FS                                        |
-| TPM sealing                          | MISSING — blocks on TPM driver                                         |
+| TPM sealing                          | MISSING — the TPM driver landed (see [TPM](TPM.md)); seal/unseal marshalling is the remaining piece |
 
 The cryptographic + serialisation layers are complete and exercised
 at every boot via the security self-test sequence. The remaining

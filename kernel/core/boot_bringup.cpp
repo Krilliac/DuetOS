@@ -94,6 +94,7 @@
 #include "drivers/iommu/iommu.h"
 #include "drivers/iommu/ivrs.h"
 #include "drivers/tpm/tpm.h"
+#include "drivers/tpm/tpm_measure.h"
 #include "drivers/iommu/vtd.h"
 #include "drivers/iommu/vtd_paging.h"
 #include "drivers/input/ps2mouse.h"
@@ -1439,6 +1440,14 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     // kernel/drivers/tpm/tpm_wire.h for what is deliberately refused.
     duetos::drivers::tpm::TpmInit();
     DUETOS_BOOT_SELFTEST(duetos::drivers::tpm::TpmSelfTest());
+
+    // Measured boot as a LOCAL tripwire: extend PCR 8/9 with what
+    // actually booted, fold PCR 0..9 into one digest, and compare it
+    // against a baseline the operator pinned on the command line.
+    // Detection only — nothing here signs a PCR set or sends one
+    // anywhere, and a mismatch warns rather than refusing to boot.
+    duetos::drivers::tpm::TpmMeasureBoot(cmdline);
+    DUETOS_BOOT_SELFTEST(duetos::drivers::tpm::TpmMeasureSelfTest());
 
     // VT-d identity-passthrough page tables. Builds root + shared
     // context + identity-mapping PDPT (3 frames = 12 KiB). The

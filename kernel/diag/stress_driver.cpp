@@ -6,6 +6,7 @@
 #include "mm/kheap.h"
 #include "sched/sched.h"
 #include "shell/shell_internal.h"
+#include "util/cmdline.h"
 #include "util/string.h"
 #include "util/types.h"
 
@@ -46,56 +47,11 @@ struct Config
 // stress= arming wouldn't race (we only arm once per boot).
 Config g_cfg = {};
 
-// Linear scan: return true iff `cmdline` contains a whitespace-
-// delimited token `key=value`; copy the value into `out` (up to
-// `cap-1` bytes, NUL-terminated). nullptr cmdline → false. A
-// minimal parser mirroring the style of CmdlineMatches in main.cpp;
-// keeping it local sidesteps having to expose that helper or a
-// fuller cmdline library before the first additional consumer.
-bool CmdlineGet(const char* cmdline, const char* key, char* out, u32 cap)
-{
-    if (cmdline == nullptr || out == nullptr || cap == 0)
-    {
-        return false;
-    }
-    out[0] = '\0';
-    const char* p = cmdline;
-    while (*p != '\0')
-    {
-        while (*p == ' ' || *p == '\t')
-        {
-            ++p;
-        }
-        if (*p == '\0')
-        {
-            break;
-        }
-        const char* token = p;
-        while (*p != '\0' && *p != ' ' && *p != '\t')
-        {
-            ++p;
-        }
-        const char* k = key;
-        const char* t = token;
-        while (*k != '\0' && t < p && *t == *k)
-        {
-            ++k;
-            ++t;
-        }
-        if (*k == '\0' && t < p && *t == '=')
-        {
-            ++t;
-            u32 i = 0;
-            while (t < p && i + 1 < cap)
-            {
-                out[i++] = *t++;
-            }
-            out[i] = '\0';
-            return true;
-        }
-    }
-    return false;
-}
+// `CmdlineGet` used to live here. It now lives in
+// `kernel/util/cmdline.h` — the TPM measured-boot tripwire became the
+// "first additional consumer" this comment used to anticipate, so the
+// helper was promoted rather than copied.
+using ::duetos::core::CmdlineGet;
 
 // Parse a non-negative decimal integer. Returns true on success; on
 // failure `*out` is left untouched so the caller's default sticks.
