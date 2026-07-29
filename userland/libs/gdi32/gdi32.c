@@ -61,6 +61,19 @@ typedef struct
 #define SYS_GDI_DELETE_DC 111
 #define SYS_GDI_DELETE_OBJECT 112
 #define SYS_GDI_BITBLT_DC 113
+#define SYS_GDI_STRETCH_BLT_DC 117
+#define SYS_GDI_CREATE_SOLID_BRUSH 108
+/* Pixel-DATA transfer (as opposed to draw commands). Six register
+ * arguments, no struct — see kernel/subsystems/win32/gdi_dib.cpp. */
+#define SYS_GDI_SET_DIBITS 214
+#define SYS_GDI_GET_DIBITS 215
+/* DIB sections need a user-visible pixel buffer of their own. */
+#define SYS_VIRTUAL_ALLOC 199
+#define SYS_VIRTUAL_FREE 200
+#define GDI_MEM_COMMIT 0x1000u
+#define GDI_MEM_RESERVE 0x2000u
+#define GDI_MEM_RELEASE 0x8000u
+#define GDI_PAGE_READWRITE 0x04u
 
 static long long gdi32_syscall1(long n, long long a)
 {
@@ -73,6 +86,27 @@ static long long gdi32_syscall3(long n, long long a, long long b, long long c)
 {
     long long rv;
     __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)n), "D"(a), "S"(b), "d"(c) : "memory");
+    return rv;
+}
+
+static long long gdi32_syscall4(long n, long long a, long long b, long long c, long long d)
+{
+    long long rv;
+    register long long r10 __asm__("r10") = d;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)n), "D"(a), "S"(b), "d"(c), "r"(r10) : "memory");
+    return rv;
+}
+
+static long long gdi32_syscall6(long n, long long a, long long b, long long c, long long d, long long e, long long f)
+{
+    long long rv;
+    register long long r10 __asm__("r10") = d;
+    register long long r8 __asm__("r8") = e;
+    register long long r9 __asm__("r9") = f;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)n), "D"(a), "S"(b), "d"(c), "r"(r10), "r"(r8), "r"(r9)
+                     : "memory");
     return rv;
 }
 
@@ -145,17 +179,232 @@ __declspec(dllexport) BOOL RestoreDC(HDC dc, INT saved)
 }
 
 /* --- Object creation --- */
-/* Brushes in v0 carry the colour in the bottom 24 bits; the stub
- * sets the top bit to distinguish "real brush" from NULL. */
-__declspec(dllexport) HBITMAP CreateBitmap(INT w, INT h, UINT planes, UINT bits_per_pel, const void* bits)
+
+/* Brush colour side table.
+ *
+ * A kernel brush handle is an opaque index — the colour lives in the
+ * kernel and there is no query syscall — but the window-DC fill paths
+ * (FillRect / FrameRect) need the COLORREF on the user side, because
+ * they pass a colour rather than a brush to the compositor. So each
+ * kernel-backed brush records its colour here at creation.
+ *
+ * Sized to match the kernel's per-process brush ceiling, so a caller
+ * that can get a kernel brush can always record it. */
+#define GDI32_MAX_BRUSHES 16
+
+typedef struct
 {
-    (void)w;
-    (void)h;
-    (void)planes;
-    (void)bits_per_pel;
-    (void)bits;
-    return (HBITMAP)0;
+    HBRUSH h; /* 0 == free slot */
+    COLORREF c;
+} GDI32_BRUSHCOLOUR;
+
+static GDI32_BRUSHCOLOUR g_brush_colours[GDI32_MAX_BRUSHES];
+
+static int gdi32_brush_remember(HBRUSH h, COLORREF c)
+{
+    int i;
+    if (!h)
+        return 0;
+    for (i = 0; i < GDI32_MAX_BRUSHES; ++i)
+    {
+        if (!g_brush_colours[i].h)
+        {
+            g_brush_colours[i].h = h;
+            g_brush_colours[i].c = c;
+            return 1;
+        }
+    }
+    return 0;
 }
+
+static int gdi32_brush_lookup(HBRUSH h, COLORREF* out)
+{
+    int i;
+    if (!h)
+        return 0;
+    for (i = 0; i < GDI32_MAX_BRUSHES; ++i)
+    {
+        if (g_brush_colours[i].h == h)
+        {
+            *out = g_brush_colours[i].c;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+__declspec(dllexport) HBRUSH CreateSolidBrush(COLORREF clr);
+
+static void gdi32_brush_forget(HBRUSH h)
+{
+    int i;
+    for (i = 0; i < GDI32_MAX_BRUSHES; ++i)
+    {
+        if (g_brush_colours[i].h == h)
+        {
+            g_brush_colours[i].h = (HBRUSH)0;
+            g_brush_colours[i].c = 0;
+            return;
+        }
+    }
+}
+
+/* --- DIB support -------------------------------------------------
+ *
+ * A kernel surface is 32bpp BGRA and knows nothing about DIB layout;
+ * SYS_GDI_SET_DIBITS / SYS_GDI_GET_DIBITS do the conversion. What
+ * lives here is the Win32-shaped scaffolding around them: reading a
+ * BITMAPINFOHEADER, computing the DWORD-padded stride the caller's
+ * buffer actually uses, and — for CreateDIBSection — owning the
+ * user-visible pixel buffer the caller writes into directly.
+ *
+ * Field offsets of BITMAPINFOHEADER (all little-endian, 40 bytes):
+ *   0 biSize(u32) 4 biWidth(i32) 8 biHeight(i32) 12 biPlanes(u16)
+ *   14 biBitCount(u16) 16 biCompression(u32) ...
+ * Read byte-wise rather than through a struct: the caller's buffer
+ * has no alignment guarantee, and the layout is identical on i386
+ * and x86_64 so there is no struct-shape divergence to get wrong. */
+
+static unsigned gdi32_rd32(const unsigned char* p)
+{
+    return (unsigned)p[0] | ((unsigned)p[1] << 8) | ((unsigned)p[2] << 16) | ((unsigned)p[3] << 24);
+}
+static unsigned gdi32_rd16(const unsigned char* p)
+{
+    return (unsigned)p[0] | ((unsigned)p[1] << 8);
+}
+
+/* Rows pad up to a 4-byte boundary. This is the calculation that
+ * gets written as `w * bpp / 8` and then shears every 24bpp image. */
+static unsigned gdi32_dib_stride(int w, unsigned bpp)
+{
+    if (w <= 0 || (bpp != 16 && bpp != 24 && bpp != 32))
+        return 0;
+    return (unsigned)((((long long)w * (long long)bpp + 31) / 32) * 4);
+}
+
+/* Pull width / height / bpp out of a BITMAPINFOHEADER. Returns 0 if
+ * the header is absent, too small, or describes a format the kernel
+ * side will refuse anyway. `out_h` keeps its SIGN — negative means a
+ * top-down DIB and the kernel needs that, not its magnitude. */
+static int gdi32_dib_header(const void* bi, int* out_w, int* out_h, unsigned* out_bpp)
+{
+    const unsigned char* p = (const unsigned char*)bi;
+    if (!p)
+        return 0;
+    if (gdi32_rd32(p) < 40)
+        return 0; /* BITMAPCOREHEADER (12 bytes) is not supported */
+    const int w = (int)gdi32_rd32(p + 4);
+    const int h = (int)gdi32_rd32(p + 8);
+    const unsigned bpp = gdi32_rd16(p + 14);
+    if (w <= 0 || h == 0)
+        return 0;
+    if (bpp != 16 && bpp != 24 && bpp != 32)
+        return 0;
+    *out_w = w;
+    *out_h = h;
+    *out_bpp = bpp;
+    return 1;
+}
+
+/* Row count, independent of origin. h == INT_MIN is filtered by the
+ * caller's header check (h == 0 is the only rejected magnitude, and
+ * INT_MIN survives it) so negate in 64-bit. */
+static int gdi32_dib_rows(int h)
+{
+    long long v = (long long)h;
+    return (int)(v < 0 ? -v : v);
+}
+
+/* Upload `bits` into kernel bitmap `bmp`. Returns the number of
+ * scanlines actually transferred, which is NOT always the number
+ * requested: if the caller's buffer ends before the header says it
+ * should, the kernel stops at the edge of the mapping rather than
+ * reading on, and the short count is how the caller finds out. */
+static int gdi32_push_dibits(HBITMAP bmp, const void* bits, int w, int h, unsigned bpp)
+{
+    unsigned stride = gdi32_dib_stride(w, bpp);
+    unsigned long long bytes;
+    if (!bmp || !bits || !stride)
+        return 0;
+    bytes = (unsigned long long)stride * (unsigned long long)gdi32_dib_rows(h);
+    return (int)gdi32_syscall6(SYS_GDI_SET_DIBITS, (long long)(unsigned long long)bmp,
+                               (long long)(unsigned long long)bits, (long long)w, (long long)h, (long long)bpp,
+                               (long long)bytes);
+}
+
+/* DIB sections the process owns. A section's defining property is
+ * that the CALLER writes pixels straight into `bits` with no GDI call
+ * in between, so the kernel surface cannot be kept in sync as it
+ * happens — the bits are pushed down on the next BitBlt / StretchBlt
+ * that reads the section (see gdi32_flush_dibsections).
+ *
+ * Fixed table rather than a heap: this DLL is freestanding, and 16
+ * live sections is already more than a v0 Win32 app opens. */
+#define GDI32_MAX_DIBSECTIONS 16
+
+typedef struct
+{
+    HBITMAP bmp; /* kernel surface handle; 0 == free slot */
+    void* bits;  /* user-visible pixel buffer (SYS_VIRTUAL_ALLOC) */
+    unsigned long res_bytes;
+    int w;
+    int h; /* signed: keeps the origin convention */
+    unsigned bpp;
+} GDI32_DIBSECTION;
+
+static GDI32_DIBSECTION g_dibsections[GDI32_MAX_DIBSECTIONS];
+
+static GDI32_DIBSECTION* gdi32_find_dibsection(HBITMAP bmp)
+{
+    int i;
+    if (!bmp)
+        return 0;
+    for (i = 0; i < GDI32_MAX_DIBSECTIONS; ++i)
+    {
+        if (g_dibsections[i].bmp == bmp)
+            return &g_dibsections[i];
+    }
+    return 0;
+}
+
+/* Push every live section's user bits into its kernel surface.
+ * Called before a blit because that is the first moment the kernel
+ * has to agree with what the caller drew. Sections the caller never
+ * touched are re-pushed too — cheap next to the blit itself, and it
+ * avoids a dirty-tracking scheme that would need a page-fault hook
+ * this DLL has no way to install. */
+static void gdi32_flush_dibsections(void)
+{
+    int i;
+    for (i = 0; i < GDI32_MAX_DIBSECTIONS; ++i)
+    {
+        GDI32_DIBSECTION* s = &g_dibsections[i];
+        if (s->bmp && s->bits)
+            (void)gdi32_push_dibits(s->bmp, s->bits, s->w, s->h, s->bpp);
+    }
+}
+
+/* Release a DIB section's slot + user buffer. Returns 1 if `bmp` was
+ * a section (the kernel surface still needs deleting by the caller). */
+static int gdi32_release_dibsection(HBITMAP bmp)
+{
+    GDI32_DIBSECTION* s = gdi32_find_dibsection(bmp);
+    if (!s)
+        return 0;
+    if (s->bits)
+    {
+        (void)gdi32_syscall3(SYS_VIRTUAL_FREE, (long long)(unsigned long long)s->bits, 0, (long long)GDI_MEM_RELEASE);
+    }
+    s->bmp = (HBITMAP)0;
+    s->bits = (void*)0;
+    s->res_bytes = 0;
+    s->w = 0;
+    s->h = 0;
+    s->bpp = 0;
+    return 1;
+}
+
 __declspec(dllexport) HBITMAP CreateCompatibleBitmap(HDC dc, INT w, INT h)
 {
     if (w <= 0 || h <= 0)
@@ -164,28 +413,171 @@ __declspec(dllexport) HBITMAP CreateCompatibleBitmap(HDC dc, INT w, INT h)
         gdi32_syscall3(SYS_GDI_CREATE_COMPAT_BITMAP, (long long)(unsigned long long)dc, (long long)w, (long long)h);
     return (HBITMAP)(unsigned long long)hbmp;
 }
+
+/* CreateBitmap — allocate a surface and, when the caller supplies
+ * them, seed it with `bits`.
+ *
+ * Win32 CreateBitmap takes a DDB, whose scanlines are WORD-aligned
+ * and top-down, not the DWORD-aligned bottom-up DIB layout. The
+ * kernel transfer speaks DIB, so a top-down height is passed (a
+ * negative value) and only the depths whose WORD and DWORD alignment
+ * coincide are accepted.
+ * GAP: 32bpp initial bits only; a 24bpp DDB's WORD-aligned rows do
+ * not match the DIB stride the kernel assumes — revisit when a PE
+ * ships one. A NULL `bits` (the common "give me a scratch surface"
+ * call) works at any depth because nothing is read. */
+__declspec(dllexport) HBITMAP CreateBitmap(INT w, INT h, UINT planes, UINT bits_per_pel, const void* bits)
+{
+    HBITMAP bmp;
+    if (w <= 0 || h <= 0 || planes != 1)
+        return (HBITMAP)0;
+    bmp = CreateCompatibleBitmap((HDC)0, w, h);
+    if (!bmp)
+        return (HBITMAP)0;
+    if (bits && bits_per_pel == 32)
+    {
+        /* Negative height: a DDB's first scanline is its top one. */
+        (void)gdi32_push_dibits(bmp, bits, w, -h, 32);
+    }
+    return bmp;
+}
+
+/* CreateDIBSection — a surface whose pixels the caller writes to
+ * directly. The user-side buffer is a real committed mapping, so a
+ * caller that memsets it or draws into it with its own code works;
+ * the kernel surface picks the bytes up on the next blit.
+ *
+ * GAP: `section` / `offset` (backing a DIB with a file mapping) are
+ * ignored — revisit when a PE passes a non-NULL section. */
 __declspec(dllexport) HBITMAP CreateDIBSection(HDC dc, const void* bi, UINT usage, void** bits, HANDLE section,
                                                DWORD offset)
 {
+    int w = 0, h = 0, i;
+    unsigned bpp = 0, stride;
+    unsigned long long need;
+    long long base;
+    HBITMAP bmp;
+    GDI32_DIBSECTION* slot = 0;
+
     (void)dc;
-    (void)bi;
     (void)usage;
     (void)section;
     (void)offset;
     if (bits)
         *bits = (void*)0;
-    return (HBITMAP)0;
+    if (!gdi32_dib_header(bi, &w, &h, &bpp))
+        return (HBITMAP)0;
+    stride = gdi32_dib_stride(w, bpp);
+    if (!stride)
+        return (HBITMAP)0;
+    need = (unsigned long long)stride * (unsigned long long)gdi32_dib_rows(h);
+
+    for (i = 0; i < GDI32_MAX_DIBSECTIONS; ++i)
+    {
+        if (!g_dibsections[i].bmp)
+        {
+            slot = &g_dibsections[i];
+            break;
+        }
+    }
+    if (!slot)
+        return (HBITMAP)0;
+
+    bmp = CreateCompatibleBitmap((HDC)0, w, gdi32_dib_rows(h));
+    if (!bmp)
+        return (HBITMAP)0;
+
+    base = gdi32_syscall4(SYS_VIRTUAL_ALLOC, (long long)need, (long long)(GDI_MEM_RESERVE | GDI_MEM_COMMIT),
+                          (long long)GDI_PAGE_READWRITE, 0);
+    if (!base)
+    {
+        (void)gdi32_syscall1(SYS_GDI_DELETE_OBJECT, (long long)(unsigned long long)bmp);
+        return (HBITMAP)0;
+    }
+
+    slot->bmp = bmp;
+    slot->bits = (void*)(unsigned long long)base;
+    slot->res_bytes = (unsigned long)need;
+    slot->w = w;
+    slot->h = h;
+    slot->bpp = bpp;
+    if (bits)
+        *bits = slot->bits;
+    return bmp;
 }
+
+/* CreateDIBitmap — a compatible surface seeded from a DIB. Unlike
+ * CreateDIBSection the caller gets no pointer back, so this is a
+ * one-shot upload. CBM_INIT (0x04) selects "copy the bits"; without
+ * it the surface is simply left zeroed. */
 __declspec(dllexport) HBITMAP CreateDIBitmap(HDC dc, const void* header, DWORD init, const void* bits, const void* bi,
                                              UINT usage)
 {
+    int w = 0, h = 0;
+    unsigned bpp = 0;
+    HBITMAP bmp;
+
     (void)dc;
-    (void)header;
-    (void)init;
-    (void)bits;
     (void)bi;
     (void)usage;
-    return (HBITMAP)0;
+    if (!gdi32_dib_header(header, &w, &h, &bpp))
+        return (HBITMAP)0;
+    bmp = CreateCompatibleBitmap((HDC)0, w, gdi32_dib_rows(h));
+    if (!bmp)
+        return (HBITMAP)0;
+    if ((init & 0x04u) && bits)
+        (void)gdi32_push_dibits(bmp, bits, w, h, bpp);
+    return bmp;
+}
+
+/* SetDIBits / GetDIBits — the explicit transfer pair.
+ *
+ * Both return the number of scanlines moved, which is what a caller
+ * checks. `start` / `scans` (a partial-band transfer) are honoured
+ * only in the degenerate whole-image case.
+ * GAP: no partial scanline bands — a call with start != 0 or scans
+ * short of the image height is refused rather than transferring the
+ * wrong rows. Revisit when a PE streams a DIB in bands. */
+__declspec(dllexport) INT SetDIBits(HDC dc, HBITMAP bmp, UINT start, UINT scans, const void* bits, const void* bi,
+                                    UINT usage)
+{
+    int w = 0, h = 0;
+    unsigned bpp = 0;
+
+    (void)dc;
+    (void)usage;
+    if (!bmp || !bits || !gdi32_dib_header(bi, &w, &h, &bpp))
+        return 0;
+    if (start != 0 || scans != (UINT)gdi32_dib_rows(h))
+        return 0;
+    /* Report what actually moved, not what was asked for. */
+    return (INT)gdi32_push_dibits(bmp, bits, w, h, bpp);
+}
+
+__declspec(dllexport) INT GetDIBits(HDC dc, HBITMAP bmp, UINT start, UINT scans, void* bits, void* bi, UINT usage)
+{
+    int w = 0, h = 0;
+    unsigned bpp = 0, stride;
+    unsigned long long bytes;
+    long long moved;
+
+    (void)dc;
+    (void)usage;
+    if (!bmp || !gdi32_dib_header(bi, &w, &h, &bpp))
+        return 0;
+    /* Win32 contract: a NULL `bits` means "just fill in the header",
+     * which our caller already supplied in full. Report the height. */
+    if (!bits)
+        return gdi32_dib_rows(h);
+    if (start != 0 || scans != (UINT)gdi32_dib_rows(h))
+        return 0;
+    stride = gdi32_dib_stride(w, bpp);
+    if (!stride)
+        return 0;
+    bytes = (unsigned long long)stride * (unsigned long long)gdi32_dib_rows(h);
+    moved = gdi32_syscall6(SYS_GDI_GET_DIBITS, (long long)(unsigned long long)bmp, (long long)(unsigned long long)bits,
+                           (long long)w, (long long)h, (long long)bpp, (long long)bytes);
+    return (INT)moved;
 }
 __declspec(dllexport) HBRUSH CreateBrushIndirect(const void* lb)
 {
@@ -193,13 +585,36 @@ __declspec(dllexport) HBRUSH CreateBrushIndirect(const void* lb)
         return (HBRUSH)0;
     /* LOGBRUSH = { UINT style; COLORREF color; ULONG_PTR hatch; } */
     const unsigned* b = (const unsigned*)lb;
-    unsigned long long tag = 0xB0000000ULL | (unsigned long long)b[1];
-    return (HBRUSH)tag;
+    return CreateSolidBrush((COLORREF)b[1]);
 }
+
+/* CreateSolidBrush — a REAL kernel brush.
+ *
+ * This used to hand back a userland sentinel (0xB<COLORREF>) and
+ * never call SYS_GDI_CREATE_SOLID_BRUSH, even though the kernel has
+ * implemented it all along. The consequence was quiet and total: the
+ * kernel could not resolve the sentinel, so SelectObject left the
+ * memory DC's brush unset, and every PatBlt / Rectangle / Ellipse
+ * into an off-screen surface painted the implicit WHITE_BRUSH
+ * regardless of what the app asked for. Nothing returned an error;
+ * the pixels were just the wrong colour.
+ *
+ * The sentinel survives as the fallback, because the window-DC fill
+ * paths (FillRect / FrameRect) decode the colour straight out of the
+ * handle and must keep working if the kernel brush table is full. */
 __declspec(dllexport) HBRUSH CreateSolidBrush(COLORREF clr)
 {
-    unsigned long long tag = 0xB0000000ULL | (unsigned long long)clr;
-    return (HBRUSH)tag;
+    long long h = gdi32_syscall1(SYS_GDI_CREATE_SOLID_BRUSH, (long long)(unsigned long long)clr);
+    if (h != 0 && gdi32_brush_remember((HBRUSH)(unsigned long long)h, clr))
+        return (HBRUSH)(unsigned long long)h;
+    if (h != 0)
+    {
+        /* Out of side-table slots: releasing the kernel brush keeps
+         * the two tables from drifting, and the sentinel still
+         * carries the colour for the window-DC paths. */
+        (void)gdi32_syscall1(SYS_GDI_DELETE_OBJECT, h);
+    }
+    return (HBRUSH)(0xB0000000ULL | (unsigned long long)clr);
 }
 __declspec(dllexport) HPEN CreatePen(INT style, INT width, COLORREF clr)
 {
@@ -308,6 +723,13 @@ __declspec(dllexport) BOOL DeleteObject(HGDIOBJ obj)
         return 1; /* SelectObject "prev" sentinel */
     if (gdi32_region_delete(obj))
         return 1; /* user-mode region — freed its pool slot */
+    /* A DIB section owns a user-side pixel mapping as well as the
+     * kernel surface. Release the mapping first, then fall through
+     * so the surface itself is deleted exactly once. */
+    (void)gdi32_release_dibsection((HBITMAP)obj);
+    /* Drop the brush colour record too, so a recycled kernel handle
+     * cannot inherit the previous brush's colour. */
+    gdi32_brush_forget((HBRUSH)obj);
     return gdi32_syscall1(SYS_GDI_DELETE_OBJECT, (long long)v) ? 1 : 0;
 }
 __declspec(dllexport) INT GetObjectA(HGDIOBJ obj, INT cb, void* buf)
@@ -330,6 +752,11 @@ __declspec(dllexport) INT GetObjectW(HGDIOBJ obj, INT cb, void* buf)
 static COLORREF gdi32_brush_colour(HBRUSH br)
 {
     unsigned long long v = (unsigned long long)br;
+    COLORREF c;
+    /* Kernel-backed brushes carry no colour in the handle, so their
+     * COLORREF comes from the side table CreateSolidBrush fills. */
+    if (gdi32_brush_lookup(br, &c))
+        return c;
     if ((v & 0xF0000000ULL) != 0xB0000000ULL)
         return 0;
     return (COLORREF)(v & 0x00FFFFFFULL);
@@ -384,6 +811,10 @@ __declspec(dllexport) BOOL BitBlt(HDC dst, INT x, INT y, INT w, INT h, HDC src, 
 {
     if (w <= 0 || h <= 0)
         return 0;
+    /* A DIB section's pixels are written by the caller with no GDI
+     * call in between, so this blit is the first point at which the
+     * kernel surface can be brought up to date. */
+    gdi32_flush_dibsections();
     /* Pack 9 args contiguous on the stack — must match the
      * kernel's `BitBltArgs` struct in
      * `kernel/subsystems/win32/gdi_objects.cpp` (9 x u64). */
@@ -399,21 +830,30 @@ __declspec(dllexport) BOOL BitBlt(HDC dst, INT x, INT y, INT w, INT h, HDC src, 
     args[8] = (unsigned long long)rop;
     return gdi32_syscall1(SYS_GDI_BITBLT_DC, (long long)(unsigned long long)args) ? 1 : 0;
 }
+/* StretchBlt — as BitBlt, with independent source and destination
+ * extents. The kernel has implemented this since SYS_GDI_STRETCH_BLT_DC
+ * landed; this stub used to return success without calling it, so a
+ * caller saw "it worked" and no pixels. Same 11-slot packed-argument
+ * shape as the kernel's `StretchBltArgs`. */
 __declspec(dllexport) BOOL StretchBlt(HDC dst, INT x, INT y, INT w, INT h, HDC src, INT sx, INT sy, INT sw, INT sh,
                                       DWORD rop)
 {
-    (void)dst;
-    (void)x;
-    (void)y;
-    (void)w;
-    (void)h;
-    (void)src;
-    (void)sx;
-    (void)sy;
-    (void)sw;
-    (void)sh;
-    (void)rop;
-    return 1;
+    unsigned long long args[11];
+    if (w <= 0 || h <= 0 || sw <= 0 || sh <= 0)
+        return 0;
+    gdi32_flush_dibsections();
+    args[0] = (unsigned long long)dst;
+    args[1] = (unsigned long long)(unsigned int)x;
+    args[2] = (unsigned long long)(unsigned int)y;
+    args[3] = (unsigned long long)(unsigned int)w;
+    args[4] = (unsigned long long)(unsigned int)h;
+    args[5] = (unsigned long long)src;
+    args[6] = (unsigned long long)(unsigned int)sx;
+    args[7] = (unsigned long long)(unsigned int)sy;
+    args[8] = (unsigned long long)(unsigned int)sw;
+    args[9] = (unsigned long long)(unsigned int)sh;
+    args[10] = (unsigned long long)rop;
+    return gdi32_syscall1(SYS_GDI_STRETCH_BLT_DC, (long long)(unsigned long long)args) ? 1 : 0;
 }
 
 /* DrawText — trivial one-line implementation: treats the rect's
