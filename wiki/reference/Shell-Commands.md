@@ -246,6 +246,8 @@ All write-side FAT operations are admin-gated.
 | `power`, `battery` | AC / battery / thermal snapshot |
 | `thermal`, `temp` | Re-read the CPU temperature sensor (Intel MSR or AMD SMN); prints `unsupported` where there is none |
 | `hwmon` | Unified sensor view |
+| `cpufreq` | Show the P-state control window (mechanism, unit, range, current). Read-only, ungated |
+| `cpufreq set <n>` | Select an operating point — bus ratio on Intel, P-state index on AMD. Needs `kCapPowerTune` **and** a `cpufreq=tune` boot; refuses values outside the platform-advertised window. Reports the delivered MHz from a 200 ms APERF/MPERF sample. See [Power-Management](../drivers/Power-Management.md) |
 | `hw`, `hardware` | Hardware-wide status / activation / serial capture (`status`, `activate`, `capture`) |
 | `gpu`, `lsgpu` | List discovered GPUs |
 | `npu`, `ml` | List discovered NPU / AI-accelerator devices (vendor/device, kind, BDF, MMIO BAR). Probe-only — no firmware / command-ring yet. Reports none when no PCI class=0x12 or known Intel NPU device-ID is present |

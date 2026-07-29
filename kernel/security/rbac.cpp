@@ -93,6 +93,10 @@ RoleId SeedRoot()
     // Zero would deny ambient elevation entirely, so it is reserved
     // for custom roles that intend that fail-closed policy.
     p.grace_seconds[duetos::core::kCapNetAdmin] = kRbacSensitiveGraceSeconds;
+    // Writing a P-state MSR is a physical-state change, so it gets the
+    // same deliberately-short ambient window as a destructive firewall
+    // change rather than the default one.
+    p.grace_seconds[duetos::core::kCapPowerTune] = kRbacSensitiveGraceSeconds;
     return RbacRegisterRole("root", p);
 }
 
@@ -388,7 +392,7 @@ void RbacSelfTest()
 //     u8  magic[4];                 // 'D','R','B','C'
 //     u32 format_version;           // = 1
 //     u32 role_count;
-//     u32 role_record_size;         // = kRoleRecordBytes (56)
+//     u32 role_record_size;         // = kRoleRecordBytes (64)
 //     u32 membership_count;
 //     u32 membership_record_size;   // = kMembershipRecordBytes (40)
 //     u32 reserved[2];              // zero
@@ -397,12 +401,12 @@ void RbacSelfTest()
 //     MembershipRecord memberships[membership_count];
 //   }
 //
-//   struct RoleRecord {            // 56 bytes
+//   struct RoleRecord {            // 64 bytes
 //     u8  name[kRbacRoleNameMax];  // 24
 //     u64 cap_mask;                //  8
 //     u16 grace_seconds[kCapCount];// kCapCount*2
 //     u8  in_use;                  //  1
-//     u8  pad[...];                // to 56
+//     u8  pad[...];                // to 64
 //   };
 //
 //   struct MembershipRecord {      // 40 bytes
@@ -417,8 +421,14 @@ namespace
 {
 
 constexpr u8 kRbacMagic[4] = {'D', 'R', 'B', 'C'};
-constexpr u32 kRbacSnapshotFormatVersion = 1;
-constexpr u32 kRoleRecordBytes = 56;
+// v2 (2026-07-29): kCapPowerTune took kCapCount from 11 to 12, which
+// pushed the role record from 55 to 57 bytes and past the old 56-byte
+// envelope. The record widened to 64 (headroom to kCapCount == 15) and
+// the version bumped with it, so a v1 snapshot is REFUSED by
+// RbacImportSnapshot rather than silently mis-parsed with every
+// grace_seconds entry shifted. Re-export after upgrading.
+constexpr u32 kRbacSnapshotFormatVersion = 2;
+constexpr u32 kRoleRecordBytes = 64;
 constexpr u32 kMembershipRecordBytes = 40;
 constexpr u32 kSubHeaderBytes = 32; // magic(4)+ver(4)+rc(4)+rs(4)+mc(4)+ms(4)+resv(8)
 static_assert(24 + 8 + duetos::core::kCapCount * 2 + 1 <= kRoleRecordBytes,

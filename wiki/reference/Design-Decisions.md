@@ -13942,3 +13942,80 @@ alone is also the safer half of the trade — the guest's helper then
 goes through `GetProcAddress`, which has its own gates, rather than the
 kernel binding a name a static import was refused.
 
+## 2026-07-29 - P-state control is gated three ways and never touches voltage
+
+The project owner approved writing the P-state selection MSRs on
+2026-07-29, reversing the read-only stance
+[Hardware-Safety](../security/Hardware-Safety.md) row 89 had held since
+2026-06-06. That row was amended in the same commit as the code: a live
+safety rule that contradicts the tree is worse than either alone,
+because a later session cannot tell which one is authoritative.
+
+Approval to write these MSRs is not approval to write them carelessly,
+and the shape below rules out several alternatives a future slice might
+otherwise reach for.
+
+**Three gates, not one.** `cpufreq=tune` on the boot cmdline,
+`kCapPowerTune` on the caller, and membership of a window read from the
+part's own registers on the same call. Any one of them alone would be
+weaker than it looks: a cap alone still lets a default boot write
+hardware; a cmdline flag alone gives every shell session the authority;
+a window check alone constrains the *value* but not *who* may set it.
+
+**Refuse, never clamp.** `cpu_sensor_math::RatioAdmit` returns 0 for an
+out-of-window request rather than pinning it to the nearest bound. A
+silent clamp would apply a ratio nobody chose, to real silicon, with no
+error for the operator to notice. This also makes "never write a ratio
+you did not read back from the part" mechanically enforceable rather
+than aspirational, and the same rule applies to a *missing* bound: a
+zero or inverted window means a read failed, which is not a licence to
+guess a range.
+
+**No syscall — the gate is the absence of a path, not a check on one.**
+A guest PE/ELF cannot request a frequency change at all. This is
+stronger than cap-gating a syscall would be, and it is the right
+strength for two reasons: an unattended thermal load is a physical
+hazard, and a workload that can modulate the clock has both a
+cross-isolation signalling channel and a Hertzbleed-class timing
+amplifier. Rules out "add `SYS_CPUFREQ_SET` gated on `kCapPowerTune`" —
+if a future slice needs userland control, it needs a fresh argument
+about the side channel first, not just a cap.
+
+**AMD selects an index, never a (ratio, voltage) pair.** `MSR_PSTATE_DEF`
+carries `CpuVid` alongside `CpuFid`/`CpuDfsId`, so composing a P-state
+definition means choosing a voltage — the Plundervolt surface. Writing
+only `MSR_PSTATE_CTL` selects among the entries AMD's own firmware
+validated, so the voltage that goes with a ratio is never ours. This
+rules out the "synthesise a P-state entry to get a ratio the table does
+not offer" approach outright.
+
+**DuetOS does not enable HWP.** `IA32_PM_ENABLE` bit 0 is write-once
+until reset, and flipping it changes how the whole platform manages
+power, not just the operating point we were asked for. So HWP is used
+where firmware already chose it (where `IA32_PERF_CTL` is ignored by
+the part anyway) and legacy `IA32_PERF_CTL` otherwise. A future EPP /
+idle-governor slice owns that decision; a set-the-ratio call does not
+get to make it as a side effect.
+
+**Read-modify-write, not compose-from-scratch.** Both Intel splices
+preserve everything they were not asked to change — bit 32 (IDA/turbo
+disengage) on `IA32_PERF_CTL`, and EPP / activity window / package
+control on `IA32_HWP_REQUEST`. Composing a fresh value silently reverts
+whatever else firmware put there.
+
+**Verify the write, and separately measure the delivery.** Every write
+is read back from the same register and compared; a mismatch is
+`NotVerified`. That proves the *request* landed. It does not prove the
+silicon delivered it, which is what the APERF/MPERF sample after
+`cpufreq set` is for. Presenting "the wrmsr returned without faulting"
+as evidence that frequency control works would be exactly the false
+green an emulator hands you — QEMU models no real P-states.
+
+**RBAC snapshot format v2.** Adding `kCapPowerTune` took `kCapCount`
+from 11 to 12 and pushed the RBAC role record from 55 to 57 bytes, past
+its 56-byte envelope. The record widened to 64 (headroom to
+`kCapCount == 15`) and the snapshot version bumped to 2, so a v1
+snapshot is refused by `RbacImportSnapshot` rather than mis-parsed with
+every `grace_seconds` entry shifted. Any future cap addition past 15
+must widen it again and bump the version again — silently reusing the
+version is the failure mode this pins.

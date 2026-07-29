@@ -396,6 +396,7 @@ void CmdSmbios();
 void CmdPower();
 void CmdThermal();
 void CmdHwmon();
+void CmdCpuFreq(u32 argc, char** argv);
 void CmdHw(u32 argc, char** argv);
 void CmdGpu();
 void CmdGfx(u32 argc, char** argv);

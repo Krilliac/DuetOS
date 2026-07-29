@@ -1710,6 +1710,46 @@ bullets': for three sessions the tooling was answering a different
 question than the one being asked, and every conclusion drawn on top of
 it was confidently wrong.
 
+### 2026-07-29 — the first physical-state register DuetOS is allowed to write
+
+Every prior sensor slice ended the same way: read the MSR, decode it,
+report it, and refuse to write anything back. `wiki/security/Hardware-Safety.md`
+made that a rule rather than a habit — row 89 said cpufreq "never writes
+`IA32_PERF_CTL`/HWP/voltage" — and a previous power lane correctly
+declined to implement P-state control because of it.
+
+The project owner approved P-state *selection* on 2026-07-29, so DuetOS
+now drives CPU frequency: Intel HWP (`IA32_HWP_REQUEST`) where firmware
+already enabled it, legacy `IA32_PERF_CTL` otherwise, and AMD
+`MSR_PSTATE_CTL` index select. Row 89 was amended in the same commit,
+because a safety rule that contradicts the tree is worse than either
+alone — the next session cannot tell which one is authoritative.
+
+What did **not** loosen is the more interesting half. Voltage is still
+untouchable, and the AMD path is index selection specifically so that no
+`(ratio, voltage)` pair is ever synthesised: `MSR_PSTATE_DEF` carries
+`CpuVid`, so composing one means choosing a voltage, which is the
+Plundervolt surface. RAPL limits, PROCHOT and thermal-throttle bits are
+where they were. And there is **no syscall** — a guest PE or ELF cannot
+request a frequency change at all, because a workload that can modulate
+the clock has both a cross-isolation signalling channel and a
+Hertzbleed-class timing amplifier. The containment there is the absence
+of a path, not a check on one.
+
+Three gates guard the write: a `cpufreq=tune` boot cmdline (off by
+default), `kCapPowerTune` on the caller, and membership of a window read
+from the part's own registers on the same call. Out-of-window requests
+are *refused, not clamped* — a silent clamp applies a number nobody
+chose to real silicon with no error to notice.
+
+The honest footnote: this is silicon-unverified. QEMU answers none of
+the frequency MSRs under TCG or KVM, so no boot has ever executed the
+`wrmsr`, and QEMU models no real P-states, so even a write that returned
+without faulting would prove nothing about delivered frequency. The
+gating, the admission math and the read path are proven on the host and
+at boot; the write waits for real hardware, where `cpufreq set`'s
+APERF/MPERF sample is the thing that will actually settle it.
+
 ## How to read the rest of the tree
 
 - `CLAUDE.md` — the authoritative project context, coding standards,

@@ -249,13 +249,12 @@ sit behind a kernel capability + an explicit cooling-aware tune mode.
   CI). The `hwmon` shell command shows the package energy / TDP / live
   draw alongside thermal + battery.
 
-## CPU Frequency Telemetry (read-only)
+## CPU Frequency Telemetry
 
 `kernel/arch/x86_64/cpufreq.{h,cpp}` reads the architectural
-frequency-reporting MSRs and decodes them to MHz. Like RAPL it is
-**read-only** — it never writes a P-state / voltage MSR (`IA32_PERF_CTL`,
-the OC mailbox, HWP request); driving frequency or voltage from software
-is a physical-damage surface, so frequency is telemetry only.
+frequency-reporting MSRs and decodes them to MHz. The read half is
+unconditional; the *control* half is default-inert and described in the
+next section.
 
 - **Intel:** `MSR_PLATFORM_INFO` (0xCE) for the base + max-efficiency
   ratios, `IA32_PERF_STATUS` (0x198) for the current operating ratio,
@@ -286,14 +285,114 @@ is a physical-damage surface, so frequency is telemetry only.
   ratio→MHz + Zen P-state + effective-freq test plus the
   unsupported-vs-zero invariant, gates CI). Shown by `hwmon`.
 
+## CPU P-state Control (default-inert, operator-unlocked)
+
+Landed 2026-07-29. Until then cpufreq was read-only because
+[Hardware-Safety](../security/Hardware-Safety.md) forbade writing
+`IA32_PERF_CTL` / HWP at all; the project owner approved P-state
+*selection* on 2026-07-29 and that row was amended in the same commit.
+**Voltage did not open and is not planned to.**
+
+**Three gates, all required before a single MSR is written:**
+
+1. **Tune mode.** `cpufreq=tune` on the boot cmdline. Off by default —
+   without it `CpuFreqSetTarget` returns `TuneModeOff` before reading
+   anything, so a normal boot leaves no trace on the hardware.
+   `CpuFreqTuneEnable()` is called once from `BootBringupKernelServices`
+   and logs `[cpufreq] tune=enabled`.
+2. **Capability.** `kCapPowerTune` (`kernel/proc/process.h`). The only
+   caller is the shell's `cpufreq set`, which takes it through the
+   normal `RequireCap` / elevation-broker path. `arch` has no view of
+   the process model, so the cap check is the *caller's* obligation and
+   is documented as such on `CpuFreqSetTarget`.
+3. **Platform-advertised window.** The request is admitted only if it
+   lies inside a window read out of this part's own registers on this
+   call. Out-of-window is **refused, not clamped** — clamping would
+   apply a number nobody chose with no error to notice
+   (`cpu_sensor_math::RatioAdmit`).
+
+**Mechanisms**, preferred in this order:
+
+- **Intel HWP** (`IA32_HWP_REQUEST`, 0x774) when `CPUID.06H:EAX[7]` says
+  HWP exists *and* `IA32_PM_ENABLE` bit 0 says firmware already turned
+  it on. Window from `IA32_HWP_CAPABILITIES` (0x771) lowest..highest.
+  Sets min == max == desired to pin the point; EPP, the activity window
+  and the package-control bit are preserved, never chosen by us. Note
+  the unit here is an abstract *performance* value, not architecturally
+  a bus ratio — it is 1:1 with the ratio on every shipping part, but
+  `cpufreq` labels it as such rather than rendering it as MHz.
+- **Intel legacy** (`IA32_PERF_CTL`, 0x199) otherwise. Window floor is
+  `IA32_PLATFORM_INFO` bits 47:40 (max-efficiency ratio), ceiling is
+  `MSR_TURBO_RATIO_LIMIT` (0x1AD) bits 7:0 where the part exposes it,
+  else the max non-turbo ratio — never a guessed headroom.
+  Read-modify-write preserves bit 32 (IDA/turbo disengage).
+- **AMD** (`MSR_PSTATE_CTL`, 0xC0010062) selects an **index** into the
+  platform's own `MSR_PSTATE_DEF` table. A lower index is a higher
+  frequency. Only indices the platform actually enabled are admitted —
+  window membership alone is not enough, since the table can have holes.
+
+**What is never written:** `MSR_PSTATE_DEF` itself (its `CpuVid` field
+would couple a voltage to the ratio — the whole reason AMD control is
+index selection), the OC mailbox `0x150`, RAPL power limits, and
+PROCHOT / thermal-throttle bits. DuetOS also never *enables* HWP:
+`IA32_PM_ENABLE` bit 0 is write-once until reset and switching the
+platform into hardware-managed P-states is a larger commitment than
+setting one operating point.
+
+**Safety of the write itself.** Every write goes through
+`WriteMsrSafe`, so a `#GP` on a part that declines the MSR is a
+recovered fault and a `WriteFailed` status rather than a dead box. Every
+write is then read back from the same register and compared; a
+disagreement is `NotVerified`, not silence.
+
+**No guest reach.** No syscall exposes any of this, so no Win32 or Linux
+thunk can request a frequency change regardless of the caps the guest
+holds. That is deliberate on two counts: an unattended thermal load, and
+the fact that a workload able to modulate the clock has a
+cross-isolation signalling channel and a Hertzbleed-class timing
+amplifier.
+
+**Surface:** `CpuFreqControlRead()` (window + mechanism + current, safe
+on any boot), `CpuFreqSetTarget(value)`, `CpuFreqTuneEnabled()`,
+`CpuFreqSetStatusName()`. Operator command: `cpufreq` shows the window,
+`cpufreq set <n>` applies one and then reports a 200 ms APERF/MPERF
+*delivered* frequency, which is a different claim from "the request
+register holds what we wrote."
+
+**Boot log:** `[cpufreq] ... control=<hwp|perf_ctl|amd_pstate|none>
+window=<lo>..<hi> tune=<on|off>` on every boot;
+`[cpufreq] set mechanism=… old=… new=…` at WARN on each transition.
+
 ## Known Limits / GAPs
 
 - **RAPL is read-only.** Energy / power / TDP readout only; setting a
   power limit is deliberately not implemented (Hardware-Safety
   pre-landing row "RAPL power-limit raise").
-- **CPU frequency is read-only.** Current/base/min + effective-frequency
-  readout only; no P-state / HWP / voltage writes (Hardware-Safety
-  pre-landing row "MSR voltage / Vcore offset").
+- **CPU P-state control is silicon-unverified.** The gating, the
+  admission math and the read path are proven (host tests + boot
+  self-test + clean boot under TCG and KVM). The *write* path is not:
+  QEMU answers none of the frequency MSRs under either accelerator, so
+  no boot has ever executed a `wrmsr` to `IA32_PERF_CTL` /
+  `IA32_HWP_REQUEST` / `MSR_PSTATE_CTL`, and QEMU models no real
+  P-states, so even a write that returned without faulting would prove
+  nothing about delivered frequency. First-boot-on-real-hardware should
+  check `cpufreq` reports a plausible window, then `cpufreq set` and
+  confirm the reported APERF/MPERF *delivered* MHz moved.
+- **No EPP / energy-performance preference control.** The HWP path
+  preserves whatever EPP firmware set and never chooses one. An EPP
+  hint is a separate policy knob (Roadmap: EPP + idle governors).
+- **HWP is never enabled by DuetOS.** On a part where firmware left
+  `IA32_PM_ENABLE` bit 0 clear, control falls back to legacy
+  `IA32_PERF_CTL`. Enabling HWP is write-once until reset; the decision
+  belongs with the EPP / idle-governor work.
+- **Per-CPU, not system-wide.** `CpuFreqSetTarget` writes the MSR on the
+  CPU that runs it. On Intel HWP and on parts with per-core P-states,
+  other cores keep their previous operating point; there is no
+  broadcast-to-all-CPUs path yet.
+- **No idle governor / C-state selection.** Idle stays at firmware
+  default.
+- **RAPL is still read-only.** Raising a power limit is a separate,
+  unapproved surface — the P-state slice did not open it.
 - **No `_BST` / `_BIF` evaluation.** Battery presence yes, charge /
   capacity / discharge rate no.
 - **No EC region reads.** Most laptop sensors (lid switch, fan RPM,
@@ -305,8 +404,6 @@ is a physical-damage surface, so frequency is telemetry only.
   "Suspend-to-RAM (S3)" below). It is REFUSED on any machine that has
   probed NVMe / AHCI / a NIC, on SMP, and under firmware that declines
   the waking vector. S4 is not modelled at all.
-- **No CPU P-state / C-state selection.** Frequency / idle stays at
-  firmware default.
 - **No SCI handler.** Power button, lid, AC-plug events are dropped.
 - **Thermal is read once at boot for the snapshot.** `ThermalRead()`
   itself resamples on every call; periodic polling into the heartbeat

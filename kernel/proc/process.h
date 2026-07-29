@@ -196,6 +196,24 @@ enum Cap : u32
     // from kProfileSandbox so an untrusted PE cannot self-promote.
     kCapSchedPriority = 10,
 
+    // Drive CPU frequency: write the P-state selection MSRs
+    // (IA32_PERF_CTL / IA32_HWP_REQUEST on Intel, MSR_PSTATE_CTL on
+    // AMD) through arch::CpuFreqSetTarget. Two distinct hazards, both
+    // physical rather than merely logical: pinning every core to its
+    // turbo ceiling is a thermal load the operator did not ask for,
+    // and frequency is a well-documented side channel — a workload
+    // that can raise and lower the clock at will can signal across
+    // isolation boundaries and can amplify frequency-dependent timing
+    // attacks (Hertzbleed).
+    //
+    // Deliberately NOT reachable from any syscall: no Win32 or Linux
+    // thunk can request it, so a guest PE/ELF has no path to the
+    // hardware at all regardless of the caps it holds. The only holder
+    // that can act on it is the kernel shell's pseudo-process, and
+    // even then only when the operator booted with `cpufreq=tune`.
+    // Withheld from every sandboxed profile.
+    kCapPowerTune = 11,
+
     // Sentinel: keep this as the last entry so kProfileTrusted can
     // be built by a loop that iterates [1 .. kCapCount). Do NOT
     // use kCapCount as a live cap — it's a boundary marker.

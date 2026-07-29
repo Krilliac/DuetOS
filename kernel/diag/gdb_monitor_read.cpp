@@ -65,11 +65,6 @@ const char* ThreadStateName(u8 s)
     }
 }
 
-// enum Cap is dense [1, kCapCount); keep the names in index order.
-const char* kCapNames[] = {
-    "none", "serial-console", "fs-read", "debug", "fs-write", "spawn-thread", "net", "input", "net-admin", "diag",
-};
-
 core::Process* FindProc(u64 pid)
 {
     return sched::SchedFindProcessByPid(pid);
@@ -127,15 +122,13 @@ void CmdCaps(u64 pid, MonitorWriter& out)
         const bool has = core::CapSetHas(caps, static_cast<core::Cap>(c));
         out.Str("  ");
         out.Str(has ? "[x] " : "[ ] ");
-        if (c < (sizeof(kCapNames) / sizeof(kCapNames[0])))
-        {
-            out.Str(kCapNames[c]);
-        }
-        else
-        {
-            out.Str("cap");
-            out.U64(c);
-        }
+        // core::CapName is the single source of truth and is covered by
+        // ProcessSelfTest's "every enumerator has a name" loop. This TU
+        // used to carry its own hand-maintained name array; it had
+        // already fallen a cap behind (kCapSchedPriority printed as
+        // "cap10"), which is the whitelist-incompleteness shape
+        // CLAUDE.md warns about. Deleted rather than extended.
+        out.Str(core::CapName(static_cast<core::Cap>(c)));
         out.Line();
     }
 }

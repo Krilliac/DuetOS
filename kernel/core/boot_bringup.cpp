@@ -823,6 +823,7 @@ void BootBringupEarly(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
     SerialWrite("[boot] Reading CPU frequency telemetry.\n");
     duetos::arch::CpuFreqProbe();
     DUETOS_BOOT_SELFTEST(duetos::arch::CpuFreqSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::arch::CpuFreqControlSelfTest());
 
     // Fault-domain registry self-test. Registers a toy domain,
     // restarts it twice, checks counters. Real driver domains are
@@ -1336,6 +1337,14 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     // cluster in BootBringupDevices, which has no cmdline of its own.
     g_expensive_selftests = CmdlineEnablesExpensiveSelfTests(cmdline);
     g_uefi_read_vars = CmdlineContains(cmdline, "uefi-getvar");
+
+    // P-state control unlock. Off by default: without this token no
+    // code path in the kernel can write IA32_PERF_CTL / IA32_HWP_REQUEST
+    // / MSR_PSTATE_CTL, and the shell's `cpufreq set` refuses. With it,
+    // a kCapPowerTune holder may select an operating point inside the
+    // window the part itself advertises. Never voltage, never a guest.
+    if (CmdlineContains(cmdline, "cpufreq=tune"))
+        duetos::arch::CpuFreqTuneEnable();
 
     // Owned-write chokepoint enforcement opt-in. Default Off; an operator
     // can soak the registry coverage (`ownedwrite=advisory`, logs writes
