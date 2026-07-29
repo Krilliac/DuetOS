@@ -24,7 +24,18 @@ import uuid
 import zlib
 
 SECTOR = 512
-TOTAL_SECTORS = 32768  # 16 MiB
+# Image size in MiB. 16 is the default and the only value the FAT32
+# self-test fixtures need. Override with DUETOS_IMAGE_MB when staging a
+# real application's files -- a modern engine DLL alone is larger than
+# the whole default image (UnityPlayer.dll is ~26 MiB), and staging
+# silently overflows the data region otherwise.
+#
+# Ceiling: FAT_FATSZ (64 sectors) gives 8192 FAT entries at 4 KiB per
+# cluster, so the data region tops out at 32 MiB. Past that the FAT
+# itself has to grow, which the fixed seed cluster numbers below assume
+# it does not.
+IMAGE_MB = int(os.environ.get("DUETOS_IMAGE_MB", "16"))
+TOTAL_SECTORS = (IMAGE_MB * 1024 * 1024) // SECTOR
 FIRST_LBA = 2048       # 1 MiB alignment, the conventional start
 LAST_LBA = TOTAL_SECTORS - 34  # leave room for backup GPT (33 sectors)
 
