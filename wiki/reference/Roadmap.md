@@ -962,7 +962,9 @@ fault→fix→re-run loop, `tools/test/run-exe.sh` + `peexec=`, using the
    `user32_32` / `gdi32_32` STUBs all trace to one missing thing — an
    off-screen surface the compositor's display list has no concept of,
    which blocks memory DCs, bitmaps, blits and DIB sections. Icon and
-   cursor resources need a `.rsrc` parser. Fonts need a font pipeline.
+   cursor resources ALSO need that off-screen surface — the `.rsrc`
+   parser landed 2026-07-28 and is no longer the blocker for them
+   (see item 2 of the program backlog). Fonts need a font pipeline.
 
 2. **Large bundled-data staging + FAT large volume.** The exe reads
    multi-GB archive files. Staging needs a much larger disk image than
@@ -1461,9 +1463,31 @@ done, it is merely written.
    real `RtlUnwindEx`/`RtlVirtualUnwind`; the kernel32 rows point at no-ops
    instead. **PROOF:** a PE that throws and catches, including a destructor
    running during unwind, as a ring3 battery row.
-2. **`.rsrc` (PE resource) parser.** Needs no kernel change — every section
-   is already mapped. Unblocks `LoadStringW` (82 binaries measured),
-   `LoadImageW`, icons, cursors, accelerators, dialog templates.
+2. ~~**`.rsrc` (PE resource) parser.**~~ **LANDED 2026-07-28.** The
+   walker, `FindResource*` / `LoadResource` / `LockResource` /
+   `SizeofResource` / `FreeResource` / `EnumResource*` and a real
+   `LoadStringW` ship on both bitnesses; `user32!LoadStringW` went from
+   282 32-bit SysWOW64 binaries wanting it (82 counting `.exe` only) to
+   0. See [`wiki/subsystems/PE-Resources.md`](../subsystems/PE-Resources.md).
+   Two consumers were deliberately NOT built, because each needs a sink
+   that does not exist — building the decoder first would be dead code:
+   - **Icons / cursors / bitmaps** (`LoadIcon`, `LoadCursor`,
+     `LoadBitmap`, `LoadImage`) need item 12 (off-screen surfaces). The
+     compositor has no icon concept, and `SYS_GDI_CREATE_CURSOR` takes a
+     fixed 12x20 three-level mask, not image bits.
+   - **Accelerators** (`LoadAccelerators`, `TranslateAccelerator`) need a
+     **KeyCode -> Win32 VK translation** first. The kernel posts
+     `WM_KEYDOWN` to the active PE window with `wParam` carrying a DuetOS
+     `KeyCode` (`ps2kbd.h`: `kKeyF1 == 0x10A`, `kKeyEnter == 0x0A`), not
+     a virtual-key code (`VK_F1 == 0x70`, `VK_RETURN == 0x0D`).
+     `RT_ACCELERATOR` stores VKs, so every `FVIRTKEY` entry would
+     mis-compare. **This is a standalone defect in the `WM_KEYDOWN`
+     contract**, not just an accelerator blocker: any PE that switches on
+     `wParam` expecting VKs is already reading wrong numbers today. Fix
+     is a translation table on the kernel side of
+     `WindowPostMessage` in `kernel/core/boot_tasks.cpp`, plus an audit
+     of the in-kernel apps that currently consume the raw KeyCodes.
+     **PROOF:** a PE that registers `Ctrl+S` and receives `WM_COMMAND`.
 3. **Side-by-side DLL loading.** A PE importing a DLL shipped beside it has
    no path at all today. The Unity launchers measure 98.5% import coverage
    with exactly ONE unresolved import (`UnityPlayer.dll!UnityMain`). Needs

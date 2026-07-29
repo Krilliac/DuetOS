@@ -511,6 +511,18 @@ syscall routing shows up immediately.
 - Profiling (`QueryProcessCycleTime`, etc.) — STUB
 - DPI awareness (`SetProcessDPIAware`, `GetDpiForSystem`) —
   return constant 96 DPI
+- Resources — REAL as of 2026-07-28. `FindResourceW/A/ExW/ExA`,
+  `LoadResource`, `LockResource`, `SizeofResource`, `FreeResource`,
+  `EnumResourceTypesW` and `EnumResourceNamesW` walk the module's
+  real `.rsrc` through `userland/libs/common/pe_resources.h`, on
+  both bitnesses. See
+  [`wiki/subsystems/PE-Resources.md`](../subsystems/PE-Resources.md).
+  **The auto-generated table below still lists these names against
+  `kOffPinReturn0`, and that is accurate but no longer what runs:**
+  `ResolveImports` prefers a preloaded DLL's export table over the
+  kernel thunk page, so the real `kernel32.dll` export wins and the
+  thunk row is now a dead fallback. The rows stay because the table
+  is generated from `thunks_table.inc`, which still contains them.
 
 **Thunked imports (auto-generated from `kernel/subsystems/win32/thunks_table.inc`):**
 
@@ -1603,6 +1615,32 @@ WinDbg client API, `SymLoadModuleEx`.
 - DDE: `DdeInitializeA/W`, `DdeCreateStringHandleA/W`,
   `DdeFreeStringHandle`, `DdeUninitialize` — STUB
 - Scrollbars (`SetScrollInfo` etc.) — STUB
+- `LoadStringW` / `LoadStringA` — REAL as of 2026-07-28, both
+  bitnesses. Walks the module's real `RT_STRING` bundles via
+  `userland/libs/common/pe_resources.h`, including the documented
+  `cchBufferMax == 0` pointer-return form. Until that slice these
+  returned a fixed `"DuetOS"` placeholder for **every** id, so a
+  caption, a menu label and an error message all came back
+  identical. `LoadStringA` carries a GAP: narrowing is Latin-1
+  truncation, not a codepage conversion.
+- `LoadIconA/W`, `LoadCursorA/W`, `LoadBitmapA/W`, `LoadImageA/W`
+  — STUB, and the blocker is the **consumer, not the parser**. The
+  compositor has no icon concept and no off-screen surface for a
+  decoded DIB to live in, and `SYS_GDI_CREATE_CURSOR` takes a
+  fixed 12x20 three-level mask rather than image bits. Backlog
+  item 12 (off-screen surfaces) is the prerequisite. `LoadIcon`
+  returns a non-NULL sentinel because `RegisterClassEx` callers
+  routinely treat a NULL `hIcon` as a fatal startup error.
+- `LoadAcceleratorsA/W`, `TranslateAcceleratorA/W` — STUB, also
+  blocked on a consumer rather than the parser. The kernel does
+  post `WM_KEYDOWN` to the active PE window
+  (`kernel/core/boot_tasks.cpp`), but `wParam` carries a DuetOS
+  `KeyCode` (`ps2kbd.h`: `kKeyF1 == 0x10A`, `kKeyEnter == 0x0A`),
+  **not** a Win32 virtual-key code (`VK_F1 == 0x70`,
+  `VK_RETURN == 0x0D`). `RT_ACCELERATOR` entries store VKs, so
+  every `FVIRTKEY` accelerator would mis-compare. The prerequisite
+  is a KeyCode -> VK translation on the kernel side of the message
+  post; see [`wiki/reference/Roadmap.md`](Roadmap.md).
 
 **Thunked imports (auto-generated from `kernel/subsystems/win32/thunks_table.inc`):**
 

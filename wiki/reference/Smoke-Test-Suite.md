@@ -203,7 +203,8 @@ the closest existing smoke before adding a new one.
 |-------|----------------|
 | `com_smoke`, `com2_smoke` | `CoInitializeEx`, `CoCreateInstance` |
 | `customdll_test` | a hand-written sample DLL exercising the DLL loader |
-| `resource_smoke` | `LoadResource`, `LockResource` |
+| `resource_smoke` | `LoadResource`, `LockResource` — the NEGATIVE path only (this image carries no `.rsrc`, so every lookup must miss cleanly) |
+| `rsrc_pe` | the POSITIVE path: a PE32 image with a real `windres`-built `.rsrc`, reading four `LoadStringW` ids across three string bundles plus a named and an integer `RT_RCDATA`. Gated `Always`, so QEMU CI runs it. See [`PE Resources`](../subsystems/PE-Resources.md) |
 
 ### Synthetic Stress / Composite
 

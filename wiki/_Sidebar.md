@@ -59,6 +59,7 @@
 ### Subsystems
 - [Win32 PE Subsystem](subsystems/Win32-PE-Subsystem.md)
 - [PE Loader](subsystems/PE-Loader.md)
+- [PE Resources (.rsrc)](subsystems/PE-Resources.md)
 - [Win32 DLLs](subsystems/Win32-DLLs.md)
 - [Win32 Registry](subsystems/Win32-Registry.md)
 - [Linux ABI](subsystems/Linux-ABI.md)

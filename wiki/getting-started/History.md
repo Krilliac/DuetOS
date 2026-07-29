@@ -1524,6 +1524,52 @@ at 98.5% coverage with exactly one unresolved import each -
 rather than one embedded in the kernel image, is what stands between
 DuetOS and a real game.
 
+## Phase 6.32 - a PE reads its own resources (2026-07-28)
+
+`LoadStringW` was the single highest-demand missing i386 import: 282 of
+the 3121 32-bit PEs in `C:\Windows\SysWOW64` want it, 82 of them
+`.exe`s. It was missing because faking it is worse than lacking it - and
+on the x86_64 side we had in fact faked it. `user32!LoadStringW` returned
+a fixed `"DuetOS"` placeholder for **every** id, so an app's window
+caption, its menu labels and its error messages all came back as the same
+six characters. `FindResource`, `LoadResource`, `LockResource` and
+`SizeofResource` were worse still: they resolved to the kernel thunk
+page's pinned-zero rows and returned NULL to everything.
+
+The fix needed no kernel change, and that is the interesting part. The PE
+loader already maps the entire image into the guest's own address space
+before ring-3 entry - `MapHeaders` puts `SizeOfHeaders` at `ImageBase`,
+`MapSection` maps every section including `.rsrc`. So the resource tree
+is reachable from a userland DLL with pointer arithmetic on pages the
+guest already owns. A `SYS_RESOURCE_*` family would have added kernel
+attack surface to read memory the guest can read anyway, and would have
+put an attacker-controlled tree walk inside the kernel.
+
+Because every byte of that tree comes from a guest binary, the walker is
+written to fail closed: one bounds gate that all reads pass through, a
+mapped-extent test computed exactly the way `MapSection` computes it, and
+three flat loops instead of recursion so a self-referential subdirectory
+pointer cannot cycle. Two negative controls - delete a gate, watch the
+malformed-input tests turn red - confirmed the tests were not vacuous.
+
+The live proof is a PE32 fixture whose `.rsrc` is laid out by `windres`
+rather than by DuetOS, because a test that checks a parser against bytes
+the test itself wrote cannot catch a wrong assumption about what a real
+toolchain emits. It reads string ids 15 and 16 - which live in
+*different* `RT_STRING` bundles - so an off-by-one in either half of the
+`(id / 16) + 1` bundling formula returns the wrong string rather than
+nothing.
+
+Two things were deliberately not built. Icons, cursors and bitmaps are
+parseable but the compositor has no icon concept and no off-screen
+surface to put a decoded DIB in. Accelerators are parseable but
+`WM_KEYDOWN` delivers a DuetOS `KeyCode` as `wParam`, not a Win32
+virtual-key code, so every `FVIRTKEY` entry in an `RT_ACCELERATOR` table
+would mis-compare - a defect in the `WM_KEYDOWN` contract that this slice
+surfaced and that stands on its own. Both are recorded with their
+specific prerequisite rather than shipped as decoders with nothing to
+decode into.
+
 ## How to read the rest of the tree
 
 - `CLAUDE.md` — the authoritative project context, coding standards,
