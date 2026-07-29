@@ -900,6 +900,26 @@ choice, not a one-liner:
 
 ## End-user features
 
+### .NET / CLR hosting — deferred, owner-acknowledged (2026-07-29)
+
+Running managed (.NET) executables is **explicitly deferred**, not forgotten.
+The project owner marked it "todo later" on 2026-07-29 while prioritising the
+native download-and-run path.
+
+Why it is a different class of work from the rest of the Win32 backlog: a
+managed PE's entry point is a stub that hands control to a runtime. Supporting
+it is not a DLL surface to fill in but a **runtime to host** — metadata and IL
+parsing, a JIT or interpreter, a garbage collector, and the CLR's own threading
+and exception models layered on top of the SEH work already landed. Every other
+open Win32 item (COM, SxS manifests, console, fibers, D3D9, DirectWrite) is
+bounded by "implement these functions"; this one is bounded by "implement
+another language runtime", and is a multi-session project of its own.
+
+Nothing else in the backlog depends on it, so deferring costs no ordering.
+A managed binary today should fail with a clear diagnostic naming the CLR
+header rather than a confusing loader error -- worth checking that it does.
+
+
 ### DECISION: should `theme=duet` become the boot default?
 
 The Aurora redesign is implemented across the `Duet*` theme family
