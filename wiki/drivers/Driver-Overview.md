@@ -113,6 +113,7 @@ userland. See [Subsystem Isolation](../kernel/Subsystem-Isolation.md).
 | `power` | 1 | `kernel/drivers/power/` |
 | `psp` | 1 | `kernel/drivers/psp/` |
 | `storage` | 3 | `kernel/drivers/storage/` |
+| `tpm` | 3 | `kernel/drivers/tpm/` |
 | `usb` | 21 | `kernel/drivers/usb/` |
 | `video` | 42 | `kernel/drivers/video/` |
 | `virtio` | 9 | `kernel/drivers/virtio/` |

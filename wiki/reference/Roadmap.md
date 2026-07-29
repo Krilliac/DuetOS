@@ -959,12 +959,15 @@ fault→fix→re-run loop, `tools/test/run-exe.sh` + `peexec=`, using the
 
    **Still open on this rung:** `msvcrt_32` stdio (`fopen`/`fread`) has
    not been rebased onto the new file-I/O surface. The remaining
-   `user32_32` / `gdi32_32` STUBs all trace to one missing thing — an
-   off-screen surface the compositor's display list has no concept of,
-   which blocks memory DCs, bitmaps, blits and DIB sections. Icon and
-   cursor resources ALSO need that off-screen surface — the `.rsrc`
-   parser landed 2026-07-28 and is no longer the blocker for them
-   (see item 2 of the program backlog). Fonts need a font pipeline.
+   `gdi32_32` bitmap / blit / DIB STUBs are now unblocked but not yet
+   written: the 64-bit `gdi32` gained real off-screen surfaces on
+   2026-07-29 and the syscalls it uses (`SYS_GDI_SET_DIBITS` /
+   `_GET_DIBITS`) are register-argument only, so the i386 port can reach
+   them through `duet_syscall6` with no struct shape to mirror. Icon and
+   cursor resources are likewise unblocked: the `.rsrc` parser landed
+   2026-07-28 and there is now a sink for the pixels. What icons still
+   need is a `SYS_GDI_CREATE_CURSOR` that takes image bits rather than a
+   fixed 12x20 three-level mask. Fonts need a font pipeline.
 
 2. **Large bundled-data staging + FAT large volume.** The exe reads
    multi-GB archive files. Staging needs a much larger disk image than
@@ -1523,9 +1526,16 @@ done, it is merely written.
    Two consumers were deliberately NOT built, because each needs a sink
    that does not exist — building the decoder first would be dead code:
    - **Icons / cursors / bitmaps** (`LoadIcon`, `LoadCursor`,
-     `LoadBitmap`, `LoadImage`) need item 12 (off-screen surfaces). The
-     compositor has no icon concept, and `SYS_GDI_CREATE_CURSOR` takes a
-     fixed 12x20 three-level mask, not image bits.
+     `LoadBitmap`, `LoadImage`) needed item 12 (off-screen surfaces),
+     which landed 2026-07-29. There is now a sink: an `RT_ICON` body is a
+     BITMAPINFOHEADER plus a bottom-up DIB, which is exactly what
+     `SYS_GDI_SET_DIBITS` consumes, so `RT_GROUP_ICON` -> `RT_ICON` ->
+     `HBITMAP` can be written against the existing surface path. Two
+     things are still genuinely absent and should be built with the
+     decoder: the AND-mask -> alpha conversion (an `RT_ICON` carries a
+     1bpp transparency mask below its colour rows, and the DIB path
+     refuses 1bpp by design), and a `SYS_GDI_CREATE_CURSOR` that takes
+     image bits rather than a fixed 12x20 three-level mask.
    - **Accelerators** (`LoadAccelerators`, `TranslateAccelerator`) need a
      **KeyCode -> Win32 VK translation** first. The kernel posts
      `WM_KEYDOWN` to the active PE window with `wParam` carrying a DuetOS
@@ -1565,8 +1575,13 @@ done, it is merely written.
 
 ### Tier 2 — graphics and media
 
-12. **Off-screen surfaces.** The compositor has no concept of one, which is
-    what blocks memory DCs, bitmaps, blits and DIB sections across GDI.
+12. ~~**Off-screen surfaces.**~~ **LANDED 2026-07-29.** The premise was
+    wrong: memory DCs, compatible bitmaps and BitBlt already existed. What
+    was missing was pixel-DATA transfer (`SYS_GDI_SET_DIBITS` /
+    `_GET_DIBITS`, 214 / 215) and, more seriously, ownership --- surfaces
+    had no owner, no per-process bound, and were never reclaimed at exit.
+    Remaining GDI DIB gaps are listed in
+    [`Win32-Surface-Status.md`](Win32-Surface-Status.md#gdi32dll).
 13. **Font pipeline.** Enumeration, fallback, metrics, antialiasing.
 14. **GDI completeness.** [dep: 12] Paths, regions, transfer modes.
 15. **D3D9.** Large back catalogue; simpler than 11/12.

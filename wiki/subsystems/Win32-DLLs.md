@@ -204,7 +204,7 @@ named export is real. Page-level limits:
 | `dwrite` | 1 | `userland/libs/dwrite/` |
 | `dxgi` | 6 | `userland/libs/dxgi/` |
 | `gdi32_32` | 46 | `userland/libs/gdi32_32/` |
-| `gdi32` | 77 | `userland/libs/gdi32/` |
+| `gdi32` | 80 | `userland/libs/gdi32/` |
 | `iphlpapi_32` | 4 | `userland/libs/iphlpapi_32/` |
 | `iphlpapi` | 56 | `userland/libs/iphlpapi/` |
 | `kernel32_32` | 132 | `userland/libs/kernel32_32/` |
