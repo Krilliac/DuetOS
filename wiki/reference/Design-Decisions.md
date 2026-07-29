@@ -13379,3 +13379,65 @@ markers for its richest input. Three discovery layers were added (runtime
   `PeCompatEntry` grew a `fat_path` column and a `Pending` state: a
   disk-sourced row cannot be read on the boot thread, because storage
   enumerates asynchronously.
+### DD - one column table per list view, three consumers
+
+- **Context:** the round above deferred proportional list content
+  because "every column in Files and Task Manager is laid out in 8-px
+  cells and hit-tested from the same arithmetic." That deferral has now
+  been taken: `app_widgets/app_text.{h,cpp}` provides measured content
+  type and Files / Task Manager lay their columns out in pixels.
+- **Decision:** each list view builds ONE column table per paint and
+  the header paint, the row paint and the hit-test all read it. The
+  flat palettes are expressed through the same table with the
+  historical `chars * 8 + 4` widths rather than through a parallel
+  legacy branch.
+- **Rules out:** keeping the paint site and the hit-test site as
+  independent expressions of the same layout. They already drifted
+  once - every click in four apps was 8 px out of phase because the
+  two arithmetic chains disagreed - and a proportional layout makes
+  that divergence unrecoverable by inspection, because there is no
+  longer a character grid to eyeball against.
+- **Rules out** a separate Aurora-only layout function: two functions
+  computing "where is column N" is the same bug with a theme switch in
+  front of it. The theme picks the *widths*, not the *code path*.
+- **Scope:** row pitch also becomes theme-dependent, so `RowH()` /
+  `HeaderH()` are single accessors and no site reads the raw `kRowH` /
+  `kHeaderH` constants. Verified by a Classic before/after control
+  capture: the Files list rows, the Files header band and the Task
+  Manager column-header row are byte-identical across the change; the
+  only differing pixels are live data (clock, CPU %, task set, GFX
+  demo frame, kernel log).
+
+### DD - an ABI badge is read, never inferred
+
+- **Context:** the reference screenshots put `NATIVE` / `WIN32 PE`
+  badges on Files rows and Task Manager rows. The previous round
+  correctly refused to invent the data.
+- **Decision:** the badge is rendered only from a value the kernel
+  actually recorded - `Process::pe_image_base` / `Process::abi_flavor`
+  for a running task (surfaced as `SchedTaskInfo::abi`), or the image
+  header for a file whose bytes are already resident. Where neither is
+  available the row renders nothing.
+- **Rules out:** deriving the badge from the file extension. The
+  launch path has to guess from `.EXE` because it has nowhere else to
+  look, but a badge inherits none of that excuse - it would
+  confidently mislabel any file whose name ends in the wrong four
+  characters, and a UI that lies quietly is worse than one that admits
+  it does not know.
+- **Rules out** reading FAT32 bytes at paint time to close the gap:
+  `Fat32ReadFile` stages the whole file, and doing that per visible
+  row per frame trades a cosmetic badge for a disk-bound compositor.
+
+### DD - the Files rail relocates the mode buttons, it does not clone them
+
+- **Context:** the reference puts the view switcher down the left edge
+  as a places rail; DuetOS had it as four toolbar buttons.
+- **Decision:** under Aurora the four existing `AppButton`s are
+  rebound into the rail. Same widgets, same `on_click`, same
+  hit-test - only `bounds` moves. REFRESH / SORT stay in the toolbar
+  and close up the gap they left.
+- **Rules out:** painting a second rail with its own hit-test that
+  calls the same `ClickMode*` functions. Two controls for one action
+  is the duplication the anti-bloat rules forbid, and a second
+  hit-test surface over the same actions is a second thing to keep in
+  phase with the paint.

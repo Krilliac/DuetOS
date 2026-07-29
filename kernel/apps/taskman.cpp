@@ -8,6 +8,8 @@
 #include "drivers/video/app_widgets/app_button.h"
 #include "drivers/video/app_widgets/app_label.h"
 #include "drivers/video/app_widgets/app_palette.h"
+#include "diag/telemetry.h"
+#include "drivers/video/app_widgets/app_text.h"
 #include "drivers/video/app_widgets/app_toolbar.h"
 #include "drivers/video/app_widgets/widget_group.h"
 #include "drivers/video/dialog.h"
@@ -33,6 +35,10 @@ constexpr duetos::u32 kHeaderH = 22; // header band: 2 lines
 constexpr duetos::u32 kFooterH = 12; // hint footer
 constexpr duetos::u32 kColPad = 6;   // left padding inside client
 
+// Height of the stats line above the column headings. Fixed in both
+// layouts — the headings band is what grows for proportional type.
+constexpr duetos::u32 kStatLineH = 12;
+
 // Live app-interior palette for the Task Manager client area. Sampled
 // per paint so a runtime theme cycle (Ctrl+Alt+Y) recolours the table.
 duetos::drivers::video::app_widgets::AppPalette Pal()
@@ -41,6 +47,45 @@ duetos::drivers::video::app_widgets::AppPalette Pal()
     using duetos::drivers::video::ThemeRole;
     const duetos::u32 body = ThemeCurrent().role_client[static_cast<duetos::u32>(ThemeRole::TaskManager)];
     return duetos::drivers::video::app_widgets::AppPaletteFor(body);
+}
+
+// Live row pitch and header-band height. Aurora leads its rows for
+// the proportional face; the flat palettes keep the historical 12 /
+// 22 exactly. Every geometry site (paint, scroll clamp, hit-test)
+// reads these, never the raw constants, so the two layouts can't
+// disagree about where row N starts.
+duetos::u32 RowH()
+{
+    using duetos::drivers::video::ChromeTextRole;
+    return Pal().aurora ? duetos::drivers::video::app_widgets::AppRowHeight(ChromeTextRole::Body) : kRowH;
+}
+
+duetos::u32 HeaderH()
+{
+    using duetos::drivers::video::ChromeTextRole;
+    if (!Pal().aurora)
+        return kHeaderH;
+    return kStatLineH + duetos::drivers::video::app_widgets::AppRowHeight(ChromeTextRole::Caption);
+}
+
+// Strip leading / trailing spaces in place. The column formatters
+// pad to a character count, which is exactly the wrong thing under a
+// proportional face — Aurora right-aligns on the measured width
+// instead, so it wants the bare value.
+void TrimSpaces(char* s)
+{
+    duetos::u32 first = 0;
+    while (s[first] == ' ')
+        ++first;
+    duetos::u32 n = 0;
+    while (s[first + n] != '\0')
+    {
+        s[n] = s[first + n];
+        ++n;
+    }
+    while (n > 0 && s[n - 1] == ' ')
+        --n;
+    s[n] = '\0';
 }
 
 // Per-column character widths. The list view has six columns:
@@ -79,6 +124,180 @@ const char* SortModeName(SortMode m)
     default:
         return "????";
     }
+}
+
+// ---------------------------------------------------------------
+// Column model — ONE table, three consumers.
+//
+// The header paint, the row paint and the header-click hit-test all
+// read `BuildCols`. They used to each re-derive `col_chars * 8 + 4`
+// from the kCol* character widths, which is how the paint and the
+// hit-test drifted out of phase. Deriving all three from one table
+// makes that class of bug unrepresentable: if a column moves, it
+// moves for the pixels and for the click at the same time.
+//
+// Two layouts share the table:
+//   - flat palettes keep the historical character-cell arithmetic
+//     verbatim (`chars * 8 + 4`, PID first), so Classic / Slate10 /
+//     Amber / DuetClassic / HighContrast stay pixel-identical;
+//   - Aurora measures every fixed column off the live proportional
+//     font and gives NAME the slack, in the reference's order.
+// ---------------------------------------------------------------
+enum class ColId : duetos::u8
+{
+    Name = 0,
+    Pid = 1,
+    Abi = 2,
+    Cpu = 3,
+    Ticks = 4,
+    Mem = 5,
+    State = 6,
+};
+
+struct Col
+{
+    ColId id;
+    duetos::u32 x;    // absolute left edge of the cell + its hit zone
+    duetos::u32 w;    // cell width; the hit zone is [x, x + w)
+    SortMode sort;    // kCount = this column has no sort key
+    bool right_align; // Aurora only: value's right edge sits at x + w
+};
+
+constexpr duetos::u32 kMaxCols = 7;
+
+// Widest value a fixed column has to hold. Measured rather than
+// assumed so the layout tracks whatever face the theme registered.
+constexpr const char* kWidestPid = "  99999";
+constexpr const char* kWidestCpu = "100.0%";
+constexpr const char* kWidestTicks = "9999999999";
+constexpr const char* kWidestMem = "9999999";
+constexpr const char* kWidestState = "Ready";
+
+// Minimum NAME width before the (optional) TICKS column is dropped.
+// Below this a proportional name truncates so hard the table stops
+// being readable, which is worse than losing the raw tick counter.
+constexpr duetos::u32 kNameMinPx = 104;
+
+const char* ColHeaderLabel(ColId id)
+{
+    switch (id)
+    {
+    case ColId::Name:
+        return "NAME";
+    case ColId::Pid:
+        return "PID";
+    case ColId::Abi:
+        return "ABI";
+    case ColId::Cpu:
+        return "CPU";
+    case ColId::Ticks:
+        return "TICKS";
+    case ColId::Mem:
+        return "MEMORY";
+    case ColId::State:
+        return "STATE";
+    }
+    return "";
+}
+
+// ABI badge text for a row, or nullptr when the row's ABI genuinely
+// cannot be determined (kernel-only tasks). Never guessed — the
+// value comes off Process::pe_image_base / Process::abi_flavor via
+// SchedTaskInfo::abi.
+const char* AbiBadge(duetos::u8 abi)
+{
+    switch (abi)
+    {
+    case duetos::sched::kTaskAbiNative:
+        return "NATIVE";
+    case duetos::sched::kTaskAbiWin32Pe:
+        return "WIN32 PE";
+    case duetos::sched::kTaskAbiLinux:
+        return "LINUX ELF";
+    default:
+        return nullptr;
+    }
+}
+
+duetos::u32 BuildCols(duetos::u32 cx, duetos::u32 cw, bool aurora, Col* out)
+{
+    using duetos::drivers::video::ChromeTextRole;
+    using duetos::drivers::video::app_widgets::AppPillWidth;
+    using duetos::drivers::video::app_widgets::AppRowDotWidth;
+    using duetos::drivers::video::app_widgets::AppTextMeasure;
+
+    duetos::u32 n = 0;
+    if (!aurora)
+    {
+        // Historical layout, byte-for-byte: PID NAME STATE CPU% TICKS MEM,
+        // each `chars * 8 + 4` wide, starting at cx + kColPad.
+        duetos::u32 x = cx + kColPad;
+        const struct
+        {
+            ColId id;
+            duetos::u32 chars;
+            SortMode sort;
+        } legacy[] = {
+            {ColId::Pid, kColPid, SortMode::Pid},        {ColId::Name, kColName, SortMode::Name},
+            {ColId::State, kColState, SortMode::State},  {ColId::Cpu, kColCpu, SortMode::Cpu},
+            {ColId::Ticks, kColTicks, SortMode::kCount}, {ColId::Mem, kColMem, SortMode::Mem},
+        };
+        for (const auto& l : legacy)
+        {
+            out[n++] = Col{l.id, x, l.chars * 8U + 4U, l.sort, false};
+            x += l.chars * 8U + 4U;
+        }
+        return n;
+    }
+
+    // Aurora: fixed columns measured off the live face, NAME flexes.
+    constexpr duetos::u32 kGap = 10;
+    const duetos::u32 pid_w = AppTextMeasure(ChromeTextRole::Body, kWidestPid);
+    const duetos::u32 abi_w = AppPillWidth("WIN32 PE");
+    const duetos::u32 cpu_w = AppTextMeasure(ChromeTextRole::Body, kWidestCpu);
+    const duetos::u32 ticks_w = AppTextMeasure(ChromeTextRole::Body, kWidestTicks);
+    const duetos::u32 mem_w = AppTextMeasure(ChromeTextRole::Body, kWidestMem);
+    const duetos::u32 state_w = AppTextMeasure(ChromeTextRole::Body, kWidestState);
+
+    const duetos::u32 pad = kColPad;
+    const duetos::u32 avail = (cw > 2U * pad) ? cw - 2U * pad : 0U;
+    const duetos::u32 fixed_no_ticks = pid_w + abi_w + cpu_w + mem_w + state_w + 5U * kGap;
+    // NAME also carries the row dot in its cell.
+    const duetos::u32 dot = AppRowDotWidth();
+
+    bool with_ticks = false;
+    duetos::u32 name_w = 0;
+    if (avail > fixed_no_ticks + dot + ticks_w + kGap && avail - (fixed_no_ticks + dot + ticks_w + kGap) >= kNameMinPx)
+    {
+        with_ticks = true;
+        name_w = avail - (fixed_no_ticks + dot + ticks_w + kGap);
+    }
+    else if (avail > fixed_no_ticks + dot)
+    {
+        name_w = avail - (fixed_no_ticks + dot);
+    }
+    else
+    {
+        // Client too narrow for the full table — give NAME what is
+        // left and let the right-aligned columns clip themselves.
+        name_w = 0;
+    }
+
+    duetos::u32 x = cx + pad;
+    auto push = [&](ColId id, duetos::u32 w, SortMode s, bool right)
+    {
+        out[n++] = Col{id, x, w, s, right};
+        x += w + kGap;
+    };
+    push(ColId::Name, dot + name_w, SortMode::Name, false);
+    push(ColId::Pid, pid_w, SortMode::Pid, true);
+    push(ColId::Abi, abi_w, SortMode::kCount, false);
+    push(ColId::Cpu, cpu_w, SortMode::Cpu, true);
+    if (with_ticks)
+        push(ColId::Ticks, ticks_w, SortMode::kCount, true);
+    push(ColId::Mem, mem_w, SortMode::Mem, true);
+    push(ColId::State, state_w, SortMode::State, false);
+    return n;
 }
 
 const char* StateGlyph(duetos::u8 state)
@@ -136,6 +355,7 @@ struct Row
     duetos::u32 mapped_kib; // per-process mapped user pages × 4 KiB
     duetos::u8 state;
     duetos::u8 priority;
+    duetos::u8 abi; // sched::kTaskAbi* — kTaskAbiNone means "no badge"
     bool is_running;
     bool has_process;
 };
@@ -524,6 +744,7 @@ void OnEnumTask(const duetos::sched::SchedTaskInfo& info, void* /*cookie*/)
     r.priority = info.priority;
     r.is_running = info.is_running;
     r.has_process = info.has_process;
+    r.abi = info.abi;
     duetos::u32 o = 0;
     if (info.name != nullptr)
     {
@@ -708,10 +929,11 @@ void DrawHeader(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 fg, 
     // single flat band.
     const duetos::u32 stat_bg = p.aurora ? p.body : bg;
     const duetos::u32 head_bg = p.aurora ? p.wash : bg;
-    FramebufferFillRect(cx, cy, cw, 12, stat_bg);
-    FramebufferFillRect(cx, cy + 12, cw, kHeaderH - 12, head_bg);
+    const duetos::u32 header_h = HeaderH();
+    FramebufferFillRect(cx, cy, cw, kStatLineH, stat_bg);
+    FramebufferFillRect(cx, cy + kStatLineH, cw, header_h - kStatLineH, head_bg);
     if (p.aurora)
-        FramebufferFillRect(cx, cy + kHeaderH - 1, cw, 1, p.line);
+        FramebufferFillRect(cx, cy + header_h - 1, cw, 1, p.line);
 
     // Line 1: aggregate stats.
     //   "CPU 12.3%  IDLE 87.7%  MEM 1234/4096  TASKS 23"
@@ -750,7 +972,18 @@ void DrawHeader(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 fg, 
     append(" MIB  TASKS ");
     append(num_tasks);
     line[o] = '\0';
-    FramebufferDrawString(cx + kColPad, cy + 2, line, p.aurora ? p.ink_2 : fg, stat_bg);
+    if (p.aurora)
+    {
+        // The aggregate line is chrome, not tabular data — it reads as
+        // a caption under the reference's title bar, so it takes the
+        // proportional Caption role like the rest of the app's chrome.
+        duetos::drivers::video::app_widgets::AppTextCell(duetos::drivers::video::ChromeTextRole::Caption, cx + kColPad,
+                                                         cy, kStatLineH, line, p.ink_2, stat_bg);
+    }
+    else
+    {
+        FramebufferDrawString(cx + kColPad, cy + 2, line, fg, stat_bg);
+    }
 
     // Line 2: column headers (PROCESSES tab only — the
     // PERFORMANCE tab paints labels inside the graph stack).
@@ -780,45 +1013,85 @@ void DrawHeader(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 fg, 
         out[w] = '\0';
     };
 
-    char col_pid[8];
-    char col_name[24];
-    char col_state[8];
-    char col_cpu[8];
-    char col_ticks[16];
-    char col_mem[8];
-    make_col_label("PID", kColPid, SortMode::Pid, col_pid);
-    make_col_label("NAME", kColName, SortMode::Name, col_name);
-    make_col_label("STATE", kColState, SortMode::State, col_state);
-    // CPU% and TICKS labels are right-padded with spaces first,
-    // then the indicator overwrites the last char.
-    make_col_label("  CPU%", kColCpu, SortMode::Cpu, col_cpu);
-    make_col_label("     TICKS", kColTicks, SortMode::Cpu, col_ticks);
-    // TICKS has no sort mode of its own; it uses the CPU sort key for
-    // the indicator (TICKS is just the raw numerator of CPU%).
-    // Override: TICKS column indicator is NOT shown — it shares the
-    // CPU% sort key, so the indicator already appears on the CPU% col.
-    FmtStrLeft("     TICKS", col_ticks, kColTicks); // plain, no indicator
-    make_col_label("  MEM", kColMem, SortMode::Mem, col_mem);
-
-    duetos::u32 x = cx + kColPad;
-    const duetos::u32 y = cy + 13;
     // Uppercase headings in muted ink; the active sort column takes the
     // accent. The design spends no other colour on the header row.
     const duetos::u32 head_fg = p.aurora ? p.ink_3 : fg;
     const duetos::u32 head_hl = p.aurora ? p.accent : hl;
-    auto draw_col = [&](const char* s, duetos::u32 w, SortMode key)
+
+    Col cols[kMaxCols];
+    const duetos::u32 ncols = BuildCols(cx, cw, p.aurora, cols);
+
+    if (!p.aurora)
     {
-        const duetos::u32 c = (g_sort == key) ? head_hl : head_fg;
-        FramebufferDrawString(x, y, s, c, head_bg);
-        x += w * 8 + 4;
-    };
-    draw_col(col_pid, kColPid, SortMode::Pid);
-    draw_col(col_name, kColName, SortMode::Name);
-    draw_col(col_state, kColState, SortMode::State);
-    draw_col(col_cpu, kColCpu, SortMode::Cpu);
-    FramebufferDrawString(x, y, col_ticks, head_fg, head_bg); // TICKS: no sort key
-    x += kColTicks * 8 + 4;
-    draw_col(col_mem, kColMem, SortMode::Mem);
+        // Flat palettes: character-padded labels drawn at the table's
+        // cell origins — the exact pixels this app has always painted.
+        char label[24];
+        const duetos::u32 y = cy + 13;
+        for (duetos::u32 i = 0; i < ncols; ++i)
+        {
+            const Col& c = cols[i];
+            const duetos::u32 chars = (c.w - 4U) / 8U;
+            switch (c.id)
+            {
+            case ColId::Pid:
+                make_col_label("PID", chars, SortMode::Pid, label);
+                break;
+            case ColId::Name:
+                make_col_label("NAME", chars, SortMode::Name, label);
+                break;
+            case ColId::State:
+                make_col_label("STATE", chars, SortMode::State, label);
+                break;
+            case ColId::Cpu:
+                make_col_label("  CPU%", chars, SortMode::Cpu, label);
+                break;
+            case ColId::Ticks:
+                // TICKS shares the CPU% sort key, so its indicator
+                // would duplicate the one on CPU%. Plain label.
+                FmtStrLeft("     TICKS", label, chars);
+                break;
+            case ColId::Mem:
+                make_col_label("  MEM", chars, SortMode::Mem, label);
+                break;
+            default:
+                label[0] = '\0';
+                break;
+            }
+            const duetos::u32 colour = (c.sort != SortMode::kCount && g_sort == c.sort) ? head_hl : head_fg;
+            FramebufferDrawString(c.x, y, label, colour, head_bg);
+        }
+        return;
+    }
+
+    // Aurora: measured labels at Caption size, right-aligned where the
+    // column's values are. The sort indicator becomes a separate
+    // glyph appended to the label rather than a character overwrite —
+    // a proportional label has no "last cell" to overwrite.
+    using duetos::drivers::video::ChromeTextRole;
+    using duetos::drivers::video::app_widgets::AppTextCell;
+    using duetos::drivers::video::app_widgets::AppTextCellRight;
+    const duetos::u32 band_y = cy + kStatLineH;
+    const duetos::u32 band_h = header_h - kStatLineH;
+    for (duetos::u32 i = 0; i < ncols; ++i)
+    {
+        const Col& c = cols[i];
+        const bool active = (c.sort != SortMode::kCount && g_sort == c.sort);
+        char label[24];
+        duetos::u32 lo = 0;
+        for (const char* s = ColHeaderLabel(c.id); *s != '\0' && lo + 3 < sizeof(label); ++s)
+            label[lo++] = *s;
+        if (active)
+        {
+            label[lo++] = ' ';
+            label[lo++] = g_sort_asc ? '^' : 'v';
+        }
+        label[lo] = '\0';
+        const duetos::u32 colour = active ? head_hl : head_fg;
+        if (c.right_align)
+            AppTextCellRight(ChromeTextRole::Caption, c.x + c.w, c.x, band_y, band_h, label, colour, head_bg);
+        else
+            AppTextCell(ChromeTextRole::Caption, c.x, band_y, band_h, label, colour, head_bg);
+    }
 }
 
 void DrawRows(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, duetos::u32 fg, duetos::u32 fg_run,
@@ -828,15 +1101,20 @@ void DrawRows(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, du
     using duetos::drivers::video::FramebufferFillRect;
 
     const auto p = Pal();
+    const duetos::u32 row_h = RowH();
+    const duetos::u32 header_h = HeaderH();
     const duetos::u32 list_bg = p.aurora ? p.body : bg;
-    const duetos::u32 list_y = cy + kHeaderH;
-    const duetos::u32 list_h = (ch > kHeaderH + kFooterH) ? ch - kHeaderH - kFooterH : 0;
+    const duetos::u32 list_y = cy + header_h;
+    const duetos::u32 list_h = (ch > header_h + kFooterH) ? ch - header_h - kFooterH : 0;
     FramebufferFillRect(cx, list_y, cw, list_h, list_bg);
 
-    if (g_row_count == 0 || list_h < kRowH)
+    if (g_row_count == 0 || list_h < row_h)
         return;
 
-    const duetos::u32 visible = list_h / kRowH;
+    Col cols[kMaxCols];
+    const duetos::u32 ncols = BuildCols(cx, cw, p.aurora, cols);
+
+    const duetos::u32 visible = list_h / row_h;
     // Keep the selection inside the viewport.
     if (g_selected < g_first_visible)
         g_first_visible = g_selected;
@@ -849,20 +1127,20 @@ void DrawRows(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, du
     {
         const duetos::u32 idx = g_first_visible + v;
         const Row& r = g_rows[idx];
-        const duetos::u32 row_y = list_y + v * kRowH;
+        const duetos::u32 row_y = list_y + v * row_h;
         const bool selected = (idx == g_selected);
         // Aurora: `--glass-3` zebra with an accent-tinted selection and
         // a 2-px accent rail, per the design's process table. Flat
         // palettes keep the solid selected-row band and no zebra.
         if (p.aurora)
         {
-            FramebufferFillRect(cx, row_y, cw, kRowH, selected ? p.sel : ((v & 1u) ? p.wash : p.body));
+            FramebufferFillRect(cx, row_y, cw, row_h, selected ? p.sel : ((v & 1u) ? p.wash : p.body));
             if (selected)
-                FramebufferFillRect(cx, row_y, 2, kRowH, p.accent);
+                FramebufferFillRect(cx, row_y, 2, row_h, p.accent);
         }
         else if (selected)
         {
-            FramebufferFillRect(cx, row_y, cw, kRowH, sel_bg);
+            FramebufferFillRect(cx, row_y, cw, row_h, sel_bg);
         }
 
         char col_pid[8];
@@ -901,19 +1179,107 @@ void DrawRows(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, du
             num_fg = p.ink_2;
             state_fg = r.is_running ? p.accent : p.ink_3;
         }
-        const duetos::u32 text_y = row_y + (kRowH - 8) / 2;
-        duetos::u32 x = cx + kColPad;
-        FramebufferDrawString(x, text_y, col_pid, num_fg, row_bg);
-        x += kColPid * 8 + 4;
-        FramebufferDrawString(x, text_y, col_name, row_fg, row_bg);
-        x += kColName * 8 + 4;
-        FramebufferDrawString(x, text_y, col_state, state_fg, row_bg);
-        x += kColState * 8 + 4;
-        FramebufferDrawString(x, text_y, col_cpu, num_fg, row_bg);
-        x += kColCpu * 8 + 4;
-        FramebufferDrawString(x, text_y, col_ticks, num_fg, row_bg);
-        x += kColTicks * 8 + 4;
-        FramebufferDrawString(x, text_y, col_mem, num_fg, row_bg);
+        // Cell paint walks the SAME table the header and the
+        // header-click hit-test walk. A column can no longer move for
+        // the pixels without moving for the click.
+        if (!p.aurora)
+        {
+            const duetos::u32 text_y = row_y + (row_h - 8) / 2;
+            for (duetos::u32 i = 0; i < ncols; ++i)
+            {
+                const Col& c = cols[i];
+                const char* s = "";
+                duetos::u32 colour = num_fg;
+                switch (c.id)
+                {
+                case ColId::Pid:
+                    s = col_pid;
+                    break;
+                case ColId::Name:
+                    s = col_name;
+                    colour = row_fg;
+                    break;
+                case ColId::State:
+                    s = col_state;
+                    colour = state_fg;
+                    break;
+                case ColId::Cpu:
+                    s = col_cpu;
+                    break;
+                case ColId::Ticks:
+                    s = col_ticks;
+                    break;
+                case ColId::Mem:
+                    s = col_mem;
+                    break;
+                default:
+                    break;
+                }
+                FramebufferDrawString(c.x, text_y, s, colour, row_bg);
+            }
+            continue;
+        }
+
+        // Aurora: proportional content. The character padding the
+        // formatters added is meaningless under a variable-width face,
+        // so numeric cells are trimmed and right-aligned on their
+        // measured width instead.
+        using duetos::drivers::video::ChromeTextRole;
+        using duetos::drivers::video::app_widgets::AppPillDraw;
+        using duetos::drivers::video::app_widgets::AppRowDotDraw;
+        using duetos::drivers::video::app_widgets::AppRowDotWidth;
+        using duetos::drivers::video::app_widgets::AppTextCell;
+        using duetos::drivers::video::app_widgets::AppTextCellRight;
+        using duetos::drivers::video::app_widgets::AppTextFit;
+        TrimSpaces(col_pid);
+        TrimSpaces(col_cpu);
+        TrimSpaces(col_ticks);
+        TrimSpaces(col_mem);
+        TrimSpaces(col_state);
+        for (duetos::u32 i = 0; i < ncols; ++i)
+        {
+            const Col& c = cols[i];
+            switch (c.id)
+            {
+            case ColId::Name:
+            {
+                // Liveness dot then the process name, truncated on a
+                // measured width rather than a character count.
+                const duetos::u32 dot_w = AppRowDotWidth();
+                AppRowDotDraw(c.x, row_y, row_h, r.is_running ? p.accent : p.ink_3);
+                char fitted[32];
+                const duetos::u32 name_budget = (c.w > dot_w) ? c.w - dot_w : 0;
+                AppTextFit(ChromeTextRole::Body, r.name, fitted, sizeof(fitted), name_budget);
+                AppTextCell(ChromeTextRole::Body, c.x + dot_w, row_y, row_h, fitted, row_fg, row_bg);
+                break;
+            }
+            case ColId::Pid:
+                AppTextCellRight(ChromeTextRole::Body, c.x + c.w, c.x, row_y, row_h, col_pid, num_fg, row_bg);
+                break;
+            case ColId::Abi:
+            {
+                // Rows whose ABI the kernel cannot name render no
+                // badge at all — AbiBadge returns nullptr and
+                // AppPillDraw is a no-op on it.
+                const char* badge = AbiBadge(r.abi);
+                const duetos::u32 ink = (r.abi == duetos::sched::kTaskAbiWin32Pe) ? p.accent_peer : p.accent;
+                AppPillDraw(c.x, row_y, row_h, badge, ink, row_bg);
+                break;
+            }
+            case ColId::Cpu:
+                AppTextCellRight(ChromeTextRole::Body, c.x + c.w, c.x, row_y, row_h, col_cpu, num_fg, row_bg);
+                break;
+            case ColId::Ticks:
+                AppTextCellRight(ChromeTextRole::Body, c.x + c.w, c.x, row_y, row_h, col_ticks, num_fg, row_bg);
+                break;
+            case ColId::Mem:
+                AppTextCellRight(ChromeTextRole::Body, c.x + c.w, c.x, row_y, row_h, col_mem, num_fg, row_bg);
+                break;
+            case ColId::State:
+                AppTextCell(ChromeTextRole::Body, c.x, row_y, row_h, col_state, state_fg, row_bg);
+                break;
+            }
+        }
     }
 }
 
@@ -983,6 +1349,86 @@ void DrawSparkline(duetos::u32 x, duetos::u32 y, duetos::u32 w, duetos::u32 h, d
     }
 }
 
+// ---------------------------------------------------------------
+// Performance-tab resource rail (Aurora only).
+//
+// One tile per logical CPU plus the aggregate, from the telemetry
+// surface. The window is caller-owned by contract — this is the Task
+// Manager's own, so a shell `top` polling at a different cadence
+// cannot consume our delta and leave both readings wrong. The first
+// sample against a fresh window reports valid == false; the rail then
+// prints the core rows with no figure rather than a fabricated 0 %.
+// ---------------------------------------------------------------
+constexpr duetos::u32 kPerfRailW = 118;
+constexpr duetos::u32 kPerfTileH = 26;
+
+// This app's own rolling window. Zero-initialised once and kept —
+// never re-zeroed per paint, or every sample would be the "first"
+// one and the rail would never show a number.
+constinit duetos::diag::TelemetryCpuWindow g_cpu_window{};
+
+void DrawPerfRail(duetos::u32 x, duetos::u32 y, duetos::u32 w, duetos::u32 h,
+                  const duetos::drivers::video::app_widgets::AppPalette& p)
+{
+    using duetos::drivers::video::ChromeTextRole;
+    using duetos::drivers::video::FramebufferFillRect;
+    using duetos::drivers::video::app_widgets::AppTextCell;
+    using duetos::drivers::video::app_widgets::AppTextCellRight;
+
+    FramebufferFillRect(x, y, w, h, p.recess);
+    FramebufferFillRect(x + w - 1, y, 1, h, p.line);
+
+    const duetos::diag::TelemetryCpuUsage usage = duetos::diag::TelemetryCpuUsageSample(g_cpu_window);
+
+    duetos::u32 row_y = y;
+    auto tile = [&](const char* label, bool has_value, duetos::u8 pct, bool accent)
+    {
+        if (row_y + kPerfTileH > y + h)
+            return;
+        // A busy meter behind the label: the tile's own fill scaled to
+        // the reading, which is what makes the rail readable at a
+        // glance without four more sparklines.
+        if (has_value && pct > 0)
+        {
+            const duetos::u32 bar_w = (w - 2U) * pct / 100U;
+            FramebufferFillRect(x + 1, row_y + kPerfTileH - 4, bar_w, 2, accent ? p.accent : p.ink_3);
+        }
+        AppTextCell(ChromeTextRole::Caption, x + 8, row_y, kPerfTileH - 6, label, p.ink_2, p.recess);
+        if (has_value)
+        {
+            char num[8];
+            duetos::u32 n = 0;
+            if (pct >= 100)
+                num[n++] = '1';
+            if (pct >= 10)
+                num[n++] = static_cast<char>('0' + (pct / 10) % 10);
+            num[n++] = static_cast<char>('0' + pct % 10);
+            num[n++] = '%';
+            num[n] = '\0';
+            AppTextCellRight(ChromeTextRole::Caption, x + w - 8, x, row_y, kPerfTileH - 6, num,
+                             accent ? p.accent : p.ink_2, p.recess);
+        }
+        row_y += kPerfTileH;
+    };
+
+    tile("CPU", usage.valid, usage.aggregate_busy_pct, true);
+    for (duetos::u32 i = 0; i < usage.core_count && i < duetos::diag::kTelemetryMaxCpus; ++i)
+    {
+        char label[12];
+        label[0] = 'C';
+        label[1] = 'o';
+        label[2] = 'r';
+        label[3] = 'e';
+        label[4] = ' ';
+        duetos::u32 n = 5;
+        if (i >= 10)
+            label[n++] = static_cast<char>('0' + i / 10);
+        label[n++] = static_cast<char>('0' + i % 10);
+        label[n] = '\0';
+        tile(label, usage.valid && usage.core_valid[i], usage.core_busy_pct[i], false);
+    }
+}
+
 void DrawPerformance(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, duetos::u32 fg, duetos::u32 fg_cpu,
                      duetos::u32 fg_mem, duetos::u32 grid, duetos::u32 frame, duetos::u32 fill, duetos::u32 bg)
 {
@@ -990,11 +1436,27 @@ void DrawPerformance(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32
     using duetos::drivers::video::FramebufferFillRect;
     const auto p = Pal();
     const duetos::u32 list_bg = p.aurora ? p.body : bg;
-    const duetos::u32 list_y = cy + kHeaderH;
-    const duetos::u32 list_h = (ch > kHeaderH + kFooterH) ? ch - kHeaderH - kFooterH : 0;
+    const duetos::u32 header_h = HeaderH();
+    const duetos::u32 list_y = cy + header_h;
+    const duetos::u32 list_h = (ch > header_h + kFooterH) ? ch - header_h - kFooterH : 0;
     FramebufferFillRect(cx, list_y, cw, list_h, list_bg);
     if (list_h < 60)
         return;
+
+    // Aurora: the reference puts a resource rail down the left of the
+    // Performance view, one tile per CPU core. The per-core numbers
+    // come from the telemetry surface, whose window is CALLER-owned —
+    // g_cpu_window below is this app's, so the shell's `top` polling
+    // at a different cadence can't eat our delta. The first sample
+    // against a fresh window is `valid == false` by contract; the rail
+    // shows the core rows with no number until a second sample lands
+    // rather than printing a fabricated 0 %.
+    const duetos::u32 rail_w = (p.aurora && cw >= 340) ? kPerfRailW : 0U;
+    if (rail_w != 0)
+        DrawPerfRail(cx, list_y, rail_w, list_h, p);
+    // Everything below paints into the slice right of the rail.
+    const duetos::u32 gx = cx + rail_w;
+    const duetos::u32 gw = cw - rail_w;
 
     // Two equal-height graph stacks with a 12-px label band each.
     const duetos::u32 stack_h = list_h / 2;
@@ -1068,8 +1530,8 @@ void DrawPerformance(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32
     append(peak_buf);
     append("  (60 s)");
     line[o] = '\0';
-    FramebufferDrawString(cx + kColPad, list_y + 2, line, p.aurora ? p.ink_2 : fg_cpu, list_bg);
-    DrawSparkline(cx + kColPad, list_y + lbl_h, cw - 2 * kColPad, graph_h, fg_cpu, grid, frame, fill, true);
+    FramebufferDrawString(gx + kColPad, list_y + 2, line, p.aurora ? p.ink_2 : fg_cpu, list_bg);
+    DrawSparkline(gx + kColPad, list_y + lbl_h, gw - 2 * kColPad, graph_h, fg_cpu, grid, frame, fill, true);
 
     // MEM header.
     o = 0;
@@ -1092,8 +1554,8 @@ void DrawPerformance(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32
     append(num_total);
     append(" MIB");
     line[o] = '\0';
-    FramebufferDrawString(cx + kColPad, list_y + stack_h + 2, line, p.aurora ? p.ink_2 : fg_mem, list_bg);
-    DrawSparkline(cx + kColPad, list_y + stack_h + lbl_h, cw - 2 * kColPad, graph_h, fg_mem, grid, frame, fill, false);
+    FramebufferDrawString(gx + kColPad, list_y + stack_h + 2, line, p.aurora ? p.ink_2 : fg_mem, list_bg);
+    DrawSparkline(gx + kColPad, list_y + stack_h + lbl_h, gw - 2 * kColPad, graph_h, fg_mem, grid, frame, fill, false);
 
     // Below the graphs (inside the footer band — the actual
     // footer is `OPENS / GRAPH / TASKS` below this) we draw
@@ -1118,7 +1580,7 @@ void DrawPerformance(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32
     append(buf15);
     line[o] = '\0';
     if (ch >= kFooterH + 12)
-        FramebufferDrawString(cx + kColPad, cy + ch - kFooterH - 12, line, p.aurora ? p.ink_3 : fg, list_bg);
+        FramebufferDrawString(gx + kColPad, cy + ch - kFooterH - 12, line, p.aurora ? p.ink_3 : fg, list_bg);
 }
 
 void DrawFn(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, void* /*cookie*/)
@@ -1233,23 +1695,17 @@ void ClickRefresh()
 // ---------------------------------------------------------------
 // Column-header click hit-test (F-025).
 //
-// The PROCESSES tab header row 2 is painted at
-//   abs_y = client_top + kHdrToolbarH + 12
-// with height kHeaderH - 12 = 10 px. `client_y` / `client_h` are the
-// window manager's client rect (WindowGetClientRect) — never a
-// hardcoded title-bar constant, which is per-theme.
+// The PROCESSES tab column headings are painted in the band
+//   [client_top + kHdrToolbarH + kStatLineH, client_top + kHdrToolbarH + HeaderH())
+// `client_y` / `client_h` are the window manager's client rect
+// (WindowGetClientRect) — never a hardcoded title-bar constant,
+// which is per-theme.
 //
-// Column X origins (relative to the client left edge cx):
-//   PID:   wx + kColPad
-//   NAME:  PID_x + kColPid * 8 + 4
-//   STATE: NAME_x + kColName * 8 + 4
-//   CPU%:  STATE_x + kColState * 8 + 4
-//   TICKS: CPU%_x + kColCpu * 8 + 4   (unsortable, skip)
-//   MEM:   TICKS_x + kColTicks * 8 + 4
-//
-// Each column owns a horizontal hit zone from its X origin up to
-// (but not including) the next column's origin. We use that zone
-// to determine which sort mode to set.
+// Column X origins come from `BuildCols` — the same table DrawHeader
+// paints the labels with and DrawRows paints the cells with. Each
+// column owns the half-open hit zone [x, x + w). Deriving the zones
+// here instead of re-writing the arithmetic is what keeps the click
+// and the pixels in phase.
 //
 // Returns kCount when the point is not inside any sortable column
 // header zone.
@@ -1257,11 +1713,11 @@ void ClickRefresh()
 SortMode HitTestColHeader(duetos::u32 px, duetos::u32 py, duetos::u32 client_x, duetos::u32 client_y,
                           duetos::u32 client_w, duetos::u32 client_h)
 {
-    // Column header row 2 is inside the legacy header band which
-    // starts at client_y + kHdrToolbarH. Row 2 within that band is
-    // at +12 px; row 2 height is kHeaderH - 12 = 10 px.
-    const duetos::u32 header_top = client_y + kHdrToolbarH + 12U;
-    const duetos::u32 header_bot = header_top + (kHeaderH - 12U);
+    // Column headings sit in the band that starts kStatLineH below
+    // the header top and runs to the end of HeaderH() — the same two
+    // values DrawHeader fills and paints into.
+    const duetos::u32 header_top = client_y + kHdrToolbarH + kStatLineH;
+    const duetos::u32 header_bot = client_y + kHdrToolbarH + HeaderH();
 
     if (py < header_top || py >= header_bot)
         return SortMode::kCount;
@@ -1272,31 +1728,15 @@ SortMode HitTestColHeader(duetos::u32 px, duetos::u32 py, duetos::u32 client_x, 
     if (g_tab != Tab::Processes)
         return SortMode::kCount;
 
-    // Build column X boundaries.
-    duetos::u32 x = client_x + kColPad;
-    struct ColZone
+    // Hit zones come from the SAME BuildCols table DrawHeader painted
+    // and DrawRows filled. Each column owns [x, x + w); an unsortable
+    // column (ABI, TICKS) reports kCount and the click falls through.
+    Col cols[kMaxCols];
+    const duetos::u32 ncols = BuildCols(client_x, client_w, Pal().aurora, cols);
+    for (duetos::u32 i = 0; i < ncols; ++i)
     {
-        duetos::u32 x_start;
-        duetos::u32 x_end;
-        SortMode mode;
-    };
-    // kCount sentinel for TICKS (no sort key).
-    const ColZone zones[] = {
-        {x, x + kColPid * 8 + 4, SortMode::Pid},
-        {x + kColPid * 8 + 4, x + (kColPid + kColName) * 8 + 8, SortMode::Name},
-        {x + (kColPid + kColName) * 8 + 8, x + (kColPid + kColName + kColState) * 8 + 12, SortMode::State},
-        {x + (kColPid + kColName + kColState) * 8 + 12, x + (kColPid + kColName + kColState + kColCpu) * 8 + 16,
-         SortMode::Cpu},
-        // TICKS zone is unsortable — skip (use kCount sentinel).
-        // MEM starts after TICKS.
-        {x + (kColPid + kColName + kColState + kColCpu + kColTicks) * 8 + 20,
-         x + (kColPid + kColName + kColState + kColCpu + kColTicks + kColMem) * 8 + 24, SortMode::Mem},
-    };
-
-    for (duetos::u32 i = 0; i < sizeof(zones) / sizeof(zones[0]); ++i)
-    {
-        if (px >= zones[i].x_start && px < zones[i].x_end)
-            return zones[i].mode;
+        if (px >= cols[i].x && px < cols[i].x + cols[i].w)
+            return cols[i].sort;
     }
     return SortMode::kCount;
 }
@@ -1491,6 +1931,7 @@ void TaskmanSelfTest()
         r.mapped_kib = mem_kib;
         r.state = state;
         r.priority = 0;
+        r.abi = pid != 0 ? duetos::sched::kTaskAbiNative : duetos::sched::kTaskAbiNone;
         r.is_running = false;
     };
     using duetos::sched::TaskState;

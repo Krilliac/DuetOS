@@ -119,7 +119,10 @@ callers that don't want to spell out the template parameter pack.
 ## The Widget Set
 
 Eight widgets ship in Pass D. Each is one .h/.cpp pair under
-`kernel/drivers/video/app_widgets/`.
+`kernel/drivers/video/app_widgets/`. Two non-widget helpers sit
+alongside them — `app_palette` (Aurora interior tokens) and `app_text`
+(measured content type + ABI pill + row dot, see
+[Content type](#content-type--app_texthcpp)).
 
 | Widget | Events | When to use |
 |---|---|---|
@@ -136,6 +139,89 @@ Every widget's `PaintSelf` reads theme colours through
 `ThemeCurrent()` rather than baked constants, so all themes
 (Pass A) and tactility on/off (Pass A residual) and the
 typography roles (Pass C) work for free.
+
+## Content type — `app_text.{h,cpp}`
+
+Pass C moved the *chrome* to proportional TTF, but app *content* — file
+names, process names, column labels — stayed on the fixed 8x8 ROM font,
+because Files and Task Manager both computed their column origins as
+`chars * 8`. That was the dominant remaining visual gap against the
+Aurora reference: the chrome read as Instrument Sans and the table
+under it read as a terminal.
+
+`app_text` is the one home for what a list view needs once its columns
+are measured instead of cell-counted:
+
+| Entry point | Job |
+|---|---|
+| `AppRowHeight(role)` | Row pitch that leads `role` comfortably (line box + 5 px). |
+| `AppTextRowY(role, y, row_h)` | Vertical centring; reproduces the historical `(row_h - 8) / 2` on the bitmap path exactly. |
+| `AppTextMeasure` / `AppTextFit` | Measure, and truncate with a trailing `..` on a *pixel* budget rather than a character count. |
+| `AppTextCell` / `AppTextCellRight` | Left- and right-aligned cells. Right-alignment uses the same measurement the paint advances by, so numeric columns stay flush. |
+| `AppPillWidth` / `AppPillDraw` | The `NATIVE` / `WIN32 PE` ABI chip. |
+| `AppRowDotWidth` / `AppRowDotDraw` | Per-row liveness dot. |
+
+Everything routes through `ChromeTextMeasure` + `ChromeTextDraw`, which
+share one per-glyph advance sum. **That is the whole point.** Before
+this refactor the Task Manager's header paint, row paint and
+header-click hit-test each re-derived `col * 8 + 4` independently, and
+they drifted — a class of bug that costs an entire debugging session to
+find. Files and Task Manager now each build one column table per paint
+and every consumer walks it:
+
+- Task Manager: `BuildCols()` returns `{id, x, w, sort, right_align}`;
+  `DrawHeader`, `DrawRows` and `HitTestColHeader` all read it. The flat
+  palettes are expressed through the *same* table with the historical
+  `chars * 8 + 4` widths, so they come out of the identical code path
+  unchanged rather than out of a parallel branch that can rot.
+- Files: `RowH()` is the single row-pitch accessor, read by every
+  `Draw*`, by `FilesListVisibleRows` and by `FilesRowAt`; `BuildCols()`
+  places SIZE / MODIFIED for both the header labels and the row values;
+  `RailW()` is read by both the list slice and the row hit-test.
+
+Invariants are pinned by `AppTextSelfTest()`, which rides the
+`[app-widgets-selftest]` umbrella and emits its own
+`[app-text-selftest] PASS` sentinel: Fit never exceeds its budget, Fit
+agrees with Measure, Fit is monotone in budget, a fitting string is not
+truncated, a pill is wider than its label, an empty badge claims zero
+width, and RowY keeps the line box inside the band.
+
+### ABI badges come from a real source
+
+Badges are never inferred from a file extension or a task name:
+
+- **Task Manager** reads `SchedTaskInfo::abi`, filled in `EmitTask`
+  from `Process::pe_image_base` (recorded by `SpawnPeFile` after
+  `PeLoad`; zero for every non-PE process) and `Process::abi_flavor`.
+  It occupies a byte of the struct's existing padding. Kernel-only
+  tasks report `kTaskAbiNone` and render **no** badge.
+- **Files** sniffs the image header only where the bytes are already
+  resident in kernel memory (`RamfsNode::file_bytes`): `\x7fELF` →
+  `NATIVE`, `MZ` + a valid `PE\0\0` at `e_lfanew` → `WIN32 PE`.
+  FAT32 rows show **nothing**. The launch path has to guess from
+  `.EXE`, and a badge that inherited that guess would confidently
+  mislabel any file whose name happens to end in the wrong four
+  characters.
+
+### Rails
+
+Under Aurora only, and only when the client is wide enough:
+
+- **Files** gets a quick-access rail. It does *not* grow a second set of
+  RAM / DISK / TRASH / DRIVE controls — the four mode buttons that
+  already live in the toolbar are rebound into the rail, same widgets,
+  same `on_click`, same hit-test, only their bounds move. REFRESH /
+  SORT stay in the toolbar. The rail's DEVICES section reports the
+  mounted FAT32 volume's own BPB label and size; nothing is listed that
+  the kernel cannot name.
+- **Task Manager Performance** gets a resource rail: an aggregate CPU
+  tile plus one tile per logical CPU, from
+  `duetos::diag::TelemetryCpuUsageSample`. The telemetry window is
+  caller-owned by contract, so the app keeps its own — a shell `top`
+  polling at a different cadence cannot consume the delta and leave
+  both readings wrong. The first sample against a fresh window reports
+  `valid == false`; the rail then shows the core rows with no figure
+  rather than a fabricated 0 %.
 
 ## Event Model
 
@@ -261,6 +347,13 @@ overlay, leave it raw; if it's chrome, migrate it.**
 - **Per-app window shots not headless-verified.** `qmp.sh` can't open
   Calculator / Notes headlessly, so per-app visual verification is
   deferred to VBox (see Acceptance + Verification).
+- **The Task Manager Performance rail has never been photographed.**
+  The demo-windows profile opens Task Manager on the Processes tab and
+  the headless QMP harness could not be driven onto the Performance tab
+  (the demo-windows boot never reached the harness's
+  `bringup-complete` gate inside its window), so the per-core tiles are
+  compile- and boot-verified only. Confirm on VBox or by opening the
+  tab interactively before treating the layout as proven.
 
 ## Related Pages
 
