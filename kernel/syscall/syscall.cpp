@@ -1174,16 +1174,109 @@ void SyscallDispatch(arch::TrapFrame* frame)
 
     case SYS_WIN32_MISS_LOG:
     {
-        KBP_PROBE_V(::duetos::debug::ProbeId::kWin32StubMiss, frame->rdi);
-
-        // rdi = IAT slot VA that the miss-logger trampoline
-        // decoded from its caller's `call [rip+disp32]`.
-        // Search CurrentProcess()->win32_iat_misses; if found,
-        // emit a [win32-miss] line with the function name.
-        const u64 slot_va = frame->rdi;
+        // rdi = the miss-logger trampoline's own RETURN ADDRESS,
+        // i.e. the byte just past the call that reached it. The
+        // decode from there back to an IAT slot VA lives here
+        // rather than in the trampoline's hand-assembled bytes,
+        // because this side can read the call site through the
+        // checked user-copy path and can report WHY a decode
+        // failed instead of inventing an address.
+        //
+        // Two call shapes reach an IAT-bound import; MSVC emits
+        // both, and which one you get depends on optimisation
+        // settings, not on anything the loader controls:
+        //
+        //   FF 15 <disp32>   call qword [rip+disp32]
+        //                    Direct indirect call through the IAT.
+        //                    slot = ret_addr + disp32.
+        //
+        //   E8 <rel32>       call rel32 -> 6-byte import thunk
+        //                    whose body is `FF 25 <rel32_2>`
+        //                    (jmp qword [rip+rel32_2]).
+        //                    thunk = ret_addr + rel32
+        //                    slot  = thunk + 6 + rel32_2
+        //
+        // The old decoder implemented only the second shape and
+        // gated it on one byte (`[ret-5] == 0xE8`). A release-built
+        // engine DLL that uses the first shape lands on a `disp32`
+        // byte that is 0xE8 once every 256 imports, and the decoder
+        // then "succeeded" with garbage. Every step below is
+        // validated, and a shape we do not recognise is REPORTED as
+        // unrecognised — a miss you cannot name is expensive, but a
+        // miss named wrongly is worse.
+        const u64 ret_addr = frame->rdi;
         Process* proc = CurrentProcess();
+
+        u64 slot_va = 0;
+        // Why the decode failed, when it did. Kept as a string so
+        // the log line is self-explaining without a decoder ring.
+        const char* undecoded = nullptr;
+
+        // Read the 6 bytes ending at the return address. That
+        // window covers both `FF 15 disp32` and `E8 rel32` (the
+        // latter occupies the last 5 of the 6).
+        u8 site[6] = {};
+        if (ret_addr < 6)
+        {
+            undecoded = "call site below address zero";
+        }
+        else if (!mm::CopyFromUser(site, reinterpret_cast<const void*>(ret_addr - 6), sizeof(site)))
+        {
+            undecoded = "call site unreadable";
+        }
+        else if (site[0] == 0xFF && site[1] == 0x15)
+        {
+            // call qword [rip+disp32]
+            const i32 disp = static_cast<i32>(static_cast<u32>(site[2]) | (static_cast<u32>(site[3]) << 8) |
+                                              (static_cast<u32>(site[4]) << 16) | (static_cast<u32>(site[5]) << 24));
+            slot_va = ret_addr + static_cast<u64>(static_cast<i64>(disp));
+        }
+        else if (site[1] == 0xE8)
+        {
+            // call rel32 — target should be a 6-byte import thunk.
+            const i32 rel = static_cast<i32>(static_cast<u32>(site[2]) | (static_cast<u32>(site[3]) << 8) |
+                                             (static_cast<u32>(site[4]) << 16) | (static_cast<u32>(site[5]) << 24));
+            const u64 thunk_va = ret_addr + static_cast<u64>(static_cast<i64>(rel));
+            u8 thunk[6] = {};
+            if (!mm::CopyFromUser(thunk, reinterpret_cast<const void*>(thunk_va), sizeof(thunk)))
+            {
+                undecoded = "call rel32 target unreadable";
+            }
+            else if (thunk[0] != 0xFF || thunk[1] != 0x25)
+            {
+                // The 0xE8 was a coincidence, or the callee is a
+                // real function rather than an import thunk. Either
+                // way there is no IAT slot behind it.
+                undecoded = "call rel32 target is not an FF25 import thunk";
+            }
+            else
+            {
+                const i32 rel2 =
+                    static_cast<i32>(static_cast<u32>(thunk[2]) | (static_cast<u32>(thunk[3]) << 8) |
+                                     (static_cast<u32>(thunk[4]) << 16) | (static_cast<u32>(thunk[5]) << 24));
+                slot_va = thunk_va + 6u + static_cast<u64>(static_cast<i64>(rel2));
+            }
+        }
+        else
+        {
+            // `call rax`, `call [reg+disp]`, vtable dispatch, a
+            // tail-`jmp` into the stub, ...
+            undecoded = "no recognised direct-call shape at call site";
+        }
+
+        // An IAT slot is a pointer-sized entry in a pointer-aligned
+        // table. A decode that lands off-alignment did not find one,
+        // whatever the opcodes said.
+        if (undecoded == nullptr && (slot_va & 7u) != 0)
+        {
+            undecoded = "decoded slot is not 8-byte aligned";
+            slot_va = 0;
+        }
+
+        KBP_PROBE_V(::duetos::debug::ProbeId::kWin32StubMiss, slot_va != 0 ? slot_va : ret_addr);
+
         const char* name = nullptr;
-        if (proc != nullptr)
+        if (proc != nullptr && slot_va != 0)
         {
             for (u64 i = 0; i < proc->win32_iat_miss_count; ++i)
             {
@@ -1197,11 +1290,36 @@ void SyscallDispatch(arch::TrapFrame* frame)
                 }
             }
         }
-        arch::SerialWrite("[win32-miss] slot=");
+
+        // Attribute the call site to a module so the line says WHO
+        // called, not just WHAT. `ProcessFindModuleBaseByVa` already
+        // owns the EXE + DLL range map used by the SEH frame walk.
+        const u64 caller_base = (proc != nullptr) ? ProcessFindModuleBaseByVa(proc, ret_addr) : 0;
+
+        arch::SerialWrite("[win32-miss] fn=\"");
+        arch::SerialWrite(name != nullptr ? name : "<unnamed>");
+        arch::SerialWrite("\" slot=");
         arch::SerialWriteHex(slot_va);
-        arch::SerialWrite(" called fn=\"");
-        arch::SerialWrite(name ? name : "<unmapped>");
-        arch::SerialWrite("\"\n");
+        arch::SerialWrite(" called-from=");
+        arch::SerialWriteHex(ret_addr);
+        arch::SerialWrite(" in-module=");
+        arch::SerialWriteHex(caller_base);
+        if (undecoded != nullptr)
+        {
+            arch::SerialWrite(" undecoded=\"");
+            arch::SerialWrite(undecoded);
+            arch::SerialWrite("\"");
+        }
+        else if (name == nullptr)
+        {
+            // Decoded cleanly but the slot is in no staged-miss row.
+            // The usual cause is that the slot belongs to a DLL whose
+            // imports were staged under a different PeLoad, or that
+            // the staging buffer overflowed — both are real, and both
+            // are invisible if this collapses into "<unmapped>".
+            arch::SerialWrite(" note=\"slot decoded but absent from this process's staged-miss table\"");
+        }
+        arch::SerialWrite("\n");
         // Trampoline zeroes rax itself; set here too for
         // clarity (we overwrite rax anyway via the syscall
         // return value mechanism).
@@ -4414,9 +4532,49 @@ void SyscallDispatch(arch::TrapFrame* frame)
                     return;
                 }
             }
-            arch::SerialWrite("[dll-load] miss path=\"");
-            arch::SerialWrite(kpath);
-            arch::SerialWrite("\"\n");
+            // An api-set contract that reached here is a DIFFERENT
+            // failure from a missing file, and saying "miss path=..."
+            // for it invites exactly the wrong fix. `api-ms-win-*`
+            // and `ext-ms-win-*` names never exist on disk on Windows
+            // either; the loader is supposed to rewrite them to a host
+            // DLL, and the table above does that for every contract we
+            // actually have a host for. Reaching this point means we
+            // ship no implementation behind that contract.
+            //
+            // Returning 0 here is CORRECT, not a shortfall. A caller
+            // probing a contract with LoadLibrary + GetProcAddress is
+            // required to handle NULL — that is how the same binary
+            // runs on a Windows build that predates the contract. A
+            // real BattleBit.exe boot exercises exactly this: the MSVC
+            // UCRT's exit path probes
+            // `api-ms-win-appmodel-runtime-l1-1-2` for
+            // `AppPolicyGetProcessTerminationMethod`, takes the NULL
+            // branch, and calls plain `ExitProcess` — the documented
+            // non-packaged-app path. Mapping such a contract onto a
+            // host DLL that does not export its functions would turn
+            // this clean, correct refusal into a confusing
+            // "function missing from a DLL that claims to exist".
+            const bool is_contract =
+                (kname[0] == 'a' && kname[1] == 'p' && kname[2] == 'i' && kname[3] == '-' && kname[4] == 'm' &&
+                 kname[5] == 's' && kname[6] == '-') ||
+                (kname[0] == 'e' && kname[1] == 'x' && kname[2] == 't' && kname[3] == '-' && kname[4] == 'm' &&
+                 kname[5] == 's' && kname[6] == '-');
+            if (is_contract)
+            {
+                // GAP: no host implemented behind this contract — the
+                // caller gets NULL, which is a legal Windows answer.
+                // Revisit only when a PE is observed to REQUIRE the
+                // contract's functions rather than probe for them.
+                arch::SerialWrite("[dll-load] api-set contract has no host (returning NULL, as Windows does) name=\"");
+                arch::SerialWrite(kname);
+                arch::SerialWrite("\"\n");
+            }
+            else
+            {
+                arch::SerialWrite("[dll-load] miss path=\"");
+                arch::SerialWrite(kpath);
+                arch::SerialWrite("\"\n");
+            }
             frame->rax = 0;
             return;
         }
