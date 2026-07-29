@@ -72,12 +72,11 @@ int main()
         EXPECT_TRUE(Luma(p.ink_2) < Luma(p.ink_3));
     }
 
-    // ----- surface ordering: recess < body < wash < hover (dark) -----
+    // ----- surface ordering: recess < body < wash < line (dark) -----
     {
         const AppPalette p = AppPaletteMake(kDarkBody, kTeal, kAmber, /*aurora=*/true);
         EXPECT_TRUE(Luma(p.recess) < Luma(p.body));
         EXPECT_TRUE(Luma(p.wash) > Luma(p.body));
-        EXPECT_TRUE(Luma(p.hover) > Luma(p.wash));
         EXPECT_TRUE(Luma(p.line) > Luma(p.wash));
         // A zebra row that equals the body is a zebra row nobody sees.
         EXPECT_TRUE(p.wash != p.body);
@@ -89,7 +88,7 @@ int main()
         const AppPalette p = AppPaletteMake(kLightBody, kTeal, kAmber, /*aurora=*/true);
         EXPECT_TRUE(Luma(p.recess) < Luma(p.body));
         EXPECT_TRUE(Luma(p.wash) < Luma(p.body));
-        EXPECT_TRUE(Luma(p.hover) < Luma(p.wash));
+        EXPECT_TRUE(Luma(p.line) < Luma(p.wash));
     }
 
     // ----- selection tint leans toward the accent, not past it -----

@@ -1,4 +1,5 @@
 #include "drivers/video/app_widgets/app_button.h"
+#include "drivers/video/app_widgets/app_palette.h"
 #include "drivers/video/blend_math.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/shadow.h"
@@ -12,7 +13,6 @@ void AppButton::PaintSelf(Compose& /*c*/) const
     if (bounds.w == 0 || bounds.h == 0)
         return;
     const auto& theme = ThemeCurrent();
-    const u32 base_bg = (bg_rgb == 0) ? theme.role_title[0] : bg_rgb;
 
     // Aurora keys are quiet: a rounded flat fill, no 1-px hard border,
     // no per-key drop shadow. The old paint stamped all three on every
@@ -21,6 +21,18 @@ void AppButton::PaintSelf(Compose& /*c*/) const
     // Flat palettes keep the historical square-bordered-and-shadowed
     // key verbatim.
     const bool aurora = theme.aurora_wallpaper;
+
+    // `bg_rgb == 0` is the documented "use the theme default" sentinel.
+    // Under the flat palettes that default is the saturated role-title
+    // hue with a dark label; under Aurora it is a `--recess` chip with
+    // muted ink, which is what every app toolbar in the reference
+    // wears. Resolving it HERE rather than per app is what stops the
+    // nine toolbars that never opted in (Notepad, About, Help, Device
+    // Manager, …) from staying bright teal.
+    const bool use_default = (bg_rgb == 0);
+    const auto pal = AppPaletteFor(theme.role_client[0]);
+    const u32 base_bg = use_default ? (aurora ? pal.recess : theme.role_title[0]) : bg_rgb;
+    const u32 label_fg = (aurora && use_default) ? pal.ink_2 : fg_rgb;
 
     u32 bg = base_bg;
     if (HasFlag(state.flags, WidgetStateFlags::Pressed))
@@ -59,7 +71,7 @@ void AppButton::PaintSelf(Compose& /*c*/) const
         const u32 lh = ChromeTextRoleHeight(ChromeTextRole::Body);
         const u32 tx = bounds.x + (bounds.w > lw ? (bounds.w - lw) / 2 : 0);
         const u32 ty = bounds.y + (bounds.h > lh ? (bounds.h - lh) / 2 : 0);
-        ChromeTextDraw(ChromeTextRole::Body, tx, ty, label, fg_rgb, bg, weight);
+        ChromeTextDraw(ChromeTextRole::Body, tx, ty, label, label_fg, bg, weight);
     }
 }
 

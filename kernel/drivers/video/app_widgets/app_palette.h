@@ -19,8 +19,8 @@
  *      opts out of the glass vocabulary (Classic / Slate10 / Amber /
  *      DuetClassic / HighContrast). Those themes must keep the exact
  *      look they had before this file existed, so an app that restyles
- *      picks `aurora ? pal.<token> : <its historical literal>` — see
- *      `AppPick`. The `ThemeSelfTest` Aurora invariants already pin the
+ *      picks `aurora ? pal.<token> : <its historical literal>`.
+ *      The `ThemeSelfTest` Aurora invariants already pin the
  *      flat-theme opt-out; this API rides that same gate rather than
  *      re-deriving a theme whitelist (which would rot the next time a
  *      palette is added).
@@ -59,7 +59,6 @@ struct AppPalette
 
     u32 recess; // sunken content pane        (--recess)
     u32 wash;   // zebra row / raised control (--glass-3)
-    u32 hover;  // pointer hover wash         (--hover)
     u32 line;   // hairline rule              (--line)
     u32 sel;    // selected row fill          (accent 14 %)
 
@@ -115,11 +114,9 @@ constexpr AppPalette AppPaletteMake(u32 body, u32 accent, u32 accent_peer, bool 
     p.ink_2 = light ? kAppInk2Light : kAppInk2Dark;
     p.ink_3 = light ? kAppInk3Light : kAppInk3Dark;
     p.recess = BlendOver(p.body, recess_tint, recess_alpha);
-    p.wash = BlendOver(p.body, overlay, 15U);   // --glass-3 .06
-    p.hover = BlendOver(p.body, overlay, 31U);  // --hover .07, lifted so it
-                                                //   still separates from wash
-    p.line = BlendOver(p.body, overlay, 26U);   // --line .10
-    p.sel = BlendOver(p.body, accent, 36U);     // accent 14 %
+    p.wash = BlendOver(p.body, overlay, 15U); // --glass-3 .06
+    p.line = BlendOver(p.body, overlay, 26U); // --line .10
+    p.sel = BlendOver(p.body, accent, 36U);   // accent 14 %
     p.accent = accent & 0x00FFFFFFU;
     p.accent_peer = (accent_peer == 0) ? (accent & 0x00FFFFFFU) : (accent_peer & 0x00FFFFFFU);
     p.danger = kAppDanger;
@@ -129,30 +126,6 @@ constexpr AppPalette AppPaletteMake(u32 body, u32 accent, u32 accent_peer, bool 
 /// Live palette for an app whose client area is filled with `body`.
 /// Samples the active theme's accent pair and Aurora opt-in.
 AppPalette AppPaletteFor(u32 body_rgb);
-
-/// Pick between an Aurora token and the app's historical literal.
-/// Keeps the flat palettes bit-identical to what they painted before
-/// the restyle without every call site spelling out the branch.
-inline u32 AppPick(const AppPalette& p, u32 aurora_rgb, u32 flat_rgb)
-{
-    return p.aurora ? aurora_rgb : flat_rgb;
-}
-
-/// Paint a badge pill: a rounded `tint`-washed capsule with `text`
-/// centred in `tint` itself. This is the design's ABI badge (Files'
-/// `WIN32 PE` / `NATIVE`, Task Manager's ABI + impact columns) and the
-/// only widget shape both list apps needed, so it lives here rather
-/// than being copy-pasted per app. Uses the 8x8 bitmap font: the
-/// design sets these labels in 9.5 px uppercase mono, which is what
-/// the ROM font already is.
-///
-/// No-ops when `w` or `h` is 0. Caller holds the compositor lock.
-void AppPillDraw(u32 x, u32 y, u32 w, u32 h, const char* text, u32 tint, u32 body_rgb);
-
-/// Width `AppPillDraw` needs for `text` — label width plus the
-/// design's symmetric padding. Lets a caller right-align a column of
-/// pills without duplicating the padding constant.
-u32 AppPillWidth(const char* text);
 
 /// Paint an app's bottom status strip: a `wash` band with a 1 px
 /// `line` hairline along its top edge. Files, Task Manager and the
