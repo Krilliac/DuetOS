@@ -5089,6 +5089,22 @@ void EmitTask(const Task* t, SchedEnumCb cb, void* cookie, bool is_running)
     info.priority = static_cast<u8>(t->priority);
     info.is_running = is_running;
     info.has_process = (t->process != nullptr);
+    // ABI flavour of the owning image, read off the Process rather
+    // than guessed from the name. `pe_image_base` is recorded by
+    // SpawnPeFile after PeLoad and is zero for every non-PE process,
+    // so it is the authoritative "this is a Win32 PE" bit; the Linux
+    // dispatcher is selected by `abi_flavor`. Kernel-only tasks stay
+    // kTaskAbiNone — a UI must render nothing for those, not a guess.
+    info.abi = kTaskAbiNone;
+    if (t->process != nullptr)
+    {
+        if (t->process->pe_image_base != 0)
+            info.abi = kTaskAbiWin32Pe;
+        else if (t->process->abi_flavor == core::kAbiLinux)
+            info.abi = kTaskAbiLinux;
+        else
+            info.abi = kTaskAbiNative;
+    }
     for (u32 i = 0; i < sizeof(info._pad); ++i)
         info._pad[i] = 0;
     // Snapshot the owning AS's mapped user-page count. Safe here

@@ -28,6 +28,7 @@
 #include "drivers/video/app_widgets/app_label.h"
 #include "drivers/video/app_widgets/app_list_row.h"
 #include "drivers/video/app_widgets/app_panel.h"
+#include "drivers/video/app_widgets/app_text.h"
 #include "drivers/video/app_widgets/widget.h"
 
 namespace duetos::drivers::video::app_widgets
@@ -125,6 +126,21 @@ void AppWidgetsSelfTest()
     if (HasFlag(lab.state.flags, WidgetStateFlags::Hover) || HasFlag(pan.state.flags, WidgetStateFlags::Hover))
     {
         mark_fail(0xD0, "[app-widgets-selftest] FAIL default state not None");
+        return;
+    }
+
+    // Content-type helpers ride this same umbrella rather than
+    // claiming a second boot_bringup hook: app_text.cpp is part of the
+    // app-widget set, and its invariants (Fit never overruns its
+    // column budget, RowY keeps the line box inside the band) are what
+    // every measured column table in Files / Task Manager depends on.
+    // AppTextSelfTest emits its own greppable
+    // `[app-text-selftest] PASS|FAIL` line; the aggregate flag below
+    // is what the Pass D umbrella reads.
+    AppTextSelfTest();
+    if (!AppTextSelfTestPassed())
+    {
+        mark_fail(0xD7, "[app-widgets-selftest] FAIL app-text invariants");
         return;
     }
 
