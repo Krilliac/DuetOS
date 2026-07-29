@@ -44,6 +44,60 @@ if [[ ! -f "${ISO_IMAGE}" ]]; then
     exit 1
 fi
 
+# DUETOS_EXTRA_CMDLINE — build a sidecar ISO whose grub.cfg appends the
+# given string to the multiboot2 cmdline, mirroring run.sh.
+#
+# This script does NOT route through run.sh; it builds its own QEMU
+# invocation. Before this block it therefore booted the canonical ISO
+# unconditionally and IGNORED DUETOS_EXTRA_CMDLINE without a word. The
+# failure was silent and expensive: every capture came up in the default
+# Classic theme no matter what was requested, so "does the Aurora
+# implementation match the design?" was answered by comparing the design
+# against a *different theme* -- and kept coming back "it didn't take".
+# A screenshot tool that quietly ignores the flag selecting what to
+# screenshot is worse than one that has no flag at all.
+EXTRA_CMDLINE="${DUETOS_EXTRA_CMDLINE:-}"
+if [[ -n "${EXTRA_CMDLINE}" ]]; then
+    if ! command -v grub-mkrescue >/dev/null 2>&1; then
+        echo "error: DUETOS_EXTRA_CMDLINE requires grub-mkrescue" >&2
+        exit 1
+    fi
+    KERNEL_ELF="${BUILD_DIR}/kernel/duetos-kernel.elf"
+    if [[ ! -f "${KERNEL_ELF}" ]]; then
+        echo "error: kernel ELF not built: ${KERNEL_ELF}" >&2
+        exit 1
+    fi
+    EXTRA_TAG="$(printf '%s' "${EXTRA_CMDLINE}" | tr -c 'a-zA-Z0-9' '_' | cut -c1-32)"
+    EXTRA_STAGE="${BUILD_DIR}/shot-iso-stage-${EXTRA_TAG}"
+    EXTRA_ISO="${BUILD_DIR}/duetos-shot-${EXTRA_TAG}.iso"
+    rm -rf "${EXTRA_STAGE}"
+    mkdir -p "${EXTRA_STAGE}/boot/grub"
+    cp "${KERNEL_ELF}" "${EXTRA_STAGE}/boot/duetos-kernel.elf"
+    # The gfxpayload/vbe lines mirror boot/grub/grub.cfg. Without them
+    # GRUB skips the video-mode set, no framebuffer tag reaches the
+    # kernel, and the compositor never paints -- which for a screenshot
+    # tool means a blank capture rather than an obvious error.
+    cat > "${EXTRA_STAGE}/boot/grub/grub.cfg" <<EOF
+set timeout=0
+set default=0
+insmod all_video
+insmod vbe
+insmod gfxterm
+set gfxmode=1024x768x32
+set gfxpayload=keep
+menuentry "DuetOS (screenshot: ${EXTRA_CMDLINE})" {
+    multiboot2 /boot/duetos-kernel.elf ${EXTRA_CMDLINE}
+    boot
+}
+EOF
+    if ! grub-mkrescue -o "${EXTRA_ISO}" "${EXTRA_STAGE}" >/dev/null 2>&1; then
+        echo "error: grub-mkrescue failed building ${EXTRA_ISO}" >&2
+        exit 1
+    fi
+    ISO_IMAGE="${EXTRA_ISO}"
+    echo "screenshot: cmdline='${EXTRA_CMDLINE}' iso=${ISO_IMAGE}"
+fi
+
 # Fresh scratch disks every invocation for determinism (same pattern
 # the main run.sh uses).
 NVME_IMAGE="${BUILD_DIR}/nvme0.img"

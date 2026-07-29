@@ -900,6 +900,30 @@ choice, not a one-liner:
 
 ## End-user features
 
+### DECISION: should `theme=duet` become the boot default?
+
+The Aurora redesign is implemented across the `Duet*` theme family
+(`duet`, `duetlight`, `duetblue`, `duetviolet`, `duetgreen`,
+`duetclassic`) but is **not the boot default**. `kernel/core/boot_bringup.cpp`
+selects a theme from the kernel cmdline (`theme=classic|slate10|amber|duet`)
+and otherwise leaves the Classic teal palette the first GUI slice shipped.
+Aurora is reachable at runtime via Ctrl+Alt+Y or Settings.
+
+Consequence, and why this is filed rather than fixed: a default-configuration
+screenshot shows **Classic**, so any "does the implementation match the
+design?" comparison run without `theme=duet` is not merely inconclusive, it
+is misleading — it compares the new design against a different theme
+entirely. At least one such comparison was made during the 2026-07-28/29
+session before this was noticed.
+
+**Open question for the project owner:** the redesign was commissioned as
+*the* look, which argues for making `duet` the default. Against: the change
+touches every default-configuration screenshot in the wiki, and any test
+that asserts on chrome geometry or colour would need re-baselining. Until
+this is decided, visual-fidelity work must be verified with
+`DUETOS_EXTRA_CMDLINE="theme=duet"`.
+
+
 ### Run a real 32-bit application — PE32 game executable (failure ladder)
 
 The standing target for the "run real Windows apps" pillar is a
