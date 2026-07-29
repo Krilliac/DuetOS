@@ -82,13 +82,16 @@ struct TelemetryCpuInfo
     u32 core_count; // rows populated in `cores`
 
     // --- frequency ---
-    // GAP: `current_mhz` comes from arch::CpuFreqRead and is only
-    // populated on a real machine with a recognised vendor — it is
-    // suppressed under a hypervisor, where the MSRs either #GP or
-    // report the host's ratios rather than the guest's. Under QEMU
-    // `freq_valid` is false, which is the honest answer.
+    // From arch::CpuFreqRead, which PROBES each frequency MSR through
+    // the fault-recoverable read rather than predicting availability
+    // from the vendor string. `freq_valid` means "at least one figure
+    // came back"; the two per-field flags say which. A platform that
+    // exposes neither reports every flag false, which is the honest
+    // answer and is a different fact from 0 MHz.
     u32 current_mhz;
+    bool current_mhz_valid;
     u32 base_mhz;
+    bool base_mhz_valid;
     bool freq_valid;
 
     TelemetryCpuCore cores[kTelemetryMaxCpus];
