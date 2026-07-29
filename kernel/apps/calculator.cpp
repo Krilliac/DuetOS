@@ -63,8 +63,8 @@ constexpr const char* kButtonLabels[kIdCount] = {
 constexpr u32 kExprY = 6;
 constexpr u32 kExprH = 12;
 constexpr u32 kReadoutY = 22;
-constexpr u32 kReadoutScale = 3; // 8x8 ROM font x3 = 24 px tabular
-constexpr u32 kRadixY = 56;
+constexpr u32 kReadoutScale = 4; // 8x8 ROM font x4 = 32 px tabular
+constexpr u32 kRadixY = 62;
 
 constexpr u32 kGridTopOffset = 100;
 constexpr u32 kGridLeftOffset = 8;
