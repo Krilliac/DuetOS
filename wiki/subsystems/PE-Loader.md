@@ -21,6 +21,81 @@ resolution, binary-search EAT lookup.
   binary-search export lookup
 - `kernel/loader/dll_loader.cpp` — DLL load + per-process DLL table
   (IAT walker + forwarder chase live in this TU and `pe_loader.cpp`)
+- `kernel/loader/sxs_dll.cpp` — side-by-side DLL loading (DLLs read off
+  a volume rather than embedded in the kernel image)
+
+## Where a DLL Can Come From
+
+Four sources, consulted in this order by `SpawnPeFile` before `PeLoad`
+walks the IAT. Every one of them ends up in the SAME `preloaded_dlls`
+array, so the import binder has one code path regardless of origin.
+
+| Source | Trust | Gated? | Selection |
+|---|---|---|---|
+| Preload table (`spawn.cpp`) | kernel image | no — part of the TCB | fixed ~44-entry list |
+| ramfs `/lib/*.dll` | kernel image | no — part of the TCB | every `*.dll` in the directory |
+| FAT32 `/LIB/*.dll` on volume 0 | operator-curated disk | **yes** | every `*.dll` in the directory |
+| The image's OWN directory | guest-writable disk | **yes** | driven by the import table |
+
+The last row is **side-by-side loading** — how essentially all real
+software ships. `SpawnPeFile` takes an on-disk origin (volume + path),
+derives the directory once, and records it on the `Process`
+(`sxs_volume` / `sxs_dir`). Both the load-time import binder and the
+runtime `SYS_DLL_LOAD_FROM_PATH` (`LoadLibraryW`) read that one field,
+so there is a single search path per process rather than a bind-time
+and a run-time answer that can disagree.
+
+Resolution is **import-name driven**, not speculative: only DLLs the
+image (or one of its dependencies) actually names are read, so pointing
+the loader at a game folder does not drag the folder in. It is also
+recursive — a side-by-side DLL's own side-by-side dependencies resolve
+— under two hard bounds:
+
+- `kSxsMaxDepth = 4` — the .exe is depth 0.
+- `kSxsMaxLoads = 16` per spawn, independent of depth, so a *wide*
+  hostile import table is bounded as well as a deep one.
+
+Cycles terminate for free: a name already present in the resolution set
+is never read again, and the set is checked before every disk access.
+
+### Security contract
+
+A DLL read off a FAT32 volume is guest-writable and executes inside the
+process's address space with the process's authority — the same
+exposure a disk-sourced `.exe` has. Both disk sources therefore pass
+`security::Gate` with `ImageKind::WindowsPE`, exactly as `PeLoad` gates
+the `.exe`. Blobs compiled into the kernel image and files under the
+trusted ramfs root are part of the TCB and are deliberately not
+re-gated (44 guard scans per spawn would be pure cost).
+
+This is observable. Booting `BattleBit.exe` with its real
+`UnityPlayer.dll` staged beside it, with the autonomic engine having
+escalated the guard to Enforce, produces:
+
+```
+[guard] WARN kind=pe name="/UNITYPLA.DLL" findings=0x1
+[guard]   - PE_SUSPICIOUS: 2+ injection-family APIs
+[guard] prompt timeout: default-deny
+[sxs] security guard blocked path="/UNITYPLA.DLL"
+```
+
+Everything else fails closed too: the advertised file size is bounded
+before any allocation, a short read is refused rather than handed to the
+PE parser, the never-freed byte cache has both a slot count
+(`kCacheSlots = 16`) and a total budget (`kSxsCacheBudgetBytes = 40 MiB`),
+and a path join that would truncate declines the load instead.
+
+API-set contract names (`api-ms-win-*` / `ext-ms-win-*`) are never taken
+to disk. No filesystem, here or on Windows, has a file by those names.
+
+### Short-name fallback
+
+`tools/qemu/make-gpt-image.py` writes 8.3 short names only, so an import
+naming `UnityPlayer.dll` will not match a directory entry literally. The
+resolver retries against the truncated uppercase form
+(`UNITYPLA.DLL`). **GAP**: no `~1` tilde disambiguation — that needs
+on-demand directory enumeration to count collisions, which the FAT32
+layer does not expose yet.
 
 ## Load Sequence
 
@@ -55,7 +130,9 @@ resolution, binary-search EAT lookup.
    - **If the export is a forwarder** (`Dll.Func` or `Dll.#N`),
      recurse through the per-process DLL table. Bounded depth.
    - Patch the IAT slot with the absolute VA of the resolved entry.
-8. **Bootstrap heap + main thread**.
+8. **Bootstrap heap + main thread**. The main thread's stack is a
+   demand-grown reservation sized from the Optional Header — see
+   [Ring-3 Stacks](#ring-3-stacks).
 9. **Entry**: schedule first user task at
    `ImageBase + AddressOfEntryPoint`.
 
@@ -91,21 +168,170 @@ with `// STUB:` or `// GAP:`. See
 [Logging and Tracing](../kernel/Logging-And-Tracing.md) for the
 convention.
 
+## Naming an Unresolved Import at Call Time
+
+An import the loader cannot resolve is bound to the shared miss-logger
+thunk in the Win32 stubs page: called as a function it returns 0, and
+emits one line naming what was called and from where.
+
+```
+[win32-miss] fn="UnityMain" slot=0x140edb210 called-from=0x140ed11f2 in-module=0x140ed0000
+```
+
+The thunk itself does nothing but pass its own return address to
+`SYS_WIN32_MISS_LOG`. **The decode from that return address back to an
+IAT slot lives in the kernel**, not in the stub page's hand-assembled
+bytes, so it can read the call site through `mm::CopyFromUser`, validate
+each step, and report a failure instead of guessing. Recognised shapes:
+
+| Call site (ends at return address) | IAT slot |
+|---|---|
+| `[48] FF 15 disp32` — `call qword [rip+disp32]` | `ret + disp32` |
+| `E8 rel32` — `call rel32` into a jump thunk | decode the thunk (below) |
+
+| Import thunk | IAT slot |
+|---|---|
+| `48 FF 25 rel32` (7 bytes — what real MSVC output uses) | `thunk + 7 + rel32` |
+| `FF 25 rel32` (6 bytes) | `thunk + 6 + rel32` |
+
+A decoded slot must be 8-byte aligned or it is discarded — an
+unaligned result is not an IAT slot whatever the opcodes said.
+
+When no shape matches, the line carries `undecoded="<reason>"` and
+**no** slot address. That is deliberate: some shapes are genuinely
+unrecoverable from a return address alone (a tail `jmp` through the
+IAT leaves the caller's caller's return address on the stack;
+`call rax` leaves no displacement to read). Reporting them as
+unrecoverable is worth more than a plausible wrong address — a wrong
+one previously sent an investigation to an unrelated subsystem. See
+Design-Decisions, "an unresolved-import miss is decoded in the kernel,
+and never guessed".
+
+A decoded slot that is absent from the process's staged-miss table is
+also called out explicitly rather than collapsing into `<unmapped>`;
+the usual cause is a slot belonging to a DLL whose imports were staged
+under a different `PeLoad`, or a staging buffer that overflowed
+(`Process::kWin32IatMissCap`, 128).
+
+## API-Set Contracts
+
+`api-ms-win-*` and `ext-ms-win-*` names are contracts, not files — no
+such DLL exists on Windows either. `kernel/loader/apiset_static.cpp`
+rewrites them to the host DLL that really exports the functions, on
+both the import-binding path and the runtime `LoadLibrary` path.
+
+A contract that is **not** in the table returns NULL, and says so:
+
+```
+[dll-load] api-set contract has no host (returning NULL, as Windows does) name="api-ms-win-appmodel-runtime-l1-1-2"
+```
+
+That is the correct answer rather than a shortfall — callers probe
+contracts precisely so they can run on Windows builds that predate
+them. A contract is added to the table only when we ship a host that
+actually exports its functions; see Design-Decisions, "an api-set
+contract with no host returns NULL, not a fabricated mapping".
+
+## Ring-3 Stacks
+
+The main thread's ring-3 stack is a **demand-grown reservation**, laid
+out and clamped by `core::UserStackPlan`
+(`kernel/proc/user_stack.h`) from the image's own Optional Header:
+
+| Field | Source | Clamp |
+|-------|--------|-------|
+| reservation size | `SizeOfStackReserve` (offset 72; u32 for PE32, u64 for PE32+) | `[64 KiB, 4 MiB]` |
+| initial commit | `SizeOfStackCommit` (offset 76 / 80) | `[2, 16]` pages |
+
+The layout grows downward from `core::kUserStackTopVa` (0x7FFE0000,
+immediately below `KUSER_SHARED_DATA`):
+
+```
+guard_lo        reserve_lo         commit_lo            top
+   |                 |                  |                |
+   [  guard region ][ reserved, uncommitted ][ committed ]
+    4 pages, fatal    grows a page per #PF     mapped at load
+```
+
+`PeLoad` commits only `[commit_lo, top)`. Everything below is address
+space until the thread touches it. The ring-3 `#PF` path in
+`kernel/arch/x86_64/traps.cpp` calls `core::UserStackServiceFault`
+BEFORE the `IsolateTask` policy and before Win32 SEH delivery, because
+a growable fault is not an error.
+
+**The growth condition is deliberately narrow.** All four must hold:
+
+1. the fault is not-present (a protection fault on a committed stack
+   page is a real error);
+2. `reserve_lo <= cr2 < commit_lo`;
+3. `commit_lo - cr2 <= 4096` — the fault names the page *immediately*
+   below the committed edge. A fault that skips uncommitted pages is a
+   wild pointer, not a stack probe;
+4. `reserve_lo <= rsp <= top` — the faulting thread is the one running
+   on this stack.
+
+Anything else falls through to the existing behaviour untouched. The
+tempting phrasing of (4) is "the access is below rsp", and it is
+**wrong**: only `push`/`call` fault below rsp; a prologue that has
+already done `sub rsp, N` writes at `[rsp + k]`, so cr2 is at or above
+rsp. Condition (4) as written is also what makes the whole path
+lock-free — every other thread runs on the thread-stack arena at
+0x68000000, far below `reserve_lo`, so no other thread can ever
+satisfy it and the main thread is the sole writer of `commit_lo`.
+
+**The guard region stays fatal.** A fault in `[guard_lo, reserve_lo)`
+returns `Guard`, never `Grow`: the kernel emits
+`[W] mm/ustack : *** RING-3 STACK OVERFLOW ***`, fires the
+`mm.user_stack_guard_hit` probe, and delivers `STATUS_STACK_OVERFLOW`
+(0xC00000FD) rather than a generic access violation. As Windows does,
+the guard region is committed *once* at that moment so the thread's
+`__except` handler has somewhere to run — it is a one-shot, the
+overflowing recursion still dies, and a second runaway walks below
+`guard_lo` into unmapped space and takes the ordinary task-kill. Four
+pages, because a single page ran out inside
+`KiUserExceptionDispatcher` and the second fault killed the thread
+before the exception could be reported.
+
+Exception delivery can itself be the thing that needs a page:
+`Win32DeliverException` writes the `EXCEPTION_RECORD` + `CONTEXT` onto
+the faulting thread's own user stack via `mm::CopyToUser`, which
+pre-checks accessibility and returns false rather than faulting. It
+therefore calls `core::UserStackCommitRange` first.
+
+Proofs: `tests/host/test_user_stack.cpp` (classifier, exhaustive),
+`userland/apps/stackgrow_smoke` (live growth past 512 KiB, battery row
+`ring3-stackgrow-smoke`), and `userland/apps/stackguard_smoke` (live
+guard hit; battery row `ring3-stackguard-smoke`, `expects_verdict =
+false` because it dies by design).
+
 ## Known Limits / GAPs
 
+- **Only the main thread's stack grows on demand.** Win32
+  `CreateThread` stacks still come off the fixed-size thread-stack
+  arena (`Process::thread_stack_cursor`, 0x68000000,
+  `Process::kV0ThreadStackPages` each) and overflow into the next
+  thread's slot with no guard region. The main-thread reservation is
+  demand-grown — see [Ring-3 Stacks](#ring-3-stacks) below.
+- **Side-by-side DLL bytes are never freed.** `DllImage` borrows its
+  `file` pointer and the parsed export table points into that buffer,
+  so the bytes must outlive every process that mapped them. The cache
+  is bounded rather than reclaimed; a refcounted unload path lands with
+  process-teardown DLL unmapping, which does not exist yet.
 - **No SEH unwinding by the loader**. SEH tables are mapped (so the
   `__C_specific_handler` finds them) but DuetOS does not unwind on
   exception — exceptions inside a PE produce a process kill.
-- **TLS image-level callbacks**: a non-empty `IMAGE_DIRECTORY_ENTRY_TLS`
-  callback array causes the PE load to fail with
-  `TlsCallbacksUnsupported` (`pe_loader.cpp:1805`). Empty callback
-  arrays — common because the MSVC CRT reserves the directory
-  unconditionally — are accepted. A future slice will inject a
-  per-process x64 thunk that walks the array with
-  `(rcx=image_base, rdx=DLL_PROCESS_ATTACH, r8=nullptr)` before
-  jumping to the real entry. Per-thread TLS init via the CRT works.
-- **No PE delay-load** (`__delayLoadHelper2`). Anything imported by
-  delay-load is treated as eager-import.
+- **TLS callbacks on DETACH**: `DLL_PROCESS_ATTACH` and
+  `DLL_THREAD_ATTACH` are both delivered (see
+  [TLS](#tls-static-data-and-callbacks) below), but neither
+  `DLL_THREAD_DETACH` nor `DLL_PROCESS_DETACH` is — thread and
+  process teardown do not walk the callback array. A CRT that frees
+  per-thread state in its detach callback leaks it.
+- **VC6-form delay-load descriptors** (`dlattrRva` clear, fields are
+  absolute VAs rather than RVAs) are skipped rather than bound. No
+  linker since VC7 emits that form.
+- **Delay-load unload** (`__FUnloadDelayLoadedDLL2`) is not supported;
+  the descriptor's `rvaHmod` slot is left at zero because eager
+  binding means the image's helper never populates it.
 - **Bound imports**: the `IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT` directory
   is silently ignored. Bound imports are an optimisation that
   embeds resolved addresses for a specific DLL build; safe to skip
@@ -154,3 +380,80 @@ evolution.
 - [Memory Management](../kernel/Memory-Management.md) — `AddressSpace`
 - [Process Model](../kernel/Process-Model.md)
 - [W^X / NX Enforcement](../security/WX-Enforcement.md)
+
+## TLS: static data and callbacks
+
+`IMAGE_DIRECTORY_ENTRY_TLS` (directory 9) is fully handled by
+`SetupStaticTls` in `kernel/loader/pe_loader.cpp`. Per process:
+
+1. The `.tls` template (`StartAddressOfRawData .. EndAddressOfRawData`)
+   plus `SizeOfZeroFill` zero bytes is copied into a fresh block at
+   `0x72000000`, capped at 64 pages.
+2. A slot-array page at `0x71000000` gets `slot[0]` = that block, and
+   `TEB.ThreadLocalStoragePointer` (`gs:[0x58]`) points at the array —
+   which is exactly what compiler-emitted `__declspec(thread)` access
+   dereferences.
+3. `AddressOfIndex` is written with 0 (single module). The VA is
+   bounds-checked against the image extent first, so a hostile TLS
+   directory cannot aim that four-byte write at the image's own R-X
+   `.text`, the TEB, or the proc-env page.
+4. If `AddressOfCallBacks` is a non-empty NULL-terminated array (capped
+   at 16 entries), an R-X page at `0x73000000` is filled with a
+   generated trampoline that calls each callback with the Win64 ABI
+   (`rcx=image_base, rdx=DLL_PROCESS_ATTACH, r8=0`) and then jumps to
+   the real entry point. `PeLoadResult::entry_va` becomes the
+   trampoline, so the callbacks run **in ring 3, in the target
+   process** — the kernel never calls a guest function pointer.
+
+`SYS_THREAD_CREATE` (`kernel/subsystems/win32/thread_syscall.cpp`)
+replicates the template per thread and generates the same shape of
+trampoline with `rdx=DLL_THREAD_ATTACH`.
+
+**Evidence:** `userland/apps/tls_pe/tls_pe.c`, spawned as
+`ring3-tls-pe` under the `pe-hello` smoke profile. It asserts the
+callback ran before the entry point, the template survived the copy,
+a worker thread got its own block, `DLL_THREAD_ATTACH` was delivered,
+and the two threads' blocks are independent — printing
+`[tls_pe] RESULT PASS`.
+
+## Delay-load imports
+
+`IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT` (directory 13) is bound
+**eagerly at load**, by `ResolveDelayImports` in
+`kernel/loader/pe_loader.cpp`. The descriptor walk itself lives in
+`kernel/loader/pe_delay_import.h` — a pure, allocation-free header so
+it can be driven from a hosted test and from the PE fuzzer.
+
+A delay-load call site is `call [__imp_Foo]` through a slot in the
+image's delay IAT, structurally identical to a static import. What
+differs is who fills the slot: normally the linker seeds it with the
+address of its own `__tailMerge` stub, and the first call goes through
+the image's statically-linked `__delayLoadHelper2`. DuetOS fills the
+slot first, through the **same** resolution ladder a static import
+uses (`BindImportSymbol`), so the helper never runs. See
+[Design-Decisions](../reference/Design-Decisions.md) for why eager
+binding was chosen over making the helper path work.
+
+Failure policy deliberately differs from the static path:
+
+| Condition | Static imports | Delay imports |
+|---|---|---|
+| Table / descriptor out of bounds, name unterminated, IAT slot outside the image | fail the load | fail the load |
+| Symbol unresolvable (fail-closed gate refused it) | fail the load | skip the slot, leave the linker's thunk |
+
+Skipping returns the image to exactly the state its linker built, which
+is what Windows does too — a delay-loaded DLL that is never called must
+not stop the image loading. Every skip is logged as
+`[pe-delay] refused <dll>!<fn>`, and misses that reach a catch-all are
+staged into the same `[win32-miss]` slot-name table and fix-journal that
+static imports use.
+
+**Evidence:** `userland/apps/delayload_pe/delayload_pe.c`, spawned as
+`ring3-delayload-pe` under the `pe-hello` smoke profile. It is linked
+with `lld-link /delayload:user32.dll` and supplies its own
+`__delayLoadHelper2` as a **tripwire** rather than a resolver, so a
+loader that failed to bind is caught instead of being papered over. It
+asserts that the delay IAT slot points outside the image before the
+first call, that the delay-loaded calls return user32's real values,
+and that the helper was never invoked — printing
+`[delayload_pe] RESULT PASS`.

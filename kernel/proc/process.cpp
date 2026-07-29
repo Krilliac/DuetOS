@@ -20,6 +20,7 @@
 #include "subsystems/linux/syscall_internal.h"
 #include "subsystems/win32/custom.h"
 #include "subsystems/win32/section.h"
+#include "subsystems/win32/gdi_objects.h"
 #include "subsystems/win32/window_syscall.h"
 #include "sched/sched.h"
 #include "sync/spinlock.h"
@@ -346,6 +347,9 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     p->user_stack_va = user_stack_va;
     p->user_rsp_init = 0; // loader overrides if it wants a custom rsp
     p->user_gs_base = 0;  // PE loader sets this to the TEB VA
+    // No growable stack until a loader publishes a reservation
+    // (SpawnPeFile does; ELF / native smoke payloads do not).
+    p->stack = UserStackRange{};
     p->win32_iat_miss_count = 0;
     // DLL image table — every slot starts empty. `has_exports`
     // = false marks a free slot (matches DllLoad's post-state
@@ -687,6 +691,15 @@ void ProcessRelease(Process* p)
     // Done OUTSIDE the compositor lock — TrackPopupCancelByOwner
     // takes both locks itself (in lock order tp_lock → compositor).
     duetos::subsystems::win32::TrackPopupCancelByOwner(p->pid);
+
+    // Reclaim the GDI objects this process still holds. Memory DCs,
+    // compatible bitmaps, brushes and pens all live in system-wide
+    // tables; without this an exiting PE strands both its pixel bytes
+    // and its table slots for the rest of the boot, and a PE that
+    // exhausted its per-process ceiling before exiting would deny
+    // those slots to everything that starts afterwards. Stock and
+    // sys-colour objects (owner 0) are untouched.
+    duetos::subsystems::win32::GdiReapByOwner(p->pid);
 
     {
         arch::SerialLineGuard guard;

@@ -4,8 +4,10 @@
 #include "drivers/input/ps2mouse.h"
 #include "drivers/video/app_widgets/app_button.h"
 #include "drivers/video/app_widgets/app_label.h"
+#include "drivers/video/app_widgets/app_palette.h"
 #include "drivers/video/app_widgets/app_panel.h"
 #include "drivers/video/app_widgets/widget_group.h"
+#include "drivers/video/blend_math.h"
 #include "drivers/video/chrome_text.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/theme.h"
@@ -54,6 +56,16 @@ constexpr const char* kButtonLabels[kIdCount] = {
 // px; the 4×5 button grid starts at kGridTopOffset and uses 68×36
 // buttons separated by 4 px gaps (5 rows now — was 4×4, extended for
 // the decimal-point + Clear-Entry keys).
+// Display-strip geometry, all offsets from the client origin. The
+// design stacks a small expression line over a large right-aligned
+// readout over the radix band (README §9 "Calculator"); the grid top
+// is unchanged so hit-testing and the widget self-test are untouched.
+constexpr u32 kExprY = 6;
+constexpr u32 kExprH = 12;
+constexpr u32 kReadoutY = 22;
+constexpr u32 kReadoutScale = 4; // 8x8 ROM font x4 = 32 px tabular
+constexpr u32 kRadixY = 62;
+
 constexpr u32 kGridTopOffset = 100;
 constexpr u32 kGridLeftOffset = 8;
 constexpr u32 kBtnW = 68;
@@ -70,9 +82,11 @@ constexpr u32 kDisplayCap = 16;
 constexpr u32 kFracDigits = 6;
 constexpr i64 kScale = 1000000; // 10^kFracDigits
 
-// Colour scheme. Light-grey digit keys, orange operators, green
-// equals, red clear, amber CE. The label colour rides on the
-// AppButton fg field; the background overrides AppButton::bg_rgb.
+// Historical (flat-theme) colour scheme. Light-grey digit keys, orange
+// operators, green equals, red clear, amber CE. The label colour rides
+// on the AppButton fg field; the background overrides AppButton::bg_rgb.
+// Classic / Slate10 / Amber / DuetClassic / HighContrast keep exactly
+// this look — only the Aurora palettes take the muted keypad below.
 struct KeyColours
 {
     u32 normal;
@@ -95,6 +109,32 @@ constexpr KeyColours ColoursFor(char k)
     if (k == '=')
         return kColEq;
     return kColOp; // '+' '-' '*' '/' '±' '⌫'
+}
+
+// Aurora keypad (docs/aurora-theme/README.md §9 "Calculator"): three
+// key classes instead of five hues.
+//
+//   function (C / CE / backspace)  — `--glass-3` wash, `--ink-3` label
+//   value    (digits, . , ± , ops) — `--recess`,     `--ink` label
+//   equals                         — accent-filled,  accent label
+//
+// The design's operator column is deliberately NOT a separate hue: it
+// reads as a value key and the accent is spent solely on `=`, which is
+// what stops the keypad looking like a toy.
+enum class KeyClass : u8
+{
+    Function = 0,
+    Value = 1,
+    Equals = 2,
+};
+
+constexpr KeyClass ClassFor(char k)
+{
+    if (k == '=')
+        return KeyClass::Equals;
+    if (k == 'C' || k == 'e' || k == static_cast<char>(0x08))
+        return KeyClass::Function;
+    return KeyClass::Value;
 }
 
 struct State
@@ -121,9 +161,13 @@ struct State
     // Memory register — survives 'C' (only MC clears it). Fixed-point.
     i64 memory; // fixed-point (× kScale)
     bool memory_set;
+    // Expression line rendered above the readout — the pending LHS and
+    // operator, e.g. "1234 +". Rebuilt every paint from accumulator /
+    // pending_op; never an input to evaluation.
+    char expr[kDisplayCap + 4];
 };
 
-constinit State g_state = {duetos::drivers::video::kWindowInvalid, {}, 0, {}, 0, 0, false, true, false, 0, false};
+constinit State g_state = {duetos::drivers::video::kWindowInvalid, {}, 0, {}, 0, 0, false, true, false, 0, false, {}};
 
 // Copy a literal NUL-terminated string into the display.
 void SetDisplayLiteral(const char* s)
@@ -144,12 +188,12 @@ void TripErr()
     SetDisplayLiteral("ERR");
 }
 
-// Format a fixed-point value (× kScale) into the display. Prints the
-// integer part, a '.', and the fractional digits with trailing zeros
-// trimmed (0.25 not 0.250000; 5 not 5.000000). If the integer part
-// doesn't fit in kDisplayCap, trips ERR (mirrors the legacy overflow
-// path).
-void SetDisplayFixed(i64 v)
+// Format a fixed-point value (× kScale) into `out`. Prints the integer
+// part, a '.', and the fractional digits with trailing zeros trimmed
+// (0.25 not 0.250000; 5 not 5.000000). Returns the written length, or
+// 0 (leaving `out` untouched) when the value needs more than `cap`
+// characters.
+u32 FormatFixed(i64 v, char* out, u32 cap)
 {
     bool neg = false;
     u64 abs_v;
@@ -196,24 +240,36 @@ void SetDisplayFixed(i64 v)
 
     // Assemble: ['-'] int '.' frac
     const u32 total = (neg ? 1u : 0u) + in + (fn > 0 ? 1u + fn : 0u);
-    if (total > kDisplayCap)
+    if (total > cap)
+        return 0;
+    u32 o = 0;
+    if (neg)
+        out[o++] = '-';
+    for (u32 i = 0; i < in; ++i)
+        out[o++] = itmp[in - 1 - i];
+    if (fn > 0)
+    {
+        out[o++] = '.';
+        for (u32 i = 0; i < fn; ++i)
+            out[o++] = ftmp[i];
+    }
+    out[o] = '\0';
+    return o;
+}
+
+// Format a fixed-point value into the display. Trips ERR when it
+// doesn't fit (mirrors the legacy overflow path).
+void SetDisplayFixed(i64 v)
+{
+    // FormatFixed writes at least one character for every value it can
+    // represent, so a 0 return is unambiguously "doesn't fit".
+    const u32 n = FormatFixed(v, g_state.display, kDisplayCap);
+    if (n == 0)
     {
         TripErr();
         return;
     }
-    u32 o = 0;
-    if (neg)
-        g_state.display[o++] = '-';
-    for (u32 i = 0; i < in; ++i)
-        g_state.display[o++] = itmp[in - 1 - i];
-    if (fn > 0)
-    {
-        g_state.display[o++] = '.';
-        for (u32 i = 0; i < fn; ++i)
-            g_state.display[o++] = ftmp[i];
-    }
-    g_state.display[o] = '\0';
-    g_state.display_len = o;
+    g_state.display_len = n;
 }
 
 // Parse the current display string as a fixed-point value (× kScale).
@@ -995,36 +1051,107 @@ void CollectButtons(AppButton* (&buttons)[kIdCount])
     CollectButtonsFrom<0>(buttons);
 }
 
-// Walk the widget chain to set per-button label / colour / callback
-// once at init.
+// Historical panel / display fills, kept for the flat palettes.
+constexpr u32 kFlatPanelBg = 0x00101828U;
+constexpr u32 kFlatDisplayBg = 0x00202830U;
+constexpr u32 kFlatDisplayFg = 0x0080F088U;
+constexpr u32 kFlatAuxFg = 0x0060B0E0U;
+constexpr u32 kFlatMemFg = 0x00FFC848U;
+
+// Live palette for the calculator's client area. Sampled per paint, not
+// cached: Ctrl+Alt+Y switches themes at runtime and a keypad that kept
+// the boot theme's colours would be the loudest possible stale-state
+// bug.
+duetos::drivers::video::app_widgets::AppPalette Palette()
+{
+    using duetos::drivers::video::ThemeCurrent;
+    using duetos::drivers::video::ThemeRole;
+    const u32 body = ThemeCurrent().role_client[static_cast<u32>(ThemeRole::Calculator)];
+    return duetos::drivers::video::app_widgets::AppPaletteFor(body);
+}
+
+// Resolve every widget colour against the active theme. Split out of
+// BindButtonsOnce (which only binds the immutable label / callback
+// wiring) so a runtime theme switch recolours the keypad.
+void ApplyPalette()
+{
+    using duetos::drivers::video::BlendOver;
+    const auto p = Palette();
+
+    auto& panel = g_calc.chain.head;
+    panel.bg_rgb = p.aurora ? p.body : kFlatPanelBg;
+    panel.border_rgb = p.aurora ? p.body : 0x00081018U;
+
+    auto& label = g_calc.chain.tail.head;
+    label.fg_rgb = p.aurora ? p.ink_3 : kFlatDisplayFg;
+    label.bg_rgb = p.aurora ? p.body : kFlatDisplayBg;
+
+    // `=` is the one accent-filled key: a heavier accent wash than a
+    // selection tint so it reads as filled, with the accent itself as
+    // the glyph.
+    const u32 equals_fill = BlendOver(p.body, p.accent, 92U);
+
+    AppButton* buttons[kIdCount];
+    CollectButtons(buttons);
+    for (u32 i = 0; i < kIdCount; ++i)
+    {
+        const char k = kButtonKeys[i];
+        if (!p.aurora)
+        {
+            const KeyColours c = ColoursFor(k);
+            buttons[i]->bg_rgb = c.normal;
+            buttons[i]->fg_rgb = c.label;
+            buttons[i]->weight =
+                (k == '=' || k == 'C' || k == 'e') ? ChromeTextWeight::Bold : ChromeTextWeight::Regular;
+            continue;
+        }
+        switch (ClassFor(k))
+        {
+        case KeyClass::Function:
+            buttons[i]->bg_rgb = p.wash;
+            buttons[i]->fg_rgb = p.ink_3;
+            break;
+        case KeyClass::Equals:
+            buttons[i]->bg_rgb = equals_fill;
+            buttons[i]->fg_rgb = p.accent;
+            break;
+        case KeyClass::Value:
+        default:
+            buttons[i]->bg_rgb = p.recess;
+            buttons[i]->fg_rgb = p.ink;
+            break;
+        }
+        // The design sets every key at one weight — the keypad's
+        // hierarchy is carried by fill and ink, not by bolding.
+        buttons[i]->weight = ChromeTextWeight::Regular;
+    }
+}
+
+// Walk the widget chain to set the per-button label / callback wiring
+// once at init, then resolve colours for the boot theme.
 void BindButtonsOnce()
 {
     auto& panel = g_calc.chain.head;
-    panel.bg_rgb = 0x00101828U;
-    panel.border_rgb = 0x00081018U;
     panel.shadow_radius = 0; // panel is INSIDE the window, no own shadow
 
+    // The expression line is the design's small muted line above the
+    // readout. The hero value is NOT a chrome-text role: at 72 px the
+    // Display role overflowed a 300-px window by a factor of two, so
+    // the readout paints as scaled tabular mono in DrawFn instead.
     auto& label = g_calc.chain.tail.head;
-    label.text = g_state.display;
-    label.role = ChromeTextRole::Display;
+    label.text = g_state.expr;
+    label.role = ChromeTextRole::Caption;
     label.weight = ChromeTextWeight::Regular;
-    label.fg_rgb = 0x0080F088U;
-    label.bg_rgb = 0x00202830U;
     label.align_left = false;
 
     AppButton* buttons[kIdCount];
     CollectButtons(buttons);
     for (u32 i = 0; i < kIdCount; ++i)
     {
-        const KeyColours c = ColoursFor(kButtonKeys[i]);
         buttons[i]->label = kButtonLabels[i];
         buttons[i]->on_click = kClickFns[i];
-        buttons[i]->bg_rgb = c.normal;
-        buttons[i]->fg_rgb = c.label;
-        buttons[i]->weight = (kButtonKeys[i] == '=' || kButtonKeys[i] == 'C' || kButtonKeys[i] == 'e')
-                                 ? ChromeTextWeight::Bold
-                                 : ChromeTextWeight::Regular;
     }
+    ApplyPalette();
 }
 
 // Re-anchor widget bounds to the live client rect. Called from
@@ -1036,8 +1163,10 @@ void RebindBoundsToClient(u32 cx, u32 cy, u32 cw)
     auto& panel = g_calc.chain.head;
     panel.bounds = Rect{cx, cy, cw, /*h=*/300u};
 
+    // Expression line sits above the hero readout, right-aligned in the
+    // same 8-px gutter the radix band uses.
     auto& label = g_calc.chain.tail.head;
-    label.bounds = Rect{cx + 8u, cy + 4u, (cw >= 16u) ? cw - 16u : cw, 28u};
+    label.bounds = Rect{cx + 8u, cy + kExprY, (cw >= 16u) ? cw - 16u : cw, kExprH};
 
     AppButton* buttons[kIdCount];
     CollectButtons(buttons);
@@ -1050,11 +1179,10 @@ void RebindBoundsToClient(u32 cx, u32 cy, u32 cw)
     }
 }
 
-// Build the clipped display view (F-051). The large Display-role font
-// is wide; a long value would paint past the client rect onto the
-// wallpaper. Cap the rendered string to the chars that fit in
-// `strip_w`; when clipped, show the most-significant end with a
-// trailing '>' overflow marker.
+// Build the clipped readout view (F-051). A long value would paint
+// past the client rect onto the wallpaper. Cap the rendered string to
+// the chars that fit in `strip_w`; when clipped, show the most-
+// significant end with a trailing '>' overflow marker.
 void BuildDisplayView(u32 strip_w)
 {
     const char* src = (g_state.display_len == 0) ? "0" : g_state.display;
@@ -1062,11 +1190,10 @@ void BuildDisplayView(u32 strip_w)
     while (src[src_len] != '\0')
         ++src_len;
 
-    // Per-char width of the Display role. Measure a single glyph so
-    // the clip tracks the active font (bitmap scale or TTF px).
-    using duetos::drivers::video::ChromeTextMeasure;
-    const u32 per_char = ChromeTextMeasure(ChromeTextRole::Display, "0");
-    u32 max_chars = (per_char > 0 && strip_w > 0) ? strip_w / per_char : src_len;
+    // The readout is the 8x8 ROM font at kReadoutScale — tabular by
+    // construction, which is what the design's mono result line wants.
+    const u32 per_char = 8u * kReadoutScale;
+    u32 max_chars = (strip_w > 0) ? strip_w / per_char : src_len;
     if (max_chars == 0)
         max_chars = 1;
 
@@ -1204,47 +1331,76 @@ void FmtOct(i64 v, char* out, u32 width)
     out[o] = '\0';
 }
 
+// Rebuild the expression line above the readout: the pending LHS and
+// its operator, or empty when nothing is pending. Purely presentational
+// — evaluation never reads it back.
+void BuildExpr()
+{
+    g_state.expr[0] = '\0';
+    if (!g_state.has_pending || g_state.error)
+        return;
+    const u32 n = FormatFixed(g_state.accumulator, g_state.expr, kDisplayCap);
+    if (n == 0)
+    {
+        g_state.expr[0] = '\0';
+        return;
+    }
+    g_state.expr[n] = ' ';
+    g_state.expr[n + 1] = g_state.pending_op;
+    g_state.expr[n + 2] = '\0';
+}
+
 // Content-draw callback. Paints the app_widgets group (panel +
-// display readout + buttons) first, then overlays the multi-radix
-// preview band carve-out and the "M" memory indicator directly.
+// expression line + keypad) first, then overlays the hero readout, the
+// multi-radix preview band and the "M" memory indicator.
 void DrawFn(u32 cx, u32 cy, u32 cw, u32 /*ch*/, void* /*cookie*/)
 {
     using duetos::drivers::video::FramebufferDrawString;
+    using duetos::drivers::video::FramebufferDrawStringScaled;
     using duetos::drivers::video::FramebufferFillRect;
     if (cw <= 16)
         return;
 
-    // 1) Re-anchor widgets to the live client rect, then paint the
-    //    widget group. Bind the label to the CLIPPED view so a long
-    //    value never paints past the client rect (F-051).
+    const auto p = Palette();
+    const u32 body = p.aurora ? p.body : kFlatPanelBg;
+    const u32 readout_fg = p.aurora ? p.ink : kFlatDisplayFg;
+    const u32 radix_label_fg = p.aurora ? p.ink_3 : kFlatAuxFg;
+    const u32 radix_value_fg = p.aurora ? p.accent : kFlatAuxFg;
+    const u32 mem_fg = p.aurora ? p.accent_peer : kFlatMemFg;
+
+    // 1) Re-anchor widgets, refresh colours for the live theme, then
+    //    paint the widget group (panel + expression line + keypad).
     RebindBoundsToClient(cx, cy, cw);
-    const u32 strip_w = (cw >= 16u) ? cw - 16u : cw;
-    BuildDisplayView(strip_w);
-    g_calc.chain.tail.head.text = g_state.display_view;
+    ApplyPalette();
+    BuildExpr();
+    g_calc.chain.tail.head.text = g_state.expr;
     Compose c{};
     g_calc.PaintAll(c);
 
-    // 2) Memory indicator — small "M" in the top-left of the display
-    //    strip when the register has a non-zero value.
-    constexpr u32 kDisplayBg = 0x00202830U;
-    if (g_state.memory_set && g_state.memory != 0)
-    {
-        constexpr u32 kMemFg = 0x00FFC848U;
-        FramebufferDrawString(cx + 8u + 4u, cy + 4u + 2u, "M", kMemFg, kDisplayBg);
-    }
+    const u32 x = cx + 8u;
+    const u32 w = (cw >= 16u) ? cw - 16u : cw;
 
-    // 3) Multi-radix preview band — sits between the display strip and
-    //    the button grid. Skipped in error state. Built from the
-    //    truncated integer part (radix views are integer-only).
+    // 2) Hero readout — right-aligned tabular digits. Clipped to the
+    //    strip so a long value never paints past the client rect
+    //    (F-051).
+    BuildDisplayView(w);
+    u32 vlen = 0;
+    while (g_state.display_view[vlen] != '\0')
+        ++vlen;
+    const u32 vw = vlen * 8u * kReadoutScale;
+    const u32 vx = (vw < w) ? x + w - vw : x;
+    FramebufferDrawStringScaled(vx, cy + kReadoutY, g_state.display_view, readout_fg, body, kReadoutScale);
+
+    // 3) Memory indicator — small "M" at the left of the expression
+    //    line when the register holds a non-zero value.
+    if (g_state.memory_set && g_state.memory != 0)
+        FramebufferDrawString(x, cy + kExprY + 2u, "M", mem_fg, body);
+
+    // 4) Multi-radix preview band — sits between the readout and the
+    //    button grid. Skipped in error state. Built from the truncated
+    //    integer part (radix views are integer-only).
     if (g_state.error)
         return;
-    constexpr u32 kAuxFg = 0x0060B0E0U;
-    const u32 x = cx + 8u;
-    const u32 y = cy + 4u;
-    const u32 w = (cw >= 16u) ? cw - 16u : cw;
-    constexpr u32 kDisplayH = 28u;
-    constexpr u32 kAuxBandH = 28u;
-    FramebufferFillRect(x, y + kDisplayH, w, kAuxBandH, kDisplayBg);
     const i64 v = ReadDisplayAsI64();
     char hex_buf[24];
     char bin_buf[28];
@@ -1252,12 +1408,17 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 /*ch*/, void* /*cookie*/)
     FmtHex(v, hex_buf, sizeof(hex_buf));
     FmtBin(v, bin_buf, sizeof(bin_buf));
     FmtOct(v, oct_buf, sizeof(oct_buf));
-    const u32 aux_y = y + kDisplayH + 4u;
+
+    // The design labels the radix row and spends the accent only on the
+    // value, so the band reads as annotation rather than as a second
+    // readout competing with the first.
+    FramebufferDrawString(x, cy + kRadixY, "HEX", radix_label_fg, body);
     u32 hlen = 0;
     while (hex_buf[hlen] != '\0')
         ++hlen;
-    const u32 hx = (hlen * 8u + 12u < w) ? x + w - hlen * 8u - 6u : x + 4u;
-    FramebufferDrawString(hx, aux_y, hex_buf, kAuxFg, kDisplayBg);
+    const u32 hx = (hlen * 8u + 32u < w) ? x + w - hlen * 8u : x + 32u;
+    FramebufferDrawString(hx, cy + kRadixY, hex_buf, radix_value_fg, body);
+
     char low[60];
     u32 lo = 0;
     for (u32 i = 0; bin_buf[i] != '\0' && lo + 1 < sizeof(low); ++i)
@@ -1267,8 +1428,9 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 /*ch*/, void* /*cookie*/)
     for (u32 i = 0; oct_buf[i] != '\0' && lo + 1 < sizeof(low); ++i)
         low[lo++] = oct_buf[i];
     low[lo] = '\0';
-    const u32 lx = (lo * 8u + 12u < w) ? x + w - lo * 8u - 6u : x + 4u;
-    FramebufferDrawString(lx, aux_y + 12u, low, kAuxFg, kDisplayBg);
+    FramebufferDrawString(x, cy + kRadixY + 12u, "BIN", radix_label_fg, body);
+    const u32 lx = (lo * 8u + 32u < w) ? x + w - lo * 8u : x + 32u;
+    FramebufferDrawString(lx, cy + kRadixY + 12u, low, radix_label_fg, body);
 }
 
 // Edge-detection state for mouse input.
@@ -1304,19 +1466,22 @@ void CalculatorMouseInput(u32 cx, u32 cy, u8 button_mask)
     using duetos::drivers::input::kMouseButtonLeft;
     if (g_state.handle == duetos::drivers::video::kWindowInvalid)
         return;
-    u32 wx = 0, wy = 0, ww = 0, wh = 0;
-    if (!duetos::drivers::video::WindowGetBounds(g_state.handle, &wx, &wy, &ww, &wh))
+    // Anchor the hit-test to the SAME client rect the compositor hands
+    // DrawFn. A hardcoded 22-px title bar put every click 8 px out of
+    // phase under the Duet family, whose title bar is 30.
+    u32 clx = 0, cly = 0, clw = 0, clh = 0;
+    if (!duetos::drivers::video::WindowGetClientRect(g_state.handle, &clx, &cly, &clw, &clh))
         return;
-    u32 client_x = cx;
-    u32 client_y = cy;
-    RebindBoundsToClient(wx, wy + 22u, ww);
+    const u32 client_x = cx;
+    const u32 client_y = cy;
+    RebindBoundsToClient(clx, cly, clw);
 
     const bool left_down = (button_mask & kMouseButtonLeft) != 0;
     const bool press_edge = left_down && !g_prev_left_down;
     const bool release_edge = !left_down && g_prev_left_down;
     g_prev_left_down = left_down;
 
-    const bool inside_window = (cx >= wx && cx < wx + ww && cy >= wy + 22u && cy < wy + wh);
+    const bool inside_window = (cx >= clx && cx < clx + clw && cy >= cly && cy < cly + clh);
     if (inside_window)
     {
         const Event m{EventKind::MouseMove, client_x, client_y, 0u, 0u};

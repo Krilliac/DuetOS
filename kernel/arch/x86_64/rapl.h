@@ -24,12 +24,15 @@
  *   MSR_AMD_PKG_ENERGY_STAT (0xC001029B)
  *   (AMD exposes no PKG_POWER_INFO, so TDP is reported "unknown".)
  *
- * Gating mirrors thermal.cpp exactly: a `rdmsr` against an MSR the
- * platform does not implement raises #GP that the trap dispatcher does
- * not recover from. Reads are issued only when CpuHas(kCpuFeatMsr) AND
- * the vendor is recognised AND we are NOT under a hypervisor
- * (IsEmulator()) — KVM/TCG do not reliably expose RAPL. On those paths
- * RaplRead() returns valid=false, and the boot probe logs "no data".
+ * Gating mirrors thermal.cpp exactly: every read goes through
+ * `arch::ReadMsrSafe`, so a `rdmsr` against an MSR the platform does
+ * not implement is a recovered #GP rather than a wedged boot. Reads
+ * are issued when CpuHas(kCpuFeatMsr) AND the vendor is recognised;
+ * presence is then decided by the POWER_UNIT register answering with
+ * something other than 0 or all-ones. There is deliberately no
+ * "bail under any hypervisor" gate any more — a hypervisor that
+ * exposes RAPL now yields real numbers, and one that does not yields
+ * valid=false, which is the honest answer rather than a predicted one.
  *
  * Context: kernel. Non-privileged MSRs; rdmsr in ring 0 is fine.
  */
@@ -53,8 +56,9 @@ struct RaplReading
 };
 
 /// Sample the RAPL MSRs once. Returns a zeroed record (valid=false)
-/// when the CPU lacks MSRs, the vendor is unrecognised, or we are under
-/// a hypervisor. Safe at any time once CPUID + CpuInfo are up.
+/// when the CPU lacks MSRs, the vendor is unrecognised, or the
+/// platform declines the POWER_UNIT register. Safe at any time once
+/// CPUID + CpuInfo are up.
 RaplReading RaplRead();
 
 /// Read package energy, busy-wait `window_ms` on the monotonic clock,

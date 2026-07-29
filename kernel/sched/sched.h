@@ -606,6 +606,14 @@ const char* SchedPowerBiasName(PowerBias b);
 /// store); safe from any task context.
 void SchedRequestActiveBalance();
 
+// `SchedTaskInfo::abi` values. A u8 rather than an enum class so the
+// struct's layout stays a plain POD snapshot (it is memcpy'd into
+// display rows by every consumer).
+inline constexpr u8 kTaskAbiNone = 0;    // kernel-only task — no user image
+inline constexpr u8 kTaskAbiNative = 1;  // native DuetOS ELF
+inline constexpr u8 kTaskAbiWin32Pe = 2; // Win32 PE loaded by SpawnPeFile
+inline constexpr u8 kTaskAbiLinux = 3;   // Linux ELF on the Linux syscall path
+
 // Read-only view of one task for ps-style enumeration. Fields
 // are snapshots copied at the moment SchedEnumerate visits the
 // task; no pointer-chasing across the boundary so callbacks can
@@ -630,7 +638,14 @@ struct SchedTaskInfo
     u8 priority;      // TaskPriority cast to u8
     bool is_running;  // true if this is the currently-scheduled task
     bool has_process; // true if owner_pid is meaningful (vs. kernel-only)
-    u8 _pad[4];
+    // Which user ABI the owning process's image was loaded under —
+    // one of the kTaskAbi* constants below. Read straight off the
+    // Process (`pe_image_base` for the Win32 PE loader's recorded
+    // main-image base, `abi_flavor` for the Linux dispatcher), never
+    // inferred from the task name. Kernel-only tasks report
+    // kTaskAbiNone so a UI can render nothing rather than guess.
+    u8 abi;
+    u8 _pad[3];
     // Number of 4 KiB user pages currently mapped in the owning
     // process's address space, snapshotted at enumerate time.
     // 0 for kernel-only tasks (no user AS). Multiply by 4 for KiB.

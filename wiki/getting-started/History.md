@@ -1524,6 +1524,192 @@ at 98.5% coverage with exactly one unresolved import each -
 rather than one embedded in the kernel image, is what stands between
 DuetOS and a real game.
 
+## Phase 6.32 - a PE reads its own resources (2026-07-28)
+
+`LoadStringW` was the single highest-demand missing i386 import: 282 of
+the 3121 32-bit PEs in `C:\Windows\SysWOW64` want it, 82 of them
+`.exe`s. It was missing because faking it is worse than lacking it - and
+on the x86_64 side we had in fact faked it. `user32!LoadStringW` returned
+a fixed `"DuetOS"` placeholder for **every** id, so an app's window
+caption, its menu labels and its error messages all came back as the same
+six characters. `FindResource`, `LoadResource`, `LockResource` and
+`SizeofResource` were worse still: they resolved to the kernel thunk
+page's pinned-zero rows and returned NULL to everything.
+
+The fix needed no kernel change, and that is the interesting part. The PE
+loader already maps the entire image into the guest's own address space
+before ring-3 entry - `MapHeaders` puts `SizeOfHeaders` at `ImageBase`,
+`MapSection` maps every section including `.rsrc`. So the resource tree
+is reachable from a userland DLL with pointer arithmetic on pages the
+guest already owns. A `SYS_RESOURCE_*` family would have added kernel
+attack surface to read memory the guest can read anyway, and would have
+put an attacker-controlled tree walk inside the kernel.
+
+Because every byte of that tree comes from a guest binary, the walker is
+written to fail closed: one bounds gate that all reads pass through, a
+mapped-extent test computed exactly the way `MapSection` computes it, and
+three flat loops instead of recursion so a self-referential subdirectory
+pointer cannot cycle. Two negative controls - delete a gate, watch the
+malformed-input tests turn red - confirmed the tests were not vacuous.
+
+The live proof is a PE32 fixture whose `.rsrc` is laid out by `windres`
+rather than by DuetOS, because a test that checks a parser against bytes
+the test itself wrote cannot catch a wrong assumption about what a real
+toolchain emits. It reads string ids 15 and 16 - which live in
+*different* `RT_STRING` bundles - so an off-by-one in either half of the
+`(id / 16) + 1` bundling formula returns the wrong string rather than
+nothing.
+
+Two things were deliberately not built. Icons, cursors and bitmaps are
+parseable but the compositor has no icon concept and no off-screen
+surface to put a decoded DIB in. Accelerators are parseable but
+`WM_KEYDOWN` delivers a DuetOS `KeyCode` as `wParam`, not a Win32
+virtual-key code, so every `FVIRTKEY` entry in an `RT_ACCELERATOR` table
+would mis-compare - a defect in the `WM_KEYDOWN` contract that this slice
+surfaced and that stands on its own. Both are recorded with their
+specific prerequisite rather than shipped as decoders with nothing to
+decode into.
+### 2026-07-29 — an app can ship its own DLLs
+
+That rung is climbed. `kernel/loader/sxs_dll.cpp` resolves an import
+miss against the directory the `.exe` was read from: it reads the DLL
+off the volume, passes it through the same security guard a disk-sourced
+`.exe` gets, maps it, and binds the import — recursively, so a
+side-by-side DLL's own side-by-side dependencies resolve too.
+
+The measurement that motivated it now reads differently. With the real
+26 MiB `UnityPlayer.dll` staged beside it, `BattleBit.exe` resolves all
+67 imports:
+
+```
+[sxs] loaded name="/UNITYPLA.DLL" base=0x180006000 size=0x19e0000
+[pe-resolve] via-dll UnityPlayer.dll!UnityMain -> 0x18055af10
+[ring3] pe spawn name="BATTLEB.EXE" pid=0x8 entry=0x143001260
+```
+
+It does not run a game — `UnityPlayer.dll` itself measures 68.6%
+coverage with 163 unresolved imports and three DLLs that do not exist
+here (`hid`, `imm32`, `opengl32`). But the launcher gets past its
+entry point and into MSVC CRT startup, and the thing that stops it is
+no longer an import at all: it overruns the fixed 64 KiB ring-3 stack
+and is killed on a `#PF` 0x930 bytes below `stack_va`. The blocker moved
+from the loader to the process model, which is progress of a different
+kind. (Closed the next day — see below.)
+
+### 2026-07-29 — the stack stops being the ceiling
+
+The blocker the side-by-side slice handed over is closed. The ring-3
+main-thread stack is no longer a fixed 64 KiB: `PeLoad` reads the
+image's own `SizeOfStackReserve` / `SizeOfStackCommit`, clamps both,
+reserves the address space, and commits only the top two pages. The
+ring-3 `#PF` handler commits one more page each time the thread walks
+into the page below the committed edge — decided BEFORE the
+task-isolation policy and before Win32 SEH delivery, because a growable
+fault is not an error.
+
+Per-spawn cost went DOWN while the ceiling went up 16x: 64 KiB
+committed unconditionally became 8 KiB committed with 1 MiB reserved.
+Across the 138-row PE-compat battery that is ~7.7 MiB of frames that no
+longer get allocated at spawn.
+
+The safety net it replaced is still there and is still fatal. A fault in
+the guard region below the reservation is never grown into; the kernel
+names it (`*** RING-3 STACK OVERFLOW ***`), fires a probe, and delivers
+`STATUS_STACK_OVERFLOW` — committing the guard region once, as Windows
+does, so the thread's `__except` has somewhere to run. Both halves are
+live battery rows: `ring3-stackgrow-smoke` walks 512 KiB and passes;
+`ring3-stackguard-smoke` recurses until it dies, by design.
+
+`BattleBit.exe` gets measurably further — through `FlsAlloc`,
+`InitializeCriticalSectionEx` and `LCMapStringEx` in the CRT — and then
+exits with status 0. The blocker moved again, and it moved somewhere
+quieter: the process now exits cleanly instead of crashing. (Where it
+moved *to* was misread at the time — see the correction below.)
+
+### 2026-07-29 — a miss you cannot name is worth less than no miss
+
+The previous entry recorded `BattleBit.exe` as stopping on
+`api-ms-win-appmodel-runtime-l1-1-2`, an API-set contract we do not
+ship. That was wrong, and the reason it was wrong is instructive.
+
+The other half of the same symptom was a line the loader could not
+explain: `[win32-miss] slot=0x1436b192b called fn="<unmapped>"`. That
+address is outside the image and not even 8-byte aligned, so it was
+never a real IAT slot. The miss-logger trampoline decoded its caller's
+call site in hand-assembled bytes, recognised exactly one instruction
+shape, and validated it with a single byte compare — one byte of
+entropy on a diagnostic whose entire job is to be trustworthy. It was
+reporting a confident guess.
+
+The decode now lives in the kernel, where it can read the call site
+through the checked user-copy path, recognise both shapes MSVC emits
+for an IAT-bound call (`FF 15 disp32`, and `E8 rel32` into a
+`[48] FF 25` jump thunk — in both the 6- and 7-byte thunk widths, the
+wide one being what real MSVC output uses), validate every step
+including pointer alignment, and say *why* a decode failed instead of
+inventing an address. The same boot now reads:
+
+```
+[win32-miss] fn="UnityMain" slot=0x140edb210 called-from=0x140ed11f2 in-module=0x140ed0000
+```
+
+which is verifiable against `objdump`: BattleBit's one import thunk
+sits at `.text+0` as `48 ff 25 09 a2 00 00`, targeting `0x14000b210`.
+
+With the miss named, the real chain fell out immediately. The image
+guard flags `UnityPlayer.dll` for importing injection-family APIs,
+prompts for allow/deny, and default-denies when an unattended boot does
+not answer. `UnityMain` therefore binds to the catch-all no-op,
+`main` calls it, gets 0, and returns 0. The api-set probe happens
+*after* that decision — it is the UCRT's exit path asking whether it is
+a packaged app — and answering NULL is the correct Windows behaviour,
+not a shortfall.
+
+The blocker was never the loader. It was a security prompt with nobody
+to answer it, hidden behind a diagnostic that guessed.
+
+### 2026-07-29 — the desktop stops being a Windows tribute act
+
+The Aurora shell had been "nearly there" for several sessions, and the
+reason it kept being nearly there is that `tools/qemu/screenshot.sh`
+silently ignored `DUETOS_EXTRA_CMDLINE`. Every screenshot taken to prove
+the redesign was a capture of **Classic**. Once the tool was fixed, the
+first honest side-by-side against the design bundle produced a delta
+list that no longer matched anyone's assumptions — the parts everybody
+had been re-checking (gradient, ring motif, hex texture, icon tiles, the
+floating island) were already right, and the parts nobody had looked at
+were wrong.
+
+Four of them, now closed:
+
+- The desktop was showing nine Windows-shaped icons in a tall column —
+  Computer, Trash, Browser, Help, Terminal, Calculator, Notepad,
+  Settings, Device Mgr — where the design puts four DuetOS-native
+  launchers in a 2×2 block: **Task Manager, Kernel Log, Inspect,
+  Files**. Two of the nine ("Computer" and "Trash") opened the same
+  window, and all nine were already in the Start menu. The desktop now
+  says what this system is for rather than what another system's
+  desktop looks like.
+- The taskbar island had a logo, a stats readout, a tray and a clock,
+  and nothing in between. It now carries the **search pill** and the
+  **pinned app row** the design puts there, with the indicator pill
+  under each button doing the work: focused, running, or — for a pinned
+  launcher that isn't open — deliberately nothing.
+- A **clock/date gadget** now floats at the right edge. Its dial has no
+  second hand, because the compositor cannot honestly claim to update
+  one.
+- The wallpaper read as an overall teal-green field. The cause was
+  taking the design's blob percentages literally when they are measured
+  against a layer that is `inset:-10%` and stops at `transparent 70%` —
+  so every blob was too big and sat too far from its edge, and an
+  earlier attempt to compensate by running the peak alphas hot had made
+  the wash broader still. Corrected geometry, literal alphas.
+
+The lesson worth keeping is the first paragraph's, not the last four
+bullets': for three sessions the tooling was answering a different
+question than the one being asked, and every conclusion drawn on top of
+it was confidently wrong.
+
 ## How to read the rest of the tree
 
 - `CLAUDE.md` — the authoritative project context, coding standards,

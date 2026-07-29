@@ -203,8 +203,11 @@ constexpr u32 kOffFormatMessageA = 0x94E;             // 32 bytes
 constexpr u32 kOffGetConsoleScreenBufferInfo = 0x96E; // 54 bytes
 
 // === RaiseException / DecodePointer / EncodePointer.
-constexpr u32 kOffRaiseException = 0x9A4; // 9 bytes (noreturn)
-constexpr u32 kOffDecodePointer = 0x9AD;  // 4 bytes (identity)
+// kOffRaiseException (0x9A4) is retired — kernel32.dll now exports a
+// real RaiseException that dispatches through ntdll. The bytes stay
+// so every later offset keeps its value; the constant is gone so no
+// future row can re-point an import at "terminate the process".
+constexpr u32 kOffDecodePointer = 0x9AD; // 4 bytes (identity)
 
 // === Semaphore family + upgraded WaitForSingleObject v3.
 constexpr u32 kOffCreateSemaphoreW = 0x9B1;             // 27 bytes (saves rdi+rsi)

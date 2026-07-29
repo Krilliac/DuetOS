@@ -91,9 +91,13 @@ __declspec(dllexport) void __stdcall DebugBreak(void) {}
  * structured exception and lets the SEH dispatcher decide. The i386
  * companion has no SEH dispatch (see msvcrt_32's
  * _except_handler4_common), so the only faithful outcome for an
- * unhandled raise is process termination carrying the exception code,
- * which is what the x86_64 thunk (kOffRaiseException -> SYS_EXIT)
- * also does. */
+ * unhandled raise is process termination carrying the exception code.
+ *
+ * The x86_64 side no longer does this: kernel32.dll!RaiseException
+ * builds a real EXCEPTION_RECORD and enters ntdll's two-pass engine
+ * (userland/libs/kernel32/kernel32_seh.c). Closing the gap here needs
+ * the kernel to deliver faults into a 32-bit dispatcher with an i386
+ * CONTEXT and the fs:[0] handler chain, which does not exist yet. */
 // STUB: no SEH dispatch - every RaiseException terminates the process
 // instead of searching for a handler, so a guest that raises an
 // exception it intended to catch dies instead.
@@ -212,22 +216,8 @@ __declspec(dllexport) BOOL __stdcall FindClose(HANDLE hFindFile)
     return 1;
 }
 
-/* ------------------------------------------------------------------
- * Resources
- * ------------------------------------------------------------------ */
-
-/* LoadResource needs a mapped-image resource-directory walk that
- * nothing in the 32-bit set provides yet (there is no FindResource
- * either). Returning NULL is the documented "resource not found"
- * answer and lets the caller fall back. */
-// STUB: always returns NULL - no PE resource-directory walker on the
-// i386 path. Real callers get no resource data.
-__declspec(dllexport) HANDLE __stdcall LoadResource(HANDLE hModule, HANDLE hResInfo)
-{
-    (void)hModule;
-    (void)hResInfo;
-    return (HANDLE)0;
-}
+/* Resources moved to kernel32_32_resource.c when the shared `.rsrc`
+ * walker landed. LoadResource used to be a return-NULL STUB here. */
 
 /* ------------------------------------------------------------------
  * Error-message formatting

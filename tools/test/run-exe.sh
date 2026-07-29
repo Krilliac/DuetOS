@@ -108,7 +108,25 @@ echo "[run-exe] booting (timeout ${DUETOS_TIMEOUT:-45}s)..."
 
 # run.sh regenerates nvme0.img via make-gpt-image.py each boot, so exporting
 # DUETOS_STAGE_FILES is all the staging that's needed.
+#
+# DUETOS_STAGE_EXTRA stages COMPANION files next to the .exe (the FAT32
+# image builder writes to the volume root, so "next to" is literal). Real
+# applications ship their own DLLs, and the loader now resolves imports
+# against the .exe's own directory -- so a run without the companions
+# staged is not testing the same program. Format matches
+# DUETOS_STAGE_FILES: ';'-separated 'SFN=/host/path'.
+#
+#   DUETOS_IMAGE_MB=48 \
+#   DUETOS_STAGE_EXTRA="UNITYPLA.DLL=/path/UnityPlayer.dll" \
+#     tools/test/run-exe.sh /path/Game.exe GAME.EXE
+#
+# Remember to raise DUETOS_IMAGE_MB: the default image is 16 MiB total,
+# which one engine DLL will not fit inside.
 export DUETOS_STAGE_FILES="${SFN}=${HOST_EXE}"
+if [[ -n "${DUETOS_STAGE_EXTRA:-}" ]]; then
+    export DUETOS_STAGE_FILES="${DUETOS_STAGE_FILES};${DUETOS_STAGE_EXTRA}"
+    echo "[run-exe] companions: ${DUETOS_STAGE_EXTRA}"
+fi
 export DUETOS_EXTRA_CMDLINE="peexec=${SFN}"
 export DUETOS_TIMEOUT="${DUETOS_TIMEOUT:-45}"
 

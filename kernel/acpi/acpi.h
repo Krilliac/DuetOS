@@ -171,6 +171,45 @@ u8 AcpiEnableValue();
 /// execution we don't do yet).
 bool AcpiShutdown();
 
+/// Physical base of the FACS (Firmware ACPI Control Structure), from
+/// the FADT's FIRMWARE_CTRL field. Returns 0 when no FADT was found,
+/// the platform is hardware-reduced ACPI (no FACS, hence no S3), or
+/// firmware parked the FACS above 4 GiB (X_FIRMWARE_CTRL — see the
+/// GAP in ParseFadt). 0 means "no FACS", never "FACS at address 0".
+u64 FacsAddress();
+
+/// Publish `real_mode_entry_phys` in the FACS firmware waking vector,
+/// so the platform re-enters the OS there after an S3 resume. The
+/// address must be below 1 MiB and 16-byte aligned (firmware builds a
+/// real-mode CS:IP from it). Zeroes X_FIRMWARE_WAKING_VECTOR when the
+/// FACS declares version >= 1 — a non-zero X vector would tell
+/// firmware to resume in protected mode at a different address.
+///
+/// Returns false — and writes nothing — when there is no FACS, the
+/// signature does not check out, the length is below the ACPI 1.0
+/// minimum, the address is out of range, or the write does not read
+/// back. A false return means suspend MUST be refused: resuming with
+/// a stale vector jumps the CPU into whatever the previous OS left.
+bool AcpiSetWakingVector(u32 real_mode_entry_phys);
+
+/// SLP_TYP values for sleep state `state` (0..5) from the firmware's
+/// `\_Sx` package. Returns false when the firmware declares no such
+/// package, which is the authoritative "this platform cannot enter
+/// Sx" answer — SLP_TYP 0 is legal, so absence never collapses into
+/// a zero value.
+bool AcpiSleepTypeFor(u8 state, u8* slp_typa, u8* slp_typb);
+
+/// Run `\_PTS(state)` then `\_GTS(state)` — the ACPI §7 sleep-prep
+/// methods firmware uses to quiesce the EC / arm SMI. Both optional;
+/// returns how many actually executed (diagnostic only).
+u32 AcpiRunSleepPrep(u8 sleep_type);
+
+/// Write `(SLP_TYP << 10) | SLP_EN` to PM1a (and PM1b when present),
+/// committing the sleep transition. Caller must have run the sleep
+/// prep methods and, for S3, published a waking vector first. On a
+/// real S3 entry this does not return until the machine wakes.
+void AcpiSleepWriteControl(u8 slp_typa, u8 slp_typb);
+
 /// HPET event-timer-block physical address from the ACPI HPET
 /// table. Returns 0 if no HPET table was present (in which case
 /// drivers should fall back to PIT or LAPIC timers only).

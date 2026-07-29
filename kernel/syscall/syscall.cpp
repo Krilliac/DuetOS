@@ -69,6 +69,7 @@
 #include "loader/dll_loader.h"
 #include "loader/elf_loader.h"
 #include "loader/pe_loader.h"
+#include "loader/sxs_dll.h"
 #include "util/random.h"
 #include "mm/kheap.h"
 #include "fs/vfs.h"
@@ -81,6 +82,7 @@
 #include "sched/sched.h"
 #include "subsystems/graphics/graphics.h"
 #include "subsystems/translation/translate.h"
+#include "subsystems/win32/gdi_dib.h"
 #include "subsystems/win32/gdi_objects.h"
 #include "subsystems/win32/thunks.h"
 #include "subsystems/win32/thunk_retirement_policy.h"
@@ -1173,16 +1175,142 @@ void SyscallDispatch(arch::TrapFrame* frame)
 
     case SYS_WIN32_MISS_LOG:
     {
-        KBP_PROBE_V(::duetos::debug::ProbeId::kWin32StubMiss, frame->rdi);
-
-        // rdi = IAT slot VA that the miss-logger trampoline
-        // decoded from its caller's `call [rip+disp32]`.
-        // Search CurrentProcess()->win32_iat_misses; if found,
-        // emit a [win32-miss] line with the function name.
-        const u64 slot_va = frame->rdi;
+        // rdi = the miss-logger trampoline's own RETURN ADDRESS,
+        // i.e. the byte just past the call that reached it. The
+        // decode from there back to an IAT slot VA lives here
+        // rather than in the trampoline's hand-assembled bytes,
+        // because this side can read the call site through the
+        // checked user-copy path and can report WHY a decode
+        // failed instead of inventing an address.
+        //
+        // Two call shapes reach an IAT-bound import; MSVC emits
+        // both, and which one you get depends on optimisation
+        // settings, not on anything the loader controls:
+        //
+        //   [48] FF 15 <disp32>  call qword [rip+disp32]
+        //                        Direct indirect call through the
+        //                        IAT. slot = ret_addr + disp32.
+        //
+        //   E8 <rel32>           call rel32 -> import thunk whose
+        //                        body is `[48] FF 25 <rel32_2>`
+        //                        (jmp qword [rip+rel32_2]).
+        //                        thunk = ret_addr + rel32
+        //                        slot  = thunk + len + rel32_2
+        //
+        // The old decoder implemented only the second shape, only in
+        // its 6-byte width, and gated it on one byte
+        // (`[ret-5] == 0xE8`). That is wrong twice over: a call site
+        // using the first shape lands on a `disp32` byte that reads
+        // 0xE8 once every 256 imports and the decode "succeeded"
+        // with garbage, and a thunk carrying the redundant REX.W
+        // prefix — which is what real MSVC output uses — was
+        // rejected outright.
+        //
+        // Every step below is validated, and a shape we do not
+        // recognise is REPORTED as unrecognised. A miss you cannot
+        // name is expensive; a miss named wrongly is worse.
+        const u64 ret_addr = frame->rdi;
         Process* proc = CurrentProcess();
+
+        u64 slot_va = 0;
+        // Why the decode failed, when it did. Kept as a string so
+        // the log line is self-explaining without a decoder ring.
+        const char* undecoded = nullptr;
+
+        // Little-endian signed 32-bit immediate out of a byte window.
+        auto imm32 = [](const u8* p) -> i64
+        {
+            const u32 raw = static_cast<u32>(p[0]) | (static_cast<u32>(p[1]) << 8) | (static_cast<u32>(p[2]) << 16) |
+                            (static_cast<u32>(p[3]) << 24);
+            return static_cast<i64>(static_cast<i32>(raw));
+        };
+
+        // Read the 7 bytes ending at the return address. Every call
+        // shape below puts its 4-byte immediate in the SAME place
+        // within that window — the last four bytes — because they
+        // differ only in how many opcode bytes precede it:
+        //
+        //   w[0] w[1] w[2] w[3..6]
+        //   48   FF   15   disp32   call qword [rip+disp32]  (7 bytes)
+        //        FF   15   disp32   call qword [rip+disp32]  (6 bytes)
+        //             E8   rel32    call rel32               (5 bytes)
+        //
+        // So the two indirect-call forms need no separate arms: the
+        // REX.W prefix is redundant on a 64-bit indirect call and
+        // does not move the displacement.
+        u8 w[7] = {};
+        if (ret_addr < sizeof(w))
+        {
+            undecoded = "call site below address zero";
+        }
+        else if (!mm::CopyFromUser(w, reinterpret_cast<const void*>(ret_addr - sizeof(w)), sizeof(w)))
+        {
+            undecoded = "call site unreadable";
+        }
+        else if (w[1] == 0xFF && w[2] == 0x15)
+        {
+            // Direct indirect call through the IAT.
+            slot_va = ret_addr + static_cast<u64>(imm32(&w[3]));
+        }
+        else if (w[2] == 0xE8)
+        {
+            // call rel32 -> import thunk. MSVC emits the thunk in
+            // two widths and BOTH are live in real binaries:
+            //
+            //   48 FF 25 rel32   rex.W jmp qword [rip+rel32]  (7 bytes)
+            //      FF 25 rel32         jmp qword [rip+rel32]  (6 bytes)
+            //
+            // Only the 6-byte form used to be recognised. Real
+            // BattleBit.exe emits the 7-byte one for its single
+            // import thunk (`UnityPlayer.dll!UnityMain` at .text+0:
+            // `48 ff 25 09 a2 00 00`), so the decode rejected a
+            // perfectly good thunk and the miss stayed unnamed. The
+            // displacement is relative to the END of the
+            // instruction, so the width is what gets added.
+            const u64 thunk_va = ret_addr + static_cast<u64>(imm32(&w[3]));
+            u8 t[7] = {};
+            if (!mm::CopyFromUser(t, reinterpret_cast<const void*>(thunk_va), sizeof(t)))
+            {
+                undecoded = "call rel32 target unreadable";
+            }
+            else if (t[0] == 0x48 && t[1] == 0xFF && t[2] == 0x25)
+            {
+                slot_va = thunk_va + 7u + static_cast<u64>(imm32(&t[3]));
+            }
+            else if (t[0] == 0xFF && t[1] == 0x25)
+            {
+                slot_va = thunk_va + 6u + static_cast<u64>(imm32(&t[2]));
+            }
+            else
+            {
+                // The 0xE8 was a coincidence, or the callee is a real
+                // function rather than an import thunk. Either way
+                // there is no IAT slot behind it.
+                undecoded = "call rel32 target is not a jmp-indirect import thunk";
+            }
+        }
+        else
+        {
+            // `call rax`, `call [reg+disp]`, vtable dispatch, or a
+            // tail `jmp` through the IAT — in the tail-jmp case the
+            // return address belongs to the caller's caller and the
+            // slot is simply not recoverable from it.
+            undecoded = "no recognised direct-call shape at call site";
+        }
+
+        // An IAT slot is a pointer-sized entry in a pointer-aligned
+        // table. A decode that lands off-alignment did not find one,
+        // whatever the opcodes said.
+        if (undecoded == nullptr && (slot_va & 7u) != 0)
+        {
+            undecoded = "decoded slot is not 8-byte aligned";
+            slot_va = 0;
+        }
+
+        KBP_PROBE_V(::duetos::debug::ProbeId::kWin32StubMiss, slot_va != 0 ? slot_va : ret_addr);
+
         const char* name = nullptr;
-        if (proc != nullptr)
+        if (proc != nullptr && slot_va != 0)
         {
             for (u64 i = 0; i < proc->win32_iat_miss_count; ++i)
             {
@@ -1196,11 +1324,36 @@ void SyscallDispatch(arch::TrapFrame* frame)
                 }
             }
         }
-        arch::SerialWrite("[win32-miss] slot=");
+
+        // Attribute the call site to a module so the line says WHO
+        // called, not just WHAT. `ProcessFindModuleBaseByVa` already
+        // owns the EXE + DLL range map used by the SEH frame walk.
+        const u64 caller_base = (proc != nullptr) ? ProcessFindModuleBaseByVa(proc, ret_addr) : 0;
+
+        arch::SerialWrite("[win32-miss] fn=\"");
+        arch::SerialWrite(name != nullptr ? name : "<unnamed>");
+        arch::SerialWrite("\" slot=");
         arch::SerialWriteHex(slot_va);
-        arch::SerialWrite(" called fn=\"");
-        arch::SerialWrite(name ? name : "<unmapped>");
-        arch::SerialWrite("\"\n");
+        arch::SerialWrite(" called-from=");
+        arch::SerialWriteHex(ret_addr);
+        arch::SerialWrite(" in-module=");
+        arch::SerialWriteHex(caller_base);
+        if (undecoded != nullptr)
+        {
+            arch::SerialWrite(" undecoded=\"");
+            arch::SerialWrite(undecoded);
+            arch::SerialWrite("\"");
+        }
+        else if (name == nullptr)
+        {
+            // Decoded cleanly but the slot is in no staged-miss row.
+            // The usual cause is that the slot belongs to a DLL whose
+            // imports were staged under a different PeLoad, or that
+            // the staging buffer overflowed — both are real, and both
+            // are invisible if this collapses into "<unmapped>".
+            arch::SerialWrite(" note=\"slot decoded but absent from this process's staged-miss table\"");
+        }
+        arch::SerialWrite("\n");
         // Trampoline zeroes rax itself; set here too for
         // clarity (we overwrite rax anyway via the syscall
         // return value mechanism).
@@ -4384,9 +4537,77 @@ void SyscallDispatch(arch::TrapFrame* frame)
         const fs::RamfsNode* n = fs::VfsLookup(proc->root, kpath, sizeof(kpath));
         if (n == nullptr || n->type != fs::RamfsNodeType::kFile || n->file_bytes == nullptr || n->file_size == 0)
         {
-            arch::SerialWrite("[dll-load] miss path=\"");
-            arch::SerialWrite(kpath);
-            arch::SerialWrite("\"\n");
+            // Side-by-side: a DLL shipped beside the process's own
+            // .exe. Same resolver, same security gate, and the SAME
+            // search directory the import binder used at spawn time
+            // (`Process::sxs_dir`) — a bind-time / run-time
+            // divergence here is exactly the bug class that has bitten
+            // this loader twice already.
+            if (proc->sxs_dir[0] != '\0')
+            {
+                ::duetos::loader::SxsSource src{};
+                src.volume = proc->sxs_volume;
+                src.valid = true;
+                u64 di = 0;
+                for (; proc->sxs_dir[di] != '\0' && di + 1 < sizeof(src.dir); ++di)
+                    src.dir[di] = proc->sxs_dir[di];
+                src.dir[di] = '\0';
+
+                const ::duetos::loader::DllSet set{proc->dll_images, &proc->dll_image_count, Process::kDllImageCap};
+                const u64 base = ::duetos::loader::SxsLoadNamed(src, kname, proc->as, set);
+                if (base != 0)
+                {
+                    arch::SerialWrite("[dll-load] OK (side-by-side) name=\"");
+                    arch::SerialWrite(kname);
+                    arch::SerialWrite("\" base=");
+                    arch::SerialWriteHex(base);
+                    arch::SerialWrite("\n");
+                    frame->rax = base;
+                    return;
+                }
+            }
+            // An api-set contract that reached here is a DIFFERENT
+            // failure from a missing file, and saying "miss path=..."
+            // for it invites exactly the wrong fix. `api-ms-win-*`
+            // and `ext-ms-win-*` names never exist on disk on Windows
+            // either; the loader is supposed to rewrite them to a host
+            // DLL, and the table above does that for every contract we
+            // actually have a host for. Reaching this point means we
+            // ship no implementation behind that contract.
+            //
+            // Returning 0 here is CORRECT, not a shortfall. A caller
+            // probing a contract with LoadLibrary + GetProcAddress is
+            // required to handle NULL — that is how the same binary
+            // runs on a Windows build that predates the contract. A
+            // real BattleBit.exe boot exercises exactly this: the MSVC
+            // UCRT's exit path probes
+            // `api-ms-win-appmodel-runtime-l1-1-2` for
+            // `AppPolicyGetProcessTerminationMethod`, takes the NULL
+            // branch, and calls plain `ExitProcess` — the documented
+            // non-packaged-app path. Mapping such a contract onto a
+            // host DLL that does not export its functions would turn
+            // this clean, correct refusal into a confusing
+            // "function missing from a DLL that claims to exist".
+            const bool is_contract = (kname[0] == 'a' && kname[1] == 'p' && kname[2] == 'i' && kname[3] == '-' &&
+                                      kname[4] == 'm' && kname[5] == 's' && kname[6] == '-') ||
+                                     (kname[0] == 'e' && kname[1] == 'x' && kname[2] == 't' && kname[3] == '-' &&
+                                      kname[4] == 'm' && kname[5] == 's' && kname[6] == '-');
+            if (is_contract)
+            {
+                // GAP: no host implemented behind this contract — the
+                // caller gets NULL, which is a legal Windows answer.
+                // Revisit only when a PE is observed to REQUIRE the
+                // contract's functions rather than probe for them.
+                arch::SerialWrite("[dll-load] api-set contract has no host (returning NULL, as Windows does) name=\"");
+                arch::SerialWrite(kname);
+                arch::SerialWrite("\"\n");
+            }
+            else
+            {
+                arch::SerialWrite("[dll-load] miss path=\"");
+                arch::SerialWrite(kpath);
+                arch::SerialWrite("\"\n");
+            }
             frame->rax = 0;
             return;
         }
@@ -4721,6 +4942,12 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     case SYS_GDI_BITBLT_DC:
         subsystems::win32::DoGdiBitBltDC(frame);
+        return;
+    case SYS_GDI_SET_DIBITS:
+        subsystems::win32::DoGdiSetDiBits(frame);
+        return;
+    case SYS_GDI_GET_DIBITS:
+        subsystems::win32::DoGdiGetDiBits(frame);
         return;
     case SYS_GDI_STRETCH_BLT_DC:
         subsystems::win32::DoGdiStretchBltDC(frame);

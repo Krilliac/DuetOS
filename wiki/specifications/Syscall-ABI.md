@@ -1272,7 +1272,7 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 13 | `SYS_PERF_COUNTER` | — | the kernel tick counter from arch::TimerTicks() — a monotonically increasing ... |
 | 14 | `SYS_HEAP_SIZE` | `rdi` = user pointer previously returned by SYS_HEAP_ALLOC | the block's payload capacity in bytes (the rounded-up allocation size recorde... |
 | 15 | `SYS_HEAP_REALLOC` | `rdi` = existing user pointer (may be 0 to request a fresh alloca...; `rsi` = new requested size in bytes | the new user VA (possibly equal to rdi if the existing block already fit) or ... |
-| 16 | `SYS_WIN32_MISS_LOG` | `rdi` = VA of the IAT slot that was just called (produced by the ... | address to compute the slot) |
+| 16 | `SYS_WIN32_MISS_LOG` | `rdi` = the miss-logger trampoline's own RETURN ADDRESS (the byte... | ADDRESS (the byte just past the call that reached it) |
 | 17 | `SYS_GETTIME_FT` | — | the current wall-clock time as a Windows FILETIME — a u64 count of 100-nanose... |
 | 18 | `SYS_NOW_NS` | — | nanoseconds since boot in rax |
 | 19 | `SYS_SLEEP_MS` | `rdi` = milliseconds to block | 0 on wake |
@@ -1466,4 +1466,6 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 211 | `SYS_VK_CALL` | — | is the per-op return value |
 | 212 | `SYS_RANDOM_BYTES` | `rdi` = user buffer VA; `rsi` = length | the number of bytes written (== length on success, a short count if the copy ... |
 | 213 | `SYS_IOCP_POST` | `rdi` = u64 IOCP handle (kWin32IocpBase range; `rsi` = u64 dwNumberOfBytesTransferred rdx = u64 dwCompletionKey ... | — |
+| 214 | `SYS_GDI_SET_DIBITS` | `rdi` = HBITMAP (owner-checked; `rsi` = user pointer to the DIB pixel array rdx = width in pixels...; `r8` = bits per pixel (16 / 24 / 32 only) r9  = size in bytes of... | — |
+| 215 | `SYS_GDI_GET_DIBITS` | — | — |
 <!-- /AUTO:syscall_args -->

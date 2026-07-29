@@ -4,6 +4,7 @@
 #include "ipc/handle_table.h"
 #include "loader/compat_shim.h"
 #include "loader/dll_loader.h"
+#include "proc/user_stack.h"
 #include "sched/sched.h"
 #include "sync/spinlock.h"
 #include "util/types.h"
@@ -318,6 +319,13 @@ struct Process
     // the base.
     u64 user_code_va;
     u64 user_stack_va; // stack base; top = user_stack_va + kPageSize
+
+    // Demand-grown ring-3 main-thread stack (PE spawns only; all
+    // zero elsewhere, which makes every ring-3 fault classify as
+    // NotStack). Unlocked by design — only the main thread can
+    // satisfy the growth condition against it; see the concurrency
+    // note in kernel/proc/user_stack.h.
+    UserStackRange stack;
     // When non-zero, Ring3UserEntry enters ring 3 with rsp = this
     // value instead of the default `user_stack_va + kPageSize`.
     // Used by SpawnElfLinux to land the user task on a pre-
@@ -626,6 +634,22 @@ struct Process
     static constexpr u64 kDllImageCap = 48;
     DllImage dll_images[kDllImageCap];
     u64 dll_image_count;
+
+    // Side-by-side DLL search directory: where this process's own
+    // image was read from on disk, so a DLL that ships beside the
+    // .exe can be found. Set once by `SpawnPeFile` from the
+    // caller-supplied origin and never mutated afterwards.
+    //
+    // BOTH the load-time import binder and the runtime
+    // `SYS_DLL_LOAD_FROM_PATH` (LoadLibraryW) read THIS field, so
+    // there is exactly one search path per process rather than a
+    // bind-time and a run-time answer that can disagree.
+    //
+    // `sxs_dir[0] == '\0'` means the image had no on-disk origin
+    // (embedded blob, ramfs) and no side-by-side search happens.
+    // See `loader/sxs_dll.h` for the search + gating rules.
+    u32 sxs_volume;
+    char sxs_dir[40];
 
     // Win32 file-handle table — backs CreateFileW / ReadFile /
     // CloseHandle / SetFilePointerEx. Each slot is

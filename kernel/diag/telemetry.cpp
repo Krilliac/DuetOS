@@ -67,14 +67,19 @@ TelemetryCpuInfo TelemetryCpuSample()
     out.stepping = ci.stepping;
 
     // --- frequency ---
-    // GAP: CpuFreqRead gates itself on a recognised vendor and a
-    // non-emulated host, so `freq_valid` is false under QEMU. That is
-    // the honest answer — the alternative is reporting the hypervisor
-    // host's ratios as if they were the guest's.
+    // CpuFreqRead probes each MSR through arch::ReadMsrSafe, so a
+    // machine that exposes the frequency interface reports it whether
+    // or not a hypervisor is present, and one that does not reports
+    // nothing at all. The two per-field flags are propagated rather
+    // than collapsed into `freq_valid`: a part can publish its static
+    // base ratio while declining a live operating point, and a UI that
+    // renders the missing half as 0 MHz looks broken.
     const auto freq = ::duetos::arch::CpuFreqRead();
     out.freq_valid = freq.valid;
-    out.current_mhz = freq.valid ? freq.current_mhz : 0;
-    out.base_mhz = (freq.valid && freq.ratios_valid) ? freq.base_mhz : 0;
+    out.current_mhz_valid = freq.valid && freq.current_valid;
+    out.current_mhz = out.current_mhz_valid ? freq.current_mhz : 0;
+    out.base_mhz_valid = freq.valid && freq.ratios_valid;
+    out.base_mhz = out.base_mhz_valid ? freq.base_mhz : 0;
 
     // --- per-core counters + topology ---
     const u32 limit = CpuRowLimit();
@@ -156,6 +161,43 @@ TelemetryCpuUsage TelemetryCpuUsageSample(TelemetryCpuWindow& window)
 
     const bool was_seeded = window.seeded;
 
+    // First pass: measure the window WITHOUT consuming it. A caller
+    // polling faster than the tick would otherwise reset prev_* every
+    // call, so the window could never accumulate past one tick and the
+    // percentage could only ever be 0 or 100.
+    u64 widest = 0;
+    for (u32 id = 0; id < limit; ++id)
+    {
+        u64 total = 0;
+        u64 idle = 0;
+        if (!::duetos::sched::SchedStatsReadCpu(id, &total, &idle))
+            continue;
+        if (was_seeded)
+        {
+            const u64 dt = tm::CounterDelta(total, window.prev_total[id]);
+            if (dt > widest)
+                widest = dt;
+        }
+    }
+
+    // Too short to mean anything: hand back the last figure computed
+    // over a window that DID qualify, and leave prev_* untouched so the
+    // window keeps growing. Reporting the quantised value here is what
+    // made the Task Manager tiles read 0% beside a 59% graph.
+    if (was_seeded && widest < kTelemetryMinWindowTicks)
+    {
+        if (!window.held_valid)
+            return out; // nothing trustworthy yet; valid stays false
+        for (u32 id = 0; id < limit; ++id)
+        {
+            out.core_busy_pct[id] = window.held_core_pct[id];
+            out.core_valid[id] = window.held_core_valid[id];
+        }
+        out.aggregate_busy_pct = window.held_aggregate_pct;
+        out.valid = true;
+        return out;
+    }
+
     for (u32 id = 0; id < limit; ++id)
     {
         u64 total = 0;
@@ -190,6 +232,19 @@ TelemetryCpuUsage TelemetryCpuUsageSample(TelemetryCpuWindow& window)
     window.seeded = true;
     out.valid = was_seeded && summed_total > 0;
     out.aggregate_busy_pct = tm::AggregateBusyPercent(summed_total, summed_idle);
+
+    // Remember a qualifying reading so the short-window path above has
+    // something true to repeat.
+    if (out.valid)
+    {
+        for (u32 id = 0; id < limit; ++id)
+        {
+            window.held_core_pct[id] = out.core_busy_pct[id];
+            window.held_core_valid[id] = out.core_valid[id];
+        }
+        window.held_aggregate_pct = out.aggregate_busy_pct;
+        window.held_valid = true;
+    }
     return out;
 }
 
@@ -339,6 +394,13 @@ void TelemetrySelfTest()
     // so it passed.
     ok = ok && (cpu.physical_cores >= 1);
     ok = ok && (cpu.physical_cores <= cpu.logical_cpus);
+    // Unsupported must stay distinguishable from zero: a cleared
+    // validity flag must never come with a populated figure beside it,
+    // or a caller that trusts the number alone reads a fabricated
+    // "0 MHz" as a real idle reading.
+    ok = ok && (cpu.current_mhz_valid || cpu.current_mhz == 0);
+    ok = ok && (cpu.base_mhz_valid || cpu.base_mhz == 0);
+    ok = ok && (cpu.freq_valid || (!cpu.current_mhz_valid && !cpu.base_mhz_valid));
     // idle is a subset of total on every CPU.
     for (u32 i = 0; i < cpu.core_count; ++i)
         ok = ok && (cpu.cores[i].idle_ticks <= cpu.cores[i].total_ticks);
@@ -356,6 +418,21 @@ void TelemetrySelfTest()
     ok = ok && (second.aggregate_busy_pct <= 100);
     for (u32 i = 0; i < second.core_count; ++i)
         ok = ok && (second.core_busy_pct[i] <= 100);
+
+    // A poll that lands inside the minimum window must NOT consume the
+    // window. This is the regression that made the Task Manager rail
+    // read "CPU 0% / Core 0 0%" beside a graph showing 59%: prev_* was
+    // overwritten on every call, so with a caller painting faster than
+    // the 100Hz tick the window never grew past one tick and
+    // (dt - di)/dt could only ever land on 0% or 100%. Asserting the
+    // snapshot survives pins the fix without stalling boot for 250ms.
+    const u64 prev_snapshot = win.prev_total[0];
+    const TelemetryCpuUsage third = TelemetryCpuUsageSample(win);
+    ok = ok && (win.prev_total[0] == prev_snapshot);
+    // Nothing has yet been measured over a qualifying window, so there
+    // is no held reading to repeat and the sample must decline to
+    // report rather than hand back a quantised one.
+    ok = ok && !third.valid;
 
     // --- memory ---
     const TelemetryMemory mem = TelemetryMemorySample();

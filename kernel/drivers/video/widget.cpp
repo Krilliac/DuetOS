@@ -46,6 +46,7 @@
 #include "drivers/video/chrome_text.h"
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
+#include "drivers/video/desktop_gadgets.h"
 #include "drivers/video/desktop_icons.h"
 #include "drivers/video/dialog.h"
 #include "drivers/video/dnd.h"
@@ -1322,6 +1323,29 @@ bool WindowGetBounds(WindowHandle h, u32* x_out, u32* y_out, u32* w_out, u32* h_
     return true;
 }
 
+bool WindowGetClientRect(WindowHandle h, u32* x_out, u32* y_out, u32* w_out, u32* h_out)
+{
+    if (!WindowValid(h))
+    {
+        return false;
+    }
+    // Must stay bit-identical to the client rect DesktopCompose hands
+    // the content-draw callback, or an app's hit-test drifts off its
+    // own paint.
+    const auto& c = g_windows[h].chrome;
+    const u32 tbh = EffectiveTitleHeight(c);
+    const u32 tbh_eff = (tbh > c.h) ? c.h : tbh;
+    if (x_out)
+        *x_out = c.x + 2;
+    if (y_out)
+        *y_out = c.y + tbh_eff + 2;
+    if (w_out)
+        *w_out = (c.w > 4) ? c.w - 4 : 0;
+    if (h_out)
+        *h_out = (c.h > tbh_eff + 4) ? c.h - tbh_eff - 4 : 0;
+    return true;
+}
+
 void WindowSetColours(WindowHandle h, u32 border_rgb, u32 title_rgb, u32 client_rgb, u32 close_rgb)
 {
     if (!WindowValid(h))
@@ -2513,7 +2537,13 @@ void WindowDrawAllOrdered()
             // "secondary chrome label" role — lighter weight than
             // the Title above, matching the dim-ink treatment we
             // already use for this slot.
-            const u32 sep_w = ChromeTextMeasure(ChromeTextRole::Caption, "| ");
+            // The design carries the title/subtitle hierarchy with a gap
+            // and a weight change, not a separator glyph — see
+            // docs/aurora-theme screenshots 17 (Kernel Log) and 19
+            // (Files). Measuring two spaces keeps the gap correct under
+            // both TTF (variable advance) and bitmap (fixed cell) fonts
+            // rather than hard-coding a pixel count.
+            const u32 sep_w = ChromeTextMeasure(ChromeTextRole::Caption, "  ");
             // Only paint if there's room for at least the
             // separator + a few glyphs before the close button.
             if (sub_x + sep_w + 32u < close_left)
@@ -2524,7 +2554,6 @@ void WindowDrawAllOrdered()
                 // that the subtitle reads as secondary, not
                 // background.
                 const u32 ink = LightenRgb(drawn.colour_title, 96);
-                ChromeTextDraw(ChromeTextRole::Caption, sub_x, title_y, "|", ink, drawn.colour_title);
                 // Greedy fit: extend the clipped buffer one
                 // character at a time and stop the moment the
                 // measured advance would overrun the close-button
@@ -3024,9 +3053,10 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
         WallpaperPaint(desktop_rgb);
     }
     ConsoleRedraw();
-    // Desktop icons sit on the wallpaper, beneath the window list, so an
-    // open window correctly occludes them.
+    // Desktop icons and gadgets sit on the wallpaper, beneath the window
+    // list, so an open window correctly occludes them.
     DesktopIconsPaint();
+    DesktopGadgetsPaint();
     WindowDrawAllOrdered();
     for (u32 i = 0; i < g_widget_count; ++i)
     {

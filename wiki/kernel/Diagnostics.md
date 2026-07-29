@@ -270,6 +270,34 @@ real idle reading, so callers must render the unavailable state:
   host's MSR ratios off as the guest's.
 - `TelemetryCpuUsage::valid == false` on the first sample against a
   fresh window — one reading of a monotonic counter carries no rate.
+  It stays false for the first ~250 ms of that window's life, until a
+  measurement interval long enough to carry a rate has accumulated (see
+  below). A pane must render its unavailable state for that opening
+  quarter-second rather than a fabricated 0%.
+
+### Why the window has a minimum length
+
+A sample taken over a window shorter than `kTelemetryMinWindowTicks`
+(25 ticks — 250 ms at the 100 Hz scheduler tick) is refused, and the
+last figure computed over a window that *did* qualify is returned in its
+place.
+
+This is not smoothing, it is a correctness floor. Tick counters advance
+at 100 Hz, so a caller polling faster than that — Task Manager samples
+once per **paint** — differences two readings taken 0 or 1 ticks apart.
+With `dt ∈ {0, 1}`, `(dt - di) / dt` can only ever evaluate to 0% or
+100%: the figure is quantised into uselessness long before it is
+inaccurate. The Performance rail read "CPU 0% / Core 0 0%" beside an
+aggregate graph showing 59% for exactly this reason — the aggregate sums
+deltas across CPUs, so it usually found at least one non-zero `dt`,
+while each individual core's tile did not.
+
+Critically, a refused sample **must not consume `prev_total` /
+`prev_idle`**. Advancing the baseline on every call is what prevented
+the window from ever growing past one tick in the first place; the
+minimum-length check alone would not have fixed it. `TelemetrySelfTest`
+pins this: a poll landing inside the minimum window must leave
+`prev_total[0]` unchanged and must decline to report.
 
 ### Why the window is caller-owned
 

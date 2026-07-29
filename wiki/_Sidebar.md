@@ -59,6 +59,7 @@
 ### Subsystems
 - [Win32 PE Subsystem](subsystems/Win32-PE-Subsystem.md)
 - [PE Loader](subsystems/PE-Loader.md)
+- [PE Resources (.rsrc)](subsystems/PE-Resources.md)
 - [Win32 DLLs](subsystems/Win32-DLLs.md)
 - [Win32 Registry](subsystems/Win32-Registry.md)
 - [Linux ABI](subsystems/Linux-ABI.md)
@@ -96,6 +97,7 @@
 - [RBAC and Elevation](security/RBAC-and-Elevation.md)
 - [Driver and Fault Domains](security/Driver-Domains.md)
 - [Persistence (secrets at rest)](security/Persistence.md)
+- [TPM 2.0 (sealing half only)](security/TPM.md)
 - [W^X / NX Enforcement](security/WX-Enforcement.md)
 - [Hardware Safety (default-inert contract)](security/Hardware-Safety.md)
 - [Intel ME / AMD PSP Mitigation](security/ME-PSP-Mitigation.md)

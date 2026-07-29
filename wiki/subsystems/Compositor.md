@@ -488,17 +488,42 @@ live on top by `wallpaper.cpp`. A failed cache allocation logs
 pre-Aurora topo + arcs + brand-strap painter, so the desktop is never
 left unpainted.
 
-Two honest approximations, both because the framebuffer's arc and
-round-rect primitives take an opaque RGB:
+Layer 2's percentages are **viewport-corrected, not transcribed**. The
+design's blob layer is `inset:-10%` and each gradient ends at
+`transparent 70%` (72% for the amber), so a figure written as `74%` in
+`README.md` §1 is `74 × 1.2 − 10 = 79%` of the screen and a `46%`
+radius is `46 × 0.84 = 39%`. Peaks are the literal CSS alphas
+(.34 / .22 / .14 → 87 / 56 / 36). Transcribing the raw percentages
+instead — and then compensating with hot peaks of 120 / 105 / 48 — is
+what made the desktop read as an overall teal-green field rather than
+the reference's near-black with two localised glows. Measured against
+`02-desktop-bare.png` downsampled to 32 × 24, mean luminance is 20.5
+against the reference's 22.9, with matching horizontal profiles. See
+Design-Decisions before "fixing" these constants back to §1's literals.
 
-- the arcs watermark pre-blends the accent against `--bg-1` instead of
-  blending per pixel (it only ever sits on the smooth part of the base
-  gradient, where the two agree to well under one 8-bit step);
-- the blob peak alphas run hotter than the design's literal
-  .34 / .22 / .14, because the squared falloff concentrates the wash
-  into the middle of each ellipse.
+One honest approximation remains, because the framebuffer's arc
+primitive takes an opaque RGB: the arcs watermark pre-blends the accent
+against `--bg-1` instead of blending per pixel (it only ever sits on the
+smooth part of the base gradient, where the two agree to well under one
+8-bit step).
 
 ### Desktop icons (`desktop_icons.cpp`)
+
+The desktop surfaces exactly the four launchers `README.md` §1 puts
+there — **Task Manager, Kernel Log, Inspect, Files** — in a 2-column
+row-major grid, filled left-to-right so the reference's reading order
+(Task Manager / Kernel Log, then Inspect / Files) is what appears. The
+grid widens past two columns only if the rows would run into the
+taskbar reserve. The set is not theme-conditional; see Design-Decisions
+"the desktop icon set is one list for every theme" for why, and for why
+the previous nine Windows-shaped entries were removed rather than kept
+under Classic. "Inspect" opens the native debugger — its Disasm /
+Memory / Symbols tabs are DuetOS's binary-inspection surface.
+
+Labels are truncated to the 84-px cell before painting. The
+proportional TTF caption fits "Task Manager"; the fixed 8-px bitmap
+caption the flat palettes use does not, and an untruncated label ran
+into the next column's.
 
 Aurora tiles are 40 × 40 at radius 10: a translucent accent wash
 (`accent` 30% → 8%) under a white gloss dome (.30 → .06, gone by 52% of
@@ -506,7 +531,31 @@ the tile), an accent border, and the glyph stroked in the accent rather
 than white-on-solid-accent. `BlendRoundRectVGradient` is the one
 primitive this needed — `FillRoundRect` is opaque and `BlendFill` is
 square, and the tile is both rounded and translucent. Palettes with
-`surface_radius == 0` keep the flat solid tile.
+`surface_radius == 0` keep the flat solid tile. The four glyphs are
+stroked outlines rather than filled silhouettes, per §1's "24 px stroke
+glyph": on a translucent tile a solid shape fills the cell and loses its
+identity.
+
+### Desktop gadgets (`desktop_gadgets.cpp`)
+
+`README.md` §1's gadget column, at the right edge above the taskbar
+reserve. Only the **clock/date panel** exists: a glass round-rect
+carrying `HH:MM`, a `Weekday, Month D` line and a 36-px analogue dial
+with hour and minute hands over an accent hub. There is deliberately no
+second hand — the compose pump runs at 1 Hz at best, so a sweeping
+second hand would claim a freshness the reading does not have.
+
+The panel is decoration: no hit-test, no click handler. It paints in
+the same compose slot as the desktop icons, so an open window occludes
+it, matching the reference desktop. On a palette without the Aurora
+vocabulary (`surface_radius == 0` or tactility off) it is a no-op
+rather than an opaque slab on the wallpaper.
+
+`FramebufferBlendRoundRect` was added for this — the translucent
+sibling of `FillRoundRect`, sharing its corner solve. The design's
+other two gadgets (kernel stats, ABI peers) are **not** implemented;
+both want a sampled history the compositor does not keep, and the
+Roadmap carries the plan.
 
 ### Taskbar island (`taskbar.cpp`)
 
@@ -538,6 +587,32 @@ Together those put the island near the reference's ~65% of screen
 width. Hit rects follow the painted geometry, so click dispatch is
 unchanged.
 
+The island's middle then gained the two cells §10 calls for:
+
+- **Search pill** (132 × 22, radius 10) between START and the app
+  buttons: a sheer well, a magnifier mark and a dim "Search" prompt.
+  It is a launcher affordance, not a query box — clicking it opens the
+  Start menu, and it accepts no typed input. Carries a `// GAP:` marker
+  saying so; there is no free-text index to search yet, and the right
+  place for a real query is §11's Start-menu search field.
+- **Pinned app row.** On the island the buttons are a superbar, not a
+  task list: `BuildButtonRoster` emits the `kPinnedRoles` launchers
+  first — whether or not they are running — then any running window not
+  already covered. The indicator pill carries the state: 16 px accent
+  plus a halo when focused, 8 px when running, **and nothing at all
+  when pinned but closed**, since painting a pill would claim the app
+  is open. The classic strip is unchanged: running windows only, since
+  its 170-px text tabs have no room for launchers.
+
+Landing the search pill surfaced a real bug in `TaskbarStartBounds`,
+which reported `kStartW` (88) regardless of layout while the island
+paints `kIslandStartW` (44). Harmless while the 44 px to START's right
+was empty; the moment the pill landed there, START swallowed a third of
+it. The accessor now follows the painted width.
+
+Five launchers are pinned, not §10's nine — see Design-Decisions
+"pinned taskbar launchers are scaled by island budget".
+
 - `TaskbarContains` hit-tests the island rect on **both** axes, so a
   click in the desktop margin either side falls through to the
   wallpaper.
@@ -564,6 +639,56 @@ unchanged.
 3. `aurora_wallpaper` without a **distinct** `accent_peer`, or with a
    `glass_alpha` of 0 or 255, is a silent opt-in: the backdrop would
    paint both blobs in one hue and the glass would composite opaque.
+
+### App interiors — `app_widgets/app_palette.{h,cpp}`
+
+The shell chrome speaking Aurora was not enough: every in-kernel app
+baked its own saturated literals (a red calculator key, cyan file-list
+headers, green-on-black process rows), so a desktop screenshot read as
+"same desktop, different applications". `AppPaletteMake` is the one
+place the design's interior tokens (`--ink` / `--ink-2` / `--ink-3`,
+`--recess`, `--glass-3`, `--line`, the accent selection tint) become
+concrete `0x00RRGGBB`.
+
+Two properties keep it honest:
+
+- **Opt-in.** `AppPalette::aurora` mirrors the theme's
+  `aurora_wallpaper`, so it is false for exactly the palettes the
+  self-test above already pins as flat. Each restyled call site picks
+  `aurora ? pal.<token> : <its historical literal>`, which is why
+  Classic / Slate10 / Amber / DuetClassic / HighContrast still paint
+  what they painted before the module existed. Riding the existing
+  opt-in rather than a fresh theme-id whitelist is deliberate — a
+  whitelist rots the next time a palette lands.
+- **Relative to the surface.** The framebuffer has no per-pixel alpha
+  and `FramebufferDrawString` stamps an opaque cell behind every
+  glyph, so a zebra row cannot be a live blend. `AppPaletteFor(body)`
+  resolves every token against the app's own client fill — and, when
+  the theme publishes `glass_alpha`, first flattens that fill over
+  `desktop_bg` so the app's opaque interior seams into its own glass
+  chrome instead of stamping a darker patch inside it. The ink ramp
+  inverts when the surface is light (Notes' cream paper, the whole
+  DuetLight family).
+
+Math is constexpr and kernel-free; `tests/host/test_app_palette.cpp`
+pins the ramp ordering, the light-mode flip and the single-accent
+collapse without a boot.
+
+`AppButton` resolves the documented `bg_rgb == 0` "theme default"
+sentinel through the same palette: a `--recess` chip with muted ink
+under Aurora, the historical role-title hue under the flat palettes.
+That is what quiets the app toolbars that never opted in individually.
+
+### Bitmap font lowercase
+
+`Font8x8Lookup` used to fold `a..z` onto the uppercase glyphs. Every
+app interior renders its content through that font, so the fold turned
+every file name, process name and log line into shouty all-caps — the
+loudest remaining difference from a reference that sets all of it
+mixed-case. `font8x8.cpp` now carries real 5 × 7 lowercase shapes with
+ascenders (`b d f h k l t`) and descenders (`g j p q y`). The cell and
+the 8-px advance are unchanged, so every column layout derived from
+them is untouched.
 
 ## Chrome Tactility (Pass A)
 

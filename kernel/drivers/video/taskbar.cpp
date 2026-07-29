@@ -1,6 +1,7 @@
 #include "drivers/video/taskbar.h"
 
 #include "arch/x86_64/rtc.h"
+#include "arch/x86_64/timer.h"
 #include "drivers/net/net.h"
 #include "drivers/power/power.h"
 #include "mm/frame_allocator.h"
@@ -11,6 +12,7 @@
 #include "drivers/video/chrome_text.h"
 #include "drivers/video/cursor.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/render_stats.h"
 #include "drivers/video/shadow.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
@@ -33,6 +35,12 @@ constinit u32 g_h = 0;
 // framebuffer edges. Recomputed by TaskbarReanchor.
 constinit u32 g_bar_x = 0;
 constinit u32 g_bar_w = 0;
+
+// Present-rate window for the CPU/FPS pill. File-scope because the
+// pill is painted from one place on one path; the window has to
+// outlive a single paint or it could never accumulate a measurable
+// interval (RenderFpsSample refuses windows shorter than 1s).
+constinit RenderFpsWindow g_fps_window{};
 // Radius the island body was last painted with; 0 for the classic
 // strip. Cached so the hit-test and the body paint agree.
 constinit u32 g_bar_radius = 0;
@@ -95,10 +103,19 @@ constinit u32 g_chevron_w = 0;
 constinit u32 g_chevron_h = 0;
 constinit bool g_chevron_hover = false;
 
-// Last-painted tab layout. Updated by TaskbarRedraw; consumed by
-// TaskbarTabAt. Capacity matches kMaxWindows so tabs and window
-// slots are in 1:1 correspondence.
-constexpr u32 kMaxTabs = 8;
+// Cached search-pill bounds — exposed via TaskbarSearchBounds so the
+// mouse reader can route a click into the Start menu. Zero-width when
+// the active layout paints no search pill (any non-island theme).
+constinit u32 g_search_x = 0;
+constinit u32 g_search_y = 0;
+constinit u32 g_search_w = 0;
+constinit u32 g_search_h = 0;
+
+// Last-painted app-button layout. Updated by TaskbarRedraw; consumed by
+// TaskbarTabAt. Capacity has to cover the island's pinned launchers PLUS
+// the running windows that aren't pinned, so it is deliberately larger
+// than either set alone.
+constexpr u32 kMaxTabs = 12;
 struct TabSlot
 {
     u32 x, y, w, h;
@@ -150,6 +167,36 @@ constexpr u32 kPillH = 3;
 constexpr u32 kPillRunW = 8;
 constexpr u32 kPillFocusW = 16;
 
+// Search pill (design §10: 250 x 40 at 1920, so 132 x 22 on the
+// IMPLEMENTATION.md §7 1024 column). It sits between START and the app
+// buttons and is the island's widest single cell.
+constexpr u32 kSearchW = 132;
+constexpr u32 kSearchH = 22;
+constexpr u32 kSearchRadius = 10;
+constexpr u32 kSearchGap = 12;
+
+// Pinned launchers, in the order the island paints them: the shell's own
+// surfaces — diagnostics, files, shell, settings.
+//
+// Design §10 pins NINE app buttons. That is a 1920 figure and it does
+// not survive the scale down. Type does not scale below 11 px
+// (IMPLEMENTATION.md §7), so the text-bearing cells on the right —
+// "CPU nn%", "60.0 FPS", the clock and the date — keep their 1920
+// widths while everything around them halves; the right-hand reserve is
+// therefore a much larger share of a 1024 island than of a 1920 one.
+// Nine buttons measured 86 % of the framebuffer, which is the
+// near-full-width strip the island exists to avoid (see the Compositor
+// wiki's "island's first landing"); five lands at ~69 %, against the
+// reference's 65 %.
+//
+// Every entry must resolve through ThemeRoleWindow to a real registered
+// window; a role whose window never got registered is skipped at paint
+// time rather than painting a button that does nothing.
+constexpr ThemeRole kPinnedRoles[] = {
+    ThemeRole::TaskManager, ThemeRole::LogView, ThemeRole::Files, ThemeRole::Terminal, ThemeRole::Settings,
+};
+constexpr u32 kPinnedCount = sizeof(kPinnedRoles) / sizeof(kPinnedRoles[0]);
+
 // Show-desktop rail: the rightmost cell of the strip. Hoisted out of
 // the paint block because the time card has to anchor LEFT of it —
 // both used to measure back from the same right edge, so the rail
@@ -182,21 +229,66 @@ u32 RightReserve()
     return pill ? 400u : 180u;
 }
 
-// Number of windows that will actually render a tab this pass.
-// Mirrors the filter in the tab loop (alive + visible + capacity).
-u32 VisibleTabCount()
+// The app buttons this pass will paint, left to right.
+//
+// Classic strip: running windows only — the strip has always meant
+// "what's on screen", and its 170-px text tabs have no room for
+// launchers that aren't running.
+//
+// Island (design §10): the pinned launchers first, whether or not they
+// are running, then any running window not already covered by one. That
+// is what makes the row a superbar rather than a task list — the design
+// shows app buttons on an empty desktop, and the indicator pill under
+// each button is what encodes running / focused / neither.
+//
+// Both the island's content-width measurement and the paint pass call
+// this, so the two cannot disagree about how many cells to reserve.
+u32 BuildButtonRoster(WindowHandle* out, u32 cap)
 {
+    const bool island = ThemeCurrent().taskbar_island && ThemeTactilityEffective();
     u32 n = 0;
+    if (island)
+    {
+        for (u32 i = 0; i < kPinnedCount && n < cap; ++i)
+        {
+            const WindowHandle h = ThemeRoleWindow(kPinnedRoles[i]);
+            if (h != kWindowInvalid && WindowIsAlive(h))
+            {
+                out[n++] = h;
+            }
+        }
+    }
     const u32 count = WindowRegistryCount();
-    for (u32 i = 0; i < count && n < kMaxTabs; ++i)
+    for (u32 i = 0; i < count && n < cap; ++i)
     {
         const WindowHandle h = i;
-        if (WindowIsAlive(h) && WindowIsVisible(h))
+        if (!WindowIsAlive(h) || !WindowIsVisible(h))
         {
-            ++n;
+            continue;
+        }
+        bool already = false;
+        for (u32 j = 0; j < n; ++j)
+        {
+            if (out[j] == h)
+            {
+                already = true;
+                break;
+            }
+        }
+        if (!already)
+        {
+            out[n++] = h;
         }
     }
     return n;
+}
+
+// Cell count only — for the width measurement, which doesn't need the
+// handles themselves.
+u32 ButtonCount()
+{
+    WindowHandle roster[kMaxTabs] = {};
+    return BuildButtonRoster(roster, kMaxTabs);
 }
 
 // Lighten an 0x00RRGGBB colour by `amount` per channel, saturating
@@ -451,17 +543,17 @@ void TaskbarReanchor()
         return;
     }
 
-    // Content width: left pad + START + gap + the tabs that will
-    // actually paint + the right-hand cluster + right pad. Clamped to
-    // the framebuffer minus an inset on each side, so a desktop with
-    // many windows degrades to a near-full-width island rather than
-    // running off the screen.
+    // Content width: left pad + START + gap + search pill + gap + the
+    // app buttons that will actually paint + the right-hand cluster +
+    // right pad. Clamped to the framebuffer minus an inset on each side,
+    // so a desktop with many windows degrades to a near-full-width
+    // island rather than running off the screen.
     // The rounded corners eat into the first and last `radius`
     // columns, so the content pad has to clear them or the START
     // button and the time card get sliced by the curve.
     const u32 pad = kEdgePad + theme.surface_radius;
-    const u32 tabs_w = VisibleTabCount() * (kIconTabW + kIconTabGap);
-    const u32 content = 2 * pad + kIslandStartW + kIslandStartGap + tabs_w + RightReserve();
+    const u32 tabs_w = ButtonCount() * (kIconTabW + kIconTabGap);
+    const u32 content = 2 * pad + kIslandStartW + kIslandStartGap + kSearchW + kSearchGap + tabs_w + RightReserve();
     const u32 max_w = (info.width > 2 * inset) ? info.width - 2 * inset : info.width;
     const u32 w = (content < max_w) ? content : max_w;
 
@@ -711,10 +803,53 @@ void TaskbarRedraw()
         ChromeTextDraw(ChromeTextRole::Body, start_label_x, text_y, "START", g_border, g_accent);
     }
 
-    // Per-window tabs. Iterate every registered window, filter
-    // alive, render a dark tab with its title. Advance x with a
-    // small gap between tabs. Clip when we'd overflow the right-
-    // side uptime reserve.
+    // Search pill (design §10), between START and the app buttons. Only
+    // the island layout has room for it; the classic strip's 170-px text
+    // tabs already fill the middle.
+    //
+    // GAP: the pill is a launcher affordance, not a query box — clicking
+    // it opens the Start menu (routed via TaskbarSearchBounds in
+    // boot_tasks). There is no free-text index to search yet, so it
+    // deliberately accepts no typed input and shows no results. Revisit
+    // when the Start menu grows its own §11 search field, which is where
+    // a real query would be typed.
+    g_search_x = 0;
+    g_search_y = 0;
+    g_search_w = 0;
+    g_search_h = 0;
+    if (island)
+    {
+        const u32 sx = start_x + start_w + kIslandStartGap;
+        const u32 sh = (g_h > kSearchH) ? kSearchH : g_h;
+        const u32 sy = g_y + (g_h - sh) / 2;
+        // Sheer well rather than an opaque chip — the pill has to read as
+        // an inset in the island's glass, the way the design's
+        // rgba(0,0,0,.22) fill does over a blurred surface.
+        FramebufferBlendFill(sx, sy, kSearchW, sh, (72U << 24) | 0x00000000U);
+        FramebufferDrawRoundRect(sx, sy, kSearchW, sh, kSearchRadius, g_border);
+
+        // Magnifier: a two-pass circle for a 2-px stroke plus a handle,
+        // matching the desktop Inspect glyph's construction.
+        const i32 lens_cx = static_cast<i32>(sx + 12);
+        const i32 lens_cy = static_cast<i32>(sy + sh / 2);
+        FramebufferDrawCircle(lens_cx, lens_cy, 4U, g_fg);
+        FramebufferDrawLine(lens_cx + 3, lens_cy + 3, lens_cx + 6, lens_cy + 6, g_fg);
+
+        // Placeholder ink is deliberately dimmer than g_fg: this is a
+        // prompt, not a value the user entered.
+        ChromeTextDraw(ChromeTextRole::Caption, sx + 24, text_y, "Search", g_tab_inactive, g_bg);
+
+        g_search_x = sx;
+        g_search_y = sy;
+        g_search_w = kSearchW;
+        g_search_h = sh;
+    }
+
+    // App buttons. On the island this is the pinned launcher row plus
+    // any running window that isn't pinned (BuildButtonRoster); on the
+    // classic strip it stays a running-windows-only task list. Advance x
+    // with a small gap between cells, and clip when we'd overflow the
+    // right-side cluster reserve.
     const u32 tab_w = island ? kIconTabW : kTabW;
     const u32 tab_gap = island ? kIconTabGap : kTabGap;
     // Reserve space on the right for the cluster of widgets that
@@ -727,33 +862,26 @@ void TaskbarRedraw()
     //   Other themes: tray (~70) + time (~80) + rail (~6) +
     //                 gaps (~14) = ~170
     const u32 right_reserve = RightReserve();
-    u32 tab_x = start_x + start_w + (island ? kIslandStartGap : kStartGap);
+    u32 tab_x = start_x + start_w + (island ? kIslandStartGap + kSearchW + kSearchGap : kStartGap);
     const u32 tabs_right_limit =
         (bar_content_right > bar_x + right_reserve) ? bar_content_right - right_reserve : bar_content_right;
 
     g_tab_count = 0;
-    const u32 count = WindowRegistryCount();
+    WindowHandle roster[kMaxTabs] = {};
+    const u32 count = BuildButtonRoster(roster, kMaxTabs);
     for (u32 i = 0; i < count; ++i)
     {
-        const WindowHandle h = i;
-        if (!WindowIsAlive(h))
-        {
-            continue;
-        }
-        // Hidden windows are pre-registered launchers, not running
-        // tasks — skip them so the taskbar reflects "what's actually
-        // on screen", which is what the user expects. Raising a
-        // hidden window via the Start menu unhides it (see
-        // WindowRaise), at which point it appears as a tab here.
-        if (!WindowIsVisible(h))
-        {
-            continue;
-        }
+        const WindowHandle h = roster[i];
+        // A pinned launcher that isn't on screen still gets a button —
+        // that's what makes the island a superbar. `running` drives the
+        // indicator pill below, so "pinned but closed" reads as a bare
+        // button with no pill under it.
+        const bool running = WindowIsVisible(h);
         if (tab_x + tab_w > tabs_right_limit)
         {
             break; // ran out of middle — overflow unshown in v0
         }
-        const bool is_active = (h == WindowActive());
+        const bool is_active = running && (h == WindowActive());
         // Active tab uses the taskbar's accent colour so the
         // focused window reads at a glance — matches the window-
         // chrome active/inactive distinction. Rounded fill +
@@ -801,17 +929,22 @@ void TaskbarRedraw()
             // scaled here. The focused pill gets a 1-px accent halo in
             // place of the design's 10-px CSS glow - the framebuffer
             // has no blur primitive, and a hard halo still separates
-            // "focused" from "running" at a glance.
-            const u32 pill_w = is_active ? kPillFocusW : kPillRunW;
-            const u32 pill_x = tab_x + (tab_h_eff - pill_w) / 2;
-            const u32 pill_y = g_y + g_h - kPillH - 2;
-            const u32 pill_rgb = is_active ? g_accent : g_tab_inactive;
-            if (is_active && pill_x >= 1)
+            // "focused" from "running" at a glance. A pinned launcher
+            // that isn't running gets NO pill: the absence is the third
+            // state, and painting one would claim the app is open.
+            if (running)
             {
-                FramebufferBlendFill(pill_x - 1, pill_y - 1, pill_w + 2, kPillH + 2,
-                                     (90U << 24) | (g_accent & 0x00FFFFFFU));
+                const u32 pill_w = is_active ? kPillFocusW : kPillRunW;
+                const u32 pill_x = tab_x + (tab_h_eff - pill_w) / 2;
+                const u32 pill_y = g_y + g_h - kPillH - 2;
+                const u32 pill_rgb = is_active ? g_accent : g_tab_inactive;
+                if (is_active && pill_x >= 1)
+                {
+                    FramebufferBlendFill(pill_x - 1, pill_y - 1, pill_w + 2, kPillH + 2,
+                                         (90U << 24) | (g_accent & 0x00FFFFFFU));
+                }
+                FramebufferFillRect(pill_x, pill_y, pill_w, kPillH, pill_rgb);
             }
-            FramebufferFillRect(pill_x, pill_y, pill_w, kPillH, pill_rgb);
         }
         else
         {
@@ -1348,8 +1481,57 @@ void TaskbarRedraw()
             left[6] = '%';
             left[7] = '\0';
             const u32 left_w = ChromeTextMeasure(ChromeTextRole::Caption, left);
+            // FPS: a real present-rate read, differenced over a
+            // window that is long enough to carry a rate. The compose
+            // pump idles at ~1 Hz and bursts under cursor activity, so
+            // the figure genuinely moves. Until the window has
+            // accumulated (RenderFpsSample reports !valid for the
+            // first second) the pill shows "--.-" rather than a
+            // fabricated number -- the same honesty contract the
+            // telemetry surface uses, and the reason this replaced a
+            // hard-coded "60.0".
+            char fps_txt[8];
+            {
+                const RenderFps fps = RenderFpsSample(g_fps_window, ::duetos::arch::TimerTicks(),
+                                                      static_cast<u32>(::duetos::arch::kTickFrequencyHz));
+                if (!fps.valid)
+                {
+                    fps_txt[0] = '-';
+                    fps_txt[1] = '-';
+                    fps_txt[2] = '.';
+                    fps_txt[3] = '-';
+                    fps_txt[4] = '\0';
+                }
+                else
+                {
+                    u32 whole = fps.fps_x10 / 10u;
+                    const u32 frac = fps.fps_x10 % 10u;
+                    u32 n = 0;
+                    if (whole >= 100u)
+                    {
+                        fps_txt[n++] = static_cast<char>('0' + whole / 100u);
+                        whole %= 100u;
+                        fps_txt[n++] = static_cast<char>('0' + whole / 10u);
+                    }
+                    else if (whole >= 10u)
+                    {
+                        fps_txt[n++] = static_cast<char>('0' + whole / 10u);
+                    }
+                    fps_txt[n++] = static_cast<char>('0' + whole % 10u);
+                    fps_txt[n++] = '.';
+                    fps_txt[n++] = static_cast<char>('0' + frac);
+                    fps_txt[n] = '\0';
+                }
+            }
             const u32 sep_w = ChromeTextMeasure(ChromeTextRole::Caption, "  "); // 2-glyph gap around divider
-            const u32 right_w = ChromeTextMeasure(ChromeTextRole::Caption, "60.0 FPS");
+            // Floor the reservation at the design's "60.0 FPS" width so
+            // the pill keeps a stable size across the common 2-digit
+            // range instead of twitching every second, but still grows
+            // if the value is genuinely wider (3 digits, or "--.-").
+            const u32 fps_measured = ChromeTextMeasure(ChromeTextRole::Caption, fps_txt) +
+                                     ChromeTextMeasure(ChromeTextRole::Caption, " FPS");
+            const u32 fps_design_w = ChromeTextMeasure(ChromeTextRole::Caption, "60.0 FPS");
+            const u32 right_w = (fps_measured > fps_design_w) ? fps_measured : fps_design_w;
             constexpr u32 pill_pad_x = 12;
             const u32 pill_w = left_w + sep_w + right_w + 2 * pill_pad_x;
             constexpr u32 pill_pad_y = 4;
@@ -1380,14 +1562,15 @@ void TaskbarRedraw()
                 {
                     FramebufferFillRect(div_x, pill_y + 4, 1, pill_h - 8, g_border);
                 }
-                // Right half: "60.0 FPS" in amber, the secondary
+                // Right half: the live rate in amber, the secondary
                 // accent. Together with the teal "CPU" label the
                 // pill carries the dual-accent duet narrative in
                 // the smallest cell of the chrome too.
                 constexpr u32 kAmberInk = 0x00F5B73A;
                 const u32 right_x = pill_x + pill_pad_x + left_w + sep_w;
-                const u32 num_w = ChromeTextMeasure(ChromeTextRole::Caption, "60.0 ");
-                ChromeTextDraw(ChromeTextRole::Caption, right_x, text_y, "60.0", kAmberInk, g_tab_inactive);
+                const u32 num_w = ChromeTextMeasure(ChromeTextRole::Caption, fps_txt) +
+                                  ChromeTextMeasure(ChromeTextRole::Caption, " ");
+                ChromeTextDraw(ChromeTextRole::Caption, right_x, text_y, fps_txt, kAmberInk, g_tab_inactive);
                 ChromeTextDraw(ChromeTextRole::Caption, right_x + num_w, text_y, "FPS", g_fg, g_tab_inactive);
                 tray_right = (pill_x >= tray_gap) ? pill_x - tray_gap : 0;
             }
@@ -1556,8 +1739,14 @@ void TaskbarStartBounds(u32* x_out, u32* y_out, u32* w_out, u32* h_out)
     // an update there must update these constants too. Small
     // static layout, so a centralised constant would be over-
     // engineering at v0 scale.
+    //
+    // The width MUST follow the layout the paint pass used. This
+    // reported kStartW unconditionally, so on the island — which paints
+    // the icon-only kIslandStartW — START claimed 44 px of dead space to
+    // its right. Harmless while that space was empty; the moment the
+    // search pill landed there it swallowed a third of it.
     const u32 start_x = g_bar_x + kEdgePad + g_bar_radius;
-    constexpr u32 start_w = kStartW;
+    const u32 start_w = (g_bar_radius > 0) ? kIslandStartW : kStartW;
     const u32 start_y = g_y + 4;
     const u32 start_h = (g_h > 8) ? g_h - 8 : g_h;
     if (x_out)
@@ -1568,6 +1757,18 @@ void TaskbarStartBounds(u32* x_out, u32* y_out, u32* w_out, u32* h_out)
         *w_out = start_w;
     if (h_out)
         *h_out = start_h;
+}
+
+void TaskbarSearchBounds(u32* x_out, u32* y_out, u32* w_out, u32* h_out)
+{
+    if (x_out)
+        *x_out = g_search_x;
+    if (y_out)
+        *y_out = g_search_y;
+    if (w_out)
+        *w_out = g_search_w;
+    if (h_out)
+        *h_out = g_search_h;
 }
 
 } // namespace duetos::drivers::video

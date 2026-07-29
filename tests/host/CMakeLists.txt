@@ -172,6 +172,11 @@ add_host_test(inferred_gap)
 add_host_test(hpet_scale)
 add_host_test(thunk_retirement_policy)
 add_host_test(pe_unwind_bounds)
+# Demand-grown ring-3 stacks: the reservation planner and the #PF
+# classifier are both freestanding (proc/user_stack.h), so the decision
+# that gates committing memory for an untrusted PE is pinned here
+# rather than only observed in a boot log.
+add_host_test(user_stack)
 # Phase B dynamic fix-discovery: config-proposal decision is freestanding
 # (env/config_proposal_decide.h), no kernel TU.
 add_host_test(config_proposal)
@@ -182,6 +187,11 @@ add_host_test(d3dcompiler)
 # GDI region geometry: freestanding header (userland/libs/gdi32/gdi32_region.h),
 # included by relative path — no extra target_sources needed.
 add_host_test(gdi32_region)
+# Off-screen GDI surface arithmetic: freestanding header
+# (kernel/subsystems/win32/gdi_surface_math.h). Pins the guest-controlled
+# allocation math (32-bit pixel-count wrap, DIB DWORD row padding,
+# INT32_MIN biHeight) and the two-surface blit clip.
+add_host_test(gdi_surface)
 # i386 kernel32 companion path / seek-resolution core: freestanding
 # header (userland/libs/kernel32_32/kernel32_32_paths.h), no kernel TU.
 add_host_test(kernel32_32_paths)
@@ -202,6 +212,12 @@ add_host_test(smbios_type17)
 # aggregate against the mean-of-percentages formula they get confused
 # with, plus the torn-read clamps.
 add_host_test(telemetry_cpu)
+# CPU sensor decode: freestanding header
+# (kernel/arch/x86_64/cpu_sensor_math.h), no kernel TU. The reads
+# themselves are unverifiable off the target (QEMU models neither the
+# AMD SMN aperture nor the Zen P-state MSRs), so the decode half is
+# pinned here against synthetic register values instead.
+add_host_test(cpu_sensor_math)
 add_host_test(damage_rect)
 # Banded damage / forced-invalidation fold: freestanding constexpr state
 # on DamageBandSet in kernel/drivers/video/framebuffer.h — no kernel TU.
@@ -271,6 +287,7 @@ add_host_test(blend)
 add_host_test(shadow_atlas)
 add_host_test(motion_math)
 add_host_test(chrome_text_measure)
+add_host_test(app_palette)
 add_host_test(app_widgets_bounds)
 add_host_test(app_widgets_paint)
 add_host_test(app_widgets_events)
@@ -283,6 +300,18 @@ add_host_test(widget_group)
 # -Wsign-conversion here — they only fire on legitimate char-index math.
 add_host_test(kernel32_nls)
 target_compile_options(test_kernel32_nls PRIVATE -Wno-conversion -Wno-sign-conversion)
+
+# PE `.rsrc` resource-directory walker (userland/libs/common/pe_resources.h):
+# the three-level tree, string-table bundling, and the malformed-input
+# cases that must fail closed. Same header-only warning-gate reasoning as
+# kernel32_nls above — the synthetic-image builder is dense index math.
+add_host_test(pe_resources)
+target_compile_options(test_pe_resources PRIVATE -Wno-conversion -Wno-sign-conversion)
+
+# Delay-load import descriptor walk (kernel/loader/pe_delay_import.h):
+# the directory-head bound, per-descriptor truncation, the all-zero
+# terminator, and every form the binder must refuse rather than trust.
+add_host_test(pe_delay_import)
 
 # Browser omnibox URL-vs-search classifier (kernel/apps/browser/omnibox_classify.h).
 add_host_test(omnibox_classify)
@@ -301,3 +330,15 @@ add_host_test(policy_shield)
 # extraction, and imitation-by-construction (net == rule level-predicates).
 add_host_test(neural_policy)
 target_sources(test_neural_policy PRIVATE "${CMAKE_SOURCE_DIR}/../../kernel/env/neural_policy.cpp")
+
+# TPM 2.0 wire marshalling (kernel/drivers/tpm/tpm_wire.h): big-endian
+# framing, the commandSize back-patch, byte-exact command encodings, and
+# hostile-reply rejection. Also pins the sealing-only allow-list: the
+# identity-half opcodes (Quote, Certify, ActivateCredential, GetTime, ...)
+# must stay refused, so this test fails if anyone adds attestation.
+add_host_test(tpm_wire)
+
+# Kernel command-line token parser (kernel/util/cmdline.h): key=value
+# lookup incl. prefix collisions, and the strict hex decoder that the TPM
+# measured-boot baseline (tpm.baseline=) depends on.
+add_host_test(cmdline)

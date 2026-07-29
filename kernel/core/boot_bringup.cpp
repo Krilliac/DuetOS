@@ -93,6 +93,8 @@
 #include "drivers/iommu/dmar.h"
 #include "drivers/iommu/iommu.h"
 #include "drivers/iommu/ivrs.h"
+#include "drivers/tpm/tpm.h"
+#include "drivers/tpm/tpm_measure.h"
 #include "drivers/iommu/vtd.h"
 #include "drivers/iommu/vtd_paging.h"
 #include "drivers/input/ps2mouse.h"
@@ -229,6 +231,7 @@
 #include "drivers/video/shadow.h"
 #include "drivers/video/svg.h"
 #include "drivers/video/chrome_text.h"
+#include "drivers/video/app_widgets/app_palette.h"
 #include "drivers/video/app_widgets/self_test.h"
 #include "drivers/video/ttf.h"
 #include "drivers/video/ttf_raster.h"
@@ -237,6 +240,7 @@
 #include "generated_chrome_font.h"
 #include "generated_chrome_font_bold.h"
 #include "drivers/video/calendar.h"
+#include "drivers/video/desktop_gadgets.h"
 #include "drivers/video/desktop_icons.h"
 #include "drivers/video/magnifier.h"
 #include "drivers/video/dialog.h"
@@ -325,6 +329,7 @@
 #include "log/klog.h"
 #include "log/klog_persist.h"
 #include "power/reboot.h"
+#include "power/suspend.h"
 #include "security/login.h"
 #include "core/boot_cmdline.h"
 #include "core/init.h"
@@ -361,6 +366,7 @@
 #include "subsystems/win32/token_syscall.h"
 #include "subsystems/win32/window_syscall.h"
 #include "loader/apiset_static.h"
+#include "loader/sxs_dll.h"
 #include "loader/compat_shim.h"
 #include "loader/dll_loader.h"
 #include "loader/elf_loader.h"
@@ -609,14 +615,12 @@ void BootBringupEarly(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
     SerialWrite("[boot] Detecting hypervisor.\n");
     duetos::arch::HypervisorProbe();
 
-    SerialWrite("[boot] Reading MSR thermals.\n");
-    duetos::arch::ThermalProbe();
-
-    SerialWrite("[boot] Reading RAPL power telemetry.\n");
-    duetos::arch::RaplProbe();
-
-    SerialWrite("[boot] Reading CPU frequency telemetry.\n");
-    duetos::arch::CpuFreqProbe();
+    // The MSR sensor probes (thermal / RAPL / cpufreq) used to run
+    // here. They now PROBE their MSRs through `arch::ReadMsrSafe`
+    // instead of predicting availability from the vendor string, so
+    // they must run after the kernel extable carries the rdmsr
+    // recovery row — see the "Bringing up kernel extable" block
+    // below, which is where they moved to.
 
     // Phase::Earlycon — utility-primitive self-tests (Result /
     // String / Hexdump / VaRegion). All four panic on failure, so
@@ -685,6 +689,9 @@ void BootBringupEarly(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
     SerialWrite("[boot] Exercising API-set contract table.\n");
     DUETOS_BOOT_SELFTEST(duetos::loader::ApiSetSelfTest());
 
+    SerialWrite("[boot] Exercising side-by-side DLL path resolution.\n");
+    DUETOS_BOOT_SELFTEST(duetos::loader::SxsSelfTest());
+
     SerialWrite("[boot] Exercising A/B boot-slot state machine.\n");
     DUETOS_BOOT_SELFTEST(duetos::fs::boot_slot::SelfTest());
 
@@ -708,7 +715,9 @@ void BootBringupEarly(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
     DUETOS_BOOT_SELFTEST(duetos::util::vt::VtParserSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::core::Sf32SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::arch::RaplSelfTest());
-    DUETOS_BOOT_SELFTEST(duetos::arch::CpuFreqSelfTest());
+    // CpuFreqSelfTest deliberately runs later, with the sensor probes,
+    // because it now asserts an invariant on a LIVE reading and the
+    // live path needs the rdmsr extable row registered first.
     DUETOS_BOOT_SELFTEST(duetos::arch::SpiFlashSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::GpuTelemetrySelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::net::NicTelemetrySelfTest());
@@ -790,11 +799,30 @@ void BootBringupEarly(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
     SerialWrite("[boot] Bringing up kernel extable.\n");
     duetos::arch::TrapsRegisterExtable();
     DUETOS_BOOT_SELFTEST(duetos::debug::ExtableSelfTest());
-    // Fault-recoverable wrmsr — covers the wrmsr inside
+    // Fault-recoverable wrmsr / rdmsr — covers the wrmsr inside
     // `arch::WriteMsrSafe`, used by the LAPIC IPI path so an
     // intermittent KVM/QEMU #GP on the x2APIC ICR doesn't
-    // recursive-halt the BSP. See arch/x86_64/msr_safe.{h,cpp,S}.
+    // recursive-halt the BSP, and the rdmsr inside
+    // `arch::ReadMsrSafe`, which every MSR sensor probe below uses
+    // to ASK the part whether an MSR exists rather than guess from
+    // the vendor string. See arch/x86_64/msr_safe.{h,cpp,S}.
     duetos::arch::RegisterMsrSafeExtable();
+    DUETOS_BOOT_SELFTEST(duetos::arch::MsrSafeSelfTest());
+
+    // MSR sensor probes. They depend on the rdmsr extable row above
+    // (a probe of an absent MSR takes a #GP that the row recovers),
+    // which is why they run here rather than alongside the other
+    // CPUID-only probes in the earlier bring-up block.
+    SerialWrite("[boot] Reading MSR thermals.\n");
+    duetos::arch::ThermalProbe();
+    DUETOS_BOOT_SELFTEST(duetos::arch::ThermalSelfTest());
+
+    SerialWrite("[boot] Reading RAPL power telemetry.\n");
+    duetos::arch::RaplProbe();
+
+    SerialWrite("[boot] Reading CPU frequency telemetry.\n");
+    duetos::arch::CpuFreqProbe();
+    DUETOS_BOOT_SELFTEST(duetos::arch::CpuFreqSelfTest());
 
     // Fault-domain registry self-test. Registers a toy domain,
     // restarts it twice, checks counters. Real driver domains are
@@ -1408,6 +1436,24 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     // IOMMU register here either.
     duetos::drivers::iommu::IvrsInit();
     DUETOS_BOOT_SELFTEST(duetos::drivers::iommu::IvrsSelfTest());
+
+    // TPM 2.0 over the FIFO/TIS window. Sits here because it needs
+    // ACPI (to learn whether the platform is FIFO or CRB) and MMIO,
+    // but nothing else — it polls with TSC-bounded waits, so it does
+    // not need the timer or the scheduler. Absent on most of the test
+    // fleet, in which case it prints present=no and gets out of the
+    // way. DuetOS implements the SEALING half of TPM only; see
+    // kernel/drivers/tpm/tpm_wire.h for what is deliberately refused.
+    duetos::drivers::tpm::TpmInit();
+    DUETOS_BOOT_SELFTEST(duetos::drivers::tpm::TpmSelfTest());
+
+    // Measured boot as a LOCAL tripwire: extend PCR 8/9 with what
+    // actually booted, fold PCR 0..9 into one digest, and compare it
+    // against a baseline the operator pinned on the command line.
+    // Detection only — nothing here signs a PCR set or sends one
+    // anywhere, and a mismatch warns rather than refusing to boot.
+    duetos::drivers::tpm::TpmMeasureBoot(cmdline);
+    DUETOS_BOOT_SELFTEST(duetos::drivers::tpm::TpmMeasureSelfTest());
 
     // VT-d identity-passthrough page tables. Builds root + shared
     // context + identity-mapping PDPT (3 frames = 12 KiB). The
@@ -2110,6 +2156,22 @@ void BootBringupDevices(bool force_net_smoke)
     SerialWrite("[boot] Bringing up PS/2 mouse.\n");
     duetos::drivers::input::Ps2MouseInit();
 
+    // S3 suspend participants. Registered HERE, between the PS/2
+    // bring-up and the PCI enumeration, because this is the widest
+    // window in which the machine is fully alive (LAPIC / IOAPIC /
+    // HPET / tick / serial / PS-2) yet owns no device that cannot
+    // survive a power cycle. The `s3test=1` live cycle below therefore
+    // exercises a real suspend with the refusal gate consulted for
+    // real, not bypassed — storage and NIC drivers, which do veto,
+    // attach several hundred lines later.
+    SerialWrite("[boot] Registering S3 suspend participants.\n");
+    duetos::power::PowerSuspendInit();
+    // FindBootCmdline(0) reads the cache primed during early boot —
+    // the low identity map that held the Multiboot2 info is long gone
+    // by here, so re-walking it would fault.
+    DUETOS_BOOT_SELFTEST(duetos::power::PowerSuspendSelfTest(
+        duetos::core::CmdlineMatches(duetos::core::FindBootCmdline(0), "s3test", "1")));
+
     SerialWrite("[boot] Enumerating PCI bus.\n");
     duetos::drivers::pci::PciEnumerate();
 
@@ -2410,6 +2472,17 @@ void BootBringupDevices(bool force_net_smoke)
     SerialWrite("[boot] Bringing up AHCI controller(s).\n");
     duetos::drivers::storage::AhciInit();
     DUETOS_BOOT_SELFTEST(duetos::drivers::storage::AhciSelfTest());
+
+    // GAP: neither the block-storage nor the NIC drivers have an S3
+    // quiesce/re-init pair, and the platform resets their controllers
+    // on wake — so from this point on the machine declines S3 rather
+    // than resuming onto a dead queue. Registered here, at the attach
+    // site, rather than unconditionally at PowerSuspendInit: the veto
+    // has to describe what is actually present. Revisit per driver;
+    // each one that grows a restore path moves to
+    // PowerSuspendRegister and drops its veto line.
+    duetos::power::PowerSuspendVeto("block-storage", "no NVMe/AHCI controller re-init after platform reset");
+    duetos::power::PowerSuspendVeto("net", "no NIC controller re-init after platform reset");
 
     // Security event ring + IR runbook: stand up the structured
     // event surface BEFORE any wall TU starts publishing. Storage
@@ -2787,6 +2860,11 @@ void PeexecDeferredTask(void*)
     duetos::u8* peexec_buf = nullptr;
     duetos::u64 peexec_cap = 0;
     duetos::i64 rn = 0;
+    // Which volume the image actually came off. The scan below tries
+    // every mounted FAT volume, and the winner is the one whose
+    // directory a side-by-side DLL has to be looked up in — searching
+    // volume 0 unconditionally would look in the wrong place.
+    duetos::u32 peexec_volume = 0;
     for (duetos::u32 attempt = 0; attempt < 12 && rn <= 0; ++attempt)
     {
         const duetos::u32 vc = fat::Fat32VolumeCount();
@@ -2826,6 +2904,7 @@ void PeexecDeferredTask(void*)
             if (got > 0 && static_cast<duetos::u64>(got) >= entry.size_bytes)
             {
                 rn = got;
+                peexec_volume = vi;
                 break;
             }
         }
@@ -2853,9 +2932,11 @@ void PeexecDeferredTask(void*)
     SerialWrite("[peexec] read bytes=");
     SerialWriteHex(static_cast<duetos::u64>(rn));
     SerialWrite("\n");
+    // Pass the on-disk origin so DLLs shipped beside the .exe resolve.
     const auto pid = duetos::core::SpawnPeFile(g_peexec_path, peexec_buf, static_cast<duetos::u64>(rn),
                                                duetos::core::CapSetTrusted(), duetos::fs::RamfsTrustedRoot(),
-                                               duetos::mm::kFrameBudgetTrusted, duetos::core::kTickBudgetTrusted);
+                                               duetos::mm::kFrameBudgetTrusted, duetos::core::kTickBudgetTrusted,
+                                               duetos::core::CapSetTrusted(), peexec_volume, g_peexec_path);
     // SpawnPeFile has copied the image into the child's address space;
     // the read buffer is no longer needed.
     duetos::mm::KFree(peexec_buf);
@@ -3169,10 +3250,11 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     win_a_chrome.y = 60;
     win_a_chrome.w = 300;
     // Sized for the 4x5 keypad (grid top offset 100 + 5*36 buttons +
-    // 4*4 gaps = 296, + title bar). Was 260 for the old 4x4 grid; the
-    // extra row carries the decimal-point + Clear-Entry keys (F-010,
-    // F-012) plus the multi-radix preview band above the grid.
-    win_a_chrome.h = 322;
+    // 4*4 gaps = 296) plus the tallest title bar in the palette table
+    // (30 across the Duet family) and the 4-px client inset. Was 322,
+    // which assumed a 22-px title bar and let the bottom key row paint
+    // 8 px past the client rect on every Duet boot.
+    win_a_chrome.h = 330;
     const duetos::drivers::video::WindowHandle calc_handle =
         duetos::drivers::video::WindowRegister(win_a_chrome, "Calculator");
     duetos::drivers::video::ThemeRegisterWindow(Role::Calculator, calc_handle);
@@ -3228,7 +3310,12 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // Subtitle for Duet-era chrome to render next to the title.
     // Themes that don't read it (Classic / Slate10 / Amber)
     // ignore the field; the storage is unconditional.
-    duetos::drivers::video::WindowSetSubtitle(logview_handle, "/sys/klog | live");
+    // "\xB7" is U+00B7 MIDDLE DOT as a single Latin-1 byte, which is what
+    // the glyph path wants: Font8x8Lookup indexes raw bytes (0xC2 is A
+    // circumflex, not a UTF-8 lead byte) and the TTF path maps the byte
+    // straight to a codepoint. Writing the character literally in this
+    // UTF-8 source would emit C2 B7 and render as "Â·".
+    duetos::drivers::video::WindowSetSubtitle(logview_handle, "/sys/klog \xB7 live");
 
     duetos::drivers::video::WindowSetContentDraw(
         logview_handle,
@@ -3239,18 +3326,33 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
             // around the whole compose so these statics are
             // race-free.
             //
-            // Severity colouring: the first chunk per log line
-            // is always the 4-byte tag ("[I] " / "[W] " / "[E] "
-            // / "[D] ") from LevelTag(). We inspect it and set
-            // the line's fg; subsequent chunks on the same line
-            // inherit that colour until the newline resets.
-            constexpr duetos::u32 kFgInfo = 0x00A0C8FF;  // muted blue-white
-            constexpr duetos::u32 kFgWarn = 0x00FFD860;  // amber
-            constexpr duetos::u32 kFgError = 0x00FF6050; // soft red
-            constexpr duetos::u32 kFgDebug = 0x00808080; // grey
+            // Severity colouring: the first chunk per log line is
+            // always the 4-byte tag ("[I] " / "[W] " / "[E] " / "[D] ")
+            // from LevelTag(). The reference (docs/aurora-theme
+            // screenshots/17-kernel-log.png) colours the LEVEL TAG only
+            // and leaves the body a muted grey, so a healthy boot reads
+            // as a calm column with the few warnings standing out —
+            // rather than the wall of saturated cyan the old paint
+            // produced by tinting whole lines. Warnings and errors are
+            // the documented exception: the design does wash the whole
+            // message for those two levels.
+            //
+            // Mono CONTENT stays mono: this is a log, not chrome text.
+            constexpr duetos::u32 kFgInfoFlat = 0x00A0C8FF;  // muted blue-white
+            constexpr duetos::u32 kFgWarnFlat = 0x00FFD860;  // amber
+            constexpr duetos::u32 kFgErrorFlat = 0x00FF6050; // soft red
+            constexpr duetos::u32 kFgDebugFlat = 0x00808080; // grey
+            const auto pal = duetos::drivers::video::app_widgets::AppPaletteFor(
+                duetos::drivers::video::ThemeCurrent()
+                    .role_client[static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::LogView)]);
             struct Render
             {
-                duetos::u32 cx, cy, col, row, max_col, max_row, fg, bg;
+                duetos::u32 cx, cy, col, row, max_col, max_row, row_h;
+                // Per-level tag colours, resolved once per paint.
+                duetos::u32 info, warn, error, debug;
+                // Body ink for a non-warning line, and the colour the
+                // NEXT character is painted in.
+                duetos::u32 body_fg, fg, bg;
                 bool done;
             };
             static Render r;
@@ -3258,14 +3360,26 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
             r.cy = cy;
             r.col = 0;
             r.row = 0;
+            // 12-px rows under Aurora: the design's line-height is
+            // 20/11.5 px, i.e. comfortably leaded. 10 px stays on the
+            // flat palettes so their row count is unchanged.
+            r.row_h = pal.aurora ? 12u : 10u;
             r.max_col = cw / 8;
-            r.max_row = ch / 10;
-            r.fg = kFgInfo;
+            r.max_row = ch / r.row_h;
+            r.info = pal.aurora ? pal.accent : kFgInfoFlat;
+            r.warn = pal.aurora ? pal.accent_peer : kFgWarnFlat;
+            r.error = pal.aurora ? pal.danger : kFgErrorFlat;
+            r.debug = pal.aurora ? pal.ink_3 : kFgDebugFlat;
+            r.body_fg = pal.aurora ? pal.ink_2 : kFgInfoFlat;
+            r.fg = r.body_fg;
             // Match the window's current client fill so text cells
             // blend cleanly into the chrome after a theme switch.
-            r.bg = duetos::drivers::video::ThemeCurrent()
-                       .role_client[static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::LogView)];
+            r.bg = pal.aurora ? pal.body
+                              : duetos::drivers::video::ThemeCurrent()
+                                    .role_client[static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::LogView)];
             r.done = false;
+            if (pal.aurora)
+                duetos::drivers::video::FramebufferFillRect(cx, cy, cw, ch, r.bg);
             duetos::core::DumpLogRingTo(
                 [](const char* s)
                 {
@@ -3275,21 +3389,30 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
                     // is '[' for the tag chunks klog emits.
                     // Other chunks (subsystem, message) don't
                     // start with '[' so won't match.
+                    // Ink the REST of this line takes once the tag has
+                    // been painted. Info / debug fall back to the muted
+                    // body ink; warnings and errors keep their wash for
+                    // the whole message, per the design.
+                    duetos::u32 rest_fg = r.fg;
                     if (s[0] == '[' && s[2] == ']')
                     {
                         switch (s[1])
                         {
                         case 'I':
-                            r.fg = kFgInfo;
+                            r.fg = r.info;
+                            rest_fg = r.body_fg;
                             break;
                         case 'W':
-                            r.fg = kFgWarn;
+                            r.fg = r.warn;
+                            rest_fg = r.warn;
                             break;
                         case 'E':
-                            r.fg = kFgError;
+                            r.fg = r.error;
+                            rest_fg = r.error;
                             break;
                         case 'D':
-                            r.fg = kFgDebug;
+                            r.fg = r.debug;
+                            rest_fg = r.debug;
                             break;
                         default:
                             break;
@@ -3319,9 +3442,11 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
                                 return;
                             }
                         }
-                        duetos::drivers::video::FramebufferDrawChar(r.cx + r.col * 8, r.cy + r.row * 10, c, r.fg, r.bg);
+                        duetos::drivers::video::FramebufferDrawChar(r.cx + r.col * 8, r.cy + r.row * r.row_h, c, r.fg,
+                                                                    r.bg);
                         ++r.col;
                     }
+                    r.fg = rest_fg;
                 });
         },
         nullptr);
@@ -3709,10 +3834,9 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         DUETOS_BOOT_SELFTEST(duetos::apps::netstatus::NetStatusSelfTest());
     }
 
-    // DEVICE MANAGER — read-only PCI device list. Handle captured for the
-    // desktop-icon registration below (Device Manager has no ThemeRole, so
-    // its icon binds to the window handle directly).
-    duetos::drivers::video::WindowHandle devicemgr_win = duetos::drivers::video::kWindowInvalid;
+    // DEVICE MANAGER — read-only PCI device list. Reached from the Start
+    // menu's system group (menu action 61); it has no ThemeRole and no
+    // desktop icon.
     {
         duetos::drivers::video::WindowChrome chrome = theme_chrome(Role::TaskManager);
         chrome.x = 260;
@@ -3723,7 +3847,6 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         duetos::drivers::video::WindowSetVisible(h, false);
         duetos::apps::devicemgr::DeviceMgrInit(h);
         DUETOS_BOOT_SELFTEST(duetos::apps::devicemgr::DeviceMgrSelfTest());
-        devicemgr_win = h;
     }
 
     // FIREWALL — empty-state placeholder; honest about the absent
@@ -3740,28 +3863,35 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         DUETOS_BOOT_SELFTEST(duetos::apps::firewall::FirewallSelfTest());
     }
 
-    // DESKTOP ICONS — surface the canonical destinations on the bare
-    // desktop (double-click to launch), the way every other OS does.
-    // Targets are window handles: themed apps resolve via ThemeRoleWindow,
-    // Device Manager uses the handle captured above. "Computer" and "Trash"
-    // both open the Files manager — it shows drives in its disk view, which
-    // is also where deleted items live (/TRASH); a standalone trash window
-    // is a follow-up.
+    // DESKTOP ICONS — the four launchers docs/aurora-theme/README.md §1
+    // puts on the bare desktop, in the reference's reading order (Task
+    // Manager / Kernel Log across the top row, Inspect / Files below).
+    // Double-click raises the bound window.
+    //
+    // This set is NOT theme-conditional. See Design-Decisions "Desktop
+    // icon set is one list for every theme": the palette decides how the
+    // shell looks, never which destinations the OS offers, and the icon
+    // array is populated once here while `theme` can be switched at any
+    // time from the shell or a restored session.
+    //
+    // "Inspect" opens the native debugger — its Disasm / Memory / Symbols
+    // tabs are DuetOS's binary-inspection surface, which is the job the
+    // design's Inspect screen does. There is no separate PE-inspector app.
     {
         using duetos::drivers::video::DesktopIconRegister;
         using duetos::drivers::video::IconGlyph;
         using duetos::drivers::video::ThemeRoleWindow;
-        DesktopIconRegister("Computer", IconGlyph::Computer, ThemeRoleWindow(Role::Files));
-        DesktopIconRegister("Browser", IconGlyph::Browser, ThemeRoleWindow(Role::Browser));
-        DesktopIconRegister("Terminal", IconGlyph::Terminal, ThemeRoleWindow(Role::Terminal));
-        DesktopIconRegister("Calculator", IconGlyph::Calculator, ThemeRoleWindow(Role::Calculator));
-        DesktopIconRegister("Notepad", IconGlyph::Notepad, ThemeRoleWindow(Role::Notes));
-        DesktopIconRegister("Settings", IconGlyph::Settings, ThemeRoleWindow(Role::Settings));
-        DesktopIconRegister("Device Mgr", IconGlyph::DeviceMgr, devicemgr_win);
-        DesktopIconRegister("Trash", IconGlyph::Trash, ThemeRoleWindow(Role::Files));
-        DesktopIconRegister("Help", IconGlyph::Help, ThemeRoleWindow(Role::Help));
+        DesktopIconRegister("Task Manager", IconGlyph::TaskManager, ThemeRoleWindow(Role::TaskManager));
+        DesktopIconRegister("Kernel Log", IconGlyph::KernelLog, ThemeRoleWindow(Role::LogView));
+        DesktopIconRegister("Inspect", IconGlyph::Inspect, duetos::apps::dbg::DbgWindow());
+        DesktopIconRegister("Files", IconGlyph::Files, ThemeRoleWindow(Role::Files));
         DUETOS_BOOT_SELFTEST(duetos::drivers::video::DesktopIconsSelfTest());
     }
+
+    // DESKTOP GADGETS — the clock/date glass panel down the right edge
+    // (README §1's gadget column). Painted from DesktopCompose; nothing
+    // to register, so this is just the layout self-test.
+    DUETOS_BOOT_SELFTEST(duetos::drivers::video::DesktopGadgetsSelfTest());
 
     // Framebuffer text console. 80x40 chars of boot log at the
     // bottom of the desktop, under the windows in z-order. Dragging

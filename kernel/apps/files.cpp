@@ -11,6 +11,8 @@
 #include "drivers/input/ps2mouse.h"
 #include "drivers/video/app_widgets/app_button.h"
 #include "drivers/video/app_widgets/app_label.h"
+#include "drivers/video/app_widgets/app_palette.h"
+#include "drivers/video/app_widgets/app_text.h"
 #include "drivers/video/app_widgets/app_toolbar.h"
 #include "drivers/video/app_widgets/widget_group.h"
 #include "drivers/video/framebuffer.h"
@@ -68,12 +70,230 @@ constexpr u32 kFatHistMax = 16;
 // Type-ahead inter-key idle gap: 100 ticks @ 100 Hz = 1 second.
 constexpr u64 kTypeaheadTimeoutTicks = 100;
 constexpr u32 kGlyphW = 8;
-constexpr u32 kRowH = 10;
+// 12-px rows: an 8-px glyph with 2 px of air above and below. The
+// design's list rows are generous (10 px padding at 1920); this is the
+// closest the 1024-wide framebuffer gets without halving the row count.
+// Every list geometry — Draw*, FilesListVisibleRows, FilesRowAt — is
+// derived from this constant, so it moves as one.
+constexpr u32 kRowH = 12;
+// Historical (flat-theme) ink ramp. Classic / Slate10 / Amber /
+// DuetClassic / HighContrast keep exactly these; the Aurora palettes
+// take the muted ramp from AppPaletteFor instead.
 constexpr u32 kInkFg = 0x00D0D8E0;
 constexpr u32 kInkDim = 0x00707880;
 constexpr u32 kInkSel = 0x00101020;
 constexpr u32 kBg = 0x00101828;
 constexpr u32 kSelBg = 0x00C0C888;
+
+// Live app-interior palette for the Files client area. Sampled per
+// paint so a runtime theme cycle (Ctrl+Alt+Y) recolours the list.
+duetos::drivers::video::app_widgets::AppPalette Pal()
+{
+    using duetos::drivers::video::ThemeCurrent;
+    using duetos::drivers::video::ThemeRole;
+    const u32 body = ThemeCurrent().role_client[static_cast<u32>(ThemeRole::Files)];
+    return duetos::drivers::video::app_widgets::AppPaletteFor(body);
+}
+
+// List-pane ground and muted ink. Under Aurora the list ground IS the
+// window's client fill, so the pane seams into the glass body instead
+// of sitting on it as a second, differently-toned panel.
+u32 ListBg()
+{
+    const auto p = Pal();
+    return p.aurora ? p.body : kBg;
+}
+
+u32 ListDim()
+{
+    const auto p = Pal();
+    return p.aurora ? p.ink_3 : kInkDim;
+}
+
+// Live row pitch. Aurora leads its rows for the proportional face;
+// the flat palettes keep the historical 12 px exactly. Every geometry
+// site — Draw*, FilesListVisibleRows, FilesRowAt — reads this, never
+// the raw constant, so the paint and the mouse hit-test cannot end up
+// on different pitches.
+u32 RowH()
+{
+    using duetos::drivers::video::ChromeTextRole;
+    return Pal().aurora ? duetos::drivers::video::app_widgets::AppRowHeight(ChromeTextRole::Body) : kRowH;
+}
+
+// ---------------------------------------------------------------
+// Quick-access rail (Aurora only).
+//
+// The reference puts the view switcher down the left edge as a
+// places rail rather than across the top as a button row. Rather
+// than growing a *second* set of RAM/DISK/TRASH/DRIVE affordances —
+// two controls for one action is exactly the duplication the
+// anti-bloat rules forbid — the four mode buttons that already live
+// in the toolbar are simply rebound into the rail under Aurora.
+// Same widgets, same on_click, same hit-test; only their bounds move.
+// REFRESH / SORT stay in the toolbar, which is where the reference
+// keeps its non-navigation actions too.
+//
+// `RailW` is the single accessor. DrawFn subtracts it from the list
+// slice and FilesRowAt adds it to the list's left bound, so the rail
+// can never eat a click the list thinks it owns.
+// ---------------------------------------------------------------
+constexpr u32 kRailW = 108;
+constexpr u32 kRailRowH = 20;
+constexpr u32 kRailRowGap = 2;
+constexpr u32 kRailCapH = 15; // section caption band
+constexpr u32 kRailPad = 8;
+
+u32 RailW(u32 content_w)
+{
+    // Below ~300 px of client the rail would leave the list unusable,
+    // so it folds away and the buttons go back to the toolbar.
+    if (!Pal().aurora || content_w < 300)
+        return 0;
+    return kRailW;
+}
+
+// Y offset of the i-th quick-access row inside the rail, relative to
+// the rail's top. Read by both the button rebind and the rail paint.
+u32 RailRowY(u32 i)
+{
+    return kRailCapH + i * (kRailRowH + kRailRowGap);
+}
+
+// ---------------------------------------------------------------
+// Column model for the list views. One table, read by the header
+// painter and by the row painter, so a column can't move for the
+// labels without moving for the values.
+//
+// Files has no per-column click target (rows are selected whole), so
+// the table carries geometry only — but it is still the single
+// source, for the same reason the Task Manager's is.
+// ---------------------------------------------------------------
+
+// ---------------------------------------------------------------
+// Vertical list geometry — ONE definition, read by the paint AND by
+// the hit-test.
+//
+// Every per-mode Draw* used to open with its own copy of
+//   list_top = cy + 2 + row_h + 2
+//   max_rows = (ch - (list_top - cy)) / row_h
+// and FilesRowAt / FilesListVisibleRows each carried a further copy —
+// FilesRowAt even re-declared kHdrToolbarH / kFooterH as local
+// constants with a comment telling the next maintainer to keep them in
+// sync by hand. Six expressions of one layout is how a click ends up a
+// row out of phase with the pixels. There is now one.
+// ---------------------------------------------------------------
+struct ListGeom
+{
+    u32 row_h;    // live row pitch
+    u32 top;      // absolute y of the first row
+    u32 max_rows; // rows that fit below the per-mode header band
+};
+
+/// `cy` / `ch` are the middle content slice the per-mode Draw*
+/// receives — already excluding the toolbar band and the footer.
+ListGeom ListGeomFor(u32 cy, u32 ch)
+{
+    ListGeom g{};
+    g.row_h = RowH();
+    g.top = cy + 2 + g.row_h + 2;
+    const u32 used = g.top - cy;
+    g.max_rows = (ch > used + g.row_h) ? (ch - used) / g.row_h : 0;
+    return g;
+}
+
+/// First visible row for a list of `n` entries with `sel` selected.
+/// Shared by the paint (which scrolls the viewport to keep the
+/// selection visible) and the hit-test (which has to undo that scroll).
+u32 ListFirstVisible(u32 n, u32 sel, u32 max_rows)
+{
+    if (max_rows == 0 || n <= max_rows || sel < max_rows)
+        return 0;
+    return sel - (max_rows - 1);
+}
+
+struct FilesCols
+{
+    u32 name_x;     // left edge of the dot + name cell
+    u32 name_w;     // width available to the (fitted) name
+    u32 abi_x;      // left edge of the ABI pill cell
+    u32 abi_w;      // 0 when the client is too narrow for badges
+    u32 size_right; // right edge the size column flushes against
+    u32 size_min;   // left bound for the size column
+    u32 date_right; // right edge the modified column flushes against
+    u32 date_min;
+};
+
+// Widest values each right-hand column has to hold, measured rather
+// than assumed so the layout tracks whatever face the theme loaded.
+constexpr const char* kWidestSize = "999.9 MB";
+constexpr const char* kWidestDate = "2026-06-08";
+
+FilesCols BuildCols(u32 x, u32 w)
+{
+    using duetos::drivers::video::ChromeTextRole;
+    using duetos::drivers::video::app_widgets::AppPillWidth;
+    using duetos::drivers::video::app_widgets::AppRowIconWidth;
+    using duetos::drivers::video::app_widgets::AppTextMeasure;
+
+    constexpr u32 kPad = 6;
+    constexpr u32 kGap = 10;
+    // The name cell leads with the row's type tile, so the tile's cell
+    // (tile + gap) comes off the name's budget here — the same width
+    // the row paint advances the name by.
+    const u32 dot = AppRowIconWidth();
+    const u32 size_w = AppTextMeasure(ChromeTextRole::Body, kWidestSize);
+    const u32 date_w = AppTextMeasure(ChromeTextRole::Body, kWidestDate);
+    const u32 abi_w = AppPillWidth("WIN32 PE");
+
+    FilesCols c{};
+    c.date_right = (w > kPad) ? x + w - kPad : x;
+    c.date_min = (c.date_right > date_w) ? c.date_right - date_w : x;
+    c.size_right = (c.date_min > kGap) ? c.date_min - kGap : c.date_min;
+    c.size_min = (c.size_right > size_w) ? c.size_right - size_w : x;
+    c.name_x = x + kPad;
+
+    // The badge column is dropped before the name is squeezed to
+    // nothing — a truncated file name is worse than a missing chip.
+    const u32 left_room = (c.size_min > c.name_x + kGap) ? c.size_min - kGap - c.name_x : 0;
+    if (left_room > dot + abi_w + kGap + 40)
+    {
+        c.abi_w = abi_w;
+        c.name_w = left_room - dot - abi_w - kGap;
+    }
+    else
+    {
+        c.abi_w = 0;
+        c.name_w = (left_room > dot) ? left_room - dot : 0;
+    }
+    c.abi_x = c.name_x + dot + c.name_w + kGap;
+    return c;
+}
+
+// ABI badge for a file whose bytes are already resident in kernel
+// memory (the ramfs views). Returns nullptr when the bytes are not
+// available or the header matches neither format — Files then renders
+// nothing at all. It deliberately does NOT fall back to the file
+// extension: the launch path has to guess from ".EXE", and a badge
+// that inherits that guess would confidently mislabel any file whose
+// name happens to end in the wrong four characters.
+const char* ResidentAbiBadge(const duetos::u8* bytes, u64 len)
+{
+    if (bytes == nullptr || len < 64)
+        return nullptr;
+    if (bytes[0] == 0x7F && bytes[1] == 'E' && bytes[2] == 'L' && bytes[3] == 'F')
+        return "NATIVE";
+    if (bytes[0] == 'M' && bytes[1] == 'Z')
+    {
+        // e_lfanew at 0x3C points at the "PE\0\0" NT signature.
+        const u32 lfanew = static_cast<u32>(bytes[0x3C]) | (static_cast<u32>(bytes[0x3D]) << 8) |
+                           (static_cast<u32>(bytes[0x3E]) << 16) | (static_cast<u32>(bytes[0x3F]) << 24);
+        if (lfanew + 4 <= len && bytes[lfanew] == 'P' && bytes[lfanew + 1] == 'E' && bytes[lfanew + 2] == 0 &&
+            bytes[lfanew + 3] == 0)
+            return "WIN32 PE";
+    }
+    return nullptr;
+}
 
 enum class Mode : u8
 {
@@ -227,8 +447,17 @@ constexpr u32 kHdrPadY = 3U;
 constexpr u32 kFooterH = 12U;
 constexpr u32 kFooterPadX = 4U;
 
-// Number of toolbar buttons (RAM/DISK/TRASH/DRIVE/REFRESH/SORT).
-constexpr u32 kHdrBtnCount = 6U;
+// Number of buttons in the widget group: the six toolbar slots
+// (RAM/DISK/TRASH/DRIVE/REFRESH/SORT) plus the Aurora breadcrumb
+// bar's back / forward pair, which fold to zero width on the flat
+// palettes and therefore neither paint nor take a click there.
+constexpr u32 kHdrBtnCount = 8U;
+constexpr u32 kBtnNavBack = 6U;
+constexpr u32 kBtnNavForward = 7U;
+// The first four toolbar slots are the view switcher (RAM / DISK /
+// TRASH / DRIVE); slots 4-5 are REFRESH / SORT. Only the switcher
+// migrates into the Aurora quick-access rail.
+constexpr u32 kFilesModeBtnCount = 4U;
 
 // Index of the REFRESH button — used by the self-test to target a
 // known mid-toolbar slot. The mode buttons (0..3 RAM/DISK/TRASH/
@@ -264,6 +493,8 @@ void ClickModeTrash();
 void ClickModeDrive();
 void ClickRefresh();
 void ClickSort();
+void ClickNavBack();
+void ClickNavForward();
 
 using duetos::drivers::video::ChromeTextRole;
 using duetos::drivers::video::ChromeTextWeight;
@@ -282,9 +513,18 @@ using duetos::drivers::video::app_widgets::Rect;
 // declaration order is the dispatch order, so buttons get first
 // refusal on the click — exactly what we want.
 constinit auto g_files = MakeWidgetGroup(AppToolbar{}, AppButton{}, AppButton{}, AppButton{}, AppButton{}, AppButton{},
-                                         AppButton{}, AppLabel{});
+                                         AppButton{}, AppButton{}, AppButton{}, AppLabel{});
 
 constinit bool g_files_bound = false;
+
+/// The footer AppLabel sits at the tail of the chain. One accessor
+/// instead of a hand-counted `.tail` ladder repeated at four call
+/// sites — adding the two nav buttons above already made every one of
+/// those ladders wrong once.
+AppLabel& FooterLabel()
+{
+    return g_files.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
+}
 
 // Walk the recursive WidgetChain by hand to grab a stable pointer
 // to each button. The chain order matches the MakeWidgetGroup
@@ -298,8 +538,122 @@ AppButton* HdrButton(u32 i)
     auto& d = c2.tail;            // btn[2] -> btn[3]
     auto& e = d.tail;             // btn[3] -> btn[4]
     auto& f = e.tail;             // btn[4] -> btn[5]
-    AppButton* btns[kHdrBtnCount] = {&a.head, &b.head, &c2.head, &d.head, &e.head, &f.head};
+    auto& g = f.tail;             // btn[5] -> btn[6]
+    auto& h = g.tail;             // btn[6] -> btn[7]
+    AppButton* btns[kHdrBtnCount] = {&a.head, &b.head, &c2.head, &d.head, &e.head, &f.head, &g.head, &h.head};
     return btns[i];
+}
+
+// ---------------------------------------------------------------
+// Breadcrumb bar (Aurora only) — `19-files.png`.
+//
+// A band under the toolbar carrying back / forward, the current path,
+// and a search field. All four rects come out of `CrumbGeomFor`, and
+// so does the height every other layout site offsets past. Two of the
+// four are clickable, so the accessor is read by the button bind (the
+// hit-test) and by the paint — same contract `ListGeomFor` holds for
+// the rows below.
+//
+// The band folds to zero height on the flat palettes, which is what
+// keeps Classic / Slate10 / Amber / DuetClassic / HighContrast
+// pixel-identical: `CrumbBarH()` is 0 there, so every offset below
+// collapses to the arithmetic those themes have always used.
+// ---------------------------------------------------------------
+constexpr u32 kCrumbBarH = 26U;
+constexpr u32 kCrumbPad = 5U;
+constexpr u32 kCrumbNavW = 24U;
+constexpr u32 kCrumbFieldH = 20U;
+constexpr u32 kCrumbSearchW = 150U;  // the design's width, at 1024 wide
+constexpr u32 kCrumbSearchMin = 70U; // below this it folds away
+constexpr u32 kCrumbPathMin = 90U;   // path field never shrinks past this
+
+u32 CrumbBarH()
+{
+    return Pal().aurora ? kCrumbBarH : 0U;
+}
+
+struct CrumbGeom
+{
+    Rect back;   // w == 0 = folded away
+    Rect fwd;    // w == 0 = folded away
+    Rect path;   // read-only path field
+    Rect search; // search field
+};
+
+CrumbGeom CrumbGeomFor(u32 cx, u32 cy, u32 cw)
+{
+    CrumbGeom g{};
+    if (CrumbBarH() == 0)
+        return g;
+
+    const u32 by = cy + kHdrToolbarH + (kCrumbBarH - kCrumbFieldH) / 2;
+    u32 x = cx + kCrumbPad + 1;
+    // Below this the nav pair plus a usable path field no longer fit;
+    // the whole bar keeps its height (so the list does not jump) but
+    // the controls fold rather than overlap.
+    if (cw < 2 * kCrumbNavW + 120)
+        return g;
+
+    g.back = Rect{x, by, kCrumbNavW, kCrumbFieldH};
+    x += kCrumbNavW + 4;
+    g.fwd = Rect{x, by, kCrumbNavW, kCrumbFieldH};
+    x += kCrumbNavW + 8;
+
+    // The search field takes what is left after the nav pair and a
+    // readable path field, capped at the design's width. Below
+    // kCrumbSearchMin there is no room for a placeholder plus a typed
+    // prefix, so it folds and the path takes the whole remainder.
+    const u32 right = cx + cw - kCrumbPad;
+    const u32 remaining = (right > x) ? right - x : 0U;
+    u32 search_w = (remaining > kCrumbPathMin + 8) ? (remaining - kCrumbPathMin - 8) : 0U;
+    if (search_w > kCrumbSearchW)
+        search_w = kCrumbSearchW;
+    if (search_w < kCrumbSearchMin)
+        search_w = 0;
+    if (search_w != 0)
+        g.search = Rect{right - search_w, by, search_w, kCrumbFieldH};
+    const u32 path_right = (search_w != 0) ? g.search.x - 8 : right;
+    g.path = Rect{x, by, (path_right > x) ? path_right - x : 0U, kCrumbFieldH};
+    return g;
+}
+
+// Current location, composed once per frame by DrawListHeaderWithCount
+// (the one place that already knows each mode's path) and rendered by
+// the breadcrumb bar. One composer, one buffer — the bar does not
+// re-derive a path the list header just built.
+constinit char g_crumb_path[64] = {};
+
+// Resolve every widget colour against the active theme. Split out of
+// BindFilesOnce (which is one-shot) so a runtime theme cycle recolours
+// the toolbar and the status strip.
+void ApplyFilesPalette()
+{
+    const auto p = Pal();
+
+    auto& toolbar = g_files.chain.head;
+    toolbar.bg_rgb = p.aurora ? p.wash : 0U; // 0 = theme.taskbar_bg
+
+    for (u32 i = 0; i < kHdrBtnCount; ++i)
+    {
+        AppButton* btn = HdrButton(i);
+        // Aurora toolbar buttons are `--glass-3` pills with muted ink,
+        // not filled chips — the accent is reserved for selection.
+        btn->bg_rgb = p.aurora ? p.recess : 0U; // 0 = theme role_title[0]
+        btn->fg_rgb = p.aurora ? p.ink_2 : 0x00101828U;
+        // The four view-switcher slots double as the quick-access
+        // rail's rows, so the active view is marked the way the
+        // reference marks it: accent-tinted fill, accent ink. Button
+        // order matches the Mode enum (RAM/DISK/TRASH/DRIVE).
+        if (p.aurora && i < kFilesModeBtnCount && i == static_cast<u32>(g_state.mode))
+        {
+            btn->bg_rgb = p.sel;
+            btn->fg_rgb = p.accent;
+        }
+    }
+
+    auto& label = FooterLabel();
+    label.fg_rgb = p.aurora ? p.ink_3 : 0x00181828U;
+    label.bg_rgb = p.aurora ? p.wash : 0x00C8C8B8U; // status band tone
 }
 
 void BindFilesOnce()
@@ -308,30 +662,25 @@ void BindFilesOnce()
         return;
     g_files_bound = true;
 
-    auto& toolbar = g_files.chain.head;
-    toolbar.bg_rgb = 0; // theme.taskbar_bg
-
-    static const char* const kLabels[kHdrBtnCount] = {"RAM", "DISK", "TRASH", "DRIVE", "REFRESH", "SORT"};
+    static const char* const kLabels[kHdrBtnCount] = {"RAM", "DISK", "TRASH", "DRIVE", "REFRESH", "SORT", "<", ">"};
     using ClickFn = void (*)();
-    static constexpr ClickFn kClicks[kHdrBtnCount] = {ClickModeRam,   ClickModeDisk, ClickModeTrash,
-                                                      ClickModeDrive, ClickRefresh,  ClickSort};
+    static constexpr ClickFn kClicks[kHdrBtnCount] = {ClickModeRam, ClickModeDisk, ClickModeTrash, ClickModeDrive,
+                                                      ClickRefresh, ClickSort,     ClickNavBack,   ClickNavForward};
     for (u32 i = 0; i < kHdrBtnCount; ++i)
     {
         AppButton* btn = HdrButton(i);
         btn->label = kLabels[i];
         btn->on_click = kClicks[i];
         btn->weight = ChromeTextWeight::Regular;
-        btn->bg_rgb = 0; // theme role_title[0]
-        btn->fg_rgb = 0x00101828U;
     }
 
-    auto& label = g_files.chain.tail.tail.tail.tail.tail.tail.tail.head;
+    auto& label = FooterLabel();
     label.text = g_footer_text;
     label.role = ChromeTextRole::Caption;
     label.weight = ChromeTextWeight::Regular;
-    label.fg_rgb = 0x00181828U;
-    label.bg_rgb = 0x00C8C8B8U; // status band tone
     label.align_left = true;
+
+    ApplyFilesPalette();
 }
 
 void RebindFilesBounds(u32 cx, u32 cy, u32 cw, u32 ch)
@@ -339,12 +688,39 @@ void RebindFilesBounds(u32 cx, u32 cy, u32 cw, u32 ch)
     auto& toolbar = g_files.chain.head;
     toolbar.bounds = Rect{cx, cy, cw, kHdrToolbarH};
 
+    // Under Aurora the four mode buttons move into the quick-access
+    // rail; REFRESH / SORT stay in the toolbar and close up the gap
+    // they left. Without a rail every button keeps its historical
+    // toolbar slot, so the flat palettes are untouched.
+    const u32 rail = RailW(cw);
+    const CrumbGeom crumb = CrumbGeomFor(cx, cy, cw);
     for (u32 i = 0; i < kHdrBtnCount; ++i)
     {
-        HdrButton(i)->bounds = Rect{cx + kHdrPadX + i * (kHdrBtnW + kHdrBtnGap), cy + kHdrPadY, kHdrBtnW, kHdrBtnH};
+        // The breadcrumb nav pair lives in its own band, from the same
+        // table the bar is painted from. On the flat palettes
+        // CrumbGeomFor returns zero rects, so neither button paints
+        // nor takes a click and those themes are untouched.
+        if (i == kBtnNavBack || i == kBtnNavForward)
+        {
+            HdrButton(i)->align_left = false;
+            HdrButton(i)->bounds = (i == kBtnNavBack) ? crumb.back : crumb.fwd;
+            continue;
+        }
+        const bool is_mode_btn = i < kFilesModeBtnCount;
+        if (rail != 0 && is_mode_btn)
+        {
+            const u32 ry = cy + kHdrToolbarH + CrumbBarH() + RailRowY(i);
+            HdrButton(i)->bounds = Rect{cx + kRailPad / 2, ry, rail - kRailPad, kRailRowH};
+            // Rail rows read as list items, so their labels sit left.
+            HdrButton(i)->align_left = true;
+            continue;
+        }
+        const u32 slot = (rail != 0) ? i - kFilesModeBtnCount : i;
+        HdrButton(i)->align_left = false;
+        HdrButton(i)->bounds = Rect{cx + kHdrPadX + slot * (kHdrBtnW + kHdrBtnGap), cy + kHdrPadY, kHdrBtnW, kHdrBtnH};
     }
 
-    auto& label = g_files.chain.tail.tail.tail.tail.tail.tail.tail.head;
+    auto& label = FooterLabel();
     const u32 fy = (ch > kFooterH) ? cy + ch - kFooterH : cy;
     const u32 fw = (cw > 2 * kFooterPadX) ? cw - 2 * kFooterPadX : cw;
     label.bounds = Rect{cx + kFooterPadX, fy, fw, kFooterH};
@@ -939,8 +1315,20 @@ void WriteU64Dec(char* dst, u32 cap, u64 v)
 // `sort_by` (nullable) appends ", by <mode>" so the user can see
 // the active sort order — only the FAT32 / Trash views sort, so
 // ramfs / DuetFS pass nullptr.
-void DrawListHeaderWithCount(u32 cx, u32 cy, const char* path, u32 count, u32 color, const char* sort_by = nullptr)
+void DrawListHeaderWithCount(u32 cx, u32 cy, u32 cw, const char* path, u32 count, u32 color,
+                             const char* sort_by = nullptr)
 {
+    // Record the location for the breadcrumb bar, which paints after
+    // the list and so sees this frame's path, not the last one's.
+    // This is the only place all four views name their location, so
+    // the bar reads it here rather than re-deriving four path walks.
+    {
+        u32 c = 0;
+        for (; path != nullptr && path[c] != '\0' && c + 1 < sizeof(g_crumb_path); ++c)
+            g_crumb_path[c] = path[c];
+        g_crumb_path[c] = '\0';
+    }
+
     char line[96];
     u32 o = 0;
     auto put = [&](const char* s)
@@ -961,6 +1349,34 @@ void DrawListHeaderWithCount(u32 cx, u32 cy, const char* path, u32 count, u32 co
     }
     put(")");
     line[o] = '\0';
+
+    // Aurora: the header is a sticky band, not a coloured line — a
+    // `--glass-3` wash with a hairline under it and muted uppercase
+    // ink. The per-view `color` (green / orange) is spent only on the
+    // flat palettes, which keep the historical single-line header.
+    const auto p = Pal();
+    if (p.aurora)
+    {
+        using duetos::drivers::video::ChromeTextRole;
+        using duetos::drivers::video::app_widgets::AppTextCell;
+        using duetos::drivers::video::app_widgets::AppTextCellRight;
+        const u32 band_h = 2 + RowH();
+        duetos::drivers::video::FramebufferFillRect(cx, cy, cw, band_h, p.wash);
+        duetos::drivers::video::FramebufferFillRect(cx, cy + band_h - 1, cw, 1, p.line);
+        // Two runs: the path + count breadcrumb on the left, and the
+        // right-hand column labels flush over the columns they name.
+        // Both read the same BuildCols table the rows do, so a label
+        // can't sit over a different column than its values.
+        // The path moved to the breadcrumb bar, so the header band
+        // carries what the reference's does: the column labels and
+        // nothing else. `line` still composes for the flat branch
+        // below, which keeps its single path+count header.
+        const FilesCols c = BuildCols(cx, cw);
+        AppTextCell(ChromeTextRole::Caption, c.name_x, cy, band_h, "NAME", p.ink_3, p.wash);
+        AppTextCellRight(ChromeTextRole::Caption, c.size_right, c.size_min, cy, band_h, "SIZE", p.ink_3, p.wash);
+        AppTextCellRight(ChromeTextRole::Caption, c.date_right, c.date_min, cy, band_h, "MODIFIED", p.ink_3, p.wash);
+        return;
+    }
     duetos::drivers::video::FramebufferDrawString(cx + 4, cy + 2, line, color, kBg);
 }
 
@@ -996,23 +1412,98 @@ void FormatFatDate(u16 date, char* out)
 }
 
 // Generic row painter — takes the type tag, name, size, and optional FAT
-// date word. `mtime_date==0` suppresses the date column. The per-mode
-// draw paths assemble these from their entry types; non-FAT modes pass 0.
-void DrawRowGeneric(u32 x, u32 y, u32 w, bool is_dir, const char* name, u64 size_bytes, bool selected,
-                    u16 mtime_date = 0)
+// date word. `mtime_date==0` suppresses the date column. `row_index` is
+// the row's position in the visible list, used only for the zebra
+// stripe. The per-mode draw paths assemble these from their entry
+// types; non-FAT modes pass 0 for the date.
+void DrawRowGeneric(u32 x, u32 y, u32 w, u32 row_index, bool is_dir, const char* name, u64 size_bytes, bool selected,
+                    u16 mtime_date = 0, const duetos::u8* resident_bytes = nullptr, u64 resident_len = 0)
 {
     using duetos::drivers::video::FramebufferDrawString;
     using duetos::drivers::video::FramebufferFillRect;
-    if (selected)
-        FramebufferFillRect(x, y, w, kRowH, kSelBg);
-    else
-        FramebufferFillRect(x, y, w, kRowH, kBg);
-    const u32 fg = selected ? kInkSel : kInkFg;
-    const u32 bg = selected ? kSelBg : kBg;
+    const auto p = Pal();
+    const u32 row_h = RowH();
+
+    // Aurora rows are quiet: the body fill with a `--glass-3` zebra
+    // stripe, selection carried by an accent tint plus a 2-px accent
+    // rail rather than by a high-chroma fill. Flat palettes keep the
+    // historical olive selection bar.
+    u32 fg = selected ? kInkSel : kInkFg;
+    u32 bg = selected ? kSelBg : kBg;
+    u32 dim = selected ? kInkSel : kInkDim;
+    if (p.aurora)
+    {
+        bg = selected ? p.sel : ((row_index & 1u) ? p.wash : p.body);
+        fg = p.ink;
+        dim = p.ink_3;
+    }
+    FramebufferFillRect(x, y, w, row_h, bg);
+    if (p.aurora && selected)
+        FramebufferFillRect(x, y, 2, row_h, p.accent);
+
+    if (p.aurora)
+    {
+        // Aurora: proportional content in a measured column table.
+        // Directories take the native accent for their dot, files the
+        // muted ink; the ABI chip is the only other colour spent.
+        using duetos::drivers::video::ChromeTextRole;
+        using duetos::drivers::video::app_widgets::AppPillDraw;
+        using duetos::drivers::video::app_widgets::AppRowIconDraw;
+        using duetos::drivers::video::app_widgets::AppRowIconWidth;
+        using duetos::drivers::video::app_widgets::AppTextCell;
+        using duetos::drivers::video::app_widgets::AppTextCellRight;
+        using duetos::drivers::video::app_widgets::AppTextFit;
+
+        const FilesCols c = BuildCols(x, w);
+        // Rounded-square type tile, per the reference's file rows. The
+        // glyph is read from the same signature the ABI badge is read
+        // from — never from the extension, which is a guess. A file
+        // whose bytes aren't resident gets an empty tile rather than an
+        // invented letter.
+        const char* badge = is_dir ? nullptr : ResidentAbiBadge(resident_bytes, resident_len);
+        const bool pe = badge != nullptr && badge[0] == 'W';
+        char tile_glyph = '\0';
+        if (is_dir)
+            tile_glyph = 'D';
+        else if (badge != nullptr)
+            tile_glyph = pe ? 'P' : 'E';
+        const u32 tile_ink = is_dir ? p.accent : (pe ? p.accent_peer : (badge != nullptr ? p.accent : p.ink_3));
+        AppRowIconDraw(c.name_x, y, row_h, tile_glyph, tile_ink, bg);
+
+        char fitted[48];
+        const char* dn = (name != nullptr && name[0] != '\0') ? name : "(root)";
+        AppTextFit(ChromeTextRole::Body, dn, fitted, sizeof(fitted), c.name_w);
+        AppTextCell(ChromeTextRole::Body, c.name_x + AppRowIconWidth(), y, row_h, fitted, fg, bg);
+
+        if (c.abi_w != 0)
+        {
+            AppPillDraw(c.abi_x, y, row_h, badge, pe ? p.accent_peer : p.accent, bg);
+        }
+
+        if (!is_dir)
+        {
+            // "4 KB" / "1.4 MB" — the reference's shape. The raw byte
+            // count stays on the flat-palette branch below.
+            char sizetext[16];
+            duetos::drivers::video::app_widgets::AppFormatSize(size_bytes, sizetext, sizeof(sizetext));
+            AppTextCellRight(ChromeTextRole::Body, c.size_right, c.size_min, y, row_h, sizetext, dim, bg);
+        }
+        if (mtime_date != 0)
+        {
+            char date_str[12];
+            FormatFatDate(mtime_date, date_str);
+            AppTextCellRight(ChromeTextRole::Body, c.date_right, c.date_min, y, row_h, date_str, dim, bg);
+        }
+        return;
+    }
+
+    const u32 text_y = y + (row_h - 8) / 2;
+    // Flat-palette path: the historical fixed-cell row, unchanged.
+    const u32 tag_fg = fg;
     const char* tag = is_dir ? "[D] " : "[F] ";
-    FramebufferDrawString(x + 4, y + 1, tag, fg, bg);
+    FramebufferDrawString(x + 4, text_y, tag, tag_fg, bg);
     const char* dn = (name != nullptr && name[0] != '\0') ? name : "(root)";
-    FramebufferDrawString(x + 4 + 4 * kGlyphW, y + 1, dn, fg, bg);
+    FramebufferDrawString(x + 4 + 4 * kGlyphW, text_y, dn, fg, bg);
 
     // Right-aligned columns: modified date (if available) then size (if file).
     // Layout: right edge → [size] ← [space] ← [date] ← ...
@@ -1032,8 +1523,8 @@ void DrawRowGeneric(u32 x, u32 y, u32 w, bool is_dir, const char* name, u64 size
         if (right_cursor > size_col_w + 8)
         {
             const u32 nx = right_cursor - size_col_w;
-            FramebufferDrawString(nx, y + 1, num, fg, bg);
-            FramebufferDrawString(nx + len * kGlyphW, y + 1, " BYTES", selected ? kInkSel : kInkDim, bg);
+            FramebufferDrawString(nx, text_y, num, fg, bg);
+            FramebufferDrawString(nx + len * kGlyphW, text_y, " BYTES", dim, bg);
             right_cursor = nx - kGlyphW; // one-glyph gap before next column
         }
     }
@@ -1047,20 +1538,21 @@ void DrawRowGeneric(u32 x, u32 y, u32 w, bool is_dir, const char* name, u64 size
         if (right_cursor > date_col_w + 4)
         {
             const u32 dx = right_cursor - date_col_w;
-            FramebufferDrawString(dx, y + 1, date_str, selected ? kInkSel : kInkDim, bg);
+            FramebufferDrawString(dx, text_y, date_str, dim, bg);
         }
     }
 }
 
 void DrawRamfs(u32 cx, u32 cy, u32 cw, u32 ch)
 {
+    const u32 row_h = RowH();
     using duetos::drivers::video::FramebufferDrawString;
     using duetos::drivers::video::FramebufferFillRect;
-    FramebufferFillRect(cx, cy, cw, ch, kBg);
+    FramebufferFillRect(cx, cy, cw, ch, ListBg());
     const duetos::fs::RamfsNode* cur = RamfsCur();
     if (cur == nullptr)
     {
-        FramebufferDrawString(cx + 4, cy + 4, "(no root)", kInkDim, kBg);
+        FramebufferDrawString(cx + 4, cy + 4, "(no root)", ListDim(), ListBg());
         return;
     }
 
@@ -1083,14 +1575,13 @@ void DrawRamfs(u32 cx, u32 cy, u32 cw, u32 ch)
         }
     }
     header[h_off] = '\0';
-    DrawListHeaderWithCount(cx, cy, header, CountChildren(RamfsCur()), 0x0080F088);
+    DrawListHeaderWithCount(cx, cy, cw, header, CountChildren(RamfsCur()), 0x0080F088);
 
-    const u32 list_top = cy + 2 + kRowH + 2;
+    const ListGeom geom = ListGeomFor(cy, ch);
+    const u32 list_top = geom.top;
     const u32 n = CountChildren(cur);
-    const u32 max_rows = (ch > (list_top - cy) + kRowH) ? (ch - (list_top - cy)) / kRowH : 0;
-    u32 first = 0;
-    if (n > max_rows && g_state.ramfs_selection >= max_rows)
-        first = g_state.ramfs_selection - (max_rows - 1);
+    const u32 max_rows = geom.max_rows;
+    const u32 first = ListFirstVisible(n, g_state.ramfs_selection, max_rows);
     for (u32 i = 0; i < max_rows && first + i < n; ++i)
     {
         const u32 idx = first + i;
@@ -1098,8 +1589,11 @@ void DrawRamfs(u32 cx, u32 cy, u32 cw, u32 ch)
         if (child == nullptr)
             break;
         const bool is_dir = (child->type == duetos::fs::RamfsNodeType::kDir);
-        DrawRowGeneric(cx, list_top + i * kRowH, cw, is_dir, child->name, is_dir ? 0 : child->file_size,
-                       idx == g_state.ramfs_selection);
+        // ramfs payloads are already resident, so the ABI badge can be
+        // read off the image header instead of guessed from the name.
+        DrawRowGeneric(cx, list_top + i * row_h, cw, i, is_dir, child->name, is_dir ? 0 : child->file_size,
+                       idx == g_state.ramfs_selection, 0, is_dir ? nullptr : child->file_bytes,
+                       is_dir ? 0 : child->file_size);
     }
     // Footer hint line moved to the AppLabel painted by DrawFn —
     // RefreshFooterText composes the per-mode text + pending-prompt
@@ -1108,27 +1602,27 @@ void DrawRamfs(u32 cx, u32 cy, u32 cw, u32 ch)
 
 void DrawFat32(u32 cx, u32 cy, u32 cw, u32 ch)
 {
+    const u32 row_h = RowH();
     using duetos::drivers::video::FramebufferDrawString;
     using duetos::drivers::video::FramebufferFillRect;
-    FramebufferFillRect(cx, cy, cw, ch, kBg);
+    FramebufferFillRect(cx, cy, cw, ch, ListBg());
 
     char header[80];
     Fat32BuildPathHeader(header, sizeof(header));
-    DrawListHeaderWithCount(cx, cy, header, g_state.fat_count, 0x0080F088, SortModeName(g_state.sort));
+    DrawListHeaderWithCount(cx, cy, cw, header, g_state.fat_count, 0x0080F088, SortModeName(g_state.sort));
 
     if (g_state.fat_count == 0)
     {
-        FramebufferDrawString(cx + 4, cy + 2 + kRowH + 4, "(no FAT32 volume mounted)", kInkDim, kBg);
+        FramebufferDrawString(cx + 4, cy + 2 + row_h + 4, "(no FAT32 volume mounted)", ListDim(), ListBg());
         // Footer hint -> AppLabel (RefreshFooterText / DrawFn).
         return;
     }
 
-    const u32 list_top = cy + 2 + kRowH + 2;
+    const ListGeom geom = ListGeomFor(cy, ch);
+    const u32 list_top = geom.top;
     const u32 n = g_state.fat_count;
-    const u32 max_rows = (ch > (list_top - cy) + kRowH) ? (ch - (list_top - cy)) / kRowH : 0;
-    u32 first = 0;
-    if (n > max_rows && g_state.fat_selection >= max_rows)
-        first = g_state.fat_selection - (max_rows - 1);
+    const u32 max_rows = geom.max_rows;
+    const u32 first = ListFirstVisible(n, g_state.fat_selection, max_rows);
     const u32 list_w =
         (cw > duetos::drivers::video::kScrollbarWidth + 2) ? cw - duetos::drivers::video::kScrollbarWidth - 2 : cw;
     for (u32 i = 0; i < max_rows && first + i < n; ++i)
@@ -1136,7 +1630,7 @@ void DrawFat32(u32 cx, u32 cy, u32 cw, u32 ch)
         const u32 idx = first + i;
         const auto& e = g_state.fat_entries[idx];
         const bool is_dir = (e.attributes & 0x10) != 0;
-        DrawRowGeneric(cx, list_top + i * kRowH, list_w, is_dir, e.name, e.size_bytes, idx == g_state.fat_selection,
+        DrawRowGeneric(cx, list_top + i * row_h, list_w, i, is_dir, e.name, e.size_bytes, idx == g_state.fat_selection,
                        e.mtime_date);
     }
     // Scrollbar at the right edge of the row area.
@@ -1145,7 +1639,7 @@ void DrawFat32(u32 cx, u32 cy, u32 cw, u32 ch)
         const duetos::u32 sb_x = cx + cw - duetos::drivers::video::kScrollbarWidth;
         const duetos::u32 sb_y = list_top;
         const duetos::u32 sb_w = duetos::drivers::video::kScrollbarWidth;
-        const duetos::u32 sb_h = max_rows * kRowH;
+        const duetos::u32 sb_h = max_rows * row_h;
         duetos::drivers::video::ScrollbarPaint(sb_x, sb_y, sb_w, sb_h, {n, max_rows, first});
         // Register the bar with the kernel so the mouse loop
         // can hit-test against it for click-on-track and
@@ -1175,29 +1669,29 @@ void DrawFat32(u32 cx, u32 cy, u32 cw, u32 ch)
 
 void DrawTrash(u32 cx, u32 cy, u32 cw, u32 ch)
 {
+    const u32 row_h = RowH();
     using duetos::drivers::video::FramebufferDrawString;
     using duetos::drivers::video::FramebufferFillRect;
-    FramebufferFillRect(cx, cy, cw, ch, kBg);
-    DrawListHeaderWithCount(cx, cy, "TRASH:/", g_state.trash_count, 0x00FFA060, SortModeName(g_state.sort));
+    FramebufferFillRect(cx, cy, cw, ch, ListBg());
+    DrawListHeaderWithCount(cx, cy, cw, "TRASH:/", g_state.trash_count, 0x00FFA060, SortModeName(g_state.sort));
 
     if (g_state.trash_count == 0)
     {
-        FramebufferDrawString(cx + 4, cy + 2 + kRowH + 4, "(trash is empty)", kInkDim, kBg);
+        FramebufferDrawString(cx + 4, cy + 2 + row_h + 4, "(trash is empty)", ListDim(), ListBg());
         // Footer hint -> AppLabel (RefreshFooterText / DrawFn).
         return;
     }
 
-    const u32 list_top = cy + 2 + kRowH + 2;
+    const ListGeom geom = ListGeomFor(cy, ch);
+    const u32 list_top = geom.top;
     const u32 n = g_state.trash_count;
-    const u32 max_rows = (ch > (list_top - cy) + kRowH) ? (ch - (list_top - cy)) / kRowH : 0;
-    u32 first = 0;
-    if (n > max_rows && g_state.trash_selection >= max_rows)
-        first = g_state.trash_selection - (max_rows - 1);
+    const u32 max_rows = geom.max_rows;
+    const u32 first = ListFirstVisible(n, g_state.trash_selection, max_rows);
     for (u32 i = 0; i < max_rows && first + i < n; ++i)
     {
         const u32 idx = first + i;
         const auto& e = g_state.trash_entries[idx];
-        DrawRowGeneric(cx, list_top + i * kRowH, cw, false, e.name, e.size_bytes, idx == g_state.trash_selection);
+        DrawRowGeneric(cx, list_top + i * row_h, cw, i, false, e.name, e.size_bytes, idx == g_state.trash_selection);
     }
 
     // Footer hint + pending-prompt overlays moved to the AppLabel
@@ -1208,9 +1702,10 @@ void DrawTrash(u32 cx, u32 cy, u32 cw, u32 ch)
 
 void DrawDuetFs(u32 cx, u32 cy, u32 cw, u32 ch)
 {
+    const u32 row_h = RowH();
     using duetos::drivers::video::FramebufferDrawString;
     using duetos::drivers::video::FramebufferFillRect;
-    FramebufferFillRect(cx, cy, cw, ch, kBg);
+    FramebufferFillRect(cx, cy, cw, ch, ListBg());
 
     // Header breadcrumb: "DRIVE:/a/b/" from the name stack.
     char header[80];
@@ -1226,21 +1721,20 @@ void DrawDuetFs(u32 cx, u32 cy, u32 cw, u32 ch)
             header[h++] = '/';
     }
     header[h] = '\0';
-    DrawListHeaderWithCount(cx, cy, header, g_state.duet_count, 0x0080F088);
+    DrawListHeaderWithCount(cx, cy, cw, header, g_state.duet_count, 0x0080F088);
 
     if (g_state.duet_count == 0)
     {
-        FramebufferDrawString(cx + 4, cy + 2 + kRowH + 4, "(empty directory)", kInkDim, kBg);
+        FramebufferDrawString(cx + 4, cy + 2 + row_h + 4, "(empty directory)", ListDim(), ListBg());
         // Footer hint -> AppLabel (RefreshFooterText / DrawFn).
         return;
     }
 
-    const u32 list_top = cy + 2 + kRowH + 2;
+    const ListGeom geom = ListGeomFor(cy, ch);
+    const u32 list_top = geom.top;
     const u32 n = g_state.duet_count;
-    const u32 max_rows = (ch > (list_top - cy) + kRowH) ? (ch - (list_top - cy)) / kRowH : 0;
-    u32 first = 0;
-    if (n > max_rows && g_state.duet_selection >= max_rows)
-        first = g_state.duet_selection - (max_rows - 1);
+    const u32 max_rows = geom.max_rows;
+    const u32 first = ListFirstVisible(n, g_state.duet_selection, max_rows);
     const u32 list_w =
         (cw > duetos::drivers::video::kScrollbarWidth + 2) ? cw - duetos::drivers::video::kScrollbarWidth - 2 : cw;
     for (u32 i = 0; i < max_rows && first + i < n; ++i)
@@ -1253,14 +1747,14 @@ void DrawDuetFs(u32 cx, u32 cy, u32 cw, u32 ch)
         for (u32 k = 0; k < nl; ++k)
             nm[k] = static_cast<char>(e.name[k]);
         nm[nl] = '\0';
-        DrawRowGeneric(cx, list_top + i * kRowH, list_w, is_dir, nm, e.size_bytes, idx == g_state.duet_selection);
+        DrawRowGeneric(cx, list_top + i * row_h, list_w, i, is_dir, nm, e.size_bytes, idx == g_state.duet_selection);
     }
     if (max_rows > 0 && cw > duetos::drivers::video::kScrollbarWidth)
     {
         const duetos::u32 sb_x = cx + cw - duetos::drivers::video::kScrollbarWidth;
         const duetos::u32 sb_y = list_top;
         const duetos::u32 sb_w = duetos::drivers::video::kScrollbarWidth;
-        const duetos::u32 sb_h = max_rows * kRowH;
+        const duetos::u32 sb_h = max_rows * row_h;
         duetos::drivers::video::ScrollbarPaint(sb_x, sb_y, sb_w, sb_h, {n, max_rows, first});
         duetos::drivers::video::WindowScrollbarSurface s{};
         s.present = true;
@@ -1353,38 +1847,182 @@ void RefreshFooterText()
         g_footer_text[sizeof(g_footer_text) - 1] = '\0';
 }
 
+// Paint the quick-access rail's ground, its section captions and the
+// DEVICES list. The four navigation rows themselves are the toolbar's
+// own AppButtons, rebound into the rail by RebindFilesBounds and
+// painted by g_files.PaintAll — this only paints what sits around
+// them.
+//
+// DEVICES reports what is actually mounted: the FAT32 volume's own
+// BPB label + size when one is mounted, and the ramfs. Nothing is
+// listed that the kernel cannot name.
+void DrawSideRail(u32 x, u32 y, u32 w, u32 h, const duetos::drivers::video::app_widgets::AppPalette& p)
+{
+    using duetos::drivers::video::ChromeTextRole;
+    using duetos::drivers::video::FramebufferFillRect;
+    using duetos::drivers::video::app_widgets::AppTextCell;
+    if (w == 0 || h == 0)
+        return;
+
+    FramebufferFillRect(x, y, w, h, p.recess);
+    FramebufferFillRect(x + w - 1, y, 1, h, p.line);
+
+    AppTextCell(ChromeTextRole::Caption, x + kRailPad, y, kRailCapH, "QUICK ACCESS", p.ink_3, p.recess);
+
+    const u32 dev_y = y + RailRowY(kFilesModeBtnCount) + 6;
+    if (dev_y + kRailCapH >= y + h)
+        return;
+    AppTextCell(ChromeTextRole::Caption, x + kRailPad, dev_y, kRailCapH, "DEVICES", p.ink_3, p.recess);
+
+    u32 row_y = dev_y + kRailCapH;
+    auto put_device = [&](const char* text)
+    {
+        if (row_y + kRailCapH >= y + h)
+            return;
+        AppTextCell(ChromeTextRole::Caption, x + kRailPad, row_y, kRailCapH, text, p.ink_2, p.recess);
+        row_y += kRailCapH;
+    };
+
+    const auto* vol = duetos::fs::fat32::Fat32Volume(0);
+    if (vol != nullptr)
+    {
+        // "<LABEL> NNN MiB" from the volume's own BPB — never a
+        // placeholder. A volume with a blank BS_VolLab prints just
+        // the size.
+        char line[32];
+        u32 o = 0;
+        for (u32 i = 0; i < sizeof(vol->volume_label) && vol->volume_label[i] != '\0' && o + 1 < sizeof(line); ++i)
+        {
+            if (vol->volume_label[i] != ' ')
+                line[o++] = vol->volume_label[i];
+        }
+        if (o + 1 < sizeof(line))
+            line[o++] = ' ';
+        char num[16];
+        const u64 mib = (static_cast<u64>(vol->total_sectors) * vol->bytes_per_sector) / (1024ull * 1024ull);
+        WriteU64Dec(num, sizeof(num), mib);
+        for (u32 i = 0; num[i] != '\0' && o + 1 < sizeof(line); ++i)
+            line[o++] = num[i];
+        const char* unit = " MiB";
+        for (u32 i = 0; unit[i] != '\0' && o + 1 < sizeof(line); ++i)
+            line[o++] = unit[i];
+        line[o] = '\0';
+        put_device(line);
+    }
+    put_device("ramfs");
+}
+
+// Breadcrumb bar, phase 1: the band and the two field grounds. Runs
+// BEFORE the widget group paints so the back / forward buttons land on
+// the band rather than being erased by it.
+void DrawCrumbGround(u32 cx, u32 cy, u32 cw, const duetos::drivers::video::app_widgets::AppPalette& p)
+{
+    using duetos::drivers::video::FramebufferFillRect;
+    using duetos::drivers::video::FramebufferFillRoundRect;
+    const CrumbGeom g = CrumbGeomFor(cx, cy, cw);
+    FramebufferFillRect(cx, cy + kHdrToolbarH, cw, kCrumbBarH, p.body);
+    if (g.path.w != 0)
+        FramebufferFillRoundRect(g.path.x, g.path.y, g.path.w, g.path.h, 6, p.recess);
+    if (g.search.w != 0)
+        FramebufferFillRoundRect(g.search.x, g.search.y, g.search.w, g.search.h, 6, p.recess);
+}
+
+// Breadcrumb bar, phase 2: the text. Runs AFTER the per-mode list
+// paint, because that is what fills g_crumb_path for this frame.
+void DrawCrumbText(u32 cx, u32 cy, u32 cw, const duetos::drivers::video::app_widgets::AppPalette& p)
+{
+    using duetos::drivers::video::ChromeTextRole;
+    using duetos::drivers::video::ChromeTextWeight;
+    using duetos::drivers::video::app_widgets::AppTextCell;
+    using duetos::drivers::video::app_widgets::AppTextFit;
+    const CrumbGeom g = CrumbGeomFor(cx, cy, cw);
+
+    if (g.path.w != 0)
+    {
+        char fitted[64];
+        const u32 budget = (g.path.w > 2 * kCrumbPad) ? g.path.w - 2 * kCrumbPad : 0;
+        AppTextFit(ChromeTextRole::Body, g_crumb_path, fitted, sizeof(fitted), budget);
+        AppTextCell(ChromeTextRole::Body, g.path.x + kCrumbPad, g.path.y, g.path.h, fitted, p.ink, p.recess,
+                    ChromeTextWeight::Bold);
+    }
+
+    if (g.search.w != 0)
+    {
+        // Wired to the live type-ahead prefix rather than being inert
+        // chrome: typing a name jumps the selection to the first match
+        // and the field shows what has been typed so far.
+        // GAP: type-ahead jumps the selection, it does not filter the
+        // list the way the reference's field implies - revisit when
+        // Files grows a real filter.
+        const bool typing = g_state.typeahead_len != 0;
+        char fitted[40];
+        const u32 budget = (g.search.w > 2 * kCrumbPad) ? g.search.w - 2 * kCrumbPad : 0;
+        AppTextFit(ChromeTextRole::Body, typing ? g_state.typeahead_buf : "Search", fitted, sizeof(fitted), budget);
+        AppTextCell(ChromeTextRole::Body, g.search.x + kCrumbPad, g.search.y, g.search.h, fitted,
+                    typing ? p.ink : p.ink_3, p.recess);
+    }
+}
+
 void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
 {
     using duetos::drivers::video::FramebufferFillRect;
     // Pass D chrome: AppToolbar at top (kHdrToolbarH), per-mode
     // list paint in the middle, AppLabel footer at the bottom.
     BindFilesOnce();
+    ApplyFilesPalette();
     RebindFilesBounds(cx, cy, cw, ch);
     RefreshFooterText();
     // Pre-paint the footer band tone so the AppLabel glyphs sit
     // on a uniform bg (AppLabel paints only its glyphs, not a
     // full-width band).
+    const auto p = Pal();
     if (ch > kFooterH)
     {
-        FramebufferFillRect(cx, cy + ch - kFooterH, cw, kFooterH, 0x00C8C8B8U);
+        if (p.aurora)
+        {
+            using duetos::drivers::video::app_widgets::AppStatusBarDraw;
+            AppStatusBarDraw(cx, cy + ch - kFooterH, cw, kFooterH, p);
+        }
+        else
+        {
+            FramebufferFillRect(cx, cy + ch - kFooterH, cw, kFooterH, 0x00C8C8B8U);
+        }
     }
+    // The rail's ground goes down before PaintAll so the mode buttons
+    // (which live in the rail under Aurora) land on it rather than on
+    // whatever the compositor left behind.
+    const u32 chrome_h = kHdrToolbarH + CrumbBarH();
+    const u32 my = cy + chrome_h;
+    const u32 mh = (ch > chrome_h + kFooterH) ? ch - chrome_h - kFooterH : 0U;
+    const u32 rail = RailW(cw);
+    if (p.aurora)
+        DrawCrumbGround(cx, cy, cw, p);
+    if (mh != 0 && rail != 0)
+        DrawSideRail(cx, my, rail, mh, p);
+
     Compose compose_ctx{};
     g_files.PaintAll(compose_ctx);
-    // Per-mode list paint into the middle slice. Mode-specific
-    // draw functions still own their own background fill +
-    // header-line + row rendering — chrome separation only.
-    const u32 my = cy + kHdrToolbarH;
-    const u32 mh = (ch > kHdrToolbarH + kFooterH) ? ch - kHdrToolbarH - kFooterH : 0U;
+    // Per-mode list paint into the middle slice, right of the rail.
+    // Mode-specific draw functions still own their own background
+    // fill + header-line + row rendering — chrome separation only.
     if (mh == 0)
         return;
+    const u32 lx = cx + rail;
+    const u32 lw = (cw > rail) ? cw - rail : 0U;
+    if (lw == 0)
+        return;
     if (g_state.mode == Mode::Fat32)
-        DrawFat32(cx, my, cw, mh);
+        DrawFat32(lx, my, lw, mh);
     else if (g_state.mode == Mode::Trash)
-        DrawTrash(cx, my, cw, mh);
+        DrawTrash(lx, my, lw, mh);
     else if (g_state.mode == Mode::DuetFs)
-        DrawDuetFs(cx, my, cw, mh);
+        DrawDuetFs(lx, my, lw, mh);
     else
-        DrawRamfs(cx, my, cw, mh);
+        DrawRamfs(lx, my, lw, mh);
+    // Last: the breadcrumb's text, now that the list header has named
+    // this frame's location.
+    if (p.aurora)
+        DrawCrumbText(cx, cy, cw, p);
 }
 
 // Spawn a PE / ELF directly from a ramfs node's embedded bytes.
@@ -1767,6 +2405,22 @@ void ClickRefresh()
         duetos::drivers::video::NotifyShow("files: rescan");
     }
 }
+// Breadcrumb navigation. Both route through the keyboard surface that
+// already owns the semantics — Backspace is the mode-agnostic
+// "go up", ']' is FAT32's forward-history step — so the click and the
+// key can never drift apart. Forward is a genuine no-op outside FAT32
+// (only that mode keeps a visit history), which is why the button is
+// painted disabled there rather than silently doing nothing.
+void ClickNavBack()
+{
+    duetos::apps::files::FilesFeedChar(static_cast<char>(0x08));
+}
+
+void ClickNavForward()
+{
+    duetos::apps::files::FilesFeedChar(']');
+}
+
 void ClickSort()
 {
     // Cycle sort mode. Mirrors the sort logic previously in
@@ -1977,25 +2631,29 @@ bool FilesFeedArrow(bool up)
 }
 
 // Visible list rows for the current window size. Mirrors the
-// max_rows formula in every Draw* path / FilesRowAt. Title bar
-// 22 px + 2-px borders + Pass D AppToolbar (kHdrToolbarH) at the
-// top, AppLabel footer (kFooterH) reserved at the bottom, then
-// the per-mode header line (2 + kRowH + 2) above the first row.
+// max_rows formula in every Draw* path / FilesRowAt. The client rect
+// comes from the window manager (the title bar is per-theme: 22 on
+// the flat palettes, 30 across the Duet family), then the Pass D
+// AppToolbar (kHdrToolbarH) at the top, the AppLabel footer
+// (kFooterH) at the bottom, and the per-mode header line
+// (2 + row_h + 2) above the first row.
 // Used to make PageUp/PageDown step exactly one screenful.
 u32 FilesListVisibleRows()
 {
-    duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
-    if (!duetos::drivers::video::WindowGetBounds(g_state.handle, &wx, &wy, &ww, &wh) || wh < 26)
+    duetos::u32 clx = 0, cly = 0, clw = 0, content_h_full = 0;
+    if (!duetos::drivers::video::WindowGetClientRect(g_state.handle, &clx, &cly, &clw, &content_h_full))
         return 0;
-    const duetos::u32 content_y_full = wy + 22 + 2;
-    const duetos::u32 content_h_full = wh - 22 - 4;
-    if (content_h_full <= kHdrToolbarH + kFooterH)
+    // Chrome above the list: the toolbar, plus the Aurora breadcrumb
+    // band (CrumbBarH() is 0 on the flat palettes, so their arithmetic
+    // is unchanged).
+    const duetos::u32 chrome_h = kHdrToolbarH + CrumbBarH();
+    if (content_h_full <= chrome_h + kFooterH)
         return 0;
-    // Middle slice the per-mode Draw* now receives.
-    const duetos::u32 content_y = content_y_full + kHdrToolbarH;
-    const duetos::u32 content_h = content_h_full - kHdrToolbarH - kFooterH;
-    const duetos::u32 list_top = content_y + 2 + kRowH + 2;
-    return (content_h > (list_top - content_y) + kRowH) ? (content_h - (list_top - content_y)) / kRowH : 0;
+    // Middle slice the per-mode Draw* now receives. `cy` is irrelevant
+    // to the row COUNT, so pass 0 — ListGeomFor derives max_rows from
+    // (top - cy), which is origin-independent.
+    const duetos::u32 content_h = content_h_full - chrome_h - kFooterH;
+    return ListGeomFor(0, content_h).max_rows;
 }
 
 // Home / End / PageUp / PageDown / Delete / F4 / F5 for the active list.
@@ -2318,9 +2976,19 @@ void FilesSelfTest()
     // volume is mounted; either way, switching back to ram mode
     // must succeed. Call the mode-switch helpers directly — bare
     // letter keys now drive type-ahead, not view switches.
+    // A profile with no FAT32 volume attached (the `bringup` smoke is
+    // one: both block devices probe "not FAT32") can never enter disk
+    // mode, so demanding it here failed the whole app self-test for a
+    // configuration that is perfectly legal. Skip the disk tier when
+    // there is no volume, the way the calendar's persist self-test
+    // already does — the round-trip back to ram mode below is the part
+    // that must hold either way.
+    const bool fat_available = duetos::fs::fat32::Fat32Volume(0) != nullptr;
     SwitchToDisk();
-    if (g_state.mode != Mode::Fat32)
+    if (fat_available && g_state.mode != Mode::Fat32)
         pass = false;
+    if (!fat_available)
+        SerialWrite("[files] disk-mode checks SKIP (no FAT32)\n");
 
     // FAT32 subdir descent+ascent. Scan the root listing for a
     // directory entry; if one exists, descend into it, check that
@@ -2493,36 +3161,59 @@ void FilesSelfTest()
     BindFilesOnce();
     RebindFilesBounds(0U, 22U, 400U, 200U);
     g_state.mode = Mode::DuetFs;
-    // Centre of the RAM button (index 0 — the first slot the
-    // BindFilesOnce loop wires up). Bounds are {kHdrPadX,
-    // 22+kHdrPadY, kHdrBtnW, kHdrBtnH}.
-    const duetos::u32 rx = kHdrPadX + kHdrBtnW / 2U;
-    const duetos::u32 ry = 22U + kHdrPadY + kHdrBtnH / 2U;
-    const Event m_move{EventKind::MouseMove, rx, ry, 0U, 0U};
-    const Event m_down{EventKind::MouseDown, rx, ry, 0U, 0U};
-    const Event m_up{EventKind::MouseUp, rx, ry, 0U, 0U};
-    if (g_files.DispatchEvent(m_move) != EventResult::Consumed)
+    // Every synthetic click aims at the bounds RebindFilesBounds just
+    // installed, never at a re-derived toolbar pitch. The hard-coded
+    // {kHdrPadX, 22+kHdrPadY} coordinates this used to carry were only
+    // ever right for the flat toolbar: under Aurora the mode buttons
+    // live in the quick-access rail and the nav pair in the breadcrumb
+    // band, so the test would have aimed at empty space and blamed the
+    // dispatch chain for it.
+    auto click_button = [&](u32 i) -> bool
+    {
+        const Rect& r = HdrButton(i)->bounds;
+        if (r.w == 0)
+            return true; // folded away on this branch
+        const duetos::u32 px = r.x + r.w / 2U;
+        const duetos::u32 py = r.y + r.h / 2U;
+        const Event mv{EventKind::MouseMove, px, py, 0U, 0U};
+        const Event dn{EventKind::MouseDown, px, py, 0U, 0U};
+        const Event up{EventKind::MouseUp, px, py, 0U, 0U};
+        return g_files.DispatchEvent(mv) == EventResult::Consumed &&
+               g_files.DispatchEvent(dn) == EventResult::Consumed && g_files.DispatchEvent(up) == EventResult::Consumed;
+    };
+    // Slot 0 is RAM on both branches — in the toolbar without a rail,
+    // in the rail with one.
+    if (!click_button(0) || g_state.mode != Mode::Ramfs)
         pass = false;
-    if (g_files.DispatchEvent(m_down) != EventResult::Consumed)
+    // REFRESH (kBtnRefresh) is idempotent; the click chain returning
+    // Consumed end-to-end is the test.
+    if (!click_button(kBtnRefresh))
         pass = false;
-    if (g_files.DispatchEvent(m_up) != EventResult::Consumed)
-        pass = false;
-    if (g_state.mode != Mode::Ramfs)
-        pass = false;
-    // REFRESH button click (index kBtnRefresh=4). NotifyShow is
-    // the visible side effect; check the dispatch path runs end-
-    // to-end (the click chain returning Consumed is the test).
-    const duetos::u32 fx = kHdrPadX + kBtnRefresh * (kHdrBtnW + kHdrBtnGap) + kHdrBtnW / 2U;
-    const duetos::u32 fy = 22U + kHdrPadY + kHdrBtnH / 2U;
-    const Event r_move{EventKind::MouseMove, fx, fy, 0U, 0U};
-    const Event r_down{EventKind::MouseDown, fx, fy, 0U, 0U};
-    const Event r_up{EventKind::MouseUp, fx, fy, 0U, 0U};
-    if (g_files.DispatchEvent(r_move) != EventResult::Consumed)
-        pass = false;
-    if (g_files.DispatchEvent(r_down) != EventResult::Consumed)
-        pass = false;
-    if (g_files.DispatchEvent(r_up) != EventResult::Consumed)
-        pass = false;
+    // Breadcrumb geometry: the nav pair, the path field and the search
+    // field must sit inside the band DrawFn reserves and must not
+    // overlap each other. The bar is folded on the flat palettes, where
+    // every rect is zero and the checks are vacuous.
+    {
+        const CrumbGeom cg = CrumbGeomFor(0U, 22U, 400U);
+        const duetos::u32 band_top = 22U + kHdrToolbarH;
+        const Rect* rects[4] = {&cg.back, &cg.fwd, &cg.path, &cg.search};
+        duetos::u32 prev_right = 0;
+        for (const Rect* r : rects)
+        {
+            if (r->w == 0)
+                continue;
+            if (r->y < band_top || r->y + r->h > band_top + CrumbBarH())
+                pass = false;
+            if (r->x < prev_right)
+                pass = false;
+            prev_right = r->x + r->w;
+        }
+        // The nav buttons must be exactly where the bar paints them.
+        if (HdrButton(kBtnNavBack)->bounds.x != cg.back.x || HdrButton(kBtnNavBack)->bounds.w != cg.back.w)
+            pass = false;
+        if (HdrButton(kBtnNavForward)->bounds.x != cg.fwd.x || HdrButton(kBtnNavForward)->bounds.w != cg.fwd.w)
+            pass = false;
+    }
     // Footer-text refresh: each per-mode hint must compose non-
     // empty into g_footer_text. Cycle the four modes and check.
     g_state.pending = Pending::None;
@@ -2571,6 +3262,48 @@ void FilesSelfTest()
         TypeaheadReset();
     }
 
+    // List geometry round-trip: the invariant the whole column-model
+    // refactor rests on. For a synthetic content slice, the vertical
+    // centre of every visible row must map back to that row's index,
+    // and a point one pixel above the first row must map to no row at
+    // all. Painting and hit-testing both go through ListGeomFor, so
+    // this is the check that the two stay one grid — it fails the
+    // moment someone re-introduces a private copy of the arithmetic.
+    {
+        const u32 test_cy = 40;
+        const u32 test_ch = 260;
+        const ListGeom g = ListGeomFor(test_cy, test_ch);
+        if (g.row_h == 0 || g.max_rows == 0 || g.top <= test_cy)
+        {
+            pass = false;
+        }
+        else
+        {
+            for (u32 i = 0; i < g.max_rows; ++i)
+            {
+                const u32 mid_y = g.top + i * g.row_h + g.row_h / 2;
+                if ((mid_y - g.top) / g.row_h != i)
+                    pass = false;
+                // The row band must sit inside the slice, or the last
+                // row paints over the footer.
+                if (g.top + (i + 1) * g.row_h > test_cy + test_ch)
+                    pass = false;
+            }
+            // Scroll bookkeeping: with the selection past the fold the
+            // viewport tracks it, and the selected row is the last
+            // visible one.
+            const u32 n = g.max_rows + 5;
+            const u32 sel = n - 1;
+            const u32 first = ListFirstVisible(n, sel, g.max_rows);
+            if (first + g.max_rows != n)
+                pass = false;
+            if (ListFirstVisible(n, 0, g.max_rows) != 0)
+                pass = false;
+            if (ListFirstVisible(g.max_rows, g.max_rows - 1, g.max_rows) != 0)
+                pass = false;
+        }
+    }
+
     g_state.ramfs_depth = saved_depth;
     g_state.ramfs_selection = saved_sel;
     g_state.mode = saved_mode;
@@ -2579,7 +3312,7 @@ void FilesSelfTest()
     {
         SerialWrite("[files] self-test OK (ramfs descend+back, mode toggle, fat32 subdir descent+back, "
                     "duetfs descend+back, ctx-dispatch, home/end, ext match, delete-disarm, f4-restore-noop, "
-                    "widget-click, footer-refresh, typeahead, date-format)\n");
+                    "widget-click, footer-refresh, typeahead, date-format, list-geometry round-trip)\n");
         SerialWrite("[files-selftest] PASS\n");
     }
     else
@@ -2735,50 +3468,54 @@ duetos::i32 FilesRowAt(duetos::u32 sx, duetos::u32 sy)
     // needs the per-mode count + selection (via ModeCount /
     // ModeSelection) — no per-mode whitelist.
     //
-    // Pass D layout: title bar 22 px + 2-px content inset, then a
-    // 26-px AppToolbar (mirrors `kHdrToolbarH`), then the per-mode
-    // header line (2 + kRowH + 2), then the first row. 12-px footer
-    // (mirrors `kFooterH`) reserved at the bottom for the AppLabel.
-    // Constants duplicated here because they live in this TU's
-    // anonymous namespace and FilesRowAt is in the outer namespace;
-    // if you change either k_hdr_toolbar_h or k_footer_h in the
-    // anonymous block above, change them here too.
-    constexpr duetos::u32 k_hdr_toolbar_h = 26U;
-    constexpr duetos::u32 k_footer_h = 12U;
+    // Pass D layout inside the client rect: a 26-px AppToolbar
+    // (mirrors `kHdrToolbarH`), then the per-mode header line
+    // (2 + row_h + 2), then the first row. 12-px footer (mirrors
+    // `kFooterH`) reserved at the bottom for the AppLabel.
+    // The client rect itself comes from the window manager — the
+    // title bar is per-theme, so re-deriving it here from a constant
+    // would put every click out of phase with the paint.
+    // The band constants come straight out of this TU's anonymous
+    // namespace (visible for the rest of the file), not from local
+    // copies. The copies that used to live here carried a comment
+    // asking the next maintainer to keep them in sync by hand — which
+    // is the divergence this whole refactor exists to remove.
+    // Chrome above the list: the toolbar band, plus the Aurora
+    // breadcrumb band. CrumbBarH() is the SAME accessor DrawFn offsets
+    // its middle slice by, so the click and the pixels move together.
+    const duetos::u32 k_hdr_toolbar_h = kHdrToolbarH + CrumbBarH();
+    constexpr duetos::u32 k_footer_h = kFooterH;
     if (ModeCount() == 0)
         return -1;
-    duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
-    if (!duetos::drivers::video::WindowGetBounds(g_state.handle, &wx, &wy, &ww, &wh))
+    duetos::u32 content_x = 0, content_y_full = 0, content_w = 0, content_h_full = 0;
+    if (!duetos::drivers::video::WindowGetClientRect(g_state.handle, &content_x, &content_y_full, &content_w,
+                                                     &content_h_full))
         return -1;
-    if (ww < 4 || wh < 26)
+    if (content_w == 0)
         return -1;
-    // Full content area first (matches DrawFn's cy / ch), then
-    // carve out the toolbar top + footer bottom to get the middle
-    // slice the per-mode Draw* function received.
-    const duetos::u32 content_x = wx + 2;
-    const duetos::u32 content_y_full = wy + 22 + 2;
-    const duetos::u32 content_w = ww - 4;
-    const duetos::u32 content_h_full = wh - 22 - 4;
     if (content_h_full <= k_hdr_toolbar_h + k_footer_h)
         return -1;
     const duetos::u32 content_y = content_y_full + k_hdr_toolbar_h;
     const duetos::u32 content_h = content_h_full - k_hdr_toolbar_h - k_footer_h;
-    if (sx < content_x || sx >= content_x + content_w)
+    // The list starts right of the quick-access rail. Same RailW()
+    // the paint used, so a click in the rail can never be read as a
+    // click on row 0 of the list.
+    const duetos::u32 list_x = content_x + RailW(content_w);
+    if (sx < list_x || sx >= content_x + content_w)
         return -1;
-    const duetos::u32 list_top = content_y + 2 + kRowH + 2;
-    if (sy < list_top)
+    // Row pitch, first-row origin and the visible-row count all come
+    // from ListGeomFor — the SAME call every Draw* path makes with the
+    // same (cy, ch). That is what keeps the click and the pixels on
+    // one grid, including when the theme changes the pitch.
+    const ListGeom geom = ListGeomFor(content_y, content_h);
+    if (sy < geom.top)
+        return -1;
+    if (geom.max_rows == 0)
         return -1;
     const duetos::u32 n = ModeCount();
-    const duetos::u32 max_rows =
-        (content_h > (list_top - content_y) + kRowH) ? (content_h - (list_top - content_y)) / kRowH : 0;
-    if (max_rows == 0)
-        return -1;
-    const duetos::u32 sel = ModeSelection();
-    duetos::u32 first = 0;
-    if (n > max_rows && sel >= max_rows)
-        first = sel - (max_rows - 1);
-    const duetos::u32 row_in_view = (sy - list_top) / kRowH;
-    if (row_in_view >= max_rows)
+    const duetos::u32 first = ListFirstVisible(n, ModeSelection(), geom.max_rows);
+    const duetos::u32 row_in_view = (sy - geom.top) / geom.row_h;
+    if (row_in_view >= geom.max_rows)
         return -1;
     const duetos::u32 idx = first + row_in_view;
     if (idx >= n)

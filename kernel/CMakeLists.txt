@@ -427,6 +427,28 @@ else()
 endif()
 add_custom_target(duetos-smoke-pes DEPENDS "${DUETOS_SMOKE_PE_STAMP}")
 
+# Side-by-side DLL fixture (SXSTEST.EXE + SXSLIB.DLL). Unlike every
+# other PE fixture here these are deliberately NOT embedded into the
+# kernel image: tools/qemu/run.sh stages both onto the FAT32 volume
+# root, and the .exe can only run if the loader found the DLL sitting
+# beside it on disk. Embedding either half would make the fixture
+# prove nothing. Output lands at the TOP of the build tree because
+# run.sh looks for it relative to build/<preset>, not build/<preset>/kernel.
+set(DUETOS_SXS_FIXTURE_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build/build-sxs-fixture.sh")
+set(DUETOS_SXS_FIXTURE_DIR    "${CMAKE_BINARY_DIR}/sxs-fixture")
+set(DUETOS_SXS_FIXTURE_STAMP  "${DUETOS_SXS_FIXTURE_DIR}/.stamp")
+add_custom_command(
+    OUTPUT "${DUETOS_SXS_FIXTURE_STAMP}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${DUETOS_SXS_FIXTURE_DIR}"
+    COMMAND "${DUETOS_SXS_FIXTURE_SCRIPT}" --out-dir "${DUETOS_SXS_FIXTURE_DIR}"
+    COMMAND "${CMAKE_COMMAND}" -E touch "${DUETOS_SXS_FIXTURE_STAMP}"
+    DEPENDS "${DUETOS_SXS_FIXTURE_SCRIPT}"
+            "${CMAKE_SOURCE_DIR}/userland/libs/sxslib/sxslib.c"
+            "${CMAKE_SOURCE_DIR}/userland/apps/sxs_test/sxs_test.c"
+    COMMENT "Compiling side-by-side DLL fixture (SXSTEST.EXE + SXSLIB.DLL)"
+    VERBATIM)
+add_custom_target(duetos-sxs-fixture ALL DEPENDS "${DUETOS_SXS_FIXTURE_STAMP}")
+
 # mini_browser.exe — minimal WinSock 2 PE that does an HTTP/1.0 GET to
 # www.google.com. Source is userland/apps/mini_browser/browser.c and
 # CMake now embeds the build-tree PE produced by build-smokes.sh.
@@ -574,6 +596,60 @@ else()
 endif()
 list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_PE32_WINDOW_HEADER}")
 
+# rsrc_pe.exe — PE32 test for the `.rsrc` rung: loads strings and binary
+# resources out of its OWN embedded resource section. windres compiles
+# rsrc_pe.rc into a genuine Windows-toolchain resource tree, which is the
+# whole point — tests/host/test_pe_resources.cpp pins the walker against
+# synthetic blobs, this pins it against real windres output reached
+# through the kernel's live image mapping from ring 3.
+#
+# Needs windres in addition to the compiler, so it carries its own
+# find_program: a host with gcc but no windres emits the empty stub
+# rather than failing the configure.
+find_program(MINGW_W64_I686_WINDRES i686-w64-mingw32-windres)
+set(DUETOS_RSRC_PE_SRC "${CMAKE_SOURCE_DIR}/userland/apps/rsrc_pe/rsrc_pe.c")
+set(DUETOS_RSRC_PE_RC "${CMAKE_SOURCE_DIR}/userland/apps/rsrc_pe/rsrc_pe.rc")
+set(DUETOS_RSRC_PE_RES "${CMAKE_CURRENT_BINARY_DIR}/rsrc_pe.res.o")
+set(DUETOS_RSRC_PE_EXE "${CMAKE_CURRENT_BINARY_DIR}/rsrc_pe.exe")
+set(DUETOS_RSRC_PE_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_rsrc_pe_pe.h")
+if(MINGW_W64_I686_GCC AND MINGW_W64_I686_WINDRES)
+    add_custom_command(
+        OUTPUT "${DUETOS_RSRC_PE_RES}"
+        COMMAND "${MINGW_W64_I686_WINDRES}" -O coff
+                -o "${DUETOS_RSRC_PE_RES}" "${DUETOS_RSRC_PE_RC}"
+        DEPENDS "${DUETOS_RSRC_PE_RC}"
+        COMMENT "Compiling rsrc_pe.rc (windres -> COFF .rsrc)"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${DUETOS_RSRC_PE_EXE}"
+        COMMAND "${MINGW_W64_I686_GCC}"
+                -nostdlib -ffreestanding -fno-stack-protector -mno-stack-arg-probe
+                -e _mainCRTStartup -Wl,--subsystem,console -Wl,--entry,_mainCRTStartup
+                -o "${DUETOS_RSRC_PE_EXE}" "${DUETOS_RSRC_PE_SRC}" "${DUETOS_RSRC_PE_RES}"
+                -lkernel32 -luser32
+        DEPENDS "${DUETOS_RSRC_PE_SRC}" "${DUETOS_RSRC_PE_RES}"
+        COMMENT "Cross-compiling rsrc_pe.exe (i386 PE32 with a real .rsrc)"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${DUETOS_RSRC_PE_HEADER}"
+        COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
+                "${DUETOS_RSRC_PE_EXE}" "${DUETOS_RSRC_PE_HEADER}"
+                kBinRsrcPeBytes --namespace "duetos::fs::generated"
+        DEPENDS "${DUETOS_RSRC_PE_EXE}" "${DUETOS_EMBED_BLOB_SCRIPT}"
+        COMMENT "Embedding rsrc_pe PE"
+        VERBATIM)
+else()
+    add_custom_command(
+        OUTPUT "${DUETOS_RSRC_PE_HEADER}"
+        COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}" --empty
+                "${DUETOS_RSRC_PE_HEADER}"
+                kBinRsrcPeBytes --namespace "duetos::fs::generated"
+        DEPENDS "${DUETOS_EMBED_BLOB_SCRIPT}"
+        COMMENT "Emitting rsrc_pe PE stub (i686 mingw or windres absent)"
+        VERBATIM)
+endif()
+list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_RSRC_PE_HEADER}")
+
 # pe32_miss.exe — PE32 that calls an unresolved Win32 import to
 # validate the 32-bit Win32 thunks page. The import (user32!
 # SetWindowsHookExA) is NOT in our v0 user32_32 stubs, so the
@@ -676,10 +752,13 @@ duetos_embed_smoke_pe(crt_smoke      kBinCrtSmokeBytes)
 duetos_embed_smoke_pe(critsec_smoke  kBinCritsecSmokeBytes)
 duetos_embed_smoke_pe(tls_smoke      kBinTlsSmokeBytes)
 duetos_embed_smoke_pe(atom_smoke     kBinAtomSmokeBytes)
+duetos_embed_smoke_pe(stackgrow_smoke kBinStackgrowSmokeBytes)
+duetos_embed_smoke_pe(stackguard_smoke kBinStackguardSmokeBytes)
 duetos_embed_smoke_pe(console_smoke  kBinConsoleSmokeBytes)
 duetos_embed_smoke_pe(datetime_smoke kBinDatetimeSmokeBytes)
 duetos_embed_smoke_pe(locale_smoke   kBinLocaleSmokeBytes)
 duetos_embed_smoke_pe(gdi_smoke      kBinGdiSmokeBytes)
+duetos_embed_smoke_pe(surface_smoke  kBinSurfaceSmokeBytes)
 duetos_embed_smoke_pe(msg_smoke      kBinMsgSmokeBytes)
 duetos_embed_smoke_pe(pipe_smoke     kBinPipeSmokeBytes)
 duetos_embed_smoke_pe(resource_smoke kBinResourceSmokeBytes)
@@ -888,11 +967,14 @@ duetos_embed_blob(generated_kernel32_dll.h
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_sync.c"
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_fs.c"
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_psapi.c"
+        "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_seh.c"
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/seh_capture.S"
+        "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/raise_exception.S"
         "${CMAKE_SOURCE_DIR}/userland/libs/common/pe_unwind_bounds.h"
         "${CMAKE_SOURCE_DIR}/kernel/subsystems/win32/thunk_retirement_wave1.inc"
         "${CMAKE_SOURCE_DIR}/tools/build/verify-pe-exports.py"
-    COMMENT "Compiling + embedding kernel32.dll (split into per-domain TUs)")
+        "${CMAKE_CURRENT_BINARY_DIR}/generated_ntdll_dll.h"
+    COMMENT "Compiling + embedding kernel32.dll (RaiseException + per-domain TUs; links ntdll.lib)")
 
 # 32-bit kernel32 companion — PE32 (i386) DLL, preloaded into PE32
 # processes' address spaces so their IAT entries to KERNEL32.dll
@@ -989,6 +1071,7 @@ duetos_embed_blob(generated_vcruntime140_dll.h
         "${CMAKE_SOURCE_DIR}/userland/libs/vcruntime140/chkstk.S"
         "${CMAKE_SOURCE_DIR}/userland/libs/vcruntime140/guard_icall.S"
         "${CMAKE_SOURCE_DIR}/userland/libs/vcruntime140/cxx_throw.S"
+        "${CMAKE_SOURCE_DIR}/userland/libs/vcruntime140/cxx_funclet.S"
         "${CMAKE_CURRENT_BINARY_DIR}/generated_ntdll_dll.h"
     COMMENT "Compiling + embedding vcruntime140.dll (C++ EH personality + memops; links ntdll.lib)")
 
@@ -1175,6 +1258,21 @@ duetos_stub_dll(d3dcompiler 0x102E0000 "D3DCompile,D3DCompile2,D3DCreateBlob,D3D
 # query, GetInstanceProcAddr / GetDeviceProcAddr string lookup,
 # DuetOS_Vk_GetStatsCounter diagnostic accessor.
 duetos_stub_dll(vulkan_1 0x102F0000 "vkCreateInstance,vkDestroyInstance,vkEnumeratePhysicalDevices,vkCreateDevice,vkDestroyDevice,vkGetDeviceQueue,vkDeviceWaitIdle,vkQueueWaitIdle,vkEnumerateInstanceVersion,vkEnumerateInstanceExtensionProperties,vkEnumerateInstanceLayerProperties,vkGetInstanceProcAddr,vkGetDeviceProcAddr,DuetOS_Vk_GetStatsCounter,DuetOS_Vk_ClearFramebufferRgba,DuetOS_Vk_CreateSurface,DuetOS_Vk_DestroySurface,DuetOS_Vk_Present,vkCreateShaderModule,vkDestroyShaderModule,vkAllocateMemory,vkFreeMemory,vkCreateBuffer,vkDestroyBuffer,vkBindBufferMemory,vkMapMemory,vkUnmapMemory,vkCreateImage,vkDestroyImage,vkBindImageMemory,vkCreateCommandPool,vkDestroyCommandPool,vkAllocateCommandBuffers,vkBeginCommandBuffer,vkEndCommandBuffer,vkCmdClearColorImage,vkQueueSubmit,vkCreatePipelineLayout,vkDestroyPipelineLayout,vkCreateRenderPass,vkDestroyRenderPass,vkCreateGraphicsPipelines,vkCreateComputePipelines,vkDestroyPipeline,vkCmdBindPipeline,vkCmdDraw,vkCmdDispatch,vkCmdBindVertexBuffers,vkCmdBindIndexBuffer,vkUpdateDescriptorSets,vkCreateDescriptorSetLayout,vkDestroyDescriptorSetLayout,vkCreateDescriptorPool,vkDestroyDescriptorPool,vkAllocateDescriptorSets,vkCmdBindDescriptorSets" "vulkan-1")
+
+
+# delayload_pe.exe — proves the loader binds data directory 13
+# (IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT). mingw's ld cannot emit that
+# directory, so this fixture is built the cxxeh_pe way: clang
+# --target=x86_64-pc-windows-msvc + lld-link /delayload:user32.dll
+# against our own kernel32.lib / user32.lib. Must come after the
+# user32 stub-DLL rule so that import lib exists.
+duetos_embed_blob(generated_delayload_pe.h
+    SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-delayload-pe.sh"
+    SRC     "${CMAKE_SOURCE_DIR}/userland/apps/delayload_pe/delayload_pe.c"
+    EXTRA_DEPS
+        "${CMAKE_CURRENT_BINARY_DIR}/generated_kernel32_dll.h"
+        "${CMAKE_CURRENT_BINARY_DIR}/generated_user32_dll.h"
+    COMMENT "Compiling + embedding delayload_pe.exe (lld-link /delayload)")
 
 
 # ----------------------------------------------------------------------------

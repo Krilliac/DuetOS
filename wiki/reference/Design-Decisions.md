@@ -13197,3 +13197,748 @@ markers for its richest input. Three discovery layers were added (runtime
   (`bochs_vbe`, `virtio_gpu`) — those must render "not applicable". A
   real number requires a periodic sampler, and none of it is verifiable
   under QEMU, which models no GPU.
+### DD — Aurora app interiors are opt-in per palette, not a global restyle
+
+- **Context:** the app interiors (`kernel/apps/*`) each carried their
+  own saturated RGB literals. Routing them through the Aurora tokens is
+  what the design asks for, but the flat palettes — Classic, Slate10,
+  Amber, DuetClassic, HighContrast — must keep the look they had.
+- **Decision:** `AppPaletteMake` publishes an `aurora` flag mirroring
+  the theme's existing `aurora_wallpaper` opt-in, and each restyled
+  call site branches `aurora ? token : <its historical literal>`. The
+  historical constants stay in the source next to their Aurora
+  counterpart rather than being deleted.
+- **Rules out:** (a) replacing the literals outright, which would
+  regress five palettes that the theme self-test deliberately keeps
+  flat; (b) deriving "is this Aurora" from a `ThemeId` whitelist —
+  that is the whitelist-incompleteness bug shape, and it would go stale
+  the next time a palette is added.
+- **Also rules out** resolving interior tokens against a fixed dark
+  ground: they are resolved against the app's own client fill, so a
+  light client (Notes' cream paper, the DuetLight family) inverts the
+  ink ramp instead of painting dark-on-dark.
+
+### DD — the 8x8 ROM font carries real lowercase
+
+- **Context:** `Font8x8Lookup` folded `a..z` onto the uppercase glyphs
+  with a "grow this table in a follow-up slice" note. Every app
+  interior renders content through that font.
+- **Decision:** ship real 5 x 7 lowercase shapes with ascenders and
+  descenders inside the existing 8 x 8 cell.
+- **Rules out:** treating the fold as permanent and instead moving app
+  content onto the proportional TTF chrome path. That would have been a
+  far larger change — every column in Files and Task Manager is laid
+  out in 8-px cells and hit-tested from the same arithmetic — for a
+  smaller fidelity gain than the glyphs themselves buy.
+- **Scope:** the cell size and the 8-px advance are unchanged, so no
+  column layout, scrollbar metric or hit-test moves.
+
+### DD — probe MSRs, do not predict them
+
+- **Context:** a `rdmsr` against an MSR the part does not implement
+  raises `#GP`, which was unrecoverable. Every MSR consumer therefore
+  guarded itself with a static "recognised vendor AND
+  `!IsEmulator()`" prediction.
+- **Decision:** add `arch::ReadMsrSafe` — an extable-guarded `rdmsr`
+  mirroring the existing `WriteMsrSafe` — and make thermal, cpufreq
+  and RAPL ask the hardware per MSR, caching the answer.
+- **Rules out:** (a) keeping the vendor+hypervisor gate, which was
+  wrong in both directions (it suppressed frequency telemetry on
+  hypervisors that DO expose the counters, and it was why an AMD dev
+  box reported no CPU temperature at all); (b) widening the gate with
+  a per-hypervisor allow-list, which is the same prediction with more
+  rows to keep stale; (c) probing on every read — a declined probe
+  costs a trap and one recovered-trap log line, so the result is
+  cached per consumer.
+- **Evidence:** `MsrSafeSelfTest` asserts both extable rows resolve to
+  their own fixups and reads `IA32_APIC_BASE` live. The bogus-MSR case
+  deliberately asserts only that the call RETURNS, because QEMU TCG
+  answers 0 for unknown MSRs while hardware and KVM `#GP`.
+
+### DD — AMD CPU temperature comes from SMN, not an MSR
+
+- **Context:** the Intel `IA32_THERM_STATUS` path cannot work on AMD,
+  which reports core temperature over the System Management Network.
+- **Decision:** read `THM_TCON_CUR_TMP` (SMN `0x00059800`) through the
+  index/data pair at PCI config `0x60`/`0x64` on device `0:0.0`,
+  gated to families 17h/19h/1Ah, and refuse the index write unless the
+  host bridge answers vendor `0x1022`.
+- **Rules out:** (a) hunting for an AMD thermal MSR — there is none at
+  a stable architectural number; (b) applying the Zen decode to pre-Zen
+  families, whose register lives at a different PCI function with a
+  different layout and would decode into a confident wrong number;
+  (c) writing the SMN index unconditionally — on an Intel MCH that
+  offset is a DRAM-configuration register; (d) synthesising a TJMax for
+  AMD, which the register does not carry.
+- **Evidence:** decode is pinned in
+  `tests/host/test_cpu_sensor_math.cpp`. The read itself is NOT
+  verifiable under QEMU, which models no SMN aperture — the boot only
+  proves it reports "unsupported" without faulting.
+
+### DD — unsupported is a flag, never a zero
+
+- **Context:** thermal, frequency and power records all previously used
+  a zero value to mean "no reading". 0 C and 0 MHz are legal values,
+  and a UI showing them looks broken rather than honest.
+- **Decision:** every sensor record carries an explicit validity flag
+  per field (`ThermalReading::source` + `tj_max_valid`,
+  `CpuFreqReading::{current,ratios,counters}_valid`,
+  `PowerSnapshot::cpu_temp_valid`, `EnvSnapshot::cpu_temp_valid`,
+  `TelemetryCpuInfo::{current,base}_mhz_valid`), and an unsupported
+  read returns the entirely empty record so a caller testing only the
+  top-level flag cannot pick a plausible zero out of it.
+- **Rules out:** zero-sentinels, and "valid" flags that coexist with
+  populated-but-meaningless fields. The self-tests assert both
+  directions.
+
+### DD - the PE resource walker is userland-only, with no syscall
+
+- **Context:** `LoadStringW` was the highest-demand missing i386 import
+  (282 of 3121 32-bit SysWOW64 PEs; 82 counting `.exe` only) and needed
+  a `.rsrc` parser. The intuitive shape is a kernel service: the kernel
+  owns the image, so ask it for the resource.
+- **Decision:** the walker (`userland/libs/common/pe_resources.h`) is a
+  freestanding userland header. No syscall was added. `MapHeaders`
+  already maps `SizeOfHeaders` at `ImageBase` and `MapSection` maps
+  every section, so a DLL holding an `HMODULE` reaches the tree with
+  pointer arithmetic on pages the guest already owns.
+- **Rules out:** (a) a `SYS_RESOURCE_*` family - it would add kernel
+  attack surface for reading memory the guest can already read, and put
+  an attacker-controlled tree walk inside the kernel; (b) widening
+  `pe_unwind_bounds.h`'s `DUET_PE_VIEW` to serve both - that view is
+  PE32+ only and requires a well-formed `.pdata`, which i386
+  resource-only images lack, so widening it would weaken the unwinder's
+  preconditions to serve an unrelated caller.
+- **Also rules out:** sharing the Win32 translation layer between the
+  two bitnesses. Calling convention, pointer width and the
+  `IS_INTRESOURCE` high-half test all differ; only the walker is shared.
+- **Evidence:** `tests/host/test_pe_resources.cpp` (including two
+  negative controls on the bounds gates) plus the `ring3-rsrc-pe`
+  battery row, which reads a real `windres`-built `.rsrc` from ring 3.
+
+### DD - `.rsrc` consumers ship only when they have a sink
+
+- **Context:** with the parser in hand, `LoadIcon` / `LoadCursor` /
+  `LoadBitmap` / `LoadImage` and `LoadAccelerators` /
+  `TranslateAccelerator` are all "just" more resource types.
+- **Decision:** none of them were implemented. Each stub carries a
+  `// STUB:` marker naming its specific prerequisite instead.
+- **Rules out:** decoding `RT_GROUP_ICON` -> `RT_ICON` DIBs now and
+  returning a handle. The compositor has no icon concept and no
+  off-screen surface, and `SYS_GDI_CREATE_CURSOR` takes a fixed 12x20
+  three-level mask, not image bits - the decoder would have no sink,
+  which is the "built but not wired in" antipattern.
+- **Rules out:** parsing `RT_ACCELERATOR` now. `WM_KEYDOWN`'s `wParam`
+  carries a DuetOS `KeyCode` (`kKeyF1 == 0x10A`), not a Win32 VK
+  (`VK_F1 == 0x70`), so every `FVIRTKEY` entry would mis-compare. The
+  prerequisite is a KeyCode -> VK translation on the kernel side of the
+  message post - recorded as its own backlog item, because it is a
+  defect in the `WM_KEYDOWN` contract independent of accelerators.
+### DD — side-by-side DLLs are import-driven, and disk-sourced DLLs are gated
+
+- **Context:** every DLL DuetOS could bind came from inside the kernel
+  image. Supporting "the app ships its own DLLs" needed a way to read a
+  DLL off the volume the `.exe` came from.
+- **Decision:** resolution is driven by the image's IMPORT TABLE, not by
+  enumerating the directory. `SpawnPeFile` learns the on-disk origin,
+  records the derived directory on the `Process`, and the resolver reads
+  only DLLs that some image actually names — recursively, bounded by
+  depth 4 and 16 loads per spawn.
+- **Rules out:** loading every `*.dll` in the `.exe`'s directory the way
+  the fixed FAT32 `/LIB` path does. A real application directory holds
+  DLLs the program never loads (BattleBit ships a 74 MiB
+  `GameAssembly.dll` alongside the 26 MiB `UnityPlayer.dll`); a
+  speculative scan would map both and exhaust the heap to bind neither.
+- **Decision:** every DLL read off a volume passes `security::Gate` with
+  `ImageKind::WindowsPE`, the same gate `PeLoad` applies to a
+  disk-sourced `.exe`. Blobs in the kernel image and files under the
+  trusted ramfs root are NOT re-gated.
+- **Rules out:** gating uniformly. 44 guard scans per spawn is pure cost
+  against bytes that are already part of the TCB — if those are
+  compromised the guard is compromised too. It also rules out the
+  reverse (gating nothing on disk), which was the pre-existing state of
+  the FAT32 `/LIB` loader and let unvetted disk code into a process's
+  address space without a verdict.
+- **Decision:** the bind-time and run-time search paths read the SAME
+  `Process::sxs_dir` field.
+- **Rules out:** letting `SYS_DLL_LOAD_FROM_PATH` keep its own notion of
+  where to look. A bind-time / run-time divergence in this loader is a
+  bug class that has already been fixed twice; one field with one writer
+  makes the divergence unrepresentable rather than merely unlikely.
+
+### DD — the side-by-side fixture is staged on disk, never embedded
+
+- **Context:** every other PE fixture in the tree is compiled into the
+  kernel image by `embed-blob.py` and spawned from a `constexpr` array.
+- **Decision:** `SXSTEST.EXE` and its companion `SXSLIB.DLL` are built
+  by `tools/build/build-sxs-fixture.sh` and staged onto the FAT32 volume
+  by `tools/qemu/run.sh`. Neither half is embedded.
+- **Rules out:** embedding either half. An embedded DLL is reachable
+  through the preload set, so an embedded fixture would pass whether or
+  not the side-by-side path works — it would prove nothing. This is why
+  `PeCompatEntry` grew a `fat_path` column and a `Pending` state: a
+  disk-sourced row cannot be read on the boot thread, because storage
+  enumerates asynchronously.
+### DD - one column table per list view, three consumers
+
+- **Context:** the round above deferred proportional list content
+  because "every column in Files and Task Manager is laid out in 8-px
+  cells and hit-tested from the same arithmetic." That deferral has now
+  been taken: `app_widgets/app_text.{h,cpp}` provides measured content
+  type and Files / Task Manager lay their columns out in pixels.
+- **Decision:** each list view builds ONE column table per paint and
+  the header paint, the row paint and the hit-test all read it. The
+  flat palettes are expressed through the same table with the
+  historical `chars * 8 + 4` widths rather than through a parallel
+  legacy branch.
+- **Rules out:** keeping the paint site and the hit-test site as
+  independent expressions of the same layout. They already drifted
+  once - every click in four apps was 8 px out of phase because the
+  two arithmetic chains disagreed - and a proportional layout makes
+  that divergence unrecoverable by inspection, because there is no
+  longer a character grid to eyeball against.
+- **Rules out** a separate Aurora-only layout function: two functions
+  computing "where is column N" is the same bug with a theme switch in
+  front of it. The theme picks the *widths*, not the *code path*.
+- **Scope:** row pitch also becomes theme-dependent, so `RowH()` /
+  `HeaderH()` are single accessors and no site reads the raw `kRowH` /
+  `kHeaderH` constants. Verified by a Classic before/after control
+  capture: the Files list rows, the Files header band and the Task
+  Manager column-header row are byte-identical across the change; the
+  only differing pixels are live data (clock, CPU %, task set, GFX
+  demo frame, kernel log).
+
+### DD - an ABI badge is read, never inferred
+
+- **Context:** the reference screenshots put `NATIVE` / `WIN32 PE`
+  badges on Files rows and Task Manager rows. The previous round
+  correctly refused to invent the data.
+- **Decision:** the badge is rendered only from a value the kernel
+  actually recorded - `Process::pe_image_base` / `Process::abi_flavor`
+  for a running task (surfaced as `SchedTaskInfo::abi`), or the image
+  header for a file whose bytes are already resident. Where neither is
+  available the row renders nothing.
+- **Rules out:** deriving the badge from the file extension. The
+  launch path has to guess from `.EXE` because it has nowhere else to
+  look, but a badge inherits none of that excuse - it would
+  confidently mislabel any file whose name ends in the wrong four
+  characters, and a UI that lies quietly is worse than one that admits
+  it does not know.
+- **Rules out** reading FAT32 bytes at paint time to close the gap:
+  `Fat32ReadFile` stages the whole file, and doing that per visible
+  row per frame trades a cosmetic badge for a disk-bound compositor.
+
+### DD - the Files rail relocates the mode buttons, it does not clone them
+
+- **Context:** the reference puts the view switcher down the left edge
+  as a places rail; DuetOS had it as four toolbar buttons.
+- **Decision:** under Aurora the four existing `AppButton`s are
+  rebound into the rail. Same widgets, same `on_click`, same
+  hit-test - only `bounds` moves. REFRESH / SORT stay in the toolbar
+  and close up the gap they left.
+- **Rules out:** painting a second rail with its own hit-test that
+  calls the same `ClickMode*` functions. Two controls for one action
+  is the duplication the anti-bloat rules forbid, and a second
+  hit-test surface over the same actions is a second thing to keep in
+  phase with the paint.
+
+### DD - S3 resume restores raw saved state, it does not replay boot init
+
+- **Context:** ACPI S3 destroys every architectural register. Something
+  has to rebuild GDTR / IDTR / TR / CR0 / CR4 / EFER / the SYSCALL MSRs
+  / FS+GS bases before C++ can run again. The tempting option is to
+  re-call the boot bring-up functions (`GdtInit`, `IdtInit`,
+  `SyscallInit`, ...), which already know how to build all of it.
+- **Decision:** `AcpiWakeResume64` restores the values saved by
+  `AcpiSuspendEnter`, in assembly, from a fixed-layout
+  `AcpiWakeContext`. The boot init functions are not replayed.
+- **Rules out:** the replay approach. Those functions re-DERIVE state
+  that is only supposed to be identical. TSS `RSP0` is the concrete
+  counter-example - it is scheduler-owned, `TssInit` zeroes it, and a
+  resume that left it zero would fault on the first ring 3 -> ring 0
+  transition after wake. So `RSP0` is saved and restored explicitly.
+  The one thing the resume path does mutate directly is the TSS
+  descriptor's BUSY bit, which survives in the in-memory GDT because
+  the CPU that set it lost power rather than switching away; `ltr` on a
+  busy TSS raises #GP, so it is cleared before TR is reloaded.
+- **Also rules out:** reusing the AP trampoline at physical 0x8000.
+  The AP path jumps to a C++ entry that joins the scheduler; the wake
+  path has to land in a register-restore stub instead. They are
+  adjacent reserved low pages (0x8000 / 0x9000), not one blob.
+
+### DD - a driver that cannot restore itself vetoes the suspend
+
+- **Context:** S3 powers devices off, and QEMU resets every device on
+  wake. A driver with no restore path will come back to a controller in
+  reset state.
+- **Decision:** `kernel/power/suspend.h` makes participation explicit
+  and binary. A driver either registers a `resume` callback
+  (`PowerSuspendRegister`) or registers a permanent
+  `PowerSuspendVeto(name, reason)`. Any registered veto makes every
+  suspend attempt refuse and name the vetoing driver. NVMe / AHCI /
+  e1000 veto today, registered at their attach site rather than
+  unconditionally, so the veto list describes what is actually present.
+- **Rules out:** suspending anyway and letting drivers fail on first
+  use after resume. A machine that returns with a wedged NVMe queue is
+  worse than one that never slept, and the failure would surface far
+  from its cause.
+- **Rules out:** encoding "cannot suspend" as a falsy return.
+  `SuspendOutcome` enumerates six distinct reasons; only `Cycled` means
+  the machine slept. This is the same discipline the MSR lane applied
+  to "unavailable is not a value" - `AcpiSleepTypeFor` returns a bool
+  plus out-params precisely because `SLP_TYP == 0` is a legal encoding
+  and must stay distinguishable from "firmware declares no such state".
+
+### DD - TPM: the sealing half is built, the identity half never will be
+
+- **Context:** a TPM offers two separable groups of features. One group
+  - seal/unseal, PCR measurement, hardware RNG, non-exportable key
+  storage - serves the machine's owner. The other - endorsement-key
+  export, attestation identity keys, `TPM2_Quote` and the rest of the
+  signed-assertion commands - serves a remote party trying to identify
+  the machine, or to withhold service from configurations it dislikes.
+  Implementing "TPM support" as a unit would ship both.
+- **Decision:** implement only the first group. The refusal is
+  structural rather than a policy check: `wire::CommandAllowed()` in
+  `kernel/drivers/tpm/tpm_wire.h` is an allow-list the transport
+  enforces before any byte reaches the FIFO, and - the load-bearing
+  part - there is deliberately no raw "submit this buffer to the TPM"
+  entrypoint, so the allow-list cannot be walked around by
+  hand-marshalling a command. The refused opcodes are written down as
+  named constants beside the list, so enabling one is a visible diff
+  directly under the comment explaining why it must not be.
+  `tests/host/test_tpm_wire.cpp` and the boot self-test both assert the
+  refusal, so adding attestation breaks a test gate rather than passing
+  quietly.
+- **The condition that would void it** is recorded in the same header
+  and in [`TPM`](../security/TPM.md): only a DuetOS-internal use for a
+  signed assertion that never leaves the machine, AND a demonstration
+  that the same structure could not be replayed to a remote verifier.
+  "An application requires attestation" is explicitly not sufficient -
+  it is the demand the rule exists to refuse.
+- **Rules out:** (a) a generic `SYS_TPM_COMMAND(buffer)` syscall, which
+  is the natural way to expose a TPM and would make every other layer
+  decorative; (b) exposing the chip's DID/VID or any per-unit value to
+  ring 3 - the identity struct is kernel- and shell-only, and is a
+  model identifier (every chip of a part reports the same values)
+  rather than a unit identifier; (c) a guest-facing seal API in this
+  slice at all, since none was needed yet and shipping one unused would
+  be the "built but not wired in" antipattern.
+- **Also rules out:** refusing to boot on a PCR mismatch. The
+  measured-boot tripwire warns and continues. A kernel that halts
+  because the boot chain changed is implementing exactly the lock-out
+  this decision set out to prevent, only against its own owner.
+- **Evidence:** verified live against `swtpm` under QEMU, not merely
+  compiled - DID/VID `0x00011014`, `TPM2_Startup` including the
+  already-started-by-firmware path, two hardware RNG reads returning
+  different data, PCR read/extend, and a boot digest that is
+  deterministic across identical boots and moves when the configuration
+  changes.
+
+### DD - measured boot excludes the PCRs the boot loader owns
+
+- **Context:** the obvious PCRs for an OS to measure into are 8 and 9,
+  which the TCG convention assigns to the operating system. The
+  measured-boot tripwire first used them, and its composite digest then
+  changed on every boot that pinned a different baseline value, so no
+  boot could ever report a match.
+- **Decision:** measure into PCR 10 (kernel identity) and PCR 11
+  (kernel command line), and compute the composite over PCR 0-7, 10 and
+  11. GRUB's TPM module already measures its own commands into PCR 8
+  and the files it loads into PCR 9, and those commands include the raw
+  kernel command line - so folding 8 and 9 in made the digest depend on
+  the baseline being pinned, meaning pinning it changed it. The
+  `tpm.baseline=` token is separately stripped before PCR 11 for the
+  same self-reference reason.
+- **Rules out:** using PCR 8/9 for any future OS-level measurement
+  while GRUB remains the loader, and measuring the command line
+  verbatim, which would reintroduce the self-reference one level up.
+- **Cost, accepted knowingly:** a tampered `grub.cfg` is no longer
+  covered by the composite. The kernel command line it produces still
+  is, via PCR 11, which is the part that changes the running system.
+- **Evidence:** two boots differing only in the baseline value produced
+  identical PCR 10 and 11 and identical PCR 0-3 and 5-7, differing only
+  in PCR 4 - the boot image, which the QEMU harness rebuilds per
+  command line. The per-PCR values are logged at DEBUG during the fold,
+  which is how this was localised in one boot rather than by bisection.
+### DD - MouseMove is broadcast to every widget, not first-Consumed-wins
+
+- **Context:** `WidgetGroup::DispatchReverse` stopped at the first
+  widget that returned `Consumed`, for every event kind. That is right
+  for a click, which exactly one widget should act on.
+- **Decision:** `MouseMove` is delivered to the whole chain. Hover is a
+  state *transition*, and `AppButton` can only clear its `Hover` flag by
+  seeing a move that lands outside it; stopping at the widget under the
+  pointer left every previously-hovered sibling permanently lit. Visible
+  proof: the boot self-tests drive synthetic clicks through the Files
+  and Calculator toolbars, and on every flat-theme boot those two apps
+  showed a stuck hover wash on `RAM` and `4` respectively.
+- **Rules out:** having apps clear sibling hover flags by hand before
+  dispatch. That is per-app bookkeeping for a framework invariant, and
+  every app that forgot it would grow the same artefact.
+- **Rules out:** making hover a pull (`widget.IsHovered(cursor)`) read
+  at paint time. That would work, but it moves pointer state into the
+  paint path and every widget would need the cursor position passed
+  down; the event already exists and only needed to reach everyone.
+
+### DD - a column's width bound is measured, never a hand-picked string
+
+- **Context:** the Aurora tables size fixed columns by measuring a
+  "widest value" string (`kWidest*`). Under a proportional face that
+  intuition fails: Liberation Sans puts `f` at 0.278em and `e` at
+  0.556em, so `"0xffff"` measures NARROWER than a real PID like
+  `"0xfeee"`, and `"unknown"` is wider than `"sleeping"` despite being
+  a character shorter. `AppTextCellRight` *drops* a run that would
+  start left of its column rather than clipping it, so the failure mode
+  is not a squeezed cell - it is an entire column silently rendering
+  nothing while the table still looks plausible.
+- **Decision:** a bound over a closed set of values (task states) is
+  computed by measuring every member. A bound over an open set (PIDs)
+  is written with digits rather than letters, with the reason stated at
+  the constant, and the Task Manager self-test asserts that every value
+  it can produce measures no wider than the column `BuildCols`
+  reserved.
+- **Rules out:** eyeballing `kWidest*` strings. This shipped a Task
+  Manager whose PID column was blank for every real process, and the
+  table read as intentional.
+- **Rules out:** making `AppTextCellRight` clip instead of skip. A
+  clipped right-aligned number is a *wrong* number; refusing to draw is
+  the safer contract. The bound is what has to be right.
+
+### DD - a usage window refuses to report rather than report a quantised rate
+
+- **Context:** `TelemetryCpuUsageSample` differences two readings of a
+  monotonic tick counter. The scheduler ticks at 100 Hz; Task Manager
+  samples once per **paint**, which is far faster. Differencing two
+  readings taken 0 or 1 ticks apart gives `dt` in `{0, 1}`, and
+  `(dt - di) / dt` can then only evaluate to 0% or 100%. The rail shipped
+  reading "CPU 0% / Core 0 0%" beside an aggregate graph showing 59% —
+  the aggregate sums deltas across CPUs so it usually found one non-zero
+  `dt`, while each per-core tile did not.
+- **Decision:** a window shorter than `kTelemetryMinWindowTicks` (25
+  ticks / 250 ms) is refused. The last figure computed over a window that
+  *did* qualify is returned in its place, and until one exists the sample
+  reports `valid == false` so the pane renders its unavailable state.
+  A refused sample does **not** advance `prev_total` / `prev_idle`.
+- **Rules out:** reporting the instantaneous value and letting the UI
+  smooth it. The input is quantised, not noisy — no amount of downstream
+  averaging recovers a rate from a one-tick window, and a smoothed 0%/100%
+  square wave is a *more* convincing wrong answer than the raw one.
+- **Rules out:** enforcing the minimum length by clamping the poll rate
+  at the caller. The window is caller-owned precisely so consumers at
+  different cadences don't consume each other's deltas; pushing the floor
+  into each caller would have to be re-derived by every future consumer.
+- **Rules out:** adding the minimum-length check alone. Advancing the
+  baseline on every call is what stopped the window growing past one tick
+  in the first place, so a length check that still consumed `prev_*` would
+  refuse forever and report nothing. Not consuming on refusal is the load
+  bearing half of the fix, and `TelemetrySelfTest` asserts it directly.
+
+### DD - ring-3 stack growth is classified, not locked
+
+- **Context:** demand-grown ring-3 stacks need the `#PF` handler to
+  decide "grow this" vs "kill this task" for an untrusted PE. Mutating
+  the commit edge looks like shared state that wants a lock, and the
+  commit itself calls `mm::AddressSpaceMapUserPage`, whose regions lock
+  is an `RwLock` over a sleeping `sched::Mutex`.
+- **Decision:** no lock. The growth condition requires the FAULTING
+  THREAD'S OWN `rsp` to be inside the reservation, and every other
+  thread in a Win32 process runs on the thread-stack arena at
+  0x68000000, far below `reserve_lo` - so no other thread can ever
+  satisfy the condition against the main-thread reservation, making the
+  main thread the sole writer of `commit_lo`. The present-probe inside
+  the commit helper is the remaining net against a double map.
+- **Rules out:** guarding the reservation with a `sync::SpinLock`. That
+  path is actively unsafe here, not merely redundant: `SpinLockAcquire`
+  does `Cli()`, and parking on the mm regions lock with interrupts off
+  while another CPU spins on the same spinlock is a deadlock. It also
+  rules out a future per-thread growable stack reusing the same
+  per-process `UserStackRange` without revisiting this argument - the
+  no-concurrency proof is a property of the ADDRESS-SPACE LAYOUT, and
+  it evaporates the moment two growable reservations coexist.
+- **Cost, accepted knowingly:** the argument is load-bearing and
+  invisible at the call site. It is written out in
+  `kernel/proc/user_stack.h` next to the condition it depends on, and
+  the condition is pinned by a hosted test
+  (`tests/host/test_user_stack.cpp`) that asserts a wild pointer from a
+  thread-arena `rsp` does NOT grow the reservation.
+- **Evidence:** live boot - the growth path commits page-by-page down a
+  512 KiB walk with no lock and no double-map panic, under SMP4.
+
+### DD - the ring-3 stack guard region is committed once, not never
+
+- **Context:** the point of a guard region below the reservation is that
+  overflow stays detectable. The strict reading is "never commit it".
+  But the STATUS_STACK_OVERFLOW that reports the overflow is delivered
+  by writing an `EXCEPTION_RECORD` + `CONTEXT` onto the very stack that
+  just ran out, so a never-committed guard means the report itself
+  faults and the thread dies as a generic access violation instead.
+- **Decision:** on the first guard hit, commit the whole guard region
+  (4 pages) and deliver `STATUS_STACK_OVERFLOW`, exactly as Windows
+  does. It is a one-shot flag on the reservation: the classifier still
+  returns `Guard` and never `Grow`, so the overflowing recursion dies;
+  a second runaway walks below `guard_lo` into unmapped space and takes
+  the ordinary task-kill.
+- **Rules out:** treating the guard as a pure hole. It also rules out a
+  one-page guard: measured live, one page ran out inside
+  `KiUserExceptionDispatcher` and the second fault task-killed the
+  thread before the exception could be reported.
+- **Cost, accepted knowingly:** a process that overflows its stack ends
+  up with 16 KiB of address space below its declared reservation
+  committed. Bounded, once per process, and it buys a nameable failure
+  instead of an anonymous one.
+- **Evidence:** live boot - `ring3-stackguard-smoke` recurses through a
+  128 KiB reservation, hits the guard, and the kernel logs
+  `*** RING-3 STACK OVERFLOW *** verdict="Guard"`, fires
+  `mm.user_stack_guard_hit`, delivers `0xC00000FD`, and the process
+  exits with that status. No task-kill, no panic.
+
+
+### DD - GDI handle ownership is enforced in the lookup, not at the call sites
+
+- **Context:** the GDI object tables (memory DCs, bitmaps, brushes,
+  pens) are system-wide, and a handle is `tag | index` with the index in
+  0..63. Those values are trivially guessable from ring 3. Before
+  2026-07-29 nothing recorded who created an object, so a PE could
+  select another process's HBITMAP into its own memory DC and blit that
+  process's off-screen pixels into its own window, or delete it. There
+  are already a dozen lookup call sites across `gdi_objects.cpp` and
+  `window_syscall.cpp`.
+- **Decision:** every non-stock object records its creating pid, and
+  `GdiLookupMemDC` / `GdiLookupBitmap` / `GdiLookupBrush` /
+  `GdiLookupPen` return `nullptr` for a handle owned by anyone else. The
+  check lives inside the lookup. Kernel-context callers (pid 0) see
+  everything, and pid 0 doubles as the shared owner for the stock and
+  sys-colour objects every process legitimately selects.
+- **Rules out:** adding the owner check per syscall handler. That is the
+  whitelist-incompleteness bug class this repo has already been bitten
+  by: a new call site that forgets the check is a silent cross-process
+  read, and nothing in the build would notice. It also rules out using a
+  pid of 0 to mean "unowned but private" - 0 is shared, and anything
+  private must carry a real pid.
+- **Cost, accepted knowingly:** the leak detector can no longer
+  enumerate the tables through the public accessors, because it needs to
+  see every slot regardless of owner. It takes an explicit unfiltered
+  census (`GdiSnapshotUsage`) instead. Any future system-wide accounting
+  pass has to do the same rather than reaching for `GdiLookup*`.
+- **Evidence:** `[gdi] reap pid=0x10 objects=0x4 bytes=0x4000` on a live
+  ring3 boot - the four objects `surface_smoke` deliberately leaks, and
+  the exact byte count of its 64x64 bitmap. A boot with no reap line is
+  the regression signal.
+
+### DD - DIB sections flush on blit rather than on write
+
+- **Context:** `CreateDIBSection` hands the caller a pointer and lets it
+  write pixels directly, with no GDI call in between. The kernel surface
+  therefore cannot be kept in sync as the writes happen.
+- **Decision:** `gdi32` allocates the user-side pixel buffer with
+  `SYS_VIRTUAL_ALLOC`, keeps a small table of live sections, and pushes
+  every live section's bytes down through `SYS_GDI_SET_DIBITS` at the
+  start of `BitBlt` / `StretchBlt` - the first moment the kernel has any
+  reason to care what the caller wrote.
+- **Rules out:** dirty-tracking the section by making its pages
+  read-only and catching the fault. That needs a user-mode fault hook
+  the DLL cannot install, and it would put a page-fault round trip in
+  the middle of an app's inner drawing loop.
+- **Cost, accepted knowingly:** sections the caller never touched are
+  re-pushed on every blit. That is cheap next to the blit itself at v0
+  sizes, but it is linear in live sections, so a future workload with
+  many large sections wants real dirty tracking rather than a bigger
+  table.
+- **Evidence:** `surface_smoke` writes a colour straight through the
+  `CreateDIBSection` pointer with no intervening GDI call, blits, and
+  reads the exact pixel back with `GetDIBits`.
+### DD - an unresolved-import miss is decoded in the kernel, and never guessed
+
+The miss-logger trampoline that catches a call to an unresolved import
+used to decode the caller's call site itself, in hand-assembled bytes
+inside the R-X Win32 stubs page. It recognised one instruction shape —
+`E8 rel32` into a 6-byte `FF 25` import thunk — and gated the whole
+decode on a single byte compare (`[ret-5] == 0xE8`).
+
+That is not enough entropy to be trusted. A call site using the other
+shape MSVC emits (`FF 15 disp32`, a direct indirect call through the
+IAT) lands on a displacement byte that reads 0xE8 roughly once in 256,
+and the decoder then "succeeded" and printed a slot address that was
+outside the image and not pointer-aligned. A real `BattleBit.exe` boot
+did exactly this and reported `slot=0x1436b192b fn="<unmapped>"` for an
+import (`UnityPlayer.dll!UnityMain`) the loader had staged correctly all
+along. The wrong answer sent a subsequent investigation to the api-set
+surface, which had nothing to do with it.
+
+The decode now lives in `SYS_WIN32_MISS_LOG`; the trampoline passes only
+its own return address. This rules out three alternatives a later slice
+could otherwise pick:
+
+- **Extending the in-page decoder to more shapes.** Rejected. Growing
+  hand-assembled bytes inside a fixed-offset stub page means shifting
+  every later stub offset, and the decoder still could not read a
+  faulting page safely or explain a failure. The kernel side gets
+  `mm::CopyFromUser` and arbitrary control flow for free.
+- **Keeping a best-effort guess when validation fails.** Rejected. A
+  miss you cannot name costs one investigation; a miss named wrongly
+  costs an investigation plus whatever the wrong name implicates. The
+  handler now reports an explicit `undecoded="<reason>"` and no
+  address. Shapes genuinely unrecoverable from a return address alone —
+  a tail `jmp` through the IAT, `call rax` — are reported as such
+  rather than approximated.
+- **Trusting opcodes without a structural check.** Rejected. A decoded
+  slot that is not 8-byte aligned is not an IAT slot whatever the
+  opcodes said, and is discarded.
+
+Both thunk widths are recognised (`48 FF 25 rel32`, 7 bytes, and
+`FF 25 rel32`, 6). The wide REX.W form is what real MSVC output uses;
+supporting only the narrow one was why the first attempt at this fix
+still could not name `UnityMain`.
+
+### DD - an api-set contract with no host returns NULL, not a fabricated mapping
+
+`kernel/loader/apiset_static.cpp` maps `api-ms-win-*` / `ext-ms-win-*`
+contract names onto the host DLL that really exports their functions.
+Contracts absent from that table resolve to nothing, and
+`SYS_DLL_LOAD_FROM_PATH` returns 0.
+
+That is the correct answer, not a gap to be closed by widening the
+table. A caller probing a contract with `LoadLibrary` +
+`GetProcAddress` is required to handle NULL — that is how one binary
+runs on a Windows build predating the contract. `BattleBit.exe`
+exercises this: the MSVC UCRT's exit path probes
+`api-ms-win-appmodel-runtime-l1-1-2` for
+`AppPolicyGetProcessTerminationMethod`, takes the NULL branch, and calls
+plain `ExitProcess` — the documented non-packaged-app path.
+
+So a contract joins the table only when we ship a host that actually
+exports its functions. Mapping a contract onto a host that does not
+would trade a clean, correct refusal for a confusing "function missing
+from a DLL that claims to exist", and would move the failure from a load
+the caller expects to handle to a call it does not.
+
+The log line distinguishes the two cases, because reporting
+`miss path="/lib/api-ms-win-..."` made a correct refusal look like a
+missing file and invited exactly the wrong fix.
+
+### DD - the desktop icon set is one list for every theme
+
+`kernel/core/boot_bringup.cpp` registers exactly four desktop icons —
+Task Manager, Kernel Log, Inspect, Files — and every palette gets the
+same four. The alternative considered, and rejected, was keeping the
+nine-item Windows-shaped set (Computer, Trash, Browser, Help, Terminal,
+Calculator, Notepad, Settings, Device Mgr) under Classic and showing the
+Aurora four only under the Duet family.
+
+Two reasons it is rejected rather than deferred:
+
+- **A theme is a palette, not a different operating system.** Making the
+  launcher set follow the colour scheme means switching theme silently
+  adds or removes destinations. That is a functional change driven by a
+  cosmetic control, and there is no way for a user to predict it.
+- **The registration is boot-time; the theme is not.** Icons are
+  registered once in bringup, while `ThemeSet` runs from the `theme`
+  shell command, the Settings app and session restore. A theme-conditional
+  set would need re-registration on every theme switch, which means
+  invalidating the hover index and the hit-test table from a path that
+  today only re-publishes colours.
+
+The nine entries were also not a neutral list to keep: "Computer" and
+"Trash" both bound to `ThemeRoleWindow(Role::Files)` — two icons, one
+destination — and every one of the nine is already in the Start menu.
+
+"Inspect" binds to `duetos::apps::dbg::DbgWindow()`. There is no separate
+PE-inspector app; the debugger's Disasm / Memory / Symbols tabs are the
+binary-inspection surface the design's Inspect screen depicts.
+
+### DD - pinned taskbar launchers are scaled by island budget, not transcribed
+
+`docs/aurora-theme/README.md` §10 pins nine app buttons on the taskbar
+island. `kernel/drivers/video/taskbar.cpp` pins five.
+
+The design's nine is a 1920-canvas figure, and the island's cells do not
+all scale together. `IMPLEMENTATION.md` §7 is explicit that type does not
+scale below 11 px, so the text-bearing cells on the right — `CPU nn%`,
+`60.0 FPS`, the clock and the date — keep their 1920 widths while the
+chrome around them halves. The right-hand reserve is therefore a much
+larger share of a 1024 island than of a 1920 one. Measured: nine buttons
+plus the search pill put the island at 86 % of the framebuffer, which is
+the near-full-width strip the island was introduced to avoid; five lands
+at ~69 %, against the reference's 65 %.
+
+So the pinned count is a function of the framebuffer, not a constant
+transcribed from the design. A future 1920 mode should widen the list
+rather than treat five as the ceiling — hence `kPinnedRoles` is a table
+and `BuildButtonRoster` is shared by the width measurement and the paint
+pass, so the two can never disagree about how many cells exist.
+
+### DD - Aurora blob percentages are viewport-corrected, not transcribed
+
+The wallpaper's three accent blobs are specified in the design CSS as
+percentages of a layer that is `inset:-10%` and whose gradients end at
+`transparent 70%`. `kernel/drivers/video/wallpaper_aurora.cpp` stores the
+corrected figures — centre `= pct x 1.2 - 10`, radius `= pct x 0.84` —
+not the literal ones.
+
+Transcribing the literals is what made the desktop read as an overall
+teal-green field instead of the reference's near-black with two localised
+glows: the blobs were ~19 % too large and their centres ~5 points too far
+from the screen edges, so all three overlapped across the middle. The
+earlier attempt to compensate by running the peak alphas hot
+(120/105/48 against the CSS's 87/56/36) treated the symptom and made the
+wash broader still.
+
+The correction is recorded here because the raw percentages are still the
+ones written in `README.md` §1, and a future slice reading only that file
+would "fix" these constants back to the literals.
+### DD - delay-load imports are bound eagerly at load, not through `__delayLoadHelper2`
+
+`IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT` (directory 13) is walked by the
+loader and every slot in the delay IAT is bound before the entry point
+runs, through the same `BindImportSymbol` ladder a static import uses.
+The image's own `__delayLoadHelper2` therefore never executes.
+
+**The alternative that was rejected: making the helper path work.**
+The intuitive reading is that "supporting delay-load faithfully" means
+implementing `__delayLoadHelper2`. It does not. That helper is linked
+INTO the PE from `delayimp.lib`; no operating system supplies it. All
+Windows does is *nothing* — the linker's `__tailMerge` stub calls the
+image's own helper, which calls `LoadLibraryA` + `GetProcAddress` and
+overwrites the slot. So "implement the helper path" really means "make
+`LoadLibrary` + `GetProcAddress` good enough to resolve everything a
+delay import can name."
+
+They are not, and deliberately so. `SYS_DLL_PROC_ADDRESS` reports a
+**miss** for thunk-table entries that are no-op stubs, because
+applications use `GetProcAddress(h, "Foo") != NULL` as a feature probe
+and handing back a stub would turn "this OS lacks Foo, take the
+fallback" into "Foo exists" followed by a silent wrong answer (see the
+comment at that syscall). It also has no route to the api-set contract
+table, the retired-name aliases, the UCRT `_o_` alias set, or the data
+landing pads. Routing delay-load through it would resolve strictly
+*less* than the static binder does, on the same names, in the same
+process.
+
+Eager binding also puts delay-load misses into the diagnostics that
+already exist — `[win32-miss]` slot naming, the fix journal, the
+`import resolved to NO-OP stub` warnings — instead of into a helper the
+kernel cannot see inside.
+
+**What this costs.** Delay-loading is sometimes used as a probe: wrap
+the first call in `__try/__except(DELAYLOAD_...)` and treat
+`ERROR_MOD_NOT_FOUND` as "optional feature absent". Under eager binding
+that exception never fires, because the slot was bound at load. In
+practice this changes nothing on DuetOS: the DLL set is preloaded and
+fixed, so a DLL that is not in the set makes the eager bind fall
+through to the same catch-all a static import would get. If a real
+binary is ever observed depending on the *failure* of a delay-load
+probe, the fix is to make the unresolvable case leave the slot alone
+(the machinery for that already exists — see below) rather than to
+resurrect the helper path.
+
+**What is deliberately NOT symmetric with static imports.** A malformed
+delay directory fails the load exactly like a malformed import table
+does. An *unresolvable symbol* does not: the slot is left holding the
+linker's own thunk. Failing the load there would reject binaries that
+delay-load a DLL they never touch, which is the entire point of
+delay-loading, and Windows loads such images fine. Leaving the slot
+alone is also the safer half of the trade — the guest's helper then
+goes through `GetProcAddress`, which has its own gates, rather than the
+kernel binding a name a static import was refused.
+

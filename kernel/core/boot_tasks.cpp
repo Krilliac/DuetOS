@@ -2777,10 +2777,6 @@ void MouseReaderTask(void*)
                 if (is_dbl)
                 {
                     duetos::drivers::video::DesktopIconActivate(icon);
-                    // Auto-focus the URL bar when the browser icon is activated
-                    // so keyboard-first URL entry works immediately (F-032).
-                    if (duetos::drivers::video::DesktopIconWindow(icon) == duetos::apps::browser::BrowserWindow())
-                        duetos::apps::browser::BrowserFocusUrl();
                     duetos::drivers::video::CursorHide();
                     duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
                     duetos::drivers::video::CursorShow();
@@ -3009,6 +3005,26 @@ void MouseReaderTask(void*)
                 {
                     StartMenuRebuildAndOpen();
                     SerialWrite("[ui] menu open\n");
+                }
+                menu_handled = true;
+            }
+        }
+
+        // Search pill press opens the Start menu — the launcher surface
+        // is where you go looking for an app. There is no free-text
+        // index behind the pill yet (see the GAP in taskbar.cpp), so it
+        // routes to the closest real destination rather than being a
+        // control that swallows a click and does nothing.
+        if (press_edge && !menu_handled && !drag.active)
+        {
+            duetos::u32 qx = 0, qy = 0, qw = 0, qh = 0;
+            duetos::drivers::video::TaskbarSearchBounds(&qx, &qy, &qw, &qh);
+            if (qw > 0 && cx >= qx && cx < qx + qw && cy >= qy && cy < qy + qh)
+            {
+                if (!duetos::drivers::video::MenuIsOpen())
+                {
+                    StartMenuRebuildAndOpen();
+                    SerialWrite("[ui] search -> menu open\n");
                 }
                 menu_handled = true;
             }

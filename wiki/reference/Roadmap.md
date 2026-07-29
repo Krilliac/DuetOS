@@ -78,90 +78,6 @@ cleanup debt: move the residual up and delete the rest.
   per-CPU + per-task pair doesn't already absorb. None observed
   since 2026-05-22.
 
-### SMP=8 (4c × 2t) AP-bringup recursive fault under x86_64-debug
-
-- **Symptom:** booting `tools/qemu/run-stress.sh cpu` on
-  **x86_64-debug only** with `DUETOS_SMP=8,sockets=1,cores=4,threads=2`
-  reproducibly hits a recursive #-fault during the **first AP**'s
-  bring-up at ~70 ms after `[arch/smp] starting AP apic_id val=0x1`.
-  Captured 2026-05-22; symptom-line in the serial log:
-
-  ```
-  [t=97644.875ms] [D] fs/fat32 : ...corrupted bytes... path=""
-  [recursive-fault] vec=0x...  rip=0x... — short-circuiting panic dump
-  ```
-
-  The vec/rip on the recursive-fault line render mostly as
-  spaces / non-printable bytes — the panic-mode SerialWrite is
-  bypassing `g_serial_lock`, so the BSP's hex digits and a
-  concurrent AP-side writer interleave at the wire level. The
-  underlying first fault is therefore lost to corruption.
-
-  **Bound:** x86_64-release at SMP=8 boots clean and runs the
-  10s-8-worker stress to `[stress] done` (verdict OK, no
-  inversions). x86_64-debug at SMP=4 also boots clean. So the
-  AP-bringup storm under KASAN/UBSAN instrumentation noise is
-  the trigger — neither SMP=8 alone nor debug alone is enough.
-- **Likely shape:** an AP's first timer IRQ enters the trap path
-  while KASAN/UBSAN shadow-map machinery is still initialising
-  for that AP's stack/IST region, AND `Current()` on that AP is
-  the bootstrap sentinel rather than a fully-armed task. The
-  UBSAN report path itself takes a lock that races. **Not** the
-  GSBASE/lidt root that PR #320 fixed — that one trace-bounds at
-  "AP online" and the recursive-fault never reaches it.
-- **Reusable harness:** `tools/test/smp-stress-sweep.sh 20 8 5`
-  re-triggers the scenario with per-repeat log capture so a
-  future investigation can grep `build/x86_64-debug/smp-stress-N.log`
-  for the first fault line.
-- **Bounded fix landed** (`arch/traps,serial: serialize recursive-fault
-  dump through g_serial_lock try-lock`): `HaltOnRecursiveFault` now
-  snapshots vec/rip into locals before formatting, pre-formats the
-  entire line into a stack buffer, and emits it through
-  `SerialWriteNRecursiveFault` — which try-acquires `g_serial_lock`
-  (non-blocking) first, falling back to the `PanicEmitTryClaim`
-  bounded-spin serializer only if the lock is held (BSP mid-dump).
-  The `vec=0x   __  rip=0x   __` interleaving symptom is suppressed.
-  Re-run `tools/test/smp-stress-sweep.sh 20 8 5` with this fix in
-  tree to read the real first-fault site in the now-clean log.
-- **An AP-bringup `Current()` fault WAS found and fixed (2026-07-28)**
-  — `sched: install the AP boot sentinel before SchedStartIdle`. The
-  clean first-fault log this item was blocked on finally arrived from a
-  full-device TCG smoke:
-
-  ```
-  SchedEnterOnAp begin cpu_id=1
-  SchedCreate: kernel task name="idle-ap1"
-  sched/idle : idle task online          <- tail of SchedStartIdle
-  [ubsan] tm-detail member-access null-deref ptr=0x0 ty='Task'
-  [panic] KASSERT: WaitQueueBlockTimeout on non-Running task cpu=1
-  ```
-
-  `SchedEnterOnAp` ran `SchedStartIdle` (which allocates via
-  `SchedCreate` -> `KMalloc` and takes locks) BEFORE minting the boot
-  sentinel and installing it as `current_task`. A fresh AP's PerCpu is
-  memset-zeroed, so `current_task` was **nullptr** for that whole
-  window — anything reaching `Current()` got a null `Task`, and
-  anything blocking failed the Running-state assert. Moving the
-  sentinel ahead of `SchedStartIdle` closes it.
-
-  Note this item's hypothesis was *nearly* right and off by one step:
-  it guessed a race involving "a sentinel `Current()`". The sentinel
-  was not the problem — the window BEFORE the sentinel existed was.
-
-  Measured over full-device TCG smokes: **0 KASSERTs across 3 boots**
-  with the fix, versus the pre-fix control panicking at t≈20 s. Every
-  fixed run reached t≈412 s (20x further) and brought up a
-  deterministic 3/3/3 APs.
-
-- **Still open — the SMP=8 stress symptom specifically.** The fix above
-  was measured against the SMP=4 boot smoke. The recursive `#`-fault
-  this item was originally filed for reproduces under
-  `tools/qemu/run-stress.sh cpu` at `DUETOS_SMP=8,sockets=1,cores=4,threads=2`,
-  which has NOT been re-run since. They plausibly share the root cause
-  — both are AP-bringup `Current()` faults — but that is an inference,
-  not a measurement. Re-run `tools/test/smp-stress-sweep.sh 20 8 5`
-  before closing this item.
-
 ### Topology — cluster-scoped IPI fan-out
 
 - **Residual:** the *cluster-scoped* fan-out (one ICR write to
@@ -729,14 +645,6 @@ In rough priority:
   real-device backends, multi-monitor mode-set.
 - **Owner:** `kernel/drivers/gpu/intel_gpu.{h,cpp}` + a new GGTT/BLT unit.
 
-### Multi-monitor / runtime resolution change
-
-- **Today:** single linear framebuffer, mode set at boot via
-  Bochs VBE; EDID parser landed, hot-plug detect missing.
-- **Blocks on:** per-vendor GPU drivers (Intel/AMD/NVIDIA all
-  probe-only), mode-set negotiation.
-- **Owner:** `kernel/drivers/gpu/`.
-
 ### Brightness — per-vendor register backlight
 
 - **Residual:** per-vendor *register* backlight (Intel/AMD PWM,
@@ -744,33 +652,6 @@ In rough priority:
   outside ACPI `_BCM`; wire the UI brightness control + Fn-key
   events to `AcpiBacklightSet`. (ACPI `_BCL`/`_BQC`/`_BCM` path +
   EC driver landed.)
-
-### Battery + ACPI suspend (residual — shared with ACPI S5)
-
-- **Residual:** S3 / S0ix suspend-to-RAM wake-vector +
-  context save/restore. EC `_Qxx` read path
-  (`AcpiEcReadQueryByte` / `AcpiEcDispatchPendingQuery`) and
-  per-bit `_Lxx`/`_Exx` GPE walking in the `env-monitor` task
-  both landed 2026-05-26 — lid-close / AC plug/unplug events
-  routed through either EC `_Qxx` or per-GPE method now fire
-  the firmware's handler. Battery / AC / lid *state* readable
-  via `_LID`/`_PSR`, SCI power-button path, ACPI S5 soft-off
-  incl. `_PTS`/`_GTS`, and the GPE `_Qxx` event surface all
-  landed. Open work: S3 trampoline + per-driver Suspend/Resume
-  callback contract (the harder half, per the research notes).
-
-### Bluetooth, Printer, Webcam
-
-- **Bluetooth residual (SMP-gated frontier):** the connection
-  manager — LE scan/connect, SMP pairing/bonding, GATT-HOGP
-  service discovery — so a real BT keyboard can associate on its
-  own; plus general L2CAP signalling / RFCOMM / SDP for
-  non-keyboard profiles. (HCI codec, HID-keyboard upper stack,
-  btusb transport, xHCI interrupt-IN primitive landed; invoked
-  via `bt probe`.)
-- **Printer:** USB printer-class driver + IPP / PostScript /
-  raster pipeline.
-- **Webcam:** UVC USB-Video class driver.
 
 ### Source-tree GAP markers
 
@@ -981,37 +862,6 @@ choice, not a one-liner:
   interactive Move/Size via `modal_input.{h,cpp}`, Files-app
   rename UI, Trash + ramfs Files per-row context menus landed.)
 
-### Winsock async surface
-
-- **Deferred:** Overlapped I/O + IOCP-backed socket reads
-  (kernel32's IOCP plumbing exists but isn't wired into the
-  socket read path — see **IOCP for sockets (Win32)** below);
-  kernel-direct event signaling at the moment of socket activity
-  (today's `WSAWaitForMultipleEvents` is a 10 ms polling loop);
-  `fWaitAll == TRUE` semantics (current impl returns on first
-  ready event). (Synchronous BSD subset + the `WSAEvent*` /
-  `WSAEventSelect` / `WSAEnumNetworkEvents` async surface +
-  kernel `SocketPollEvents` producer + `WSAAsyncSelect`
-  window-message delivery with DLL-side non-blocking emulation
-  landed.)
-
-### IOCP for sockets (Win32)
-
-- **Cost:** ~300 LoC for a new `KCompletionPort` kernel object
-  (`kernel/ipc/kcompletion.{h,cpp}`) + new sub-ops on
-  `SYS_HANDLE_OP`: `kCompPortCreate(concurrency)`,
-  `kCompPortAssociate(port, handle, key)`,
-  `kCompPortPost(port, key, bytes, ovl)`,
-  `kCompPortGet(port, &key, &bytes, &ovl, timeoutMs)`. New socket
-  sub-op `kSockOpOverlapped(kind, sock, buf, len, ovl_uptr)`
-  returns `WSA_IO_PENDING` and posts completion to the associated
-  port.
-- **Reference:** Wine `dlls/ws2_32/socket.c` overlapped path +
-  `WS_AddCompletion` → `NtRemoveIoCompletion`.
-- **Ordering:** `WSAAsyncSelect` shipped (no kernel change);
-  IOCP follows when a real overlapped-using PE binary is in test.
-- **Owner:** `kernel/ipc/`, `userland/libs/ws2_32/`.
-
 ### TCP AccECN (RFC 9768)
 
 - **Lands:** 4 ECN counters per direction for L4S / DOCSIS
@@ -1031,26 +881,6 @@ choice, not a one-liner:
   estimator + 4-state machine (~2000 LoC) on top — no workload justifies
   it yet.
 
-### IPv6 dual-stack
-
-- **Cost:** ~3000 LoC + ~15 KB state.
-- **Design:** mirror lwIP's `src/core/ipv6/` (smallest correct
-  IPv6 reference at ~3000 LoC). Cross-reference OpenBSD
-  `sys/netinet6/` for the cleaner protocol layering. Address
-  widening: 4-byte → 16-byte union on every `addr_t`; per-socket
-  +10 B for AF+V6ONLY+scope+flowinfo; per-TCB +24 B for
-  dual-family endpoints; prefix list + default-router list +
-  neighbor cache ~6 KB total.
-- **Approach:** AF_INET6 as the native type with v4-mapped
-  addresses (`::ffff:0:0/96`) bridging. NOT separate AF_INET +
-  AF_INET6 codepaths.
-- **Required pieces:** NDP (NS/NA), Router Discovery (RS/RA),
-  prefix-info → SLAAC, MLD (mandatory for solicited-node
-  reception), fragment reassembly (sender-side fragmentation can
-  defer to PMTUD-discovered minimum MTU + don't-fragment).
-- **Owner:** new `kernel/net/ipv6/` subdirectory; subsystem page
-  follows the same shape as `Network-Stack.md`.
-
 ### Open-firmware adoption (per Wireless / GPU)
 
 - See [Open Firmware Landscape 2026](../drivers/Open-Firmware-Landscape-2026.md)
@@ -1069,6 +899,67 @@ choice, not a one-liner:
 ---
 
 ## End-user features
+
+### DECISION: should `theme=duet` become the boot default?
+
+The Aurora redesign is implemented across the `Duet*` theme family
+(`duet`, `duetlight`, `duetblue`, `duetviolet`, `duetgreen`,
+`duetclassic`) but is **not the boot default**. `kernel/core/boot_bringup.cpp`
+selects a theme from the kernel cmdline (`theme=classic|slate10|amber|duet`)
+and otherwise leaves the Classic teal palette the first GUI slice shipped.
+Aurora is reachable at runtime via Ctrl+Alt+Y or Settings.
+
+Consequence, and why this is filed rather than fixed: a default-configuration
+screenshot shows **Classic**, so any "does the implementation match the
+design?" comparison run without `theme=duet` is not merely inconclusive, it
+is misleading — it compares the new design against a different theme
+entirely. At least one such comparison was made during the 2026-07-28/29
+session before this was noticed.
+
+**Open question for the project owner:** the redesign was commissioned as
+*the* look, which argues for making `duet` the default. Against: the change
+touches every default-configuration screenshot in the wiki, and any test
+that asserts on chrome geometry or colour would need re-baselining. Until
+this is decided, visual-fidelity work must be verified with
+`DUETOS_EXTRA_CMDLINE="theme=duet"`.
+
+
+
+### Aurora desktop-shell residuals (2026-07-29)
+
+The four fidelity deltas from the first valid `theme=duet` comparison have
+landed -- desktop icon set, taskbar search pill + pinned app row, the
+clock/date gadget, and the wallpaper glow geometry. See
+`wiki/subsystems/Compositor.md` for what shipped. What is still open:
+
+1. **The other two gadgets.** README §1's gadget column carries three panels;
+   only the clock/date one exists. The kernel panel wants a 46-px CPU
+   sparkline plus five mono stat rows, and the ABI-peers panel wants live
+   per-ABI process counts. Both need a sampled history the compositor does
+   not keep today -- `SchedStatsRead()` returns an instantaneous figure, so a
+   sparkline would have to invent its own ring buffer. Concrete plan: add a
+   small per-second sample ring next to the scheduler stats (one owner, read
+   by both the gadget and the taskbar's stats pill), then paint the two
+   panels beneath the clock at the same column width. Do not ship either
+   panel before the ring exists -- a sparkline drawn from one sample is a
+   decoration that claims to be a measurement.
+2. **The gadget column has no fps figure.** The taskbar pill's is now real
+   (`RenderFpsSample` over `RenderStats::frames_presented`); the gadget
+   column still omits one. Reuse the same sampler rather than adding a
+   second rate derivation.
+3. **The taskbar's stats pill has no sparkline.** README §10 puts a 52-px
+   sparkline between the CPU percentage and the fps figure. Blocked on the
+   same sample ring as item 1.
+4. **START paints a solid accent tile, not the design's sheer mark.** The
+   reference's START is a dark cell carrying only the teal/amber arcs; the
+   implementation fills the whole 44-px cell with `taskbar_accent`, which
+   makes it the loudest object on the island. Surfaced while landing the
+   search pill next to it; not fixed because it is a separate cell with its
+   own hover/open states.
+5. **The pinned row is five buttons, not the design's nine.** Deliberate --
+   see Design-Decisions "Pinned taskbar launchers are scaled by island
+   budget, not transcribed from the 1920 canvas".
+
 
 ### Run a real 32-bit application — PE32 game executable (failure ladder)
 
@@ -1129,10 +1020,15 @@ fault→fix→re-run loop, `tools/test/run-exe.sh` + `peexec=`, using the
 
    **Still open on this rung:** `msvcrt_32` stdio (`fopen`/`fread`) has
    not been rebased onto the new file-I/O surface. The remaining
-   `user32_32` / `gdi32_32` STUBs all trace to one missing thing — an
-   off-screen surface the compositor's display list has no concept of,
-   which blocks memory DCs, bitmaps, blits and DIB sections. Icon and
-   cursor resources need a `.rsrc` parser. Fonts need a font pipeline.
+   `gdi32_32` bitmap / blit / DIB STUBs are now unblocked but not yet
+   written: the 64-bit `gdi32` gained real off-screen surfaces on
+   2026-07-29 and the syscalls it uses (`SYS_GDI_SET_DIBITS` /
+   `_GET_DIBITS`) are register-argument only, so the i386 port can reach
+   them through `duet_syscall6` with no struct shape to mirror. Icon and
+   cursor resources are likewise unblocked: the `.rsrc` parser landed
+   2026-07-28 and there is now a sink for the pixels. What icons still
+   need is a `SYS_GDI_CREATE_CURSOR` that takes image bits rather than a
+   fixed 12x20 three-level mask. Fonts need a font pipeline.
 
 2. **Large bundled-data staging + FAT large volume.** The exe reads
    multi-GB archive files. Staging needs a much larger disk image than
@@ -1147,89 +1043,6 @@ fault→fix→re-run loop, `tools/test/run-exe.sh` + `peexec=`, using the
    or a software GL). The big rendering-subsystem expansion.
 4. **WSOCK32 / WININET** (realm/login networking) and **FMOD** audio —
    later rungs once it renders.
-
-### Run a real 64-bit application - side-by-side DLL loading (next rung)
-
-**Landed 2026-07-28:** off-the-shelf x86_64 MSVC binaries start. A stock
-`cl /MT` build reaches `main()` and exits 0, and System32's `clip.exe`,
-`sort.exe` and `timeout.exe` run to an exit code -- `timeout.exe`
-returns **1 with no arguments, matching real Windows exactly**. The
-blocker was `VirtualProtect` failing on every page outside a
-`VirtualAlloc` region (see Design-Decisions, same date); import coverage
-was never the issue.
-
-The measured next blocker is **loading a DLL that ships beside the
-.exe**. `tools/test/pe-compat-survey.py` puts the Unity launchers on
-this dev host (`BattleBit.exe`, `Black Ice.exe`, `Cult Of The Lamb.exe`)
-at 98.5% coverage with exactly **one** unresolved import each --
-`UnityPlayer.dll!UnityMain`. Every DLL DuetOS can bind is embedded in
-the kernel image via the `spawn.cpp` preload set; a PE that imports a
-DLL sitting next to it on the volume has no path at all.
-
-What the rung needs:
-
-1. The spawn path must remember the directory the PE was read from, so
-   an import miss has somewhere to look. `peexec=` reads a bare 8.3 name
-   off FAT32 vol 0 today.
-2. A read-DLL-from-volume helper, and recursive import resolution for
-   the loaded DLL (its own imports may pull further side-by-side DLLs).
-3. The security guard must scan a disk-loaded DLL the way it scans a
-   disk-loaded PE -- this is the reviewable signal, since a DLL loaded
-   from a guest-writable volume executes in the process's address space.
-4. `SYS_DLL_LOAD_FROM_PATH` should share that path so runtime
-   `LoadLibrary` of a bundled DLL works too, rather than only the
-   `/lib/<name>` ramfs lookup.
-
-Sizing the rung honestly: side-by-side loading is necessary but nowhere
-near sufficient for a real game. `UnityPlayer.dll` itself measures 68.6%
-coverage with **163** unresolved imports plus three DLLs that do not
-exist here at all (`hid.dll`, `imm32.dll`, `opengl32.dll`), and the
-bundled `mono-2.0-bdwgc.dll` adds 72 more. The managed assemblies all
-import `mscoree.dll`. Expect the ladder above this rung to be import
-coverage, then OpenGL, then audio/input -- the same long middle the
-PE32 ladder describes.
-
-### GetProcAddress cannot see the kernel thunk page
-
-Bind-time and run-time symbol resolution use **different surfaces**. The
-PE import binder resolves against the preloaded DLLs' export tables AND
-`Win32ThunksLookup` (the fixed R-X thunk page at `kWin32ThunksVa`).
-`SYS_DLL_PROC_ADDRESS` resolves only through
-`ProcessResolveDllExportByBase`, i.e. export tables. A symbol DuetOS
-genuinely implements, but implements as a thunk rather than a DLL
-export, is therefore **invisible to a runtime `GetProcAddress`**.
-
-Measured, not inferred (2026-07-28, stock `vulkaninfo.exe`, with the new
-`[dll-load] GetProcAddress miss` diagnostic): 15 misses, of which 13 are
-present in `thunks_table.inc` right now -
-`InitializeCriticalSectionEx`, `FlsAlloc`, `FlsSetValue`,
-`LCMapStringEx`, `CompareStringEx`, `EnumSystemLocalesEx`,
-`GetDateFormatEx`, `GetLocaleInfoEx`, `GetTimeFormatEx`,
-`GetUserDefaultLocaleName`, `IsValidLocaleName`, `AreFileApisANSI`,
-`LocaleNameToLCID`. Only `FlsGetValue2` and `LCIDToLocaleName` are
-genuinely absent. The MSVC UCRT caches those NULLs and later calls
-through one, giving an access violation at `rip=0`.
-
-**Why this was NOT force-fixed.** The obvious fix - fall back to
-`Win32ThunksLookup` on an export-table miss - changes `GetProcAddress`
-semantics in a way one boot cannot validate. Many thunks are
-*safe-ignore stubs* returning a constant; the loader already emits a
-Warn when an IMPORT lands on one, precisely because the caller will
-silently misbehave. Applications routinely use
-`GetProcAddress(h, "Foo") != NULL` as a **feature/OS-version probe** and
-branch on the answer. Handing back a no-op stub converts "this OS lacks
-Foo, use the fallback path" into "Foo exists" followed by a silent
-no-op - trading a loud failure for a quiet wrong answer.
-
-So the fix needs a policy decision first: return only NON-no-op thunks
-(`Win32ThunksLookupKind`'s `out_is_noop` already distinguishes them), or
-return all and accept probe breakage. The former is almost certainly
-right and is a small change - but it deserves a corpus re-run across all
-nine binaries, not a single vulkaninfo boot. Note also that the module
-handle must be mapped back to a DLL name for the lookup, and that
-`kernelbase.dll` is a declared pure forwarder to `kernel32.dll`, so a
-kernelbase handle should consult kernel32's thunks - which is exactly
-what its `.def` already does for the exported subset.
 
 ### Runtime LoadLibrary sees only a hand-picked subset of the shipped DLLs
 
@@ -1256,6 +1069,100 @@ that needs the preload table hoisted out of its enclosing function to
 file scope (it is a function-local `static const` today) and exposed
 through `proc/spawn.h`; that refactor is the whole item.
 
+**Amendment (2026-07-29, side-by-side DLL slice).** Two corrections to
+the diagnosis above, from reading the live path rather than the `/lib`
+node list:
+
+1. The exposure is narrower than "every other embedded DLL is
+   unreachable". `SYS_DLL_LOAD_FROM_PATH` consults
+   `ProcessFindDllBaseByName` FIRST, and `SpawnPeFile` registers every
+   preloaded DLL into `proc->dll_images[]` — so for an import-bearing PE
+   a runtime `LoadLibrary("user32.dll")` already hits the process image
+   table and never reaches `/lib`. The real hole is exactly the case the
+   `vulkaninfo` story describes: a DLL that the `arch::IsEmulator()`
+   preload trim skipped (`essential = false`) was never registered, so
+   there was nothing in the table to find. Deriving `/lib` from the
+   preload list still fixes it; so would not trimming.
+2. There is now a third answer for the same shape: a DLL shipped on the
+   volume beside the `.exe` is reachable at runtime via the same
+   syscall, because `SYS_DLL_LOAD_FROM_PATH` falls through to the
+   side-by-side resolver using `Process::sxs_dir`. That does not close
+   this item — it covers app-supplied DLLs, not kernel-shipped ones —
+   but it removes the "the app must ask us to embed it" pressure that
+   made this item urgent.
+
+### BattleBit's next blocker: the guard default-denies UnityPlayer.dll
+
+**This item replaces an earlier one that named the api-set surface as
+the blocker. That diagnosis was wrong, and the thing that made it wrong
+is now fixed — see the correction below before acting on it.**
+
+`BattleBit.exe` exits with status **0** and no fault. Grading a run of
+it by "did anything crash" scores this as a success. It is not one.
+
+What actually happens, read off a live boot
+(`tools/test/run-exe.sh`, `DUETOS_IMAGE_MB=48`,
+`DUETOS_STAGE_EXTRA=UNITYPLA.DLL=<path>`):
+
+```
+[guard] WARN kind=pe name="/UNITYPLA.DLL" findings=0x1
+[guard]   - PE_SUSPICIOUS: 2+ injection-family APIs
+[guard]  Allow [y] / Deny [n] — 10s default-deny. >
+[guard] prompt timeout: default-deny
+[sxs] security guard blocked path="/UNITYPLA.DLL"
+[pe-resolve] unknown import -> catch-all NO-OP fn="UnityMain"
+[win32-miss] fn="UnityMain" slot=0x140edb210 called-from=0x140ed11f2 in-module=0x140ed0000
+[dll-load] api-set contract has no host (returning NULL, as Windows does) name="api-ms-win-appmodel-runtime-l1-1-2"
+[sys] exit rc val=0x0
+```
+
+The chain is: the image guard flags a 26 MiB game engine for importing
+two or more injection-family APIs (which every game engine does), opens
+an **interactive** allow/deny prompt, and in an unattended boot nobody
+answers, so it default-denies. `UnityPlayer.dll` therefore never loads,
+`UnityMain` binds to the catch-all no-op, `BattleBit.exe`'s `main`
+calls it, gets 0 back, and returns 0. `exit(0)` is the honest
+consequence of a `main` that returned 0.
+
+**The api-set line is a red herring.** It happens *after* the process
+has already decided to exit: the MSVC UCRT's exit path probes
+`api-ms-win-appmodel-runtime-l1-1-2` for
+`AppPolicyGetProcessTerminationMethod`, and takes the NULL branch to
+plain `ExitProcess`. Returning NULL there is the correct Windows answer
+for a non-packaged app — it is what any Windows build predating the
+contract does. Mapping that contract onto a host DLL that does not
+export its functions would convert a correct refusal into a confusing
+"function missing from a DLL that claims to exist". Do not do it. The
+contract now says so in the log rather than reporting
+`miss path=/lib/...`, which is what made it look like a missing file.
+
+So the open work is the guard, not the loader:
+
+- An unattended PE run cannot load **any** WARN-verdict side-by-side
+  DLL, because the prompt always times out to deny. That is correct as
+  a default and must stay the default.
+- What is missing is a deliberate operator opt-in — a boot-time
+  pre-authorisation for a named image, so an automated run can consent
+  in advance instead of relying on a human at a serial console.
+  Flipping the timeout default to allow is **not** an acceptable
+  substitute; it would silently weaken the gate for every image.
+
+Until that exists, a BattleBit run measures the guard's default, not
+the loader's. Whoever picks this up should confirm with
+`grep -n "sxs. security guard blocked" <log>` before drawing any
+conclusion about import coverage.
+
+### Win32 CreateThread stacks are still fixed-size
+
+Demand growth covers the PE main thread only. `SYS_THREAD_CREATE`
+carves `Process::kV0ThreadStackPages` off the thread-stack arena at
+0x68000000 with no guard region between slots, so a worker thread that
+recurses overflows into its neighbour's stack silently. The machinery
+to fix it already exists (`core::UserStackPlan` / `UserStackClassify`
+in `kernel/proc/user_stack.h`); what it needs is a per-thread
+`UserStackRange` instead of the single per-process one, and an arena
+that leaves guard gaps between slots.
+
 ### Win32 handle lifecycle — teardown + close-dispatch gaps (audited 2026-07-26)
 
 A read-only audit of the PE loader and Win32 handle lifecycle found one
@@ -1268,18 +1175,10 @@ drifted behind the set. Verified against the code, not inferred.
 
 Ranked, with the security one first:
 
-1. **Section handles are never released at process teardown —
-   sandbox-reachable, system-wide.** `Section g_pool[kSectionPoolCap]`
-   (`subsystems/win32/section.cpp:20`) is a **file-scope global**, 8
-   slots shared by every process, and `SYS_SECTION_CREATE` has **no
-   entry in `cap_table.def`** — a zero-capability guest PE can call
-   `NtCreateSection`. `ProcessRelease` walks `kobj_handles` and
-   `win32_dirs[]` only; the sole `SectionRelease` caller is the
-   explicit-`CloseHandle` arm. Eight short-lived sandboxed spawns that
-   each create one section and exit therefore exhaust the pool **for
-   every process on the system until reboot**. This is the reviewable
-   signal from CLAUDE.md — a malicious PE doing something a native
-   DuetOS process could not. Fix: one release loop in `ProcessRelease`.
+1. **(FIXED 2026-07-28)** Section handles are now released at process
+   teardown - `ProcessRelease` walks the section pool (`process.cpp`
+   ~758 / ~877). The sandbox-reachable pool-exhaustion path this
+   described is closed.
 2. **Job-object handles cannot be closed by any shipped DLL.**
    `NtClose`/`CloseHandle` always issue syscall 22, and `DoFileClose`'s
    band chain has **no arm for `kJobHandleBase` (0xC00..0xC07)**.
@@ -1396,303 +1295,52 @@ pool is the worked example to copy.
   numbers, not argument slots. An argument-contract checker would need
   to parse the per-syscall register documentation out of `syscall.h`.
 
-### Chrome tactility (Pass A) — residual polish + Pass A verification
+### Chrome tactility (Pass A) - residual
 
-The chrome-tactility plan
-(`docs/superpowers/plans/2026-05-24-duetos-chrome-tactility.md`)
-landed 23 of its 28 tasks: blend math + atlas-based 9-slice soft
-shadow + 7 new Theme fields + per-theme intensity matrix +
-runtime override (cmdline + shell) + chrome paint integration
-on windows, modals, snap previews, taskbar tabs + strip, menu
-panels + the WindowPaintFocusGlow helper. See
-[`Compositor`](../subsystems/Compositor.md#chrome-tactility-pass-a)
-for the subsystem summary.
+23 of 28 plan tasks landed (blend math, 9-slice soft shadow, 7 Theme
+fields, per-theme intensity matrix). QEMU verification passed 2026-05-24;
+`boot-log-analyze.sh` reports the TACTILITY line every boot.
 
-The residuals waiting on visual verification or follow-on work:
+**Residual: VBox boot verification only.** LAPIC / GS-base differences
+from QEMU have caught real bugs before (see the `vbox-bringup-pr266`
+notes). Everything else in this pass is landed and documented in
+[`Compositor`](../subsystems/Compositor.md).
 
-- **VBox boot verification** (Task 27 step 5 of the plan).
-  QEMU verification landed on 2026-05-24: all four
-  `*-selftest` PASS sentinels fire on the canonical
-  `x86_64-debug-fast` boot, the boot-log-analyzer TACTILITY
-  section reports `blend=1 shadow=1 theme-matrix=1 umbrella=1
-  probe fires=0`, and `tools/test/tactility-screenshot-matrix.sh
-  classic` produces a 2.3 MB 1024×768 PPM at
-  `build/shots/classic-debug-fast.ppm`. VBox still wanted per
-  the [`vbox-bringup-pr266`](../../docs/...) memory entry —
-  LAPIC / GS-base differences from QEMU sometimes catch what
-  QEMU doesn't.
-- **(VERIFIED 2026-05-24)** HighContrast pixel-diff invariant
-  (plan §8.5 step 6). Empirically confirmed via
-  `tools/test/hc-invariant-check.sh`: HighContrast captured
-  twice under tactility=auto (theme matrix says off) + once
-  under tactility=off (runtime override) shows the
-  auto-vs-override diff (324 px) is below the inter-boot
-  noise floor itself (333 px). The 333 px noise floor is the
-  live taskbar widgets — clock display, uptime ticker,
-  network-state cell, cursor PS/2-timing anti-aliasing —
-  which vary independently of any chrome code. Together with
-  the structural argument (HighContrast.tactility_enabled
-  = false → ThemeTactilityEffective = false → every
-  `*Shadow` site routes through the legacy fallback branch),
-  the invariant is closed for this branch.
-- **Menu scale-pop animation** (Task 18 full of the plan). The
-  menu panel pop from 95% to 100% on open would need a per-
-  panel scale factor threaded through `MenuRedraw` + the
-  `MenuItemAt` hit-test so the click target stays aligned with
-  the painted bounds while the animation runs. Discrete
-  refactor; visual verification mandatory.
-- **Cursor micro-shadow** (Task 21 of the plan, plan-marked
-  stretch). Per-frame cost is the heaviest in the spec —
-  cursor moves every PS/2 packet at up to 60 Hz. Also requires
-  enlarging the cursor backing-store to cover the shadow halo
-  so the shadow region restores when the cursor moves, instead
-  of leaving a trail. Defer until soak shows headroom.
-- **Per-tab pressed state** (out of plan scope). The taskbar
-  per-tab paint reads a CursorPosition-derived hover state but
-  the input layer transitions straight from press to dispatch
-  without a paint-time pressed bit. An input-state refactor
-  that surfaces per-widget pressed-bits would light up the
-  press overlay that the chrome-tactility plan describes.
-- **Menu row hover wash + force-dirty on flips** (Tasks 18 row-
-  wash + 23 of the plan). The existing solid-accent hover-row
-  fill in `MenuRedraw` is already a strong affordance; layering
-  a tactility wash on top would compound. Task 23's
-  force-dirty-on-flip pattern needs `WidgetFlag::*` bit-flip
-  call sites that don't exist in this codebase — the current
-  bool-state model doesn't have flip points to instrument.
-- **WM z-order click bleed-through re-verification.** User reported
-  on 2026-05-25 (amber-theme VBox boot, screenshot at 00:59) that
-  "apps beneath the ones on top i clicked bleed through." Visible
-  bleed in that screenshot predates `7ecfa12c security/guard: pause
-  desktop compose while modal prompt is up` by 21 min and is most
-  likely the same desktop-compose-vs-guard-prompt race that commit
-  fixes. Code inspection of `WindowRaise` + `DesktopCompose` +
-  `FramebufferEndCompose` diff scan found the z-order repaint path
-  architecturally correct in isolation (gradient marks full-screen
-  damage → diff scan finds all changed pixels → blit). Commit
-  `e13159be video/wm: force full-screen snapshot invalidation on
-  WindowRaise` lands a belt-and-suspenders: when `WindowRaise`
-  actually reorders, post a full-screen `FramebufferInvalidateSnapshot`
-  so the next `EndCompose` unconditionally flushes shadow→live +
-  resyncs the snapshot.
-  **Root cause found 2026-07-26 — that guard was a no-op on any
-  present-hook backend.** `EndCompose` force-blitted the invalidated
-  rects shadow→live and re-synced the snapshot there, then overwrote
-  the damage union with the content-diff result (`g_damage = d`, or
-  `g_damage.Reset()` on an empty diff) — and the re-sync is exactly
-  what makes the diff report those pixels as unchanged. So the forced
-  rects were dropped before `FramebufferPresent` ran: on virtio-gpu the
-  z-order repaint reached the guest's live surface and never reached
-  the host scanout. Same defect stranded a moved cursor's old sprite on
-  the host. Fixed by folding the forced rects back into the published
-  damage (see [`Graphics-Drivers`](../drivers/Graphics-Drivers.md#forced-invalidation--direct-to-live-writers),
-  regression sentinel `tests/host/test_damage_bands.cpp`).
-  Re-verify on the next VBox session WITHOUT triggering a guard
-  prompt. VBox's default VBoxVGA/VBoxSVGA is a direct framebuffer (no
-  present hook), where the blit alone was already sufficient — so if
-  bleed is still observable *there*, a distinct second cause remains
-  (cursor backing mismatch, a draw path bypassing `MarkDamage`, or a
-  paint primitive writing to `g_info.virt` directly during compose).
-  On QEMU `-vga virtio` the fix above is the expected cure.
+### Chrome tactility (Pass B) - residual
 
-When a residual ships, delete its bullet here and update the
-[`Compositor`](../subsystems/Compositor.md) subsystem page's
-"Deferred from Pass A" call-out.
+Landed and verified; `boot-log-analyze.sh` reports the PASS B line
+(splash / wallpaper-motion / login-gui / umbrella) every boot.
 
-### Chrome tactility (Pass B) — residual polish + Pass B verification
+**Residual: none known.** Retained only as a pointer - the subsystem
+detail lives in [`Compositor`](../subsystems/Compositor.md).
 
-The first-impression moments plan
-(`docs/superpowers/plans/2026-05-24-duetos-pass-b.md`)
-landed all 25 tasks: boot splash with motion + phase ticker, animated
-wallpaper with arc rotation / pulse / topo drift, login GUI with
-backdrop clock + avatar card + atlas-shadow + focus-glow password
-field + sign-in button. See
-[`Compositor`](../subsystems/Compositor.md#first-impression-moments-pass-b)
-for the subsystem summary.
+### Chrome typography (Pass C) - residual
 
-QEMU verification complete (2026-05-24): all Pass B self-tests fire
-(`[splash-selftest] PASS`, `[wallpaper-motion-selftest] PASS`,
-`[login-gui-selftest] PASS`, `[pass-b-selftest] PASS`); the
-boot-log-analyzer PASS B section reports `splash=1 wallpaper-motion=1
-login-gui=1 umbrella=1 probe fires=0`; no Pass A regressions;
-soak reports zero wallpaper/splash/login errors, zero real soft-lockup
-warnings, zero compositor missed ticks.
+All 21 planned tasks landed, plus 5 settings sub-panel migrations.
+`chrome-text-selftest` PASSes every boot.
 
-The residuals waiting on visual verification:
+**Residual: none known.** Proportional metrics for list CONTENT landed
+2026-07-29 (`app_widgets/app_text.{h,cpp}` plus the Files / Task Manager
+column-model refactor); `[app-text-selftest]` PASSes every boot.
 
-- **VBox boot verification.** Pairs with the Pass A VBox residual
-  above. Same approach: boot the matrix under VirtualBox after QEMU
-  verification; LAPIC / GS-base differences from QEMU sometimes catch
-  what QEMU doesn't. Run after the Pass A VBox verification is cleared.
-- **Screenshot matrix for splash / login surfaces.** The
-  `tactility-screenshot-matrix.sh --splash --login --wallpaper`
-  invocation from the spec §10 criterion 1 requires QEMU PPM capture
-  (`-screendump`), which is infra-limited in the headless WSL dev
-  environment. Cleared automatically when VBox visual verification runs
-  (the GUI boot produces the visible frames the spec calls for).
+### App widgets (Pass D) - residual
 
-Follow-on items surfaced during live VBox testing of Pass B:
+The widget library landed (`app_button`, `app_label`, `app_panel`,
+`app_divider`, `app_list_row`, `app_toolbar`, `app_input`,
+`app_scrollbar`) plus 28 per-app migrations. `[app-widgets-selftest]` and
+`[pass-d-selftest] PASS (widgets=ok, apps=28/28)` fire every boot.
+Aurora (2026-07-28) added `app_palette` on top, so interiors now theme
+from one owner.
 
-- **Mouse-click positioning under headless QEMU rel-mode.**
-  `tools/test/qmp-click.sh` ships in two modes — `abs` for display
-  setups and `rel` for headless. The rel-mode "snap to origin via
-  Δ=-65535 then move by (X, Y)" pattern is reliable for the snap part
-  but the move-by-(X,Y) sometimes doesn't fully propagate through the
-  PS/2 driver under fast successive calls (observed: cursor stays at
-  origin after a click on (400, 400)). Needs a per-call settling
-  delay or per-axis ack from the kernel-side PS/2 ringbuffer; for now,
-  treat headless QEMU mouse-click as best-effort and re-issue if the
-  cursor doesn't land. Abs-mode users (real display, `usb-tablet`)
-  are unaffected.
-
-When a residual ships, delete its bullet here and update the
-[`Compositor`](../subsystems/Compositor.md) subsystem page's
-"Deferred from Pass B" call-out.
-
-### Chrome typography (Pass C) — residual polish + Pass C verification
-
-The typography hierarchy plan
-(`docs/superpowers/plans/2026-05-24-duetos-pass-c.md`)
-landed all 21 planned tasks plus 5 settings sub-panel migrations + 1
-drive-by comment fix (27 commits total). New module
-`kernel/drivers/video/chrome_text.{h,cpp}` owns the four-tier
-dispatch (Display 72 px / Title 16 px / Body 13 px / Caption 11 px),
-with Regular + Bold weights backed by Liberation Sans Regular and a
-newly-baked Liberation Sans Bold companion. Boot sentinels
-`[chrome-text-selftest] PASS` and `[pass-c-selftest] PASS
-(chrome-text=ok)` fire under the `if constexpr (kBootSelfTests)`
-umbrella. See
-[`Compositor`](../subsystems/Compositor.md#typography-hierarchy-pass-c)
-for the subsystem summary.
-
-Per-task verification: every implementation subagent ran a debug
-boot smoke after its commit; all 21 tasks reported all three Pass C
-sentinels green plus the bold-font load line, with no PANIC / TRIPLE
-/ new non-deliberate FAIL. The `pass-c-soak.sh` 30 s rig (Task 19)
-PASSed against commit `ad680846`. Full end-to-end acceptance run
-(debug + release builds, hosted ctest, soak, screenshot matrix,
-clang-format on all touched TUs together) is **deferred — pending
-host disk space** at the time of branch wrap (WSL vhdx couldn't grow
-on a 29 MB-free C:). Re-run once disk is freed; expected to be clean
-based on per-task evidence.
-
-Residuals carried into Pass D / future polish:
-
-- **Bitmap themes collapse Caption to Body at scale 1** (both =
-  8 px). Acceptable v0 — bitmap font is single-size; the role split
-  is recovered automatically on any TTF theme. Add a 6×8 micro-font
-  asset if a bitmap-theme reviewer reports the visual collapse is
-  confusing.
-- **No italic, no Thin / Medium / Heavy weights.** Intentional v0
-  omission. Extend `ChromeTextWeight` + bake the asset when a design
-  need lands.
-- **VBox boot verification.** Pairs with the Pass A / Pass B VBox
-  residuals above — boot the typography matrix under VirtualBox to
-  pick up anything QEMU smokes don't. The
-  `tactility-screenshot-matrix.sh --typography` rig (Task 18) is
-  the canonical surface set (login + lock + wallpaper × 10 themes
-  = 30 PPMs) once the host can rebuild the kernel.elf.
-- **Avatar monogram is Title Bold** — fits the 40 px circle today.
-  If avatar grows above ~40 px or shrinks below ~24 px, the Bold
-  Title metric may need a dedicated "hero monogram" role between
-  Display and Title.
-
-When a residual ships, delete its bullet here and update the
-[`Compositor`](../subsystems/Compositor.md) subsystem page's
-"Pass C — Typography Hierarchy" call-out.
-
-### App widgets (Pass D) — residual polish
-
-The app-widgets plan
-(`docs/superpowers/plans/2026-05-25-duetos-pass-d.md`)
-landed the library at
-`kernel/drivers/video/app_widgets/{widget.h,widget_group.h,
-app_button.{h,cpp}, app_label.{h,cpp}, app_panel.{h,cpp},
-app_divider.{h,cpp}, app_list_row.{h,cpp}, app_toolbar.{h,cpp},
-app_input.{h,cpp}, app_scrollbar.{h,cpp}, self_test.{h,cpp}}`
-plus 28 per-app migrations and the acceptance scaffolding
-(`tools/test/pass-d-soak.sh` 60 s regression guard,
-`tactility-screenshot-matrix.sh --apps` mode). Boot sentinels
-`[app-widgets-selftest] PASS` and
-`[pass-d-selftest] PASS (widgets=ok, apps=28/28)` fire under the
-`if constexpr (kBootSelfTests)` umbrella. See
-[`AppWidgets`](../subsystems/AppWidgets.md) for the subsystem
-reference and
-[`Compositor`](../subsystems/Compositor.md#app-widgets-pass-d)
-for the integration summary.
-
-Per-task verification: every implementation subagent ran a debug
-boot smoke after its commit; all 28 app migrations report their
-per-app sentinel green plus both umbrella sentinels, with no
-PANIC / TRIPLE / oom-slab-fault. The `pass-d-soak.sh` 60 s rig
-PASSes against commit `5dd79097` (28/28 apps green + Pass A/B/C
-umbrellas all green + no soft-lockups).
-
-Residuals carried out of Pass D:
-
-- **Apps not migrated** — six `.cpp` files under `kernel/apps/`
-  intentionally stay on raw paint (or have no paint surface):
-    - `dbg.cpp`, `dbg_core.cpp` — debug overlays must work when
-      half the kernel is wedged; raw paint by design.
-    - `gfxdemo_modes.cpp`, `gfxdemo_modes_vk.cpp` — the demos
-      exercise primitive APIs directly; widget chrome would
-      defeat the demonstration.
-    - `notes_persist.cpp` — pure data layer; no paint surface.
-    - `trash.cpp` — facade module providing Files' trash mode;
-      no chrome of its own.
-  Don't migrate these without a compelling reason; the carve-out
-  rationale is documented in
-  [`AppWidgets`](../subsystems/AppWidgets.md#carve-outs).
-- **Carve-outs preserved (raw paint regions inside migrated
-  apps)** — Files' folder/list grid, Calendar's month/week/day
-  cells, Terminal's cell grid, Hexview's byte grid,
-  Gfxdemo's content region, Dbg_render's overlay layer all
-  paint raw. Each app's `RenderContent()` runs after
-  `group.PaintAll(compose)` into the carved-out rect; the
-  widget group owns the chrome only. This pattern is the
-  recommended shape for future apps with fixed-grid surfaces.
-- **VBox visual verification** — pairs with the Pass A / Pass B /
-  Pass C VBox residuals above. Boot the
-  `tactility-screenshot-matrix.sh --apps` 3 surfaces × 10 themes
-  = 30 PPM reference set under VirtualBox to pick up anything
-  QEMU smokes don't.
-- **Per-app window screenshots deferred to VBox.** The
-  `--apps` matrix mode captures three chrome surfaces (login,
-  wallpaper, lock) per theme because qmp.sh can't open
-  Calculator / Notes / etc. headlessly — QMP key+click driving
-  the Start menu isn't implemented (qmp.sh supports
-  `screendump` / `powerdown` / `quit` / `status` only). When
-  full per-app shots become valuable, either extend qmp.sh
-  with a `keys` / `click` subcommand routed through QMP
-  `input-send-event`, or capture them manually under VBox.
-- **gfxdemo legacy sentinel.** Predates the
-  `[<app>-selftest] PASS` convention and emits
-  `[gfxdemo] self-test OK (sin LUT, FxMul, PRNG, Mandelbrot,
-  chrome)` instead. `pass-d-soak.sh` accepts either form;
-  next time gfxdemo gets touched, normalise its emission to
-  the standard sentinel and drop the soak's special case.
-
-Potential Pass E items (deferred — none of these are committed):
-
-- **Layout managers** — today every widget gets explicit
-  `Rect bounds` set at construction. A `VBox` / `HBox` /
-  `Grid` layout manager would compute bounds from constraints
-  + content size, eliminating manual coordinate maths.
-- **Extended widget set** — `Checkbox`, `Slider`, `Progress`,
-  `Tabs`, `Tooltip`, `Spinner`, `RadioGroup`. Each is one
-  widget pair following the existing shape.
-- **Event-routing hub** — today every app calls
-  `group.DispatchEvent(event)` directly from its mouse /
-  keyboard reader. A hub that knows about window focus +
-  z-order would route automatically (the window manager
-  already does this for chrome; widgets could plug in).
-- **Animation system** — Pass A's tactility uses
-  static shadow textures; an animation hook (interpolate
-  state.flags transitions over N ms) would let press / hover
-  feel kinetic without each widget hand-rolling it.
-
-When a residual ships, delete its bullet here and update the
-[`AppWidgets`](../subsystems/AppWidgets.md) subsystem page.
+**Residuals:** the Task Manager Performance resource rail is wired and
+boot-clean but has never been photographed - the demo-windows profile
+opens Task Manager on the Processes tab and the headless QMP harness
+could not drive a tab switch, so its per-core tiles are compile- and
+boot-verified only. ABI pills, per-row dots and the Files quick-access
+rail landed 2026-07-29. Files shows an ABI badge only where the image
+bytes are already resident (ramfs); FAT32 rows deliberately show none
+rather than inherit the launch path's extension guess. See
+[`AppWidgets`](../subsystems/AppWidgets.md).
 
 ### RBAC + elevation broker — v1 follow-ups
 
@@ -1719,21 +1367,6 @@ When a residual ships, delete its bullet here and update the
   full-screen surface. (v0 broker + role table + grace cache +
   CLI/GUI prompt + `NtAdjustPrivilegesToken` facade routing
   landed.)
-
-### Suspend-to-RAM (S3 / S0ix)
-
-Consolidated S3 / S0ix wake-vector + context save/restore
-residual. The GPE `_Qxx` / `_Lxx` / `_Exx` dispatch half of this
-entry landed 2026-05-26 (EC query-byte read +
-`env-monitor`-task GPE walker — see "Battery + ACPI suspend"
-above). What remains: the trampoline blob below 1 MiB, CPU /
-device context save/restore via `kernel/arch/x86_64/acpi_wakeup.{S,cpp}`,
-and the per-driver Suspend/Resume callback contract in a new
-`kernel/power/` subsystem. Research notes document the FACS
-wake-vector handshake, the trampoline mode-transition sequence,
-and the device-state save surface. (ACPI S5 soft-off incl.
-`_PTS`/`_GTS` in §7 order, reboot chain, and lid/AC/battery
-*state* reads all landed — see the Battery row above.)
 
 ### Device Manager — eject + hot-unplug + virtio per-class I/O
 
@@ -1846,7 +1479,7 @@ are ABI — do not reuse retired numbers.
 | T4-03 | gfx | P2 | Intel iGPU Gen9+/Xe driver basics: GTT setup, command ring, 2D blitter acceleration (PCI probe + register peek + software fallback landed). | BitBlt-heavy paths use the Intel blitter instead of software fills. |
 | T5-01 | mm | P1 | Full `STATUS_GUARD_PAGE_VIOLATION` delivery to userland for `PAGE_GUARD` pages — **now unblocked** (T6-02 x64 SEH landed). v0 silently re-arms the guard (the next write succeeds); the reserve/commit split + protection bits + `VirtualQuery` already shipped. | A PE relying on the guard-page exception (not just silent stack-grow) sees `STATUS_GUARD_PAGE_VIOLATION`. |
 | T5-03 | mm | P2 | Real KASLR in the UEFI loader (memory-map scan, random 2 MiB-aligned base in a 64 MiB window, boot-info handoff, boot-log report). **Same work as Linux-CVE Class II follow-up.** | Two cold boots show different kernel `.text` load addresses. |
-| T6-05 | win32 | complete — 2026-07-26 | MSVC x64 C++ EH now captures the caller's complete aligned `CONTEXT`, validates bounded PE unwind metadata, restores GPR/XMM state, binds by-value and reference catches from the correct HandlerType metadata, and defers catch execution to `TARGET_UNWIND` so crossed-frame destructors run first. The `pe-runtime` QEMU profile passes scalar catch, class-reference catch, cross-frame destructor unwind, catch-all, TLS, SEH, and synchronization with 51/51 boot self-tests. Remaining extensions are non-trivial copy-ctor catch objects, FH4 compressed FuncInfo, ESTypeList, and rethrow. | `cxxeh_pe` prints all four subtest PASS markers, `[cxxeh] RESULT PASS`, and exits 0. |
+| T6-05 | win32 | complete — 2026-07-26 | MSVC x64 C++ EH now captures the caller's complete aligned `CONTEXT`, validates bounded PE unwind metadata, restores GPR/XMM state, binds by-value and reference catches from the correct HandlerType metadata, and defers catch execution to `TARGET_UNWIND` so crossed-frame destructors run first. The `pe-runtime` QEMU profile passes scalar catch, class-reference catch, cross-frame destructor unwind, catch-all, TLS, SEH, and synchronization with 51/51 boot self-tests. Remaining extensions are non-trivial copy-ctor catch objects, FH4 compressed FuncInfo, ESTypeList, and rethrow (`throw;` — attempted 2026-07-28 and backed out: supplying the in-flight object is easy, but the re-raise's frame walk returns to the same function with `ControlPc` still inside the inner `try` and re-selects the catch it just left; needs the funclet-to-tryblock link threaded through the dispatch). | `cxxeh_pe` prints all four subtest PASS markers, `[cxxeh] RESULT PASS`, and exits 0. |
 | T7-04 | fs | P2 | Scoped NTFS write: create, write, truncate, delete, rename with MFT/index/journal/bitmap updates; no compression/encryption/ADS for v0. | PEs can perform basic writes to NTFS volumes. |
 | T8-01-followon | sched | P3 | **Bands landed 2026-06-10** (4 MLFQ bands from `win32_priority_class`, band-0-first pop, wake-preempt, escape valve — acceptance met: high-prio preempts low within one tick). **Residual:** behavioural *aging/decay* (demote a quantum-hog, promote a starved task) — v0 fixes band by priority class, not behaviour; the escape valve is the only anti-starvation mechanism. Lower priority now (the user-visible preemption works); revisit if a workload shows fixed bands mis-schedule. | A CPU-bound band-2 task that never yields is demoted below a freshly-ready band-2 interactive task. |
 | T10-04 | build | P2 | Extend hosted `ctest` to mirror the PE-parser contract (Result / string / syscall_error / cvt / text_hash / d3dcompiler / damage_rect / wild_address / disk_path / vfs_resolve / registry_path already wired). PE parser is kernel-only — use the algorithmic-contract pattern (re-state the routine inline, assert canonical cases) as primitives grow self-contained. | Host `ctest` covers Result + PE parser + VFS + registry + string helpers without QEMU. |
@@ -1990,9 +1623,38 @@ done, it is merely written.
    real `RtlUnwindEx`/`RtlVirtualUnwind`; the kernel32 rows point at no-ops
    instead. **PROOF:** a PE that throws and catches, including a destructor
    running during unwind, as a ring3 battery row.
-2. **`.rsrc` (PE resource) parser.** Needs no kernel change — every section
-   is already mapped. Unblocks `LoadStringW` (82 binaries measured),
-   `LoadImageW`, icons, cursors, accelerators, dialog templates.
+2. ~~**`.rsrc` (PE resource) parser.**~~ **LANDED 2026-07-28.** The
+   walker, `FindResource*` / `LoadResource` / `LockResource` /
+   `SizeofResource` / `FreeResource` / `EnumResource*` and a real
+   `LoadStringW` ship on both bitnesses; `user32!LoadStringW` went from
+   282 32-bit SysWOW64 binaries wanting it (82 counting `.exe` only) to
+   0. See [`wiki/subsystems/PE-Resources.md`](../subsystems/PE-Resources.md).
+   Two consumers were deliberately NOT built, because each needs a sink
+   that does not exist — building the decoder first would be dead code:
+   - **Icons / cursors / bitmaps** (`LoadIcon`, `LoadCursor`,
+     `LoadBitmap`, `LoadImage`) needed item 12 (off-screen surfaces),
+     which landed 2026-07-29. There is now a sink: an `RT_ICON` body is a
+     BITMAPINFOHEADER plus a bottom-up DIB, which is exactly what
+     `SYS_GDI_SET_DIBITS` consumes, so `RT_GROUP_ICON` -> `RT_ICON` ->
+     `HBITMAP` can be written against the existing surface path. Two
+     things are still genuinely absent and should be built with the
+     decoder: the AND-mask -> alpha conversion (an `RT_ICON` carries a
+     1bpp transparency mask below its colour rows, and the DIB path
+     refuses 1bpp by design), and a `SYS_GDI_CREATE_CURSOR` that takes
+     image bits rather than a fixed 12x20 three-level mask.
+   - **Accelerators** (`LoadAccelerators`, `TranslateAccelerator`) need a
+     **KeyCode -> Win32 VK translation** first. The kernel posts
+     `WM_KEYDOWN` to the active PE window with `wParam` carrying a DuetOS
+     `KeyCode` (`ps2kbd.h`: `kKeyF1 == 0x10A`, `kKeyEnter == 0x0A`), not
+     a virtual-key code (`VK_F1 == 0x70`, `VK_RETURN == 0x0D`).
+     `RT_ACCELERATOR` stores VKs, so every `FVIRTKEY` entry would
+     mis-compare. **This is a standalone defect in the `WM_KEYDOWN`
+     contract**, not just an accelerator blocker: any PE that switches on
+     `wParam` expecting VKs is already reading wrong numbers today. Fix
+     is a translation table on the kernel side of
+     `WindowPostMessage` in `kernel/core/boot_tasks.cpp`, plus an audit
+     of the in-kernel apps that currently consume the raw KeyCodes.
+     **PROOF:** a PE that registers `Ctrl+S` and receives `WM_COMMAND`.
 3. **Side-by-side DLL loading.** A PE importing a DLL shipped beside it has
    no path at all today. The Unity launchers measure 98.5% import coverage
    with exactly ONE unresolved import (`UnityPlayer.dll!UnityMain`). Needs
@@ -2004,10 +1666,19 @@ done, it is merely written.
    `QueryInterface`, apartments, in-proc servers. `ole32.c` is 32 exports in
    one file today. Gates installers, shell integration and most DirectX
    device-creation paths — the largest multiplier left after 1-3.
-6. **Delay-load imports.** `ResolveDelayLoadedAPI` / `DelayLoadFailureHook`
-   were deliberately skipped once because they need `GetProcAddress`, which
-   lives only in the thunk page and is not linkable from kernel32.
-7. **PE TLS callbacks.** The TLS directory callback array is never run.
+6. ~~**Delay-load imports.**~~ **LANDED 2026-07-29.** The premise was
+   wrong twice over: `__delayLoadHelper2` is linked INTO the image by
+   `delayimp.lib`, not provided by the OS, and routing through it would
+   have gone through `GetProcAddress`, which deliberately reports a miss
+   for no-op thunks. The loader binds directory 13 eagerly through the
+   static-import ladder instead — see
+   [`PE-Loader.md`](../subsystems/PE-Loader.md#delay-load-imports).
+7. ~~**PE TLS callbacks.**~~ **ALREADY LANDED** (T6-01, predates this
+   backlog). `SetupStaticTls` copies the `.tls` template, wires
+   `TEB.ThreadLocalStoragePointer` and `_tls_index`, and runs
+   `AddressOfCallBacks` in ring 3 via a generated trampoline on both
+   process and thread attach. Remaining gap is DETACH — see
+   [`PE-Loader.md`](../subsystems/PE-Loader.md#tls-static-data-and-callbacks).
 8. **SxS / assembly manifests.** Many installers and MFC apps depend on it.
 9. **Console completeness.** Screen buffers, VT sequences, real
    `ReadConsoleInput`.
@@ -2019,8 +1690,13 @@ done, it is merely written.
 
 ### Tier 2 — graphics and media
 
-12. **Off-screen surfaces.** The compositor has no concept of one, which is
-    what blocks memory DCs, bitmaps, blits and DIB sections across GDI.
+12. ~~**Off-screen surfaces.**~~ **LANDED 2026-07-29.** The premise was
+    wrong: memory DCs, compatible bitmaps and BitBlt already existed. What
+    was missing was pixel-DATA transfer (`SYS_GDI_SET_DIBITS` /
+    `_GET_DIBITS`, 214 / 215) and, more seriously, ownership --- surfaces
+    had no owner, no per-process bound, and were never reclaimed at exit.
+    Remaining GDI DIB gaps are listed in
+    [`Win32-Surface-Status.md`](Win32-Surface-Status.md#gdi32dll).
 13. **Font pipeline.** Enumeration, fallback, metrics, antialiasing.
 14. **GDI completeness.** [dep: 12] Paths, regions, transfer modes.
 15. **D3D9.** Large back catalogue; simpler than 11/12.
@@ -2035,23 +1711,67 @@ done, it is merely written.
 
 ### Tier 3 — hardware needed to be a daily driver
 
-23. **Power management.** `kernel/power/` contains only `reboot.cpp`. S3 /
-    S0ix suspend-resume and the wake path. ACPI is already parsed. A laptop
-    that cannot sleep is not a daily driver.
-24. **CPU frequency scaling.** P-states, EPP, idle governors.
-25. **`ReadMsrSafe`.** A ~20-line fault-tolerant `rdmsr` mirroring the
-    existing `wrmsr` template in `msr_safe.S`. Every MSR consumer currently
-    defends with static vendor+hypervisor gating because a bad `rdmsr` is
-    unrecoverable. Cheap unlock for AMD CPU temperature on this dev box.
-26. **Thermal + battery policy.** [dep: 25]
-27. **TPM 2.0 — sealing half only.** Seal / unseal / PCR-measure / hardware
-    RNG, and deliberately NO endorsement-key export, NO quote signing, NO
-    attestation protocol. Enforced by capability, so a guest PE is
-    structurally unable to obtain a stable hardware identifier.
-28. **Full-disk encryption.** [dep: 27] Key sealed to PCR state, so no
-    passphrase on every boot.
-29. **Measured boot as a LOCAL tripwire.** [dep: 27] Detection without
-    reporting — the two are separable and we implement only the first.
+23. **Power management.** The S3 core LANDED 2026-07-29: real-mode wake
+    trampoline at physical 0x9000 (`arch/x86_64/acpi_wakeup.{S,cpp}`),
+    CPU architectural save/restore across the power loss, the FACS
+    waking-vector handshake, generic `\_Sx` sleep-package decode, and
+    the per-driver Suspend/Resume + veto contract in
+    `kernel/power/suspend.{h,cpp}`. A full cycle is proven under QEMU +
+    SeaBIOS by `tools/test/s3-cycle-smoke.sh`. What remains:
+    - `ResumePlatform` re-MAPS MMIO as well as re-programming the
+      controllers (LapicInit / IoApicInit / HpetInit each call
+      `mm::MapMmio` again). The arena is a bump allocator with no free,
+      so every cycle leaks arena and strands cached pointers to the old
+      VA; an `s3test=1` boot faults later in the VirtIO probe. Fix by
+      splitting a re-program-only entry point out of each Init.
+    - NVMe / AHCI / e1000 register `PowerSuspendVeto` at attach, so a
+      machine that probed them declines S3. Each needs a quiesce +
+      controller re-init pair to become a participant.
+    - SMP: `PowerSuspendCheck` refuses with more than one CPU online —
+      no AP park/resume path exists.
+    - OVMF never re-enters the waking vector (SeaBIOS does), so UEFI S3
+      resume is unproven.
+    - S0ix is untouched.
+24. **CPU frequency scaling.** P-states, EPP, idle governors. The
+    READ half has landed — Intel ratios, AMD Zen P-state decode
+    (`MSR_PSTATE_DEF` / `MSR_PSTATE_STATUS`) and APERF/MPERF effective
+    frequency, all probed rather than predicted. What remains is
+    *control*: selecting a P-state, EPP hints, and idle governors,
+    which per the Hardware-Safety contract must sit behind a kernel
+    capability and an explicit tune mode.
+25. ~~**`ReadMsrSafe`.**~~ LANDED. Extable-guarded `rdmsr` beside the
+    existing `wrmsr` template; every MSR consumer now probes instead of
+    predicting, and the static vendor+hypervisor gates are gone from
+    thermal, cpufreq and RAPL.
+26. **Thermal + battery policy.** [dep: 25 — cleared] The CPU
+    temperature READ exists for both vendors now (AMD via SMN, still
+    unvalidated on hardware). What remains is the policy: periodic
+    resampling into the heartbeat, throttle thresholds, and battery
+    `_BST`/`_BIF` evaluation.
+27. **TPM 2.0 — seal / unseal.** [PARTIAL — the rest of item 27 LANDED]
+    The TIS/FIFO transport, presence detection, ACPI TPM2 interface
+    check, PCR extend + read, and the hardware RNG are in and verified
+    live against `swtpm`; so is the permanent refusal of the identity
+    half (EK export, AIKs, quote signing), enforced by a transport
+    allow-list plus the absence of any raw passthrough. See
+    [`TPM`](../security/TPM.md). What remains is sealing itself: the
+    marshalling for `TPM2_CreatePrimary` / `Create` / `Load` / `Unseal`
+    and the trial/policy session handling that binds a sealed blob to a
+    PCR policy. The command codes are already on the allow-list. When a
+    guest-facing seal syscall lands it must be cap-gated and derive key
+    material per-application, salted per install, so two applications
+    cannot correlate on a shared identifier even locally.
+28. **Full-disk encryption.** [dep: 27's seal/unseal] Key sealed to PCR
+    state, so no passphrase on every boot.
+29. ~~**Measured boot as a LOCAL tripwire.**~~ LANDED. PCR 10/11 carry
+    the kernel identity and command line; the composite over PCR 0-7,
+    10 and 11 is read back from the chip and compared against a
+    baseline pinned with `tpm.baseline=`. A mismatch warns and never
+    refuses to boot — refusing would be the lock-out behaviour the
+    design set out to avoid. Detection only: nothing signs a PCR set
+    and nothing sends one anywhere. Remaining limitation, recorded as a
+    `// GAP:` — the baseline shares storage with the thing it measures,
+    which needs the writable persistent store to fix properly.
 30. **Secure Boot chain verification.**
 31. **Bluetooth.** HCI, L2CAP, then HID and A2DP.
 32. **Precision touchpad HID** — gestures, palm rejection.

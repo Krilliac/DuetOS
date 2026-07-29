@@ -161,6 +161,39 @@ case "${PROFILE}" in
         scenario=(
             "[hello-pe] Hello from a PE executable!"
             'pe spawn name="ring3-hello-pe"'
+            # Exception handling. The forbidden "] FAIL" pattern does
+            # NOT cover these — their failure lines read
+            # "] RESULT FAIL" / "] <case>: FAIL" — so without naming
+            # the PASS lines here the whole EH engine could regress
+            # on a green boot.
+            "[seh_pe] RESULT PASS"
+            "[seh_try] except-null-write: PASS"
+            "[seh_try] except-div-zero: PASS"
+            "[seh_try] finally-on-unwind: PASS"
+            "[seh_try] raise-exception: PASS"
+            "[seh_try] RESULT PASS"
+            "[cxxeh] int-catch: PASS"
+            "[cxxeh] class-ref-catch: PASS"
+            "[cxxeh] destructor-unwind: PASS"
+            "[cxxeh] catch-all: PASS"
+            "[cxxeh] RESULT PASS"
+            # PE loader directories 9 (TLS) and 13 (delay-load). Same
+            # reasoning as the EH block above, and verified the hard
+            # way: with ResolveDelayImports stubbed out, delayload_pe
+            # printed RESULT FAIL and BOTH this script and
+            # boot-log-analyze.sh still exited 0. Naming the PASS
+            # lines is the only thing that turns these fixtures into
+            # a gate.
+            "[tls_pe] tls-callback-before-entry: PASS"
+            "[tls_pe] static-tls-template-copied: PASS"
+            "[tls_pe] per-thread-tls-template: PASS"
+            "[tls_pe] dll-thread-attach: PASS"
+            "[tls_pe] per-thread-tls-independence: PASS"
+            "[tls_pe] RESULT PASS"
+            "[delayload_pe] delay-iat-bound-outside-image: PASS"
+            "[delayload_pe] delay-call-returns-real-values: PASS"
+            "[delayload_pe] helper-not-invoked: PASS"
+            "[delayload_pe] RESULT PASS"
         )
         ;;
     pe-winapi)

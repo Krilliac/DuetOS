@@ -24,13 +24,26 @@
  * index in bits 15:0. Makes SelectObject / DeleteObject able to
  * route by inspection — no per-handle lookup for the type check.
  *
+ * OWNERSHIP
+ *   The tables are system-wide but every non-stock object records
+ *   the pid that created it, and `GdiLookup*` refuses a handle whose
+ *   owner is not the calling process. That check lives in the lookup
+ *   rather than at each syscall entry on purpose: handle values are
+ *   `tag | index` with index in 0..63, so they are trivially
+ *   guessable, and a per-call-site allow-list would only have to
+ *   miss once for a PE to read another process's off-screen pixels
+ *   back out through BitBlt.
+ *
+ *   Creation is bounded per-process (kMax*PerProcess plus a byte
+ *   budget for pixel-backed objects) so one guest cannot take every
+ *   slot, and `GdiReapByOwner` frees whatever a process still holds
+ *   when it exits.
+ *
  * Not in scope (v0):
- *   - HPEN / HFONT / HRGN state (stock handles only, no real
- *     draw-path consumers yet).
- *   - DC colour state (SetTextColor / SetBkColor). TextOutA uses
- *     a hard-coded white ink.
+ *   - HFONT / HRGN state (stock handles only, no real draw-path
+ *     consumers yet).
  *   - Coordinate transforms (no SetWindowOrgEx et al.).
- *   - Per-process scoping — handle table is system-wide.
+ *   - Palettised (<= 8bpp) DIBs. 16 / 24 / 32bpp only.
  *
  * Context: kernel. Every entry point is reachable from a ring-3 PE
  * via a SYS_GDI_* syscall; the handle-manager side holds no locks
@@ -54,10 +67,23 @@ inline constexpr u32 kMaxBrushes = 64;
 inline constexpr u32 kMaxPens = 64;
 
 // Max pixels per compatible bitmap. Keeps a malicious caller from
-// requesting a 100 MB bitmap. 1024 × 1024 × 4 = 4 MiB per bitmap;
-// at 64 bitmaps that's 256 MiB worst-case, but typical usage is
-// a handful of <= window-sized bitmaps.
+// requesting a 100 MB bitmap. 1024 × 1024 × 4 = 4 MiB per bitmap.
+// (Same value as gdi_surface_math.h's kMaxSurfacePixels, which is
+// what actually enforces it — this alias keeps existing callers
+// reading naturally.)
 inline constexpr u32 kMaxBitmapPixels = 1024 * 1024;
+
+// Per-process ceilings. The tables above are the SYSTEM-wide limit;
+// these bound what any single guest can hold out of them, so a PE
+// that leaks (or deliberately hoards) cannot deny GDI to every
+// process that starts after it. 8 MiB of off-screen pixels is four
+// full 1024x768 double-buffers — comfortably more than a v0 Win32
+// app needs and 1/32 of the system total.
+inline constexpr u32 kMaxMemDcsPerProcess = 16;
+inline constexpr u32 kMaxBitmapsPerProcess = 16;
+inline constexpr u32 kMaxBrushesPerProcess = 16;
+inline constexpr u32 kMaxPensPerProcess = 16;
+inline constexpr u64 kMaxBitmapBytesPerProcess = 8u * 1024u * 1024u;
 
 // Background mode constants — Win32 SetBkMode values.
 inline constexpr u8 kBkModeTransparent = 1;
@@ -66,6 +92,7 @@ inline constexpr u8 kBkModeOpaque = 2;
 struct MemDC
 {
     bool alive;
+    u64 owner_pid;       // creating process; only that pid may look it up
     u64 selected_bitmap; // HBITMAP handle (with tag) or 0 = none
     u64 selected_pen;    // HPEN handle (with tag) or 0 = use BLACK_PEN implicitly
     u64 selected_brush;  // HBRUSH handle (with tag) or 0 = use WHITE_BRUSH implicitly
@@ -79,6 +106,7 @@ struct MemDC
 struct Bitmap
 {
     bool alive;
+    u64 owner_pid;
     u32 width;
     u32 height;
     u32 pitch;   // bytes per row; always width * 4 in v0
@@ -88,13 +116,15 @@ struct Bitmap
 struct Brush
 {
     bool alive;
-    u32 rgb;    // 0x00RRGGBB
-    bool stock; // stock brushes are never freed
+    u64 owner_pid; // 0 for stock / sys-colour brushes (shared, never freed)
+    u32 rgb;       // 0x00RRGGBB
+    bool stock;    // stock brushes are never freed
 };
 
 struct Pen
 {
     bool alive;
+    u64 owner_pid;
     u32 rgb;
     u32 width; // pixels; 0 means "1 pixel cosmetic"
     bool stock;
@@ -123,13 +153,39 @@ void GdiInit();
 // since those are small integers from the WindowHandle registry).
 u64 GdiHandleType(u64 h);
 
-// Accessors — return nullptr / false on invalid handle. The
-// returned pointer is kernel-owned and stable until the handle is
-// deleted.
+// Accessors — return nullptr on an invalid handle OR on a handle
+// owned by a different process. Stock and sys-colour brushes/pens
+// are shared and resolve for everyone; DCs and bitmaps never are.
+// The returned pointer is kernel-owned and stable until the handle
+// is deleted.
+//
+// The owner check is what stops a PE from walking handle indices
+// 0..63 and blitting another process's off-screen surface into its
+// own window. Callers in kernel context (no current process) are
+// treated as the kernel owner and see everything.
 MemDC* GdiLookupMemDC(u64 h);
 Bitmap* GdiLookupBitmap(u64 h);
 Brush* GdiLookupBrush(u64 h);
 Pen* GdiLookupPen(u64 h);
+
+/// Free every GDI object owned by `pid` and clear its slots. Called
+/// from process teardown so an exiting PE cannot strand pixel bytes
+/// or table slots for the rest of the boot. Returns the number of
+/// objects reclaimed. Refuses pid == 0 (kernel/stock objects).
+u32 GdiReapByOwner(u64 pid);
+
+/// Unfiltered table census, for the leak detector. Deliberately not
+/// expressed via GdiLookup* — those are owner-filtered now, and a
+/// system-wide accounting pass must see every slot.
+struct GdiUsage
+{
+    u32 mem_dcs;
+    u32 bitmaps;
+    u32 brushes; // non-stock only
+    u32 pens;    // non-stock only
+    u64 bitmap_bytes;
+};
+GdiUsage GdiSnapshotUsage();
 
 // Operations (called from the syscall dispatchers).
 u64 GdiCreateCompatibleDC();

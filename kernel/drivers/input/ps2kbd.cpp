@@ -699,15 +699,37 @@ void IrqHandler()
 
 } // namespace
 
+// Set by Ps2KeyboardInit, cleared only by Ps2KeyboardResume. At
+// namespace scope rather than function-local so the resume path can
+// reset it — see Ps2KeyboardResume below.
+static constinit bool s_kbd_initialised = false;
+
+void Ps2KeyboardInit();
+
+void Ps2KeyboardResume()
+{
+    // Re-entry after ACPI S3. The controller lost power and IoApicInit
+    // has already rebuilt an all-masked redirection table, so the full
+    // bring-up has to run again — this is not the accidental second
+    // init the guard exists to catch.
+    KASSERT(s_kbd_initialised, "drivers/ps2kbd", "Ps2KeyboardResume before Ps2KeyboardInit");
+    s_kbd_initialised = false;
+    Ps2KeyboardInit();
+}
+
 void Ps2KeyboardInit()
 {
     // Double-init guard: re-routing the IOAPIC pin and re-installing
     // the handler would cause transient IRQ loss + a duplicate route
     // entry. Panic is the right outcome — silent second-init is
     // impossible to diagnose from logs later.
-    static constinit bool s_initialised = false;
-    KASSERT(!s_initialised, "drivers/ps2kbd", "Ps2KeyboardInit called twice");
-    s_initialised = true;
+    //
+    // An S3 resume is the one legitimate re-entry: the platform reset
+    // wiped the 8042 AND the IOAPIC redirection table, so the pin
+    // genuinely has to be re-routed. That path goes through
+    // Ps2KeyboardResume, which clears the flag deliberately.
+    KASSERT(!s_kbd_initialised, "drivers/ps2kbd", "Ps2KeyboardInit called twice");
+    s_kbd_initialised = true;
 
     // Full 8042 bring-up: disable both channels, flush stale data,
     // self-test the controller, enable port 1 + its IRQ. Leaves the

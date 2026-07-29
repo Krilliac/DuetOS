@@ -690,53 +690,54 @@
     0xC3,             // 0x249 ret
 
     // --- miss-logger (offset 0x24A, 41 bytes) -----------------
-    // Catch-all trampoline for every unresolved import. Two-step
-    // decode of the caller's control flow so we recover the IAT
-    // slot VA that matches what the PE loader staged:
+    // Catch-all trampoline for every unresolved import. It hands
+    // the kernel its own RETURN ADDRESS and lets the kernel decode
+    // the caller's call site back to an IAT slot VA.
     //
-    // step A (caller's `call qword [rip+rel32]` is actually
-    // `call rel32` because MSVC emits 5-byte direct
-    // CALLs to tiny 6-byte import "thunks", not the
-    // `call [IAT]` pattern). So [rsp] - 4 gives the
-    // rel32 of the CALL; adding it to [rsp] yields
-    // the thunk's VA (e.g. 0x140004F4E).
+    // This used to decode the call site here, in hand-assembled
+    // bytes, and it recognised exactly one shape: a 5-byte
+    // `call rel32` into a 6-byte `FF 25` import thunk. Its only
+    // validation was a single byte compare (`[rax-5] == 0xE8`),
+    // and if that byte happened to match for any other reason the
+    // decode ran anyway and produced a plausible-looking but
+    // entirely wrong slot VA — which is precisely how a real
+    // BattleBit.exe boot reported
+    // `slot=0x140e0192b called fn="<unmapped>"`: an address
+    // outside the image, not even 8-byte aligned, for an import
+    // (`UnityPlayer.dll!UnityMain`) the loader had staged
+    // correctly all along. One byte of entropy is a 1-in-256
+    // false-positive rate on a diagnostic whose entire job is to
+    // be trustworthy.
     //
-    // step B At the thunk, bytes are `FF 25 rel32_2` — an
-    // indirect `jmp qword [rip+rel32_2]`. rel32_2 is
-    // relative to the byte after the jmp, so
-    // IAT_slot_VA = thunk + 6 + rel32_2.
+    // The decode now lives in the kernel (`SYS_WIN32_MISS_LOG`,
+    // kernel/syscall/syscall.cpp), where it can read the call
+    // site through the checked user-copy path, recognise BOTH
+    // call shapes MSVC emits, validate every step, and say WHY it
+    // failed when it fails. Moving it also shrinks this
+    // trampoline from 41 bytes of branchy pointer arithmetic to a
+    // straight-line prologue, so nothing after it shifts.
     //
-    // The kernel side looks up IAT_slot_VA in the per-process
-    // miss table populated at load time and logs the function
-    // name. Each call still returns 0 (same as the old stub).
-    //
-    // Guard: before decoding, check that the byte immediately
-    // preceding the return address is `0xE8` (the `call rel32`
-    // opcode). If not, the caller used an indirect call pattern
-    // (`call rax`, `call [reg+disp]`, vtable dispatch, etc.);
-    // the decode would alias whatever bytes happen to sit there,
-    // yielding a plausible-looking but entirely wrong slot VA
-    // that surfaces as `<unmapped>`. Skipping the syscall in
-    // that case keeps the log honest — "no legible call
-    // pattern" becomes silence rather than fake data.
-    //
-    // Regs: we clobber rax, rcx, rdi — all caller-saved under
-    // any Win64 callable we'd be substituted for, and the syscall
-    // path preserves the rest. No save/restore needed.
-    0x48, 0x8B, 0x04, 0x24,       // 0x24A mov rax, [rsp] ; return addr
-    0x80, 0x78, 0xFB, 0xE8,       // 0x24E cmp byte [rax-5], 0xE8 ; CALL rel32?
-    0x75, 0x1C,                   // 0x252 jne +28 -> 0x270 ; skip decode+syscall
-    0x48, 0x63, 0x48, 0xFC,       // 0x254 movsxd rcx, dword [rax-4] ; CALL rel32
-    0x48, 0x01, 0xC1,             // 0x258 add rcx, rax ; rcx = thunk VA
-    0x48, 0x63, 0x41, 0x02,       // 0x25B movsxd rax, dword [rcx+2] ; thunk's JMP rel32
-    0x48, 0x01, 0xC8,             // 0x25F add rax, rcx ; rax = thunk + rel32
-    0x48, 0x83, 0xC0, 0x06,       // 0x262 add rax, 6 ; rax = IAT slot VA
-    0x48, 0x89, 0xC7,             // 0x266 mov rdi, rax ; arg0 = IAT slot VA
-    0xB8, 0x10, 0x00, 0x00, 0x00, // 0x269 mov eax, 16 (SYS_WIN32_MISS_LOG)
-    0xCD, 0x80,                   // 0x26E int 0x80
-    // .skip target — common epilogue returns 0 for both paths.
-    0x31, 0xC0, // 0x270 xor eax, eax
-    0xC3,       // 0x272 ret
+    // ABI: RDI is a NON-volatile register in the Microsoft x64
+    // ABI (the volatile set is RAX/RCX/RDX/R8-R11). The previous
+    // version passed its argument in RDI and never restored it,
+    // silently corrupting a callee-saved register in whatever
+    // Win64 function it was standing in for. It is saved and
+    // restored here. RAX is volatile and is the return value
+    // slot, so clobbering it is correct.
+    0x48, 0x8B, 0x04, 0x24,       // 0x24A mov rax, [rsp] ; return address
+    0x57,                         // 0x24E push rdi ; RDI is non-volatile in Win64
+    0x48, 0x89, 0xC7,             // 0x24F mov rdi, rax ; arg0 = return address
+    0xB8, 0x10, 0x00, 0x00, 0x00, // 0x252 mov eax, 16 (SYS_WIN32_MISS_LOG)
+    0xCD, 0x80,                   // 0x257 int 0x80
+    0x5F,                         // 0x259 pop rdi ; restore callee-saved
+    0x31, 0xC0,                   // 0x25A xor eax, eax ; unresolved import returns 0
+    0xC3,                         // 0x25C ret
+    // Pad 0x25D..0x272 with int3 so every later stub offset is
+    // unchanged. Unreachable by construction; if control ever does
+    // arrive here it traps loudly instead of sliding into the next
+    // stub's bytes.
+    0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, // 0x25D..0x267
+    0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, // 0x268..0x272
 
     // === CRT argc / argv accessors ==================
     //
@@ -2342,12 +2343,13 @@
 
     // === =============================================
 
-    // --- RaiseException (offset 0x9A4, 9 bytes) ---------------
-    // Win32:
-    // void RaiseException(DWORD dwExceptionCode, DWORD flags,
-    // DWORD nArgs, const ULONG_PTR *args);
-    // v0 has no SEH, so any RaiseException is fatal — route to
-    // SYS_EXIT with rcx (exception code) as the exit code.
+    // --- Dead 9 bytes at 0x9A4 --------------------------------
+    // Formerly the RaiseException sink, from when the kernel had no
+    // SEH: it routed the call to SYS_EXIT(dwExceptionCode). The real
+    // user-mode kernel32!RaiseException (kernel32_seh.c +
+    // raise_exception.S) supersedes it and no table row points here
+    // any more. The bytes stay so every later offset keeps its
+    // value; they are unreachable.
     0x48, 0x89, 0xCF, // 0x9A4 mov rdi, rcx
     0x31, 0xC0,       // 0x9A7 xor eax, eax
     0xCD, 0x80,       // 0x9A9 int 0x80

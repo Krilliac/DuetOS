@@ -219,6 +219,20 @@ void TssSetRsp0(u64 rsp0)
     g_bsp_tss.rsp0 = rsp0;
 }
 
+u64 TssCurrentRsp0()
+{
+    // Mirror of TssSetRsp0's routing, so the value read back is the
+    // one that CPU's `ltr`'d TSS actually holds.
+    if (cpu::BspInstalled())
+    {
+        cpu::PerCpu* p = cpu::CurrentCpu();
+        const Tss* t = static_cast<const Tss*>(p->tss);
+        if (t != nullptr)
+            return t->rsp0;
+    }
+    return g_bsp_tss.rsp0;
+}
+
 Tss* BspTssPtr()
 {
     return &g_bsp_tss;

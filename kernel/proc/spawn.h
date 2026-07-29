@@ -128,4 +128,19 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
 u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, const fs::RamfsNode* root,
                 u64 frame_budget, u64 tick_budget, CapSet cap_ceiling);
 
+/// As above, plus the image's ON-DISK ORIGIN so DLLs shipped beside
+/// the .exe can be found.
+///
+/// `origin_path` is the FAT32 path the bytes were read from — either
+/// a bare basename ("FOO.EXE", meaning the volume root) or a full
+/// path ("/GAMES/FOO.EXE") — on volume `origin_volume`. Callers that
+/// spawn from an embedded blob or from ramfs pass `nullptr` and get
+/// the pre-existing behaviour: no side-by-side search happens.
+///
+/// The derived directory is recorded on the Process, so the runtime
+/// `LoadLibraryW` path resolves against the same directory the import
+/// binder did. See `loader/sxs_dll.h`.
+u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, const fs::RamfsNode* root,
+                u64 frame_budget, u64 tick_budget, CapSet cap_ceiling, u32 origin_volume, const char* origin_path);
+
 } // namespace duetos::core

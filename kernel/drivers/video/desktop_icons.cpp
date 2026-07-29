@@ -26,8 +26,12 @@ Icon g_icons[kMaxIcons] = {};
 u32 g_icon_count = 0;
 int g_hover = -1; // index of the hovered icon, or -1
 
-// Grid layout. Icons fill the left column top-to-bottom, then wrap into
-// the next column once they'd reach the taskbar.
+// Grid layout. docs/aurora-theme/README.md §1 specifies a 2-column grid
+// of cells at the top-left, filled left-to-right; the reference desktop
+// reads Task Manager / Kernel Log across the top row and Inspect / Files
+// across the second. Column-major filling — which is what this used to
+// do — put the second icon UNDER the first, which is the layout of a
+// nine-item Windows-style column, not of the design's 2x2 block.
 constexpr u32 kTopY = 24;
 constexpr u32 kColX0 = 20;
 constexpr u32 kColStride = 96;
@@ -36,14 +40,17 @@ constexpr u32 kCellW = 84;
 constexpr u32 kCellH = 84;
 constexpr u32 kTileW = 56;
 constexpr u32 kBottomReserve = 52;
+constexpr u32 kGridCols = 2;
+
+// Longest label the paint pass will render before truncating. 20 covers
+// every registered label with room to spare; the cell-width clamp below
+// is what actually decides where the text stops.
+constexpr u32 kMaxLabel = 20;
 
 // 0x00RRGGBB, matching the rest of the chrome.
 constexpr u32 kWhite = 0x00FFFFFFu;
-constexpr u32 kDark = 0x001A222Cu; // screens / recesses inside a glyph
 constexpr u32 kTileBorder = 0x00101418u;
 constexpr u32 kLabelChip = 0x00141A20u;
-constexpr u32 kTermGreen = 0x0050E060u;
-constexpr u32 kPaperRed = 0x00C04848u;
 
 // Aurora tile metrics — docs/aurora-theme/README.md §1 "Desktop icon",
 // scaled to the 1024x768 column of IMPLEMENTATION.md §7 (52 -> 40 px
@@ -110,139 +117,105 @@ void BlendRoundRectVGradient(u32 x, u32 y, u32 w, u32 h, u32 radius, u32 rgb, u3
     }
 }
 
+// Row-major over kGridCols columns. If that many rows would run past the
+// taskbar reserve the grid widens instead — the count is data (a future
+// slice can register more destinations) and running icons off the bottom
+// of the screen is worse than a wider block.
 void IconCell(u32 index, u32* out_x, u32* out_y)
 {
     const FramebufferInfo fb = FramebufferGet();
     const u32 usable = (fb.height > kTopY + kBottomReserve) ? (fb.height - kTopY - kBottomReserve) : kRowPitch;
-    u32 rows = usable / kRowPitch;
-    if (rows == 0)
+    u32 rows_that_fit = usable / kRowPitch;
+    if (rows_that_fit == 0)
     {
-        rows = 1;
+        rows_that_fit = 1;
     }
-    *out_x = kColX0 + (index / rows) * kColStride;
-    *out_y = kTopY + (index % rows) * kRowPitch;
+    u32 cols = kGridCols;
+    while (cols < kMaxIcons && (g_icon_count + cols - 1) / cols > rows_that_fit)
+    {
+        ++cols;
+    }
+    *out_x = kColX0 + (index % cols) * kColStride;
+    *out_y = kTopY + (index / cols) * kRowPitch;
 }
 
-// Draw the iconographic glyph for `kind` inside the kTileW x kTileH tile
-// at (tx, ty). `fg` is the stroke colour (white); `accent` is the tile
-// fill (used where the glyph wants the tile colour to show through).
-void DrawGlyph(IconGlyph kind, u32 tx, u32 ty, u32 tile, u32 fg, u32 accent)
+// Draw the iconographic glyph for `kind` inside the `tile`-square tile at
+// (tx, ty). `fg` is the stroke colour — the accent under Aurora, white on
+// the flat palettes.
+//
+// README §1 calls for a 24-px stroke glyph on a 52-px tile — a light,
+// outlined mark, not a filled silhouette. The plots below are stroked for
+// that reason: on the Aurora tile the glyph is accent-on-translucent, and
+// a solid shape at that size fills the tile and loses its identity. That
+// is also why there is no second "recess" colour any more: none of the
+// four marks has an interior that needs to read as a hole.
+void DrawGlyph(IconGlyph kind, u32 tx, u32 ty, u32 tile, u32 fg)
 {
-    // Every glyph below is hand-plotted against a 32-px art box (the
-    // original 56-px tile's 12-px margin), so the box stays 32 on any
-    // tile that can hold it and the margin absorbs the difference.
-    // Rescaling the plots instead would mean re-tuning nine glyphs.
-    const u32 s = (tile > 36) ? 32 : tile - 4;
-    const u32 m = (tile - s) / 2;
-    const u32 ox = tx + m;
-    const u32 oy = ty + m;
-    const i32 cx = static_cast<i32>(tx + tile / 2);
-    const i32 cy = static_cast<i32>(ty + tile / 2);
+    // Art box: the design's 24-px glyph on a 52-px tile is a ~46 % inset,
+    // so the box tracks the tile rather than staying a fixed 32 px — the
+    // Aurora tile is 40 px here and a fixed box would overflow it.
+    const u32 s = (tile * 22u) / 40u * 2u > tile - 8u ? tile - 8u : (tile * 22u) / 40u * 2u;
+    const u32 ox = tx + (tile - s) / 2u;
+    const u32 oy = ty + (tile - s) / 2u;
+    const u32 right = ox + s - 1;
+    const u32 bottom = oy + s - 1;
 
     switch (kind)
     {
-    case IconGlyph::Computer:
+    case IconGlyph::TaskManager:
     {
-        const u32 mh = s * 2 / 3;
-        FramebufferFillRoundRect(ox, oy, s, mh, 3, fg);
-        FramebufferFillRect(ox + 3, oy + 3, s - 6, mh - 6, kDark);
-        FramebufferFillRect(ox + s / 2 - 2, oy + mh, 4, 6, fg);
-        FramebufferFillRect(ox + s / 2 - 8, oy + mh + 6, 16, 3, fg);
-        break;
-    }
-    case IconGlyph::Browser:
-    {
-        const i32 r = static_cast<i32>(s / 2);
-        FramebufferFillCircle(cx, cy, static_cast<u32>(r), fg);
-        FramebufferDrawCircle(cx, cy, static_cast<u32>(r), accent);
-        FramebufferDrawLine(cx, cy - r, cx, cy + r, accent);
-        FramebufferDrawLine(cx - r, cy, cx + r, cy, accent);
-        FramebufferDrawLine(cx - r + 3, cy - r / 2, cx + r - 3, cy - r / 2, accent);
-        FramebufferDrawLine(cx - r + 3, cy + r / 2, cx + r - 3, cy + r / 2, accent);
-        break;
-    }
-    case IconGlyph::Terminal:
-    {
-        FramebufferFillRoundRect(ox, oy, s, s, 3, kDark);
-        FramebufferDrawLine(static_cast<i32>(ox + 6), static_cast<i32>(oy + 7), static_cast<i32>(ox + 13),
-                            static_cast<i32>(oy + s / 2), kTermGreen);
-        FramebufferDrawLine(static_cast<i32>(ox + 13), static_cast<i32>(oy + s / 2), static_cast<i32>(ox + 6),
-                            static_cast<i32>(oy + s - 7), kTermGreen);
-        FramebufferFillRect(ox + 15, oy + s - 11, 10, 3, kTermGreen);
-        break;
-    }
-    case IconGlyph::Calculator:
-    {
-        FramebufferFillRoundRect(ox, oy, s, s, 3, fg);
-        FramebufferFillRect(ox + 3, oy + 3, s - 6, s / 4, kDark);
-        const u32 by = oy + s / 4 + 5;
-        for (u32 r = 0; r < 3; ++r)
+        // Four ascending columns on a baseline — the same silhouette the
+        // taskbar's TaskManager glyph uses, so the desktop launcher and
+        // the running app's button read as the same app.
+        FramebufferFillRect(ox, bottom, s, 2, fg);
+        const u32 bar_w = s / 6u;
+        const u32 gap = (s - 4u * bar_w) / 3u;
+        for (u32 i = 0; i < 4; ++i)
         {
-            for (u32 c = 0; c < 3; ++c)
-            {
-                FramebufferFillRect(ox + 4 + c * 8, by + r * 6, 5, 4, accent);
-            }
+            const u32 h = (s * (3u + 2u * i)) / 12u;
+            FramebufferFillRect(ox + i * (bar_w + gap), bottom - h, bar_w, h, fg);
         }
         break;
     }
-    case IconGlyph::Notepad:
+    case IconGlyph::KernelLog:
     {
-        const u32 pw = s * 5 / 6;
-        FramebufferFillRect(ox, oy, pw, s, fg);
-        for (u32 i = 1; i <= 4; ++i)
-        {
-            FramebufferDrawLine(static_cast<i32>(ox + 5), static_cast<i32>(oy + i * 6), static_cast<i32>(ox + pw - 4),
-                                static_cast<i32>(oy + i * 6), accent);
-        }
-        FramebufferFillRect(ox, oy, 3, s, kPaperRed);
-        break;
-    }
-    case IconGlyph::Settings:
-    {
-        const u32 r = s / 2 - 1;
-        // Eight teeth around the rim (unit directions scaled to r).
-        const i32 dirs[8][2] = {{0, -7}, {5, -5}, {7, 0}, {5, 5}, {0, 7}, {-5, 5}, {-7, 0}, {-5, -5}};
-        for (auto& d : dirs)
-        {
-            const i32 tcx = cx + d[0] * static_cast<i32>(r) / 7;
-            const i32 tcy = cy + d[1] * static_cast<i32>(r) / 7;
-            FramebufferFillRect(static_cast<u32>(tcx - 2), static_cast<u32>(tcy - 2), 5, 5, fg);
-        }
-        FramebufferFillCircle(cx, cy, r - 1, fg);
-        FramebufferFillCircle(cx, cy, r * 2 / 5, kDark);
-        break;
-    }
-    case IconGlyph::DeviceMgr:
-    {
-        FramebufferFillRect(ox + 4, oy + 4, s - 8, s - 8, fg);
-        FramebufferFillRect(ox + 8, oy + 8, s - 16, s - 16, kDark);
+        // Console frame with a title rule and three log lines of
+        // decreasing length.
+        FramebufferDrawRoundRect(ox, oy, s, s, 3, fg);
+        FramebufferFillRect(ox + 2, oy + s / 4u, s - 4u, 1, fg);
         for (u32 i = 0; i < 3; ++i)
         {
-            FramebufferFillRect(ox + 8 + i * 8, oy, 3, 4, fg);
-            FramebufferFillRect(ox + 8 + i * 8, oy + s - 4, 3, 4, fg);
-            FramebufferFillRect(ox, oy + 8 + i * 8, 4, 3, fg);
-            FramebufferFillRect(ox + s - 4, oy + 8 + i * 8, 4, 3, fg);
+            const u32 len = (s - 8u) - i * (s / 8u);
+            FramebufferFillRect(ox + 4, oy + s / 4u + 4u + i * (s / 6u), len, 2, fg);
         }
         break;
     }
-    case IconGlyph::Trash:
+    case IconGlyph::Inspect:
     {
-        FramebufferFillRect(ox + s / 2 - 3, oy, 6, 3, fg);     // handle
-        FramebufferFillRect(ox, oy + 3, s, 4, fg);             // lid
-        FramebufferFillRect(ox + 3, oy + 8, s - 6, s - 9, fg); // body
-        FramebufferDrawLine(static_cast<i32>(ox + s / 3), static_cast<i32>(oy + 11), static_cast<i32>(ox + s / 3),
-                            static_cast<i32>(oy + s - 3), accent);
-        FramebufferDrawLine(static_cast<i32>(ox + 2 * s / 3), static_cast<i32>(oy + 11),
-                            static_cast<i32>(ox + 2 * s / 3), static_cast<i32>(oy + s - 3), accent);
+        // Magnifier over a short code column — the design's Inspect is a
+        // binary/disassembly reader, so the lens sits on text, not on a
+        // bare circle.
+        for (u32 i = 0; i < 3; ++i)
+        {
+            FramebufferFillRect(ox, oy + i * (s / 5u), (s / 2u) - i * 2u, 2, fg);
+        }
+        const i32 lens_r = static_cast<i32>(s / 4u);
+        const i32 lens_cx = static_cast<i32>(ox + (s * 3u) / 5u);
+        const i32 lens_cy = static_cast<i32>(oy + (s * 3u) / 5u);
+        FramebufferDrawCircle(lens_cx, lens_cy, static_cast<u32>(lens_r), fg);
+        FramebufferDrawCircle(lens_cx, lens_cy, static_cast<u32>(lens_r) - 1u, fg);
+        FramebufferDrawLine(lens_cx + (lens_r * 3) / 4, lens_cy + (lens_r * 3) / 4, static_cast<i32>(right),
+                            static_cast<i32>(bottom), fg);
         break;
     }
-    case IconGlyph::Help:
+    case IconGlyph::Files:
     {
-        FramebufferFillCircle(cx, cy, s / 2 - 1, fg);
-        const u32 qw = ChromeTextMeasure(ChromeTextRole::Title, "?");
-        const u32 qh = ChromeTextRoleHeight(ChromeTextRole::Title);
-        ChromeTextDraw(ChromeTextRole::Title, static_cast<u32>(cx) - qw / 2, static_cast<u32>(cy) - qh / 2, "?", accent,
-                       fg, ChromeTextWeight::Bold);
+        // Folder: a raised tab over an outlined body.
+        const u32 tab_h = s / 6u;
+        FramebufferFillRect(ox, oy + tab_h, (s * 2u) / 5u, 2, fg);
+        FramebufferFillRect(ox, oy + tab_h, 2, 2, fg);
+        FramebufferDrawRoundRect(ox, oy + tab_h + 2u, s, s - tab_h - 2u, 3, fg);
+        FramebufferFillRect(ox + 2, oy + tab_h + 2u + (s / 5u), s - 4u, 1, fg);
         break;
     }
     }
@@ -311,19 +284,36 @@ void DesktopIconsPaint()
             // band, where that ground is within a step or two of truth.
             FramebufferDrawRoundRect(tile_x, tile_y, tile_side, tile_side, kAuroraRadius,
                                      BlendOver(ThemeCurrent().desktop_bg, accent, 97));
-            DrawGlyph(g_icons[i].glyph, tile_x, tile_y, tile_side, accent, kDark);
+            DrawGlyph(g_icons[i].glyph, tile_x, tile_y, tile_side, accent);
         }
         else
         {
             FramebufferFillRect(tile_x - 1u, tile_y - 1u, tile_side + 2u, tile_side + 2u, kTileBorder);
             FramebufferFillRect(tile_x, tile_y, tile_side, tile_side, accent);
-            DrawGlyph(g_icons[i].glyph, tile_x, tile_y, tile_side, kWhite, accent);
+            DrawGlyph(g_icons[i].glyph, tile_x, tile_y, tile_side, kWhite);
         }
 
-        const u32 lw = ChromeTextMeasure(ChromeTextRole::Caption, g_icons[i].label);
+        // Labels are truncated to the cell rather than being allowed to
+        // run past it. The proportional TTF caption fits "Task Manager"
+        // inside 84 px; the fixed 8-px bitmap caption the flat palettes
+        // use does not, and an untruncated label ran straight into the
+        // next column's.
+        char label[kMaxLabel];
+        u32 n = 0;
+        while (n + 1u < kMaxLabel && g_icons[i].label[n] != '\0')
+        {
+            label[n] = g_icons[i].label[n];
+            ++n;
+        }
+        label[n] = '\0';
+        while (n > 1u && ChromeTextMeasure(ChromeTextRole::Caption, label) > kCellW)
+        {
+            label[--n] = '\0';
+        }
+        const u32 lw = ChromeTextMeasure(ChromeTextRole::Caption, label);
         const u32 lx = cell_x + (kCellW > lw ? (kCellW - lw) / 2u : 0u);
         const u32 ly = tile_y + tile_side + 6u;
-        ChromeTextDraw(ChromeTextRole::Caption, lx, ly, g_icons[i].label, kWhite, kLabelChip, ChromeTextWeight::Bold);
+        ChromeTextDraw(ChromeTextRole::Caption, lx, ly, label, kWhite, kLabelChip, ChromeTextWeight::Bold);
     }
 }
 
@@ -354,18 +344,6 @@ void DesktopIconActivate(int index)
     }
     WindowSetVisible(target, true);
     WindowRaise(target);
-}
-
-u32 DesktopIconCount()
-{
-    return g_icon_count;
-}
-
-WindowHandle DesktopIconWindow(int index)
-{
-    if (index < 0 || static_cast<u32>(index) >= g_icon_count)
-        return kWindowInvalid;
-    return g_icons[static_cast<u32>(index)].target;
 }
 
 void DesktopIconsSelfTest()

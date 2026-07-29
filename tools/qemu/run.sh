@@ -10,6 +10,8 @@
 # Flags chosen for early-boot diagnosis:
 #   -serial stdio          : pipe COM1 to this terminal
 #   -no-reboot             : halt on triple fault instead of resetting
+#                            (dropped by DUETOS_ALLOW_REBOOT=1 — S3 resume
+#                             legitimately goes through a platform reset)
 #   -no-shutdown           : leave QEMU alive so `info registers` works
 #   -d int,cpu_reset       : trace interrupts + reset causes
 #   -D qemu.log            : dump that trace to qemu.log
@@ -244,6 +246,25 @@ fi
 # nothing meaningful for determinism.
 NVME_IMAGE="${BUILD_DIR}/nvme0.img"
 SATA_IMAGE="${BUILD_DIR}/sata0.img"
+
+# Side-by-side DLL fixture. SXSTEST.EXE imports SXSLIB.DLL, and neither
+# is embedded in the kernel image — the ring3 PE-compat battery row can
+# only pass if the loader reads the DLL off the volume next to the .exe.
+# Staged automatically whenever the build produced them, and APPENDED to
+# whatever the caller already asked for (run-exe.sh sets its own entry).
+# Set DUETOS_NO_SXS_FIXTURE=1 to leave them off the image.
+SXS_FIXTURE_DIR="${BUILD_DIR}/sxs-fixture"
+if [[ -z "${DUETOS_NO_SXS_FIXTURE:-}" \
+      && -f "${SXS_FIXTURE_DIR}/SXSTEST.EXE" && -f "${SXS_FIXTURE_DIR}/SXSLIB.DLL" ]]; then
+    SXS_SPEC="SXSTEST.EXE=${SXS_FIXTURE_DIR}/SXSTEST.EXE;SXSLIB.DLL=${SXS_FIXTURE_DIR}/SXSLIB.DLL"
+    if [[ -n "${DUETOS_STAGE_FILES:-}" ]]; then
+        export DUETOS_STAGE_FILES="${DUETOS_STAGE_FILES};${SXS_SPEC}"
+    else
+        export DUETOS_STAGE_FILES="${SXS_SPEC}"
+    fi
+    echo "[run.sh] staging side-by-side DLL fixture (SXSTEST.EXE + SXSLIB.DLL)" >&2
+fi
+
 python3 "${SCRIPT_DIR}/make-gpt-image.py" "${NVME_IMAGE}"
 python3 "${SCRIPT_DIR}/make-gpt-image.py" "${SATA_IMAGE}"
 
@@ -447,6 +468,19 @@ fi
 # remapping only, intremap=off) plus the split irqchip QEMU requires for
 # it; the kernel then programs VT-d identity translation at boot. Used to
 # verify DMA-remapping enforcement under QEMU.
+# `-no-reboot` turns a guest reset into a QEMU exit, which is what you
+# want when diagnosing a triple fault. It is exactly wrong for ACPI S3,
+# though: waking from S3 goes THROUGH a platform reset (QEMU resets the
+# machine, firmware re-runs and jumps to the FACS waking vector), so
+# -no-reboot converts a healthy resume into a shutdown before the guest
+# executes an instruction. DUETOS_ALLOW_REBOOT=1 drops the flag; the S3
+# cycle harness (tools/test/s3-cycle-smoke.sh) sets it.
+REBOOT_ARGS=(-no-reboot)
+if [[ "${DUETOS_ALLOW_REBOOT:-0}" != "0" ]]; then
+    REBOOT_ARGS=()
+    echo "[run.sh] -no-reboot dropped (DUETOS_ALLOW_REBOOT=1): a guest reset will restart, not exit" >&2
+fi
+
 MACHINE_OPTS="q35,accel=${ACCEL}"
 IOMMU_DEVICE_ARGS=()
 if [[ "${DUETOS_IOMMU_DEVICE:-0}" != "0" ]]; then
@@ -455,9 +489,54 @@ if [[ "${DUETOS_IOMMU_DEVICE:-0}" != "0" ]]; then
     echo "[run.sh] Intel VT-d IOMMU device enabled (intremap=off)" >&2
 fi
 
+# Optional TPM 2.0 emulation, backed by a host `swtpm` process. Default
+# off: with no TPM the kernel's TIS probe reads back an all-ones DID/VID
+# from the unbacked 0xFED40000 window and reports ABSENT, which is the
+# path most boots should exercise. DUETOS_TPM=1 starts a per-run swtpm
+# whose state lives in a scratch dir, and attaches it as an ISA tpm-tis
+# device at the architectural TIS window. QEMU then also publishes a
+# TPM2 ACPI table, so this exercises the ACPI discovery path too.
+#
+# Requires `swtpm` on the host (apt-get install swtpm swtpm-tools); if it
+# is missing we fail loudly rather than silently booting without a TPM,
+# because a silent fallback would make an absent-TPM run masquerade as a
+# TPM run and turn the self-test into a false green.
+TPM_DEVICE_ARGS=()
+TPM_STATE_DIR=""
+if [[ "${DUETOS_TPM:-0}" != "0" ]]; then
+    if ! command -v swtpm >/dev/null 2>&1; then
+        echo "[run.sh] DUETOS_TPM=1 but swtpm is not installed" >&2
+        echo "[run.sh]   apt-get install swtpm swtpm-tools" >&2
+        exit 1
+    fi
+    TPM_STATE_DIR="${DUETOS_TPM_STATE_DIR:-$(mktemp -d -t duetos-swtpm-XXXXXX)}"
+    mkdir -p "${TPM_STATE_DIR}"
+    swtpm socket \
+        --tpmstate "dir=${TPM_STATE_DIR}" \
+        --ctrl "type=unixio,path=${TPM_STATE_DIR}/swtpm-sock" \
+        --tpm2 --daemon \
+        --log "file=${TPM_STATE_DIR}/swtpm.log,level=1"
+    # swtpm --daemon returns before the socket is necessarily bound.
+    for _ in $(seq 1 50); do
+        [[ -S "${TPM_STATE_DIR}/swtpm-sock" ]] && break
+        sleep 0.1
+    done
+    if [[ ! -S "${TPM_STATE_DIR}/swtpm-sock" ]]; then
+        echo "[run.sh] swtpm failed to bind ${TPM_STATE_DIR}/swtpm-sock" >&2
+        exit 1
+    fi
+    TPM_DEVICE_ARGS=(
+        -chardev "socket,id=chrtpm,path=${TPM_STATE_DIR}/swtpm-sock"
+        -tpmdev  "emulator,id=tpm0,chardev=chrtpm"
+        -device  "tpm-tis,tpmdev=tpm0"
+    )
+    echo "[run.sh] TPM 2.0 emulation enabled (swtpm state ${TPM_STATE_DIR})" >&2
+fi
+
 QEMU_ARGS=(
     -machine  "${MACHINE_OPTS}"
     "${IOMMU_DEVICE_ARGS[@]}"
+    "${TPM_DEVICE_ARGS[@]}"
     -cpu      "${CPU_MODEL}"
     "${SMP_ARGS[@]}"
     -m        "${RAM_SIZE}"
@@ -478,7 +557,7 @@ QEMU_ARGS=(
     # until the debugger actually attaches. Separate from QEMU's
     # `-gdb` flag (which is QEMU's hypervisor-side debugger).
     -serial   "${DUETOS_GDB_TRANSPORT_QEMU}"
-    -no-reboot
+    "${REBOOT_ARGS[@]}"
     -no-shutdown
     -d        int,cpu_reset
     -D        qemu.log

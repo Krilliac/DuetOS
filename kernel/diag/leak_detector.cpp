@@ -229,40 +229,13 @@ ClassSnapshot SnapshotGdi()
 {
     using namespace ::duetos::subsystems::win32;
     ClassSnapshot s{ResourceClass::kGdiObject, 0, 0, 0, kClassNames[7]};
-    u64 outstanding = 0;
-    u64 byte_cost = 0;
-    // The global tables are file-static in gdi_objects.cpp; we can
-    // iterate via the public `GdiLookup*` accessors over each handle
-    // index. Index → handle mapping uses the kGdiTag* family.
-    for (u32 i = 0; i < kMaxMemDcs; ++i)
-    {
-        if (GdiLookupMemDC(kGdiTagMemDC | i) != nullptr)
-            ++outstanding;
-    }
-    for (u32 i = 0; i < kMaxBitmaps; ++i)
-    {
-        const Bitmap* b = GdiLookupBitmap(kGdiTagBitmap | i);
-        if (b != nullptr)
-        {
-            ++outstanding;
-            byte_cost += static_cast<u64>(b->pitch) * b->height;
-        }
-    }
-    for (u32 i = 0; i < kMaxBrushes; ++i)
-    {
-        const Brush* b = GdiLookupBrush(kGdiTagBrush | i);
-        if (b != nullptr && !b->stock)
-            ++outstanding;
-    }
-    for (u32 i = 0; i < kMaxPens; ++i)
-    {
-        const Pen* p = GdiLookupPen(kGdiTagPen | i);
-        if (p != nullptr && !p->stock)
-            ++outstanding;
-    }
-    s.outstanding = outstanding;
-    s.peak = outstanding;
-    s.byte_cost = byte_cost;
+    // Must be the UNFILTERED census: `GdiLookup*` resolves only
+    // objects visible to the calling process, and a system-wide leak
+    // accounting pass has to see every slot regardless of owner.
+    const GdiUsage u = GdiSnapshotUsage();
+    s.outstanding = static_cast<u64>(u.mem_dcs) + u.bitmaps + u.brushes + u.pens;
+    s.peak = s.outstanding;
+    s.byte_cost = u.bitmap_bytes;
     return s;
 }
 

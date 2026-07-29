@@ -142,13 +142,25 @@ const AmlNamespaceEntry* AmlNamespaceFind(const char* path);
 /// and quick "do I have any thermal zones declared?" predicates.
 u32 AmlNamespaceCountByKind(AmlObjectKind k);
 
-/// Decode the `\_S5` (soft-off) sleep-state values from AML.
-/// Populates `*slp_typa` / `*slp_typb` with the first two
+/// Decode a sleep-state package's SLP_TYP values from AML.
+/// `name3` is the 3-char state name ("_S0".."_S5"); both the
+/// padded ("\_S3_") and plain ("\_S3") namespace spellings are
+/// tried. Populates `*slp_typa` / `*slp_typb` with the first two
 /// elements of the `Package { SLP_TYPa, SLP_TYPb, ... }`
 /// declaration. Returns false on missing name, unexpected
 /// opcode, or element encodings outside v0's supported subset
-/// (ZeroOp / OneOp / BytePrefix). Callers on false stay in
-/// "ACPI shutdown unsupported" — we don't guess bits.
+/// (ZeroOp / OneOp / BytePrefix).
+///
+/// A false return is the ONLY signal that the firmware does not
+/// support that sleep state, and it is deliberately not folded
+/// into the value: SLP_TYP 0 is a legal encoding, so "absent"
+/// and "zero" must never share a representation. Callers on
+/// false stay in "that sleep state is unsupported" — we don't
+/// guess bits.
+bool AmlReadSleepPackage(const char* name3, u8* slp_typa, u8* slp_typb);
+
+/// `AmlReadSleepPackage("_S5", ...)` — the soft-off shorthand the
+/// shutdown path uses.
 bool AmlReadS5(u8* slp_typa, u8* slp_typb);
 
 // --- Region / Field index (populated by AmlNamespaceBuild) ----------

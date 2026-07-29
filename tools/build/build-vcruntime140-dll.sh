@@ -29,6 +29,7 @@ SRC_C="${SRC_DIR}/vcruntime140.c"
 SRC_S_CHKSTK="${SRC_DIR}/chkstk.S"
 SRC_S_GUARD="${SRC_DIR}/guard_icall.S"
 SRC_S_CXX_THROW="${SRC_DIR}/cxx_throw.S"
+SRC_S_CXX_FUNCLET="${SRC_DIR}/cxx_funclet.S"
 EMBED="${REPO_ROOT}/tools/build/embed-blob.py"
 
 WORK_DIR="$(dirname "${OUT_HEADER}")/vcruntime140"
@@ -37,6 +38,7 @@ OBJ_C="${WORK_DIR}/vcruntime140.obj"
 OBJ_S_CHKSTK="${WORK_DIR}/chkstk.obj"
 OBJ_S_GUARD="${WORK_DIR}/guard_icall.obj"
 OBJ_S_CXX_THROW="${WORK_DIR}/cxx_throw.obj"
+OBJ_S_CXX_FUNCLET="${WORK_DIR}/cxx_funclet.obj"
 DLL="${WORK_DIR}/vcruntime140.dll"
 
 # ntdll import lib (built by build-ntdll-dll.sh into the sibling
@@ -64,7 +66,7 @@ LLD_LINK="${LLD_LINK:-lld-link}"
     -fno-builtin-memcpy \
     -fno-builtin-memmove \
     -mno-red-zone \
-    -fno-asynchronous-unwind-tables \
+    -fasynchronous-unwind-tables \
     -O2 \
     -Wall -Wextra \
     "${SRC_C}" \
@@ -78,6 +80,8 @@ LLD_LINK="${LLD_LINK:-lld-link}"
     "${SRC_S_GUARD}" -o "${OBJ_S_GUARD}"
 "${CLANG}" --target=x86_64-pc-windows-msvc -c -ffreestanding -nostdlib \
     "${SRC_S_CXX_THROW}" -o "${OBJ_S_CXX_THROW}"
+"${CLANG}" --target=x86_64-pc-windows-msvc -c -ffreestanding -nostdlib \
+    "${SRC_S_CXX_FUNCLET}" -o "${OBJ_S_CXX_FUNCLET}"
 
 rm -f "${DLL}"
 
@@ -98,7 +102,7 @@ set +e
     /export:memmove \
     /export:memcmp \
     /export:memchr \
-    /export:__C_specific_handler \
+    /export:__C_specific_handler=ntdll.__C_specific_handler \
     /export:__CxxFrameHandler3 \
     /export:__CxxFrameHandler4 \
     /export:_CxxThrowException \
@@ -118,6 +122,7 @@ set +e
     "${OBJ_S_CHKSTK}" \
     "${OBJ_S_GUARD}" \
     "${OBJ_S_CXX_THROW}" \
+    "${OBJ_S_CXX_FUNCLET}" \
     "${NTDLL_LIB}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}
 set -e

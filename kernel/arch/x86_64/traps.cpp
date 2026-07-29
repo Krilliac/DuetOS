@@ -64,6 +64,7 @@
 #include "mm/kstack.h"
 #include "mm/paging.h"
 #include "mm/poison_alloc.h"
+#include "proc/user_stack.h"
 #include "sched/sched.h"
 #include "subsystems/win32/vmap_syscall.h"
 #include "subsystems/win32/seh_dispatch.h"
@@ -1880,12 +1881,47 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     // IsolateTask policy below. Full STATUS_GUARD_PAGE_VIOLATION
     // delivery is gated on T6-02 (x64 SEH); v0 silently re-arms,
     // which still services the common stack-grow probe pattern.
+    //
+    // Ring-3 stack growth gets the bite after that. A growable
+    // fault is NOT an error — it must be decided BEFORE the
+    // IsolateTask policy and before SEH delivery, because both of
+    // those treat it as a crash. The classification is deliberately
+    // narrow (see core::UserStackServiceFault): only a not-present
+    // fault naming the page immediately below the committed edge,
+    // from at or below the thread's own rsp, inside the
+    // reservation and above the guard page, grows the stack.
+    // Everything else — including a guard-page hit — falls through
+    // to the existing handling untouched.
+    bool stack_guard_hit = false;
     if (frame->vector == 14 && from_user)
     {
         const u64 cr2 = ReadCr2();
         if (::duetos::subsystems::win32::Win32VmapPageGuardClear(cr2))
         {
             return;
+        }
+
+        const auto stack_verdict = ::duetos::core::UserStackServiceFault(cr2, frame->error_code, frame->rsp);
+        if (stack_verdict == ::duetos::core::UserStackFault::Grew)
+        {
+            // Page committed — iretq retries the faulting access.
+            return;
+        }
+        if (stack_verdict == ::duetos::core::UserStackFault::Guard ||
+            stack_verdict == ::duetos::core::UserStackFault::Failed)
+        {
+            // The whole point of demand growth is that overflow
+            // stays detectable. Guard = the thread walked off the
+            // bottom of its own reservation; Failed = the commit was
+            // warranted but the box is out of frames. Neither is
+            // recoverable, and neither is silent.
+            stack_guard_hit = (stack_verdict == ::duetos::core::UserStackFault::Guard);
+            KLOG_WARN_S("mm/ustack", "*** RING-3 STACK OVERFLOW ***", "verdict",
+                        ::duetos::core::UserStackFaultName(stack_verdict));
+            KLOG_WARN_V("mm/ustack", "  faulting va", cr2);
+            KLOG_WARN_V("mm/ustack", "  rsp", frame->rsp);
+            KLOG_WARN_V("mm/ustack", "  rip", frame->rip);
+            KBP_PROBE_V(::duetos::debug::ProbeId::kUserStackGuardHit, cr2);
         }
     }
 
@@ -1973,6 +2009,15 @@ extern "C" void TrapDispatch(TrapFrame* frame)
             // STATUS_STACK_BUFFER_OVERRUN sees the right value and the
             // boot log names the failure instead of hiding it.
             u32 seh_status = VectorToUserNtStatus(frame->vector);
+            if (stack_guard_hit)
+            {
+                // Name the failure the way Windows does, so a PE's
+                // __except filter can tell "the stack ran out" from
+                // "a pointer went wild". Delivery may still fail —
+                // the records go on the exhausted stack — in which
+                // case the task-kill path below reports it.
+                seh_status = ::duetos::subsystems::win32::kStatusStackOverflow;
+            }
             u32 fastfail_code = 0;
             const bool is_fastfail = ::duetos::subsystems::win32::Win32DecodeFastFail(frame, &fastfail_code);
             if (is_fastfail)

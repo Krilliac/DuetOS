@@ -287,7 +287,12 @@ __declspec(dllexport) int _XcptFilter(unsigned long xcptnum, void* pxcptinfoptrs
 // STUB: no SEH4 scope-table walk, no cookie validation, no filter or
 // finally-block execution - every frame reports "not mine", so a
 // guest's try/except and try/finally blocks never run. Requires a
-// kernel-side 32-bit exception dispatcher first.
+// kernel-side 32-bit exception dispatcher first: the x86_64 path
+// works end to end (kernel seh_dispatch.cpp -> ntdll
+// KiUserExceptionDispatcher -> __C_specific_handler), but it builds
+// an x64 CONTEXT and resumes at an x64 entry point. i386 SEH is a
+// different shape entirely - the fs:[0] registration chain rather
+// than .pdata tables - so none of that engine is reusable here.
 __declspec(dllexport) int _except_handler4_common(unsigned long* cookie, void* check_fn, void* exception_record,
                                                   void* registration, void* context, void* dispatcher)
 {

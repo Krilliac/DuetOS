@@ -379,6 +379,16 @@ void FramebufferFillRectGradient(u32 x, u32 y, u32 w, u32 h, u32 top_rgb, u32 bo
 /// Clipped; no-op on empty dimensions or !Available().
 void FramebufferFillRoundRect(u32 x, u32 y, u32 w, u32 h, u32 radius, u32 rgb);
 
+/// Translucent sibling of `FramebufferFillRoundRect`: same corner
+/// geometry, but each row is composited with `FramebufferBlendFill`
+/// so the surface underneath reads through. `argb` carries the alpha
+/// in its top byte, matching `FramebufferBlendFill`.
+///
+/// This is what an Aurora glass surface needs and neither existing
+/// primitive provides — `FillRoundRect` is opaque and `BlendFill` is
+/// square. Clipped; no-op on empty dimensions or !Available().
+void FramebufferBlendRoundRect(u32 x, u32 y, u32 w, u32 h, u32 radius, u32 argb);
+
 /// Outline-only sibling of `FramebufferFillRoundRect`. Paints a
 /// 1-pixel rounded-rect border in `rgb`. Same radius clamping
 /// rules as the fill primitive. Interior is untouched. Used by

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "loader/dll_loader.h"
+#include "proc/user_stack.h"
 #include "util/types.h"
 
 namespace duetos::mm
@@ -14,44 +15,56 @@ struct Process;
 }
 
 /*
- * DuetOS PE/COFF loader — v0.
+ * DuetOS PE/COFF loader.
  *
  * Pillar #1 of the project is "run Windows PE executables
- * natively." This is the v0 slice of that: enough of the loader
- * to bring up a freestanding PE produced by clang + lld-link,
- * with no imports, no base relocations, no TLS callbacks, no
- * exception directory, no delay-load. Such a PE is purely a
- * container for mapped bytes and an entry point — precisely
- * what a first loader should target.
+ * natively." This is the loader half of that: it turns an
+ * untrusted PE image into a mapped, fixed-up, ring-3-ready
+ * address space.
  *
- * Scope (explicit):
+ * Handled:
  *
  *   - DOS stub header ("MZ") recognition + e_lfanew redirect.
- *   - NT Headers: PE\0\0 signature, FileHeader.Machine ==
- *     IMAGE_FILE_MACHINE_AMD64.
- *   - Optional Header (PE32+): ImageBase, AddressOfEntryPoint,
- *     SectionAlignment, FileAlignment, SizeOfImage,
- *     SizeOfHeaders.
- *   - Section Table: for each section, map SizeOfRawData bytes
- *     from file[PointerToRawData ..] into
- *     [ImageBase + VirtualAddress ..] with flags derived from
- *     IMAGE_SCN_MEM_{EXECUTE,READ,WRITE}.
+ *   - NT Headers: the four-byte "PE" + two NUL signature, and
+ *     FileHeader.Machine. PE32+
+ *     (AMD64) runs; PE32 (i386) parses and maps but its ring-3
+ *     entry is gated (PeStatus::Pe32ExecutionNotReady).
+ *   - Optional Header: ImageBase, AddressOfEntryPoint,
+ *     SectionAlignment, FileAlignment, SizeOfImage, SizeOfHeaders,
+ *     DllCharacteristics (per-image ASLR opt-in).
+ *   - Section Table: SizeOfRawData bytes copied from
+ *     file[PointerToRawData ..] to [load_base + VirtualAddress ..]
+ *     with flags derived from IMAGE_SCN_MEM_{EXECUTE,READ,WRITE},
+ *     W^X enforced.
+ *   - Base Relocations (directory 5) — the image is relocatable, so
+ *     spawn can apply an ASLR delta.
+ *   - Imports (directory 1) — every IAT slot bound against the
+ *     preloaded DLL export tables, the api-set contract table, and
+ *     the kernel thunk page.
+ *   - Delay-load imports (directory 13) — bound EAGERLY through the
+ *     same ladder, so the image's own __delayLoadHelper2 never
+ *     runs. See wiki/reference/Design-Decisions.md.
+ *   - TLS (directory 9) — .tls template copied per-thread,
+ *     TEB.ThreadLocalStoragePointer + _tls_index wired, and the
+ *     AddressOfCallBacks array invoked in ring 3 via a generated
+ *     trampoline before the entry point.
+ *   - Load Config (directory 10) — the /GS `__security_cookie` is
+ *     seeded per-image from the kernel RNG.
  *
- * Non-scope (v0 rejects these):
+ * Not handled:
  *
- *   - Import Directory with any descriptors — we require an
- *     empty IAT. Delay-load likewise.
- *   - Base Relocations — we require ImageBase to be usable
- *     verbatim. SizeOfImage must fit at ImageBase.
- *   - TLS, exception handlers, bound imports, COM descriptor.
- *   - Non-page-aligned SectionAlignment / FileAlignment — the
- *     build toolchain passes /align:4096 /filealign:4096 so
- *     every raw offset equals the RVA. A future slice will
- *     handle real filealign=0x200 PEs with cross-page copies.
+ *   - Bound imports (directory 11) and the delay-load bound IAT:
+ *     both are prebind caches, ignored in favour of a real bind.
+ *   - COM descriptor (directory 14) — no managed images.
+ *   - The VC6 absolute-VA delay-load descriptor form (dlattrRva
+ *     clear); those descriptors are skipped, not bound.
  *
- * Stack handling mirrors ElfLoad: one writable, NX ring-3 page
- * mapped at kV0StackVa (0x7FFFE000). v0 does not honour the
- * Optional Header's SizeOfStackReserve / SizeOfStackCommit.
+ * Stack handling honours the Optional Header: the image's
+ * SizeOfStackReserve / SizeOfStackCommit (both clamped) lay out a
+ * demand-grown reservation ending at core::kUserStackTopVa, of
+ * which only the top is committed at load. The #PF handler grows
+ * it a page at a time and a guard page below the reservation
+ * keeps a runaway fatal — see kernel/proc/user_stack.h.
  *
  * Context: kernel task. Safe from any caller that can hold the
  * AS creation lock.
@@ -63,41 +76,35 @@ namespace duetos::core
 enum class PeStatus : u8
 {
     Ok = 0,
-    TooSmall,                // Buffer can't hold a DOS stub.
-    BadDosMagic,             // First two bytes are not "MZ".
-    BadLfanewBounds,         // e_lfanew points past end-of-file.
-    BadNtSignature,          // Not "PE\0\0".
-    BadMachine,              // Not IMAGE_FILE_MACHINE_AMD64.
-    NotPe32Plus,             // OptionalHeader.Magic != 0x20B.
-    SectionAlignUnsup,       // SectionAlignment != 4096.
-    FileAlignUnsup,          // FileAlignment not a power-of-2 in [512, 4096].
-    SectionCountZero,        // No sections to load.
-    OptHeaderOutOfBounds,    // SizeOfOptionalHeader shorter than required.
-    SectionOutOfBounds,      // Section raw data extends past end-of-file.
-    ImportsPresent,          // Imports non-empty AND at least one unresolved stub.
-    RelocsNonEmpty,          // Base Reloc Directory is non-empty (v0 unsupported).
-    TlsPresent,              // TLS Directory is non-empty. Callback array may be
-                             // empty (MSVC's placeholder .tls section) or carry
-                             // actual process-startup callbacks. PeLoad tolerates
-                             // the former and rejects the latter via
-                             // `TlsCallbacksUnsupported` below.
-    TlsCallbacksUnsupported, // TLS Directory has >= 1 non-null callback VA in
-                             // its callbacks array. v0 does not execute them
-                             // (the ring-3 thunk that'd call each callback
-                             // before entry is a separate slice). Failing the
-                             // load beats silently skipping init a real
-                             // Windows PE's main() might depend on.
-    StubsPageAllocFail,      // Could not allocate the Win32 stubs page during load.
-    ImageBaseOutOfRange,     // ImageBase or ImageBase+SizeOfImage lands outside the canonical
-                             // user low half (>0x00007FFFFFFFFFFF). A malicious PE with a
-                             // kernel-half ImageBase would otherwise drive AddressSpaceMapUserPage
-                             // into PanicAs and DoS the kernel from any execve-style spawn path.
-    Pe32ExecutionNotReady,   // OptionalHeader.Magic == 0x10B (PE32 / i386). The image parses
-                             // and PeReport can walk it (diagnostic-load), but actual MapAndRun
-                             // is gated until the 32-bit user-CS, syscall-ABI, and i386 DLL
-                             // set land. Distinct from NotPe32Plus so callers can tell "rejected
-                             // because of format" (NotPe32Plus, malformed magic) apart from
-                             // "rejected because of policy" (this).
+    TooSmall,              // Buffer can't hold a DOS stub.
+    BadDosMagic,           // First two bytes are not "MZ".
+    BadLfanewBounds,       // e_lfanew points past end-of-file.
+    BadNtSignature,        // Not "PE\0\0".
+    BadMachine,            // Not IMAGE_FILE_MACHINE_AMD64.
+    NotPe32Plus,           // OptionalHeader.Magic != 0x20B.
+    SectionAlignUnsup,     // SectionAlignment != 4096.
+    FileAlignUnsup,        // FileAlignment not a power-of-2 in [512, 4096].
+    SectionCountZero,      // No sections to load.
+    OptHeaderOutOfBounds,  // SizeOfOptionalHeader shorter than required.
+    SectionOutOfBounds,    // Section raw data extends past end-of-file.
+    ImportsPresent,        // Imports non-empty AND at least one unresolved stub.
+    RelocsNonEmpty,        // Base Reloc Directory is non-empty (v0 unsupported).
+    TlsPresent,            // TLS Directory is non-empty. Not a reject reason:
+                           // PeLoad copies the .tls template, wires
+                           // TEB.ThreadLocalStoragePointer, writes _tls_index,
+                           // and runs AddressOfCallBacks through a generated
+                           // ring-3 trampoline before the entry point.
+    StubsPageAllocFail,    // Could not allocate the Win32 stubs page during load.
+    ImageBaseOutOfRange,   // ImageBase or ImageBase+SizeOfImage lands outside the canonical
+                           // user low half (>0x00007FFFFFFFFFFF). A malicious PE with a
+                           // kernel-half ImageBase would otherwise drive AddressSpaceMapUserPage
+                           // into PanicAs and DoS the kernel from any execve-style spawn path.
+    Pe32ExecutionNotReady, // OptionalHeader.Magic == 0x10B (PE32 / i386). The image parses
+                           // and PeReport can walk it (diagnostic-load), but actual MapAndRun
+                           // is gated until the 32-bit user-CS, syscall-ABI, and i386 DLL
+                           // set land. Distinct from NotPe32Plus so callers can tell "rejected
+                           // because of format" (NotPe32Plus, malformed magic) apart from
+                           // "rejected because of policy" (this).
 };
 
 const char* PeStatusName(PeStatus s);
@@ -170,6 +177,40 @@ void PeQuickSummaryTo(PeReportFn writer, const u8* file, u64 file_len);
 bool PeResolveImportsForLoadedImage(const u8* file, u64 file_len, duetos::mm::AddressSpace* as,
                                     const DllImage* preloaded_dlls, u64 preloaded_dll_count);
 
+/// True iff `dll_name` is a Windows API-set contract name —
+/// "api-ms-win-..." or "ext-ms-win-..." (case-insensitive). These
+/// are not real DLLs: they are name contracts whose implementation
+/// lives in one of the base DLLs the loader already preloads
+/// (kernel32 / kernelbase / ntdll / ...). mingw's import libs
+/// (e.g. -lsynchronization) emit imports against these contract
+/// names for modern APIs (WaitOnAddress, condition variables, ...),
+/// and Chrome links the same way.
+///
+/// Exposed because every code path that might otherwise go looking
+/// for a FILE by that name must not — no filesystem, here or on
+/// Windows, has one.
+bool IsApiSetContract(const char* dll_name);
+
+/// Callback for `PeEnumImportDlls`. `dll_name` is a bounds-checked
+/// pointer INTO the caller's file buffer (never null, always NUL
+/// terminated inside the buffer) and is only valid for the duration
+/// of the call. Return false to stop the walk early.
+using PeImportDllFn = bool (*)(const char* dll_name, void* ctx);
+
+/// Enumerate the DLL names in a PE's import directory without
+/// touching an address space. Every RVA is validated against
+/// `file_len` before it is dereferenced, so a hostile / truncated
+/// image stops the walk instead of reading out of bounds.
+///
+/// Returns the number of descriptors visited. A PE with no import
+/// directory returns 0 — that is not an error.
+///
+/// The side-by-side DLL resolver (`loader/sxs_dll.h`) uses this to
+/// learn WHICH DLLs an image wants before deciding what to read off
+/// the volume; the import binder itself still walks the directory
+/// again inside `ResolveImports`.
+u32 PeEnumImportDlls(const u8* file, u64 file_len, PeImportDllFn fn, void* ctx);
+
 struct PeLoadResult
 {
     bool ok;
@@ -184,8 +225,14 @@ struct PeLoadResult
                            // PE32 enters via EnterUserMode32 (compat mode,
                            // CS=0x3B), PE32+ via EnterUserModeWithGs.
     u64 entry_va;          // ImageBase + AddressOfEntryPoint
-    u64 stack_va;          // Lowest VA of the stack page.
-    u64 stack_top;         // rsp at ring-3 entry (stack_va + kPageSize).
+    u64 stack_va;          // Lowest COMMITTED VA of the ring-3 stack.
+    u64 stack_top;         // One-past-last byte of the reservation; rsp at
+                           // ring-3 entry is derived from it by the spawn path.
+    // Full reservation descriptor (top / reserve_lo / commit_lo /
+    // guard_lo). SpawnPeFile copies this onto the Process so the
+    // #PF handler can grow the stack on demand. See
+    // kernel/proc/user_stack.h.
+    UserStackRange stack;
     u64 image_base;
     u64 image_size;
     u64 teb_va; // VA of the per-task TEB page (0 if PE has no

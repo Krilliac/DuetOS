@@ -10,9 +10,16 @@
  *   LoadStringW / LoadStringA (user32)
  *   EnumResourceTypesW (skipped — callback)
  *
- * DuetOS PEs don't carry .rsrc sections yet, so most of these
- * return NULL today. Smoke value = "doesn't trap on missing
- * resource".
+ * This image deliberately carries NO .rsrc, so it is the negative
+ * half of the resource surface: every lookup must miss cleanly and
+ * nothing must trap. The positive half — real strings and binary
+ * resources out of a windres-built .rsrc — is userland/apps/rsrc_pe.
+ *
+ * Note the LoadStringW(missing) check was silently FAILING before the
+ * .rsrc parser landed (2026-07-28): user32's LoadStringW used to
+ * return a fixed "DuetOS" placeholder for every id, so it answered 6
+ * where this asserts 0. Nobody saw it because this row is BareMetal-
+ * gated and never runs under QEMU CI.
  */
 #include <windows.h>
 
