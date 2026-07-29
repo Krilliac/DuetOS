@@ -1119,31 +1119,33 @@ void DeliverSegment(u32 idx, const MacAddress& peer_mac, Ipv4Address peer_ip, co
         }
     }
 
-    // ECN data plane (RFC 3168 §6.1.2–§6.1.5) — synchronized states
-    // only. SYN-carrying segments use ECE/CWR as negotiation, not
-    // congestion feedback, and were handled above.
-    if (t.ecn_ok && (flags & kFlagSyn) == 0)
-    {
-        // §6.1.3: an IP-layer CE mark obliges us to echo ECE on every
-        // outgoing ACK until the peer's CWR confirms it reacted.
-        if (ip_ce)
-            t.peer_ce_pending = true;
-        // §6.1.5: the peer's CWR retires our ECE obligation.
-        if ((flags & kFlagCwr) != 0)
-            t.peer_ce_pending = false;
-        // §6.1.2: inbound ECE is a congestion signal — same CA
-        // reduction as loss, no retransmit, at most once per window
-        // (gated inside EcnOnEce).
-        if ((flags & kFlagEce) != 0)
-            (void)EcnOnEce(t);
-    }
-
     // ESTABLISHED / FIN_WAIT_1 / FIN_WAIT_2 / CLOSE_WAIT / CLOSING /
     // LAST_ACK / TIME_WAIT: process ACK + data + FIN.
     if ((flags & kFlagAck) != 0)
     {
         if (AckInWindow(ack, t.snd_una, t.snd_nxt))
         {
+            // ECN data plane (RFC 3168 §6.1.2-§6.1.5) — synchronized
+            // states only, AFTER segment acceptability (ACK in window).
+            // Processing ECN before the acceptability gate let a single
+            // spoofed ECE/CE segment in the 4-tuple repeatedly collapse
+            // cwnd — a throughput-DoS with no memory-safety impact.
+            if (t.ecn_ok && (flags & kFlagSyn) == 0)
+            {
+                // §6.1.3: an IP-layer CE mark obliges us to echo ECE on
+                // every outgoing ACK until the peer's CWR confirms it
+                // reacted.
+                if (ip_ce)
+                    t.peer_ce_pending = true;
+                // §6.1.5: the peer's CWR retires our ECE obligation.
+                if ((flags & kFlagCwr) != 0)
+                    t.peer_ce_pending = false;
+                // §6.1.2: inbound ECE is a congestion signal — same CA
+                // reduction as loss, no retransmit, at most once per
+                // window (gated inside EcnOnEce).
+                if ((flags & kFlagEce) != 0)
+                    (void)EcnOnEce(t);
+            }
             if (ack == t.snd_una && payload_len == 0 && t.rtx_count > 0)
             {
                 // Duplicate ACK — accumulate; on third dup, enter fast
