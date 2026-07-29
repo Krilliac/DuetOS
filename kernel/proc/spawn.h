@@ -77,6 +77,30 @@ struct CapSet;
 namespace duetos::core
 {
 
+/// A single entry in the kernel's embedded DLL preload table.
+/// Each Win32-imports PE gets these DLLs pre-loaded into its
+/// address space before PeLoad runs so ResolveImports can walk
+/// their EATs. The same table drives ramfs `/lib/` population
+/// so runtime LoadLibrary can find every shipped DLL by name.
+struct PreloadEntry
+{
+    const char* name; // DLL filename (e.g. "kernel32.dll")
+    const u8* data;   // kernel direct-map pointer to the blob
+    u64 size;         // blob size in bytes
+    bool essential;   // false = skip under IsEmulator() to trim
+                      //         the per-PE preload chain on CI
+};
+
+/// PE64 preload table -- the authoritative list of DLLs the
+/// kernel embeds for 64-bit Win32 PEs. Also iterated by ramfs
+/// to populate `/lib/` at boot so runtime LoadLibrary finds them.
+extern const PreloadEntry kPreloadTable[];
+extern const u64 kPreloadTableCount;
+
+/// PE32 preload table -- 32-bit companion DLLs for i386 PEs.
+extern const PreloadEntry kPreloadTablePe32[];
+extern const u64 kPreloadTablePe32Count;
+
 /// Kernel-side entry trampoline for every ring-3 task created
 /// via `sched::SchedCreateUser`. Runs in ring 0 on a fresh
 /// kernel stack with the task's own AS already loaded in CR3.

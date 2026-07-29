@@ -457,6 +457,216 @@ u64 SpawnElfLinux(const char* name, const u8* elf_bytes, u64 elf_len, CapSet cap
     return proc->pid;
 }
 
+
+// PE64 preload table -- the authoritative list of DLLs every 64-bit
+// Win32-imports PE gets pre-loaded into its AS. Adding a new DLL is
+// a one-line append once the blob is embedded via CMake. Exposed via
+// spawn.h so ramfs /lib/ population stays in sync automatically.
+const PreloadEntry kPreloadTable[] = {
+    // customdll{,2}.dll — fixtures for ring3-customdll-test,
+    // which is itself gated under !emulator. Skip the preload
+    // when the consumer isn't going to spawn.
+    {"customdll.dll", fs::generated::kBinCustomDllBytes, fs::generated::kBinCustomDllBytes_len,
+     /*essential=*/false},
+    {"customdll2.dll", fs::generated::kBinCustomDll2Bytes, fs::generated::kBinCustomDll2Bytes_len,
+     /*essential=*/false},
+    // kernel32.dll — 32 exports covering process/thread
+    // identity, pseudo-handles, last-error, terminators,
+    // safe-ignore shims, GetStdHandle, Sleep /
+    // SwitchToThread / GetTickCount(64), and the full
+    // Interlocked* family (32 + 64-bit). The via-DLL path in
+    // ResolveImports matches kernel32.dll BEFORE falling
+    // through to the hand-assembled stubs page. Stubs stay
+    // as dead-code fallback; sweep later.
+    {"kernel32.dll", fs::generated::kBinKernel32DllBytes, fs::generated::kBinKernel32DllBytes_len,
+     /*essential=*/true},
+    // vcruntime140.dll — memset / memcpy / memmove. Every
+    // MSVC-built PE calls these for struct copy / zero-init
+    // / CRT startup. The via-DLL path now fires for each.
+    {"vcruntime140.dll", fs::generated::kBinVcruntime140DllBytes, fs::generated::kBinVcruntime140DllBytes_len,
+     /*essential=*/true},
+    // msvcrt.dll — string intrinsics
+    // (strlen / strcmp / strcpy / strchr + wide variants).
+    // Retires the corresponding flat stubs.
+    {"msvcrt.dll", fs::generated::kBinMsvcrtDllBytes, fs::generated::kBinMsvcrtDllBytes_len,
+     /*essential=*/true},
+    // ucrtbase.dll — UCRT runtime: heap
+    // (malloc/free/calloc/realloc/_aligned_*), terminators
+    // (exit/_exit), CRT startup shims (_initterm,
+    // _set_app_type, ...), string intrinsics. Retires the
+    // corresponding flat stubs.
+    {"ucrtbase.dll", fs::generated::kBinUcrtbaseDllBytes, fs::generated::kBinUcrtbaseDllBytes_len,
+     /*essential=*/true},
+    // ntdll.dll — Nt* / Zw* / Rtl* / Ldr* / __chkstk.
+    // 108 exports. Retires the prior ntdll flat stubs.
+    // Zw* are same-DLL forwarders to Nt*;
+    // STATUS_NOT_IMPLEMENTED aliases centralise on
+    // NtReturnNotImpl.
+    {"ntdll.dll", fs::generated::kBinNtdllDllBytes, fs::generated::kBinNtdllDllBytes_len,
+     /*essential=*/true},
+    // dbghelp.dll — 11 Sym* / StackWalk / MiniDumpWriteDump
+    // no-ops. Callers check returns; v0 has no PDB parser
+    // or stack walker.
+    {"dbghelp.dll", fs::generated::kBinDbghelpDllBytes, fs::generated::kBinDbghelpDllBytes_len,
+     /*essential=*/true},
+    // msvcp140.dll — 17 C++ std:: throw helpers + ostream
+    // stubs via mangled-name .def aliases. Throw paths
+    // terminate with SYS_EXIT(3).
+    {"msvcp140.dll", fs::generated::kBinMsvcp140DllBytes, fs::generated::kBinMsvcp140DllBytes_len,
+     /*essential=*/true},
+    // kernelbase.dll — pure forwarders to kernel32.dll
+    // (44 entries). Resolved at IAT-patch time via the
+    // forwarder chaser.
+    {"kernelbase.dll", fs::generated::kBinKernelbaseDllBytes, fs::generated::kBinKernelbaseDllBytes_len,
+     /*essential=*/true},
+    // advapi32.dll — Reg* (not-found),
+    // token/privilege (success), GetUserName* (constant),
+    // SystemFunction036 (deterministic RNG). 25 exports.
+    {"advapi32.dll", fs::generated::kBinAdvapi32DllBytes, fs::generated::kBinAdvapi32DllBytes_len,
+     /*essential=*/true},
+    // Small stub DLLs for misc support surface. Most
+    // return "not found" / success sentinels;
+    // CoTaskMem* + SysAllocString alias the process heap.
+    {"shlwapi.dll", fs::generated::kBinShlwapiDllBytes, fs::generated::kBinShlwapiDllBytes_len,
+     /*essential=*/true},
+    {"shell32.dll", fs::generated::kBinShell32DllBytes, fs::generated::kBinShell32DllBytes_len,
+     /*essential=*/true},
+    {"ole32.dll", fs::generated::kBinOle32DllBytes, fs::generated::kBinOle32DllBytes_len,
+     /*essential=*/true},
+    {"oleaut32.dll", fs::generated::kBinOleaut32DllBytes, fs::generated::kBinOleaut32DllBytes_len,
+     /*essential=*/false},
+    // winmm.dll — perf-counter / GetTickCount routes for
+    // hello-winapi's [perf-counter] required-signature line.
+    {"winmm.dll", fs::generated::kBinWinmmDllBytes, fs::generated::kBinWinmmDllBytes_len,
+     /*essential=*/true},
+    {"bcrypt.dll", fs::generated::kBinBcryptDllBytes, fs::generated::kBinBcryptDllBytes_len,
+     /*essential=*/true},
+    {"psapi.dll", fs::generated::kBinPsapiDllBytes, fs::generated::kBinPsapiDllBytes_len,
+     /*essential=*/true},
+    // DirectX v0 — d3d9/d3d11/d3d12/dxgi all carry real
+    // COM-vtable implementations of the Clear-and-Present
+    // pipeline (see userland/libs/d3d*/). Marked essential so
+    // the d3d{9,11,12}_smoke + dxgi_smoke PEs find their
+    // exports under the emulator preload trim. SYS_GFX_TRACE
+    // counters tick from inside each Present.
+    {"d3d9.dll", fs::generated::kBinD3d9DllBytes, fs::generated::kBinD3d9DllBytes_len,
+     /*essential=*/true},
+    {"d3d11.dll", fs::generated::kBinD3d11DllBytes, fs::generated::kBinD3d11DllBytes_len,
+     /*essential=*/true},
+    {"d3d12.dll", fs::generated::kBinD3d12DllBytes, fs::generated::kBinD3d12DllBytes_len,
+     /*essential=*/true},
+    {"dxgi.dll", fs::generated::kBinDxgiDllBytes, fs::generated::kBinDxgiDllBytes_len,
+     /*essential=*/true},
+    {"d3dcompiler.dll", fs::generated::kBinD3dcompilerDllBytes, fs::generated::kBinD3dcompilerDllBytes_len,
+     /*essential=*/false},
+    // vulkan-1.dll — Win32 PE library that any Vulkan-using
+    // game / app imports. Thunks to the in-kernel ICD via
+    // SYS_VK_CALL (syscall 211). v0 only covers the lifecycle
+    // subset; binders that need buffer / image / submit will
+    // see VK_ERROR_INITIALIZATION_FAILED until the follow-on
+    // slice extends the op-code dispatch. Marked non-
+    // essential — most boots don't spawn a Vulkan PE.
+    {"vulkan-1.dll", fs::generated::kBinVulkan_1DllBytes, fs::generated::kBinVulkan_1DllBytes_len,
+     /*essential=*/false},
+    {"user32.dll", fs::generated::kBinUser32DllBytes, fs::generated::kBinUser32DllBytes_len,
+     /*essential=*/true},
+    {"gdi32.dll", fs::generated::kBinGdi32DllBytes, fs::generated::kBinGdi32DllBytes_len,
+     /*essential=*/true},
+    // Networking / crypto / common UI / version / setup.
+    // ws2_32 is essential because mini_browser.exe imports it
+    // and we exercise WSAStartup / gethostbyname / socket /
+    // connect / send / recv / closesocket / WSACleanup as a
+    // live HTTP probe to www.google.com.
+    {"ws2_32.dll", fs::generated::kBinWs2_32DllBytes, fs::generated::kBinWs2_32DllBytes_len,
+     /*essential=*/true},
+    {"wininet.dll", fs::generated::kBinWininetDllBytes, fs::generated::kBinWininetDllBytes_len,
+     /*essential=*/true},
+    {"winhttp.dll", fs::generated::kBinWinhttpDllBytes, fs::generated::kBinWinhttpDllBytes_len,
+     /*essential=*/true},
+    {"crypt32.dll", fs::generated::kBinCrypt32DllBytes, fs::generated::kBinCrypt32DllBytes_len,
+     /*essential=*/false},
+    {"comctl32.dll", fs::generated::kBinComctl32DllBytes, fs::generated::kBinComctl32DllBytes_len,
+     /*essential=*/false},
+    {"comdlg32.dll", fs::generated::kBinComdlg32DllBytes, fs::generated::kBinComdlg32DllBytes_len,
+     /*essential=*/false},
+    {"version.dll", fs::generated::kBinVersionDllBytes, fs::generated::kBinVersionDllBytes_len,
+     /*essential=*/true},
+    {"setupapi.dll", fs::generated::kBinSetupapiDllBytes, fs::generated::kBinSetupapiDllBytes_len,
+     /*essential=*/true},
+    // Six more support DLLs — IP helper, user env,
+    // terminal services, DWM, theming, SSPI.
+    {"iphlpapi.dll", fs::generated::kBinIphlpapiDllBytes, fs::generated::kBinIphlpapiDllBytes_len,
+     /*essential=*/true},
+    {"userenv.dll", fs::generated::kBinUserenvDllBytes, fs::generated::kBinUserenvDllBytes_len,
+     /*essential=*/true},
+    {"wtsapi32.dll", fs::generated::kBinWtsapi32DllBytes, fs::generated::kBinWtsapi32DllBytes_len,
+     /*essential=*/true},
+    {"dwmapi.dll", fs::generated::kBinDwmapiDllBytes, fs::generated::kBinDwmapiDllBytes_len,
+     /*essential=*/true},
+    {"uxtheme.dll", fs::generated::kBinUxthemeDllBytes, fs::generated::kBinUxthemeDllBytes_len,
+     /*essential=*/true},
+    {"secur32.dll", fs::generated::kBinSecur32DllBytes, fs::generated::kBinSecur32DllBytes_len,
+     /*essential=*/false},
+    // DirectX peripheral DLLs v0 — input/audio/2D-blit/Direct2D/
+    // DirectWrite. Marked essential so the matching smoke PEs find
+    // their exports under the emulator preload trim.
+    {"dinput8.dll", fs::generated::kBinDinput8DllBytes, fs::generated::kBinDinput8DllBytes_len,
+     /*essential=*/true},
+    {"xinput1_4.dll", fs::generated::kBinXinput1_4DllBytes, fs::generated::kBinXinput1_4DllBytes_len,
+     /*essential=*/true},
+    {"xaudio2_8.dll", fs::generated::kBinXaudio2_8DllBytes, fs::generated::kBinXaudio2_8DllBytes_len,
+     /*essential=*/true},
+    {"dsound.dll", fs::generated::kBinDsoundDllBytes, fs::generated::kBinDsoundDllBytes_len,
+     /*essential=*/true},
+    {"ddraw.dll", fs::generated::kBinDdrawDllBytes, fs::generated::kBinDdrawDllBytes_len,
+     /*essential=*/true},
+    {"d2d1.dll", fs::generated::kBinD2d1DllBytes, fs::generated::kBinD2d1DllBytes_len,
+     /*essential=*/true},
+    {"dwrite.dll", fs::generated::kBinDwriteDllBytes, fs::generated::kBinDwriteDllBytes_len,
+     /*essential=*/true},
+};
+const u64 kPreloadTableCount = sizeof(kPreloadTable) / sizeof(kPreloadTable[0]);
+
+// 32-bit (PE32) preload set — 13 companion DLLs, each mapped at
+// the same ImageBase it was built with (low 4 GiB). kernel32,
+// msvcrt, user32 and gdi32 carry real implementations; the rest
+// are still safe-ignore stubs. Grows as PE32 callers need more.
+const PreloadEntry kPreloadTablePe32[] = {
+    {"kernel32.dll", fs::generated::kBinKernel32_32DllBytes, fs::generated::kBinKernel32_32DllBytes_len,
+     /*essential=*/true},
+    {"msvcrt.dll", fs::generated::kBinMsvcrt_32DllBytes, fs::generated::kBinMsvcrt_32DllBytes_len,
+     /*essential=*/true},
+    {"user32.dll", fs::generated::kBinUser32_32DllBytes, fs::generated::kBinUser32_32DllBytes_len,
+     /*essential=*/true},
+    {"gdi32.dll", fs::generated::kBinGdi32_32DllBytes, fs::generated::kBinGdi32_32DllBytes_len,
+     /*essential=*/true},
+    /* All PE32 stubs marked essential — they're each ~2-3 KiB
+     * and DllLoad is microseconds. Skipping any of them under
+     * emulator would leave the PE32 IAT walker falling back to
+     * the (unmapped-for-PE32) Win32 thunks catch-all on every
+     * unresolved import, defeating the whole point of the
+     * 32-bit DLL set. */
+    {"advapi32.dll", fs::generated::kBinAdvapi32_32DllBytes, fs::generated::kBinAdvapi32_32DllBytes_len,
+     /*essential=*/true},
+    {"comctl32.dll", fs::generated::kBinComctl32_32DllBytes, fs::generated::kBinComctl32_32DllBytes_len,
+     /*essential=*/true},
+    {"comdlg32.dll", fs::generated::kBinComdlg32_32DllBytes, fs::generated::kBinComdlg32_32DllBytes_len,
+     /*essential=*/true},
+    {"crypt32.dll", fs::generated::kBinCrypt32_32DllBytes, fs::generated::kBinCrypt32_32DllBytes_len,
+     /*essential=*/true},
+    {"iphlpapi.dll", fs::generated::kBinIphlpapi_32DllBytes, fs::generated::kBinIphlpapi_32DllBytes_len,
+     /*essential=*/true},
+    {"shell32.dll", fs::generated::kBinShell32_32DllBytes, fs::generated::kBinShell32_32DllBytes_len,
+     /*essential=*/true},
+    {"shlwapi.dll", fs::generated::kBinShlwapi_32DllBytes, fs::generated::kBinShlwapi_32DllBytes_len,
+     /*essential=*/true},
+    {"ws2_32.dll", fs::generated::kBinWs2_32_32DllBytes, fs::generated::kBinWs2_32_32DllBytes_len,
+     /*essential=*/true},
+    {"bcrypt.dll", fs::generated::kBinBcrypt_32DllBytes, fs::generated::kBinBcrypt_32DllBytes_len,
+     /*essential=*/true},
+};
+const u64 kPreloadTablePe32Count = sizeof(kPreloadTablePe32) / sizeof(kPreloadTablePe32[0]);
+
 // PE twin of SpawnElfFile. Parses a PE/COFF image with the
 // v0 loader, maps its sections + a stack page into a fresh
 // AddressSpace, and enqueues a ring-3 task to enter it. The
@@ -619,238 +829,12 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     // CMake. `kPreloadSlotCap` caps the stack-local array size;
     // bump if the list grows past it.
     constexpr u64 kPreloadSlotCap = 56;
-    struct PreloadDllEntry
-    {
-        const char* label; // diagnostic name for boot-log
-        const u8* bytes;   // kernel direct-map pointer to the blob
-        u64 len;           // blob size in bytes
-        bool essential;    // false = skip under arch::IsEmulator() to
-                           //         keep the per-PE preload chain
-                           //         short on CI (each DllLoad is a
-                           //         page alloc + PE parse + EAT walk;
-                           //         under TCG/oversubscribed-KVM that
-                           //         compounds to seconds of guest
-                           //         time per PE × 2 Win32 PEs left
-                           //         in the post-trim emulator path).
-                           //         "essential" = the 3 essential
-                           //         PEs (hello-pe, hello-winapi,
-                           //         winkill) actually walk one of
-                           //         this DLL's exports during their
-                           //         imported-function chain.
-    };
-    // `static` so the array lives in .rodata and the
-    // initializer doesn't compile to a runtime memcpy from a
-    // template — the kernel doesn't link libc.
-    static const PreloadDllEntry preload_set[] = {
-        // customdll{,2}.dll — fixtures for ring3-customdll-test,
-        // which is itself gated under !emulator. Skip the preload
-        // when the consumer isn't going to spawn.
-        {"customdll.dll", fs::generated::kBinCustomDllBytes, fs::generated::kBinCustomDllBytes_len,
-         /*essential=*/false},
-        {"customdll2.dll", fs::generated::kBinCustomDll2Bytes, fs::generated::kBinCustomDll2Bytes_len,
-         /*essential=*/false},
-        // kernel32.dll — 32 exports covering process/thread
-        // identity, pseudo-handles, last-error, terminators,
-        // safe-ignore shims, GetStdHandle, Sleep /
-        // SwitchToThread / GetTickCount(64), and the full
-        // Interlocked* family (32 + 64-bit). The via-DLL path in
-        // ResolveImports matches kernel32.dll BEFORE falling
-        // through to the hand-assembled stubs page. Stubs stay
-        // as dead-code fallback; sweep later.
-        {"kernel32.dll", fs::generated::kBinKernel32DllBytes, fs::generated::kBinKernel32DllBytes_len,
-         /*essential=*/true},
-        // vcruntime140.dll — memset / memcpy / memmove. Every
-        // MSVC-built PE calls these for struct copy / zero-init
-        // / CRT startup. The via-DLL path now fires for each.
-        {"vcruntime140.dll", fs::generated::kBinVcruntime140DllBytes, fs::generated::kBinVcruntime140DllBytes_len,
-         /*essential=*/true},
-        // msvcrt.dll — string intrinsics
-        // (strlen / strcmp / strcpy / strchr + wide variants).
-        // Retires the corresponding flat stubs.
-        {"msvcrt.dll", fs::generated::kBinMsvcrtDllBytes, fs::generated::kBinMsvcrtDllBytes_len,
-         /*essential=*/true},
-        // ucrtbase.dll — UCRT runtime: heap
-        // (malloc/free/calloc/realloc/_aligned_*), terminators
-        // (exit/_exit), CRT startup shims (_initterm,
-        // _set_app_type, ...), string intrinsics. Retires the
-        // corresponding flat stubs.
-        {"ucrtbase.dll", fs::generated::kBinUcrtbaseDllBytes, fs::generated::kBinUcrtbaseDllBytes_len,
-         /*essential=*/true},
-        // ntdll.dll — Nt* / Zw* / Rtl* / Ldr* / __chkstk.
-        // 108 exports. Retires the prior ntdll flat stubs.
-        // Zw* are same-DLL forwarders to Nt*;
-        // STATUS_NOT_IMPLEMENTED aliases centralise on
-        // NtReturnNotImpl.
-        {"ntdll.dll", fs::generated::kBinNtdllDllBytes, fs::generated::kBinNtdllDllBytes_len,
-         /*essential=*/true},
-        // dbghelp.dll — 11 Sym* / StackWalk / MiniDumpWriteDump
-        // no-ops. Callers check returns; v0 has no PDB parser
-        // or stack walker.
-        {"dbghelp.dll", fs::generated::kBinDbghelpDllBytes, fs::generated::kBinDbghelpDllBytes_len,
-         /*essential=*/true},
-        // msvcp140.dll — 17 C++ std:: throw helpers + ostream
-        // stubs via mangled-name .def aliases. Throw paths
-        // terminate with SYS_EXIT(3).
-        {"msvcp140.dll", fs::generated::kBinMsvcp140DllBytes, fs::generated::kBinMsvcp140DllBytes_len,
-         /*essential=*/true},
-        // kernelbase.dll — pure forwarders to kernel32.dll
-        // (44 entries). Resolved at IAT-patch time via the
-        // forwarder chaser.
-        {"kernelbase.dll", fs::generated::kBinKernelbaseDllBytes, fs::generated::kBinKernelbaseDllBytes_len,
-         /*essential=*/true},
-        // advapi32.dll — Reg* (not-found),
-        // token/privilege (success), GetUserName* (constant),
-        // SystemFunction036 (deterministic RNG). 25 exports.
-        {"advapi32.dll", fs::generated::kBinAdvapi32DllBytes, fs::generated::kBinAdvapi32DllBytes_len,
-         /*essential=*/true},
-        // Small stub DLLs for misc support surface. Most
-        // return "not found" / success sentinels;
-        // CoTaskMem* + SysAllocString alias the process heap.
-        {"shlwapi.dll", fs::generated::kBinShlwapiDllBytes, fs::generated::kBinShlwapiDllBytes_len,
-         /*essential=*/true},
-        {"shell32.dll", fs::generated::kBinShell32DllBytes, fs::generated::kBinShell32DllBytes_len,
-         /*essential=*/true},
-        {"ole32.dll", fs::generated::kBinOle32DllBytes, fs::generated::kBinOle32DllBytes_len,
-         /*essential=*/true},
-        {"oleaut32.dll", fs::generated::kBinOleaut32DllBytes, fs::generated::kBinOleaut32DllBytes_len,
-         /*essential=*/false},
-        // winmm.dll — perf-counter / GetTickCount routes for
-        // hello-winapi's [perf-counter] required-signature line.
-        {"winmm.dll", fs::generated::kBinWinmmDllBytes, fs::generated::kBinWinmmDllBytes_len,
-         /*essential=*/true},
-        {"bcrypt.dll", fs::generated::kBinBcryptDllBytes, fs::generated::kBinBcryptDllBytes_len,
-         /*essential=*/true},
-        {"psapi.dll", fs::generated::kBinPsapiDllBytes, fs::generated::kBinPsapiDllBytes_len,
-         /*essential=*/true},
-        // DirectX v0 — d3d9/d3d11/d3d12/dxgi all carry real
-        // COM-vtable implementations of the Clear-and-Present
-        // pipeline (see userland/libs/d3d*/). Marked essential so
-        // the d3d{9,11,12}_smoke + dxgi_smoke PEs find their
-        // exports under the emulator preload trim. SYS_GFX_TRACE
-        // counters tick from inside each Present.
-        {"d3d9.dll", fs::generated::kBinD3d9DllBytes, fs::generated::kBinD3d9DllBytes_len,
-         /*essential=*/true},
-        {"d3d11.dll", fs::generated::kBinD3d11DllBytes, fs::generated::kBinD3d11DllBytes_len,
-         /*essential=*/true},
-        {"d3d12.dll", fs::generated::kBinD3d12DllBytes, fs::generated::kBinD3d12DllBytes_len,
-         /*essential=*/true},
-        {"dxgi.dll", fs::generated::kBinDxgiDllBytes, fs::generated::kBinDxgiDllBytes_len,
-         /*essential=*/true},
-        {"d3dcompiler.dll", fs::generated::kBinD3dcompilerDllBytes, fs::generated::kBinD3dcompilerDllBytes_len,
-         /*essential=*/false},
-        // vulkan-1.dll — Win32 PE library that any Vulkan-using
-        // game / app imports. Thunks to the in-kernel ICD via
-        // SYS_VK_CALL (syscall 211). v0 only covers the lifecycle
-        // subset; binders that need buffer / image / submit will
-        // see VK_ERROR_INITIALIZATION_FAILED until the follow-on
-        // slice extends the op-code dispatch. Marked non-
-        // essential — most boots don't spawn a Vulkan PE.
-        {"vulkan-1.dll", fs::generated::kBinVulkan_1DllBytes, fs::generated::kBinVulkan_1DllBytes_len,
-         /*essential=*/false},
-        {"user32.dll", fs::generated::kBinUser32DllBytes, fs::generated::kBinUser32DllBytes_len,
-         /*essential=*/true},
-        {"gdi32.dll", fs::generated::kBinGdi32DllBytes, fs::generated::kBinGdi32DllBytes_len,
-         /*essential=*/true},
-        // Networking / crypto / common UI / version / setup.
-        // ws2_32 is essential because mini_browser.exe imports it
-        // and we exercise WSAStartup / gethostbyname / socket /
-        // connect / send / recv / closesocket / WSACleanup as a
-        // live HTTP probe to www.google.com.
-        {"ws2_32.dll", fs::generated::kBinWs2_32DllBytes, fs::generated::kBinWs2_32DllBytes_len,
-         /*essential=*/true},
-        {"wininet.dll", fs::generated::kBinWininetDllBytes, fs::generated::kBinWininetDllBytes_len,
-         /*essential=*/true},
-        {"winhttp.dll", fs::generated::kBinWinhttpDllBytes, fs::generated::kBinWinhttpDllBytes_len,
-         /*essential=*/true},
-        {"crypt32.dll", fs::generated::kBinCrypt32DllBytes, fs::generated::kBinCrypt32DllBytes_len,
-         /*essential=*/false},
-        {"comctl32.dll", fs::generated::kBinComctl32DllBytes, fs::generated::kBinComctl32DllBytes_len,
-         /*essential=*/false},
-        {"comdlg32.dll", fs::generated::kBinComdlg32DllBytes, fs::generated::kBinComdlg32DllBytes_len,
-         /*essential=*/false},
-        {"version.dll", fs::generated::kBinVersionDllBytes, fs::generated::kBinVersionDllBytes_len,
-         /*essential=*/true},
-        {"setupapi.dll", fs::generated::kBinSetupapiDllBytes, fs::generated::kBinSetupapiDllBytes_len,
-         /*essential=*/true},
-        // Six more support DLLs — IP helper, user env,
-        // terminal services, DWM, theming, SSPI.
-        {"iphlpapi.dll", fs::generated::kBinIphlpapiDllBytes, fs::generated::kBinIphlpapiDllBytes_len,
-         /*essential=*/true},
-        {"userenv.dll", fs::generated::kBinUserenvDllBytes, fs::generated::kBinUserenvDllBytes_len,
-         /*essential=*/true},
-        {"wtsapi32.dll", fs::generated::kBinWtsapi32DllBytes, fs::generated::kBinWtsapi32DllBytes_len,
-         /*essential=*/true},
-        {"dwmapi.dll", fs::generated::kBinDwmapiDllBytes, fs::generated::kBinDwmapiDllBytes_len,
-         /*essential=*/true},
-        {"uxtheme.dll", fs::generated::kBinUxthemeDllBytes, fs::generated::kBinUxthemeDllBytes_len,
-         /*essential=*/true},
-        {"secur32.dll", fs::generated::kBinSecur32DllBytes, fs::generated::kBinSecur32DllBytes_len,
-         /*essential=*/false},
-        // DirectX peripheral DLLs v0 — input/audio/2D-blit/Direct2D/
-        // DirectWrite. Marked essential so the matching smoke PEs find
-        // their exports under the emulator preload trim.
-        {"dinput8.dll", fs::generated::kBinDinput8DllBytes, fs::generated::kBinDinput8DllBytes_len,
-         /*essential=*/true},
-        {"xinput1_4.dll", fs::generated::kBinXinput1_4DllBytes, fs::generated::kBinXinput1_4DllBytes_len,
-         /*essential=*/true},
-        {"xaudio2_8.dll", fs::generated::kBinXaudio2_8DllBytes, fs::generated::kBinXaudio2_8DllBytes_len,
-         /*essential=*/true},
-        {"dsound.dll", fs::generated::kBinDsoundDllBytes, fs::generated::kBinDsoundDllBytes_len,
-         /*essential=*/true},
-        {"ddraw.dll", fs::generated::kBinDdrawDllBytes, fs::generated::kBinDdrawDllBytes_len,
-         /*essential=*/true},
-        {"d2d1.dll", fs::generated::kBinD2d1DllBytes, fs::generated::kBinD2d1DllBytes_len,
-         /*essential=*/true},
-        {"dwrite.dll", fs::generated::kBinDwriteDllBytes, fs::generated::kBinDwriteDllBytes_len,
-         /*essential=*/true},
-    };
-    constexpr u64 kPreloadEntryCount = sizeof(preload_set) / sizeof(preload_set[0]);
-    static_assert(kPreloadEntryCount <= kPreloadSlotCap, "Preload DLL list exceeds stack-local cap");
-
-    // 32-bit (PE32) preload set — 13 companion DLLs, each mapped at
-    // the same ImageBase it was built with (low 4 GiB). kernel32,
-    // msvcrt, user32 and gdi32 carry real implementations; the rest
-    // are still safe-ignore stubs. Grows as PE32 callers need more.
-    static const PreloadDllEntry preload_set_pe32[] = {
-        {"kernel32.dll", fs::generated::kBinKernel32_32DllBytes, fs::generated::kBinKernel32_32DllBytes_len,
-         /*essential=*/true},
-        {"msvcrt.dll", fs::generated::kBinMsvcrt_32DllBytes, fs::generated::kBinMsvcrt_32DllBytes_len,
-         /*essential=*/true},
-        {"user32.dll", fs::generated::kBinUser32_32DllBytes, fs::generated::kBinUser32_32DllBytes_len,
-         /*essential=*/true},
-        {"gdi32.dll", fs::generated::kBinGdi32_32DllBytes, fs::generated::kBinGdi32_32DllBytes_len,
-         /*essential=*/true},
-        /* All PE32 stubs marked essential — they're each ~2-3 KiB
-         * and DllLoad is microseconds. Skipping any of them under
-         * emulator would leave the PE32 IAT walker falling back to
-         * the (unmapped-for-PE32) Win32 thunks catch-all on every
-         * unresolved import, defeating the whole point of the
-         * 32-bit DLL set. */
-        {"advapi32.dll", fs::generated::kBinAdvapi32_32DllBytes, fs::generated::kBinAdvapi32_32DllBytes_len,
-         /*essential=*/true},
-        {"comctl32.dll", fs::generated::kBinComctl32_32DllBytes, fs::generated::kBinComctl32_32DllBytes_len,
-         /*essential=*/true},
-        {"comdlg32.dll", fs::generated::kBinComdlg32_32DllBytes, fs::generated::kBinComdlg32_32DllBytes_len,
-         /*essential=*/true},
-        {"crypt32.dll", fs::generated::kBinCrypt32_32DllBytes, fs::generated::kBinCrypt32_32DllBytes_len,
-         /*essential=*/true},
-        {"iphlpapi.dll", fs::generated::kBinIphlpapi_32DllBytes, fs::generated::kBinIphlpapi_32DllBytes_len,
-         /*essential=*/true},
-        {"shell32.dll", fs::generated::kBinShell32_32DllBytes, fs::generated::kBinShell32_32DllBytes_len,
-         /*essential=*/true},
-        {"shlwapi.dll", fs::generated::kBinShlwapi_32DllBytes, fs::generated::kBinShlwapi_32DllBytes_len,
-         /*essential=*/true},
-        {"ws2_32.dll", fs::generated::kBinWs2_32_32DllBytes, fs::generated::kBinWs2_32_32DllBytes_len,
-         /*essential=*/true},
-        {"bcrypt.dll", fs::generated::kBinBcrypt_32DllBytes, fs::generated::kBinBcrypt_32DllBytes_len,
-         /*essential=*/true},
-    };
-    constexpr u64 kPreloadPe32EntryCount = sizeof(preload_set_pe32) / sizeof(preload_set_pe32[0]);
-    static_assert(kPreloadPe32EntryCount <= kPreloadSlotCap, "PE32 preload list exceeds cap");
+    static_assert(kPreloadTableCount <= kPreloadSlotCap, "Preload DLL list exceeds stack-local cap");
+    static_assert(kPreloadTablePe32Count <= kPreloadSlotCap, "PE32 preload list exceeds cap");
 
     // Pick the bitness-correct list.
-    const PreloadDllEntry* active_set = pe_is_pe32 ? preload_set_pe32 : preload_set;
-    const u64 active_count = pe_is_pe32 ? kPreloadPe32EntryCount : kPreloadEntryCount;
+    const PreloadEntry* active_set = pe_is_pe32 ? kPreloadTablePe32 : kPreloadTable;
+    const u64 active_count = pe_is_pe32 ? kPreloadTablePe32Count : kPreloadTableCount;
 
     // Intentionally NOT value-initialised: zero-init of a 4-entry
     // DllImage array (~400 bytes) makes clang emit memset, which
@@ -889,7 +873,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
             // points into the first DLL's range now reads garbage
             // — typically manifesting as a ring-3 #GP/#UD/#PF at a
             // valid-looking RIP inside a previously-loaded DLL.
-            const bool dll_dynamic_base = duetos::core::PeIsDynamicBase(active_set[i].bytes, active_set[i].len);
+            const bool dll_dynamic_base = duetos::core::PeIsDynamicBase(active_set[i].data, active_set[i].size);
             // Per-DLL preload breadcrumb (smoke-profile-gated). The
             // intermittent CI boot-wedge localized to "between as-ok and
             // dll-preloaded" (the spawn-trace breadcrumbs) — i.e. inside
@@ -906,7 +890,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
                 SerialWrite("[ring3] spawn-trace name=\"");
                 SerialWrite(name);
                 SerialWrite("\" step=dll-attempt label=");
-                SerialWrite(active_set[i].label);
+                SerialWrite(active_set[i].name);
                 SerialWrite("\n");
             }
             u64 dll_aslr_delta = 0;
@@ -921,12 +905,12 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
                 // for overlap with already-loaded DLLs without
                 // actually mapping pages. PeImageSizeOf returns 0
                 // on parse failure; let DllLoad re-detect that.
-                const u64 trial_size = duetos::core::PeImageSizeOf(active_set[i].bytes, active_set[i].len);
-                const u64 trial_pref = duetos::core::PePreferredBaseOf(active_set[i].bytes, active_set[i].len);
+                const u64 trial_size = duetos::core::PeImageSizeOf(active_set[i].data, active_set[i].size);
+                const u64 trial_pref = duetos::core::PePreferredBaseOf(active_set[i].data, active_set[i].size);
                 if (trial_size == 0 || trial_pref == 0)
                 {
                     dll_aslr_delta = trial_delta;
-                    dll = DllLoad(active_set[i].bytes, active_set[i].len, as, dll_aslr_delta);
+                    dll = DllLoad(active_set[i].data, active_set[i].size, as, dll_aslr_delta);
                     break;
                 }
                 const u64 trial_base = trial_pref + trial_delta;
@@ -952,7 +936,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
                         continue;
                 }
                 dll_aslr_delta = trial_delta;
-                dll = DllLoad(active_set[i].bytes, active_set[i].len, as, dll_aslr_delta);
+                dll = DllLoad(active_set[i].data, active_set[i].size, as, dll_aslr_delta);
                 break;
             }
             if (dll.status == DllLoadStatus::Ok)
@@ -970,7 +954,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
                                                                    preloaded_dlls, preloaded_count - 1);
                 arch::SerialLineGuard guard;
                 SerialWrite("[ring3] pre-loaded ");
-                SerialWrite(active_set[i].label);
+                SerialWrite(active_set[i].name);
                 SerialWrite(" base=");
                 SerialWriteHex(dll.image.base_va);
                 SerialWrite(" aslr_delta=");
@@ -981,7 +965,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
             {
                 arch::SerialLineGuard guard;
                 SerialWrite("[ring3] ");
-                SerialWrite(active_set[i].label);
+                SerialWrite(active_set[i].name);
                 SerialWrite(" DllLoad failed for \"");
                 SerialWrite(name);
                 SerialWrite("\" status=");
