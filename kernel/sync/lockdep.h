@@ -202,6 +202,16 @@ inline constexpr LockClass kLockClassCompositor = 0x09;
 /// never nested blocking — a nested pair would be a same-class
 /// edge lockdep treats as a cycle).
 inline constexpr LockClass kLockClassSchedRunq = 0x0A;
+/// AMD System Management Network index/data pair
+/// (`arch/x86_64/thermal.cpp::g_smn_lock`). The SMN aperture is
+/// reached by writing an address to PCI config 0x60 and then reading
+/// PCI config 0x64 on device 0:0.0 — two separate config accesses
+/// that must not interleave with another CPU's pair. Acquire
+/// ordering: ABOVE `kLockClassPciConfig`, which each of those two
+/// accesses takes internally. smn -> pci-config is the only legal
+/// direction and is enforced by construction: nothing under
+/// pci-config reaches back into an SMN read.
+inline constexpr LockClass kLockClassSmn = 0x0B;
 
 /// Maximum simultaneous holders per CPU. A code path that acquires
 /// more than this many locks at once trips a warning and lockdep

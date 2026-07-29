@@ -141,6 +141,7 @@ void Compose(SystemEnvironment& e)
     e.battery_percent = (ps.battery.state == drivers::power::kBatNotPresent) ? 255 : ps.battery.percent;
     e.lid_present = ps.lid_present;
     e.lid_open = ps.lid_open;
+    e.cpu_temp_valid = ps.cpu_temp_valid;
     e.cpu_temp_c = ps.cpu_temp_c;
     e.pkg_temp_c = ps.package_temp_c;
     e.thermal_throttle = ps.thermal_throttle_hit;
@@ -158,7 +159,8 @@ bool SameObservable(const SystemEnvironment& a, const SystemEnvironment& b)
            a.cpu_hybrid == b.cpu_hybrid && a.ram_bytes == b.ram_bytes && a.numa == b.numa &&
            a.numa_nodes == b.numa_nodes && a.form_factor == b.form_factor && a.ac == b.ac &&
            a.battery_state == b.battery_state && a.battery_percent == b.battery_percent &&
-           a.lid_present == b.lid_present && a.lid_open == b.lid_open && a.cpu_temp_c == b.cpu_temp_c &&
+           a.lid_present == b.lid_present && a.lid_open == b.lid_open &&
+           a.cpu_temp_valid == b.cpu_temp_valid && a.cpu_temp_c == b.cpu_temp_c &&
            a.pkg_temp_c == b.pkg_temp_c && a.thermal_throttle == b.thermal_throttle && a.power_policy == b.power_policy;
 }
 
@@ -214,9 +216,9 @@ void EmitBanner(const SystemEnvironment& e)
     }
 
     arch::SerialWrite(" temp=");
-    if (e.cpu_temp_c == 0)
+    if (!e.cpu_temp_valid)
     {
-        arch::SerialWrite("n/a");
+        arch::SerialWrite("unsupported");
     }
     else
     {

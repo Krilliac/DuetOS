@@ -76,8 +76,16 @@ struct PowerSnapshot
     AcState ac;
     BatteryInfo battery;
     bool chassis_is_laptop; // from SMBIOS chassis type
-    u8 cpu_temp_c;          // from MSR thermal; 0 = not available
+    // Thermal, from arch::ThermalRead. The `*_valid` flags are the
+    // honest answer to "does this machine have a temperature sensor" —
+    // 0 C is a legal reading on a cold machine, so a zero-sentinel
+    // cannot carry that fact. A UI must render the invalid case as
+    // unsupported, never as a number.
+    bool cpu_temp_valid;
+    u8 cpu_temp_c;
+    bool package_temp_valid;
     u8 package_temp_c;
+    bool tj_max_valid;
     u8 tj_max_c;
     bool thermal_throttle_hit;
     bool backend_is_stub; // true only when no live ACPI power data

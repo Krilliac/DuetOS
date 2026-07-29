@@ -202,6 +202,12 @@ add_host_test(smbios_type17)
 # aggregate against the mean-of-percentages formula they get confused
 # with, plus the torn-read clamps.
 add_host_test(telemetry_cpu)
+# CPU sensor decode: freestanding header
+# (kernel/arch/x86_64/cpu_sensor_math.h), no kernel TU. The reads
+# themselves are unverifiable off the target (QEMU models neither the
+# AMD SMN aperture nor the Zen P-state MSRs), so the decode half is
+# pinned here against synthetic register values instead.
+add_host_test(cpu_sensor_math)
 add_host_test(damage_rect)
 # Banded damage / forced-invalidation fold: freestanding constexpr state
 # on DamageBandSet in kernel/drivers/video/framebuffer.h — no kernel TU.
