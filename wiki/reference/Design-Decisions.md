@@ -13561,3 +13561,46 @@ markers for its richest input. Three discovery layers were added (runtime
   in PCR 4 - the boot image, which the QEMU harness rebuilds per
   command line. The per-PCR values are logged at DEBUG during the fold,
   which is how this was localised in one boot rather than by bisection.
+### DD - MouseMove is broadcast to every widget, not first-Consumed-wins
+
+- **Context:** `WidgetGroup::DispatchReverse` stopped at the first
+  widget that returned `Consumed`, for every event kind. That is right
+  for a click, which exactly one widget should act on.
+- **Decision:** `MouseMove` is delivered to the whole chain. Hover is a
+  state *transition*, and `AppButton` can only clear its `Hover` flag by
+  seeing a move that lands outside it; stopping at the widget under the
+  pointer left every previously-hovered sibling permanently lit. Visible
+  proof: the boot self-tests drive synthetic clicks through the Files
+  and Calculator toolbars, and on every flat-theme boot those two apps
+  showed a stuck hover wash on `RAM` and `4` respectively.
+- **Rules out:** having apps clear sibling hover flags by hand before
+  dispatch. That is per-app bookkeeping for a framework invariant, and
+  every app that forgot it would grow the same artefact.
+- **Rules out:** making hover a pull (`widget.IsHovered(cursor)`) read
+  at paint time. That would work, but it moves pointer state into the
+  paint path and every widget would need the cursor position passed
+  down; the event already exists and only needed to reach everyone.
+
+### DD - a column's width bound is measured, never a hand-picked string
+
+- **Context:** the Aurora tables size fixed columns by measuring a
+  "widest value" string (`kWidest*`). Under a proportional face that
+  intuition fails: Liberation Sans puts `f` at 0.278em and `e` at
+  0.556em, so `"0xffff"` measures NARROWER than a real PID like
+  `"0xfeee"`, and `"unknown"` is wider than `"sleeping"` despite being
+  a character shorter. `AppTextCellRight` *drops* a run that would
+  start left of its column rather than clipping it, so the failure mode
+  is not a squeezed cell - it is an entire column silently rendering
+  nothing while the table still looks plausible.
+- **Decision:** a bound over a closed set of values (task states) is
+  computed by measuring every member. A bound over an open set (PIDs)
+  is written with digits rather than letters, with the reason stated at
+  the constant, and the Task Manager self-test asserts that every value
+  it can produce measures no wider than the column `BuildCols`
+  reserved.
+- **Rules out:** eyeballing `kWidest*` strings. This shipped a Task
+  Manager whose PID column was blank for every real process, and the
+  table read as intentional.
+- **Rules out:** making `AppTextCellRight` clip instead of skip. A
+  clipped right-aligned number is a *wrong* number; refusing to draw is
+  the safer contract. The bound is what has to be right.

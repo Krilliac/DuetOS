@@ -154,10 +154,12 @@ are measured instead of cell-counted:
 
 | Entry point | Job |
 |---|---|
-| `AppRowHeight(role)` | Row pitch that leads `role` comfortably (line box + 5 px). |
+| `AppRowHeight(role)` | Row pitch that leads `role` comfortably (line box + 8 px). The reference's tables run ~2.7x the cap height of the name in them; 5 px put us at ~2.0x, which read visibly tighter. |
 | `AppTextRowY(role, y, row_h)` | Vertical centring; reproduces the historical `(row_h - 8) / 2` on the bitmap path exactly. |
 | `AppTextMeasure` / `AppTextFit` | Measure, and truncate with a trailing `..` on a *pixel* budget rather than a character count. |
 | `AppTextCell` / `AppTextCellRight` | Left- and right-aligned cells. Right-alignment uses the same measurement the paint advances by, so numeric columns stay flush. |
+| `AppRowIconWidth` / `AppRowIconDraw` | The reference's per-row rounded-square type tile (13 px, outlined, one centred glyph). Files' rows use this where they used a 4-px dot; Task Manager keeps the dot, which is what its reference shows. The helper classifies nothing — a caller with no type evidence passes `'\0'` and gets an empty tile rather than a guessed letter. |
+| `AppFormatSize(bytes, out, cap)` | Human-readable byte counts in the reference's shape: `980 B`, `4 KB`, `1.4 MB`, `2.1 GB`. Bytes and KB are whole numbers; MB and GB carry one decimal. Files' rows printed `6000 BYTES` before this. |
 | `AppPillWidth` / `AppPillDraw` | The `NATIVE` / `WIN32 PE` ABI chip. |
 | `AppRowDotWidth` / `AppRowDotDraw` | Per-row liveness dot. |
 
@@ -237,6 +239,18 @@ stops at the first `Consumed` and returns immediately. If every
 widget returned `NotInterested`, the host is free to fall back to
 its raw paint region (Files' folder grid, terminal cell grid,
 hexview byte grid).
+
+**`MouseMove` is the exception: it is broadcast to every widget.**
+Hover is a state *transition*, and a widget can only CLEAR its
+`Hover` flag by being told about a move that falls outside it.
+First-`Consumed`-wins stopped the walk at whichever widget the
+pointer was over, so every previously-hovered sibling stayed lit for
+the rest of the session. That was observable: the boot self-tests
+drive synthetic clicks through the toolbars, and Files' `RAM` button
+and Calculator's `4` key were left wearing a hover wash on every
+flat-theme boot. `DispatchReverse` now delivers `MouseMove` to the
+whole chain and returns `Consumed` if any widget was inside; the
+`MouseDown` / `MouseUp` first-`Consumed`-wins contract is unchanged.
 
 State transitions happen inside `OnEventSelf` — a button hovered-
 to-pressed sequence is three OnEvent calls (MouseMove ON,

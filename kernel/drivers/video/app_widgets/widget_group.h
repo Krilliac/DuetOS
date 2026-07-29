@@ -81,11 +81,25 @@ template <typename Head, typename... Tail> struct WidgetChain<Head, Tail...>
         // (later-declared widgets are visually on top, so they get
         // first refusal on the event), then fall back to head.
         const EventResult fromTail = tail.DispatchReverse(e);
-        if (fromTail == EventResult::Consumed)
+
+        // ...except for MouseMove, which every widget must see.
+        // MouseMove is a state TRANSITION, not an exclusive action: a
+        // widget can only CLEAR its Hover flag by being told about a
+        // move that falls outside it. Stopping the walk at whichever
+        // widget the pointer happens to be over left every previously
+        // hovered sibling lit for the rest of the session — visible as
+        // a toolbar chip, or a tab strip, that keeps its hover wash
+        // long after the pointer moved on.
+        if (e.kind != EventKind::MouseMove && fromTail == EventResult::Consumed)
         {
             return EventResult::Consumed;
         }
-        return head.OnEvent(e);
+        const EventResult fromHead = head.OnEvent(e);
+        if (fromTail == EventResult::Consumed || fromHead == EventResult::Consumed)
+        {
+            return EventResult::Consumed;
+        }
+        return fromHead;
     }
 };
 
