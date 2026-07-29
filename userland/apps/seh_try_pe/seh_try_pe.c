@@ -26,13 +26,56 @@ typedef void* HANDLE;
 #define EXCEPTION_ACCESS_VIOLATION 0xC0000005UL
 #define EXCEPTION_INT_DIVIDE_BY_ZERO 0xC0000094UL
 
+/* An arbitrary application-defined code (customer bit set, as
+ * Windows requires for non-system exception codes). */
+#define RAISE_TEST_CODE 0xE0BADC0DUL
+
 __declspec(dllimport) HANDLE __stdcall GetStdHandle(DWORD nStdHandle);
 __declspec(dllimport) BOOL __stdcall WriteConsoleA(HANDLE h, const void* buf, DWORD len, DWORD* written, void* resv);
 __declspec(dllimport) void __stdcall ExitProcess(unsigned int code);
+__declspec(dllimport) void __stdcall RaiseException(DWORD dwExceptionCode, DWORD dwExceptionFlags,
+                                                    DWORD nNumberOfArguments, const ULONG64* lpArguments);
 
-/* MSVC SEH intrinsic — recovers the current exception's NTSTATUS
- * inside an __except filter. Recognised by clang in MSVC mode. */
+/* MSVC SEH intrinsics — recover the current exception's NTSTATUS and
+ * its EXCEPTION_POINTERS inside an __except filter. Recognised by
+ * clang in MSVC mode. */
 unsigned long __cdecl _exception_code(void);
+void* __cdecl _exception_info(void);
+#define GetExceptionInformation() ((EXCEPTION_POINTERS*)_exception_info())
+
+/* Just enough of EXCEPTION_RECORD / EXCEPTION_POINTERS to read the
+ * argument vector back out of a RaiseException. */
+typedef struct
+{
+    DWORD ExceptionCode;
+    DWORD ExceptionFlags;
+    void* ExceptionRecord;
+    void* ExceptionAddress;
+    DWORD NumberParameters;
+    DWORD _align;
+    ULONG64 ExceptionInformation[15];
+} EXCEPTION_RECORD_T;
+
+typedef struct
+{
+    EXCEPTION_RECORD_T* ExceptionRecord;
+    void* ContextRecord;
+} EXCEPTION_POINTERS;
+
+/* Filter-time helper: pull the parameter count and first two
+ * parameters out of the live record. Kept out of the __except body
+ * because the record is only guaranteed live during the filter. */
+static DWORD ExFilterParams(EXCEPTION_POINTERS* ep, ULONG64* p0, ULONG64* p1)
+{
+    if (ep == 0 || ep->ExceptionRecord == 0)
+        return 0;
+    const EXCEPTION_RECORD_T* r = ep->ExceptionRecord;
+    if (r->NumberParameters >= 1)
+        *p0 = r->ExceptionInformation[0];
+    if (r->NumberParameters >= 2)
+        *p1 = r->ExceptionInformation[1];
+    return r->NumberParameters;
+}
 
 static void Out(const char* s)
 {
@@ -169,6 +212,43 @@ __declspec(noinline) static int t_repeatable(void)
     return 1;
 }
 
+/* 5. Software exception: RaiseException must dispatch through the
+ *    same engine a CPU fault does, and deliver its argument vector
+ *    intact. This is the path a statically-linked MSVC CRT's
+ *    `throw` takes — its own _CxxThrowException copy calls
+ *    kernel32!RaiseException(0xE06D7363, ...) rather than our
+ *    vcruntime140 export. While kernel32!RaiseException was a
+ *    SYS_EXIT stub, every such throw ended the process with the
+ *    exception code as its exit status. */
+__declspec(noinline) static int t_raise_exception(void)
+{
+    ULONG64 args[2] = {0x1122334455667788ULL, 0x99AABBCCDDEEFF00ULL};
+    unsigned long code = 0;
+    ULONG64 seen0 = 0, seen1 = 0;
+    unsigned long nparams = 0;
+    int caught = 0;
+    __try
+    {
+        RaiseException(RAISE_TEST_CODE, 0, 2, args);
+        Out("[seh_try] raise-exception: FAIL (returned)\r\n");
+    }
+    __except ((code = _exception_code()), (nparams = ExFilterParams(GetExceptionInformation(), &seen0, &seen1)),
+              EXCEPTION_EXECUTE_HANDLER)
+    {
+        caught = 1;
+        Out("[seh_try] raise __except code=");
+        OutHex(code);
+        Out("\r\n");
+    }
+    if (caught && code == RAISE_TEST_CODE && nparams == 2 && seen0 == args[0] && seen1 == args[1])
+    {
+        Out("[seh_try] raise-exception: PASS\r\n");
+        return 0;
+    }
+    Out("[seh_try] raise-exception: FAIL\r\n");
+    return 1;
+}
+
 void __cdecl mainCRTStartup(void)
 {
     Out("[seh_try] starting\r\n");
@@ -177,6 +257,7 @@ void __cdecl mainCRTStartup(void)
     fail |= t_div_zero();
     fail |= t_finally_on_unwind();
     fail |= t_repeatable();
+    fail |= t_raise_exception();
     Out(fail ? "[seh_try] RESULT FAIL\r\n" : "[seh_try] RESULT PASS\r\n");
     Out("[seh_try] done\r\n");
     ExitProcess(fail ? 1u : 0u);

@@ -2342,12 +2342,13 @@
 
     // === =============================================
 
-    // --- RaiseException (offset 0x9A4, 9 bytes) ---------------
-    // Win32:
-    // void RaiseException(DWORD dwExceptionCode, DWORD flags,
-    // DWORD nArgs, const ULONG_PTR *args);
-    // v0 has no SEH, so any RaiseException is fatal — route to
-    // SYS_EXIT with rcx (exception code) as the exit code.
+    // --- Dead 9 bytes at 0x9A4 --------------------------------
+    // Formerly the RaiseException sink, from when the kernel had no
+    // SEH: it routed the call to SYS_EXIT(dwExceptionCode). The real
+    // user-mode kernel32!RaiseException (kernel32_seh.c +
+    // raise_exception.S) supersedes it and no table row points here
+    // any more. The bytes stay so every later offset keeps its
+    // value; they are unreachable.
     0x48, 0x89, 0xCF, // 0x9A4 mov rdi, rcx
     0x31, 0xC0,       // 0x9A7 xor eax, eax
     0xCD, 0x80,       // 0x9A9 int 0x80
