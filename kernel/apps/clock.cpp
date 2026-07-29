@@ -6,6 +6,7 @@
 #include "drivers/input/ps2mouse.h"
 #include "drivers/video/app_widgets/app_button.h"
 #include "drivers/video/app_widgets/app_label.h"
+#include "drivers/video/app_widgets/app_palette.h"
 #include "drivers/video/app_widgets/app_toolbar.h"
 #include "drivers/video/app_widgets/widget_group.h"
 #include "drivers/video/chrome_text.h"
@@ -13,6 +14,7 @@
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/notify.h"
 #include "drivers/video/sound_cue.h"
+#include "drivers/video/theme.h"
 
 namespace duetos::apps::clock
 {
@@ -51,12 +53,45 @@ constexpr u8 kDigitMask[10] = {
 constexpr u32 kColonW = 8; // width reserved for a ":" glyph
 constexpr u32 kGap = 4;    // gap between digits / separators
 
-// Colours chosen for a retro-LED look against the client's
-// dark background. kSegOn = glowing green; kSegOff = dim
-// trace so "8888" shows every inactive segment faintly.
+// Historical (flat-theme) retro-LED look against the client's dark
+// background. kSegOn = glowing green; kSegOff = dim trace so "8888"
+// shows every inactive segment faintly. The Aurora palettes take the
+// restrained ramp below instead — the design's clock is quiet type,
+// not a 1970s LED module.
 constexpr u32 kSegOn = 0x0020FF40;
 constexpr u32 kSegOff = 0x00102818;
 constexpr u32 kBg = 0x00081008;
+
+// Live app-interior palette for the Clock client area. Sampled per
+// paint so a runtime theme cycle recolours the face.
+duetos::drivers::video::app_widgets::AppPalette Pal()
+{
+    using duetos::drivers::video::ThemeCurrent;
+    using duetos::drivers::video::ThemeRole;
+    const u32 body = ThemeCurrent().role_client[static_cast<u32>(ThemeRole::Clock)];
+    return duetos::drivers::video::app_widgets::AppPaletteFor(body);
+}
+
+// Resolved segment colours for the active theme.
+struct FaceInk
+{
+    u32 on;
+    u32 off;
+    u32 colon;
+    u32 ground;
+};
+
+FaceInk Face()
+{
+    const auto p = Pal();
+    if (!p.aurora)
+        return FaceInk{kSegOn, kSegOff, kSegOn, kBg};
+    // Lit segments take the primary ink and unlit ones the hairline
+    // tint, so the "8888" ghost survives without a second hue. The
+    // accent is spent on the colon alone — the design's rule that one
+    // accent mark per surface is enough.
+    return FaceInk{p.ink, p.line, p.accent, p.body};
+}
 
 constinit duetos::drivers::video::WindowHandle g_handle = duetos::drivers::video::kWindowInvalid;
 
@@ -188,14 +223,41 @@ AppLabel& ClockFooterLabel()
     return g_clock.chain.tail.tail.tail.tail.tail.head;
 }
 
+// Resolve every widget colour against the active theme. Split out of
+// BindClockOnce (which is one-shot) so a runtime theme cycle recolours
+// the mode strip and the status line. The active mode takes the
+// accent so the strip reads as a selector rather than four chips.
+void ApplyClockPalette()
+{
+    const auto pal = Pal();
+
+    auto& toolbar = g_clock.chain.head;
+    toolbar.bg_rgb = pal.aurora ? pal.wash : 0U; // 0 = theme.taskbar_bg
+
+    for (u32 i = 0; i < kClockModeBtnCount; ++i)
+    {
+        AppButton* btn = ClockModeButton(i);
+        if (!pal.aurora)
+        {
+            btn->bg_rgb = 0; // theme role default
+            btn->fg_rgb = 0x00101828U;
+            continue;
+        }
+        const bool active = (static_cast<u32>(g_mode) == i);
+        btn->bg_rgb = active ? pal.sel : pal.recess;
+        btn->fg_rgb = active ? pal.accent : pal.ink_2;
+    }
+
+    auto& footer = ClockFooterLabel();
+    footer.fg_rgb = pal.aurora ? pal.ink_3 : kSegOn;
+    footer.bg_rgb = pal.aurora ? pal.body : kBg;
+}
+
 void BindClockOnce()
 {
     if (g_clock_bound)
         return;
     g_clock_bound = true;
-
-    auto& toolbar = g_clock.chain.head;
-    toolbar.bg_rgb = 0; // theme.taskbar_bg
 
     static const char* const kClockModeLabels[kClockModeBtnCount] = {"CLOCK", "STOP", "ALRM", "TIMR"};
     using ClickFn = void (*)();
@@ -207,17 +269,15 @@ void BindClockOnce()
         btn->label = kClockModeLabels[i];
         btn->on_click = kClockModeClicks[i];
         btn->weight = ChromeTextWeight::Regular;
-        btn->bg_rgb = 0; // theme role default
-        btn->fg_rgb = 0x00101828U;
     }
 
     auto& footer = ClockFooterLabel();
     footer.text = g_clock_footer_text;
     footer.role = ChromeTextRole::Caption;
     footer.weight = ChromeTextWeight::Regular;
-    footer.fg_rgb = kSegOn;
-    footer.bg_rgb = kBg;
     footer.align_left = false;
+
+    ApplyClockPalette();
 }
 
 // Re-anchor the toolbar + buttons + footer to the live client
@@ -278,7 +338,8 @@ void RefreshClockFooter()
 void PaintSegment(u32 x, u32 y, u8 seg, bool on)
 {
     using duetos::drivers::video::FramebufferFillRect;
-    const u32 c = on ? kSegOn : kSegOff;
+    const FaceInk ink = Face();
+    const u32 c = on ? ink.on : ink.off;
     switch (seg)
     {
     case 0: // a — top
@@ -326,8 +387,9 @@ void PaintColon(u32 x, u32 y)
     const u32 cx = x + (kColonW - sz) / 2;
     const u32 y1 = y + kDigitH / 3 - sz / 2;
     const u32 y2 = y + 2 * kDigitH / 3 - sz / 2;
-    FramebufferFillRect(cx, y1, sz, sz, kSegOn);
-    FramebufferFillRect(cx, y2, sz, sz, kSegOn);
+    const u32 colon = Face().colon;
+    FramebufferFillRect(cx, y1, sz, sz, colon);
+    FramebufferFillRect(cx, y2, sz, sz, colon);
 }
 
 // Live stopwatch elapsed in ticks (running + accumulated). Each
@@ -496,12 +558,13 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     // resolution is 10 ms and we test against zero.
     CheckAlarmTrigger();
     CheckTimerTrigger();
-    FramebufferFillRect(cx, cy, cw, ch, kBg);
+    FramebufferFillRect(cx, cy, cw, ch, Face().ground);
 
     // Pass D chrome: re-anchor + refresh + paint the toolbar +
     // mode buttons + footer label. The LED face (carve-out)
     // paints inside the band between the toolbar and the footer.
     BindClockOnce();
+    ApplyClockPalette();
     RefreshClockFooter();
     RebindClockBounds(cx, cy, cw, ch);
 
@@ -902,17 +965,15 @@ void ClockMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
     using duetos::drivers::input::kMouseButtonLeft;
     if (g_handle == duetos::drivers::video::kWindowInvalid)
         return;
-    duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
-    if (!duetos::drivers::video::WindowGetBounds(g_handle, &wx, &wy, &ww, &wh))
+    // The client rect comes from the window manager — the title bar is
+    // per-theme (22 on the flat palettes, 30 across the Duet family),
+    // so a hardcoded constant puts every click out of phase with the
+    // paint. RebindClockBounds takes the same rect DrawFn receives.
+    duetos::u32 wx = 0, client_y = 0, ww = 0, client_h = 0;
+    if (!duetos::drivers::video::WindowGetClientRect(g_handle, &wx, &client_y, &ww, &client_h))
         return;
-    // Title bar is 22 px; client origin sits below it. The
-    // WidgetGroup dispatch path needs cursor coords in the
-    // same frame RebindClockBounds anchors the chrome to.
-    constexpr duetos::u32 kTitleH = 22U;
-    if (wh <= kTitleH)
+    if (client_h == 0)
         return;
-    const duetos::u32 client_y = wy + kTitleH;
-    const duetos::u32 client_h = wh - kTitleH;
     BindClockOnce();
     RebindClockBounds(wx, client_y, ww, client_h);
 
@@ -921,7 +982,7 @@ void ClockMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
     const bool release_edge = !left_down && g_clock_prev_left_down;
     g_clock_prev_left_down = left_down;
 
-    const bool inside_window = (cx >= wx && cx < wx + ww && cy >= client_y && cy < wy + wh);
+    const bool inside_window = (cx >= wx && cx < wx + ww && cy >= client_y && cy < client_y + client_h);
     if (inside_window)
     {
         const Event m{EventKind::MouseMove, cx, cy, 0U, 0U};

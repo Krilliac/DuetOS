@@ -7,6 +7,7 @@
 #include "drivers/input/ps2mouse.h"
 #include "drivers/video/app_widgets/app_button.h"
 #include "drivers/video/app_widgets/app_label.h"
+#include "drivers/video/app_widgets/app_palette.h"
 #include "drivers/video/app_widgets/app_toolbar.h"
 #include "drivers/video/app_widgets/widget_group.h"
 #include "drivers/video/dialog.h"
@@ -23,10 +24,24 @@ namespace duetos::apps::taskman
 namespace
 {
 
-constexpr duetos::u32 kRowH = 10;    // 8x8 glyph + 2 px gap
+// 12-px rows: an 8x8 glyph with 2 px of air above and below. The
+// design's process table is generously leaded; every row geometry
+// (DrawRows, the perf stack, the scroll clamp) derives from this
+// constant so it moves as one.
+constexpr duetos::u32 kRowH = 12;
 constexpr duetos::u32 kHeaderH = 22; // header band: 2 lines
 constexpr duetos::u32 kFooterH = 12; // hint footer
 constexpr duetos::u32 kColPad = 6;   // left padding inside client
+
+// Live app-interior palette for the Task Manager client area. Sampled
+// per paint so a runtime theme cycle (Ctrl+Alt+Y) recolours the table.
+duetos::drivers::video::app_widgets::AppPalette Pal()
+{
+    using duetos::drivers::video::ThemeCurrent;
+    using duetos::drivers::video::ThemeRole;
+    const duetos::u32 body = ThemeCurrent().role_client[static_cast<duetos::u32>(ThemeRole::TaskManager)];
+    return duetos::drivers::video::app_widgets::AppPaletteFor(body);
+}
 
 // Per-column character widths. The list view has six columns:
 // PID (5 chars), NAME (16), STATE (5), CPU% (6), TICKS (10), MEM (6).
@@ -302,14 +317,42 @@ AppButton* HdrButton(duetos::u32 i)
     return btns[i];
 }
 
+// Resolve every widget colour against the active theme. Split out of
+// BindTaskmanOnce (which is one-shot) so a runtime theme cycle
+// recolours the tab strip and the status strip. The active tab takes
+// the accent — the design's 2-px underline, expressed here as a tinted
+// chip because the toolbar has no room for a separate rule.
+void ApplyTaskmanPalette()
+{
+    const auto p = Pal();
+
+    auto& toolbar = g_taskman.chain.head;
+    toolbar.bg_rgb = p.aurora ? p.wash : 0U; // 0 = theme.taskbar_bg
+
+    for (duetos::u32 i = 0; i < kHdrBtnCount; ++i)
+    {
+        AppButton* btn = HdrButton(i);
+        if (!p.aurora)
+        {
+            btn->bg_rgb = 0; // theme role default
+            btn->fg_rgb = 0x00101828U;
+            continue;
+        }
+        const bool active_tab = (i == 0 && g_tab == Tab::Processes) || (i == 1 && g_tab != Tab::Processes);
+        btn->bg_rgb = active_tab ? p.sel : p.recess;
+        btn->fg_rgb = active_tab ? p.accent : p.ink_2;
+    }
+
+    auto& label = g_taskman.chain.tail.tail.tail.tail.tail.head;
+    label.fg_rgb = p.aurora ? p.ink_3 : 0x00181828U;
+    label.bg_rgb = p.aurora ? p.wash : 0x00C8C8B8U; // status band tone
+}
+
 void BindTaskmanOnce()
 {
     if (g_taskman_bound)
         return;
     g_taskman_bound = true;
-
-    auto& toolbar = g_taskman.chain.head;
-    toolbar.bg_rgb = 0; // theme.taskbar_bg
 
     static const char* const kLabels[kHdrBtnCount] = {"TASKS", "PERF", "SORT", "REFRESH"};
     using ClickFn = void (*)();
@@ -320,17 +363,15 @@ void BindTaskmanOnce()
         btn->label = kLabels[i];
         btn->on_click = kClicks[i];
         btn->weight = ChromeTextWeight::Regular;
-        btn->bg_rgb = 0; // theme role default
-        btn->fg_rgb = 0x00101828U;
     }
 
     auto& label = g_taskman.chain.tail.tail.tail.tail.tail.head;
     label.text = g_footer_text;
     label.role = ChromeTextRole::Caption;
     label.weight = ChromeTextWeight::Regular;
-    label.fg_rgb = 0x00181828U;
-    label.bg_rgb = 0x00C8C8B8U; // status band tone
     label.align_left = true;
+
+    ApplyTaskmanPalette();
 }
 
 // Re-anchor the toolbar + buttons + footer label to the live
@@ -660,7 +701,17 @@ void DrawHeader(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 fg, 
 {
     using duetos::drivers::video::FramebufferDrawString;
     using duetos::drivers::video::FramebufferFillRect;
-    FramebufferFillRect(cx, cy, cw, kHeaderH, bg);
+    const auto p = Pal();
+    // Aurora: the stats line sits on the window's own ground while the
+    // column headings sit on a `--glass-3` band with a hairline under
+    // it — the design's sticky table header. Flat palettes keep the
+    // single flat band.
+    const duetos::u32 stat_bg = p.aurora ? p.body : bg;
+    const duetos::u32 head_bg = p.aurora ? p.wash : bg;
+    FramebufferFillRect(cx, cy, cw, 12, stat_bg);
+    FramebufferFillRect(cx, cy + 12, cw, kHeaderH - 12, head_bg);
+    if (p.aurora)
+        FramebufferFillRect(cx, cy + kHeaderH - 1, cw, 1, p.line);
 
     // Line 1: aggregate stats.
     //   "CPU 12.3%  IDLE 87.7%  MEM 1234/4096  TASKS 23"
@@ -699,7 +750,7 @@ void DrawHeader(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 fg, 
     append(" MIB  TASKS ");
     append(num_tasks);
     line[o] = '\0';
-    FramebufferDrawString(cx + kColPad, cy + 2, line, fg, bg);
+    FramebufferDrawString(cx + kColPad, cy + 2, line, p.aurora ? p.ink_2 : fg, stat_bg);
 
     // Line 2: column headers (PROCESSES tab only — the
     // PERFORMANCE tab paints labels inside the graph stack).
@@ -750,18 +801,22 @@ void DrawHeader(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 fg, 
     make_col_label("  MEM", kColMem, SortMode::Mem, col_mem);
 
     duetos::u32 x = cx + kColPad;
-    const duetos::u32 y = cy + 12;
+    const duetos::u32 y = cy + 13;
+    // Uppercase headings in muted ink; the active sort column takes the
+    // accent. The design spends no other colour on the header row.
+    const duetos::u32 head_fg = p.aurora ? p.ink_3 : fg;
+    const duetos::u32 head_hl = p.aurora ? p.accent : hl;
     auto draw_col = [&](const char* s, duetos::u32 w, SortMode key)
     {
-        const duetos::u32 c = (g_sort == key) ? hl : fg;
-        FramebufferDrawString(x, y, s, c, bg);
+        const duetos::u32 c = (g_sort == key) ? head_hl : head_fg;
+        FramebufferDrawString(x, y, s, c, head_bg);
         x += w * 8 + 4;
     };
     draw_col(col_pid, kColPid, SortMode::Pid);
     draw_col(col_name, kColName, SortMode::Name);
     draw_col(col_state, kColState, SortMode::State);
     draw_col(col_cpu, kColCpu, SortMode::Cpu);
-    FramebufferDrawString(x, y, col_ticks, fg, bg); // TICKS: no sort key
+    FramebufferDrawString(x, y, col_ticks, head_fg, head_bg); // TICKS: no sort key
     x += kColTicks * 8 + 4;
     draw_col(col_mem, kColMem, SortMode::Mem);
 }
@@ -772,9 +827,11 @@ void DrawRows(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, du
     using duetos::drivers::video::FramebufferDrawString;
     using duetos::drivers::video::FramebufferFillRect;
 
+    const auto p = Pal();
+    const duetos::u32 list_bg = p.aurora ? p.body : bg;
     const duetos::u32 list_y = cy + kHeaderH;
     const duetos::u32 list_h = (ch > kHeaderH + kFooterH) ? ch - kHeaderH - kFooterH : 0;
-    FramebufferFillRect(cx, list_y, cw, list_h, bg);
+    FramebufferFillRect(cx, list_y, cw, list_h, list_bg);
 
     if (g_row_count == 0 || list_h < kRowH)
         return;
@@ -794,8 +851,19 @@ void DrawRows(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, du
         const Row& r = g_rows[idx];
         const duetos::u32 row_y = list_y + v * kRowH;
         const bool selected = (idx == g_selected);
-        if (selected)
+        // Aurora: `--glass-3` zebra with an accent-tinted selection and
+        // a 2-px accent rail, per the design's process table. Flat
+        // palettes keep the solid selected-row band and no zebra.
+        if (p.aurora)
+        {
+            FramebufferFillRect(cx, row_y, cw, kRowH, selected ? p.sel : ((v & 1u) ? p.wash : p.body));
+            if (selected)
+                FramebufferFillRect(cx, row_y, 2, kRowH, p.accent);
+        }
+        else if (selected)
+        {
             FramebufferFillRect(cx, row_y, cw, kRowH, sel_bg);
+        }
 
         char col_pid[8];
         char col_name[24];
@@ -818,20 +886,34 @@ void DrawRows(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, du
         else
             FmtStrLeft(" ----", col_mem, kColMem);
 
-        const duetos::u32 row_bg = selected ? sel_bg : bg;
-        const duetos::u32 row_fg = r.is_running ? fg_run : fg;
+        duetos::u32 row_bg = selected ? sel_bg : bg;
+        duetos::u32 row_fg = r.is_running ? fg_run : fg;
+        // Aurora row ink: the process NAME carries the primary ink,
+        // numeric columns the secondary, and the accent is spent only
+        // on the running state — not on the whole row, which is what
+        // made the old table read as green-on-black.
+        duetos::u32 num_fg = row_fg;
+        duetos::u32 state_fg = row_fg;
+        if (p.aurora)
+        {
+            row_bg = selected ? p.sel : ((v & 1u) ? p.wash : p.body);
+            row_fg = p.ink;
+            num_fg = p.ink_2;
+            state_fg = r.is_running ? p.accent : p.ink_3;
+        }
+        const duetos::u32 text_y = row_y + (kRowH - 8) / 2;
         duetos::u32 x = cx + kColPad;
-        FramebufferDrawString(x, row_y + 1, col_pid, row_fg, row_bg);
+        FramebufferDrawString(x, text_y, col_pid, num_fg, row_bg);
         x += kColPid * 8 + 4;
-        FramebufferDrawString(x, row_y + 1, col_name, row_fg, row_bg);
+        FramebufferDrawString(x, text_y, col_name, row_fg, row_bg);
         x += kColName * 8 + 4;
-        FramebufferDrawString(x, row_y + 1, col_state, row_fg, row_bg);
+        FramebufferDrawString(x, text_y, col_state, state_fg, row_bg);
         x += kColState * 8 + 4;
-        FramebufferDrawString(x, row_y + 1, col_cpu, row_fg, row_bg);
+        FramebufferDrawString(x, text_y, col_cpu, num_fg, row_bg);
         x += kColCpu * 8 + 4;
-        FramebufferDrawString(x, row_y + 1, col_ticks, row_fg, row_bg);
+        FramebufferDrawString(x, text_y, col_ticks, num_fg, row_bg);
         x += kColTicks * 8 + 4;
-        FramebufferDrawString(x, row_y + 1, col_mem, row_fg, row_bg);
+        FramebufferDrawString(x, text_y, col_mem, num_fg, row_bg);
     }
 }
 
@@ -906,9 +988,11 @@ void DrawPerformance(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32
 {
     using duetos::drivers::video::FramebufferDrawString;
     using duetos::drivers::video::FramebufferFillRect;
+    const auto p = Pal();
+    const duetos::u32 list_bg = p.aurora ? p.body : bg;
     const duetos::u32 list_y = cy + kHeaderH;
     const duetos::u32 list_h = (ch > kHeaderH + kFooterH) ? ch - kHeaderH - kFooterH : 0;
-    FramebufferFillRect(cx, list_y, cw, list_h, bg);
+    FramebufferFillRect(cx, list_y, cw, list_h, list_bg);
     if (list_h < 60)
         return;
 
@@ -984,7 +1068,7 @@ void DrawPerformance(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32
     append(peak_buf);
     append("  (60 s)");
     line[o] = '\0';
-    FramebufferDrawString(cx + kColPad, list_y + 2, line, fg_cpu, bg);
+    FramebufferDrawString(cx + kColPad, list_y + 2, line, p.aurora ? p.ink_2 : fg_cpu, list_bg);
     DrawSparkline(cx + kColPad, list_y + lbl_h, cw - 2 * kColPad, graph_h, fg_cpu, grid, frame, fill, true);
 
     // MEM header.
@@ -1008,7 +1092,7 @@ void DrawPerformance(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32
     append(num_total);
     append(" MIB");
     line[o] = '\0';
-    FramebufferDrawString(cx + kColPad, list_y + stack_h + 2, line, fg_mem, bg);
+    FramebufferDrawString(cx + kColPad, list_y + stack_h + 2, line, p.aurora ? p.ink_2 : fg_mem, list_bg);
     DrawSparkline(cx + kColPad, list_y + stack_h + lbl_h, cw - 2 * kColPad, graph_h, fg_mem, grid, frame, fill, false);
 
     // Below the graphs (inside the footer band — the actual
@@ -1034,7 +1118,7 @@ void DrawPerformance(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32
     append(buf15);
     line[o] = '\0';
     if (ch >= kFooterH + 12)
-        FramebufferDrawString(cx + kColPad, cy + ch - kFooterH - 12, line, fg, bg);
+        FramebufferDrawString(cx + kColPad, cy + ch - kFooterH - 12, line, p.aurora ? p.ink_3 : fg, list_bg);
 }
 
 void DrawFn(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, void* /*cookie*/)
@@ -1051,7 +1135,18 @@ void DrawFn(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, void
     constexpr duetos::u32 kGrid = 0x00203040;  // graph gridlines
     constexpr duetos::u32 kFrame = 0x00405070; // graph border
     constexpr duetos::u32 kFill = 0x00081020;  // graph background
-    FramebufferFillRect(cx, cy, cw, ch, bg);
+
+    // Aurora sparkline card: the design's 60x26 cards sit on a
+    // `--recess` ground with a hairline frame and accent / peer plot
+    // lines — no saturated green wireframe.
+    const auto p = Pal();
+    const duetos::u32 ground = p.aurora ? p.body : bg;
+    const duetos::u32 graph_grid = p.aurora ? p.line : kGrid;
+    const duetos::u32 graph_frame = p.aurora ? p.line : kFrame;
+    const duetos::u32 graph_fill = p.aurora ? p.recess : kFill;
+    const duetos::u32 plot_cpu = p.aurora ? p.accent : kFgCpu;
+    const duetos::u32 plot_mem = p.aurora ? p.accent_peer : kFgMem;
+    FramebufferFillRect(cx, cy, cw, ch, ground);
 
     MaybeSampleHistory();
     RebuildSnapshot();
@@ -1061,6 +1156,7 @@ void DrawFn(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, void
     // footer at the bottom (kFooterBandH). The middle slice is
     // what DrawHeader / DrawRows / DrawPerformance receive.
     BindTaskmanOnce();
+    ApplyTaskmanPalette();
     RebindTaskmanBounds(cx, cy, cw, ch);
     RefreshTaskmanStatus();
     // Pre-paint the footer band tone so the AppLabel glyphs sit
@@ -1068,7 +1164,14 @@ void DrawFn(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, void
     // full-width band).
     if (ch > kFooterBandH)
     {
-        FramebufferFillRect(cx, cy + ch - kFooterBandH, cw, kFooterBandH, 0x00C8C8B8U);
+        if (p.aurora)
+        {
+            duetos::drivers::video::app_widgets::AppStatusBarDraw(cx, cy + ch - kFooterBandH, cw, kFooterBandH, p);
+        }
+        else
+        {
+            FramebufferFillRect(cx, cy + ch - kFooterBandH, cw, kFooterBandH, 0x00C8C8B8U);
+        }
     }
     Compose compose_ctx{};
     g_taskman.PaintAll(compose_ctx);
@@ -1082,11 +1185,11 @@ void DrawFn(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, void
     const duetos::u32 mh = (ch > kHdrToolbarH + kFooterBandH) ? ch - kHdrToolbarH - kFooterBandH : 0U;
     if (mh == 0)
         return;
-    DrawHeader(cx, my, cw, kFg, kHl, bg);
+    DrawHeader(cx, my, cw, kFg, kHl, ground);
     if (g_tab == Tab::Processes)
-        DrawRows(cx, my, cw, mh, kFg, kFgRun, kSelBg, bg);
+        DrawRows(cx, my, cw, mh, kFg, kFgRun, kSelBg, ground);
     else
-        DrawPerformance(cx, my, cw, mh, kFg, kFgCpu, kFgMem, kGrid, kFrame, kFill, bg);
+        DrawPerformance(cx, my, cw, mh, kFg, plot_cpu, plot_mem, graph_grid, graph_frame, graph_fill, ground);
     // The legacy DrawFooter painted the hotkey hint inside the
     // middle slice. That hint moved to the AppLabel footer
     // (RefreshTaskmanStatus + PaintAll), so DrawFooter is no
@@ -1131,10 +1234,12 @@ void ClickRefresh()
 // Column-header click hit-test (F-025).
 //
 // The PROCESSES tab header row 2 is painted at
-//   abs_y = window_top + kTitleH + kHdrToolbarH + 12
-// with height kHeaderH - 12 = 10 px.
+//   abs_y = client_top + kHdrToolbarH + 12
+// with height kHeaderH - 12 = 10 px. `client_y` / `client_h` are the
+// window manager's client rect (WindowGetClientRect) — never a
+// hardcoded title-bar constant, which is per-theme.
 //
-// Column X origins (relative to window left edge wx):
+// Column X origins (relative to the client left edge cx):
 //   PID:   wx + kColPad
 //   NAME:  PID_x + kColPid * 8 + 4
 //   STATE: NAME_x + kColName * 8 + 4
@@ -1149,19 +1254,18 @@ void ClickRefresh()
 // Returns kCount when the point is not inside any sortable column
 // header zone.
 // ---------------------------------------------------------------
-SortMode HitTestColHeader(duetos::u32 px, duetos::u32 py, duetos::u32 wx, duetos::u32 wy, duetos::u32 ww,
-                          duetos::u32 wh)
+SortMode HitTestColHeader(duetos::u32 px, duetos::u32 py, duetos::u32 client_x, duetos::u32 client_y,
+                          duetos::u32 client_w, duetos::u32 client_h)
 {
-    constexpr duetos::u32 kTitleH = 22U;
     // Column header row 2 is inside the legacy header band which
     // starts at client_y + kHdrToolbarH. Row 2 within that band is
     // at +12 px; row 2 height is kHeaderH - 12 = 10 px.
-    const duetos::u32 header_top = wy + kTitleH + kHdrToolbarH + 12U;
+    const duetos::u32 header_top = client_y + kHdrToolbarH + 12U;
     const duetos::u32 header_bot = header_top + (kHeaderH - 12U);
 
     if (py < header_top || py >= header_bot)
         return SortMode::kCount;
-    if (px < wx || px >= wx + ww || wy + wh == 0)
+    if (px < client_x || px >= client_x + client_w || client_h == 0)
         return SortMode::kCount;
 
     // Only active on the PROCESSES tab.
@@ -1169,7 +1273,7 @@ SortMode HitTestColHeader(duetos::u32 px, duetos::u32 py, duetos::u32 wx, duetos
         return SortMode::kCount;
 
     // Build column X boundaries.
-    duetos::u32 x = wx + kColPad;
+    duetos::u32 x = client_x + kColPad;
     struct ColZone
     {
         duetos::u32 x_start;
@@ -1532,17 +1636,15 @@ void TaskmanMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
     using duetos::drivers::input::kMouseButtonLeft;
     if (g_handle == duetos::drivers::video::kWindowInvalid)
         return;
-    duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
-    if (!duetos::drivers::video::WindowGetBounds(g_handle, &wx, &wy, &ww, &wh))
+    // The client rect comes from the window manager — the title bar is
+    // per-theme (22 on the flat palettes, 30 across the Duet family),
+    // so a hardcoded constant puts every click out of phase with the
+    // paint. RebindTaskmanBounds takes the same rect DrawFn receives.
+    duetos::u32 wx = 0, client_y = 0, ww = 0, client_h = 0;
+    if (!duetos::drivers::video::WindowGetClientRect(g_handle, &wx, &client_y, &ww, &client_h))
         return;
-    // Title bar is 22 px; client origin sits below it.
-    // RebindTaskmanBounds works in client-relative coords so the
-    // widget dispatch path needs cursor coords in the same frame.
-    constexpr duetos::u32 kTitleH = 22U;
-    if (wh <= kTitleH)
+    if (client_h == 0)
         return;
-    const duetos::u32 client_y = wy + kTitleH;
-    const duetos::u32 client_h = wh - kTitleH;
     BindTaskmanOnce();
     RebindTaskmanBounds(wx, client_y, ww, client_h);
 
@@ -1551,7 +1653,7 @@ void TaskmanMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
     const bool release_edge = !left_down && g_prev_left_down;
     g_prev_left_down = left_down;
 
-    const bool inside_window = (cx >= wx && cx < wx + ww && cy >= client_y && cy < wy + wh);
+    const bool inside_window = (cx >= wx && cx < wx + ww && cy >= client_y && cy < client_y + client_h);
     if (inside_window)
     {
         const Event m{EventKind::MouseMove, cx, cy, 0U, 0U};
@@ -1566,7 +1668,7 @@ void TaskmanMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
         // keep the two surfaces independent). If the hit lands on a
         // sortable column, update g_sort and g_sort_asc then return
         // — the compositor will repaint on the next tick.
-        const SortMode hit = HitTestColHeader(cx, cy, wx, wy, ww, wh);
+        const SortMode hit = HitTestColHeader(cx, cy, wx, client_y, ww, client_h);
         if (hit != SortMode::kCount)
         {
             if (g_sort == hit)
