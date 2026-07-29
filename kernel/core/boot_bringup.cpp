@@ -326,6 +326,7 @@
 #include "log/klog.h"
 #include "log/klog_persist.h"
 #include "power/reboot.h"
+#include "power/suspend.h"
 #include "security/login.h"
 #include "core/boot_cmdline.h"
 #include "core/init.h"
@@ -2134,6 +2135,22 @@ void BootBringupDevices(bool force_net_smoke)
     SerialWrite("[boot] Bringing up PS/2 mouse.\n");
     duetos::drivers::input::Ps2MouseInit();
 
+    // S3 suspend participants. Registered HERE, between the PS/2
+    // bring-up and the PCI enumeration, because this is the widest
+    // window in which the machine is fully alive (LAPIC / IOAPIC /
+    // HPET / tick / serial / PS-2) yet owns no device that cannot
+    // survive a power cycle. The `s3test=1` live cycle below therefore
+    // exercises a real suspend with the refusal gate consulted for
+    // real, not bypassed — storage and NIC drivers, which do veto,
+    // attach several hundred lines later.
+    SerialWrite("[boot] Registering S3 suspend participants.\n");
+    duetos::power::PowerSuspendInit();
+    // FindBootCmdline(0) reads the cache primed during early boot —
+    // the low identity map that held the Multiboot2 info is long gone
+    // by here, so re-walking it would fault.
+    DUETOS_BOOT_SELFTEST(duetos::power::PowerSuspendSelfTest(
+        duetos::core::CmdlineMatches(duetos::core::FindBootCmdline(0), "s3test", "1")));
+
     SerialWrite("[boot] Enumerating PCI bus.\n");
     duetos::drivers::pci::PciEnumerate();
 
@@ -2434,6 +2451,17 @@ void BootBringupDevices(bool force_net_smoke)
     SerialWrite("[boot] Bringing up AHCI controller(s).\n");
     duetos::drivers::storage::AhciInit();
     DUETOS_BOOT_SELFTEST(duetos::drivers::storage::AhciSelfTest());
+
+    // GAP: neither the block-storage nor the NIC drivers have an S3
+    // quiesce/re-init pair, and the platform resets their controllers
+    // on wake — so from this point on the machine declines S3 rather
+    // than resuming onto a dead queue. Registered here, at the attach
+    // site, rather than unconditionally at PowerSuspendInit: the veto
+    // has to describe what is actually present. Revisit per driver;
+    // each one that grows a restore path moves to
+    // PowerSuspendRegister and drops its veto line.
+    duetos::power::PowerSuspendVeto("block-storage", "no NVMe/AHCI controller re-init after platform reset");
+    duetos::power::PowerSuspendVeto("net", "no NIC controller re-init after platform reset");
 
     // Security event ring + IR runbook: stand up the structured
     // event surface BEFORE any wall TU starts publishing. Storage

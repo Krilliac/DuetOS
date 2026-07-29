@@ -124,6 +124,13 @@ void TssInit();
 /// ring-3 smoke task sets it once at entry and never revisits.
 void TssSetRsp0(u64 rsp0);
 
+/// Read back this CPU's TSS RSP0. The S3 suspend path saves it before
+/// the power transition and hands it to the wake trampoline, because
+/// RSP0 is scheduler-owned state that no re-init function would
+/// reconstruct — a resume that left it zero would fault on the first
+/// ring 3 -> ring 0 transition after wake.
+u64 TssCurrentRsp0();
+
 /// Check whether all three IST stack canaries are still the magic
 /// pattern planted by TssInit. Returns false if any has been
 /// overwritten — indicates a stack blown through its 4 KiB budget,

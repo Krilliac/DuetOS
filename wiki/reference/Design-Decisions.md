@@ -13441,3 +13441,50 @@ markers for its richest input. Three discovery layers were added (runtime
   is the duplication the anti-bloat rules forbid, and a second
   hit-test surface over the same actions is a second thing to keep in
   phase with the paint.
+
+### DD - S3 resume restores raw saved state, it does not replay boot init
+
+- **Context:** ACPI S3 destroys every architectural register. Something
+  has to rebuild GDTR / IDTR / TR / CR0 / CR4 / EFER / the SYSCALL MSRs
+  / FS+GS bases before C++ can run again. The tempting option is to
+  re-call the boot bring-up functions (`GdtInit`, `IdtInit`,
+  `SyscallInit`, ...), which already know how to build all of it.
+- **Decision:** `AcpiWakeResume64` restores the values saved by
+  `AcpiSuspendEnter`, in assembly, from a fixed-layout
+  `AcpiWakeContext`. The boot init functions are not replayed.
+- **Rules out:** the replay approach. Those functions re-DERIVE state
+  that is only supposed to be identical. TSS `RSP0` is the concrete
+  counter-example - it is scheduler-owned, `TssInit` zeroes it, and a
+  resume that left it zero would fault on the first ring 3 -> ring 0
+  transition after wake. So `RSP0` is saved and restored explicitly.
+  The one thing the resume path does mutate directly is the TSS
+  descriptor's BUSY bit, which survives in the in-memory GDT because
+  the CPU that set it lost power rather than switching away; `ltr` on a
+  busy TSS raises #GP, so it is cleared before TR is reloaded.
+- **Also rules out:** reusing the AP trampoline at physical 0x8000.
+  The AP path jumps to a C++ entry that joins the scheduler; the wake
+  path has to land in a register-restore stub instead. They are
+  adjacent reserved low pages (0x8000 / 0x9000), not one blob.
+
+### DD - a driver that cannot restore itself vetoes the suspend
+
+- **Context:** S3 powers devices off, and QEMU resets every device on
+  wake. A driver with no restore path will come back to a controller in
+  reset state.
+- **Decision:** `kernel/power/suspend.h` makes participation explicit
+  and binary. A driver either registers a `resume` callback
+  (`PowerSuspendRegister`) or registers a permanent
+  `PowerSuspendVeto(name, reason)`. Any registered veto makes every
+  suspend attempt refuse and name the vetoing driver. NVMe / AHCI /
+  e1000 veto today, registered at their attach site rather than
+  unconditionally, so the veto list describes what is actually present.
+- **Rules out:** suspending anyway and letting drivers fail on first
+  use after resume. A machine that returns with a wedged NVMe queue is
+  worse than one that never slept, and the failure would surface far
+  from its cause.
+- **Rules out:** encoding "cannot suspend" as a falsy return.
+  `SuspendOutcome` enumerates six distinct reasons; only `Cycled` means
+  the machine slept. This is the same discipline the MSR lane applied
+  to "unavailable is not a value" - `AcpiSleepTypeFor` returns a bool
+  plus out-params precisely because `SLP_TYP == 0` is a legal encoding
+  and must stay distinguishable from "firmware declares no such state".

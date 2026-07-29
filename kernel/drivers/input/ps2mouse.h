@@ -89,6 +89,13 @@ struct MousePacket
 /// assume packets will arrive.
 void Ps2MouseInit();
 
+/// Re-run the full controller bring-up after an ACPI S3 resume. The
+/// platform reset powered the 8042 down and IoApicInit rebuilt the
+/// redirection table masked, so both the device dialogue and the IRQ
+/// route have to be re-established. Panics if called before the
+/// matching Init — resume is a re-entry, not an alternative entry.
+void Ps2MouseResume();
+
 /// Block the calling task until a full 3-byte packet has been
 /// assembled from the IRQ stream, then return it decoded. Never
 /// blocks if a packet is already queued.

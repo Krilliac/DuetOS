@@ -299,7 +299,12 @@ is a physical-damage surface, so frequency is telemetry only.
 - **No EC region reads.** Most laptop sensors (lid switch, fan RPM,
   ambient temp) hang off the embedded controller; v0 leaves it
   untouched.
-- **No suspend / resume.** S3 / S4 not modelled.
+- **S3 suspend/resume: core landed, gated.** The wake trampoline, the
+  CPU architectural save/restore, the FACS waking-vector handshake and
+  the per-driver Suspend/Resume + veto contract are in tree (see
+  "Suspend-to-RAM (S3)" below). It is REFUSED on any machine that has
+  probed NVMe / AHCI / a NIC, on SMP, and under firmware that declines
+  the waking vector. S4 is not modelled at all.
 - **No CPU P-state / C-state selection.** Frequency / idle stays at
   firmware default.
 - **No SCI handler.** Power button, lid, AC-plug events are dropped.
@@ -327,3 +332,64 @@ is a physical-damage surface, so frequency is telemetry only.
   family
 - [Diagnostics](../kernel/Diagnostics.md) — thermal as a runtime signal
 - [Roadmap](../reference/Roadmap.md) — battery telemetry, suspend / resume
+
+## Suspend-to-RAM (S3)
+
+Landed 2026-07-29. Three pieces:
+
+| Piece | File | Job |
+|---|---|---|
+| ACPI plumbing | `kernel/acpi/acpi.cpp`, `aml.cpp` | `FacsAddress`, `AcpiSetWakingVector`, `AcpiSleepTypeFor`, `AcpiSleepWriteControl`, generic `AmlReadSleepPackage` |
+| Wake trampoline + context | `kernel/arch/x86_64/acpi_wakeup.{S,cpp,h}` | real -> protected -> long mode blob at physical `0x9000`; `AcpiSuspendEnter` / `AcpiWakeResume64` save/restore pair |
+| Orchestration | `kernel/power/suspend.{h,cpp}` | participant + veto registry, refusal outcomes, self-test |
+
+### The refusal contract
+
+`PowerSuspendToRam` returns a `SuspendOutcome`; only `Cycled` means the
+machine slept. The other five each name a distinct reason
+(`no-acpi-s3-package`, `no-waking-vector`, `device-refused`,
+`multiple-cpus-online`, `platform-declined`). Nothing collapses into a
+falsy value: `SLP_TYP == 0` is a legal encoding, so "firmware declares
+no `\_S3`" is carried by a bool return, never by a zero.
+
+Drivers opt in with `PowerSuspendRegister(name, prepare, resume)` or
+opt out with `PowerSuspendVeto(name, reason)`. Today:
+
+| Driver | Status |
+|---|---|
+| serial (16550) | participant — `SerialInit` on resume |
+| PS/2 keyboard, PS/2 mouse | participants — `Ps2KeyboardResume` / `Ps2MouseResume` re-run the 8042 bring-up and re-route the IOAPIC pin |
+| block storage (NVMe / AHCI) | **veto** — no controller re-init after platform reset |
+| NIC | **veto** — no controller re-init after platform reset |
+
+Because the vetoes are registered at the drivers' attach site, S3 is
+available only in the boot window before storage and networking come
+up. That window is where the live self-test runs.
+
+### Proving it
+
+`tools/test/s3-cycle-smoke.sh` boots with `s3test=1`, waits for
+`[suspend] entering S3`, confirms QEMU's run-state is `suspended`,
+delivers a QMP `system_wakeup` (`tools/qemu/qmp.sh wakeup`), then
+requires the resume sentinel, continued log output, and no fault
+signature afterwards.
+
+Two QEMU-specific notes, both learned the hard way:
+
+- **`-no-reboot` breaks S3.** Waking goes THROUGH a platform reset, so
+  `-no-reboot` turns a healthy resume into a shutdown before the guest
+  executes an instruction. `DUETOS_ALLOW_REBOOT=1` drops the flag.
+- **SeaBIOS resumes, OVMF does not.** Under `DUETOS_LEGACY=1` the
+  firmware re-enters the waking vector and the cycle completes. Under
+  OVMF the trampoline's first real-mode breadcrumb never appears, so
+  the firmware is not honouring the vector. UEFI S3 resume is therefore
+  unproven.
+
+### Known limits
+
+- `ResumePlatform` re-maps MMIO as well as re-programming the LAPIC /
+  IOAPIC / HPET. The MMIO arena is a bump allocator with no free, so
+  each cycle leaks arena; an `s3test=1` boot faults later in the VirtIO
+  probe. Tracked as Roadmap item 23.
+- No AP park/resume, so `PowerSuspendCheck` refuses on SMP.
+- S0ix untouched.

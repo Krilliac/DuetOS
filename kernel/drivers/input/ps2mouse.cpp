@@ -478,11 +478,26 @@ bool Ps2MouseControllerBringup()
 
 } // namespace
 
+// Namespace scope so the S3 resume path can reset it — see
+// Ps2MouseResume below.
+static constinit bool s_mouse_initialised = false;
+
+void Ps2MouseInit();
+
+void Ps2MouseResume()
+{
+    // Re-entry after ACPI S3: the aux channel lost power and the
+    // IOAPIC route was rebuilt masked, so the bring-up has to run
+    // again. Not the accidental second init the guard catches.
+    KASSERT(s_mouse_initialised, "drivers/ps2mouse", "Ps2MouseResume before Ps2MouseInit");
+    s_mouse_initialised = false;
+    Ps2MouseInit();
+}
+
 void Ps2MouseInit()
 {
-    static constinit bool s_initialised = false;
-    KASSERT(!s_initialised, "drivers/ps2mouse", "Ps2MouseInit called twice");
-    s_initialised = true;
+    KASSERT(!s_mouse_initialised, "drivers/ps2mouse", "Ps2MouseInit called twice");
+    s_mouse_initialised = true;
 
     // Run steps 1-6 with interrupts disabled. Ps2KeyboardInit has
     // already unmasked IRQ 1, so without this the live keyboard ISR
