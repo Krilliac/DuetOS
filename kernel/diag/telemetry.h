@@ -112,11 +112,32 @@ TelemetryCpuInfo TelemetryCpuSample();
 /// Zero-initialise before first use; the first TelemetryCpuUsageSample
 /// call against a fresh window returns `valid == false`, because a
 /// single reading of a monotonic counter carries no rate information.
+/// Minimum ticks that must accumulate before the window reports a NEW
+/// figure. Below this the sample is not merely noisy, it is misleading:
+/// at a 100 Hz scheduler tick a caller repainting at 60 Hz sees dt == 1,
+/// and (dt - di) / dt can then only ever be 0% or 100%. A Task Manager
+/// polling per paint therefore rendered "Core 0 0%" beside an aggregate
+/// graph reading 59%, because the graph averaged a longer history while
+/// the tiles quantised a one-tick window.
+///
+/// 25 ticks = 250 ms at the default rate: fine enough to feel live,
+/// coarse enough that a busy core cannot round to zero.
+inline constexpr u64 kTelemetryMinWindowTicks = 25;
+
 struct TelemetryCpuWindow
 {
     u64 prev_total[kTelemetryMaxCpus];
     u64 prev_idle[kTelemetryMaxCpus];
     bool seeded;
+
+    /// Last figure computed over a window that met the minimum. Held so
+    /// an over-eager caller keeps seeing the last TRUE reading instead
+    /// of a quantised one; `held_valid` stays false until the first
+    /// qualifying window closes.
+    u8 held_core_pct[kTelemetryMaxCpus];
+    bool held_core_valid[kTelemetryMaxCpus];
+    u8 held_aggregate_pct;
+    bool held_valid;
 };
 
 /// Per-core and aggregate utilisation over the window.
