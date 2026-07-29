@@ -2536,7 +2536,13 @@ void WindowDrawAllOrdered()
             // "secondary chrome label" role — lighter weight than
             // the Title above, matching the dim-ink treatment we
             // already use for this slot.
-            const u32 sep_w = ChromeTextMeasure(ChromeTextRole::Caption, "| ");
+            // The design carries the title/subtitle hierarchy with a gap
+            // and a weight change, not a separator glyph — see
+            // docs/aurora-theme screenshots 17 (Kernel Log) and 19
+            // (Files). Measuring two spaces keeps the gap correct under
+            // both TTF (variable advance) and bitmap (fixed cell) fonts
+            // rather than hard-coding a pixel count.
+            const u32 sep_w = ChromeTextMeasure(ChromeTextRole::Caption, "  ");
             // Only paint if there's room for at least the
             // separator + a few glyphs before the close button.
             if (sub_x + sep_w + 32u < close_left)
@@ -2547,7 +2553,6 @@ void WindowDrawAllOrdered()
                 // that the subtitle reads as secondary, not
                 // background.
                 const u32 ink = LightenRgb(drawn.colour_title, 96);
-                ChromeTextDraw(ChromeTextRole::Caption, sub_x, title_y, "|", ink, drawn.colour_title);
                 // Greedy fit: extend the clipped buffer one
                 // character at a time and stop the moment the
                 // measured advance would overrun the close-button

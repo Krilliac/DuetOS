@@ -3309,7 +3309,12 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // Subtitle for Duet-era chrome to render next to the title.
     // Themes that don't read it (Classic / Slate10 / Amber)
     // ignore the field; the storage is unconditional.
-    duetos::drivers::video::WindowSetSubtitle(logview_handle, "/sys/klog | live");
+    // "\xB7" is U+00B7 MIDDLE DOT as a single Latin-1 byte, which is what
+    // the glyph path wants: Font8x8Lookup indexes raw bytes (0xC2 is A
+    // circumflex, not a UTF-8 lead byte) and the TTF path maps the byte
+    // straight to a codepoint. Writing the character literally in this
+    // UTF-8 source would emit C2 B7 and render as "Â·".
+    duetos::drivers::video::WindowSetSubtitle(logview_handle, "/sys/klog \xB7 live");
 
     duetos::drivers::video::WindowSetContentDraw(
         logview_handle,
