@@ -97,6 +97,7 @@
 - [RBAC and Elevation](security/RBAC-and-Elevation.md)
 - [Driver and Fault Domains](security/Driver-Domains.md)
 - [Persistence (secrets at rest)](security/Persistence.md)
+- [TPM 2.0 (sealing half only)](security/TPM.md)
 - [W^X / NX Enforcement](security/WX-Enforcement.md)
 - [Hardware Safety (default-inert contract)](security/Hardware-Safety.md)
 - [Intel ME / AMD PSP Mitigation](security/ME-PSP-Mitigation.md)

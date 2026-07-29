@@ -489,9 +489,54 @@ if [[ "${DUETOS_IOMMU_DEVICE:-0}" != "0" ]]; then
     echo "[run.sh] Intel VT-d IOMMU device enabled (intremap=off)" >&2
 fi
 
+# Optional TPM 2.0 emulation, backed by a host `swtpm` process. Default
+# off: with no TPM the kernel's TIS probe reads back an all-ones DID/VID
+# from the unbacked 0xFED40000 window and reports ABSENT, which is the
+# path most boots should exercise. DUETOS_TPM=1 starts a per-run swtpm
+# whose state lives in a scratch dir, and attaches it as an ISA tpm-tis
+# device at the architectural TIS window. QEMU then also publishes a
+# TPM2 ACPI table, so this exercises the ACPI discovery path too.
+#
+# Requires `swtpm` on the host (apt-get install swtpm swtpm-tools); if it
+# is missing we fail loudly rather than silently booting without a TPM,
+# because a silent fallback would make an absent-TPM run masquerade as a
+# TPM run and turn the self-test into a false green.
+TPM_DEVICE_ARGS=()
+TPM_STATE_DIR=""
+if [[ "${DUETOS_TPM:-0}" != "0" ]]; then
+    if ! command -v swtpm >/dev/null 2>&1; then
+        echo "[run.sh] DUETOS_TPM=1 but swtpm is not installed" >&2
+        echo "[run.sh]   apt-get install swtpm swtpm-tools" >&2
+        exit 1
+    fi
+    TPM_STATE_DIR="${DUETOS_TPM_STATE_DIR:-$(mktemp -d -t duetos-swtpm-XXXXXX)}"
+    mkdir -p "${TPM_STATE_DIR}"
+    swtpm socket \
+        --tpmstate "dir=${TPM_STATE_DIR}" \
+        --ctrl "type=unixio,path=${TPM_STATE_DIR}/swtpm-sock" \
+        --tpm2 --daemon \
+        --log "file=${TPM_STATE_DIR}/swtpm.log,level=1"
+    # swtpm --daemon returns before the socket is necessarily bound.
+    for _ in $(seq 1 50); do
+        [[ -S "${TPM_STATE_DIR}/swtpm-sock" ]] && break
+        sleep 0.1
+    done
+    if [[ ! -S "${TPM_STATE_DIR}/swtpm-sock" ]]; then
+        echo "[run.sh] swtpm failed to bind ${TPM_STATE_DIR}/swtpm-sock" >&2
+        exit 1
+    fi
+    TPM_DEVICE_ARGS=(
+        -chardev "socket,id=chrtpm,path=${TPM_STATE_DIR}/swtpm-sock"
+        -tpmdev  "emulator,id=tpm0,chardev=chrtpm"
+        -device  "tpm-tis,tpmdev=tpm0"
+    )
+    echo "[run.sh] TPM 2.0 emulation enabled (swtpm state ${TPM_STATE_DIR})" >&2
+fi
+
 QEMU_ARGS=(
     -machine  "${MACHINE_OPTS}"
     "${IOMMU_DEVICE_ARGS[@]}"
+    "${TPM_DEVICE_ARGS[@]}"
     -cpu      "${CPU_MODEL}"
     "${SMP_ARGS[@]}"
     -m        "${RAM_SIZE}"

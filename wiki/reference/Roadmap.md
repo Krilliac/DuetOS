@@ -1618,14 +1618,30 @@ done, it is merely written.
     unvalidated on hardware). What remains is the policy: periodic
     resampling into the heartbeat, throttle thresholds, and battery
     `_BST`/`_BIF` evaluation.
-27. **TPM 2.0 — sealing half only.** Seal / unseal / PCR-measure / hardware
-    RNG, and deliberately NO endorsement-key export, NO quote signing, NO
-    attestation protocol. Enforced by capability, so a guest PE is
-    structurally unable to obtain a stable hardware identifier.
-28. **Full-disk encryption.** [dep: 27] Key sealed to PCR state, so no
-    passphrase on every boot.
-29. **Measured boot as a LOCAL tripwire.** [dep: 27] Detection without
-    reporting — the two are separable and we implement only the first.
+27. **TPM 2.0 — seal / unseal.** [PARTIAL — the rest of item 27 LANDED]
+    The TIS/FIFO transport, presence detection, ACPI TPM2 interface
+    check, PCR extend + read, and the hardware RNG are in and verified
+    live against `swtpm`; so is the permanent refusal of the identity
+    half (EK export, AIKs, quote signing), enforced by a transport
+    allow-list plus the absence of any raw passthrough. See
+    [`TPM`](../security/TPM.md). What remains is sealing itself: the
+    marshalling for `TPM2_CreatePrimary` / `Create` / `Load` / `Unseal`
+    and the trial/policy session handling that binds a sealed blob to a
+    PCR policy. The command codes are already on the allow-list. When a
+    guest-facing seal syscall lands it must be cap-gated and derive key
+    material per-application, salted per install, so two applications
+    cannot correlate on a shared identifier even locally.
+28. **Full-disk encryption.** [dep: 27's seal/unseal] Key sealed to PCR
+    state, so no passphrase on every boot.
+29. ~~**Measured boot as a LOCAL tripwire.**~~ LANDED. PCR 10/11 carry
+    the kernel identity and command line; the composite over PCR 0-7,
+    10 and 11 is read back from the chip and compared against a
+    baseline pinned with `tpm.baseline=`. A mismatch warns and never
+    refuses to boot — refusing would be the lock-out behaviour the
+    design set out to avoid. Detection only: nothing signs a PCR set
+    and nothing sends one anywhere. Remaining limitation, recorded as a
+    `// GAP:` — the baseline shares storage with the thing it measures,
+    which needs the writable persistent store to fix properly.
 30. **Secure Boot chain verification.**
 31. **Bluetooth.** HCI, L2CAP, then HID and A2DP.
 32. **Precision touchpad HID** — gestures, palm rejection.

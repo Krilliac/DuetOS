@@ -315,3 +315,15 @@ add_host_test(policy_shield)
 # extraction, and imitation-by-construction (net == rule level-predicates).
 add_host_test(neural_policy)
 target_sources(test_neural_policy PRIVATE "${CMAKE_SOURCE_DIR}/../../kernel/env/neural_policy.cpp")
+
+# TPM 2.0 wire marshalling (kernel/drivers/tpm/tpm_wire.h): big-endian
+# framing, the commandSize back-patch, byte-exact command encodings, and
+# hostile-reply rejection. Also pins the sealing-only allow-list: the
+# identity-half opcodes (Quote, Certify, ActivateCredential, GetTime, ...)
+# must stay refused, so this test fails if anyone adds attestation.
+add_host_test(tpm_wire)
+
+# Kernel command-line token parser (kernel/util/cmdline.h): key=value
+# lookup incl. prefix collisions, and the strict hex decoder that the TPM
+# measured-boot baseline (tpm.baseline=) depends on.
+add_host_test(cmdline)

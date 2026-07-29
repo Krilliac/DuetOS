@@ -13488,3 +13488,76 @@ markers for its richest input. Three discovery layers were added (runtime
   to "unavailable is not a value" - `AcpiSleepTypeFor` returns a bool
   plus out-params precisely because `SLP_TYP == 0` is a legal encoding
   and must stay distinguishable from "firmware declares no such state".
+
+### DD - TPM: the sealing half is built, the identity half never will be
+
+- **Context:** a TPM offers two separable groups of features. One group
+  - seal/unseal, PCR measurement, hardware RNG, non-exportable key
+  storage - serves the machine's owner. The other - endorsement-key
+  export, attestation identity keys, `TPM2_Quote` and the rest of the
+  signed-assertion commands - serves a remote party trying to identify
+  the machine, or to withhold service from configurations it dislikes.
+  Implementing "TPM support" as a unit would ship both.
+- **Decision:** implement only the first group. The refusal is
+  structural rather than a policy check: `wire::CommandAllowed()` in
+  `kernel/drivers/tpm/tpm_wire.h` is an allow-list the transport
+  enforces before any byte reaches the FIFO, and - the load-bearing
+  part - there is deliberately no raw "submit this buffer to the TPM"
+  entrypoint, so the allow-list cannot be walked around by
+  hand-marshalling a command. The refused opcodes are written down as
+  named constants beside the list, so enabling one is a visible diff
+  directly under the comment explaining why it must not be.
+  `tests/host/test_tpm_wire.cpp` and the boot self-test both assert the
+  refusal, so adding attestation breaks a test gate rather than passing
+  quietly.
+- **The condition that would void it** is recorded in the same header
+  and in [`TPM`](../security/TPM.md): only a DuetOS-internal use for a
+  signed assertion that never leaves the machine, AND a demonstration
+  that the same structure could not be replayed to a remote verifier.
+  "An application requires attestation" is explicitly not sufficient -
+  it is the demand the rule exists to refuse.
+- **Rules out:** (a) a generic `SYS_TPM_COMMAND(buffer)` syscall, which
+  is the natural way to expose a TPM and would make every other layer
+  decorative; (b) exposing the chip's DID/VID or any per-unit value to
+  ring 3 - the identity struct is kernel- and shell-only, and is a
+  model identifier (every chip of a part reports the same values)
+  rather than a unit identifier; (c) a guest-facing seal API in this
+  slice at all, since none was needed yet and shipping one unused would
+  be the "built but not wired in" antipattern.
+- **Also rules out:** refusing to boot on a PCR mismatch. The
+  measured-boot tripwire warns and continues. A kernel that halts
+  because the boot chain changed is implementing exactly the lock-out
+  this decision set out to prevent, only against its own owner.
+- **Evidence:** verified live against `swtpm` under QEMU, not merely
+  compiled - DID/VID `0x00011014`, `TPM2_Startup` including the
+  already-started-by-firmware path, two hardware RNG reads returning
+  different data, PCR read/extend, and a boot digest that is
+  deterministic across identical boots and moves when the configuration
+  changes.
+
+### DD - measured boot excludes the PCRs the boot loader owns
+
+- **Context:** the obvious PCRs for an OS to measure into are 8 and 9,
+  which the TCG convention assigns to the operating system. The
+  measured-boot tripwire first used them, and its composite digest then
+  changed on every boot that pinned a different baseline value, so no
+  boot could ever report a match.
+- **Decision:** measure into PCR 10 (kernel identity) and PCR 11
+  (kernel command line), and compute the composite over PCR 0-7, 10 and
+  11. GRUB's TPM module already measures its own commands into PCR 8
+  and the files it loads into PCR 9, and those commands include the raw
+  kernel command line - so folding 8 and 9 in made the digest depend on
+  the baseline being pinned, meaning pinning it changed it. The
+  `tpm.baseline=` token is separately stripped before PCR 11 for the
+  same self-reference reason.
+- **Rules out:** using PCR 8/9 for any future OS-level measurement
+  while GRUB remains the loader, and measuring the command line
+  verbatim, which would reintroduce the self-reference one level up.
+- **Cost, accepted knowingly:** a tampered `grub.cfg` is no longer
+  covered by the composite. The kernel command line it produces still
+  is, via PCR 11, which is the part that changes the running system.
+- **Evidence:** two boots differing only in the baseline value produced
+  identical PCR 10 and 11 and identical PCR 0-3 and 5-7, differing only
+  in PCR 4 - the boot image, which the QEMU harness rebuilds per
+  command line. The per-PCR values are logged at DEBUG during the fold,
+  which is how this was localised in one boot rather than by bisection.
