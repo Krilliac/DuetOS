@@ -1186,24 +1186,28 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // both, and which one you get depends on optimisation
         // settings, not on anything the loader controls:
         //
-        //   FF 15 <disp32>   call qword [rip+disp32]
-        //                    Direct indirect call through the IAT.
-        //                    slot = ret_addr + disp32.
+        //   [48] FF 15 <disp32>  call qword [rip+disp32]
+        //                        Direct indirect call through the
+        //                        IAT. slot = ret_addr + disp32.
         //
-        //   E8 <rel32>       call rel32 -> 6-byte import thunk
-        //                    whose body is `FF 25 <rel32_2>`
-        //                    (jmp qword [rip+rel32_2]).
-        //                    thunk = ret_addr + rel32
-        //                    slot  = thunk + 6 + rel32_2
+        //   E8 <rel32>           call rel32 -> import thunk whose
+        //                        body is `[48] FF 25 <rel32_2>`
+        //                        (jmp qword [rip+rel32_2]).
+        //                        thunk = ret_addr + rel32
+        //                        slot  = thunk + len + rel32_2
         //
-        // The old decoder implemented only the second shape and
-        // gated it on one byte (`[ret-5] == 0xE8`). A release-built
-        // engine DLL that uses the first shape lands on a `disp32`
-        // byte that is 0xE8 once every 256 imports, and the decoder
-        // then "succeeded" with garbage. Every step below is
-        // validated, and a shape we do not recognise is REPORTED as
-        // unrecognised — a miss you cannot name is expensive, but a
-        // miss named wrongly is worse.
+        // The old decoder implemented only the second shape, only in
+        // its 6-byte width, and gated it on one byte
+        // (`[ret-5] == 0xE8`). That is wrong twice over: a call site
+        // using the first shape lands on a `disp32` byte that reads
+        // 0xE8 once every 256 imports and the decode "succeeded"
+        // with garbage, and a thunk carrying the redundant REX.W
+        // prefix — which is what real MSVC output uses — was
+        // rejected outright.
+        //
+        // Every step below is validated, and a shape we do not
+        // recognise is REPORTED as unrecognised. A miss you cannot
+        // name is expensive; a miss named wrongly is worse.
         const u64 ret_addr = frame->rdi;
         Process* proc = CurrentProcess();
 
@@ -1212,55 +1216,84 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // the log line is self-explaining without a decoder ring.
         const char* undecoded = nullptr;
 
-        // Read the 6 bytes ending at the return address. That
-        // window covers both `FF 15 disp32` and `E8 rel32` (the
-        // latter occupies the last 5 of the 6).
-        u8 site[6] = {};
-        if (ret_addr < 6)
+        // Little-endian signed 32-bit immediate out of a byte window.
+        auto imm32 = [](const u8* p) -> i64
+        {
+            const u32 raw = static_cast<u32>(p[0]) | (static_cast<u32>(p[1]) << 8) | (static_cast<u32>(p[2]) << 16) |
+                            (static_cast<u32>(p[3]) << 24);
+            return static_cast<i64>(static_cast<i32>(raw));
+        };
+
+        // Read the 7 bytes ending at the return address. Every call
+        // shape below puts its 4-byte immediate in the SAME place
+        // within that window — the last four bytes — because they
+        // differ only in how many opcode bytes precede it:
+        //
+        //   w[0] w[1] w[2] w[3..6]
+        //   48   FF   15   disp32   call qword [rip+disp32]  (7 bytes)
+        //        FF   15   disp32   call qword [rip+disp32]  (6 bytes)
+        //             E8   rel32    call rel32               (5 bytes)
+        //
+        // So the two indirect-call forms need no separate arms: the
+        // REX.W prefix is redundant on a 64-bit indirect call and
+        // does not move the displacement.
+        u8 w[7] = {};
+        if (ret_addr < sizeof(w))
         {
             undecoded = "call site below address zero";
         }
-        else if (!mm::CopyFromUser(site, reinterpret_cast<const void*>(ret_addr - 6), sizeof(site)))
+        else if (!mm::CopyFromUser(w, reinterpret_cast<const void*>(ret_addr - sizeof(w)), sizeof(w)))
         {
             undecoded = "call site unreadable";
         }
-        else if (site[0] == 0xFF && site[1] == 0x15)
+        else if (w[1] == 0xFF && w[2] == 0x15)
         {
-            // call qword [rip+disp32]
-            const i32 disp = static_cast<i32>(static_cast<u32>(site[2]) | (static_cast<u32>(site[3]) << 8) |
-                                              (static_cast<u32>(site[4]) << 16) | (static_cast<u32>(site[5]) << 24));
-            slot_va = ret_addr + static_cast<u64>(static_cast<i64>(disp));
+            // Direct indirect call through the IAT.
+            slot_va = ret_addr + static_cast<u64>(imm32(&w[3]));
         }
-        else if (site[1] == 0xE8)
+        else if (w[2] == 0xE8)
         {
-            // call rel32 — target should be a 6-byte import thunk.
-            const i32 rel = static_cast<i32>(static_cast<u32>(site[2]) | (static_cast<u32>(site[3]) << 8) |
-                                             (static_cast<u32>(site[4]) << 16) | (static_cast<u32>(site[5]) << 24));
-            const u64 thunk_va = ret_addr + static_cast<u64>(static_cast<i64>(rel));
-            u8 thunk[6] = {};
-            if (!mm::CopyFromUser(thunk, reinterpret_cast<const void*>(thunk_va), sizeof(thunk)))
+            // call rel32 -> import thunk. MSVC emits the thunk in
+            // two widths and BOTH are live in real binaries:
+            //
+            //   48 FF 25 rel32   rex.W jmp qword [rip+rel32]  (7 bytes)
+            //      FF 25 rel32         jmp qword [rip+rel32]  (6 bytes)
+            //
+            // Only the 6-byte form used to be recognised. Real
+            // BattleBit.exe emits the 7-byte one for its single
+            // import thunk (`UnityPlayer.dll!UnityMain` at .text+0:
+            // `48 ff 25 09 a2 00 00`), so the decode rejected a
+            // perfectly good thunk and the miss stayed unnamed. The
+            // displacement is relative to the END of the
+            // instruction, so the width is what gets added.
+            const u64 thunk_va = ret_addr + static_cast<u64>(imm32(&w[3]));
+            u8 t[7] = {};
+            if (!mm::CopyFromUser(t, reinterpret_cast<const void*>(thunk_va), sizeof(t)))
             {
                 undecoded = "call rel32 target unreadable";
             }
-            else if (thunk[0] != 0xFF || thunk[1] != 0x25)
+            else if (t[0] == 0x48 && t[1] == 0xFF && t[2] == 0x25)
             {
-                // The 0xE8 was a coincidence, or the callee is a
-                // real function rather than an import thunk. Either
-                // way there is no IAT slot behind it.
-                undecoded = "call rel32 target is not an FF25 import thunk";
+                slot_va = thunk_va + 7u + static_cast<u64>(imm32(&t[3]));
+            }
+            else if (t[0] == 0xFF && t[1] == 0x25)
+            {
+                slot_va = thunk_va + 6u + static_cast<u64>(imm32(&t[2]));
             }
             else
             {
-                const i32 rel2 =
-                    static_cast<i32>(static_cast<u32>(thunk[2]) | (static_cast<u32>(thunk[3]) << 8) |
-                                     (static_cast<u32>(thunk[4]) << 16) | (static_cast<u32>(thunk[5]) << 24));
-                slot_va = thunk_va + 6u + static_cast<u64>(static_cast<i64>(rel2));
+                // The 0xE8 was a coincidence, or the callee is a real
+                // function rather than an import thunk. Either way
+                // there is no IAT slot behind it.
+                undecoded = "call rel32 target is not a jmp-indirect import thunk";
             }
         }
         else
         {
-            // `call rax`, `call [reg+disp]`, vtable dispatch, a
-            // tail-`jmp` into the stub, ...
+            // `call rax`, `call [reg+disp]`, vtable dispatch, or a
+            // tail `jmp` through the IAT — in the tail-jmp case the
+            // return address belongs to the caller's caller and the
+            // slot is simply not recoverable from it.
             undecoded = "no recognised direct-call shape at call site";
         }
 
