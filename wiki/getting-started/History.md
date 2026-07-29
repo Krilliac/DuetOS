@@ -1668,6 +1668,48 @@ not a shortfall.
 The blocker was never the loader. It was a security prompt with nobody
 to answer it, hidden behind a diagnostic that guessed.
 
+### 2026-07-29 — the desktop stops being a Windows tribute act
+
+The Aurora shell had been "nearly there" for several sessions, and the
+reason it kept being nearly there is that `tools/qemu/screenshot.sh`
+silently ignored `DUETOS_EXTRA_CMDLINE`. Every screenshot taken to prove
+the redesign was a capture of **Classic**. Once the tool was fixed, the
+first honest side-by-side against the design bundle produced a delta
+list that no longer matched anyone's assumptions — the parts everybody
+had been re-checking (gradient, ring motif, hex texture, icon tiles, the
+floating island) were already right, and the parts nobody had looked at
+were wrong.
+
+Four of them, now closed:
+
+- The desktop was showing nine Windows-shaped icons in a tall column —
+  Computer, Trash, Browser, Help, Terminal, Calculator, Notepad,
+  Settings, Device Mgr — where the design puts four DuetOS-native
+  launchers in a 2×2 block: **Task Manager, Kernel Log, Inspect,
+  Files**. Two of the nine ("Computer" and "Trash") opened the same
+  window, and all nine were already in the Start menu. The desktop now
+  says what this system is for rather than what another system's
+  desktop looks like.
+- The taskbar island had a logo, a stats readout, a tray and a clock,
+  and nothing in between. It now carries the **search pill** and the
+  **pinned app row** the design puts there, with the indicator pill
+  under each button doing the work: focused, running, or — for a pinned
+  launcher that isn't open — deliberately nothing.
+- A **clock/date gadget** now floats at the right edge. Its dial has no
+  second hand, because the compositor cannot honestly claim to update
+  one.
+- The wallpaper read as an overall teal-green field. The cause was
+  taking the design's blob percentages literally when they are measured
+  against a layer that is `inset:-10%` and stops at `transparent 70%` —
+  so every blob was too big and sat too far from its edge, and an
+  earlier attempt to compensate by running the peak alphas hot had made
+  the wash broader still. Corrected geometry, literal alphas.
+
+The lesson worth keeping is the first paragraph's, not the last four
+bullets': for three sessions the tooling was answering a different
+question than the one being asked, and every conclusion drawn on top of
+it was confidently wrong.
+
 ## How to read the rest of the tree
 
 - `CLAUDE.md` — the authoritative project context, coding standards,

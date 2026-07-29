@@ -925,38 +925,41 @@ this is decided, visual-fidelity work must be verified with
 
 
 
-### Aurora desktop-shell fidelity deltas (first valid comparison, 2026-07-29)
+### Aurora desktop-shell residuals (2026-07-29)
 
-Measured by capturing `theme=duet` with the now-fixed `tools/qemu/screenshot.sh`
-and diffing against `docs/aurora-theme` screenshot 01-desktop-overview. Every
-earlier comparison was invalid -- the tool ignored the theme flag and captured
-Classic -- so this is the first delta list that describes the real gap. The
-shell itself (teal gradient, ring motif, hex-dump texture, proportional label
-font, rounded icon tiles, floating centred taskbar pill) **is implemented and
-matches**; what follows is what remains.
+The four fidelity deltas from the first valid `theme=duet` comparison have
+landed -- desktop icon set, taskbar search pill + pinned app row, the
+clock/date gadget, and the wallpaper glow geometry. See
+`wiki/subsystems/Compositor.md` for what shipped. What is still open:
 
-1. **Desktop icon set is the wrong list.** The design puts four DuetOS-native
-   app launchers on the desktop -- Task Manager, Kernel Log, Inspect, Files --
-   in a 2x2 grid. The implementation shows a nine-item Windows-like set
-   (Computer, Trash, Browser, Help, Terminal, Calculator, Notepad, Settings,
-   Device Mgr) in a single tall column. This is the largest single visual
-   difference and is pure data, not layout work.
-2. **Taskbar pill is missing its centre section.** The design's pill carries,
-   left to right: a refresh/logo affordance, a **Search box**, a row of pinned
-   app icons, then the CPU sparkline + fps + tray + clock. The implementation
-   has the logo, the CPU/fps readout, tray and clock, but no search box and no
-   pinned-app row.
-3. **No desktop widgets.** The design's right edge carries a clock/date widget,
-   a graph panel and a stats panel floating over the wallpaper. Nothing
-   equivalent exists.
-4. **Wallpaper is more saturated than the design.** The reference is near-black
-   with two localised glows (teal top-right, amber bottom-left); the
-   implementation reads as an overall teal-green field with the amber glow
-   confined to the lower-left corner. Same motif, different value range --
-   a palette/falloff tune, not new geometry.
-
-Note the taskbar's "60.0 FPS" is a hard-coded string literal, not a measured
-figure; the CPU percentage beside it is real.
+1. **The other two gadgets.** README §1's gadget column carries three panels;
+   only the clock/date one exists. The kernel panel wants a 46-px CPU
+   sparkline plus five mono stat rows, and the ABI-peers panel wants live
+   per-ABI process counts. Both need a sampled history the compositor does
+   not keep today -- `SchedStatsRead()` returns an instantaneous figure, so a
+   sparkline would have to invent its own ring buffer. Concrete plan: add a
+   small per-second sample ring next to the scheduler stats (one owner, read
+   by both the gadget and the taskbar's stats pill), then paint the two
+   panels beneath the clock at the same column width. Do not ship either
+   panel before the ring exists -- a sparkline drawn from one sample is a
+   decoration that claims to be a measurement.
+2. **"60.0 FPS" is still a hard-coded string literal**, in both the taskbar
+   stats pill and (by omission) the gadget column. The CPU percentage beside
+   it is real. Either wire it to a real present counter or drop the cell;
+   leaving a fabricated number in the chrome is the worse of the three
+   options.
+3. **The taskbar's stats pill has no sparkline.** README §10 puts a 52-px
+   sparkline between the CPU percentage and the fps figure. Blocked on the
+   same sample ring as item 1.
+4. **START paints a solid accent tile, not the design's sheer mark.** The
+   reference's START is a dark cell carrying only the teal/amber arcs; the
+   implementation fills the whole 44-px cell with `taskbar_accent`, which
+   makes it the loudest object on the island. Surfaced while landing the
+   search pill next to it; not fixed because it is a separate cell with its
+   own hover/open states.
+5. **The pinned row is five buttons, not the design's nine.** Deliberate --
+   see Design-Decisions "Pinned taskbar launchers are scaled by island
+   budget, not transcribed from the 1920 canvas".
 
 
 ### Run a real 32-bit application — PE32 game executable (failure ladder)
