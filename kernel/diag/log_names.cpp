@@ -290,6 +290,10 @@ const char* SyscallName(u64 num)
         return "SYS_GDI_GET_SYS_COLOR";
     case 128:
         return "SYS_GDI_GET_SYS_COLOR_BRUSH";
+    case 214:
+        return "SYS_GDI_SET_DIBITS";
+    case 215:
+        return "SYS_GDI_GET_DIBITS";
     default:
         return "?";
     }

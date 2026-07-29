@@ -82,6 +82,7 @@
 #include "sched/sched.h"
 #include "subsystems/graphics/graphics.h"
 #include "subsystems/translation/translate.h"
+#include "subsystems/win32/gdi_dib.h"
 #include "subsystems/win32/gdi_objects.h"
 #include "subsystems/win32/thunks.h"
 #include "subsystems/win32/thunk_retirement_policy.h"
@@ -4751,6 +4752,12 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     case SYS_GDI_BITBLT_DC:
         subsystems::win32::DoGdiBitBltDC(frame);
+        return;
+    case SYS_GDI_SET_DIBITS:
+        subsystems::win32::DoGdiSetDiBits(frame);
+        return;
+    case SYS_GDI_GET_DIBITS:
+        subsystems::win32::DoGdiGetDiBits(frame);
         return;
     case SYS_GDI_STRETCH_BLT_DC:
         subsystems::win32::DoGdiStretchBltDC(frame);
