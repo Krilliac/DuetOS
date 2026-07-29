@@ -13817,3 +13817,58 @@ The log line distinguishes the two cases, because reporting
 `miss path="/lib/api-ms-win-..."` made a correct refusal look like a
 missing file and invited exactly the wrong fix.
 
+### DD - delay-load imports are bound eagerly at load, not through `__delayLoadHelper2`
+
+`IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT` (directory 13) is walked by the
+loader and every slot in the delay IAT is bound before the entry point
+runs, through the same `BindImportSymbol` ladder a static import uses.
+The image's own `__delayLoadHelper2` therefore never executes.
+
+**The alternative that was rejected: making the helper path work.**
+The intuitive reading is that "supporting delay-load faithfully" means
+implementing `__delayLoadHelper2`. It does not. That helper is linked
+INTO the PE from `delayimp.lib`; no operating system supplies it. All
+Windows does is *nothing* — the linker's `__tailMerge` stub calls the
+image's own helper, which calls `LoadLibraryA` + `GetProcAddress` and
+overwrites the slot. So "implement the helper path" really means "make
+`LoadLibrary` + `GetProcAddress` good enough to resolve everything a
+delay import can name."
+
+They are not, and deliberately so. `SYS_DLL_PROC_ADDRESS` reports a
+**miss** for thunk-table entries that are no-op stubs, because
+applications use `GetProcAddress(h, "Foo") != NULL` as a feature probe
+and handing back a stub would turn "this OS lacks Foo, take the
+fallback" into "Foo exists" followed by a silent wrong answer (see the
+comment at that syscall). It also has no route to the api-set contract
+table, the retired-name aliases, the UCRT `_o_` alias set, or the data
+landing pads. Routing delay-load through it would resolve strictly
+*less* than the static binder does, on the same names, in the same
+process.
+
+Eager binding also puts delay-load misses into the diagnostics that
+already exist — `[win32-miss]` slot naming, the fix journal, the
+`import resolved to NO-OP stub` warnings — instead of into a helper the
+kernel cannot see inside.
+
+**What this costs.** Delay-loading is sometimes used as a probe: wrap
+the first call in `__try/__except(DELAYLOAD_...)` and treat
+`ERROR_MOD_NOT_FOUND` as "optional feature absent". Under eager binding
+that exception never fires, because the slot was bound at load. In
+practice this changes nothing on DuetOS: the DLL set is preloaded and
+fixed, so a DLL that is not in the set makes the eager bind fall
+through to the same catch-all a static import would get. If a real
+binary is ever observed depending on the *failure* of a delay-load
+probe, the fix is to make the unresolvable case leave the slot alone
+(the machinery for that already exists — see below) rather than to
+resurrect the helper path.
+
+**What is deliberately NOT symmetric with static imports.** A malformed
+delay directory fails the load exactly like a malformed import table
+does. An *unresolvable symbol* does not: the slot is left holding the
+linker's own thunk. Failing the load there would reject binaries that
+delay-load a DLL they never touch, which is the entire point of
+delay-loading, and Windows loads such images fine. Leaving the slot
+alone is also the safer half of the trade — the guest's helper then
+goes through `GetProcAddress`, which has its own gates, rather than the
+kernel binding a name a static import was refused.
+

@@ -485,6 +485,11 @@ syscall routing shows up immediately.
   kernel thunk page and is not linkable from `kernel32.dll`; a
   version that loaded the library but could not bind the export
   would hand back a bogus pointer and crash at the call site.
+  This costs nothing in practice: the PE loader binds
+  `IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT` eagerly at load
+  ([`PE-Loader.md`](../subsystems/PE-Loader.md#delay-load-imports)),
+  so an image's own `__delayLoadHelper2` — the only caller these
+  two entry points have — never runs.
   `RtlUnwind` — the real unwinder is `ntdll!RtlUnwindEx`;
   `kernel32.dll` links `/nodefaultlib` with no import table, so it
   cannot forward, and a kernel32-local copy would be a second

@@ -130,6 +130,7 @@
 #include "generated_handle_smoke_pe.h"
 #include "generated_browser_pe_pe.h"
 #include "generated_tls_pe_pe.h"
+#include "generated_delayload_pe.h"
 #include "generated_seh_pe_pe.h"
 #include "generated_cxxeh_pe.h"
 #include "generated_seh_try_pe.h"
@@ -2958,6 +2959,14 @@ void StartRing3SmokeTask()
         // [tls_pe] RESULT PASS on success.
         SpawnPeFile("ring3-tls-pe", fs::generated::kBinTlsPeBytes, fs::generated::kBinTlsPeBytes_len, CapSetTrusted(),
                     fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        // Delay-load imports: a PE whose user32 imports live in
+        // IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT (directory 13) rather
+        // than the ordinary import table. The image carries its own
+        // __delayLoadHelper2 as a tripwire, so a loader that did NOT
+        // bind the delay IAT is caught rather than silently papered
+        // over by the helper. Prints [delayload_pe] RESULT PASS.
+        SpawnPeFile("ring3-delayload-pe", fs::generated::kBinDelayloadPeBytes, fs::generated::kBinDelayloadPeBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
         // T6-02 slice 1: SEH foundation. Exercises real
         // RtlCaptureContext + table-based RtlLookupFunctionEntry
         // (.pdata parse). Prints [seh_pe] RESULT PASS on success.

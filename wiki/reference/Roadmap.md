@@ -1664,10 +1664,19 @@ done, it is merely written.
    `QueryInterface`, apartments, in-proc servers. `ole32.c` is 32 exports in
    one file today. Gates installers, shell integration and most DirectX
    device-creation paths — the largest multiplier left after 1-3.
-6. **Delay-load imports.** `ResolveDelayLoadedAPI` / `DelayLoadFailureHook`
-   were deliberately skipped once because they need `GetProcAddress`, which
-   lives only in the thunk page and is not linkable from kernel32.
-7. **PE TLS callbacks.** The TLS directory callback array is never run.
+6. ~~**Delay-load imports.**~~ **LANDED 2026-07-29.** The premise was
+   wrong twice over: `__delayLoadHelper2` is linked INTO the image by
+   `delayimp.lib`, not provided by the OS, and routing through it would
+   have gone through `GetProcAddress`, which deliberately reports a miss
+   for no-op thunks. The loader binds directory 13 eagerly through the
+   static-import ladder instead — see
+   [`PE-Loader.md`](../subsystems/PE-Loader.md#delay-load-imports).
+7. ~~**PE TLS callbacks.**~~ **ALREADY LANDED** (T6-01, predates this
+   backlog). `SetupStaticTls` copies the `.tls` template, wires
+   `TEB.ThreadLocalStoragePointer` and `_tls_index`, and runs
+   `AddressOfCallBacks` in ring 3 via a generated trampoline on both
+   process and thread attach. Remaining gap is DETACH — see
+   [`PE-Loader.md`](../subsystems/PE-Loader.md#tls-static-data-and-callbacks).
 8. **SxS / assembly manifests.** Many installers and MFC apps depend on it.
 9. **Console completeness.** Screen buffers, VT sequences, real
    `ReadConsoleInput`.
