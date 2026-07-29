@@ -627,6 +627,22 @@ struct Process
     DllImage dll_images[kDllImageCap];
     u64 dll_image_count;
 
+    // Side-by-side DLL search directory: where this process's own
+    // image was read from on disk, so a DLL that ships beside the
+    // .exe can be found. Set once by `SpawnPeFile` from the
+    // caller-supplied origin and never mutated afterwards.
+    //
+    // BOTH the load-time import binder and the runtime
+    // `SYS_DLL_LOAD_FROM_PATH` (LoadLibraryW) read THIS field, so
+    // there is exactly one search path per process rather than a
+    // bind-time and a run-time answer that can disagree.
+    //
+    // `sxs_dir[0] == '\0'` means the image had no on-disk origin
+    // (embedded blob, ramfs) and no side-by-side search happens.
+    // See `loader/sxs_dll.h` for the search + gating rules.
+    u32 sxs_volume;
+    char sxs_dir[40];
+
     // Win32 file-handle table — backs CreateFileW / ReadFile /
     // CloseHandle / SetFilePointerEx. Each slot is
     // tagged by `kind`: a Ramfs-backed slot stores a pointer to

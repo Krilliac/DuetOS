@@ -272,8 +272,13 @@ void CmdPeexec(u32 argc, char** argv)
     duetos::core::CapSetAdd(caps, duetos::core::kCapSerialConsole);
     duetos::core::CapSetAdd(caps, duetos::core::kCapFsRead);
     duetos::core::CapSetAdd(caps, duetos::core::kCapSpawnThread);
+    // Pass the on-disk origin (volume 0, `path` reduced to its leaf
+    // above, so the search directory is the volume root) so a DLL
+    // shipped beside the .exe resolves. Disk-sourced DLLs go through
+    // the same security guard the .exe itself does.
     const u64 pid = duetos::core::SpawnPeFile(path, pe_buf, static_cast<u64>(n), caps, duetos::fs::RamfsSandboxRoot(),
-                                              /*frame_budget=*/512, duetos::core::kTickBudgetSandbox);
+                                              /*frame_budget=*/512, duetos::core::kTickBudgetSandbox, caps,
+                                              /*origin_volume=*/0, path);
     // SpawnPeFile copied the image into the child's address space; the
     // read buffer is no longer needed.
     duetos::mm::KFree(pe_buf);
