@@ -70,7 +70,7 @@ for src in "${SRC_FILES[@]}"; do
         -fno-builtin-memcpy \
         -fno-builtin-memmove \
         -mno-red-zone \
-        -fno-asynchronous-unwind-tables \
+        -fasynchronous-unwind-tables \
         -O2 \
         -Wall -Wextra \
         "${src}" \

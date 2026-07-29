@@ -144,6 +144,17 @@ set +e
     /export:memcpy \
     /export:memmove \
     /export:memset \
+    `# C++ / SEH personality. A PE that imports these from msvcrt` \
+    `# (mingw-w64 and older MSVC link lines do) used to get the` \
+    `# ExceptionContinueSearch / terminate fallback thunks, so its` \
+    `# catch blocks never ran even though the real engine was` \
+    `# already loaded. Forwarders bind those importers to the one` \
+    `# implementation each: the MSVC C++ personality + throw entry` \
+    `# live in vcruntime140, the SEH personality in ntdll.` \
+    /export:__CxxFrameHandler3=vcruntime140.__CxxFrameHandler3 \
+    /export:__CxxFrameHandler4=vcruntime140.__CxxFrameHandler4 \
+    /export:_CxxThrowException=vcruntime140._CxxThrowException \
+    /export:__C_specific_handler=ntdll.__C_specific_handler \
     /out:"${DLL}" \
     "${OBJ}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}

@@ -117,9 +117,8 @@ __declspec(dllexport) NO_BUILTIN_MEMOPS void* memchr(const void* ptr, int c, siz
  * - _CxxThrowException — builds the C++ EXCEPTION_RECORD
  *   (0xE06D7363) and enters ntdll's NtRaiseException dispatcher.
  *
- * - __C_specific_handler — kept as a ContinueSearch shim (ntdll
- *   owns the real SEH one; left as-is to avoid perturbing the
- *   working __try/__except path).
+ * - __C_specific_handler — PE forwarder to ntdll's real
+ *   scope-table walker (link line, not a body here).
  *
  * - _purecall / __std_terminate — terminate.
  * - __std_exception_copy / _destroy — no-op.
@@ -134,15 +133,12 @@ __declspec(dllexport) NO_BUILTIN_MEMOPS void* memchr(const void* ptr, int c, siz
         __builtin_unreachable();                                                                                       \
     } while (0)
 
-__declspec(dllexport) unsigned long __C_specific_handler(void* ExceptionRecord, void* EstablisherFrame,
-                                                         void* ContextRecord, void* DispatcherContext)
-{
-    (void)ExceptionRecord;
-    (void)EstablisherFrame;
-    (void)ContextRecord;
-    (void)DispatcherContext;
-    return 1; /* ExceptionContinueSearch */
-}
+/* __C_specific_handler is NOT defined here. It is a PE forwarder to
+ * ntdll's real scope-table walker, declared on the link line — see
+ * build-vcruntime140-dll.sh. The local body used to be a constant
+ * ExceptionContinueSearch, so a PE that resolved the SEH personality
+ * against vcruntime140 rather than ntdll silently lost every
+ * __except filter while the working engine sat one DLL away. */
 
 /* ------------------------------------------------------------------
  * MSVC x64 C++ exception handling (FH3).
@@ -168,7 +164,19 @@ __declspec(dllexport) unsigned long __C_specific_handler(void* ExceptionRecord, 
  * common scalar / single-cross case is correct); the FH4
  * compressed FuncInfo encoding (FH4 falls back to FH3 decode and
  * only works for the uncompressed subset); ESTypeList /
- * exception-spec; rethrow of the in-flight object.
+ * exception-spec.
+ *
+ * STUB: rethrow. A bare `throw;` compiles to
+ * _CxxThrowException(NULL, NULL), and this personality has no
+ * record of which exception the running catch is handling, so the
+ * re-raise carries a NULL ThrowInfo, matches nothing, and the
+ * process dies on the unhandled path. Supplying the in-flight
+ * object is the easy half; the hard half is that the re-raise's
+ * frame walk arrives back at the SAME function whose ControlPc is
+ * still inside the inner try, so the search re-selects the catch it
+ * just came from. MSVC resolves that with the tryblock the catch
+ * funclet belongs to; wiring it needs the funclet-to-tryblock link
+ * threaded through the dispatch, not just a saved object.
  * ------------------------------------------------------------------ */
 
 #define CXX_EXCEPTION 0xE06D7363u
@@ -347,44 +355,13 @@ static void cxxeh_dbg_hex64(char* out, unsigned long long v)
     out[16] = '\0';
 }
 
-/* Invoke a catch / destructor funclet. x64 MSVC funclets receive
- * the establisher frame in rdx (param 2) per the Windows x64 ABI,
- * BUT also expect it spilled to the r8-home shadow slot
- * (`[rsp+0x10]` from the funclet's view) because MSVC-generated
- * catch funclets typically reload it from there rather than
- * trusting rdx across nested calls inside the funclet body.
- * cxxeh_pe's catch funclet for `test_int_throw` literally does
- * `mov rdx, [rsp+0x10]` as its first instruction — without the
- * spill the funclet reads stale shadow-space bytes (a previous
- * caller's r8) and `lea rbp, [rdx+0x40]` lands rbp at a garbage
- * address. Stack-discipline-wise this is the MSVC funclet ABI we
- * have to honour even though our cxx_call_funclet itself doesn't
- * need the spill. Naked so our prologue can't shift the frame
- * the funclet addresses through rdx. */
-__attribute__((naked)) static void* cxx_call_funclet(void* handler, u64_ frame)
-{
-    __asm__ volatile("push %rbp\n\t"
-                     "mov %rsp,%rbp\n\t"
-                     "sub $0x20,%rsp\n\t"
-                     "and $-16,%rsp\n\t"
-                     "mov %rdx,%r8\n\t"  /* r8 = frame (establisher) */
-                     "mov %rcx,%rax\n\t" /* rax = handler */
-                     "xor %ecx,%ecx\n\t"
-                     "mov %r8,%rdx\n\t" /* rdx = frame (ABI arg 2) */
-                     /* The CALL below pushes 8 bytes (return addr),
-                      * so the funclet's `[rsp+0x10]` from its view is
-                      * `[rsp+0x08]` from ours (pre-call). Store the
-                      * establisher there so the funclet's first
-                      * `mov rdx, [rsp+0x10]` (re-reading the
-                      * r8/rdx-home slot) sees the right frame. */
-                     "mov %r8,0x08(%rsp)\n\t"
-                     "call *%rax\n\t"
-                     "leave\n\t"
-                     "ret\n\t");
-}
+/* Invoke a catch / destructor funclet. The body lives in
+ * cxx_funclet.S: it has to honour the MSVC funclet ABI's
+ * establisher-frame spill AND carry real unwind data so a `throw;`
+ * inside a catch body can be unwound back out through this frame.
+ * See that file for both. */
+extern void* __attribute__((ms_abi)) cxx_call_funclet(void* handler, u64_ frame);
 
-/* Run this frame's destructor funclets walking the unwind map from
- * `cur` toward `target` (exclusive). */
 static void cxx_local_unwind(u64_ image_base, const cxx_function_descr* d, u64_ frame, int cur, int target)
 {
     if (d->unwind_map == 0)

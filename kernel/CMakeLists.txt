@@ -992,6 +992,7 @@ duetos_embed_blob(generated_vcruntime140_dll.h
         "${CMAKE_SOURCE_DIR}/userland/libs/vcruntime140/chkstk.S"
         "${CMAKE_SOURCE_DIR}/userland/libs/vcruntime140/guard_icall.S"
         "${CMAKE_SOURCE_DIR}/userland/libs/vcruntime140/cxx_throw.S"
+        "${CMAKE_SOURCE_DIR}/userland/libs/vcruntime140/cxx_funclet.S"
         "${CMAKE_CURRENT_BINARY_DIR}/generated_ntdll_dll.h"
     COMMENT "Compiling + embedding vcruntime140.dll (C++ EH personality + memops; links ntdll.lib)")
 

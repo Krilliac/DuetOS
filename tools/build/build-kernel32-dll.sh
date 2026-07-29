@@ -87,7 +87,7 @@ for src in "${SRC_FILES[@]}"; do
         -fno-stack-protector \
         -fno-builtin \
         -mno-red-zone \
-        -fno-asynchronous-unwind-tables \
+        -fasynchronous-unwind-tables \
         -O2 \
         -Wall -Wextra \
         "${src}" \
