@@ -177,6 +177,23 @@ case "${PROFILE}" in
             "[cxxeh] destructor-unwind: PASS"
             "[cxxeh] catch-all: PASS"
             "[cxxeh] RESULT PASS"
+            # PE loader directories 9 (TLS) and 13 (delay-load). Same
+            # reasoning as the EH block above, and verified the hard
+            # way: with ResolveDelayImports stubbed out, delayload_pe
+            # printed RESULT FAIL and BOTH this script and
+            # boot-log-analyze.sh still exited 0. Naming the PASS
+            # lines is the only thing that turns these fixtures into
+            # a gate.
+            "[tls_pe] tls-callback-before-entry: PASS"
+            "[tls_pe] static-tls-template-copied: PASS"
+            "[tls_pe] per-thread-tls-template: PASS"
+            "[tls_pe] dll-thread-attach: PASS"
+            "[tls_pe] per-thread-tls-independence: PASS"
+            "[tls_pe] RESULT PASS"
+            "[delayload_pe] delay-iat-bound-outside-image: PASS"
+            "[delayload_pe] delay-call-returns-real-values: PASS"
+            "[delayload_pe] helper-not-invoked: PASS"
+            "[delayload_pe] RESULT PASS"
         )
         ;;
     pe-winapi)

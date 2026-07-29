@@ -320,16 +320,18 @@ false` because it dies by design).
 - **No SEH unwinding by the loader**. SEH tables are mapped (so the
   `__C_specific_handler` finds them) but DuetOS does not unwind on
   exception — exceptions inside a PE produce a process kill.
-- **TLS image-level callbacks**: a non-empty `IMAGE_DIRECTORY_ENTRY_TLS`
-  callback array causes the PE load to fail with
-  `TlsCallbacksUnsupported` (`pe_loader.cpp:1805`). Empty callback
-  arrays — common because the MSVC CRT reserves the directory
-  unconditionally — are accepted. A future slice will inject a
-  per-process x64 thunk that walks the array with
-  `(rcx=image_base, rdx=DLL_PROCESS_ATTACH, r8=nullptr)` before
-  jumping to the real entry. Per-thread TLS init via the CRT works.
-- **No PE delay-load** (`__delayLoadHelper2`). Anything imported by
-  delay-load is treated as eager-import.
+- **TLS callbacks on DETACH**: `DLL_PROCESS_ATTACH` and
+  `DLL_THREAD_ATTACH` are both delivered (see
+  [TLS](#tls-static-data-and-callbacks) below), but neither
+  `DLL_THREAD_DETACH` nor `DLL_PROCESS_DETACH` is — thread and
+  process teardown do not walk the callback array. A CRT that frees
+  per-thread state in its detach callback leaks it.
+- **VC6-form delay-load descriptors** (`dlattrRva` clear, fields are
+  absolute VAs rather than RVAs) are skipped rather than bound. No
+  linker since VC7 emits that form.
+- **Delay-load unload** (`__FUnloadDelayLoadedDLL2`) is not supported;
+  the descriptor's `rvaHmod` slot is left at zero because eager
+  binding means the image's helper never populates it.
 - **Bound imports**: the `IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT` directory
   is silently ignored. Bound imports are an optimisation that
   embeds resolved addresses for a specific DLL build; safe to skip
@@ -378,3 +380,80 @@ evolution.
 - [Memory Management](../kernel/Memory-Management.md) — `AddressSpace`
 - [Process Model](../kernel/Process-Model.md)
 - [W^X / NX Enforcement](../security/WX-Enforcement.md)
+
+## TLS: static data and callbacks
+
+`IMAGE_DIRECTORY_ENTRY_TLS` (directory 9) is fully handled by
+`SetupStaticTls` in `kernel/loader/pe_loader.cpp`. Per process:
+
+1. The `.tls` template (`StartAddressOfRawData .. EndAddressOfRawData`)
+   plus `SizeOfZeroFill` zero bytes is copied into a fresh block at
+   `0x72000000`, capped at 64 pages.
+2. A slot-array page at `0x71000000` gets `slot[0]` = that block, and
+   `TEB.ThreadLocalStoragePointer` (`gs:[0x58]`) points at the array —
+   which is exactly what compiler-emitted `__declspec(thread)` access
+   dereferences.
+3. `AddressOfIndex` is written with 0 (single module). The VA is
+   bounds-checked against the image extent first, so a hostile TLS
+   directory cannot aim that four-byte write at the image's own R-X
+   `.text`, the TEB, or the proc-env page.
+4. If `AddressOfCallBacks` is a non-empty NULL-terminated array (capped
+   at 16 entries), an R-X page at `0x73000000` is filled with a
+   generated trampoline that calls each callback with the Win64 ABI
+   (`rcx=image_base, rdx=DLL_PROCESS_ATTACH, r8=0`) and then jumps to
+   the real entry point. `PeLoadResult::entry_va` becomes the
+   trampoline, so the callbacks run **in ring 3, in the target
+   process** — the kernel never calls a guest function pointer.
+
+`SYS_THREAD_CREATE` (`kernel/subsystems/win32/thread_syscall.cpp`)
+replicates the template per thread and generates the same shape of
+trampoline with `rdx=DLL_THREAD_ATTACH`.
+
+**Evidence:** `userland/apps/tls_pe/tls_pe.c`, spawned as
+`ring3-tls-pe` under the `pe-hello` smoke profile. It asserts the
+callback ran before the entry point, the template survived the copy,
+a worker thread got its own block, `DLL_THREAD_ATTACH` was delivered,
+and the two threads' blocks are independent — printing
+`[tls_pe] RESULT PASS`.
+
+## Delay-load imports
+
+`IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT` (directory 13) is bound
+**eagerly at load**, by `ResolveDelayImports` in
+`kernel/loader/pe_loader.cpp`. The descriptor walk itself lives in
+`kernel/loader/pe_delay_import.h` — a pure, allocation-free header so
+it can be driven from a hosted test and from the PE fuzzer.
+
+A delay-load call site is `call [__imp_Foo]` through a slot in the
+image's delay IAT, structurally identical to a static import. What
+differs is who fills the slot: normally the linker seeds it with the
+address of its own `__tailMerge` stub, and the first call goes through
+the image's statically-linked `__delayLoadHelper2`. DuetOS fills the
+slot first, through the **same** resolution ladder a static import
+uses (`BindImportSymbol`), so the helper never runs. See
+[Design-Decisions](../reference/Design-Decisions.md) for why eager
+binding was chosen over making the helper path work.
+
+Failure policy deliberately differs from the static path:
+
+| Condition | Static imports | Delay imports |
+|---|---|---|
+| Table / descriptor out of bounds, name unterminated, IAT slot outside the image | fail the load | fail the load |
+| Symbol unresolvable (fail-closed gate refused it) | fail the load | skip the slot, leave the linker's thunk |
+
+Skipping returns the image to exactly the state its linker built, which
+is what Windows does too — a delay-loaded DLL that is never called must
+not stop the image loading. Every skip is logged as
+`[pe-delay] refused <dll>!<fn>`, and misses that reach a catch-all are
+staged into the same `[win32-miss]` slot-name table and fix-journal that
+static imports use.
+
+**Evidence:** `userland/apps/delayload_pe/delayload_pe.c`, spawned as
+`ring3-delayload-pe` under the `pe-hello` smoke profile. It is linked
+with `lld-link /delayload:user32.dll` and supplies its own
+`__delayLoadHelper2` as a **tripwire** rather than a resolver, so a
+loader that failed to bind is caught instead of being papered over. It
+asserts that the delay IAT slot points outside the image before the
+first call, that the delay-loaded calls return user32's real values,
+and that the helper was never invoked — printing
+`[delayload_pe] RESULT PASS`.

@@ -308,6 +308,11 @@ target_compile_options(test_kernel32_nls PRIVATE -Wno-conversion -Wno-sign-conve
 add_host_test(pe_resources)
 target_compile_options(test_pe_resources PRIVATE -Wno-conversion -Wno-sign-conversion)
 
+# Delay-load import descriptor walk (kernel/loader/pe_delay_import.h):
+# the directory-head bound, per-descriptor truncation, the all-zero
+# terminator, and every form the binder must refuse rather than trust.
+add_host_test(pe_delay_import)
+
 # Browser omnibox URL-vs-search classifier (kernel/apps/browser/omnibox_classify.h).
 add_host_test(omnibox_classify)
 

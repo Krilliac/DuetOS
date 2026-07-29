@@ -1260,6 +1260,21 @@ duetos_stub_dll(d3dcompiler 0x102E0000 "D3DCompile,D3DCompile2,D3DCreateBlob,D3D
 duetos_stub_dll(vulkan_1 0x102F0000 "vkCreateInstance,vkDestroyInstance,vkEnumeratePhysicalDevices,vkCreateDevice,vkDestroyDevice,vkGetDeviceQueue,vkDeviceWaitIdle,vkQueueWaitIdle,vkEnumerateInstanceVersion,vkEnumerateInstanceExtensionProperties,vkEnumerateInstanceLayerProperties,vkGetInstanceProcAddr,vkGetDeviceProcAddr,DuetOS_Vk_GetStatsCounter,DuetOS_Vk_ClearFramebufferRgba,DuetOS_Vk_CreateSurface,DuetOS_Vk_DestroySurface,DuetOS_Vk_Present,vkCreateShaderModule,vkDestroyShaderModule,vkAllocateMemory,vkFreeMemory,vkCreateBuffer,vkDestroyBuffer,vkBindBufferMemory,vkMapMemory,vkUnmapMemory,vkCreateImage,vkDestroyImage,vkBindImageMemory,vkCreateCommandPool,vkDestroyCommandPool,vkAllocateCommandBuffers,vkBeginCommandBuffer,vkEndCommandBuffer,vkCmdClearColorImage,vkQueueSubmit,vkCreatePipelineLayout,vkDestroyPipelineLayout,vkCreateRenderPass,vkDestroyRenderPass,vkCreateGraphicsPipelines,vkCreateComputePipelines,vkDestroyPipeline,vkCmdBindPipeline,vkCmdDraw,vkCmdDispatch,vkCmdBindVertexBuffers,vkCmdBindIndexBuffer,vkUpdateDescriptorSets,vkCreateDescriptorSetLayout,vkDestroyDescriptorSetLayout,vkCreateDescriptorPool,vkDestroyDescriptorPool,vkAllocateDescriptorSets,vkCmdBindDescriptorSets" "vulkan-1")
 
 
+# delayload_pe.exe — proves the loader binds data directory 13
+# (IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT). mingw's ld cannot emit that
+# directory, so this fixture is built the cxxeh_pe way: clang
+# --target=x86_64-pc-windows-msvc + lld-link /delayload:user32.dll
+# against our own kernel32.lib / user32.lib. Must come after the
+# user32 stub-DLL rule so that import lib exists.
+duetos_embed_blob(generated_delayload_pe.h
+    SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-delayload-pe.sh"
+    SRC     "${CMAKE_SOURCE_DIR}/userland/apps/delayload_pe/delayload_pe.c"
+    EXTRA_DEPS
+        "${CMAKE_CURRENT_BINARY_DIR}/generated_kernel32_dll.h"
+        "${CMAKE_CURRENT_BINARY_DIR}/generated_user32_dll.h"
+    COMMENT "Compiling + embedding delayload_pe.exe (lld-link /delayload)")
+
+
 # ----------------------------------------------------------------------------
 # KARL — Kernel Address Randomized Link (OpenBSD-style).
 #

@@ -62,6 +62,7 @@
 #include "log/klog.h"
 #include "loader/apiset_static.h"
 #include "loader/image_patch.h"
+#include "loader/pe_delay_import.h"
 #include "loader/pe_exports.h"
 #include "proc/process.h"
 #include "util/random.h"
@@ -116,6 +117,7 @@ constexpr u64 kDirEntryImport = 1;
 constexpr u64 kDirEntryBaseReloc = 5;
 constexpr u64 kDirEntryTls = 9;
 constexpr u64 kDirEntryLoadConfig = 10;
+constexpr u64 kDirEntryDelayImport = 13;
 
 // IMAGE_LOAD_CONFIG_DIRECTORY64 field offsets used by the
 // /GS cookie-randomisation slice. The LoadConfig struct grows
@@ -644,8 +646,6 @@ const char* PeStatusName(PeStatus s)
         return "RelocsNonEmpty";
     case PeStatus::TlsPresent:
         return "TlsPresent";
-    case PeStatus::TlsCallbacksUnsupported:
-        return "TlsCallbacksUnsupported";
     case PeStatus::StubsPageAllocFail:
         return "StubsPageAllocFail";
     case PeStatus::ImageBaseOutOfRange:
@@ -1722,6 +1722,371 @@ bool TryResolveViaPreloadedDllsAnyName(const char* fn_name, const DllImage* dlls
     return false;
 }
 
+// Resolve ONE import symbol to the VA its IAT slot should hold.
+//
+// This is the whole resolution ladder — preloaded-DLL EAT (by name
+// or ordinal), the api-set contract table and its any-name
+// fallback, the retired-kernel32 fail-closed gates, the UCRT `_o_`
+// alias retry, and finally the kernel thunk page with its data /
+// function catch-alls. It also does the bookkeeping that goes with
+// a miss: the fix-journal record, the `[win32-miss]` slot-name
+// staging, and the cleanroom trace.
+//
+// Factored out of ResolveImports so the DELAY-load binder
+// (ResolveDelayImports) resolves symbols through the exact same
+// ladder. Two copies would be the "parallel subsystems doing the
+// same thing" drift hazard in its most dangerous form: what would
+// drift are the fail-closed retirement gates, and a binder that
+// silently missed one would let a delay import bind a name a
+// static import is refused.
+//
+// `iat_slot_va` is the (not yet bounds-checked) VA of the slot this
+// symbol will land in; it is used only to name the slot in the
+// miss-logger table. `diag_table_rva` / `diag_slot_index` identify
+// the symbol in cleanroom trace records.
+//
+// Returns false when a fail-closed gate REFUSES the symbol. The
+// static-import caller must treat that as a fatal load failure (a
+// half-resolved IAT leaves slots that #PF on first call); the
+// delay-load caller leaves the slot alone instead, which returns
+// the image to exactly the state its linker built.
+struct ImportBinding
+{
+    u64 stub_va = 0;
+    bool is_noop_stub = false;
+};
+
+// Decode one IMAGE_THUNK_DATA name-table entry into (ordinal,
+// name). `ent` is the already-read entry: 8 bytes for PE32+, 4 for
+// PE32, with the ordinal flag at bit 63 / bit 31 respectively and
+// the IBN RVA in the low 31 bits either way.
+//
+// By-ordinal entries have no name in the file, so a printable "#N"
+// is synthesised into the caller-owned `ordinal_buf` — the caller
+// must keep that buffer alive for as long as it uses `out_name`
+// (StagedMissAppend takes its own copy for exactly this reason).
+//
+// Returns false when the IBN RVA does not translate or its name is
+// unterminated; the caller decides whether that is fatal. The
+// static-import and delay-import name tables have identical shape,
+// which is why this is shared rather than copied.
+bool DecodeThunkSymbol(const u8* file, u64 file_len, const PeHeaders& h, u64 ent, char (&ordinal_buf)[32],
+                       u32& out_ordinal, const char*& out_name)
+{
+    const u64 ordinal_flag = h.is_pe32 ? (u64(1) << 31) : (u64(1) << 63);
+    if ((ent & ordinal_flag) != 0)
+    {
+        out_ordinal = static_cast<u32>(ent & 0xFFFF);
+        ordinal_buf[0] = '#';
+        u32 v = out_ordinal;
+        u32 digits = 0;
+        char tmp[10];
+        if (v == 0)
+        {
+            tmp[digits++] = '0';
+        }
+        while (v > 0 && digits < sizeof(tmp))
+        {
+            tmp[digits++] = static_cast<char>('0' + (v % 10));
+            v /= 10;
+        }
+        u32 out_idx = 1;
+        for (u32 i = digits; i > 0 && out_idx + 1 < sizeof(ordinal_buf); --i)
+            ordinal_buf[out_idx++] = tmp[i - 1];
+        ordinal_buf[out_idx] = '\0';
+        out_name = ordinal_buf;
+        return true;
+    }
+
+    out_ordinal = 0;
+    const u32 ibn_rva = static_cast<u32>(ent & 0x7FFFFFFF);
+    const u64 ibn_off = RvaToFile(file, file_len, h, ibn_rva);
+    if (ibn_off == ~u64(0) || ibn_off + 2 >= file_len)
+        return false;
+    out_name = BoundedCString(file, file_len, ibn_off + 2);
+    return out_name != nullptr;
+}
+
+bool BindImportSymbol(const PeHeaders& h, const char* dll_name, const char* fn_name, bool is_ordinal_import,
+                      u32 import_ordinal, const DllImage* preloaded_dlls, u64 preloaded_dll_count, u64 iat_slot_va,
+                      u32 diag_table_rva, u32 diag_slot_index, ImportBinding& out)
+{
+    using arch::SerialLineGuard;
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+    u64 stub_va = 0;
+    bool is_noop_stub = false;
+    // Consult the caller's preloaded DLL table first.
+    // On hit, the IAT slot is patched with
+    // the DLL's export VA directly — no trampoline page,
+    // no syscall round-trip — the PE's indirect call
+    // lands straight in the DLL's code. Misses fall
+    // through to Win32ThunksLookupKind, preserving all
+    // existing stub-table behaviour.
+    //
+    // For ordinal imports we ask the EAT directly; the
+    // flat stub table is name-keyed and won't match.
+    bool resolved_via_dll =
+        is_ordinal_import
+            ? TryResolveViaPreloadedDllsByOrdinal(dll_name, import_ordinal, preloaded_dlls, preloaded_dll_count,
+                                                  &stub_va)
+            : TryResolveViaPreloadedDlls(dll_name, fn_name, preloaded_dlls, preloaded_dll_count, &stub_va);
+    // API-set fallback: an "api-ms-win-*" / "ext-ms-win-*"
+    // import names a contract, not a real DLL, so the exact
+    // (dll,fn) match above misses. Two-tier resolution:
+    //
+    //   1. Static contract→host table (`apiset_static.cpp`).
+    //      The deterministic path — for every contract the
+    //      table knows, route directly to the named host
+    //      and let the normal (dll, fn) resolution chase
+    //      forwarders. Boot log says `via-apiset-table`.
+    //
+    //   2. "First preloaded export by name" heuristic
+    //      (`TryResolveViaPreloadedDllsAnyName`). Fallback
+    //      for contracts the table doesn't yet cover. Boot
+    //      log says `via-apiset-heuristic` so a new
+    //      contract is grep-able and can be added to the
+    //      table in a follow-on slice.
+    const bool is_api_set_contract = IsApiSetContract(dll_name);
+    const char* api_set_host = nullptr;
+    if (is_api_set_contract)
+        (void)::duetos::loader::ApiSetResolveStatic(dll_name, &api_set_host);
+
+    const bool is_retired_kernel32_name =
+        !h.is_pe32 && !is_ordinal_import && win32::IsRetiredKernel32ImportName(fn_name);
+    const bool is_recognized_retired_api_set_alias = is_retired_kernel32_name && is_api_set_contract &&
+                                                     api_set_host != nullptr &&
+                                                     win32::IsKernel32ProviderDll(api_set_host);
+    const bool retired_import_requires_real_dll =
+        is_retired_kernel32_name && (win32::IsKernel32ProviderDll(dll_name) || is_recognized_retired_api_set_alias);
+
+    // API-set prefixes alone are not authority to borrow a kernel32
+    // export. A retired name may use a contract only when the static
+    // schema recognizes it and names kernel32/kernelbase as its host.
+    // This prevents fabricated or wrong-host contracts from turning
+    // a fail-closed retirement entry into an any-name lookup.
+    if (is_retired_kernel32_name && is_api_set_contract && !is_recognized_retired_api_set_alias)
+    {
+        core::CleanroomTraceRecord("pe-loader", "retired-import-invalid-api-set", h.image_base, diag_table_rva,
+                                   diag_slot_index);
+        core::LogWithString(core::LogLevel::Error, "pe-resolve", "RETIRED import uses unrecognized API-set provider",
+                            "fn", fn_name);
+        core::LogWithString(core::LogLevel::Error, "pe-resolve", "  from", "dll", dll_name);
+        return false;
+    }
+
+    // All retired aliases converge on the one linked artifact the
+    // build verifies. This also handles direct kernelbase imports
+    // and API-set contracts whose nominal host is kernelbase.
+    if (!resolved_via_dll && retired_import_requires_real_dll &&
+        TryResolveViaPreloadedDlls("kernel32.dll", fn_name, preloaded_dlls, preloaded_dll_count, &stub_va))
+    {
+        resolved_via_dll = true;
+        SerialLineGuard guard;
+        SerialWrite("[pe-resolve] via-retired-provider ");
+        SerialWrite(dll_name);
+        SerialWrite("!");
+        SerialWrite(fn_name);
+        SerialWrite(" -> kernel32.dll\n");
+    }
+
+    if (!resolved_via_dll && !is_ordinal_import && is_api_set_contract && !retired_import_requires_real_dll)
+    {
+        if (api_set_host != nullptr)
+        {
+            if (TryResolveViaPreloadedDlls(api_set_host, fn_name, preloaded_dlls, preloaded_dll_count, &stub_va))
+            {
+                resolved_via_dll = true;
+                SerialLineGuard guard;
+                SerialWrite("[pe-resolve] via-apiset-table ");
+                SerialWrite(dll_name);
+                SerialWrite("!");
+                SerialWrite(fn_name);
+                SerialWrite(" -> ");
+                SerialWrite(api_set_host);
+                SerialWrite("\n");
+            }
+        }
+        // A retired kernel32 contract must never bind a coincidental
+        // same-name export from some other preloaded DLL.
+        if (!resolved_via_dll &&
+            TryResolveViaPreloadedDllsAnyName(fn_name, preloaded_dlls, preloaded_dll_count, &stub_va))
+        {
+            resolved_via_dll = true;
+            SerialLineGuard guard;
+            SerialWrite("[pe-resolve] via-apiset-heuristic ");
+            SerialWrite(dll_name);
+            SerialWrite("!");
+            SerialWrite(fn_name);
+            SerialWrite("\n");
+        }
+    }
+    // UCRT `_o_` alias set. `api-ms-win-crt-private-l1-1-0.dll`
+    // re-exports the CRT entry points a second time under an `_o_`
+    // prefix — `_o__initialize_onexit_table` IS
+    // `_initialize_onexit_table`, `_o_exit` IS `exit`. The prefix is
+    // an internal UCRT convention for the ordinal-stable private
+    // contract, not a distinct function, so nothing implements the
+    // prefixed spelling anywhere and the exact-name lookups above
+    // always miss.
+    //
+    // This is high-volume, not exotic: a survey of every 64-bit .exe
+    // in System32 counted ~241 binaries importing each of ~15 `_o_`
+    // names. Every base name they want is already provided by
+    // ucrtbase and by the thunk table; only the spelling stood in
+    // the way.
+    //
+    // `_o_` is a reserved UCRT-internal prefix — no shipping Win32
+    // DLL exports an unrelated symbol starting with it — so the
+    // retry cannot shadow a legitimate export. It is gated behind
+    // every earlier attempt having failed, and behind the retired-
+    // name rules, so it can only ever turn a miss into a hit.
+    if (!resolved_via_dll && !is_ordinal_import && !retired_import_requires_real_dll && fn_name[0] == '_' &&
+        fn_name[1] == 'o' && fn_name[2] == '_' && fn_name[3] != '\0')
+    {
+        const char* alias_base = fn_name + 3;
+        if (TryResolveViaPreloadedDllsAnyName(alias_base, preloaded_dlls, preloaded_dll_count, &stub_va))
+        {
+            resolved_via_dll = true;
+            SerialLineGuard guard;
+            SerialWrite("[pe-resolve] via-ucrt-o-alias ");
+            SerialWrite(dll_name);
+            SerialWrite("!");
+            SerialWrite(fn_name);
+            SerialWrite(" -> ");
+            SerialWrite(alias_base);
+            SerialWrite("\n");
+        }
+    }
+
+    // A retired PE32+ named import may use an exact DLL EAT hit or
+    // one of the canonical aliases above. If neither resolves, fail
+    // the load before the legacy table or generic miss logger,
+    // regardless of which DLL name supplied the malformed import.
+    // A successful same-name export from another real DLL remains
+    // valid because PE export names are scoped to their DLL.
+    if (win32::RetiredNamedImportWouldFallBack(h.is_pe32, is_ordinal_import, resolved_via_dll, fn_name))
+    {
+        core::CleanroomTraceRecord("pe-loader", "retired-import-unresolved", h.image_base, diag_table_rva,
+                                   diag_slot_index);
+        core::LogWithString(core::LogLevel::Error, "pe-resolve", "RETIRED import requires exact real DLL export", "fn",
+                            fn_name);
+        core::LogWithString(core::LogLevel::Error, "pe-resolve", "  from", "dll", dll_name);
+        return false;
+    }
+    // A missing PE32+ ordinal from a kernel provider has no
+    // trustworthy name to match against the retirement manifest
+    // or legacy table. Reject it instead of turning "#<ordinal>"
+    // into a generic success-returning miss thunk. Valid ordinals
+    // have already resolved through the preloaded DLL EAT above.
+    if (!resolved_via_dll && !h.is_pe32 && is_ordinal_import &&
+        (win32::IsKernel32ProviderDll(dll_name) || is_api_set_contract))
+    {
+        core::CleanroomTraceRecord("pe-loader", "kernel-provider-ordinal-unresolved", h.image_base, diag_table_rva,
+                                   diag_slot_index);
+        core::LogWithString(core::LogLevel::Error, "pe-resolve", "UNRESOLVED kernel-provider ordinal import", "fn",
+                            fn_name);
+        core::LogWithString(core::LogLevel::Error, "pe-resolve", "  from", "dll", dll_name);
+        return false;
+    }
+    if (resolved_via_dll)
+    {
+        SerialLineGuard guard;
+        SerialWrite("[pe-resolve] via-dll ");
+        SerialWrite(dll_name);
+        SerialWrite("!");
+        SerialWrite(fn_name);
+        SerialWrite(" -> ");
+        SerialWriteHex(stub_va);
+        SerialWrite("\n");
+    }
+    else if (h.is_pe32)
+    {
+        // PE32: via-DLL miss → 32-bit unresolved-import
+        // stub. The Win32ThunksLookupKind path is skipped
+        // because the bytes in the PE32+ thunks page are
+        // 64-bit instructions; decoding them in compat
+        // mode would trap immediately. The 32-bit stub
+        // does SYS_EXIT(0xDEAD0042) so any call to an
+        // unresolved import cleanly terminates the
+        // process with a readable signature.
+        stub_va = win32::kWin32Thunks32UnresolvedVa;
+        is_noop_stub = true;
+    }
+    else if (!win32::Win32ThunksLookupKind(dll_name, fn_name, &stub_va, &is_noop_stub))
+    {
+        // Unresolved import. Two flavours land here:
+        //   - Functions -> miss-logger thunk (R-X). Called,
+        //     logs a `[win32-miss]` line + returns 0.
+        //   - Data (e.g. `?cout@std@@3V...`) -> data-miss
+        //     landing pad in the proc-env page (RW, zeros).
+        //     Dereferenced as a pointer, reads 0 cleanly.
+        // Picking the right bucket is a name-mangling
+        // heuristic (`?...@@3...` == MSVC global data).
+        const bool is_data = win32::IsLikelyDataImport(fn_name);
+        // Per-name override for the well-known CRT data
+        // globals (`__argv`, `__argc`, `_acmdln`, `_wcmdln`)
+        // takes precedence over the all-zeros catch-all.
+        // The IAT then holds the proc-env slot VA holding
+        // the populated value, so the CRT's argv-walk
+        // pattern reads a real argv pointer instead of zero.
+        const bool data_named = is_data && win32::Win32ThunksLookupDataNamed(fn_name, &stub_va);
+        const bool ok = data_named ? true
+                        : is_data  ? win32::Win32ThunksLookupDataCatchAll(&stub_va)
+                                   : win32::Win32ThunksLookupCatchAll(&stub_va);
+        if (!ok)
+        {
+            core::CleanroomTraceRecord("pe-loader", "import-unresolved-fatal", h.image_base, diag_table_rva,
+                                       diag_slot_index);
+            core::LogWithString(core::LogLevel::Error, "pe-resolve", "UNRESOLVED import (no catch-all)", "fn", fn_name);
+            core::LogWithString(core::LogLevel::Error, "pe-resolve", "  from", "dll", dll_name);
+            return false;
+        }
+        // Only the catch-all branches resolved to a generic
+        // noop. data_named pointed the IAT slot at a real
+        // proc-env-backed location; treating it as a noop
+        // would re-journal it on every boot via the
+        // noop-stub path below, defeating the dedup the
+        // data-named lookup provides.
+        is_noop_stub = !data_named;
+        const char* msg = data_named ? "data import -> proc-env named slot"
+                          : is_data  ? "unknown import -> data-miss zero pad"
+                                     : "unknown import -> catch-all NO-OP";
+        core::LogWithString(core::LogLevel::Warn, "pe-resolve", msg, "fn", fn_name);
+        core::LogWithString(core::LogLevel::Warn, "pe-resolve", "  from", "dll", dll_name);
+        // Record the gap. Build "<dll>!<fn>" into a 40-byte
+        // source_pin so the reviewer can grep the journal
+        // for "ntdll!Nt..." or "kernel32!Csr...". `data_named`
+        // is excluded — those resolved to a real proc-env slot
+        // and aren't a gap. Skipped when the journal isn't
+        // initialised (very early boot, before kernel_main
+        // has called FixJournalInit; static allocator
+        // ordering should make that unreachable in practice).
+        if (!data_named)
+        {
+            char pin[40];
+            BuildFixJournalPin(dll_name, fn_name, pin);
+            (void)::duetos::diag::FixJournalRecord(::duetos::diag::FixDetector::UnmappedThunk, pin,
+                                                   is_data ? "implement data import" : "implement Win32 thunk",
+                                                   h.image_base, 0);
+        }
+        // Only FUNCTION catch-alls need an IAT-slot-name
+        // mapping in the miss-logger table — data imports
+        // aren't called, just dereferenced, and will never
+        // hit SYS_WIN32_MISS_LOG.
+        if (!is_data)
+        {
+            StagedMissAppend(iat_slot_va, fn_name);
+        }
+        core::CleanroomTraceRecord("pe-loader", is_data ? "import-data-catchall" : "import-fn-catchall", h.image_base,
+                                   diag_table_rva, diag_slot_index);
+    }
+
+    out.stub_va = stub_va;
+    out.is_noop_stub = is_noop_stub;
+    return true;
+}
+
 bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm::AddressSpace* as,
                     const DllImage* preloaded_dlls, u64 preloaded_dll_count)
 {
@@ -1828,338 +2193,35 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
             // Ordinal vs by-name: the ordinal flag bit gates which
             // shape the low bits carry.
             const bool is_ordinal_import = (ent & ordinal_flag) != 0;
-            const u32 import_ordinal = static_cast<u32>(ent & 0xFFFF);
-
+            u32 import_ordinal = 0;
             const char* fn_name = nullptr;
             char ordinal_name_buf[32];
-            if (is_ordinal_import)
+            if (!DecodeThunkSymbol(file, file_len, h, ent, ordinal_name_buf, import_ordinal, fn_name))
             {
-                // Synthesize a printable "#N" name for log lines and
-                // catch-all path. The buffer is on the stack — the
-                // by-name fall-through never persists this pointer.
-                ordinal_name_buf[0] = '#';
-                u32 v = import_ordinal;
-                u32 digits = 0;
-                char tmp[10];
-                if (v == 0)
                 {
-                    tmp[digits++] = '0';
-                }
-                while (v > 0 && digits < sizeof(tmp))
-                {
-                    tmp[digits++] = static_cast<char>('0' + (v % 10));
-                    v /= 10;
-                }
-                u32 out_idx = 1;
-                for (u32 i = digits; i > 0 && out_idx + 1 < sizeof(ordinal_name_buf); --i)
-                    ordinal_name_buf[out_idx++] = tmp[i - 1];
-                ordinal_name_buf[out_idx] = '\0';
-                fn_name = ordinal_name_buf;
-            }
-            else
-            {
-                const u32 ibn_rva = static_cast<u32>(ent & 0x7FFFFFFF);
-                const u64 ibn_off = RvaToFile(file, file_len, h, ibn_rva);
-                if (ibn_off == ~u64(0) || ibn_off + 2 >= file_len)
-                {
-                    {
-                        SerialLineGuard guard;
-                        SerialWrite("[pe-resolve] ");
-                        SerialWrite(dll_name);
-                        SerialWrite(": IBN rva out of bounds\n");
-                    }
-                    return false;
-                }
-                fn_name = BoundedCString(file, file_len, ibn_off + 2);
-                if (fn_name == nullptr)
-                {
-                    {
-                        SerialLineGuard guard;
-                        SerialWrite("[pe-resolve] ");
-                        SerialWrite(dll_name);
-                        SerialWrite(": IBN name unterminated\n");
-                    }
-                    return false;
-                }
-            }
-
-            u64 stub_va = 0;
-            bool is_noop_stub = false;
-            // Consult the caller's preloaded DLL table first.
-            // On hit, the IAT slot is patched with
-            // the DLL's export VA directly — no trampoline page,
-            // no syscall round-trip — the PE's indirect call
-            // lands straight in the DLL's code. Misses fall
-            // through to Win32ThunksLookupKind, preserving all
-            // existing stub-table behaviour.
-            //
-            // For ordinal imports we ask the EAT directly; the
-            // flat stub table is name-keyed and won't match.
-            bool resolved_via_dll =
-                is_ordinal_import
-                    ? TryResolveViaPreloadedDllsByOrdinal(dll_name, import_ordinal, preloaded_dlls, preloaded_dll_count,
-                                                          &stub_va)
-                    : TryResolveViaPreloadedDlls(dll_name, fn_name, preloaded_dlls, preloaded_dll_count, &stub_va);
-            // API-set fallback: an "api-ms-win-*" / "ext-ms-win-*"
-            // import names a contract, not a real DLL, so the exact
-            // (dll,fn) match above misses. Two-tier resolution:
-            //
-            //   1. Static contract→host table (`apiset_static.cpp`).
-            //      The deterministic path — for every contract the
-            //      table knows, route directly to the named host
-            //      and let the normal (dll, fn) resolution chase
-            //      forwarders. Boot log says `via-apiset-table`.
-            //
-            //   2. "First preloaded export by name" heuristic
-            //      (`TryResolveViaPreloadedDllsAnyName`). Fallback
-            //      for contracts the table doesn't yet cover. Boot
-            //      log says `via-apiset-heuristic` so a new
-            //      contract is grep-able and can be added to the
-            //      table in a follow-on slice.
-            const bool is_api_set_contract = IsApiSetContract(dll_name);
-            const char* api_set_host = nullptr;
-            if (is_api_set_contract)
-                (void)::duetos::loader::ApiSetResolveStatic(dll_name, &api_set_host);
-
-            const bool is_retired_kernel32_name =
-                !h.is_pe32 && !is_ordinal_import && win32::IsRetiredKernel32ImportName(fn_name);
-            const bool is_recognized_retired_api_set_alias = is_retired_kernel32_name && is_api_set_contract &&
-                                                             api_set_host != nullptr &&
-                                                             win32::IsKernel32ProviderDll(api_set_host);
-            const bool retired_import_requires_real_dll =
-                is_retired_kernel32_name &&
-                (win32::IsKernel32ProviderDll(dll_name) || is_recognized_retired_api_set_alias);
-
-            // API-set prefixes alone are not authority to borrow a kernel32
-            // export. A retired name may use a contract only when the static
-            // schema recognizes it and names kernel32/kernelbase as its host.
-            // This prevents fabricated or wrong-host contracts from turning
-            // a fail-closed retirement entry into an any-name lookup.
-            if (is_retired_kernel32_name && is_api_set_contract && !is_recognized_retired_api_set_alias)
-            {
-                core::CleanroomTraceRecord("pe-loader", "retired-import-invalid-api-set", h.image_base, first_thunk,
-                                           fn_idx);
-                core::LogWithString(core::LogLevel::Error, "pe-resolve",
-                                    "RETIRED import uses unrecognized API-set provider", "fn", fn_name);
-                core::LogWithString(core::LogLevel::Error, "pe-resolve", "  from", "dll", dll_name);
-                return false;
-            }
-
-            // All retired aliases converge on the one linked artifact the
-            // build verifies. This also handles direct kernelbase imports
-            // and API-set contracts whose nominal host is kernelbase.
-            if (!resolved_via_dll && retired_import_requires_real_dll &&
-                TryResolveViaPreloadedDlls("kernel32.dll", fn_name, preloaded_dlls, preloaded_dll_count, &stub_va))
-            {
-                resolved_via_dll = true;
-                SerialLineGuard guard;
-                SerialWrite("[pe-resolve] via-retired-provider ");
-                SerialWrite(dll_name);
-                SerialWrite("!");
-                SerialWrite(fn_name);
-                SerialWrite(" -> kernel32.dll\n");
-            }
-
-            if (!resolved_via_dll && !is_ordinal_import && is_api_set_contract && !retired_import_requires_real_dll)
-            {
-                if (api_set_host != nullptr)
-                {
-                    if (TryResolveViaPreloadedDlls(api_set_host, fn_name, preloaded_dlls, preloaded_dll_count,
-                                                   &stub_va))
-                    {
-                        resolved_via_dll = true;
-                        SerialLineGuard guard;
-                        SerialWrite("[pe-resolve] via-apiset-table ");
-                        SerialWrite(dll_name);
-                        SerialWrite("!");
-                        SerialWrite(fn_name);
-                        SerialWrite(" -> ");
-                        SerialWrite(api_set_host);
-                        SerialWrite("\n");
-                    }
-                }
-                // A retired kernel32 contract must never bind a coincidental
-                // same-name export from some other preloaded DLL.
-                if (!resolved_via_dll &&
-                    TryResolveViaPreloadedDllsAnyName(fn_name, preloaded_dlls, preloaded_dll_count, &stub_va))
-                {
-                    resolved_via_dll = true;
                     SerialLineGuard guard;
-                    SerialWrite("[pe-resolve] via-apiset-heuristic ");
+                    SerialWrite("[pe-resolve] ");
                     SerialWrite(dll_name);
-                    SerialWrite("!");
-                    SerialWrite(fn_name);
-                    SerialWrite("\n");
+                    SerialWrite(": INT entry name out of bounds\n");
                 }
-            }
-            // UCRT `_o_` alias set. `api-ms-win-crt-private-l1-1-0.dll`
-            // re-exports the CRT entry points a second time under an `_o_`
-            // prefix — `_o__initialize_onexit_table` IS
-            // `_initialize_onexit_table`, `_o_exit` IS `exit`. The prefix is
-            // an internal UCRT convention for the ordinal-stable private
-            // contract, not a distinct function, so nothing implements the
-            // prefixed spelling anywhere and the exact-name lookups above
-            // always miss.
-            //
-            // This is high-volume, not exotic: a survey of every 64-bit .exe
-            // in System32 counted ~241 binaries importing each of ~15 `_o_`
-            // names. Every base name they want is already provided by
-            // ucrtbase and by the thunk table; only the spelling stood in
-            // the way.
-            //
-            // `_o_` is a reserved UCRT-internal prefix — no shipping Win32
-            // DLL exports an unrelated symbol starting with it — so the
-            // retry cannot shadow a legitimate export. It is gated behind
-            // every earlier attempt having failed, and behind the retired-
-            // name rules, so it can only ever turn a miss into a hit.
-            if (!resolved_via_dll && !is_ordinal_import && !retired_import_requires_real_dll && fn_name[0] == '_' &&
-                fn_name[1] == 'o' && fn_name[2] == '_' && fn_name[3] != '\0')
-            {
-                const char* alias_base = fn_name + 3;
-                if (TryResolveViaPreloadedDllsAnyName(alias_base, preloaded_dlls, preloaded_dll_count, &stub_va))
-                {
-                    resolved_via_dll = true;
-                    SerialLineGuard guard;
-                    SerialWrite("[pe-resolve] via-ucrt-o-alias ");
-                    SerialWrite(dll_name);
-                    SerialWrite("!");
-                    SerialWrite(fn_name);
-                    SerialWrite(" -> ");
-                    SerialWrite(alias_base);
-                    SerialWrite("\n");
-                }
+                return false;
             }
 
-            // A retired PE32+ named import may use an exact DLL EAT hit or
-            // one of the canonical aliases above. If neither resolves, fail
-            // the load before the legacy table or generic miss logger,
-            // regardless of which DLL name supplied the malformed import.
-            // A successful same-name export from another real DLL remains
-            // valid because PE export names are scoped to their DLL.
-            if (win32::RetiredNamedImportWouldFallBack(h.is_pe32, is_ordinal_import, resolved_via_dll, fn_name))
+            ImportBinding binding;
+            const u64 iat_slot_off = u64(first_thunk) + u64(fn_idx) * ent_bytes;
+            if (!BindImportSymbol(h, dll_name, fn_name, is_ordinal_import, import_ordinal, preloaded_dlls,
+                                  preloaded_dll_count, h.image_base + iat_slot_off, first_thunk, fn_idx, binding))
             {
-                core::CleanroomTraceRecord("pe-loader", "retired-import-unresolved", h.image_base, first_thunk, fn_idx);
-                core::LogWithString(core::LogLevel::Error, "pe-resolve",
-                                    "RETIRED import requires exact real DLL export", "fn", fn_name);
-                core::LogWithString(core::LogLevel::Error, "pe-resolve", "  from", "dll", dll_name);
                 return false;
             }
-            // A missing PE32+ ordinal from a kernel provider has no
-            // trustworthy name to match against the retirement manifest
-            // or legacy table. Reject it instead of turning "#<ordinal>"
-            // into a generic success-returning miss thunk. Valid ordinals
-            // have already resolved through the preloaded DLL EAT above.
-            if (!resolved_via_dll && !h.is_pe32 && is_ordinal_import &&
-                (win32::IsKernel32ProviderDll(dll_name) || is_api_set_contract))
-            {
-                core::CleanroomTraceRecord("pe-loader", "kernel-provider-ordinal-unresolved", h.image_base, first_thunk,
-                                           fn_idx);
-                core::LogWithString(core::LogLevel::Error, "pe-resolve", "UNRESOLVED kernel-provider ordinal import",
-                                    "fn", fn_name);
-                core::LogWithString(core::LogLevel::Error, "pe-resolve", "  from", "dll", dll_name);
-                return false;
-            }
-            if (resolved_via_dll)
-            {
-                SerialLineGuard guard;
-                SerialWrite("[pe-resolve] via-dll ");
-                SerialWrite(dll_name);
-                SerialWrite("!");
-                SerialWrite(fn_name);
-                SerialWrite(" -> ");
-                SerialWriteHex(stub_va);
-                SerialWrite("\n");
-            }
-            else if (h.is_pe32)
-            {
-                // PE32: via-DLL miss → 32-bit unresolved-import
-                // stub. The Win32ThunksLookupKind path is skipped
-                // because the bytes in the PE32+ thunks page are
-                // 64-bit instructions; decoding them in compat
-                // mode would trap immediately. The 32-bit stub
-                // does SYS_EXIT(0xDEAD0042) so any call to an
-                // unresolved import cleanly terminates the
-                // process with a readable signature.
-                stub_va = win32::kWin32Thunks32UnresolvedVa;
-                is_noop_stub = true;
-            }
-            else if (!win32::Win32ThunksLookupKind(dll_name, fn_name, &stub_va, &is_noop_stub))
-            {
-                // Unresolved import. Two flavours land here:
-                //   - Functions -> miss-logger thunk (R-X). Called,
-                //     logs a `[win32-miss]` line + returns 0.
-                //   - Data (e.g. `?cout@std@@3V...`) -> data-miss
-                //     landing pad in the proc-env page (RW, zeros).
-                //     Dereferenced as a pointer, reads 0 cleanly.
-                // Picking the right bucket is a name-mangling
-                // heuristic (`?...@@3...` == MSVC global data).
-                const bool is_data = win32::IsLikelyDataImport(fn_name);
-                // Per-name override for the well-known CRT data
-                // globals (`__argv`, `__argc`, `_acmdln`, `_wcmdln`)
-                // takes precedence over the all-zeros catch-all.
-                // The IAT then holds the proc-env slot VA holding
-                // the populated value, so the CRT's argv-walk
-                // pattern reads a real argv pointer instead of zero.
-                const bool data_named = is_data && win32::Win32ThunksLookupDataNamed(fn_name, &stub_va);
-                const bool ok = data_named ? true
-                                : is_data  ? win32::Win32ThunksLookupDataCatchAll(&stub_va)
-                                           : win32::Win32ThunksLookupCatchAll(&stub_va);
-                if (!ok)
-                {
-                    core::CleanroomTraceRecord("pe-loader", "import-unresolved-fatal", h.image_base, first_thunk,
-                                               fn_idx);
-                    core::LogWithString(core::LogLevel::Error, "pe-resolve", "UNRESOLVED import (no catch-all)", "fn",
-                                        fn_name);
-                    core::LogWithString(core::LogLevel::Error, "pe-resolve", "  from", "dll", dll_name);
-                    return false;
-                }
-                // Only the catch-all branches resolved to a generic
-                // noop. data_named pointed the IAT slot at a real
-                // proc-env-backed location; treating it as a noop
-                // would re-journal it on every boot via the
-                // noop-stub path below, defeating the dedup the
-                // data-named lookup provides.
-                is_noop_stub = !data_named;
-                const char* msg = data_named ? "data import -> proc-env named slot"
-                                  : is_data  ? "unknown import -> data-miss zero pad"
-                                             : "unknown import -> catch-all NO-OP";
-                core::LogWithString(core::LogLevel::Warn, "pe-resolve", msg, "fn", fn_name);
-                core::LogWithString(core::LogLevel::Warn, "pe-resolve", "  from", "dll", dll_name);
-                // Record the gap. Build "<dll>!<fn>" into a 40-byte
-                // source_pin so the reviewer can grep the journal
-                // for "ntdll!Nt..." or "kernel32!Csr...". `data_named`
-                // is excluded — those resolved to a real proc-env slot
-                // and aren't a gap. Skipped when the journal isn't
-                // initialised (very early boot, before kernel_main
-                // has called FixJournalInit; static allocator
-                // ordering should make that unreachable in practice).
-                if (!data_named)
-                {
-                    char pin[40];
-                    BuildFixJournalPin(dll_name, fn_name, pin);
-                    (void)::duetos::diag::FixJournalRecord(::duetos::diag::FixDetector::UnmappedThunk, pin,
-                                                           is_data ? "implement data import" : "implement Win32 thunk",
-                                                           h.image_base, 0);
-                }
-                // Only FUNCTION catch-alls need an IAT-slot-name
-                // mapping in the miss-logger table — data imports
-                // aren't called, just dereferenced, and will never
-                // hit SYS_WIN32_MISS_LOG.
-                if (!is_data)
-                {
-                    const u64 iat_slot_va_for_miss = h.image_base + u64(first_thunk) + u64(fn_idx) * ent_bytes;
-                    StagedMissAppend(iat_slot_va_for_miss, fn_name);
-                }
-                core::CleanroomTraceRecord("pe-loader", is_data ? "import-data-catchall" : "import-fn-catchall",
-                                           h.image_base, first_thunk, fn_idx);
-            }
+            const u64 stub_va = binding.stub_va;
+            const bool is_noop_stub = binding.is_noop_stub;
 
             // Patch the IAT slot. Slot size is bitness-dependent
             // (8 bytes for PE32+, 4 for PE32) — the same as the INT
             // entry size we just read. For PE32 the resolved VA
             // must fit in 32 bits; we asserted this implicitly by
             // mapping the 32-bit DLL set into the low 4 GiB.
-            const u64 iat_slot_off = u64(first_thunk) + u64(fn_idx) * ent_bytes;
             // first_thunk is the import descriptor's FirstThunk RVA —
             // attacker-controlled and, like the .reloc case above,
             // bounded to the image extent (the helper's frame check
@@ -2225,6 +2287,210 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
 
     core::LogWithValue(core::LogLevel::Info, "pe-resolve", "total imports resolved", resolved);
     core::CleanroomTraceRecord("pe-loader", "imports-resolved", h.image_base, resolved, 0);
+    return true;
+}
+
+// Bind IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT (index 13) eagerly.
+//
+// A delay-load call site is `call [__imp_Foo]` through a slot in
+// the image's delay IAT — structurally identical to a static
+// import. What differs is who fills the slot: the linker seeds it
+// with the address of a `__tailMerge` stub it emitted into the
+// image, and that stub calls the image's own `__delayLoadHelper2`
+// (linked in from delayimp.lib), which does LoadLibrary +
+// GetProcAddress and overwrites the slot on first call.
+//
+// We fill the slot at load time instead, through the SAME ladder a
+// static import uses, so the helper never runs. See
+// wiki/reference/Design-Decisions.md for why (short version: our
+// GetProcAddress deliberately reports a miss for no-op thunks so
+// that feature probes keep their meaning, which makes the helper
+// path strictly weaker than the binder, and eager binding routes
+// delay-load misses into the same `[win32-miss]` / fix-journal
+// diagnostics static imports already get).
+//
+// Failure policy differs from ResolveImports on purpose:
+//
+//   - A MALFORMED directory (table out of bounds, descriptor
+//     truncated, DLL name unterminated, IAT slot outside the
+//     image) fails the load. Those are hostile-image signals and
+//     get the same treatment the static path gives them.
+//   - An UNRESOLVABLE symbol does NOT fail the load. The slot is
+//     left holding the linker's own thunk, which is exactly the
+//     state the image shipped in — Windows likewise loads such an
+//     image fine and only fails at the first call. Failing here
+//     would reject binaries that delay-load a DLL they never
+//     touch, which is the whole point of delay-loading.
+//
+// Returns false only for the malformed cases above.
+bool ResolveDelayImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm::AddressSpace* as,
+                         const DllImage* preloaded_dlls, u64 preloaded_dll_count)
+{
+    using namespace ::duetos::loader::delayimp;
+    using arch::SerialLineGuard;
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+
+    const PeDataDir dir = ReadDataDir(file, file_len, h, kDirEntryDelayImport);
+    if (dir.rva == 0 || dir.size == 0)
+        return true; // no delay imports
+
+    const u64 tbl_off = RvaToFile(file, file_len, h, dir.rva);
+    if (!DelayTableInBounds(tbl_off, dir.size, file_len))
+    {
+        SerialWrite("[pe-delay] delay-import table rva out of bounds\n");
+        return false;
+    }
+
+    constexpr u32 kMaxFnPerDll = 256;
+    const u64 ent_bytes = h.is_pe32 ? u64(4) : u64(8);
+    const u64 ordinal_flag = h.is_pe32 ? (u64(1) << 31) : (u64(1) << 63);
+    u32 bound = 0;
+    u32 skipped = 0;
+
+    for (u32 d = 0; d < kMaxDelayDescriptors; ++d)
+    {
+        DelayDescriptor desc{};
+        const DelayDescStatus ds = ReadDelayDescriptor(file, file_len, tbl_off, d, desc);
+        if (ds == DelayDescStatus::Terminator || ds == DelayDescStatus::IndexOverflow)
+            break;
+        if (ds == DelayDescStatus::Incomplete)
+        {
+            SerialWrite("[pe-delay] descriptor truncated by end-of-file\n");
+            return false;
+        }
+        if (ds != DelayDescStatus::Ok)
+        {
+            // GAP: the VC6 absolute-VA descriptor form (dlattrRva
+            // clear) is not bound — no linker has emitted it since
+            // VC7, and binding it needs a separate VA-vs-RVA fixup
+            // path. Descriptors missing a name/IAT/INT table are
+            // unbindable by construction. Both leave the image's
+            // own helper in charge, so skipping is safe.
+            SerialLineGuard guard;
+            SerialWrite("[pe-delay] descriptor skipped status=");
+            SerialWrite(DelayDescStatusName(ds));
+            SerialWrite("\n");
+            ++skipped;
+            continue;
+        }
+
+        const u64 name_off = RvaToFile(file, file_len, h, desc.name_rva);
+        const char* dll_name = (name_off == ~u64(0)) ? nullptr : BoundedCString(file, file_len, name_off);
+        if (dll_name == nullptr || dll_name[0] == '\0')
+        {
+            SerialWrite("[pe-delay] descriptor has bad DLL name rva\n");
+            return false;
+        }
+
+        const u64 int_off = RvaToFile(file, file_len, h, desc.int_rva);
+        if (int_off == ~u64(0))
+        {
+            SerialLineGuard guard;
+            SerialWrite("[pe-delay] ");
+            SerialWrite(dll_name);
+            SerialWrite(": INT rva out of bounds\n");
+            return false;
+        }
+
+        u32 dll_bound = 0;
+        for (u32 fn_idx = 0; fn_idx < kMaxFnPerDll; ++fn_idx)
+        {
+            const u64 int_ent_off = int_off + u64(fn_idx) * ent_bytes;
+            if (int_ent_off + ent_bytes > file_len)
+                break;
+            const u64 ent = h.is_pe32 ? u64(LeU32(file + int_ent_off)) : LeU64(file + int_ent_off);
+            if (ent == 0)
+                break;
+
+            u32 import_ordinal = 0;
+            const char* fn_name = nullptr;
+            char ordinal_name_buf[32];
+            if (!DecodeThunkSymbol(file, file_len, h, ent, ordinal_name_buf, import_ordinal, fn_name))
+            {
+                SerialLineGuard guard;
+                SerialWrite("[pe-delay] ");
+                SerialWrite(dll_name);
+                SerialWrite(": INT entry name out of bounds\n");
+                return false;
+            }
+            const bool is_ordinal_import = (ent & ordinal_flag) != 0;
+
+            // The delay IAT slot. Bounds-checked BEFORE resolving so
+            // a crafted rvaIAT can never reach the direct-map write
+            // (loader/image_patch.h is the single source of truth for
+            // this invariant — the frame lookup alone does not stop a
+            // write aimed at the image's own R-X .text, the TEB, or
+            // the proc-env page).
+            const u64 slot_off = u64(desc.iat_rva) + u64(fn_idx) * ent_bytes;
+            if (!loader::ImageRangeInBounds(slot_off, ent_bytes, h.image_size))
+            {
+                SerialLineGuard guard;
+                SerialWrite("[pe-delay] ");
+                SerialWrite(dll_name);
+                SerialWrite("!");
+                SerialWrite(fn_name);
+                SerialWrite(": delay IAT slot outside image\n");
+                return false;
+            }
+            const u64 slot_va = h.image_base + slot_off;
+
+            ImportBinding binding;
+            if (!BindImportSymbol(h, dll_name, fn_name, is_ordinal_import, import_ordinal, preloaded_dlls,
+                                  preloaded_dll_count, slot_va, desc.iat_rva, fn_idx, binding))
+            {
+                // Refused by a fail-closed gate. Leave the linker's
+                // thunk in place rather than binding something the
+                // static path would have rejected.
+                SerialLineGuard guard;
+                SerialWrite("[pe-delay] refused ");
+                SerialWrite(dll_name);
+                SerialWrite("!");
+                SerialWrite(fn_name);
+                SerialWrite(" — slot left on the image's own helper\n");
+                ++skipped;
+                continue;
+            }
+
+            if (!loader::ImageDirectWriteLe(as, slot_va, ent_bytes, binding.stub_va))
+            {
+                SerialLineGuard guard;
+                SerialWrite("[pe-delay] ");
+                SerialWrite(dll_name);
+                SerialWrite("!");
+                SerialWrite(fn_name);
+                SerialWrite(": delay IAT slot VA not mapped\n");
+                return false;
+            }
+            ++dll_bound;
+            ++bound;
+
+            const core::LogLevel lvl = binding.is_noop_stub ? core::LogLevel::Warn : core::LogLevel::Info;
+            core::LogWithString(lvl, "pe-delay",
+                                binding.is_noop_stub ? "delay import bound to NO-OP stub" : "delay import bound", "fn",
+                                fn_name);
+        }
+
+        SerialLineGuard guard;
+        SerialWrite("[pe-delay] ");
+        SerialWrite(dll_name);
+        SerialWrite(" bound=");
+        SerialWriteHex(dll_bound);
+        SerialWrite("\n");
+    }
+
+    // GAP: `rvaHmod` is left at zero. It is the helper's HMODULE
+    // cache; nothing reads it once the slots are bound, and
+    // __FUnloadDelayLoadedDLL2 (the only other consumer) is not
+    // implemented. Revisit if a real binary is observed unloading a
+    // delay-loaded DLL.
+    core::LogWithValue(core::LogLevel::Info, "pe-delay", "delay imports bound", bound);
+    core::CleanroomTraceRecord("pe-loader", "delay-imports-resolved", h.image_base, bound, skipped);
+    SerialWrite("[pe-delay] total bound=");
+    SerialWriteHex(bound);
+    SerialWrite(" skipped=");
+    SerialWriteHex(skipped);
+    SerialWrite("\n");
     return true;
 }
 
@@ -2398,15 +2664,13 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     //                    reason IS imports (not something we
     //                    don't handle at all yet).
     // Everything else is still a hard reject for v0.
-    // Accept TlsPresent alongside Ok + ImportsPresent — TLS
-    // callbacks aren't wired (the PE will not have _tls_index
-    // or TEB.ThreadLocalStoragePointer populated), but many
-    // real-world PEs carry a near-empty .tls section that the
-    // program itself doesn't actually read at runtime (e.g.
-    // MSVC's default CRT stubs). Rejecting on TLS presence
-    // alone keeps us from even ATTEMPTING to run binaries like
-    // windows-kill.exe; accepting + logging lets us see how
-    // far they get before the first real gap.
+    // Accept TlsPresent alongside Ok + ImportsPresent. TLS is
+    // fully handled below (SetupStaticTls copies the .tls
+    // template, wires TEB.ThreadLocalStoragePointer, writes
+    // _tls_index, and runs the callback array through a
+    // generated trampoline before the entry point) — this status
+    // is just how ParseHeaders reports "directory 9 is non-empty"
+    // and must not be treated as a reject reason.
     // PE32 (i386) is now executable end-to-end for self-contained
     // images whose import surface is never actually called — the
     // pe32_smoke fixture exits via int 0x80 directly. PE32 images
@@ -2415,6 +2679,17 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     // Pe32ExecutionNotReady status is retained so a future
     // policy gate can flip it back on if we want to reject such
     // PEs preemptively.
+    //
+    // Delay-load imports are a SECOND import directory (index 13)
+    // that ParseHeaders does not report on — a PE can carry them
+    // with an empty directory 1, which would otherwise come back
+    // as PeStatus::Ok and skip the whole import-machinery gate
+    // below (thunks page, proc-env page, binder). Compute it here
+    // so the gate reads "this image imports something", whichever
+    // directory it used.
+    const PeDataDir delay_dir = ReadDataDir(file, file_len, h, kDirEntryDelayImport);
+    const bool has_delay_imports = delay_dir.rva != 0 && delay_dir.size != 0;
+
     PeStatus effective_ps = ps;
     if (effective_ps != PeStatus::Ok && effective_ps != PeStatus::ImportsPresent &&
         effective_ps != PeStatus::TlsPresent)
@@ -2848,7 +3123,7 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     //     argv=[program_name, NULL], program_name="a.exe". PE32
     //     accessors live in a 32-bit kernel32 — gated alongside
     //     Layer 4.
-    if (!h.is_pe32 && ps == PeStatus::ImportsPresent)
+    if (!h.is_pe32 && (ps == PeStatus::ImportsPresent || has_delay_imports))
     {
         auto env_frame_r = AllocateFrame();
         if (!env_frame_r)
@@ -2912,7 +3187,7 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     // R-X. `Win32ThunksPopulate` writes the full `sizeof(kThunksBytes)`
     // into the direct-map window; any trailing bytes in the second
     // page beyond the stub table stay zeroed from the pre-clear.
-    if (!h.is_pe32 && ps == PeStatus::ImportsPresent)
+    if (!h.is_pe32 && (ps == PeStatus::ImportsPresent || has_delay_imports))
     {
         auto stubs_frame_r = AllocateContiguousFrames(2);
         if (!stubs_frame_r)
@@ -2942,8 +3217,18 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
             return r;
         }
         SerialWrite("[pe-load] step5 imports resolved\n");
+
+        // Delay-load imports (directory 13) bind through the same
+        // ladder, right after the static IAT so the thunks page and
+        // proc-env landing pads the binder may point at already
+        // exist.
+        if (!ResolveDelayImports(file, file_len, h, as, preloaded_dlls, preloaded_dll_count))
+        {
+            SerialWrite("[pe-load] FAIL ResolveDelayImports\n");
+            return r;
+        }
     }
-    else if (h.is_pe32 && ps == PeStatus::ImportsPresent)
+    else if (h.is_pe32 && (ps == PeStatus::ImportsPresent || has_delay_imports))
     {
         // PE32 IAT walk + 32-bit Win32 thunks page. Unresolved
         // imports get pointed at the i386 "SYS_EXIT(0xDEAD0042)"
@@ -2972,6 +3257,12 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
             return r;
         }
         SerialWrite("[pe-load] step5 pe32 imports resolved\n");
+
+        if (!ResolveDelayImports(file, file_len, h, as, preloaded_dlls, preloaded_dll_count))
+        {
+            SerialWrite("[pe-load] FAIL ResolveDelayImports (pe32)\n");
+            return r;
+        }
     }
 
     // 4b'. Static TLS + TLS callbacks (T6-01). 64-bit Win32 PEs
@@ -3008,7 +3299,11 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     SerialWrite("[pe-load] OK\n");
 
     r.ok = true;
-    r.imports_resolved = (ps == PeStatus::ImportsPresent);
+    // Delay imports count: an image whose ONLY imports are
+    // delay-loaded still calls into kernel32 (HeapAlloc et al) once
+    // the slots are bound, so it needs the per-process Win32 heap
+    // just as much as a statically-importing one.
+    r.imports_resolved = (ps == PeStatus::ImportsPresent) || has_delay_imports;
     r.is_pe32 = h.is_pe32;
     r.entry_va = tls_entry_override != 0 ? tls_entry_override : (h.image_base + h.entry_rva);
     r.stack_va = plan.commit_lo;
@@ -3316,6 +3611,50 @@ void ReportTls(const u8* file, u64 file_len, const PeHeaders& h)
     SerialWrite("\n");
 }
 
+// Delay-load import directory (13). Same "walk it, name it, bail
+// out quietly on malformed bytes" contract as the reporters above
+// — and the reason this reporter exists at all is that PeReport is
+// what the PE fuzzer drives (tests/fuzz/fuzz_pe.cpp), so putting
+// the descriptor walk here gives ResolveDelayImports' parser real
+// coverage against hostile inputs without needing an AddressSpace.
+void ReportDelayImports(const u8* file, u64 file_len, const PeHeaders& h)
+{
+    using namespace ::duetos::loader::delayimp;
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+    const PeDataDir dir = ReadDataDir(file, file_len, h, kDirEntryDelayImport);
+    if (dir.rva == 0 || dir.size == 0)
+    {
+        SerialWrite("  delay-imports: (empty)\n");
+        return;
+    }
+    const u64 tbl_off = RvaToFile(file, file_len, h, dir.rva);
+    if (!DelayTableInBounds(tbl_off, dir.size, file_len))
+    {
+        SerialWrite("  delay-imports: <bad rva>\n");
+        return;
+    }
+    for (u32 d = 0; d < kMaxDelayDescriptors; ++d)
+    {
+        DelayDescriptor desc{};
+        const DelayDescStatus ds = ReadDelayDescriptor(file, file_len, tbl_off, d, desc);
+        if (ds == DelayDescStatus::Terminator || ds == DelayDescStatus::Incomplete ||
+            ds == DelayDescStatus::IndexOverflow)
+        {
+            break;
+        }
+        const u64 name_off = RvaToFile(file, file_len, h, desc.name_rva);
+        const char* dll_name = (name_off == ~u64(0)) ? nullptr : BoundedCString(file, file_len, name_off);
+        SerialWrite("  delay-import: ");
+        SerialWrite(dll_name != nullptr ? dll_name : "<bad name>");
+        SerialWrite(" status=");
+        SerialWrite(DelayDescStatusName(ds));
+        SerialWrite(" iat_rva=");
+        SerialWriteHex(desc.iat_rva);
+        SerialWrite("\n");
+    }
+}
+
 } // namespace
 
 void PeReport(const u8* file, u64 file_len)
@@ -3350,6 +3689,7 @@ void PeReport(const u8* file, u64 file_len)
     ReportImports(file, file_len, h);
     ReportRelocs(file, file_len, h);
     ReportTls(file, file_len, h);
+    ReportDelayImports(file, file_len, h);
 
     // Stage 2: also dump the Export Address Table if present.
     // Executables routinely ship with no exports, in which case
