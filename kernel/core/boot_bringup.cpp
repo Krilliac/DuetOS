@@ -609,14 +609,12 @@ void BootBringupEarly(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
     SerialWrite("[boot] Detecting hypervisor.\n");
     duetos::arch::HypervisorProbe();
 
-    SerialWrite("[boot] Reading MSR thermals.\n");
-    duetos::arch::ThermalProbe();
-
-    SerialWrite("[boot] Reading RAPL power telemetry.\n");
-    duetos::arch::RaplProbe();
-
-    SerialWrite("[boot] Reading CPU frequency telemetry.\n");
-    duetos::arch::CpuFreqProbe();
+    // The MSR sensor probes (thermal / RAPL / cpufreq) used to run
+    // here. They now PROBE their MSRs through `arch::ReadMsrSafe`
+    // instead of predicting availability from the vendor string, so
+    // they must run after the kernel extable carries the rdmsr
+    // recovery row — see the "Bringing up kernel extable" block
+    // below, which is where they moved to.
 
     // Phase::Earlycon — utility-primitive self-tests (Result /
     // String / Hexdump / VaRegion). All four panic on failure, so
@@ -790,11 +788,29 @@ void BootBringupEarly(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
     SerialWrite("[boot] Bringing up kernel extable.\n");
     duetos::arch::TrapsRegisterExtable();
     DUETOS_BOOT_SELFTEST(duetos::debug::ExtableSelfTest());
-    // Fault-recoverable wrmsr — covers the wrmsr inside
+    // Fault-recoverable wrmsr / rdmsr — covers the wrmsr inside
     // `arch::WriteMsrSafe`, used by the LAPIC IPI path so an
     // intermittent KVM/QEMU #GP on the x2APIC ICR doesn't
-    // recursive-halt the BSP. See arch/x86_64/msr_safe.{h,cpp,S}.
+    // recursive-halt the BSP, and the rdmsr inside
+    // `arch::ReadMsrSafe`, which every MSR sensor probe below uses
+    // to ASK the part whether an MSR exists rather than guess from
+    // the vendor string. See arch/x86_64/msr_safe.{h,cpp,S}.
     duetos::arch::RegisterMsrSafeExtable();
+    DUETOS_BOOT_SELFTEST(duetos::arch::MsrSafeSelfTest());
+
+    // MSR sensor probes. They depend on the rdmsr extable row above
+    // (a probe of an absent MSR takes a #GP that the row recovers),
+    // which is why they run here rather than alongside the other
+    // CPUID-only probes in the earlier bring-up block.
+    SerialWrite("[boot] Reading MSR thermals.\n");
+    duetos::arch::ThermalProbe();
+    DUETOS_BOOT_SELFTEST(duetos::arch::ThermalSelfTest());
+
+    SerialWrite("[boot] Reading RAPL power telemetry.\n");
+    duetos::arch::RaplProbe();
+
+    SerialWrite("[boot] Reading CPU frequency telemetry.\n");
+    duetos::arch::CpuFreqProbe();
 
     // Fault-domain registry self-test. Registers a toy domain,
     // restarts it twice, checks counters. Real driver domains are
