@@ -27,9 +27,15 @@ namespace
 {
 
 /// Leading added to a role's line box to get a comfortable row pitch.
-/// 5 px reads as the reference's generous table leading at 1024 wide
-/// without halving the visible row count.
-constexpr u32 kRowLeading = 5;
+///
+/// The reference's tables run their rows at ~2.7x the cap height of
+/// the name in them; round 4's 5 px put us at ~2.0x, which is the
+/// "reads tighter than the reference" the review called out. 8 px
+/// lands Body at 21 px against a 13 px line box — ~2.6x — and still
+/// leaves 9 rows visible in the smallest window the shell opens
+/// (Files at 240 px of client). Any larger and the list stops being
+/// a list at 1024x768.
+constexpr u32 kRowLeading = 8;
 
 /// Chip geometry. 5 px of horizontal padding either side of the
 /// label, 2 px of vertical padding around the Caption line box.
@@ -41,6 +47,14 @@ constexpr u32 kPillTintAlpha = 46; // ~18 % — the design's tag fill
 /// the gap to the text that follows it).
 constexpr u32 kDotRadius = 2;
 constexpr u32 kDotCell = 12;
+
+/// File-type tile: a 13 px rounded square with an 8 px gap to the
+/// name. The outline sits at ~62 % of the row ink so the tile reads
+/// as a container rather than as a second piece of text.
+constexpr u32 kIconTile = 13;
+constexpr u32 kIconGap = 8;
+constexpr u32 kIconRadius = 4;
+constexpr u32 kIconEdgeAlpha = 158;
 
 constinit bool s_passed = false;
 
@@ -212,6 +226,112 @@ void AppRowDotDraw(u32 x, u32 y, u32 row_h, u32 rgb)
     FramebufferFillCircle(cx, cy, kDotRadius, rgb);
 }
 
+u32 AppRowIconWidth()
+{
+    return kIconTile + kIconGap;
+}
+
+void AppRowIconDraw(u32 x, u32 y, u32 row_h, char glyph, u32 ink, u32 bg)
+{
+    const u32 tile_y = (row_h > kIconTile) ? y + (row_h - kIconTile) / 2 : y;
+    const u32 edge = BlendOver(bg, ink, static_cast<u8>(kIconEdgeAlpha));
+    FramebufferDrawRoundRect(x, tile_y, kIconTile, kIconTile, kIconRadius, edge);
+
+    if (glyph == '\0')
+    {
+        return;
+    }
+    // The glyph is centred on the tile's measured width, not on a
+    // character-cell assumption — a proportional 'P' and a
+    // proportional 'D' are different widths.
+    const char label[2] = {glyph, '\0'};
+    const u32 gw = ChromeTextMeasure(ChromeTextRole::Caption, label);
+    const u32 gh = ChromeTextRoleHeight(ChromeTextRole::Caption);
+    if (gw >= kIconTile || gh >= kIconTile)
+    {
+        return;
+    }
+    ChromeTextDraw(ChromeTextRole::Caption, x + (kIconTile - gw) / 2, tile_y + (kIconTile - gh) / 2, label, edge, bg);
+}
+
+u32 AppFormatSize(u64 bytes, char* out, u32 cap)
+{
+    if (out == nullptr || cap == 0)
+    {
+        return 0;
+    }
+    out[0] = '\0';
+
+    constexpr u64 kKiB = 1024ull;
+    constexpr u64 kMiB = 1024ull * 1024ull;
+    constexpr u64 kGiB = 1024ull * 1024ull * 1024ull;
+
+    // Whole part, optional tenth, and the unit. Bytes and KB are
+    // whole-number units in the reference ("4 KB"); MB and GB carry a
+    // single decimal ("1.4 MB").
+    u64 whole = 0;
+    u64 tenth = 0;
+    bool has_tenth = false;
+    const char* unit = " B";
+    if (bytes < kKiB)
+    {
+        whole = bytes;
+    }
+    else if (bytes < kMiB)
+    {
+        whole = (bytes + kKiB / 2) / kKiB;
+        unit = " KB";
+    }
+    else
+    {
+        const u64 scale = (bytes < kGiB) ? kMiB : kGiB;
+        unit = (bytes < kGiB) ? " MB" : " GB";
+        // Split the scaling so the x10 never touches the full
+        // magnitude — a multi-TiB volume would overflow `bytes * 10`.
+        const u64 tenths = (bytes / scale) * 10ull + ((bytes % scale) * 10ull + scale / 2) / scale;
+        whole = tenths / 10ull;
+        tenth = tenths % 10ull;
+        has_tenth = true;
+    }
+
+    // Render the whole part most-significant digit first.
+    char digits[24];
+    u32 nd = 0;
+    if (whole == 0)
+    {
+        digits[nd++] = '0';
+    }
+    while (whole > 0 && nd < sizeof(digits))
+    {
+        digits[nd++] = static_cast<char>('0' + (whole % 10ull));
+        whole /= 10ull;
+    }
+
+    u32 o = 0;
+    auto put = [&](char ch)
+    {
+        if (o + 1 < cap)
+        {
+            out[o++] = ch;
+        }
+    };
+    for (u32 i = nd; i > 0; --i)
+    {
+        put(digits[i - 1]);
+    }
+    if (has_tenth)
+    {
+        put('.');
+        put(static_cast<char>('0' + tenth));
+    }
+    for (u32 i = 0; unit[i] != '\0'; ++i)
+    {
+        put(unit[i]);
+    }
+    out[o] = '\0';
+    return o;
+}
+
 void AppTextSelfTest()
 {
     using duetos::arch::SerialWrite;
@@ -297,6 +417,47 @@ void AppTextSelfTest()
     if (ty < 100 || ty + ChromeTextRoleHeight(ChromeTextRole::Body) > 100 + row_h)
     {
         mark_fail(0xDF, "[app-text-selftest] FAIL RowY pushed text outside the band");
+        return;
+    }
+
+    // (7) Human-readable sizes match the reference's shape exactly.
+    //     A file listing that printed "4096 BYTES" where the design
+    //     prints "4 KB" is the single loudest content tell, so the
+    //     boundaries are pinned rather than eyeballed.
+    struct SizeCase
+    {
+        u64 bytes;
+        const char* want;
+    };
+    static constexpr SizeCase kSizeCases[] = {
+        {0, "0 B"},       {512, "512 B"},      {1023, "1023 B"},    {1024, "1 KB"},        {4096, "4 KB"},
+        {81920, "80 KB"}, {1468006, "1.4 MB"}, {1048576, "1.0 MB"}, {22020096, "21.0 MB"}, {2147483648ull, "2.0 GB"},
+    };
+    for (const auto& c : kSizeCases)
+    {
+        char got[16];
+        const u32 n = AppFormatSize(c.bytes, got, sizeof(got));
+        u32 i = 0;
+        for (; c.want[i] != '\0' && got[i] != '\0'; ++i)
+        {
+            if (c.want[i] != got[i])
+            {
+                break;
+            }
+        }
+        if (c.want[i] != '\0' || got[i] != '\0' || n != i)
+        {
+            mark_fail(0xE0, "[app-text-selftest] FAIL AppFormatSize disagreed with the reference shape");
+            return;
+        }
+    }
+
+    // (8) The icon cell always leaves a gap between the tile and the
+    //     name that follows it — a name budget computed as
+    //     `cell - tile` must stay positive or the two collide.
+    if (AppRowIconWidth() <= kIconTile)
+    {
+        mark_fail(0xE1, "[app-text-selftest] FAIL icon cell left no gap for the name");
         return;
     }
 

@@ -92,9 +92,32 @@ u32 AppPillWidth(const char* label);
 void AppPillDraw(u32 x, u32 y, u32 row_h, const char* label, u32 ink, u32 bg);
 
 /// 4-px status dot, left edge at `x`, vertically centred in the row.
-/// The reference's per-row liveness marker.
+/// The reference's per-row liveness marker. Task Manager's process
+/// rows use this; a *file* row uses the icon tile below instead.
 u32 AppRowDotWidth();
 void AppRowDotDraw(u32 x, u32 y, u32 row_h, u32 rgb);
+
+/// Rounded-square file-type tile — the reference's per-row icon in
+/// a file listing (`19-files.png`). A 13x13 chip outlined in `ink`
+/// with a single centred `glyph` in the same hue, vertically centred
+/// in the row band. `glyph` is the type initial the caller already
+/// knows ('P' for a PE image, 'D' for a directory, …); this helper
+/// classifies nothing, so a row whose type is unknown passes '\0'
+/// and gets a plain empty tile rather than a guessed letter.
+///
+/// `AppRowIconWidth` is the cell the tile claims including the gap to
+/// the name that follows it, so a column table can size the name
+/// budget without knowing the tile's internal geometry.
+u32 AppRowIconWidth();
+void AppRowIconDraw(u32 x, u32 y, u32 row_h, char glyph, u32 ink, u32 bg);
+
+/// Human-readable byte count, in the reference's shape: `980 B`,
+/// `4 KB`, `1.4 MB`, `2.1 GB`. Bytes and KB render as whole numbers;
+/// MB and GB carry one decimal, which is exactly what the reference
+/// screenshots show ("4 KB" next to "1.4 MB"). Always NUL-terminates
+/// and returns the written length; `cap` includes the terminator and
+/// 12 bytes is always enough.
+u32 AppFormatSize(u64 bytes, char* out, u32 cap);
 
 /// Boot-time self-test: pins the invariants the column tables depend
 /// on — Fit never returns a width above its budget, Fit is monotone
