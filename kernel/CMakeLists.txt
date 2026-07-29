@@ -574,6 +574,60 @@ else()
 endif()
 list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_PE32_WINDOW_HEADER}")
 
+# rsrc_pe.exe — PE32 test for the `.rsrc` rung: loads strings and binary
+# resources out of its OWN embedded resource section. windres compiles
+# rsrc_pe.rc into a genuine Windows-toolchain resource tree, which is the
+# whole point — tests/host/test_pe_resources.cpp pins the walker against
+# synthetic blobs, this pins it against real windres output reached
+# through the kernel's live image mapping from ring 3.
+#
+# Needs windres in addition to the compiler, so it carries its own
+# find_program: a host with gcc but no windres emits the empty stub
+# rather than failing the configure.
+find_program(MINGW_W64_I686_WINDRES i686-w64-mingw32-windres)
+set(DUETOS_RSRC_PE_SRC "${CMAKE_SOURCE_DIR}/userland/apps/rsrc_pe/rsrc_pe.c")
+set(DUETOS_RSRC_PE_RC "${CMAKE_SOURCE_DIR}/userland/apps/rsrc_pe/rsrc_pe.rc")
+set(DUETOS_RSRC_PE_RES "${CMAKE_CURRENT_BINARY_DIR}/rsrc_pe.res.o")
+set(DUETOS_RSRC_PE_EXE "${CMAKE_CURRENT_BINARY_DIR}/rsrc_pe.exe")
+set(DUETOS_RSRC_PE_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_rsrc_pe_pe.h")
+if(MINGW_W64_I686_GCC AND MINGW_W64_I686_WINDRES)
+    add_custom_command(
+        OUTPUT "${DUETOS_RSRC_PE_RES}"
+        COMMAND "${MINGW_W64_I686_WINDRES}" -O coff
+                -o "${DUETOS_RSRC_PE_RES}" "${DUETOS_RSRC_PE_RC}"
+        DEPENDS "${DUETOS_RSRC_PE_RC}"
+        COMMENT "Compiling rsrc_pe.rc (windres -> COFF .rsrc)"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${DUETOS_RSRC_PE_EXE}"
+        COMMAND "${MINGW_W64_I686_GCC}"
+                -nostdlib -ffreestanding -fno-stack-protector -mno-stack-arg-probe
+                -e _mainCRTStartup -Wl,--subsystem,console -Wl,--entry,_mainCRTStartup
+                -o "${DUETOS_RSRC_PE_EXE}" "${DUETOS_RSRC_PE_SRC}" "${DUETOS_RSRC_PE_RES}"
+                -lkernel32 -luser32
+        DEPENDS "${DUETOS_RSRC_PE_SRC}" "${DUETOS_RSRC_PE_RES}"
+        COMMENT "Cross-compiling rsrc_pe.exe (i386 PE32 with a real .rsrc)"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${DUETOS_RSRC_PE_HEADER}"
+        COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
+                "${DUETOS_RSRC_PE_EXE}" "${DUETOS_RSRC_PE_HEADER}"
+                kBinRsrcPeBytes --namespace "duetos::fs::generated"
+        DEPENDS "${DUETOS_RSRC_PE_EXE}" "${DUETOS_EMBED_BLOB_SCRIPT}"
+        COMMENT "Embedding rsrc_pe PE"
+        VERBATIM)
+else()
+    add_custom_command(
+        OUTPUT "${DUETOS_RSRC_PE_HEADER}"
+        COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}" --empty
+                "${DUETOS_RSRC_PE_HEADER}"
+                kBinRsrcPeBytes --namespace "duetos::fs::generated"
+        DEPENDS "${DUETOS_EMBED_BLOB_SCRIPT}"
+        COMMENT "Emitting rsrc_pe PE stub (i686 mingw or windres absent)"
+        VERBATIM)
+endif()
+list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_RSRC_PE_HEADER}")
+
 # pe32_miss.exe — PE32 that calls an unresolved Win32 import to
 # validate the 32-bit Win32 thunks page. The import (user32!
 # SetWindowsHookExA) is NOT in our v0 user32_32 stubs, so the
