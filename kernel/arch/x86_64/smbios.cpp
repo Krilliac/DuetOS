@@ -1,6 +1,8 @@
 #include "arch/x86_64/smbios.h"
 
 #include "arch/x86_64/serial.h"
+#include "arch/x86_64/smbios_decode.h"
+#include "arch/x86_64/uefi_nvram.h"
 #include "core/panic.h"
 #include "log/klog.h"
 #include "mm/page.h"
@@ -35,6 +37,29 @@ constexpr u64 kScanProbeBytes = 32;
 // run < 128 bytes. We mirror the kernel-side summary buffer width
 // when copying.
 constexpr u64 kSummaryFieldCap = 64;
+
+// SMBIOS_TABLE_GUID — EB9D2D31-2D88-11D3-9A16-0090273FC14D.
+// Published by UEFI firmware pointing at a 32-bit ("_SM_") entry point.
+constexpr EfiGuid kSmbiosTableGuid = {
+    0xEB9D2D31u, 0x2D88u, 0x11D3u, {0x9Au, 0x16u, 0x00u, 0x90u, 0x27u, 0x3Fu, 0xC1u, 0x4Du}};
+
+// SMBIOS3_TABLE_GUID — F2FD1544-9794-4A2C-992E-E5BBCF20E394.
+// Points at a 64-bit ("_SM3_") entry point, whose structure table may
+// legitimately sit above 4 GiB. Preferred when the firmware publishes
+// both, since the 3.x anchor is authoritative on a modern box.
+constexpr EfiGuid kSmbios3TableGuid = {
+    0xF2FD1544u, 0x9794u, 0x4A2Cu, {0x99u, 0x2Eu, 0xE5u, 0xBBu, 0xCFu, 0x20u, 0xE3u, 0x94u}};
+
+/// Resolve the SMBIOS entry-point physical address from the EFI
+/// Configuration Table, preferring the 3.x GUID. Returns 0 when the
+/// system wasn't UEFI-booted or the firmware publishes neither GUID.
+u64 FindEntryPointPhysViaEfi()
+{
+    const u64 v3 = UefiFindConfigTable(kSmbios3TableGuid);
+    if (v3 != 0)
+        return v3;
+    return UefiFindConfigTable(kSmbiosTableGuid);
+}
 
 // Copy a slice of validated SMBIOS bytes into a NUL-terminated
 // C string, truncating at `cap - 1`. Used after
@@ -73,6 +98,53 @@ void ReadStringIntoBuffer(const u8* table, u64 table_len, const DuetosSmbiosStru
     CopyStringSlice(dst, cap, table + out.offset, out.length);
 }
 
+/// Decode one Type 17 record into the summary's memory-device array.
+void HandleMemoryDevice(const u8* table, u64 table_len, const DuetosSmbiosStructure& s)
+{
+    namespace dec = ::duetos::arch::smbios_decode;
+
+    const u8* fmt = table + s.formatted_offset;
+    const u8 length = s.formatted_length;
+
+    // The locator strings live at 0x10/0x11, so a record that doesn't
+    // reach them is a pre-2.1 stub with nothing we can render.
+    if (length < dec::kType17OffsetBankLocator + 1)
+        return;
+
+    if (g_summary.memory_device_count >= kSmbiosMaxMemoryDevices)
+    {
+        g_summary.memory_devices_truncated = true;
+        return;
+    }
+
+    SmbiosMemoryDevice& d = g_summary.memory_devices[g_summary.memory_device_count];
+    ++g_summary.memory_device_count;
+
+    d.size_bytes = dec::DecodeMemorySizeBytes(fmt, length);
+    d.populated = !dec::MemorySlotIsEmpty(fmt, length) && d.size_bytes > 0;
+    d.speed_mts = dec::DecodeMemorySpeedMts(fmt, length);
+    d.form_factor = fmt[dec::kType17OffsetFormFactor];
+    d.memory_type = (length > dec::kType17OffsetMemoryType) ? fmt[dec::kType17OffsetMemoryType] : 0;
+
+    ReadStringIntoBuffer(table, table_len, s, fmt[dec::kType17OffsetDeviceLocator], d.device_locator,
+                         sizeof(d.device_locator));
+    ReadStringIntoBuffer(table, table_len, s, fmt[dec::kType17OffsetBankLocator], d.bank_locator,
+                         sizeof(d.bank_locator));
+    if (length > dec::kType17OffsetManufacturer)
+    {
+        ReadStringIntoBuffer(table, table_len, s, fmt[dec::kType17OffsetManufacturer], d.manufacturer,
+                             sizeof(d.manufacturer));
+    }
+    if (length > dec::kType17OffsetPartNumber)
+    {
+        ReadStringIntoBuffer(table, table_len, s, fmt[dec::kType17OffsetPartNumber], d.part_number,
+                             sizeof(d.part_number));
+    }
+
+    if (d.populated)
+        g_summary.memory_installed_bytes += d.size_bytes;
+}
+
 void HandleStructure(const u8* table, u64 table_len, const DuetosSmbiosStructure& s)
 {
     // The Rust walker has already validated that
@@ -99,6 +171,14 @@ void HandleStructure(const u8* table, u64 table_len, const DuetosSmbiosStructure
             ReadStringIntoBuffer(table, table_len, s, fmt[6], g_summary.system_version, kSummaryFieldCap);
         }
         break;
+    case 2: // Baseboard / Module Information (the motherboard)
+        if (length >= 7)
+        {
+            ReadStringIntoBuffer(table, table_len, s, fmt[4], g_summary.baseboard_manufacturer, kSummaryFieldCap);
+            ReadStringIntoBuffer(table, table_len, s, fmt[5], g_summary.baseboard_product, kSummaryFieldCap);
+            ReadStringIntoBuffer(table, table_len, s, fmt[6], g_summary.baseboard_version, kSummaryFieldCap);
+        }
+        break;
     case 3: // System Enclosure / Chassis
         // Chassis type is byte 5 (offset 0x05 from structure
         // start). High bit = chassis lock, bits 6:0 = type.
@@ -115,6 +195,9 @@ void HandleStructure(const u8* table, u64 table_len, const DuetosSmbiosStructure
             ReadStringIntoBuffer(table, table_len, s, fmt[0x10], g_summary.cpu_version, kSummaryFieldCap);
         }
         break;
+    case 17: // Memory Device — one record per DIMM slot
+        HandleMemoryDevice(table, table_len, s);
+        break;
     default:
         break;
     }
@@ -128,29 +211,56 @@ void SmbiosInit()
     KASSERT(!s_done, "arch/smbios", "SmbiosInit called twice");
     s_done = true;
 
-    // 1) Walk the legacy BIOS scan window 16-byte aligned, asking
-    // the Rust validator to decode each candidate. The first
-    // success wins — the parser prefers the 3.x anchor when both
-    // are present at the same address.
+    // 1) Find the entry point. The EFI Configuration Table is tried
+    // first because it is the ONLY source that works on a UEFI boot —
+    // pure UEFI firmware leaves the legacy BIOS window empty, which is
+    // why this probe reported "no SMBIOS entry point" under OVMF for as
+    // long as the legacy scan was the only path. The legacy scan
+    // remains as the SeaBIOS / legacy-BIOS fallback.
     DuetosSmbiosEntryPoint ep = {};
     bool found = false;
-    for (u64 phys = kScanStart; phys + kScanProbeBytes <= kScanEnd; phys += 16)
+    const char* source = "none";
+
+    const u64 efi_ep_phys = FindEntryPointPhysViaEfi();
+    if (efi_ep_phys != 0)
     {
-        const auto* p = static_cast<const u8*>(mm::PhysToVirt(phys));
-        if (p == nullptr)
-            continue;
-        if (duetos_smbios_parse_entry_point(p, static_cast<usize>(kScanProbeBytes), &ep))
+        const auto* p = static_cast<const u8*>(mm::MapMmio(efi_ep_phys, kScanProbeBytes));
+        if (p != nullptr && duetos_smbios_parse_entry_point(p, static_cast<usize>(kScanProbeBytes), &ep))
         {
             found = true;
-            break;
+            source = "efi-config-table";
+        }
+    }
+
+    // 2) Legacy BIOS window, 16-byte aligned. The first candidate the
+    // Rust validator accepts wins — it checks the anchor signature and
+    // the additive checksum, so a false positive here is not a concern.
+    if (!found)
+    {
+        for (u64 phys = kScanStart; phys + kScanProbeBytes <= kScanEnd; phys += 16)
+        {
+            const auto* p = static_cast<const u8*>(mm::PhysToVirt(phys));
+            if (p == nullptr)
+                continue;
+            if (duetos_smbios_parse_entry_point(p, static_cast<usize>(kScanProbeBytes), &ep))
+            {
+                found = true;
+                source = "legacy-scan";
+                break;
+            }
         }
     }
 
     if (!found)
     {
-        core::Log(core::LogLevel::Warn, "arch/smbios", "no SMBIOS entry point — skipping");
+        core::Log(core::LogLevel::Warn, "arch/smbios",
+                  "no SMBIOS entry point (EFI config table + legacy scan) — skipping");
         return;
     }
+
+    arch::SerialWrite("[smbios] entry-point source=");
+    arch::SerialWrite(source);
+    arch::SerialWrite("\n");
 
     g_summary.present = true;
     g_summary.major_version = ep.major_version;
@@ -214,6 +324,25 @@ void SmbiosInit()
     arch::SerialWrite(ChassisTypeName(g_summary.chassis_type));
     arch::SerialWrite(g_summary.chassis_type != 0 && SmbiosIsLaptopChassis() ? " (laptop-like)" : "");
     arch::SerialWrite("\n");
+    arch::SerialWrite("[smbios] baseboard=\"");
+    arch::SerialWrite(g_summary.baseboard_manufacturer);
+    arch::SerialWrite(" ");
+    arch::SerialWrite(g_summary.baseboard_product);
+    arch::SerialWrite("\"\n");
+
+    // Per-DIMM roll-up. Slot rows are DEBUG-gated (a 16-DIMM box would
+    // otherwise add 16 lines to every boot); the one-line total is not.
+    arch::SerialWrite("[smbios] memory devices=");
+    arch::SerialWriteHex(g_summary.memory_device_count);
+    arch::SerialWrite(" installed_mib=");
+    arch::SerialWriteHex(g_summary.memory_installed_bytes / (1024ULL * 1024ULL));
+    arch::SerialWrite(g_summary.memory_devices_truncated ? " (truncated)" : "");
+    arch::SerialWrite("\n");
+    for (u32 i = 0; i < g_summary.memory_device_count; ++i)
+    {
+        const SmbiosMemoryDevice& d = g_summary.memory_devices[i];
+        KLOG_DEBUG_S("arch/smbios", "dimm", "locator", d.device_locator);
+    }
 }
 
 const SmbiosSummary& SmbiosGet()

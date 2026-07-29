@@ -83,6 +83,23 @@ UefiVariableResult UefiGetVariable(const u16* name, const EfiGuid* guid);
 /// The UEFI global-variable GUID (Boot####, BootOrder, ...).
 const EfiGuid& UefiGlobalVariableGuid();
 
+/// Look up one vendor table in the EFI Configuration Table by GUID and
+/// return its physical address, or 0 when the firmware doesn't publish
+/// it (or the bootloader passed no EFI64 system-table tag — e.g. a
+/// legacy-BIOS boot).
+///
+/// READ-ONLY and firmware-call-free: this walks the
+/// `EFI_CONFIGURATION_TABLE` array the System Table points at, it does
+/// NOT enter Boot/Runtime Services. That makes it safe to call at any
+/// point after the Multiboot2 snapshot is captured — unlike
+/// `UefiGetVariable`, which thunks into firmware code.
+///
+/// This is how a UEFI-booted system publishes ACPI, SMBIOS and friends:
+/// under pure UEFI there is no legacy 0xF0000 BIOS area to scan, so a
+/// GUID lookup here is the ONLY way to find those tables. See
+/// `arch::SmbiosInit`, which prefers this over its legacy scan.
+u64 UefiFindConfigTable(const EfiGuid& guid);
+
 /// Sample once + log a one-line summary at boot. When `read_variables`
 /// is true (operator passed `uefi-getvar` on the cmdline) it additionally
 /// calls GetVariable to read + log BootOrder — the firmware call is

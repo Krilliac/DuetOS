@@ -267,6 +267,7 @@
 #include "diag/fault_inject.h"
 #include "diag/fault_react.h"
 #include "diag/panic_wait.h"
+#include "diag/telemetry.h"
 #include "diag/fix_journal.h"
 #include "diag/kpath.h"
 #include "diag/kpath_persist.h"
@@ -607,9 +608,6 @@ void BootBringupEarly(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
 
     SerialWrite("[boot] Detecting hypervisor.\n");
     duetos::arch::HypervisorProbe();
-
-    SerialWrite("[boot] Probing SMBIOS.\n");
-    duetos::arch::SmbiosInit();
 
     SerialWrite("[boot] Reading MSR thermals.\n");
     duetos::arch::ThermalProbe();
@@ -1164,6 +1162,25 @@ void BootBringupMemPaging()
     // init-with-validation example).
     duetos::mm::PoisonAllocInit();
     duetos::mm::PoisonAllocSelfTest();
+
+    // SMBIOS — firmware inventory (BIOS, system, baseboard, chassis,
+    // CPU, per-DIMM memory devices).
+    //
+    // MUST run here, not in BootBringupEarly where it used to sit. Both
+    // of its entry-point discovery paths have prerequisites that early
+    // slot did not satisfy:
+    //   - the EFI Configuration Table lookup needs the Multiboot2
+    //     snapshot, which FrameAllocatorInit only captures above, and
+    //     needs MapMmio, which needs PagingInit;
+    //   - even the legacy 0xF0000 scan calls PhysToVirt, so it wants the
+    //     direct map live — its own header comment claimed it ran "after
+    //     PagingInit" while the call site actually preceded it.
+    // Running early meant the EFI path could never fire, so every UEFI
+    // boot (which is the default under tools/qemu/run.sh) logged
+    // "no SMBIOS entry point" and the data looked absent rather than
+    // merely unreachable.
+    SerialWrite("[boot] Probing SMBIOS.\n");
+    duetos::arch::SmbiosInit();
     // Kernel-image W^X / DEP — split the 2 MiB PS direct map covering
     // the kernel image into 4 KiB pages, then apply per-section flags:
     //   .text  → R + X   (writes to .text now #PF)
