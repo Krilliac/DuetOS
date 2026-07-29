@@ -1971,3 +1971,157 @@ When a roadmap item lands:
 If an item is wrong-sized for a single commit, write a slice plan
 into the relevant subsystem page and keep a one-line index
 pointer here — **not** a landed-work paragraph.
+
+## Program backlog — ordered (2026-07-28)
+
+The standing work queue, in priority order. Items are ordered by **how much
+real software or hardware each unlocks per unit of work**, not by how
+interesting they are. Detailed sections for several already exist elsewhere
+in this file; this is the running order, not a replacement for them.
+
+Convention: `[dep: N]` means item N should land first. **PROOF** names the
+artefact that decides whether it actually works — without one an item is not
+done, it is merely written.
+
+### Tier 1 — Win32 compatibility (the first pillar)
+
+1. **SEH + C++ exception handling.** Every `throw` currently terminates the
+   process and `__try/__except` never runs. `ntdll_dispatch.c` already has
+   real `RtlUnwindEx`/`RtlVirtualUnwind`; the kernel32 rows point at no-ops
+   instead. **PROOF:** a PE that throws and catches, including a destructor
+   running during unwind, as a ring3 battery row.
+2. **`.rsrc` (PE resource) parser.** Needs no kernel change — every section
+   is already mapped. Unblocks `LoadStringW` (82 binaries measured),
+   `LoadImageW`, icons, cursors, accelerators, dialog templates.
+3. **Side-by-side DLL loading.** A PE importing a DLL shipped beside it has
+   no path at all today. The Unity launchers measure 98.5% import coverage
+   with exactly ONE unresolved import (`UnityPlayer.dll!UnityMain`). Needs
+   exe-directory tracking, recursive import resolution, guard scanning of
+   disk-loaded DLLs, and the same path reused by runtime `LoadLibrary`.
+4. **Dialog manager.** [dep: 2] Template-driven dialogs, modal loop,
+   standard controls.
+5. **Real COM.** Registry-backed CLSID to DLL resolution, `IUnknown` /
+   `QueryInterface`, apartments, in-proc servers. `ole32.c` is 32 exports in
+   one file today. Gates installers, shell integration and most DirectX
+   device-creation paths — the largest multiplier left after 1-3.
+6. **Delay-load imports.** `ResolveDelayLoadedAPI` / `DelayLoadFailureHook`
+   were deliberately skipped once because they need `GetProcAddress`, which
+   lives only in the thunk page and is not linkable from kernel32.
+7. **PE TLS callbacks.** The TLS directory callback array is never run.
+8. **SxS / assembly manifests.** Many installers and MFC apps depend on it.
+9. **Console completeness.** Screen buffers, VT sequences, real
+   `ReadConsoleInput`.
+10. **Fibers.** Real fibers, not the current `Tls*` aliases.
+11. **.NET spike.** [dep: 3, 5] Do NOT write a CLR. Determine whether
+    CoreCLR can be hosted as a guest PE — that converts a multi-year feature
+    into a compatibility problem already being solved. **PROOF:** a managed
+    hello-world runs, or a written account of the exact blocker.
+
+### Tier 2 — graphics and media
+
+12. **Off-screen surfaces.** The compositor has no concept of one, which is
+    what blocks memory DCs, bitmaps, blits and DIB sections across GDI.
+13. **Font pipeline.** Enumeration, fallback, metrics, antialiasing.
+14. **GDI completeness.** [dep: 12] Paths, regions, transfer modes.
+15. **D3D9.** Large back catalogue; simpler than 11/12.
+16. **D3D11 completeness** and **D3D12** beyond the current thunk layer.
+17. **DirectWrite / Direct2D.** [dep: 13]
+18. **Vulkan ICD completeness** — real pipelines, render passes, swapchain.
+19. **Hardware video decode.**
+20. **XAudio2 / WASAPI real mixing.** [dep: 21]
+21. **Audio depth** — USB audio class, HDMI/DP audio, per-stream volume,
+    resampling.
+22. **DirectInput / XInput** bound to real HID devices.
+
+### Tier 3 — hardware needed to be a daily driver
+
+23. **Power management.** `kernel/power/` contains only `reboot.cpp`. S3 /
+    S0ix suspend-resume and the wake path. ACPI is already parsed. A laptop
+    that cannot sleep is not a daily driver.
+24. **CPU frequency scaling.** P-states, EPP, idle governors.
+25. **`ReadMsrSafe`.** A ~20-line fault-tolerant `rdmsr` mirroring the
+    existing `wrmsr` template in `msr_safe.S`. Every MSR consumer currently
+    defends with static vendor+hypervisor gating because a bad `rdmsr` is
+    unrecoverable. Cheap unlock for AMD CPU temperature on this dev box.
+26. **Thermal + battery policy.** [dep: 25]
+27. **TPM 2.0 — sealing half only.** Seal / unseal / PCR-measure / hardware
+    RNG, and deliberately NO endorsement-key export, NO quote signing, NO
+    attestation protocol. Enforced by capability, so a guest PE is
+    structurally unable to obtain a stable hardware identifier.
+28. **Full-disk encryption.** [dep: 27] Key sealed to PCR state, so no
+    passphrase on every boot.
+29. **Measured boot as a LOCAL tripwire.** [dep: 27] Detection without
+    reporting — the two are separable and we implement only the first.
+30. **Secure Boot chain verification.**
+31. **Bluetooth.** HCI, L2CAP, then HID and A2DP.
+32. **Precision touchpad HID** — gestures, palm rejection.
+33. **UVC camera.**
+34. **Multi-monitor + hotplug**, per-head modeset.
+35. **SD/MMC**, **Thunderbolt/USB4**, **more NICs** (2.5G Realtek, Intel
+    I225), **fingerprint / sensors**.
+36. **Real GPU engine-busy sampling.** AMD `mmGRBM_STATUS` bit 31 is already
+    mapped but read ONCE at probe — a single read of a level-triggered bit
+    is not a duty cycle; it needs a periodic sampler. Intel: RC6 residency
+    or RING head/tail. NVIDIA: `NV_PGRAPH_STATUS`. Virtual adapters must
+    report NOT APPLICABLE, never 0%. **PROOF:** unvalidatable in QEMU —
+    needs a bare-metal boot.
+
+### Tier 4 — storage and filesystems
+
+37. **Native journaling FS** with checksums; **COW snapshots**.
+38. **NTFS write** (read-only today), **ext4 write**.
+39. **exFAT cluster-chain growth** — writes are bounded today.
+40. **TRIM/discard**, **NVMe namespace management**, **software RAID**.
+41. **File-change notification** (`ReadDirectoryChangesW` / inotify).
+42. **Memory-mapped file completeness.**
+43. **SMB client** — the biggest single interop win on a home network.
+44. **Disk quotas**, **NFS client**.
+
+### Tier 5 — networking
+
+45. **TLS 1.3** — a branch exists (X25519 + RSA-PSS done, protocol layer
+    remaining); finish and merge it.
+46. **IPv6 dual-stack.**
+47. **Firewall / packet filter**, **NAT + bridging**.
+48. **WireGuard**, **QUIC / HTTP3**, **DNS-over-HTTPS**, **mDNS**.
+49. **Wi-Fi depth** — WPA3, roaming, iwlwifi.
+
+### Tier 6 — kernel hardening and quality
+
+50. **WaitQueue detach primitive.** One missing scheduler ABI
+    (`WaitQueueBlockLocked`) blocks three filed findings (R1-14
+    `regions_lock`, R1-15 PS/2 ring, C4 unkillable blocked threads).
+    Building it once retires all three.
+51. **Root-cause the intermittent `sync/spinlock` self-deadlock** seen ~1
+    boot in 5 during the userland elf-loader OOM self-tests.
+52. **CET / shadow stacks**, **per-entry IBRS**, **KCFI**.
+53. **NUMA awareness**, **huge pages**, **memory compression**.
+54. **io_uring-style async I/O.**
+55. **Real-time scheduling class**, **cgroup-style resource limits**.
+56. **Checkpoint / restore** of a running process.
+57. **Kernel live patching.**
+58. **Crash reporting with symbolisation**; **sampling profiler**.
+
+### Tier 7 — the differentiator
+
+59. **PE/ELF interop as a first-class feature.** DuetOS runs both as peers
+    on ONE kernel, ONE VFS, ONE TCP stack. A Linux binary piping into a
+    Windows binary in the same process tree is something Wine cannot do (no
+    Linux kernel ABI) and WSL cannot do natively (two kernels). Most of the
+    substrate exists; what is missing is deliberate plumbing and a demo.
+60. **Hypervisor.** [dep: 23] Run Linux/Windows guests; `tools/vmm` already
+    drives WHP on the host side.
+61. **Package manager / installer**, **multi-user + fast switching**,
+    **remote desktop**, **accessibility** (screen reader), **i18n**.
+
+### Standing rules for this backlog
+
+- An item is done when its **PROOF** artefact runs, not when it compiles.
+- Anything returning a constant carries `// STUB:`; real-but-limited carries
+  `// GAP: <what> - <when>`. A present-but-lying export is worse than a
+  missing one — `LoadStringW` is deliberately unexported for exactly this
+  reason.
+- Prefer extending an existing subsystem over adding one.
+- Re-run `tools/test/pe-compat-survey.py` after Tier 1 items: it measures
+  which real binaries each change actually unblocked, turning "what next"
+  into a measurement instead of a guess.
