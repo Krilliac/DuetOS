@@ -4,6 +4,7 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 
 ## Active Sessions
 
+<<<<<<< HEAD
 ### [DONE] thunk-retirement-wave1
 - **Session**: `Codex-thunk-wave1`
 - **Branch**: `claude/thunk-retirement-wave1`
@@ -467,3 +468,20 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Correct SYS_THREAD_OPEN fixture number and synchronize TID-only handle contract
 - **Claimed**: 2026-07-27T06:51:16Z
 - **Status**: COMPLETED @ 2026-07-27T06:52:05Z
+=======
+### 🟢 linux-mm-wx-hardening
+- **Session**: `Nathan-8`
+- **Branch**: `claude/linux-mmap-wx-hardening`
+- **Files**: `kernel/subsystems/linux/syscall_mm.cpp kernel/subsystems/linux/mm_protection_policy.h kernel/subsystems/linux/extra_syscalls.cpp kernel/subsystems/linux/syscall_internal.h tests/host/test_linux_mm_policy.cpp tests/host/CMakeLists.txt wiki/security/WX-Enforcement.md wiki/reference/Design-Decisions.md`
+- **Description**: Enforce Linux mmap and mprotect W^X policy and make mseal failure truthful
+- **Claimed**: 2026-07-26T12:30:06Z
+- **Status**: IN PROGRESS
+>>>>>>> 531563d6 (chore: claim subsystem 'linux-mm-wx-hardening' [session Nathan-8])
+
+### 🟢 ci-red-main-repair
+- **Session**: `Nathan-616`
+- **Branch**: `claude/ci-red-main-repair`
+- **Files**: `Codex-CI-red-main`
+- **Description**: kernel/subsystems/win32/registry.cpp kernel/loader/pe_loader.cpp kernel/proc/ring3_smoke.cpp userland/apps/accel_test/hello.c userland/apps/console4_smoke/console4_smoke.c userland/apps/dialog_smoke/dialog_smoke.c userland/apps/guard_smoke/guard_smoke.c userland/libs/advapi32/advapi32.c userland/libs/comtest/comtest.c userland/libs/gdi32/gdi32.c userland/libs/kernel32/kernel32_fiber.c userland/libs/ole32/ole32.c tools/build/build-accel-test.sh tests/host/test_thunk_retirement_policy.cpp tools/build/test_verify_pe_exports.py
+- **Claimed**: 2026-07-30T23:59:25Z
+- **Status**: IN PROGRESS
