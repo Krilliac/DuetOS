@@ -196,9 +196,7 @@
     {"kernel32.dll", "ResetEvent", kOffResetEventReal},
 
     // The public Tls* names are retired to the verified kernel32 DLL.
-    // Fls* retains the shared fixed byte spans (v0 has no fibers).
-    {"kernel32.dll", "FlsAlloc", kOffTlsAllocReal}, {"kernel32.dll", "FlsFree", kOffTlsFreeReal},
-    {"kernel32.dll", "FlsGetValue", kOffTlsGetValueReal}, {"kernel32.dll", "FlsSetValue", kOffTlsSetValueReal},
+    // Fls* retired to kernel32 DLL (real per-fiber storage via SYS_FLS_*).
 
     // console APIs. WriteConsoleW is the major
     // Unicode-output entry point; the stub UTF-16-strips to
@@ -521,16 +519,7 @@
     {"kernel32.dll", "SetThreadIdealProcessor", kOffPinReturn0}, // prev ideal = 0
     {"kernel32.dll", "GetThreadIdealProcessorEx", kOffPinReturn1},
     {"kernel32.dll", "DisableThreadLibraryCalls", kOffPinReturn1},
-    // Fiber API: pin 0 / void — no fiber scheduler in v0. Create*
-    // returning NULL forces callers onto thread fallback; the
-    // Switch/Delete leg is genuinely void.
-    {"kernel32.dll", "CreateFiber", kOffPinFiberZero}, {"kernel32.dll", "CreateFiberEx", kOffPinFiberZero},
-    {"kernel32.dll", "ConvertThreadToFiber", kOffPinFiberZero},
-    {"kernel32.dll", "ConvertThreadToFiberEx", kOffPinFiberZero},
-    {"kernel32.dll", "ConvertFiberToThread", kOffPinReturn1},
-    {"kernel32.dll", "SwitchToFiber", kOffPinFiberVoid}, // void
-    {"kernel32.dll", "DeleteFiber", kOffPinFiberVoid},   // void
-    {"kernel32.dll", "IsThreadAFiber", kOffPinFiberZero},
+    // Fiber API: retired to kernel32 DLL (real fibers via SYS_FIBER_*).
     {"kernel32.dll", "DebugBreak", kOffPinVoidNop}, // void — no int3 (would kill us)
     {"kernel32.dll", "DebugActiveProcess", kOffPinReturn0}, {"kernel32.dll", "DebugActiveProcessStop", kOffPinReturn0},
     // GetSystemTimePreciseAsFileTime has the same shape as

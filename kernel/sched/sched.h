@@ -336,6 +336,71 @@ inline constexpr u32 kWin32TlsCap = 64;
 u64 CurrentTaskTlsSlotValue(u32 idx, u64 generation);
 void SetCurrentTaskTlsSlotValue(u32 idx, u64 generation, u64 value);
 
+// ---------------------------------------------------------------------------
+// Per-task Win32 fiber accessors
+// ---------------------------------------------------------------------------
+
+/// Fiber capacity per task (mirrors Task::kFiberCap).
+inline constexpr u32 kFiberCap = 8;
+/// FLS capacity per fiber (mirrors Process::kWin32FlsCap).
+inline constexpr u32 kFlsCap = 32;
+/// Sentinel: thread is not a fiber.
+inline constexpr u32 kFiberNone = 0xFF;
+
+/// True if the current task has been converted to a fiber.
+bool CurrentTaskIsFiber();
+
+/// Active fiber index, or kFiberNone.
+u32 CurrentTaskActiveFiber();
+
+/// How many fiber slots are in use on the current task.
+u32 CurrentTaskFiberCount();
+
+/// Pointer to the active fiber's FLS value array (32 u64s). nullptr
+/// if the current task is not a fiber. Used by FLS syscall handlers.
+u64* CurrentTaskActiveFiberFlsValues();
+u64* CurrentTaskActiveFiberFlsGenerations();
+
+/// Read/write the FiberData (TEB+0x20) of the active fiber.
+u64 CurrentTaskFiberData();
+
+/// Direct access to the fiber context array for the fiber syscall
+/// handlers. Returns nullptr if the task has no fiber table (kernel
+/// task, pre-convert). The caller must bounds-check index < kFiberCap
+/// and verify in_use before touching the returned pointer.
+struct FiberContextView
+{
+    u64 rax, rbx, rcx, rdx, rsi, rdi, rbp;
+    u64 r8, r9, r10, r11, r12, r13, r14, r15;
+    u64 rip, rsp, rflags;
+    u64 fiber_data;
+    u64 fls_values[32];
+    u64 fls_generation[32];
+    u64 stack_base_va;
+    u64 stack_pages;
+    bool in_use;
+};
+
+/// Initialise fiber slot 0 from the current trap frame (ConvertThreadToFiber).
+/// Returns the fiber "address" (slot+1) or 0 on failure.
+u64 CurrentTaskFiberConvert(u64 fiber_data);
+
+/// Allocate a new fiber slot with a fresh stack. Returns fiber "address"
+/// (slot+1) or 0 on failure.
+u64 CurrentTaskFiberCreate(u64 start_address, u64 fiber_data, u64 stack_pages,
+                           u64 stack_base_va);
+
+/// Save the current fiber's registers from `frame`, load the target
+/// fiber's registers into `frame`. Returns true on success.
+bool CurrentTaskFiberSwitch(u32 target_slot, arch::TrapFrame* frame);
+
+/// Delete a fiber slot, returning its stack info for unmapping.
+/// Returns true on success.
+bool CurrentTaskFiberDelete(u32 slot, u64* out_stack_base, u64* out_stack_pages);
+
+/// True if `slot` is the currently active fiber.
+bool CurrentTaskFiberIsActive(u32 slot);
+
 /// Read the task ID of an arbitrary `Task*`. Returns 0 for nullptr.
 /// Used by Win32 custom-diagnostics deadlock-detection to record a
 /// mutex's owner edge in the wait graph without exposing Task's

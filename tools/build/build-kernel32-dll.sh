@@ -47,6 +47,7 @@ SRC_FILES=(
     "${SRC_DIR}/kernel32_psapi.c"
     "${SRC_DIR}/kernel32_seh.c"
     "${SRC_DIR}/kernel32_resource.c"
+    "${SRC_DIR}/kernel32_fiber.c"
     "${SRC_DIR}/seh_capture.S"
     "${SRC_DIR}/raise_exception.S"
 )
@@ -424,6 +425,14 @@ set +e
     /export:Process32First /export:Process32Next \
     /export:OpenProcess \
     /export:GenerateConsoleCtrlEvent \
+    /export:ConvertThreadToFiber /export:ConvertThreadToFiberEx \
+    /export:ConvertFiberToThread \
+    /export:CreateFiber /export:CreateFiberEx \
+    /export:SwitchToFiber /export:DeleteFiber \
+    /export:GetCurrentFiber /export:GetFiberData \
+    /export:IsThreadAFiber \
+    /export:FlsAlloc /export:FlsFree \
+    /export:FlsGetValue /export:FlsSetValue \
     /out:"${DLL}" \
     "${OBJS[@]}" \
     "${NTDLL_LIB}" 2>&1 | grep -v "align specified without /driver"

@@ -90,6 +90,7 @@
 #include "subsystems/win32/vmap_syscall.h"
 #include "util/debug_assert.h"
 #include "util/nospec.h"
+#include "subsystems/win32/fiber_syscall.h"
 #include "subsystems/win32/tls_syscall.h"
 #include "subsystems/win32/file_syscall.h"
 #include "subsystems/win32/thread_syscall.h"
@@ -648,6 +649,13 @@ void SyscallDispatch(arch::TrapFrame* frame)
         {
             ProcessPublishWin32ThreadExit(proc, sched::TaskId(self), static_cast<u32>(code & 0xFFFFFFFFu));
         }
+        // GAP: DLL_THREAD_DETACH not dispatched — revisit when DLL_PROCESS_ATTACH dispatch lands
+        // (dll_loader.h notes ATTACH as "not in scope yet"; sending DETACH without ATTACH
+        // would violate the DllMain sequencing contract and break correctly-written DLLs).
+        // When ATTACH exists: iterate proc->dll_images[], build a user-mode trampoline
+        // that calls each DllMain(hModule, DLL_THREAD_DETACH, NULL), redirect the trap
+        // frame through it, and have the trampoline re-issue SYS_EXIT on completion.
+
         // SchedExit is [[noreturn]] — it marks the current task Dead,
         // wakes the reaper, and Schedule()s away forever. The trap
         // frame on this task's kernel stack becomes orphaned and
@@ -4993,6 +5001,32 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     case SYS_GDI_SET_BK_MODE:
         subsystems::win32::DoGdiSetBkMode(frame);
+        return;
+
+    // Win32 fiber + FLS family.
+    case SYS_FIBER_CONVERT:
+        subsystems::win32::DoFiberConvert(frame);
+        return;
+    case SYS_FIBER_CREATE:
+        subsystems::win32::DoFiberCreate(frame);
+        return;
+    case SYS_FIBER_SWITCH:
+        subsystems::win32::DoFiberSwitch(frame);
+        return;
+    case SYS_FIBER_DELETE:
+        subsystems::win32::DoFiberDelete(frame);
+        return;
+    case SYS_FLS_ALLOC:
+        subsystems::win32::DoFlsAlloc(frame);
+        return;
+    case SYS_FLS_FREE:
+        subsystems::win32::DoFlsFree(frame);
+        return;
+    case SYS_FLS_GET:
+        subsystems::win32::DoFlsGet(frame);
+        return;
+    case SYS_FLS_SET:
+        subsystems::win32::DoFlsSet(frame);
         return;
 
     case SYS_GFX_D3D_STUB:

@@ -419,6 +419,40 @@ struct Task
     Task* all_prev;
     Task* all_next;
 
+    // ===================================================================
+    // Win32 Fiber context. Each fiber in a thread has its own saved GP
+    // register set, stack pointer, instruction pointer, and FLS values.
+    // A thread starts with no fibers (fiber_count == 0); calling
+    // ConvertThreadToFiber creates slot 0 from the current context.
+    // ===================================================================
+    static constexpr u32 kFiberCap = 8;
+    static constexpr u32 kFiberNone = 0xFF;
+
+    struct FiberContext
+    {
+        // Saved GP registers (restored into the TrapFrame on SwitchToFiber).
+        u64 rax, rbx, rcx, rdx, rsi, rdi, rbp;
+        u64 r8, r9, r10, r11, r12, r13, r14, r15;
+        u64 rip;
+        u64 rsp;
+        u64 rflags;
+        // Fiber metadata.
+        u64 fiber_data; // arbitrary user pointer (TEB+0x20)
+        // Per-fiber FLS values. 32 slots per fiber matching Process::kWin32FlsCap.
+        u64 fls_values[32];
+        u64 fls_generation[32];
+        // Stack allocation tracking (only for CreateFiber'd fibers, not
+        // the converted-thread fiber which uses the thread's own stack).
+        u64 stack_base_va; // 0 = thread's own stack (ConvertThreadToFiber)
+        u64 stack_pages;   // page count allocated for this fiber's stack
+        bool in_use;
+        u8 _fiber_pad[7];
+    };
+    FiberContext fibers[kFiberCap];
+    u32 fiber_count;       // how many fibers have been created (incl. slot 0)
+    u32 active_fiber;      // index into fibers[] of the currently running fiber
+                           // kFiberNone = not a fiber (no ConvertThreadToFiber yet)
+
     // Lockdep held-class stack, parked here across ContextSwitch.
     // A sleeping mutex is held across switches; a single global
     // held stack conflated two tasks' independent mutexes into a
@@ -4006,6 +4040,244 @@ void SetCurrentTaskTlsSlotValue(u32 idx, u64 generation, u64 value)
     }
     self->win32_tls_slot_value[idx] = value;
     self->win32_tls_slot_generation[idx] = generation;
+}
+
+// ---------------------------------------------------------------------------
+// Win32 fiber accessors
+// ---------------------------------------------------------------------------
+
+bool CurrentTaskIsFiber()
+{
+    Task* self = CurrentTask();
+    return (self != nullptr) && (self->active_fiber != Task::kFiberNone);
+}
+
+u32 CurrentTaskActiveFiber()
+{
+    Task* self = CurrentTask();
+    return (self != nullptr) ? self->active_fiber : Task::kFiberNone;
+}
+
+u32 CurrentTaskFiberCount()
+{
+    Task* self = CurrentTask();
+    return (self != nullptr) ? self->fiber_count : 0;
+}
+
+u64* CurrentTaskActiveFiberFlsValues()
+{
+    Task* self = CurrentTask();
+    if (self == nullptr || self->active_fiber == Task::kFiberNone)
+    {
+        return nullptr;
+    }
+    return self->fibers[self->active_fiber].fls_values;
+}
+
+u64* CurrentTaskActiveFiberFlsGenerations()
+{
+    Task* self = CurrentTask();
+    if (self == nullptr || self->active_fiber == Task::kFiberNone)
+    {
+        return nullptr;
+    }
+    return self->fibers[self->active_fiber].fls_generation;
+}
+
+u64 CurrentTaskFiberData()
+{
+    Task* self = CurrentTask();
+    if (self == nullptr || self->active_fiber == Task::kFiberNone)
+    {
+        return 0;
+    }
+    return self->fibers[self->active_fiber].fiber_data;
+}
+
+u64 CurrentTaskFiberConvert(u64 fiber_data)
+{
+    Task* self = CurrentTask();
+    if (self == nullptr)
+    {
+        return 0;
+    }
+    if (self->active_fiber != Task::kFiberNone)
+    {
+        // Already a fiber.
+        return 0;
+    }
+    if (self->fiber_count >= Task::kFiberCap)
+    {
+        return 0;
+    }
+    // Slot 0 is the converted-thread fiber. Its register context is
+    // NOT populated here — it will be saved by the first SwitchToFiber.
+    auto& f = self->fibers[0];
+    f.in_use = true;
+    f.fiber_data = fiber_data;
+    f.stack_base_va = 0; // uses thread's own stack
+    f.stack_pages = 0;
+    // FLS values start zeroed (memset at Task allocation).
+    self->fiber_count = 1;
+    self->active_fiber = 0;
+    return 1; // fiber "address" = slot + 1
+}
+
+u64 CurrentTaskFiberCreate(u64 start_address, u64 fiber_data, u64 stack_pages,
+                           u64 stack_base_va)
+{
+    Task* self = CurrentTask();
+    if (self == nullptr)
+    {
+        return 0;
+    }
+    // Must be a fiber first (ConvertThreadToFiber).
+    if (self->active_fiber == Task::kFiberNone)
+    {
+        return 0;
+    }
+    if (self->fiber_count >= Task::kFiberCap)
+    {
+        return 0;
+    }
+    // Find a free slot.
+    u32 slot = Task::kFiberNone;
+    for (u32 i = 0; i < Task::kFiberCap; ++i)
+    {
+        if (!self->fibers[i].in_use)
+        {
+            slot = i;
+            break;
+        }
+    }
+    if (slot == Task::kFiberNone)
+    {
+        return 0;
+    }
+    auto& f = self->fibers[slot];
+    // Zero the context.
+    f.rax = f.rbx = f.rdx = f.rsi = f.rdi = f.rbp = 0;
+    f.r8 = f.r9 = f.r10 = f.r11 = f.r12 = f.r13 = f.r14 = f.r15 = 0;
+    // RCX = fiber_data — the Win64 first-parameter register, so the
+    // fiber proc receives its lpParameter argument naturally when
+    // iretq resumes at f.rip.
+    f.rcx = fiber_data;
+    f.rip = start_address;
+    // Stack grows down: RSP starts at the top of the allocated region,
+    // minus 8 bytes for the return address slot (16-byte aligned).
+    f.rsp = stack_base_va + (stack_pages * 4096) - 8;
+    f.rflags = 0x202; // IF set
+    f.fiber_data = fiber_data;
+    f.stack_base_va = stack_base_va;
+    f.stack_pages = stack_pages;
+    f.in_use = true;
+    // Zero FLS values.
+    for (u32 i = 0; i < 32; ++i)
+    {
+        f.fls_values[i] = 0;
+        f.fls_generation[i] = 0;
+    }
+    self->fiber_count++;
+    return static_cast<u64>(slot + 1); // fiber "address"
+}
+
+bool CurrentTaskFiberSwitch(u32 target_slot, arch::TrapFrame* frame)
+{
+    Task* self = CurrentTask();
+    if (self == nullptr || frame == nullptr)
+    {
+        return false;
+    }
+    if (self->active_fiber == Task::kFiberNone)
+    {
+        return false;
+    }
+    if (target_slot >= Task::kFiberCap || !self->fibers[target_slot].in_use)
+    {
+        return false;
+    }
+    if (target_slot == self->active_fiber)
+    {
+        return true; // switching to self is a no-op
+    }
+
+    // Save current fiber's GP registers from the trap frame.
+    auto& cur = self->fibers[self->active_fiber];
+    cur.rax = frame->rax;
+    cur.rbx = frame->rbx;
+    cur.rcx = frame->rcx;
+    cur.rdx = frame->rdx;
+    cur.rsi = frame->rsi;
+    cur.rdi = frame->rdi;
+    cur.rbp = frame->rbp;
+    cur.r8 = frame->r8;
+    cur.r9 = frame->r9;
+    cur.r10 = frame->r10;
+    cur.r11 = frame->r11;
+    cur.r12 = frame->r12;
+    cur.r13 = frame->r13;
+    cur.r14 = frame->r14;
+    cur.r15 = frame->r15;
+    cur.rip = frame->rip;
+    cur.rsp = frame->rsp;
+    cur.rflags = frame->rflags;
+
+    // Load target fiber's registers into the trap frame.
+    auto& tgt = self->fibers[target_slot];
+    frame->rax = tgt.rax;
+    frame->rbx = tgt.rbx;
+    frame->rcx = tgt.rcx;
+    frame->rdx = tgt.rdx;
+    frame->rsi = tgt.rsi;
+    frame->rdi = tgt.rdi;
+    frame->rbp = tgt.rbp;
+    frame->r8 = tgt.r8;
+    frame->r9 = tgt.r9;
+    frame->r10 = tgt.r10;
+    frame->r11 = tgt.r11;
+    frame->r12 = tgt.r12;
+    frame->r13 = tgt.r13;
+    frame->r14 = tgt.r14;
+    frame->r15 = tgt.r15;
+    frame->rip = tgt.rip;
+    frame->rsp = tgt.rsp;
+    frame->rflags = tgt.rflags;
+
+    self->active_fiber = target_slot;
+    return true;
+}
+
+bool CurrentTaskFiberDelete(u32 slot, u64* out_stack_base, u64* out_stack_pages)
+{
+    Task* self = CurrentTask();
+    if (self == nullptr)
+    {
+        return false;
+    }
+    if (slot >= Task::kFiberCap || !self->fibers[slot].in_use)
+    {
+        return false;
+    }
+    auto& f = self->fibers[slot];
+    if (out_stack_base != nullptr)
+    {
+        *out_stack_base = f.stack_base_va;
+    }
+    if (out_stack_pages != nullptr)
+    {
+        *out_stack_pages = f.stack_pages;
+    }
+    f.in_use = false;
+    f.stack_base_va = 0;
+    f.stack_pages = 0;
+    self->fiber_count--;
+    return true;
+}
+
+bool CurrentTaskFiberIsActive(u32 slot)
+{
+    Task* self = CurrentTask();
+    return (self != nullptr) && (self->active_fiber == slot);
 }
 
 u64 TaskId(const Task* t)

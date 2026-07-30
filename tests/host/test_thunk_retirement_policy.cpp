@@ -37,7 +37,7 @@ int main()
     EXPECT_FALSE(IsRetiredKernel32ImportName("_InterlockedIncrement"));
     EXPECT_FALSE(IsRetiredKernel32ImportName("InterlockedIncrement64"));
     EXPECT_FALSE(IsRetiredKernel32ImportName("tlsalloc"));
-    EXPECT_FALSE(IsRetiredKernel32ImportName("FlsAlloc"));
+    EXPECT_TRUE(IsRetiredKernel32ImportName("FlsAlloc"));
     EXPECT_FALSE(IsRetiredKernel32ImportName("TlsAllocEx"));
 
     EXPECT_TRUE(RetiredNamedImportWouldFallBack(false, false, false, "GetLastError"));

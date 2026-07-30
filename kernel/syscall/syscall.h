@@ -2226,6 +2226,72 @@ enum SyscallNumber : u64
     // destination. Backs gdi32!GetDIBits.
     // ABI stable from this commit.
     SYS_GDI_GET_DIBITS = 215,
+
+    // ===================================================================
+    // Win32 Fiber + Fiber-Local Storage (FLS) family.
+    //
+    // Fibers are cooperative user-mode threads within a single OS thread.
+    // Each fiber has its own stack, register context, and FLS slots.
+    // SwitchToFiber saves/restores the full GP register set + RSP + RIP
+    // via trap-frame manipulation in the syscall handler.
+    // ===================================================================
+
+    // SYS_FIBER_CONVERT — convert the calling thread into a fiber.
+    //   rdi = fiber_data (arbitrary user pointer stored at TEB+0x20).
+    //   rax = non-zero fiber address on success (the kernel-assigned
+    //         fiber index + 1), 0 on failure (already a fiber, or
+    //         fiber table full). Backs ConvertThreadToFiber /
+    //         ConvertThreadToFiberEx.
+    SYS_FIBER_CONVERT = 216,
+
+    // SYS_FIBER_CREATE — create a new fiber with its own stack.
+    //   rdi = start_address (user VA of the fiber entry function).
+    //   rsi = fiber_data (arbitrary user pointer).
+    //   rdx = stack_size (0 = default 64 KiB; otherwise rounded up
+    //         to page size).
+    //   rax = non-zero fiber address on success, 0 on failure (table
+    //         full, bad start VA, OOM for stack). Backs CreateFiber /
+    //         CreateFiberEx.
+    SYS_FIBER_CREATE = 217,
+
+    // SYS_FIBER_SWITCH — switch from the current fiber to a target.
+    //   rdi = target fiber address (as returned by CONVERT or CREATE).
+    //   The handler saves the current fiber's GP regs + RSP + RIP from
+    //   the trap frame, loads the target fiber's saved context into the
+    //   trap frame, updates TEB+0x20 (FiberData), and returns via iretq
+    //   — execution resumes in the target fiber's context. Backs
+    //   SwitchToFiber.
+    SYS_FIBER_SWITCH = 218,
+
+    // SYS_FIBER_DELETE — delete a fiber and free its stack.
+    //   rdi = fiber address. Returns 0 on success, u64(-1) on bad
+    //         address. Deleting the CURRENT fiber terminates the
+    //         thread (same as ExitThread). Backs DeleteFiber.
+    SYS_FIBER_DELETE = 219,
+
+    // SYS_FLS_ALLOC — allocate a Fiber-Local Storage slot.
+    //   rdi = cleanup callback VA (0 = no callback). Returns the
+    //         slot index (0..31) or u64(-1) if all slots are in use.
+    //         FLS slots are per-process; VALUES are per-fiber.
+    //         Backs FlsAlloc.
+    SYS_FLS_ALLOC = 220,
+
+    // SYS_FLS_FREE — free a previously allocated FLS slot.
+    //   rdi = slot index. Returns 0 on success, u64(-1) on bad
+    //         index / unallocated. Backs FlsFree.
+    SYS_FLS_FREE = 221,
+
+    // SYS_FLS_GET — read the calling fiber's FLS slot value.
+    //   rdi = slot index. Returns the stored u64 value, or 0 for
+    //         an unset / stale / invalid index. If the calling
+    //         thread is not a fiber, falls back to per-thread
+    //         storage (same as TLS). Backs FlsGetValue.
+    SYS_FLS_GET = 222,
+
+    // SYS_FLS_SET — write the calling fiber's FLS slot value.
+    //   rdi = slot index, rsi = value. Returns 0 on success,
+    //         u64(-1) on bad index. Backs FlsSetValue.
+    SYS_FLS_SET = 223,
 };
 
 // Vulkan syscall op-codes. Used as the `rdi` value to SYS_VK_CALL

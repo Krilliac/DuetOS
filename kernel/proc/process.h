@@ -1092,14 +1092,28 @@ struct Process
     // one thread cannot observe another thread's slot contents.
     //
     // 64 slots is plenty for any CRT — typical MSVC CRT
-    // uses 3-5 TLS slots. FLS (Fiber-Local Storage) aliases
-    // to the same API in v0 since we have no fibers.
+    // uses 3-5 TLS slots.
     static constexpr u64 kWin32TlsCap = 64;
     sync::SpinLock tls_lock;
     u64 tls_slot_in_use; // bitmap: bit N = slot N allocated
     // Every free/allocate transition advances the slot generation.
     // Per-task values stamped with an older generation read as zero.
     u64 tls_slot_generation[kWin32TlsCap];
+
+    // Fiber-Local Storage (FLS). Separate from TLS: FLS slots are
+    // per-process allocation, but values are per-FIBER (not per-thread).
+    // When a thread is not converted to a fiber, FLS falls back to
+    // per-thread storage (same as TLS). 32 slots is enough for typical
+    // CRT usage (MSVC uses 1-3 FLS slots for fiber-safe CRT state).
+    static constexpr u64 kWin32FlsCap = 32;
+    sync::SpinLock fls_lock;
+    u32 fls_slot_in_use; // bitmap: bit N = slot N allocated
+    u32 _fls_pad0;
+    u64 fls_slot_generation[kWin32FlsCap];
+    // Per-slot cleanup callback VA (user-mode function pointer).
+    // Called when a fiber is deleted or when FlsFree is called.
+    // 0 = no callback.
+    u64 fls_cleanup_callback[kWin32FlsCap];
 
     // Static-TLS template descriptor (T6-01 per-thread half).
     // Populated by the PE loader's SetupStaticTls when the image
