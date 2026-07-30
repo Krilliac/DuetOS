@@ -1860,8 +1860,24 @@ WinDbg client API, `SymLoadModuleEx`.
   `CreateEllipticRgn`, `CreatePolygonRgn`) and clip-region selection
   (`SelectClipRgn`, `ExtSelectClipRgn`) — STUB.
 - Metafiles: `CreateMetaFile`, `PlayMetaFile` — STUB
+- **Font pipeline (v0):** `CreateFontA`/`CreateFontW` route through
+  `SYS_GDI_CREATE_FONT` (225) to a kernel font registry with 3
+  built-in bitmap fonts (System 8x8, Fixedsys 8x8, Terminal 8x16).
+  `SelectObject` on font handles updates the DC's selected font.
+  `GetTextMetricsA`/`GetTextMetricsW` return metrics for the DC's
+  selected font via `SYS_GDI_GET_TEXT_METRICS` (226).
+  `GetTextExtentPoint32A`/`GetTextExtentPoint32W`/`GetCharWidth32A`
+  derive cell size from the DC's font. All text-drawing paths
+  (`TextOutA`/`W`, `DrawTextA`/`W`) honour the DC's selected font.
+  `GetStockObject` returns font handles for `SYSTEM_FONT` (13) and
+  `SYSTEM_FIXED_FONT` (16). Per-process font ceiling: 16 handles.
+  These DLL exports are resolved from the preloaded gdi32.dll EAT,
+  not from the thunk table (the thunk table entries are dead
+  fallbacks).
 - Outline / TrueType fonts: `EnumFontsW`, `GetGlyphOutline`
-  — STUB (we render only the kernel's 8x8 bitmap font)
+  — STUB (no outline font rasteriser; the registry serves only
+  bitmap fonts)
+- `CreateFontIndirectA`/`CreateFontIndirectW` — STUB (return 0)
 - Color management: `SetICMMode`, `GetICMProfile` — STUB
 - Printer DC: `CreateDCW("WINSPOOL\\…")` — STUB
 

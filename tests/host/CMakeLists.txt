@@ -364,3 +364,12 @@ add_host_test(tpm_wire)
 # lookup incl. prefix collisions, and the strict hex decoder that the TPM
 # measured-boot baseline (tpm.baseline=) depends on.
 add_host_test(cmdline)
+
+# Font registry (kernel/subsystems/graphics/font.cpp + font8x8.cpp):
+# lookup logic, built-in registration, case-insensitive name match,
+# height-based fallback, and LookupGlyph dispatch.
+add_host_test(font_registry)
+target_sources(test_font_registry PRIVATE
+    "${CMAKE_SOURCE_DIR}/../../kernel/subsystems/graphics/font.cpp"
+    "${CMAKE_SOURCE_DIR}/../../kernel/drivers/video/font8x8.cpp"
+)

@@ -5046,6 +5046,12 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_GDI_SET_BK_MODE:
         subsystems::win32::DoGdiSetBkMode(frame);
         return;
+    case SYS_GDI_CREATE_FONT:
+        subsystems::win32::DoGdiCreateFont(frame);
+        return;
+    case SYS_GDI_GET_TEXT_METRICS:
+        subsystems::win32::DoGdiGetTextMetrics(frame);
+        return;
 
     // Win32 fiber + FLS family.
     case SYS_FIBER_CONVERT:

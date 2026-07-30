@@ -57,6 +57,7 @@
 #include "mm/kheap.h"
 #include "mm/paging.h"
 #include "sched/sched.h"
+#include "subsystems/graphics/font.h"
 #include "subsystems/win32/gdi_objects.h"
 #include "sync/spinlock.h"
 
@@ -724,7 +725,7 @@ void DoGdiTextOut(arch::TrapFrame* frame)
                 // background with bk_color; TRANSPARENT leaves it
                 // unchanged.
                 const bool opaque = (dc->bk_mode == kBkModeOpaque);
-                GdiPaintTextOnBitmap(bmp, x, y, text, dc->text_color, dc->bk_color, opaque);
+                GdiPaintTextOnBitmapWithFont(bmp, x, y, text, dc->text_color, dc->bk_color, opaque, dc->selected_font);
                 ok = true;
             }
         }
@@ -807,7 +808,7 @@ void DoGdiTextOutW(arch::TrapFrame* frame)
             if (bmp != nullptr)
             {
                 const bool opaque = (dc->bk_mode == kBkModeOpaque);
-                GdiPaintTextOnBitmap(bmp, x, y, text, dc->text_color, dc->bk_color, opaque);
+                GdiPaintTextOnBitmapWithFont(bmp, x, y, text, dc->text_color, dc->bk_color, opaque, dc->selected_font);
                 ok = true;
             }
         }
@@ -1690,8 +1691,24 @@ static u64 DrawTextAsciiOnDc(u64 hdc, const char* text, u64 copy_len, u64 user_r
     const i32 rw = rr - rx;
     const i32 rh = rb - ry;
 
-    const i32 text_w = static_cast<i32>(copy_len) * 8;
-    const i32 text_h = 8;
+    // Resolve the DC's font to compute text dimensions.
+    u64 font_handle = 0;
+    {
+        MemDC* mdc = GdiLookupMemDC(hdc);
+        if (mdc != nullptr)
+            font_handle = mdc->selected_font;
+        else
+        {
+            WindowDcState* ws = GdiWindowDcState(static_cast<u32>(hdc));
+            if (ws != nullptr)
+                font_handle = ws->selected_font;
+        }
+    }
+    const graphics::FontEntry* font = GdiResolveDcFont(font_handle);
+    const i32 glyph_w = font ? static_cast<i32>(font->glyph_width) : 8;
+    const i32 glyph_h = font ? static_cast<i32>(font->glyph_height) : 8;
+    const i32 text_w = static_cast<i32>(copy_len) * glyph_w;
+    const i32 text_h = glyph_h;
     (void)kDtSingleLine;
 
     i32 px = rx;
@@ -1717,7 +1734,8 @@ static u64 DrawTextAsciiOnDc(u64 hdc, const char* text, u64 copy_len, u64 user_r
             if (bmp != nullptr)
             {
                 const bool opaque = (dc->bk_mode == kBkModeOpaque);
-                GdiPaintTextOnBitmap(bmp, px, py, text, dc->text_color, dc->bk_color, opaque);
+                GdiPaintTextOnBitmapWithFont(bmp, px, py, text, dc->text_color, dc->bk_color, opaque,
+                                             dc->selected_font);
                 ok = true;
             }
         }

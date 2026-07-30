@@ -64,6 +64,8 @@ typedef struct
 #define SYS_GDI_STRETCH_BLT_DC 117
 #define SYS_GDI_CREATE_SOLID_BRUSH 108
 #define SYS_GDI_CREATE_PEN 118
+#define SYS_GDI_CREATE_FONT 225
+#define SYS_GDI_GET_TEXT_METRICS 226
 /* Pixel-DATA transfer (as opposed to draw commands). Six register
  * arguments, no struct — see kernel/subsystems/win32/gdi_dib.cpp. */
 #define SYS_GDI_SET_DIBITS 214
@@ -80,6 +82,13 @@ static long long gdi32_syscall1(long n, long long a)
 {
     long long rv;
     __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)n), "D"(a) : "memory");
+    return rv;
+}
+
+static long long gdi32_syscall2(long n, long long a, long long b)
+{
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)n), "D"(a), "S"(b) : "memory");
     return rv;
 }
 
@@ -632,21 +641,40 @@ __declspec(dllexport) HFONT CreateFontA(INT h, INT w, INT esc, INT orient, INT w
                                         DWORD strikeout, DWORD charset, DWORD out_prec, DWORD clip_prec, DWORD quality,
                                         DWORD pitch, const char* face)
 {
-    (void)h;
     (void)w;
     (void)esc;
     (void)orient;
-    (void)weight;
-    (void)italic;
     (void)underline;
     (void)strikeout;
-    (void)charset;
     (void)out_prec;
     (void)clip_prec;
     (void)quality;
     (void)pitch;
-    (void)face;
-    return (HFONT)0;
+
+    /* Pack the arguments into the struct the kernel expects. */
+    struct
+    {
+        unsigned long long height;
+        unsigned long long font_weight;
+        unsigned long long is_italic;
+        unsigned long long font_charset;
+        char face_name[32];
+    } args;
+    args.height = (unsigned long long)(h < 0 ? -h : h);
+    args.font_weight = (unsigned long long)weight;
+    args.is_italic = italic ? 1ULL : 0ULL;
+    args.font_charset = (unsigned long long)(unsigned char)charset;
+    /* Copy face name. */
+    int i = 0;
+    if (face)
+    {
+        for (; i < 31 && face[i]; ++i)
+            args.face_name[i] = face[i];
+    }
+    args.face_name[i] = '\0';
+
+    long long result = gdi32_syscall1(SYS_GDI_CREATE_FONT, (long long)(unsigned long long)&args);
+    return (HFONT)(unsigned long long)result;
 }
 __declspec(dllexport) HFONT CreateFontW(INT h, INT w, INT esc, INT orient, INT weight, DWORD italic, DWORD underline,
                                         DWORD strikeout, DWORD charset, DWORD out_prec, DWORD clip_prec, DWORD quality,
@@ -681,9 +709,18 @@ __declspec(dllexport) HFONT CreateFontIndirectW(const void* lf)
 
 __declspec(dllexport) HGDIOBJ GetStockObject(INT idx)
 {
-    /* Stock objects 0..18; return a sentinel handle keyed off idx. */
+    /* Stock objects 0..18. Font indices (13=SYSTEM_FONT,
+     * 16=SYSTEM_FIXED_FONT) need a real kernel handle because
+     * SelectObject must route them as HFONT. Other indices return
+     * a sentinel handle (0xD000 + idx). */
     if (idx < 0 || idx > 18)
         return (HGDIOBJ)0;
+    if (idx == 13 || idx == 16)
+    {
+        long long h = gdi32_syscall1(109 /* SYS_GDI_GET_STOCK_OBJECT */, (long long)idx);
+        if (h != 0)
+            return (HGDIOBJ)(unsigned long long)h;
+    }
     return (HGDIOBJ)(unsigned long long)(0xD000 + idx);
 }
 __declspec(dllexport) HGDIOBJ SelectObject(HDC dc, HGDIOBJ obj)
@@ -691,12 +728,28 @@ __declspec(dllexport) HGDIOBJ SelectObject(HDC dc, HGDIOBJ obj)
     if (obj == (HGDIOBJ)0)
         return (HGDIOBJ)0;
     /* GDI_TAG-wrapped HDCs (window DCs) don't have an in-kernel DC
-     * table entry — return a non-NULL "previously selected" sentinel
-     * so callers that null-check don't bail. Real memory DCs route
-     * through the kernel which returns the previously-selected
-     * object handle (or 0 if none). */
+     * table entry for most object types — return a sentinel. But font
+     * handles (tag 0x05) must route through the kernel so the per-
+     * window DC state records the selection for GetTextMetrics / text
+     * drawing. For other types the kernel has no window-DC brush/pen
+     * state yet, so we keep the sentinel path. */
     if (((unsigned long long)dc & GDI_TAG) == GDI_TAG)
+    {
+        unsigned long long obj_val = (unsigned long long)obj;
+        if ((obj_val & 0x0F000000ULL) == 0x05000000ULL)
+        {
+            /* Font handle on a window DC — route through kernel.
+             * Pass the raw HWND (strip GDI_TAG) since the kernel's
+             * GdiSelectObject expects a plain window handle for the
+             * window-DC path. */
+            unsigned long long hwnd = (unsigned long long)dc & ~GDI_TAG;
+            long long prev = gdi32_syscall3(SYS_GDI_SELECT_OBJECT, (long long)hwnd, (long long)obj_val, 0);
+            if (prev == 0)
+                return (HGDIOBJ)(unsigned long long)0xD0FFEDULL;
+            return (HGDIOBJ)(unsigned long long)prev;
+        }
         return (HGDIOBJ)(unsigned long long)0xD0FFEDULL;
+    }
     long long prev =
         gdi32_syscall3(SYS_GDI_SELECT_OBJECT, (long long)(unsigned long long)dc, (long long)(unsigned long long)obj, 0);
     if (prev == 0)
@@ -1408,40 +1461,64 @@ __declspec(dllexport) INT GetDeviceCaps(HDC dc, INT index)
     }
 }
 
-/* GetTextExtentPoint32A/W — measure text. With 8x8 bitmap font,
- * width = chars * 8, height = 8. Caller's SIZE struct is two
- * INT fields (cx, cy). */
+/* GetTextExtentPoint32A/W — measure text using the DC's selected
+ * font. Queries GetTextMetricsA to get the glyph dimensions. */
 typedef struct
 {
     INT cx;
     INT cy;
 } SIZE_GDI;
+
+/* Helper: get the DC's font cell size via GetTextMetrics. */
+static void gdi32_font_cell_size(HDC dc, INT* out_w, INT* out_h)
+{
+    unsigned char tm_buf[57];
+    for (int i = 0; i < 57; ++i)
+        tm_buf[i] = 0;
+    INT* fields = (INT*)tm_buf;
+    /* Strip GDI_TAG for window DCs. */
+    unsigned long long hdc_val = (unsigned long long)dc;
+    if ((hdc_val & GDI_TAG) == GDI_TAG)
+        hdc_val = hdc_val & ~GDI_TAG;
+    long long ok = gdi32_syscall2(SYS_GDI_GET_TEXT_METRICS, (long long)hdc_val, (long long)(unsigned long long)tm_buf);
+    if (ok)
+    {
+        *out_w = fields[5]; /* tmAveCharWidth */
+        *out_h = fields[0]; /* tmHeight */
+    }
+    else
+    {
+        *out_w = 8;
+        *out_h = 8;
+    }
+}
 __declspec(dllexport) BOOL GetTextExtentPoint32A(HDC dc, const char* str, INT cnt, SIZE_GDI* sz)
 {
-    (void)dc;
     (void)str;
     if (sz)
     {
-        sz->cx = (cnt < 0 ? 0 : cnt) * 8;
-        sz->cy = 8;
+        INT cw, ch;
+        gdi32_font_cell_size(dc, &cw, &ch);
+        sz->cx = (cnt < 0 ? 0 : cnt) * cw;
+        sz->cy = ch;
     }
     return 1;
 }
 __declspec(dllexport) BOOL GetTextExtentPoint32W(HDC dc, const wchar_t16* str, INT cnt, SIZE_GDI* sz)
 {
-    (void)dc;
     (void)str;
     if (sz)
     {
-        sz->cx = (cnt < 0 ? 0 : cnt) * 8;
-        sz->cy = 8;
+        INT cw, ch;
+        gdi32_font_cell_size(dc, &cw, &ch);
+        sz->cx = (cnt < 0 ? 0 : cnt) * cw;
+        sz->cy = ch;
     }
     return 1;
 }
 __declspec(dllexport) BOOL GetTextExtentExPointW(HDC dc, const wchar_t16* str, INT cnt, INT max_extent, INT* fit,
                                                  INT* dx, SIZE_GDI* sz)
 {
-    (void)dc;
     (void)str;
     (void)max_extent;
     (void)dx;
@@ -1449,30 +1526,43 @@ __declspec(dllexport) BOOL GetTextExtentExPointW(HDC dc, const wchar_t16* str, I
         *fit = cnt;
     if (sz)
     {
-        sz->cx = (cnt < 0 ? 0 : cnt) * 8;
-        sz->cy = 8;
+        INT cw, ch;
+        gdi32_font_cell_size(dc, &cw, &ch);
+        sz->cx = (cnt < 0 ? 0 : cnt) * cw;
+        sz->cy = ch;
     }
     return 1;
 }
 
-/* GetTextMetricsA/W — fill a TEXTMETRIC. Real struct is 56 bytes
- * for ANSI. We zero-fill and write the few fields apps actually
- * read: tmHeight=8, tmAveCharWidth=8, tmMaxCharWidth=8. */
+/* GetTextMetricsA/W — fill a TEXTMETRIC from the DC's selected
+ * font via the kernel. Falls back to hardcoded 8x8 if the
+ * syscall fails (defensive). */
 __declspec(dllexport) BOOL GetTextMetricsA(HDC dc, void* tm)
 {
-    (void)dc;
     if (!tm)
         return 0;
+    /* Zero the struct first. */
     unsigned char* p = (unsigned char*)tm;
-    for (int i = 0; i < 56; ++i)
+    for (int i = 0; i < 57; ++i)
         p[i] = 0;
+
+    /* Strip GDI_TAG for window DCs so the kernel sees a plain
+     * window handle it can look up in WindowDcState. */
+    unsigned long long hdc_val = (unsigned long long)dc;
+    if ((hdc_val & GDI_TAG) == GDI_TAG)
+        hdc_val = hdc_val & ~GDI_TAG;
+
+    long long ok = gdi32_syscall2(SYS_GDI_GET_TEXT_METRICS, (long long)hdc_val, (long long)(unsigned long long)tm);
+    if (ok)
+        return 1;
+
+    /* Fallback: hardcoded 8x8 metrics. */
     INT* fields = (INT*)tm;
     fields[0] = 8; /* tmHeight */
     fields[1] = 8; /* tmAscent */
-    fields[2] = 0; /* tmDescent */
     fields[5] = 8; /* tmAveCharWidth */
     fields[6] = 8; /* tmMaxCharWidth */
-    fields[7] = 1; /* tmWeight (FW_NORMAL = 400 actually but doesn't matter for v0) */
+    fields[7] = 400; /* tmWeight = FW_NORMAL */
     return 1;
 }
 __declspec(dllexport) BOOL GetTextMetricsW(HDC dc, void* tm)
@@ -1480,16 +1570,17 @@ __declspec(dllexport) BOOL GetTextMetricsW(HDC dc, void* tm)
     return GetTextMetricsA(dc, tm);
 }
 
-/* GetCharWidth32A/W — width of each character in the range. With
- * a fixed-width font, every cell is 8 pixels. */
+/* GetCharWidth32A/W — width of each character in the range. Uses
+ * the DC's selected font's cell width. */
 __declspec(dllexport) BOOL GetCharWidth32A(HDC dc, UINT first, UINT last, INT* widths)
 {
-    (void)dc;
     if (!widths || last < first)
         return 0;
+    INT cw, ch;
+    gdi32_font_cell_size(dc, &cw, &ch);
     UINT n = last - first + 1;
     for (UINT i = 0; i < n; ++i)
-        widths[i] = 8;
+        widths[i] = cw;
     return 1;
 }
 __declspec(dllexport) BOOL GetCharWidth32W(HDC dc, UINT first, UINT last, INT* widths)

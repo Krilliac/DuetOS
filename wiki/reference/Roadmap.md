@@ -1052,7 +1052,6 @@ fault→fix→re-run loop, `tools/test/run-exe.sh` + `peexec=`, using the
    -> BGRA; `LoadIconA/W`, `LoadCursorA/W`, `LoadImageA/W` are REAL on
    both bitnesses; `icon_smoke` PE fixture in the ring3 battery.
    `LoadBitmapA/W` remains STUB (`RT_BITMAP` decode not yet written).
-   Fonts need a font pipeline.
 
 2. **Large bundled-data staging + FAT large volume.** The exe reads
    multi-GB archive files. Staging needs a much larger disk image than
@@ -1715,8 +1714,7 @@ done, it is merely written.
     had no owner, no per-process bound, and were never reclaimed at exit.
     Remaining GDI DIB gaps are listed in
     [`Win32-Surface-Status.md`](Win32-Surface-Status.md#gdi32dll).
-13. **Font pipeline.** Enumeration, fallback, metrics, antialiasing.
-14. **GDI completeness.** [dep: 12] Paths, regions, transfer modes.
+13. **GDI completeness.** [dep: 12] Paths, regions, transfer modes.
 15. **D3D9.** Large back catalogue; simpler than 11/12.
 16. **D3D11 completeness** and **D3D12** beyond the current thunk layer.
 17. **DirectWrite / Direct2D.** [dep: 13]

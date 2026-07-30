@@ -30,6 +30,7 @@
 
 #include "subsystems/win32/gdi_objects.h"
 
+#include "subsystems/graphics/font.h"
 #include "subsystems/win32/gdi_surface_math.h"
 
 #include "arch/x86_64/serial.h"
@@ -53,6 +54,7 @@ constinit MemDC g_mem_dcs[kMaxMemDcs] = {};
 constinit Bitmap g_bitmaps[kMaxBitmaps] = {};
 constinit Brush g_brushes[kMaxBrushes] = {};
 constinit Pen g_pens[kMaxPens] = {};
+constinit GdiFont g_fonts[kMaxFonts] = {};
 constinit WindowDcState g_win_dcs[kMaxWindowDcSlots] = {};
 
 // First six brush slots are pre-allocated for stock brushes. Their
@@ -119,7 +121,7 @@ void OwnerBitmapUsage(u64 pid, u32* out_count, u64* out_bytes)
 u64 GdiHandleType(u64 h)
 {
     const u64 tag = h & kGdiTagMask;
-    if (tag == kGdiTagMemDC || tag == kGdiTagBitmap || tag == kGdiTagBrush)
+    if (tag == kGdiTagMemDC || tag == kGdiTagBitmap || tag == kGdiTagBrush || tag == kGdiTagFont)
         return tag;
     return 0;
 }
@@ -188,6 +190,21 @@ Pen* GdiLookupPen(u64 h)
     if (!OwnerVisible(g_pens[idx].owner_pid))
         return nullptr;
     return &g_pens[idx];
+}
+
+GdiFont* GdiLookupFont(u64 h)
+{
+    if ((h & kGdiTagMask) != kGdiTagFont)
+        return nullptr;
+    u32 idx = HandleIndex(h);
+    if (idx >= kMaxFonts)
+        return nullptr;
+    idx = util::MaskedIndex32(idx, kMaxFonts);
+    if (!g_fonts[idx].alive)
+        return nullptr;
+    if (!OwnerVisible(g_fonts[idx].owner_pid))
+        return nullptr;
+    return &g_fonts[idx];
 }
 
 WindowDcState* GdiWindowDcState(u32 window_handle)
@@ -337,7 +354,20 @@ void GdiInit()
     stock_pen(kStockBlackPen, 0x00000000, true);
     stock_pen(kStockNullPen, 0x00000000, true); // NULL pen — skip draw
 
-    arch::SerialWrite("[gdi] stock objects registered (6 brushes, 3 pens)\n");
+    // Stock fonts. SYSTEM_FONT (13) and SYSTEM_FIXED_FONT (16)
+    // point at font registry slot 0 (System 8x8).
+    graphics::FontRegistryInit();
+    auto stock_font = [](u32 slot, u32 reg_idx)
+    {
+        g_fonts[slot].alive = true;
+        g_fonts[slot].owner_pid = 0;
+        g_fonts[slot].registry_index = reg_idx;
+        g_fonts[slot].stock = true;
+    };
+    stock_font(kStockSystemFont, 0);
+    stock_font(kStockSystemFixedFont, 0);
+
+    arch::SerialWrite("[gdi] stock objects registered (6 brushes, 3 pens, 2 fonts)\n");
 }
 
 u64 GdiCreateCompatibleDC()
@@ -477,6 +507,12 @@ u64 GdiGetStockObject(u32 index)
             return 0;
         return MakeHandle(kGdiTagPen, index);
     }
+    if (index == kStockSystemFont || index == kStockSystemFixedFont)
+    {
+        if (!g_fonts[index].alive)
+            return 0;
+        return MakeHandle(kGdiTagFont, index);
+    }
     return 0;
 }
 
@@ -506,6 +542,47 @@ u64 GdiCreatePen(u32 style, u32 width, u32 rgb)
             g_pens[i].width = (width == 0) ? 1 : width;
             g_pens[i].stock = false;
             return MakeHandle(kGdiTagPen, i);
+        }
+    }
+    return 0;
+}
+
+u64 GdiCreateFont(u32 height, u32 weight, bool italic, u8 charset, const char* face_name)
+{
+    const u64 pid = CallerPid();
+    if (pid != 0)
+    {
+        u32 held = 0;
+        for (u32 i = 0; i < kMaxFonts; ++i)
+        {
+            if (g_fonts[i].alive && !g_fonts[i].stock && g_fonts[i].owner_pid == pid)
+                ++held;
+        }
+        if (held >= kMaxFontsPerProcess)
+            return 0;
+    }
+
+    // Look up the best-matching font in the registry.
+    const char* name = (face_name != nullptr && face_name[0] != '\0') ? face_name : "System";
+    const graphics::FontEntry* entry = graphics::FontRegistryLookup(name, height, weight, italic, charset);
+    if (entry == nullptr)
+        return 0;
+
+    // Compute the registry index from the pointer.
+    const u32 reg_idx = static_cast<u32>(entry - graphics::FontRegistryGet(0));
+
+    // Find a free slot in the GDI font table. Stock fonts occupy
+    // slots 13 and 16; non-stock allocations start from 0 but skip
+    // occupied stock slots.
+    for (u32 i = 0; i < kMaxFonts; ++i)
+    {
+        if (!g_fonts[i].alive)
+        {
+            g_fonts[i].alive = true;
+            g_fonts[i].owner_pid = pid;
+            g_fonts[i].registry_index = reg_idx;
+            g_fonts[i].stock = false;
+            return MakeHandle(kGdiTagFont, i);
         }
     }
     return 0;
@@ -604,11 +681,17 @@ u64 GdiSelectObject(u64 hdc, u64 hobj)
             dc->selected_brush = hobj;
             return prev;
         }
+        if (obj_tag == kGdiTagFont && GdiLookupFont(hobj) != nullptr)
+        {
+            const u64 prev = dc->selected_font;
+            dc->selected_font = hobj;
+            return prev;
+        }
         return hobj;
     }
     // Window-HDC path — look up / lazily init the per-window DC
-    // state. Both pen and brush selections now land in the side
-    // table so Rectangle / Ellipse / PatBlt can consult them.
+    // state. Pen, brush, and font selections land in the side
+    // table so Rectangle / Ellipse / PatBlt / TextOut can consult them.
     if ((hdc & kGdiTagMask) == 0)
     {
         WindowDcState* s = GdiWindowDcState(static_cast<u32>(hdc));
@@ -624,6 +707,12 @@ u64 GdiSelectObject(u64 hdc, u64 hobj)
             {
                 const u64 prev = s->selected_brush;
                 s->selected_brush = hobj;
+                return prev;
+            }
+            if (obj_tag == kGdiTagFont && GdiLookupFont(hobj) != nullptr)
+            {
+                const u64 prev = s->selected_font;
+                s->selected_font = hobj;
                 return prev;
             }
         }
@@ -677,6 +766,16 @@ bool GdiDeleteObject(u64 hobj)
         p->alive = false;
         return true;
     }
+    if (tag == kGdiTagFont)
+    {
+        GdiFont* f = GdiLookupFont(hobj);
+        if (f == nullptr)
+            return false;
+        if (f->stock)
+            return true; // no-op on stock per Win32 spec
+        f->alive = false;
+        return true;
+    }
     return false;
 }
 
@@ -699,6 +798,7 @@ u32 GdiReapByOwner(u64 pid)
             g_mem_dcs[i].selected_bitmap = 0;
             g_mem_dcs[i].selected_pen = 0;
             g_mem_dcs[i].selected_brush = 0;
+            g_mem_dcs[i].selected_font = 0;
             ++reaped;
         }
     }
@@ -735,6 +835,15 @@ u32 GdiReapByOwner(u64 pid)
         {
             g_pens[i].alive = false;
             g_pens[i].owner_pid = 0;
+            ++reaped;
+        }
+    }
+    for (u32 i = 0; i < kMaxFonts; ++i)
+    {
+        if (g_fonts[i].alive && !g_fonts[i].stock && g_fonts[i].owner_pid == pid)
+        {
+            g_fonts[i].alive = false;
+            g_fonts[i].owner_pid = 0;
             ++reaped;
         }
     }
@@ -851,6 +960,48 @@ void GdiPaintTextOnBitmap(Bitmap* bmp, i32 x, i32 y, const char* text, u32 fg, u
             }
         }
         cur_x += static_cast<i32>(kGlyphWidth);
+    }
+}
+
+const graphics::FontEntry* GdiResolveDcFont(u64 font_handle)
+{
+    if (font_handle != 0)
+    {
+        const GdiFont* gf = GdiLookupFont(font_handle);
+        if (gf != nullptr)
+        {
+            const graphics::FontEntry* fe = graphics::FontRegistryGet(gf->registry_index);
+            if (fe != nullptr)
+                return fe;
+        }
+    }
+    // Fallback: System font at slot 0.
+    return graphics::FontRegistryGet(0);
+}
+
+void GdiPaintTextOnBitmapWithFont(Bitmap* bmp, i32 x, i32 y, const char* text, u32 fg, u32 bg, bool opaque,
+                                  u64 font_handle)
+{
+    if (bmp == nullptr || bmp->pixels == nullptr || text == nullptr)
+        return;
+
+    const graphics::FontEntry* font = GdiResolveDcFont(font_handle);
+    if (font == nullptr)
+    {
+        // No font registry at all — impossible after GdiInit, but
+        // fall back to the legacy 8x8 path as a safety net.
+        GdiPaintTextOnBitmap(bmp, x, y, text, fg, bg, opaque);
+        return;
+    }
+
+    const u32 stride = bmp->pitch / 4;
+    i32 cur_x = x;
+    for (u32 i = 0; text[i] != '\0'; ++i)
+    {
+        if (cur_x + static_cast<i32>(font->glyph_width) <= 0 || cur_x >= static_cast<i32>(bmp->width))
+            break;
+        graphics::FontDrawChar(font, bmp->pixels, stride, bmp->width, bmp->height, cur_x, y, text[i], fg, bg, opaque);
+        cur_x += static_cast<i32>(font->glyph_width);
     }
 }
 
@@ -1740,6 +1891,126 @@ void DoGdiEllipseFilled(arch::TrapFrame* frame)
         CompositorUnlock();
     }
     frame->rax = ok ? 1 : 0;
+}
+
+void DoGdiCreateFont(arch::TrapFrame* frame)
+{
+    // rdi = pointer to a user-land struct:
+    //   { u64 height, u64 weight, u64 italic, u64 charset, char face[32] }
+    struct CreateFontArgs
+    {
+        u64 height;
+        u64 weight;
+        u64 italic;
+        u64 charset;
+        char face_name[32];
+    };
+
+    const u64 user_args = frame->rdi;
+    if (user_args == 0)
+    {
+        frame->rax = 0;
+        return;
+    }
+    CreateFontArgs args{};
+    if (!duetos::mm::CopyFromUser(&args, reinterpret_cast<const void*>(user_args), sizeof(args)))
+    {
+        frame->rax = 0;
+        return;
+    }
+    // NUL-terminate the face name defensively.
+    args.face_name[31] = '\0';
+
+    frame->rax = GdiCreateFont(static_cast<u32>(args.height), static_cast<u32>(args.weight), args.italic != 0,
+                               static_cast<u8>(args.charset), args.face_name);
+}
+
+void DoGdiGetTextMetrics(arch::TrapFrame* frame)
+{
+    // rdi = HDC, rsi = pointer to user-land TEXTMETRICA (we write
+    // into it). We fill the fixed-size structure expected by Win32.
+    struct TextMetricA
+    {
+        i32 tmHeight;
+        i32 tmAscent;
+        i32 tmDescent;
+        i32 tmInternalLeading;
+        i32 tmExternalLeading;
+        i32 tmAveCharWidth;
+        i32 tmMaxCharWidth;
+        i32 tmWeight;
+        i32 tmOverhang;
+        i32 tmDigitizedAspectX;
+        i32 tmDigitizedAspectY;
+        u8 tmFirstChar;
+        u8 tmLastChar;
+        u8 tmDefaultChar;
+        u8 tmBreakChar;
+        u8 tmItalic;
+        u8 tmUnderlined;
+        u8 tmStruckOut;
+        u8 tmPitchAndFamily;
+        u8 tmCharSet;
+    };
+
+    const u64 hdc = frame->rdi;
+    const u64 user_tm = frame->rsi;
+    if (user_tm == 0)
+    {
+        frame->rax = 0;
+        return;
+    }
+
+    // Resolve the DC's selected font.
+    u64 font_handle = 0;
+    MemDC* dc = GdiLookupMemDC(hdc);
+    if (dc != nullptr)
+    {
+        font_handle = dc->selected_font;
+    }
+    else
+    {
+        // Try window DC state.
+        WindowDcState* ws = GdiWindowDcState(static_cast<u32>(hdc));
+        if (ws != nullptr)
+            font_handle = ws->selected_font;
+    }
+
+    const graphics::FontEntry* font = GdiResolveDcFont(font_handle);
+    if (font == nullptr)
+    {
+        frame->rax = 0;
+        return;
+    }
+
+    TextMetricA tm{};
+    tm.tmHeight = static_cast<i32>(font->glyph_height);
+    tm.tmAscent = static_cast<i32>(font->glyph_height);
+    tm.tmDescent = 0;
+    tm.tmInternalLeading = 0;
+    tm.tmExternalLeading = 0;
+    tm.tmAveCharWidth = static_cast<i32>(font->glyph_width);
+    tm.tmMaxCharWidth = static_cast<i32>(font->glyph_width);
+    tm.tmWeight = static_cast<i32>(font->weight);
+    tm.tmOverhang = 0;
+    tm.tmDigitizedAspectX = 1;
+    tm.tmDigitizedAspectY = 1;
+    tm.tmFirstChar = 0x20;
+    tm.tmLastChar = 0x7E;
+    tm.tmDefaultChar = '?';
+    tm.tmBreakChar = ' ';
+    tm.tmItalic = font->italic ? 1 : 0;
+    tm.tmUnderlined = 0;
+    tm.tmStruckOut = 0;
+    tm.tmPitchAndFamily = 0x31; // FIXED_PITCH | FF_MODERN
+    tm.tmCharSet = font->charset;
+
+    if (!duetos::mm::CopyToUser(reinterpret_cast<void*>(user_tm), &tm, sizeof(tm)))
+    {
+        frame->rax = 0;
+        return;
+    }
+    frame->rax = 1;
 }
 
 } // namespace duetos::subsystems::win32

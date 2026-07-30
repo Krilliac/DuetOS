@@ -40,8 +40,7 @@
  *   when it exits.
  *
  * Not in scope (v0):
- *   - HFONT / HRGN state (stock handles only, no real draw-path
- *     consumers yet).
+ *   - HRGN state (stock handles only, no real draw-path consumers).
  *   - Coordinate transforms (no SetWindowOrgEx et al.).
  *   - Palettised (<= 8bpp) DIBs. 16 / 24 / 32bpp only.
  *
@@ -49,6 +48,11 @@
  * via a SYS_GDI_* syscall; the handle-manager side holds no locks
  * of its own (the compositor mutex held by the caller suffices).
  */
+
+namespace duetos::subsystems::graphics
+{
+struct FontEntry;
+} // namespace duetos::subsystems::graphics
 
 namespace duetos::subsystems::win32
 {
@@ -60,11 +64,13 @@ inline constexpr u64 kGdiTagMemDC = 0x01000000u;
 inline constexpr u64 kGdiTagBitmap = 0x02000000u;
 inline constexpr u64 kGdiTagBrush = 0x03000000u;
 inline constexpr u64 kGdiTagPen = 0x04000000u;
+inline constexpr u64 kGdiTagFont = 0x05000000u;
 
 inline constexpr u32 kMaxMemDcs = 64;
 inline constexpr u32 kMaxBitmaps = 64;
 inline constexpr u32 kMaxBrushes = 64;
 inline constexpr u32 kMaxPens = 64;
+inline constexpr u32 kMaxFonts = 64;
 
 // Max pixels per compatible bitmap. Keeps a malicious caller from
 // requesting a 100 MB bitmap. 1024 × 1024 × 4 = 4 MiB per bitmap.
@@ -83,6 +89,7 @@ inline constexpr u32 kMaxMemDcsPerProcess = 16;
 inline constexpr u32 kMaxBitmapsPerProcess = 16;
 inline constexpr u32 kMaxBrushesPerProcess = 16;
 inline constexpr u32 kMaxPensPerProcess = 16;
+inline constexpr u32 kMaxFontsPerProcess = 16;
 inline constexpr u64 kMaxBitmapBytesPerProcess = 8u * 1024u * 1024u;
 
 // Background mode constants — Win32 SetBkMode values.
@@ -96,6 +103,7 @@ struct MemDC
     u64 selected_bitmap; // HBITMAP handle (with tag) or 0 = none
     u64 selected_pen;    // HPEN handle (with tag) or 0 = use BLACK_PEN implicitly
     u64 selected_brush;  // HBRUSH handle (with tag) or 0 = use WHITE_BRUSH implicitly
+    u64 selected_font;   // HFONT handle (with tag) or 0 = use SYSTEM_FONT implicitly
     u32 text_color;      // 0x00RRGGBB (unpacked from COLORREF on set)
     u32 bk_color;        // 0x00RRGGBB
     u8 bk_mode;          // kBkModeTransparent (default) or kBkModeOpaque
@@ -130,6 +138,14 @@ struct Pen
     bool stock;
 };
 
+struct GdiFont
+{
+    bool alive;
+    u64 owner_pid;
+    u32 registry_index; // index into the font registry
+    bool stock;         // stock fonts are never freed
+};
+
 // Stock object indices (Win32 GetStockObject codes). Our brush
 // indices 0..5 match Win32 exactly; pen indices start at 6 (we
 // use them as internal brush-table slots so the handle tag can
@@ -143,6 +159,8 @@ inline constexpr u32 kStockNullBrush = 5;
 inline constexpr u32 kStockWhitePen = 6;
 inline constexpr u32 kStockBlackPen = 7;
 inline constexpr u32 kStockNullPen = 8;
+inline constexpr u32 kStockSystemFont = 13;
+inline constexpr u32 kStockSystemFixedFont = 16;
 
 /// One-time registration of the pre-defined stock objects.
 /// Safe to call multiple times (idempotent).
@@ -167,6 +185,7 @@ MemDC* GdiLookupMemDC(u64 h);
 Bitmap* GdiLookupBitmap(u64 h);
 Brush* GdiLookupBrush(u64 h);
 Pen* GdiLookupPen(u64 h);
+GdiFont* GdiLookupFont(u64 h);
 
 /// Free every GDI object owned by `pid` and clear its slots. Called
 /// from process teardown so an exiting PE cannot strand pixel bytes
@@ -192,6 +211,7 @@ u64 GdiCreateCompatibleDC();
 u64 GdiCreateCompatibleBitmap(u32 width, u32 height);
 u64 GdiCreateSolidBrush(u32 rgb);
 u64 GdiCreatePen(u32 style, u32 width, u32 rgb);
+u64 GdiCreateFont(u32 height, u32 weight, bool italic, u8 charset, const char* face_name);
 u64 GdiGetStockObject(u32 index);
 u64 GdiSelectObject(u64 hdc, u64 hobj); // returns previous selection (0 if none / unsupported)
 bool GdiDeleteDC(u64 hdc);
@@ -209,6 +229,15 @@ void GdiPaintRectOnBitmap(Bitmap* bmp, i32 x, i32 y, i32 w, i32 h, u32 rgb);
 /// `opaque` is true. Stops at the first NUL or when the next glyph
 /// cell would exit the bitmap horizontally.
 void GdiPaintTextOnBitmap(Bitmap* bmp, i32 x, i32 y, const char* text, u32 fg, u32 bg, bool opaque);
+
+/// Paint text using a specific font from the registry. If
+/// `font_handle` is 0 or invalid, falls back to the 8x8 System font.
+void GdiPaintTextOnBitmapWithFont(Bitmap* bmp, i32 x, i32 y, const char* text, u32 fg, u32 bg, bool opaque,
+                                  u64 font_handle);
+
+/// Resolve a DC's effective font. Returns the FontEntry pointer for
+/// the DC's selected font, or the System font if none is selected.
+const graphics::FontEntry* GdiResolveDcFont(u64 font_handle);
 
 /// Copy `src_w × src_h` BGRA pixels from `src` into `bmp` at
 /// `(dst_x, dst_y)`. `src_pitch_px` is the source stride in pixels
@@ -238,6 +267,7 @@ struct WindowDcState
     u8 bk_mode;
     u64 selected_pen;
     u64 selected_brush;
+    u64 selected_font;
     i32 cur_x;
     i32 cur_y;
 };
@@ -276,6 +306,8 @@ void DoGdiEllipseFilled(arch::TrapFrame* frame);
 void DoGdiPatBlt(arch::TrapFrame* frame);
 void DoGdiGetSysColor(arch::TrapFrame* frame);
 void DoGdiGetSysColorBrush(arch::TrapFrame* frame);
+void DoGdiCreateFont(arch::TrapFrame* frame);
+void DoGdiGetTextMetrics(arch::TrapFrame* frame);
 
 // System palette — Win32 COLOR_* indices 0..30. Returns a
 // Classic-theme COLORREF or 0x00C0C0C0 for unknown indices.

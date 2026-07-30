@@ -2303,6 +2303,20 @@ enum SyscallNumber : u64
     // Returns: custom cursor slot id (>= 256) on success, 0 on failure.
     // ABI stable from this commit.
     SYS_GDI_CREATE_CURSOR_RGBA = 224,
+
+    // SYS_GDI_CREATE_FONT — create a logical font from attributes.
+    //   rdi = pointer to user-land struct:
+    //         { u64 height, u64 weight, u64 italic, u64 charset,
+    //           char face_name[32] }
+    //   rax <- HFONT handle (kGdiTagFont | index), or 0 on failure.
+    SYS_GDI_CREATE_FONT = 225,
+
+    // SYS_GDI_GET_TEXT_METRICS — fill a TEXTMETRICA struct for the
+    // DC's currently-selected font.
+    //   rdi = HDC
+    //   rsi = pointer to user-land TEXTMETRICA (57 bytes)
+    //   rax <- 1 on success, 0 on failure.
+    SYS_GDI_GET_TEXT_METRICS = 226,
 };
 
 // Vulkan syscall op-codes. Used as the `rdi` value to SYS_VK_CALL

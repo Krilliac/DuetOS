@@ -14211,3 +14211,38 @@ version is the failure mode this pins.
   tags, or CDATA sections). At that point, upgrade the scanner to
   handle the specific construct — do not pull in a full XML parser
   unless at least three distinct constructs need it.
+
+---
+
+### DD-XX: Font registry — fixed-capacity bitmap-only, 3 built-in faces
+
+_2026-07-30_
+
+- **Context:** Win32 text rendering needs a font pipeline. The GDI
+  `CreateFontA`/`W`, `SelectObject`, `GetTextMetrics`, and every text
+  drawing API (`TextOutA`/`W`, `DrawTextA`/`W`) need to resolve a font
+  handle to glyph data. Win32 programs expect to create font objects,
+  select them into DCs, and have text-drawing calls honour the selection.
+- **Decision:** A kernel-side font registry in
+  `kernel/subsystems/graphics/font.{h,cpp}` with a fixed-capacity
+  array of 16 `FontEntry` slots. Three built-in bitmap fonts are
+  registered at init: System (8x8, slot 0), Fixedsys (8x8, slot 1),
+  Terminal (VGA 8x16, slot 2). `FontRegistryLookup` matches by name
+  (case-insensitive), then by height (>= 12 prefers Terminal, else
+  System). GDI font handles use tag 0x05 in bits 27:24, with a
+  per-process ceiling of 16 handles and a system-wide ceiling of 64
+  `GdiFont` objects. Stock fonts at indices 13 (`SYSTEM_FONT`) and 16
+  (`SYSTEM_FIXED_FONT`) both resolve to registry slot 0 (System).
+  Two new syscalls: `SYS_GDI_CREATE_FONT` (225) and
+  `SYS_GDI_GET_TEXT_METRICS` (226).
+- **Rules out:** TrueType/OpenType rasterisation in this tier. The
+  registry serves only fixed-pitch bitmap fonts with 1-bit glyph data.
+  A future outline font rasteriser would extend `FontEntry` with a
+  rasterise callback and add scalable glyph storage, but the registry
+  API shape and the GDI handle / DC-selection plumbing are correct as-is.
+- **Accepted cost:** all text renders in one of three bitmap faces at
+  fixed sizes (8x8 or 8x16). Applications requesting "Arial 12pt"
+  get System 8x8 or Terminal 8x16 depending on the requested height.
+  This is visually coarse but functionally correct — every Win32 text
+  API returns real values (not stubs), and text drawing uses the
+  selected font's glyph data.
