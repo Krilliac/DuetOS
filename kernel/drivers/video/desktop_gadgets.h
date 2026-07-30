@@ -7,9 +7,9 @@
  *
  * docs/aurora-theme/README.md §1 puts a gadget column down the right
  * edge of the desktop: a clock/date panel, a kernel panel (CPU
- * sparkline + stat rows) and an ABI-peers panel. Only the clock panel
- * exists today — see wiki/subsystems/Compositor.md for what the other
- * two need before they can carry honest numbers.
+ * sparkline + stat rows) and an ABI-peers panel. The stats panels read
+ * the scheduler-owned 1 Hz sample ring so they carry honest, shared
+ * numbers rather than per-surface decorations.
  *
  * The panel is decoration, not a control: it has no hit-test and no
  * click handler. It paints between the wallpaper and the window list
@@ -21,8 +21,8 @@
  * to float a panel over, so on those this is a no-op rather than an
  * opaque rectangle sitting on the wallpaper.
  *
- * Context: kernel, compositor thread only. Reads the RTC on each paint,
- * exactly as the taskbar clock does. No state of its own, so no lock.
+ * Context: kernel, compositor thread only. Reads the RTC and scheduler
+ * sample ring on each paint, exactly as the taskbar clock/stats pill do.
  */
 
 namespace duetos::drivers::video

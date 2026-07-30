@@ -945,38 +945,29 @@ this is decided, visual-fidelity work must be verified with
 
 
 
-### Aurora desktop-shell residuals (2026-07-29)
+### Aurora desktop-shell residuals (updated 2026-07-30)
 
 The four fidelity deltas from the first valid `theme=duet` comparison have
 landed -- desktop icon set, taskbar search pill + pinned app row, the
 clock/date gadget, and the wallpaper glow geometry. See
-`wiki/subsystems/Compositor.md` for what shipped. What is still open:
+`wiki/subsystems/Compositor.md` for what shipped.
 
-1. **The other two gadgets.** README §1's gadget column carries three panels;
-   only the clock/date one exists. The kernel panel wants a 46-px CPU
-   sparkline plus five mono stat rows, and the ABI-peers panel wants live
-   per-ABI process counts. Both need a sampled history the compositor does
-   not keep today -- `SchedStatsRead()` returns an instantaneous figure, so a
-   sparkline would have to invent its own ring buffer. Concrete plan: add a
-   small per-second sample ring next to the scheduler stats (one owner, read
-   by both the gadget and the taskbar's stats pill), then paint the two
-   panels beneath the clock at the same column width. Do not ship either
-   panel before the ring exists -- a sparkline drawn from one sample is a
-   decoration that claims to be a measurement.
-2. **The gadget column has no fps figure.** The taskbar pill's is now real
-   (`RenderFpsSample` over `RenderStats::frames_presented`); the gadget
-   column still omits one. Reuse the same sampler rather than adding a
-   second rate derivation.
-3. **The taskbar's stats pill has no sparkline.** README §10 puts a 52-px
-   sparkline between the CPU percentage and the fps figure. Blocked on the
-   same sample ring as item 1.
-4. **START paints a solid accent tile, not the design's sheer mark.** The
+Closed on 2026-07-30: the scheduler owns a 1 Hz sample ring shared by
+the desktop gadget column and the taskbar stats pill. The gadget column
+now paints the kernel stats and ABI-peers panels beneath the clock, the
+kernel panel includes the FPS figure, and the taskbar pill includes the
+README §10 CPU sparkline. The compositor reads the ring without taking
+`g_sched_lock`.
+
+What is still open:
+
+1. **START paints a solid accent tile, not the design's sheer mark.** The
    reference's START is a dark cell carrying only the teal/amber arcs; the
    implementation fills the whole 44-px cell with `taskbar_accent`, which
    makes it the loudest object on the island. Surfaced while landing the
    search pill next to it; not fixed because it is a separate cell with its
    own hover/open states.
-5. **The pinned row is five buttons, not the design's nine.** Deliberate --
+2. **The pinned row is five buttons, not the design's nine.** Deliberate --
    see Design-Decisions "Pinned taskbar launchers are scaled by island
    budget, not transcribed from the 1920 canvas".
 

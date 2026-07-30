@@ -2,10 +2,13 @@
 
 #include "arch/x86_64/rtc.h"
 #include "arch/x86_64/serial.h"
+#include "arch/x86_64/timer.h"
 #include "drivers/video/chrome_text.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/render_stats.h"
 #include "drivers/video/taskbar.h"
 #include "drivers/video/theme.h"
+#include "sched/sched.h"
 
 namespace duetos::drivers::video
 {
@@ -21,8 +24,16 @@ namespace
 constexpr u32 kColW = 220;
 constexpr u32 kEdgeInset = 24;
 constexpr u32 kClockH = 88;
+constexpr u32 kPanelGap = 12;
+constexpr u32 kKernelH = 126;
+constexpr u32 kAbiH = 92;
+constexpr u32 kColumnH = kClockH + kPanelGap + kKernelH + kPanelGap + kAbiH;
 constexpr u32 kPadX = 16;
 constexpr u32 kDialR = 18;
+constexpr u32 kKernelSparkW = 46;
+constexpr u32 kKernelSparkH = 18;
+
+constinit RenderFpsWindow g_gadget_fps_window{};
 
 // Sine of 6*k degrees in Q10, k = 0..15 (0..90 degrees). A minute hand
 // needs 60 distinct directions, so a 12-entry hour table won't do; the
@@ -84,6 +95,134 @@ void AppendU32(char* dst, u32* at, u32 cap, u32 v)
     dst[*at] = '\0';
 }
 
+void AppendU64(char* dst, u32* at, u32 cap, u64 v)
+{
+    char tmp[21];
+    u32 n = 0;
+    do
+    {
+        tmp[n++] = static_cast<char>('0' + (v % 10U));
+        v /= 10U;
+    } while (v != 0 && n < sizeof(tmp));
+    while (n > 0 && *at + 1U < cap)
+    {
+        dst[(*at)++] = tmp[--n];
+    }
+    dst[*at] = '\0';
+}
+
+void FormatU64(char* dst, u32 cap, u64 v)
+{
+    u32 at = 0;
+    dst[0] = '\0';
+    AppendU64(dst, &at, cap, v);
+}
+
+void FormatCpuPct(char* dst, u32 cap, u32 pct)
+{
+    if (cap == 0)
+    {
+        return;
+    }
+    if (pct > 99U)
+    {
+        pct = 99U;
+    }
+    u32 at = 0;
+    if (pct >= 10U && at + 1U < cap)
+    {
+        dst[at++] = static_cast<char>('0' + pct / 10U);
+    }
+    if (at + 1U < cap)
+    {
+        dst[at++] = static_cast<char>('0' + pct % 10U);
+    }
+    if (at + 1U < cap)
+    {
+        dst[at++] = '%';
+    }
+    dst[at] = '\0';
+}
+
+void FormatFps(char* dst, u32 cap, RenderFps fps)
+{
+    if (cap == 0)
+    {
+        return;
+    }
+    if (!fps.valid)
+    {
+        u32 at = 0;
+        Append(dst, &at, cap, "--.-");
+        return;
+    }
+    u32 whole = fps.fps_x10 / 10U;
+    const u32 frac = fps.fps_x10 % 10U;
+    u32 at = 0;
+    if (whole >= 100U && at + 1U < cap)
+    {
+        dst[at++] = static_cast<char>('0' + whole / 100U);
+        whole %= 100U;
+    }
+    if (whole >= 10U && at + 1U < cap)
+    {
+        dst[at++] = static_cast<char>('0' + whole / 10U);
+    }
+    if (at + 1U < cap)
+    {
+        dst[at++] = static_cast<char>('0' + whole % 10U);
+    }
+    if (at + 1U < cap)
+    {
+        dst[at++] = '.';
+    }
+    if (at + 1U < cap)
+    {
+        dst[at++] = static_cast<char>('0' + frac);
+    }
+    dst[at] = '\0';
+}
+
+void DrawGlassPanel(u32 x, u32 y, u32 w, u32 h, const Theme& theme)
+{
+    const u32 radius = theme.surface_radius;
+    FramebufferBlendRoundRect(x, y, w, h, radius, (theme.glass_alpha << 24) | (theme.taskbar_bg & 0x00FFFFFFU));
+    FramebufferDrawRoundRect(x, y, w, h, radius, theme.taskbar_border);
+    if (w > 2U * radius)
+    {
+        FramebufferBlendFill(x + radius, y + 1U, w - 2U * radius, 1U, (theme.sheen_alpha << 24) | 0x00FFFFFFU);
+    }
+}
+
+void DrawMetricRow(u32 x, u32 y, const char* label, const char* value, const Theme& theme, u32 value_ink)
+{
+    constexpr u32 kLabelW = 58;
+    ChromeTextDraw(ChromeTextRole::Caption, x, y, label, theme.taskbar_tab_inactive, theme.taskbar_bg);
+    ChromeTextDraw(ChromeTextRole::Caption, x + kLabelW, y, value, value_ink, theme.taskbar_bg);
+}
+
+void DrawCpuSparkline(u32 x, u32 y, u32 w, u32 h, const sched::SchedStatsSampleSnapshot& samples, u32 ink, u32 dim)
+{
+    if (w == 0 || h == 0)
+    {
+        return;
+    }
+    FramebufferFillRect(x, y + h - 1U, w, 1U, dim);
+    const u32 count = (samples.count > w) ? w : samples.count;
+    const u32 left_pad = w - count;
+    for (u32 i = 0; i < count; ++i)
+    {
+        const auto& s = samples.samples[samples.count - count + i];
+        const u32 pct = s.valid ? s.cpu_busy_pct : 0U;
+        u32 bar_h = (pct * (h - 1U) + 99U) / 100U;
+        if (bar_h == 0)
+        {
+            bar_h = 1U;
+        }
+        FramebufferFillRect(x + left_pad + i, y + h - bar_h, 1U, bar_h, ink);
+    }
+}
+
 // Zeller's congruence — same derivation as the taskbar's date row.
 // Returns 0 = Sunday.
 u32 DayOfWeek(u32 year, u32 month, u32 day)
@@ -112,7 +251,7 @@ bool ColumnOrigin(u32* out_x, u32* out_y)
         return false;
     }
     const u32 bottom_limit = (fb.height > TaskbarHeight()) ? fb.height - TaskbarHeight() : 0U;
-    if (kEdgeInset + kClockH >= bottom_limit)
+    if (kEdgeInset + kColumnH >= bottom_limit)
     {
         return false;
     }
@@ -206,6 +345,80 @@ void DesktopGadgetsPaint()
     FramebufferBlendFill(static_cast<u32>(dcx) - 2U, static_cast<u32>(dcy) - 2U, 5U, 5U,
                          (110U << 24) | (accent & 0x00FFFFFFU));
     FramebufferFillRect(static_cast<u32>(dcx) - 1U, static_cast<u32>(dcy) - 1U, 2U, 2U, accent);
+
+    sched::SchedStatsSampleSnapshot samples{};
+    sched::SchedStatsSampleSnapshotRead(&samples);
+    const sched::SchedStatsSample* latest =
+        (samples.count != 0 && samples.samples[samples.count - 1U].valid) ? &samples.samples[samples.count - 1U]
+                                                                           : nullptr;
+    const u32 cpu_pct = (latest != nullptr) ? latest->cpu_busy_pct : 0U;
+    const u32 live = (latest != nullptr) ? latest->tasks_live : 0U;
+    const u32 sleeping = (latest != nullptr) ? latest->tasks_sleeping : 0U;
+    const u32 blocked = (latest != nullptr) ? latest->tasks_blocked : 0U;
+    const u64 ctxsw = (latest != nullptr) ? latest->context_switches : 0U;
+    const u32 native = (latest != nullptr) ? latest->native_processes : 0U;
+    const u32 win32 = (latest != nullptr) ? latest->win32_processes : 0U;
+    const u32 linux = (latest != nullptr) ? latest->linux_processes : 0U;
+    const u32 peer_accent = (theme.accent_peer != 0) ? theme.accent_peer : 0x00F5B73A;
+
+    const u32 kernel_y = py + kClockH + kPanelGap;
+    DrawGlassPanel(px, kernel_y, kColW, kKernelH, theme);
+    ChromeTextDraw(ChromeTextRole::Caption, px + kPadX, kernel_y + 10U, "Kernel", accent, theme.taskbar_bg,
+                   ChromeTextWeight::Bold);
+    DrawCpuSparkline(px + kPadX, kernel_y + 31U, kKernelSparkW, kKernelSparkH, samples, accent, theme.taskbar_border);
+
+    char cpu_val[8];
+    char live_val[16];
+    char sleep_val[16];
+    char block_val[16];
+    char ctx_val[22];
+    char fps_val[8];
+    FormatCpuPct(cpu_val, sizeof(cpu_val), cpu_pct);
+    FormatU64(live_val, sizeof(live_val), live);
+    FormatU64(sleep_val, sizeof(sleep_val), sleeping);
+    FormatU64(block_val, sizeof(block_val), blocked);
+    FormatU64(ctx_val, sizeof(ctx_val), ctxsw);
+    const RenderFps fps =
+        RenderFpsSample(g_gadget_fps_window, arch::TimerTicks(), static_cast<u32>(arch::kTickFrequencyHz));
+    FormatFps(fps_val, sizeof(fps_val), fps);
+
+    const u32 row_step = ChromeTextRoleHeight(ChromeTextRole::Caption) + 3U;
+    u32 row_y = kernel_y + 54U;
+    DrawMetricRow(px + kPadX, row_y, "cpu", cpu_val, theme, theme.taskbar_fg);
+    row_y += row_step;
+    DrawMetricRow(px + kPadX, row_y, "live", live_val, theme, theme.taskbar_fg);
+    row_y += row_step;
+    DrawMetricRow(px + kPadX, row_y, "sleep", sleep_val, theme, theme.taskbar_fg);
+    row_y += row_step;
+    DrawMetricRow(px + kPadX, row_y, "block", block_val, theme, theme.taskbar_fg);
+    row_y += row_step;
+    DrawMetricRow(px + kPadX, row_y, "ctx", ctx_val, theme, theme.taskbar_fg);
+    ChromeTextDraw(ChromeTextRole::Caption, px + kPadX + 118U, kernel_y + 32U, fps_val, peer_accent, theme.taskbar_bg);
+    ChromeTextDraw(ChromeTextRole::Caption, px + kPadX + 118U + ChromeTextMeasure(ChromeTextRole::Caption, fps_val) +
+                                               ChromeTextMeasure(ChromeTextRole::Caption, " "),
+                   kernel_y + 32U, "FPS", theme.taskbar_fg, theme.taskbar_bg);
+
+    const u32 abi_y = kernel_y + kKernelH + kPanelGap;
+    DrawGlassPanel(px, abi_y, kColW, kAbiH, theme);
+    ChromeTextDraw(ChromeTextRole::Caption, px + kPadX, abi_y + 10U, "ABI peers", peer_accent, theme.taskbar_bg,
+                   ChromeTextWeight::Bold);
+
+    char native_val[16];
+    char win32_val[16];
+    char linux_val[16];
+    char total_val[16];
+    FormatU64(native_val, sizeof(native_val), native);
+    FormatU64(win32_val, sizeof(win32_val), win32);
+    FormatU64(linux_val, sizeof(linux_val), linux);
+    FormatU64(total_val, sizeof(total_val), native + win32 + linux);
+    row_y = abi_y + 31U;
+    DrawMetricRow(px + kPadX, row_y, "native", native_val, theme, accent);
+    row_y += row_step;
+    DrawMetricRow(px + kPadX, row_y, "win32", win32_val, theme, peer_accent);
+    row_y += row_step;
+    DrawMetricRow(px + kPadX, row_y, "linux", linux_val, theme, theme.taskbar_fg);
+    row_y += row_step;
+    DrawMetricRow(px + kPadX, row_y, "total", total_val, theme, theme.taskbar_fg);
 }
 
 void DesktopGadgetsSelfTest()
@@ -219,7 +432,7 @@ void DesktopGadgetsSelfTest()
         // Fully on screen horizontally, and clear of the taskbar reserve.
         if (px + kColW > fb.width)
             ok = false;
-        if (py + kClockH > fb.height - TaskbarHeight())
+        if (py + kColumnH > fb.height - TaskbarHeight())
             ok = false;
     }
     arch::SerialWrite(ok ? "[desktop-gadgets] selftest PASS\n" : "[desktop-gadgets] selftest FAIL\n");

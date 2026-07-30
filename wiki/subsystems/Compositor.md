@@ -539,11 +539,20 @@ identity.
 ### Desktop gadgets (`desktop_gadgets.cpp`)
 
 `README.md` §1's gadget column, at the right edge above the taskbar
-reserve. Only the **clock/date panel** exists: a glass round-rect
-carrying `HH:MM`, a `Weekday, Month D` line and a 36-px analogue dial
-with hour and minute hands over an accent hub. There is deliberately no
-second hand — the compose pump runs at 1 Hz at best, so a sweeping
-second hand would claim a freshness the reading does not have.
+reserve. It now carries the three reference panels:
+
+- **Clock/date:** a glass round-rect carrying `HH:MM`, a `Weekday, Month
+  D` line and a 36-px analogue dial with hour and minute hands over an
+  accent hub. There is deliberately no second hand — the compose pump
+  runs at 1 Hz at best, so a sweeping second hand would claim a
+  freshness the reading does not have.
+- **Kernel:** the scheduler-owned 1 Hz sample ring feeds a 46-px CPU
+  sparkline plus live/sleep/blocked/context-switch/FPS rows. FPS reuses
+  the compositor render-stat sampler instead of inventing a second rate.
+- **ABI peers:** the same scheduler sample carries process buckets for
+  native, Win32 PE and Linux peers. The scheduler maintains one counted
+  task representative per process so compositor paint can read the
+  bucketed totals without walking the task registry.
 
 The panel is decoration: no hit-test, no click handler. It paints in
 the same compose slot as the desktop icons, so an open window occludes
@@ -552,10 +561,9 @@ vocabulary (`surface_radius == 0` or tactility off) it is a no-op
 rather than an opaque slab on the wallpaper.
 
 `FramebufferBlendRoundRect` was added for this — the translucent
-sibling of `FillRoundRect`, sharing its corner solve. The design's
-other two gadgets (kernel stats, ABI peers) are **not** implemented;
-both want a sampled history the compositor does not keep, and the
-Roadmap carries the plan.
+sibling of `FillRoundRect`, sharing its corner solve. The diagnostic
+samples are owned by `kernel/sched/sched.cpp`; `desktop_gadgets.cpp`
+does not acquire `g_sched_lock` from inside the compositor lock.
 
 ### Taskbar island (`taskbar.cpp`)
 
@@ -582,6 +590,12 @@ Per `README.md` §10 the island's content is different from the strip's:
 - START drops its label and paints the arcs mark alone at 44 px;
 - the right-hand reserve is 270 px, not 400 — the island's cells pack
   tighter than the strip's.
+
+The right-hand stats pill now matches the README shape: CPU percent,
+a 52-px sparkline from the scheduler sample ring, FPS from
+`RenderFpsSample`, and the clock/date card. The scheduler-owned ring is
+shared with the desktop gadget column so the two surfaces report the
+same CPU answer.
 
 Together those put the island near the reference's ~65% of screen
 width. Hit rects follow the painted geometry, so click dispatch is

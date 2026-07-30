@@ -217,6 +217,13 @@ struct Task
     // exist before the entry can run.
     bool published;
 
+    // True when this task is the current representative for its
+    // owning Process in the scheduler-owned ABI process counters.
+    // Exactly one live-or-deferred-dead task per Process may carry
+    // the contribution; SchedFinishTaskSwitch transfers or clears it
+    // when the representative exits.
+    bool stats_process_counted;
+
     // First-run flag. True from SchedCreate until SchedFinishTaskSwitch
     // runs for the first time on this task — i.e. true while the
     // SchedCreate-primed stack layout (planted &SchedTaskTrampoline at
@@ -466,6 +473,9 @@ struct Task
     u32 lockdep_held_depth;
 };
 
+void SchedStatsProcessPublishedLocked(Task* task);
+void SchedStatsProcessRetiredLocked(Task* task);
+
 namespace
 {
 
@@ -699,6 +709,29 @@ inline u64 SchedSumReaped()
 // reported by the heartbeat and by the `top` shell command.
 constinit u64 g_total_ticks = 0;
 constinit u64 g_idle_ticks = 0;
+// Shared 1 Hz scheduler sample ring for Aurora/taskbar diagnostic
+// surfaces. Written lazily by SchedStatsSampleSnapshotRead under this
+// small untagged lock, never from the hot timer path; this keeps
+// paint-rate consumers from deriving slightly different CPU percentages
+// from the same lifetime counters without taking g_sched_lock from
+// compositor paint.
+constinit sync::SpinLock g_stats_sample_lock{
+    .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
+constinit SchedStatsSample g_stats_samples[kSchedStatsSampleRingSize] = {};
+constinit u32 g_stats_sample_next = 0;
+constinit u32 g_stats_sample_count = 0;
+constinit bool g_stats_sample_seeded = false;
+constinit u64 g_stats_sample_last_tick = 0;
+constinit u64 g_stats_sample_prev_total = 0;
+constinit u64 g_stats_sample_prev_idle = 0;
+
+// ABI process buckets cached by task lifecycle hooks. Reads happen from
+// compositor/taskbar paint via the sample lock above, so the counters are
+// updated with atomic stores even though the representative transfer logic
+// itself runs under g_sched_lock.
+constinit u32 g_stats_native_processes = 0;
+constinit u32 g_stats_win32_processes = 0;
+constinit u32 g_stats_linux_processes = 0;
 
 // Zombie list — tasks that called SchedExit and are off-CPU, waiting
 // for the reaper to free their struct + stack. Linked through Task::next
@@ -2183,6 +2216,7 @@ extern "C" void SchedFinishTaskSwitch()
     {
         pcpu->ctxsw_dying_task_to_zombie = nullptr;
         sync::SpinLockGuard guard(g_sched_lock);
+        SchedStatsProcessRetiredLocked(dying);
         dying->next = g_zombies;
         g_zombies = dying;
         WaitQueueWakeOneLocked(&g_reaper_wq);
@@ -2284,6 +2318,7 @@ void PublishCreatedTask(Task* task)
     // the same lock as the runqueue push. The hung-task detector
     // can observe it only after every caller-owned field is ready.
     AllTasksLink(task);
+    SchedStatsProcessPublishedLocked(task);
     SchedCpuIncCreated();
     SchedCpuIncLive();
 }
@@ -2358,6 +2393,7 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     t->kill_reason = KillReason::TickBudget;
     t->hung_task_exempt = false; // default: detector watches every task
     t->published = false;
+    t->stats_process_counted = false;
     t->ticks_run = 0;
     t->schedin_tick = 0;
     t->win32_last_error = 0; // ERROR_SUCCESS, per-thread Win32 slot
@@ -5264,6 +5300,220 @@ u64 SchedCurrentKernelStackTop()
     return reinterpret_cast<u64>(self->stack_base) + self->stack_size;
 }
 
+u8 CpuBusyPctFromTicks(u64 total_delta, u64 idle_delta)
+{
+    if (total_delta == 0)
+    {
+        return 0;
+    }
+    const u64 busy = (total_delta > idle_delta) ? (total_delta - idle_delta) : 0;
+    u64 pct = (busy * 100u) / total_delta;
+    if (pct > 99u)
+    {
+        pct = 99u;
+    }
+    return static_cast<u8>(pct);
+}
+
+enum class SampleAbiBucket : u8
+{
+    None,
+    Native,
+    Win32,
+    Linux,
+};
+
+SampleAbiBucket SampleAbiBucketForProcess(const core::Process* process)
+{
+    if (process == nullptr)
+    {
+        return SampleAbiBucket::None;
+    }
+    if (process->pe_image_base != 0)
+    {
+        return SampleAbiBucket::Win32;
+    }
+    if (process->abi_flavor == core::kAbiLinux)
+    {
+        return SampleAbiBucket::Linux;
+    }
+    return SampleAbiBucket::Native;
+}
+
+u32* SampleAbiCounterPtr(SampleAbiBucket bucket)
+{
+    switch (bucket)
+    {
+    case SampleAbiBucket::Native:
+        return &g_stats_native_processes;
+    case SampleAbiBucket::Win32:
+        return &g_stats_win32_processes;
+    case SampleAbiBucket::Linux:
+        return &g_stats_linux_processes;
+    case SampleAbiBucket::None:
+        break;
+    }
+    return nullptr;
+}
+
+void SampleAbiCounterAdd(SampleAbiBucket bucket, bool increment)
+{
+    u32* value = SampleAbiCounterPtr(bucket);
+    if (value == nullptr)
+    {
+        return;
+    }
+    const u32 current = __atomic_load_n(value, __ATOMIC_RELAXED);
+    if (increment)
+    {
+        if (current != 0xFFFFFFFFu)
+        {
+            __atomic_store_n(value, current + 1U, __ATOMIC_RELAXED);
+        }
+        return;
+    }
+    if (current != 0)
+    {
+        __atomic_store_n(value, current - 1U, __ATOMIC_RELAXED);
+    }
+}
+
+bool ProcessHasStatsRepresentativeLocked(const core::Process* process, const Task* exclude)
+{
+    if (process == nullptr)
+    {
+        return false;
+    }
+    for (Task* it = g_all_tasks_head; it != nullptr; it = it->all_next)
+    {
+        if (it != exclude && it->process == process && it->stats_process_counted)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+Task* FindLiveStatsReplacementLocked(const core::Process* process, const Task* exclude)
+{
+    if (process == nullptr)
+    {
+        return nullptr;
+    }
+    for (Task* it = g_all_tasks_head; it != nullptr; it = it->all_next)
+    {
+        if (it != exclude && it->state != TaskState::Dead && it->process == process)
+        {
+            return it;
+        }
+    }
+    return nullptr;
+}
+
+void SchedStatsProcessPublishedLocked(Task* task)
+{
+    if (task == nullptr || task->process == nullptr)
+    {
+        return;
+    }
+    if (!ProcessHasStatsRepresentativeLocked(task->process, task))
+    {
+        task->stats_process_counted = true;
+        SampleAbiCounterAdd(SampleAbiBucketForProcess(task->process), /*increment=*/true);
+    }
+}
+
+void SchedStatsProcessRetiredLocked(Task* task)
+{
+    if (task == nullptr || task->process == nullptr || !task->stats_process_counted)
+    {
+        return;
+    }
+
+    Task* replacement = FindLiveStatsReplacementLocked(task->process, task);
+    if (replacement != nullptr)
+    {
+        replacement->stats_process_counted = true;
+    }
+    else
+    {
+        SampleAbiCounterAdd(SampleAbiBucketForProcess(task->process), /*increment=*/false);
+    }
+    task->stats_process_counted = false;
+}
+
+u16 ClampU16(u64 value)
+{
+    return static_cast<u16>((value > 0xFFFFu) ? 0xFFFFu : value);
+}
+
+SchedStatsSample BuildSchedStatsSample(u64 now_tick)
+{
+    SchedStatsSample sample{};
+    sample.tick = now_tick;
+    sample.context_switches = g_context_switches;
+    const u64 live = SchedSumLive();
+    const u64 sleeping = SchedSumSleeping();
+    const u64 blocked = SchedSumBlocked();
+    sample.tasks_live = ClampU16(live);
+    sample.tasks_sleeping = ClampU16(sleeping);
+    sample.tasks_blocked = ClampU16(blocked);
+
+    const u64 total = g_total_ticks;
+    const u64 idle = g_idle_ticks;
+    if (g_stats_sample_seeded)
+    {
+        const u64 total_delta = (total >= g_stats_sample_prev_total) ? (total - g_stats_sample_prev_total) : 0;
+        const u64 idle_delta = (idle >= g_stats_sample_prev_idle) ? (idle - g_stats_sample_prev_idle) : 0;
+        sample.cpu_busy_pct = CpuBusyPctFromTicks(total_delta, idle_delta);
+    }
+    else
+    {
+        sample.cpu_busy_pct = CpuBusyPctFromTicks(total, idle);
+    }
+
+    sample.native_processes = ClampU16(__atomic_load_n(&g_stats_native_processes, __ATOMIC_RELAXED));
+    sample.win32_processes = ClampU16(__atomic_load_n(&g_stats_win32_processes, __ATOMIC_RELAXED));
+    sample.linux_processes = ClampU16(__atomic_load_n(&g_stats_linux_processes, __ATOMIC_RELAXED));
+    sample.valid = true;
+    return sample;
+}
+
+void MaybeAppendSchedStatsSampleLocked()
+{
+    // Debug app self-tests can read UI helpers before the scheduler is
+    // installed. At that point there is no stable task graph to sample.
+    if (!cpu::BspInstalled())
+    {
+        return;
+    }
+    u64 now = g_tick_now;
+    if (now == 0)
+    {
+        now = arch::TimerTicks();
+    }
+    if (g_stats_sample_seeded)
+    {
+        const u64 elapsed = (now >= g_stats_sample_last_tick) ? (now - g_stats_sample_last_tick) : 0;
+        if (elapsed < arch::kTickFrequencyHz)
+        {
+            return;
+        }
+    }
+
+    const SchedStatsSample sample = BuildSchedStatsSample(now);
+    g_stats_samples[g_stats_sample_next] = sample;
+    g_stats_sample_next = (g_stats_sample_next + 1U) % kSchedStatsSampleRingSize;
+    if (g_stats_sample_count < kSchedStatsSampleRingSize)
+    {
+        ++g_stats_sample_count;
+    }
+    g_stats_sample_seeded = true;
+    g_stats_sample_last_tick = now;
+    g_stats_sample_prev_total = g_total_ticks;
+    g_stats_sample_prev_idle = g_idle_ticks;
+}
+
 SchedStats SchedStatsRead()
 {
     return SchedStats{
@@ -5277,6 +5527,51 @@ SchedStats SchedStatsRead()
         .total_ticks = g_total_ticks,
         .idle_ticks = g_idle_ticks,
     };
+}
+
+void SchedStatsSampleSnapshotRead(SchedStatsSampleSnapshot* out)
+{
+    if (out == nullptr)
+    {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+    if (!cpu::BspInstalled())
+    {
+        return;
+    }
+
+    sync::SpinLockGuard guard(g_stats_sample_lock);
+    MaybeAppendSchedStatsSampleLocked();
+    out->count = g_stats_sample_count;
+    const u32 first =
+        (g_stats_sample_next + kSchedStatsSampleRingSize - g_stats_sample_count) % kSchedStatsSampleRingSize;
+    for (u32 i = 0; i < g_stats_sample_count; ++i)
+    {
+        out->samples[i] = g_stats_samples[(first + i) % kSchedStatsSampleRingSize];
+    }
+}
+
+bool SchedStatsLatestSample(SchedStatsSample* out)
+{
+    if (out == nullptr)
+    {
+        return false;
+    }
+    memset(out, 0, sizeof(*out));
+    if (!cpu::BspInstalled())
+    {
+        return false;
+    }
+    sync::SpinLockGuard guard(g_stats_sample_lock);
+    MaybeAppendSchedStatsSampleLocked();
+    if (g_stats_sample_count == 0)
+    {
+        return false;
+    }
+    const u32 newest = (g_stats_sample_next + kSchedStatsSampleRingSize - 1U) % kSchedStatsSampleRingSize;
+    *out = g_stats_samples[newest];
+    return out->valid;
 }
 
 bool SchedStatsReadCpu(u32 cpu_id, u64* total_ticks, u64* idle_ticks)

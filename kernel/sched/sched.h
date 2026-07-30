@@ -609,6 +609,43 @@ struct SchedStats
 };
 SchedStats SchedStatsRead();
 
+/// Per-second scheduler/UI sample ring. Owned by the scheduler so every
+/// visual surface renders the same CPU/load answer instead of inventing
+/// local deltas from lifetime counters. Samples are oldest -> newest in
+/// the snapshot; `count` can be smaller than the ring size early in boot.
+inline constexpr u32 kSchedStatsSampleRingSize = 52;
+
+struct SchedStatsSample
+{
+    u64 tick;             // scheduler tick when the sample was recorded
+    u64 context_switches; // lifetime, for the kernel gadget row
+    u16 tasks_live;
+    u16 tasks_sleeping;
+    u16 tasks_blocked;
+    u16 native_processes;
+    u16 win32_processes;
+    u16 linux_processes;
+    u8 cpu_busy_pct; // 0..99, one-second delta where possible
+    bool valid;
+};
+
+struct SchedStatsSampleSnapshot
+{
+    SchedStatsSample samples[kSchedStatsSampleRingSize];
+    u32 count;
+};
+
+/// Copy the scheduler's shared sample ring into `out`. Null-safe.
+/// The read may append one fresh sample if at least one second elapsed
+/// since the previous sample. It does not acquire `g_sched_lock` or
+/// walk the task registry, so compositor paint can consume it without
+/// creating a compositor -> scheduler lock-order edge.
+void SchedStatsSampleSnapshotRead(SchedStatsSampleSnapshot* out);
+
+/// Copy the newest sample into `out`. Returns false before the first
+/// sample exists or when `out` is null.
+bool SchedStatsLatestSample(SchedStatsSample* out);
+
 /// Per-CPU tick accounting for `cpu_id`. Writes the CPU's lifetime
 /// timer-tick count into `*total_ticks` and the subset spent in the
 /// idle task into `*idle_ticks`. Returns true on success.
