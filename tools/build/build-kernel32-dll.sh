@@ -327,6 +327,8 @@ set +e
     /export:WriteFile \
     /export:WriteConsoleA \
     /export:WriteConsoleW \
+    /export:ReadConsoleA \
+    /export:ReadConsoleW \
     /export:CloseHandle \
     /export:CreateFileW \
     /export:ReadFile \

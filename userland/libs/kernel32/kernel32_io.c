@@ -2247,6 +2247,42 @@ __declspec(dllexport) BOOL WriteConsoleW(HANDLE hConsole, const wchar_t16* buf, 
     return rv >= 0 ? 1 : 0;
 }
 
+/* ReadConsoleA — read console input.
+ *
+ * v0: non-blocking stub that returns 0 characters. The kernel
+ * has no blocking console-input path for PE processes yet (the
+ * terminal input goes through the kernel shell). A real
+ * implementation would issue SYS_READ on the console input
+ * handle and block until a line is available.
+ * // STUB: returns immediately with 0 chars — revisit when
+ * console input for PE processes is wired. */
+__declspec(dllexport) BOOL ReadConsoleA(HANDLE hConsoleInput, void* lpBuffer, DWORD nNumberOfCharsToRead,
+                                        DWORD* lpNumberOfCharsRead, void* pInputControl)
+{
+    (void)hConsoleInput;
+    (void)lpBuffer;
+    (void)nNumberOfCharsToRead;
+    (void)pInputControl;
+    if (lpNumberOfCharsRead != (DWORD*)0)
+        *lpNumberOfCharsRead = 0;
+    return 1;
+}
+
+/* ReadConsoleW — wide variant of ReadConsoleA.
+ * // STUB: returns immediately with 0 chars — revisit when
+ * console input for PE processes is wired. */
+__declspec(dllexport) BOOL ReadConsoleW(HANDLE hConsoleInput, wchar_t16* lpBuffer, DWORD nNumberOfCharsToRead,
+                                        DWORD* lpNumberOfCharsRead, void* pInputControl)
+{
+    (void)hConsoleInput;
+    (void)lpBuffer;
+    (void)nNumberOfCharsToRead;
+    (void)pInputControl;
+    if (lpNumberOfCharsRead != (DWORD*)0)
+        *lpNumberOfCharsRead = 0;
+    return 1;
+}
+
 __declspec(dllexport) BOOL CloseHandle(HANDLE h)
 {
     long long discard;

@@ -542,6 +542,42 @@ static unsigned short g_console_attrs = 0x07;
 static int g_console_cursor_visible = 1;
 static int g_console_cursor_size = 25; /* pct of cell */
 
+/* Emit raw bytes to stdout via SYS_WRITE(fd=1). Used by
+ * SetConsoleCursorPosition, SetConsoleTextAttribute and
+ * FillConsoleOutputCharacterA to push ANSI escapes to the
+ * kernel terminal. */
+static void console_emit_raw(const char* buf, int len)
+{
+    long long discard;
+    __asm__ volatile("int $0x80"
+                     : "=a"(discard)
+                     : "a"((long long)2), /* SYS_WRITE */
+                       "D"((long long)1), /* fd=1 stdout */
+                       "S"((long long)buf), "d"((long long)len)
+                     : "memory");
+}
+
+/* Format a small unsigned int (0..9999) into `out`, returning
+ * the number of digits written. No NUL terminator. */
+static int console_itoa(unsigned v, char* out)
+{
+    if (v == 0)
+    {
+        out[0] = '0';
+        return 1;
+    }
+    char tmp[8];
+    int n = 0;
+    while (v > 0)
+    {
+        tmp[n++] = (char)('0' + (v % 10));
+        v /= 10;
+    }
+    for (int i = 0; i < n; ++i)
+        out[i] = tmp[n - 1 - i];
+    return n;
+}
+
 __declspec(dllexport) BOOL GetConsoleScreenBufferInfo(HANDLE h, DUETOS_CONSOLE_SBI* info)
 {
     (void)h;
@@ -571,11 +607,23 @@ typedef struct
     BOOL visible;
 } DUETOS_CONSOLE_CURSOR_INFO;
 
+/* SetConsoleCursorPosition — store + emit ESC[row;colH.
+ * Win32 COORD is 0-based; ANSI CUP is 1-based. */
 __declspec(dllexport) BOOL SetConsoleCursorPosition(HANDLE h, DUETOS_COORD pos)
 {
     (void)h;
     g_console_cur_x = pos.x;
     g_console_cur_y = pos.y;
+    /* Emit ANSI CUP: ESC [ <row+1> ; <col+1> H */
+    char esc[24];
+    int p = 0;
+    esc[p++] = '\x1b';
+    esc[p++] = '[';
+    p += console_itoa((unsigned)(pos.y + 1), esc + p);
+    esc[p++] = ';';
+    p += console_itoa((unsigned)(pos.x + 1), esc + p);
+    esc[p++] = 'H';
+    console_emit_raw(esc, p);
     return 1;
 }
 
@@ -599,10 +647,56 @@ __declspec(dllexport) BOOL SetConsoleCursorInfo(HANDLE h, const DUETOS_CONSOLE_C
     return 1;
 }
 
+/* SetConsoleTextAttribute — store + emit ANSI SGR.
+ *
+ * Win32 attribute bits:
+ *   0x01 FOREGROUND_BLUE    0x10 BACKGROUND_BLUE
+ *   0x02 FOREGROUND_GREEN   0x20 BACKGROUND_GREEN
+ *   0x04 FOREGROUND_RED     0x40 BACKGROUND_RED
+ *   0x08 FOREGROUND_INTENSITY  0x80 BACKGROUND_INTENSITY
+ *
+ * ANSI SGR: 30-37 = fg, 40-47 = bg, 90-97 = bright fg,
+ * 100-107 = bright bg. Win32 color order is BGR; ANSI is
+ * BGR too (30=black,31=red,32=green,33=yellow,34=blue,
+ * 35=magenta,36=cyan,37=white).
+ *
+ * Win32 bit layout → ANSI index mapping:
+ *   bits[2:0] = R,G,B → ANSI = 30 + (B<<2|G<<1|R) with
+ *   R and B swapped: win32 bit0=B,bit1=G,bit2=R →
+ *   ANSI index = (bit2>>2)|(bit1)|(bit0<<2) =
+ *   swap bit0 and bit2. */
+static unsigned short win32_color_to_ansi_idx(unsigned short c)
+{
+    /* c is a 3-bit Win32 color: bit0=BLUE, bit1=GREEN, bit2=RED.
+     * ANSI: bit0=RED, bit1=GREEN, bit2=BLUE. Swap bits 0 and 2. */
+    unsigned short r = (c >> 2) & 1; /* Win32 RED  -> ANSI bit0 */
+    unsigned short g = (c >> 1) & 1; /* Win32 GREEN stays */
+    unsigned short b = c & 1;        /* Win32 BLUE -> ANSI bit2 */
+    return (b << 2) | (g << 1) | r;
+}
+
 __declspec(dllexport) BOOL SetConsoleTextAttribute(HANDLE h, unsigned short attrs)
 {
     (void)h;
     g_console_attrs = attrs;
+    /* Emit ANSI SGR: ESC [ 0 ; <fg> ; <bg> m */
+    unsigned short fg3 = attrs & 0x07;
+    int fg_bright = (attrs & 0x08) ? 1 : 0;
+    unsigned short bg3 = (attrs >> 4) & 0x07;
+    int bg_bright = (attrs & 0x80) ? 1 : 0;
+    unsigned short fg_code = (fg_bright ? 90 : 30) + win32_color_to_ansi_idx(fg3);
+    unsigned short bg_code = (bg_bright ? 100 : 40) + win32_color_to_ansi_idx(bg3);
+    char esc[24];
+    int p = 0;
+    esc[p++] = '\x1b';
+    esc[p++] = '[';
+    esc[p++] = '0'; /* reset first */
+    esc[p++] = ';';
+    p += console_itoa(fg_code, esc + p);
+    esc[p++] = ';';
+    p += console_itoa(bg_code, esc + p);
+    esc[p++] = 'm';
+    console_emit_raw(esc, p);
     return 1;
 }
 
@@ -617,12 +711,37 @@ __declspec(dllexport) BOOL FillConsoleOutputAttribute(HANDLE h, unsigned short a
     return 1;
 }
 
+/* FillConsoleOutputCharacterA — emit fill characters.
+ *
+ * The most common call pattern is FillConsoleOutputCharacterA(
+ * hOut, ' ', cols*rows, {0,0}, &written) — i.e. "clear the
+ * screen." We detect that (ch==' ' && origin=={0,0} && count
+ * >= 80*25) and emit ESC[2J ESC[H (clear+home) instead of
+ * 2000 spaces. For other calls, emit the character `count`
+ * times in batches through SYS_WRITE. */
 __declspec(dllexport) BOOL FillConsoleOutputCharacterA(HANDLE h, char ch, DWORD count, DUETOS_COORD origin,
                                                        DWORD* written)
 {
     (void)h;
-    (void)ch;
-    (void)origin;
+    if (ch == ' ' && origin.x == 0 && origin.y == 0 && count >= 80u * 25u)
+    {
+        /* Screen-clear shortcut. */
+        console_emit_raw("\x1b[2J\x1b[H", 7);
+    }
+    else
+    {
+        /* Emit `count` copies of `ch` in 128-byte batches. */
+        char batch[128];
+        for (int i = 0; i < 128; ++i)
+            batch[i] = ch;
+        DWORD remaining = count;
+        while (remaining > 0)
+        {
+            int n = remaining > 128 ? 128 : (int)remaining;
+            console_emit_raw(batch, n);
+            remaining -= (DWORD)n;
+        }
+    }
     if (written != (DWORD*)0)
         *written = count;
     return 1;
@@ -631,12 +750,8 @@ __declspec(dllexport) BOOL FillConsoleOutputCharacterA(HANDLE h, char ch, DWORD 
 __declspec(dllexport) BOOL FillConsoleOutputCharacterW(HANDLE h, wchar_t16 ch, DWORD count, DUETOS_COORD origin,
                                                        DWORD* written)
 {
-    (void)h;
-    (void)ch;
-    (void)origin;
-    if (written != (DWORD*)0)
-        *written = count;
-    return 1;
+    /* Route through the A variant with low-byte strip. */
+    return FillConsoleOutputCharacterA(h, (char)(ch & 0xFF), count, origin, written);
 }
 
 __declspec(dllexport) BOOL GetNumberOfConsoleInputEvents(HANDLE h, DWORD* count)

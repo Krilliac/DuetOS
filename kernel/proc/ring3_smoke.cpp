@@ -231,6 +231,7 @@
 #include "generated_reg2_smoke_pe.h"
 #include "generated_thread3_smoke_pe.h"
 #include "generated_console3_smoke_pe.h"
+#include "generated_console4_smoke_pe.h"
 #include "generated_disp_smoke_pe.h"
 #include "generated_fs2_smoke_pe.h"
 #include "generated_intl_smoke_pe.h"
@@ -2449,6 +2450,7 @@ constexpr PeCompatEntry kPeCompatBattery[] = {
     PE_COMPAT("ring3-mem2-smoke", kBinMem2SmokeBytes, BareMetal, true),
     PE_COMPAT("ring3-fs2-smoke", kBinFs2SmokeBytes, BareMetal, true),
     PE_COMPAT("ring3-console3-smoke", kBinConsole3SmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-console4-smoke", kBinConsole4SmokeBytes, BareMetal, true),
     PE_COMPAT("ring3-xml-smoke", kBinXmlSmokeBytes, BareMetal, true),
     PE_COMPAT("ring3-reg3-smoke", kBinReg3SmokeBytes, BareMetal, true),
     PE_COMPAT("ring3-proc3-smoke", kBinProc3SmokeBytes, BareMetal, true),

@@ -116,11 +116,39 @@ __declspec(dllexport) LONG64 InterlockedXor64(LONG64 volatile* dest, LONG64 valu
  * branching onto obscure alt paths.
  * ------------------------------------------------------------------ */
 
+/* Per-handle console mode tracking. STD_INPUT_HANDLE (-10),
+ * STD_OUTPUT_HANDLE (-11), STD_ERROR_HANDLE (-12) each get
+ * their own mode word. Index: 0=stdin, 1=stdout, 2=stderr.
+ *
+ * Default modes match Windows defaults:
+ *   stdin:  ENABLE_PROCESSED_INPUT(1) | ENABLE_LINE_INPUT(2)
+ *           | ENABLE_ECHO_INPUT(4) = 0x07
+ *   stdout: ENABLE_PROCESSED_OUTPUT(1) | ENABLE_WRAP_AT_EOL_OUTPUT(2) = 0x03
+ *   stderr: same as stdout = 0x03
+ */
+static DWORD g_console_mode[3] = {0x07, 0x03, 0x03};
+
+static int console_mode_index(HANDLE h)
+{
+    unsigned long long v = (unsigned long long)(UINT_PTR)h;
+    if (v == 0xFFFFFFF6ULL)
+        return 0; /* STD_INPUT_HANDLE  = -10 */
+    if (v == 0xFFFFFFF5ULL)
+        return 1; /* STD_OUTPUT_HANDLE = -11 */
+    if (v == 0xFFFFFFF4ULL)
+        return 2; /* STD_ERROR_HANDLE  = -12 */
+    return -1;
+}
+
 __declspec(dllexport) BOOL GetConsoleMode(HANDLE hConsole, DWORD* lpMode)
 {
-    (void)hConsole;
-    if (lpMode != (DWORD*)0)
-        *lpMode = 3; /* ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT */
+    if (lpMode == (DWORD*)0)
+        return 0;
+    int idx = console_mode_index(hConsole);
+    if (idx >= 0)
+        *lpMode = g_console_mode[idx];
+    else
+        *lpMode = 0x03; /* default for unknown handles */
     return 1;
 }
 
@@ -141,8 +169,9 @@ __declspec(dllexport) UINT GetConsoleOutputCP(void)
 
 __declspec(dllexport) BOOL SetConsoleMode(HANDLE hConsole, DWORD mode)
 {
-    (void)hConsole;
-    (void)mode;
+    int idx = console_mode_index(hConsole);
+    if (idx >= 0)
+        g_console_mode[idx] = mode;
     return 1;
 }
 
