@@ -584,7 +584,7 @@ static HICON __stdcall user32_32_load_icon_impl(HINSTANCE inst, unsigned long na
         if (iw == 0 || ih == 0 || iw > 64 || ih > 64)
             return (HICON)1;
         {
-            unsigned char bgra[64 * 64 * 4];
+            static unsigned char bgra[64 * 64 * 4];
             if (!duet_res_decode_icon(&view, DUET_RES_TYPE_ICON, icon_id, iw, ih, bgra, 64 * 64, (unsigned int*)0,
                                       (unsigned int*)0))
                 return (HICON)1;
@@ -631,7 +631,7 @@ static HCURSOR __stdcall user32_32_load_cursor_impl(HINSTANCE inst, unsigned lon
         if (cw == 0 || ch == 0 || cw > 64 || ch > 64)
             return (HCURSOR)IDC_ARROW_32;
         {
-            unsigned char bgra[64 * 64 * 4];
+            static unsigned char bgra[64 * 64 * 4];
             unsigned int x_hot = 0, y_hot = 0;
             if (!duet_res_decode_icon(&view, DUET_RES_TYPE_CURSOR, cursor_id, cw, ch, bgra, 64 * 64, &x_hot, &y_hot))
                 return (HCURSOR)IDC_ARROW_32;

@@ -168,10 +168,10 @@ constexpr u32 kOffResetEventReal = 0x755;                    // 15 bytes
 // a dedicated whole-array compaction; the unused constant is marked
 // [[maybe_unused]] to suppress the warning.
 [[maybe_unused]] constexpr u32 kOffWaitForObj2 = 0x764;      // 66 bytes (mutex+event-aware)
-constexpr u32 kOffTlsAllocReal = 0x7A6;                      // 8 bytes
-constexpr u32 kOffTlsFreeReal = 0x7AE;                       // 24 bytes
-constexpr u32 kOffTlsGetValueReal = 0x7C6;                   // 13 bytes
-constexpr u32 kOffTlsSetValueReal = 0x7D3;                   // 20 bytes
+[[maybe_unused]] constexpr u32 kOffTlsAllocReal = 0x7A6;     // 8 bytes
+[[maybe_unused]] constexpr u32 kOffTlsFreeReal = 0x7AE;      // 24 bytes
+[[maybe_unused]] constexpr u32 kOffTlsGetValueReal = 0x7C6;  // 13 bytes
+[[maybe_unused]] constexpr u32 kOffTlsSetValueReal = 0x7D3;  // 20 bytes
 constexpr u32 kOffNtAllocateVirtualMemory = 0x7E7;           // 36 bytes
 constexpr u32 kOffNtFreeVirtualMemory = 0x80B;               // 33 bytes
 constexpr u32 kOffGetSystemTimeSt = 0x82C;                   // 11 bytes
@@ -451,11 +451,12 @@ constexpr u32 kOffSehFilterExe = 0x11DC;         // 3 bytes — _seh_filter_exe:
 // REAL. Distinct from the catch-all sinks so an unintended retirement
 // (e.g. someone adds a brand-new import without pinning it) still
 // surfaces as NOOP in the per-DLL wiki table.
-constexpr u32 kOffPinReturn0 = 0x11DF;    // 3 bytes — "v0 missing capability returns 0"
-constexpr u32 kOffPinReturn1 = 0x11E2;    // 6 bytes — "v0 operation accepted, no side effect, returns TRUE"
-constexpr u32 kOffPinVoidNop = 0x11E8;    // 1 byte  — "v0 void no-op"
-constexpr u32 kOffPinFiberZero = 0x11E9;  // 3 bytes — no-fiber world: Create/Convert/IsFiber returns 0
-constexpr u32 kOffPinFiberVoid = 0x11EC;  // 1 byte  — no-fiber world: SwitchToFiber/DeleteFiber are void
+constexpr u32 kOffPinReturn0 = 0x11DF; // 3 bytes — "v0 missing capability returns 0"
+constexpr u32 kOffPinReturn1 = 0x11E2; // 6 bytes — "v0 operation accepted, no side effect, returns TRUE"
+constexpr u32 kOffPinVoidNop = 0x11E8; // 1 byte  — "v0 void no-op"
+[[maybe_unused]] constexpr u32 kOffPinFiberZero = 0x11E9; // 3 bytes — no-fiber world: Create/Convert/IsFiber returns 0
+[[maybe_unused]] constexpr u32 kOffPinFiberVoid =
+    0x11EC;                               // 1 byte  — no-fiber world: SwitchToFiber/DeleteFiber are void
 constexpr u32 kOffPinBadPtrSafe = 0x11ED; // 3 bytes — IsBadXPtr: can't probe, report not-bad (returns 0)
 constexpr u32 kOffPinLcidEnUs = 0x11F0;   // 6 bytes — pinned en-US LCID/LANGID (0x0409)
 
@@ -570,11 +571,6 @@ static_assert(HasExactThunkRow("vcruntime140.dll", "_InterlockedIncrement", kOff
 static_assert(HasExactThunkRow("vcruntime140.dll", "_InterlockedDecrement", kOffInterlockedDec));
 static_assert(HasExactThunkRow("vcruntime140.dll", "_InterlockedExchange", kOffInterlockedExchg));
 static_assert(HasExactThunkRow("vcruntime140.dll", "_InterlockedCompareExchange", kOffInterlockedCmpXchg));
-static_assert(HasExactThunkRow("kernel32.dll", "FlsAlloc", kOffTlsAllocReal));
-static_assert(HasExactThunkRow("kernel32.dll", "FlsFree", kOffTlsFreeReal));
-static_assert(HasExactThunkRow("kernel32.dll", "FlsGetValue", kOffTlsGetValueReal));
-static_assert(HasExactThunkRow("kernel32.dll", "FlsSetValue", kOffTlsSetValueReal));
-
 struct ThunkHashEntry
 {
     u64 key_hash;

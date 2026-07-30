@@ -1410,8 +1410,8 @@ struct dlg_state
     HANDLE hwnd;
     DLGPROC dlgproc;
     INT_PTR result;
-    int ended;     /* set by EndDialog */
-    UINT def_id;   /* DM_SETDEFID / DM_GETDEFID */
+    int ended;   /* set by EndDialog */
+    UINT def_id; /* DM_SETDEFID / DM_GETDEFID */
     int in_use;
 };
 static struct dlg_state s_dlg_states[4];
@@ -1718,8 +1718,7 @@ static HANDLE dlg_child_find(HANDLE dialog, int ctrl_id)
 {
     for (int i = 0; i < DLG_CHILD_TABLE_CAP; ++i)
     {
-        if (s_dlg_children[i].in_use && s_dlg_children[i].dialog == dialog &&
-            s_dlg_children[i].ctrl_id == ctrl_id)
+        if (s_dlg_children[i].in_use && s_dlg_children[i].dialog == dialog && s_dlg_children[i].ctrl_id == ctrl_id)
         {
             return s_dlg_children[i].child;
         }
@@ -1869,8 +1868,8 @@ static int dlg_du_to_px_y(int du)
  * dialog window and all child controls, and optionally enters a
  * modal message loop. Returns the dialog HWND (modeless) or the
  * EndDialog result (modal). */
-static HANDLE dlg_create_from_template(const void* tmpl_raw, HANDLE hParent, DLGPROC proc, LPARAM initParam,
-                                       int modal, INT_PTR* out_result)
+static HANDLE dlg_create_from_template(const void* tmpl_raw, HANDLE hParent, DLGPROC proc, LPARAM initParam, int modal,
+                                       INT_PTR* out_result)
 {
     if (!tmpl_raw)
         return (HANDLE)0;
@@ -1936,8 +1935,8 @@ static HANDLE dlg_create_from_template(const void* tmpl_raw, HANDLE hParent, DLG
     /* Create the dialog window. We use WS_POPUP | WS_CAPTION as
      * the base style; the template's style is merged in. */
     DWORD win_style = style | WS_POPUP;
-    HANDLE dlg_hwnd = CreateWindowExA(exstyle, "", title, win_style, px_x, px_y, px_w, px_h, hParent,
-                                      (HANDLE)0, (HANDLE)0, 0);
+    HANDLE dlg_hwnd =
+        CreateWindowExA(exstyle, "", title, win_style, px_x, px_y, px_w, px_h, hParent, (HANDLE)0, (HANDLE)0, 0);
     if (!dlg_hwnd)
         return (HANDLE)0;
 
@@ -2057,8 +2056,7 @@ static HANDLE dlg_create_from_template(const void* tmpl_raw, HANDLE hParent, DLG
         long long rv;
         __asm__ volatile("int $0x80"
                          : "=a"(rv)
-                         : "a"((long long)SYS_WIN_GET_MSG), "D"((long long)(unsigned long long)&msg),
-                           "S"((long long)0)
+                         : "a"((long long)SYS_WIN_GET_MSG), "D"((long long)(unsigned long long)&msg), "S"((long long)0)
                          : "memory");
         if (rv == 0)
             break; /* WM_QUIT */
@@ -2499,7 +2497,7 @@ static HANDLE user32_load_cursor_impl(HANDLE h, unsigned long name_id)
              * cursors, cap at 64x64 to keep stack usage sane. */
             unsigned int use_w = cw > 64 ? 64 : cw;
             unsigned int use_h = ch > 64 ? 64 : ch;
-            unsigned char bgra[64 * 64 * 4];
+            static unsigned char bgra[64 * 64 * 4];
             unsigned int x_hot = 0, y_hot = 0;
             if (!duet_res_decode_icon(&view, DUET_RES_TYPE_CURSOR, cursor_id, use_w, use_h, bgra, 64 * 64, &x_hot,
                                       &y_hot))
@@ -2557,7 +2555,7 @@ static HANDLE user32_load_icon_impl(HANDLE h, unsigned long name_id)
         if (iw == 0 || ih == 0 || iw > 64 || ih > 64)
             return (HANDLE)1;
         {
-            unsigned char bgra[64 * 64 * 4];
+            static unsigned char bgra[64 * 64 * 4];
             if (!duet_res_decode_icon(&view, DUET_RES_TYPE_ICON, icon_id, iw, ih, bgra, 64 * 64, (unsigned int*)0,
                                       (unsigned int*)0))
                 return (HANDLE)1;

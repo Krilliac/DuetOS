@@ -95,15 +95,9 @@ void DoFiberCreate(arch::TrapFrame* frame)
             frame->rax = 0;
             return;
         }
-        // Zero the frame.
-        auto* kva = static_cast<u8*>(mm::PhysToVirt(f));
-        for (u64 j = 0; j < mm::kPageSize; ++j)
-        {
-            kva[j] = 0;
-        }
         const u64 va = stack_base + i * mm::kPageSize;
-        mm::AddressSpaceMapUserPage(
-            proc->as, va, f, mm::kPageFlagPresent | mm::kPageFlagWritable | mm::kPageFlagUser | mm::kPageFlagNoExecute);
+        mm::AddressSpaceMapUserPage(proc->as, va, f,
+                                    mm::kPagePresent | mm::kPageWritable | mm::kPageUser | mm::kPageNoExecute);
     }
     proc->vmap_pages_used += pages;
 
