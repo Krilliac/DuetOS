@@ -202,11 +202,16 @@ struct PeHeaders
 // independently. Without an unwind, a partial-failure leaks every
 // frame mapped before the failing leg (~20+ frames + VA mappings).
 //
-// Contract: every successful AddressSpaceMapUserPage inside PeLoad
-// (and the helpers it delegates to) is followed by a Track(va)
-// call. The destructor walks the tracked VAs in reverse order and
-// calls AddressSpaceUnmapUserPage, which both clears the PTE and
-// frees the underlying frame (see kernel/mm/address_space.cpp:446).
+// Contract: every AddressSpaceMapUserPage call inside PeLoad (and
+// the helpers it delegates to) is followed by an
+// AddressSpaceProbePteRaw check — MapUserPage returns void and has
+// three silent refusal paths (frame budget, region grow OOM,
+// page-table walker OOM). If the probe shows the PTE absent, the
+// caller FreeFrames the orphaned frame and fails the load. Only on
+// a confirmed-present PTE does the caller Track(va). The destructor
+// walks the tracked VAs in reverse order and calls
+// AddressSpaceUnmapUserPage, which both clears the PTE and frees
+// the underlying frame (see kernel/mm/address_space.cpp:446).
 // PeLoad disarms the guard on success — the destructor then no-ops.
 //
 // The tracked-VA array is heap-backed and sized per-image by Init()
@@ -538,6 +543,18 @@ bool MapSection(const u8* file, const u8* sec, u64 image_base, u64 image_size, d
         if (!reusing)
         {
             AddressSpaceMapUserPage(as, page_va, frame, flags);
+            // MapUserPage returns void and has three silent refusal
+            // paths (frame budget exhausted, region-table grow OOM,
+            // page-table walker OOM). Probe the leaf PTE: absent =
+            // the map was refused = FreeFrame and fail the load.
+            if ((AddressSpaceProbePteRaw(as, page_va) & kPagePresent) == 0)
+            {
+                FreeFrame(frame);
+                KLOG_WARN_AV(::duetos::core::LogArea::Loader, "pe-loader",
+                             "MapUserPage refused (frame budget / OOM) — section page", page_va);
+                KBP_PROBE_V(::duetos::debug::ProbeId::kPeLoaderOom, page_va);
+                return false;
+            }
             guard.Track(page_va);
         }
         else
@@ -604,6 +621,14 @@ bool MapHeaders(const u8* file, u64 sizeof_headers, u64 image_base, duetos::mm::
         if (!reusing)
         {
             AddressSpaceMapUserPage(as, page_va, frame, kPagePresent | kPageUser | kPageNoExecute);
+            if ((AddressSpaceProbePteRaw(as, page_va) & kPagePresent) == 0)
+            {
+                FreeFrame(frame);
+                KLOG_WARN_AV(::duetos::core::LogArea::Loader, "pe-loader",
+                             "MapUserPage refused (frame budget / OOM) — header page", page_va);
+                KBP_PROBE_V(::duetos::debug::ProbeId::kPeLoaderOom, page_va);
+                return false;
+            }
             guard.Track(page_va);
         }
     }
@@ -956,6 +981,14 @@ TlsSetupResult SetupStaticTls(const u8* file, u64 file_len, const PeHeaders& h, 
         const u64 va = kV0TlsBlockVa + p * duetos::mm::kPageSize;
         duetos::mm::AddressSpaceMapUserPage(as, va, f,
                                             mm::kPagePresent | mm::kPageUser | mm::kPageWritable | mm::kPageNoExecute);
+        if ((duetos::mm::AddressSpaceProbePteRaw(as, va) & mm::kPagePresent) == 0)
+        {
+            mm::FreeFrame(f);
+            KLOG_WARN_AV(::duetos::core::LogArea::Loader, "pe-loader",
+                         "MapUserPage refused (frame budget / OOM) — TLS block page", va);
+            KBP_PROBE_V(::duetos::debug::ProbeId::kPeLoaderOom, va);
+            return res;
+        }
         guard.Track(va);
     }
     if (raw != 0)
@@ -996,6 +1029,14 @@ TlsSetupResult SetupStaticTls(const u8* file, u64 file_len, const PeHeaders& h, 
             d[b] = static_cast<u8>((kV0TlsBlockVa >> (b * 8)) & 0xFF);
         duetos::mm::AddressSpaceMapUserPage(as, kV0TlsArrayVa, f,
                                             mm::kPagePresent | mm::kPageUser | mm::kPageWritable | mm::kPageNoExecute);
+        if ((duetos::mm::AddressSpaceProbePteRaw(as, kV0TlsArrayVa) & mm::kPagePresent) == 0)
+        {
+            mm::FreeFrame(f);
+            KLOG_WARN_AV(::duetos::core::LogArea::Loader, "pe-loader",
+                         "MapUserPage refused (frame budget / OOM) — TLS array page", kV0TlsArrayVa);
+            KBP_PROBE_V(::duetos::debug::ProbeId::kPeLoaderOom, kV0TlsArrayVa);
+            return res;
+        }
         guard.Track(kV0TlsArrayVa);
     }
 
@@ -1101,6 +1142,14 @@ TlsSetupResult SetupStaticTls(const u8* file, u64 file_len, const PeHeaders& h, 
         emit(0xE0);
         // R-X (no writable, no NX) — W^X for generated code.
         duetos::mm::AddressSpaceMapUserPage(as, kV0TlsTrampVa, f, mm::kPagePresent | mm::kPageUser);
+        if ((duetos::mm::AddressSpaceProbePteRaw(as, kV0TlsTrampVa) & mm::kPagePresent) == 0)
+        {
+            mm::FreeFrame(f);
+            KLOG_WARN_AV(::duetos::core::LogArea::Loader, "pe-loader",
+                         "MapUserPage refused (frame budget / OOM) — TLS trampoline", kV0TlsTrampVa);
+            KBP_PROBE_V(::duetos::debug::ProbeId::kPeLoaderOom, kV0TlsTrampVa);
+            return res;
+        }
         guard.Track(kV0TlsTrampVa);
         res.entry_override_va = kV0TlsTrampVa;
         arch::SerialWrite("[pe-tls] callbacks=");
@@ -2944,6 +2993,14 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
         }
         const PhysAddr stack_frame = stack_frame_r.value();
         AddressSpaceMapUserPage(as, page_va, stack_frame, kPagePresent | kPageUser | kPageWritable | kPageNoExecute);
+        if ((AddressSpaceProbePteRaw(as, page_va) & kPagePresent) == 0)
+        {
+            FreeFrame(stack_frame);
+            KLOG_WARN_AV(::duetos::core::LogArea::Loader, "pe-loader",
+                         "MapUserPage refused (frame budget / OOM) — stack page", page_va);
+            KBP_PROBE_V(::duetos::debug::ProbeId::kPeLoaderOom, page_va);
+            return r;
+        }
         guard.Track(page_va);
     }
     SerialWrite("[pe-load] step4 stack reserve=");
@@ -3107,6 +3164,14 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
                 teb_direct[kTeb32OffPeb + b] = static_cast<u8>((teb_va32 >> (b * 8)) & 0xFF);
         }
         AddressSpaceMapUserPage(as, kV0TebVa, teb_frame, kPagePresent | kPageUser | kPageWritable | kPageNoExecute);
+        if ((AddressSpaceProbePteRaw(as, kV0TebVa) & kPagePresent) == 0)
+        {
+            FreeFrame(teb_frame);
+            KLOG_WARN_AV(::duetos::core::LogArea::Loader, "pe-loader",
+                         "MapUserPage refused (frame budget / OOM) — TEB page", kV0TebVa);
+            KBP_PROBE_V(::duetos::debug::ProbeId::kPeLoaderOom, kV0TebVa);
+            return r;
+        }
         guard.Track(kV0TebVa);
         teb_va = kV0TebVa;
         SerialWrite("[pe-load] step4b teb mapped va=");
@@ -3139,6 +3204,14 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
         win32::Win32ProcEnvPopulate(env_direct, program_name, h.image_base);
         AddressSpaceMapUserPage(as, win32::kProcEnvVa, env_frame,
                                 kPagePresent | kPageUser | kPageWritable | kPageNoExecute);
+        if ((AddressSpaceProbePteRaw(as, win32::kProcEnvVa) & kPagePresent) == 0)
+        {
+            FreeFrame(env_frame);
+            KLOG_WARN_AV(::duetos::core::LogArea::Loader, "pe-loader",
+                         "MapUserPage refused (frame budget / OOM) — proc-env page", win32::kProcEnvVa);
+            KBP_PROBE_V(::duetos::debug::ProbeId::kPeLoaderOom, win32::kProcEnvVa);
+            return r;
+        }
         guard.Track(win32::kProcEnvVa);
         SerialWrite("[pe-load] step4c proc-env mapped va=");
         SerialWriteHex(win32::kProcEnvVa);
@@ -3167,6 +3240,14 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
             kusd_direct[i] = 0;
         win32::Win32KuserSharedDataPopulate(kusd_direct);
         AddressSpaceMapUserPage(as, win32::kKuserSharedDataVa, kusd_frame, kPagePresent | kPageUser | kPageNoExecute);
+        if ((AddressSpaceProbePteRaw(as, win32::kKuserSharedDataVa) & kPagePresent) == 0)
+        {
+            FreeFrame(kusd_frame);
+            KLOG_WARN_AV(::duetos::core::LogArea::Loader, "pe-loader",
+                         "MapUserPage refused (frame budget / OOM) — KUSER_SHARED_DATA", win32::kKuserSharedDataVa);
+            KBP_PROBE_V(::duetos::debug::ProbeId::kPeLoaderOom, win32::kKuserSharedDataVa);
+            return r;
+        }
         guard.Track(win32::kKuserSharedDataVa);
         SerialWrite("[pe-load] step4d KUSER_SHARED_DATA mapped va=");
         SerialWriteHex(win32::kKuserSharedDataVa);
@@ -3206,9 +3287,27 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
         // frame at a time, matching the bitmap-per-frame shape of the
         // contiguous run (see kernel/mm/dma.h:99).
         AddressSpaceMapUserPage(as, win32::kWin32ThunksVa, stubs_frame, kPagePresent | kPageUser);
+        if ((AddressSpaceProbePteRaw(as, win32::kWin32ThunksVa) & kPagePresent) == 0)
+        {
+            FreeFrame(stubs_frame);
+            FreeFrame(stubs_frame + kPageSize);
+            KLOG_WARN_AV(::duetos::core::LogArea::Loader, "pe-loader",
+                         "MapUserPage refused (frame budget / OOM) — thunks page 0", win32::kWin32ThunksVa);
+            KBP_PROBE_V(::duetos::debug::ProbeId::kPeLoaderOom, win32::kWin32ThunksVa);
+            return r;
+        }
         guard.Track(win32::kWin32ThunksVa);
         AddressSpaceMapUserPage(as, win32::kWin32ThunksVa + kPageSize, stubs_frame + kPageSize,
                                 kPagePresent | kPageUser);
+        if ((AddressSpaceProbePteRaw(as, win32::kWin32ThunksVa + kPageSize) & kPagePresent) == 0)
+        {
+            FreeFrame(stubs_frame + kPageSize);
+            KLOG_WARN_AV(::duetos::core::LogArea::Loader, "pe-loader",
+                         "MapUserPage refused (frame budget / OOM) — thunks page 1",
+                         win32::kWin32ThunksVa + kPageSize);
+            KBP_PROBE_V(::duetos::debug::ProbeId::kPeLoaderOom, win32::kWin32ThunksVa + kPageSize);
+            return r;
+        }
         guard.Track(win32::kWin32ThunksVa + kPageSize);
 
         if (!ResolveImports(file, file_len, h, as, preloaded_dlls, preloaded_dll_count))
@@ -3249,6 +3348,14 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
         win32::Win32Thunks32Populate(thunks32_direct);
         // R-X — same W^X discipline as the 64-bit thunks page.
         AddressSpaceMapUserPage(as, win32::kWin32Thunks32Va, thunks32_frame, kPagePresent | kPageUser);
+        if ((AddressSpaceProbePteRaw(as, win32::kWin32Thunks32Va) & kPagePresent) == 0)
+        {
+            FreeFrame(thunks32_frame);
+            KLOG_WARN_AV(::duetos::core::LogArea::Loader, "pe-loader",
+                         "MapUserPage refused (frame budget / OOM) — pe32 thunks page", win32::kWin32Thunks32Va);
+            KBP_PROBE_V(::duetos::debug::ProbeId::kPeLoaderOom, win32::kWin32Thunks32Va);
+            return r;
+        }
         guard.Track(win32::kWin32Thunks32Va);
 
         if (!ResolveImports(file, file_len, h, as, preloaded_dlls, preloaded_dll_count))
