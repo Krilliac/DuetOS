@@ -35,7 +35,7 @@ struct SocketCtx
     bool closed;
 };
 
-constexpr u32 kReadsInClientHelloFrame = 3; // header, payload, MAC.
+constexpr u32 kReadsInClientHelloFrame = 3;          // header, payload, MAC.
 constexpr u64 kPostClientHelloRecvTimeoutTicks = 20; // 200 ms at the 100 Hz scheduler tick.
 
 bool SocketReadExact(void* opaque, u8* buf, u32 len)
