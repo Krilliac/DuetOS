@@ -73,10 +73,12 @@ typedef unsigned long long VkQueue;
 /* ---------------------------------------------------------------- *
  * SYS_VK_CALL syscall thunk (int 0x80)                             *
  *                                                                  *
- * Linux-like calling convention used across the DuetOS userland    *
- * DLLs: syscall number in `rax`, args in rdi/rsi/rdx/r10/r8.       *
- * Returns the kernel-set rax. SYS_VK_CALL is 211; the op-code in   *
- * rdi selects which Vulkan entry the kernel forwards to.           *
+ * Syscall number in `rax` (211), op-code in `rdi`. Per-op args     *
+ * ride in rdx / r10 / r8 / r9 — these are what DoVkCall reads     *
+ * from the trap frame. rsi is in the trampoline register list but  *
+ * is NOT read by the kernel; every call site MUST pass 0 as the    *
+ * first payload arg (a1) to fill the rsi slot, placing the real    *
+ * arguments starting from a2 (rdx) onward.                        *
  * ---------------------------------------------------------------- */
 
 #define DV_NO_BUILTIN __attribute__((no_builtin("memset", "memcpy", "memcmp", "memmove")))
@@ -211,7 +213,7 @@ typedef unsigned long long VkDescriptorSet;
  * (variant << 29 | major << 22 | minor << 12 | patch). */
 VkResult vkEnumerateInstanceVersion(UINT32* pApiVersion)
 {
-    const long long ok = vk_syscall1(VkOp_GetInstanceVersion, (long long)(SIZE_T)pApiVersion);
+    const long long ok = vk_syscall2(VkOp_GetInstanceVersion, 0, (long long)(SIZE_T)pApiVersion);
     return (ok == 1) ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
 }
 
@@ -272,8 +274,8 @@ VkResult vkEnumeratePhysicalDevices(VkInstance instance, UINT32* pPhysicalDevice
 {
     if (pPhysicalDeviceCount == NULL)
         return VK_ERROR_INITIALIZATION_FAILED;
-    const long long ok = vk_syscall4(VkOp_EnumeratePhysicalDevices, (long long)instance,
-                                     (long long)(SIZE_T)pPhysicalDeviceCount, (long long)(SIZE_T)pPhysicalDevices, 0);
+    const long long ok = vk_syscall4(VkOp_EnumeratePhysicalDevices, 0, (long long)instance,
+                                     (long long)(SIZE_T)pPhysicalDeviceCount, (long long)(SIZE_T)pPhysicalDevices);
     return (ok == 1) ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
 }
 
@@ -284,7 +286,7 @@ VkResult vkCreateDevice(VkPhysicalDevice physicalDevice, const void* pCreateInfo
     (void)pAllocator;
     if (pDevice == NULL)
         return VK_ERROR_INITIALIZATION_FAILED;
-    const long long ok = vk_syscall3(VkOp_CreateDevice, (long long)physicalDevice, (long long)(SIZE_T)pDevice, 0);
+    const long long ok = vk_syscall3(VkOp_CreateDevice, 0, (long long)physicalDevice, (long long)(SIZE_T)pDevice);
     return (ok == 1) ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
 }
 
@@ -300,18 +302,18 @@ void vkGetDeviceQueue(VkDevice device, UINT32 queueFamilyIndex, UINT32 queueInde
     (void)queueIndex;
     if (pQueue == NULL)
         return;
-    (void)vk_syscall3(VkOp_GetDeviceQueue, (long long)device, (long long)(SIZE_T)pQueue, 0);
+    (void)vk_syscall3(VkOp_GetDeviceQueue, 0, (long long)device, (long long)(SIZE_T)pQueue);
 }
 
 VkResult vkDeviceWaitIdle(VkDevice device)
 {
-    const long long ok = vk_syscall1(VkOp_DeviceWaitIdle, (long long)device);
+    const long long ok = vk_syscall2(VkOp_DeviceWaitIdle, 0, (long long)device);
     return (ok == 1) ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
 }
 
 VkResult vkQueueWaitIdle(VkQueue queue)
 {
-    const long long ok = vk_syscall1(VkOp_QueueWaitIdle, (long long)queue);
+    const long long ok = vk_syscall2(VkOp_QueueWaitIdle, 0, (long long)queue);
     return (ok == 1) ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
 }
 
@@ -518,7 +520,7 @@ PFN_vkVoidFunction vkGetDeviceProcAddr(VkDevice device, const char* pName)
  * a userland smoke test to verify the syscall path is alive. */
 UINT64 DuetOS_Vk_GetStatsCounter(UINT32 counter_id)
 {
-    return (UINT64)vk_syscall1(VkOp_GetStatsCounter, (long long)counter_id);
+    return (UINT64)vk_syscall2(VkOp_GetStatsCounter, 0, (long long)counter_id);
 }
 
 /* DuetOS-only proof-of-concept thunk: clear the framebuffer to
@@ -529,7 +531,7 @@ UINT64 DuetOS_Vk_GetStatsCounter(UINT32 counter_id)
  * Returns 1 on success, 0 if the framebuffer is unavailable. */
 INT DuetOS_Vk_ClearFramebufferRgba(DWORD argb)
 {
-    return (INT)vk_syscall1(VkOp_ClearFramebufferRgba, (long long)argb);
+    return (INT)vk_syscall2(VkOp_ClearFramebufferRgba, 0, (long long)argb);
 }
 
 /* DuetOS-only WSI v0 thunks. The full vkCreateSwapchainKHR /
@@ -592,7 +594,7 @@ VkResult vkCreateShaderModule(VkDevice device, const void* pCreateInfo, const vo
     const SIZE_T code_size = *(const SIZE_T*)(ci + 24);
     const void* code = *(const void* const*)(ci + 32);
     const long long h =
-        vk_syscall4(VkOp_CreateShaderModule, (long long)device, (long long)(SIZE_T)code, (long long)code_size, 0);
+        vk_syscall4(VkOp_CreateShaderModule, 0, (long long)device, (long long)(SIZE_T)code, (long long)code_size);
     if (h == 0)
         return VK_ERROR_INITIALIZATION_FAILED;
     *pShaderModule = (VkShaderModule)h;
@@ -615,7 +617,7 @@ VkResult vkAllocateMemory(VkDevice device, const void* pAllocateInfo, const void
         return VK_ERROR_INITIALIZATION_FAILED;
     const BYTE* ai = (const BYTE*)pAllocateInfo;
     const UINT64 size = *(const UINT64*)(ai + 16);
-    const long long h = vk_syscall3(VkOp_AllocateMemory, (long long)device, (long long)size, 0);
+    const long long h = vk_syscall3(VkOp_AllocateMemory, 0, (long long)device, (long long)size);
     if (h == 0)
         return VK_ERROR_OUT_OF_HOST_MEMORY;
     *pMemory = (VkDeviceMemory)h;
@@ -636,7 +638,7 @@ VkResult vkCreateBuffer(VkDevice device, const void* pCreateInfo, const void* pA
         return VK_ERROR_INITIALIZATION_FAILED;
     const BYTE* ci = (const BYTE*)pCreateInfo;
     const UINT64 size = *(const UINT64*)(ci + 24);
-    const long long h = vk_syscall3(VkOp_CreateBuffer, (long long)device, (long long)size, 0);
+    const long long h = vk_syscall3(VkOp_CreateBuffer, 0, (long long)device, (long long)size);
     if (h == 0)
         return VK_ERROR_INITIALIZATION_FAILED;
     *pBuffer = (VkBuffer)h;
@@ -718,7 +720,7 @@ VkResult vkCreateCommandPool(VkDevice device, const void* pCreateInfo, const voi
     (void)pAllocator;
     if (pPool == NULL)
         return VK_ERROR_INITIALIZATION_FAILED;
-    const long long h = vk_syscall1(VkOp_CreateCommandPool, (long long)device);
+    const long long h = vk_syscall2(VkOp_CreateCommandPool, 0, (long long)device);
     if (h == 0)
         return VK_ERROR_INITIALIZATION_FAILED;
     *pPool = (VkCommandPool)h;
@@ -755,13 +757,13 @@ VkResult vkAllocateCommandBuffers(VkDevice device, const void* pAllocateInfo, Vk
 VkResult vkBeginCommandBuffer(VkCommandBuffer cb, const void* pBeginInfo)
 {
     (void)pBeginInfo;
-    const long long ok = vk_syscall1(VkOp_BeginCommandBuffer, (long long)cb);
+    const long long ok = vk_syscall2(VkOp_BeginCommandBuffer, 0, (long long)cb);
     return (ok == 1) ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
 }
 
 VkResult vkEndCommandBuffer(VkCommandBuffer cb)
 {
-    const long long ok = vk_syscall1(VkOp_EndCommandBuffer, (long long)cb);
+    const long long ok = vk_syscall2(VkOp_EndCommandBuffer, 0, (long long)cb);
     return (ok == 1) ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
 }
 
@@ -792,7 +794,7 @@ void vkCmdClearColorImage(VkCommandBuffer cb, VkImage image, DWORD /*VkImageLayo
         const int sh = (i == 0) ? 16 : (i == 1) ? 8 : (i == 2) ? 0 : 24;
         argb |= (q << sh);
     }
-    (void)vk_syscall4(VkOp_CmdClearColorImage, (long long)cb, (long long)image, (long long)argb, 0);
+    (void)vk_syscall4(VkOp_CmdClearColorImage, 0, (long long)cb, (long long)image, (long long)argb);
 }
 
 VkResult vkQueueSubmit(VkQueue queue, UINT32 submitCount, const void* pSubmits, UINT64 fence)
@@ -827,7 +829,7 @@ VkResult vkCreatePipelineLayout(VkDevice device, const void* pCreateInfo, const 
     (void)pAllocator;
     if (pPipelineLayout == NULL)
         return VK_ERROR_INITIALIZATION_FAILED;
-    const long long h = vk_syscall1(VkOp_CreatePipelineLayout, (long long)device);
+    const long long h = vk_syscall2(VkOp_CreatePipelineLayout, 0, (long long)device);
     if (h == 0)
         return VK_ERROR_INITIALIZATION_FAILED;
     *pPipelineLayout = (VkPipelineLayout)h;
@@ -846,7 +848,7 @@ VkResult vkCreateRenderPass(VkDevice device, const void* pCreateInfo, const void
     (void)pAllocator;
     if (pRenderPass == NULL)
         return VK_ERROR_INITIALIZATION_FAILED;
-    const long long h = vk_syscall1(VkOp_CreateRenderPass, (long long)device);
+    const long long h = vk_syscall2(VkOp_CreateRenderPass, 0, (long long)device);
     if (h == 0)
         return VK_ERROR_INITIALIZATION_FAILED;
     *pRenderPass = (VkRenderPass)h;
@@ -916,7 +918,7 @@ VkResult vkCreateComputePipelines(VkDevice device, UINT64 pipelineCache, UINT32 
     const BYTE* ci = (const BYTE*)pCreateInfos;
     const VkShaderModule cs = *(const VkShaderModule*)(ci + 40);
     const VkPipelineLayout layout = *(const VkPipelineLayout*)(ci + 96);
-    const long long h = vk_syscall4(VkOp_CreateComputePipeline, (long long)device, (long long)layout, (long long)cs, 0);
+    const long long h = vk_syscall4(VkOp_CreateComputePipeline, 0, (long long)device, (long long)layout, (long long)cs);
     if (h == 0)
         return VK_ERROR_INITIALIZATION_FAILED;
     pPipelines[0] = (VkPipeline)h;
@@ -1011,7 +1013,7 @@ VkResult vkCreateDescriptorSetLayout(VkDevice device, const void* pCreateInfo, c
     (void)pAllocator;
     if (pSetLayout == NULL)
         return VK_ERROR_INITIALIZATION_FAILED;
-    const long long h = vk_syscall1(VkOp_CreateDescriptorSetLayout, (long long)device);
+    const long long h = vk_syscall2(VkOp_CreateDescriptorSetLayout, 0, (long long)device);
     if (h == 0)
         return VK_ERROR_INITIALIZATION_FAILED;
     *pSetLayout = (VkDescriptorSetLayout)h;
@@ -1060,7 +1062,7 @@ VkResult vkAllocateDescriptorSets(VkDevice device, const void* pAllocateInfo, Vk
     if (layouts == NULL)
         return VK_ERROR_INITIALIZATION_FAILED;
     const long long h =
-        vk_syscall4(VkOp_AllocateDescriptorSet, (long long)device, (long long)pool, (long long)layouts[0], 0);
+        vk_syscall4(VkOp_AllocateDescriptorSet, 0, (long long)device, (long long)pool, (long long)layouts[0]);
     if (h == 0)
         return VK_ERROR_INITIALIZATION_FAILED;
     pDescriptorSets[0] = (VkDescriptorSet)h;

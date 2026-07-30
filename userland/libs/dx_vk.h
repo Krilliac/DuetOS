@@ -17,10 +17,10 @@
  * Register convention (matches kernel/syscall/syscall_vk.cpp —
  * the authority): rax = 211, rdi = VkOp, and the per-op arguments
  * ride in rdx / r10 / r8 / r9. rsi is NOT read by any kernel
- * handler, so every call below passes 0 as the first payload arg.
- * (Several vulkan_1.c call sites put their first argument in rsi
- * instead — those entries are latently misaligned with the
- * kernel; do not copy their argument placement.)
+ * handler, so every call below passes 0 as the first payload arg
+ * (the vk_syscallN trampolines still include rsi in their
+ * register list, but the kernel ignores it). vulkan_1.c follows
+ * the same convention.
  *
  * What the back end owns (one per process in v0):
  *   - instance → physical device → device → queue,

@@ -2234,24 +2234,24 @@ enum SyscallNumber : u64
 enum VkOp : u64
 {
     // Lifecycle
-    kVkOpCreateInstance = 0,  // rsi = VkInstance* out_handle (kernel returns 0/non-zero)
-    kVkOpDestroyInstance = 1, // rsi = VkInstance handle
+    kVkOpCreateInstance = 0,  // rdx = VkInstance* out_handle (kernel returns 0/non-zero)
+    kVkOpDestroyInstance = 1, // rdx = VkInstance handle
     kVkOpEnumeratePhysicalDevices =
-        2,                   // rsi = instance, rdx = u32* count, r10 = VkPhysicalDevice* out (or 0 to query count)
-    kVkOpCreateDevice = 3,   // rsi = phys, rdx = VkDevice* out
-    kVkOpDestroyDevice = 4,  // rsi = device handle
-    kVkOpGetDeviceQueue = 5, // rsi = device, rdx = VkQueue* out
-    kVkOpDeviceWaitIdle = 6, // rsi = device
-    kVkOpQueueWaitIdle = 7,  // rsi = queue
+        2,                   // rdx = instance, r10 = u32* count, r8 = VkPhysicalDevice* out (or 0 to query count)
+    kVkOpCreateDevice = 3,   // rdx = phys, r10 = VkDevice* out
+    kVkOpDestroyDevice = 4,  // rdx = device handle
+    kVkOpGetDeviceQueue = 5, // rdx = device, r10 = VkQueue* out
+    kVkOpDeviceWaitIdle = 6, // rdx = device
+    kVkOpQueueWaitIdle = 7,  // rdx = queue
     // Properties
-    kVkOpGetInstanceVersion = 8, // rsi = u32* version_out; returns 0/non-zero
+    kVkOpGetInstanceVersion = 8, // rdx = u32* version_out; returns 0/non-zero
     // Diagnostic
-    kVkOpGetStatsCounter = 9, // rsi = counter id (see VkStatsCounter), returns the counter value
+    kVkOpGetStatsCounter = 9, // rdx = counter id (see VkStatsCounter), returns the counter value
     // End-to-end clear: routes a userland "clear the framebuffer"
     // call through the Vulkan ICD's FramebufferFillRect path. Lets
     // d3d11's ClearRenderTargetView (and any other v0 caller) drive
     // a Vulkan clear without building the full
-    // Instance->Device->CmdBuf->Submit ladder by hand. rsi = packed
+    // Instance->Device->CmdBuf->Submit ladder by hand. rdx = packed
     // 0xAARRGGBB color word.
     kVkOpClearFramebufferRgba = 10,
     // WSI ops — minimal "open a surface, present pixels" set so a
