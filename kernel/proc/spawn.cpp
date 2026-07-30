@@ -1309,7 +1309,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
                 SerialWrite(name);
                 SerialWrite("\"\n");
             }
-            AddressSpaceRelease(as);
+            ProcessRelease(proc);
             return 0;
         }
         // The DLLs were pre-loaded BEFORE PeLoad so

@@ -738,6 +738,15 @@ void ProcessRelease(Process* p)
         }
     }
 
+    // Release any Win32 process handles (OpenProcess results) this
+    // process still holds. Each in-use slot retains the target
+    // Process; without this loop an app that exits without calling
+    // CloseHandle on an OpenProcess result pins the target Process
+    // + AddressSpace forever. Idempotent — the sched reaper may
+    // have already called this, in which case every slot is cleared
+    // and the loop is a no-op.
+    ProcessDropOwnedProcessHandles(p);
+
     // Release any SysV SHM attachments still held. DoShmat takes a refcount
     // that only shmdt(2) dropped, so a process exiting while attached used to
     // strand the segment and its pool slot for the rest of the boot. Runs

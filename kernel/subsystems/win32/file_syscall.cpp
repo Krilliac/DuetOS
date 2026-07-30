@@ -2,6 +2,7 @@
 
 #include "subsystems/win32/custom.h"
 #include "subsystems/win32/dir_syscall.h"
+#include "subsystems/win32/job_syscall.h"
 #include "subsystems/win32/registry.h"
 #include "subsystems/win32/section.h"
 
@@ -359,6 +360,13 @@ void DoFileClose(arch::TrapFrame* frame)
             h.pool_index = 0;
             section::SectionRelease(pool_idx);
         }
+    }
+    else if (handle >= kJobHandleBase && handle < kJobHandleBase + kJobPoolCap)
+    {
+        // Job-object handles — route to SysJobClose which drops
+        // the job's refcount and, if it hits 0, releases every
+        // member Process's retain.
+        win32::SysJobClose(handle);
     }
     frame->rax = 0;
 }

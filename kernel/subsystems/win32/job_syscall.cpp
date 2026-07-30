@@ -52,9 +52,7 @@ namespace duetos::subsystems::win32
 namespace
 {
 
-constexpr u32 kJobPoolCap = 8;
 constexpr u32 kJobMaxProcs = 32;
-constexpr u64 kJobHandleBase = 0xC00ULL;
 
 struct JobMember
 {

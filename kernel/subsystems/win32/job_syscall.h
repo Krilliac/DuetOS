@@ -14,6 +14,10 @@
 namespace duetos::subsystems::win32
 {
 
+// Handle-band constants — shared with DoFileClose dispatch.
+constexpr u64 kJobHandleBase = 0xC00ULL;
+constexpr u32 kJobPoolCap = 8;
+
 // JobObject — process-grouping container.
 i64 SysJobCreate();
 i64 SysJobAssign(u64 job_handle, u64 process_handle);

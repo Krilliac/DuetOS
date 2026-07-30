@@ -1199,15 +1199,9 @@ Ranked, with the security one first:
    teardown - `ProcessRelease` walks the section pool (`process.cpp`
    ~758 / ~877). The sandbox-reachable pool-exhaustion path this
    described is closed.
-2. **Job-object handles cannot be closed by any shipped DLL.**
-   `NtClose`/`CloseHandle` always issue syscall 22, and `DoFileClose`'s
-   band chain has **no arm for `kJobHandleBase` (0xC00..0xC07)**.
-   `SysJobClose` (168) has exactly one caller in the tree — the raw
-   dispatcher — and nothing in `userland/` ever issues 168. So the
-   spec-correct `NtCreateJobObject` → `NtAssignProcessToJobObject` →
-   `NtClose` sequence leaks 100% of the time, and the `ProcessRetain`
-   done at assign pins the target `Process` + its `AddressSpace`
-   forever. Fix: one arm in `DoFileClose`.
+2. **(FIXED 2026-07-29)** `DoFileClose` now has a `kJobHandleBase`
+   arm that routes job-handle close to `SysJobClose`. Constants
+   exported from `job_syscall.h`.
 3. **Fixed 2026-07-27 — local thread handles (0x400 band) now have
    stable identity and lifecycle.** `DoFileClose` has the missing
    local-thread arm, and slot claim, identity/exit publication, wait
@@ -1237,30 +1231,26 @@ Ranked, with the security one first:
    that unwinds its subsystem-owned reservations. Add cancellable
    wait/async-syscall cleanup before treating forced termination as
    immediate or resource-complete.
-4. **`win32_proc_handles[]` is not walked at teardown**, so an app that
-   exits without `CloseHandle` on an `OpenProcess` result (normal —
-   real Windows auto-closes) pins the target `Process` + `AddressSpace`
-   for the life of the kernel. `kCapDebug`-gated. Foreign thread rows
-   now retain only immutable TIDs and need no teardown release. Fix:
-   one `win32_proc_handles[]` loop in `ProcessRelease`.
+4. **(FIXED 2026-07-29)** `ProcessRelease` now calls
+   `ProcessDropOwnedProcessHandles(p)` early in the teardown
+   sequence, releasing any retained process handles before the AS
+   goes away. Idempotent with the sched-reaper call.
 5. **Mutex ownership is not force-released when the owning task dies.**
    Only the explicit-`CloseHandle`-while-holding path drops it, so a
    worker killed while holding a mutex leaves `m->owner` a dead `Task*`
    and any sibling thread blocks forever, with no `WAIT_ABANDONED`.
    **Larger refactor** — needs per-task held-lock bookkeeping or a
    task-death hook; the handle table stores type-erased `KObject*`.
-6. **`SpawnPeFile` leaks a `Process` on one error path.**
-   `spawn.cpp:1419` calls `AddressSpaceRelease(as)` after
-   `ProcessCreate` has already taken ownership of `as`; it should be
-   `ProcessRelease(proc)`. One line, OOM-gated.
+6. **(FIXED 2026-07-29)** `SpawnPeFile` Win32HeapInit error path now
+   calls `ProcessRelease(proc)` instead of `AddressSpaceRelease(as)`,
+   matching the ownership transfer at `ProcessCreate`.
 
-Because 1-4 are the same drift, the durable fix is not four more
-hand-edits: give the bands one enumeration both sites share, or add a
-static check that every declared `kWin32*Base` / `kJobHandleBase`
-appears in both — the same "convert the whitelist into a property test"
-move that `tools/test/check-syscall-numbers.py` makes for syscall
-literals. Note `kWin32VmapBase` / `kWin32ExtraHeapArenaBase` are VA
-bases, not handle bands, and must be excluded.
+**(DONE 2026-07-29)** `tools/test/check-handle-bands.py` is the
+property-test companion to the hand-fixes above: it greps every
+declared `kWin32*Base` / `kJobHandleBase` constant and verifies each
+appears in both `DoFileClose` and `ProcessRelease` (or is in a
+documented exempt list). Currently 12/12 pass. Add future bands to
+this check.
 
 Not audited, out of that audit's fence and still open: whether
 `mm::CopyFromUser`/`CopyToUser` validate a 32-bit process's range with
