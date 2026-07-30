@@ -153,6 +153,7 @@
 #include "generated_atom_smoke_pe.h"
 #include "generated_stackgrow_smoke_pe.h"
 #include "generated_stackguard_smoke_pe.h"
+#include "generated_guard_smoke_pe.h"
 #include "generated_console_smoke_pe.h"
 #include "generated_critsec_smoke_pe.h"
 #include "generated_crt_smoke_pe.h"
@@ -2364,6 +2365,11 @@ constexpr PeCompatEntry kPeCompatBattery[] = {
     // kernel's "*** RING-3 STACK OVERFLOW ***" warn plus the
     // mm.user_stack_guard_hit probe.
     PE_COMPAT("ring3-stackguard-smoke", kBinStackguardSmokeBytes, Always, false),
+    // PAGE_GUARD exception delivery (T5-01). VirtualAlloc(PAGE_GUARD),
+    // writes to the page, VEH handler catches STATUS_GUARD_PAGE_VIOLATION
+    // (0x80000001), verifies the exception record, and confirms the
+    // guard is one-shot.
+    PE_COMPAT("ring3-guard-smoke", kBinGuardSmokeBytes, Always, true),
     PE_COMPAT("ring3-console-smoke", kBinConsoleSmokeBytes, BareMetal, true),
     PE_COMPAT("ring3-datetime-smoke", kBinDatetimeSmokeBytes, BareMetal, true),
     PE_COMPAT("ring3-locale-smoke", kBinLocaleSmokeBytes, BareMetal, true),

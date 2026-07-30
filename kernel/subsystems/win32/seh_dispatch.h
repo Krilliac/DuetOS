@@ -57,6 +57,21 @@ bool Win32DeliverException(arch::TrapFrame* frame, u32 ntstatus, bool is_pf, boo
 /// the actual reason in ExceptionInformation[0].
 constexpr u32 kStatusStackBufferOverrun = 0xC0000409;
 
+/// STATUS_GUARD_PAGE_VIOLATION — delivered when a ring-3 access
+/// hits a PAGE_GUARD page. The guard bit is cleared (one-shot),
+/// and the exception is dispatched as a first-chance continuable
+/// exception so the PE's SEH chain can observe it. If the handler
+/// returns EXCEPTION_CONTINUE_EXECUTION, the faulting instruction
+/// retries and succeeds (the guard was already cleared). If no
+/// handler is installed and delivery fails, the instruction also
+/// retries — guard-page violations are warning-severity (0x8*),
+/// not error-severity (0xC*).
+///
+/// ExceptionRecord shape: same as STATUS_ACCESS_VIOLATION —
+/// NumberParameters=2, ExceptionInformation[0] = access type
+/// (0=read, 1=write), ExceptionInformation[1] = faulting VA.
+constexpr u32 kStatusGuardPageViolation = 0x80000001u;
+
 /// STATUS_STACK_OVERFLOW — raised when a thread's access lands in
 /// the guard page below its stack reservation, i.e. the stack ran
 /// out rather than a pointer went wild. Delivering the right code

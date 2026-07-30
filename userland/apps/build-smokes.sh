@@ -189,6 +189,7 @@ declare -A APPS=(
     # boot cost of the row is negligible.
     [stackguard_smoke]="-lkernel32 -Xlinker --stack -Xlinker 131072,4096"
     [console4_smoke]="-lkernel32"
+    [guard_smoke]="-lkernel32 -lntdll"
 )
 
 for app in "${!APPS[@]}"; do

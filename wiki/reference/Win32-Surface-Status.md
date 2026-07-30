@@ -368,6 +368,13 @@ syscall routing shows up immediately.
   through the address space, gated to the user half and to already-
   mapped pages, and still refuse every `PAGE_EXECUTE_*` (W^X) and
   `PAGE_GUARD` outside a region.
+  <!-- 2026-07-29 -->
+  **`PAGE_GUARD` exception delivery (T5-01):** writing to a guard page
+  now delivers `STATUS_GUARD_PAGE_VIOLATION` (0x80000001) to the PE's
+  SEH/VEH chain before the instruction retries, matching Windows
+  behaviour. The guard is still one-shot (cleared on first access).
+  GAP: reads to a guard page do not trigger the exception (the v0
+  guard implementation strips writability, not accessibility).
   `HeapFree`, `HeapSize`, `HeapReAlloc`, `GetProcessHeap`,
   `GlobalAlloc`, `GlobalFree`, `GlobalLock`, `GlobalUnlock`,
   `LocalAlloc`, `LocalFree`

@@ -1890,7 +1890,8 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     // fault naming the page immediately below the committed edge,
     // from at or below the thread's own rsp, inside the
     // reservation and above the guard page, grows the stack.
-    // Everything else — including a guard-page hit — falls through
+    // A Win32 vmap PAGE_GUARD hit is intercepted first and delivers
+    // STATUS_GUARD_PAGE_VIOLATION. Everything else falls through
     // to the existing handling untouched.
     bool stack_guard_hit = false;
     if (frame->vector == 14 && from_user)
@@ -1898,6 +1899,20 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         const u64 cr2 = ReadCr2();
         if (::duetos::subsystems::win32::Win32VmapPageGuardClear(cr2))
         {
+            // T5-01: the guard bit is cleared and the base protection
+            // restored — the faulting instruction WILL succeed on
+            // retry. Before retrying, deliver STATUS_GUARD_PAGE_VIOLATION
+            // (0x80000001) to the PE's SEH chain so a __try/__except
+            // or Vectored Exception Handler can observe it. If delivery
+            // succeeds, iretq lands at KiUserExceptionDispatcher; the
+            // handler runs, and EXCEPTION_CONTINUE_EXECUTION retries the
+            // instruction (which now succeeds). If delivery fails (no
+            // ntdll, non-Win32 process), we just return — the instruction
+            // retries and succeeds anyway, matching the v0 silent-re-arm
+            // behaviour for non-SEH-aware binaries.
+            const bool pf_write = (frame->error_code & 0x2) != 0;
+            (void)::duetos::subsystems::win32::Win32DeliverException(
+                frame, ::duetos::subsystems::win32::kStatusGuardPageViolation, /*is_pf=*/true, pf_write, cr2);
             return;
         }
 

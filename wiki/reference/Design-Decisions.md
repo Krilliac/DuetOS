@@ -14089,3 +14089,34 @@ version is the failure mode this pins.
   exception applies to the retransmit; a single UDP datagram is not
   recovered. This is the same behaviour as any stateful firewall whose
   rule is added after the fact.
+
+---
+
+### DD#NNN — T5-01: STATUS_GUARD_PAGE_VIOLATION delivery via SEH (2026-07-29)
+
+- **Context:** `VirtualAlloc` with `PAGE_GUARD` already stored the
+  guard bits and the page-fault handler cleared them on access. But the
+  PE never saw the `STATUS_GUARD_PAGE_VIOLATION` exception (the guard
+  was silently re-armed). T6-02 (x64 SEH) is now complete, so the
+  delivery path exists.
+- **Decision:** deliver `STATUS_GUARD_PAGE_VIOLATION` (0x80000001) as a
+  first-chance continuable exception through the existing
+  `Win32DeliverException` path, BEFORE the faulting instruction retries.
+  The guard bit is cleared and base protection restored first (guard is
+  one-shot), then the exception is dispatched. If no handler is installed
+  or delivery fails (non-Win32 process, no ntdll), the instruction
+  retries anyway — 0x80000001 is warning-severity, not error-severity.
+- **ExceptionRecord shape:** identical to STATUS_ACCESS_VIOLATION:
+  `NumberParameters=2`, `ExceptionInformation[0]` = access type (0=read,
+  1=write), `ExceptionInformation[1]` = faulting VA.
+- **Rules out:** delivering the exception on a *separate* code path from
+  IsolateTask. The guard page recovery runs before the IsolateTask
+  policy because the guard page is NOT a fault — it's a protection
+  mechanism. The instruction will succeed on retry regardless of whether
+  SEH delivery works, so the delivery must not enter the task-kill
+  fallback.
+- **Known gap:** reads to a guard page do not trigger the exception.
+  The v0 implementation strips the writable bit from the PTE (so writes
+  fault) but leaves the page readable. Full Windows behaviour requires
+  marking the page not-present (so both reads and writes fault), which
+  is a separate change that touches the demand-commit path.

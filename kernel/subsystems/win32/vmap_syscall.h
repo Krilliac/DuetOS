@@ -36,13 +36,11 @@ void DoVirtualProtect(arch::TrapFrame* frame);
 /// IsolateTask policy fires: if `cr2` lies inside a Win32 vmap
 /// region's currently-guard-armed page, clear the guard bit,
 /// re-apply the underlying protection (PAGE_GUARD stripped), and
-/// return true so the faulting instruction is retried. Returns
-/// false on miss (cr2 not in a vmap region, page not guarded, or
-/// page not committed) so the caller proceeds with normal fault
-/// dispatch. Full STATUS_GUARD_PAGE_VIOLATION delivery is gated
-/// on T6-02 (x64 SEH); v0 silently re-arms — which still serves
-/// the common stack-grow probe pattern (the next write succeeds
-/// after the first fault).
+/// return true so the caller can deliver
+/// STATUS_GUARD_PAGE_VIOLATION (0x80000001) to the PE's SEH chain
+/// before the faulting instruction retries. Returns false on miss
+/// (cr2 not in a vmap region, page not guarded, or page not
+/// committed) so the caller proceeds with normal fault dispatch.
 bool Win32VmapPageGuardClear(::duetos::u64 cr2);
 
 } // namespace duetos::subsystems::win32
