@@ -348,9 +348,9 @@ void DesktopGadgetsPaint()
 
     sched::SchedStatsSampleSnapshot samples{};
     sched::SchedStatsSampleSnapshotRead(&samples);
-    const sched::SchedStatsSample* latest =
-        (samples.count != 0 && samples.samples[samples.count - 1U].valid) ? &samples.samples[samples.count - 1U]
-                                                                           : nullptr;
+    const sched::SchedStatsSample* latest = (samples.count != 0 && samples.samples[samples.count - 1U].valid)
+                                                ? &samples.samples[samples.count - 1U]
+                                                : nullptr;
     const u32 cpu_pct = (latest != nullptr) ? latest->cpu_busy_pct : 0U;
     const u32 live = (latest != nullptr) ? latest->tasks_live : 0U;
     const u32 sleeping = (latest != nullptr) ? latest->tasks_sleeping : 0U;
@@ -394,8 +394,9 @@ void DesktopGadgetsPaint()
     row_y += row_step;
     DrawMetricRow(px + kPadX, row_y, "ctx", ctx_val, theme, theme.taskbar_fg);
     ChromeTextDraw(ChromeTextRole::Caption, px + kPadX + 118U, kernel_y + 32U, fps_val, peer_accent, theme.taskbar_bg);
-    ChromeTextDraw(ChromeTextRole::Caption, px + kPadX + 118U + ChromeTextMeasure(ChromeTextRole::Caption, fps_val) +
-                                               ChromeTextMeasure(ChromeTextRole::Caption, " "),
+    ChromeTextDraw(ChromeTextRole::Caption,
+                   px + kPadX + 118U + ChromeTextMeasure(ChromeTextRole::Caption, fps_val) +
+                       ChromeTextMeasure(ChromeTextRole::Caption, " "),
                    kernel_y + 32U, "FPS", theme.taskbar_fg, theme.taskbar_bg);
 
     const u32 abi_y = kernel_y + kKernelH + kPanelGap;

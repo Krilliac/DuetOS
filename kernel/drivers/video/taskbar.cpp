@@ -315,8 +315,8 @@ u32 LatestCpuPct(const ::duetos::sched::SchedStatsSampleSnapshot& samples)
     return static_cast<u32>(pct);
 }
 
-void DrawCpuSparkline(u32 x, u32 y, u32 w, u32 h, const ::duetos::sched::SchedStatsSampleSnapshot& samples,
-                      u32 ink, u32 dim)
+void DrawCpuSparkline(u32 x, u32 y, u32 w, u32 h, const ::duetos::sched::SchedStatsSampleSnapshot& samples, u32 ink,
+                      u32 dim)
 {
     if (w == 0 || h == 0)
     {
