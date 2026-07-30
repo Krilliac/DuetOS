@@ -840,6 +840,7 @@ duetos_embed_smoke_pe(xml_smoke      kBinXmlSmokeBytes)
 duetos_embed_smoke_pe(reg3_smoke     kBinReg3SmokeBytes)
 duetos_embed_smoke_pe(proc3_smoke    kBinProc3SmokeBytes)
 duetos_embed_smoke_pe(com2_smoke     kBinCom2SmokeBytes)
+duetos_embed_smoke_pe(com3_smoke     kBinCom3SmokeBytes)
 duetos_embed_smoke_pe(advmem_smoke   kBinAdvmemSmokeBytes)
 duetos_embed_smoke_pe(wstr2_smoke    kBinWstr2SmokeBytes)
 duetos_embed_smoke_pe(fs3_smoke      kBinFs3SmokeBytes)
@@ -1257,6 +1258,11 @@ duetos_stub_dll(d3dcompiler 0x102E0000 "D3DCompile,D3DCompile2,D3DCreateBlob,D3D
 # instance/device, GetDeviceQueue, *WaitIdle), enumeration, version
 # query, GetInstanceProcAddr / GetDeviceProcAddr string lookup,
 # DuetOS_Vk_GetStatsCounter diagnostic accessor.
+# comtest.dll — minimal COM in-proc server for testing the
+# DLL-backed CoCreateInstance path. Exports DllGetClassObject +
+# DllCanUnloadNow for CLSID_ComTest.
+duetos_stub_dll(comtest 0x10300000 "DllGetClassObject,DllCanUnloadNow")
+
 duetos_stub_dll(vulkan_1 0x102F0000 "vkCreateInstance,vkDestroyInstance,vkEnumeratePhysicalDevices,vkCreateDevice,vkDestroyDevice,vkGetDeviceQueue,vkDeviceWaitIdle,vkQueueWaitIdle,vkEnumerateInstanceVersion,vkEnumerateInstanceExtensionProperties,vkEnumerateInstanceLayerProperties,vkGetInstanceProcAddr,vkGetDeviceProcAddr,DuetOS_Vk_GetStatsCounter,DuetOS_Vk_ClearFramebufferRgba,DuetOS_Vk_CreateSurface,DuetOS_Vk_DestroySurface,DuetOS_Vk_Present,vkCreateShaderModule,vkDestroyShaderModule,vkAllocateMemory,vkFreeMemory,vkCreateBuffer,vkDestroyBuffer,vkBindBufferMemory,vkMapMemory,vkUnmapMemory,vkCreateImage,vkDestroyImage,vkBindImageMemory,vkCreateCommandPool,vkDestroyCommandPool,vkAllocateCommandBuffers,vkBeginCommandBuffer,vkEndCommandBuffer,vkCmdClearColorImage,vkQueueSubmit,vkCreatePipelineLayout,vkDestroyPipelineLayout,vkCreateRenderPass,vkDestroyRenderPass,vkCreateGraphicsPipelines,vkCreateComputePipelines,vkDestroyPipeline,vkCmdBindPipeline,vkCmdDraw,vkCmdDispatch,vkCmdBindVertexBuffers,vkCmdBindIndexBuffer,vkUpdateDescriptorSets,vkCreateDescriptorSetLayout,vkDestroyDescriptorSetLayout,vkCreateDescriptorPool,vkDestroyDescriptorPool,vkAllocateDescriptorSets,vkCmdBindDescriptorSets" "vulkan-1")
 
 

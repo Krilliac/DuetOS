@@ -157,6 +157,7 @@ declare -A APPS=(
     [reg3_smoke]="-lkernel32 -ladvapi32"
     [proc3_smoke]="-lkernel32"
     [com2_smoke]="-lkernel32 -lole32 -lmsvcrt"
+    [com3_smoke]="-lkernel32 -lole32"
     [advmem_smoke]="-lkernel32"
     [wstr2_smoke]="-lkernel32 -lmsvcrt"
     [fs3_smoke]="-lkernel32 -lshlwapi"

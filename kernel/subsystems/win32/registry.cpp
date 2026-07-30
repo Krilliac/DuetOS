@@ -76,6 +76,21 @@ constexpr RegValue kHkcuVolatileEnvValues[] = {
     {"USERDOMAIN", kRegSz, 7, "DUETOS\0", 0},
 };
 
+// HKCR COM CLSID InProcServer32 entries. Each terminal key
+// carries a default ("") REG_SZ value naming the DLL that
+// exports DllGetClassObject for this CLSID. ole32.c's v0 uses
+// its own static table, but registry-aware code (and future
+// registry-backed resolution) reads these.
+constexpr RegValue kHkcrComTestInProcValues[] = {
+    {"", kRegSz, 12, "comtest.dll\0", 0},
+};
+constexpr RegValue kHkcrShellLinkInProcValues[] = {
+    {"", kRegSz, 11, "shell32.dll\0", 0},
+};
+constexpr RegValue kHkcrMMDevEnumInProcValues[] = {
+    {"", kRegSz, 12, "mmdevapi.dll\0", 0},
+};
+
 // Static tree. Two tiers:
 //
 //   - Terminal keys carry `values` + `value_count` and back the
@@ -112,6 +127,21 @@ constexpr RegKey kRegKeys[] = {
     {kHkeyCurrentUser, "Software\\Microsoft", nullptr, 0},
     {kHkeyCurrentUser, "Software\\Microsoft\\Windows", nullptr, 0},
     {kHkeyCurrentUser, "Software\\Microsoft\\Windows\\CurrentVersion", nullptr, 0},
+    // HKCR COM CLSID entries — InProcServer32 terminal keys plus
+    // their prefix chain. Mirror constraint: advapi32.c tracks
+    // these as well.
+    {kHkeyClassesRoot, "CLSID", nullptr, 0},
+    {kHkeyClassesRoot, "CLSID\\{1234abcd-0001-0001-0001-000000000001}", nullptr, 0},
+    {kHkeyClassesRoot, "CLSID\\{1234abcd-0001-0001-0001-000000000001}\\InProcServer32",
+     kHkcrComTestInProcValues, static_cast<u32>(sizeof(kHkcrComTestInProcValues) / sizeof(kHkcrComTestInProcValues[0]))},
+    {kHkeyClassesRoot, "CLSID\\{00021401-0000-0000-c000-000000000046}", nullptr, 0},
+    {kHkeyClassesRoot, "CLSID\\{00021401-0000-0000-c000-000000000046}\\InProcServer32",
+     kHkcrShellLinkInProcValues,
+     static_cast<u32>(sizeof(kHkcrShellLinkInProcValues) / sizeof(kHkcrShellLinkInProcValues[0]))},
+    {kHkeyClassesRoot, "CLSID\\{bcde0395-e52f-467c-8e3d-c4579291692e}", nullptr, 0},
+    {kHkeyClassesRoot, "CLSID\\{bcde0395-e52f-467c-8e3d-c4579291692e}\\InProcServer32",
+     kHkcrMMDevEnumInProcValues,
+     static_cast<u32>(sizeof(kHkcrMMDevEnumInProcValues) / sizeof(kHkcrMMDevEnumInProcValues[0]))},
 };
 
 constexpr u64 kRegKeyCount = sizeof(kRegKeys) / sizeof(kRegKeys[0]);
@@ -1310,8 +1340,20 @@ void RegistrySelfTest()
     if (md != 13 /* "19041.duetos\\0" / "Professional\\0" */)
         fail("MaxValueLens data should be 13 for HKLM CurrentVersion");
 
-    arch::SerialWrite("[registry-selftest] PASS (4 terminal + 8 prefix keys, ci-lookup, concat-path, child walker, "
-                      "max-lens)\n");
+    // HKCR COM CLSID entries — InProcServer32 terminals resolve and
+    // carry the expected DLL-name default value.
+    const RegKey* hkcr_clsid = LookupKey(kHkeyClassesRoot, "CLSID");
+    if (hkcr_clsid == nullptr)
+        fail("HKCR\\CLSID prefix entry missing");
+    const RegKey* comtest_ips =
+        LookupKey(kHkeyClassesRoot, "CLSID\\{1234abcd-0001-0001-0001-000000000001}\\InProcServer32");
+    if (comtest_ips == nullptr || comtest_ips->value_count != 1)
+        fail("HKCR ComTest InProcServer32 missing or empty");
+    if (comtest_ips->values[0].type != kRegSz)
+        fail("HKCR ComTest InProcServer32 default value not REG_SZ");
+
+    arch::SerialWrite("[registry-selftest] PASS (4 terminal + 8 prefix + 8 HKCR keys, ci-lookup, concat-path, "
+                      "child walker, max-lens)\n");
 }
 
 namespace detail

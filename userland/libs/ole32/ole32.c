@@ -700,6 +700,103 @@ static void* find_registered_factory(const struct Guid* clsid, DWORD context)
     return (void*)0;
 }
 
+/*
+ * ---- CLSID-to-DLL resolution: static table + LoadLibrary path ----
+ *
+ * When a CLSID isn't found in builtin or registered factories,
+ * look it up in the static CLSID-to-DLL table below. If found,
+ * LoadLibrary the DLL via SYS_DLL_LOAD_FROM_PATH (205), resolve
+ * its DllGetClassObject export via SYS_DLL_PROC_ADDRESS (57),
+ * and call it. This is the real COM in-proc server activation
+ * path that Windows uses for HKCR\CLSID\{...}\InProcServer32.
+ */
+
+static unsigned long long sys_load_library(const char* name)
+{
+    unsigned long long len = 0;
+    while (name[len] != '\0')
+        ++len;
+    unsigned long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)205), "D"((long long)name), "S"((long long)len) : "memory");
+    return rv;
+}
+
+static unsigned long long sys_get_proc_address(unsigned long long base, const char* name)
+{
+    unsigned long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)57), "D"((long long)base), "S"((long long)name) : "memory");
+    return rv;
+}
+
+typedef struct ClsidDllEntry
+{
+    struct Guid clsid;
+    const char* dll_name;
+} ClsidDllEntry;
+
+/* CLSID_ComTest — {1234ABCD-0001-0001-0001-000000000001}. Test
+ * coclass served by comtest.dll for end-to-end COM smoke. */
+static const struct Guid kCLSID_ComTest = {
+    0x1234ABCDu, 0x0001u, 0x0001u, {0x00u, 0x01u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x01u}};
+
+/* CLSID_MMDeviceEnumerator — {BCDE0395-E52F-467C-8E3D-C4579291692E}.
+ * Audio device enumeration; served by mmdevapi.dll on Windows. */
+static const struct Guid kCLSID_MMDeviceEnumerator = {
+    0xBCDE0395u, 0xE52Fu, 0x467Cu, {0x8Eu, 0x3Du, 0xC4u, 0x57u, 0x92u, 0x91u, 0x69u, 0x2Eu}};
+
+/* CLSID_ShellLink — {00021401-0000-0000-C000-000000000046}.
+ * Shell link objects; served by shell32.dll on Windows. */
+static const struct Guid kCLSID_ShellLink = {
+    0x00021401u, 0x0000u, 0x0000u, {0xC0u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x46u}};
+
+/* CLSID_TaskbarList — {56FDF344-FD6D-11D0-958A-006097C9A090}.
+ * Taskbar list; served by shell32.dll on Windows. */
+static const struct Guid kCLSID_TaskbarList = {
+    0x56FDF344u, 0xFD6Du, 0x11D0u, {0x95u, 0x8Au, 0x00u, 0x60u, 0x97u, 0xC9u, 0xA0u, 0x90u}};
+
+static const ClsidDllEntry g_clsid_dll_table[] = {
+    {/* ComTest */ {0x1234ABCDu, 0x0001u, 0x0001u, {0x00u, 0x01u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x01u}},
+     "comtest.dll"},
+    {/* MMDeviceEnumerator */
+     {0xBCDE0395u, 0xE52Fu, 0x467Cu, {0x8Eu, 0x3Du, 0xC4u, 0x57u, 0x92u, 0x91u, 0x69u, 0x2Eu}},
+     "mmdevapi.dll"},
+    {/* ShellLink */
+     {0x00021401u, 0x0000u, 0x0000u, {0xC0u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x46u}},
+     "shell32.dll"},
+    {/* TaskbarList */
+     {0x56FDF344u, 0xFD6Du, 0x11D0u, {0x95u, 0x8Au, 0x00u, 0x60u, 0x97u, 0xC9u, 0xA0u, 0x90u}},
+     "shell32.dll"},
+};
+
+#define CLSID_DLL_TABLE_COUNT (int)(sizeof(g_clsid_dll_table) / sizeof(g_clsid_dll_table[0]))
+
+typedef HRESULT (*DllGetClassObjectFn)(const struct Guid*, const struct Guid*, void**);
+
+/* Try loading a DLL's DllGetClassObject export for a CLSID. Returns
+ * S_OK on success (ppv filled), or a failure HRESULT. */
+static HRESULT find_dll_factory(const struct Guid* clsid, const struct Guid* riid, void** ppv)
+{
+    const char* dll_name = (const char*)0;
+    for (int i = 0; i < CLSID_DLL_TABLE_COUNT; ++i)
+    {
+        if (guid_equal(clsid, &g_clsid_dll_table[i].clsid))
+        {
+            dll_name = g_clsid_dll_table[i].dll_name;
+            break;
+        }
+    }
+    if (!dll_name)
+        return REGDB_E_CLASSNOTREG;
+    unsigned long long base = sys_load_library(dll_name);
+    if (base == 0)
+        return REGDB_E_CLASSNOTREG;
+    unsigned long long proc = sys_get_proc_address(base, "DllGetClassObject");
+    if (proc == 0)
+        return REGDB_E_CLASSNOTREG;
+    DllGetClassObjectFn fn = (DllGetClassObjectFn)proc;
+    return fn(clsid, riid, ppv);
+}
+
 __declspec(dllexport) HRESULT CoGetClassObject(const void* rclsid, DWORD dwClsCtx, void* pvReserved, const void* riid,
                                                void** ppv)
 {
@@ -709,13 +806,20 @@ __declspec(dllexport) HRESULT CoGetClassObject(const void* rclsid, DWORD dwClsCt
     *ppv = (void*)0;
     if (!rclsid || !riid)
         return E_INVALIDARG;
+    /* 1. Process-local registered factories (CoRegisterClassObject). */
     void* factory = find_registered_factory((const struct Guid*)rclsid, dwClsCtx ? dwClsCtx : CLSCTX_INPROC_SERVER);
     if (!factory)
+    {
+        /* 2. Built-in static factories (FileOpenDialog, etc). */
         factory = find_builtin_factory((const struct Guid*)rclsid);
-    if (!factory)
-        return REGDB_E_CLASSNOTREG;
-    IClassFactoryLike* cf = (IClassFactoryLike*)factory;
-    return cf->lpVtbl->QueryInterface(cf, (const struct Guid*)riid, ppv);
+    }
+    if (factory)
+    {
+        IClassFactoryLike* cf = (IClassFactoryLike*)factory;
+        return cf->lpVtbl->QueryInterface(cf, (const struct Guid*)riid, ppv);
+    }
+    /* 3. CLSID-to-DLL table: LoadLibrary + DllGetClassObject. */
+    return find_dll_factory((const struct Guid*)rclsid, (const struct Guid*)riid, ppv);
 }
 
 __declspec(dllexport) HRESULT CoCreateInstance(const void* rclsid, void* pUnkOuter, DWORD dwClsCtx, const void* riid,
@@ -952,17 +1056,107 @@ __declspec(dllexport) void* CoTaskMemRealloc(void* pv, SIZE_T cb)
     return (void*)rv;
 }
 
-/* CoGetMalloc — return a sentinel "IMalloc" pointer that callers
- * occasionally compare against null. v0 has no real IMalloc COM
- * object, so the alias is safe-but-non-callable; the caller must
- * call CoTaskMemAlloc directly anyway in any path that survives
- * v0. */
+/*
+ * CoGetMalloc — return a real IMalloc COM object backed by the
+ * CoTaskMem* family. Process-global singleton: the one instance
+ * is never freed (matches Windows behaviour).
+ */
+
+typedef struct IMallocObj
+{
+    const void* lpVtbl;
+    ULONG refs;
+} IMallocObj;
+
+static const struct Guid kIID_IMalloc = {
+    0x00000002u, 0x0000u, 0x0000u, {0xC0u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x46u}};
+
+static HRESULT __stdcall imalloc_qi(IMallocObj* self, const struct Guid* riid, void** ppv)
+{
+    if (!ppv)
+        return E_POINTER;
+    *ppv = (void*)0;
+    if (guid_equal(riid, &kIID_IUnknown) || guid_equal(riid, &kIID_IMalloc))
+    {
+        ++self->refs;
+        *ppv = self;
+        return S_OK;
+    }
+    return E_NOINTERFACE;
+}
+
+static ULONG __stdcall imalloc_addref(IMallocObj* self) { return ++self->refs; }
+
+static ULONG __stdcall imalloc_release(IMallocObj* self)
+{
+    if (self->refs > 1)
+        --self->refs;
+    return self->refs; /* singleton: never goes to 0 */
+}
+
+static void* __stdcall imalloc_alloc(IMallocObj* self, SIZE_T cb)
+{
+    (void)self;
+    return CoTaskMemAlloc(cb);
+}
+
+static void* __stdcall imalloc_realloc(IMallocObj* self, void* pv, SIZE_T cb)
+{
+    (void)self;
+    return CoTaskMemRealloc(pv, cb);
+}
+
+static void __stdcall imalloc_free(IMallocObj* self, void* pv)
+{
+    (void)self;
+    CoTaskMemFree(pv);
+}
+
+static SIZE_T __stdcall imalloc_get_size(IMallocObj* self, void* pv)
+{
+    (void)self;
+    (void)pv;
+    return (SIZE_T)-1; /* GAP: no heap-query syscall yet — return -1 (unknown) */
+}
+
+static int __stdcall imalloc_did_alloc(IMallocObj* self, void* pv)
+{
+    (void)self;
+    (void)pv;
+    return -1; /* -1 = unknown (documented IMalloc return) */
+}
+
+static void __stdcall imalloc_heap_minimize(IMallocObj* self)
+{
+    (void)self;
+}
+
+typedef struct
+{
+    HRESULT(__stdcall* QueryInterface)(IMallocObj*, const struct Guid*, void**);
+    ULONG(__stdcall* AddRef)(IMallocObj*);
+    ULONG(__stdcall* Release)(IMallocObj*);
+    void*(__stdcall* Alloc)(IMallocObj*, SIZE_T);
+    void*(__stdcall* Realloc)(IMallocObj*, void*, SIZE_T);
+    void(__stdcall* Free)(IMallocObj*, void*);
+    SIZE_T(__stdcall* GetSize)(IMallocObj*, void*);
+    int(__stdcall* DidAlloc)(IMallocObj*, void*);
+    void(__stdcall* HeapMinimize)(IMallocObj*);
+} IMallocVtbl;
+
+static const IMallocVtbl g_imalloc_vtbl = {imalloc_qi,           imalloc_addref,  imalloc_release,
+                                           imalloc_alloc,        imalloc_realloc, imalloc_free,
+                                           imalloc_get_size,     imalloc_did_alloc, imalloc_heap_minimize};
+static IMallocObj g_imalloc = {&g_imalloc_vtbl, 1};
+
 __declspec(dllexport) HRESULT CoGetMalloc(DWORD context, void** ppMalloc)
 {
     (void)context;
-    if (ppMalloc)
-        *ppMalloc = (void*)0;
-    return E_NOTIMPL;
+    if (!ppMalloc)
+        return E_INVALIDARG;
+    ++g_imalloc.refs;
+    *ppMalloc = &g_imalloc;
+    return S_OK;
 }
 
 /* CoRegisterClassObject / CoRevokeClassObject — process-local

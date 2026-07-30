@@ -149,6 +149,18 @@ static const RegValue k_hkcu_volatile_env_values[] = {
     {"USERDOMAIN", REG_SZ, "DUETOS\0", 7, 0},
 };
 
+/* HKCR COM CLSID InProcServer32 entries — mirror of
+ * registry.cpp's kHkcr*InProcValues. */
+static const RegValue k_hkcr_comtest_inproc_values[] = {
+    {"", REG_SZ, "comtest.dll\0", 12, 0},
+};
+static const RegValue k_hkcr_shelllink_inproc_values[] = {
+    {"", REG_SZ, "shell32.dll\0", 11, 0},
+};
+static const RegValue k_hkcr_mmdevenum_inproc_values[] = {
+    {"", REG_SZ, "mmdevapi.dll\0", 12, 0},
+};
+
 /* Mirror of registry.cpp::kRegKeys[] — see the comment block
  * there for the tier rationale (terminal vs. prefix). Adding an
  * entry here means adding the matching entry in the kernel side
@@ -175,6 +187,20 @@ static const RegKey k_reg_keys[] = {
     {HKEY_CURRENT_USER, "Software\\Microsoft", (const RegValue*)0, 0},
     {HKEY_CURRENT_USER, "Software\\Microsoft\\Windows", (const RegValue*)0, 0},
     {HKEY_CURRENT_USER, "Software\\Microsoft\\Windows\\CurrentVersion", (const RegValue*)0, 0},
+    /* HKCR COM CLSID entries — mirror of registry.cpp. */
+    {HKEY_CLASSES_ROOT, "CLSID", (const RegValue*)0, 0},
+    {HKEY_CLASSES_ROOT, "CLSID\\{1234abcd-0001-0001-0001-000000000001}", (const RegValue*)0, 0},
+    {HKEY_CLASSES_ROOT, "CLSID\\{1234abcd-0001-0001-0001-000000000001}\\InProcServer32",
+     k_hkcr_comtest_inproc_values,
+     (DWORD)(sizeof(k_hkcr_comtest_inproc_values) / sizeof(k_hkcr_comtest_inproc_values[0]))},
+    {HKEY_CLASSES_ROOT, "CLSID\\{00021401-0000-0000-c000-000000000046}", (const RegValue*)0, 0},
+    {HKEY_CLASSES_ROOT, "CLSID\\{00021401-0000-0000-c000-000000000046}\\InProcServer32",
+     k_hkcr_shelllink_inproc_values,
+     (DWORD)(sizeof(k_hkcr_shelllink_inproc_values) / sizeof(k_hkcr_shelllink_inproc_values[0]))},
+    {HKEY_CLASSES_ROOT, "CLSID\\{bcde0395-e52f-467c-8e3d-c4579291692e}", (const RegValue*)0, 0},
+    {HKEY_CLASSES_ROOT, "CLSID\\{bcde0395-e52f-467c-8e3d-c4579291692e}\\InProcServer32",
+     k_hkcr_mmdevenum_inproc_values,
+     (DWORD)(sizeof(k_hkcr_mmdevenum_inproc_values) / sizeof(k_hkcr_mmdevenum_inproc_values[0]))},
 };
 
 #define REG_KEY_COUNT (sizeof(k_reg_keys) / sizeof(k_reg_keys[0]))
