@@ -1245,17 +1245,46 @@ void Push83(char* comp, u32 cap, u32* n, char c)
         comp[(*n)++] = u;
 }
 
-// Derive an 8.3 download filename into `out` (cap >= 13: 8+'.'+3+NUL).
+// Derive a download filename into `out`. Preserves long filenames —
+// the FAT32 layer handles LFN (VFAT) entry emission for names that
+// exceed 8.3 or contain lowercase. Characters illegal on FAT32
+// (control chars, \/:"*?<>|) are stripped; the result is capped at
+// `cap - 1` characters.
+//
 // Priority: (1) a `filename="..."` token in Content-Disposition;
 // (2) the URL path's basename if it carries an extension; (3) the
 // DLxxxx counter with an extension mapped from Content-Type.
-// GAP: 8.3 only — long names and non-ASCII are truncated/dropped, no
-// collision-suffixing beyond the DLxxxx counter.
 void DeriveDownloadFilename(const char* url, const char* content_type, const char* content_disposition, u32 dl_index,
                             char* out, u32 cap)
 {
-    char stem[9];
-    char ext[4];
+    // Helper: push a character into buf, skipping FAT32-illegal chars.
+    auto pushSafe = [](char* buf, u32 buf_cap, u32* n, char c)
+    {
+        if (*n >= buf_cap)
+            return;
+        // FAT32 illegal: control chars, \/:"*?<>|
+        if (c < 0x20)
+            return;
+        switch (c)
+        {
+        case '\\':
+        case '/':
+        case ':':
+        case '"':
+        case '*':
+        case '?':
+        case '<':
+        case '>':
+        case '|':
+            return;
+        default:
+            break;
+        }
+        buf[(*n)++] = c;
+    };
+
+    char stem[52]; // enough for a typical long filename stem
+    char ext[12];  // enough for long extensions (.torrent, .download, etc.)
     u32 sn = 0;
     u32 en = 0;
     bool have_name = false;
@@ -1268,7 +1297,6 @@ void DeriveDownloadFilename(const char* url, const char* content_type, const cha
         const char want[] = "filename";
         for (u32 i = 0; content_disposition[i] != '\0'; ++i)
         {
-            // Match the "filename" token case-insensitively at i.
             const char* p = content_disposition + i;
             u32 j = 0;
             for (; want[j] != '\0'; ++j)
@@ -1289,8 +1317,6 @@ void DeriveDownloadFilename(const char* url, const char* content_type, const cha
         }
         if (fn != nullptr)
         {
-            // Read up to the closing quote / separator into stem.ext,
-            // splitting on the LAST '.'.
             char raw_name[64];
             u32 rn = 0;
             for (u32 i = 0; fn[i] != '\0' && fn[i] != '"' && fn[i] != ';' && rn + 1 < sizeof(raw_name); ++i)
@@ -1301,16 +1327,15 @@ void DeriveDownloadFilename(const char* url, const char* content_type, const cha
                 if (raw_name[i] == '.')
                     dot = i;
             for (u32 i = 0; i < dot; ++i)
-                Push83(stem, 8, &sn, raw_name[i]);
+                pushSafe(stem, sizeof(stem), &sn, raw_name[i]);
             for (u32 i = dot + 1; i < rn; ++i)
-                Push83(ext, 3, &en, raw_name[i]);
+                pushSafe(ext, sizeof(ext), &en, raw_name[i]);
             if (sn > 0)
                 have_name = true;
         }
     }
 
-    // (2) URL path basename with an extension. Reset any partial
-    // component left by a disposition whose name sanitised to empty.
+    // (2) URL path basename with an extension.
     if (!have_name && url != nullptr)
     {
         sn = 0;
@@ -1320,7 +1345,6 @@ void DeriveDownloadFilename(const char* url, const char* content_type, const cha
         {
             const char* path = pu.path;
             u32 plen = StrLen(path);
-            // Strip a trailing query (?...) for basename purposes.
             for (u32 i = 0; i < plen; ++i)
                 if (path[i] == '?')
                 {
@@ -1335,12 +1359,12 @@ void DeriveDownloadFilename(const char* url, const char* content_type, const cha
             for (u32 i = slash; i < plen; ++i)
                 if (path[i] == '.')
                     dot = i;
-            if (dot < plen && dot + 1 < plen) // has a non-empty extension
+            if (dot < plen && dot + 1 < plen)
             {
                 for (u32 i = slash; i < dot; ++i)
-                    Push83(stem, 8, &sn, path[i]);
+                    pushSafe(stem, sizeof(stem), &sn, path[i]);
                 for (u32 i = dot + 1; i < plen; ++i)
-                    Push83(ext, 3, &en, path[i]);
+                    pushSafe(ext, sizeof(ext), &en, path[i]);
                 if (sn > 0 && en > 0)
                     have_name = true;
                 else
@@ -1357,16 +1381,15 @@ void DeriveDownloadFilename(const char* url, const char* content_type, const cha
     {
         sn = 0;
         en = 0;
-        const char dl[] = "DL";
-        Push83(stem, 8, &sn, dl[0]);
-        Push83(stem, 8, &sn, dl[1]);
-        Push83(stem, 8, &sn, static_cast<char>('0' + (dl_index / 1000) % 10));
-        Push83(stem, 8, &sn, static_cast<char>('0' + (dl_index / 100) % 10));
-        Push83(stem, 8, &sn, static_cast<char>('0' + (dl_index / 10) % 10));
-        Push83(stem, 8, &sn, static_cast<char>('0' + dl_index % 10));
+        stem[sn++] = 'D';
+        stem[sn++] = 'L';
+        stem[sn++] = static_cast<char>('0' + (dl_index / 1000) % 10);
+        stem[sn++] = static_cast<char>('0' + (dl_index / 100) % 10);
+        stem[sn++] = static_cast<char>('0' + (dl_index / 10) % 10);
+        stem[sn++] = static_cast<char>('0' + dl_index % 10);
         const char* e = ExtForType(content_type);
         for (u32 i = 0; e[i] != '\0'; ++i)
-            Push83(ext, 3, &en, e[i]);
+            pushSafe(ext, sizeof(ext), &en, e[i]);
     }
 
     // An all-illegal stem (sanitized to empty) falls back to "DL".
@@ -1379,10 +1402,10 @@ void DeriveDownloadFilename(const char* url, const char* content_type, const cha
     {
         const char* e = ExtForType(content_type);
         for (u32 i = 0; e[i] != '\0'; ++i)
-            Push83(ext, 3, &en, e[i]);
+            pushSafe(ext, sizeof(ext), &en, e[i]);
     }
 
-    // Assemble STEM.EXT into out (cap presumed >= 13).
+    // Assemble STEM.EXT into out.
     u32 o = 0;
     for (u32 i = 0; i < sn && o + 1 < cap; ++i)
         out[o++] = stem[i];
@@ -2370,7 +2393,7 @@ void DoFetch(const char* url)
         namespace fat = fs::fat32;
         const fat::Volume* dlv = fat::Fat32Volume(0);
         const u32 dl_index = (dlv != nullptr) ? NextDownloadIndex(dlv) : 0;
-        char filename[16];
+        char filename[68]; // room for long filenames (stem 52 + '.' + ext 12 + NUL)
         DeriveDownloadFilename(url, content_type, content_disp, dl_index, filename, sizeof(filename));
         SaveDownloadAs(raw, got, filename);
         mm::KFree(raw);

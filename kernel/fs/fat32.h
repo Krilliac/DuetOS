@@ -17,13 +17,12 @@
  *   - Log one line per non-deleted, non-volume-label entry:
  *     name, attrs, first cluster, size.
  *
- * Not in scope (next slice):
- *   - File content read by cluster-chain walk. BlockDeviceRead into
- *     a caller buffer, bounded by the size field. Exposing it as a
- *     VFS mount-point is the one-after-that.
- *   - Long filename (LFN) decoding.
- *   - Subdirectory recursion (root-dir only for v0).
- *   - Writes.
+ * Capabilities beyond the original v0 parse:
+ *   - File content read by cluster-chain walk (Fat32ReadFile).
+ *   - Long filename (LFN / VFAT) decoding AND emission.
+ *   - Subdirectory recursion and path-based operations.
+ *   - Writes: create, append, truncate, delete, mkdir, rmdir.
+ *   - Streaming append to zero-size files (create-empty + append).
  *
  * Context: kernel. Safe in task context (issues BlockDeviceRead,
  * which is polling-mode synchronous).
@@ -204,33 +203,28 @@ i64 Fat32WriteInPlace(const Volume* v, const DirEntry* e, u64 offset, const void
 ///
 /// Mutates BOTH FAT copies to keep the mirror in sync. Does NOT
 /// update FSInfo (free_count / next_free are only hints; Linux
-/// and Windows rebuild them on mount if stale). Does NOT support
-/// appending to a zero-size file in v0 — use Fat32WriteInPlace
-/// for existing content, Fat32AppendInRoot once the file already
-/// has one cluster.
-///
-/// Only root-dir files are supported in v0; extending a file in
-/// a subdirectory needs the directory's entry LBA handed in,
-/// which the path walker doesn't yet expose. Follow-up slice.
+/// and Windows rebuild them on mount if stale). Supports
+/// appending to a zero-size file: the first append allocates an
+/// initial cluster and patches the directory entry's
+/// first_cluster field, so the create-empty + append-chunks
+/// streaming pattern works end-to-end.
 i64 Fat32AppendInRoot(const Volume* v, const char* name, const void* buf, u64 len);
 
 /// Create a new file in the root directory with the given name
-/// and initial content. `name` may be a "NAME.EXT" form (up to
-/// 8 + 3 chars, case-insensitive) or a bare "NAME" with no dot.
-/// Anything that can't fit in the 8.3 SFN encoding (longer than
-/// 8 base or 3 extension, or containing forbidden chars) is
-/// rejected with -1. No LFN is emitted in v0 — callers get
-/// the 8.3 form preserved verbatim.
+/// and initial content. `name` may be a short 8.3 form or a long
+/// filename — LFN (VFAT) entries are emitted automatically when
+/// the name exceeds 8.3 limits or contains lowercase.
 ///
 /// Behavior:
-///   - Finds the first unused directory slot (0x00 end-of-dir or
-///     0xE5 deleted) in the root cluster chain.
+///   - Finds unused directory slot(s) in the root cluster chain
+///     (reserves a run of contiguous slots when LFN is needed).
 ///   - If bytes != nullptr && len > 0: allocates one or more
 ///     clusters, writes the content, chains them, and records
 ///     first_cluster + size in the directory entry.
-///   - Writes the SFN record (attributes = 0x20 = ARCHIVE).
-///   - Does NOT support subdirectory targets, LFN emission, or
-///     root-cluster-full growth. A filled root dir returns -1.
+///   - Writes the SFN record (attributes = 0x20 = ARCHIVE) and
+///     any preceding LFN fragment records.
+///   - Does NOT support root-cluster-full growth. A filled root
+///     dir returns -1.
 ///
 /// Returns the file's new size on success, -1 on failure.
 /// Duplicate-name detection: returns -1 if a non-deleted entry

@@ -689,15 +689,58 @@ i64 AppendInDir(const Volume* v, u32 dir_cluster, const char* name, const void* 
         KDBG_S(Fat32Append, "fs/fat32", "AppendInDir target missing", "name", name);
         return -1;
     }
-    const DirEntry* e = &e_val;
+    DirEntry* e = &e_val;
     if (e->attributes & kAttrDirectory)
         return -1; // append-to-directory is nonsensical
-    if (e->first_cluster < 2)
-        return -1; // zero-byte files are not supported in v0
 
     const u64 cluster_bytes = u64(v->sectors_per_cluster) * u64(v->bytes_per_sector);
     if (v->sectors_per_cluster > sizeof(g_scratch) / 512)
         return -1;
+
+    // Handle zero-size files: allocate a first cluster and patch
+    // the on-disk directory entry's first_cluster field before
+    // the normal append path runs. This unlocks the streaming
+    // write pattern (create empty → append chunks) that the
+    // browser download path needs for multi-MB files.
+    if (e->first_cluster < 2)
+    {
+        const u32 first = AllocateFreeCluster(*v);
+        if (first == 0)
+            return -1;
+        if (!ZeroCluster(*v, first))
+            return -1;
+        // Patch the on-disk dir entry's first_cluster. RMW the
+        // sector containing the SFN record.
+        u64 flba = 0;
+        u32 foff = 0;
+        if (!FindEntryLbaInDir(*v, dir_cluster, name, &flba, &foff))
+        {
+            // Roll back the allocation — the entry vanished between
+            // the lookup above and this one. Should not happen in
+            // practice (single-writer), but handle it cleanly.
+            FreeClusterChain(*v, first);
+            return -1;
+        }
+        if (drivers::storage::BlockDeviceRead(v->block_handle, flba, 1, g_scratch) != 0)
+        {
+            FreeClusterChain(*v, first);
+            return -1;
+        }
+        // SFN offset 26-27: first_cluster low 16 bits
+        // SFN offset 20-21: first_cluster high 16 bits
+        g_scratch[foff + 26] = static_cast<u8>(first & 0xFF);
+        g_scratch[foff + 27] = static_cast<u8>((first >> 8) & 0xFF);
+        g_scratch[foff + 20] = static_cast<u8>((first >> 16) & 0xFF);
+        g_scratch[foff + 21] = static_cast<u8>((first >> 24) & 0xFF);
+        if (drivers::storage::BlockDeviceWrite(v->block_handle, flba, 1, g_scratch) != 0)
+        {
+            FreeClusterChain(*v, first);
+            return -1;
+        }
+        e_val.first_cluster = first;
+        KLOG_DEBUG_V("fs/fat32", "append: allocated first cluster for zero-size file", first);
+    }
+
     const u32 old_size = e->size_bytes;
     const u64 new_size_u64 = u64(old_size) + len;
     if (new_size_u64 > 0xFFFFFFFFull)

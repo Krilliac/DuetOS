@@ -2126,10 +2126,31 @@ bool MaybeLaunchFat32Entry(const duetos::fs::fat32::DirEntry& e)
     for (duetos::u32 i = 0; e.name[i] != '\0' && ti < sizeof(tag) - 1; ++i)
         tag[ti++] = e.name[i];
     tag[ti] = '\0';
+    // Build the volume-relative path so SpawnPeFile can derive the
+    // side-by-side DLL search directory from where the .exe lives.
+    // Shape: "FILE.EXE" at root, "/SUBDIR/FILE.EXE" when nested.
+    char origin_path[80];
+    duetos::u32 op = 0;
+    if (g_state.fat_depth > 0)
+    {
+        origin_path[op++] = '/';
+        for (duetos::u32 d = 0; d < g_state.fat_depth && op + 1 < sizeof(origin_path); ++d)
+        {
+            for (duetos::u32 j = 0; g_state.fat_path_names[d][j] != '\0' && op + 1 < sizeof(origin_path); ++j)
+                origin_path[op++] = g_state.fat_path_names[d][j];
+            if (op + 1 < sizeof(origin_path))
+                origin_path[op++] = '/';
+        }
+    }
+    for (duetos::u32 i = 0; e.name[i] != '\0' && op + 1 < sizeof(origin_path); ++i)
+        origin_path[op++] = e.name[i];
+    origin_path[op] = '\0';
+
     const duetos::u64 pid =
         is_exe
             ? duetos::core::SpawnPeFile(tag, staging, e.size_bytes, UserLaunchCaps(), duetos::fs::RamfsSandboxRoot(),
-                                        kUserLaunchFrames, duetos::core::kTickBudgetSandbox)
+                                        kUserLaunchFrames, duetos::core::kTickBudgetSandbox, UserLaunchCaps(),
+                                        /*origin_volume=*/0, origin_path)
             : duetos::core::SpawnElfFile(tag, staging, e.size_bytes, UserLaunchCaps(), duetos::fs::RamfsSandboxRoot(),
                                          kUserLaunchFrames, duetos::core::kTickBudgetSandbox);
     // SpawnPeFile/SpawnElfFile copies the bytes into the new
