@@ -1,0 +1,11 @@
+; userland/apps/dialog_smoke/kernel32.def
+;
+; kernel32 import surface for the dialog_smoke fixture.
+
+LIBRARY kernel32.dll
+
+EXPORTS
+    ExitProcess
+    GetStdHandle
+    WriteConsoleA
+    GetLastError

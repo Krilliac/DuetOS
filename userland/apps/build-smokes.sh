@@ -125,6 +125,7 @@ declare -A APPS=(
     [setupapi_smoke]="-lkernel32 -lsetupapi"
     [asyn_smoke]="-lkernel32"
     [wndmsg_smoke]="-lkernel32 -luser32"
+    [dialog_smoke]="-lkernel32 -luser32"
     [scrap_smoke]="-lkernel32 -luser32"
     [trace_smoke]="-lkernel32 -ladvapi32"
     [wmi_smoke]="-lkernel32 -lole32"

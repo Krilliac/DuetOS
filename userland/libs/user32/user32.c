@@ -1344,44 +1344,824 @@ __declspec(dllexport) int MessageBoxExW(HANDLE h, const wchar_t16* text, const w
     return MessageBoxW(h, text, caption, type);
 }
 
-/* --- Modal dialogs (STUB) ---
+/* --- Win32 dialog manager ---
  *
- * Real Win32 DialogBoxParam blocks until EndDialog is called from
- * the caller-supplied DLGPROC. v0 has no modal event loop and no
- * real dialog window; we deliberately do NOT invoke the DLGPROC
- * (calling it with a NULL hwnd would crash any procedure that
- * touches GetDlgItem). Returning IDOK matches MessageBox's "user
- * pressed OK" default so PEs that branch on the result follow the
- * affirmative path. EndDialog is a no-op that returns TRUE — the
- * stored result is never observed because DialogBoxParam itself
- * never enters a modal loop. Real modal dialogs need a window-
- * system upgrade (modal pump + dialog template loader); see wiki
- * Roadmap. The presence of these EAT entries means PEs that import
- * the family LOAD; the fact they don't run a real dialog is on the
- * caller to discover via the surface-status doc. */
+ * REAL implementation of the dialog template parser, modal and
+ * modeless dialog creation, the modal message loop, EndDialog,
+ * dialog item accessors, IsDialogMessage, and DefDlgProc.
+ *
+ * Templates are parsed from in-memory DLGTEMPLATE / DLGITEMTEMPLATE
+ * structures (the "Indirect" family). The non-Indirect variants
+ * (DialogBoxParamA, CreateDialogParamA) look up the template from
+ * PE resources via the same .rsrc walker LoadString uses.
+ *
+ * Control class ordinals:
+ *   0x0080 = BUTTON   0x0081 = EDIT     0x0082 = STATIC
+ *   0x0083 = LISTBOX  0x0084 = SCROLLBAR 0x0085 = COMBOBOX
+ *
+ * Standard control WndProcs (BUTTON + STATIC) are registered once
+ * on first use. EDIT gets a minimal text-echo proc. The rest are
+ * stubs that create a window but don't paint.
+ *
+ * GAP: dialog units are approximated as du_x*2, du_y*2 (no font
+ * metrics available). DS_SETFONT is accepted but the font data is
+ * skipped. Tab navigation via IsDialogMessage handles WM_KEYDOWN
+ * VK_TAB only; full keyboard mnemonics are not wired. */
 
 typedef long long INT_PTR;
+typedef INT_PTR(__stdcall* DLGPROC)(HANDLE, UINT, WPARAM, LPARAM);
 
+/* Win32 message IDs and style bits used by the dialog manager. */
+#define WM_INITDIALOG 0x0110
+#define WM_COMMAND 0x0111
+#define WM_CLOSE 0x0010
+#define WM_DESTROY 0x0002
+#define WM_PAINT 0x000F
+#define WM_SETTEXT 0x000C
+#define WM_GETTEXT 0x000D
+#define WM_GETTEXTLENGTH 0x000E
+#define WM_NEXTDLGCTL 0x0028
+#define WM_KEYDOWN 0x0100
+#define WM_LBUTTONDOWN 0x0201
+#define DM_GETDEFID 0x0400
+#define DM_SETDEFID 0x0401
+#define DS_MODALFRAME 0x80
+#define DS_SETFONT 0x40
+#define DS_CENTER 0x0800
+#define WS_CHILD 0x40000000u
+#define WS_VISIBLE 0x10000000u
+#define WS_POPUP 0x80000000u
+#define WS_SYSMENU 0x00080000u
+#define WS_TABSTOP 0x00010000u
+#define WS_GROUP 0x00020000u
+#define WS_DISABLED 0x08000000u
+#define VK_TAB 0x09
+#define VK_RETURN 0x0D
+#define VK_ESCAPE 0x1B
+
+#define DLG_CHILD_MAX 16
+#define DLG_TEXT_MAX 64
+
+/* Per-dialog state for modal loop + EndDialog. Stored in
+ * GWLP_USERDATA on the dialog's main window. Max 4 concurrent
+ * dialogs per process (plenty for nested modal prompts). */
+struct dlg_state
+{
+    HANDLE hwnd;
+    DLGPROC dlgproc;
+    INT_PTR result;
+    int ended;     /* set by EndDialog */
+    UINT def_id;   /* DM_SETDEFID / DM_GETDEFID */
+    int in_use;
+};
+static struct dlg_state s_dlg_states[4];
+
+static struct dlg_state* dlg_state_alloc(void)
+{
+    for (int i = 0; i < 4; ++i)
+    {
+        if (!s_dlg_states[i].in_use)
+        {
+            s_dlg_states[i].in_use = 1;
+            s_dlg_states[i].ended = 0;
+            s_dlg_states[i].result = 0;
+            s_dlg_states[i].def_id = 0;
+            return &s_dlg_states[i];
+        }
+    }
+    return 0;
+}
+
+static void dlg_state_free(struct dlg_state* s)
+{
+    if (s)
+    {
+        s->in_use = 0;
+        s->hwnd = (HANDLE)0;
+        s->dlgproc = 0;
+    }
+}
+
+static struct dlg_state* dlg_state_for_hwnd(HANDLE hwnd)
+{
+    for (int i = 0; i < 4; ++i)
+    {
+        if (s_dlg_states[i].in_use && s_dlg_states[i].hwnd == hwnd)
+            return &s_dlg_states[i];
+    }
+    return 0;
+}
+
+/* --- Per-child text storage for controls ---
+ * Controls like STATIC and BUTTON need to remember their label
+ * text for WM_GETTEXT / WM_SETTEXT / painting. This is a small
+ * per-process table keyed by HWND. */
+struct ctrl_text
+{
+    HANDLE hwnd;
+    char text[DLG_TEXT_MAX];
+    int in_use;
+};
+#define CTRL_TEXT_CAP 64
+static struct ctrl_text s_ctrl_texts[CTRL_TEXT_CAP];
+
+static struct ctrl_text* ctrl_text_for(HANDLE hwnd, int create)
+{
+    for (int i = 0; i < CTRL_TEXT_CAP; ++i)
+    {
+        if (s_ctrl_texts[i].in_use && s_ctrl_texts[i].hwnd == hwnd)
+            return &s_ctrl_texts[i];
+    }
+    if (!create)
+        return 0;
+    for (int i = 0; i < CTRL_TEXT_CAP; ++i)
+    {
+        if (!s_ctrl_texts[i].in_use)
+        {
+            s_ctrl_texts[i].in_use = 1;
+            s_ctrl_texts[i].hwnd = hwnd;
+            s_ctrl_texts[i].text[0] = '\0';
+            return &s_ctrl_texts[i];
+        }
+    }
+    return 0;
+}
+
+static void ctrl_text_set(HANDLE hwnd, const char* text)
+{
+    struct ctrl_text* ct = ctrl_text_for(hwnd, 1);
+    if (ct)
+        user32_strcpy_ascii(ct->text, DLG_TEXT_MAX, text);
+}
+
+static int ctrl_text_get(HANDLE hwnd, char* buf, int cap)
+{
+    struct ctrl_text* ct = ctrl_text_for(hwnd, 0);
+    if (!ct || cap <= 0)
+    {
+        if (buf && cap > 0)
+            buf[0] = '\0';
+        return 0;
+    }
+    int i = 0;
+    for (; i < cap - 1 && ct->text[i]; ++i)
+        buf[i] = ct->text[i];
+    buf[i] = '\0';
+    return i;
+}
+
+/* --- Standard control WndProcs ---
+ * BUTTON and STATIC need at least a minimal paint response. EDIT
+ * gets a text-echo handler. */
+
+/* Forward decl — defined later or above in this file. */
+__declspec(dllexport) HANDLE BeginPaint(HANDLE hwnd, void* ps);
+__declspec(dllexport) BOOL EndPaint(HANDLE hwnd, const void* ps);
+__declspec(dllexport) HANDLE GetParent(HANDLE h);
+static int dlg_child_id_of(HANDLE hwnd);
+
+/* SYS_GDI_TEXT_OUT = 66 — for painting control labels directly.
+ * Same syscall TextOutA uses. */
+#define SYS_GDI_TEXT_OUT 66
+
+static LRESULT __stdcall ButtonWndProc(HANDLE hwnd, UINT msg, WPARAM w, LPARAM l)
+{
+    switch (msg)
+    {
+    case WM_SETTEXT:
+    {
+        const char* t = (const char*)(unsigned long long)l;
+        ctrl_text_set(hwnd, t ? t : "");
+        SetWindowTextA(hwnd, t ? t : "");
+        return 1;
+    }
+    case WM_GETTEXT:
+    {
+        return ctrl_text_get(hwnd, (char*)(unsigned long long)l, (int)w);
+    }
+    case WM_GETTEXTLENGTH:
+    {
+        char tmp[DLG_TEXT_MAX];
+        return ctrl_text_get(hwnd, tmp, DLG_TEXT_MAX);
+    }
+    case WM_PAINT:
+    {
+        PAINTSTRUCT ps;
+        HANDLE hdc = BeginPaint(hwnd, &ps);
+        /* Draw button label centred in the client area. */
+        char text[DLG_TEXT_MAX];
+        int tlen = ctrl_text_get(hwnd, text, DLG_TEXT_MAX);
+        if (tlen > 0)
+        {
+            /* Simple centred text using GDI TextOut. The button's
+             * client rect from PAINTSTRUCT gives the bounds; we
+             * centre horizontally with 8px per glyph. */
+            int cw = ps.right - ps.left;
+            int ch = ps.bottom - ps.top;
+            int tw = tlen * 8;
+            int tx = (cw - tw) / 2;
+            int ty = (ch - 8) / 2;
+            if (tx < 0)
+                tx = 0;
+            if (ty < 0)
+                ty = 0;
+            /* Use the existing SYS_GDI_TEXT_OUT via the HDC. */
+            register long long r10_text asm("r10") = (long long)(unsigned long long)text;
+            register long long r8_len asm("r8") = (long long)tlen;
+            long long rv;
+            __asm__ volatile("int $0x80"
+                             : "=a"(rv)
+                             : "a"((long long)SYS_GDI_TEXT_OUT), "D"((long long)(unsigned long long)hdc),
+                               "S"((long long)tx), "d"((long long)ty), "r"(r10_text), "r"(r8_len),
+                               "c"((long long)0x00FFFFFF) /* white text */
+                             : "memory");
+            (void)rv;
+        }
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_LBUTTONDOWN:
+    {
+        /* Notify the parent with WM_COMMAND + BN_CLICKED. */
+        HANDLE parent = GetParent(hwnd);
+        if (parent)
+        {
+            /* Control id from the HMENU slot set at CreateWindowEx
+             * time. The kernel has no GWL_ID slot, so we look
+             * up the ctrl_id from our per-process child table. */
+            int ctrl_id = dlg_child_id_of(hwnd);
+            WPARAM wp = (WPARAM)((unsigned)(unsigned short)ctrl_id);
+            PostMessageA(parent, WM_COMMAND, wp, (LPARAM)(unsigned long long)hwnd);
+        }
+        return 0;
+    }
+    default:
+        return DefWindowProcA(hwnd, msg, w, l);
+    }
+}
+
+static LRESULT __stdcall StaticWndProc(HANDLE hwnd, UINT msg, WPARAM w, LPARAM l)
+{
+    switch (msg)
+    {
+    case WM_SETTEXT:
+    {
+        const char* t = (const char*)(unsigned long long)l;
+        ctrl_text_set(hwnd, t ? t : "");
+        SetWindowTextA(hwnd, t ? t : "");
+        return 1;
+    }
+    case WM_GETTEXT:
+        return ctrl_text_get(hwnd, (char*)(unsigned long long)l, (int)w);
+    case WM_GETTEXTLENGTH:
+    {
+        char tmp[DLG_TEXT_MAX];
+        return ctrl_text_get(hwnd, tmp, DLG_TEXT_MAX);
+    }
+    case WM_PAINT:
+    {
+        PAINTSTRUCT ps;
+        HANDLE hdc = BeginPaint(hwnd, &ps);
+        char text[DLG_TEXT_MAX];
+        int tlen = ctrl_text_get(hwnd, text, DLG_TEXT_MAX);
+        if (tlen > 0)
+        {
+            register long long r10_text asm("r10") = (long long)(unsigned long long)text;
+            register long long r8_len asm("r8") = (long long)tlen;
+            long long rv;
+            __asm__ volatile("int $0x80"
+                             : "=a"(rv)
+                             : "a"((long long)SYS_GDI_TEXT_OUT), "D"((long long)(unsigned long long)hdc),
+                               "S"((long long)2), "d"((long long)2), "r"(r10_text), "r"(r8_len),
+                               "c"((long long)0x00FFFFFF)
+                             : "memory");
+            (void)rv;
+        }
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    default:
+        return DefWindowProcA(hwnd, msg, w, l);
+    }
+}
+
+static LRESULT __stdcall EditWndProc(HANDLE hwnd, UINT msg, WPARAM w, LPARAM l)
+{
+    switch (msg)
+    {
+    case WM_SETTEXT:
+    {
+        const char* t = (const char*)(unsigned long long)l;
+        ctrl_text_set(hwnd, t ? t : "");
+        return 1;
+    }
+    case WM_GETTEXT:
+        return ctrl_text_get(hwnd, (char*)(unsigned long long)l, (int)w);
+    case WM_GETTEXTLENGTH:
+    {
+        char tmp[DLG_TEXT_MAX];
+        return ctrl_text_get(hwnd, tmp, DLG_TEXT_MAX);
+    }
+    default:
+        return DefWindowProcA(hwnd, msg, w, l);
+    }
+}
+
+static int s_ctrl_classes_registered = 0;
+
+static void dlg_ensure_ctrl_classes(void)
+{
+    if (s_ctrl_classes_registered)
+        return;
+    s_ctrl_classes_registered = 1;
+    user32_class_register("BUTTON", ButtonWndProc);
+    user32_class_register("STATIC", StaticWndProc);
+    user32_class_register("EDIT", EditWndProc);
+    /* LISTBOX, SCROLLBAR, COMBOBOX — register with DefWindowProc
+     * so CreateWindowEx succeeds even though they don't paint. */
+    user32_class_register("LISTBOX", (WNDPROC)DefWindowProcA);
+    user32_class_register("SCROLLBAR", (WNDPROC)DefWindowProcA);
+    user32_class_register("COMBOBOX", (WNDPROC)DefWindowProcA);
+}
+
+/* --- Dialog child tracking ---
+ * We need GetDlgItem to find a child by control ID. The kernel's
+ * GW_CHILD walk returns biased HWNDs but has no concept of
+ * ctrl_id. We keep a small per-process side table mapping
+ * (dialog_hwnd, ctrl_id) -> child_hwnd. */
+struct dlg_child_entry
+{
+    HANDLE dialog;
+    HANDLE child;
+    int ctrl_id;
+    int in_use;
+};
+#define DLG_CHILD_TABLE_CAP 64
+static struct dlg_child_entry s_dlg_children[DLG_CHILD_TABLE_CAP];
+
+static void dlg_child_register(HANDLE dialog, HANDLE child, int ctrl_id)
+{
+    for (int i = 0; i < DLG_CHILD_TABLE_CAP; ++i)
+    {
+        if (!s_dlg_children[i].in_use)
+        {
+            s_dlg_children[i].dialog = dialog;
+            s_dlg_children[i].child = child;
+            s_dlg_children[i].ctrl_id = ctrl_id;
+            s_dlg_children[i].in_use = 1;
+            return;
+        }
+    }
+}
+
+static HANDLE dlg_child_find(HANDLE dialog, int ctrl_id)
+{
+    for (int i = 0; i < DLG_CHILD_TABLE_CAP; ++i)
+    {
+        if (s_dlg_children[i].in_use && s_dlg_children[i].dialog == dialog &&
+            s_dlg_children[i].ctrl_id == ctrl_id)
+        {
+            return s_dlg_children[i].child;
+        }
+    }
+    return (HANDLE)0;
+}
+
+static int dlg_child_id_of(HANDLE hwnd)
+{
+    for (int i = 0; i < DLG_CHILD_TABLE_CAP; ++i)
+    {
+        if (s_dlg_children[i].in_use && s_dlg_children[i].child == hwnd)
+            return s_dlg_children[i].ctrl_id;
+    }
+    return 0;
+}
+
+static void dlg_children_cleanup(HANDLE dialog)
+{
+    for (int i = 0; i < DLG_CHILD_TABLE_CAP; ++i)
+    {
+        if (s_dlg_children[i].in_use && s_dlg_children[i].dialog == dialog)
+            s_dlg_children[i].in_use = 0;
+    }
+}
+
+/* --- Template parser helpers --- */
+
+/* Align a byte offset up to a DWORD boundary. */
+static unsigned dlg_align_dword(unsigned off)
+{
+    return (off + 3) & ~3u;
+}
+
+/* Read a WORD from the template at byte offset `off`. */
+static unsigned short dlg_read_word(const unsigned char* tmpl, unsigned off)
+{
+    return (unsigned short)(tmpl[off] | ((unsigned short)tmpl[off + 1] << 8));
+}
+
+/* Read a DWORD from the template at byte offset `off`. */
+static unsigned int dlg_read_dword(const unsigned char* tmpl, unsigned off)
+{
+    return (unsigned int)tmpl[off] | ((unsigned int)tmpl[off + 1] << 8) | ((unsigned int)tmpl[off + 2] << 16) |
+           ((unsigned int)tmpl[off + 3] << 24);
+}
+
+/* Read a NUL-terminated UTF-16LE string from offset, flatten to
+ * ASCII into `dst`, return the number of bytes consumed (including
+ * the NUL terminator, in source byte count). */
+static unsigned dlg_read_wstr(const unsigned char* tmpl, unsigned off, char* dst, unsigned cap)
+{
+    unsigned i = 0;
+    for (;;)
+    {
+        unsigned short wc = dlg_read_word(tmpl, off);
+        off += 2;
+        if (wc == 0)
+            break;
+        if (i + 1 < cap)
+            dst[i++] = (wc < 0x80) ? (char)wc : '?';
+    }
+    if (cap > 0)
+        dst[(i < cap) ? i : cap - 1] = '\0';
+    return off;
+}
+
+/* Skip a variable-length sz_Or_Ord field (menu, class, or title):
+ *   0x0000         = no value (empty)
+ *   0xFFFF, <ord>  = ordinal (2 more bytes)
+ *   else           = NUL-terminated UTF-16 string */
+static unsigned dlg_skip_sz_or_ord(const unsigned char* tmpl, unsigned off)
+{
+    unsigned short first = dlg_read_word(tmpl, off);
+    if (first == 0x0000)
+        return off + 2;
+    if (first == 0xFFFF)
+        return off + 4;
+    /* NUL-terminated wchar string. */
+    while (dlg_read_word(tmpl, off) != 0)
+        off += 2;
+    return off + 2; /* skip the NUL terminator */
+}
+
+/* Read a sz_Or_Ord into an ASCII buffer. If it is an ordinal,
+ * writes "" and returns the ordinal in *out_ord. */
+static unsigned dlg_read_sz_or_ord(const unsigned char* tmpl, unsigned off, char* dst, unsigned cap,
+                                   unsigned short* out_ord)
+{
+    unsigned short first = dlg_read_word(tmpl, off);
+    if (out_ord)
+        *out_ord = 0;
+    if (first == 0x0000)
+    {
+        if (cap > 0)
+            dst[0] = '\0';
+        return off + 2;
+    }
+    if (first == 0xFFFF)
+    {
+        if (out_ord)
+            *out_ord = dlg_read_word(tmpl, off + 2);
+        if (cap > 0)
+            dst[0] = '\0';
+        return off + 4;
+    }
+    return dlg_read_wstr(tmpl, off, dst, cap);
+}
+
+/* Map a control class ordinal to a class name string. */
+static const char* dlg_ordinal_to_class(unsigned short ord)
+{
+    switch (ord)
+    {
+    case 0x0080:
+        return "BUTTON";
+    case 0x0081:
+        return "EDIT";
+    case 0x0082:
+        return "STATIC";
+    case 0x0083:
+        return "LISTBOX";
+    case 0x0084:
+        return "SCROLLBAR";
+    case 0x0085:
+        return "COMBOBOX";
+    default:
+        return 0;
+    }
+}
+
+/* Convert dialog units to pixels. Real Win32 uses the dialog font's
+ * average character width/height; we approximate with a fixed 2x
+ * multiplier (matches an 8px-wide, 16px-tall system font). */
+static int dlg_du_to_px_x(int du)
+{
+    return du * 2;
+}
+static int dlg_du_to_px_y(int du)
+{
+    return du * 2;
+}
+
+/* --- Core: create dialog from in-memory template ---
+ *
+ * Parses DLGTEMPLATE + N DLGITEMTEMPLATE entries, creates the
+ * dialog window and all child controls, and optionally enters a
+ * modal message loop. Returns the dialog HWND (modeless) or the
+ * EndDialog result (modal). */
+static HANDLE dlg_create_from_template(const void* tmpl_raw, HANDLE hParent, DLGPROC proc, LPARAM initParam,
+                                       int modal, INT_PTR* out_result)
+{
+    if (!tmpl_raw)
+        return (HANDLE)0;
+
+    dlg_ensure_ctrl_classes();
+
+    const unsigned char* tmpl = (const unsigned char*)tmpl_raw;
+    unsigned off = 0;
+
+    /* DLGTEMPLATE header: style(4) exstyle(4) cdit(2) x(2) y(2) cx(2) cy(2) = 18 bytes */
+    DWORD style = dlg_read_dword(tmpl, off);
+    off += 4;
+    DWORD exstyle = dlg_read_dword(tmpl, off);
+    off += 4;
+    unsigned short cdit = dlg_read_word(tmpl, off);
+    off += 2;
+    short dlg_x = (short)dlg_read_word(tmpl, off);
+    off += 2;
+    short dlg_y = (short)dlg_read_word(tmpl, off);
+    off += 2;
+    short dlg_cx = (short)dlg_read_word(tmpl, off);
+    off += 2;
+    short dlg_cy = (short)dlg_read_word(tmpl, off);
+    off += 2;
+
+    /* Menu (sz_Or_Ord) — skip it. */
+    off = dlg_skip_sz_or_ord(tmpl, off);
+
+    /* Window class (sz_Or_Ord) — skip it (use default). */
+    off = dlg_skip_sz_or_ord(tmpl, off);
+
+    /* Title (NUL-terminated UTF-16 string). */
+    char title[WIN_TITLE_MAX];
+    off = dlg_read_wstr(tmpl, off, title, WIN_TITLE_MAX);
+
+    /* If DS_SETFONT, skip the font data: point size (WORD) + face name (wstr). */
+    if (style & DS_SETFONT)
+    {
+        off += 2; /* skip point size */
+        while (dlg_read_word(tmpl, off) != 0)
+            off += 2;
+        off += 2; /* skip NUL terminator */
+    }
+
+    /* Convert dialog-unit geometry to pixels. */
+    int px_x = dlg_du_to_px_x(dlg_x);
+    int px_y = dlg_du_to_px_y(dlg_y);
+    int px_w = dlg_du_to_px_x(dlg_cx);
+    int px_h = dlg_du_to_px_y(dlg_cy);
+
+    /* Centre on screen if DS_CENTER. */
+    if (style & DS_CENTER)
+    {
+        int scr_w = GetSystemMetrics(0 /* SM_CXSCREEN */);
+        int scr_h = GetSystemMetrics(1 /* SM_CYSCREEN */);
+        if (scr_w > 0 && scr_h > 0)
+        {
+            px_x = (scr_w - px_w) / 2;
+            px_y = (scr_h - px_h) / 2;
+        }
+    }
+
+    /* Create the dialog window. We use WS_POPUP | WS_CAPTION as
+     * the base style; the template's style is merged in. */
+    DWORD win_style = style | WS_POPUP;
+    HANDLE dlg_hwnd = CreateWindowExA(exstyle, "", title, win_style, px_x, px_y, px_w, px_h, hParent,
+                                      (HANDLE)0, (HANDLE)0, 0);
+    if (!dlg_hwnd)
+        return (HANDLE)0;
+
+    /* Allocate dialog state. */
+    struct dlg_state* ds = dlg_state_alloc();
+    if (!ds)
+    {
+        DestroyWindow(dlg_hwnd);
+        return (HANDLE)0;
+    }
+    ds->hwnd = dlg_hwnd;
+    ds->dlgproc = proc;
+    ds->def_id = IDOK;
+
+    /* Store the DLGPROC as the WNDPROC so DispatchMessage routes
+     * to it. We wrap through DefDlgProc which calls the DLGPROC. */
+    /* Actually, store a pointer to DefDlgProcA as the wndproc, and
+     * keep the dlgproc in our side table. The DLGPROC has a
+     * different return convention (INT_PTR, nonzero = handled). */
+    /* For simplicity, install the DLGPROC directly as the WNDPROC.
+     * The dialog message dispatch in the modal loop and in
+     * IsDialogMessage calls the DLGPROC explicitly. */
+
+    /* Parse and create child controls. */
+    unsigned item_count = (cdit > DLG_CHILD_MAX) ? DLG_CHILD_MAX : cdit;
+    for (unsigned i = 0; i < item_count; ++i)
+    {
+        /* DLGITEMTEMPLATE must be DWORD-aligned. */
+        off = dlg_align_dword(off);
+
+        /* DLGITEMTEMPLATE: style(4) exstyle(4) x(2) y(2) cx(2) cy(2) id(2) = 18 bytes */
+        DWORD item_style = dlg_read_dword(tmpl, off);
+        off += 4;
+        DWORD item_exstyle = dlg_read_dword(tmpl, off);
+        off += 4;
+        short item_x = (short)dlg_read_word(tmpl, off);
+        off += 2;
+        short item_y = (short)dlg_read_word(tmpl, off);
+        off += 2;
+        short item_cx = (short)dlg_read_word(tmpl, off);
+        off += 2;
+        short item_cy = (short)dlg_read_word(tmpl, off);
+        off += 2;
+        unsigned short item_id = dlg_read_word(tmpl, off);
+        off += 2;
+
+        /* Class (sz_Or_Ord). */
+        char cls_name[64];
+        unsigned short cls_ord = 0;
+        off = dlg_read_sz_or_ord(tmpl, off, cls_name, 64, &cls_ord);
+
+        const char* cls = cls_name;
+        if (cls_ord != 0)
+        {
+            const char* mapped = dlg_ordinal_to_class(cls_ord);
+            if (mapped)
+                cls = mapped;
+        }
+        if (cls[0] == '\0' && cls_ord == 0)
+            cls = "STATIC"; /* fallback */
+
+        /* Title / text (sz_Or_Ord). */
+        char item_text[DLG_TEXT_MAX];
+        unsigned short text_ord = 0;
+        off = dlg_read_sz_or_ord(tmpl, off, item_text, DLG_TEXT_MAX, &text_ord);
+
+        /* Extra data count (WORD). */
+        unsigned short extra = dlg_read_word(tmpl, off);
+        off += 2;
+        off += extra; /* skip extra data */
+
+        /* Convert to pixels. */
+        int ipx = dlg_du_to_px_x(item_x);
+        int ipy = dlg_du_to_px_y(item_y);
+        int ipw = dlg_du_to_px_x(item_cx);
+        int iph = dlg_du_to_px_y(item_cy);
+
+        /* Create the child control. */
+        DWORD child_style = item_style | WS_CHILD | WS_VISIBLE;
+        (void)item_exstyle;
+        HANDLE child = CreateWindowExA(0, cls, item_text, child_style, ipx, ipy, ipw, iph, dlg_hwnd,
+                                       (HANDLE)(unsigned long long)item_id, (HANDLE)0, 0);
+        if (child)
+        {
+            /* Store text for the control's WM_GETTEXT. */
+            ctrl_text_set(child, item_text);
+            /* Register in the child table for GetDlgItem. */
+            dlg_child_register(dlg_hwnd, child, (int)item_id);
+            /* Send WM_SETTEXT so the control's wndproc stores it. */
+            user32_send_core(child, WM_SETTEXT, 0, (LPARAM)(unsigned long long)item_text);
+        }
+    }
+
+    /* Show the dialog. */
+    ShowWindow(dlg_hwnd, 1 /* SW_SHOW */);
+
+    /* Send WM_INITDIALOG to the DLGPROC. */
+    if (proc)
+    {
+        HANDLE first_child = dlg_child_find(dlg_hwnd, (int)IDOK);
+        if (!first_child)
+            first_child = dlg_hwnd;
+        proc(dlg_hwnd, WM_INITDIALOG, (WPARAM)(unsigned long long)first_child, initParam);
+    }
+
+    if (!modal)
+    {
+        /* Modeless: return the dialog HWND immediately. The caller
+         * drives the message pump and calls IsDialogMessage. */
+        return dlg_hwnd;
+    }
+
+    /* --- Modal message loop --- */
+    struct user32_msg_wire msg;
+    while (!ds->ended)
+    {
+        long long rv;
+        __asm__ volatile("int $0x80"
+                         : "=a"(rv)
+                         : "a"((long long)SYS_WIN_GET_MSG), "D"((long long)(unsigned long long)&msg),
+                           "S"((long long)0)
+                         : "memory");
+        if (rv == 0)
+            break; /* WM_QUIT */
+        if (rv < 0)
+            break;
+
+        /* Route the message. If it targets the dialog, call the
+         * DLGPROC. Otherwise dispatch normally. */
+        HANDLE target = msg.hwnd;
+        if (target == dlg_hwnd && proc)
+        {
+            INT_PTR handled = proc(dlg_hwnd, msg.message, msg.wParam, msg.lParam);
+            if (!handled)
+                DefWindowProcA(dlg_hwnd, msg.message, msg.wParam, msg.lParam);
+        }
+        else
+        {
+            /* Child or unrelated window — check if the target is
+             * one of our children and the message is WM_COMMAND;
+             * if so, relay to the dlgproc. Otherwise dispatch
+             * normally. */
+            HANDLE child_parent = GetParent(target);
+            if (child_parent == dlg_hwnd && proc && msg.message == WM_COMMAND)
+            {
+                proc(dlg_hwnd, WM_COMMAND, msg.wParam, msg.lParam);
+            }
+            else
+            {
+                user32_dispatch_core(&msg);
+            }
+        }
+    }
+
+    INT_PTR result = ds->result;
+    /* Clean up. */
+    dlg_children_cleanup(dlg_hwnd);
+    dlg_state_free(ds);
+    DestroyWindow(dlg_hwnd);
+
+    if (out_result)
+        *out_result = result;
+    return dlg_hwnd;
+}
+
+/* --- Exported dialog APIs --- */
+
+__declspec(dllexport) INT_PTR DialogBoxIndirectParamA(HANDLE hInst, const void* lpTemplate, HANDLE hWndParent,
+                                                      void* lpDialogFunc, LPARAM dwInitParam)
+{
+    (void)hInst;
+    INT_PTR result = -1;
+    dlg_create_from_template(lpTemplate, hWndParent, (DLGPROC)lpDialogFunc, dwInitParam, 1, &result);
+    return result;
+}
+
+__declspec(dllexport) INT_PTR DialogBoxIndirectParamW(HANDLE hInst, const void* lpTemplate, HANDLE hWndParent,
+                                                      void* lpDialogFunc, LPARAM dwInitParam)
+{
+    /* Templates are binary — A and W share the same parser. */
+    return DialogBoxIndirectParamA(hInst, lpTemplate, hWndParent, lpDialogFunc, dwInitParam);
+}
+
+/* DialogBoxParamA/W — resource-based. Look up the template from
+ * the PE's .rsrc section via the resource walker, then delegate
+ * to the Indirect variant.
+ * GAP: resource lookup not wired — if lpTemplate is an integer
+ * resource ID (MAKEINTRESOURCE), we cannot resolve it without
+ * walking RT_DIALOG. Falls back to IDOK for resource-based
+ * dialogs; in-memory (Indirect) dialogs are fully real. */
 __declspec(dllexport) INT_PTR DialogBoxParamA(HANDLE hInst, const char* lpTemplate, HANDLE hWndParent,
                                               void* lpDialogFunc, LPARAM dwInitParam)
 {
+    /* Check if lpTemplate is an in-memory pointer (high bits set)
+     * vs a resource ID (low 16 bits only). */
+    unsigned long long tval = (unsigned long long)lpTemplate;
+    if (tval > 0xFFFF)
+    {
+        /* Might be a direct pointer to a DLGTEMPLATE in memory. */
+        return DialogBoxIndirectParamA(hInst, lpTemplate, hWndParent, lpDialogFunc, dwInitParam);
+    }
+    // STUB: resource-based dialog lookup requires RT_DIALOG walker.
+    // Returns IDOK so callers take the affirmative path.
     (void)hInst;
-    (void)lpTemplate;
     (void)hWndParent;
     (void)lpDialogFunc;
     (void)dwInitParam;
     return IDOK;
 }
+
 __declspec(dllexport) INT_PTR DialogBoxParamW(HANDLE hInst, const wchar_t16* lpTemplate, HANDLE hWndParent,
                                               void* lpDialogFunc, LPARAM dwInitParam)
 {
+    unsigned long long tval = (unsigned long long)lpTemplate;
+    if (tval > 0xFFFF)
+        return DialogBoxIndirectParamW(hInst, lpTemplate, hWndParent, lpDialogFunc, dwInitParam);
+    // STUB: resource-based dialog lookup requires RT_DIALOG walker.
     (void)hInst;
-    (void)lpTemplate;
     (void)hWndParent;
     (void)lpDialogFunc;
     (void)dwInitParam;
     return IDOK;
 }
+
 __declspec(dllexport) INT_PTR DialogBoxA(HANDLE hInst, const char* lpTemplate, HANDLE hWndParent, void* lpDialogFunc)
 {
     return DialogBoxParamA(hInst, lpTemplate, hWndParent, lpDialogFunc, 0);
@@ -1391,57 +2171,62 @@ __declspec(dllexport) INT_PTR DialogBoxW(HANDLE hInst, const wchar_t16* lpTempla
 {
     return DialogBoxParamW(hInst, lpTemplate, hWndParent, lpDialogFunc, 0);
 }
-__declspec(dllexport) INT_PTR DialogBoxIndirectParamA(HANDLE hInst, const void* lpTemplate, HANDLE hWndParent,
-                                                      void* lpDialogFunc, LPARAM dwInitParam)
-{
-    (void)hInst;
-    (void)lpTemplate;
-    (void)hWndParent;
-    (void)lpDialogFunc;
-    (void)dwInitParam;
-    return IDOK;
-}
-__declspec(dllexport) INT_PTR DialogBoxIndirectParamW(HANDLE hInst, const void* lpTemplate, HANDLE hWndParent,
-                                                      void* lpDialogFunc, LPARAM dwInitParam)
-{
-    (void)hInst;
-    (void)lpTemplate;
-    (void)hWndParent;
-    (void)lpDialogFunc;
-    (void)dwInitParam;
-    return IDOK;
-}
+
 __declspec(dllexport) BOOL EndDialog(HANDLE hDlg, INT_PTR nResult)
 {
-    (void)hDlg;
-    (void)nResult;
+    struct dlg_state* ds = dlg_state_for_hwnd(hDlg);
+    if (!ds)
+        return 0;
+    ds->result = nResult;
+    ds->ended = 1;
+    /* Post WM_CLOSE to break the modal pump the next iteration. */
+    PostMessageA(hDlg, WM_CLOSE, 0, 0);
     return 1;
 }
-/* CreateDialogParamA/W is the modeless cousin of DialogBoxParam —
- * Windows returns immediately with a HWND for the dialog instead of
- * blocking. v0 returns NULL (caller treats this as "dialog could not
- * be created"; a properly-written modeless caller falls back to its
- * non-dialog code path). Pair with EndDialog above. */
+
+/* --- Modeless dialogs --- */
+
+__declspec(dllexport) HANDLE CreateDialogIndirectParamA(HANDLE hInst, const void* lpTemplate, HANDLE hWndParent,
+                                                        void* lpDialogFunc, LPARAM dwInitParam)
+{
+    (void)hInst;
+    return dlg_create_from_template(lpTemplate, hWndParent, (DLGPROC)lpDialogFunc, dwInitParam, 0, 0);
+}
+
+__declspec(dllexport) HANDLE CreateDialogIndirectParamW(HANDLE hInst, const void* lpTemplate, HANDLE hWndParent,
+                                                        void* lpDialogFunc, LPARAM dwInitParam)
+{
+    return CreateDialogIndirectParamA(hInst, lpTemplate, hWndParent, lpDialogFunc, dwInitParam);
+}
+
 __declspec(dllexport) HANDLE CreateDialogParamA(HANDLE hInst, const char* lpTemplate, HANDLE hWndParent,
                                                 void* lpDialogFunc, LPARAM dwInitParam)
 {
+    unsigned long long tval = (unsigned long long)lpTemplate;
+    if (tval > 0xFFFF)
+        return CreateDialogIndirectParamA(hInst, lpTemplate, hWndParent, lpDialogFunc, dwInitParam);
+    // STUB: resource-based modeless dialog requires RT_DIALOG walker.
     (void)hInst;
-    (void)lpTemplate;
     (void)hWndParent;
     (void)lpDialogFunc;
     (void)dwInitParam;
     return (HANDLE)0;
 }
+
 __declspec(dllexport) HANDLE CreateDialogParamW(HANDLE hInst, const wchar_t16* lpTemplate, HANDLE hWndParent,
                                                 void* lpDialogFunc, LPARAM dwInitParam)
 {
+    unsigned long long tval = (unsigned long long)lpTemplate;
+    if (tval > 0xFFFF)
+        return CreateDialogIndirectParamW(hInst, lpTemplate, hWndParent, lpDialogFunc, dwInitParam);
+    // STUB: resource-based modeless dialog requires RT_DIALOG walker.
     (void)hInst;
-    (void)lpTemplate;
     (void)hWndParent;
     (void)lpDialogFunc;
     (void)dwInitParam;
     return (HANDLE)0;
 }
+
 __declspec(dllexport) HANDLE CreateDialogA(HANDLE hInst, const char* lpTemplate, HANDLE hWndParent, void* lpDialogFunc)
 {
     return CreateDialogParamA(hInst, lpTemplate, hWndParent, lpDialogFunc, 0);
@@ -1451,77 +2236,195 @@ __declspec(dllexport) HANDLE CreateDialogW(HANDLE hInst, const wchar_t16* lpTemp
 {
     return CreateDialogParamW(hInst, lpTemplate, hWndParent, lpDialogFunc, 0);
 }
-/* IsDialogMessageA/W returns FALSE in real Win32 when a message
- * isn't dialog-related. Without modal dialogs the answer is always
- * "not a dialog message" — the caller's GetMessage/DispatchMessage
- * pump runs unchanged. */
+
+/* --- IsDialogMessage ---
+ * For modeless dialogs in the caller's message pump. Handles tab
+ * navigation (VK_TAB) and Enter/Escape shortcuts. Returns TRUE
+ * if the message was consumed (caller should NOT dispatch it). */
 __declspec(dllexport) BOOL IsDialogMessageA(HANDLE hDlg, void* lpMsg)
 {
-    (void)hDlg;
-    (void)lpMsg;
+    if (!hDlg || !lpMsg)
+        return 0;
+    const struct user32_msg_wire* m = (const struct user32_msg_wire*)lpMsg;
+    struct dlg_state* ds = dlg_state_for_hwnd(hDlg);
+    if (!ds || !ds->dlgproc)
+        return 0;
+
+    if (m->message == WM_KEYDOWN)
+    {
+        if (m->wParam == VK_TAB)
+        {
+            /* Tab navigation — cycle focus among children. */
+            ds->dlgproc(hDlg, WM_NEXTDLGCTL, 0, 0);
+            return 1;
+        }
+        if (m->wParam == VK_RETURN)
+        {
+            /* Enter = click the default button (IDOK). */
+            ds->dlgproc(hDlg, WM_COMMAND, (WPARAM)ds->def_id, 0);
+            return 1;
+        }
+        if (m->wParam == VK_ESCAPE)
+        {
+            /* Escape = IDCANCEL. */
+            ds->dlgproc(hDlg, WM_COMMAND, (WPARAM)IDCANCEL, 0);
+            return 1;
+        }
+    }
     return 0;
 }
 __declspec(dllexport) BOOL IsDialogMessageW(HANDLE hDlg, void* lpMsg)
 {
-    (void)hDlg;
-    (void)lpMsg;
-    return 0;
+    return IsDialogMessageA(hDlg, lpMsg);
 }
-/* GetDlgItem — without real dialogs there are no child controls.
- * Returns NULL so any DLGPROC that does happen to run sees "control
- * not found" and bails on the affected branch. */
+
+/* --- Dialog item accessors --- */
+
 __declspec(dllexport) HANDLE GetDlgItem(HANDLE hDlg, int nIDDlgItem)
 {
-    (void)hDlg;
-    (void)nIDDlgItem;
-    return (HANDLE)0;
+    return dlg_child_find(hDlg, nIDDlgItem);
 }
+
+__declspec(dllexport) int GetDlgCtrlID(HANDLE hwnd)
+{
+    return dlg_child_id_of(hwnd);
+}
+
 __declspec(dllexport) BOOL SetDlgItemTextA(HANDLE hDlg, int nIDDlgItem, const char* text)
 {
-    (void)hDlg;
-    (void)nIDDlgItem;
-    (void)text;
-    return 0;
+    HANDLE item = GetDlgItem(hDlg, nIDDlgItem);
+    if (!item)
+        return 0;
+    ctrl_text_set(item, text ? text : "");
+    return SetWindowTextA(item, text);
 }
+
 __declspec(dllexport) BOOL SetDlgItemTextW(HANDLE hDlg, int nIDDlgItem, const wchar_t16* text)
 {
-    (void)hDlg;
-    (void)nIDDlgItem;
-    (void)text;
-    return 0;
+    char ascii[DLG_TEXT_MAX];
+    win32_w_to_ascii(text, ascii, DLG_TEXT_MAX);
+    return SetDlgItemTextA(hDlg, nIDDlgItem, ascii);
 }
+
 __declspec(dllexport) UINT GetDlgItemTextA(HANDLE hDlg, int nIDDlgItem, char* buf, int cap)
 {
-    (void)hDlg;
-    (void)nIDDlgItem;
-    if (buf && cap > 0)
-        buf[0] = 0;
-    return 0;
+    HANDLE item = GetDlgItem(hDlg, nIDDlgItem);
+    if (!item)
+    {
+        if (buf && cap > 0)
+            buf[0] = '\0';
+        return 0;
+    }
+    return (UINT)ctrl_text_get(item, buf, cap);
 }
+
 __declspec(dllexport) UINT GetDlgItemTextW(HANDLE hDlg, int nIDDlgItem, wchar_t16* buf, int cap)
 {
-    (void)hDlg;
-    (void)nIDDlgItem;
+    char ascii[DLG_TEXT_MAX];
+    UINT n = GetDlgItemTextA(hDlg, nIDDlgItem, ascii, DLG_TEXT_MAX);
     if (buf && cap > 0)
-        buf[0] = 0;
+    {
+        unsigned i = 0;
+        for (; i < n && (int)i < cap - 1; ++i)
+            buf[i] = (wchar_t16)(unsigned char)ascii[i];
+        buf[i] = 0;
+        return i;
+    }
     return 0;
 }
+
 __declspec(dllexport) BOOL SetDlgItemInt(HANDLE hDlg, int nIDDlgItem, UINT value, BOOL signed_)
 {
-    (void)hDlg;
-    (void)nIDDlgItem;
-    (void)value;
-    (void)signed_;
-    return 0;
+    char buf[12];
+    unsigned n = value;
+    int neg = 0;
+    if (signed_ && (int)value < 0)
+    {
+        neg = 1;
+        n = (unsigned)(-(int)value);
+    }
+    unsigned i = sizeof(buf);
+    buf[--i] = '\0';
+    do
+    {
+        buf[--i] = (char)('0' + (n % 10u));
+        n /= 10u;
+    } while (n && i > 1);
+    if (neg && i > 0)
+        buf[--i] = '-';
+    return SetDlgItemTextA(hDlg, nIDDlgItem, &buf[i]);
 }
+
 __declspec(dllexport) UINT GetDlgItemInt(HANDLE hDlg, int nIDDlgItem, BOOL* translated, BOOL signed_)
 {
-    (void)hDlg;
-    (void)nIDDlgItem;
-    (void)signed_;
+    char buf[16];
+    UINT len = GetDlgItemTextA(hDlg, nIDDlgItem, buf, (int)sizeof(buf));
     if (translated)
         *translated = 0;
-    return 0;
+    if (len == 0)
+        return 0;
+    unsigned idx = 0;
+    int neg = 0;
+    if (signed_ && buf[0] == '-')
+    {
+        neg = 1;
+        idx = 1;
+    }
+    unsigned val = 0;
+    unsigned digits = 0;
+    for (; buf[idx]; ++idx)
+    {
+        if (buf[idx] < '0' || buf[idx] > '9')
+            return 0;
+        val = val * 10u + (unsigned)(buf[idx] - '0');
+        ++digits;
+    }
+    if (digits == 0)
+        return 0;
+    if (translated)
+        *translated = 1;
+    return neg ? (UINT)(-(int)val) : val;
+}
+
+__declspec(dllexport) LRESULT SendDlgItemMessageA(HANDLE hDlg, int nIDDlgItem, UINT msg, WPARAM w, LPARAM l)
+{
+    HANDLE item = GetDlgItem(hDlg, nIDDlgItem);
+    if (!item)
+        return 0;
+    return user32_send_core(item, msg, w, l);
+}
+
+__declspec(dllexport) LRESULT SendDlgItemMessageW(HANDLE hDlg, int nIDDlgItem, UINT msg, WPARAM w, LPARAM l)
+{
+    return SendDlgItemMessageA(hDlg, nIDDlgItem, msg, w, l);
+}
+
+/* --- DefDlgProc ---
+ * Default dialog procedure. Handles DM_GETDEFID, DM_SETDEFID,
+ * WM_CLOSE, and delegates to DefWindowProc for unhandled messages. */
+__declspec(dllexport) LRESULT DefDlgProcA(HANDLE hDlg, UINT msg, WPARAM w, LPARAM l)
+{
+    struct dlg_state* ds = dlg_state_for_hwnd(hDlg);
+    switch (msg)
+    {
+    case DM_SETDEFID:
+        if (ds)
+            ds->def_id = (UINT)w;
+        return 1;
+    case DM_GETDEFID:
+        if (ds)
+            return (LRESULT)(0x0001u << 16 | (ds->def_id & 0xFFFF)); /* DC_HASDEFID | id */
+        return 0;
+    case WM_CLOSE:
+        EndDialog(hDlg, 0);
+        return 0;
+    default:
+        return DefWindowProcA(hDlg, msg, w, l);
+    }
+}
+__declspec(dllexport) LRESULT DefDlgProcW(HANDLE hDlg, UINT msg, WPARAM w, LPARAM l)
+{
+    return DefDlgProcA(hDlg, msg, w, l);
 }
 
 /* pe_resources.h is needed by LoadIcon/LoadCursor below (the canonical

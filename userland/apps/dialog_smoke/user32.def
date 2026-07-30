@@ -1,0 +1,16 @@
+; userland/apps/dialog_smoke/user32.def
+;
+; user32 import surface for the dialog_smoke fixture.
+
+LIBRARY user32.dll
+
+EXPORTS
+    DialogBoxIndirectParamA
+    EndDialog
+    GetDlgItem
+    PostMessageA
+    SendMessageA
+    SetDlgItemTextA
+    GetDlgItemTextA
+    IsDialogMessageA
+    DefDlgProcA

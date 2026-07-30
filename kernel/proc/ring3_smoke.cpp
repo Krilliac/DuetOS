@@ -218,6 +218,7 @@
 #include "generated_trace_smoke_pe.h"
 #include "generated_wmi_smoke_pe.h"
 #include "generated_wndmsg_smoke_pe.h"
+#include "generated_dialog_smoke_pe.h"
 #include "generated_find_smoke_pe.h"
 #include "generated_iocp2_smoke_pe.h"
 #include "generated_proc2_smoke_pe.h"
@@ -2436,6 +2437,7 @@ constexpr PeCompatEntry kPeCompatBattery[] = {
     PE_COMPAT("ring3-setupapi-smoke", kBinSetupapiSmokeBytes, BareMetal, true),
     PE_COMPAT("ring3-asyn-smoke", kBinAsynSmokeBytes, BareMetal, true),
     PE_COMPAT("ring3-wndmsg-smoke", kBinWndmsgSmokeBytes, BareMetal, true),
+    PE_COMPAT("ring3-dialog-smoke", kBinDialogSmokeBytes, BareMetal, true),
     PE_COMPAT("ring3-scrap-smoke", kBinScrapSmokeBytes, BareMetal, true),
     PE_COMPAT("ring3-trace-smoke", kBinTraceSmokeBytes, BareMetal, true),
     PE_COMPAT("ring3-wmi-smoke", kBinWmiSmokeBytes, BareMetal, true),

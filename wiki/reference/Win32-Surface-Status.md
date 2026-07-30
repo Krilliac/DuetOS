@@ -1612,16 +1612,28 @@ WinDbg client API, `SymLoadModuleEx`.
   window redraw (`SYS_WIN_INVALIDATE`) but the compositor has no
   non-client menu band yet, so item glyphs aren't painted — GAP.
   `LoadMenuW` — STUB (needs the `.rsrc` resource loader).
-- Modal dialogs: `DialogBoxA/W`, `DialogBoxParamA/W`,
-  `DialogBoxIndirectParamA/W`, `CreateDialogA/W`,
-  `CreateDialogParamA/W`, `EndDialog`, `IsDialogMessageA/W`,
-  `GetDlgItem`, `GetDlgItemTextA/W`, `SetDlgItemTextA/W`,
-  `GetDlgItemInt`, `SetDlgItemInt` — STUB facades. The EAT
-  entries exist so PEs that import them link; the bodies
-  return IDOK / NULL / FALSE without invoking the user-supplied
-  DLGPROC (no modal pump in v0). Apps that branch on the
-  return value follow the affirmative path; apps that need a
-  real dialog see no controls.
+- Dialog manager (in-memory templates): `DialogBoxIndirectParamA/W`,
+  `CreateDialogIndirectParamA/W`, `EndDialog`, `IsDialogMessageA/W`,
+  `GetDlgItem`, `GetDlgCtrlID`, `GetDlgItemTextA/W`,
+  `SetDlgItemTextA/W`, `GetDlgItemInt`, `SetDlgItemInt`,
+  `SendDlgItemMessageA/W`, `DefDlgProcA/W` — REAL for in-memory
+  DLGTEMPLATE templates. Parses DLGTEMPLATE/DLGITEMTEMPLATE, creates
+  the dialog window and child controls, runs a modal message loop
+  (DialogBoxIndirectParam) or returns immediately (CreateDialogIndirect),
+  and EndDialog unwinds the modal pump with the caller's result code.
+  Standard control classes BUTTON (0x0080), EDIT (0x0081), STATIC
+  (0x0082), LISTBOX (0x0083), SCROLLBAR (0x0084), COMBOBOX (0x0085)
+  are registered and create windows; BUTTON and STATIC paint labels
+  via WM_PAINT.
+  GAP: dialog units are approximated (2x multiplier, no font metrics);
+  DS_SETFONT is accepted but font data is skipped; tab navigation
+  in IsDialogMessage handles VK_TAB only (no mnemonics).
+- Dialog manager (resource-based): `DialogBoxParamA/W`,
+  `DialogBoxA/W`, `CreateDialogParamA/W`, `CreateDialogA/W` — STUB
+  when passed a PE resource ID (MAKEINTRESOURCE). Requires an
+  RT_DIALOG `.rsrc` walker that does not exist. If passed a direct
+  pointer to an in-memory template (address > 0xFFFF), delegates to
+  the Indirect variant and works.
 - Hooks: `SetWindowsHookExA/W`, `UnhookWindowsHookEx`,
   `CallNextHookEx` — STUB
 - Subclassing: `SetWindowSubclass` lives in comctl32 — STUB
