@@ -3,6 +3,7 @@
 #include "fs/fat32.h"
 #include "ipc/handle_table.h"
 #include "loader/compat_shim.h"
+#include "loader/manifest.h"
 #include "loader/dll_loader.h"
 #include "proc/user_stack.h"
 #include "sched/sched.h"
@@ -1538,6 +1539,12 @@ struct Process
     // the full process.h. Field is inlined into Process; small +
     // POD-shaped, no allocation needed.
     compat::CompatPolicy compat_policy;
+
+    // Per-PE SxS assembly manifest, parsed from the RT_MANIFEST
+    // resource (type 24) at load time. Defaults to all-zero (=
+    // no manifest present, AsInvoker, DPI-unaware). The canonical
+    // type lives in `kernel/loader/manifest.h`.
+    ManifestInfo manifest;
 
     u64 refcount;
 };

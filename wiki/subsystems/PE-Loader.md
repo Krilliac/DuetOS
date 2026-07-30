@@ -353,7 +353,10 @@ false` because it dies by design).
   without CFG validation.
 - **Resource section**: mapped read-only but not interpreted — the
   resource APIs (`FindResource`, `LoadIcon`, etc.) walk the section
-  themselves.
+  themselves. The spawn path extracts `RT_MANIFEST` (type 24) from
+  the raw PE file before mapping and parses it for execution level,
+  DPI awareness, long-path awareness, and SxS dependency names
+  (`kernel/loader/manifest.h` + `manifest.cpp`).
 - **PEB / PEB_LDR_DATA**: the loader populates a minimal v0
   scaffolding inside the TEB page (`pe_loader.cpp` step 4b for
   PE32+) — `gs:[0x60]` -> PEB at TEB+0x100, `PEB.Ldr` at

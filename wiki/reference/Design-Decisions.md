@@ -14189,3 +14189,25 @@ version is the failure mode this pins.
   resampled to 12x20). This is visually noticeable but functionally
   correct — the cursor tracks the hotspot, click targets work, and
   system cursors (IDC_ARROW etc.) bypass this path entirely.
+
+### DD-nnn: Win32 assembly manifest parser uses scan, not DOM (2026-07-30)
+
+- **Context:** Win32 PEs embed XML assembly manifests as RT_MANIFEST
+  resources. The kernel needs to extract execution level, DPI awareness,
+  long-path awareness, and SxS dependency names at PE load time.
+- **Decision:** Use a scan-based approach (seek known attribute/element
+  patterns in the XML byte stream) rather than building a DOM or SAX
+  parser. The parser lives in `kernel/loader/manifest.h` +
+  `manifest.cpp`, runs on raw PE file bytes before ring-3 entry, and
+  stores the result on `Process::manifest`.
+- **Rules out:** a general-purpose XML parser in the kernel. Assembly
+  manifests are machine-generated and tightly schematised (no CDATA,
+  no entity references, no processing instructions, no comments
+  interleaved with attribute values), so the scan approach is sufficient
+  and avoids ~2000 lines of XML parsing code that would rot without
+  diverse input.
+- **Revisit when:** a real application's manifest trips the scanner
+  (e.g., namespace-prefixed elements, XML comments inside critical
+  tags, or CDATA sections). At that point, upgrade the scanner to
+  handle the specific construct — do not pull in a full XML parser
+  unless at least three distinct constructs need it.

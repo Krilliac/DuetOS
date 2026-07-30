@@ -1686,7 +1686,9 @@ done, it is merely written.
    `AddressOfCallBacks` in ring 3 via a generated trampoline on both
    process and thread attach. Remaining gap is DETACH — see
    [`PE-Loader.md`](../subsystems/PE-Loader.md#tls-static-data-and-callbacks).
-8. **SxS / assembly manifests.** Many installers and MFC apps depend on it.
+8. ~~**SxS / assembly manifests.**~~ **LANDED 2026-07-30.** RT_MANIFEST
+   resource parser (`ParseManifestFromPe`), execution level / DPI awareness /
+   SxS dependency extraction. Wired into `Process::manifest` at spawn.
 9. ~~**Console completeness.**~~ **LANDED 2026-07-29.** Real
    `GetStdHandle`, `WriteConsoleA/W`, `ReadConsoleA/W`,
    `GetConsoleMode`/`SetConsoleMode`, `GetConsoleScreenBufferInfo`,

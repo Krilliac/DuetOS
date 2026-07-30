@@ -28,6 +28,7 @@
 #include "mm/kheap.h"
 #include "loader/dll_loader.h"
 #include "loader/elf_loader.h"
+#include "loader/manifest.h"
 #include "loader/pe_loader.h"
 #include "loader/sxs_dll.h"
 #include "log/klog.h"
@@ -1295,6 +1296,13 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     // policy is "every override flag off, kernel acts as it did
     // before app-compat existed."
     duetos::core::compat::ApplySidecar(proc, root, name);
+    // Parse the RT_MANIFEST resource from the raw PE bytes (still
+    // in kernel memory). Extracts requested execution level, DPI
+    // awareness, long-path awareness, and SxS dependency names.
+    // No-op when the PE has no resource directory or no RT_MANIFEST
+    // entry — the default ManifestInfo is all-zero (AsInvoker,
+    // DPI-unaware, no SxS deps).
+    proc->manifest = duetos::core::ParseManifestFromPe(pe_bytes, pe_len);
     // Per-process Win32 heap. Only initialised for PEs that
     // actually imported anything — a freestanding PE like
     // /bin/hello.exe doesn't call HeapAlloc and shouldn't burn

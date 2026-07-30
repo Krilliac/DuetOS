@@ -522,7 +522,11 @@ syscall routing shows up immediately.
   is GAP: switches but no per-fiber FLS
 - Profiling (`QueryProcessCycleTime`, etc.) — STUB
 - DPI awareness (`SetProcessDPIAware`, `GetDpiForSystem`) —
-  return constant 96 DPI
+  return constant 96 DPI. Manifest-declared DPI awareness is now
+  parsed from RT_MANIFEST at load time and stored on
+  `Process::manifest.dpi_awareness` (2026-07-30).
+  GAP: thunks (`IsProcessDPIAware`, `GetProcessDPIAwareness`) do
+  not yet read the parsed value — still return constant 96.
 - Resources — REAL as of 2026-07-28. `FindResourceW/A/ExW/ExA`,
   `LoadResource`, `LockResource`, `SizeofResource`, `FreeResource`,
   `EnumResourceTypesW` and `EnumResourceNamesW` walk the module's
@@ -2854,9 +2858,14 @@ above and are deliberately absent from this list.
 - **msi.dll** — Windows Installer. .msi packages can't run.
 - **wuapi.dll**, **wuaueng.dll** — Windows Update.
 - **sxs.dll** — side-by-side assembly resolution
-  (fusion / WinSxS manifests). Without it, manifests
-  pointing to specific common-controls versions resolve
-  to nothing.
+  (fusion / WinSxS manifests). **Partially addressed
+  (2026-07-30):** RT_MANIFEST resources are now parsed at
+  PE load time (execution level, DPI awareness, SxS dependency
+  names stored on `Process::manifest`). The runtime DLL
+  resolution part (version-specific WinSxS directory lookup)
+  is still missing — manifests pointing to specific
+  common-controls versions still resolve via the flat SxS
+  directory rather than version-keyed paths.
 - **dbghelp.dll** — we have a stub-shaped one (§1).
 
 ### Shell / UX
@@ -2927,9 +2936,13 @@ above and are deliberately absent from this list.
   kernel; the NT-shaped APC API is a STUB.
 - **Object Manager / NT namespace** — `\??`, `\Device`, `\KernelObjects`
   paths. Most NtCreate* calls don't actually traverse these.
-- **PE manifest / SxS resolution** — multi-version DLL
-  resolution. Apps that depend on a specific common-controls
-  manifest fall back silently to v5.
+- **PE manifest / SxS resolution** — **parsing landed
+  (2026-07-30):** RT_MANIFEST is extracted and parsed at PE load
+  time; execution level, DPI awareness, long-path-aware, and SxS
+  dependency names stored on `Process::manifest`. Multi-version DLL
+  resolution (version-keyed WinSxS directory lookup) is still
+  missing; apps that depend on a specific common-controls manifest
+  fall back silently to v5.
 
 ### Graphics specifics
 

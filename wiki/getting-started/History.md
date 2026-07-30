@@ -1750,6 +1750,17 @@ gating, the admission math and the read path are proven on the host and
 at boot; the write waits for real hardware, where `cpufreq set`'s
 APERF/MPERF sample is the thing that will actually settle it.
 
+### Win32 assembly manifests (2026-07-30)
+
+The last Tier 1 backlog item: parsing the XML assembly manifests that
+Win32 PEs embed as RT_MANIFEST resources. The spawn path now extracts
+the manifest from the raw PE's resource directory and parses it for
+requested execution level (asInvoker/highestAvailable/requireAdministrator),
+DPI awareness, long-path awareness, and SxS dependency names. The result
+is stored on `Process::manifest` and consulted by Win32 thunks.
+`kernel/loader/manifest.h` defines `ManifestInfo`; `manifest.cpp`
+implements both the PE resource extraction and the XML scan.
+
 ## How to read the rest of the tree
 
 - `CLAUDE.md` — the authoritative project context, coding standards,

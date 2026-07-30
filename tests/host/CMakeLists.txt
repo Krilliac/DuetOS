@@ -328,6 +328,13 @@ target_compile_options(test_pe_icon_decode PRIVATE -Wno-conversion -Wno-sign-con
 # terminator, and every form the binder must refuse rather than trust.
 add_host_test(pe_delay_import)
 
+# Win32 SxS assembly-manifest parser (kernel/loader/manifest.h +
+# manifest.cpp): execution level, DPI awareness, long-path awareness,
+# SxS dependency extraction, and end-to-end PE resource extraction.
+add_host_test(manifest)
+target_sources(test_manifest PRIVATE "${CMAKE_SOURCE_DIR}/../../kernel/loader/manifest.cpp")
+target_compile_options(test_manifest PRIVATE -Wno-conversion -Wno-sign-conversion)
+
 # Browser omnibox URL-vs-search classifier (kernel/apps/browser/omnibox_classify.h).
 add_host_test(omnibox_classify)
 
