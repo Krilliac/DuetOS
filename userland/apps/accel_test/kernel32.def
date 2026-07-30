@@ -1,0 +1,10 @@
+; userland/apps/accel_test/kernel32.def
+;
+; kernel32 import surface for the accel_test fixture.
+
+LIBRARY kernel32.dll
+
+EXPORTS
+    ExitProcess
+    OutputDebugStringA
+    Sleep

@@ -69,6 +69,7 @@
 #include "subsystems/audio/audio_backend.h"
 #include "time/tick.h"
 #include "time/timekeeper.h"
+#include "subsystems/win32/keycode_vk.h"
 #include "subsystems/win32/window_syscall.h"
 
 namespace duetos::core
@@ -227,12 +228,16 @@ void KbdReaderTask(void*)
         // kKeyNone wake event that brought us here.
         if (duetos::security::BrokerKbdReaderPumpDeferred())
             continue;
+        // Translate to Win32 virtual-key code ONCE per
+        // event so every downstream consumer (key-state
+        // tracker, WM_KEYDOWN, WM_KEYUP) sees VKs.
+        const duetos::u16 vk = duetos::subsystems::win32::KeyCodeToVk(static_cast<duetos::u16>(ev.code));
         // Track async keyboard state BEFORE the early
         // release / kKeyNone filter so release edges are
-        // recorded. `ev.code` wraps to the low 8 bits of
-        // the VK cache so ext keys collide gracefully with
-        // unmapped slots.
-        duetos::drivers::video::WindowInputTrackKey(static_cast<duetos::u16>(ev.code), !ev.is_release);
+        // recorded. Now correctly indexed by VK rather
+        // than by raw KeyCode (previously ext keys at
+        // 0x100+ wrapped to collide with low ASCII).
+        duetos::drivers::video::WindowInputTrackKey(vk ? vk : static_cast<duetos::u16>(ev.code), !ev.is_release);
         // Record a real key's release for the auto-repeat run detector
         // below (it keys off the release->re-press gap). Modifier-only
         // transitions (kKeyNone) carry no VK and are skipped.
@@ -272,7 +277,7 @@ void KbdReaderTask(void*)
                     const duetos::u64 lp_base = 1ull | (1ull << 30) | (1ull << 31);
                     const duetos::u64 lp = alt_held ? (lp_base | (1ull << 29)) : lp_base;
                     const duetos::u32 keyup_msg = alt_held ? kWmSysKeyUp : kWmKeyUp;
-                    duetos::drivers::video::WindowPostMessage(active_pe, keyup_msg, ev.code, lp);
+                    duetos::drivers::video::WindowPostMessage(active_pe, keyup_msg, vk ? vk : ev.code, lp);
                     duetos::drivers::video::CompositorUnlock();
                     duetos::drivers::video::WindowMsgWakeAll();
                 }
@@ -1654,7 +1659,9 @@ void KbdReaderTask(void*)
                 const duetos::u64 lp = alt_held ? (lp_base | (1ull << 29)) : lp_base;
                 const duetos::u32 keydown_msg = alt_held ? kWmSysKeyDown : kWmKeyDown;
                 const duetos::u32 char_msg = alt_held ? kWmSysChar : kWmChar;
-                duetos::drivers::video::WindowPostMessage(active_pe, keydown_msg, ev.code, lp);
+                duetos::drivers::video::WindowPostMessage(active_pe, keydown_msg, vk ? vk : ev.code, lp);
+                // WM_CHAR carries the CHARACTER code, not the VK.
+                // Use the original ev.code for printable ASCII.
                 if (ev.code >= 0x20 && ev.code <= 0x7E)
                 {
                     duetos::drivers::video::WindowPostMessage(active_pe, char_msg, ev.code, lp);

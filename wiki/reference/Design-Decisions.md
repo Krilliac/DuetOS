@@ -14143,3 +14143,25 @@ version is the failure mode this pins.
   no-op, RamVol + cmdline remain the fallback). Binary format is not
   human-readable, but the shell `guard except` command already displays
   the list in hex.
+
+### DD#051 — WM_KEYDOWN wParam carries Win32 VK codes, not DuetOS KeyCodes (2026-07-29)
+
+- **Decision:** translate DuetOS `KeyCode` (from `ps2kbd.h`) to Win32
+  virtual-key codes at the point where `WM_KEYDOWN` / `WM_KEYUP` messages
+  are posted to PE windows in `kernel/core/boot_tasks.cpp`. The translation
+  table lives in `kernel/subsystems/win32/keycode_vk.h`. `WM_CHAR` continues
+  to carry the raw character code (correct per Win32 spec).
+- **Rationale:** Win32 PEs universally expect `wParam` to be a VK code in
+  `WM_KEYDOWN`/`WM_KEYUP`. DuetOS `KeyCode` values diverge from VKs for
+  non-ASCII keys (`kKeyF1 == 0x10A` vs `VK_F1 == 0x70`), `kKeyEnter == 0x0A`
+  vs `VK_RETURN == 0x0D`, and letters (lowercase vs uppercase). The raw
+  posting was a v0 shortcut that broke every PE that switches on `wParam`.
+  It also broke `GetKeyState` / `GetAsyncKeyState` for extended keys, since
+  `WindowInputTrackKey` uses `code & 0xFF` -- arrow keys at 0x100+ wrapped
+  to collide with low ASCII.
+- **Rules out:** passing DuetOS `KeyCode` through to PEs. Once VK translation
+  is in place, the contract is Win32-compatible and cannot regress without
+  breaking existing PE fixtures.
+- **Accepted cost:** the translation table is US-QWERTY-only for punctuation
+  VKs (e.g. `VK_OEM_*`). A future keyboard-layout abstraction would need to
+  update the VK mapping, not remove it.

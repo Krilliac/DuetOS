@@ -1582,9 +1582,10 @@ WinDbg client API, `SymLoadModuleEx`.
 - Clipboard: `OpenClipboard`, `CloseClipboard`,
   `EmptyClipboard`, `GetClipboardData`, `SetClipboardData`
   — GAP: format conversion is text-only, no CF_DIB / CF_HDROP
-- Accelerators: `LoadAcceleratorsW`, `TranslateAccelerator`
-  — GAP: tables load but TranslateAccelerator only handles
-  ASCII keys
+- Accelerators: `LoadAcceleratorsA/W`, `TranslateAcceleratorA/W`
+  — REAL. RT_ACCELERATOR tables loaded via pe_resources.h;
+  TranslateAccelerator matches VK + modifiers and posts
+  WM_COMMAND. GAP: named (string) accelerator tables unsupported
 - Menus: `CreateMenu`, `CreatePopupMenu`, `DestroyMenu`,
   `AppendMenuA/W`, `InsertMenuA/W`, `RemoveMenu`, `DeleteMenu`,
   `EnableMenuItem`, `CheckMenuItem`, `ModifyMenuA/W`, `GetSubMenu`,
@@ -1643,16 +1644,14 @@ WinDbg client API, `SymLoadModuleEx`.
   item 12 (off-screen surfaces) is the prerequisite. `LoadIcon`
   returns a non-NULL sentinel because `RegisterClassEx` callers
   routinely treat a NULL `hIcon` as a fatal startup error.
-- `LoadAcceleratorsA/W`, `TranslateAcceleratorA/W` — STUB, also
-  blocked on a consumer rather than the parser. The kernel does
-  post `WM_KEYDOWN` to the active PE window
-  (`kernel/core/boot_tasks.cpp`), but `wParam` carries a DuetOS
-  `KeyCode` (`ps2kbd.h`: `kKeyF1 == 0x10A`, `kKeyEnter == 0x0A`),
-  **not** a Win32 virtual-key code (`VK_F1 == 0x70`,
-  `VK_RETURN == 0x0D`). `RT_ACCELERATOR` entries store VKs, so
-  every `FVIRTKEY` accelerator would mis-compare. The prerequisite
-  is a KeyCode -> VK translation on the kernel side of the message
-  post; see [`wiki/reference/Roadmap.md`](Roadmap.md).
+- `LoadAcceleratorsA/W`, `TranslateAcceleratorA/W` — REAL.
+  The kernel now posts Win32 VK codes in `WM_KEYDOWN`/`WM_KEYUP`
+  `wParam` (translated from DuetOS `KeyCode` via
+  `kernel/subsystems/win32/keycode_vk.h`). `LoadAcceleratorsA/W`
+  parse `RT_ACCELERATOR` from the PE's `.rsrc` section via
+  `duet_res_find`; `TranslateAcceleratorA/W` match VK + modifier
+  state and post `WM_COMMAND`. GAP: named (string) accelerator
+  tables are unsupported (only `MAKEINTRESOURCE` ordinals).
 
 **Thunked imports (auto-generated from `kernel/subsystems/win32/thunks_table.inc`):**
 

@@ -57,6 +57,7 @@
 #include "generated_dwmapi_dll.h"
 #include "generated_customdll.h"
 #include "generated_customdll2.h"
+#include "generated_accel_test.h"
 #include "generated_customdll_test.h"
 #include "generated_d3d11_dll.h"
 #include "generated_d3d12_dll.h"
@@ -3096,6 +3097,13 @@ void StartRing3SmokeTask()
         // registry in advapi32.dll + real fopen/fread in ucrtbase.dll.
         SpawnPeFile("ring3-reg-fopen-test", fs::generated::kBinRegFopenTestBytes,
                     fs::generated::kBinRegFopenTestBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                    mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        // Accelerator table fixture. Builds an in-memory ACCEL table
+        // (VK_S -> ID 100), posts WM_KEYDOWN(VK_S), calls
+        // TranslateAcceleratorA, and asserts WM_COMMAND is received.
+        // Exercises the VK translation path end-to-end.
+        SpawnPeFile("ring3-accel-test", fs::generated::kBinAccelTestBytes,
+                    fs::generated::kBinAccelTestBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
                     mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     }
     // Real-world Windows PE diagnostic attempt. Expected to

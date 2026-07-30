@@ -331,6 +331,12 @@ duetos_embed_blob(generated_windowed_hello.h
     DEFS_DIR "${CMAKE_SOURCE_DIR}/userland/apps/windowed_hello"
     COMMENT  "Compiling + embedding /bin/windowed_hello.exe (user32 window bridge)")
 
+duetos_embed_blob(generated_accel_test.h
+    SCRIPT   "${CMAKE_SOURCE_DIR}/tools/build/build-accel-test.sh"
+    SRC      "${CMAKE_SOURCE_DIR}/userland/apps/accel_test/hello.c"
+    DEFS_DIR "${CMAKE_SOURCE_DIR}/userland/apps/accel_test"
+    COMMENT  "Compiling + embedding /bin/accel_test.exe (accelerator table fixture)")
+
 duetos_embed_blob(generated_customdll_test.h
     SCRIPT   "${CMAKE_SOURCE_DIR}/tools/build/build-customdll-test.sh"
     SRC      "${CMAKE_SOURCE_DIR}/userland/apps/customdll_test/hello.c"

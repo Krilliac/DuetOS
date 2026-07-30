@@ -398,24 +398,102 @@ __declspec(dllexport) BOOL TranslateMessage(const void* msg)
     (void)msg;
     return 0;
 }
-// STUB: returns 0 (nothing translated) - LoadAccelerators never hands
-// out a table, and WM_KEYDOWN wParam is a DuetOS KeyCode rather than a
-// Win32 VK, so there is nothing to match against. See the Load* family
-// comment for the two prerequisites.
-__declspec(dllexport) BOOL TranslateAcceleratorA(HANDLE h, HANDLE accel, void* msg)
+/* TranslateAccelerator — implemented below (after user32_post_msg_core
+ * and GetKeyState are defined). These thin wrappers forward to
+ * user32_translate_accel. */
+#define FVIRTKEY 1
+#define FSHIFT   4
+#define FCONTROL 8
+#define FALT     16
+#define WM_KEYDOWN    0x0100
+#define WM_SYSKEYDOWN 0x0104
+#define WM_COMMAND    0x0111
+
+/* In-memory accelerator table: count + pointer to raw entries. */
+typedef struct
 {
-    (void)h;
-    (void)accel;
-    (void)msg;
+    unsigned int count;
+    const unsigned char* entries; /* array of 8-byte ACCEL entries */
+} ACCEL_TABLE;
+
+/* Forward declarations — bodies appear later in this TU. */
+static BOOL user32_post_msg_core(HANDLE h, UINT msg, WPARAM w, LPARAM l);
+__declspec(dllexport) short GetKeyState(int vk);
+
+static BOOL user32_translate_accel(HANDLE hwnd, HANDLE accel, void* pmsg)
+{
+    const ACCEL_TABLE* tbl;
+    struct user32_msg_wire* m;
+    unsigned int i;
+    unsigned int vk_code;
+    unsigned int fVirt;
+    unsigned int key;
+    unsigned int cmd;
+    BOOL shift;
+    BOOL ctrl;
+    BOOL alt;
+
+    if (!accel || !pmsg)
+        return 0;
+
+    m = (struct user32_msg_wire*)pmsg;
+    /* Only WM_KEYDOWN / WM_SYSKEYDOWN are accelerator candidates. */
+    if (m->message != WM_KEYDOWN && m->message != WM_SYSKEYDOWN)
+        return 0;
+
+    tbl = (const ACCEL_TABLE*)(unsigned long long)accel;
+    if (!tbl->entries || tbl->count == 0)
+        return 0;
+
+    vk_code = (unsigned int)(m->wParam & 0xFFFF);
+    /* Query modifier state via GetKeyState. VK_SHIFT=0x10,
+     * VK_CONTROL=0x11, VK_MENU=0x12. High bit set = down. */
+    shift = (GetKeyState(0x10) & 0x8000) ? 1 : 0;
+    ctrl = (GetKeyState(0x11) & 0x8000) ? 1 : 0;
+    alt = (GetKeyState(0x12) & 0x8000) ? 1 : 0;
+
+    for (i = 0; i < tbl->count; ++i)
+    {
+        const unsigned char* e = tbl->entries + (unsigned long long)i * 8;
+        fVirt = (unsigned int)e[0] | ((unsigned int)e[1] << 8);
+        key = (unsigned int)e[2] | ((unsigned int)e[3] << 8);
+        cmd = (unsigned int)e[4] | ((unsigned int)e[5] << 8);
+
+        if (fVirt & FVIRTKEY)
+        {
+            /* VK match -- compare virtual-key code. */
+            if (key != vk_code)
+                continue;
+            /* Check modifier requirements. */
+            if (((fVirt & FSHIFT) != 0) != shift)
+                continue;
+            if (((fVirt & FCONTROL) != 0) != ctrl)
+                continue;
+            if (((fVirt & FALT) != 0) != alt)
+                continue;
+        }
+        else
+        {
+            /* ASCII character match (rare but spec'd). */
+            if (key != vk_code)
+                continue;
+        }
+        /* Match found -- post WM_COMMAND. wParam high word = 1
+         * (accelerator source), low word = cmd id. */
+        user32_post_msg_core(hwnd, WM_COMMAND,
+                             (WPARAM)(((unsigned long long)1 << 16) | (unsigned long long)cmd), 0);
+        return 1;
+    }
     return 0;
 }
-// STUB: returns 0 - see TranslateAcceleratorA.
+
+__declspec(dllexport) BOOL TranslateAcceleratorA(HANDLE h, HANDLE accel, void* msg)
+{
+    return user32_translate_accel(h, accel, msg);
+}
 __declspec(dllexport) BOOL TranslateAcceleratorW(HANDLE h, HANDLE accel, void* msg)
 {
-    (void)h;
-    (void)accel;
-    (void)msg;
-    return 0;
+    return user32_translate_accel(h, accel, msg);
 }
 
 static BOOL user32_post_msg_core(HANDLE h, UINT msg, WPARAM w, LPARAM l)
@@ -1446,40 +1524,20 @@ __declspec(dllexport) UINT GetDlgItemInt(HANDLE hDlg, int nIDDlgItem, BOOL* tran
 
 /* --- Load* family ---
  *
- * LoadStringA/W below are REAL as of the `.rsrc` parser slice. The rest
- * of this family stays stubbed, and the reason is NOT a missing parser —
- * it is a missing consumer for what the parser would produce. Walking
- * RT_ACCELERATOR / RT_GROUP_ICON / RT_BITMAP today would build a
- * decoder with no sink, which is worse than an honest NULL:
+ * LoadStringA/W are REAL as of the `.rsrc` parser slice.
+ * LoadAcceleratorsA/W are REAL as of the VK-translation slice
+ * (2026-07-29) -- defined below after pe_resources.h include.
  *
- *   accelerators — the kernel does post WM_KEYDOWN to the active PE
- *     window (kernel/core/boot_tasks.cpp), but wParam carries a DuetOS
- *     KeyCode (ps2kbd.h: kKeyF1 == 0x10A, kKeyEnter == 0x0A), not a
- *     Win32 virtual-key code (VK_F1 == 0x70, VK_RETURN == 0x0D).
- *     RT_ACCELERATOR entries store VKs, so every FVIRTKEY accelerator
- *     would mis-compare. The prerequisite is a KeyCode -> VK translation
- *     on the kernel side of the message post.
- *   icons / cursors / bitmaps — the compositor has no off-screen
- *     surface and no icon concept; SYS_GDI_CREATE_CURSOR takes a fixed
- *     12x20 three-level mask, not a DIB. Backlog item 12 (off-screen
- *     surfaces) is the prerequisite.
- *
- * Both prerequisites are recorded in wiki/reference/Roadmap.md. */
-// STUB: returns NULL - RT_ACCELERATOR is parseable but WM_KEYDOWN
-// wParam is a DuetOS KeyCode, not a Win32 VK, so nothing could match.
-__declspec(dllexport) HANDLE LoadAcceleratorsA(HANDLE h, const char* name)
-{
-    (void)h;
-    (void)name;
-    return (HANDLE)0;
-}
-// STUB: returns NULL - see LoadAcceleratorsA.
-__declspec(dllexport) HANDLE LoadAcceleratorsW(HANDLE h, const wchar_t16* name)
-{
-    (void)h;
-    (void)name;
-    return (HANDLE)0;
-}
+ * The remaining stubs (icons, cursors, bitmaps) stay stubbed:
+ *   icons / cursors / bitmaps -- the compositor has no off-screen
+ *     surface and no icon concept. */
+
+/* LoadAcceleratorsA/W -- implemented after the pe_resources.h
+ * include (see user32_load_accel below). Forward-declared here
+ * so the export list in the EAT stays ordered. */
+static HANDLE user32_load_accel(HANDLE h, unsigned int name_id);
+__declspec(dllexport) HANDLE LoadAcceleratorsA(HANDLE h, const char* name);
+__declspec(dllexport) HANDLE LoadAcceleratorsW(HANDLE h, const wchar_t16* name);
 // STUB: returns NULL - no off-screen surface for the decoded DIB to
 // live in (backlog item 12).
 __declspec(dllexport) HANDLE LoadBitmapA(HANDLE h, const char* name)
@@ -1669,6 +1727,74 @@ __declspec(dllexport) int LoadStringA(HANDLE h, UINT id, char* buf, int len)
         buf[i] = (chars[i] < 0x100u) ? (char)(unsigned char)chars[i] : '?';
     buf[i] = 0;
     return i;
+}
+
+/* --- Accelerator table implementation (after pe_resources.h) --- */
+
+/* Per-process accelerator table pool. We store up to 4 tables
+ * (most apps use one or two) statically to avoid heap allocation
+ * in user32's freestanding environment. */
+#define USER32_MAX_ACCEL_TABLES 4
+static ACCEL_TABLE g_accel_pool[USER32_MAX_ACCEL_TABLES];
+static unsigned int g_accel_pool_used = 0;
+
+static HANDLE user32_load_accel(HANDLE h, unsigned int name_id)
+{
+    DUET_RES_VIEW view;
+    DUET_RES_KEY type;
+    DUET_RES_KEY name;
+    unsigned int rva;
+    unsigned int size;
+    const unsigned char* data;
+    ACCEL_TABLE* tbl;
+
+    if (!user32_string_view(h, &view))
+        return (HANDLE)0;
+
+    type.by_name = 0;
+    type.id = DUET_RES_TYPE_ACCELERATOR;
+    type.name = (const unsigned short*)0;
+    type.name_len = 0;
+
+    name.by_name = 0;
+    name.id = name_id;
+    name.name = (const unsigned short*)0;
+    name.name_len = 0;
+
+    if (!duet_res_find(&view, &type, &name, 0, 0, &rva, &size))
+        return (HANDLE)0;
+
+    data = duet_res_at(&view, rva, size);
+    if (!data || size < 8)
+        return (HANDLE)0;
+
+    if (g_accel_pool_used >= USER32_MAX_ACCEL_TABLES)
+        return (HANDLE)0;
+
+    tbl = &g_accel_pool[g_accel_pool_used++];
+    tbl->count = size / 8;
+    tbl->entries = data;
+    return (HANDLE)(unsigned long long)tbl;
+}
+
+__declspec(dllexport) HANDLE LoadAcceleratorsA(HANDLE h, const char* name)
+{
+    /* MAKEINTRESOURCE check: high bits zero = ordinal. */
+    unsigned long long p = (unsigned long long)(const void*)name;
+    if (p < 0x10000)
+        return user32_load_accel(h, (unsigned int)p);
+    /* GAP: named (string) accelerator tables -- no real-world PE
+     * in our v0 corpus uses a named accel table, so we skip the
+     * UTF-8 -> UTF-16 name conversion for now. */
+    return (HANDLE)0;
+}
+__declspec(dllexport) HANDLE LoadAcceleratorsW(HANDLE h, const wchar_t16* name)
+{
+    unsigned long long p = (unsigned long long)(const void*)name;
+    if (p < 0x10000)
+        return user32_load_accel(h, (unsigned int)p);
+    /* GAP: named (wide-string) accelerator tables. */
+    return (HANDLE)0;
 }
 
 /* --- Cursor / clipboard --- */

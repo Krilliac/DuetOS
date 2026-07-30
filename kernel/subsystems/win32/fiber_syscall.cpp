@@ -3,7 +3,7 @@
 #include "arch/x86_64/traps.h"
 #include "log/klog.h"
 #include "mm/address_space.h"
-#include "mm/frame_alloc.h"
+#include "mm/frame_allocator.h"
 #include "mm/paging.h"
 #include "proc/process.h"
 #include "sched/sched.h"
@@ -102,15 +102,13 @@ void DoFiberCreate(arch::TrapFrame* frame)
             kva[j] = 0;
         }
         const u64 va = stack_base + i * mm::kPageSize;
-        mm::AddressSpaceMapUserPage(proc->as, va, f,
-                                    mm::kPageFlagPresent | mm::kPageFlagWritable |
-                                        mm::kPageFlagUser | mm::kPageFlagNoExecute);
+        mm::AddressSpaceMapUserPage(
+            proc->as, va, f, mm::kPageFlagPresent | mm::kPageFlagWritable | mm::kPageFlagUser | mm::kPageFlagNoExecute);
     }
     proc->vmap_pages_used += pages;
 
     // Register the fiber in the task's fiber table.
-    const u64 result = sched::CurrentTaskFiberCreate(
-        start_address, fiber_data, pages, stack_base);
+    const u64 result = sched::CurrentTaskFiberCreate(start_address, fiber_data, pages, stack_base);
     if (result == 0)
     {
         KLOG_WARN("win32/fiber", "DoFiberCreate: fiber table full");

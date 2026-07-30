@@ -1651,19 +1651,6 @@ done, it is merely written.
      1bpp transparency mask below its colour rows, and the DIB path
      refuses 1bpp by design), and a `SYS_GDI_CREATE_CURSOR` that takes
      image bits rather than a fixed 12x20 three-level mask.
-   - **Accelerators** (`LoadAccelerators`, `TranslateAccelerator`) need a
-     **KeyCode -> Win32 VK translation** first. The kernel posts
-     `WM_KEYDOWN` to the active PE window with `wParam` carrying a DuetOS
-     `KeyCode` (`ps2kbd.h`: `kKeyF1 == 0x10A`, `kKeyEnter == 0x0A`), not
-     a virtual-key code (`VK_F1 == 0x70`, `VK_RETURN == 0x0D`).
-     `RT_ACCELERATOR` stores VKs, so every `FVIRTKEY` entry would
-     mis-compare. **This is a standalone defect in the `WM_KEYDOWN`
-     contract**, not just an accelerator blocker: any PE that switches on
-     `wParam` expecting VKs is already reading wrong numbers today. Fix
-     is a translation table on the kernel side of
-     `WindowPostMessage` in `kernel/core/boot_tasks.cpp`, plus an audit
-     of the in-kernel apps that currently consume the raw KeyCodes.
-     **PROOF:** a PE that registers `Ctrl+S` and receives `WM_COMMAND`.
 3. **Side-by-side DLL loading.** A PE importing a DLL shipped beside it has
    no path at all today. The Unity launchers measure 98.5% import coverage
    with exactly ONE unresolved import (`UnityPlayer.dll!UnityMain`). Needs

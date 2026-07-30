@@ -1,0 +1,17 @@
+; userland/apps/accel_test/user32.def
+;
+; user32 import surface for the accel_test fixture.
+
+LIBRARY user32.dll
+
+EXPORTS
+    CreateWindowExA
+    DefWindowProcA
+    DispatchMessageA
+    GetKeyState
+    GetMessageA
+    PeekMessageA
+    PostMessageA
+    RegisterClassA
+    ShowWindow
+    TranslateAcceleratorA
