@@ -77,7 +77,9 @@ COMMON=(-nostdlib -ffreestanding -fno-stack-protector -mno-stack-arg-probe)
     -Wl,--out-implib,"${IMPLIB}" \
     -Wl,--image-base,0x10400000 \
     -o "${OUT_DIR}/sxslib.dll" "${DLL_SRC}"
-mv -f "${OUT_DIR}/sxslib.dll" "${DLL_OUT}"
+# Two-step rename for case-insensitive filesystems (NTFS via WSL).
+mv -f "${OUT_DIR}/sxslib.dll" "${OUT_DIR}/sxslib.dll.tmp"
+mv -f "${OUT_DIR}/sxslib.dll.tmp" "${DLL_OUT}"
 
 # The .exe. Imports resolve against the import lib at link time and
 # against the on-disk DLL at load time.
