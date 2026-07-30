@@ -43,6 +43,7 @@
 #include "util/types.h"
 #include "drivers/input/ps2kbd.h"
 #include "drivers/video/framebuffer.h"
+#include "fs/fat32.h"
 #include "fs/tmpfs.h"
 
 namespace duetos::security
@@ -106,8 +107,7 @@ constinit u32 g_allowed_count = 0;
 // pre-authorised boot for a clean one.
 constinit u32 g_cmdline_seeded = 0;
 
-// Where the exception list is stored: RamVol, not the legacy flat
-// tmpfs tier.
+// In-memory backing store: RamVol, not the legacy flat tmpfs tier.
 //
 // tmpfs slots cap at kTmpFsContentMax (512 bytes) — seven 65-byte
 // digest lines — while this table holds 256. The previous code
@@ -119,11 +119,22 @@ constinit u32 g_cmdline_seeded = 0;
 // the legacy cap can never grow and RamVol is the path instead),
 // it is quota'd, and `RamVolInit` runs long before `GuardInit`.
 //
-// NOT durable across a reboot: RamVol is RAM, and DuetOS writes to
-// disk only on a DuetOS-owned partition, which does not exist until
-// the installer has run. Cross-boot persistence is therefore the
-// cmdline seed (`guard-allow=`) until an installed system exists.
+// Cross-reboot persistence: `GUARD.DAT` on the DuetOS-owned FAT32
+// volume (see `SaveDiskExceptions` / `LoadDiskExceptions` below).
+// The disk file is loaded by `GuardLoadDiskExceptions()` after FAT32
+// is probed, and updated on every `GuardRememberAllow` /
+// `GuardForgetException`.
 constexpr const char* kAllowlistPath = "/run/guard-allowed";
+
+// On-disk exception file. Simple flat format: raw 32-byte SHA-256
+// digests concatenated. No header, no padding — the file size is
+// always a multiple of 32. Stored on the first DuetOS-owned FAT32
+// volume (kDuetOsVolumeId + "DUETOS" label).
+constexpr const char* kDiskAllowlistFile = "GUARD.DAT";
+
+// True once the on-disk file has been loaded. Prevents a second
+// load from doubling every entry.
+constinit bool g_disk_loaded = false;
 
 // Boot cmdline token that pre-authorises images without a human at
 // the console. Repeatable, and each occurrence takes a comma-
@@ -566,6 +577,140 @@ void AppendAllowedHash(const u8 h[32])
     ++g_allowed_count;
 }
 
+// ---------------------------------------------------------------
+// On-disk persistence (DuetOS-owned FAT32 volume).
+//
+// File format: raw concatenated 32-byte SHA-256 digests, no header.
+// File size is always a multiple of 32. This is the simplest
+// format that round-trips without parsing overhead — the hex-text
+// form in RamVol is human-readable but costs 2x the bytes and
+// needs line-by-line parsing; on disk the binary form is better
+// because GUARD.DAT is not meant to be hand-edited (operators use
+// the shell `guard except` surface or the interactive prompt).
+// ---------------------------------------------------------------
+
+/// Find the first DuetOS-owned FAT32 volume, or nullptr if none
+/// has been probed yet. The search runs every time rather than
+/// caching, because the volume index can shift if a volume is
+/// forgotten (e.g. after the ownership self-test's RAM disk is
+/// retracted).
+const fs::fat32::Volume* FindDuetOsVolume()
+{
+    for (u32 i = 0; i < fs::fat32::Fat32VolumeCount(); ++i)
+    {
+        const auto* v = fs::fat32::Fat32Volume(i);
+        if (fs::fat32::Fat32VolumeIsDuetOsOwned(v))
+            return v;
+    }
+    return nullptr;
+}
+
+/// Load exceptions from GUARD.DAT on the DuetOS-owned FAT32 volume.
+/// Merges into the in-memory table without duplicating entries that
+/// the RamVol or cmdline path already installed.
+void LoadDiskExceptions()
+{
+    const auto* vol = FindDuetOsVolume();
+    if (vol == nullptr)
+    {
+        arch::SerialWrite("[guard] no DuetOS-owned FAT32 volume — disk exceptions not loaded\n");
+        return;
+    }
+    fs::fat32::DirEntry entry;
+    if (!fs::fat32::Fat32LookupPath(vol, kDiskAllowlistFile, &entry))
+    {
+        arch::SerialWrite("[guard] GUARD.DAT not found on DuetOS volume — no disk exceptions\n");
+        return;
+    }
+    if (entry.size_bytes == 0)
+    {
+        arch::SerialWrite("[guard] GUARD.DAT is empty — no disk exceptions\n");
+        return;
+    }
+    // Validate file size is a multiple of 32.
+    if (entry.size_bytes % kImageDigestBytes != 0)
+    {
+        KLOG_WARN_V("security/guard", "GUARD.DAT size not a multiple of 32 — skipping disk load", entry.size_bytes);
+        return;
+    }
+    const u32 count = entry.size_bytes / kImageDigestBytes;
+    if (count > kMaxAllowed)
+    {
+        KLOG_WARN_V("security/guard", "GUARD.DAT has more entries than kMaxAllowed — capping", count);
+    }
+    // Read the file. Cap at the table capacity.
+    const u32 to_read = (count > kMaxAllowed) ? kMaxAllowed : count;
+    static u8 disk_buf[kMaxAllowed * kImageDigestBytes];
+    const i64 got = fs::fat32::Fat32ReadFile(vol, &entry, disk_buf, to_read * kImageDigestBytes);
+    if (got < 0 || static_cast<u64>(got) < to_read * kImageDigestBytes)
+    {
+        KLOG_WARN("security/guard", "GUARD.DAT read failed or short — disk exceptions not loaded");
+        return;
+    }
+    u32 loaded = 0;
+    for (u32 i = 0; i < to_read; ++i)
+    {
+        const u8* h = disk_buf + i * kImageDigestBytes;
+        if (!IsHashAllowed(h))
+        {
+            AppendAllowedHash(h);
+            ++loaded;
+        }
+    }
+    arch::SerialWrite("[guard] loaded ");
+    arch::SerialWriteHex(loaded);
+    arch::SerialWrite(" disk exceptions from GUARD.DAT (");
+    arch::SerialWriteHex(to_read);
+    arch::SerialWrite(" on disk, ");
+    arch::SerialWriteHex(to_read - loaded);
+    arch::SerialWrite(" already known)\n");
+}
+
+/// Persist the full in-memory exception list to GUARD.DAT on the
+/// DuetOS-owned FAT32 volume. Overwrites the file atomically (delete
+/// + create) so a shorter list doesn't leave stale entries. No-op
+/// if no DuetOS volume exists — the RamVol copy is still the live
+/// authority for the current boot.
+void SaveDiskExceptions()
+{
+    const auto* vol = FindDuetOsVolume();
+    if (vol == nullptr)
+        return; // no volume — can't persist; RamVol is the fallback
+    if (g_allowed_count == 0)
+    {
+        // Empty list: delete the file if it exists so a reboot doesn't
+        // reload stale entries.
+        (void)fs::fat32::Fat32DeleteInRoot(vol, kDiskAllowlistFile);
+        return;
+    }
+    // Build the binary blob: kImageDigestBytes per entry.
+    static u8 disk_buf[kMaxAllowed * kImageDigestBytes];
+    const u32 bytes = g_allowed_count * kImageDigestBytes;
+    for (u32 i = 0; i < g_allowed_count; ++i)
+    {
+        for (u32 k = 0; k < kImageDigestBytes; ++k)
+            disk_buf[i * kImageDigestBytes + k] = g_allowed_hashes[i][k];
+    }
+    // Delete + create rather than in-place overwrite: the file size
+    // may have changed (entries added or removed), and
+    // Fat32WriteInPlace rejects writes past the existing size.
+    (void)fs::fat32::Fat32DeleteInRoot(vol, kDiskAllowlistFile);
+    const i64 created = fs::fat32::Fat32CreateInRoot(vol, kDiskAllowlistFile, disk_buf, bytes);
+    if (created < 0 || static_cast<u64>(created) != bytes)
+    {
+        KLOG_WARN("security/guard", "GUARD.DAT write failed — exceptions stored in RamVol only this boot");
+    }
+    else
+    {
+        (void)fs::fat32::Fat32Sync(vol);
+    }
+}
+
+// ---------------------------------------------------------------
+// RamVol persistence (in-memory, survives for the boot but not
+// across reboots).
+// ---------------------------------------------------------------
+
 // One stored line: 64 hex chars + '\n'.
 constexpr u32 kAllowlistLineBytes = kImageDigestHexChars + 1;
 
@@ -640,6 +785,14 @@ void SaveAllowlist()
         // still authoritative for this boot; say so loudly rather
         // than letting the operator believe it was stored.
         KLOG_WARN("security/guard", "exception list not fully stored (quota or sealed) — in-memory only");
+    }
+
+    // Persist to disk so exceptions survive reboot. Best-effort:
+    // if no DuetOS volume is mounted yet (early boot) or the write
+    // fails, the RamVol copy is still authoritative for this boot.
+    if (g_disk_loaded)
+    {
+        SaveDiskExceptions();
     }
 }
 
@@ -1263,6 +1416,26 @@ const Report* GuardLastReport()
 bool GuardPromptActive()
 {
     return g_prompt_active;
+}
+
+void GuardLoadDiskExceptions()
+{
+    if (g_disk_loaded)
+    {
+        arch::SerialWrite("[guard] disk exceptions already loaded (ignored)\n");
+        return;
+    }
+    g_disk_loaded = true;
+    LoadDiskExceptions();
+
+    // Now that the disk path is live, persist whatever the RamVol /
+    // cmdline path already installed so a first-boot cmdline seed
+    // survives into the on-disk file without the operator having to
+    // re-approve on the next reboot.
+    if (g_allowed_count > 0)
+    {
+        SaveDiskExceptions();
+    }
 }
 
 void GuardInit()

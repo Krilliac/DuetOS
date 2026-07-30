@@ -148,11 +148,14 @@ bool GateThread(ImageKind kind, const char* name);
 //      allow: unknown images still hit the full heuristic path,
 //      and an unmatched Warn image is still denied on timeout.
 //
-// Storage is RamVol (`/run/guard-allowed`), which survives for the
-// life of the boot but NOT across a reboot: DuetOS writes to disk
-// only on a DuetOS-owned partition, and none exists until the
-// installer has run. Until then the boot cmdline is the durable
-// channel. See the store comment in guard.cpp.
+// Storage: RamVol (`/run/guard-allowed`) is the immediate in-memory
+// backing store, live for the duration of the boot.  Persistent
+// storage across reboots uses `GUARD.DAT` on the DuetOS-owned FAT32
+// volume (identified by `Fat32VolumeIsDuetOsOwned`).  The disk file
+// is loaded by `GuardLoadDiskExceptions()` (called after FAT32 is
+// probed) and updated on every `GuardRememberAllow` /
+// `GuardForgetException`.  The boot cmdline (`guard-allow=`) remains
+// the override channel for CI / unattended boots.
 // -------------------------------------------------------------
 
 /// Load the stored exception list (one 64-char hex SHA-256 digest
@@ -181,6 +184,14 @@ bool GuardExceptionGet(u32 index, u8 out[32]);
 /// Drop the exception at `index` and rewrite the store. Returns
 /// false if the index is out of range.
 bool GuardForgetException(u32 index);
+
+/// Load exceptions from the DuetOS-owned FAT32 volume's GUARD.DAT
+/// file. Called from boot_bringup AFTER FAT32 volumes are probed
+/// and mounted — GuardInit runs before FAT32 is available, so this
+/// is a deferred second pass. Idempotent: digests already in the
+/// in-memory list (from RamVol or cmdline) are not duplicated.
+/// Safe if no DuetOS volume exists or the file is absent.
+void GuardLoadDiskExceptions();
 
 /// Boot-time init: zero counters, seed the allow/deny tables,
 /// load the stored exception list, apply `guard-allow=` cmdline

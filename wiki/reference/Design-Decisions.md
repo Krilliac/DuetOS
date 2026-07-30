@@ -14120,3 +14120,26 @@ version is the failure mode this pins.
   fault) but leaves the page readable. Full Windows behaviour requires
   marking the page not-present (so both reads and writes fault), which
   is a separate change that touches the demand-commit path.
+
+## 2026-07-29 - Guard exceptions persist across reboot via GUARD.DAT
+
+### DD — GUARD.DAT uses binary digests, not hex text
+
+- **Context:** guard exceptions lived only in RamVol (RAM) and were lost
+  on reboot. Operators had to re-approve images via `guard-allow=` boot
+  tokens or re-answer prompts every boot.
+- **Decision:** persist exceptions to `GUARD.DAT` on the DuetOS-owned
+  FAT32 volume (identified by `Fat32VolumeIsDuetOsOwned`). The file
+  format is raw concatenated 32-byte SHA-256 digests with no header —
+  file size is always a multiple of 32. Load deferred to after FAT32
+  volumes are probed (`GuardLoadDiskExceptions` in boot_bringup.cpp);
+  save on every add/remove via delete-and-create + `Fat32Sync`.
+- **Rules out:** hex-text format on disk (costs 2x bytes for no human
+  benefit — GUARD.DAT is not hand-edited; operators use the shell
+  `guard except` surface). Also rules out a magic/version header in v0;
+  a future format change can be detected by file-size-mod-32 != 0 and
+  re-derive from the image scan.
+- **Accepted cost:** no DuetOS volume = no disk persistence (silent
+  no-op, RamVol + cmdline remain the fallback). Binary format is not
+  human-readable, but the shell `guard except` command already displays
+  the list in hex.

@@ -2627,6 +2627,14 @@ void BootBringupDevices(bool force_net_smoke)
         }
     }
 
+    // Now that FAT32 volumes are probed and mounted, load any guard
+    // exceptions persisted to GUARD.DAT on the DuetOS-owned volume.
+    // GuardInit ran long before FAT32 was available (it must be live
+    // before any image loader runs), so this is the deferred second
+    // pass that brings in the on-disk exceptions.
+    SerialWrite("[boot] Loading guard disk exceptions.\n");
+    duetos::security::GuardLoadDiskExceptions();
+
     SerialWrite("[boot] Cross-mount VfsResolve self-test.\n");
     DUETOS_BOOT_SELFTEST(duetos::fs::VfsResolveCrossMountSelfTest());
 

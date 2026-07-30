@@ -80,17 +80,30 @@ for a clean one.
 
 ### Storage and durability
 
-The list lives in RamVol at `/run/guard-allowed`, one hex digest per
-line. It survives for the life of the boot and **not across a reboot**:
-RamVol is RAM, and DuetOS writes to disk only on a DuetOS-owned
-partition, which does not exist until the installer has run (see
-[Hardware-Safety](Hardware-Safety.md)). Until an installed system
-exists, the boot cmdline is the durable channel.
+**In-memory (per-boot):** the live list lives in RamVol at
+`/run/guard-allowed`, one hex digest per line. This is the
+authoritative store for the running system.
 
-> This replaced a tmpfs-backed store that appeared to work and did not:
-> tmpfs slots cap at 512 bytes — seven digest lines — while the table
-> holds 256, so every entry past the seventh was dropped and the last
-> survivor was cut mid-digest, which made the reload skip it too.
+**On-disk (cross-reboot):** exceptions are also persisted to `GUARD.DAT`
+on the DuetOS-owned FAT32 volume (identified by BPB serial
+`kDuetOsVolumeId` + label "DUETOS"; see [Hardware-Safety](Hardware-Safety.md)).
+The file format is simple binary: raw 32-byte SHA-256 digests
+concatenated, no header. File size is always a multiple of 32.
+
+- **Load:** `GuardLoadDiskExceptions()` runs in `boot_bringup.cpp` after
+  FAT32 volumes are probed and mounted. Digests already known from the
+  RamVol or cmdline path are not duplicated.
+- **Save:** every `GuardRememberAllow` (interactive `a` prompt or shell
+  `guard except add`) and `GuardForgetException` rewrites `GUARD.DAT`
+  via delete-and-create. `Fat32Sync` flushes the write to stable media.
+- **No DuetOS volume:** if no DuetOS-owned volume exists (CI images,
+  pre-installer boots), the disk path is a silent no-op and the boot
+  cmdline (`guard-allow=`) remains the durable channel.
+
+> **Historical note.** The original store was tmpfs-backed, which capped
+> at 512 bytes (seven digest lines), silently dropped everything past
+> the seventh, and cut the last survivor mid-digest. RamVol replaced it
+> as the in-memory tier; GUARD.DAT now provides cross-reboot durability.
 
 ## Firewall exceptions
 
@@ -184,9 +197,10 @@ do anything a native DuetOS process could not — the property
 
 ## Known limits
 
-- **No cross-reboot persistence** until the installer gives us a
-  DuetOS-owned partition. Tracked as the storage note above; the boot
-  cmdline is the interim durable channel.
+- **Cross-reboot persistence requires a DuetOS-owned FAT32 volume.**
+  GUARD.DAT is written to the volume identified by `Fat32VolumeIsDuetOsOwned`.
+  CI images and pre-installer boots that lack this volume fall back to
+  the boot cmdline (`guard-allow=`) as the durable channel.
 - **No exception expiry.** An exception lasts until it is revoked or the
   machine reboots. Time-boxed grants exist for capabilities (the
   elevation broker's leases) but are not modelled here.
