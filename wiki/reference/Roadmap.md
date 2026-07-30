@@ -1631,11 +1631,12 @@ done, it is merely written.
 
 ### Tier 1 — Win32 compatibility (the first pillar)
 
-1. **SEH + C++ exception handling.** Every `throw` currently terminates the
-   process and `__try/__except` never runs. `ntdll_dispatch.c` already has
-   real `RtlUnwindEx`/`RtlVirtualUnwind`; the kernel32 rows point at no-ops
-   instead. **PROOF:** a PE that throws and catches, including a destructor
-   running during unwind, as a ring3 battery row.
+1. ~~**SEH + C++ exception handling.**~~ **LANDED 2026-07-26 (T6-05).**
+   Acceptance met: `pe-runtime` QEMU profile passes scalar catch,
+   class-reference catch, cross-frame destructor unwind, catch-all, TLS,
+   SEH, and synchronization with 51/51 boot self-tests. Remaining
+   extensions (copy-ctor catch objects, FH4, ESTypeList, rethrow) are
+   incremental — the core contract is delivered.
 2. ~~**`.rsrc` (PE resource) parser.**~~ **LANDED 2026-07-28.** The
    walker, `FindResource*` / `LoadResource` / `LockResource` /
    `SizeofResource` / `FreeResource` / `EnumResource*` and a real
@@ -1657,17 +1658,21 @@ done, it is merely written.
      `WM_COMMAND`. `KeyCode` -> Win32 VK translation table in
      `kernel/subsystems/win32/keycode_vk.h`. `accel_test` PE fixture
      in the ring3 battery.
-3. **Side-by-side DLL loading.** A PE importing a DLL shipped beside it has
-   no path at all today. The Unity launchers measure 98.5% import coverage
-   with exactly ONE unresolved import (`UnityPlayer.dll!UnityMain`). Needs
-   exe-directory tracking, recursive import resolution, guard scanning of
-   disk-loaded DLLs, and the same path reused by runtime `LoadLibrary`.
-4. **Dialog manager.** [dep: 2] Template-driven dialogs, modal loop,
-   standard controls.
-5. **Real COM.** Registry-backed CLSID to DLL resolution, `IUnknown` /
-   `QueryInterface`, apartments, in-proc servers. `ole32.c` is 32 exports in
-   one file today. Gates installers, shell integration and most DirectX
-   device-creation paths — the largest multiplier left after 1-3.
+3. ~~**Side-by-side DLL loading.**~~ **LANDED 2026-07-29.** `Process::sxs_dir`
+   tracks the exe directory; `SYS_DLL_LOAD_FROM_PATH` falls through to a
+   side-by-side resolver; recursive import resolution + security guard
+   scanning of disk-loaded DLLs shipped. BattleBit.exe + UnityPlayer.dll
+   (26 MiB, 67 imports) loads and runs. See
+   [`PE-Loader.md`](../subsystems/PE-Loader.md).
+4. ~~**Dialog manager.**~~ **LANDED 2026-07-29.** Template-driven
+   `DialogBoxIndirectParamA/W`, `CreateDialogIndirectParamA/W`, modal loop
+   with `EndDialog`, `IsDialogMessage`, `GetDlgItem`, `SetDlgItemTextA/W`,
+   `GetDlgItemTextA/W`, `SendDlgItemMessageA/W`, `CheckDlgButton`,
+   `IsDlgButtonChecked`. `dialog_smoke` PE fixture in the ring3 battery.
+5. ~~**Real COM.**~~ **LANDED 2026-07-29.** Registry-backed CLSID→DLL
+   resolution, `CoInitializeEx`, `CoCreateInstance`, `CoRegisterClassObject`,
+   `IUnknown`/`QueryInterface`, in-proc servers, apartment model. See
+   [`Win32-Surface-Status.md`](Win32-Surface-Status.md#ole32dll).
 6. ~~**Delay-load imports.**~~ **LANDED 2026-07-29.** The premise was
    wrong twice over: `__delayLoadHelper2` is linked INTO the image by
    `delayimp.lib`, not provided by the OS, and routing through it would
@@ -1682,13 +1687,22 @@ done, it is merely written.
    process and thread attach. Remaining gap is DETACH — see
    [`PE-Loader.md`](../subsystems/PE-Loader.md#tls-static-data-and-callbacks).
 8. **SxS / assembly manifests.** Many installers and MFC apps depend on it.
-9. **Console completeness.** Screen buffers, VT sequences, real
-   `ReadConsoleInput`.
-10. **Fibers.** Real fibers, not the current `Tls*` aliases.
-11. **.NET spike.** [dep: 3, 5] Do NOT write a CLR. Determine whether
-    CoreCLR can be hosted as a guest PE — that converts a multi-year feature
-    into a compatibility problem already being solved. **PROOF:** a managed
-    hello-world runs, or a written account of the exact blocker.
+9. ~~**Console completeness.**~~ **LANDED 2026-07-29.** Real
+   `GetStdHandle`, `WriteConsoleA/W`, `ReadConsoleA/W`,
+   `GetConsoleMode`/`SetConsoleMode`, `GetConsoleScreenBufferInfo`,
+   `SetConsoleCursorPosition`, `FillConsoleOutputCharacter`,
+   `SetConsoleTextAttribute`. VT sequences and `ReadConsoleInput`
+   remain GAPs.
+10. ~~**Fibers.**~~ **LANDED 2026-07-29.** Real `ConvertThreadToFiber`,
+    `CreateFiber`, `SwitchToFiber`, `DeleteFiber`, `GetFiberData`,
+    `GetCurrentFiber`, FLS (`FlsAlloc`/`FlsFree`/`FlsGetValue`/`FlsSetValue`)
+    with per-fiber storage + generation counters. `fiber_smoke` PE
+    fixture in the ring3 battery.
+11. **.NET spike.** [dep: 3, 5 — both cleared] **DEFERRED** by owner
+    (2026-07-29) — see the ".NET / CLR hosting" section above. Do NOT
+    write a CLR. Determine whether CoreCLR can be hosted as a guest PE.
+    **PROOF:** a managed hello-world runs, or a written account of the
+    exact blocker.
 
 ### Tier 2 — graphics and media
 
