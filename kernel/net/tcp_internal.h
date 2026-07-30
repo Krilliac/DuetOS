@@ -118,6 +118,11 @@ struct Tcb
     u32 snd_una;
     u32 snd_nxt;
     u32 snd_wnd;
+    // RFC 9293 SND.WL1 / SND.WL2: the sequence and acknowledgment
+    // numbers which last updated snd_wnd.  Older segments must not
+    // shrink a newer advertised receive window.
+    u32 snd_wl1;
+    u32 snd_wl2;
     u32 rcv_nxt;
     u32 rcv_wnd;
 
@@ -335,6 +340,12 @@ void SendStandaloneRst(u32 iface_index, const MacAddress& peer_mac, Ipv4Address 
 // tcp_selftest.cpp. Production callers go through OnSegment /
 // Send / Recv on the public surface.
 bool AckInWindow(u32 ack, u32 snd_una, u32 snd_nxt);
+
+/// Apply a peer advertised send window if this ACK is at least as fresh as
+/// the last accepted window update.  SYN windows are never scaled; every
+/// later segment uses the peer-negotiated RFC 7323 scale.  Exposed so the
+/// boot self-test pins the zero-window and stale-update invariants.
+bool UpdateSendWindow(Tcb& t, u32 seg_seq, u32 seg_ack, u16 raw_window, u8 flags);
 
 /// What to do with an inbound RST, per RFC 9293 §3.10.7.4 and the
 /// RFC 5961 §3.2 challenge-ACK hardening.

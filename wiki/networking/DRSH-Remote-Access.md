@@ -22,7 +22,7 @@ crypto that public-key auth needs.
 | Password KDF | PBKDF2-HMAC-SHA256, 4096 iters |
 | Auth | Mutual challenge-response over a pre-shared password |
 | Channels per session | 1 (shell **or** desktop), v0 |
-| Concurrent sessions | Up to 256 (bounded by TCP v1 TCB table). The single-session limit was retired when the kernel landed multi-connection TCP. |
+| Concurrent sessions | 1 authenticated DRSH session at a time. TCP v1 can host independent 5-tuples, but DRSH still has one global session record and one synchronous worker. |
 
 Source: [`kernel/net/drsh/`](../../kernel/net/drsh/). Shell command:
 `drshd`.
@@ -87,20 +87,20 @@ DRSH does **not** provide:
   because PMK is a deterministic function of `(password, nonce_s)`. A
   follow-up ECDHE handshake variant will land once an in-tree
   big-int + curve subsystem exists.
-- **Multi-session is hard-bounded by the kernel TCB table.** The
-  kernel's TCP v1 stack hosts up to 256 concurrent TCBs (see
-  [`TCP State Machine`](TCP-State-Machine.md)). The DRSH service
-  itself accepts on a single port; each accept lands a fresh TCB
-  on its own 5-tuple, so multiple clients can connect at once
-  without colliding. The v0 "single concurrent session" GAP that
-  used to live here has been retired.
+- **Concurrent authenticated sessions.** The kernel's TCP v1 stack
+  can host independent 5-tuples (see [`TCP State Machine`](TCP-State-Machine.md)),
+  and DRSH now accepts real on-wire TCP children, but the service still
+  owns one global `DrshSession` record and runs one synchronous channel
+  loop on the listener worker. Additional clients must wait for the current
+  session to tear down or be refused by the listener/backlog.
 
 ## Threading & Locking Model
 
 - The **accept loop** (`drsh_server.cpp`) runs in process context on a
-  worker thread, blocking on `accept` on the listener socket. Each
-  accepted connection rides its own TCB on its own 5-tuple, so multiple
-  clients connect without colliding.
+  worker thread, polling `SocketAcceptNonblocking` so `drshd stop` can
+  be observed between accept probes. Each accepted on-wire connection rides
+  its own TCB on its own 5-tuple, but the DRSH worker services only one
+  accepted session at a time.
 - Each session's **channel loop** runs synchronously on the same worker:
   it drives the handshake, then services exactly one channel (shell or
   desktop) before tearing down — there is no per-channel task, which is
@@ -227,9 +227,10 @@ frame — input is responsive, redraws are batched.
 These are intentional, documented limits. Each one points at a
 future slice that lifts it.
 
-- ~~**Single concurrent on-wire session.**~~ Lifted by TCP v1
-  (2026-05-12) — the kernel now hosts up to 256 concurrent
-  connections via the TCB table.
+- **Single authenticated DRSH session.** TCP v1 lifted the old single-slot
+  wire limit, and DRSH can now accept real TCP children, but per-session
+  task/state allocation is still needed before multiple authenticated
+  clients can run concurrently.
 - **Pre-shared key only.** No public-key auth. Lifted by adding
   ECDHE on top of an in-tree curve25519 implementation.
 - **Single channel per session.** The service runs the channel
@@ -246,12 +247,12 @@ future slice that lifts it.
 
 `DrshSelfTest()` runs at boot, derives session keys from a known
 PMK + nonces, encrypt-then-MACs a 13-byte message through an
-in-memory transport, and verifies the decrypt + MAC-check returns
-the original plaintext. Emits one explicit `PASS` line so CI can
-grep for it:
+in-memory transport, verifies the decrypt + MAC-check returns the original
+plaintext, and covers the brute-force lockout state machine. Emits one
+explicit `PASS` line so CI can grep for it:
 
 ```
-[net/drsh-selftest] PASS (frame round-trip)
+[net/drsh-selftest] PASS (frame round-trip + lockout)
 ```
 
 ## Reading the source

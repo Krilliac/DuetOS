@@ -194,6 +194,14 @@ bool SocketListen(u32 idx, u32 backlog);
 /// Returns the new socket pool index (refs=1), or -1 on bad listener.
 i32 SocketAccept(u32 listener_idx, Ipv4Address* out_peer_ip, u16* out_peer_port);
 
+/// Probe both the loopback and TCP accept queues without blocking. Returns
+/// a new socket pool index (refs=1), -11 when no child is ready yet, or -1
+/// when `listener_idx` is no longer a valid stream listener.
+///
+/// Kernel services which own a cancellation flag use this rather than the
+/// blocking SocketAccept so a stop request can be observed promptly.
+i32 SocketAcceptNonblocking(u32 listener_idx, Ipv4Address* out_peer_ip, u16* out_peer_port);
+
 /// Non-blocking probe of the listener's loopback accept queue.
 /// Returns the accepted socket's pool index when a paired
 /// connector is pending (T3-01 loopback path), -1 otherwise.

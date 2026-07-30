@@ -522,6 +522,43 @@ u32 EffectiveSendWindow(const Tcb& t, u32 extra_cwnd)
     return (t.snd_wnd < eff_cwnd) ? t.snd_wnd : eff_cwnd;
 }
 
+// RFC 7323 §2.3: a SYN advertises an unscaled receive window.  Once the
+// handshake is underway, every non-SYN segment's window is scaled by the
+// peer's advertised shift count (including the final ACK of a passive open).
+u32 DecodePeerWindow(const Tcb& t, u16 raw_window, u8 flags)
+{
+    const u8 shift = ((flags & kFlagSyn) == 0 && t.peer_supports_wscale) ? t.snd_wscale : 0;
+    return u32(raw_window) << shift;
+}
+
+DUETOS_NO_SANITIZE_WRAP bool SeqGt(u32 a, u32 b)
+{
+    return static_cast<i32>(a - b) > 0;
+}
+
+DUETOS_NO_SANITIZE_WRAP bool SeqGeq(u32 a, u32 b)
+{
+    return static_cast<i32>(a - b) >= 0;
+}
+
+bool UpdateSendWindow(Tcb& t, u32 seg_seq, u32 seg_ack, u16 raw_window, u8 flags)
+{
+    if ((flags & kFlagAck) == 0)
+        return false;
+
+    // RFC 9293 §3.10.7.3: accept the advertised window only when the
+    // segment is newer than SND.WL1, or comes from the same sequence point
+    // and acknowledges at least as much as SND.WL2.  This preserves a real
+    // zero window while rejecting stale attempts to close an open one.
+    if (!SeqGt(seg_seq, t.snd_wl1) && (seg_seq != t.snd_wl1 || !SeqGeq(seg_ack, t.snd_wl2)))
+        return false;
+
+    t.snd_wnd = DecodePeerWindow(t, raw_window, flags);
+    t.snd_wl1 = seg_seq;
+    t.snd_wl2 = seg_ack;
+    return true;
+}
+
 // PAWS stale-segment test (RFC 7323 §5.3). See the header declaration.
 bool PawsReject(const Tcb& t, u32 seg_tsval, u8 flags, bool has_timestamp)
 {
@@ -1039,10 +1076,6 @@ void DeliverSegment(u32 idx, const MacAddress& peer_mac, Ipv4Address peer_ip, co
     // Refresh peer MAC (might've changed if the router learned a
     // new neighbor entry while we were idle).
     t.peer_mac = peer_mac;
-    // Snd_wnd update — always, even on a duplicate ACK.
-    const u8 ws = t.peer_supports_wscale ? t.snd_wscale : 0;
-    t.snd_wnd = u32(win) << ws;
-
     // Sender-side SACK scoreboard (RFC 2018 receipt / RFC 6675).
     // Parse any SACK blocks the peer attached, mark the matching
     // rtx_queue segments, and refresh the hole list the recovery
@@ -1075,6 +1108,12 @@ void DeliverSegment(u32 idx, const MacAddress& peer_mac, Ipv4Address peer_ip, co
                 t.mss_send = po.mss;
             // Mark our SYN as acked.
             t.snd_una = ack;
+            // SYN windows are unscaled (RFC 7323 §2.3).  Seed the
+            // freshness pair from this accepted SYN+ACK so later stale
+            // ACKs cannot overwrite the peer's advertised window.
+            t.snd_wnd = DecodePeerWindow(t, win, flags);
+            t.snd_wl1 = seq;
+            t.snd_wl2 = ack;
             t.sack_high = ack; // seed the SACK scoreboard at snd_una.
             t.rtx_count = 0;
             for (u32 i = 0; i < kRtxQueueMax; ++i)
@@ -1102,6 +1141,7 @@ void DeliverSegment(u32 idx, const MacAddress& peer_mac, Ipv4Address peer_ip, co
     {
         if ((flags & kFlagAck) != 0 && AckInWindow(ack, t.snd_una, t.snd_nxt))
         {
+            (void)UpdateSendWindow(t, seq, ack, win, flags);
             t.snd_una = ack;
             t.sack_high = ack; // seed the SACK scoreboard at snd_una.
             t.rtx_count = 0;
@@ -1125,6 +1165,11 @@ void DeliverSegment(u32 idx, const MacAddress& peer_mac, Ipv4Address peer_ip, co
     {
         if (AckInWindow(ack, t.snd_una, t.snd_nxt))
         {
+            // A valid ACK may reopen a previously-zero peer window or free
+            // congestion-window space.  Resume queued transmission here;
+            // merely waking a writer is insufficient because a caller which
+            // already queued bytes has no reason to call Send again.
+            (void)UpdateSendWindow(t, seq, ack, win, flags);
             // ECN data plane (RFC 3168 §6.1.2-§6.1.5) — synchronized
             // states only, AFTER segment acceptability (ACK in window).
             // Processing ECN before the acceptability gate let a single
@@ -1285,6 +1330,11 @@ void DeliverSegment(u32 idx, const MacAddress& peer_mac, Ipv4Address peer_ip, co
                 DropTcb(idx);
                 return;
             }
+            // RFC 6675's pipe-driven recovery owns its own transmit loop;
+            // all other valid ACKs must retry queued data after their ACK /
+            // window update has been processed.
+            if (!(t.peer_supports_sack && t.in_fast_recovery))
+                DrainSendBuffer(t);
         }
     }
 
@@ -1408,6 +1458,8 @@ void HandleListenSyn(u32 listener_idx, u32 iface_index, const MacAddress& peer_m
     child.iss = GenIsn(child.local_ip, child.local_port, child.peer_ip, child.peer_port);
     child.snd_una = child.iss;
     child.snd_nxt = child.iss + 1;
+    child.snd_wl1 = peer_seq;
+    child.snd_wl2 = 0;
     child.irs = peer_seq;
     child.rcv_nxt = peer_seq + 1;
     child.mss_send = (po.mss > 0 && po.mss < kDefaultMss) ? po.mss : kDefaultMss;

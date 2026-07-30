@@ -254,6 +254,8 @@ void ResetTcbStorage(Tcb& t)
     t.snd_una = 0;
     t.snd_nxt = 0;
     t.snd_wnd = 65535;
+    t.snd_wl1 = 0;
+    t.snd_wl2 = 0;
     t.rcv_nxt = 0;
     t.rcv_wnd = kRcvBufBytes;
     t.snd_wscale = 0;
