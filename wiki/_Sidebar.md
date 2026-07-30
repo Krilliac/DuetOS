@@ -56,6 +56,9 @@
 - [VirtIO Devices](drivers/Virtio.md)
 - [Power Management](drivers/Power-Management.md)
 
+### Graphics
+- [GPU Graphics Techniques Part 1](graphics/GPU-Graphics-Techniques-Part1.md)
+
 ### Subsystems
 - [Win32 PE Subsystem](subsystems/Win32-PE-Subsystem.md)
 - [PE Loader](subsystems/PE-Loader.md)
