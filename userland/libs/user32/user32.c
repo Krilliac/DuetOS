@@ -49,8 +49,11 @@ typedef void* HANDLE;
 #define SYS_WIN_GET_KEYSTATE 77
 #define SYS_WIN_GET_CURSOR 78
 #define SYS_WIN_SET_CURSOR 79
+#define SYS_GDI_CREATE_COMPAT_BITMAP 107
 #define SYS_GDI_SET_CURSOR 174
 #define SYS_GDI_CREATE_CURSOR 175
+#define SYS_GDI_SET_DIBITS 214
+#define SYS_GDI_CREATE_CURSOR_RGBA 224
 
 /* GdiCursorShape — keep in sync with kernel/syscall/syscall.h. */
 #define DUETOS_CURSOR_ARROW 0
@@ -402,12 +405,12 @@ __declspec(dllexport) BOOL TranslateMessage(const void* msg)
  * and GetKeyState are defined). These thin wrappers forward to
  * user32_translate_accel. */
 #define FVIRTKEY 1
-#define FSHIFT   4
+#define FSHIFT 4
 #define FCONTROL 8
-#define FALT     16
-#define WM_KEYDOWN    0x0100
+#define FALT 16
+#define WM_KEYDOWN 0x0100
 #define WM_SYSKEYDOWN 0x0104
-#define WM_COMMAND    0x0111
+#define WM_COMMAND 0x0111
 
 /* In-memory accelerator table: count + pointer to raw entries. */
 typedef struct
@@ -480,8 +483,7 @@ static BOOL user32_translate_accel(HANDLE hwnd, HANDLE accel, void* pmsg)
         }
         /* Match found -- post WM_COMMAND. wParam high word = 1
          * (accelerator source), low word = cmd id. */
-        user32_post_msg_core(hwnd, WM_COMMAND,
-                             (WPARAM)(((unsigned long long)1 << 16) | (unsigned long long)cmd), 0);
+        user32_post_msg_core(hwnd, WM_COMMAND, (WPARAM)(((unsigned long long)1 << 16) | (unsigned long long)cmd), 0);
         return 1;
     }
     return 0;
@@ -1522,15 +1524,24 @@ __declspec(dllexport) UINT GetDlgItemInt(HANDLE hDlg, int nIDDlgItem, BOOL* tran
     return 0;
 }
 
+/* pe_resources.h is needed by LoadIcon/LoadCursor below (the canonical
+ * include is near LoadString but these decoders come first). */
+#include "../common/pe_resources.h"
+
+static const void* user32_exe_base(void);
+static int user32_string_view(HANDLE h, DUET_RES_VIEW* view);
+
 /* --- Load* family ---
  *
  * LoadStringA/W are REAL as of the `.rsrc` parser slice.
+ * LoadIconA/W are REAL: decode RT_GROUP_ICON -> RT_ICON from .rsrc,
+ * create a GDI bitmap via SYS_GDI_CREATE_COMPAT_BITMAP + SET_DIBITS.
+ * LoadCursorA/W are REAL for system cursors (IDC_*); for PE cursors
+ * they decode RT_GROUP_CURSOR -> RT_CURSOR and register via
+ * SYS_GDI_CREATE_CURSOR_RGBA.
+ * LoadImageA/W dispatch by type to LoadIcon/LoadCursor/LoadBitmap.
  * LoadAcceleratorsA/W are REAL as of the VK-translation slice
- * (2026-07-29) -- defined below after pe_resources.h include.
- *
- * The remaining stubs (icons, cursors, bitmaps) stay stubbed:
- *   icons / cursors / bitmaps -- the compositor has no off-screen
- *     surface and no icon concept. */
+ * (2026-07-29) -- defined below after pe_resources.h include. */
 
 /* LoadAcceleratorsA/W -- implemented after the pe_resources.h
  * include (see user32_load_accel below). Forward-declared here
@@ -1553,69 +1564,175 @@ __declspec(dllexport) HANDLE LoadBitmapW(HANDLE h, const wchar_t16* name)
     (void)name;
     return (HANDLE)0;
 }
-/* LoadCursor — return the IDC_* sentinel as the HCURSOR so a
- * subsequent SetCursor can decode which shape was requested.
- * The kernel doesn't track HCURSOR identity; the value is just
- * the round-trip key.
- *
- * `name` here is the MAKEINTRESOURCE-style integer cast to a
- * char*; values < 0x10000 are the well-known IDC_* IDs. v1
- * recognises only those; named cursors return IDC_ARROW. */
+/* LoadCursor — for NULL hInstance, return the IDC_* sentinel as the
+ * HCURSOR so a subsequent SetCursor can decode which shape was requested.
+ * For a PE hInstance, decode RT_GROUP_CURSOR from .rsrc and register via
+ * SYS_GDI_CREATE_CURSOR_RGBA. */
+static HANDLE user32_load_cursor_impl(HANDLE h, unsigned long name_id)
+{
+    /* System cursor (hInstance == NULL) — return IDC_* sentinel. */
+    if (h == (HANDLE)0)
+    {
+        if (name_id == 0 || name_id > 0xFFFF)
+            return (HANDLE)(unsigned long long)IDC_ARROW;
+        return (HANDLE)(unsigned long long)name_id;
+    }
+    /* PE cursor — decode from .rsrc. */
+    if (name_id == 0 || name_id > 0xFFFF)
+        return (HANDLE)(unsigned long long)IDC_ARROW;
+    {
+        DUET_RES_VIEW view;
+        unsigned int cursor_id = 0;
+        unsigned int cw = 0, ch = 0;
+        if (!user32_string_view(h, &view))
+            return (HANDLE)(unsigned long long)IDC_ARROW;
+        if (!duet_res_pick_icon(&view, DUET_RES_TYPE_GROUP_CURSOR, name_id, 32, 32, &cursor_id, &cw, &ch))
+            return (HANDLE)(unsigned long long)IDC_ARROW;
+        if (cw == 0 || ch == 0 || cw > 256 || ch > 256)
+            return (HANDLE)(unsigned long long)IDC_ARROW;
+        {
+            /* Decode the RT_CURSOR body to BGRA pixels on the stack.
+             * Max 256*256*4 = 256KB — within PE stack limits. For large
+             * cursors, cap at 64x64 to keep stack usage sane. */
+            unsigned int use_w = cw > 64 ? 64 : cw;
+            unsigned int use_h = ch > 64 ? 64 : ch;
+            unsigned char bgra[64 * 64 * 4];
+            unsigned int x_hot = 0, y_hot = 0;
+            if (!duet_res_decode_icon(&view, DUET_RES_TYPE_CURSOR, cursor_id, use_w, use_h, bgra, 64 * 64, &x_hot,
+                                      &y_hot))
+                return (HANDLE)(unsigned long long)IDC_ARROW;
+            /* Register via SYS_GDI_CREATE_CURSOR_RGBA. */
+            {
+                long long result;
+                unsigned long long packed_dim = (unsigned long long)use_w | ((unsigned long long)use_h << 16);
+                unsigned long long packed_hot =
+                    (unsigned long long)(x_hot & 0xFF) | ((unsigned long long)(y_hot & 0xFF) << 8);
+                asm volatile("syscall"
+                             : "=a"(result)
+                             : "a"((long long)SYS_GDI_CREATE_CURSOR_RGBA), "D"((long long)(unsigned long long)bgra),
+                               "S"((long long)packed_dim), "d"((long long)packed_hot)
+                             : "memory", "rcx", "r11");
+                if (result > 0)
+                    return (HANDLE)(unsigned long long)result;
+            }
+        }
+    }
+    return (HANDLE)(unsigned long long)IDC_ARROW;
+}
+
 __declspec(dllexport) HANDLE LoadCursorA(HANDLE h, const char* name)
 {
-    (void)h;
     unsigned long id = (unsigned long)(unsigned long long)name;
-    if (id == 0 || id > 0xFFFF)
-        return (HANDLE)(unsigned long long)IDC_ARROW;
-    return (HANDLE)(unsigned long long)id;
+    return user32_load_cursor_impl(h, id);
 }
 __declspec(dllexport) HANDLE LoadCursorW(HANDLE h, const wchar_t16* name)
 {
-    (void)h;
     unsigned long id = (unsigned long)(unsigned long long)name;
-    if (id == 0 || id > 0xFFFF)
-        return (HANDLE)(unsigned long long)IDC_ARROW;
-    return (HANDLE)(unsigned long long)id;
+    return user32_load_cursor_impl(h, id);
 }
-/* LoadIcon returns a non-NULL sentinel rather than NULL because
- * RegisterClassEx callers routinely treat a NULL hIcon as a fatal
- * startup error, and the class's icon is never drawn anywhere. */
-// STUB: returns a constant sentinel, not a decoded icon - the
-// compositor has no icon sink (backlog item 12).
+
+/* LoadIcon — for NULL hInstance, return a non-NULL sentinel (system icon).
+ * For a PE hInstance, decode RT_GROUP_ICON from .rsrc into a GDI bitmap
+ * (SYS_GDI_CREATE_COMPAT_BITMAP + SYS_GDI_SET_DIBITS) and return that
+ * as the HICON. */
+static HANDLE user32_load_icon_impl(HANDLE h, unsigned long name_id)
+{
+    /* System icon (hInstance == NULL) — return sentinel. */
+    if (h == (HANDLE)0)
+        return (HANDLE)1; /* non-NULL sentinel for RegisterClassEx */
+    /* PE icon — decode from .rsrc. */
+    if (name_id == 0 || name_id > 0xFFFF)
+        return (HANDLE)1;
+    {
+        DUET_RES_VIEW view;
+        unsigned int icon_id = 0;
+        unsigned int iw = 0, ih = 0;
+        if (!user32_string_view(h, &view))
+            return (HANDLE)1;
+        if (!duet_res_pick_icon(&view, DUET_RES_TYPE_GROUP_ICON, name_id, 32, 32, &icon_id, &iw, &ih))
+            return (HANDLE)1;
+        if (iw == 0 || ih == 0 || iw > 64 || ih > 64)
+            return (HANDLE)1;
+        {
+            unsigned char bgra[64 * 64 * 4];
+            if (!duet_res_decode_icon(&view, DUET_RES_TYPE_ICON, icon_id, iw, ih, bgra, 64 * 64, (unsigned int*)0,
+                                      (unsigned int*)0))
+                return (HANDLE)1;
+            /* Create a GDI bitmap and upload the decoded pixels. */
+            {
+                long long bmp_h;
+                asm volatile("syscall"
+                             : "=a"(bmp_h)
+                             : "a"((long long)SYS_GDI_CREATE_COMPAT_BITMAP),
+                               "D"((long long)0), /* hdc — 0 for screen-compat */
+                               "S"((long long)iw), "d"((long long)ih)
+                             : "memory", "rcx", "r11");
+                if (bmp_h == 0)
+                    return (HANDLE)1;
+                /* Upload BGRA pixels via SYS_GDI_SET_DIBITS. The kernel
+                 * expects: rdi=bitmap_handle, rsi=pixels, rdx=width,
+                 * r10=height, r8=bpp(32), r9=stride. */
+                {
+                    long long set_r;
+                    unsigned long long stride = (unsigned long long)(iw * 4);
+                    register long long r10 asm("r10") = (long long)ih;
+                    register long long r8 asm("r8") = (long long)32;
+                    register long long r9 asm("r9") = (long long)stride;
+                    asm volatile("syscall"
+                                 : "=a"(set_r)
+                                 : "a"((long long)SYS_GDI_SET_DIBITS), "D"((long long)(unsigned long long)bmp_h),
+                                   "S"((long long)(unsigned long long)bgra), "d"((long long)iw), "r"(r10), "r"(r8),
+                                   "r"(r9)
+                                 : "memory", "rcx", "r11");
+                    (void)set_r;
+                }
+                return (HANDLE)(unsigned long long)bmp_h;
+            }
+        }
+    }
+}
+
 __declspec(dllexport) HANDLE LoadIconA(HANDLE h, const char* name)
 {
-    (void)h;
-    (void)name;
-    return (HANDLE)1;
+    unsigned long id = (unsigned long)(unsigned long long)name;
+    return user32_load_icon_impl(h, id);
 }
-// STUB: returns a constant sentinel - see LoadIconA.
 __declspec(dllexport) HANDLE LoadIconW(HANDLE h, const wchar_t16* name)
 {
-    (void)h;
-    (void)name;
-    return (HANDLE)1;
+    unsigned long id = (unsigned long)(unsigned long long)name;
+    return user32_load_icon_impl(h, id);
 }
-// STUB: returns NULL - see LoadBitmapA.
+
+/* LoadImage — unified loader. Dispatches by type. */
+#define IMAGE_BITMAP 0
+#define IMAGE_ICON 1
+#define IMAGE_CURSOR 2
+
 __declspec(dllexport) HANDLE LoadImageA(HANDLE h, const char* name, UINT t, int w, int ht, UINT flags)
 {
-    (void)h;
-    (void)name;
-    (void)t;
     (void)w;
     (void)ht;
     (void)flags;
-    return (HANDLE)0;
+    /* GAP: LR_DEFAULTSIZE, LR_SHARED, LR_LOADFROMFILE not implemented — revisit when file-load is needed. */
+    if (t == IMAGE_ICON)
+        return LoadIconA(h, name);
+    if (t == IMAGE_CURSOR)
+        return LoadCursorA(h, name);
+    /* IMAGE_BITMAP falls through to LoadBitmap stub. */
+    return LoadBitmapA(h, name);
 }
-// STUB: returns NULL - see LoadBitmapA.
+
 __declspec(dllexport) HANDLE LoadImageW(HANDLE h, const wchar_t16* name, UINT t, int w, int ht, UINT flags)
 {
-    (void)h;
-    (void)name;
-    (void)t;
     (void)w;
     (void)ht;
     (void)flags;
-    return (HANDLE)0;
+    /* GAP: LR_DEFAULTSIZE, LR_SHARED, LR_LOADFROMFILE not implemented — revisit when file-load is needed. */
+    if (t == IMAGE_ICON)
+        return LoadIconW(h, (const wchar_t16*)name);
+    if (t == IMAGE_CURSOR)
+        return LoadCursorW(h, name);
+    return LoadBitmapW(h, (const wchar_t16*)name);
 }
 __declspec(dllexport) HANDLE LoadMenuA(HANDLE h, const char* name)
 {

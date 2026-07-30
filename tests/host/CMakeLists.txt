@@ -318,6 +318,11 @@ target_compile_options(test_kernel32_nls PRIVATE -Wno-conversion -Wno-sign-conve
 add_host_test(pe_resources)
 target_compile_options(test_pe_resources PRIVATE -Wno-conversion -Wno-sign-conversion)
 
+# Icon / cursor decoder (duet_res_pick_icon, duet_res_decode_icon).
+# Synthetic PE with hand-crafted RT_GROUP_ICON + RT_ICON resources.
+add_host_test(pe_icon_decode)
+target_compile_options(test_pe_icon_decode PRIVATE -Wno-conversion -Wno-sign-conversion)
+
 # Delay-load import descriptor walk (kernel/loader/pe_delay_import.h):
 # the directory-head bound, per-descriptor truncation, the all-zero
 # terminator, and every form the binder must refuse rather than trust.

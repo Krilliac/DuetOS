@@ -692,4 +692,51 @@ void CursorSetShapeCustom(u32 custom_id)
     }
 }
 
+u32 CursorRegisterCustomRgba(const u32* rgba, u32 w, u32 h, u8 x_hot, u8 y_hot)
+{
+    if (rgba == nullptr || w == 0 || h == 0)
+        return 0;
+    // Scale hotspot to 12x20 coordinate space.
+    const u8 scaled_xhot = static_cast<u8>((static_cast<u32>(x_hot) * kCursorWidth) / w);
+    const u8 scaled_yhot = static_cast<u8>((static_cast<u32>(y_hot) * kCursorHeight) / h);
+    // Nearest-neighbour resample to the fixed 12x20 mask format.
+    u8 mask[kCursorHeight * kCursorWidth];
+    for (u32 dy = 0; dy < kCursorHeight; ++dy)
+    {
+        const u32 sy = (dy * h) / kCursorHeight;
+        for (u32 dx = 0; dx < kCursorWidth; ++dx)
+        {
+            const u32 sx = (dx * w) / kCursorWidth;
+            const u32 pixel = rgba[sy * w + sx]; // BGRA or ARGB — alpha is byte 3
+            const u8 alpha = static_cast<u8>(pixel >> 24);
+            mask[dy * kCursorWidth + dx] = (alpha > 128) ? 2 : 0; // 2 = fill, 0 = transparent
+        }
+    }
+    // Synthesise outline: any fill pixel adjacent to a transparent pixel
+    // gets an outline neighbour (value 1).
+    u8 outline[kCursorHeight * kCursorWidth];
+    for (u32 i = 0; i < kCursorHeight * kCursorWidth; ++i)
+        outline[i] = mask[i];
+    for (u32 dy = 0; dy < kCursorHeight; ++dy)
+    {
+        for (u32 dx = 0; dx < kCursorWidth; ++dx)
+        {
+            if (mask[dy * kCursorWidth + dx] != 0)
+                continue; // only transparent pixels become outline
+            bool adj_fill = false;
+            if (dx > 0 && mask[dy * kCursorWidth + dx - 1] == 2)
+                adj_fill = true;
+            if (dx + 1 < kCursorWidth && mask[dy * kCursorWidth + dx + 1] == 2)
+                adj_fill = true;
+            if (dy > 0 && mask[(dy - 1) * kCursorWidth + dx] == 2)
+                adj_fill = true;
+            if (dy + 1 < kCursorHeight && mask[(dy + 1) * kCursorWidth + dx] == 2)
+                adj_fill = true;
+            if (adj_fill)
+                outline[dy * kCursorWidth + dx] = 1;
+        }
+    }
+    return CursorRegisterCustom(outline, scaled_xhot, scaled_yhot);
+}
+
 } // namespace duetos::drivers::video

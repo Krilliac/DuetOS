@@ -1,0 +1,11 @@
+/*
+ * userland/apps/icon_smoke/icon_smoke.rc — the resource script compiled
+ * into icon_smoke.exe by windres.
+ *
+ * Defines a single 16x16 icon at id 1. The .ico file is generated at
+ * build time by gen_icon.py (a solid-blue 16x16 32bpp square). The
+ * fixture's LoadIconW(hInst, MAKEINTRESOURCE(1)) proves the
+ * RT_GROUP_ICON -> RT_ICON decoder works against windres output.
+ */
+
+1 ICON "icon_smoke.ico"

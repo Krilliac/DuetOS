@@ -154,6 +154,14 @@ constexpr u32 kCustomCursorIdBase = 256;
 constexpr u32 kCustomCursorMax = 16;
 u32 CursorRegisterCustom(const u8* mask_240, u8 x_hot, u8 y_hot);
 
+/// Register a custom cursor from an RGBA pixel buffer of arbitrary
+/// dimensions. The image is nearest-neighbour sampled down to the
+/// internal 12x20 sprite size and converted to the 3-level mask
+/// format (alpha > 128 → fill, else transparent; outline is
+/// synthesised on edges). Returns a slot id (>= 256) or 0 on
+/// failure (table full / null pixels / zero dimensions).
+u32 CursorRegisterCustomRgba(const u32* rgba, u32 w, u32 h, u8 x_hot, u8 y_hot);
+
 /// Switch to a custom sprite previously registered via
 /// CursorRegisterCustom. Out-of-range / unregistered ids fall
 /// back to Arrow. Same change-gate semantics as CursorSetShape.

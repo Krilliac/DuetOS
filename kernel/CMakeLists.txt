@@ -656,6 +656,63 @@ else()
 endif()
 list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_RSRC_PE_HEADER}")
 
+# icon_smoke.exe — PE32 test for the icon resource loading path.
+# gen_icon.py produces a minimal 16x16 .ico at build time, windres
+# compiles icon_smoke.rc (which references the .ico) into a COFF
+# resource object, and mingw-gcc links the final PE with a genuine
+# RT_GROUP_ICON + RT_ICON .rsrc section.
+set(DUETOS_ICON_SMOKE_SRC "${CMAKE_SOURCE_DIR}/userland/apps/icon_smoke/icon_smoke.c")
+set(DUETOS_ICON_SMOKE_RC "${CMAKE_SOURCE_DIR}/userland/apps/icon_smoke/icon_smoke.rc")
+set(DUETOS_ICON_SMOKE_ICO "${CMAKE_CURRENT_BINARY_DIR}/icon_smoke.ico")
+set(DUETOS_ICON_SMOKE_RES "${CMAKE_CURRENT_BINARY_DIR}/icon_smoke.res.o")
+set(DUETOS_ICON_SMOKE_EXE "${CMAKE_CURRENT_BINARY_DIR}/icon_smoke.exe")
+set(DUETOS_ICON_SMOKE_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_icon_smoke_pe.h")
+if(MINGW_W64_I686_GCC AND MINGW_W64_I686_WINDRES)
+    add_custom_command(
+        OUTPUT "${DUETOS_ICON_SMOKE_ICO}"
+        COMMAND python3 "${CMAKE_SOURCE_DIR}/userland/apps/icon_smoke/gen_icon.py"
+                "${DUETOS_ICON_SMOKE_ICO}"
+        DEPENDS "${CMAKE_SOURCE_DIR}/userland/apps/icon_smoke/gen_icon.py"
+        COMMENT "Generating 16x16 icon_smoke.ico"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${DUETOS_ICON_SMOKE_RES}"
+        COMMAND "${MINGW_W64_I686_WINDRES}" -O coff
+                -I "${CMAKE_CURRENT_BINARY_DIR}"
+                -o "${DUETOS_ICON_SMOKE_RES}" "${DUETOS_ICON_SMOKE_RC}"
+        DEPENDS "${DUETOS_ICON_SMOKE_RC}" "${DUETOS_ICON_SMOKE_ICO}"
+        COMMENT "Compiling icon_smoke.rc (windres -> COFF .rsrc)"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${DUETOS_ICON_SMOKE_EXE}"
+        COMMAND "${MINGW_W64_I686_GCC}"
+                -nostdlib -ffreestanding -fno-stack-protector -mno-stack-arg-probe
+                -e _mainCRTStartup -Wl,--subsystem,console -Wl,--entry,_mainCRTStartup
+                -o "${DUETOS_ICON_SMOKE_EXE}" "${DUETOS_ICON_SMOKE_SRC}" "${DUETOS_ICON_SMOKE_RES}"
+                -lkernel32 -luser32
+        DEPENDS "${DUETOS_ICON_SMOKE_SRC}" "${DUETOS_ICON_SMOKE_RES}"
+        COMMENT "Cross-compiling icon_smoke.exe (i386 PE32 with icon .rsrc)"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${DUETOS_ICON_SMOKE_HEADER}"
+        COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
+                "${DUETOS_ICON_SMOKE_EXE}" "${DUETOS_ICON_SMOKE_HEADER}"
+                kBinIconSmokeBytes --namespace "duetos::fs::generated"
+        DEPENDS "${DUETOS_ICON_SMOKE_EXE}" "${DUETOS_EMBED_BLOB_SCRIPT}"
+        COMMENT "Embedding icon_smoke PE"
+        VERBATIM)
+else()
+    add_custom_command(
+        OUTPUT "${DUETOS_ICON_SMOKE_HEADER}"
+        COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}" --empty
+                "${DUETOS_ICON_SMOKE_HEADER}"
+                kBinIconSmokeBytes --namespace "duetos::fs::generated"
+        DEPENDS "${DUETOS_EMBED_BLOB_SCRIPT}"
+        COMMENT "Emitting icon_smoke PE stub (i686 mingw or windres absent)"
+        VERBATIM)
+endif()
+list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_ICON_SMOKE_HEADER}")
+
 # pe32_miss.exe — PE32 that calls an unresolved Win32 import to
 # validate the 32-bit Win32 thunks page. The import (user32!
 # SetWindowsHookExA) is NOT in our v0 user32_32 stubs, so the

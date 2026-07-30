@@ -588,4 +588,312 @@ DUET_RES_INLINE int duet_res_find_string(const DUET_RES_VIEW* view, unsigned int
     return 0;
 }
 
+/* ---- Icon / cursor resource decoding ----
+ *
+ * RT_GROUP_ICON (14) contains a 6-byte header + N GRPICONDIRENTRY
+ * records, each 14 bytes:
+ *   u8  bWidth, bHeight (0 means 256)
+ *   u8  bColorCount, bReserved
+ *   u16 wPlanes, wBitCount
+ *   u32 dwBytesInRes
+ *   u16 nID              <-- RT_ICON resource integer ID
+ *
+ * RT_ICON (3) contains a BITMAPINFOHEADER (40 bytes minimum) followed
+ * by the XOR colour rows (bottom-up DIB) and then the 1bpp AND mask
+ * rows (also bottom-up, DWORD-aligned).
+ *
+ * RT_GROUP_CURSOR (12) / RT_CURSOR (1) use the same layout but the
+ * GRPCURSORDIRENTRY swaps planes/bitCount for xHotspot/yHotspot, and
+ * the RT_CURSOR body prepends a 4-byte hotspot header before the
+ * BITMAPINFOHEADER.
+ *
+ * Provenance: PE/COFF spec section 6.9, MSDN NEWHEADER / RESDIR /
+ * CURSORDIR documentation. Added 2026-07-29. */
+
+#define DUET_RES_GRPICON_HEADER_SIZE 6u
+#define DUET_RES_GRPICON_ENTRY_SIZE 14u
+
+/* Select the best icon size from an RT_GROUP_ICON resource.
+ *
+ * Walks the group directory, picks the entry whose dimensions best
+ * match `desired_w x desired_h`, and writes the chosen RT_ICON integer
+ * ID into `*out_icon_id`. Returns 1 on hit, 0 if the group is empty
+ * or malformed.
+ *
+ * Selection heuristic: prefer exact match, then the next larger, then
+ * the largest available. Ties break on higher bit depth. */
+DUET_RES_INLINE int duet_res_pick_icon(const DUET_RES_VIEW* view, unsigned int type_id, unsigned int name_id,
+                                       unsigned int desired_w, unsigned int desired_h, unsigned int* out_icon_id,
+                                       unsigned int* out_width, unsigned int* out_height)
+{
+    DUET_RES_KEY type;
+    DUET_RES_KEY name;
+    unsigned int rva;
+    unsigned int size;
+    const unsigned char* data;
+    unsigned int count;
+    unsigned int i;
+    int best_score;
+    unsigned int best_id;
+    unsigned int best_w;
+    unsigned int best_h;
+
+    if (out_icon_id == (unsigned int*)0)
+        return 0;
+
+    type.by_name = 0;
+    type.id = type_id;
+    type.name = (const unsigned short*)0;
+    type.name_len = 0u;
+    name.by_name = 0;
+    name.id = name_id;
+    name.name = (const unsigned short*)0;
+    name.name_len = 0u;
+
+    if (!duet_res_find(view, &type, &name, 0, 0, &rva, &size))
+        return 0;
+    data = duet_res_at(view, rva, size);
+    if (data == (const unsigned char*)0 || size < DUET_RES_GRPICON_HEADER_SIZE)
+        return 0;
+    count = duet_res_u16(data + 4u);
+    if (count == 0u || size < DUET_RES_GRPICON_HEADER_SIZE + count * DUET_RES_GRPICON_ENTRY_SIZE)
+        return 0;
+
+    best_score = -1;
+    best_id = 0u;
+    best_w = 0u;
+    best_h = 0u;
+    for (i = 0; i < count; ++i)
+    {
+        const unsigned char* e = data + DUET_RES_GRPICON_HEADER_SIZE + i * DUET_RES_GRPICON_ENTRY_SIZE;
+        unsigned int ew = e[0];
+        unsigned int eh = e[1];
+        unsigned int bits = duet_res_u16(e + 6u);
+        unsigned int eid = duet_res_u16(e + 12u);
+        int score;
+        if (ew == 0u)
+            ew = 256u;
+        if (eh == 0u)
+            eh = 256u;
+        /* Score: exact = 1000000, larger = 500000 - delta, smaller = delta. */
+        if (ew == desired_w && eh == desired_h)
+            score = 1000000 + (int)bits;
+        else if (ew >= desired_w && eh >= desired_h)
+            score = 500000 - (int)(ew - desired_w + eh - desired_h) + (int)bits;
+        else
+            score = (int)(ew + eh + bits);
+        if (score > best_score)
+        {
+            best_score = score;
+            best_id = eid;
+            best_w = ew;
+            best_h = eh;
+        }
+    }
+    if (best_score < 0)
+        return 0;
+    *out_icon_id = best_id;
+    if (out_width != (unsigned int*)0)
+        *out_width = best_w;
+    if (out_height != (unsigned int*)0)
+        *out_height = best_h;
+    return 1;
+}
+
+/* Decode an RT_ICON (or RT_CURSOR) DIB body into caller-provided BGRA
+ * pixels. The AND mask (1bpp, bottom-up, DWORD-aligned) sets alpha=0
+ * for transparent pixels.
+ *
+ * `icon_type` selects the resource type for the lookup:
+ *   DUET_RES_TYPE_ICON (3)   -- RT_ICON
+ *   DUET_RES_TYPE_CURSOR (1) -- RT_CURSOR (body has 4-byte hotspot prefix)
+ *
+ * `out_bgra` must point to `max_pixels * 4` writable bytes. The caller
+ * must know the icon dimensions (from duet_res_pick_icon). On success
+ * writes `icon_w * icon_h` BGRA pixels and returns 1.
+ *
+ * For cursors, the hotspot is written to `*out_x_hot`, `*out_y_hot`
+ * if those pointers are non-NULL. */
+DUET_RES_INLINE int duet_res_decode_icon(const DUET_RES_VIEW* view, unsigned int icon_type, unsigned int icon_id,
+                                         unsigned int icon_w, unsigned int icon_h, unsigned char* out_bgra,
+                                         unsigned int max_pixels, unsigned int* out_x_hot, unsigned int* out_y_hot)
+{
+    DUET_RES_KEY type;
+    DUET_RES_KEY name;
+    unsigned int rva;
+    unsigned int size;
+    const unsigned char* body;
+    const unsigned char* bih;
+    unsigned int bih_size;
+    unsigned int bmp_w;
+    int bmp_h_raw;
+    unsigned int bmp_h;
+    unsigned int bpp;
+    unsigned int color_table_entries;
+    unsigned int color_table_bytes;
+    unsigned int xor_stride;
+    unsigned int and_stride;
+    unsigned int xor_offset;
+    unsigned int and_offset;
+    unsigned int y;
+
+    if (out_bgra == (unsigned char*)0 || icon_w == 0u || icon_h == 0u)
+        return 0;
+    if (icon_w * icon_h > max_pixels)
+        return 0;
+
+    type.by_name = 0;
+    type.id = icon_type;
+    type.name = (const unsigned short*)0;
+    type.name_len = 0u;
+    name.by_name = 0;
+    name.id = icon_id;
+    name.name = (const unsigned short*)0;
+    name.name_len = 0u;
+
+    if (!duet_res_find(view, &type, &name, 0, 0, &rva, &size))
+        return 0;
+    body = duet_res_at(view, rva, size);
+    if (body == (const unsigned char*)0)
+        return 0;
+
+    /* RT_CURSOR has a 4-byte hotspot header before the BIH. */
+    if (icon_type == DUET_RES_TYPE_CURSOR)
+    {
+        if (size < 4u)
+            return 0;
+        if (out_x_hot != (unsigned int*)0)
+            *out_x_hot = duet_res_u16(body);
+        if (out_y_hot != (unsigned int*)0)
+            *out_y_hot = duet_res_u16(body + 2u);
+        body += 4u;
+        size -= 4u;
+    }
+    bih = body;
+    if (size < 40u)
+        return 0;
+    bih_size = duet_res_u32(bih);
+    if (bih_size < 40u || bih_size > size)
+        return 0;
+
+    bmp_w = duet_res_u32(bih + 4u);
+    bmp_h_raw = (int)duet_res_u32(bih + 8u);
+    /* In an icon, biHeight = XOR height + AND height (both equal to the
+     * icon height), so the actual image height is biHeight / 2. */
+    if (bmp_h_raw > 0)
+        bmp_h = (unsigned int)bmp_h_raw / 2u;
+    else
+        bmp_h = (unsigned int)(-bmp_h_raw) / 2u;
+    bpp = duet_res_u16(bih + 14u);
+    if (bmp_w != icon_w || bmp_h != icon_h)
+        return 0; /* dimensions don't match what the group claimed */
+    if (bpp != 32u && bpp != 24u && bpp != 8u && bpp != 4u && bpp != 1u)
+        return 0;
+
+    /* Colour table entries. BI_RGB is the only compression we accept. */
+    {
+        unsigned int compression = duet_res_u32(bih + 16u);
+        unsigned int clr_used = duet_res_u32(bih + 32u);
+        if (compression != 0u) /* BI_RGB */
+            return 0;
+        if (bpp <= 8u)
+        {
+            color_table_entries = clr_used != 0u ? clr_used : (1u << bpp);
+            if (color_table_entries > (1u << bpp))
+                color_table_entries = (1u << bpp);
+        }
+        else
+        {
+            color_table_entries = 0u;
+        }
+    }
+    color_table_bytes = color_table_entries * 4u;
+
+    /* Scanline strides (DWORD-aligned). */
+    xor_stride = ((bmp_w * bpp + 31u) / 32u) * 4u;
+    and_stride = ((bmp_w + 31u) / 32u) * 4u;
+
+    xor_offset = bih_size + color_table_bytes;
+    and_offset = xor_offset + xor_stride * bmp_h;
+
+    if (and_offset + and_stride * bmp_h > size)
+        return 0; /* truncated */
+
+    /* Decode rows bottom-up. DIB row 0 is the bottom of the image. */
+    for (y = 0; y < bmp_h; ++y)
+    {
+        const unsigned int dst_y = bmp_h - 1u - y; /* flip to top-down */
+        unsigned char* dst_row = out_bgra + dst_y * bmp_w * 4u;
+        const unsigned char* xor_row = bih + xor_offset + y * xor_stride;
+        const unsigned char* and_row = bih + and_offset + y * and_stride;
+        const unsigned char* palette = bih + bih_size;
+        unsigned int x;
+
+        for (x = 0; x < bmp_w; ++x)
+        {
+            unsigned char b = 0, g = 0, r = 0, a = 255;
+
+            /* Decode colour from the XOR bitmap. */
+            if (bpp == 32u)
+            {
+                b = xor_row[x * 4u];
+                g = xor_row[x * 4u + 1u];
+                r = xor_row[x * 4u + 2u];
+                a = xor_row[x * 4u + 3u];
+            }
+            else if (bpp == 24u)
+            {
+                b = xor_row[x * 3u];
+                g = xor_row[x * 3u + 1u];
+                r = xor_row[x * 3u + 2u];
+            }
+            else if (bpp == 8u)
+            {
+                unsigned int idx = xor_row[x];
+                if (idx < color_table_entries)
+                {
+                    b = palette[idx * 4u];
+                    g = palette[idx * 4u + 1u];
+                    r = palette[idx * 4u + 2u];
+                }
+            }
+            else if (bpp == 4u)
+            {
+                unsigned int idx = (xor_row[x / 2u] >> (4u * (1u - (x & 1u)))) & 0xFu;
+                if (idx < color_table_entries)
+                {
+                    b = palette[idx * 4u];
+                    g = palette[idx * 4u + 1u];
+                    r = palette[idx * 4u + 2u];
+                }
+            }
+            else /* bpp == 1 */
+            {
+                unsigned int idx = (xor_row[x / 8u] >> (7u - (x & 7u))) & 1u;
+                if (idx < color_table_entries)
+                {
+                    b = palette[idx * 4u];
+                    g = palette[idx * 4u + 1u];
+                    r = palette[idx * 4u + 2u];
+                }
+            }
+
+            /* AND mask: bit=1 means transparent. For 32bpp icons with
+             * per-pixel alpha, the AND mask is usually all zeros and the
+             * alpha channel carries transparency; we honour both. */
+            {
+                unsigned int and_bit = (and_row[x / 8u] >> (7u - (x & 7u))) & 1u;
+                if (and_bit)
+                    a = 0;
+            }
+
+            dst_row[x * 4u + 0u] = b;
+            dst_row[x * 4u + 1u] = g;
+            dst_row[x * 4u + 2u] = r;
+            dst_row[x * 4u + 3u] = a;
+        }
+    }
+    return 1;
+}
+
 #endif /* DUETOS_USERLAND_PE_RESOURCES_H */

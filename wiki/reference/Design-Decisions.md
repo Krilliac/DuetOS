@@ -14165,3 +14165,27 @@ version is the failure mode this pins.
 - **Accepted cost:** the translation table is US-QWERTY-only for punctuation
   VKs (e.g. `VK_OEM_*`). A future keyboard-layout abstraction would need to
   update the VK mapping, not remove it.
+
+### DD — SYS_GDI_CREATE_CURSOR_RGBA resamples to the fixed 12x20 cursor sprite
+
+- **Context:** `LoadCursorW` needs a path from arbitrary-sized RGBA
+  icon/cursor resources (up to 256x256) to the kernel's cursor sprite,
+  which is a fixed 12x20 three-level mask (0=transparent, 1=outline,
+  2=fill).
+- **Decision:** `SYS_GDI_CREATE_CURSOR_RGBA` (224) accepts a
+  user-supplied RGBA pixel buffer of arbitrary dimensions plus a
+  hotspot, nearest-neighbour resamples to 12x20, and converts
+  alpha>128 to fill (2) with synthesised outline (1) on edges adjacent
+  to fill pixels. The hotspot is proportionally scaled. The resampled
+  sprite is registered via the existing `CursorRegisterCustom` path.
+- **Rules out:** growing the cursor sprite dimensions to match the
+  source. The compositor, the damage-rect system, and the VGA-plane
+  cursor fast-path all assume 12x20; changing it is a cross-cutting
+  refactor that would need to touch `DesktopCompose`, `CursorDraw`,
+  and the VBE/GOP display driver. A future "big cursors" feature would
+  retire the three-level mask entirely in favour of a composited RGBA
+  overlay; the resampling path is correct until then.
+- **Accepted cost:** detail loss on large cursors (e.g., 48x48
+  resampled to 12x20). This is visually noticeable but functionally
+  correct — the cursor tracks the hotspot, click targets work, and
+  system cursors (IDC_ARROW etc.) bypass this path entirely.

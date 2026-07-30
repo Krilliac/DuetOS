@@ -552,42 +552,170 @@ __declspec(dllexport) INT __stdcall MessageBoxW(HWND owner, const wchar_t16* tex
     return MessageBoxA(owner, flat_text, flat_caption, type);
 }
 
-/* LoadString below is REAL — it walks the PE's own `.rsrc`. Icons and
- * cursors stay stubbed, and the blocker is the consumer, not the
- * parser: the compositor has no icon concept and no off-screen surface
- * for a decoded DIB, and SYS_GDI_CREATE_CURSOR takes a fixed 12x20
- * three-level mask rather than image bits. Backlog item 12 (off-screen
- * surfaces) is the prerequisite; see the matching note in
- * userland/libs/user32/user32.c. */
-/* STUB: returns a non-null sentinel, not a decoded icon/cursor. The
- * sentinel keeps the caller's NULL-on-failure path from firing;
- * nothing draws. */
+/* LoadIcon/LoadCursor — REAL for system resources (NULL hInstance
+ * returns sentinel); REAL for PE resources (decode .rsrc, register
+ * icon as GDI bitmap or cursor via SYS_GDI_CREATE_CURSOR_RGBA).
+ * See userland/libs/user32/user32.c for the matching 64-bit impl. */
+
+#define IDC_ARROW_32 32512
+
+/* Forward-declare — pe_resources.h is included below for LoadString. */
+#include "../common/pe_resources.h"
+
+#define SYS_GDI_CREATE_COMPAT_BITMAP 107
+#define SYS_GDI_SET_DIBITS 214
+#define SYS_GDI_CREATE_CURSOR_RGBA 224
+
+static HICON __stdcall user32_32_load_icon_impl(HINSTANCE inst, unsigned long name_id)
+{
+    if (inst == (HINSTANCE)0)
+        return (HICON)1; /* system icon sentinel */
+    if (name_id == 0 || name_id > 0xFFFF)
+        return (HICON)1;
+    {
+        DUET_RES_VIEW view;
+        unsigned int icon_id = 0;
+        unsigned int iw = 0, ih = 0;
+        const void* base = (const void*)inst;
+        if (!duet_res_init(base, &view))
+            return (HICON)1;
+        if (!duet_res_pick_icon(&view, DUET_RES_TYPE_GROUP_ICON, name_id, 32, 32, &icon_id, &iw, &ih))
+            return (HICON)1;
+        if (iw == 0 || ih == 0 || iw > 64 || ih > 64)
+            return (HICON)1;
+        {
+            unsigned char bgra[64 * 64 * 4];
+            if (!duet_res_decode_icon(&view, DUET_RES_TYPE_ICON, icon_id, iw, ih, bgra, 64 * 64, (unsigned int*)0,
+                                      (unsigned int*)0))
+                return (HICON)1;
+            {
+                int bmp_h = duet_syscall3(SYS_GDI_CREATE_COMPAT_BITMAP, 0, iw, ih);
+                if (bmp_h == 0)
+                    return (HICON)1;
+                duet_syscall6(SYS_GDI_SET_DIBITS, (unsigned)bmp_h, (unsigned)(unsigned long)bgra, iw, ih, 32, iw * 4);
+                return (HICON)(unsigned long)bmp_h;
+            }
+        }
+    }
+}
+
 __declspec(dllexport) HICON __stdcall LoadIconA(HINSTANCE inst, const char* name)
 {
-    (void)inst;
-    (void)name;
-    return (HICON)1;
+    return user32_32_load_icon_impl(inst, (unsigned long)(unsigned long)name);
 }
 
 __declspec(dllexport) HICON __stdcall LoadIconW(HINSTANCE inst, const wchar_t16* name)
 {
-    (void)inst;
-    (void)name;
-    return (HICON)1;
+    return user32_32_load_icon_impl(inst, (unsigned long)(unsigned long)name);
+}
+
+static HCURSOR __stdcall user32_32_load_cursor_impl(HINSTANCE inst, unsigned long name_id)
+{
+    if (inst == (HINSTANCE)0)
+    {
+        if (name_id == 0 || name_id > 0xFFFF)
+            return (HCURSOR)IDC_ARROW_32;
+        return (HCURSOR)name_id;
+    }
+    if (name_id == 0 || name_id > 0xFFFF)
+        return (HCURSOR)IDC_ARROW_32;
+    {
+        DUET_RES_VIEW view;
+        unsigned int cursor_id = 0;
+        unsigned int cw = 0, ch = 0;
+        const void* base = (const void*)inst;
+        if (!duet_res_init(base, &view))
+            return (HCURSOR)IDC_ARROW_32;
+        if (!duet_res_pick_icon(&view, DUET_RES_TYPE_GROUP_CURSOR, name_id, 32, 32, &cursor_id, &cw, &ch))
+            return (HCURSOR)IDC_ARROW_32;
+        if (cw == 0 || ch == 0 || cw > 64 || ch > 64)
+            return (HCURSOR)IDC_ARROW_32;
+        {
+            unsigned char bgra[64 * 64 * 4];
+            unsigned int x_hot = 0, y_hot = 0;
+            if (!duet_res_decode_icon(&view, DUET_RES_TYPE_CURSOR, cursor_id, cw, ch, bgra, 64 * 64, &x_hot, &y_hot))
+                return (HCURSOR)IDC_ARROW_32;
+            {
+                unsigned packed_dim = cw | (ch << 16);
+                unsigned packed_hot = (x_hot & 0xFF) | ((y_hot & 0xFF) << 8);
+                int result =
+                    duet_syscall3(SYS_GDI_CREATE_CURSOR_RGBA, (unsigned)(unsigned long)bgra, packed_dim, packed_hot);
+                if (result > 0)
+                    return (HCURSOR)(unsigned long)result;
+            }
+        }
+    }
+    return (HCURSOR)IDC_ARROW_32;
 }
 
 __declspec(dllexport) HCURSOR __stdcall LoadCursorA(HINSTANCE inst, const char* name)
 {
-    (void)inst;
-    (void)name;
-    return (HCURSOR)2;
+    return user32_32_load_cursor_impl(inst, (unsigned long)(unsigned long)name);
 }
 
 __declspec(dllexport) HCURSOR __stdcall LoadCursorW(HINSTANCE inst, const wchar_t16* name)
 {
+    return user32_32_load_cursor_impl(inst, (unsigned long)(unsigned long)name);
+}
+
+/* LoadImage — unified loader for IMAGE_ICON, IMAGE_CURSOR, IMAGE_BITMAP. */
+#define IMAGE_BITMAP_32 0
+#define IMAGE_ICON_32 1
+#define IMAGE_CURSOR_32 2
+
+// STUB: returns NULL - RT_BITMAP not decoded yet.
+__declspec(dllexport) HANDLE __stdcall LoadBitmapA(HINSTANCE inst, const char* name)
+{
     (void)inst;
     (void)name;
-    return (HCURSOR)2;
+    return (HANDLE)0;
+}
+__declspec(dllexport) HANDLE __stdcall LoadBitmapW(HINSTANCE inst, const wchar_t16* name)
+{
+    (void)inst;
+    (void)name;
+    return (HANDLE)0;
+}
+// STUB: returns NULL - RT_ACCELERATOR needs KeyCode->VK translation.
+__declspec(dllexport) HANDLE __stdcall LoadAcceleratorsA(HINSTANCE inst, const char* name)
+{
+    (void)inst;
+    (void)name;
+    return (HANDLE)0;
+}
+__declspec(dllexport) HANDLE __stdcall LoadAcceleratorsW(HINSTANCE inst, const wchar_t16* name)
+{
+    (void)inst;
+    (void)name;
+    return (HANDLE)0;
+}
+
+__declspec(dllexport) HANDLE __stdcall LoadImageA(HINSTANCE inst, const char* name, unsigned type, int w, int h,
+                                                  unsigned flags)
+{
+    (void)w;
+    (void)h;
+    (void)flags;
+    /* GAP: LR_DEFAULTSIZE, LR_SHARED, LR_LOADFROMFILE not implemented — revisit when file-load is needed. */
+    if (type == IMAGE_ICON_32)
+        return (HANDLE)LoadIconA(inst, name);
+    if (type == IMAGE_CURSOR_32)
+        return (HANDLE)LoadCursorA(inst, name);
+    return (HANDLE)LoadBitmapA(inst, name);
+}
+
+__declspec(dllexport) HANDLE __stdcall LoadImageW(HINSTANCE inst, const wchar_t16* name, unsigned type, int w, int h,
+                                                  unsigned flags)
+{
+    (void)w;
+    (void)h;
+    (void)flags;
+    /* GAP: LR_DEFAULTSIZE, LR_SHARED, LR_LOADFROMFILE not implemented — revisit when file-load is needed. */
+    if (type == IMAGE_ICON_32)
+        return (HANDLE)LoadIconW(inst, name);
+    if (type == IMAGE_CURSOR_32)
+        return (HANDLE)LoadCursorW(inst, name);
+    return (HANDLE)LoadBitmapW(inst, name);
 }
 
 /* ------------------------------------------------------------------
@@ -599,7 +727,7 @@ __declspec(dllexport) HCURSOR __stdcall LoadCursorW(HINSTANCE inst, const wchar_
  * DLLs link with /nodefaultlib and import nothing.
  * ------------------------------------------------------------------ */
 
-#include "../common/pe_resources.h"
+/* pe_resources.h already included above for LoadIcon/LoadCursor. */
 
 #define SYS_DLL_BASE_BY_NAME 172
 

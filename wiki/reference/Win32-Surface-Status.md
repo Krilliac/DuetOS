@@ -1636,14 +1636,22 @@ WinDbg client API, `SymLoadModuleEx`.
   caption, a menu label and an error message all came back
   identical. `LoadStringA` carries a GAP: narrowing is Latin-1
   truncation, not a codepage conversion.
-- `LoadIconA/W`, `LoadCursorA/W`, `LoadBitmapA/W`, `LoadImageA/W`
-  — STUB, and the blocker is the **consumer, not the parser**. The
-  compositor has no icon concept and no off-screen surface for a
-  decoded DIB to live in, and `SYS_GDI_CREATE_CURSOR` takes a
-  fixed 12x20 three-level mask rather than image bits. Backlog
-  item 12 (off-screen surfaces) is the prerequisite. `LoadIcon`
-  returns a non-NULL sentinel because `RegisterClassEx` callers
-  routinely treat a NULL `hIcon` as a fatal startup error.
+- `LoadIconA/W` — REAL. Decodes RT_GROUP_ICON -> RT_ICON from the
+  PE's .rsrc section into BGRA pixels, creates a GDI bitmap via
+  `SYS_GDI_CREATE_COMPAT_BITMAP` + `SYS_GDI_SET_DIBITS`, and
+  returns the bitmap handle as HICON. NULL hInstance returns a
+  non-NULL sentinel for system icons (`RegisterClassEx` callers
+  treat NULL `hIcon` as fatal). Icons up to 64x64 are decoded.
+- `LoadCursorA/W` — REAL. NULL hInstance returns IDC_* sentinels
+  (existing behaviour). PE hInstance decodes RT_GROUP_CURSOR ->
+  RT_CURSOR from .rsrc and registers via `SYS_GDI_CREATE_CURSOR_RGBA`
+  (syscall 224), which nearest-neighbour samples to the 12x20
+  internal sprite. Cursors up to 64x64 are decoded.
+- `LoadImageA/W` — REAL. Dispatches by `IMAGE_ICON` / `IMAGE_CURSOR`
+  / `IMAGE_BITMAP` to LoadIcon / LoadCursor / LoadBitmap. GAP:
+  `LR_DEFAULTSIZE`, `LR_SHARED`, `LR_LOADFROMFILE` not implemented.
+- `LoadBitmapA/W` — STUB, returns NULL. RT_BITMAP decoding is the
+  remaining piece.
 - `LoadAcceleratorsA/W`, `TranslateAcceleratorA/W` — REAL.
   The kernel now posts Win32 VK codes in `WM_KEYDOWN`/`WM_KEYUP`
   `wParam` (translated from DuetOS `KeyCode` via

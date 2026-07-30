@@ -1044,11 +1044,15 @@ fault→fix→re-run loop, `tools/test/run-exe.sh` + `peexec=`, using the
    written: the 64-bit `gdi32` gained real off-screen surfaces on
    2026-07-29 and the syscalls it uses (`SYS_GDI_SET_DIBITS` /
    `_GET_DIBITS`) are register-argument only, so the i386 port can reach
-   them through `duet_syscall6` with no struct shape to mirror. Icon and
-   cursor resources are likewise unblocked: the `.rsrc` parser landed
-   2026-07-28 and there is now a sink for the pixels. What icons still
-   need is a `SYS_GDI_CREATE_CURSOR` that takes image bits rather than a
-   fixed 12x20 three-level mask. Fonts need a font pipeline.
+   them through `duet_syscall6` with no struct shape to mirror.
+   ~~Icon and cursor resources~~ **LANDED 2026-07-29:**
+   `SYS_GDI_CREATE_CURSOR_RGBA` (216) takes RGBA image bits + hotspot;
+   `duet_res_pick_icon` / `duet_res_decode_icon` in `pe_resources.h`
+   walk `RT_GROUP_ICON` -> `RT_ICON`, decode BIH + bottom-up DIB + AND-mask
+   -> BGRA; `LoadIconA/W`, `LoadCursorA/W`, `LoadImageA/W` are REAL on
+   both bitnesses; `icon_smoke` PE fixture in the ring3 battery.
+   `LoadBitmapA/W` remains STUB (`RT_BITMAP` decode not yet written).
+   Fonts need a font pipeline.
 
 2. **Large bundled-data staging + FAT large volume.** The exe reads
    multi-GB archive files. Staging needs a much larger disk image than
@@ -1640,17 +1644,19 @@ done, it is merely written.
    0. See [`wiki/subsystems/PE-Resources.md`](../subsystems/PE-Resources.md).
    Two consumers were deliberately NOT built, because each needs a sink
    that does not exist — building the decoder first would be dead code:
-   - **Icons / cursors / bitmaps** (`LoadIcon`, `LoadCursor`,
-     `LoadBitmap`, `LoadImage`) needed item 12 (off-screen surfaces),
-     which landed 2026-07-29. There is now a sink: an `RT_ICON` body is a
-     BITMAPINFOHEADER plus a bottom-up DIB, which is exactly what
-     `SYS_GDI_SET_DIBITS` consumes, so `RT_GROUP_ICON` -> `RT_ICON` ->
-     `HBITMAP` can be written against the existing surface path. Two
-     things are still genuinely absent and should be built with the
-     decoder: the AND-mask -> alpha conversion (an `RT_ICON` carries a
-     1bpp transparency mask below its colour rows, and the DIB path
-     refuses 1bpp by design), and a `SYS_GDI_CREATE_CURSOR` that takes
-     image bits rather than a fixed 12x20 three-level mask.
+   - ~~**Icons / cursors / bitmaps**~~ **LANDED 2026-07-29.** `LoadIcon`,
+     `LoadCursor`, `LoadImage` are REAL on both bitnesses.
+     `SYS_GDI_CREATE_CURSOR_RGBA` (224) takes RGBA pixels + hotspot.
+     `duet_res_decode_icon` walks RT_GROUP_ICON -> RT_ICON, decodes
+     BIH + bottom-up DIB (32/24/8/4/1bpp) + AND-mask -> BGRA.
+     `icon_smoke` PE fixture in the ring3 battery.
+     `LoadBitmapA/W` remains STUB (`RT_BITMAP` decode not yet written).
+   - ~~**Accelerators**~~ **LANDED 2026-07-29.** `LoadAcceleratorsA/W`
+     parse `RT_ACCELERATOR` from the PE's `.rsrc` section.
+     `TranslateAcceleratorA/W` match VK + modifier state and post
+     `WM_COMMAND`. `KeyCode` -> Win32 VK translation table in
+     `kernel/subsystems/win32/keycode_vk.h`. `accel_test` PE fixture
+     in the ring3 battery.
 3. **Side-by-side DLL loading.** A PE importing a DLL shipped beside it has
    no path at all today. The Unity launchers measure 98.5% import coverage
    with exactly ONE unresolved import (`UnityPlayer.dll!UnityMain`). Needs

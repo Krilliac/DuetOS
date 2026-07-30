@@ -4957,6 +4957,50 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_GDI_GET_DIBITS:
         subsystems::win32::DoGdiGetDiBits(frame);
         return;
+    case SYS_GDI_CREATE_CURSOR_RGBA:
+    {
+        // PE registers a custom cursor from an RGBA pixel buffer.
+        // rdi = rgba_ptr (u32* user), rsi = (width | height<<16),
+        // rdx = (x_hot | y_hot<<8).
+        const u64 rgba_va = frame->rdi;
+        const u32 w = static_cast<u32>(frame->rsi & 0xFFFFU);
+        const u32 h = static_cast<u32>((frame->rsi >> 16) & 0xFFFFU);
+        const u64 hot = frame->rdx;
+        // Sanity: cap at 256x256 (largest icon Windows defines).
+        if (rgba_va == 0 || w == 0 || h == 0 || w > 256 || h > 256)
+        {
+            frame->rax = 0;
+            return;
+        }
+        const u32 pixel_count = w * h;
+        const u32 byte_count = pixel_count * 4;
+        // Stack-allocate for small icons; reject oversized.
+        if (byte_count > 256u * 256u * 4u)
+        {
+            frame->rax = 0;
+            return;
+        }
+        // Use a kernel heap allocation for the pixel buffer since
+        // 256*256*4 = 256KB can exceed the kernel stack.
+        auto* buf = static_cast<u32*>(mm::KMalloc(byte_count));
+        if (buf == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        if (!mm::CopyFromUser(buf, reinterpret_cast<const void*>(rgba_va), byte_count))
+        {
+            mm::KFree(buf);
+            frame->rax = 0;
+            return;
+        }
+        const u8 x_hot = static_cast<u8>(hot & 0xFFU);
+        const u8 y_hot = static_cast<u8>((hot >> 8) & 0xFFU);
+        const u32 id = duetos::drivers::video::CursorRegisterCustomRgba(buf, w, h, x_hot, y_hot);
+        mm::KFree(buf);
+        frame->rax = id;
+        return;
+    }
     case SYS_GDI_STRETCH_BLT_DC:
         subsystems::win32::DoGdiStretchBltDC(frame);
         return;

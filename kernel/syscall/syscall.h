@@ -2292,6 +2292,17 @@ enum SyscallNumber : u64
     //   rdi = slot index, rsi = value. Returns 0 on success,
     //         u64(-1) on bad index. Backs FlsSetValue.
     SYS_FLS_SET = 223,
+
+    // SYS_GDI_CREATE_CURSOR_RGBA — register a custom cursor from an
+    // RGBA pixel buffer of arbitrary dimensions. The kernel samples
+    // the image down to its internal sprite size (12x20) and converts
+    // to the 3-level mask format.
+    //   rdi = const u32* rgba_pixels (user pointer, w*h u32s, BGRA8888)
+    //   rsi = u64 packed (width | height << 16)
+    //   rdx = u64 packed (x_hot | y_hot << 8)
+    // Returns: custom cursor slot id (>= 256) on success, 0 on failure.
+    // ABI stable from this commit.
+    SYS_GDI_CREATE_CURSOR_RGBA = 224,
 };
 
 // Vulkan syscall op-codes. Used as the `rdi` value to SYS_VK_CALL
