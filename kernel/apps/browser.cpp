@@ -1232,19 +1232,6 @@ const char* ExtForType(const char* content_type)
     return "BIN";
 }
 
-// Append `c` to an 8.3 component buffer, uppercasing and dropping any
-// char outside [A-Z0-9]. `cap` bounds the component (8 for stem, 3 for
-// ext); `*n` tracks the live length.
-void Push83(char* comp, u32 cap, u32* n, char c)
-{
-    if (*n >= cap)
-        return;
-    char u = (c >= 'a' && c <= 'z') ? static_cast<char>(c - ('a' - 'A')) : c;
-    const bool ok = (u >= 'A' && u <= 'Z') || (u >= '0' && u <= '9');
-    if (ok)
-        comp[(*n)++] = u;
-}
-
 // Derive a download filename into `out`. Preserves long filenames —
 // the FAT32 layer handles LFN (VFAT) entry emission for names that
 // exceed 8.3 or contain lowercase. Characters illegal on FAT32

@@ -851,6 +851,7 @@ duetos_embed_smoke_pe(handle2_smoke  kBinHandle2SmokeBytes)
 duetos_embed_smoke_pe(sock_opt_smoke kBinSockOptSmokeBytes)
 duetos_embed_smoke_pe(prio_smoke     kBinPrioSmokeBytes)
 duetos_embed_smoke_pe(debug2_smoke   kBinDebug2SmokeBytes)
+duetos_embed_smoke_pe(guard_smoke    kBinGuardSmokeBytes)
 # DirectX v0 smoke suite — covers d3d{9,11,12} Clear+Present pipelines
 # plus the new dinput8/xinput/xaudio2/dsound/ddraw/d2d1/dwrite peripheral
 # DLLs through real COM vtable calls.
