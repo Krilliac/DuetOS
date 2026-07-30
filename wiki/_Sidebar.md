@@ -58,6 +58,7 @@
 
 ### Graphics
 - [GPU Graphics Techniques Part 1](graphics/GPU-Graphics-Techniques-Part1.md)
+- [GPU Graphics Techniques Part 2](graphics/GPU-Graphics-Techniques-Part2.md)
 
 ### Subsystems
 - [Win32 PE Subsystem](subsystems/Win32-PE-Subsystem.md)
