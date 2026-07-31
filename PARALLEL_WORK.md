@@ -586,3 +586,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Route eligible GDI solid fills through the verified Intel BLT engine on the owned compose surface with validation, serialization, and CPU fallback
 - **Claimed**: 2026-07-31T07:24:16Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] gpu-intel-t403
+- **Session**: `Nathan-1458`
+- **Branch**: `claude/gpu-intel-t403-20260731`
+- **Files**: `kernel/drivers/gpu/intel_gpu.cpp kernel/drivers/gpu/intel_gpu.h kernel/drivers/gpu/intel_gpu_cmds.cpp kernel/drivers/gpu/intel_gpu_cmds.h kernel/drivers/video/framebuffer.cpp tests/host/test_intel_blt.cpp tests/host/CMakeLists.txt`
+- **Description**: Route eligible GDI solid fills through the verified Intel BLT engine on the owned compose surface with validation, serialization, and CPU fallback
+- **Claimed**: 2026-07-31T07:28:08Z
+- **Status**: IN PROGRESS
