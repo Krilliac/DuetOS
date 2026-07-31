@@ -493,3 +493,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Repair current main CI format executable-bit and export-test drift discovered while validating handoff PRs
 - **Claimed**: 2026-07-31T00:00:20Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] ci-red-main-sched-format
+- **Session**: `Codex-CI-red-main`
+- **Branch**: `claude/ci-red-main-repair`
+- **Files**: `kernel/sched/sched.cpp kernel/sched/sched.h`
+- **Description**: Format already-landed scheduler fiber additions so current main passes full-tree clang-format
+- **Claimed**: 2026-07-31T00:02:37Z
+- **Status**: IN PROGRESS
