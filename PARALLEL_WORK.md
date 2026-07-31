@@ -1475,13 +1475,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T23:21:50Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] rust-ffi-signature-parity
+### [DONE] rust-ffi-signature-parity
 - **Session**: `Nathan-1196`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/test/check-rust-ffi-signatures.py tools/test/test-rust-ffi-signatures.py`
 - **Description**: Bounded canonical C/Rust FFI arity type pointer-depth and constness parity gate
 - **Claimed**: 2026-07-31T23:40:31Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-31T23:46:59Z
 
 ### [ACTIVE] service-manifest-authority-replay
 - **Session**: `Nathan-1892`
