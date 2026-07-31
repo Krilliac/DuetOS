@@ -124,6 +124,13 @@ inline constexpr u32 kMiFlushDw = (0x26u << 23) | 1u;
 // live framebuffer. Gated; real-HW only.
 u32 IntelBltColorFillProbe(u32 argb);
 
+/// True after the offscreen XY_COLOR_BLT probe has completed and read
+/// back the requested colour on this boot. This is a capability
+/// observation only: it does not authorize a caller to submit work or
+/// to use the live framebuffer until a consumer supplies surface
+/// mapping and ring-serialization ownership.
+bool IntelBltColorFillVerified();
+
 // Real-hardware escalation rung 3: allocate a batch page, GGTT-map it,
 // fill it with [MI_STORE_DWORD_IMM(cookie) ; MI_BATCH_BUFFER_END],
 // dispatch it from the ring via MI_BATCH_BUFFER_START (GGTT), poll, and

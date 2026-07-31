@@ -28,6 +28,10 @@ namespace
 {
 
 bool g_brought_up = false;
+// Sticky for the lifetime of the boot. The probe only reports verified
+// hardware execution after the CPU read-back matches the submitted
+// colour; failed or unavailable probes leave it false.
+bool g_blt_color_fill_verified = false;
 
 // The RCS ring buffer is owned for the lifetime of the boot on
 // success — we retain the DmaBuffer here so the controller's
@@ -584,8 +588,15 @@ u32 IntelBltColorFillProbe(u32 argb)
     }
     mm::DmaSyncForCpu(surf, 0, 4u);
     const u32 readback = px[0];
+    if (readback == argb)
+        g_blt_color_fill_verified = true;
     mm::FreeDmaCoherent(surf); // GGTT slot leaks (one high-window entry) — fine for a one-shot probe
     return readback;
+}
+
+bool IntelBltColorFillVerified()
+{
+    return g_blt_color_fill_verified;
 }
 
 bool IsBroughtUp()
