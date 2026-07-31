@@ -747,7 +747,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
             return;
         }
         const u64 target_pid = frame->rdi;
-        Process* target = sched::SchedFindProcessByPid(target_pid);
+        Process* target = sched::SchedFindProcessByPidRetained(target_pid);
         if (target == nullptr)
         {
             frame->rax = 0;
@@ -771,10 +771,10 @@ void SyscallDispatch(arch::TrapFrame* frame)
             // misbehaving Win32 app instead of debugging a silent
             // "OpenProcess returns 0" report from user mode.
             KLOG_ONCE_WARN("syscall", "OpenProcess: per-process Win32 handle table full");
+            ProcessRelease(target);
             frame->rax = 0; // table full
             return;
         }
-        ProcessRetain(target);
         caller->win32_proc_handles[idx].in_use = true;
         caller->win32_proc_handles[idx].target = target;
         frame->rax = Process::kWin32ProcessBase + idx;

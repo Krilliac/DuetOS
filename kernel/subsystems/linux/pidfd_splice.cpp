@@ -28,9 +28,8 @@
  * (process.cpp `g_next_pid`), so a pid names at most one Process
  * for the life of the boot — the property process.cpp already
  * relies on when it resolves a dying child's parent by pid. Every
- * consumer re-resolves through SchedFindProcessByPid and takes a
- * TRANSIENT retain across its use (same idiom as
- * ResolveAffinityTarget in syscall_sched.cpp).
+ * consumer re-resolves through the scheduler-owned retained lookup
+ * before accessing the target after the lookup.
  *
  * splice / tee / vmsplice route bytes between fds without a
  * userland round-trip. v0 bounces through a 1 KiB on-stack
@@ -166,14 +165,10 @@ i64 DoPidfdSendSignal(u64 pidfd, u64 sig, u64 user_info, u64 flags)
     if (caller->linux_fds[pidfd].state != 12)
         return kEBADF;
     const u64 target_pid = caller->linux_fds[pidfd].first_cluster;
-    core::Process* target = sched::SchedFindProcessByPid(target_pid);
+    core::Process* target = sched::SchedFindProcessByPidRetained(target_pid);
     if (target == nullptr)
         return kESRCH; // target may have already exited
-    // The pidfd is a WEAK reference — nothing keeps `target` alive
-    // between the lookup and the delivery. Take a transient retain
-    // across the call, exactly the idiom ResolveAffinityTarget uses
-    // in syscall_sched.cpp.
-    core::ProcessRetain(target);
+    // The retained lookup keeps the target alive across delivery.
     const i64 rc = LinuxSignalDeliver(target, static_cast<u32>(sig));
     core::ProcessRelease(target);
     return rc;
@@ -212,14 +207,17 @@ i64 DoPidfdGetfd(u64 pidfd, u64 target_fd, u64 flags)
     if (caller->linux_fds[pidfd].state != 12)
         return kEBADF;
     const u64 target_pid = caller->linux_fds[pidfd].first_cluster;
-    core::Process* target = sched::SchedFindProcessByPid(target_pid);
-    if (target == nullptr)
-        return kESRCH;
     if (target_fd >= 16)
         return kEBADF;
+    core::Process* target = sched::SchedFindProcessByPidRetained(target_pid);
+    if (target == nullptr)
+        return kESRCH;
     target_fd = util::MaskedIndex(target_fd, 16);
     if (target->linux_fds[target_fd].state == 0)
+    {
+        core::ProcessRelease(target);
         return kEBADF;
+    }
 
     // Find a free slot in caller's table.
     i32 caller_slot = -1;
@@ -230,17 +228,22 @@ i64 DoPidfdGetfd(u64 pidfd, u64 target_fd, u64 flags)
             break;
         }
     if (caller_slot < 0)
+    {
+        core::ProcessRelease(target);
         return kEMFILE;
+    }
 
     // Refuse states that aren't safe to share across processes.
     const u8 state = target->linux_fds[target_fd].state;
     if (state == 2 || state == 11 || state == 14)
+    {
+        core::ProcessRelease(target);
         return kEINVAL; // regular file / dirfd / memfd
+    }
 
-    // The pidfd is a WEAK reference — take a transient retain so the
-    // target Process cannot be freed while we read its fd table
-    // (same idiom as ResolveAffinityTarget in syscall_sched.cpp).
-    core::ProcessRetain(target);
+    // The retained lookup keeps the target Process alive while its
+    // fd table is copied. A per-process fd lock remains a separate
+    // gap for concurrent close(2).
     // GAP: the target's fd table is read without a per-process fd
     // lock, so this races a concurrent close(2) on another CPU —
     // revisit when the Linux fd table grows a lock.
