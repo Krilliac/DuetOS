@@ -596,7 +596,7 @@ void Fat32SelfTest()
         char name[64];
         const char* prefix = "/SUB/GROWTEST/LongEntry";
         u32 w = 0;
-        while (prefix[w] != 0 && w + 8 < sizeof(name))
+        while (w < 24 && w + 8 < sizeof(name) && prefix[w] != 0)
         {
             name[w] = prefix[w];
             ++w;
@@ -631,7 +631,7 @@ void Fat32SelfTest()
         char name[64];
         const char* prefix = "/SUB/GROWTEST/LongEntry";
         u32 w = 0;
-        while (prefix[w] != 0 && w + 8 < sizeof(name))
+        while (w < 24 && w + 8 < sizeof(name) && prefix[w] != 0)
         {
             name[w] = prefix[w];
             ++w;
