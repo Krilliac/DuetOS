@@ -970,3 +970,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Versioned service message validator implementation
 - **Claimed**: 2026-07-31T19:32:03Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] ipc-message-abi-test
+- **Session**: `Codex-ipc-message-abi`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tests/host/test_message_abi.cpp`
+- **Description**: Hostile-input and compatibility vectors for message ABI
+- **Claimed**: 2026-07-31T19:32:04Z
+- **Status**: IN PROGRESS
