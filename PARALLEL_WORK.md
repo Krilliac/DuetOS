@@ -746,3 +746,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Accept opaque generation-tagged Win32 file handles in CRT and PE32 fixture
 - **Claimed**: 2026-07-31T15:56:35Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] task-affinity-publication
+- **Session**: `Codex-scheduler-exit-lifetime`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/sched/workpool.cpp kernel/shell/shell_bench.cpp`
+- **Description**: Migrate post-publication raw Task affinity callers to scheduler-owned TID operations
+- **Claimed**: 2026-07-31T15:58:01Z
+- **Status**: IN PROGRESS
