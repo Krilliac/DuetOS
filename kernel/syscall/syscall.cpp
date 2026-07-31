@@ -1958,22 +1958,10 @@ void SyscallDispatch(arch::TrapFrame* frame)
             u8* kva = static_cast<u8*>(mm::PhysToVirt(fp));
             for (u64 i = 0; i < page_size; ++i)
                 kva[i] = 0;
-            mm::AddressSpaceMapUserPage(target->as, va, fp, pte_flags | mm::kPagePresent);
-            // GS-02 (CWE-401): AddressSpaceMapUserPage returns void and can
-            // silently refuse (budget exhausted / region-table grow OOM /
-            // PTE-pool dry — address_space.cpp:408/431/449), leaving `va`
-            // unmapped. The SEC-003 pre-screen at 1631 proved every page in
-            // this range was absent, so re-probing the PTE after the map is
-            // an exact success test: a still-absent PTE means the map was
-            // refused. Without this check the loop leaks `fp` (allocated at
-            // 1641, never recorded in any region table, never reclaimable
-            // until process exit) AND returns kStatusSuccess with an
-            // unmapped base_va — the caller's first touch #PFs and the
-            // process is reaped. Detect, free the orphan frame, unwind the
-            // pages mapped so far this call (same idiom as the OOM leg at
-            // 1651), and surface kStatusNoMemory. Impact is guest-self-only;
-            // this turns a silent leak-plus-false-success into a clean
-            // out-of-memory return.
+            // GS-02 (CWE-401): MapUserPage returns false for recoverable
+            // budget/table/page-table resource refusal. The SEC-003
+            // pre-screen proved this VA was absent; a failed result means
+            // the frame remains caller-owned and the allocation must unwind.
             if (mm::AddressSpaceProbePte(target->as, va) == mm::kNullFrame)
             {
                 mm::FreeFrame(fp);
@@ -4470,7 +4458,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
         }
         // Reject path separators in the basename — the caller is
         // supposed to pass "customdll.dll", not "../etc/passwd".
-        for (u64 i = 0; kname[i] != '\0' && i < sizeof(kname); ++i)
+        for (u64 i = 0; i < sizeof(kname) && kname[i] != '\0'; ++i)
         {
             if (kname[i] == '/' || kname[i] == '\\')
             {

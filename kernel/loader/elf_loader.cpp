@@ -382,8 +382,8 @@ void LoadSegment(LoadCtx& ctx, const ElfSegment& seg)
 
         if (!reusing)
         {
-            AddressSpaceMapUserPage(ctx.as, page_va, frame, flags);
-            // MapUserPage returns void and has THREE silent non-fatal
+            if (!AddressSpaceMapUserPage(ctx.as, page_va, frame, flags))
+            // MapUserPage can refuse three recoverable resource failures
             // refusal paths (address_space.cpp: frame budget exhausted,
             // region-table grow OOM, page-table walker OOM). Each one
             // `return`s WITHOUT taking ownership of `frame` and without
@@ -533,7 +533,8 @@ ElfLoadResult ElfLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as
         return r;
     }
     const PhysAddr stack_frame = stack_frame_r.value();
-    AddressSpaceMapUserPage(as, kV0StackVa, stack_frame, kPagePresent | kPageUser | kPageWritable | kPageNoExecute);
+    if (!AddressSpaceMapUserPage(
+            as, kV0StackVa, stack_frame, kPagePresent | kPageUser | kPageWritable | kPageNoExecute))
     // Same unchecked-map/unconditional-Track shape as the segment loop
     // above: MapUserPage can silently refuse (budget / OOM) without
     // taking ownership of `stack_frame`. Probe before tracking so a

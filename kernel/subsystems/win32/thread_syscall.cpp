@@ -166,7 +166,11 @@ u8* MapOrReuse(core::Process* proc, u64 va, u64 flags)
         fr = mm::AllocateFrame().value_or(mm::kNullFrame);
         if (fr == mm::kNullFrame)
             return nullptr;
-        mm::AddressSpaceMapUserPage(proc->as, va, fr, flags);
+        if (!mm::AddressSpaceMapUserPage(proc->as, va, fr, flags))
+        {
+            mm::FreeFrame(fr);
+            return nullptr;
+        }
     }
     return static_cast<u8*>(mm::PhysToVirt(fr));
 }
@@ -449,8 +453,14 @@ void DoThreadCreate(arch::TrapFrame* frame)
     // path. Without this the next
     // DoThreadCreate would try to re-map the successfully-allocated
     // pages' VAs and AddressSpaceMapUserPage would panic on
-    // "virt already mapped". Leak is bounded; frames get reclaimed
-    // when the process dies (AS destructor walks regions).
+    // "virt already mapped". The reserved VA cursor is not rolled
+    // back because another creator may have claimed a later range, but
+    // every successfully mapped page is explicitly unwound on failure.
+    auto unwind_stack = [&](u64 mapped_pages)
+    {
+        for (u64 i = 0; i < mapped_pages; ++i)
+            (void)mm::AddressSpaceUnmapUserPage(proc->as, stack_base_va + i * mm::kPageSize);
+    };
     mm::PhysAddr top_frame_phys = mm::kNullFrame;
     for (u64 p = 0; p < stack_pages; ++p)
     {
@@ -464,14 +474,23 @@ void DoThreadCreate(arch::TrapFrame* frame)
             SerialWrite("/");
             SerialWriteHex(stack_pages);
             SerialWrite("\n");
+            unwind_stack(p);
             // Release the slot we claimed above; no task ever attaches.
             release_claimed_slot();
             frame->rax = static_cast<u64>(-1);
             return;
         }
         const u64 page_va = stack_base_va + p * mm::kPageSize;
-        mm::AddressSpaceMapUserPage(proc->as, page_va, frame_phys,
-                                    mm::kPagePresent | mm::kPageUser | mm::kPageWritable | mm::kPageNoExecute);
+        if (!mm::AddressSpaceMapUserPage(
+                proc->as, page_va, frame_phys,
+                mm::kPagePresent | mm::kPageUser | mm::kPageWritable | mm::kPageNoExecute))
+        {
+            mm::FreeFrame(frame_phys);
+            unwind_stack(p);
+            release_claimed_slot();
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
         if (p == stack_pages - 1)
             top_frame_phys = frame_phys;
     }

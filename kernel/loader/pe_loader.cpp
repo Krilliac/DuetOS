@@ -204,8 +204,8 @@ struct PeHeaders
 //
 // Contract: every AddressSpaceMapUserPage call inside PeLoad (and
 // the helpers it delegates to) is followed by an
-// AddressSpaceProbePteRaw check — MapUserPage returns void and has
-// three silent refusal paths (frame budget, region grow OOM,
+// AddressSpaceProbePteRaw check — MapUserPage returns false for
+// three recoverable refusal paths (frame budget, region grow OOM,
 // page-table walker OOM). If the probe shows the PTE absent, the
 // caller FreeFrames the orphaned frame and fails the load. Only on
 // a confirmed-present PTE does the caller Track(va). The destructor
@@ -542,11 +542,9 @@ bool MapSection(const u8* file, const u8* sec, u64 image_base, u64 image_size, d
         }
         if (!reusing)
         {
-            AddressSpaceMapUserPage(as, page_va, frame, flags);
-            // MapUserPage returns void and has three silent refusal
-            // paths (frame budget exhausted, region-table grow OOM,
-            // page-table walker OOM). Probe the leaf PTE: absent =
-            // the map was refused = FreeFrame and fail the load.
+            (void)AddressSpaceMapUserPage(as, page_va, frame, flags);
+            // Probe the leaf PTE as a defensive invariant check: absent
+            // means the map was refused, so FreeFrame and fail the load.
             if ((AddressSpaceProbePteRaw(as, page_va) & kPagePresent) == 0)
             {
                 FreeFrame(frame);
