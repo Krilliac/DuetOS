@@ -1,12 +1,14 @@
 #pragma once
 
+#include "duet/syscall_numbers_generated.h"
+
 /*
  * DuetOS — userland-side syscall numbers + raw int 0x80 ABI.
  *
- * Mirrors the kernel-side `enum SyscallNumber` in
- * `kernel/syscall/syscall.h`. Every userland binary that issues
- * syscalls (the v0 shell, future native init, eventual coreutils
- * shims) consumes this header.
+ * Syscall numbers come from the versioned native IDL through
+ * `syscall_numbers_generated.h`; this header adds typed wrapper contracts
+ * and operation selectors. Every native userland binary consumes the same
+ * generated constants as the kernel-side migration checks.
  *
  * Calling convention:
  *   eax = syscall number
@@ -19,29 +21,19 @@
  * `int 0x80` so the kernel side doesn't need MSR_LSTAR / SCE).
  */
 
-#define DUET_SYS_EXIT 0
-#define DUET_SYS_GETPID 1
-#define DUET_SYS_WRITE 2
-
 /* SYS_STDIN_READ — drain cooked ASCII bytes from the calling
  * process's per-process stdin ring. Backs `read(STDIN_FILENO,
  * buf, len)`. Blocks until at least one byte is available.
  * Distinct from the kernel's path-based SYS_READ (= 5), which
  * takes a NUL-terminated ASCII path pointer in rdi rather than
  * a file descriptor + buffer. */
-#define DUET_SYS_STDIN_READ 171
-
 /* SYS_SLEEP_MS — block the calling task for `ms` milliseconds (rdi).
  * ms == 0 behaves like a yield. Mirrors kernel SYS_SLEEP_MS = 19. */
-#define DUET_SYS_SLEEP_MS 19
-
 /* SYS_SOCKET_OP — the kernel's multiplexed BSD-socket entry point
  * (kernel/syscall/syscall.h SYS_SOCKET_OP = 153). Native binaries
  * reach the same kernel socket pool the Win32 ws2_32.dll uses. The
  * op selector goes in arg0 (rdi); the rest are op-specific. Cap-gated
  * on kCapNet. See duet/socket.h for typed wrappers. */
-#define DUET_SYS_SOCKET_OP 153
-
 #define DUET_SOCKOP_CREATE 1
 #define DUET_SOCKOP_BIND 2
 #define DUET_SOCKOP_CONNECT 3
