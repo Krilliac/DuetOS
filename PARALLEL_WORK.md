@@ -1210,3 +1210,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Credential
 - **Claimed**: 2026-07-31T21:21:32Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] gui-message-queue-host-properties
+- **Session**: `Nathan-601`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tests/host/test_gui_message_queue.cpp`
+- **Description**: Host production queue properties, deterministic concurrency, sanitizer gate
+- **Claimed**: 2026-07-31T21:29:27Z
+- **Status**: IN PROGRESS
