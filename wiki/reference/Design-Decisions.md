@@ -13847,6 +13847,28 @@ destination — and every one of the nine is already in the Start menu.
 PE-inspector app; the debugger's Disasm / Memory / Symbols tabs are the
 binary-inspection surface the design's Inspect screen depicts.
 
+### DD - Aurora CPU sparklines are scheduler-owned, not compositor-local
+
+`docs/aurora-theme/README.md` asks for two visible CPU histories: the
+desktop gadget's kernel panel and the taskbar island's right-side stats
+pill. A compositor-local ring would give each surface its own cadence and
+would tempt paint code to derive rates from lifetime counters while holding
+the compositor mutex.
+
+The owner is therefore `kernel/sched/sched.cpp`: it lazily appends a 1 Hz
+`SchedStatsSample` ring, and both `desktop_gadgets.cpp` and `taskbar.cpp`
+copy that ring for paint. The sample path uses an unclassified sample-ring
+lock plus scheduler-maintained ABI process buckets, not a task-registry walk
+under `g_sched_lock`, so compositor paint does not create a compositor ->
+scheduler lock-order edge.
+
+ABI-peer counts are process counts, not task counts. The scheduler keeps one
+counted task representative per `Process`; when that representative exits,
+`SchedFinishTaskSwitch` transfers the representative bit to another live
+task of the same process or decrements the native / Win32 / Linux bucket.
+That makes the desktop panel honest without asking the compositor to dedupe
+tasks by `Process*`.
+
 ### DD - pinned taskbar launchers are scaled by island budget, not transcribed
 
 `docs/aurora-theme/README.md` §10 pins nine app buttons on the taskbar

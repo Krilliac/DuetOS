@@ -4,7 +4,6 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 
 ## Active Sessions
 
-<<<<<<< HEAD
 ### [DONE] thunk-retirement-wave1
 - **Session**: `Codex-thunk-wave1`
 - **Branch**: `claude/thunk-retirement-wave1`
@@ -468,7 +467,6 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Correct SYS_THREAD_OPEN fixture number and synchronize TID-only handle contract
 - **Claimed**: 2026-07-27T06:51:16Z
 - **Status**: COMPLETED @ 2026-07-27T06:52:05Z
-=======
 ### 🟢 linux-mm-wx-hardening
 - **Session**: `Nathan-8`
 - **Branch**: `claude/linux-mmap-wx-hardening`
@@ -476,7 +474,6 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Enforce Linux mmap and mprotect W^X policy and make mseal failure truthful
 - **Claimed**: 2026-07-26T12:30:06Z
 - **Status**: IN PROGRESS
->>>>>>> 531563d6 (chore: claim subsystem 'linux-mm-wx-hardening' [session Nathan-8])
 
 ### [DONE] ci-red-main-repair
 - **Session**: `Nathan-616`
@@ -509,3 +506,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Re-record completed DRSH wire attack slice after rebasing onto repaired main
 - **Claimed**: 2026-07-31T00:24:23Z
 - **Status**: COMPLETED @ 2026-07-31T00:24:28Z
+
+### [DONE] aurora-sample-gadgets-post-drsh
+- **Session**: `Codex-Aurora-gadgets-post-drsh`
+- **Branch**: `claude/aurora-sample-gadgets`
+- **Files**: `kernel/drivers/video/desktop_gadgets.cpp kernel/drivers/video/desktop_gadgets.h kernel/drivers/video/taskbar.cpp kernel/sched/sched.cpp kernel/sched/sched.h wiki/subsystems/Compositor.md wiki/reference/Roadmap.md wiki/reference/Design-Decisions.md`
+- **Description**: Re-record completed Aurora sample stats gadgets slice after rebasing onto DRSH-merged main
+- **Claimed**: 2026-07-31T00:51:53Z
+- **Status**: COMPLETED @ 2026-07-31T00:51:58Z

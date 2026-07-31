@@ -209,7 +209,7 @@ constexpr u32 kRailGap = 4;
 // rail + the gaps between them. Sized so tabs never get clipped by
 // the rightmost paint pass.
 //
-//   Duet family: pill (~180) + tray (~100) + time (~80) +
+//   Duet family: pill (~240 incl. CPU sparkline) + tray (~100) + time (~80) +
 //                rail (~6) + gaps (~30) = ~400
 //   Other themes: tray (~70) + time (~80) + rail (~6) +
 //                 gaps (~14) = ~170
@@ -225,8 +225,8 @@ u32 RightReserve()
     // Measuring the strip's looser 400 there is what left a dead gap
     // between the last app button and the stats pill.
     if (pill && ThemeCurrent().taskbar_island && ThemeTactilityEffective())
-        return 270u;
-    return pill ? 400u : 180u;
+        return 330u;
+    return pill ? 460u : 180u;
 }
 
 // The app buttons this pass will paint, left to right.
@@ -289,6 +289,57 @@ u32 ButtonCount()
 {
     WindowHandle roster[kMaxTabs] = {};
     return BuildButtonRoster(roster, kMaxTabs);
+}
+
+u32 LatestCpuPct(const ::duetos::sched::SchedStatsSampleSnapshot& samples)
+{
+    if (samples.count != 0)
+    {
+        const auto& latest = samples.samples[samples.count - 1U];
+        if (latest.valid)
+        {
+            return latest.cpu_busy_pct;
+        }
+    }
+    const auto stats = ::duetos::sched::SchedStatsRead();
+    if (stats.total_ticks == 0)
+    {
+        return 0;
+    }
+    const u64 busy = (stats.total_ticks > stats.idle_ticks) ? (stats.total_ticks - stats.idle_ticks) : 0;
+    u64 pct = (busy * 100u) / stats.total_ticks;
+    if (pct > 99u)
+    {
+        pct = 99u;
+    }
+    return static_cast<u32>(pct);
+}
+
+void DrawCpuSparkline(u32 x, u32 y, u32 w, u32 h, const ::duetos::sched::SchedStatsSampleSnapshot& samples, u32 ink,
+                      u32 dim)
+{
+    if (w == 0 || h == 0)
+    {
+        return;
+    }
+    FramebufferFillRect(x, y + h - 1U, w, 1U, dim);
+    const u32 count = (samples.count > w) ? w : samples.count;
+    const u32 left_pad = w - count;
+    for (u32 col = 0; col < left_pad; ++col)
+    {
+        FramebufferFillRect(x + col, y + h - 1U, 1U, 1U, dim);
+    }
+    for (u32 i = 0; i < count; ++i)
+    {
+        const auto& s = samples.samples[samples.count - count + i];
+        const u32 pct = s.valid ? s.cpu_busy_pct : 0;
+        u32 bar_h = (pct * (h - 1U) + 99U) / 100U;
+        if (bar_h == 0)
+        {
+            bar_h = 1U;
+        }
+        FramebufferFillRect(x + left_pad + i, y + h - bar_h, 1U, bar_h, ink);
+    }
 }
 
 // Lighten an 0x00RRGGBB colour by `amount` per channel, saturating
@@ -1444,17 +1495,9 @@ void TaskbarRedraw()
             // already published every heartbeat under the same
             // arithmetic; reading it here keeps the pill and the
             // klog telemetry in lockstep.
-            const auto stats = ::duetos::sched::SchedStatsRead();
-            u32 cpu_pct = 0;
-            if (stats.total_ticks > 0)
-            {
-                const u64 busy = (stats.total_ticks > stats.idle_ticks) ? (stats.total_ticks - stats.idle_ticks) : 0;
-                cpu_pct = static_cast<u32>((busy * 100u) / stats.total_ticks);
-                if (cpu_pct > 99u)
-                {
-                    cpu_pct = 99u;
-                }
-            }
+            ::duetos::sched::SchedStatsSampleSnapshot sched_samples{};
+            ::duetos::sched::SchedStatsSampleSnapshotRead(&sched_samples);
+            const u32 cpu_pct = LatestCpuPct(sched_samples);
             // FPS: the compose pump runs at ~1 Hz when idle and
             // bursts to 60 Hz under cursor activity. Hard-code
             // 60.0 here so the pill matches the prototype's
@@ -1532,8 +1575,11 @@ void TaskbarRedraw()
                                      ChromeTextMeasure(ChromeTextRole::Caption, " FPS");
             const u32 fps_design_w = ChromeTextMeasure(ChromeTextRole::Caption, "60.0 FPS");
             const u32 right_w = (fps_measured > fps_design_w) ? fps_measured : fps_design_w;
+            constexpr u32 kSparkW = 52;
+            constexpr u32 kSparkH = 12;
+            constexpr u32 kSparkGap = 8;
             constexpr u32 pill_pad_x = 12;
-            const u32 pill_w = left_w + sep_w + right_w + 2 * pill_pad_x;
+            const u32 pill_w = left_w + kSparkGap + kSparkW + sep_w + right_w + 2 * pill_pad_x;
             constexpr u32 pill_pad_y = 4;
             const u32 pill_h = (g_h > 2 * pill_pad_y) ? g_h - 2 * pill_pad_y - 2 : 22;
             if (tray_right > pill_w + 8)
@@ -1552,12 +1598,15 @@ void TaskbarRedraw()
                 ChromeTextDraw(ChromeTextRole::Caption, pill_x + pill_pad_x, text_y, "CPU", g_accent, g_tab_inactive);
                 ChromeTextDraw(ChromeTextRole::Caption, pill_x + pill_pad_x + cpu_label_w, text_y, left + 4, g_fg,
                                g_tab_inactive);
+                const u32 spark_x = pill_x + pill_pad_x + left_w + kSparkGap;
+                const u32 spark_y = pill_y + ((pill_h > kSparkH) ? (pill_h - kSparkH) / 2U : 0U);
+                DrawCpuSparkline(spark_x, spark_y, kSparkW, kSparkH, sched_samples, g_accent, g_border);
                 // Hairline divider (1-px) between the two halves
                 // — matches the prototype's `<span style={{width:1
                 // height:12,background:'var(--line-2)'}}/>` strip.
                 // Anchor the divider at the midpoint of the sep
                 // gap so the spacing reads symmetric on both sides.
-                const u32 div_x = pill_x + pill_pad_x + left_w + sep_w / 2;
+                const u32 div_x = pill_x + pill_pad_x + left_w + kSparkGap + kSparkW + sep_w / 2;
                 if (pill_h > 8)
                 {
                     FramebufferFillRect(div_x, pill_y + 4, 1, pill_h - 8, g_border);
@@ -1567,7 +1616,7 @@ void TaskbarRedraw()
                 // pill carries the dual-accent duet narrative in
                 // the smallest cell of the chrome too.
                 constexpr u32 kAmberInk = 0x00F5B73A;
-                const u32 right_x = pill_x + pill_pad_x + left_w + sep_w;
+                const u32 right_x = pill_x + pill_pad_x + left_w + kSparkGap + kSparkW + sep_w;
                 const u32 num_w = ChromeTextMeasure(ChromeTextRole::Caption, fps_txt) +
                                   ChromeTextMeasure(ChromeTextRole::Caption, " ");
                 ChromeTextDraw(ChromeTextRole::Caption, right_x, text_y, fps_txt, kAmberInk, g_tab_inactive);
