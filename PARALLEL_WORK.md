@@ -930,3 +930,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Route PE32 thread messages to kernel Task queues
 - **Claimed**: 2026-07-31T18:41:42Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] gui-task-message-v2-gdi-identity
+- **Session**: `Codex-gui-task-queue`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/subsystems/win32/gdi_objects.cpp kernel/subsystems/win32/gdi_objects.h`
+- **Description**: Keep window HDC state keyed by generation-safe HWND identity
+- **Claimed**: 2026-07-31T18:44:01Z
+- **Status**: IN PROGRESS
