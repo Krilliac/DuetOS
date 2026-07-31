@@ -11,7 +11,8 @@ struct RamfsNode;
 namespace duetos::core
 {
 struct CapSet;
-}
+struct Process;
+} // namespace duetos::core
 
 /*
  * DuetOS — canonical ring-3 process spawn API.
@@ -77,6 +78,13 @@ struct CapSet;
 namespace duetos::core
 {
 
+/// Synchronous child-initialization hook invoked after the image and Process
+/// are fully constructed but before SchedCreateUser publishes a runnable
+/// Task. The child is exclusively owned by the spawn path. Returning false
+/// aborts publication and runs normal Process teardown, including any state
+/// the callback already installed.
+using SpawnPrepareCallback = bool (*)(Process* child, void* context);
+
 /// A single entry in the kernel's embedded DLL preload table.
 /// Each Win32-imports PE gets these DLLs pre-loaded into its
 /// address space before PeLoad runs so ResolveImports can walk
@@ -123,7 +131,8 @@ extern const u64 kPreloadTablePe32Count;
 u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps, const fs::RamfsNode* root,
                  u64 frame_budget, u64 tick_budget);
 u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps, const fs::RamfsNode* root,
-                 u64 frame_budget, u64 tick_budget, CapSet cap_ceiling);
+                 u64 frame_budget, u64 tick_budget, CapSet cap_ceiling, SpawnPrepareCallback prepare = nullptr,
+                 void* prepare_context = nullptr);
 
 /// Linux-ABI twin of `SpawnElfFile`. Same parse + AS + Process
 /// pipeline, but flips `Process::abi_flavor = kAbiLinux` after
@@ -139,7 +148,8 @@ u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps
 u64 SpawnElfLinux(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps, const fs::RamfsNode* root,
                   u64 frame_budget, u64 tick_budget);
 u64 SpawnElfLinux(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps, const fs::RamfsNode* root,
-                  u64 frame_budget, u64 tick_budget, CapSet cap_ceiling);
+                  u64 frame_budget, u64 tick_budget, CapSet cap_ceiling, SpawnPrepareCallback prepare = nullptr,
+                  void* prepare_context = nullptr);
 
 /// PE/COFF twin of `SpawnElfFile`. Loads via the v0 PE loader
 /// (freestanding, no imports, no relocations) and queues a
@@ -165,6 +175,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
 /// `LoadLibraryW` path resolves against the same directory the import
 /// binder did. See `loader/sxs_dll.h`.
 u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, const fs::RamfsNode* root,
-                u64 frame_budget, u64 tick_budget, CapSet cap_ceiling, u32 origin_volume, const char* origin_path);
+                u64 frame_budget, u64 tick_budget, CapSet cap_ceiling, u32 origin_volume, const char* origin_path,
+                SpawnPrepareCallback prepare = nullptr, void* prepare_context = nullptr);
 
 } // namespace duetos::core

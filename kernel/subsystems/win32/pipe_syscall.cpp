@@ -7,6 +7,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/traps.h"
+#include "fs/file_route.h"
 #include "log/klog.h"
 #include "mm/paging.h"
 #include "proc/process.h"
@@ -19,19 +20,6 @@ namespace
 {
 
 constexpr u64 kBadResult = static_cast<u64>(-1);
-
-// Find a free Win32FileHandle slot. Returns the slot index or
-// kWin32HandleCap if the table is full.
-u64 FindFreeSlot(::duetos::core::Process* proc)
-{
-    using ::duetos::core::Process;
-    for (u64 i = 0; i < Process::kWin32HandleCap; ++i)
-    {
-        if (proc->win32_handles[i].kind == Process::FsBackingKind::None)
-            return i;
-    }
-    return Process::kWin32HandleCap;
-}
 
 void StampPipeEnd(::duetos::core::Process::Win32FileHandle& h, u32 pool_idx, bool is_write_end)
 {
@@ -75,23 +63,19 @@ void DoWin32CreatePipe(arch::TrapFrame* frame)
 
     // Reserve two file-handle slots BEFORE allocating the pool
     // entry so a pool-leak can't happen on table-full failure.
-    const u64 read_slot = FindFreeSlot(proc);
-    if (read_slot == Process::kWin32HandleCap)
+    Process::Win32FileReservation read_reservation{};
+    if (!::duetos::core::ProcessReserveWin32FileHandle(proc, &read_reservation))
     {
         frame->rax = kBadResult;
         return;
     }
-    // Tentatively mark the read slot busy so FindFreeSlot's next
-    // call returns a different one.
-    proc->win32_handles[read_slot].kind = Process::FsBackingKind::Pipe;
-    const u64 write_slot = FindFreeSlot(proc);
-    if (write_slot == Process::kWin32HandleCap)
+    Process::Win32FileReservation write_reservation{};
+    if (!::duetos::core::ProcessReserveWin32FileHandle(proc, &write_reservation))
     {
-        proc->win32_handles[read_slot].kind = Process::FsBackingKind::None;
+        ::duetos::core::ProcessAbortWin32FileHandle(proc, read_reservation);
         frame->rax = kBadResult;
         return;
     }
-    proc->win32_handles[write_slot].kind = Process::FsBackingKind::Pipe;
 
     // Allocate pool slot. PipeAlloc initialises both refcounts
     // to 1 so the read-end / write-end seats below land at the
@@ -99,17 +83,35 @@ void DoWin32CreatePipe(arch::TrapFrame* frame)
     const i32 pool_idx = ::duetos::subsystems::linux::internal::PipeAlloc();
     if (pool_idx < 0)
     {
-        proc->win32_handles[read_slot].kind = Process::FsBackingKind::None;
-        proc->win32_handles[write_slot].kind = Process::FsBackingKind::None;
+        ::duetos::core::ProcessAbortWin32FileHandle(proc, read_reservation);
+        ::duetos::core::ProcessAbortWin32FileHandle(proc, write_reservation);
         frame->rax = kBadResult;
         return;
     }
 
-    StampPipeEnd(proc->win32_handles[read_slot], static_cast<u32>(pool_idx), /*is_write=*/false);
-    StampPipeEnd(proc->win32_handles[write_slot], static_cast<u32>(pool_idx), /*is_write=*/true);
+    Process::Win32FileHandle read_candidate{};
+    Process::Win32FileHandle write_candidate{};
+    StampPipeEnd(read_candidate, static_cast<u32>(pool_idx), /*is_write=*/false);
+    StampPipeEnd(write_candidate, static_cast<u32>(pool_idx), /*is_write=*/true);
 
-    const u64 read_handle = Process::kWin32HandleBase + read_slot;
-    const u64 write_handle = Process::kWin32HandleBase + write_slot;
+    u64 read_handle = 0;
+    u64 write_handle = 0;
+    if (!::duetos::core::ProcessPublishWin32FileHandle(proc, read_reservation, read_candidate, &read_handle) ||
+        !::duetos::core::ProcessPublishWin32FileHandle(proc, write_reservation, write_candidate, &write_handle))
+    {
+        ::duetos::core::ProcessAbortWin32FileHandle(proc, read_reservation);
+        ::duetos::core::ProcessAbortWin32FileHandle(proc, write_reservation);
+        if (read_handle != 0)
+            (void)::duetos::fs::routing::CloseForProcess(proc, read_handle);
+        else
+            ::duetos::subsystems::linux::internal::PipeReleaseRead(static_cast<u32>(pool_idx));
+        if (write_handle != 0)
+            (void)::duetos::fs::routing::CloseForProcess(proc, write_handle);
+        else
+            ::duetos::subsystems::linux::internal::PipeReleaseWrite(static_cast<u32>(pool_idx));
+        frame->rax = kBadResult;
+        return;
+    }
 
     if (!::duetos::mm::CopyToUser(reinterpret_cast<void*>(user_read), &read_handle, sizeof(read_handle)) ||
         !::duetos::mm::CopyToUser(reinterpret_cast<void*>(user_write), &write_handle, sizeof(write_handle)))
@@ -117,10 +119,8 @@ void DoWin32CreatePipe(arch::TrapFrame* frame)
         // Roll back both ends — drop the per-end refcounts so
         // the pool entry's read_refs+write_refs both drop to 0
         // and PipeReleaseRead/Write tear it down.
-        ::duetos::subsystems::linux::internal::PipeReleaseRead(static_cast<u32>(pool_idx));
-        ::duetos::subsystems::linux::internal::PipeReleaseWrite(static_cast<u32>(pool_idx));
-        proc->win32_handles[read_slot].kind = Process::FsBackingKind::None;
-        proc->win32_handles[write_slot].kind = Process::FsBackingKind::None;
+        (void)::duetos::fs::routing::CloseForProcess(proc, read_handle);
+        (void)::duetos::fs::routing::CloseForProcess(proc, write_handle);
         frame->rax = kBadResult;
         return;
     }

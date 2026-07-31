@@ -852,7 +852,7 @@ u32 LinuxFdEpollReady(u32 fd, u32 interest_mask)
             const u64 target_pid = slot.first_cluster;
             // Two terminal states count as "exited":
             //   - target on g_zombies (DoExit done, not yet reaped)
-            //   - SchedFindProcessByPid returns nullptr (already
+            //   - SchedProcessExists returns false (already
             //     reaped or never existed)
             // Unreaped-zombie is the common case for shells that
             // poll a pidfd before wait4; reaped-already covers
@@ -863,8 +863,7 @@ u32 LinuxFdEpollReady(u32 fd, u32 interest_mask)
             }
             else
             {
-                core::Process* tgt = sched::SchedFindProcessByPid(target_pid);
-                if (tgt == nullptr)
+                if (!sched::SchedProcessExists(target_pid))
                     ready |= kEPOLLIN;
             }
         }

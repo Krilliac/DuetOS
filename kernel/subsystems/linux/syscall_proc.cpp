@@ -68,7 +68,7 @@ i64 DoExit(u64 status)
 
 // Linux getpid() returns the TGID — in our v0 single-thread-per-
 // process model this is the Process pid (Process::pid, the same id
-// SchedFindProcessByPid resolves against). Returning CurrentTaskId()
+// scheduler process lookup resolves against). Returning CurrentTaskId()
 // here would hand back the scheduler task tid, which is a different
 // counter; the immediate symptom was pidfd_open(getpid()) coming
 // back -ESRCH because the tid never matched any Process->pid.
@@ -109,23 +109,17 @@ i64 DoSchedYield()
 i64 DoTgkill(u64 tgid, u64 tid, u64 sig)
 {
     KLOG_INFO_2V("linux/proc", "DoTgkill", "tid", tid, "sig", sig);
-    (void)tgid;
-    if (sig == 0)
-    {
-        // Existence-probe form: verify the tid is alive.
-        sched::Task* t = sched::SchedFindTaskByTid(tid);
-        return (t != nullptr) ? 0 : kESRCH;
-    }
     core::Process* target = sched::SchedFindProcessByTidRetained(tid);
-    if (target == nullptr)
+    if (target == nullptr || target->pid != tgid)
     {
+        core::ProcessRelease(target);
         KLOG_WARN_V("linux/proc", "DoTgkill: ESRCH (tid not found)", tid);
         return kESRCH;
     }
-    if (target == nullptr)
+    if (sig == 0)
     {
-        KLOG_WARN_V("linux/proc", "DoTgkill: ESRCH (kernel-only task)", tid);
-        return kESRCH; // kernel-only task — no Linux process to signal
+        core::ProcessRelease(target);
+        return 0;
     }
     const i64 rc = LinuxSignalDeliver(target, static_cast<u32>(sig));
     core::ProcessRelease(target);
@@ -145,7 +139,7 @@ i64 DoKill(u64 pid, u64 sig)
         // Existence probe.
         if (spid <= 0)
             return 0;
-        return (sched::SchedFindProcessByPid(static_cast<u64>(spid)) != nullptr) ? 0 : kESRCH;
+        return sched::SchedProcessExists(static_cast<u64>(spid)) ? 0 : kESRCH;
     }
     core::Process* target = nullptr;
     if (spid > 0)
@@ -199,7 +193,7 @@ i64 DoGetPgid(u64 pid)
     // pid != 0: lookup the target. v0 hasn't built a real
     // pgid table, so report pid itself (each process is its
     // own group leader). -ESRCH if pid doesn't exist.
-    if (sched::SchedFindProcessByPid(pid) == nullptr)
+    if (!sched::SchedProcessExists(pid))
         return kESRCH;
     return static_cast<i64>(pid);
 }
@@ -212,7 +206,7 @@ i64 DoGetSid(u64 pid)
         const auto* p = core::CurrentProcess();
         return (p != nullptr) ? static_cast<i64>(p->pid) : 0;
     }
-    if (sched::SchedFindProcessByPid(pid) == nullptr)
+    if (!sched::SchedProcessExists(pid))
         return kESRCH;
     return static_cast<i64>(pid);
 }

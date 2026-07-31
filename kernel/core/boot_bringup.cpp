@@ -359,6 +359,7 @@
 #include "subsystems/win32/apc_selftest.h"
 #include "subsystems/win32/custom_selftest.h"
 #include "subsystems/win32/heap_selftest.h"
+#include "subsystems/win32/job_syscall.h"
 #include "subsystems/win32/vmap_selftest.h"
 #include "subsystems/win32/gdi_objects.h"
 #include "subsystems/win32/nt_coverage.h"
@@ -1136,6 +1137,18 @@ void BootBringupMemPaging()
                                               []()
                                               {
                                                   KernelHeapSelfTest();
+                                                  return duetos::core::Result<void>{};
+                                              });
+        duetos::core::InitcallRegisterOrPanic(duetos::core::Phase::Heap, "process-handle-lifetime-selftest",
+                                              []()
+                                              {
+                                                  duetos::core::ProcessHandleLifetimeSelfTest();
+                                                  return duetos::core::Result<void>{};
+                                              });
+        duetos::core::InitcallRegisterOrPanic(duetos::core::Phase::Heap, "job-owner-exit-selftest",
+                                              []()
+                                              {
+                                                  duetos::subsystems::win32::JobOwnerExitSelfTest();
                                                   return duetos::core::Result<void>{};
                                               });
         // IocpSelfTest moved to Phase::Sched — alongside the

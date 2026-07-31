@@ -119,8 +119,7 @@ i64 DoPidfdOpen(u64 pid, u64 flags)
     core::Process* caller = core::CurrentProcess();
     if (caller == nullptr)
         return kEPERM;
-    core::Process* target = sched::SchedFindProcessByPid(pid);
-    if (target == nullptr)
+    if (!sched::SchedProcessExists(pid))
         return kESRCH;
     const i32 fd = core::LinuxFdAllocLowest(caller, 3);
     if (fd < 0)

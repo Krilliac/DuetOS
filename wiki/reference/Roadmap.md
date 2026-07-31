@@ -143,13 +143,26 @@ cleanup debt: move the residual up and delete the rest.
   at a time and performs frame allocation/copying outside the spinlock.
   Readers, including the breakpoint resolver, still take only the
   bounded spinlock and never sleep.
-- **Remaining lifetime contracts:** probe/lookup currently returns an
-  unpinned snapshot after releasing `regions_lock`; cross-AS copy needs a
-  page guard or transaction-scoped API. Win32 section mapping must pin its
-  frames before it can wait for the AS transaction, and cross-process VM
-  operations must retain their target while synchronized with handle-slot
-  removal. Multi-threaded fork also needs sibling quiescence, COW, or an
-  explicit rejection contract to promise a coherent memory snapshot.
+- **Process/cross-AS lifetime slice implemented on the audit branch:**
+  Win32 process-handle slots now have an IRQ-safe owner lock. Lookup takes a
+  target reference before dropping that lock; close and final drain detach
+  rows under it and release afterward. Every VM/query/terminate/info/section
+  consumer holds the transient reference through the operation. Cross-AS
+  read/write uses a bounded address-space transaction-copy API, so PTE
+  resolution, permission validation, and direct-map access cannot race
+  unmap/protect/remap; caller user-copy runs outside the AS transaction. The
+  scheduler reaper now removes task lookup visibility before dropping its
+  Process/AS references, and public borrowed PID/TID lookups are replaced by
+  retained, existence-only, or scheduler-owned by-ID operations. Owner Jobs
+  drain at the last-task boundary, and SpawnEx installs inherited stdio before
+  the child Task becomes runnable.
+- **Remaining lifetime contracts:** raw frame lookup remains for callers that
+  must be classified as pre-publication/stopped-task safe or moved behind a
+  transaction operation. Win32 section mapping must pin its section and
+  frames before it can wait for the AS transaction, and its handle/view/W^X
+  ledgers need serialized reserve/publish/retire state. Multi-threaded fork
+  also needs sibling quiescence, COW, or an explicit rejection contract to
+  promise a coherent memory snapshot.
 - **Verification boundary:** source diff/format checks are complete.
   Full MSVC build, rebuilt tests, multi-vCPU QEMU boot, allocation-failure
   injection, and concurrent map/protect/unmap stress remain required.

@@ -19,6 +19,7 @@
 #include "mm/address_space.h"
 #include "proc/process.h"
 #include "sched/sched.h"
+#include "sync/spinlock.h"
 #include "subsystems/win32/custom.h"
 #include "subsystems/win32/registry.h"
 #include "util/string.h"
@@ -65,9 +66,9 @@ const char* ThreadStateName(u8 s)
     }
 }
 
-core::Process* FindProc(u64 pid)
+core::ScopedProcessRef FindProc(u64 pid)
 {
-    return sched::SchedFindProcessByPid(pid);
+    return core::ScopedProcessRef(sched::SchedFindProcessByPidRetained(pid));
 }
 
 void NotFound(const char* verb, u64 pid, MonitorWriter& out)
@@ -105,7 +106,8 @@ void CmdPs(MonitorWriter& out)
 
 void CmdCaps(u64 pid, MonitorWriter& out)
 {
-    core::Process* p = FindProc(pid);
+    core::ScopedProcessRef process_ref = FindProc(pid);
+    core::Process* p = process_ref.Get();
     if (p == nullptr)
     {
         NotFound("caps", pid, out);
@@ -174,7 +176,8 @@ void CmdThreads(MonitorWriter& out)
 
 void CmdHandles(u64 pid, MonitorWriter& out)
 {
-    core::Process* p = FindProc(pid);
+    core::ScopedProcessRef process_ref = FindProc(pid);
+    core::Process* p = process_ref.Get();
     if (p == nullptr)
     {
         NotFound("handles", pid, out);
@@ -207,7 +210,8 @@ void CmdHandles(u64 pid, MonitorWriter& out)
 
 void CmdVm(u64 pid, MonitorWriter& out)
 {
-    core::Process* p = FindProc(pid);
+    core::ScopedProcessRef process_ref = FindProc(pid);
+    core::Process* p = process_ref.Get();
     if (p == nullptr)
     {
         NotFound("vm", pid, out);
@@ -221,9 +225,17 @@ void CmdVm(u64 pid, MonitorWriter& out)
         out.Str(" has no address space (kernel task)\n");
         return;
     }
-    const u32 total = as->region_count;
     constexpr u32 kRowCap = 96;
-    const u32 shown = (total < kRowCap) ? total : kRowCap;
+    mm::AddressSpaceUserRegion rows[kRowCap]{};
+    u32 total = 0;
+    u32 shown = 0;
+    {
+        sync::SpinLockGuard region_guard(as->regions_lock);
+        total = as->region_count;
+        shown = (total < kRowCap) ? total : kRowCap;
+        for (u32 i = 0; i < shown; ++i)
+            rows[i] = as->regions[i];
+    }
     out.Str("pid ");
     out.U64(pid);
     out.Str(" regions=");
@@ -232,9 +244,9 @@ void CmdVm(u64 pid, MonitorWriter& out)
     for (u32 i = 0; i < shown; ++i)
     {
         out.Str("  va=0x");
-        out.Hex(as->regions[i].vaddr, 12);
+        out.Hex(rows[i].vaddr, 12);
         out.Str("  frame=0x");
-        out.Hex(static_cast<u64>(as->regions[i].frame), 9);
+        out.Hex(static_cast<u64>(rows[i].frame), 9);
         out.Line();
     }
     if (shown < total)
@@ -247,7 +259,8 @@ void CmdVm(u64 pid, MonitorWriter& out)
 
 void CmdMods(u64 pid, MonitorWriter& out)
 {
-    core::Process* p = FindProc(pid);
+    core::ScopedProcessRef process_ref = FindProc(pid);
+    core::Process* p = process_ref.Get();
     if (p == nullptr)
     {
         NotFound("mods", pid, out);
@@ -316,7 +329,8 @@ void CmdWin(MonitorWriter& out)
 
 void CmdWin32(u64 pid, MonitorWriter& out)
 {
-    core::Process* p = FindProc(pid);
+    core::ScopedProcessRef process_ref = FindProc(pid);
+    core::Process* p = process_ref.Get();
     if (p == nullptr)
     {
         NotFound("win32", pid, out);
