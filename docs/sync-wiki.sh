@@ -466,17 +466,27 @@ main() {
             echo ""
             CHECK_MODE=true
 
+            local tmpdir
+            tmpdir=$(mktemp -d)
+            local source_wiki_dir="$WIKI_DIR"
+            local scratch_wiki_dir="$tmpdir/wiki"
+            mkdir -p "$scratch_wiki_dir"
+            trap "rm -rf -- '$tmpdir'" EXIT
+
+            # Check mode must never write into the worktree.  Copy the
+            # Markdown corpus first, then redirect every sync helper to the
+            # isolated tree.  This also avoids a fragile write-back restore
+            # step when the repository is hosted by OneDrive.
+            while IFS= read -r -d '' mdfile; do
+                local rel="${mdfile#$source_wiki_dir/}"
+                mkdir -p "$scratch_wiki_dir/$(dirname "$rel")"
+                cp -- "$mdfile" "$scratch_wiki_dir/$rel"
+            done < <(find "$source_wiki_dir" -name '*.md' -print0)
+
+            WIKI_DIR="$scratch_wiki_dir"
             collect_inventory
             check_stale_references
             sync_sidebar
-
-            local tmpdir
-            tmpdir=$(mktemp -d)
-            (cd "$WIKI_DIR" && find . -name '*.md' -print0 | \
-                while IFS= read -r -d '' rel; do
-                    mkdir -p "$tmpdir/$(dirname "$rel")"
-                    cp "$rel" "$tmpdir/$rel"
-                done)
 
             sync_syscall_page
             sync_caps_page
@@ -487,17 +497,16 @@ main() {
             local stale=0
             while IFS= read -r -d '' mdfile; do
                 local rel="${mdfile#$WIKI_DIR/}"
-                if [ -f "$tmpdir/$rel" ] && ! diff -q "$mdfile" "$tmpdir/$rel" > /dev/null 2>&1; then
+                if [ -f "$source_wiki_dir/$rel" ] &&
+                   ! diff -q "$mdfile" "$source_wiki_dir/$rel" > /dev/null 2>&1; then
                     log_warning "  $rel is out of date"
                     stale=$((stale + 1))
                 fi
             done < <(find "$WIKI_DIR" -name '*.md' -print0)
 
-            (cd "$tmpdir" && find . -name '*.md' -print0 | \
-                while IFS= read -r -d '' rel; do
-                    cp "$rel" "$WIKI_DIR/$rel"
-                done)
-            rm -rf "$tmpdir"
+            WIKI_DIR="$source_wiki_dir"
+            rm -rf -- "$tmpdir"
+            trap - EXIT
 
             echo ""
             if [ "$stale" -gt 0 ]; then
