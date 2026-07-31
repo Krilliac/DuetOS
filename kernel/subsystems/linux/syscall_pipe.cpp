@@ -193,7 +193,7 @@ struct EventfdPin
     explicit operator bool() const { return eventfd != nullptr; }
 };
 
-void PipeMaybeFree(u32 idx)
+[[maybe_unused]] void PipeMaybeFree(u32 idx)
 {
     if (idx >= kPipePoolCap)
         return;
@@ -863,7 +863,7 @@ i64 PipeWriteKernel(u32 idx, const u8* src, u64 len)
 namespace
 {
 
-i64 PipeSpliceFromPipe(u32 dst_idx, u32 src_idx, u64 len)
+[[maybe_unused]] i64 PipeSpliceFromPipe(u32 dst_idx, u32 src_idx, u64 len)
 {
     if (dst_idx >= kPipePoolCap || src_idx >= kPipePoolCap || len == 0 || dst_idx == src_idx)
         return (dst_idx == src_idx) ? -22 : 0;
@@ -916,7 +916,7 @@ i64 PipeSpliceFromPipe(u32 dst_idx, u32 src_idx, u64 len)
     }
 }
 
-i64 PipeTeeFromPipe(u32 dst_idx, u32 src_idx, u64 len)
+[[maybe_unused]] i64 PipeTeeFromPipe(u32 dst_idx, u32 src_idx, u64 len)
 {
     if (dst_idx >= kPipePoolCap || src_idx >= kPipePoolCap || len == 0 || dst_idx == src_idx)
         return (dst_idx == src_idx) ? -22 : 0;
