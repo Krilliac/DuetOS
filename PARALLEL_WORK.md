@@ -1154,3 +1154,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Guard
 - **Claimed**: 2026-07-31T20:58:17Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] host-msvc-production-portability
+- **Session**: `Nathan-1176`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/debug/probes.h`
+- **Description**: No description provided
+- **Claimed**: 2026-07-31T21:14:35Z
+- **Status**: IN PROGRESS
