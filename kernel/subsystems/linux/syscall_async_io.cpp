@@ -91,8 +91,10 @@ struct Timerfd
 struct Signalfd
 {
     bool in_use;
-    u8 _pad[3];
+    bool closing;
+    u8 _pad[2];
     u32 refs;
+    u32 pins;
     u64 mask;
     sched::WaitQueue read_wq;
 };
@@ -201,6 +203,43 @@ struct EpollPin
     explicit operator bool() const { return epoll != nullptr; }
 };
 
+struct SignalfdPin
+{
+    u32 idx;
+    Signalfd* signalfd;
+
+    explicit SignalfdPin(u32 value) : idx(value), signalfd(nullptr)
+    {
+        if (value >= kSignalfdPoolCap)
+            return;
+        sync::SpinLockGuard guard(g_async_lock);
+        Signalfd& s = g_signalfd_pool[value];
+        if (s.in_use && !s.closing)
+        {
+            ++s.pins;
+            signalfd = &s;
+        }
+    }
+
+    ~SignalfdPin()
+    {
+        if (signalfd == nullptr)
+            return;
+        sync::SpinLockGuard guard(g_async_lock);
+        Signalfd& s = g_signalfd_pool[idx];
+        if (s.pins > 0)
+            --s.pins;
+        if (s.pins == 0 && s.refs == 0)
+        {
+            s.in_use = false;
+            s.closing = false;
+            s.mask = 0;
+        }
+    }
+
+    explicit operator bool() const { return signalfd != nullptr; }
+};
+
 i32 TimerfdAlloc(u32 clock_id)
 {
     sync::SpinLockGuard guard(g_async_lock);
@@ -227,22 +266,22 @@ i32 TimerfdAlloc(u32 clock_id)
 
 i32 SignalfdAlloc(u64 mask)
 {
-    arch::Cli();
+    sync::SpinLockGuard guard(g_async_lock);
     for (u32 i = 0; i < kSignalfdPoolCap; ++i)
     {
         if (!g_signalfd_pool[i].in_use)
         {
             Signalfd& s = g_signalfd_pool[i];
             s.in_use = true;
+            s.closing = false;
             s.refs = 1;
+            s.pins = 0;
             s.mask = mask;
             s.read_wq.head = nullptr;
             s.read_wq.tail = nullptr;
-            arch::Sti();
             return static_cast<i32>(i);
         }
     }
-    arch::Sti();
     return -1;
 }
 
@@ -559,32 +598,34 @@ void SignalfdRetain(u32 idx)
 {
     if (idx >= kSignalfdPoolCap)
         return;
-    arch::Cli();
+    sync::SpinLockGuard guard(g_async_lock);
     Signalfd& s = g_signalfd_pool[idx];
-    if (s.in_use)
+    if (s.in_use && !s.closing)
         ++s.refs;
-    arch::Sti();
 }
 
 void SignalfdRelease(u32 idx)
 {
     if (idx >= kSignalfdPoolCap)
         return;
-    arch::Cli();
+    sync::SpinLockGuard guard(g_async_lock);
     Signalfd& s = g_signalfd_pool[idx];
     if (!s.in_use || s.refs == 0)
     {
-        arch::Sti();
         return;
     }
     --s.refs;
     if (s.refs == 0)
     {
         sched::WaitQueueWakeAll(&s.read_wq);
-        s.in_use = false;
-        s.mask = 0;
+        s.closing = true;
+        if (s.pins == 0)
+        {
+            s.in_use = false;
+            s.closing = false;
+            s.mask = 0;
+        }
     }
-    arch::Sti();
 }
 
 i64 SignalfdRead(u32 idx, u64 user_dst, u64 len)
@@ -593,14 +634,17 @@ i64 SignalfdRead(u32 idx, u64 user_dst, u64 len)
         return kEINVAL;
     if (len < 128) // sizeof(struct signalfd_siginfo)
         return kEINVAL;
-    Signalfd& s = g_signalfd_pool[idx];
+    SignalfdPin pin(idx);
+    if (!pin)
+        return 0;
     core::Process* p = core::CurrentProcess();
     if (p == nullptr)
         return kEINVAL;
-    arch::Cli();
-    if (!s.in_use)
+    auto lock_flags = sync::SpinLockAcquire(g_async_lock);
+    Signalfd& s = *pin.signalfd;
+    if (!s.in_use || s.closing)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_async_lock, lock_flags);
         return 0;
     }
     // Walk the pending bitmap; emit one signalfd_siginfo per
@@ -631,7 +675,7 @@ i64 SignalfdRead(u32 idx, u64 user_dst, u64 len)
         p->linux_pending_signals &= ~bit;
         emitted += 128;
     }
-    arch::Sti();
+    sync::SpinLockRelease(g_async_lock, lock_flags);
     if (emitted == 0)
         return kEAGAIN;
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_dst), stage, emitted))
@@ -667,10 +711,12 @@ i64 DoSignalfd(u64 fd, u64 user_mask, u64 sigsetsize, u64 flags)
         const u32 idx = p->linux_fds[fd].first_cluster;
         if (idx >= kSignalfdPoolCap)
             return kEINVAL;
-        arch::Cli();
-        if (g_signalfd_pool[idx].in_use)
-            g_signalfd_pool[idx].mask = mask;
-        arch::Sti();
+        SignalfdPin pin(idx);
+        if (!pin)
+            return kEINVAL;
+        sync::SpinLockGuard guard(g_async_lock);
+        if (pin.signalfd->in_use && !pin.signalfd->closing)
+            pin.signalfd->mask = mask;
         return static_cast<i64>(fd);
     }
     const i32 new_fd = core::LinuxFdAllocLowest(p, 3);
