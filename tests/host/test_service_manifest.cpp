@@ -188,6 +188,17 @@ void ExpectCleared(const ServiceManifestPlanV1& plan)
     EXPECT_EQ(plan.topological_identities[0], 0ULL);
 }
 
+bool HashEquals(const duetos::loader::Hash256& left, const duetos::loader::Hash256& right)
+{
+    return std::memcmp(left.bytes, right.bytes, sizeof(left.bytes)) == 0;
+}
+
+bool HashIsZero(const duetos::loader::Hash256& hash)
+{
+    const duetos::loader::Hash256 zero{};
+    return HashEquals(hash, zero);
+}
+
 u32 ServiceOffset(u32 index)
 {
     return kServiceManifestV1HeaderBytes + index * kServiceManifestV1ServiceBytes;
@@ -268,6 +279,19 @@ int main()
         EXPECT_EQ(encoded.error, ServiceManifestError::Ok);
         EXPECT_EQ(encoded.bytes_written, fixture.byte_count);
         EXPECT_TRUE(std::memcmp(second.data(), fixture.bytes.data(), fixture.byte_count) == 0);
+
+        duetos::loader::Hash256 document_hash{};
+        EXPECT_EQ(ServiceManifestDocumentHashV1(fixture.document, &document_hash), ServiceManifestError::Ok);
+        EXPECT_TRUE(HashEquals(document_hash, fixture.authority.sealed_object_hash));
+        duetos::loader::Hash256 repeated_hash{};
+        EXPECT_EQ(ServiceManifestDocumentHashV1(fixture.document, &repeated_hash), ServiceManifestError::Ok);
+        EXPECT_TRUE(HashEquals(document_hash, repeated_hash));
+
+        ServiceManifestDocumentV1 changed_policy = fixture.document;
+        changed_policy.services[0].restart_policy = ServiceManifestRestartPolicy::Always;
+        duetos::loader::Hash256 changed_hash{};
+        EXPECT_EQ(ServiceManifestDocumentHashV1(changed_policy, &changed_hash), ServiceManifestError::Ok);
+        EXPECT_FALSE(HashEquals(document_hash, changed_hash));
         EXPECT_EQ(fixture.bytes[0], static_cast<u8>(fixture.byte_count & 0xFFu));
         EXPECT_EQ(fixture.bytes[4], static_cast<u8>(kServiceManifestVersion1));
 
@@ -480,6 +504,22 @@ int main()
         EXPECT_EQ(ServiceManifestEncodeV1(&fixture.document, sizeof(fixture.document), fixture.document).error,
                   ServiceManifestError::DefinitionAliasesOutput);
         EXPECT_EQ(fixture.document.manifest_identity, document_identity);
+
+        duetos::loader::Hash256* aliased_hash = &fixture.document.services[0].executable_content_hash;
+        const duetos::loader::Hash256 preserved_hash = *aliased_hash;
+        EXPECT_EQ(ServiceManifestDocumentHashV1(fixture.document, nullptr), ServiceManifestError::NullArgument);
+        auto* invalid_hash = reinterpret_cast<duetos::loader::Hash256*>(~static_cast<duetos::uptr>(0) - 15);
+        EXPECT_EQ(ServiceManifestDocumentHashV1(fixture.document, invalid_hash),
+                  ServiceManifestError::InvalidPointerRange);
+        EXPECT_EQ(ServiceManifestDocumentHashV1(fixture.document, aliased_hash),
+                  ServiceManifestError::DefinitionAliasesOutput);
+        EXPECT_TRUE(HashEquals(*aliased_hash, preserved_hash));
+
+        ServiceManifestDocumentV1 invalid_document = fixture.document;
+        invalid_document.flags = 1;
+        duetos::loader::Hash256 cleared_hash = MakeHash(0xE0);
+        EXPECT_EQ(ServiceManifestDocumentHashV1(invalid_document, &cleared_hash), ServiceManifestError::UnknownFlags);
+        EXPECT_TRUE(HashIsZero(cleared_hash));
     }
 
     // Dependency values are identities, never slots.  Supplying array index 1
@@ -548,6 +588,11 @@ int main()
         const auto encoded = ServiceManifestEncodeV1(bytes.data(), bytes.size(), maximum);
         EXPECT_EQ(encoded.error, ServiceManifestError::Ok);
         EXPECT_EQ(encoded.bytes_written, kServiceManifestMaximumBytes);
+        duetos::loader::Hash256 incremental_hash{};
+        duetos::loader::Hash256 contiguous_hash{};
+        EXPECT_EQ(ServiceManifestDocumentHashV1(maximum, &incremental_hash), ServiceManifestError::Ok);
+        duetos::crypto::Sha256Hash(bytes.data(), encoded.bytes_written, contiguous_hash.bytes);
+        EXPECT_TRUE(HashEquals(incremental_hash, contiguous_hash));
         auto authority = MakeAuthority(maximum, bytes.data(), encoded.bytes_written);
         ServiceManifestPlanV1 plan{};
         EXPECT_EQ(ServiceManifestValidateV1(bytes.data(), encoded.bytes_written, &authority, &plan),

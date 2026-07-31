@@ -279,6 +279,15 @@ bool ServiceManifestAuthoritySnapshotIsCanonicalV1(const ServiceManifestAuthorit
 // [any thread; pure, allocation-free, callback-free]
 ServiceManifestError ServiceManifestDocumentValidateV1(const ServiceManifestDocumentV1& document);
 
+// Validate a native document and hash its exact canonical v1 wire encoding
+// without materializing the full encoded object.  The implementation uses one
+// service-row-sized scratch buffer.  Output must not overlap the document.
+// Null, invalid-range, and alias failures leave output untouched; after a valid
+// non-aliased output is established, every failure clears it.
+// [any thread; pure, allocation-free, callback-free]
+ServiceManifestError ServiceManifestDocumentHashV1(const ServiceManifestDocumentV1& document,
+                                                   loader::Hash256* hash_out);
+
 // Deterministic transactional LE encoding.  Invalid/aliased input performs no
 // output write.  Success writes exactly bytes_written bytes.
 // [any thread; pure, allocation-free, callback-free]
