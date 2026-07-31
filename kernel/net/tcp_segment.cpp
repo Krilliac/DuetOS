@@ -691,15 +691,21 @@ void NotifyParentAccept(Tcb& child)
     if (parent->backlog_count >= parent->backlog_max)
     {
         ++g_stats.backlog_drops;
+        // The handshake already completed, but there is no durable place
+        // for this child. Reject it immediately; leaving an established
+        // child with parent_listener set would consume a global TCB slot
+        // forever without ever becoming accept()able.
+        SendSegment(child, kFlagRst | kFlagAck, child.snd_nxt, child.rcv_nxt, nullptr, 0);
+        ++g_stats.rst_tx;
+        DropTcb(u32(&child - &g_tcbs[0]));
         return;
     }
     parent->backlog_ring[parent->backlog_head] = MakeId(u32(&child - &g_tcbs[0]), child.generation);
     parent->backlog_head = (parent->backlog_head + 1) % kListenBacklogMax;
     ++parent->backlog_count;
     // The child graduates from half-open to accept-queued, so it stops
-    // counting against the SYN backlog. Note the early return above
-    // (accept ring full) deliberately does NOT do this: that child is
-    // established but unaccepted and still occupies a listener slot.
+    // counting against the SYN backlog. The full-queue path above drops
+    // the child, and DropTcb releases the half-open accounting there.
     if (parent->syn_backlog_count > 0)
         --parent->syn_backlog_count;
     child.parent_listener = 0; // one-shot push
