@@ -24,6 +24,7 @@
 #include "mm/paging.h"
 #include "proc/process.h"
 #include "sched/sched.h"
+#include "sync/spinlock.h"
 #include "util/nospec.h"
 
 namespace duetos::subsystems::linux::internal
@@ -60,8 +61,10 @@ struct InotifyWatch
 struct InotifyInstance
 {
     bool in_use;
-    u8 _pad[3];
+    bool closing;
+    u8 _pad[2];
     u32 refs;
+    u32 pins;
     i32 next_wd;
     u32 _pad2;
     InotifyWatch watches[kInotifyWatchCap];
@@ -74,6 +77,47 @@ struct InotifyInstance
 };
 
 InotifyInstance g_inotify_pool[kInotifyPoolCap];
+constinit sync::SpinLock g_inotify_lock = {
+    .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
+
+struct InotifyPin
+{
+    u32 idx;
+    InotifyInstance* instance;
+
+    explicit InotifyPin(u32 value) : idx(value), instance(nullptr)
+    {
+        if (value >= kInotifyPoolCap)
+            return;
+        sync::SpinLockGuard guard(g_inotify_lock);
+        InotifyInstance& inst = g_inotify_pool[value];
+        if (inst.in_use && !inst.closing)
+        {
+            ++inst.pins;
+            instance = &inst;
+        }
+    }
+
+    ~InotifyPin()
+    {
+        if (instance == nullptr)
+            return;
+        sync::SpinLockGuard guard(g_inotify_lock);
+        InotifyInstance& inst = g_inotify_pool[idx];
+        if (inst.pins > 0)
+            --inst.pins;
+        if (inst.pins == 0 && inst.refs == 0)
+        {
+            inst.in_use = false;
+            inst.closing = false;
+            inst.count = 0;
+            inst.head = 0;
+            inst.tail = 0;
+        }
+    }
+
+    explicit operator bool() const { return instance != nullptr; }
+};
 
 bool PathEqual(const char* a, const char* b)
 {
@@ -95,14 +139,16 @@ void CopyPath(const char* src, char (&dst)[kInotifyPathCap])
 
 i32 InotifyAlloc()
 {
-    arch::Cli();
+    sync::SpinLockGuard guard(g_inotify_lock);
     for (u32 i = 0; i < kInotifyPoolCap; ++i)
     {
         if (!g_inotify_pool[i].in_use)
         {
             InotifyInstance& inst = g_inotify_pool[i];
             inst.in_use = true;
+            inst.closing = false;
             inst.refs = 1;
+            inst.pins = 0;
             inst.next_wd = 1;
             for (u32 w = 0; w < kInotifyWatchCap; ++w)
                 inst.watches[w].in_use = false;
@@ -111,11 +157,9 @@ i32 InotifyAlloc()
             inst.count = 0;
             inst.read_wq.head = nullptr;
             inst.read_wq.tail = nullptr;
-            arch::Sti();
             return static_cast<i32>(i);
         }
     }
-    arch::Sti();
     // Inotify instance pool saturated. Subsequent inotify_init1
     // calls will keep failing until something closes; once-warn
     // surfaces the saturation to the operator.
@@ -123,7 +167,7 @@ i32 InotifyAlloc()
     return -1;
 }
 
-// Caller holds arch::Cli.
+// Caller holds g_inotify_lock.
 void RingPushLocked(InotifyInstance& inst, i32 wd, u32 mask, const char* path)
 {
     if (inst.count == kInotifyRingCap)
@@ -165,7 +209,7 @@ void InotifyPublish(const char* path, u32 mask)
 {
     if (path == nullptr || path[0] == '\0' || mask == 0)
         return;
-    arch::Cli();
+    auto lock_flags = sync::SpinLockAcquire(g_inotify_lock);
     for (u32 i = 0; i < kInotifyPoolCap; ++i)
     {
         InotifyInstance& inst = g_inotify_pool[i];
@@ -224,7 +268,7 @@ void InotifyPublish(const char* path, u32 mask)
         if (inst.count > 0)
             sched::WaitQueueWakeAll(&inst.read_wq);
     }
-    arch::Sti();
+    sync::SpinLockRelease(g_inotify_lock, lock_flags);
     // Fan the same event out to fanotify subscribers. Lives outside
     // the inotify Cli/Sti window because fanotify owns its own.
     FanotifyPublishFromInotify(path, mask);
@@ -237,36 +281,38 @@ void InotifyRetain(u32 idx)
 {
     if (idx >= kInotifyPoolCap)
         return;
-    arch::Cli();
+    sync::SpinLockGuard guard(g_inotify_lock);
     InotifyInstance& inst = g_inotify_pool[idx];
-    if (inst.in_use)
+    if (inst.in_use && !inst.closing)
         ++inst.refs;
-    arch::Sti();
 }
 
 void InotifyRelease(u32 idx)
 {
     if (idx >= kInotifyPoolCap)
         return;
-    arch::Cli();
+    sync::SpinLockGuard guard(g_inotify_lock);
     InotifyInstance& inst = g_inotify_pool[idx];
     if (!inst.in_use || inst.refs == 0)
     {
-        arch::Sti();
         return;
     }
     --inst.refs;
     if (inst.refs == 0)
     {
         sched::WaitQueueWakeAll(&inst.read_wq);
-        inst.in_use = false;
+        inst.closing = true;
         for (u32 w = 0; w < kInotifyWatchCap; ++w)
             inst.watches[w].in_use = false;
-        inst.count = 0;
-        inst.head = 0;
-        inst.tail = 0;
+        if (inst.pins == 0)
+        {
+            inst.in_use = false;
+            inst.closing = false;
+            inst.count = 0;
+            inst.head = 0;
+            inst.tail = 0;
+        }
     }
-    arch::Sti();
 }
 
 i64 InotifyRead(u32 idx, u64 user_dst, u64 len)
@@ -275,18 +321,27 @@ i64 InotifyRead(u32 idx, u64 user_dst, u64 len)
         return kEINVAL;
     if (len < 16)
         return kEINVAL;
-    InotifyInstance& inst = g_inotify_pool[idx];
-    arch::Cli();
-    while (inst.in_use && inst.count == 0)
-    {
-        sched::WaitQueueBlock(&inst.read_wq);
-        arch::Cli();
-    }
-    if (!inst.in_use)
-    {
-        arch::Sti();
+    InotifyPin pin(idx);
+    if (!pin)
         return 0;
-    }
+    while (true)
+    {
+        auto lock_flags = sync::SpinLockAcquire(g_inotify_lock);
+        InotifyInstance& inst = *pin.instance;
+        if (!inst.in_use || inst.closing)
+        {
+            sync::SpinLockRelease(g_inotify_lock, lock_flags);
+            return 0;
+        }
+        if (inst.count == 0)
+        {
+            sched::WaitQueue* wq = &inst.read_wq;
+            sync::SpinLockRelease(g_inotify_lock, lock_flags);
+            arch::Cli();
+            (void)sched::WaitQueueBlockTimeout(wq, 5);
+            arch::Sti();
+            continue;
+        }
     // Copy as many events as fit in the user buffer.
     u8 stage[256];
     u64 emitted = 0;
@@ -316,12 +371,13 @@ i64 InotifyRead(u32 idx, u64 user_dst, u64 len)
         inst.tail = (inst.tail + 1) % kInotifyRingCap;
         --inst.count;
     }
-    arch::Sti();
+    sync::SpinLockRelease(g_inotify_lock, lock_flags);
     if (emitted == 0)
         return kEAGAIN;
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_dst), stage, emitted))
         return kEFAULT;
     return static_cast<i64>(emitted);
+    }
 }
 
 // =========================================================
@@ -390,11 +446,10 @@ i64 DoInotifyAddWatch(u64 fd, u64 user_path, u64 mask)
         return kEFAULT;
     if (copy.status == mm::UserStringCopyStatus::NoTerminator)
         return kENAMETOOLONG;
-    arch::Cli();
+    sync::SpinLockGuard guard(g_inotify_lock);
     InotifyInstance& inst = g_inotify_pool[idx];
     if (!inst.in_use)
     {
-        arch::Sti();
         return kEBADF;
     }
     // IN_MASK_ADD (= 0x20000000): if a watch already exists on
@@ -409,7 +464,6 @@ i64 DoInotifyAddWatch(u64 fd, u64 user_path, u64 mask)
             else
                 inst.watches[w].mask = static_cast<u32>(mask);
             const i32 wd = inst.watches[w].wd;
-            arch::Sti();
             return static_cast<i64>(wd);
         }
     }
@@ -422,11 +476,9 @@ i64 DoInotifyAddWatch(u64 fd, u64 user_path, u64 mask)
             inst.watches[w].mask = static_cast<u32>(mask);
             CopyPath(path, inst.watches[w].path);
             const i32 wd = inst.watches[w].wd;
-            arch::Sti();
             return static_cast<i64>(wd);
         }
     }
-    arch::Sti();
     return kENOMEM;
 }
 
@@ -443,11 +495,10 @@ i64 DoInotifyRmWatch(u64 fd, u64 wd_arg)
     const u32 idx = p->linux_fds[fd].first_cluster;
     if (idx >= kInotifyPoolCap)
         return kEINVAL;
-    arch::Cli();
+    sync::SpinLockGuard guard(g_inotify_lock);
     InotifyInstance& inst = g_inotify_pool[idx];
     if (!inst.in_use)
     {
-        arch::Sti();
         return kEBADF;
     }
     for (u32 w = 0; w < kInotifyWatchCap; ++w)
@@ -455,11 +506,9 @@ i64 DoInotifyRmWatch(u64 fd, u64 wd_arg)
         if (inst.watches[w].in_use && inst.watches[w].wd == wd)
         {
             inst.watches[w].in_use = false;
-            arch::Sti();
             return 0;
         }
     }
-    arch::Sti();
     return kEINVAL;
 }
 
