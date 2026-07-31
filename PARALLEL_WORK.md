@@ -715,13 +715,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T15:33:50Z
 - **Status**: COMPLETED @ 2026-07-31T16:44:29Z
 
-### [ACTIVE] host-msvc-panic-portability
+### [DONE] host-msvc-panic-portability
 - **Session**: `Nathan-221`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/core/panic.h`
 - **Description**: Make cold-path annotations portable to MSVC-hosted tests
 - **Claimed**: 2026-07-31T15:36:01Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-31T16:44:31Z
 
 ### [ACTIVE] host-msvc-saturating
 - **Session**: `Nathan-221`
