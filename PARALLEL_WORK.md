@@ -978,3 +978,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Hostile-input and compatibility vectors for message ABI
 - **Claimed**: 2026-07-31T19:32:04Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] ipc-message-abi-host-build
+- **Session**: `Codex-ipc-message-abi`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tests/host/CMakeLists.txt`
+- **Description**: Register message ABI host test
+- **Claimed**: 2026-07-31T19:32:04Z
+- **Status**: IN PROGRESS
