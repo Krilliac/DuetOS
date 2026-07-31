@@ -45,16 +45,6 @@ constexpr u32 kAmdCpProbeCookie = 0xC0DEC0DEu;
 constexpr u64 kAmdCpProbeTimeoutNs = 100ull * 1000ull * 1000ull;
 constexpr u32 kAmdCpProbeIterationCap = 1u << 20;
 
-bool DirectCpMicrocodeGeneration(const char* family)
-{
-    if (family == nullptr || family[0] != 'g' || family[1] != 'f' || family[2] != 'x')
-        return false;
-    // The direct host-upload path is for GFX9 and GFX10/10.3. GFX11+
-    // firmware is PSP-mediated and must not be poked through these
-    // legacy UCODE_DATA registers.
-    return family[3] == '9' || (family[3] == '1' && family[4] == '0');
-}
-
 u32 Mmio32(u64 offset)
 {
     if (g_mmio_regs == nullptr || offset + 4 > g_mmio_bytes)
@@ -298,14 +288,17 @@ void Probe(GpuInfo& g)
     // Direct CP microcode upload is valid for GFX9/GFX10 only. Real-HW
     // needs gfx_*.bin under the open-firmware path; an incomplete load
     // leaves CP_ME_CNTL halted and therefore cannot reach the PM4 probe.
-    if (DirectCpMicrocodeGeneration(g.family))
+    const AmdCpFirmwarePath firmware_path = AmdCpFirmwarePathForFamily(g.family);
+    if (firmware_path == AmdCpFirmwarePath::kDirectHostUpload)
     {
         const auto ucode = AmdCpLoadMicrocode(MmioRegs());
         g_cp_microcode_loaded = ucode.has_value();
     }
     else
     {
-        arch::SerialWrite("[gpu/amd/cp] direct microcode upload gated (generation requires PSP or is unknown)\n");
+        arch::SerialWrite("[gpu/amd/cp] direct microcode upload gated (path=");
+        arch::SerialWrite(AmdCpFirmwarePathName(firmware_path));
+        arch::SerialWrite(", CP stays inert)\n");
     }
     return {};
 }

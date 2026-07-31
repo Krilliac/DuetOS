@@ -45,6 +45,26 @@ inline constexpr u32 kAmdMeHalt = 1u << 28;                                 // 0
 inline constexpr u32 kAmdCpHaltAll = kAmdCeHalt | kAmdPfpHalt | kAmdMeHalt; // 0x15000000
 inline constexpr u32 kAmdRlcEnableF32 = 1u << 0;                            // RLC_CNTL.RLC_ENABLE_F32
 
+// Generation-specific CP firmware policy. GFX9/GFX10.x expose the
+// unsigned images that this driver can stream directly. GFX11 images
+// are signed and require a PSP-mediated path that is not implemented
+// yet. Unknown families stay explicitly unsupported rather than being
+// treated as PSP-capable by accident.
+enum class AmdCpFirmwarePath : u8
+{
+    kDirectHostUpload,
+    kPspRequired,
+    kUnsupported,
+};
+
+/// Classify the CP firmware path without touching hardware or parsing
+/// an image. This is the single generation gate used by Bringup and
+/// the boot self-test.
+AmdCpFirmwarePath AmdCpFirmwarePathForFamily(const char* family);
+
+/// Stable diagnostic label for the generation gate.
+const char* AmdCpFirmwarePathName(AmdCpFirmwarePath path);
+
 // Halt the CP, stream PFP/CE/ME (+ RLC if present) microcode through
 // the *_UCODE_DATA registers (ADDR auto-increments from 0; trailing
 // version write per engine), then un-halt only on a complete required
