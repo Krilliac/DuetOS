@@ -1402,3 +1402,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Canonical LE decoder and trusted authority narrowing
 - **Claimed**: 2026-07-31T22:25:43Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-manifest-test
+- **Session**: `Nathan-1381`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tests/host/test_service_manifest.cpp`
+- **Description**: Hostile deterministic DAG and authority tests
+- **Claimed**: 2026-07-31T22:25:50Z
+- **Status**: IN PROGRESS
