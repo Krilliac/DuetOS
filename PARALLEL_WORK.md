@@ -1314,3 +1314,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Object
 - **Claimed**: 2026-07-31T22:01:49Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] ipc-object-transfer-test
+- **Session**: `Nathan-1467`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tests/host/test_object_transfer.cpp`
+- **Description**: Hostile
+- **Claimed**: 2026-07-31T22:01:58Z
+- **Status**: IN PROGRESS
