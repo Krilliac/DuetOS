@@ -1330,3 +1330,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: No description provided
 - **Claimed**: 2026-07-31T22:02:34Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-publication-state-source
+- **Session**: `Nathan-700`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/service_transition.cpp`
+- **Description**: Service_transition_source
+- **Claimed**: 2026-07-31T22:02:49Z
+- **Status**: IN PROGRESS
