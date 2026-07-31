@@ -1107,13 +1107,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T20:08:21Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] rust-ffi-hard-ingress
+### [DONE] rust-ffi-hard-ingress
 - **Session**: `Nathan-1340`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/acpi/acpi_rust/src/lib.rs kernel/arch/x86_64/smbios_rust/src/lib.rs kernel/drivers/pci/caps_rust/src/lib.rs kernel/drivers/usb/class_rust/src/lib.rs kernel/drivers/usb/hid_rust/src/lib.rs kernel/drivers/usb/msc_scsi_rust/src/lib.rs kernel/fs/duetfs/src/ffi.rs kernel/fs/exfat_rust/src/lib.rs kernel/fs/ext4_rust/src/lib.rs kernel/fs/ntfs_rust/src/lib.rs kernel/loader/exec_meta_rust/src/lib.rs kernel/mm/multiboot2_rust/src/lib.rs kernel/net/hci_rust/src/lib.rs kernel/net/parsers_rust/src/lib.rs kernel/net/tls_rust/src/lib.rs kernel/net/wifi80211_rust/src/lib.rs kernel/util/img_meta_rust/src/lib.rs`
 - **Description**: Make raw-pointer exports explicitly unsafe and bind raw-derived references to call-local scopes
 - **Claimed**: 2026-07-31T20:10:15Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-31T20:35:21Z
 
 ### [ACTIVE] resource-domain-host-properties
 - **Session**: `Codex-resource-domain`
