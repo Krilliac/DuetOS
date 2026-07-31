@@ -1194,3 +1194,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Immutable
 - **Claimed**: 2026-07-31T21:21:30Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] proc-credentials-core
+- **Session**: `Nathan-418`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/proc/credentials.cpp`
+- **Description**: Fixed-pool
+- **Claimed**: 2026-07-31T21:21:31Z
+- **Status**: IN PROGRESS
