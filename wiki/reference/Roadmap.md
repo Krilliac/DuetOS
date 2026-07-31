@@ -140,43 +140,18 @@ cleanup debt: move the residual up and delete the rest.
   resolution.
 
 
-### PS/2 scan-code ring — two writers to `g_ring_tail` on SMP
+### PS/2 scan-code ring — SMP single-producer/single-consumer invariant
 
-- **Finding (audit R1-15, medium):** the scan-code ring is protected
-  only by `arch::Cli()` / `Sti()`, and `Ps2KeyboardTryReadChar`
-  (`drivers/input/ps2kbd.cpp:841`) has no protection at all. On SMP
-  `Cli` masks only the LOCAL CPU, so the IRQ can fire on a peer and
-  race the reader regardless.
-- **The actual defect is a second writer, not just a missing mask.**
-  `g_ring_tail` is documented as the "read cursor (task)", but the IRQ
-  producer ALSO advances it on the ring-full path
-  (`ps2kbd.cpp:687`, `++g_ring_tail; // discard oldest`). Two
-  unsynchronised read-modify-writes to the same cursor lose an update,
-  which leaves `head - tail` permanently skewed — so the fullness test
-  that drives the drop path is wrong from then on, and the consumer can
-  re-read a byte the producer intended to discard.
-- **Why a spinlock is not a drop-in.** `Ps2KeyboardRead`
-  (`ps2kbd.cpp:740`) calls `WaitQueueBlock(&g_readers)` INSIDE its
-  `Cli` region, which is what makes its check-then-sleep atomic against
-  the waker. Converting that to a spinlock requires the
-  release-and-block primitive `WaitQueueBlockLocked(wq, lock)` — which
-  Design-Decisions already records as deliberately deferred and which
-  is not exported. Locking only the producer and `TryReadChar` would
-  leave the blocking reader racing, i.e. the partial-fix trap.
-- **The other option is a design change:** switch the ring-full policy
-  from drop-OLDEST to drop-NEWEST. The producer would then only ever
-  write `g_ring_head` and the consumer only `g_ring_tail`, making it a
-  true single-producer/single-consumer ring that needs no lock at all
-  (aligned u64 loads/stores are atomic on x86_64). The cost is the
-  behaviour `ps2kbd.cpp:676-680` deliberately chose: dropping the
-  oldest keeps key-RELEASE bytes that arrive after a press, which
-  matters more than keeping the first press of a burst. Worth noting
-  the ring is only full when the consumer is already too slow, so bytes
-  are lost either way — the question is which.
-- **Blocks on:** picking one of those two. Both are defensible; the
-  first is strictly more work and gates on a scheduler-ABI addition,
-  the second trades a documented input-handling nicety for a
-  lock-free invariant.
+- **Landed:** ring overflow now drops the incoming (newest) scan code
+  instead of advancing the task-owned `g_ring_tail` from IRQ context.
+  The IRQ writes only `g_ring_head`; readers write only `g_ring_tail`,
+  so the ring no longer has two unsynchronised writers on SMP.
+- **Trade-off:** under overflow, a new byte may be lost instead of the
+  oldest queued byte. This is intentional: preserving cursor ownership
+  is more important than the previous overflow preference, and either
+  policy loses input once the consumer is too slow.
+- **Residual:** the raw API remains single-reader, and the blocking
+  reader still uses the existing `Cli()` check-then-block handoff.
 
 
 ### Cancelling an untimed-blocked thread — needs a WaitQueue detach primitive

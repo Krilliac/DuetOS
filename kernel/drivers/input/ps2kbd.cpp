@@ -97,9 +97,9 @@ constexpr u8 kKbdVector = 0x21; // LAPIC vector we route IRQ 1 to
 
 // Power-of-two ring buffer; head moves on push (IRQ context), tail on
 // pop (task context). Single producer, single reader — no locking
-// needed on x86_64 because byte-aligned u16 loads/stores are atomic
-// and the producer runs at higher privilege (IRQ) than the consumer,
-// so the consumer can never tear a producer's update.
+// is needed for cursor ownership on x86_64. The blocking consumer still
+// uses Cli() for the check-then-block handoff; the IRQ never writes the
+// task-owned tail, so peer-CPU delivery cannot race a tail update.
 constexpr u64 kRingSize = 64;
 constexpr u64 kRingMask = kRingSize - 1;
 static_assert((kRingSize & kRingMask) == 0, "ring size must be power of two");
@@ -672,20 +672,20 @@ void IrqHandler()
         const u8 byte = Inb(kDataPort);
 
         // Ring is full iff (head - tail) == size. In that case the
-        // oldest byte is lost: we advance tail past the sacrificial
-        // entry, then push. Alternative "drop newest" behaviour would
-        // be simpler but loses key-release bytes that come AFTER the
-        // press — which matters more than losing the first press in a
-        // queue of many.
+        // Drop the incoming byte rather than advancing tail: the IRQ is
+        // the sole producer and the reader is the sole consumer, so
+        // neither side writes the other's cursor. Advancing tail here
+        // would race a reader on a different CPU even with local IRQs
+        // masked.
         if (g_ring_head - g_ring_tail >= kRingSize)
         {
             // Once-warn: dropping scan codes is a real bug (consumer
             // not draining fast enough). Subsequent drops still bump
             // g_bytes_dropped; the metrics counter stays the running
             // tally, the log line just surfaces the FIRST drop.
-            KLOG_ONCE_WARN("drivers/ps2kbd", "scan-code ring full — discarding OLDEST byte (consumer too slow)");
-            ++g_ring_tail; // discard oldest
+            KLOG_ONCE_WARN("drivers/ps2kbd", "scan-code ring full — discarding NEWEST byte (consumer too slow)");
             ++g_bytes_dropped;
+            continue;
         }
         g_ring[g_ring_head & kRingMask] = byte;
         ++g_ring_head;
