@@ -478,13 +478,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Status**: IN PROGRESS
 >>>>>>> 531563d6 (chore: claim subsystem 'linux-mm-wx-hardening' [session Nathan-8])
 
-### 🟢 ci-red-main-repair
+### [DONE] ci-red-main-repair
 - **Session**: `Nathan-616`
 - **Branch**: `claude/ci-red-main-repair`
 - **Files**: `Codex-CI-red-main`
 - **Description**: kernel/subsystems/win32/registry.cpp kernel/loader/pe_loader.cpp kernel/proc/ring3_smoke.cpp userland/apps/accel_test/hello.c userland/apps/console4_smoke/console4_smoke.c userland/apps/dialog_smoke/dialog_smoke.c userland/apps/guard_smoke/guard_smoke.c userland/libs/advapi32/advapi32.c userland/libs/comtest/comtest.c userland/libs/gdi32/gdi32.c userland/libs/kernel32/kernel32_fiber.c userland/libs/ole32/ole32.c tools/build/build-accel-test.sh tests/host/test_thunk_retirement_policy.cpp tools/build/test_verify_pe_exports.py
 - **Claimed**: 2026-07-30T23:59:25Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-31T00:04:51Z
 
 ### [DONE] ci-red-main-repair-files
 - **Session**: `Nathan-545`
