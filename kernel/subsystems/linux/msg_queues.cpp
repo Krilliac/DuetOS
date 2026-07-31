@@ -163,13 +163,14 @@ i32 SysvFindByMtype(SysvMq& q, i64 mtype_filter)
         return -1;
     if (mtype_filter == 0)
         return static_cast<i32>(q.tail);
+    const u64 negative_limit = (mtype_filter < 0) ? (0ull - static_cast<u64>(mtype_filter)) : 0;
     for (u32 i = 0; i < q.count; ++i)
     {
         const u32 idx = (q.tail + i) % kMqMsgsPerQueue;
         const SysvMsg& m = q.ring[idx];
         if (mtype_filter > 0 && m.mtype == mtype_filter)
             return static_cast<i32>(idx);
-        if (mtype_filter < 0 && m.mtype <= -mtype_filter)
+        if (mtype_filter < 0 && static_cast<u64>(m.mtype) <= negative_limit)
             return static_cast<i32>(idx);
     }
     return -1;
