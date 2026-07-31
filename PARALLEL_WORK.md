@@ -778,3 +778,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Move guarded user-stack growth and reclamation ownership from Process to Task
 - **Claimed**: 2026-07-31T16:18:01Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] win32-file-opaque-pe32-comments
+- **Session**: `Nathan-1554`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `userland/libs/kernel32_32/kernel32_32.c userland/libs/kernel32_32/kernel32_32_fs.c`
+- **Description**: Synchronize PE32 file-handle comments with opaque generation-tagged ABI
+- **Claimed**: 2026-07-31T16:19:59Z
+- **Status**: IN PROGRESS
