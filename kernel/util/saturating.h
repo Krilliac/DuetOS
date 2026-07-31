@@ -3,6 +3,11 @@
 #include "util/compiler.h"
 #include "util/types.h"
 
+#if defined(_MSC_VER)
+#include <atomic>
+#include <intrin.h>
+#endif
+
 /*
  * DuetOS — saturating integer arithmetic, v0.
  *
@@ -58,6 +63,12 @@
 namespace duetos::util
 {
 
+#if defined(_MSC_VER)
+#define DUETOS_SAT_CALLER_RIP() _ReturnAddress()
+#else
+#define DUETOS_SAT_CALLER_RIP() __builtin_return_address(0)
+#endif
+
 // Forward decl of the diagnostic helper. Defined in saturating.cpp.
 // Logs one klog WARN line including the symbol of the calling
 // function (resolved via util/symbols.h). `tag` is one of "add",
@@ -72,12 +83,17 @@ void SatLogClamp(const char* tag, u64 attempted, u64 clamped, void* caller_rip);
 template <typename T> [[nodiscard]] DUETOS_NO_SANITIZE_WRAP inline T SatAdd(T a, T b)
 {
     static_assert(sizeof(T) <= 8, "SatAdd: T too wide");
+    const T maxv = static_cast<T>(~static_cast<T>(0));
     T result;
-    if (__builtin_add_overflow(a, b, &result))
+#if defined(_MSC_VER)
+    const bool overflow = a > static_cast<T>(maxv - b);
+    result = static_cast<T>(a + b);
+#else
+    const bool overflow = __builtin_add_overflow(a, b, &result);
+#endif
+    if (overflow)
     {
-        const T maxv = static_cast<T>(~static_cast<T>(0));
-        SatLogClamp("add", static_cast<u64>(a) + static_cast<u64>(b), static_cast<u64>(maxv),
-                    __builtin_return_address(0));
+        SatLogClamp("add", static_cast<u64>(a) + static_cast<u64>(b), static_cast<u64>(maxv), DUETOS_SAT_CALLER_RIP());
         return maxv;
     }
     return result;
@@ -87,9 +103,15 @@ template <typename T> [[nodiscard]] inline T SatSub(T a, T b)
 {
     static_assert(sizeof(T) <= 8, "SatSub: T too wide");
     T result;
-    if (__builtin_sub_overflow(a, b, &result))
+#if defined(_MSC_VER)
+    const bool overflow = a < b;
+    result = static_cast<T>(a - b);
+#else
+    const bool overflow = __builtin_sub_overflow(a, b, &result);
+#endif
+    if (overflow)
     {
-        SatLogClamp("sub", static_cast<u64>(a), 0, __builtin_return_address(0));
+        SatLogClamp("sub", static_cast<u64>(a), 0, DUETOS_SAT_CALLER_RIP());
         return 0;
     }
     return result;
@@ -98,12 +120,17 @@ template <typename T> [[nodiscard]] inline T SatSub(T a, T b)
 template <typename T> [[nodiscard]] DUETOS_NO_SANITIZE_WRAP inline T SatMul(T a, T b)
 {
     static_assert(sizeof(T) <= 8, "SatMul: T too wide");
+    const T maxv = static_cast<T>(~static_cast<T>(0));
     T result;
-    if (__builtin_mul_overflow(a, b, &result))
+#if defined(_MSC_VER)
+    const bool overflow = b != 0 && a > static_cast<T>(maxv / b);
+    result = static_cast<T>(a * b);
+#else
+    const bool overflow = __builtin_mul_overflow(a, b, &result);
+#endif
+    if (overflow)
     {
-        const T maxv = static_cast<T>(~static_cast<T>(0));
-        SatLogClamp("mul", static_cast<u64>(a) * static_cast<u64>(b), static_cast<u64>(maxv),
-                    __builtin_return_address(0));
+        SatLogClamp("mul", static_cast<u64>(a) * static_cast<u64>(b), static_cast<u64>(maxv), DUETOS_SAT_CALLER_RIP());
         return maxv;
     }
     return result;
@@ -142,11 +169,21 @@ template <typename T> DUETOS_NO_SANITIZE_WRAP inline T SatAtomicAdd(T* p, T n)
 {
     static_assert(sizeof(T) <= 8, "SatAtomicAdd: T too wide");
     const T maxv = static_cast<T>(~static_cast<T>(0));
+#if defined(_MSC_VER)
+    std::atomic_ref<T> atomic_value(*p);
+    T cur = atomic_value.load(std::memory_order_relaxed);
+#else
     T cur = __atomic_load_n(p, __ATOMIC_RELAXED);
+#endif
     while (true)
     {
         T next;
+#if defined(_MSC_VER)
+        const bool overflow = cur > static_cast<T>(maxv - n);
+        next = static_cast<T>(cur + n);
+#else
         const bool overflow = __builtin_add_overflow(cur, n, &next);
+#endif
         if (overflow)
         {
             next = maxv;
@@ -156,12 +193,19 @@ template <typename T> DUETOS_NO_SANITIZE_WRAP inline T SatAtomicAdd(T* p, T n)
         // overflow log fires only on the iteration that actually
         // commits, so SMP contention can't multiply the WARN
         // count.
-        if (__atomic_compare_exchange_n(p, &cur, next, /*weak=*/false, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+#if defined(_MSC_VER)
+        const bool committed =
+            atomic_value.compare_exchange_strong(cur, next, std::memory_order_relaxed, std::memory_order_relaxed);
+#else
+        const bool committed =
+            __atomic_compare_exchange_n(p, &cur, next, /*weak=*/false, __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+#endif
+        if (committed)
         {
             if (overflow)
             {
                 SatLogClamp("atom-add", static_cast<u64>(cur) + static_cast<u64>(n), static_cast<u64>(maxv),
-                            __builtin_return_address(0));
+                            DUETOS_SAT_CALLER_RIP());
             }
             return next;
         }
@@ -202,7 +246,7 @@ template <typename T> struct Saturating
     {
         if (value == static_cast<T>(~static_cast<T>(0)))
         {
-            SatLogClamp("inc", static_cast<u64>(value) + 1, static_cast<u64>(value), __builtin_return_address(0));
+            SatLogClamp("inc", static_cast<u64>(value) + 1, static_cast<u64>(value), DUETOS_SAT_CALLER_RIP());
         }
         else
         {
@@ -220,7 +264,7 @@ template <typename T> struct Saturating
     {
         if (value == 0)
         {
-            SatLogClamp("dec", 0, 0, __builtin_return_address(0));
+            SatLogClamp("dec", 0, 0, DUETOS_SAT_CALLER_RIP());
         }
         else
         {

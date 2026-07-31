@@ -47,17 +47,25 @@
 // DEBUG_ASSERT — predicate version. `cond` must be side-effect-free
 // (it's not evaluated in release builds).
 //
-// `__builtin_expect(!(cond), 0)` biases the branch predictor toward
-// the assertion holding. Combined with the `if constexpr` guard,
-// release builds compile both the check AND the operand-evaluation
-// out entirely — there is no static-branch left for DCE to clean up.
+// Clang/GCC's `__builtin_expect` biases the branch predictor toward
+// the assertion holding. MSVC has no equivalent expression intrinsic,
+// so hosted MSVC tests use the plain predicate. Combined with the
+// `if constexpr` guard, release builds compile both the check AND the
+// operand-evaluation out entirely — there is no static branch left
+// for DCE to clean up.
 // -----------------------------------------------------------------
+#if defined(_MSC_VER)
+#define DUETOS_DEBUG_UNLIKELY(cond) (cond)
+#else
+#define DUETOS_DEBUG_UNLIKELY(cond) __builtin_expect(!!(cond), 0)
+#endif
+
 #define DEBUG_ASSERT(cond, subsys, msg)                                                                                \
     do                                                                                                                 \
     {                                                                                                                  \
         if constexpr (::duetos::core::kAssertsEnabled)                                                                 \
         {                                                                                                              \
-            if (__builtin_expect(!(cond), 0))                                                                          \
+            if (DUETOS_DEBUG_UNLIKELY(!(cond)))                                                                        \
             {                                                                                                          \
                 ::duetos::core::Panic((subsys), "DEBUG_ASSERT failed: " msg);                                          \
             }                                                                                                          \
@@ -69,7 +77,7 @@
     {                                                                                                                  \
         if constexpr (::duetos::core::kAssertsEnabled)                                                                 \
         {                                                                                                              \
-            if (__builtin_expect(!(cond), 0))                                                                          \
+            if (DUETOS_DEBUG_UNLIKELY(!(cond)))                                                                        \
             {                                                                                                          \
                 ::duetos::core::PanicWithValue((subsys), "DEBUG_ASSERT failed: " msg, (value));                        \
             }                                                                                                          \

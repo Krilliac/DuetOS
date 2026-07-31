@@ -109,16 +109,23 @@ void DumpPeerCpuSnapshots();
 ///     overflow caught by guard page).
 ///
 /// Why a runtime branch instead of a macro / template: the function
-/// is `[[gnu::cold]]` and out-of-line, so the call site is a single
+/// is cold-attributed where the host compiler supports it and out-of-line,
+/// so the call site is a single
 /// `call` — the same code-shape as `Panic` today. Keeping the
 /// flavor decision inside one TU means a future build flavor (e.g.
 /// `release-asserts`) can flip it without re-touching every caller.
-[[gnu::cold]] void DebugPanicOrWarn(const char* subsystem, const char* message);
+#if defined(_MSC_VER)
+#define DUETOS_COLD_PATH
+#else
+#define DUETOS_COLD_PATH [[gnu::cold]]
+#endif
+
+DUETOS_COLD_PATH void DebugPanicOrWarn(const char* subsystem, const char* message);
 
 /// Same idea, but renders a single u64 value alongside the message
 /// — used by call sites that already pass the offending pointer /
 /// index / count to `PanicWithValue`.
-[[gnu::cold]] void DebugPanicOrWarnWithValue(const char* subsystem, const char* message, u64 value);
+DUETOS_COLD_PATH void DebugPanicOrWarnWithValue(const char* subsystem, const char* message, u64 value);
 
 } // namespace duetos::core
 

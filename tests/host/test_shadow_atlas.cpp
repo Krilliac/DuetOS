@@ -19,16 +19,21 @@ using duetos::drivers::video::ShadowFalloffAlpha;
 
 int main()
 {
+    // Keep these coordinates runtime-observable so MSVC's /W4 does not
+    // diagnose the assertion macro's branch as a constant condition.
+    volatile int zero = 0;
+    volatile int edge = 32;
+
     // ----- alpha at origin (corner of the 32×32 atlas) is full -----
-    EXPECT_EQ(ShadowFalloffAlpha(0, 0), 255);
+    EXPECT_EQ(ShadowFalloffAlpha(zero, zero), 255);
 
     // ----- alpha at the atlas edge (32, 0) has decayed to 0 -----
-    EXPECT_EQ(ShadowFalloffAlpha(32, 0), 0);
+    EXPECT_EQ(ShadowFalloffAlpha(edge, zero), 0);
 
     // ----- alpha at the diagonal corner (32, 32) is 0 -----
     // (32, 32) is sqrt(2048) ≈ 45 px from origin — well beyond the
     // 32-px radius where the curve clamps to 0.
-    EXPECT_EQ(ShadowFalloffAlpha(32, 32), 0);
+    EXPECT_EQ(ShadowFalloffAlpha(edge, edge), 0);
 
     // ----- alpha is monotonically non-increasing along x -----
     {
