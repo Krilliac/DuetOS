@@ -4,7 +4,6 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 
 ## Active Sessions
 
-<<<<<<< HEAD
 ### [DONE] thunk-retirement-wave1
 - **Session**: `Codex-thunk-wave1`
 - **Branch**: `claude/thunk-retirement-wave1`
@@ -468,7 +467,6 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Correct SYS_THREAD_OPEN fixture number and synchronize TID-only handle contract
 - **Claimed**: 2026-07-27T06:51:16Z
 - **Status**: COMPLETED @ 2026-07-27T06:52:05Z
-=======
 ### 🟢 linux-mm-wx-hardening
 - **Session**: `Nathan-8`
 - **Branch**: `claude/linux-mmap-wx-hardening`
@@ -476,7 +474,6 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Enforce Linux mmap and mprotect W^X policy and make mseal failure truthful
 - **Claimed**: 2026-07-26T12:30:06Z
 - **Status**: IN PROGRESS
->>>>>>> 531563d6 (chore: claim subsystem 'linux-mm-wx-hardening' [session Nathan-8])
 
 ### [DONE] ci-red-main-repair
 - **Session**: `Nathan-616`
