@@ -1418,3 +1418,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Caller-locked fixed-capacity exact endpoint epoch and request lifecycle ledger
 - **Claimed**: 2026-07-31T23:02:15Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-lifecycle-broker
+- **Session**: `Codex-root-lifecycle`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/service_lifecycle_broker.h`
+- **Description**: No description provided
+- **Claimed**: 2026-07-31T23:06:33Z
+- **Status**: IN PROGRESS
