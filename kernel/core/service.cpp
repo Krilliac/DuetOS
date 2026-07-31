@@ -7,6 +7,7 @@
 #include "proc/process.h"
 #include "proc/spawn.h"
 #include "sched/sched.h"
+#include "sync/spinlock.h"
 #include "time/timekeeper.h"
 #include "util/string.h"
 
@@ -67,13 +68,36 @@ struct ServiceRuntime
     u32 restarts; // lifetime respawns
     u32 restarts_in_window;
     u64 window_start_ns;
+    bool restart_window_active;
     u64 last_spawn_ns;
     u64 last_exit_ns;
+    // Every start/stop/restart reservation advances this non-wrapping token.
+    // A spawn performed without the lock may publish only if its token still
+    // matches.  Stop can therefore cancel an in-flight spawn without waiting
+    // under the runtime spinlock.
+    u64 transition_generation;
+    bool desired_running;
+    bool start_in_flight;
 };
 
 constinit ServiceRuntime g_rt[kManifestCount] = {};
 constinit bool g_initialized = false;
 constinit bool g_supervisor_running = false;
+sync::SpinLock g_service_lock{};
+
+struct StartReservation
+{
+    u32 index;
+    u64 generation;
+    bool valid;
+};
+
+enum class StartCommitResult : u8
+{
+    Published,
+    Failed,
+    Cancelled,
+};
 
 u64 NowNs()
 {
@@ -85,17 +109,109 @@ u64 NowNs()
 // kServiceRestartMax respawns per kServiceRestartWindowNs; rolls the
 // window forward once it elapses. Same shape as the fault-domain
 // restart throttle.
-bool RateLimitAllow(u32& restarts_in_window, u64& window_start_ns, u64 now_ns)
+bool RateLimitAllow(ServiceRuntime& runtime, u64 now_ns)
 {
-    if (window_start_ns == 0 || now_ns - window_start_ns >= kServiceRestartWindowNs)
+    if (!runtime.restart_window_active || now_ns < runtime.window_start_ns ||
+        now_ns - runtime.window_start_ns >= kServiceRestartWindowNs)
     {
-        window_start_ns = now_ns;
-        restarts_in_window = 0;
+        runtime.restart_window_active = true;
+        runtime.window_start_ns = now_ns;
+        runtime.restarts_in_window = 0;
     }
-    if (restarts_in_window >= kServiceRestartMax)
+    if (runtime.restarts_in_window >= kServiceRestartMax)
         return false;
-    ++restarts_in_window;
+    ++runtime.restarts_in_window;
     return true;
+}
+
+void InitLocked()
+{
+    if (g_initialized)
+        return;
+    for (u32 i = 0; i < kManifestCount; ++i)
+    {
+        g_rt[i] = ServiceRuntime{};
+        g_rt[i].state = ServiceState::Stopped;
+    }
+    g_initialized = true;
+}
+
+bool ReserveStartRuntimeLocked(ServiceRuntime& runtime, u64& generation)
+{
+    if ((runtime.state == ServiceState::Running && runtime.desired_running) ||
+        (runtime.start_in_flight && runtime.desired_running))
+    {
+        return false;
+    }
+    if (runtime.transition_generation == ~0ULL)
+    {
+        runtime.state = ServiceState::Failed;
+        runtime.pid = 0;
+        runtime.desired_running = false;
+        runtime.start_in_flight = false;
+        return false;
+    }
+
+    ++runtime.transition_generation;
+    runtime.desired_running = true;
+    runtime.start_in_flight = true;
+    generation = runtime.transition_generation;
+    return true;
+}
+
+bool ReserveStartLocked(u32 index, StartReservation& reservation)
+{
+    if (index >= kManifestCount)
+        return false;
+    ServiceRuntime& runtime = g_rt[index];
+    u64 generation = 0;
+    if (!ReserveStartRuntimeLocked(runtime, generation))
+        return false;
+    reservation.index = index;
+    reservation.generation = generation;
+    reservation.valid = true;
+    return true;
+}
+
+StartCommitResult CommitStartRuntimeLocked(ServiceRuntime& runtime, u64 generation, u64 pid, u64 now_ns)
+{
+    if (generation == 0 || !runtime.start_in_flight || runtime.transition_generation != generation ||
+        !runtime.desired_running)
+    {
+        return StartCommitResult::Cancelled;
+    }
+
+    runtime.start_in_flight = false;
+    if (pid == 0)
+    {
+        runtime.state = ServiceState::Failed;
+        runtime.pid = 0;
+        return StartCommitResult::Failed;
+    }
+
+    runtime.state = ServiceState::Running;
+    runtime.pid = pid;
+    runtime.last_spawn_ns = now_ns;
+    return StartCommitResult::Published;
+}
+
+StartCommitResult CommitStartLocked(const StartReservation& reservation, u64 pid, u64 now_ns)
+{
+    if (!reservation.valid || reservation.index >= kManifestCount)
+        return StartCommitResult::Cancelled;
+    return CommitStartRuntimeLocked(g_rt[reservation.index], reservation.generation, pid, now_ns);
+}
+
+u64 StopLocked(ServiceRuntime& runtime)
+{
+    const u64 pid = runtime.state == ServiceState::Running ? runtime.pid : 0;
+    if (runtime.transition_generation != ~0ULL)
+        ++runtime.transition_generation;
+    runtime.desired_running = false;
+    runtime.start_in_flight = false;
+    runtime.state = ServiceState::Stopped;
+    runtime.pid = 0;
+    return pid;
 }
 
 i32 FindByName(const char* name)
@@ -129,31 +245,44 @@ u64 SpawnService(const ServiceDesc& d)
                                       duetos::core::kTickBudgetTrusted);
 }
 
-// Start service `idx` from a non-Running state. Updates runtime and
-// logs one [svc] line mirroring the old [boot] spawn lines.
-void StartIndex(u32 idx)
+// Execute a reserved spawn without g_service_lock, then publish it only if
+// the exact transition token is still current.  A concurrent Stop invalidates
+// the token; any process created after that cancellation is killed outside the
+// lock and never becomes the recorded service instance.
+bool ExecuteStart(const StartReservation& reservation)
 {
-    const ServiceDesc& d = kManifest[idx];
-    ServiceRuntime& rt = g_rt[idx];
+    if (!reservation.valid || reservation.index >= kManifestCount || reservation.generation == 0)
+        return false;
+    const ServiceDesc& d = kManifest[reservation.index];
     const u64 pid = SpawnService(d);
-    if (pid == 0)
+    const u64 now_ns = NowNs();
+    StartCommitResult result;
     {
-        rt.state = ServiceState::Failed;
-        rt.pid = 0;
+        sync::SpinLockGuard guard(g_service_lock);
+        result = CommitStartLocked(reservation, pid, now_ns);
+    }
+
+    if (result == StartCommitResult::Cancelled)
+    {
+        if (pid != 0)
+            (void)duetos::sched::SchedKillByPid(pid);
+        return false;
+    }
+    if (result == StartCommitResult::Failed)
+    {
         KLOG_WARN("svc", "service spawn failed");
         arch::SerialWrite("[svc] ");
         arch::SerialWrite(d.name);
         arch::SerialWrite(" FAILED (load/spawn)\n");
-        return;
+        return false;
     }
-    rt.state = ServiceState::Running;
-    rt.pid = pid;
-    rt.last_spawn_ns = NowNs();
+
     arch::SerialWrite("[svc] ");
     arch::SerialWrite(d.name);
     arch::SerialWrite(" pid=");
     arch::SerialWriteHex(pid);
     arch::SerialWrite("\n");
+    return true;
 }
 
 void SupervisorTask(void* /*arg*/)
@@ -169,14 +298,8 @@ void SupervisorTask(void* /*arg*/)
 
 void ServiceManagerInit()
 {
-    if (g_initialized)
-        return;
-    g_initialized = true;
-    for (u32 i = 0; i < kManifestCount; ++i)
-    {
-        g_rt[i] = ServiceRuntime{};
-        g_rt[i].state = ServiceState::Stopped;
-    }
+    sync::SpinLockGuard guard(g_service_lock);
+    InitLocked();
 }
 
 void ServiceManagerStartAll()
@@ -184,24 +307,57 @@ void ServiceManagerStartAll()
     ServiceManagerInit();
     for (u32 i = 0; i < kManifestCount; ++i)
     {
-        if (kManifest[i].autostart && g_rt[i].state == ServiceState::Stopped)
-            StartIndex(i);
+        bool should_start = false;
+        {
+            sync::SpinLockGuard guard(g_service_lock);
+            const ServiceRuntime& runtime = g_rt[i];
+            should_start = runtime.state == ServiceState::Stopped && !runtime.start_in_flight;
+        }
+        if (kManifest[i].autostart && should_start)
+            (void)ServiceStart(kManifest[i].name);
     }
-    if (!g_supervisor_running)
+
+    bool create_supervisor = false;
     {
-        g_supervisor_running = true;
-        (void)duetos::sched::SchedCreate(&SupervisorTask, nullptr, "svcmon");
+        sync::SpinLockGuard guard(g_service_lock);
+        if (!g_supervisor_running)
+        {
+            // Reserve publication before dropping the lock so concurrent
+            // StartAll calls cannot create duplicate monitor tasks.
+            g_supervisor_running = true;
+            create_supervisor = true;
+        }
+    }
+    if (create_supervisor && duetos::sched::SchedCreate(&SupervisorTask, nullptr, "svcmon") == nullptr)
+    {
+        {
+            sync::SpinLockGuard guard(g_service_lock);
+            g_supervisor_running = false;
+        }
+        KLOG_WARN("svc", "service supervisor task creation failed");
     }
 }
 
 void ServiceManagerTick()
 {
+    ServiceManagerInit();
     const u64 now = NowNs();
     for (u32 i = 0; i < kManifestCount; ++i)
     {
-        ServiceRuntime& rt = g_rt[i];
-        if (rt.state != ServiceState::Running)
+        u64 pid = 0;
+        u64 generation = 0;
+        {
+            sync::SpinLockGuard guard(g_service_lock);
+            const ServiceRuntime& runtime = g_rt[i];
+            if (runtime.state == ServiceState::Running && runtime.desired_running)
+            {
+                pid = runtime.pid;
+                generation = runtime.transition_generation;
+            }
+        }
+        if (pid == 0)
             continue;
+
         // Liveness MUST include Blocked tasks: a resident daemon spends
         // its life parked in a blocking syscall (e.g. netd in accept()),
         // and a Blocked task is NOT on the runqueue/sleep/zombie lists
@@ -210,20 +366,53 @@ void ServiceManagerTick()
         // spawn duplicates that collided on the port. SchedProcessAlive
         // walks the all-tasks registry, so it sees Blocked tasks too.
         // Monotonic PIDs mean a "not alive" verdict can't be a reused id.
-        if (duetos::sched::SchedProcessAlive(rt.pid))
+        if (duetos::sched::SchedProcessAlive(pid))
             continue;
-        rt.state = ServiceState::Exited;
-        rt.last_exit_ns = now;
-        if (kManifest[i].restart != ServiceRestartPolicy::Always)
-            continue;
-        if (!RateLimitAllow(rt.restarts_in_window, rt.window_start_ns, now))
+
+        StartReservation restart{};
+        bool rate_limited = false;
         {
-            rt.state = ServiceState::Failed;
-            KLOG_WARN("svc", "service hit respawn rate limit — giving up");
-            continue;
+            sync::SpinLockGuard guard(g_service_lock);
+            ServiceRuntime& runtime = g_rt[i];
+            // A stop/restart or newer publication may have raced the unlocked
+            // scheduler probe.  Only the exact running generation can be
+            // transitioned by this observation.
+            if (runtime.state != ServiceState::Running || runtime.pid != pid ||
+                runtime.transition_generation != generation || !runtime.desired_running)
+            {
+                continue;
+            }
+
+            runtime.state = ServiceState::Exited;
+            runtime.pid = 0;
+            runtime.last_exit_ns = now;
+            if (kManifest[i].restart != ServiceRestartPolicy::Always)
+            {
+                runtime.desired_running = false;
+                continue;
+            }
+
+            if (!RateLimitAllow(runtime, now))
+            {
+                runtime.state = ServiceState::Failed;
+                runtime.desired_running = false;
+                rate_limited = true;
+            }
+            else
+            {
+                ++runtime.restarts;
+                (void)ReserveStartLocked(i, restart);
+            }
         }
-        ++rt.restarts;
-        StartIndex(i);
+
+        if (rate_limited)
+        {
+            KLOG_WARN("svc", "service hit respawn rate limit — giving up");
+        }
+        else if (restart.valid)
+        {
+            (void)ExecuteStart(restart);
+        }
     }
 }
 
@@ -233,11 +422,20 @@ bool ServiceStart(const char* name)
     if (idx < 0)
         return false;
     ServiceManagerInit();
-    ServiceRuntime& rt = g_rt[idx];
-    if (rt.state == ServiceState::Running)
-        return true; // already up
-    StartIndex(static_cast<u32>(idx));
-    return rt.state == ServiceState::Running;
+
+    StartReservation reservation{};
+    bool already_requested = false;
+    {
+        sync::SpinLockGuard guard(g_service_lock);
+        const ServiceRuntime& runtime = g_rt[idx];
+        already_requested = (runtime.state == ServiceState::Running && runtime.desired_running) ||
+                            (runtime.start_in_flight && runtime.desired_running);
+        if (!already_requested)
+            (void)ReserveStartLocked(static_cast<u32>(idx), reservation);
+    }
+    if (already_requested)
+        return true;
+    return reservation.valid && ExecuteStart(reservation);
 }
 
 bool ServiceStop(const char* name)
@@ -245,14 +443,18 @@ bool ServiceStop(const char* name)
     const i32 idx = FindByName(name);
     if (idx < 0)
         return false;
-    ServiceRuntime& rt = g_rt[idx];
-    if (rt.state == ServiceState::Running && rt.pid != 0)
-        (void)duetos::sched::SchedKillByPid(rt.pid);
-    // Stopped is terminal until the operator restarts it — this also
-    // disables the Always respawn path (the tick only acts on Running),
-    // so `svc stop` on a daemon actually keeps it down.
-    rt.state = ServiceState::Stopped;
-    rt.pid = 0;
+    ServiceManagerInit();
+
+    u64 pid = 0;
+    {
+        sync::SpinLockGuard guard(g_service_lock);
+        // Stopped is terminal until the operator restarts it.  This also
+        // invalidates an unlocked spawn reservation and disables Always
+        // respawn before the scheduler kill runs.
+        pid = StopLocked(g_rt[idx]);
+    }
+    if (pid != 0)
+        (void)duetos::sched::SchedKillByPid(pid);
     return true;
 }
 
@@ -272,49 +474,100 @@ bool ServiceStatusAt(u32 idx, ServiceStatusView* out)
 {
     if (idx >= kManifestCount || out == nullptr)
         return false;
+    ServiceManagerInit();
     const ServiceDesc& d = kManifest[idx];
-    const ServiceRuntime& rt = g_rt[idx];
-    out->name = d.name;
-    out->state = rt.state;
-    out->restart = d.restart;
-    out->autostart = d.autostart;
-    out->pid = rt.pid;
-    out->restarts = rt.restarts;
-    out->last_spawn_ns = rt.last_spawn_ns;
-    out->last_exit_ns = rt.last_exit_ns;
+    {
+        sync::SpinLockGuard guard(g_service_lock);
+        const ServiceRuntime& runtime = g_rt[idx];
+        out->name = d.name;
+        out->state = runtime.state;
+        out->restart = d.restart;
+        out->autostart = d.autostart;
+        out->pid = runtime.pid;
+        out->restarts = runtime.restarts;
+        out->last_spawn_ns = runtime.last_spawn_ns;
+        out->last_exit_ns = runtime.last_exit_ns;
+    }
     return true;
 }
 
 void ServiceManagerSelfTest()
 {
-    // Exercise the crash-loop rate limiter — the one piece of logic the
-    // boot path can't otherwise reach (no Always daemon ships yet).
-    u32 count = 0;
-    u64 window = 0;
+    // Exercise the crash-loop rate limiter deterministically without
+    // requiring the resident Always service to fail repeatedly at boot.
+    ServiceRuntime runtime{};
+    runtime.state = ServiceState::Stopped;
     const u64 t0 = 1'000'000'000ull;
 
     // First kServiceRestartMax respawns inside the window are allowed.
     for (u32 i = 0; i < kServiceRestartMax; ++i)
     {
-        if (!RateLimitAllow(count, window, t0))
+        if (!RateLimitAllow(runtime, t0))
         {
             arch::SerialWrite("[svc-selftest] FAIL (early deny)\n");
             return;
         }
     }
     // The next one is denied — crash-loop guard tripped.
-    if (RateLimitAllow(count, window, t0))
+    if (RateLimitAllow(runtime, t0))
     {
         arch::SerialWrite("[svc-selftest] FAIL (no deny at limit)\n");
         return;
     }
     // After the window elapses, respawns are permitted again.
-    if (!RateLimitAllow(count, window, t0 + kServiceRestartWindowNs))
+    if (!RateLimitAllow(runtime, t0 + kServiceRestartWindowNs))
     {
         arch::SerialWrite("[svc-selftest] FAIL (window did not roll)\n");
         return;
     }
-    arch::SerialWrite("[svc-selftest] PASS (respawn rate limiter)\n");
+
+    // A start reservation is exclusive until it commits or is cancelled.
+    // Stop invalidates the token without waiting for the loader/scheduler;
+    // the stale commit must request cleanup rather than publishing its PID.
+    u64 first_generation = 0;
+    if (!ReserveStartRuntimeLocked(runtime, first_generation) || first_generation == 0)
+    {
+        arch::SerialWrite("[svc-selftest] FAIL (start reservation)\n");
+        return;
+    }
+    u64 duplicate_generation = 0;
+    if (ReserveStartRuntimeLocked(runtime, duplicate_generation))
+    {
+        arch::SerialWrite("[svc-selftest] FAIL (duplicate start reservation)\n");
+        return;
+    }
+    if (StopLocked(runtime) != 0 ||
+        CommitStartRuntimeLocked(runtime, first_generation, 41, t0) != StartCommitResult::Cancelled)
+    {
+        arch::SerialWrite("[svc-selftest] FAIL (stale start publication)\n");
+        return;
+    }
+
+    u64 second_generation = 0;
+    if (!ReserveStartRuntimeLocked(runtime, second_generation) || second_generation <= first_generation ||
+        CommitStartRuntimeLocked(runtime, second_generation, 42, t0) != StartCommitResult::Published ||
+        runtime.state != ServiceState::Running || runtime.pid != 42)
+    {
+        arch::SerialWrite("[svc-selftest] FAIL (exact start publication)\n");
+        return;
+    }
+    if (StopLocked(runtime) != 42 || runtime.state != ServiceState::Stopped || runtime.pid != 0 ||
+        runtime.desired_running || runtime.start_in_flight)
+    {
+        arch::SerialWrite("[svc-selftest] FAIL (stop transition)\n");
+        return;
+    }
+
+    u64 failed_generation = 0;
+    if (!ReserveStartRuntimeLocked(runtime, failed_generation) ||
+        CommitStartRuntimeLocked(runtime, failed_generation, 0, t0) != StartCommitResult::Failed ||
+        runtime.state != ServiceState::Failed || runtime.pid != 0)
+    {
+        arch::SerialWrite("[svc-selftest] FAIL (spawn failure transition)\n");
+        return;
+    }
+
+    arch::SerialWrite("[svc-selftest] PASS (rate limit + transactional lifecycle)\n");
 }
 
 } // namespace duetos::core
