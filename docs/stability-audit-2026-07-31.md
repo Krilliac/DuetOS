@@ -21,11 +21,12 @@ Status: active; static and host-side partial verification complete. Full kernel/
 - Focused syntax-only compilation and cppcheck passes cover every modified translation unit.
 - The address-space map-failure slice covered the production PE/ELF/DLL loaders, Linux `brk`/`mmap`/`mremap`/`munmap`/`mincore`, vDSO and stack growth, Win32 heap/vmap/fiber/thread allocation, and the shared page-table walker. The follow-on `mincore` validation also passed g++ C++23 syntax-only and focused cppcheck checks; the focused runs had no new correctness findings.
 - The Linux socket/I/O boundary slice covered `recvmsg`/`accept4` output ownership, socket KFile-attachment failure cleanup, `recvmmsg`/`sendmmsg` address spans, and `readv`/`writev`/`preadv`/`pwritev` iovec arithmetic. The three changed translation units passed g++ C++23 syntax-only and focused cppcheck checks.
+- The Linux timer/async timeout slice covered saturating alarm, interval-timer, and POSIX-timer nanosecond conversions/deadline rearming, timespec validation, timer output narrowing, overrun saturation, and `epoll_pwait2` negative/invalid/overflowing timeout handling. Both changed translation units passed g++ C++23 syntax-only and focused cppcheck checks; remaining cppcheck output was pre-existing style/flow guidance in surrounding code.
 - Existing host CTest tree: 68 registered tests; 34 passed, 34 were not run because their prebuilt executables are absent. This tree was not rebuilt against the audit commits.
 
 ## Implemented hardening
 
-Recent audit commits include teardown pinning for socket/IPC/async pools, timeout and overflow saturation, address-space map refusal/partial-table rollback, Linux mapping-span and `mincore` validation, socket boundary failure cleanup, PE-loader map refusal checks, driver/loader range arithmetic, diagnostic formatting safety, filesystem label walks, Linux directory-prefix copying, and explicit userland ABI/CRT contracts. The current branch is clean at `6e655c65`.
+Recent audit commits include teardown pinning for socket/IPC/async pools, timeout and overflow saturation, address-space map refusal/partial-table rollback, Linux mapping-span and `mincore` validation, socket boundary failure cleanup, PE-loader map refusal checks, driver/loader range arithmetic, diagnostic formatting safety, filesystem label walks, Linux directory-prefix copying, and explicit userland ABI/CRT contracts. The latest timer/async hardening code commit is `4d921155`; the branch is clean after the accompanying ledger update.
 
 ## Remaining verification
 
