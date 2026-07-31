@@ -770,3 +770,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Make Section generation refs views and borrowed-range map/unmap transactional
 - **Claimed**: 2026-07-31T15:58:41Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] task-user-stack-lifetime
+- **Session**: `Codex-scheduler-exit-lifetime`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/proc/user_stack.cpp kernel/proc/user_stack.h kernel/subsystems/win32/thread_syscall.cpp tests/host/test_user_stack.cpp`
+- **Description**: Move guarded user-stack growth and reclamation ownership from Process to Task
+- **Claimed**: 2026-07-31T16:18:01Z
+- **Status**: IN PROGRESS
