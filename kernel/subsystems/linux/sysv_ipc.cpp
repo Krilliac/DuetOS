@@ -70,7 +70,8 @@ struct ShmSegment
 {
     bool in_use;
     bool marked_destroy;
-    u8 _pad[2];
+    bool initializing;
+    u8 _pad;
     u32 refcount; // attachments + open handles
     i32 key;      // SysV key passed by the caller (IPC_PRIVATE = 0)
     u32 page_count;
@@ -116,7 +117,7 @@ i32 ShmFindByKey(i32 key)
     if (key == 0) // IPC_PRIVATE
         return -1;
     for (u32 i = 0; i < kShmPoolCap; ++i)
-        if (g_shm_pool[i].in_use && !g_shm_pool[i].marked_destroy && g_shm_pool[i].key == key)
+        if (g_shm_pool[i].in_use && !g_shm_pool[i].initializing && !g_shm_pool[i].marked_destroy && g_shm_pool[i].key == key)
             return static_cast<i32>(i);
     return -1;
 }
@@ -141,6 +142,7 @@ i32 ShmAlloc(i32 key, u64 size)
             continue;
         ShmSegment& s = g_shm_pool[i];
         s.in_use = true;
+        s.initializing = true;
         s.marked_destroy = false;
         s.refcount = 1; // shmget itself holds the initial reference
         s.key = key;
@@ -154,6 +156,7 @@ i32 ShmAlloc(i32 key, u64 size)
         {
             arch::Cli();
             s.in_use = false;
+            s.initializing = false;
             arch::Sti();
             return -1;
         }
@@ -170,6 +173,7 @@ i32 ShmAlloc(i32 key, u64 size)
                 arch::Cli();
                 s.frames = nullptr;
                 s.in_use = false;
+                s.initializing = false;
                 arch::Sti();
                 ok = false;
                 break;
@@ -184,6 +188,9 @@ i32 ShmAlloc(i32 key, u64 size)
         }
         if (!ok)
             return -1;
+        arch::Cli();
+        s.initializing = false;
+        arch::Sti();
         return static_cast<i32>(i);
     }
     arch::Sti();
