@@ -350,7 +350,7 @@ int main()
                                        MakeAuthority(kHandleRightWrite))
                       .status,
                   ObjectTransferStatus::SourceRejected);
-        invalid = MakeAuthority(kHandleRightRead);
+        invalid = MakeAuthority(kHandleRightInspect);
         invalid.type = KObjectType::Event;
         EXPECT_EQ(ObjectTransferExport(&fixture.transfer, &fixture.source, fixture.source_handle, invalid).status,
                   ObjectTransferStatus::SourceRejected);
