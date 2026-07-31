@@ -215,12 +215,6 @@ u8* RingSlot(GspRpcRing& ring, u32 index)
     return static_cast<u8*>(ring.dma.virt) + offset;
 }
 
-const u8* RingSlot(const GspRpcRing& ring, u32 index)
-{
-    const u64 offset = static_cast<u64>(index) * ring.slot_bytes;
-    return static_cast<const u8*>(ring.dma.virt) + offset;
-}
-
 } // namespace
 
 ::duetos::core::Result<void> GspRpcRingReset(GspRpcRing* ring)
