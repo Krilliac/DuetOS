@@ -1395,13 +1395,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T22:25:38Z
 - **Status**: COMPLETED @ 2026-07-31T23:32:44Z
 
-### [ACTIVE] service-manifest-source
+### [DONE] service-manifest-source
 - **Session**: `Nathan-1039`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/core/service_manifest.cpp`
 - **Description**: Canonical LE decoder and trusted authority narrowing
 - **Claimed**: 2026-07-31T22:25:43Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-31T23:32:50Z
 
 ### [ACTIVE] service-manifest-test
 - **Session**: `Nathan-1381`
