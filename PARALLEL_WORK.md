@@ -1050,3 +1050,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Versioned syscall IDL migration source plus generated names, policy, userland constants, fuzz/tracing metadata, and drift checks
 - **Claimed**: 2026-07-31T19:52:02Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] native-syscall-names-source
+- **Session**: `Nathan-1522`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/syscall/syscall_names.def`
+- **Description**: Generate the complete diagnostic name table from the versioned native syscall IDL and close current 38-row inventory gap
+- **Claimed**: 2026-07-31T19:56:41Z
+- **Status**: IN PROGRESS
