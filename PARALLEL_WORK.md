@@ -1387,13 +1387,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T22:22:40Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] service-manifest-api
+### [DONE] service-manifest-api
 - **Session**: `Nathan-1113`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/core/service_manifest.h`
 - **Description**: Immutable bounded service manifest byte contract
 - **Claimed**: 2026-07-31T22:25:38Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-31T23:32:44Z
 
 ### [ACTIVE] service-manifest-source
 - **Session**: `Nathan-1039`
