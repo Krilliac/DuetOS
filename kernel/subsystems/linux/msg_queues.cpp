@@ -539,8 +539,20 @@ void PosixMqRelease(u32 idx)
         return;
     }
     --q.refs;
+    PosixMsg* ring = nullptr;
     // mq_unlink + last-handle-close together free the ring.
+    if (q.refs == 0 && q.name[0] == '\0')
+    {
+        ring = q.ring;
+        q.ring = nullptr;
+        q.in_use = false;
+        q.count = 0;
+        sched::WaitQueueWakeAll(&q.read_wq);
+        sched::WaitQueueWakeAll(&q.write_wq);
+    }
     arch::Sti();
+    if (ring != nullptr)
+        mm::KFree(ring);
 }
 
 i64 DoMqOpen(u64 user_name, u64 oflag, u64 mode, u64 user_attr)
