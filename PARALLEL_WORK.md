@@ -642,3 +642,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Make capped cross-process VM calls chunked and partial-copy status truthful
 - **Claimed**: 2026-07-31T14:17:15Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] vm-process-lookup-callers
+- **Session**: `Nathan-221`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/subsystems/win32/spawn_syscall.cpp kernel/apps/dbg_core.cpp kernel/diag/gdb_monitor_read.cpp kernel/diag/leak_detector.cpp kernel/shell/shell_exec.cpp`
+- **Description**: Replace borrowed scheduler Process pointers at dereferencing callers and serialize diagnostics
+- **Claimed**: 2026-07-31T14:17:25Z
+- **Status**: IN PROGRESS
