@@ -1146,3 +1146,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Generation-tagged gesture and window-menu contexts with stale-generation cancellation
 - **Claimed**: 2026-07-31T20:43:31Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] host-msvc-d3dcompiler
+- **Session**: `Nathan-610`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tests/host/test_d3dcompiler.cpp`
+- **Description**: Guard
+- **Claimed**: 2026-07-31T20:58:17Z
+- **Status**: IN PROGRESS
