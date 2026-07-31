@@ -1274,3 +1274,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Allocation-free
 - **Claimed**: 2026-07-31T21:42:01Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] proc-thread-group-host
+- **Session**: `Nathan-535`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tests/host/test_thread_group.cpp`
+- **Description**: ThreadGroup
+- **Claimed**: 2026-07-31T21:42:06Z
+- **Status**: IN PROGRESS
