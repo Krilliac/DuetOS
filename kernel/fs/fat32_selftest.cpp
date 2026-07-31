@@ -595,10 +595,11 @@ void Fat32SelfTest()
         // Name forces LFN path: mixed case + long base.
         char name[64];
         const char* prefix = "/SUB/GROWTEST/LongEntry";
+        const char* cursor = prefix;
         u32 w = 0;
-        while (w < 24 && w + 8 < sizeof(name) && prefix[w] != 0)
+        while (w < 24 && w + 8 < sizeof(name) && *cursor != 0)
         {
-            name[w] = prefix[w];
+            name[w] = *cursor++;
             ++w;
         }
         // Append "NN.txt".
@@ -630,10 +631,11 @@ void Fat32SelfTest()
     {
         char name[64];
         const char* prefix = "/SUB/GROWTEST/LongEntry";
+        const char* cursor = prefix;
         u32 w = 0;
-        while (w < 24 && w + 8 < sizeof(name) && prefix[w] != 0)
+        while (w < 24 && w + 8 < sizeof(name) && *cursor != 0)
         {
-            name[w] = prefix[w];
+            name[w] = *cursor++;
             ++w;
         }
         name[w++] = static_cast<char>('0' + (i / 10) % 10);
