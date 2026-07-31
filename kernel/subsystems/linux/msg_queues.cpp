@@ -61,7 +61,8 @@ struct SysvMq
 {
     bool in_use;
     bool marked_destroy;
-    u8 _pad[2];
+    bool initializing;
+    u8 _pad;
     i32 key;
     u32 head;
     u32 tail;
@@ -83,7 +84,8 @@ struct PosixMsg
 struct PosixMq
 {
     bool in_use;
-    u8 _pad[3];
+    bool initializing;
+    u8 _pad[2];
     u32 refs;
     char name[kPosixMqNameCap];
     u32 max_msgs; // current ring cap
@@ -107,7 +109,7 @@ i32 SysvMqFindByKey(i32 key)
     if (key == 0)
         return -1;
     for (u32 i = 0; i < kSysvMqPoolCap; ++i)
-        if (g_sysv_pool[i].in_use && !g_sysv_pool[i].marked_destroy && g_sysv_pool[i].key == key)
+        if (g_sysv_pool[i].in_use && !g_sysv_pool[i].initializing && !g_sysv_pool[i].marked_destroy && g_sysv_pool[i].key == key)
             return static_cast<i32>(i);
     return -1;
 }
@@ -121,6 +123,7 @@ i32 SysvMqAlloc(i32 key)
             continue;
         SysvMq& q = g_sysv_pool[i];
         q.in_use = true;
+        q.initializing = true;
         q.marked_destroy = false;
         q.key = key;
         q.head = 0;
@@ -130,15 +133,20 @@ i32 SysvMqAlloc(i32 key)
         q.read_wq.tail = nullptr;
         q.write_wq.head = nullptr;
         q.write_wq.tail = nullptr;
+        q.ring = nullptr;
         arch::Sti();
         q.ring = static_cast<SysvMsg*>(mm::KMalloc(sizeof(SysvMsg) * kMqMsgsPerQueue));
         if (q.ring == nullptr)
         {
             arch::Cli();
             q.in_use = false;
+            q.initializing = false;
             arch::Sti();
             return -1;
         }
+        arch::Cli();
+        q.initializing = false;
+        arch::Sti();
         return static_cast<i32>(i);
     }
     arch::Sti();
@@ -449,7 +457,7 @@ bool PosixMqNameEqual(const char* a, const char* b)
 i32 PosixMqFindByName(const char* name)
 {
     for (u32 i = 0; i < kPosixMqPoolCap; ++i)
-        if (g_posix_pool[i].in_use && PosixMqNameEqual(g_posix_pool[i].name, name))
+        if (g_posix_pool[i].in_use && !g_posix_pool[i].initializing && PosixMqNameEqual(g_posix_pool[i].name, name))
             return static_cast<i32>(i);
     return -1;
 }
@@ -467,6 +475,7 @@ i32 PosixMqAlloc(const char* name, u32 max_msgs, u32 max_bytes)
             continue;
         PosixMq& q = g_posix_pool[i];
         q.in_use = true;
+        q.initializing = true;
         q.refs = 1;
         q.max_msgs = max_msgs;
         q.max_msg_bytes = max_bytes;
@@ -479,15 +488,20 @@ i32 PosixMqAlloc(const char* name, u32 max_msgs, u32 max_bytes)
         q.read_wq.tail = nullptr;
         q.write_wq.head = nullptr;
         q.write_wq.tail = nullptr;
+        q.ring = nullptr;
         arch::Sti();
         q.ring = static_cast<PosixMsg*>(mm::KMalloc(sizeof(PosixMsg) * max_msgs));
         if (q.ring == nullptr)
         {
             arch::Cli();
             q.in_use = false;
+            q.initializing = false;
             arch::Sti();
             return -1;
         }
+        arch::Cli();
+        q.initializing = false;
+        arch::Sti();
         return static_cast<i32>(i);
     }
     arch::Sti();
