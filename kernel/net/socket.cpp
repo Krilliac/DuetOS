@@ -276,6 +276,7 @@ bool SocketAlive(u32 idx)
 {
     if (idx >= kSocketPoolCap)
         return false;
+    sync::SpinLockGuard guard(g_sock_lock);
     return g_pool[idx].in_use;
 }
 
@@ -927,7 +928,10 @@ bool SocketShutdown(u32 idx, u32 how)
 
 void SocketGetLocal(u32 idx, Ipv4Address* out_ip, u16* out_port)
 {
-    if (idx >= kSocketPoolCap || !g_pool[idx].in_use)
+    if (idx >= kSocketPoolCap)
+        return;
+    sync::SpinLockGuard guard(g_sock_lock);
+    if (!g_pool[idx].in_use)
         return;
     if (out_ip != nullptr)
         *out_ip = g_pool[idx].local_ip;
@@ -937,7 +941,10 @@ void SocketGetLocal(u32 idx, Ipv4Address* out_ip, u16* out_port)
 
 void SocketGetPeer(u32 idx, Ipv4Address* out_ip, u16* out_port)
 {
-    if (idx >= kSocketPoolCap || !g_pool[idx].in_use)
+    if (idx >= kSocketPoolCap)
+        return;
+    sync::SpinLockGuard guard(g_sock_lock);
+    if (!g_pool[idx].in_use)
         return;
     if (out_ip != nullptr)
         *out_ip = g_pool[idx].peer_ip;
