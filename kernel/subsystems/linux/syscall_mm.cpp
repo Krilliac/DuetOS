@@ -617,23 +617,34 @@ i64 DoMsync(u64 addr, u64 len, u64 flags)
 // resident. Bad address surfaces as EFAULT.
 i64 DoMincore(u64 addr, u64 len, u64 user_vec)
 {
-    (void)addr;
     if (user_vec == 0)
         return kEFAULT;
+    if ((addr & (mm::kPageSize - 1)) != 0)
+        return kEINVAL;
     if (len == 0)
         return 0;
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || p->as == nullptr)
+        return kEINVAL;
     const u64 aligned_len = PageUp(len);
     if (aligned_len == 0)
         return kEINVAL;
+    constexpr u64 kUserMaxExclusive = 0x0000800000000000ULL;
+    if (addr >= kUserMaxExclusive || aligned_len > (kUserMaxExclusive - addr))
+        return kEFAULT;
     const u64 pages = aligned_len / mm::kPageSize;
-    if (pages == 0)
-        return 0;
     constexpr u64 kMaxPages = 4096;
-    const u64 to_mark = (pages > kMaxPages) ? kMaxPages : pages;
+    if (pages > kMaxPages)
+        return kENOMEM;
+    for (u64 i = 0; i < pages; ++i)
+    {
+        if (mm::AddressSpaceProbePte(p->as, addr + i * mm::kPageSize) == mm::kNullFrame)
+            return kEFAULT;
+    }
     u8 ones[kMaxPages]; // per-call, not process-shared static
-    for (u64 i = 0; i < to_mark; ++i)
+    for (u64 i = 0; i < pages; ++i)
         ones[i] = 1;
-    if (!mm::CopyToUser(reinterpret_cast<void*>(user_vec), ones, to_mark))
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_vec), ones, pages))
         return kEFAULT;
     return 0;
 }
