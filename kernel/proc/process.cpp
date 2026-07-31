@@ -723,18 +723,24 @@ void ProcessRelease(Process* p)
         Process* parent = sched::SchedFindProcessByPidRetained(p->linux_parent_pid);
         if (parent != nullptr)
         {
-            arch::Cli();
-            if (parent->linux_child_exit_count < Process::kLinuxChildExitCap)
+            bool queued = false;
             {
-                auto& slot = parent->linux_child_exits[parent->linux_child_exit_count];
-                slot.pid = p->pid;
-                slot.exit_code = p->linux_exit_code;
-                slot.was_signaled = p->linux_was_signaled;
-                slot.exit_signal = p->linux_exit_signal;
-                ++parent->linux_child_exit_count;
+                sync::SpinLockGuard child_guard(parent->linux_child_exit_lock);
+                if (parent->linux_child_exit_count < Process::kLinuxChildExitCap)
+                {
+                    auto& slot = parent->linux_child_exits[parent->linux_child_exit_count];
+                    slot.pid = p->pid;
+                    slot.exit_code = p->linux_exit_code;
+                    slot.was_signaled = p->linux_was_signaled;
+                    slot.exit_signal = p->linux_exit_signal;
+                    ++parent->linux_child_exit_count;
+                    queued = true;
+                }
+            }
+            if (queued)
+            {
                 sched::WaitQueueWakeOne(&parent->linux_wait_wq);
             }
-            arch::Sti();
             ProcessRelease(parent);
         }
     }

@@ -39,6 +39,7 @@
 #include "mm/paging.h"
 #include "proc/process.h"
 #include "sched/sched.h"
+#include "sync/spinlock.h"
 #include "util/nospec.h"
 
 namespace duetos::subsystems::linux::internal
@@ -91,6 +92,16 @@ void DrainChildExitLocked(core::Process* p, u32 idx, core::Process::LinuxChildEx
     --p->linux_child_exit_count;
 }
 
+bool TryDrainChildExit(core::Process* p, i64 target_pid, core::Process::LinuxChildExit& out)
+{
+    sync::SpinLockGuard guard(p->linux_child_exit_lock);
+    const i32 found = FindChildExitMatchLocked(p, target_pid);
+    if (found < 0)
+        return false;
+    DrainChildExitLocked(p, static_cast<u32>(found), out);
+    return true;
+}
+
 i32 EncodeWStatus(const core::Process::LinuxChildExit& exit)
 {
     if (exit.was_signaled)
@@ -119,9 +130,8 @@ i64 DoWait4(u64 pid, u64 user_status, u64 options, u64 user_rusage)
     const bool nonblocking = (options & kWNOHANG) != 0;
     while (true)
     {
-        arch::Cli();
-        i32 found = FindChildExitMatchLocked(p, target_pid);
-        if (found < 0)
+        core::Process::LinuxChildExit exit{};
+        if (!TryDrainChildExit(p, target_pid, exit))
         {
             // POSIX rule: if the caller has NO children at all
             // (no live ones AND no zombies queued), wait4 returns
@@ -130,7 +140,6 @@ i64 DoWait4(u64 pid, u64 user_status, u64 options, u64 user_rusage)
             // bug — it deadlocked single-process exercisers
             // (synfull's wait4 probe) waiting for a child that
             // would never exist.
-            arch::Sti();
             const u64 live_children = sched::SchedCountChildrenOfPid(p->pid);
             if (live_children == 0)
                 return kECHILD;
@@ -146,9 +155,6 @@ i64 DoWait4(u64 pid, u64 user_status, u64 options, u64 user_rusage)
             sched::WaitQueueBlock(&p->linux_wait_wq);
             continue;
         }
-        core::Process::LinuxChildExit exit;
-        DrainChildExitLocked(p, static_cast<u32>(found), exit);
-        arch::Sti();
         if (user_status != 0)
         {
             const i32 wstatus = EncodeWStatus(exit);
@@ -187,16 +193,14 @@ i64 DoWaitid(u64 idtype, u64 id, u64 user_info, u64 options, u64 user_rusage)
     const bool nonblocking = (options & kWNOHANG) != 0;
     while (true)
     {
-        arch::Cli();
-        i32 found = FindChildExitMatchLocked(p, target_pid);
-        if (found < 0)
+        core::Process::LinuxChildExit exit{};
+        if (!TryDrainChildExit(p, target_pid, exit))
         {
             // POSIX rule (mirrored from DoWait4 above): no
             // children at all -> -ECHILD immediately, regardless
             // of WNOHANG. Without this, a single-process exerciser
             // calling waitid blocks forever on linux_wait_wq for
             // a child that will never register.
-            arch::Sti();
             const u64 live_children = sched::SchedCountChildrenOfPid(p->pid);
             if (live_children == 0)
                 return kECHILD;
@@ -221,9 +225,6 @@ i64 DoWaitid(u64 idtype, u64 id, u64 user_info, u64 options, u64 user_rusage)
             sched::WaitQueueBlock(&p->linux_wait_wq);
             continue;
         }
-        core::Process::LinuxChildExit exit;
-        DrainChildExitLocked(p, static_cast<u32>(found), exit);
-        arch::Sti();
         if (user_info != 0)
         {
             // struct siginfo_t — first 32 bytes carry si_signo /

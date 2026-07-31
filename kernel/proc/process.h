@@ -1342,6 +1342,10 @@ struct Process
     u8 _linux_exit_pad[2];
     u64 linux_child_exit_count;
     LinuxChildExit linux_child_exits[kLinuxChildExitCap];
+    // Serializes child-exit queue producers (reaper CPUs) and
+    // wait4/waitid consumers. CLI is per-CPU and cannot protect
+    // this shared queue on SMP.
+    mutable sync::SpinLock linux_child_exit_lock;
     sched::WaitQueue linux_wait_wq;
 
     // Win32 custom-diagnostics state — opaque pointer to a
