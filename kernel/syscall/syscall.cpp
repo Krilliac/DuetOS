@@ -2239,9 +2239,19 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // fd table intact.
         LinuxFdCloseOnExec(caller);
 
-        // Tear down the AS user mappings, then ElfLoad into the
-        // same AS. Past this point any failure is fatal — the
-        // caller's address space is already gone.
+        // Tear down Task-owned stack authority before the generic AS
+        // clear. SchedCountTasksForProcess above proves this is the only
+        // Task that could own a reservation in the shared AS. The drop
+        // makes the descriptor unreachable under the scheduler lock, then
+        // releases its exact token outside that spinlock. If ElfLoad fails,
+        // SchedExit sees an ownership-free Task and cannot double-release.
+        // Native/ELF Tasks have no token, so the operation is a no-op.
+        sched::SchedDropCurrentOwnedUserStack();
+        caller->stack = {};
+
+        // Tear down the remaining AS user mappings, then ElfLoad into the
+        // same AS. Past this point any failure is fatal - the caller's
+        // old address space and stack authority are already gone.
         mm::AddressSpaceClearUserMappings(caller->as);
         const core::ElfLoadResult r = core::ElfLoad(buf, e.size_bytes, caller->as);
         mm::KFree(buf);

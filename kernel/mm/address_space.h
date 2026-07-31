@@ -53,12 +53,10 @@
  *     unmaps each page from this AS's PML4, returns each backing
  *     frame to the physical allocator, walks the user-half tables
  *     (PML4[0..255]) freeing intermediate PDPT/PD/PT frames, and
- *     finally frees the PML4 frame. Refcount semantics: each Task
- *     holds one reference; the reaper's release on task death drops
- *     the count, and only the last holder pays the destruction cost.
- *     v0 grows the count to 1 at create and decrements on release;
- *     multi-threaded processes (multiple Tasks per AS) become
- *     possible the day we add an AddressSpaceRetain call.
+ *     finally frees the PML4 frame. Refcount semantics: a Process owns
+ *     one AS reference regardless of how many Tasks share that Process.
+ *     Tasks retain the Process, and the Process destructor drops its AS
+ *     reference; only the last direct AS owner pays the destruction cost.
  *
  * Region table size cap (`kMaxUserVmRegionsPerAs`) bounds bookkeeping
  * to a fixed size on the AS struct so destroy is allocation-free. Any
@@ -99,16 +97,18 @@ namespace duetos::mm
 // doubles up to the AS's frame_budget, never past this cap. So this
 // number bounds the MAXIMUM a single process may reach — NOT a fixed
 // per-process cost. A process that maps a handful of pages occupies a
-// handful of 16-byte entries, not all 8192. (The prior design stored a
+// handful of 24-byte entries, not all 8192. (The prior design stored a
 // flat inline 8192-entry array = 128 KiB on EVERY AddressSpace, which
 // exhausted the 64 MiB kheap when the boot battery spawned dozens of
 // ASes concurrently — see kernel/mm/kheap.h.)
 inline constexpr u64 kMaxUserVmRegionsPerAs = 8192;
 
 // Initial heap-allocated capacity of a fresh AS's region table, in
-// entries (16 × sizeof(AddressSpaceUserRegion) = 256 bytes). Clamped
-// down to frame_budget for tiny-budget sandbox ASes. Grown by doubling
-// in AddressSpaceMapUserPage when full.
+// entries (16 × sizeof(AddressSpaceUserRegion) = 384 bytes). Together
+// with the initial four-entry reservation ledger (96 bytes), fresh-AS
+// ledger storage is 480 bytes. Clamped down to frame_budget for
+// tiny-budget sandbox ASes. Grown by doubling in AddressSpaceMapUserPage
+// when full.
 inline constexpr u16 kInitialRegionCapacity = 16;
 
 // Default frame budgets for the two canonical profiles. A new AS is
@@ -135,22 +135,68 @@ inline constexpr u64 kFrameBudgetTrusted = kMaxUserVmRegionsPerAs;
 // covering the largest v0 Win32 Section (4 MiB).
 inline constexpr u64 kMaxBorrowedRangePages = 1024;
 
+// User-VA reservations are sparse ownership capabilities rather than
+// mappings. The current consumer is a task-owned guarded stack: reserving
+// its full [guard_lo, top) window prevents an unrelated owned or borrowed
+// mapper from occupying an as-yet-uncommitted page. The page bound keeps
+// the no-present-PTE validation pass finite while covering the maximum
+// 4 MiB stack reservation plus its four guard pages (1028 pages).
+inline constexpr u64 kMaxUserVmReservationPages = 2048;
+inline constexpr u16 kInitialUserVmReservationCapacity = 4;
+inline constexpr u16 kMaxUserVmReservationsPerAs = 64;
+
+struct AddressSpace;
+
+/// Opaque, AS-scoped capability for one exact user-VA reservation. Token
+/// values come from one kernel-global, non-wrapping source, so a stale token
+/// cannot become valid if an AddressSpace allocation is destroyed and its
+/// address is later reused. Tokens are minted only by
+/// AddressSpaceReserveUserRange and become permanently stale when released.
+/// Kernel callers may copy a token across a private loader -> Task boundary,
+/// but cannot construct a non-zero token directly.
+class AddressSpaceReservationToken
+{
+  public:
+    constexpr AddressSpaceReservationToken() = default;
+    constexpr bool IsValid() const { return owner_ != nullptr && value_ != 0; }
+
+  private:
+    explicit constexpr AddressSpaceReservationToken(AddressSpace* owner, u64 value) : owner_(owner), value_(value) {}
+
+    AddressSpace* owner_ = nullptr;
+    u64 value_ = 0;
+
+    friend bool AddressSpaceReserveUserRange(AddressSpace*, u64, u64, AddressSpaceReservationToken*);
+    friend bool AddressSpaceMapReservedUserPage(AddressSpace*, const AddressSpaceReservationToken&, u64, PhysAddr, u64);
+    friend bool AddressSpaceReservationMatches(AddressSpace*, const AddressSpaceReservationToken&, u64, u64);
+    friend bool AddressSpaceReleaseUserReservation(AddressSpace*, const AddressSpaceReservationToken&, u64, u64);
+    friend void AddressSpaceSelfTest();
+};
+
 struct AddressSpaceUserRegion
 {
-    u64 vaddr;      // start of a 4 KiB user page
-    PhysAddr frame; // backing frame returned by AllocateFrame
+    u64 vaddr;                 // start of a 4 KiB user page
+    PhysAddr frame;            // backing frame returned by AllocateFrame
+    u64 reservation_token = 0; // 0=ordinary AS-owned page; otherwise exact reservation owner
 };
+
+struct AddressSpaceUserReservation
+{
+    u64 lo;          // inclusive, page-aligned
+    u64 hi;          // exclusive, page-aligned
+    u64 token_value; // non-zero and never reused anywhere in this boot
+};
+
+static_assert(sizeof(AddressSpaceUserRegion) == 24, "user-region ledger cost changed");
+static_assert(sizeof(AddressSpaceUserReservation) == 24, "user-reservation ledger cost changed");
 
 struct AddressSpace
 {
     PhysAddr pml4_phys; // CR3 value (low 12 bits already zero)
     u64* pml4_virt;     // direct-map alias for kernel-side editing
-    // tasks holding this AS. Saturating: a runaway Retain loop (or
-    // attacker driving cross-process handle duplication) cannot wrap
-    // the counter past 2^64 to zero and trigger a premature
-    // teardown. Lifetime arithmetic on a 64-bit counter is
-    // astronomical in practice; saturation closes the wrap-to-UAF
-    // defense gap regardless.
+    // Direct owners holding this AS (normally one Process). Checked retain
+    // and release CAS loops reject both zero resurrection and saturation,
+    // so lifetime arithmetic cannot wrap into a premature teardown.
     util::SatU64 refcount;
 
     // Maximum number of user frames this AS is allowed to own.
@@ -183,6 +229,15 @@ struct AddressSpace
     // Heap-allocated region table (region_capacity entries). Non-null
     // for any live AS; freed by AddressSpaceRelease.
     AddressSpaceUserRegion* regions;
+
+    // Sparse user-VA ownership reservations. Protected by mutation_lock,
+    // never regions_lock: every operation that creates, consumes, or
+    // releases a token is task-context VM mutation work. The table grows
+    // outside regions_lock and is freed with the AS. Token values come from
+    // a kernel-global non-wrapping source, preventing allocator-address ABA.
+    u16 reservation_count;
+    u16 reservation_capacity;
+    AddressSpaceUserReservation* reservations;
 
     // Bitmask of CPU ids that currently have THIS AS loaded in CR3.
     // Bit (1u << cpu_id) is set by AddressSpaceActivate when a CPU
@@ -244,6 +299,37 @@ core::Result<AddressSpace*> AddressSpaceCreate(u64 frame_budget);
 /// switching the child task in.
 bool AddressSpaceMapUserPage(AddressSpace* as, u64 virt, PhysAddr frame, u64 flags);
 
+/// Transactionally reserve an unmapped, page-aligned user range [lo, hi).
+/// The range must not overlap an existing reservation or any present owned
+/// or borrowed PTE. On success, `out_token` receives the only capability
+/// accepted by AddressSpaceMapReservedUserPage for this range. Ordinary
+/// owned and borrowed maps reject every overlap until the token is released.
+/// Returns false without a live reservation on conflict, table-cap/global
+/// identity exhaustion, or reservation-ledger OOM. Task context only; never
+/// call under a spinlock.
+bool AddressSpaceReserveUserRange(AddressSpace* as, u64 lo, u64 hi, AddressSpaceReservationToken* out_token);
+
+/// Map one AS-owned page inside the exact reservation named by `token`.
+/// The frame is tagged with that token in the owned-region ledger so release
+/// retires exactly this reservation's pages, never a foreign PTE that merely
+/// occupies the same VA. A present PTE is always a refusal, not success.
+/// Argument, W^X, frame-budget, and ownership-on-failure rules match
+/// AddressSpaceMapUserPage.
+bool AddressSpaceMapReservedUserPage(AddressSpace* as, const AddressSpaceReservationToken& token, u64 virt,
+                                     PhysAddr frame, u64 flags);
+
+/// True only when `token` is live in `as` and names exactly [lo, hi).
+/// Used at the loader/scheduler handoff before a private Task is published.
+bool AddressSpaceReservationMatches(AddressSpace* as, const AddressSpaceReservationToken& token, u64 lo, u64 hi);
+
+/// Retire every AS-owned page tagged with `token`, complete each required
+/// TLB shootdown and frame/table release outside regions_lock, then remove
+/// the exact [expected_lo, expected_hi) reservation. Returns false without
+/// mutation for a stale token or range mismatch. The owning Task must already
+/// be unreachable (or still private/current during creation/exec unwind).
+bool AddressSpaceReleaseUserReservation(AddressSpace* as, const AddressSpaceReservationToken& token, u64 expected_lo,
+                                        u64 expected_hi);
+
 /// Reverse of MapUserPage. Finds the `(virt, frame)` pair in the
 /// regions table, clears the leaf PTE, returns the backing frame
 /// to the physical allocator, and drops the region bookkeeping
@@ -267,9 +353,9 @@ bool AddressSpaceUnmapUserPage(AddressSpace* as, u64 virt);
 /// AS-destroy walker won't free this frame, and the AS
 /// frame budget isn't consumed.
 ///
-/// Returns true on success. Returns false if `virt` is already mapped
-/// (no overwrite) or page-table preparation runs out of frames. Panics
-/// on the same invariant violations as MapUserPage.
+/// Returns true on success. Returns false if `virt` is already mapped,
+/// overlaps a live user-VA reservation, or page-table preparation runs out
+/// of frames. Panics on the same invariant violations as MapUserPage.
 ///
 /// Pairs with AddressSpaceUnmapBorrowedPage. Callers MUST
 /// keep their own ledger of the (virt, frame) pairs they
@@ -281,7 +367,8 @@ bool AddressSpaceMapBorrowedPage(AddressSpace* as, u64 virt, PhysAddr frame, u64
 /// validated/prepared before the bounded structural commit. On false, no
 /// leaf PTE from the range has been installed. `frames` must contain `count`
 /// page-aligned physical frames and `count` must be in
-/// [1, kMaxBorrowedRangePages].
+/// [1, kMaxBorrowedRangePages]. Any overlap with a live reservation is a
+/// clean all-or-nothing refusal.
 bool AddressSpaceMapBorrowedRange(AddressSpace* as, u64 virt, const PhysAddr* frames, u64 count, u64 flags);
 
 /// Read the frame backing `virt` in `as` by walking the page
@@ -353,7 +440,12 @@ u64 AddressSpaceProbePteRaw(const AddressSpace* as, u64 virt);
 /// AddressSpaceRelease before returning the error). Does NOT cover
 /// borrowed-page mappings (Win32 sections) — they aren't in
 /// the regions ledger; callers that need them must dup them
-/// explicitly.
+/// explicitly. Reservations and their tokens are deliberately NOT
+/// inherited: each copied region is mapped with reservation_token == 0,
+/// including already-committed caller-stack pages. Linux fork/clone paths
+/// do not attach an owned-stack descriptor to the child Task, so those Tasks
+/// retain fixed/caller-stack semantics and cannot use the PE demand-growth
+/// capability. Uncommitted reservation and guard pages are not copied.
 ///
 /// The caller owns the returned AS — must AddressSpaceRelease
 /// it when done.
@@ -371,6 +463,11 @@ core::Result<AddressSpace*> AddressSpaceFork(const AddressSpace* parent);
 /// Borrowed-page mappings (Win32 sections) are NOT touched —
 /// they aren't in the regions ledger. Callers that need to
 /// nuke section views must do that separately.
+///
+/// The caller must first release every live user-VA reservation. execve's
+/// guaranteed-single-task path does this by dropping the current Task's
+/// owned stack token. A surviving token across whole-AS replacement is an
+/// invariant violation, so this function asserts reservation_count == 0.
 ///
 /// Each detached page is invalidated on every CPU currently using
 /// `as` before its frame is returned to the allocator. Empty user-half
@@ -429,10 +526,11 @@ inline u16 AddressSpaceUserPageCount(const AddressSpace* as)
 /// Currently-active AS on this CPU (nullptr = kernel AS / boot PML4).
 AddressSpace* AddressSpaceCurrent();
 
-/// Bump the refcount. Use when handing the AS to another holder
-/// (e.g. a future thread spawn that shares the AS). v0 single-Task-
-/// per-AS code paths don't need to call this — Create returns with
-/// refcount=1 already, which is the count for the spawning task.
+/// Bump the refcount when handing the AS to another direct owner. Normal
+/// multi-Task processes do not call this: every Task retains the shared
+/// Process, while that Process owns one AS reference. Create returns with
+/// refcount=1 for the owner that adopts the new AS. Retaining zero or a
+/// saturated counter is an invariant violation.
 void AddressSpaceRetain(AddressSpace* as);
 
 /// Drop a reference. When the last reference goes away, walks the

@@ -202,8 +202,8 @@ struct PeHeaders
 // independently. Without an unwind, a partial-failure leaks every
 // frame mapped before the failing leg (~20+ frames + VA mappings).
 //
-// Contract: every AddressSpaceMapUserPage call inside PeLoad (and
-// the helpers it delegates to) is followed by an
+// Contract: every ordinary AddressSpaceMapUserPage call inside PeLoad
+// (and the helpers it delegates to) is followed by an
 // AddressSpaceProbePteRaw check — MapUserPage returns false for
 // three recoverable refusal paths (frame budget, region grow OOM,
 // page-table walker OOM). If the probe shows the PTE absent, the
@@ -211,7 +211,9 @@ struct PeHeaders
 // a confirmed-present PTE does the caller Track(va). The destructor
 // walks the tracked VAs in reverse order and calls
 // AddressSpaceUnmapUserPage, which both clears the PTE and frees
-// the underlying frame (see kernel/mm/address_space.cpp:446).
+// the underlying frame. The stack is the exception: its complete window is
+// reserved before the first commit, each page is mapped with the exact
+// AS-scoped token, and unwind releases the token as one ownership unit.
 // PeLoad disarms the guard on success — the destructor then no-ops.
 //
 // The tracked-VA array is heap-backed and sized per-image by Init()
@@ -232,6 +234,9 @@ struct LoaderUnwindGuard
     u64 cap = 0;
     u32 count = 0;
     bool armed = true;
+    duetos::mm::AddressSpaceReservationToken stack_reservation{};
+    u64 stack_reservation_lo = 0;
+    u64 stack_reservation_hi = 0;
 
     // Allocate the tracking array for `capacity` page VAs. Returns
     // false on OOM or an over-ceiling request; the caller must fail the
@@ -266,6 +271,15 @@ struct LoaderUnwindGuard
     {
         if (armed && as != nullptr)
         {
+            // The stack reservation owns its exact tagged pages and must be
+            // retired as one capability before generic loader mappings are
+            // unwound. No tracked-VA guesswork may unmap a foreign page.
+            if (stack_reservation.IsValid())
+            {
+                KASSERT(duetos::mm::AddressSpaceReleaseUserReservation(as, stack_reservation, stack_reservation_lo,
+                                                                       stack_reservation_hi),
+                        "loader/pe", "failed to release primary stack reservation during unwind");
+            }
             // Walk in reverse so paging table levels are torn down in
             // the same order they were built up.
             for (u32 i = count; i > 0; --i)
@@ -2949,9 +2963,10 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     //    out the reservation. We commit ONLY the top of it here —
     //    the rest is address space the #PF handler commits a page
     //    at a time as the thread's stack pointer walks down (see
-    //    kernel/proc/user_stack.h). A guard page sits below the
-    //    reservation and is never committed, so a runaway still
-    //    dies instead of quietly consuming the reservation.
+    //    kernel/proc/user_stack.h). The guard region is committed only
+    //    by the one-shot overflow service path so SEH has emergency space;
+    //    it never becomes normal growth territory, and a runaway still
+    //    terminates loudly.
     u64 want_reserve = 0;
     u64 want_commit = 0;
     {
@@ -2978,6 +2993,17 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
         KLOG_WARN_V("pe-load", "  reservation granted (bytes)", plan.top - plan.reserve_lo);
     }
 
+    duetos::mm::AddressSpaceReservationToken stack_reservation{};
+    if (!AddressSpaceReserveUserRange(as, plan.guard_lo, plan.top, &stack_reservation))
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Loader, "pe-loader", "failed to reserve primary stack ownership window",
+                     plan.guard_lo);
+        return r;
+    }
+    guard.stack_reservation = stack_reservation;
+    guard.stack_reservation_lo = plan.guard_lo;
+    guard.stack_reservation_hi = plan.top;
+
     for (u64 page_va = plan.commit_lo; page_va < plan.top; page_va += kPageSize)
     {
         auto stack_frame_r = AllocateFrame();
@@ -2990,16 +3016,23 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
             return r;
         }
         const PhysAddr stack_frame = stack_frame_r.value();
-        AddressSpaceMapUserPage(as, page_va, stack_frame, kPagePresent | kPageUser | kPageWritable | kPageNoExecute);
-        if ((AddressSpaceProbePteRaw(as, page_va) & kPagePresent) == 0)
+        // AllocateFrame currently zeroes on every slow/pool path. Repeat the
+        // confidentiality boundary here so a future allocator policy change
+        // cannot publish recycled kernel contents through a ring-3 stack PTE.
+        auto* stack_bytes = static_cast<u8*>(PhysToVirt(stack_frame));
+        for (u64 i = 0; i < kPageSize; ++i)
+        {
+            stack_bytes[i] = 0;
+        }
+        if (!AddressSpaceMapReservedUserPage(as, stack_reservation, page_va, stack_frame,
+                                             kPagePresent | kPageUser | kPageWritable | kPageNoExecute))
         {
             FreeFrame(stack_frame);
             KLOG_WARN_AV(::duetos::core::LogArea::Loader, "pe-loader",
-                         "MapUserPage refused (frame budget / OOM) — stack page", page_va);
+                         "reserved stack map refused (token/conflict/budget)", page_va);
             KBP_PROBE_V(::duetos::debug::ProbeId::kPeLoaderOom, page_va);
             return r;
         }
-        guard.Track(page_va);
     }
     SerialWrite("[pe-load] step4 stack reserve=");
     SerialWriteHex(plan.top - plan.reserve_lo);
@@ -3413,6 +3446,7 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     r.stack_va = plan.commit_lo;
     r.stack_top = plan.top;
     r.stack = plan;
+    r.stack_reservation = stack_reservation;
     r.image_base = h.image_base;
     r.image_size = h.image_size;
     r.teb_va = teb_va;

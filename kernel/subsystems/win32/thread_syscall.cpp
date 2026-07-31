@@ -43,7 +43,8 @@ struct ThreadPrepareContext
     core::Process* process;
     u64 slot;
     u64 generation;
-    u64 user_stack_va;
+    core::UserStackRange user_stack;
+    mm::AddressSpaceReservationToken stack_reservation;
     u64 user_gs_base;
     u64 tid;
 };
@@ -53,6 +54,11 @@ void PrepareWin32ThreadTask(sched::Task* task, void* raw_context)
     auto* context = static_cast<ThreadPrepareContext*>(raw_context);
     KASSERT(task != nullptr && context != nullptr && context->process != nullptr, "win32/thread",
             "invalid prepared-task context");
+
+    // Stack ownership must exist before scheduler publication: the new
+    // Task may fault, exit and reach the reaper on another CPU as soon as
+    // this callback returns.
+    sched::SchedPrepareOwnedUserStack(task, context->user_stack, context->stack_reservation);
 
     if (context->user_gs_base != 0)
         sched::SchedSetUserGsOverride(task, context->user_gs_base);
@@ -65,7 +71,7 @@ void PrepareWin32ThreadTask(sched::Task* task, void* raw_context)
     KASSERT(row.in_use && row.creating && row.generation == context->generation && row.tid == 0, "win32/thread",
             "prepared task lost reserved handle slot");
     row.tid = context->tid;
-    row.user_stack_va = context->user_stack_va;
+    row.user_stack_va = context->user_stack.reserve_lo;
     sync::SpinLockRelease(process->win32_thread_lock, flags);
 }
 
@@ -151,6 +157,14 @@ constexpr u64 kPerThreadBlkMaxPages = 8; // 32 KiB static-TLS cap / thread
 constexpr u32 kDllThreadAttach = 2;
 constexpr u64 kTebOffSelf = 0x30;
 constexpr u64 kTebOffTlsPtr = 0x58;
+
+// Demand-grown secondary stacks occupy disjoint [guard,reservation]
+// windows below the main TEB at 0x70000000. The legacy cursor remains the
+// process-wide allocator, but each published Task owns only its own range.
+constexpr u64 kThreadStackArenaLimit = 0x70000000ULL;
+constexpr u64 kThreadStackReserveBytes = core::kUserStackReserveMin;
+constexpr u64 kThreadStackInitialCommitBytes = core::kUserStackCommitMinPages * mm::kPageSize;
+constexpr u64 kThreadStackFootprint = kThreadStackReserveBytes + core::kUserStackGuardPages * mm::kPageSize;
 
 // Map `va` in `proc->as` if unmapped, else reuse the existing
 // frame (slots are recycled across thread create/exit, so the
@@ -391,36 +405,54 @@ void DoThreadCreate(arch::TrapFrame* frame)
     // down once SchedCreateUser succeeds.
     u32 slot = Process::kWin32ThreadCap;
     u64 claim_generation = 0;
-    u64 stack_base_va = 0;
-    const u64 stack_pages = Process::kV0ThreadStackPages;
+    core::UserStackRange user_stack{};
+    bool stack_arena_exhausted = false;
     {
         const sync::IrqFlags flags = sync::SpinLockAcquire(proc->win32_thread_lock);
-        for (u32 i = 0; i < Process::kWin32ThreadCap; ++i)
+        const u64 stack_guard_lo = proc->thread_stack_cursor;
+        if ((stack_guard_lo & (mm::kPageSize - 1)) != 0 ||
+            stack_guard_lo > kThreadStackArenaLimit - kThreadStackFootprint)
         {
-            if (!proc->win32_threads[i].in_use)
+            stack_arena_exhausted = true;
+        }
+        else
+        {
+            user_stack = core::UserStackPlanAt(stack_guard_lo + kThreadStackFootprint, kThreadStackReserveBytes,
+                                               kThreadStackInitialCommitBytes, nullptr);
+            if (!core::UserStackRangeIsValid(user_stack) || user_stack.guard_lo != stack_guard_lo)
             {
-                slot = i;
-                proc->win32_threads[i].in_use = true;
-                proc->win32_threads[i].creating = true;
-                proc->win32_threads[i].handle_open = false;
-                proc->win32_threads[i].exited = false;
-                proc->win32_threads[i].exit_code = 0x103; // STILL_ACTIVE for this generation
-                ++proc->win32_threads[i].generation;
-                if (proc->win32_threads[i].generation == 0)
+                stack_arena_exhausted = true;
+            }
+        }
+        if (!stack_arena_exhausted)
+        {
+            for (u32 i = 0; i < Process::kWin32ThreadCap; ++i)
+            {
+                if (!proc->win32_threads[i].in_use)
+                {
+                    slot = i;
+                    proc->win32_threads[i].in_use = true;
+                    proc->win32_threads[i].creating = true;
+                    proc->win32_threads[i].handle_open = false;
+                    proc->win32_threads[i].exited = false;
+                    proc->win32_threads[i].exit_code = 0x103; // STILL_ACTIVE for this generation
                     ++proc->win32_threads[i].generation;
-                claim_generation = proc->win32_threads[i].generation;
-                proc->win32_threads[i].tid = 0;
-                proc->win32_threads[i].user_stack_va = 0;
-                stack_base_va = proc->thread_stack_cursor;
-                proc->thread_stack_cursor += stack_pages * mm::kPageSize;
-                break;
+                    if (proc->win32_threads[i].generation == 0)
+                        ++proc->win32_threads[i].generation;
+                    claim_generation = proc->win32_threads[i].generation;
+                    proc->win32_threads[i].tid = 0;
+                    proc->win32_threads[i].user_stack_va = 0;
+                    proc->thread_stack_cursor = user_stack.top;
+                    break;
+                }
             }
         }
         sync::SpinLockRelease(proc->win32_thread_lock, flags);
     }
     if (slot == Process::kWin32ThreadCap)
     {
-        SerialWrite("[thread] create out-of-handles pid=");
+        SerialWrite(stack_arena_exhausted ? "[thread] create stack-arena exhausted pid="
+                                          : "[thread] create out-of-handles pid=");
         SerialWriteHex(proc->pid);
         SerialWrite("\n");
         frame->rax = static_cast<u64>(-1);
@@ -443,24 +475,27 @@ void DoThreadCreate(arch::TrapFrame* frame)
         sync::SpinLockRelease(proc->win32_thread_lock, flags);
     };
 
-    // Carve a fresh stack range off the process's thread-stack
-    // cursor. N pages, writable + NX + user. Stack grows down,
-    // so rsp starts at (base + N*4096 - 8).
-    //
-    // The slot-claim critical section already reserves the FULL
-    // requested range before any allocation, even if only `p`
-    // pages make it in — same pattern as vmap_syscall's partial-OOM
-    // path. Without this the next
-    // DoThreadCreate would try to re-map the successfully-allocated
-    // pages' VAs and AddressSpaceMapUserPage would panic on
-    // "virt already mapped". The reserved VA cursor is not rolled
-    // back because another creator may have claimed a later range, but
-    // every successfully mapped page is explicitly unwound on failure.
-    auto unwind_stack = [&](u64 mapped_pages)
+    // The spin-protected cursor claim makes the VA choice unique among
+    // peer creators. The address-space reservation is acquired only after
+    // dropping that spinlock: it takes the AS mutation mutex and may grow
+    // its ledger. From this point every stack PTE requires the exact token.
+    // The cursor is deliberately not rolled back on failure because a peer
+    // may already have claimed a later window.
+    mm::AddressSpaceReservationToken stack_reservation{};
+    if (!mm::AddressSpaceReserveUserRange(proc->as, user_stack.guard_lo, user_stack.top, &stack_reservation))
     {
-        for (u64 i = 0; i < mapped_pages; ++i)
-            (void)mm::AddressSpaceUnmapUserPage(proc->as, stack_base_va + i * mm::kPageSize);
-    };
+        SerialWrite("[thread] create FAIL stack reservation conflict/exhaustion pid=");
+        SerialWriteHex(proc->pid);
+        SerialWrite("\n");
+        release_claimed_slot();
+        frame->rax = static_cast<u64>(-1);
+        return;
+    }
+    auto unwind_stack = [&]() { core::UserStackReleaseOwnedMappings(proc->as, user_stack, stack_reservation); };
+
+    // Commit only the bounded initial top pages as RW + user + NX;
+    // page faults grow the current Task's descriptor downward.
+    const u64 stack_pages = (user_stack.top - user_stack.commit_lo) / mm::kPageSize;
     mm::PhysAddr top_frame_phys = mm::kNullFrame;
     for (u64 p = 0; p < stack_pages; ++p)
     {
@@ -474,18 +509,24 @@ void DoThreadCreate(arch::TrapFrame* frame)
             SerialWrite("/");
             SerialWriteHex(stack_pages);
             SerialWrite("\n");
-            unwind_stack(p);
+            unwind_stack();
             // Release the slot we claimed above; no task ever attaches.
             release_claimed_slot();
             frame->rax = static_cast<u64>(-1);
             return;
         }
-        const u64 page_va = stack_base_va + p * mm::kPageSize;
-        if (!mm::AddressSpaceMapUserPage(proc->as, page_va, frame_phys,
-                                         mm::kPagePresent | mm::kPageUser | mm::kPageWritable | mm::kPageNoExecute))
+        const u64 page_va = user_stack.commit_lo + p * mm::kPageSize;
+        auto* frame_bytes = static_cast<u8*>(mm::PhysToVirt(frame_phys));
+        for (u64 i = 0; i < mm::kPageSize; ++i)
+        {
+            frame_bytes[i] = 0;
+        }
+        if (!mm::AddressSpaceMapReservedUserPage(proc->as, stack_reservation, page_va, frame_phys,
+                                                 mm::kPagePresent | mm::kPageUser | mm::kPageWritable |
+                                                     mm::kPageNoExecute))
         {
             mm::FreeFrame(frame_phys);
-            unwind_stack(p);
+            unwind_stack();
             release_claimed_slot();
             frame->rax = static_cast<u64>(-1);
             return;
@@ -493,7 +534,7 @@ void DoThreadCreate(arch::TrapFrame* frame)
         if (p == stack_pages - 1)
             top_frame_phys = frame_phys;
     }
-    const u64 stack_top = stack_base_va + stack_pages * mm::kPageSize;
+    const u64 stack_top = user_stack.top;
     // Microsoft x64 ABI at function entry:
     //   rsp % 16 == 8                — `call` pushed 8 bytes
     //   [rsp]                         — return address
@@ -516,6 +557,7 @@ void DoThreadCreate(arch::TrapFrame* frame)
     constexpr u64 kShadowReserve = 0x28;
     const u64 user_rsp = stack_top - kShadowReserve;
 
+    KASSERT(top_frame_phys != mm::kNullFrame, "win32/thread", "thread stack has no committed top page");
     auto* top_page_kva = static_cast<u8*>(mm::PhysToVirt(top_frame_phys));
     auto* retaddr_slot = reinterpret_cast<u64*>(top_page_kva + mm::kPageSize - kShadowReserve);
     *retaddr_slot = ::duetos::win32::kWin32ThreadExitTrampVa;
@@ -527,6 +569,7 @@ void DoThreadCreate(arch::TrapFrame* frame)
     if (desc == nullptr)
     {
         SerialWrite("[thread] create FAIL heap alloc for ThreadDesc\n");
+        unwind_stack();
         release_claimed_slot();
         frame->rax = static_cast<u64>(-1);
         return;
@@ -567,35 +610,37 @@ void DoThreadCreate(arch::TrapFrame* frame)
     // Name: short thread label. Pin to the process's pid + slot
     // for debugging; a real Win32 caller would pass a name via
     // SetThreadDescription, which is a future syscall.
-    static char s_name[32] = {};
+    char thread_name[32] = {};
     // Open-coded "thread-<pid>-<slot>" — avoid dragging a
     // full sprintf in just for this.
     u32 nlen = 0;
     const char* prefix = "thread-";
-    for (u32 i = 0; prefix[i] != '\0' && nlen < sizeof(s_name) - 1; ++i, ++nlen)
-        s_name[nlen] = prefix[i];
+    for (u32 i = 0; prefix[i] != '\0' && nlen < sizeof(thread_name) - 1; ++i, ++nlen)
+        thread_name[nlen] = prefix[i];
     // lowercase hex digits for pid + slot, 2 hex each — the
     // debugger + logs only need to disambiguate small counts.
     auto hexd = [&](u8 v)
     {
         const char table[] = "0123456789abcdef";
-        if (nlen < sizeof(s_name) - 1)
-            s_name[nlen++] = table[(v >> 4) & 0xF];
-        if (nlen < sizeof(s_name) - 1)
-            s_name[nlen++] = table[v & 0xF];
+        if (nlen < sizeof(thread_name) - 1)
+            thread_name[nlen++] = table[(v >> 4) & 0xF];
+        if (nlen < sizeof(thread_name) - 1)
+            thread_name[nlen++] = table[v & 0xF];
     };
     hexd(static_cast<u8>(proc->pid & 0xFF));
-    if (nlen < sizeof(s_name) - 1)
-        s_name[nlen++] = '-';
+    if (nlen < sizeof(thread_name) - 1)
+        thread_name[nlen++] = '-';
     hexd(static_cast<u8>(slot));
-    s_name[nlen] = '\0';
+    thread_name[nlen] = '\0';
 
-    ThreadPrepareContext prepare_context{proc, slot, claim_generation, stack_base_va, per_thread_teb, 0};
-    sched::Task* t = sched::SchedCreateUserPrepared(&Ring3ThreadEntry, desc, s_name, proc, &PrepareWin32ThreadTask,
+    ThreadPrepareContext prepare_context{proc,           slot, claim_generation, user_stack, stack_reservation,
+                                         per_thread_teb, 0};
+    sched::Task* t = sched::SchedCreateUserPrepared(&Ring3ThreadEntry, desc, thread_name, proc, &PrepareWin32ThreadTask,
                                                     &prepare_context);
     if (t == nullptr)
     {
         SerialWrite("[thread] create FAIL SchedCreateUser\n");
+        unwind_stack();
         mm::KFree(desc);
         // ProcessRetain was consumed by SchedCreateUser's
         // gate-denial branch (ProcessRelease there) on nullptr
@@ -614,8 +659,12 @@ void DoThreadCreate(arch::TrapFrame* frame)
     SerialWriteHex(handle);
     SerialWrite(" start=");
     SerialWriteHex(start_va);
-    SerialWrite(" stack_base=");
-    SerialWriteHex(stack_base_va);
+    SerialWrite(" stack=[");
+    SerialWriteHex(user_stack.reserve_lo);
+    SerialWrite("..");
+    SerialWriteHex(user_stack.top);
+    SerialWrite(") guard=");
+    SerialWriteHex(user_stack.guard_lo);
     SerialWrite("\n");
     custom::OnHandleAlloc(proc, handle, static_cast<u32>(core::SYS_THREAD_CREATE), frame->rip);
     {

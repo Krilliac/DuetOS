@@ -201,6 +201,19 @@ namespace duetos::core
 namespace
 {
 
+struct PrimaryUserStackPrepareContext
+{
+    UserStackRange stack;
+    mm::AddressSpaceReservationToken reservation;
+};
+
+void PreparePrimaryUserStackTask(sched::Task* task, void* raw_context)
+{
+    auto* context = static_cast<PrimaryUserStackPrepareContext*>(raw_context);
+    KASSERT(task != nullptr && context != nullptr, "proc/spawn", "invalid primary-stack prepare context");
+    sched::SchedPrepareOwnedUserStack(task, context->stack, context->reservation);
+}
+
 // Map the embedded Linux vDSO blob (one page) into `as` at
 // `base_va`, copy the blob bytes into the freshly-allocated
 // frame, and record both the base and the absolute VA of
@@ -1251,6 +1264,12 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         AddressSpaceRelease(as);
         return 0;
     }
+    if (!UserStackRangeIsValid(r.stack) || !r.stack_reservation.IsValid())
+    {
+        KLOG_WARN("ring3", "PeLoad returned success without a valid stack reservation");
+        AddressSpaceRelease(as);
+        return 0;
+    }
     Process* proc = ProcessCreate(name, as, caps, root, r.entry_va, r.stack_va, tick_budget, cap_ceiling);
     if (proc == nullptr)
     {
@@ -1284,10 +1303,10 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     proc->user_rsp_init = r.stack_top - 0x48;
     proc->user_gs_base = r.teb_va;
     proc->user_is_pe32 = r.is_pe32;
-    // Publish the demand-grown stack reservation. Until this line
-    // runs the process has an all-zero UserStackRange and every
-    // ring-3 #PF classifies as NotStack — i.e. exactly the
-    // pre-growth behaviour.
+    // Compatibility snapshot for process inspection and Win32 metadata.
+    // Mapping authority is not inferred from this field: the scheduler
+    // prepare callback below transfers the loader's opaque AS token into
+    // the private Task before publication.
     proc->stack = r.stack;
     // T6-01 per-thread half: stash the static-TLS template so
     // SYS_THREAD_CREATE can give each new thread its own TEB +
@@ -1396,7 +1415,9 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         SerialWrite("\n");
     }
     const u64 pid = proc->pid;
-    if (sched::SchedCreateUser(&Ring3UserEntry, nullptr, proc->name, proc) == nullptr)
+    PrimaryUserStackPrepareContext stack_context{r.stack, r.stack_reservation};
+    if (sched::SchedCreateUserPrepared(&Ring3UserEntry, nullptr, proc->name, proc, &PreparePrimaryUserStackTask,
+                                       &stack_context) == nullptr)
         return 0;
     return pid;
 }
