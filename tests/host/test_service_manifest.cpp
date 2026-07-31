@@ -1,6 +1,7 @@
 // Hosted canonical encoding, hostile decoding, authority narrowing, DAG, and
 // structured mutation coverage for core/service_manifest.{h,cpp}.
 
+#include "crypto_host_shims.h"
 #include "host_test_helper.h"
 #include "core/service_manifest.h"
 #include "crypto/sha256.h"
