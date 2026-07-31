@@ -63,7 +63,8 @@ struct SysvMq
     bool in_use;
     bool marked_destroy;
     bool initializing;
-    u8 _pad;
+    bool closing;
+    u32 pins;
     i32 key;
     u32 head;
     u32 tail;
@@ -102,6 +103,8 @@ struct PosixMq
 
 SysvMq g_sysv_pool[kSysvMqPoolCap];
 PosixMq g_posix_pool[kPosixMqPoolCap];
+constinit sync::SpinLock g_sysv_lock = {
+    .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
 constinit sync::SpinLock g_posix_lock = {
     .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
 
@@ -147,6 +150,48 @@ struct PosixMqPin
     explicit operator bool() const { return queue != nullptr; }
 };
 
+struct SysvMqPin
+{
+    u32 idx;
+    SysvMq* queue;
+
+    explicit SysvMqPin(u32 value) : idx(value), queue(nullptr)
+    {
+        if (value >= kSysvMqPoolCap)
+            return;
+        sync::SpinLockGuard guard(g_sysv_lock);
+        SysvMq& q = g_sysv_pool[value];
+        if (q.in_use && !q.initializing && !q.closing)
+        {
+            ++q.pins;
+            queue = &q;
+        }
+    }
+
+    ~SysvMqPin()
+    {
+        if (queue == nullptr)
+            return;
+        auto flags = sync::SpinLockAcquire(g_sysv_lock);
+        SysvMq& q = g_sysv_pool[idx];
+        if (q.pins > 0)
+            --q.pins;
+        SysvMsg* ring = nullptr;
+        if (q.pins == 0 && !q.in_use && q.closing)
+        {
+            ring = q.ring;
+            q.ring = nullptr;
+            q.closing = false;
+            q.count = 0;
+        }
+        sync::SpinLockRelease(g_sysv_lock, flags);
+        if (ring != nullptr)
+            mm::KFree(ring);
+    }
+
+    explicit operator bool() const { return queue != nullptr; }
+};
+
 // =========================================================
 // SysV MQ helpers
 // =========================================================
@@ -155,6 +200,7 @@ i32 SysvMqFindByKey(i32 key)
 {
     if (key == 0)
         return -1;
+    sync::SpinLockGuard guard(g_sysv_lock);
     for (u32 i = 0; i < kSysvMqPoolCap; ++i)
         if (g_sysv_pool[i].in_use && !g_sysv_pool[i].initializing && !g_sysv_pool[i].marked_destroy && g_sysv_pool[i].key == key)
             return static_cast<i32>(i);
@@ -163,15 +209,17 @@ i32 SysvMqFindByKey(i32 key)
 
 i32 SysvMqAlloc(i32 key)
 {
-    arch::Cli();
+    auto flags = sync::SpinLockAcquire(g_sysv_lock);
     for (u32 i = 0; i < kSysvMqPoolCap; ++i)
     {
-        if (g_sysv_pool[i].in_use)
+        if (g_sysv_pool[i].in_use || g_sysv_pool[i].closing)
             continue;
         SysvMq& q = g_sysv_pool[i];
         q.in_use = true;
         q.initializing = true;
         q.marked_destroy = false;
+        q.closing = false;
+        q.pins = 0;
         q.key = key;
         q.head = 0;
         q.tail = 0;
@@ -181,22 +229,22 @@ i32 SysvMqAlloc(i32 key)
         q.write_wq.head = nullptr;
         q.write_wq.tail = nullptr;
         q.ring = nullptr;
-        arch::Sti();
+        sync::SpinLockRelease(g_sysv_lock, flags);
         q.ring = static_cast<SysvMsg*>(mm::KMalloc(sizeof(SysvMsg) * kMqMsgsPerQueue));
         if (q.ring == nullptr)
         {
-            arch::Cli();
+            flags = sync::SpinLockAcquire(g_sysv_lock);
             q.in_use = false;
             q.initializing = false;
-            arch::Sti();
+            sync::SpinLockRelease(g_sysv_lock, flags);
             return -1;
         }
-        arch::Cli();
+        flags = sync::SpinLockAcquire(g_sysv_lock);
         q.initializing = false;
-        arch::Sti();
+        sync::SpinLockRelease(g_sysv_lock, flags);
         return static_cast<i32>(i);
     }
-    arch::Sti();
+    sync::SpinLockRelease(g_sysv_lock, flags);
     return -1;
 }
 
@@ -287,44 +335,54 @@ i64 DoMsgsnd(u64 msqid, u64 user_msg, u64 msgsz, u64 msgflg)
         return -14; // -EFAULT
     if (mtype <= 0)
         return -22;
-    SysvMq& q = g_sysv_pool[idx];
-    arch::Cli();
-    while (q.in_use && !q.marked_destroy && q.count == kMqMsgsPerQueue)
+    SysvMqPin pin(idx);
+    if (!pin)
+        return -22;
+    SysvMq& q = *pin.queue;
+    while (true)
     {
+        auto lock_flags = sync::SpinLockAcquire(g_sysv_lock);
+        if (!q.in_use || q.marked_destroy || q.closing)
+        {
+            sync::SpinLockRelease(g_sysv_lock, lock_flags);
+            return -22;
+        }
+        if (q.count != kMqMsgsPerQueue)
+        {
+            sync::SpinLockRelease(g_sysv_lock, lock_flags);
+            break;
+        }
         if (nowait)
         {
-            arch::Sti();
+            sync::SpinLockRelease(g_sysv_lock, lock_flags);
             return -11; // -EAGAIN
         }
-        sched::WaitQueueBlock(&q.write_wq);
+        sched::WaitQueue* wq = &q.write_wq;
+        sync::SpinLockRelease(g_sysv_lock, lock_flags);
         arch::Cli();
-    }
-    if (!q.in_use || q.marked_destroy)
-    {
+        (void)sched::WaitQueueBlockTimeout(wq, 5);
         arch::Sti();
-        return -22;
     }
     // Stage outside Cli/Sti.
     SysvMsg stage;
     stage.mtype = mtype;
     stage.len = static_cast<u32>(msgsz);
-    arch::Sti();
     if (msgsz > 0)
     {
         if (!mm::CopyFromUser(stage.body, reinterpret_cast<const void*>(user_msg + sizeof(i64)), msgsz))
             return -14;
     }
-    arch::Cli();
-    if (!q.in_use || q.marked_destroy)
+    auto lock_flags = sync::SpinLockAcquire(g_sysv_lock);
+    if (!q.in_use || q.marked_destroy || q.closing)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_sysv_lock, lock_flags);
         return -22;
     }
     q.ring[q.head] = stage;
     q.head = (q.head + 1) % kMqMsgsPerQueue;
     ++q.count;
     sched::WaitQueueWakeOne(&q.read_wq);
-    arch::Sti();
+    sync::SpinLockRelease(g_sysv_lock, lock_flags);
     return 0;
 }
 
@@ -338,29 +396,39 @@ i64 DoMsgrcv(u64 msqid, u64 user_msg, u64 msgsz, u64 mtype_filter, u64 msgflg)
     const bool nowait = (msgflg & kIpcNowait) != 0;
     const i64 filter = static_cast<i64>(mtype_filter);
 
-    SysvMq& q = g_sysv_pool[idx];
+    SysvMqPin pin(idx);
+    if (!pin)
+        return -22;
+    SysvMq& q = *pin.queue;
     SysvMsg out;
-    arch::Cli();
-    i32 hit = -1;
-    while (q.in_use && !q.marked_destroy && (hit = SysvFindByMtype(q, filter)) < 0)
+    while (true)
     {
+        auto lock_flags = sync::SpinLockAcquire(g_sysv_lock);
+        if (!q.in_use || q.marked_destroy || q.closing)
+        {
+            sync::SpinLockRelease(g_sysv_lock, lock_flags);
+            return -22;
+        }
+        const i32 hit = SysvFindByMtype(q, filter);
+        if (hit >= 0)
+        {
+            out = q.ring[hit];
+            SysvDrainAt(q, static_cast<u32>(hit));
+            sched::WaitQueueWakeOne(&q.write_wq);
+            sync::SpinLockRelease(g_sysv_lock, lock_flags);
+            break;
+        }
         if (nowait)
         {
-            arch::Sti();
+            sync::SpinLockRelease(g_sysv_lock, lock_flags);
             return -42; // -ENOMSG
         }
-        sched::WaitQueueBlock(&q.read_wq);
+        sched::WaitQueue* wq = &q.read_wq;
+        sync::SpinLockRelease(g_sysv_lock, lock_flags);
         arch::Cli();
-    }
-    if (!q.in_use || q.marked_destroy)
-    {
+        (void)sched::WaitQueueBlockTimeout(wq, 5);
         arch::Sti();
-        return -22;
     }
-    out = q.ring[hit];
-    SysvDrainAt(q, static_cast<u32>(hit));
-    sched::WaitQueueWakeOne(&q.write_wq);
-    arch::Sti();
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_msg), &out.mtype, sizeof(out.mtype)))
         return -14;
     const u64 to_copy = (out.len < msgsz) ? out.len : msgsz;
@@ -378,11 +446,11 @@ i64 DoMsgctl(u64 msqid, u64 cmd, u64 user_buf)
     if (msqid == 0 || msqid > kSysvMqPoolCap)
         return -22;
     const u32 idx = static_cast<u32>(msqid - 1);
-    arch::Cli();
+    auto lock_flags = sync::SpinLockAcquire(g_sysv_lock);
     SysvMq& q = g_sysv_pool[idx];
     if (!q.in_use)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_sysv_lock, lock_flags);
         return -22;
     }
     if (cmd == kIpcRmid)
@@ -391,20 +459,29 @@ i64 DoMsgctl(u64 msqid, u64 cmd, u64 user_buf)
         SysvMsg* ring = q.ring;
         sched::WaitQueueWakeAll(&q.read_wq);
         sched::WaitQueueWakeAll(&q.write_wq);
+        q.closing = true;
         q.in_use = false;
-        q.ring = nullptr;
         q.count = 0;
-        arch::Sti();
+        if (q.pins == 0)
+        {
+            q.ring = nullptr;
+            q.closing = false;
+        }
+        else
+        {
+            ring = nullptr;
+        }
+        sync::SpinLockRelease(g_sysv_lock, lock_flags);
         if (ring != nullptr)
             mm::KFree(ring);
         return 0;
     }
     if (cmd == kIpcStat)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_sysv_lock, lock_flags);
         return 0; // msqid_ds copy-out deferred (sub-GAP)
     }
-    arch::Sti();
+    sync::SpinLockRelease(g_sysv_lock, lock_flags);
     return -22;
 }
 
