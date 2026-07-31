@@ -794,3 +794,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Recognize opaque generation-tagged Section handles in NtQueryObject
 - **Claimed**: 2026-07-31T16:23:53Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] proc-job-core-service
+- **Session**: `Codex-job-core-service`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/proc/job.h`
+- **Description**: No description provided
+- **Claimed**: 2026-07-31T16:24:29Z
+- **Status**: IN PROGRESS
