@@ -14289,3 +14289,20 @@ _2026-07-30_
   sustained overflow becomes measurable, or `WaitQueueBlockLocked` is
   available for a fully locked queue design.
 - **Related tracks:** Track 6 (Drivers — input), Track 9 (Windowing).
+
+## 056 — Address-space region bookkeeping uses a non-sleeping structural lock
+
+- **Scope:** `kernel/mm/address_space.{h,cpp}`
+- **Decision:** Protect each AS's compacting `regions[]` table and its
+  page-table mutation helpers with a per-AS `sync::SpinLock`. Readers,
+  writers, fork snapshots, borrowed-page operations, and teardown all
+  serialize through that lock.
+- **Why:** swap-with-last unmapping can move a live row while another
+  CPU scans the table. A sleeping `RwLock` is invalid because the
+  breakpoint resolver reaches the lookup path while holding a spinlock.
+- **Rules out / defers:** lock-free region scans and partial writer-only
+  locking. AS lifetime remains separately governed by
+  `AddressSpaceRetain` / `AddressSpaceRelease`; the lock does not create
+  a lifetime reference.
+- **Verification boundary:** source-level lock coverage and diff checks
+  are complete; a full MSVC/QEMU/SMP run is still required.
