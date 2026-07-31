@@ -1,90 +1,103 @@
 /*
- * Win32 section pool implementation.
- * See section.h for v0 scope + refcount semantics.
+ * Win32 anonymous section pool.
+ *
+ * The global spinlock protects only slot state, generation, refs, and brief
+ * metadata snapshots. Per-slot map_mutex serializes W^X history and borrowed
+ * range transactions. Allocation, address-space work, TLB waits, and teardown
+ * happen with the spinlock released.
  */
 
 #include "subsystems/win32/section.h"
 
+#include "arch/x86_64/serial.h"
+#include "core/panic.h"
 #include "log/klog.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
 #include "mm/kheap.h"
 #include "mm/page.h"
 #include "proc/process.h"
+#include "sched/sched.h"
 #include "sync/spinlock.h"
+#include "util/saturating.h"
 
 namespace duetos::subsystems::win32::section
 {
 
 namespace
 {
-Section g_pool[kSectionPoolCap];
 
-// Guards the pool's SLOT-OWNERSHIP state — `in_use` and `refcount` —
-// on an SMP kernel. Nothing synchronised these before, which left two
-// concrete races:
-//
-//   * SectionCreate scanned for `!in_use` and only set `in_use = true`
-//     AFTER the frames-table KMalloc and every AllocateFrame + page
-//     zeroing. Two CPUs in NtCreateSection therefore selected the SAME
-//     slot with near-certainty under load, and the loser's frames table
-//     was leaked while both processes were handed the same section.
-//   * SectionRelease did a non-atomic `--refcount` and then tore the
-//     section down at zero. Two concurrent releases could both observe
-//     zero and both tear the section down — a double free of every
-//     physical frame in the section, handing those frames to two future
-//     owners at once.
-//
-// Scope is deliberately narrow: the claim and the refcount transitions
-// only. The heavy work in SectionCreate (KMalloc + per-page
-// AllocateFrame + zeroing) runs OUTSIDE the lock, so this never holds a
-// spinlock across an allocation. Lock order is section -> frame
-// allocator / kheap; nothing in mm takes this lock, so that edge cannot
-// invert.
-constinit duetos::sync::SpinLock g_section_lock{};
-
-inline u64 PageUp(u64 v)
+enum class SectionState : u8
 {
-    return (v + (mm::kPageSize - 1)) & ~(mm::kPageSize - 1);
+    Free,
+    Constructing,
+    Live,
+    Retiring,
+};
+
+struct Section
+{
+    SectionState state;
+    u8 _pad0[3];
+    u32 generation;
+    u32 num_pages;
+    util::SatU32 refcount;
+    u32 page_protect;
+    mm::PhysAddr* frames;
+    bool has_writable_view;
+    bool has_executable_view;
+    u8 _pad1[6];
+    // Persistent across slot generations. Never clear/reinitialize this field.
+    sched::Mutex map_mutex;
+};
+
+constinit Section g_pool[kSectionPoolCap]{};
+constinit sync::SpinLock g_section_lock{};
+
+class SectionMapGuard
+{
+  public:
+    explicit SectionMapGuard(sched::Mutex& mutex) : m_mutex(mutex) { sched::MutexLock(&m_mutex); }
+    ~SectionMapGuard() { sched::MutexUnlock(&m_mutex); }
+    SectionMapGuard(const SectionMapGuard&) = delete;
+    SectionMapGuard& operator=(const SectionMapGuard&) = delete;
+
+  private:
+    sched::Mutex& m_mutex;
+};
+
+inline u64 PageUp(u64 value)
+{
+    return (value + (mm::kPageSize - 1)) & ~(mm::kPageSize - 1);
 }
 
-// Translate a Win32 PAGE_* value into mm::kPage* PTE flags.
-// The kernel-side PTE always carries kPageUser. W^X is
-// enforced by AddressSpaceMapBorrowedPage; this function
-// just maps the Win32 enum to the closest legal PTE flag set.
 u64 ProtectToPteFlags(u32 win32_protect)
 {
-    constexpr u32 PAGE_READONLY = 0x02;
-    constexpr u32 PAGE_READWRITE = 0x04;
-    constexpr u32 PAGE_EXECUTE = 0x10;
-    constexpr u32 PAGE_EXECUTE_READ = 0x20;
-    constexpr u32 PAGE_EXECUTE_READWRITE = 0x40;
+    constexpr u32 kPageReadonly = 0x02;
+    constexpr u32 kPageReadwrite = 0x04;
+    constexpr u32 kPageWritecopy = 0x08;
+    constexpr u32 kPageExecute = 0x10;
+    constexpr u32 kPageExecuteRead = 0x20;
+    constexpr u32 kPageExecuteReadwrite = 0x40;
 
     u64 flags = mm::kPagePresent | mm::kPageUser;
     switch (win32_protect)
     {
-    case PAGE_READONLY:
+    case kPageReadonly:
         flags |= mm::kPageNoExecute;
         break;
-    case PAGE_READWRITE:
+    case kPageReadwrite:
+    case kPageWritecopy:
         flags |= mm::kPageWritable | mm::kPageNoExecute;
         break;
-    case PAGE_EXECUTE:
-    case PAGE_EXECUTE_READ:
-        // RX — executable, not writable. W^X-safe.
+    case kPageExecute:
+    case kPageExecuteRead:
         break;
-    case PAGE_EXECUTE_READWRITE:
-        // RWX is the canonical shellcode pattern. v0 refuses
-        // — the W^X check in AddressSpaceMapBorrowedPage
-        // would panic. Fall back to RW (NX). Process
-        // hollowing tests can use NtProtectVirtualMemory
-        // to flip pages to RX in a separate step (when that
-        // syscall lands).
-        KLOG_ONCE_WARN("subsystems/win32/section", "PAGE_EXECUTE_READWRITE refused (W^X) — downgraded to RW+NX");
+    case kPageExecuteReadwrite:
+        KLOG_ONCE_WARN("subsystems/win32/section", "PAGE_EXECUTE_READWRITE refused (W^X); downgraded to RW+NX");
         flags |= mm::kPageWritable | mm::kPageNoExecute;
         break;
     default:
-        // Unknown protection — treat as RW.
         KLOG_WARN_V("subsystems/win32/section", "unknown PAGE_* protect, treating as RW",
                     static_cast<u64>(win32_protect));
         flags |= mm::kPageWritable | mm::kPageNoExecute;
@@ -93,296 +106,437 @@ u64 ProtectToPteFlags(u32 win32_protect)
     return flags;
 }
 
-} // namespace
-
-i32 SectionCreate(u64 size_bytes, u32 page_protect)
+SectionKey LiveKeyForSlot(u32 slot)
 {
-    if (size_bytes == 0 || size_bytes > kSectionMaxBytes)
+    if (slot >= kSectionPoolCap)
     {
-        KLOG_WARN_V("subsystems/win32/section", "SectionCreate: size_bytes out of range, size_bytes=", size_bytes);
-        return -1;
+        return kInvalidSectionKey;
     }
-    const u64 aligned = PageUp(size_bytes);
-    const u32 num_pages = static_cast<u32>(aligned / mm::kPageSize);
-
-    // Find AND claim a free slot under the lock, so no peer CPU can
-    // pick the same one while we allocate. `refcount = 0` marks the
-    // slot as reserved-but-not-yet-live; it becomes 1 only once the
-    // section is fully constructed below, and Retain/Release both
-    // refuse to act on a zero-refcount slot.
-    u32 idx = kSectionPoolCap;
+    sync::SpinLockGuard guard(g_section_lock);
+    const Section& section = g_pool[slot];
+    if (section.state != SectionState::Live || section.refcount == 0)
     {
-        duetos::sync::SpinLockGuard guard(g_section_lock);
-        for (u32 i = 0; i < kSectionPoolCap; ++i)
+        return kInvalidSectionKey;
+    }
+    return SectionKey{slot, section.generation};
+}
+
+bool ReserveSlot(SectionKey* key_out)
+{
+    sync::SpinLockGuard guard(g_section_lock);
+    for (u32 slot = 0; slot < kSectionPoolCap; ++slot)
+    {
+        Section& section = g_pool[slot];
+        if (section.state != SectionState::Free || section.generation >= kSectionMaxGeneration)
         {
-            if (!g_pool[i].in_use)
+            continue;
+        }
+        ++section.generation;
+        section.state = SectionState::Constructing;
+        section.num_pages = 0;
+        section.refcount = 0;
+        section.page_protect = 0;
+        section.frames = nullptr;
+        section.has_writable_view = false;
+        section.has_executable_view = false;
+        *key_out = SectionKey{slot, section.generation};
+        return true;
+    }
+    return false;
+}
+
+void AbortConstruction(SectionKey key)
+{
+    sync::SpinLockGuard guard(g_section_lock);
+    Section& section = g_pool[key.slot];
+    if (section.state == SectionState::Constructing && section.generation == key.generation)
+    {
+        section.state = SectionState::Free;
+    }
+}
+
+bool PublishConstruction(SectionKey key, mm::PhysAddr* frames, u32 num_pages, u32 page_protect)
+{
+    sync::SpinLockGuard guard(g_section_lock);
+    Section& section = g_pool[key.slot];
+    if (section.state != SectionState::Constructing || section.generation != key.generation)
+    {
+        return false;
+    }
+    section.frames = frames;
+    section.num_pages = num_pages;
+    section.page_protect = page_protect;
+    section.refcount = 1;
+    section.has_writable_view = false;
+    section.has_executable_view = false;
+    section.state = SectionState::Live;
+    return true;
+}
+
+void FreeFrameVector(mm::PhysAddr* frames, u32 num_pages)
+{
+    if (frames == nullptr)
+    {
+        return;
+    }
+    for (u32 page = 0; page < num_pages; ++page)
+    {
+        if (frames[page] != mm::kNullFrame)
+        {
+            mm::FreeFrame(frames[page]);
+        }
+    }
+    mm::KFree(frames);
+}
+
+bool SnapshotLiveSection(SectionKey key, mm::PhysAddr** frames_out, u32* num_pages_out, bool* writable_out,
+                         bool* executable_out)
+{
+    sync::SpinLockGuard guard(g_section_lock);
+    const Section& section = g_pool[key.slot];
+    if (section.state != SectionState::Live || section.generation != key.generation || section.refcount == 0 ||
+        section.frames == nullptr || section.num_pages == 0)
+    {
+        return false;
+    }
+    *frames_out = section.frames;
+    *num_pages_out = section.num_pages;
+    if (writable_out != nullptr)
+    {
+        *writable_out = section.has_writable_view;
+    }
+    if (executable_out != nullptr)
+    {
+        *executable_out = section.has_executable_view;
+    }
+    return true;
+}
+
+bool MapSection(SectionKey key, mm::AddressSpace* target_as, u64 base_va, u32 view_protect, bool adopt_view_reference)
+{
+    if (!SectionKeyIsValid(key) || target_as == nullptr || (base_va & (mm::kPageSize - 1)) != 0)
+    {
+        return false;
+    }
+    // This operation pin keeps the frame vector alive. On the new API's
+    // success path it becomes the active view reference without a gap.
+    if (!SectionRetain(key))
+    {
+        return false;
+    }
+
+    bool mapped = false;
+    {
+        Section& section = g_pool[key.slot];
+        SectionMapGuard map_guard(section.map_mutex);
+        mm::PhysAddr* frames = nullptr;
+        u32 num_pages = 0;
+        bool has_writable_view = false;
+        bool has_executable_view = false;
+        if (SnapshotLiveSection(key, &frames, &num_pages, &has_writable_view, &has_executable_view))
+        {
+            constexpr u64 kUserLastPage = 0x00007FFFFFFFF000ULL;
+            const u64 last_page_offset = static_cast<u64>(num_pages - 1) * mm::kPageSize;
+            const u64 flags = ProtectToPteFlags(view_protect);
+            const bool grants_write = (flags & mm::kPageWritable) != 0;
+            const bool grants_exec = (flags & mm::kPageNoExecute) == 0;
+            if (base_va <= kUserLastPage && last_page_offset <= kUserLastPage - base_va &&
+                !(grants_exec && has_writable_view) && !(grants_write && has_executable_view))
             {
-                idx = i;
-                g_pool[i].in_use = true;
-                g_pool[i].refcount = 0;
-                g_pool[i].frames = nullptr;
-                g_pool[i].num_pages = 0;
-                g_pool[i].has_writable_view = false;
-                g_pool[i].has_executable_view = false;
-                break;
+                mapped = mm::AddressSpaceMapBorrowedRange(target_as, base_va, frames, num_pages, flags);
+                if (mapped)
+                {
+                    sync::SpinLockGuard guard(g_section_lock);
+                    Section& live = g_pool[key.slot];
+                    if (live.state == SectionState::Live && live.generation == key.generation)
+                    {
+                        live.has_writable_view = live.has_writable_view || grants_write;
+                        live.has_executable_view = live.has_executable_view || grants_exec;
+                    }
+                }
+            }
+            else if ((grants_exec && has_writable_view) || (grants_write && has_executable_view))
+            {
+                KLOG_WARN("subsystems/win32/section", "SectionMap: sticky W^X history rejected aliased view");
             }
         }
     }
-    if (idx == kSectionPoolCap)
+
+    if (!mapped || !adopt_view_reference)
     {
-        KLOG_ERROR_V("subsystems/win32/section", "SectionCreate: pool exhausted, capacity",
-                     static_cast<u64>(kSectionPoolCap));
-        return -1;
+        SectionRelease(key);
+    }
+    return mapped;
+}
+
+bool UnmapSection(SectionKey key, mm::AddressSpace* target_as, u64 base_va, bool release_view_reference)
+{
+    if (!SectionKeyIsValid(key) || target_as == nullptr || (base_va & (mm::kPageSize - 1)) != 0)
+    {
+        return false;
+    }
+    // Take a temporary operation pin in addition to the caller-claimed view
+    // reference. This makes stale/double-unmap a clean refusal rather than a
+    // frame-vector lifetime assumption inside the address-space transaction.
+    if (!SectionRetain(key))
+    {
+        return false;
     }
 
-    Section& s = g_pool[idx];
-    s.frames = static_cast<mm::PhysAddr*>(mm::KMalloc(sizeof(mm::PhysAddr) * num_pages));
-    if (s.frames == nullptr)
+    bool unmapped = false;
     {
-        KLOG_ERROR_V("subsystems/win32/section", "SectionCreate: KMalloc for frames table failed (OOM); pages",
-                     static_cast<u64>(num_pages));
-        // Release the slot we claimed above, or this failure leaks it
-        // out of the pool permanently.
-        duetos::sync::SpinLockGuard guard(g_section_lock);
-        s.in_use = false;
-        return -1;
-    }
-    for (u32 i = 0; i < num_pages; ++i)
-        s.frames[i] = mm::kNullFrame;
-    for (u32 i = 0; i < num_pages; ++i)
-    {
-        const mm::PhysAddr f = mm::AllocateFrame().value_or(mm::kNullFrame);
-        if (f == mm::kNullFrame)
+        Section& section = g_pool[key.slot];
+        SectionMapGuard map_guard(section.map_mutex);
+        mm::PhysAddr* frames = nullptr;
+        u32 num_pages = 0;
+        if (SnapshotLiveSection(key, &frames, &num_pages, nullptr, nullptr))
         {
-            // OOM mid-creation — roll back.
-            KLOG_ERROR_2V("subsystems/win32/section", "SectionCreate: AllocateFrame OOM mid-creation — rolling back",
-                          "page_index", static_cast<u64>(i), "of", static_cast<u64>(num_pages));
-            for (u32 j = 0; j < i; ++j)
-                mm::FreeFrame(s.frames[j]);
-            mm::KFree(s.frames);
-            s.frames = nullptr;
-            // Same as the KMalloc failure above: hand the claimed slot
-            // back, otherwise an OOM here burns a pool entry forever.
-            duetos::sync::SpinLockGuard guard(g_section_lock);
-            s.in_use = false;
-            return -1;
+            unmapped = mm::AddressSpaceUnmapBorrowedRangeExpected(target_as, base_va, frames, num_pages);
         }
-        // Zero the frame — Windows guarantees fresh sections
-        // come back zeroed, and the W^X-safe RW mapping that
-        // every section view installs would leak previous
-        // owners' data otherwise.
-        u8* dst = static_cast<u8*>(mm::PhysToVirt(f));
-        for (u64 k = 0; k < mm::kPageSize; ++k)
-            dst[k] = 0;
-        s.frames[i] = f;
     }
-    // Publish the finished section. `in_use` was already set when the
-    // slot was claimed; flipping refcount 0 -> 1 under the lock is what
-    // makes it live to Retain/Release.
+
+    SectionRelease(key); // temporary operation pin
+    if (unmapped && release_view_reference)
     {
-        duetos::sync::SpinLockGuard guard(g_section_lock);
-        s.num_pages = num_pages;
-        s.refcount = 1; // new handle
-        s.page_protect = page_protect;
-        s.has_writable_view = false;
-        s.has_executable_view = false;
+        SectionRelease(key);
     }
-    return static_cast<i32>(idx);
+    return unmapped;
+}
+
+} // namespace
+
+bool SectionCreate(u64 size_bytes, u32 page_protect, SectionKey* key_out)
+{
+    if (key_out == nullptr || size_bytes == 0 || size_bytes > kSectionMaxBytes)
+    {
+        return false;
+    }
+    *key_out = kInvalidSectionKey;
+    SectionKey key{};
+    if (!ReserveSlot(&key))
+    {
+        KLOG_ERROR("subsystems/win32/section", "SectionCreate: pool exhausted or every generation retired");
+        return false;
+    }
+
+    const u32 num_pages = static_cast<u32>(PageUp(size_bytes) / mm::kPageSize);
+    auto* frames = static_cast<mm::PhysAddr*>(mm::KMalloc(sizeof(mm::PhysAddr) * num_pages));
+    if (frames == nullptr)
+    {
+        AbortConstruction(key);
+        return false;
+    }
+    for (u32 page = 0; page < num_pages; ++page)
+    {
+        frames[page] = mm::kNullFrame;
+    }
+    for (u32 page = 0; page < num_pages; ++page)
+    {
+        auto frame_result = mm::AllocateFrame();
+        if (!frame_result)
+        {
+            FreeFrameVector(frames, num_pages);
+            AbortConstruction(key);
+            return false;
+        }
+        frames[page] = frame_result.value();
+        auto* bytes = static_cast<u8*>(mm::PhysToVirt(frames[page]));
+        for (u64 offset = 0; offset < mm::kPageSize; ++offset)
+        {
+            bytes[offset] = 0;
+        }
+    }
+    if (!PublishConstruction(key, frames, num_pages, page_protect))
+    {
+        FreeFrameVector(frames, num_pages);
+        AbortConstruction(key);
+        return false;
+    }
+    *key_out = key;
+    return true;
+}
+
+bool SectionRetain(SectionKey key)
+{
+    if (!SectionKeyIsValid(key))
+    {
+        return false;
+    }
+    sync::SpinLockGuard guard(g_section_lock);
+    Section& section = g_pool[key.slot];
+    const u32 refs = static_cast<u32>(section.refcount);
+    if (section.state != SectionState::Live || section.generation != key.generation || refs == 0 ||
+        refs == static_cast<u32>(~0U))
+    {
+        return false;
+    }
+    ++section.refcount;
+    return true;
+}
+
+void SectionRelease(SectionKey key)
+{
+    if (!SectionKeyIsValid(key))
+    {
+        return;
+    }
+    mm::PhysAddr* doomed_frames = nullptr;
+    u32 doomed_pages = 0;
+    {
+        sync::SpinLockGuard guard(g_section_lock);
+        Section& section = g_pool[key.slot];
+        if (section.state != SectionState::Live || section.generation != key.generation || section.refcount == 0)
+        {
+            return;
+        }
+        --section.refcount;
+        if (section.refcount != 0)
+        {
+            return;
+        }
+        section.state = SectionState::Retiring;
+        doomed_frames = section.frames;
+        doomed_pages = section.num_pages;
+        section.frames = nullptr;
+        section.num_pages = 0;
+        section.page_protect = 0;
+        section.has_writable_view = false;
+        section.has_executable_view = false;
+    }
+
+    FreeFrameVector(doomed_frames, doomed_pages);
+
+    sync::SpinLockGuard guard(g_section_lock);
+    Section& section = g_pool[key.slot];
+    if (section.state == SectionState::Retiring && section.generation == key.generation)
+    {
+        section.state = SectionState::Free;
+    }
+}
+
+bool SectionMapAndRetainView(SectionKey key, mm::AddressSpace* target_as, u64 base_va, u32 view_protect)
+{
+    return MapSection(key, target_as, base_va, view_protect, true);
+}
+
+bool SectionUnmapAndReleaseView(SectionKey key, mm::AddressSpace* target_as, u64 base_va)
+{
+    return UnmapSection(key, target_as, base_va, true);
+}
+
+u64 SectionViewSize(SectionKey key)
+{
+    if (!SectionKeyIsValid(key))
+    {
+        return 0;
+    }
+    sync::SpinLockGuard guard(g_section_lock);
+    const Section& section = g_pool[key.slot];
+    if (section.state != SectionState::Live || section.generation != key.generation || section.refcount == 0)
+    {
+        return 0;
+    }
+    return static_cast<u64>(section.num_pages) * mm::kPageSize;
+}
+
+void SectionLifetimeSelfTest()
+{
+    auto expect = [](bool condition, const char* message)
+    {
+        if (!condition)
+        {
+            core::Panic("win32/section-selftest", message);
+        }
+    };
+
+    SectionKey first{};
+    expect(SectionCreate(2 * mm::kPageSize, 0x04, &first), "initial section create failed");
+    expect(SectionViewSize(first) == 2 * mm::kPageSize, "initial section size mismatch");
+    auto as_result = mm::AddressSpaceCreate(mm::kFrameBudgetTrusted);
+    expect(static_cast<bool>(as_result), "address-space create failed");
+    mm::AddressSpace* as = as_result.value();
+    constexpr u64 kViewBase = 0x000000009FFFF000ULL;
+    expect(SectionMapAndRetainView(first, as, kViewBase, 0x04), "transactional view map failed");
+
+    // Drop the handle reference first. The active view must keep the object
+    // alive until its exact expected-frame unmap completes.
+    SectionRelease(first);
+    expect(SectionViewSize(first) == 2 * mm::kPageSize, "view did not retain section lifetime");
+    expect(SectionUnmapAndReleaseView(first, as, kViewBase), "transactional view unmap failed");
+    expect(!SectionRetain(first), "retired section generation remained retainable");
+    mm::AddressSpaceRelease(as);
+
+    SectionKey second{};
+    expect(SectionCreate(mm::kPageSize, 0x02, &second), "recycled section create failed");
+    expect(second.slot == first.slot && second.generation == first.generation + 1,
+           "recycled slot did not advance generation");
+    SectionRelease(first); // stale release must not affect the new generation.
+    expect(SectionViewSize(second) == mm::kPageSize, "stale release damaged recycled section");
+    SectionRelease(second);
+    expect(!SectionRetain(second), "released recycled generation remained retainable");
+    arch::SerialWrite("[section-lifetime-selftest] PASS\n");
+}
+
+// Temporary compatibility wrappers; see section.h.
+i32 SectionCreate(u64 size_bytes, u32 page_protect)
+{
+    SectionKey key{};
+    return SectionCreate(size_bytes, page_protect, &key) ? static_cast<i32>(key.slot) : -1;
 }
 
 void SectionRetain(u32 idx)
 {
-    if (idx >= kSectionPoolCap)
-    {
-        // OOB handle index — caller minted the handle outside the
-        // section pool or a Win32 thunk corrupted it before reaching
-        // us. Log once per call site so the first occurrence pins
-        // the buggy caller, then drop the retain so the section
-        // pool doesn't run a phantom refcount.
-        KLOG_ONCE_WARN_V("subsystems/win32/section", "SectionRetain idx out of range", idx);
-        return;
-    }
-    Section& s = g_pool[idx];
-    duetos::sync::SpinLockGuard guard(g_section_lock);
-    // refcount == 0 with in_use set means the slot is CLAIMED but still
-    // being constructed by SectionCreate — not a live section yet.
-    if (!s.in_use || s.refcount == 0)
-        return;
-    ++s.refcount;
+    (void)SectionRetain(LiveKeyForSlot(idx));
 }
 
 void SectionRelease(u32 idx)
 {
-    if (idx >= kSectionPoolCap)
-    {
-        KLOG_ONCE_WARN_V("subsystems/win32/section", "SectionRelease idx out of range", idx);
-        return;
-    }
-    Section& s = g_pool[idx];
-
-    // Decide the teardown under the lock, but PERFORM it outside.
-    //
-    // Deciding under the lock is what makes the double free impossible:
-    // exactly one caller can observe the 1 -> 0 transition, and it
-    // clears `in_use` before releasing, so a concurrent release sees a
-    // free slot and bails. Performing it outside keeps up to
-    // kSectionMaxBytes/4K == 1024 FreeFrame calls off an IRQs-disabled
-    // spinlock hold.
-    mm::PhysAddr* doomed_frames = nullptr;
-    u32 doomed_pages = 0;
-    {
-        duetos::sync::SpinLockGuard guard(g_section_lock);
-        if (!s.in_use || s.refcount == 0)
-            return;
-        --s.refcount;
-        if (s.refcount != 0)
-            return;
-        // Last reference: take exclusive ownership of the frames table
-        // and retire the slot in the same critical section.
-        doomed_frames = s.frames;
-        doomed_pages = s.num_pages;
-        s.frames = nullptr;
-        s.in_use = false;
-        s.num_pages = 0;
-        s.page_protect = 0;
-        s.has_writable_view = false;
-        s.has_executable_view = false;
-    }
-
-    if (doomed_frames != nullptr)
-    {
-        for (u32 i = 0; i < doomed_pages; ++i)
-        {
-            if (doomed_frames[i] != mm::kNullFrame)
-                mm::FreeFrame(doomed_frames[i]);
-        }
-        mm::KFree(doomed_frames);
-    }
+    SectionRelease(LiveKeyForSlot(idx));
 }
 
 bool SectionMap(u32 idx, mm::AddressSpace* target_as, u64 base_va, u32 view_protect)
 {
-    if (idx >= kSectionPoolCap || target_as == nullptr || (base_va & 0xFFF) != 0)
-    {
-        KLOG_WARN_V("subsystems/win32/section",
-                    "SectionMap: bad args (idx oor / null AS / unaligned VA); base_va=", base_va);
-        return false;
-    }
-    Section& s = g_pool[idx];
-    if (!s.in_use)
-    {
-        KLOG_WARN_V("subsystems/win32/section", "SectionMap: idx not in use, idx=", static_cast<u64>(idx));
-        return false;
-    }
-    // SEC-004
-    // W^X across the whole section's view history. ProtectToPteFlags downgrades
-    // PAGE_EXECUTE_READWRITE to RW+NX for a single view, but it cannot see the
-    // other views of the same frames. Reject a view that would grant EXECUTE on
-    // a section that has ever had a writable view, and vice versa, so the
-    // write-here / execute-there aliasing bypass can never form.
-    constexpr u32 PAGE_READWRITE = 0x04;
-    constexpr u32 PAGE_EXECUTE = 0x10;
-    constexpr u32 PAGE_EXECUTE_READ = 0x20;
-    constexpr u32 PAGE_EXECUTE_READWRITE = 0x40;
-    constexpr u32 PAGE_WRITECOPY = 0x08;
-    const bool wants_write = (view_protect == PAGE_READWRITE) || (view_protect == PAGE_WRITECOPY) ||
-                             (view_protect == PAGE_EXECUTE_READWRITE);
-    const bool wants_exec = (view_protect == PAGE_EXECUTE) || (view_protect == PAGE_EXECUTE_READ) ||
-                            (view_protect == PAGE_EXECUTE_READWRITE);
-    if ((wants_exec && s.has_writable_view) || (wants_write && s.has_executable_view))
-    {
-        KLOG_WARN_V("subsystems/win32/section",
-                    "SectionMap: W^X — refusing aliased writable+executable view; view_protect=",
-                    static_cast<u64>(view_protect));
-        return false;
-    }
-    const u64 flags = ProtectToPteFlags(view_protect);
-    for (u32 i = 0; i < s.num_pages; ++i)
-    {
-        const u64 va = base_va + static_cast<u64>(i) * mm::kPageSize;
-        if (!mm::AddressSpaceMapBorrowedPage(target_as, va, s.frames[i], flags))
-        {
-            // PTE conflict — roll back the partial map so the AS
-            // doesn't end up with a half-installed view.
-            KLOG_ERROR_2V("subsystems/win32/section", "SectionMap: MapBorrowedPage PTE conflict — rolling back partial",
-                          "page", static_cast<u64>(i), "va", va);
-            for (u32 j = 0; j < i; ++j)
-            {
-                mm::AddressSpaceUnmapBorrowedPage(target_as, base_va + static_cast<u64>(j) * mm::kPageSize);
-            }
-            return false;
-        }
-    }
-    // SEC-004
-    // Record this view's W/X disposition only after the whole map committed,
-    // so a rolled-back partial map never poisons the section's history. The
-    // installed PTE is RW+NX whenever ProtectToPteFlags saw a writable request
-    // (incl. the RWX downgrade), so track has_writable_view off wants_write.
-    if (wants_write)
-        s.has_writable_view = true;
-    if (wants_exec && !wants_write)
-        s.has_executable_view = true;
-    return true;
+    return MapSection(LiveKeyForSlot(idx), target_as, base_va, view_protect, false);
 }
 
 bool SectionUnmap(u32 idx, mm::AddressSpace* target_as, u64 base_va)
 {
-    if (idx >= kSectionPoolCap || target_as == nullptr || (base_va & 0xFFF) != 0)
-        return false;
-    Section& s = g_pool[idx];
-    if (!s.in_use)
-        return false;
-    bool all_mapped = true;
-    for (u32 i = 0; i < s.num_pages; ++i)
-    {
-        const u64 va = base_va + static_cast<u64>(i) * mm::kPageSize;
-        if (!mm::AddressSpaceUnmapBorrowedPage(target_as, va))
-            all_mapped = false;
-    }
-    return all_mapped;
+    return UnmapSection(LiveKeyForSlot(idx), target_as, base_va, false);
 }
 
 u64 SectionViewSize(u32 idx)
 {
-    if (idx >= kSectionPoolCap)
-        return 0;
-    const Section& s = g_pool[idx];
-    if (!s.in_use)
-        return 0;
-    return static_cast<u64>(s.num_pages) * mm::kPageSize;
+    return SectionViewSize(LiveKeyForSlot(idx));
 }
 
 i32 SectionUnmapAtVa(mm::AddressSpace* target_as, u64 base_va)
 {
-    if (target_as == nullptr || (base_va & 0xFFF) != 0)
-        return -1;
-    const mm::PhysAddr first = mm::AddressSpaceProbePte(target_as, base_va);
-    if (first == mm::kNullFrame)
-        return -1;
-    for (u32 i = 0; i < kSectionPoolCap; ++i)
+    if (target_as == nullptr || (base_va & (mm::kPageSize - 1)) != 0)
     {
-        const Section& s = g_pool[i];
-        if (!s.in_use || s.num_pages == 0 || s.frames == nullptr)
-            continue;
-        if (s.frames[0] != first)
-            continue;
-        SectionUnmap(i, target_as, base_va);
-        return static_cast<i32>(i);
+        return -1;
+    }
+    for (u32 slot = 0; slot < kSectionPoolCap; ++slot)
+    {
+        const SectionKey key = LiveKeyForSlot(slot);
+        if (SectionKeyIsValid(key) && UnmapSection(key, target_as, base_va, false))
+        {
+            return static_cast<i32>(slot);
+        }
     }
     return -1;
 }
 
 i32 LookupSectionHandle(core::Process* caller, u64 handle)
 {
-    if (caller == nullptr)
+    if (caller == nullptr || handle < core::Process::kWin32SectionBase)
+    {
         return -1;
-    if (handle < core::Process::kWin32SectionBase)
-        return -1;
+    }
     const u64 slot = handle - core::Process::kWin32SectionBase;
-    if (slot >= core::Process::kWin32SectionCap)
+    if (slot >= core::Process::kWin32SectionCap || !caller->win32_section_handles[slot].in_use)
+    {
         return -1;
-    if (!caller->win32_section_handles[slot].in_use)
-        return -1;
+    }
     return static_cast<i32>(caller->win32_section_handles[slot].pool_index);
 }
 

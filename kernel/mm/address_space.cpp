@@ -49,6 +49,9 @@ namespace
 constexpr u64 kEntriesPerTable = 512;
 constexpr u64 kAddrMask = 0x000FFFFFFFFFF000ULL;
 constexpr u64 kKernelHalfFirstIndex = 256;
+// A consecutive 1024-page range spans at most three PTs, two PDs, and two
+// PDPTs, so seven prepared/retired intermediate frames are sufficient.
+constexpr u8 kMaxBorrowedRangePageTables = 7;
 
 // Lifetime counters — maintained inside the public release/create
 // paths. Plain globals because v0 has no AS allocator concurrency.
@@ -138,7 +141,7 @@ class AddressSpaceMutationGuard
 // structural lock has been released.
 struct PageTableReserve
 {
-    u64* tables[3]{};
+    u64* tables[kMaxBorrowedRangePageTables]{};
     u8 count{};
     u8 next{};
 };
@@ -159,7 +162,7 @@ void ReleasePageTableReserve(PageTableReserve& reserve)
 
 bool PreparePageTableReserve(PageTableReserve& reserve, u8 count)
 {
-    KASSERT(count <= 3, "mm/as", "page-table reserve exceeds x86_64 walk depth");
+    KASSERT(count <= kMaxBorrowedRangePageTables, "mm/as", "page-table reserve exceeds bounded transaction cap");
     for (u8 i = 0; i < count; ++i)
     {
         u64* table = AllocateTable();
@@ -181,6 +184,8 @@ u64* TakeReservedTable(PageTableReserve& reserve)
     ++reserve.next;
     return table;
 }
+
+u64* WalkToPteIn(u64* pml4, u64 virt, PageTableReserve* reserve);
 
 // Count how many intermediate tables are absent on the path to `virt`.
 // Caller holds regions_lock, so the count remains valid until commit while
@@ -217,6 +222,109 @@ u8 MissingTableCount(u64* pml4, u64 virt)
         PanicAs("AS walker hit a 2 MiB PS page", virt);
     }
     return 0;
+}
+
+// Validate that a consecutive borrowed range has no present leaves and count
+// the unique missing intermediate tables needed to commit it. The range is
+// consecutive, so every (PML4), (PML4,PDPT), and (PML4,PDPT,PD) key appears in
+// one contiguous run; remembering the preceding indices avoids counting a
+// missing parent once per page. Caller holds regions_lock and mutation_lock.
+bool PrepareBorrowedRangePlanLocked(u64* pml4, u64 virt, u64 count, u8& missing_tables)
+{
+    u64 previous_i4 = kEntriesPerTable;
+    u64 previous_i3 = kEntriesPerTable;
+    u64 previous_i2 = kEntriesPerTable;
+    bool pml4_present = false;
+    bool pdpt_entry_present = false;
+    u64* pdpt = nullptr;
+    u64* pd = nullptr;
+    missing_tables = 0;
+
+    for (u64 page = 0; page < count; ++page)
+    {
+        const u64 page_virt = virt + page * kPageSize;
+        const u64 i4 = IndexPml4(page_virt);
+        const u64 i3 = IndexPdpt(page_virt);
+        const u64 i2 = IndexPd(page_virt);
+
+        if (i4 != previous_i4)
+        {
+            previous_i4 = i4;
+            previous_i3 = kEntriesPerTable;
+            previous_i2 = kEntriesPerTable;
+            const u64 pml4_entry = pml4[i4];
+            pml4_present = (pml4_entry & kPagePresent) != 0;
+            if (!pml4_present)
+            {
+                ++missing_tables;
+                pdpt = nullptr;
+            }
+            else
+            {
+                pdpt = static_cast<u64*>(PhysToVirt(pml4_entry & kAddrMask));
+            }
+        }
+
+        if (i3 != previous_i3)
+        {
+            previous_i3 = i3;
+            previous_i2 = kEntriesPerTable;
+            if (!pml4_present)
+            {
+                ++missing_tables;
+                pdpt_entry_present = false;
+                pd = nullptr;
+            }
+            else
+            {
+                const u64 pdpt_entry = pdpt[i3];
+                if ((pdpt_entry & kPagePresent) != 0 && (pdpt_entry & kPageHugeOrPat) != 0)
+                {
+                    PanicAs("borrowed-range plan hit a 1 GiB PS page", page_virt);
+                }
+                pdpt_entry_present = (pdpt_entry & kPagePresent) != 0;
+                if (!pdpt_entry_present)
+                {
+                    ++missing_tables;
+                    pd = nullptr;
+                }
+                else
+                {
+                    pd = static_cast<u64*>(PhysToVirt(pdpt_entry & kAddrMask));
+                }
+            }
+        }
+
+        if (i2 != previous_i2)
+        {
+            previous_i2 = i2;
+            if (!pml4_present || !pdpt_entry_present)
+            {
+                ++missing_tables;
+            }
+            else
+            {
+                const u64 pd_entry = pd[i2];
+                if ((pd_entry & kPagePresent) != 0 && (pd_entry & kPageHugeOrPat) != 0)
+                {
+                    PanicAs("borrowed-range plan hit a 2 MiB PS page", page_virt);
+                }
+                if ((pd_entry & kPagePresent) == 0)
+                {
+                    ++missing_tables;
+                }
+            }
+        }
+
+        u64* existing = WalkToPteIn(pml4, page_virt, nullptr);
+        if (existing != nullptr && (*existing & kPagePresent) != 0)
+        {
+            return false;
+        }
+    }
+
+    KASSERT(missing_tables <= kMaxBorrowedRangePageTables, "mm/as", "borrowed-range plan exceeded page-table bound");
+    return true;
 }
 
 // Walk to a leaf PTE without doing slow work. When `reserve` is null this
@@ -315,6 +423,44 @@ void ReleaseRetiredPageTables(RetiredPageTables& retired)
         retired.frames[i] = kNullFrame;
     }
     retired.count = 0;
+}
+
+struct RetiredPageTableRange
+{
+    PhysAddr frames[kMaxBorrowedRangePageTables]{};
+    u8 count{};
+};
+
+void AppendRetiredRangeTables(RetiredPageTableRange& range, const RetiredPageTables& path)
+{
+    for (u8 i = 0; i < path.count; ++i)
+    {
+        bool duplicate = false;
+        for (u8 j = 0; j < range.count; ++j)
+        {
+            if (range.frames[j] == path.frames[i])
+            {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate)
+        {
+            continue;
+        }
+        KASSERT(range.count < kMaxBorrowedRangePageTables, "mm/as", "borrowed-range prune exceeded page-table bound");
+        range.frames[range.count++] = path.frames[i];
+    }
+}
+
+void ReleaseRetiredRangeTables(RetiredPageTableRange& range)
+{
+    for (u8 i = 0; i < range.count; ++i)
+    {
+        FreeFrame(range.frames[i]);
+        range.frames[i] = kNullFrame;
+    }
+    range.count = 0;
 }
 
 // Leaf PTE at `virt` has already been cleared. Detach each now-empty
@@ -779,74 +925,82 @@ bool AddressSpaceUnmapUserPage(AddressSpace* as, u64 virt)
     return true;
 }
 
-bool AddressSpaceMapBorrowedPage(AddressSpace* as, u64 virt, PhysAddr frame, u64 flags)
+bool AddressSpaceMapBorrowedRange(AddressSpace* as, u64 virt, const PhysAddr* frames, u64 count, u64 flags)
 {
     if (as == nullptr)
     {
-        PanicAs("AddressSpaceMapBorrowedPage with null AS", virt);
+        PanicAs("AddressSpaceMapBorrowedRange with null AS", virt);
     }
     if ((virt & 0xFFF) != 0)
     {
-        PanicAs("AddressSpaceMapBorrowedPage: unaligned virt", virt);
+        PanicAs("AddressSpaceMapBorrowedRange: unaligned virt", virt);
     }
-    if ((frame & 0xFFF) != 0)
+    if (frames == nullptr || count == 0 || count > kMaxBorrowedRangePages)
     {
-        PanicAs("AddressSpaceMapBorrowedPage: unaligned phys", frame);
+        return false;
     }
-    constexpr u64 kUserMax = 0x00007FFFFFFFFFFFULL;
-    if (virt > kUserMax)
+    constexpr u64 kUserLastPage = 0x00007FFFFFFFF000ULL;
+    const u64 last_page_offset = (count - 1) * kPageSize;
+    if (virt > kUserLastPage || last_page_offset > kUserLastPage - virt)
     {
-        PanicAs("AddressSpaceMapBorrowedPage: virt outside canonical low half", virt);
+        PanicAs("AddressSpaceMapBorrowedRange: range outside canonical low half", virt);
     }
     if ((flags & kPageUser) == 0)
     {
-        PanicAs("AddressSpaceMapBorrowedPage: flags missing kPageUser", flags);
+        PanicAs("AddressSpaceMapBorrowedRange: flags missing kPageUser", flags);
     }
     if ((flags & kPageWritable) != 0 && (flags & kPageNoExecute) == 0)
     {
-        PanicAs("AddressSpaceMapBorrowedPage: W^X violation", flags);
+        PanicAs("AddressSpaceMapBorrowedRange: W^X violation", flags);
     }
     if ((flags & kPageGlobal) != 0)
     {
-        PanicAs("AddressSpaceMapBorrowedPage: kPageGlobal on user page", flags);
+        PanicAs("AddressSpaceMapBorrowedRange: kPageGlobal on user page", flags);
     }
+    for (u64 page = 0; page < count; ++page)
+    {
+        if ((frames[page] & 0xFFF) != 0)
+        {
+            PanicAs("AddressSpaceMapBorrowedRange: unaligned phys", frames[page]);
+        }
+    }
+
     AddressSpaceMutationGuard mutation(*as);
-    bool already_mapped = false;
     u8 missing_tables = 0;
     {
         sync::SpinLockGuard guard(as->regions_lock);
-        u64* existing = WalkToPteIn(as->pml4_virt, virt, nullptr);
-        already_mapped = existing != nullptr && (*existing & kPagePresent) != 0;
-        if (!already_mapped)
+        if (!PrepareBorrowedRangePlanLocked(as->pml4_virt, virt, count, missing_tables))
         {
-            missing_tables = MissingTableCount(as->pml4_virt, virt);
+            return false;
         }
-    }
-    if (already_mapped)
-    {
-        return false;
     }
 
     PageTableReserve reserve{};
     if (!PreparePageTableReserve(reserve, missing_tables))
     {
-        KLOG_WARN_V("mm/as", "MapBorrowedPage: frame pool dry building page tables", virt);
+        KLOG_WARN_V("mm/as", "MapBorrowedRange: frame pool dry building page tables", virt);
         return false;
     }
     {
         sync::SpinLockGuard guard(as->regions_lock);
-        u64* pte = WalkToPteIn(as->pml4_virt, virt, &reserve);
-        KASSERT(pte != nullptr, "mm/as", "prepared borrowed-map transaction produced no leaf PTE");
-        KASSERT((*pte & kPagePresent) == 0, "mm/as", "borrowed-map transaction raced an existing PTE");
-        *pte = (frame & kAddrMask) | (flags | kPagePresent);
+        for (u64 page = 0; page < count; ++page)
+        {
+            const u64 page_virt = virt + page * kPageSize;
+            u64* pte = WalkToPteIn(as->pml4_virt, page_virt, &reserve);
+            KASSERT(pte != nullptr, "mm/as", "prepared borrowed-range transaction produced no leaf PTE");
+            KASSERT((*pte & kPagePresent) == 0, "mm/as", "borrowed-range transaction raced an existing PTE");
+            *pte = (frames[page] & kAddrMask) | (flags | kPagePresent);
+        }
     }
-    KASSERT(reserve.next == reserve.count, "mm/as", "borrowed-map transaction left prepared tables unused");
+    KASSERT(reserve.next == reserve.count, "mm/as", "borrowed-range transaction left prepared tables unused");
     ReleasePageTableReserve(reserve);
-    if (AddressSpaceCurrent() == as)
-    {
-        Invlpg(virt);
-    }
+    TlbShootdownRange(as, virt, count * kPageSize);
     return true;
+}
+
+bool AddressSpaceMapBorrowedPage(AddressSpace* as, u64 virt, PhysAddr frame, u64 flags)
+{
+    return AddressSpaceMapBorrowedRange(as, virt, &frame, 1, flags);
 }
 
 PhysAddr AddressSpaceProbePte(const AddressSpace* as, u64 virt)
@@ -991,6 +1145,22 @@ bool AddressSpaceProtectUserPage(AddressSpace* as, u64 virt, u64 new_flags)
     bool refused_write_to_exec = false;
     {
         sync::SpinLockGuard guard(as->regions_lock);
+        bool owned_mapping = false;
+        for (u16 i = 0; i < as->region_count; ++i)
+        {
+            if (as->regions[i].vaddr == virt)
+            {
+                owned_mapping = true;
+                break;
+            }
+        }
+        if (!owned_mapping)
+        {
+            // A present leaf that is absent from the owned-frame ledger is a
+            // borrowed mapping. Its owner must serialize protection with its
+            // own frame/view lifetime transaction.
+            return false;
+        }
         u64* pte = WalkToPteIn(as->pml4_virt, virt, nullptr);
         if (pte == nullptr || (*pte & kPagePresent) == 0)
             return false;
@@ -1017,7 +1187,9 @@ bool AddressSpaceProtectUserPage(AddressSpace* as, u64 virt, u64 new_flags)
     return true;
 }
 
-bool AddressSpaceUnmapBorrowedPage(AddressSpace* as, u64 virt)
+namespace
+{
+bool UnmapBorrowedRange(AddressSpace* as, u64 virt, const PhysAddr* expected_frames, u64 count, bool require_expected)
 {
     if (as == nullptr)
     {
@@ -1025,28 +1197,73 @@ bool AddressSpaceUnmapBorrowedPage(AddressSpace* as, u64 virt)
     }
     if ((virt & 0xFFF) != 0)
     {
-        PanicAs("AddressSpaceUnmapBorrowedPage: unaligned virt", virt);
+        PanicAs("AddressSpaceUnmapBorrowedRange: unaligned virt", virt);
     }
-    constexpr u64 kUserMax = 0x00007FFFFFFFFFFFULL;
-    if (virt > kUserMax)
+    if (count == 0 || count > kMaxBorrowedRangePages || (require_expected && expected_frames == nullptr))
     {
-        PanicAs("AddressSpaceUnmapBorrowedPage: virt outside canonical low half", virt);
+        return false;
     }
+    constexpr u64 kUserLastPage = 0x00007FFFFFFFF000ULL;
+    const u64 last_page_offset = (count - 1) * kPageSize;
+    if (virt > kUserLastPage || last_page_offset > kUserLastPage - virt)
+    {
+        PanicAs("AddressSpaceUnmapBorrowedRange: range outside canonical low half", virt);
+    }
+    if (require_expected)
+    {
+        for (u64 page = 0; page < count; ++page)
+        {
+            if ((expected_frames[page] & 0xFFF) != 0)
+            {
+                PanicAs("AddressSpaceUnmapBorrowedRange: unaligned expected phys", expected_frames[page]);
+            }
+        }
+    }
+
     AddressSpaceMutationGuard mutation(*as);
-    RetiredPageTables retired_tables{};
+    RetiredPageTableRange retired_tables{};
     {
         sync::SpinLockGuard guard(as->regions_lock);
-        u64* pte = WalkToPteIn(as->pml4_virt, virt, nullptr);
-        if (pte == nullptr || (*pte & kPagePresent) == 0)
+        // Validation pass first: failure cannot leave a partially-unmapped
+        // view. The outer mutation lock keeps the checked leaves stable.
+        for (u64 page = 0; page < count; ++page)
         {
-            return false;
+            const u64 page_virt = virt + page * kPageSize;
+            u64* pte = WalkToPteIn(as->pml4_virt, page_virt, nullptr);
+            if (pte == nullptr || (*pte & kPagePresent) == 0 ||
+                (require_expected && (*pte & kAddrMask) != expected_frames[page]))
+            {
+                return false;
+            }
         }
-        *pte = 0;
-        retired_tables = PruneEmptyTablePathLocked(as, virt);
+        for (u64 page = 0; page < count; ++page)
+        {
+            u64* pte = WalkToPteIn(as->pml4_virt, virt + page * kPageSize, nullptr);
+            KASSERT(pte != nullptr, "mm/as", "validated borrowed-range PTE disappeared during commit");
+            *pte = 0;
+        }
+        // Prune after every leaf is clear. This lets a PT/PD shared by pages
+        // in the same range retire exactly once, after its last leaf vanished.
+        for (u64 page = 0; page < count; ++page)
+        {
+            const RetiredPageTables path = PruneEmptyTablePathLocked(as, virt + page * kPageSize);
+            AppendRetiredRangeTables(retired_tables, path);
+        }
     }
-    TlbShootdownAddr(as, virt);
-    ReleaseRetiredPageTables(retired_tables);
+    TlbShootdownRange(as, virt, count * kPageSize);
+    ReleaseRetiredRangeTables(retired_tables);
     return true;
+}
+} // namespace
+
+bool AddressSpaceUnmapBorrowedRangeExpected(AddressSpace* as, u64 virt, const PhysAddr* expected_frames, u64 count)
+{
+    return UnmapBorrowedRange(as, virt, expected_frames, count, true);
+}
+
+bool AddressSpaceUnmapBorrowedPage(AddressSpace* as, u64 virt)
+{
+    return UnmapBorrowedRange(as, virt, nullptr, 1, false);
 }
 
 void AddressSpaceActivate(AddressSpace* as)
@@ -1364,6 +1581,54 @@ void AddressSpaceSelfTest()
         AddressSpaceWriteUserMemory(a, kTestVa + 37, write_probe, sizeof(write_probe)))
     {
         PanicAs("self-test: transaction-copy bypassed read-only PTE", kTestVa);
+    }
+
+    // Exercise a borrowed transaction across a PDPT boundary. A mismatched
+    // expected-frame vector must leave all three leaves intact, and the
+    // generic owned-page protect API must refuse to mutate the borrowed view.
+    constexpr u64 kBorrowedVa = 0x000000007FFFF000ULL;
+    PhysAddr borrowed_frames[3]{};
+    for (u64 page = 0; page < 3; ++page)
+    {
+        auto borrowed_r = AllocateFrame();
+        if (!borrowed_r)
+        {
+            PanicAs("self-test: borrowed-range AllocateFrame failed", page);
+        }
+        borrowed_frames[page] = borrowed_r.value();
+    }
+    if (!AddressSpaceMapBorrowedRange(a, kBorrowedVa, borrowed_frames, 3,
+                                      kPagePresent | kPageWritable | kPageUser | kPageNoExecute))
+    {
+        PanicAs("self-test: borrowed-range map refused test transaction", kBorrowedVa);
+    }
+    if (AddressSpaceProtectUserPage(a, kBorrowedVa, kPagePresent | kPageUser | kPageNoExecute))
+    {
+        PanicAs("self-test: owned-page protect accepted borrowed mapping", kBorrowedVa);
+    }
+    const PhysAddr wrong_frames[3] = {borrowed_frames[1], borrowed_frames[0], borrowed_frames[2]};
+    if (AddressSpaceUnmapBorrowedRangeExpected(a, kBorrowedVa, wrong_frames, 3))
+    {
+        PanicAs("self-test: borrowed-range unmap accepted mismatched frame vector", kBorrowedVa);
+    }
+    for (u64 page = 0; page < 3; ++page)
+    {
+        if (AddressSpaceProbePte(a, kBorrowedVa + page * kPageSize) != borrowed_frames[page])
+        {
+            PanicAs("self-test: failed borrowed unmap partially cleared transaction", page);
+        }
+    }
+    if (!AddressSpaceUnmapBorrowedRangeExpected(a, kBorrowedVa, borrowed_frames, 3))
+    {
+        PanicAs("self-test: borrowed-range expected unmap failed", kBorrowedVa);
+    }
+    for (u64 page = 0; page < 3; ++page)
+    {
+        if (AddressSpaceProbePte(a, kBorrowedVa + page * kPageSize) != kNullFrame)
+        {
+            PanicAs("self-test: borrowed-range PTE survived unmap", page);
+        }
+        FreeFrame(borrowed_frames[page]);
     }
 
     // Deliberately NOT flipping CR3 here. kernel_main runs on the
