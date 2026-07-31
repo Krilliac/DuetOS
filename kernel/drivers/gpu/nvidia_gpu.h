@@ -145,13 +145,12 @@ inline constexpr u64 kGspWprAlign = 4096;             // every sub-region is pag
 inline constexpr u64 kGspBootArgsBytes = 4096;        // single boot-args page
 inline constexpr u64 kGspDefaultHeapBytes = 0x800000; // 8 MiB RM heap (open-gpu default class)
 
-/// RPC message ring. NVIDIA's GSP RPC is a pair of single-producer /
-/// single-consumer rings (command = host->GSP, message = GSP->host)
-/// in system memory, each a power-of-two count of fixed-size slots.
-/// `tx`/`rx` are the producer/consumer indices the two sides bump;
-/// they wrap modulo `slot_count`. This struct is the host-side
-/// bookkeeping view — the on-DMA layout is the slot array backed by
-/// `dma`.
+/// Host-side bounded ring model for a GSP command or message queue.
+/// The real GSP queue header/doorbell contract is deliberately not
+/// guessed here. This model only owns a power-of-two slot array and
+/// single-producer/single-consumer indices; one slot remains unused so
+/// full and empty are unambiguous. `dma` is the backing storage when a
+/// later hardware path connects it to a real GSP queue.
 struct GspRpcRing
 {
     mm::DmaBuffer dma; // backing host-system DMA region (Dma32)
@@ -201,11 +200,34 @@ inline constexpr u32 kGspRpcFnAllocChannel = 0x0000'1001u; // PFIFO channel allo
 /// checksum/length mismatch. Pure; no hardware. Unit-tested.
 ::duetos::core::Result<void> GspRpcDecode(const u8* slot, u32 slot_bytes, GspRpcHeader* out);
 
-/// Advance a ring index by one slot, wrapping at `slot_count`.
+/// Advance a valid ring index by one slot, wrapping at `slot_count`.
 /// Split out so the wrap math is exercised by the self-test
 /// independently of any ring buffer being live. `InvalidArgument`
-/// when `slot_count` is not a non-zero power of two.
+/// when `index` is out of range or `slot_count` is not a non-zero
+/// power of two.
 ::duetos::core::Result<u32> GspRingAdvance(u32 index, u32 slot_count);
+
+/// Validate and clear a host-side ring model. `dma.virt` and
+/// `dma.bytes` may refer to a real DMA allocation or a caller-owned
+/// test buffer; no device is contacted. `slot_count` must be at least
+/// two and a power of two, and `dma.bytes` must cover every slot.
+::duetos::core::Result<void> GspRpcRingReset(GspRpcRing* ring);
+
+/// Enqueue one encoded message. The producer index advances only
+/// after the complete slot is written and synchronized for a device.
+/// `Busy` means the bounded ring is full; the slot remains untouched.
+/// This is a generic host model, not a claim about an undocumented
+/// NVIDIA doorbell or ownership protocol.
+::duetos::core::Result<void> GspRpcRingEnqueue(GspRpcRing* ring, u32 function, const u8* payload, u32 payload_len,
+                                               u32 sequence);
+
+/// Dequeue one message into a caller-owned payload buffer. The
+/// consumer index advances only after decode, checksum, and output
+/// capacity checks succeed. `NotReady` means empty, `BufferTooSmall`
+/// leaves the message pending for a retry, and `Corrupt` leaves the
+/// offending slot pending for diagnosis or reset.
+::duetos::core::Result<void> GspRpcRingDequeue(GspRpcRing* ring, GspRpcHeader* out, u8* payload, u32 payload_capacity,
+                                               u32* payload_len);
 
 /// Compute the WPR layout for a firmware image of `fw_image_size`
 /// bytes (RM ELF) needing `radix3_size` bytes of page tables, packed
