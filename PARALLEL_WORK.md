@@ -531,10 +531,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T05:17:53Z
 - **Status**: COMPLETED @ 2026-07-31T05:40:34Z
 
-### [ACTIVE] drsh-concurrent-access-boot
+### [DONE] drsh-concurrent-access-boot
 - **Session**: `Nathan-655`
 - **Branch**: `claude/drsh-agent-host`
 - **Files**: `kernel/core/boot_bringup.cpp`
 - **Description**: Enable external peer policy only for the explicit DRSH test autostart fixture
 - **Claimed**: 2026-07-31T05:23:38Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-31T05:41:09Z
