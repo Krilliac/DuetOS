@@ -130,6 +130,11 @@ inline constexpr u16 kInitialRegionCapacity = 16;
 inline constexpr u64 kFrameBudgetSandbox = 8;
 inline constexpr u64 kFrameBudgetTrusted = kMaxUserVmRegionsPerAs;
 
+// Borrowed mappings are committed as one bounded page-table transaction.
+// A 1024-page cap keeps the IRQ-disabled structural commit finite while
+// covering the largest v0 Win32 Section (4 MiB).
+inline constexpr u64 kMaxBorrowedRangePages = 1024;
+
 struct AddressSpaceUserRegion
 {
     u64 vaddr;      // start of a 4 KiB user page
@@ -271,6 +276,14 @@ bool AddressSpaceUnmapUserPage(AddressSpace* as, u64 virt);
 /// installed via this API — there is no kernel-side record.
 bool AddressSpaceMapBorrowedPage(AddressSpace* as, u64 virt, PhysAddr frame, u64 flags);
 
+/// Atomically install `count` consecutive borrowed mappings beginning at
+/// `virt`. Every leaf PTE and every required intermediate page table is
+/// validated/prepared before the bounded structural commit. On false, no
+/// leaf PTE from the range has been installed. `frames` must contain `count`
+/// page-aligned physical frames and `count` must be in
+/// [1, kMaxBorrowedRangePages].
+bool AddressSpaceMapBorrowedRange(AddressSpace* as, u64 virt, const PhysAddr* frames, u64 count, u64 flags);
+
 /// Read the frame backing `virt` in `as` by walking the page
 /// tables directly — independent of the regions table. Used
 /// to identify section views (which install borrowed PTEs not
@@ -289,13 +302,23 @@ PhysAddr AddressSpaceProbePte(const AddressSpace* as, u64 virt);
 /// before the caller may release or reuse the borrowed frame.
 bool AddressSpaceUnmapBorrowedPage(AddressSpace* as, u64 virt);
 
+/// Atomically clear `count` consecutive borrowed mappings only when every
+/// present PTE still names the corresponding frame in `expected_frames`.
+/// A mismatch, missing PTE, or invalid count returns false without clearing
+/// any PTE. The function never frees the borrowed frames; after it returns
+/// true, the range-wide TLB shootdown has completed and the owner may release
+/// or reuse them.
+bool AddressSpaceUnmapBorrowedRangeExpected(AddressSpace* as, u64 virt, const PhysAddr* expected_frames, u64 count);
+
 /// Rewrite the leaf-PTE flag bits at `virt` in `as` to
 /// `new_flags` (the same bit set MapUserPage / MapBorrowedPage
 /// take — kPagePresent | kPageUser | kPageWritable | kPageNoExecute
 /// in any combination, with the same W^X invariant). Preserves
 /// the backing frame; only the protection bits change. Returns
-/// true if the page was present and the PTE was rewritten,
-/// false if `virt` is unmapped (no PTE to mutate).
+/// true if the page is owned by this AS, present, and the PTE was rewritten;
+/// false if `virt` is unmapped or is a borrowed mapping owned by another
+/// subsystem. Borrowed mappings must be protected through their owner's
+/// transaction so its frame and W^X ledgers cannot diverge from the PTE.
 ///
 /// TLB invalidation is broadcast to every CPU currently using `as`
 /// before the mutation transaction completes.

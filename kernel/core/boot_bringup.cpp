@@ -360,6 +360,7 @@
 #include "subsystems/win32/custom_selftest.h"
 #include "subsystems/win32/heap_selftest.h"
 #include "subsystems/win32/job_syscall.h"
+#include "subsystems/win32/section.h"
 #include "subsystems/win32/vmap_selftest.h"
 #include "subsystems/win32/gdi_objects.h"
 #include "subsystems/win32/nt_coverage.h"
@@ -1145,6 +1146,12 @@ void BootBringupMemPaging()
                                                   duetos::core::ProcessHandleLifetimeSelfTest();
                                                   return duetos::core::Result<void>{};
                                               });
+        duetos::core::InitcallRegisterOrPanic(duetos::core::Phase::Heap, "job-handle-lifetime-selftest",
+                                              []()
+                                              {
+                                                  duetos::subsystems::win32::JobHandleLifetimeSelfTest();
+                                                  return duetos::core::Result<void>{};
+                                              });
         duetos::core::InitcallRegisterOrPanic(duetos::core::Phase::Heap, "job-owner-exit-selftest",
                                               []()
                                               {
@@ -1862,6 +1869,12 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
                                               []()
                                               {
                                                   duetos::mm::AddressSpaceSelfTest();
+                                                  return duetos::core::Result<void>{};
+                                              });
+        duetos::core::InitcallRegisterOrPanic(duetos::core::Phase::Sched, "section-lifetime-selftest",
+                                              []()
+                                              {
+                                                  duetos::subsystems::win32::section::SectionLifetimeSelfTest();
                                                   return duetos::core::Result<void>{};
                                               });
         // Phase::Sched (plan A1-followup, 2026-04-28). RwLock state-
