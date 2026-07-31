@@ -786,3 +786,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Synchronize PE32 file-handle comments with opaque generation-tagged ABI
 - **Claimed**: 2026-07-31T16:19:59Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] win32-section-userland-type
+- **Session**: `Nathan-1762`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `userland/libs/ntdll/ntdll_info.c`
+- **Description**: Recognize opaque generation-tagged Section handles in NtQueryObject
+- **Claimed**: 2026-07-31T16:23:53Z
+- **Status**: IN PROGRESS
