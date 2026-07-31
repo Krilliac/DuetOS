@@ -3,6 +3,7 @@
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
 #include "debug/probes.h"
+#include "drivers/gpu/intel_gpu.h"
 #include "drivers/video/blend_math.h"
 #include "drivers/video/font8x8.h"
 #include "drivers/video/render_stats.h"
@@ -174,6 +175,23 @@ inline WriteTarget GetWriteTarget()
         return {reinterpret_cast<u8*>(g_shadow_base), g_shadow_pitch};
     }
     return {reinterpret_cast<u8*>(g_info.virt), g_info.pitch};
+}
+
+bool TryIntelComposeFill(u32 x, u32 y, u32 width, u32 height, u32 rgb)
+{
+    // The firmware framebuffer may belong to any display backend and its
+    // physical ownership is not described by the v0 video contract. Only
+    // accelerate the compositor's own contiguous shadow surface; the normal
+    // CPU write remains the authoritative fallback for direct/live paths.
+    if (!g_compose_active || g_shadow_base == nullptr || g_shadow_phys == 0 || g_shadow_frames == 0)
+        return false;
+
+    const ::duetos::drivers::gpu::intel::BltSurfaceDescriptor surface{
+        g_shadow_phys,
+        g_shadow_base,
+        {g_shadow_frames * mm::kPageSize, g_info.width, g_info.height, g_shadow_pitch, 32},
+    };
+    return ::duetos::drivers::gpu::intel::IntelBltColorFill(surface, x, y, width, height, rgb);
 }
 
 // Walk the Multiboot2 tag list for tag 8. Returns a pointer into the
@@ -1036,6 +1054,12 @@ void FramebufferFillRect(u32 x, u32 y, u32 w, u32 h, u32 rgb)
     const u32 x_end = (x + w > g_info.width) ? g_info.width : x + w;
     const u32 y_end = (y + h > g_info.height) ? g_info.height : y + h;
 
+    if (TryIntelComposeFill(x, y, x_end - x, y_end - y, rgb))
+    {
+        MarkDamage(x, y, x_end - x, y_end - y);
+        return;
+    }
+
     const WriteTarget wt = GetWriteTarget();
     for (u32 yi = y; yi < y_end; ++yi)
     {
@@ -1061,6 +1085,10 @@ void FramebufferBlit(u32 dst_x, u32 dst_y, const u32* src, u32 src_w, u32 src_h,
     const u32 x_end = (dst_x + src_w > g_info.width) ? g_info.width : dst_x + src_w;
     const u32 y_end = (dst_y + src_h > g_info.height) ? g_info.height : dst_y + src_h;
 
+    // BitBlt sources arrive as arbitrary kernel buffers (the Win32 window
+    // pool is not a published physically-contiguous GPU surface), so this
+    // slice deliberately keeps the existing CPU copy here. The fill path
+    // above is the only operation with a complete ownership descriptor.
     const WriteTarget wt = GetWriteTarget();
     for (u32 yi = dst_y; yi < y_end; ++yi)
     {

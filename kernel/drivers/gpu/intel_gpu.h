@@ -1,6 +1,7 @@
 #pragma once
 
 #include "drivers/gpu/gpu.h"
+#include "drivers/gpu/intel_gpu_cmds.h"
 #include "util/result.h"
 #include "util/types.h"
 
@@ -26,14 +27,16 @@
  *   - `Bringup(GpuInfo&)` — allocate a 4 KiB DMA-coherent ring
  *     buffer for the Render Command Streamer (RCS, MMIO 0x2000),
  *     program the ring head/tail/start, fire a NOOP MI command
- *     into the ring as a sanity check, and stop. The ring is
- *     left armed but no real workloads are submitted. The whole
- *     bring-up is gated behind a `kCapDriverIntelGpu` style
- *     check — current call sites do not yet enable real
- *     hardware ring submission, so the function exits early
- *     with `Unsupported` until the register pokes have been
- *     validated on real silicon. The skeleton shows the bring-
- *     up shape so a follow-up slice can fill them in safely.
+ *     into the ring as a sanity check, and stop. The ring is left
+ *     armed; the only workload path below is gated behind the
+ *     offscreen BLT proof and a kernel-owned surface descriptor.
+ *     Bring-up exits early with `Unsupported` until the register
+ *     pokes have been validated on real silicon.
+ *   - `IntelBltColorFill(...)` â€” after the offscreen BLT probe has
+ *     verified execution, synchronously fill a validated, kernel-owned
+ *     contiguous compose surface. The compositor keeps its CPU path as
+ *     the fallback; firmware scanout and unowned BitBlt sources remain
+ *     outside this slice.
  *
  * Out of scope (v0):
  *   - Modeset (DDI / display-pipe programming, EDID consumption
@@ -41,7 +44,8 @@
  *   - GTT page-table programming (we'd need a DRM-style virtual
  *     memory manager for guest GPU pointers).
  *   - Power management (RC6, freq scaling, package C-states).
- *   - Per-engine scheduler classes (RCS, BCS, VCS, VECS).
+ *   - Per-engine scheduler classes (RCS, BCS, VCS, VECS), direct
+ *     firmware-scanout writes, and source-surface BitBlt submission.
  *
  * Context: kernel. `Probe` is called from `gpu::RunVendorProbe`
  * during `GpuInit`. `Bringup` is gated.
@@ -49,6 +53,18 @@
 
 namespace duetos::drivers::gpu::intel
 {
+
+/// Kernel-owned linear surface handed to the BLT submission path. The
+/// physical run and CPU alias must describe the same allocation; callers
+/// must keep it alive until the synchronous operation returns. The first
+/// consumer is the compositor's physically-contiguous compose shadow, not
+/// the firmware scanout aperture.
+struct BltSurfaceDescriptor
+{
+    u64 phys;
+    void* cpu_virt;
+    BltSurfaceGeometry geometry;
+};
 
 // Shared BAR0 MMIO accessors used by every Intel GPU TU (intel_gpu,
 // intel_forcewake, …). Bounds-checked against the mapped BAR; a read
@@ -143,6 +159,14 @@ inline constexpr u32 kIntelMiStoreDwordImm = (0x20u << 23) | (4u - 2u); // opcod
 /// and retained for the boot. Safe to invoke from the boot
 /// self-test, the `gpu` shell command, or a CI smoke harness.
 u32 IntelRcsStoreImmProbe(u32 value);
+
+/// Synchronously submit one validated XY_COLOR_BLT into a kernel-owned
+/// surface. Returns true only after the RCS head catches the submitted tail
+/// and the destination has been ordered for CPU readers. The operation is
+/// gated by `IntelBltColorFillVerified()`, owns a serialized ring critical
+/// section, and returns false for invalid/unavailable/timed-out hardware so
+/// the caller can take its unchanged CPU fallback.
+bool IntelBltColorFill(const BltSurfaceDescriptor& surface, u32 x, u32 y, u32 width, u32 height, u32 argb);
 
 /// Run the v0 probe: liveness reads + arch decode. Populates
 /// `g.probe_reg`, `g.mmio_live`, and `g.arch` in-place. Safe even

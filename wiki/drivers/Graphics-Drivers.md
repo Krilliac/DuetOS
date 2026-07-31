@@ -125,6 +125,14 @@ Each tier-1 vendor now has a dedicated driver TU under
   greps for. QEMU's emulated `-vga std` / `-vga virtio` boots
   take the "skipped" path (vendor IDs 0x1234 / 0x1AF4, not
   Intel's 0x8086).
+  `IntelBltColorFillProbe` then verifies an offscreen `XY_COLOR_BLT`
+  read-back. Once that capability is true, `FramebufferFillRect` may
+  submit solid fills into the compositor's physically-contiguous compose
+  shadow through a cached GGTT mapping and serialized ring owner.
+  Geometry/format validation and the existing CPU loop remain the fallback.
+  The firmware scanout aperture is not touched, and `FramebufferBlit`
+  stays on CPU until its GDI source pool has an equivalent physical-surface
+  descriptor.
 - `amd_gpu.{h,cpp}` — GFX9+ driver that opportunistically maps
   BAR5 (the register file lives there, not at BAR0 like Intel),
   reads `mmGRBM_STATUS` / `mmRLC_GPM_STAT`, probes the

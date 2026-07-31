@@ -19,6 +19,7 @@
 #include "log/klog.h"
 #include "mm/dma.h"
 #include "mm/zone.h"
+#include "sync/spinlock.h"
 #include "time/timekeeper.h"
 
 namespace duetos::drivers::gpu::intel
@@ -51,6 +52,54 @@ mm::DmaBuffer g_rcs_scratch = {};
 // store-imm probe so it doesn't re-walk `gpu.cpp`'s GpuInfo
 // records each time. Set by Bringup; consulted by the probe.
 const GpuInfo* g_intel_info = nullptr;
+
+// One cached GGTT mapping is enough for the first consumer: the
+// compositor's compose shadow remains physically contiguous and stable for
+// the lifetime of the framebuffer mode. Mapping is intentionally owned by
+// this TU; callers never submit a raw GPU address or touch the ring.
+struct BltSurfaceMapping
+{
+    u64 phys;
+    u64 bytes;
+    u64 gpu_va;
+};
+
+constinit BltSurfaceMapping g_blt_surface_mapping{};
+constinit ::duetos::sync::SpinLock g_blt_submit_lock{};
+// A spinlock cannot span GGTT mapping or the hardware completion wait: the
+// former is a potentially long page loop and the latter may consume 100 ms.
+// Keep whole-operation serialization with a nonblocking ownership word so a
+// concurrent compositor caller falls straight back to its CPU implementation.
+volatile u32 g_blt_submission_busy = 0;
+
+bool TryClaimBltSubmission()
+{
+    u32 expected = 0;
+    return __atomic_compare_exchange_n(&g_blt_submission_busy, &expected, 1u, false, __ATOMIC_ACQUIRE,
+                                       __ATOMIC_RELAXED);
+}
+
+void ReleaseBltSubmission()
+{
+    __atomic_store_n(&g_blt_submission_busy, 0u, __ATOMIC_RELEASE);
+}
+
+struct BltSubmissionLease
+{
+    BltSubmissionLease() : held(TryClaimBltSubmission()) {}
+    ~BltSubmissionLease()
+    {
+        if (held)
+            ReleaseBltSubmission();
+    }
+
+    BltSubmissionLease(const BltSubmissionLease&) = delete;
+    BltSubmissionLease& operator=(const BltSubmissionLease&) = delete;
+    BltSubmissionLease(BltSubmissionLease&&) = delete;
+    BltSubmissionLease& operator=(BltSubmissionLease&&) = delete;
+
+    bool held;
+};
 
 u32 Mmio32(const GpuInfo& g, u64 offset)
 {
@@ -88,6 +137,102 @@ const char* FuseDisplayTag(u32 fuse)
     default:
         return "disp-unknown";
     }
+}
+
+bool BltSurfacePhysicalRangeValid(const BltSurfaceDescriptor& surface)
+{
+    if (surface.phys == 0 || (surface.phys & 0xFFFu) != 0 || surface.cpu_virt == nullptr)
+        return false;
+    if (surface.geometry.bytes == 0)
+        return false;
+    return surface.geometry.bytes - 1u <= ~0ull - surface.phys;
+}
+
+u64 MapBltSurface(const BltSurfaceDescriptor& surface)
+{
+    const u64 bytes = surface.geometry.bytes;
+    if (g_blt_surface_mapping.phys == surface.phys && g_blt_surface_mapping.bytes >= bytes)
+        return g_blt_surface_mapping.gpu_va;
+    if (bytes > ~0ull - (mm::kPageSize - 1u))
+        return 0;
+
+    const u64 pages = (bytes + (mm::kPageSize - 1u)) >> mm::kPageSizeLog2;
+    u64 first_va = 0;
+    for (u64 page = 0; page < pages; ++page)
+    {
+        const u64 page_offset = page << mm::kPageSizeLog2;
+        if (page_offset > ~0ull - surface.phys)
+            return 0;
+        const u64 gpu_va = GgttMapPage(*g_intel_info, surface.phys + page_offset);
+        if (gpu_va == 0)
+            return 0;
+        if (page == 0)
+            first_va = gpu_va;
+        else if (gpu_va != first_va + page_offset)
+            return 0;
+    }
+
+    g_blt_surface_mapping = {surface.phys, bytes, first_va};
+    return first_va;
+}
+
+bool QueueColorBlt(const GpuInfo& g, u64 dst_va, const BltSurfaceDescriptor& surface, u32 x, u32 y, u32 width,
+                   u32 height, u32 argb, u32* new_tail_out)
+{
+    constexpr u32 kBltDwords = 7;
+    constexpr u32 kFlushDwords = 3;
+    constexpr u32 kSubmitDwords = kBltDwords + kFlushDwords;
+
+    if (new_tail_out == nullptr)
+        return false;
+
+    const u32 cur_head = Mmio32(g, kIntelRcsHead);
+    const u32 cur_tail = Mmio32(g, kIntelRcsTail);
+    if (cur_head != cur_tail || cur_tail >= kIntelRingBytes || (cur_tail & 3u) != 0)
+        return false;
+
+    const ColorBltPacket blt = EncodeColorBlt(dst_va, surface.geometry.pitch_bytes, x, y, x + width, y + height, argb);
+    u32* ring = static_cast<u32*>(g_rcs_ring.virt);
+    const u64 ring_dwords = kIntelRingBytes / sizeof(u32);
+    u64 ofs = cur_tail / sizeof(u32);
+    if (ofs + kSubmitDwords > ring_dwords)
+    {
+        while (ofs < ring_dwords)
+            ring[ofs++] = kIntelMiNoop;
+        ofs = 0;
+    }
+    for (u32 i = 0; i < kBltDwords; ++i)
+        ring[ofs + i] = blt.dw[i];
+    ring[ofs + kBltDwords] = kMiFlushDw;
+    ring[ofs + kBltDwords + 1u] = 0;
+    ring[ofs + kBltDwords + 2u] = 0;
+
+    const u32 new_tail = static_cast<u32>(((ofs + kSubmitDwords) * sizeof(u32)) % kIntelRingBytes);
+    mm::DmaSyncForDevice(g_rcs_ring, 0, kIntelRingBytes);
+    Mmio32Write(g, kIntelRcsTail, new_tail);
+    *new_tail_out = new_tail;
+    return true;
+}
+
+bool PollColorBlt(const GpuInfo& g, u32 new_tail)
+{
+    constexpr u64 kTimeoutNs = 100ull * 1000ull * 1000ull;
+    constexpr u32 kIterCap = 1u << 20;
+
+    const u64 start_ns = ::duetos::time::MonotonicNs();
+    for (u32 iter = 0; iter < kIterCap; ++iter)
+    {
+        if (Mmio32(g, kIntelRcsHead) == new_tail)
+            return true;
+        asm volatile("pause" ::: "memory");
+        if (start_ns != 0)
+        {
+            const u64 now_ns = ::duetos::time::MonotonicNs();
+            if (now_ns > start_ns && (now_ns - start_ns) > kTimeoutNs)
+                break;
+        }
+    }
+    return false;
 }
 
 } // namespace
@@ -597,6 +742,42 @@ u32 IntelBltColorFillProbe(u32 argb)
 bool IntelBltColorFillVerified()
 {
     return g_blt_color_fill_verified;
+}
+
+bool IntelBltColorFill(const BltSurfaceDescriptor& surface, u32 x, u32 y, u32 width, u32 height, u32 argb)
+{
+    if (!g_blt_color_fill_verified || !g_brought_up || g_intel_info == nullptr || g_rcs_ring.virt == nullptr ||
+        !GgttReady() || !IsBltSurfaceGeometryValid(surface.geometry) ||
+        !IsBltRectValid(surface.geometry, x, y, width, height) || !BltSurfacePhysicalRangeValid(surface))
+    {
+        return false;
+    }
+
+    // Do not block a compositor or interrupt-context caller behind a
+    // hardware poll. A concurrent BLT gets the existing CPU fallback and
+    // the next compose can retry after the serialized owner leaves.
+    ::duetos::sync::SpinLockTryGuard guard{g_blt_submit_lock};
+    if (!guard.held())
+        return false;
+
+    const u64 dst_va = MapBltSurfaceLocked(surface);
+    if (dst_va == 0)
+        return false;
+
+    const mm::DmaBuffer cpu_view{static_cast<mm::PhysAddr>(surface.phys), surface.cpu_virt, surface.geometry.bytes,
+                                 mm::Zone::Normal};
+    mm::DmaSyncForDevice(cpu_view, 0, surface.geometry.bytes);
+    if (!SubmitColorBltLocked(*g_intel_info, dst_va, surface, x, y, width, height, argb))
+    {
+        // A timeout means the ring can no longer be trusted for this boot.
+        // Disable only this optional path; callers continue with their
+        // existing CPU implementation and no later operation is submitted.
+        g_blt_color_fill_verified = false;
+        KLOG_WARN("drivers/gpu/intel", "RCS blt-fill: serialized compose submission timed out; CPU fallback armed");
+        return false;
+    }
+    mm::DmaSyncForCpu(cpu_view, 0, surface.geometry.bytes);
+    return true;
 }
 
 bool IsBroughtUp()

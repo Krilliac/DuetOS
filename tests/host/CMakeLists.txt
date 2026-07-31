@@ -232,6 +232,9 @@ add_host_test(damage_rect)
 # Banded damage / forced-invalidation fold: freestanding constexpr state
 # on DamageBandSet in kernel/drivers/video/framebuffer.h — no kernel TU.
 add_host_test(damage_bands)
+# Intel 2D BLT surface/rectangle gate and packet encoding are pure; the
+# actual MMIO submitter remains gated to real Intel silicon.
+add_host_test(intel_blt)
 add_host_test(render_stats)
 target_sources(test_render_stats PRIVATE
     "${CMAKE_SOURCE_DIR}/../../kernel/drivers/video/render_stats.cpp"
