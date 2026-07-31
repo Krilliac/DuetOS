@@ -1010,3 +1010,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Require the GRUB plus Multiboot2 smoke before publication and fail closed on missing prerequisites or timeouts
 - **Claimed**: 2026-07-31T19:37:47Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] immutable-load-plan
+- **Session**: `Codex-kobject-handle-v2`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/loader/load_plan.h kernel/loader/load_plan.cpp tests/host/test_load_plan.cpp`
+- **Description**: Versioned immutable executable load plan with allocation-free hostile-input validation
+- **Claimed**: 2026-07-31T19:40:18Z
+- **Status**: IN PROGRESS
