@@ -797,6 +797,15 @@ u64 CreateForProcess(::duetos::core::Process* proc, const char* path, const void
         SerialWrite("[fs/route] create: post-plant lookup miss \"");
         SerialWrite(disk_rest);
         SerialWrite("\"\n");
+        // The on-disk create succeeded, but without a canonical DirEntry
+        // the caller cannot receive a usable handle. Roll the plant back
+        // so an internal lookup failure does not leak an orphaned file.
+        if (!fat32::Fat32DeleteAtPath(vol, disk_rest))
+        {
+            SerialWrite("[fs/route] create: rollback delete failed \"");
+            SerialWrite(disk_rest);
+            SerialWrite("\"\n");
+        }
         return u64(-1);
     }
 
