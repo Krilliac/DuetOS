@@ -906,3 +906,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Generation-safe fixed-capacity opaque handles and checked KObject retention
 - **Claimed**: 2026-07-31T18:24:27Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] gui-task-message-v2
+- **Session**: `Codex-gui-task-queue`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/drivers/video/gui_message_queue.cpp`
+- **Description**: No description provided
+- **Claimed**: 2026-07-31T18:40:04Z
+- **Status**: IN PROGRESS
