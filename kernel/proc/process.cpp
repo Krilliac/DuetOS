@@ -720,7 +720,7 @@ void ProcessRelease(Process* p)
     // happens while the dying process's data is still valid.
     if (p->linux_parent_pid != 0)
     {
-        Process* parent = sched::SchedFindProcessByPid(p->linux_parent_pid);
+        Process* parent = sched::SchedFindProcessByPidRetained(p->linux_parent_pid);
         if (parent != nullptr)
         {
             arch::Cli();
@@ -735,6 +735,7 @@ void ProcessRelease(Process* p)
                 sched::WaitQueueWakeOne(&parent->linux_wait_wq);
             }
             arch::Sti();
+            ProcessRelease(parent);
         }
     }
 

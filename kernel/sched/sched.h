@@ -151,6 +151,13 @@ bool SchedSehDeliveryAllowed(Task* t, u64 fault_rip);
 /// into a Process pointer the kernel can hand back as a handle.
 core::Process* SchedFindProcessByPid(u64 target_pid);
 
+/// Find a process and take a Process reference while holding the
+/// scheduler lock. Use when the caller will access the process after
+/// the lookup; this closes the lookup-to-retain lifetime race of the
+/// borrowed SchedFindProcessByPid API. Caller must ProcessRelease the
+/// returned pointer.
+core::Process* SchedFindProcessByPidRetained(u64 target_pid);
+
 /// True iff a task with `target_pid` is currently on the
 /// zombies list (TaskState::Dead, awaiting reap). Used by the
 /// pidfd EPOLLIN-on-exit path to flip a poll without claiming
