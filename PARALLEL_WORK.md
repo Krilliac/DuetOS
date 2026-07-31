@@ -754,3 +754,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Migrate post-publication raw Task affinity callers to scheduler-owned TID operations
 - **Claimed**: 2026-07-31T15:58:01Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] win32-file-opaque-pe32-classifier
+- **Session**: `Nathan-1940`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `userland/libs/kernel32_32/kernel32_32_internal.h`
+- **Description**: Classify PE32 opaque generation-tagged file handles without truncation
+- **Claimed**: 2026-07-31T15:58:33Z
+- **Status**: IN PROGRESS
