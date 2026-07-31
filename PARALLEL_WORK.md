@@ -610,3 +610,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Complete one QEMU-testable Virtio-GPU resource lifecycle or scanout feature with bounded queue/DMA behavior
 - **Claimed**: 2026-07-31T07:23:57Z
 - **Status**: COMPLETED @ 2026-07-31T07:30:48Z
+
+### [ACTIVE] mm-address-space-transactions
+- **Session**: `Nathan-1058`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/mm/address_space.cpp kernel/mm/address_space.h docs/stability-audit-2026-07-31.md wiki/reference/Roadmap.md`
+- **Description**: Split VM mutation serialization from IRQ-safe structural snapshots; keep alloc/free/TLB IPI outside regions spinlock
+- **Claimed**: 2026-07-31T13:20:39Z
+- **Status**: IN PROGRESS
