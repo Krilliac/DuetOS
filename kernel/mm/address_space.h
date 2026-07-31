@@ -5,6 +5,7 @@
 #include "util/result.h"
 #include "mm/frame_allocator.h"
 #include "mm/paging.h"
+#include "sched/sched.h"
 #include "sync/spinlock.h"
 
 /*
@@ -71,6 +72,18 @@
  * which is IRQ-safe today. AS Activate is safe from any context (a
  * single MOV-to-CR3) and is called from the scheduler's switch path
  * with interrupts disabled.
+ *
+ * Mutation locking:
+ *
+ *   - `mutation_lock` is the task-context transaction boundary for
+ *     map, unmap, protect, fork, clear, and final teardown. It may span
+ *     allocation, frame release, page copying, and TLB-shootdown waits.
+ *   - `regions_lock` is the IRQ-saving structural lock. It protects
+ *     page-table edits plus the regions pointer/count/capacity, and is
+ *     held only for bounded, non-blocking commits or snapshots.
+ *   - Lock order is mutation_lock -> regions_lock. Readers take only
+ *     regions_lock. No allocator, scheduler, cross-subsystem call, or
+ *     TLB IPI wait is allowed while regions_lock is held.
  */
 
 namespace duetos::mm
@@ -137,10 +150,9 @@ struct AddressSpace
 
     // Maximum number of user frames this AS is allowed to own.
     // MapUserPage rejects new mappings once region_count reaches
-    // this budget, returning false to the caller (or panicking in
-    // the v0 "panics on failure" API). Set at create time and
-    // immutable — a process's policy can't be widened after it
-    // starts running.
+    // this budget and returns false to the caller. Set at create
+    // time and immutable — a process's policy can't be widened
+    // after it starts running.
     u64 frame_budget;
 
     // User-VM region table. The backing storage is HEAP-ALLOCATED and
@@ -148,7 +160,7 @@ struct AddressSpace
     // frame_budget / kMaxUserVmRegionsPerAs) — so a process that maps
     // few pages costs few entries, not a flat 128 KiB. The AS's
     // frame_budget caps usage to an even smaller number for untrusted
-    // processes. Destroy walks the first `region_count` entries; Release
+    // processes. Release walks the first `region_count` entries, then
     // frees the `regions` allocation.
     //
     // u16 (not u8): kMaxUserVmRegionsPerAs is 8192 — well past
@@ -179,9 +191,19 @@ struct AddressSpace
     volatile u32 active_cpu_mask;
     u8 _pad_acm[4];
 
-    // Structural lock for regions[] and region_count. This is a
-    // spinlock because lookup is reachable while another subsystem
+    // [task context, thread-safe] Serializes complete VM mutations,
+    // including their prepare and retire phases. Slow work is legal
+    // while this lock is held; it must always be acquired before
+    // regions_lock when both are needed. Mutable so AddressSpaceFork
+    // can stabilize a const parent while it copies owned frames.
+    mutable sched::Mutex mutation_lock;
+
+    // [any thread, bounded/IRQ-safe] Structural lock for page-table
+    // edits and regions pointer/count/capacity snapshots. This remains
+    // a spinlock because lookup is reachable while another subsystem
     // holds a spinlock; an RwLock reader could sleep in that path.
+    // Never hold it across allocation/free, scheduling, page copying,
+    // cross-subsystem calls, or a TLB-shootdown IPI wait.
     mutable sync::SpinLock regions_lock;
 };
 
@@ -194,6 +216,11 @@ struct AddressSpace
 /// (no panic — callers may want to refuse the process spawn cleanly).
 core::Result<AddressSpace*> AddressSpaceCreate(u64 frame_budget);
 
+/// Mutation APIs below require scheduler-backed task context and may
+/// sleep while another thread mutates the same AS. They must not be
+/// called from IRQ/NMI context or while the caller holds a spinlock.
+/// Read-only probe/lookup APIs remain bounded under regions_lock.
+///
 /// Install a user-accessible 4 KiB mapping at `virt` in `as`. `virt`
 /// must be in the canonical low half and 4 KiB-aligned; `flags` must
 /// include `kPageUser`. The (virt, frame) pair is recorded for
@@ -201,8 +228,8 @@ core::Result<AddressSpace*> AddressSpaceCreate(u64 frame_budget);
 /// AS owns it now.
 ///
 /// Panics on malformed arguments (virt in kernel half or unaligned, an
-/// unaligned frame, an already-mapped VA, missing kPageUser, W^X violation,
-/// or kPageGlobal). Returns false for recoverable resource refusal
+/// unaligned frame, missing kPageUser, W^X violation, or kPageGlobal).
+/// Returns false for an already-mapped VA or recoverable resource refusal
 /// (frame-budget exhaustion, region-table growth OOM, or page-table-walker
 /// OOM); on false, ownership of `frame` remains with the caller.
 ///
@@ -218,11 +245,13 @@ bool AddressSpaceMapUserPage(AddressSpace* as, u64 virt, PhysAddr frame, u64 fla
 /// entry. Returns true if the page was mapped in this AS and has
 /// been released, false if `virt` was not one of this AS's
 /// user-region entries (already unmapped, never mapped, or belongs
-/// to a different AS). `virt` must be 4 KiB-aligned.
+/// to a different AS). `virt` must be 4 KiB-aligned and in the
+/// canonical user half.
 ///
 /// Safe to call on `as` whether or not it's currently active: the
-/// kernel direct-map alias writes the PTE; TLB invalidation is
-/// emitted only for the active CPU when `as` is the active AS.
+/// kernel direct-map alias writes the PTE. Before the backing frame is
+/// reused, TLB invalidation is broadcast to every CPU currently using
+/// `as` (and performed locally when this CPU uses it).
 bool AddressSpaceUnmapUserPage(AddressSpace* as, u64 virt);
 
 /// Install a leaf PTE for a frame the AS does NOT own — the
@@ -233,9 +262,9 @@ bool AddressSpaceUnmapUserPage(AddressSpace* as, u64 virt);
 /// AS-destroy walker won't free this frame, and the AS
 /// frame budget isn't consumed.
 ///
-/// Returns true on success. Returns false if `virt` is
-/// already mapped (no overwrite). Panics on the same
-/// invariant violations as MapUserPage.
+/// Returns true on success. Returns false if `virt` is already mapped
+/// (no overwrite) or page-table preparation runs out of frames. Panics
+/// on the same invariant violations as MapUserPage.
 ///
 /// Pairs with AddressSpaceUnmapBorrowedPage. Callers MUST
 /// keep their own ledger of the (virt, frame) pairs they
@@ -247,15 +276,17 @@ bool AddressSpaceMapBorrowedPage(AddressSpace* as, u64 virt, PhysAddr frame, u64
 /// to identify section views (which install borrowed PTEs not
 /// recorded in the regions ledger). Returns kNullFrame when
 /// `virt` has no present PTE in `as`. `virt` must be 4 KiB-
-/// aligned.
+/// aligned. The returned frame is an unpinned snapshot: callers that
+/// dereference it must separately exclude concurrent unmap/release.
 PhysAddr AddressSpaceProbePte(const AddressSpace* as, u64 virt);
 
 /// Reverse of MapBorrowedPage: clear the leaf PTE at `virt`
 /// in `as` without touching the regions table and without
 /// freeing the backing frame. Returns true if a present
 /// PTE was cleared, false if `virt` was already unmapped.
-/// TLB invalidation is emitted on the active CPU only when
-/// `as` is the active AS.
+/// Panics if `virt` is unaligned or outside the canonical user half.
+/// TLB invalidation is broadcast to every CPU currently using `as`
+/// before the caller may release or reuse the borrowed frame.
 bool AddressSpaceUnmapBorrowedPage(AddressSpace* as, u64 virt);
 
 /// Rewrite the leaf-PTE flag bits at `virt` in `as` to
@@ -266,8 +297,8 @@ bool AddressSpaceUnmapBorrowedPage(AddressSpace* as, u64 virt);
 /// true if the page was present and the PTE was rewritten,
 /// false if `virt` is unmapped (no PTE to mutate).
 ///
-/// TLB invalidation is emitted on the active CPU only when
-/// `as` is the active AS — same contract as MapUserPage.
+/// TLB invalidation is broadcast to every CPU currently using `as`
+/// before the mutation transaction completes.
 ///
 /// Panics on the same invariants MapUserPage enforces:
 /// unaligned `virt`, `virt` outside the canonical low half,
@@ -281,7 +312,8 @@ bool AddressSpaceProtectUserPage(AddressSpace* as, u64 virt, u64 new_flags);
 /// User / etc.) and the middle bits encode the physical frame
 /// — same layout the kernel writes via MapUserPage. Used by
 /// AddressSpaceFork to re-apply parent flags on the child PTEs
-/// without losing per-page protection.
+/// without losing per-page protection. This is an unpinned snapshot;
+/// it does not preserve the frame or permissions after return.
 u64 AddressSpaceProbePteRaw(const AddressSpace* as, u64 virt);
 
 /// Duplicate `parent`'s user mappings into a fresh AS. Allocates
@@ -291,7 +323,8 @@ u64 AddressSpaceProbePteRaw(const AddressSpace* as, u64 virt);
 /// direct-map alias, and maps the new frame in the child with
 /// the SAME PTE flags the parent's leaf PTE carried (preserves
 /// W^X — code stays RX, data stays RW + NX). Returns
-/// `Err{ErrorCode::InvalidArgument}` if `parent` is null, or
+/// `Err{ErrorCode::InvalidArgument}` if `parent` is null or its owned
+/// region ledger disagrees with its page tables, or
 /// `Err{ErrorCode::OutOfMemory}` on allocation failure (and rolls
 /// back any partially-installed child mappings via
 /// AddressSpaceRelease before returning the error). Does NOT cover
@@ -308,16 +341,19 @@ core::Result<AddressSpace*> AddressSpaceFork(const AddressSpace* parent);
 /// leaf PTE, frees the backing frame back to the physical
 /// allocator, and resets `region_count` to 0.
 ///
-/// Used by execve() — replace the running process's image
-/// in-place. PML4/PDPT/PD pages stay; the leaf PT pages are
-/// retained so a subsequent ElfLoad can re-populate them.
+/// Used by execve() — replace the running process's image in-place.
+/// Intermediate user-half tables are pruned as their final leaf is
+/// removed; a subsequent ElfLoad allocates only the paths it needs.
 ///
 /// Borrowed-page mappings (Win32 sections) are NOT touched —
 /// they aren't in the regions ledger. Callers that need to
 /// nuke section views must do that separately.
 ///
-/// TLB invalidation on the active CPU when `as` is the active
-/// AS — same contract as MapUserPage / UnmapUserPage.
+/// Each detached page is invalidated on every CPU currently using
+/// `as` before its frame is returned to the allocator. Empty user-half
+/// PT/PD/PDPT pages are pruned in the same transaction and retired only
+/// after that shootdown, so sparse map/unmap churn cannot retain them
+/// until final AS destruction.
 void AddressSpaceClearUserMappings(AddressSpace* as);
 
 /// Reverse of MapUserPage: given a user VA, return the physical
@@ -327,7 +363,8 @@ void AddressSpaceClearUserMappings(AddressSpace* as);
 /// without touching page-table flags — the kernel's direct map
 /// is always writable, so `PhysToVirt(LookupUserFrame(...))` is
 /// the shortest path to "modify this page that's currently RO
-/// in the user's view."
+/// in the user's view." The returned frame is an unpinned snapshot;
+/// callers must separately exclude concurrent unmap/release.
 PhysAddr AddressSpaceLookupUserFrame(const AddressSpace* as, u64 virt);
 
 /// Activate `as` by loading its PML4 into CR3 — but only if `as` is
@@ -364,7 +401,8 @@ void AddressSpaceRetain(AddressSpace* as);
 /// page tables (PML4[0..255]) freeing intermediate PDPT/PD/PT
 /// frames, then frees the PML4 frame itself. After release the
 /// caller MUST NOT touch `as` again. nullptr is a no-op (the kernel
-/// AS is never released).
+/// AS is never released). A last-reference release requires task
+/// context because teardown takes mutation_lock and may sleep.
 void AddressSpaceRelease(AddressSpace* as);
 
 /// Diagnostics — cheap snapshots.

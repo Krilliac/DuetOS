@@ -126,24 +126,58 @@ cleanup debt: move the residual up and delete the rest.
 - **Shape a real fix has to take.** Separate the table's
   STRUCTURAL integrity from the long operations around it: a short
   IRQ-safe spinlock covering only the scan / swap / count update,
-  with frame allocation, page-table edits and TLB shootdowns kept
-  outside it. `AddressSpaceMapUserPage` allocates while holding
-  the current lock, so it cannot simply be converted in place. The
-  alternative is to stop compacting — tombstone the dying row and
-  reclaim separately — which keeps readers correct without any new
-  lock on the read path.
-- **Resolved:** the implementation now uses a per-AS non-sleeping
-  `sync::SpinLock` across map, unmap, fork snapshot, clear, lookup,
-  page-count diagnostics, borrowed-page PTE operations, and teardown.
-  The breakpoint resolver can therefore call the lookup while holding
-  its own spinlock without sleeping. Full MSVC/QEMU/SMP verification
-  remains pending.
+  with allocation/free, page copying, cross-subsystem calls, and TLB
+  shootdown waits kept outside it. Bounded page-table edits belong
+  inside the structural commit; allocating their intermediate tables
+  does not.
+- **Implemented on the audit branch:** each AS now has a task-context
+  `sched::Mutex` transaction lock above the existing structural
+  `sync::SpinLock`. Map operations inspect under the spinlock, prepare
+  region-table storage and up to three page-table frames outside it,
+  then commit the PTE and ledger atomically under it. Unmap/protect
+  detach or rewrite under the spinlock, drop it, then complete the TLB
+  shootdown and frame retirement while the mutex prevents a same-VA
+  mutation from overtaking them. Empty user-half table paths are pruned
+  during the structural commit and their frames are released only after
+  shootdown, bounding sparse map/unmap churn. Fork snapshots one row/PTE
+  at a time and performs frame allocation/copying outside the spinlock.
+  Readers, including the breakpoint resolver, still take only the
+  bounded spinlock and never sleep.
+- **Remaining lifetime contracts:** probe/lookup currently returns an
+  unpinned snapshot after releasing `regions_lock`; cross-AS copy needs a
+  page guard or transaction-scoped API. Win32 section mapping must pin its
+  frames before it can wait for the AS transaction, and cross-process VM
+  operations must retain their target while synchronized with handle-slot
+  removal. Multi-threaded fork also needs sibling quiescence, COW, or an
+  explicit rejection contract to promise a coherent memory snapshot.
+- **Verification boundary:** source diff/format checks are complete.
+  Full MSVC build, rebuilt tests, multi-vCPU QEMU boot, allocation-failure
+  injection, and concurrent map/protect/unmap stress remain required.
 - **Historical blocker:** deciding between those two, since it changes an
   mm-core invariant. Not attempted as a drive-by: `address_space.cpp`
   is the highest-blast-radius file in the tree and a partial fix here
   (locking writers only, leaving the spinlock-holding reader
   unsynchronised) would buy very little while looking like a
   resolution.
+
+### AdaptiveMutex — close the SMP check-to-park lost-wake window
+
+- **Finding:** `AdaptiveMutexLock` rechecks `m_owner` after local `Cli()`,
+  then calls the public `WaitQueueBlock`. A remote unlock can clear the
+  owner and observe an empty wait queue between those two steps; the
+  waiter then enqueues after the last wake and can sleep forever.
+- **Known-good pattern:** `sched::MutexLock` holds `g_sched_lock`
+  continuously across owner check, wait-queue enqueue, and the locked
+  scheduler handoff. Local interrupt masking alone cannot provide that
+  cross-CPU transaction.
+- **Current containment:** the address-space transaction work deliberately
+  uses `sched::Mutex`, not `AdaptiveMutex`. Do not place AdaptiveMutex on
+  another correctness-critical contended path until its park handshake is
+  coupled to the scheduler lock.
+- **Required fix/verification:** expose or reuse a scheduler-owned
+  check-and-park helper, then add a deterministic two-CPU test where unlock
+  lands in the former check/enqueue window. Existing fast-path and ordinary
+  contention self-tests do not force this interleaving.
 
 
 ### PS/2 scan-code ring — SMP single-producer/single-consumer invariant
