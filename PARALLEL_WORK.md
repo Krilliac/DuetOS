@@ -1138,3 +1138,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Generation-safe waitable MessagePort KObject atop validated MessageRing
 - **Claimed**: 2026-07-31T20:34:40Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] gui-window-side-tables
+- **Session**: `Codex-gui-task-queue`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/boot_tasks.cpp kernel/core/menu_dispatch.cpp kernel/core/menu_dispatch.h kernel/drivers/video/menu.cpp kernel/drivers/video/menu.h`
+- **Description**: Generation-tagged gesture and window-menu contexts with stale-generation cancellation
+- **Claimed**: 2026-07-31T20:43:31Z
+- **Status**: IN PROGRESS
