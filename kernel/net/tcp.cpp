@@ -8,10 +8,10 @@
  * (segment dispatcher + RFC-793 transitions) lives in tcp_segment.cpp;
  * the periodic timer in tcp_timer.cpp; the selftest in tcp_selftest.cpp.
  *
- * Concurrency: every public entry grabs arch::Cli on entry and
- * releases on exit. The state machine and timer use the same single
- * global IRQ-off window. SMP migration is a follow-up: each bucket
- * gets a spinlock, the table generation becomes atomic.
+ * Concurrency: every public entry and the RX/timer paths take the
+ * shared IRQ-save TCB spinlock. Internal state-machine helpers require
+ * that lock to be held. The global lock is intentionally simple for
+ * this cap; per-bucket locks remain a follow-up optimization.
  */
 
 #include "net/tcp.h"
@@ -23,6 +23,7 @@
 #include "log/klog.h"
 #include "mm/kheap.h"
 #include "sched/sched.h"
+#include "sync/spinlock.h"
 #include "time/tick.h"
 #include "util/random.h"
 #include "util/string.h"
@@ -48,6 +49,8 @@ constinit u16 g_ephemeral_cursor = 49152;
 
 // ML-02 (net-0): see tcp_internal.h. Seeded in tcp::Init (tcp_timer.cpp).
 constinit u64 g_isn_secret = 0;
+constinit sync::SpinLock g_tcb_lock = {
+    .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
 
 u64 NowTicks()
 {
@@ -122,7 +125,7 @@ bool DecodeId(TcbId id, u32* out_idx)
     if (idx_plus_one == 0 || idx_plus_one > kTcbCap)
         return false;
     const u32 idx = idx_plus_one - 1;
-    if (!g_tcbs[idx].in_use)
+    if (!g_tcbs[idx].in_use || g_tcbs[idx].initializing)
         return false;
     if (g_tcbs[idx].generation != u8(id >> 24))
         return false;
@@ -240,6 +243,7 @@ void ResetTcbStorage(Tcb& t)
     for (u32 i = 0; i < 6; ++i)
         t.peer_mac.octets[i] = 0;
     t.refs = 0;
+    t.initializing = false;
     t.backlog_max = 0;
     t.backlog_count = 0;
     t.backlog_head = 0;
@@ -403,20 +407,20 @@ const char* StateName(State s)
 
 Stats StatsRead()
 {
-    arch::Cli();
+    auto flags = sync::SpinLockAcquire(internal::g_tcb_lock);
     Stats s = internal::g_stats;
     u64 alive = 0;
     for (u32 i = 0; i < kTcbCap; ++i)
-        if (internal::g_tcbs[i].in_use)
+        if (internal::g_tcbs[i].in_use && !internal::g_tcbs[i].initializing)
             ++alive;
     s.tcbs_alive = alive;
-    arch::Sti();
+    sync::SpinLockRelease(internal::g_tcb_lock, flags);
     return s;
 }
 
 // -------------------------------------------------------------------
 // Public API — Listen / Accept / Connect / Send / Recv / Close.
-// All grab arch::Cli on entry and release on every exit path.
+// All grab the shared TCB lock on entry and release it on every exit path.
 // -------------------------------------------------------------------
 
 TcbId Listen(u32 iface_index, Ipv4Address local_ip, u16 local_port, u32 backlog)
@@ -429,16 +433,16 @@ TcbId Listen(u32 iface_index, Ipv4Address local_ip, u16 local_port, u32 backlog)
     if (local_port == 0)
         return kInvalidTcbId;
 
-    arch::Cli();
+    auto flags = sync::SpinLockAcquire(g_tcb_lock);
     if (LookupListener(local_port) != kTcbCap)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_tcb_lock, flags);
         return kInvalidTcbId;
     }
     const u32 idx = AllocSlot();
     if (idx == kTcbCap)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_tcb_lock, flags);
         return kInvalidTcbId;
     }
     Tcb& t = g_tcbs[idx];
@@ -458,18 +462,18 @@ TcbId Listen(u32 iface_index, Ipv4Address local_ip, u16 local_port, u32 backlog)
     // does a linear scan, fast enough at v0 cap.
     t.bucket_next = kBucketNone;
     ++g_stats.listens;
-    arch::Sti();
+    sync::SpinLockRelease(g_tcb_lock, flags);
     return MakeId(idx, gen);
 }
 
 TcbId AcceptNonblocking(TcbId listener, Ipv4Address* out_peer_ip, u16* out_peer_port)
 {
     using namespace internal;
-    arch::Cli();
+    auto flags = sync::SpinLockAcquire(g_tcb_lock);
     Tcb* lp = TcbFromId(listener);
     if (lp == nullptr || !lp->is_listener)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_tcb_lock, flags);
         return kInvalidTcbId;
     }
     while (lp->backlog_count != 0)
@@ -485,16 +489,17 @@ TcbId AcceptNonblocking(TcbId listener, Ipv4Address* out_peer_ip, u16* out_peer_
         if (out_peer_port != nullptr)
             *out_peer_port = ct->peer_port;
         ++g_stats.accepts;
-        arch::Sti();
+        sync::SpinLockRelease(g_tcb_lock, flags);
         return child_id;
     }
-    arch::Sti();
+    sync::SpinLockRelease(g_tcb_lock, flags);
     return kInvalidTcbId;
 }
 
 sched::WaitQueue* AcceptWaitQueue(TcbId listener)
 {
     using namespace internal;
+    sync::SpinLockGuard guard(g_tcb_lock);
     Tcb* lp = TcbFromId(listener);
     if (lp == nullptr || !lp->is_listener)
         return nullptr;
@@ -504,13 +509,13 @@ sched::WaitQueue* AcceptWaitQueue(TcbId listener)
 TcbId Connect(u32 iface_index, Ipv4Address dst_ip, u16 dst_port, u16 local_port)
 {
     using namespace internal;
-    arch::Cli();
+    auto flags = sync::SpinLockAcquire(g_tcb_lock);
     if (local_port == 0)
     {
         local_port = AllocEphemeralPort();
         if (local_port == 0)
         {
-            arch::Sti();
+            sync::SpinLockRelease(g_tcb_lock, flags);
             return kInvalidTcbId;
         }
     }
@@ -518,24 +523,33 @@ TcbId Connect(u32 iface_index, Ipv4Address dst_ip, u16 dst_port, u16 local_port)
     Ipv4Address local_ip = InterfaceIp(iface_index);
     if (LookupExact(iface_index, local_ip, local_port, dst_ip, dst_port) != kTcbCap)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_tcb_lock, flags);
         return kInvalidTcbId;
     }
     const u32 idx = AllocSlot();
     if (idx == kTcbCap)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_tcb_lock, flags);
         return kInvalidTcbId;
     }
     Tcb& t = g_tcbs[idx];
     const u8 gen = u8(t.generation + 1);
-    arch::Sti();
-    if (!AllocTcbBuffers(t))
-        return kInvalidTcbId;
-    arch::Cli();
     ResetTcbStorage(t);
     t.generation = gen;
     t.in_use = true;
+    t.initializing = true;
+    sync::SpinLockRelease(g_tcb_lock, flags);
+    if (!AllocTcbBuffers(t))
+    {
+        flags = sync::SpinLockAcquire(g_tcb_lock);
+        t.in_use = false;
+        t.initializing = false;
+        sync::SpinLockRelease(g_tcb_lock, flags);
+        return kInvalidTcbId;
+    }
+    flags = sync::SpinLockAcquire(g_tcb_lock);
+    t.generation = gen;
+    t.initializing = false;
     t.is_listener = false;
     t.state = State::SynSent;
     t.iface_index = iface_index;
@@ -562,7 +576,7 @@ TcbId Connect(u32 iface_index, Ipv4Address dst_ip, u16 dst_port, u16 local_port)
     SendSegment(t, kFlagSyn | kFlagEce | kFlagCwr, t.iss, 0, nullptr, 0);
     // Arm retransmit.
     t.rtx_deadline = NowTicks() + t.rto_ticks;
-    arch::Sti();
+    sync::SpinLockRelease(g_tcb_lock, flags);
     return MakeId(idx, gen);
 }
 
@@ -572,32 +586,32 @@ bool WaitConnected(TcbId id, u64 timeout_ticks)
     const u64 deadline = NowTicks() + timeout_ticks;
     while (true)
     {
-        arch::Cli();
+        auto flags = sync::SpinLockAcquire(g_tcb_lock);
         Tcb* t = TcbFromId(id);
         if (t == nullptr)
         {
-            arch::Sti();
+            sync::SpinLockRelease(g_tcb_lock, flags);
             return false;
         }
         if (t->state == State::Established)
         {
-            arch::Sti();
+            sync::SpinLockRelease(g_tcb_lock, flags);
             return true;
         }
         if (t->state == State::Closed)
         {
-            arch::Sti();
+            sync::SpinLockRelease(g_tcb_lock, flags);
             return false;
         }
         const u64 now = NowTicks();
         if (now >= deadline)
         {
-            arch::Sti();
+            sync::SpinLockRelease(g_tcb_lock, flags);
             return false;
         }
         const u64 wait = deadline - now;
         const u64 step = (wait < 5) ? wait : 5;
-        arch::Sti();
+        sync::SpinLockRelease(g_tcb_lock, flags);
         sched::SchedSleepTicks(step);
     }
 }
@@ -607,21 +621,21 @@ i32 Send(TcbId id, const u8* data, u32 len)
     using namespace internal;
     if (data == nullptr && len > 0)
         return -1;
-    arch::Cli();
+    auto flags = sync::SpinLockAcquire(g_tcb_lock);
     Tcb* t = TcbFromId(id);
     if (t == nullptr || t->is_listener)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_tcb_lock, flags);
         return -1;
     }
     if (t->tx_closed)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_tcb_lock, flags);
         return -1;
     }
     if (t->state != State::Established && t->state != State::CloseWait)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_tcb_lock, flags);
         return -1;
     }
     const u32 free_bytes = kSndBufBytes - t->sndbuf_count;
@@ -633,7 +647,7 @@ i32 Send(TcbId id, const u8* data, u32 len)
     }
     t->sndbuf_count += take;
     DrainSendBuffer(*t);
-    arch::Sti();
+    sync::SpinLockRelease(g_tcb_lock, flags);
     return i32(take);
 }
 
@@ -642,11 +656,11 @@ i32 RecvNonblocking(TcbId id, u8* out, u32 cap)
     using namespace internal;
     if (cap > 0 && out == nullptr)
         return -1;
-    arch::Cli();
+    auto flags = sync::SpinLockAcquire(g_tcb_lock);
     Tcb* t = TcbFromId(id);
     if (t == nullptr || t->is_listener)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_tcb_lock, flags);
         return -1;
     }
     if (t->rcvbuf_count == 0)
@@ -654,15 +668,15 @@ i32 RecvNonblocking(TcbId id, u8* out, u32 cap)
         // Peer FIN consumed and buffer drained → orderly EOF.
         if (t->peer_fin_seen)
         {
-            arch::Sti();
+            sync::SpinLockRelease(g_tcb_lock, flags);
             return 0;
         }
         if (t->state == State::Closed)
         {
-            arch::Sti();
+            sync::SpinLockRelease(g_tcb_lock, flags);
             return 0;
         }
-        arch::Sti();
+        sync::SpinLockRelease(g_tcb_lock, flags);
         return -2; // would block
     }
     const u32 take = (cap < t->rcvbuf_count) ? cap : t->rcvbuf_count;
@@ -680,29 +694,29 @@ i32 RecvNonblocking(TcbId id, u8* out, u32 cap)
         // Window opened — send an ACK so the peer learns.
         SendSegment(*t, kFlagAck, t->snd_nxt, t->rcv_nxt, nullptr, 0);
     }
-    arch::Sti();
+    sync::SpinLockRelease(g_tcb_lock, flags);
     return i32(take);
 }
 
 void Close(TcbId id)
 {
     using namespace internal;
-    arch::Cli();
+    auto flags = sync::SpinLockAcquire(g_tcb_lock);
     Tcb* t = TcbFromId(id);
     if (t == nullptr)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_tcb_lock, flags);
         return;
     }
     if (t->is_listener)
     {
         DropTcb(u32(t - &g_tcbs[0]));
-        arch::Sti();
+        sync::SpinLockRelease(g_tcb_lock, flags);
         return;
     }
     if (t->tx_closed)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_tcb_lock, flags);
         return;
     }
     t->tx_closed = true;
@@ -723,17 +737,17 @@ void Close(TcbId id)
         t->state = State::LastAck;
         t->rtx_deadline = NowTicks() + t->rto_ticks;
     }
-    arch::Sti();
+    sync::SpinLockRelease(g_tcb_lock, flags);
 }
 
 void Abort(TcbId id)
 {
     using namespace internal;
-    arch::Cli();
+    auto flags = sync::SpinLockAcquire(g_tcb_lock);
     Tcb* t = TcbFromId(id);
     if (t == nullptr)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_tcb_lock, flags);
         return;
     }
     if (!t->is_listener && t->state != State::Closed && t->state != State::Listen)
@@ -742,27 +756,27 @@ void Abort(TcbId id)
         ++g_stats.rst_tx;
     }
     DropTcb(u32(t - &g_tcbs[0]));
-    arch::Sti();
+    sync::SpinLockRelease(g_tcb_lock, flags);
 }
 
 void Retain(TcbId id)
 {
     using namespace internal;
-    arch::Cli();
+    auto flags = sync::SpinLockAcquire(g_tcb_lock);
     Tcb* t = TcbFromId(id);
     if (t != nullptr)
         ++t->refs;
-    arch::Sti();
+    sync::SpinLockRelease(g_tcb_lock, flags);
 }
 
 void Release(TcbId id)
 {
     using namespace internal;
-    arch::Cli();
+    auto flags = sync::SpinLockAcquire(g_tcb_lock);
     Tcb* t = TcbFromId(id);
     if (t == nullptr)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_tcb_lock, flags);
         return;
     }
     if (t->refs > 0)
@@ -798,12 +812,13 @@ void Release(TcbId id)
             }
         }
     }
-    arch::Sti();
+    sync::SpinLockRelease(g_tcb_lock, flags);
 }
 
 bool Alive(TcbId id)
 {
     using namespace internal;
+    sync::SpinLockGuard guard(g_tcb_lock);
     u32 idx;
     return DecodeId(id, &idx);
 }
@@ -811,6 +826,7 @@ bool Alive(TcbId id)
 State GetState(TcbId id)
 {
     using namespace internal;
+    sync::SpinLockGuard guard(g_tcb_lock);
     Tcb* t = TcbFromId(id);
     if (t == nullptr)
         return State::Closed;
@@ -820,6 +836,7 @@ State GetState(TcbId id)
 bool PeerClosed(TcbId id)
 {
     using namespace internal;
+    sync::SpinLockGuard guard(g_tcb_lock);
     Tcb* t = TcbFromId(id);
     if (t == nullptr)
         return true;
@@ -829,6 +846,7 @@ bool PeerClosed(TcbId id)
 bool GetLocalEndpoint(TcbId id, Ipv4Address* out_ip, u16* out_port)
 {
     using namespace internal;
+    sync::SpinLockGuard guard(g_tcb_lock);
     Tcb* t = TcbFromId(id);
     if (t == nullptr)
         return false;
@@ -842,6 +860,7 @@ bool GetLocalEndpoint(TcbId id, Ipv4Address* out_ip, u16* out_port)
 bool GetPeerEndpoint(TcbId id, Ipv4Address* out_ip, u16* out_port)
 {
     using namespace internal;
+    sync::SpinLockGuard guard(g_tcb_lock);
     Tcb* t = TcbFromId(id);
     if (t == nullptr)
         return false;
@@ -855,6 +874,7 @@ bool GetPeerEndpoint(TcbId id, Ipv4Address* out_ip, u16* out_port)
 sched::WaitQueue* RecvWaitQueue(TcbId id)
 {
     using namespace internal;
+    sync::SpinLockGuard guard(g_tcb_lock);
     Tcb* t = TcbFromId(id);
     return (t == nullptr) ? nullptr : &t->read_wq;
 }
@@ -862,6 +882,7 @@ sched::WaitQueue* RecvWaitQueue(TcbId id)
 sched::WaitQueue* SendWaitQueue(TcbId id)
 {
     using namespace internal;
+    sync::SpinLockGuard guard(g_tcb_lock);
     Tcb* t = TcbFromId(id);
     return (t == nullptr) ? nullptr : &t->write_wq;
 }
@@ -869,6 +890,7 @@ sched::WaitQueue* SendWaitQueue(TcbId id)
 bool SetNoDelay(TcbId id, bool on)
 {
     using namespace internal;
+    sync::SpinLockGuard guard(g_tcb_lock);
     Tcb* t = TcbFromId(id);
     if (t == nullptr)
         return false;
@@ -879,6 +901,7 @@ bool SetNoDelay(TcbId id, bool on)
 bool SetKeepAlive(TcbId id, bool on)
 {
     using namespace internal;
+    sync::SpinLockGuard guard(g_tcb_lock);
     Tcb* t = TcbFromId(id);
     if (t == nullptr)
         return false;
