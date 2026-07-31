@@ -2040,7 +2040,7 @@ bool MaybeLaunchRamfsExe(const duetos::fs::RamfsNode* sel)
     char tag[40];
     duetos::u32 ti = 0;
     const char prefix[] = "ramfs-launch:";
-    while (ti < sizeof(tag) - 1 && ti < sizeof(prefix) - 1 && prefix[ti] != '\0')
+    while (ti < sizeof(prefix) - 1 && ti < sizeof(tag) - 1 && prefix[ti] != '\0')
     {
         tag[ti] = prefix[ti];
         ++ti;
@@ -2118,7 +2118,7 @@ bool MaybeLaunchFat32Entry(const duetos::fs::fat32::DirEntry& e)
     char tag[40];
     duetos::u32 ti = 0;
     const char prefix[] = "fat32-launch:";
-    while (ti < sizeof(tag) - 1 && ti < sizeof(prefix) - 1 && prefix[ti] != '\0')
+    while (ti < sizeof(prefix) - 1 && ti < sizeof(tag) - 1 && prefix[ti] != '\0')
     {
         tag[ti] = prefix[ti];
         ++ti;

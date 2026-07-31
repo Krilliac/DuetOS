@@ -605,8 +605,6 @@ void DispatchMenuAction(duetos::u32 action, duetos::u32 ctx)
                                     duetos::u64 v = pid;
                                     char tmp[24];
                                     duetos::u32 ti = 0;
-                                    if (v == 0)
-                                        tmp[ti++] = '0';
                                     while (v != 0)
                                     {
                                         tmp[ti++] = static_cast<char>('0' + v % 10);
