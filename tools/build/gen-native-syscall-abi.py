@@ -492,13 +492,24 @@ def render_policy_markdown(rows: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def render_policy_json(rows: list[dict[str, Any]]) -> str:
+    policy = {
+        "schema": SCHEMA_NAME,
+        "schema_version": SCHEMA_VERSION,
+        "abi": ABI_NAME,
+        "syscalls": rows,
+    }
+    return json.dumps(policy, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
+
+
 def expected_outputs(root: Path, document: dict[str, Any]) -> dict[Path, str]:
-    rows = document["syscalls"]
+    rows = validate_document(document)
     return {
         root / "kernel/syscall/syscall_names.def": render_names_def(rows),
         root / "kernel/syscall/cap_table.def": render_cap_table(rows),
         root / "kernel/syscall/syscall_idl_generated.def": render_def(rows),
         root / "userland/libc/include/duet/syscall_numbers_generated.h": render_userland_header(rows),
+        root / "docs/native-syscall-policy.json": render_policy_json(rows),
         root / "docs/native-syscall-policy.md": render_policy_markdown(rows),
     }
 

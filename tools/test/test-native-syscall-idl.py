@@ -55,6 +55,33 @@ class NativeSyscallIdlTests(unittest.TestCase):
             IDL.expected_outputs(ROOT, copy.deepcopy(self.document)),
         )
 
+    def test_policy_json_is_canonical_complete_and_current(self) -> None:
+        rows = IDL.validate_document(self.document)
+        policy_path = ROOT / "docs/native-syscall-policy.json"
+        rendered = IDL.expected_outputs(ROOT, self.document)[policy_path]
+        policy = json.loads(rendered)
+
+        self.assertEqual(
+            {"abi", "schema", "schema_version", "syscalls"},
+            set(policy),
+        )
+        self.assertEqual(IDL.ABI_NAME, policy["abi"])
+        self.assertEqual(IDL.SCHEMA_NAME, policy["schema"])
+        self.assertEqual(IDL.SCHEMA_VERSION, policy["schema_version"])
+        self.assertEqual(rows, policy["syscalls"])
+        self.assertEqual(
+            json.dumps(policy, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+            rendered,
+        )
+        self.assertEqual(rendered, policy_path.read_text(encoding="utf-8"))
+
+        reordered = copy.deepcopy(self.document)
+        reordered["syscalls"] = [dict(reversed(tuple(row.items()))) for row in reordered["syscalls"]]
+        self.assertEqual(
+            rendered,
+            IDL.expected_outputs(ROOT, reordered)[policy_path],
+        )
+
     def test_duplicate_and_out_of_order_numbers_fail_closed(self) -> None:
         self.assert_invalid(lambda doc: doc["syscalls"][1].__setitem__("number", doc["syscalls"][0]["number"]))
         self.assert_invalid(lambda doc: doc["syscalls"].__setitem__(slice(0, 2), list(reversed(doc["syscalls"][:2]))))
@@ -101,6 +128,16 @@ class NativeSyscallIdlTests(unittest.TestCase):
                 IDL.write_or_check(expected, check=True)
             artifact.write_text("expected\n", encoding="utf-8")
             IDL.write_or_check(expected, check=True)
+
+    def test_check_mode_detects_policy_json_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outputs = IDL.expected_outputs(root, self.document)
+            IDL.write_or_check(outputs, check=False)
+            policy_path = root / "docs/native-syscall-policy.json"
+            policy_path.write_text(policy_path.read_text(encoding="utf-8") + " ", encoding="utf-8")
+            with self.assertRaisesRegex(IDL.IdlError, r"docs/native-syscall-policy\.json"):
+                IDL.write_or_check(outputs, check=True)
 
 
 if __name__ == "__main__":
