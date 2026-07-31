@@ -1306,3 +1306,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Endpoint-owned
 - **Claimed**: 2026-07-31T22:01:39Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] ipc-object-transfer-source
+- **Session**: `Nathan-840`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/ipc/object_transfer.cpp`
+- **Description**: Object
+- **Claimed**: 2026-07-31T22:01:49Z
+- **Status**: IN PROGRESS
