@@ -101,7 +101,11 @@ struct SocketOperationPin
     const Socket* socket;
 
     explicit SocketOperationPin(u32 value) : idx(value), socket(SocketPin(value)) {}
-    ~SocketOperationPin() { if (socket != nullptr) SocketUnpin(idx); }
+    ~SocketOperationPin()
+    {
+        if (socket != nullptr)
+            SocketUnpin(idx);
+    }
     explicit operator bool() const { return socket != nullptr; }
     Socket& mutable_socket() const { return *const_cast<Socket*>(socket); }
 };
@@ -197,11 +201,9 @@ void FinishSocketTeardown(const SocketTeardown& td)
     if (td.tcb != tcp::kInvalidTcbId)
         tcp::Release(td.tcb);
     if (td.loopback_pipe_recv_idx >= 0)
-        ::duetos::subsystems::linux::internal::PipeReleaseRead(
-            static_cast<u32>(td.loopback_pipe_recv_idx));
+        ::duetos::subsystems::linux::internal::PipeReleaseRead(static_cast<u32>(td.loopback_pipe_recv_idx));
     if (td.loopback_pipe_send_idx >= 0)
-        ::duetos::subsystems::linux::internal::PipeReleaseWrite(
-            static_cast<u32>(td.loopback_pipe_send_idx));
+        ::duetos::subsystems::linux::internal::PipeReleaseWrite(static_cast<u32>(td.loopback_pipe_send_idx));
 }
 
 } // namespace
@@ -608,8 +610,7 @@ bool SocketConnect(u32 idx, Ipv4Address peer_ip, u16 peer_port)
         }
         flags = sync::SpinLockAcquire(g_sock_lock);
         if (!g_pool[idx].in_use || g_pool[idx].closing || !g_pool[listener_idx].in_use ||
-            g_pool[listener_idx].closing ||
-            g_pool[listener_idx].loopback_pending_accept_idx != -1)
+            g_pool[listener_idx].closing || g_pool[listener_idx].loopback_pending_accept_idx != -1)
         {
             // Either end went away (or another connector won the
             // listener's single pending slot) while the lock was down.
@@ -724,8 +725,7 @@ i32 SocketAcceptNonblocking(u32 listener_idx, Ipv4Address* out_peer_ip, u16* out
     // On-wire: ask the TCB table.
     auto flags = sync::SpinLockAcquire(g_sock_lock);
     Socket& l = g_pool[listener_idx];
-    if (!l.in_use || l.closing || l.type != kSocketTypeStream || !l.listening ||
-        l.tcb == tcp::kInvalidTcbId)
+    if (!l.in_use || l.closing || l.type != kSocketTypeStream || !l.listening || l.tcb == tcp::kInvalidTcbId)
     {
         sync::SpinLockRelease(g_sock_lock, flags);
         return -1;
@@ -789,8 +789,7 @@ i32 SocketAccept(u32 listener_idx, Ipv4Address* out_peer_ip, u16* out_peer_port)
         // without a busy loop.
         auto flags = sync::SpinLockAcquire(g_sock_lock);
         Socket& l = g_pool[listener_idx];
-        if (!l.in_use || l.closing || l.type != kSocketTypeStream || !l.listening ||
-            l.tcb == tcp::kInvalidTcbId)
+        if (!l.in_use || l.closing || l.type != kSocketTypeStream || !l.listening || l.tcb == tcp::kInvalidTcbId)
         {
             sync::SpinLockRelease(g_sock_lock, flags);
             return -1;
@@ -1048,8 +1047,8 @@ i64 SocketRecvStream(u32 idx, u8* out, u32 cap)
         // Kernel-buffer variant: `out` is the syscall handler's kernel
         // staging buffer (the handler CopyToUser's it afterwards), so the
         // user-pointer PipeRead would CopyToUser it and fail (-EFAULT).
-        const i64 got =
-            ::duetos::subsystems::linux::internal::PipeReadKernel(static_cast<u32>(state.loopback_pipe_recv_idx), out, cap);
+        const i64 got = ::duetos::subsystems::linux::internal::PipeReadKernel(
+            static_cast<u32>(state.loopback_pipe_recv_idx), out, cap);
         if (got > 0)
         {
             sync::SpinLockGuard guard(g_sock_lock);

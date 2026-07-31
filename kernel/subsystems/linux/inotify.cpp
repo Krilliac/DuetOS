@@ -342,41 +342,41 @@ i64 InotifyRead(u32 idx, u64 user_dst, u64 len)
             arch::Sti();
             continue;
         }
-    // Copy as many events as fit in the user buffer.
-    u8 stage[256];
-    u64 emitted = 0;
-    while (inst.count > 0)
-    {
-        const InotifyEvent& e = inst.ring[inst.tail];
-        const u64 record = 16 + e.name_len;
-        if (emitted + record > sizeof(stage) || emitted + record > len)
-            break;
-        // Pack: 16-byte header + name padded to e.name_len.
-        u8* p = stage + emitted;
-        const i32 wd = e.wd;
-        const u32 mask = e.mask;
-        const u32 cookie = e.cookie;
-        const u32 name_len = e.name_len;
-        for (u32 i = 0; i < 4; ++i)
-            p[i] = static_cast<u8>((wd >> (i * 8)) & 0xFF);
-        for (u32 i = 0; i < 4; ++i)
-            p[4 + i] = static_cast<u8>((mask >> (i * 8)) & 0xFF);
-        for (u32 i = 0; i < 4; ++i)
-            p[8 + i] = static_cast<u8>((cookie >> (i * 8)) & 0xFF);
-        for (u32 i = 0; i < 4; ++i)
-            p[12 + i] = static_cast<u8>((name_len >> (i * 8)) & 0xFF);
-        for (u32 i = 0; i < name_len; ++i)
-            p[16 + i] = (i < kInotifyPathCap && e.name[i] != '\0') ? static_cast<u8>(e.name[i]) : 0;
-        emitted += record;
-        inst.tail = (inst.tail + 1) % kInotifyRingCap;
-        --inst.count;
-    }
-    sync::SpinLockRelease(g_inotify_lock, lock_flags);
-    if (emitted == 0)
-        return kEAGAIN;
-    if (!mm::CopyToUser(reinterpret_cast<void*>(user_dst), stage, emitted))
-        return kEFAULT;
-    return static_cast<i64>(emitted);
+        // Copy as many events as fit in the user buffer.
+        u8 stage[256];
+        u64 emitted = 0;
+        while (inst.count > 0)
+        {
+            const InotifyEvent& e = inst.ring[inst.tail];
+            const u64 record = 16 + e.name_len;
+            if (emitted + record > sizeof(stage) || emitted + record > len)
+                break;
+            // Pack: 16-byte header + name padded to e.name_len.
+            u8* p = stage + emitted;
+            const i32 wd = e.wd;
+            const u32 mask = e.mask;
+            const u32 cookie = e.cookie;
+            const u32 name_len = e.name_len;
+            for (u32 i = 0; i < 4; ++i)
+                p[i] = static_cast<u8>((wd >> (i * 8)) & 0xFF);
+            for (u32 i = 0; i < 4; ++i)
+                p[4 + i] = static_cast<u8>((mask >> (i * 8)) & 0xFF);
+            for (u32 i = 0; i < 4; ++i)
+                p[8 + i] = static_cast<u8>((cookie >> (i * 8)) & 0xFF);
+            for (u32 i = 0; i < 4; ++i)
+                p[12 + i] = static_cast<u8>((name_len >> (i * 8)) & 0xFF);
+            for (u32 i = 0; i < name_len; ++i)
+                p[16 + i] = (i < kInotifyPathCap && e.name[i] != '\0') ? static_cast<u8>(e.name[i]) : 0;
+            emitted += record;
+            inst.tail = (inst.tail + 1) % kInotifyRingCap;
+            --inst.count;
+        }
+        sync::SpinLockRelease(g_inotify_lock, lock_flags);
+        if (emitted == 0)
+            return kEAGAIN;
+        if (!mm::CopyToUser(reinterpret_cast<void*>(user_dst), stage, emitted))
+            return kEFAULT;
+        return static_cast<i64>(emitted);
     }
 }
 

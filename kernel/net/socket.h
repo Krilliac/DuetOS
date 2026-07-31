@@ -82,7 +82,7 @@ struct SocketDgram
 struct Socket
 {
     bool in_use;
-    bool closing;      // owner/last-handle teardown has begun
+    bool closing; // owner/last-handle teardown has begun
     u8 _pad0[2];
     u32 refs;        // dup() bumps; close() drops
     u32 pins;        // transient operation pins; never exposed to userland

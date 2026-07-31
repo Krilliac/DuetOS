@@ -481,9 +481,8 @@ void DoThreadCreate(arch::TrapFrame* frame)
             return;
         }
         const u64 page_va = stack_base_va + p * mm::kPageSize;
-        if (!mm::AddressSpaceMapUserPage(
-                proc->as, page_va, frame_phys,
-                mm::kPagePresent | mm::kPageUser | mm::kPageWritable | mm::kPageNoExecute))
+        if (!mm::AddressSpaceMapUserPage(proc->as, page_va, frame_phys,
+                                         mm::kPagePresent | mm::kPageUser | mm::kPageWritable | mm::kPageNoExecute))
         {
             mm::FreeFrame(frame_phys);
             unwind_stack(p);

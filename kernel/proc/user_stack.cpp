@@ -57,8 +57,8 @@ bool CommitOnePage(mm::AddressSpace* as, u64 page_va)
     }
 
     const mm::PhysAddr frame = frame_r.value();
-    if (!mm::AddressSpaceMapUserPage(
-            as, page_va, frame, mm::kPagePresent | mm::kPageUser | mm::kPageWritable | mm::kPageNoExecute))
+    if (!mm::AddressSpaceMapUserPage(as, page_va, frame,
+                                     mm::kPagePresent | mm::kPageUser | mm::kPageWritable | mm::kPageNoExecute))
     {
         KLOG_WARN_V("mm/ustack", "stack grow: MapUserPage refused (budget/OOM) at va", page_va);
         mm::FreeFrame(frame);

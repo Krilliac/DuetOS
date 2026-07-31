@@ -179,7 +179,7 @@ __declspec(dllexport) BOOL __stdcall WriteConsoleW(HANDLE hConsole, const wchar_
     }
     /* Stack-local 256-byte ASCII bounce. CRT writes are typically
      * line-at-a-time so a small cap suffices. */
-    char ascii[256] = {0};
+    char ascii[256];
     DWORD cap = n > 256 ? 256 : n;
     for (DWORD i = 0; i < cap; ++i)
         ascii[i] = (char)(buf[i] & 0xFF);

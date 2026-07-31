@@ -42,7 +42,7 @@ namespace
 
 namespace duetos::mm
 {
-void AddressSpaceMapUserPage(AddressSpace*, u64, PhysAddr, u64)
+bool AddressSpaceMapUserPage(AddressSpace*, u64, PhysAddr, u64)
 {
     Trap("AddressSpaceMapUserPage");
 }
