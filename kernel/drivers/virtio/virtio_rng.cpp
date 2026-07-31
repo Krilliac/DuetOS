@@ -79,11 +79,13 @@ bool PullEntropy(VirtioPciLayout* L, VirtioQueue* q)
                 sample = (sample << 8) | buf[i];
             KLOG_INFO_2V("drivers/virtio/rng", "entropy pulled + mixed", "bytes", static_cast<u64>(mix_len),
                          "sample-u64", sample);
+            mm::FreeFrame(buf_phys);
             return true;
         }
         asm volatile("pause" ::: "memory");
     }
     KLOG_WARN("drivers/virtio/rng", "entropy poll timed out");
+    mm::FreeFrame(buf_phys);
     return false;
 }
 } // namespace
