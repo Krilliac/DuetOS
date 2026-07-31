@@ -1451,13 +1451,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T23:06:50Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] native-syscall-dispatch-bijection
+### [DONE] native-syscall-dispatch-bijection
 - **Session**: `Nathan-1412`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/test/native-syscall-dispatch-bijection.py tools/test/test-native-syscall-dispatch-bijection.py`
 - **Description**: Bounded native syscall IDL enum dispatch bijection and migration classification gate
 - **Claimed**: 2026-07-31T23:16:05Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-31T23:26:49Z
 
 ### [ACTIVE] gui-send-service-foundation
 - **Session**: `Codex-gui-send-service`
