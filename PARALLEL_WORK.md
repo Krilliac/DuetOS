@@ -842,3 +842,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Make automatic mmap range allocation atomic across Linux, VM, and Section callers
 - **Claimed**: 2026-07-31T16:51:11Z
 - **Status**: COMPLETED @ 2026-07-31T16:51:42Z
+
+### [ACTIVE] win32-section-fork-cursor
+- **Session**: `Nathan-86`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/subsystems/linux/syscall_clone.cpp`
+- **Description**: Snapshot the shared mmap cursor atomically when forking a Process
+- **Claimed**: 2026-07-31T16:51:58Z
+- **Status**: IN PROGRESS
