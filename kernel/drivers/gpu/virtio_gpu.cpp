@@ -317,6 +317,11 @@ struct GpuRespDisplayInfo
 struct ControlQ
 {
     bool up;
+    // A timed-out or malformed completion leaves the device-owned
+    // descriptor chain and response page live. Do not recycle the
+    // queue until a reset path exists; callers fall back to the CPU
+    // framebuffer instead.
+    bool faulted;
     u16 queue_size;
     u16 last_used_idx; // last `used->idx` we consumed
     u16 next_avail;    // our own increment, written into avail->idx
@@ -404,16 +409,26 @@ bool AllocateQueueRings(ControlQ& q)
     void* used_v = nullptr;
     void* req_v = nullptr;
     void* resp_v = nullptr;
+    bool desc_allocated = false;
+    bool avail_allocated = false;
+    bool used_allocated = false;
+    bool req_allocated = false;
+    bool resp_allocated = false;
     if (!AllocOnePage(&q.desc_phys, &desc_v))
-        return false;
+        goto fail;
+    desc_allocated = true;
     if (!AllocOnePage(&q.avail_phys, &avail_v))
-        return false;
+        goto fail;
+    avail_allocated = true;
     if (!AllocOnePage(&q.used_phys, &used_v))
-        return false;
+        goto fail;
+    used_allocated = true;
     if (!AllocOnePage(&q.req_phys, &req_v))
-        return false;
+        goto fail;
+    req_allocated = true;
     if (!AllocOnePage(&q.resp_phys, &resp_v))
-        return false;
+        goto fail;
+    resp_allocated = true;
     q.desc = static_cast<volatile VirtqDesc*>(desc_v);
     q.avail_hdr = static_cast<volatile VirtqAvailHdr*>(avail_v);
     q.avail_ring = reinterpret_cast<volatile u16*>(static_cast<u8*>(avail_v) + sizeof(VirtqAvailHdr));
@@ -423,12 +438,34 @@ bool AllocateQueueRings(ControlQ& q)
     q.resp_buf = static_cast<u8*>(resp_v);
     q.queue_size = kQueueSize;
     return true;
+
+fail:
+    // Nothing has been published to the device before all five pages
+    // are allocated, so every successful allocation is still ours to
+    // return immediately.
+    if (resp_allocated)
+        ::duetos::mm::FreeFrame(q.resp_phys);
+    if (req_allocated)
+        ::duetos::mm::FreeFrame(q.req_phys);
+    if (used_allocated)
+        ::duetos::mm::FreeFrame(q.used_phys);
+    if (avail_allocated)
+        ::duetos::mm::FreeFrame(q.avail_phys);
+    if (desc_allocated)
+        ::duetos::mm::FreeFrame(q.desc_phys);
+    q = {};
+    return false;
 }
 
 } // namespace
 
 bool VirtioGpuBringUp()
 {
+    if (g_cq.faulted)
+    {
+        arch::SerialWrite("[virtio-gpu] bring-up: controlq faulted; CPU fallback remains active\n");
+        return false;
+    }
     if (g_cq.up)
         return true;
     if (!g_last.present || g_last.common_cfg == nullptr || g_last.notify == nullptr)
@@ -559,7 +596,7 @@ void ResetLastDisplay()
 // resources).
 bool SubmitControlq(u32 req_len, u32 resp_len, u32* resp_bytes_out)
 {
-    if (!g_cq.up)
+    if (!g_cq.up || g_cq.faulted || g_cq.queue_size == 0 || g_cq.queue_size > kQueueSize)
         return false;
     if (req_len > 4096 || resp_len > 4096)
         return false;
@@ -583,7 +620,7 @@ bool SubmitControlq(u32 req_len, u32 resp_len, u32* resp_bytes_out)
     g_cq.avail_hdr->idx = g_cq.next_avail;
 
     asm volatile("" ::: "memory");
-
+    asm volatile("mfence" ::: "memory");
     *reinterpret_cast<volatile u16*>(g_cq.notify_reg) = 0;
 
     u64 spins = 0;
@@ -593,14 +630,41 @@ bool SubmitControlq(u32 req_len, u32 resp_len, u32* resp_bytes_out)
         if (++spins > 1'000'000)
         {
             arch::SerialWrite("[virtio-gpu] submit: timeout waiting for used ring\n");
+            // The device may still own descriptor 0 and either DMA
+            // buffer. Poison the queue rather than overwriting those
+            // buffers on a later call; the caller stays on CPU paint.
+            g_cq.faulted = true;
+            g_cq.up = false;
             return false;
         }
     }
+    const u16 expected_used_idx = static_cast<u16>(g_cq.last_used_idx + 1);
+    if (g_cq.used_hdr->idx != expected_used_idx)
+    {
+        arch::SerialWrite("[virtio-gpu] submit: used-ring index jumped; controlq faulted\n");
+        g_cq.faulted = true;
+        g_cq.up = false;
+        return false;
+    }
     const u16 used_slot = g_cq.last_used_idx % g_cq.queue_size;
+    if (g_cq.used_ring[used_slot].id != 0)
+    {
+        arch::SerialWrite("[virtio-gpu] submit: used-ring returned an unknown descriptor; controlq faulted\n");
+        g_cq.faulted = true;
+        g_cq.up = false;
+        return false;
+    }
     const u32 resp_bytes = g_cq.used_ring[used_slot].len;
+    if (resp_bytes > resp_len)
+    {
+        arch::SerialWrite("[virtio-gpu] submit: used length exceeds response buffer; controlq faulted\n");
+        g_cq.faulted = true;
+        g_cq.up = false;
+        return false;
+    }
     g_cq.last_used_idx = static_cast<u16>(g_cq.last_used_idx + 1);
 
-    asm volatile("" ::: "memory");
+    asm volatile("mfence" ::: "memory");
 
     if (resp_bytes_out != nullptr)
         *resp_bytes_out = resp_bytes;
@@ -644,6 +708,14 @@ const VirtioDisplayInfo& VirtioGpuGetDisplayInfo()
     u32 resp_bytes = 0;
     if (!SubmitControlq(sizeof(GpuCtrlHdr), sizeof(GpuRespDisplayInfo), &resp_bytes))
         return g_last_display;
+
+    if (resp_bytes < sizeof(GpuRespDisplayInfo))
+    {
+        arch::SerialWrite("[virtio-gpu] GET_DISPLAY_INFO: short response; controlq faulted\n");
+        g_cq.faulted = true;
+        g_cq.up = false;
+        return g_last_display;
+    }
 
     auto* resp = reinterpret_cast<const GpuRespDisplayInfo*>(g_cq.resp_buf);
     if (resp->hdr.type != kRespOkDisplayInfo)
@@ -709,7 +781,7 @@ namespace
 
 // Command numbers (virtio 1.0 §5.7.6.7).
 constexpr u32 kCmdResourceCreate2d = 0x0101;
-[[maybe_unused]] constexpr u32 kCmdResourceUnref = 0x0102;
+constexpr u32 kCmdResourceUnref = 0x0102;
 constexpr u32 kCmdSetScanout = 0x0103;
 constexpr u32 kCmdResourceFlush = 0x0104;
 constexpr u32 kCmdTransferToHost2d = 0x0105;
@@ -789,6 +861,18 @@ struct ResourceAttachBacking
     MemEntry entries[1]; // nr_entries = 1 in v2
 };
 
+// These wire sizes are part of the virtio-gpu protocol, not compiler
+// convenience. Keep the request/response pages bounded if a future
+// field edit changes alignment or accidentally grows a command.
+static_assert(sizeof(GpuCtrlHdr) == 24);
+static_assert(sizeof(GpuRespDisplayInfo) == 408);
+static_assert(sizeof(ResCreate2d) == 40);
+static_assert(sizeof(ResUnref) == 32);
+static_assert(sizeof(SetScanout) == 48);
+static_assert(sizeof(ResourceFlush) == 48);
+static_assert(sizeof(TransferToHost2d) == 56);
+static_assert(sizeof(ResourceAttachBacking) == 48);
+
 constinit VirtioScanoutInfo g_scanout = {};
 
 // Whether the scanout is currently bound to its real resource_id
@@ -806,14 +890,44 @@ constinit bool g_scanout_enabled = true;
 constinit GpuResourceHandle g_scanout_surface = kInvalidGpuResource;
 constinit GpuResourceHandle g_scanout_vram = kInvalidGpuResource;
 
+struct PendingResourceCleanup
+{
+    bool active;
+    u32 resource_id;
+    ::duetos::mm::PhysAddr backing_phys;
+    u64 backing_bytes;
+};
+
+constinit PendingResourceCleanup g_pending_cleanup = {};
+
+constexpr u32 kScanoutResourceId = 1;
+constexpr u32 kScanoutId = 0;
+constexpr u64 kPageSize = 4096;
+
+enum class HeaderCommandResult : u8
+{
+    kOk,
+    kDeviceError,
+    kTransportFailure,
+};
+
 // Issue one header-returning command with a prebuilt request. Logs
 // a failure line and returns false if the response type isn't
 // RESP_OK_NODATA. `label` is purely for log clarity.
-bool SubmitHeaderCommand(u32 req_len, const char* label)
+HeaderCommandResult SubmitHeaderCommandResultFor(u32 req_len, const char* label)
 {
     u32 resp_bytes = 0;
     if (!SubmitControlq(req_len, sizeof(GpuCtrlHdr), &resp_bytes))
-        return false;
+        return HeaderCommandResult::kTransportFailure;
+    if (resp_bytes < sizeof(GpuCtrlHdr))
+    {
+        arch::SerialWrite("[virtio-gpu] ");
+        arch::SerialWrite(label);
+        arch::SerialWrite(": short response; controlq faulted\n");
+        g_cq.faulted = true;
+        g_cq.up = false;
+        return HeaderCommandResult::kTransportFailure;
+    }
     auto* resp = reinterpret_cast<const GpuCtrlHdr*>(g_cq.resp_buf);
     if (resp->type != kRespOkNoData)
     {
@@ -822,14 +936,70 @@ bool SubmitHeaderCommand(u32 req_len, const char* label)
         arch::SerialWrite(": unexpected resp_type=");
         arch::SerialWriteHex(resp->type);
         arch::SerialWrite(" (expected 0x1100)\n");
-        return false;
+        return HeaderCommandResult::kDeviceError;
     }
+    return HeaderCommandResult::kOk;
+}
+
+bool SubmitHeaderCommand(u32 req_len, const char* label)
+{
+    return SubmitHeaderCommandResultFor(req_len, label) == HeaderCommandResult::kOk;
+}
+
+void FreeScanoutBacking(::duetos::mm::PhysAddr backing_phys, u64 backing_bytes)
+{
+    const u64 pages = (backing_bytes + kPageSize - 1) / kPageSize;
+    ::duetos::mm::FreeContiguousFrames(backing_phys, pages);
+}
+
+bool TryReleasePendingResource()
+{
+    if (!g_pending_cleanup.active)
+        return true;
+    if (!g_cq.up || g_cq.faulted)
+        return false;
+
+    ClearIoBuffers(sizeof(ResUnref), sizeof(GpuCtrlHdr));
+    auto* req = reinterpret_cast<volatile ResUnref*>(g_cq.req_buf);
+    FillCtrlHdr(&req->hdr, kCmdResourceUnref);
+    req->resource_id = g_pending_cleanup.resource_id;
+    req->padding = 0;
+    if (SubmitHeaderCommandResultFor(sizeof(ResUnref), "RESOURCE_UNREF(cleanup)") != HeaderCommandResult::kOk)
+        return false;
+
+    FreeScanoutBacking(g_pending_cleanup.backing_phys, g_pending_cleanup.backing_bytes);
+    g_pending_cleanup = {};
+    arch::SerialWrite("[virtio-gpu] resource-lifecycle: cleanup ACKed; backing released\n");
     return true;
 }
 
-constexpr u32 kScanoutResourceId = 1;
-constexpr u32 kScanoutId = 0;
-constexpr u64 kPageSize = 4096;
+void RememberPendingResource(::duetos::mm::PhysAddr backing_phys, u64 backing_bytes)
+{
+    g_pending_cleanup.active = true;
+    g_pending_cleanup.resource_id = kScanoutResourceId;
+    g_pending_cleanup.backing_phys = backing_phys;
+    g_pending_cleanup.backing_bytes = backing_bytes;
+    arch::SerialWrite("[virtio-gpu] resource-lifecycle: retaining backing until RESOURCE_UNREF is ACKed\n");
+}
+
+bool CleanupFailedSetup(::duetos::mm::PhysAddr backing_phys, u64 backing_bytes, bool resource_may_exist,
+                        const char* stage)
+{
+    if (!resource_may_exist)
+    {
+        FreeScanoutBacking(backing_phys, backing_bytes);
+        return false;
+    }
+
+    RememberPendingResource(backing_phys, backing_bytes);
+    if (!TryReleasePendingResource())
+    {
+        arch::SerialWrite("[virtio-gpu] setup-scanout: ");
+        arch::SerialWrite(stage);
+        arch::SerialWrite(" failed; CPU fallback remains active\n");
+    }
+    return false;
+}
 
 } // namespace
 
@@ -846,6 +1016,12 @@ bool VirtioGpuSetupScanout(u32 width, u32 height)
     if (!g_cq.up)
     {
         arch::SerialWrite("[virtio-gpu] setup-scanout: bring-up has not run\n");
+        return false;
+    }
+    if (!TryReleasePendingResource())
+    {
+        arch::SerialWrite("[virtio-gpu] setup-scanout: pending resource cleanup not complete; "
+                          "CPU fallback remains active\n");
         return false;
     }
     if (width == 0 || height == 0 || width > 4096 || height > 4096)
@@ -872,6 +1048,8 @@ bool VirtioGpuSetupScanout(u32 width, u32 height)
     for (u64 i = 0; i < bytes; ++i)
         static_cast<u8*>(backing_va)[i] = 0;
 
+    bool resource_may_exist = false;
+
     // 1) RESOURCE_CREATE_2D
     {
         ClearIoBuffers(sizeof(ResCreate2d), sizeof(GpuCtrlHdr));
@@ -881,8 +1059,11 @@ bool VirtioGpuSetupScanout(u32 width, u32 height)
         req->format = kFmtB8G8R8A8Unorm;
         req->width = width;
         req->height = height;
-        if (!SubmitHeaderCommand(sizeof(ResCreate2d), "RESOURCE_CREATE_2D"))
-            return false;
+        const HeaderCommandResult result = SubmitHeaderCommandResultFor(sizeof(ResCreate2d), "RESOURCE_CREATE_2D");
+        if (result != HeaderCommandResult::kOk)
+            return CleanupFailedSetup(base, bytes, result == HeaderCommandResult::kTransportFailure,
+                                      "RESOURCE_CREATE_2D");
+        resource_may_exist = true;
     }
 
     // 2) RESOURCE_ATTACH_BACKING (single contiguous entry).
@@ -895,8 +1076,9 @@ bool VirtioGpuSetupScanout(u32 width, u32 height)
         req->entries[0].addr = base;
         req->entries[0].length = static_cast<u32>(bytes);
         req->entries[0].padding = 0;
-        if (!SubmitHeaderCommand(sizeof(ResourceAttachBacking), "RESOURCE_ATTACH_BACKING"))
-            return false;
+        if (SubmitHeaderCommandResultFor(sizeof(ResourceAttachBacking), "RESOURCE_ATTACH_BACKING") !=
+            HeaderCommandResult::kOk)
+            return CleanupFailedSetup(base, bytes, resource_may_exist, "RESOURCE_ATTACH_BACKING");
     }
 
     // 3) SET_SCANOUT
@@ -910,8 +1092,8 @@ bool VirtioGpuSetupScanout(u32 width, u32 height)
         req->r.height = height;
         req->scanout_id = kScanoutId;
         req->resource_id = kScanoutResourceId;
-        if (!SubmitHeaderCommand(sizeof(SetScanout), "SET_SCANOUT"))
-            return false;
+        if (SubmitHeaderCommandResultFor(sizeof(SetScanout), "SET_SCANOUT") != HeaderCommandResult::kOk)
+            return CleanupFailedSetup(base, bytes, resource_may_exist, "SET_SCANOUT");
     }
 
     g_scanout.ready = true;
@@ -923,6 +1105,7 @@ bool VirtioGpuSetupScanout(u32 width, u32 height)
     g_scanout.backing_phys = base;
     g_scanout.backing_bytes = bytes;
     g_scanout.backing_va = backing_va;
+    g_scanout_enabled = true;
 
     // Register with the GPU resource accountant: the scanout is
     // a kernel-owned surface (host-side render target) and a
@@ -947,6 +1130,8 @@ bool VirtioGpuSetupScanout(u32 width, u32 height)
     arch::SerialWrite(" va=");
     arch::SerialWriteHex(reinterpret_cast<u64>(backing_va));
     arch::SerialWrite("\n");
+    arch::SerialWrite("[virtio-gpu] resource-lifecycle: committed; guest backing remains live until "
+                      "RESOURCE_UNREF ACK\n");
     return true;
 }
 
@@ -1080,10 +1265,14 @@ bool VirtioGpuFlushScanout(u32 x, u32 y, u32 w, u32 h)
     // Clip to the resource extent — the host rejects rects outside.
     if (x >= g_scanout.width || y >= g_scanout.height)
         return false;
-    if (x + w > g_scanout.width)
-        w = g_scanout.width - x;
-    if (y + h > g_scanout.height)
-        h = g_scanout.height - y;
+    // Use subtraction after the bounds checks; x + w can wrap before
+    // the comparison when a damaged rect comes from a hostile caller.
+    const u32 available_w = g_scanout.width - x;
+    const u32 available_h = g_scanout.height - y;
+    if (w > available_w)
+        w = available_w;
+    if (h > available_h)
+        h = available_h;
     if (w == 0 || h == 0)
         return true; // nothing to flush
 
