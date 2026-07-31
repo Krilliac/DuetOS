@@ -110,8 +110,10 @@ struct EpollWatch
 struct Epoll
 {
     bool in_use;
-    u8 _pad[3];
+    bool closing;
+    u8 _pad[2];
     u32 refs;
+    u32 pins;
     u32 watch_count;
     u32 _pad2;
     EpollWatch watches[kEpollWatchCap];
@@ -162,6 +164,43 @@ struct TimerfdPin
     explicit operator bool() const { return timer != nullptr; }
 };
 
+struct EpollPin
+{
+    u32 idx;
+    Epoll* epoll;
+
+    explicit EpollPin(u32 value) : idx(value), epoll(nullptr)
+    {
+        if (value >= kEpollPoolCap)
+            return;
+        sync::SpinLockGuard guard(g_async_lock);
+        Epoll& e = g_epoll_pool[value];
+        if (e.in_use && !e.closing)
+        {
+            ++e.pins;
+            epoll = &e;
+        }
+    }
+
+    ~EpollPin()
+    {
+        if (epoll == nullptr)
+            return;
+        sync::SpinLockGuard guard(g_async_lock);
+        Epoll& e = g_epoll_pool[idx];
+        if (e.pins > 0)
+            --e.pins;
+        if (e.pins == 0 && e.refs == 0)
+        {
+            e.in_use = false;
+            e.closing = false;
+            e.watch_count = 0;
+        }
+    }
+
+    explicit operator bool() const { return epoll != nullptr; }
+};
+
 i32 TimerfdAlloc(u32 clock_id)
 {
     sync::SpinLockGuard guard(g_async_lock);
@@ -209,22 +248,22 @@ i32 SignalfdAlloc(u64 mask)
 
 i32 EpollAlloc()
 {
-    arch::Cli();
+    sync::SpinLockGuard guard(g_async_lock);
     for (u32 i = 0; i < kEpollPoolCap; ++i)
     {
         if (!g_epoll_pool[i].in_use)
         {
             Epoll& e = g_epoll_pool[i];
             e.in_use = true;
+            e.closing = false;
             e.refs = 1;
+            e.pins = 0;
             e.watch_count = 0;
             for (u32 w = 0; w < kEpollWatchCap; ++w)
                 e.watches[w].in_use = false;
-            arch::Sti();
             return static_cast<i32>(i);
         }
     }
-    arch::Sti();
     return -1;
 }
 
@@ -673,33 +712,33 @@ void EpollRetain(u32 idx)
 {
     if (idx >= kEpollPoolCap)
         return;
-    arch::Cli();
+    sync::SpinLockGuard guard(g_async_lock);
     Epoll& e = g_epoll_pool[idx];
-    if (e.in_use)
+    if (e.in_use && !e.closing)
         ++e.refs;
-    arch::Sti();
 }
 
 void EpollRelease(u32 idx)
 {
     if (idx >= kEpollPoolCap)
         return;
-    arch::Cli();
+    sync::SpinLockGuard guard(g_async_lock);
     Epoll& e = g_epoll_pool[idx];
     if (!e.in_use || e.refs == 0)
-    {
-        arch::Sti();
         return;
-    }
     --e.refs;
     if (e.refs == 0)
     {
-        e.in_use = false;
-        e.watch_count = 0;
+        e.closing = true;
         for (u32 w = 0; w < kEpollWatchCap; ++w)
             e.watches[w].in_use = false;
+        if (e.pins == 0)
+        {
+            e.in_use = false;
+            e.closing = false;
+            e.watch_count = 0;
+        }
     }
-    arch::Sti();
 }
 
 u32 LinuxFdEpollReady(u32 fd, u32 interest_mask)
@@ -864,17 +903,19 @@ i64 DoEpollCtl(u64 epfd, u64 op, u64 fd, u64 user_event)
     const u32 idx = p->linux_fds[epfd].first_cluster;
     if (idx >= kEpollPoolCap)
         return kEINVAL;
+    EpollPin pin(idx);
+    if (!pin)
+        return kEBADF;
     EpollEvent ev{};
     if (op != kEpollCtlDel && user_event != 0)
     {
         if (!mm::CopyFromUser(&ev, reinterpret_cast<const void*>(user_event), sizeof(ev)))
             return kEFAULT;
     }
-    arch::Cli();
-    Epoll& e = g_epoll_pool[idx];
-    if (!e.in_use)
+    sync::SpinLockGuard guard(g_async_lock);
+    Epoll& e = *pin.epoll;
+    if (!e.in_use || e.closing)
     {
-        arch::Sti();
         return kEBADF;
     }
     // Search for an existing watch on this fd.
@@ -889,7 +930,6 @@ i64 DoEpollCtl(u64 epfd, u64 op, u64 fd, u64 user_event)
     {
         if (found >= 0)
         {
-            arch::Sti();
             return -17; // -EEXIST
         }
         for (u32 w = 0; w < kEpollWatchCap; ++w)
@@ -901,38 +941,31 @@ i64 DoEpollCtl(u64 epfd, u64 op, u64 fd, u64 user_event)
                 e.watches[w].events = ev.events;
                 e.watches[w].user_data = ev.data;
                 ++e.watch_count;
-                arch::Sti();
                 return 0;
             }
         }
-        arch::Sti();
         return kENOMEM;
     }
     if (op == kEpollCtlDel)
     {
         if (found < 0)
         {
-            arch::Sti();
             return kENOENT;
         }
         e.watches[found].in_use = false;
         --e.watch_count;
-        arch::Sti();
         return 0;
     }
     if (op == kEpollCtlMod)
     {
         if (found < 0)
         {
-            arch::Sti();
             return kENOENT;
         }
         e.watches[found].events = ev.events;
         e.watches[found].user_data = ev.data;
-        arch::Sti();
         return 0;
     }
-    arch::Sti();
     return kEINVAL;
 }
 
@@ -955,6 +988,9 @@ i64 DoEpollWait(u64 epfd, u64 user_events, u64 maxevents, u64 timeout_ms)
     if (idx >= kEpollPoolCap)
         return kEINVAL;
     // Convert timeout_ms (signed by caller convention; -1 = infinite)
+    EpollPin pin(idx);
+    if (!pin)
+        return kEBADF;
     // into a tick budget. 10 ms per tick, round up so a 1 ms timeout
     // still polls once before returning.
     bool infinite = false;
@@ -975,17 +1011,17 @@ i64 DoEpollWait(u64 epfd, u64 user_events, u64 maxevents, u64 timeout_ms)
     while (true)
     {
         u32 hits = 0;
-        arch::Cli();
-        Epoll& e = g_epoll_pool[idx];
-        if (!e.in_use)
+        auto lock_flags = sync::SpinLockAcquire(g_async_lock);
+        Epoll& e = *pin.epoll;
+        if (!e.in_use || e.closing)
         {
-            arch::Sti();
+            sync::SpinLockRelease(g_async_lock, lock_flags);
             return kEBADF;
         }
         const u32 watch_count_snap = e.watch_count;
         if (watch_count_snap == 0)
         {
-            arch::Sti();
+            sync::SpinLockRelease(g_async_lock, lock_flags);
             // Empty epoll set — block until timeout (Linux returns 0
             // immediately if no watches, but we mimic the more useful
             // "wait for the timeout" so callers can throttle loops
@@ -996,7 +1032,7 @@ i64 DoEpollWait(u64 epfd, u64 user_events, u64 maxevents, u64 timeout_ms)
             EpollWatch snap[kEpollWatchCap]{};
             for (u32 w = 0; w < kEpollWatchCap; ++w)
                 snap[w] = e.watches[w];
-            arch::Sti();
+            sync::SpinLockRelease(g_async_lock, lock_flags);
             for (u32 w = 0; w < kEpollWatchCap && hits < maxevents; ++w)
             {
                 if (!snap[w].in_use)
