@@ -674,3 +674,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: No description provided
 - **Claimed**: 2026-07-31T14:35:52Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] task-lookup-shell
+- **Session**: `Nathan-29`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/shell/shell_process.cpp`
+- **Description**: Retire
+- **Claimed**: 2026-07-31T14:36:08Z
+- **Status**: IN PROGRESS
