@@ -1002,3 +1002,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Align maintainer and wiki boot claims with required GRUB plus Multiboot2 release contract and experimental direct UEFI status
 - **Claimed**: 2026-07-31T19:37:39Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] boot-release-gate
+- **Session**: `Codex-gui-task-queue`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `CMakeLists.txt boot/grub/grub.cfg tools/test/ctest-boot-smoke.sh .github/workflows/release.yml`
+- **Description**: Require the GRUB plus Multiboot2 smoke before publication and fail closed on missing prerequisites or timeouts
+- **Claimed**: 2026-07-31T19:37:47Z
+- **Status**: IN PROGRESS
