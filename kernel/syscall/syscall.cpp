@@ -1962,7 +1962,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
             // budget/table/page-table resource refusal. The SEC-003
             // pre-screen proved this VA was absent; a failed result means
             // the frame remains caller-owned and the allocation must unwind.
-            if (mm::AddressSpaceProbePte(target->as, va) == mm::kNullFrame)
+            if (!mm::AddressSpaceMapUserPage(target->as, va, fp, mm::kPagePresent | pte_flags))
             {
                 mm::FreeFrame(fp);
                 for (u64 j = base_va; j < va; j += page_size)
