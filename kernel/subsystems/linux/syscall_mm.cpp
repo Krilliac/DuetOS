@@ -443,7 +443,12 @@ i64 DoMunmap(u64 addr, u64 len)
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || p->as == nullptr)
         return kEINVAL;
-    const u64 aligned_len = (len + 0xFFF) & ~u64(0xFFF);
+    const u64 aligned_len = PageUp(len);
+    if (aligned_len == 0)
+        return kEINVAL;
+    constexpr u64 kUserMaxExclusive = 0x0000800000000000ULL;
+    if (addr >= kUserMaxExclusive || aligned_len > (kUserMaxExclusive - addr))
+        return kEINVAL;
     u64 freed = 0;
     for (u64 off = 0; off < aligned_len; off += mm::kPageSize)
     {
@@ -615,7 +620,12 @@ i64 DoMincore(u64 addr, u64 len, u64 user_vec)
     (void)addr;
     if (user_vec == 0)
         return kEFAULT;
-    const u64 pages = (len + 0xFFFu) / 0x1000u;
+    if (len == 0)
+        return 0;
+    const u64 aligned_len = PageUp(len);
+    if (aligned_len == 0)
+        return kEINVAL;
+    const u64 pages = aligned_len / mm::kPageSize;
     if (pages == 0)
         return 0;
     constexpr u64 kMaxPages = 4096;
