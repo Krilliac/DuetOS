@@ -2039,14 +2039,14 @@ bool MaybeLaunchRamfsExe(const duetos::fs::RamfsNode* sel)
         return false;
     char tag[40];
     duetos::u32 ti = 0;
-    const char* prefix = "ramfs-launch:";
-    while (prefix[ti] != '\0' && ti < sizeof(tag) - 1)
+    const char prefix[] = "ramfs-launch:";
+    while (ti < sizeof(tag) - 1 && ti < sizeof(prefix) - 1 && prefix[ti] != '\0')
     {
         tag[ti] = prefix[ti];
         ++ti;
     }
     duetos::u32 ni = 0;
-    while (sel->name[ni] != '\0' && ti < sizeof(tag) - 1)
+    while (ti < sizeof(tag) - 1 && sel->name[ni] != '\0')
     {
         tag[ti++] = sel->name[ni++];
     }
@@ -2117,13 +2117,13 @@ bool MaybeLaunchFat32Entry(const duetos::fs::fat32::DirEntry& e)
     }
     char tag[40];
     duetos::u32 ti = 0;
-    const char* prefix = "fat32-launch:";
-    while (prefix[ti] != '\0' && ti < sizeof(tag) - 1)
+    const char prefix[] = "fat32-launch:";
+    while (ti < sizeof(tag) - 1 && ti < sizeof(prefix) - 1 && prefix[ti] != '\0')
     {
         tag[ti] = prefix[ti];
         ++ti;
     }
-    for (duetos::u32 i = 0; e.name[i] != '\0' && ti < sizeof(tag) - 1; ++i)
+    for (duetos::u32 i = 0; ti < sizeof(tag) - 1 && e.name[i] != '\0'; ++i)
         tag[ti++] = e.name[i];
     tag[ti] = '\0';
     // Build the volume-relative path so SpawnPeFile can derive the

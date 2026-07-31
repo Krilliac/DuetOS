@@ -173,7 +173,7 @@ constinit State g_state = {duetos::drivers::video::kWindowInvalid, {}, 0, {}, 0,
 void SetDisplayLiteral(const char* s)
 {
     u32 n = 0;
-    while (s[n] != '\0' && n < kDisplayCap)
+    while (n < kDisplayCap && s[n] != '\0')
     {
         g_state.display[n] = s[n];
         ++n;
