@@ -96,7 +96,7 @@ cleanup debt: move the residual up and delete the rest.
 
 ### AddressSpace region table — synchronise reads against the swap-with-last compaction
 
-- **Finding (audit R1-14, high):** `AddressSpace::regions_lock` is
+- **Historical finding (audit R1-14, fixed in this audit):** `AddressSpace::regions_lock` was
   acquired in exactly ONE place — `AddressSpaceMapUserPage`
   (`mm/address_space.cpp:396`). `AddressSpaceUnmapUserPage`,
   `AddressSpaceClearUserMappings`, `AddressSpaceFork`,
@@ -132,7 +132,13 @@ cleanup debt: move the residual up and delete the rest.
   alternative is to stop compacting — tombstone the dying row and
   reclaim separately — which keeps readers correct without any new
   lock on the read path.
-- **Blocks on:** deciding between those two, since it changes an
+- **Resolved:** the implementation now uses a per-AS non-sleeping
+  `sync::SpinLock` across map, unmap, fork snapshot, clear, lookup,
+  page-count diagnostics, borrowed-page PTE operations, and teardown.
+  The breakpoint resolver can therefore call the lookup while holding
+  its own spinlock without sleeping. Full MSVC/QEMU/SMP verification
+  remains pending.
+- **Historical blocker:** deciding between those two, since it changes an
   mm-core invariant. Not attempted as a drive-by: `address_space.cpp`
   is the highest-blast-radius file in the tree and a partial fix here
   (locking writers only, leaving the spinlock-holding reader

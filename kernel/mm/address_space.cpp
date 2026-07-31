@@ -252,7 +252,7 @@ core::Result<AddressSpace*> AddressSpaceCreate(u64 frame_budget)
     // Zero the chunk before populating. KMalloc returns memory still
     // carrying whatever was last in it — including the freed-payload
     // poison `kFreedPagePoison` (0xDE) from the C2 patch — and the
-    // embedded `regions_lock` (RwLock) is otherwise default-initialised
+    // embedded `regions_lock` is otherwise default-initialised
     // by the field declaration. Without this, `Mutex.waiters.tail`
     // reads back as `0xdededededededede` and the first MutexLock
     // trying to enqueue a waiter dereferences a non-canonical pointer
@@ -386,14 +386,14 @@ void AddressSpaceMapUserPage(AddressSpace* as, u64 virt, PhysAddr frame, u64 fla
     {
         PanicAs("AddressSpaceMapUserPage: kPageGlobal on user page", flags);
     }
-    // Take the regions lock exclusive across the whole mutation
+    // Take the structural regions spinlock across the whole mutation
     // (budget check + PTE write + TLB invalidate + region table
     // append). Today the AS is single-Task; the lock is
     // uncontended. The day a Process becomes multi-threaded
     // (multiple Tasks per AS), this exclusive guard already
     // serialises concurrent map/unmap callers correctly.
-    // (B1-followup, 2026-04-28.)
-    sync::RwLockExclusiveGuard guard(as->regions_lock);
+    // so no reader can observe a partially committed mapping.
+    sync::SpinLockGuard guard(as->regions_lock);
 
     if (as->region_count >= as->frame_budget)
     {
@@ -534,6 +534,7 @@ bool AddressSpaceUnmapUserPage(AddressSpace* as, u64 virt)
     {
         PanicAs("AddressSpaceUnmapUserPage: unaligned virt", virt);
     }
+    sync::SpinLockGuard guard(as->regions_lock);
     // Find the region. Linear scan over region_count — typical
     // region_count is small (≤128), and munmap is infrequent; this
     // stays cheaper than building an index.
@@ -585,6 +586,7 @@ bool AddressSpaceMapBorrowedPage(AddressSpace* as, u64 virt, PhysAddr frame, u64
     {
         PanicAs("AddressSpaceMapBorrowedPage: kPageGlobal on user page", flags);
     }
+    sync::SpinLockGuard guard(as->regions_lock);
     u64* pte = WalkToPteIn(as->pml4_virt, virt, /*create=*/true);
     if (pte == nullptr)
     {
@@ -611,6 +613,7 @@ PhysAddr AddressSpaceProbePte(const AddressSpace* as, u64 virt)
         return kNullFrame;
     if ((virt & 0xFFF) != 0)
         PanicAs("AddressSpaceProbePte: unaligned virt", virt);
+    sync::SpinLockGuard guard(as->regions_lock);
     u64* pte = WalkToPteIn(as->pml4_virt, virt, /*create=*/false);
     if (pte == nullptr || (*pte & kPagePresent) == 0)
         return kNullFrame;
@@ -623,6 +626,7 @@ u64 AddressSpaceProbePteRaw(const AddressSpace* as, u64 virt)
         return 0;
     if ((virt & 0xFFF) != 0)
         PanicAs("AddressSpaceProbePteRaw: unaligned virt", virt);
+    sync::SpinLockGuard guard(as->regions_lock);
     u64* pte = WalkToPteIn(as->pml4_virt, virt, /*create=*/false);
     if (pte == nullptr || (*pte & kPagePresent) == 0)
         return 0;
@@ -640,11 +644,18 @@ core::Result<AddressSpace*> AddressSpaceFork(const AddressSpace* parent)
     if (!child_r)
         return core::Err{child_r.error()};
     AddressSpace* child = child_r.value();
+    sync::SpinLockGuard parent_guard(parent->regions_lock);
     for (u16 i = 0; i < parent->region_count; ++i)
     {
         const u64 va = parent->regions[i].vaddr;
         const PhysAddr parent_frame = parent->regions[i].frame;
-        const u64 parent_pte = AddressSpaceProbePteRaw(parent, va);
+        // The parent region lock is held for the whole snapshot, so
+        // use the lock-free inner PTE walk here rather than re-entering
+        // the non-recursive spinlock through the public probe helper.
+        u64* parent_pte_ptr = WalkToPteIn(parent->pml4_virt, va, /*create=*/false);
+        const u64 parent_pte = (parent_pte_ptr != nullptr && (*parent_pte_ptr & kPagePresent) != 0)
+                                   ? *parent_pte_ptr
+                                   : 0;
         if (parent_pte == 0)
         {
             // Region table thinks `va` is mapped but the PTE
@@ -694,6 +705,7 @@ void AddressSpaceClearUserMappings(AddressSpace* as)
 {
     if (as == nullptr)
         return;
+    sync::SpinLockGuard guard(as->regions_lock);
     // Pop entries off the tail. UnmapUserPageByIndex handles the
     // PTE clear + TLB shootdown + frame free + region-table
     // decrement; passing the index directly avoids the linear
@@ -722,6 +734,7 @@ bool AddressSpaceProtectUserPage(AddressSpace* as, u64 virt, u64 new_flags)
     if ((new_flags & kPageGlobal) != 0)
         PanicAs("AddressSpaceProtectUserPage: kPageGlobal on user page", new_flags);
 
+    sync::SpinLockGuard guard(as->regions_lock);
     u64* pte = WalkToPteIn(as->pml4_virt, virt, /*create=*/false);
     if (pte == nullptr || (*pte & kPagePresent) == 0)
         return false;
@@ -764,6 +777,7 @@ bool AddressSpaceUnmapBorrowedPage(AddressSpace* as, u64 virt)
     {
         PanicAs("AddressSpaceUnmapBorrowedPage: unaligned virt", virt);
     }
+    sync::SpinLockGuard guard(as->regions_lock);
     u64* pte = WalkToPteIn(as->pml4_virt, virt, /*create=*/false);
     if (pte == nullptr || (*pte & kPagePresent) == 0)
     {
@@ -813,6 +827,7 @@ PhysAddr AddressSpaceLookupUserFrame(const AddressSpace* as, u64 virt)
 {
     if (as == nullptr)
         return kNullFrame;
+    sync::SpinLockGuard guard(as->regions_lock);
     const u64 page_va = virt & ~(kPageSize - 1);
     for (u16 i = 0; i < as->region_count; ++i)
     {
@@ -902,11 +917,14 @@ void AddressSpaceRelease(AddressSpace* as)
     // about to free the entire table tree), but draining the region
     // table makes the freed-frame ledger easy to audit in the
     // FrameAllocator stats: regions.count + page-table frames freed.
-    for (u16 i = 0; i < as->region_count; ++i)
     {
-        FreeFrame(as->regions[i].frame);
+        sync::SpinLockGuard guard(as->regions_lock);
+        for (u16 i = 0; i < as->region_count; ++i)
+        {
+            FreeFrame(as->regions[i].frame);
+        }
+        as->region_count = 0;
     }
-    as->region_count = 0;
     arch::SerialWrite("[as] regions freed\n");
 
     // Free intermediate user-half tables, then the PML4 itself.
