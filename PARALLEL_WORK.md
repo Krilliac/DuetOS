@@ -571,10 +571,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T07:24:07Z
 - **Status**: COMPLETED @ 2026-07-31T07:26:46Z
 
-### [ACTIVE] gpu-nvidia-gsp-ring
+### [DONE] gpu-nvidia-gsp-ring
 - **Session**: `Nathan-859`
 - **Branch**: `claude/gpu-nvidia-gsp-ring-20260731`
 - **Files**: `kernel/drivers/gpu/nvidia_gpu.h kernel/drivers/gpu/nvidia_gpu.cpp kernel/drivers/gpu/nvidia_gsp_fw.h kernel/drivers/gpu/nvidia_gsp_fw.cpp`
 - **Description**: Bounded GSP RPC ring model with structural overflow and corruption selftests; no PFIFO/PGRAPH writes
 - **Claimed**: 2026-07-31T07:25:58Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-31T07:31:13Z
