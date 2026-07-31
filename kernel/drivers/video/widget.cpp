@@ -3947,8 +3947,10 @@ void WindowClipboardSetText(const char* text)
     // Capture the previous content first so we can promote it to
     // history before overwriting. An empty previous slot is not
     // pushed (nothing to remember).
-    char prev[kWindowClipboardMax];
-    const u32 prev_len = g_clipboard_len;
+    char prev[kWindowClipboardMax] = {};
+    u32 prev_len = g_clipboard_len;
+    if (prev_len >= kWindowClipboardMax)
+        prev_len = kWindowClipboardMax - 1;
     for (u32 i = 0; i < prev_len; ++i)
         prev[i] = g_clipboard[i];
 

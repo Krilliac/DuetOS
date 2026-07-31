@@ -2748,9 +2748,9 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
         // when the rejection is silent on the boot log. Pin
         // format `loader/pe:<status>` groups by reject reason.
         char pin[40];
-        const char* tag = "loader/pe:";
+        constexpr char tag[] = "loader/pe:";
         u64 p = 0;
-        while (p < 39 && tag[p] != '\0')
+        while (p < sizeof(tag) - 1 && tag[p] != '\0')
         {
             pin[p] = tag[p];
             ++p;

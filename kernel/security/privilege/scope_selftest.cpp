@@ -32,7 +32,7 @@ void ScopeSelfTest()
     Roots roots;
     roots.root[0] = "/home/user";
     roots.count = 1;
-    char out[512];
+    char out[512] = {};
     auto allow = [&](const char* in) { return CanonicalizeAndContain(in, roots, out, sizeof(out)); };
 
     // 1: default scope holds the five caps (and there is no 6th / installHandler).
