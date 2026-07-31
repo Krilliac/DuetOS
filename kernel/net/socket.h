@@ -51,6 +51,8 @@
  * refcount pinning rather than a spinlock. Revisit when kernel/sched
  * exports a release-and-block primitive (WaitQueueBlockCurrentLocked
  * is file-local to sched.cpp today).
+ * SocketAlive and the endpoint value accessors are lock-protected;
+ * they return snapshots rather than pointers into the pool.
  *
  * RX delivery: NetUdpDispatch in stack.cpp checks the socket pool
  * via SocketUdpDispatch BEFORE the legacy UdpBinding table — once
