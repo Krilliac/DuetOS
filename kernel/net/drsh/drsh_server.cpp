@@ -15,23 +15,24 @@
  *
  * Owns the singleton DrshGlobal, the listener socket, and the server
  * task. `DrshServerStart` opens the listener and spawns the task;
- * `DrshServerStop` flips a stop flag the task polls on its accept
- * boundary and the inner channel loops; the task drops the socket
- * and exits cleanly once it lands at the boundary.
+ * accepted sockets are handed to bounded per-session worker tasks.
+ * `DrshServerStop` flips the listener flag and each worker's stop flag;
+ * bounded receive polling then lets every worker tear down cleanly.
  *
  * Accept loop discipline: SocketAcceptNonblocking probes either the
  * loopback accept queue or the TCP listener's established-child queue. We
  * sleep one tick between empty probes so `DrshServerStop` can reliably
  * observe its cancellation flag rather than being trapped in a blocking
- * accept call. Once a connection arrives we hand the accepted socket to
- * `MakeSocketTransport`, drive the handshake, and run a channel-multiplex
- * loop until the client disconnects or any frame returns false (link drop).
+ * accept call. Once a connection arrives we reserve a session slot, publish
+ * a worker task, and return to accepting other clients. Each worker drives
+ * its own handshake and channel-multiplex loop until the client disconnects
+ * or any frame returns false (link drop).
  *
  * Session lifecycle:
  *
- *   listener -> accept -> handshake
- *     pass: ServerHandshake fills g_global.session, marks
- *           session_active, ConnectionsTotal++
+ *   listener -> accept -> reserve -> worker -> handshake
+ *     pass: ServerHandshake fills the worker's private session record,
+ *           marks that slot authenticated, and increments ConnectionsTotal
  *     fail: drop link, AuthFailuresTotal++
  *
  *   while authenticated:
@@ -57,11 +58,11 @@ namespace
 {
 
 constinit DrshGlobal g_global = {};
-constexpr u64 kHandshakeRecvTimeoutTicks = 5; // 50 ms at the 100 Hz scheduler tick.
+constexpr u64 kHandshakeRecvTimeoutTicks = 5;      // 50 ms at 100 Hz.
+constexpr u64 kAuthenticatedRecvTimeoutTicks = 50; // 500 ms idle poll.
 
-void ResetSessionKeys()
+void ResetSessionKeys(DrshSession& sess)
 {
-    auto& sess = g_global.session;
     sess.authenticated = false;
     for (u32 i = 0; i < sizeof(sess.aes_enc.round_keys) / sizeof(sess.aes_enc.round_keys[0]); ++i)
         sess.aes_enc.round_keys[i] = 0;
@@ -79,10 +80,9 @@ void ResetSessionKeys()
 
 // ----------------------------------------------------------------
 // Brute-force lockout — the same shape as security/auth.cpp's
-// per-account lockout, applied to the (single, system-wide) DRSH
-// pre-shared key. State lives in DrshGlobal; all access is from the
-// server task (single-threaded accept loop) plus the admin shell
-// commands, which are serialised against it by the scheduler.
+// per-account lockout, applied to the system-wide DRSH pre-shared key.
+// State lives in DrshGlobal and is shared by the listener, session workers,
+// and admin shell commands under the state lock.
 // ----------------------------------------------------------------
 
 // True iff the listener is currently refusing connections because the
@@ -91,7 +91,7 @@ void ResetSessionKeys()
 // timer are cleared and an unlock event is published — so the next
 // accept boundary that runs past the threshold window re-opens the
 // door without a separate sweep.
-bool LockoutActive(u64 now_ns)
+bool LockoutActiveLocked(u64 now_ns)
 {
     if (g_global.locked_until_ns == 0)
         return false;
@@ -104,11 +104,18 @@ bool LockoutActive(u64 now_ns)
     return false;
 }
 
+bool LockoutActive(u64 now_ns)
+{
+    sync::SpinLockGuard guard(g_global.state_lock);
+    return LockoutActiveLocked(now_ns);
+}
+
 // A successful handshake clears the streak — the legitimate admin just
 // proved they hold the key, so an attacker's prior misses shouldn't
 // keep them on the brink.
 void RegisterAuthSuccess()
 {
+    sync::SpinLockGuard guard(g_global.state_lock);
     g_global.failed_streak = 0;
     g_global.locked_until_ns = 0;
 }
@@ -117,6 +124,7 @@ void RegisterAuthSuccess()
 // crossing the threshold, arms the timed lockout.
 void RegisterAuthFailure(u64 now_ns)
 {
+    sync::SpinLockGuard guard(g_global.state_lock);
     if (g_global.failed_streak < 0xFFFFFFFFu)
         ++g_global.failed_streak;
     duetos::security::EventRingPublishKind(duetos::security::EventKind::AuthLoginFailure, 0, 0, g_global.failed_streak,
@@ -130,6 +138,87 @@ void RegisterAuthFailure(u64 now_ns)
     }
 }
 
+bool ListenerRunning()
+{
+    sync::SpinLockGuard guard(g_global.state_lock);
+    return g_global.listener_running;
+}
+
+bool PasswordConfigured()
+{
+    sync::SpinLockGuard guard(g_global.state_lock);
+    return g_global.password_len != 0;
+}
+
+bool PeerAllowed(Ipv4Address peer_ip)
+{
+    sync::SpinLockGuard guard(g_global.state_lock);
+    if (g_global.allow_external || peer_ip.octets[0] == 127)
+        return true;
+    ++g_global.policy_rejections_total;
+    return false;
+}
+
+DrshClientSession* ReserveSession(u32 socket_idx, Ipv4Address peer_ip)
+{
+    sync::SpinLockGuard guard(g_global.state_lock);
+    if (g_global.active_sessions >= kDrshMaxSessions)
+    {
+        ++g_global.capacity_rejections_total;
+        return nullptr;
+    }
+    for (u32 i = 0; i < kDrshMaxSessions; ++i)
+    {
+        DrshClientSession& client = g_global.sessions[i];
+        if (client.in_use)
+            continue;
+        client.in_use = true;
+        client.authenticated = false;
+        client.socket_idx = socket_idx;
+        client.peer_ip = peer_ip;
+        client.stop_requested = false;
+        ResetSessionKeys(client.session);
+        ++g_global.active_sessions;
+        return &client;
+    }
+    ++g_global.capacity_rejections_total;
+    return nullptr;
+}
+
+void MarkSessionAuthenticated(DrshClientSession& client)
+{
+    sync::SpinLockGuard guard(g_global.state_lock);
+    if (!client.authenticated)
+    {
+        client.authenticated = true;
+        ++g_global.authenticated_sessions;
+        ++g_global.connections_total;
+    }
+}
+
+void FinishSession(DrshClientSession& client)
+{
+    const u64 frames_rx = client.session.frames_rx;
+    const u64 frames_tx = client.session.frames_tx;
+    const u64 bytes_rx = client.session.bytes_rx;
+    const u64 bytes_tx = client.session.bytes_tx;
+    sync::SpinLockGuard guard(g_global.state_lock);
+    if (client.authenticated && g_global.authenticated_sessions > 0)
+        --g_global.authenticated_sessions;
+    if (g_global.active_sessions > 0)
+        --g_global.active_sessions;
+    g_global.frames_rx_total += frames_rx;
+    g_global.frames_tx_total += frames_tx;
+    g_global.bytes_rx_total += bytes_rx;
+    g_global.bytes_tx_total += bytes_tx;
+    ResetSessionKeys(client.session);
+    client.authenticated = false;
+    client.in_use = false;
+    client.socket_idx = 0;
+    client.peer_ip = {};
+    client.stop_requested = false;
+}
+
 bool OpenListenerSocket(u16 port, i32* out_idx)
 {
     const i32 idx = duetos::net::SocketAlloc(duetos::net::kSocketDomainInet, duetos::net::kSocketTypeStream);
@@ -141,7 +230,7 @@ bool OpenListenerSocket(u16 port, i32* out_idx)
         duetos::net::SocketRelease(static_cast<u32>(idx));
         return false;
     }
-    if (!duetos::net::SocketListen(static_cast<u32>(idx), /*backlog=*/1))
+    if (!duetos::net::SocketListen(static_cast<u32>(idx), kDrshMaxSessions))
     {
         duetos::net::SocketRelease(static_cast<u32>(idx));
         return false;
@@ -150,14 +239,13 @@ bool OpenListenerSocket(u16 port, i32* out_idx)
     return true;
 }
 
-bool HandleSessionFrames(DrshTransport& t)
+bool HandleSessionFrames(DrshTransport& t, DrshSession& sess, volatile bool* stop_requested)
 {
-    auto& sess = g_global.session;
     u8 payload[kDrshMaxPayload];
     u32 plen = 0;
     u8 type = 0;
     u8 chan = 0;
-    while (g_global.listener_running)
+    while (stop_requested == nullptr || !*stop_requested)
     {
         if (!RecvFrame(t, sess, &type, &chan, payload, &plen))
             return false;
@@ -206,29 +294,37 @@ bool HandleSessionFrames(DrshTransport& t)
     return true;
 }
 
-void RunOneSession(u32 accepted_idx)
+void RunOneSession(DrshClientSession& client)
 {
-    // Bound pre-auth reads so a silent TCP peer cannot monopolize the
-    // single DRSH server task. Authenticated sessions return to the socket
-    // default below so an interactive shell can sit idle normally.
+    const u32 accepted_idx = client.socket_idx;
+    if (client.stop_requested)
+    {
+        duetos::net::SocketRelease(accepted_idx);
+        FinishSession(client);
+        return;
+    }
+
+    // Bound pre-auth reads so a silent TCP peer cannot monopolize a worker.
+    // Authenticated sessions keep a longer periodic timeout so an idle
+    // interactive shell remains usable while `drshd stop` stays observable.
     duetos::net::SocketSetRecvTimeout(accepted_idx, kHandshakeRecvTimeoutTicks);
 
     DrshTransport t{};
-    if (!MakeSocketTransport(accepted_idx, t))
+    if (!MakeSocketTransport(accepted_idx, &client.stop_requested, t))
     {
         duetos::net::SocketRelease(accepted_idx);
+        FinishSession(client);
         return;
     }
-    ResetSessionKeys();
-    g_global.session_active = true;
 
-    const HandshakeOutcome outcome = ServerHandshake(t, g_global.password, g_global.password_len, g_global.session);
+    const HandshakeOutcome outcome = ServerHandshake(t, g_global.password, g_global.password_len, client.session);
     if (outcome == HandshakeOutcome::Ok)
     {
-        g_global.connections_total += 1;
+        MarkSessionAuthenticated(client);
         RegisterAuthSuccess();
-        duetos::net::SocketSetRecvTimeout(accepted_idx, 0);
-        (void)HandleSessionFrames(t);
+        TransportMarkAuthenticated(t);
+        duetos::net::SocketSetRecvTimeout(accepted_idx, kAuthenticatedRecvTimeoutTicks);
+        (void)HandleSessionFrames(t, client.session, &client.stop_requested);
     }
     else
     {
@@ -237,7 +333,10 @@ void RunOneSession(u32 accepted_idx)
         // (BadCredentials) feeds the brute-force lockout — wire noise
         // and malformed frames must not let a scanner lock out the
         // legitimate admin. See kDrshLockoutThreshold in drsh.h.
-        g_global.auth_failures_total += 1;
+        {
+            sync::SpinLockGuard guard(g_global.state_lock);
+            ++g_global.auth_failures_total;
+        }
         if (outcome == HandshakeOutcome::BadCredentials)
             RegisterAuthFailure(duetos::time::MonotonicNs());
         KLOG_WARN("net/drsh", "handshake refused");
@@ -246,28 +345,37 @@ void RunOneSession(u32 accepted_idx)
     // Best-effort orderly disconnect; ignore failure (likely the
     // peer already closed). Note: cannot send a MAC'd disconnect
     // if auth never completed, but SendFrame handles that.
-    (void)SendFrame(t, g_global.session, kDrshFrameDisconnect, kDrshChannelControl, nullptr, 0);
+    (void)SendFrame(t, client.session, kDrshFrameDisconnect, kDrshChannelControl, nullptr, 0);
 
     if (t.Close != nullptr)
         t.Close(t.ctx);
     duetos::net::SocketRelease(accepted_idx);
 
-    ResetSessionKeys();
-    g_global.session_active = false;
+    FinishSession(client);
+}
+
+void SessionTaskEntry(void* arg)
+{
+    auto* client = reinterpret_cast<DrshClientSession*>(arg);
+    if (client != nullptr)
+        RunOneSession(*client);
 }
 
 void ServerTaskEntry(void* /*arg*/)
 {
+    if (!ListenerRunning())
+        return;
     i32 listener_idx = -1;
     if (!OpenListenerSocket(g_global.listen_port, &listener_idx))
     {
         KLOG_ERROR("net/drsh", "listener bind failed");
+        sync::SpinLockGuard guard(g_global.state_lock);
         g_global.listener_running = false;
         return;
     }
     KLOG_INFO_V("net/drsh", "listening on TCP port", g_global.listen_port);
 
-    while (g_global.listener_running)
+    while (ListenerRunning())
     {
         duetos::net::Ipv4Address peer_ip{};
         u16 peer_port = 0;
@@ -280,7 +388,7 @@ void ServerTaskEntry(void* /*arg*/)
             duetos::sched::SchedSleepTicks(1);
             continue;
         }
-        if (g_global.password_len == 0)
+        if (!PasswordConfigured())
         {
             // Listener was running but the password got cleared
             // mid-flight — refuse the connection without crypto.
@@ -292,16 +400,47 @@ void ServerTaskEntry(void* /*arg*/)
             // Brute-force wall is up: drop the connection before any
             // crypto runs, so a flood of attempts during the lockout
             // window costs the box a SocketRelease, not a PBKDF2.
-            g_global.throttled_total += 1;
+            {
+                sync::SpinLockGuard guard(g_global.state_lock);
+                ++g_global.throttled_total;
+            }
             duetos::net::SocketRelease(static_cast<u32>(accepted));
             continue;
         }
-        RunOneSession(static_cast<u32>(accepted));
+        if (!PeerAllowed(peer_ip))
+        {
+            // Local-only is the default. Reject before reserving a worker or
+            // entering PBKDF2 so an external scanner cannot consume a DRSH
+            // session slot or authentication CPU.
+            duetos::net::SocketRelease(static_cast<u32>(accepted));
+            continue;
+        }
+        DrshClientSession* client = ReserveSession(static_cast<u32>(accepted), peer_ip);
+        if (client == nullptr)
+        {
+            duetos::net::SocketRelease(static_cast<u32>(accepted));
+            continue;
+        }
+        if (duetos::sched::SchedCreate(&SessionTaskEntry, client, "drshd-session") == nullptr)
+        {
+            {
+                sync::SpinLockGuard guard(g_global.state_lock);
+                ResetSessionKeys(client->session);
+                client->in_use = false;
+                client->authenticated = false;
+                if (g_global.active_sessions > 0)
+                    --g_global.active_sessions;
+            }
+            duetos::net::SocketRelease(static_cast<u32>(accepted));
+        }
     }
 
     KLOG_INFO("net/drsh", "listener stopping");
     duetos::net::SocketRelease(static_cast<u32>(listener_idx));
-    g_global.listener_running = false;
+    {
+        sync::SpinLockGuard guard(g_global.state_lock);
+        g_global.listener_running = false;
+    }
 }
 
 } // namespace
@@ -374,31 +513,39 @@ void DrshInit()
     g.initialized = true;
     g.password_set = false;
     g.listener_running = false;
-    g.session_active = false;
+    g.allow_external = false;
     g.listen_port = kDrshDefaultPort;
     g.password_len = 0;
+    g.active_sessions = 0;
+    g.authenticated_sessions = 0;
     for (u32 i = 0; i < kDrshMaxPasswordBytes; ++i)
         g.password[i] = 0;
     g.connections_total = 0;
     g.auth_failures_total = 0;
+    g.policy_rejections_total = 0;
+    g.capacity_rejections_total = 0;
+    g.frames_rx_total = 0;
+    g.frames_tx_total = 0;
+    g.bytes_rx_total = 0;
+    g.bytes_tx_total = 0;
     g.failed_streak = 0;
     g.locked_until_ns = 0;
     g.throttled_total = 0;
-    internal::ResetSessionKeys();
+    for (u32 i = 0; i < kDrshMaxSessions; ++i)
+    {
+        g.sessions[i].in_use = false;
+        g.sessions[i].authenticated = false;
+        g.sessions[i].socket_idx = 0;
+        g.sessions[i].peer_ip = {};
+        g.sessions[i].stop_requested = false;
+        internal::ResetSessionKeys(g.sessions[i].session);
+    }
 }
 
 bool DrshSetPassword(const char* password)
 {
     DrshInit();
     auto& g = internal::g_global;
-    if (g.listener_running)
-    {
-        // Refuse to rotate while a session might be in flight; the
-        // KDF binds the password into the session keys, and a
-        // rotation now would break an in-flight handshake without
-        // any way for the client to learn it should retry.
-        return false;
-    }
     if (password == nullptr)
         return false;
     u32 len = 0;
@@ -406,6 +553,16 @@ bool DrshSetPassword(const char* password)
         ++len;
     if (password[len] != '\0' && len == kDrshMaxPasswordBytes)
         return false; // overflow
+
+    sync::SpinLockGuard guard(g.state_lock);
+    if (g.listener_running || g.active_sessions != 0)
+    {
+        // Refuse to rotate while the listener or a worker is in flight; the
+        // KDF binds the password into the session keys, and a
+        // rotation now would break an in-flight handshake without
+        // any way for the client to learn it should retry.
+        return false;
+    }
     for (u32 i = 0; i < kDrshMaxPasswordBytes; ++i)
         g.password[i] = 0;
     for (u32 i = 0; i < len; ++i)
@@ -421,30 +578,43 @@ bool DrshSetPassword(const char* password)
     return true;
 }
 
-bool DrshServerStart(u16 port)
+bool DrshServerStart(u16 port, bool allow_external)
 {
     DrshInit();
     auto& g = internal::g_global;
-    if (g.listener_running)
-        return false;
-    if (!g.password_set)
     {
-        KLOG_WARN("net/drsh", "refusing to start: no password set");
+        sync::SpinLockGuard guard(g.state_lock);
+        if (g.listener_running || g.active_sessions != 0)
+            return false;
+        if (!g.password_set)
+        {
+            KLOG_WARN("net/drsh", "refusing to start: no password set");
+            return false;
+        }
+        g.listen_port = (port == 0) ? kDrshDefaultPort : port;
+        g.allow_external = allow_external;
+        g.listener_running = true;
+    }
+    if (duetos::sched::SchedCreate(&internal::ServerTaskEntry, nullptr, "drshd") == nullptr)
+    {
+        sync::SpinLockGuard guard(g.state_lock);
+        g.listener_running = false;
         return false;
     }
-    g.listen_port = (port == 0) ? kDrshDefaultPort : port;
-    g.listener_running = true;
-    duetos::sched::SchedCreate(&internal::ServerTaskEntry, nullptr, "drshd");
     return true;
 }
 
 void DrshServerStop()
 {
     auto& g = internal::g_global;
-    if (!g.listener_running)
-        return;
+    sync::SpinLockGuard guard(g.state_lock);
     g.listener_running = false;
-    // Server task will exit on its next accept poll (~10 ms). We
+    for (u32 i = 0; i < kDrshMaxSessions; ++i)
+    {
+        if (g.sessions[i].in_use)
+            g.sessions[i].stop_requested = true;
+    }
+    // The listener exits on its next accept poll (~10 ms), while each
     // do NOT block here — caller is a shell command and the user
     // will see the listener_running flag flip in `drshd status`.
 }
@@ -452,9 +622,13 @@ void DrshServerStop()
 void DrshUnlock()
 {
     auto& g = internal::g_global;
-    const bool was_locked = g.locked_until_ns != 0;
-    g.failed_streak = 0;
-    g.locked_until_ns = 0;
+    bool was_locked = false;
+    {
+        sync::SpinLockGuard guard(g.state_lock);
+        was_locked = g.locked_until_ns != 0;
+        g.failed_streak = 0;
+        g.locked_until_ns = 0;
+    }
     if (was_locked)
     {
         duetos::security::EventRingPublishKind(duetos::security::EventKind::AuthAccountUnlocked, 0, 1 /*manual*/, 0,
@@ -466,21 +640,30 @@ DrshStatus DrshServerStatus()
 {
     auto& g = internal::g_global;
     DrshStatus s{};
-    s.running = g.listener_running;
-    s.listening = g.listener_running;
-    s.session_active = g.session_active;
-    s.authenticated = g.session.authenticated;
-    s.password_set = g.password_set ? 1 : 0;
-    s.listen_port = g.listen_port;
-    s.connections_total = g.connections_total;
-    s.auth_failures_total = g.auth_failures_total;
-    s.frames_rx = g.session.frames_rx;
-    s.frames_tx = g.session.frames_tx;
-    s.bytes_rx = g.session.bytes_rx;
-    s.bytes_tx = g.session.bytes_tx;
-    s.throttled_total = g.throttled_total;
-    s.locked_until_ns = g.locked_until_ns;
-    s.failed_streak = g.failed_streak;
+    {
+        sync::SpinLockGuard guard(g.state_lock);
+        s.running = g.listener_running;
+        s.listening = g.listener_running;
+        s.session_active = g.active_sessions != 0;
+        s.authenticated = g.authenticated_sessions != 0;
+        s.allow_external = g.allow_external;
+        s.password_set = g.password_set ? 1 : 0;
+        s.listen_port = g.listen_port;
+        s.active_sessions = g.active_sessions;
+        s.authenticated_sessions = g.authenticated_sessions;
+        s.max_sessions = kDrshMaxSessions;
+        s.connections_total = g.connections_total;
+        s.auth_failures_total = g.auth_failures_total;
+        s.policy_rejections_total = g.policy_rejections_total;
+        s.capacity_rejections_total = g.capacity_rejections_total;
+        s.frames_rx = g.frames_rx_total;
+        s.frames_tx = g.frames_tx_total;
+        s.bytes_rx = g.bytes_rx_total;
+        s.bytes_tx = g.bytes_tx_total;
+        s.throttled_total = g.throttled_total;
+        s.locked_until_ns = g.locked_until_ns;
+        s.failed_streak = g.failed_streak;
+    }
     return s;
 }
 

@@ -514,3 +514,27 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Re-record completed Aurora sample stats gadgets slice after rebasing onto DRSH-merged main
 - **Claimed**: 2026-07-31T00:51:53Z
 - **Status**: COMPLETED @ 2026-07-31T00:51:58Z
+
+### [DONE] drsh-agent-host
+- **Session**: `Codex-drsh-agent-host-2026-07-30`
+- **Branch**: `claude/drsh-agent-host`
+- **Files**: `tools/security/drsh_host.py tools/security/drsh_agent.py tools/qemu/run.sh wiki/networking/DRSH-Remote-Access.md`
+- **Description**: Host a throwaway DuetOS QEMU and dispatch real authenticated DRSH agent workers; keep separate from protocol/OS attack scripts.
+- **Claimed**: 2026-07-31T04:37:53Z
+- **Status**: COMPLETED @ 2026-07-31T04:56:36Z
+
+### [DONE] drsh-concurrent-access
+- **Session**: `Nathan-1422`
+- **Branch**: `claude/drsh-agent-host`
+- **Files**: `kernel/net/drsh/drsh.h kernel/net/drsh/drsh_internal.h kernel/net/drsh/drsh_server.cpp kernel/net/drsh/drsh_transport.cpp kernel/shell/shell_drsh.cpp tools/qemu/run.sh tools/security/drsh_host.py wiki/networking/DRSH-Remote-Access.md`
+- **Description**: Concurrent DRSH sessions with explicit local-only or external access policy
+- **Claimed**: 2026-07-31T05:17:53Z
+- **Status**: COMPLETED @ 2026-07-31T05:40:34Z
+
+### [DONE] drsh-concurrent-access-boot
+- **Session**: `Nathan-655`
+- **Branch**: `claude/drsh-agent-host`
+- **Files**: `kernel/core/boot_bringup.cpp`
+- **Description**: Enable external peer policy only for the explicit DRSH test autostart fixture
+- **Claimed**: 2026-07-31T05:23:38Z
+- **Status**: COMPLETED @ 2026-07-31T05:41:09Z
