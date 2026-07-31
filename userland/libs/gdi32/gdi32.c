@@ -1558,10 +1558,10 @@ __declspec(dllexport) BOOL GetTextMetricsA(HDC dc, void* tm)
 
     /* Fallback: hardcoded 8x8 metrics. */
     INT* fields = (INT*)tm;
-    fields[0] = 8; /* tmHeight */
-    fields[1] = 8; /* tmAscent */
-    fields[5] = 8; /* tmAveCharWidth */
-    fields[6] = 8; /* tmMaxCharWidth */
+    fields[0] = 8;   /* tmHeight */
+    fields[1] = 8;   /* tmAscent */
+    fields[5] = 8;   /* tmAveCharWidth */
+    fields[6] = 8;   /* tmMaxCharWidth */
     fields[7] = 400; /* tmWeight = FW_NORMAL */
     return 1;
 }

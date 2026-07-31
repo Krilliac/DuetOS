@@ -80,17 +80,14 @@ __declspec(dllexport) BOOL ConvertFiberToThread(void)
  * CreateFiber — allocate a new fiber with a default stack.
  * Returns the fiber address or NULL on failure.
  */
-__declspec(dllexport) void* CreateFiber(unsigned long long dwStackSize,
-                                        void (*lpStartAddress)(void*),
+__declspec(dllexport) void* CreateFiber(unsigned long long dwStackSize, void (*lpStartAddress)(void*),
                                         void* lpParameter)
 {
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
-                     : "a"((long long)217),
-                       "D"((long long)(unsigned long long)lpStartAddress),
-                       "S"((long long)(unsigned long long)lpParameter),
-                       "d"((long long)dwStackSize)
+                     : "a"((long long)217), "D"((long long)(unsigned long long)lpStartAddress),
+                       "S"((long long)(unsigned long long)lpParameter), "d"((long long)dwStackSize)
                      : "memory");
     return (void*)(unsigned long long)rv;
 }
@@ -100,24 +97,17 @@ __declspec(dllexport) void* CreateFiber(unsigned long long dwStackSize,
  * dwStackCommitSize and dwStackReserveSize both map to
  * the same stack_size parameter; dwFlags is ignored.
  */
-__declspec(dllexport) void* CreateFiberEx(unsigned long long dwStackCommitSize,
-                                          unsigned long long dwStackReserveSize,
-                                          DWORD dwFlags,
-                                          void (*lpStartAddress)(void*),
-                                          void* lpParameter)
+__declspec(dllexport) void* CreateFiberEx(unsigned long long dwStackCommitSize, unsigned long long dwStackReserveSize,
+                                          DWORD dwFlags, void (*lpStartAddress)(void*), void* lpParameter)
 {
     (void)dwFlags;
     /* Use the larger of commit/reserve as the stack size hint. */
-    unsigned long long sz = dwStackReserveSize > dwStackCommitSize
-                                ? dwStackReserveSize
-                                : dwStackCommitSize;
+    unsigned long long sz = dwStackReserveSize > dwStackCommitSize ? dwStackReserveSize : dwStackCommitSize;
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
-                     : "a"((long long)217),
-                       "D"((long long)(unsigned long long)lpStartAddress),
-                       "S"((long long)(unsigned long long)lpParameter),
-                       "d"((long long)sz)
+                     : "a"((long long)217), "D"((long long)(unsigned long long)lpStartAddress),
+                       "S"((long long)(unsigned long long)lpParameter), "d"((long long)sz)
                      : "memory");
     return (void*)(unsigned long long)rv;
 }
@@ -133,10 +123,8 @@ __declspec(dllexport) void SwitchToFiber(void* lpFiber)
     __asm__ volatile("int $0x80"
                      :
                      : "a"((long long)218), "D"((long long)(unsigned long long)lpFiber)
-                     : "memory", "rcx", "rdx", "rsi",
-                       "r8", "r9", "r10", "r11",
-                       "r12", "r13", "r14", "r15",
-                       "rbx", "rbp");
+                     : "memory", "rcx", "rdx", "rsi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15", "rbx",
+                       "rbp");
     /* After SwitchToFiber returns, we are back in this fiber. */
 }
 
@@ -147,10 +135,7 @@ __declspec(dllexport) void SwitchToFiber(void* lpFiber)
  */
 __declspec(dllexport) void DeleteFiber(void* lpFiber)
 {
-    __asm__ volatile("int $0x80"
-                     :
-                     : "a"((long long)219), "D"((long long)(unsigned long long)lpFiber)
-                     : "memory");
+    __asm__ volatile("int $0x80" : : "a"((long long)219), "D"((long long)(unsigned long long)lpFiber) : "memory");
 }
 
 /* ------------------------------------------------------------------
@@ -175,10 +160,7 @@ __declspec(dllexport) void* GetCurrentFiber(void)
     /* Re-issue convert with data=0; if already a fiber, kernel
      * returns existing fiber address without modifying state. */
     long long rv;
-    __asm__ volatile("int $0x80"
-                     : "=a"(rv)
-                     : "a"((long long)216), "D"((long long)0)
-                     : "memory");
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)216), "D"((long long)0) : "memory");
     return (void*)(unsigned long long)rv;
 }
 
@@ -308,8 +290,7 @@ __declspec(dllexport) BOOL FlsSetValue(DWORD dwFlsIndex, void* lpFlsData)
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
-                     : "a"((long long)223),
-                       "D"((long long)(unsigned long long)dwFlsIndex),
+                     : "a"((long long)223), "D"((long long)(unsigned long long)dwFlsIndex),
                        "S"((long long)(unsigned long long)lpFlsData)
                      : "memory");
     return (rv == 0) ? 1 : 0;

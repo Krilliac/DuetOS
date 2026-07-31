@@ -58,7 +58,7 @@ static long __attribute__((ms_abi)) veh_guard_handler(void* ExceptionInfo)
 {
     void** ep = (void**)ExceptionInfo;
     unsigned char* rec = (unsigned char*)ep[0];
-    unsigned long code = *(unsigned int*)(rec + 0x00);  /* ExceptionCode */
+    unsigned long code = *(unsigned int*)(rec + 0x00); /* ExceptionCode */
 
     if (code == EXC_GUARD_PAGE)
     {
@@ -103,8 +103,8 @@ void __cdecl mainCRTStartup(void)
     }
 
     /* Allocate a single page with PAGE_GUARD. */
-    volatile int* ptr = (volatile int*)VirtualAlloc(
-        NULL, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE | 0x100 /* PAGE_GUARD */);
+    volatile int* ptr =
+        (volatile int*)VirtualAlloc(NULL, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE | 0x100 /* PAGE_GUARD */);
     if (ptr == NULL)
     {
         Out("[guard_smoke] VirtualAlloc failed\r\n");
@@ -121,7 +121,7 @@ void __cdecl mainCRTStartup(void)
     g_guard_access_type = 0xFFFFFFFF; /* sentinel */
     g_guard_fault_va = 0;
 
-    *ptr = 0x42;  /* triggers the guard */
+    *ptr = 0x42; /* triggers the guard */
 
     if (g_guard_hits == 1 && g_guard_code == EXC_GUARD_PAGE)
     {

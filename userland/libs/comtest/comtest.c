@@ -74,7 +74,10 @@ static HRESULT __stdcall obj_qi(TestObj* self, const struct Guid* riid, void** p
     return E_NOINTERFACE;
 }
 
-static ULONG __stdcall obj_addref(TestObj* self) { return ++self->refs; }
+static ULONG __stdcall obj_addref(TestObj* self)
+{
+    return ++self->refs;
+}
 
 static ULONG __stdcall obj_release(TestObj* self)
 {
@@ -117,7 +120,10 @@ static HRESULT __stdcall cf_qi(TestFactory* self, const struct Guid* riid, void*
     return E_NOINTERFACE;
 }
 
-static ULONG __stdcall cf_addref(TestFactory* self) { return ++self->refs; }
+static ULONG __stdcall cf_addref(TestFactory* self)
+{
+    return ++self->refs;
+}
 
 static ULONG __stdcall cf_release(TestFactory* self)
 {
@@ -170,4 +176,7 @@ __declspec(dllexport) HRESULT DllGetClassObject(const struct Guid* rclsid, const
     return REGDB_E_CLASSNOTREG;
 }
 
-__declspec(dllexport) HRESULT DllCanUnloadNow(void) { return S_FALSE; }
+__declspec(dllexport) HRESULT DllCanUnloadNow(void)
+{
+    return S_FALSE;
+}

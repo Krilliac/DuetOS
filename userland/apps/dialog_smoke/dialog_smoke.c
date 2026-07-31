@@ -47,14 +47,14 @@ static DWORD AlignDword(DWORD off)
 
 static void PutWord(unsigned char* buf, DWORD* off, WORD val)
 {
-    buf[*off]     = (unsigned char)(val & 0xFF);
+    buf[*off] = (unsigned char)(val & 0xFF);
     buf[*off + 1] = (unsigned char)((val >> 8) & 0xFF);
     *off += 2;
 }
 
 static void PutDword(unsigned char* buf, DWORD* off, DWORD val)
 {
-    buf[*off]     = (unsigned char)(val & 0xFF);
+    buf[*off] = (unsigned char)(val & 0xFF);
     buf[*off + 1] = (unsigned char)((val >> 8) & 0xFF);
     buf[*off + 2] = (unsigned char)((val >> 16) & 0xFF);
     buf[*off + 3] = (unsigned char)((val >> 24) & 0xFF);
@@ -161,10 +161,10 @@ static DWORD BuildTemplate(unsigned char* buf, DWORD bufSize)
     /* cdit = 3 items */
     PutWord(buf, &off, 3);
     /* x, y, cx, cy (dialog units) */
-    PutWord(buf, &off, 0);    /* x   */
-    PutWord(buf, &off, 0);    /* y   */
-    PutWord(buf, &off, 200);  /* cx  */
-    PutWord(buf, &off, 100);  /* cy  */
+    PutWord(buf, &off, 0);   /* x   */
+    PutWord(buf, &off, 0);   /* y   */
+    PutWord(buf, &off, 200); /* cx  */
+    PutWord(buf, &off, 100); /* cy  */
     /* menu = none */
     PutWord(buf, &off, 0);
     /* class = default */
@@ -179,10 +179,10 @@ static DWORD BuildTemplate(unsigned char* buf, DWORD bufSize)
     /* dwExtendedStyle */
     PutDword(buf, &off, 0);
     /* x, y, cx, cy */
-    PutWord(buf, &off, 10);   /* x   */
-    PutWord(buf, &off, 10);   /* y   */
-    PutWord(buf, &off, 80);   /* cx  */
-    PutWord(buf, &off, 10);   /* cy  */
+    PutWord(buf, &off, 10); /* x   */
+    PutWord(buf, &off, 10); /* y   */
+    PutWord(buf, &off, 80); /* cx  */
+    PutWord(buf, &off, 10); /* cy  */
     /* id */
     PutWord(buf, &off, 100);
     /* class: predefined ordinal 0x0082 (STATIC) */
@@ -200,10 +200,10 @@ static DWORD BuildTemplate(unsigned char* buf, DWORD bufSize)
     /* dwExtendedStyle */
     PutDword(buf, &off, 0);
     /* x, y, cx, cy */
-    PutWord(buf, &off, 40);   /* x   */
-    PutWord(buf, &off, 70);   /* y   */
-    PutWord(buf, &off, 50);   /* cx  */
-    PutWord(buf, &off, 14);   /* cy  */
+    PutWord(buf, &off, 40); /* x   */
+    PutWord(buf, &off, 70); /* y   */
+    PutWord(buf, &off, 50); /* cx  */
+    PutWord(buf, &off, 14); /* cy  */
     /* id = IDOK */
     PutWord(buf, &off, 1);
     /* class: predefined ordinal 0x0080 (BUTTON) */
@@ -221,10 +221,10 @@ static DWORD BuildTemplate(unsigned char* buf, DWORD bufSize)
     /* dwExtendedStyle */
     PutDword(buf, &off, 0);
     /* x, y, cx, cy */
-    PutWord(buf, &off, 110);  /* x   */
-    PutWord(buf, &off, 70);   /* y   */
-    PutWord(buf, &off, 50);   /* cx  */
-    PutWord(buf, &off, 14);   /* cy  */
+    PutWord(buf, &off, 110); /* x   */
+    PutWord(buf, &off, 70);  /* y   */
+    PutWord(buf, &off, 50);  /* cx  */
+    PutWord(buf, &off, 14);  /* cy  */
     /* id = IDCANCEL */
     PutWord(buf, &off, 2);
     /* class: predefined ordinal 0x0080 (BUTTON) */
@@ -255,12 +255,11 @@ void __cdecl mainCRTStartup(void)
 
     /* Launch the modal dialog. The DlgProc posts IDOK to itself
      * during WM_INITDIALOG, so this returns without user input. */
-    INT_PTR ret = DialogBoxIndirectParamA(
-        NULL,                           /* hInstance     */
-        (LPCDLGTEMPLATE)tmpl,           /* lpTemplate    */
-        NULL,                           /* hWndParent    */
-        DlgProc,                        /* lpDialogFunc  */
-        0);                             /* dwInitParam   */
+    INT_PTR ret = DialogBoxIndirectParamA(NULL,                 /* hInstance     */
+                                          (LPCDLGTEMPLATE)tmpl, /* lpTemplate    */
+                                          NULL,                 /* hWndParent    */
+                                          DlgProc,              /* lpDialogFunc  */
+                                          0);                   /* dwInitParam   */
 
     /* --- Report sub-checks ------------------------------------ */
 

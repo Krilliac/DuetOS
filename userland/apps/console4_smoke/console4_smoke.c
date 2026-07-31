@@ -70,9 +70,7 @@ void __cdecl mainCRTStartup(void)
         CONSOLE_SCREEN_BUFFER_INFO sbi = {0};
         GetConsoleScreenBufferInfo(g_out, &sbi);
         Out("[console4_smoke] SetCursorPosition      = ");
-        Out(ok && sbi.dwCursorPosition.X == 5 && sbi.dwCursorPosition.Y == 3
-                ? "PASS\r\n"
-                : "FAIL\r\n");
+        Out(ok && sbi.dwCursorPosition.X == 5 && sbi.dwCursorPosition.Y == 3 ? "PASS\r\n" : "FAIL\r\n");
     }
 
     /* 5. SetConsoleTextAttribute. */

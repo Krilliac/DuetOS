@@ -717,14 +717,20 @@ static unsigned long long sys_load_library(const char* name)
     while (name[len] != '\0')
         ++len;
     unsigned long long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)205), "D"((long long)name), "S"((long long)len) : "memory");
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)205), "D"((long long)name), "S"((long long)len)
+                     : "memory");
     return rv;
 }
 
 static unsigned long long sys_get_proc_address(unsigned long long base, const char* name)
 {
     unsigned long long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)57), "D"((long long)base), "S"((long long)name) : "memory");
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)57), "D"((long long)base), "S"((long long)name)
+                     : "memory");
     return rv;
 }
 
@@ -1085,7 +1091,10 @@ static HRESULT __stdcall imalloc_qi(IMallocObj* self, const struct Guid* riid, v
     return E_NOINTERFACE;
 }
 
-static ULONG __stdcall imalloc_addref(IMallocObj* self) { return ++self->refs; }
+static ULONG __stdcall imalloc_addref(IMallocObj* self)
+{
+    return ++self->refs;
+}
 
 static ULONG __stdcall imalloc_release(IMallocObj* self)
 {
@@ -1144,9 +1153,9 @@ typedef struct
     void(__stdcall* HeapMinimize)(IMallocObj*);
 } IMallocVtbl;
 
-static const IMallocVtbl g_imalloc_vtbl = {imalloc_qi,           imalloc_addref,  imalloc_release,
-                                           imalloc_alloc,        imalloc_realloc, imalloc_free,
-                                           imalloc_get_size,     imalloc_did_alloc, imalloc_heap_minimize};
+static const IMallocVtbl g_imalloc_vtbl = {imalloc_qi,       imalloc_addref,    imalloc_release,
+                                           imalloc_alloc,    imalloc_realloc,   imalloc_free,
+                                           imalloc_get_size, imalloc_did_alloc, imalloc_heap_minimize};
 static IMallocObj g_imalloc = {&g_imalloc_vtbl, 1};
 
 __declspec(dllexport) HRESULT CoGetMalloc(DWORD context, void** ppMalloc)
