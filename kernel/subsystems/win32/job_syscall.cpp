@@ -9,14 +9,14 @@
  *
  * A termination intent borrows member Process pointers from the core.  Its
  * operation pin keeps the membership references attached while scheduler calls
- * run outside the core pool lock.  Close and owner drain can tombstone the Job
- * concurrently, but retirement and ProcessRelease wait for intent completion.
+ * run outside the core pool lock.  Close, owner drain, and member exit can race
+ * with termination, but retirement and deferred ProcessRelease wait for intent
+ * completion.
  *
  * Known gaps retained by this adapter/service split:
  *   - information classes other than BasicAccountingInformation,
  *     BasicProcessIdList, and BasicAndIoAccountingInformation are rejected;
  *   - configured CPU/working-set/resource limits are not enforced;
- *   - non-owner member process exit does not detach membership;
  *   - nested Jobs are not represented, so a null query selects the first Job
  *     containing the caller rather than an immediate parent in a nesting tree.
  */
@@ -158,8 +158,12 @@ i64 SysJobAssign(u64 job_handle, u64 process_handle)
     if (caller == nullptr)
         return -1;
 
-    // Acquire the target reference before entering the core.  Assigned adopts
-    // it; every other result leaves it here to be released after the core lock.
+    // Keep the lookup reference as an audit pin, then offer a second reference
+    // for membership adoption.  Successful publication is followed by a live-
+    // task check while the audit pin still protects the pointer.  If the
+    // last-task exit hook scanned before publication, the zero-count replay
+    // removes the new membership; if publication won, that hook sees it.
+    // Neither scheduler call runs beneath the Job pool lock.
     core::Process* target = nullptr;
     if (process_handle == static_cast<u64>(-1))
     {
@@ -176,11 +180,20 @@ i64 SysJobAssign(u64 job_handle, u64 process_handle)
     core::JobKey key{};
     core::JobAssignResult result = core::JobAssignResult::InvalidJob;
     if (DecodeJobHandle(job_handle, &key))
+    {
+        core::ProcessRetain(target); // candidate membership reference
         result = core::JobAssignRetained(key, static_cast<u64>(caller->pid), target);
 
+        if (result != core::JobAssignResult::Assigned)
+            core::ProcessRelease(target); // candidate reference was not adopted
+    }
+
     if (result == core::JobAssignResult::Assigned)
-        target = nullptr; // the membership owns this reference now
-    core::ProcessRelease(target);
+    {
+        if (sched::SchedCountLiveTasksForProcess(target) == 0)
+            core::JobOnProcessExit(target);
+    }
+    core::ProcessRelease(target); // lookup/audit reference
 
     if (result == core::JobAssignResult::Assigned || result == core::JobAssignResult::AlreadyMember)
         return 0;
@@ -361,10 +374,40 @@ void JobOwnerExitSelfTest()
     JobDrainOwnedByProcess(owner);
     JobTestExpect(__atomic_load_n(&owner->refcount, __ATOMIC_ACQUIRE) == 1, "owner-exit self-test reference imbalance");
 
+    core::JobOnProcessExit(owner);
+    core::JobOnProcessExit(owner);
+    JobTestExpect(__atomic_load_n(&owner->refcount, __ATOMIC_ACQUIRE) == 1,
+                  "post-drain exit notification released owner twice");
+
     core::JobLifecycleSnapshot lifecycle{};
     JobTestExpect(core::JobInspectLifecycle(key, &lifecycle) && lifecycle.state == core::JobState::Retired &&
                       lifecycle.references == 0 && lifecycle.member_count == 0,
                   "owner-exit self-test Job did not retire");
+
+    // Force the scan-before-publication ordering used by SysJobAssign's
+    // post-publication liveness handshake: the earlier notification found no
+    // membership, while this replay must release the newly published one.
+    core::ProcessRetain(owner);
+    core::JobKey exit_first_key{};
+    JobTestExpect(core::JobCreate(static_cast<u64>(owner->pid), &exit_first_key),
+                  "exit-first owner self-test could not allocate Job");
+    JobTestExpect(core::JobAssignRetained(exit_first_key, static_cast<u64>(owner->pid), owner) ==
+                      core::JobAssignResult::Assigned,
+                  "exit-first owner self-test could not assign owner");
+    core::JobOnProcessExit(owner);
+    core::JobOnProcessExit(owner);
+    JobTestExpect(__atomic_load_n(&owner->refcount, __ATOMIC_ACQUIRE) == 1,
+                  "exit-first owner notification did not release exactly once");
+
+    core::JobSnapshot exit_first_snapshot{};
+    JobTestExpect(core::JobSnapshotOwned(exit_first_key, static_cast<u64>(owner->pid), &exit_first_snapshot) &&
+                      exit_first_snapshot.member_count == 0 && exit_first_snapshot.total_processes == 1 &&
+                      exit_first_snapshot.total_terminated_processes == 0,
+                  "exit-first owner accounting was not exact");
+    JobDrainOwnedByProcess(owner);
+    JobTestExpect(core::JobInspectLifecycle(exit_first_key, &lifecycle) && lifecycle.state == core::JobState::Retired &&
+                      lifecycle.references == 0 && lifecycle.member_count == 0,
+                  "exit-first owner Job did not retire after drain");
 
     mm::KFree(owner);
     arch::SerialWrite("[win32/job] owner-exit self-test PASS\n");
@@ -465,10 +508,24 @@ void JobHandleLifetimeSelfTest()
                       containing.member_pids[0] == static_cast<u64>(other->pid),
                   "zero-ref Terminating Job disappeared from null-handle membership snapshot");
 
+    core::JobOnProcessExit(other);
+    core::JobOnProcessExit(other);
+    JobTestExpect(__atomic_load_n(&other->refcount, __ATOMIC_ACQUIRE) == 2,
+                  "exit notification released member while termination intent was active");
+    JobTestExpect(core::JobInspectLifecycle(first_key, &lifecycle) && lifecycle.state == core::JobState::Terminating &&
+                      lifecycle.references == 0 && lifecycle.operation_pins == 1 && lifecycle.member_count == 0 &&
+                      lifecycle.retire_pending,
+                  "exit notification did not remove pinned logical membership exactly once");
+    JobTestExpect(!core::JobContainsAny(other),
+                  "exited member remained visible through zero-ref Terminating membership test");
+    containing = {};
+    JobTestExpect(!core::JobSnapshotContaining(other, &containing),
+                  "exited member remained visible through zero-ref Terminating membership snapshot");
+
     core::ProcessRetain(other);
     JobTestExpect(core::JobAssignRetained(conflict_key, static_cast<u64>(owner->pid), other) ==
                       core::JobAssignResult::MembershipConflict,
-                  "zero-ref Terminating membership was ignored by cross-Job admission");
+                  "deferred-exit ownership was ignored by cross-Job admission");
     core::ProcessRelease(other); // pinned-row conflict did not adopt this reference
     JobTestExpect(core::JobClose(conflict_key, static_cast<u64>(owner->pid)),
                   "cross-Job conflict fixture close failed");
@@ -493,14 +550,29 @@ void JobHandleLifetimeSelfTest()
     JobTestExpect(core::JobSnapshotOwned(second_key, static_cast<u64>(owner->pid), &snapshot),
                   "replacement Job key did not resolve exact row");
 
+    core::ProcessRetain(other);
+    JobTestExpect(core::JobAssignRetained(second_key, static_cast<u64>(owner->pid), other) ==
+                      core::JobAssignResult::Assigned,
+                  "replacement Job did not adopt retained member");
+
     core::JobTerminationIntent second_intent{};
     JobTestExpect(core::JobBeginTermination(second_key, static_cast<u64>(owner->pid), &second_intent) ==
                           core::JobTerminateResult::Begun &&
+                      second_intent.member_count == 1 && second_intent.members[0] == other &&
                       core::JobFinishTermination(&second_intent),
                   "replacement Job termination transition failed");
     JobTestExpect(core::JobInspectLifecycle(second_key, &lifecycle) && lifecycle.state == core::JobState::Tombstone &&
                       lifecycle.references == 1,
                   "terminated Job did not remain an open tombstone");
+    core::JobOnProcessExit(other);
+    core::JobOnProcessExit(other);
+    JobTestExpect(__atomic_load_n(&other->refcount, __ATOMIC_ACQUIRE) == 1,
+                  "Tombstone exit notification did not release exactly once");
+    JobTestExpect(core::JobSnapshotOwned(second_key, static_cast<u64>(owner->pid), &snapshot) &&
+                      snapshot.member_count == 0 && snapshot.total_processes == 1 &&
+                      snapshot.total_terminated_processes == 1,
+                  "Tombstone exit accounting was not exact");
+    JobTestExpect(!core::JobContainsAny(other), "Tombstone kept exited member logically visible");
     JobTestExpect(core::JobBeginTermination(second_key, static_cast<u64>(owner->pid), &second_intent) ==
                       core::JobTerminateResult::AlreadyTerminated,
                   "tombstoned Job did not make repeat termination idempotent");
