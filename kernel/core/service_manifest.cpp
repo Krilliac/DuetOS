@@ -599,6 +599,28 @@ ServiceManifestError ValidateDocumentInternal(const ServiceManifestDocumentV1& d
     return ValidateGraph(document, topological_identities);
 }
 
+u32 EncodedDependenciesOffset(const ServiceManifestDocumentV1& document)
+{
+    return kServiceManifestV1HeaderBytes + document.service_count * kServiceManifestV1ServiceBytes;
+}
+
+void EncodeHeader(u8* bytes, const ServiceManifestDocumentV1& document, u32 encoded_size)
+{
+    WriteLe32(bytes + kHeaderTotalSizeOffset, encoded_size);
+    WriteLe16(bytes + kHeaderVersionOffset, kServiceManifestVersion1);
+    WriteLe16(bytes + kHeaderBytesOffset, static_cast<u16>(kServiceManifestV1HeaderBytes));
+    WriteLe16(bytes + kHeaderServiceBytesOffset, static_cast<u16>(kServiceManifestV1ServiceBytes));
+    WriteLe16(bytes + kHeaderDependencyBytesOffset, static_cast<u16>(kServiceManifestV1DependencyBytes));
+    WriteLe16(bytes + kHeaderServiceCountOffset, document.service_count);
+    WriteLe16(bytes + kHeaderDependencyCountOffset, document.dependency_count);
+    WriteLe32(bytes + kHeaderFlagsOffset, document.flags);
+    WriteLe64(bytes + kHeaderManifestIdentityOffset, document.manifest_identity);
+    WriteLe64(bytes + kHeaderSignerIdentityOffset, document.signer_identity);
+    WriteLe64(bytes + kHeaderProfileIdentityOffset, document.profile_identity);
+    WriteLe32(bytes + kHeaderServicesOffset, kServiceManifestV1HeaderBytes);
+    WriteLe32(bytes + kHeaderDependenciesOffset, EncodedDependenciesOffset(document));
+}
+
 void EncodeService(u8* bytes, const ServiceManifestServiceV1& service)
 {
     WriteLe64(bytes + kServiceIdentityOffset, service.service_identity);
@@ -622,6 +644,12 @@ void EncodeService(u8* bytes, const ServiceManifestServiceV1& service)
     WriteLe32(bytes + kServiceReservedOffset, service.reserved);
     CopyBytes(bytes + kServiceNameOffset, service.name, kServiceManifestServiceNameCapacity);
     CopyBytes(bytes + kServicePathOffset, service.executable_path, kServiceManifestExecutablePathCapacity);
+}
+
+void EncodeDependency(u8* bytes, const ServiceManifestDependencyV1& dependency)
+{
+    WriteLe64(bytes + kDependencyOwnerOffset, dependency.owner_service_identity);
+    WriteLe64(bytes + kDependencyTargetOffset, dependency.dependency_service_identity);
 }
 
 void DecodeService(const u8* bytes, ServiceManifestServiceV1* service)
@@ -688,6 +716,46 @@ ServiceManifestError ServiceManifestDocumentValidateV1(const ServiceManifestDocu
     return ValidateDocumentInternal(document, nullptr, nullptr);
 }
 
+ServiceManifestError ServiceManifestDocumentHashV1(const ServiceManifestDocumentV1& document, loader::Hash256* hash_out)
+{
+    if (hash_out == nullptr)
+        return ServiceManifestError::NullArgument;
+    if (!PointerRangeIsValid(hash_out, sizeof(*hash_out)))
+        return ServiceManifestError::InvalidPointerRange;
+    if (PointerRangesOverlap(hash_out, sizeof(*hash_out), &document, sizeof(document)))
+        return ServiceManifestError::DefinitionAliasesOutput;
+
+    ZeroBytes(hash_out, sizeof(*hash_out));
+    const ServiceManifestError document_error = ServiceManifestDocumentValidateV1(document);
+    if (document_error != ServiceManifestError::Ok)
+        return document_error;
+
+    const u32 encoded_size = ServiceManifestEncodedSizeV1(document.service_count, document.dependency_count);
+    if (encoded_size == 0)
+        return ServiceManifestError::SizeOverflow;
+
+    crypto::Sha256Ctx context{};
+    u8 scratch[kServiceManifestV1ServiceBytes]{};
+    crypto::Sha256Init(context);
+
+    EncodeHeader(scratch, document, encoded_size);
+    crypto::Sha256Update(context, scratch, kServiceManifestV1HeaderBytes);
+    for (u32 index = 0; index < document.service_count; ++index)
+    {
+        ZeroBytes(scratch, sizeof(scratch));
+        EncodeService(scratch, document.services[index]);
+        crypto::Sha256Update(context, scratch, kServiceManifestV1ServiceBytes);
+    }
+    for (u32 index = 0; index < document.dependency_count; ++index)
+    {
+        ZeroBytes(scratch, kServiceManifestV1DependencyBytes);
+        EncodeDependency(scratch, document.dependencies[index]);
+        crypto::Sha256Update(context, scratch, kServiceManifestV1DependencyBytes);
+    }
+    crypto::Sha256Final(context, hash_out->bytes);
+    return ServiceManifestError::Ok;
+}
+
 ServiceManifestEncodeResult ServiceManifestEncodeV1(void* output, u64 output_capacity,
                                                     const ServiceManifestDocumentV1& document)
 {
@@ -709,21 +777,8 @@ ServiceManifestEncodeResult ServiceManifestEncodeV1(void* output, u64 output_cap
 
     ZeroBytes(output, encoded_size);
     auto* bytes = static_cast<u8*>(output);
-    const u32 dependencies_offset =
-        kServiceManifestV1HeaderBytes + document.service_count * kServiceManifestV1ServiceBytes;
-    WriteLe32(bytes + kHeaderTotalSizeOffset, encoded_size);
-    WriteLe16(bytes + kHeaderVersionOffset, kServiceManifestVersion1);
-    WriteLe16(bytes + kHeaderBytesOffset, static_cast<u16>(kServiceManifestV1HeaderBytes));
-    WriteLe16(bytes + kHeaderServiceBytesOffset, static_cast<u16>(kServiceManifestV1ServiceBytes));
-    WriteLe16(bytes + kHeaderDependencyBytesOffset, static_cast<u16>(kServiceManifestV1DependencyBytes));
-    WriteLe16(bytes + kHeaderServiceCountOffset, document.service_count);
-    WriteLe16(bytes + kHeaderDependencyCountOffset, document.dependency_count);
-    WriteLe32(bytes + kHeaderFlagsOffset, document.flags);
-    WriteLe64(bytes + kHeaderManifestIdentityOffset, document.manifest_identity);
-    WriteLe64(bytes + kHeaderSignerIdentityOffset, document.signer_identity);
-    WriteLe64(bytes + kHeaderProfileIdentityOffset, document.profile_identity);
-    WriteLe32(bytes + kHeaderServicesOffset, kServiceManifestV1HeaderBytes);
-    WriteLe32(bytes + kHeaderDependenciesOffset, dependencies_offset);
+    const u32 dependencies_offset = EncodedDependenciesOffset(document);
+    EncodeHeader(bytes, document, encoded_size);
 
     for (u32 index = 0; index < document.service_count; ++index)
     {
@@ -733,8 +788,7 @@ ServiceManifestEncodeResult ServiceManifestEncodeV1(void* output, u64 output_cap
     for (u32 index = 0; index < document.dependency_count; ++index)
     {
         u8* edge = bytes + dependencies_offset + index * kServiceManifestV1DependencyBytes;
-        WriteLe64(edge + kDependencyOwnerOffset, document.dependencies[index].owner_service_identity);
-        WriteLe64(edge + kDependencyTargetOffset, document.dependencies[index].dependency_service_identity);
+        EncodeDependency(edge, document.dependencies[index]);
     }
     return ServiceManifestEncodeResult{ServiceManifestError::Ok, encoded_size};
 }
