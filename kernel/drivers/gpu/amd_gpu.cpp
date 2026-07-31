@@ -338,7 +338,14 @@ u32 AmdCpWriteDataProbe(u32 cookie)
     u32* ring = static_cast<u32*>(g_cp_ring.virt);
     const u32 ring_dwords = static_cast<u32>(kAmdCpRingDwords);
     const u32 ring_mask = ring_dwords - 1u;
-    const u32 current_wptr = Mmio32(kAmdRegCpRb0Wptr) & ring_mask;
+    const u32 current_wptr_raw = Mmio32(kAmdRegCpRb0Wptr);
+    if (current_wptr_raw == kAmdCpProbeFailure)
+    {
+        KLOG_WARN("drivers/gpu/amd", "CP PM4 WRITE_DATA WPTR read failed");
+        mm::FreeDmaCoherent(scratch);
+        return kAmdCpProbeFailure;
+    }
+    const u32 current_wptr = current_wptr_raw & ring_mask;
     u32 packet_offset = current_wptr;
     constexpr u32 kPacketDwords = sizeof(WriteDataPacket) / sizeof(u32);
     static_assert(kPacketDwords == 5, "WRITE_DATA probe packet size");

@@ -209,9 +209,9 @@ Sequence: halt CP via `mmCP_ME_CNTL`, walk
 `mmCP_PFP_UCODE_ADDR=0` then stream dwords to
 `mmCP_PFP_UCODE_DATA` (auto-increment), repeat for CE and ME
 (via `mmCP_ME_RAM_WADDR` / `_DATA`), trailing version write to
-each `*_ADDR`, then un-halt. RLC must be loaded and
-`RLC_ENABLE_F32=1` before CP wakes — leave PG disabled
-(`mmRLC_PG_CNTL=0`) for the minimum-viable path.
+each `*_ADDR`, then un-halt only after PFP/CE/ME are complete. RLC is
+loaded and `RLC_ENABLE_F32=1` when its optional image is present;
+leave PG disabled (`mmRLC_PG_CNTL=0`) for the minimum-viable path.
 
 **Minimum PM4 demo:** `AmdCpWriteDataProbe` emits a
 `PACKET3_WRITE_DATA(0x37)` with `DST_SEL=mem`, `ENGINE_SEL=ME`, and
