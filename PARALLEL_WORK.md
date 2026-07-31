@@ -962,3 +962,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: No description provided
 - **Claimed**: 2026-07-31T19:31:37Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] ipc-message-abi-source
+- **Session**: `Codex-ipc-message-abi`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/ipc/message_abi.cpp`
+- **Description**: Versioned service message validator implementation
+- **Claimed**: 2026-07-31T19:32:03Z
+- **Status**: IN PROGRESS
