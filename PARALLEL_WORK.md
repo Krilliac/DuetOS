@@ -522,3 +522,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Host a throwaway DuetOS QEMU and dispatch real authenticated DRSH agent workers; keep separate from protocol/OS attack scripts.
 - **Claimed**: 2026-07-31T04:37:53Z
 - **Status**: COMPLETED @ 2026-07-31T04:56:36Z
+
+### [ACTIVE] drsh-concurrent-access
+- **Session**: `Nathan-1422`
+- **Branch**: `claude/drsh-agent-host`
+- **Files**: `kernel/net/drsh/drsh.h kernel/net/drsh/drsh_internal.h kernel/net/drsh/drsh_server.cpp kernel/net/drsh/drsh_transport.cpp kernel/shell/shell_drsh.cpp tools/qemu/run.sh tools/security/drsh_host.py wiki/networking/DRSH-Remote-Access.md`
+- **Description**: Concurrent DRSH sessions with explicit local-only or external access policy
+- **Claimed**: 2026-07-31T05:17:53Z
+- **Status**: IN PROGRESS
