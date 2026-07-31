@@ -1067,13 +1067,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T19:58:16Z
 - **Status**: COMPLETED @ 2026-07-31T20:04:33Z
 
-### [ACTIVE] native-libc-syscall-idl
+### [DONE] native-libc-syscall-idl
 - **Session**: `Nathan-237`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `userland/libc/include/duet/syscall.h`
 - **Description**: Replace duplicated native libc syscall numbers with the generated IDL header while preserving documented wrappers and socket operation constants
 - **Claimed**: 2026-07-31T19:59:16Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-31T20:04:35Z
 
 ### [ACTIVE] native-syscall-cap-policy
 - **Session**: `Nathan-239`
