@@ -6,35 +6,10 @@
 
 include("${CMAKE_SOURCE_DIR}/cmake/DuetOSRust.cmake")
 
-file(GLOB_RECURSE DUETOS_RUST_SUBSYSTEM_SOURCES CONFIGURE_DEPENDS
-    "${CMAKE_SOURCE_DIR}/kernel/fs/duetfs/src/*.rs"
-    "${CMAKE_SOURCE_DIR}/kernel/fs/duetfs/Cargo.toml"
-    "${CMAKE_SOURCE_DIR}/kernel/drivers/usb/class_rust/src/*.rs"
-    "${CMAKE_SOURCE_DIR}/kernel/drivers/usb/class_rust/Cargo.toml"
-    "${CMAKE_SOURCE_DIR}/kernel/drivers/usb/hid_rust/src/*.rs"
-    "${CMAKE_SOURCE_DIR}/kernel/drivers/usb/hid_rust/Cargo.toml"
-    "${CMAKE_SOURCE_DIR}/kernel/net/parsers_rust/src/*.rs"
-    "${CMAKE_SOURCE_DIR}/kernel/net/parsers_rust/Cargo.toml"
-    "${CMAKE_SOURCE_DIR}/kernel/drivers/usb/msc_scsi_rust/src/*.rs"
-    "${CMAKE_SOURCE_DIR}/kernel/drivers/usb/msc_scsi_rust/Cargo.toml"
-    "${CMAKE_SOURCE_DIR}/kernel/util/img_meta_rust/src/*.rs"
-    "${CMAKE_SOURCE_DIR}/kernel/util/img_meta_rust/Cargo.toml"
-    "${CMAKE_SOURCE_DIR}/kernel/loader/exec_meta_rust/src/*.rs"
-    "${CMAKE_SOURCE_DIR}/kernel/loader/exec_meta_rust/Cargo.toml"
-    "${CMAKE_SOURCE_DIR}/kernel/fs/ntfs_rust/src/*.rs"
-    "${CMAKE_SOURCE_DIR}/kernel/fs/ntfs_rust/Cargo.toml"
-    "${CMAKE_SOURCE_DIR}/kernel/fs/exfat_rust/src/*.rs"
-    "${CMAKE_SOURCE_DIR}/kernel/fs/exfat_rust/Cargo.toml"
-    "${CMAKE_SOURCE_DIR}/kernel/fs/ext4_rust/src/*.rs"
-    "${CMAKE_SOURCE_DIR}/kernel/fs/ext4_rust/Cargo.toml"
-    "${CMAKE_SOURCE_DIR}/kernel/acpi/acpi_rust/src/*.rs"
-    "${CMAKE_SOURCE_DIR}/kernel/acpi/acpi_rust/Cargo.toml"
-    "${CMAKE_SOURCE_DIR}/kernel/acpi/aml_rust/src/*.rs"
-    "${CMAKE_SOURCE_DIR}/kernel/acpi/aml_rust/Cargo.toml"
-    "${CMAKE_SOURCE_DIR}/kernel/net/wifi80211_rust/src/*.rs"
-    "${CMAKE_SOURCE_DIR}/kernel/net/wifi80211_rust/Cargo.toml"
-    "${CMAKE_SOURCE_DIR}/kernel/net/hci_rust/src/*.rs"
-    "${CMAKE_SOURCE_DIR}/kernel/net/hci_rust/Cargo.toml"
+duetos_collect_rust_workspace_depends(
+    AGGREGATE_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml"
+    CHECKER "${CMAKE_SOURCE_DIR}/tools/test/check-rust-ffi.py"
+    OUTPUT_VAR DUETOS_RUST_WORKSPACE_DEPENDS
 )
 
 duetos_add_rust_staticlib(
@@ -46,21 +21,7 @@ duetos_add_rust_staticlib(
     INCLUDE_VAR DUETOS_KERNEL_RUST_INCLUDE_DIR
     TARGET_VAR DUETOS_KERNEL_RUST_TARGET
     EXTRA_DEPENDS
-        ${DUETOS_RUST_SUBSYSTEM_SOURCES}
-        "${CMAKE_SOURCE_DIR}/kernel/fs/duetfs/include/duetfs.h"
-        "${CMAKE_SOURCE_DIR}/kernel/drivers/usb/class_rust/include/usbclass.h"
-        "${CMAKE_SOURCE_DIR}/kernel/drivers/usb/hid_rust/include/usbhid.h"
-        "${CMAKE_SOURCE_DIR}/kernel/net/parsers_rust/include/parsers_rust.h"
-        "${CMAKE_SOURCE_DIR}/kernel/drivers/usb/msc_scsi_rust/include/msc_scsi_rust.h"
-        "${CMAKE_SOURCE_DIR}/kernel/util/img_meta_rust/include/img_meta_rust.h"
-        "${CMAKE_SOURCE_DIR}/kernel/loader/exec_meta_rust/include/exec_meta_rust.h"
-        "${CMAKE_SOURCE_DIR}/kernel/fs/ntfs_rust/include/ntfs_rust.h"
-        "${CMAKE_SOURCE_DIR}/kernel/fs/exfat_rust/include/exfat_rust.h"
-        "${CMAKE_SOURCE_DIR}/kernel/fs/ext4_rust/include/ext4_rust.h"
-        "${CMAKE_SOURCE_DIR}/kernel/acpi/acpi_rust/include/acpi_rust.h"
-        "${CMAKE_SOURCE_DIR}/kernel/acpi/aml_rust/include/aml_rust.h"
-        "${CMAKE_SOURCE_DIR}/kernel/net/wifi80211_rust/include/wifi80211_rust.h"
-        "${CMAKE_SOURCE_DIR}/kernel/net/hci_rust/include/hci_rust.h"
+        ${DUETOS_RUST_WORKSPACE_DEPENDS}
 )
 
 set(DUETOS_KERNEL_RUST_STATIC_LIB "${DUETOS_KERNEL_RUST_STATIC_LIB}" PARENT_SCOPE)
