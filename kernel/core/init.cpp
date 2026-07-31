@@ -344,7 +344,10 @@ extern "C" void (*__init_array_end[])();
 
 void RunInitArray()
 {
-    const u64 count = static_cast<u64>(__init_array_end - __init_array_start);
+    const u64 begin = reinterpret_cast<u64>(__init_array_start);
+    const u64 end = reinterpret_cast<u64>(__init_array_end);
+    const u64 bytes = end >= begin ? end - begin : 0;
+    const u64 count = bytes / sizeof(__init_array_start[0]);
     arch::SerialWrite("[init] _init_array: ");
     arch::SerialWriteHex(count);
     arch::SerialWrite(" entries\n");

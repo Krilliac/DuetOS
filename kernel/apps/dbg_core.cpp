@@ -304,11 +304,12 @@ usize ScanBytes(u64 pid, const u8* needle, usize nlen, u64* hits, usize cap)
     // and direct — no AS walks.
     if (pid == kKernelPid)
     {
-        const u8* lo = _text_start;
-        const u8* hi = _text_end;
-        if (hi <= lo)
+        const u64 lo_addr = reinterpret_cast<u64>(_text_start);
+        const u64 hi_addr = reinterpret_cast<u64>(_text_end);
+        if (hi_addr <= lo_addr)
             return 0;
-        const u64 size = static_cast<u64>(hi - lo);
+        const u8* lo = reinterpret_cast<const u8*>(lo_addr);
+        const u64 size = hi_addr - lo_addr;
         for (u64 off = 0; off + nlen <= size && hit_count < cap; ++off)
         {
             bool match = true;

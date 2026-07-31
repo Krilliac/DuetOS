@@ -1024,7 +1024,9 @@ u64 SmpStartAps()
     // Copy the trampoline image into physical 0x8000. Frame allocator
     // has the low 1 MiB permanently reserved, so nobody else owns this
     // memory.
-    const u64 tramp_len = static_cast<u64>(ap_trampoline_end - ap_trampoline_start);
+    const u64 tramp_start = reinterpret_cast<u64>(ap_trampoline_start);
+    const u64 tramp_end = reinterpret_cast<u64>(ap_trampoline_end);
+    const u64 tramp_len = tramp_end >= tramp_start ? tramp_end - tramp_start : 0;
     if (tramp_len > 0x1000)
     {
         // Build-time invariant violated. Debug: panic so the
