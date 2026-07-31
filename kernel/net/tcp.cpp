@@ -472,25 +472,24 @@ TcbId AcceptNonblocking(TcbId listener, Ipv4Address* out_peer_ip, u16* out_peer_
         arch::Sti();
         return kInvalidTcbId;
     }
-    if (lp->backlog_count == 0)
+    while (lp->backlog_count != 0)
     {
-        arch::Sti();
-        return kInvalidTcbId;
-    }
-    const TcbId child_id = lp->backlog_ring[lp->backlog_tail];
-    lp->backlog_tail = (lp->backlog_tail + 1) % kListenBacklogMax;
-    --lp->backlog_count;
-    Tcb* ct = TcbFromId(child_id);
-    if (ct != nullptr)
-    {
+        const TcbId child_id = lp->backlog_ring[lp->backlog_tail];
+        lp->backlog_tail = (lp->backlog_tail + 1) % kListenBacklogMax;
+        --lp->backlog_count;
+        Tcb* ct = TcbFromId(child_id);
+        if (ct == nullptr || !ct->in_use || ct->state != State::Established)
+            continue; // child was dropped after being queued; discard stale ID
         if (out_peer_ip != nullptr)
             *out_peer_ip = ct->peer_ip;
         if (out_peer_port != nullptr)
             *out_peer_port = ct->peer_port;
+        ++g_stats.accepts;
+        arch::Sti();
+        return child_id;
     }
-    ++g_stats.accepts;
     arch::Sti();
-    return child_id;
+    return kInvalidTcbId;
 }
 
 sched::WaitQueue* AcceptWaitQueue(TcbId listener)
