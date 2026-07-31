@@ -1282,3 +1282,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: ThreadGroup
 - **Claimed**: 2026-07-31T21:42:06Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] gui-broker-protocol
+- **Session**: `Nathan-1592`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/drivers/video/gui_broker_protocol.h kernel/drivers/video/gui_broker_protocol.cpp tests/host/test_gui_broker_protocol.cpp`
+- **Description**: Versioned transport-independent GUI broker wire contract and hostile host vectors
+- **Claimed**: 2026-07-31T21:49:13Z
+- **Status**: IN PROGRESS
