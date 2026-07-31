@@ -902,7 +902,7 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
         // bytes ~= glyph cell count for the Caption role bitmap
         // path, which is the v0 default).
         u32 base_len = 0;
-        while (g_status_text[base_len] != '\0' && base_len < sizeof(g_status_text))
+        while (base_len < sizeof(g_status_text) - 1 && g_status_text[base_len] != '\0')
             ++base_len;
         const u32 fx = sx + base_len * kGlyphW;
         const u32 max_x = cx + cw - kPad;

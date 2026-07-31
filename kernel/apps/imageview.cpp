@@ -410,7 +410,7 @@ enum class ImageFormat : u8
 ImageFormat ClassifyByName(const char* name)
 {
     u32 len = 0;
-    while (name[len] != '\0' && len < kNameCap)
+    while (len < kNameCap && name[len] != '\0')
         ++len;
     if (len < 5)
         return ImageFormat::Unknown;

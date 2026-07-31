@@ -1249,7 +1249,7 @@ u64 ProcessFindDllBaseByName(const Process* proc, const char* dll_name)
     // export table.
     char trimmed[64];
     u32 i = 0;
-    while (dll_name[i] != '\0' && i < sizeof(trimmed) - 1)
+    while (i < sizeof(trimmed) - 1 && dll_name[i] != '\0')
     {
         trimmed[i] = dll_name[i];
         ++i;
@@ -1275,7 +1275,7 @@ u64 ProcessFindDllBaseByName(const Process* proc, const char* dll_name)
         // Compare with the same suffix-tolerant rule on both sides.
         char other[64];
         u32 oi = 0;
-        while (name[oi] != '\0' && oi < sizeof(other) - 1)
+        while (oi < sizeof(other) - 1 && name[oi] != '\0')
         {
             other[oi] = name[oi];
             ++oi;
