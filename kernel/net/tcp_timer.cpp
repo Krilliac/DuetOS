@@ -83,12 +83,12 @@ void RetransmitFirstUnacked(Tcb& t)
 void TimerTick()
 {
     using namespace internal;
-    arch::Cli();
+    auto lock_flags = sync::SpinLockAcquire(g_tcb_lock);
     const u64 now = NowTicks();
     for (u32 i = 0; i < kTcbCap; ++i)
     {
         Tcb& t = g_tcbs[i];
-        if (!t.in_use)
+        if (!t.in_use || t.initializing)
             continue;
         if (t.is_listener)
             continue;
@@ -196,7 +196,7 @@ void TimerTick()
             t.persist_deadline = now + t.persist_backoff_ticks;
         }
     }
-    arch::Sti();
+    sync::SpinLockRelease(g_tcb_lock, lock_flags);
 }
 
 namespace
@@ -227,16 +227,19 @@ void Init()
 {
     if (internal::g_initialised)
         return;
-    arch::Cli();
+    auto flags = sync::SpinLockAcquire(internal::g_tcb_lock);
     for (u32 i = 0; i < kTcbCap; ++i)
+    {
         internal::g_tcbs[i].in_use = false;
+        internal::g_tcbs[i].initializing = false;
+    }
     for (u32 i = 0; i < kTcbBuckets; ++i)
         internal::g_buckets[i] = internal::kBucketNone;
     internal::g_stats = {};
     // ML-02 (net-0): seed the per-boot ISN secret from the CSPRNG once.
     internal::g_isn_secret = ::duetos::core::RandomU64();
     internal::g_initialised = true;
-    arch::Sti();
+    sync::SpinLockRelease(internal::g_tcb_lock, flags);
     internal::StartTimerTask();
 }
 

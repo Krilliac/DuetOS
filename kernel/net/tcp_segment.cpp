@@ -10,9 +10,8 @@
  *   - DrainSendBuffer / Retransmit helpers used by the public API
  *     and the timer task.
  *
- * Everything in here runs under arch::Cli (single-CPU lock). Callers
- * that re-enter the state machine through the public API are
- * responsible for the lock.
+ * Everything in here runs under the shared IRQ-save TCB spinlock.
+ * Callers that enter the state machine are responsible for holding it.
  */
 
 #include "net/tcp.h"
@@ -1413,7 +1412,7 @@ void DeliverSegment(u32 idx, const MacAddress& peer_mac, Ipv4Address peer_ip, co
 }
 
 void HandleListenSyn(u32 listener_idx, u32 iface_index, const MacAddress& peer_mac, Ipv4Address peer_ip, u16 peer_port,
-                     u16 local_port, u32 peer_seq, u8 peer_flags, const ParsedOptions& po)
+                     u16 local_port, u32 peer_seq, u8 peer_flags, const ParsedOptions& po, sync::IrqFlags& lock_flags)
 {
     Tcb& parent = g_tcbs[listener_idx];
     // Gate on completed-awaiting-accept AND still-handshaking children.
@@ -1438,14 +1437,44 @@ void HandleListenSyn(u32 listener_idx, u32 iface_index, const MacAddress& peer_m
     }
     Tcb& child = g_tcbs[idx];
     const u8 gen = u8(child.generation + 1);
-    if (!AllocTcbBuffers(child))
-    {
-        ++g_stats.backlog_drops;
-        return;
-    }
+    const TcbId parent_id = MakeId(listener_idx, parent.generation);
     ResetTcbStorage(child);
     child.generation = gen;
     child.in_use = true;
+    child.initializing = true;
+    sync::SpinLockRelease(g_tcb_lock, lock_flags);
+    if (!AllocTcbBuffers(child))
+    {
+        lock_flags = sync::SpinLockAcquire(g_tcb_lock);
+        child.in_use = false;
+        child.initializing = false;
+        ++g_stats.backlog_drops;
+        return;
+    }
+    lock_flags = sync::SpinLockAcquire(g_tcb_lock);
+    Tcb* current_parent = TcbFromId(parent_id);
+    if (current_parent == nullptr || !current_parent->is_listener)
+    {
+        sync::SpinLockRelease(g_tcb_lock, lock_flags);
+        FreeTcbBuffers(child);
+        lock_flags = sync::SpinLockAcquire(g_tcb_lock);
+        child.in_use = false;
+        child.initializing = false;
+        ++g_stats.backlog_drops;
+        return;
+    }
+    Tcb& parent_after_alloc = *current_parent;
+    if (parent_after_alloc.backlog_count + parent_after_alloc.syn_backlog_count >= parent_after_alloc.backlog_max)
+    {
+        sync::SpinLockRelease(g_tcb_lock, lock_flags);
+        FreeTcbBuffers(child);
+        lock_flags = sync::SpinLockAcquire(g_tcb_lock);
+        child.in_use = false;
+        child.initializing = false;
+        ++g_stats.backlog_drops;
+        return;
+    }
+    child.initializing = false;
     child.is_listener = false;
     child.state = State::SynRcvd;
     child.iface_index = iface_index;
@@ -1455,11 +1484,11 @@ void HandleListenSyn(u32 listener_idx, u32 iface_index, const MacAddress& peer_m
     child.peer_port = peer_port;
     child.peer_mac = peer_mac;
     child.refs = 1;
-    child.parent_listener = MakeId(listener_idx, parent.generation);
+    child.parent_listener = parent_id;
     // This child now occupies one of the listener's backlog slots and
     // holds it until the handshake completes (NotifyParentAccept) or
     // the Tcb is torn down (DropTcb). Both of those release it.
-    ++parent.syn_backlog_count;
+    ++parent_after_alloc.syn_backlog_count;
     // ML-02 (net-0): RFC 6528 keyed ISN — see GenIsn (tcp.cpp).
     child.iss = GenIsn(child.local_ip, child.local_port, child.peer_ip, child.peer_port);
     child.snd_una = child.iss;
@@ -1494,7 +1523,7 @@ void OnSegment(u32 iface_index, const MacAddress& peer_mac, Ipv4Address peer_ip,
     using namespace internal;
     if (tcp == nullptr || tcp_len < 20)
         return;
-    arch::Cli();
+    auto lock_flags = sync::SpinLockAcquire(g_tcb_lock);
     ++g_stats.segs_rx;
     const u16 src_port = (u16(tcp[0]) << 8) | u16(tcp[1]);
     const u16 dst_port = (u16(tcp[2]) << 8) | u16(tcp[3]);
@@ -1504,7 +1533,7 @@ void OnSegment(u32 iface_index, const MacAddress& peer_mac, Ipv4Address peer_ip,
     const u8 flags = tcp[13];
     if (data_off_bytes < 20 || data_off_bytes > tcp_len)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_tcb_lock, lock_flags);
         return;
     }
     Ipv4Address local_ip = InterfaceIp(iface_index);
@@ -1514,7 +1543,7 @@ void OnSegment(u32 iface_index, const MacAddress& peer_mac, Ipv4Address peer_ip,
     if (idx != kTcbCap)
     {
         DeliverSegment(idx, peer_mac, peer_ip, tcp, tcp_len, ip_ce);
-        arch::Sti();
+        sync::SpinLockRelease(g_tcb_lock, lock_flags);
         return;
     }
 
@@ -1527,8 +1556,8 @@ void OnSegment(u32 iface_index, const MacAddress& peer_mac, Ipv4Address peer_ip,
             const u8* opts = tcp + 20;
             const u32 opts_len = data_off_bytes - 20;
             ParsedOptions po = ParseOptions(opts, opts_len);
-            HandleListenSyn(lidx, iface_index, peer_mac, peer_ip, src_port, dst_port, seq, flags, po);
-            arch::Sti();
+            HandleListenSyn(lidx, iface_index, peer_mac, peer_ip, src_port, dst_port, seq, flags, po, lock_flags);
+            sync::SpinLockRelease(g_tcb_lock, lock_flags);
             return;
         }
     }
@@ -1536,7 +1565,7 @@ void OnSegment(u32 iface_index, const MacAddress& peer_mac, Ipv4Address peer_ip,
     // Anything else gets an RST (unless it itself is an RST).
     if ((flags & kFlagRst) == 0)
         SendStandaloneRst(iface_index, peer_mac, peer_ip, src_port, dst_port, seq, ack, flags);
-    arch::Sti();
+    sync::SpinLockRelease(g_tcb_lock, lock_flags);
 }
 
 } // namespace duetos::net::tcp

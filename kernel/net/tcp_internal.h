@@ -3,6 +3,7 @@
 #include "net/tcp.h"
 #include "net/tcp_sack.h"
 #include "sched/sched.h"
+#include "sync/spinlock.h"
 #include "util/types.h"
 
 /*
@@ -84,6 +85,8 @@ struct Tcb
     u8 _pad0[2];
 
     u32 refs;
+    bool initializing; // reserved while heap-backed buffers are allocated
+    u8 _pad_refs[3];
 
     // LISTEN-only: backlog ring of TcbIds for accepted children.
     u32 backlog_max;
@@ -267,10 +270,13 @@ extern constinit u16 g_ephemeral_cursor;
 // a deterministic function of the 4-tuple so TIME_WAIT old-duplicate
 // monotonicity is preserved across reincarnated connections.
 extern constinit u64 g_isn_secret;
+// Cross-CPU guard for the TCB table. Public entry points and the RX/timer
+// paths share this lock; internal state-machine helpers require it held.
+extern constinit sync::SpinLock g_tcb_lock;
 // NOLINTEND(bugprone-dynamic-static-initializers)
 
-// Helpers shared across the TCP TUs. All assume the caller holds
-// arch::Cli (single-CPU stand-in for a per-bucket lock).
+// Helpers shared across the TCP TUs. All table/state-machine helpers
+// assume the caller holds g_tcb_lock.
 u64 NowTicks();
 u32 MsToTicks(u32 ms);
 bool IpEq(Ipv4Address a, Ipv4Address b);

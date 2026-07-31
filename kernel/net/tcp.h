@@ -21,7 +21,7 @@
  * surface in the kernel.
  *
  * Threading: every TCB touches g_tcb_table under a single
- * net-stack-wide spinlock (arch::Cli for v0; the slot for a real
+ * net-stack-wide IRQ-save spinlock (replacing the old CPU-local
  * per-bucket lock is wired but not enabled). The timer task uses
  * the same lock — IRQ-off windows are short (walk one bucket,
  * fire one segment).
