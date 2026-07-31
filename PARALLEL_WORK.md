@@ -1458,3 +1458,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Bounded native syscall IDL enum dispatch bijection and migration classification gate
 - **Claimed**: 2026-07-31T23:16:05Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] gui-send-service-foundation
+- **Session**: `Codex-gui-send-service`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/drivers/video/gui_send_service.h kernel/drivers/video/gui_send_service.cpp tests/host/test_gui_send_service.cpp`
+- **Description**: Non-hot-reloadable same-process synchronous GUI send service foundation
+- **Claimed**: 2026-07-31T23:18:57Z
+- **Status**: IN PROGRESS
