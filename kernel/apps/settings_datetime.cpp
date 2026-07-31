@@ -379,7 +379,6 @@ bool Key(char c)
         {
             // Well-known Google time server — same as the shell `ntp` command.
             duetos::net::Ipv4Address srv{{216, 239, 35, 0}};
-            AppendStr(g_ntp_status, sizeof(g_ntp_status), nullptr, ""); // unused; direct write below
             // Update status to "querying" immediately so the panel
             // shows activity on the next frame.
             g_ntp_status[0] = 'N';

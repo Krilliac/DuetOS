@@ -118,7 +118,7 @@ struct Builder
     Node* document;
     // Open-element stack; entry 0 is always the Document.
     static constexpr u32 kMaxDepth = 256;
-    Node* stack[kMaxDepth];
+    Node* stack[kMaxDepth] = {};
     u32 depth;
 
     explicit Builder(Arena& a) : arena(a), document(nullptr), depth(0) {}
