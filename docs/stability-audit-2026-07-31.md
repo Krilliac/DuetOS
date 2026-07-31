@@ -23,7 +23,7 @@ Status: active; static and host-side partial verification complete. Full kernel/
 
 ## Implemented hardening
 
-Recent audit commits include teardown pinning for socket/IPC/async pools, timeout and overflow saturation, bounds and source-span checks, driver/loader range arithmetic, diagnostic formatting safety, filesystem label walks, Linux directory-prefix copying, and explicit userland ABI/CRT contracts. The current branch is clean at `9aeca2f0`.
+Recent audit commits include teardown pinning for socket/IPC/async pools, timeout and overflow saturation, bounds and source-span checks, PE-loader map refusal checks, driver/loader range arithmetic, diagnostic formatting safety, filesystem label walks, Linux directory-prefix copying, and explicit userland ABI/CRT contracts. The current branch is clean at `9800db83`.
 
 ## Remaining verification
 
