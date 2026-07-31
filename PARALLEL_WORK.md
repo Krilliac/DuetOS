@@ -658,3 +658,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Run owner-job exit-drain reference-balance selftest before user tasks
 - **Claimed**: 2026-07-31T14:18:14Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] vm-process-lookup-api
+- **Session**: `Nathan-221`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/sched/sched.h kernel/subsystems/linux/syscall_async_io.cpp kernel/subsystems/linux/syscall_proc.cpp kernel/subsystems/linux/pidfd_splice.cpp`
+- **Description**: Retire borrowed Process pointer lookup in favor of retained ownership or boolean existence queries
+- **Claimed**: 2026-07-31T14:24:02Z
+- **Status**: IN PROGRESS
