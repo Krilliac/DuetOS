@@ -14268,3 +14268,24 @@ _2026-07-30_
   This is visually coarse but functionally correct — every Win32 text
   API returns real values (not stubs), and text drawing uses the
   selected font's glyph data.
+
+---
+
+## 055 — PS/2 keyboard overflow preserves SPSC cursor ownership
+
+- **Scope:** `kernel/drivers/input/ps2kbd.{h,cpp}`
+- **Decision:** When the 64-byte scan-code ring is full, discard the
+  incoming byte. The IRQ producer advances only `g_ring_head`; the
+  single reader advances only `g_ring_tail`.
+- **Why:** The previous drop-oldest path advanced the task-owned tail
+  from IRQ context. `Cli()` masks interrupts only on the current CPU,
+  so that second writer could race a reader running on another CPU.
+  Dropping newest preserves the single-producer/single-consumer
+  invariant without introducing a scheduler release-and-block ABI.
+- **Rules out / defers:** The previous drop-oldest overflow preference.
+  The raw scan-code API remains single-reader; a future multi-reader
+  input layer can define a separate event-stream ownership contract.
+- **Revisit when:** Input latency or key-release preservation under
+  sustained overflow becomes measurable, or `WaitQueueBlockLocked` is
+  available for a fully locked queue design.
+- **Related tracks:** Track 6 (Drivers — input), Track 9 (Windowing).

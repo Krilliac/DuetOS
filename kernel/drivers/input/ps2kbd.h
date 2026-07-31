@@ -35,8 +35,9 @@
  *     interface will carry them as a modifier bitmap.
  *   - Single reader for raw bytes. `Ps2KeyboardRead` blocks on one
  *     wait queue; two concurrent readers would fight over bytes.
- *   - Ring buffer drops oldest bytes on overflow (not newest, not
- *     block-in-IRQ — that would deadlock).
+ *   - Ring buffer drops newest bytes on overflow (not oldest, not
+ *     block-in-IRQ — that would deadlock). This keeps the IRQ producer
+ *     from modifying the task-owned read cursor on SMP.
  *
  * Context: kernel. Init runs once, after IoApicInit + SchedInit.
  */
