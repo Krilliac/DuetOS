@@ -1098,3 +1098,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Regenerate and gate native syscall IDL artifacts in the existing repository static-analysis workflow
 - **Claimed**: 2026-07-31T20:00:48Z
 - **Status**: COMPLETED @ 2026-07-31T20:04:38Z
+
+### [ACTIVE] socket-alloc-transaction
+- **Session**: `Nathan-1456`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/net/socket.cpp`
+- **Description**: Atomic socket slot reservation across BSP preemption and SMP allocation races
+- **Claimed**: 2026-07-31T20:08:21Z
+- **Status**: IN PROGRESS
