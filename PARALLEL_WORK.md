@@ -1466,3 +1466,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Non-hot-reloadable same-process synchronous GUI send service foundation
 - **Claimed**: 2026-07-31T23:18:57Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-lifecycle-lockdep
+- **Session**: `Nathan-1167`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/sync/lockdep.h kernel/sync/lockdep.cpp`
+- **Description**: Register scheduler-to-service lifecycle broker lock ordering
+- **Claimed**: 2026-07-31T23:21:50Z
+- **Status**: IN PROGRESS
