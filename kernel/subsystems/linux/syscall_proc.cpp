@@ -116,19 +116,20 @@ i64 DoTgkill(u64 tgid, u64 tid, u64 sig)
         sched::Task* t = sched::SchedFindTaskByTid(tid);
         return (t != nullptr) ? 0 : kESRCH;
     }
-    sched::Task* t = sched::SchedFindTaskByTid(tid);
-    if (t == nullptr)
+    core::Process* target = sched::SchedFindProcessByTidRetained(tid);
+    if (target == nullptr)
     {
         KLOG_WARN_V("linux/proc", "DoTgkill: ESRCH (tid not found)", tid);
         return kESRCH;
     }
-    core::Process* target = sched::TaskProcess(t);
     if (target == nullptr)
     {
         KLOG_WARN_V("linux/proc", "DoTgkill: ESRCH (kernel-only task)", tid);
         return kESRCH; // kernel-only task — no Linux process to signal
     }
-    return LinuxSignalDeliver(target, static_cast<u32>(sig));
+    const i64 rc = LinuxSignalDeliver(target, static_cast<u32>(sig));
+    core::ProcessRelease(target);
+    return rc;
 }
 
 // Linux: kill(pid, sig). pid > 0 → deliver to the matching process.
@@ -148,7 +149,7 @@ i64 DoKill(u64 pid, u64 sig)
     }
     core::Process* target = nullptr;
     if (spid > 0)
-        target = sched::SchedFindProcessByPid(static_cast<u64>(spid));
+        target = sched::SchedFindProcessByPidRetained(static_cast<u64>(spid));
     else if (spid == 0)
         target = core::CurrentProcess();
     else
@@ -161,7 +162,10 @@ i64 DoKill(u64 pid, u64 sig)
         KLOG_WARN_V("linux/proc", "DoKill: ESRCH (target not found)", pid);
         return kESRCH;
     }
-    return LinuxSignalDeliver(target, static_cast<u32>(sig));
+    const i64 rc = LinuxSignalDeliver(target, static_cast<u32>(sig));
+    if (spid > 0)
+        core::ProcessRelease(target);
+    return rc;
 }
 
 // Linux: getppid / getpgid / getsid / setpgid. v0 has a flat
