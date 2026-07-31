@@ -514,3 +514,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Re-record completed Aurora sample stats gadgets slice after rebasing onto DRSH-merged main
 - **Claimed**: 2026-07-31T00:51:53Z
 - **Status**: COMPLETED @ 2026-07-31T00:51:58Z
+
+### [ACTIVE] drsh-agent-host
+- **Session**: `Codex-drsh-agent-host-2026-07-30`
+- **Branch**: `claude/drsh-agent-host`
+- **Files**: `tools/security/drsh_host.py tools/security/drsh_agent.py tools/qemu/run.sh wiki/networking/DRSH-Remote-Access.md`
+- **Description**: Host a throwaway DuetOS QEMU and dispatch real authenticated DRSH agent workers; keep separate from protocol/OS attack scripts.
+- **Claimed**: 2026-07-31T04:37:53Z
+- **Status**: IN PROGRESS
