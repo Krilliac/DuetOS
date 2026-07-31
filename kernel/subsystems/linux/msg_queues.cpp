@@ -27,6 +27,7 @@
 #include "mm/paging.h"
 #include "proc/process.h"
 #include "sched/sched.h"
+#include "sync/spinlock.h"
 #include "time/tick.h"
 #include "util/nospec.h"
 
@@ -85,8 +86,10 @@ struct PosixMq
 {
     bool in_use;
     bool initializing;
-    u8 _pad[2];
+    bool closing;
+    u8 _pad;
     u32 refs;
+    u32 pins;
     char name[kPosixMqNameCap];
     u32 max_msgs; // current ring cap
     u32 max_msg_bytes;
@@ -99,6 +102,50 @@ struct PosixMq
 
 SysvMq g_sysv_pool[kSysvMqPoolCap];
 PosixMq g_posix_pool[kPosixMqPoolCap];
+constinit sync::SpinLock g_posix_lock = {
+    .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
+
+struct PosixMqPin
+{
+    u32 idx;
+    PosixMq* queue;
+
+    explicit PosixMqPin(u32 value) : idx(value), queue(nullptr)
+    {
+        if (value >= kPosixMqPoolCap)
+            return;
+        sync::SpinLockGuard guard(g_posix_lock);
+        PosixMq& q = g_posix_pool[value];
+        if (q.in_use && !q.initializing && !q.closing)
+        {
+            ++q.pins;
+            queue = &q;
+        }
+    }
+
+    ~PosixMqPin()
+    {
+        if (queue == nullptr)
+            return;
+        auto flags = sync::SpinLockAcquire(g_posix_lock);
+        PosixMq& q = g_posix_pool[idx];
+        if (q.pins > 0)
+            --q.pins;
+        PosixMsg* ring = nullptr;
+        if (q.pins == 0 && q.refs == 0 && !q.in_use && q.closing)
+        {
+            ring = q.ring;
+            q.ring = nullptr;
+            q.closing = false;
+            q.count = 0;
+        }
+        sync::SpinLockRelease(g_posix_lock, flags);
+        if (ring != nullptr)
+            mm::KFree(ring);
+    }
+
+    explicit operator bool() const { return queue != nullptr; }
+};
 
 // =========================================================
 // SysV MQ helpers
@@ -475,15 +522,17 @@ i32 PosixMqAlloc(const char* name, u32 max_msgs, u32 max_bytes)
         max_msgs = kMqMsgsPerQueue;
     if (max_bytes == 0 || max_bytes > kMqMaxMsgBytes)
         max_bytes = kMqMaxMsgBytes;
-    arch::Cli();
+    auto flags = sync::SpinLockAcquire(g_posix_lock);
     for (u32 i = 0; i < kPosixMqPoolCap; ++i)
     {
-        if (g_posix_pool[i].in_use)
+        if (g_posix_pool[i].in_use || g_posix_pool[i].closing)
             continue;
         PosixMq& q = g_posix_pool[i];
         q.in_use = true;
         q.initializing = true;
+        q.closing = false;
         q.refs = 1;
+        q.pins = 0;
         q.max_msgs = max_msgs;
         q.max_msg_bytes = max_bytes;
         q.count = 0;
@@ -496,22 +545,22 @@ i32 PosixMqAlloc(const char* name, u32 max_msgs, u32 max_bytes)
         q.write_wq.head = nullptr;
         q.write_wq.tail = nullptr;
         q.ring = nullptr;
-        arch::Sti();
+        sync::SpinLockRelease(g_posix_lock, flags);
         q.ring = static_cast<PosixMsg*>(mm::KMalloc(sizeof(PosixMsg) * max_msgs));
         if (q.ring == nullptr)
         {
-            arch::Cli();
+            flags = sync::SpinLockAcquire(g_posix_lock);
             q.in_use = false;
             q.initializing = false;
-            arch::Sti();
+            sync::SpinLockRelease(g_posix_lock, flags);
             return -1;
         }
-        arch::Cli();
+        flags = sync::SpinLockAcquire(g_posix_lock);
         q.initializing = false;
-        arch::Sti();
+        sync::SpinLockRelease(g_posix_lock, flags);
         return static_cast<i32>(i);
     }
-    arch::Sti();
+    sync::SpinLockRelease(g_posix_lock, flags);
     return -1;
 }
 
@@ -521,21 +570,20 @@ void PosixMqRetain(u32 idx)
 {
     if (idx >= kPosixMqPoolCap)
         return;
-    arch::Cli();
-    if (g_posix_pool[idx].in_use)
+    sync::SpinLockGuard guard(g_posix_lock);
+    if (g_posix_pool[idx].in_use && !g_posix_pool[idx].closing)
         ++g_posix_pool[idx].refs;
-    arch::Sti();
 }
 
 void PosixMqRelease(u32 idx)
 {
     if (idx >= kPosixMqPoolCap)
         return;
-    arch::Cli();
+    auto flags = sync::SpinLockAcquire(g_posix_lock);
     PosixMq& q = g_posix_pool[idx];
     if (!q.in_use || q.refs == 0)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_posix_lock, flags);
         return;
     }
     --q.refs;
@@ -543,14 +591,19 @@ void PosixMqRelease(u32 idx)
     // mq_unlink + last-handle-close together free the ring.
     if (q.refs == 0 && q.name[0] == '\0')
     {
-        ring = q.ring;
-        q.ring = nullptr;
+        q.closing = true;
         q.in_use = false;
-        q.count = 0;
         sched::WaitQueueWakeAll(&q.read_wq);
         sched::WaitQueueWakeAll(&q.write_wq);
+        if (q.pins == 0)
+        {
+            ring = q.ring;
+            q.ring = nullptr;
+            q.closing = false;
+            q.count = 0;
+        }
     }
-    arch::Sti();
+    sync::SpinLockRelease(g_posix_lock, flags);
     if (ring != nullptr)
         mm::KFree(ring);
 }
@@ -638,11 +691,11 @@ i64 DoMqUnlink(u64 user_name)
         return kEFAULT;
     if (copy.status == mm::UserStringCopyStatus::NoTerminator)
         return kENAMETOOLONG;
-    arch::Cli();
+    auto lock_flags = sync::SpinLockAcquire(g_posix_lock);
     const i32 idx = PosixMqFindByName(name);
     if (idx < 0)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_posix_lock, lock_flags);
         return -2;
     }
     PosixMq& q = g_posix_pool[idx];
@@ -653,17 +706,23 @@ i64 DoMqUnlink(u64 user_name)
     {
         // No live fd holders — free immediately.
         PosixMsg* ring = q.ring;
+        q.closing = true;
         q.in_use = false;
+        if (q.pins != 0)
+        {
+            sync::SpinLockRelease(g_posix_lock, lock_flags);
+            return 0;
+        }
         q.ring = nullptr;
         q.count = 0;
         sched::WaitQueueWakeAll(&q.read_wq);
         sched::WaitQueueWakeAll(&q.write_wq);
-        arch::Sti();
+        sync::SpinLockRelease(g_posix_lock, lock_flags);
         if (ring != nullptr)
             mm::KFree(ring);
         return 0;
     }
-    arch::Sti();
+    sync::SpinLockRelease(g_posix_lock, lock_flags);
     return 0;
 }
 
@@ -681,7 +740,10 @@ i64 DoMqTimedsend(u64 mqdes, u64 user_msg, u64 msg_len, u64 prio, u64 user_timeo
     const u32 idx = p->linux_fds[mqdes].first_cluster;
     if (idx >= kPosixMqPoolCap)
         return -22;
-    PosixMq& q = g_posix_pool[idx];
+    PosixMqPin pin(idx);
+    if (!pin)
+        return -9;
+    PosixMq& q = *pin.queue;
     if (msg_len > q.max_msg_bytes)
         return -90; // -EMSGSIZE
     u64 deadline_ticks = 0;
@@ -696,23 +758,29 @@ i64 DoMqTimedsend(u64 mqdes, u64 user_msg, u64 msg_len, u64 prio, u64 user_timeo
         if (!mm::CopyFromUser(stage.body, reinterpret_cast<const void*>(user_msg), msg_len))
             return -14;
     }
-    arch::Cli();
-    while (q.in_use && q.count == q.max_msgs)
+    while (true)
     {
-        const i64 wait_rv = WaitWithDeadline(&q.write_wq, deadline_ticks, no_deadline);
+        auto lock_flags = sync::SpinLockAcquire(g_posix_lock);
+        if (!q.in_use || q.closing)
+        {
+            sync::SpinLockRelease(g_posix_lock, lock_flags);
+            return -9;
+        }
+        if (q.count != q.max_msgs)
+        {
+            q.ring[q.count] = stage;
+            ++q.count;
+            sched::WaitQueueWakeOne(&q.read_wq);
+            sync::SpinLockRelease(g_posix_lock, lock_flags);
+            return 0;
+        }
+        sched::WaitQueue* wq = &q.write_wq;
+        sync::SpinLockRelease(g_posix_lock, lock_flags);
+        arch::Cli();
+        const i64 wait_rv = WaitWithDeadline(wq, deadline_ticks, no_deadline);
         if (wait_rv != 0)
-            return wait_rv; // -ETIMEDOUT (IRQs already re-enabled)
+            return wait_rv;
     }
-    if (!q.in_use)
-    {
-        arch::Sti();
-        return -9;
-    }
-    q.ring[q.count] = stage;
-    ++q.count;
-    sched::WaitQueueWakeOne(&q.read_wq);
-    arch::Sti();
-    return 0;
 }
 
 i64 DoMqTimedreceive(u64 mqdes, u64 user_msg, u64 msg_cap, u64 user_prio, u64 user_timeout)
@@ -727,36 +795,46 @@ i64 DoMqTimedreceive(u64 mqdes, u64 user_msg, u64 msg_cap, u64 user_prio, u64 us
     const u32 idx = p->linux_fds[mqdes].first_cluster;
     if (idx >= kPosixMqPoolCap)
         return -22;
-    PosixMq& q = g_posix_pool[idx];
+    PosixMqPin pin(idx);
+    if (!pin)
+        return -9;
+    PosixMq& q = *pin.queue;
     u64 deadline_ticks = 0;
     bool no_deadline = true;
     if (!LoadDeadline(user_timeout, deadline_ticks, no_deadline))
         return -22;
     PosixMsg out;
-    arch::Cli();
-    while (q.in_use && q.count == 0)
+    while (true)
     {
-        const i64 wait_rv = WaitWithDeadline(&q.read_wq, deadline_ticks, no_deadline);
+        auto lock_flags = sync::SpinLockAcquire(g_posix_lock);
+        if (!q.in_use || q.closing)
+        {
+            sync::SpinLockRelease(g_posix_lock, lock_flags);
+            return -9;
+        }
+        if (q.count != 0)
+        {
+            // Find highest-priority message.
+            u32 best = 0;
+            for (u32 i = 1; i < q.count; ++i)
+                if (q.ring[i].prio > q.ring[best].prio)
+                    best = i;
+            out = q.ring[best];
+            // Remove by shifting tail down.
+            for (u32 i = best; i + 1 < q.count; ++i)
+                q.ring[i] = q.ring[i + 1];
+            --q.count;
+            sched::WaitQueueWakeOne(&q.write_wq);
+            sync::SpinLockRelease(g_posix_lock, lock_flags);
+            break;
+        }
+        sched::WaitQueue* wq = &q.read_wq;
+        sync::SpinLockRelease(g_posix_lock, lock_flags);
+        arch::Cli();
+        const i64 wait_rv = WaitWithDeadline(wq, deadline_ticks, no_deadline);
         if (wait_rv != 0)
             return wait_rv;
     }
-    if (!q.in_use)
-    {
-        arch::Sti();
-        return -9;
-    }
-    // Find highest-priority message.
-    u32 best = 0;
-    for (u32 i = 1; i < q.count; ++i)
-        if (q.ring[i].prio > q.ring[best].prio)
-            best = i;
-    out = q.ring[best];
-    // Remove by shifting tail down.
-    for (u32 i = best; i + 1 < q.count; ++i)
-        q.ring[i] = q.ring[i + 1];
-    --q.count;
-    sched::WaitQueueWakeOne(&q.write_wq);
-    arch::Sti();
     if (msg_cap < out.len)
         return -90; // -EMSGSIZE
     if (out.len > 0)
