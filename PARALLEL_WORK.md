@@ -1091,10 +1091,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T20:00:08Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] native-syscall-idl-gates
+### [DONE] native-syscall-idl-gates
 - **Session**: `Nathan-990`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/build/regenerate-syscall-artifacts.sh tools/dev/invariant-check.sh`
 - **Description**: Regenerate and gate native syscall IDL artifacts in the existing repository static-analysis workflow
 - **Claimed**: 2026-07-31T20:00:48Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-31T20:04:38Z
