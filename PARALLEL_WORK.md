@@ -666,3 +666,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Retire borrowed Process pointer lookup in favor of retained ownership or boolean existence queries
 - **Claimed**: 2026-07-31T14:24:02Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] task-lookup-lifetime
+- **Session**: `Nathan-2012`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/subsystems/linux/syscall_sched.cpp`
+- **Description**: No description provided
+- **Claimed**: 2026-07-31T14:35:52Z
+- **Status**: IN PROGRESS
