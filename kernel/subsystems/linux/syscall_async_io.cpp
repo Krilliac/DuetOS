@@ -1161,10 +1161,19 @@ i64 DoEpollPwait2(u64 epfd, u64 events, u64 maxevents, u64 user_ts, u64 sigmask,
         } ts = {};
         if (!mm::CopyFromUser(&ts, reinterpret_cast<const void*>(user_ts), sizeof(ts)))
             return kEFAULT;
+        if (ts.sec < 0 || ts.nsec < 0 || ts.nsec >= 1000000000LL)
+            return kEINVAL;
         if (ts.sec == 0 && ts.nsec == 0)
             timeout_ms = 0;
         else
-            timeout_ms = ts.sec * 1000 + (ts.nsec + 999999) / 1000000;
+        {
+            constexpr i64 kMaxTimeoutMs = 0x7fff'ffff'ffff'ffffLL;
+            const i64 rounded_ms = (ts.nsec + 999999) / 1000000;
+            if (ts.sec > (kMaxTimeoutMs - rounded_ms) / 1000)
+                timeout_ms = kMaxTimeoutMs;
+            else
+                timeout_ms = ts.sec * 1000 + rounded_ms;
+        }
     }
     return DoEpollPwait(epfd, events, maxevents, static_cast<u64>(timeout_ms), sigmask, sigsetsize);
 }
