@@ -582,8 +582,8 @@ void CmdUnzip(u32 argc, char** argv)
         {
             char dirpath[300];
             duetos::u32 di = 0;
-            const char* prefix = "/unzip/";
-            while (prefix[di] != '\0' && di < sizeof(dirpath) - 1)
+            constexpr char prefix[] = "/unzip/";
+            while (di < sizeof(prefix) - 1 && di < sizeof(dirpath) - 1 && prefix[di] != '\0')
             {
                 dirpath[di] = prefix[di];
                 ++di;
@@ -614,8 +614,8 @@ void CmdUnzip(u32 argc, char** argv)
         // does NOT auto-mkdir).
         char outpath[300];
         duetos::u32 oi = 0;
-        const char* prefix = "/unzip/";
-        while (prefix[oi] != '\0' && oi < sizeof(outpath) - 1)
+        constexpr char prefix[] = "/unzip/";
+        while (oi < sizeof(prefix) - 1 && oi < sizeof(outpath) - 1 && prefix[oi] != '\0')
         {
             outpath[oi] = prefix[oi];
             ++oi;

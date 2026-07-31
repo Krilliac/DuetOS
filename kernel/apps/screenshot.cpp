@@ -446,8 +446,8 @@ bool ScreenshotCapture()
     // confirmation the F-key actually wrote anything.
     char toast[40];
     u32 to = 0;
-    const char* prefix = "saved ";
-    while (prefix[to] != '\0' && to + 1 < sizeof(toast))
+    constexpr char prefix[] = "saved ";
+    while (to < sizeof(prefix) - 1 && to + 1 < sizeof(toast) && prefix[to] != '\0')
     {
         toast[to] = prefix[to];
         ++to;
@@ -552,8 +552,8 @@ bool ScreenshotCaptureTga()
     SetLastStatus("saved");
     char toast[40];
     u32 to = 0;
-    const char* prefix = "saved ";
-    while (prefix[to] != '\0' && to + 1 < sizeof(toast))
+    constexpr char prefix[] = "saved ";
+    while (to < sizeof(prefix) - 1 && to + 1 < sizeof(toast) && prefix[to] != '\0')
     {
         toast[to] = prefix[to];
         ++to;

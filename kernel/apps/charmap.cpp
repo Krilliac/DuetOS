@@ -621,7 +621,7 @@ void ClickCopy()
     char buf[64];
     u32 o = 0;
     const char p[] = "copied U+";
-    while (o + 1 < sizeof(buf) && o < sizeof(p) - 1 && p[o] != '\0')
+    while (o < sizeof(p) - 1 && o + 1 < sizeof(buf) && p[o] != '\0')
     {
         buf[o] = p[o];
         ++o;
@@ -752,7 +752,7 @@ bool CharMapFeedChar(char c)
         char buf[64];
         u32 o = 0;
         const char p[] = "copied U+";
-        while (o + 1 < sizeof(buf) && o < sizeof(p) - 1 && p[o] != '\0')
+        while (o < sizeof(p) - 1 && o + 1 < sizeof(buf) && p[o] != '\0')
         {
             buf[o] = p[o];
             ++o;
