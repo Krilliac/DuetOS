@@ -9,12 +9,11 @@
  * every virtio-GPU-compatible hypervisor (KVM, Xen HVM, Cloud
  * Hypervisor). Device ID 0x1050 under vendor 0x1AF4 on PCIe.
  *
- * This slice gets only as far as reading the controller's
- * capabilities + common-config region. Queue programming +
- * actual commands (GET_DISPLAY_INFO, RESOURCE_CREATE_2D,
- * SET_SCANOUT, RESOURCE_FLUSH) are the v1 story — a real
- * virtio-gpu driver is roughly the same size as the Bochs VBE
- * driver × 10.
+ * The driver reads the controller's capabilities, programs a polled
+ * controlq, and drives the minimal 2D resource/scanout path used by
+ * QEMU. The guest backing stays owned until the host acknowledges
+ * RESOURCE_UNREF; a timed-out or malformed queue completion poisons
+ * the queue and leaves callers on the CPU framebuffer fallback.
  *
  * What lands here:
  *   - Walk PCI capabilities looking for `vendor-specific` entries
@@ -76,8 +75,6 @@ VirtioGpuLayout VirtioGpuLastLayout();
 //   - Parse the response into `VirtioDisplayInfo`.
 //
 // Scope (future):
-//   - RESOURCE_CREATE_2D + ATTACH_BACKING + SET_SCANOUT +
-//     TRANSFER_TO_HOST_2D + RESOURCE_FLUSH — the full blit cycle.
 //   - MSI-X interrupt-driven completion (today we poll the used ring).
 //   - cursorq for hardware cursor.
 //   - virgl 3D path (requires VIRTIO_GPU_F_VIRGL feature + context init).
@@ -157,6 +154,11 @@ struct VirtioScanoutInfo
 /// Allocates `ceil(w*h*4 / 4096)` contiguous frames for the backing.
 /// Returns false if any step fails; logs which step. Idempotent —
 /// subsequent calls are no-ops if the previous setup is live.
+/// If a post-create step fails, the driver sends RESOURCE_UNREF before
+/// freeing the contiguous backing. When the queue cannot prove that
+/// acknowledgement, it retains the backing and poisons the queue so
+/// the device cannot DMA into recycled frames; callers stay on the CPU
+/// framebuffer fallback.
 bool VirtioGpuSetupScanout(u32 width, u32 height);
 
 /// Re-establish the scanout at a NEW resolution. Unlike

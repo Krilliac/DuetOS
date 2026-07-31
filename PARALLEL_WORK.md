@@ -602,3 +602,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Route eligible GDI solid fills through the verified Intel BLT engine on the owned compose surface with validation, serialization, and CPU fallback
 - **Claimed**: 2026-07-31T07:32:14Z
 - **Status**: COMPLETED @ 2026-07-31T07:37:50Z
+
+### [DONE] gpu-virtio-resource-lifecycle
+- **Session**: `Nathan-1526`
+- **Branch**: `claude/gpu-virtio-feature-slice-20260731`
+- **Files**: `kernel/drivers/gpu/virtio_gpu.cpp kernel/drivers/gpu/virtio_gpu.h`
+- **Description**: Complete one QEMU-testable Virtio-GPU resource lifecycle or scanout feature with bounded queue/DMA behavior
+- **Claimed**: 2026-07-31T07:23:57Z
+- **Status**: COMPLETED @ 2026-07-31T07:30:48Z
