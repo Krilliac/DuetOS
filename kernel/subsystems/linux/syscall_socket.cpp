@@ -224,8 +224,7 @@ i64 DoAccept4(u64 fd, u64 user_addr, u64 user_addrlen, u64 flags)
     u32 listen_idx;
     if (!FdIsSocket(p, fd, listen_idx))
         return kEBADF;
-    const auto* listener = ::duetos::net::SocketGet(listen_idx);
-    if (listener == nullptr || !listener->listening)
+    if (!::duetos::net::SocketIsListening(listen_idx))
         return kEINVAL;
     ::duetos::net::Ipv4Address peer_ip = {};
     u16 peer_port = 0;
@@ -270,8 +269,8 @@ i64 DoSendto(u64 fd, u64 user_buf, u64 len, u64 flags, u64 user_dest_addr, u64 a
     u32 idx;
     if (!FdIsSocket(p, fd, idx))
         return kEBADF;
-    const auto* s = ::duetos::net::SocketGet(idx);
-    if (s == nullptr)
+    const u16 socket_type = ::duetos::net::SocketTypeOf(idx);
+    if (socket_type == 0)
         return kEBADF;
     constexpr u64 kStageCap = 1500;
     if (len > kStageCap)
@@ -279,7 +278,7 @@ i64 DoSendto(u64 fd, u64 user_buf, u64 len, u64 flags, u64 user_dest_addr, u64 a
     u8 stage[kStageCap];
     if (len > 0 && !mm::CopyFromUser(stage, reinterpret_cast<const void*>(user_buf), len))
         return kEFAULT;
-    if (s->type == ::duetos::net::kSocketTypeDgram)
+    if (socket_type == ::duetos::net::kSocketTypeDgram)
     {
         ::duetos::net::Ipv4Address dst_ip = {};
         u16 dst_port = 0;
@@ -306,16 +305,17 @@ i64 DoRecvfrom(u64 fd, u64 user_buf, u64 len, u64 flags, u64 user_src_addr, u64 
     u32 idx;
     if (!FdIsSocket(p, fd, idx))
         return kEBADF;
-    const auto* s = ::duetos::net::SocketGet(idx);
-    if (s == nullptr)
+    const u16 socket_type = ::duetos::net::SocketTypeOf(idx);
+    if (socket_type == 0)
         return kEBADF;
     constexpr u64 kStageCap = 1500;
     if (len > kStageCap)
         len = kStageCap;
     u8 stage[kStageCap];
-    if (s->type == ::duetos::net::kSocketTypeDgram)
+    if (socket_type == ::duetos::net::kSocketTypeDgram)
     {
-        if ((flags & kMsgDontwait) != 0 && s->udp_count == 0 && (s->shutdown_flags & 0x1) == 0)
+        if ((flags & kMsgDontwait) != 0 && !::duetos::net::SocketDgramReady(idx) &&
+            !::duetos::net::SocketReadShutdown(idx))
             return kEAGAIN;
         ::duetos::net::Ipv4Address src_ip = {};
         u16 src_port = 0;
@@ -337,7 +337,7 @@ i64 DoRecvfrom(u64 fd, u64 user_buf, u64 len, u64 flags, u64 user_src_addr, u64 
         // socket's connected/shutdown state — if we can prove
         // there's nothing to read RIGHT NOW (not connected, or
         // shutdown), short-circuit. Otherwise fall through.
-        if (!s->connected || (s->shutdown_flags & 0x1) != 0)
+        if (!::duetos::net::SocketIsConnected(idx) || ::duetos::net::SocketReadShutdown(idx))
             return 0; // SHUT_RD or never-connected → EOF-ish
         // Sub-GAP: a connected stream with no buffered bytes
         // would still block here because we don't have a
@@ -465,10 +465,9 @@ i64 DoGetpeername(u64 fd, u64 user_addr, u64 user_addrlen)
     u32 idx;
     if (!FdIsSocket(p, fd, idx))
         return kEBADF;
-    const auto* s = ::duetos::net::SocketGet(idx);
-    if (s == nullptr)
+    if (::duetos::net::SocketTypeOf(idx) == 0)
         return kEBADF;
-    if (!s->connected)
+    if (!::duetos::net::SocketIsConnected(idx))
         return kENotConn;
     ::duetos::net::Ipv4Address ip;
     u16 port;
@@ -537,14 +536,14 @@ i64 DoSocketpair(u64 domain, u64 type, u64 protocol, u64 user_sv)
 
 i64 SocketFdRead(u32 idx, u64 user_dst, u64 len)
 {
-    const auto* s = ::duetos::net::SocketGet(idx);
-    if (s == nullptr)
+    const u16 socket_type = ::duetos::net::SocketTypeOf(idx);
+    if (socket_type == 0)
         return kEBADF;
     constexpr u64 kStageCap = 1500;
     if (len > kStageCap)
         len = kStageCap;
     u8 stage[kStageCap];
-    if (s->type == ::duetos::net::kSocketTypeDgram)
+    if (socket_type == ::duetos::net::kSocketTypeDgram)
     {
         u32 truth = 0;
         const i64 got = ::duetos::net::SocketRecvDgram(idx, stage, static_cast<u32>(len), &truth, nullptr, nullptr);
@@ -562,8 +561,8 @@ i64 SocketFdRead(u32 idx, u64 user_dst, u64 len)
 
 i64 SocketFdWrite(u32 idx, u64 user_src, u64 len)
 {
-    const auto* s = ::duetos::net::SocketGet(idx);
-    if (s == nullptr)
+    const u16 socket_type = ::duetos::net::SocketTypeOf(idx);
+    if (socket_type == 0)
         return kEBADF;
     constexpr u64 kStageCap = 1500;
     if (len > kStageCap)
@@ -571,7 +570,7 @@ i64 SocketFdWrite(u32 idx, u64 user_src, u64 len)
     u8 stage[kStageCap];
     if (len > 0 && !mm::CopyFromUser(stage, reinterpret_cast<const void*>(user_src), len))
         return kEFAULT;
-    if (s->type == ::duetos::net::kSocketTypeDgram)
+    if (socket_type == ::duetos::net::kSocketTypeDgram)
         return ::duetos::net::SocketSendDgram(idx, {}, 0, stage, static_cast<u32>(len));
     return ::duetos::net::SocketSendStream(idx, stage, static_cast<u32>(len));
 }
@@ -588,16 +587,16 @@ void SocketFdRetain(u32 idx)
 
 bool SocketFdReadReady(u32 idx)
 {
-    const auto* s = ::duetos::net::SocketGet(idx);
-    if (s == nullptr)
+    const u16 socket_type = ::duetos::net::SocketTypeOf(idx);
+    if (socket_type == 0)
         return false;
-    if (s->type == ::duetos::net::kSocketTypeDgram)
-        return s->udp_count > 0;
+    if (socket_type == ::duetos::net::kSocketTypeDgram)
+        return ::duetos::net::SocketDgramReady(idx);
     // SOCK_STREAM — conservatively report ready once the TCP slot is
     // established. Real readability can only be probed by attempting
     // a 0-byte recv against the shared single-slot machine; v0
     // tolerates a handful of spurious wakes per epoll caller.
-    return s->connected;
+    return ::duetos::net::SocketIsConnected(idx);
 }
 
 // =============================================================

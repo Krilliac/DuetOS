@@ -45,12 +45,10 @@
  * condition — so a wake that lands in the drop→park window costs one
  * extra tick instead of stalling until the next datagram.
  *
- * GAP: SocketRecvStream / SocketSendStream / SocketPollEvents /
- * SocketGet still touch pool fields outside the lock — they sleep or
- * call into the pipe pool inside their loops, so they need per-socket
- * refcount pinning rather than a spinlock. Revisit when kernel/sched
- * exports a release-and-block primitive (WaitQueueBlockCurrentLocked
- * is file-local to sched.cpp today).
+ * Potentially blocking operations pin their pool entry before reading
+ * fields or calling another subsystem. A pin protects the entry's
+ * lifetime across sleeps; scalar state is snapshotted under this pool
+ * lock before calls which may run without it.
  * SocketAlive and the endpoint value accessors are lock-protected;
  * they return snapshots rather than pointers into the pool.
  *
@@ -84,8 +82,10 @@ struct SocketDgram
 struct Socket
 {
     bool in_use;
-    u8 _pad0[3];
+    bool closing;      // owner/last-handle teardown has begun
+    u8 _pad0[2];
     u32 refs;        // dup() bumps; close() drops
+    u32 pins;        // transient operation pins; never exposed to userland
     u16 family;      // AF_INET only in v0
     u16 type;        // SOCK_DGRAM or SOCK_STREAM
     u32 iface_index; // interface this socket is anchored to (always 0 in v0)
@@ -171,8 +171,24 @@ void SocketReleaseByOwner(u64 pid);
 /// True iff `idx` is a live pool entry.
 bool SocketAlive(u32 idx);
 
-/// Accessor — read-only. Returns nullptr on dead idx.
-const Socket* SocketGet(u32 idx);
+/// Pin a live socket for a possibly-blocking kernel operation. The
+/// returned pointer remains valid until the matching SocketUnpin,
+/// even if all user handles close meanwhile. The pointer is not a
+/// replacement for the pool lock when reading mutable socket fields.
+/// Returns nullptr for a dead or closing socket.
+const Socket* SocketPin(u32 idx);
+
+/// Drop an operation pin. If owner teardown already removed all
+/// handle references, this may complete the deferred socket teardown.
+void SocketUnpin(u32 idx);
+
+/// Lock-protected snapshots for short syscall checks; these avoid
+/// exposing an unpinned Socket pointer to callers.
+bool SocketIsListening(u32 idx);
+bool SocketIsConnected(u32 idx);
+bool SocketReadShutdown(u32 idx);
+bool SocketDgramReady(u32 idx);
+u16 SocketTypeOf(u32 idx);
 
 /// Bind the socket to a local port. UDP: claims the port in the
 /// shared port table. TCP: records the port + ip; the TCB is built

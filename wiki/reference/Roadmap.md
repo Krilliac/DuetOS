@@ -1249,6 +1249,13 @@ of unconditionally re-enabling. That is the IRQ-save lock contract, and
 it also closes the cross-CPU use-after-free on a released socket's UDP
 RX ring.
 
+**Landed 2026-07-31:** socket operations now take a transient lifetime pin
+before sleeping or entering TCP/pipe code. Last-handle and owner teardown
+mark the entry closing and defer resource release until pins drain; stream,
+datagram, and poll paths snapshot mutable endpoint state under the pool lock.
+Raw `SocketGet` access has been removed from syscall handlers. Runtime build,
+boot, and concurrent socket validation remain outstanding for this slice.
+
 **Still open:** make interrupt nesting distinguish hardware IRQ frames
 from syscall/exception frames and rate-limit the defer diagnostic. Do
 not weaken the nested-IRQ scheduling guard. Separately, the TCB table
