@@ -1066,3 +1066,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Hostile-schema and deterministic-output regression tests for the native syscall IDL generator
 - **Claimed**: 2026-07-31T19:58:16Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] native-libc-syscall-idl
+- **Session**: `Nathan-237`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `userland/libc/include/duet/syscall.h`
+- **Description**: Replace duplicated native libc syscall numbers with the generated IDL header while preserving documented wrappers and socket operation constants
+- **Claimed**: 2026-07-31T19:59:16Z
+- **Status**: IN PROGRESS
