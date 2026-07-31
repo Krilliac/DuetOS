@@ -1362,3 +1362,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Transport_neutral_serviced_wire_validation
 - **Claimed**: 2026-07-31T22:10:56Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] serviced-protocol-test
+- **Session**: `Nathan-313`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tests/host/test_serviced_protocol.cpp`
+- **Description**: Hostile_serviced_protocol_vectors
+- **Claimed**: 2026-07-31T22:10:57Z
+- **Status**: IN PROGRESS
