@@ -858,7 +858,7 @@ i64 SocketSendDgram(u32 idx, Ipv4Address dst_ip, u16 dst_port, const u8* data, u
         const u16 ephem = AllocEphemeralUdpPort();
         if (ephem == 0)
             return -98;
-        Socket& s = *pin.mutable_socket();
+        Socket& s = pin.mutable_socket();
         if (!s.in_use || s.closing || s.type != kSocketTypeDgram)
             return -88;
         s.local_port = ephem;
