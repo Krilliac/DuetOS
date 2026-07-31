@@ -391,10 +391,15 @@ u64 ItimerspecToTicks(i64 sec, i64 nsec)
 {
     if (sec < 0 || nsec < 0)
         return 0;
-    const u64 total_ns = static_cast<u64>(sec) * 1'000'000'000ull + static_cast<u64>(nsec);
+    constexpr u64 kMax = static_cast<u64>(-1);
+    const u64 sec_u = static_cast<u64>(sec);
+    const u64 nsec_u = static_cast<u64>(nsec);
+    if (sec_u > (kMax - nsec_u) / 1'000'000'000ull)
+        return kMax / kTickNs;
+    const u64 total_ns = sec_u * 1'000'000'000ull + nsec_u;
     if (total_ns == 0)
         return 0;
-    return (total_ns + kTickNs - 1) / kTickNs;
+    return total_ns > kMax - (kTickNs - 1) ? kMax / kTickNs : (total_ns + kTickNs - 1) / kTickNs;
 }
 
 void TicksToItimerspec(u64 ticks, i64& sec_out, i64& nsec_out)
@@ -465,7 +470,7 @@ i64 DoTimerfdSettime(u64 fd, u64 flags, u64 user_new, u64 user_old)
         if ((flags & kTfdTimerAbstime) != 0)
             t.next_expiry_tick = first_ticks; // absolute tick value (caller-side).
         else
-            t.next_expiry_tick = now + first_ticks;
+            t.next_expiry_tick = first_ticks > static_cast<u64>(-1) - now ? static_cast<u64>(-1) : now + first_ticks;
         t.interval_ticks = interval_ticks;
     }
     t.expirations = 0;
