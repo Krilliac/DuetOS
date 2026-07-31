@@ -14,15 +14,14 @@
  * HOW
  *   `Create` allocates a fresh PML4 frame, copies the kernel-
  *   half pointers from the boot PML4, and zeroes the user
- *   half. `Switch` writes CR3. `MapUserPage` /
- *   `UnmapUserPage` are thin wrappers that gate on "this VA
- *   is in the user half" before delegating to paging.cpp's
- *   walk-or-create.
+ *   half. `Activate` writes CR3. User mappings are mutated through a
+ *   task-context transaction lock; their page-table and owned-frame
+ *   ledger commits remain bounded under an IRQ-safe structural lock.
  *
- *   Teardown (`Destroy`) walks the user half and frees every
- *   leaf frame, then every intermediate page-table frame, then
- *   the PML4 itself. The kernel half is left alone — it's
- *   shared.
+ *   Teardown (`Release`) drains owned leaf frames from the ledger,
+ *   then frees the remaining user-half page-table tree and PML4.
+ *   Empty intermediate tables are pruned earlier on unmap. The kernel
+ *   half is left alone because it is shared.
  */
 
 #include "mm/address_space.h"
@@ -95,10 +94,10 @@ inline void Invlpg(u64 v)
 
 // Allocate a fresh page-table frame, zero it, return its kernel
 // virtual alias, or nullptr when the physical frame pool is dry.
-// Returning null (instead of panicking) lets the failure propagate
-// up through WalkToPteIn to AddressSpaceMapUserPage, which fails
-// the single user mapping gracefully — a userland exec hitting the
-// frame ceiling must kill that process, never halt the kernel.
+// Returning null (instead of panicking) lets reserve preparation fail
+// the single user mapping gracefully before structural commit — a
+// userland exec hitting the frame ceiling must kill that process, never
+// halt the kernel.
 u64* AllocateTable()
 {
     auto frame_r = AllocateFrame();
@@ -115,28 +114,129 @@ u64* AllocateTable()
     return table;
 }
 
-u64* WalkToPteIn(u64* pml4, u64 virt, bool create)
+class AddressSpaceMutationGuard
+{
+  public:
+    explicit AddressSpaceMutationGuard(const AddressSpace& as) : m_lock(as.mutation_lock)
+    {
+        KASSERT(sched::CurrentTask() != nullptr, "mm/as", "address-space mutation before scheduler initialization");
+        sched::MutexLock(&m_lock);
+    }
+
+    ~AddressSpaceMutationGuard() { sched::MutexUnlock(&m_lock); }
+
+    AddressSpaceMutationGuard(const AddressSpaceMutationGuard&) = delete;
+    AddressSpaceMutationGuard& operator=(const AddressSpaceMutationGuard&) = delete;
+
+  private:
+    sched::Mutex& m_lock;
+};
+
+// A map transaction prepares every page-table frame before taking the
+// IRQ-saving regions_lock. Commit consumes the zeroed tables without
+// calling the frame allocator; failure cleanup likewise runs after the
+// structural lock has been released.
+struct PageTableReserve
+{
+    u64* tables[3]{};
+    u8 count{};
+    u8 next{};
+};
+
+void ReleasePageTableReserve(PageTableReserve& reserve)
+{
+    for (u8 i = 0; i < reserve.count; ++i)
+    {
+        if (reserve.tables[i] != nullptr)
+        {
+            FreeFrame(VirtToPhys(reserve.tables[i]));
+            reserve.tables[i] = nullptr;
+        }
+    }
+    reserve.count = 0;
+    reserve.next = 0;
+}
+
+bool PreparePageTableReserve(PageTableReserve& reserve, u8 count)
+{
+    KASSERT(count <= 3, "mm/as", "page-table reserve exceeds x86_64 walk depth");
+    for (u8 i = 0; i < count; ++i)
+    {
+        u64* table = AllocateTable();
+        if (table == nullptr)
+        {
+            ReleasePageTableReserve(reserve);
+            return false;
+        }
+        reserve.tables[reserve.count++] = table;
+    }
+    return true;
+}
+
+u64* TakeReservedTable(PageTableReserve& reserve)
+{
+    KASSERT(reserve.next < reserve.count, "mm/as", "page-table transaction exhausted its reserve");
+    u64* table = reserve.tables[reserve.next];
+    reserve.tables[reserve.next] = nullptr;
+    ++reserve.next;
+    return table;
+}
+
+// Count how many intermediate tables are absent on the path to `virt`.
+// Caller holds regions_lock, so the count remains valid until commit while
+// the outer mutation_lock excludes every page-table writer.
+u8 MissingTableCount(u64* pml4, u64 virt)
+{
+    const u64 i4 = IndexPml4(virt);
+    const u64 i3 = IndexPdpt(virt);
+    const u64 i2 = IndexPd(virt);
+
+    const u64 pml4_entry = pml4[i4];
+    if ((pml4_entry & kPagePresent) == 0)
+    {
+        return 3;
+    }
+    auto* pdpt = static_cast<u64*>(PhysToVirt(pml4_entry & kAddrMask));
+    const u64 pdpt_entry = pdpt[i3];
+    if ((pdpt_entry & kPagePresent) == 0)
+    {
+        return 2;
+    }
+    if ((pdpt_entry & kPageHugeOrPat) != 0)
+    {
+        PanicAs("AS walker hit a 1 GiB PS page", virt);
+    }
+    auto* pd = static_cast<u64*>(PhysToVirt(pdpt_entry & kAddrMask));
+    const u64 pd_entry = pd[i2];
+    if ((pd_entry & kPagePresent) == 0)
+    {
+        return 1;
+    }
+    if ((pd_entry & kPageHugeOrPat) != 0)
+    {
+        PanicAs("AS walker hit a 2 MiB PS page", virt);
+    }
+    return 0;
+}
+
+// Walk to a leaf PTE without doing slow work. When `reserve` is null this
+// is lookup-only and returns null for a missing level. Otherwise each
+// missing level consumes one table prepared before regions_lock was taken.
+u64* WalkToPteIn(u64* pml4, u64 virt, PageTableReserve* reserve)
 {
     const u64 i4 = IndexPml4(virt);
     const u64 i3 = IndexPdpt(virt);
     const u64 i2 = IndexPd(virt);
     const u64 i1 = IndexPt(virt);
 
-    u64* created_pdpt = nullptr;
-    u64* created_pd = nullptr;
     u64& pml4_entry = pml4[i4];
     if ((pml4_entry & kPagePresent) == 0)
     {
-        if (!create)
+        if (reserve == nullptr)
         {
             return nullptr;
         }
-        u64* new_pdpt = AllocateTable();
-        if (new_pdpt == nullptr)
-        {
-            return nullptr; // frame pool dry — propagate, don't panic
-        }
-        created_pdpt = new_pdpt;
+        u64* new_pdpt = TakeReservedTable(*reserve);
         const PhysAddr phys = VirtToPhys(new_pdpt);
         // PML4 entry must carry kPageUser when it covers a user-
         // accessible PT — without it the CPU page walker rejects
@@ -150,21 +250,11 @@ u64* WalkToPteIn(u64* pml4, u64 virt, bool create)
     u64& pdpt_entry = pdpt[i3];
     if ((pdpt_entry & kPagePresent) == 0)
     {
-        if (!create)
+        if (reserve == nullptr)
         {
             return nullptr;
         }
-        u64* new_pd = AllocateTable();
-        if (new_pd == nullptr)
-        {
-            if (created_pdpt != nullptr)
-            {
-                pml4_entry = 0;
-                FreeFrame(VirtToPhys(created_pdpt));
-            }
-            return nullptr; // frame pool dry — propagate, don't panic
-        }
-        created_pd = new_pd;
+        u64* new_pd = TakeReservedTable(*reserve);
         const PhysAddr phys = VirtToPhys(new_pd);
         pdpt_entry = phys | kPagePresent | kPageWritable | kPageUser;
     }
@@ -177,25 +267,11 @@ u64* WalkToPteIn(u64* pml4, u64 virt, bool create)
     u64& pd_entry = pd[i2];
     if ((pd_entry & kPagePresent) == 0)
     {
-        if (!create)
+        if (reserve == nullptr)
         {
             return nullptr;
         }
-        u64* new_pt = AllocateTable();
-        if (new_pt == nullptr)
-        {
-            if (created_pd != nullptr)
-            {
-                pdpt_entry = 0;
-                FreeFrame(VirtToPhys(created_pd));
-            }
-            if (created_pdpt != nullptr)
-            {
-                pml4_entry = 0;
-                FreeFrame(VirtToPhys(created_pdpt));
-            }
-            return nullptr; // frame pool dry — propagate, don't panic
-        }
+        u64* new_pt = TakeReservedTable(*reserve);
         const PhysAddr phys = VirtToPhys(new_pt);
         pd_entry = phys | kPagePresent | kPageWritable | kPageUser;
     }
@@ -205,6 +281,95 @@ u64* WalkToPteIn(u64* pml4, u64 virt, bool create)
     }
     auto* pt = static_cast<u64*>(PhysToVirt(pd_entry & kAddrMask));
     return &pt[i1];
+}
+
+struct RetiredPageTables
+{
+    PhysAddr frames[3]{};
+    u8 count{};
+};
+
+bool PageTableIsEmpty(const u64* table)
+{
+    for (u64 i = 0; i < kEntriesPerTable; ++i)
+    {
+        if (table[i] != 0)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+void AppendRetiredTable(RetiredPageTables& retired, PhysAddr frame)
+{
+    KASSERT(retired.count < 3, "mm/as", "too many page-table levels retired for one VA");
+    retired.frames[retired.count++] = frame;
+}
+
+void ReleaseRetiredPageTables(RetiredPageTables& retired)
+{
+    for (u8 i = 0; i < retired.count; ++i)
+    {
+        FreeFrame(retired.frames[i]);
+        retired.frames[i] = kNullFrame;
+    }
+    retired.count = 0;
+}
+
+// Leaf PTE at `virt` has already been cleared. Detach each now-empty
+// intermediate table from the top-level tree while regions_lock is held,
+// but merely record its frame here. The caller performs the TLB shootdown
+// first and returns these frames to the allocator afterward.
+RetiredPageTables PruneEmptyTablePathLocked(AddressSpace* as, u64 virt)
+{
+    KASSERT_WITH_VALUE(virt <= 0x00007FFFFFFFFFFFULL, "mm/as", "attempted to prune outside the canonical user half",
+                       virt);
+    RetiredPageTables retired{};
+    const u64 i4 = IndexPml4(virt);
+    const u64 i3 = IndexPdpt(virt);
+    const u64 i2 = IndexPd(virt);
+
+    u64& pml4_entry = as->pml4_virt[i4];
+    if ((pml4_entry & kPagePresent) == 0)
+    {
+        return retired;
+    }
+    auto* pdpt = static_cast<u64*>(PhysToVirt(pml4_entry & kAddrMask));
+    u64& pdpt_entry = pdpt[i3];
+    if ((pdpt_entry & kPagePresent) == 0 || (pdpt_entry & kPageHugeOrPat) != 0)
+    {
+        return retired;
+    }
+    auto* pd = static_cast<u64*>(PhysToVirt(pdpt_entry & kAddrMask));
+    u64& pd_entry = pd[i2];
+    if ((pd_entry & kPagePresent) == 0 || (pd_entry & kPageHugeOrPat) != 0)
+    {
+        return retired;
+    }
+    auto* pt = static_cast<u64*>(PhysToVirt(pd_entry & kAddrMask));
+    if (!PageTableIsEmpty(pt))
+    {
+        return retired;
+    }
+
+    AppendRetiredTable(retired, pd_entry & kAddrMask);
+    pd_entry = 0;
+    if (!PageTableIsEmpty(pd))
+    {
+        return retired;
+    }
+
+    AppendRetiredTable(retired, pdpt_entry & kAddrMask);
+    pdpt_entry = 0;
+    if (!PageTableIsEmpty(pdpt))
+    {
+        return retired;
+    }
+
+    AppendRetiredTable(retired, pml4_entry & kAddrMask);
+    pml4_entry = 0;
+    return retired;
 }
 
 // Release every PT/PD/PDPT frame reachable from PML4[0..255] of `pml4`.
@@ -271,11 +436,12 @@ core::Result<AddressSpace*> AddressSpaceCreate(u64 frame_budget)
     // Zero the chunk before populating. KMalloc returns memory still
     // carrying whatever was last in it — including the freed-payload
     // poison `kFreedPagePoison` (0xDE) from the C2 patch — and the
-    // embedded `regions_lock` is otherwise default-initialised
-    // by the field declaration. Without this, `Mutex.waiters.tail`
-    // reads back as `0xdededededededede` and the first MutexLock
-    // trying to enqueue a waiter dereferences a non-canonical pointer
-    // and #GPs.
+    // embedded locks are plain zero-valid structs (SpinLock ticket
+    // counters plus Mutex owner/wait-queue links). KMalloc does not run
+    // field initializers, so explicit zeroing is their initialization
+    // contract. Without it, `mutation_lock.waiters.tail` reads back as
+    // `0xdededededededede` and the first contended MutexLock dereferences
+    // a non-canonical pointer and #GPs.
     memset(as, 0, sizeof(AddressSpace));
 
     // Heap-allocate the user-VM region table (grown on demand later in
@@ -405,98 +571,126 @@ bool AddressSpaceMapUserPage(AddressSpace* as, u64 virt, PhysAddr frame, u64 fla
     {
         PanicAs("AddressSpaceMapUserPage: kPageGlobal on user page", flags);
     }
-    // Take the structural regions spinlock across the whole mutation
-    // (budget check + PTE write + TLB invalidate + region table
-    // append). Today the AS is single-Task; the lock is
-    // uncontended. The day a Process becomes multi-threaded
-    // (multiple Tasks per AS), this exclusive guard already
-    // serialises concurrent map/unmap callers correctly.
-    // so no reader can observe a partially committed mapping.
-    sync::SpinLockGuard guard(as->regions_lock);
+    AddressSpaceMutationGuard mutation(*as);
 
-    if (as->region_count >= as->frame_budget)
+    bool budget_exhausted = false;
+    bool already_mapped = false;
+    bool grow_regions = false;
+    u16 region_count = 0;
+    u16 new_capacity = 0;
+    u8 missing_tables = 0;
+    AddressSpaceUserRegion* current_regions = nullptr;
     {
-        // Budget exhausted. Refusing the mapping is the safe
-        // default — a runaway process cannot drain the frame
-        // allocator past this point. NON-FATAL: leaving the page
-        // unmapped makes the offending user process fault on first
-        // access and get reaped by the ring-3 fault handler; the
-        // kernel must not halt because one userland exec hit its
-        // budget. (Previously a PanicAs — see the v0 note that
-        // anticipated this needing a non-fatal variant.)
-        KLOG_WARN_V("mm/as", "MapUserPage: frame budget exhausted — refusing mapping", as->region_count);
+        sync::SpinLockGuard guard(as->regions_lock);
+        region_count = as->region_count;
+        budget_exhausted = region_count >= as->frame_budget;
+        if (!budget_exhausted)
+        {
+            u64* existing = WalkToPteIn(as->pml4_virt, virt, nullptr);
+            if (existing != nullptr && (*existing & kPagePresent) != 0)
+            {
+                already_mapped = true;
+            }
+            else
+            {
+                missing_tables = MissingTableCount(as->pml4_virt, virt);
+                grow_regions = region_count == as->region_capacity;
+                current_regions = as->regions;
+                if (grow_regions)
+                {
+                    u32 cap = static_cast<u32>(as->region_capacity) * 2u;
+                    if (cap > as->frame_budget)
+                    {
+                        cap = static_cast<u32>(as->frame_budget);
+                    }
+                    new_capacity = static_cast<u16>(cap);
+                }
+            }
+        }
+    }
+
+    if (budget_exhausted)
+    {
+        KLOG_WARN_V("mm/as", "MapUserPage: frame budget exhausted — refusing mapping", region_count);
+        return false;
+    }
+    if (already_mapped)
+    {
+        KLOG_WARN_V("mm/as", "MapUserPage: virtual address already mapped — refusing overwrite", virt);
         return false;
     }
 
-    // Grow the heap-allocated region table if this append would overflow
-    // it. The budget check above guarantees region_count < frame_budget,
-    // so region_count == region_capacity implies region_capacity <
-    // frame_budget — doubling (clamped to frame_budget) always yields
-    // room. Done BEFORE the PTE write so a grow-OOM refuses the mapping
-    // without leaving an installed-but-unrecorded leaf PTE behind.
-    if (as->region_count == as->region_capacity)
+    // Prepare both fallible resources before the bounded structural
+    // commit. mutation_lock keeps the inspected table path and regions
+    // pointer stable while regions_lock is intentionally dropped.
+    AddressSpaceUserRegion* grown_regions = nullptr;
+    if (grow_regions)
     {
-        u32 new_cap = static_cast<u32>(as->region_capacity) * 2u;
-        if (new_cap > as->frame_budget)
+        grown_regions = static_cast<AddressSpaceUserRegion*>(KMalloc(sizeof(AddressSpaceUserRegion) * new_capacity));
+        if (grown_regions == nullptr)
         {
-            new_cap = static_cast<u32>(as->frame_budget);
-        }
-        auto* grown = static_cast<AddressSpaceUserRegion*>(KMalloc(sizeof(AddressSpaceUserRegion) * new_cap));
-        if (grown == nullptr)
-        {
-            // NON-FATAL, same contract as the budget / frame-pool-dry
-            // paths below: refuse this one mapping (caller's user page
-            // #PFs and the process is reaped), never halt the kernel.
-            KLOG_WARN_V("mm/as", "MapUserPage: region-table grow OOM — refusing mapping", as->region_count);
+            KLOG_WARN_V("mm/as", "MapUserPage: region-table grow OOM — refusing mapping", region_count);
             return false;
         }
-        memcpy(grown, as->regions, sizeof(AddressSpaceUserRegion) * as->region_count);
-        KFree(as->regions);
-        as->regions = grown;
-        as->region_capacity = static_cast<u16>(new_cap);
+        memcpy(grown_regions, current_regions, sizeof(AddressSpaceUserRegion) * region_count);
     }
 
-    u64* pte = WalkToPteIn(as->pml4_virt, virt, /*create=*/true);
-    if (pte == nullptr)
+    PageTableReserve reserve{};
+    if (!PreparePageTableReserve(reserve, missing_tables))
     {
-        // Physical frame pool dry while building page tables for a
-        // user mapping. NON-FATAL for the same reason as the budget
-        // path: the unmapped page → user #PF → process reaped, not
-        // a kernel halt. This is the fix for the intermittent
-        // "AllocateFrame returned null inside AS walker" panic that
-        // tripped under heavy back-to-back PE/ELF spawns.
+        if (grown_regions != nullptr)
+        {
+            KFree(grown_regions);
+        }
         KLOG_WARN_V("mm/as", "MapUserPage: frame pool dry building page tables — refusing mapping", virt);
         return false;
     }
-    if (*pte & kPagePresent)
-    {
-        PanicAs("AddressSpaceMapUserPage: virt already mapped", virt);
-    }
-    *pte = (frame & kAddrMask) | (flags | kPagePresent);
 
-    // Only invalidate the TLB if THIS AS is the one currently active
-    // on this CPU. If we just edited a different AS's tables, the
-    // CPU's TLB has nothing for that VA cached and the invlpg would
-    // be wasted work. The activate path's MOV-to-CR3 will flush
-    // every non-global entry on switch-in.
+    {
+        sync::SpinLockGuard guard(as->regions_lock);
+        if (grown_regions != nullptr)
+        {
+            as->regions = grown_regions;
+            as->region_capacity = new_capacity;
+        }
+        u64* pte = WalkToPteIn(as->pml4_virt, virt, &reserve);
+        KASSERT(pte != nullptr, "mm/as", "prepared map transaction produced no leaf PTE");
+        KASSERT((*pte & kPagePresent) == 0, "mm/as", "map transaction raced an existing PTE");
+        *pte = (frame & kAddrMask) | (flags | kPagePresent);
+        as->regions[as->region_count] = AddressSpaceUserRegion{virt, frame};
+        ++as->region_count;
+    }
+
+    KASSERT(reserve.next == reserve.count, "mm/as", "map transaction left prepared tables unused");
+    ReleasePageTableReserve(reserve);
+    if (grown_regions != nullptr)
+    {
+        KFree(current_regions);
+    }
+
+    // Invalidation is outside the IRQ-saving structural lock. The outer
+    // mutation transaction prevents a same-VA unmap/remap from overtaking
+    // this commit while the local translation state is synchronized.
     if (AddressSpaceCurrent() == as)
     {
         Invlpg(virt);
     }
-
-    as->regions[as->region_count] = AddressSpaceUserRegion{virt, frame};
-    ++as->region_count;
     return true;
 }
 
 namespace
 {
-// Inner unmap: drop the region at `idx`, clear its PTE, broadcast
-// TLB shootdown, free the frame. Caller has already located the
-// row — UnmapUserPage scans first, while ClearUserMappings hands
-// in `region_count - 1` to avoid an O(n) scan on every teardown
-// step.
-void UnmapUserPageByIndex(AddressSpace* as, u16 idx)
+struct RetiredUserPage
+{
+    u64 virt{};
+    PhysAddr frame{kNullFrame};
+    RetiredPageTables page_tables{};
+};
+
+// Commit the structural half of an unmap. Caller holds regions_lock and
+// the outer mutation_lock. TLB retirement and frame release happen only
+// after the IRQ-saving structural lock has been dropped.
+RetiredUserPage DetachUserPageByIndexLocked(AddressSpace* as, u16 idx)
 {
     // Precondition the header comment describes but nothing
     // enforced: idx must address a live row. With region_count==0
@@ -514,21 +708,17 @@ void UnmapUserPageByIndex(AddressSpace* as, u16 idx)
     // are corrupt relative to the region table — panic so the gap
     // is visible, rather than silently leaving the region list out
     // of sync with the page tables.
-    u64* pte = WalkToPteIn(as->pml4_virt, virt, /*create=*/false);
+    u64* pte = WalkToPteIn(as->pml4_virt, virt, nullptr);
     if (pte == nullptr || (*pte & kPagePresent) == 0)
     {
         PanicAs("AddressSpaceUnmapUserPage: region table claims mapping but PTE absent", virt);
     }
+    if ((*pte & kAddrMask) != frame)
+    {
+        PanicAs("AddressSpaceUnmapUserPage: region table/PTE frame mismatch", virt);
+    }
     *pte = 0;
-
-    // Flush both the local TLB (if this CPU is in `as`) AND every
-    // peer CPU whose CR3 also maps `as`. On uniprocessor the helper
-    // collapses to the local invlpg; on SMP it sends a TLB-shootdown
-    // IPI and waits for ack. See wiki/security/Linux-CVE-Audit.md
-    // class FF for the threat model — without the broadcast, a peer
-    // CPU keeps writing through a stale RW TLB entry to a frame
-    // that's been recycled into a different process.
-    TlbShootdownAddr(as, virt);
+    RetiredPageTables page_tables = PruneEmptyTablePathLocked(as, virt);
 
     // Compact the region table — swap the dying slot with the last
     // in-use slot. Order doesn't matter; destroy walks `region_count`
@@ -539,8 +729,7 @@ void UnmapUserPageByIndex(AddressSpace* as, u16 idx)
         as->regions[idx] = as->regions[last];
     }
     --as->region_count;
-
-    FreeFrame(frame);
+    return RetiredUserPage{virt, frame, page_tables};
 }
 } // namespace
 
@@ -554,24 +743,39 @@ bool AddressSpaceUnmapUserPage(AddressSpace* as, u64 virt)
     {
         PanicAs("AddressSpaceUnmapUserPage: unaligned virt", virt);
     }
-    sync::SpinLockGuard guard(as->regions_lock);
-    // Find the region. Linear scan over region_count — typical
-    // region_count is small (≤128), and munmap is infrequent; this
-    // stays cheaper than building an index.
-    u16 found = u16(-1);
-    for (u16 i = 0; i < as->region_count; ++i)
+    constexpr u64 kUserMax = 0x00007FFFFFFFFFFFULL;
+    if (virt > kUserMax)
     {
-        if (as->regions[i].vaddr == virt)
+        PanicAs("AddressSpaceUnmapUserPage: virt outside canonical low half", virt);
+    }
+    AddressSpaceMutationGuard mutation(*as);
+    RetiredUserPage retired{};
+    {
+        sync::SpinLockGuard guard(as->regions_lock);
+        // Find the region. Linear scan over region_count — typical
+        // region_count is small (≤128), and munmap is infrequent; this
+        // stays cheaper than building an index.
+        u16 found = u16(-1);
+        for (u16 i = 0; i < as->region_count; ++i)
         {
-            found = i;
-            break;
+            if (as->regions[i].vaddr == virt)
+            {
+                found = i;
+                break;
+            }
         }
+        if (found == u16(-1))
+        {
+            return false;
+        }
+        retired = DetachUserPageByIndexLocked(as, found);
     }
-    if (found == u16(-1))
-    {
-        return false;
-    }
-    UnmapUserPageByIndex(as, found);
+
+    // The transaction stays exclusive until every CPU has discarded the
+    // old translation and only then returns the backing frame for reuse.
+    TlbShootdownAddr(as, retired.virt);
+    FreeFrame(retired.frame);
+    ReleaseRetiredPageTables(retired.page_tables);
     return true;
 }
 
@@ -606,20 +810,38 @@ bool AddressSpaceMapBorrowedPage(AddressSpace* as, u64 virt, PhysAddr frame, u64
     {
         PanicAs("AddressSpaceMapBorrowedPage: kPageGlobal on user page", flags);
     }
-    sync::SpinLockGuard guard(as->regions_lock);
-    u64* pte = WalkToPteIn(as->pml4_virt, virt, /*create=*/true);
-    if (pte == nullptr)
+    AddressSpaceMutationGuard mutation(*as);
+    bool already_mapped = false;
+    u8 missing_tables = 0;
     {
-        // Frame pool dry building page tables — fail the borrow
-        // (caller already handles false) rather than null-deref.
+        sync::SpinLockGuard guard(as->regions_lock);
+        u64* existing = WalkToPteIn(as->pml4_virt, virt, nullptr);
+        already_mapped = existing != nullptr && (*existing & kPagePresent) != 0;
+        if (!already_mapped)
+        {
+            missing_tables = MissingTableCount(as->pml4_virt, virt);
+        }
+    }
+    if (already_mapped)
+    {
+        return false;
+    }
+
+    PageTableReserve reserve{};
+    if (!PreparePageTableReserve(reserve, missing_tables))
+    {
         KLOG_WARN_V("mm/as", "MapBorrowedPage: frame pool dry building page tables", virt);
         return false;
     }
-    if (*pte & kPagePresent)
     {
-        return false;
+        sync::SpinLockGuard guard(as->regions_lock);
+        u64* pte = WalkToPteIn(as->pml4_virt, virt, &reserve);
+        KASSERT(pte != nullptr, "mm/as", "prepared borrowed-map transaction produced no leaf PTE");
+        KASSERT((*pte & kPagePresent) == 0, "mm/as", "borrowed-map transaction raced an existing PTE");
+        *pte = (frame & kAddrMask) | (flags | kPagePresent);
     }
-    *pte = (frame & kAddrMask) | (flags | kPagePresent);
+    KASSERT(reserve.next == reserve.count, "mm/as", "borrowed-map transaction left prepared tables unused");
+    ReleasePageTableReserve(reserve);
     if (AddressSpaceCurrent() == as)
     {
         Invlpg(virt);
@@ -634,7 +856,7 @@ PhysAddr AddressSpaceProbePte(const AddressSpace* as, u64 virt)
     if ((virt & 0xFFF) != 0)
         PanicAs("AddressSpaceProbePte: unaligned virt", virt);
     sync::SpinLockGuard guard(as->regions_lock);
-    u64* pte = WalkToPteIn(as->pml4_virt, virt, /*create=*/false);
+    u64* pte = WalkToPteIn(as->pml4_virt, virt, nullptr);
     if (pte == nullptr || (*pte & kPagePresent) == 0)
         return kNullFrame;
     return *pte & kAddrMask;
@@ -647,7 +869,7 @@ u64 AddressSpaceProbePteRaw(const AddressSpace* as, u64 virt)
     if ((virt & 0xFFF) != 0)
         PanicAs("AddressSpaceProbePteRaw: unaligned virt", virt);
     sync::SpinLockGuard guard(as->regions_lock);
-    u64* pte = WalkToPteIn(as->pml4_virt, virt, /*create=*/false);
+    u64* pte = WalkToPteIn(as->pml4_virt, virt, nullptr);
     if (pte == nullptr || (*pte & kPagePresent) == 0)
         return 0;
     return *pte;
@@ -664,18 +886,29 @@ core::Result<AddressSpace*> AddressSpaceFork(const AddressSpace* parent)
     if (!child_r)
         return core::Err{child_r.error()};
     AddressSpace* child = child_r.value();
-    sync::SpinLockGuard parent_guard(parent->regions_lock);
-    for (u16 i = 0; i < parent->region_count; ++i)
+
+    // Stabilize the parent's owned-frame ledger for the whole copy, but
+    // take the IRQ-saving structural lock only long enough to snapshot
+    // one row and its PTE. Frame allocation and memcpy remain sleepable.
+    AddressSpaceMutationGuard parent_mutation(*parent);
+    u16 parent_region_count = 0;
     {
-        const u64 va = parent->regions[i].vaddr;
-        const PhysAddr parent_frame = parent->regions[i].frame;
-        // The parent region lock is held for the whole snapshot, so
-        // use the lock-free inner PTE walk here rather than re-entering
-        // the non-recursive spinlock through the public probe helper.
-        u64* parent_pte_ptr = WalkToPteIn(parent->pml4_virt, va, /*create=*/false);
-        const u64 parent_pte =
-            (parent_pte_ptr != nullptr && (*parent_pte_ptr & kPagePresent) != 0) ? *parent_pte_ptr : 0;
-        if (parent_pte == 0)
+        sync::SpinLockGuard parent_guard(parent->regions_lock);
+        parent_region_count = parent->region_count;
+    }
+    for (u16 i = 0; i < parent_region_count; ++i)
+    {
+        AddressSpaceUserRegion parent_region{};
+        u64 parent_pte = 0;
+        {
+            sync::SpinLockGuard parent_guard(parent->regions_lock);
+            parent_region = parent->regions[i];
+            u64* parent_pte_ptr = WalkToPteIn(parent->pml4_virt, parent_region.vaddr, nullptr);
+            parent_pte = (parent_pte_ptr != nullptr && (*parent_pte_ptr & kPagePresent) != 0) ? *parent_pte_ptr : 0;
+        }
+        const u64 va = parent_region.vaddr;
+        const PhysAddr parent_frame = parent_region.frame;
+        if (parent_pte == 0 || (parent_pte & kAddrMask) != parent_frame)
         {
             // Region table thinks `va` is mapped but the PTE
             // walk found nothing present. That means an unmap
@@ -685,8 +918,9 @@ core::Result<AddressSpace*> AddressSpaceFork(const AddressSpace* parent)
             // such bug is found at fork time, not days later
             // when the child segfaults on a missing page.
             KLOG_WARN_2V("mm/address_space", "AddressSpaceFork: region table out of sync with PTEs", "va", va,
-                         "region_idx", static_cast<u64>(i));
-            continue;
+                         "pte_frame", parent_pte & kAddrMask);
+            AddressSpaceRelease(child);
+            return core::Err{core::ErrorCode::InvalidArgument};
         }
         // Extract flags: mask out the address bits, keep the
         // protection / present / user / NX flags.
@@ -702,19 +936,14 @@ core::Result<AddressSpace*> AddressSpaceFork(const AddressSpace* parent)
         const void* src = PhysToVirt(parent_frame);
         void* dst = PhysToVirt(child_frame);
         memcpy(dst, src, kPageSize);
-        const u16 region_count_before = child->region_count;
-        AddressSpaceMapUserPage(child, va, child_frame, flags);
-        if (child->region_count == region_count_before)
+        if (!AddressSpaceMapUserPage(child, va, child_frame, flags))
         {
-            // Map refused (frame budget exhausted or page-table
-            // pool dry — both non-fatal paths in MapUserPage that
-            // return without installing). child_frame was allocated
-            // above but is not in child->regions[], so
-            // AddressSpaceRelease will never reclaim it. Free it
-            // here, otherwise a fork near the frame budget leaks one
-            // physical frame per skipped region under memory
-            // pressure.
+            // A fork is all-or-nothing. The child owns none of this
+            // frame on refusal, and releasing the partial AS reclaims
+            // every page committed by earlier iterations.
             FreeFrame(child_frame);
+            AddressSpaceRelease(child);
+            return core::Err{core::ErrorCode::OutOfMemory};
         }
     }
     return child;
@@ -724,16 +953,21 @@ void AddressSpaceClearUserMappings(AddressSpace* as)
 {
     if (as == nullptr)
         return;
-    sync::SpinLockGuard guard(as->regions_lock);
-    // Pop entries off the tail. UnmapUserPageByIndex handles the
-    // PTE clear + TLB shootdown + frame free + region-table
-    // decrement; passing the index directly avoids the linear
-    // scan AddressSpaceUnmapUserPage does, taking teardown from
-    // O(n²) (each Unmap scans the full table to find the va we
-    // already knew the index of) down to O(n).
-    while (as->region_count > 0)
+    AddressSpaceMutationGuard mutation(*as);
+    for (;;)
     {
-        UnmapUserPageByIndex(as, u16(as->region_count - 1));
+        RetiredUserPage retired{};
+        {
+            sync::SpinLockGuard guard(as->regions_lock);
+            if (as->region_count == 0)
+            {
+                break;
+            }
+            retired = DetachUserPageByIndexLocked(as, u16(as->region_count - 1));
+        }
+        TlbShootdownAddr(as, retired.virt);
+        FreeFrame(retired.frame);
+        ReleaseRetiredPageTables(retired.page_tables);
     }
 }
 
@@ -753,32 +987,29 @@ bool AddressSpaceProtectUserPage(AddressSpace* as, u64 virt, u64 new_flags)
     if ((new_flags & kPageGlobal) != 0)
         PanicAs("AddressSpaceProtectUserPage: kPageGlobal on user page", new_flags);
 
-    sync::SpinLockGuard guard(as->regions_lock);
-    u64* pte = WalkToPteIn(as->pml4_virt, virt, /*create=*/false);
-    if (pte == nullptr || (*pte & kPagePresent) == 0)
-        return false;
-    // SEC-004
-    // W^X-at-mprotect: even though new_flags is itself W^X-clean (the RWX panic
-    // above guarantees that), a page that is CURRENTLY writable must never be
-    // flipped to executable. Otherwise a PE maps a section / VirtualAlloc RW,
-    // writes shellcode, then NtProtectVirtualMemory(...PAGE_EXECUTE_READ) turns
-    // the very bytes it just wrote into code — the same write-then-execute
-    // bypass that SectionMap's sticky flags close, but routed around the
-    // section path entirely. Refuse adding EXECUTE to a writable page by
-    // clearing WRITE as we grant EXECUTE: the resulting page is RX, never RWX
-    // and never W-then-X on the same observable contents. DuetOS enforces W^X
-    // as a pillar (no JIT pages), so no legitimate non-JIT workload regresses —
-    // loaders map .text RX and .data/.bss RW as distinct pages.
-    const bool granting_exec = (new_flags & kPageNoExecute) == 0;
-    const bool currently_writable = (*pte & kPageWritable) != 0;
-    if (granting_exec && currently_writable)
+    AddressSpaceMutationGuard mutation(*as);
+    bool refused_write_to_exec = false;
     {
-        new_flags |= kPageNoExecute; // keep it non-executable; preserve current W
+        sync::SpinLockGuard guard(as->regions_lock);
+        u64* pte = WalkToPteIn(as->pml4_virt, virt, nullptr);
+        if (pte == nullptr || (*pte & kPagePresent) == 0)
+            return false;
+        // SEC-004: a currently writable page may not become executable.
+        const bool granting_exec = (new_flags & kPageNoExecute) == 0;
+        const bool currently_writable = (*pte & kPageWritable) != 0;
+        if (granting_exec && currently_writable)
+        {
+            new_flags |= kPageNoExecute;
+            refused_write_to_exec = true;
+        }
+        const u64 frame = *pte & kAddrMask;
+        *pte = frame | (new_flags | kPagePresent);
+    }
+    if (refused_write_to_exec)
+    {
         KLOG_ONCE_WARN("mm/address_space",
                        "AddressSpaceProtectUserPage: W^X — refusing W->X transition, kept page non-executable");
     }
-    const u64 frame = *pte & kAddrMask;
-    *pte = frame | (new_flags | kPagePresent);
     // Protect downgrades (e.g. RW→RO) leave stale RW entries in
     // peer-CPU TLBs that allow writes through after the PTE was
     // already narrowed. Broadcast the shootdown. See class FF.
@@ -796,14 +1027,25 @@ bool AddressSpaceUnmapBorrowedPage(AddressSpace* as, u64 virt)
     {
         PanicAs("AddressSpaceUnmapBorrowedPage: unaligned virt", virt);
     }
-    sync::SpinLockGuard guard(as->regions_lock);
-    u64* pte = WalkToPteIn(as->pml4_virt, virt, /*create=*/false);
-    if (pte == nullptr || (*pte & kPagePresent) == 0)
+    constexpr u64 kUserMax = 0x00007FFFFFFFFFFFULL;
+    if (virt > kUserMax)
     {
-        return false;
+        PanicAs("AddressSpaceUnmapBorrowedPage: virt outside canonical low half", virt);
     }
-    *pte = 0;
+    AddressSpaceMutationGuard mutation(*as);
+    RetiredPageTables retired_tables{};
+    {
+        sync::SpinLockGuard guard(as->regions_lock);
+        u64* pte = WalkToPteIn(as->pml4_virt, virt, nullptr);
+        if (pte == nullptr || (*pte & kPagePresent) == 0)
+        {
+            return false;
+        }
+        *pte = 0;
+        retired_tables = PruneEmptyTablePathLocked(as, virt);
+    }
     TlbShootdownAddr(as, virt);
+    ReleaseRetiredPageTables(retired_tables);
     return true;
 }
 
@@ -918,44 +1160,57 @@ void AddressSpaceRelease(AddressSpace* as)
         AddressSpaceActivate(nullptr);
     }
 
-    arch::SerialWrite("[as] destroying pml4_phys=");
-    arch::SerialWriteHex(as->pml4_phys);
-    arch::SerialWrite(" regions=");
-    arch::SerialWriteHex(as->region_count);
-    arch::SerialWrite("\n");
+    const u32 active_cpu_mask = __atomic_load_n(&as->active_cpu_mask, __ATOMIC_ACQUIRE);
+    KASSERT_WITH_VALUE(active_cpu_mask == 0, "mm/as", "AddressSpaceRelease while AS active on a peer CPU",
+                       active_cpu_mask);
 
-    // Return every backing frame the AS is responsible for. Walking
-    // the regions table BEFORE the page tables is deliberate — we
-    // don't actually need to UnmapPage from this AS's PML4 (we're
-    // about to free the entire table tree), but draining the region
-    // table makes the freed-frame ledger easy to audit in the
-    // FrameAllocator stats: regions.count + page-table frames freed.
-    // Return every backing frame the AS is responsible for. Walking
-    // the regions table BEFORE the page tables is deliberate — we
-    // don't actually need to UnmapPage from this AS's PML4 (we're
-    // about to free the entire table tree), but draining the region
-    // table makes the freed-frame ledger easy to audit in the
-    // FrameAllocator stats: regions.count + page-table frames freed.
     {
-        sync::SpinLockGuard guard(as->regions_lock);
-        for (u16 i = 0; i < as->region_count; ++i)
+        AddressSpaceMutationGuard mutation(*as);
+        u16 regions_at_destroy = 0;
         {
-            FreeFrame(as->regions[i].frame);
+            sync::SpinLockGuard guard(as->regions_lock);
+            regions_at_destroy = as->region_count;
         }
-        as->region_count = 0;
+
+        arch::SerialWrite("[as] destroying pml4_phys=");
+        arch::SerialWriteHex(as->pml4_phys);
+        arch::SerialWrite(" regions=");
+        arch::SerialWriteHex(regions_at_destroy);
+        arch::SerialWrite("\n");
+
+        // Detach one owned frame at a time under the structural lock,
+        // then return it after interrupts are restored. The whole drain
+        // remains one mutation transaction, so no mapper can repopulate
+        // the AS between iterations.
+        for (;;)
+        {
+            PhysAddr frame = kNullFrame;
+            {
+                sync::SpinLockGuard guard(as->regions_lock);
+                if (as->region_count == 0)
+                {
+                    break;
+                }
+                --as->region_count;
+                frame = as->regions[as->region_count].frame;
+            }
+            FreeFrame(frame);
+        }
+        arch::SerialWrite("[as] regions freed\n");
+
+        // Free intermediate user-half tables, then the PML4 itself.
+        FreeUserHalfTables(as->pml4_virt);
+        arch::SerialWrite("[as] tables freed\n");
+        FreeFrame(as->pml4_phys);
+        arch::SerialWrite("[as] pml4 frame freed\n");
+
+        // Free the heap-allocated region table before the struct itself.
+        KFree(as->regions);
+        as->regions = nullptr;
     }
-    arch::SerialWrite("[as] regions freed\n");
 
-    // Free intermediate user-half tables, then the PML4 itself.
-    FreeUserHalfTables(as->pml4_virt);
-    arch::SerialWrite("[as] tables freed\n");
-    FreeFrame(as->pml4_phys);
-    arch::SerialWrite("[as] pml4 frame freed\n");
-
-    // Free the heap-allocated region table before the struct itself.
-    KFree(as->regions);
-    as->regions = nullptr;
-
+    // mutation's destructor must release the embedded lock before the
+    // AddressSpace allocation itself becomes invalid.
     KFree(as);
     arch::SerialWrite("[as] AddressSpace struct freed\n");
     ++g_destroyed;
@@ -1001,12 +1256,16 @@ void AddressSpaceSelfTest()
         PanicAs("self-test: AllocateFrame failed", 0);
     }
     const PhysAddr frame = frame_r.value();
-    AddressSpaceMapUserPage(a, kTestVa, frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
+    if (!AddressSpaceMapUserPage(a, kTestVa, frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute))
+    {
+        FreeFrame(frame);
+        PanicAs("self-test: AddressSpaceMapUserPage refused test mapping", kTestVa);
+    }
 
     // Walk a's tables directly — must find the PTE we just
     // installed, with Present + User bits set.
-    u64* a_pte = WalkToPteIn(a->pml4_virt, kTestVa, /*create=*/false);
-    if (a_pte == nullptr || (*a_pte & kPagePresent) == 0 || (*a_pte & kPageUser) == 0)
+    const u64 a_pte = AddressSpaceProbePteRaw(a, kTestVa);
+    if ((a_pte & kPagePresent) == 0 || (a_pte & kPageUser) == 0)
     {
         PanicAs("self-test: AS-A does not have the page we mapped", kTestVa);
     }
@@ -1015,8 +1274,8 @@ void AddressSpaceSelfTest()
     // user-half tables exist for this VA in b's PML4 tree yet).
     // This is the CORE isolation assertion: two sibling ASes DO
     // NOT share a mapping installed in one of them.
-    u64* b_pte = WalkToPteIn(b->pml4_virt, kTestVa, /*create=*/false);
-    if (b_pte != nullptr && ((*b_pte) & kPagePresent) != 0)
+    const u64 b_pte = AddressSpaceProbePteRaw(b, kTestVa);
+    if ((b_pte & kPagePresent) != 0)
     {
         PanicAs("self-test: AS-B SAW AS-A's private page — ISOLATION BROKEN", kTestVa);
     }
