@@ -6641,6 +6641,22 @@ Task* SchedFindTaskByTid(u64 target_tid)
     return hit;
 }
 
+core::Process* SchedFindProcessByTidRetained(u64 target_tid)
+{
+    if (!cpu::BspInstalled())
+    {
+        return nullptr;
+    }
+    sync::SpinLockGuard guard(g_sched_lock);
+    Task* hit = FindTaskByTidLocked(target_tid);
+    if (hit == nullptr || hit->state == TaskState::Dead || hit->process == nullptr)
+    {
+        return nullptr;
+    }
+    core::ProcessRetain(hit->process);
+    return hit->process;
+}
+
 bool SchedThreadExistsByTid(u64 target_tid)
 {
     if (!cpu::BspInstalled())

@@ -198,6 +198,12 @@ u64 SchedCountChildrenOfPid(u64 parent_pid);
 /// after a scheduler lifetime boundary.
 Task* SchedFindTaskByTid(u64 target_tid);
 
+/// Resolve a live task TID to its owning Process and retain that
+/// Process while holding the scheduler lifetime lock. Caller must
+/// ProcessRelease the returned pointer. Returns nullptr for missing,
+/// dead, or kernel-only tasks.
+core::Process* SchedFindProcessByTidRetained(u64 target_tid);
+
 /// Validate an immutable TID for SYS_THREAD_OPEN while holding the
 /// scheduler lifetime lock. Finds Blocked tasks through the global
 /// all-tasks registry and rejects Dead/kernel-only tasks. No Task*
