@@ -1043,13 +1043,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T19:47:53Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] native-syscall-idl
+### [DONE] native-syscall-idl
 - **Session**: `Nathan-427`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `abi/native_syscalls.json tools/build/gen-native-syscall-abi.py tools/test/check-native-syscall-idl.py kernel/syscall/syscall_idl_generated.def userland/libc/include/duet/syscall_numbers_generated.h docs/native-syscall-policy.json docs/native-syscall-policy.md`
 - **Description**: Versioned syscall IDL migration source plus generated names, policy, userland constants, fuzz/tracing metadata, and drift checks
 - **Claimed**: 2026-07-31T19:52:02Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-31T20:04:28Z
 
 ### [ACTIVE] native-syscall-names-source
 - **Session**: `Nathan-1522`
