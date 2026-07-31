@@ -1378,3 +1378,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Implementation-grade serviced to execd displayd registryd netd extraction architecture map
 - **Claimed**: 2026-07-31T22:16:14Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] gui-send-transaction
+- **Session**: `Nathan-960`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/drivers/video/gui_send_transaction.h kernel/drivers/video/gui_send_transaction.cpp tests/host/test_gui_send_transaction.cpp`
+- **Description**: Generation-safe synchronous GUI SendMessage transaction table and hostile host vectors
+- **Claimed**: 2026-07-31T22:22:40Z
+- **Status**: IN PROGRESS
