@@ -563,10 +563,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T06:34:21Z
 - **Status**: COMPLETED @ 2026-07-31T06:37:48Z
 
-### [ACTIVE] gpu-amd-vm-pte
+### [DONE] gpu-amd-vm-pte
 - **Session**: `Nathan-782`
 - **Branch**: `claude/gpu-amd-vm-20260731`
 - **Files**: `kernel/drivers/gpu/amd_gpu_vm.h kernel/drivers/gpu/amd_gpu_vm.cpp`
 - **Description**: AMD GFX9-GFX11 VM PTE encoding and reject-path selftests; no MMIO or firmware upload
 - **Claimed**: 2026-07-31T07:24:07Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-31T07:26:46Z
