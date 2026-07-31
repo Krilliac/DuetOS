@@ -530,3 +530,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Concurrent DRSH sessions with explicit local-only or external access policy
 - **Claimed**: 2026-07-31T05:17:53Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] drsh-concurrent-access-boot
+- **Session**: `Nathan-655`
+- **Branch**: `claude/drsh-agent-host`
+- **Files**: `kernel/core/boot_bringup.cpp`
+- **Description**: Enable external peer policy only for the explicit DRSH test autostart fixture
+- **Claimed**: 2026-07-31T05:23:38Z
+- **Status**: IN PROGRESS
