@@ -86,7 +86,7 @@ pub const PCIE_EXT_CAP_HOP_CAP: usize = 256;
 
 // ---------- helpers ----------
 
-fn slice_from_raw<'a>(p: *const u8, len: usize) -> Option<&'a [u8]> {
+unsafe fn slice_from_raw(p: *const u8, len: usize, _scope: &()) -> Option<&[u8]> {
     if p.is_null() {
         return None;
     }
@@ -94,7 +94,7 @@ fn slice_from_raw<'a>(p: *const u8, len: usize) -> Option<&'a [u8]> {
     Some(unsafe { slice::from_raw_parts(p, len) })
 }
 
-fn out_init<'a, T: Default + Copy>(out: *mut T) -> Option<&'a mut T> {
+unsafe fn out_init<T: Default + Copy>(out: *mut T, _scope: &mut ()) -> Option<&mut T> {
     if out.is_null() {
         return None;
     }
@@ -259,17 +259,24 @@ fn find_extended_cap(config: &[u8], cap_id: u16, out: &mut DuetosPciExtCap) -> b
 /// `next_offset` value is the caller-safe advance — 0 when the
 /// chain ends, the device reported a self-loop, or the pointer
 /// fell outside the canonical [0x40, 0xFF] range.
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_pci_caps_parse_standard_at(
+pub unsafe extern "C" fn duetos_pci_caps_parse_standard_at(
     config: *const u8,
     config_len: usize,
     off: usize,
     out: *mut DuetosPciCap,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(config, config_len) else {
+    let config_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(config, config_len, &config_scope) }) else {
         return false;
     };
     parse_standard_cap_at(slice, off, dst)
@@ -278,17 +285,24 @@ pub extern "C" fn duetos_pci_caps_parse_standard_at(
 /// Walk the standard capability list looking for the first cap
 /// with `cap_id`. Hop-capped at `PCI_STD_CAP_HOP_CAP` (48) to bound
 /// pathological cycles or runaway chains.
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_pci_caps_find_standard(
+pub unsafe extern "C" fn duetos_pci_caps_find_standard(
     config: *const u8,
     config_len: usize,
     cap_id: u8,
     out: *mut DuetosPciCap,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(config, config_len) else {
+    let config_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(config, config_len, &config_scope) }) else {
         return false;
     };
     find_standard_cap(slice, cap_id, dst)
@@ -298,17 +312,24 @@ pub extern "C" fn duetos_pci_caps_find_standard(
 /// header packs (cap_id:16 | version:4 | next:12). `next_offset` is
 /// the caller-safe advance — 0 on end-of-list, mis-alignment, out-
 /// of-range pointer, or self-loop.
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_pci_caps_parse_extended_at(
+pub unsafe extern "C" fn duetos_pci_caps_parse_extended_at(
     config: *const u8,
     config_len: usize,
     off: usize,
     out: *mut DuetosPciExtCap,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(config, config_len) else {
+    let config_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(config, config_len, &config_scope) }) else {
         return false;
     };
     parse_extended_cap_at(slice, off, dst)
@@ -317,17 +338,24 @@ pub extern "C" fn duetos_pci_caps_parse_extended_at(
 /// Walk the PCIe extended capability list looking for the first
 /// cap with `cap_id`. Hop-capped at `PCIE_EXT_CAP_HOP_CAP` (256)
 /// to bound pathological cycles.
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_pci_caps_find_extended(
+pub unsafe extern "C" fn duetos_pci_caps_find_extended(
     config: *const u8,
     config_len: usize,
     cap_id: u16,
     out: *mut DuetosPciExtCap,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(config, config_len) else {
+    let config_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(config, config_len, &config_scope) }) else {
         return false;
     };
     find_extended_cap(slice, cap_id, dst)

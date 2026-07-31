@@ -153,7 +153,7 @@ pub const EXT4_EXTENT_HEADER_MAGIC: u16 = 0xF30A;
 pub const EXT4_INODE_FLAG_EXTENTS: u32 = 0x80000;
 pub const EXT4_FEATURE_RO_COMPAT_LARGE_FILE: u32 = 0x02;
 
-fn slice_from_raw<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
+unsafe fn slice_from_raw(ptr: *const u8, len: usize, _scope: &()) -> Option<&[u8]> {
     if ptr.is_null() {
         return None;
     }
@@ -161,7 +161,7 @@ fn slice_from_raw<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
     Some(unsafe { slice::from_raw_parts(ptr, len) })
 }
 
-fn out_init<'a, T: Default + Copy>(out: *mut T) -> Option<&'a mut T> {
+unsafe fn out_init<T: Default + Copy>(out: *mut T, _scope: &mut ()) -> Option<&mut T> {
     if out.is_null() {
         return None;
     }
@@ -362,87 +362,137 @@ fn parse_dirent(block: &[u8], byte_off: u32, out: &mut DuetosExt4DirEntry) -> u3
 
 // ---------- FFI ----------
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_ext4_parse_superblock(buf: *const u8, len: usize, out: *mut DuetosExt4Superblock) -> bool {
-    let Some(dst) = out_init(out) else {
+pub unsafe extern "C" fn duetos_ext4_parse_superblock(
+    buf: *const u8,
+    len: usize,
+    out: *mut DuetosExt4Superblock,
+) -> bool {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_superblock(slice, dst)
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_ext4_parse_group_desc0(buf: *const u8, len: usize, out: *mut DuetosExt4GroupDesc) -> bool {
-    let Some(dst) = out_init(out) else {
+pub unsafe extern "C" fn duetos_ext4_parse_group_desc0(
+    buf: *const u8,
+    len: usize,
+    out: *mut DuetosExt4GroupDesc,
+) -> bool {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_group_desc0(slice, dst)
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_ext4_parse_inode(
+pub unsafe extern "C" fn duetos_ext4_parse_inode(
     buf: *const u8,
     len: usize,
     ino_size: u16,
     feature_ro_compat: u32,
     out: *mut DuetosExt4Inode,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_inode(slice, ino_size, feature_ro_compat, dst)
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_ext4_parse_extent_header(
+pub unsafe extern "C" fn duetos_ext4_parse_extent_header(
     buf: *const u8,
     len: usize,
     out: *mut DuetosExt4ExtentHeader,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_extent_header(slice, dst)
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_ext4_parse_extent_leaf(
+pub unsafe extern "C" fn duetos_ext4_parse_extent_leaf(
     buf: *const u8,
     len: usize,
     idx: u16,
     out: *mut DuetosExt4Extent,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_extent_leaf(slice, idx, dst)
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_ext4_parse_extent_index(
+pub unsafe extern "C" fn duetos_ext4_parse_extent_index(
     buf: *const u8,
     len: usize,
     idx: u16,
     out: *mut DuetosExt4ExtentIndex,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_extent_index(slice, idx, dst)
@@ -452,17 +502,24 @@ pub extern "C" fn duetos_ext4_parse_extent_index(
 /// (rec_len) on success, 0 on a hard error. `out->ok == 1` means
 /// the record is a real entry (non-zero inode + name_len > 0);
 /// `out->ok == 0` means "valid placeholder slot — advance past it".
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_ext4_parse_dirent(
+pub unsafe extern "C" fn duetos_ext4_parse_dirent(
     block: *const u8,
     block_len: usize,
     byte_off: u32,
     out: *mut DuetosExt4DirEntry,
 ) -> u32 {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return 0;
     };
-    let Some(slice) = slice_from_raw(block, block_len) else {
+    let block_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(block, block_len, &block_scope) }) else {
         return 0;
     };
     parse_dirent(slice, byte_off, dst)

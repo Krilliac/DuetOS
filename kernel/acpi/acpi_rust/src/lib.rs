@@ -146,7 +146,7 @@ pub const ACPI_GENERIC_ADDR_SPACE_MEMORY: u8 = 0;
 
 pub const ACPI_SRAT_TYPE_MEMORY_AFFINITY: u8 = 1;
 
-fn slice_from_raw<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
+unsafe fn slice_from_raw(ptr: *const u8, len: usize, _scope: &()) -> Option<&[u8]> {
     if ptr.is_null() {
         return None;
     }
@@ -154,7 +154,7 @@ fn slice_from_raw<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
     Some(unsafe { slice::from_raw_parts(ptr, len) })
 }
 
-fn out_init<'a, T: Default + Copy>(out: *mut T) -> Option<&'a mut T> {
+unsafe fn out_init<T: Default + Copy>(out: *mut T, _scope: &mut ()) -> Option<&mut T> {
     if out.is_null() {
         return None;
     }
@@ -375,93 +375,146 @@ fn parse_srat_memory_affinity(buf: &[u8], off: usize, out: &mut DuetosAcpiSratMe
 
 // ---------- FFI ----------
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_acpi_parse_rsdp(buf: *const u8, len: usize, out: *mut DuetosAcpiRsdp) -> bool {
-    let Some(dst) = out_init(out) else {
+pub unsafe extern "C" fn duetos_acpi_parse_rsdp(buf: *const u8, len: usize, out: *mut DuetosAcpiRsdp) -> bool {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_rsdp(slice, dst)
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_acpi_parse_table_header(buf: *const u8, len: usize, out: *mut DuetosAcpiTableHeader) -> bool {
-    let Some(dst) = out_init(out) else {
+pub unsafe extern "C" fn duetos_acpi_parse_table_header(
+    buf: *const u8,
+    len: usize,
+    out: *mut DuetosAcpiTableHeader,
+) -> bool {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_table_header(slice, dst)
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_acpi_parse_madt_entry_header(
+pub unsafe extern "C" fn duetos_acpi_parse_madt_entry_header(
     buf: *const u8,
     len: usize,
     off: usize,
     out: *mut DuetosAcpiMadtEntryHeader,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_madt_entry_header(slice, off, dst)
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_acpi_parse_fadt(buf: *const u8, len: usize, out: *mut DuetosAcpiFadt) -> bool {
-    let Some(dst) = out_init(out) else {
+pub unsafe extern "C" fn duetos_acpi_parse_fadt(buf: *const u8, len: usize, out: *mut DuetosAcpiFadt) -> bool {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_fadt(slice, dst)
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_acpi_parse_mcfg_entry(
+pub unsafe extern "C" fn duetos_acpi_parse_mcfg_entry(
     buf: *const u8,
     len: usize,
     idx: u32,
     out: *mut DuetosAcpiMcfgEntry,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_mcfg_entry(slice, idx, dst)
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_acpi_parse_hpet(buf: *const u8, len: usize, out: *mut DuetosAcpiHpet) -> bool {
-    let Some(dst) = out_init(out) else {
+pub unsafe extern "C" fn duetos_acpi_parse_hpet(buf: *const u8, len: usize, out: *mut DuetosAcpiHpet) -> bool {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_hpet(slice, dst)
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_acpi_parse_srat_memory_affinity(
+pub unsafe extern "C" fn duetos_acpi_parse_srat_memory_affinity(
     buf: *const u8,
     len: usize,
     off: usize,
     out: *mut DuetosAcpiSratMemoryAffinity,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_srat_memory_affinity(slice, off, dst)

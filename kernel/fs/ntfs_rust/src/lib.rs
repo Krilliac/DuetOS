@@ -103,7 +103,7 @@ pub const NTFS_ATTR_TYPE_FILE_NAME: u32 = 0x30;
 /// Attribute list terminator.
 pub const NTFS_ATTR_TYPE_END: u32 = 0xFFFF_FFFF;
 
-fn slice_from_raw<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
+unsafe fn slice_from_raw(ptr: *const u8, len: usize, _scope: &()) -> Option<&[u8]> {
     if ptr.is_null() {
         return None;
     }
@@ -113,7 +113,7 @@ fn slice_from_raw<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
     Some(unsafe { slice::from_raw_parts(ptr, len) })
 }
 
-fn out_init<'a, T: Default + Copy>(out: *mut T) -> Option<&'a mut T> {
+unsafe fn out_init<T: Default + Copy>(out: *mut T, _scope: &mut ()) -> Option<&mut T> {
     if out.is_null() {
         return None;
     }
@@ -335,12 +335,23 @@ fn parse_runlist_entry(buf: &[u8], prev_lcn: u64, out: &mut DuetosNtfsRunlistEnt
 // ---------- FFI ----------
 
 /// FFI: probe + parse an NTFS boot sector.
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_ntfs_parse_boot_sector(buf: *const u8, len: usize, out: *mut DuetosNtfsBootSector) -> bool {
-    let Some(dst) = out_init(out) else {
+pub unsafe extern "C" fn duetos_ntfs_parse_boot_sector(
+    buf: *const u8,
+    len: usize,
+    out: *mut DuetosNtfsBootSector,
+) -> bool {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_boot_sector(slice, dst)
@@ -355,17 +366,24 @@ pub extern "C" fn duetos_ntfs_decode_mft_record_size(raw: i8, bytes_per_cluster:
 /// FFI: parse an MFT record header. `rec_size` is the on-disk
 /// record size (typically 1024) so partial reads with trailing
 /// scratch are bounded correctly.
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_ntfs_parse_mft_record_header(
+pub unsafe extern "C" fn duetos_ntfs_parse_mft_record_header(
     rec: *const u8,
     rec_len: usize,
     rec_size: usize,
     out: *mut DuetosNtfsMftRecordHeader,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(rec, rec_len) else {
+    let rec_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(rec, rec_len, &rec_scope) }) else {
         return false;
     };
     parse_mft_record_header(slice, rec_size, dst)
@@ -375,17 +393,24 @@ pub extern "C" fn duetos_ntfs_parse_mft_record_header(
 /// the (offset, units) byte span of its UTF-16 name. The caller
 /// does the UTF-16 → ASCII translation in its own code (in DuetOS,
 /// `util::Utf16CpToSafeAscii`).
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_ntfs_find_resident_file_name(
+pub unsafe extern "C" fn duetos_ntfs_find_resident_file_name(
     rec: *const u8,
     rec_len: usize,
     rec_size: usize,
     out: *mut DuetosNtfsFileNameSpan,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(rec, rec_len) else {
+    let rec_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(rec, rec_len, &rec_scope) }) else {
         return false;
     };
     find_resident_file_name(slice, rec_size, dst)
@@ -395,17 +420,24 @@ pub extern "C" fn duetos_ntfs_find_resident_file_name(
 /// running absolute LCN; pass 0 for the first call. On the
 /// end-of-runlist terminator byte returns `bytes_consumed = 1`
 /// and `ok = 0`; on a hard parse error returns `false`.
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_ntfs_parse_runlist_entry(
+pub unsafe extern "C" fn duetos_ntfs_parse_runlist_entry(
     buf: *const u8,
     len: usize,
     prev_lcn: u64,
     out: *mut DuetosNtfsRunlistEntry,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_runlist_entry(slice, prev_lcn, dst)
