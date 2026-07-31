@@ -76,11 +76,6 @@ JobRow* ResolveOwnedLocked(JobKey key, u64 owner_pid)
     return row;
 }
 
-bool IsExternallyVisibleLocked(const JobRow& row)
-{
-    return row.references != 0 && IsExternallyVisibleState(row.state);
-}
-
 bool ContainsLocked(const JobRow& row, const Process* member)
 {
     for (u32 index = 0; index < kJobMemberCapacity; ++index)
@@ -253,7 +248,12 @@ bool JobContainsAny(const Process* member)
     for (u32 index = 0; index < kJobPoolCapacity; ++index)
     {
         const JobRow& row = g_job_pool[index];
-        if (IsExternallyVisibleLocked(row) && ContainsLocked(row, member))
+        // Membership remains authoritative while a zero-reference
+        // Terminating row is held alive by its operation pin.  Requiring a
+        // public handle here would let null-handle membership queries deny
+        // the same ownership that JobAssignRetained correctly treats as an
+        // exclusive cross-Job conflict.
+        if (IsExternallyVisibleState(row.state) && ContainsLocked(row, member))
             return true;
     }
     return false;
@@ -283,7 +283,7 @@ bool JobSnapshotContaining(const Process* member, JobSnapshot* out_snapshot)
     for (u32 index = 0; index < kJobPoolCapacity; ++index)
     {
         const JobRow& row = g_job_pool[index];
-        if (IsExternallyVisibleLocked(row) && ContainsLocked(row, member))
+        if (IsExternallyVisibleState(row.state) && ContainsLocked(row, member))
         {
             SnapshotLocked(row, *out_snapshot);
             return true;

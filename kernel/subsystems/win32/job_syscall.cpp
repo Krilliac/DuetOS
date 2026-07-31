@@ -459,6 +459,11 @@ void JobHandleLifetimeSelfTest()
                   "last-close did not defer retirement behind termination pin");
     JobTestExpect(__atomic_load_n(&other->refcount, __ATOMIC_ACQUIRE) == 2,
                   "close released member while termination intent was active");
+    containing = {};
+    JobTestExpect(core::JobContainsAny(other), "zero-ref Terminating Job disappeared from null-handle membership test");
+    JobTestExpect(core::JobSnapshotContaining(other, &containing) && containing.member_count == 1 &&
+                      containing.member_pids[0] == static_cast<u64>(other->pid),
+                  "zero-ref Terminating Job disappeared from null-handle membership snapshot");
 
     core::ProcessRetain(other);
     JobTestExpect(core::JobAssignRetained(conflict_key, static_cast<u64>(owner->pid), other) ==
