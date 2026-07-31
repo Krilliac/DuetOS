@@ -6514,12 +6514,8 @@ u64 SchedCountChildrenOfPid(u64 parent_pid)
 // resolve so exit bookkeeping can find its Process. Any future
 // scheduler list must be reachable through the registry, not added
 // as another walk here (whitelist-incompleteness class).
-core::Process* SchedFindProcessByPid(u64 target_pid)
+core::Process* FindProcessByPidLocked(u64 target_pid)
 {
-    if (!cpu::BspInstalled())
-    {
-        return nullptr;
-    }
     auto match = [&](Task* t) -> core::Process*
     {
         if (t == nullptr)
@@ -6538,7 +6534,6 @@ core::Process* SchedFindProcessByPid(u64 target_pid)
         return p;
     };
 
-    sync::SpinLockGuard guard(g_sched_lock);
     core::Process* hit = nullptr;
     Task* running = Current();
     if ((hit = match(running)) != nullptr)
@@ -6575,6 +6570,34 @@ core::Process* SchedFindProcessByPid(u64 target_pid)
         {
             hit = match(t);
         }
+    }
+    return hit;
+}
+
+core::Process* SchedFindProcessByPid(u64 target_pid)
+{
+    if (!cpu::BspInstalled())
+    {
+        return nullptr;
+    }
+    sync::SpinLockGuard guard(g_sched_lock);
+    return FindProcessByPidLocked(target_pid);
+}
+
+core::Process* SchedFindProcessByPidRetained(u64 target_pid)
+{
+    if (!cpu::BspInstalled())
+    {
+        return nullptr;
+    }
+    // The scheduler lock protects the lookup-to-retain interval. A
+    // caller that first uses SchedFindProcessByPid and then retains
+    // can lose the last task's reference between those operations.
+    sync::SpinLockGuard guard(g_sched_lock);
+    core::Process* hit = FindProcessByPidLocked(target_pid);
+    if (hit != nullptr)
+    {
+        core::ProcessRetain(hit);
     }
     return hit;
 }
