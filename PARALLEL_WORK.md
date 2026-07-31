@@ -547,10 +547,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T05:49:50Z
 - **Status**: COMPLETED @ 2026-07-31T06:04:13Z
 
-### [ACTIVE] gpu-amd-psp-status
+### [DONE] gpu-amd-psp-status
 - **Session**: `Nathan-1936`
 - **Branch**: `claude/gpu-amd-psp-status-20260731`
 - **Files**: `kernel/drivers/gpu/amd_gpu.cpp kernel/drivers/gpu/amd_gpu.h kernel/drivers/gpu/amd_gpu_cmds.cpp kernel/drivers/gpu/amd_gpu_cmds.h kernel/drivers/gpu/amd_cp_ucode.cpp kernel/drivers/gpu/amd_cp_ucode.h kernel/drivers/gpu/amd_gfx_fw.cpp kernel/drivers/gpu/amd_gfx_fw.h`
 - **Description**: AMD generation-specific capability/status selftest after merged PM4; PSP/GFX11 or VM groundwork with explicit fallback
 - **Claimed**: 2026-07-31T06:28:35Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-31T06:35:45Z
