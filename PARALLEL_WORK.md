@@ -1122,3 +1122,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Host ownership quota generation and concurrent charge-release properties for ResourceDomain
 - **Claimed**: 2026-07-31T20:18:14Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] load-image-staging
+- **Session**: `Nathan-1074`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/loader/load_image.h kernel/loader/load_image.cpp tests/host/test_load_image.cpp`
+- **Description**: Loader-private staging package with sealed LoadPlan backing and transactional ownership map
+- **Claimed**: 2026-07-31T20:19:16Z
+- **Status**: IN PROGRESS
