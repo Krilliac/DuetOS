@@ -874,3 +874,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Release the registry-owned opposite pipe end exactly once across connected server close (offline claim; remote publication pending)
 - **Claimed**: 2026-07-31T17:02:55Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-runtime-transactions
+- **Session**: `Codex-root-service-lifetime`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/service.cpp kernel/core/service.h`
+- **Description**: Serialize service lifecycle with reserve-execute-commit tokens and no scheduler or loader calls under the runtime lock (offline claim; remote publication pending)
+- **Claimed**: 2026-07-31T17:08:41Z
+- **Status**: IN PROGRESS
