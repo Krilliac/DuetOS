@@ -1442,3 +1442,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Lifecycle
 - **Claimed**: 2026-07-31T23:06:48Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-lifecycle-broker-test
+- **Session**: `Codex-root-lifecycle`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tests/host/test_service_lifecycle_broker.cpp`
+- **Description**: Lifecycle
+- **Claimed**: 2026-07-31T23:06:50Z
+- **Status**: IN PROGRESS
