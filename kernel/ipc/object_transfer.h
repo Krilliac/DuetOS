@@ -212,8 +212,12 @@ ObjectTransferImportResult ObjectTransferImport(ObjectTransferTable* table, Obje
 // leave and always outside the transfer lock.
 ObjectTransferStatus ObjectTransferRevoke(ObjectTransferTable* table, ObjectTransferRef reference);
 
-// Terminal endpoint teardown.  Idempotent, including concurrent callers.
-// New export/import/revoke operations fail once Draining begins.
+// Terminal endpoint teardown.  Once every row is detached under the lock,
+// Closed is published and the owner releases its private detached-ref list
+// outside the lock without touching the table again.  Concurrent or destructor-
+// reentrant close may therefore return Ok after authority is detached while the
+// owning call is still finishing those private releases.  New operations fail
+// once Draining begins.
 ObjectTransferStatus ObjectTransferTableClose(ObjectTransferTable* table);
 
 u32 ObjectTransferLiveCount(ObjectTransferTable* table);

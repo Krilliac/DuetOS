@@ -162,10 +162,15 @@ using namespace duetos::ipc;
 struct TestObject
 {
     KObject base;
+    ObjectTransferTable* close_on_destroy = nullptr;
+    ObjectTransferStatus reentrant_close_status = ObjectTransferStatus::CorruptState;
 };
 
-void DestroyTestObject(KObject*)
+void DestroyTestObject(KObject* object)
 {
+    auto* test_object = reinterpret_cast<TestObject*>(object);
+    if (test_object->close_on_destroy != nullptr)
+        test_object->reentrant_close_status = ObjectTransferTableClose(test_object->close_on_destroy);
     g_destroyed.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -663,8 +668,25 @@ int main()
         HostDrainHandleTable(&destination);
     }
 
+    // Closed is published after authority detaches but before any last-ref
+    // destructor runs.  A destructor that re-enters close therefore observes
+    // the terminal state instead of waiting forever on the owning call.
+    {
+        TransferFixture fixture;
+        const auto exported = ObjectTransferExport(&fixture.transfer, &fixture.source, fixture.source_handle,
+                                                   MakeAuthority(kHandleRightRead, 200));
+        ASSERT_TRUE(exported.status == ObjectTransferStatus::Ok);
+        fixture.object.close_on_destroy = &fixture.transfer;
+        HostRemoveHandle(&fixture.source, fixture.source_handle);
+        fixture.source_handle = kHandleInvalid;
+        EXPECT_EQ(KObjectRefcount(&fixture.object.base), 1U);
+        EXPECT_EQ(ObjectTransferTableClose(&fixture.transfer), ObjectTransferStatus::Ok);
+        EXPECT_EQ(fixture.object.reentrant_close_status, ObjectTransferStatus::Ok);
+        EXPECT_EQ(KObjectRefcount(&fixture.object.base), 0U);
+    }
+
     EXPECT_STREQ(ObjectTransferStatusName(ObjectTransferStatus::ReferenceReplayed), "reference-replayed");
     EXPECT_STREQ(ObjectTransferStatusName(static_cast<ObjectTransferStatus>(0xFF)), "?");
-    EXPECT_EQ(g_destroyed.load(std::memory_order_relaxed), 10U);
+    EXPECT_EQ(g_destroyed.load(std::memory_order_relaxed), 11U);
     return duetos_host_test::finish_main("test_object_transfer");
 }
