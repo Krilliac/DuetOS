@@ -1403,13 +1403,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T22:25:43Z
 - **Status**: COMPLETED @ 2026-07-31T23:32:50Z
 
-### [ACTIVE] service-manifest-test
+### [DONE] service-manifest-test
 - **Session**: `Nathan-1381`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tests/host/test_service_manifest.cpp`
 - **Description**: Hostile deterministic DAG and authority tests
 - **Claimed**: 2026-07-31T22:25:50Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-31T23:32:59Z
 
 ### [DONE] ipc-endpoint-request-ledger
 - **Session**: `Nathan-1761`
