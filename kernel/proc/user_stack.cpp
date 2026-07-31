@@ -56,16 +56,12 @@ bool CommitOnePage(mm::AddressSpace* as, u64 page_va)
         return false;
     }
 
-    mm::AddressSpaceMapUserPage(as, page_va, frame_r.value(),
-                                mm::kPagePresent | mm::kPageUser | mm::kPageWritable | mm::kPageNoExecute);
-
-    // MapUserPage returns void and refuses (with a warn) once the
-    // AS's frame budget is spent — the PTE is the only reliable
-    // success signal. Same pattern the ELF loader uses.
-    if ((mm::AddressSpaceProbePteRaw(as, page_va) & mm::kPagePresent) == 0)
+    const mm::PhysAddr frame = frame_r.value();
+    if (!mm::AddressSpaceMapUserPage(
+            as, page_va, frame, mm::kPagePresent | mm::kPageUser | mm::kPageWritable | mm::kPageNoExecute))
     {
-        KLOG_WARN_V("mm/ustack", "stack grow: MapUserPage refused (frame budget) at va", page_va);
-        mm::FreeFrame(frame_r.value());
+        KLOG_WARN_V("mm/ustack", "stack grow: MapUserPage refused (budget/OOM) at va", page_va);
+        mm::FreeFrame(frame);
         return false;
     }
     return true;

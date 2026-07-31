@@ -245,7 +245,11 @@ bool MapHeadersPage(const u8* file, u64 sizeof_headers, u64 base_va, duetos::mm:
         {
             for (u64 i = n; i < kPageSize; ++i)
                 direct[i] = 0;
-            AddressSpaceMapUserPage(as, page_va, frame, kPagePresent | kPageUser | kPageNoExecute);
+            if (!AddressSpaceMapUserPage(as, page_va, frame, kPagePresent | kPageUser | kPageNoExecute))
+            {
+                FreeFrame(frame);
+                return false;
+            }
         }
     }
     return true;
@@ -323,7 +327,11 @@ bool MapSection(const u8* file, const u8* sec, u64 base_va, u64 image_size, duet
         }
         if (!reusing)
         {
-            AddressSpaceMapUserPage(as, page_va, frame, flags);
+            if (!AddressSpaceMapUserPage(as, page_va, frame, flags))
+            {
+                FreeFrame(frame);
+                return false;
+            }
         }
         else
         {

@@ -235,7 +235,12 @@ bool MapLinuxVdso(::duetos::mm::AddressSpace* as, Process* proc, u64 base_va)
     // R-X user mapping. No write — the blob is read-only at
     // runtime. No kPageGlobal — per-process mapping.
     const u64 flags = kPagePresent | kPageUser;
-    AddressSpaceMapUserPage(as, base_va, frame, flags);
+    if (!AddressSpaceMapUserPage(as, base_va, frame, flags))
+    {
+        FreeFrame(frame);
+        KLOG_WARN_AV(::duetos::core::LogArea::Loader, "proc/spawn", "vDSO map refused", base_va);
+        return false;
+    }
 
     proc->linux_vdso_base = base_va;
     proc->linux_vdso_rt_sigreturn_va = base_va + vdso_gen::kOffLinuxVdsoRtSigreturn;

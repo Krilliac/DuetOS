@@ -200,15 +200,17 @@ core::Result<AddressSpace*> AddressSpaceCreate(u64 frame_budget);
 /// teardown; the caller must NOT separately FreeFrame(frame) — the
 /// AS owns it now.
 ///
-/// Panics on: virt in kernel half, virt unaligned, virt already
-/// mapped in this AS, kPageUser missing from flags, region table
-/// full, or page-table allocation failure.
+/// Panics on malformed arguments (virt in kernel half or unaligned, an
+/// unaligned frame, an already-mapped VA, missing kPageUser, W^X violation,
+/// or kPageGlobal). Returns false for recoverable resource refusal
+/// (frame-budget exhaustion, region-table growth OOM, or page-table-walker
+/// OOM); on false, ownership of `frame` remains with the caller.
 ///
 /// IMPORTANT: this writes into `as`'s PML4 directly via the direct-
 /// map alias — `as` does NOT need to be the active AS. That's how
 /// a parent task on a different AS can populate a child AS before
 /// switching the child task in.
-void AddressSpaceMapUserPage(AddressSpace* as, u64 virt, PhysAddr frame, u64 flags);
+bool AddressSpaceMapUserPage(AddressSpace* as, u64 virt, PhysAddr frame, u64 flags);
 
 /// Reverse of MapUserPage. Finds the `(virt, frame)` pair in the
 /// regions table, clears the leaf PTE, returns the backing frame

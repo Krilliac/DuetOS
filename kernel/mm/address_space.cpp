@@ -122,6 +122,8 @@ u64* WalkToPteIn(u64* pml4, u64 virt, bool create)
     const u64 i2 = IndexPd(virt);
     const u64 i1 = IndexPt(virt);
 
+    u64* created_pdpt = nullptr;
+    u64* created_pd = nullptr;
     u64& pml4_entry = pml4[i4];
     if ((pml4_entry & kPagePresent) == 0)
     {
@@ -134,6 +136,7 @@ u64* WalkToPteIn(u64* pml4, u64 virt, bool create)
         {
             return nullptr; // frame pool dry — propagate, don't panic
         }
+        created_pdpt = new_pdpt;
         const PhysAddr phys = VirtToPhys(new_pdpt);
         // PML4 entry must carry kPageUser when it covers a user-
         // accessible PT — without it the CPU page walker rejects
@@ -154,8 +157,14 @@ u64* WalkToPteIn(u64* pml4, u64 virt, bool create)
         u64* new_pd = AllocateTable();
         if (new_pd == nullptr)
         {
+            if (created_pdpt != nullptr)
+            {
+                pml4_entry = 0;
+                FreeFrame(VirtToPhys(created_pdpt));
+            }
             return nullptr; // frame pool dry — propagate, don't panic
         }
+        created_pd = new_pd;
         const PhysAddr phys = VirtToPhys(new_pd);
         pdpt_entry = phys | kPagePresent | kPageWritable | kPageUser;
     }
@@ -175,6 +184,16 @@ u64* WalkToPteIn(u64* pml4, u64 virt, bool create)
         u64* new_pt = AllocateTable();
         if (new_pt == nullptr)
         {
+            if (created_pd != nullptr)
+            {
+                pdpt_entry = 0;
+                FreeFrame(VirtToPhys(created_pd));
+            }
+            if (created_pdpt != nullptr)
+            {
+                pml4_entry = 0;
+                FreeFrame(VirtToPhys(created_pdpt));
+            }
             return nullptr; // frame pool dry — propagate, don't panic
         }
         const PhysAddr phys = VirtToPhys(new_pt);
@@ -334,7 +353,7 @@ core::Result<AddressSpace*> AddressSpaceCreate(u64 frame_budget)
     return as;
 }
 
-void AddressSpaceMapUserPage(AddressSpace* as, u64 virt, PhysAddr frame, u64 flags)
+bool AddressSpaceMapUserPage(AddressSpace* as, u64 virt, PhysAddr frame, u64 flags)
 {
     if (as == nullptr)
     {
@@ -406,7 +425,7 @@ void AddressSpaceMapUserPage(AddressSpace* as, u64 virt, PhysAddr frame, u64 fla
         // budget. (Previously a PanicAs — see the v0 note that
         // anticipated this needing a non-fatal variant.)
         KLOG_WARN_V("mm/as", "MapUserPage: frame budget exhausted — refusing mapping", as->region_count);
-        return;
+        return false;
     }
 
     // Grow the heap-allocated region table if this append would overflow
@@ -429,7 +448,7 @@ void AddressSpaceMapUserPage(AddressSpace* as, u64 virt, PhysAddr frame, u64 fla
             // paths below: refuse this one mapping (caller's user page
             // #PFs and the process is reaped), never halt the kernel.
             KLOG_WARN_V("mm/as", "MapUserPage: region-table grow OOM — refusing mapping", as->region_count);
-            return;
+            return false;
         }
         memcpy(grown, as->regions, sizeof(AddressSpaceUserRegion) * as->region_count);
         KFree(as->regions);
@@ -447,7 +466,7 @@ void AddressSpaceMapUserPage(AddressSpace* as, u64 virt, PhysAddr frame, u64 fla
         // "AllocateFrame returned null inside AS walker" panic that
         // tripped under heavy back-to-back PE/ELF spawns.
         KLOG_WARN_V("mm/as", "MapUserPage: frame pool dry building page tables — refusing mapping", virt);
-        return;
+        return false;
     }
     if (*pte & kPagePresent)
     {
@@ -467,6 +486,7 @@ void AddressSpaceMapUserPage(AddressSpace* as, u64 virt, PhysAddr frame, u64 fla
 
     as->regions[as->region_count] = AddressSpaceUserRegion{virt, frame};
     ++as->region_count;
+    return true;
 }
 
 namespace

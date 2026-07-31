@@ -66,6 +66,12 @@ void DoFiberCreate(arch::TrapFrame* frame)
     u64 pages = kDefaultFiberStackPages;
     if (stack_size != 0)
     {
+        if (stack_size > (~u64(0) - (mm::kPageSize - 1)))
+        {
+            KLOG_WARN("win32/fiber", "DoFiberCreate: stack-size rounding overflow");
+            frame->rax = 0;
+            return;
+        }
         pages = (stack_size + mm::kPageSize - 1) / mm::kPageSize;
     }
     // Clamp to reasonable bounds.
@@ -75,7 +81,8 @@ void DoFiberCreate(arch::TrapFrame* frame)
     }
 
     // Allocate user VA from the process vmap arena.
-    if (proc->vmap_pages_used + pages > core::Process::kWin32VmapCapPages)
+    if (proc->vmap_pages_used > core::Process::kWin32VmapCapPages ||
+        pages > core::Process::kWin32VmapCapPages - proc->vmap_pages_used)
     {
         KLOG_WARN("win32/fiber", "DoFiberCreate: vmap arena full");
         frame->rax = 0;
@@ -90,14 +97,23 @@ void DoFiberCreate(arch::TrapFrame* frame)
         const mm::PhysAddr f = mm::AllocateFrame().value_or(mm::kNullFrame);
         if (f == mm::kNullFrame)
         {
-            proc->vmap_pages_used += i;
+            for (u64 j = 0; j < i; ++j)
+                (void)mm::AddressSpaceUnmapUserPage(proc->as, stack_base + j * mm::kPageSize);
             KLOG_WARN("win32/fiber", "DoFiberCreate: OOM allocating stack frames");
             frame->rax = 0;
             return;
         }
         const u64 va = stack_base + i * mm::kPageSize;
-        mm::AddressSpaceMapUserPage(proc->as, va, f,
-                                    mm::kPagePresent | mm::kPageWritable | mm::kPageUser | mm::kPageNoExecute);
+        if (!mm::AddressSpaceMapUserPage(
+                proc->as, va, f, mm::kPagePresent | mm::kPageWritable | mm::kPageUser | mm::kPageNoExecute))
+        {
+            mm::FreeFrame(f);
+            for (u64 j = 0; j < i; ++j)
+                (void)mm::AddressSpaceUnmapUserPage(proc->as, stack_base + j * mm::kPageSize);
+            KLOG_WARN("win32/fiber", "DoFiberCreate: stack map refused");
+            frame->rax = 0;
+            return;
+        }
     }
     proc->vmap_pages_used += pages;
 
@@ -106,6 +122,10 @@ void DoFiberCreate(arch::TrapFrame* frame)
     if (result == 0)
     {
         KLOG_WARN("win32/fiber", "DoFiberCreate: fiber table full");
+        for (u64 i = 0; i < pages; ++i)
+            (void)mm::AddressSpaceUnmapUserPage(proc->as, stack_base + i * mm::kPageSize);
+        proc->vmap_pages_used -= pages;
+        return;
     }
     else
     {
