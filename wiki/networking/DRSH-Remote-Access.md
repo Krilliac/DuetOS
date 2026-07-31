@@ -45,6 +45,63 @@ DRSH: connections=0, auth_failures=0, frames rx/tx=0/0
 Stop the listener with `drshd stop`; rotate the password with
 `drshd passwd <newpass>` (only while the listener is stopped).
 
+## Live DRSH agent campaign
+
+The host-side agent campaign is a separate test surface from
+`tools/security/drsh_attack.py` and `tools/security/drsh_os_attack.py`. It
+boots a throwaway QEMU guest with the test-only `DUETOS_DRSH_AUTOSTART=ON`
+build option, forwards DRSH to a loopback-only host port, and starts
+independent `drsh_agent.py` processes. Each process performs a real DRSH
+handshake, opens the shell channel, runs its command plan inside the guest,
+and closes the session.
+
+From the WSL-native checkout, with a build that already has the option enabled:
+
+```text
+python3 tools/security/drsh_host.py --agent recon --agent second-recon --jsonl
+```
+
+The kernel build must run in a WSL-native checkout. From PowerShell, sync the
+Windows source into a bounded WSL scratch tree, then run the campaign there:
+
+```text
+wsl.exe -d Ubuntu-24.04 -- bash -lc "DUETOS_SRC=/mnt/c/Users/<you>/DuetOS bash /mnt/c/Users/<you>/DuetOS/tools/build/sync-to-wsl-scratch.sh /root/scratch/duetos-drsh-agent-host"
+wsl.exe -d Ubuntu-24.04 -- bash -lc "cd /root/scratch/duetos-drsh-agent-host && python3 tools/security/drsh_host.py --build --preset x86_64-debug --jsonl"
+```
+
+Running `--build` from PowerShell is rejected deliberately: CMake caches and
+kernel objects created through `/mnt/c` and `C:/` are different path domains.
+
+The default plan is two non-destructive agents (`recon` and `operator`). The
+built-in `control` profile writes one marker under `/tmp`, reads it back, and
+checks a capability-denied operation; select it only with the explicit guest
+control acknowledgement:
+
+```text
+python tools/security/drsh_host.py --agent controller:control --agent observer:recon --i-understand-guest-control
+```
+
+For other custom commands, provide a JSON array and explicitly acknowledge that
+commands can mutate, stop, or expose data from the guest:
+
+```json
+[
+  {"name": "recon", "profile": "recon"},
+  {"name": "controlled-operator", "commands": ["id", "drshd status", "policy show"]}
+]
+```
+
+```text
+python3 tools/security/drsh_host.py --plan agent-plan.json --i-understand-guest-control
+```
+
+Agents are intentionally scheduled one at a time because DRSH v0 owns one
+global authenticated session and one synchronous worker. The campaign keeps
+the guest endpoint on `127.0.0.1`, writes guest and per-agent logs to a
+temporary campaign directory, and stops QEMU when complete. Use
+`--keep-guest` plus `--connect-only --host-port <port>` for a follow-up
+campaign against the same locally running guest.
+
 ## Threat model
 
 DRSH defends against an attacker on the wire — passive eavesdropping

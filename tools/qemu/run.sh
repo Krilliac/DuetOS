@@ -542,8 +542,10 @@ if [[ -n "${DUETOS_DRSH_HOST_PORT:-}" ]]; then
         echo "[run.sh] invalid DUETOS_DRSH_HOST_PORT=${DUETOS_DRSH_HOST_PORT}" >&2
         exit 2
     fi
-    NETDEV_USER_SPEC+=",hostfwd=tcp::${DUETOS_DRSH_HOST_PORT}-:4322"
-    echo "[run.sh] DRSH host forward tcp::${DUETOS_DRSH_HOST_PORT}-:4322" >&2
+    # The DRSH campaign is a local test boundary.  Do not expose the
+    # known-password listener on the host LAN just because QEMU is running.
+    NETDEV_USER_SPEC+=",hostfwd=tcp:127.0.0.1:${DUETOS_DRSH_HOST_PORT}-:4322"
+    echo "[run.sh] DRSH host forward tcp:127.0.0.1:${DUETOS_DRSH_HOST_PORT}-:4322" >&2
 fi
 
 QEMU_ARGS=(
