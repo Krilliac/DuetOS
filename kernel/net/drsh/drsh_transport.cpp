@@ -17,14 +17,9 @@
  * second carrier (a VirtIO console, a USB CDC pipe, etc.), a new
  * transport TU plugs in without touching the protocol.
  *
- * v0 caveat — the kernel TCP stack only carries one bidirectional
- * connection at a time. Loopback paired-socket sessions work today;
- * a real on-wire client is reachable only as long as no other TCP
- * caller (e.g. `http` shell command) is competing for the slot. The
- * service does NOT attempt to arbitrate that — the existing slot
- * mechanism returns false to the second caller, which is the
- * desired refusal shape. A stack-v1 multi-connection slot will
- * remove the limit without protocol changes.
+ * The TCP v1 TCB table carries independent connections by 5-tuple.
+ * DRSH still services one channel at a time inside each accepted
+ * session; that protocol limit is separate from TCP concurrency.
  */
 
 namespace duetos::net::drsh::internal
@@ -36,8 +31,12 @@ namespace
 struct SocketCtx
 {
     u32 socket_idx;
+    u32 completed_exact_reads;
     bool closed;
 };
+
+constexpr u32 kReadsInClientHelloFrame = 3;          // header, payload, MAC.
+constexpr u64 kPostClientHelloRecvTimeoutTicks = 20; // 200 ms at the 100 Hz scheduler tick.
 
 bool SocketReadExact(void* opaque, u8* buf, u32 len)
 {
@@ -70,6 +69,15 @@ bool SocketReadExact(void* opaque, u8* buf, u32 len)
             return false;
         }
         got += static_cast<u32>(r);
+    }
+    ++ctx->completed_exact_reads;
+    if (ctx->completed_exact_reads == kReadsInClientHelloFrame)
+    {
+        // Once a complete ClientHello frame is in hand, allow a little more
+        // room for the client to derive and send its PBKDF-backed Auth frame.
+        // Silent or partial-header peers still hit the short server-side
+        // timeout armed before MakeSocketTransport.
+        duetos::net::SocketSetRecvTimeout(ctx->socket_idx, kPostClientHelloRecvTimeoutTicks);
     }
     return true;
 }
@@ -130,6 +138,7 @@ bool MakeSocketTransport(u32 socket_idx, DrshTransport& out)
     if (ctx == nullptr)
         return false;
     ctx->socket_idx = socket_idx;
+    ctx->completed_exact_reads = 0;
     ctx->closed = false;
     out.ctx = ctx;
     out.ReadExact = &SocketReadExact;

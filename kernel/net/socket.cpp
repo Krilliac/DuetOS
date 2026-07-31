@@ -541,17 +541,76 @@ i32 SocketAcceptLoopback(u32 listener_idx, Ipv4Address* out_peer_ip, u16* out_pe
     return accepted;
 }
 
+i32 SocketAcceptNonblocking(u32 listener_idx, Ipv4Address* out_peer_ip, u16* out_peer_port)
+{
+    if (listener_idx >= kSocketPoolCap)
+        return -1;
+    // Loopback first — cheaper.
+    const i32 lb = SocketAcceptLoopback(listener_idx, out_peer_ip, out_peer_port);
+    if (lb >= 0)
+        return lb;
+    // On-wire: ask the TCB table.
+    auto flags = sync::SpinLockAcquire(g_sock_lock);
+    Socket& l = g_pool[listener_idx];
+    if (!l.in_use || l.type != kSocketTypeStream || !l.listening || l.tcb == tcp::kInvalidTcbId)
+    {
+        sync::SpinLockRelease(g_sock_lock, flags);
+        return -1;
+    }
+    const tcp::TcbId listener_tcb = l.tcb;
+    sync::SpinLockRelease(g_sock_lock, flags);
+    Ipv4Address peer_ip;
+    u16 peer_port;
+    const tcp::TcbId child = tcp::AcceptNonblocking(listener_tcb, &peer_ip, &peer_port);
+    if (child == tcp::kInvalidTcbId)
+        return -11; // EAGAIN
+
+    const i32 new_idx = SocketAlloc(kSocketDomainInet, kSocketTypeStream);
+    if (new_idx < 0)
+    {
+        tcp::Abort(child);
+        tcp::Release(child);
+        return -1;
+    }
+    Ipv4Address le_ip;
+    u16 le_port;
+    const bool have_local_endpoint = tcp::GetLocalEndpoint(child, &le_ip, &le_port);
+    flags = sync::SpinLockAcquire(g_sock_lock);
+    Socket& cs = g_pool[new_idx];
+    cs.tcb = child;
+    cs.peer_ip = peer_ip;
+    cs.peer_port = peer_port;
+    cs.connected = true;
+    if (have_local_endpoint)
+    {
+        cs.local_ip = le_ip;
+        cs.local_port = le_port;
+        cs.bound = true;
+    }
+    sync::SpinLockRelease(g_sock_lock, flags);
+    if (out_peer_ip != nullptr)
+        *out_peer_ip = peer_ip;
+    if (out_peer_port != nullptr)
+        *out_peer_port = peer_port;
+    return new_idx;
+}
+
 i32 SocketAccept(u32 listener_idx, Ipv4Address* out_peer_ip, u16* out_peer_port)
 {
     if (listener_idx >= kSocketPoolCap)
         return -1;
     while (true)
     {
-        // Loopback first — cheaper.
-        const i32 lb = SocketAcceptLoopback(listener_idx, out_peer_ip, out_peer_port);
-        if (lb >= 0)
-            return lb;
-        // On-wire: ask the TCB table.
+        const i32 accepted = SocketAcceptNonblocking(listener_idx, out_peer_ip, out_peer_port);
+        if (accepted != -11)
+            return accepted;
+
+        // Nothing ready. Block on the TCB's accept wait queue with
+        // a short timeout — the TCP RX path wakes it via
+        // NotifyParentAccept when a wire child hits ESTABLISHED;
+        // the timeout lets loopback wakers (which fire on the
+        // socket-layer accept_wq, not the TCB's) still make progress
+        // without a busy loop.
         auto flags = sync::SpinLockAcquire(g_sock_lock);
         Socket& l = g_pool[listener_idx];
         if (!l.in_use || l.type != kSocketTypeStream || !l.listening || l.tcb == tcp::kInvalidTcbId)
@@ -561,45 +620,6 @@ i32 SocketAccept(u32 listener_idx, Ipv4Address* out_peer_ip, u16* out_peer_port)
         }
         const tcp::TcbId listener_tcb = l.tcb;
         sync::SpinLockRelease(g_sock_lock, flags);
-        Ipv4Address peer_ip;
-        u16 peer_port;
-        const tcp::TcbId child = tcp::AcceptNonblocking(listener_tcb, &peer_ip, &peer_port);
-        if (child != tcp::kInvalidTcbId)
-        {
-            const i32 new_idx = SocketAlloc(kSocketDomainInet, kSocketTypeStream);
-            if (new_idx < 0)
-            {
-                tcp::Abort(child);
-                tcp::Release(child);
-                return -1;
-            }
-            flags = sync::SpinLockAcquire(g_sock_lock);
-            Socket& cs = g_pool[new_idx];
-            cs.tcb = child;
-            cs.peer_ip = peer_ip;
-            cs.peer_port = peer_port;
-            cs.connected = true;
-            Ipv4Address le_ip;
-            u16 le_port;
-            if (tcp::GetLocalEndpoint(child, &le_ip, &le_port))
-            {
-                cs.local_ip = le_ip;
-                cs.local_port = le_port;
-                cs.bound = true;
-            }
-            sync::SpinLockRelease(g_sock_lock, flags);
-            if (out_peer_ip != nullptr)
-                *out_peer_ip = peer_ip;
-            if (out_peer_port != nullptr)
-                *out_peer_port = peer_port;
-            return new_idx;
-        }
-        // Nothing ready. Block on the TCB's accept wait queue with
-        // a short timeout — the TCP RX path wakes it via
-        // NotifyParentAccept when a wire child hits ESTABLISHED;
-        // the timeout lets the loopback wakers (which fire on the
-        // socket-layer accept_wq, not the TCB's) still make progress
-        // without a busy loop.
         sched::WaitQueue* wq = tcp::AcceptWaitQueue(listener_tcb);
         if (wq != nullptr)
         {
@@ -609,7 +629,7 @@ i32 SocketAccept(u32 listener_idx, Ipv4Address* out_peer_ip, u16* out_peer_port)
             // must not be held across a scheduling point — so the
             // timeout, not the lock, is what bounds the residual race.
             flags = sync::SpinLockAcquire(g_sock_lock);
-            const bool park = l.in_use && l.loopback_pending_accept_idx == -1;
+            const bool park = g_pool[listener_idx].in_use && g_pool[listener_idx].loopback_pending_accept_idx == -1;
             sync::SpinLockRelease(g_sock_lock, flags);
             if (park)
             {

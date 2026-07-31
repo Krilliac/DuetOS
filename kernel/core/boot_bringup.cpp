@@ -2434,6 +2434,21 @@ void BootBringupDevices(bool force_net_smoke)
     SerialWrite("[boot] Bringing up network stack skeleton.\n");
     duetos::net::NetStackInit();
     DUETOS_BOOT_SELFTEST(duetos::net::firewall::FwSelfTest());
+#ifdef DUETOS_DRSH_AUTOSTART
+    // Red-team fixture only.  TCP must exist before the listener task can
+    // claim a TCB; starting it above NetStackInit lets tcp::Init reset a
+    // listener that has already been published.  The option is OFF by
+    // default, so a production image never ships a known password.
+    if (!duetos::net::drsh::DrshSetPassword("test") ||
+        !duetos::net::drsh::DrshServerStart(duetos::net::drsh::kDrshDefaultPort))
+    {
+        KLOG_ERROR("net/drsh", "test autostart failed");
+    }
+    else
+    {
+        KLOG_WARN("net/drsh", "test autostart enabled (known password)");
+    }
+#endif
 
     // Activate the ME/PSP fence now that the firewall is online:
     // install AMT / vPro / IPMI port blocks and emit the boot-log

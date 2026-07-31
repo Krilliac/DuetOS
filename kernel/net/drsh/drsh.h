@@ -15,11 +15,11 @@
  *     that's enough for a pre-shared-secret design and not enough for
  *     public-key auth. When a big-int + curve subsystem lands, an
  *     ECDHE handshake variant can plug in alongside the PSK one.
- *   - Single concurrent session in v0. The kernel's TCP stack only
- *     hosts one bidirectional connection at a time; layering accept-
- *     multiplex on top would invent a stack capability that doesn't
- *     exist. The protocol IS designed so a stack-v1 multi-accept slot
- *     drops in without protocol changes — server state is per-session.
+ *   - One channel per accepted session in v0. The TCP v1 stack can
+ *     host many 5-tuples, but this service currently owns one global
+ *     session record and services one accepted connection at a time.
+ *     Per-session task/state allocation is required before concurrent
+ *     authenticated DRSH clients are truthful.
  *
  * Wire protocol (after handshake):
  *

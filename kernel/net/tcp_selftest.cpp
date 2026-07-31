@@ -95,6 +95,40 @@ bool TestWindowMath()
     return true;
 }
 
+bool TestSendWindowUpdates()
+{
+    using namespace internal;
+    Tcb t{};
+    ResetTcbStorage(t);
+    t.peer_supports_wscale = true;
+    t.snd_wscale = 7;
+    t.snd_wnd = 8192;
+    t.snd_wl1 = 100;
+    t.snd_wl2 = 200;
+
+    // The final ACK of a passive open is a non-SYN segment, so its
+    // advertised window is scaled.  A real zero remains zero.
+    if (!UpdateSendWindow(t, 101, 201, 0, kFlagAck) || t.snd_wnd != 0)
+        return false;
+    if (!UpdateSendWindow(t, 102, 202, 512, kFlagAck) || t.snd_wnd != (512u << 7))
+        return false;
+
+    // An older segment cannot collapse the newer window, while a segment
+    // at the same sequence point with a newer ACK may update it.
+    const u32 open_window = t.snd_wnd;
+    if (UpdateSendWindow(t, 101, 999, 0, kFlagAck) || t.snd_wnd != open_window)
+        return false;
+    if (!UpdateSendWindow(t, 102, 203, 513, kFlagAck) || t.snd_wnd != (513u << 7))
+        return false;
+
+    // SYN windows are deliberately unscaled even after negotiating WS.
+    t.snd_wl1 = 0;
+    t.snd_wl2 = 0;
+    if (!UpdateSendWindow(t, 1, 1, 512, kFlagSyn | kFlagAck) || t.snd_wnd != 512)
+        return false;
+    return true;
+}
+
 // RST acceptability — RFC 9293 §3.10.7.4 / RFC 5961 §3.2.
 //
 // Exists because the pre-fix code accepted ANY RST whose 4-tuple
@@ -903,6 +937,11 @@ void SelfTest()
     if (!TestWindowMath())
     {
         EmitFail("ack window wrap");
+        all_ok = false;
+    }
+    if (!TestSendWindowUpdates())
+    {
+        EmitFail("send-window update freshness and scaling");
         all_ok = false;
     }
     if (!TestRstAcceptability())

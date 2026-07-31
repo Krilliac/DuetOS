@@ -533,6 +533,19 @@ if [[ "${DUETOS_TPM:-0}" != "0" ]]; then
     echo "[run.sh] TPM 2.0 emulation enabled (swtpm state ${TPM_STATE_DIR})" >&2
 fi
 
+# Optional host forward for the DRSH attack harness. Keeping it opt-in
+# avoids reserving a host port during ordinary smoke boots.
+NETDEV_USER_SPEC="user,id=net0"
+if [[ -n "${DUETOS_DRSH_HOST_PORT:-}" ]]; then
+    if [[ ! "${DUETOS_DRSH_HOST_PORT}" =~ ^[0-9]+$ ]] ||
+       (( DUETOS_DRSH_HOST_PORT < 1 || DUETOS_DRSH_HOST_PORT > 65535 )); then
+        echo "[run.sh] invalid DUETOS_DRSH_HOST_PORT=${DUETOS_DRSH_HOST_PORT}" >&2
+        exit 2
+    fi
+    NETDEV_USER_SPEC+=",hostfwd=tcp::${DUETOS_DRSH_HOST_PORT}-:4322"
+    echo "[run.sh] DRSH host forward tcp::${DUETOS_DRSH_HOST_PORT}-:4322" >&2
+fi
+
 QEMU_ARGS=(
     -machine  "${MACHINE_OPTS}"
     "${IOMMU_DEVICE_ARGS[@]}"
@@ -594,7 +607,7 @@ QEMU_ARGS=(
     # value across reboots. `-device e1000e` advertises the MSI-X
     # capability so the driver's IRQ-wake path gets exercised;
     # `-device e1000` would fall back to polling.
-    -netdev   "user,id=net0"
+    -netdev   "${NETDEV_USER_SPEC}"
     -device   "e1000e,netdev=net0,mac=52:54:00:12:34:56"
     # virtio transport coverage. Without at least one virtio-pci
     # device QEMU never instantiates the virtio bus, so the whole

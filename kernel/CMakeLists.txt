@@ -1739,6 +1739,14 @@ if(DUETOS_ATTACK_SIM)
     target_compile_definitions(duetos-kernel-stage1   PRIVATE DUETOS_ATTACK_SIM=1)
 endif()
 
+# Test-only DRSH listener used by the host attack harness. Normal builds keep
+# remote access off until an admin sets a password and runs `drshd start`.
+option(DUETOS_DRSH_AUTOSTART "Start DRSH on port 4322 with the test password (attack harness only)" OFF)
+if(DUETOS_DRSH_AUTOSTART)
+    target_compile_definitions(duetos-kernel          PRIVATE DUETOS_DRSH_AUTOSTART=1)
+    target_compile_definitions(duetos-kernel-stage1   PRIVATE DUETOS_DRSH_AUTOSTART=1)
+endif()
+
 
 # Deliberate-CPU-exception build flag, consumed by kernel_main and
 # triggered by tools/debug/test-trap.sh. Executes `ud2` to take a #UD fault

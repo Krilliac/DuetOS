@@ -501,3 +501,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Format already-landed scheduler fiber additions so current main passes full-tree clang-format
 - **Claimed**: 2026-07-31T00:02:37Z
 - **Status**: COMPLETED @ 2026-07-31T00:04:44Z
+
+### [DONE] drsh-wire-attack-rebased
+- **Session**: `Codex-DRSH-recovery-rebase`
+- **Branch**: `claude/drsh-attack-campaign-2026-07-30`
+- **Files**: `kernel/net/drsh/* kernel/net/tcp* kernel/net/socket* kernel/CMakeLists.txt kernel/core/boot_bringup.cpp tools/qemu/run.sh tools/security/drsh_* wiki/networking/DRSH-Remote-Access.md`
+- **Description**: Re-record completed DRSH wire attack slice after rebasing onto repaired main
+- **Claimed**: 2026-07-31T00:24:23Z
+- **Status**: COMPLETED @ 2026-07-31T00:24:28Z

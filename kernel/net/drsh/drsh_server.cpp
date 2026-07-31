@@ -19,14 +19,13 @@
  * boundary and the inner channel loops; the task drops the socket
  * and exits cleanly once it lands at the boundary.
  *
- * Accept loop discipline: SocketAcceptLoopback returns -1 when no
- * pair is pending. We poll on a ~10ms cadence (one scheduler tick at
- * 100 Hz) so a hot CPU doesn't melt when nobody is connecting; the
- * `running` flag is checked between polls so a stop request is
- * acted on within one tick. Once a connection arrives we hand the
- * accepted socket to `MakeSocketTransport`, drive the handshake, and
- * run a channel-multiplex loop until the client disconnects or any
- * frame returns false (link drop).
+ * Accept loop discipline: SocketAcceptNonblocking probes either the
+ * loopback accept queue or the TCP listener's established-child queue. We
+ * sleep one tick between empty probes so `DrshServerStop` can reliably
+ * observe its cancellation flag rather than being trapped in a blocking
+ * accept call. Once a connection arrives we hand the accepted socket to
+ * `MakeSocketTransport`, drive the handshake, and run a channel-multiplex
+ * loop until the client disconnects or any frame returns false (link drop).
  *
  * Session lifecycle:
  *
@@ -58,6 +57,7 @@ namespace
 {
 
 constinit DrshGlobal g_global = {};
+constexpr u64 kHandshakeRecvTimeoutTicks = 5; // 50 ms at the 100 Hz scheduler tick.
 
 void ResetSessionKeys()
 {
@@ -208,6 +208,11 @@ bool HandleSessionFrames(DrshTransport& t)
 
 void RunOneSession(u32 accepted_idx)
 {
+    // Bound pre-auth reads so a silent TCP peer cannot monopolize the
+    // single DRSH server task. Authenticated sessions return to the socket
+    // default below so an interactive shell can sit idle normally.
+    duetos::net::SocketSetRecvTimeout(accepted_idx, kHandshakeRecvTimeoutTicks);
+
     DrshTransport t{};
     if (!MakeSocketTransport(accepted_idx, t))
     {
@@ -222,6 +227,7 @@ void RunOneSession(u32 accepted_idx)
     {
         g_global.connections_total += 1;
         RegisterAuthSuccess();
+        duetos::net::SocketSetRecvTimeout(accepted_idx, 0);
         (void)HandleSessionFrames(t);
     }
     else
@@ -265,12 +271,12 @@ void ServerTaskEntry(void* /*arg*/)
     {
         duetos::net::Ipv4Address peer_ip{};
         u16 peer_port = 0;
-        const i32 accepted = duetos::net::SocketAcceptLoopback(static_cast<u32>(listener_idx), &peer_ip, &peer_port);
+        const i32 accepted = duetos::net::SocketAcceptNonblocking(static_cast<u32>(listener_idx), &peer_ip, &peer_port);
         if (accepted < 0)
         {
-            // No pending pair — sleep one tick and re-poll. The
-            // stop flag is re-read at the top of the loop so a
-            // stop arrives within ~10 ms.
+            // No pending child (EAGAIN) or a listener error. Sleep one tick
+            // before re-polling so an idle service does not spin; the stop
+            // flag is re-read at the top of the loop within ~10 ms.
             duetos::sched::SchedSleepTicks(1);
             continue;
         }
