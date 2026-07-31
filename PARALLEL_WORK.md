@@ -650,3 +650,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Replace borrowed scheduler Process pointers at dereferencing callers and serialize diagnostics
 - **Claimed**: 2026-07-31T14:17:25Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] vm-process-exit-test
+- **Session**: `Nathan-221`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/boot_bringup.cpp`
+- **Description**: Run owner-job exit-drain reference-balance selftest before user tasks
+- **Claimed**: 2026-07-31T14:18:14Z
+- **Status**: IN PROGRESS
