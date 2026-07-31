@@ -986,3 +986,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Register message ABI host test
 - **Claimed**: 2026-07-31T19:32:04Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] boot-truth-docs
+- **Session**: `Codex-gui-task-queue`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `README.md`
+- **Description**: No description provided
+- **Claimed**: 2026-07-31T19:37:26Z
+- **Status**: IN PROGRESS
