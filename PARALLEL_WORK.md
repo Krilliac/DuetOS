@@ -922,3 +922,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Per-Task transactional GUI queues and generation-safe HWND identity
 - **Claimed**: 2026-07-31T18:40:21Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] gui-task-message-v2-pe32-thread
+- **Session**: `Codex-gui-task-queue`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `userland/libs/user32_32/user32_32_dlg.c`
+- **Description**: Route PE32 thread messages to kernel Task queues
+- **Claimed**: 2026-07-31T18:41:42Z
+- **Status**: IN PROGRESS
