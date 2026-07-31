@@ -13,7 +13,8 @@
  * logger, or other external subsystem call runs while the Job pool lock is
  * held.  Assignment transfers a reference acquired by the caller.  A
  * JobTerminationIntent borrows member pointers while an internal operation pin
- * prevents close/drain from detaching their owning references.
+ * prevents close/drain or process-exit notification from detaching their
+ * owning references.
  */
 
 #include "util/types.h"
@@ -96,7 +97,10 @@ bool JobCreate(u64 owner_pid, JobKey* out_key);
 
 /// Attempt to add `member`, for which the caller already owns one Process
 /// reference.  Assigned transfers that reference to the Job.  Every other
-/// result leaves the reference with the caller.
+/// result leaves the reference with the caller.  The caller must arrange a
+/// JobOnProcessExit notification after the last live task.  If assignment can
+/// race that boundary, keep a separate reference through a post-publication
+/// liveness check and replay JobOnProcessExit when the member already exited.
 JobAssignResult JobAssignRetained(JobKey key, u64 owner_pid, Process* member);
 
 /// Test membership in one owner-authorized Job.
@@ -118,6 +122,13 @@ JobTerminateResult JobBeginTermination(JobKey key, u64 owner_pid, JobTermination
 /// after the last reference when appropriate.  Member releases occur only
 /// after the pool lock is dropped.
 bool JobFinishTermination(JobTerminationIntent* intent);
+
+/// Notify the service that `process` has no live tasks.  Logical membership is
+/// removed exactly once; a concurrent termination intent may defer the owning
+/// reference release until JobFinishTermination consumes its operation pin.
+/// The caller must keep `process` alive through this call.  Thread-safe and
+/// callable from any CPU; does not invoke the scheduler.
+void JobOnProcessExit(Process* process);
 
 /// Drop one open reference.  Returns false for stale, foreign, or double close.
 bool JobClose(JobKey key, u64 owner_pid);

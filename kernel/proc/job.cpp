@@ -8,9 +8,10 @@
  *                             close / owner drain --------------/
  *
  * Reserved is never externally visible.  Terminating owns an operation pin,
- * so a concurrent last-close or owner drain records retire_pending but cannot
- * detach membership references until JobFinishTermination.  Tombstones remain
- * queryable while an open reference exists and reject new assignments.
+ * so a concurrent last-close, owner drain, or member exit records deferred
+ * work but cannot detach membership references until JobFinishTermination.
+ * Tombstones remain queryable while an open reference exists and reject new
+ * assignments.
  */
 
 #include "proc/job.h"
@@ -27,6 +28,7 @@ namespace
 struct JobMember
 {
     Process* process;
+    bool exit_pending;
 };
 
 struct JobRow
@@ -76,7 +78,17 @@ JobRow* ResolveOwnedLocked(JobKey key, u64 owner_pid)
     return row;
 }
 
-bool ContainsLocked(const JobRow& row, const Process* member)
+bool ContainsActiveLocked(const JobRow& row, const Process* member)
+{
+    for (u32 index = 0; index < kJobMemberCapacity; ++index)
+    {
+        if (row.members[index].process == member && !row.members[index].exit_pending)
+            return true;
+    }
+    return false;
+}
+
+bool ContainsHeldLocked(const JobRow& row, const Process* member)
 {
     for (u32 index = 0; index < kJobMemberCapacity; ++index)
     {
@@ -92,10 +104,28 @@ void SnapshotLocked(const JobRow& row, JobSnapshot& snapshot)
     snapshot.total_terminated_processes = row.total_terminated_processes;
     for (u32 index = 0; index < kJobMemberCapacity; ++index)
     {
-        const Process* member = row.members[index].process;
-        if (member != nullptr)
+        const JobMember& entry = row.members[index];
+        const Process* member = entry.process;
+        if (member != nullptr && !entry.exit_pending)
             snapshot.member_pids[snapshot.member_count++] = member->pid;
     }
+}
+
+// Detach references whose logical membership was already removed by
+// JobOnProcessExit while a termination operation pin kept them alive.
+u32 DetachExitedMembersLocked(JobRow& row, Process** detached)
+{
+    u32 detached_count = 0;
+    for (u32 index = 0; index < kJobMemberCapacity; ++index)
+    {
+        JobMember& entry = row.members[index];
+        if (entry.process == nullptr || !entry.exit_pending)
+            continue;
+        detached[detached_count++] = entry.process;
+        entry.process = nullptr;
+        entry.exit_pending = false;
+    }
+    return detached_count;
 }
 
 // Detach one row while preserving its generation.  Every returned pointer is
@@ -106,10 +136,11 @@ u32 DetachMembersLocked(JobRow& row, Process** detached)
     u32 detached_count = 0;
     for (u32 index = 0; index < kJobMemberCapacity; ++index)
     {
-        Process*& member = row.members[index].process;
-        if (member != nullptr)
-            detached[detached_count++] = member;
-        member = nullptr;
+        JobMember& entry = row.members[index];
+        if (entry.process != nullptr)
+            detached[detached_count++] = entry.process;
+        entry.process = nullptr;
+        entry.exit_pending = false;
     }
     row.member_count = 0;
     return detached_count;
@@ -173,7 +204,10 @@ bool JobCreate(u64 owner_pid, JobKey* out_key)
         row.total_terminated_processes = 0;
         row.retire_pending = false;
         for (u32 member = 0; member < kJobMemberCapacity; ++member)
+        {
             row.members[member].process = nullptr;
+            row.members[member].exit_pending = false;
+        }
         row.state = JobState::Live;
 
         out_key->slot = index;
@@ -195,17 +229,18 @@ JobAssignResult JobAssignRetained(JobKey key, u64 owner_pid, Process* member)
     if (row->state != JobState::Live)
         return JobAssignResult::Terminated;
 
-    if (ContainsLocked(*row, member))
+    if (ContainsActiveLocked(*row, member))
         return JobAssignResult::AlreadyMember;
 
-    // Membership is globally exclusive until the owning row retires. Keep
-    // zero-reference Terminating rows in this scan: their operation pin still
-    // owns the member reference, and admitting the same Process elsewhere
-    // would make null-handle queries and termination ownership ambiguous.
+    // Membership ownership is globally exclusive until the owning reference
+    // is detached. Keep zero-reference Terminating rows in this scan: their
+    // operation pin still owns active and deferred-exit member references, and
+    // admitting the same Process elsewhere would make termination ownership
+    // ambiguous.
     for (u32 index = 0; index < kJobPoolCapacity; ++index)
     {
         const JobRow& other = g_job_pool[index];
-        if (&other != row && IsExternallyVisibleState(other.state) && ContainsLocked(other, member))
+        if (&other != row && IsExternallyVisibleState(other.state) && ContainsHeldLocked(other, member))
             return JobAssignResult::MembershipConflict;
     }
 
@@ -217,6 +252,7 @@ JobAssignResult JobAssignRetained(JobKey key, u64 owner_pid, Process* member)
         if (row->members[index].process == nullptr)
         {
             row->members[index].process = member; // adopts caller's retained reference
+            row->members[index].exit_pending = false;
             ++row->member_count;
             ++row->total_processes;
             return JobAssignResult::Assigned;
@@ -235,7 +271,7 @@ bool JobContainsOwned(JobKey key, u64 owner_pid, const Process* member, bool* ou
     JobRow* row = ResolveOwnedLocked(key, owner_pid);
     if (row == nullptr)
         return false;
-    *out_contains = ContainsLocked(*row, member);
+    *out_contains = ContainsActiveLocked(*row, member);
     return true;
 }
 
@@ -253,7 +289,7 @@ bool JobContainsAny(const Process* member)
         // public handle here would let null-handle membership queries deny
         // the same ownership that JobAssignRetained correctly treats as an
         // exclusive cross-Job conflict.
-        if (IsExternallyVisibleState(row.state) && ContainsLocked(row, member))
+        if (IsExternallyVisibleState(row.state) && ContainsActiveLocked(row, member))
             return true;
     }
     return false;
@@ -283,7 +319,7 @@ bool JobSnapshotContaining(const Process* member, JobSnapshot* out_snapshot)
     for (u32 index = 0; index < kJobPoolCapacity; ++index)
     {
         const JobRow& row = g_job_pool[index];
-        if (IsExternallyVisibleState(row.state) && ContainsLocked(row, member))
+        if (IsExternallyVisibleState(row.state) && ContainsActiveLocked(row, member))
         {
             SnapshotLocked(row, *out_snapshot);
             return true;
@@ -310,8 +346,9 @@ JobTerminateResult JobBeginTermination(JobKey key, u64 owner_pid, JobTermination
     out_intent->key = key;
     for (u32 index = 0; index < kJobMemberCapacity; ++index)
     {
-        Process* member = row->members[index].process;
-        if (member != nullptr)
+        const JobMember& entry = row->members[index];
+        Process* member = entry.process;
+        if (member != nullptr && !entry.exit_pending)
             out_intent->members[out_intent->member_count++] = member;
     }
     row->total_terminated_processes += out_intent->member_count;
@@ -336,6 +373,8 @@ bool JobFinishTermination(JobTerminationIntent* intent)
         --row->operation_pins;
         if (row->references == 0 || row->retire_pending)
             detached_count = RetireLocked(*row, detached);
+        else
+            detached_count = DetachExitedMembersLocked(*row, detached);
     }
 
     intent->active = false;
@@ -344,6 +383,48 @@ bool JobFinishTermination(JobTerminationIntent* intent)
         intent->members[index] = nullptr;
     ReleaseDetached(detached, detached_count);
     return true;
+}
+
+void JobOnProcessExit(Process* process)
+{
+    if (process == nullptr)
+        return;
+
+    Process* detached[kJobPoolCapacity * kJobMemberCapacity]{};
+    u32 detached_count = 0;
+    {
+        sync::SpinLockGuard guard(g_job_lock);
+        for (u32 row_index = 0; row_index < kJobPoolCapacity; ++row_index)
+        {
+            JobRow& row = g_job_pool[row_index];
+            if (!IsExternallyVisibleState(row.state))
+                continue;
+
+            for (u32 member_index = 0; member_index < kJobMemberCapacity; ++member_index)
+            {
+                JobMember& entry = row.members[member_index];
+                if (entry.process != process || entry.exit_pending)
+                    continue;
+
+                // A termination intent borrows this pointer. Remove logical
+                // membership now, but let its operation pin carry the owning
+                // reference until the intent is consumed.
+                if (row.state == JobState::Terminating && row.operation_pins != 0)
+                {
+                    entry.exit_pending = true;
+                }
+                else
+                {
+                    detached[detached_count++] = entry.process;
+                    entry.process = nullptr;
+                    entry.exit_pending = false;
+                }
+
+                --row.member_count;
+            }
+        }
+    }
+    ReleaseDetached(detached, detached_count);
 }
 
 bool JobClose(JobKey key, u64 owner_pid)
