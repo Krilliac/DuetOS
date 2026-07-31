@@ -32,5 +32,6 @@ Recent audit commits include teardown pinning for socket/IPC/async pools, timeou
 - QEMU boot, syscall/fuzz/stress campaigns, SMP/S3 paths, and graphical/runtime smoke tests.
 - Hardware-dependent storage, networking, GPU, ACPI, and USB paths.
 - Static analyzer residuals classified as intentional canary/SEH fixtures, linker/PE image-base contracts, inline-assembly parser limitations, or bounded NUL-terminated pointer contracts; they should be revisited after a target-aware compiler/analyzer run.
+- Active-path design risks retained for follow-up: IOCP close currently marks the port closed on the first handle close if duplicate IOCP handles become supported; `pidfd_getfd` reads a target Linux fd table without a per-process fd lock during concurrent close. Both require their owning handle/fd-lifetime contracts before a safe fix.
 
 The machine preflight currently reports STOP-level resource pressure, so no build or QEMU process was launched during this audit slice.
