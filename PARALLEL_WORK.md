@@ -1346,3 +1346,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Service_transition_host_properties
 - **Claimed**: 2026-07-31T22:02:50Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] serviced-protocol-api
+- **Session**: `Nathan-331`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/serviced_protocol.h`
+- **Description**: Capability_checked_serviced_wire_api
+- **Claimed**: 2026-07-31T22:10:55Z
+- **Status**: IN PROGRESS
