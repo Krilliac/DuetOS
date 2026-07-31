@@ -834,3 +834,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Make wiki drift check operate on an isolated copy and never mutate the worktree
 - **Claimed**: 2026-07-31T16:32:01Z
 - **Status**: COMPLETED @ 2026-07-31T16:37:31Z
+
+### [ACTIVE] win32-section-mmap-cursor
+- **Session**: `Nathan-1221`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/subsystems/linux/syscall_mm.cpp kernel/subsystems/linux/syscall_clone.cpp`
+- **Description**: Make automatic mmap range allocation atomic across Linux, VM, and Section callers
+- **Claimed**: 2026-07-31T16:51:11Z
+- **Status**: IN PROGRESS
