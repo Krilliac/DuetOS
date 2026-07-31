@@ -163,7 +163,7 @@ void WriteDec(u64 v)
     }
     char buf[24];
     u32 n = 0;
-    while (v > 0 && n < sizeof(buf))
+    while (v > 0 && n + 1 < sizeof(buf))
     {
         buf[n++] = static_cast<char>('0' + (v % 10));
         v /= 10;
