@@ -892,15 +892,19 @@ i64 DoEpollWait(u64 epfd, u64 user_events, u64 maxevents, u64 timeout_ms)
     // Convert timeout_ms (signed by caller convention; -1 = infinite)
     // into a tick budget. 10 ms per tick, round up so a 1 ms timeout
     // still polls once before returning.
-    const i64 timeout_signed = static_cast<i64>(timeout_ms);
     bool infinite = false;
     u64 deadline_tick = 0;
-    if (timeout_signed < 0)
+    constexpr u64 kInfiniteTimeout = static_cast<u64>(-1);
+    constexpr u64 kMaxSignedTimeout = 0x7FFF'FFFF'FFFF'FFFFull;
+    if (timeout_ms == kInfiniteTimeout)
         infinite = true;
+    else if (timeout_ms > kMaxSignedTimeout)
+        return kEINVAL;
     else
     {
-        const u64 ticks = (timeout_signed + 9) / 10;
-        deadline_tick = sched::SchedNowTicks() + ticks;
+        const u64 ticks = timeout_ms / 10 + ((timeout_ms % 10) != 0 ? 1 : 0);
+        const u64 now = sched::SchedNowTicks();
+        deadline_tick = (ticks > static_cast<u64>(-1) - now) ? static_cast<u64>(-1) : now + ticks;
     }
     EpollEvent out_buf[64];
     while (true)
@@ -924,7 +928,7 @@ i64 DoEpollWait(u64 epfd, u64 user_events, u64 maxevents, u64 timeout_ms)
         }
         else
         {
-            EpollWatch snap[kEpollWatchCap];
+            EpollWatch snap[kEpollWatchCap]{};
             for (u32 w = 0; w < kEpollWatchCap; ++w)
                 snap[w] = e.watches[w];
             arch::Sti();
