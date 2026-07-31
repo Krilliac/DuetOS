@@ -722,3 +722,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Make cold-path annotations portable to MSVC-hosted tests
 - **Claimed**: 2026-07-31T15:36:01Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] host-msvc-saturating
+- **Session**: `Nathan-221`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/util/saturating.h tests/host/test_shadow_atlas.cpp`
+- **Description**: Make saturating telemetry and constant-condition tests portable to MSVC
+- **Claimed**: 2026-07-31T15:37:07Z
+- **Status**: IN PROGRESS
