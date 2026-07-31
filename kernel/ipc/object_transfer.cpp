@@ -525,6 +525,12 @@ ObjectTransferStatus ObjectTransferTableClose(ObjectTransferTable* table)
                         ClearSlot(&slot);
                     }
                 }
+                // This is the terminal close linearization point.  Publishing
+                // Closed before external releases makes destructor re-entry
+                // idempotent instead of waiting on its own caller.  Everything
+                // below owns only the local detached list and never touches
+                // `table` again.
+                table->state = ObjectTransferTableState::Closed;
                 completed = true;
             }
         }
@@ -533,12 +539,6 @@ ObjectTransferStatus ObjectTransferTableClose(ObjectTransferTable* table)
         {
             for (u32 index = 0; index < detached_count; ++index)
                 KObjectRelease(detached[index]);
-            {
-                TransferGuard guard(*table);
-                if (table->state != ObjectTransferTableState::Draining || table->active_operations != 0)
-                    return ObjectTransferStatus::CorruptState;
-                table->state = ObjectTransferTableState::Closed;
-            }
             return result;
         }
         CpuRelax();
