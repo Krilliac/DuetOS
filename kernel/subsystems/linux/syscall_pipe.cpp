@@ -40,6 +40,7 @@
 #include "mm/paging.h"
 #include "proc/process.h"
 #include "sched/sched.h"
+#include "sync/spinlock.h"
 
 namespace duetos::subsystems::linux::internal
 {
@@ -59,9 +60,11 @@ constexpr i64 kEpipe = -32;
 struct Pipe
 {
     bool in_use;
+    bool closing;
     u8 _pad[3];
     u32 read_refs;
     u32 write_refs;
+    u32 pins;
     u32 head;
     u32 tail;
     u32 count;
@@ -73,8 +76,10 @@ struct Pipe
 struct Eventfd
 {
     bool in_use;
+    bool closing;
     u8 _pad[3];
     u32 refs;
+    u32 pins;
     u64 counter;
     u32 flags; // EFD_SEMAPHORE etc.
     u32 _pad2;
@@ -83,6 +88,8 @@ struct Eventfd
 
 Pipe g_pipe_pool[kPipePoolCap];
 Eventfd g_eventfd_pool[kEventfdPoolCap];
+constinit sync::SpinLock g_pipe_lock = {
+    .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
 
 // ============================================================
 // Pipe pool helpers
@@ -91,25 +98,115 @@ Eventfd g_eventfd_pool[kEventfdPoolCap];
 // header declaration (used by Win32 CreatePipe routing as well
 // as Linux pipe2) can resolve to a single definition.
 
-void PipeMaybeFree(u32 idx)
+u8* TakePipeFreeLocked(Pipe& p)
 {
     // Caller already holds cli.
-    Pipe& p = g_pipe_pool[idx];
-    if (p.read_refs == 0 && p.write_refs == 0 && p.in_use)
+    // Caller holds g_pipe_lock.
+    if (p.read_refs != 0 || p.write_refs != 0 || p.pins != 0 || !p.in_use)
+        return nullptr;
+    if (p.in_use)
     {
         u8* b = p.buf;
         p.in_use = false;
+        p.closing = false;
         p.buf = nullptr;
+        return b;
         // Free outside cli — same rationale as alloc.
-        arch::Sti();
-        mm::KFree(b);
-        arch::Cli();
     }
+    return nullptr;
+}
+
+void FinishPipeFree(u8* buf)
+{
+    if (buf != nullptr)
+        mm::KFree(buf);
+}
+
+struct PipePin
+{
+    u32 idx;
+    Pipe* pipe;
+
+    explicit PipePin(u32 value) : idx(value), pipe(nullptr)
+    {
+        if (value >= kPipePoolCap)
+            return;
+        sync::SpinLockGuard guard(g_pipe_lock);
+        Pipe& p = g_pipe_pool[value];
+        if (p.in_use && !p.closing)
+        {
+            ++p.pins;
+            pipe = &p;
+        }
+    }
+
+    ~PipePin()
+    {
+        if (pipe == nullptr)
+            return;
+        auto flags = sync::SpinLockAcquire(g_pipe_lock);
+        Pipe& p = g_pipe_pool[idx];
+        if (p.pins > 0)
+            --p.pins;
+        u8* buf = TakePipeFreeLocked(p);
+        sync::SpinLockRelease(g_pipe_lock, flags);
+        FinishPipeFree(buf);
+    }
+
+    explicit operator bool() const { return pipe != nullptr; }
+};
+
+struct EventfdPin
+{
+    u32 idx;
+    Eventfd* eventfd;
+
+    explicit EventfdPin(u32 value) : idx(value), eventfd(nullptr)
+    {
+        if (value >= kEventfdPoolCap)
+            return;
+        sync::SpinLockGuard guard(g_pipe_lock);
+        Eventfd& e = g_eventfd_pool[value];
+        if (e.in_use && !e.closing)
+        {
+            ++e.pins;
+            eventfd = &e;
+        }
+    }
+
+    ~EventfdPin()
+    {
+        if (eventfd == nullptr)
+            return;
+        sync::SpinLockGuard guard(g_pipe_lock);
+        Eventfd& e = g_eventfd_pool[idx];
+        if (e.pins > 0)
+            --e.pins;
+        if (e.pins == 0 && e.refs == 0)
+        {
+            e.in_use = false;
+            e.closing = false;
+            e.counter = 0;
+        }
+    }
+
+    explicit operator bool() const { return eventfd != nullptr; }
+};
+
+void PipeMaybeFree(u32 idx)
+{
+    if (idx >= kPipePoolCap)
+        return;
+    auto flags = sync::SpinLockAcquire(g_pipe_lock);
+    u8* buf = TakePipeFreeLocked(g_pipe_pool[idx]);
+    sync::SpinLockRelease(g_pipe_lock, flags);
+    FinishPipeFree(buf);
 }
 
 } // namespace
 
-i32 PipeAlloc()
+#if 0 // superseded by the pinned, SMP-safe implementations below
+[[maybe_unused]] i32 PipeAllocLegacy()
 {
     arch::Cli();
     for (u32 i = 0; i < kPipePoolCap; ++i)
@@ -153,8 +250,42 @@ i32 PipeAlloc()
     arch::Sti();
     return -1;
 }
+#endif
 
-void PipeRetainRead(u32 idx)
+i32 PipeAlloc()
+{
+    u8* b = static_cast<u8*>(mm::KMalloc(kPipeBufBytes));
+    if (b == nullptr)
+        return -1;
+    auto flags = sync::SpinLockAcquire(g_pipe_lock);
+    for (u32 i = 0; i < kPipePoolCap; ++i)
+    {
+        if (g_pipe_pool[i].in_use)
+            continue;
+        Pipe& p = g_pipe_pool[i];
+        p.buf = b;
+        p.in_use = true;
+        p.closing = false;
+        p.read_refs = 1;
+        p.write_refs = 1;
+        p.pins = 0;
+        p.head = 0;
+        p.tail = 0;
+        p.count = 0;
+        p.read_wq.head = nullptr;
+        p.read_wq.tail = nullptr;
+        p.write_wq.head = nullptr;
+        p.write_wq.tail = nullptr;
+        sync::SpinLockRelease(g_pipe_lock, flags);
+        return static_cast<i32>(i);
+    }
+    sync::SpinLockRelease(g_pipe_lock, flags);
+    mm::KFree(b);
+    return -1;
+}
+
+#if 0 // superseded legacy bodies retained for source comparison
+[[maybe_unused]] void PipeRetainReadLegacy(u32 idx)
 {
     if (idx >= kPipePoolCap)
         return;
@@ -165,7 +296,7 @@ void PipeRetainRead(u32 idx)
     arch::Sti();
 }
 
-void PipeRetainWrite(u32 idx)
+[[maybe_unused]] void PipeRetainWriteLegacy(u32 idx)
 {
     if (idx >= kPipePoolCap)
         return;
@@ -176,7 +307,7 @@ void PipeRetainWrite(u32 idx)
     arch::Sti();
 }
 
-void PipeReleaseRead(u32 idx)
+[[maybe_unused]] void PipeReleaseReadLegacy(u32 idx)
 {
     if (idx >= kPipePoolCap)
         return;
@@ -194,7 +325,7 @@ void PipeReleaseRead(u32 idx)
     arch::Sti();
 }
 
-void PipeReleaseWrite(u32 idx)
+[[maybe_unused]] void PipeReleaseWriteLegacy(u32 idx)
 {
     if (idx >= kPipePoolCap)
         return;
@@ -211,8 +342,129 @@ void PipeReleaseWrite(u32 idx)
     PipeMaybeFree(idx);
     arch::Sti();
 }
+#endif
+
+void PipeRetainRead(u32 idx)
+{
+    if (idx >= kPipePoolCap)
+        return;
+    sync::SpinLockGuard guard(g_pipe_lock);
+    Pipe& p = g_pipe_pool[idx];
+    if (p.in_use && !p.closing)
+        ++p.read_refs;
+}
+
+void PipeRetainWrite(u32 idx)
+{
+    if (idx >= kPipePoolCap)
+        return;
+    sync::SpinLockGuard guard(g_pipe_lock);
+    Pipe& p = g_pipe_pool[idx];
+    if (p.in_use && !p.closing)
+        ++p.write_refs;
+}
+
+void PipeReleaseRead(u32 idx)
+{
+    if (idx >= kPipePoolCap)
+        return;
+    auto flags = sync::SpinLockAcquire(g_pipe_lock);
+    Pipe& p = g_pipe_pool[idx];
+    if (!p.in_use || p.read_refs == 0)
+    {
+        sync::SpinLockRelease(g_pipe_lock, flags);
+        return;
+    }
+    --p.read_refs;
+    if (p.read_refs == 0)
+    {
+        sched::WaitQueueWakeAll(&p.write_wq);
+        if (p.write_refs == 0)
+            p.closing = true;
+    }
+    u8* buf = TakePipeFreeLocked(p);
+    sync::SpinLockRelease(g_pipe_lock, flags);
+    FinishPipeFree(buf);
+}
+
+void PipeReleaseWrite(u32 idx)
+{
+    if (idx >= kPipePoolCap)
+        return;
+    auto flags = sync::SpinLockAcquire(g_pipe_lock);
+    Pipe& p = g_pipe_pool[idx];
+    if (!p.in_use || p.write_refs == 0)
+    {
+        sync::SpinLockRelease(g_pipe_lock, flags);
+        return;
+    }
+    --p.write_refs;
+    if (p.write_refs == 0)
+    {
+        sched::WaitQueueWakeAll(&p.read_wq);
+        if (p.read_refs == 0)
+            p.closing = true;
+    }
+    u8* buf = TakePipeFreeLocked(p);
+    sync::SpinLockRelease(g_pipe_lock, flags);
+    FinishPipeFree(buf);
+}
+
+void PipeWait(sched::WaitQueue* wq)
+{
+    arch::Cli();
+    (void)sched::WaitQueueBlockTimeout(wq, /*ticks=*/5);
+    arch::Sti();
+}
 
 i64 PipeRead(u32 idx, u64 user_dst, u64 len)
+{
+    if (idx >= kPipePoolCap || len == 0)
+        return 0;
+    PipePin pin(idx);
+    if (!pin)
+        return 0;
+    u8 stage[256];
+    while (true)
+    {
+        auto flags = sync::SpinLockAcquire(g_pipe_lock);
+        Pipe& p = *pin.pipe;
+        if (!p.in_use)
+        {
+            sync::SpinLockRelease(g_pipe_lock, flags);
+            return 0;
+        }
+        if (p.count == 0)
+        {
+            if (p.write_refs == 0)
+            {
+                sync::SpinLockRelease(g_pipe_lock, flags);
+                return 0;
+            }
+            sched::WaitQueue* wq = &p.read_wq;
+            sync::SpinLockRelease(g_pipe_lock, flags);
+            PipeWait(wq);
+            continue;
+        }
+        u64 to_read = (len < p.count) ? len : p.count;
+        if (to_read > sizeof(stage))
+            to_read = sizeof(stage);
+        for (u64 i = 0; i < to_read; ++i)
+        {
+            stage[i] = p.buf[p.tail];
+            p.tail = (p.tail + 1) % kPipeBufBytes;
+            --p.count;
+        }
+        sched::WaitQueueWakeOne(&p.write_wq);
+        sync::SpinLockRelease(g_pipe_lock, flags);
+        if (!mm::CopyToUser(reinterpret_cast<void*>(user_dst), stage, to_read))
+            return kEFAULT;
+        return static_cast<i64>(to_read);
+    }
+}
+
+#if 0 // superseded legacy body retained for source comparison
+[[maybe_unused]] i64 PipeReadLegacy(u32 idx, u64 user_dst, u64 len)
 {
     if (idx >= kPipePoolCap || len == 0)
         return 0;
@@ -252,8 +504,51 @@ i64 PipeRead(u32 idx, u64 user_dst, u64 len)
         return kEFAULT;
     return static_cast<i64>(to_read);
 }
+#endif
 
 i64 PipeWrite(u32 idx, u64 user_src, u64 len)
+{
+    if (idx >= kPipePoolCap || len == 0)
+        return 0;
+    u8 stage[256];
+    const u64 to_stage = (len < sizeof(stage)) ? len : sizeof(stage);
+    if (!mm::CopyFromUser(stage, reinterpret_cast<const void*>(user_src), to_stage))
+        return kEFAULT;
+    PipePin pin(idx);
+    if (!pin)
+        return kEpipe;
+    while (true)
+    {
+        auto flags = sync::SpinLockAcquire(g_pipe_lock);
+        Pipe& p = *pin.pipe;
+        if (!p.in_use || p.read_refs == 0)
+        {
+            sync::SpinLockRelease(g_pipe_lock, flags);
+            return kEpipe;
+        }
+        if (p.count == kPipeBufBytes)
+        {
+            sched::WaitQueue* wq = &p.write_wq;
+            sync::SpinLockRelease(g_pipe_lock, flags);
+            PipeWait(wq);
+            continue;
+        }
+        const u64 free_slots = kPipeBufBytes - p.count;
+        const u64 to_write = (to_stage < free_slots) ? to_stage : free_slots;
+        for (u64 i = 0; i < to_write; ++i)
+        {
+            p.buf[p.head] = stage[i];
+            p.head = (p.head + 1) % kPipeBufBytes;
+            ++p.count;
+        }
+        sched::WaitQueueWakeOne(&p.read_wq);
+        sync::SpinLockRelease(g_pipe_lock, flags);
+        return static_cast<i64>(to_write);
+    }
+}
+
+#if 0 // superseded legacy body retained for source comparison
+[[maybe_unused]] i64 PipeWriteLegacy(u32 idx, u64 user_src, u64 len)
 {
     if (idx >= kPipePoolCap || len == 0)
         return 0;
@@ -291,8 +586,51 @@ i64 PipeWrite(u32 idx, u64 user_src, u64 len)
     arch::Sti();
     return static_cast<i64>(to_write);
 }
+#endif
 
 i64 PipeReadKernel(u32 idx, u8* dst, u64 len)
+{
+    if (idx >= kPipePoolCap || len == 0 || dst == nullptr)
+        return 0;
+    PipePin pin(idx);
+    if (!pin)
+        return 0;
+    while (true)
+    {
+        auto flags = sync::SpinLockAcquire(g_pipe_lock);
+        Pipe& p = *pin.pipe;
+        if (!p.in_use)
+        {
+            sync::SpinLockRelease(g_pipe_lock, flags);
+            return 0;
+        }
+        if (p.count == 0)
+        {
+            if (p.write_refs == 0)
+            {
+                sync::SpinLockRelease(g_pipe_lock, flags);
+                return 0;
+            }
+            sched::WaitQueue* wq = &p.read_wq;
+            sync::SpinLockRelease(g_pipe_lock, flags);
+            PipeWait(wq);
+            continue;
+        }
+        const u64 to_read = (len < p.count) ? len : p.count;
+        for (u64 i = 0; i < to_read; ++i)
+        {
+            dst[i] = p.buf[p.tail];
+            p.tail = (p.tail + 1) % kPipeBufBytes;
+            --p.count;
+        }
+        sched::WaitQueueWakeOne(&p.write_wq);
+        sync::SpinLockRelease(g_pipe_lock, flags);
+        return static_cast<i64>(to_read);
+    }
+}
+
+#if 0 // superseded legacy body retained for source comparison
+[[maybe_unused]] i64 PipeReadKernelLegacy(u32 idx, u8* dst, u64 len)
 {
     if (idx >= kPipePoolCap || len == 0 || dst == nullptr)
         return 0;
@@ -324,8 +662,47 @@ i64 PipeReadKernel(u32 idx, u8* dst, u64 len)
     arch::Sti();
     return static_cast<i64>(to_read);
 }
+#endif
 
 i64 PipeWriteKernel(u32 idx, const u8* src, u64 len)
+{
+    if (idx >= kPipePoolCap || len == 0 || src == nullptr)
+        return 0;
+    PipePin pin(idx);
+    if (!pin)
+        return kEpipe;
+    while (true)
+    {
+        auto flags = sync::SpinLockAcquire(g_pipe_lock);
+        Pipe& p = *pin.pipe;
+        if (!p.in_use || p.read_refs == 0)
+        {
+            sync::SpinLockRelease(g_pipe_lock, flags);
+            return kEpipe;
+        }
+        if (p.count == kPipeBufBytes)
+        {
+            sched::WaitQueue* wq = &p.write_wq;
+            sync::SpinLockRelease(g_pipe_lock, flags);
+            PipeWait(wq);
+            continue;
+        }
+        const u64 free_slots = kPipeBufBytes - p.count;
+        const u64 to_write = (len < free_slots) ? len : free_slots;
+        for (u64 i = 0; i < to_write; ++i)
+        {
+            p.buf[p.head] = src[i];
+            p.head = (p.head + 1) % kPipeBufBytes;
+            ++p.count;
+        }
+        sched::WaitQueueWakeOne(&p.read_wq);
+        sync::SpinLockRelease(g_pipe_lock, flags);
+        return static_cast<i64>(to_write);
+    }
+}
+
+#if 0 // superseded legacy body retained for source comparison
+[[maybe_unused]] i64 PipeWriteKernelLegacy(u32 idx, const u8* src, u64 len)
 {
     if (idx >= kPipePoolCap || len == 0 || src == nullptr)
         return 0;
@@ -358,6 +735,7 @@ i64 PipeWriteKernel(u32 idx, const u8* src, u64 len)
     arch::Sti();
     return static_cast<i64>(to_write);
 }
+#endif
 
 // splice / tee — kernel-bypass byte movement between two pipe
 // rings. No CopyFromUser/CopyToUser bounce; no per-byte loops on
@@ -373,7 +751,8 @@ i64 PipeWriteKernel(u32 idx, const u8* src, u64 len)
 // Source-side EOF (every writer closed) returns 0 as PipeRead
 // would. Destination-side disconnect (every reader closed)
 // returns -EPIPE.
-i64 PipeSpliceFromPipe(u32 dst_idx, u32 src_idx, u64 len)
+#if 0 // superseded legacy bodies retained for source comparison
+[[maybe_unused]] i64 PipeSpliceFromPipeLegacy(u32 dst_idx, u32 src_idx, u64 len)
 {
     if (dst_idx >= kPipePoolCap || src_idx >= kPipePoolCap || len == 0)
         return 0;
@@ -426,7 +805,7 @@ i64 PipeSpliceFromPipe(u32 dst_idx, u32 src_idx, u64 len)
     return static_cast<i64>(to_move);
 }
 
-i64 PipeTeeFromPipe(u32 dst_idx, u32 src_idx, u64 len)
+[[maybe_unused]] i64 PipeTeeFromPipeLegacy(u32 dst_idx, u32 src_idx, u64 len)
 {
     if (dst_idx >= kPipePoolCap || src_idx >= kPipePoolCap || len == 0)
         return 0;
@@ -475,6 +854,7 @@ i64 PipeTeeFromPipe(u32 dst_idx, u32 src_idx, u64 len)
     arch::Sti();
     return static_cast<i64>(to_copy);
 }
+#endif
 
 // ============================================================
 // Eventfd pool helpers
@@ -483,7 +863,110 @@ i64 PipeTeeFromPipe(u32 dst_idx, u32 src_idx, u64 len)
 namespace
 {
 
-i32 EventfdAlloc(u64 initval, u32 flags)
+i64 PipeSpliceFromPipe(u32 dst_idx, u32 src_idx, u64 len)
+{
+    if (dst_idx >= kPipePoolCap || src_idx >= kPipePoolCap || len == 0 || dst_idx == src_idx)
+        return (dst_idx == src_idx) ? -22 : 0;
+    PipePin dst_pin(dst_idx);
+    PipePin src_pin(src_idx);
+    if (!dst_pin || !src_pin)
+        return 0;
+    while (true)
+    {
+        auto flags = sync::SpinLockAcquire(g_pipe_lock);
+        Pipe& dst = *dst_pin.pipe;
+        Pipe& src = *src_pin.pipe;
+        if (!src.in_use || !dst.in_use || dst.read_refs == 0)
+        {
+            sync::SpinLockRelease(g_pipe_lock, flags);
+            return src.in_use ? kEpipe : 0;
+        }
+        if (src.count == 0)
+        {
+            if (src.write_refs == 0)
+            {
+                sync::SpinLockRelease(g_pipe_lock, flags);
+                return 0;
+            }
+            sched::WaitQueue* wq = &src.read_wq;
+            sync::SpinLockRelease(g_pipe_lock, flags);
+            PipeWait(wq);
+            continue;
+        }
+        const u64 src_avail = src.count;
+        const u64 dst_free = kPipeBufBytes - dst.count;
+        u64 to_move = (len < src_avail) ? len : src_avail;
+        if (to_move > dst_free)
+            to_move = dst_free;
+        for (u64 i = 0; i < to_move; ++i)
+        {
+            dst.buf[dst.head] = src.buf[src.tail];
+            dst.head = (dst.head + 1) % kPipeBufBytes;
+            ++dst.count;
+            src.tail = (src.tail + 1) % kPipeBufBytes;
+            --src.count;
+        }
+        if (to_move > 0)
+        {
+            sched::WaitQueueWakeOne(&dst.read_wq);
+            sched::WaitQueueWakeOne(&src.write_wq);
+        }
+        sync::SpinLockRelease(g_pipe_lock, flags);
+        return static_cast<i64>(to_move);
+    }
+}
+
+i64 PipeTeeFromPipe(u32 dst_idx, u32 src_idx, u64 len)
+{
+    if (dst_idx >= kPipePoolCap || src_idx >= kPipePoolCap || len == 0 || dst_idx == src_idx)
+        return (dst_idx == src_idx) ? -22 : 0;
+    PipePin dst_pin(dst_idx);
+    PipePin src_pin(src_idx);
+    if (!dst_pin || !src_pin)
+        return 0;
+    while (true)
+    {
+        auto flags = sync::SpinLockAcquire(g_pipe_lock);
+        Pipe& dst = *dst_pin.pipe;
+        Pipe& src = *src_pin.pipe;
+        if (!src.in_use || !dst.in_use || dst.read_refs == 0)
+        {
+            sync::SpinLockRelease(g_pipe_lock, flags);
+            return src.in_use ? kEpipe : 0;
+        }
+        if (src.count == 0)
+        {
+            if (src.write_refs == 0)
+            {
+                sync::SpinLockRelease(g_pipe_lock, flags);
+                return 0;
+            }
+            sched::WaitQueue* wq = &src.read_wq;
+            sync::SpinLockRelease(g_pipe_lock, flags);
+            PipeWait(wq);
+            continue;
+        }
+        const u64 dst_free = kPipeBufBytes - dst.count;
+        u64 to_copy = (len < src.count) ? len : src.count;
+        if (to_copy > dst_free)
+            to_copy = dst_free;
+        u32 src_cursor = src.tail;
+        for (u64 i = 0; i < to_copy; ++i)
+        {
+            dst.buf[dst.head] = src.buf[src_cursor];
+            dst.head = (dst.head + 1) % kPipeBufBytes;
+            ++dst.count;
+            src_cursor = (src_cursor + 1) % kPipeBufBytes;
+        }
+        if (to_copy > 0)
+            sched::WaitQueueWakeOne(&dst.read_wq);
+        sync::SpinLockRelease(g_pipe_lock, flags);
+        return static_cast<i64>(to_copy);
+    }
+}
+
+#if 0 // superseded legacy body retained for source comparison
+[[maybe_unused]] i32 EventfdAllocLegacy(u64 initval, u32 flags)
 {
     arch::Cli();
     for (u32 i = 0; i < kEventfdPoolCap; ++i)
@@ -504,10 +987,33 @@ i32 EventfdAlloc(u64 initval, u32 flags)
     arch::Sti();
     return -1;
 }
+#endif
+
+ i32 EventfdAlloc(u64 initval, u32 flags)
+{
+    sync::SpinLockGuard guard(g_pipe_lock);
+    for (u32 i = 0; i < kEventfdPoolCap; ++i)
+    {
+        Eventfd& e = g_eventfd_pool[i];
+        if (e.in_use)
+            continue;
+        e.in_use = true;
+        e.closing = false;
+        e.refs = 1;
+        e.pins = 0;
+        e.counter = initval;
+        e.flags = flags;
+        e.read_wq.head = nullptr;
+        e.read_wq.tail = nullptr;
+        return static_cast<i32>(i);
+    }
+    return -1;
+}
 
 } // namespace
 
-void EventfdRetain(u32 idx)
+#if 0 // superseded legacy bodies retained for source comparison
+[[maybe_unused]] void EventfdRetainLegacy(u32 idx)
 {
     if (idx >= kEventfdPoolCap)
         return;
@@ -518,7 +1024,7 @@ void EventfdRetain(u32 idx)
     arch::Sti();
 }
 
-void EventfdRelease(u32 idx)
+[[maybe_unused]] void EventfdReleaseLegacy(u32 idx)
 {
     if (idx >= kEventfdPoolCap)
         return;
@@ -540,7 +1046,7 @@ void EventfdRelease(u32 idx)
     arch::Sti();
 }
 
-i64 EventfdRead(u32 idx, u64 user_dst, u64 len)
+[[maybe_unused]] i64 EventfdReadLegacy(u32 idx, u64 user_dst, u64 len)
 {
     if (idx >= kEventfdPoolCap)
         return kEINVAL;
@@ -580,7 +1086,7 @@ i64 EventfdRead(u32 idx, u64 user_dst, u64 len)
 // Non-blocking readiness probes — for epoll_wait
 // ============================================================
 
-bool PipeReadReady(u32 idx)
+[[maybe_unused]] bool PipeReadReadyLegacy(u32 idx)
 {
     if (idx >= kPipePoolCap)
         return false;
@@ -591,7 +1097,7 @@ bool PipeReadReady(u32 idx)
     return ready;
 }
 
-bool PipeWriteReady(u32 idx)
+[[maybe_unused]] bool PipeWriteReadyLegacy(u32 idx)
 {
     if (idx >= kPipePoolCap)
         return false;
@@ -604,7 +1110,7 @@ bool PipeWriteReady(u32 idx)
     return ready;
 }
 
-bool EventfdReady(u32 idx)
+[[maybe_unused]] bool EventfdReadyLegacy(u32 idx)
 {
     if (idx >= kEventfdPoolCap)
         return false;
@@ -615,7 +1121,7 @@ bool EventfdReady(u32 idx)
     return ready;
 }
 
-i64 EventfdWrite(u32 idx, u64 user_src, u64 len)
+[[maybe_unused]] i64 EventfdWriteLegacy(u32 idx, u64 user_src, u64 len)
 {
     if (idx >= kEventfdPoolCap)
         return kEINVAL;
@@ -645,10 +1151,134 @@ i64 EventfdWrite(u32 idx, u64 user_src, u64 len)
     arch::Sti();
     return 8;
 }
+#endif
 
 // ============================================================
 // Syscall handlers — DoPipe / DoPipe2 / DoEventfd / DoEventfd2
 // ============================================================
+
+void EventfdRetain(u32 idx)
+{
+    if (idx >= kEventfdPoolCap)
+        return;
+    sync::SpinLockGuard guard(g_pipe_lock);
+    Eventfd& e = g_eventfd_pool[idx];
+    if (e.in_use && !e.closing)
+        ++e.refs;
+}
+
+void EventfdRelease(u32 idx)
+{
+    if (idx >= kEventfdPoolCap)
+        return;
+    sync::SpinLockGuard guard(g_pipe_lock);
+    Eventfd& e = g_eventfd_pool[idx];
+    if (!e.in_use || e.refs == 0)
+        return;
+    --e.refs;
+    if (e.refs == 0)
+    {
+        e.closing = true;
+        sched::WaitQueueWakeAll(&e.read_wq);
+        if (e.pins == 0)
+        {
+            e.in_use = false;
+            e.closing = false;
+            e.counter = 0;
+        }
+    }
+}
+
+i64 EventfdRead(u32 idx, u64 user_dst, u64 len)
+{
+    if (idx >= kEventfdPoolCap || len < 8)
+        return kEINVAL;
+    EventfdPin pin(idx);
+    if (!pin)
+        return 0;
+    constexpr u32 kEfdSemaphore = 0x1;
+    while (true)
+    {
+        auto flags = sync::SpinLockAcquire(g_pipe_lock);
+        Eventfd& e = *pin.eventfd;
+        if (!e.in_use || e.closing)
+        {
+            sync::SpinLockRelease(g_pipe_lock, flags);
+            return 0;
+        }
+        if (e.counter == 0)
+        {
+            sched::WaitQueue* wq = &e.read_wq;
+            sync::SpinLockRelease(g_pipe_lock, flags);
+            PipeWait(wq);
+            continue;
+        }
+        u64 out;
+        if ((e.flags & kEfdSemaphore) != 0)
+        {
+            out = 1;
+            --e.counter;
+        }
+        else
+        {
+            out = e.counter;
+            e.counter = 0;
+        }
+        sync::SpinLockRelease(g_pipe_lock, flags);
+        if (!mm::CopyToUser(reinterpret_cast<void*>(user_dst), &out, sizeof(out)))
+            return kEFAULT;
+        return 8;
+    }
+}
+
+bool PipeReadReady(u32 idx)
+{
+    if (idx >= kPipePoolCap)
+        return false;
+    sync::SpinLockGuard guard(g_pipe_lock);
+    const Pipe& p = g_pipe_pool[idx];
+    return p.in_use && !p.closing && (p.count > 0 || p.write_refs == 0);
+}
+
+bool PipeWriteReady(u32 idx)
+{
+    if (idx >= kPipePoolCap)
+        return false;
+    sync::SpinLockGuard guard(g_pipe_lock);
+    const Pipe& p = g_pipe_pool[idx];
+    return p.in_use && !p.closing && (p.count < kPipeBufBytes || p.read_refs == 0);
+}
+
+bool EventfdReady(u32 idx)
+{
+    if (idx >= kEventfdPoolCap)
+        return false;
+    sync::SpinLockGuard guard(g_pipe_lock);
+    const Eventfd& e = g_eventfd_pool[idx];
+    return e.in_use && !e.closing && e.counter > 0;
+}
+
+i64 EventfdWrite(u32 idx, u64 user_src, u64 len)
+{
+    if (idx >= kEventfdPoolCap || len < 8)
+        return kEINVAL;
+    u64 in = 0;
+    if (!mm::CopyFromUser(&in, reinterpret_cast<const void*>(user_src), sizeof(in)))
+        return kEFAULT;
+    if (in == static_cast<u64>(-1))
+        return kEINVAL;
+    EventfdPin pin(idx);
+    if (!pin)
+        return kEINVAL;
+    sync::SpinLockGuard guard(g_pipe_lock);
+    Eventfd& e = *pin.eventfd;
+    if (!e.in_use || e.closing)
+        return kEINVAL;
+    const u64 cap = static_cast<u64>(-1) - 1;
+    e.counter = (e.counter > cap - in) ? cap : e.counter + in;
+    sched::WaitQueueWakeOne(&e.read_wq);
+    return 8;
+}
 
 i64 DoPipe(u64 user_fds)
 {
