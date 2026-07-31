@@ -27,6 +27,54 @@ static_assert(kAmdCpHaltAll == 0x15000000u, "CP halt-all (ME|PFP|CE)");
 namespace
 {
 
+// Match a literal prefix without indexing beyond a short C string. The
+// generation tags are supplied by the PCI classifier, but this helper keeps
+// the public gate safe for malformed or synthetic callers too.
+bool HasPrefix(const char* value, const char* prefix)
+{
+    if (value == nullptr || prefix == nullptr)
+        return false;
+    while (*prefix != '\0')
+    {
+        if (*value == '\0' || *value != *prefix)
+            return false;
+        ++value;
+        ++prefix;
+    }
+    return true;
+}
+
+} // namespace
+
+AmdCpFirmwarePath AmdCpFirmwarePathForFamily(const char* family)
+{
+    // The family tags are deliberately coarse strings from AmdGenTag:
+    // gfx9-*, gfx10-* / gfx10.3-*, and gfx11-*. Keep this parser narrow
+    // so a future GFX generation cannot silently enter an old upload path.
+    if (HasPrefix(family, "gfx9") || HasPrefix(family, "gfx10"))
+        return AmdCpFirmwarePath::kDirectHostUpload;
+    if (HasPrefix(family, "gfx11"))
+        return AmdCpFirmwarePath::kPspRequired;
+    return AmdCpFirmwarePath::kUnsupported;
+}
+
+const char* AmdCpFirmwarePathName(AmdCpFirmwarePath path)
+{
+    switch (path)
+    {
+    case AmdCpFirmwarePath::kDirectHostUpload:
+        return "direct-host-upload";
+    case AmdCpFirmwarePath::kPspRequired:
+        return "psp-required";
+    case AmdCpFirmwarePath::kUnsupported:
+    default:
+        return "unsupported";
+    }
+}
+
+namespace
+{
+
 // Load one engine's microcode: FwLoad + AmdGfxFwParse, then stream the
 // payload dwords into `data_reg` (the ADDR register auto-increments
 // from 0), and write the trailing ucode version to `addr_reg`.
@@ -100,14 +148,28 @@ bool LoadEngine(void* bar5, const char* basename, u64 addr_reg, u64 data_reg)
 
 void AmdCpUcodeSelfTest()
 {
-    if (kAmdCpHaltAll == 0x15000000u && kAmdCeHalt == 0x01000000u && kAmdPfpHalt == 0x04000000u &&
-        kAmdMeHalt == 0x10000000u)
+    const bool halt_masks_ok = kAmdCpHaltAll == 0x15000000u && kAmdCeHalt == 0x01000000u &&
+                               kAmdPfpHalt == 0x04000000u && kAmdMeHalt == 0x10000000u;
+    const bool generation_gate_ok =
+        AmdCpFirmwarePathForFamily("gfx9-raven") == AmdCpFirmwarePath::kDirectHostUpload &&
+        AmdCpFirmwarePathForFamily("gfx10-navi1x") == AmdCpFirmwarePath::kDirectHostUpload &&
+        AmdCpFirmwarePathForFamily("gfx10.3-navi2x") == AmdCpFirmwarePath::kDirectHostUpload &&
+        AmdCpFirmwarePathForFamily("gfx11-navi3x") == AmdCpFirmwarePath::kPspRequired &&
+        AmdCpFirmwarePathForFamily("amd-pre-gfx9-or-unknown") == AmdCpFirmwarePath::kUnsupported &&
+        AmdCpFirmwarePathForFamily(nullptr) == AmdCpFirmwarePath::kUnsupported &&
+        AmdCpFirmwarePathForFamily("") == AmdCpFirmwarePath::kUnsupported &&
+        AmdCpFirmwarePathForFamily("g") == AmdCpFirmwarePath::kUnsupported &&
+        AmdCpFirmwarePathForFamily("gf") == AmdCpFirmwarePath::kUnsupported &&
+        AmdCpFirmwarePathForFamily("gfx") == AmdCpFirmwarePath::kUnsupported &&
+        AmdCpFirmwarePathForFamily("gfx1") == AmdCpFirmwarePath::kUnsupported;
+
+    if (halt_masks_ok && generation_gate_ok)
     {
-        arch::SerialWrite("[gpu/amd/ucode] selftest PASS (CP halt-mask constants compile-verified)\n");
+        arch::SerialWrite("[gpu/amd/ucode] selftest PASS (CP halt masks + generation firmware gate)\n");
         return;
     }
     KBP_PROBE_V(::duetos::debug::ProbeId::kBootSelftestFail, 0x4155u /* 'AU' */);
-    arch::SerialWrite("[gpu/amd/ucode] selftest FAIL (halt masks)\n");
+    arch::SerialWrite("[gpu/amd/ucode] selftest FAIL (halt masks or generation firmware gate)\n");
 }
 
 } // namespace duetos::drivers::gpu::amd
