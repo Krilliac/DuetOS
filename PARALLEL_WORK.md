@@ -1411,13 +1411,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T22:25:50Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] ipc-endpoint-request-ledger
+### [DONE] ipc-endpoint-request-ledger
 - **Session**: `Nathan-1761`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/ipc/endpoint_request_ledger.h kernel/ipc/endpoint_request_ledger.cpp tests/host/test_endpoint_request_ledger.cpp`
 - **Description**: Caller-locked fixed-capacity exact endpoint epoch and request lifecycle ledger
 - **Claimed**: 2026-07-31T23:02:15Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-31T23:15:03Z
 
 ### [ACTIVE] service-lifecycle-broker
 - **Session**: `Codex-root-lifecycle`
