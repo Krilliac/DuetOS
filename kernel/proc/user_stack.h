@@ -11,20 +11,20 @@
  * 256 frames per spawn across every boot PE and every PE-compat
  * battery row, and almost all of it would never be touched.
  *
- * The reservation for a PE's main thread looks like this, growing
- * downward from `top`:
+ * Each ring-3 Task that owns a demand-grown stack carries its own
+ * reservation descriptor. It looks like this, growing from `top`:
  *
  *     guard_lo        reserve_lo         commit_lo            top
  *        |                 |                  |                |
  *        [  guard region ][ reserved, uncommitted ][ committed ]
  *        <--  fatal   -->  <-- grows on demand -->  <-- mapped -->
  *
- * `top` is fixed (`kUserStackTopVa`); `reserve_lo` comes from the
- * image's own `SizeOfStackReserve`, clamped; `commit_lo` starts at
- * `top - SizeOfStackCommit` (clamped) and walks down as the thread
- * faults; `[guard_lo, reserve_lo)` is the guard region, which growth
- * may NEVER extend into, so a genuine runaway still dies loudly
- * instead of quietly eating address space.
+ * A PE main thread uses the fixed `kUserStackTopVa`; secondary threads
+ * use disjoint tops from the Win32 thread-stack arena. `reserve_lo`
+ * comes from the requested reserve, clamped; `commit_lo` starts at
+ * `top - requested commit` (clamped) and walks down as that Task faults.
+ * `[guard_lo, reserve_lo)` is the guard region, which ordinary growth
+ * may NEVER extend into, so a genuine runaway still dies loudly.
  *
  * Growth is deliberately narrow — see UserStackClassify. A
  * mis-classified fault that silently commits memory is worse than
@@ -32,28 +32,24 @@
  * naming the page immediately below the committed region, taken by
  * the thread whose own rsp is inside this reservation.
  *
- * Concurrency: there is none, and that is a property of the
- * classifier rather than a lock. Growth requires the faulting
- * thread's own rsp to be inside this reservation (condition 4), and
- * every other thread in the process runs on the Win32 thread-stack
- * arena at 0x68000000 — strictly below this reservation — so no
- * other thread can ever satisfy condition 4 against it. The main
- * thread is therefore the sole writer of `commit_lo`, whether it faults
- * in user mode or the kernel pre-commits on its behalf from the
- * SEH dispatcher. A spinlock here would be worse than useless: the
- * commit path calls into mm, whose regions lock can park the task,
- * and parking while holding a spinlock with interrupts off is a
- * deadlock. The present-probe inside the commit helper is the
- * remaining net against a double map.
- *
- * GAP: only the PE main-thread stack is growable — Win32
- * CreateThread stacks come off the fixed-size thread-stack arena
- * (Process::thread_stack_cursor, 0x68000000) and still overflow
- * into the next thread's slot.
+ * Concurrency: the descriptor is Task-owned, and only the current Task
+ * can service or pre-commit its stack. A second Task sharing the same
+ * Process therefore cannot mutate this descriptor. Growth additionally
+ * requires the current rsp to lie inside the descriptor (condition 4).
+ * No stack lock is needed, which is important because mapping may enter
+ * MM paths that cannot run under the scheduler spinlock. The address-space
+ * reservation token provides the ownership check for every committed page;
+ * an existing PTE is a hard mapping failure, never inferred as ours.
  */
 #pragma once
 
 #include "util/types.h"
+
+namespace duetos::mm
+{
+struct AddressSpace;
+class AddressSpaceReservationToken;
+} // namespace duetos::mm
 
 namespace duetos::core
 {
@@ -117,9 +113,10 @@ inline constexpr u64 kUserStackGrowStep = 4096;
 /// cannot turn one call into a whole-reservation commit.
 inline constexpr u64 kUserStackKernelCommitMax = 4;
 
-/// Per-process ring-3 stack reservation. All-zero means "this
-/// process has no growable stack" (native ring-3 smoke payloads,
-/// ELF tasks) and every fault classifies as NotStack.
+/// Per-task ring-3 stack reservation. All-zero means "this Task has no
+/// growable stack" (native ring-3 smoke payloads, ELF tasks and Linux
+/// clone Tasks using caller-supplied stacks), and every fault classifies
+/// as NotStack.
 struct UserStackRange
 {
     u64 top;        // one-past-last byte of the reservation
@@ -160,12 +157,21 @@ enum class UserStackFault : u8
 /// and freestanding — no kernel headers, no allocation, no locking
 /// — and can be unit-tested directly off this header. See
 /// tests/host/test_user_stack.cpp.
-inline UserStackRange UserStackPlan(u64 reserve_bytes, u64 commit_bytes, bool* clamped)
+inline UserStackRange UserStackPlanAt(u64 top, u64 reserve_bytes, u64 commit_bytes, bool* clamped)
 {
     constexpr u64 kPage = 4096;
-    auto align_up = [](u64 v) { return (v + kPage - 1) & ~(kPage - 1); };
+    constexpr u64 kCanonicalUserTopExclusive = 0x0000800000000000ULL;
+    auto align_up = [](u64 v)
+    {
+        if (v > ~u64{0} - (kPage - 1))
+        {
+            return ~u64{0} & ~(kPage - 1);
+        }
+        return (v + kPage - 1) & ~(kPage - 1);
+    };
 
-    u64 reserve = align_up(reserve_bytes);
+    const u64 requested_reserve = align_up(reserve_bytes);
+    u64 reserve = requested_reserve;
     if (reserve < kUserStackReserveMin)
     {
         reserve = kUserStackReserveMin;
@@ -176,7 +182,7 @@ inline UserStackRange UserStackPlan(u64 reserve_bytes, u64 commit_bytes, bool* c
     }
     if (clamped != nullptr)
     {
-        *clamped = (reserve != align_up(reserve_bytes));
+        *clamped = (reserve != requested_reserve);
     }
 
     // Initial commit: honour SizeOfStackCommit, but inside the
@@ -195,13 +201,71 @@ inline UserStackRange UserStackPlan(u64 reserve_bytes, u64 commit_bytes, bool* c
         commit_pages = reserve / kPage;
     }
 
+    const u64 guard_bytes = kUserStackGuardPages * kPage;
+    if ((top & (kPage - 1)) != 0 || top > kCanonicalUserTopExclusive || top < reserve + guard_bytes)
+    {
+        if (clamped != nullptr)
+        {
+            *clamped = true;
+        }
+        return UserStackRange{};
+    }
+
     UserStackRange r{};
-    r.top = kUserStackTopVa;
-    r.reserve_lo = kUserStackTopVa - reserve;
-    r.commit_lo = kUserStackTopVa - commit_pages * kPage;
+    r.top = top;
+    r.reserve_lo = top - reserve;
+    r.commit_lo = top - commit_pages * kPage;
     r.guard_lo = r.reserve_lo - kUserStackGuardPages * kPage;
     r.guard_taken = false;
     return r;
+}
+
+/// Main-thread convenience wrapper. Secondary thread arenas call
+/// UserStackPlanAt with their disjoint per-task top.
+inline UserStackRange UserStackPlan(u64 reserve_bytes, u64 commit_bytes, bool* clamped)
+{
+    return UserStackPlanAt(kUserStackTopVa, reserve_bytes, commit_bytes, clamped);
+}
+
+/// Validate every bound the mapping and reaper loops rely on. This stays
+/// pure and freestanding so teardown can reject a corrupted descriptor
+/// before it becomes an unbounded VA walk.
+inline bool UserStackRangeIsValid(const UserStackRange& s)
+{
+    constexpr u64 kPage = 4096;
+    constexpr u64 kCanonicalUserTopExclusive = 0x0000800000000000ULL;
+    const u64 fields = s.top | s.reserve_lo | s.commit_lo | s.guard_lo;
+    if (s.top == 0 || s.top > kCanonicalUserTopExclusive || (fields & (kPage - 1)) != 0)
+    {
+        return false;
+    }
+    if (s.guard_lo >= s.reserve_lo || s.reserve_lo >= s.top || s.commit_lo >= s.top)
+    {
+        return false;
+    }
+    if (s.reserve_lo - s.guard_lo != kUserStackGuardPages * kPage)
+    {
+        return false;
+    }
+    const u64 reserve = s.top - s.reserve_lo;
+    if (reserve < kUserStackReserveMin || reserve > kUserStackReserveMax)
+    {
+        return false;
+    }
+    const u64 commit_floor = s.guard_taken ? s.guard_lo : s.reserve_lo;
+    return s.commit_lo >= commit_floor;
+}
+
+/// True only when both descriptors are valid and their complete owned
+/// windows (guard included) do not overlap. Address spaces are deliberately
+/// not part of this pure helper; the scheduler compares those first.
+inline bool UserStackRangesDisjoint(const UserStackRange& a, const UserStackRange& b)
+{
+    if (!UserStackRangeIsValid(a) || !UserStackRangeIsValid(b))
+    {
+        return false;
+    }
+    return a.top <= b.guard_lo || b.top <= a.guard_lo;
 }
 
 /// Decide what a ring-3 page fault means for `s`. Pure — no
@@ -228,7 +292,7 @@ inline UserStackFault UserStackClassify(const UserStackRange& s, u64 fault_va, u
 {
     if (s.top == 0)
     {
-        return UserStackFault::NotStack; // no growable stack on this process
+        return UserStackFault::NotStack; // no growable stack on this Task
     }
 
     // The guard region is checked FIRST and independently of the
@@ -269,11 +333,10 @@ inline UserStackFault UserStackClassify(const UserStackRange& s, u64 fault_va, u
     // cr2 = rsp on the first frame of a recursing PE.)
     //
     // Anchoring on rsp's own location instead is both correct and
-    // stronger. It is what proves no OTHER thread can ever grow this
-    // reservation: every other thread in the process runs on the
-    // Win32 thread-stack arena at 0x68000000, far below reserve_lo,
-    // so none of them can satisfy this. That is the whole
-    // no-locking argument (see the concurrency note above).
+    // stronger. The service path already selects only the current
+    // Task's descriptor; this condition additionally proves that Task
+    // is actually executing on the stack it is asking the kernel to
+    // grow.
     if (rsp < s.reserve_lo || rsp > s.top)
     {
         return UserStackFault::NotStack;
@@ -300,6 +363,14 @@ UserStackFault UserStackServiceFault(u64 fault_va, u64 err_code, u64 rsp);
 /// the reservation, reaches more than `kUserStackKernelCommitMax`
 /// pages past the committed edge, or a frame allocation fails.
 bool UserStackCommitRange(u64 lo, u64 hi);
+
+/// Release the exact AS reservation capability backing an owned descriptor.
+/// The caller must have made the owning Task unreachable (or still be the
+/// private/current owner during unwind) and must keep `as` alive. Only pages
+/// tagged with `token` are retired; a foreign PTE at the same VA is an
+/// invariant violation, never something this helper guesses it owns.
+void UserStackReleaseOwnedMappings(mm::AddressSpace* as, const UserStackRange& stack,
+                                   const mm::AddressSpaceReservationToken& token);
 
 /// Human-readable name for a UserStackFault — boot-log use.
 const char* UserStackFaultName(UserStackFault f);

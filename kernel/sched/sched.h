@@ -6,7 +6,8 @@
 namespace duetos::mm
 {
 struct AddressSpace; // forward decl; defined in kernel/mm/address_space.h
-}
+class AddressSpaceReservationToken;
+} // namespace duetos::mm
 
 namespace duetos::arch
 {
@@ -15,8 +16,9 @@ struct TrapFrame; // forward decl; defined in kernel/arch/x86_64/traps.h
 
 namespace duetos::core
 {
-struct Process; // forward decl; defined in kernel/proc/process.h
-}
+struct Process;        // forward decl; defined in kernel/proc/process.h
+struct UserStackRange; // forward decl; defined in kernel/proc/user_stack.h
+} // namespace duetos::core
 
 /*
  * DuetOS kernel scheduler — v0.
@@ -108,6 +110,28 @@ using TaskPrepareFn = void (*)(Task* task, void* context);
 /// SchedCreateUser.
 Task* SchedCreateUserPrepared(TaskEntry entry, void* arg, const char* name, core::Process* process,
                               TaskPrepareFn prepare, void* context);
+
+/// Attach a disjoint, scheduler-owned user-stack reservation while `task`
+/// is still private to SchedCreateUserPrepared. `token` must be the live,
+/// exact AS reservation for the descriptor's [guard_lo, top) window. The
+/// scheduler releases that capability and only its tagged pages when the
+/// Task is reaped. Calling this after publication is an invariant violation.
+void SchedPrepareOwnedUserStack(Task* task, const core::UserStackRange& stack,
+                                const mm::AddressSpaceReservationToken& token);
+
+/// Return the current Task's mutable stack descriptor and its address
+/// space as one coherent snapshot. Returns nullptr (and writes nullptr to
+/// `out_as`, when provided) for kernel Tasks and Tasks using borrowed or
+/// fixed user stacks. `out_token`, when provided, receives the immutable
+/// capability required for exact stack commits. Only the current Task may
+/// mutate the returned range.
+core::UserStackRange* SchedCurrentUserStack(mm::AddressSpace** out_as, mm::AddressSpaceReservationToken* out_token);
+
+/// Drop and exactly release the current Task's owned stack reservation.
+/// Used by guaranteed-single-task exec before replacing every user mapping.
+/// No-op for a fixed/borrowed stack. Task context only; may wait for TLB
+/// shootdown and must not run under a scheduler or subsystem spinlock.
+void SchedDropCurrentOwnedUserStack();
 
 /// Accessor for the Task's owning process pointer. nullptr for
 /// kernel-only tasks (workers, reaper, idle). Used by syscall
@@ -851,21 +875,30 @@ StackHealth SchedCheckTaskStacks();
 enum class KillResult : u8
 {
     Signaled = 0,    // Task found and flagged for termination
-    NotFound = 1,    // No task with that PID
-    Protected = 2,   // Task is special (idle / reaper / PID 0)
+    NotFound = 1,    // No task with that TID
+    Protected = 2,   // Task is special (idle / reaper / TID 0)
     AlreadyDead = 3, // Task is in the zombie list
     Blocked = 4,     // Task is Blocked — v0 can't detach safely
 };
 const char* KillResultName(KillResult r);
 
-/// Flag a non-current task by PID for termination. For Running
+/// Flag one non-current Task by TID for termination. The historical function
+/// name says PID, but Process PIDs and Task TIDs are independent and need not
+/// match. For Running
 /// / Ready targets, the kill activates the next time Schedule()
 /// runs. For Sleeping targets, the task is lifted off the sleep
 /// queue and re-queued Ready so it runs and dies on its next
 /// slot. Blocked targets are not detached in v0 — the caller
 /// gets a Blocked result code and should try again after the
 /// task is woken by something else.
-KillResult SchedKillByPid(u64 pid);
+KillResult SchedKillByPid(u64 tid);
+
+/// Resolve `process_pid` to one scheduler-owned Process identity and signal
+/// every published live Task belonging to it under the same g_sched_lock hold.
+/// No Task* or Process* escapes the lock. Returns the number of newly accepted
+/// requests (including blocked tasks whose normal wake will take the kill), or
+/// 0 when the process has no eligible live tasks.
+u64 SchedKillProcessByPid(u64 process_pid);
 
 /// Walk every live task and signal each one whose owning Process
 /// matches `target` for termination. Used by NtTerminateProcess

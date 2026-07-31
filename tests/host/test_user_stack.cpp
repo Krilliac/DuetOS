@@ -36,7 +36,10 @@ using duetos::core::kUserStackTopVa;
 using duetos::core::UserStackClassify;
 using duetos::core::UserStackFault;
 using duetos::core::UserStackPlan;
+using duetos::core::UserStackPlanAt;
 using duetos::core::UserStackRange;
+using duetos::core::UserStackRangeIsValid;
+using duetos::core::UserStackRangesDisjoint;
 
 namespace
 {
@@ -143,6 +146,54 @@ void TestPlanRoundsUpToPages()
     EXPECT_EQ((s.top - s.commit_lo) / kPage, 4u);
 }
 
+void TestCustomTopPlansDisjointTaskStacks()
+{
+    constexpr u64 kArenaBase = 0x68000000ull;
+    constexpr u64 kReserve = kUserStackReserveMin;
+    constexpr u64 kFootprint = kReserve + kUserStackGuardPages * kPage;
+
+    const UserStackRange first = UserStackPlanAt(kArenaBase + kFootprint, kReserve, 0, nullptr);
+    const UserStackRange second = UserStackPlanAt(first.top + kFootprint, kReserve, 0, nullptr);
+
+    EXPECT_TRUE(UserStackRangeIsValid(first));
+    EXPECT_TRUE(UserStackRangeIsValid(second));
+    EXPECT_EQ(first.guard_lo, kArenaBase);
+    EXPECT_EQ(second.guard_lo, first.top);
+    EXPECT_TRUE(first.top <= second.guard_lo);
+    EXPECT_TRUE(UserStackRangesDisjoint(first, second));
+    EXPECT_EQ((first.top - first.commit_lo) / kPage, kUserStackCommitMinPages);
+    EXPECT_EQ((second.top - second.commit_lo) / kPage, kUserStackCommitMinPages);
+}
+
+void TestDescriptorValidationBoundsTeardownWalk()
+{
+    UserStackRange s = UserStackPlanAt(0x68014000ull, kUserStackReserveMin, 0, nullptr);
+    EXPECT_TRUE(UserStackRangeIsValid(s));
+
+    UserStackRange bad = s;
+    bad.top += 1;
+    EXPECT_TRUE(!UserStackRangeIsValid(bad));
+
+    bad = s;
+    bad.guard_lo -= kPage;
+    EXPECT_TRUE(!UserStackRangeIsValid(bad));
+
+    bad = s;
+    bad.commit_lo = bad.reserve_lo - kPage;
+    EXPECT_TRUE(!UserStackRangeIsValid(bad));
+
+    // Once the one-shot guard has fired, commit_lo may legitimately
+    // enter the guard region, but never below its hard floor.
+    bad.guard_taken = true;
+    EXPECT_TRUE(UserStackRangeIsValid(bad));
+    bad.commit_lo = bad.guard_lo - kPage;
+    EXPECT_TRUE(!UserStackRangeIsValid(bad));
+
+    EXPECT_TRUE(!UserStackRangeIsValid(UserStackRange{}));
+    EXPECT_TRUE(!UserStackRangesDisjoint(s, s));
+    EXPECT_EQ(UserStackPlanAt(0x68014001ull, kUserStackReserveMin, 0, nullptr).top, 0u);
+}
+
 // ---------------------------------------------------------------
 // UserStackClassify — the decision that gates committing memory.
 // ---------------------------------------------------------------
@@ -197,10 +248,9 @@ void TestOnlyTheThreadRunningOnThisStackCanGrowIt()
 {
     const UserStackRange s = FreshPlan();
 
-    // Every other thread in the process runs on the Win32
-    // thread-stack arena at 0x68000000, far below this reservation.
-    // A wild pointer from one of them lands in the reservation but
-    // must NOT grow it — that is the entire no-locking argument.
+    // The service path selects the current Task's descriptor. The pure
+    // classifier additionally refuses an rsp from a different stack,
+    // even if a caller accidentally hands it the wrong descriptor.
     const u64 other_thread_rsp = 0x68001000ull;
     ExpectVerdict("classify: wild pointer from another thread is not stack",
                   UserStackClassify(s, s.commit_lo - 8, kErrNotPresentWrite, other_thread_rsp),
@@ -313,6 +363,8 @@ int main()
     TestPlanFloorsTinyReserve();
     TestPlanClampsCommitToWindow();
     TestPlanRoundsUpToPages();
+    TestCustomTopPlansDisjointTaskStacks();
+    TestDescriptorValidationBoundsTeardownWalk();
 
     TestGrowsOnTheAdjacentPage();
     TestRefusesToSkipPages();

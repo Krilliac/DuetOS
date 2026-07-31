@@ -56,6 +56,7 @@
 #include "log/klog.h"
 #include "core/panic.h"
 #include "proc/process.h"
+#include "proc/user_stack.h"
 #include "diag/recovery.h"
 #include "cpu/critical.h"
 #include "cpu/percpu.h"
@@ -173,6 +174,16 @@ struct Task
     // SchedCreateUser; the reaper ProcessReleases it on death.
     // Used by CurrentProcess() for cap lookup.
     core::Process* process;
+
+    // Demand-grown user stacks belong to Tasks, not Processes: multiple
+    // ring-3 Tasks can share one Process/AS while growing and eventually
+    // reclaiming disjoint reservations independently. All-zero means this
+    // Task uses a fixed or caller-supplied borrowed stack. The ownership
+    // bit is deliberately separate so the reaper never unmaps a Linux
+    // clone stack merely because its rsp happens to point into user memory.
+    core::UserStackRange user_stack;
+    mm::AddressSpaceReservationToken user_stack_reservation;
+    bool owns_user_stack_mappings;
 
     // Flag set by any kernel subsystem that wants this task
     // killed at next resched. Historical name was tick_exhausted
@@ -2342,6 +2353,28 @@ void PublishCreatedTask(Task* task)
     KASSERT(task != nullptr, "sched", "PublishCreatedTask null task");
     KASSERT(!task->published, "sched", "PublishCreatedTask called twice");
     sync::SpinLockGuard guard(g_sched_lock);
+
+    // Every owned stack must have been attached by an explicit private-Task
+    // prepare callback. Publication never infers ownership from Process or a
+    // VA: the AS-scoped capability was reserved before any stack PTE existed
+    // and is the only authority accepted by growth and teardown.
+    KASSERT(task->owns_user_stack_mappings == (task->user_stack.top != 0), "sched",
+            "published Task user-stack descriptor/ownership mismatch");
+    KASSERT(task->owns_user_stack_mappings == task->user_stack_reservation.IsValid(), "sched",
+            "published Task user-stack token/ownership mismatch");
+    KASSERT(!task->owns_user_stack_mappings || core::UserStackRangeIsValid(task->user_stack), "sched",
+            "published Task owns an invalid user-stack descriptor");
+    if (task->owns_user_stack_mappings)
+    {
+        for (Task* it = g_all_tasks_head; it != nullptr; it = it->all_next)
+        {
+            if (it->as == task->as && it->owns_user_stack_mappings)
+            {
+                KASSERT(core::UserStackRangesDisjoint(task->user_stack, it->user_stack), "sched",
+                        "Task user-stack ownership windows overlap");
+            }
+        }
+    }
     task->published = true;
     RunqueuePush(task);
     // Add the new task to the global "all live tasks" list under
@@ -2421,6 +2454,9 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     t->priority = priority;
     t->as = as;
     t->process = process; // user tasks: caller's Process; kernel tasks: nullptr
+    t->user_stack = core::UserStackRange{};
+    t->user_stack_reservation = mm::AddressSpaceReservationToken{};
+    t->owns_user_stack_mappings = false;
     // Seed the MLFQ band from the owning process's priority class.
     // RunqueuePushOn recomputes this on every enqueue so a later
     // SetPriorityClass takes effect — this just gives the first
@@ -2637,6 +2673,86 @@ Task* SchedCreateUserPrepared(TaskEntry entry, void* arg, const char* name, core
 {
     KASSERT(prepare != nullptr, "sched", "SchedCreateUserPrepared without initializer");
     return CreateUserTask(entry, arg, name, process, prepare, context);
+}
+
+void SchedPrepareOwnedUserStack(Task* task, const core::UserStackRange& stack,
+                                const mm::AddressSpaceReservationToken& token)
+{
+    KASSERT(task != nullptr, "sched", "SchedPrepareOwnedUserStack null task");
+    KASSERT(!task->published, "sched", "SchedPrepareOwnedUserStack after publication");
+    KASSERT(task->process != nullptr && task->as != nullptr, "sched",
+            "SchedPrepareOwnedUserStack requires a process-backed user task");
+    KASSERT(!task->owns_user_stack_mappings && task->user_stack.top == 0, "sched",
+            "SchedPrepareOwnedUserStack attempted to replace a descriptor");
+    KASSERT(core::UserStackRangeIsValid(stack), "sched", "SchedPrepareOwnedUserStack invalid descriptor");
+    KASSERT(mm::AddressSpaceReservationMatches(task->as, token, stack.guard_lo, stack.top), "sched",
+            "SchedPrepareOwnedUserStack token does not name descriptor window");
+    task->user_stack = stack;
+    task->user_stack_reservation = token;
+    task->owns_user_stack_mappings = true;
+}
+
+core::UserStackRange* SchedCurrentUserStack(mm::AddressSpace** out_as, mm::AddressSpaceReservationToken* out_token)
+{
+    if (out_as != nullptr)
+    {
+        *out_as = nullptr;
+    }
+    if (out_token != nullptr)
+    {
+        *out_token = mm::AddressSpaceReservationToken{};
+    }
+    Task* self = CurrentTask();
+    if (self == nullptr || self->as == nullptr || !self->owns_user_stack_mappings || self->user_stack.top == 0 ||
+        !self->user_stack_reservation.IsValid())
+    {
+        return nullptr;
+    }
+    KASSERT(core::UserStackRangeIsValid(self->user_stack), "sched", "current Task user-stack descriptor invalid");
+    if (out_as != nullptr)
+    {
+        *out_as = self->as;
+    }
+    if (out_token != nullptr)
+    {
+        *out_token = self->user_stack_reservation;
+    }
+    return &self->user_stack;
+}
+
+void SchedDropCurrentOwnedUserStack()
+{
+    Task* self = CurrentTask();
+    if (self == nullptr)
+    {
+        return;
+    }
+
+    mm::AddressSpace* as = nullptr;
+    core::UserStackRange stack{};
+    mm::AddressSpaceReservationToken token{};
+    bool owned = false;
+    {
+        sync::SpinLockGuard guard(g_sched_lock);
+        owned = self->owns_user_stack_mappings;
+        if (owned)
+        {
+            as = self->as;
+            stack = self->user_stack;
+            token = self->user_stack_reservation;
+            self->user_stack = core::UserStackRange{};
+            self->user_stack_reservation = mm::AddressSpaceReservationToken{};
+            self->owns_user_stack_mappings = false;
+        }
+    }
+    if (!owned)
+    {
+        return;
+    }
+    KASSERT(as != nullptr && core::UserStackRangeIsValid(stack) && token.IsValid(), "sched/exec",
+            "current Task owned invalid user-stack state");
+    KASSERT(mm::AddressSpaceReleaseUserReservation(as, token, stack.guard_lo, stack.top), "sched/exec",
+            "failed to release current Task user-stack reservation");
 }
 
 core::Process* TaskProcess(Task* t)
@@ -5898,7 +6014,7 @@ void SleepQueueRemove(Task* t)
 
 } // namespace
 
-KillResult SchedKillByPid(u64 pid)
+KillResult SchedKillByPid(u64 tid)
 {
     // g_sched_lock (not bare Cli): the walk reads peer CPUs'
     // runqueues, and the Sleeping branch below mutates the sleep
@@ -5911,7 +6027,7 @@ KillResult SchedKillByPid(u64 pid)
     // Resolve from the scheduler-owned all-tasks registry. Unlike
     // the old runqueue/sleep walk this includes tasks parked on a
     // WaitQueue and keeps the Task pointer inside this lock hold.
-    Task* target = FindTaskByTidLocked(pid);
+    Task* target = FindTaskByTidLocked(tid);
     if (target == nullptr)
     {
         return KillResult::NotFound;
@@ -5949,6 +6065,53 @@ KillResult SchedKillByPid(u64 pid)
     // Ready / Running tasks don't need repositioning — they'll
     // hit Schedule() naturally and die there.
     return KillResult::Signaled;
+}
+
+u64 SchedKillProcessByPid(u64 process_pid)
+{
+    if (process_pid == 0)
+        return 0;
+
+    // Resolve Process identity and install every request in one scheduler
+    // transaction. PID and TID are independent allocators; no Task* or
+    // Process* may escape this lock hold.
+    sync::SpinLockGuard guard(g_sched_lock);
+    core::Process* target_process = nullptr;
+    for (Task* task = g_all_tasks_head; task != nullptr; task = task->all_next)
+    {
+        if (task->process != nullptr && task->process->pid == process_pid)
+        {
+            target_process = task->process;
+            break;
+        }
+    }
+    if (target_process == nullptr)
+        return 0;
+
+    u64 signalled = 0;
+    for (Task* task = g_all_tasks_head; task != nullptr; task = task->all_next)
+    {
+        if (task->process != target_process || task->state == TaskState::Dead || task->kill_requested ||
+            IsProtectedTask(task))
+        {
+            continue;
+        }
+
+        task->kill_requested = true;
+        task->kill_reason = KillReason::UserKill;
+        if (task->state == TaskState::Sleeping)
+        {
+            SleepQueueRemove(task);
+            task->wake_tick = 0;
+            task->state = TaskState::Ready;
+            RunqueuePush(task);
+        }
+        // Baseline v0 cannot detach an arbitrary WaitQueue-blocked Task.
+        // Its request remains installed and the owning producer's normal
+        // wake path will make it runnable so it can take the kill.
+        ++signalled;
+    }
+    return signalled;
 }
 
 u64 SchedKillByProcess(core::Process* target)
@@ -6808,6 +6971,9 @@ namespace
             // already-freed Process storage.
             core::Process* dead_process = nullptr;
             mm::AddressSpace* dead_as = nullptr;
+            core::UserStackRange dead_user_stack{};
+            mm::AddressSpaceReservationToken dead_user_stack_reservation{};
+            bool dead_owns_user_stack = false;
             bool on_runq = false;
             bool is_current = false;
             ::duetos::u32 current_cpu = 0;
@@ -6830,8 +6996,14 @@ namespace
                     AllTasksUnlink(dead);
                     dead_process = dead->process;
                     dead_as = dead->as;
+                    dead_user_stack = dead->user_stack;
+                    dead_user_stack_reservation = dead->user_stack_reservation;
+                    dead_owns_user_stack = dead->owns_user_stack_mappings;
                     dead->process = nullptr;
                     dead->as = nullptr;
+                    dead->user_stack = core::UserStackRange{};
+                    dead->user_stack_reservation = mm::AddressSpaceReservationToken{};
+                    dead->owns_user_stack_mappings = false;
                 }
                 sync::SpinLockRelease(g_sched_lock, lf);
             }
@@ -6860,6 +7032,22 @@ namespace
                 }
                 arch::SerialWrite("\n");
                 core::PanicWithValue("sched/reaper", "freeing a still-reachable task (resume UAF root)", dead->id);
+            }
+
+            // The Task is now unreachable and off-CPU, but its Process
+            // reference still keeps `dead_as` alive. Reclaim only mappings
+            // explicitly owned by this Task, outside g_sched_lock and before
+            // ProcessRelease can destroy the AS. Linux clone stacks never set
+            // the ownership bit and are intentionally left to their caller or
+            // the eventual whole-AS teardown.
+            if (dead_owns_user_stack)
+            {
+                KASSERT(dead_as != nullptr, "sched/reaper", "owned user stack without an address space");
+                KASSERT(core::UserStackRangeIsValid(dead_user_stack), "sched/reaper",
+                        "owned user stack descriptor corrupted before teardown");
+                KASSERT(dead_user_stack_reservation.IsValid(), "sched/reaper",
+                        "owned user stack missing reservation token");
+                core::UserStackReleaseOwnedMappings(dead_as, dead_user_stack, dead_user_stack_reservation);
             }
 
             // Drop the task's process reference. The Process owns
@@ -6909,6 +7097,11 @@ namespace
                 // registry, so a count of 0 means this was the last task.
                 if (SchedCountLiveTasksForProcess(dead_process) == 0)
                 {
+                    // Membership exit is a protocol event distinct from
+                    // owner teardown. The scheduler lock is not held here,
+                    // and dead_process remains pinned by the reaper until
+                    // ProcessRelease below.
+                    core::JobOnProcessExit(dead_process);
                     core::ProcessDropOwnedProcessHandles(dead_process);
                     // Jobs hold strong member references, including a
                     // possible reference back to their owner. Drain them at

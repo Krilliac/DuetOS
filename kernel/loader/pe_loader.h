@@ -1,13 +1,9 @@
 #pragma once
 
 #include "loader/dll_loader.h"
+#include "mm/address_space.h"
 #include "proc/user_stack.h"
 #include "util/types.h"
-
-namespace duetos::mm
-{
-struct AddressSpace;
-}
 
 namespace duetos::core
 {
@@ -229,10 +225,15 @@ struct PeLoadResult
     u64 stack_top;         // One-past-last byte of the reservation; rsp at
                            // ring-3 entry is derived from it by the spawn path.
     // Full reservation descriptor (top / reserve_lo / commit_lo /
-    // guard_lo). SpawnPeFile copies this onto the Process so the
-    // #PF handler can grow the stack on demand. See
-    // kernel/proc/user_stack.h.
+    // guard_lo). SpawnPeFile transfers this and the capability below
+    // to the private primary Task before scheduler publication; the #PF
+    // handler accepts only that current Task's pair. See user_stack.h.
     UserStackRange stack;
+    // Exact AS-scoped capability reserved before the first stack page was
+    // committed. Spawn transfers it to the private primary Task; loader or
+    // spawn failure destroys/releases it without ever publishing a raw VA
+    // window as ownership.
+    duetos::mm::AddressSpaceReservationToken stack_reservation;
     u64 image_base;
     u64 image_size;
     u64 teb_va; // VA of the per-task TEB page (0 if PE has no
