@@ -1074,3 +1074,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Replace duplicated native libc syscall numbers with the generated IDL header while preserving documented wrappers and socket operation constants
 - **Claimed**: 2026-07-31T19:59:16Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] native-syscall-cap-policy
+- **Session**: `Nathan-239`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/syscall/cap_table.def`
+- **Description**: Generate the authoritative static capability gate rows from the versioned native syscall IDL
+- **Claimed**: 2026-07-31T19:59:47Z
+- **Status**: IN PROGRESS
