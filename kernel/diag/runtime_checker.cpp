@@ -909,9 +909,10 @@ DUETOS_NO_SANITIZE_WRAP u64 ComputeTextSpotHash()
     constexpr u64 kFnvPrime = 0x100000001b3ULL;
     constexpr u64 kSpotBytes = 4096;
     u64 h = kFnvOffset;
-    const u8* s = _text_start;
-    const u8* e = _text_end;
-    const u64 text_bytes = u64(e - s);
+    const u64 start = reinterpret_cast<u64>(_text_start);
+    const u64 end = reinterpret_cast<u64>(_text_end);
+    const u64 text_bytes = end >= start ? end - start : 0;
+    const u8* s = reinterpret_cast<const u8*>(start);
     const u64 head_bytes = (text_bytes < kSpotBytes) ? text_bytes : kSpotBytes;
     for (u64 i = 0; i < head_bytes; ++i)
     {
@@ -922,7 +923,7 @@ DUETOS_NO_SANITIZE_WRAP u64 ComputeTextSpotHash()
     {
         for (u64 i = 0; i < kSpotBytes; ++i)
         {
-            h ^= e[-i64(kSpotBytes) + i64(i)];
+            h ^= s[text_bytes - kSpotBytes + i];
             h *= kFnvPrime;
         }
     }
@@ -938,11 +939,14 @@ DUETOS_NO_SANITIZE_WRAP u64 ComputeTextFullHash()
     constexpr u64 kFnvOffset = 0xcbf29ce484222325ULL;
     constexpr u64 kFnvPrime = 0x100000001b3ULL;
     u64 h = kFnvOffset;
-    const u8* s = _text_start;
-    const u8* e = _text_end;
-    for (const u8* p = s; p < e; ++p)
+    const u64 start = reinterpret_cast<u64>(_text_start);
+    const u64 end = reinterpret_cast<u64>(_text_end);
+    if (end < start)
+        return h;
+    const u8* s = reinterpret_cast<const u8*>(start);
+    for (u64 i = 0; i < end - start; ++i)
     {
-        h ^= *p;
+        h ^= s[i];
         h *= kFnvPrime;
     }
     return h;

@@ -500,10 +500,15 @@ bool HotPatchSelfTest()
 HotPatchBulkResult HotPatchApplyAll()
 {
     HotPatchBulkResult r{};
-    const auto* p = __duetos_hotpatch_pairs_start;
-    const auto* end = __duetos_hotpatch_pairs_end;
-    for (; p < end; ++p)
+    const u64 begin = reinterpret_cast<u64>(__duetos_hotpatch_pairs_start);
+    const u64 end = reinterpret_cast<u64>(__duetos_hotpatch_pairs_end);
+    if (end < begin)
+        return r;
+    const u64 count = (end - begin) / sizeof(HotPatchPair);
+    const auto* pairs = __duetos_hotpatch_pairs_start;
+    for (u64 index = 0; index < count; ++index)
     {
+        const auto* p = &pairs[index];
         ++r.considered;
         const u64 target_va = reinterpret_cast<u64>(p->target);
         const u64 replacement_va = reinterpret_cast<u64>(p->replacement);

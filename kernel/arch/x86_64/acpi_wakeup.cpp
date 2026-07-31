@@ -74,7 +74,9 @@ AcpiWakeContext& AcpiWakeContextGet()
 
 bool AcpiWakeArm()
 {
-    const u64 len = static_cast<u64>(acpi_wake_tramp_end - acpi_wake_tramp_start);
+    const u64 start = reinterpret_cast<u64>(acpi_wake_tramp_start);
+    const u64 end = reinterpret_cast<u64>(acpi_wake_tramp_end);
+    const u64 len = end >= start ? end - start : 0;
     if (len == 0 || len > kTrampolineMaxLen)
     {
         KLOG_WARN_V("arch/acpi-wake", "wake trampoline image does not fit its page — S3 unavailable", len);
@@ -124,7 +126,9 @@ void AcpiWakeSelfTest()
 {
     using core::PanicWithValue;
 
-    const u64 len = static_cast<u64>(acpi_wake_tramp_end - acpi_wake_tramp_start);
+    const u64 start = reinterpret_cast<u64>(acpi_wake_tramp_start);
+    const u64 end = reinterpret_cast<u64>(acpi_wake_tramp_end);
+    const u64 len = end >= start ? end - start : 0;
     if (len != kTrampolineMaxLen)
         PanicWithValue("arch/acpi-wake", "wake trampoline blob is not exactly one page", len);
 
