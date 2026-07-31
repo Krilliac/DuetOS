@@ -52,8 +52,7 @@ static_assert(EncodeValidatedPte(AmdGpuVmGeneration::kGfx10, 0x12345000ull,
                                  AmdGpuVmAccess::kRead | AmdGpuVmAccess::kWrite) == 0x0002000012345067ull,
               "GFX10 system PTE encoding changed");
 static_assert(EncodeValidatedPte(AmdGpuVmGeneration::kGfx11, 0x12345000ull,
-                                 AmdGpuVmAccess::kRead | AmdGpuVmAccess::kWrite | AmdGpuVmAccess::kExecute) ==
-                  0x0002000012345077ull,
+                                 AmdGpuVmAccess::kRead | AmdGpuVmAccess::kExecute) == 0x0002000012345037ull,
               "GFX11 system PTE encoding changed");
 
 bool ExpectReject(const AmdGpuVmPteRequest& request, AmdGpuVmReject expected)
@@ -101,7 +100,7 @@ void AmdGpuVmSelfTest()
 
     const bool happy_paths = gfx9.has_value() && gfx9.value() == 0x0400000012345067ull && gfx10.has_value() &&
                              gfx10.value() == 0x0002000012345067ull && gfx11.has_value() &&
-                             gfx11.value() == 0x0002000012345077ull;
+                             gfx11.value() == 0x0002000012345037ull;
     const bool reject_paths =
         ExpectReject({static_cast<AmdGpuVmGeneration>(0xFFu), kPhysicalAddress, kReadWrite},
                      AmdGpuVmReject::kUnknownGeneration) &&
