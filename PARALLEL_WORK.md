@@ -738,3 +738,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Wire real kernel32 and ntdll Job lifecycle ingress with verdict-bearing smoke coverage
 - **Claimed**: 2026-07-31T15:53:38Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] win32-file-opaque-userland
+- **Session**: `Nathan-892`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `userland/libs/ucrtbase/ucrtbase.c userland/libs/msvcrt/msvcrt.c userland/apps/pe32_rich/pe32_rich.c`
+- **Description**: Accept opaque generation-tagged Win32 file handles in CRT and PE32 fixture
+- **Claimed**: 2026-07-31T15:56:35Z
+- **Status**: IN PROGRESS
