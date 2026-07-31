@@ -367,6 +367,21 @@ void AddressSpaceClearUserMappings(AddressSpace* as);
 /// callers must separately exclude concurrent unmap/release.
 PhysAddr AddressSpaceLookupUserFrame(const AddressSpace* as, u64 virt);
 
+/// [task context, thread-safe] Copy one bounded range from `as`'s user
+/// mapping into a trusted kernel buffer. The range must stay within one
+/// 4 KiB page. Resolves the PTE and copies through its direct-map alias
+/// while mutation_lock excludes concurrent unmap/remap; no raw frame or
+/// pointer escapes the transaction. Returns false for an invalid range,
+/// absent/non-user page, or null buffer.
+bool AddressSpaceReadUserMemory(AddressSpace* as, u64 user_va, void* kernel_dst, u64 len);
+
+/// [task context, thread-safe] Copy one bounded range from a trusted
+/// kernel buffer into `as`'s user mapping. Same transaction and range
+/// contract as AddressSpaceReadUserMemory, and additionally requires the
+/// target leaf PTE to be writable. Returns false instead of bypassing a
+/// read-only/RX mapping through the kernel direct map.
+bool AddressSpaceWriteUserMemory(AddressSpace* as, u64 user_va, const void* kernel_src, u64 len);
+
 /// Activate `as` by loading its PML4 into CR3 — but only if `as` is
 /// not already the active AS on this CPU. Updates the per-CPU
 /// current-AS tracker. `as == nullptr` selects the kernel AS (the
@@ -374,8 +389,9 @@ PhysAddr AddressSpaceLookupUserFrame(const AddressSpace* as, u64 virt);
 /// switches don't pay a CR3 write.
 void AddressSpaceActivate(AddressSpace* as);
 
-/// Return the number of 4 KiB user pages currently mapped in `as`.
-/// Each page in `region_count` represents exactly one 4 KiB frame.
+/// [any thread, bounded/IRQ-safe] Return the number of owned 4 KiB user
+/// pages currently mapped in `as`. Borrowed Section mappings are not part
+/// of this ledger. Each page in `region_count` represents one owned frame.
 /// Used by diagnostics (taskman MEM column) to show per-process
 /// resident page count without reaching into AS internals.
 /// Returns 0 for a null `as` (kernel-only tasks have no user AS).

@@ -357,16 +357,8 @@ void CmdSuspend(u32 argc, char** argv)
         ConsoleWriteln("SUSPEND: BAD TID");
         return;
     }
-    duetos::sched::Task* t = duetos::sched::SchedFindTaskByTid(tid);
-    if (t == nullptr)
-    {
-        ConsoleWrite("SUSPEND: NO SUCH TID: ");
-        WriteU64Dec(tid);
-        ConsoleWriteChar('\n');
-        return;
-    }
     u32 prev = 0;
-    const auto r = duetos::sched::SchedSuspendTask(t, &prev);
+    const auto r = duetos::sched::SchedSuspendByTid(tid, &prev);
     switch (r)
     {
     case duetos::sched::SuspendResult::Signaled:
@@ -405,16 +397,8 @@ void CmdResume(u32 argc, char** argv)
         ConsoleWriteln("RESUME: BAD TID");
         return;
     }
-    duetos::sched::Task* t = duetos::sched::SchedFindTaskByTid(tid);
-    if (t == nullptr)
-    {
-        ConsoleWrite("RESUME: NO SUCH TID: ");
-        WriteU64Dec(tid);
-        ConsoleWriteChar('\n');
-        return;
-    }
     u32 prev = 0;
-    const auto r = duetos::sched::SchedResumeTask(t, &prev);
+    const auto r = duetos::sched::SchedResumeByTid(tid, &prev);
     switch (r)
     {
     case duetos::sched::SuspendResult::Signaled:
@@ -463,15 +447,16 @@ void CmdAffinity(u32 argc, char** argv)
         ConsoleWriteln("AFFINITY: BAD CPU");
         return;
     }
-    duetos::sched::Task* t = duetos::sched::SchedFindTaskByTid(tid);
-    if (t == nullptr)
+    const auto result = (cpu >= 32) ? duetos::sched::AffinityResult::InvalidMask
+                                    : duetos::sched::SchedSetAffinityByTid(tid, static_cast<u32>(cpu));
+    if (result == duetos::sched::AffinityResult::NotFound || result == duetos::sched::AffinityResult::AlreadyDead)
     {
         ConsoleWrite("AFFINITY: NO SUCH TID: ");
         WriteU64Dec(tid);
         ConsoleWriteChar('\n');
         return;
     }
-    if (!duetos::sched::SchedSetAffinity(t, static_cast<u32>(cpu)))
+    if (result == duetos::sched::AffinityResult::InvalidMask)
     {
         ConsoleWrite("AFFINITY: CPU ");
         WriteU64Dec(cpu);

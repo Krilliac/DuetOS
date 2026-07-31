@@ -1236,15 +1236,17 @@ enum SyscallNumber : u64
     // SYS_PROCESS_VM_READ — read from another process's user
     // memory. Backs ntdll.dll's NtReadVirtualMemory (and
     // kernel32.dll's ReadProcessMemory once it's rewritten).
-    //   rdi = target process handle (kWin32ProcessBase + idx)
-    //   rsi = target VA (in the target's user AS)
-    //   rdx = caller's destination buffer (in the caller's AS)
-    //   r10 = byte count to read (capped at kSyscallProcessVmMax)
-    //   r8  = optional caller VA of a `u64*` to receive the
-    //         actual byte count copied. 0 = don't write back.
+    //   rdi = target process handle (kWin32ProcessBase + idx);
+    //   rsi = target VA (in the target's user AS);
+    //   rdx = caller's destination buffer (in the caller's AS);
+    //   r10 = byte count at most kSyscallProcessVmMax;
+    //   r8  = optional u64 copied-count output VA (0 disables writeback);
     //   rax = NTSTATUS (0 = success, otherwise an
     //         STATUS_INVALID_HANDLE / STATUS_ACCESS_VIOLATION /
     //         STATUS_ACCESS_DENIED / STATUS_INVALID_PARAMETER).
+    // Returns STATUS_SUCCESS for a full bounded request, STATUS_PARTIAL_COPY
+    // for a nonzero short transfer, STATUS_ACCESS_VIOLATION for a zero-byte
+    // fault, or STATUS_INVALID_PARAMETER for an oversized direct request.
     //
     // The caller does NOT need kCapDebug a SECOND time for the
     // read — kCapDebug was already enforced at SYS_PROCESS_OPEN,
@@ -1254,37 +1256,33 @@ enum SyscallNumber : u64
     // anyway so a cap that's revoked between open and use
     // (a future feature) takes effect immediately.
     //
-    // Implementation: walks the target's `AddressSpace` regions
-    // table page-by-page (`AddressSpaceLookupUserFrame` →
-    // `mm::PhysToVirt`), copies to the caller's buffer via
-    // `CopyToUser` (caller's AS is the active AS, since this is
-    // a syscall from ring 3). Stops at the first unmapped page
-    // in the target — partial copies are reported via the
-    // bytes-read out-pointer. Matches Windows: a partial read
-    // returns STATUS_PARTIAL_COPY (0x8000000D) with the byte
-    // count populated; v0 collapses partial-copy to
-    // STATUS_ACCESS_VIOLATION because the BytesRead out-pointer
-    // is enough to disambiguate for any sane caller.
+    // Implementation: moves bounded chunks through an address-space
+    // transaction-copy API. PTE resolution, permission validation,
+    // and direct-map access are one mutation lifetime; caller-side
+    // CopyToUser runs after that transaction. Stops at the first
+    // inaccessible page. A nonzero partial transfer returns
+    // STATUS_PARTIAL_COPY (0x8000000D) with the count populated;
+    // a zero-byte fault returns STATUS_ACCESS_VIOLATION.
     SYS_PROCESS_VM_READ = 132,
 
     // SYS_PROCESS_VM_WRITE — write to another process's user
     // memory. Backs ntdll.dll's NtWriteVirtualMemory (and
     // kernel32.dll's WriteProcessMemory once it's rewritten).
-    //   rdi = target process handle
-    //   rsi = target VA (in the target's user AS)
-    //   rdx = caller's source buffer (in the caller's AS)
-    //   r10 = byte count to write (capped at kSyscallProcessVmMax)
-    //   r8  = optional caller VA of a `u64*` to receive the
-    //         actual byte count written. 0 = don't write back.
+    //   rdi = target process handle;
+    //   rsi = target VA (in the target's user AS);
+    //   rdx = caller's source buffer (in the caller's AS);
+    //   r10 = byte count at most kSyscallProcessVmMax;
+    //   r8  = optional u64 written-count output VA (0 disables writeback);
     //   rax = NTSTATUS as for SYS_PROCESS_VM_READ.
+    // Returns the same full, partial, fault, and oversized-request NTSTATUS
+    // contract as SYS_PROCESS_VM_READ.
     //
     // Symmetric to the read path but with caller and target
     // roles swapped. Same partial-copy behaviour at the first
     // unmapped target page. There is NO COW: a write to a page
     // the target has READ-ONLY mapped is REFUSED, not silently
     // satisfied via the always-writable kernel direct map. The
-    // handler probes the target's leaf PTE
-    // (AddressSpaceProbePteRaw) and writes a page only if it is
+    // transaction-copy handler writes a page only if its leaf PTE is
     // present + user + writable from the target's own view — so
     // this path can't write memory a native process couldn't
     // (closes the W^X / RO-page isolation hole). A refused page
@@ -2616,8 +2614,8 @@ constexpr u32 kContextFull = kContextControl | kContextInteger | kContextSegment
 /// SYS_PROCESS_VM_WRITE may move. 16 KiB is plenty for the v0
 /// caller surface (debugger reads of PEB / PROCESS_BASIC_INFORMATION
 /// / TEB / thread context, malware probes scanning for sentinel
-/// patterns) and bounds the kernel's per-call work. Larger transfers
-/// chunk on the caller side.
+/// patterns) and bounds the kernel's per-call work. The kernel rejects
+/// larger direct requests; ntdll splits its public NT calls into chunks.
 inline constexpr u64 kSyscallProcessVmMax = 16384;
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

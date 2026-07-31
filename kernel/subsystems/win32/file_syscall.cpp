@@ -273,15 +273,7 @@ void DoFileClose(arch::TrapFrame* frame)
         // remains — which is the right Windows-shape semantics:
         // closing the last handle to a dead process actually
         // reaps it.
-        const u64 slot = handle - core::Process::kWin32ProcessBase;
-        core::Process::Win32ProcessHandle& h = proc->win32_proc_handles[slot];
-        if (h.in_use)
-        {
-            core::Process* target = h.target;
-            h.in_use = false;
-            h.target = nullptr;
-            core::ProcessRelease(target);
-        }
+        (void)core::ProcessCloseWin32ProcessHandle(proc, handle);
     }
     else if (handle >= core::Process::kWin32ThreadBase &&
              handle < core::Process::kWin32ThreadBase + core::Process::kWin32ThreadCap)
@@ -361,7 +353,7 @@ void DoFileClose(arch::TrapFrame* frame)
             section::SectionRelease(pool_idx);
         }
     }
-    else if (handle >= kJobHandleBase && handle < kJobHandleBase + kJobPoolCap)
+    else if (IsJobHandle(handle))
     {
         // Job-object handles — route to SysJobClose which drops
         // the job's refcount and, if it hits 0, releases every

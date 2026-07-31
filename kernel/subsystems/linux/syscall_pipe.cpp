@@ -344,24 +344,32 @@ i32 PipeAlloc()
 }
 #endif
 
-void PipeRetainRead(u32 idx)
+bool PipeRetainRead(u32 idx)
 {
     if (idx >= kPipePoolCap)
-        return;
+        return false;
     sync::SpinLockGuard guard(g_pipe_lock);
     Pipe& p = g_pipe_pool[idx];
     if (p.in_use && !p.closing)
+    {
         ++p.read_refs;
+        return true;
+    }
+    return false;
 }
 
-void PipeRetainWrite(u32 idx)
+bool PipeRetainWrite(u32 idx)
 {
     if (idx >= kPipePoolCap)
-        return;
+        return false;
     sync::SpinLockGuard guard(g_pipe_lock);
     Pipe& p = g_pipe_pool[idx];
     if (p.in_use && !p.closing)
+    {
         ++p.write_refs;
+        return true;
+    }
+    return false;
 }
 
 void PipeReleaseRead(u32 idx)

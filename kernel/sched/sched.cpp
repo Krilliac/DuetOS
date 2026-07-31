@@ -64,6 +64,7 @@
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
 #include "security/guard.h"
+#include "subsystems/win32/job_syscall.h"
 #include "mm/kheap.h"
 #include "mm/kstack.h"
 #include "mm/paging.h"
@@ -82,6 +83,8 @@ extern "C" void ContextSwitch(u64* old_rsp_slot, u64 new_rsp);
 
 struct Task
 {
+    static constexpr u64 kNameCap = 64;
+
     u64 id;
     TaskState state;
     u64 rsp;        // saved stack pointer (0 while running)
@@ -102,6 +105,10 @@ struct Task
     // `wake_tick` alone is insufficient because it stays 0 for
     // an untimed wait.
     u64 block_start_tick;
+    // Every task owns its diagnostic label. Besides making the public
+    // TaskName contract true, this prevents user-spawn leaf names and AP
+    // bootstrap scratch labels from escaping caller stack storage.
+    char name_storage[kNameCap];
     const char* name;
     // `next` threads the runqueue, a WaitQueue, or the zombie list —
     // mutually exclusive; at most one of those is the task's home
@@ -489,6 +496,8 @@ namespace
 using arch::Halt;
 using arch::SerialWrite;
 using arch::SerialWriteHex;
+
+Task* FindTaskByTidLocked(u64 tid);
 
 constexpr u64 kKernelStackBytes = 128 * 1024; // 128 KiB per task. Bumped 16->64 KiB on
                                               // 2026-04-25 (PE-loader DllImage[48] preload +
@@ -2396,7 +2405,14 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     t->stack_base = stack;
     t->stack_size = kKernelStackBytes;
     t->wake_tick = 0;
-    t->name = name;
+    u64 name_len = 0;
+    while (name[name_len] != '\0' && name_len + 1 < Task::kNameCap)
+    {
+        t->name_storage[name_len] = name[name_len];
+        ++name_len;
+    }
+    t->name_storage[name_len] = '\0';
+    t->name = t->name_storage;
     t->next = nullptr;
     t->sleep_next = nullptr;
     t->sleep_prev = nullptr;
@@ -2583,6 +2599,7 @@ Task* CreateUserTask(TaskEntry entry, void* arg, const char* name, core::Process
     // SchedCreateInternal returning and the assignment landing —
     // the new task then enters Ring3UserEntry, hits the
     // `CurrentProcess() == nullptr` gate, and panics.
+    const u64 process_pid = process->pid;
     Task* t =
         SchedCreateInternal(entry, arg, name, TaskPriority::Normal, process->as, process, prepare, prepare_context);
     if (t == nullptr)
@@ -2597,7 +2614,9 @@ Task* CreateUserTask(TaskEntry entry, void* arg, const char* name, core::Process
         core::ProcessRelease(process);
         return nullptr;
     }
-    KBP_PROBE_V(::duetos::debug::ProbeId::kRing3Spawn, process->pid);
+    // Publication can run and reap the child on another CPU before the
+    // creator resumes, so no Task or Process field may be read here.
+    KBP_PROBE_V(::duetos::debug::ProbeId::kRing3Spawn, process_pid);
     // Refcount discipline: ProcessCreate returned refcount=1 (one
     // for the creating caller). The caller hands that reference off
     // to this Task — no retain needed. Subsequent Tasks that want
@@ -4372,6 +4391,27 @@ static u32 OnlineCpuMask()
     return (1u << online) - 1u;
 }
 
+static void ApplyAffinityMaskLocked(Task* task, u32 effective, u32 online_bits)
+{
+    sync::SpinLockAssertHeld(g_sched_lock);
+    task->affinity_mask = (effective == online_bits) ? kAffinityAll : effective;
+    // If the task's routing hint now points at a forbidden CPU,
+    // retarget it to the lowest allowed one so the next wake lands
+    // correctly. A task that is Ready on a now-forbidden runqueue
+    // is re-homed lazily by the RunqueuePopRunnable backstop.
+    if (!TaskAllowedOn(task, task->last_cpu))
+    {
+        for (u32 i = 0; i < 32u; ++i)
+        {
+            if ((effective >> i) & 1u)
+            {
+                task->last_cpu = i;
+                break;
+            }
+        }
+    }
+}
+
 bool SchedSetAffinityMask(Task* t, u32 mask)
 {
     if (t == nullptr)
@@ -4398,22 +4438,7 @@ bool SchedSetAffinityMask(Task* t, u32 mask)
     // Store the all-online set as kAffinityAll so every placement
     // path stays on its byte-for-byte unrestricted fast path when
     // the caller didn't actually restrict anything.
-    t->affinity_mask = (effective == online_bits) ? kAffinityAll : effective;
-    // If the task's routing hint now points at a forbidden CPU,
-    // retarget it to the lowest allowed one so the next wake lands
-    // correctly. A task that is Ready on a now-forbidden runqueue
-    // is re-homed lazily by the RunqueuePopRunnable backstop.
-    if (!TaskAllowedOn(t, t->last_cpu))
-    {
-        for (u32 i = 0; i < 32u; ++i)
-        {
-            if ((effective >> i) & 1u)
-            {
-                t->last_cpu = i;
-                break;
-            }
-        }
-    }
+    ApplyAffinityMaskLocked(t, effective, online_bits);
     return true;
 }
 
@@ -4428,6 +4453,45 @@ u32 SchedGetAffinityMask(Task* t)
     // set so callers (the Linux sched_getaffinity thunk) see the
     // CPUs the task can actually land on, not 0xFFFFFFFF.
     return (t->affinity_mask == kAffinityAll) ? OnlineCpuMask() : t->affinity_mask;
+}
+
+AffinityResult SchedSetAffinityMaskByTid(u64 target_tid, u32 mask)
+{
+    const u32 online_bits = OnlineCpuMask();
+    const u32 effective = mask & online_bits;
+    if (effective == 0u)
+        return AffinityResult::InvalidMask;
+
+    sync::SpinLockGuard guard(g_sched_lock);
+    Task* target = FindTaskByTidLocked(target_tid);
+    if (target == nullptr)
+        return AffinityResult::NotFound;
+    if (target->state == TaskState::Dead)
+        return AffinityResult::AlreadyDead;
+    ApplyAffinityMaskLocked(target, effective, online_bits);
+    return AffinityResult::Success;
+}
+
+AffinityResult SchedSetAffinityByTid(u64 target_tid, u32 cpu_id)
+{
+    if (cpu_id >= 32u)
+        return AffinityResult::InvalidMask;
+    return SchedSetAffinityMaskByTid(target_tid, 1u << cpu_id);
+}
+
+AffinityResult SchedGetAffinityMaskByTid(u64 target_tid, u32* mask_out)
+{
+    if (mask_out == nullptr)
+        return AffinityResult::InvalidMask;
+
+    sync::SpinLockGuard guard(g_sched_lock);
+    Task* target = FindTaskByTidLocked(target_tid);
+    if (target == nullptr)
+        return AffinityResult::NotFound;
+    if (target->state == TaskState::Dead)
+        return AffinityResult::AlreadyDead;
+    *mask_out = (target->affinity_mask == kAffinityAll) ? OnlineCpuMask() : target->affinity_mask;
+    return AffinityResult::Success;
 }
 
 bool SchedSetAffinity(Task* t, u32 cpu_id)
@@ -5911,11 +5975,9 @@ u64 SchedKillByProcess(core::Process* target)
     // pass. Bounding the sweep converts that into a WARN plus a live
     // residue count instead of a wedged kernel.
     constexpr u32 kTidBatch = 32;
-    constexpr u32 kMaxSweepPasses = 8; // 8 * 32 = 256 threads per kill
     u64 signalled = 0;
-    u32 passes = 0;
 
-    for (; passes < kMaxSweepPasses; ++passes)
+    for (;;)
     {
         u64 tids[kTidBatch];
         u32 ntids = 0;
@@ -5923,7 +5985,8 @@ u64 SchedKillByProcess(core::Process* target)
             sync::SpinLockGuard guard(g_sched_lock);
             for (Task* task = g_all_tasks_head; task != nullptr && ntids < kTidBatch; task = task->all_next)
             {
-                if (task->process == target && task->state != TaskState::Dead)
+                if (task->process == target && task->state != TaskState::Dead && !task->kill_requested &&
+                    !IsProtectedTask(task))
                     tids[ntids++] = task->id;
             }
         }
@@ -5952,7 +6015,7 @@ u64 SchedKillByProcess(core::Process* target)
     const u64 residue = SchedCountLiveTasksForProcess(target);
     if (residue != 0)
     {
-        KLOG_WARN_V("sched", "SchedKillByProcess left live tasks (blocked and uncancellable, or > sweep bound)",
+        KLOG_WARN_V("sched", "SchedKillByProcess left live tasks (already-signalled blocked tasks await wake)",
                     residue);
     }
     return signalled;
@@ -6574,14 +6637,14 @@ core::Process* FindProcessByPidLocked(u64 target_pid)
     return hit;
 }
 
-core::Process* SchedFindProcessByPid(u64 target_pid)
+bool SchedProcessExists(u64 target_pid)
 {
     if (!cpu::BspInstalled())
     {
-        return nullptr;
+        return false;
     }
     sync::SpinLockGuard guard(g_sched_lock);
-    return FindProcessByPidLocked(target_pid);
+    return FindProcessByPidLocked(target_pid) != nullptr;
 }
 
 core::Process* SchedFindProcessByPidRetained(u64 target_pid)
@@ -6590,54 +6653,15 @@ core::Process* SchedFindProcessByPidRetained(u64 target_pid)
     {
         return nullptr;
     }
-    // The scheduler lock protects the lookup-to-retain interval. A
-    // caller that first uses SchedFindProcessByPid and then retains
-    // can lose the last task's reference between those operations.
+    // The scheduler lock protects the lookup-to-retain interval.
+    // Exposing a borrowed Process pointer would let the reaper drop
+    // the last task reference before a caller could pin it.
     sync::SpinLockGuard guard(g_sched_lock);
     core::Process* hit = FindProcessByPidLocked(target_pid);
     if (hit != nullptr)
     {
         core::ProcessRetain(hit);
     }
-    return hit;
-}
-
-Task* SchedFindTaskByTid(u64 target_tid)
-{
-    if (!cpu::BspInstalled())
-    {
-        return nullptr;
-    }
-    // Same walk shape as SchedFindProcessByPid — every list that
-    // can hold a Task. Returns the first task whose id matches.
-    // The returned Task* is only transiently valid. User-visible
-    // handles must store the immutable TID and use scheduler-owned
-    // by-TID operations instead of retaining this pointer.
-    sync::SpinLockGuard guard(g_sched_lock);
-    auto match = [&](Task* t) -> Task* { return (t != nullptr && t->id == target_tid) ? t : nullptr; };
-    Task* hit = match(Current());
-    if (hit != nullptr)
-    {
-        return hit;
-    }
-    ForEachRunqueueTask(
-        [&](Task* t)
-        {
-            hit = match(t);
-            return hit != nullptr;
-        });
-    if (hit == nullptr)
-    {
-        for (Task* t = g_sleep_head; t != nullptr && hit == nullptr; t = t->sleep_next)
-        {
-            hit = match(t);
-        }
-    }
-    // Skip zombies — opening a handle on a dead task is a v0
-    // GAP we don't service. The kernel zeroes a Process* once
-    // the task is in the zombie list (the reaper holds the
-    // last refcount), so there'd be no Process to retain
-    // even if we tried.
     return hit;
 }
 
@@ -6737,12 +6761,6 @@ namespace
     SchedExemptCurrentFromHungTask();
     for (;;)
     {
-        arch::Cli();
-        while (g_zombies == nullptr)
-        {
-            WaitQueueBlock(&g_reaper_wq);
-        }
-
         // Detach the entire zombie list. `SchedFinishTaskSwitch`
         // adds new zombies under `g_sched_lock` (the SMP-safe
         // deferred-zombie handoff that closes the reaper-frees-
@@ -6758,23 +6776,91 @@ namespace
         // list in one pass avoids N wake-up round trips when a
         // burst of tasks exits at once.
         Task* drained = nullptr;
+        sync::IrqFlags lf = sync::SpinLockAcquire(g_sched_lock);
+        if (g_zombies == nullptr)
         {
-            sync::IrqFlags lf = sync::SpinLockAcquire(g_sched_lock);
-            drained = g_zombies;
-            g_zombies = nullptr;
-            sync::SpinLockRelease(g_sched_lock, lf);
+            // Predicate check and wait-queue publication are one scheduler
+            // transaction. A producer cannot insert+wake between them: it
+            // takes this same lock, and ScheduleLockedHandoff keeps it held
+            // until this task is genuinely off-CPU.
+            WaitQueueBlockCurrentLocked(&g_reaper_wq);
+            ScheduleLockedHandoff(lf);
+            continue;
         }
-        arch::Sti();
+        drained = g_zombies;
+        g_zombies = nullptr;
+        sync::SpinLockRelease(g_sched_lock, lf);
 
-        // KFree happens AFTER we Sti so the heap path is not running
-        // with interrupts disabled (the heap is not required to be
-        // IRQ-safe today, but holding CLI across KFree locks out the
-        // timer for longer than the reap itself).
+        // The scheduler-lock release restored the entry IRQ state, so KFree
+        // never runs inside the predicate transaction.
         while (drained != nullptr)
         {
             Task* dead = drained;
             drained = dead->next;
             dead->next = nullptr;
+
+            // First make the dead task unreachable through every
+            // scheduler-owned lookup and detach its lifetime-bearing
+            // pointers while g_sched_lock still serializes those readers.
+            // Dropping the last Process reference before this handoff would
+            // leave dead->process visible in g_all_tasks_head, allowing a
+            // concurrent find-and-retain lookup to touch refcount-zero or
+            // already-freed Process storage.
+            core::Process* dead_process = nullptr;
+            mm::AddressSpace* dead_as = nullptr;
+            bool on_runq = false;
+            bool is_current = false;
+            ::duetos::u32 current_cpu = 0;
+            {
+                sync::IrqFlags lf = sync::SpinLockAcquire(g_sched_lock);
+                on_runq = ForEachRunqueueTask([dead](Task* task) { return task == dead; });
+                const u32 lim = arch::SmpCpuIdLimit();
+                for (u32 i = 0; i < lim; ++i)
+                {
+                    cpu::PerCpu* p = arch::SmpGetPercpu(i);
+                    if (p != nullptr && p->current_task == dead)
+                    {
+                        is_current = true;
+                        current_cpu = i;
+                        break;
+                    }
+                }
+                if (!on_runq && !is_current)
+                {
+                    AllTasksUnlink(dead);
+                    dead_process = dead->process;
+                    dead_as = dead->as;
+                    dead->process = nullptr;
+                    dead->as = nullptr;
+                }
+                sync::SpinLockRelease(g_sched_lock, lf);
+            }
+
+            // The zombie handoff promises `dead` is off every runqueue and
+            // no CPU still has it as current. Prove that before tearing down
+            // any referenced Process/AS or freeing its stack. Logging and
+            // panic run after g_sched_lock is released.
+            if (on_runq || is_current)
+            {
+                arch::SerialLineGuard guard;
+                arch::SerialWrite("\n[sched/reaper] REACHABLE TASK ABOUT TO BE FREED -- UAF root  task=");
+                arch::SerialWriteHex(reinterpret_cast<::duetos::u64>(dead));
+                arch::SerialWrite("  id=");
+                arch::SerialWriteHex(dead->id);
+                arch::SerialWrite("  name=\"");
+                arch::SerialWrite(dead->name ? dead->name : "<null>");
+                arch::SerialWrite("\"  state=");
+                arch::SerialWriteHex(static_cast<::duetos::u64>(dead->state));
+                arch::SerialWrite(on_runq ? "  [STILL ON A RUNQUEUE]" : "");
+                if (is_current)
+                {
+                    arch::SerialWrite("  [IS current_task on cpu ");
+                    arch::SerialWriteHex(current_cpu);
+                    arch::SerialWrite("]");
+                }
+                arch::SerialWrite("\n");
+                core::PanicWithValue("sched/reaper", "freeing a still-reachable task (resume UAF root)", dead->id);
+            }
 
             // Drop the task's process reference. The Process owns
             // the AS — ProcessRelease drops its AS reference, and
@@ -6797,7 +6883,7 @@ namespace
             // off-CPU (which it is by construction: SchedExit only
             // enqueues to the zombie list once Schedule() has
             // switched away).
-            if (dead->process != nullptr)
+            if (dead_process != nullptr)
             {
                 // Last task of this process? Then drop the
                 // references its Win32 process-handle table
@@ -6819,77 +6905,22 @@ namespace
                 // which is how one leaked 0x7xx handle wedges a
                 // restart=Always service out of its listener port.
                 //
-                // `dead` is already Dead and still linked into the
-                // all-tasks registry (AllTasksUnlink runs further
-                // down), so a count of 0 means this was the last
-                // task.
-                if (SchedCountLiveTasksForProcess(dead->process) == 0)
+                // `dead` is already Dead and unlinked from the all-tasks
+                // registry, so a count of 0 means this was the last task.
+                if (SchedCountLiveTasksForProcess(dead_process) == 0)
                 {
-                    core::ProcessDropOwnedProcessHandles(dead->process);
+                    core::ProcessDropOwnedProcessHandles(dead_process);
+                    // Jobs hold strong member references, including a
+                    // possible reference back to their owner. Drain them at
+                    // the same last-task boundary; waiting for ProcessRelease
+                    // would leave an uncloseable self-membership cycle.
+                    ::duetos::subsystems::win32::JobDrainOwnedByProcess(dead_process);
                 }
-                core::ProcessRelease(dead->process);
-                dead->process = nullptr;
-                dead->as = nullptr; // process owned it; pointer is now dangling, clear it
+                core::ProcessRelease(dead_process);
             }
             else
             {
-                mm::AddressSpaceRelease(dead->as);
-                dead->as = nullptr;
-            }
-
-            // === REAPER REACHABILITY GUARD (UAF hunt, 2026-06-05) ===
-            // The smoking-gun test for the boot-tail wild-jump hypothesis
-            // (Schedule() later resumes a freed task). BEFORE we free this
-            // task's stack and struct, prove it is genuinely unreachable: it
-            // must NOT be on any CPU's runqueue and must NOT be any CPU's
-            // `current_task`. By construction it should already be off-CPU
-            // and off-runqueue (zombie handoff in SchedFinishTaskSwitch), so
-            // a hit here means the reaper is about to free a task that
-            // Schedule() can still pick — exactly the UAF that produces the
-            // corrupt resume. Scan under g_sched_lock (the producer of both
-            // structures); capture the verdict, release, then panic naming
-            // the offender so we catch the ROOT here, before the wild jump.
-            {
-                bool on_runq = false;
-                bool is_current = false;
-                ::duetos::u32 cur_cpu = 0;
-                {
-                    sync::IrqFlags lf = sync::SpinLockAcquire(g_sched_lock);
-                    on_runq = ForEachRunqueueTask([dead](Task* t) { return t == dead; });
-                    const u32 lim = arch::SmpCpuIdLimit();
-                    for (u32 i = 0; i < lim; ++i)
-                    {
-                        cpu::PerCpu* p = arch::SmpGetPercpu(i);
-                        if (p != nullptr && p->current_task == dead)
-                        {
-                            is_current = true;
-                            cur_cpu = i;
-                            break;
-                        }
-                    }
-                    sync::SpinLockRelease(g_sched_lock, lf);
-                }
-                if (on_runq || is_current)
-                {
-                    arch::SerialLineGuard guard;
-                    arch::SerialWrite("\n[sched/reaper] REACHABLE TASK ABOUT TO BE FREED — UAF root  task=");
-                    arch::SerialWriteHex(reinterpret_cast<::duetos::u64>(dead));
-                    arch::SerialWrite("  id=");
-                    arch::SerialWriteHex(dead->id);
-                    arch::SerialWrite("  name=\"");
-                    arch::SerialWrite(dead->name ? dead->name : "<null>");
-                    arch::SerialWrite("\"  state=");
-                    arch::SerialWriteHex(static_cast<::duetos::u64>(dead->state));
-                    arch::SerialWrite(on_runq ? "  [STILL ON A RUNQUEUE]" : "");
-                    if (is_current)
-                    {
-                        arch::SerialWrite("  [IS current_task on cpu ");
-                        arch::SerialWriteHex(cur_cpu);
-                        arch::SerialWrite("]");
-                    }
-                    arch::SerialWrite("\n");
-                    core::PanicWithValue("sched/reaper", "freeing a still-reachable task (resume UAF root)", dead->id);
-                }
+                mm::AddressSpaceRelease(dead_as);
             }
 
             // Stack_base can be nullptr for the boot task (task 0);
@@ -6906,16 +6937,6 @@ namespace
                     core::PanicWithValue("sched/reaper", "stack canary corrupted (task overflow?)", canary);
                 }
                 mm::FreeKernelStack(dead->stack_base, dead->stack_size);
-            }
-            // Remove from the global all-tasks list before freeing
-            // the Task struct — otherwise the next walker would
-            // dereference a freed pointer. Under the sched lock so
-            // a concurrent SchedCreate or hung-task walker can't
-            // see the half-unlinked state.
-            {
-                sync::IrqFlags lf = sync::SpinLockAcquire(g_sched_lock);
-                AllTasksUnlink(dead);
-                sync::SpinLockRelease(g_sched_lock, lf);
             }
             mm::KFree(dead);
             SchedCpuIncReaped();

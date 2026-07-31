@@ -1098,6 +1098,61 @@ PhysAddr AddressSpaceLookupUserFrame(const AddressSpace* as, u64 virt)
     return kNullFrame;
 }
 
+namespace
+{
+bool CopyUserMemoryTransaction(AddressSpace* as, u64 user_va, void* kernel_buffer, u64 len, bool write)
+{
+    if (len == 0)
+    {
+        return true;
+    }
+    constexpr u64 kUserMax = 0x00007FFFFFFFFFFFULL;
+    const u64 page_offset = user_va & (kPageSize - 1);
+    if (as == nullptr || kernel_buffer == nullptr || user_va > kUserMax || len > (kPageSize - page_offset))
+    {
+        return false;
+    }
+
+    AddressSpaceMutationGuard mutation(*as);
+    u64 pte_value = 0;
+    {
+        sync::SpinLockGuard guard(as->regions_lock);
+        u64* pte = WalkToPteIn(as->pml4_virt, user_va, nullptr);
+        if (pte == nullptr)
+        {
+            return false;
+        }
+        pte_value = *pte;
+        constexpr u64 kReadableUser = kPagePresent | kPageUser;
+        if ((pte_value & kReadableUser) != kReadableUser || (write && (pte_value & kPageWritable) == 0))
+        {
+            return false;
+        }
+    }
+
+    auto* direct = static_cast<u8*>(PhysToVirt(pte_value & kAddrMask)) + page_offset;
+    if (write)
+    {
+        memcpy(direct, kernel_buffer, len);
+    }
+    else
+    {
+        memcpy(kernel_buffer, direct, len);
+    }
+    return true;
+}
+} // namespace
+
+bool AddressSpaceReadUserMemory(AddressSpace* as, u64 user_va, void* kernel_dst, u64 len)
+{
+    return CopyUserMemoryTransaction(as, user_va, kernel_dst, len, false);
+}
+
+bool AddressSpaceWriteUserMemory(AddressSpace* as, u64 user_va, const void* kernel_src, u64 len)
+{
+    return CopyUserMemoryTransaction(as, user_va, const_cast<void*>(kernel_src), len, true);
+}
+
 void AddressSpaceRetain(AddressSpace* as)
 {
     if (as == nullptr)
@@ -1278,6 +1333,37 @@ void AddressSpaceSelfTest()
     if ((b_pte & kPagePresent) != 0)
     {
         PanicAs("self-test: AS-B SAW AS-A's private page — ISOLATION BROKEN", kTestVa);
+    }
+
+    // Transaction-copy access must keep frame lookup, permission check,
+    // and direct-map dereference inside one mutation lifetime. Exercise
+    // both directions, isolation, and write refusal after an RO downgrade.
+    const u8 write_probe[4] = {0xD0, 0xE7, 0xA5, 0x5A};
+    u8 read_probe[4]{};
+    if (!AddressSpaceWriteUserMemory(a, kTestVa + 37, write_probe, sizeof(write_probe)) ||
+        !AddressSpaceReadUserMemory(a, kTestVa + 37, read_probe, sizeof(read_probe)))
+    {
+        PanicAs("self-test: transaction-copy read/write refused mapped page", kTestVa);
+    }
+    for (u32 i = 0; i < sizeof(write_probe); ++i)
+    {
+        if (read_probe[i] != write_probe[i])
+        {
+            PanicAs("self-test: transaction-copy data mismatch", i);
+        }
+    }
+    if (AddressSpaceReadUserMemory(b, kTestVa + 37, read_probe, sizeof(read_probe)))
+    {
+        PanicAs("self-test: transaction-copy crossed address-space isolation", kTestVa);
+    }
+    if (AddressSpaceReadUserMemory(a, kTestVa + kPageSize - 2, read_probe, sizeof(read_probe)))
+    {
+        PanicAs("self-test: transaction-copy accepted a cross-page range", kTestVa);
+    }
+    if (!AddressSpaceProtectUserPage(a, kTestVa, kPagePresent | kPageUser | kPageNoExecute) ||
+        AddressSpaceWriteUserMemory(a, kTestVa + 37, write_probe, sizeof(write_probe)))
+    {
+        PanicAs("self-test: transaction-copy bypassed read-only PTE", kTestVa);
     }
 
     // Deliberately NOT flipping CR3 here. kernel_main runs on the

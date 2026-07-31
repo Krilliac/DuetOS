@@ -203,19 +203,6 @@ u64 PathLen(const char* p)
     return n;
 }
 
-// Find a free Win32 handle slot on `proc`. Returns kWin32HandleCap
-// when none are free.
-u64 FindFreeSlot(::duetos::core::Process* proc)
-{
-    using ::duetos::core::Process;
-    for (u64 i = 0; i < Process::kWin32HandleCap; ++i)
-    {
-        if (proc->win32_handles[i].kind == Process::FsBackingKind::None)
-            return i;
-    }
-    return Process::kWin32HandleCap;
-}
-
 // Validate handle id, return slot index or u64(-1).
 //
 // Spectre v1 nospec: every consumer of this function uses the
@@ -230,6 +217,46 @@ u64 HandleToSlot(u64 handle)
         return u64(-1);
     return ::duetos::util::MaskedIndex(handle - Process::kWin32HandleBase, Process::kWin32HandleCap);
 }
+
+// RAII wrapper for the process-owned reserve/publish protocol. Filesystem
+// lookup and mutation may block, so the process spinlock is never held across
+// those operations; the exact generation token prevents a delayed publisher
+// from landing in a recycled slot.
+class HandleReservation final
+{
+  public:
+    explicit HandleReservation(::duetos::core::Process* process) : m_process(process), m_held(false)
+    {
+        m_held = ::duetos::core::ProcessReserveWin32FileHandle(process, &m_token);
+    }
+
+    ~HandleReservation()
+    {
+        if (m_held)
+            ::duetos::core::ProcessAbortWin32FileHandle(m_process, m_token);
+    }
+
+    HandleReservation(const HandleReservation&) = delete;
+    HandleReservation& operator=(const HandleReservation&) = delete;
+
+    [[nodiscard]] bool IsValid() const { return m_held; }
+
+    u64 Publish(const ::duetos::core::Process::Win32FileHandle& candidate)
+    {
+        if (!m_held)
+            return u64(-1);
+        u64 handle = u64(-1);
+        if (!::duetos::core::ProcessPublishWin32FileHandle(m_process, m_token, candidate, &handle))
+            return u64(-1);
+        m_held = false;
+        return handle;
+    }
+
+  private:
+    ::duetos::core::Process* m_process;
+    ::duetos::core::Process::Win32FileReservation m_token{};
+    bool m_held;
+};
 
 // Per-handle byte size accessor — every backing knows it.
 u64 HandleSize(const ::duetos::core::Process::Win32FileHandle& h)
@@ -266,15 +293,16 @@ u64 OpenForProcess(::duetos::core::Process* proc, const char* path)
     const char* duet_sub = nullptr;
     const bool duet_routed = ParseDuetFsPath(proc->root, path, &duet_handle, &duet_sub);
 
-    const u64 slot = FindFreeSlot(proc);
-    if (slot == Process::kWin32HandleCap)
+    HandleReservation reservation(proc);
+    if (!reservation.IsValid())
     {
         SerialWrite("[fs/route] open out-of-handles pid=");
         SerialWriteHex(proc->pid);
         SerialWrite("\n");
         return u64(-1);
     }
-    Process::Win32FileHandle& h = proc->win32_handles[slot];
+    Process::Win32FileHandle h{};
+    h.named_pipe_registry_slot = -1;
 
     if (duet_routed)
     {
@@ -304,7 +332,9 @@ u64 OpenForProcess(::duetos::core::Process* proc, const char* path)
         h.cursor = 0;
         h.is_canary = false;
         (void)CopyPathInto(h.fat32_path, nullptr);
-        const u64 handle = Process::kWin32HandleBase + slot;
+        const u64 handle = reservation.Publish(h);
+        if (handle == u64(-1))
+            return u64(-1);
         SerialWrite("[fs/route] open ok pid=");
         SerialWriteHex(proc->pid);
         SerialWrite(" path=\"");
@@ -368,7 +398,9 @@ u64 OpenForProcess(::duetos::core::Process* proc, const char* path)
         // CREATE-time matches that, and CreateForProcess
         // already runs the full CanaryCheck before plant).
         h.is_canary = ::duetos::security::CanaryMatchesPath(disk_rest);
-        const u64 handle = Process::kWin32HandleBase + slot;
+        const u64 handle = reservation.Publish(h);
+        if (handle == u64(-1))
+            return u64(-1);
         SerialWrite("[fs/route] open ok pid=");
         SerialWriteHex(proc->pid);
         SerialWrite(" path=\"");
@@ -419,7 +451,9 @@ u64 OpenForProcess(::duetos::core::Process* proc, const char* path)
         h.cursor = 0;
         h.is_canary = false;
         (void)CopyPathInto(h.fat32_path, nullptr);
-        const u64 handle = Process::kWin32HandleBase + slot;
+        const u64 handle = reservation.Publish(h);
+        if (handle == u64(-1))
+            return u64(-1);
         SerialWrite("[fs/route] open ok pid=");
         SerialWriteHex(proc->pid);
         SerialWrite(" path=\"");
@@ -443,7 +477,9 @@ u64 OpenForProcess(::duetos::core::Process* proc, const char* path)
     h.cursor = 0;
     h.is_canary = ::duetos::security::CanaryMatchesPath(path);
     (void)CopyPathInto(h.fat32_path, nullptr); // ramfs handles never need it
-    const u64 handle = Process::kWin32HandleBase + slot;
+    const u64 handle = reservation.Publish(h);
+    if (handle == u64(-1))
+        return u64(-1);
     SerialWrite("[fs/route] open ok pid=");
     SerialWriteHex(proc->pid);
     SerialWrite(" path=\"");
@@ -465,7 +501,7 @@ u64 ReadForProcess(::duetos::core::Process* proc, u64 handle, void* dst, u64 len
     if (slot == u64(-1))
         return u64(-1);
     Process::Win32FileHandle& h = proc->win32_handles[slot];
-    if (h.kind == Process::FsBackingKind::None)
+    if (h.kind == Process::FsBackingKind::None || h.kind == Process::FsBackingKind::Reserved)
         return u64(-1);
     if (len == 0)
         return 0;
@@ -547,7 +583,7 @@ u64 WriteForProcess(::duetos::core::Process* proc, u64 handle, const void* src, 
     if (slot == u64(-1))
         return u64(-1);
     Process::Win32FileHandle& h = proc->win32_handles[slot];
-    if (h.kind == Process::FsBackingKind::None)
+    if (h.kind == Process::FsBackingKind::None || h.kind == Process::FsBackingKind::Reserved)
         return u64(-1);
     if (len == 0)
         return 0;
@@ -690,6 +726,9 @@ u64 CreateForProcess(::duetos::core::Process* proc, const char* path, const void
     const char* duet_sub = nullptr;
     if (ParseDuetFsPath(proc->root, path, &duet_handle, &duet_sub))
     {
+        HandleReservation reservation(proc);
+        if (!reservation.IsValid())
+            return u64(-1);
         const auto dev = DuetFsDeviceFor(duet_handle);
         u32 new_id = 0;
         const u64 sub_len = PathLen(duet_sub);
@@ -713,10 +752,8 @@ u64 CreateForProcess(::duetos::core::Process* proc, const char* path, const void
                 return u64(-1);
             }
         }
-        const u64 slot = FindFreeSlot(proc);
-        if (slot == Process::kWin32HandleCap)
-            return u64(-1);
-        Process::Win32FileHandle& dh = proc->win32_handles[slot];
+        Process::Win32FileHandle dh{};
+        dh.named_pipe_registry_slot = -1;
         dh.kind = Process::FsBackingKind::DuetFs;
         dh.ramfs_node = nullptr;
         dh.fat32_volume_idx = 0;
@@ -726,9 +763,15 @@ u64 CreateForProcess(::duetos::core::Process* proc, const char* path, const void
         dh.cursor = 0;
         dh.is_canary = false;
         (void)CopyPathInto(dh.fat32_path, nullptr);
+        const u64 handle = reservation.Publish(dh);
+        if (handle == u64(-1))
+        {
+            (void)duetfs_unlink_path(&dev, reinterpret_cast<const u8*>(duet_sub), sub_len + 1);
+            return u64(-1);
+        }
         if (init_len > 0)
             ::duetos::core::RecordFsWrite(proc, init_len);
-        return Process::kWin32HandleBase + slot;
+        return handle;
     }
     if (!ParseDiskPath(proc->root, path, &disk_idx, &disk_rest))
     {
@@ -768,15 +811,16 @@ u64 CreateForProcess(::duetos::core::Process* proc, const char* path, const void
     // failure doesn't leave a freshly-created file orphaned in
     // the directory. If the plant fails the slot returns to
     // FsBackingKind::None below.
-    const u64 slot = FindFreeSlot(proc);
-    if (slot == Process::kWin32HandleCap)
+    HandleReservation reservation(proc);
+    if (!reservation.IsValid())
     {
         SerialWrite("[fs/route] create out-of-handles pid=");
         SerialWriteHex(proc->pid);
         SerialWrite("\n");
         return u64(-1);
     }
-    Process::Win32FileHandle& h = proc->win32_handles[slot];
+    Process::Win32FileHandle h{};
+    h.named_pipe_registry_slot = -1;
 
     const i64 created = fat32::Fat32CreateAtPath(vol, disk_rest, init_bytes, init_len);
     if (created < 0)
@@ -828,7 +872,12 @@ u64 CreateForProcess(::duetos::core::Process* proc, const char* path, const void
     if (init_len > 0)
         ::duetos::core::RecordFsWrite(proc, init_len);
     ::duetos::subsystems::linux::internal::InotifyPublish(disk_rest, ::duetos::subsystems::linux::internal::kInCreate);
-    const u64 handle = Process::kWin32HandleBase + slot;
+    const u64 handle = reservation.Publish(h);
+    if (handle == u64(-1))
+    {
+        (void)fat32::Fat32DeleteAtPath(vol, disk_rest);
+        return u64(-1);
+    }
     SerialWrite("[fs/route] create ok pid=");
     SerialWriteHex(proc->pid);
     SerialWrite(" path=\"");
@@ -852,7 +901,7 @@ u64 SeekForProcess(::duetos::core::Process* proc, u64 handle, i64 offset, u32 wh
     if (slot == u64(-1))
         return u64(-1);
     Process::Win32FileHandle& h = proc->win32_handles[slot];
-    if (h.kind == Process::FsBackingKind::None)
+    if (h.kind == Process::FsBackingKind::None || h.kind == Process::FsBackingKind::Reserved)
         return u64(-1);
     const u64 size = HandleSize(h);
     i64 base = 0;
@@ -888,7 +937,7 @@ u64 FstatForProcess(::duetos::core::Process* proc, u64 handle, u64* out_size)
     if (slot == u64(-1))
         return u64(-1);
     const Process::Win32FileHandle& h = proc->win32_handles[slot];
-    if (h.kind == Process::FsBackingKind::None)
+    if (h.kind == Process::FsBackingKind::None || h.kind == Process::FsBackingKind::Reserved)
         return u64(-1);
     *out_size = HandleSize(h);
     return 0;
@@ -899,37 +948,90 @@ u64 CloseForProcess(::duetos::core::Process* proc, u64 handle)
     using ::duetos::core::Process;
     if (proc == nullptr)
         return 0;
-    const u64 slot = HandleToSlot(handle);
-    if (slot == u64(-1))
+    Process::Win32FileHandle detached{};
+    if (!::duetos::core::ProcessDetachWin32FileHandle(proc, handle, &detached))
         return 0;
-    Process::Win32FileHandle& h = proc->win32_handles[slot];
-    // Pipe ends: drop the per-end refcount BEFORE clearing the
-    // slot. The pipe pool walks read_refs / write_refs to decide
-    // when to free the buffer + wake the opposite end (EOF /
-    // EPIPE semantics); skipping the release would leak the slot.
-    if (h.kind == Process::FsBackingKind::Pipe)
+    // The row is already empty and reusable here. Backing teardown may wake
+    // tasks or free memory, so it deliberately happens after win32_file_lock.
+    if (detached.kind == Process::FsBackingKind::Pipe)
     {
-        if (h.pipe_is_write_end)
-            ::duetos::subsystems::linux::internal::PipeReleaseWrite(h.pipe_pool_idx);
+        if (detached.pipe_is_write_end)
+            ::duetos::subsystems::linux::internal::PipeReleaseWrite(detached.pipe_pool_idx);
         else
-            ::duetos::subsystems::linux::internal::PipeReleaseRead(h.pipe_pool_idx);
+            ::duetos::subsystems::linux::internal::PipeReleaseRead(detached.pipe_pool_idx);
         // Server end of a named pipe: drop the registry entry
         // and any orphan opposite-end reservation (no client
         // ever connected) before the slot is reused. Client
         // ends and anonymous pipes keep slot == -1 and skip.
-        if (h.named_pipe_registry_slot >= 0)
-            ::duetos::ipc::NamedPipeOnServerClose(h.named_pipe_registry_slot, h.named_pipe_registry_gen);
+        if (detached.named_pipe_registry_slot >= 0)
+            ::duetos::ipc::NamedPipeOnServerClose(detached.named_pipe_registry_slot, detached.named_pipe_registry_gen);
     }
-    h.kind = Process::FsBackingKind::None;
-    h.ramfs_node = nullptr;
-    h.fat32_volume_idx = 0;
-    h.cursor = 0;
-    h.pipe_pool_idx = 0;
-    h.pipe_is_write_end = false;
-    h.named_pipe_registry_slot = -1;
-    h.named_pipe_registry_gen = 0;
-    (void)CopyPathInto(h.fat32_path, nullptr);
     return 0;
+}
+
+u64 DuplicateForChild(::duetos::core::Process* parent, u64 parent_handle, ::duetos::core::Process* child)
+{
+    using ::duetos::core::Process;
+    if (parent == nullptr || child == nullptr)
+        return 0;
+    const u64 slot = HandleToSlot(parent_handle);
+    if (slot == u64(-1))
+        return 0;
+
+    Process::Win32FileReservation child_reservation{};
+    if (!::duetos::core::ProcessReserveWin32FileHandle(child, &child_reservation))
+        return 0;
+
+    Process::Win32FileHandle candidate{};
+    bool backing_retained = false;
+    bool valid = false;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(parent->win32_file_lock);
+    const Process::Win32FileHandle& source = parent->win32_handles[slot];
+    if (source.kind == Process::FsBackingKind::Pipe || source.kind == Process::FsBackingKind::Fat32 ||
+        source.kind == Process::FsBackingKind::Ramfs || source.kind == Process::FsBackingKind::DuetFs)
+    {
+        candidate = source;
+        if (source.kind == Process::FsBackingKind::Pipe)
+        {
+            backing_retained = source.pipe_is_write_end
+                                   ? ::duetos::subsystems::linux::internal::PipeRetainWrite(source.pipe_pool_idx)
+                                   : ::duetos::subsystems::linux::internal::PipeRetainRead(source.pipe_pool_idx);
+            valid = backing_retained;
+        }
+        else
+        {
+            valid = true;
+        }
+    }
+    sync::SpinLockRelease(parent->win32_file_lock, flags);
+
+    if (!valid)
+    {
+        ::duetos::core::ProcessAbortWin32FileHandle(child, child_reservation);
+        return 0;
+    }
+
+    // Inheritance duplicates the backing but not the open-file cursor in this
+    // v0 ABI. Named-pipe registry ownership stays exclusively with the
+    // original server handle; the child owns only one ordinary pipe end.
+    candidate.cursor = 0;
+    candidate.named_pipe_registry_slot = -1;
+    candidate.named_pipe_registry_gen = 0;
+
+    u64 child_handle = 0;
+    if (!::duetos::core::ProcessPublishWin32FileHandle(child, child_reservation, candidate, &child_handle))
+    {
+        ::duetos::core::ProcessAbortWin32FileHandle(child, child_reservation);
+        if (backing_retained)
+        {
+            if (candidate.pipe_is_write_end)
+                ::duetos::subsystems::linux::internal::PipeReleaseWrite(candidate.pipe_pool_idx);
+            else
+                ::duetos::subsystems::linux::internal::PipeReleaseRead(candidate.pipe_pool_idx);
+        }
+        return 0;
+    }
+    return child_handle;
 }
 
 // ---------------------------------------------------------------

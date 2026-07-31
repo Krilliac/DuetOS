@@ -1229,6 +1229,16 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 211 | `SYS_VK_CALL` |
 | 212 | `SYS_RANDOM_BYTES` |
 | 213 | `SYS_IOCP_POST` |
+| 214 | `SYS_GDI_SET_DIBITS` |
+| 215 | `SYS_GDI_GET_DIBITS` |
+| 216 | `SYS_FIBER_CONVERT` |
+| 217 | `SYS_FIBER_CREATE` |
+| 218 | `SYS_FIBER_SWITCH` |
+| 219 | `SYS_FIBER_DELETE` |
+| 220 | `SYS_FLS_ALLOC` |
+| 221 | `SYS_FLS_FREE` |
+| 222 | `SYS_FLS_GET` |
+| 223 | `SYS_FLS_SET` |
 <!-- /AUTO:syscall_list -->
 
 ## Native Syscall Argument / Return Reference
@@ -1388,8 +1398,8 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 129 | `SYS_WIN32_CUSTOM` | — | — |
 | 130 | `SYS_REGISTRY` | — | NTSTATUS in rax (kNtStatusSuccess = 0, STATUS_OBJECT_NAME_NOT_FOUND = 0xC0000... |
 | 131 | `SYS_PROCESS_OPEN` | `rdi` = target PID (u64) | — |
-| 132 | `SYS_PROCESS_VM_READ` | `rdi` = target process handle (kWin32ProcessBase + idx) rsi = tar... | STATUS_PARTIAL_COPY (0x8000000D) with the byte count populated |
-| 133 | `SYS_PROCESS_VM_WRITE` | `rdi` = target process handle rsi = target VA (in the target's us... | — |
+| 132 | `SYS_PROCESS_VM_READ` | `rdi` = target process handle (kWin32ProcessBase + idx); `rsi` = target VA (in the target's user AS); `rdx` = caller's destination buffer (in the caller's AS); `r10` = byte count at most kSyscallProcessVmMax; `r8` = optional u64 copied-count output VA (0 disables writeback) | STATUS_SUCCESS for a full bounded request, STATUS_PARTIAL_COPY for a nonzero ... |
+| 133 | `SYS_PROCESS_VM_WRITE` | `rdi` = target process handle; `rsi` = target VA (in the target's user AS); `rdx` = caller's source buffer (in the caller's AS); `r10` = byte count at most kSyscallProcessVmMax; `r8` = optional u64 written-count output VA (0 disables writeback) | the same full, partial, fault, and oversized-request NTSTATUS contract as SYS... |
 | 134 | `SYS_PROCESS_VM_QUERY` | `rdi` = target process handle rsi = target VA to probe rdx = call... | a single-page region: BaseAddress = the 4 KiB-aligned start of the page conta... |
 | 135 | `SYS_THREAD_SUSPEND` | `rdi` = local CreateThread handle or a foreign handle returned by... | — |
 | 136 | `SYS_THREAD_RESUME` | — | shape as SYS_THREAD_SUSPEND |

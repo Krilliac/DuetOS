@@ -86,6 +86,12 @@ u64 FstatForProcess(::duetos::core::Process* proc, u64 handle, u64* out_size);
 /// free slot is a no-op. Always returns 0.
 u64 CloseForProcess(::duetos::core::Process* proc, u64 handle);
 
+/// Duplicate one inheritable Win32 file handle into an unpublished child.
+/// Parent row validation, snapshot, and pipe-end retain are atomic with
+/// respect to CloseForProcess; child publication uses the generation-checked
+/// reserve/publish protocol. Returns 0 on failure, otherwise the child handle.
+u64 DuplicateForChild(::duetos::core::Process* parent, u64 parent_handle, ::duetos::core::Process* child);
+
 /// Look up a path's metadata without opening a handle. Used by
 /// NtQueryAttributesFile / NtQueryFullAttributesFile and the
 /// Linux stat() family. Fills `out_size` (file size in bytes)

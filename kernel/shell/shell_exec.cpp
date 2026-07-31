@@ -875,7 +875,8 @@ void CmdPeTriage(u32 argc, char** argv)
             ConsoleWriteln("PE-TRIAGE: USAGE: PE-TRIAGE [PID]");
             return;
         }
-        duetos::core::Process* p = duetos::sched::SchedFindProcessByPid(pid);
+        duetos::core::ScopedProcessRef process_ref(duetos::sched::SchedFindProcessByPidRetained(pid));
+        duetos::core::Process* p = process_ref.Get();
         if (p == nullptr)
         {
             ConsoleWrite("PE-TRIAGE: NO SUCH PID: ");
@@ -894,15 +895,22 @@ void CmdPeTriage(u32 argc, char** argv)
             auto* c = static_cast<TriageCookie*>(ck);
             if (!info.has_process || info.owner_pid == 0)
                 return;
-            if (TriageSeen(c, info.owner_pid))
-                return;
-            duetos::core::Process* p = duetos::sched::SchedFindProcessByPid(info.owner_pid);
-            if (p == nullptr || p->win32_iat_miss_count == 0)
-                return;
-            PrintProcessTriage(p, info.owner_pid);
-            ++c->reported;
+            (void)TriageSeen(c, info.owner_pid);
         },
         &cookie);
+    // SchedEnumerate invokes its callback under g_sched_lock. Resolve and
+    // print only after that snapshot walk has returned: retained lookup
+    // re-enters the scheduler and console output may block.
+    for (u32 i = 0; i < cookie.seen_count; ++i)
+    {
+        const u64 pid = cookie.seen[i];
+        duetos::core::ScopedProcessRef process_ref(duetos::sched::SchedFindProcessByPidRetained(pid));
+        duetos::core::Process* p = process_ref.Get();
+        if (p == nullptr || p->win32_iat_miss_count == 0)
+            continue;
+        PrintProcessTriage(p, pid);
+        ++cookie.reported;
+    }
     if (cookie.reported == 0)
         ConsoleWriteln("PE-TRIAGE: NO WIN32 PES WITH UNRESOLVED IMPORTS");
 }

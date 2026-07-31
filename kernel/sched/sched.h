@@ -132,30 +132,16 @@ void SchedSetUserGsOverride(Task* t, u64 gs_base);
 /// never throttled. No-op-false on a null task.
 bool SchedSehDeliveryAllowed(Task* t, u64 fault_rip);
 
-/// Find the first live `core::Process*` with `pid == target_pid`.
-/// Walks every queue (running, normal-runqueue, idle-runqueue,
-/// sleep-queue, zombies) under g_sched_lock to keep the lists
-/// stable during the scan — including against peer CPUs, which
-/// bare arch::Cli never excluded. Returns nullptr if no task with
-/// that PID is alive — including the case where the task exists
-/// but is a kernel-only task (`process == nullptr`).
-///
-/// Does NOT bump the returned Process's refcount. Callers that
-/// need to hold the reference past the immediate scan window
-/// must call `core::ProcessRetain` — and accept the residual
-/// race that the process can exit between this returning and
-/// the retain. Persistent process handles require a dedicated
-/// scheduler-owned find-and-retain primitive.
-///
-/// Used by SYS_PROCESS_OPEN (NtOpenProcess) to translate a PID
-/// into a Process pointer the kernel can hand back as a handle.
-core::Process* SchedFindProcessByPid(u64 target_pid);
+/// Return whether a process-backed task with `pid == target_pid` is
+/// still registered. This intentionally exposes no borrowed pointer:
+/// callers that dereference Process state must use the retained lookup
+/// below, while liveness/pidfd probes need only this moment-in-time bool.
+bool SchedProcessExists(u64 target_pid);
 
 /// Find a process and take a Process reference while holding the
 /// scheduler lock. Use when the caller will access the process after
-/// the lookup; this closes the lookup-to-retain lifetime race of the
-/// borrowed SchedFindProcessByPid API. Caller must ProcessRelease the
-/// returned pointer.
+/// the lookup; this is the only public API that returns a Process pointer.
+/// Caller must ProcessRelease the result (prefer ScopedProcessRef).
 core::Process* SchedFindProcessByPidRetained(u64 target_pid);
 
 /// True iff a task with `target_pid` is currently on the
@@ -166,10 +152,8 @@ core::Process* SchedFindProcessByPidRetained(u64 target_pid);
 bool SchedIsPidZombie(u64 target_pid);
 
 /// True iff the process `target_pid` has at least one non-Dead task
-/// in ANY state — Running, Ready, Sleeping, OR Blocked. Unlike
-/// SchedFindProcessByPid (which walks only the runqueues + sleep +
-/// zombie lists and therefore MISSES a task parked on a WaitQueue),
-/// this walks the global all-tasks registry under g_sched_lock, so a
+/// in ANY state — Running, Ready, Sleeping, OR Blocked. This walks
+/// the global all-tasks registry under g_sched_lock, so a
 /// daemon blocked in a syscall (e.g. a server in accept()) correctly
 /// reads as alive. This is the liveness predicate a supervisor must
 /// use to decide whether a service has actually exited — see
@@ -184,19 +168,6 @@ bool SchedProcessAlive(u64 target_pid);
 /// sleep) under g_sched_lock, excluding zombies — a zombie no
 /// longer counts against the live-process limit.
 u64 SchedCountChildrenOfPid(u64 parent_pid);
-
-/// Find the first live Task with `id == target_tid`. Walks the
-/// same lists as SchedFindProcessByPid (running + run-normal +
-/// run-idle + sleep) under g_sched_lock. Skips zombies — a
-/// dead task has no live Process to retain, so the cross-
-/// process thread-handle opener would have nothing to refcount.
-/// Misses tasks Blocked on a wait queue (they sit on none of
-/// the walked lists). Returns nullptr if no live task matches.
-///
-/// The returned Task* is a transient diagnostic/legacy lookup
-/// only. It must never be stored in a user-visible handle or used
-/// after a scheduler lifetime boundary.
-Task* SchedFindTaskByTid(u64 target_tid);
 
 /// Resolve a live task TID to its owning Process and retain that
 /// Process while holding the scheduler lifetime lock. Caller must
@@ -457,6 +428,26 @@ bool SchedSetAffinity(Task* t, u32 cpu_id);
 /// "unrestricted" sentinel is expanded to the concrete online-CPU
 /// set so callers see real CPU bits. Returns 0 for a null task.
 u32 SchedGetAffinityMask(Task* t);
+
+/// Result for scheduler-owned affinity operations that resolve an
+/// immutable TID and consume the Task entirely under g_sched_lock.
+/// No borrowed Task pointer escapes to a caller that can race reaping.
+enum class AffinityResult : u8
+{
+    Success,
+    NotFound,
+    AlreadyDead,
+    InvalidMask,
+};
+
+/// Set/get affinity by immutable TID while holding the scheduler lifetime
+/// lock across lookup and Task access. The setter intersects `mask` with
+/// online CPUs and returns InvalidMask if the effective set is empty. The
+/// getter requires a non-null output pointer. Missing/unlinked tasks return
+/// NotFound; a task observed in its pre-reap Dead state returns AlreadyDead.
+AffinityResult SchedSetAffinityMaskByTid(u64 target_tid, u32 mask);
+AffinityResult SchedSetAffinityByTid(u64 target_tid, u32 cpu_id);
+AffinityResult SchedGetAffinityMaskByTid(u64 target_tid, u32* mask_out);
 
 // ---------------------------------------------------------------------------
 // Per-task syscall trail

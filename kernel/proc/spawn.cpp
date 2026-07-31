@@ -260,7 +260,8 @@ u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps
 }
 
 u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps, const fs::RamfsNode* root,
-                 u64 frame_budget, u64 tick_budget, CapSet cap_ceiling)
+                 u64 frame_budget, u64 tick_budget, CapSet cap_ceiling, SpawnPrepareCallback prepare,
+                 void* prepare_context)
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
@@ -279,7 +280,8 @@ u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps
     // `.note.ABI-tag` parsing), add it here.
     if (elf_len > 7 && elf_bytes[7] == 3)
     {
-        return SpawnElfLinux(name, elf_bytes, elf_len, caps, root, frame_budget, tick_budget, cap_ceiling);
+        return SpawnElfLinux(name, elf_bytes, elf_len, caps, root, frame_budget, tick_budget, cap_ceiling, prepare,
+                             prepare_context);
     }
     // Fire the `inspect arm` latch if the operator armed it
     // before spawning. No-op when unarmed; one-shot when armed.
@@ -305,6 +307,11 @@ u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps
         AddressSpaceRelease(as);
         return 0;
     }
+    if (prepare != nullptr && !prepare(proc, prepare_context))
+    {
+        ProcessRelease(proc);
+        return 0;
+    }
     {
         arch::SerialLineGuard guard;
         SerialWrite("[ring3] elf spawn name=\"");
@@ -317,8 +324,10 @@ u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps
         SerialWriteHex(r.stack_top);
         SerialWrite("\n");
     }
-    sched::SchedCreateUser(&Ring3UserEntry, nullptr, name, proc);
-    return proc->pid;
+    const u64 pid = proc->pid;
+    if (sched::SchedCreateUser(&Ring3UserEntry, nullptr, proc->name, proc) == nullptr)
+        return 0;
+    return pid;
 }
 
 u64 SpawnElfLinux(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps, const fs::RamfsNode* root,
@@ -328,7 +337,8 @@ u64 SpawnElfLinux(const char* name, const u8* elf_bytes, u64 elf_len, CapSet cap
 }
 
 u64 SpawnElfLinux(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps, const fs::RamfsNode* root,
-                  u64 frame_budget, u64 tick_budget, CapSet cap_ceiling)
+                  u64 frame_budget, u64 tick_budget, CapSet cap_ceiling, SpawnPrepareCallback prepare,
+                  void* prepare_context)
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
@@ -447,6 +457,12 @@ u64 SpawnElfLinux(const char* name, const u8* elf_bytes, u64 elf_len, CapSet cap
         proc->user_rsp_init = rsp_init;
     }
 
+    if (prepare != nullptr && !prepare(proc, prepare_context))
+    {
+        ProcessRelease(proc);
+        return 0;
+    }
+
     {
         arch::SerialLineGuard guard;
         SerialWrite("[ring3] linux elf spawn name=\"");
@@ -459,8 +475,10 @@ u64 SpawnElfLinux(const char* name, const u8* elf_bytes, u64 elf_len, CapSet cap
         SerialWriteHex(r.stack_top);
         SerialWrite("\n");
     }
-    sched::SchedCreateUser(&Ring3UserEntry, nullptr, name, proc);
-    return proc->pid;
+    const u64 pid = proc->pid;
+    if (sched::SchedCreateUser(&Ring3UserEntry, nullptr, proc->name, proc) == nullptr)
+        return 0;
+    return pid;
 }
 
 
@@ -694,7 +712,8 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
 }
 
 u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, const fs::RamfsNode* root,
-                u64 frame_budget, u64 tick_budget, CapSet cap_ceiling, u32 origin_volume, const char* origin_path)
+                u64 frame_budget, u64 tick_budget, CapSet cap_ceiling, u32 origin_volume, const char* origin_path,
+                SpawnPrepareCallback prepare, void* prepare_context)
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
@@ -1354,6 +1373,11 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
             SerialWrite("\n");
         }
     }
+    if (prepare != nullptr && !prepare(proc, prepare_context))
+    {
+        ProcessRelease(proc);
+        return 0;
+    }
     {
         // Atomic line — see the matching guard in SpawnRing3Task.
         // Required for the qemu-smoke pe-* signature
@@ -1371,8 +1395,10 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         SerialWriteHex(r.stack_top);
         SerialWrite("\n");
     }
-    sched::SchedCreateUser(&Ring3UserEntry, nullptr, name, proc);
-    return proc->pid;
+    const u64 pid = proc->pid;
+    if (sched::SchedCreateUser(&Ring3UserEntry, nullptr, proc->name, proc) == nullptr)
+        return 0;
+    return pid;
 }
 
 } // namespace duetos::core

@@ -31,6 +31,7 @@
 #include "security/ir_runbook.h"
 #include "time/tick.h"
 #include "time/timekeeper.h"
+#include "util/nospec.h"
 
 namespace duetos::core
 {
@@ -338,7 +339,14 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     // mis-routes one process's notifications to another. Matches
     // the CAS discipline the refcount path already uses.
     p->pid = __atomic_fetch_add(&g_next_pid, 1, __ATOMIC_RELAXED);
-    p->name = name;
+    u64 name_len = 0;
+    while (name[name_len] != '\0' && name_len + 1 < Process::kNameCap)
+    {
+        p->name_storage[name_len] = name[name_len];
+        ++name_len;
+    }
+    p->name_storage[name_len] = '\0';
+    p->name = p->name_storage;
     p->as = as;
     p->cap_ceiling = cap_ceiling;
     p->caps = CapSet{caps.bits & cap_ceiling.bits};
@@ -403,10 +411,13 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     // ramfs / fat32 fields are valid only when kind matches.
     for (u32 i = 0; i < Process::kWin32HandleCap; ++i)
     {
+        p->win32_handles[i].generation = 0;
         p->win32_handles[i].kind = Process::FsBackingKind::None;
         p->win32_handles[i].ramfs_node = nullptr;
         p->win32_handles[i].fat32_volume_idx = 0;
         p->win32_handles[i].cursor = 0;
+        p->win32_handles[i].named_pipe_registry_slot = -1;
+        p->win32_handles[i].named_pipe_registry_gen = 0;
     }
     // Win32 VirtualAlloc arena — bump-only for v0. Starts at
     // Process::kWin32VmapBase with 0 pages consumed.
@@ -603,29 +614,240 @@ void ProcessRetain(Process* p)
     }
 }
 
+bool ProcessReserveWin32FileHandle(Process* owner, Process::Win32FileReservation* reservation_out)
+{
+    if (owner == nullptr || reservation_out == nullptr)
+        return false;
+
+    bool reserved = false;
+    Process::Win32FileReservation reservation{};
+    const sync::IrqFlags flags = sync::SpinLockAcquire(owner->win32_file_lock);
+    for (u32 i = 0; i < Process::kWin32HandleCap; ++i)
+    {
+        Process::Win32FileHandle& row = owner->win32_handles[i];
+        if (row.kind != Process::FsBackingKind::None || row.generation == ~0ULL)
+            continue;
+
+        const u64 generation = row.generation + 1;
+        Process::Win32FileHandle claimed{};
+        claimed.generation = generation;
+        claimed.kind = Process::FsBackingKind::Reserved;
+        claimed.named_pipe_registry_slot = -1;
+        row = claimed;
+        reservation.slot = i;
+        reservation.generation = generation;
+        reserved = true;
+        break;
+    }
+    sync::SpinLockRelease(owner->win32_file_lock, flags);
+
+    if (reserved)
+        *reservation_out = reservation;
+    return reserved;
+}
+
+bool ProcessPublishWin32FileHandle(Process* owner, const Process::Win32FileReservation& reservation,
+                                   const Process::Win32FileHandle& candidate, u64* handle_out)
+{
+    if (owner == nullptr || handle_out == nullptr || reservation.slot >= Process::kWin32HandleCap ||
+        reservation.generation == 0 || candidate.kind == Process::FsBackingKind::None ||
+        candidate.kind == Process::FsBackingKind::Reserved)
+    {
+        return false;
+    }
+
+    bool published = false;
+    const u32 slot = static_cast<u32>(util::MaskedIndex(reservation.slot, Process::kWin32HandleCap));
+    const sync::IrqFlags flags = sync::SpinLockAcquire(owner->win32_file_lock);
+    Process::Win32FileHandle& row = owner->win32_handles[slot];
+    if (row.kind == Process::FsBackingKind::Reserved && row.generation == reservation.generation)
+    {
+        row = candidate;
+        row.generation = reservation.generation;
+        published = true;
+    }
+    sync::SpinLockRelease(owner->win32_file_lock, flags);
+
+    if (published)
+        *handle_out = Process::kWin32HandleBase + slot;
+    return published;
+}
+
+void ProcessAbortWin32FileHandle(Process* owner, const Process::Win32FileReservation& reservation)
+{
+    if (owner == nullptr || reservation.slot >= Process::kWin32HandleCap || reservation.generation == 0)
+        return;
+
+    const u32 slot = static_cast<u32>(util::MaskedIndex(reservation.slot, Process::kWin32HandleCap));
+    const sync::IrqFlags flags = sync::SpinLockAcquire(owner->win32_file_lock);
+    Process::Win32FileHandle& row = owner->win32_handles[slot];
+    if (row.kind == Process::FsBackingKind::Reserved && row.generation == reservation.generation)
+    {
+        Process::Win32FileHandle empty{};
+        empty.generation = reservation.generation;
+        empty.kind = Process::FsBackingKind::None;
+        empty.named_pipe_registry_slot = -1;
+        row = empty;
+    }
+    sync::SpinLockRelease(owner->win32_file_lock, flags);
+}
+
+bool ProcessDetachWin32FileHandle(Process* owner, u64 handle, Process::Win32FileHandle* detached_out)
+{
+    if (owner == nullptr || detached_out == nullptr || handle < Process::kWin32HandleBase)
+        return false;
+    u64 raw_slot = handle - Process::kWin32HandleBase;
+    if (raw_slot >= Process::kWin32HandleCap)
+        return false;
+    raw_slot = util::MaskedIndex(raw_slot, Process::kWin32HandleCap);
+
+    bool detached = false;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(owner->win32_file_lock);
+    Process::Win32FileHandle& row = owner->win32_handles[raw_slot];
+    if (row.kind != Process::FsBackingKind::None && row.kind != Process::FsBackingKind::Reserved)
+    {
+        *detached_out = row;
+        Process::Win32FileHandle empty{};
+        empty.generation = row.generation;
+        empty.kind = Process::FsBackingKind::None;
+        empty.named_pipe_registry_slot = -1;
+        row = empty;
+        detached = true;
+    }
+    sync::SpinLockRelease(owner->win32_file_lock, flags);
+    return detached;
+}
+
+u64 ProcessInstallWin32ProcessHandle(Process* owner, Process* target)
+{
+    if (owner == nullptr || target == nullptr)
+    {
+        return 0;
+    }
+
+    u64 slot = Process::kWin32ProcessCap;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(owner->win32_handle_lock);
+    for (u64 i = 0; i < Process::kWin32ProcessCap; ++i)
+    {
+        if (!owner->win32_proc_handles[i].in_use)
+        {
+            slot = i;
+            owner->win32_proc_handles[i].target = target;
+            owner->win32_proc_handles[i].in_use = true;
+            break;
+        }
+    }
+    sync::SpinLockRelease(owner->win32_handle_lock, flags);
+    return (slot == Process::kWin32ProcessCap) ? 0 : (Process::kWin32ProcessBase + slot);
+}
+
+Process* ProcessLookupWin32ProcessHandleRetained(Process* owner, u64 handle)
+{
+    if (owner == nullptr || handle < Process::kWin32ProcessBase)
+    {
+        return nullptr;
+    }
+    u64 slot = handle - Process::kWin32ProcessBase;
+    if (slot >= Process::kWin32ProcessCap)
+    {
+        return nullptr;
+    }
+    slot = util::MaskedIndex(slot, Process::kWin32ProcessCap);
+
+    Process* target = nullptr;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(owner->win32_handle_lock);
+    const Process::Win32ProcessHandle& row = owner->win32_proc_handles[slot];
+    if (row.in_use && row.target != nullptr)
+    {
+        target = row.target;
+        ProcessRetain(target);
+    }
+    sync::SpinLockRelease(owner->win32_handle_lock, flags);
+    return target;
+}
+
+bool ProcessCloseWin32ProcessHandle(Process* owner, u64 handle)
+{
+    if (owner == nullptr || handle < Process::kWin32ProcessBase)
+    {
+        return false;
+    }
+    u64 slot = handle - Process::kWin32ProcessBase;
+    if (slot >= Process::kWin32ProcessCap)
+    {
+        return false;
+    }
+    slot = util::MaskedIndex(slot, Process::kWin32ProcessCap);
+
+    Process* target = nullptr;
+    bool removed = false;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(owner->win32_handle_lock);
+    Process::Win32ProcessHandle& row = owner->win32_proc_handles[slot];
+    if (row.in_use)
+    {
+        removed = true;
+        target = row.target;
+        row.in_use = false;
+        row.target = nullptr;
+    }
+    sync::SpinLockRelease(owner->win32_handle_lock, flags);
+
+    if (target != nullptr)
+    {
+        ProcessRelease(target);
+    }
+    return removed;
+}
+
+u32 ProcessWin32ProcessHandleCount(const Process* owner)
+{
+    if (owner == nullptr)
+    {
+        return 0;
+    }
+    u32 count = 0;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(owner->win32_handle_lock);
+    for (u64 i = 0; i < Process::kWin32ProcessCap; ++i)
+    {
+        if (owner->win32_proc_handles[i].in_use)
+        {
+            ++count;
+        }
+    }
+    sync::SpinLockRelease(owner->win32_handle_lock, flags);
+    return count;
+}
+
 void ProcessDropOwnedProcessHandles(Process* p)
 {
     if (p == nullptr)
     {
         return;
     }
-    for (u64 i = 0; i < Process::kWin32ProcessCap; ++i)
+    Process* targets[Process::kWin32ProcessCap]{};
+    u32 target_count = 0;
     {
-        Process::Win32ProcessHandle& h = p->win32_proc_handles[i];
-        if (!h.in_use)
+        const sync::IrqFlags flags = sync::SpinLockAcquire(p->win32_handle_lock);
+        for (u64 i = 0; i < Process::kWin32ProcessCap; ++i)
         {
-            continue;
+            Process::Win32ProcessHandle& h = p->win32_proc_handles[i];
+            if (!h.in_use)
+            {
+                continue;
+            }
+            targets[target_count++] = h.target;
+            h.in_use = false;
+            h.target = nullptr;
         }
-        Process* target = h.target;
-        // Clear the slot BEFORE releasing. `target` may be `p`
-        // itself (SYS_PROCESS_OPEN does not refuse the caller's own
-        // PID), in which case the release below can run p's whole
-        // destroy path — it must not re-enter a half-cleared table.
-        // For an A<->B cycle the same ordering makes each side a
-        // plain refcount drop.
-        h.in_use = false;
-        h.target = nullptr;
-        ProcessRelease(target);
+        sync::SpinLockRelease(p->win32_handle_lock, flags);
+    }
+
+    // Drop refs after the entire table is detached and the slot lock is
+    // released. A target may be `p` itself, or two targets may form an
+    // A<->B cycle; no destructor can re-enter a half-cleared table.
+    for (u32 i = 0; i < target_count; ++i)
+    {
+        ProcessRelease(targets[i]);
     }
 }
 
@@ -882,12 +1104,7 @@ void ProcessRelease(Process* p)
     // ProcessRelease runs in reaper / syscall task context with
     // interrupts on, not in an IRQ handler.
     for (u64 i = 0; i < Process::kWin32HandleCap; ++i)
-    {
-        if (p->win32_handles[i].kind != Process::FsBackingKind::None)
-        {
-            (void)fs::routing::CloseForProcess(p, Process::kWin32HandleBase + i);
-        }
-    }
+        (void)fs::routing::CloseForProcess(p, Process::kWin32HandleBase + i);
 
     // Drop the section-pool reference held by every section handle
     // the process left open. Mirrors DoFileClose's 0x900 arm
@@ -1523,6 +1740,52 @@ void ProcessSelfTest()
     Expect(ShouldLogDenial(kSandboxDenialKillThreshold - 4), "denial near threshold logs (96)");
 
     arch::SerialWrite("[process-selftest] PASS (CapSet + CapName + ShouldLogDenial)\n");
+}
+
+void ProcessHandleLifetimeSelfTest()
+{
+    // This fixture needs KMalloc and therefore runs in the Heap initcall
+    // phase, unlike the pure-helper ProcessSelfTest above. The target begins
+    // with one base reference plus exactly one caller-owned reference for
+    // every handle transferred into the table. Closing a slot and releasing
+    // a retained lookup must return precisely to the base reference.
+    auto* owner = static_cast<Process*>(mm::KMalloc(sizeof(Process)));
+    auto* target = static_cast<Process*>(mm::KMalloc(sizeof(Process)));
+    Expect(owner != nullptr && target != nullptr, "process-handle fixtures allocated");
+    memset(owner, 0, sizeof(Process));
+    memset(target, 0, sizeof(Process));
+    target->refcount = Process::kWin32ProcessCap + 2;
+
+    u64 handles[Process::kWin32ProcessCap]{};
+    for (u64 i = 0; i < Process::kWin32ProcessCap; ++i)
+    {
+        handles[i] = ProcessInstallWin32ProcessHandle(owner, target);
+        Expect(handles[i] == Process::kWin32ProcessBase + i, "process-handle slot publication");
+    }
+    Expect(ProcessWin32ProcessHandleCount(owner) == Process::kWin32ProcessCap, "process-handle count at capacity");
+    Expect(ProcessInstallWin32ProcessHandle(owner, target) == 0, "process-handle saturation refused");
+    Expect(__atomic_load_n(&target->refcount, __ATOMIC_ACQUIRE) == Process::kWin32ProcessCap + 2,
+           "failed process-handle install preserves caller ownership");
+    ProcessRelease(target); // drop the unadopted saturation-attempt ref
+
+    Process* pinned = ProcessLookupWin32ProcessHandleRetained(owner, handles[0]);
+    Expect(pinned == target, "process-handle retained lookup");
+    Expect(__atomic_load_n(&target->refcount, __ATOMIC_ACQUIRE) == Process::kWin32ProcessCap + 2,
+           "process-handle lookup increments refcount");
+    Expect(ProcessCloseWin32ProcessHandle(owner, handles[0]), "process-handle close succeeds once");
+    Expect(!ProcessCloseWin32ProcessHandle(owner, handles[0]), "process-handle double close refused");
+    Expect(ProcessLookupWin32ProcessHandleRetained(owner, handles[0]) == nullptr,
+           "closed process handle cannot be looked up");
+    ProcessRelease(pinned);
+
+    ProcessDropOwnedProcessHandles(owner);
+    ProcessDropOwnedProcessHandles(owner);
+    Expect(ProcessWin32ProcessHandleCount(owner) == 0, "process-handle drain is idempotent");
+    Expect(__atomic_load_n(&target->refcount, __ATOMIC_ACQUIRE) == 1, "process-handle references balance after drain");
+
+    mm::KFree(target);
+    mm::KFree(owner);
+    arch::SerialWrite("[process-handle-selftest] PASS\n");
 }
 
 // ---------------------------------------------------------------
