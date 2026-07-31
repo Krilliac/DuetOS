@@ -869,7 +869,9 @@ __declspec(dllexport) FILE* _wfopen(const _ucrt_wchar_t* path, const _ucrt_wchar
         ++n;
     }
     ascii[n] = 0;
-    return fopen(ascii, (const char*)0);
+    // v0's file shim is read-oriented and currently ignores the mode;
+    // keep the call contract non-null until full UTF-16 mode handling lands.
+    return fopen(ascii, "rb");
 }
 
 __declspec(dllexport) int fclose(FILE* f)
@@ -1004,9 +1006,10 @@ __declspec(dllexport) char* tmpnam(char* buf)
     /* Format: "X:\\Temp\\duetXXXX.tmp" — 19 bytes + NUL fits in 32. */
     const char prefix[] = "X:\\Temp\\duet";
     int i = 0;
-    while (i < L_tmpnam - 1 && prefix[i])
+    const char* prefix_cursor = prefix;
+    while (i < L_tmpnam - 1 && *prefix_cursor)
     {
-        dst[i] = prefix[i];
+        dst[i] = *prefix_cursor++;
         ++i;
     }
     /* 4 hex digits of the counter so two consecutive calls
