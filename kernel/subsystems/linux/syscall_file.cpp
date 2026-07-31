@@ -213,9 +213,9 @@ i64 DoOpen(u64 user_path, u64 flags, u64 mode)
         char dir_path[80];
         for (u32 i = 0; i < sizeof(dir_path); ++i)
             dir_path[i] = 0;
-        const char dprefix[] = "/disk/0/";
+        constexpr char dprefix[] = "/disk/0/";
         u32 di = 0;
-        while (dprefix[di] != '\0' && di < sizeof(dir_path) - 1)
+        while (di < sizeof(dprefix) - 1 && dprefix[di] != '\0')
         {
             dir_path[di] = dprefix[di];
             ++di;
