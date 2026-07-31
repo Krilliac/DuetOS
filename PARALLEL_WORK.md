@@ -1059,13 +1059,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T19:56:41Z
 - **Status**: COMPLETED @ 2026-07-31T20:04:31Z
 
-### [ACTIVE] native-syscall-idl-tests
+### [DONE] native-syscall-idl-tests
 - **Session**: `Nathan-1754`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/test/test-native-syscall-idl.py`
 - **Description**: Hostile-schema and deterministic-output regression tests for the native syscall IDL generator
 - **Claimed**: 2026-07-31T19:58:16Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-31T20:04:33Z
 
 ### [ACTIVE] native-libc-syscall-idl
 - **Session**: `Nathan-237`
