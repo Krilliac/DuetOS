@@ -351,6 +351,8 @@ i64 DoWritev(u64 fd, u64 user_iov, u64 iovcnt)
         return 0;
     if (iovcnt > 1024)
         return kEINVAL; // sanity cap
+    if (user_iov > (~u64(0) - iovcnt * 16))
+        return kEFAULT;
     i64 total = 0;
     for (u64 i = 0; i < iovcnt; ++i)
     {
@@ -385,6 +387,8 @@ i64 DoReadv(u64 fd, u64 user_iov, u64 iovcnt)
         return 0;
     if (iovcnt > 1024)
         return kEINVAL;
+    if (user_iov > (~u64(0) - iovcnt * 16))
+        return kEFAULT;
     i64 total = 0;
     for (u64 i = 0; i < iovcnt; ++i)
     {
@@ -635,6 +639,8 @@ i64 PreadvLoop(u64 fd, u64 user_iov, u64 iovcnt, i64 offset)
         return 0;
     if (iovcnt > kIovMax)
         return kEINVAL;
+    if (user_iov > (~u64(0) - iovcnt * sizeof(UserIovec)))
+        return kEFAULT;
     UserIovec iov[kIovMax];
     if (!mm::CopyFromUser(iov, reinterpret_cast<const void*>(user_iov), iovcnt * sizeof(UserIovec)))
         return kEFAULT;
@@ -661,6 +667,8 @@ i64 PwritevLoop(u64 fd, u64 user_iov, u64 iovcnt, i64 offset)
         return 0;
     if (iovcnt > kIovMax)
         return kEINVAL;
+    if (user_iov > (~u64(0) - iovcnt * sizeof(UserIovec)))
+        return kEFAULT;
     UserIovec iov[kIovMax];
     if (!mm::CopyFromUser(iov, reinterpret_cast<const void*>(user_iov), iovcnt * sizeof(UserIovec)))
         return kEFAULT;

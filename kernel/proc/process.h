@@ -1893,7 +1893,12 @@ i32 LinuxFdAllocLowest(Process* p, u32 lo);
 /// slot + zero fd state). On success, stores the resulting
 /// `ipc::Handle` in `p->linux_fds[fd].kf_handle` so close /
 /// dup / fork can route through the unified table.
-bool LinuxFdAttachKFile(Process* p, u32 fd, u8 kind, u32 pool_index, void (*release)(u32));
+/// `out_pool_released`, when non-null, is set true when a failed
+/// HandleTableInsert already dropped the newly-created KFile and fired
+/// its pool-release callback. Callers that own the pool slot can use the
+/// false case to release it themselves (KFileCreate failure).
+bool LinuxFdAttachKFile(Process* p, u32 fd, u8 kind, u32 pool_index, void (*release)(u32),
+                        bool* out_pool_released = nullptr);
 
 /// Owner-aware variant of `LinuxFdAttachKFile`. Used by dirfd
 /// (kind=11), whose backing storage is a `Process::win32_dirs[]`

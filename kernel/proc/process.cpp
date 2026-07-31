@@ -1003,8 +1003,9 @@ void RecordSandboxDenial(Cap cap)
         // the most-denied? which pid is hitting it?).
         char pin[40];
         constexpr char prefix[] = "cap/";
+        constexpr u64 kPrefixLen = sizeof(prefix) - 1;
         u64 pp = 0;
-        while (pp < sizeof(prefix) - 1 && pp < 39 && prefix[pp] != '\0')
+        while (pp < kPrefixLen && prefix[pp] != '\0')
         {
             pin[pp] = prefix[pp];
             ++pp;
@@ -1781,8 +1782,10 @@ i32 LinuxFdAllocLowest(Process* p, u32 lo)
     return -1;
 }
 
-bool LinuxFdAttachKFile(Process* p, u32 fd, u8 kind, u32 pool_index, void (*release)(u32))
+bool LinuxFdAttachKFile(Process* p, u32 fd, u8 kind, u32 pool_index, void (*release)(u32), bool* out_pool_released)
 {
+    if (out_pool_released != nullptr)
+        *out_pool_released = false;
     if (p == nullptr || fd >= 16)
         return false;
     auto kf_r = ::duetos::ipc::KFileCreate(KindOf(kind), pool_index, release, /*vnode=*/nullptr,
@@ -1806,6 +1809,8 @@ bool LinuxFdAttachKFile(Process* p, u32 fd, u8 kind, u32 pool_index, void (*rele
         // counting on cleanup if attach fails.
         KLOG_ONCE_WARN("proc/linux-fd", "HandleTableInsert failed (table full) on attach");
         ::duetos::ipc::KObjectRelease(&kf_r.value()->base);
+        if (out_pool_released != nullptr)
+            *out_pool_released = true;
         return false;
     }
     p->linux_fds[fd].kf_handle = h_r.value();
