@@ -9,8 +9,8 @@
 // followed by an unlink. If something earlier in the test leaves a
 // stale file, later tests log -EEXIST / -ENOENT but keep running.
 
-typedef unsigned long u64;
-typedef long i64;
+typedef unsigned long long u64;
+typedef long long i64;
 
 #define DUET_USER_TRAP_UNREACHABLE()                                                                                   \
     do                                                                                                                 \

@@ -68,7 +68,7 @@ static inline int num_format_core_a(const char* num, const DUETOS_NUMBERFMT_A* n
         int_digits[int_len++] = *p++;
 
     /* Collect fractional digits (after '.'). */
-    char frac_digits[32];
+    char frac_digits[32] = {0};
     int frac_len = 0;
     if (*p == '.' || *p == ',') /* accept either separator in input */
     {

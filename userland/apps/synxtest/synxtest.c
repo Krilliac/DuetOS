@@ -1,8 +1,8 @@
 // Linux-ABI syscall exerciser. No libc — all inline asm.
 // Tests a spread of syscalls; prints a tag for each so the boot
 // log shows exactly which ones the kernel understood.
-typedef unsigned long u64;
-typedef long i64;
+typedef unsigned long long u64;
+typedef long long i64;
 
 #define DUET_USER_TRAP_UNREACHABLE()                                                                                   \
     do                                                                                                                 \

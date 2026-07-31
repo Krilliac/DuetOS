@@ -453,7 +453,7 @@ __declspec(dllexport) DWORD RtlComputeCrc32(DWORD seed, const unsigned char* buf
     {
         crc ^= buf[i];
         for (int j = 0; j < 8; ++j)
-            crc = (crc >> 1) ^ (0xEDB88320u & -(int)(crc & 1));
+            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
     }
     return crc ^ 0xFFFFFFFFu;
 }
@@ -647,7 +647,7 @@ __declspec(dllexport) wchar_t16* RtlIpv4AddressToStringW(const unsigned char* ad
 {
     if (!addr_be || !out)
         return out;
-    char tmp[16];
+    char tmp[16] = {0};
     char* end = RtlIpv4AddressToStringA(addr_be, tmp);
     int n = (int)(end - tmp);
     for (int i = 0; i <= n; ++i)

@@ -5,9 +5,9 @@
 // One sc3(write) per line: see synfs.c for why ("[net] X rc=N\n"
 // in a single buffer beats kernel-log interleaving).
 
-typedef unsigned long u64;
+typedef unsigned long long u64;
 typedef unsigned short u16;
-typedef long i64;
+typedef long long i64;
 
 #define DUET_USER_TRAP_UNREACHABLE()                                                                                   \
     do                                                                                                                 \
