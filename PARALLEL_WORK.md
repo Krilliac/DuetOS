@@ -682,3 +682,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Retire
 - **Claimed**: 2026-07-31T14:36:08Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] spawn-prepublish-core
+- **Session**: `Nathan-953`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/proc/spawn.cpp`
+- **Description**: Prepare
+- **Claimed**: 2026-07-31T14:43:47Z
+- **Status**: IN PROGRESS
