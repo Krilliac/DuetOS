@@ -1386,3 +1386,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Generation-safe synchronous GUI SendMessage transaction table and hostile host vectors
 - **Claimed**: 2026-07-31T22:22:40Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-manifest-api
+- **Session**: `Nathan-1113`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/service_manifest.h`
+- **Description**: Immutable bounded service manifest byte contract
+- **Claimed**: 2026-07-31T22:25:38Z
+- **Status**: IN PROGRESS
