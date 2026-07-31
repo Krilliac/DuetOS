@@ -1434,3 +1434,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Generate canonical machine-readable native syscall policy JSON with deterministic drift coverage
 - **Claimed**: 2026-07-31T23:06:45Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-lifecycle-broker-source
+- **Session**: `Codex-root-lifecycle`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/service_lifecycle_broker.cpp`
+- **Description**: Lifecycle
+- **Claimed**: 2026-07-31T23:06:48Z
+- **Status**: IN PROGRESS
