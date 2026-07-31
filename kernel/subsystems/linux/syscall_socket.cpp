@@ -120,11 +120,15 @@ bool FdAssignSocket(::duetos::core::Process* p, u32 fd, u32 sock_idx)
     p->linux_fds[fd].size = 0;
     p->linux_fds[fd].offset = 0;
     p->linux_fds[fd].path[0] = '\0';
-    if (!::duetos::core::LinuxFdAttachKFile(p, fd, /*kind=*/6, sock_idx, &SocketFdRelease))
+    bool pool_released = false;
+    if (!::duetos::core::LinuxFdAttachKFile(p, fd, /*kind=*/6, sock_idx, &SocketFdRelease, &pool_released))
     {
-        // Attach failed — KFile sidecar absent, legacy DoClose
-        // path will release. Mark not-attached by leaving
-        // kf_handle = invalid; caller decides whether to fail.
+        // KFileCreate failure has not fired the pool callback; a failed
+        // HandleTableInsert has already fired it. Clear the descriptor in
+        // both cases so callers never return a half-attached socket fd.
+        if (!pool_released)
+            SocketFdRelease(sock_idx);
+        ::duetos::core::LinuxFdClose(p, fd);
         return false;
     }
     return true;
@@ -162,12 +166,7 @@ i64 DoSocket(u64 domain, u64 type, u64 protocol)
     if (sock < 0)
         return kENFILE;
     if (!FdAssignSocket(p, static_cast<u32>(fd), static_cast<u32>(sock)))
-    {
-        // KFile sidecar attach failed — slot is left at state=6 with
-        // no kf_handle, so DoClose's legacy-arm release path will
-        // still fire. We could have rolled back here, but the legacy
-        // path covers cleanup symmetrically.
-    }
+        return kENFILE;
     if ((type & kSockCloExec) != 0)
         ::duetos::core::LinuxFdSetCloexec(p, static_cast<u32>(fd), true);
     arch::SerialWrite("[linux/socket] fd=");
@@ -237,9 +236,14 @@ i64 DoAccept4(u64 fd, u64 user_addr, u64 user_addrlen, u64 flags)
         ::duetos::net::SocketRelease(static_cast<u32>(new_sock));
         return kEMFILE;
     }
-    FdAssignSocket(p, static_cast<u32>(new_fd), static_cast<u32>(new_sock));
-    if (user_addr != 0 && user_addrlen != 0)
-        WriteSockaddrIn(user_addr, user_addrlen, peer_ip, peer_port);
+    if (!FdAssignSocket(p, static_cast<u32>(new_fd), static_cast<u32>(new_sock)))
+        return kENFILE;
+    if (user_addr != 0 && user_addrlen != 0 &&
+        !WriteSockaddrIn(user_addr, user_addrlen, peer_ip, peer_port))
+    {
+        ::duetos::core::LinuxFdClose(p, static_cast<u32>(new_fd));
+        return kEFAULT;
+    }
     return new_fd;
 }
 
@@ -325,8 +329,9 @@ i64 DoRecvfrom(u64 fd, u64 user_buf, u64 len, u64 flags, u64 user_src_addr, u64 
             return got;
         if (got > 0 && !mm::CopyToUser(reinterpret_cast<void*>(user_buf), stage, static_cast<u64>(got)))
             return kEFAULT;
-        if (user_src_addr != 0 && user_addrlen != 0)
-            WriteSockaddrIn(user_src_addr, user_addrlen, src_ip, src_port);
+        if (user_src_addr != 0 && user_addrlen != 0 &&
+            !WriteSockaddrIn(user_src_addr, user_addrlen, src_ip, src_port))
+            return kEFAULT;
         return got;
     }
     if ((flags & kMsgDontwait) != 0)
@@ -411,16 +416,15 @@ i64 DoRecvmsg(u64 fd, u64 user_msg, u64 flags)
     if (!mm::CopyFromUser(&iov, reinterpret_cast<const void*>(mh.msg_iov), sizeof(iov)))
         return kEFAULT;
     // Synthesise an in-place addrlen for the recvfrom call.
-    u32 addrlen = mh.msg_namelen;
     u64 addrlen_user = 0;
     if (mh.msg_name != 0)
     {
-        // recvfrom expects a user pointer to the addrlen; v0 creates
-        // a temp on the user stack via the existing addrlen pointer
-        // when one was supplied. Otherwise, skip the address-out half.
-        if (!mm::CopyToUser(reinterpret_cast<void*>(mh.msg_name), &addrlen, 0))
+        // `msg_namelen` is the u32 field at offset 8 in the user msghdr,
+        // not the sockaddr buffer at msg_name. Pass its actual user VA so
+        // recvfrom reads the caller's capacity and writes back the truth.
+        if (user_msg > (~u64(0) - 8))
             return kEFAULT;
-        addrlen_user = mh.msg_name; // recvfrom uses this only for write-back
+        addrlen_user = user_msg + 8;
     }
     return DoRecvfrom(fd, iov.base, iov.len, flags, mh.msg_name, addrlen_user);
 }
@@ -627,6 +631,8 @@ i64 DoRecvmmsg(u64 fd, u64 user_mmsgvec, u64 vlen, u64 flags, u64 user_timeout)
         return 0;
     if (vlen > kVlenMax)
         vlen = kVlenMax;
+    if (user_mmsgvec > (~u64(0) - vlen * kMmsghdrSize))
+        return kEFAULT;
     auto* p = ::duetos::core::CurrentProcess();
     if (p == nullptr)
         return kEPERM;
@@ -666,6 +672,8 @@ i64 DoSendmmsg(u64 fd, u64 user_mmsgvec, u64 vlen, u64 flags)
         return 0;
     if (vlen > kVlenMax)
         vlen = kVlenMax;
+    if (user_mmsgvec > (~u64(0) - vlen * kMmsghdrSize))
+        return kEFAULT;
     auto* p = ::duetos::core::CurrentProcess();
     if (p == nullptr)
         return kEPERM;
