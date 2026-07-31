@@ -143,6 +143,8 @@ void RingPushLocked(InotifyInstance& inst, i32 wd, u32 mask, const char* path)
     for (const char* p = path; *p != '\0'; ++p)
         if (*p == '/')
             leaf = p + 1;
+    for (u32 j = 0; j < kInotifyPathCap; ++j)
+        e.name[j] = '\0';
     u32 i = 0;
     for (; i < kInotifyPathCap - 1 && leaf[i] != '\0'; ++i)
         e.name[i] = leaf[i];
