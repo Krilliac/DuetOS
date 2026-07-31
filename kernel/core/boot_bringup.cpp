@@ -4239,7 +4239,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         if (hit != nullptr)
         {
             duetos::u32 n = 0;
-            while (hit[n] != '\0' && hit[n] != ' ' && n < sizeof(g_peexec_path) - 1)
+            while (n < sizeof(g_peexec_path) - 1 && hit[n] != '\0' && hit[n] != ' ')
             {
                 g_peexec_path[n] = hit[n];
                 ++n;
