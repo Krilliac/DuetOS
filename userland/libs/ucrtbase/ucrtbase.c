@@ -1004,7 +1004,7 @@ __declspec(dllexport) char* tmpnam(char* buf)
     /* Format: "X:\\Temp\\duetXXXX.tmp" — 19 bytes + NUL fits in 32. */
     const char prefix[] = "X:\\Temp\\duet";
     int i = 0;
-    while (prefix[i] && i < L_tmpnam - 1)
+    while (i < L_tmpnam - 1 && prefix[i])
     {
         dst[i] = prefix[i];
         ++i;
