@@ -312,6 +312,13 @@ struct Task
     // dispatch frame.
     u64 irq_depth;
 
+    // Per-task hardware-IRQ nesting depth. Saved/restored alongside
+    // irq_depth, but excludes syscalls/software traps. The timer
+    // recursion guard must defer only when the timer interrupted another
+    // hardware IRQ frame; a timer interrupting a syscall is a legitimate
+    // preemption point.
+    u64 hard_irq_depth;
+
     // Per-task debug-register state (DR0..DR3 + DR7). Mirrors
     // the fs_base idiom: saved from the CPU just before
     // ContextSwitch, restored into the CPU right after so each
@@ -2194,6 +2201,20 @@ extern "C" void SchedFinishTaskSwitch()
             self->first_run = false;
     }
     sync::IrqFlags flags{.rflags = pcpu->ctxsw_lock_flags};
+    // Lock-pass releases restore the IF bit captured by the task that switched
+    // us in, not by the suspended task whose stack we have just resumed. When
+    // the target task is resuming inside an old hardware IRQ tail
+    // (hard_irq_depth > 0), restoring the source IF=1 here enables timer IRQs
+    // before the target's outer iretq has unwound. That re-enters the timer at
+    // hard depth 2 and can livelock in the F-050 nested-preempt defer path.
+    // Keep interrupts masked for this one scheduler-lock release; the real
+    // interrupted RFLAGS will be restored at the architectural boundary by the
+    // pending iretq.
+    if (arch::HardIrqNestDepthRaw() != 0)
+    {
+        constexpr u64 kRflagsIf = 1ULL << 9;
+        flags.rflags &= ~kRflagsIf;
+    }
     pcpu->ctxsw_lock_to_release = nullptr;
     pcpu->ctxsw_lock_flags = 0;
     sync::SpinLockRelease(*static_cast<sync::SpinLock*>(lock_ptr), flags);
@@ -2403,6 +2424,7 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     t->seh_repeat = 0;
     t->_pad_seh = 0;
     t->irq_depth = 0;
+    t->hard_irq_depth = 0;
     // No breakpoints on a fresh task. DR7 = 0 disables every slot
     // (the architecture's MBS bit 10 flips to 1 on the first real
     // install via the breakpoint manager — at that point DR7 is
@@ -3097,9 +3119,13 @@ void ScheduleLockedHandoff(sync::IrqFlags lock_flags)
     // increment taken on one CPU travels with the task here and the
     // matching decrement lands on whatever CPU resumes it. Without
     // this handoff the live slot would leak across switches (see the
-    // IrqNestScope comment in traps.cpp).
+    // IrqNestScope comment in traps.cpp). Carry the hardware-IRQ-only
+    // depth in parallel so the timer recursion guard can distinguish
+    // "timer inside an IRQ" from "timer interrupted a syscall."
     prev->irq_depth = arch::IrqNestDepthRaw();
+    prev->hard_irq_depth = arch::HardIrqNestDepthRaw();
     arch::IrqNestDepthSet(next->irq_depth);
+    arch::HardIrqNestDepthSet(next->hard_irq_depth);
 
     // Debug-register handoff. Save outgoing task's DR0..DR3 + DR7
     // from the CPU, then write the incoming task's values in.

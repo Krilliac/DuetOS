@@ -298,6 +298,16 @@ constinit u64 g_irq_counts_per_cpu[acpi::kMaxCpus][256] = {};
 // under IF=0; no atomic needed on the slot itself.
 constinit u64 g_irq_nest_depth_per_cpu[acpi::kMaxCpus] = {};
 
+// Hardware-IRQ-only nesting depth. The broader counter above includes CPU
+// exceptions and software traps (notably int 0x80 syscalls), but the timer
+// recursion guard only wants to defer when a timer IRQ interrupts another
+// still-live hardware IRQ frame. A timer interrupting a syscall is a normal
+// kernel preemption point and must not be starved. This mirrors the total
+// trap-depth slot's task save/restore: an IRQ-tail Schedule suspends the
+// interrupted task with a live hard-IRQ frame on its stack, so that depth must
+// travel with the task while the CPU runs something else at depth 0.
+constinit u64 g_hard_irq_nest_depth_per_cpu[acpi::kMaxCpus] = {};
+
 // Per-CPU ring of recent kernel-mode interrupted RIPs. TrapDispatch
 // pushes frame->rip on every kernel-mode ((cs & 3) == 0) dispatch — the
 // saved RIP is the instruction the CPU was executing when the trap/IRQ
@@ -698,6 +708,13 @@ static inline u64& IrqNestSlot()
     return g_irq_nest_depth_per_cpu[idx];
 }
 
+static inline u64& HardIrqNestSlot()
+{
+    const u32 id = ::duetos::cpu::CurrentCpuIdOrBsp();
+    const u32 idx = (id < acpi::kMaxCpus) ? id : 0u;
+    return g_hard_irq_nest_depth_per_cpu[idx];
+}
+
 // Relaxed cross-CPU high-water update. The CAS loop only spins when
 // `depth` actually exceeds the current max — once the system has
 // reached its steady-state nesting (depth 1 for an un-nested trap)
@@ -728,6 +745,53 @@ u64 IrqNestDepthRaw()
 void IrqNestDepthSet(u64 v)
 {
     IrqNestSlot() = v;
+}
+u64 HardIrqNestDepth()
+{
+    return HardIrqNestSlot();
+}
+u64 HardIrqNestDepthRaw()
+{
+    return HardIrqNestSlot();
+}
+void HardIrqNestDepthSet(u64 v)
+{
+    HardIrqNestSlot() = v;
+}
+
+// Consume a pending reschedule request at an IRQ tail.
+//
+// Normal path: the timer handler sets need_resched, the IRQ dispatcher
+// clears it here, and Schedule() runs after LAPIC EOI.
+//
+// Nested-timer path: a timer may interrupt a task that is still unwinding
+// from an older IRQ-driven Schedule() frame. Scheduling again at depth > 1
+// stacks another TrapDispatch frame on the same descending stack (the F-050
+// tight-recursion failure mode), so we re-arm need_resched and return. The
+// matching outer IRQ frame will run its own normal tail drain after the nested
+// timer returns. We deliberately do not retry from the same IRQ frame after a
+// Schedule() returns: that can keep rescheduling a task before its current IRQ
+// frame reaches the RAII destructor, fossilizing a hard-IRQ depth of 1 across
+// the runqueue.
+static void DrainIrqTailResched(const TrapFrame* frame)
+{
+    if (!sched::TakeNeedResched())
+    {
+        return;
+    }
+
+    if (g_timer_nest_defer_enabled && frame->vector == kTimerVector && HardIrqNestDepth() > 1)
+    {
+        sched::SetNeedResched();
+        __atomic_fetch_add(&g_timer_nest_defer_count, 1, __ATOMIC_RELAXED);
+        KLOG_DEBUG_V("sched", "timer preempt deferred (nested IRQ)", HardIrqNestDepth());
+        return;
+    }
+
+    if (!cpu::DeferPreemptIfCritical())
+    {
+        sched::Schedule();
+    }
 }
 
 u32 LastKernelIrqRips(u32 cpu, u64* out, u32 out_len)
@@ -1285,12 +1349,17 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     // This is what makes the runtime checker's IrqNesting ceiling
     // (kIrqNestingCeiling) and the panic-snapshot depth field live
     // signals instead of constants.
+    const bool hard_irq_frame = IsDispatchedVector(frame->vector);
     struct IrqNestScope
     {
-        IrqNestScope()
+        explicit IrqNestScope(bool hard_irq) : hard_irq(hard_irq)
         {
             const u64 depth = ++IrqNestSlot();
             IrqNestMaxObserve(depth);
+            if (hard_irq)
+            {
+                ++HardIrqNestSlot();
+            }
         }
         ~IrqNestScope()
         {
@@ -1303,8 +1372,17 @@ extern "C" void TrapDispatch(TrapFrame* frame)
             {
                 --slot;
             }
+            if (hard_irq)
+            {
+                u64& hard_slot = HardIrqNestSlot();
+                if (hard_slot != 0)
+                {
+                    --hard_slot;
+                }
+            }
         }
-    } nest_scope;
+        bool hard_irq;
+    } nest_scope(hard_irq_frame);
 
     // KPath: record that this vector fired before any handler-
     // specific dispatch. Single bounds check + relaxed atomic add;
@@ -1399,34 +1477,7 @@ extern "C" void TrapDispatch(TrapFrame* frame)
             // proceed to call Schedule() normally. We still consume
             // need_resched via TakeNeedResched so a future tick
             // doesn't see a stale flag.
-            if (sched::TakeNeedResched())
-            {
-                // F-050 nesting defer: a TIMER IRQ that interrupted a
-                // context still inside a not-yet-unwound IRQ frame
-                // (IrqNestDepth() > 1, i.e. an outer IRQ's Schedule()
-                // chain hasn't iretq'd yet) must NOT call Schedule()
-                // here — doing so stacks another TrapDispatch frame on
-                // the same descending stack each tick (tight descent ->
-                // recursion guard -> panic). Defer instead: re-arm
-                // need-resched and let the OUTER frame run the single
-                // Schedule() on its way out, so the busy thread always
-                // iretqs out of frame #1 before another Schedule()
-                // lands. Only the timer drives this (it's the periodic
-                // preemption source); a nested device IRQ that legitly
-                // needs to reschedule still does so via the critnest
-                // path below. Gated on g_timer_nest_defer_enabled so the
-                // historical always-Schedule path can be restored.
-                if (g_timer_nest_defer_enabled && frame->vector == kTimerVector && IrqNestDepth() > 1)
-                {
-                    sched::SetNeedResched();
-                    __atomic_fetch_add(&g_timer_nest_defer_count, 1, __ATOMIC_RELAXED);
-                    KLOG_DEBUG_V("sched", "timer preempt deferred (nested IRQ)", IrqNestDepth());
-                }
-                else if (!cpu::DeferPreemptIfCritical())
-                {
-                    sched::Schedule();
-                }
-            }
+            DrainIrqTailResched(frame);
         }
         else
         {

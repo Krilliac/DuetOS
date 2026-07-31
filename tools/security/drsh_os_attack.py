@@ -23,7 +23,7 @@ class Probe:
     title: str
     destructive: bool = False
     sensitive: bool = False
-    timeout: float = 3.0
+    timeout: float = 10.0
 
 
 @dataclass
@@ -54,18 +54,60 @@ def add(findings: list[Finding], vector: str, severity: str, title: str, detail:
             print(f"    {line[:180]}")
 
 
-def run_probe_vector(shell: Shell, vector: str, probes: list[Probe], findings: list[Finding]) -> None:
+BLOCKED_MARKERS = (
+    "denied",
+    "error",
+    "failed",
+    "force  to proceed",
+    "command not found",
+    "no such",
+    "only /tmp",
+    "outside 1 gib direct map",
+    "protected",
+    "refused",
+    "unknown",
+    "usage",
+)
+
+
+def response_indicates_blocked(response: str) -> bool:
+    lower = response.lower()
+    return any(marker in lower for marker in BLOCKED_MARKERS)
+
+
+def run_probe_vector(shell: Shell, vector: str, probes: list[Probe], findings: list[Finding]) -> bool:
     print(f"\n[OS-PROBE] {vector}")
     for probe in probes:
-        response = shell.run(probe.command, timeout=probe.timeout)
-        lower = response.lower()
-        if probe.destructive and response.strip() and "denied" not in lower and "error" not in lower:
+        try:
+            response = shell.run(probe.command, timeout=probe.timeout)
+        except (DrshDisconnected, DrshProtocolError, OSError) as error:
+            if probe.destructive:
+                add(
+                    findings,
+                    vector,
+                    "HIGH",
+                    f"destructive command disrupted DRSH session: {probe.command}",
+                    str(error),
+                )
+                return False
+            raise
+        blocked = response_indicates_blocked(response)
+        if vector == "escape" and probe.destructive and response.strip():
+            # Command-injection probes that return a normal shell error, a
+            # literal echo, or a directory listing did not execute the embedded
+            # reboot/halt/panic payload. If one of those payloads actually
+            # fires, the probe normally ends as a timeout/disconnect and is
+            # classified by the exception path above.
+            snippet = response.strip().replace("\n", " ")[:160]
+            add(findings, vector, "INFO", f"{probe.command}: {snippet}")
+        elif probe.destructive and response.strip() and not blocked:
             add(findings, vector, "HIGH", f"destructive command may have succeeded: {probe.command}", response)
-        elif probe.sensitive and response.strip() and "denied" not in lower and "error" not in lower:
+        elif probe.sensitive and response.strip() and not blocked:
             add(findings, vector, "MEDIUM", f"sensitive probe returned data: {probe.command}", response)
         else:
             snippet = response.strip().replace("\n", " ")[:160]
             add(findings, vector, "INFO", f"{probe.command}: {snippet}")
+    return True
 
 
 SAFE_VECTORS: dict[str, list[Probe]] = {
@@ -161,7 +203,13 @@ DESTRUCTIVE_VECTORS: dict[str, list[Probe]] = {
 def vector_names(include_destructive: bool) -> list[str]:
     names = sorted(SAFE_VECTORS)
     if include_destructive:
-        names.extend(sorted(DESTRUCTIVE_VECTORS))
+        destructive = sorted(DESTRUCTIVE_VECTORS)
+        # Keep explicit guest-power vectors at the end for --vector all. Those
+        # commands are allowed to halt/reboot/panic the throwaway QEMU guest, so
+        # running them early masks useful findings from the other categories.
+        names.extend(name for name in destructive if name != "power")
+        if "power" in DESTRUCTIVE_VECTORS:
+            names.append("power")
     return names
 
 
@@ -170,7 +218,9 @@ def run_vectors(shell: Shell, names: list[str], findings: list[Finding]) -> None
         probes = SAFE_VECTORS.get(name) or DESTRUCTIVE_VECTORS.get(name)
         if probes is None:
             raise ValueError(f"unknown vector: {name}")
-        run_probe_vector(shell, name, probes, findings)
+        if not run_probe_vector(shell, name, probes, findings):
+            print(f"\n[OS-PROBE] stopping after terminal destructive effect in {name}")
+            break
 
 
 def parse_args() -> argparse.Namespace:
