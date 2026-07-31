@@ -1234,3 +1234,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: kernel/loader/execd_protocol.h
 - **Claimed**: 2026-07-31T21:38:56Z
 - **Status**: COMPLETED @ 2026-07-31T21:39:16Z
+
+### [ACTIVE] execd-protocol
+- **Session**: `Nathan-1607`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/loader/execd_protocol.h`
+- **Description**: No description provided
+- **Claimed**: 2026-07-31T21:39:18Z
+- **Status**: IN PROGRESS
