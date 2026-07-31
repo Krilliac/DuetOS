@@ -898,3 +898,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: No description provided
 - **Claimed**: 2026-07-31T18:24:07Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] kobject-handle-v2-callers
+- **Session**: `Codex-kobject-handle-v2`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/ipc/handle_table.cpp kernel/ipc/handle_table_selftest.cpp kernel/ipc/kobject.h kernel/ipc/kobject.cpp kernel/ipc/kevent.cpp kernel/ipc/kfile.cpp kernel/ipc/kmailbox.cpp kernel/ipc/kmutex.cpp kernel/ipc/ksemaphore.cpp kernel/ipc/kwaitable.cpp kernel/ipc/named_kobjects.cpp kernel/subsystems/win32/kobject_handle.h kernel/subsystems/win32/mutex_syscall.cpp kernel/subsystems/win32/mutex_syscall.h kernel/subsystems/win32/event_syscall.cpp kernel/subsystems/win32/event_syscall.h kernel/subsystems/win32/semaphore_syscall.cpp kernel/subsystems/win32/semaphore_syscall.h kernel/subsystems/win32/iocp_syscall.cpp kernel/subsystems/win32/iocp_syscall.h kernel/subsystems/win32/named_kobj_syscall.cpp kernel/subsystems/win32/named_kobj_syscall.h userland/libs/kernel32/kernel32_sync.c userland/libs/kernel32_32/kernel32_32_sync.c userland/libs/ntdll/ntdll_facades.c`
+- **Description**: Generation-safe fixed-capacity opaque handles and checked KObject retention
+- **Claimed**: 2026-07-31T18:24:27Z
+- **Status**: IN PROGRESS
