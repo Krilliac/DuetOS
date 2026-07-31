@@ -1394,3 +1394,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Immutable bounded service manifest byte contract
 - **Claimed**: 2026-07-31T22:25:38Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-manifest-source
+- **Session**: `Nathan-1039`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/service_manifest.cpp`
+- **Description**: Canonical LE decoder and trusted authority narrowing
+- **Claimed**: 2026-07-31T22:25:43Z
+- **Status**: IN PROGRESS
