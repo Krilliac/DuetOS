@@ -954,3 +954,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Make
 - **Claimed**: 2026-07-31T19:14:31Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] ipc-message-abi
+- **Session**: `Codex-ipc-message-abi`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/ipc/message_abi.h`
+- **Description**: No description provided
+- **Claimed**: 2026-07-31T19:31:37Z
+- **Status**: IN PROGRESS
