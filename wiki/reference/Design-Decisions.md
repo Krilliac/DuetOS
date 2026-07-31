@@ -12521,6 +12521,18 @@ markers for its richest input. Three discovery layers were added (runtime
   hosted build, boot, and concurrent socket tests remain required before
   this is considered runtime-proven.
 
+## 2026-07-31 — TCP accept queues discard stale children and reject overflow
+
+- **Decision:** `AcceptNonblocking` drains stale or no-longer-established
+  child IDs instead of returning a handle whose generation no longer maps
+  to a live TCB.
+- **Decision:** when a completed handshake finds the listener's accept
+  queue full, the child is reset and dropped immediately. It must not remain
+  established with `parent_listener` set, because that state has no path to
+  `accept()` and consumes a TCB slot.
+- **Verification boundary:** the fixes pass source/diff checks; boot TCP
+  selftest and concurrent backlog/close tests remain required.
+
 ## 2026-07-27 — TLB-shootdown ack targets gate on a self-set `tlb_ipi_ready`, never on `online`
 
 - **Context:** `SmpTlbShootdownBroadcast` built its kernel-AS ack mask from
