@@ -1290,3 +1290,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Versioned transport-independent GUI broker wire contract and hostile host vectors
 - **Claimed**: 2026-07-31T21:49:13Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] process-decomposition-map
+- **Session**: `Nathan-1684`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `docs/process-decomposition-2026-07-31.md`
+- **Description**: Implementation-grade
+- **Claimed**: 2026-07-31T21:55:32Z
+- **Status**: IN PROGRESS
