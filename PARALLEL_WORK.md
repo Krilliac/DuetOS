@@ -810,3 +810,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: No description provided
 - **Claimed**: 2026-07-31T16:24:48Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] proc-job-win32-header
+- **Session**: `Codex-job-core-service`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/subsystems/win32/job_syscall.h`
+- **Description**: No description provided
+- **Claimed**: 2026-07-31T16:24:50Z
+- **Status**: IN PROGRESS
