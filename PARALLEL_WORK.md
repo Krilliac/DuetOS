@@ -698,3 +698,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Expose
 - **Claimed**: 2026-07-31T14:44:00Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] win32-file-handle-lifetime
+- **Session**: `Nathan-1508`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/fs/file_route.cpp kernel/fs/file_route.h kernel/subsystems/linux/syscall_pipe.cpp kernel/subsystems/linux/syscall_pipe.h kernel/subsystems/win32/pipe_syscall.cpp kernel/subsystems/win32/named_pipe_syscall.cpp`
+- **Description**: Serialize reserve publish inherit and detach for Win32 file handles
+- **Claimed**: 2026-07-31T14:56:08Z
+- **Status**: IN PROGRESS
