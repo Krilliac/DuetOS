@@ -1226,3 +1226,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Pure bounded cross-process GUI broker authorization policy and host properties
 - **Claimed**: 2026-07-31T21:37:46Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] Codex-exec-admission
+- **Session**: `Nathan-1477`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `execd-protocol`
+- **Description**: kernel/loader/execd_protocol.h
+- **Claimed**: 2026-07-31T21:38:56Z
+- **Status**: IN PROGRESS
