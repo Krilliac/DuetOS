@@ -827,10 +827,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T16:24:52Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] docs-sync-dry-run
+### [DONE] docs-sync-dry-run
 - **Session**: `Nathan-221`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `docs/sync-wiki.sh`
 - **Description**: Make wiki drift check operate on an isolated copy and never mutate the worktree
 - **Claimed**: 2026-07-31T16:32:01Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-31T16:37:31Z
