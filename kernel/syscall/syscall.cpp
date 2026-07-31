@@ -2580,13 +2580,13 @@ void SyscallDispatch(arch::TrapFrame* frame)
                     break;
                 }
             }
-            const auto* s = ::duetos::net::SocketGet(static_cast<u32>(frame->rsi));
-            if (s == nullptr)
+            const u16 socket_type = ::duetos::net::SocketTypeOf(static_cast<u32>(frame->rsi));
+            if (socket_type == 0)
             {
                 rv = -9; // -EBADF
                 break;
             }
-            if (s->type == ::duetos::net::kSocketTypeDgram)
+            if (socket_type == ::duetos::net::kSocketTypeDgram)
                 rv = ::duetos::net::SocketSendDgram(static_cast<u32>(frame->rsi), dst_ip, dst_port, stage,
                                                     static_cast<u32>(len));
             else
@@ -2600,13 +2600,13 @@ void SyscallDispatch(arch::TrapFrame* frame)
             if (cap > kStageCap)
                 cap = kStageCap;
             u8 stage[kStageCap];
-            const auto* s = ::duetos::net::SocketGet(static_cast<u32>(frame->rsi));
-            if (s == nullptr)
+            const u16 socket_type = ::duetos::net::SocketTypeOf(static_cast<u32>(frame->rsi));
+            if (socket_type == 0)
             {
                 rv = -9;
                 break;
             }
-            if (s->type == ::duetos::net::kSocketTypeDgram)
+            if (socket_type == ::duetos::net::kSocketTypeDgram)
             {
                 ::duetos::net::Ipv4Address src_ip = {};
                 u16 src_port = 0;

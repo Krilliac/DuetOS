@@ -12503,6 +12503,24 @@ markers for its richest input. Three discovery layers were added (runtime
   slice retired the 27th (`SocketRecvDgram`); every remaining entry is a
   real SMP lost-wake, not noise.
 
+## 2026-07-31 — Socket operations pin lifetime and snapshot mutable state
+
+- **Decision:** `SocketPin` / `SocketUnpin` protect every potentially
+  blocking socket operation from slot reuse and deferred teardown. Last
+  handle close and process-owner reclamation mark the entry closing, wake
+  waiters, and release the TCB, pipe endpoints, and UDP ring only after
+  operation pins drain.
+- **Decision:** stream send/recv, datagram send, and poll snapshot mutable
+  endpoint state under the socket-pool lock before calling TCP or the pipe
+  pool. Short syscall probes use lock-protected scalar accessors rather
+  than exposing a raw pool pointer.
+- **Why:** a pool lock alone cannot cover sleeps or calls into subsystems
+  with their own interrupt/lock contracts. A raw `Socket*` therefore had
+  both use-after-free and field-race hazards under close/reuse.
+- **Verification boundary:** source checks and diff review are complete;
+  hosted build, boot, and concurrent socket tests remain required before
+  this is considered runtime-proven.
+
 ## 2026-07-27 — TLB-shootdown ack targets gate on a self-set `tlb_ipi_ready`, never on `online`
 
 - **Context:** `SmpTlbShootdownBroadcast` built its kernel-AS ack mask from
