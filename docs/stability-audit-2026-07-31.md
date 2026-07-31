@@ -23,7 +23,7 @@ Status: active; static and host-side partial verification complete. Full kernel/
 
 ## Implemented hardening
 
-Recent audit commits include teardown pinning for socket/IPC/async pools, timeout and overflow saturation, bounds and source-span checks, driver/loader range arithmetic, diagnostic formatting safety, filesystem label walks, Linux directory-prefix copying, and explicit userland ABI/CRT contracts. The current branch is clean at `4b6e15fe`.
+Recent audit commits include teardown pinning for socket/IPC/async pools, timeout and overflow saturation, bounds and source-span checks, driver/loader range arithmetic, diagnostic formatting safety, filesystem label walks, Linux directory-prefix copying, and explicit userland ABI/CRT contracts. The current branch is clean at `9aeca2f0`.
 
 ## Remaining verification
 
@@ -32,6 +32,6 @@ Recent audit commits include teardown pinning for socket/IPC/async pools, timeou
 - QEMU boot, syscall/fuzz/stress campaigns, SMP/S3 paths, and graphical/runtime smoke tests.
 - Hardware-dependent storage, networking, GPU, ACPI, and USB paths.
 - Static analyzer residuals classified as intentional canary/SEH fixtures, linker/PE image-base contracts, inline-assembly parser limitations, or bounded NUL-terminated pointer contracts; they should be revisited after a target-aware compiler/analyzer run.
-- Active-path design risks retained for follow-up: IOCP close currently marks the port closed on the first handle close if duplicate IOCP handles become supported; `pidfd_getfd` reads a target Linux fd table without a per-process fd lock during concurrent close. Both require their owning handle/fd-lifetime contracts before a safe fix.
+- Active-path design risks retained for follow-up: IOCP close currently marks the port closed on the first handle close if duplicate IOCP handles become supported; the current userland `DuplicateHandle` implementation aliases the numeric source handle, and no `NtDuplicateObject`/kernel duplicate dispatch exists for IOCP. `pidfd_getfd` reads a target Linux fd table without a per-process fd lock during concurrent close; the array is directly read by many Linux syscall paths, so adding a lock only at `pidfd_getfd` would not establish an invariant. Both require their owning handle/fd-lifetime contracts before a safe fix.
 
 The machine preflight currently reports STOP-level resource pressure, so no build or QEMU process was launched during this audit slice.
