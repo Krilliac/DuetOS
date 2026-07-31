@@ -1034,3 +1034,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Make installer output and comments state that embedded direct UEFI bytes are layout preparation, not a bootable installation
 - **Claimed**: 2026-07-31T19:44:43Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] ipc-versioned-payload
+- **Session**: `Codex-ipc-message-abi`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/ipc/versioned_payload.h kernel/ipc/versioned_payload.cpp tests/host/test_versioned_payload.cpp`
+- **Description**: Allocation-free size/version-tagged payload validation and transactional encoding for generated IPC contracts
+- **Claimed**: 2026-07-31T19:47:53Z
+- **Status**: IN PROGRESS
