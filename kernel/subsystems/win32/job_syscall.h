@@ -1,34 +1,34 @@
 #pragma once
 
 /*
- * Win32 JobObject syscall surface.
+ * Win32 adapter for the protocol-neutral process Job service.
  *
- * Handles: low 12-bit tag kJobHandleBase = 0xC00..0xC07 plus a
- * non-wrapping generation in the high bits.
+ * This layer owns public handle tags, Win32 information-class layouts,
+ * capability checks, user copies, and scheduler kill requests. Pool state,
+ * member references, accounting, termination pins, and owner drain live in
+ * proc/job.{h,cpp}.
  *
  * (Formerly iocp_job.h — the IOCP half migrated to the KObject-
  * shaped ipc::IocpPort + kobj_handles; see iocp_syscall.h.)
  */
 
+#include "proc/job.h"
 #include "util/types.h"
-
-namespace duetos::core
-{
-struct Process;
-}
 
 namespace duetos::subsystems::win32
 {
 
 // Handle-band constants — shared with DoFileClose dispatch.
 constexpr u64 kJobHandleBase = 0xC00ULL;
-constexpr u32 kJobPoolCap = 8;
+constexpr u32 kJobPoolCap = core::kJobPoolCapacity;
 constexpr u64 kJobHandleTagMask = 0xFFFULL;
+constexpr u32 kJobHandleGenerationShift = 12;
 
 inline constexpr bool IsJobHandle(u64 handle)
 {
     const u64 tag = handle & kJobHandleTagMask;
-    return (handle >> 12) != 0 && tag >= kJobHandleBase && tag < kJobHandleBase + kJobPoolCap;
+    return (handle & (1ULL << 63)) == 0 && (handle >> kJobHandleGenerationShift) != 0 && tag >= kJobHandleBase &&
+           tag < kJobHandleBase + kJobPoolCap;
 }
 
 // JobObject — process-grouping container.
@@ -49,5 +49,9 @@ void JobDrainOwnedByProcess(core::Process* owner);
 /// Heap-phase reference-balance test for the owner-exit drain. Must run
 /// after KernelHeapInit and before user tasks can create Job objects.
 void JobOwnerExitSelfTest();
+
+/// Heap-phase handle-generation, owner-isolation, close-balance, and query-ABI
+/// regression. Must run before user tasks can create Job objects.
+void JobHandleLifetimeSelfTest();
 
 } // namespace duetos::subsystems::win32
