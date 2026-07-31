@@ -1130,3 +1130,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Loader-private staging package with sealed LoadPlan backing and transactional ownership map
 - **Claimed**: 2026-07-31T20:19:16Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] ipc-message-port
+- **Session**: `Codex-resource-domain`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/ipc/kmessage_port.h kernel/ipc/kmessage_port.cpp tests/host/test_kmessage_port.cpp`
+- **Description**: Generation-safe waitable MessagePort KObject atop validated MessageRing
+- **Claimed**: 2026-07-31T20:34:40Z
+- **Status**: IN PROGRESS
