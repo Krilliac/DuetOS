@@ -1202,3 +1202,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Fixed-pool
 - **Claimed**: 2026-07-31T21:21:31Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] proc-credentials-host
+- **Session**: `Nathan-383`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tests/host/test_credentials.cpp`
+- **Description**: Credential
+- **Claimed**: 2026-07-31T21:21:32Z
+- **Status**: IN PROGRESS
