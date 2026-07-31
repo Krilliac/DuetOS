@@ -539,10 +539,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T05:23:38Z
 - **Status**: COMPLETED @ 2026-07-31T05:41:09Z
 
-### [ACTIVE] gpu-amd-pm4
+### [DONE] gpu-amd-pm4
 - **Session**: `Nathan-131`
 - **Branch**: `claude/gpu-amd-pm4-20260731`
 - **Files**: `kernel/drivers/gpu/amd_gpu.h kernel/drivers/gpu/amd_gpu.cpp kernel/drivers/gpu/amd_gpu_cmds.h kernel/drivers/gpu/amd_cp_ucode.cpp kernel/drivers/gpu/amd_cp_ucode.h wiki/drivers/Graphics-Drivers.md wiki/reference/GPU-Implementation-Notes.md wiki/reference/Roadmap.md`
 - **Description**: AMD GFX9 PM4 write-data readback probe after CP microcode load
 - **Claimed**: 2026-07-31T05:49:50Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-31T06:04:13Z
