@@ -1082,3 +1082,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Generate the authoritative static capability gate rows from the versioned native syscall IDL
 - **Claimed**: 2026-07-31T19:59:47Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] ipc-message-ring
+- **Session**: `Codex-ipc-message-abi`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/ipc/message_ring.h kernel/ipc/message_ring.cpp tests/host/test_message_ring.cpp`
+- **Description**: Caller-storage bounded validated message ring with explicit backpressure and transactional sequence-exact receive
+- **Claimed**: 2026-07-31T20:00:08Z
+- **Status**: IN PROGRESS
