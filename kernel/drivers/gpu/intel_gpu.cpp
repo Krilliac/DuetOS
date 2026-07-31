@@ -19,7 +19,6 @@
 #include "log/klog.h"
 #include "mm/dma.h"
 #include "mm/zone.h"
-#include "sync/spinlock.h"
 #include "time/timekeeper.h"
 
 namespace duetos::drivers::gpu::intel
@@ -65,7 +64,6 @@ struct BltSurfaceMapping
 };
 
 constinit BltSurfaceMapping g_blt_surface_mapping{};
-constinit ::duetos::sync::SpinLock g_blt_submit_lock{};
 // A spinlock cannot span GGTT mapping or the hardware completion wait: the
 // former is a potentially long page loop and the latter may consume 100 ms.
 // Keep whole-operation serialization with a nonblocking ownership word so a
@@ -756,18 +754,21 @@ bool IntelBltColorFill(const BltSurfaceDescriptor& surface, u32 x, u32 y, u32 wi
     // Do not block a compositor or interrupt-context caller behind a
     // hardware poll. A concurrent BLT gets the existing CPU fallback and
     // the next compose can retry after the serialized owner leaves.
-    ::duetos::sync::SpinLockTryGuard guard{g_blt_submit_lock};
-    if (!guard.held())
+    BltSubmissionLease lease{};
+    if (!lease.held)
         return false;
 
-    const u64 dst_va = MapBltSurfaceLocked(surface);
+    const u64 dst_va = MapBltSurface(surface);
     if (dst_va == 0)
         return false;
 
     const mm::DmaBuffer cpu_view{static_cast<mm::PhysAddr>(surface.phys), surface.cpu_virt, surface.geometry.bytes,
                                  mm::Zone::Normal};
     mm::DmaSyncForDevice(cpu_view, 0, surface.geometry.bytes);
-    if (!SubmitColorBltLocked(*g_intel_info, dst_va, surface, x, y, width, height, argb))
+    u32 new_tail = 0;
+    if (!QueueColorBlt(*g_intel_info, dst_va, surface, x, y, width, height, argb, &new_tail))
+        return false;
+    if (!PollColorBlt(*g_intel_info, new_tail))
     {
         // A timeout means the ring can no longer be trusted for this boot.
         // Disable only this optional path; callers continue with their
