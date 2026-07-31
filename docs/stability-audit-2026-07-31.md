@@ -37,6 +37,117 @@ The process-lifetime follow-up adds a per-process IRQ-safe handle-slot lock and 
 
 The same slice closes the surrounding publication edges. Last-task reaping removes scheduler lookup visibility before Process/AS teardown and drains self-owned Jobs without running destructors under the Job lock. Affinity, suspend/resume, and `tgkill(..., 0)` consume immutable TIDs entirely inside scheduler-owned operations rather than carrying a borrowed `Task*`. Job termination accounts against the locked object instead of re-resolving a reusable slot, and Job error logging now occurs after unlocking. SpawnEx installs inherited stdio through a synchronous pre-publication callback; a child cannot run or exit before its initial handle table and standard-handle aliases are complete. The ntdll VM facade chunks requests above 16 KiB, prevalidates whole-range overflow, preserves kernel validation for zero-length calls, aggregates counts, and distinguishes data-path partial copies from later administrative failures.
 
+## Architecture stabilization contract
+
+The repository-wide architecture review is adopted as a dependency-ordered
+stabilization program. It is not a simultaneous rewrite. Every extraction uses
+a strangler transition: define and test a narrow interface, adapt the current
+implementation behind it, move one behavior at a time, compare old and new
+behavior, then prohibit the retired dependency from returning.
+
+The non-negotiable boundaries are:
+
+- Native and compatibility APIs remain adapters over one scheduler, VM, object,
+  filesystem, socket, graphics, and IPC implementation. A second Win32-shaped
+  kernel backend is not acceptable.
+- A recovery domain inside the shared kernel address space is not described as
+  fault isolation. Only a separate address space, and where applicable an IOMMU
+  domain, establishes a containment boundary.
+- Syscall handlers receive retained typed objects or immutable identifiers. They
+  do not carry borrowed `Process*`, `Task*`, PTE, or handle-slot pointers across
+  an unlock, block, copy, teardown, or external call.
+- All hostile arithmetic and structure validation occurs at ingress. No
+  compatibility shim, parser, or service may rely on silent W+X downgrades,
+  alignment repair, truncated identifiers, or partial initialization.
+- No allocator, user copy, page copy, TLB-wait, destructor, scheduler call, or
+  service callback runs beneath an IRQ-safe pool or metadata spinlock.
+
+### Phase order and exit gates
+
+1. **Correctness and truthfulness.** Finish transactional VM metadata, guarded
+   task-owned stacks, generation-safe handles, per-task GUI queues, the truthful
+   boot contract, mandatory prerequisites, and generated syscall/security
+   inventory. Exit requires sanitizer/model concurrency coverage, stale-handle
+   rejection after forced reuse, at least one unmapped guard page per stack, no
+   required release-test skips, and explicit policy metadata for every syscall.
+2. **Object and process decomposition.** Introduce a small process core plus Job,
+   credentials, thread-group, and independently destructible ABI contexts.
+   Register files, sections, sockets, pipes, windows, and synchronization objects
+   in one reference-driven teardown system. Exit requires no backend, GUI,
+   socket, or ABI-specific fields in the core and passing create/duplicate/
+   inherit/close/exit properties for every object family.
+3. **Generated ABI and IPC.** Make a versioned IDL the source of syscall numbers,
+   kernel dispatch, C/Rust stubs, argument validators, authorization, tracing,
+   fuzz metadata, and documentation. Add waitable channels/message ports and
+   size/version-tagged request structures. Exit requires zero handwritten number
+   duplication and reproducible generated compatibility reports.
+4. **Service extraction.** Extract `serviced`, then `execd`, `displayd`,
+   `registryd`, `netd`, selected filesystem parsers, and suitable driver hosts.
+   An extracted service must be restartable with defined client recovery, and
+   its crash/fuzz campaign must be unable to corrupt the kernel or stop unrelated
+   processes.
+5. **GUI compatibility.** Route messages to the owning Task, implement real
+   `PostThreadMessage`, broker and filter cross-process delivery, and make
+   synchronous cross-thread sends explicit RPC with cancellation, timeout, and
+   reentrancy tracking. Exit requires independent queues in one process,
+   integrity-safe cross-process behavior, reference message ordering, and
+   defined saturation/backpressure.
+6. **Boot, build, and packaging separation.** Replace recursive privileged source
+   discovery with explicit subsystem targets, ship an initrd or immutable system
+   image with a hashed capability manifest, keep applications/fixtures out of the
+   production kernel, and require the advertised boot path in release CI.
+7. **Measured SMP and performance refinement.** Only after the prior correctness
+   gates: add priority inheritance, lower stack budgets, consider per-CPU runqueue
+   locks, adopt `SYSCALL/SYSRET`, add IOMMU domains, and optimize IPC/shared
+   memory. Each change needs a reproducible contention or latency win without a
+   stress regression.
+
+### Decisions frozen for the first implementation waves
+
+- **Boot:** Multiboot2 through GRUB is the supported release contract until the
+  direct UEFI loader completes segment loading, `ExitBootServices`, versioned
+  `BootInfo`, and kernel handoff in required CI. The partial loader remains an
+  experimental path and must not be advertised as complete.
+- **Handles:** first make the current bounded tables generation-safe; paged growth
+  follows after initialization and teardown can allocate safely. Public PE32
+  tokens reserve bit 31 and use nonzero, non-wrapping generations. Generation
+  exhaustion retires a slot rather than accepting ABA. Raw lookup is deprecated
+  in favor of typed retained lookup.
+- **Stacks:** the owning Task holds a non-forgeable address-space reservation
+  token for its whole guard/reserve/commit interval. Mapping, demand growth,
+  exec, fork, and reaping consume that exact token; a present foreign PTE is a
+  hard conflict, never adopted as stack memory.
+- **GUI:** a fixed allocation-free queue and its wait queue belong to each Task.
+  Receive is transactional: peek a sequence while locked, copy unlocked, then
+  commit that exact sequence. `WM_QUIT` cannot be evicted; coalescing is limited
+  to explicitly safe high-frequency messages.
+- **Execution:** the kernel PE loader first produces and consumes a compact,
+  immutable `LoadPlan`. `execd` later owns parsing and dependency policy, while a
+  small kernel validator rejects overlap, overflow, W+X, mutable executable
+  backing, and an entry point outside executable regions.
+- **Service control:** kernel-resident service state is transitional policy, not
+  a security boundary. `serviced` owns manifests and restart policy through
+  capability-checked IPC; the kernel retains scheduling, mappings, interrupts,
+  object rights, and final device/DMA authority.
+
+### Quantitative completion evidence
+
+- One million randomized map/protect/unmap/fork/lookup operations without
+  divergence from the reference interval model.
+- Zero stale resolutions under forced handle-slot reuse and terminal-generation
+  tests.
+- Zero object leaks after 10,000 create/duplicate/inherit/close/exit cycles per
+  object family.
+- One thousand consecutive boots for every required release profile, with no
+  missing-prerequisite skip path.
+- Complete generated syscall authorization metadata and checked object rights.
+- Cross-process GUI fuzzing cannot cause unauthorized close, quit, focus,
+  capture, or input changes.
+- Service fault injection leaves the kernel and unrelated processes running.
+- Compatibility is reported by behavioral fixtures (return and last-error
+  values, layouts, ordering, blocking, inheritance, thread-local state,
+  cross-process security, and abnormal cleanup), not by export counts.
+
 ## Remaining verification
 
 - Full MSVC build and link.
@@ -53,4 +164,8 @@ The same slice closes the surrounding publication edges. Last-task reaping remov
 - Fork now stabilizes the mapping structure but does not quiesce sibling writers to mapped memory. A coherent multi-threaded fork needs sibling suspension, write-protected COW, or an explicit rejection contract.
 - Win32 `SectionMap` still does not pin its section frames before entering the sleepable AS mapping transaction. Section-handle lookup, W^X state, and per-process view ledgers also need one serialized reserve/publish/retire contract so close/unmap cannot free, alias, or double-release a view in flight.
 
-The machine preflight currently reports STOP-level resource pressure, so no build or QEMU process was launched during this audit slice.
+The post-trace machine preflight recovered to `GO` with 7.1 GiB free RAM,
+31.6 GiB commit headroom, zero running builds, and approximately 1.62 GiB of
+kernel pool. Builds remain serialized until the active lifetime edits reach a
+coherent checkpoint; the elevated pool baseline still makes a reboot advisable
+before the prolonged release/QEMU campaigns.
