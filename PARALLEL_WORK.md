@@ -1242,3 +1242,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: No description provided
 - **Claimed**: 2026-07-31T21:39:18Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] execd-protocol-source
+- **Session**: `Nathan-922`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/loader/execd_protocol.cpp`
+- **Description**: Transport-neutral
+- **Claimed**: 2026-07-31T21:39:33Z
+- **Status**: IN PROGRESS
