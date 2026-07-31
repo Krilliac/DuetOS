@@ -989,7 +989,7 @@ i64 PipeTeeFromPipe(u32 dst_idx, u32 src_idx, u64 len)
 }
 #endif
 
- i32 EventfdAlloc(u64 initval, u32 flags)
+i32 EventfdAlloc(u64 initval, u32 flags)
 {
     sync::SpinLockGuard guard(g_pipe_lock);
     for (u32 i = 0; i < kEventfdPoolCap; ++i)

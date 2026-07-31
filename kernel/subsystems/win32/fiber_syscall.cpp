@@ -104,8 +104,8 @@ void DoFiberCreate(arch::TrapFrame* frame)
             return;
         }
         const u64 va = stack_base + i * mm::kPageSize;
-        if (!mm::AddressSpaceMapUserPage(
-                proc->as, va, f, mm::kPagePresent | mm::kPageWritable | mm::kPageUser | mm::kPageNoExecute))
+        if (!mm::AddressSpaceMapUserPage(proc->as, va, f,
+                                         mm::kPagePresent | mm::kPageWritable | mm::kPageUser | mm::kPageNoExecute))
         {
             mm::FreeFrame(f);
             for (u64 j = 0; j < i; ++j)

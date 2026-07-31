@@ -117,7 +117,8 @@ i32 ShmFindByKey(i32 key)
     if (key == 0) // IPC_PRIVATE
         return -1;
     for (u32 i = 0; i < kShmPoolCap; ++i)
-        if (g_shm_pool[i].in_use && !g_shm_pool[i].initializing && !g_shm_pool[i].marked_destroy && g_shm_pool[i].key == key)
+        if (g_shm_pool[i].in_use && !g_shm_pool[i].initializing && !g_shm_pool[i].marked_destroy &&
+            g_shm_pool[i].key == key)
             return static_cast<i32>(i);
     return -1;
 }

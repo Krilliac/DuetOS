@@ -139,8 +139,7 @@ void LinuxAlarmCheckAndRaise(::duetos::core::Process* p)
         {
             u64 missed = (now - p->linux_alarm_deadline_ns) / p->linux_alarm_interval_ns + 1;
             p->linux_alarm_deadline_ns =
-                SaturatingAdd(p->linux_alarm_deadline_ns,
-                              SaturatingMul(missed, p->linux_alarm_interval_ns));
+                SaturatingAdd(p->linux_alarm_deadline_ns, SaturatingMul(missed, p->linux_alarm_interval_ns));
         }
         else
         {
@@ -199,8 +198,7 @@ i64 DoAlarm(u64 seconds)
         p->linux_alarm_deadline_ns = SaturatingAdd(now, SaturatingMul(seconds, kNsPerSec));
         p->linux_alarm_interval_ns = 0; // alarm(2) is one-shot
     }
-    return prior_remaining_sec > static_cast<u64>(kMaxI64) ? kMaxI64
-                                                           : static_cast<i64>(prior_remaining_sec);
+    return prior_remaining_sec > static_cast<u64>(kMaxI64) ? kMaxI64 : static_cast<i64>(prior_remaining_sec);
 }
 
 // getitimer(which, value) — read the current interval timer.

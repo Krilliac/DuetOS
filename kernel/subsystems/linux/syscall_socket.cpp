@@ -238,8 +238,7 @@ i64 DoAccept4(u64 fd, u64 user_addr, u64 user_addrlen, u64 flags)
     }
     if (!FdAssignSocket(p, static_cast<u32>(new_fd), static_cast<u32>(new_sock)))
         return kENFILE;
-    if (user_addr != 0 && user_addrlen != 0 &&
-        !WriteSockaddrIn(user_addr, user_addrlen, peer_ip, peer_port))
+    if (user_addr != 0 && user_addrlen != 0 && !WriteSockaddrIn(user_addr, user_addrlen, peer_ip, peer_port))
     {
         ::duetos::core::LinuxFdClose(p, static_cast<u32>(new_fd));
         return kEFAULT;
@@ -329,8 +328,7 @@ i64 DoRecvfrom(u64 fd, u64 user_buf, u64 len, u64 flags, u64 user_src_addr, u64 
             return got;
         if (got > 0 && !mm::CopyToUser(reinterpret_cast<void*>(user_buf), stage, static_cast<u64>(got)))
             return kEFAULT;
-        if (user_src_addr != 0 && user_addrlen != 0 &&
-            !WriteSockaddrIn(user_src_addr, user_addrlen, src_ip, src_port))
+        if (user_src_addr != 0 && user_addrlen != 0 && !WriteSockaddrIn(user_src_addr, user_addrlen, src_ip, src_port))
             return kEFAULT;
         return got;
     }

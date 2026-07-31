@@ -352,39 +352,39 @@ i64 FanotifyRead(u32 idx, u64 user_dst, u64 len)
             arch::Sti();
             continue;
         }
-    u8 stage[256];
-    u64 emitted = 0;
-    while (inst.count > 0)
-    {
-        const FanEvent& e = inst.ring[inst.tail];
-        constexpr u32 kRecord = 24;
-        if (emitted + kRecord > sizeof(stage) || emitted + kRecord > len)
-            break;
-        u8* p = stage + emitted;
-        const u32 event_len = e.event_len;
-        for (u32 i = 0; i < 4; ++i)
-            p[i] = static_cast<u8>((event_len >> (i * 8)) & 0xFF);
-        p[4] = 3; // FANOTIFY_METADATA_VERSION
-        p[5] = 0; // reserved
-        p[6] = 24;
-        p[7] = 0; // metadata_len = 24
-        for (u32 i = 0; i < 8; ++i)
-            p[8 + i] = static_cast<u8>((e.mask >> (i * 8)) & 0xFF);
-        // fd = -1 (FAN_NOFD) — sub-GAP
-        for (u32 i = 0; i < 4; ++i)
-            p[16 + i] = 0xFF;
-        for (u32 i = 0; i < 4; ++i)
-            p[20 + i] = static_cast<u8>((e.pid >> (i * 8)) & 0xFF);
-        emitted += kRecord;
-        inst.tail = (inst.tail + 1) % kFanotifyRingCap;
-        --inst.count;
-    }
-    sync::SpinLockRelease(g_fan_lock, lock_flags);
-    if (emitted == 0)
-        return kEAGAIN;
-    if (!mm::CopyToUser(reinterpret_cast<void*>(user_dst), stage, emitted))
-        return kEFAULT;
-    return static_cast<i64>(emitted);
+        u8 stage[256];
+        u64 emitted = 0;
+        while (inst.count > 0)
+        {
+            const FanEvent& e = inst.ring[inst.tail];
+            constexpr u32 kRecord = 24;
+            if (emitted + kRecord > sizeof(stage) || emitted + kRecord > len)
+                break;
+            u8* p = stage + emitted;
+            const u32 event_len = e.event_len;
+            for (u32 i = 0; i < 4; ++i)
+                p[i] = static_cast<u8>((event_len >> (i * 8)) & 0xFF);
+            p[4] = 3; // FANOTIFY_METADATA_VERSION
+            p[5] = 0; // reserved
+            p[6] = 24;
+            p[7] = 0; // metadata_len = 24
+            for (u32 i = 0; i < 8; ++i)
+                p[8 + i] = static_cast<u8>((e.mask >> (i * 8)) & 0xFF);
+            // fd = -1 (FAN_NOFD) — sub-GAP
+            for (u32 i = 0; i < 4; ++i)
+                p[16 + i] = 0xFF;
+            for (u32 i = 0; i < 4; ++i)
+                p[20 + i] = static_cast<u8>((e.pid >> (i * 8)) & 0xFF);
+            emitted += kRecord;
+            inst.tail = (inst.tail + 1) % kFanotifyRingCap;
+            --inst.count;
+        }
+        sync::SpinLockRelease(g_fan_lock, lock_flags);
+        if (emitted == 0)
+            return kEAGAIN;
+        if (!mm::CopyToUser(reinterpret_cast<void*>(user_dst), stage, emitted))
+            return kEFAULT;
+        return static_cast<i64>(emitted);
     }
 }
 

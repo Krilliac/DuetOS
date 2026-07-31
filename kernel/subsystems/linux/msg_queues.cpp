@@ -202,7 +202,8 @@ i32 SysvMqFindByKey(i32 key)
         return -1;
     sync::SpinLockGuard guard(g_sysv_lock);
     for (u32 i = 0; i < kSysvMqPoolCap; ++i)
-        if (g_sysv_pool[i].in_use && !g_sysv_pool[i].initializing && !g_sysv_pool[i].marked_destroy && g_sysv_pool[i].key == key)
+        if (g_sysv_pool[i].in_use && !g_sysv_pool[i].initializing && !g_sysv_pool[i].marked_destroy &&
+            g_sysv_pool[i].key == key)
             return static_cast<i32>(i);
     return -1;
 }
@@ -537,8 +538,7 @@ bool LoadDeadline(u64 user_timeout, u64& out_deadline_ticks, bool& out_no_deadli
     if (period_ns == 0)
         return false;
     // Round up so a sub-tick deadline doesn't immediately fire.
-    out_deadline_ticks = abs_ns > kMax - (period_ns - 1) ? kMax / period_ns
-                                                         : (abs_ns + (period_ns - 1)) / period_ns;
+    out_deadline_ticks = abs_ns > kMax - (period_ns - 1) ? kMax / period_ns : (abs_ns + (period_ns - 1)) / period_ns;
     return true;
 }
 

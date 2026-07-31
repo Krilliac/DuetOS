@@ -246,8 +246,8 @@ i64 DoBrk(u64 new_brk)
                               "brk: AllocateFrame OOM mid-grow; partial brk", va);
                 return static_cast<i64>(p->linux_brk_current);
             }
-            if (!mm::AddressSpaceMapUserPage(
-                    p->as, va, frame, mm::kPagePresent | mm::kPageWritable | mm::kPageUser | mm::kPageNoExecute))
+            if (!mm::AddressSpaceMapUserPage(p->as, va, frame,
+                                             mm::kPagePresent | mm::kPageWritable | mm::kPageUser | mm::kPageNoExecute))
             {
                 mm::FreeFrame(frame);
                 p->linux_brk_current = va;

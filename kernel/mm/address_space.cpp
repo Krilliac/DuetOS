@@ -673,9 +673,8 @@ core::Result<AddressSpace*> AddressSpaceFork(const AddressSpace* parent)
         // use the lock-free inner PTE walk here rather than re-entering
         // the non-recursive spinlock through the public probe helper.
         u64* parent_pte_ptr = WalkToPteIn(parent->pml4_virt, va, /*create=*/false);
-        const u64 parent_pte = (parent_pte_ptr != nullptr && (*parent_pte_ptr & kPagePresent) != 0)
-                                   ? *parent_pte_ptr
-                                   : 0;
+        const u64 parent_pte =
+            (parent_pte_ptr != nullptr && (*parent_pte_ptr & kPagePresent) != 0) ? *parent_pte_ptr : 0;
         if (parent_pte == 0)
         {
             // Region table thinks `va` is mapped but the PTE
