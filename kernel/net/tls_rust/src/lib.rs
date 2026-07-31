@@ -61,7 +61,7 @@ pub struct DuetosTlsHandshakeView {
 // contract is that `ptr` is readable for `len` bytes; the parsers
 // only index through bounds-checked slice operations after this
 // point.
-fn buf_as_slice<'a>(buf: *const u8, len: u32) -> Option<&'a [u8]> {
+unsafe fn buf_as_slice(buf: *const u8, len: u32, _scope: &()) -> Option<&[u8]> {
     if buf.is_null() {
         return None;
     }
@@ -93,7 +93,8 @@ pub unsafe extern "C" fn duetos_tls_peek_record(buf: *const u8, len: u32, out: *
     if out.is_null() {
         return false;
     }
-    let Some(s) = buf_as_slice(buf, len) else {
+    let buf_scope = ();
+    let Some(s) = (unsafe { buf_as_slice(buf, len, &buf_scope) }) else {
         return false;
     };
     if s.len() < 5 {
@@ -126,7 +127,8 @@ pub unsafe extern "C" fn duetos_tls_peek_handshake(buf: *const u8, len: u32, out
     if out.is_null() {
         return false;
     }
-    let Some(s) = buf_as_slice(buf, len) else {
+    let buf_scope = ();
+    let Some(s) = (unsafe { buf_as_slice(buf, len, &buf_scope) }) else {
         return false;
     };
     if s.len() < 4 {
@@ -180,7 +182,8 @@ pub unsafe extern "C" fn duetos_tls_parse_server_hello(
     if server_random.is_null() || out_cipher.is_null() {
         return false;
     }
-    let Some(s) = buf_as_slice(body, len) else {
+    let body_scope = ();
+    let Some(s) = (unsafe { buf_as_slice(body, len, &body_scope) }) else {
         return false;
     };
     // 2 (version) + 32 (random) + 1 (sid len) + 2 (cipher) + 1 (comp) = 38
@@ -251,7 +254,8 @@ pub unsafe extern "C" fn duetos_tls_parse_certificate_leaf(
     if out_leaf_der.is_null() || out_leaf_len.is_null() {
         return false;
     }
-    let Some(s) = buf_as_slice(body, len) else {
+    let body_scope = ();
+    let Some(s) = (unsafe { buf_as_slice(body, len, &body_scope) }) else {
         return false;
     };
     if s.len() < 6 {

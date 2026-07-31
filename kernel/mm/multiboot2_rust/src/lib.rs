@@ -102,7 +102,7 @@ const MULTIBOOT_MMAP_ENTRY_SIZE_MAX: u32 = 256;
 
 // ---------- helpers ----------
 
-fn slice_from_raw<'a>(p: *const u8, len: usize) -> Option<&'a [u8]> {
+unsafe fn slice_from_raw(p: *const u8, len: usize, _scope: &()) -> Option<&[u8]> {
     if p.is_null() {
         return None;
     }
@@ -110,7 +110,7 @@ fn slice_from_raw<'a>(p: *const u8, len: usize) -> Option<&'a [u8]> {
     Some(unsafe { slice::from_raw_parts(p, len) })
 }
 
-fn out_init<'a, T: Default + Copy>(out: *mut T) -> Option<&'a mut T> {
+unsafe fn out_init<T: Default + Copy>(out: *mut T, _scope: &mut ()) -> Option<&mut T> {
     if out.is_null() {
         return None;
     }
@@ -263,16 +263,23 @@ fn parse_mmap_entry(buf: &[u8], off: usize, out: &mut DuetosMultibootMmapEntry) 
 /// gives the byte length of the entire info block (header
 /// inclusive); the caller can then iterate tags inside
 /// `[buf, buf + total_size)`.
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_multiboot2_parse_header(
+pub unsafe extern "C" fn duetos_multiboot2_parse_header(
     buf: *const u8,
     len: usize,
     out: *mut DuetosMultibootInfoHeader,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_header(slice, dst)
@@ -284,17 +291,24 @@ pub extern "C" fn duetos_multiboot2_parse_header(
 /// `off` until it sees `tag_type == MULTIBOOT_TAG_END` (0) or
 /// runs out of slice. Caller is responsible for capping iteration
 /// at some hop count (`MULTIBOOT_TAG_HOP_CAP` is recommended).
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_multiboot2_next_tag(
+pub unsafe extern "C" fn duetos_multiboot2_next_tag(
     buf: *const u8,
     len: usize,
     off: usize,
     out: *mut DuetosMultibootTag,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     next_tag(slice, off, dst)
@@ -305,18 +319,25 @@ pub extern "C" fn duetos_multiboot2_next_tag(
 /// `off` should be the offset of the mmap tag's first byte (i.e.
 /// the value `next_tag` wrote to `offset` for a mmap-typed tag);
 /// `tag_size` is the value it wrote to `size`.
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_multiboot2_parse_mmap(
+pub unsafe extern "C" fn duetos_multiboot2_parse_mmap(
     buf: *const u8,
     len: usize,
     off: usize,
     tag_size: u32,
     out: *mut DuetosMultibootMmap,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_mmap_tag(slice, off, tag_size, dst)
@@ -324,17 +345,24 @@ pub extern "C" fn duetos_multiboot2_parse_mmap(
 
 /// Decode one mmap entry at `off`. Returns the {base, length, type}
 /// triple after rejecting base+length overflow.
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_multiboot2_parse_mmap_entry(
+pub unsafe extern "C" fn duetos_multiboot2_parse_mmap_entry(
     buf: *const u8,
     len: usize,
     off: usize,
     out: *mut DuetosMultibootMmapEntry,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_mmap_entry(slice, off, dst)

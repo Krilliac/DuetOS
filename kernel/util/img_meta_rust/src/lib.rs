@@ -78,7 +78,7 @@ pub struct DuetosJpegInfo {
 // `pub extern "C"` entry points are clippy-clean. New crates ship
 // with `// SAFETY:` comments on every unsafe block.
 
-fn slice_from_raw<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
+unsafe fn slice_from_raw(ptr: *const u8, len: usize, _scope: &()) -> Option<&[u8]> {
     if ptr.is_null() {
         return None;
     }
@@ -87,7 +87,7 @@ fn slice_from_raw<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
     Some(unsafe { slice::from_raw_parts(ptr, len) })
 }
 
-fn out_init<'a, T: Default + Copy>(out: *mut T) -> Option<&'a mut T> {
+unsafe fn out_init<T: Default + Copy>(out: *mut T, _scope: &mut ()) -> Option<&mut T> {
     if out.is_null() {
         return None;
     }
@@ -192,12 +192,19 @@ fn parse_png_header(buf: &[u8], out: &mut DuetosPngInfo) -> bool {
     true
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_img_meta_parse_png(buf: *const u8, len: usize, out: *mut DuetosPngInfo) -> bool {
-    let Some(dst) = out_init(out) else {
+pub unsafe extern "C" fn duetos_img_meta_parse_png(buf: *const u8, len: usize, out: *mut DuetosPngInfo) -> bool {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_png_header(slice, dst)
@@ -243,12 +250,19 @@ fn parse_bmp_header(buf: &[u8], out: &mut DuetosBmpInfo) -> bool {
     true
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_img_meta_parse_bmp(buf: *const u8, len: usize, out: *mut DuetosBmpInfo) -> bool {
-    let Some(dst) = out_init(out) else {
+pub unsafe extern "C" fn duetos_img_meta_parse_bmp(buf: *const u8, len: usize, out: *mut DuetosBmpInfo) -> bool {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_bmp_header(slice, dst)
@@ -328,12 +342,19 @@ fn parse_tga_header(buf: &[u8], out: &mut DuetosTgaInfo) -> bool {
     true
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_img_meta_parse_tga(buf: *const u8, len: usize, out: *mut DuetosTgaInfo) -> bool {
-    let Some(dst) = out_init(out) else {
+pub unsafe extern "C" fn duetos_img_meta_parse_tga(buf: *const u8, len: usize, out: *mut DuetosTgaInfo) -> bool {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_tga_header(slice, dst)
@@ -501,12 +522,19 @@ fn parse_jpeg_header(buf: &[u8], out: &mut DuetosJpegInfo) -> bool {
     false
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_img_meta_parse_jpeg(buf: *const u8, len: usize, out: *mut DuetosJpegInfo) -> bool {
-    let Some(dst) = out_init(out) else {
+pub unsafe extern "C" fn duetos_img_meta_parse_jpeg(buf: *const u8, len: usize, out: *mut DuetosJpegInfo) -> bool {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_jpeg_header(slice, dst)

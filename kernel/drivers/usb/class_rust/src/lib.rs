@@ -67,7 +67,7 @@ struct InterfaceContext {
     protocol: u8,
 }
 
-fn write_default<'a, T: Default>(out: *mut T) -> Option<&'a mut T> {
+unsafe fn write_default<T: Default>(out: *mut T, _scope: &mut ()) -> Option<&mut T> {
     if out.is_null() {
         return None;
     }
@@ -80,7 +80,7 @@ fn write_default<'a, T: Default>(out: *mut T) -> Option<&'a mut T> {
     }
 }
 
-fn descriptor_from_raw<'a>(buf: *const u8, len: u32) -> Option<&'a [u8]> {
+unsafe fn descriptor_from_raw(buf: *const u8, len: u32, _scope: &()) -> Option<&[u8]> {
     if len == 0 {
         return Some(&[]);
     }
@@ -137,12 +137,23 @@ fn record_endpoint(set: &mut DuetosUsbClassEndpointSet, endpoint_address: u8, at
     }
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_usbclass_parse_config(buf: *const u8, len: u32, out: *mut DuetosUsbClassSummary) -> bool {
-    let Some(out) = write_default(out) else {
+pub unsafe extern "C" fn duetos_usbclass_parse_config(
+    buf: *const u8,
+    len: u32,
+    out: *mut DuetosUsbClassSummary,
+) -> bool {
+    let mut out_scope = ();
+    let Some(out) = (unsafe { write_default(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(desc) = descriptor_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(desc) = (unsafe { descriptor_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
 

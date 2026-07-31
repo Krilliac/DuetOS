@@ -105,7 +105,7 @@ unsafe fn make_dev(desc: *const DuetFsDevice) -> Option<ExternBlockDevice> {
     })
 }
 
-unsafe fn cstr_to_slice<'a>(p: *const c_uchar, max: usize) -> Option<&'a [u8]> {
+unsafe fn cstr_to_slice(p: *const c_uchar, max: usize, _scope: &()) -> Option<&[u8]> {
     if p.is_null() || max == 0 {
         return None;
     }
@@ -160,7 +160,8 @@ pub unsafe extern "C" fn duetfs_lookup(
     let Some(mut dev) = (unsafe { make_dev(desc) }) else {
         return STATUS_INVALID;
     };
-    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else {
+    let path_scope = ();
+    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max, &path_scope) }) else {
         return STATUS_INVALID;
     };
     let fs = match Fs::open(&mut dev) {
@@ -210,7 +211,8 @@ pub unsafe extern "C" fn duetfs_lookup_follow(
     let Some(mut dev) = (unsafe { make_dev(desc) }) else {
         return STATUS_INVALID;
     };
-    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else {
+    let path_scope = ();
+    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max, &path_scope) }) else {
         return STATUS_INVALID;
     };
     let fs = match Fs::open(&mut dev) {
@@ -421,7 +423,8 @@ pub unsafe extern "C" fn duetfs_create_path(
     let Some(mut dev) = (unsafe { make_dev(desc) }) else {
         return STATUS_INVALID;
     };
-    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else {
+    let path_scope = ();
+    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max, &path_scope) }) else {
         return STATUS_INVALID;
     };
     let Some((parent_path, name)) = split_parent_and_name(path_bytes) else {
@@ -463,7 +466,8 @@ pub unsafe extern "C" fn duetfs_unlink_path(
     let Some(mut dev) = (unsafe { make_dev(desc) }) else {
         return STATUS_INVALID;
     };
-    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else {
+    let path_scope = ();
+    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max, &path_scope) }) else {
         return STATUS_INVALID;
     };
     let Some((parent_path, name)) = split_parent_and_name(path_bytes) else {
@@ -569,10 +573,12 @@ pub unsafe extern "C" fn duetfs_create_symlink(
     let Some(mut dev) = (unsafe { make_dev(desc) }) else {
         return STATUS_INVALID;
     };
-    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else {
+    let path_scope = ();
+    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max, &path_scope) }) else {
         return STATUS_INVALID;
     };
-    let Some(target_bytes) = (unsafe { cstr_to_slice(target, target_max) }) else {
+    let target_scope = ();
+    let Some(target_bytes) = (unsafe { cstr_to_slice(target, target_max, &target_scope) }) else {
         return STATUS_INVALID;
     };
     let Some((parent_path, name)) = split_parent_and_name(path_bytes) else {
@@ -655,10 +661,12 @@ pub unsafe extern "C" fn duetfs_link(
     let Some(mut dev) = (unsafe { make_dev(desc) }) else {
         return STATUS_INVALID;
     };
-    let Some(existing_bytes) = (unsafe { cstr_to_slice(existing_path, existing_max) }) else {
+    let existing_path_scope = ();
+    let Some(existing_bytes) = (unsafe { cstr_to_slice(existing_path, existing_max, &existing_path_scope) }) else {
         return STATUS_INVALID;
     };
-    let Some(new_bytes) = (unsafe { cstr_to_slice(new_path, new_max) }) else {
+    let new_path_scope = ();
+    let Some(new_bytes) = (unsafe { cstr_to_slice(new_path, new_max, &new_path_scope) }) else {
         return STATUS_INVALID;
     };
     let Some((parent_path, name)) = split_parent_and_name(new_bytes) else {
@@ -1076,7 +1084,8 @@ pub unsafe extern "C" fn duetfs_xattr_set(
     let Some(mut dev) = (unsafe { make_dev(desc) }) else {
         return STATUS_INVALID;
     };
-    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else {
+    let path_scope = ();
+    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max, &path_scope) }) else {
         return STATUS_INVALID;
     };
     let mut fs = match Fs::open(&mut dev) {
@@ -1126,7 +1135,8 @@ pub unsafe extern "C" fn duetfs_xattr_get(
     let Some(mut dev) = (unsafe { make_dev(desc) }) else {
         return STATUS_INVALID;
     };
-    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else {
+    let path_scope = ();
+    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max, &path_scope) }) else {
         return STATUS_INVALID;
     };
     let fs = match Fs::open(&mut dev) {
@@ -1176,7 +1186,8 @@ pub unsafe extern "C" fn duetfs_xattr_list(
     let Some(mut dev) = (unsafe { make_dev(desc) }) else {
         return STATUS_INVALID;
     };
-    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else {
+    let path_scope = ();
+    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max, &path_scope) }) else {
         return STATUS_INVALID;
     };
     let fs = match Fs::open(&mut dev) {
@@ -1223,7 +1234,8 @@ pub unsafe extern "C" fn duetfs_xattr_remove(
     let Some(mut dev) = (unsafe { make_dev(desc) }) else {
         return STATUS_INVALID;
     };
-    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else {
+    let path_scope = ();
+    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max, &path_scope) }) else {
         return STATUS_INVALID;
     };
     let mut fs = match Fs::open(&mut dev) {
