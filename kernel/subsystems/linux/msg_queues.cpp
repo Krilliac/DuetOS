@@ -403,12 +403,18 @@ bool LoadDeadline(u64 user_timeout, u64& out_deadline_ticks, bool& out_no_deadli
     if (ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1'000'000'000)
         return false;
 
-    const u64 abs_ns = static_cast<u64>(ts.tv_sec) * 1'000'000'000ull + static_cast<u64>(ts.tv_nsec);
+    constexpr u64 kMax = static_cast<u64>(-1);
+    const u64 sec = static_cast<u64>(ts.tv_sec);
+    const u64 nsec = static_cast<u64>(ts.tv_nsec);
+    if (sec > (kMax - nsec) / 1'000'000'000ull)
+        return false;
+    const u64 abs_ns = sec * 1'000'000'000ull + nsec;
     const u64 period_ns = ::duetos::time::TickPeriodNs();
     if (period_ns == 0)
         return false;
     // Round up so a sub-tick deadline doesn't immediately fire.
-    out_deadline_ticks = (abs_ns + (period_ns - 1)) / period_ns;
+    out_deadline_ticks = abs_ns > kMax - (period_ns - 1) ? kMax / period_ns
+                                                         : (abs_ns + (period_ns - 1)) / period_ns;
     return true;
 }
 
