@@ -876,7 +876,8 @@ void VfsResolveCrossMountSelfTest()
     for (u32 i = 0; i < sizeof(miss_path); ++i)
         miss_path[i] = 0;
     u32 mi = 0;
-    for (; mi < sizeof(miss_path) - 1 && st.mount_point[mi] != 0; ++mi)
+    constexpr u32 kMountPointCapacity = 64;
+    for (; mi < kMountPointCapacity && mi < sizeof(miss_path) - 1 && st.mount_point[mi] != 0; ++mi)
         miss_path[mi] = st.mount_point[mi];
     const char suffix[] = "/_NONE_TEST_NOT_THERE_.X";
     for (u32 j = 0; mi + 1 < sizeof(miss_path) && suffix[j] != 0; ++j, ++mi)

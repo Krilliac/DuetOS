@@ -1002,9 +1002,9 @@ void RecordSandboxDenial(Cap cap)
         // and emit a denial-specific brief (which capability is
         // the most-denied? which pid is hitting it?).
         char pin[40];
-        const char* prefix = "cap/";
+        constexpr char prefix[] = "cap/";
         u64 pp = 0;
-        while (pp < 39 && prefix[pp] != '\0')
+        while (pp < sizeof(prefix) - 1 && pp < 39 && prefix[pp] != '\0')
         {
             pin[pp] = prefix[pp];
             ++pp;

@@ -131,7 +131,8 @@ u32 MlmeBuildDefaultRsnIe(u8* out, u32 cap)
                                                    u8 ssid_len, const u8 supp_rates[8], u8 supp_rates_count,
                                                    const u8* rsn_ie, u32 rsn_ie_len, u8* out, u32 cap)
 {
-    if (out == nullptr || ssid == nullptr || ssid_len > kSsidMaxBytes || rsn_ie_len > 256)
+    if (out == nullptr || ssid == nullptr || supp_rates == nullptr || supp_rates_count > 8 ||
+        (rsn_ie == nullptr && rsn_ie_len != 0) || ssid_len > kSsidMaxBytes || rsn_ie_len > 256)
     {
         KLOG_WARN_2V("net/wireless/mlme", "BuildAssocReqFrame: invalid args", "ssid_len", static_cast<u64>(ssid_len),
                      "rsn_ie_len", static_cast<u64>(rsn_ie_len));
@@ -404,7 +405,7 @@ void MlmeSelfTest()
         KASSERT(rsn[1] == 20, "net/wireless/mlme", "RSN IE inner length wrong");
         KASSERT(rsn[7] == kCipherCcmp128, "net/wireless/mlme", "RSN group cipher != CCMP-128");
 
-        const u8 rates[4] = {0x82, 0x84, 0x8B, 0x96};
+        const u8 rates[8] = {0x82, 0x84, 0x8B, 0x96, 0, 0, 0, 0};
         u8 buf[256] = {};
         const char* ssid = "TestNet";
         auto r = MlmeBuildAssocReqFrame(sta, ap, ssid, 7, rates, 4, rsn, rsn_len, buf, sizeof(buf));
