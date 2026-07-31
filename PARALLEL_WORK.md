@@ -1227,10 +1227,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T21:37:46Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] Codex-exec-admission
+### [DONE] Codex-exec-admission
 - **Session**: `Nathan-1477`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `execd-protocol`
 - **Description**: kernel/loader/execd_protocol.h
 - **Claimed**: 2026-07-31T21:38:56Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-31T21:39:16Z
