@@ -866,3 +866,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: primary-stack-token-result-contract
 - **Claimed**: 2026-07-31T16:52:37Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] named-pipe-registry-reservation
+- **Session**: `Nathan-offline-1744`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/ipc/named_pipes.cpp kernel/ipc/named_pipes.h`
+- **Description**: Release the registry-owned opposite pipe end exactly once across connected server close (offline claim; remote publication pending)
+- **Claimed**: 2026-07-31T17:02:55Z
+- **Status**: IN PROGRESS
