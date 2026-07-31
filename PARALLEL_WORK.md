@@ -1354,3 +1354,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Capability_checked_serviced_wire_api
 - **Claimed**: 2026-07-31T22:10:55Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] serviced-protocol-source
+- **Session**: `Nathan-344`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/serviced_protocol.cpp`
+- **Description**: Transport_neutral_serviced_wire_validation
+- **Claimed**: 2026-07-31T22:10:56Z
+- **Status**: IN PROGRESS
