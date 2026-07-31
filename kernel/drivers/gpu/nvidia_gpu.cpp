@@ -147,7 +147,7 @@ u64 AlignUp(u64 v, u64 align)
     // Header + payload must fit the slot, and total length must not
     // overflow a u32 (payload_len is bounded well below that, but
     // guard the arithmetic anyway).
-    if (payload_len > slot_bytes - kGspRpcHeaderBytes || slot_bytes < kGspRpcHeaderBytes)
+    if (slot_bytes < kGspRpcHeaderBytes || payload_len > slot_bytes - kGspRpcHeaderBytes)
         return ::duetos::core::Err{::duetos::core::ErrorCode::BufferTooSmall};
 
     const u32 total = kGspRpcHeaderBytes + payload_len;
@@ -183,10 +183,128 @@ u64 AlignUp(u64 v, u64 align)
 
 ::duetos::core::Result<u32> GspRingAdvance(u32 index, u32 slot_count)
 {
-    if (!IsPowerOfTwo(slot_count))
+    if (!IsPowerOfTwo(slot_count) || index >= slot_count)
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
     // Power-of-two count: wrap with a mask, no division.
     return (index + 1) & (slot_count - 1);
+}
+
+namespace
+{
+
+::duetos::core::ErrorCode ValidateRingConfig(const GspRpcRing* ring, u64& required_bytes)
+{
+    if (ring == nullptr || ring->dma.virt == nullptr || ring->slot_count < 2 || !IsPowerOfTwo(ring->slot_count) ||
+        ring->slot_bytes < kGspRpcHeaderBytes)
+        return ::duetos::core::ErrorCode::InvalidArgument;
+
+    required_bytes = static_cast<u64>(ring->slot_count) * ring->slot_bytes;
+    if (ring->dma.bytes < required_bytes)
+        return ::duetos::core::ErrorCode::BufferTooSmall;
+    return ::duetos::core::ErrorCode::Ok;
+}
+
+bool RingIndicesValid(const GspRpcRing& ring)
+{
+    return ring.tx < ring.slot_count && ring.rx < ring.slot_count;
+}
+
+u8* RingSlot(GspRpcRing& ring, u32 index)
+{
+    const u64 offset = static_cast<u64>(index) * ring.slot_bytes;
+    return static_cast<u8*>(ring.dma.virt) + offset;
+}
+
+const u8* RingSlot(const GspRpcRing& ring, u32 index)
+{
+    const u64 offset = static_cast<u64>(index) * ring.slot_bytes;
+    return static_cast<const u8*>(ring.dma.virt) + offset;
+}
+
+} // namespace
+
+::duetos::core::Result<void> GspRpcRingReset(GspRpcRing* ring)
+{
+    u64 required_bytes = 0;
+    const auto config = ValidateRingConfig(ring, required_bytes);
+    if (config != ::duetos::core::ErrorCode::Ok)
+        return ::duetos::core::Err{config};
+
+    ring->tx = 0;
+    ring->rx = 0;
+    auto* storage = static_cast<u8*>(ring->dma.virt);
+    for (u64 i = 0; i < required_bytes; ++i)
+        storage[i] = 0;
+    mm::DmaSyncForDevice(ring->dma, 0, required_bytes);
+    return {};
+}
+
+::duetos::core::Result<void> GspRpcRingEnqueue(GspRpcRing* ring, u32 function, const u8* payload, u32 payload_len,
+                                               u32 sequence)
+{
+    u64 required_bytes = 0;
+    const auto config = ValidateRingConfig(ring, required_bytes);
+    (void)required_bytes;
+    if (config != ::duetos::core::ErrorCode::Ok)
+        return ::duetos::core::Err{config};
+    if (!RingIndicesValid(*ring))
+        return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
+
+    const auto next = GspRingAdvance(ring->tx, ring->slot_count);
+    if (!next.has_value())
+        return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
+    if (next.value() == ring->rx)
+        return ::duetos::core::Err{::duetos::core::ErrorCode::Busy};
+
+    auto* slot = RingSlot(*ring, ring->tx);
+    auto encoded = GspRpcEncode(slot, ring->slot_bytes, function, payload, payload_len, sequence);
+    if (!encoded.has_value())
+        return ::duetos::core::Err{encoded.error()};
+
+    const u64 offset = static_cast<u64>(ring->tx) * ring->slot_bytes;
+    mm::DmaSyncForDevice(ring->dma, offset, ring->slot_bytes);
+    ring->tx = next.value();
+    return {};
+}
+
+::duetos::core::Result<void> GspRpcRingDequeue(GspRpcRing* ring, GspRpcHeader* out, u8* payload, u32 payload_capacity,
+                                               u32* payload_len)
+{
+    if (out == nullptr || payload_len == nullptr || (payload == nullptr && payload_capacity != 0))
+        return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
+
+    u64 required_bytes = 0;
+    const auto config = ValidateRingConfig(ring, required_bytes);
+    (void)required_bytes;
+    if (config != ::duetos::core::ErrorCode::Ok)
+        return ::duetos::core::Err{config};
+    if (!RingIndicesValid(*ring))
+        return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
+    if (ring->rx == ring->tx)
+        return ::duetos::core::Err{::duetos::core::ErrorCode::NotReady};
+
+    const u64 offset = static_cast<u64>(ring->rx) * ring->slot_bytes;
+    mm::DmaSyncForCpu(ring->dma, offset, ring->slot_bytes);
+    GspRpcHeader decoded{};
+    auto decode = GspRpcDecode(RingSlot(*ring, ring->rx), ring->slot_bytes, &decoded);
+    if (!decode.has_value())
+        return ::duetos::core::Err{decode.error()};
+
+    const u32 decoded_payload_len = decoded.length - kGspRpcHeaderBytes;
+    *payload_len = decoded_payload_len;
+    if (decoded_payload_len > payload_capacity || (decoded_payload_len != 0 && payload == nullptr))
+        return ::duetos::core::Err{::duetos::core::ErrorCode::BufferTooSmall};
+    const auto next = GspRingAdvance(ring->rx, ring->slot_count);
+    if (!next.has_value())
+        return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
+
+    const auto* slot_payload = RingSlot(*ring, ring->rx) + kGspRpcHeaderBytes;
+    for (u32 i = 0; i < decoded_payload_len; ++i)
+        payload[i] = slot_payload[i];
+    *out = decoded;
+
+    ring->rx = next.value();
+    return {};
 }
 
 ::duetos::core::Result<GspWprLayout> GspComputeWprLayout(u64 vram_end, u64 fw_image_size, u64 radix3_size)
@@ -358,6 +476,15 @@ void Probe(GpuInfo& g)
     msg_ring.dma = mr.value();
     msg_ring.slot_count = kGspRpcSlotCount;
     msg_ring.slot_bytes = kGspRpcSlotBytes;
+
+    auto cmd_reset = GspRpcRingReset(&cmd_ring);
+    auto msg_reset = GspRpcRingReset(&msg_ring);
+    if (!cmd_reset.has_value() || !msg_reset.has_value())
+    {
+        mm::FreeDmaCoherent(msg_ring.dma);
+        mm::FreeDmaCoherent(cmd_ring.dma);
+        return ::duetos::core::Err{!cmd_reset.has_value() ? cmd_reset.error() : msg_reset.error()};
+    }
     phase = GspBringupPhase::RingsAllocated;
 
     arch::SerialWrite("[gpu/nvidia] GSP RPC rings: cmd_phys=");
@@ -434,13 +561,107 @@ bool GspStructuralSelfTest()
 
     // 4. Ring index wraps at slot_count and rejects non-power-of-two.
     auto adv = GspRingAdvance(kGspRpcSlotCount - 1, kGspRpcSlotCount);
-    if (!adv.has_value() || adv.value() != 0 || GspRingAdvance(0, 17).has_value())
+    if (!adv.has_value() || adv.value() != 0 || GspRingAdvance(0, 17).has_value() ||
+        GspRingAdvance(kGspRpcSlotCount, kGspRpcSlotCount).has_value())
     {
         arch::SerialWrite("[nvidia-gsp-selftest] FAIL (ring wrap)\n");
         return false;
     }
 
-    // 5. WPR layout math: sub-regions page-aligned, ordered, ending
+    // 5. Host-side bounded ring model: a short output buffer leaves
+    // the message pending, FIFO order survives a wrap, full/empty
+    // states are bounded, and a corrupt slot does not get consumed.
+    static u8 ring_storage[kGspRpcRingBytes] = {};
+    GspRpcRing ring{};
+    ring.dma.virt = ring_storage;
+    ring.dma.bytes = sizeof(ring_storage);
+    ring.slot_count = kGspRpcSlotCount;
+    ring.slot_bytes = kGspRpcSlotBytes;
+    if (!GspRpcRingReset(&ring).has_value())
+    {
+        arch::SerialWrite("[nvidia-gsp-selftest] FAIL (ring reset)\n");
+        return false;
+    }
+
+    const u8 first_payload[] = {0xA1, 0xB2, 0xC3};
+    if (!GspRpcRingEnqueue(&ring, kGspRpcFnAllocChannel, first_payload, sizeof(first_payload), 11).has_value())
+    {
+        arch::SerialWrite("[nvidia-gsp-selftest] FAIL (ring enqueue)\n");
+        return false;
+    }
+    GspRpcHeader first_header{};
+    u8 short_payload[2] = {};
+    u32 first_length = 0;
+    auto short_dequeue = GspRpcRingDequeue(&ring, &first_header, short_payload, sizeof(short_payload), &first_length);
+    if (short_dequeue.has_value() || short_dequeue.error() != ::duetos::core::ErrorCode::BufferTooSmall ||
+        first_length != sizeof(first_payload) || ring.rx != 0)
+    {
+        arch::SerialWrite("[nvidia-gsp-selftest] FAIL (short dequeue consumed)\n");
+        return false;
+    }
+
+    u8 first_output[sizeof(first_payload)] = {};
+    auto first_dequeue = GspRpcRingDequeue(&ring, &first_header, first_output, sizeof(first_output), &first_length);
+    if (!first_dequeue.has_value() || first_header.sequence != 11 || first_length != sizeof(first_payload) ||
+        first_output[0] != first_payload[0] || first_output[2] != first_payload[2])
+    {
+        arch::SerialWrite("[nvidia-gsp-selftest] FAIL (ring dequeue)\n");
+        return false;
+    }
+
+    for (u32 i = 0; i < kGspRpcSlotCount - 1; ++i)
+    {
+        const u8 value = static_cast<u8>(i);
+        if (!GspRpcRingEnqueue(&ring, kGspRpcFnNop, &value, 1, 100 + i).has_value())
+        {
+            arch::SerialWrite("[nvidia-gsp-selftest] FAIL (ring fifo fill)\n");
+            return false;
+        }
+    }
+    const u8 overflow_value = 0xFF;
+    auto full = GspRpcRingEnqueue(&ring, kGspRpcFnNop, &overflow_value, 1, 999);
+    if (full.has_value() || full.error() != ::duetos::core::ErrorCode::Busy)
+    {
+        arch::SerialWrite("[nvidia-gsp-selftest] FAIL (ring full accepted)\n");
+        return false;
+    }
+    for (u32 i = 0; i < kGspRpcSlotCount - 1; ++i)
+    {
+        GspRpcHeader header{};
+        u8 value = 0;
+        u32 length = 0;
+        if (!GspRpcRingDequeue(&ring, &header, &value, sizeof(value), &length).has_value() ||
+            header.sequence != 100 + i || length != 1 || value != static_cast<u8>(i))
+        {
+            arch::SerialWrite("[nvidia-gsp-selftest] FAIL (ring fifo order)\n");
+            return false;
+        }
+    }
+    GspRpcHeader empty_header{};
+    u8 empty_payload = 0;
+    u32 empty_length = 0;
+    auto empty = GspRpcRingDequeue(&ring, &empty_header, &empty_payload, sizeof(empty_payload), &empty_length);
+    if (empty.has_value() || empty.error() != ::duetos::core::ErrorCode::NotReady)
+    {
+        arch::SerialWrite("[nvidia-gsp-selftest] FAIL (ring empty accepted)\n");
+        return false;
+    }
+
+    const u8 corrupt_payload = 0x5A;
+    if (!GspRpcRingEnqueue(&ring, kGspRpcFnNop, &corrupt_payload, 1, 1000).has_value())
+    {
+        arch::SerialWrite("[nvidia-gsp-selftest] FAIL (ring corruption setup)\n");
+        return false;
+    }
+    ring_storage[ring.rx * ring.slot_bytes + kGspRpcHeaderBytes] ^= 0x01;
+    auto corrupt = GspRpcRingDequeue(&ring, &empty_header, &empty_payload, sizeof(empty_payload), &empty_length);
+    if (corrupt.has_value() || corrupt.error() != ::duetos::core::ErrorCode::Corrupt || ring.rx != 0)
+    {
+        arch::SerialWrite("[nvidia-gsp-selftest] FAIL (ring corruption consumed)\n");
+        return false;
+    }
+
+    // 6. WPR layout math: sub-regions page-aligned, ordered, ending
     //    exactly at vram_end, and undersized VRAM rejected.
     const u64 vram_end = 256ull * 1024 * 1024;
     auto wpr = GspComputeWprLayout(vram_end, 0x400000, 0x10000);
@@ -465,7 +686,7 @@ bool GspStructuralSelfTest()
         return false;
     }
 
-    arch::SerialWrite("[nvidia-gsp-selftest] PASS (rpc encode/decode, ring wrap, wpr layout)\n");
+    arch::SerialWrite("[nvidia-gsp-selftest] PASS (rpc encode/decode, bounded ring, ring wrap, wpr layout)\n");
     return true;
 }
 
@@ -474,7 +695,8 @@ void NvidiaGspSelfTest()
     // Structural helpers first — these need no device and run on
     // every boot, so the bring-up math is covered even on the
     // typical QEMU host that has no NVIDIA GPU at all.
-    GspStructuralSelfTest();
+    if (!GspStructuralSelfTest())
+        return;
 
     // Walk the GPU records and find an NVIDIA display controller.
     // Self-tests run after `GpuInit` populates the cache.
