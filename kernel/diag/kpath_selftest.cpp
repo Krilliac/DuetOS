@@ -46,9 +46,9 @@ bool IterMatchCallback(const KPathIterRow& row, void* /*ctx*/)
         // Pointer-equality is sufficient because both source sites
         // use the same string literal (string-pooled by the linker).
         const char* a = row.name;
-        const char* b = "kpath.selftest.site";
+        constexpr char b[] = "kpath.selftest.site";
         bool match = true;
-        for (::duetos::u32 i = 0; i < 24; ++i)
+        for (::duetos::u32 i = 0; i < sizeof(b); ++i)
         {
             if (a[i] != b[i])
             {

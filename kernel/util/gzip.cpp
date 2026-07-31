@@ -233,7 +233,7 @@ void GzipZlibSelfTest()
 
     // ----- zlib happy path.
     {
-        u8 src[32];
+        u8 src[64];
         const u32 n = BuildZlibFixture(src);
         u8 out[16];
         const u32 produced = ZlibInflate(src, n, out, sizeof(out));
@@ -243,7 +243,7 @@ void GzipZlibSelfTest()
     }
     // ----- zlib FCHECK mismatch.
     {
-        u8 src[32];
+        u8 src[64];
         const u32 n = BuildZlibFixture(src);
         src[1] = 0x02; // breaks the (CMF*256 + FLG) % 31 == 0 invariant
         u8 out[16];
@@ -252,7 +252,7 @@ void GzipZlibSelfTest()
     }
     // ----- zlib Adler tamper.
     {
-        u8 src[32];
+        u8 src[64];
         const u32 n = BuildZlibFixture(src);
         src[12] ^= 0xFF;
         u8 out[16];
