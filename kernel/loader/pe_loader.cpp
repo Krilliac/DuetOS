@@ -3303,8 +3303,7 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
         {
             FreeFrame(stubs_frame + kPageSize);
             KLOG_WARN_AV(::duetos::core::LogArea::Loader, "pe-loader",
-                         "MapUserPage refused (frame budget / OOM) — thunks page 1",
-                         win32::kWin32ThunksVa + kPageSize);
+                         "MapUserPage refused (frame budget / OOM) — thunks page 1", win32::kWin32ThunksVa + kPageSize);
             KBP_PROBE_V(::duetos::debug::ProbeId::kPeLoaderOom, win32::kWin32ThunksVa + kPageSize);
             return r;
         }

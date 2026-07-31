@@ -387,8 +387,7 @@ u64 CurrentTaskFiberConvert(u64 fiber_data);
 
 /// Allocate a new fiber slot with a fresh stack. Returns fiber "address"
 /// (slot+1) or 0 on failure.
-u64 CurrentTaskFiberCreate(u64 start_address, u64 fiber_data, u64 stack_pages,
-                           u64 stack_base_va);
+u64 CurrentTaskFiberCreate(u64 start_address, u64 fiber_data, u64 stack_pages, u64 stack_base_va);
 
 /// Save the current fiber's registers from `frame`, load the target
 /// fiber's registers into `frame`. Returns true on success.

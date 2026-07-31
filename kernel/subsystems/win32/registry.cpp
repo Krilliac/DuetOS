@@ -132,15 +132,13 @@ constexpr RegKey kRegKeys[] = {
     // these as well.
     {kHkeyClassesRoot, "CLSID", nullptr, 0},
     {kHkeyClassesRoot, "CLSID\\{1234abcd-0001-0001-0001-000000000001}", nullptr, 0},
-    {kHkeyClassesRoot, "CLSID\\{1234abcd-0001-0001-0001-000000000001}\\InProcServer32",
-     kHkcrComTestInProcValues, static_cast<u32>(sizeof(kHkcrComTestInProcValues) / sizeof(kHkcrComTestInProcValues[0]))},
+    {kHkeyClassesRoot, "CLSID\\{1234abcd-0001-0001-0001-000000000001}\\InProcServer32", kHkcrComTestInProcValues,
+     static_cast<u32>(sizeof(kHkcrComTestInProcValues) / sizeof(kHkcrComTestInProcValues[0]))},
     {kHkeyClassesRoot, "CLSID\\{00021401-0000-0000-c000-000000000046}", nullptr, 0},
-    {kHkeyClassesRoot, "CLSID\\{00021401-0000-0000-c000-000000000046}\\InProcServer32",
-     kHkcrShellLinkInProcValues,
+    {kHkeyClassesRoot, "CLSID\\{00021401-0000-0000-c000-000000000046}\\InProcServer32", kHkcrShellLinkInProcValues,
      static_cast<u32>(sizeof(kHkcrShellLinkInProcValues) / sizeof(kHkcrShellLinkInProcValues[0]))},
     {kHkeyClassesRoot, "CLSID\\{bcde0395-e52f-467c-8e3d-c4579291692e}", nullptr, 0},
-    {kHkeyClassesRoot, "CLSID\\{bcde0395-e52f-467c-8e3d-c4579291692e}\\InProcServer32",
-     kHkcrMMDevEnumInProcValues,
+    {kHkeyClassesRoot, "CLSID\\{bcde0395-e52f-467c-8e3d-c4579291692e}\\InProcServer32", kHkcrMMDevEnumInProcValues,
      static_cast<u32>(sizeof(kHkcrMMDevEnumInProcValues) / sizeof(kHkcrMMDevEnumInProcValues[0]))},
 };
 

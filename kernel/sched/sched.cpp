@@ -449,9 +449,9 @@ struct Task
         u8 _fiber_pad[7];
     };
     FiberContext fibers[kFiberCap];
-    u32 fiber_count;       // how many fibers have been created (incl. slot 0)
-    u32 active_fiber;      // index into fibers[] of the currently running fiber
-                           // kFiberNone = not a fiber (no ConvertThreadToFiber yet)
+    u32 fiber_count;  // how many fibers have been created (incl. slot 0)
+    u32 active_fiber; // index into fibers[] of the currently running fiber
+                      // kFiberNone = not a fiber (no ConvertThreadToFiber yet)
 
     // Lockdep held-class stack, parked here across ContextSwitch.
     // A sleeping mutex is held across switches; a single global
@@ -4123,8 +4123,7 @@ u64 CurrentTaskFiberConvert(u64 fiber_data)
     return 1; // fiber "address" = slot + 1
 }
 
-u64 CurrentTaskFiberCreate(u64 start_address, u64 fiber_data, u64 stack_pages,
-                           u64 stack_base_va)
+u64 CurrentTaskFiberCreate(u64 start_address, u64 fiber_data, u64 stack_pages, u64 stack_base_va)
 {
     Task* self = CurrentTask();
     if (self == nullptr)

@@ -3110,9 +3110,8 @@ void StartRing3SmokeTask()
         // (VK_S -> ID 100), posts WM_KEYDOWN(VK_S), calls
         // TranslateAcceleratorA, and asserts WM_COMMAND is received.
         // Exercises the VK translation path end-to-end.
-        SpawnPeFile("ring3-accel-test", fs::generated::kBinAccelTestBytes,
-                    fs::generated::kBinAccelTestBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                    mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        SpawnPeFile("ring3-accel-test", fs::generated::kBinAccelTestBytes, fs::generated::kBinAccelTestBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     }
     // Real-world Windows PE diagnostic attempt. Expected to
     // reject (most imports unresolved) — the value is the

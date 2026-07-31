@@ -42,15 +42,15 @@ typedef struct
 #define CW_USEDEFAULT ((int)0x80000000)
 #define SW_SHOW 5
 #define WS_OVERLAPPEDWINDOW 0x00CF0000u
-#define WM_QUIT    0x0012
-#define WM_CLOSE   0x0010
+#define WM_QUIT 0x0012
+#define WM_CLOSE 0x0010
 #define WM_KEYDOWN 0x0100
 #define WM_COMMAND 0x0111
-#define PM_REMOVE  1
-#define VK_S       0x53
+#define PM_REMOVE 1
+#define VK_S 0x53
 #define VK_CONTROL 0x11
-#define FVIRTKEY   1
-#define FCONTROL   8
+#define FVIRTKEY 1
+#define FCONTROL 8
 
 #define ID_SAVE 100
 
@@ -72,29 +72,17 @@ typedef struct
 } WNDCLASSA;
 
 __declspec(dllimport) ATOM __stdcall RegisterClassA(const WNDCLASSA* wc);
-__declspec(dllimport) HANDLE __stdcall CreateWindowExA(DWORD dwExStyle,
-                                                       const char* lpClassName,
-                                                       const char* lpWindowName,
-                                                       DWORD dwStyle, int x, int y,
-                                                       int nWidth, int nHeight,
-                                                       HANDLE hWndParent,
-                                                       HANDLE hMenu,
-                                                       HANDLE hInstance,
-                                                       void* lpParam);
+__declspec(dllimport) HANDLE __stdcall CreateWindowExA(DWORD dwExStyle, const char* lpClassName,
+                                                       const char* lpWindowName, DWORD dwStyle, int x, int y,
+                                                       int nWidth, int nHeight, HANDLE hWndParent, HANDLE hMenu,
+                                                       HANDLE hInstance, void* lpParam);
 __declspec(dllimport) BOOL __stdcall ShowWindow(HANDLE hWnd, int nCmdShow);
-__declspec(dllimport) BOOL __stdcall GetMessageA(MSG* msg, HANDLE h,
-                                                  UINT min, UINT max);
-__declspec(dllimport) BOOL __stdcall PeekMessageA(MSG* msg, HANDLE h,
-                                                   UINT min, UINT max,
-                                                   UINT flags);
+__declspec(dllimport) BOOL __stdcall GetMessageA(MSG* msg, HANDLE h, UINT min, UINT max);
+__declspec(dllimport) BOOL __stdcall PeekMessageA(MSG* msg, HANDLE h, UINT min, UINT max, UINT flags);
 __declspec(dllimport) LRESULT __stdcall DispatchMessageA(const MSG* msg);
-__declspec(dllimport) LRESULT __stdcall DefWindowProcA(HANDLE h, UINT msg,
-                                                        WPARAM w, LPARAM l);
-__declspec(dllimport) BOOL __stdcall PostMessageA(HANDLE h, UINT msg,
-                                                   WPARAM w, LPARAM l);
-__declspec(dllimport) BOOL __stdcall TranslateAcceleratorA(HANDLE h,
-                                                            HANDLE accel,
-                                                            void* msg);
+__declspec(dllimport) LRESULT __stdcall DefWindowProcA(HANDLE h, UINT msg, WPARAM w, LPARAM l);
+__declspec(dllimport) BOOL __stdcall PostMessageA(HANDLE h, UINT msg, WPARAM w, LPARAM l);
+__declspec(dllimport) BOOL __stdcall TranslateAcceleratorA(HANDLE h, HANDLE accel, void* msg);
 __declspec(dllimport) short __stdcall GetKeyState(int vk);
 
 __declspec(dllimport) void __stdcall OutputDebugStringA(const char* s);
@@ -107,8 +95,7 @@ __declspec(dllimport) void __stdcall Sleep(DWORD ms);
 
 static int g_got_command = 0;
 
-static LRESULT __stdcall WndProc(HANDLE hwnd, UINT msg,
-                                  WPARAM w, LPARAM l)
+static LRESULT __stdcall WndProc(HANDLE hwnd, UINT msg, WPARAM w, LPARAM l)
 {
     if (msg == WM_COMMAND)
     {
@@ -138,11 +125,8 @@ void mainCRTStartup(void)
     wc.lpszClassName = "AccelTest";
 
     RegisterClassA(&wc);
-    hwnd = CreateWindowExA(0, "AccelTest", "Accel Test",
-                           WS_OVERLAPPEDWINDOW,
-                           CW_USEDEFAULT, CW_USEDEFAULT,
-                           320, 200, (HANDLE)0, (HANDLE)0,
-                           (HANDLE)0, (void*)0);
+    hwnd = CreateWindowExA(0, "AccelTest", "Accel Test", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 320, 200,
+                           (HANDLE)0, (HANDLE)0, (HANDLE)0, (void*)0);
     if (!hwnd)
     {
         OutputDebugStringA("accel_test: no hwnd\n");
@@ -171,11 +155,7 @@ void mainCRTStartup(void)
              * Our table says FCONTROL but Ctrl isn't physically
              * held. To test the matching path properly, we build
              * a second table WITHOUT the modifier requirement. */
-            static const unsigned char bare[8] = {
-                FVIRTKEY & 0xFF, 0,
-                VK_S & 0xFF, 0,
-                ID_SAVE & 0xFF, 0,
-                0, 0};
+            static const unsigned char bare[8] = {FVIRTKEY & 0xFF, 0, VK_S & 0xFF, 0, ID_SAVE & 0xFF, 0, 0, 0};
             static struct
             {
                 unsigned int count;

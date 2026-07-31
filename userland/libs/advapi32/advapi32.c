@@ -190,16 +190,13 @@ static const RegKey k_reg_keys[] = {
     /* HKCR COM CLSID entries — mirror of registry.cpp. */
     {HKEY_CLASSES_ROOT, "CLSID", (const RegValue*)0, 0},
     {HKEY_CLASSES_ROOT, "CLSID\\{1234abcd-0001-0001-0001-000000000001}", (const RegValue*)0, 0},
-    {HKEY_CLASSES_ROOT, "CLSID\\{1234abcd-0001-0001-0001-000000000001}\\InProcServer32",
-     k_hkcr_comtest_inproc_values,
+    {HKEY_CLASSES_ROOT, "CLSID\\{1234abcd-0001-0001-0001-000000000001}\\InProcServer32", k_hkcr_comtest_inproc_values,
      (DWORD)(sizeof(k_hkcr_comtest_inproc_values) / sizeof(k_hkcr_comtest_inproc_values[0]))},
     {HKEY_CLASSES_ROOT, "CLSID\\{00021401-0000-0000-c000-000000000046}", (const RegValue*)0, 0},
-    {HKEY_CLASSES_ROOT, "CLSID\\{00021401-0000-0000-c000-000000000046}\\InProcServer32",
-     k_hkcr_shelllink_inproc_values,
+    {HKEY_CLASSES_ROOT, "CLSID\\{00021401-0000-0000-c000-000000000046}\\InProcServer32", k_hkcr_shelllink_inproc_values,
      (DWORD)(sizeof(k_hkcr_shelllink_inproc_values) / sizeof(k_hkcr_shelllink_inproc_values[0]))},
     {HKEY_CLASSES_ROOT, "CLSID\\{bcde0395-e52f-467c-8e3d-c4579291692e}", (const RegValue*)0, 0},
-    {HKEY_CLASSES_ROOT, "CLSID\\{bcde0395-e52f-467c-8e3d-c4579291692e}\\InProcServer32",
-     k_hkcr_mmdevenum_inproc_values,
+    {HKEY_CLASSES_ROOT, "CLSID\\{bcde0395-e52f-467c-8e3d-c4579291692e}\\InProcServer32", k_hkcr_mmdevenum_inproc_values,
      (DWORD)(sizeof(k_hkcr_mmdevenum_inproc_values) / sizeof(k_hkcr_mmdevenum_inproc_values[0]))},
 };
 

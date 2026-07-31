@@ -218,7 +218,7 @@ class VerifyPeExportsTests(unittest.TestCase):
         with self.assertRaisesRegex(VERIFY.PeError, "overlapping section"):
             self.parse(data)
 
-    def test_manifest_is_exact_six_wave_set(self) -> None:
+    def test_manifest_is_exact_retirement_set(self) -> None:
         manifest = (
             MODULE_PATH.parents[2]
             / "kernel"
@@ -255,6 +255,20 @@ class VerifyPeExportsTests(unittest.TestCase):
                 "TlsFree",
                 "TlsGetValue",
                 "TlsSetValue",
+                "FlsAlloc",
+                "FlsFree",
+                "FlsGetValue",
+                "FlsSetValue",
+                "ConvertThreadToFiber",
+                "ConvertThreadToFiberEx",
+                "ConvertFiberToThread",
+                "CreateFiber",
+                "CreateFiberEx",
+                "SwitchToFiber",
+                "DeleteFiber",
+                "GetCurrentFiber",
+                "GetFiberData",
+                "IsThreadAFiber",
             ],
         )
 
