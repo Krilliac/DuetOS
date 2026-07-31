@@ -510,10 +510,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T00:24:23Z
 - **Status**: COMPLETED @ 2026-07-31T00:24:28Z
 
-### [ACTIVE] aurora-sample-gadgets-post-drsh
+### [DONE] aurora-sample-gadgets-post-drsh
 - **Session**: `Codex-Aurora-gadgets-post-drsh`
 - **Branch**: `claude/aurora-sample-gadgets`
 - **Files**: `kernel/drivers/video/desktop_gadgets.cpp kernel/drivers/video/desktop_gadgets.h kernel/drivers/video/taskbar.cpp kernel/sched/sched.cpp kernel/sched/sched.h wiki/subsystems/Compositor.md wiki/reference/Roadmap.md wiki/reference/Design-Decisions.md`
 - **Description**: Re-record completed Aurora sample stats gadgets slice after rebasing onto DRSH-merged main
 - **Claimed**: 2026-07-31T00:51:53Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-07-31T00:51:58Z
