@@ -634,3 +634,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Drain owner jobs at last-task exit without releasing members under the pool lock
 - **Claimed**: 2026-07-31T14:17:02Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] vm-process-abi
+- **Session**: `Nathan-221`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/syscall/syscall.h userland/libs/ntdll/ntdll_reg.c wiki/specifications/Syscall-ABI.md`
+- **Description**: Make capped cross-process VM calls chunked and partial-copy status truthful
+- **Claimed**: 2026-07-31T14:17:15Z
+- **Status**: IN PROGRESS
