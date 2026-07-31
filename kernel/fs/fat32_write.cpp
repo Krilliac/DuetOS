@@ -583,7 +583,10 @@ bool ReserveRunInDir(const Volume& v, u32 dir_cluster, u32 count, u64* out_first
     if (fresh == 0)
         return false;
     if (!ZeroCluster(v, fresh))
+    {
+        (void)FreeClusterChain(v, fresh);
         return false;
+    }
     if (!WriteFatEntry(v, tail, fresh))
     {
         // Best-effort rollback: mark the fresh cluster free again.
@@ -708,7 +711,10 @@ i64 AppendInDir(const Volume* v, u32 dir_cluster, const char* name, const void* 
         if (first == 0)
             return -1;
         if (!ZeroCluster(*v, first))
+        {
+            (void)FreeClusterChain(*v, first);
             return -1;
+        }
         // Patch the on-disk dir entry's first_cluster. RMW the
         // sector containing the SFN record.
         u64 flba = 0;
@@ -774,9 +780,15 @@ i64 AppendInDir(const Volume* v, u32 dir_cluster, const char* name, const void* 
         if (fresh == 0)
             return -1;
         if (!ZeroCluster(*v, fresh))
+        {
+            (void)FreeClusterChain(*v, fresh);
             return -1;
+        }
         if (!WriteFatEntry(*v, tail, fresh))
+        {
+            (void)FreeClusterChain(*v, fresh);
             return -1;
+        }
         tail = fresh;
         tail_off = 0;
     }
@@ -819,9 +831,15 @@ i64 AppendInDir(const Volume* v, u32 dir_cluster, const char* name, const void* 
         if (fresh == 0)
             return -1;
         if (!ZeroCluster(*v, fresh))
+        {
+            (void)FreeClusterChain(*v, fresh);
             return -1;
+        }
         if (!WriteFatEntry(*v, tail, fresh))
+        {
+            (void)FreeClusterChain(*v, fresh);
             return -1;
+        }
         tail = fresh;
         tail_off = 0;
     }
@@ -1157,9 +1175,15 @@ i64 WriteInDir(const Volume* v, u32 dir_cluster, const char* name, u64 offset, c
             if (fresh == 0)
                 return -1;
             if (!ZeroCluster(*v, fresh))
+            {
+                (void)FreeClusterChain(*v, fresh);
                 return -1;
+            }
             if (!WriteFatEntry(*v, prev, fresh))
+            {
+                (void)FreeClusterChain(*v, fresh);
                 return -1;
+            }
             cluster = fresh;
         }
         in_cluster_off = 0;

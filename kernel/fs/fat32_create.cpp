@@ -346,7 +346,12 @@ i64 CreateInDir(const Volume* v, u32 dir_cluster, const char* name, const void* 
         if (first_cluster == 0)
             return -1;
         if (!ZeroCluster(*v, first_cluster))
+        {
+            // Allocation marks the cluster EOC immediately; reclaim it
+            // if initialization fails before it is linked.
+            (void)FreeClusterChain(*v, first_cluster);
             return -1;
+        }
         u32 tail = first_cluster;
         u64 written = 0;
         const auto* src = static_cast<const u8*>(buf);
@@ -375,9 +380,21 @@ i64 CreateInDir(const Volume* v, u32 dir_cluster, const char* name, const void* 
             if (written == len)
                 break;
             const u32 fresh = AllocateFreeCluster(*v);
-            if (fresh == 0 || !ZeroCluster(*v, fresh) || !WriteFatEntry(*v, tail, fresh))
+            if (fresh == 0)
             {
-                FreeClusterChain(*v, first_cluster);
+                (void)FreeClusterChain(*v, first_cluster);
+                return -1;
+            }
+            if (!ZeroCluster(*v, fresh))
+            {
+                (void)FreeClusterChain(*v, fresh);
+                (void)FreeClusterChain(*v, first_cluster);
+                return -1;
+            }
+            if (!WriteFatEntry(*v, tail, fresh))
+            {
+                (void)FreeClusterChain(*v, fresh);
+                (void)FreeClusterChain(*v, first_cluster);
                 return -1;
             }
             tail = fresh;
