@@ -21,7 +21,7 @@
  * Because `gpu.cpp` only maps BAR0 in v0, this driver maps BAR5
  * itself the first time `Probe` runs against an AMD device.
  *
- * v0 scope:
+ * Current scope:
  *   - `Probe(GpuInfo&)` — opportunistically map BAR5, read
  *     `mmGRBM_STATUS` (0x8010, dword) and `mmRLC_GPM_STAT`
  *     (0xC400 / 4) to confirm the GFX engine is alive, log
@@ -41,16 +41,13 @@
  *     RPTR without firmware), then read every register back to
  *     verify the writes stuck. On success the ring buffer is
  *     retained for the lifetime of the boot and `g_brought_up`
- *     flips to true; the CP itself stays inert until microcode
- *     is loaded — this slice gets us to the next gate (firmware
- *     push) without invoking it.
+ *     flips to true; GFX9/GFX10 parts then attempt the direct
+ *     PFP/CE/ME microcode path. A complete upload enables a bounded
+ *     PM4 WRITE_DATA cookie probe; incomplete firmware keeps the CP
+ *     halted. GFX11+ remains PSP-gated.
  *
- * Out of scope (v0):
- *   - Microcode push (MEC / PFP / ME / CE / RLC / SDMA). The
- *     ucode blobs are advisory probes only — the CP can't
- *     execute a single PM4 packet without them, so the
- *     "RPTR catches WPTR" liveness check Intel's RCS uses
- *     cannot fire here today.
+ * Out of scope:
+ *   - PSP-mediated GFX11+ firmware, compute MEC submission, and SDMA.
  *   - VM PageTables / GART programming.
  *   - SMU (power-management coprocessor) interaction.
  *   - SMC interface for clock + voltage scaling.
@@ -156,29 +153,31 @@ void Probe(GpuInfo& g);
 ::duetos::core::Result<void> Bringup(GpuInfo& g);
 
 /// True iff a successful Bringup has run on at least one AMD
-/// device this boot. Note this means "CP register file is
-/// programmed and read-back-verified" — NOT "the CP is executing
-/// PM4 packets" (that requires MEC / PFP / ME firmware push,
-/// which is the next gate after this slice).
+/// device this boot. This means the CP register file is programmed
+/// and read-back-verified; PM4 execution additionally requires a
+/// complete, generation-supported microcode upload.
 bool IsBroughtUp();
 
 /// Diagnostic: kernel pointer to the mapped BAR5 register file,
-/// or nullptr if Probe didn't map it. The next slice (firmware
-/// loader / ring program) needs this without re-running PCI
-/// BAR queries.
+/// or nullptr if Probe didn't map it. Used by the CP firmware and
+/// PM4 probe paths without re-running PCI BAR queries.
 void* MmioRegs();
+
+/// Submit one PM4 PACKET3(WRITE_DATA) through CP_RB0 and read the
+/// cookie back from a temporary Zone::Dma32 scratch page. Returns
+/// the read-back value, or 0xFFFFFFFF when the direct CP microcode
+/// gate is not satisfied or the bounded RPTR poll times out.
+/// Real-hardware-only; no user-mode submission surface is exposed.
+u32 AmdCpWriteDataProbe(u32 cookie);
 
 /// Boot self-test. Walks the GPU records discovered by
 /// `gpu::GpuInit`; if an AMD display controller is present and
-/// `IsBroughtUp()` returned true, emits the structural sentinel
-/// `[gpu/amd/cp] selftest PASS (registers programmed,
-/// firmware-pending)` that CI greps for. If no AMD controller is
-/// present (typical QEMU smoke), emits
-/// `[gpu/amd/cp] no AMD device — skipped`. If an AMD controller
-/// IS present but bring-up did NOT succeed, emits a FAIL line +
-/// fires `kBootSelftestFail`. Never panics — hardware that
-/// doesn't expose a working CP today is a documented limitation,
-/// not a kernel bug.
+/// `IsBroughtUp()` returned true, emits a structural PASS. With
+/// complete direct microcode it also verifies a PM4 WRITE_DATA cookie;
+/// with missing or PSP-gated firmware it preserves the structural
+/// `firmware-pending` PASS. If no AMD controller is present (typical
+/// QEMU smoke), emits `no AMD device — skipped`. A failed ring or PM4
+/// read-back emits a FAIL probe but never panics.
 void AmdCpRingSelfTest();
 
 } // namespace duetos::drivers::gpu::amd

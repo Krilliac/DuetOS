@@ -196,41 +196,43 @@ Primary sources:
 
 ## AMD GFX9+ — CP microcode push for PM4 execution
 
-CP_RB0_BASE / _BASE_HI / _CNTL are already programmed and
-read-back verified at BAR5 MMIO. The next gate is **direct host
-upload of PFP / ME / CE / RLC microcode** through
-`mmCP_*_UCODE_ADDR` / `_DATA` register-pair streams. This works
-without PSP on **GFX9 (Vega 10 / 12 / 20 / Raven / Renoir),
-GFX10 (Navi 1x), and GFX10.3 (Navi 2x)** — AMD ships unsigned
-microcode for these parts. **GFX11+** (RX 7000 series, Phoenix,
-Strix) requires PSP-mediated upload because microcode is signed.
+CP_RB0_BASE / _BASE_HI / _CNTL are programmed and read-back
+verified at BAR5 MMIO. The direct host upload of PFP / ME / CE / RLC
+microcode through `mmCP_*_UCODE_ADDR` / `_DATA` register-pair streams
+is now implemented and generation-gated. This works without PSP on
+**GFX9 (Vega 10 / 12 / 20 / Raven / Renoir), GFX10 (Navi 1x), and
+GFX10.3 (Navi 2x)** — AMD ships unsigned microcode for these parts.
+**GFX11+** (RX 7000 series, Phoenix, Strix) remains PSP-gated because
+microcode is signed.
 
 Sequence: halt CP via `mmCP_ME_CNTL`, walk
 `mmCP_PFP_UCODE_ADDR=0` then stream dwords to
 `mmCP_PFP_UCODE_DATA` (auto-increment), repeat for CE and ME
 (via `mmCP_ME_RAM_WADDR` / `_DATA`), trailing version write to
-each `*_ADDR`, then un-halt. RLC must be loaded and
-`RLC_ENABLE_F32=1` before CP wakes — leave PG disabled
-(`mmRLC_PG_CNTL=0`) for the minimum-viable path.
+each `*_ADDR`, then un-halt only after PFP/CE/ME are complete. RLC is
+loaded and `RLC_ENABLE_F32=1` when its optional image is present;
+leave PG disabled (`mmRLC_PG_CNTL=0`) for the minimum-viable path.
 
-**Minimum PM4 demo:** emit `PACKET3_NOP` (`0xC0001000`), bump
-WPTR, poll RPTR. Strong proof: `PACKET3_WRITE_DATA(0x37)` with
-`DST_SEL=mem`, `ENGINE_SEL=PFP`, `WR_CONFIRM`, pointing into a
-Zone::Dma32 buffer with a cookie — read-back proves execution.
+**Minimum PM4 demo:** `AmdCpWriteDataProbe` emits a
+`PACKET3_WRITE_DATA(0x37)` with `DST_SEL=mem`, `ENGINE_SEL=ME`, and
+`WR_CONFIRM`, pointing into a Zone::Dma32 buffer with a cookie. It
+bumps WPTR, polls RPTR with a 100 ms / 1 Mi iteration bound, and reads
+the cookie back; that read-back proves packet execution. The probe is
+only reached after a complete direct GFX9/GFX10 upload.
 
 Firmware-header layout: `common_firmware_header` (32 B) +
 `gfx_firmware_header_v1_0` (44 B) → payload at
 `ucode_array_offset_bytes`.
 
-**Status (this branch):** the microcode-image parser landed.
-`drivers/gpu/amd_gfx_fw.{h,cpp}` validates the
+**Status (this branch):** the microcode-image parser and MMIO upload
+landed. `drivers/gpu/amd_gfx_fw.{h,cpp}` validates the
 `common_firmware_header` + `gfx_firmware_header_v1_0` layout and
-exposes the ucode payload as a (dword*, count) view to a follow-on
-upload slice. Pinned by `AmdGfxFwSelfTest` (1 happy path + 6 reject
-paths) and wired into `amd::Probe`. The MMIO upload sequence
-(halt CP, stream dwords to `mmCP_PFP_UCODE_DATA` / `mmCP_CE_UCODE_DATA`
-/ `mmCP_ME_RAM_DATA`, RLC bring-up, un-halt) is the next slice — it
-only validates on real Vega 10 / Navi hardware.
+exposes the ucode payload as a (dword*, count) view. `AmdCpLoadMicrocode`
+halts CP, streams the required images, leaves partial sets halted, and
+unhalts only on a complete PFP/CE/ME set. The boot self-test then runs
+the PM4 WRITE_DATA cookie read-back on real GFX9/GFX10 hardware. The
+upload and probe remain unverified on silicon until a Vega/Navi card is
+booted with matching open-firmware blobs.
 
 Primary sources: [amdgpu gfx_v9_0.c](https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/amd/amdgpu/gfx_v9_0.c),
 [amdgpu_ucode.h](https://raw.githubusercontent.com/torvalds/linux/master/drivers/gpu/drm/amd/amdgpu/amdgpu_ucode.h),

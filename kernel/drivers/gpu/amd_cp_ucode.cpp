@@ -77,18 +77,20 @@ bool LoadEngine(void* bar5, const char* basename, u64 addr_reg, u64 data_reg)
     const bool ce = LoadEngine(bar5, "gfx_ce.bin", kAmdRegCpCeUcodeAddr, kAmdRegCpCeUcodeData);
     const bool me = LoadEngine(bar5, "gfx_me.bin", kAmdRegCpMeRamWaddr, kAmdRegCpMeRamData);
 
-    // RLC (optional for the CP-alive gate): disable F32, load, re-enable.
-    // Power-gating left off for the minimal path.
+    // RLC (optional for the CP-alive gate): disable F32, load, and only
+    // re-enable it after all required CP images are present. This keeps
+    // the whole path inert when a partial firmware set was supplied.
     const u32 rlc_cntl = AmdReg32(bar5, kAmdRegRlcCntl);
     AmdReg32Write(bar5, kAmdRegRlcCntl, rlc_cntl & ~kAmdRlcEnableF32);
-    if (LoadEngine(bar5, "gfx_rlc.bin", kAmdRegRlcGpmUcodeAddr, kAmdRegRlcGpmUcodeData))
-        AmdReg32Write(bar5, kAmdRegRlcCntl, rlc_cntl | kAmdRlcEnableF32);
-
-    // Un-halt so the CP starts fetching PM4 from the ring.
-    AmdReg32Write(bar5, kAmdRegCpMeCntl, 0);
+    const bool rlc = LoadEngine(bar5, "gfx_rlc.bin", kAmdRegRlcGpmUcodeAddr, kAmdRegRlcGpmUcodeData);
 
     if (pfp && ce && me)
     {
+        if (rlc)
+            AmdReg32Write(bar5, kAmdRegRlcCntl, rlc_cntl | kAmdRlcEnableF32);
+        // Un-halt only after every required CP image is resident so the
+        // engine can never fetch a partially initialized instruction RAM.
+        AmdReg32Write(bar5, kAmdRegCpMeCntl, 0);
         arch::SerialWrite("[gpu/amd/ucode] CP microcode loaded (pfp+ce+me), CP un-halted\n");
         return {};
     }

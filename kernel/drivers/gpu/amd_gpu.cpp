@@ -9,6 +9,7 @@
 #include "drivers/gpu/amd_gpu.h"
 
 #include "drivers/gpu/amd_cp_ucode.h"
+#include "drivers/gpu/amd_gpu_cmds.h"
 
 #include "arch/x86_64/serial.h"
 #include "debug/probes.h"
@@ -19,6 +20,7 @@
 #include "mm/dma.h"
 #include "mm/paging.h"
 #include "mm/zone.h"
+#include "time/timekeeper.h"
 
 namespace duetos::drivers::gpu::amd
 {
@@ -30,11 +32,28 @@ void* g_mmio_regs = nullptr;
 u64 g_mmio_phys = 0;
 u64 g_mmio_bytes = 0;
 bool g_brought_up = false;
+bool g_cp_microcode_loaded = false;
 
 // The CP ring buffer is owned for the lifetime of the boot on
 // success. On failure the buffer is freed before this slot is
 // touched and `.virt == nullptr` remains the live state.
 mm::DmaBuffer g_cp_ring = {};
+
+constexpr u32 kAmdCpProbeFailure = 0xFFFFFFFFu;
+constexpr u32 kAmdCpProbeSentinel = 0xDEADBEEFu;
+constexpr u32 kAmdCpProbeCookie = 0xC0DEC0DEu;
+constexpr u64 kAmdCpProbeTimeoutNs = 100ull * 1000ull * 1000ull;
+constexpr u32 kAmdCpProbeIterationCap = 1u << 20;
+
+bool DirectCpMicrocodeGeneration(const char* family)
+{
+    if (family == nullptr || family[0] != 'g' || family[1] != 'f' || family[2] != 'x')
+        return false;
+    // The direct host-upload path is for GFX9 and GFX10/10.3. GFX11+
+    // firmware is PSP-mediated and must not be poked through these
+    // legacy UCODE_DATA registers.
+    return family[3] == '9' || (family[3] == '1' && family[4] == '0');
+}
 
 u32 Mmio32(u64 offset)
 {
@@ -276,11 +295,18 @@ void Probe(GpuInfo& g)
     arch::SerialWrite(" rptr=");
     arch::SerialWriteHex(rb_rptr);
     arch::SerialWrite(" — attempting CP microcode upload\n");
-    // CP microcode upload (amd_cp_ucode): stream PFP/CE/ME (+RLC) so the
-    // CP can execute PM4 from the ring. Real-HW + needs gfx_*.bin under
-    // the open-firmware path; returns Err (logged) when absent, leaving
-    // the ring programmed but inert. Reached only on a live AMD BAR5.
-    (void)AmdCpLoadMicrocode(MmioRegs());
+    // Direct CP microcode upload is valid for GFX9/GFX10 only. Real-HW
+    // needs gfx_*.bin under the open-firmware path; an incomplete load
+    // leaves CP_ME_CNTL halted and therefore cannot reach the PM4 probe.
+    if (DirectCpMicrocodeGeneration(g.family))
+    {
+        const auto ucode = AmdCpLoadMicrocode(MmioRegs());
+        g_cp_microcode_loaded = ucode.has_value();
+    }
+    else
+    {
+        arch::SerialWrite("[gpu/amd/cp] direct microcode upload gated (generation requires PSP or is unknown)\n");
+    }
     return {};
 }
 
@@ -292,6 +318,91 @@ bool IsBroughtUp()
 void* MmioRegs()
 {
     return g_mmio_regs;
+}
+
+u32 AmdCpWriteDataProbe(u32 cookie)
+{
+    if (!g_brought_up || !g_cp_microcode_loaded || g_cp_ring.virt == nullptr || g_mmio_regs == nullptr)
+        return kAmdCpProbeFailure;
+
+    auto scratch_result = mm::AllocDmaCoherent(mm::kPageSize, mm::Zone::Dma32);
+    if (!scratch_result.has_value())
+    {
+        KLOG_WARN("drivers/gpu/amd", "CP PM4 WRITE_DATA scratch allocation failed");
+        return kAmdCpProbeFailure;
+    }
+    const mm::DmaBuffer scratch = scratch_result.value();
+    auto* scratch_word = static_cast<volatile u32*>(scratch.virt);
+    *scratch_word = kAmdCpProbeSentinel;
+
+    u32* ring = static_cast<u32*>(g_cp_ring.virt);
+    const u32 ring_dwords = static_cast<u32>(kAmdCpRingDwords);
+    const u32 ring_mask = ring_dwords - 1u;
+    const u32 current_wptr_raw = Mmio32(kAmdRegCpRb0Wptr);
+    if (current_wptr_raw == kAmdCpProbeFailure)
+    {
+        KLOG_WARN("drivers/gpu/amd", "CP PM4 WRITE_DATA WPTR read failed");
+        mm::FreeDmaCoherent(scratch);
+        return kAmdCpProbeFailure;
+    }
+    const u32 current_wptr = current_wptr_raw & ring_mask;
+    u32 packet_offset = current_wptr;
+    constexpr u32 kPacketDwords = sizeof(WriteDataPacket) / sizeof(u32);
+    static_assert(kPacketDwords == 5, "WRITE_DATA probe packet size");
+
+    if (packet_offset + kPacketDwords > ring_dwords)
+    {
+        // A type-3 NOP is one dword. Pad to the end so the CP can wrap
+        // without decoding the tail of a split WRITE_DATA packet.
+        while (packet_offset < ring_dwords)
+            ring[packet_offset++] = EncodePacket3(kPacket3Nop, 0);
+        packet_offset = 0;
+    }
+
+    const WriteDataPacket packet = EncodeWriteData(scratch.phys, cookie);
+    for (u32 i = 0; i < kPacketDwords; ++i)
+        ring[packet_offset + i] = packet.dw[i];
+    const u32 new_wptr = (packet_offset + kPacketDwords) & ring_mask;
+
+    // Publish the scratch sentinel before the ring packet, then publish
+    // the packet before the MMIO doorbell. The ring and scratch are both
+    // DMA-coherent, but retain the barriers for non-coherent future ports.
+    mm::DmaSyncForDevice(scratch, 0, sizeof(u32));
+    mm::DmaSyncForDevice(g_cp_ring, 0, kAmdCpRingBytes);
+    Mmio32Write(kAmdRegCpRb0Wptr, new_wptr);
+
+    const u64 start_ns = ::duetos::time::MonotonicNs();
+    bool ring_advanced = false;
+    u32 observed_rptr = kAmdCpProbeFailure;
+    for (u32 iter = 0; iter < kAmdCpProbeIterationCap; ++iter)
+    {
+        observed_rptr = Mmio32(kAmdRegCpRb0Rptr) & ring_mask;
+        if (observed_rptr == new_wptr)
+        {
+            ring_advanced = true;
+            break;
+        }
+        asm volatile("pause" ::: "memory");
+        if (start_ns != 0)
+        {
+            const u64 now_ns = ::duetos::time::MonotonicNs();
+            if (now_ns > start_ns && (now_ns - start_ns) > kAmdCpProbeTimeoutNs)
+                break;
+        }
+    }
+
+    if (!ring_advanced)
+    {
+        KLOG_WARN_V("drivers/gpu/amd", "CP PM4 WRITE_DATA timeout (RPTR)", observed_rptr);
+        KLOG_DEBUG_V("drivers/gpu/amd", "CP PM4 WRITE_DATA target WPTR", new_wptr);
+        mm::FreeDmaCoherent(scratch);
+        return kAmdCpProbeFailure;
+    }
+
+    mm::DmaSyncForCpu(scratch, 0, sizeof(u32));
+    const u32 readback = *scratch_word;
+    mm::FreeDmaCoherent(scratch);
+    return readback;
 }
 
 void AmdCpRingSelfTest()
@@ -322,7 +433,23 @@ void AmdCpRingSelfTest()
 
     if (IsBroughtUp())
     {
-        arch::SerialWrite("[gpu/amd/cp] selftest PASS (registers programmed, firmware-pending)\n");
+        if (!g_cp_microcode_loaded)
+        {
+            arch::SerialWrite("[gpu/amd/cp] selftest PASS (registers programmed, firmware-pending)\n");
+            return;
+        }
+
+        const u32 readback = AmdCpWriteDataProbe(kAmdCpProbeCookie);
+        if (readback == kAmdCpProbeCookie)
+        {
+            arch::SerialWrite("[gpu/amd/cp] selftest PASS (ring online, PM4 WRITE_DATA verified, "
+                              "scratch=0xC0DEC0DE)\n");
+            return;
+        }
+        KBP_PROBE_V(::duetos::debug::ProbeId::kBootSelftestFail, readback);
+        arch::SerialWrite("[gpu/amd/cp] selftest FAIL (PM4 WRITE_DATA readback=");
+        arch::SerialWriteHex(readback);
+        arch::SerialWrite(")\n");
         return;
     }
 
