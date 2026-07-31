@@ -1370,3 +1370,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Hostile_serviced_protocol_vectors
 - **Claimed**: 2026-07-31T22:10:57Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-extraction-map
+- **Session**: `Nathan-455`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `docs/service-extraction-2026-07-31.md`
+- **Description**: Implementation-grade serviced to execd displayd registryd netd extraction architecture map
+- **Claimed**: 2026-07-31T22:16:14Z
+- **Status**: IN PROGRESS
