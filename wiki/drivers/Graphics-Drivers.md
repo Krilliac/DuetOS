@@ -139,12 +139,15 @@ Each tier-1 vendor now has a dedicated driver TU under
   `kGpuRingBringupFail` (carrying a packed which-register-
   mismatched bitmap as `value`), drops a `KLOG_WARN`, frees the
   buffer, and disables the ring. On success the ring buffer is
-  retained for the lifetime of the boot but the CP itself stays
-  inert — without a MEC/PFP/ME firmware push the engine can't
-  fetch a single PM4 packet. `AmdCpRingSelfTest` hooked to
-  `DUETOS_BOOT_SELFTEST` emits the structural sentinel CI greps
-  for — `selftest PASS (registers programmed, firmware-pending)`,
-  `selftest FAIL`, or `no AMD device — skipped`. QEMU's emulated
+  retained for the lifetime of the boot. On GFX9/GFX10, `Bringup`
+  streams PFP/CE/ME firmware when the required blobs are present and
+  keeps `CP_ME_CNTL` halted on a partial set. After a complete direct
+  upload, `AmdCpWriteDataProbe` emits a PM4 `PACKET3(WRITE_DATA)` cookie
+  to a Zone::Dma32 scratch page, polls RPTR with a bounded timeout,
+  and verifies the read-back. GFX11+ remains PSP-gated.
+  `AmdCpRingSelfTest` hooked to `DUETOS_BOOT_SELFTEST` emits the
+  structural firmware-pending PASS, the real-hardware PM4 read-back
+  PASS, a FAIL probe, or `no AMD device — skipped`. QEMU's emulated
   `-vga std` / `-vga virtio` boots take the "skipped" path.
 - `nvidia_gpu.{h,cpp}` — Turing+ scaffold. `Probe` reads
   `PMC_BOOT_0` / `PMC_BOOT_42` / `PMC_BOOT_8` (chip /
@@ -708,17 +711,15 @@ recompose. Four themes ship:
   devices report vendor IDs 0x1234 / 0x1AF4 and the
   `IntelRcsRingSelfTest` emits the structural "no Intel device
   — skipped" sentinel.
-- **AMD CP ring is register-programmed, not executing.** GFX9+
-  hardware has `mmCP_RB0_BASE` / `_BASE_HI` / `_CNTL` programmed
-  and read-back verified, so the kernel knows it can talk to the
-  CP register file. But the Command Processor can't execute a
-  single PM4 packet without microcode pushed (`gfx_pfp.bin` /
-  `gfx_me.bin` / `gfx_ce.bin` for the GFX pipeline, plus
-  `gfx_mec.bin` for compute and `gfx_rlc.bin` for power
-  management). The firmware-loader probe in `amd::Probe` logs
-  which blobs an operator has dropped in; an actual MEC/PFP/ME
-  push is the next gate. Until that lands, RPTR stays at 0 on
-  every boot — that's expected behaviour, not a bug.
+- **AMD CP execution is firmware-gated and real-hardware-only.** GFX9+
+  hardware has `mmCP_RB0_BASE` / `_BASE_HI` / `_CNTL` programmed and
+  read-back verified. For GFX9/GFX10, `amd::Bringup` streams the
+  required PFP/CE/ME images through the UCODE_DATA registers and keeps
+  `CP_ME_CNTL` halted if any required image is missing. A complete
+  direct upload enables the PM4 `WRITE_DATA` cookie probe, which polls
+  RPTR and reads the cookie back from Zone::Dma32 scratch. GFX11+
+  remains PSP-gated; QEMU has no AMD model, so the proof is not
+  exercised by the normal boot smoke path.
 - **NVIDIA Turing+ is observation-only.** The driver now reads
   a wider diagnostic register set (PMC_BOOT_0 / _42 / _8 +
   PMC_INTR_EN_0 + PFIFO_INTR + PBUS_INTR_0 + PFB_PRI_RD) and

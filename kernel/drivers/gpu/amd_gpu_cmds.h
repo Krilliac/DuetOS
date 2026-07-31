@@ -7,11 +7,10 @@
  * DuetOS — AMD GFX9+ PM4 command encoders.
  *
  * The CP (Command Processor) executes PM4 packets. The amd_gpu CP ring
- * is already programmed (CP_RB0_BASE/CNTL read-back verified), but the
- * CP cannot run a single packet until microcode (PFP/ME/CE) is uploaded
- * — that upload (streaming the firmware-blob dwords to
- * mmCP_*_UCODE_DATA) is the next gated slice. These encoders are the
- * PM4 vocabulary that microcode-loaded CP will execute.
+ * is already programmed (CP_RB0_BASE/CNTL read-back verified). On
+ * GFX9/GFX10, the direct PFP/ME/CE upload now gates a real PM4 probe;
+ * GFX11+ remains PSP-mediated. These encoders are the PM4 vocabulary
+ * that a microcode-loaded CP executes.
  *
  * Encoders are proven at COMPILE time (static_assert) against values
  * derived from the amdgpu soc15d.h macro expressions — a wrong shift

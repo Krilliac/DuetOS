@@ -7,7 +7,8 @@
 /*
  * DuetOS — AMD GFX9 CP microcode upload (the gate that makes the CP
  * able to execute PM4). The amd_gpu CP ring is programmed but inert
- * until PFP/CE/ME (and RLC) microcode is loaded.
+ * until PFP/CE/ME microcode is loaded; a partial image set remains
+ * halted rather than being released into the ring.
  *
  * GFX9 / GFX10 / GFX10.3 ship UNSIGNED microcode that the host streams
  * directly through the mmCP_*_UCODE_DATA register pairs — no PSP. (GFX11+
@@ -46,9 +47,10 @@ inline constexpr u32 kAmdRlcEnableF32 = 1u << 0;                            // R
 
 // Halt the CP, stream PFP/CE/ME (+ RLC if present) microcode through
 // the *_UCODE_DATA registers (ADDR auto-increments from 0; trailing
-// version write per engine), then un-halt. Each engine's image is
-// loaded via FwLoad + AmdGfxFwParse. Returns Ok iff PFP+CE+ME loaded;
-// Err{NotFound} if a required image is missing. Gated; real-HW only.
+// version write per engine), then un-halt only on a complete required
+// set. Each engine's image is loaded via FwLoad + AmdGfxFwParse.
+// Returns Ok iff PFP+CE+ME loaded; Err{NotFound} if a required image
+// is missing. The caller generation-gates this path to GFX9/GFX10.
 ::duetos::core::Result<void> AmdCpLoadMicrocode(void* bar5);
 
 // Pure boot self-test of the halt-mask constants. Device-independent;
