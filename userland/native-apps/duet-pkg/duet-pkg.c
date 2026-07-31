@@ -42,7 +42,7 @@
 
 typedef unsigned char u8;
 typedef unsigned int u32;
-typedef unsigned long u64;
+typedef unsigned long long u64;
 
 #define SHA256_DIGEST_BYTES 32
 #define SHA256_BLOCK_BYTES 64

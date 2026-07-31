@@ -16,8 +16,8 @@
 // Skip-list: syscalls that destroy the process / modify TLS in
 // ways that break a single-threaded exerciser. See SKIP[] below.
 
-typedef unsigned long u64;
-typedef long i64;
+typedef unsigned long long u64;
+typedef long long i64;
 
 #define DUET_USER_TRAP_UNREACHABLE()                                                                                   \
     do                                                                                                                 \
