@@ -14306,3 +14306,18 @@ _2026-07-30_
   a lifetime reference.
 - **Verification boundary:** source-level lock coverage and diff checks
   are complete; a full MSVC/QEMU/SMP run is still required.
+
+## 057 — Linux child-exit queue has explicit SMP ownership
+
+- **Scope:** `kernel/proc/process.{h,cpp}`,
+  `kernel/subsystems/linux/syscall_stub.cpp`
+- **Decision:** Protect the parent’s child-exit ring with a dedicated
+  process spinlock. The reaper publishes a complete record under the
+  lock, and wait4/waitid atomically find-and-drain one record under the
+  same lock before copying results to user memory.
+- **Why:** `arch::Cli()` masks only the current CPU; it cannot serialize
+  a reaper on one CPU against a wait syscall on another CPU.
+- **Residual:** the check-to-block wait-queue handoff still depends on
+  the scheduler’s existing interrupt-disabled protocol and needs the
+  planned `WaitQueueBlockLocked` primitive for a complete lost-wakeup
+  proof.
