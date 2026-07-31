@@ -690,3 +690,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Prepare
 - **Claimed**: 2026-07-31T14:43:47Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] spawn-prepublish-api
+- **Session**: `Nathan-705`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/proc/spawn.h`
+- **Description**: Expose
+- **Claimed**: 2026-07-31T14:44:00Z
+- **Status**: IN PROGRESS
