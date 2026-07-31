@@ -81,6 +81,37 @@ inline constexpr u32 kBltWriteRgba = 3u << 20;                      // 0x0030000
 inline constexpr u32 kBltRopFill = 0xF0u << 16;                     // 0x00F00000 (PATCOPY/solid)
 inline constexpr u32 kBltRopSrcCopy = 0xCCu << 16;                  // 0x00CC0000 (SRCCOPY)
 
+// Geometry contract shared by the command encoder and the first live
+// consumer. The hardware packet carries the pitch and both rectangle
+// edges in 16-bit fields, so validation belongs next to the encoder rather
+// than being rediscovered by each caller.
+struct BltSurfaceGeometry
+{
+    u64 bytes;
+    u32 width;
+    u32 height;
+    u32 pitch_bytes;
+    u8 bpp;
+};
+
+constexpr bool IsBltSurfaceGeometryValid(const BltSurfaceGeometry& surface)
+{
+    const u64 row_bytes = static_cast<u64>(surface.width) * 4u;
+    const u64 surface_bytes = static_cast<u64>(surface.pitch_bytes) * surface.height;
+    return surface.bytes != 0 && surface.width != 0 && surface.height != 0 && surface.width <= 0xFFFFu &&
+           surface.height <= 0xFFFFu && surface.bpp == 32 && surface.pitch_bytes >= row_bytes &&
+           (surface.pitch_bytes & 3u) == 0 && surface.pitch_bytes <= 0xFFFFu && surface_bytes <= surface.bytes;
+}
+
+constexpr bool IsBltRectValid(const BltSurfaceGeometry& surface, u32 x, u32 y, u32 width, u32 height)
+{
+    if (!IsBltSurfaceGeometryValid(surface) || width == 0 || height == 0)
+        return false;
+    const u64 x_end = static_cast<u64>(x) + width;
+    const u64 y_end = static_cast<u64>(y) + height;
+    return x_end <= surface.width && y_end <= surface.height && x_end <= 0xFFFFu && y_end <= 0xFFFFu;
+}
+
 struct ColorBltPacket
 {
     u32 dw[7];
