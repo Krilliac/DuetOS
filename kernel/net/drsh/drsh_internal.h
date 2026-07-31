@@ -1,7 +1,9 @@
 #pragma once
 
 #include "net/drsh/drsh.h"
+#include "net/stack.h"
 #include "crypto/aes.h"
+#include "sync/spinlock.h"
 #include "util/types.h"
 
 /*
@@ -49,6 +51,21 @@ struct DrshSession
     u64 frames_rx;
     u64 bytes_tx;
     u64 bytes_rx;
+};
+
+// One independently-owned connection. The slot is reserved before a
+// worker task is published and released only after its transport and key
+// material have been torn down.
+struct DrshClientSession
+{
+    bool in_use;
+    bool authenticated;
+    u8 _pad[2];
+    u32 socket_idx;
+    Ipv4Address peer_ip;
+    volatile bool stop_requested;
+    u8 _pad2[3];
+    DrshSession session;
 };
 
 // Transport callbacks — the protocol layer is transport-agnostic so
@@ -139,26 +156,39 @@ void ServerMainLoop();
 // drsh_transport.cpp — build a transport over the kernel socket pool.
 // Returns false if no listener can be opened. The transport's ctx is
 // allocated from the heap; Close() frees it.
-bool MakeSocketTransport(u32 socket_idx, DrshTransport& out);
+bool MakeSocketTransport(u32 socket_idx, volatile bool* stop_requested, DrshTransport& out);
+
+// Mark the transport authenticated so a receive timeout becomes a periodic
+// idle poll instead of a handshake deadline.
+void TransportMarkAuthenticated(DrshTransport& transport);
 
 // Global state accessors — drsh_server.cpp owns the singleton, but
 // shell_drsh.cpp (status command) needs a peek.
 struct DrshGlobal
 {
+    sync::SpinLock state_lock;
     bool initialized;
     bool password_set;
     bool listener_running;
-    bool session_active;
+    bool allow_external;
     u16 listen_port;
     u8 password[kDrshMaxPasswordBytes];
     u32 password_len;
+    u32 active_sessions;
+    u32 authenticated_sessions;
     u64 connections_total;
     u64 auth_failures_total;
+    u64 policy_rejections_total;
+    u64 capacity_rejections_total;
+    u64 frames_rx_total;
+    u64 frames_tx_total;
+    u64 bytes_rx_total;
+    u64 bytes_tx_total;
     // Brute-force throttle (see kDrshLockoutThreshold in drsh.h).
     u32 failed_streak;   // consecutive bad-credential handshakes since last success / unlock
     u64 locked_until_ns; // 0 = unlocked; else MonotonicNs at which the lockout expires
     u64 throttled_total; // connections refused without crypto while locked out
-    DrshSession session;
+    DrshClientSession sessions[kDrshMaxSessions];
 };
 
 DrshGlobal& Globals();

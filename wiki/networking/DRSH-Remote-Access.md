@@ -22,7 +22,7 @@ crypto that public-key auth needs.
 | Password KDF | PBKDF2-HMAC-SHA256, 4096 iters |
 | Auth | Mutual challenge-response over a pre-shared password |
 | Channels per session | 1 (shell **or** desktop), v0 |
-| Concurrent sessions | 1 authenticated DRSH session at a time. TCP v1 can host independent 5-tuples, but DRSH still has one global session record and one synchronous worker. |
+| Concurrent sessions | Up to 8 independent authenticated sessions, each with its own worker and key state. |
 
 Source: [`kernel/net/drsh/`](../../kernel/net/drsh/). Shell command:
 `drshd`.
@@ -42,8 +42,21 @@ DRSH: session=idle, authenticated=no
 DRSH: connections=0, auth_failures=0, frames rx/tx=0/0
 ```
 
+The default listener is local-only: non-loopback peers are rejected before
+authentication. To admit peers arriving through a network interface, make the
+exposure explicit as an admin:
+
+```text
+$ drshd stop
+$ drshd start 4322 --external
+DRSHD: listener started
+```
+
+`-g` is accepted as a short alias for `--external`. The selected access mode
+is visible in `drshd status` as `access=local-only` or `access=external`.
 Stop the listener with `drshd stop`; rotate the password with
-`drshd passwd <newpass>` (only while the listener is stopped).
+`drshd passwd <newpass>` only after the listener and its active workers have
+drained.
 
 ## Live DRSH agent campaign
 
@@ -72,8 +85,9 @@ wsl.exe -d Ubuntu-24.04 -- bash -lc "cd /root/scratch/duetos-drsh-agent-host && 
 Running `--build` from PowerShell is rejected deliberately: CMake caches and
 kernel objects created through `/mnt/c` and `C:/` are different path domains.
 
-The default plan is two non-destructive agents (`recon` and `operator`). The
-built-in `control` profile writes one marker under `/tmp`, reads it back, and
+The default plan is two non-destructive agents (`recon` and `operator`),
+launched concurrently so the campaign exercises independent DRSH connections.
+The built-in `control` profile writes one marker under `/tmp`, reads it back, and
 checks a capability-denied operation; select it only with the explicit guest
 control acknowledgement:
 
@@ -95,12 +109,16 @@ commands can mutate, stop, or expose data from the guest:
 python3 tools/security/drsh_host.py --plan agent-plan.json --i-understand-guest-control
 ```
 
-Agents are intentionally scheduled one at a time because DRSH v0 owns one
-global authenticated session and one synchronous worker. The campaign keeps
-the guest endpoint on `127.0.0.1`, writes guest and per-agent logs to a
-temporary campaign directory, and stops QEMU when complete. Use
+The campaign keeps the guest endpoint on `127.0.0.1`, writes guest and
+per-agent logs to a temporary campaign directory, and stops QEMU when
+complete. Use
 `--keep-guest` plus `--connect-only --host-port <port>` for a follow-up
 campaign against the same locally running guest.
+
+For a deliberately externally reachable QEMU test forward, add
+`--allow-external` to `drsh_host.py`. That changes the host-side forward from
+`127.0.0.1` to `0.0.0.0`; it is independent of, and should be paired with,
+the guest's `drshd start --external` policy.
 
 ## Threat model
 
@@ -144,28 +162,22 @@ DRSH does **not** provide:
   because PMK is a deterministic function of `(password, nonce_s)`. A
   follow-up ECDHE handshake variant will land once an in-tree
   big-int + curve subsystem exists.
-- **Concurrent authenticated sessions.** The kernel's TCP v1 stack
-  can host independent 5-tuples (see [`TCP State Machine`](TCP-State-Machine.md)),
-  and DRSH now accepts real on-wire TCP children, but the service still
-  owns one global `DrshSession` record and runs one synchronous channel
-  loop on the listener worker. Additional clients must wait for the current
-  session to tear down or be refused by the listener/backlog.
 
 ## Threading & Locking Model
 
 - The **accept loop** (`drsh_server.cpp`) runs in process context on a
-  worker thread, polling `SocketAcceptNonblocking` so `drshd stop` can
-  be observed between accept probes. Each accepted on-wire connection rides
-  its own TCB on its own 5-tuple, but the DRSH worker services only one
-  accepted session at a time.
-- Each session's **channel loop** runs synchronously on the same worker:
-  it drives the handshake, then services exactly one channel (shell or
-  desktop) before tearing down — there is no per-channel task, which is
-  why v0 caps a session at one channel.
+  listener task, polling `SocketAcceptNonblocking` so `drshd stop` can be
+  observed between accept probes. Each accepted connection reserves one of
+  eight session slots and gets its own worker task and TCB.
+- Each session's **channel loop** runs synchronously on its own worker: it
+  drives the handshake, then services exactly one channel (shell or desktop)
+  before tearing down. A bounded receive timeout lets stop request workers
+  without closing a socket from a foreign task.
 - All socket I/O blocks in process context; nothing in DRSH runs from an
-  IRQ handler. Session state (keys, counters, the pre-shared password in
-  `g_global.password`) lives in kernel globals mutated only on this
-  worker path.
+  IRQ handler. Session keys and counters live in per-connection slots;
+  aggregate status and lockout state are protected by the DRSH state lock.
+  The pre-shared password in `g_global.password` cannot rotate while the
+  listener or any session worker is active.
 
 ## Wire protocol
 
@@ -284,10 +296,10 @@ frame — input is responsive, redraws are batched.
 These are intentional, documented limits. Each one points at a
 future slice that lifts it.
 
-- **Single authenticated DRSH session.** TCP v1 lifted the old single-slot
-  wire limit, and DRSH can now accept real TCP children, but per-session
-  task/state allocation is still needed before multiple authenticated
-  clients can run concurrently.
+- **Bounded authenticated session count.** DRSH admits up to eight
+  independent authenticated sessions. Lifted by adding dynamic session
+  allocation and a scheduler-backed worker pool when a larger fleet is
+  needed.
 - **Pre-shared key only.** No public-key auth. Lifted by adding
   ECDHE on top of an in-tree curve25519 implementation.
 - **Single channel per session.** The service runs the channel

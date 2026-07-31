@@ -2435,12 +2435,14 @@ void BootBringupDevices(bool force_net_smoke)
     duetos::net::NetStackInit();
     DUETOS_BOOT_SELFTEST(duetos::net::firewall::FwSelfTest());
 #ifdef DUETOS_DRSH_AUTOSTART
-    // Red-team fixture only.  TCP must exist before the listener task can
-    // claim a TCB; starting it above NetStackInit lets tcp::Init reset a
+    // Red-team fixture only.  The `true` external-policy argument is
+    // required because QEMU user-mode host forwarding arrives from the
+    // guest-side gateway, not 127.0.0.1. TCP must exist before the listener
+    // task can claim a TCB; starting it above NetStackInit lets tcp::Init reset a
     // listener that has already been published.  The option is OFF by
     // default, so a production image never ships a known password.
     if (!duetos::net::drsh::DrshSetPassword("test") ||
-        !duetos::net::drsh::DrshServerStart(duetos::net::drsh::kDrshDefaultPort))
+        !duetos::net::drsh::DrshServerStart(duetos::net::drsh::kDrshDefaultPort, true))
     {
         KLOG_ERROR("net/drsh", "test autostart failed");
     }

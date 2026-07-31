@@ -15,11 +15,11 @@
  *     that's enough for a pre-shared-secret design and not enough for
  *     public-key auth. When a big-int + curve subsystem lands, an
  *     ECDHE handshake variant can plug in alongside the PSK one.
- *   - One channel per accepted session in v0. The TCP v1 stack can
- *     host many 5-tuples, but this service currently owns one global
- *     session record and services one accepted connection at a time.
- *     Per-session task/state allocation is required before concurrent
- *     authenticated DRSH clients are truthful.
+ *   - One channel per accepted session. The TCP v1 stack and DRSH
+ *     service can host several bounded, independent authenticated
+ *     sessions; each accepted connection gets its own task and key
+ *     record. The shell and desktop channel remain mutually exclusive
+ *     within one session.
  *
  * Wire protocol (after handshake):
  *
@@ -81,6 +81,7 @@ namespace duetos::net::drsh
 inline constexpr u32 kDrshMagic = 0x44525348; // "DRSH"
 inline constexpr u16 kDrshVersion = 0x0001;
 inline constexpr u16 kDrshDefaultPort = 4322;
+inline constexpr u32 kDrshMaxSessions = 8;
 
 inline constexpr u32 kDrshMaxPayload = 4096; // per-frame ciphertext cap
 inline constexpr u32 kDrshNonceBytes = 16;
@@ -153,12 +154,19 @@ struct DrshStatus
     bool listening;
     bool session_active;
     bool authenticated;
-    u8 password_set; // 0 = no password configured, 1 = set
-    u8 _pad[3];
+    bool allow_external; // false = loopback peers only
+    u8 password_set;     // 0 = no password configured, 1 = set
+    u8 _pad[2];
     u16 listen_port;
     u16 _pad2;
+    u32 active_sessions;
+    u32 authenticated_sessions;
+    u32 max_sessions;
+    u32 _pad3;
     u64 connections_total;
     u64 auth_failures_total;
+    u64 policy_rejections_total;
+    u64 capacity_rejections_total;
     u64 frames_rx;
     u64 frames_tx;
     u64 bytes_rx;
@@ -167,7 +175,7 @@ struct DrshStatus
     u64 throttled_total; // connections refused while the lockout was armed
     u64 locked_until_ns; // 0 = not locked; else MonotonicNs at which the lockout lifts
     u32 failed_streak;   // consecutive bad-credential handshakes since last success / unlock
-    u32 _pad3;
+    u32 _pad4;
 };
 
 /// One-time module init. Idempotent. Wires the service into the
@@ -180,10 +188,12 @@ void DrshInit();
 /// kDrshMaxPasswordBytes; returns false on overflow.
 bool DrshSetPassword(const char* password);
 
-/// Start the listener on `port` (or kDrshDefaultPort if 0). Returns
-/// false if the service is already running, no password is set, or
-/// the underlying socket layer refuses the bind.
-bool DrshServerStart(u16 port);
+/// Start the listener on `port` (or kDrshDefaultPort if 0). By default
+/// only loopback peers are admitted. `allow_external=true` opts into
+/// admitting peers arriving through a non-loopback interface. Returns
+/// false if the service is already running, workers are still draining,
+/// no password is set, or the underlying socket layer refuses the bind.
+bool DrshServerStart(u16 port, bool allow_external = false);
 
 /// Stop the listener and tear down any active session. Idempotent.
 void DrshServerStop();

@@ -6,9 +6,9 @@ agent owns a real authenticated DRSH shell session and runs an operator-
 supplied command plan inside the guest.  The host campaign starts one process
 per agent so the login/control boundary is exercised end to end.
 
-DRSH v0 has one synchronous authenticated session, so callers must not run
-multiple agents against the same guest concurrently.  drsh_host.py enforces
-that rule for campaign runs.
+The guest admits a bounded set of independent authenticated sessions, so
+callers may run multiple agent processes against the same guest concurrently.
+Each process still owns exactly one login, shell channel, and logout.
 """
 
 from __future__ import annotations

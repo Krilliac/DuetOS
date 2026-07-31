@@ -32,6 +32,8 @@ struct SocketCtx
 {
     u32 socket_idx;
     u32 completed_exact_reads;
+    volatile bool* stop_requested;
+    bool authenticated;
     bool closed;
 };
 
@@ -63,6 +65,20 @@ bool SocketReadExact(void* opaque, u8* buf, u32 len)
             if (r == -11) // EAGAIN
             {
                 duetos::sched::SchedSleepTicks(1);
+                continue;
+            }
+            if (r == -110 && ctx->authenticated)
+            {
+                // Authenticated idle sessions use a bounded receive timeout
+                // so `drshd stop` can be observed without a foreign task
+                // closing this socket. Keep an interactive shell alive while
+                // the service is running; the stop flag turns the next
+                // timeout into a clean transport failure.
+                if (ctx->stop_requested != nullptr && *ctx->stop_requested)
+                {
+                    ctx->closed = true;
+                    return false;
+                }
                 continue;
             }
             ctx->closed = true;
@@ -132,19 +148,28 @@ void SocketCloseTransport(void* opaque)
 
 } // namespace
 
-bool MakeSocketTransport(u32 socket_idx, DrshTransport& out)
+bool MakeSocketTransport(u32 socket_idx, volatile bool* stop_requested, DrshTransport& out)
 {
     auto* ctx = reinterpret_cast<SocketCtx*>(duetos::mm::KMalloc(sizeof(SocketCtx)));
     if (ctx == nullptr)
         return false;
     ctx->socket_idx = socket_idx;
     ctx->completed_exact_reads = 0;
+    ctx->stop_requested = stop_requested;
+    ctx->authenticated = false;
     ctx->closed = false;
     out.ctx = ctx;
     out.ReadExact = &SocketReadExact;
     out.WriteAll = &SocketWriteAll;
     out.Close = &SocketCloseTransport;
     return true;
+}
+
+void TransportMarkAuthenticated(DrshTransport& transport)
+{
+    auto* ctx = reinterpret_cast<SocketCtx*>(transport.ctx);
+    if (ctx != nullptr)
+        ctx->authenticated = true;
 }
 
 } // namespace duetos::net::drsh::internal

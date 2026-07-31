@@ -43,16 +43,28 @@ void PrintStatus()
     ConsoleWrite(s.password_set ? "set" : "unset");
     ConsoleWrite(", port=");
     WriteU64Dec(static_cast<u64>(s.listen_port));
+    ConsoleWrite(", access=");
+    ConsoleWrite(s.allow_external ? "external" : "local-only");
     ConsoleWriteln("");
     ConsoleWrite("DRSH: session=");
     ConsoleWrite(s.session_active ? "active" : "idle");
     ConsoleWrite(", authenticated=");
     ConsoleWrite(s.authenticated ? "yes" : "no");
+    ConsoleWrite(", active/authenticated=");
+    WriteU64Dec(static_cast<u64>(s.active_sessions));
+    ConsoleWrite("/");
+    WriteU64Dec(static_cast<u64>(s.authenticated_sessions));
+    ConsoleWrite("/");
+    WriteU64Dec(static_cast<u64>(s.max_sessions));
     ConsoleWriteln("");
     ConsoleWrite("DRSH: connections=");
     WriteU64Dec(s.connections_total);
     ConsoleWrite(", auth_failures=");
     WriteU64Dec(s.auth_failures_total);
+    ConsoleWrite(", policy_rejects=");
+    WriteU64Dec(s.policy_rejections_total);
+    ConsoleWrite(", capacity_rejects=");
+    WriteU64Dec(s.capacity_rejections_total);
     ConsoleWrite(", frames rx/tx=");
     WriteU64Dec(s.frames_rx);
     ConsoleWrite("/");
@@ -123,15 +135,34 @@ void CmdDrshd(u32 argc, char** argv)
         if (!RequireAdmin("DRSHD"))
             return;
         u16 port = 0; // 0 = default
+        bool allow_external = false;
         if (argc >= 3)
         {
-            if (!ParseU16(argv[2], &port))
+            if (StrEqual(argv[2], "--external") || StrEqual(argv[2], "-g"))
             {
-                ConsoleWriteln("DRSHD: malformed port");
+                allow_external = true;
+            }
+            else if (!ParseU16(argv[2], &port))
+            {
+                ConsoleWriteln("DRSHD: malformed port or option");
                 return;
             }
         }
-        if (!DrshServerStart(port))
+        if (argc >= 4)
+        {
+            if (!StrEqual(argv[3], "--external") && !StrEqual(argv[3], "-g"))
+            {
+                ConsoleWriteln("DRSHD: usage: drshd start [port] [--external]");
+                return;
+            }
+            allow_external = true;
+        }
+        if (argc > 4)
+        {
+            ConsoleWriteln("DRSHD: usage: drshd start [port] [--external]");
+            return;
+        }
+        if (!DrshServerStart(port, allow_external))
         {
             ConsoleWriteln("DRSHD: start failed (already running, no password, or socket layer refused)");
             return;
@@ -155,7 +186,7 @@ void CmdDrshd(u32 argc, char** argv)
         ConsoleWriteln("DRSHD: lockout cleared");
         return;
     }
-    ConsoleWriteln("DRSHD: usage: drshd [status|start [port]|stop|passwd <pw>|unlock]");
+    ConsoleWriteln("DRSHD: usage: drshd [status|start [port] [--external]|stop|passwd <pw>|unlock]");
 }
 
 } // namespace duetos::core::shell::internal

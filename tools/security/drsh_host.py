@@ -7,10 +7,10 @@ an isolated QEMU guest with the test-only DRSH listener enabled, then starts
 independent drsh_agent.py processes that authenticate and control the guest
 through the forwarded TCP service.
 
-DRSH v0 permits one authenticated session at a time.  Agents are therefore
-scheduled sequentially; each still has its own process and performs its own
-login, command execution, and logout.  The host forward is loopback-only and
-the guest is torn down by default when the campaign ends.
+DRSH admits a bounded set of independent authenticated sessions. Agents are
+therefore launched as separate concurrent processes; each performs its own
+login, command execution, and logout. The host forward is loopback-only by
+default and the guest is torn down by default when the campaign ends.
 """
 
 from __future__ import annotations
@@ -216,6 +216,11 @@ def parse_args() -> argparse.Namespace:
         help="allow custom commands that can mutate or stop the guest",
     )
     parser.add_argument(
+        "--allow-external",
+        action="store_true",
+        help="bind the QEMU host forward on all host interfaces (high risk; default is loopback)",
+    )
+    parser.add_argument(
         "--build",
         action="store_true",
         help="configure/build with DUETOS_DRSH_AUTOSTART=ON before booting",
@@ -309,6 +314,7 @@ def main() -> int:
                     {
                         "DUETOS_PRESET": args.preset,
                         "DUETOS_DRSH_HOST_PORT": str(port),
+                        "DUETOS_DRSH_ALLOW_EXTERNAL": "1" if args.allow_external else "0",
                         "DUETOS_DISPLAY": "none",
                         "DUETOS_GDB_TRANSPORT": "pty",
                         "DUETOS_QMP": "0",
@@ -331,11 +337,13 @@ def main() -> int:
             failures = 0
             child_env = os.environ.copy()
             child_env["DRSH_PASSWORD"] = args.password
+            children = []
             for index, spec in enumerate(specs, start=1):
                 agent_log = log_dir / f"agent-{index:02d}-{spec.name}.log"
                 print(f"[host] starting {spec.name} ({index}/{len(specs)})")
-                with agent_log.open("wb") as output:
-                    child = subprocess.run(
+                output = agent_log.open("wb")
+                try:
+                    child = subprocess.Popen(
                         build_agent_command(
                             spec,
                             DRSH_HOST,
@@ -348,8 +356,19 @@ def main() -> int:
                         stdout=output,
                         stderr=subprocess.STDOUT,
                     )
-                print(f"[host] {spec.name} exit={child.returncode} log={agent_log}")
-                if child.returncode != 0:
+                except Exception:
+                    output.close()
+                    raise
+                children.append((index, spec, child, output, agent_log))
+
+            # Keep every agent as an independent process, but wait only after
+            # all have been published so the guest exercises real concurrent
+            # DRSH sessions rather than a serialized worker queue.
+            for index, spec, child, output, agent_log in children:
+                returncode = child.wait()
+                output.close()
+                print(f"[host] {spec.name} exit={returncode} log={agent_log}")
+                if returncode != 0:
                     failures += 1
 
             print(f"CAMPAIGN SUMMARY agents={len(specs)} failures={failures} endpoint={DRSH_HOST}:{port}")
