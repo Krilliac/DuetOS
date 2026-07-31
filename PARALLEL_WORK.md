@@ -882,3 +882,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Serialize service lifecycle with reserve-execute-commit tokens and no scheduler or loader calls under the runtime lock (offline claim; remote publication pending)
 - **Claimed**: 2026-07-31T17:08:41Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] rust-build-truth
+- **Session**: `Codex-rust-build-truth`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/rust/CMakeLists.txt cmake/DuetOSRust.cmake tools/test/check-rust-ffi.py wiki/tooling/Rust-Subsystems.md`
+- **Description**: Derive aggregate Rust build dependencies from the workspace and fail closed on Rust FFI inventory drift (offline claim; remote publication pending)
+- **Claimed**: 2026-07-31T17:17:23Z
+- **Status**: IN PROGRESS
