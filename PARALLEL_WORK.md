@@ -890,3 +890,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Derive aggregate Rust build dependencies from the workspace and fail closed on Rust FFI inventory drift (offline claim; remote publication pending)
 - **Claimed**: 2026-07-31T17:17:23Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] kobject-handle-v2
+- **Session**: `Codex-kobject-handle-v2`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/ipc/handle_table.h`
+- **Description**: No description provided
+- **Claimed**: 2026-07-31T18:24:07Z
+- **Status**: IN PROGRESS
