@@ -887,9 +887,16 @@ i64 DoMqGetsetattr(u64 mqdes, u64 user_new, u64 user_old)
     const u32 idx = p->linux_fds[mqdes].first_cluster;
     if (idx >= kPosixMqPoolCap)
         return -22;
-    PosixMq& q = g_posix_pool[idx];
-    if (!q.in_use)
+    PosixMqPin pin(idx);
+    if (!pin)
         return -9;
+    auto lock_flags = sync::SpinLockAcquire(g_posix_lock);
+    PosixMq& q = *pin.queue;
+    if (!q.in_use || q.closing)
+    {
+        sync::SpinLockRelease(g_posix_lock, lock_flags);
+        return -9;
+    }
     if (user_old != 0)
     {
         // struct mq_attr: { mq_flags; mq_maxmsg; mq_msgsize; mq_curmsgs; }
@@ -898,8 +905,13 @@ i64 DoMqGetsetattr(u64 mqdes, u64 user_new, u64 user_old)
         attr[1] = q.max_msgs;
         attr[2] = q.max_msg_bytes;
         attr[3] = q.count;
+        sync::SpinLockRelease(g_posix_lock, lock_flags);
         if (!mm::CopyToUser(reinterpret_cast<void*>(user_old), attr, sizeof(attr)))
             return -14;
+    }
+    else
+    {
+        sync::SpinLockRelease(g_posix_lock, lock_flags);
     }
     (void)user_new; // mq_flags writes (O_NONBLOCK toggle) — sub-GAP
     return 0;
