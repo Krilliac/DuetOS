@@ -762,3 +762,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Classify PE32 opaque generation-tagged file handles without truncation
 - **Claimed**: 2026-07-31T15:58:33Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] win32-section-transaction
+- **Session**: `Nathan-1547`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/subsystems/win32/section.cpp kernel/subsystems/win32/section.h`
+- **Description**: Make Section generation refs views and borrowed-range map/unmap transactional
+- **Claimed**: 2026-07-31T15:58:41Z
+- **Status**: IN PROGRESS
