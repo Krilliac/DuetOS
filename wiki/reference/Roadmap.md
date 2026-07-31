@@ -297,37 +297,6 @@ landed.)
   or a workload that crosses a trust boundary the hardware can't
   enforce.
 
-### PE loader — unchecked `AddressSpaceMapUserPage` frame leak
-
-- **Mechanism (confirmed, mirrors a bug already fixed on the ELF
-  side 2026-07-28):** `AddressSpaceMapUserPage` returns `void` and
-  has three *silent, non-fatal* refusal paths — frame budget
-  exhausted, region-table grow OOM, page-table walker OOM
-  (`kernel/mm/address_space.cpp:398`, `:426`, `:440`). None of them
-  takes ownership of the caller's frame or appends a regions row,
-  and `address_space.h:205-208` forbids the caller from
-  `FreeFrame`-ing a frame it handed over. `pe_loader.cpp` calls it
-  and immediately `guard.Track(va)` without checking, at roughly
-  twelve sites: section pages (`:531`), header pages (`:597`), the
-  relocation/TLS paths (`:939`, `:979`, `:1084`), the image reserve
-  loop (`:2500`), TEB (`:2650`), proc-env (`:2682`),
-  KUSER_SHARED_DATA (`:2710`), and the 64- and 32-bit thunks pages
-  (`:2749`, `:2752`, `:2782`). Every page past the AS's
-  `frame_budget` leaks one 4 KiB frame permanently, `PeLoad` still
-  reports success with a half-mapped image, and the bogus `Track`
-  rows make the unwind walk call `UnmapUserPage` on VAs with no
-  regions row (returns false, reclaims nothing).
-- **Fix shape:** the ELF loader's — probe the leaf PTE with
-  `AddressSpaceProbePteRaw` (O(1)) after the map; absent ⇒ the map
-  was refused ⇒ `FreeFrame` and fail the load. See
-  `kernel/loader/elf_loader.cpp` `LoadSegment` for the landed
-  pattern.
-- **Why it wasn't done in the ELF slice:** twelve sites in a
-  ~2800-line TU with several distinct failure-propagation shapes
-  (some return `bool`, some are inside `PeLoad` proper). Fixing two
-  of twelve would leave a half-consistent loader, which is worse
-  than a uniformly-known gap. Wants its own slice.
-
 ---
 
 ## Storage and filesystem
