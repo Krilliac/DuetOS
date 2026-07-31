@@ -77,9 +77,12 @@ void Utf16LePartitionName(const char* label, u32 label_len, u8 out[72])
         out[i] = 0;
     if (label == nullptr)
         return;
-    for (u32 i = 0; i < 35 && i < label_len && label[i] != '\0'; ++i)
+    const char* cursor = label;
+    for (u32 i = 0; i < 35 && i < label_len; ++i, ++cursor)
     {
-        out[i * 2] = static_cast<u8>(label[i]);
+        if (*cursor == '\0')
+            break;
+        out[i * 2] = static_cast<u8>(*cursor);
         out[i * 2 + 1] = 0;
     }
 }
