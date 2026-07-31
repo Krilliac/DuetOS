@@ -858,3 +858,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: No description provided
 - **Claimed**: 2026-07-31T16:52:30Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] stack-reservation-loader-api
+- **Session**: `Codex-scheduler-exit-lifetime`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/loader/pe_loader.h`
+- **Description**: primary-stack-token-result-contract
+- **Claimed**: 2026-07-31T16:52:37Z
+- **Status**: IN PROGRESS
