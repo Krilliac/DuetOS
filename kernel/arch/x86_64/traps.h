@@ -100,6 +100,14 @@ u64 IrqNestMax();
 u64 IrqNestDepthRaw();
 void IrqNestDepthSet(u64 v);
 
+/// Hardware-IRQ-only nesting depth for the running task. This deliberately
+/// excludes software traps/syscalls: a timer interrupting a syscall is a
+/// normal preemption point, while a timer interrupting an already-live hardware
+/// IRQ frame is the tight-recursion case that must be deferred.
+u64 HardIrqNestDepth();
+u64 HardIrqNestDepthRaw();
+void HardIrqNestDepthSet(u64 v);
+
 /// Per-vector IRQ handler signature. The LAPIC EOI is sent by the IRQ
 /// dispatcher (not by individual handlers), so handlers should NOT EOI
 /// themselves — doing so twice loses an interrupt.

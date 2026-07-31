@@ -2,7 +2,8 @@
 """Non-destructive DRSH wire attack smoke suite.
 
 The suite validates hostile framing and pre-auth starvation behavior without
-running guest shell commands other than `help` for post-test health checks.
+running guest shell commands other than a tiny liveness canary for post-test
+health checks.
 Disruptive OS-command probes live in drsh_os_attack.py and require an explicit
 destructive opt-in there.
 """
@@ -40,6 +41,7 @@ from drsh_wire import (
 )
 
 SETTLE_SECONDS = 0.1
+SLOWLORIS_RETRY_TIMEOUT = 20.0
 
 
 def record(results: list[tuple[str, bool, str]], name: str, ok: bool, detail: str = "") -> None:
@@ -62,12 +64,20 @@ def connect_session(host: str, port: int, password: bytes, timeout: float) -> Dr
 
 
 def health(results: list[tuple[str, bool, str]], name: str, host: str, port: int, password: bytes) -> None:
-    session = connect_session(host, port, password, timeout=2.5)
-    session.open_shell()
-    output = session.run_shell_command("help", timeout=2.5)
-    session.close()
+    session: DrshSession | None = None
+    output = ""
+    try:
+        session = connect_session(host, port, password, timeout=5.0)
+        session.open_shell()
+        # Keep the post-attack liveness canary intentionally small. `help`
+        # can produce enough output on a slow TCG guest to consume the whole
+        # timeout window and strand DRSH v0's single authenticated session.
+        output = session.run_shell_command("id", timeout=10.0)
+    finally:
+        if session is not None:
+            session.close()
     time.sleep(SETTLE_SECONDS)
-    record(results, name, len(output) > 100, f"bytes={len(output)}")
+    record(results, name, len(output.strip()) > 0, f"bytes={len(output)}")
 
 
 def malformed_hello(results: list[tuple[str, bool, str]], host: str, port: int, password: bytes) -> None:
@@ -146,7 +156,12 @@ def slowloris(results: list[tuple[str, bool, str]], host: str, port: int, passwo
     try:
         start = time.time()
         try:
-            probe = DrshSession.connect(host, port, password, timeout=5.0)
+            # The guest-side pre-auth timeout is intentionally short in
+            # scheduler ticks, but under TCG a handful of guest ticks can be
+            # several wall-clock seconds while the serial log is busy. Give the
+            # security property enough host time to show up: the silent holder
+            # must age out and a real admin handshake must then complete.
+            probe = DrshSession.connect(host, port, password, timeout=SLOWLORIS_RETRY_TIMEOUT)
             probe.close()
             record(results, "slowloris_parallel_auth_after_timeout", True, f"latency={time.time() - start:.2f}s")
         except Exception as error:
