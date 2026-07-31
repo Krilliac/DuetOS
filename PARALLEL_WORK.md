@@ -730,3 +730,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Make saturating telemetry and constant-condition tests portable to MSVC
 - **Claimed**: 2026-07-31T15:37:07Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] win32-job-userland-ingress
+- **Session**: `Codex-job-userland`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `userland/libs/kernel32/kernel32_io.c userland/libs/ntdll/ntdll_token.c userland/libs/ntdll/ntdll.c userland/libs/ntdll/ntdll_rtl.c userland/libs/ntdll/ntdll_internal.h tools/build/build-kernel32-dll.sh userland/apps/jobobj_smoke/jobobj_smoke.c`
+- **Description**: Wire real kernel32 and ntdll Job lifecycle ingress with verdict-bearing smoke coverage
+- **Claimed**: 2026-07-31T15:53:38Z
+- **Status**: IN PROGRESS
