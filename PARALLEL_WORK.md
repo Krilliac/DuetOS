@@ -1178,3 +1178,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Allocation-free frozen executable-plan admission seam with exact prepare consume cancel identity
 - **Claimed**: 2026-07-31T21:15:59Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] host-msvc-kernel32-nls-test
+- **Session**: `Nathan-1841`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tests/host/test_kernel32_nls.cpp`
+- **Description**: Map
+- **Claimed**: 2026-07-31T21:17:07Z
+- **Status**: IN PROGRESS
