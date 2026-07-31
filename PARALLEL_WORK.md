@@ -1322,3 +1322,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Hostile
 - **Claimed**: 2026-07-31T22:01:58Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-publication-state
+- **Session**: `Nathan-1202`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/service_transition.h`
+- **Description**: No description provided
+- **Claimed**: 2026-07-31T22:02:34Z
+- **Status**: IN PROGRESS
