@@ -1162,3 +1162,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: No description provided
 - **Claimed**: 2026-07-31T21:14:35Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] host-msvc-render-stats
+- **Session**: `Nathan-1882`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/drivers/video/render_stats.cpp`
+- **Description**: Rename
+- **Claimed**: 2026-07-31T21:14:42Z
+- **Status**: IN PROGRESS
