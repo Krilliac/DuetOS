@@ -850,3 +850,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Snapshot the shared mmap cursor atomically when forking a Process
 - **Claimed**: 2026-07-31T16:51:58Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] stack-reservation-loader
+- **Session**: `Codex-scheduler-exit-lifetime`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/loader/pe_loader.cpp`
+- **Description**: No description provided
+- **Claimed**: 2026-07-31T16:52:30Z
+- **Status**: IN PROGRESS
