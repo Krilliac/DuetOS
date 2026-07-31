@@ -554,3 +554,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: AMD generation-specific capability/status selftest after merged PM4; PSP/GFX11 or VM groundwork with explicit fallback
 - **Claimed**: 2026-07-31T06:28:35Z
 - **Status**: COMPLETED @ 2026-07-31T06:35:45Z
+
+### [ACTIVE] gpu-intel-blt-capability
+- **Session**: `Nathan-280`
+- **Branch**: `claude/gpu-intel-blt-gdi-20260731`
+- **Files**: `kernel/drivers/gpu/intel_gpu.h kernel/drivers/gpu/intel_gpu.cpp kernel/drivers/gpu/intel_gpu_cmds.h kernel/drivers/gpu/intel_gpu_cmds.cpp`
+- **Description**: Publish explicit Intel BLT capability after the existing real-hardware offscreen probe; keep GDI/compositor wiring deferred until surface mapping and submission serialization contracts exist
+- **Claimed**: 2026-07-31T06:34:21Z
+- **Status**: IN PROGRESS
