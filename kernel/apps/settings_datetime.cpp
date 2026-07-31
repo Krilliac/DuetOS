@@ -138,20 +138,21 @@ void AppendStr(char* out, u32 cap, u32* o, const char* s)
 
 void AppendSignedDec(char* out, u32 cap, u32* o, i32 v)
 {
-    if (v < 0)
+    i64 value = v;
+    if (value < 0)
     {
         if (*o + 1 < cap)
             out[(*o)++] = '-';
-        v = -v;
+        value = -value;
     }
     char tmp[12];
     u32 n = 0;
-    if (v == 0)
+    if (value == 0)
         tmp[n++] = '0';
-    while (v > 0 && n < sizeof(tmp))
+    while (value > 0 && n + 1 < sizeof(tmp))
     {
-        tmp[n++] = static_cast<char>('0' + (v % 10));
-        v /= 10;
+        tmp[n++] = static_cast<char>('0' + (value % 10));
+        value /= 10;
     }
     while (n > 0 && *o + 1 < cap)
         out[(*o)++] = tmp[--n];
