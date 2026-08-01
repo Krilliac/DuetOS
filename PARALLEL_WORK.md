@@ -2771,10 +2771,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T17:23:26Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] service-manifest-authority-binding-20260801
+### [DONE] service-manifest-authority-binding-20260801
 - **Session**: `Nathan-640`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `config/service-authority.toml config/services.toml tools/build/gen-service-manifest.py tools/test/test-gen-service-manifest.py kernel/CMakeLists.txt`
 - **Description**: Bind generated artifact package to a separately trusted build authority while keeping bootstrap plans and activation disabled
 - **Claimed**: 2026-08-01T17:31:11Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T17:43:31Z
