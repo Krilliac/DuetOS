@@ -2354,3 +2354,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Align epoll readiness declaration with retained Linux fd receipt and migrate poll caller
 - **Claimed**: 2026-08-01T14:16:39Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] cancellable-waits-20260801
+- **Session**: `Codex-cancellable-waits-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/sched/sched.h,kernel/sched/sched.cpp,tools/test/test-cancellable-wait-contract.py`
+- **Description**: Add result-bearing cancellable WaitQueue and Condvar primitives; truthful deferred cancellation diagnostics
+- **Claimed**: 2026-08-01T14:19:07Z
+- **Status**: IN PROGRESS
