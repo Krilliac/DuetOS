@@ -2090,3 +2090,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Focused generation rendezvous source contract
 - **Claimed**: 2026-08-01T12:36:09Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] linux-fd-transaction-core
+- **Session**: `Codex-linux-fd-transaction-core`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/proc/process.h kernel/proc/process.cpp kernel/ipc/handle_table.h kernel/ipc/handle_table.cpp tools/test/test-linux-fd-transaction-contract.py`
+- **Description**: SMP-linearizable Linux fd core receipts and failure-atomic handle replacement
+- **Claimed**: 2026-08-01T12:37:44Z
+- **Status**: IN PROGRESS
