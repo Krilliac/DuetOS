@@ -1763,13 +1763,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T05:54:09Z
 - **Status**: COMPLETED @ 2026-08-01T06:21:50Z
 
-### [ACTIVE] smp-ap-handshake-test-20260801
+### [DONE] smp-ap-handshake-test-20260801
 - **Session**: `Codex-smp-ap-handshake-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/test/test-smp-ap-handshake.py`
 - **Description**: Deterministic generation-slot handshake and source-layout regression
 - **Claimed**: 2026-08-01T06:08:52Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T06:21:56Z
 
 ### [ACTIVE] mm-tlb-confirmed-20260801
 - **Session**: `Codex-tlb-confirmed-20260801`
