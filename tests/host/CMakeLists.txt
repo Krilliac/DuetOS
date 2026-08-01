@@ -164,6 +164,8 @@ endfunction()
 add_host_test(result)
 add_host_test(syscall_error)
 target_sources(test_syscall_error PRIVATE "${CMAKE_SOURCE_DIR}/../../kernel/syscall/error.cpp")
+add_host_test(message_abi)
+target_sources(test_message_abi PRIVATE "${CMAKE_SOURCE_DIR}/../../kernel/ipc/message_abi.cpp")
 # Phase A dynamic fix-discovery: decision logic is a freestanding header
 # (syscall/inferred_gap_decide.h), so the test needs no kernel TU.
 add_host_test(inferred_gap)
