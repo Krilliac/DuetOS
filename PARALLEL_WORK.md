@@ -2827,13 +2827,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T18:57:44Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] job-scheduler-linearization-repair-20260801
+### [DONE] job-scheduler-linearization-repair-20260801
 - **Session**: `Codex-JobLinearization-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/proc/job.h,kernel/proc/job.cpp,kernel/sched/sched.h,kernel/sched/sched.cpp,kernel/proc/process.h,kernel/proc/process.cpp,kernel/subsystems/win32/job_syscall.cpp,kernel/syscall/syscall.cpp,tools/test/test-job-member-completion-contract.py,tools/test/test-job-scheduler-linearization-contract.py,tools/test/test-process-task-publication-contract.py,tools/test/test-task-cancellation-contract.py`
 - **Description**: Scheduler-linearized Job assignment inheritance termination exit-code and retirement repair
 - **Claimed**: 2026-08-01T19:00:22Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T19:41:11Z
 
 ### [ACTIVE] job-userland-runtime-proof-20260801
 - **Session**: `Codex-JobUserlandProof-20260801`
