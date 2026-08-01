@@ -795,13 +795,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T16:23:53Z
 - **Status**: COMPLETED @ 2026-08-01T13:24:01Z
 
-### [ACTIVE] proc-job-core-service
+### [DONE] proc-job-core-service
 - **Session**: `Codex-job-core-service`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/proc/job.h`
 - **Description**: No description provided
 - **Claimed**: 2026-07-31T16:24:29Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T18:58:59Z
 
 ### [ACTIVE] proc-job-core-source
 - **Session**: `Codex-job-core-service`
