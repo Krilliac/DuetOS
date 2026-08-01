@@ -3139,10 +3139,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T21:47:45Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] service-bootstrap-live-build-20260801
+### [DONE] service-bootstrap-live-build-20260801
 - **Session**: `Nathan-944`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/CMakeLists.txt`
 - **Description**: Register the live service bootstrap anchor in both kernel stages
 - **Claimed**: 2026-08-01T21:55:18Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T21:56:41Z
