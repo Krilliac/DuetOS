@@ -1722,3 +1722,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Raise
 - **Claimed**: 2026-08-01T05:15:57Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] channel-service-epoch-drain-20260801
+- **Session**: `Codex-channel-service-epoch-repair`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/ipc/channel_core.h kernel/ipc/channel_core.cpp tests/host/test_channel_core.cpp kernel/core/service_directory.h kernel/core/service_directory.cpp tests/host/test_service_directory.cpp`
+- **Description**: Expected-epoch atomic drain gate and stale-wrapper teardown coverage
+- **Claimed**: 2026-08-01T05:16:51Z
+- **Status**: IN PROGRESS
