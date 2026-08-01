@@ -1714,3 +1714,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Register service boot-order semantic guard in required CI harness
 - **Claimed**: 2026-08-01T05:10:36Z
 - **Status**: COMPLETED @ 2026-08-01T05:11:12Z
+
+### [ACTIVE] initcall-capacity-20260801
+- **Session**: `Nathan-1192`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/init.h`
+- **Description**: Raise
+- **Claimed**: 2026-08-01T05:15:57Z
+- **Status**: IN PROGRESS
