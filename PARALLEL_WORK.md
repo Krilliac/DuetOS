@@ -3035,7 +3035,7 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T21:03:49Z
 - **Status**: COMPLETED @ 2026-08-01T21:18:02Z
 
-### [ACTIVE] linux-sysv-ipc-id-generation-wait-contract-20260801
+### [DONE] linux-sysv-ipc-id-generation-wait-contract-20260801
 - **Session**: `Nathan-1201`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/test/test-linux-sysv-ipc-wait-cancellation-contract.py`
@@ -3081,7 +3081,7 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Files**: `userland/native-apps/serviced/supervisor.h userland/native-apps/serviced/supervisor.c tests/host/test_serviced_supervisor.cpp tools/test/test-serviced-supervisor-contract.py tests/host/CMakeLists.txt`
 - **Description**: Fixed-capacity serviced policy state machine with exact lifecycle replay restart reconciliation and command dedup
 - **Claimed**: 2026-08-01T21:25:02Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T21:40:16Z
 
 ### [ACTIVE] process-authority-direct-callers-20260801
 - **Session**: `Codex-ProcessAuthority-20260801`
