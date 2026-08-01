@@ -2627,13 +2627,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T15:44:15Z
 - **Status**: COMPLETED @ 2026-08-01T15:54:00Z
 
-### [ACTIVE] linux-signalfd-poll-owner-20260801
+### [DONE] linux-signalfd-poll-owner-20260801
 - **Session**: `Codex-linux-timerfd-signalfd-receipts`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/subsystems/linux/syscall_misc.cpp`
 - **Description**: Pass explicit current Process into retained fd readiness for signalfd pending-state evaluation
 - **Claimed**: 2026-08-01T15:46:05Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T15:54:09Z
 
 ### [ACTIVE] linux-epoll-exact-identity-contract-20260801
 - **Session**: `Codex-linux-timerfd-signalfd-receipts`
