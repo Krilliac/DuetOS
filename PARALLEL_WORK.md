@@ -3003,7 +3003,7 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T20:43:03Z
 - **Status**: COMPLETED @ 2026-08-01T20:48:47Z
 
-### [ACTIVE] service-handle-table-host-atomic-20260801
+### [DONE] service-handle-table-host-atomic-20260801
 - **Session**: `Nathan-2`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/ipc/handle_table.cpp`
@@ -3049,7 +3049,7 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Files**: `kernel/core/service_runtime.h,kernel/core/service_runtime.cpp,tools/test/test-service-runtime-owner-contract.py`
 - **Description**: Static
 - **Claimed**: 2026-08-01T21:06:00Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T21:18:14Z
 
 ### [ACTIVE] service-endpoint-publication-doc-20260801
 - **Session**: `Nathan-539`
