@@ -2139,10 +2139,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T13:00:03Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] ci-structural-contract-registry-20260801
+### [DONE] ci-structural-contract-registry-20260801
 - **Session**: `Nathan-1352`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `.github/workflows/build.yml`
 - **Description**: Register
 - **Claimed**: 2026-08-01T13:02:42Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T13:05:17Z
