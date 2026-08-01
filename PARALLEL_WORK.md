@@ -1706,3 +1706,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Launch managed user services only after the Userland phase completes
 - **Claimed**: 2026-08-01T04:56:32Z
 - **Status**: COMPLETED @ 2026-08-01T05:04:34Z
+
+### [ACTIVE] boot-order-ci-registration-20260801
+- **Session**: `Codex-boot-order-ci-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `.github/workflows/build.yml`
+- **Description**: Register service boot-order semantic guard in required CI harness
+- **Claimed**: 2026-08-01T05:10:36Z
+- **Status**: IN PROGRESS
