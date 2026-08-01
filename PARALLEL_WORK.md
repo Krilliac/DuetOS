@@ -1923,13 +1923,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T09:03:46Z
 - **Status**: COMPLETED @ 2026-08-01T09:07:25Z
 
-### [ACTIVE] exit-helper-unwind-sig-20260801
+### [DONE] exit-helper-unwind-sig-20260801
 - **Session**: `Codex-exit-helper-unwind`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/subsystems/linux/syscall_sig.cpp`
 - **Description**: No description provided
 - **Claimed**: 2026-08-01T09:04:05Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T09:07:34Z
 
 ### [ACTIVE] exit-helper-unwind-fiber-20260801
 - **Session**: `Codex-exit-helper-unwind`
