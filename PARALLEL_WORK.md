@@ -1563,13 +1563,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T03:27:54Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] boot-verdict-verifier
+### [DONE] boot-verdict-verifier
 - **Session**: `Codex-gui-task-queue`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/test/verify-boot-verdict.py tools/test/test-verify-boot-verdict.py`
 - **Description**: Bounded machine-readable exact SMP boot-report completion and exit-class verifier with hostile tests
 - **Claimed**: 2026-08-01T03:29:56Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T04:31:49Z
 
 ### [ACTIVE] smoke-profile-smp-producer
 - **Session**: `Codex-gui-task-queue`
