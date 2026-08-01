@@ -1986,3 +1986,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Restore resumed task interrupt state across scheduler lock handoff
 - **Claimed**: 2026-08-01T09:51:38Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] scheduler-resume-if-percpu-doc-20260801
+- **Session**: `Nathan-555`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/cpu/percpu.h`
+- **Description**: Document source RFLAGS breadcrumb versus resumed-task lock release state
+- **Claimed**: 2026-08-01T09:52:29Z
+- **Status**: IN PROGRESS
