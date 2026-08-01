@@ -923,13 +923,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T18:40:21Z
 - **Status**: COMPLETED @ 2026-08-01T04:31:17Z
 
-### [ACTIVE] gui-task-message-v2-pe32-thread
+### [DONE] gui-task-message-v2-pe32-thread
 - **Session**: `Codex-gui-task-queue`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `userland/libs/user32_32/user32_32_dlg.c`
 - **Description**: Route PE32 thread messages to kernel Task queues
 - **Claimed**: 2026-07-31T18:41:42Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T04:31:19Z
 
 ### [ACTIVE] gui-task-message-v2-gdi-identity
 - **Session**: `Codex-gui-task-queue`
