@@ -2122,3 +2122,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: cooperative-cancellation-safe-KMutex-abandonment
 - **Claimed**: 2026-08-01T12:56:42Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] fable-epoll-fd-identity-20260801
+- **Session**: `Fable-epoll-fd-identity`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/subsystems/linux/syscall_async_io.cpp tools/test/test-epoll-fd-identity-contract.py`
+- **Description**: Migrate epoll watches to strong fd receipt identity
+- **Claimed**: 2026-08-01T13:00:02Z
+- **Status**: IN PROGRESS
