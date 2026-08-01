@@ -2097,7 +2097,7 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Files**: `kernel/proc/process.h kernel/proc/process.cpp kernel/ipc/handle_table.h kernel/ipc/handle_table.cpp tools/test/test-linux-fd-transaction-contract.py`
 - **Description**: SMP-linearizable Linux fd core receipts and failure-atomic handle replacement
 - **Claimed**: 2026-08-01T12:37:44Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T12:53:25Z
 
 ### [DONE] gdb-monitor-atomic-controls-20260801
 - **Session**: `Codex-root-gdb-monitor-20260801`
