@@ -2786,3 +2786,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Initialize authority-bound service package, mint typed stable backing identities, stage ELF LoadImages, and consume through ExecAdmission without activation
 - **Claimed**: 2026-08-01T17:45:11Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] rust-ingress-node-validation-20260801
+- **Session**: `Nathan-RustNode-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/fs/duetfs/src/format.rs,kernel/fs/duetfs/src/fs.rs,kernel/fs/duetfs/src/fsck.rs,kernel/fs/duetfs/src/ops_dir.rs`
+- **Description**: Centralize validated normal node reads while preserving bounded raw fsck diagnostics
+- **Claimed**: 2026-08-01T17:52:28Z
+- **Status**: IN PROGRESS
