@@ -2995,7 +2995,7 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T20:34:10Z
 - **Status**: COMPLETED @ 2026-08-01T20:48:45Z
 
-### [ACTIVE] service-exit-observer-build-20260801
+### [DONE] service-exit-observer-build-20260801
 - **Session**: `Codex-ServiceExitObserverBuild-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tests/host/CMakeLists.txt`
@@ -3017,4 +3017,4 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Files**: `kernel/core/service_bootstrap_activation.h,kernel/core/service_bootstrap_activation.cpp,kernel/proc/process.cpp,tests/host/test_service_bootstrap_activation.cpp,tools/test/test-service-bootstrap-activation-contract.py`
 - **Description**: Integrate exact service exit observer reservation binding rollback and post-Exited publication without runnable-before-registration races
 - **Claimed**: 2026-08-01T20:50:06Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T20:50:49Z
