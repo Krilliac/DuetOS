@@ -1882,3 +1882,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Structural regression guard for cooperative task cancellation boundaries
 - **Claimed**: 2026-08-01T08:57:35Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] adaptive-mutex-docs-20260801
+- **Session**: `Nathan-1299`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `wiki/kernel/Synchronization.md`
+- **Description**: No description provided
+- **Claimed**: 2026-08-01T08:57:35Z
+- **Status**: IN PROGRESS
