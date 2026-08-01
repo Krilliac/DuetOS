@@ -3146,3 +3146,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Register the live service bootstrap anchor in both kernel stages
 - **Claimed**: 2026-08-01T21:55:18Z
 - **Status**: COMPLETED @ 2026-08-01T21:56:41Z
+
+### [ACTIVE] win32-service-endpoint-close-20260801
+- **Session**: `Codex-ServiceEndpointClose-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/subsystems/win32/file_syscall.cpp,tools/test/test-win32-service-endpoint-close-contract.py`
+- **Description**: Wire
+- **Claimed**: 2026-08-01T22:15:39Z
+- **Status**: IN PROGRESS
