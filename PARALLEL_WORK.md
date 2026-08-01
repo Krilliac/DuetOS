@@ -2874,3 +2874,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Bind Linux exit status into the combined scheduler cancellation ticket
 - **Claimed**: 2026-08-01T19:32:54Z
 - **Status**: COMPLETED @ 2026-08-01T19:41:28Z
+
+### [ACTIVE] scheduler-sleep-exit-boundary-20260801
+- **Session**: `Nathan-287`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/sched/sched.h,kernel/sched/sched.cpp,tools/test/test-task-cancellation-contract.py`
+- **Description**: Close kill-before-sleep race and constrain process-backed terminal exits to cooperative boundaries
+- **Claimed**: 2026-08-01T19:42:11Z
+- **Status**: IN PROGRESS
