@@ -1035,13 +1035,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T19:44:43Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] ipc-versioned-payload
+### [DONE] ipc-versioned-payload
 - **Session**: `Codex-ipc-message-abi`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/ipc/versioned_payload.h kernel/ipc/versioned_payload.cpp tests/host/test_versioned_payload.cpp`
 - **Description**: Allocation-free size/version-tagged payload validation and transactional encoding for generated IPC contracts
 - **Claimed**: 2026-07-31T19:47:53Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T03:04:06Z
 
 ### [DONE] native-syscall-idl
 - **Session**: `Nathan-427`
