@@ -2426,3 +2426,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: breakpoint-read-contract-doc
 - **Claimed**: 2026-08-01T14:42:09Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] linux-fd-inherit-legacy-contract-20260801
+- **Session**: `Codex-linux-fd-inherit-legacy-contract-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tools/test/test-linux-fd-transaction-contract.py`
+- **Description**: Update legacy fd transaction contract for result-bearing atomic inheritance
+- **Claimed**: 2026-08-01T14:42:29Z
+- **Status**: IN PROGRESS
