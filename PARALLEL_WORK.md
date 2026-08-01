@@ -3107,13 +3107,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T21:36:03Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] serviced-supervisor-policy-20260801
+### [DONE] serviced-supervisor-policy-20260801
 - **Session**: `Codex-ServicedSupervisor-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `userland/native-apps/serviced/supervisor_policy.c`
 - **Description**: Private serviced event command reconciliation and restart policy implementation
 - **Claimed**: 2026-08-01T21:37:45Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T22:22:24Z
 
 ### [DONE] service-bootstrap-live-20260801
 - **Session**: `Nathan-161`
