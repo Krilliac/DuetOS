@@ -2466,3 +2466,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Process-owned synchronized Linux cwd snapshot and replacement contract
 - **Claimed**: 2026-08-01T14:50:20Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] win32-heap-vm-safety-20260801
+- **Session**: `Codex-win32-heap-vm-safety`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/subsystems/win32/heap.cpp,kernel/subsystems/win32/heap.h,tools/test/test-win32-heap-vm-safety-contract.py`
+- **Description**: Serialize process heap metadata and route all heap user-memory access through locked AddressSpace copy APIs
+- **Claimed**: 2026-08-01T14:51:37Z
+- **Status**: IN PROGRESS
