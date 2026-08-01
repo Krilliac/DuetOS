@@ -1731,10 +1731,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T05:16:51Z
 - **Status**: COMPLETED @ 2026-08-01T05:25:35Z
 
-### [ACTIVE] strict-panic-verifier-20260801
+### [DONE] strict-panic-verifier-20260801
 - **Session**: `Nathan-1028`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/test/verify-boot-verdict.py tools/test/test-verify-boot-verdict.py`
 - **Description**: Narrow panic forbidden signatures to real terminal sentinels and add benign classifier regression
 - **Claimed**: 2026-08-01T05:23:16Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T05:27:15Z
