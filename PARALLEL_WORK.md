@@ -1803,13 +1803,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T06:24:21Z
 - **Status**: COMPLETED @ 2026-08-01T06:29:40Z
 
-### [ACTIVE] smp-ap-docs-ci-shared-20260801
+### [DONE] smp-ap-docs-ci-shared-20260801
 - **Session**: `Codex-smp-docs-ci-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/cpu/topology.h`
 - **Description**: No description provided
 - **Claimed**: 2026-08-01T06:24:42Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T06:29:42Z
 
 ### [ACTIVE] smp-ap-docs-boot-20260801
 - **Session**: `Codex-smp-docs-ci-20260801`
