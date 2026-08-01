@@ -2059,13 +2059,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T12:34:33Z
 - **Status**: COMPLETED @ 2026-08-01T12:52:27Z
 
-### [ACTIVE] gdb-stop-rendezvous-20260801
+### [DONE] gdb-stop-rendezvous-20260801
 - **Session**: `Nathan-1693`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/cpu/percpu.h`
 - **Description**: No description provided
 - **Claimed**: 2026-08-01T12:35:33Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T12:52:29Z
 
 ### [ACTIVE] gdb-stop-rendezvous-arch-20260801
 - **Session**: `Nathan-475`
