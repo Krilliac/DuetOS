@@ -3034,3 +3034,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Link
 - **Claimed**: 2026-08-01T21:03:49Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] linux-sysv-ipc-id-generation-wait-contract-20260801
+- **Session**: `Nathan-1201`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tools/test/test-linux-sysv-ipc-wait-cancellation-contract.py`
+- **Description**: Synchronize prior SysV wait contract with generation-bearing exact public IDs without weakening cancellation semantics
+- **Claimed**: 2026-08-01T21:05:53Z
+- **Status**: IN PROGRESS
