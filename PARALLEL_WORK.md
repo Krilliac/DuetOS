@@ -787,13 +787,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T16:19:59Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] win32-section-userland-type
+### [DONE] win32-section-userland-type
 - **Session**: `Nathan-1762`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `userland/libs/ntdll/ntdll_info.c`
 - **Description**: Recognize opaque generation-tagged Section handles in NtQueryObject
 - **Claimed**: 2026-07-31T16:23:53Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T13:24:01Z
 
 ### [ACTIVE] proc-job-core-service
 - **Session**: `Codex-job-core-service`
