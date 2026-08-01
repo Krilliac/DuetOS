@@ -2986,3 +2986,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Update exact POSIX MQ receipt lifetime contract for cancellable waits without subsystem pins
 - **Claimed**: 2026-08-01T20:31:38Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-exit-observer-20260801
+- **Session**: `Codex-ServiceExitObserver-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/service_exit_observer.h,kernel/core/service_exit_observer.cpp,tests/host/test_service_exit_observer.cpp,tools/test/test-service-exit-observer-contract.py`
+- **Description**: Fixed-capacity publication-reserved exact ProcessKey service-exit event queue with dequeue acknowledgement
+- **Claimed**: 2026-08-01T20:34:10Z
+- **Status**: IN PROGRESS
