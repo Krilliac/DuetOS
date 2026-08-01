@@ -2370,3 +2370,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Move live AP bootstrap contexts onto the guarded kernel-stack arena and retire stale scope documentation
 - **Claimed**: 2026-08-01T14:20:00Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] address-space-region-sync-panic-comment-20260801
+- **Session**: `Nathan-440`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/panic.cpp`
+- **Description**: Correct panic region-summary comment grammar
+- **Claimed**: 2026-08-01T14:21:58Z
+- **Status**: IN PROGRESS
