@@ -1883,13 +1883,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T08:57:35Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] adaptive-mutex-docs-20260801
+### [DONE] adaptive-mutex-docs-20260801
 - **Session**: `Nathan-1299`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `wiki/kernel/Synchronization.md`
 - **Description**: No description provided
 - **Claimed**: 2026-08-01T08:57:35Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T09:01:32Z
 
 ### [ACTIVE] mm-user-tlb-reclaim-header-20260801
 - **Session**: `Nathan-1098`
