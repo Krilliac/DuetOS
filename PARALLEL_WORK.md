@@ -2306,3 +2306,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: hostile-structural-region-table-contract
 - **Claimed**: 2026-08-01T13:59:19Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] linux-fd-post-close-commit-20260801
+- **Session**: `Codex-linux-fd-post-close-commit`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/proc/process.h,kernel/proc/process.cpp,tools/test/test-linux-fd-receipt-extension-contract.py`
+- **Description**: Allow retained guarded OFD metadata commit after source fd close without touching replacement slot
+- **Claimed**: 2026-08-01T14:06:46Z
+- **Status**: IN PROGRESS
