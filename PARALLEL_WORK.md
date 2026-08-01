@@ -2498,3 +2498,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Migrate chdir fchdir and getcwd to coherent process cwd snapshot replacement APIs
 - **Claimed**: 2026-08-01T14:57:24Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] linux-mmap-vm-receipts-20260801
+- **Session**: `Nathan-1906`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/subsystems/linux/syscall_mm.cpp`
+- **Description**: No description provided
+- **Claimed**: 2026-08-01T15:00:35Z
+- **Status**: IN PROGRESS
