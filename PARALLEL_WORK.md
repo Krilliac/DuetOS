@@ -3082,3 +3082,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Fixed-capacity serviced policy state machine with exact lifecycle replay restart reconciliation and command dedup
 - **Claimed**: 2026-08-01T21:25:02Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] process-authority-direct-callers-20260801
+- **Session**: `Codex-ProcessAuthority-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/subsystems/win32/file_syscall.cpp,kernel/subsystems/linux/syscall.cpp`
+- **Description**: Migrate
+- **Claimed**: 2026-08-01T21:25:48Z
+- **Status**: IN PROGRESS
