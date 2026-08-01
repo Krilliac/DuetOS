@@ -971,13 +971,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T19:32:03Z
 - **Status**: COMPLETED @ 2026-08-01T00:22:24Z
 
-### [ACTIVE] ipc-message-abi-test
+### [DONE] ipc-message-abi-test
 - **Session**: `Codex-ipc-message-abi`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tests/host/test_message_abi.cpp`
 - **Description**: Hostile-input and compatibility vectors for message ABI
 - **Claimed**: 2026-07-31T19:32:04Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T00:22:27Z
 
 ### [ACTIVE] ipc-message-abi-host-build
 - **Session**: `Codex-ipc-message-abi`
