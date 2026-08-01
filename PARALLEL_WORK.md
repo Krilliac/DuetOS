@@ -1794,3 +1794,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Synchronize kernel-stack reclamation ordering contract
 - **Claimed**: 2026-08-01T06:13:47Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] smp-ap-docs-ci-20260801
+- **Session**: `Codex-smp-docs-ci-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/arch/x86_64/smp.h`
+- **Description**: No description provided
+- **Claimed**: 2026-08-01T06:24:21Z
+- **Status**: IN PROGRESS
