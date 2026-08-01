@@ -1547,13 +1547,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T03:07:43Z
 - **Status**: COMPLETED @ 2026-08-01T04:31:47Z
 
-### [ACTIVE] vm-exec-reaper-transaction-20260801
+### [DONE] vm-exec-reaper-transaction-20260801
 - **Session**: `Codex-vm-exec-reaper-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/sched/sched.cpp kernel/sched/sched.h kernel/syscall/syscall.cpp kernel/proc/process.cpp kernel/proc/process.h`
 - **Description**: Serialize exec with dead-task stack drain and reject live borrowed mappings
 - **Claimed**: 2026-08-01T03:19:44Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T14:18:41Z
 
 ### [DONE] core-service-directory-20260801
 - **Session**: `Codex-service-directory-20260801`
