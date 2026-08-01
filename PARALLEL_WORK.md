@@ -2867,10 +2867,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T19:26:06Z
 - **Status**: COMPLETED @ 2026-08-01T19:41:25Z
 
-### [ACTIVE] linux-exit-code-ticket-20260801
+### [DONE] linux-exit-code-ticket-20260801
 - **Session**: `Nathan-1332`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/subsystems/linux/syscall_proc.cpp tools/test/test-linux-exit-unwind-contract.py`
 - **Description**: Bind Linux exit status into the combined scheduler cancellation ticket
 - **Claimed**: 2026-08-01T19:32:54Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T19:41:28Z
