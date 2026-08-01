@@ -2842,3 +2842,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Real
 - **Claimed**: 2026-08-01T19:01:50Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-lifecycle-dependency-reserve-20260801
+- **Session**: `Nathan-ServiceActivate-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/service_lifecycle_broker.h kernel/core/service_lifecycle_broker.cpp tests/host/test_service_lifecycle_broker.cpp`
+- **Description**: Atomically require exact manifest dependencies Running while reserving a service start
+- **Claimed**: 2026-08-01T19:06:16Z
+- **Status**: IN PROGRESS
