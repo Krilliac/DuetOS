@@ -2522,3 +2522,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: mmap-and-mremap-hostile-structural-contract
 - **Claimed**: 2026-08-01T15:00:52Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-scheduler-publication-gate-20260801
+- **Session**: `Nathan-1888`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/sched/sched.cpp,kernel/core/service.cpp,tools/test/test-service-publication-gate-contract.py`
+- **Description**: scheduler-lock-service-commit-and-unpublished-task-rollback
+- **Claimed**: 2026-08-01T15:00:59Z
+- **Status**: IN PROGRESS
