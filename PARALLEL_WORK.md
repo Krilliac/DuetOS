@@ -2993,7 +2993,7 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Files**: `kernel/core/service_exit_observer.h,kernel/core/service_exit_observer.cpp,tests/host/test_service_exit_observer.cpp,tools/test/test-service-exit-observer-contract.py`
 - **Description**: Fixed-capacity publication-reserved exact ProcessKey service-exit event queue with dequeue acknowledgement
 - **Claimed**: 2026-08-01T20:34:10Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T20:48:45Z
 
 ### [ACTIVE] service-exit-observer-build-20260801
 - **Session**: `Codex-ServiceExitObserverBuild-20260801`
