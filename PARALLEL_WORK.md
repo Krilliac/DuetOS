@@ -2970,3 +2970,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Snapshot exact retained OFD O_NONBLOCK state and pass it into cancellable read helpers without holding guards across waits
 - **Claimed**: 2026-08-01T20:14:03Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] linux-signal-wait-sequence-20260801
+- **Session**: `Codex-LinuxNotifyAioCancel-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/proc/process.h,kernel/proc/process.cpp`
+- **Description**: Persistent saturating signal event sequence for ABA-safe signalfd cancellation waits
+- **Claimed**: 2026-08-01T20:18:35Z
+- **Status**: IN PROGRESS
