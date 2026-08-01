@@ -2651,10 +2651,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T15:49:37Z
 - **Status**: COMPLETED @ 2026-08-01T15:50:25Z
 
-### [ACTIVE] linux-fd-generation-exhaustion-20260801
+### [DONE] linux-fd-generation-exhaustion-20260801
 - **Session**: `Nathan-LinuxFdGeneration-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/proc/process.h,kernel/proc/process.cpp,tools/test/test-linux-fd-generation-exhaustion-contract.py`
 - **Description**: Retire
 - **Claimed**: 2026-08-01T15:51:53Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T15:59:06Z
