@@ -1483,10 +1483,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T23:40:31Z
 - **Status**: COMPLETED @ 2026-07-31T23:46:59Z
 
-### [ACTIVE] service-manifest-authority-replay
+### [DONE] service-manifest-authority-replay
 - **Session**: `Nathan-1892`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/core/service_manifest.h kernel/core/service_manifest.cpp tests/host/test_service_manifest.cpp`
 - **Description**: Expose pure native document against retained authority validation for lifecycle broker anti-forgery
 - **Claimed**: 2026-07-31T23:45:31Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T00:06:20Z
