@@ -1995,10 +1995,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T09:52:29Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] kmutex-cancellation-contract-20260801
+### [DONE] kmutex-cancellation-contract-20260801
 - **Session**: `Codex-kmutex-contract-test`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/test/test-kmutex-cancellation-contract.py`
 - **Description**: Red-first
 - **Claimed**: 2026-08-01T10:04:27Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T10:26:35Z
