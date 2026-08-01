@@ -1587,13 +1587,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T03:44:51Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] smoke-profile-smp-order-test
+### [DONE] smoke-profile-smp-order-test
 - **Session**: `Codex-gui-task-queue`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/test/test-smoke-profile-order.py`
 - **Description**: Semantic structural guard for target spawn SMP topology IPI Userland smoke termination ordering
 - **Claimed**: 2026-08-01T03:46:14Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T04:31:53Z
 
 ### [DONE] authorization-context-foundation-20260801
 - **Session**: `Codex-root-authorization-20260801`
