@@ -1642,3 +1642,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: hostile_runner_wiring_and_exact_2_4_cpu_contracts
 - **Claimed**: 2026-08-01T04:36:19Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] Codex-boot-order-crash
+- **Session**: `Nathan-1516`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/boot_bringup.cpp tools/test/test-service-boot-order.py`
+- **Description**: Move user service launch behind scheduler initialization and guard boot source ordering
+- **Claimed**: 2026-08-01T04:43:11Z
+- **Status**: IN PROGRESS
