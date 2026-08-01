@@ -2674,3 +2674,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Audit
 - **Claimed**: 2026-08-01T16:05:47Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] rust-ingress-allocator-20260801
+- **Session**: `Nathan-623`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/fs/duetfs/src/kheap_alloc.rs,kernel/fs/duetfs/src/lib.rs`
+- **Description**: Harden
+- **Claimed**: 2026-08-01T16:07:36Z
+- **Status**: IN PROGRESS
