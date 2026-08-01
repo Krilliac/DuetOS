@@ -2434,3 +2434,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Update legacy fd transaction contract for result-bearing atomic inheritance
 - **Claimed**: 2026-08-01T14:42:29Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] cancellable-waits-held-contract-followup-20260801
+- **Session**: `Nathan-955`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/sched/sched.cpp`
+- **Description**: No description provided
+- **Claimed**: 2026-08-01T14:43:31Z
+- **Status**: IN PROGRESS
