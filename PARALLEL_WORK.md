@@ -2939,13 +2939,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T20:09:41Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] win32-directory-address-wait-cancellation-20260801
+### [DONE] win32-directory-address-wait-cancellation-20260801
 - **Session**: `Codex-root-win32wait`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/subsystems/win32/dir_syscall.cpp,kernel/subsystems/win32/waitaddr_syscall.cpp,tools/test/test-win32-directory-address-wait-cancellation-contract.py`
 - **Description**: Sequence-linearized
 - **Claimed**: 2026-08-01T20:10:29Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T20:23:16Z
 
 ### [ACTIVE] linux-sysv-sem-wait-cancellation-20260801
 - **Session**: `Nathan-720`
