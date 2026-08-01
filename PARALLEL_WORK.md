@@ -1083,13 +1083,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T19:59:47Z
 - **Status**: COMPLETED @ 2026-07-31T20:04:36Z
 
-### [ACTIVE] ipc-message-ring
+### [DONE] ipc-message-ring
 - **Session**: `Codex-ipc-message-abi`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/ipc/message_ring.h kernel/ipc/message_ring.cpp tests/host/test_message_ring.cpp`
 - **Description**: Caller-storage bounded validated message ring with explicit backpressure and transactional sequence-exact receive
 - **Claimed**: 2026-07-31T20:00:08Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T03:03:33Z
 
 ### [DONE] native-syscall-idl-gates
 - **Session**: `Nathan-990`
