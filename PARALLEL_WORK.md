@@ -2107,13 +2107,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T12:48:59Z
 - **Status**: COMPLETED @ 2026-08-01T12:52:39Z
 
-### [ACTIVE] kmutex-cancel-abandon-20260801
+### [DONE] kmutex-cancel-abandon-20260801
 - **Session**: `Nathan-1522`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/ipc/kmutex.h`
 - **Description**: No description provided
 - **Claimed**: 2026-08-01T12:56:04Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T13:23:35Z
 
 ### [ACTIVE] kmutex-cancel-abandon-impl-20260801
 - **Session**: `Nathan-1726`
