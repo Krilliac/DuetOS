@@ -2954,3 +2954,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Cancellation-safe sequence-linearized SysV semop and semtimedop waits with removal and saturation safety
 - **Claimed**: 2026-08-01T20:10:43Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] linux-notify-aio-wait-cancel-20260801
+- **Session**: `Codex-LinuxNotifyAioCancel-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/subsystems/linux/fanotify.cpp,kernel/subsystems/linux/inotify.cpp,kernel/subsystems/linux/syscall_async_io.cpp,kernel/subsystems/linux/pidfd_splice.cpp,tools/test/test-linux-notify-aio-wait-cancellation-contract.py`
+- **Description**: Sequence-linearized cancellable notification timerfd epoll and pidfd waits with close timeout and ABA contracts
+- **Claimed**: 2026-08-01T20:11:36Z
+- **Status**: IN PROGRESS
