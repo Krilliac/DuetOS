@@ -2891,13 +2891,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T19:43:51Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] handle-table-publication-reservation-20260801
+### [DONE] handle-table-publication-reservation-20260801
 - **Session**: `Codex-HandlePublication-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/ipc/handle_table.h,kernel/ipc/handle_table.cpp,kernel/ipc/handle_table_selftest.cpp,tools/test/test-handle-publication-reservation-contract.py`
 - **Description**: Unpublished exact handle reservation publish abort and drain transaction
 - **Claimed**: 2026-08-01T19:43:55Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T20:04:53Z
 
 ### [ACTIVE] linux-child-wait-cancel-status-20260801
 - **Session**: `Codex-UserWaitCancellation-20260801`
