@@ -1891,13 +1891,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T08:57:35Z
 - **Status**: COMPLETED @ 2026-08-01T09:01:32Z
 
-### [ACTIVE] mm-user-tlb-reclaim-header-20260801
+### [DONE] mm-user-tlb-reclaim-header-20260801
 - **Session**: `Nathan-1098`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/mm/address_space.h`
 - **Description**: Confirmed user address-space TLB reclaim API contract
 - **Claimed**: 2026-08-01T08:57:37Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T09:13:56Z
 
 ### [ACTIVE] mm-user-tlb-reclaim-test-20260801
 - **Session**: `Nathan-910`
