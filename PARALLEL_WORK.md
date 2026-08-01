@@ -1419,13 +1419,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T23:02:15Z
 - **Status**: COMPLETED @ 2026-07-31T23:15:03Z
 
-### [ACTIVE] service-lifecycle-broker
+### [DONE] service-lifecycle-broker
 - **Session**: `Codex-root-lifecycle`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/core/service_lifecycle_broker.h`
 - **Description**: No description provided
 - **Claimed**: 2026-07-31T23:06:33Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T00:07:22Z
 
 ### [ACTIVE] native-syscall-policy-json
 - **Session**: `Nathan-663`
