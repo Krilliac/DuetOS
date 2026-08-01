@@ -1874,3 +1874,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: linux-dispatch-cancellation-boundary
 - **Claimed**: 2026-08-01T08:57:32Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] task-cancel-contract-test-20260801
+- **Session**: `Nathan-1315`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tools/test/test-task-cancellation-contract.py`
+- **Description**: Structural regression guard for cooperative task cancellation boundaries
+- **Claimed**: 2026-08-01T08:57:35Z
+- **Status**: IN PROGRESS
