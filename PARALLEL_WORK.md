@@ -907,13 +907,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T18:24:27Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] gui-task-message-v2
+### [DONE] gui-task-message-v2
 - **Session**: `Codex-gui-task-queue`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/drivers/video/gui_message_queue.cpp`
 - **Description**: No description provided
 - **Claimed**: 2026-07-31T18:40:04Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T04:31:16Z
 
 ### [ACTIVE] gui-task-message-v2-surface
 - **Session**: `Codex-gui-task-queue`
