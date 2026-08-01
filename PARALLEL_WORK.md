@@ -2082,3 +2082,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Wait for rendezvous and gate peer register writes
 - **Claimed**: 2026-08-01T12:36:07Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] gdb-stop-rendezvous-test-20260801
+- **Session**: `Nathan-1374`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tools/test/test-gdb-stop-rendezvous-contract.py`
+- **Description**: Focused generation rendezvous source contract
+- **Claimed**: 2026-08-01T12:36:09Z
+- **Status**: IN PROGRESS
