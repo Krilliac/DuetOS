@@ -2475,13 +2475,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T14:51:37Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] adaptive-mutex-doc-sync-20260801
+### [DONE] adaptive-mutex-doc-sync-20260801
 - **Session**: `Nathan-687`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/sched/sched.h`
 - **Description**: No description provided
 - **Claimed**: 2026-08-01T14:55:26Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T14:58:56Z
 
 ### [DONE] adaptive-mutex-doc-sync-rest-20260801
 - **Session**: `Nathan-1973`
