@@ -1987,13 +1987,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T09:51:38Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] scheduler-resume-if-percpu-doc-20260801
+### [DONE] scheduler-resume-if-percpu-doc-20260801
 - **Session**: `Nathan-555`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/cpu/percpu.h`
 - **Description**: Document source RFLAGS breadcrumb versus resumed-task lock release state
 - **Claimed**: 2026-08-01T09:52:29Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T12:35:01Z
 
 ### [DONE] kmutex-cancellation-contract-20260801
 - **Session**: `Codex-kmutex-contract-test`
