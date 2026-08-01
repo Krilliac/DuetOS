@@ -1954,3 +1954,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Retire stale adaptive mutex and user TLB reclamation roadmap text
 - **Claimed**: 2026-08-01T09:16:40Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] task-cancel-contract-test-fix-20260801
+- **Session**: `Nathan-480`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tools/test/test-task-cancellation-contract.py`
+- **Description**: Align cancellation structural guard with helper-based atomic implementation
+- **Claimed**: 2026-08-01T09:17:09Z
+- **Status**: IN PROGRESS
