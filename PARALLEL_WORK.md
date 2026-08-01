@@ -915,13 +915,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T18:40:04Z
 - **Status**: COMPLETED @ 2026-08-01T04:31:16Z
 
-### [ACTIVE] gui-task-message-v2-surface
+### [DONE] gui-task-message-v2-surface
 - **Session**: `Codex-gui-task-queue`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/drivers/video/gui_message_queue.h kernel/drivers/video/widget.cpp kernel/drivers/video/widget.h kernel/subsystems/win32/window_syscall.cpp kernel/subsystems/win32/window_syscall.h userland/libs/user32/user32.c userland/libs/user32_32/user32_32.c wiki/subsystems/Compositor.md`
 - **Description**: Per-Task transactional GUI queues and generation-safe HWND identity
 - **Claimed**: 2026-07-31T18:40:21Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T04:31:17Z
 
 ### [ACTIVE] gui-task-message-v2-pe32-thread
 - **Session**: `Codex-gui-task-queue`
