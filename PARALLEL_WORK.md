@@ -2571,13 +2571,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T15:17:58Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] process-key-structural-test-compat-20260801
+### [DONE] process-key-structural-test-compat-20260801
 - **Session**: `Nathan-ProcessKey-Tests-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/test/test-process-task-publication-contract.py,tools/test/test-linux-child-relation-contract.py,tools/test/test-linux-fd-transaction-contract.py`
 - **Description**: Make
 - **Claimed**: 2026-08-01T15:24:47Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T15:26:06Z
 
 ### [ACTIVE] loader-image-patch-vm-receipts-20260801
 - **Session**: `Nathan-1959`
