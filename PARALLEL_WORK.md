@@ -2978,3 +2978,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Persistent saturating signal event sequence for ABA-safe signalfd cancellation waits
 - **Claimed**: 2026-08-01T20:18:35Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] linux-fd-async-pools-wait-contract-20260801
+- **Session**: `Nathan-828`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tools/test/test-linux-fd-async-pools-contract.py`
+- **Description**: Update exact POSIX MQ receipt lifetime contract for cancellable waits without subsystem pins
+- **Claimed**: 2026-08-01T20:31:38Z
+- **Status**: IN PROGRESS
