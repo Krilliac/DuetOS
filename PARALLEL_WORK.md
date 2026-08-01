@@ -2083,13 +2083,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T12:36:07Z
 - **Status**: COMPLETED @ 2026-08-01T12:52:34Z
 
-### [ACTIVE] gdb-stop-rendezvous-test-20260801
+### [DONE] gdb-stop-rendezvous-test-20260801
 - **Session**: `Nathan-1374`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/test/test-gdb-stop-rendezvous-contract.py`
 - **Description**: Focused generation rendezvous source contract
 - **Claimed**: 2026-08-01T12:36:09Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T12:52:36Z
 
 ### [ACTIVE] linux-fd-transaction-core
 - **Session**: `Codex-linux-fd-transaction-core`
