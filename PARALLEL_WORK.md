@@ -2882,3 +2882,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Close kill-before-sleep race and constrain process-backed terminal exits to cooperative boundaries
 - **Claimed**: 2026-08-01T19:42:11Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] user-wait-cancellation-20260801
+- **Session**: `Codex-UserWaitCancellation-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/proc/process.cpp,kernel/proc/process.h,kernel/subsystems/win32/thread_syscall.cpp,kernel/subsystems/win32/thread_syscall.h,kernel/syscall/syscall.cpp,tools/test/test-process-child-wait-cancellation-contract.py,tools/test/test-win32-thread-wait-cancellation-contract.py`
+- **Description**: Sequence-linearized
+- **Claimed**: 2026-08-01T19:43:51Z
+- **Status**: IN PROGRESS
