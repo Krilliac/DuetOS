@@ -1443,13 +1443,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T23:06:48Z
 - **Status**: COMPLETED @ 2026-08-01T00:07:33Z
 
-### [ACTIVE] service-lifecycle-broker-test
+### [DONE] service-lifecycle-broker-test
 - **Session**: `Codex-root-lifecycle`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tests/host/test_service_lifecycle_broker.cpp`
 - **Description**: Lifecycle
 - **Claimed**: 2026-07-31T23:06:50Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T00:07:39Z
 
 ### [DONE] native-syscall-dispatch-bijection
 - **Session**: `Nathan-1412`
