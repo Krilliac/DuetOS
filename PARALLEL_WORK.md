@@ -2754,3 +2754,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Synchronize
 - **Claimed**: 2026-08-01T17:02:59Z
 - **Status**: COMPLETED @ 2026-08-01T17:05:26Z
+
+### [ACTIVE] service-elf-load-image-20260801
+- **Session**: `Nathan-294`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/loader/elf_load_image.h kernel/loader/elf_load_image.cpp tests/host/test_elf_load_image.cpp tests/host/CMakeLists.txt tools/test/test-service-elf-load-image-contract.py wiki/kernel/Loader.md`
+- **Description**: Stage exact ELF bytes through production parser into sealed LoadImage/LoadPlan without publishing a Process
+- **Claimed**: 2026-08-01T17:19:06Z
+- **Status**: IN PROGRESS
