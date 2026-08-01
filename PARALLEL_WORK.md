@@ -3123,13 +3123,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T21:42:44Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] service-directory-close-adapter-20260801
+### [DONE] service-directory-close-adapter-20260801
 - **Session**: `Codex-ServiceDirectoryClose-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/core/service_directory.h,kernel/core/service_directory.cpp,tests/host/test_service_directory.cpp,tools/test/test-service-endpoint-contract.py`
 - **Description**: Bind normal server handle close to exact accepted-channel ownership release without endpoint metadata leaks
 - **Claimed**: 2026-08-01T21:44:58Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T22:09:34Z
 
 ### [ACTIVE] serviced-supervisor-policy-split-20260801
 - **Session**: `Codex-ServicedSupervisor-20260801`
