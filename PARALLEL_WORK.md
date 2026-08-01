@@ -2243,13 +2243,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T13:26:33Z
 - **Status**: COMPLETED @ 2026-08-01T13:58:51Z
 
-### [ACTIVE] linux-fd-async-pools-rest-20260801
+### [DONE] linux-fd-async-pools-rest-20260801
 - **Session**: `Nathan-1697`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/subsystems/linux/inotify.cpp,kernel/subsystems/linux/msg_queues.cpp,kernel/subsystems/linux/extra_syscalls.cpp,tools/test/test-linux-fd-async-pools-contract.py`
 - **Description**: Migrate
 - **Claimed**: 2026-08-01T13:26:49Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T13:58:53Z
 
 ### [ACTIVE] linux-fd-io-contract
 - **Session**: `Nathan-746`
