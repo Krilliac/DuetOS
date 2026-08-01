@@ -987,13 +987,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T19:32:04Z
 - **Status**: COMPLETED @ 2026-08-01T00:22:29Z
 
-### [ACTIVE] boot-truth-docs
+### [DONE] boot-truth-docs
 - **Session**: `Codex-gui-task-queue`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `README.md`
 - **Description**: No description provided
 - **Claimed**: 2026-07-31T19:37:26Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T04:31:24Z
 
 ### [ACTIVE] boot-truth-wiki
 - **Session**: `Codex-gui-task-queue`
