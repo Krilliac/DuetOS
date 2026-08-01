@@ -1787,13 +1787,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T06:11:49Z
 - **Status**: COMPLETED @ 2026-08-01T06:27:06Z
 
-### [ACTIVE] mm-tlb-kstack-contract-header-20260801
+### [DONE] mm-tlb-kstack-contract-header-20260801
 - **Session**: `Codex-tlb-confirmed-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/mm/kstack.h`
 - **Description**: Synchronize kernel-stack reclamation ordering contract
 - **Claimed**: 2026-08-01T06:13:47Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T06:27:13Z
 
 ### [ACTIVE] smp-ap-docs-ci-20260801
 - **Session**: `Codex-smp-docs-ci-20260801`
