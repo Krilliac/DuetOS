@@ -1818,3 +1818,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: synchronize_AP_admission_boot_comment
 - **Claimed**: 2026-08-01T06:24:51Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] smp-ap-ci-registration-20260801
+- **Session**: `Codex-smp-docs-ci-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `.github/workflows/build.yml`
+- **Description**: register_AP_handshake_static_test
+- **Claimed**: 2026-08-01T06:24:52Z
+- **Status**: IN PROGRESS
