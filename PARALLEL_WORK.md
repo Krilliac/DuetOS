@@ -1890,3 +1890,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: No description provided
 - **Claimed**: 2026-08-01T08:57:35Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] mm-user-tlb-reclaim-header-20260801
+- **Session**: `Nathan-1098`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/mm/address_space.h`
+- **Description**: Confirmed user address-space TLB reclaim API contract
+- **Claimed**: 2026-08-01T08:57:37Z
+- **Status**: IN PROGRESS
