@@ -2115,13 +2115,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T12:56:04Z
 - **Status**: COMPLETED @ 2026-08-01T13:23:35Z
 
-### [ACTIVE] kmutex-cancel-abandon-impl-20260801
+### [DONE] kmutex-cancel-abandon-impl-20260801
 - **Session**: `Nathan-1726`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/ipc/kmutex.cpp,kernel/subsystems/win32/mutex_syscall.cpp,kernel/subsystems/win32/file_syscall.cpp,kernel/sched/sched.h,kernel/sched/sched.cpp,tools/test/test-kmutex-cancellation-contract.py,tools/test/test-task-cancellation-contract.py`
 - **Description**: cooperative-cancellation-safe-KMutex-abandonment
 - **Claimed**: 2026-08-01T12:56:42Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T13:23:43Z
 
 ### [ACTIVE] fable-epoll-fd-identity-20260801
 - **Session**: `Fable-epoll-fd-identity`
