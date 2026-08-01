@@ -2610,3 +2610,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Immutable
 - **Claimed**: 2026-08-01T15:40:27Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-manifest-transfer-uniqueness-20260801
+- **Session**: `Nathan-1001`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/service_manifest.h,kernel/core/service_manifest.cpp,tests/host/test_service_manifest.cpp`
+- **Description**: Reject
+- **Claimed**: 2026-08-01T15:41:33Z
+- **Status**: IN PROGRESS
