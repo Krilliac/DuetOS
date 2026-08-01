@@ -2778,3 +2778,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Bind generated artifact package to a separately trusted build authority while keeping bootstrap plans and activation disabled
 - **Claimed**: 2026-08-01T17:31:11Z
 - **Status**: COMPLETED @ 2026-08-01T17:43:31Z
+
+### [ACTIVE] service-runtime-staging-20260801
+- **Session**: `Nathan-186`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/service_bootstrap_stage.h,kernel/core/service_bootstrap_stage.cpp,tests/host/test_service_bootstrap_stage.cpp,tools/test/test-service-bootstrap-stage-contract.py,wiki/kernel/Service-Bootstrap.md,kernel/CMakeLists.txt,tests/host/CMakeLists.txt`
+- **Description**: Initialize authority-bound service package, mint typed stable backing identities, stage ELF LoadImages, and consume through ExecAdmission without activation
+- **Claimed**: 2026-08-01T17:45:11Z
+- **Status**: IN PROGRESS
