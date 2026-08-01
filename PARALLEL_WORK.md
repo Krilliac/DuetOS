@@ -1626,3 +1626,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: strict_boot_verdict_in_ctest_runner
 - **Claimed**: 2026-08-01T04:33:50Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] boot-verdict-integration-ci
+- **Session**: `Codex-boot-verdict-integration`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `.github/workflows/build.yml`
+- **Description**: exact_2_and_4_vcpu_machine_verdict_CI
+- **Claimed**: 2026-08-01T04:33:51Z
+- **Status**: IN PROGRESS
