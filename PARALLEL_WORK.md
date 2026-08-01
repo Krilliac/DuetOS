@@ -1970,3 +1970,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Guard reaper interrupt enable before confirmed kernel-stack TLB reclamation
 - **Claimed**: 2026-08-01T09:35:53Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] process-task-publication-contract-20260801
+- **Session**: `Nathan-1594`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tools/test/test-process-task-publication-contract.py`
+- **Description**: Red-first
+- **Claimed**: 2026-08-01T09:40:42Z
+- **Status**: IN PROGRESS
