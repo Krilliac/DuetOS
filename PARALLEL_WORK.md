@@ -2258,3 +2258,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: forbid-raw-fd-slots-and-require-explicit-receipt-cleanup
 - **Claimed**: 2026-08-01T13:28:07Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] linux-fd-receipt-extension-20260801
+- **Session**: `Codex-linux-fd-receipt-extension`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/proc/process.h`
+- **Description**: No description provided
+- **Claimed**: 2026-08-01T13:34:15Z
+- **Status**: IN PROGRESS
