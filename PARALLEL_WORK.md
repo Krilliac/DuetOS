@@ -635,13 +635,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T14:17:02Z
 - **Status**: COMPLETED @ 2026-08-01T03:09:59Z
 
-### [ACTIVE] vm-process-abi
+### [DONE] vm-process-abi
 - **Session**: `Nathan-221`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/syscall/syscall.h userland/libs/ntdll/ntdll_reg.c wiki/specifications/Syscall-ABI.md`
 - **Description**: Make capped cross-process VM calls chunked and partial-copy status truthful
 - **Claimed**: 2026-07-31T14:17:15Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T03:10:02Z
 
 ### [ACTIVE] vm-process-lookup-callers
 - **Session**: `Nathan-221`
