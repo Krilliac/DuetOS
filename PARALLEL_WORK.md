@@ -3099,7 +3099,7 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T21:34:41Z
 - **Status**: COMPLETED @ 2026-08-01T22:22:17Z
 
-### [ACTIVE] service-runtime-owner-doc-20260801
+### [DONE] service-runtime-owner-doc-20260801
 - **Session**: `Codex-ServiceRuntimeDoc-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `wiki/kernel/Service-Bootstrap.md`
@@ -3169,7 +3169,7 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Files**: `userland/native-apps/registryd/registry_store.h,userland/native-apps/registryd/registry_store.c,userland/native-apps/registryd/registry_persistence.c,tests/host/test_registryd_store.cpp,tools/test/test-registryd-store-contract.py`
 - **Description**: Allocation-free registry store with canonical snapshot and WAL recovery
 - **Claimed**: 2026-08-01T22:18:13Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T22:58:31Z
 
 ### [ACTIVE] execd-worker-engine-20260801
 - **Session**: `Nathan-1915`
