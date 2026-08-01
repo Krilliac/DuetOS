@@ -2226,3 +2226,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Classify
 - **Claimed**: 2026-08-01T13:24:32Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] ci-kmutex-fd-core-contracts-20260801
+- **Session**: `Nathan-874`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `.github/workflows/build.yml`
+- **Description**: Register
+- **Claimed**: 2026-08-01T13:24:57Z
+- **Status**: IN PROGRESS
