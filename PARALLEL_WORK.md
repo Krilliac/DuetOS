@@ -1851,13 +1851,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T08:57:13Z
 - **Status**: COMPLETED @ 2026-08-01T09:13:48Z
 
-### [ACTIVE] task-cancellation-boundaries-20260801
+### [DONE] task-cancellation-boundaries-20260801
 - **Session**: `Nathan-1271`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/arch/x86_64/traps.cpp`
 - **Description**: No description provided
 - **Claimed**: 2026-08-01T08:57:19Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T12:34:57Z
 
 ### [ACTIVE] task-cancellation-usermode-20260801
 - **Session**: `Nathan-1721`
