@@ -2515,13 +2515,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T15:00:39Z
 - **Status**: COMPLETED @ 2026-08-01T15:04:48Z
 
-### [ACTIVE] linux-mmap-vm-receipts-test-20260801
+### [DONE] linux-mmap-vm-receipts-test-20260801
 - **Session**: `Nathan-319`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/test/test-linux-mmap-vm-receipt-contract.py`
 - **Description**: mmap-and-mremap-hostile-structural-contract
 - **Claimed**: 2026-08-01T15:00:52Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T15:22:49Z
 
 ### [ACTIVE] service-scheduler-publication-gate-20260801
 - **Session**: `Nathan-1888`
