@@ -2402,3 +2402,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Make Linux fd inheritance failure-atomic and state-11 safe; add guarded retained-regular OFD refresh
 - **Claimed**: 2026-08-01T14:36:07Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] vm-breakpoint-frame-access-20260801
+- **Session**: `Nathan-210`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/debug/breakpoints.cpp`
+- **Description**: No description provided
+- **Claimed**: 2026-08-01T14:41:50Z
+- **Status**: IN PROGRESS
