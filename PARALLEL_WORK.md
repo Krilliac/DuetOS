@@ -2594,3 +2594,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Serialize
 - **Claimed**: 2026-08-01T15:29:52Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] linux-timerfd-signalfd-receipts-20260801
+- **Session**: `Codex-linux-timerfd-signalfd-receipts`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/subsystems/linux/syscall_async_io.cpp,tools/test/test-linux-timer-signalfd-receipt-contract.py`
+- **Description**: Atomic timerfd/signalfd publication, exact retained receipt operations, and epoll strong identity comparison
+- **Claimed**: 2026-08-01T15:37:39Z
+- **Status**: IN PROGRESS
