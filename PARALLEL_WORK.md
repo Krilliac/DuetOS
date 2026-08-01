@@ -1531,13 +1531,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T02:54:16Z
 - **Status**: COMPLETED @ 2026-08-01T05:16:41Z
 
-### [ACTIVE] proc-resource-channel-charge-20260801
+### [DONE] proc-resource-channel-charge-20260801
 - **Session**: `Codex-resource-channel-charge-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/proc/resource_domain.h kernel/proc/resource_domain.cpp tests/host/test_resource_domain_channel.cpp`
 - **Description**: Generation-safe ResourceDomain channel charge authority
 - **Claimed**: 2026-08-01T03:02:15Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T18:56:20Z
 
 ### [DONE] ipc-message-ring-port-p2-coverage
 - **Session**: `Codex-gui-task-queue`
