@@ -1139,13 +1139,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T20:34:40Z
 - **Status**: COMPLETED @ 2026-08-01T03:03:48Z
 
-### [ACTIVE] gui-window-side-tables
+### [DONE] gui-window-side-tables
 - **Session**: `Codex-gui-task-queue`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/core/boot_tasks.cpp kernel/core/menu_dispatch.cpp kernel/core/menu_dispatch.h kernel/drivers/video/menu.cpp kernel/drivers/video/menu.h`
 - **Description**: Generation-tagged gesture and window-menu contexts with stale-generation cancellation
 - **Claimed**: 2026-07-31T20:43:31Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T04:31:39Z
 
 ### [ACTIVE] host-msvc-d3dcompiler
 - **Session**: `Nathan-610`
