@@ -2843,13 +2843,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T19:01:50Z
 - **Status**: COMPLETED @ 2026-08-01T19:41:14Z
 
-### [ACTIVE] service-lifecycle-dependency-reserve-20260801
+### [DONE] service-lifecycle-dependency-reserve-20260801
 - **Session**: `Nathan-ServiceActivate-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/core/service_lifecycle_broker.h kernel/core/service_lifecycle_broker.cpp tests/host/test_service_lifecycle_broker.cpp`
 - **Description**: Atomically require exact manifest dependencies Running while reserving a service start
 - **Claimed**: 2026-08-01T19:06:16Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T19:56:32Z
 
 ### [DONE] job-ntdll-query-export-fix-20260801
 - **Session**: `Codex-JobUserlandProof-20260801`
