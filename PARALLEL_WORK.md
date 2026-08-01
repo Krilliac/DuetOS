@@ -3130,3 +3130,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Bind normal server handle close to exact accepted-channel ownership release without endpoint metadata leaks
 - **Claimed**: 2026-08-01T21:44:58Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] serviced-supervisor-policy-split-20260801
+- **Session**: `Codex-ServicedSupervisor-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `userland/native-apps/serviced/supervisor_reconcile.c userland/native-apps/serviced/supervisor_event.c userland/native-apps/serviced/supervisor_command.c`
+- **Description**: Split serviced reconciliation ordered-event and command-dedup policy TUs
+- **Claimed**: 2026-08-01T21:47:45Z
+- **Status**: IN PROGRESS
