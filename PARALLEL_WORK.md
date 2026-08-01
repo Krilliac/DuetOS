@@ -2802,3 +2802,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Deterministic
 - **Claimed**: 2026-08-01T18:02:35Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] gdb-capability-snapshot-20260801
+- **Session**: `Codex-job-cycle-break`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/proc/process.h,kernel/diag/gdb_monitor_read.cpp`
+- **Description**: Expose bounded no-wait effective capability snapshot for stop-loop diagnostics without direct Process authority access
+- **Claimed**: 2026-08-01T18:28:04Z
+- **Status**: IN PROGRESS
