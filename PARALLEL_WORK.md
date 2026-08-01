@@ -2443,13 +2443,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T14:43:31Z
 - **Status**: COMPLETED @ 2026-08-01T14:53:06Z
 
-### [ACTIVE] cancellable-waits-format-followup-20260801
+### [DONE] cancellable-waits-format-followup-20260801
 - **Session**: `Nathan-775`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/sched/sched.h,tools/test/test-cancellable-wait-contract.py`
 - **Description**: cancellable-wait-header-and-contract-format
 - **Claimed**: 2026-08-01T14:45:23Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T14:53:08Z
 
 ### [DONE] pidfd-runtime-contract-refresh-20260801
 - **Session**: `Nathan-1721`
