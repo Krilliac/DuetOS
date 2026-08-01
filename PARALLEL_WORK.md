@@ -2539,13 +2539,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T15:04:58Z
 - **Status**: COMPLETED @ 2026-08-01T15:11:59Z
 
-### [ACTIVE] service-scheduler-publication-doc-20260801
+### [DONE] service-scheduler-publication-doc-20260801
 - **Session**: `Nathan-376`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/core/service.h`
 - **Description**: document-scheduler-atomic-first-task-publication
 - **Claimed**: 2026-08-01T15:05:58Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T15:26:12Z
 
 ### [DONE] dbg-scan-coherence-20260801
 - **Session**: `Codex-dbg-scan-coherence-20260801`
