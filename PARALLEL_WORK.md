@@ -2442,3 +2442,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: No description provided
 - **Claimed**: 2026-08-01T14:43:31Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] cancellable-waits-format-followup-20260801
+- **Session**: `Nathan-775`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/sched/sched.h,tools/test/test-cancellable-wait-contract.py`
+- **Description**: cancellable-wait-header-and-contract-format
+- **Claimed**: 2026-08-01T14:45:23Z
+- **Status**: IN PROGRESS
