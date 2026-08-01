@@ -2186,3 +2186,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: No description provided
 - **Claimed**: 2026-08-01T13:16:22Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] process-handle-generation-impl-20260801
+- **Session**: `Nathan-1647`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/proc/process.cpp`
+- **Description**: Opaque
+- **Claimed**: 2026-08-01T13:16:40Z
+- **Status**: IN PROGRESS
