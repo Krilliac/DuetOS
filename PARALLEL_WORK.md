@@ -2050,3 +2050,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Deterministic staged ServiceManifest v1 package and hostile generator tests without boot activation
 - **Claimed**: 2026-08-01T11:16:39Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] gdb-monitor-stop-snapshots-20260801
+- **Session**: `Codex-root-gdb-monitor-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/diag/gdb_monitor.h kernel/diag/gdb_monitor.cpp kernel/diag/gdb_monitor_read.cpp kernel/sched/sched.h kernel/sched/sched.cpp tools/test/test-gdb-monitor-stop-safety-contract.py`
+- **Description**: Bounded no-wait qRcmd snapshots and incomplete-rendezvous gating
+- **Claimed**: 2026-08-01T12:34:33Z
+- **Status**: IN PROGRESS
