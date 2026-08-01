@@ -1571,13 +1571,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T03:29:56Z
 - **Status**: COMPLETED @ 2026-08-01T04:31:49Z
 
-### [ACTIVE] smoke-profile-smp-producer
+### [DONE] smoke-profile-smp-producer
 - **Session**: `Codex-gui-task-queue`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/core/main.cpp`
 - **Description**: Move smoke profile termination after SMP and Userland phases so exact CPU verdicts are producible
 - **Claimed**: 2026-08-01T03:44:11Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T04:31:51Z
 
 ### [ACTIVE] vm-sysv-attach-transaction-20260801
 - **Session**: `Codex-process-section-audit`
