@@ -2586,3 +2586,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Classify
 - **Claimed**: 2026-08-01T15:25:10Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] linux-vm-range-transaction-20260801
+- **Session**: `Nathan-LinuxVmRange-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/mm/address_space.h,kernel/mm/address_space.cpp,kernel/subsystems/linux/syscall_mm.cpp,tools/test/test-linux-mmap-vm-receipt-contract.py`
+- **Description**: Serialize
+- **Claimed**: 2026-08-01T15:29:52Z
+- **Status**: IN PROGRESS
