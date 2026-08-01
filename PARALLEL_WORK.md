@@ -1515,10 +1515,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T00:36:35Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] ipc-channel-core-codex-20260801
+### [DONE] ipc-channel-core-codex-20260801
 - **Session**: `Nathan-1571`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/ipc/channel_core.h`
 - **Description**: No description provided
 - **Claimed**: 2026-08-01T02:53:15Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T02:54:13Z
