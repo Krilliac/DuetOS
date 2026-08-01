@@ -627,13 +627,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T13:58:27Z
 - **Status**: COMPLETED @ 2026-08-01T03:09:57Z
 
-### [ACTIVE] vm-process-exit-drain
+### [DONE] vm-process-exit-drain
 - **Session**: `Nathan-221`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/sched/sched.cpp kernel/subsystems/win32/job_syscall.h`
 - **Description**: Drain owner jobs at last-task exit without releasing members under the pool lock
 - **Claimed**: 2026-07-31T14:17:02Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T03:09:59Z
 
 ### [ACTIVE] vm-process-abi
 - **Session**: `Nathan-221`
