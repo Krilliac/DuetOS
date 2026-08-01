@@ -3001,7 +3001,7 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Files**: `tests/host/CMakeLists.txt`
 - **Description**: Register hosted service exit observer test after endpoint CMake handoff
 - **Claimed**: 2026-08-01T20:43:03Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T20:48:47Z
 
 ### [ACTIVE] service-handle-table-host-atomic-20260801
 - **Session**: `Nathan-2`
