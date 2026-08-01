@@ -1842,3 +1842,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Finalize audited publication ordering and deterministic SMP selftest
 - **Claimed**: 2026-08-01T07:04:02Z
 - **Status**: COMPLETED @ 2026-08-01T07:04:09Z
+
+### [ACTIVE] mm-user-tlb-reclaim-20260801
+- **Session**: `Nathan-584`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/mm/address_space.cpp`
+- **Description**: No description provided
+- **Claimed**: 2026-08-01T08:57:13Z
+- **Status**: IN PROGRESS
