@@ -1778,3 +1778,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Confirmed per-target TLB delivery and unmap-before-shootdown-before-frame-free ordering
 - **Claimed**: 2026-08-01T06:09:42Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] mm-tlb-confirmed-header-20260801
+- **Session**: `Codex-tlb-confirmed-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/mm/paging.h`
+- **Description**: Declare confirmed kernel-range peer TLB invalidation barrier
+- **Claimed**: 2026-08-01T06:11:49Z
+- **Status**: IN PROGRESS
