@@ -1762,3 +1762,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Attempt-specific trampoline readiness publication
 - **Claimed**: 2026-08-01T05:54:09Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] smp-ap-handshake-test-20260801
+- **Session**: `Codex-smp-ap-handshake-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tools/test/test-smp-ap-handshake.py`
+- **Description**: Deterministic generation-slot handshake and source-layout regression
+- **Claimed**: 2026-08-01T06:08:52Z
+- **Status**: IN PROGRESS
