@@ -2299,13 +2299,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T13:59:17Z
 - **Status**: COMPLETED @ 2026-08-01T14:19:58Z
 
-### [ACTIVE] address-space-region-sync-test-20260801
+### [DONE] address-space-region-sync-test-20260801
 - **Session**: `Nathan-1969`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/test/test-address-space-region-sync-contract.py`
 - **Description**: hostile-structural-region-table-contract
 - **Claimed**: 2026-08-01T13:59:19Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T14:20:02Z
 
 ### [ACTIVE] linux-fd-post-close-commit-20260801
 - **Session**: `Codex-linux-fd-post-close-commit`
