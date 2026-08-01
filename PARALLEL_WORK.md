@@ -1691,13 +1691,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T04:53:58Z
 - **Status**: COMPLETED @ 2026-08-01T05:07:21Z
 
-### [ACTIVE] host-cmake-registry-20260801
+### [DONE] host-cmake-registry-20260801
 - **Session**: `Codex-host-cmake-registry-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tests/host/CMakeLists.txt`
 - **Description**: Register
 - **Claimed**: 2026-08-01T04:54:20Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T05:10:18Z
 
 ### [DONE] Codex-boot-order-crash-main
 - **Session**: `Nathan-1764`
