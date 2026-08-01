@@ -2898,3 +2898,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Unpublished exact handle reservation publish abort and drain transaction
 - **Claimed**: 2026-08-01T19:43:55Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] linux-child-wait-cancel-status-20260801
+- **Session**: `Codex-UserWaitCancellation-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/subsystems/linux/syscall_stub.cpp`
+- **Description**: Propagate
+- **Claimed**: 2026-08-01T19:44:20Z
+- **Status**: IN PROGRESS
