@@ -1795,13 +1795,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T06:13:47Z
 - **Status**: COMPLETED @ 2026-08-01T06:27:13Z
 
-### [ACTIVE] smp-ap-docs-ci-20260801
+### [DONE] smp-ap-docs-ci-20260801
 - **Session**: `Codex-smp-docs-ci-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/arch/x86_64/smp.h`
 - **Description**: No description provided
 - **Claimed**: 2026-08-01T06:24:21Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T06:29:40Z
 
 ### [ACTIVE] smp-ap-docs-ci-shared-20260801
 - **Session**: `Codex-smp-docs-ci-20260801`
