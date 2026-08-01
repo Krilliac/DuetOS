@@ -2074,3 +2074,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Generation-safe bounded GDB NMI rendezvous
 - **Claimed**: 2026-08-01T12:36:06Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] gdb-stop-rendezvous-server-20260801
+- **Session**: `Nathan-381`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/diag/gdb_server.cpp`
+- **Description**: Wait for rendezvous and gate peer register writes
+- **Claimed**: 2026-08-01T12:36:07Z
+- **Status**: IN PROGRESS
