@@ -1546,3 +1546,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Deterministic reservation-exhaustion and close-during-copy host coverage
 - **Claimed**: 2026-08-01T03:07:43Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] vm-exec-reaper-transaction-20260801
+- **Session**: `Codex-vm-exec-reaper-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/sched/sched.cpp kernel/sched/sched.h kernel/syscall/syscall.cpp kernel/proc/process.cpp kernel/proc/process.h`
+- **Description**: Serialize exec with dead-task stack drain and reject live borrowed mappings
+- **Claimed**: 2026-08-01T03:19:44Z
+- **Status**: IN PROGRESS
