@@ -2699,10 +2699,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T16:17:20Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] linux-signal-pending-sync-test-20260801
+### [DONE] linux-signal-pending-sync-test-20260801
 - **Session**: `Codex-linux-signal-pending-sync`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/test/test-linux-timer-signalfd-receipt-contract.py`
 - **Description**: Update retained async readiness contract for centralized atomic pending-signal accessor
 - **Claimed**: 2026-08-01T16:18:29Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T16:28:11Z
