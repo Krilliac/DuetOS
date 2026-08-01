@@ -1019,13 +1019,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T19:40:18Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] boot-truth-faq
+### [DONE] boot-truth-faq
 - **Session**: `Codex-gui-task-queue`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `wiki/getting-started/FAQ.md`
 - **Description**: Remove the remaining newcomer-facing claim that conflates GRUB and the experimental direct UEFI loader
 - **Claimed**: 2026-07-31T19:43:36Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T04:31:35Z
 
 ### [ACTIVE] boot-installer-truth
 - **Session**: `Codex-gui-task-queue`
