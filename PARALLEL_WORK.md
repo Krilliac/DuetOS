@@ -1522,3 +1522,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: No description provided
 - **Claimed**: 2026-08-01T02:53:15Z
 - **Status**: COMPLETED @ 2026-08-01T02:54:13Z
+
+### [ACTIVE] ipc-channel-core-codex-20260801-exact
+- **Session**: `Codex-channel-core-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/ipc/channel_core.h kernel/ipc/channel_core.cpp tests/host/test_channel_core.cpp`
+- **Description**: Internal generation-safe paired channel owner primitive
+- **Claimed**: 2026-08-01T02:54:16Z
+- **Status**: IN PROGRESS
