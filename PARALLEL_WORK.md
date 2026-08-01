@@ -2635,13 +2635,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T15:46:05Z
 - **Status**: COMPLETED @ 2026-08-01T15:54:09Z
 
-### [ACTIVE] linux-epoll-exact-identity-contract-20260801
+### [DONE] linux-epoll-exact-identity-contract-20260801
 - **Session**: `Codex-linux-timerfd-signalfd-receipts`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/test/test-epoll-fd-identity-contract.py`
 - **Description**: Update epoll structural contract for helper-encapsulated exact KFile/OFD identity matching
 - **Claimed**: 2026-08-01T15:48:36Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T15:54:15Z
 
 ### [DONE] loader-image-patch-rollback-doc-20260801
 - **Session**: `Nathan-1678`
