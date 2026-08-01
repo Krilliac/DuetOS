@@ -2234,3 +2234,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Register
 - **Claimed**: 2026-08-01T13:24:57Z
 - **Status**: COMPLETED @ 2026-08-01T13:25:28Z
+
+### [ACTIVE] linux-fd-async-pools-20260801
+- **Session**: `Nathan-1384`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/subsystems/linux/fanotify.cpp`
+- **Description**: No description provided
+- **Claimed**: 2026-08-01T13:26:33Z
+- **Status**: IN PROGRESS
