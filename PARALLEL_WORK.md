@@ -2619,13 +2619,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T15:41:33Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] linux-async-ready-doc-20260801
+### [DONE] linux-async-ready-doc-20260801
 - **Session**: `Codex-linux-timerfd-signalfd-receipts`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/subsystems/linux/syscall_async_io.h`
 - **Description**: Synchronize retained readiness and signalfd behavior contract comments
 - **Claimed**: 2026-08-01T15:44:15Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T15:54:00Z
 
 ### [ACTIVE] linux-signalfd-poll-owner-20260801
 - **Session**: `Codex-linux-timerfd-signalfd-receipts`
