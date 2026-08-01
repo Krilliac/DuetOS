@@ -1698,3 +1698,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Register
 - **Claimed**: 2026-08-01T04:54:20Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] Codex-boot-order-crash-main
+- **Session**: `Nathan-1764`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/main.cpp`
+- **Description**: Launch managed user services only after the Userland phase completes
+- **Claimed**: 2026-08-01T04:56:32Z
+- **Status**: IN PROGRESS
