@@ -2154,3 +2154,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Align
 - **Claimed**: 2026-08-01T13:06:15Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] gdb-percpu-generation-init-20260801
+- **Session**: `Codex-root-gdb-percpu-init`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/cpu/percpu.cpp`
+- **Description**: Initialize generation-based GDB freeze fields after rendezvous migration
+- **Claimed**: 2026-08-01T13:08:49Z
+- **Status**: IN PROGRESS
