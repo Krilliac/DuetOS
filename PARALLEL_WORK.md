@@ -2099,10 +2099,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T12:37:44Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] gdb-monitor-atomic-controls-20260801
+### [DONE] gdb-monitor-atomic-controls-20260801
 - **Session**: `Codex-root-gdb-monitor-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/debug/probes.cpp kernel/diag/kdbg.cpp`
 - **Description**: Atomic qRcmd control state safe across NMI stop/resume
 - **Claimed**: 2026-08-01T12:48:59Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T12:52:39Z
