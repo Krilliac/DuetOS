@@ -3066,3 +3066,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Wire
 - **Claimed**: 2026-08-01T21:15:21Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-runtime-owner-build-20260801
+- **Session**: `Codex-ServiceRuntimeBuild-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/CMakeLists.txt`
+- **Description**: Register static service runtime owner in production kernel source graph
+- **Claimed**: 2026-08-01T21:18:53Z
+- **Status**: IN PROGRESS
