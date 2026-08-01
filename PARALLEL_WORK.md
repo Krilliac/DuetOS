@@ -3011,7 +3011,7 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T20:44:37Z
 - **Status**: COMPLETED @ 2026-08-01T20:50:47Z
 
-### [ACTIVE] service-exit-observer-integration-20260801
+### [DONE] service-exit-observer-integration-20260801
 - **Session**: `Nathan-937`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/core/service_bootstrap_activation.h,kernel/core/service_bootstrap_activation.cpp,kernel/proc/process.cpp,tests/host/test_service_bootstrap_activation.cpp,tools/test/test-service-bootstrap-activation-contract.py`
@@ -3025,7 +3025,7 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Files**: `kernel/subsystems/linux/msg_queues.cpp,kernel/subsystems/linux/sysv_ipc.cpp,kernel/subsystems/linux/syscall_internal.h,tools/test/test-linux-sysv-ipc-id-generation-contract.py`
 - **Description**: Generation-bearing stale-safe positive Linux SysV message semaphore and shared-memory identifiers with hostile reuse and saturation contracts
 - **Claimed**: 2026-08-01T20:53:44Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T21:12:26Z
 
 ### [ACTIVE] service-exit-observer-activation-build-20260801
 - **Session**: `Nathan-1710`
