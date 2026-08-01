@@ -2211,13 +2211,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T13:17:09Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] handle-band-helper-dispatch-20260801
+### [DONE] handle-band-helper-dispatch-20260801
 - **Session**: `Nathan-884`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/test/check-handle-bands.py`
 - **Description**: Recognize
 - **Claimed**: 2026-08-01T13:24:20Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T13:33:04Z
 
 ### [DONE] process-handle-generation-user-classifier-20260801
 - **Session**: `Nathan-1433`
