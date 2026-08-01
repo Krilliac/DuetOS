@@ -3115,13 +3115,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T21:37:45Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] service-bootstrap-live-20260801
+### [DONE] service-bootstrap-live-20260801
 - **Session**: `Nathan-161`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/core/service_bootstrap_live.h,kernel/core/service_bootstrap_live.cpp,kernel/core/boot_bringup.cpp,tools/test/test-service-bootstrap-live-contract.py`
 - **Description**: Wire fixed-capacity generated service staging and runtime owner into boot without activating services
 - **Claimed**: 2026-08-01T21:42:44Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T22:14:40Z
 
 ### [DONE] service-directory-close-adapter-20260801
 - **Session**: `Codex-ServiceDirectoryClose-20260801`
