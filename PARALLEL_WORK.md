@@ -1690,3 +1690,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Deliver detached request cleanup exactly once outside locks across busy and batch close paths
 - **Claimed**: 2026-08-01T04:53:58Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] host-cmake-registry-20260801
+- **Session**: `Codex-host-cmake-registry-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tests/host/CMakeLists.txt`
+- **Description**: Register
+- **Claimed**: 2026-08-01T04:54:20Z
+- **Status**: IN PROGRESS
