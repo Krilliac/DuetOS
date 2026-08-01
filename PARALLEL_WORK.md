@@ -2714,3 +2714,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Replace
 - **Claimed**: 2026-08-01T16:33:23Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] job-member-completion-contract-20260801
+- **Session**: `Codex-job-cycle-break`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tools/test/test-job-member-completion-contract.py`
+- **Description**: Enforce
+- **Claimed**: 2026-08-01T16:43:28Z
+- **Status**: IN PROGRESS
