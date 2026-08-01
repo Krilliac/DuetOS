@@ -2067,13 +2067,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T12:35:33Z
 - **Status**: COMPLETED @ 2026-08-01T12:52:29Z
 
-### [ACTIVE] gdb-stop-rendezvous-arch-20260801
+### [DONE] gdb-stop-rendezvous-arch-20260801
 - **Session**: `Nathan-475`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/arch/x86_64/smp.h kernel/arch/x86_64/smp.cpp kernel/arch/x86_64/traps.cpp`
 - **Description**: Generation-safe bounded GDB NMI rendezvous
 - **Claimed**: 2026-08-01T12:36:06Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T12:52:32Z
 
 ### [ACTIVE] gdb-stop-rendezvous-server-20260801
 - **Session**: `Nathan-381`
