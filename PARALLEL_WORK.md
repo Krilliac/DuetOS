@@ -2691,13 +2691,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T16:13:22Z
 - **Status**: COMPLETED @ 2026-08-01T16:28:20Z
 
-### [ACTIVE] service-artifact-pipeline-20260801
+### [DONE] service-artifact-pipeline-20260801
 - **Session**: `Nathan-1353`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/CMakeLists.txt,tools/build/gen-service-manifest.py,tools/test/test-gen-service-manifest.py,userland/native-apps/serviced/serviced.c,userland/native-apps/execd/execd.c,userland/native-apps/displayd/displayd.c,userland/native-apps/registryd/registryd.c`
 - **Description**: Deterministic freestanding service artifacts and bounded build-tree manifest/package binding with activation disabled
 - **Claimed**: 2026-08-01T16:17:20Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T16:51:13Z
 
 ### [DONE] linux-signal-pending-sync-test-20260801
 - **Session**: `Codex-linux-signal-pending-sync`
