@@ -2187,13 +2187,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T13:16:22Z
 - **Status**: COMPLETED @ 2026-08-01T13:17:06Z
 
-### [ACTIVE] process-handle-generation-impl-20260801
+### [DONE] process-handle-generation-impl-20260801
 - **Session**: `Nathan-1647`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/proc/process.cpp`
 - **Description**: Opaque
 - **Claimed**: 2026-08-01T13:16:40Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T13:32:55Z
 
 ### [ACTIVE] process-handle-generation-test-20260801
 - **Session**: `Nathan-65`
