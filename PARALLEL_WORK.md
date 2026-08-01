@@ -3010,3 +3010,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Add
 - **Claimed**: 2026-08-01T20:44:37Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-exit-observer-integration-20260801
+- **Session**: `Nathan-937`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/service_bootstrap_activation.h,kernel/core/service_bootstrap_activation.cpp,kernel/proc/process.cpp,tests/host/test_service_bootstrap_activation.cpp,tools/test/test-service-bootstrap-activation-contract.py`
+- **Description**: Integrate exact service exit observer reservation binding rollback and post-Exited publication without runnable-before-registration races
+- **Claimed**: 2026-08-01T20:50:06Z
+- **Status**: IN PROGRESS
