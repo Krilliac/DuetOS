@@ -1906,3 +1906,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Focused confirmed user TLB reclaim structural coverage
 - **Claimed**: 2026-08-01T08:57:43Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] adaptive-mutex-boot-doc-20260801
+- **Session**: `Nathan-1182`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/boot_bringup.cpp`
+- **Description**: synchronize_adaptive_mutex_boot_selftest_comment
+- **Claimed**: 2026-08-01T08:57:57Z
+- **Status**: IN PROGRESS
