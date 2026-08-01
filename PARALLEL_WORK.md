@@ -2578,3 +2578,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Make
 - **Claimed**: 2026-08-01T15:24:47Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] loader-image-patch-vm-receipts-20260801
+- **Session**: `Nathan-1959`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/loader/image_patch.h,kernel/loader/dll_loader.cpp,tools/test/test-loader-image-patch-vm-receipt-contract.py`
+- **Description**: Classify
+- **Claimed**: 2026-08-01T15:25:10Z
+- **Status**: IN PROGRESS
