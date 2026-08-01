@@ -1738,3 +1738,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Narrow panic forbidden signatures to real terminal sentinels and add benign classifier regression
 - **Claimed**: 2026-08-01T05:23:16Z
 - **Status**: COMPLETED @ 2026-08-01T05:27:15Z
+
+### [ACTIVE] strict-crash-banner-verifier-20260801
+- **Session**: `Nathan-990`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tools/test/verify-boot-verdict.py tools/test/test-verify-boot-verdict.py`
+- **Description**: Match actual DuetOS crash dump sentinel and accept benign minidump reservation prose
+- **Claimed**: 2026-08-01T05:38:17Z
+- **Status**: IN PROGRESS
