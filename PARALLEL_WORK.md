@@ -2410,3 +2410,19 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: No description provided
 - **Claimed**: 2026-08-01T14:41:50Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] vm-breakpoint-frame-access-test-20260801
+- **Session**: `Nathan-1187`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tools/test/test-breakpoint-address-space-read-contract.py`
+- **Description**: hostile-structural-frame-lifetime-contract
+- **Claimed**: 2026-08-01T14:42:09Z
+- **Status**: IN PROGRESS
+
+### [ACTIVE] vm-breakpoint-frame-access-header-20260801
+- **Session**: `Nathan-1188`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/debug/breakpoints.h`
+- **Description**: breakpoint-read-contract-doc
+- **Claimed**: 2026-08-01T14:42:09Z
+- **Status**: IN PROGRESS
