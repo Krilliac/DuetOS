@@ -2875,13 +2875,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T19:32:54Z
 - **Status**: COMPLETED @ 2026-08-01T19:41:28Z
 
-### [ACTIVE] scheduler-sleep-exit-boundary-20260801
+### [DONE] scheduler-sleep-exit-boundary-20260801
 - **Session**: `Nathan-287`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/sched/sched.h,kernel/sched/sched.cpp,tools/test/test-task-cancellation-contract.py`
 - **Description**: Close kill-before-sleep race and constrain process-backed terminal exits to cooperative boundaries
 - **Claimed**: 2026-08-01T19:42:11Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T20:07:00Z
 
 ### [ACTIVE] user-wait-cancellation-20260801
 - **Session**: `Codex-UserWaitCancellation-20260801`
