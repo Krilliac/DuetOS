@@ -2362,3 +2362,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Add result-bearing cancellable WaitQueue and Condvar primitives; truthful deferred cancellation diagnostics
 - **Claimed**: 2026-08-01T14:19:07Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] fable-ap-bootstrap-guard-20260801
+- **Session**: `Codex-root-ap-stack`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/arch/x86_64/smp.cpp kernel/mm/kstack.h tools/test/test-ap-bootstrap-stack-contract.py`
+- **Description**: Move live AP bootstrap contexts onto the guarded kernel-stack arena and retire stale scope documentation
+- **Claimed**: 2026-08-01T14:20:00Z
+- **Status**: IN PROGRESS
