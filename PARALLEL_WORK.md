@@ -1027,13 +1027,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T19:43:36Z
 - **Status**: COMPLETED @ 2026-08-01T04:31:35Z
 
-### [ACTIVE] boot-installer-truth
+### [DONE] boot-installer-truth
 - **Session**: `Codex-gui-task-queue`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/shell/shell_storage.cpp kernel/fs/installer.cpp kernel/fs/installer.h`
 - **Description**: Make installer output and comments state that embedded direct UEFI bytes are layout preparation, not a bootable installation
 - **Claimed**: 2026-07-31T19:44:43Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T04:31:37Z
 
 ### [DONE] ipc-versioned-payload
 - **Session**: `Codex-ipc-message-abi`
