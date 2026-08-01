@@ -2794,3 +2794,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Centralize validated normal node reads while preserving bounded raw fsck diagnostics
 - **Claimed**: 2026-08-01T17:52:28Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] cancellation-smp-runtime-oracle-20260801
+- **Session**: `Codex-cancellation-smp-oracle`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/test/cancellation_smp_oracle.h,kernel/test/cancellation_smp_oracle.cpp,kernel/test/smoke_profile.h,kernel/test/smoke_profile.cpp,tools/test/profile-boot-smoke.sh,tools/test/test-cancellation-smp-oracle-contract.py,wiki/tooling/QEMU-Smoke.md`
+- **Description**: Deterministic
+- **Claimed**: 2026-08-01T18:02:35Z
+- **Status**: IN PROGRESS
