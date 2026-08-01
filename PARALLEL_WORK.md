@@ -2058,3 +2058,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Bounded no-wait qRcmd snapshots and incomplete-rendezvous gating
 - **Claimed**: 2026-08-01T12:34:33Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] gdb-stop-rendezvous-20260801
+- **Session**: `Nathan-1693`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/cpu/percpu.h`
+- **Description**: No description provided
+- **Claimed**: 2026-08-01T12:35:33Z
+- **Status**: IN PROGRESS
