@@ -2851,13 +2851,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T19:06:16Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] job-ntdll-query-export-fix-20260801
+### [DONE] job-ntdll-query-export-fix-20260801
 - **Session**: `Codex-JobUserlandProof-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/build/build-ntdll-dll.sh`
 - **Description**: Remove
 - **Claimed**: 2026-08-01T19:24:39Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T19:41:16Z
 
 ### [ACTIVE] linux-pipe-wait-cancellation-20260801
 - **Session**: `Nathan-538`
