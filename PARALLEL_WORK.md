@@ -1498,3 +1498,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: No description provided
 - **Claimed**: 2026-08-01T00:14:07Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] gui-send-lockdep-registration
+- **Session**: `Codex-gui-send-service`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/sync/lockdep.cpp`
+- **Description**: Register GUI send lock classes
+- **Claimed**: 2026-08-01T00:14:23Z
+- **Status**: IN PROGRESS
