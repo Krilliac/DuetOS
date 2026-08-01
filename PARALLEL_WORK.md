@@ -2850,3 +2850,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Atomically require exact manifest dependencies Running while reserving a service start
 - **Claimed**: 2026-08-01T19:06:16Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] job-ntdll-query-export-fix-20260801
+- **Session**: `Codex-JobUserlandProof-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tools/build/build-ntdll-dll.sh`
+- **Description**: Remove
+- **Claimed**: 2026-08-01T19:24:39Z
+- **Status**: IN PROGRESS
