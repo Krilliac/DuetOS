@@ -2282,3 +2282,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: receipt-extension-hostile-contract
 - **Claimed**: 2026-08-01T13:34:42Z
 - **Status**: COMPLETED @ 2026-08-01T13:55:36Z
+
+### [ACTIVE] address-space-region-sync-20260801
+- **Session**: `Nathan-1830`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/mm/address_space.h`
+- **Description**: No description provided
+- **Claimed**: 2026-08-01T13:59:01Z
+- **Status**: IN PROGRESS
