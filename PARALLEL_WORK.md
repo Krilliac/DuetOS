@@ -2835,13 +2835,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T19:00:22Z
 - **Status**: COMPLETED @ 2026-08-01T19:41:11Z
 
-### [ACTIVE] job-userland-runtime-proof-20260801
+### [DONE] job-userland-runtime-proof-20260801
 - **Session**: `Codex-JobUserlandProof-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `userland/libs/kernel32/kernel32_sync.c,userland/apps/jobobj_smoke/*,tools/build/build-kernel32-dll.sh,tools/test/test-job-userland-ingress-contract.py,tools/test/test-job-runtime-proof-contract.py,wiki/reference/Win32-Surface-Status.md,wiki/specifications/Syscall-ABI.md,wiki/kernel/Scheduler.md`
 - **Description**: Real
 - **Claimed**: 2026-08-01T19:01:50Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T19:41:14Z
 
 ### [ACTIVE] service-lifecycle-dependency-reserve-20260801
 - **Session**: `Nathan-ServiceActivate-20260801`
