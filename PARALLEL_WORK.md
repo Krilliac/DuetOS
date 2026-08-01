@@ -2602,3 +2602,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Atomic timerfd/signalfd publication, exact retained receipt operations, and epoll strong identity comparison
 - **Claimed**: 2026-08-01T15:37:39Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-object-package-20260801
+- **Session**: `Nathan-1283`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/service_object_package.h,kernel/core/service_object_package.cpp,tests/host/test_service_object_package.cpp,tests/host/CMakeLists.txt`
+- **Description**: Immutable
+- **Claimed**: 2026-08-01T15:40:27Z
+- **Status**: IN PROGRESS
