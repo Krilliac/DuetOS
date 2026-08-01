@@ -1866,3 +1866,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: bootstrap-cancellation-boundary
 - **Claimed**: 2026-08-01T08:57:31Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] task-cancellation-linux-dispatch-20260801
+- **Session**: `Nathan-906`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/subsystems/linux/syscall.cpp`
+- **Description**: linux-dispatch-cancellation-boundary
+- **Claimed**: 2026-08-01T08:57:32Z
+- **Status**: IN PROGRESS
