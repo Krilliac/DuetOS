@@ -2682,3 +2682,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Harden
 - **Claimed**: 2026-08-01T16:07:36Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] linux-signal-pending-sync-20260801
+- **Session**: `Codex-linux-signal-pending-sync`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/proc/process.h,kernel/proc/process.cpp,kernel/subsystems/linux/syscall_sig.cpp,kernel/subsystems/linux/signal_deliver.cpp,kernel/subsystems/linux/syscall_timer.cpp,kernel/subsystems/linux/syscall_async_io.cpp,tools/test/test-linux-signal-pending-sync-contract.py`
+- **Description**: Atomic process-pending signal publication and exact claimant drain across signal, timer, handler, signalfd, and epoll paths
+- **Claimed**: 2026-08-01T16:13:22Z
+- **Status**: IN PROGRESS
