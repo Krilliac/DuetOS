@@ -1554,3 +1554,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Serialize exec with dead-task stack drain and reject live borrowed mappings
 - **Claimed**: 2026-08-01T03:19:44Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] core-service-directory-20260801
+- **Session**: `Codex-service-directory-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/service_directory.h kernel/core/service_directory.cpp tests/host/test_service_directory.cpp`
+- **Description**: Bounded generation-safe internal service directory
+- **Claimed**: 2026-08-01T03:27:54Z
+- **Status**: IN PROGRESS
