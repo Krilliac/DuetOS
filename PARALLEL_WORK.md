@@ -2091,7 +2091,7 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T12:36:09Z
 - **Status**: COMPLETED @ 2026-08-01T12:52:36Z
 
-### [ACTIVE] linux-fd-transaction-core
+### [DONE] linux-fd-transaction-core
 - **Session**: `Codex-linux-fd-transaction-core`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/proc/process.h kernel/proc/process.cpp kernel/ipc/handle_table.h kernel/ipc/handle_table.cpp tools/test/test-linux-fd-transaction-contract.py`
@@ -2155,10 +2155,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T13:06:15Z
 - **Status**: COMPLETED @ 2026-08-01T13:10:46Z
 
-### [ACTIVE] gdb-percpu-generation-init-20260801
+### [DONE] gdb-percpu-generation-init-20260801
 - **Session**: `Codex-root-gdb-percpu-init`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/cpu/percpu.cpp`
 - **Description**: Initialize generation-based GDB freeze fields after rendezvous migration
 - **Claimed**: 2026-08-01T13:08:49Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T13:12:26Z
