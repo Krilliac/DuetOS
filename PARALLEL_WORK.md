@@ -3026,3 +3026,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Generation-bearing stale-safe positive Linux SysV message semaphore and shared-memory identifiers with hostile reuse and saturation contracts
 - **Claimed**: 2026-08-01T20:53:44Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-exit-observer-activation-build-20260801
+- **Session**: `Nathan-1710`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tests/host/CMakeLists.txt`
+- **Description**: Link
+- **Claimed**: 2026-08-01T21:03:49Z
+- **Status**: IN PROGRESS
