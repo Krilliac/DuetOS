@@ -3098,3 +3098,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Private fixed-layout storage for opaque serviced supervisor object
 - **Claimed**: 2026-08-01T21:34:41Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-runtime-owner-doc-20260801
+- **Session**: `Codex-ServiceRuntimeDoc-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `wiki/kernel/Service-Bootstrap.md`
+- **Description**: Document static runtime ownership, exact identity inspection, and live-boot boundary
+- **Claimed**: 2026-08-01T21:36:03Z
+- **Status**: IN PROGRESS
