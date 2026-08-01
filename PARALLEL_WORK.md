@@ -1467,13 +1467,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T23:18:57Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] service-lifecycle-lockdep
+### [DONE] service-lifecycle-lockdep
 - **Session**: `Nathan-1167`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/sync/lockdep.h kernel/sync/lockdep.cpp`
 - **Description**: Register scheduler-to-service lifecycle broker lock ordering
 - **Claimed**: 2026-07-31T23:21:50Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T00:07:46Z
 
 ### [DONE] rust-ffi-signature-parity
 - **Session**: `Nathan-1196`
