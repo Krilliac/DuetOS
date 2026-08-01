@@ -1643,13 +1643,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T04:36:19Z
 - **Status**: COMPLETED @ 2026-08-01T04:50:19Z
 
-### [ACTIVE] Codex-boot-order-crash
+### [DONE] Codex-boot-order-crash
 - **Session**: `Nathan-1516`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/core/boot_bringup.cpp tools/test/test-service-boot-order.py`
 - **Description**: Move user service launch behind scheduler initialization and guard boot source ordering
 - **Claimed**: 2026-08-01T04:43:11Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T05:04:25Z
 
 ### [DONE] authorization-context-audit-20260801
 - **Session**: `Nathan-1525`
