@@ -1875,13 +1875,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T08:57:32Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] task-cancel-contract-test-20260801
+### [DONE] task-cancel-contract-test-20260801
 - **Session**: `Nathan-1315`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/test/test-task-cancellation-contract.py`
 - **Description**: Structural regression guard for cooperative task cancellation boundaries
 - **Claimed**: 2026-08-01T08:57:35Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T09:07:12Z
 
 ### [DONE] adaptive-mutex-docs-20260801
 - **Session**: `Nathan-1299`
