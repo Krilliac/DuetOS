@@ -2971,13 +2971,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T20:14:03Z
 - **Status**: COMPLETED @ 2026-08-01T20:47:34Z
 
-### [ACTIVE] linux-signal-wait-sequence-20260801
+### [DONE] linux-signal-wait-sequence-20260801
 - **Session**: `Codex-LinuxNotifyAioCancel-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/proc/process.h,kernel/proc/process.cpp`
 - **Description**: Persistent saturating signal event sequence for ABA-safe signalfd cancellation waits
 - **Claimed**: 2026-08-01T20:18:35Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T20:47:47Z
 
 ### [ACTIVE] linux-fd-async-pools-wait-contract-20260801
 - **Session**: `Nathan-828`
