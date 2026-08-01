@@ -2666,3 +2666,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Close
 - **Claimed**: 2026-08-01T16:03:16Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] rust-ingress-hardening-20260801
+- **Session**: `Nathan-1547`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `cmake/DuetOSRust.cmake,kernel/rust/CMakeLists.txt,tools/test/check-rust-ffi.py,tools/test/check-rust-ffi-signatures.py,tools/test/test-rust-ffi-signatures.py,kernel/fs/duetfs/src/ffi.rs,kernel/fs/duetfs/src/crypto.rs,kernel/fs/duetfs/src/compress.rs,kernel/fs/duetfs/include/duetfs.h,tools/test/test-rust-ingress-hardening-contract.py`
+- **Description**: Audit
+- **Claimed**: 2026-08-01T16:05:47Z
+- **Status**: IN PROGRESS
