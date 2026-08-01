@@ -3043,7 +3043,7 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T21:05:53Z
 - **Status**: COMPLETED @ 2026-08-01T21:18:06Z
 
-### [ACTIVE] service-runtime-owner-20260801
+### [DONE] service-runtime-owner-20260801
 - **Session**: `Nathan-1400`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/core/service_runtime.h,kernel/core/service_runtime.cpp,tools/test/test-service-runtime-owner-contract.py`
@@ -3105,7 +3105,7 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Files**: `wiki/kernel/Service-Bootstrap.md`
 - **Description**: Document static runtime ownership, exact identity inspection, and live-boot boundary
 - **Claimed**: 2026-08-01T21:36:03Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T22:58:27Z
 
 ### [DONE] serviced-supervisor-policy-20260801
 - **Session**: `Codex-ServicedSupervisor-20260801`
