@@ -3131,13 +3131,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T21:44:58Z
 - **Status**: COMPLETED @ 2026-08-01T22:09:34Z
 
-### [ACTIVE] serviced-supervisor-policy-split-20260801
+### [DONE] serviced-supervisor-policy-split-20260801
 - **Session**: `Codex-ServicedSupervisor-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `userland/native-apps/serviced/supervisor_reconcile.c userland/native-apps/serviced/supervisor_event.c userland/native-apps/serviced/supervisor_command.c`
 - **Description**: Split serviced reconciliation ordered-event and command-dedup policy TUs
 - **Claimed**: 2026-08-01T21:47:45Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T22:22:31Z
 
 ### [DONE] service-bootstrap-live-build-20260801
 - **Session**: `Nathan-944`
