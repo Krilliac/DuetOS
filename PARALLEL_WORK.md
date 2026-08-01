@@ -1858,3 +1858,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: No description provided
 - **Claimed**: 2026-08-01T08:57:19Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] task-cancellation-usermode-20260801
+- **Session**: `Nathan-1721`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/arch/x86_64/usermode.S`
+- **Description**: bootstrap-cancellation-boundary
+- **Claimed**: 2026-08-01T08:57:31Z
+- **Status**: IN PROGRESS
