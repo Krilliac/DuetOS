@@ -2043,13 +2043,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T10:35:06Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] boot-manifest-package-20260801
+### [DONE] boot-manifest-package-20260801
 - **Session**: `Codex-boot-manifest-package`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `config/services.toml tools/build/gen-service-manifest.py kernel/core/boot_service_manifest_data.h tools/test/test-gen-service-manifest.py`
 - **Description**: Deterministic staged ServiceManifest v1 package and hostile generator tests without boot activation
 - **Claimed**: 2026-08-01T11:16:39Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T16:12:51Z
 
 ### [DONE] gdb-monitor-stop-snapshots-20260801
 - **Session**: `Codex-root-gdb-monitor-20260801`
