@@ -1939,13 +1939,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T09:04:05Z
 - **Status**: COMPLETED @ 2026-08-01T09:07:42Z
 
-### [ACTIVE] hardening-ci-registration-20260801
+### [DONE] hardening-ci-registration-20260801
 - **Session**: `Nathan-739`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `.github/workflows/build.yml`
 - **Description**: Register task cancellation and user TLB reclaim structural tests
 - **Claimed**: 2026-08-01T09:16:33Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T09:20:37Z
 
 ### [ACTIVE] hardening-roadmap-sync-20260801
 - **Session**: `Nathan-205`
