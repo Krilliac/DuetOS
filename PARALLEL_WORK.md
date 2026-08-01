@@ -2427,13 +2427,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T14:42:09Z
 - **Status**: COMPLETED @ 2026-08-01T14:48:10Z
 
-### [ACTIVE] linux-fd-inherit-legacy-contract-20260801
+### [DONE] linux-fd-inherit-legacy-contract-20260801
 - **Session**: `Codex-linux-fd-inherit-legacy-contract-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/test/test-linux-fd-transaction-contract.py`
 - **Description**: Update legacy fd transaction contract for result-bearing atomic inheritance
 - **Claimed**: 2026-08-01T14:42:29Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T14:49:07Z
 
 ### [ACTIVE] cancellable-waits-held-contract-followup-20260801
 - **Session**: `Nathan-955`
