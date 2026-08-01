@@ -2514,3 +2514,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Synchronize Linux CWD internal documentation with process snapshot replacement API
 - **Claimed**: 2026-08-01T15:00:39Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] linux-mmap-vm-receipts-test-20260801
+- **Session**: `Nathan-319`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tools/test/test-linux-mmap-vm-receipt-contract.py`
+- **Description**: mmap-and-mremap-hostile-structural-contract
+- **Claimed**: 2026-08-01T15:00:52Z
+- **Status**: IN PROGRESS
