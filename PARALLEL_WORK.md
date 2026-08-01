@@ -2458,3 +2458,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: refresh-pidfd-runtime-order-for-transactional-export
 - **Claimed**: 2026-08-01T14:48:14Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] linux-cwd-sync-20260801
+- **Session**: `Codex-linux-cwd-sync-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/proc/process.h,kernel/proc/process.cpp,tools/test/test-linux-cwd-sync-contract.py`
+- **Description**: Process-owned synchronized Linux cwd snapshot and replacement contract
+- **Claimed**: 2026-08-01T14:50:20Z
+- **Status**: IN PROGRESS
