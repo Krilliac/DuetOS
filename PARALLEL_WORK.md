@@ -2994,3 +2994,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Fixed-capacity publication-reserved exact ProcessKey service-exit event queue with dequeue acknowledgement
 - **Claimed**: 2026-08-01T20:34:10Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-exit-observer-build-20260801
+- **Session**: `Codex-ServiceExitObserverBuild-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tests/host/CMakeLists.txt`
+- **Description**: Register hosted service exit observer test after endpoint CMake handoff
+- **Claimed**: 2026-08-01T20:43:03Z
+- **Status**: IN PROGRESS
