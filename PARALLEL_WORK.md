@@ -1835,10 +1835,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T06:41:50Z
 - **Status**: COMPLETED @ 2026-08-01T07:01:21Z
 
-### [ACTIVE] adaptive-mutex-lifetime-auditfix-20260801
+### [DONE] adaptive-mutex-lifetime-auditfix-20260801
 - **Session**: `Nathan-1460`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/sync/adaptive_mutex.cpp kernel/sync/adaptive_mutex.h`
 - **Description**: Finalize audited publication ordering and deterministic SMP selftest
 - **Claimed**: 2026-08-01T07:04:02Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T07:04:09Z
