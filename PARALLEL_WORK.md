@@ -2555,13 +2555,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T15:08:54Z
 - **Status**: COMPLETED @ 2026-08-01T15:16:05Z
 
-### [ACTIVE] process-key-publication-gate-20260801
+### [DONE] process-key-publication-gate-20260801
 - **Session**: `Nathan-ProcessKey-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/proc/process.h,kernel/proc/process.cpp`
 - **Description**: Non-wrapping
 - **Claimed**: 2026-08-01T15:12:47Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T15:26:04Z
 
 ### [ACTIVE] win32-thread-tls-vm-receipts-20260801
 - **Session**: `Nathan-1548`
