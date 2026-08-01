@@ -3050,3 +3050,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Static
 - **Claimed**: 2026-08-01T21:06:00Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-endpoint-publication-doc-20260801
+- **Session**: `Nathan-539`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `wiki/kernel/Service-Bootstrap.md`
+- **Description**: Document
+- **Claimed**: 2026-08-01T21:09:51Z
+- **Status**: IN PROGRESS
