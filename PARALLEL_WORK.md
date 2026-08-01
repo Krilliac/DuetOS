@@ -3042,3 +3042,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Synchronize prior SysV wait contract with generation-bearing exact public IDs without weakening cancellation semantics
 - **Claimed**: 2026-08-01T21:05:53Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-runtime-owner-20260801
+- **Session**: `Nathan-1400`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/service_runtime.h,kernel/core/service_runtime.cpp,tools/test/test-service-runtime-owner-contract.py`
+- **Description**: Static
+- **Claimed**: 2026-08-01T21:06:00Z
+- **Status**: IN PROGRESS
