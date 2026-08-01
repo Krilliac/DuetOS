@@ -1922,3 +1922,19 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: No description provided
 - **Claimed**: 2026-08-01T09:03:46Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] exit-helper-unwind-sig-20260801
+- **Session**: `Codex-exit-helper-unwind`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/subsystems/linux/syscall_sig.cpp`
+- **Description**: No description provided
+- **Claimed**: 2026-08-01T09:04:05Z
+- **Status**: IN PROGRESS
+
+### [ACTIVE] exit-helper-unwind-fiber-20260801
+- **Session**: `Codex-exit-helper-unwind`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/subsystems/win32/fiber_syscall.cpp`
+- **Description**: No description provided
+- **Claimed**: 2026-08-01T09:04:05Z
+- **Status**: IN PROGRESS
