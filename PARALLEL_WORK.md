@@ -1115,13 +1115,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T20:10:15Z
 - **Status**: COMPLETED @ 2026-07-31T20:35:21Z
 
-### [ACTIVE] resource-domain-host-properties
+### [DONE] resource-domain-host-properties
 - **Session**: `Codex-resource-domain`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tests/host/test_resource_domain.cpp`
 - **Description**: Host ownership quota generation and concurrent charge-release properties for ResourceDomain
 - **Claimed**: 2026-07-31T20:18:14Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T03:01:32Z
 
 ### [ACTIVE] load-image-staging
 - **Session**: `Nathan-1074`
