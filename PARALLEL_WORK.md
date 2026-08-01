@@ -3178,3 +3178,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Fixed-capacity authenticated generation-safe execd request worker engine with cancellation reply commit peer close and drain
 - **Claimed**: 2026-08-01T22:30:59Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] registryd-store-split-20260801
+- **Session**: `Nathan-1463`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `userland/native-apps/registryd/registry_store_internal.h,userland/native-apps/registryd/registry_validate.c,userland/native-apps/registryd/registry_recovery.c`
+- **Description**: Split registryd canonical validation and recovery codecs below bloat thresholds
+- **Claimed**: 2026-08-01T22:50:16Z
+- **Status**: IN PROGRESS
