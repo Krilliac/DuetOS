@@ -2810,3 +2810,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Expose bounded no-wait effective capability snapshot for stop-loop diagnostics without direct Process authority access
 - **Claimed**: 2026-08-01T18:28:04Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] gdb-capability-snapshot-contract-20260801
+- **Session**: `Codex-job-cycle-break`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tools/test/test-gdb-monitor-stop-safety-contract.py`
+- **Description**: Require capability stop-loop reader to use process-owned no-wait snapshot helper
+- **Claimed**: 2026-08-01T18:29:19Z
+- **Status**: IN PROGRESS
