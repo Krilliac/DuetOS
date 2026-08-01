@@ -1674,3 +1674,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: independent_authorization_context_audit_and_replay_watermark_hostile_coverage
 - **Claimed**: 2026-08-01T04:46:47Z
 - **Status**: COMPLETED @ 2026-08-01T04:50:02Z
+
+### [ACTIVE] service-directory-cleanup-20260801
+- **Session**: `Codex-service-cleanup-repair`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/service_directory.h`
+- **Description**: No description provided
+- **Claimed**: 2026-08-01T04:53:29Z
+- **Status**: IN PROGRESS
