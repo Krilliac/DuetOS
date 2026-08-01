@@ -1850,3 +1850,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: No description provided
 - **Claimed**: 2026-08-01T08:57:13Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] task-cancellation-boundaries-20260801
+- **Session**: `Nathan-1271`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/arch/x86_64/traps.cpp`
+- **Description**: No description provided
+- **Claimed**: 2026-08-01T08:57:19Z
+- **Status**: IN PROGRESS
