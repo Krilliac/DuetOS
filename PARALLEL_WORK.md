@@ -1627,13 +1627,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T04:33:50Z
 - **Status**: COMPLETED @ 2026-08-01T04:50:14Z
 
-### [ACTIVE] boot-verdict-integration-ci
+### [DONE] boot-verdict-integration-ci
 - **Session**: `Codex-boot-verdict-integration`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `.github/workflows/build.yml`
 - **Description**: exact_2_and_4_vcpu_machine_verdict_CI
 - **Claimed**: 2026-08-01T04:33:51Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T04:50:16Z
 
 ### [ACTIVE] boot-verdict-integration-host-test
 - **Session**: `Codex-boot-verdict-integration`
