@@ -3170,3 +3170,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Allocation-free registry store with canonical snapshot and WAL recovery
 - **Claimed**: 2026-08-01T22:18:13Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] execd-worker-engine-20260801
+- **Session**: `Nathan-1915`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `userland/native-apps/execd/worker.h,userland/native-apps/execd/worker_internal.h,userland/native-apps/execd/worker.c,userland/native-apps/execd/worker_request.c,tests/host/test_execd_worker.cpp,tools/test/test-execd-worker-contract.py`
+- **Description**: Fixed-capacity authenticated generation-safe execd request worker engine with cancellation reply commit peer close and drain
+- **Claimed**: 2026-08-01T22:30:59Z
+- **Status**: IN PROGRESS
