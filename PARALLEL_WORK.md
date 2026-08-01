@@ -2467,13 +2467,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T14:50:20Z
 - **Status**: COMPLETED @ 2026-08-01T15:04:23Z
 
-### [ACTIVE] win32-heap-vm-safety-20260801
+### [DONE] win32-heap-vm-safety-20260801
 - **Session**: `Codex-win32-heap-vm-safety`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/subsystems/win32/heap.cpp,kernel/subsystems/win32/heap.h,tools/test/test-win32-heap-vm-safety-contract.py`
 - **Description**: Serialize process heap metadata and route all heap user-memory access through locked AddressSpace copy APIs
 - **Claimed**: 2026-08-01T14:51:37Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T15:12:02Z
 
 ### [DONE] adaptive-mutex-doc-sync-20260801
 - **Session**: `Nathan-687`
