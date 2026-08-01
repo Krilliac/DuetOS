@@ -955,13 +955,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T19:14:31Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] ipc-message-abi
+### [DONE] ipc-message-abi
 - **Session**: `Codex-ipc-message-abi`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/ipc/message_abi.h`
 - **Description**: No description provided
 - **Claimed**: 2026-07-31T19:31:37Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T00:22:22Z
 
 ### [ACTIVE] ipc-message-abi-source
 - **Session**: `Codex-ipc-message-abi`
