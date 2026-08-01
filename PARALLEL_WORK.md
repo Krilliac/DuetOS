@@ -995,13 +995,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T19:37:26Z
 - **Status**: COMPLETED @ 2026-08-01T04:31:24Z
 
-### [ACTIVE] boot-truth-wiki
+### [DONE] boot-truth-wiki
 - **Session**: `Codex-gui-task-queue`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `CLAUDE.md wiki/kernel/Boot.md wiki/kernel/UEFI-Loader.md wiki/getting-started/Getting-Started.md wiki/tooling/Build-System.md wiki/tooling/Running-on-VMs.md wiki/tooling/QEMU-Smoke.md wiki/reference/Daily-Driver-Readiness.md wiki/security/Linux-CVE-Audit.md`
 - **Description**: Align maintainer and wiki boot claims with required GRUB plus Multiboot2 release contract and experimental direct UEFI status
 - **Claimed**: 2026-07-31T19:37:39Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T04:31:31Z
 
 ### [ACTIVE] boot-release-gate
 - **Session**: `Codex-gui-task-queue`
