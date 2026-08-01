@@ -1650,3 +1650,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Move user service launch behind scheduler initialization and guard boot source ordering
 - **Claimed**: 2026-08-01T04:43:11Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] authorization-context-audit-20260801
+- **Session**: `Nathan-1525`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/proc/authorization_context.h`
+- **Description**: No description provided
+- **Claimed**: 2026-08-01T04:45:20Z
+- **Status**: IN PROGRESS
