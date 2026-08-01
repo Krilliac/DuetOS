@@ -2011,13 +2011,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T10:26:53Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] task-receipt-user-callers-20260801
+### [DONE] task-receipt-user-callers-20260801
 - **Session**: `Codex-root-lifecycle-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/subsystems/win32/thread_syscall.cpp kernel/subsystems/linux/syscall_clone.cpp tests/fuzz/host_shim/net_stubs.cpp tests/fuzz/host_shim/usbnet_stubs.cpp`
 - **Description**: Migrate public Task creation callers to immutable receipts and fix fork ownership
 - **Claimed**: 2026-08-01T10:29:41Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T14:33:54Z
 
 ### [DONE] task-receipt-loadtest-20260801
 - **Session**: `Nathan-986`
