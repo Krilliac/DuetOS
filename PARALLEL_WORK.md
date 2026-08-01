@@ -2715,13 +2715,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T16:33:23Z
 - **Status**: COMPLETED @ 2026-08-01T18:59:10Z
 
-### [ACTIVE] job-member-completion-contract-20260801
+### [DONE] job-member-completion-contract-20260801
 - **Session**: `Codex-job-cycle-break`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/test/test-job-member-completion-contract.py`
 - **Description**: Enforce
 - **Claimed**: 2026-08-01T16:43:28Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T18:59:12Z
 
 ### [DONE] linux-exit-unwind-20260801
 - **Session**: `Codex-linux-exit-unwind`
