@@ -1586,3 +1586,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Serialize SysV SHM attach rows with Process VM transaction and exact borrowed-range publication
 - **Claimed**: 2026-08-01T03:44:51Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] smoke-profile-smp-order-test
+- **Session**: `Codex-gui-task-queue`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tools/test/test-smoke-profile-order.py`
+- **Description**: Semantic structural guard for target spawn SMP topology IPI Userland smoke termination ordering
+- **Claimed**: 2026-08-01T03:46:14Z
+- **Status**: IN PROGRESS
