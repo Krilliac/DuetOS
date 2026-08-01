@@ -1723,13 +1723,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T05:15:57Z
 - **Status**: COMPLETED @ 2026-08-01T05:22:04Z
 
-### [ACTIVE] channel-service-epoch-drain-20260801
+### [DONE] channel-service-epoch-drain-20260801
 - **Session**: `Codex-channel-service-epoch-repair`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/ipc/channel_core.h kernel/ipc/channel_core.cpp tests/host/test_channel_core.cpp kernel/core/service_directory.h kernel/core/service_directory.cpp tests/host/test_service_directory.cpp`
 - **Description**: Expected-epoch atomic drain gate and stale-wrapper teardown coverage
 - **Claimed**: 2026-08-01T05:16:51Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T05:25:35Z
 
 ### [ACTIVE] strict-panic-verifier-20260801
 - **Session**: `Nathan-1028`
