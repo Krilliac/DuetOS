@@ -2626,3 +2626,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Synchronize retained readiness and signalfd behavior contract comments
 - **Claimed**: 2026-08-01T15:44:15Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] linux-signalfd-poll-owner-20260801
+- **Session**: `Codex-linux-timerfd-signalfd-receipts`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/subsystems/linux/syscall_misc.cpp`
+- **Description**: Pass explicit current Process into retained fd readiness for signalfd pending-state evaluation
+- **Claimed**: 2026-08-01T15:46:05Z
+- **Status**: IN PROGRESS
