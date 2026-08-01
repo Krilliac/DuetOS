@@ -2018,3 +2018,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Migrate public Task creation callers to immutable receipts and fix fork ownership
 - **Claimed**: 2026-08-01T10:29:41Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] task-receipt-loadtest-20260801
+- **Session**: `Nathan-986`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/shell/shell_loadtest.cpp`
+- **Description**: Migrate load-test worker creation to immutable TaskCreateResult receipt
+- **Claimed**: 2026-08-01T10:31:36Z
+- **Status**: IN PROGRESS
