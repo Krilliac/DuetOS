@@ -135,6 +135,8 @@ inline constexpr LockClass kLockClassMax = 256;
 ///   1.  kLockClassSched         (scheduler runqueue / wait-queue)
 ///   1a. kLockClassServiceLifecycle (managed-service publication state)
 ///   2.  kLockClassCompositor    (UI compositor — runs from kernel task)
+///   2a. kLockClassGuiSendService (GUI send endpoint/call/wait state)
+///   2b. kLockClassGuiSendTransaction (nested GUI send transition table)
 ///   3.  kLockClassKObject       (IPC object refcount ledger)
 ///   4.  kLockClassKStack        (kernel-stack arena)
 ///   5.  kLockClassFat32         (FAT32 driver mutex)
@@ -217,6 +219,18 @@ inline constexpr LockClass kLockClassSmn = 0x0B;
 /// this briefly while already holding the scheduler lock; lifecycle code never
 /// calls back into the scheduler while holding it.
 inline constexpr LockClass kLockClassServiceLifecycle = 0x0C;
+/// Same-process synchronous GUI send service state. A compositor snapshot may
+/// be held outside this lock; the service never calls the compositor while
+/// holding it. The private transaction-table lock is the only allowed nested
+/// GUI-send lock.
+inline constexpr LockClass kLockClassGuiSendService = 0x0D;
+/// GUI send transaction transitions nested strictly inside the owning
+/// GuiSendService lock. Transaction code never calls back into its service.
+inline constexpr LockClass kLockClassGuiSendTransaction = 0x0E;
+
+static_assert(kLockClassGuiSendService != kLockClassGuiSendTransaction);
+static_assert(kLockClassGuiSendService != kLockClassUnclassified);
+static_assert(kLockClassGuiSendTransaction != kLockClassUnclassified);
 
 /// Maximum simultaneous holders per CPU. A code path that acquires
 /// more than this many locks at once trips a warning and lockdep
