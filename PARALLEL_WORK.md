@@ -2171,13 +2171,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T13:12:35Z
 - **Status**: COMPLETED @ 2026-08-01T13:13:02Z
 
-### [ACTIVE] process-handle-generation-20260801
+### [DONE] process-handle-generation-20260801
 - **Session**: `Nathan-151`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/proc/process.h`
 - **Description**: No description provided
 - **Claimed**: 2026-08-01T13:16:07Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T13:32:52Z
 
 ### [DONE] linux-fd-io-migration
 - **Session**: `Nathan-1410`
