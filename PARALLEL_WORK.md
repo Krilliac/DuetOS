@@ -2435,13 +2435,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T14:42:29Z
 - **Status**: COMPLETED @ 2026-08-01T14:49:07Z
 
-### [ACTIVE] cancellable-waits-held-contract-followup-20260801
+### [DONE] cancellable-waits-held-contract-followup-20260801
 - **Session**: `Nathan-955`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/sched/sched.cpp`
 - **Description**: No description provided
 - **Claimed**: 2026-08-01T14:43:31Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T14:53:06Z
 
 ### [ACTIVE] cancellable-waits-format-followup-20260801
 - **Session**: `Nathan-775`
