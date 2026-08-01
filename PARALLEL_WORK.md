@@ -2562,3 +2562,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Non-wrapping
 - **Claimed**: 2026-08-01T15:12:47Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] win32-thread-tls-vm-receipts-20260801
+- **Session**: `Nathan-1548`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/subsystems/win32/thread_syscall.cpp,tools/test/test-win32-thread-tls-vm-safety-contract.py`
+- **Description**: Migrate Win32 thread and TLS user-memory access to address-space lifetime-safe copy APIs
+- **Claimed**: 2026-08-01T15:17:58Z
+- **Status**: IN PROGRESS
