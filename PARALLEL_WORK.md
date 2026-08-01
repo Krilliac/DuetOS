@@ -803,13 +803,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T16:24:29Z
 - **Status**: COMPLETED @ 2026-08-01T18:58:59Z
 
-### [ACTIVE] proc-job-core-source
+### [DONE] proc-job-core-source
 - **Session**: `Codex-job-core-service`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/proc/job.cpp`
 - **Description**: No description provided
 - **Claimed**: 2026-07-31T16:24:48Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T18:59:02Z
 
 ### [ACTIVE] proc-job-win32-header
 - **Session**: `Codex-job-core-service`
