@@ -2859,13 +2859,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T19:24:39Z
 - **Status**: COMPLETED @ 2026-08-01T19:41:16Z
 
-### [ACTIVE] linux-pipe-wait-cancellation-20260801
+### [DONE] linux-pipe-wait-cancellation-20260801
 - **Session**: `Nathan-538`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/subsystems/linux/syscall_pipe.cpp tools/test/test-linux-pipe-wait-cancellation-contract.py`
 - **Description**: Cancellation-safe sequence-linearized Linux pipe eventfd splice and tee waits
 - **Claimed**: 2026-08-01T19:26:06Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T19:41:25Z
 
 ### [ACTIVE] linux-exit-code-ticket-20260801
 - **Session**: `Nathan-1332`
