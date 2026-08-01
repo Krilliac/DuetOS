@@ -2507,13 +2507,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T15:00:35Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] linux-cwd-internal-doc-20260801
+### [DONE] linux-cwd-internal-doc-20260801
 - **Session**: `Codex-linux-cwd-internal-doc-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/subsystems/linux/syscall_internal.h`
 - **Description**: Synchronize Linux CWD internal documentation with process snapshot replacement API
 - **Claimed**: 2026-08-01T15:00:39Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T15:04:48Z
 
 ### [ACTIVE] linux-mmap-vm-receipts-test-20260801
 - **Session**: `Nathan-319`
