@@ -2298,3 +2298,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: structural-region-table-read-synchronization
 - **Claimed**: 2026-08-01T13:59:17Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] address-space-region-sync-test-20260801
+- **Session**: `Nathan-1969`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tools/test/test-address-space-region-sync-contract.py`
+- **Description**: hostile-structural-region-table-contract
+- **Claimed**: 2026-08-01T13:59:19Z
+- **Status**: IN PROGRESS
