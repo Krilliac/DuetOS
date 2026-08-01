@@ -2490,3 +2490,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Reconcile remaining AdaptiveMutex comments and synchronization documentation
 - **Claimed**: 2026-08-01T14:55:46Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] linux-cwd-callers-20260801
+- **Session**: `Codex-linux-cwd-callers-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/subsystems/linux/syscall_path.cpp`
+- **Description**: Migrate chdir fchdir and getcwd to coherent process cwd snapshot replacement APIs
+- **Claimed**: 2026-08-01T14:57:24Z
+- **Status**: IN PROGRESS
