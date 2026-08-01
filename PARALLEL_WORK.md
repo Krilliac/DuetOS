@@ -2131,13 +2131,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T13:00:02Z
 - **Status**: COMPLETED @ 2026-08-01T15:37:37Z
 
-### [ACTIVE] fable-pidfd-getfd-identity-20260801
+### [DONE] fable-pidfd-getfd-identity-20260801
 - **Session**: `Fable-pidfd-getfd-identity`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/subsystems/linux/pidfd_splice.cpp tools/test/test-pidfd-strong-identity-contract.py kernel/subsystems/linux/syscall_internal.h`
 - **Description**: Migrate pidfd operations and getfd export import to strong fd receipts
 - **Claimed**: 2026-08-01T13:00:03Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T16:01:22Z
 
 ### [DONE] ci-structural-contract-registry-20260801
 - **Session**: `Nathan-1352`
