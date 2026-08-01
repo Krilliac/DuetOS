@@ -2026,3 +2026,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Migrate load-test worker creation to immutable TaskCreateResult receipt
 - **Claimed**: 2026-08-01T10:31:36Z
 - **Status**: COMPLETED @ 2026-08-01T10:32:03Z
+
+### [ACTIVE] task-receipt-loadtest-20260801
+- **Session**: `Codex-root-lifecycle-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/shell/shell_loadtest.cpp`
+- **Description**: Migrate loadtest task creation to immutable receipt
+- **Claimed**: 2026-08-01T10:32:10Z
+- **Status**: IN PROGRESS
