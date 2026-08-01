@@ -2218,3 +2218,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Recognize
 - **Claimed**: 2026-08-01T13:24:20Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] process-handle-generation-user-classifier-20260801
+- **Session**: `Nathan-1433`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `userland/libs/ntdll/ntdll_info.c`
+- **Description**: Classify
+- **Claimed**: 2026-08-01T13:24:32Z
+- **Status**: IN PROGRESS
