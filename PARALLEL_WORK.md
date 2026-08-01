@@ -2946,3 +2946,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Sequence-linearized
 - **Claimed**: 2026-08-01T20:10:29Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] linux-sysv-sem-wait-cancellation-20260801
+- **Session**: `Nathan-720`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/subsystems/linux/sysv_ipc.cpp,kernel/subsystems/linux/syscall_internal.h`
+- **Description**: Cancellation-safe sequence-linearized SysV semop and semtimedop waits with removal and saturation safety
+- **Claimed**: 2026-08-01T20:10:43Z
+- **Status**: IN PROGRESS
