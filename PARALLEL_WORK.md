@@ -875,13 +875,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T17:02:55Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] service-runtime-transactions
+### [DONE] service-runtime-transactions
 - **Session**: `Codex-root-service-lifetime`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/core/service.cpp kernel/core/service.h`
 - **Description**: Serialize service lifecycle with reserve-execute-commit tokens and no scheduler or loader calls under the runtime lock (offline claim; remote publication pending)
 - **Claimed**: 2026-07-31T17:08:41Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T15:00:46Z
 
 ### [ACTIVE] rust-build-truth
 - **Session**: `Codex-rust-build-truth`
