@@ -2643,10 +2643,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T15:48:36Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] loader-image-patch-rollback-doc-20260801
+### [DONE] loader-image-patch-rollback-doc-20260801
 - **Session**: `Nathan-1678`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/loader/dll_loader.h`
 - **Description**: Synchronize
 - **Claimed**: 2026-08-01T15:49:37Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T15:50:25Z
