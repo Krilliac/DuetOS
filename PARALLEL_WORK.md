@@ -2291,13 +2291,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T13:59:01Z
 - **Status**: COMPLETED @ 2026-08-01T14:19:54Z
 
-### [ACTIVE] address-space-region-sync-impl-20260801
+### [DONE] address-space-region-sync-impl-20260801
 - **Session**: `Nathan-1390`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/mm/address_space.cpp`
 - **Description**: structural-region-table-read-synchronization
 - **Claimed**: 2026-08-01T13:59:17Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T14:19:58Z
 
 ### [ACTIVE] address-space-region-sync-test-20260801
 - **Session**: `Nathan-1969`
