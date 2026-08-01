@@ -619,13 +619,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T13:20:39Z
 - **Status**: COMPLETED @ 2026-07-31T13:44:10Z
 
-### [ACTIVE] vm-process-lifetime
+### [DONE] vm-process-lifetime
 - **Session**: `Nathan-221`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/mm/address_space.cpp kernel/mm/address_space.h kernel/proc/process.cpp kernel/proc/process.h kernel/syscall/syscall.cpp kernel/subsystems/win32/file_syscall.cpp kernel/subsystems/win32/job_syscall.cpp docs/stability-audit-2026-07-31.md wiki/reference/Roadmap.md`
 - **Description**: Retain process-handle targets and copy cross-AS memory under address-space mutation lifetime
 - **Claimed**: 2026-07-31T13:58:27Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T03:09:57Z
 
 ### [ACTIVE] vm-process-exit-drain
 - **Session**: `Nathan-221`
