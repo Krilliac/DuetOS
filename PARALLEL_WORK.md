@@ -3051,13 +3051,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T21:06:00Z
 - **Status**: COMPLETED @ 2026-08-01T21:18:14Z
 
-### [ACTIVE] service-endpoint-publication-doc-20260801
+### [DONE] service-endpoint-publication-doc-20260801
 - **Session**: `Nathan-539`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `wiki/kernel/Service-Bootstrap.md`
 - **Description**: Document
 - **Claimed**: 2026-08-01T21:09:51Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T21:18:18Z
 
 ### [ACTIVE] process-authority-wiring-20260801
 - **Session**: `Codex-ProcessAuthority-20260801`
