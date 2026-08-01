@@ -2002,3 +2002,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Red-first
 - **Claimed**: 2026-08-01T10:04:27Z
 - **Status**: COMPLETED @ 2026-08-01T10:26:35Z
+
+### [ACTIVE] receipt-callers-20260801
+- **Session**: `Nathan-1909`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/main.cpp kernel/diag/hung_task.cpp kernel/diag/stress_driver.cpp kernel/security/gui_fuzz.cpp kernel/sync/adaptive_mutex.cpp`
+- **Description**: Migrate unclaimed scheduler create callers from raw Task pointers to immutable TaskCreateResult receipts
+- **Claimed**: 2026-08-01T10:26:53Z
+- **Status**: IN PROGRESS
