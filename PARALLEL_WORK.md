@@ -2034,3 +2034,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Migrate loadtest task creation to immutable receipt
 - **Claimed**: 2026-08-01T10:32:10Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] process-task-publication-atomic-compile-20260801
+- **Session**: `Codex-root-lifecycle-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tools/test/test-process-task-publication-contract.py`
+- **Description**: Accept compiler-valid underlying atomic access for enum lifecycle state
+- **Claimed**: 2026-08-01T10:35:06Z
+- **Status**: IN PROGRESS
