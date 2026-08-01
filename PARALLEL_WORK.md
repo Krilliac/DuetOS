@@ -1594,3 +1594,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Semantic structural guard for target spawn SMP topology IPI Userland smoke termination ordering
 - **Claimed**: 2026-08-01T03:46:14Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] authorization-context-foundation-20260801
+- **Session**: `Codex-root-authorization-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/proc/authorization_context.h kernel/proc/authorization_context.cpp tests/host/test_authorization_context.cpp`
+- **Description**: Standalone generation-safe DuetOS authorization authority and enforcement accounting service
+- **Claimed**: 2026-08-01T03:56:03Z
+- **Status**: IN PROGRESS
