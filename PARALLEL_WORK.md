@@ -2915,13 +2915,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T19:56:57Z
 - **Status**: COMPLETED @ 2026-08-01T20:04:55Z
 
-### [ACTIVE] service-endpoint-kobject-name-20260801
+### [DONE] service-endpoint-kobject-name-20260801
 - **Session**: `Codex-HandlePublication-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/ipc/kobject.cpp`
 - **Description**: Expose stable diagnostic name for ServiceEndpoint KObject tag
 - **Claimed**: 2026-08-01T19:58:04Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T20:04:58Z
 
 ### [ACTIVE] service-endpoint-publication-20260801
 - **Session**: `Nathan-ServiceActivate-20260801`
