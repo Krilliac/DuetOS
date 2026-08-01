@@ -2179,13 +2179,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T13:16:07Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] linux-fd-io-migration
+### [DONE] linux-fd-io-migration
 - **Session**: `Nathan-1410`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/subsystems/linux/syscall_fd.cpp`
 - **Description**: No description provided
 - **Claimed**: 2026-08-01T13:16:22Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T13:17:06Z
 
 ### [ACTIVE] process-handle-generation-impl-20260801
 - **Session**: `Nathan-1647`
