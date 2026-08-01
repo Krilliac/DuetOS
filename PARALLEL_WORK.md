@@ -2987,7 +2987,7 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T20:31:38Z
 - **Status**: COMPLETED @ 2026-08-01T20:48:42Z
 
-### [ACTIVE] service-exit-observer-20260801
+### [DONE] service-exit-observer-20260801
 - **Session**: `Codex-ServiceExitObserver-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/core/service_exit_observer.h,kernel/core/service_exit_observer.cpp,tests/host/test_service_exit_observer.cpp,tools/test/test-service-exit-observer-contract.py`
@@ -3033,7 +3033,7 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Files**: `tests/host/CMakeLists.txt`
 - **Description**: Link
 - **Claimed**: 2026-08-01T21:03:49Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T21:18:02Z
 
 ### [ACTIVE] linux-sysv-ipc-id-generation-wait-contract-20260801
 - **Session**: `Nathan-1201`
