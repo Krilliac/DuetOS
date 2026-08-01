@@ -2474,3 +2474,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Serialize process heap metadata and route all heap user-memory access through locked AddressSpace copy APIs
 - **Claimed**: 2026-08-01T14:51:37Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] adaptive-mutex-doc-sync-20260801
+- **Session**: `Nathan-687`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/sched/sched.h`
+- **Description**: No description provided
+- **Claimed**: 2026-08-01T14:55:26Z
+- **Status**: IN PROGRESS
