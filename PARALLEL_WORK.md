@@ -1131,13 +1131,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T20:19:16Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] ipc-message-port
+### [DONE] ipc-message-port
 - **Session**: `Codex-resource-domain`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/ipc/kmessage_port.h kernel/ipc/kmessage_port.cpp tests/host/test_kmessage_port.cpp`
 - **Description**: Generation-safe waitable MessagePort KObject atop validated MessageRing
 - **Claimed**: 2026-07-31T20:34:40Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T03:03:48Z
 
 ### [ACTIVE] gui-window-side-tables
 - **Session**: `Codex-gui-task-queue`
