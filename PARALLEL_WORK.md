@@ -3186,3 +3186,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Split registryd canonical validation and recovery codecs below bloat thresholds
 - **Claimed**: 2026-08-01T22:50:16Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] displayd-engine-20260801
+- **Session**: `Nathan-715`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `userland/native-apps/displayd/display_engine.h,userland/native-apps/displayd/display_engine_internal.h,userland/native-apps/displayd/display_engine.c,userland/native-apps/displayd/display_engine_request.c,tests/host/test_displayd_engine.cpp,tools/test/test-displayd-engine-contract.py`
+- **Description**: Fixed-capacity
+- **Claimed**: 2026-08-01T23:00:56Z
+- **Status**: IN PROGRESS
