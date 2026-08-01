@@ -2922,3 +2922,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Expose stable diagnostic name for ServiceEndpoint KObject tag
 - **Claimed**: 2026-08-01T19:58:04Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-endpoint-publication-20260801
+- **Session**: `Nathan-ServiceActivate-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/service_endpoint.h kernel/core/service_endpoint.cpp kernel/core/service_directory.h kernel/core/service_directory.cpp tests/host/test_service_endpoint.cpp tests/host/test_service_directory.cpp tools/test/test-service-endpoint-contract.py`
+- **Description**: Authenticated ServiceEndpoint ownership and failure-atomic directory/handle publication
+- **Claimed**: 2026-08-01T20:00:58Z
+- **Status**: IN PROGRESS
