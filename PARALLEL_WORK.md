@@ -3090,3 +3090,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Migrate
 - **Claimed**: 2026-08-01T21:25:48Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] serviced-supervisor-private-20260801
+- **Session**: `Codex-ServicedSupervisor-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `userland/native-apps/serviced/supervisor_internal.h`
+- **Description**: Private fixed-layout storage for opaque serviced supervisor object
+- **Claimed**: 2026-08-01T21:34:41Z
+- **Status**: IN PROGRESS
