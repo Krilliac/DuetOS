@@ -2690,3 +2690,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Atomic process-pending signal publication and exact claimant drain across signal, timer, handler, signalfd, and epoll paths
 - **Claimed**: 2026-08-01T16:13:22Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-artifact-pipeline-20260801
+- **Session**: `Nathan-1353`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/CMakeLists.txt,tools/build/gen-service-manifest.py,tools/test/test-gen-service-manifest.py,userland/native-apps/serviced/serviced.c,userland/native-apps/execd/execd.c,userland/native-apps/displayd/displayd.c,userland/native-apps/registryd/registryd.c`
+- **Description**: Deterministic freestanding service artifacts and bounded build-tree manifest/package binding with activation disabled
+- **Claimed**: 2026-08-01T16:17:20Z
+- **Status**: IN PROGRESS
