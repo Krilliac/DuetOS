@@ -1538,3 +1538,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Generation-safe ResourceDomain channel charge authority
 - **Claimed**: 2026-08-01T03:02:15Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] ipc-message-ring-port-p2-coverage
+- **Session**: `Codex-gui-task-queue`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/ipc/message_ring.h kernel/ipc/message_ring.cpp tests/host/test_message_ring.cpp kernel/ipc/kmessage_port.h kernel/ipc/kmessage_port.cpp tests/host/test_kmessage_port.cpp`
+- **Description**: Deterministic reservation-exhaustion and close-during-copy host coverage
+- **Claimed**: 2026-08-01T03:07:43Z
+- **Status**: IN PROGRESS
