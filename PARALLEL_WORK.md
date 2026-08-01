@@ -819,13 +819,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T16:24:50Z
 - **Status**: COMPLETED @ 2026-08-01T18:59:04Z
 
-### [ACTIVE] proc-job-win32-adapter
+### [DONE] proc-job-win32-adapter
 - **Session**: `Codex-job-core-service`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/subsystems/win32/job_syscall.cpp`
 - **Description**: No description provided
 - **Claimed**: 2026-07-31T16:24:52Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T18:59:07Z
 
 ### [DONE] docs-sync-dry-run
 - **Session**: `Nathan-221`
