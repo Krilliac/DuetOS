@@ -2386,3 +2386,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Register integrated Fable-targeted hostile structural contracts in authoritative CI
 - **Claimed**: 2026-08-01T14:26:06Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] linux-fd-fork-inheritance-caller-20260801
+- **Session**: `Nathan-1452`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/subsystems/linux/syscall_clone.cpp`
+- **Description**: Consume failure-atomic dirfd-filtered Linux fd inheritance and remove raw fork cleanup scan
+- **Claimed**: 2026-08-01T14:34:32Z
+- **Status**: IN PROGRESS
