@@ -2554,3 +2554,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Mutation-coherent pointer-free debugger region scan with explicit cap truncation diagnostics
 - **Claimed**: 2026-08-01T15:08:54Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] process-key-publication-gate-20260801
+- **Session**: `Nathan-ProcessKey-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/proc/process.h,kernel/proc/process.cpp`
+- **Description**: Non-wrapping
+- **Claimed**: 2026-08-01T15:12:47Z
+- **Status**: IN PROGRESS
