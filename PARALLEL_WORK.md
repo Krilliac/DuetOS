@@ -2395,13 +2395,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T14:34:32Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] linux-fd-inherit-retained-refresh-20260801
+### [DONE] linux-fd-inherit-retained-refresh-20260801
 - **Session**: `Codex-linux-fd-inherit-retained-refresh-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/proc/process.h,kernel/proc/process.cpp,tools/test/test-linux-fd-receipt-extension-contract.py`
 - **Description**: Make Linux fd inheritance failure-atomic and state-11 safe; add guarded retained-regular OFD refresh
 - **Claimed**: 2026-08-01T14:36:07Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T14:48:59Z
 
 ### [DONE] vm-breakpoint-frame-access-20260801
 - **Session**: `Nathan-210`
