@@ -2251,13 +2251,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T13:26:49Z
 - **Status**: COMPLETED @ 2026-08-01T13:58:53Z
 
-### [ACTIVE] linux-fd-io-contract
+### [DONE] linux-fd-io-contract
 - **Session**: `Nathan-746`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/test/test-linux-fd-io-transaction-contract.py`
 - **Description**: forbid-raw-fd-slots-and-require-explicit-receipt-cleanup
 - **Claimed**: 2026-08-01T13:28:07Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T14:09:54Z
 
 ### [DONE] linux-fd-receipt-extension-20260801
 - **Session**: `Codex-linux-fd-receipt-extension`
