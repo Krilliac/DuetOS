@@ -1578,3 +1578,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Move smoke profile termination after SMP and Userland phases so exact CPU verdicts are producible
 - **Claimed**: 2026-08-01T03:44:11Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] vm-sysv-attach-transaction-20260801
+- **Session**: `Codex-process-section-audit`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/subsystems/linux/sysv_ipc.cpp`
+- **Description**: Serialize SysV SHM attach rows with Process VM transaction and exact borrowed-range publication
+- **Claimed**: 2026-08-01T03:44:51Z
+- **Status**: IN PROGRESS
