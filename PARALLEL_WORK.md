@@ -2762,3 +2762,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Stage exact ELF bytes through production parser into sealed LoadImage/LoadPlan without publishing a Process
 - **Claimed**: 2026-08-01T17:19:06Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] ipc-residual-wait-cancellation-20260801
+- **Session**: `Nathan-467`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/ipc/iocp.h,kernel/ipc/iocp.cpp,kernel/subsystems/win32/iocp_syscall.cpp,kernel/ipc/kmessage_port.h,kernel/ipc/kmessage_port.cpp,tools/test/test-ipc-residual-wait-cancellation-contract.py`
+- **Description**: Migrate IOCP and message-port waits to explicit cancellation-safe outcomes with deadline and lifetime contracts
+- **Claimed**: 2026-08-01T17:23:26Z
+- **Status**: IN PROGRESS
