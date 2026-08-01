@@ -2907,13 +2907,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T19:44:20Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] service-endpoint-kobject-tag-20260801
+### [DONE] service-endpoint-kobject-tag-20260801
 - **Session**: `Codex-HandlePublication-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/ipc/kobject.h`
 - **Description**: Append stable ServiceEndpoint KObject tag for authenticated channel handles
 - **Claimed**: 2026-08-01T19:56:57Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T20:04:55Z
 
 ### [ACTIVE] service-endpoint-kobject-name-20260801
 - **Session**: `Codex-HandlePublication-20260801`
