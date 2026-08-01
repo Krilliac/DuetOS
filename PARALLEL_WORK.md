@@ -2985,7 +2985,7 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Files**: `tools/test/test-linux-fd-async-pools-contract.py`
 - **Description**: Update exact POSIX MQ receipt lifetime contract for cancellable waits without subsystem pins
 - **Claimed**: 2026-08-01T20:31:38Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T20:48:42Z
 
 ### [ACTIVE] service-exit-observer-20260801
 - **Session**: `Codex-ServiceExitObserver-20260801`
