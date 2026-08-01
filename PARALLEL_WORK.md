@@ -2123,13 +2123,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T12:56:42Z
 - **Status**: COMPLETED @ 2026-08-01T13:23:43Z
 
-### [ACTIVE] fable-epoll-fd-identity-20260801
+### [DONE] fable-epoll-fd-identity-20260801
 - **Session**: `Fable-epoll-fd-identity`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/subsystems/linux/syscall_async_io.cpp tools/test/test-epoll-fd-identity-contract.py`
 - **Description**: Migrate epoll watches to strong fd receipt identity
 - **Claimed**: 2026-08-01T13:00:02Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T15:37:37Z
 
 ### [ACTIVE] fable-pidfd-getfd-identity-20260801
 - **Session**: `Fable-pidfd-getfd-identity`
