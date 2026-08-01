@@ -2931,13 +2931,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T20:00:58Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] linux-sysv-ipc-wait-cancellation-20260801
+### [DONE] linux-sysv-ipc-wait-cancellation-20260801
 - **Session**: `Nathan-565`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/subsystems/linux/msg_queues.cpp,tools/test/test-linux-sysv-ipc-wait-cancellation-contract.py`
 - **Description**: Sequence-linearized cancellable SysV message-queue and semaphore blocking waits with removal and ABA safety
 - **Claimed**: 2026-08-01T20:09:41Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T20:50:41Z
 
 ### [DONE] win32-directory-address-wait-cancellation-20260801
 - **Session**: `Codex-root-win32wait`
