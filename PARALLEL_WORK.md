@@ -1898,3 +1898,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Confirmed user address-space TLB reclaim API contract
 - **Claimed**: 2026-08-01T08:57:37Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] mm-user-tlb-reclaim-test-20260801
+- **Session**: `Nathan-910`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tools/test/test-user-tlb-reclaim-contract.py`
+- **Description**: Focused confirmed user TLB reclaim structural coverage
+- **Claimed**: 2026-08-01T08:57:43Z
+- **Status**: IN PROGRESS
