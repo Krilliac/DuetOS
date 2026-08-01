@@ -2659,13 +2659,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T15:51:53Z
 - **Status**: COMPLETED @ 2026-08-01T15:59:06Z
 
-### [ACTIVE] cancellation-unwind-safety-20260801
+### [DONE] cancellation-unwind-safety-20260801
 - **Session**: `Nathan-138`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/sched/sched.h,kernel/sched/sched.cpp,kernel/ipc/kmutex.h,kernel/ipc/kmutex.cpp,tools/test/test-task-cancellation-contract.py,tools/test/test-cancellable-wait-contract.py,tools/test/test-kmutex-cancellation-contract.py,wiki/kernel/Scheduler.md,wiki/kernel/Synchronization.md`
 - **Description**: Close
 - **Claimed**: 2026-08-01T16:03:16Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T17:55:24Z
 
 ### [ACTIVE] rust-ingress-hardening-20260801
 - **Session**: `Nathan-1547`
