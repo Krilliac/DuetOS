@@ -2899,13 +2899,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T19:43:55Z
 - **Status**: COMPLETED @ 2026-08-01T20:04:53Z
 
-### [ACTIVE] linux-child-wait-cancel-status-20260801
+### [DONE] linux-child-wait-cancel-status-20260801
 - **Session**: `Codex-UserWaitCancellation-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/subsystems/linux/syscall_stub.cpp`
 - **Description**: Propagate
 - **Claimed**: 2026-08-01T19:44:20Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T20:07:05Z
 
 ### [DONE] service-endpoint-kobject-tag-20260801
 - **Session**: `Codex-HandlePublication-20260801`
