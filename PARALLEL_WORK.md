@@ -1490,3 +1490,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Expose pure native document against retained authority validation for lifecycle broker anti-forgery
 - **Claimed**: 2026-07-31T23:45:31Z
 - **Status**: COMPLETED @ 2026-08-01T00:06:20Z
+
+### [ACTIVE] gui-send-lockdep
+- **Session**: `Codex-gui-send-service`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/sync/lockdep.h`
+- **Description**: No description provided
+- **Claimed**: 2026-08-01T00:14:07Z
+- **Status**: IN PROGRESS
