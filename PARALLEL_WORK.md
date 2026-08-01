@@ -1603,10 +1603,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T03:56:03Z
 - **Status**: COMPLETED @ 2026-08-01T04:29:48Z
 
-### [ACTIVE] gui-broker-protocol-reply-layout
+### [DONE] gui-broker-protocol-reply-layout
 - **Session**: `Codex-gui-task-queue`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/drivers/video/gui_broker_protocol.h kernel/drivers/video/gui_broker_protocol.cpp tests/host/test_gui_broker_protocol.cpp`
 - **Description**: Adopt stale broker claim and repair reply sequence wire offset with hostile vectors
 - **Claimed**: 2026-08-01T04:13:46Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T04:31:55Z
