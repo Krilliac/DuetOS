@@ -883,13 +883,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T17:08:41Z
 - **Status**: COMPLETED @ 2026-08-01T15:00:46Z
 
-### [ACTIVE] rust-build-truth
+### [DONE] rust-build-truth
 - **Session**: `Codex-rust-build-truth`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/rust/CMakeLists.txt cmake/DuetOSRust.cmake tools/test/check-rust-ffi.py wiki/tooling/Rust-Subsystems.md`
 - **Description**: Derive aggregate Rust build dependencies from the workspace and fail closed on Rust FFI inventory drift (offline claim; remote publication pending)
 - **Claimed**: 2026-07-31T17:17:23Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T18:16:35Z
 
 ### [ACTIVE] kobject-handle-v2
 - **Session**: `Codex-kobject-handle-v2`
