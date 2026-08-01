@@ -2202,3 +2202,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Generation-safe
 - **Claimed**: 2026-08-01T13:16:45Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] linux-fd-io-migration
+- **Session**: `Nathan-458`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/subsystems/linux/syscall_fd.cpp,kernel/subsystems/linux/syscall_file.cpp,kernel/subsystems/linux/syscall_io.cpp,kernel/subsystems/linux/syscall_pipe.cpp`
+- **Description**: transactional-fd-receipt-migration
+- **Claimed**: 2026-08-01T13:17:09Z
+- **Status**: IN PROGRESS
