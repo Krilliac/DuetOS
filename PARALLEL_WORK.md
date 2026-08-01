@@ -1579,13 +1579,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T03:44:11Z
 - **Status**: COMPLETED @ 2026-08-01T04:31:51Z
 
-### [ACTIVE] vm-sysv-attach-transaction-20260801
+### [DONE] vm-sysv-attach-transaction-20260801
 - **Session**: `Codex-process-section-audit`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/subsystems/linux/sysv_ipc.cpp`
 - **Description**: Serialize SysV SHM attach rows with Process VM transaction and exact borrowed-range publication
 - **Claimed**: 2026-08-01T03:44:51Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T04:39:28Z
 
 ### [DONE] smoke-profile-smp-order-test
 - **Session**: `Codex-gui-task-queue`
