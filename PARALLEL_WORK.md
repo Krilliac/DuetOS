@@ -1826,3 +1826,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: register_AP_handshake_static_test
 - **Claimed**: 2026-08-01T06:24:52Z
 - **Status**: COMPLETED @ 2026-08-01T06:29:48Z
+
+### [ACTIVE] adaptive-mutex-lifetime-20260801
+- **Session**: `Nathan-1927`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/sync/adaptive_mutex.cpp kernel/sync/adaptive_mutex.h`
+- **Description**: Replace raw Task owner compatibility mutex with scheduler-owned lifetime-safe mutex wrapper
+- **Claimed**: 2026-08-01T06:41:50Z
+- **Status**: IN PROGRESS
