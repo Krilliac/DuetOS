@@ -2523,13 +2523,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T15:00:52Z
 - **Status**: COMPLETED @ 2026-08-01T15:22:49Z
 
-### [ACTIVE] service-scheduler-publication-gate-20260801
+### [DONE] service-scheduler-publication-gate-20260801
 - **Session**: `Nathan-1888`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/sched/sched.cpp,kernel/core/service.cpp,tools/test/test-service-publication-gate-contract.py`
 - **Description**: scheduler-lock-service-commit-and-unpublished-task-rollback
 - **Claimed**: 2026-08-01T15:00:59Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T15:26:09Z
 
 ### [DONE] win32-heap-process-lock-20260801
 - **Session**: `Codex-win32-heap-vm-safety`
