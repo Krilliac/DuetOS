@@ -2547,13 +2547,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T15:05:58Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] dbg-scan-coherence-20260801
+### [DONE] dbg-scan-coherence-20260801
 - **Session**: `Codex-dbg-scan-coherence-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/apps/dbg_core.cpp,tools/test/test-dbg-core-scan-coherence-contract.py`
 - **Description**: Mutation-coherent pointer-free debugger region scan with explicit cap truncation diagnostics
 - **Claimed**: 2026-08-01T15:08:54Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T15:16:05Z
 
 ### [ACTIVE] process-key-publication-gate-20260801
 - **Session**: `Nathan-ProcessKey-20260801`
