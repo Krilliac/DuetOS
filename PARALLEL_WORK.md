@@ -1746,3 +1746,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Match actual DuetOS crash dump sentinel and accept benign minidump reservation prose
 - **Claimed**: 2026-08-01T05:38:17Z
 - **Status**: COMPLETED @ 2026-08-01T05:44:47Z
+
+### [ACTIVE] smp-ap-handshake-20260801
+- **Session**: `Codex-smp-ap-handshake-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/arch/x86_64/smp.cpp`
+- **Description**: No description provided
+- **Claimed**: 2026-08-01T05:53:53Z
+- **Status**: IN PROGRESS
