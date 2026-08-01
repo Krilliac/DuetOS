@@ -1595,13 +1595,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T03:46:14Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] authorization-context-foundation-20260801
+### [DONE] authorization-context-foundation-20260801
 - **Session**: `Codex-root-authorization-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/proc/authorization_context.h kernel/proc/authorization_context.cpp tests/host/test_authorization_context.cpp`
 - **Description**: Standalone generation-safe DuetOS authorization authority and enforcement accounting service
 - **Claimed**: 2026-08-01T03:56:03Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T04:29:48Z
 
 ### [ACTIVE] gui-broker-protocol-reply-layout
 - **Session**: `Codex-gui-task-queue`
