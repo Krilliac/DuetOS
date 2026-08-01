@@ -1610,3 +1610,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Adopt stale broker claim and repair reply sequence wire offset with hostile vectors
 - **Claimed**: 2026-08-01T04:13:46Z
 - **Status**: COMPLETED @ 2026-08-01T04:31:55Z
+
+### [ACTIVE] boot-verdict-integration
+- **Session**: `Codex-boot-verdict-integration`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tools/test/profile-boot-smoke.sh`
+- **Description**: No description provided
+- **Claimed**: 2026-08-01T04:33:38Z
+- **Status**: IN PROGRESS
