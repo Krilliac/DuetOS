@@ -2731,13 +2731,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T16:48:47Z
 - **Status**: COMPLETED @ 2026-08-01T16:56:26Z
 
-### [ACTIVE] ipc-wait-cancellation-20260801
+### [DONE] ipc-wait-cancellation-20260801
 - **Session**: `Codex-ipc-wait-cancellation`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/ipc/kevent.h,kernel/ipc/kevent.cpp,kernel/ipc/ksemaphore.h,kernel/ipc/ksemaphore.cpp,kernel/ipc/kmailbox.h,kernel/ipc/kmailbox.cpp,kernel/ipc/kwaitable.h,kernel/ipc/kwaitable.cpp,kernel/subsystems/win32/event_syscall.h,kernel/subsystems/win32/event_syscall.cpp,kernel/subsystems/win32/semaphore_syscall.h,kernel/subsystems/win32/semaphore_syscall.cpp,kernel/shell/shell_bench.cpp,tools/test/test-ipc-wait-cancellation-contract.py,wiki/kernel/IPC.md`
 - **Description**: Migrate
 - **Claimed**: 2026-08-01T16:57:47Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T17:25:58Z
 
 ### [DONE] job-userland-ingress-contract-20260801
 - **Session**: `Codex-job-cycle-break`
