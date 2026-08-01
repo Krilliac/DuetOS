@@ -2203,13 +2203,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T13:16:45Z
 - **Status**: COMPLETED @ 2026-08-01T13:32:58Z
 
-### [ACTIVE] linux-fd-io-migration
+### [DONE] linux-fd-io-migration
 - **Session**: `Nathan-458`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/subsystems/linux/syscall_fd.cpp,kernel/subsystems/linux/syscall_file.cpp,kernel/subsystems/linux/syscall_io.cpp,kernel/subsystems/linux/syscall_pipe.cpp`
 - **Description**: transactional-fd-receipt-migration
 - **Claimed**: 2026-08-01T13:17:09Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T14:09:52Z
 
 ### [DONE] handle-band-helper-dispatch-20260801
 - **Session**: `Nathan-884`
