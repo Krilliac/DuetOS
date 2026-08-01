@@ -428,56 +428,86 @@ int main()
         Fixture fixture;
         ServiceManifestPlanV1 plan{};
         ServiceManifestAuthoritySnapshotV1 replay = fixture.authority;
+        EXPECT_EQ(ServiceManifestDocumentValidateAgainstAuthorityV1(fixture.document, replay),
+                  ServiceManifestError::Ok);
         replay.profile_identity += 1;
         EXPECT_TRUE(ServiceManifestAuthoritySnapshotIsCanonicalV1(replay));
         EXPECT_EQ(ServiceManifestValidateV1(fixture.bytes.data(), fixture.byte_count, &replay, &plan),
+                  ServiceManifestError::ProfileMismatch);
+        EXPECT_EQ(ServiceManifestDocumentValidateAgainstAuthorityV1(fixture.document, replay),
                   ServiceManifestError::ProfileMismatch);
         replay = fixture.authority;
         replay.signer_identity += 1;
         EXPECT_EQ(ServiceManifestValidateV1(fixture.bytes.data(), fixture.byte_count, &replay, &plan),
                   ServiceManifestError::SignerMismatch);
+        EXPECT_EQ(ServiceManifestDocumentValidateAgainstAuthorityV1(fixture.document, replay),
+                  ServiceManifestError::SignerMismatch);
         replay = fixture.authority;
         replay.manifest_identity += 1;
         EXPECT_EQ(ServiceManifestValidateV1(fixture.bytes.data(), fixture.byte_count, &replay, &plan),
+                  ServiceManifestError::InvalidManifestIdentity);
+        EXPECT_EQ(ServiceManifestDocumentValidateAgainstAuthorityV1(fixture.document, replay),
                   ServiceManifestError::InvalidManifestIdentity);
         replay = fixture.authority;
         replay.allowed_capabilities = 0;
         EXPECT_TRUE(ServiceManifestAuthoritySnapshotIsCanonicalV1(replay));
         EXPECT_EQ(ServiceManifestValidateV1(fixture.bytes.data(), fixture.byte_count, &replay, &plan),
                   ServiceManifestError::CapabilityDenied);
+        EXPECT_EQ(ServiceManifestDocumentValidateAgainstAuthorityV1(fixture.document, replay),
+                  ServiceManifestError::CapabilityDenied);
         replay = fixture.authority;
         replay.maximum_frame_budget_pages = 64;
         EXPECT_EQ(ServiceManifestValidateV1(fixture.bytes.data(), fixture.byte_count, &replay, &plan),
+                  ServiceManifestError::FrameBudgetDenied);
+        EXPECT_EQ(ServiceManifestDocumentValidateAgainstAuthorityV1(fixture.document, replay),
                   ServiceManifestError::FrameBudgetDenied);
         replay = fixture.authority;
         replay.allowed_immutable_policies = 1ULL << 2;
         EXPECT_EQ(ServiceManifestValidateV1(fixture.bytes.data(), fixture.byte_count, &replay, &plan),
                   ServiceManifestError::ImmutablePolicyDenied);
+        EXPECT_EQ(ServiceManifestDocumentValidateAgainstAuthorityV1(fixture.document, replay),
+                  ServiceManifestError::ImmutablePolicyDenied);
         replay = fixture.authority;
         replay.allowed_service_kinds = 1u << static_cast<u8>(ServiceManifestKind::Win32);
         EXPECT_EQ(ServiceManifestValidateV1(fixture.bytes.data(), fixture.byte_count, &replay, &plan),
                   ServiceManifestError::ServiceKindDenied);
+        EXPECT_EQ(ServiceManifestDocumentValidateAgainstAuthorityV1(fixture.document, replay),
+                  ServiceManifestError::ServiceKindDenied);
         replay = fixture.authority;
-        replay.allowed_resource_profiles =
-            1u << static_cast<u8>(ServiceManifestResourceProfile::Sandbox);
+        replay.allowed_resource_profiles = 1u << static_cast<u8>(ServiceManifestResourceProfile::Sandbox);
         EXPECT_EQ(ServiceManifestValidateV1(fixture.bytes.data(), fixture.byte_count, &replay, &plan),
+                  ServiceManifestError::ResourceProfileDenied);
+        EXPECT_EQ(ServiceManifestDocumentValidateAgainstAuthorityV1(fixture.document, replay),
                   ServiceManifestError::ResourceProfileDenied);
         replay = fixture.authority;
         replay.maximum_section_objects = 1;
         EXPECT_EQ(ServiceManifestValidateV1(fixture.bytes.data(), fixture.byte_count, &replay, &plan),
                   ServiceManifestError::ResourceCeilingDenied);
+        EXPECT_EQ(ServiceManifestDocumentValidateAgainstAuthorityV1(fixture.document, replay),
+                  ServiceManifestError::ResourceCeilingDenied);
         replay = fixture.authority;
         replay.maximum_tick_budget = 5000;
         EXPECT_EQ(ServiceManifestValidateV1(fixture.bytes.data(), fixture.byte_count, &replay, &plan),
+                  ServiceManifestError::TickBudgetDenied);
+        EXPECT_EQ(ServiceManifestDocumentValidateAgainstAuthorityV1(fixture.document, replay),
                   ServiceManifestError::TickBudgetDenied);
         replay = fixture.authority;
         replay.maximum_services = 2;
         EXPECT_EQ(ServiceManifestValidateV1(fixture.bytes.data(), fixture.byte_count, &replay, &plan),
                   ServiceManifestError::ServiceCountDenied);
+        EXPECT_EQ(ServiceManifestDocumentValidateAgainstAuthorityV1(fixture.document, replay),
+                  ServiceManifestError::ServiceCountDenied);
         replay = fixture.authority;
         replay.maximum_dependencies = 2;
         EXPECT_EQ(ServiceManifestValidateV1(fixture.bytes.data(), fixture.byte_count, &replay, &plan),
                   ServiceManifestError::DependencyCountDenied);
+        EXPECT_EQ(ServiceManifestDocumentValidateAgainstAuthorityV1(fixture.document, replay),
+                  ServiceManifestError::DependencyCountDenied);
+
+        replay = fixture.authority;
+        replay.flags = 0;
+        EXPECT_EQ(ServiceManifestDocumentValidateAgainstAuthorityV1(fixture.document, replay),
+                  ServiceManifestError::AuthorityMalformed);
     }
 
     // Output never aliases hostile bytes or trusted authority.  In particular,

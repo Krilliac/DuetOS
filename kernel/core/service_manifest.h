@@ -279,6 +279,16 @@ bool ServiceManifestAuthoritySnapshotIsCanonicalV1(const ServiceManifestAuthorit
 // [any thread; pure, allocation-free, callback-free]
 ServiceManifestError ServiceManifestDocumentValidateV1(const ServiceManifestDocumentV1& document);
 
+// Revalidate one canonical native document against an independently retained
+// authority snapshot.  This repeats every signer/profile identity binding and
+// every capability, policy, kind, resource, budget, and graph ceiling enforced
+// by the wire validator.  It is intended for trust-boundary consumers that
+// receive a caller-owned ServiceManifestPlanV1 and must not rely on provenance
+// claims alone.  Callers must keep both inputs immutable for the full call.
+// [any thread; pure, allocation-free, callback-free]
+ServiceManifestError ServiceManifestDocumentValidateAgainstAuthorityV1(
+    const ServiceManifestDocumentV1& document, const ServiceManifestAuthoritySnapshotV1& authority);
+
 // Validate a native document and hash its exact canonical v1 wire encoding
 // without materializing the full encoded object.  The implementation uses one
 // service-row-sized scratch buffer.  Output must not overlap the document.

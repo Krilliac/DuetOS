@@ -716,6 +716,20 @@ ServiceManifestError ServiceManifestDocumentValidateV1(const ServiceManifestDocu
     return ValidateDocumentInternal(document, nullptr, nullptr);
 }
 
+ServiceManifestError ServiceManifestDocumentValidateAgainstAuthorityV1(
+    const ServiceManifestDocumentV1& document, const ServiceManifestAuthoritySnapshotV1& authority)
+{
+    if (!ServiceManifestAuthoritySnapshotIsCanonicalV1(authority))
+        return ServiceManifestError::AuthorityMalformed;
+    if (!IdentityIsValid(document.manifest_identity) || document.manifest_identity != authority.manifest_identity)
+        return ServiceManifestError::InvalidManifestIdentity;
+    if (document.signer_identity != authority.signer_identity)
+        return ServiceManifestError::SignerMismatch;
+    if (document.profile_identity != authority.profile_identity)
+        return ServiceManifestError::ProfileMismatch;
+    return ValidateDocumentInternal(document, &authority, nullptr);
+}
+
 ServiceManifestError ServiceManifestDocumentHashV1(const ServiceManifestDocumentV1& document, loader::Hash256* hash_out)
 {
     if (hash_out == nullptr)
