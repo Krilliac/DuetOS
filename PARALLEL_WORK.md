@@ -1946,3 +1946,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Register task cancellation and user TLB reclaim structural tests
 - **Claimed**: 2026-08-01T09:16:33Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] hardening-roadmap-sync-20260801
+- **Session**: `Nathan-205`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `wiki/reference/Roadmap.md`
+- **Description**: Retire stale adaptive mutex and user TLB reclamation roadmap text
+- **Claimed**: 2026-08-01T09:16:40Z
+- **Status**: IN PROGRESS
