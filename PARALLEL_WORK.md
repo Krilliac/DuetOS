@@ -1811,13 +1811,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T06:24:42Z
 - **Status**: COMPLETED @ 2026-08-01T06:29:42Z
 
-### [ACTIVE] smp-ap-docs-boot-20260801
+### [DONE] smp-ap-docs-boot-20260801
 - **Session**: `Codex-smp-docs-ci-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/core/boot_bringup.cpp`
 - **Description**: synchronize_AP_admission_boot_comment
 - **Claimed**: 2026-08-01T06:24:51Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T06:29:45Z
 
 ### [ACTIVE] smp-ap-ci-registration-20260801
 - **Session**: `Codex-smp-docs-ci-20260801`
