@@ -2338,3 +2338,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Close GetMessage lost-wake window with scheduler-owned mutation sequence
 - **Claimed**: 2026-08-01T14:09:55Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] linux-fd-residual-receipts-20260801
+- **Session**: `Nathan-330`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/subsystems/linux/syscall_xattr.cpp,kernel/subsystems/linux/syscall_path.cpp,kernel/subsystems/linux/syscall_fs_mut.cpp,kernel/subsystems/linux/syscall_misc.cpp,kernel/subsystems/linux/syscall_socket.cpp,kernel/subsystems/linux/syscall_stub.cpp,tools/test/test-linux-fd-residual-receipt-contract.py`
+- **Description**: Migrate remaining unclaimed Linux fd-slot syscall paths to stable receipt and OFD guard ownership
+- **Claimed**: 2026-08-01T14:12:46Z
+- **Status**: IN PROGRESS
