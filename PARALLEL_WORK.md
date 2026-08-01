@@ -2322,3 +2322,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: panic-safe-fail-fast-region-summary-snapshot
 - **Claimed**: 2026-08-01T14:07:21Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] fable-gui-wait-sequence-20260801
+- **Session**: `Nathan-1026`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/drivers/video/gui_message_queue.h`
+- **Description**: No description provided
+- **Claimed**: 2026-08-01T14:09:26Z
+- **Status**: IN PROGRESS
