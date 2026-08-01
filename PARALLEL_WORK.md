@@ -2634,3 +2634,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Pass explicit current Process into retained fd readiness for signalfd pending-state evaluation
 - **Claimed**: 2026-08-01T15:46:05Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] linux-epoll-exact-identity-contract-20260801
+- **Session**: `Codex-linux-timerfd-signalfd-receipts`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tools/test/test-epoll-fd-identity-contract.py`
+- **Description**: Update epoll structural contract for helper-encapsulated exact KFile/OFD identity matching
+- **Claimed**: 2026-08-01T15:48:36Z
+- **Status**: IN PROGRESS
