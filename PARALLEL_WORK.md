@@ -2787,13 +2787,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T17:45:11Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] rust-ingress-node-validation-20260801
+### [DONE] rust-ingress-node-validation-20260801
 - **Session**: `Nathan-RustNode-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/fs/duetfs/src/format.rs,kernel/fs/duetfs/src/fs.rs,kernel/fs/duetfs/src/fsck.rs,kernel/fs/duetfs/src/ops_dir.rs`
 - **Description**: Centralize validated normal node reads while preserving bounded raw fsck diagnostics
 - **Claimed**: 2026-08-01T17:52:28Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T18:16:33Z
 
 ### [ACTIVE] cancellation-smp-runtime-oracle-20260801
 - **Session**: `Codex-cancellation-smp-oracle`
