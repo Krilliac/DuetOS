@@ -2267,13 +2267,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T13:34:15Z
 - **Status**: COMPLETED @ 2026-08-01T13:55:22Z
 
-### [ACTIVE] linux-fd-receipt-extension-impl-20260801
+### [DONE] linux-fd-receipt-extension-impl-20260801
 - **Session**: `Codex-linux-fd-receipt-extension`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/proc/process.cpp`
 - **Description**: Receipt
 - **Claimed**: 2026-08-01T13:34:27Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T13:55:29Z
 
 ### [ACTIVE] linux-fd-receipt-extension-test-20260801
 - **Session**: `Codex-linux-fd-receipt-extension`
