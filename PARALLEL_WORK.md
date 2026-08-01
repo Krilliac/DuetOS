@@ -2738,3 +2738,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Migrate
 - **Claimed**: 2026-08-01T16:57:47Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] job-userland-ingress-contract-20260801
+- **Session**: `Codex-job-cycle-break`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tools/test/test-job-userland-ingress-contract.py`
+- **Description**: Hostile
+- **Claimed**: 2026-08-01T16:58:46Z
+- **Status**: IN PROGRESS
