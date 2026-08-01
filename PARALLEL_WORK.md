@@ -3058,3 +3058,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Document
 - **Claimed**: 2026-08-01T21:09:51Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] process-authority-wiring-20260801
+- **Session**: `Codex-ProcessAuthority-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/proc/process.h,kernel/proc/process.cpp,kernel/proc/credentials.h,kernel/proc/credentials.cpp,kernel/proc/authorization_context.h,kernel/proc/authorization_context.cpp,kernel/sched/sched.cpp,kernel/syscall/cap_gate.cpp,kernel/security/broker.cpp,kernel/security/grace.cpp,kernel/security/grace.h,kernel/security/attack_sim.cpp,kernel/shell/shell_security.cpp,kernel/apps/dbg_core.cpp,kernel/diag/leak_detector.cpp,kernel/syscall/syscall.cpp,kernel/subsystems/linux/syscall_clone.cpp,kernel/subsystems/linux/syscall_misc.cpp,kernel/subsystems/linux/syscall_time.cpp,kernel/subsystems/win32/spawn_syscall.cpp,kernel/subsystems/win32/token_syscall.cpp,tests/host/test_credentials.cpp,tests/host/test_authorization_context.cpp,tools/test/test-process-authority-wiring-contract.py`
+- **Description**: Wire
+- **Claimed**: 2026-08-01T21:15:21Z
+- **Status**: IN PROGRESS
