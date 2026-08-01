@@ -2194,3 +2194,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Opaque
 - **Claimed**: 2026-08-01T13:16:40Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] process-handle-generation-test-20260801
+- **Session**: `Nathan-65`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tools/test/test-process-handle-generation-contract.py`
+- **Description**: Generation-safe
+- **Claimed**: 2026-08-01T13:16:45Z
+- **Status**: IN PROGRESS
