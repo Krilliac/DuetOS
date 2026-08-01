@@ -939,13 +939,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T18:44:01Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] proc-resource-domain
+### [DONE] proc-resource-domain
 - **Session**: `Codex-resource-domain`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/proc/resource_domain.h kernel/proc/resource_domain.cpp`
 - **Description**: Generation-safe spawn-tree Section object and frame quota domains with exact final-ref charge tokens
 - **Claimed**: 2026-07-31T19:00:55Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T03:00:59Z
 
 ### [ACTIVE] kobject-handle-v2-thunk
 - **Session**: `Nathan-1281`
