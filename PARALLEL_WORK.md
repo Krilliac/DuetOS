@@ -1618,3 +1618,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: No description provided
 - **Claimed**: 2026-08-01T04:33:38Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] boot-verdict-integration-ctest
+- **Session**: `Codex-boot-verdict-integration`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tools/test/ctest-boot-smoke.sh`
+- **Description**: strict_boot_verdict_in_ctest_runner
+- **Claimed**: 2026-08-01T04:33:50Z
+- **Status**: IN PROGRESS
