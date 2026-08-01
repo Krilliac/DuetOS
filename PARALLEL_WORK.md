@@ -3162,3 +3162,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Pinned
 - **Claimed**: 2026-08-01T22:16:32Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] registryd-store-20260801
+- **Session**: `Nathan-1239`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `userland/native-apps/registryd/registry_store.h,userland/native-apps/registryd/registry_store.c,userland/native-apps/registryd/registry_persistence.c,tests/host/test_registryd_store.cpp,tools/test/test-registryd-store-contract.py`
+- **Description**: Allocation-free registry store with canonical snapshot and WAL recovery
+- **Claimed**: 2026-08-01T22:18:13Z
+- **Status**: IN PROGRESS
