@@ -2675,13 +2675,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T16:05:47Z
 - **Status**: COMPLETED @ 2026-08-01T18:16:27Z
 
-### [ACTIVE] rust-ingress-allocator-20260801
+### [DONE] rust-ingress-allocator-20260801
 - **Session**: `Nathan-623`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/fs/duetfs/src/kheap_alloc.rs,kernel/fs/duetfs/src/lib.rs`
 - **Description**: Harden
 - **Claimed**: 2026-08-01T16:07:36Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T18:16:30Z
 
 ### [DONE] linux-signal-pending-sync-20260801
 - **Session**: `Codex-linux-signal-pending-sync`
