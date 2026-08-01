@@ -2347,13 +2347,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T14:12:46Z
 - **Status**: COMPLETED @ 2026-08-01T14:51:27Z
 
-### [ACTIVE] linux-fd-poll-ready-declaration-20260801
+### [DONE] linux-fd-poll-ready-declaration-20260801
 - **Session**: `Nathan-440`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/subsystems/linux/syscall_async_io.h`
 - **Description**: Align epoll readiness declaration with retained Linux fd receipt and migrate poll caller
 - **Claimed**: 2026-08-01T14:16:39Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T14:51:29Z
 
 ### [DONE] cancellable-waits-20260801
 - **Session**: `Codex-cancellable-waits-20260801`
