@@ -731,13 +731,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T15:37:07Z
 - **Status**: COMPLETED @ 2026-07-31T16:44:33Z
 
-### [ACTIVE] win32-job-userland-ingress
+### [DONE] win32-job-userland-ingress
 - **Session**: `Codex-job-userland`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `userland/libs/kernel32/kernel32_io.c userland/libs/ntdll/ntdll_token.c userland/libs/ntdll/ntdll.c userland/libs/ntdll/ntdll_rtl.c userland/libs/ntdll/ntdll_internal.h tools/build/build-kernel32-dll.sh userland/apps/jobobj_smoke/jobobj_smoke.c`
 - **Description**: Wire real kernel32 and ntdll Job lifecycle ingress with verdict-bearing smoke coverage
 - **Claimed**: 2026-07-31T15:53:38Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T18:58:56Z
 
 ### [ACTIVE] win32-file-opaque-userland
 - **Session**: `Nathan-892`
