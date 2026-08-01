@@ -2451,13 +2451,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T14:45:23Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] pidfd-runtime-contract-refresh-20260801
+### [DONE] pidfd-runtime-contract-refresh-20260801
 - **Session**: `Nathan-1721`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/test/test-process-runtime-access-contract.py`
 - **Description**: refresh-pidfd-runtime-order-for-transactional-export
 - **Claimed**: 2026-08-01T14:48:14Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T14:51:35Z
 
 ### [ACTIVE] linux-cwd-sync-20260801
 - **Session**: `Codex-linux-cwd-sync-20260801`
