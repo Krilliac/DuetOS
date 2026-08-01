@@ -2331,13 +2331,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T14:09:26Z
 - **Status**: COMPLETED @ 2026-08-01T14:51:38Z
 
-### [ACTIVE] fable-gui-wait-sequence-surface-20260801
+### [DONE] fable-gui-wait-sequence-surface-20260801
 - **Session**: `Nathan-532`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/drivers/video/gui_message_queue.cpp kernel/drivers/video/widget.h kernel/drivers/video/widget.cpp kernel/subsystems/win32/window_syscall.cpp tools/test/test-gui-message-wait-sequence-contract.py wiki/subsystems/Compositor.md`
 - **Description**: Close GetMessage lost-wake window with scheduler-owned mutation sequence
 - **Claimed**: 2026-08-01T14:09:55Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T14:51:41Z
 
 ### [DONE] linux-fd-residual-receipts-20260801
 - **Session**: `Nathan-330`
