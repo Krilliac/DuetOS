@@ -1978,3 +1978,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Red-first
 - **Claimed**: 2026-08-01T09:40:42Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] scheduler-resume-if-contract-20260801
+- **Session**: `Nathan-1407`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/sched/context_switch.S`
+- **Description**: Restore resumed task interrupt state across scheduler lock handoff
+- **Claimed**: 2026-08-01T09:51:38Z
+- **Status**: IN PROGRESS
