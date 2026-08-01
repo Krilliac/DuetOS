@@ -2819,13 +2819,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T18:29:19Z
 - **Status**: COMPLETED @ 2026-08-01T18:37:20Z
 
-### [ACTIVE] service-bootstrap-activation-20260801
+### [DONE] service-bootstrap-activation-20260801
 - **Session**: `Nathan-ServiceActivate-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/core/service_bootstrap_stage.h kernel/core/service_bootstrap_stage.cpp kernel/core/service_bootstrap_activation.h kernel/core/service_bootstrap_activation.cpp tests/host/test_service_bootstrap_stage.cpp tests/host/test_service_bootstrap_activation.cpp tools/test/test-service-bootstrap-stage-contract.py tools/test/test-service-bootstrap-activation-contract.py wiki/kernel/Service-Bootstrap.md kernel/proc/resource_domain.h kernel/proc/resource_domain.cpp tests/host/test_resource_domain.cpp kernel/CMakeLists.txt tests/host/CMakeLists.txt`
 - **Description**: Compiled-but-dormant one-shot authority-bound service activation transaction
 - **Claimed**: 2026-08-01T18:57:44Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T19:56:29Z
 
 ### [DONE] job-scheduler-linearization-repair-20260801
 - **Session**: `Codex-JobLinearization-20260801`
