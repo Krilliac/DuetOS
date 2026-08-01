@@ -3154,3 +3154,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Wire
 - **Claimed**: 2026-08-01T22:15:39Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-endpoint-request-lifecycle-20260801
+- **Session**: `Codex-ServiceRequestLifecycle-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/ipc/channel_core.h,kernel/ipc/channel_core.cpp,kernel/core/service_endpoint.h,kernel/core/service_endpoint.cpp,tests/host/test_channel_core.cpp,tests/host/test_service_endpoint.cpp,tools/test/test-service-endpoint-request-lifecycle-contract.py`
+- **Description**: Pinned
+- **Claimed**: 2026-08-01T22:16:32Z
+- **Status**: IN PROGRESS
