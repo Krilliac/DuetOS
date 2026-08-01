@@ -3018,3 +3018,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Integrate exact service exit observer reservation binding rollback and post-Exited publication without runnable-before-registration races
 - **Claimed**: 2026-08-01T20:50:06Z
 - **Status**: COMPLETED @ 2026-08-01T20:50:49Z
+
+### [ACTIVE] linux-sysv-ipc-id-generation-20260801
+- **Session**: `Nathan-1201`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/subsystems/linux/msg_queues.cpp,kernel/subsystems/linux/sysv_ipc.cpp,kernel/subsystems/linux/syscall_internal.h,tools/test/test-linux-sysv-ipc-id-generation-contract.py`
+- **Description**: Generation-bearing stale-safe positive Linux SysV message semaphore and shared-memory identifiers with hostile reuse and saturation contracts
+- **Claimed**: 2026-08-01T20:53:44Z
+- **Status**: IN PROGRESS
