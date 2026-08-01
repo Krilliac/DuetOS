@@ -1635,13 +1635,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T04:33:51Z
 - **Status**: COMPLETED @ 2026-08-01T04:50:16Z
 
-### [ACTIVE] boot-verdict-integration-host-test
+### [DONE] boot-verdict-integration-host-test
 - **Session**: `Codex-boot-verdict-integration`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/test/test-profile-boot-verdict-integration.py`
 - **Description**: hostile_runner_wiring_and_exact_2_4_cpu_contracts
 - **Claimed**: 2026-08-01T04:36:19Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T04:50:19Z
 
 ### [ACTIVE] Codex-boot-order-crash
 - **Session**: `Nathan-1516`
