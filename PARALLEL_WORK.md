@@ -3002,3 +3002,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Register hosted service exit observer test after endpoint CMake handoff
 - **Claimed**: 2026-08-01T20:43:03Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-handle-table-host-atomic-20260801
+- **Session**: `Nathan-2`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/ipc/handle_table.cpp`
+- **Description**: Add
+- **Claimed**: 2026-08-01T20:44:37Z
+- **Status**: IN PROGRESS
