@@ -2979,7 +2979,7 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T20:18:35Z
 - **Status**: COMPLETED @ 2026-08-01T20:47:47Z
 
-### [ACTIVE] linux-fd-async-pools-wait-contract-20260801
+### [DONE] linux-fd-async-pools-wait-contract-20260801
 - **Session**: `Nathan-828`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/test/test-linux-fd-async-pools-contract.py`
@@ -3009,7 +3009,7 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Files**: `kernel/ipc/handle_table.cpp`
 - **Description**: Add
 - **Claimed**: 2026-08-01T20:44:37Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T20:50:47Z
 
 ### [ACTIVE] service-exit-observer-integration-20260801
 - **Session**: `Nathan-937`
