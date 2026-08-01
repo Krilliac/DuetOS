@@ -1962,3 +1962,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Align cancellation structural guard with helper-based atomic implementation
 - **Claimed**: 2026-08-01T09:17:09Z
 - **Status**: COMPLETED @ 2026-08-01T09:19:00Z
+
+### [ACTIVE] reaper-tlb-if-contract-20260801
+- **Session**: `Nathan-1850`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tools/test/test-tlb-shootdown-contract.py`
+- **Description**: Guard reaper interrupt enable before confirmed kernel-stack TLB reclamation
+- **Claimed**: 2026-08-01T09:35:53Z
+- **Status**: IN PROGRESS
