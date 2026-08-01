@@ -2923,13 +2923,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T19:58:04Z
 - **Status**: COMPLETED @ 2026-08-01T20:04:58Z
 
-### [ACTIVE] service-endpoint-publication-20260801
+### [DONE] service-endpoint-publication-20260801
 - **Session**: `Nathan-ServiceActivate-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/core/service_endpoint.h kernel/core/service_endpoint.cpp kernel/core/service_directory.h kernel/core/service_directory.cpp tests/host/test_service_endpoint.cpp tests/host/test_service_directory.cpp tools/test/test-service-endpoint-contract.py`
 - **Description**: Authenticated ServiceEndpoint ownership and failure-atomic directory/handle publication
 - **Claimed**: 2026-08-01T20:00:58Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T21:18:09Z
 
 ### [DONE] linux-sysv-ipc-wait-cancellation-20260801
 - **Session**: `Nathan-565`
