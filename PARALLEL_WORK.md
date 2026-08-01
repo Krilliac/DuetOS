@@ -1971,13 +1971,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T09:35:53Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] process-task-publication-contract-20260801
+### [DONE] process-task-publication-contract-20260801
 - **Session**: `Nathan-1594`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/test/test-process-task-publication-contract.py`
 - **Description**: Red-first
 - **Claimed**: 2026-08-01T09:40:42Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T09:56:05Z
 
 ### [ACTIVE] scheduler-resume-if-contract-20260801
 - **Session**: `Nathan-1407`
