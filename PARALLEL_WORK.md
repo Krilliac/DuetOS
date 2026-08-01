@@ -2723,10 +2723,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T16:43:28Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] linux-exit-unwind-20260801
+### [DONE] linux-exit-unwind-20260801
 - **Session**: `Codex-linux-exit-unwind`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/subsystems/linux/syscall.cpp,kernel/subsystems/linux/syscall.h,kernel/subsystems/translation/translate.cpp,tools/test/test-linux-exit-unwind-contract.py`
 - **Description**: Make Linux and NT translated exit requests return through cooperative cancellation guards without false noreturn or foreign frame abandonment
 - **Claimed**: 2026-08-01T16:48:47Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-01T16:56:26Z
