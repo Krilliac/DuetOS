@@ -2130,3 +2130,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Migrate epoll watches to strong fd receipt identity
 - **Claimed**: 2026-08-01T13:00:02Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] fable-pidfd-getfd-identity-20260801
+- **Session**: `Fable-pidfd-getfd-identity`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/subsystems/linux/pidfd_splice.cpp tools/test/test-pidfd-strong-identity-contract.py kernel/subsystems/linux/syscall_internal.h`
+- **Description**: Migrate pidfd operations and getfd export import to strong fd receipts
+- **Claimed**: 2026-08-01T13:00:03Z
+- **Status**: IN PROGRESS
