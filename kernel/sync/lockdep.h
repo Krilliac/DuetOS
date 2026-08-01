@@ -133,6 +133,7 @@ inline constexpr LockClass kLockClassMax = 256;
 /// "deadlock waiting to happen" — fix the code, not the rule.
 ///
 ///   1.  kLockClassSched         (scheduler runqueue / wait-queue)
+///   1a. kLockClassServiceLifecycle (managed-service publication state)
 ///   2.  kLockClassCompositor    (UI compositor — runs from kernel task)
 ///   3.  kLockClassKObject       (IPC object refcount ledger)
 ///   4.  kLockClassKStack        (kernel-stack arena)
@@ -212,6 +213,10 @@ inline constexpr LockClass kLockClassSchedRunq = 0x0A;
 /// direction and is enforced by construction: nothing under
 /// pci-config reaches back into an SMN read.
 inline constexpr LockClass kLockClassSmn = 0x0B;
+/// Managed-service lifecycle broker.  The scheduler publication gate acquires
+/// this briefly while already holding the scheduler lock; lifecycle code never
+/// calls back into the scheduler while holding it.
+inline constexpr LockClass kLockClassServiceLifecycle = 0x0C;
 
 /// Maximum simultaneous holders per CPU. A code path that acquires
 /// more than this many locks at once trips a warning and lockdep
