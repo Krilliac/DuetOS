@@ -3979,13 +3979,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T10:51:17Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] resource-domain-channel-host-proof-20260802
+### [DONE] resource-domain-channel-host-proof-20260802
 - **Session**: `Nathan-604`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tests/host/test_resource_domain_channel.cpp`
 - **Description**: Recover audit harden and publish ResourceDomain channel charging host proof
 - **Claimed**: 2026-08-02T10:57:26Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T11:02:15Z
 
 ### [ACTIVE] service-runtime-maintenance-bridge-20260802
 - **Session**: `Codex-ServiceRuntimeMaintenance-20260802`
