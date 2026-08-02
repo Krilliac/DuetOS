@@ -142,14 +142,20 @@ bool WriteScratchToVolume(const ::duetos::fs::fat32::Volume* v, ::duetos::u64 le
 {
     namespace fat = ::duetos::fs::fat32;
 
-    // Delete any prior copy so size is exact.
+    // Sub-phase markers — see the rationale on the flush markers above.
+    // These split the two FAT32 operations so a stall names delete vs
+    // create rather than just "the write".
+    ::duetos::arch::SerialWrite("[kpath-persist]  w: lookup\n");
     fat::DirEntry pre;
     if (fat::Fat32LookupPath(v, kKPathTsvPath, &pre))
     {
+        ::duetos::arch::SerialWrite("[kpath-persist]  w: delete\n");
         fat::Fat32DeleteAtPath(v, kKPathTsvPath);
     }
 
+    ::duetos::arch::SerialWrite("[kpath-persist]  w: create\n");
     const ::duetos::i64 wrote = fat::Fat32CreateAtPath(v, kKPathTsvPath, g_kpath_scratch, length);
+    ::duetos::arch::SerialWrite("[kpath-persist]  w: created\n");
     return wrote >= 0;
 }
 
@@ -191,8 +197,21 @@ void KPathPersistFlush()
         KLOG_WARN("diag/kpath-persist", "FAT32 volume gone — sink offline");
         return;
     }
+    // Phase markers. This flush is the last thing a smoke profile does
+    // before its completion sentinel, and it has repeatedly stalled for
+    // minutes there with the kernel otherwise healthy and NO other
+    // output — the FAT32 write path is effectively silent, so a stalled
+    // boot could not be localised past "somewhere after the kpath
+    // summary". Raw serial (not klog) on purpose: klog Debug is
+    // suppressed in this build and klog Info would re-enter the FAT32
+    // persistence path we are trying to observe. Three short lines on a
+    // healthy boot; on a stalled one, the last marker printed names the
+    // phase that hung.
+    ::duetos::arch::SerialWrite("[kpath-persist] flush: build\n");
     const ::duetos::u64 len = BuildScratch(false);
+    ::duetos::arch::SerialWrite("[kpath-persist] flush: write\n");
     (void)WriteScratchToVolume(v, len);
+    ::duetos::arch::SerialWrite("[kpath-persist] flush: done\n");
 }
 
 void KPathPersistFlushPanicSafe()
