@@ -6,52 +6,29 @@
 #include "util/types.h"
 
 /*
- * DuetOS — per-process kernel-object handle table, v0 (plan A3) +
- * per-handle rights (Fuchsia/Zircon model).
+ * DuetOS - per-process kernel-object handle table, v2.
  *
- * WHAT
- *   A fixed-size array mapping `Handle` (u32) to `KObject*` plus a
- *   `u64 rights` bitmask. Native and Win32/NT and Linux ABI front-
- *   ends translate their own handle shapes to/from `Handle`; the
- *   kernel-internal name for an IPC object is its `KObject*` plus
- *   its `Handle` in the owning process's table.
+ * Handles are opaque, generation-tagged, positive 31-bit values:
  *
- * RIGHTS MODEL (ceiling vs floor)
- *   A locked effective Process capability snapshot (kCap*) is the
- *   authority ceiling — it gates whether the process can call the
- *   syscall family at all. Per-handle rights
- *   are the FLOOR — they can only NARROW from the ceiling. A handle
- *   can never grant a right the holding process's caps would not
- *   permit; `HandleDuplicate`/`HandleReplace` can produce a strictly
- *   reduced-rights variant but never an escalated one.
+ *     bits  0..11  slot (1..63 today)
+ *     bits 12..30  non-zero generation
+ *     bit      31  always zero
  *
- *   Default for a fresh handle: `kHandleRightAll`, masked by the
- *   kernel-object's `TypeAllowedRights` (KEvent has no Read/Write
- *   but does have Signal/Wait; KFile has Read/Write/Inspect but no
- *   Signal/Wait) AND by
- *   `ProcessCapsToHandleRights(ProcessCapsSnapshot(proc))` (a
- *   process without kCapFsWrite gets handles without Write).
+ * A terminal-generation slot is retired on close rather than wrapped.
+ * A stale token therefore cannot alias an object installed later in the
+ * same row. The table remains fixed-capacity; dynamic paging is a later
+ * extension that does not change this identity format.
  *
- * INDEX 0 IS RESERVED
- *   `kHandleInvalid = 0`. Slot 0 is never handed out, so a freshly
- *   zeroed `HandleTable` is in the "all-empty" state and any code
- *   that accidentally treats `0` as a valid handle hits the
- *   invalid-handle return path.
- *
- * NO BOOT-TIME ALLOCATOR
- *   Fixed-size storage — `HandleTable` is plain-old-data, safe to
- *   declare `static` or embed in a struct. v0 capacity is sized
- *   for the kinds of handle-counts a typical process holds; the
- *   plan's "10 000-handle stress test" verification is gated on
- *   raising this constant.
- *
- * THREADING
- *   Each table has its own `SpinLock`. Acquired around every
- *   `Insert / Lookup / Remove / Duplicate / CheckRight` so concurrent
- *   access from different ABI front-ends in the same process
- *   serialises safely. The lock does NOT cover the underlying
- *   `KObject`'s refcount — that uses `g_kobject_lock` from
- *   `kobject.cpp`.
+ * The table owns exactly one KObject reference per live slot. Insert
+ * adopts the caller's reference on success and leaves it untouched on
+ * failure. A publication reservation is an invisible, nonce-bound slot:
+ * it owns no KObject reference and can only be published with the exact
+ * reserved type and rights, or aborted. Retained lookup pins a row under
+ * table.lock, performs the checked KObject retain after dropping table.lock,
+ * then removes the pin.
+ * Close invalidates the exact generation and waits for those short pins
+ * before transferring the table-owned reference. No KObject retain,
+ * release, or destroy callback runs while table.lock is held.
  */
 
 namespace duetos::core
@@ -65,33 +42,79 @@ namespace duetos::ipc
 using Handle = u32;
 inline constexpr Handle kHandleInvalid = 0;
 
-/// v0 capacity. Sized for the typical process's live handle count
-/// (a Win32 GUI app rarely exceeds 30 simultaneous handles in
-/// production). Bumping this is a one-line change; the plan's
-/// "10 000 handles" stress is gated on a real workload demanding
-/// it.
+inline constexpr u32 kHandleSlotBits = 12;
+inline constexpr Handle kHandleSlotMask = (1u << kHandleSlotBits) - 1u;
+inline constexpr u32 kHandleGenerationBits = 19;
+inline constexpr u32 kHandleGenerationMax = (1u << kHandleGenerationBits) - 1u;
+inline constexpr Handle kHandlePositiveMax = 0x7FFFFFFFu;
+
+/// Fixed capacity for v2. Slot zero is the invalid sentinel, so 63 rows
+/// can be live. The 12-bit slot field intentionally leaves ABI room for
+/// later paged tables without changing generation placement.
 inline constexpr u32 kHandleTableCapacity = 64;
+static_assert(kHandleTableCapacity <= kHandleSlotMask + 1u, "handle slot field too narrow");
 
-// ---------------------------------------------------------------
-// Per-handle rights bitmask (Fuchsia/Zircon model).
-//
-// The rights enumeration mirrors the kernel's cap enumeration as
-// much as possible so a "drop rights to read-only" call is
-// intuitive. Each bit gates one class of operation on a handle:
-//
-//   kHandleRightRead    — read syscalls (fs read, ipc recv, evt query)
-//   kHandleRightWrite   — write syscalls (fs write, ipc send, sem post)
-//   kHandleRightDuplicate — caller may create a copy via HandleDuplicate
-//   kHandleRightTransfer  — caller may pass the handle through IPC
-//   kHandleRightWait    — caller may wait on the object (sync objects)
-//   kHandleRightSignal  — caller may signal the object (events)
-//   kHandleRightDestroy — caller may explicitly close (vs lifetime-managed)
-//   kHandleRightInspect — caller may query state (size, type, name)
-//
-// New rights APPEND at the end. The numeric values are stable —
-// once a rights bit is published it never moves.
-// ---------------------------------------------------------------
+inline constexpr Handle HandleEncode(u32 slot, u32 generation)
+{
+    return (slot > 0 && slot < kHandleTableCapacity && generation > 0 && generation <= kHandleGenerationMax)
+               ? static_cast<Handle>((generation << kHandleSlotBits) | slot)
+               : kHandleInvalid;
+}
 
+inline constexpr bool HandleDecode(Handle handle, u32* out_slot, u32* out_generation)
+{
+    if (handle == kHandleInvalid || handle > kHandlePositiveMax)
+        return false;
+    const u32 slot = handle & kHandleSlotMask;
+    const u32 generation = handle >> kHandleSlotBits;
+    if (slot == 0 || slot >= kHandleTableCapacity || generation == 0 || generation > kHandleGenerationMax)
+        return false;
+    if (out_slot != nullptr)
+        *out_slot = slot;
+    if (out_generation != nullptr)
+        *out_generation = generation;
+    return true;
+}
+
+inline constexpr u32 HandleSlotIndex(Handle handle)
+{
+    u32 slot = 0;
+    return HandleDecode(handle, &slot, nullptr) ? slot : 0;
+}
+
+/// Preserve the generation while substituting a low-12-bit ABI type
+/// band (0x200 for Mutex, 0x300 for Event, 0x500 for Semaphore, etc.).
+inline constexpr bool HandleEncodeTagged(Handle handle, u32 tag_base, u64* out_value)
+{
+    u32 slot = 0;
+    u32 generation = 0;
+    if (out_value == nullptr || tag_base > kHandleSlotMask || tag_base + kHandleTableCapacity > 0x1000u ||
+        !HandleDecode(handle, &slot, &generation))
+        return false;
+    *out_value = static_cast<u64>((generation << kHandleSlotBits) | (tag_base + slot));
+    return true;
+}
+
+/// Decode a PE32-safe tagged handle. Values with upper bits, bit 31,
+/// generation zero, slot zero, or a tag outside the requested band fail.
+inline constexpr bool HandleDecodeTagged(u64 value, u32 tag_base, Handle* out_handle)
+{
+    if (out_handle == nullptr || value == 0 || value > kHandlePositiveMax || tag_base > kHandleSlotMask ||
+        tag_base + kHandleTableCapacity > 0x1000u)
+        return false;
+    const u32 raw = static_cast<u32>(value);
+    const u32 low_tag = raw & kHandleSlotMask;
+    const u32 generation = raw >> kHandleSlotBits;
+    if (low_tag <= tag_base || low_tag >= tag_base + kHandleTableCapacity || generation == 0)
+        return false;
+    const Handle decoded = HandleEncode(low_tag - tag_base, generation);
+    if (decoded == kHandleInvalid)
+        return false;
+    *out_handle = decoded;
+    return true;
+}
+
+// Per-handle rights. Numeric values are stable; append new rights.
 inline constexpr u64 kHandleRightRead = 1ULL << 0;
 inline constexpr u64 kHandleRightWrite = 1ULL << 1;
 inline constexpr u64 kHandleRightDuplicate = 1ULL << 2;
@@ -101,168 +124,160 @@ inline constexpr u64 kHandleRightSignal = 1ULL << 5;
 inline constexpr u64 kHandleRightDestroy = 1ULL << 6;
 inline constexpr u64 kHandleRightInspect = 1ULL << 7;
 
-/// Convenience: full rights mask. New handles get this, AND'd by
-/// the kernel-object type's allowed set and by the process's caps.
 inline constexpr u64 kHandleRightAll = kHandleRightRead | kHandleRightWrite | kHandleRightDuplicate |
                                        kHandleRightTransfer | kHandleRightWait | kHandleRightSignal |
                                        kHandleRightDestroy | kHandleRightInspect;
 
-/// Return the subset of `kHandleRight*` meaningful for a given
-/// kernel-object type. KEvent has no Read/Write but does have
-/// Signal/Wait; KFile has Read/Write/Inspect but no Signal. KMutex
-/// has Wait/Signal-equivalent (acquire/release) but no Read/Write.
-/// Used at handle-creation time to mask the default-rights value
-/// down to the operations the underlying type actually supports.
+/// Rights meaningful for a concrete object type.
 u64 TypeAllowedRights(KObjectType type);
 
-/// Map an effective Process capability snapshot to the subset of
-/// `kHandleRight*`
-/// the process is permitted to GRANT on new handles. A process
-/// without kCapFsWrite cannot mint handles carrying Write rights;
-/// without kCapDebug it cannot mint handles carrying Inspect
-/// rights. This is the policy layer that translates ambient
-/// process-level authority into per-handle authority.
-u64 ProcessCapsToHandleRights(const ::duetos::core::CapSet& caps);
+/// Type-aware capability ceiling for a freshly-created handle. In
+/// particular, File Read and Write map independently to kCapFsRead and
+/// kCapFsWrite; filesystem policy never leaks onto mailbox Write.
+u64 HandleRightsForProcess(KObjectType type, const ::duetos::core::CapSet& caps);
+
+enum class HandleSlotState : u8
+{
+    Free = 0,
+    Live = 1,
+    Closing = 2,
+    Retired = 3,
+    Reserved = 4,
+};
+
+enum class HandleTableState : u8
+{
+    Open = 0,
+    Draining,
+    Closed,
+};
 
 struct HandleSlot
 {
-    KObject* obj; ///< nullptr = free
-    u64 rights;   ///< per-handle rights mask (kHandleRight*)
+    KObject* obj;
+    u64 rights;
+    u64 reservation_nonce;
+    u32 generation;
+    u32 acquisition_pins;
+    KObjectType reserved_type;
+    HandleSlotState state;
 };
 
 struct HandleTable
 {
     HandleSlot slots[kHandleTableCapacity];
     sync::SpinLock lock;
-    /// Index to start the next insert scan from. The previous
-    /// allocation lands at slots[next_free_hint]; the next insert
-    /// starts looking at slots[next_free_hint + 1] and wraps. With
-    /// a sparsely-populated table this skips the typically-busy
-    /// prefix; with a full table behaviour is identical to a
-    /// from-zero scan. Zero-init is correct (the unused slot 0 is
-    /// reserved for kHandleInvalid, so wrap-skipping it is OK).
     u32 next_free_hint;
+    u32 active_operations;
+    HandleTableState state;
 };
 
-/// Insert `obj` into the table with the FULL default-rights mask
-/// (kHandleRightAll & TypeAllowedRights(obj->type)). Process-caps
-/// masking is the caller's responsibility — most syscall entry
-/// sites already know their CurrentProcess and call the rights-
-/// aware overload below. The table takes ownership of the caller's
-/// reference (no extra `KObjectAcquire`).
-///
-/// Returns the assigned `Handle` (always >= 1), or
-/// `Err{ErrorCode::OutOfMemory}` if the table is full.
-::duetos::core::Result<Handle> HandleTableInsert(HandleTable& table, KObject* obj);
-
-/// Insert with an explicit rights mask. The stored rights are
-/// `requested_rights & TypeAllowedRights(obj->type)` — a caller can
-/// only ever NARROW from the type-allowed ceiling. Use this overload
-/// at syscall entry sites where the caller's effective capability
-/// snapshot is known and should further narrow the default. Common form:
-///
-///     HandleTableInsert(table, obj,
-///         kHandleRightAll &
-///             ProcessCapsToHandleRights(ProcessCapsSnapshot(proc)));
+/// Install `obj` with explicit rights. Success adopts the caller's
+/// existing reference; failure leaves ownership with the caller.
+/// Zero or unsupported rights are rejected rather than publishing a
+/// rightsless or silently-masked production handle.
 ::duetos::core::Result<Handle> HandleTableInsert(HandleTable& table, KObject* obj, u64 requested_rights);
 
-/// Look up `h` in the table. If `expected_type` is non-Invalid,
-/// the slot's object's type must match. Returns:
-///   - the `KObject*` on success (no refcount change — caller must
-///     not hold the pointer past a possible `HandleTableRemove`).
-///   - nullptr for any of: invalid handle, out-of-range handle,
-///     empty slot, type mismatch.
-KObject* HandleTableLookup(HandleTable& table, Handle h, KObjectType expected_type);
+/// Exact unpublished slot reservation for a multi-object transaction.
+/// The returned handle is not visible to lookup, rights, live-count, or
+/// snapshot APIs until Publish succeeds. A reservation owns no KObject
+/// reference. Its boot-global nonce prevents replay across table reuse or
+/// against another table with the same slot/generation shape.
+struct HandleTableReservation
+{
+    Handle handle;
+    u64 nonce;
+};
 
-/// Lookup with an additional reference taken. The ref is acquired
-/// under the table's lock so it cannot race with a concurrent
-/// `HandleTableRemove`. Caller MUST pair the returned non-null
-/// pointer with a `KObjectRelease` once done. Used by syscall
-/// handlers that need the kernel object to stay alive across a
-/// blocking primitive (Wait / Acquire) where the issuing process
-/// could close the handle in parallel.
-KObject* HandleTableLookupRef(HandleTable& table, Handle h, KObjectType expected_type);
+inline constexpr HandleTableReservation kInvalidHandleTableReservation{kHandleInvalid, 0};
 
-/// Read the current rights mask of `h`. Returns 0 for any of:
-/// invalid handle, out-of-range, empty slot. Cheap: one lookup +
-/// one read under the table lock. Diagnostic / inspect use only.
+inline constexpr bool HandleTableReservationIsValid(HandleTableReservation reservation)
+{
+    return reservation.handle != kHandleInvalid && reservation.nonce != 0;
+}
+
+::duetos::core::Result<HandleTableReservation> HandleTableReserve(HandleTable& table, KObjectType object_type,
+                                                                  u64 requested_rights);
+
+/// Publish `obj` into one exact reservation. Success adopts the caller's
+/// existing reference and consumes the reservation. Failure leaves caller
+/// ownership unchanged; if the table is still open, the exact reservation
+/// remains available for Abort.
+::duetos::core::Result<Handle> HandleTablePublish(HandleTable& table, HandleTableReservation reservation, KObject* obj);
+
+/// Abort one exact reservation. No KObject retain/release occurs. Replays,
+/// cross-table tickets, published tickets, and stale generations fail closed.
+::duetos::core::Result<void> HandleTableAbort(HandleTable& table, HandleTableReservation reservation);
+
+/// Exact retained lookup. Generation, type, and required-rights checks
+/// are one linearized operation. Returns nullptr on any validation or
+/// checked-retain failure. Caller releases every non-null result.
+KObject* HandleTableLookupRef(HandleTable& table, Handle h, KObjectType expected_type, u64 required_rights = 0);
+
+/// Generation-safe metadata queries. Rights returns zero for an invalid,
+/// stale, closing, or missing handle. CheckRight rejects a zero request.
 u64 HandleTableRights(HandleTable& table, Handle h);
-
-/// Per-handle rights check. Returns true iff:
-///   - `h` exists in `table` (in-range, non-zero, non-empty slot),
-///     AND
-///   - every bit in `required_rights` is set in the slot's rights.
-///
-/// Use at every syscall that operates on a handle, AFTER the
-/// kernel's process-level `CapCheck` (the ceiling) and BEFORE the
-/// real work:
-///
-///     if (!HandleCheckRight(proc->kobj_handles, h, kHandleRightWrite))
-///         return Err{ErrorCode::PermissionDenied};
-///
-/// Cheap: one lookup + one bitand. The kernel's process-level cap
-/// check still runs upstream; this is the narrower per-handle gate.
 bool HandleCheckRight(HandleTable& table, Handle h, u64 required_rights);
 
-/// Remove `h` from the table. Calls `KObjectRelease` on the slot's
-/// object (the table held a reference; it is dropping it). Returns
-/// Ok on success, `Err{ErrorCode::InvalidArgument}` for bad
-/// handles.
-///
-/// Note: Remove deliberately does NOT enforce
-/// `kHandleRightDestroy` — process tear-down (`HandleTableDrain`)
-/// must always be able to reclaim every handle regardless of
-/// rights. Syscall front-ends that want to honour a missing
-/// Destroy right should check it explicitly via
-/// `HandleCheckRight` BEFORE calling Remove.
+/// Atomically invalidate an exact handle and transfer the table-owned
+/// reference to the caller. The caller must release the returned object
+/// after any type-specific close action.
+::duetos::core::Result<KObject*> HandleTableDetach(HandleTable& table, Handle h, KObjectType expected_type,
+                                                   u64 required_rights = 0);
+
+/// Remove an exact handle and release its table-owned ref outside the
+/// table lock. Teardown uses this rights-bypassing primitive; public
+/// CloseHandle paths should use HandleTableDetach with Destroy required.
 ::duetos::core::Result<void> HandleTableRemove(HandleTable& table, Handle h);
 
-/// Duplicate handle `h` from `src` into `dst`, preserving the
-/// source handle's full rights mask. Calls `KObjectAcquire` to add
-/// a fresh reference for `dst`.
+/// Duplicate to `dst`, preserving or explicitly narrowing rights. The
+/// source must carry Duplicate and a checked retain must succeed before
+/// destination publication. No two table locks are held together.
 ::duetos::core::Result<Handle> HandleTableDuplicate(HandleTable& src, HandleTable& dst, Handle h);
-
-/// Same as `HandleTableDuplicate` but with explicit rights
-/// narrowing. The new handle's rights are
-/// `src_rights & requested_rights`. Returns
-/// `Err{ErrorCode::PermissionDenied}` if the source handle lacks
-/// `kHandleRightDuplicate`, or if `requested_rights` would
-/// ESCALATE (has bits not present in src's current rights).
 ::duetos::core::Result<Handle> HandleTableDuplicateRights(HandleTable& src, HandleTable& dst, Handle h,
                                                           u64 requested_rights);
 
-/// Replace `src_handle` in `table` with a strictly-reduced-rights
-/// variant. Equivalent to duplicate-then-close-src but atomic (no
-/// window where both exist). On success the old handle id is
-/// invalidated and the returned id is the new one. `requested_rights`
-/// must be a subset of the source's current rights — any bit not
-/// already present is treated as a request to ESCALATE and rejected.
-/// Returns `Err{ErrorCode::PermissionDenied}` on attempted
-/// escalation or missing `kHandleRightDuplicate`;
-/// `Err{ErrorCode::InvalidArgument}` for bad source handle;
-/// `Err{ErrorCode::OutOfMemory}` if the table is full (in which case
-/// the source handle is preserved unchanged).
+/// In-place atomic rights replacement. The object/ref and slot stay put;
+/// generation increments under one lock acquisition, invalidating the old
+/// token without a duplicate-then-remove visibility window.
 ::duetos::core::Result<Handle> HandleReplace(HandleTable& table, Handle src_handle, u64 requested_rights);
 
-/// Total live handle count. Linear scan; cheap.
+struct HandleAdoptReplaceResult
+{
+    Handle handle;
+    KObject* displaced;
+};
+
+/// Atomically replace the object owned by one exact live handle. The caller
+/// supplies an already-owned `replacement` reference; success adopts it,
+/// invalidates `existing`, and transfers the displaced table-owned reference
+/// to the caller for release after all outer locks are gone. Failure leaves
+/// both the table and caller ownership unchanged. No retain, release, or
+/// destroy callback runs while `table.lock` is held.
+::duetos::core::Result<HandleAdoptReplaceResult> HandleTableAdoptReplace(
+    HandleTable& table, Handle existing, KObject* replacement, u64 requested_rights,
+    KObjectType expected_type = KObjectType::Invalid);
+
 u32 HandleTableLiveCount(HandleTable& table);
 
-/// Drop every handle in the table. Used by process tear-down.
-/// Calls `KObjectRelease` for every non-empty slot. Safe to call
-/// on an already-empty table.
+struct HandleSnapshotEntry
+{
+    Handle handle;
+    KObjectType type;
+    u64 rights;
+};
+
+/// Copy handle/type/rights metadata without exposing borrowed pointers.
+/// Returns total live rows; writes at most `capacity` entries.
+u32 HandleTableSnapshot(HandleTable& table, HandleSnapshotEntry* out, u32 capacity);
+
+/// Terminal teardown. New operations fail once draining starts. All live
+/// table-owned references are detached under the lock and released after
+/// it. Safe and idempotent on an already-drained table.
 void HandleTableDrain(HandleTable& table);
 
-/// Boot-time self-test for the base handle-table operations:
-/// insert/lookup/duplicate/remove/drain. Panics on any mismatch.
 void HandleTableSelfTest();
-
-/// Boot-time self-test for the per-handle-rights extension.
-/// Exercises: type-allowed masking at creation, caps-derived
-/// narrowing, HandleDuplicate with reduced rights, refusal of
-/// escalation attempts, refusal when source lacks Duplicate right,
-/// HandleReplace atomicity, and HandleCheckRight gating. Panics on
-/// any mismatch — the rights model is load-bearing for every
-/// handle-mediated syscall and a regression here is a hard stop.
 void HandleRightsSelfTest();
+void HandleTableContentionSelfTest();
 
 } // namespace duetos::ipc
