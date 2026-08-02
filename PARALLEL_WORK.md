@@ -1259,13 +1259,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T21:39:40Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] proc-thread-group-api
+### [DONE] proc-thread-group-api
 - **Session**: `Nathan-963`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/proc/thread_group.h`
 - **Description**: Opaque
 - **Claimed**: 2026-07-31T21:41:56Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T09:46:01Z
 
 ### [ACTIVE] proc-thread-group-core
 - **Session**: `Nathan-2031`
