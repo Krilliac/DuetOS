@@ -3675,10 +3675,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T06:42:59Z
 - **Status**: COMPLETED @ 2026-08-02T06:43:49Z
 
-### [ACTIVE] service-process-teardown-readiness-drift-20260802
+### [DONE] service-process-teardown-readiness-drift-20260802
 - **Session**: `Codex-ProcessTeardownReadiness-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tests/host/test_service_process_endpoint_teardown.cpp`
 - **Description**: Update completed ProcessKey endpoint teardown fixture for explicit joint directory readiness before Connect
 - **Claimed**: 2026-08-02T06:49:18Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T06:50:16Z
