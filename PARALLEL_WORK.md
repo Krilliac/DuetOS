@@ -3283,13 +3283,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T01:06:09Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] pci-endpoint-identity-20260801
+### [DONE] pci-endpoint-identity-20260801
 - **Session**: `Nathan-1003`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/drivers/pci/pci.h,kernel/drivers/pci/pci.cpp,tests/host/test_pci_endpoint_identity.cpp,tools/test/test-pci-endpoint-identity-contract.py`
 - **Description**: Cached endpoint-only revision programming-interface and subsystem identity with hostile decode coverage
 - **Claimed**: 2026-08-02T01:26:34Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T01:52:48Z
 
 ### [ACTIVE] net-mt7921-fixedmap-20260801
 - **Session**: `Fable-MT7921Slice-20260801`
