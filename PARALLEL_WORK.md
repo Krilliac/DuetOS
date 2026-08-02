@@ -3811,13 +3811,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T08:51:11Z
 - **Status**: COMPLETED @ 2026-08-02T08:56:45Z
 
-### [ACTIVE] daemon-source-publish-20260802
+### [DONE] daemon-source-publish-20260802
 - **Session**: `Codex-DaemonSourcePublish-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `userland/native-apps/displayd/display_engine.c,userland/native-apps/displayd/display_engine.h,userland/native-apps/displayd/display_engine_event.c,userland/native-apps/displayd/display_engine_internal.h,userland/native-apps/displayd/display_engine_request.c,userland/native-apps/displayd/display_engine_validate.c,userland/native-apps/displayd/displayd.c,userland/native-apps/execd/execd.c,userland/native-apps/execd/worker.c,userland/native-apps/execd/worker.h,userland/native-apps/execd/worker_internal.h,userland/native-apps/execd/worker_request.c,userland/native-apps/registryd/registry_recovery.c,userland/native-apps/registryd/registry_store_internal.h,userland/native-apps/registryd/registry_validate.c,userland/native-apps/registryd/registryd.c,userland/native-apps/serviced/serviced.c,userland/native-apps/serviced/supervisor.c,userland/native-apps/serviced/supervisor.h,userland/native-apps/serviced/supervisor_command.c,userland/native-apps/serviced/supervisor_event.c,userland/native-apps/serviced/supervisor_internal.h,userland/native-apps/serviced/supervisor_policy.c,userland/native-apps/serviced/supervisor_reconcile.c,tests/host/test_displayd_engine.cpp,tests/host/test_execd_worker.cpp,tests/host/test_serviced_supervisor.cpp,tools/test/test-execd-worker-contract.py,tools/test/test-serviced-supervisor-contract.py`
 - **Description**: Publish
 - **Claimed**: 2026-08-02T08:51:13Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T09:01:41Z
 
 ### [ACTIVE] service-control-platform-adapter-20260802
 - **Session**: `Codex-ServiceControlPlatform-20260802`
