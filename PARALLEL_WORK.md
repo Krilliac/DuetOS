@@ -3219,10 +3219,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T23:26:59Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] displayd-engine-split-20260801
+### [DONE] displayd-engine-split-20260801
 - **Session**: `Codex-DisplaydEngine-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `userland/native-apps/displayd/display_engine_validate.c userland/native-apps/displayd/display_engine_event.c`
 - **Description**: Mechanical anti-bloat split of validated displayd engine
 - **Claimed**: 2026-08-01T23:50:40Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T00:02:35Z
