@@ -3890,3 +3890,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Audit
 - **Claimed**: 2026-08-02T10:03:27Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-live-control-host-build-20260802
+- **Session**: `Codex-ServiceLiveControlIntegration-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tests/host/CMakeLists.txt`
+- **Description**: Register embedded reap ledger dependency and typed service-control platform host target
+- **Claimed**: 2026-08-02T10:09:24Z
+- **Status**: IN PROGRESS
