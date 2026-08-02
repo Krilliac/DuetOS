@@ -382,7 +382,9 @@ void CmdNic()
     }
     for (u64 i = 0; i < n; ++i)
     {
-        const auto& nic = duetos::drivers::net::Nic(i);
+        duetos::drivers::net::NicInfo nic{};
+        if (!duetos::drivers::net::NicSnapshot(i, &nic))
+            break;
         ConsoleWrite("NIC ");
         WriteU64Dec(i);
         ConsoleWrite(": vid=");
@@ -422,7 +424,9 @@ void CmdIfconfig()
     }
     for (duetos::u64 i = 0; i < nics; ++i)
     {
-        const auto& nic = duetos::drivers::net::Nic(i);
+        duetos::drivers::net::NicInfo nic{};
+        if (!duetos::drivers::net::NicSnapshot(i, &nic))
+            break;
         const bool bound = duetos::net::InterfaceIsBound(static_cast<duetos::u32>(i));
         ConsoleWrite("net");
         WriteU64Dec(i);
@@ -618,10 +622,11 @@ void CmdNetscan()
     bool any_eth = false;
     for (u64 i = 0; i < nics; ++i)
     {
-        const auto& nic = duetos::drivers::net::Nic(i);
-        const bool wifiish = nic.subclass == 0x80 || (nic.family != nullptr && (StrStartsWith(nic.family, "iwlwifi") ||
-                                                                                StrStartsWith(nic.family, "rtl8821") ||
-                                                                                StrStartsWith(nic.family, "bcm4")));
+        duetos::drivers::net::NicInfo nic{};
+        if (!duetos::drivers::net::NicSnapshot(i, &nic))
+            break;
+        const bool wifiish = nic.subclass == duetos::drivers::net::kPciSubclassOther ||
+                             duetos::drivers::net::nic_ids::NicFamilyLooksWireless(nic.family);
         if (wifiish)
             any_wifi = true;
         else
@@ -677,8 +682,11 @@ void CmdNetscan()
     }
     for (u64 i = 0; i < nics; ++i)
     {
-        const auto& nic = duetos::drivers::net::Nic(i);
-        if (nic.subclass == 0x80)
+        duetos::drivers::net::NicInfo nic{};
+        if (!duetos::drivers::net::NicSnapshot(i, &nic))
+            break;
+        if (nic.subclass == duetos::drivers::net::kPciSubclassOther ||
+            duetos::drivers::net::nic_ids::NicFamilyLooksWireless(nic.family))
             continue;
         ConsoleWrite("  net");
         WriteU64Dec(i);
@@ -842,10 +850,11 @@ void CmdWifi(u32 argc, char** argv)
         if (capture)
             duetos::net::wireless::diag::Clear();
 
-        duetos::drivers::net::NetInit();
+        if (!duetos::drivers::net::NetInit())
+            ConsoleWriteln("WIFI: NIC activation refused (registry transition or quarantined teardown)");
 
         const auto wifi = duetos::drivers::net::WirelessStatusRead();
-        ConsoleWrite("WIFI: hardware path activated adapters=");
+        ConsoleWrite("WIFI: inventory refreshed adapters=");
         WriteU64Dec(wifi.adapters_detected);
         ConsoleWrite(" drivers=");
         WriteU64Dec(wifi.drivers_online);
@@ -863,9 +872,12 @@ void CmdWifi(u32 argc, char** argv)
 
         for (u64 i = 0; i < duetos::drivers::net::NicCount(); ++i)
         {
-            if (!duetos::drivers::net::NicIsWireless(i))
+            duetos::drivers::net::NicInfo nic{};
+            if (!duetos::drivers::net::NicSnapshot(i, &nic))
+                break;
+            if (nic.subclass != duetos::drivers::net::kPciSubclassOther &&
+                !duetos::drivers::net::nic_ids::NicFamilyLooksWireless(nic.family))
                 continue;
-            const auto& nic = duetos::drivers::net::Nic(i);
             ConsoleWrite("  wifi");
             WriteU64Dec(i);
             ConsoleWrite(" vendor=");

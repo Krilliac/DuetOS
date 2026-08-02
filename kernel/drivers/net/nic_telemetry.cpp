@@ -28,7 +28,9 @@ void NicTelemetryProbe()
     }
     for (u64 i = 0; i < n; ++i)
     {
-        const NicInfo& nic = Nic(i);
+        NicInfo nic{};
+        if (!NicSnapshot(i, &nic))
+            break;
         SerialWrite("[nic] ");
         SerialWrite(nic.family != nullptr ? nic.family : "unknown");
         if (nic.mac_valid)

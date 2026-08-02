@@ -287,10 +287,13 @@ TelemetryNet TelemetryNetSample()
     const u64 nic_count = dnet::NicCount();
     for (u64 i = 0; i < nic_count && out.count < kTelemetryMaxNics; ++i)
     {
-        const auto& n = dnet::Nic(i);
+        dnet::NicInfo n{};
+        if (!dnet::NicSnapshot(i, &n))
+            break;
         TelemetryNic& t = out.nics[out.count];
 
-        t.kind = dnet::NicIsWireless(i) ? TelemetryNicKind::Wireless : TelemetryNicKind::Ethernet;
+        const bool wireless = n.subclass == dnet::kPciSubclassOther || dnet::nic_ids::NicFamilyLooksWireless(n.family);
+        t.kind = wireless ? TelemetryNicKind::Wireless : TelemetryNicKind::Ethernet;
         t.vendor_id = n.vendor_id;
         t.device_id = n.device_id;
         t.vendor_name = ::duetos::core::PciVendorName(n.vendor_id);
