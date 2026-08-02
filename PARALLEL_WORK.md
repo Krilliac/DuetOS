@@ -1011,13 +1011,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T19:37:47Z
 - **Status**: COMPLETED @ 2026-08-01T04:31:33Z
 
-### [ACTIVE] immutable-load-plan
+### [DONE] immutable-load-plan
 - **Session**: `Codex-kobject-handle-v2`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/loader/load_plan.h kernel/loader/load_plan.cpp tests/host/test_load_plan.cpp`
 - **Description**: Versioned immutable executable load plan with allocation-free hostile-input validation
 - **Claimed**: 2026-07-31T19:40:18Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T09:44:43Z
 
 ### [DONE] boot-truth-faq
 - **Session**: `Codex-gui-task-queue`
