@@ -3203,13 +3203,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T23:05:29Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] netd-socket-engine-20260801
+### [DONE] netd-socket-engine-20260801
 - **Session**: `Codex-NetdSocketEngine-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `userland/native-apps/netd/socket_engine.h,userland/native-apps/netd/socket_engine_internal.h,userland/native-apps/netd/socket_engine.c,userland/native-apps/netd/socket_engine_request.c,tests/host/test_netd_socket_engine.cpp,tools/test/test-netd-socket-engine-contract.py`
 - **Description**: Fixed-capacity authenticated netd socket Open Close transaction engine with fail-closed transport attachment and exact drain cleanup
 - **Claimed**: 2026-08-01T23:13:18Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T10:51:03Z
 
 ### [DONE] netd-socket-engine-split-20260801
 - **Session**: `Codex-NetdSocketEngine-20260801`
