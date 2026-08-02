@@ -4090,3 +4090,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Publish
 - **Claimed**: 2026-08-02T12:20:27Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] process-lifecycle-integration-recovery-20260802
+- **Session**: `Codex-ProcessLifecycle-Recovery-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/proc/process.h,kernel/proc/process.cpp,kernel/proc/job.h,kernel/proc/job.cpp,kernel/sched/sched.h,kernel/sched/sched.cpp,tools/test/test-process-runtime-access-contract.py,tools/test/test-process-handle-generation-contract.py,tools/test/test-process-child-wait-cancellation-contract.py,tools/test/test-process-authority-wiring-contract.py,tools/test/test-linux-exit-unwind-contract.py,tools/test/test-linux-child-relation-contract.py,tools/test/test-job-member-completion-contract.py,tools/test/test-job-runtime-proof-contract.py,tools/test/test-job-scheduler-linearization-contract.py,tools/test/test-task-cancellation-contract.py`
+- **Description**: Recover
+- **Claimed**: 2026-08-02T12:21:47Z
+- **Status**: IN PROGRESS
