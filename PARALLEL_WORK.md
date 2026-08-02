@@ -3691,13 +3691,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T06:50:38Z
 - **Status**: COMPLETED @ 2026-08-02T06:51:06Z
 
-### [ACTIVE] service-live-restage-banks-20260802
+### [DONE] service-live-restage-banks-20260802
 - **Session**: `Codex-ServiceLiveRestageBanks-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/core/service_bootstrap_live.h,kernel/core/service_bootstrap_live.cpp,tools/test/test-service-bootstrap-live-contract.py,tests/host/test_service_bootstrap_live.cpp`
 - **Description**: Provision restart-safe fixed two-bank live service staging owner with failure-atomic inactive-bank restage seam and hostile hosted coverage
 - **Claimed**: 2026-08-02T06:52:53Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T07:23:22Z
 
 ### [ACTIVE] service-control-syscall-20260802
 - **Session**: `Codex-ServiceControlSyscall-20260802`
