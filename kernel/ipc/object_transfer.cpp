@@ -15,12 +15,6 @@ namespace duetos::ipc
 namespace
 {
 
-struct DecodedTransferRef
-{
-    u32 slot;
-    u32 generation;
-};
-
 #if defined(DUETOS_HOST_TEST)
 u32 AtomicFetchAdd(u32* value, u32 increment)
 {
@@ -38,17 +32,6 @@ void AtomicStoreRelease(u32* value, u32 next)
 }
 #endif
 
-void CpuRelax()
-{
-#if defined(DUETOS_HOST_TEST) && defined(_MSC_VER)
-    _mm_pause();
-#elif defined(DUETOS_HOST_TEST)
-    __builtin_ia32_pause();
-#else
-    asm volatile("pause" ::: "memory");
-#endif
-}
-
 class TransferGuard
 {
   public:
@@ -57,7 +40,13 @@ class TransferGuard
         : m_table(table), m_ticket(AtomicFetchAdd(&table.lock.next_ticket, 1))
     {
         while (AtomicLoadAcquire(&table.lock.now_serving) != m_ticket)
-            CpuRelax();
+        {
+#if defined(_MSC_VER)
+            _mm_pause();
+#else
+            __builtin_ia32_pause();
+#endif
+        }
     }
 
     ~TransferGuard() { AtomicStoreRelease(&m_table.lock.now_serving, m_ticket + 1u); }
@@ -80,16 +69,46 @@ class TransferGuard
 #endif
 };
 
-bool DecodeTransferRefNospec(ObjectTransferRef reference, DecodedTransferRef* out)
+ObjectTransferDecodedRef DecodeTransferRefNospec(ObjectTransferRef reference)
 {
-    u32 slot = 0;
-    u32 generation = 0;
-    if (out == nullptr || !ObjectTransferRefDecode(reference, &slot, &generation))
+    const ObjectTransferDecodedRef decoded = ObjectTransferRefDecode(reference);
+    if (!ObjectTransferDecodedRefIsValid(decoded))
+        return kInvalidObjectTransferDecodedRef;
+    const u32 masked_slot = util::MaskedIndex32(decoded.slot, kObjectTransferTableCapacity);
+    if (masked_slot != decoded.slot)
+        return kInvalidObjectTransferDecodedRef;
+    return ObjectTransferDecodedRef{masked_slot, decoded.generation};
+}
+
+bool MetadataIsZero(const ObjectTransferImmutableMetadata& metadata)
+{
+    if (metadata.identity != 0 || metadata.object_size != 0 || metadata.flags != 0 || metadata.reserved != 0)
         return false;
-    const u32 masked_slot = util::MaskedIndex32(slot, kObjectTransferTableCapacity);
-    if (masked_slot != slot)
+    for (u32 index = 0; index < sizeof(metadata.content_hash); ++index)
+    {
+        if (metadata.content_hash[index] != 0)
+            return false;
+    }
+    return true;
+}
+
+bool TableIsCanonicalUninitialized(const ObjectTransferTable& table)
+{
+    if (table.initialized != 0 || table.state != ObjectTransferTableState::Uninitialized || table.next_free_hint != 0 ||
+        table.active_operations != 0)
+    {
         return false;
-    *out = DecodedTransferRef{masked_slot, generation};
+    }
+    for (u32 index = 0; index < kObjectTransferTableCapacity; ++index)
+    {
+        const ObjectTransferSlot& slot = table.slots[index];
+        if (slot.object != nullptr || !MetadataIsZero(slot.metadata) || slot.rights != 0 || slot.generation != 0 ||
+            slot.acquisition_pins != 0 || slot.type != KObjectType::Invalid ||
+            slot.state != ObjectTransferSlotState::Free)
+        {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -101,8 +120,7 @@ bool MetadataValid(const ObjectTransferImmutableMetadata& metadata)
 
 bool AuthorityValid(const ObjectTransferAuthority& authority)
 {
-    if (authority.type == KObjectType::Invalid || authority.rights == 0 ||
-        (authority.rights & ~kHandleRightAll) != 0)
+    if (authority.type == KObjectType::Invalid || authority.rights == 0 || (authority.rights & ~kHandleRightAll) != 0)
     {
         return false;
     }
@@ -112,8 +130,7 @@ bool AuthorityValid(const ObjectTransferAuthority& authority)
 bool RequestedRightsValid(KObjectType expected_type, u64 requested_rights)
 {
     return expected_type != KObjectType::Invalid && requested_rights != 0 &&
-           (requested_rights & ~kHandleRightAll) == 0 &&
-           (requested_rights & ~TypeAllowedRights(expected_type)) == 0;
+           (requested_rights & ~kHandleRightAll) == 0 && (requested_rights & ~TypeAllowedRights(expected_type)) == 0;
 }
 
 bool SlotMatches(const ObjectTransferSlot& slot, u32 generation)
@@ -131,7 +148,7 @@ ObjectTransferStatus ReferenceFailure(const ObjectTransferSlot& slot, u32 genera
 ObjectTransferSlotState ClosedStateFor(const ObjectTransferSlot& slot)
 {
     return slot.generation == kObjectTransferGenerationMax ? ObjectTransferSlotState::Retired
-                                                            : ObjectTransferSlotState::Free;
+                                                           : ObjectTransferSlotState::Free;
 }
 
 void ClearMetadata(ObjectTransferImmutableMetadata* metadata)
@@ -165,6 +182,20 @@ ObjectTransferImportResult ImportFailure(ObjectTransferStatus status,
     return ObjectTransferImportResult{status, destination_error, kHandleInvalid, EmptyAuthority()};
 }
 
+ObjectTransferImportResult AbortImportReservation(HandleTable& destination, HandleTableReservation reservation,
+                                                  ObjectTransferStatus status,
+                                                  core::ErrorCode destination_error = core::ErrorCode::Ok)
+{
+    const core::Result<void> aborted = HandleTableAbort(destination, reservation);
+    if (aborted.has_value() || aborted.error() == core::ErrorCode::BadState)
+        return ImportFailure(status, destination_error);
+
+    // This function is the sole owner of an unpublished exact reservation.
+    // InvalidArgument therefore means its generation/nonce was consumed or
+    // changed behind us while the destination table remained open.
+    return ImportFailure(ObjectTransferStatus::CorruptState, aborted.error());
+}
+
 ObjectTransferStatus StateFailure(ObjectTransferTableState state)
 {
     switch (state)
@@ -186,6 +217,10 @@ ObjectTransferStatus ObjectTransferTableInitialize(ObjectTransferTable* table, u
 {
     if (table == nullptr || first_generation == 0 || first_generation > kObjectTransferGenerationMax)
         return ObjectTransferStatus::InvalidArgument;
+    if (table->initialized == 1)
+        return ObjectTransferStatus::AlreadyInitialized;
+    if (!TableIsCanonicalUninitialized(*table))
+        return ObjectTransferStatus::CorruptState;
 
 #if defined(DUETOS_HOST_TEST)
     table->lock.next_ticket = 0;
@@ -229,10 +264,8 @@ ObjectTransferExportResult ObjectTransferExport(ObjectTransferTable* table, Hand
     if (!AuthorityValid(authority_snapshot))
         return ExportFailure(ObjectTransferStatus::InvalidArgument);
 
-    const u64 required_source_rights =
-        kHandleRightTransfer | kHandleRightDuplicate | authority_snapshot.rights;
-    KObject* retained =
-        HandleTableLookupRef(*source, source_handle, authority_snapshot.type, required_source_rights);
+    const u64 required_source_rights = kHandleRightTransfer | kHandleRightDuplicate | authority_snapshot.rights;
+    KObject* retained = HandleTableLookupRef(*source, source_handle, authority_snapshot.type, required_source_rights);
     if (retained == nullptr)
         return ExportFailure(ObjectTransferStatus::SourceRejected);
 
@@ -259,8 +292,7 @@ ObjectTransferExportResult ObjectTransferExport(ObjectTransferTable* table, Hand
                 ObjectTransferSlot& slot = table->slots[index];
                 if (slot.state == ObjectTransferSlotState::Retired)
                     continue;
-                if (slot.state == ObjectTransferSlotState::Free &&
-                    slot.generation == kObjectTransferGenerationMax)
+                if (slot.state == ObjectTransferSlotState::Free && slot.generation == kObjectTransferGenerationMax)
                 {
                     slot.state = ObjectTransferSlotState::Retired;
                     continue;
@@ -310,51 +342,75 @@ ObjectTransferImportResult ObjectTransferImport(ObjectTransferTable* table, Obje
     if (table->initialized != 1)
         return ImportFailure(ObjectTransferStatus::NotInitialized);
 
-    DecodedTransferRef decoded{};
-    if (!DecodeTransferRefNospec(reference, &decoded))
+    const ObjectTransferDecodedRef decoded = DecodeTransferRefNospec(reference);
+    if (!ObjectTransferDecodedRefIsValid(decoded))
         return ImportFailure(ObjectTransferStatus::InvalidReference);
+
+    // Reserve destination capacity before pinning transfer authority. The
+    // unpublished exact ticket makes every later failure rollback-only and
+    // prevents a checked retain from racing another allocation for its slot.
+    const core::Result<HandleTableReservation> reserved =
+        HandleTableReserve(*destination, expected_type, requested_rights);
+    if (!reserved.has_value())
+        return ImportFailure(ObjectTransferStatus::DestinationRejected, reserved.error());
+    const HandleTableReservation reservation = reserved.value();
 
     KObject* object = nullptr;
     ObjectTransferImmutableMetadata metadata{};
+    ObjectTransferStatus validation_status = ObjectTransferStatus::Ok;
     {
         TransferGuard guard(*table);
         if (table->state != ObjectTransferTableState::Open)
-            return ImportFailure(StateFailure(table->state));
-
-        ObjectTransferSlot& slot = table->slots[decoded.slot];
-        if (!SlotMatches(slot, decoded.generation))
         {
-            if (slot.state == ObjectTransferSlotState::Closing && slot.generation == decoded.generation)
-                return ImportFailure(ObjectTransferStatus::Busy);
-            return ImportFailure(ReferenceFailure(slot, decoded.generation));
+            validation_status = StateFailure(table->state);
         }
-        if (slot.type != expected_type || slot.object->type != expected_type)
-            return ImportFailure(ObjectTransferStatus::TypeMismatch);
-        if ((requested_rights & ~slot.rights) != 0)
-            return ImportFailure(ObjectTransferStatus::RightsDenied);
-        if (slot.acquisition_pins == static_cast<u32>(-1) ||
-            table->active_operations == static_cast<u32>(-1))
+        else
         {
-            return ImportFailure(ObjectTransferStatus::OperationOverflow);
+            ObjectTransferSlot& slot = table->slots[decoded.slot];
+            if (!SlotMatches(slot, decoded.generation))
+            {
+                validation_status =
+                    slot.state == ObjectTransferSlotState::Closing && slot.generation == decoded.generation
+                        ? ObjectTransferStatus::Busy
+                        : ReferenceFailure(slot, decoded.generation);
+            }
+            else if (slot.type != expected_type || slot.object->type != expected_type)
+            {
+                validation_status = ObjectTransferStatus::TypeMismatch;
+            }
+            else if ((requested_rights & ~slot.rights) != 0)
+            {
+                validation_status = ObjectTransferStatus::RightsDenied;
+            }
+            else if (slot.acquisition_pins == static_cast<u32>(-1) || table->active_operations == static_cast<u32>(-1))
+            {
+                validation_status = ObjectTransferStatus::OperationOverflow;
+            }
+            else
+            {
+                // This pin is the import authority linearization point. Revoke
+                // may mark Closing after it, but cannot release the row-owned
+                // reference until this operation removes the pin.
+                ++slot.acquisition_pins;
+                ++table->active_operations;
+                object = slot.object;
+                metadata = slot.metadata;
+            }
         }
-
-        // This pin is the import linearization point.  Revoke can mark the row
-        // Closing after it, but cannot release the row-owned ref until unpin.
-        ++slot.acquisition_pins;
-        ++table->active_operations;
-        object = slot.object;
-        metadata = slot.metadata;
     }
+
+    if (validation_status != ObjectTransferStatus::Ok)
+        return AbortImportReservation(*destination, reservation, validation_status);
 
     const bool retained = KObjectAcquire(object);
     bool identity_intact = false;
     {
         TransferGuard guard(*table);
         ObjectTransferSlot& slot = table->slots[decoded.slot];
-        identity_intact = slot.generation == decoded.generation && slot.object == object &&
-                          (slot.state == ObjectTransferSlotState::Live ||
-                           slot.state == ObjectTransferSlotState::Closing) &&
-                          slot.acquisition_pins > 0 && table->active_operations > 0;
+        identity_intact =
+            slot.generation == decoded.generation && slot.object == object &&
+            (slot.state == ObjectTransferSlotState::Live || slot.state == ObjectTransferSlotState::Closing) &&
+            slot.acquisition_pins > 0 && table->active_operations > 0;
         if (slot.acquisition_pins > 0)
             --slot.acquisition_pins;
         if (table->active_operations > 0)
@@ -365,24 +421,27 @@ ObjectTransferImportResult ObjectTransferImport(ObjectTransferTable* table, Obje
     {
         if (retained)
             KObjectRelease(object);
-        return ImportFailure(ObjectTransferStatus::CorruptState);
+        return AbortImportReservation(*destination, reservation, ObjectTransferStatus::CorruptState);
     }
     if (!retained)
-        return ImportFailure(ObjectTransferStatus::RetainFailed);
+        return AbortImportReservation(*destination, reservation, ObjectTransferStatus::RetainFailed);
 
     // The checked retained ref now makes `object` independent of the transfer
-    // row.  Destination insertion happens after unpin and with no transfer lock.
-    auto inserted = HandleTableInsert(*destination, object, requested_rights);
-    if (!inserted.has_value())
+    // row. Publishing the exact reservation is the only ownership commit and
+    // happens after unpin with no transfer lock held.
+    const core::Result<Handle> published = HandleTablePublish(*destination, reservation, object);
+    if (!published.has_value())
     {
-        const core::ErrorCode error = inserted.error();
+        const core::ErrorCode error = published.error();
         KObjectRelease(object);
-        return ImportFailure(ObjectTransferStatus::DestinationRejected, error);
+        const core::Result<void> aborted = HandleTableAbort(*destination, reservation);
+        const bool reservation_gone = aborted.has_value() || aborted.error() == core::ErrorCode::BadState;
+        if (error == core::ErrorCode::BadState && reservation_gone)
+            return ImportFailure(ObjectTransferStatus::DestinationRejected, error);
+        return ImportFailure(ObjectTransferStatus::CorruptState, aborted.has_value() ? error : aborted.error());
     }
 
-    return ObjectTransferImportResult{ObjectTransferStatus::Ok,
-                                      core::ErrorCode::Ok,
-                                      inserted.value(),
+    return ObjectTransferImportResult{ObjectTransferStatus::Ok, core::ErrorCode::Ok, published.value(),
                                       ObjectTransferAuthority{expected_type, requested_rights, metadata}};
 }
 
@@ -392,57 +451,39 @@ ObjectTransferStatus ObjectTransferRevoke(ObjectTransferTable* table, ObjectTran
         return ObjectTransferStatus::InvalidArgument;
     if (table->initialized != 1)
         return ObjectTransferStatus::NotInitialized;
-    DecodedTransferRef decoded{};
-    if (!DecodeTransferRefNospec(reference, &decoded))
+    const ObjectTransferDecodedRef decoded = DecodeTransferRefNospec(reference);
+    if (!ObjectTransferDecodedRefIsValid(decoded))
         return ObjectTransferStatus::InvalidReference;
 
+    KObject* detached = nullptr;
     {
         TransferGuard guard(*table);
         if (table->state != ObjectTransferTableState::Open)
             return StateFailure(table->state);
+
         ObjectTransferSlot& slot = table->slots[decoded.slot];
-        if (!SlotMatches(slot, decoded.generation))
+        if (slot.state == ObjectTransferSlotState::Closing && slot.generation == decoded.generation)
         {
-            if (slot.state == ObjectTransferSlotState::Closing && slot.generation == decoded.generation)
-                return ObjectTransferStatus::Busy;
+            if (slot.object == nullptr)
+                return ObjectTransferStatus::CorruptState;
+        }
+        else if (SlotMatches(slot, decoded.generation))
+        {
+            slot.state = ObjectTransferSlotState::Closing;
+        }
+        else
+        {
             return ReferenceFailure(slot, decoded.generation);
         }
-        if (table->active_operations == static_cast<u32>(-1))
-            return ObjectTransferStatus::OperationOverflow;
-        slot.state = ObjectTransferSlotState::Closing;
-        ++table->active_operations;
+
+        if (slot.acquisition_pins != 0)
+            return ObjectTransferStatus::Busy;
+        detached = slot.object;
+        ClearSlot(&slot);
     }
 
-    for (;;)
-    {
-        KObject* detached = nullptr;
-        bool corrupt = false;
-        {
-            TransferGuard guard(*table);
-            ObjectTransferSlot& slot = table->slots[decoded.slot];
-            if (slot.state != ObjectTransferSlotState::Closing || slot.generation != decoded.generation ||
-                slot.object == nullptr || table->active_operations == 0)
-            {
-                corrupt = true;
-                if (table->active_operations > 0)
-                    --table->active_operations;
-            }
-            else if (slot.acquisition_pins == 0)
-            {
-                detached = slot.object;
-                ClearSlot(&slot);
-                --table->active_operations;
-            }
-        }
-        if (corrupt)
-            return ObjectTransferStatus::CorruptState;
-        if (detached != nullptr)
-        {
-            KObjectRelease(detached);
-            return ObjectTransferStatus::Ok;
-        }
-        CpuRelax();
-    }
+    KObjectRelease(detached);
+    return ObjectTransferStatus::Ok;
 }
 
 ObjectTransferStatus ObjectTransferTableClose(ObjectTransferTable* table)
@@ -452,7 +493,9 @@ ObjectTransferStatus ObjectTransferTableClose(ObjectTransferTable* table)
     if (table->initialized != 1)
         return ObjectTransferStatus::NotInitialized;
 
-    bool owns_close = false;
+    KObject* detached[kObjectTransferTableCapacity - 1]{};
+    u32 detached_count = 0;
+    ObjectTransferStatus result = ObjectTransferStatus::Ok;
     {
         TransferGuard guard(*table);
         if (table->state == ObjectTransferTableState::Uninitialized)
@@ -462,7 +505,6 @@ ObjectTransferStatus ObjectTransferTableClose(ObjectTransferTable* table)
         if (table->state == ObjectTransferTableState::Open)
         {
             table->state = ObjectTransferTableState::Draining;
-            owns_close = true;
             for (u32 index = 1; index < kObjectTransferTableCapacity; ++index)
             {
                 ObjectTransferSlot& slot = table->slots[index];
@@ -470,79 +512,46 @@ ObjectTransferStatus ObjectTransferTableClose(ObjectTransferTable* table)
                     slot.state = ObjectTransferSlotState::Closing;
             }
         }
-        else if (table->state != ObjectTransferTableState::Draining)
+        if (table->state != ObjectTransferTableState::Draining)
         {
             return ObjectTransferStatus::CorruptState;
         }
-    }
-
-    if (!owns_close)
-    {
-        for (;;)
+        u32 observed_pins = 0;
+        for (u32 index = 0; index < kObjectTransferTableCapacity; ++index)
         {
-            {
-                TransferGuard guard(*table);
-                if (table->state == ObjectTransferTableState::Closed)
-                    return ObjectTransferStatus::Ok;
-                if (table->state != ObjectTransferTableState::Draining)
-                    return ObjectTransferStatus::CorruptState;
-            }
-            CpuRelax();
-        }
-    }
-
-    for (;;)
-    {
-        KObject* detached[kObjectTransferTableCapacity - 1]{};
-        u32 detached_count = 0;
-        ObjectTransferStatus result = ObjectTransferStatus::Ok;
-        bool completed = false;
-        {
-            TransferGuard guard(*table);
-            if (table->state != ObjectTransferTableState::Draining)
+            const u32 pins = table->slots[index].acquisition_pins;
+            if (pins > static_cast<u32>(-1) - observed_pins)
                 return ObjectTransferStatus::CorruptState;
-            if (table->active_operations == 0)
+            observed_pins += pins;
+        }
+        if (observed_pins != table->active_operations)
+            return ObjectTransferStatus::CorruptState;
+        if (observed_pins != 0)
+            return ObjectTransferStatus::Busy;
+        for (u32 index = 1; index < kObjectTransferTableCapacity; ++index)
+        {
+            ObjectTransferSlot& slot = table->slots[index];
+            if (slot.object != nullptr)
             {
-                for (u32 index = 1; index < kObjectTransferTableCapacity; ++index)
-                {
-                    if (table->slots[index].acquisition_pins != 0)
-                        return ObjectTransferStatus::CorruptState;
-                }
-                for (u32 index = 1; index < kObjectTransferTableCapacity; ++index)
-                {
-                    ObjectTransferSlot& slot = table->slots[index];
-                    if (slot.object != nullptr)
-                    {
-                        detached[detached_count++] = slot.object;
-                        if (slot.state != ObjectTransferSlotState::Closing)
-                            result = ObjectTransferStatus::CorruptState;
-                        ClearSlot(&slot);
-                    }
-                    else if (slot.state == ObjectTransferSlotState::Closing ||
-                             slot.state == ObjectTransferSlotState::Live)
-                    {
-                        result = ObjectTransferStatus::CorruptState;
-                        ClearSlot(&slot);
-                    }
-                }
-                // This is the terminal close linearization point.  Publishing
-                // Closed before external releases makes destructor re-entry
-                // idempotent instead of waiting on its own caller.  Everything
-                // below owns only the local detached list and never touches
-                // `table` again.
-                table->state = ObjectTransferTableState::Closed;
-                completed = true;
+                detached[detached_count++] = slot.object;
+                if (slot.state != ObjectTransferSlotState::Closing)
+                    result = ObjectTransferStatus::CorruptState;
+                ClearSlot(&slot);
+            }
+            else if (slot.state == ObjectTransferSlotState::Closing || slot.state == ObjectTransferSlotState::Live)
+            {
+                result = ObjectTransferStatus::CorruptState;
+                ClearSlot(&slot);
             }
         }
-
-        if (completed)
-        {
-            for (u32 index = 0; index < detached_count; ++index)
-                KObjectRelease(detached[index]);
-            return result;
-        }
-        CpuRelax();
+        // Terminal close linearizes before external releases. Destructor
+        // re-entry therefore observes Closed and never waits on this caller.
+        table->state = ObjectTransferTableState::Closed;
     }
+
+    for (u32 index = 0; index < detached_count; ++index)
+        KObjectRelease(detached[index]);
+    return result;
 }
 
 u32 ObjectTransferLiveCount(ObjectTransferTable* table)
@@ -573,6 +582,8 @@ const char* ObjectTransferStatusName(ObjectTransferStatus status)
         return "invalid-argument";
     case ObjectTransferStatus::NotInitialized:
         return "not-initialized";
+    case ObjectTransferStatus::AlreadyInitialized:
+        return "already-initialized";
     case ObjectTransferStatus::Closed:
         return "closed";
     case ObjectTransferStatus::Full:
