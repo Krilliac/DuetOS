@@ -3667,10 +3667,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T06:36:13Z
 - **Status**: COMPLETED @ 2026-08-02T06:39:43Z
 
-### [ACTIVE] service-object-package-joint-ready-stub-20260802
+### [DONE] service-object-package-joint-ready-stub-20260802
 - **Session**: `Codex-ServiceObjectPackageJointReady-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tests/host/test_service_object_package.cpp`
 - **Description**: Update focused lifecycle host stub to final race-free ServiceDirectoryCommitJointReady signature
 - **Claimed**: 2026-08-02T06:42:59Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T06:43:49Z
