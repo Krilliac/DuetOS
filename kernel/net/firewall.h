@@ -22,6 +22,12 @@
  * paths. Operators flip the inbound default to Deny once
  * their explicit allow-list covers the workloads that need
  * unsolicited inbound traffic.
+ *
+ * All public operations are IRQ-safe and thread-safe. One internal
+ * spinlock publishes rules, counters, denial records, conntrack, and
+ * rate-limit state as a coherent domain; readers receive complete snapshots.
+ * Tick reads, klog output, network callbacks, and notification delivery are
+ * deliberately deferred until after that lock is released.
  */
 
 namespace duetos::net::firewall
@@ -138,7 +144,8 @@ const char* TcpStateName(TcpState s);
 /// fired. Increments the matched rule's hit counter. `tcp_flags`
 /// is the TCP header's flag byte (offset 13) when proto==Tcp; it
 /// drives the conntrack state transitions and is ignored for
-/// other protocols.
+/// other protocols. Denial notification is prepared while state is
+/// committed, then delivered after the firewall lock is released.
 Action FwEvaluate(Direction dir, Proto proto, Ipv4Address src_ip, Ipv4Address dst_ip, u16 src_port, u16 dst_port,
                   u8 tcp_flags, u32* matched_index);
 

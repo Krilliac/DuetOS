@@ -5,6 +5,8 @@
 #include "log/klog.h"
 #include "net/fw_exception.h"
 #include "security/exception_id.h"
+#include "sync/lockdep.h"
+#include "sync/spinlock.h"
 #include "time/tick.h"
 #include "util/compiler.h"
 
@@ -54,6 +56,13 @@ constexpr const char* kCmdlineAllowKey = "fw-allow";
 constexpr u64 kDenialToastCooldownTicks = 5 * 100; // ~5s at kSchedulerHz
 constinit u64 g_last_toast_ticks = 0;
 constinit bool g_toast_armed = false;
+
+// One IRQ-save lock publishes the firewall's mutually related rule, stats,
+// denial-log, conntrack, and toast-rate state. It is intentionally never held
+// across TickCount, logging, notification delivery, or any network callback.
+// Public readers copy complete snapshots before releasing it.
+constinit sync::SpinLock g_firewall_lock = {
+    .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
 
 constexpr u32 kSchedulerHz = 100;
 
@@ -170,15 +179,19 @@ TcpState TcpStateAfterIngress(TcpState s, u8 flags)
     return s;
 }
 
-void ConntrackInsertOrRefresh(Proto proto, Ipv4Address local_ip, u16 local_port, Ipv4Address peer_ip, u16 peer_port,
-                              u8 tcp_flags)
+void ConntrackResetLocked()
+{
+    for (u32 i = 0; i < kConntrackCap; ++i)
+        g_conntrack[i] = ConntrackEntry{};
+}
+
+void ConntrackInsertOrRefreshLocked(Proto proto, Ipv4Address local_ip, u16 local_port, Ipv4Address peer_ip,
+                                    u16 peer_port, u8 tcp_flags, u64 now)
 {
     if (proto != Proto::Tcp && proto != Proto::Udp)
     {
         return;
     }
-    const u64 now = ::duetos::time::TickCount();
-
     // Refresh-or-evict pass: walk once, look for a tuple match;
     // along the way track the oldest `last_use_ticks` slot for a
     // possible eviction. Inactive slots win over both — fill
@@ -236,14 +249,13 @@ void ConntrackInsertOrRefresh(Proto proto, Ipv4Address local_ip, u16 local_port,
     ++g_stats.conntrack_inserts;
 }
 
-bool ConntrackLookupReverse(Proto proto, Ipv4Address ingress_src_ip, u16 ingress_src_port, Ipv4Address ingress_dst_ip,
-                            u16 ingress_dst_port, u8 tcp_flags)
+bool ConntrackLookupReverseLocked(Proto proto, Ipv4Address ingress_src_ip, u16 ingress_src_port,
+                                  Ipv4Address ingress_dst_ip, u16 ingress_dst_port, u8 tcp_flags, u64 now)
 {
     if (proto != Proto::Tcp && proto != Proto::Udp)
     {
         return false;
     }
-    const u64 now = ::duetos::time::TickCount();
     // Ingress packet (src=peer, dst=local) matches an egress
     // entry whose (local, peer) is the reverse tuple.
     for (u32 i = 0; i < kConntrackCap; ++i)
@@ -306,18 +318,18 @@ void AppendLiteral(char* buf, u32* w, u32 cap, const char* s)
 /// Rate-limited (see kDenialToastCooldownTicks) so a scan cannot
 /// turn the notification surface into a denial-of-service of its
 /// own.
-void RaiseDenialToast(const DenialRecord& r)
+bool PrepareDenialToastLocked(const DenialRecord& r, u64 now, char* text, u32 text_capacity)
 {
-    const u64 now = ::duetos::time::TickCount();
+    if (text == nullptr || text_capacity == 0)
+        return false;
     if (g_toast_armed && (now - g_last_toast_ticks) < kDenialToastCooldownTicks)
-        return;
+        return false;
     g_toast_armed = true;
     g_last_toast_ticks = now;
 
     // "firewall blocked in 10.0.2.2:445 (#7 — firewall except 7)"
-    char text[duetos::drivers::video::kNotifyMaxText];
     u32 w = 0;
-    const u32 cap = static_cast<u32>(sizeof(text)) - 1;
+    const u32 cap = text_capacity - 1;
     AppendLiteral(text, &w, cap, "firewall blocked ");
     AppendLiteral(text, &w, cap, r.dir == Direction::Ingress ? "in " : "out ");
     const Ipv4Address& peer = (r.dir == Direction::Ingress) ? r.src_ip : r.dst_ip;
@@ -333,17 +345,16 @@ void RaiseDenialToast(const DenialRecord& r)
     AppendDecimal(text, &w, cap, static_cast<u32>(r.sequence));
     AppendLiteral(text, &w, cap, "' to allow");
     text[w] = '\0';
-
-    duetos::drivers::video::NotifyShowKind(text, duetos::drivers::video::NotifyKind::Warning);
+    return true;
 }
 
-void LogDenial(Direction dir, Proto proto, Ipv4Address src_ip, Ipv4Address dst_ip, u16 src_port, u16 dst_port,
-               u32 matched_rule)
+DenialRecord LogDenialLocked(Direction dir, Proto proto, Ipv4Address src_ip, Ipv4Address dst_ip, u16 src_port,
+                             u16 dst_port, u32 matched_rule, u64 now)
 {
     const u64 seq = g_log_total++;
     DenialRecord& r = g_log[seq % kFwLogCap];
     r.sequence = seq + 1; // 1-based externally so 0 stays the "slot empty" sentinel
-    r.ticks = ::duetos::time::TickCount();
+    r.ticks = now;
     r.dir = dir;
     r.proto = proto;
     r.src_ip = src_ip;
@@ -351,8 +362,7 @@ void LogDenial(Direction dir, Proto proto, Ipv4Address src_ip, Ipv4Address dst_i
     r.src_port = src_port;
     r.dst_port = dst_port;
     r.matched_rule = matched_rule;
-
-    RaiseDenialToast(r);
+    return r;
 }
 
 bool RuleMatches(const Rule& r, Direction dir, Proto proto, Ipv4Address src_ip, Ipv4Address dst_ip, u16 src_port,
@@ -396,10 +406,26 @@ bool RuleMatches(const Rule& r, Direction dir, Proto proto, Ipv4Address src_ip, 
     return true;
 }
 
+u32 FwAddLocked(const Rule& rule)
+{
+    for (u32 i = 0; i < kFwMaxRules; ++i)
+    {
+        if (!g_rules[i].active)
+        {
+            g_rules[i] = rule;
+            g_rules[i].active = true;
+            g_rules[i].hits = 0;
+            return i;
+        }
+    }
+    return kFwMaxRules;
+}
+
 } // namespace
 
 void FwInit()
 {
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_firewall_lock);
     for (u32 i = 0; i < kFwMaxRules; ++i)
     {
         g_rules[i] = Rule{};
@@ -415,7 +441,8 @@ void FwInit()
     g_cmdline_seeded = 0;
     g_toast_armed = false;
     g_last_toast_ticks = 0;
-    ConntrackReset();
+    ConntrackResetLocked();
+    sync::SpinLockRelease(g_firewall_lock, flags);
     KLOG_INFO("net/firewall", "rule-table reset; defaults=allow/allow");
 
     // Seed operator exceptions from the boot cmdline. Runs after the
@@ -428,10 +455,9 @@ void FwInit()
 
 void ConntrackReset()
 {
-    for (u32 i = 0; i < kConntrackCap; ++i)
-    {
-        g_conntrack[i] = ConntrackEntry{};
-    }
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_firewall_lock);
+    ConntrackResetLocked();
+    sync::SpinLockRelease(g_firewall_lock, flags);
 }
 
 u32 ConntrackSnapshot(ConntrackEntry* out, u32 cap)
@@ -440,6 +466,7 @@ u32 ConntrackSnapshot(ConntrackEntry* out, u32 cap)
     {
         return 0;
     }
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_firewall_lock);
     u32 written = 0;
     for (u32 i = 0; i < kConntrackCap && written < cap; ++i)
     {
@@ -448,6 +475,7 @@ u32 ConntrackSnapshot(ConntrackEntry* out, u32 cap)
             out[written++] = g_conntrack[i];
         }
     }
+    sync::SpinLockRelease(g_firewall_lock, flags);
     return written;
 }
 
@@ -457,9 +485,11 @@ u32 FwLogSnapshot(DenialRecord* out, u32 cap)
     {
         return 0;
     }
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_firewall_lock);
     const u64 total = g_log_total;
     if (total == 0)
     {
+        sync::SpinLockRelease(g_firewall_lock, flags);
         return 0;
     }
     const u64 want = (total < kFwLogCap) ? total : kFwLogCap;
@@ -469,12 +499,16 @@ u32 FwLogSnapshot(DenialRecord* out, u32 cap)
     {
         out[written++] = g_log[s % kFwLogCap];
     }
+    sync::SpinLockRelease(g_firewall_lock, flags);
     return written;
 }
 
 u64 FwLogTotalCount()
 {
-    return g_log_total;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_firewall_lock);
+    const u64 total = g_log_total;
+    sync::SpinLockRelease(g_firewall_lock, flags);
+    return total;
 }
 
 const char* TcpStateName(TcpState s)
@@ -496,11 +530,15 @@ const char* TcpStateName(TcpState s)
 
 Action FwDefaultPolicy(Direction dir)
 {
-    return dir == Direction::Ingress ? g_default_in : g_default_out;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_firewall_lock);
+    const Action action = dir == Direction::Ingress ? g_default_in : g_default_out;
+    sync::SpinLockRelease(g_firewall_lock, flags);
+    return action;
 }
 
 void FwSetDefaultPolicy(Direction dir, Action action)
 {
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_firewall_lock);
     if (dir == Direction::Ingress)
     {
         g_default_in = action;
@@ -509,21 +547,15 @@ void FwSetDefaultPolicy(Direction dir, Action action)
     {
         g_default_out = action;
     }
+    sync::SpinLockRelease(g_firewall_lock, flags);
 }
 
 u32 FwAdd(const Rule& rule)
 {
-    for (u32 i = 0; i < kFwMaxRules; ++i)
-    {
-        if (!g_rules[i].active)
-        {
-            g_rules[i] = rule;
-            g_rules[i].active = true;
-            g_rules[i].hits = 0;
-            return i;
-        }
-    }
-    return kFwMaxRules;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_firewall_lock);
+    const u32 index = FwAddLocked(rule);
+    sync::SpinLockRelease(g_firewall_lock, flags);
+    return index;
 }
 
 void FwRemove(u32 index)
@@ -532,8 +564,10 @@ void FwRemove(u32 index)
     {
         return;
     }
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_firewall_lock);
     g_rules[index].active = false;
     g_rules[index].hits = 0;
+    sync::SpinLockRelease(g_firewall_lock, flags);
 }
 
 namespace
@@ -598,29 +632,31 @@ bool FwExceptionFromDenial(u64 sequence, u32* out_index)
     // rather than promoting whatever now occupies that slot — the
     // operator asked to allow a specific packet they saw, not
     // whatever landed in its place.
-    if (sequence == 0 || sequence > g_log_total)
-        return false;
-    if (g_log_total > kFwLogCap && sequence <= g_log_total - kFwLogCap)
-        return false;
-
-    const DenialRecord& d = g_log[(sequence - 1) % kFwLogCap];
-    if (d.sequence != sequence)
-        return false;
-
-    ExceptionSpec spec{};
-    spec.egress = (d.dir == Direction::Egress);
-    spec.proto = static_cast<u8>(d.proto);
-    const Ipv4Address& peer = (d.dir == Direction::Ingress) ? d.src_ip : d.dst_ip;
-    for (u32 i = 0; i < 4; ++i)
-        spec.addr[i] = peer.octets[i];
-    // /32: promoting a denial allows exactly the host that was
-    // blocked. Widening to a subnet is a separate, deliberate act
-    // through `firewall except add <spec>`.
-    spec.mask_bits = 32;
-    spec.any_port = (d.proto != Proto::Tcp && d.proto != Proto::Udp);
-    spec.port = d.dst_port;
-
-    const u32 idx = FwAdd(RuleFromSpec(spec));
+    u32 idx = kFwMaxRules;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_firewall_lock);
+    const bool sequence_live =
+        sequence != 0 && sequence <= g_log_total && (g_log_total <= kFwLogCap || sequence > g_log_total - kFwLogCap);
+    if (sequence_live)
+    {
+        const DenialRecord& d = g_log[(sequence - 1) % kFwLogCap];
+        if (d.sequence == sequence)
+        {
+            ExceptionSpec spec{};
+            spec.egress = (d.dir == Direction::Egress);
+            spec.proto = static_cast<u8>(d.proto);
+            const Ipv4Address& peer = (d.dir == Direction::Ingress) ? d.src_ip : d.dst_ip;
+            for (u32 i = 0; i < 4; ++i)
+                spec.addr[i] = peer.octets[i];
+            // /32: promoting a denial allows exactly the host that was
+            // blocked. Widening to a subnet is a separate, deliberate act
+            // through `firewall except add <spec>`.
+            spec.mask_bits = 32;
+            spec.any_port = (d.proto != Proto::Tcp && d.proto != Proto::Udp);
+            spec.port = d.dst_port;
+            idx = FwAddLocked(RuleFromSpec(spec));
+        }
+    }
+    sync::SpinLockRelease(g_firewall_lock, flags);
     if (idx >= kFwMaxRules)
         return false;
     if (out_index != nullptr)
@@ -664,7 +700,9 @@ void FwSeedExceptionsFromCmdline(const char* cmdline)
         }
     }
 
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_firewall_lock);
     g_cmdline_seeded = installed;
+    sync::SpinLockRelease(g_firewall_lock, flags);
     if (rejected > 0)
     {
         // A rejected spec means traffic the operator meant to permit
@@ -679,18 +717,23 @@ void FwSeedExceptionsFromCmdline(const char* cmdline)
 
 u32 FwExceptionCount()
 {
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_firewall_lock);
     u32 n = 0;
     for (u32 i = 0; i < kFwMaxRules; ++i)
     {
         if (g_rules[i].active && g_rules[i].exception)
             ++n;
     }
+    sync::SpinLockRelease(g_firewall_lock, flags);
     return n;
 }
 
 u32 FwCmdlineSeededCount()
 {
-    return g_cmdline_seeded;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_firewall_lock);
+    const u32 count = g_cmdline_seeded;
+    sync::SpinLockRelease(g_firewall_lock, flags);
+    return count;
 }
 
 void FwToggle(u32 index)
@@ -699,84 +742,87 @@ void FwToggle(u32 index)
     {
         return;
     }
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_firewall_lock);
     g_rules[index].active = !g_rules[index].active;
+    sync::SpinLockRelease(g_firewall_lock, flags);
 }
 
 Action FwEvaluate(Direction dir, Proto proto, Ipv4Address src_ip, Ipv4Address dst_ip, u16 src_port, u16 dst_port,
                   u8 tcp_flags, u32* matched_index)
 {
+    const u64 now = ::duetos::time::TickCount();
+    char toast_text[duetos::drivers::video::kNotifyMaxText] = {};
+    bool show_toast = false;
+    bool explicit_match = false;
+    u32 matched = kFwMaxRules;
+    Action verdict = Action::Allow;
+
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_firewall_lock);
     if (dir == Direction::Ingress)
-    {
         ++g_stats.ingress_checked;
-    }
     else
-    {
         ++g_stats.egress_checked;
-    }
+
     for (u32 i = 0; i < kFwMaxRules; ++i)
     {
         if (RuleMatches(g_rules[i], dir, proto, src_ip, dst_ip, src_port, dst_port))
         {
+            explicit_match = true;
+            matched = i;
             ++g_rules[i].hits;
-            if (matched_index != nullptr)
-            {
-                *matched_index = i;
-            }
-            if (g_rules[i].action == Action::Deny)
+            verdict = g_rules[i].action;
+            if (verdict == Action::Deny)
             {
                 if (dir == Direction::Ingress)
-                {
                     ++g_stats.ingress_denied;
-                }
                 else
-                {
                     ++g_stats.egress_denied;
-                }
-                LogDenial(dir, proto, src_ip, dst_ip, src_port, dst_port, i);
+                const DenialRecord denial = LogDenialLocked(dir, proto, src_ip, dst_ip, src_port, dst_port, i, now);
+                show_toast = PrepareDenialToastLocked(denial, now, toast_text, sizeof(toast_text));
             }
-            return g_rules[i].action;
+            break;
         }
     }
+
+    if (!explicit_match)
+    {
+        // Egress that no explicit rule matched registers a conntrack entry so
+        // the corresponding inbound reply is recognised under default-deny.
+        if (dir == Direction::Egress)
+            ConntrackInsertOrRefreshLocked(proto, src_ip, src_port, dst_ip, dst_port, tcp_flags, now);
+
+        verdict = dir == Direction::Ingress ? g_default_in : g_default_out;
+        if (dir == Direction::Ingress && verdict == Action::Deny &&
+            ConntrackLookupReverseLocked(proto, src_ip, src_port, dst_ip, dst_port, tcp_flags, now))
+        {
+            verdict = Action::Allow;
+        }
+        else if (verdict == Action::Deny)
+        {
+            if (dir == Direction::Ingress)
+                ++g_stats.ingress_denied;
+            else
+                ++g_stats.egress_denied;
+            const DenialRecord denial =
+                LogDenialLocked(dir, proto, src_ip, dst_ip, src_port, dst_port, kFwMaxRules, now);
+            show_toast = PrepareDenialToastLocked(denial, now, toast_text, sizeof(toast_text));
+        }
+    }
+    sync::SpinLockRelease(g_firewall_lock, flags);
+
     if (matched_index != nullptr)
-    {
-        *matched_index = kFwMaxRules;
-    }
-    // Egress that no explicit rule matched: register a
-    // conntrack entry so the corresponding inbound reply
-    // is recognised even under a default-deny inbound policy.
-    if (dir == Direction::Egress)
-    {
-        ConntrackInsertOrRefresh(proto, src_ip, src_port, dst_ip, dst_port, tcp_flags);
-    }
-    // Ingress that no explicit rule matched and the default
-    // would deny: consult conntrack for a matching outbound
-    // before logging.
-    Action def = FwDefaultPolicy(dir);
-    if (dir == Direction::Ingress && def == Action::Deny)
-    {
-        if (ConntrackLookupReverse(proto, src_ip, src_port, dst_ip, dst_port, tcp_flags))
-        {
-            return Action::Allow;
-        }
-    }
-    if (def == Action::Deny)
-    {
-        if (dir == Direction::Ingress)
-        {
-            ++g_stats.ingress_denied;
-        }
-        else
-        {
-            ++g_stats.egress_denied;
-        }
-        LogDenial(dir, proto, src_ip, dst_ip, src_port, dst_port, kFwMaxRules);
-    }
-    return def;
+        *matched_index = matched;
+    if (show_toast)
+        duetos::drivers::video::NotifyShowKind(toast_text, duetos::drivers::video::NotifyKind::Warning);
+    return verdict;
 }
 
 Stats FwStatsRead()
 {
-    return g_stats;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_firewall_lock);
+    const Stats stats = g_stats;
+    sync::SpinLockRelease(g_firewall_lock, flags);
+    return stats;
 }
 
 u32 FwSnapshot(Rule* out, u32 cap)
@@ -785,11 +831,13 @@ u32 FwSnapshot(Rule* out, u32 cap)
     {
         return 0;
     }
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_firewall_lock);
     u32 written = 0;
     for (u32 i = 0; i < kFwMaxRules && written < cap; ++i)
     {
         out[written++] = g_rules[i];
     }
+    sync::SpinLockRelease(g_firewall_lock, flags);
     return written;
 }
 
