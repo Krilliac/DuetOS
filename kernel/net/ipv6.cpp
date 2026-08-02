@@ -36,6 +36,8 @@
 
 #include "arch/x86_64/serial.h"
 #include "debug/probes.h"
+#include "sync/lockdep.h"
+#include "sync/spinlock.h"
 #include "util/string.h"
 
 // Firewall-gated TX trampoline exported by stack.cpp. Going through
@@ -55,7 +57,19 @@ namespace duetos::net
 namespace
 {
 
-Ipv6Stats g_ipv6_stats = {};
+constinit Ipv6Stats g_ipv6_stats = {};
+// Statistics are shared by every RX task and may be sampled by UI/diagnostic
+// tasks. The lock protects only individual counter updates and snapshot
+// copyout; it is never held across transport dispatch or a driver TX call.
+constinit sync::SpinLock g_ipv6_stats_lock = {
+    .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
+
+void Ipv6StatIncrement(u64 Ipv6Stats::*field)
+{
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_ipv6_stats_lock);
+    ++(g_ipv6_stats.*field);
+    sync::SpinLockRelease(g_ipv6_stats_lock, flags);
+}
 
 // 16-bit one's-complement sum (RFC 1071) with a running 32-bit
 // accumulator the caller folds. Kept local so the pseudo-header
@@ -201,7 +215,10 @@ u16 Ipv6PseudoChecksum(const Ipv6Address& src, const Ipv6Address& dst, u8 next_h
 
 Ipv6Stats Ipv6StatsRead()
 {
-    return g_ipv6_stats;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_ipv6_stats_lock);
+    const Ipv6Stats stats = g_ipv6_stats;
+    sync::SpinLockRelease(g_ipv6_stats_lock, flags);
+    return stats;
 }
 
 namespace
@@ -241,9 +258,9 @@ void SendEchoReply(u32 iface_index, const u8* eth, const Ipv6Header& hdr, const 
     r_icmp[3] = u8(ck & 0xFF);
 
     if (DuetosNetIfaceTx(iface_index, reply, frame_len))
-        ++g_ipv6_stats.icmpv6_echo_tx;
+        Ipv6StatIncrement(&Ipv6Stats::icmpv6_echo_tx);
     else
-        ++g_ipv6_stats.tx_failures;
+        Ipv6StatIncrement(&Ipv6Stats::tx_failures);
 }
 
 // Build + transmit a Neighbor Advertisement (type 136) answering a
@@ -287,15 +304,15 @@ void SendNeighborAdvert(u32 iface_index, const u8* eth, const Ipv6Header& hdr, c
     na[3] = u8(ck & 0xFF);
 
     if (DuetosNetIfaceTx(iface_index, reply, frame_len))
-        ++g_ipv6_stats.nd_advert_tx;
+        Ipv6StatIncrement(&Ipv6Stats::nd_advert_tx);
     else
-        ++g_ipv6_stats.tx_failures;
+        Ipv6StatIncrement(&Ipv6Stats::tx_failures);
 }
 
 // ICMPv6 demux: echo request -> reply; Neighbor Solicitation -> NA.
 void HandleIcmpv6(u32 iface_index, const u8* eth, const Ipv6Header& hdr, const u8* icmp, u64 icmp_len)
 {
-    ++g_ipv6_stats.rx_icmpv6;
+    Ipv6StatIncrement(&Ipv6Stats::rx_icmpv6);
     if (icmp_len < 4)
         return;
     // Validate the ICMPv6 checksum (covers the pseudo-header).
@@ -308,7 +325,7 @@ void HandleIcmpv6(u32 iface_index, const u8* eth, const Ipv6Header& hdr, const u
 
     if (icmp[0] == kIcmpv6EchoRequest)
     {
-        ++g_ipv6_stats.icmpv6_echo_rx;
+        Ipv6StatIncrement(&Ipv6Stats::icmpv6_echo_rx);
         // Only answer if addressed to our link-local address.
         if (!Ipv6Eq(hdr.dst, our_ll))
             return;
@@ -316,7 +333,7 @@ void HandleIcmpv6(u32 iface_index, const u8* eth, const Ipv6Header& hdr, const u
     }
     else if (icmp[0] == kIcmpv6NeighborSolicit && icmp_len >= 24)
     {
-        ++g_ipv6_stats.nd_solicit_rx;
+        Ipv6StatIncrement(&Ipv6Stats::nd_solicit_rx);
         // Target address sits at bytes 8..23 of the NS message.
         Ipv6Address target = {};
         for (u32 i = 0; i < 16; ++i)
@@ -336,17 +353,17 @@ void HandleIcmpv6(u32 iface_index, const u8* eth, const Ipv6Header& hdr, const u
 
 bool Ipv6HandleIncoming(u32 iface_index, const void* frame, u64 len)
 {
-    ++g_ipv6_stats.rx_packets;
+    Ipv6StatIncrement(&Ipv6Stats::rx_packets);
     if (frame == nullptr || len < 14 + kIpv6HeaderBytes)
     {
-        ++g_ipv6_stats.rx_bad_length;
+        Ipv6StatIncrement(&Ipv6Stats::rx_bad_length);
         return false;
     }
     const auto* eth = static_cast<const u8*>(frame);
     const u16 ether_type = (u16(eth[12]) << 8) | u16(eth[13]);
     if (ether_type != kEtherTypeIpv6)
     {
-        ++g_ipv6_stats.rx_bad_length;
+        Ipv6StatIncrement(&Ipv6Stats::rx_bad_length);
         return false;
     }
 
@@ -356,7 +373,7 @@ bool Ipv6HandleIncoming(u32 iface_index, const void* frame, u64 len)
     u64 payload_off = 0;
     if (!Ipv6HeaderParse(ip, ip_avail, hdr, payload_off))
     {
-        ++g_ipv6_stats.rx_bad_version;
+        Ipv6StatIncrement(&Ipv6Stats::rx_bad_version);
         return false;
     }
 
@@ -370,7 +387,7 @@ bool Ipv6HandleIncoming(u32 iface_index, const void* frame, u64 len)
         break;
     case kIpProtoUdp:
     {
-        ++g_ipv6_stats.rx_udp;
+        Ipv6StatIncrement(&Ipv6Stats::rx_udp);
         if (l4_len < 8)
             break;
         // Validate the UDP checksum over the IPv6 pseudo-header
@@ -392,7 +409,7 @@ bool Ipv6HandleIncoming(u32 iface_index, const void* frame, u64 len)
     }
     case kIpProtoTcp:
     {
-        ++g_ipv6_stats.rx_tcp;
+        Ipv6StatIncrement(&Ipv6Stats::rx_tcp);
         if (l4_len < 20)
             break;
         if (Ipv6PseudoChecksum(hdr.src, hdr.dst, kIpProtoTcp, l4, l4_len) != 0)
@@ -412,7 +429,7 @@ bool Ipv6HandleIncoming(u32 iface_index, const void* frame, u64 len)
         break;
     }
     default:
-        ++g_ipv6_stats.rx_other_proto;
+        Ipv6StatIncrement(&Ipv6Stats::rx_other_proto);
         break;
     }
     return true;
