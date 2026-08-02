@@ -1,6 +1,7 @@
 #include "cpu/ipi_call.h"
 
 #include "acpi/acpi.h"
+#include "arch/x86_64/cpu.h"
 #include "arch/x86_64/lapic.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/smp.h"
@@ -259,12 +260,37 @@ void IpiCallVectorHandler()
 // the soft cap; beyond it we keep waiting but bump the timeout
 // counter and emit a one-shot WARN. (Hard-panicking on a slow
 // peer is more harmful than continuing.)
+//
+// While waiting, SERVICE OUR OWN MAILBOX. Two CPUs that cross-call
+// each other while either has IF=0 otherwise deadlock: neither can
+// take the other's IPI vector, so both completion words stay 0 and
+// both spin forever. Concurrent thread-exit TLB shootdowns hit this
+// live (2026-08-02, pe-threads profile: repeated soft-cap WARNs at
+// t≈149s, then the kheartbeat and smoke tasks wedged behind the
+// stuck caller and the box timed out with the kernel "healthy").
+// Draining inside a cli window is exclusive with this CPU's own
+// vector handler — the handler also runs with IF=0 — and an empty
+// ring makes the drain a cheap no-op, so the fast path is unchanged.
 void SpinForCompletion(volatile u32* done, const char* tag)
 {
     u64 spins = 0;
     while (__atomic_load_n(done, __ATOMIC_ACQUIRE) == 0u)
     {
         asm volatile("pause" ::: "memory");
+        {
+            u64 saved_rflags = 0;
+            asm volatile("pushfq; pop %0" : "=r"(saved_rflags)::"memory");
+            arch::Cli();
+            PerCpu* self = CurrentCpu();
+            if (self != nullptr && self->cpu_id < acpi::kMaxCpus)
+            {
+                DrainMailbox(g_mailboxes[self->cpu_id]);
+            }
+            if ((saved_rflags & 0x200u) != 0)
+            {
+                arch::Sti();
+            }
+        }
         ++spins;
         if (spins == kWaitSpinSoftCap)
         {
