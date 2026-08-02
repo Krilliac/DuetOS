@@ -3754,3 +3754,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Advance native syscall IDL and dispatch bijection cardinality for dedicated SYS_SERVICE_CONTROL 228
 - **Claimed**: 2026-08-02T07:20:25Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-control-manifest-policy-20260802
+- **Session**: `Codex-ServiceControlSyscall-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/service_manifest.h,kernel/core/service_manifest.cpp,config/services.toml,config/service-authority.toml,tools/build/gen-service-manifest.py,tools/test/test-gen-service-manifest.py,kernel/core/boot_service_manifest_data.h`
+- **Description**: Deliberately extend ServiceManifest v1 capability policy for kCapServiceControl and grant it only to serviced
+- **Claimed**: 2026-08-02T07:23:59Z
+- **Status**: IN PROGRESS
