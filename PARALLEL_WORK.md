@@ -3386,3 +3386,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: IRQ-safe ARP UDP DNS NTP DHCP state with generation-revalidated snapshot commit and hostile hosted concurrency coverage
 - **Claimed**: 2026-08-02T02:47:10Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-package-ci-20260802
+- **Session**: `Codex-ServicePackageCI-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tools/test/test-service-package-ci-contract.py`
+- **Description**: Require
+- **Claimed**: 2026-08-02T02:54:27Z
+- **Status**: IN PROGRESS
