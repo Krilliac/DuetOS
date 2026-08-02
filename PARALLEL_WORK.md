@@ -3898,3 +3898,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Register embedded reap ledger dependency and typed service-control platform host target
 - **Claimed**: 2026-08-02T10:09:24Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] gui-broker-protocol-recovery-20260802
+- **Session**: `Codex-GuiBrokerProtocol-Recovery-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/drivers/video/gui_broker_protocol.h,kernel/drivers/video/gui_broker_protocol.cpp,tests/host/test_gui_broker_protocol.cpp`
+- **Description**: Audit and publish hostile GUI broker wire protocol
+- **Claimed**: 2026-08-02T10:12:06Z
+- **Status**: IN PROGRESS
