@@ -3842,3 +3842,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Separate exact exit event sequence from public acknowledgement token while preserving service-control v1 ABI size
 - **Claimed**: 2026-08-02T09:12:14Z
 - **Status**: COMPLETED @ 2026-08-02T09:35:37Z
+
+### [ACTIVE] immutable-load-plan-recovery-20260802
+- **Session**: `Codex-ImmutableLoadPlan-Recovery-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/loader/load_plan.h`
+- **Description**: No description provided
+- **Claimed**: 2026-08-02T09:44:58Z
+- **Status**: IN PROGRESS
