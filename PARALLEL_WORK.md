@@ -3266,3 +3266,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Update
 - **Claimed**: 2026-08-02T01:02:31Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] pci-bar-sizing-20260801
+- **Session**: `Nathan-952`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/drivers/pci/pci.h,kernel/drivers/pci/pci.cpp,tests/host/test_pci_bar_probe.cpp,tools/test/test-pci-bar-sizing-contract.py`
+- **Description**: Serialized decode-safe 32/64-bit PCI BAR sizing transaction with hostile host contract tests
+- **Claimed**: 2026-08-02T01:04:54Z
+- **Status**: IN PROGRESS
