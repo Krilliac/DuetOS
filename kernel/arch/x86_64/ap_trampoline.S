@@ -173,6 +173,17 @@ ap_trampoline_start:
     mov     rax, TRAMP_BASE + OFF_CAPTURED_TOKEN
     mov     [rax], esi
 
+    /* Null return-address primer. The C++ entry is jumped to, not
+       called, so without this its frame sits at the exact stack top and
+       __builtin_return_address(0) / any frame-pointer walk in the
+       OUTERMOST frame reads [rbp+8] == stack_top — one byte past the
+       slot, which is the NEIGHBOURING slot's guard page (observed live
+       2026-08-02: AP online KBP_PROBE_V faulted cr2 == initial RSP and
+       panicked as a bogus "kernel stack overflow"). The zero quad both
+       terminates walkers and restores the post-call ABI shape
+       (RSP % 16 == 8 at function entry). */
+    push    0
+
     /* Tail-call into the kernel's C++ entry point. [[noreturn]]. */
     mov     rax, TRAMP_BASE + OFF_ENTRY
     jmp     [rax]
