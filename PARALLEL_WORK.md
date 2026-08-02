@@ -1299,13 +1299,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T21:55:32Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] ipc-object-transfer
+### [DONE] ipc-object-transfer
 - **Session**: `Nathan-1481`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/ipc/object_transfer.h`
 - **Description**: Endpoint-owned
 - **Claimed**: 2026-07-31T22:01:39Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T07:09:27Z
 
 ### [ACTIVE] ipc-object-transfer-source
 - **Session**: `Nathan-840`
