@@ -3307,13 +3307,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T01:56:49Z
 - **Status**: COMPLETED @ 2026-08-02T02:20:42Z
 
-### [ACTIVE] net-stack-udp-receipt-20260801
+### [DONE] net-stack-udp-receipt-20260801
 - **Session**: `Codex-NetUdpReceipt-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/net/socket.cpp,kernel/net/socket.h,tests/host/test_net_stack_restart.cpp,tools/test/test-net-stack-restart-contract.py`
 - **Description**: Exact UDP interface receipts, restart isolation, and bounded stream-socket stale-state reconciliation
 - **Claimed**: 2026-08-02T02:00:12Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T02:43:31Z
 
 ### [DONE] structural-contract-drift-20260802
 - **Session**: `Codex-StructuralDrift-20260802`
