@@ -523,6 +523,15 @@ constexpr bool IntelE1000BringUpEligible(u16 did)
     return IntelE1000BringUpProfileFromDeviceId(did) != IntelE1000BringUpProfile::None;
 }
 
+// Modern virtio-net uses the device-specific PCI identity 1AF4:1041 and the
+// virtio 1.x capability transport. The transitional 1AF4:1000 identity may
+// expose legacy I/O BAR semantics that the modern-only backend does not own,
+// so it remains inventory-only.
+constexpr bool VirtioNetBringUpEligible(u16 did)
+{
+    return did == 0x1041;
+}
+
 // ---------------------------------------------------------------
 // Intel wireless (iwlwifi).
 // ---------------------------------------------------------------
@@ -931,27 +940,46 @@ constexpr WirelessBackend BroadcomWirelessBackendFromIdentity(u16 did, u16 subsy
     return WirelessBackend::None;
 }
 
-constexpr const char* BroadcomWirelessTag(u16 did)
+constexpr const char* BroadcomWirelessBackendTag(WirelessBackend backend)
 {
-    if (did == 0x4355 || did == 0x4365)
-        return BroadcomWirelessCandidateBackendsFromDeviceId(did) != 0 ? "brcm-wifi-candidate" : nullptr;
-
-    const WirelessBackendMask candidates = BroadcomWirelessCandidateBackendsFromDeviceId(did);
-    if (candidates == WirelessBackendBit(WirelessBackend::BroadcomB43Ssb))
+    switch (backend)
+    {
+    case WirelessBackend::BroadcomB43Ssb:
         return "b43-ssb-wifi";
-    if (candidates == WirelessBackendBit(WirelessBackend::BroadcomBcma))
+    case WirelessBackend::BroadcomBcma:
         return "brcm-bcma-wifi";
-    if (candidates == WirelessBackendBit(WirelessBackend::BroadcomBrcmfmac))
+    case WirelessBackend::BroadcomBrcmfmac:
         return "brcmfmac-pcie";
-    return nullptr;
+    default:
+        return nullptr;
+    }
 }
 
-constexpr bool BroadcomWirelessProbeEligible(u16 did)
+/// Resolve a display tag with the same complete tuple required by upstream
+/// backend selection. An unresolved but factual raw candidate remains visible
+/// under a generic tag; it never becomes hardware eligibility.
+constexpr const char* BroadcomWirelessTagFromIdentity(u16 did, u16 subsystem_vendor_id, u16 subsystem_device_id,
+                                                      bool subsystem_known)
+{
+    const char* exact = BroadcomWirelessBackendTag(
+        BroadcomWirelessBackendFromIdentity(did, subsystem_vendor_id, subsystem_device_id, subsystem_known));
+    if (exact != nullptr)
+        return exact;
+    return BroadcomWirelessCandidateBackendsFromDeviceId(did) != 0 ? "brcm-wifi-candidate" : nullptr;
+}
+
+constexpr const char* BroadcomWirelessTag(u16 did)
+{
+    return BroadcomWirelessTagFromIdentity(did, 0, 0, false);
+}
+
+constexpr bool BroadcomWirelessProbeEligible(WirelessBackend backend, u16 did)
 {
     // b43/SSB, BCMA, and brcmfmac have different core enumeration and
     // firmware formats.  In particular, brcmfmac must program the BAR0
     // backplane window before core access; BAR0+0 is not a universal
     // ChipCommon register.  The old generic shell is therefore disabled.
+    (void)backend;
     (void)did;
     return false;
 }

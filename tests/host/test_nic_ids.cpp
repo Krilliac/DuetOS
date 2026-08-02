@@ -127,6 +127,14 @@ void TestE1000BringUpGate()
     }
 }
 
+void TestVirtioNetBringUpGate()
+{
+    EXPECT_FALSE(VirtioNetBringUpEligible(0x1000)); // transitional transport
+    EXPECT_TRUE(VirtioNetBringUpEligible(0x1041));  // modern virtio-net
+    for (u32 did = 0; did <= 0xFFFF; ++did)
+        EXPECT_EQ(VirtioNetBringUpEligible(static_cast<u16>(did)), did == 0x1041);
+}
+
 void TestIntelWireless()
 {
     // Representative IDs per generation.
@@ -252,21 +260,21 @@ void TestBroadcom()
         EXPECT_EQ(BroadcomWirelessCandidateBackendsFromDeviceId(did), kB43Mask);
         EXPECT_EQ(BroadcomWirelessBackendFromIdentity(did, 0, 0, false), WirelessBackend::BroadcomB43Ssb);
         EXPECT_STREQ(BroadcomWirelessTag(did), "b43-ssb-wifi");
-        EXPECT_FALSE(BroadcomWirelessProbeEligible(did));
+        EXPECT_FALSE(BroadcomWirelessProbeEligible(WirelessBackend::BroadcomB43Ssb, did));
     }
     for (const u16 did : kBcma)
     {
         EXPECT_EQ(BroadcomWirelessCandidateBackendsFromDeviceId(did), kBcmaMask);
         EXPECT_EQ(BroadcomWirelessBackendFromIdentity(did, 0, 0, false), WirelessBackend::BroadcomBcma);
         EXPECT_STREQ(BroadcomWirelessTag(did), "brcm-bcma-wifi");
-        EXPECT_FALSE(BroadcomWirelessProbeEligible(did));
+        EXPECT_FALSE(BroadcomWirelessProbeEligible(WirelessBackend::BroadcomBcma, did));
     }
     for (const u16 did : kBrcmfmacGeneric)
     {
         EXPECT_EQ(BroadcomWirelessCandidateBackendsFromDeviceId(did), kBrcmfmacMask);
         EXPECT_EQ(BroadcomWirelessBackendFromIdentity(did, 0, 0, false), WirelessBackend::BroadcomBrcmfmac);
         EXPECT_STREQ(BroadcomWirelessTag(did), "brcmfmac-pcie");
-        EXPECT_FALSE(BroadcomWirelessProbeEligible(did));
+        EXPECT_FALSE(BroadcomWirelessProbeEligible(WirelessBackend::BroadcomBrcmfmac, did));
     }
 
     // Raw 4355 is brcmfmac only for 14E4:4355. Raw 4365 is ambiguous
@@ -283,6 +291,8 @@ void TestBroadcom()
     EXPECT_EQ(BroadcomWirelessBackendFromIdentity(0x4355, 0, 0, false), WirelessBackend::None);
     EXPECT_EQ(BroadcomWirelessBackendFromIdentity(0x4355, 0x14E4, 0x4355, true), WirelessBackend::BroadcomBrcmfmac);
     EXPECT_EQ(BroadcomWirelessBackendFromIdentity(0x4355, 0x14E4, 0x4354, true), WirelessBackend::None);
+    EXPECT_STREQ(BroadcomWirelessTagFromIdentity(0x4355, 0x14E4, 0x4355, true), "brcmfmac-pcie");
+    EXPECT_STREQ(BroadcomWirelessTagFromIdentity(0x4355, 0x14E4, 0x4354, true), "brcm-wifi-candidate");
 
     EXPECT_EQ(BroadcomWirelessBackendFromIdentity(0x4365, 0, 0, false), WirelessBackend::None);
     EXPECT_EQ(BroadcomWirelessBackendFromIdentity(0x4365, 0x14E4, 0x4365, true), WirelessBackend::BroadcomBrcmfmac);
@@ -291,6 +301,9 @@ void TestBroadcom()
     EXPECT_EQ(BroadcomWirelessBackendFromIdentity(0x4365, 0x105B, 0xE092, true), WirelessBackend::BroadcomBcma);
     EXPECT_EQ(BroadcomWirelessBackendFromIdentity(0x4365, 0x103C, 0x804A, true), WirelessBackend::BroadcomBcma);
     EXPECT_EQ(BroadcomWirelessBackendFromIdentity(0x4365, 0x1028, 0x4365, true), WirelessBackend::None);
+    EXPECT_STREQ(BroadcomWirelessTagFromIdentity(0x4365, 0x14E4, 0x4365, true), "brcmfmac-pcie");
+    EXPECT_STREQ(BroadcomWirelessTagFromIdentity(0x4365, 0x1028, 0x0016, true), "brcm-bcma-wifi");
+    EXPECT_STREQ(BroadcomWirelessTagFromIdentity(0x4365, 0, 0, false), "brcm-wifi-candidate");
 
     // Wired tg3 range and arbitrary outsiders are not wireless.
     constexpr u16 kUnsupported[] = {0x0000, 0x1600, 0x16FF, 0x42FF, 0x4300, 0x4302, 0x4323, 0x4326,
@@ -308,7 +321,7 @@ void TestBroadcom()
         if (BroadcomWirelessCandidateBackendsFromDeviceId(candidate) != 0)
         {
             ++wireless_candidates;
-            EXPECT_FALSE(BroadcomWirelessProbeEligible(candidate));
+            EXPECT_FALSE(BroadcomWirelessProbeEligible(WirelessBackend::None, candidate));
         }
     }
     EXPECT_EQ(wireless_candidates, 65u);
@@ -444,6 +457,7 @@ int main()
 {
     TestIntelWiredDispatch();
     TestE1000BringUpGate();
+    TestVirtioNetBringUpGate();
     TestIntelWireless();
     TestRealtek();
     TestBroadcom();

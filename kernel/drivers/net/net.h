@@ -1,49 +1,44 @@
 #pragma once
 
+#include "drivers/net/nic_ids.h"
 #include "util/result.h"
 #include "util/types.h"
 
 /*
- * DuetOS — Network driver shell, v0.
+ * DuetOS — PCI network discovery and concrete-driver dispatch.
  *
- * Discovery + classification for PCI network controllers, mirroring
- * the `drivers/gpu/` pattern. Walks the `pci::Device` cache after
- * `PciEnumerate`, picks every device with class_code == 0x02
- * (network controller), dispatches to a vendor/device probe, and
- * logs the result. BAR 0 is mapped as MMIO for each NIC so a
- * future driver slice can reach the register file without
- * re-running the size probe.
+ * `NetInit` walks the PCI cache after enumeration, records exact
+ * evidence-backed family candidates, and runs only a backend whose
+ * register contract is explicitly enabled. Classification never authorizes
+ * MMIO: unsupported wired families and all current PCI Wi-Fi candidates are
+ * inventory-only. Packet I/O is enabled only for the 8086:100E and 8086:10D3
+ * emulated Intel profiles, exact AMD PCnet 1022:2000, and modern virtio-net
+ * 1AF4:1041. The transitional virtio identity 1AF4:1000 remains inventory-only.
+ * Functional backends must own callback admission, worker join, and
+ * bus-master-off teardown; focused QEMU restart proof remains a separate
+ * release gate.
  *
- * Scope (v0):
- *   - Discovery + classification only. Probes identify the chip
- *     family (e1000e / rtl8169 / virtio-net / ...) and log it.
- *   - BAR 0 mapped into the kernel MMIO arena.
- *   - No packet I/O, no MAC address read, no link-state, no IRQ
- *     wiring. The upper network stack (TCP/IP, ARP, DHCP) is a
- *     later track entirely (kernel/net/).
+ * A selected backend owns its BAR choice. Mappings are cached by BDF, BAR,
+ * physical address, and size so restart cycles reuse the monotonic MMIO
+ * arena rather than consuming a fresh aperture. No generic "map BAR0 for
+ * every network controller" path is permitted.
  *
  * The device tier maps to wiki/drivers/Driver-Overview.md (Hardware
  * Target Matrix):
- *   Tier 1: Intel e1000 / e1000e (commodity wired NICs)
+ *   Tier 1: Intel e1000 / e1000e (100E/10D3 functional profiles today)
  *   Tier 2: Realtek rtl8169, Broadcom bcm57xx
- *   Tier 3: virtio-net (dev only)
- *   Tier 4: Intel iwlwifi, Realtek rtl88xx (Wi-Fi, much later)
+ *   Tier 3: modern virtio-net 1041 (dev-only functional profile)
+ *   Tier 4: Intel/Realtek/Broadcom/MediaTek PCI Wi-Fi (inventory only)
  *
- * Context: kernel. `NetInit` runs once at boot after `PciEnumerate`.
+ * Context: kernel. `NetInit` runs after `PciEnumerate` and can run again
+ * after a successful `NetShutdown`.
  */
 
 namespace duetos::drivers::net
 {
 
-// Common vendor IDs. A few are duplicated with drivers/gpu — PCI
-// vendor IDs are global, not per-class.
-inline constexpr u16 kVendorIntel = 0x8086;
-inline constexpr u16 kVendorRealtek = 0x10EC;
-inline constexpr u16 kVendorBroadcom = 0x14E4;
-inline constexpr u16 kVendorMarvell = 0x11AB;
-inline constexpr u16 kVendorMellanox = 0x15B3;
-inline constexpr u16 kVendorRedHatVirt = 0x1AF4; // virtio-net
-inline constexpr u16 kVendorAmd = 0x1022;        // AMD PCnet (VirtualBox default NIC)
+// Vendor IDs live in drivers/net/nic_ids.h alongside the device-ID
+// classification tables (single source of truth, host-testable).
 
 // PCI class codes.
 inline constexpr u8 kPciClassNetwork = 0x02;
@@ -67,57 +62,63 @@ struct NicInfo
 
     u16 vendor_id;
     u16 device_id;
+    u16 subsystem_vendor_id;
+    u16 subsystem_device_id;
     u8 bus;
     u8 device;
     u8 function;
-    u8 subclass;        // 0x00 Ethernet, 0x80 Other (Wi-Fi)
+    u8 class_code;
+    u8 subclass; // 0x00 Ethernet, 0x80 Other (Wi-Fi)
+    u8 programming_interface;
+    u8 revision_id;
+    bool subsystem_known;
     const char* vendor; // short string ("Intel", "Realtek", ...)
     const char* family; // chip family ("e1000e-82574", "rtl8169", ...)
     u64 mmio_phys;
-    u64 mmio_size;
+    u64 mmio_size; // bytes actually mapped at mmio_virt, never the larger raw BAR extent
     void* mmio_virt;
-    u8 mac[6]; // all-zero if the vendor probe didn't read it
+    u8 mmio_bar; // PCI BAR index selected by the concrete backend contract
+    u8 mac[6];   // all-zero if the vendor probe didn't read it
     bool mac_valid;
     bool link_up; // filled by the vendor probe; false on NICs
                   // whose status register we don't read yet
-    // True when a chip-specific driver shell has bound to this NIC
-    // (e1000 brings full I/O up; iwlwifi / rtl88xx / bcm43xx bring
-    // up to chip-identified + MMIO-live + awaiting firmware).
+    // True only when a chip-specific backend has completed its supported
+    // bring-up. Candidate classification and read-only inventory never set it.
     bool driver_online;
-    // Wireless-only: true iff the chip needs vendor firmware before
-    // it can associate. The kernel has no firmware-loader subsystem
-    // in v0, so every wireless NIC reports `firmware_pending=true`
-    // until the loader lands. Wired NICs leave this false.
+    // Wireless-only backend state. Probe-only candidates leave this false;
+    // a future safe backend may set it while an accepted firmware load is
+    // pending. Wired NICs always leave it false.
     bool firmware_pending;
     WirelessFwState wireless_fw_state;
-    // Vendor-readable chip identification dword. iwlwifi: CSR_HW_REV;
-    // rtl88xx: SYS_CFG1 / chip-version register; bcm43xx: ChipCommon
-    // ChipID dword. Zero if the bring-up didn't reach an MMIO read.
+    // Backend-specific chip-identification dword. Zero unless a safe backend
+    // reached an authorized MMIO read.
     u32 chip_id;
 };
 
-/// Walk the PCI cache, register every network controller, run the
-/// vendor-specific probe. Idempotent — early-returns until the
-/// matching `NetShutdown` has cleared the live flag.
-void NetInit();
+/// Walk the PCI cache, register every network controller, and run only an
+/// admitted vendor backend. Repeated calls while Running are idempotent.
+/// Returns Busy while teardown is in progress or a failed teardown has left
+/// quarantined contexts that must be drained by another `NetShutdown`.
+::duetos::core::Result<void> NetInit();
 
-/// Drop every NIC record + clear the live flag so the next
-/// `NetInit` re-walks PCI. Always succeeds. The MMIO mappings
-/// established by the previous Init are NOT torn down (would burn
-/// the MMIO arena on every restart cycle); a follow-up slice that
-/// caches `(bus,dev,fn) → mmio_virt` can fix that.
+/// Quiesce live NIC workers and operations, then clear the discovery records
+/// so the next `NetInit` re-walks PCI. Returns Busy rather than releasing DMA
+/// if an exact worker generation or operation pin does not drain in time.
+/// Stable MMIO mappings remain owned by the bounded BDF/BAR cache.
 ::duetos::core::Result<void> NetShutdown();
 
 /// Number of NICs discovered.
 u64 NicCount();
 
-/// Accessor for a discovered NIC record.
-const NicInfo& Nic(u64 index);
+/// Copy one discovered record while the registry is Running. Returns false
+/// for a stale/out-of-range index or while init, shutdown, or quarantine owns
+/// the registry. Callers never retain a reference into mutable global storage.
+bool NicSnapshot(u64 index, NicInfo* out);
 
 /// True iff the NIC at `index` is a wireless adapter — discriminated
 /// by either the PCI subclass (0x80 = "other / wireless" historically
-/// used for Wi-Fi) or by family-string heuristics matching Intel
-/// iwlwifi / Realtek rtl88xx / Broadcom bcm43xx ranges. Used by the
+/// used for Wi-Fi) or by family-string heuristics backed by exact Intel,
+/// Realtek, Broadcom, and MediaTek candidate sets. Used by the
 /// shell `netscan` and the GUI network flyout to separate wired
 /// from wireless adapters honestly — DuetOS has no wireless driver
 /// online, so detected wireless adapters are advertised as "no
@@ -139,20 +140,13 @@ struct WirelessStatus
 };
 WirelessStatus WirelessStatusRead();
 
-// Vendor probe stubs — classify by device_id and log the family.
-// No packet I/O. Replaced by real chip-specific init in a future
-// driver slice (e1000 ring setup, rtl8169 MAC config, etc.).
+// Vendor candidate classifiers. A returned tag is inventory metadata, not
+// proof that a concrete driver is online or that MMIO is safe.
 
 const char* IntelNicTag(u16 device_id);
 const char* RealtekNicTag(u16 device_id);
-const char* BroadcomNicTag(u16 device_id);
+const char* BroadcomNicTag(u16 device_id, u16 subsystem_vendor_id, u16 subsystem_device_id, bool subsystem_known);
 const char* VirtioNetTag(u16 device_id);
-const char* MediatekNicTag(u16 device_id);
-
-/// Bring up an AMD PCnet-PCI II/III (1022:2000) — VirtualBox's default
-/// adapter / QEMU `-device pcnet`. Full polled RX/TX over an I/O-port
-/// register file (RAP/RDP, SWSTYLE 2), binds iface 0 and starts DHCP.
-/// Returns true if the chip came up and was bound. Defined in pcnet.cpp.
-bool PcnetBringUp(NicInfo& n);
+const char* MediatekNicTag(u16 vendor_id, u16 device_id);
 
 } // namespace duetos::drivers::net
