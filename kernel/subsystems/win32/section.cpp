@@ -16,7 +16,6 @@
 #include "mm/frame_allocator.h"
 #include "mm/kheap.h"
 #include "mm/page.h"
-#include "proc/process.h"
 #include "sched/sched.h"
 #include "sync/spinlock.h"
 #include "util/saturating.h"
@@ -42,8 +41,9 @@ struct Section
     u32 generation;
     u32 num_pages;
     util::SatU32 refcount;
-    u32 page_protect;
+    u32 max_page_protect;
     mm::PhysAddr* frames;
+    core::ResourceSectionChargeKey resource_charge;
     bool has_writable_view;
     bool has_executable_view;
     u8 _pad1[6];
@@ -71,7 +71,20 @@ inline u64 PageUp(u64 value)
     return (value + (mm::kPageSize - 1)) & ~(mm::kPageSize - 1);
 }
 
-u64 ProtectToPteFlags(u32 win32_protect)
+enum SectionAccess : u8
+{
+    kSectionAccessRead = 1U << 0,
+    kSectionAccessWrite = 1U << 1,
+    kSectionAccessExecute = 1U << 2,
+};
+
+struct DecodedProtection
+{
+    u64 pte_flags;
+    u8 access;
+};
+
+bool DecodeProtection(u32 win32_protect, DecodedProtection* decoded_out)
 {
     constexpr u32 kPageReadonly = 0x02;
     constexpr u32 kPageReadwrite = 0x04;
@@ -79,70 +92,83 @@ u64 ProtectToPteFlags(u32 win32_protect)
     constexpr u32 kPageExecute = 0x10;
     constexpr u32 kPageExecuteRead = 0x20;
     constexpr u32 kPageExecuteReadwrite = 0x40;
+    constexpr u32 kPageExecuteWritecopy = 0x80;
 
-    u64 flags = mm::kPagePresent | mm::kPageUser;
+    if (decoded_out == nullptr)
+    {
+        return false;
+    }
+    DecodedProtection decoded{mm::kPagePresent | mm::kPageUser, 0};
     switch (win32_protect)
     {
     case kPageReadonly:
-        flags |= mm::kPageNoExecute;
+        decoded.pte_flags |= mm::kPageNoExecute;
+        decoded.access = kSectionAccessRead;
         break;
     case kPageReadwrite:
-    case kPageWritecopy:
-        flags |= mm::kPageWritable | mm::kPageNoExecute;
+        decoded.pte_flags |= mm::kPageWritable | mm::kPageNoExecute;
+        decoded.access = kSectionAccessRead | kSectionAccessWrite;
         break;
     case kPageExecute:
+        // x86_64 has no execute-only user PTE. Keep the logical access as X
+        // for maximum-subset checks; the architectural mapping is RX, as on
+        // Windows/x86.
+        decoded.access = kSectionAccessExecute;
+        break;
     case kPageExecuteRead:
+        decoded.access = kSectionAccessRead | kSectionAccessExecute;
         break;
+    case kPageWritecopy:
     case kPageExecuteReadwrite:
-        KLOG_ONCE_WARN("subsystems/win32/section", "PAGE_EXECUTE_READWRITE refused (W^X); downgraded to RW+NX");
-        flags |= mm::kPageWritable | mm::kPageNoExecute;
-        break;
+    case kPageExecuteWritecopy:
+        // No COW machinery exists, and W+X is forbidden. Never silently
+        // broaden/downgrade these requests into a different protection.
+        return false;
     default:
-        KLOG_WARN_V("subsystems/win32/section", "unknown PAGE_* protect, treating as RW",
-                    static_cast<u64>(win32_protect));
-        flags |= mm::kPageWritable | mm::kPageNoExecute;
-        break;
+        return false;
     }
-    return flags;
+    *decoded_out = decoded;
+    return true;
 }
 
-SectionKey LiveKeyForSlot(u32 slot)
+bool ProtectionIsSubset(const DecodedProtection& view, const DecodedProtection& maximum)
 {
-    if (slot >= kSectionPoolCap)
-    {
-        return kInvalidSectionKey;
-    }
-    sync::SpinLockGuard guard(g_section_lock);
-    const Section& section = g_pool[slot];
-    if (section.state != SectionState::Live || section.refcount == 0)
-    {
-        return kInvalidSectionKey;
-    }
-    return SectionKey{slot, section.generation};
+    return (view.access & static_cast<u8>(~maximum.access)) == 0;
 }
 
-bool ReserveSlot(SectionKey* key_out)
+bool ReserveSlot(core::ResourceSectionPoolClass pool_class, SectionKey* key_out)
 {
     sync::SpinLockGuard guard(g_section_lock);
-    for (u32 slot = 0; slot < kSectionPoolCap; ++slot)
+    auto reserve_range = [key_out](u32 begin, u32 end)
     {
-        Section& section = g_pool[slot];
-        if (section.state != SectionState::Free || section.generation >= kSectionMaxGeneration)
+        for (u32 slot = begin; slot < end; ++slot)
         {
-            continue;
+            Section& section = g_pool[slot];
+            if (section.state != SectionState::Free || section.generation >= kSectionMaxGeneration)
+            {
+                continue;
+            }
+            ++section.generation;
+            section.state = SectionState::Constructing;
+            section.num_pages = 0;
+            section.refcount = 0;
+            section.max_page_protect = 0;
+            section.frames = nullptr;
+            section.resource_charge = core::kInvalidResourceSectionChargeKey;
+            section.has_writable_view = false;
+            section.has_executable_view = false;
+            *key_out = SectionKey{slot, section.generation};
+            return true;
         }
-        ++section.generation;
-        section.state = SectionState::Constructing;
-        section.num_pages = 0;
-        section.refcount = 0;
-        section.page_protect = 0;
-        section.frames = nullptr;
-        section.has_writable_view = false;
-        section.has_executable_view = false;
-        *key_out = SectionKey{slot, section.generation};
+        return false;
+    };
+
+    if (pool_class == core::ResourceSectionPoolClass::AuthenticatedService &&
+        reserve_range(core::kResourceSectionOrdinaryPoolCapacity, kSectionPoolCap))
+    {
         return true;
     }
-    return false;
+    return reserve_range(0, core::kResourceSectionOrdinaryPoolCapacity);
 }
 
 void AbortConstruction(SectionKey key)
@@ -155,7 +181,8 @@ void AbortConstruction(SectionKey key)
     }
 }
 
-bool PublishConstruction(SectionKey key, mm::PhysAddr* frames, u32 num_pages, u32 page_protect)
+bool PublishConstruction(SectionKey key, mm::PhysAddr* frames, u32 num_pages, u32 max_page_protect,
+                         core::ResourceSectionChargeKey resource_charge)
 {
     sync::SpinLockGuard guard(g_section_lock);
     Section& section = g_pool[key.slot];
@@ -165,7 +192,8 @@ bool PublishConstruction(SectionKey key, mm::PhysAddr* frames, u32 num_pages, u3
     }
     section.frames = frames;
     section.num_pages = num_pages;
-    section.page_protect = page_protect;
+    section.max_page_protect = max_page_protect;
+    section.resource_charge = resource_charge;
     section.refcount = 1;
     section.has_writable_view = false;
     section.has_executable_view = false;
@@ -189,8 +217,16 @@ void FreeFrameVector(mm::PhysAddr* frames, u32 num_pages)
     mm::KFree(frames);
 }
 
-bool SnapshotLiveSection(SectionKey key, mm::PhysAddr** frames_out, u32* num_pages_out, bool* writable_out,
-                         bool* executable_out)
+void RollbackResourceCharge(core::ResourceSectionChargeKey& charge, const char* failure)
+{
+    if (!core::ResourceSectionChargeKeyIsValid(charge))
+        return;
+    if (!core::ResourceDomainReleaseSection(&charge))
+        core::Panic("subsystems/win32/section", failure);
+}
+
+bool SnapshotLiveSection(SectionKey key, mm::PhysAddr** frames_out, u32* num_pages_out, u32* max_page_protect_out,
+                         bool* writable_out, bool* executable_out)
 {
     sync::SpinLockGuard guard(g_section_lock);
     const Section& section = g_pool[key.slot];
@@ -201,6 +237,10 @@ bool SnapshotLiveSection(SectionKey key, mm::PhysAddr** frames_out, u32* num_pag
     }
     *frames_out = section.frames;
     *num_pages_out = section.num_pages;
+    if (max_page_protect_out != nullptr)
+    {
+        *max_page_protect_out = section.max_page_protect;
+    }
     if (writable_out != nullptr)
     {
         *writable_out = section.has_writable_view;
@@ -212,14 +252,16 @@ bool SnapshotLiveSection(SectionKey key, mm::PhysAddr** frames_out, u32* num_pag
     return true;
 }
 
-bool MapSection(SectionKey key, mm::AddressSpace* target_as, u64 base_va, u32 view_protect, bool adopt_view_reference)
+bool MapSection(SectionKey key, mm::AddressSpace* target_as, u64 base_va, u32 view_protect)
 {
-    if (!SectionKeyIsValid(key) || target_as == nullptr || (base_va & (mm::kPageSize - 1)) != 0)
+    DecodedProtection view{};
+    if (!SectionKeyIsValid(key) || target_as == nullptr || (base_va & (mm::kPageSize - 1)) != 0 ||
+        !DecodeProtection(view_protect, &view))
     {
         return false;
     }
-    // This operation pin keeps the frame vector alive. On the new API's
-    // success path it becomes the active view reference without a gap.
+    // This operation pin keeps the frame vector alive and becomes the active
+    // view reference on success without a lifetime gap.
     if (!SectionRetain(key))
     {
         return false;
@@ -231,13 +273,17 @@ bool MapSection(SectionKey key, mm::AddressSpace* target_as, u64 base_va, u32 vi
         SectionMapGuard map_guard(section.map_mutex);
         mm::PhysAddr* frames = nullptr;
         u32 num_pages = 0;
+        u32 max_page_protect = 0;
         bool has_writable_view = false;
         bool has_executable_view = false;
-        if (SnapshotLiveSection(key, &frames, &num_pages, &has_writable_view, &has_executable_view))
+        DecodedProtection maximum{};
+        if (SnapshotLiveSection(key, &frames, &num_pages, &max_page_protect, &has_writable_view,
+                                &has_executable_view) &&
+            DecodeProtection(max_page_protect, &maximum) && ProtectionIsSubset(view, maximum))
         {
             constexpr u64 kUserLastPage = 0x00007FFFFFFFF000ULL;
             const u64 last_page_offset = static_cast<u64>(num_pages - 1) * mm::kPageSize;
-            const u64 flags = ProtectToPteFlags(view_protect);
+            const u64 flags = view.pte_flags;
             const bool grants_write = (flags & mm::kPageWritable) != 0;
             const bool grants_exec = (flags & mm::kPageNoExecute) == 0;
             if (base_va <= kUserLastPage && last_page_offset <= kUserLastPage - base_va &&
@@ -262,14 +308,14 @@ bool MapSection(SectionKey key, mm::AddressSpace* target_as, u64 base_va, u32 vi
         }
     }
 
-    if (!mapped || !adopt_view_reference)
+    if (!mapped)
     {
         SectionRelease(key);
     }
     return mapped;
 }
 
-bool UnmapSection(SectionKey key, mm::AddressSpace* target_as, u64 base_va, bool release_view_reference)
+bool UnmapSection(SectionKey key, mm::AddressSpace* target_as, u64 base_va)
 {
     if (!SectionKeyIsValid(key) || target_as == nullptr || (base_va & (mm::kPageSize - 1)) != 0)
     {
@@ -289,14 +335,14 @@ bool UnmapSection(SectionKey key, mm::AddressSpace* target_as, u64 base_va, bool
         SectionMapGuard map_guard(section.map_mutex);
         mm::PhysAddr* frames = nullptr;
         u32 num_pages = 0;
-        if (SnapshotLiveSection(key, &frames, &num_pages, nullptr, nullptr))
+        if (SnapshotLiveSection(key, &frames, &num_pages, nullptr, nullptr, nullptr))
         {
             unmapped = mm::AddressSpaceUnmapBorrowedRangeExpected(target_as, base_va, frames, num_pages);
         }
     }
 
     SectionRelease(key); // temporary operation pin
-    if (unmapped && release_view_reference)
+    if (unmapped)
     {
         SectionRelease(key);
     }
@@ -305,24 +351,39 @@ bool UnmapSection(SectionKey key, mm::AddressSpace* target_as, u64 base_va, bool
 
 } // namespace
 
-bool SectionCreate(u64 size_bytes, u32 page_protect, SectionKey* key_out)
+bool SectionCreate(core::ResourceDomainKey domain, u64 size_bytes, u32 page_protect, SectionKey* key_out)
 {
-    if (key_out == nullptr || size_bytes == 0 || size_bytes > kSectionMaxBytes)
+    if (key_out == nullptr)
     {
         return false;
     }
     *key_out = kInvalidSectionKey;
-    SectionKey key{};
-    if (!ReserveSlot(&key))
+    DecodedProtection maximum{};
+    if (size_bytes == 0 || size_bytes > kSectionMaxBytes || !DecodeProtection(page_protect, &maximum))
     {
+        return false;
+    }
+    const u32 num_pages = static_cast<u32>(PageUp(size_bytes) / mm::kPageSize);
+    core::ResourceSectionChargeKey resource_charge = core::kInvalidResourceSectionChargeKey;
+    core::ResourceSectionPoolClass pool_class = core::ResourceSectionPoolClass::Ordinary;
+    if (!core::ResourceDomainTryChargeSection(domain, num_pages, &resource_charge, &pool_class))
+    {
+        KLOG_WARN("subsystems/win32/section", "SectionCreate: resource-domain quota refused allocation");
+        return false;
+    }
+
+    SectionKey key{};
+    if (!ReserveSlot(pool_class, &key))
+    {
+        RollbackResourceCharge(resource_charge, "SectionCreate slot-refusal charge rollback failed");
         KLOG_ERROR("subsystems/win32/section", "SectionCreate: pool exhausted or every generation retired");
         return false;
     }
 
-    const u32 num_pages = static_cast<u32>(PageUp(size_bytes) / mm::kPageSize);
     auto* frames = static_cast<mm::PhysAddr*>(mm::KMalloc(sizeof(mm::PhysAddr) * num_pages));
     if (frames == nullptr)
     {
+        RollbackResourceCharge(resource_charge, "SectionCreate metadata-OOM charge rollback failed");
         AbortConstruction(key);
         return false;
     }
@@ -336,6 +397,7 @@ bool SectionCreate(u64 size_bytes, u32 page_protect, SectionKey* key_out)
         if (!frame_result)
         {
             FreeFrameVector(frames, num_pages);
+            RollbackResourceCharge(resource_charge, "SectionCreate frame-OOM charge rollback failed");
             AbortConstruction(key);
             return false;
         }
@@ -346,9 +408,10 @@ bool SectionCreate(u64 size_bytes, u32 page_protect, SectionKey* key_out)
             bytes[offset] = 0;
         }
     }
-    if (!PublishConstruction(key, frames, num_pages, page_protect))
+    if (!PublishConstruction(key, frames, num_pages, page_protect, resource_charge))
     {
         FreeFrameVector(frames, num_pages);
+        RollbackResourceCharge(resource_charge, "SectionCreate publication charge rollback failed");
         AbortConstruction(key);
         return false;
     }
@@ -382,6 +445,7 @@ void SectionRelease(SectionKey key)
     }
     mm::PhysAddr* doomed_frames = nullptr;
     u32 doomed_pages = 0;
+    core::ResourceSectionChargeKey doomed_charge = core::kInvalidResourceSectionChargeKey;
     {
         sync::SpinLockGuard guard(g_section_lock);
         Section& section = g_pool[key.slot];
@@ -397,14 +461,25 @@ void SectionRelease(SectionKey key)
         section.state = SectionState::Retiring;
         doomed_frames = section.frames;
         doomed_pages = section.num_pages;
+        doomed_charge = section.resource_charge;
         section.frames = nullptr;
         section.num_pages = 0;
-        section.page_protect = 0;
+        section.max_page_protect = 0;
+        section.resource_charge = core::kInvalidResourceSectionChargeKey;
         section.has_writable_view = false;
         section.has_executable_view = false;
     }
 
     FreeFrameVector(doomed_frames, doomed_pages);
+
+    // The exact charge remains live through the object's final reference and
+    // frame teardown. Never publish this physical slot as Free unless the
+    // matching non-wrapping charge was consumed successfully; a mismatch is
+    // internal corruption and must fail closed with the slot Retiring.
+    if (!core::ResourceDomainReleaseSection(&doomed_charge))
+    {
+        core::Panic("subsystems/win32/section", "final resource-domain charge release failed");
+    }
 
     sync::SpinLockGuard guard(g_section_lock);
     Section& section = g_pool[key.slot];
@@ -414,14 +489,28 @@ void SectionRelease(SectionKey key)
     }
 }
 
+bool SectionViewProtectionIsCompatible(SectionKey key, u32 view_protect)
+{
+    DecodedProtection view{};
+    if (!SectionKeyIsValid(key) || !DecodeProtection(view_protect, &view))
+    {
+        return false;
+    }
+    sync::SpinLockGuard guard(g_section_lock);
+    const Section& section = g_pool[key.slot];
+    DecodedProtection maximum{};
+    return section.state == SectionState::Live && section.generation == key.generation && section.refcount != 0 &&
+           DecodeProtection(section.max_page_protect, &maximum) && ProtectionIsSubset(view, maximum);
+}
+
 bool SectionMapAndRetainView(SectionKey key, mm::AddressSpace* target_as, u64 base_va, u32 view_protect)
 {
-    return MapSection(key, target_as, base_va, view_protect, true);
+    return MapSection(key, target_as, base_va, view_protect);
 }
 
 bool SectionUnmapAndReleaseView(SectionKey key, mm::AddressSpace* target_as, u64 base_va)
 {
-    return UnmapSection(key, target_as, base_va, true);
+    return UnmapSection(key, target_as, base_va);
 }
 
 u64 SectionViewSize(SectionKey key)
@@ -449,95 +538,172 @@ void SectionLifetimeSelfTest()
         }
     };
 
+    core::ResourceDomainKey lifetime_domain = core::kInvalidResourceDomainKey;
+    expect(core::ResourceDomainCreateTrusted(&lifetime_domain), "lifetime resource-domain create failed");
+
+    constexpr u32 kRejectedCreateProtections[] = {
+        0x00,  // no protection selected
+        0x01,  // PAGE_NOACCESS is not representable as a present view
+        0x08,  // PAGE_WRITECOPY needs COW
+        0x40,  // PAGE_EXECUTE_READWRITE violates W^X
+        0x80,  // PAGE_EXECUTE_WRITECOPY needs COW and violates W^X
+        0x104, // PAGE_READWRITE | unsupported modifier
+    };
+    for (const u32 rejected_protect : kRejectedCreateProtections)
+    {
+        SectionKey rejected{0, 1};
+        expect(!SectionCreate(lifetime_domain, mm::kPageSize, rejected_protect, &rejected) &&
+                   rejected == kInvalidSectionKey,
+               "unsupported Section maximum protection was accepted");
+    }
+
+    DecodedProtection read_only{};
+    DecodedProtection read_write{};
+    DecodedProtection execute_only{};
+    DecodedProtection execute_read{};
+    expect(DecodeProtection(0x02, &read_only) && (read_only.pte_flags & mm::kPageWritable) == 0 &&
+               (read_only.pte_flags & mm::kPageNoExecute) != 0,
+           "PAGE_READONLY decoder flags drifted");
+    expect(DecodeProtection(0x04, &read_write) && (read_write.pte_flags & mm::kPageWritable) != 0 &&
+               (read_write.pte_flags & mm::kPageNoExecute) != 0,
+           "PAGE_READWRITE decoder flags drifted");
+    expect(DecodeProtection(0x10, &execute_only) && (execute_only.pte_flags & mm::kPageWritable) == 0 &&
+               (execute_only.pte_flags & mm::kPageNoExecute) == 0,
+           "PAGE_EXECUTE decoder flags drifted");
+    expect(DecodeProtection(0x20, &execute_read) && (execute_read.pte_flags & mm::kPageWritable) == 0 &&
+               (execute_read.pte_flags & mm::kPageNoExecute) == 0,
+           "PAGE_EXECUTE_READ decoder flags drifted");
+    expect(ProtectionIsSubset(execute_only, execute_read) && !ProtectionIsSubset(execute_read, execute_only) &&
+               ProtectionIsSubset(read_only, execute_read) && !ProtectionIsSubset(read_write, execute_read),
+           "Section protection subset lattice drifted");
+
     SectionKey first{};
-    expect(SectionCreate(2 * mm::kPageSize, 0x04, &first), "initial section create failed");
+    expect(SectionCreate(lifetime_domain, 2 * mm::kPageSize, 0x04, &first), "initial section create failed");
+    core::ResourceDomainSnapshot lifetime_snapshot{};
+    expect(core::ResourceDomainInspectExact(lifetime_domain, &lifetime_snapshot) &&
+               lifetime_snapshot.section_objects == 1 && lifetime_snapshot.section_pages == 2,
+           "initial Section charge was not published to its domain");
     expect(SectionViewSize(first) == 2 * mm::kPageSize, "initial section size mismatch");
+    expect(SectionViewProtectionIsCompatible(first, 0x02), "RW maximum rejected read-only subset");
+    expect(SectionViewProtectionIsCompatible(first, 0x04), "RW maximum rejected exact RW view");
+    expect(!SectionViewProtectionIsCompatible(first, 0x08), "RW maximum accepted COW view");
+    expect(!SectionViewProtectionIsCompatible(first, 0x10), "RW maximum accepted executable view");
+    expect(!SectionViewProtectionIsCompatible(first, 0x40), "RW maximum accepted writable+executable view");
     auto as_result = mm::AddressSpaceCreate(mm::kFrameBudgetTrusted);
     expect(static_cast<bool>(as_result), "address-space create failed");
     mm::AddressSpace* as = as_result.value();
     constexpr u64 kViewBase = 0x000000009FFFF000ULL;
+    expect(!SectionMapAndRetainView(first, as, kViewBase + 1, 0x04), "unaligned Section view was accepted");
+    expect(!SectionMapAndRetainView(first, as, kViewBase, 0x20), "view exceeded Section maximum access");
     expect(SectionMapAndRetainView(first, as, kViewBase, 0x04), "transactional view map failed");
+
+    // A different live Section key must not be able to clear this view merely
+    // because it names the same VA. Exact expected-frame comparison keeps the
+    // original PTE and both objects' references intact on mismatch.
+    SectionKey wrong_key{};
+    expect(SectionCreate(lifetime_domain, mm::kPageSize, 0x04, &wrong_key), "mismatch Section create failed");
+    expect(!SectionUnmapAndReleaseView(wrong_key, as, kViewBase),
+           "foreign Section key cleared an existing borrowed view");
+    expect(mm::AddressSpaceProbePte(as, kViewBase) != mm::kNullFrame,
+           "failed exact unmap disturbed the original Section PTE");
+    SectionRelease(wrong_key);
 
     // Drop the handle reference first. The active view must keep the object
     // alive until its exact expected-frame unmap completes.
     SectionRelease(first);
+    expect(core::ResourceDomainInspectExact(lifetime_domain, &lifetime_snapshot) &&
+               lifetime_snapshot.section_objects == 1 && lifetime_snapshot.section_pages == 2,
+           "handle close released a Section charge still pinned by a live view");
     expect(SectionViewSize(first) == 2 * mm::kPageSize, "view did not retain section lifetime");
     expect(SectionUnmapAndReleaseView(first, as, kViewBase), "transactional view unmap failed");
+    expect(core::ResourceDomainInspectExact(lifetime_domain, &lifetime_snapshot) &&
+               lifetime_snapshot.section_objects == 0 && lifetime_snapshot.section_pages == 0,
+           "final Section view release did not consume its exact charge");
     expect(!SectionRetain(first), "retired section generation remained retainable");
     mm::AddressSpaceRelease(as);
 
     SectionKey second{};
-    expect(SectionCreate(mm::kPageSize, 0x02, &second), "recycled section create failed");
+    expect(SectionCreate(lifetime_domain, mm::kPageSize, 0x02, &second), "recycled section create failed");
     expect(second.slot == first.slot && second.generation == first.generation + 1,
            "recycled slot did not advance generation");
     SectionRelease(first); // stale release must not affect the new generation.
     expect(SectionViewSize(second) == mm::kPageSize, "stale release damaged recycled section");
+    expect(SectionViewProtectionIsCompatible(second, 0x02), "read-only maximum rejected exact view");
+    expect(!SectionViewProtectionIsCompatible(second, 0x04), "read-only maximum accepted writable view");
     SectionRelease(second);
     expect(!SectionRetain(second), "released recycled generation remained retainable");
+
+    SectionKey executable{};
+    expect(SectionCreate(lifetime_domain, mm::kPageSize, 0x20, &executable),
+           "executable-read section create failed");
+    expect(SectionViewProtectionIsCompatible(executable, 0x02), "RX maximum rejected read-only subset");
+    expect(SectionViewProtectionIsCompatible(executable, 0x10), "RX maximum rejected execute-only subset");
+    expect(SectionViewProtectionIsCompatible(executable, 0x20), "RX maximum rejected exact RX view");
+    expect(!SectionViewProtectionIsCompatible(executable, 0x04), "RX maximum accepted writable view");
+    auto exec_as_result = mm::AddressSpaceCreate(mm::kFrameBudgetTrusted);
+    expect(static_cast<bool>(exec_as_result), "executable-view address-space create failed");
+    mm::AddressSpace* exec_as = exec_as_result.value();
+    expect(SectionMapAndRetainView(executable, exec_as, kViewBase, 0x10),
+           "execute-only subset failed to map transactionally");
+    expect(SectionUnmapAndReleaseView(executable, exec_as, kViewBase),
+           "execute-only subset failed to unmap transactionally");
+    mm::AddressSpaceRelease(exec_as);
+    SectionRelease(executable);
+    expect(!SectionRetain(executable), "released executable section remained retainable");
+
+    expect(core::ResourceDomainRelease(lifetime_domain), "lifetime resource-domain release failed");
+
+    // Physical partition regression: while every row is free, authenticated
+    // services must prefer [6,8), preserving [0,6) for ordinary domains.
+    // Six one-page Sections across three ordinary spawn roots must then fill
+    // exactly that ordinary partition; a seventh root must fail and roll its
+    // prospective charge back instead of crossing into reserved capacity.
+    core::ResourceDomainKey service_domain = core::kInvalidResourceDomainKey;
+    SectionKey service_sections[core::kResourceSectionReservedServiceSlots]{};
+    expect(core::ResourceDomainCreateAuthenticatedService(&service_domain),
+           "partition service-domain create failed");
+    for (u32 index = 0; index < core::kResourceSectionReservedServiceSlots; ++index)
+    {
+        expect(SectionCreate(service_domain, mm::kPageSize, 0x04, &service_sections[index]),
+               "authenticated service could not use reserved Section capacity");
+        expect(service_sections[index].slot >= core::kResourceSectionOrdinaryPoolCapacity,
+               "authenticated service did not prefer its reserved Section partition");
+    }
+
+    core::ResourceDomainKey ordinary_domains[4]{};
+    SectionKey ordinary_sections[6]{};
+    for (u32 domain_index = 0; domain_index < 4; ++domain_index)
+    {
+        expect(core::ResourceDomainCreateTrusted(&ordinary_domains[domain_index]),
+               "partition ordinary-domain create failed");
+    }
+    for (u32 section_index = 0; section_index < 6; ++section_index)
+    {
+        const u32 domain_index = section_index / 2;
+        expect(SectionCreate(ordinary_domains[domain_index], mm::kPageSize, 0x04,
+                             &ordinary_sections[section_index]),
+               "ordinary Section could not fill its six-slot partition");
+        expect(ordinary_sections[section_index].slot < core::kResourceSectionOrdinaryPoolCapacity,
+               "ordinary Section escaped into a service-reserved slot");
+    }
+    SectionKey refused_ordinary = kInvalidSectionKey;
+    expect(!SectionCreate(ordinary_domains[3], mm::kPageSize, 0x04, &refused_ordinary) &&
+               refused_ordinary == kInvalidSectionKey,
+           "ordinary Section consumed service-reserved capacity");
+    core::ResourceDomainSnapshot refused_snapshot{};
+    expect(core::ResourceDomainInspectExact(ordinary_domains[3], &refused_snapshot) &&
+               refused_snapshot.section_objects == 0 && refused_snapshot.section_pages == 0,
+           "ordinary partition refusal leaked its resource charge");
+
+    for (SectionKey& section : service_sections)
+        SectionRelease(section);
+    expect(core::ResourceDomainRelease(service_domain), "partition service-domain release failed");
+    for (SectionKey& section : ordinary_sections)
+        SectionRelease(section);
+    for (core::ResourceDomainKey& domain : ordinary_domains)
+        expect(core::ResourceDomainRelease(domain), "partition ordinary-domain release failed");
+
     arch::SerialWrite("[section-lifetime-selftest] PASS\n");
-}
-
-// Temporary compatibility wrappers; see section.h.
-i32 SectionCreate(u64 size_bytes, u32 page_protect)
-{
-    SectionKey key{};
-    return SectionCreate(size_bytes, page_protect, &key) ? static_cast<i32>(key.slot) : -1;
-}
-
-void SectionRetain(u32 idx)
-{
-    (void)SectionRetain(LiveKeyForSlot(idx));
-}
-
-void SectionRelease(u32 idx)
-{
-    SectionRelease(LiveKeyForSlot(idx));
-}
-
-bool SectionMap(u32 idx, mm::AddressSpace* target_as, u64 base_va, u32 view_protect)
-{
-    return MapSection(LiveKeyForSlot(idx), target_as, base_va, view_protect, false);
-}
-
-bool SectionUnmap(u32 idx, mm::AddressSpace* target_as, u64 base_va)
-{
-    return UnmapSection(LiveKeyForSlot(idx), target_as, base_va, false);
-}
-
-u64 SectionViewSize(u32 idx)
-{
-    return SectionViewSize(LiveKeyForSlot(idx));
-}
-
-i32 SectionUnmapAtVa(mm::AddressSpace* target_as, u64 base_va)
-{
-    if (target_as == nullptr || (base_va & (mm::kPageSize - 1)) != 0)
-    {
-        return -1;
-    }
-    for (u32 slot = 0; slot < kSectionPoolCap; ++slot)
-    {
-        const SectionKey key = LiveKeyForSlot(slot);
-        if (SectionKeyIsValid(key) && UnmapSection(key, target_as, base_va, false))
-        {
-            return static_cast<i32>(slot);
-        }
-    }
-    return -1;
-}
-
-i32 LookupSectionHandle(core::Process* caller, u64 handle)
-{
-    if (caller == nullptr || handle < core::Process::kWin32SectionBase)
-    {
-        return -1;
-    }
-    const u64 slot = handle - core::Process::kWin32SectionBase;
-    if (slot >= core::Process::kWin32SectionCap || !caller->win32_section_handles[slot].in_use)
-    {
-        return -1;
-    }
-    return static_cast<i32>(caller->win32_section_handles[slot].pool_index);
 }
 
 } // namespace duetos::subsystems::win32::section
