@@ -3547,13 +3547,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T05:03:30Z
 - **Status**: COMPLETED @ 2026-08-02T05:22:16Z
 
-### [ACTIVE] service-process-endpoint-teardown-20260802
+### [DONE] service-process-endpoint-teardown-20260802
 - **Session**: `Nathan-265`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tests/host/test_service_process_endpoint_teardown.cpp,tools/test/test-service-process-endpoint-teardown-contract.py`
 - **Description**: ProcessKey-aware accepted ServiceEndpoint owner release before raw Process HandleTable drain with durable bounded Busy retry
 - **Claimed**: 2026-08-02T05:04:26Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T06:12:50Z
 
 ### [DONE] root-service-endpoint-contract-drift-20260802
 - **Session**: `Codex-Root-EndpointContract-20260802`
