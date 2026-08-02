@@ -2216,6 +2216,14 @@ void BootBringupDevices(bool force_net_smoke)
     SerialWrite("[boot] Enumerating PCI bus.\n");
     duetos::drivers::pci::PciEnumerate();
 
+    // NetStackInit starts the TCP timer task, so it belongs after scheduler
+    // bring-up, but every protocol table and built-in interface self-test must
+    // be complete before a driver can publish a binding or deliver RX. PCI
+    // enumeration is passive; VirtioInit and NetInit below are the first
+    // activation points.
+    SerialWrite("[boot] Bringing up network stack before NIC activation.\n");
+    duetos::net::NetStackInit();
+
     SerialWrite("[boot] Probing VirtIO PCI devices.\n");
     duetos::drivers::virtio::VirtioInit();
     DUETOS_BOOT_SELFTEST(duetos::drivers::virtio::VirtioInputSelfTest());
@@ -2338,7 +2346,8 @@ void BootBringupDevices(bool force_net_smoke)
     DUETOS_BOOT_SELFTEST(duetos::core::ServiceManagerSelfTest());
 
     SerialWrite("[boot] Detecting NICs.\n");
-    duetos::drivers::net::NetInit();
+    if (!duetos::drivers::net::NetInit())
+        SerialWrite("[boot] NIC registry unavailable (transition or quarantined teardown).\n");
     // drivers/net fault domain self-registers via
     // KERNEL_INITCALL(Drivers, "drivers/net.module", ...) in
     // `kernel/drivers/net/net.cpp`.
@@ -2463,8 +2472,6 @@ void BootBringupDevices(bool force_net_smoke)
     // slice 3 will additionally wake it on an ACPI SCI.
     duetos::env::EnvironmentMonitorStart();
 
-    SerialWrite("[boot] Bringing up network stack skeleton.\n");
-    duetos::net::NetStackInit();
     DUETOS_BOOT_SELFTEST(duetos::net::firewall::FwSelfTest());
 #ifdef DUETOS_DRSH_AUTOSTART
     // Red-team fixture only.  The `true` external-policy argument is
