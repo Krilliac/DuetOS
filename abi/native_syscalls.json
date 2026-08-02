@@ -8490,6 +8490,104 @@
       ],
       "returns": "Legacy documentation does not state the return contract.",
       "summary": "SYS_GDI_GET_TEXT_METRICS — fill a TEXTMETRICA struct for the DC's currently-selected font. rdi = HDC rsi = pointer to user-land TEXTMETRICA (57 bytes) rax <- 1 on success, 0 on failure."
+    },
+    {
+      "number": 227,
+      "name": "SYS_SERVICE_ENDPOINT_OP",
+      "status": "implemented",
+      "authorization": {
+        "mode": "dynamic",
+        "capabilities": [],
+        "owner": "kernel/syscall/service_endpoint_ingress.cpp",
+        "rationale": "The handler derives the full current ProcessKey, immutable credentials, current capability snapshot, service instance, and endpoint generation inside the kernel. No caller-supplied process or service identity grants authority."
+      },
+      "object_rights": {
+        "mode": "dynamic",
+        "rights": [],
+        "owner": "kernel/syscall/service_endpoint_ingress.cpp",
+        "rationale": "Each operation performs an exact typed HandleTable lookup and checks Read, Write, Wait, Destroy, Duplicate, or Transfer rights after bounded control-block decoding."
+      },
+      "trace": {
+        "category": "ipc",
+        "sensitive": true
+      },
+      "fuzz": {
+        "enabled": true,
+        "profile": "mixed"
+      },
+      "arguments": [
+        {
+          "register": "rdi",
+          "kind": "user_buffer",
+          "description": "duet_service_endpoint_request_v1 followed by at most 4096 inline frame bytes"
+        },
+        {
+          "register": "rsi",
+          "kind": "size",
+          "description": "exact request byte count"
+        },
+        {
+          "register": "rdx",
+          "kind": "user_buffer",
+          "description": "duet_service_endpoint_result_v1 followed by caller-reserved inline receive storage"
+        },
+        {
+          "register": "r10",
+          "kind": "size",
+          "description": "bounded result capacity"
+        }
+      ],
+      "returns": "0 when a structured result was delivered; negative errno for invalid ABI storage, copy faults, or unavailable kernel ingress",
+      "summary": "Authenticated versioned ServiceEndpoint accept, receive, reply-ack, close, and typed ObjectTransfer multiplexer."
+    },
+    {
+      "number": 228,
+      "name": "SYS_SERVICE_CONTROL",
+      "status": "implemented",
+      "authorization": {
+        "mode": "dynamic",
+        "capabilities": [],
+        "owner": "kernel/syscall/service_control_ingress.cpp",
+        "rationale": "DESCRIBE_SELF and MARK_READY derive the exact current service instance from the kernel ProcessKey. ENUMERATE, ACTIVATE, STOP, RESTAGE, EXIT_DEQUEUE, and EXIT_ACK require the kernel-owned kCapServiceControl effective snapshot; no request field carries or widens capability authority."
+      },
+      "object_rights": {
+        "mode": "none",
+        "rights": [],
+        "owner": "none",
+        "rationale": "The fixed request contains no handle or kernel pointer. Every mutation is bound to broker, service generation, ProcessKey, and operation-token identities resolved by the service runtime."
+      },
+      "trace": {
+        "category": "process",
+        "sensitive": true
+      },
+      "fuzz": {
+        "enabled": true,
+        "profile": "mixed"
+      },
+      "arguments": [
+        {
+          "register": "rdi",
+          "kind": "user_buffer",
+          "description": "pointer to fixed pointer-free duet_service_control_request_v1"
+        },
+        {
+          "register": "rsi",
+          "kind": "size",
+          "description": "exact request size"
+        },
+        {
+          "register": "rdx",
+          "kind": "user_buffer",
+          "description": "pointer to fixed duet_service_control_result_v1"
+        },
+        {
+          "register": "r10",
+          "kind": "size",
+          "description": "exact result capacity"
+        }
+      ],
+      "returns": "0 when a structured result was delivered; negative errno for invalid ABI storage, copy faults, or unavailable kernel ingress",
+      "summary": "Versioned native service self-readiness and capability-gated supervisor lifecycle and exit-ledger ingress."
     }
   ]
 }

@@ -8,6 +8,8 @@
  */
 
 #include "duet/syscall.h"
+#include "duet/service_control.h"
+#include "duet/service_endpoint.h"
 #include "string.h"
 #include "unistd.h"
 
@@ -81,6 +83,32 @@ long duet_socket_op(long op, long a1, long a2, long a3, long a4, long a5)
                      : "=a"(rv)
                      : "a"((long)DUET_SYS_SOCKET_OP), "D"(op), "S"(a1), "d"(a2), "r"(a3), "r"(a4), "r"(a5)
                      : "r10", "r8", "r9", "rcx", "r11", "memory");
+    return rv;
+}
+
+long duet_service_endpoint_op(const duet_service_endpoint_request_v1* request, size_t request_bytes,
+                              duet_service_endpoint_result_v1* result, size_t result_capacity)
+{
+    long rv;
+    __asm__ volatile("mov %5, %%r10\n\t"
+                     "int $0x80"
+                     : "=a"(rv)
+                     : "a"((long)DUET_SYS_SERVICE_ENDPOINT_OP), "D"(request), "S"((long)request_bytes), "d"(result),
+                       "r"((long)result_capacity)
+                     : "r10", "rcx", "r11", "memory");
+    return rv;
+}
+
+long duet_service_control(const duet_service_control_request_v1* request, size_t request_bytes,
+                          duet_service_control_result_v1* result, size_t result_capacity)
+{
+    long rv;
+    __asm__ volatile("mov %5, %%r10\n\t"
+                     "int $0x80"
+                     : "=a"(rv)
+                     : "a"((long)DUET_SYS_SERVICE_CONTROL), "D"(request), "S"((long)request_bytes), "d"(result),
+                       "r"((long)result_capacity)
+                     : "r10", "rcx", "r11", "memory");
     return rv;
 }
 

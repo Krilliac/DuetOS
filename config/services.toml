@@ -1,0 +1,106 @@
+# Canonical source for the staged DuetOS ServiceManifest v1 package.
+#
+# This file deliberately describes the future extracted bootstrap chain and is
+# not wired into kernel/core/service.cpp. artifacts_resolved remains false in
+# this source file so source-only generation uses deterministic staged labels;
+# the kernel CMake package maps every row to an exact built ELF and resolves the
+# hashes. `service-authority.toml` is the separate trusted policy that binds the
+# resulting manifest hash/extent. Authority binding alone does not create the
+# sealed serviced/execd LoadPlans or make boot activation ready.
+
+[manifest]
+format_version = 1
+manifest_identity = 0x445545544d414e31 # "DUETMAN1"
+signer_identity = 0x445545544255494c   # "DUETBUIL"
+profile_identity = 0x4455455453564331  # "DUETSVC1"
+artifacts_resolved = false
+
+[[service]]
+identity = 0x100
+name = "serviced"
+path = "/system/serviced"
+transfer_ref = 1
+staged_content_label = "services/serviced/unbuilt-v1"
+immutable_policy_selector = 1
+kind = "broker"
+restart = "always"
+autostart = true
+resource_profile = "authenticated-service"
+capabilities = ["serial-console", "fs-read", "spawn-thread", "service-control"]
+frame_budget_pages = 1024
+tick_budget = 1048576
+section_objects = 4
+section_pages = 1024
+dependencies = []
+
+[[service]]
+identity = 0x200
+name = "execd"
+path = "/system/execd"
+transfer_ref = 2
+staged_content_label = "services/execd/unbuilt-v1"
+immutable_policy_selector = 1
+kind = "broker"
+restart = "always"
+autostart = true
+resource_profile = "authenticated-service"
+capabilities = ["fs-read"]
+frame_budget_pages = 2048
+tick_budget = 1048576
+section_objects = 4
+section_pages = 2048
+dependencies = ["serviced"]
+
+[[service]]
+identity = 0x300
+name = "displayd"
+path = "/system/displayd"
+transfer_ref = 3
+staged_content_label = "services/displayd/unbuilt-v1"
+immutable_policy_selector = 1
+kind = "native"
+restart = "always"
+autostart = true
+resource_profile = "authenticated-service"
+capabilities = ["serial-console", "input"]
+frame_budget_pages = 8192
+tick_budget = 1048576
+section_objects = 4
+section_pages = 2048
+dependencies = ["execd"]
+
+[[service]]
+identity = 0x400
+name = "registryd"
+path = "/system/registryd"
+transfer_ref = 4
+staged_content_label = "services/registryd/unbuilt-v1"
+immutable_policy_selector = 1
+kind = "native"
+restart = "always"
+autostart = true
+resource_profile = "authenticated-service"
+capabilities = ["fs-read", "fs-write"]
+frame_budget_pages = 2048
+tick_budget = 1048576
+section_objects = 4
+section_pages = 2048
+dependencies = ["execd"]
+
+[[service]]
+identity = 0x500
+name = "netd"
+path = "/system/netd"
+transfer_ref = 5
+staged_content_label = "services/netd/unbuilt-v1"
+immutable_policy_selector = 1
+kind = "native"
+restart = "always"
+autostart = true
+resource_profile = "authenticated-service"
+capabilities = ["serial-console", "net", "net-admin"]
+frame_budget_pages = 4096
+tick_budget = 1048576
+section_objects = 4
+section_pages = 2048
+dependencies = ["execd"]

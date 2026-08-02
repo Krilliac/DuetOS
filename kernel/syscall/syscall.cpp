@@ -46,6 +46,8 @@
 #include "syscall/cap_gate.h"
 #include "syscall/error.h"
 #include "syscall/inferred_gap.h"
+#include "syscall/service_control_ingress.h"
+#include "syscall/service_endpoint_ingress.h"
 #include "syscall/syscall.h"
 #include "drivers/video/cursor.h"
 #include "drivers/video/widget.h"
@@ -446,6 +448,12 @@ i64 DoWrite(u64 fd, const void* user_buf, u64 len)
 void SyscallInit()
 {
     KLOG_TRACE_SCOPE("syscall", "SyscallInit");
+    const ServiceEndpointIngressStatus ingress_status = ServiceEndpointIngressInitializeKernel();
+    KASSERT(ingress_status == ServiceEndpointIngressStatus::Ok, "syscall",
+            "ServiceEndpoint ingress failed one-shot initialization");
+    const ServiceControlIngressStatus service_control_status = ServiceControlIngressInitializeKernel();
+    KASSERT(service_control_status == ServiceControlIngressStatus::Ok, "syscall",
+            "ServiceControl ingress failed one-shot initialization");
     arch::IdtSetUserGate(kSyscallVector, reinterpret_cast<u64>(&isr_128));
     Log(LogLevel::Info, "sys", "syscall gate online at int 0x80");
     KLOG_INFO_V("syscall", "SyscallInit: int gate installed at vector", kSyscallVector);
@@ -5000,6 +5008,14 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     case SYS_FLS_SET:
         subsystems::win32::DoFlsSet(frame);
+        return;
+
+    case SYS_SERVICE_ENDPOINT_OP:
+        DoServiceEndpointOp(frame);
+        return;
+
+    case SYS_SERVICE_CONTROL:
+        DoServiceControl(frame);
         return;
 
     case SYS_GFX_D3D_STUB:
