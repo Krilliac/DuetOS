@@ -1334,6 +1334,12 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         }
     }
 
+    // A user-origin trap is a cooperative cancellation boundary. Construct
+    // this before every other dispatcher guard so IRQ depth, RIP-integrity,
+    // minidump, and subsystem scopes unwind before Task teardown. Kernel-
+    // origin IRQs remain inert and finish their interrupted kernel frame.
+    const bool cancellation_user_origin = (frame->cs & 3) == 3;
+    ::duetos::sched::ScopedTaskCancellationDeferral cancellation_guard(cancellation_user_origin);
     RipIntegrityGuard guard(frame);
 
     // IRQ/trap nesting-depth accounting. Increment the current CPU's
@@ -1572,13 +1578,12 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         if (NmiWatchdogHandleNmi(frame->rip))
             return;
 
-        // GDB stop-rendezvous broadcast (recoverable). Distinct from
-        // the panic-broadcast halt path below: the calling CPU will
-        // clear arch::SmpGdbStopActive() once its stop loop exits,
-        // and we want to RESUME from the NMI at that point — not
-        // halt. Capture our state into the per-CPU gdb snapshot,
-        // flip the gdb_frozen flag, then spin until the flag clears.
-        if (cpu::BspInstalled() && arch::SmpGdbStopActive())
+        // GDB stop-rendezvous broadcast (recoverable). Capture the active
+        // generation once: both acknowledgement and release are tied to this
+        // exact value, so a stale acknowledgement cannot satisfy a later stop
+        // and a later stop cannot keep this older NMI frame spinning.
+        const u64 gdb_stop_generation = arch::SmpGdbStopGeneration();
+        if (cpu::BspInstalled() && gdb_stop_generation != 0)
         {
             cpu::PerCpu* p = cpu::CurrentCpu();
             if (p != nullptr)
@@ -1592,23 +1597,22 @@ extern "C" void TrapDispatch(TrapFrame* frame)
                 // this CPU's kernel stack and stays valid for the
                 // entire freeze spin below.
                 p->gdb_frozen_frame = frame;
-                asm volatile("" ::: "memory");
-                p->gdb_frozen = 1;
+                // The release-store is the sole acknowledgement. The stop
+                // initiator's acquire-load cannot observe this generation
+                // without also observing every snapshot/frame write above.
+                __atomic_store_n(&p->gdb_frozen_generation, gdb_stop_generation, __ATOMIC_RELEASE);
             }
-            // Bounded by the BSP's release: it clears the global
-            // flag the moment its stop loop exits (continue / detach
-            // / kill / step). We re-read with a `pause` to be polite
-            // to the SMT sibling. No timeout — the BSP is the only
-            // path that can release us, and if it never does, the
-            // kernel is wedged anyway and the operator will reset.
-            while (arch::SmpGdbStopActive())
+            // Bounded by the matching stop owner's generation-safe release.
+            // A different nonzero generation also releases this older frame;
+            // the next NMI will publish a fresh acknowledgement before that
+            // generation can count this CPU as frozen.
+            while (arch::SmpGdbStopGeneration() == gdb_stop_generation)
             {
                 asm volatile("pause" ::: "memory");
             }
             if (p != nullptr)
             {
-                asm volatile("" ::: "memory");
-                p->gdb_frozen = 0;
+                __atomic_store_n(&p->gdb_frozen_generation, 0u, __ATOMIC_RELEASE);
                 p->gdb_frozen_frame = nullptr;
             }
             return; // resume the interrupted code on this peer
@@ -2214,12 +2218,11 @@ extern "C" void TrapDispatch(TrapFrame* frame)
             ::duetos::diag::FixJournalRecordFromTrap2(::duetos::diag::FixDetector::UserFault, uf_ctx_a, uf_ctx_b,
                                                       frame->rip);
         }
-        // SchedExit must NOT run with IF=0 forever; it ends in a
-        // Schedule() that waits for the reaper, and the reaper needs
-        // timer IRQs to make progress. SchedYield/SchedExit internally
-        // cli/sti around Schedule, so we don't need to explicitly sti
-        // here. Control never returns from SchedExit.
-        duetos::sched::SchedExit();
+        // Publish intent and return through every trap-local RAII scope. The
+        // outer cancellation guard runs last and performs SchedExit only after
+        // IRQ nesting and diagnostic state have been restored.
+        duetos::sched::SchedRequestCurrentExit(duetos::sched::KillReason::UserFault);
+        return;
     }
 
     // Fall-through outcome: TrapResponse::Panic. Every kernel-mode

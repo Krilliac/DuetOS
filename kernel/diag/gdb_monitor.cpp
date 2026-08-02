@@ -273,6 +273,20 @@ void Usage(MonitorWriter& out)
             "  duet dump                 minidump from the stop-point context\n");
 }
 
+void StopUnavailable(const char* verb, const char* reason, const GdbMonitorStopContext* stop_context,
+                     MonitorWriter& out)
+{
+    out.Str(verb);
+    out.Str(": unavailable at stop (");
+    out.Str(reason);
+    if (stop_context != nullptr && !stop_context->complete)
+    {
+        out.Str("; missing=0x");
+        out.Hex(stop_context->expected_mask & ~stop_context->acknowledged_mask);
+    }
+    out.Str(")\n");
+}
+
 // ---- control verbs --------------------------------------------------------
 
 void CmdProbe(u32 argc, const char** argv, MonitorWriter& out)
@@ -475,7 +489,7 @@ void CmdDump(MonitorWriter& out)
 // Dispatch
 // ---------------------------------------------------------------------------
 
-bool GdbMonitorDispatch(const char* cmd, u32 cmd_len, MonitorWriter& out)
+bool GdbMonitorDispatch(const char* cmd, u32 cmd_len, MonitorWriter& out, const GdbMonitorStopContext* stop_context)
 {
     if (cmd == nullptr)
     {
@@ -506,6 +520,16 @@ bool GdbMonitorDispatch(const char* cmd, u32 cmd_len, MonitorWriter& out)
     u64 pid = 0;
     const bool have_pid = (argc >= 3) && ParseU64(argv[2], &pid);
 
+    // A timed-out rendezvous means at least one peer may still be executing.
+    // Only static help text is safe in that state. Never try to "make progress"
+    // by releasing acknowledged peers: that would violate debugger stop
+    // semantics and make every register/memory snapshot incoherent.
+    if (stop_context != nullptr && !stop_context->complete)
+    {
+        StopUnavailable(sub, "rendezvous incomplete", stop_context, out);
+        return true;
+    }
+
     if (Eq(sub, "ps"))
     {
         mon_internal::CmdPs(out);
@@ -516,7 +540,10 @@ bool GdbMonitorDispatch(const char* cmd, u32 cmd_len, MonitorWriter& out)
     }
     else if (Eq(sub, "win"))
     {
-        mon_internal::CmdWin(out);
+        if (stop_context != nullptr)
+            StopUnavailable(sub, "compositor snapshot has no no-wait API", stop_context, out);
+        else
+            mon_internal::CmdWin(out);
     }
     else if (Eq(sub, "caps") || Eq(sub, "handles") || Eq(sub, "vm") || Eq(sub, "mods") || Eq(sub, "win32"))
     {
@@ -553,15 +580,24 @@ bool GdbMonitorDispatch(const char* cmd, u32 cmd_len, MonitorWriter& out)
     }
     else if (Eq(sub, "watch"))
     {
-        CmdWatch(argc, argv, out);
+        if (stop_context != nullptr)
+            StopUnavailable(sub, "watch table has no transactional try API", stop_context, out);
+        else
+            CmdWatch(argc, argv, out);
     }
     else if (Eq(sub, "trip"))
     {
-        CmdTrip(argc, argv, out);
+        if (stop_context != nullptr)
+            StopUnavailable(sub, "tripwire table has no try API", stop_context, out);
+        else
+            CmdTrip(argc, argv, out);
     }
     else if (Eq(sub, "dump"))
     {
-        CmdDump(out);
+        if (stop_context != nullptr)
+            StopUnavailable(sub, "minidump emission is not reentrancy guarded", stop_context, out);
+        else
+            CmdDump(out);
     }
     else
     {

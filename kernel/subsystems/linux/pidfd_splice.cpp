@@ -2,34 +2,20 @@
  * Linux pidfd family + zero-copy fd-to-fd plumbing.
  *
  * pidfd_open / pidfd_send_signal / pidfd_getfd are the modern
- * race-free signaling API. v0 implementation: a pidfd is a
- * LinuxFd (state 12) carrying nothing but the target pid in
- * `first_cluster` — a WEAK reference. Read / write reject
- * pidfds with EBADF (the only operation Linux supports on a
- * pidfd is poll/epoll for "process exited" and
- * pidfd_send_signal — v0 supports the send_signal path; the
- * exit-poll integration is a sub-GAP).
+ * race-free signaling API. A pidfd is a LinuxFd (state 12) whose
+ * KFile owns one strong immutable Process identity. Read / write
+ * reject pidfds with EBADF (the only operation Linux supports on a
+ * pidfd is poll/epoll for "process exited" and pidfd_send_signal.
+ * v0 supports both surfaces. The syscall exit path may issue an early
+ * advisory wake, while the Process reaper issues the authoritative wake
+ * only after release-publishing the inert Exited header.
  *
- * WHY WEAK, NOT A ProcessRetain: process teardown is what drains
- * the fd table. `ipc::HandleTableDrain(p->kobj_handles)` — the
- * only thing that closes an fd a process never close(2)'d — runs
- * INSIDE ProcessRelease's refcount==0 body. So a strong Process
- * ref held by an fd is an unbreakable cycle: pidfd_open(getpid())
- * takes 1->2, exit drops 2->1, the destruction body (and with it
- * the drain that would have dropped the other ref) never runs.
- * The process, its whole address space, its sockets and its
- * child-exit publication to a waiting parent all leak forever;
- * a fork()+pidfd_open(getpid())+exit() loop is an unbounded
- * memory-exhaustion primitive. Two processes pidfd_open'ing each
- * other pin each other the same way, so refusing self-pidfds
- * would not have fixed it.
- *
- * Weak is safe because pids are monotonic and never reused
- * (process.cpp `g_next_pid`), so a pid names at most one Process
- * for the life of the boot — the property process.cpp already
- * relies on when it resolves a dying child's parent by pid. Every
- * consumer re-resolves through the scheduler-owned retained lookup
- * before accessing the target after the lookup.
+ * The Process reference belongs to the shared KFile, not to each
+ * descriptor slot. HandleTableDuplicate therefore lets dup/fork share the
+ * open-file description without multiplying the target reference. Last-task
+ * teardown drains Linux fds while the reaper pins the dying Process, so self
+ * and cross-process pidfd graphs are broken before the inert header can lose
+ * its final reference. No pidfd operation re-resolves a weak numeric PID.
  *
  * splice / tee / vmsplice route bytes between fds without a
  * userland round-trip. v0 bounces through a 1 KiB on-stack
@@ -44,23 +30,31 @@
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
+#include "ipc/handle_table.h"
+#include "ipc/kfile.h"
+#include "ipc/kobject.h"
 #include "mm/paging.h"
 #include "proc/process.h"
 #include "sched/sched.h"
+#include "sync/spinlock.h"
 #include "util/nospec.h"
 
 namespace duetos::subsystems::linux::internal
 {
 
+void LinuxPollEventWake();
+u64 LinuxPollEventSequenceSnapshot();
+const u64* LinuxPollEventSequenceAddress();
+sched::WaitQueue* LinuxPollEventWq();
+
 namespace
 {
 
-// Pidfd allocation pool. Per-process instead of a global pool —
-// each pidfd lives in the caller's linux_fds[] slot table. The
-// first_cluster slot of the LinuxFd carries the target PID and
-// that is the WHOLE of a pidfd's state; no Process reference is
-// held (see the file banner for why a strong ref would deadlock
-// teardown).
+constexpr u32 kLinuxFdCap = 16;
+
+// Pidfds need no separate allocation pool. Each descriptor slot owns a
+// generation-checked handle to one shared KFile; that KFile owns the sole
+// strong Process identity reference for the open-file description.
 //
 // Zero-copy claim: NOT pidfds — those don't transfer pages, they
 // just hold a process handle. The "zero-copy" comment lives on
@@ -71,45 +65,78 @@ namespace
 // Global pidfd-exit waitqueue (§ syscall_internal.h LinuxPidfdExitWake).
 // Lives in this TU because pidfd is the canonical surface that needs
 // it; everything else (epoll_wait, DoExitGroup) reaches it through
-// the LinuxPidfdExitWake() / LinuxProcessHasPidfd() helpers.
+// the LinuxPidfdExitWake() / LinuxPidfdExitWq() helpers.
 namespace
 {
 sched::WaitQueue g_pidfd_exit_wq{};
+u64 g_linux_poll_event_sequence = 0;
+constinit sync::SpinLock g_linux_poll_event_lock = {
+    .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
 } // namespace
+
+void LinuxPollEventWake()
+{
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_linux_poll_event_lock);
+    const u64 previous = __atomic_load_n(&g_linux_poll_event_sequence, __ATOMIC_RELAXED);
+    if (previous != ~u64{0})
+        __atomic_store_n(&g_linux_poll_event_sequence, previous + 1, __ATOMIC_RELEASE);
+    sync::SpinLockRelease(g_linux_poll_event_lock, flags);
+
+    constexpr u64 kRflagsInterruptEnable = 1ULL << 9;
+    const bool interrupts_were_enabled = (arch::ReadRflags() & kRflagsInterruptEnable) != 0;
+    arch::Cli();
+    sched::WaitQueueWakeAll(&g_pidfd_exit_wq);
+    if (interrupts_were_enabled)
+        arch::Sti();
+}
+
+u64 LinuxPollEventSequenceSnapshot()
+{
+    return __atomic_load_n(&g_linux_poll_event_sequence, __ATOMIC_ACQUIRE);
+}
+
+const u64* LinuxPollEventSequenceAddress()
+{
+    return &g_linux_poll_event_sequence;
+}
+
+sched::WaitQueue* LinuxPollEventWq()
+{
+    return &g_pidfd_exit_wq;
+}
 
 void LinuxPidfdExitWake()
 {
-    sched::WaitQueueWakeAll(&g_pidfd_exit_wq);
+    // The syscall exit path may call this before SchedExit as an advisory
+    // wake. ProcessCompleteExitFromReaper calls it again after release-
+    // publishing Exited, closing the SMP re-check/lost-wake window.
+    LinuxPollEventWake();
 }
 
-bool LinuxProcessHasPidfd(const core::Process* p)
+core::Process* LinuxPidfdAcquireTarget(const core::LinuxFdAcquired& acquired)
 {
-    if (p == nullptr)
-        return false;
-    for (u32 i = 3; i < 16; ++i)
-        if (p->linux_fds[i].state == 12)
-            return true;
-    return false;
+    if (acquired.snapshot.state != 12 || acquired.kfile_ref == nullptr)
+        return nullptr;
+    const auto* file = reinterpret_cast<const ipc::KFile*>(acquired.kfile_ref);
+    return ipc::KFileAcquirePidfdTarget(file);
 }
 
 sched::WaitQueue* LinuxPidfdExitWq()
 {
-    return &g_pidfd_exit_wq;
+    return LinuxPollEventWq();
 }
 
 // =========================================================
 // pidfd_open / pidfd_send_signal
 // =========================================================
 
-// pidfd_open(pid, flags) — a weak, pid-keyed handle on a live
-// process. No Process reference is taken: the fd stores the pid
-// and every consumer re-resolves it. See the file banner for the
-// teardown cycle a strong reference would create.
+// pidfd_open(pid, flags) — install a generation-checked KFile whose
+// shared open-file description owns a strong Process identity.
 i64 DoPidfdOpen(u64 pid, u64 flags)
 {
     constexpr u64 kPIDFD_NONBLOCK = 0x800;
-    (void)kPIDFD_NONBLOCK; // accepted but blocking-only in v0
-    (void)flags;
+    if ((flags & ~kPIDFD_NONBLOCK) != 0)
+        return kEINVAL;
     // pid==0 is invalid in pidfd_open (real Linux returns
     // -EINVAL since "self" is not addressable that way; the
     // documented "no pid" sentinel for pidfd_open is just
@@ -119,32 +146,39 @@ i64 DoPidfdOpen(u64 pid, u64 flags)
     core::Process* caller = core::CurrentProcess();
     if (caller == nullptr)
         return kEPERM;
-    if (!sched::SchedProcessExists(pid))
+
+    core::ScopedProcessRef target(sched::SchedFindProcessByPidRetained(pid));
+    if (!target)
         return kESRCH;
-    const i32 fd = core::LinuxFdAllocLowest(caller, 3);
-    if (fd < 0)
-        return kEMFILE;
-    caller->linux_fds[fd].state = 12;
-    caller->linux_fds[fd].flags = 0;
-    caller->linux_fds[fd].first_cluster = static_cast<u32>(pid);
-    caller->linux_fds[fd].size = 0;
-    caller->linux_fds[fd].offset = 0;
-    caller->linux_fds[fd].path[0] = '\0';
-    // No release callback: a pidfd owns no pool slot and no
-    // Process reference, so there is nothing for KFileDestroy to
-    // drop. `kfile.cpp` KFileDestroy explicitly supports a null
-    // pool-release callback ("for kinds with no pool ref to drop
-    // ... the callback is nullptr and we just free").
-    if (!core::LinuxFdAttachKFile(caller, static_cast<u32>(fd), /*kind=*/12, static_cast<u32>(pid),
-                                  /*release=*/nullptr))
-    {
-        caller->linux_fds[fd].state = 0;
+    core::ScopedProcessRuntimeAccess target_runtime(target.Get());
+    const u64 target_pid = target->pid;
+    if (!target_runtime || !sched::SchedProcessAlive(target_pid))
+        return kESRCH;
+
+    auto file_result = ipc::KFileCreatePidfd(target.Get());
+    if (!file_result.has_value())
         return kENOMEM;
+    ipc::KFile* file = file_result.value();
+
+    core::Process::LinuxFd payload{};
+    payload.state = 12;
+    payload.kf_handle = ipc::kHandleInvalid;
+    core::LinuxFdPrepared prepared{};
+    if (!core::LinuxFdPrepare(&prepared, payload, &file->base, static_cast<u32>(flags & kPIDFD_NONBLOCK)))
+    {
+        ipc::KObjectRelease(&file->base);
+        return kENOMEM;
+    }
+    const i32 fd = core::LinuxFdBindLowest(caller, 3, &prepared, true);
+    if (fd < 0)
+    {
+        core::LinuxFdPreparedRelease(&prepared);
+        return kEMFILE;
     }
     arch::SerialWrite("[linux/pidfd] open fd=");
     arch::SerialWriteHex(static_cast<u64>(fd));
     arch::SerialWrite(" target_pid=");
-    arch::SerialWriteHex(pid);
+    arch::SerialWriteHex(target_pid);
     arch::SerialWrite("\n");
     return static_cast<i64>(fd);
 }
@@ -154,33 +188,34 @@ i64 DoPidfdSendSignal(u64 pidfd, u64 sig, u64 user_info, u64 flags)
     (void)user_info; // siginfo_t payload not honoured (v0 carries only signum)
     (void)flags;
     core::Process* caller = core::CurrentProcess();
-    if (caller == nullptr || pidfd >= 16)
+    if (caller == nullptr || pidfd >= kLinuxFdCap)
         return kEBADF;
     // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
     // Mask BEFORE the linux_fds[] dereference: a misprediction of the
     // `pidfd >= 16` bounds check would otherwise speculate the load at
     // an OOB index and leak via cache side-channel.
-    pidfd = util::MaskedIndex(pidfd, 16);
-    if (caller->linux_fds[pidfd].state != 12)
+    pidfd = util::MaskedIndex(pidfd, kLinuxFdCap);
+    core::LinuxFdAcquired acquired{};
+    if (!core::LinuxFdAcquire(caller, static_cast<u32>(pidfd), 12, &acquired))
         return kEBADF;
-    const u64 target_pid = caller->linux_fds[pidfd].first_cluster;
-    core::Process* target = sched::SchedFindProcessByPidRetained(target_pid);
-    if (target == nullptr)
+    core::ScopedProcessRef target(LinuxPidfdAcquireTarget(acquired));
+    core::LinuxFdAcquiredRelease(&acquired);
+    if (!target)
+        return kEBADF;
+    core::ScopedProcessRuntimeAccess target_runtime(target.Get());
+    const u64 target_pid = target->pid;
+    if (!target_runtime || !sched::SchedProcessAlive(target_pid))
         return kESRCH; // target may have already exited
-    // The retained lookup keeps the target alive across delivery.
-    const i64 rc = LinuxSignalDeliver(target, static_cast<u32>(sig));
-    core::ProcessRelease(target);
-    return rc;
+    // The KFile-derived retained identity keeps the target alive across
+    // delivery; no numeric PID lookup can redirect this operation.
+    return LinuxSignalDeliver(target.Get(), static_cast<u32>(sig));
 }
 
-// pidfd_getfd(pidfd, target_fd, flags) — dup an fd from a target
-// process into the caller's fd table. The copy itself goes through
-// core::LinuxFdCopyAcrossProcesses — the same helper fork uses —
-// because `kf_handle` is table-local and `ofd` is refcounted, so a
-// raw slot copy would alias one of the CALLER's own live objects
-// and leak/over-release pool references. Regular files (state 2),
-// directories (state 11) and memfd (state 14) are not currently
-// shareable across processes — sub-GAP (see
+// pidfd_getfd(pidfd, target_fd, flags) duplicates one exact retained fd
+// generation from the target into the caller. Export/import never holds two
+// process fd locks together. Regular files (state 2), directories (state 11),
+// and memfd (state 14) are not currently shareable across processes; that
+// remains a bounded sub-GAP (see
 // wiki/reference/Design-Decisions.md). Cap-gated on kCapDebug
 // (cross-process fd inspection is the same threat class as
 // PROCESS_VM_READ).
@@ -192,7 +227,7 @@ i64 DoPidfdGetfd(u64 pidfd, u64 target_fd, u64 flags)
     if (flags != 0)
         return kEINVAL;
     core::Process* caller = core::CurrentProcess();
-    if (caller == nullptr || pidfd >= 16)
+    if (caller == nullptr || pidfd >= kLinuxFdCap)
         return kEBADF;
     if (!core::ProcessHasCap(caller, kCapDebug))
     {
@@ -202,61 +237,40 @@ i64 DoPidfdGetfd(u64 pidfd, u64 target_fd, u64 flags)
     // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
     // Mask BEFORE the linux_fds[] dereference (the bounds-check branch
     // can mispredict and leak an OOB load via cache side-channel).
-    pidfd = util::MaskedIndex(pidfd, 16);
-    if (caller->linux_fds[pidfd].state != 12)
+    pidfd = util::MaskedIndex(pidfd, kLinuxFdCap);
+    if (target_fd >= kLinuxFdCap)
         return kEBADF;
-    const u64 target_pid = caller->linux_fds[pidfd].first_cluster;
-    if (target_fd >= 16)
-        return kEBADF;
-    core::Process* target = sched::SchedFindProcessByPidRetained(target_pid);
-    if (target == nullptr)
-        return kESRCH;
-    target_fd = util::MaskedIndex(target_fd, 16);
-    if (target->linux_fds[target_fd].state == 0)
-    {
-        core::ProcessRelease(target);
-        return kEBADF;
-    }
 
-    // Find a free slot in caller's table.
-    i32 caller_slot = -1;
-    for (u32 i = 3; i < LinuxFdEffectiveMax(caller); ++i)
-        if (caller->linux_fds[i].state == 0)
-        {
-            caller_slot = static_cast<i32>(i);
-            break;
-        }
-    if (caller_slot < 0)
-    {
-        core::ProcessRelease(target);
-        return kEMFILE;
-    }
+    core::LinuxFdAcquired pidfd_acquired{};
+    if (!core::LinuxFdAcquire(caller, static_cast<u32>(pidfd), 12, &pidfd_acquired))
+        return kEBADF;
+    core::ScopedProcessRef target(LinuxPidfdAcquireTarget(pidfd_acquired));
+    core::LinuxFdAcquiredRelease(&pidfd_acquired);
+    if (!target)
+        return kEBADF;
+    core::ScopedProcessRuntimeAccess target_runtime(target.Get());
+    const u64 target_pid = target->pid;
+    if (!target_runtime || !sched::SchedProcessAlive(target_pid))
+        return kESRCH;
+    target_fd = util::MaskedIndex(target_fd, kLinuxFdCap);
+    core::LinuxFdTransfer transfer{};
+    if (!core::LinuxFdExport(target.Get(), static_cast<u32>(target_fd), &transfer))
+        return kEBADF;
 
     // Refuse states that aren't safe to share across processes.
-    const u8 state = target->linux_fds[target_fd].state;
+    const u8 state = transfer.snapshot.state;
     if (state == 2 || state == 11 || state == 14)
     {
-        core::ProcessRelease(target);
+        core::LinuxFdTransferRelease(&transfer);
         return kEINVAL; // regular file / dirfd / memfd
     }
 
-    // The retained lookup keeps the target Process alive while its
-    // fd table is copied. A per-process fd lock remains a separate
-    // gap for concurrent close(2).
-    // GAP: the target's fd table is read without a per-process fd
-    // lock, so this races a concurrent close(2) on another CPU —
-    // revisit when the Linux fd table grows a lock.
-    //
-    // No per-pool *Retain here: the duplicated KFile handle IS the
-    // pool reference (process.h `LinuxFdCopyAcrossProcesses`), so
-    // the caller's close(2) balances it through LinuxFdClose.
-    const bool copied =
-        core::LinuxFdCopyAcrossProcesses(caller, static_cast<u32>(caller_slot), target, static_cast<u32>(target_fd));
-    core::ProcessRelease(target);
-    if (!copied)
+    // Import consumes the retained transfer only on success. Explicit release
+    // is therefore safe on both paths and never runs while an fd lock is held.
+    const i32 caller_slot = core::LinuxFdImportLowest(caller, 3, &transfer, true);
+    core::LinuxFdTransferRelease(&transfer);
+    if (caller_slot < 0)
         return kEMFILE;
-    // pidfd_getfd(2) always returns a close-on-exec descriptor.
-    core::LinuxFdSetCloexec(caller, static_cast<u32>(caller_slot), true);
 
     arch::SerialWrite("[linux/pidfd_getfd] caller=");
     arch::SerialWriteHex(caller->pid);

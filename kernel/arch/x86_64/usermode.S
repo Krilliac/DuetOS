@@ -30,6 +30,7 @@
 
 .section .text
 .align 16
+.extern SchedUserBootstrapComplete
 .global EnterUserMode
 .type EnterUserMode, @function
 EnterUserMode:
@@ -51,6 +52,18 @@ EnterUserModeWithGs:
      *   rdx = user_gs_base (0 for non-PE tasks)
      */
     endbr64
+    /* Consume the Task's initial cancellation deferral only after its C++
+     * bootstrap entry copied/freed any heap descriptor. Preserve all three
+     * user-entry arguments across the SysV call; 3 pushes transform the
+     * entry rsp%16==8 into the required call-site rsp%16==0. A pending kill
+     * exits inside the hook and never reaches the segment transition. */
+    push    rdi
+    push    rsi
+    push    rdx
+    call    SchedUserBootstrapComplete
+    pop     rdx
+    pop     rsi
+    pop     rdi
     /* Disable interrupts from the moment we start setting up segments.
      * A timer tick between "mov ds, ax" and "iretq" would deliver onto
      * the current kernel stack with the data segments half-swapped;
@@ -163,6 +176,19 @@ EnterUserModeWithGs:
 .type EnterUserModeThread, @function
 EnterUserModeThread:
     endbr64
+    /* Four live arguments require one extra alignment slot before the call:
+     * entry rsp%16==8, four pushes retain 8, then sub 8 reaches 0. */
+    push    rdi
+    push    rsi
+    push    rdx
+    push    rcx
+    sub     rsp, 8
+    call    SchedUserBootstrapComplete
+    add     rsp, 8
+    pop     rcx
+    pop     rdx
+    pop     rsi
+    pop     rdi
     mov     r15, rcx                /* stash user_rcx; r15 is scrubbed below anyway */
 
     cli
@@ -238,6 +264,16 @@ EnterUserModeThread:
 .type EnterUserMode32, @function
 EnterUserMode32:
     endbr64
+
+    /* Same bootstrap/cancellation transaction as the 64-bit three-argument
+     * path. The hook runs before cli, swapgs, segment loads, or FSBASE writes. */
+    push    rdi
+    push    rsi
+    push    rdx
+    call    SchedUserBootstrapComplete
+    pop     rdx
+    pop     rsi
+    pop     rdi
 
     cli
 

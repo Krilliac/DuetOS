@@ -20,6 +20,7 @@
 #include "cpu/topology.h"
 #include "mm/address_space.h"
 #include "mm/kheap.h"
+#include "mm/kstack.h"
 #include "mm/page.h"
 #include "mm/paging.h"
 #include "sched/sched.h"
@@ -43,8 +44,11 @@ namespace
 // Parameter-block offsets — MUST match the `.set OFF_*` values in
 // ap_trampoline.S. Changing one without the other wedges the AP into
 // reading zero / random parameters.
-constexpr u64 kOffOnlineFlag = 0xFD4;
+constexpr u64 kOffCapturedToken = 0xFCC;
+constexpr u64 kOffParkedToken = 0xFD0;
+constexpr u64 kOffReadyToken = 0xFD4;
 constexpr u64 kOffCpuId = 0xFD8;
+constexpr u64 kOffAttemptToken = 0xFDC;
 constexpr u64 kOffEntry = 0xFE0;
 constexpr u64 kOffStack = 0xFE8;
 constexpr u64 kOffPml4 = 0xFF0;
@@ -64,6 +68,50 @@ constinit cpu::PerCpu* g_ap_percpus[acpi::kMaxCpus] = {};
 constinit ApGdtBundle* g_ap_gdt_bundles[acpi::kMaxCpus] = {};
 constinit u64 g_cpus_online = 1;  // BSP always counted
 constinit u32 g_cpu_id_limit = 1; // 1 + max cpu_id ever bound (so iteration covers BSP + every AP slot used)
+
+// Per-slot admission is persistent kernel memory, unlike the shared
+// trampoline parameter block. An AP first publishes that it has captured
+// the mutable stack/id/token parameters, then waits here for permission to
+// initialize. After CPUHP succeeds it publishes ready and waits for the BSP
+// to make the slot schedulable. A timed-out AP therefore cannot enter the
+// scheduler merely because it woke after SmpStartAps stopped waiting.
+constinit u32 g_ap_admission[acpi::kMaxCpus] = {};
+constinit u32 g_ap_attempt_generation = 1;
+
+constexpr u32 kApTokenCpuBits = 8;
+constexpr u32 kApTokenCpuMask = (1u << kApTokenCpuBits) - 1u;
+constexpr u32 kApGatePhaseMask = 0xC0000000u;
+constexpr u32 kApGateInitialize = 0x40000000u;
+constexpr u32 kApGateRun = 0x80000000u;
+constexpr u32 kApGateReject = 0xC0000000u;
+constexpr u32 kApReadyFailure = 0x80000000u;
+
+static_assert(acpi::kMaxCpus <= (1u << kApTokenCpuBits), "AP token must retain the complete cpu_id");
+
+constexpr u32 MakeApAttemptToken(u32 generation, u32 cpu_id)
+{
+    return (generation << kApTokenCpuBits) | cpu_id;
+}
+
+constexpr bool ApAttemptTokenMatchesCpu(u32 token, u32 cpu_id)
+{
+    return token != 0 && (token & kApGatePhaseMask) == 0 && (token & kApTokenCpuMask) == cpu_id;
+}
+
+constexpr u32 ApGateValue(u32 token, u32 phase)
+{
+    return token | phase;
+}
+
+// Compile-time hostile cases for the generation/slot encoding. A stale
+// generation for the same slot and the same generation for a different slot
+// must both be distinct, and none may alias an admission phase.
+static_assert(MakeApAttemptToken(1, 3) != MakeApAttemptToken(2, 3));
+static_assert(MakeApAttemptToken(1, 2) != MakeApAttemptToken(1, 3));
+static_assert(ApAttemptTokenMatchesCpu(MakeApAttemptToken(1, 3), 3));
+static_assert(!ApAttemptTokenMatchesCpu(MakeApAttemptToken(1, 3), 2));
+static_assert(ApGateValue(MakeApAttemptToken(1, 3), kApGateInitialize) !=
+              ApGateValue(MakeApAttemptToken(1, 3), kApGateRun));
 
 // LAPIC ICR low-half fields. The ICR register layout itself
 // (offsets / the x2APIC MSR / delivery-status polling) is owned by
@@ -190,20 +238,61 @@ inline u32& TrampU32At(u64 offset)
     return *reinterpret_cast<u32*>(base + offset);
 }
 
-// Busy-spin up to ~200 ms for the AP to flip its online flag.
-bool WaitForApOnline()
+// Wait for one exact attempt token. A late AP from an older generation may
+// still publish into the shared trampoline page, but cannot satisfy this
+// comparison and therefore cannot acknowledge a newer AP's attempt.
+bool WaitForApToken(u64 offset, u32 expected_token, u64 timeout_ticks)
 {
-    constexpr u64 kTimeoutTicks = 20; // * 10 ms = 200 ms
     const u64 start = TimerTicks();
-    while (TimerTicks() - start < kTimeoutTicks)
+    while (TimerTicks() - start < timeout_ticks)
     {
-        if (TrampU32At(kOffOnlineFlag) != 0)
+        if (__atomic_load_n(&TrampU32At(offset), __ATOMIC_ACQUIRE) == expected_token)
         {
             return true;
         }
         asm volatile("pause" ::: "memory");
     }
     return false;
+}
+
+enum class ApReadyResult : u8
+{
+    Ready,
+    Failed,
+    TimedOut,
+};
+
+ApReadyResult WaitForApReady(u32 expected_token, u64 timeout_ticks)
+{
+    const u64 start = TimerTicks();
+    while (TimerTicks() - start < timeout_ticks)
+    {
+        const u32 observed = __atomic_load_n(&TrampU32At(kOffReadyToken), __ATOMIC_ACQUIRE);
+        if (observed == expected_token)
+        {
+            return ApReadyResult::Ready;
+        }
+        if (observed == (expected_token | kApReadyFailure))
+        {
+            return ApReadyResult::Failed;
+        }
+        asm volatile("pause" ::: "memory");
+    }
+    return ApReadyResult::TimedOut;
+}
+
+[[noreturn]] void ParkUnadmittedAp(u32 attempt_token)
+{
+    // Tell a rejecting BSP that this AP no longer touches CPUHP/topology or
+    // the shared trampoline parameters. Keep the private bootstrap stack and
+    // GDT live: NMIs may still arrive even though maskable interrupts remain
+    // disabled and the CPU never joins the scheduler.
+    __atomic_store_n(&TrampU32At(kOffParkedToken), attempt_token, __ATOMIC_RELEASE);
+    asm volatile("cli" ::: "memory");
+    for (;;)
+    {
+        asm volatile("hlt" ::: "memory");
+    }
 }
 
 } // namespace
@@ -298,52 +387,133 @@ u32 PanicWaitPeersHalt(u64 spin_budget)
     return acked;
 }
 
-// GDB stop-rendezvous flag. Set by SmpStopBroadcastNmi, cleared
-// by SmpStopReleaseNmi. Read by the vector-2 NMI handler in
-// traps.cpp via SmpGdbStopActive(). Plain volatile + asm fence —
-// the NMI handler runs with IF=0 so atomic-RMW machinery isn't
-// needed; we just need the compiler to actually issue the load
-// each time and the store to be visible across cores.
-constinit volatile u32 g_gdb_stop_active = 0;
+// GDB stop rendezvous generations. The counter never returns zero; the active
+// slot is zero only between stop sessions. Release uses compare-exchange so a
+// delayed/stale owner cannot accidentally thaw a newer generation.
+static_assert(acpi::kMaxCpus <= 64, "GDB stop masks must cover every CPU slot");
+constinit u64 g_gdb_stop_generation_counter = 0;
+constinit u64 g_gdb_stop_active_generation = 0;
 
-void SmpStopBroadcastNmi()
+namespace
 {
-    if (!LapicIsReady())
+
+u64 NextGdbStopGeneration()
+{
+    u64 observed = __atomic_load_n(&g_gdb_stop_generation_counter, __ATOMIC_RELAXED);
+    for (;;)
     {
-        // Pre-LAPIC stop request — only the calling CPU exists
-        // anyway (no APs without LAPIC). Set the flag for symmetry
-        // and return.
-        g_gdb_stop_active = 1;
-        asm volatile("" ::: "memory");
-        return;
+        if (observed == ~u64{0})
+            core::Panic("arch/smp", "GDB stop generation exhausted");
+        const u64 next = observed + 1;
+        if (__atomic_compare_exchange_n(&g_gdb_stop_generation_counter, &observed, next, false, __ATOMIC_RELAXED,
+                                        __ATOMIC_RELAXED))
+        {
+            return next;
+        }
     }
-
-    // Order matters: peers must see the flag = 1 BEFORE the NMI
-    // fires, otherwise a peer NMI handler that wins the race would
-    // see flag = 0 and take the panic-halt path. Fence then write
-    // then fence — the LAPIC ICR write itself is a serialising
-    // operation per Intel SDM, but be explicit.
-    asm volatile("" ::: "memory");
-    g_gdb_stop_active = 1;
-    asm volatile("mfence" ::: "memory");
-
-    constexpr u32 kIcrDeliveryNmi = 4U << 8;
-    constexpr u32 kIcrDstShorthandAllExSelf = 3U << 18;
-    constexpr u32 icr_low = kIcrDeliveryNmi | kIcrLevelAssert | kIcrDstShorthandAllExSelf;
-
-    LapicSendIcr(0, icr_low);
 }
 
-void SmpStopReleaseNmi()
+u64 GdbExpectedPeerMask()
 {
-    asm volatile("mfence" ::: "memory");
-    g_gdb_stop_active = 0;
-    asm volatile("" ::: "memory");
+    const cpu::PerCpu* const self = cpu::CurrentCpu();
+    const u32 self_id = self != nullptr ? self->cpu_id : 0;
+    const u32 limit = SmpCpuIdLimit();
+    u64 expected = 0;
+    for (u32 id = 0; id < limit && id < acpi::kMaxCpus; ++id)
+    {
+        if (id == self_id)
+            continue;
+        cpu::PerCpu* const peer = SmpGetPercpu(id);
+        if (peer != nullptr && __atomic_load_n(&peer->online, __ATOMIC_ACQUIRE))
+            expected |= u64{1} << id;
+    }
+    return expected;
+}
+
+u64 GdbAcknowledgedPeerMask(u64 expected_mask, u64 generation)
+{
+    u64 acknowledged = 0;
+    const u32 limit = SmpCpuIdLimit();
+    for (u32 id = 0; id < limit && id < acpi::kMaxCpus; ++id)
+    {
+        const u64 bit = u64{1} << id;
+        if ((expected_mask & bit) == 0)
+            continue;
+        cpu::PerCpu* const peer = SmpGetPercpu(id);
+        if (peer != nullptr && __atomic_load_n(&peer->gdb_frozen_generation, __ATOMIC_ACQUIRE) == generation)
+        {
+            acknowledged |= bit;
+        }
+    }
+    return acknowledged;
+}
+
+} // namespace
+
+GdbStopRendezvous SmpStopBroadcastNmiAndWait(u64 spin_budget)
+{
+    GdbStopRendezvous result{};
+    result.generation = NextGdbStopGeneration();
+    result.expected_mask = GdbExpectedPeerMask();
+
+    // Refuse to overwrite an active generation. This path is only reachable
+    // on a recursively entered stop loop; reporting an incomplete rendezvous
+    // leaves the original owner's peers frozen and, importantly, gives this
+    // caller no generation it can successfully release.
+    u64 inactive = 0;
+    if (!__atomic_compare_exchange_n(&g_gdb_stop_active_generation, &inactive, result.generation, false,
+                                     __ATOMIC_RELEASE, __ATOMIC_ACQUIRE))
+    {
+        result.missing_mask = result.expected_mask;
+        result.complete = false;
+        return result;
+    }
+
+    if (LapicIsReady())
+    {
+        // The release publication above must be globally visible before the
+        // NMI can enter a peer. LAPIC ICR delivery is serializing, but retain
+        // an explicit hardware fence at this trap-path boundary.
+        asm volatile("mfence" ::: "memory");
+        constexpr u32 kIcrDeliveryNmi = 4U << 8;
+        constexpr u32 kIcrDstShorthandAllExSelf = 3U << 18;
+        constexpr u32 icr_low = kIcrDeliveryNmi | kIcrLevelAssert | kIcrDstShorthandAllExSelf;
+        LapicSendIcr(0, icr_low);
+    }
+
+    // One collective sample is always taken, even with a zero budget. Each
+    // additional iteration is a bounded polite spin; no lock or timer IRQ is
+    // required while the stop-loop CPU has interrupts disabled.
+    for (u64 spin = 0;; ++spin)
+    {
+        result.acknowledged_mask = GdbAcknowledgedPeerMask(result.expected_mask, result.generation);
+        if (result.acknowledged_mask == result.expected_mask || spin == spin_budget)
+            break;
+        asm volatile("pause" ::: "memory");
+    }
+
+    result.missing_mask = result.expected_mask & ~result.acknowledged_mask;
+    result.complete = result.missing_mask == 0;
+    return result;
+}
+
+bool SmpStopReleaseNmi(u64 generation)
+{
+    if (generation == 0)
+        return false;
+    u64 expected = generation;
+    return __atomic_compare_exchange_n(&g_gdb_stop_active_generation, &expected, 0u, false, __ATOMIC_RELEASE,
+                                       __ATOMIC_ACQUIRE);
+}
+
+u64 SmpGdbStopGeneration()
+{
+    return __atomic_load_n(&g_gdb_stop_active_generation, __ATOMIC_ACQUIRE);
 }
 
 bool SmpGdbStopActive()
 {
-    return g_gdb_stop_active != 0;
+    return SmpGdbStopGeneration() != 0;
 }
 
 u64 SmpCpusOnline()
@@ -745,18 +915,17 @@ void SmpSendReschedIpi(u32 cpu_id)
 
 // ---------------------------------------------------------------------------
 // AP kernel entry — called from ap_trampoline.S once long mode is live.
-// Signature: void ApEntryFromTrampoline(u32 cpu_id)
+// Signature: void ApEntryFromTrampoline(u32 cpu_id, u32 attempt_token)
 //
-// The AP enters here on its own 16 KiB stack (top loaded by the
-// trampoline from the parameter block). Interrupts are disabled, no
-// scheduler on this CPU yet, no LAPIC timer.
+// The AP enters here on its own guard-paged 128 KiB bootstrap stack (top
+// loaded by the trampoline from the parameter block). Interrupts are
+// disabled, no scheduler runs on this CPU yet, and there is no LAPIC timer.
 //
 // v0 scope:
 //   1) install per-CPU struct via GSBASE
 //   2) bring up the AP's LAPIC (enable MSR + SVR)
-//   3) flip the trampoline's online_flag so BSP stops waiting
-//   4) hlt forever (scheduler entry is a separate follow-up commit,
-//      gated on the runqueue/sleepqueue spinlock work landing fully)
+//   3) publish the exact attempt token after CPUHP initialization
+//   4) wait for slot-specific BSP admission before joining the scheduler
 // ---------------------------------------------------------------------------
 namespace
 {
@@ -900,7 +1069,7 @@ namespace
 ::duetos::core::Result<void> CpuhpStartTopology(u32 cpu_id)
 {
     // Decode this AP's CPUID/SRAT topology BEFORE flipping the
-    // online_flag, so the BSP's WaitForApOnline poll inside
+    // ready token, so the BSP's WaitForApReady poll inside
     // SmpStartAps doubles as the rendezvous on AP topology init.
     // After SmpStartAps returns, the BSP runs TopologyAssignClusters
     // and every AP's row is already populated — no separate done flag.
@@ -929,8 +1098,31 @@ void SmpCpuhpRegister()
     CpuhpInstall(CpuhpState::StartingTopology, "topology", &CpuhpStartTopology, nullptr);
 }
 
-extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
+extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id, u32 attempt_token)
 {
+    if (cpu_id == 0 || cpu_id >= acpi::kMaxCpus || !ApAttemptTokenMatchesCpu(attempt_token, cpu_id))
+    {
+        __atomic_store_n(&TrampU32At(kOffReadyToken), attempt_token | kApReadyFailure, __ATOMIC_RELEASE);
+        ParkUnadmittedAp(attempt_token);
+    }
+
+    // Capturing parameters is not permission to mutate CPUHP/topology state.
+    // A late AP whose BSP wait expired sees Reject and parks here, before any
+    // shared subsystem initialization.
+    for (;;)
+    {
+        const u32 gate = __atomic_load_n(&g_ap_admission[cpu_id], __ATOMIC_ACQUIRE);
+        if (gate == ApGateValue(attempt_token, kApGateInitialize))
+        {
+            break;
+        }
+        if (gate == ApGateValue(attempt_token, kApGateReject))
+        {
+            ParkUnadmittedAp(attempt_token);
+        }
+        asm volatile("pause" ::: "memory");
+    }
+
     // FIRST — before ANY call that can reach cpu::CurrentCpu(): bring
     // this AP's IA32_APIC_BASE into the kernel's chosen APIC mode (EN,
     // plus EXTD when the BSP selected x2APIC). IA32_APIC_BASE is a
@@ -965,6 +1157,13 @@ extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
         }
     }
 
+    cpu::PerCpu* const pcpu = g_ap_percpus[cpu_id];
+    if (pcpu == nullptr || pcpu->lapic_id != LapicCurrentId())
+    {
+        __atomic_store_n(&TrampU32At(kOffReadyToken), attempt_token | kApReadyFailure, __ATOMIC_RELEASE);
+        ParkUnadmittedAp(attempt_token);
+    }
+
     // Walk the bring-up chain through every registered startup. The
     // chain runs the historic AP init steps (GDT/GS-base/IDT/CR4/
     // syscall-MSRs/LAPIC/topology) in their original numeric order;
@@ -973,18 +1172,38 @@ extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
     // pre-migration inline sequence — see CpuhpStart* in this TU for
     // each step's body and rationale.
     //
-    // The CpuhpBringUp return value is intentionally dropped: any
-    // failure here is fatal to the AP, but at this stage we have
-    // no logging surface beyond raw serial — the underlying step
-    // KASSERTs/panics for the conditions that historically triggered
-    // them, and a rollback through the AP's partial state is not
-    // recoverable (we are mid-bring-up on this very CPU). The
-    // framework still records the per-CPU state for the panic dump.
-    (void)::duetos::cpu::CpuhpBringUp(cpu_id);
+    // CPUHP owns rollback on failure. Preserve its result so a partial AP
+    // cannot be reported ready or admitted into the scheduler.
+    const ::duetos::core::Result<void> bringup = ::duetos::cpu::CpuhpBringUp(cpu_id);
+    if (!bringup.has_value())
+    {
+        // CpuhpBringUp has already rolled successful states back. Report the
+        // exact failed attempt and park so the BSP can fail closed without
+        // admitting a partially initialized CPU.
+        __atomic_store_n(&TrampU32At(kOffReadyToken), attempt_token | kApReadyFailure, __ATOMIC_RELEASE);
+        ParkUnadmittedAp(attempt_token);
+    }
 
-    // Signal BSP BEFORE logging — log path races with BSP's serial
-    // writes and can delay arbitrarily on contention.
-    TrampU32At(kOffOnlineFlag) = 1;
+    // Signal full initialization BEFORE logging: the log path races with
+    // BSP serial writes and can delay arbitrarily on contention.
+    __atomic_store_n(&TrampU32At(kOffReadyToken), attempt_token, __ATOMIC_RELEASE);
+
+    for (;;)
+    {
+        const u32 gate = __atomic_load_n(&g_ap_admission[cpu_id], __ATOMIC_ACQUIRE);
+        if (gate == ApGateValue(attempt_token, kApGateRun))
+        {
+            break;
+        }
+        if (gate == ApGateValue(attempt_token, kApGateReject))
+        {
+            // CPUHP reached Online, but the BSP withdrew admission after its
+            // bounded wait. Roll the CPUHP count/state back before parking.
+            (void)::duetos::cpu::CpuhpTakeDown(cpu_id);
+            ParkUnadmittedAp(attempt_token);
+        }
+        asm volatile("pause" ::: "memory");
+    }
 
     core::LogWithValue(core::LogLevel::Info, "arch/smp", "AP online cpu_id", static_cast<u64>(cpu_id));
     KBP_PROBE_V(::duetos::debug::ProbeId::kSmpApOnline, cpu_id);
@@ -1070,7 +1289,6 @@ u64 SmpStartAps()
     // letting the next AP reuse it — see the rationale at the point of
     // use below. cpu_id 0 is the BSP, so APs start at 1.
     u32 next_cpu_id = 1;
-
     for (u64 i = 0; i < acpi::CpuCount(); ++i)
     {
         const acpi::LapicRecord& rec = acpi::Lapic(i);
@@ -1095,10 +1313,10 @@ u64 SmpStartAps()
         // derived from `aps_started` (a count of SUCCESSES).
         //
         // With the old `aps_started + 1`, an AP that failed to signal
-        // within the bounded WaitForApOnline window left `aps_started`
+        // within the bounded parameter-capture window left `aps_started`
         // unchanged, so the NEXT MADT entry was handed the very same
         // cpu_id -- overwriting g_ap_percpus[id] and g_ap_gdt_bundles[id]
-        // and reusing the same 16 KiB AP stack.
+        // and reusing the same guarded AP bootstrap stack.
         //
         // That is not merely a leak. The reason the retry path exists at
         // all is that a first SIPI can be slow to take (Intel recommends
@@ -1110,10 +1328,10 @@ u64 SmpStartAps()
         // immediate, unrecoverable memory corruption.
         //
         // Burning the slot instead is cheap (kMaxAps is 31 and real
-        // machines use far fewer) and leaves a late AP with its own
-        // exclusively-owned state. Such an AP is harmless: `online` was
-        // never set and `g_cpu_id_limit` was never bumped for it, so the
-        // scheduler routes no work to it and it simply idles.
+        // machines use far fewer). The handshake below additionally stops
+        // launching later APs if one never confirms that it captured these
+        // mutable parameters; only then is it safe not to overwrite its
+        // exclusively-owned stack/id/token while it may still wake late.
         const u32 cpu_id = next_cpu_id++;
 
         // Allocate per-AP PerCpu struct.
@@ -1160,7 +1378,7 @@ u64 SmpStartAps()
         }
         // GDB stop-rendezvous fields. Zero — peer hasn't been
         // NMI-frozen yet on this AP.
-        ap_pcpu->gdb_frozen = 0;
+        ap_pcpu->gdb_frozen_generation = 0;
         ap_pcpu->gdb_snapshot_rip = 0;
         ap_pcpu->gdb_snapshot_rsp = 0;
         ap_pcpu->gdb_snapshot_rflags = 0;
@@ -1188,8 +1406,8 @@ u64 SmpStartAps()
         // TSS slot wired by AllocateApGdt below, before the AP runs.
         ap_pcpu->tss = nullptr;
         // Liveness flag — flipped to true at the END of this loop
-        // iteration, AFTER WaitForApOnline confirms the AP has
-        // signalled. Until then `PickClusterPlacement` skips this
+        // iteration, AFTER the exact ready token confirms CPUHP has
+        // completed. Until then `PickClusterPlacement` skips this
         // slot, so a wakeable task on the BSP can't be routed to
         // an AP that isn't running yet. The memset above already
         // zeroed it; explicit assignment documents the contract.
@@ -1217,24 +1435,37 @@ u64 SmpStartAps()
         // them. Set the limit AFTER the AP signals online via
         // `g_cpus_online` below.
 
-        // Per-AP 16 KiB stack. The trampoline loads RSP with stack_top
-        // (= stack_base + size) so we pass that.
-        constexpr u64 kApStackBytes = 16 * 1024;
-        auto* stack = static_cast<u8*>(mm::KMalloc(kApStackBytes));
+        // Persistent per-AP bootstrap stack. AP startup now performs the full
+        // CPUHP chain and scheduler admission before its first context switch;
+        // a heap allocation would let an overflow corrupt adjacent kernel
+        // objects. Use the same guard-paged arena as scheduler-owned stacks.
+        //
+        // The stack remains mapped for the CPU lifetime: a rejected AP parks
+        // on it forever, while an admitted AP abandons it only after the first
+        // scheduler switch. Reclaiming the admitted case needs a post-switch
+        // ownership handoff and is deliberately separate from this safety fix.
+        auto* stack = static_cast<u8*>(mm::AllocateKernelStack(mm::kKernelStackUsableBytes));
         if (stack == nullptr)
         {
-            // Per-AP stack allocation failed. Debug: panic.
+            // Per-AP guarded-stack allocation failed. Debug: panic.
             // Release: undo the PerCpu we just allocated and skip
             // this AP. Slightly-higher g_cpu_id_limit is harmless
             // — bounded loops just iterate over an empty slot.
-            core::DebugPanicOrWarn("arch/smp", "KMalloc failed for AP stack");
+            core::DebugPanicOrWarn("arch/smp", "AllocateKernelStack failed for AP bootstrap stack");
             g_ap_percpus[cpu_id] = nullptr;
             mm::KFree(ap_pcpu);
             continue;
         }
-        TrampU64At(kOffStack) = reinterpret_cast<u64>(stack + kApStackBytes);
+        const u32 attempt_token = MakeApAttemptToken(g_ap_attempt_generation++, cpu_id);
+        KASSERT(ApAttemptTokenMatchesCpu(attempt_token, cpu_id), "arch/smp", "AP attempt token overflowed");
+
+        TrampU64At(kOffStack) = reinterpret_cast<u64>(stack + mm::kKernelStackUsableBytes);
         TrampU32At(kOffCpuId) = cpu_id;
-        TrampU32At(kOffOnlineFlag) = 0;
+        TrampU32At(kOffAttemptToken) = attempt_token;
+        __atomic_store_n(&g_ap_admission[cpu_id], 0u, __ATOMIC_RELEASE);
+        __atomic_store_n(&TrampU32At(kOffCapturedToken), 0u, __ATOMIC_RELEASE);
+        __atomic_store_n(&TrampU32At(kOffParkedToken), 0u, __ATOMIC_RELEASE);
+        __atomic_store_n(&TrampU32At(kOffReadyToken), 0u, __ATOMIC_RELEASE);
 
         // Compose the "starting AP" log as one atomic SerialWrite
         // instead of going through klog's multi-fragment path. The
@@ -1286,16 +1517,53 @@ u64 SmpStartAps()
         const u32 sipi = kIcrDeliveryStartup | (kTrampolinePhys >> 12);
         SmpSendIpi(rec.apic_id, sipi);
 
-        if (!WaitForApOnline())
+        // Phase 1 waits only for the assembly-loaded parameters to be
+        // captured. A retry is safe while no AP has published this token;
+        // once captured, a second SIPI would target an already-running CPU.
+        constexpr u64 kCaptureTimeoutTicks = 20; // * 10 ms = 200 ms
+        bool captured = WaitForApToken(kOffCapturedToken, attempt_token, kCaptureTimeoutTicks);
+        if (!captured)
         {
             // Intel recommends a second SIPI if the first doesn't take.
             SmpSendIpi(rec.apic_id, sipi);
-            if (!WaitForApOnline())
+            captured = WaitForApToken(kOffCapturedToken, attempt_token, kCaptureTimeoutTicks);
+            if (!captured)
             {
-                core::LogWithValue(core::LogLevel::Error, "arch/smp", "AP never signalled online, giving up",
+                // This AP might still wake and read the current parameter
+                // block. Reject it before CPUHP and stop the enumeration so
+                // no later attempt can overwrite its stack/id/token.
+                __atomic_store_n(&g_ap_admission[cpu_id], ApGateValue(attempt_token, kApGateReject), __ATOMIC_RELEASE);
+                core::LogWithValue(core::LogLevel::Error, "arch/smp",
+                                   "AP never captured startup parameters; aborting AP bring-up",
                                    static_cast<u64>(rec.apic_id));
-                continue;
+                break;
             }
+        }
+
+        // Phase 2 authorizes this exact slot/generation to initialize. CPUHP
+        // emits several serialized debug lines and legitimately exceeded the
+        // former 400 ms all-in-one timeout under a contended 4-vCPU boot, so
+        // give initialized work a separate five-second bound.
+        __atomic_store_n(&g_ap_admission[cpu_id], ApGateValue(attempt_token, kApGateInitialize), __ATOMIC_RELEASE);
+        constexpr u64 kInitializeTimeoutTicks = 500; // * 10 ms = 5 s
+        const ApReadyResult ready = WaitForApReady(attempt_token, kInitializeTimeoutTicks);
+        if (ready != ApReadyResult::Ready)
+        {
+            __atomic_store_n(&g_ap_admission[cpu_id], ApGateValue(attempt_token, kApGateReject), __ATOMIC_RELEASE);
+            core::LogWithValue(core::LogLevel::Error, "arch/smp",
+                               ready == ApReadyResult::Failed ? "AP CPUHP initialization failed; aborting AP bring-up"
+                                                              : "AP initialization timed out; aborting AP bring-up",
+                               static_cast<u64>(rec.apic_id));
+
+            // The AP captured its private stack/id before initialization was
+            // authorized. Do not let the BSP finalize topology until that AP
+            // confirms CPUHP has rolled back and it is parked.
+            constexpr u64 kParkTimeoutTicks = 500; // * 10 ms = 5 s
+            if (!WaitForApToken(kOffParkedToken, attempt_token, kParkTimeoutTicks))
+            {
+                core::PanicWithValue("arch/smp", "rejected AP did not quiesce", static_cast<u64>(rec.apic_id));
+            }
+            break;
         }
 
         ++aps_started;
@@ -1312,11 +1580,15 @@ u64 SmpStartAps()
         // runtime (hot-plug / power-management / watchdog kill) can
         // flip `online = false` to immediately stop routing without
         // having to coordinate `g_cpu_id_limit`.
-        ap_pcpu->online = true;
         if (cpu_id + 1 > g_cpu_id_limit)
         {
             g_cpu_id_limit = cpu_id + 1;
         }
+        __atomic_store_n(&ap_pcpu->online, true, __ATOMIC_RELEASE);
+        // Final admission comes last. The AP's acquire load of this
+        // slot-specific value observes the count, id-limit, and online
+        // publication above before entering SchedEnterOnAp.
+        __atomic_store_n(&g_ap_admission[cpu_id], ApGateValue(attempt_token, kApGateRun), __ATOMIC_RELEASE);
     }
 
     // Structural sentinel — ONE atomic SerialWrite so it stays a

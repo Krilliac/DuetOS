@@ -1286,7 +1286,7 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 17 | `SYS_GETTIME_FT` | — | the current wall-clock time as a Windows FILETIME — a u64 count of 100-nanose... |
 | 18 | `SYS_NOW_NS` | — | nanoseconds since boot in rax |
 | 19 | `SYS_SLEEP_MS` | `rdi` = milliseconds to block | 0 on wake |
-| 20 | `SYS_FILE_OPEN` | `rdi` = user pointer to NUL-terminated ASCII path; `rsi` = path-length cap (caller-supplied to bound the CopyFromUser) | a Win32-shaped handle (Process::kWin32HandleBase + slot_idx, i |
+| 20 | `SYS_FILE_OPEN` | `rdi` = user pointer to NUL-terminated ASCII path; `rsi` = path-length cap (caller-supplied to bound the CopyFromUser) | an opaque positive Win32 file handle: low tag bits 0 through 11 are 0x100 thr... |
 | 21 | `SYS_FILE_READ` | `rdi` = handle (Win32-shaped); `rsi` = user dst buffer; `rdx` = byte count cap | bytes actually copied (≤ both `rdx` and remaining bytes in the file from the ... |
 | 22 | `SYS_FILE_CLOSE` | `rdi` = handle | 0 on success or no-op (closing an already-closed / never-opened handle is a d... |
 | 23 | `SYS_FILE_SEEK` | `rdi` = handle; `rsi` = signed offset; `rdx` = whence (0 = SET | the new cursor position (relative to file start) on success, or u64(-1) on fa... |
@@ -1309,8 +1309,8 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 40 | `SYS_GETTIME_ST` | `rdi` = user pointer to a 16-byte SYSTEMTIME struct | 0 on success, u64(-1) on EFAULT |
 | 41 | `SYS_ST_TO_FT` | `rdi` = user pointer to an input SYSTEMTIME; `rsi` = user pointer to an output FILETIME | 0 on success |
 | 42 | `SYS_FT_TO_ST` | `rdi` = user pointer to an input FILETIME; `rsi` = user pointer to an output SYSTEMTIME | — |
-| 43 | `SYS_FILE_WRITE` | `rdi` = handle (Win32-shaped; `rsi` = user pointer to source bytes; `rdx` = byte count | bytes written (0 |
-| 44 | `SYS_FILE_CREATE` | `rdi` = user pointer to NUL-terminated ASCII path; `rsi` = path-buffer cap (bytes); `rdx` = user pointer to initial bytes (may be 0/null for empty file); `r10` = initial byte count | a Win32 pseudo- handle (kWin32HandleBase + slot_idx) on success, u64(-1) on f... |
+| 43 | `SYS_FILE_WRITE` | `rdi` = opaque positive Win32 file handle with low tag 0x100 thro...; `rsi` = user pointer to source bytes; `rdx` = byte count | bytes written (0 |
+| 44 | `SYS_FILE_CREATE` | `rdi` = user pointer to NUL-terminated ASCII path; `rsi` = path-buffer cap (bytes); `rdx` = user pointer to initial bytes (may be 0/null for empty file); `r10` = initial byte count | an opaque positive Win32 file handle with low tag 0x100 through 0x10F and non... |
 | 45 | `SYS_THREAD_CREATE` | `rdi` = user-mode start VA (thread proc); `rsi` = user-mode parameter (passed as RCX on thread entry per Wi... | a Win32 pseudo-handle (kWin32ThreadBase + slot_idx, i |
 | 46 | `SYS_DEBUG_PRINT` | `rdi` = user pointer to NUL-terminated ASCII string | — |
 | 47 | `SYS_MEM_STATUS` | `rdi` = user pointer to a 64-byte Win32 MEMORYSTATUSEX struct | — |
@@ -1413,7 +1413,7 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 144 | `SYS_FILE_RENAME` | — | — |
 | 145 | `SYS_PROCESS_TERMINATE` | `rdi` = ProcessHandle (NtCurrentProcess = -1 → self-task-exit; `rsi` = exit status (passed through to SchedExit on the self path); `rdx` = user buffer; `r10` = buffer cap; `r8` = user u32* return_length | — |
 | 146 | `SYS_THREAD_TERMINATE` | — | — |
-| 147 | `SYS_PROCESS_QUERY_INFO` | — | — |
+| 147 | `SYS_PROCESS_QUERY_INFO` | `rdi` = Process handle (`-1` = self); `rsi` = information class; `rdx` = user output buffer; `r10` = buffer capacity; `r8` = optional user `u32*` ReturnLength | NTSTATUS. Class 0 writes the 48-byte x64 `PROCESS_BASIC_INFORMATION`; its first field is `STILL_ACTIVE` (`0x103`) until lifecycle `Exited`, then the exact durable Win32 exit code. |
 | 148 | `SYS_VM_ALLOCATE` | `rdi` = ProcessHandle (-1 = self); `rsi` = base_addr (0 = pick any aligned); `rdx` = size in bytes (rounded up to a page); `r10` = AllocationType (MEM_COMMIT | MEM_RESERVE; `r8` = protect flags (PAGE_*; `r9` = user u64* base out (set on success) | — |
 | 149 | `SYS_VM_FREE` | — | — |
 | 150 | `SYS_VM_PROTECT` | — | — |
@@ -1429,12 +1429,12 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 160 | `SYS_IOCP_SET` | — | — |
 | 161 | `SYS_IOCP_REMOVE` | — | — |
 | 162 | `SYS_IOCP_CLOSE` | — | — |
-| 163 | `SYS_JOB_CREATE` | — | — |
-| 164 | `SYS_JOB_ASSIGN` | — | — |
-| 165 | `SYS_JOB_IS_IN` | — | — |
-| 166 | `SYS_JOB_TERMINATE` | — | — |
-| 167 | `SYS_JOB_QUERY` | — | — |
-| 168 | `SYS_JOB_CLOSE` | — | — |
+| 163 | `SYS_JOB_CREATE` | no arguments; caller must hold `kCapSpawnThread` | Opaque positive Job handle (low tag `0xC00` through `0xC07`, non-zero generation above bit 11), or `-1` on failure. |
+| 164 | `SYS_JOB_ASSIGN` | `rdi` = Job handle; `rsi` = Process handle (`-1` = self) | `0` for assignment/already-member; `-1` for a stale/foreign Job, invalid or non-live Process, membership conflict, capacity, or terminated Job. |
+| 165 | `SYS_JOB_IS_IN` | `rdi` = Job handle (`0` = any containing Job); `rsi` = Process handle (`0`/`-1` = self); `rdx` = user `u32*` result | `0` after writing `0` or `1`; `-1` for an invalid handle/output pointer. |
+| 166 | `SYS_JOB_TERMINATE` | `rdi` = Job handle; `rsi` = Win32 `DWORD` exit code | `0` after publishing cooperative process-wide Job kill requests; `-1` for a stale/foreign Job or invalid termination transaction. |
+| 167 | `SYS_JOB_QUERY` | `rdi` = Job handle (`0` = Job containing caller); `rsi` = class (`1`, `3`, or `8`); `rdx` = user buffer; `r10` = buffer capacity | Bytes written on success, `-1` on failure. Class 3 accepts an 8-byte header-only/partial buffer and reports the full assigned count plus the number of complete PIDs returned. |
+| 168 | `SYS_JOB_CLOSE` | `rdi` = generation-valid Job handle | `0` after dropping the owner's handle reference; `-1` for stale/foreign/invalid handles. Membership persists until exact Process exit even after the last reference closes. |
 | 169 | `SYS_TOKEN_ADJUST` | `rdi` = u32 disable_all       (0 / 1) rsi = const u8* user_new   ...; `rdx` = u32 user_new_byte_len (0 if disable_all == 1) r10 = u8* u...; `r8` = u32 user_prev_byte_cap  Returns: 0  on full success (ever... | — |
 | 170 | `SYS_WIN_GET_MOUSE_DELTA` | `rdi` = user pointer to a 16-byte DIMOUSESTATE-shaped buffer { i3... | — |
 | 171 | `SYS_STDIN_READ` | `rdi` = user pointer to a destination byte buffer; `rsi` = capacity in bytes (must be > 0 | "as much as is ready," not "fill the buffer") |
@@ -1453,7 +1453,7 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 188 | `SYS_DRAIN_USER_APC` | `rdi` = u64* user out_pfn        // VA written on success rsi = u... | 1 if an APC was drained, 0 if the queue was empty for the caller, (u64)-1 on ... |
 | 189 | `SYS_PRIORITY_CLASS` | `rdi` = u64 op                   // 0 = get; `rsi` = u32 new_class            // ignored when op == 0 Returns ... | the current (post-op) priority class on success, 0 on bad op |
 | 190 | `SYS_PROCESS_SPAWN_EX` | `rdi` = const char* user path           // NUL-terminated rsi = u... | the new pid on success, (u64)-1 on failure (any inherited handle resolves to ... |
-| 191 | `SYS_GET_INHERITED_STD` | `rdi` = u64 idx                  // 0=stdin | the inherited Win32 file handle (kWin32HandleBase range) on success, 0 if no ... |
+| 191 | `SYS_GET_INHERITED_STD` | `rdi` = u64 idx                  // 0=stdin | the inherited opaque positive Win32 file handle with low tag 0x100 through 0x... |
 | 192 | `SYS_HEAPEX_CREATE` | `rdi` = u64 pages   (clamped to kWin32ExtraHeapPagesMax) Returns ... | the heap handle (also the base VA) on success, 0 on table-full / OOM |
 | 193 | `SYS_HEAPEX_DESTROY` | `rdi` = u64 heap_handle | 1 on success, 0 on bad handle |
 | 194 | `SYS_HEAPEX_ALLOC` | `rdi` = u64 heap_handle (0 = default) rsi = u64 size Returns user... | user VA or 0 on OOM |
@@ -1465,8 +1465,8 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 199 | `SYS_VIRTUAL_ALLOC` | `rdi` = u64 size_bytes        // rounded up to page multiples rsi...; `r10` = u64 hint_va            // 0 = pick from arena bump cursor | the region's base VA on success (each call returns the SAME base when committ... |
 | 200 | `SYS_VIRTUAL_FREE` | `rdi` = u64 base_va rsi = u64 size_bytes        // 0 with MEM_REL... | 1 on success, 0 on bad VA / size / type mix |
 | 201 | `SYS_VIRTUAL_PROTECT` | `rdi` = u64 base_va rsi = u64 size_bytes rdx = u64 new_protection... | 1 on success, 0 on miss / W^X violation |
-| 202 | `SYS_NAMED_PIPE_CREATE` | `rdi` = const char* user name      // bare pipe name (no //  "\; `rsi` = u64 name_len_cap           // bounds the name copy rdx = ... | a Win32-shaped file handle (kWin32HandleBase + slot) for the server end on su... |
-| 203 | `SYS_NAMED_PIPE_OPEN` | `rdi` = const char* user name      // bare pipe name rsi = u64 na... | a Win32-shaped file handle for the client end on success, (u64)-1 on miss (na... |
+| 202 | `SYS_NAMED_PIPE_CREATE` | `rdi` = const char* user name      // bare pipe name (no //  "\; `rsi` = u64 name_len_cap           // bounds the name copy rdx = ... | an opaque positive Win32 file handle with low tag 0x100 through 0x10F and non... |
+| 203 | `SYS_NAMED_PIPE_OPEN` | `rdi` = const char* user name      // bare pipe name rsi = u64 na... | an opaque positive Win32 file handle with low tag 0x100 through 0x10F and non... |
 | 204 | `SYS_DIAG_FAULT_INJECT` | `rdi` = FaultClass enum value (1 = NullDeref | -EACCES and the call is recorded as a sandbox denial |
 | 205 | `SYS_DLL_LOAD_FROM_PATH` | `rdi` = user pointer to NUL-terminated ASCII basename (e; `rsi` = name length in bytes (excluding NUL) | the base VA |
 | 206 | `SYS_COMPAT_QUERY` | — | the per-process app-compat policy flags as a packed bitmask |

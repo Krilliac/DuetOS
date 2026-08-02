@@ -24,7 +24,7 @@ LAST_UNLINK_TRANSITION = (
     r"ProcessLifecycleState::Published\s*,\s*ProcessLifecycleState::Exiting\s*\)"
 )
 EXIT_COMPLETE_TRANSITION = (
-    r"ProcessLifecycleTransition\s*\(\s*dead_process\s*,\s*"
+    r"ProcessLifecycleTransition\s*\(\s*process\s*,\s*"
     r"ProcessLifecycleState::Exiting\s*,\s*ProcessLifecycleState::Exited\s*\)"
 )
 
@@ -236,11 +236,17 @@ def branch_rejects_non_published(source: str) -> bool:
 
 
 def branch_rejects_failed_first_transition(source: str) -> bool:
-    return any(
+    if any(
         re.search(r"!\s*" + FIRST_PUBLICATION_TRANSITION, statement.condition)
         and re.search(r"\breturn\s+false\s*;", statement.then_body)
         for statement in if_statements(source)
-    )
+    ):
+        return True
+    # Once a one-shot external publication gate has accepted, losing the
+    # Private -> Published CAS is an impossible invariant violation rather
+    # than an ordinary rejection path. A checked fatal transition is equally
+    # strong and must not be mistaken for an unchecked state write.
+    return transition_failure_is_fatal(source, FIRST_PUBLICATION_TRANSITION)
 
 
 def transition_failure_is_fatal(source: str, transition_pattern: str) -> bool:
@@ -351,7 +357,7 @@ class ProcessTaskPublicationContractTests(unittest.TestCase):
             with self.subTest(state=state):
                 self.assertRegex(lifecycle, rf"\b{state}\b")
 
-        process = type_body(self.process_h, r"struct\s+Process")
+        process = type_body(self.process_h, r"struct\s+Process\b")
         self.assertRegex(process, r"\bProcessLifecycleState\s+lifecycle_state\s*;")
 
         create = function_body(self.process_cpp, r"Process\s*\*\s*ProcessCreate")
@@ -377,17 +383,171 @@ class ProcessTaskPublicationContractTests(unittest.TestCase):
         )
 
         load = function_body(self.process_cpp, r"ProcessLifecycleState\s+ProcessLifecycleLoad")
-        require_pattern(load, r"__atomic_load_n\s*\(\s*&\w+->lifecycle_state\b", "lifecycle load is not atomic")
+        require_pattern(
+            load,
+            r"__atomic_load(?:_n)?\s*\([\s\S]*?&\w+->lifecycle_state\b",
+            "lifecycle load is not atomic",
+        )
         self.assertIn("__ATOMIC_ACQUIRE", load)
+        self.assertNotIn("reinterpret_cast", load)
 
         transition = function_body(self.process_cpp, r"bool\s+ProcessLifecycleTransition")
         require_pattern(
             transition,
-            r"__atomic_compare_exchange_n\s*\(\s*&\w+->lifecycle_state\b",
+            r"__atomic_compare_exchange(?:_n)?\s*\([\s\S]*?&\w+->lifecycle_state\b",
             "lifecycle transition is not a checked atomic state change",
         )
         self.assertIn("__ATOMIC_ACQ_REL", transition)
         self.assertIn("__ATOMIC_ACQUIRE", transition)
+        self.assertNotIn("reinterpret_cast", transition)
+
+    def test_process_termination_tombstone_is_distinct_atomic_and_monotonic(self) -> None:
+        termination = type_body(self.process_h, r"enum\s+class\s+ProcessTerminationState")
+        self.assertRegex(termination, r"\bOpen\b")
+        self.assertRegex(termination, r"\bClosed\b")
+        process = type_body(self.process_h, r"struct\s+Process\b")
+        self.assertRegex(process, r"\bProcessTerminationState\s+termination_state\s*;")
+
+        require_pattern(
+            self.process_h_code,
+            r"\bProcessTerminationState\s+ProcessTerminationLoad\s*\(",
+            "missing Process termination snapshot API",
+        )
+        require_pattern(
+            self.process_h_code,
+            r"\bbool\s+ProcessTerminationClose\s*\(",
+            "missing Process termination close API",
+        )
+
+        process_cpp_code = code_only(self.process_cpp)
+        self.assertEqual(
+            len(
+                re.findall(
+                    r"\btermination_state\s*=\s*ProcessTerminationState::Open\s*;",
+                    process_cpp_code,
+                )
+            ),
+            1,
+            "Process termination can be reopened or is not initialized exactly once",
+        )
+        create = function_body(self.process_cpp, r"Process\s*\*\s*ProcessCreate")
+        initialized = require_pattern(
+            create,
+            r"p->termination_state\s*=\s*ProcessTerminationState::Open\s*;",
+            "ProcessCreate does not explicitly open Task publication",
+        )
+        self.assertLess(initialized.start(), create.rfind("return p;"))
+
+        load = function_body(self.process_cpp, r"ProcessTerminationState\s+ProcessTerminationLoad")
+        require_pattern(load, r"__atomic_load\s*\([^;]*&process->termination_state", "termination load is not atomic")
+        self.assertIn("__ATOMIC_ACQUIRE", load)
+        self.assertNotIn("ProcessLifecycle", load)
+
+        close = function_body(self.process_cpp, r"bool\s+ProcessTerminationClose")
+        require_pattern(
+            close,
+            r"__atomic_compare_exchange\s*\([^;]*&process->termination_state",
+            "termination close is not a checked atomic transition",
+        )
+        self.assertIn("ProcessTerminationState::Open", close)
+        self.assertIn("ProcessTerminationState::Closed", close)
+        self.assertIn("__ATOMIC_ACQ_REL", close)
+        self.assertIn("__ATOMIC_ACQUIRE", close)
+        self.assertNotIn("ProcessLifecycle", close)
+
+    def test_process_wide_kill_closes_publication_before_its_exact_scan(self) -> None:
+        publish = function_body(self.sched_cpp, r"bool\s+PublishCreatedTask")
+        publish_store = require_pattern(publish, r"task->published\s*=\s*true\s*;", "Task publication disappeared")
+        lock_begin, lock_end = lock_span_containing(publish, publish_store.start())
+        locked_publish = publish[lock_begin:lock_end]
+        tombstone_guards = [
+            statement
+            for statement in if_statements(locked_publish)
+            if "ProcessTerminationLoad(task->process)" in statement.condition
+            and "ProcessTerminationState::Open" in statement.condition
+        ]
+        self.assertEqual(len(tombstone_guards), 1, "publication lacks one real closed-Process rejection")
+        self.assertRegex(tombstone_guards[0].condition, r"!=\s*ProcessTerminationState::Open")
+        self.assertRegex(tombstone_guards[0].then_body, r"return\s+false\s*;")
+        self.assertLess(tombstone_guards[0].start, locked_publish.index("task->published = true"))
+        self.assertLess(
+            tombstone_guards[0].start,
+            locked_publish.index("ProcessRunPublicationGateAtSchedulerPublication"),
+            "closed first-Task publication consumes its one-shot policy gate",
+        )
+
+        for name, signature in (
+            ("PID kill", r"u64\s+SchedKillProcessByPid"),
+            ("retained-Process kill", r"u64\s+SchedKillByProcess"),
+        ):
+            with self.subTest(kill_path=name):
+                body = function_body(self.sched_cpp, signature)
+                close = require_pattern(
+                    body,
+                    r"ProcessTerminationClose\s*\(\s*target\s*,\s*exit_code\s*\)",
+                    f"{name} does not close Task publication",
+                )
+                scan = require_pattern(
+                    body[close.end() :],
+                    r"for\s*\(\s*Task\s*\*\s*task\s*=\s*g_all_tasks_head\b",
+                    f"{name} has no exact post-close task scan",
+                )
+                scan_position = close.end() + scan.start()
+                signal = require_pattern(
+                    body[scan_position:],
+                    r"SignalTaskLocked\s*\(",
+                    f"{name} scan does not signal matching Tasks",
+                )
+                signal_position = scan_position + signal.start()
+                lock_start, lock_finish = lock_span_containing(body, close.start())
+                self.assertTrue(
+                    lock_start <= close.start() < scan_position < signal_position < lock_finish,
+                    f"{name} does not close-before-scan in one scheduler-lock transaction",
+                )
+                self.assertNotIn(
+                    "ProcessLifecycleTransition",
+                    body,
+                    f"{name} advances lifecycle before last-Task reap",
+                )
+
+        individual = function_body(self.sched_cpp, r"KillResult\s+SchedKillByPid")
+        self.assertNotIn("ProcessTerminationClose", individual, "individual TID kill closes its whole Process")
+
+    def test_closed_task_publication_preserves_full_private_rollback(self) -> None:
+        rollback = function_body(self.sched_cpp, r"void\s+DestroyUnpublishedTask")
+        for operation in (
+            "UserStackReleaseOwnedMappings",
+            "FreeKernelStack",
+            "task->process = nullptr",
+            "task->as = nullptr",
+            "KFree(task)",
+        ):
+            with self.subTest(rollback_operation=operation):
+                self.assertIn(operation, rollback)
+
+        create = function_body(self.sched_cpp, r"TaskCreateResult\s+SchedCreateInternal")
+        publish = require_pattern(create, r"PublishCreatedTask\s*\(\s*t\s*\)", "Task creation bypasses publication")
+        destroy = require_pattern(
+            create,
+            r"DestroyUnpublishedTask\s*\(\s*t\s*\)",
+            "rejected publication leaks its private Task",
+        )
+        self.assertLess(publish.start(), destroy.start())
+        failed_publish = [
+            statement
+            for statement in if_statements(create)
+            if "!published" in statement.condition and "DestroyUnpublishedTask(t)" in statement.then_body
+        ]
+        self.assertEqual(len(failed_publish), 1, "private rollback is not controlled by the publication receipt")
+
+        create_user = function_body(self.sched_cpp, r"TaskCreateResult\s+CreateUserTask")
+        failed_user = [statement for statement in if_statements(create_user) if "!result.created" in statement.condition]
+        self.assertEqual(len(failed_user), 1, "CreateUserTask lost failed-publication handling")
+        unwind = failed_user[0].then_body
+        unlock = unwind.find("vm_transaction.Unlock()")
+        release = unwind.find("ProcessRelease(process)")
+        returned = unwind.find("return TaskCreateResult{false, 0}")
+        self.assertTrue(0 <= unlock < release < returned, "failed publication releases Process ownership unsafely")
 
     def test_first_and_additional_task_publication_are_state_gated_under_lock(self) -> None:
         publish = function_body(self.sched_cpp, r"bool\s+PublishCreatedTask")
@@ -458,44 +618,64 @@ class ProcessTaskPublicationContractTests(unittest.TestCase):
 
     def test_exit_hooks_finish_the_lifecycle_before_releasing_the_process(self) -> None:
         reaper = function_body(self.sched_cpp, r"\[\[noreturn\]\]\s+void\s+ReaperMain")
-        transition = require_pattern(
+        completion_call = require_pattern(
             reaper,
-            EXIT_COMPLETE_TRANSITION,
-            "last-task exit never completes Exiting to Exited",
+            r"ProcessCompleteExitFromReaper\s*\(\s*dead_process\s*\)",
+            "last-task exit does not delegate the one-shot Process teardown",
         )
         release = reaper.rfind("ProcessRelease(dead_process)")
-        self.assertGreater(release, transition.end(), "Process reference drops before Exited is published")
-        hooks = (
-            "JobOnProcessExit(dead_process)",
-            "ProcessDropOwnedProcessHandles(dead_process)",
-            "JobDrainOwnedByProcess",
-        )
-        for hook in hooks:
-            with self.subTest(hook=hook):
-                hook_position = reaper.find(hook)
-                self.assertGreaterEqual(hook_position, 0)
-                self.assertLess(hook_position, transition.start(), f"{hook} runs after Exited publication")
-
+        self.assertGreater(release, completion_call.end(), "Process reference drops before exit completion")
         self.assertTrue(
             any(
                 "dead_was_last_process_task" in statement.condition
-                and re.search(EXIT_COMPLETE_TRANSITION, statement.then_body)
+                and "ProcessCompleteExitFromReaper(dead_process)" in statement.then_body
                 for statement in if_statements(reaper)
             ),
-            "Exiting-to-Exited transition is not part of the one-shot last-task exit path",
+            "Process exit completion is not conditional on the exact last-task result",
         )
+
+        completion = function_body(self.process_cpp, r"void\s+ProcessCompleteExitFromReaper")
+        transition = require_pattern(
+            completion,
+            EXIT_COMPLETE_TRANSITION,
+            "last-task exit never completes Exiting to Exited",
+        )
+        teardown_call = completion.find("TeardownProcessRuntimeResources(process, true)")
+        self.assertGreaterEqual(teardown_call, 0)
+        self.assertLess(teardown_call, transition.start(), "runtime teardown runs after Exited publication")
+
+        teardown = function_body(self.process_cpp, r"void\s+TeardownProcessRuntimeResources")
+        hooks = (
+            "ProcessDropOwnedProcessHandles(p)",
+            "JobDrainOwned(process_key)",
+        )
+        for hook in hooks:
+            with self.subTest(hook=hook):
+                hook_position = teardown.find(hook)
+                self.assertGreaterEqual(hook_position, 0)
+                self.assertLess(hook_position, teardown.index("AddressSpaceRelease(p->as)"))
+
+        lock_begin, lock_end = lock_span_containing(reaper, reaper.index("AllTasksUnlink(dead)"))
+        locked_unlink = reaper[lock_begin:lock_end]
+        membership_exit = locked_unlink.find("JobOnProcessExit(core::ProcessKeySnapshot(dead_process))")
+        lifecycle_exit = locked_unlink.find("ProcessLifecycleTransition(dead_process")
         self.assertTrue(
-            transition_failure_is_fatal(reaper, EXIT_COMPLETE_TRANSITION),
+            0 <= lifecycle_exit < membership_exit,
+            "exact Job membership is not removed at the scheduler-linearized last-Task boundary",
+        )
+        self.assertNotIn("JobOnProcessExit", teardown, "unlocked teardown reintroduced the assignment/exit race")
+
+        self.assertTrue(
+            transition_failure_is_fatal(completion, EXIT_COMPLETE_TRANSITION),
             "failed Exiting-to-Exited transition is ignored",
         )
 
-        lock_begin, lock_end = lock_span_containing(reaper, reaper.index("AllTasksUnlink(dead)"))
-        self.assertGreaterEqual(transition.start(), lock_end, "Exited is published while g_sched_lock is still held")
+        self.assertGreaterEqual(completion_call.start(), lock_end, "exit completion runs while g_sched_lock is held")
 
     def test_process_release_zero_transition_is_state_gated(self) -> None:
         release = function_body(self.process_cpp, r"void\s+ProcessRelease")
         zero_boundary = release.index("if (new_count != 0)")
-        destruction = release.index("KBP_PROBE_V", zero_boundary)
+        destruction = release.rindex("mm::KFree(p)")
         gate_region = release[zero_boundary:destruction]
 
         load = require_pattern(
@@ -503,17 +683,10 @@ class ProcessTaskPublicationContractTests(unittest.TestCase):
             r"ProcessLifecycleLoad\s*\(\s*p\s*\)",
             "zero-reference ProcessRelease does not inspect lifecycle state",
         )
-        rejecting_gate = False
-        for statement in if_statements(gate_region):
-            condition = statement.condition
-            if (
-                "ProcessLifecycleState::Private" in condition
-                and "ProcessLifecycleState::Exited" in condition
-                and len(re.findall(r"!=", condition)) >= 2
-                and re.search(r"\b(?:Panic\w*|KASSERT)\b", statement.then_body)
-            ):
-                rejecting_gate = True
-        self.assertTrue(rejecting_gate, "zero references must reject every state except Private and Exited")
+        self.assertIn("lifecycle == ProcessLifecycleState::Private", gate_region)
+        self.assertIn("TeardownProcessRuntimeResources(p, false)", gate_region)
+        self.assertIn("lifecycle == ProcessLifecycleState::Exited", gate_region)
+        self.assertRegex(gate_region, r"else\s*\{[\s\S]*?PanicWithValue")
         self.assertLess(load.start(), gate_region.index("ProcessLifecycleState::Private"))
 
     def test_public_create_api_returns_only_an_immutable_value_receipt(self) -> None:
@@ -543,7 +716,6 @@ class ProcessTaskPublicationContractTests(unittest.TestCase):
         after_publish = create[publish.end() :]
         self.assertNotRegex(after_publish, r"\bt\s*->", "published Task is dereferenced after it may have been reaped")
         self.assertRegex(after_publish, rf"\breturn\s+{re.escape(receipt_name)}\s*;")
-
 
 if __name__ == "__main__":
     unittest.main()

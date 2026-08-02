@@ -808,6 +808,9 @@ void CmdReadelf(u32 argc, char** argv)
 // ---------------------------------------------------------------
 namespace
 {
+// Caller holds ScopedProcessRuntimeAccess. The miss ledger is inline and
+// loader-published, but the admission requirement makes triage semantics
+// explicitly live-runtime-only and excludes an Exiting teardown race.
 void PrintProcessTriage(const duetos::core::Process* p, u64 pid)
 {
     ConsoleWrite("[pe-triage] pid=");
@@ -884,6 +887,14 @@ void CmdPeTriage(u32 argc, char** argv)
             ConsoleWriteChar('\n');
             return;
         }
+        duetos::core::ScopedProcessRuntimeAccess runtime_access(p);
+        if (!runtime_access)
+        {
+            ConsoleWrite("PE-TRIAGE: PID EXITING: ");
+            WriteU64Dec(pid);
+            ConsoleWriteChar('\n');
+            return;
+        }
         PrintProcessTriage(p, pid);
         return;
     }
@@ -906,7 +917,10 @@ void CmdPeTriage(u32 argc, char** argv)
         const u64 pid = cookie.seen[i];
         duetos::core::ScopedProcessRef process_ref(duetos::sched::SchedFindProcessByPidRetained(pid));
         duetos::core::Process* p = process_ref.Get();
-        if (p == nullptr || p->win32_iat_miss_count == 0)
+        if (p == nullptr)
+            continue;
+        duetos::core::ScopedProcessRuntimeAccess runtime_access(p);
+        if (!runtime_access || p->win32_iat_miss_count == 0)
             continue;
         PrintProcessTriage(p, pid);
         ++cookie.reported;
