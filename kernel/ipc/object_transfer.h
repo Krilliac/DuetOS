@@ -16,13 +16,23 @@
  * handle.  Import may be repeated until exact-generation revoke or endpoint
  * close and may narrow beneath that ceiling.
  *
- * Every live row owns exactly one KObject reference.  Import pins the exact
- * row under the transfer lock, drops that lock, performs a checked retain,
- * removes the pin, and only then publishes to the destination HandleTable.
- * Revoke first marks the exact row Closing and waits for its short pins before
- * releasing the row-owned reference.  No retain, release, destroy callback,
- * or HandleTable operation runs under the transfer lock, and no two table
- * locks are ever held together.
+ * Every live row owns exactly one KObject reference. Import first reserves an
+ * exact unpublished destination HandleTable row, then pins the transfer row,
+ * drops the transfer lock, performs a checked retain, removes the pin, and
+ * publishes only into that reservation. Every pre-publication failure aborts
+ * the exact ticket; terminal destination drain safely owns its cleanup.
+ * Revoke first marks the exact row Closing. If a short acquisition pin is
+ * still live, Revoke returns Busy and a later owner-scheduled retry completes
+ * the detach. Close uses the same nonblocking deferred-progress contract. No
+ * retain, release, destroy callback, or HandleTable operation runs under the
+ * transfer lock, and no two table locks are ever held together.
+ *
+ * The table is embedded in an endpoint but does not pin that outer object.
+ * Every table operation after Initialize therefore requires an endpoint
+ * operation pin (normally a retained endpoint KObject reference) that keeps
+ * the table storage alive through return. Endpoint storage reclamation occurs
+ * only after outer operation quiescence. Busy close/revoke retries also hold
+ * such a pin.
  */
 
 #include "ipc/handle_table.h"
@@ -47,8 +57,7 @@ inline constexpr ObjectTransferRef kObjectTransferPositiveMax = 0x7FFFFFFFu;
 // Slot zero is the invalid sentinel.  Keeping the table smaller than the
 // encoded slot band bounds each endpoint to 31 simultaneously-live exports.
 inline constexpr u32 kObjectTransferTableCapacity = 32;
-static_assert(kObjectTransferTableCapacity <= kObjectTransferSlotMask + 1u,
-              "object-transfer slot field is too narrow");
+static_assert(kObjectTransferTableCapacity <= kObjectTransferSlotMask + 1u, "object-transfer slot field is too narrow");
 
 inline constexpr ObjectTransferRef ObjectTransferRefEncode(u32 slot, u32 generation)
 {
@@ -58,22 +67,32 @@ inline constexpr ObjectTransferRef ObjectTransferRefEncode(u32 slot, u32 generat
                : kObjectTransferRefInvalid;
 }
 
-inline constexpr bool ObjectTransferRefDecode(ObjectTransferRef reference, u32* out_slot, u32* out_generation)
+struct ObjectTransferDecodedRef
+{
+    u32 slot;
+    u32 generation;
+};
+
+inline constexpr ObjectTransferDecodedRef kInvalidObjectTransferDecodedRef{0, 0};
+
+inline constexpr bool ObjectTransferDecodedRefIsValid(ObjectTransferDecodedRef decoded)
+{
+    return decoded.slot > 0 && decoded.slot < kObjectTransferTableCapacity && decoded.generation > 0 &&
+           decoded.generation <= kObjectTransferGenerationMax;
+}
+
+inline constexpr ObjectTransferDecodedRef ObjectTransferRefDecode(ObjectTransferRef reference)
 {
     if (reference == kObjectTransferRefInvalid || reference > kObjectTransferPositiveMax)
-        return false;
+        return kInvalidObjectTransferDecodedRef;
     const u32 slot = reference & kObjectTransferSlotMask;
     const u32 generation = reference >> kObjectTransferSlotBits;
     if (slot == 0 || slot >= kObjectTransferTableCapacity || generation == 0 ||
         generation > kObjectTransferGenerationMax)
     {
-        return false;
+        return kInvalidObjectTransferDecodedRef;
     }
-    if (out_slot != nullptr)
-        *out_slot = slot;
-    if (out_generation != nullptr)
-        *out_generation = generation;
-    return true;
+    return ObjectTransferDecodedRef{slot, generation};
 }
 
 inline constexpr u32 kObjectTransferMetadataSealed = 1u << 0;
@@ -106,6 +125,7 @@ enum class ObjectTransferStatus : u8
     Ok = 0,
     InvalidArgument,
     NotInitialized,
+    AlreadyInitialized,
     Closed,
     Full,
     IdentityExhausted,
@@ -160,8 +180,9 @@ struct ObjectTransferHostLock
 };
 #endif
 
-// Public only for allocation-free endpoint embedding.  Treat all fields as
-// opaque after initialization.
+// Public only for allocation-free endpoint embedding. Treat all fields as
+// opaque after initialization. The outer retained endpoint operation, not
+// active_operations, protects the lifetime of this storage.
 struct ObjectTransferSlot
 {
     KObject* object;
@@ -187,37 +208,42 @@ struct ObjectTransferTable
     ObjectTransferTableState state;
 };
 
-// [unpublished/quiescent endpoint]
+// [unpublished, never-before-initialized endpoint]
+// One-shot construction accepts only canonical zero-initialized storage. It
+// never resets Open/Draining/Closed state or reuses a prior generation domain.
 // `first_generation` is exposed only for deterministic terminal-generation
-// tests.  Production callers use the default.
+// tests. Production callers use the default. Failure leaves the table intact.
 ObjectTransferStatus ObjectTransferTableInitialize(ObjectTransferTable* table, u32 first_generation = 1);
 
-// [trusted kernel caller]
+// [trusted kernel caller holding one outer endpoint operation pin]
 // On success adopts the single checked reference returned by the exact source
 // lookup.  Failure retains no reference.  `authority.metadata` must be derived
 // from trusted immutable object state, never from sender-controlled bytes.
 ObjectTransferExportResult ObjectTransferExport(ObjectTransferTable* table, HandleTable* source, Handle source_handle,
                                                 const ObjectTransferAuthority& authority);
 
-// [endpoint receive path]
-// The reference and requested narrowing may originate in hostile bytes.  The
-// concrete expected type is a trusted call-site decision.  Success returns a
-// destination handle and the table-derived immutable authority bound to it.
+// [endpoint receive path holding one outer endpoint operation pin]
+// The reference and requested narrowing may originate in hostile bytes. The
+// concrete expected type is a trusted call-site decision. Destination capacity
+// is reserved before the transfer row is pinned; success publishes exactly
+// that reservation and returns its handle plus table-derived authority.
 ObjectTransferImportResult ObjectTransferImport(ObjectTransferTable* table, ObjectTransferRef reference,
                                                 HandleTable* destination, KObjectType expected_type,
                                                 u64 requested_rights);
 
-// Close exactly one generation.  Once Closing is visible, no new import can
-// pin the row.  The row-owned reference is released only after existing pins
-// leave and always outside the transfer lock.
+// [caller holds one outer endpoint operation pin]
+// Close exactly one generation. Once Closing is visible, no new import can pin
+// the row. Busy means a pre-existing pin still owns progress; schedule a later
+// retry. Ok detaches and releases the row-owned reference outside the lock.
 ObjectTransferStatus ObjectTransferRevoke(ObjectTransferTable* table, ObjectTransferRef reference);
 
-// Terminal endpoint teardown.  Once every row is detached under the lock,
-// Closed is published and the owner releases its private detached-ref list
-// outside the lock without touching the table again.  Concurrent or destructor-
-// reentrant close may therefore return Ok after authority is detached while the
-// owning call is still finishing those private releases.  New operations fail
-// once Draining begins.
+// [caller holds one outer endpoint operation pin; endpoint storage is not freed
+// until all such pins quiesce]
+// Terminal endpoint teardown. The first call publishes Draining. Busy means an
+// earlier import still owns a short pin; schedule a later retry. Any retry may
+// finish the detach, publish Closed, and release its private ref list outside
+// the lock. Concurrent and destructor-reentrant calls never wait. New export,
+// import, and revoke operations fail once Draining begins.
 ObjectTransferStatus ObjectTransferTableClose(ObjectTransferTable* table);
 
 u32 ObjectTransferLiveCount(ObjectTransferTable* table);
