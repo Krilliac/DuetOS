@@ -191,6 +191,11 @@ class NetStackRestartContractTests(unittest.TestCase):
         self.assertIn("NetStackInjectRx(u32 iface_index", self.header)
         self.assertTrue(exact_rx)
 
+    def test_boot_diagnostic_scan_uses_registry_copyout(self) -> None:
+        init = function_body(self.stack, "NetStackInit")
+        self.assertIn("drivers::net::NicSnapshot", init)
+        self.assertNotRegex(init, r"drivers::net::Nic\s*\(")
+
     def test_tcp_objects_capture_exact_interface_identity(self) -> None:
         tcb = re.search(r"struct\s+Tcb\s*\{(?P<body>.*?)\n\};", self.tcp_internal, re.DOTALL)
         self.assertIsNotNone(tcb)
