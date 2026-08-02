@@ -37,7 +37,7 @@
  * REFCOUNT SEMANTICS
  *   `KObjectInit` sets refcount = 1. The first `HandleTableInsert`
  *   takes ownership of that initial reference (no extra acquire).
- *   `HandleTableDuplicate` calls `KObjectAcquire` to add a fresh
+ *   `HandleTableDuplicate` calls checked `KObjectAcquire` to add a fresh
  *   reference for the destination handle. `HandleTableRemove`
  *   calls `KObjectRelease`; on the last release, the
  *   type-specific `destroy` callback runs and the storage is
@@ -64,8 +64,10 @@ enum class KObjectType : u16
     Semaphore = 3,
     Mailbox = 4,
     Waitable = 5,
-    File = 6, ///< KFile — open file descriptor (plan A3-followup).
-    Iocp = 7, ///< IocpPort — I/O completion port (Win32 IOCP backing).
+    File = 6,        ///< KFile — open file descriptor (plan A3-followup).
+    Iocp = 7,        ///< IocpPort — I/O completion port (Win32 IOCP backing).
+    MessagePort = 8, ///< Waitable validated MessageRing endpoint.
+    ServiceEndpoint = 9, ///< Authenticated bidirectional ChannelCore endpoint.
 
     /// Used by the v0 self-test exclusively. Real kernel code must
     /// never use this — it exists so the infrastructure can be
@@ -95,9 +97,14 @@ struct KObject
 /// `KObjectRelease`).
 void KObjectInit(KObject* obj, KObjectType type, KObjectDestroyFn destroy);
 
-/// Add a reference. Used by `HandleTableDuplicate`. Cheap (one
-/// spinlock + increment).
-void KObjectAcquire(KObject* obj);
+/// Try to add a reference. Used by every path that publishes a new
+/// owner (handle duplication, named-object registration, and
+/// blocking-operation pins). Returns false for nullptr, a dead
+/// object (refcount 0), or a saturated refcount. Callers MUST branch
+/// on the result; publishing ownership after a failed retain would
+/// create an unbacked reference and eventually a use-after-free.
+/// Cheap (one spinlock + checked increment).
+[[nodiscard]] bool KObjectAcquire(KObject* obj);
 
 /// Drop a reference. Calls `obj->destroy(obj)` on the last
 /// release. Safe to call with `obj == nullptr` (no-op).
