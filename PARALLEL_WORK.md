@@ -3827,10 +3827,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T09:00:48Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] elf-load-image-publish-20260802
+### [DONE] elf-load-image-publish-20260802
 - **Session**: `Codex-ELFLoadImagePublish-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/loader/elf_load_image.h,kernel/loader/elf_load_image.cpp,tests/host/test_elf_load_image.cpp,tools/test/test-service-elf-load-image-contract.py`
 - **Description**: Audit and publish hostile-input-safe immutable ELF load-image closure
 - **Claimed**: 2026-08-02T09:01:11Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T09:11:29Z
