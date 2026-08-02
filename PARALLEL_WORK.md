@@ -3938,3 +3938,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Audit and publish pure hostile GUI message authorization policy
 - **Claimed**: 2026-08-02T10:19:21Z
 - **Status**: COMPLETED @ 2026-08-02T10:22:17Z
+
+### [ACTIVE] service-exit-binding-host-target-20260802
+- **Session**: `Codex-ServiceExitBinding-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tests/host/CMakeLists.txt`
+- **Description**: Register exact hosted reap-ledger target and thread linkage proof
+- **Claimed**: 2026-08-02T10:31:54Z
+- **Status**: IN PROGRESS
