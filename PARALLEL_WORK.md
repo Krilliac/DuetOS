@@ -3923,13 +3923,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T10:16:57Z
 - **Status**: COMPLETED @ 2026-08-02T10:47:12Z
 
-### [ACTIVE] service-exit-binding-runtime-pristine-20260802
+### [DONE] service-exit-binding-runtime-pristine-20260802
 - **Session**: `Codex-ServiceExitBinding-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/core/service_runtime.cpp`
 - **Description**: Extend runtime pristine validation for carried directory service identity
 - **Claimed**: 2026-08-02T10:18:49Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T10:47:19Z
 
 ### [DONE] gui-message-policy-recovery-20260802
 - **Session**: `Codex-GuiMessagePolicy-Recovery-20260802`
