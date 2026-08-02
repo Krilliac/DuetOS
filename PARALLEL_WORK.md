@@ -1187,13 +1187,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T21:17:07Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] proc-credentials-api
+### [DONE] proc-credentials-api
 - **Session**: `Nathan-1200`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/proc/credentials.h`
 - **Description**: Immutable
 - **Claimed**: 2026-07-31T21:21:30Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T08:07:50Z
 
 ### [ACTIVE] proc-credentials-core
 - **Session**: `Nathan-418`
