@@ -3403,13 +3403,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T03:13:05Z
 - **Status**: COMPLETED @ 2026-08-02T03:22:29Z
 
-### [ACTIVE] service-endpoint-ingress-20260802
+### [DONE] service-endpoint-ingress-20260802
 - **Session**: `Codex-ServiceEndpointIngress-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `abi/native_syscalls.json kernel/syscall/cap_table.def kernel/syscall/syscall_idl_generated.def userland/libc/include/duet/syscall_numbers_generated.h docs/native-syscall-policy.json docs/native-syscall-policy.md kernel/syscall/syscall.h kernel/syscall/syscall.cpp kernel/syscall/service_endpoint_ingress.h kernel/syscall/service_endpoint_ingress.cpp userland/libc/include/duet/service_endpoint.h userland/libc/src/syscall.c kernel/proc/process.cpp tests/host/test_service_endpoint_ingress.cpp tools/test/test-service-endpoint-ingress-contract.py`
 - **Description**: Authenticated versioned native-userland ServiceEndpoint accept receive reply-ack and typed object-transfer ingress with process-bound receipts
 - **Claimed**: 2026-08-02T03:15:30Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T05:35:59Z
 
 ### [DONE] parallel-claim-safety-20260802
 - **Session**: `Codex-ParallelClaimSafety-20260802`
