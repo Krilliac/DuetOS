@@ -3778,3 +3778,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Publish service exit observer object package runtime owner and exact production and hosted build graph
 - **Claimed**: 2026-08-02T08:04:40Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] process-authority-foundation-integration-20260802
+- **Session**: `Nathan-18`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/proc/credentials.h,kernel/proc/credentials.cpp,kernel/proc/authorization_context.h,kernel/proc/authorization_context.cpp,tests/host/test_credentials.cpp,tests/host/test_authorization_context.cpp`
+- **Description**: Audit and finish uncommitted generation-safe Credentials and AuthorizationContext foundations: immutable snapshots, nonwrapping generations, replay watermark, hostile/concurrent tests
+- **Claimed**: 2026-08-02T08:10:12Z
+- **Status**: IN PROGRESS
