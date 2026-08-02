@@ -3418,3 +3418,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Serialize coordinator mutation and fail closed on scope ambiguity sync and publication errors
 - **Claimed**: 2026-08-02T03:24:07Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-endpoint-ingress-names-20260802
+- **Session**: `Codex-ServiceEndpointIngress-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/syscall/syscall_names.def`
+- **Description**: Register SYS_SERVICE_ENDPOINT_OP in the canonical generated syscall name table
+- **Claimed**: 2026-08-02T03:36:09Z
+- **Status**: IN PROGRESS
