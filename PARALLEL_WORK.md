@@ -1267,13 +1267,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T21:41:56Z
 - **Status**: COMPLETED @ 2026-08-02T09:46:01Z
 
-### [ACTIVE] proc-thread-group-core
+### [DONE] proc-thread-group-core
 - **Session**: `Nathan-2031`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/proc/thread_group.cpp`
 - **Description**: Allocation-free
 - **Claimed**: 2026-07-31T21:42:01Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T09:46:13Z
 
 ### [ACTIVE] proc-thread-group-host
 - **Session**: `Nathan-535`
