@@ -3706,3 +3706,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Dedicated versioned native service-control ABI 228 with exact self and supervisor authority and typed platform adapters
 - **Claimed**: 2026-08-02T06:55:57Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-control-cap-name-20260802
+- **Session**: `Codex-ServiceControlSyscall-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/proc/process.cpp`
+- **Description**: Register the dedicated service-control capability name and self-test without widening service manifest v1
+- **Claimed**: 2026-08-02T07:00:37Z
+- **Status**: IN PROGRESS
