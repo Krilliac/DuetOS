@@ -3770,3 +3770,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Audit and integrate generation-safe resource-domain lifetime and exact Section frame charging
 - **Claimed**: 2026-08-02T07:25:50Z
 - **Status**: COMPLETED @ 2026-08-02T07:37:02Z
+
+### [ACTIVE] service-foundation-dependency-integration-20260802
+- **Session**: `Nathan-234`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/service_exit_observer.h,kernel/core/service_exit_observer.cpp,tests/host/test_service_exit_observer.cpp,tools/test/test-service-exit-observer-contract.py,kernel/core/service_object_package.h,kernel/core/service_object_package.cpp,tests/host/test_service_object_package.cpp,kernel/core/service_runtime.h,kernel/core/service_runtime.cpp,tools/test/test-service-runtime-owner-contract.py,kernel/CMakeLists.txt,tests/host/CMakeLists.txt`
+- **Description**: Publish service exit observer object package runtime owner and exact production and hosted build graph
+- **Claimed**: 2026-08-02T08:04:40Z
+- **Status**: IN PROGRESS
