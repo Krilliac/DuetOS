@@ -4003,13 +4003,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T11:07:56Z
 - **Status**: COMPLETED @ 2026-08-02T11:14:06Z
 
-### [ACTIVE] service-runtime-reaper-bridge-20260802
+### [DONE] service-runtime-reaper-bridge-20260802
 - **Session**: `Codex-ServiceRuntimeReaper-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/sched/sched.cpp,tools/test/test-service-runtime-reaper-contract.py`
 - **Description**: Drive bounded endpoint and exact exit-reap maintenance from scheduler reaper with monotonic time and retry-safe sleep
 - **Claimed**: 2026-08-02T11:12:48Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T11:53:01Z
 
 ### [DONE] pci-bar-endpoint-recovery-20260802
 - **Session**: `Nathan-996`
