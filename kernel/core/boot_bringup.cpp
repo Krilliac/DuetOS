@@ -4235,18 +4235,10 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     duetos::fs::RamfsCpuhistSnapshot();
     duetos::fs::RamfsInspectSnapshot();
 
-    // Launch the userland service set through the service manager. The
-    // manifest (kernel/core/service.cpp) is now the single source of
-    // truth for what runs at boot — the userland shell stub, the native
-    // demo apps (hello_native, nat_calc, nat_sysinfo), and the duet-pkg
-    // selftest — replacing the hand-unrolled SpawnElfFile blocks that
-    // used to live here. ServiceManagerStartAll spawns every autostart
-    // entry in manifest order and starts the `svcmon` supervisor task
-    // that tracks each service's state and respawns Always-services with
-    // crash-loop protection. Operators drive the set at runtime via the
-    // `svc` shell command. (The duet-pkg entry still emits its
-    // `[duet-pkg-selftest] PASS` sentinel on every healthy boot.)
-    duetos::core::ServiceManagerStartAll();
+    // Managed services are deliberately not started from this pre-scheduler
+    // desktop bringup path. main.cpp admits them only after SchedInit and the
+    // Userland initcall phase, when address-space transaction mutexes and
+    // task publication are available.
 
     // peexec=<FATPATH> kernel cmdline: load a Windows PE/.exe off
     // FAT32 vol 0 and spawn it as a Win32 process at boot. This is the
