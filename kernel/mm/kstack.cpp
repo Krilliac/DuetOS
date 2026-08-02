@@ -291,7 +291,13 @@ void* AllocateKernelStack(u64 stack_bytes)
             {
                 // Arena full. Return nullptr — SchedCreate already
                 // panics on a nullptr stack, preserving the prior
-                // KMalloc contract.
+                // KMalloc contract. Both nullptr legs of this function
+                // used to be silent, which left the resulting
+                // "AllocateKernelStack failed" panic unable to say
+                // WHICH resource ran out — name the leg and the live
+                // occupancy so the dump is self-diagnosing.
+                KLOG_WARN_2V("mm/kstack", "arena full (slot exhaustion)", "in_use", g_slots_in_use, "ever",
+                             g_slots_ever_allocated);
                 return nullptr;
             }
             slot_index = g_next_unseen_slot++;
@@ -304,6 +310,8 @@ void* AllocateKernelStack(u64 stack_bytes)
     // the user.
     if (!InstallStackPages(slot_index))
     {
+        KLOG_WARN_2V("mm/kstack", "backing-frame allocation failed (physical OOM, not slot exhaustion)", "slot",
+                     slot_index, "in_use", g_slots_in_use);
         sync::SpinLockGuard guard(g_kstack_lock);
         FreelistPush(slot_index);
         return nullptr;
