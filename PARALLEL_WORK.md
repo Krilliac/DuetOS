@@ -4051,10 +4051,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T11:45:48Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] endpoint-ledger-identity-recovery-20260802
+### [DONE] endpoint-ledger-identity-recovery-20260802
 - **Session**: `Codex-EndpointLedgerIdentity-Recovery-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/ipc/endpoint_request_ledger.h,kernel/ipc/endpoint_request_ledger.cpp,tests/host/test_endpoint_request_ledger.cpp,tools/test/test-endpoint-request-ledger-identity-contract.py`
 - **Description**: Recover
 - **Claimed**: 2026-08-02T11:54:21Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T12:04:16Z
