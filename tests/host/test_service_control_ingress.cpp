@@ -78,7 +78,7 @@ void ResetModel()
         0,     ServiceLifecycleBuilderState::None, false,
     };
     g_model.rows[2] = ServiceLifecycleSnapshot{
-        0x300, ServiceTransitionPhase::Exited,     4,     kInvalidServiceInstanceKey, 2, 30, 1, 0, 1,
+        0x300, ServiceTransitionPhase::Failed,     4,     kInvalidServiceInstanceKey, 2, 30, 1, 0, 1,
         1,     ServiceLifecycleBuilderState::None, false,
     };
 
@@ -291,8 +291,9 @@ ServiceControlIngressPlatformV1 Platform()
     return platform;
 }
 
-void ExpectStructured(ServiceControlIngressState& state, const ServiceControlIngressCaller& caller,
-                      const duet_service_control_request_v1& request, i32 expected)
+duet_service_control_result_v1 ExpectStructured(ServiceControlIngressState& state,
+                                                const ServiceControlIngressCaller& caller,
+                                                const duet_service_control_request_v1& request, i32 expected)
 {
     duet_service_control_result_v1 result{};
     EXPECT_EQ(ServiceControlIngressExecute(&state, &caller, &request, &result), ServiceControlIngressStatus::Ok);
@@ -304,6 +305,7 @@ void ExpectStructured(ServiceControlIngressState& state, const ServiceControlIng
     EXPECT_EQ(result.reserved32, 0U);
     EXPECT_EQ(result.reserved[0], 0ULL);
     EXPECT_EQ(result.reserved[1], 0ULL);
+    return result;
 }
 
 void TestValidationAndAuthorization()
@@ -338,7 +340,7 @@ void TestValidationAndAuthorization()
     request.reserved[0] = 1;
     ExpectStructured(state, self, request, DUET_SERVICE_CONTROL_STATUS_INVALID_ARGUMENT);
     request = Request(DUET_SERVICE_CONTROL_OP_DESCRIBE_SELF);
-    request.reserved[1] = 1;
+    request.event_sequence = 1;
     ExpectStructured(state, self, request, DUET_SERVICE_CONTROL_STATUS_INVALID_ARGUMENT);
     request = Request(99);
     ExpectStructured(state, self, request, DUET_SERVICE_CONTROL_STATUS_UNSUPPORTED);
@@ -439,7 +441,11 @@ void TestPlatformAndExactMutations()
 
     duet_service_control_request_v1 restage = Request(DUET_SERVICE_CONTROL_OP_RESTAGE);
     BindRequestToRow(&restage, 2, ProcessKey{0x30003, 303});
-    restage.operation_token = 0xEE01;
+    restage.event_sequence = 0xEE01;
+    restage.operation_token = 0xAC01;
+    ExpectStructured(state, supervisor, restage, DUET_SERVICE_CONTROL_STATUS_INVALID_ARGUMENT);
+    EXPECT_EQ(g_model.restage_calls, 0U);
+    restage.operation_token = 0;
     EXPECT_EQ(ServiceControlIngressExecute(&state, &supervisor, &restage, &result), ServiceControlIngressStatus::Ok);
     EXPECT_EQ(result.status, DUET_SERVICE_CONTROL_STATUS_BUSY);
     EXPECT_EQ(g_model.last_target.event_sequence, 0xEE01ULL);
@@ -479,8 +485,21 @@ void TestExitDeliveryAndAckReplay()
     ack.process_identity = result.process_identity;
     ack.pid = result.pid;
     ack.operation_token = result.operation_token;
-    ExpectStructured(state, supervisor, ack, DUET_SERVICE_CONTROL_STATUS_BUSY);
-    ExpectStructured(state, supervisor, ack, DUET_SERVICE_CONTROL_STATUS_OK);
+    ExpectStructured(state, supervisor, ack, DUET_SERVICE_CONTROL_STATUS_INVALID_ARGUMENT);
+    EXPECT_EQ(g_model.ack_calls, 0U);
+    ack.event_sequence = result.event_sequence;
+    result = ExpectStructured(state, supervisor, ack, DUET_SERVICE_CONTROL_STATUS_BUSY);
+    EXPECT_EQ(g_model.last_target.event_sequence, 0xEE01ULL);
+    EXPECT_EQ(ack.operation_token, 0xAC01ULL);
+    EXPECT_EQ(result.event_sequence, ack.event_sequence);
+    EXPECT_EQ(result.operation_token, ack.operation_token);
+    EXPECT_EQ(result.phase, DUET_SERVICE_CONTROL_PHASE_FAILED);
+    EXPECT_EQ(result.process_identity, 0ULL);
+    EXPECT_EQ(result.pid, 0ULL);
+    result = ExpectStructured(state, supervisor, ack, DUET_SERVICE_CONTROL_STATUS_OK);
+    EXPECT_EQ(result.event_sequence, ack.event_sequence);
+    EXPECT_EQ(result.operation_token, ack.operation_token);
+    EXPECT_EQ(result.phase, DUET_SERVICE_CONTROL_PHASE_FAILED);
     ExpectStructured(state, supervisor, ack, DUET_SERVICE_CONTROL_STATUS_REPLAY_REJECTED);
     EXPECT_EQ(g_model.ack_calls, 3U);
 

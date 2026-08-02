@@ -70,7 +70,8 @@ enum class ServiceControlPlatformStatusV1 : u8
 // three fields bind the broker incarnation, stable service identity, and the
 // currently observed transition generation (which is legitimately zero before
 // a service's first activation). `process` is invalid only for ACTIVATE;
-// RESTAGE additionally carries the nonzero exit-ledger event sequence.
+// RESTAGE and EXIT_ACK additionally carry the nonzero exit-ledger event
+// sequence, independently of EXIT_ACK's public acknowledgement token.
 struct ServiceControlPlatformTargetV1
 {
     u64 broker_epoch;

@@ -89,9 +89,11 @@ extern "C"
         uint64_t transition_generation;
         uint64_t process_identity;
         uint64_t pid;
-        /* RESTAGE: exit event sequence. EXIT_ACK: public ACK token. */
+        /* EXIT_ACK-only public acknowledgement authority; zero otherwise. */
         uint64_t operation_token;
-        uint64_t reserved[2];
+        /* RESTAGE/EXIT_ACK exact exit-ledger event identity; zero otherwise. */
+        uint64_t event_sequence;
+        uint64_t reserved[1];
     } duet_service_control_request_v1;
 
     typedef struct duet_service_control_result_v1
@@ -117,7 +119,7 @@ extern "C"
         uint64_t pid;
         /* Public ACK token for EXIT_DEQUEUE/EXIT_ACK; zero otherwise. */
         uint64_t operation_token;
-        /* Stable exit-ledger event sequence; RESTAGE uses this as its token. */
+        /* Exact factual event sequence; copy into RESTAGE/EXIT_ACK requests. */
         uint64_t event_sequence;
         int64_t exit_status;
         uint64_t reserved[2];
@@ -134,9 +136,17 @@ extern "C"
 
 #if defined(__cplusplus)
     static_assert(sizeof(duet_service_control_request_v1) == 80, "service-control request ABI changed");
+    static_assert(offsetof(duet_service_control_request_v1, operation_token) == 56,
+                  "service-control acknowledgement-token offset changed");
+    static_assert(offsetof(duet_service_control_request_v1, event_sequence) == 64,
+                  "service-control event-sequence offset changed");
     static_assert(sizeof(duet_service_control_result_v1) == 112, "service-control result ABI changed");
 #else
 _Static_assert(sizeof(duet_service_control_request_v1) == 80, "service-control request ABI changed");
+_Static_assert(offsetof(duet_service_control_request_v1, operation_token) == 56,
+               "service-control acknowledgement-token offset changed");
+_Static_assert(offsetof(duet_service_control_request_v1, event_sequence) == 64,
+               "service-control event-sequence offset changed");
 _Static_assert(sizeof(duet_service_control_result_v1) == 112, "service-control result ABI changed");
 #endif
 
