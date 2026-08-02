@@ -31,6 +31,11 @@
 namespace duetos::core
 {
 
+struct ServiceDirectory;
+struct ServiceKey;
+struct ServiceRegistrationReservation;
+enum class ServiceDirectoryStatus : u8;
+
 inline constexpr u32 kServiceLifecycleCapacity = kServiceManifestMaximumServices;
 inline constexpr u64 kServiceLifecycleInvalidBrokerEpoch = 0;
 static_assert(kServiceLifecycleCapacity <= 64, "service lifecycle dependency mask width exceeded");
@@ -147,6 +152,7 @@ enum class ServiceLifecycleStatus : u8
     KillRequired,
     AlreadyStopping,
     StartRetirementPending,
+    DependencyNotReady,
     Busy,
 };
 
@@ -167,6 +173,7 @@ struct ServiceLifecycleRow
     u32 observed_exits;
     u32 failed_exits;
     ServiceLifecycleBuilderState builder_state;
+    bool ready;
     u8 reserved8;
     u16 reserved16;
     u32 reserved32;
@@ -207,6 +214,7 @@ struct ServiceLifecycleSnapshot
     u32 observed_exits;
     u32 failed_exits;
     ServiceLifecycleBuilderState builder_state;
+    bool ready;
 };
 
 struct ServiceLifecycleBrokerSnapshot
@@ -231,6 +239,26 @@ struct ServiceLifecyclePublicationResult
 {
     ServiceLifecycleStatus status;
     ServiceLifecycleInstanceToken instance;
+};
+
+// Joint first-Task publication result.  The directory status is meaningful
+// only when lifecycle_status is Ok.  A non-Ok directory status guarantees
+// that the exact lifecycle commit was rolled back to its prior Starting
+// builder state before the lifecycle lock was released.
+struct ServiceLifecycleDirectoryPublicationResult
+{
+    ServiceLifecycleStatus lifecycle_status;
+    ServiceDirectoryStatus directory_status;
+    ServiceLifecycleInstanceToken instance;
+};
+
+// Joint service-readiness result. directory_status is meaningful only when
+// lifecycle_status is Ok. A non-Ok directory status guarantees neither half
+// was changed by this invocation.
+struct ServiceLifecycleDirectoryReadyResult
+{
+    ServiceLifecycleStatus lifecycle_status;
+    ServiceDirectoryStatus directory_status;
 };
 
 struct ServiceLifecycleStopResult
@@ -284,6 +312,18 @@ ServiceLifecycleStatus ServiceLifecycleBrokerInitialize(ServiceLifecycleBroker* 
 ServiceLifecycleStartResult ServiceLifecycleBrokerReserveStart(ServiceLifecycleBroker* broker, u64 service_identity,
                                                                u64 expected_generation, u64 now_ns);
 
+/// Dependency-aware reserve for the authenticated bootstrap builder. Under one
+/// broker-lock critical section, validate the exact selected row and require
+/// every identity in its manifest-derived dependency mask to be Running with a
+/// valid published instance whose joint ready transaction committed, then
+/// reserve the start. DependencyNotReady makes
+/// no mutation. This is the only supported bootstrap dependency-admission
+/// primitive; callers must not synthesize it from unlocked Inspect snapshots.
+/// [any task/CPU, thread-safe]
+ServiceLifecycleStartResult ServiceLifecycleBrokerReserveStartWithDependencies(ServiceLifecycleBroker* broker,
+                                                                               u64 service_identity,
+                                                                               u64 expected_generation, u64 now_ns);
+
 /// Commit private-construction failure for one exact start ticket.  The
 /// timestamp must be monotonic for this row. Restart decisions belong to
 /// serviced; this operation records only the exact transition and telemetry.
@@ -310,6 +350,35 @@ ServiceLifecycleStatus ServiceLifecycleBrokerAcknowledgeCancelledStart(ServiceLi
 ServiceLifecyclePublicationResult ServiceLifecycleBrokerCommitPublication(ServiceLifecycleBroker* broker,
                                                                           ServiceLifecycleStartTicket ticket,
                                                                           ServiceInstanceKey instance, u64 now_ns);
+
+/// Authenticated bootstrap publication join.  Call only from the first-Task
+/// scheduler publication gate after the exact exit-observer row is Bound.
+/// This operation holds the lifecycle lock continuously while it commits the
+/// exact ticket/ProcessKey and takes the lower-ranked directory lock to publish
+/// the already-private registration.  Directory publication is the last
+/// fallible visibility step.  On directory refusal, a private exact rollback
+/// token restores the lifecycle row to the same Starting builder transaction
+/// before either lock is released; no Running-without-directory interval can
+/// escape to stop/drain callers.
+///
+/// No endpoint, HandleTable operation, allocation, callback, destructor,
+/// logging, scheduler call, or wait is permitted in this lock chain.
+/// [scheduler publication lock held; nonblocking]
+ServiceLifecycleDirectoryPublicationResult ServiceLifecycleBrokerCommitDirectoryPublication(
+    ServiceLifecycleBroker* broker, ServiceLifecycleStartTicket ticket, ServiceInstanceKey instance, u64 now_ns,
+    ServiceDirectory* directory, ServiceRegistrationReservation* reservation);
+
+/// Atomically admit one exact published instance for dependency starts and new
+/// directory Connect calls. This operation holds the lifecycle lock, validates
+/// the exact current Running instance, then takes the lower-ranked directory
+/// lock to validate the exact Active ServiceKey/owner. Only after all fallible
+/// checks pass does it write directory.ready followed by lifecycle.ready; no
+/// fallible operation remains after the first write. Exact replay is
+/// idempotent. Owner Lookup and Accept do not depend on this admission bit.
+/// [any task/CPU, thread-safe; nonblocking]
+ServiceLifecycleDirectoryReadyResult ServiceLifecycleBrokerMarkReady(ServiceLifecycleBroker* broker,
+                                                                     ServiceLifecycleInstanceToken instance,
+                                                                     ServiceDirectory* directory, ServiceKey service);
 
 /// Request stop for an exact observed generation.  KillRequired returns the
 /// sole scheduler-kill token; StartCancelled returns the exact builder ticket
