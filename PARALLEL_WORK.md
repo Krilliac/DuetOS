@@ -3906,3 +3906,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Audit and publish hostile GUI broker wire protocol
 - **Claimed**: 2026-08-02T10:12:06Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-runtime-reap-host-proof-20260802
+- **Session**: `Codex-ServiceLiveControlIntegration-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tests/host/test_service_bootstrap_activation.cpp`
+- **Description**: Pin embedded reap ledger initialization and activation authority identity in hosted runtime fixture
+- **Claimed**: 2026-08-02T10:13:26Z
+- **Status**: IN PROGRESS
