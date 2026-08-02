@@ -3490,3 +3490,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Defer
 - **Claimed**: 2026-08-02T04:28:38Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] address-space-write-lease-20260802
+- **Session**: `Nathan-918`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/mm/address_space.h,kernel/mm/address_space.cpp,tools/test/test-address-space-write-lease-contract.py`
+- **Description**: Generation-safe bounded write lease that pins exact user mappings across irreversible syscall operations without holding VM locks
+- **Claimed**: 2026-08-02T04:34:36Z
+- **Status**: IN PROGRESS
