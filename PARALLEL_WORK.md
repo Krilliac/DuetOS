@@ -4042,3 +4042,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Recover orphaned wireless lifetime NIC identity and generation-safe network registry snapshots as one dependency-ordered closure
 - **Claimed**: 2026-08-02T11:35:20Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] net-stack-restart-recovery-20260802
+- **Session**: `Nathan-808`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/net/stack.h,kernel/net/stack.cpp,kernel/net/tcp.h,kernel/net/tcp_internal.h,kernel/net/tcp.cpp,kernel/net/tcp_segment.cpp,kernel/net/tcp_selftest.cpp,tests/host/test_net_stack_restart.cpp,tests/host/net_protocol_state_smp_frames.h,tests/host/test_net_protocol_state_smp.cpp,tools/test/test-net-stack-restart-contract.py,tools/test/test-net-protocol-state-sync-contract.py,wiki/networking/Network-Stack.md`
+- **Description**: Recover
+- **Claimed**: 2026-08-02T11:45:48Z
+- **Status**: IN PROGRESS
