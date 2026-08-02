@@ -237,7 +237,7 @@ i64 DoGetrusage(u64 who, u64 user_buf)
         const core::Process* p = core::CurrentProcess();
         if (p != nullptr)
         {
-            const u64 ticks = p->ticks_used;
+            const u64 ticks = core::ProcessTicksUsedSnapshot(p);
             ru.ru_utime_sec = static_cast<i64>(ticks / 100ull);
             ru.ru_utime_usec = static_cast<i64>((ticks % 100ull) * 10'000ull);
         }
@@ -286,8 +286,8 @@ i64 DoPoll(u64 user_fds, u64 nfds, i64 timeout_ms)
             continue;
         // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
         const u64 masked_fd = util::MaskedIndex(static_cast<u64>(fds[i].fd), 16);
-        const u8 state = p->linux_fds[masked_fd].state;
-        if (state == 0)
+        core::LinuxFdAcquired acquired{};
+        if (!core::LinuxFdAcquire(p, static_cast<u32>(masked_fd), 0, &acquired))
         {
             fds[i].revents = 0x20; // POLLNVAL
             ++ready;
@@ -303,13 +303,14 @@ i64 DoPoll(u64 user_fds, u64 nfds, i64 timeout_ms)
         const u32 want = static_cast<u32>(fds[i].events) & (kPollIn | kPollOut);
         if (want != 0)
         {
-            const u32 got = LinuxFdEpollReady(static_cast<u32>(fds[i].fd), want);
+            const u32 got = LinuxFdEpollReady(acquired, want, p);
             if (got != 0)
             {
                 fds[i].revents = static_cast<i16>(got);
                 ++ready;
             }
         }
+        core::LinuxFdAcquiredRelease(&acquired);
     }
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_fds), &fds[0], nfds * sizeof(PollFd)))
         return kEFAULT;
@@ -347,26 +348,44 @@ i64 DoGetdents64(u64 fd, u64 user_buf, u64 count)
         return kEBADF;
     // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
     fd = util::MaskedIndex(fd, 16);
-    const u32 state = p->linux_fds[fd].state;
-    if (state == 0)
+    core::LinuxFdAcquired acquired{};
+    if (!core::LinuxFdAcquire(p, static_cast<u32>(fd), 0, &acquired))
         return kEBADF;
     // Linux distinguishes "bad fd" from "fd is valid but not a
     // directory": getdents64 on a regular file / pipe / socket
     // returns -ENOTDIR, not -EBADF.
-    if (state != 11)
+    if (acquired.snapshot.state != 11)
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
         return kENOTDIR;
-    const u32 dslot = p->linux_fds[fd].first_cluster;
+    }
+    core::LinuxFdIoGuard guard{};
+    if (!core::LinuxFdIoGuardEnter(&acquired, &guard))
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
+        return kEBADF;
+    }
+    const u32 dslot = acquired.snapshot.first_cluster;
     if (dslot >= core::Process::kWin32DirCap)
+    {
+        core::LinuxFdIoGuardExit(&guard);
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEINVAL;
+    }
     auto& dh = p->win32_dirs[dslot];
     if (!dh.in_use || dh.entries == nullptr)
+    {
+        core::LinuxFdIoGuardExit(&guard);
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEBADF;
+    }
     auto* entries = static_cast<fs::fat32::DirEntry*>(dh.entries);
     u8 stage[1024];
     u64 emitted = 0;
-    while (dh.next_index < dh.entry_count)
+    u32 next_index = dh.next_index;
+    while (next_index < dh.entry_count)
     {
-        const auto& e = entries[dh.next_index];
+        const auto& e = entries[next_index];
         // Compute name length (cap to 255 chars to fit in u16
         // d_reclen with the 19-byte header + NUL).
         u32 nlen = 0;
@@ -377,8 +396,8 @@ i64 DoGetdents64(u64 fd, u64 user_buf, u64 count)
         if (emitted + record > count || emitted + record > sizeof(stage))
             break;
         u8* r = stage + emitted;
-        const u64 d_ino = static_cast<u64>(e.first_cluster ? e.first_cluster : (dh.next_index + 1));
-        const i64 d_off = static_cast<i64>(dh.next_index + 1);
+        const u64 d_ino = static_cast<u64>(e.first_cluster ? e.first_cluster : (next_index + 1));
+        const i64 d_off = static_cast<i64>(next_index + 1);
         const u16 d_reclen = static_cast<u16>(record);
         const u8 d_type = (e.attributes & 0x10) ? 4 /*DT_DIR*/ : 8 /*DT_REG*/;
         for (u32 i = 0; i < 8; ++i)
@@ -395,12 +414,23 @@ i64 DoGetdents64(u64 fd, u64 user_buf, u64 count)
         for (u32 i = 19 + nlen + 1; i < record; ++i)
             r[i] = 0;
         emitted += record;
-        ++dh.next_index;
+        ++next_index;
     }
     if (emitted == 0)
+    {
+        core::LinuxFdIoGuardExit(&guard);
+        core::LinuxFdAcquiredRelease(&acquired);
         return 0;
+    }
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), stage, emitted))
+    {
+        core::LinuxFdIoGuardExit(&guard);
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEFAULT;
+    }
+    dh.next_index = next_index;
+    core::LinuxFdIoGuardExit(&guard);
+    core::LinuxFdAcquiredRelease(&acquired);
     return static_cast<i64>(emitted);
 }
 
@@ -523,14 +553,19 @@ i64 DoFlock(u64 fd, u64 op)
         return kEBADF;
     // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
     fd = util::MaskedIndex(fd, 16);
-    if (p->linux_fds[fd].state == 0)
+    core::LinuxFdAcquired acquired{};
+    if (!core::LinuxFdAcquire(p, static_cast<u32>(fd), 0, &acquired))
         return kEBADF;
     const u64 cmd = op & ~kLockNb;
     if (cmd != kLockSh && cmd != kLockEx && cmd != kLockUn)
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEINVAL;
+    }
     // We don't currently store flock state per-fd; just accept the
     // call. Sub-GAP: real cross-process flock would need a global
     // (path, holder-pid, mode) table that survives close-on-fork.
+    core::LinuxFdAcquiredRelease(&acquired);
     return 0;
 }
 
@@ -826,23 +861,41 @@ i64 DoGetdents(u64 fd, u64 user_buf, u64 count)
         return kEBADF;
     // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
     fd = util::MaskedIndex(fd, 16);
-    const u32 state = p->linux_fds[fd].state;
-    if (state == 0)
+    core::LinuxFdAcquired acquired{};
+    if (!core::LinuxFdAcquire(p, static_cast<u32>(fd), 0, &acquired))
         return kEBADF;
-    if (state != 11)
+    if (acquired.snapshot.state != 11)
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
         return kENOTDIR;
-    const u32 dslot = p->linux_fds[fd].first_cluster;
+    }
+    core::LinuxFdIoGuard guard{};
+    if (!core::LinuxFdIoGuardEnter(&acquired, &guard))
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
+        return kEBADF;
+    }
+    const u32 dslot = acquired.snapshot.first_cluster;
     if (dslot >= core::Process::kWin32DirCap)
+    {
+        core::LinuxFdIoGuardExit(&guard);
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEINVAL;
+    }
     auto& dh = p->win32_dirs[dslot];
     if (!dh.in_use || dh.entries == nullptr)
+    {
+        core::LinuxFdIoGuardExit(&guard);
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEBADF;
+    }
     auto* entries = static_cast<fs::fat32::DirEntry*>(dh.entries);
     u8 stage[1024];
     u64 emitted = 0;
-    while (dh.next_index < dh.entry_count)
+    u32 next_index = dh.next_index;
+    while (next_index < dh.entry_count)
     {
-        const auto& e = entries[dh.next_index];
+        const auto& e = entries[next_index];
         u32 nlen = 0;
         while (nlen < sizeof(e.name) - 1 && e.name[nlen] != '\0')
             ++nlen;
@@ -852,8 +905,8 @@ i64 DoGetdents(u64 fd, u64 user_buf, u64 count)
         if (emitted + record > count || emitted + record > sizeof(stage))
             break;
         u8* r = stage + emitted;
-        const u64 d_ino = static_cast<u64>(e.first_cluster ? e.first_cluster : (dh.next_index + 1));
-        const i64 d_off = static_cast<i64>(dh.next_index + 1);
+        const u64 d_ino = static_cast<u64>(e.first_cluster ? e.first_cluster : (next_index + 1));
+        const i64 d_off = static_cast<i64>(next_index + 1);
         const u16 d_reclen = static_cast<u16>(record);
         const u8 d_type = (e.attributes & 0x10) ? 4 /*DT_DIR*/ : 8 /*DT_REG*/;
         for (u32 i = 0; i < 8; ++i)
@@ -873,12 +926,23 @@ i64 DoGetdents(u64 fd, u64 user_buf, u64 count)
         // d_type as the LAST byte of the record.
         r[record - 1] = d_type;
         emitted += record;
-        ++dh.next_index;
+        ++next_index;
     }
     if (emitted == 0)
+    {
+        core::LinuxFdIoGuardExit(&guard);
+        core::LinuxFdAcquiredRelease(&acquired);
         return 0;
+    }
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), stage, emitted))
+    {
+        core::LinuxFdIoGuardExit(&guard);
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEFAULT;
+    }
+    dh.next_index = next_index;
+    core::LinuxFdIoGuardExit(&guard);
+    core::LinuxFdAcquiredRelease(&acquired);
     return static_cast<i64>(emitted);
 }
 

@@ -269,8 +269,21 @@ void TokenAdjustSelfTest()
 {
     arch::SerialWrite("[win32/token] self-test: previous-state + reversible-disable\n");
 
+    const auto reset_authorization = [](core::Process& process) {
+        if (core::AuthorizationContextKeyIsValid(process.authorization) &&
+            !core::AuthorizationRelease(&process.authorization))
+            core::Panic("win32/token", "self-test: synthetic authorization reset failed");
+        if (!core::AuthorizationCreateTrusted(core::CapSetEmpty(), core::CapSetTrusted(), core::kTickBudgetTrusted,
+                                              &process.authorization))
+            core::Panic("win32/token", "self-test: synthetic authorization create failed");
+    };
+    const auto release_authorization = [](core::Process& process) {
+        if (!core::AuthorizationRelease(&process.authorization))
+            core::Panic("win32/token", "self-test: synthetic authorization release failed");
+    };
+
     static core::Process disable_all{};
-    disable_all.cap_ceiling = core::CapSetTrusted();
+    reset_authorization(disable_all);
     constexpr core::Cap kMapped[] = {
         core::kCapDebug,
         core::kCapFsRead,
@@ -295,7 +308,7 @@ void TokenAdjustSelfTest()
         core::Panic("win32/token", "self-test: disable-all lowered the grant ceiling");
 
     static core::Process remove{};
-    remove.cap_ceiling = core::CapSetTrusted();
+    reset_authorization(remove);
     if (!core::ProcessCapsGrant(&remove, core::kCapFsWrite))
         core::Panic("win32/token", "self-test: remove setup grant failed");
     const core::CapSet remove_before = ChangeMappedPrivilege(&remove, core::kCapFsWrite, true);
@@ -304,7 +317,7 @@ void TokenAdjustSelfTest()
         core::Panic("win32/token", "self-test: remove PreviousState/ceiling mismatch");
 
     static core::Process disable{};
-    disable.cap_ceiling = core::CapSetTrusted();
+    reset_authorization(disable);
     if (!core::ProcessCapsGrant(&disable, core::kCapFsRead))
         core::Panic("win32/token", "self-test: disable setup grant failed");
     const core::CapSet disable_before = ChangeMappedPrivilege(&disable, core::kCapFsRead, false);
@@ -326,7 +339,7 @@ void TokenAdjustSelfTest()
             core::Panic("win32/token", "self-test: broker lease cleanup failed");
 
         static core::Process shell_off{};
-        shell_off.cap_ceiling = core::CapSetTrusted();
+        reset_authorization(shell_off);
         constexpr u64 kShellGeneration = 0xB10CE3u;
         const u64 shell_deadline = duetos::time::MonotonicNs() + 1000000000ull;
         const u64 fs_write_bit = 1ULL << static_cast<u32>(core::kCapFsWrite);
@@ -337,7 +350,12 @@ void TokenAdjustSelfTest()
             core::ProcessCapsRevokeLease(&shell_off, core::kCapFsWrite, kShellGeneration) ||
             core::ProcessCapCeilingSnapshot(&shell_off).bits != core::CapSetTrusted().bits)
             core::Panic("win32/token", "self-test: shell-off did not clear lease reversibly");
+        release_authorization(shell_off);
     }
+
+    release_authorization(disable);
+    release_authorization(remove);
+    release_authorization(disable_all);
 
     arch::SerialWrite("[win32/token] self-test: PASS\n");
 }
