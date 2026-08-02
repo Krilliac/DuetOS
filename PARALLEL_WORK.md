@@ -3963,10 +3963,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T10:43:43Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] host-build-graph-closure-20260802
+### [DONE] host-build-graph-closure-20260802
 - **Session**: `Codex-HostBuildGraph-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tests/host/CMakeLists.txt`
 - **Description**: Register service-control ingress and correct threaded host-test linkage
 - **Claimed**: 2026-08-02T10:48:05Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T10:49:59Z
