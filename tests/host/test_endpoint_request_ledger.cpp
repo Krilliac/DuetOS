@@ -1,5 +1,5 @@
-// Hosted exact-epoch, replay, exhaustion, drain, and caller-lock concurrency
-// coverage for ipc/endpoint_request_ledger.{h,cpp}.
+// Hosted directional-identity, replay, reset, exact-drain, and caller-lock
+// concurrency coverage for ipc/endpoint_request_ledger.{h,cpp}.
 
 #include "host_test_helper.h"
 #include "ipc/endpoint_request_ledger.h"
@@ -9,6 +9,7 @@
 #include <barrier>
 #include <mutex>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 
 namespace
@@ -19,15 +20,29 @@ using duetos::u64;
 using duetos::u8;
 using namespace duetos::ipc;
 
-EndpointRequestKey Key(u64 epoch, u64 request_id)
+EndpointRequestLedgerIdentity Identity(
+    u64 epoch, EndpointRequestDirection direction = EndpointRequestDirection::InitiatorToAcceptor)
 {
-    return EndpointRequestKey{epoch, request_id};
+    return EndpointRequestLedgerIdentity{epoch, direction};
 }
 
-EndpointRequestLedger NewLedger(u64 epoch, u64 first_request_id = 1)
+EndpointRequestKey Key(EndpointRequestLedgerIdentity identity, u64 request_id)
+{
+    return EndpointRequestKey{identity, request_id};
+}
+
+EndpointRequestKey Key(u64 epoch, u64 request_id,
+                       EndpointRequestDirection direction = EndpointRequestDirection::InitiatorToAcceptor)
+{
+    return Key(Identity(epoch, direction), request_id);
+}
+
+EndpointRequestLedger NewLedger(u64 epoch, u64 first_request_id = 1,
+                                EndpointRequestDirection direction = EndpointRequestDirection::InitiatorToAcceptor)
 {
     EndpointRequestLedger ledger{};
-    EXPECT_EQ(EndpointRequestLedgerInitialize(&ledger, epoch, first_request_id), EndpointRequestLedgerStatus::Ok);
+    EXPECT_EQ(EndpointRequestLedgerInitialize(&ledger, Identity(epoch, direction), first_request_id),
+              EndpointRequestLedgerStatus::Ok);
     EXPECT_TRUE(EndpointRequestLedgerIsCanonical(ledger));
     return ledger;
 }
@@ -49,24 +64,25 @@ enum class ModelState : u8
 
 struct ModelLedger
 {
-    u64 epoch;
+    EndpointRequestLedgerIdentity identity;
     u64 next_request_id;
     ModelState state;
     // false=Reserved, true=Committed
     std::unordered_map<u64, bool> active;
 };
 
-ModelLedger NewModel(u64 epoch, u64 first_request_id = 1)
+ModelLedger NewModel(u64 epoch, u64 first_request_id = 1,
+                     EndpointRequestDirection direction = EndpointRequestDirection::InitiatorToAcceptor)
 {
-    return ModelLedger{epoch, first_request_id, ModelState::Open, {}};
+    return ModelLedger{Identity(epoch, direction), first_request_id, ModelState::Open, {}};
 }
 
 EndpointRequestLedgerStatus ModelValidateKey(const ModelLedger& model, EndpointRequestKey key)
 {
     if (!EndpointRequestKeyIsValid(key))
         return EndpointRequestLedgerStatus::InvalidArgument;
-    if (key.endpoint_epoch != model.epoch)
-        return EndpointRequestLedgerStatus::StaleEpoch;
+    if (!(key.ledger_identity == model.identity))
+        return EndpointRequestLedgerStatus::StaleIdentity;
     return EndpointRequestLedgerStatus::Ok;
 }
 
@@ -175,28 +191,29 @@ EndpointRequestKey SelectModelKey(const ModelLedger& model, u64 sample)
 {
     const u64 selector = (sample >> 8) % 6;
     if (selector == 0 && !model.active.empty())
-        return Key(model.epoch, model.active.begin()->first);
+        return Key(model.identity, model.active.begin()->first);
     if (selector == 1)
-        return Key(model.epoch, model.next_request_id == 0 ? 1 : model.next_request_id);
+        return Key(model.identity, model.next_request_id == 0 ? 1 : model.next_request_id);
     if (selector == 2)
     {
         const u64 next = model.next_request_id == 0 ? 1 : model.next_request_id;
-        return Key(model.epoch, next == kEndpointRequestIdMaximum ? next : next + 1);
+        return Key(model.identity, next == kEndpointRequestIdMaximum ? next : next + 1);
     }
     if (selector == 3)
     {
         const u64 next = model.next_request_id == 0 ? kEndpointRequestIdMaximum : model.next_request_id;
-        return Key(model.epoch, next > 1 ? next - 1 : 1);
+        return Key(model.identity, next > 1 ? next - 1 : 1);
     }
     if (selector == 4)
-        return Key(model.epoch + 1, model.next_request_id == 0 ? 1 : model.next_request_id);
-    return (sample & 1) != 0 ? Key(0, 1) : Key(model.epoch, 0);
+        return Key(Identity(model.identity.endpoint_epoch + 1, model.identity.direction),
+                   model.next_request_id == 0 ? 1 : model.next_request_id);
+    return (sample & 1) != 0 ? Key(0, 1) : Key(model.identity, 0);
 }
 
 void ExpectModelMatches(const EndpointRequestLedger& ledger, const ModelLedger& model)
 {
     EXPECT_TRUE(EndpointRequestLedgerIsCanonical(ledger));
-    EXPECT_EQ(ledger.endpoint_epoch, model.epoch);
+    EXPECT_TRUE(ledger.identity == model.identity);
     EXPECT_EQ(ledger.next_request_id, model.next_request_id);
     EXPECT_EQ(ledger.active_count, static_cast<u32>(model.active.size()));
     if (model.state == ModelState::Open)
@@ -211,6 +228,16 @@ void ExpectModelMatches(const EndpointRequestLedger& ledger, const ModelLedger& 
 
 int main()
 {
+    // Commit and Drain publish bounded values rather than writing through a
+    // caller-controlled address. These signature checks are the regression
+    // gate for the former output-alias corruption surface.
+    static_assert(std::is_same_v<decltype(EndpointRequestLedgerCommit(nullptr, kInvalidEndpointRequestKey)),
+                                 EndpointRequestCommitResult>);
+    static_assert(std::is_same_v<decltype(EndpointRequestLedgerDrain(nullptr)), EndpointRequestDrainResult>);
+
+    EXPECT_FALSE(EndpointRequestLedgerIdentityIsValid(kInvalidEndpointRequestLedgerIdentity));
+    EXPECT_FALSE(EndpointRequestLedgerIdentityIsValid(Identity(1, EndpointRequestDirection::Invalid)));
+    EXPECT_TRUE(EndpointRequestLedgerIdentityIsValid(Identity(1)));
     EXPECT_FALSE(EndpointRequestKeyIsValid(kInvalidEndpointRequestKey));
     EXPECT_FALSE(EndpointRequestKeyIsValid(Key(0, 1)));
     EXPECT_FALSE(EndpointRequestKeyIsValid(Key(1, 0)));
@@ -224,16 +251,34 @@ int main()
     EXPECT_EQ(EndpointRequestLedgerComplete(nullptr, kInvalidEndpointRequestCompletionAuthority),
               EndpointRequestLedgerStatus::InvalidArgument);
     EXPECT_EQ(EndpointRequestLedgerReserve(&uninitialized, Key(1, 1)), EndpointRequestLedgerStatus::NotInitialized);
-    EXPECT_EQ(EndpointRequestLedgerInitialize(nullptr, 1), EndpointRequestLedgerStatus::InvalidArgument);
-    EXPECT_EQ(EndpointRequestLedgerInitialize(&uninitialized, 0), EndpointRequestLedgerStatus::InvalidArgument);
+    EXPECT_EQ(EndpointRequestLedgerInitialize(nullptr, Identity(1)), EndpointRequestLedgerStatus::InvalidArgument);
+    EXPECT_EQ(EndpointRequestLedgerReset(nullptr, Identity(2)), EndpointRequestLedgerStatus::InvalidArgument);
+    EXPECT_EQ(EndpointRequestLedgerReset(&uninitialized, Identity(2)), EndpointRequestLedgerStatus::NotInitialized);
+    EXPECT_EQ(EndpointRequestLedgerInitialize(&uninitialized, kInvalidEndpointRequestLedgerIdentity),
+              EndpointRequestLedgerStatus::InvalidArgument);
     EXPECT_TRUE(EndpointRequestLedgerIsCanonical(uninitialized));
-    EXPECT_EQ(EndpointRequestLedgerInitialize(&uninitialized, 1, 0), EndpointRequestLedgerStatus::InvalidArgument);
+    EXPECT_EQ(EndpointRequestLedgerInitialize(&uninitialized, Identity(1), 0),
+              EndpointRequestLedgerStatus::InvalidArgument);
     EXPECT_TRUE(EndpointRequestLedgerIsCanonical(uninitialized));
+
+    // Initialize is one-shot and cannot erase live authority. Reset is a
+    // separate transition that refuses any state other than drained+empty.
+    EXPECT_EQ(EndpointRequestLedgerInitialize(&uninitialized, Identity(1)), EndpointRequestLedgerStatus::Ok);
+    EXPECT_EQ(EndpointRequestLedgerReserve(&uninitialized, Key(1, 1)), EndpointRequestLedgerStatus::Ok);
+    EXPECT_EQ(EndpointRequestLedgerInitialize(&uninitialized, Identity(2)),
+              EndpointRequestLedgerStatus::AlreadyInitialized);
+    EXPECT_EQ(EndpointRequestLedgerReset(&uninitialized, Identity(2)), EndpointRequestLedgerStatus::ResetNotDrained);
+    EXPECT_TRUE(uninitialized.identity == Identity(1));
+    EXPECT_EQ(uninitialized.active_count, 1U);
+    EXPECT_EQ(EndpointRequestLedgerCancel(&uninitialized, Key(1, 1)), EndpointRequestLedgerStatus::Ok);
+    EXPECT_EQ(EndpointRequestLedgerInitialize(&uninitialized, Identity(2)),
+              EndpointRequestLedgerStatus::AlreadyInitialized);
+    EXPECT_EQ(EndpointRequestLedgerReset(&uninitialized, Identity(2)), EndpointRequestLedgerStatus::ResetNotDrained);
 
     EndpointRequestLedger ledger = NewLedger(7);
     EXPECT_EQ(ledger.next_request_id, 1ULL);
     EXPECT_EQ(EndpointRequestLedgerReserve(&ledger, Key(0, 1)), EndpointRequestLedgerStatus::InvalidArgument);
-    EXPECT_EQ(EndpointRequestLedgerReserve(&ledger, Key(8, 1)), EndpointRequestLedgerStatus::StaleEpoch);
+    EXPECT_EQ(EndpointRequestLedgerReserve(&ledger, Key(8, 1)), EndpointRequestLedgerStatus::StaleIdentity);
     EXPECT_EQ(EndpointRequestLedgerReserve(&ledger, Key(7, 2)), EndpointRequestLedgerStatus::OutOfOrder);
     EXPECT_EQ(ledger.next_request_id, 1ULL);
     EXPECT_EQ(ledger.active_count, 0U);
@@ -248,14 +293,16 @@ int main()
     // invalid until the one-shot Commit boundary mints a trusted value.
     EndpointRequestCompletionAuthority authority1{};
     EXPECT_EQ(EndpointRequestLedgerComplete(&ledger, authority1), EndpointRequestLedgerStatus::InvalidArgument);
-    EXPECT_EQ(EndpointRequestLedgerCommit(&ledger, request1, nullptr), EndpointRequestLedgerStatus::InvalidArgument);
-    EXPECT_EQ(EndpointRequestLedgerCommit(&ledger, request1, &authority1), EndpointRequestLedgerStatus::Ok);
+    const EndpointRequestCommitResult commit1 = EndpointRequestLedgerCommit(&ledger, request1);
+    EXPECT_EQ(commit1.status, EndpointRequestLedgerStatus::Ok);
+    authority1 = commit1.completion_authority;
     EXPECT_TRUE(EndpointRequestCompletionAuthorityIsValid(authority1));
     EXPECT_TRUE(authority1.request_key() == request1);
 
     EndpointRequestCompletionAuthority duplicate_authority{};
-    EXPECT_EQ(EndpointRequestLedgerCommit(&ledger, request1, &duplicate_authority),
-              EndpointRequestLedgerStatus::ReplayRejected);
+    EndpointRequestCommitResult duplicate_commit = EndpointRequestLedgerCommit(&ledger, request1);
+    EXPECT_EQ(duplicate_commit.status, EndpointRequestLedgerStatus::ReplayRejected);
+    duplicate_authority = duplicate_commit.completion_authority;
     EXPECT_FALSE(EndpointRequestCompletionAuthorityIsValid(duplicate_authority));
     const EndpointRequestCompletionAuthority authority_copy = authority1;
     EXPECT_EQ(EndpointRequestLedgerComplete(&ledger, authority1), EndpointRequestLedgerStatus::Ok);
@@ -267,19 +314,42 @@ int main()
     EXPECT_EQ(EndpointRequestLedgerReserve(&ledger, request2), EndpointRequestLedgerStatus::Ok);
     EXPECT_EQ(EndpointRequestLedgerCancel(&ledger, request2), EndpointRequestLedgerStatus::Ok);
     EXPECT_EQ(EndpointRequestLedgerCancel(&ledger, request2), EndpointRequestLedgerStatus::ReplayRejected);
-    EXPECT_EQ(EndpointRequestLedgerCommit(&ledger, request2, &duplicate_authority),
-              EndpointRequestLedgerStatus::ReplayRejected);
+    duplicate_commit = EndpointRequestLedgerCommit(&ledger, request2);
+    EXPECT_EQ(duplicate_commit.status, EndpointRequestLedgerStatus::ReplayRejected);
+    duplicate_authority = duplicate_commit.completion_authority;
     EXPECT_FALSE(EndpointRequestCompletionAuthorityIsValid(duplicate_authority));
-    EXPECT_EQ(EndpointRequestLedgerCommit(&ledger, Key(7, 3), &duplicate_authority),
-              EndpointRequestLedgerStatus::NotFound);
+    duplicate_commit = EndpointRequestLedgerCommit(&ledger, Key(7, 3));
+    EXPECT_EQ(duplicate_commit.status, EndpointRequestLedgerStatus::NotFound);
+    duplicate_authority = duplicate_commit.completion_authority;
     EXPECT_EQ(EndpointRequestLedgerCancel(&ledger, Key(7, 4)), EndpointRequestLedgerStatus::OutOfOrder);
     EXPECT_TRUE(EndpointRequestLedgerIsCanonical(ledger));
 
     EndpointRequestLedger other_epoch = NewLedger(8);
-    EndpointRequestCompletionAuthority other_authority{};
     EXPECT_EQ(EndpointRequestLedgerReserve(&other_epoch, Key(8, 1)), EndpointRequestLedgerStatus::Ok);
-    EXPECT_EQ(EndpointRequestLedgerCommit(&other_epoch, Key(8, 1), &other_authority), EndpointRequestLedgerStatus::Ok);
-    EXPECT_EQ(EndpointRequestLedgerComplete(&ledger, other_authority), EndpointRequestLedgerStatus::StaleEpoch);
+    const EndpointRequestCommitResult other_commit = EndpointRequestLedgerCommit(&other_epoch, Key(8, 1));
+    EXPECT_EQ(other_commit.status, EndpointRequestLedgerStatus::Ok);
+    EXPECT_EQ(EndpointRequestLedgerComplete(&ledger, other_commit.completion_authority),
+              EndpointRequestLedgerStatus::StaleIdentity);
+
+    // Equal request IDs in opposite directions are distinct authority domains.
+    // A completion minted by one directional ledger cannot consume the other.
+    EndpointRequestLedger forward = NewLedger(9, 1, EndpointRequestDirection::InitiatorToAcceptor);
+    EndpointRequestLedger reverse = NewLedger(9, 1, EndpointRequestDirection::AcceptorToInitiator);
+    const EndpointRequestKey forward_key = Key(9, 1, EndpointRequestDirection::InitiatorToAcceptor);
+    const EndpointRequestKey reverse_key = Key(9, 1, EndpointRequestDirection::AcceptorToInitiator);
+    EXPECT_EQ(EndpointRequestLedgerReserve(&forward, forward_key), EndpointRequestLedgerStatus::Ok);
+    EXPECT_EQ(EndpointRequestLedgerReserve(&reverse, reverse_key), EndpointRequestLedgerStatus::Ok);
+    const EndpointRequestCommitResult forward_commit = EndpointRequestLedgerCommit(&forward, forward_key);
+    const EndpointRequestCommitResult reverse_commit = EndpointRequestLedgerCommit(&reverse, reverse_key);
+    EXPECT_EQ(forward_commit.status, EndpointRequestLedgerStatus::Ok);
+    EXPECT_EQ(reverse_commit.status, EndpointRequestLedgerStatus::Ok);
+    EXPECT_EQ(EndpointRequestLedgerComplete(&reverse, forward_commit.completion_authority),
+              EndpointRequestLedgerStatus::StaleIdentity);
+    EXPECT_EQ(reverse.active_count, 1U);
+    EXPECT_EQ(EndpointRequestLedgerComplete(&reverse, reverse_commit.completion_authority),
+              EndpointRequestLedgerStatus::Ok);
+    EXPECT_EQ(EndpointRequestLedgerComplete(&forward, forward_commit.completion_authority),
+              EndpointRequestLedgerStatus::Ok);
 
     // Capacity failure must not consume the exact next sequence. Once a row is
     // released, retrying that same ID succeeds.
@@ -289,7 +359,9 @@ int main()
     {
         const EndpointRequestKey key = Key(20, static_cast<u64>(index) + 1);
         EXPECT_EQ(EndpointRequestLedgerReserve(&full, key), EndpointRequestLedgerStatus::Ok);
-        EXPECT_EQ(EndpointRequestLedgerCommit(&full, key, &full_authorities[index]), EndpointRequestLedgerStatus::Ok);
+        const EndpointRequestCommitResult committed = EndpointRequestLedgerCommit(&full, key);
+        EXPECT_EQ(committed.status, EndpointRequestLedgerStatus::Ok);
+        full_authorities[index] = committed.completion_authority;
     }
     EXPECT_EQ(full.active_count, kEndpointRequestLedgerCapacity);
     EXPECT_EQ(full.next_request_id, static_cast<u64>(kEndpointRequestLedgerCapacity) + 1);
@@ -311,13 +383,14 @@ int main()
     EXPECT_EQ(EndpointRequestLedgerReserve(&terminal, terminal_key), EndpointRequestLedgerStatus::Ok);
     EXPECT_EQ(terminal.state, EndpointRequestLedgerState::SequenceRetired);
     EXPECT_EQ(terminal.next_request_id, 0ULL);
-    EndpointRequestCompletionAuthority terminal_authority{};
-    EXPECT_EQ(EndpointRequestLedgerCommit(&terminal, terminal_key, &terminal_authority),
-              EndpointRequestLedgerStatus::Ok);
+    EndpointRequestCommitResult terminal_commit = EndpointRequestLedgerCommit(&terminal, terminal_key);
+    EXPECT_EQ(terminal_commit.status, EndpointRequestLedgerStatus::Ok);
+    EndpointRequestCompletionAuthority terminal_authority = terminal_commit.completion_authority;
     EXPECT_EQ(EndpointRequestLedgerReserve(&terminal, Key(30, 1)), EndpointRequestLedgerStatus::SequenceExhausted);
     EXPECT_EQ(EndpointRequestLedgerComplete(&terminal, terminal_authority), EndpointRequestLedgerStatus::Ok);
-    EXPECT_EQ(EndpointRequestLedgerCommit(&terminal, terminal_key, &terminal_authority),
-              EndpointRequestLedgerStatus::ReplayRejected);
+    terminal_commit = EndpointRequestLedgerCommit(&terminal, terminal_key);
+    EXPECT_EQ(terminal_commit.status, EndpointRequestLedgerStatus::ReplayRejected);
+    terminal_authority = terminal_commit.completion_authority;
     EXPECT_FALSE(EndpointRequestCompletionAuthorityIsValid(terminal_authority));
     EXPECT_EQ(terminal.state, EndpointRequestLedgerState::SequenceRetired);
     EXPECT_TRUE(EndpointRequestLedgerIsCanonical(terminal));
@@ -325,38 +398,79 @@ int main()
     // Drain cancels every outstanding phase, is idempotent, and prevents any
     // stale completion from publishing a reply.
     EndpointRequestLedger draining = NewLedger(40);
-    EndpointRequestCompletionAuthority draining_authority{};
     EXPECT_EQ(EndpointRequestLedgerReserve(&draining, Key(40, 1)), EndpointRequestLedgerStatus::Ok);
-    EXPECT_EQ(EndpointRequestLedgerCommit(&draining, Key(40, 1), &draining_authority), EndpointRequestLedgerStatus::Ok);
+    const EndpointRequestCommitResult draining_commit = EndpointRequestLedgerCommit(&draining, Key(40, 1));
+    EXPECT_EQ(draining_commit.status, EndpointRequestLedgerStatus::Ok);
+    const EndpointRequestCompletionAuthority draining_authority = draining_commit.completion_authority;
     EXPECT_EQ(EndpointRequestLedgerReserve(&draining, Key(40, 2)), EndpointRequestLedgerStatus::Ok);
-    u32 cancelled = 99;
-    EXPECT_EQ(EndpointRequestLedgerDrain(&draining, nullptr), EndpointRequestLedgerStatus::InvalidArgument);
-    EXPECT_EQ(EndpointRequestLedgerDrain(nullptr, &cancelled), EndpointRequestLedgerStatus::InvalidArgument);
-    EXPECT_EQ(cancelled, 0U);
-    cancelled = 99;
-    EXPECT_EQ(EndpointRequestLedgerDrain(&draining, &cancelled), EndpointRequestLedgerStatus::Ok);
-    EXPECT_EQ(cancelled, 2U);
+    const EndpointRequestDrainResult null_drain = EndpointRequestLedgerDrain(nullptr);
+    EXPECT_EQ(null_drain.status, EndpointRequestLedgerStatus::InvalidArgument);
+    EXPECT_EQ(null_drain.detached_count, 0U);
+    const EndpointRequestDrainResult drained = EndpointRequestLedgerDrain(&draining);
+    EXPECT_EQ(drained.status, EndpointRequestLedgerStatus::Ok);
+    EXPECT_EQ(drained.detached_count, 2U);
+    EXPECT_TRUE(drained.detached_keys[0] == Key(40, 1));
+    EXPECT_TRUE(drained.detached_keys[1] == Key(40, 2));
+    for (u32 index = drained.detached_count; index < kEndpointRequestLedgerCapacity; ++index)
+        EXPECT_TRUE(drained.detached_keys[index] == kInvalidEndpointRequestKey);
     EXPECT_EQ(draining.state, EndpointRequestLedgerState::Draining);
     EXPECT_EQ(draining.active_count, 0U);
     EXPECT_EQ(EndpointRequestLedgerReserve(&draining, Key(40, 3)), EndpointRequestLedgerStatus::Draining);
-    EXPECT_EQ(EndpointRequestLedgerCommit(&draining, Key(40, 1), &duplicate_authority),
-              EndpointRequestLedgerStatus::Draining);
+    duplicate_commit = EndpointRequestLedgerCommit(&draining, Key(40, 1));
+    EXPECT_EQ(duplicate_commit.status, EndpointRequestLedgerStatus::Draining);
+    duplicate_authority = duplicate_commit.completion_authority;
     EXPECT_FALSE(EndpointRequestCompletionAuthorityIsValid(duplicate_authority));
     EXPECT_EQ(EndpointRequestLedgerCancel(&draining, Key(40, 2)), EndpointRequestLedgerStatus::Draining);
     EXPECT_EQ(EndpointRequestLedgerComplete(&draining, draining_authority), EndpointRequestLedgerStatus::Draining);
-    EXPECT_EQ(EndpointRequestLedgerReserve(&draining, Key(41, 3)), EndpointRequestLedgerStatus::StaleEpoch);
-    cancelled = 99;
-    EXPECT_EQ(EndpointRequestLedgerDrain(&draining, &cancelled), EndpointRequestLedgerStatus::Ok);
-    EXPECT_EQ(cancelled, 0U);
+    EXPECT_EQ(EndpointRequestLedgerReserve(&draining, Key(41, 3)), EndpointRequestLedgerStatus::StaleIdentity);
+    const EndpointRequestDrainResult repeated_drain = EndpointRequestLedgerDrain(&draining);
+    EXPECT_EQ(repeated_drain.status, EndpointRequestLedgerStatus::Ok);
+    EXPECT_EQ(repeated_drain.detached_count, 0U);
     EXPECT_TRUE(EndpointRequestLedgerIsCanonical(draining));
 
-    // Structural corruption fails closed and clears authority outputs.
+    // Reset is the only reuse boundary. It requires drained+empty state, keeps
+    // direction immutable, and advances epoch strictly so copied authority can
+    // never become valid for a new row with the same request ID.
+    EndpointRequestLedger resettable = NewLedger(60);
+    EXPECT_EQ(EndpointRequestLedgerReserve(&resettable, Key(60, 1)), EndpointRequestLedgerStatus::Ok);
+    const EndpointRequestCommitResult old_commit = EndpointRequestLedgerCommit(&resettable, Key(60, 1));
+    EXPECT_EQ(old_commit.status, EndpointRequestLedgerStatus::Ok);
+    EXPECT_EQ(EndpointRequestLedgerReset(&resettable, Identity(61)), EndpointRequestLedgerStatus::ResetNotDrained);
+    const EndpointRequestDrainResult old_drain = EndpointRequestLedgerDrain(&resettable);
+    EXPECT_EQ(old_drain.status, EndpointRequestLedgerStatus::Ok);
+    EXPECT_EQ(old_drain.detached_count, 1U);
+    EXPECT_TRUE(old_drain.detached_keys[0] == Key(60, 1));
+    EXPECT_EQ(EndpointRequestLedgerReset(&resettable, Identity(61), 0), EndpointRequestLedgerStatus::InvalidArgument);
+    EXPECT_EQ(EndpointRequestLedgerReset(&resettable, Identity(60)), EndpointRequestLedgerStatus::StaleIdentity);
+    EXPECT_EQ(EndpointRequestLedgerReset(&resettable, Identity(59)), EndpointRequestLedgerStatus::StaleIdentity);
+    EXPECT_EQ(EndpointRequestLedgerReset(&resettable, Identity(61, EndpointRequestDirection::AcceptorToInitiator)),
+              EndpointRequestLedgerStatus::InvalidArgument);
+    EXPECT_EQ(EndpointRequestLedgerReset(&resettable, Identity(61)), EndpointRequestLedgerStatus::Ok);
+    EXPECT_TRUE(resettable.identity == Identity(61));
+    EXPECT_TRUE(old_drain.detached_keys[0] == Key(60, 1));
+    EXPECT_EQ(EndpointRequestLedgerReserve(&resettable, Key(61, 1)), EndpointRequestLedgerStatus::Ok);
+    const EndpointRequestCommitResult new_commit = EndpointRequestLedgerCommit(&resettable, Key(61, 1));
+    EXPECT_EQ(new_commit.status, EndpointRequestLedgerStatus::Ok);
+    EXPECT_EQ(EndpointRequestLedgerComplete(&resettable, old_commit.completion_authority),
+              EndpointRequestLedgerStatus::StaleIdentity);
+    EXPECT_EQ(resettable.active_count, 1U);
+    EXPECT_EQ(EndpointRequestLedgerComplete(&resettable, new_commit.completion_authority),
+              EndpointRequestLedgerStatus::Ok);
+    EXPECT_EQ(EndpointRequestLedgerInitialize(&resettable, Identity(62)),
+              EndpointRequestLedgerStatus::AlreadyInitialized);
+
+    EndpointRequestLedger exhausted_identity = NewLedger(kEndpointRequestEpochMaximum);
+    EXPECT_EQ(EndpointRequestLedgerDrain(&exhausted_identity).status, EndpointRequestLedgerStatus::Ok);
+    EXPECT_EQ(EndpointRequestLedgerReset(&exhausted_identity, Identity(kEndpointRequestEpochMaximum)),
+              EndpointRequestLedgerStatus::IdentityExhausted);
+
+    // Structural corruption fails closed and returns invalid authority.
     EndpointRequestLedger corrupt = NewLedger(50);
     corrupt.active_count = 1;
     EXPECT_FALSE(EndpointRequestLedgerIsCanonical(corrupt));
-    duplicate_authority = EndpointRequestCompletionAuthority{};
-    EXPECT_EQ(EndpointRequestLedgerCommit(&corrupt, Key(50, 1), &duplicate_authority),
-              EndpointRequestLedgerStatus::CorruptState);
+    duplicate_commit = EndpointRequestLedgerCommit(&corrupt, Key(50, 1));
+    EXPECT_EQ(duplicate_commit.status, EndpointRequestLedgerStatus::CorruptState);
+    duplicate_authority = duplicate_commit.completion_authority;
     EXPECT_FALSE(EndpointRequestCompletionAuthorityIsValid(duplicate_authority));
     corrupt = NewLedger(50);
     corrupt.slots[0].key = Key(50, 1);
@@ -385,10 +499,10 @@ int main()
             break;
         case 1:
         {
-            EndpointRequestCompletionAuthority actual_authority{};
             bool model_authority = false;
-            EXPECT_EQ(EndpointRequestLedgerCommit(&churn, key, &actual_authority),
-                      ModelCommit(model, key, &model_authority));
+            const EndpointRequestCommitResult actual_commit = EndpointRequestLedgerCommit(&churn, key);
+            EXPECT_EQ(actual_commit.status, ModelCommit(model, key, &model_authority));
+            const EndpointRequestCompletionAuthority actual_authority = actual_commit.completion_authority;
             EXPECT_EQ(EndpointRequestCompletionAuthorityIsValid(actual_authority), model_authority);
             if (model_authority)
             {
@@ -427,10 +541,20 @@ int main()
         }
         default:
         {
-            u32 actual_cancelled = 0;
+            const auto expected_detached = model.active;
             const u32 model_cancelled = ModelDrain(model);
-            EXPECT_EQ(EndpointRequestLedgerDrain(&churn, &actual_cancelled), EndpointRequestLedgerStatus::Ok);
-            EXPECT_EQ(actual_cancelled, model_cancelled);
+            const EndpointRequestDrainResult actual_drain = EndpointRequestLedgerDrain(&churn);
+            EXPECT_EQ(actual_drain.status, EndpointRequestLedgerStatus::Ok);
+            EXPECT_EQ(actual_drain.detached_count, model_cancelled);
+            std::unordered_map<u64, bool> observed_detached;
+            for (u32 index = 0; index < actual_drain.detached_count; ++index)
+            {
+                const EndpointRequestKey detached = actual_drain.detached_keys[index];
+                EXPECT_TRUE(detached.ledger_identity == model.identity);
+                EXPECT_TRUE(expected_detached.find(detached.request_id) != expected_detached.end());
+                EXPECT_TRUE(observed_detached.emplace(detached.request_id, true).second);
+            }
+            EXPECT_EQ(observed_detached.size(), expected_detached.size());
             churn_authorities.clear();
             break;
         }
@@ -441,9 +565,11 @@ int main()
         // quiescence and installs a strictly newer epoch.
         if (model.state == ModelState::Draining && (iteration & 7U) == 0)
         {
-            const u64 next_epoch = model.epoch + 1;
-            EXPECT_EQ(EndpointRequestLedgerInitialize(&churn, next_epoch), EndpointRequestLedgerStatus::Ok);
-            model = NewModel(next_epoch);
+            const u64 next_epoch = model.identity.endpoint_epoch + 1;
+            const EndpointRequestDirection direction = model.identity.direction;
+            EXPECT_EQ(EndpointRequestLedgerReset(&churn, Identity(next_epoch, direction)),
+                      EndpointRequestLedgerStatus::Ok);
+            model = NewModel(next_epoch, 1, direction);
             churn_authorities.clear();
             ExpectModelMatches(churn, model);
         }
@@ -455,10 +581,11 @@ int main()
     for (u32 iteration = 0; iteration < 2000; ++iteration)
     {
         EndpointRequestLedger raced = NewLedger(1000ULL + iteration);
-        const EndpointRequestKey raced_key = Key(raced.endpoint_epoch, 1);
-        EndpointRequestCompletionAuthority raced_authority{};
+        const EndpointRequestKey raced_key = Key(raced.identity, 1);
         EXPECT_EQ(EndpointRequestLedgerReserve(&raced, raced_key), EndpointRequestLedgerStatus::Ok);
-        EXPECT_EQ(EndpointRequestLedgerCommit(&raced, raced_key, &raced_authority), EndpointRequestLedgerStatus::Ok);
+        const EndpointRequestCommitResult raced_commit = EndpointRequestLedgerCommit(&raced, raced_key);
+        EXPECT_EQ(raced_commit.status, EndpointRequestLedgerStatus::Ok);
+        const EndpointRequestCompletionAuthority raced_authority = raced_commit.completion_authority;
         const EndpointRequestCompletionAuthority copied_authority = raced_authority;
 
         std::mutex endpoint_lock;

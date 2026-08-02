@@ -14,11 +14,6 @@ void ClearSlot(EndpointRequestSlot& slot)
     slot.state = EndpointRequestSlotState::Free;
 }
 
-void ClearLedger(EndpointRequestLedger& ledger)
-{
-    ledger = EndpointRequestLedger{};
-}
-
 bool SlotIsClear(const EndpointRequestSlot& slot)
 {
     return slot.state == EndpointRequestSlotState::Free && slot.key == kInvalidEndpointRequestKey;
@@ -67,9 +62,21 @@ EndpointRequestLedgerStatus ValidateKeyForLedger(const EndpointRequestLedger& le
 {
     if (!EndpointRequestKeyIsValid(key))
         return EndpointRequestLedgerStatus::InvalidArgument;
-    if (key.endpoint_epoch != ledger.endpoint_epoch)
-        return EndpointRequestLedgerStatus::StaleEpoch;
+    if (!(key.ledger_identity == ledger.identity))
+        return EndpointRequestLedgerStatus::StaleIdentity;
     return EndpointRequestLedgerStatus::Ok;
+}
+
+EndpointRequestCommitResult CommitFailure(EndpointRequestLedgerStatus status)
+{
+    return EndpointRequestCommitResult{status, kInvalidEndpointRequestCompletionAuthority};
+}
+
+EndpointRequestDrainResult DrainFailure(EndpointRequestLedgerStatus status)
+{
+    EndpointRequestDrainResult result{};
+    result.status = status;
+    return result;
 }
 
 EndpointRequestLedgerStatus ClassifyMissingKey(const EndpointRequestLedger& ledger, EndpointRequestKey key)
@@ -87,18 +94,51 @@ EndpointRequestLedgerStatus ClassifyMissingKey(const EndpointRequestLedger& ledg
 
 } // namespace
 
-EndpointRequestLedgerStatus EndpointRequestLedgerInitialize(EndpointRequestLedger* ledger, u64 endpoint_epoch,
+EndpointRequestLedgerStatus EndpointRequestLedgerInitialize(EndpointRequestLedger* ledger,
+                                                            EndpointRequestLedgerIdentity identity,
                                                             u64 first_request_id)
 {
     if (ledger == nullptr)
         return EndpointRequestLedgerStatus::InvalidArgument;
-
-    ClearLedger(*ledger);
-    if (endpoint_epoch == kEndpointRequestEpochInvalid || first_request_id == kEndpointRequestIdInvalid)
+    if (!EndpointRequestLedgerIsCanonical(*ledger))
+        return EndpointRequestLedgerStatus::CorruptState;
+    if (ledger->state != EndpointRequestLedgerState::Uninitialized)
+        return EndpointRequestLedgerStatus::AlreadyInitialized;
+    if (!EndpointRequestLedgerIdentityIsValid(identity) || first_request_id == kEndpointRequestIdInvalid)
         return EndpointRequestLedgerStatus::InvalidArgument;
 
-    ledger->endpoint_epoch = endpoint_epoch;
+    ledger->identity = identity;
     ledger->next_request_id = first_request_id;
+    ledger->state = EndpointRequestLedgerState::Open;
+    return EndpointRequestLedgerStatus::Ok;
+}
+
+EndpointRequestLedgerStatus EndpointRequestLedgerReset(EndpointRequestLedger* ledger,
+                                                       EndpointRequestLedgerIdentity next_identity,
+                                                       u64 first_request_id)
+{
+    if (ledger == nullptr)
+        return EndpointRequestLedgerStatus::InvalidArgument;
+    if (!EndpointRequestLedgerIsCanonical(*ledger))
+        return EndpointRequestLedgerStatus::CorruptState;
+    if (ledger->state == EndpointRequestLedgerState::Uninitialized)
+        return EndpointRequestLedgerStatus::NotInitialized;
+    if (ledger->state != EndpointRequestLedgerState::Draining)
+        return EndpointRequestLedgerStatus::ResetNotDrained;
+    if (!EndpointRequestLedgerIdentityIsValid(next_identity) || first_request_id == kEndpointRequestIdInvalid ||
+        next_identity.direction != ledger->identity.direction)
+    {
+        return EndpointRequestLedgerStatus::InvalidArgument;
+    }
+    if (ledger->identity.endpoint_epoch == kEndpointRequestEpochMaximum)
+        return EndpointRequestLedgerStatus::IdentityExhausted;
+    if (next_identity.endpoint_epoch <= ledger->identity.endpoint_epoch)
+        return EndpointRequestLedgerStatus::StaleIdentity;
+
+    ledger->identity = next_identity;
+    ledger->next_request_id = first_request_id;
+    ledger->active_count = 0;
+    ledger->next_free_hint = 0;
     ledger->state = EndpointRequestLedgerState::Open;
     return EndpointRequestLedgerStatus::Ok;
 }
@@ -112,7 +152,7 @@ bool EndpointRequestLedgerIsCanonical(const EndpointRequestLedger& ledger)
 
     if (ledger.state == EndpointRequestLedgerState::Uninitialized)
     {
-        if (ledger.endpoint_epoch != kEndpointRequestEpochInvalid ||
+        if (!(ledger.identity == kInvalidEndpointRequestLedgerIdentity) ||
             ledger.next_request_id != kEndpointRequestIdInvalid || ledger.active_count != 0 ||
             ledger.next_free_hint != 0)
         {
@@ -126,7 +166,7 @@ bool EndpointRequestLedgerIsCanonical(const EndpointRequestLedger& ledger)
         return true;
     }
 
-    if (ledger.endpoint_epoch == kEndpointRequestEpochInvalid)
+    if (!EndpointRequestLedgerIdentityIsValid(ledger.identity))
         return false;
     if (ledger.state == EndpointRequestLedgerState::Open)
     {
@@ -160,7 +200,7 @@ bool EndpointRequestLedgerIsCanonical(const EndpointRequestLedger& ledger)
         }
         if (ledger.state == EndpointRequestLedgerState::Draining ||
             (slot.state != EndpointRequestSlotState::Reserved && slot.state != EndpointRequestSlotState::Committed) ||
-            !EndpointRequestKeyIsValid(slot.key) || slot.key.endpoint_epoch != ledger.endpoint_epoch)
+            !EndpointRequestKeyIsValid(slot.key) || !(slot.key.ledger_identity == ledger.identity))
         {
             return false;
         }
@@ -219,34 +259,27 @@ EndpointRequestLedgerStatus EndpointRequestLedgerReserve(EndpointRequestLedger* 
     return EndpointRequestLedgerStatus::Ok;
 }
 
-EndpointRequestLedgerStatus EndpointRequestLedgerCommit(EndpointRequestLedger* ledger, EndpointRequestKey key,
-                                                        EndpointRequestCompletionAuthority* completion_authority_out)
+EndpointRequestCommitResult EndpointRequestLedgerCommit(EndpointRequestLedger* ledger, EndpointRequestKey key)
 {
-    if (completion_authority_out != nullptr)
-        *completion_authority_out = kInvalidEndpointRequestCompletionAuthority;
-    if (completion_authority_out == nullptr)
-        return EndpointRequestLedgerStatus::InvalidArgument;
-
     const EndpointRequestLedgerStatus ledger_status = ValidateLedger(ledger);
     if (ledger_status != EndpointRequestLedgerStatus::Ok)
-        return ledger_status;
+        return CommitFailure(ledger_status);
     const EndpointRequestLedgerStatus key_status = ValidateKeyForLedger(*ledger, key);
     if (key_status != EndpointRequestLedgerStatus::Ok)
-        return key_status;
+        return CommitFailure(key_status);
     if (ledger->state == EndpointRequestLedgerState::Draining)
-        return EndpointRequestLedgerStatus::Draining;
+        return CommitFailure(EndpointRequestLedgerStatus::Draining);
 
     const u32 slot_index = FindLiveSlot(*ledger, key);
     if (slot_index == kNoEndpointRequestSlot)
-        return ClassifyMissingKey(*ledger, key);
+        return CommitFailure(ClassifyMissingKey(*ledger, key));
 
     EndpointRequestSlot& slot = ledger->slots[slot_index];
     if (slot.state != EndpointRequestSlotState::Reserved)
-        return EndpointRequestLedgerStatus::ReplayRejected;
+        return CommitFailure(EndpointRequestLedgerStatus::ReplayRejected);
 
     slot.state = EndpointRequestSlotState::Committed;
-    *completion_authority_out = EndpointRequestCompletionAuthority(key);
-    return EndpointRequestLedgerStatus::Ok;
+    return EndpointRequestCommitResult{EndpointRequestLedgerStatus::Ok, EndpointRequestCompletionAuthority(key)};
 }
 
 EndpointRequestLedgerStatus EndpointRequestLedgerCancel(EndpointRequestLedger* ledger, EndpointRequestKey key)
@@ -293,27 +326,27 @@ EndpointRequestLedgerStatus EndpointRequestLedgerComplete(EndpointRequestLedger*
     return EndpointRequestLedgerStatus::Ok;
 }
 
-EndpointRequestLedgerStatus EndpointRequestLedgerDrain(EndpointRequestLedger* ledger, u32* cancelled_request_count_out)
+EndpointRequestDrainResult EndpointRequestLedgerDrain(EndpointRequestLedger* ledger)
 {
-    if (cancelled_request_count_out != nullptr)
-        *cancelled_request_count_out = 0;
-    if (cancelled_request_count_out == nullptr)
-        return EndpointRequestLedgerStatus::InvalidArgument;
-
     const EndpointRequestLedgerStatus ledger_status = ValidateLedger(ledger);
     if (ledger_status != EndpointRequestLedgerStatus::Ok)
-        return ledger_status;
+        return DrainFailure(ledger_status);
     if (ledger->state == EndpointRequestLedgerState::Draining)
-        return EndpointRequestLedgerStatus::Ok;
+        return DrainFailure(EndpointRequestLedgerStatus::Ok);
 
-    *cancelled_request_count_out = ledger->active_count;
+    EndpointRequestDrainResult result{};
+    result.status = EndpointRequestLedgerStatus::Ok;
     for (u32 index = 0; index < kEndpointRequestLedgerCapacity; ++index)
+    {
+        if (ledger->slots[index].state != EndpointRequestSlotState::Free)
+            result.detached_keys[result.detached_count++] = ledger->slots[index].key;
         ClearSlot(ledger->slots[index]);
+    }
     ledger->next_request_id = kEndpointRequestIdInvalid;
     ledger->active_count = 0;
     ledger->next_free_hint = 0;
     ledger->state = EndpointRequestLedgerState::Draining;
-    return EndpointRequestLedgerStatus::Ok;
+    return result;
 }
 
 const char* EndpointRequestLedgerStatusName(EndpointRequestLedgerStatus status)
@@ -326,6 +359,12 @@ const char* EndpointRequestLedgerStatusName(EndpointRequestLedgerStatus status)
         return "invalid-argument";
     case EndpointRequestLedgerStatus::NotInitialized:
         return "not-initialized";
+    case EndpointRequestLedgerStatus::AlreadyInitialized:
+        return "already-initialized";
+    case EndpointRequestLedgerStatus::ResetNotDrained:
+        return "reset-not-drained";
+    case EndpointRequestLedgerStatus::IdentityExhausted:
+        return "identity-exhausted";
     case EndpointRequestLedgerStatus::CorruptState:
         return "corrupt-state";
     case EndpointRequestLedgerStatus::Draining:
@@ -334,8 +373,8 @@ const char* EndpointRequestLedgerStatusName(EndpointRequestLedgerStatus status)
         return "sequence-exhausted";
     case EndpointRequestLedgerStatus::Full:
         return "full";
-    case EndpointRequestLedgerStatus::StaleEpoch:
-        return "stale-epoch";
+    case EndpointRequestLedgerStatus::StaleIdentity:
+        return "stale-identity";
     case EndpointRequestLedgerStatus::OutOfOrder:
         return "out-of-order";
     case EndpointRequestLedgerStatus::ReplayRejected:
