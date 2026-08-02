@@ -3594,3 +3594,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Enforce exact protocol routes and add CONNECT and SEND_REQUEST operations with failure-atomic settlement
 - **Claimed**: 2026-08-02T05:42:19Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-stage-load-image-reset-20260802
+- **Session**: `Nathan-1080`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/loader/load_image.h,kernel/loader/load_image.cpp,tests/host/test_load_image.cpp`
+- **Description**: Loader-owned
+- **Claimed**: 2026-08-02T05:50:36Z
+- **Status**: IN PROGRESS
