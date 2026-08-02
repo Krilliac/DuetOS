@@ -240,6 +240,30 @@ API-set policy state to a caller. See [Syscalls](Syscalls.md).
 - **No relocation streaming.** Whole-image relocation runs in one pass
   before the image is handed back. Lazy relocation is not planned.
 
+## Service package ELF staging
+
+`elf_load_image.h` / `.cpp` bridge the raw ELF parser and the
+authority-bound `LoadImage` staging infrastructure used by the service
+bootstrap package.  Given a service identity and the corresponding
+ELF bytes from the generated manifest, the adapter:
+
+1. Validates the ELF structurally via `ElfValidate`.
+2. Computes the SHA-256 of the raw bytes and compares it against the
+   separately authenticated expected source hash in the staging request.
+3. Pre-flights segment bounds (no single segment wider than
+   `kElfLoadImageMaximumSegmentSpanBytes`, total VA within
+   `kLoadPlanUserMax`), W^X, and executable entry reachability.
+4. Initialises a `LoadImage` with the computed region/page plan and
+   stages every PT_LOAD page through `LoadImageStagePage`.
+5. On any failure after initialisation, calls `LoadImageRelease` to
+   reclaim owned frames — no partial image is ever published.
+
+The adapter is compiled and structurally tested
+(`tests/host/test_elf_load_image.cpp`, `add_host_test(elf_load_image)`).
+Activation readiness remains false: the generated package has
+`ActivationReady = false` because the process-publication and
+endpoint-readiness adapters are not yet wired to truthful gates.
+
 ## Related Pages
 
 - [PE Loader](../subsystems/PE-Loader.md) — PE/COFF detail

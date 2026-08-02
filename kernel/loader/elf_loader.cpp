@@ -661,50 +661,42 @@ void ElfLoaderUnwindSelfTest()
     // frames than it allocated during the test window. That's not a
     // leak — it's bookkeeping noise from the running kernel. Enforce
     // direction-only: fail loudly on missing frames, tolerate gains.
-    // FreeFramesCount() is a GLOBAL counter and this test runs as a
+    // FreeFramesCount() is a GLOBAL counter, and this test runs as a
     // Phase::Userland initcall on the BSP while every other CPU is
-    // online and allocating. A concurrent allocation elsewhere lands in
-    // the same counter and is indistinguishable from a leak here, so a
-    // bare `after < before` is a false-positive generator: the identical
-    // build passes this check on the bringup / ring3 / pe-hello profiles
-    // and panicked on pe-winapi purely because unrelated timing shifted
-    // (2026-08-02). Rather than loosen the invariant — a real unwind
-    // leak must still panic — establish whether the measurement is
-    // trustworthy at all: sample the counter twice around nothing. If it
-    // moved, some other CPU is allocating and this test cannot attribute
-    // frames to itself, so it reports an explicit SKIP instead of a
-    // verdict it has no evidence for.
-    // Post-hoc quiescence probes cannot attribute the counter either: a
-    // BURST allocator — spawn a thread, allocate its stack/TLS, block —
-    // moves frames during the test window and is silent by the time any
-    // probe runs (2026-08-02, third occurrence: the deficit survived a
-    // two-tick quiescence window). What every observed interferer has
-    // in common is task churn, and the scheduler already keeps lifetime
-    // counters for exactly that. Snapshot created/exited/reaped around
-    // each measured window; if ANY moved, some other task's lifecycle
-    // overlapped the window and the global frame count cannot be
-    // attributed to this test — report an explicit SKIP. A genuine
-    // unwind leak on a quiet boot (bringup profile: nothing spawning)
-    // still panics, which is where this gate is actually enforceable.
-    auto sched_churn_signature = []()
-    {
-        const ::duetos::sched::SchedStats s = ::duetos::sched::SchedStatsRead();
-        return s.tasks_created + s.tasks_exited + s.tasks_reaped;
-    };
-
-    auto check_no_leak = [&sched_churn_signature](u64 before, u64 after, u64 churn_before, const char* tag)
+    // online and allocating. A concurrent allocation anywhere lands in
+    // the same counter and is indistinguishable from a leak here.
+    //
+    // Two successive attempts to make this measurement sound on a live
+    // boot both had holes, and each shipped a false-positive PANIC:
+    //   1. Sample the counter twice around nothing and skip if it moved.
+    //      Defeated by a BURST allocator (spawn thread, take stack+TLS,
+    //      block) that is silent by the time the probe runs.
+    //   2. Skip when scheduler task-churn counters moved. Defeated by a
+    //      pure allocator that churns no tasks — which is exactly what
+    //      the async klog flusher is (2026-08-02, third false positive,
+    //      on the linux profile).
+    // The defect is not the specific gate; it is that a global counter
+    // cannot attribute frames to one caller while other CPUs allocate.
+    // No further heuristic fixes that.
+    //
+    // So the LIVE check reports instead of halting: an apparent deficit
+    // emits a WARN sentinel and fires the boot-selftest probe (an
+    // attached GDB still breaks at the exact frame), but does not panic
+    // the box on evidence it cannot stand behind. A false panic is worse
+    // than a missed one here — it halts every profile that happens to
+    // schedule badly, and it trains a reader to disbelieve the check.
+    //
+    // The authoritative, panic-severity version of this invariant
+    // belongs in the hosted tests (tests/host/test_elf_load_image.cpp,
+    // test_load_image.cpp), where the allocator is deterministic and
+    // single-threaded and `after < before` genuinely means a leak.
+    // GAP: the unwind-specific leak case is not yet covered there —
+    // port it so the strict assertion has a sound home.
+    auto check_no_leak = [](u64 before, u64 after, const char* tag)
     {
         if (after >= before)
             return;
-        FrameAllocatorDrainPools();
-        if (sched_churn_signature() != churn_before || FreeFramesCount() != after)
-        {
-            SerialWrite("[elf-test] SKIP frame-leak check (");
-            SerialWrite(tag);
-            SerialWrite("): concurrent task churn, count not attributable\n");
-            return;
-        }
-        SerialWrite("[elf-test] FAIL frame leak (");
+        SerialWrite("[elf-test] WARN frame-count deficit (");
         SerialWrite(tag);
         SerialWrite(") before=");
         auto write_hex = [](u64 v)
@@ -720,8 +712,11 @@ void ElfLoaderUnwindSelfTest()
         write_hex(before);
         SerialWrite(" after=");
         write_hex(after);
-        SerialWrite("\n");
-        core::Panic("elf-loader", "ElfLoaderUnwindSelfTest: frame leak detected");
+        SerialWrite(" (global counter; may be a concurrent allocator, not a leak)\n");
+        // Probe so an attached GDB still breaks here on the first
+        // occurrence, and the fire count shows in the panic dump's
+        // probe table even on a boot that completes.
+        KBP_PROBE_V(::duetos::debug::ProbeId::kBootSelftestFail, 0x454Cu /* 'EL' */);
     };
 
     // Sample free-frame count BEFORE AddressSpaceCreate so the post-
@@ -739,7 +734,6 @@ void ElfLoaderUnwindSelfTest()
     // diff reflects real allocation drift.
     FrameAllocatorDrainPools();
     const u64 free_before = FreeFramesCount();
-    const u64 churn_before = sched_churn_signature();
 
     auto as_r = AddressSpaceCreate(/*frame_budget=*/64);
     if (!as_r)
@@ -798,7 +792,7 @@ void ElfLoaderUnwindSelfTest()
     // pool (instead of the bitmap) show up in the free count.
     FrameAllocatorDrainPools();
     const u64 free_after = FreeFramesCount();
-    check_no_leak(free_before, free_after, churn_before, "oom-midsegment");
+    check_no_leak(free_before, free_after, "oom-midsegment");
 
     // -----------------------------------------------------------
     // Case 2 — image larger than the old fixed 1024-VA tracker,
@@ -819,7 +813,6 @@ void ElfLoaderUnwindSelfTest()
 
     FrameAllocatorDrainPools();
     const u64 free_before_big = FreeFramesCount();
-    const u64 churn_before_big = sched_churn_signature();
 
     auto as_big_r = AddressSpaceCreate(/*frame_budget=*/64);
     if (!as_big_r)
@@ -846,7 +839,7 @@ void ElfLoaderUnwindSelfTest()
 
     AddressSpaceRelease(as_big);
     FrameAllocatorDrainPools();
-    check_no_leak(free_before_big, FreeFramesCount(), churn_before_big, "oversize-budget-refusal");
+    check_no_leak(free_before_big, FreeFramesCount(), "oversize-budget-refusal");
 
     SerialWrite("[elf-test] unwind-guard PASS\n");
 }
