@@ -3522,3 +3522,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Initialize
 - **Claimed**: 2026-08-02T04:42:49Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-endpoint-handle-rights-20260802
+- **Session**: `Nathan-933`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/ipc/handle_table.cpp,kernel/ipc/handle_table_selftest.cpp`
+- **Description**: Remove generic Duplicate and Transfer rights from ServiceEndpoint handles and prove mint paths fail closed
+- **Claimed**: 2026-08-02T04:53:17Z
+- **Status**: IN PROGRESS
