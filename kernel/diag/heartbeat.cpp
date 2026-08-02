@@ -327,6 +327,20 @@ void RegisterHeartbeatKstats()
 
         // One compound line per stat category. Keeping each line short
         // enough that grep extracts one field cleanly, and keeping the
+        // Hung-task detector FIRST, before any Info-level line below can
+        // park us. Every LogWithValue in this loop routes through the
+        // klog persistence sink, which takes the FAT32 driver mutex — so
+        // a task that wedges while HOLDING that mutex also blocks the
+        // heartbeat, and the detector that exists to report exactly that
+        // deadlock never runs. The watchdog was downstream of the failure
+        // it watches for: a real ~264 s FAT32-holder stall (2026-08-02,
+        // pe-threads / pe-winapi smoke) produced no hung-task line at
+        // all, and the resulting "no report, so nothing is Blocked"
+        // inference sent that investigation the wrong way for hours.
+        // Ordering alone closes the blind spot — the detector itself
+        // takes no filesystem locks and allocates nothing.
+        ::duetos::diag::HungTaskTick();
+
         // category on the left so log reading is predictable.
         LogWithValue(LogLevel::Info, "kheartbeat", "cpus_online", arch::SmpCpusOnline());
         LogWithValue(LogLevel::Info, "kheartbeat", "ctx_switches", sched_stats.context_switches);
@@ -368,13 +382,7 @@ void RegisterHeartbeatKstats()
         LogWithValue(LogLevel::Info, "kheartbeat", "health_last_scan_issues", h.last_scan_issues);
         LogWithValue(LogLevel::Info, "kheartbeat", "health_issues_total", h.issues_found_total);
 
-        // Hung-task detector. Walks the all-tasks list looking
-        // for tasks stuck in Blocked state for longer than the
-        // 30 s threshold; complements the per-CPU soft-lockup
-        // detector by catching the deadlock / lost-wakeup /
-        // dropped-signal class. Cheap when nothing is hung — one
-        // bounded list walk + zero allocations.
-        ::duetos::diag::HungTaskTick();
+        // (Hung-task detector runs at the top of the beat — see there.)
 
         // Drain any deferred fault-react reports recorded from
         // the trap handler since the previous beat. Each pending

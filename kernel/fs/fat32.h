@@ -368,6 +368,15 @@ void Fat32OwnershipSelfTest();
 /// is online, where re-entry cannot happen.
 bool Fat32BusyOnCurrentTask();
 
+/// Report the current holder of the FAT32 driver mutex: the owning task
+/// id and the return address of the site that acquired it. Writes
+/// `~0ull` / 0 when the mutex is free. A task that wedges while holding
+/// this mutex blocks every later filesystem user (including the klog
+/// persistence sink), so at a stall the actionable question is who owns
+/// it and where they took it — not who is waiting. Read-only and
+/// lock-free; intended for diagnostics (hung-task reports, panic dumps).
+void Fat32DriverLockOwner(u64* tid_out, u64* acquire_rip_out);
+
 /// Drop the in-memory volume registry. Used by the
 /// `fs/fat32` fault-domain teardown so a subsequent `Fat32Probe`
 /// re-walks the block layer cleanly. The on-disk content is left

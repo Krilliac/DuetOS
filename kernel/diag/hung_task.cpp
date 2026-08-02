@@ -20,6 +20,7 @@
 #include "debug/probes.h"
 #include "diag/fault_react.h"
 #include "diag/fma/ereport.h"
+#include "fs/fat32.h"
 #include "log/klog.h"
 #include "sched/sched.h"
 #include "security/fault_domain.h"
@@ -171,6 +172,25 @@ u64 TickInternal(u64 now_ticks, u64 threshold)
         arch::SerialWrite("\" stuck_ticks=");
         arch::SerialWriteHex(stuck_for);
         arch::SerialWrite("\n");
+
+        // Name the FAT32 driver-mutex holder alongside the waiter. That
+        // mutex is the widest choke point in the kernel — the klog
+        // persistence sink takes it on ordinary log lines — so when
+        // tasks pile up behind the filesystem the blocked task is
+        // usually an innocent waiter and the HOLDER is the bug. Emitted
+        // only on an already-firing report, so a healthy boot prints
+        // nothing extra.
+        u64 fs_owner_tid = 0;
+        u64 fs_acquire_rip = 0;
+        ::duetos::fs::fat32::Fat32DriverLockOwner(&fs_owner_tid, &fs_acquire_rip);
+        if (fs_owner_tid != ~u64{0})
+        {
+            arch::SerialWrite("[hung-task]   fat32 driver mutex held by tid=");
+            arch::SerialWriteHex(fs_owner_tid);
+            arch::SerialWrite(" acquired_at=");
+            arch::SerialWriteHex(fs_acquire_rip);
+            arch::SerialWrite("\n");
+        }
 
         // Fire the probe so an attached GDB can break on
         // `duetos::debug::ProbeFire` and inspect the offending
