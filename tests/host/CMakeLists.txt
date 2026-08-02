@@ -506,6 +506,29 @@ target_sources(
         "${CMAKE_SOURCE_DIR}/../../kernel/core/service_exit_observer.cpp"
 )
 target_link_libraries(test_service_exit_observer PRIVATE Threads::Threads)
+add_host_test(service_exit_reap_ledger)
+target_compile_definitions(test_service_exit_reap_ledger PRIVATE DUETOS_HOST_TEST=1)
+target_sources(
+    test_service_exit_reap_ledger
+    PRIVATE
+        "${CMAKE_SOURCE_DIR}/../../kernel/core/service_exit_reap_ledger.cpp"
+        "${CMAKE_SOURCE_DIR}/../../kernel/core/service_exit_observer.cpp"
+        "${CMAKE_SOURCE_DIR}/../../kernel/core/service_lifecycle_broker.cpp"
+        "${CMAKE_SOURCE_DIR}/../../kernel/core/service_directory.cpp"
+        "${CMAKE_SOURCE_DIR}/../../kernel/core/service_endpoint.cpp"
+        "${CMAKE_SOURCE_DIR}/../../kernel/core/service_manifest.cpp"
+        "${CMAKE_SOURCE_DIR}/../../kernel/core/service_transition.cpp"
+        "${CMAKE_SOURCE_DIR}/../../kernel/ipc/channel_core.cpp"
+        "${CMAKE_SOURCE_DIR}/../../kernel/ipc/endpoint_request_ledger.cpp"
+        "${CMAKE_SOURCE_DIR}/../../kernel/ipc/handle_table.cpp"
+        "${CMAKE_SOURCE_DIR}/../../kernel/proc/credentials.cpp"
+        "${CMAKE_SOURCE_DIR}/../../kernel/proc/resource_domain.cpp"
+        "${CMAKE_SOURCE_DIR}/../../kernel/crypto/sha256.cpp"
+)
+target_link_libraries(test_service_exit_reap_ledger PRIVATE Threads::Threads)
+if(MSVC)
+    target_link_options(test_service_exit_reap_ledger PRIVATE "/STACK:8388608")
+endif()
 add_host_test(serviced_protocol)
 target_sources(
     test_serviced_protocol

@@ -439,12 +439,13 @@ PublishedService PublishService(Fixture& fixture, const ServiceSpec& spec)
         ServiceDirectoryReserveRegistration(&fixture.directory, &name, spec.manifest_slot, owner, &credential);
     EXPECT_EQ(directory.status, ServiceDirectoryStatus::Ok);
 
-    EXPECT_EQ(ServiceExitObserverBindAtSchedulerPublication(&fixture.observer, reservation.registration, process),
+    EXPECT_EQ(ServiceExitObserverBindAtSchedulerPublication(&fixture.observer, reservation.registration, process,
+                                                            directory.reservation),
               ServiceExitObserverStatus::Ok);
 
     // The joint commit consumes the reservation, so snapshot the durable
     // directory ServiceKey first — it is the exact teardown authority the
-    // reap acquirer later supplies as the row's directory binding.
+    // observer captures from that same reservation before it is consumed.
     const ServiceKey directory_key = directory.reservation.service;
     const ServiceLifecycleDirectoryPublicationResult joined = ServiceLifecycleBrokerCommitDirectoryPublication(
         &fixture.broker, start.ticket, instance_key, fixture.Now(), &fixture.directory, &directory.reservation);
@@ -482,8 +483,8 @@ ReadyEvent StageReadyEvent(Fixture& fixture, const ServiceSpec& spec, u32 exit_c
 {
     const PublishedService published = PublishService(fixture, spec);
     CrashService(fixture, published, exit_code);
-    const ServiceExitReapAcquireResult acquired = ServiceExitReapLedgerAcquireFromObserver(
-        &fixture.ledger, &fixture.observer, ServiceExitReapDirectoryBindingFor(published.directory_key));
+    const ServiceExitReapAcquireResult acquired =
+        ServiceExitReapLedgerAcquireFromObserver(&fixture.ledger, &fixture.observer);
     EXPECT_EQ(acquired.status, ServiceExitReapStatus::Ok);
     const ServiceExitReapPumpResult pumped = ServiceExitReapLedgerPump(
         &fixture.ledger, &fixture.broker, &fixture.directory, &fixture.observer, fixture.Now(), 8);
@@ -503,9 +504,12 @@ int main()
         EXPECT_EQ(ServiceExitReapLedgerInitialize(nullptr), ServiceExitReapStatus::NullArgument);
         ServiceExitReapLedger ledger{};
         ServiceExitObserver observer{};
-        EXPECT_EQ(
-            ServiceExitReapLedgerAcquireFromObserver(&ledger, &observer, kServiceExitReapNoDirectoryBinding).status,
-            ServiceExitReapStatus::NotInitialized);
+        EXPECT_EQ(ServiceExitReapLedgerAcquireFromObserver(nullptr, &observer).status,
+                  ServiceExitReapStatus::NullArgument);
+        EXPECT_EQ(ServiceExitReapLedgerAcquireFromObserver(&ledger, nullptr).status,
+                  ServiceExitReapStatus::NullArgument);
+        EXPECT_EQ(ServiceExitReapLedgerAcquireFromObserver(&ledger, &observer).status,
+                  ServiceExitReapStatus::NotInitialized);
         EXPECT_EQ(ServiceExitReapLedgerClose(&ledger), ServiceExitReapStatus::NotInitialized);
         ServiceLifecycleBroker broker{};
         ServiceDirectory directory{};
@@ -524,17 +528,6 @@ int main()
                   ServiceExitReapStatus::InvalidProcessKey);
         EXPECT_EQ(ServiceExitReapLedgerDequeueForDelivery(&ledger, kInvalidProcessKey).status,
                   ServiceExitReapStatus::InvalidProcessKey);
-        const ServiceExitReapAcquireResult bad_binding = ServiceExitReapLedgerAcquireFromObserver(
-            &ledger, &observer, ServiceExitReapDirectoryBinding{1, kInvalidServiceKey});
-        EXPECT_EQ(bad_binding.status, ServiceExitReapStatus::InvalidBinding);
-        EXPECT_EQ(ServiceExitReapLedgerAcquireFromObserver(&ledger, &observer,
-                                                           ServiceExitReapDirectoryBinding{0, ServiceKey{1, 1}})
-                      .status,
-                  ServiceExitReapStatus::InvalidBinding);
-        EXPECT_EQ(ServiceExitReapLedgerAcquireFromObserver(&ledger, &observer,
-                                                           ServiceExitReapDirectoryBinding{2, ServiceKey{1, 1}})
-                      .status,
-                  ServiceExitReapStatus::InvalidBinding);
         ledger.state = static_cast<ServiceExitReapLedgerState>(0xFF);
         ServiceExitReapLedgerSnapshot corrupt_snapshot{};
         EXPECT_EQ(ServiceExitReapLedgerInspect(&ledger, &corrupt_snapshot), ServiceExitReapStatus::CorruptState);
@@ -544,9 +537,7 @@ int main()
         EXPECT_EQ(ServiceExitReapLedgerClose(&ledger), ServiceExitReapStatus::Ok);
         EXPECT_EQ(ServiceExitReapLedgerPump(&ledger, &broker, &directory, &observer, 0, 0).status,
                   ServiceExitReapStatus::Closed);
-        EXPECT_EQ(
-            ServiceExitReapLedgerAcquireFromObserver(&ledger, &observer, kServiceExitReapNoDirectoryBinding).status,
-            ServiceExitReapStatus::Closed);
+        EXPECT_EQ(ServiceExitReapLedgerAcquireFromObserver(&ledger, &observer).status, ServiceExitReapStatus::Closed);
         EXPECT_EQ(ServiceExitReapLedgerInitialize(&ledger), ServiceExitReapStatus::Ok);
         EXPECT_EQ(ServiceExitReapLedgerClose(&ledger), ServiceExitReapStatus::Ok);
 
@@ -565,17 +556,15 @@ int main()
         CrashService(fixture, published, 7);
         EXPECT_EQ(InspectObserver(fixture).pending_count, 1U);
 
-        const ServiceExitReapAcquireResult acquired = ServiceExitReapLedgerAcquireFromObserver(
-            &fixture.ledger, &fixture.observer, ServiceExitReapDirectoryBindingFor(published.directory_key));
+        const ServiceExitReapAcquireResult acquired =
+            ServiceExitReapLedgerAcquireFromObserver(&fixture.ledger, &fixture.observer);
         EXPECT_EQ(acquired.status, ServiceExitReapStatus::Ok);
         EXPECT_TRUE(ServiceExitReapRowTicketIsValid(acquired.ticket));
         EXPECT_EQ(InspectObserver(fixture).pending_count, 0U);
 
         // The observer receipt was dequeued exactly once; there is no second
         // event to acquire and the observer sees no further pending work.
-        EXPECT_EQ(ServiceExitReapLedgerAcquireFromObserver(&fixture.ledger, &fixture.observer,
-                                                           kServiceExitReapNoDirectoryBinding)
-                      .status,
+        EXPECT_EQ(ServiceExitReapLedgerAcquireFromObserver(&fixture.ledger, &fixture.observer).status,
                   ServiceExitReapStatus::NoEvent);
 
         // Teardown is not yet settled, so the service cannot restage.
@@ -683,8 +672,8 @@ int main()
         Fixture fixture;
         const PublishedService published = PublishService(fixture, kServicedSpec);
         CrashService(fixture, published, 0);
-        const ServiceExitReapAcquireResult acquired = ServiceExitReapLedgerAcquireFromObserver(
-            &fixture.ledger, &fixture.observer, ServiceExitReapDirectoryBindingFor(published.directory_key));
+        const ServiceExitReapAcquireResult acquired =
+            ServiceExitReapLedgerAcquireFromObserver(&fixture.ledger, &fixture.observer);
         EXPECT_EQ(acquired.status, ServiceExitReapStatus::Ok);
 
         ServiceExitReapRowTicket stale = acquired.ticket;
@@ -703,8 +692,8 @@ int main()
 
         // The requeued event is replay-safe: the exact receipt is acquired
         // again and this time committed.
-        const ServiceExitReapAcquireResult reacquired = ServiceExitReapLedgerAcquireFromObserver(
-            &fixture.ledger, &fixture.observer, ServiceExitReapDirectoryBindingFor(published.directory_key));
+        const ServiceExitReapAcquireResult reacquired =
+            ServiceExitReapLedgerAcquireFromObserver(&fixture.ledger, &fixture.observer);
         EXPECT_EQ(reacquired.status, ServiceExitReapStatus::Ok);
         const ServiceExitReapPumpResult pumped = ServiceExitReapLedgerPump(
             &fixture.ledger, &fixture.broker, &fixture.directory, &fixture.observer, fixture.Now(), 1);
@@ -723,8 +712,8 @@ int main()
         Fixture fixture;
         const PublishedService published = PublishService(fixture, kServicedSpec);
         CrashService(fixture, published, 2);
-        const ServiceExitReapAcquireResult acquired = ServiceExitReapLedgerAcquireFromObserver(
-            &fixture.ledger, &fixture.observer, ServiceExitReapDirectoryBindingFor(published.directory_key));
+        const ServiceExitReapAcquireResult acquired =
+            ServiceExitReapLedgerAcquireFromObserver(&fixture.ledger, &fixture.observer);
         EXPECT_EQ(acquired.status, ServiceExitReapStatus::Ok);
         fixture.ledger.rows[acquired.ticket.row].reserved8[0] = 1;
         EXPECT_EQ(ServiceExitReapLedgerQueryRestageExact(&fixture.ledger, EventKey(published, acquired.ticket)).status,
@@ -789,8 +778,8 @@ int main()
         Fixture fixture;
         const PublishedService published = PublishService(fixture, kServicedSpec);
         CrashService(fixture, published, 3);
-        const ServiceExitReapAcquireResult acquired = ServiceExitReapLedgerAcquireFromObserver(
-            &fixture.ledger, &fixture.observer, ServiceExitReapDirectoryBindingFor(published.directory_key));
+        const ServiceExitReapAcquireResult acquired =
+            ServiceExitReapLedgerAcquireFromObserver(&fixture.ledger, &fixture.observer);
         EXPECT_EQ(acquired.status, ServiceExitReapStatus::Ok);
         EXPECT_EQ(ServiceExitReapLedgerPump(&fixture.ledger, &fixture.broker, &fixture.directory, &fixture.observer,
                                             fixture.Now(), 1)
@@ -939,43 +928,45 @@ int main()
         EXPECT_EQ(idempotent.reverted_rows, 0U);
     }
 
-    // An explicitly unbound directory binding reports Unbound instead of a
-    // fabricated teardown: the directory row survives untouched and the event
-    // still reaches delivery with its exact recorded facts.
+    // The event carries the exact directory generation captured at publication.
+    // If that slot is recycled before the reap pump reaches directory teardown,
+    // the stale event settles absent without touching the replacement row.
     {
         Fixture fixture;
-        const PublishedService published = PublishService(fixture, kServicedSpec);
-        CrashService(fixture, published, 21);
-        const ServiceExitReapAcquireResult acquired = ServiceExitReapLedgerAcquireFromObserver(
-            &fixture.ledger, &fixture.observer, kServiceExitReapNoDirectoryBinding);
+        const PublishedService first = PublishService(fixture, kServicedSpec);
+        CrashService(fixture, first, 21);
+        const ServiceExitReapAcquireResult acquired =
+            ServiceExitReapLedgerAcquireFromObserver(&fixture.ledger, &fixture.observer);
         EXPECT_EQ(acquired.status, ServiceExitReapStatus::Ok);
+        EXPECT_EQ(fixture.ledger.rows[acquired.ticket.row].directory_service, first.directory_key);
+
+        EXPECT_EQ(ServiceDirectoryOwnerCrashed(&fixture.directory, first.directory_key, first.directory_owner).status,
+                  ServiceDirectoryStatus::Ok);
+        EXPECT_EQ(ServiceDirectoryInspectExact(&fixture.directory, first.directory_key).status,
+                  ServiceDirectoryStatus::StaleKey);
+
+        const PublishedService replacement = PublishService(fixture, kExecdSpec);
+        EXPECT_EQ(replacement.directory_key.slot, first.directory_key.slot);
+        EXPECT_NE(replacement.directory_key.generation, first.directory_key.generation);
+
         const ServiceExitReapPumpResult pumped = ServiceExitReapLedgerPump(
             &fixture.ledger, &fixture.broker, &fixture.directory, &fixture.observer, fixture.Now(), 8);
         EXPECT_EQ(pumped.ready_transitions, 1U);
         EXPECT_EQ(InspectRow(fixture, acquired.ticket.row).directory_disposition,
-                  ServiceExitReapDirectoryDisposition::Unbound);
-        EXPECT_EQ(ServiceDirectoryInspectExact(&fixture.directory, published.directory_key).status,
-                  ServiceDirectoryStatus::Ok);
-        EXPECT_EQ(ServiceDirectoryInspectExact(&fixture.directory, published.directory_key).snapshot.state,
-                  ServiceDirectoryEntryState::Active);
-        const ServiceExitReapRestageResult unbound =
-            ServiceExitReapLedgerQueryRestageExact(&fixture.ledger, EventKey(published, acquired.ticket));
-        EXPECT_EQ(unbound.status, ServiceExitReapStatus::Ok);
-        EXPECT_EQ(unbound.eligible, 0U);
+                  ServiceExitReapDirectoryDisposition::SettledAbsent);
+        EXPECT_EQ(fixture.ledger.rows[acquired.ticket.row].directory_status, ServiceDirectoryStatus::StaleKey);
+        const ServiceDirectoryInspectResult replacement_row =
+            ServiceDirectoryInspectExact(&fixture.directory, replacement.directory_key);
+        EXPECT_EQ(replacement_row.status, ServiceDirectoryStatus::Ok);
+        EXPECT_EQ(replacement_row.snapshot.state, ServiceDirectoryEntryState::Active);
 
         const ProcessKey owner = Key(9400);
         const ServiceExitReapDeliveryResult delivered = ServiceExitReapLedgerDequeueForDelivery(&fixture.ledger, owner);
         EXPECT_EQ(delivered.status, ServiceExitReapStatus::Ok);
-        EXPECT_EQ(delivered.record.directory_disposition, ServiceExitReapDirectoryDisposition::Unbound);
+        EXPECT_EQ(delivered.record.directory_disposition, ServiceExitReapDirectoryDisposition::SettledAbsent);
         EXPECT_EQ(ServiceExitReapLedgerAcknowledgeDelivery(&fixture.ledger, EventKey(delivered.record),
                                                            delivered.record.delivery_token, owner),
                   ServiceExitReapStatus::Ok);
-
-        // The registration is still owned by the dead instance; the exact
-        // OwnerCrashed call the acquirer skipped still succeeds afterwards.
-        EXPECT_EQ(
-            ServiceDirectoryOwnerCrashed(&fixture.directory, published.directory_key, published.directory_owner).status,
-            ServiceDirectoryStatus::Ok);
     }
 
     // Global rotating fairness: the lowest row perpetually Busy in
@@ -985,8 +976,8 @@ int main()
         Fixture fixture;
         const PublishedService serviced = PublishService(fixture, kServicedSpec);
         CrashService(fixture, serviced, 1);
-        const ServiceExitReapAcquireResult serviced_acquired = ServiceExitReapLedgerAcquireFromObserver(
-            &fixture.ledger, &fixture.observer, ServiceExitReapDirectoryBindingFor(serviced.directory_key));
+        const ServiceExitReapAcquireResult serviced_acquired =
+            ServiceExitReapLedgerAcquireFromObserver(&fixture.ledger, &fixture.observer);
         EXPECT_EQ(serviced_acquired.status, ServiceExitReapStatus::Ok);
         EXPECT_EQ(ServiceExitReapLedgerPump(&fixture.ledger, &fixture.broker, &fixture.directory, &fixture.observer,
                                             fixture.Now(), 1)
@@ -998,8 +989,8 @@ int main()
 
         const PublishedService execd = PublishService(fixture, kExecdSpec);
         CrashService(fixture, execd, 2);
-        const ServiceExitReapAcquireResult execd_acquired = ServiceExitReapLedgerAcquireFromObserver(
-            &fixture.ledger, &fixture.observer, ServiceExitReapDirectoryBindingFor(execd.directory_key));
+        const ServiceExitReapAcquireResult execd_acquired =
+            ServiceExitReapLedgerAcquireFromObserver(&fixture.ledger, &fixture.observer);
         EXPECT_EQ(execd_acquired.status, ServiceExitReapStatus::Ok);
 
         const ServiceExitReapPumpResult pumped = ServiceExitReapLedgerPump(
@@ -1043,8 +1034,8 @@ int main()
         Fixture fixture;
         const PublishedService published = PublishService(fixture, kServicedSpec);
         CrashService(fixture, published, 6);
-        const ServiceExitReapAcquireResult acquired = ServiceExitReapLedgerAcquireFromObserver(
-            &fixture.ledger, &fixture.observer, ServiceExitReapDirectoryBindingFor(published.directory_key));
+        const ServiceExitReapAcquireResult acquired =
+            ServiceExitReapLedgerAcquireFromObserver(&fixture.ledger, &fixture.observer);
         EXPECT_EQ(acquired.status, ServiceExitReapStatus::Ok);
         EXPECT_EQ(ServiceExitReapLedgerPump(&fixture.ledger, &fixture.broker, &fixture.directory, &fixture.observer,
                                             fixture.Now(), 2)
@@ -1089,8 +1080,8 @@ int main()
         Fixture fixture;
         const PublishedService published = PublishService(fixture, kServicedSpec);
         CrashService(fixture, published, 61);
-        const ServiceExitReapAcquireResult acquired = ServiceExitReapLedgerAcquireFromObserver(
-            &fixture.ledger, &fixture.observer, ServiceExitReapDirectoryBindingFor(published.directory_key));
+        const ServiceExitReapAcquireResult acquired =
+            ServiceExitReapLedgerAcquireFromObserver(&fixture.ledger, &fixture.observer);
         EXPECT_EQ(acquired.status, ServiceExitReapStatus::Ok);
         EXPECT_EQ(ServiceExitReapLedgerPump(&fixture.ledger, &fixture.broker, &fixture.directory, &fixture.observer,
                                             fixture.Now(), 2)
@@ -1142,8 +1133,8 @@ int main()
 
         const PublishedService overflow = PublishService(fixture, kServicedSpec);
         CrashService(fixture, overflow, 99);
-        const ServiceExitReapAcquireResult refused = ServiceExitReapLedgerAcquireFromObserver(
-            &fixture.ledger, &fixture.observer, ServiceExitReapDirectoryBindingFor(overflow.directory_key));
+        const ServiceExitReapAcquireResult refused =
+            ServiceExitReapLedgerAcquireFromObserver(&fixture.ledger, &fixture.observer);
         EXPECT_EQ(refused.status, ServiceExitReapStatus::CapacityExhausted);
         EXPECT_EQ(InspectObserver(fixture).pending_count, 1U);
 
@@ -1154,8 +1145,8 @@ int main()
         EXPECT_EQ(ServiceExitReapLedgerAcknowledgeDelivery(&fixture.ledger, events[0], tokens[0], owner),
                   ServiceExitReapStatus::Ok);
 
-        const ServiceExitReapAcquireResult admitted = ServiceExitReapLedgerAcquireFromObserver(
-            &fixture.ledger, &fixture.observer, ServiceExitReapDirectoryBindingFor(overflow.directory_key));
+        const ServiceExitReapAcquireResult admitted =
+            ServiceExitReapLedgerAcquireFromObserver(&fixture.ledger, &fixture.observer);
         EXPECT_EQ(admitted.status, ServiceExitReapStatus::Ok);
         EXPECT_EQ(InspectObserver(fixture).pending_count, 0U);
         const ServiceExitReapPumpResult pumped = ServiceExitReapLedgerPump(
@@ -1186,8 +1177,8 @@ int main()
         Fixture fixture;
         const PublishedService published = PublishService(fixture, kServicedSpec);
         CrashService(fixture, published, 13);
-        const ServiceExitReapAcquireResult acquired = ServiceExitReapLedgerAcquireFromObserver(
-            &fixture.ledger, &fixture.observer, ServiceExitReapDirectoryBindingFor(published.directory_key));
+        const ServiceExitReapAcquireResult acquired =
+            ServiceExitReapLedgerAcquireFromObserver(&fixture.ledger, &fixture.observer);
         EXPECT_EQ(acquired.status, ServiceExitReapStatus::Ok);
         EXPECT_EQ(ServiceExitReapLedgerPump(&fixture.ledger, &fixture.broker, &fixture.directory, &fixture.observer,
                                             fixture.Now(), 2)
@@ -1229,10 +1220,10 @@ int main()
         const PublishedService execd = PublishService(fixture, kExecdSpec);
         CrashService(fixture, serviced, 31);
         CrashService(fixture, execd, 32);
-        const ServiceExitReapAcquireResult serviced_acquired = ServiceExitReapLedgerAcquireFromObserver(
-            &fixture.ledger, &fixture.observer, ServiceExitReapDirectoryBindingFor(serviced.directory_key));
-        const ServiceExitReapAcquireResult execd_acquired = ServiceExitReapLedgerAcquireFromObserver(
-            &fixture.ledger, &fixture.observer, ServiceExitReapDirectoryBindingFor(execd.directory_key));
+        const ServiceExitReapAcquireResult serviced_acquired =
+            ServiceExitReapLedgerAcquireFromObserver(&fixture.ledger, &fixture.observer);
+        const ServiceExitReapAcquireResult execd_acquired =
+            ServiceExitReapLedgerAcquireFromObserver(&fixture.ledger, &fixture.observer);
         EXPECT_EQ(serviced_acquired.status, ServiceExitReapStatus::Ok);
         EXPECT_EQ(execd_acquired.status, ServiceExitReapStatus::Ok);
         EXPECT_EQ(ServiceExitReapLedgerPump(&fixture.ledger, &fixture.broker, &fixture.directory, &fixture.observer,
@@ -1298,11 +1289,7 @@ int main()
         ServiceExitReapLedgerHostSetHook(&PauseAtHostHook, &pause);
         ServiceExitReapAcquireResult acquired{};
         std::thread acquirer(
-            [&]
-            {
-                acquired = ServiceExitReapLedgerAcquireFromObserver(
-                    &fixture.ledger, &fixture.observer, ServiceExitReapDirectoryBindingFor(published.directory_key));
-            });
+            [&] { acquired = ServiceExitReapLedgerAcquireFromObserver(&fixture.ledger, &fixture.observer); });
         (void)WaitForHostPause(pause);
         EXPECT_TRUE(pause.event.row < kServiceExitReapLedgerCapacity);
         EXPECT_NE(pause.event.admission, kServiceExitReapInvalidAdmission);
@@ -1335,8 +1322,8 @@ int main()
         Fixture fixture;
         const PublishedService published = PublishService(fixture, kServicedSpec);
         CrashService(fixture, published, 72);
-        const ServiceExitReapAcquireResult acquired = ServiceExitReapLedgerAcquireFromObserver(
-            &fixture.ledger, &fixture.observer, ServiceExitReapDirectoryBindingFor(published.directory_key));
+        const ServiceExitReapAcquireResult acquired =
+            ServiceExitReapLedgerAcquireFromObserver(&fixture.ledger, &fixture.observer);
         EXPECT_EQ(acquired.status, ServiceExitReapStatus::Ok);
 
         HostPause pause(ServiceExitReapLedgerHostHookPoint::PumpSelectedBeforeExternalCall);
@@ -1376,8 +1363,8 @@ int main()
         Fixture fixture;
         const PublishedService published = PublishService(fixture, kServicedSpec);
         CrashService(fixture, published, 73);
-        const ServiceExitReapAcquireResult acquired = ServiceExitReapLedgerAcquireFromObserver(
-            &fixture.ledger, &fixture.observer, ServiceExitReapDirectoryBindingFor(published.directory_key));
+        const ServiceExitReapAcquireResult acquired =
+            ServiceExitReapLedgerAcquireFromObserver(&fixture.ledger, &fixture.observer);
         EXPECT_EQ(acquired.status, ServiceExitReapStatus::Ok);
 
         HostPause pause(ServiceExitReapLedgerHostHookPoint::RollbackReservedBeforeObserverRequeue);
@@ -1410,8 +1397,8 @@ int main()
         Fixture fixture;
         const PublishedService published = PublishService(fixture, kServicedSpec);
         CrashService(fixture, published, 74);
-        const ServiceExitReapAcquireResult acquired = ServiceExitReapLedgerAcquireFromObserver(
-            &fixture.ledger, &fixture.observer, ServiceExitReapDirectoryBindingFor(published.directory_key));
+        const ServiceExitReapAcquireResult acquired =
+            ServiceExitReapLedgerAcquireFromObserver(&fixture.ledger, &fixture.observer);
         EXPECT_EQ(acquired.status, ServiceExitReapStatus::Ok);
         EXPECT_EQ(ServiceExitReapLedgerPump(&fixture.ledger, &fixture.broker, &fixture.directory, &fixture.observer,
                                             fixture.Now(), 2)
@@ -1459,8 +1446,8 @@ int main()
         Fixture fixture;
         const PublishedService published = PublishService(fixture, kServicedSpec);
         CrashService(fixture, published, 17);
-        const ServiceExitReapAcquireResult acquired = ServiceExitReapLedgerAcquireFromObserver(
-            &fixture.ledger, &fixture.observer, ServiceExitReapDirectoryBindingFor(published.directory_key));
+        const ServiceExitReapAcquireResult acquired =
+            ServiceExitReapLedgerAcquireFromObserver(&fixture.ledger, &fixture.observer);
         EXPECT_EQ(acquired.status, ServiceExitReapStatus::Ok);
         EXPECT_EQ(ServiceExitReapLedgerClose(&fixture.ledger), ServiceExitReapStatus::RowsLive);
         EXPECT_EQ(ServiceExitReapLedgerInitialize(&fixture.ledger), ServiceExitReapStatus::AlreadyInitialized);
@@ -1511,13 +1498,13 @@ int main()
         Fixture fixture;
         const PublishedService serviced = PublishService(fixture, kServicedSpec);
         CrashService(fixture, serviced, 1);
-        const ServiceExitReapAcquireResult serviced_acquired = ServiceExitReapLedgerAcquireFromObserver(
-            &fixture.ledger, &fixture.observer, ServiceExitReapDirectoryBindingFor(serviced.directory_key));
+        const ServiceExitReapAcquireResult serviced_acquired =
+            ServiceExitReapLedgerAcquireFromObserver(&fixture.ledger, &fixture.observer);
         EXPECT_EQ(serviced_acquired.status, ServiceExitReapStatus::Ok);
         const PublishedService execd = PublishService(fixture, kExecdSpec);
         CrashService(fixture, execd, 2);
-        const ServiceExitReapAcquireResult execd_acquired = ServiceExitReapLedgerAcquireFromObserver(
-            &fixture.ledger, &fixture.observer, ServiceExitReapDirectoryBindingFor(execd.directory_key));
+        const ServiceExitReapAcquireResult execd_acquired =
+            ServiceExitReapLedgerAcquireFromObserver(&fixture.ledger, &fixture.observer);
         EXPECT_EQ(execd_acquired.status, ServiceExitReapStatus::Ok);
 
         std::atomic<u64> now{100000};

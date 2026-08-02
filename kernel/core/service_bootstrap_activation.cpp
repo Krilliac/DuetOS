@@ -162,8 +162,8 @@ bool CommitLifecyclePublication(ProcessKey process, void* raw_context)
         return false;
     }
     context->invoked = true;
-    context->bind_status =
-        ServiceExitObserverBindAtSchedulerPublication(context->exit_observer, *context->exit_registration, process);
+    context->bind_status = ServiceExitObserverBindAtSchedulerPublication(
+        context->exit_observer, *context->exit_registration, process, *context->directory_registration);
     if (context->bind_status != ServiceExitObserverStatus::Ok)
         return false;
 

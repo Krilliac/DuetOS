@@ -150,14 +150,15 @@ bool EventIsZero(const ServiceExitEvent& event)
            event.receipt.registration.start.transition.generation == 0 && event.receipt.process.identity == 0 &&
            event.receipt.process.pid == 0 && event.instance.start.broker_epoch == 0 &&
            event.instance.start.transition.service_identity == 0 && event.instance.start.transition.generation == 0 &&
-           event.instance.process.process_identity == 0 && event.instance.process.pid == 0 && event.exit_code == 0 &&
+           event.instance.process.process_identity == 0 && event.instance.process.pid == 0 &&
+           event.directory_service.slot == 0 && event.directory_service.generation == 0 && event.exit_code == 0 &&
            event.failed == 0 && event.reserved8[0] == 0 && event.reserved8[1] == 0 && event.reserved8[2] == 0;
 }
 
 bool EventIsCanonical(const ServiceExitEvent& event)
 {
     return ServiceExitEventReceiptIsValid(event.receipt) && ServiceLifecycleInstanceTokenIsValid(event.instance) &&
-           event.receipt.registration.start == event.instance.start &&
+           ServiceKeyIsValid(event.directory_service) && event.receipt.registration.start == event.instance.start &&
            event.receipt.process.identity == event.instance.process.process_identity &&
            event.receipt.process.pid == event.instance.process.pid && event.failed <= 1 && event.reserved8[0] == 0 &&
            event.reserved8[1] == 0 && event.reserved8[2] == 0;
@@ -230,9 +231,6 @@ bool DirectorySettlementIsCanonical(const ServiceExitReapRow& row)
     case ServiceExitReapDirectoryDisposition::RefusedTerminal:
         return row.directory_bound == 1 &&
                DirectoryOutcomeIsTerminal(row.directory_status, row.directory_endpoint_status);
-    case ServiceExitReapDirectoryDisposition::Unbound:
-        return row.directory_bound == 0 && row.directory_status == ServiceDirectoryStatus::Ok &&
-               row.directory_endpoint_status == ServiceEndpointStatus::Ok && row.directory_drained_channels == 0;
     }
     return false;
 }
@@ -256,7 +254,7 @@ bool RowIsCanonical(const ServiceExitReapRow& row)
     if (row.stage > ServiceExitReapRowStage::Delivered || row.pump_inflight > 1 || row.directory_bound > 1 ||
         row.reserved8[0] != 0 || row.reserved8[1] != 0 || row.reserved32 != 0 ||
         row.lifecycle_disposition > ServiceExitReapLifecycleDisposition::RefusedTerminal ||
-        row.directory_disposition > ServiceExitReapDirectoryDisposition::Unbound ||
+        row.directory_disposition > ServiceExitReapDirectoryDisposition::RefusedTerminal ||
         row.observer_ack_disposition > ServiceExitReapObserverAckDisposition::Refused ||
         row.lifecycle_status > ServiceLifecycleStatus::Busy ||
         row.directory_status > ServiceDirectoryStatus::HandleRollbackFailed ||
@@ -294,17 +292,8 @@ bool RowIsCanonical(const ServiceExitReapRow& row)
         !EventIsCanonical(row.event) ||
         !(row.directory_owner ==
           ServiceInstanceToken{row.event.instance.start.transition, row.event.instance.process}) ||
-        (row.directory_bound != 0 ? !ServiceKeyIsValid(row.directory_service)
-                                  : !(row.directory_service == kInvalidServiceKey)))
-    {
-        return false;
-    }
-
-    if (row.directory_disposition == ServiceExitReapDirectoryDisposition::Unbound && row.directory_bound != 0)
-        return false;
-    if ((row.directory_disposition == ServiceExitReapDirectoryDisposition::Committed ||
-         row.directory_disposition == ServiceExitReapDirectoryDisposition::SettledAbsent) &&
-        row.directory_bound == 0)
+        row.directory_bound != 1 || !ServiceKeyIsValid(row.directory_service) ||
+        !(row.directory_service == row.event.directory_service))
     {
         return false;
     }
@@ -497,20 +486,12 @@ ServiceExitReapStatus ServiceExitReapLedgerClose(ServiceExitReapLedger* ledger)
 }
 
 ServiceExitReapAcquireResult ServiceExitReapLedgerAcquireFromObserver(ServiceExitReapLedger* ledger,
-                                                                      ServiceExitObserver* observer,
-                                                                      ServiceExitReapDirectoryBinding binding)
+                                                                      ServiceExitObserver* observer)
 {
     ServiceExitReapAcquireResult result{ServiceExitReapStatus::NullArgument, ServiceExitObserverStatus::Ok,
                                         kInvalidServiceExitReapRowTicket};
     if (ledger == nullptr || observer == nullptr)
         return result;
-    if (binding.bound > 1 || (binding.bound == 0 && !(binding.service == kInvalidServiceKey)) ||
-        (binding.bound == 1 && !ServiceKeyIsValid(binding.service)))
-    {
-        result.status = ServiceExitReapStatus::InvalidBinding;
-        return result;
-    }
-
     u32 reserved_row = kServiceExitReapInvalidRow;
     u64 admission = kServiceExitReapInvalidAdmission;
     {
@@ -579,8 +560,8 @@ ServiceExitReapAcquireResult ServiceExitReapLedgerAcquireFromObserver(ServiceExi
     row.admission = admission;
     row.event_sequence = admission;
     row.event = dequeued.event;
-    row.directory_bound = binding.bound;
-    row.directory_service = binding.service;
+    row.directory_bound = 1;
+    row.directory_service = dequeued.event.directory_service;
     // The exact directory owner token is derived from the event's instance
     // token, exactly as ServiceLifecycleBrokerObserveExit derives its
     // transition token; joint publication guarantees the directory row owner
@@ -682,7 +663,6 @@ struct ReapPumpWorkItem
     u32 row;
     u64 admission;
     ServiceExitReapRowStage stage;
-    u8 directory_bound;
     ServiceExitEvent event;
     ServiceKey directory_service;
     ServiceInstanceToken directory_owner;
@@ -704,7 +684,6 @@ bool PumpSelectLocked(ServiceExitReapLedger* ledger, ReapPumpWorkItem* item)
         item->row = index;
         item->admission = row.admission;
         item->stage = row.stage;
-        item->directory_bound = row.directory_bound;
         item->event = row.event;
         item->directory_service = row.directory_service;
         item->directory_owner = row.directory_owner;
@@ -803,22 +782,6 @@ ServiceExitReapPumpResult ServiceExitReapLedgerPump(ServiceExitReapLedger* ledge
                 row.lifecycle_disposition = ServiceExitReapLifecycleDisposition::RefusedTerminal;
                 ++result.lifecycle_refused;
             }
-            row.pump_inflight = 0;
-            continue;
-        }
-
-        if (item.stage == ServiceExitReapRowStage::LifecycleCommitted && item.directory_bound == 0)
-        {
-            sync::SpinLockGuard guard(ledger->lock);
-            ServiceExitReapRow& row = ledger->rows[item.row];
-            if (!PumpWorkItemStillMatches(row, item))
-            {
-                result.status = ServiceExitReapStatus::CorruptState;
-                continue;
-            }
-            row.stage = ServiceExitReapRowStage::DirectoryCommitted;
-            row.directory_disposition = ServiceExitReapDirectoryDisposition::Unbound;
-            ++result.directory_committed;
             row.pump_inflight = 0;
             continue;
         }
@@ -1220,8 +1183,6 @@ const char* ServiceExitReapStatusName(ServiceExitReapStatus status)
         return "ok";
     case ServiceExitReapStatus::NullArgument:
         return "null-argument";
-    case ServiceExitReapStatus::InvalidBinding:
-        return "invalid-binding";
     case ServiceExitReapStatus::InvalidProcessKey:
         return "invalid-process-key";
     case ServiceExitReapStatus::InvalidEventKey:

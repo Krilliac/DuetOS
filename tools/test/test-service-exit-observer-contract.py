@@ -27,6 +27,7 @@ class ServiceExitObserverContract(unittest.TestCase):
             "u32 generation;",
             "ServiceLifecycleStartTicket start;",
             "ProcessKey process;",
+            "ServiceKey directory_service;",
             "ServiceExitObserverSlot slots[kServiceExitObserverCapacity]",
         ):
             self.assertIn(token, HEADER)
@@ -43,12 +44,17 @@ class ServiceExitObserverContract(unittest.TestCase):
         release = body("void ReleaseSlot(", "void ClearObserver(")
         self.assertIn("ServiceExitObserverSlotState::Retired", release)
         self.assertNotIn("slot->generation = 0", release)
+        clear = body("void ClearSlotIdentity(", "void ReleaseSlot(")
+        self.assertIn("slot->directory_service = kInvalidServiceKey", clear)
 
     def test_publication_bind_is_scalar_and_failure_atomic(self) -> None:
         bind = body("ServiceExitObserverStatus ServiceExitObserverBindAtSchedulerPublication(",
                     "ServiceExitObserverStatus ServiceExitObserverAbort(")
         self.assertLess(bind.index("RegistrationMatches"), bind.index("slot.process = process"))
         self.assertLess(bind.index("DuplicateProcess"), bind.index("slot.process = process"))
+        self.assertLess(bind.index("ServiceRegistrationReservationIsValid"),
+                        bind.index("slot.directory_service = directory_registration.service"))
+        self.assertIn("slot.directory_service = directory_registration.service", bind)
         self.assertIn("slot.state = ServiceExitObserverSlotState::Bound", bind)
         for forbidden in ("SchedCreate(", "SchedYield(", "KMalloc(", "KFree(", "KObjectRelease(",
                           "ServiceLifecycleBrokerCommit"):
@@ -76,6 +82,7 @@ class ServiceExitObserverContract(unittest.TestCase):
                        "ServiceExitObserverStatus ServiceExitObserverAcknowledge(")
         self.assertIn("slot.state = ServiceExitObserverSlotState::Delivered", dequeue)
         self.assertIn("ServiceLifecycleInstanceToken{slot.start", dequeue)
+        self.assertIn("slot.directory_service", dequeue)
         acknowledge = body("ServiceExitObserverStatus ServiceExitObserverAcknowledge(",
                            "ServiceExitObserverStatus ServiceExitObserverRequeue(")
         self.assertIn("ServiceExitObserverSlotState::Delivered", acknowledge)
@@ -105,6 +112,8 @@ class ServiceExitObserverContract(unittest.TestCase):
             "constexpr u32 kWorkers = 32",
             "ServiceExitObserverBeginDrain",
             "ServiceExitObserverFinishDrain",
+            "InvalidDirectoryRegistration",
+            "event.event.directory_service",
         ):
             self.assertIn(token, HOST_TEST)
 

@@ -102,8 +102,7 @@ enum class ServiceExitReapRowStage : u8
 };
 
 // Recorded facts about each settlement.  The ledger never fabricates a
-// missing outcome: a refusal keeps the exact peer status, and an unbound
-// directory stage is reported as Unbound rather than as a committed close.
+// missing outcome: a refusal keeps the exact peer status.
 enum class ServiceExitReapLifecycleDisposition : u8
 {
     None = 0,
@@ -120,9 +119,6 @@ enum class ServiceExitReapDirectoryDisposition : u8
     // authoritative teardown settlement for restage.
     SettledAbsent,
     RefusedTerminal,
-    // The acquirer declared no directory binding (explicitly unknown), so
-    // ServiceDirectoryOwnerCrashed was never called for this row.
-    Unbound,
 };
 
 enum class ServiceExitReapObserverAckDisposition : u8
@@ -136,7 +132,6 @@ enum class ServiceExitReapStatus : u8
 {
     Ok = 0,
     NullArgument,
-    InvalidBinding,
     InvalidProcessKey,
     InvalidEventKey,
     AlreadyInitialized,
@@ -213,25 +208,6 @@ inline constexpr bool operator==(ServiceExitReapEventKey lhs, ServiceExitReapEve
     return lhs.broker_epoch == rhs.broker_epoch && lhs.service_identity == rhs.service_identity &&
            lhs.transition_generation == rhs.transition_generation && lhs.process == rhs.process &&
            lhs.event_sequence == rhs.event_sequence;
-}
-
-// Directory binding supplied by the acquirer.  The exit event does not carry
-// the directory ServiceKey (registration authority stays with whoever drove
-// publication), so the caller either supplies the exact key or explicitly
-// declares it unknown.  The ledger never invents a key and never resolves one
-// by name, and an unbound row reports ServiceExitReapDirectoryDisposition::
-// Unbound instead of a fabricated teardown.
-struct ServiceExitReapDirectoryBinding
-{
-    u8 bound;
-    ServiceKey service;
-};
-
-inline constexpr ServiceExitReapDirectoryBinding kServiceExitReapNoDirectoryBinding{0, kInvalidServiceKey};
-
-inline constexpr ServiceExitReapDirectoryBinding ServiceExitReapDirectoryBindingFor(ServiceKey service)
-{
-    return ServiceExitReapDirectoryBinding{1, service};
 }
 
 // One durable reap row.  Public only for fixed-capacity boot-global embedding
@@ -399,14 +375,13 @@ ServiceExitReapStatus ServiceExitReapLedgerClose(ServiceExitReapLedger* ledger);
 
 /// Dequeue exactly one pending observer exit event into a Free row.  A full
 /// ledger refuses with CapacityExhausted BEFORE touching the observer, so the
-/// event stays queued there and nothing is dropped.  The caller supplies the
-/// directory binding (exact ServiceKey or explicitly unbound); the exact
-/// directory owner token is derived from the event's instance token, exactly
-/// as the lifecycle broker derives it.
+/// event stays queued there and nothing is dropped.  The exact directory
+/// ServiceKey is carried by that same observer event; the exact directory
+/// owner token is derived from the event's instance token, exactly as the
+/// lifecycle broker derives it.
 /// [any task/CPU, thread-safe; no ledger lock held across the observer call]
 ServiceExitReapAcquireResult ServiceExitReapLedgerAcquireFromObserver(ServiceExitReapLedger* ledger,
-                                                                      ServiceExitObserver* observer,
-                                                                      ServiceExitReapDirectoryBinding binding);
+                                                                      ServiceExitObserver* observer);
 
 /// Explicit pre-commit rollback: requeue the exact observer receipt and free
 /// the row.  Legal only while the row is Acquired; after the lifecycle commit

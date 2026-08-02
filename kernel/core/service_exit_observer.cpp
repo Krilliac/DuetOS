@@ -57,6 +57,7 @@ void ClearSlotIdentity(ServiceExitObserverSlot* slot)
 {
     slot->start = kInvalidServiceLifecycleStartTicket;
     slot->process = kInvalidProcessKey;
+    slot->directory_service = kInvalidServiceKey;
     slot->exit_code = 0;
     slot->reserved32 = 0;
 }
@@ -79,7 +80,10 @@ void ClearObserver(ServiceExitObserver* observer)
     observer->observer_epoch = kServiceExitObserverInvalidEpoch;
     observer->event_sequence = 0;
     for (u32 index = 0; index < kServiceExitObserverCapacity; ++index)
+    {
         observer->slots[index] = ServiceExitObserverSlot{};
+        ClearSlotIdentity(&observer->slots[index]);
+    }
 }
 
 void PublishSequenceLocked(ServiceExitObserver* observer)
@@ -194,6 +198,7 @@ ServiceExitReservationResult ServiceExitObserverReserve(ServiceExitObserver* obs
     slot.state = ServiceExitObserverSlotState::Reserved;
     slot.start = start;
     slot.process = kInvalidProcessKey;
+    slot.directory_service = kInvalidServiceKey;
     slot.exit_code = 0;
     ++observer->active_count;
     result.status = ServiceExitObserverStatus::Ok;
@@ -201,14 +206,16 @@ ServiceExitReservationResult ServiceExitObserverReserve(ServiceExitObserver* obs
     return result;
 }
 
-ServiceExitObserverStatus ServiceExitObserverBindAtSchedulerPublication(ServiceExitObserver* observer,
-                                                                        ServiceExitRegistration registration,
-                                                                        ProcessKey process)
+ServiceExitObserverStatus ServiceExitObserverBindAtSchedulerPublication(
+    ServiceExitObserver* observer, ServiceExitRegistration registration, ProcessKey process,
+    const ServiceRegistrationReservation& directory_registration)
 {
     if (observer == nullptr)
         return ServiceExitObserverStatus::NullArgument;
     if (!ProcessKeyIsValid(process))
         return ServiceExitObserverStatus::InvalidProcessKey;
+    if (!ServiceRegistrationReservationIsValid(directory_registration))
+        return ServiceExitObserverStatus::InvalidDirectoryRegistration;
     if (!ServiceExitRegistrationIsValid(registration) || registration.slot >= kServiceExitObserverCapacity)
         return ServiceExitObserverStatus::InvalidRegistration;
 
@@ -236,6 +243,7 @@ ServiceExitObserverStatus ServiceExitObserverBindAtSchedulerPublication(ServiceE
     }
 
     slot.process = process;
+    slot.directory_service = directory_registration.service;
     slot.state = ServiceExitObserverSlotState::Bound;
     return ServiceExitObserverStatus::Ok;
 }
@@ -348,6 +356,7 @@ ServiceExitDequeueResult ServiceExitObserverDequeue(ServiceExitObserver* observe
         result.event = ServiceExitEvent{
             receipt,
             ServiceLifecycleInstanceToken{slot.start, ServiceInstanceKey{slot.process.identity, slot.process.pid}},
+            slot.directory_service,
             slot.exit_code,
             static_cast<u8>(slot.exit_code != 0 ? 1 : 0),
             {},
@@ -523,6 +532,8 @@ const char* ServiceExitObserverStatusName(ServiceExitObserverStatus status)
         return "invalid-registration";
     case ServiceExitObserverStatus::InvalidProcessKey:
         return "invalid-process-key";
+    case ServiceExitObserverStatus::InvalidDirectoryRegistration:
+        return "invalid-directory-registration";
     case ServiceExitObserverStatus::DuplicateProcess:
         return "duplicate-process";
     case ServiceExitObserverStatus::ExitAlreadyPublished:

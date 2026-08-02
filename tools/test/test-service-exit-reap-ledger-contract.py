@@ -210,6 +210,23 @@ class ServiceExitReapLedgerContract(unittest.TestCase):
         self.assertLess(acquire.index("CapacityExhausted"), acquire.index("ServiceExitObserverDequeue("))
         self.assertIn("SequenceExhausted", acquire)
 
+    def test_directory_identity_is_carried_by_the_same_observer_event(self) -> None:
+        acquire = body("ServiceExitReapAcquireResult ServiceExitReapLedgerAcquireFromObserver(",
+                       "ServiceExitReapRollbackResult ServiceExitReapLedgerRollbackAcquired(")
+        self.assertIn("row.directory_service = dequeued.event.directory_service", acquire)
+        self.assertIn("row.directory_bound = 1", acquire)
+        self.assertIn("ServiceKeyIsValid(event.directory_service)", SOURCE)
+        self.assertIn("row.directory_service == row.event.directory_service", SOURCE)
+        self.assertNotIn("ServiceExitReapDirectoryBinding", HEADER + SOURCE + HOST_TEST)
+        self.assertNotIn("ServiceExitReapDirectoryDisposition::Unbound", HEADER + SOURCE + HOST_TEST)
+        for token in (
+            "same reservation before it is consumed",
+            "slot is recycled before the reap pump",
+            "replacement.directory_key.generation",
+            "ServiceExitReapDirectoryDisposition::SettledAbsent",
+        ):
+            self.assertIn(token, HOST_TEST)
+
     def test_token_is_reserved_before_observer_ack_and_fails_closed(self) -> None:
         pump = body("ServiceExitReapPumpResult ServiceExitReapLedgerPump(",
                     "ServiceExitReapDeliveryResult ServiceExitReapLedgerDequeueForDelivery(")
