@@ -3274,3 +3274,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Serialized decode-safe 32/64-bit PCI BAR sizing transaction with hostile host contract tests
 - **Claimed**: 2026-08-02T01:04:54Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] net-registry-snapshot-20260801
+- **Session**: `Codex-NetRegistry-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/diag/telemetry.cpp,kernel/net/wireless/inventory.cpp,kernel/drivers/video/netpanel.cpp,kernel/shell/shell_network.cpp,kernel/shell/shell_hardware.cpp,kernel/drivers/net/nic_telemetry.cpp,tests/fuzz/host_shim/net_stubs.cpp,tools/test/test-net-registry-lifecycle-contract.py`
+- **Description**: Lock-protected NIC registry lifecycle with copy-out snapshots and fail-closed restart state
+- **Claimed**: 2026-08-02T01:06:09Z
+- **Status**: IN PROGRESS
