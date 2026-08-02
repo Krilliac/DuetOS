@@ -55,6 +55,7 @@
 #include "time/cyclic.h"
 #include "log/klog.h"
 #include "core/panic.h"
+#include "core/service_runtime.h"
 #include "proc/process.h"
 #include "proc/user_stack.h"
 #include "diag/recovery.h"
@@ -71,6 +72,7 @@
 #include "mm/paging.h"
 #include "sync/spinlock.h"
 #include "time/tick.h"
+#include "time/timekeeper.h"
 #include "util/debug_assert.h"
 #include "util/string.h"
 #include "util/compiler.h"
@@ -6914,6 +6916,96 @@ u64 SchedCountTasksForProcess(const core::Process* process)
 namespace
 {
 
+void WaitQueueBlockCurrentLocked(WaitQueue* wq);
+
+bool DriveServiceRuntimeMaintenance()
+{
+    // Process teardown can leave exact accepted endpoint owners waiting for a
+    // peer operation pin. Drain that bounded directory batch before advancing
+    // exit rows, because exit settlement may close another directory entry.
+    const core::ServiceRuntimeDriveDeferredAcceptedResultV1 deferred =
+        core::ServiceRuntimeDriveDeferredAcceptedKernelV1();
+    if (deferred.runtime_status == core::ServiceRuntimeStatusV1::NotInitialized)
+        return false;
+    if (deferred.runtime_status != core::ServiceRuntimeStatusV1::Ok)
+    {
+        core::PanicWithValue("sched/reaper", "service runtime rejected deferred endpoint maintenance",
+                             static_cast<u64>(deferred.runtime_status));
+    }
+
+    bool retry = false;
+    if (deferred.directory_status == core::ServiceDirectoryStatus::Ok)
+    {
+        if (deferred.pending_channels != 0)
+        {
+            core::PanicWithValue("sched/reaper", "deferred endpoint maintenance lost pending accounting",
+                                 deferred.pending_channels);
+        }
+    }
+    else if (deferred.directory_status == core::ServiceDirectoryStatus::Busy && deferred.pending_channels != 0)
+    {
+        retry = true;
+    }
+    else
+    {
+        const u64 failure =
+            (static_cast<u64>(deferred.directory_status) << 32U) | static_cast<u64>(deferred.endpoint_status);
+        core::PanicWithValue("sched/reaper", "deferred endpoint maintenance failed closed", failure);
+    }
+
+    const core::ServiceRuntimeDriveExitReapResultV1 exit_reap =
+        core::ServiceRuntimeDriveExitReapKernelV1(time::MonotonicNs());
+    if (exit_reap.runtime_status != core::ServiceRuntimeStatusV1::Ok)
+    {
+        core::PanicWithValue("sched/reaper", "service runtime rejected exit-reap maintenance",
+                             static_cast<u64>(exit_reap.runtime_status));
+    }
+
+    if (exit_reap.acquire_status == core::ServiceExitReapStatus::Ok)
+    {
+        if (exit_reap.observer_status != core::ServiceExitObserverStatus::Ok)
+        {
+            core::PanicWithValue("sched/reaper", "exit-reap acquisition returned inconsistent observer status",
+                                 static_cast<u64>(exit_reap.observer_status));
+        }
+        // The fixed acquisition budget was consumed. Poll once more so another
+        // already-pending observer event cannot be stranded behind this one.
+        retry = true;
+    }
+    else if (exit_reap.acquire_status == core::ServiceExitReapStatus::NoEvent)
+    {
+        if (exit_reap.observer_status != core::ServiceExitObserverStatus::NoEvent)
+        {
+            core::PanicWithValue("sched/reaper", "empty exit-reap acquisition lost observer status",
+                                 static_cast<u64>(exit_reap.observer_status));
+        }
+    }
+    else if (exit_reap.acquire_status == core::ServiceExitReapStatus::CapacityExhausted)
+    {
+        if (exit_reap.observer_status != core::ServiceExitObserverStatus::Ok)
+        {
+            core::PanicWithValue("sched/reaper", "full exit-reap ledger returned inconsistent observer status",
+                                 static_cast<u64>(exit_reap.observer_status));
+        }
+        // Capacity can become available only after serviced ACKs a delivery.
+        // No ACK-to-reaper wake exists yet, so retain the conservative timed
+        // retry; ledger occupancy alone must never be used as the predicate.
+        retry = true;
+    }
+    else
+    {
+        const u64 failure =
+            (static_cast<u64>(exit_reap.acquire_status) << 32U) | static_cast<u64>(exit_reap.observer_status);
+        core::PanicWithValue("sched/reaper", "exit-reap acquisition failed closed", failure);
+    }
+
+    if (exit_reap.pump.status != core::ServiceExitReapStatus::Ok)
+    {
+        core::PanicWithValue("sched/reaper", "exit-reap pump failed closed", static_cast<u64>(exit_reap.pump.status));
+    }
+    return retry || exit_reap.pump.rows_pending != 0;
+}
+
 [[noreturn]] void ReaperMain(void*)
 {
     // Opt out of the hung-task detector — the reaper sits in
@@ -6924,6 +7016,12 @@ namespace
     SchedExemptCurrentFromHungTask();
     for (;;)
     {
+        // A task may resume here with IF inherited from the switcher rather
+        // than from its own suspended frame. Reassert ordinary worker context
+        // before calling runtime maintenance or entering a timed wait.
+        arch::Sti();
+        const bool service_runtime_work_pending = DriveServiceRuntimeMaintenance();
+
         // Detach the entire zombie list. `SchedFinishTaskSwitch`
         // adds new zombies under `g_sched_lock` (the SMP-safe
         // deferred-zombie handoff that closes the reaper-frees-
@@ -6942,6 +7040,15 @@ namespace
         sync::IrqFlags lf = sync::SpinLockAcquire(g_sched_lock);
         if (g_zombies == nullptr)
         {
+            if (service_runtime_work_pending)
+            {
+                // Never poll while holding g_sched_lock. One scheduler tick
+                // gives a peer or serviced a fair chance to release the exact
+                // operation pin / delivery capacity that caused backpressure.
+                sync::SpinLockRelease(g_sched_lock, lf);
+                SchedSleepTicks(1);
+                continue;
+            }
             // Predicate check and wait-queue publication are one scheduler
             // transaction. A producer cannot insert+wake between them: it
             // takes this same lock, and ScheduleLockedHandoff keeps it held
@@ -6978,7 +7085,7 @@ namespace
             bool is_current = false;
             ::duetos::u32 current_cpu = 0;
             {
-                sync::IrqFlags lf = sync::SpinLockAcquire(g_sched_lock);
+                sync::IrqFlags verify_flags = sync::SpinLockAcquire(g_sched_lock);
                 on_runq = ForEachRunqueueTask([dead](Task* task) { return task == dead; });
                 const u32 lim = arch::SmpCpuIdLimit();
                 for (u32 i = 0; i < lim; ++i)
@@ -7005,7 +7112,7 @@ namespace
                     dead->user_stack_reservation = mm::AddressSpaceReservationToken{};
                     dead->owns_user_stack_mappings = false;
                 }
-                sync::SpinLockRelease(g_sched_lock, lf);
+                sync::SpinLockRelease(g_sched_lock, verify_flags);
             }
 
             // The zombie handoff promises `dead` is off every runqueue and
