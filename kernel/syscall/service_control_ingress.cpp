@@ -249,8 +249,7 @@ AbiStatus MapPlatformStatus(ServiceControlPlatformStatusV1 status)
 
 bool RequestBaseIsCanonical(const duet_service_control_request_v1& request)
 {
-    return request.struct_size == sizeof(request) && request.flags == 0 && request.reserved[0] == 0 &&
-           request.reserved[1] == 0;
+    return request.struct_size == sizeof(request) && request.flags == 0 && request.reserved[0] == 0;
 }
 
 bool RequestOperationIsKnown(u16 operation)
@@ -266,25 +265,30 @@ bool RequestShapeIsCanonical(const duet_service_control_request_v1& request)
     case DUET_SERVICE_CONTROL_OP_DESCRIBE_SELF:
     case DUET_SERVICE_CONTROL_OP_EXIT_DEQUEUE:
         return request.service_index == 0 && request.broker_epoch == 0 && request.service_identity == 0 &&
-               request.transition_generation == 0 && ProcessIsEmpty(process) && request.operation_token == 0;
+               request.transition_generation == 0 && ProcessIsEmpty(process) && request.operation_token == 0 &&
+               request.event_sequence == 0;
     case DUET_SERVICE_CONTROL_OP_MARK_READY:
         return request.service_index == 0 && request.broker_epoch != 0 && request.service_identity != 0 &&
-               request.transition_generation != 0 && ProcessKeyIsValid(process) && request.operation_token == 0;
+               request.transition_generation != 0 && ProcessKeyIsValid(process) && request.operation_token == 0 &&
+               request.event_sequence == 0;
     case DUET_SERVICE_CONTROL_OP_ENUMERATE:
         return request.service_identity == 0 && request.transition_generation == 0 && ProcessIsEmpty(process) &&
-               request.operation_token == 0;
+               request.operation_token == 0 && request.event_sequence == 0;
     case DUET_SERVICE_CONTROL_OP_ACTIVATE:
         return request.service_index == 0 && request.broker_epoch != 0 && request.service_identity != 0 &&
-               ProcessIsEmpty(process) && request.operation_token == 0;
+               ProcessIsEmpty(process) && request.operation_token == 0 && request.event_sequence == 0;
     case DUET_SERVICE_CONTROL_OP_STOP:
         return request.service_index == 0 && request.broker_epoch != 0 && request.service_identity != 0 &&
-               (ProcessIsEmpty(process) || ProcessKeyIsValid(process)) && request.operation_token == 0;
+               (ProcessIsEmpty(process) || ProcessKeyIsValid(process)) && request.operation_token == 0 &&
+               request.event_sequence == 0;
     case DUET_SERVICE_CONTROL_OP_RESTAGE:
         return request.service_index == 0 && request.broker_epoch != 0 && request.service_identity != 0 &&
-               request.transition_generation != 0 && ProcessKeyIsValid(process) && request.operation_token != 0;
+               request.transition_generation != 0 && ProcessKeyIsValid(process) && request.operation_token == 0 &&
+               request.event_sequence != 0;
     case DUET_SERVICE_CONTROL_OP_EXIT_ACK:
         return request.service_index == 0 && request.broker_epoch != 0 && request.service_identity != 0 &&
-               request.transition_generation != 0 && ProcessKeyIsValid(process) && request.operation_token != 0;
+               request.transition_generation != 0 && ProcessKeyIsValid(process) && request.operation_token != 0 &&
+               request.event_sequence != 0;
     default:
         return false;
     }
@@ -414,7 +418,7 @@ bool RequestMatchesService(const duet_service_control_request_v1& request, const
 ServiceControlPlatformTargetV1 PlatformTarget(const duet_service_control_request_v1& request)
 {
     return ServiceControlPlatformTargetV1{request.broker_epoch, request.service_identity, request.transition_generation,
-                                          RequestProcess(request), request.operation_token};
+                                          RequestProcess(request), request.event_sequence};
 }
 
 AbiStatus RefreshServiceResult(const RuntimeView& runtime, u64 service_identity, duet_service_control_result_v1* result)
@@ -682,16 +686,9 @@ ServiceControlIngressStatus ServiceControlIngressExecute(ServiceControlIngressSt
             platform.exit_ack(platform.context, &runtime.authority, caller->process, PlatformTarget(request_copy),
                               request_copy.operation_token);
         const AbiStatus mapped = MapPlatformStatus(platform_status);
-        result->flags = DUET_SERVICE_CONTROL_RESULT_HAS_SERVICE;
-        result->service_index = current.index;
-        result->service_count = runtime.broker.service_count;
-        result->phase = DUET_SERVICE_CONTROL_PHASE_EXITED;
-        result->broker_epoch = request_copy.broker_epoch;
-        result->service_identity = request_copy.service_identity;
-        result->transition_generation = request_copy.transition_generation;
-        result->process_identity = request_copy.process_identity;
-        result->pid = request_copy.pid;
+        FillServiceResult(runtime, current, result);
         result->operation_token = request_copy.operation_token;
+        result->event_sequence = request_copy.event_sequence;
         SetStatus(result, mapped);
         return ServiceControlIngressStatus::Ok;
     }
