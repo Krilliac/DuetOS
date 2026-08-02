@@ -3322,3 +3322,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Repair structural tests after authorization, scheduler-linearized Job exit, and service-doc wording migrations
 - **Claimed**: 2026-08-02T02:01:20Z
 - **Status**: COMPLETED @ 2026-08-02T02:05:34Z
+
+### [ACTIVE] mt7921-fixedmap-integration-20260802
+- **Session**: `Codex-MT7921Integration-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/drivers/net/mt7921_contract.h,kernel/drivers/net/mt7921_contract.cpp,tests/host/test_mt7921_contract.cpp,tools/test/test-mt7921-contract.py`
+- **Description**: Audit and integrate Fable exact fixed/L1 register mapping and generation-bound planning
+- **Claimed**: 2026-08-02T02:09:09Z
+- **Status**: IN PROGRESS
