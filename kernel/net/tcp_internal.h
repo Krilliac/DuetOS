@@ -40,6 +40,28 @@ inline constexpr u8 kOptTimestamp = 8;
 
 inline constexpr u8 kBucketNone = 0xFF;
 
+class StackInterfacePinGuard
+{
+  public:
+    explicit StackInterfacePinGuard(u32 iface_index) : m_acquired(NetStackAcquireInterface(iface_index, &m_snapshot)) {}
+
+    ~StackInterfacePinGuard()
+    {
+        if (m_acquired)
+            NetStackReleaseInterface(m_snapshot.binding);
+    }
+
+    StackInterfacePinGuard(const StackInterfacePinGuard&) = delete;
+    StackInterfacePinGuard& operator=(const StackInterfacePinGuard&) = delete;
+
+    explicit operator bool() const { return m_acquired; }
+    const NetInterfaceSnapshot& snapshot() const { return m_snapshot; }
+
+  private:
+    NetInterfaceSnapshot m_snapshot{};
+    bool m_acquired;
+};
+
 // One in-flight segment. Allocated as an array on the TCB heap;
 // `len == 0` marks an unused slot.
 //
@@ -76,13 +98,13 @@ struct Tcb
     u8 generation;
     State state;
 
-    u32 iface_index;
+    NetInterfaceBinding interface_binding;
     Ipv4Address local_ip;
     Ipv4Address peer_ip;
     u16 local_port;
     u16 peer_port;
+    MacAddress local_mac;
     MacAddress peer_mac;
-    u8 _pad0[2];
 
     u32 refs;
     bool initializing; // reserved while heap-backed buffers are allocated
@@ -281,7 +303,7 @@ u64 NowTicks();
 u32 MsToTicks(u32 ms);
 bool IpEq(Ipv4Address a, Ipv4Address b);
 bool IpZero(Ipv4Address a);
-u32 BucketHash(u32 iface, Ipv4Address local_ip, u16 local_port, Ipv4Address peer_ip, u16 peer_port);
+u32 BucketHash(NetInterfaceBinding binding, Ipv4Address local_ip, u16 local_port, Ipv4Address peer_ip, u16 peer_port);
 // ML-02 (net-0): RFC 6528 keyed ISN. Returns a coarse-clock component
 // (NowTicks >> 6, ~640ms granularity) plus a secret-keyed hash of the
 // connection 4-tuple. The clock term keeps successive connections on
@@ -294,8 +316,8 @@ bool DecodeId(TcbId id, u32* out_idx);
 Tcb* TcbFromId(TcbId id);
 void BucketInsert(u32 idx);
 void BucketRemove(u32 idx);
-u32 LookupExact(u32 iface, Ipv4Address local_ip, u16 local_port, Ipv4Address peer_ip, u16 peer_port);
-u32 LookupListener(u16 local_port);
+u32 LookupExact(NetInterfaceBinding binding, Ipv4Address local_ip, u16 local_port, Ipv4Address peer_ip, u16 peer_port);
+u32 LookupListener(NetInterfaceBinding binding, u16 local_port);
 u32 AllocSlot();
 u16 AllocEphemeralPort();
 void ResetTcbStorage(Tcb& t);
@@ -339,8 +361,8 @@ void DeliverSegment(u32 idx, const MacAddress& peer_mac, Ipv4Address peer_ip, co
 
 // Send a one-shot RST in response to a segment that didn't match
 // any TCB. Used as the default reject path.
-void SendStandaloneRst(u32 iface_index, const MacAddress& peer_mac, Ipv4Address peer_ip, u16 peer_port, u16 local_port,
-                       u32 peer_seq, u32 peer_ack, u8 peer_flags);
+void SendStandaloneRst(const NetInterfaceSnapshot& interface, const MacAddress& peer_mac, Ipv4Address peer_ip,
+                       u16 peer_port, u16 local_port, u32 peer_seq, u32 peer_ack, u8 peer_flags);
 
 // Selftest hooks — exposed for the boot-time self-test in
 // tcp_selftest.cpp. Production callers go through OnSegment /

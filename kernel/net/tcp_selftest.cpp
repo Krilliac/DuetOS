@@ -67,16 +67,16 @@ bool TestBucketRoundTrip()
     Tcb& t = g_tcbs[3];
     ResetTcbStorage(t);
     t.in_use = true;
-    t.iface_index = 0;
+    t.interface_binding = NetInterfaceBinding{0, 1};
     t.local_ip = {{10, 0, 0, 5}};
     t.peer_ip = {{10, 0, 0, 6}};
     t.local_port = 12345;
     t.peer_port = 80;
     BucketInsert(3);
-    const u32 hit = LookupExact(0, {{10, 0, 0, 5}}, 12345, {{10, 0, 0, 6}}, 80);
+    const u32 hit = LookupExact(t.interface_binding, {{10, 0, 0, 5}}, 12345, {{10, 0, 0, 6}}, 80);
     const bool ok_hit = (hit == 3);
     BucketRemove(3);
-    const u32 miss = LookupExact(0, {{10, 0, 0, 5}}, 12345, {{10, 0, 0, 6}}, 80);
+    const u32 miss = LookupExact(t.interface_binding, {{10, 0, 0, 5}}, 12345, {{10, 0, 0, 6}}, 80);
     t.in_use = false;
     return ok_hit && miss == kTcbCap;
 }
@@ -210,7 +210,7 @@ bool TestSynBacklogAccounting()
     child.in_use = true;
     child.is_listener = false;
     child.state = State::SynRcvd;
-    child.iface_index = 0;
+    child.interface_binding = NetInterfaceBinding{0, 1};
     child.local_ip = {{10, 0, 0, 1}};
     child.peer_ip = {{10, 0, 0, 2}};
     child.local_port = 8080;

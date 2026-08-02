@@ -267,9 +267,10 @@ struct ArpEntry
 {
     Ipv4Address ip;
     MacAddress mac;
-    u64 expiry_ticks; // 0 = slot free
-    u32 iface_index;  // L2 interface the entry belongs to
-    u8 next_idx;      // chain link: index into g_arp_cache, or kArpEntryNone for tail
+    u64 expiry_ticks;       // 0 = slot free
+    u64 binding_generation; // Exact netif generation that learned this mapping.
+    u32 iface_index;        // L2 interface the entry belongs to
+    u8 next_idx;            // chain link: index into g_arp_cache, or kArpEntryNone for tail
     u8 _pad[3];
 };
 
@@ -364,6 +365,49 @@ Ipv4Stats Ipv4StatsRead();
 
 using NetTxFn = bool (*)(u32 iface_index, const void* frame, u64 len);
 
+/// Context-bearing transmit callback for restartable drivers. The stack
+/// retains `driver_context` only while the exact binding receipt is live.
+/// Unbind closes admission and drains every callback pin before clearing
+/// either pointer, so a successful unbind is the driver's lifetime join.
+using NetTxContextFn = bool (*)(void* driver_context, u32 iface_index, const void* frame, u64 len);
+
+/// Exact identity of one publication in an interface slot. Generations never
+/// repeat during a boot; zero is invalid. Drivers must retain this receipt and
+/// present it for RX injection and unbind so delayed work from an old device
+/// incarnation cannot act on a replacement bound at the same index.
+struct NetInterfaceBinding
+{
+    u32 iface_index;
+    u64 generation;
+};
+
+struct NetInterfaceSnapshot
+{
+    NetInterfaceBinding binding;
+    MacAddress mac;
+    Ipv4Address ip;
+};
+
+inline constexpr u32 kInvalidNetInterfaceIndex = ~u32(0);
+inline constexpr NetInterfaceBinding kInvalidNetInterfaceBinding{kInvalidNetInterfaceIndex, 0};
+
+inline constexpr bool NetInterfaceBindingIsValid(NetInterfaceBinding binding)
+{
+    return binding.iface_index != kInvalidNetInterfaceIndex && binding.generation != 0;
+}
+
+inline constexpr bool NetInterfaceBindingEqual(NetInterfaceBinding left, NetInterfaceBinding right)
+{
+    return left.iface_index == right.iface_index && left.generation == right.generation;
+}
+
+enum class NetInterfaceUnbindResult : u8
+{
+    Unbound = 0,   ///< Exact generation is fully drained and reset (also returned for an idempotent retry).
+    StaleBinding,  ///< Receipt is invalid or names a different generation.
+    DrainTimedOut, ///< Admission is closed, but callbacks remain pinned; retain/quarantine driver context.
+};
+
 /// Bind a NIC to the stack. `iface_index` must be < InterfaceCount().
 /// `tx` is the driver's send trampoline. `mac` is the local MAC
 /// (used as Ethernet src on every transmitted frame). `ip` is the
@@ -371,11 +415,51 @@ using NetTxFn = bool (*)(u32 iface_index, const void* frame, u64 len);
 /// false if iface_index is out of range or tx is null.
 bool NetStackBindInterface(u32 iface_index, MacAddress mac, Ipv4Address ip, NetTxFn tx);
 
+/// Publish a restartable NIC binding. `tx` and `driver_context` remain stable
+/// until `NetStackUnbindInterface` returns Unbound. The slot must be vacant;
+/// replacement-in-place is rejected so teardown can never be bypassed.
+/// [ordinary task context; thread-safe]
+bool NetStackBindInterfaceOwned(u32 iface_index, MacAddress mac, Ipv4Address ip, NetTxContextFn tx,
+                                void* driver_context, NetInterfaceBinding* out_binding);
+
+/// Acquire one lifetime pin on the current publication and atomically
+/// snapshot its exact identity and addresses. The caller must release the
+/// returned receipt exactly once with `NetStackReleaseInterface`. This is for
+/// protocol objects that must publish generation-bearing state while driver
+/// teardown is concurrently possible.
+/// [ordinary task or RX task; thread-safe]
+bool NetStackAcquireInterface(u32 iface_index, NetInterfaceSnapshot* out_snapshot);
+
+/// Release a pin returned by `NetStackAcquireInterface`. The exact receipt
+/// cannot become stale while its pin is held; invalid/mismatched receipts are
+/// programming errors.
+void NetStackReleaseInterface(NetInterfaceBinding binding);
+
+/// Transmit only through the exact interface publication named by `binding`.
+/// Delayed protocol work from an old generation fails closed after unbind or
+/// rebind and can never invoke the replacement driver's callback.
+bool NetStackTransmit(NetInterfaceBinding binding, const void* frame, u64 len);
+
+/// Close admission for an exact binding, wait at most `drain_timeout_ticks`
+/// for already-admitted TX/RX operations, retire every TCP TCB owned by that
+/// exact generation, then clear interface/DHCP state. ARP state is generation-
+/// tagged and therefore becomes unreachable at this same join point. On
+/// DrainTimedOut the callback and context are deliberately retained with
+/// admission closed; the owner may retry with the same receipt.
+/// Must not be called from the binding's TX callback or RX dispatch context.
+/// [ordinary task context; thread-safe]
+NetInterfaceUnbindResult NetStackUnbindInterface(NetInterfaceBinding binding, u64 drain_timeout_ticks);
+
 /// Inject a raw ethernet frame received by the NIC. The stack
 /// parses the ethertype and dispatches to ARP or IPv4. Safe to
 /// call from the driver's RX task. No-op when iface_index isn't
 /// bound or no handler matches.
 void NetStackInjectRx(u32 iface_index, const void* frame, u64 len);
+
+/// Generation-checked RX ingress for restartable drivers. A delayed frame
+/// carrying an old receipt is dropped even after the slot has been rebound.
+/// [driver RX task; thread-safe]
+void NetStackInjectRx(NetInterfaceBinding binding, const void* frame, u64 len);
 
 struct IcmpStats
 {
