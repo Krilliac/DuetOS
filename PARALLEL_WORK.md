@@ -3962,3 +3962,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Recover audit harden and publish the orphaned MT7921 contract closure
 - **Claimed**: 2026-08-02T10:43:43Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] host-build-graph-closure-20260802
+- **Session**: `Codex-HostBuildGraph-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tests/host/CMakeLists.txt`
+- **Description**: Register service-control ingress and correct threaded host-test linkage
+- **Claimed**: 2026-08-02T10:48:05Z
+- **Status**: IN PROGRESS
