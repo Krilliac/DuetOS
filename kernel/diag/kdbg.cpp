@@ -124,27 +124,27 @@ const char* ChannelName(DbgChannel ch)
 
 void DbgEnable(u32 mask)
 {
-    g_dbg_mask |= mask;
+    __atomic_fetch_or(&g_dbg_mask, mask, __ATOMIC_ACQ_REL);
 }
 
 void DbgDisable(u32 mask)
 {
-    g_dbg_mask &= ~mask;
+    __atomic_fetch_and(&g_dbg_mask, ~mask, __ATOMIC_ACQ_REL);
 }
 
 void DbgSet(u32 mask)
 {
-    g_dbg_mask = mask;
+    __atomic_store_n(&g_dbg_mask, mask, __ATOMIC_RELEASE);
 }
 
 u32 DbgMask()
 {
-    return g_dbg_mask;
+    return __atomic_load_n(&g_dbg_mask, __ATOMIC_ACQUIRE);
 }
 
 bool DbgIsEnabled(DbgChannel ch)
 {
-    return (g_dbg_mask & static_cast<u32>(ch)) != 0;
+    return (DbgMask() & static_cast<u32>(ch)) != 0;
 }
 
 const char* DbgChannelName(DbgChannel ch)
