@@ -4098,3 +4098,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Recover
 - **Claimed**: 2026-08-02T12:21:47Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] process-lifecycle-callsite-recovery-20260802
+- **Session**: `Codex-ProcessLifecycle-Recovery-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/subsystems/linux/syscall_clone.cpp,kernel/subsystems/linux/syscall_stub.cpp,kernel/subsystems/linux/syscall_rlimit.cpp,userland/libs/kernel32/kernel32_sync.c,tools/build/build-ntdll-dll.sh,userland/apps/jobobj_smoke/jobobj_smoke.c,userland/apps/jobobj_smoke/JOB_RUNTIME_QEMU_TODO.md,wiki/specifications/Syscall-ABI.md,kernel/syscall/syscall.cpp,kernel/subsystems/win32/job_syscall.cpp,kernel/subsystems/linux/pidfd_splice.cpp,kernel/apps/dbg_core.cpp,kernel/diag/leak_detector.cpp,kernel/diag/gdb_monitor.h,kernel/diag/gdb_monitor.cpp,kernel/diag/gdb_monitor_read.cpp,kernel/diag/gdb_server.cpp,kernel/arch/x86_64/smp.cpp,kernel/subsystems/linux/syscall_proc.cpp,kernel/shell/shell_exec.cpp,kernel/subsystems/win32/file_syscall.cpp,userland/libs/ntdll/ntdll_info.c,kernel/subsystems/linux/syscall.h,kernel/subsystems/translation/translate.cpp,kernel/arch/x86_64/traps.cpp`
+- **Description**: Recover
+- **Claimed**: 2026-08-02T12:24:32Z
+- **Status**: IN PROGRESS
