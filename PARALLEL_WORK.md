@@ -3347,10 +3347,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T02:23:08Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] browser-smoke-ci-20260802
+### [DONE] browser-smoke-ci-20260802
 - **Session**: `Codex-BrowserSmokeCI-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/test/test-browser-smoke-profile-contract.py,wiki/reference/Smoke-Test-Suite.md`
 - **Description**: Wire existing browser smoke profile into runner and CI with exact runtime markers and correct docs
 - **Claimed**: 2026-08-02T02:23:54Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T02:26:48Z
