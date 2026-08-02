@@ -3819,13 +3819,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T08:51:13Z
 - **Status**: COMPLETED @ 2026-08-02T09:01:41Z
 
-### [ACTIVE] service-control-platform-adapter-20260802
+### [DONE] service-control-platform-adapter-20260802
 - **Session**: `Codex-ServiceControlPlatform-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/core/service_control_platform.h,kernel/core/service_control_platform.cpp,tests/host/test_service_control_platform.cpp,tools/test/test-service-control-platform-contract.py`
 - **Description**: Typed service-control platform adapter over live activation/lifecycle/restage/exact reap ledger
 - **Claimed**: 2026-08-02T09:00:48Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T09:35:44Z
 
 ### [DONE] elf-load-image-publish-20260802
 - **Session**: `Codex-ELFLoadImagePublish-20260802`
