@@ -3874,3 +3874,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Audit and publish hostile framed execd transport protocol
 - **Claimed**: 2026-08-02T09:56:42Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-live-control-integration-20260802
+- **Session**: `Codex-ServiceLiveControlIntegration-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/service_runtime.h,kernel/core/service_runtime.cpp,kernel/core/service_bootstrap_live.h,kernel/core/service_bootstrap_live.cpp,kernel/core/service_control_platform.cpp,tests/host/test_service_control_platform.cpp,tools/test/test-service-runtime-owner-contract.py,tools/test/test-service-bootstrap-live-contract.py,tools/test/test-service-control-platform-contract.py`
+- **Description**: Embed exact reap ledger authority and install service-control platform after live-state publication
+- **Claimed**: 2026-08-02T10:02:46Z
+- **Status**: IN PROGRESS
