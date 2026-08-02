@@ -1123,13 +1123,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T20:18:14Z
 - **Status**: COMPLETED @ 2026-08-01T03:01:32Z
 
-### [ACTIVE] load-image-staging
+### [DONE] load-image-staging
 - **Session**: `Nathan-1074`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/loader/load_image.h kernel/loader/load_image.cpp tests/host/test_load_image.cpp`
 - **Description**: Loader-private staging package with sealed LoadPlan backing and transactional ownership map
 - **Claimed**: 2026-07-31T20:19:16Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T03:55:58Z
 
 ### [DONE] ipc-message-port
 - **Session**: `Codex-resource-domain`
