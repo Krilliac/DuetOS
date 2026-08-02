@@ -9,7 +9,6 @@
 #include "arch/x86_64/traps.h"
 #include "fs/file_route.h"
 #include "log/klog.h"
-#include "mm/paging.h"
 #include "proc/process.h"
 #include "subsystems/linux/syscall_pipe.h"
 
@@ -113,8 +112,10 @@ void DoWin32CreatePipe(arch::TrapFrame* frame)
         return;
     }
 
-    if (!::duetos::mm::CopyToUser(reinterpret_cast<void*>(user_read), &read_handle, sizeof(read_handle)) ||
-        !::duetos::mm::CopyToUser(reinterpret_cast<void*>(user_write), &write_handle, sizeof(write_handle)))
+    if (::duetos::core::ProcessCopyUserAbiWordTo(proc, reinterpret_cast<void*>(user_read), read_handle) !=
+            ::duetos::core::UserAbiWordStatus::Ok ||
+        ::duetos::core::ProcessCopyUserAbiWordTo(proc, reinterpret_cast<void*>(user_write), write_handle) !=
+            ::duetos::core::UserAbiWordStatus::Ok)
     {
         // Roll back both ends — drop the per-end refcounts so
         // the pool entry's read_refs+write_refs both drop to 0

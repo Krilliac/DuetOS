@@ -118,10 +118,11 @@ __declspec(dllexport) HANDLE __stdcall GetStdHandle(DWORD nStdHandle)
     return (HANDLE)(unsigned)nStdHandle;
 }
 
-/* WriteFile dispatches by handle range, mirroring the 64-bit
- * kernel32:
- *   - kernel file handles (0x100..0x10F, planted by CreateFile* via
- *     SYS_FILE_OPEN / SYS_FILE_CREATE) → SYS_FILE_WRITE, which walks
+/* WriteFile dispatches by handle kind, mirroring the 64-bit kernel32:
+ *   - opaque kernel file handles keep a low tag in 0x100..0x10F and
+ *     carry a non-zero generation in bits 12..30. CreateFile* obtains
+ *     them through SYS_FILE_OPEN / SYS_FILE_CREATE; valid handles route
+ *     to SYS_FILE_WRITE, which walks
  *     the per-handle cursor under the kCapFsWrite gate.
  *   - the three std handles → SYS_WRITE(fd=1).
  *   - anything else → FALSE. No "dump it to stdout anyway" fallback:

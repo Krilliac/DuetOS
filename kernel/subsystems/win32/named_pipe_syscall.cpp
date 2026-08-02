@@ -129,10 +129,9 @@ void DoNamedPipeCreate(arch::TrapFrame* frame)
 
     // Plant the server-end handle. The server keeps ONE end's ref
     // (the matching one from PipeAlloc). The opposite end's ref
-    // stays at 1 as the "registry reservation" — when the client
-    // connects it acquires a fresh ref on top; when the server
-    // closes before a client connects, NamedPipeOnServerClose
-    // drops this orphan ref.
+    // stays at 1 as the "registry reservation." Every client acquires
+    // a fresh ref on top; NamedPipeOnServerClose always drops the
+    // registry-owned ref after removing this exact registration.
     Process::Win32FileHandle candidate{};
     StampPipeHandle(candidate, static_cast<u32>(pool_idx), /*is_write_end=*/server_is_writer,
                     static_cast<i8>(registry_slot), registry_gen);
@@ -171,44 +170,27 @@ void DoNamedPipeOpen(arch::TrapFrame* frame)
         return;
     }
 
-    // Look up + mark connected under the registry lock.
+    // Reserve the destination row before acquiring an opposite-end reference,
+    // so a full table cannot consume a client retain.
+    Process::Win32FileReservation reservation{};
+    if (!::duetos::core::ProcessReserveWin32FileHandle(proc, &reservation))
+    {
+        frame->rax = kBadResult;
+        return;
+    }
+
+    // Lookup and opposite-end retain are one registry transaction. Exact
+    // server close cannot recycle the pool slot between those steps.
     u32 pool_idx = 0;
     bool server_is_writer = false;
     if (!NamedPipeConnectClient(name, &pool_idx, &server_is_writer))
     {
-        frame->rax = kBadResult;
-        return;
-    }
-
-    // Reserve a Win32 file-handle slot before we acquire the
-    // opposite-end refcount so a table-full failure doesn't leak
-    // the bump.
-    Process::Win32FileReservation reservation{};
-    if (!::duetos::core::ProcessReserveWin32FileHandle(proc, &reservation))
-    {
-        // NamedPipeConnectClient already flipped client_connected.
-        // The opposite-end retain below has NOT happened yet, so the
-        // only state to roll back is that flag — leaving it set would
-        // make NamedPipeOnServerClose treat the reservation as
-        // consumed and skip the orphan release, leaking the slot.
-        NamedPipeUnconnectClient(name);
-        frame->rax = kBadResult;
-        return;
-    }
-
-    // Client end is the OPPOSITE of the server's end. Acquire a
-    // fresh refcount on that side so it doesn't drop to zero when
-    // the registry releases its reservation on server close.
-    const bool client_is_writer = !server_is_writer;
-    const bool retained = client_is_writer ? ::duetos::subsystems::linux::internal::PipeRetainWrite(pool_idx)
-                                           : ::duetos::subsystems::linux::internal::PipeRetainRead(pool_idx);
-    if (!retained)
-    {
-        NamedPipeUnconnectClient(name);
         ::duetos::core::ProcessAbortWin32FileHandle(proc, reservation);
         frame->rax = kBadResult;
         return;
     }
+
+    const bool client_is_writer = !server_is_writer;
 
     // The client's handle does NOT touch the registry on close —
     // it's an ordinary pipe-pool end (slot = -1).
@@ -222,7 +204,6 @@ void DoNamedPipeOpen(arch::TrapFrame* frame)
             ::duetos::subsystems::linux::internal::PipeReleaseWrite(pool_idx);
         else
             ::duetos::subsystems::linux::internal::PipeReleaseRead(pool_idx);
-        NamedPipeUnconnectClient(name);
         ::duetos::core::ProcessAbortWin32FileHandle(proc, reservation);
         frame->rax = kBadResult;
         return;
