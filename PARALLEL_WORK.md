@@ -3338,3 +3338,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Link serviced execd displayd production artifacts with their completed policy engines and park safely until authenticated userland endpoint ingress exists
 - **Claimed**: 2026-08-02T02:19:45Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] virtio-net-restart-20260802
+- **Session**: `Codex-VirtioNetRestart-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/drivers/virtio/virtio_net.cpp,kernel/drivers/virtio/virtio_net.h,tests/host/test_virtio_net_restart.cpp,tools/test/test-virtio-net-restart-contract.py`
+- **Description**: Exact-generation virtio-net binding with operation pins worker retirement and fail-closed queue teardown
+- **Claimed**: 2026-08-02T02:23:08Z
+- **Status**: IN PROGRESS
