@@ -3531,13 +3531,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T04:53:17Z
 - **Status**: COMPLETED @ 2026-08-02T05:06:16Z
 
-### [ACTIVE] net-protocol-state-smp-p0-20260802
+### [DONE] net-protocol-state-smp-p0-20260802
 - **Session**: `Nathan-596`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/net/firewall.h,kernel/net/firewall.cpp,kernel/net/ipv6.h,kernel/net/ipv6.cpp`
 - **Description**: IRQ-safe
 - **Claimed**: 2026-08-02T04:58:15Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T05:22:05Z
 
 ### [ACTIVE] net-protocol-state-smp-fixtures-20260802
 - **Session**: `Nathan-1403`
