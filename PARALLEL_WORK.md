@@ -3211,13 +3211,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T23:13:18Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] netd-socket-engine-split-20260801
+### [DONE] netd-socket-engine-split-20260801
 - **Session**: `Codex-NetdSocketEngine-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `userland/native-apps/netd/socket_engine_validate.c,userland/native-apps/netd/socket_engine_lifecycle.c`
 - **Description**: Split netd socket engine invariant validation from close reply and drain lifecycle below bloat thresholds
 - **Claimed**: 2026-08-01T23:26:59Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T10:50:52Z
 
 ### [DONE] displayd-engine-split-20260801
 - **Session**: `Codex-DisplaydEngine-20260801`
