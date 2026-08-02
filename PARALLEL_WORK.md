@@ -3995,13 +3995,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T10:57:54Z
 - **Status**: COMPLETED @ 2026-08-02T11:08:51Z
 
-### [ACTIVE] gui-message-queue-recovery-20260802
+### [DONE] gui-message-queue-recovery-20260802
 - **Session**: `Nathan-1559`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/drivers/video/gui_message_queue.h,kernel/drivers/video/gui_message_queue.cpp,tests/host/test_gui_message_queue.cpp`
 - **Description**: Audit
 - **Claimed**: 2026-08-02T11:07:56Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T11:14:06Z
 
 ### [ACTIVE] service-runtime-reaper-bridge-20260802
 - **Session**: `Codex-ServiceRuntimeReaper-20260802`
