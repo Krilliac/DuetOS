@@ -604,14 +604,16 @@ void CmdRoute(u32 argc, char** argv)
     ConsoleWriteln("");
     if (argc < 2)
         return;
-    const auto* arp = duetos::net::ArpLookup(0, lease.router);
+    duetos::net::ArpEntry arp{};
+    const bool arp_found = duetos::net::ArpLookup(0, lease.router, &arp);
     ConsoleWrite("gateway L2: ");
-    if (arp == nullptr)
+    if (!arp_found)
     {
         ConsoleWriteln("not in ARP cache (peer hasn't replied to ARP yet)");
         return;
     }
-    WriteMac(arp->mac.octets);
+    const duetos::net::MacAddress gateway_mac = arp.mac;
+    WriteMac(gateway_mac.octets);
     ConsoleWriteln("  (ARP cached)");
 }
 
@@ -1265,25 +1267,27 @@ void CmdNet(u32 argc, char** argv)
         ConsoleWriteln("");
 
         ConsoleWrite("NET TEST: gateway ARP ... ");
-        const auto* arp = duetos::net::ArpLookup(0, lease.router);
-        if (arp == nullptr)
+        duetos::net::ArpEntry arp{};
+        bool arp_found = duetos::net::ArpLookup(0, lease.router, &arp);
+        if (!arp_found)
         {
             duetos::net::NetIcmpSendEcho(0, lease.router, 0xBEEF, 1);
             for (u32 i = 0; i < 100; ++i)
             {
                 duetos::sched::SchedSleepTicks(1);
-                arp = duetos::net::ArpLookup(0, lease.router);
-                if (arp != nullptr)
+                arp_found = duetos::net::ArpLookup(0, lease.router, &arp);
+                if (arp_found)
                     break;
             }
         }
-        if (arp == nullptr)
+        if (!arp_found)
         {
             ConsoleWriteln("FAIL (gateway didn't reply to ARP)");
             return;
         }
         ConsoleWrite("OK mac=");
-        WriteMac(arp->mac.octets);
+        const duetos::net::MacAddress gateway_mac = arp.mac;
+        WriteMac(gateway_mac.octets);
         ConsoleWriteln("");
 
         ConsoleWrite("NET TEST: dns ... ");
