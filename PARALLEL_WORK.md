@@ -4026,3 +4026,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Audit
 - **Claimed**: 2026-08-02T11:18:59Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] process-key-foundation-20260802
+- **Session**: `Nathan-793`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/proc/process.h,kernel/proc/process.cpp,tools/test/test-process-key-contract.py`
+- **Description**: Publish
+- **Claimed**: 2026-08-02T11:25:29Z
+- **Status**: IN PROGRESS
