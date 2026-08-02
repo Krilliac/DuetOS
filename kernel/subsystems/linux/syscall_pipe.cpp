@@ -36,6 +36,7 @@
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
+#include "ipc/kfile.h"
 #include "mm/kheap.h"
 #include "mm/paging.h"
 #include "proc/process.h"
@@ -68,6 +69,11 @@ struct Pipe
     u32 head;
     u32 tail;
     u32 count;
+    // Monotonic predicate epochs bridge the pipe lock to scheduler enqueue.
+    // Producers publish the matching epoch before waking the queue; consumers
+    // snapshot it while holding g_pipe_lock and revalidate under g_sched_lock.
+    u64 read_sequence;
+    u64 write_sequence;
     u8* buf; // KMalloc'd kPipeBufBytes
     sched::WaitQueue read_wq;
     sched::WaitQueue write_wq;
@@ -81,6 +87,7 @@ struct Eventfd
     u32 refs;
     u32 pins;
     u64 counter;
+    u64 read_sequence;
     u32 flags; // EFD_SEMAPHORE etc.
     u32 _pad2;
     sched::WaitQueue read_wq;
@@ -90,6 +97,18 @@ Pipe g_pipe_pool[kPipePoolCap];
 Eventfd g_eventfd_pool[kEventfdPoolCap];
 constinit sync::SpinLock g_pipe_lock = {
     .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
+
+u64 WaitSequenceSnapshotLocked(const u64* sequence)
+{
+    return __atomic_load_n(sequence, __ATOMIC_ACQUIRE);
+}
+
+void WaitSequencePublishLocked(u64* sequence)
+{
+    const u64 observed = __atomic_load_n(sequence, __ATOMIC_RELAXED);
+    if (observed != ~u64{0})
+        __atomic_store_n(sequence, observed + 1, __ATOMIC_RELEASE);
+}
 
 // ============================================================
 // Pipe pool helpers
@@ -110,6 +129,8 @@ u8* TakePipeFreeLocked(Pipe& p)
         p.in_use = false;
         p.closing = false;
         p.buf = nullptr;
+        p.read_sequence = 0;
+        p.write_sequence = 0;
         return b;
         // Free outside cli — same rationale as alloc.
     }
@@ -133,7 +154,7 @@ struct PipePin
             return;
         sync::SpinLockGuard guard(g_pipe_lock);
         Pipe& p = g_pipe_pool[value];
-        if (p.in_use && !p.closing)
+        if (p.in_use && !p.closing && p.pins != ~0U)
         {
             ++p.pins;
             pipe = &p;
@@ -167,7 +188,7 @@ struct EventfdPin
             return;
         sync::SpinLockGuard guard(g_pipe_lock);
         Eventfd& e = g_eventfd_pool[value];
-        if (e.in_use && !e.closing)
+        if (e.in_use && !e.closing && e.pins != ~0U)
         {
             ++e.pins;
             eventfd = &e;
@@ -187,6 +208,7 @@ struct EventfdPin
             e.in_use = false;
             e.closing = false;
             e.counter = 0;
+            e.read_sequence = 0;
         }
     }
 
@@ -272,6 +294,8 @@ i32 PipeAlloc()
         p.head = 0;
         p.tail = 0;
         p.count = 0;
+        p.read_sequence = 1;
+        p.write_sequence = 1;
         p.read_wq.head = nullptr;
         p.read_wq.tail = nullptr;
         p.write_wq.head = nullptr;
@@ -350,7 +374,7 @@ bool PipeRetainRead(u32 idx)
         return false;
     sync::SpinLockGuard guard(g_pipe_lock);
     Pipe& p = g_pipe_pool[idx];
-    if (p.in_use && !p.closing)
+    if (p.in_use && !p.closing && p.read_refs != ~0U)
     {
         ++p.read_refs;
         return true;
@@ -364,7 +388,7 @@ bool PipeRetainWrite(u32 idx)
         return false;
     sync::SpinLockGuard guard(g_pipe_lock);
     Pipe& p = g_pipe_pool[idx];
-    if (p.in_use && !p.closing)
+    if (p.in_use && !p.closing && p.write_refs != ~0U)
     {
         ++p.write_refs;
         return true;
@@ -386,6 +410,7 @@ void PipeReleaseRead(u32 idx)
     --p.read_refs;
     if (p.read_refs == 0)
     {
+        WaitSequencePublishLocked(&p.write_sequence);
         sched::WaitQueueWakeAll(&p.write_wq);
         if (p.write_refs == 0)
             p.closing = true;
@@ -409,6 +434,7 @@ void PipeReleaseWrite(u32 idx)
     --p.write_refs;
     if (p.write_refs == 0)
     {
+        WaitSequencePublishLocked(&p.read_sequence);
         sched::WaitQueueWakeAll(&p.read_wq);
         if (p.read_refs == 0)
             p.closing = true;
@@ -418,11 +444,18 @@ void PipeReleaseWrite(u32 idx)
     FinishPipeFree(buf);
 }
 
-void PipeWait(sched::WaitQueue* wq)
+bool PipeWaitCancellable(sched::WaitQueue* wq, const u64* sequence, u64 observed_sequence)
 {
-    arch::Cli();
-    (void)sched::WaitQueueBlockTimeout(wq, /*ticks=*/5);
-    arch::Sti();
+    // A saturated sequence can no longer prove that no producer raced this
+    // wait. Retain bounded polling as a fail-closed fallback: it still exposes
+    // cancellation, but cannot park forever after a lost producer wake.
+    if (observed_sequence == ~u64{0})
+    {
+        return sched::WaitQueueBlockTimeoutCancellable(wq, 1) !=
+               sched::WaitQueueBlockResult::Cancelled;
+    }
+    return sched::WaitQueueBlockIfSequenceUnchangedCancellable(wq, sequence, observed_sequence) !=
+           sched::WaitQueueBlockResult::Cancelled;
 }
 
 i64 PipeRead(u32 idx, u64 user_dst, u64 len)
@@ -450,8 +483,10 @@ i64 PipeRead(u32 idx, u64 user_dst, u64 len)
                 return 0;
             }
             sched::WaitQueue* wq = &p.read_wq;
+            const u64 observed_sequence = WaitSequenceSnapshotLocked(&p.read_sequence);
             sync::SpinLockRelease(g_pipe_lock, flags);
-            PipeWait(wq);
+            if (!PipeWaitCancellable(wq, &p.read_sequence, observed_sequence))
+                return kEINTR;
             continue;
         }
         u64 to_read = (len < p.count) ? len : p.count;
@@ -463,6 +498,7 @@ i64 PipeRead(u32 idx, u64 user_dst, u64 len)
             p.tail = (p.tail + 1) % kPipeBufBytes;
             --p.count;
         }
+        WaitSequencePublishLocked(&p.write_sequence);
         sched::WaitQueueWakeOne(&p.write_wq);
         sync::SpinLockRelease(g_pipe_lock, flags);
         if (!mm::CopyToUser(reinterpret_cast<void*>(user_dst), stage, to_read))
@@ -537,8 +573,10 @@ i64 PipeWrite(u32 idx, u64 user_src, u64 len)
         if (p.count == kPipeBufBytes)
         {
             sched::WaitQueue* wq = &p.write_wq;
+            const u64 observed_sequence = WaitSequenceSnapshotLocked(&p.write_sequence);
             sync::SpinLockRelease(g_pipe_lock, flags);
-            PipeWait(wq);
+            if (!PipeWaitCancellable(wq, &p.write_sequence, observed_sequence))
+                return kEINTR;
             continue;
         }
         const u64 free_slots = kPipeBufBytes - p.count;
@@ -549,6 +587,7 @@ i64 PipeWrite(u32 idx, u64 user_src, u64 len)
             p.head = (p.head + 1) % kPipeBufBytes;
             ++p.count;
         }
+        WaitSequencePublishLocked(&p.read_sequence);
         sched::WaitQueueWakeOne(&p.read_wq);
         sync::SpinLockRelease(g_pipe_lock, flags);
         return static_cast<i64>(to_write);
@@ -620,8 +659,10 @@ i64 PipeReadKernel(u32 idx, u8* dst, u64 len)
                 return 0;
             }
             sched::WaitQueue* wq = &p.read_wq;
+            const u64 observed_sequence = WaitSequenceSnapshotLocked(&p.read_sequence);
             sync::SpinLockRelease(g_pipe_lock, flags);
-            PipeWait(wq);
+            if (!PipeWaitCancellable(wq, &p.read_sequence, observed_sequence))
+                return kEINTR;
             continue;
         }
         const u64 to_read = (len < p.count) ? len : p.count;
@@ -631,6 +672,7 @@ i64 PipeReadKernel(u32 idx, u8* dst, u64 len)
             p.tail = (p.tail + 1) % kPipeBufBytes;
             --p.count;
         }
+        WaitSequencePublishLocked(&p.write_sequence);
         sched::WaitQueueWakeOne(&p.write_wq);
         sync::SpinLockRelease(g_pipe_lock, flags);
         return static_cast<i64>(to_read);
@@ -691,8 +733,10 @@ i64 PipeWriteKernel(u32 idx, const u8* src, u64 len)
         if (p.count == kPipeBufBytes)
         {
             sched::WaitQueue* wq = &p.write_wq;
+            const u64 observed_sequence = WaitSequenceSnapshotLocked(&p.write_sequence);
             sync::SpinLockRelease(g_pipe_lock, flags);
-            PipeWait(wq);
+            if (!PipeWaitCancellable(wq, &p.write_sequence, observed_sequence))
+                return kEINTR;
             continue;
         }
         const u64 free_slots = kPipeBufBytes - p.count;
@@ -703,6 +747,7 @@ i64 PipeWriteKernel(u32 idx, const u8* src, u64 len)
             p.head = (p.head + 1) % kPipeBufBytes;
             ++p.count;
         }
+        WaitSequencePublishLocked(&p.read_sequence);
         sched::WaitQueueWakeOne(&p.read_wq);
         sync::SpinLockRelease(g_pipe_lock, flags);
         return static_cast<i64>(to_write);
@@ -899,8 +944,10 @@ i64 PipeSpliceFromPipe(u32 dst_idx, u32 src_idx, u64 len)
                 return 0;
             }
             sched::WaitQueue* wq = &src.read_wq;
+            const u64 observed_sequence = WaitSequenceSnapshotLocked(&src.read_sequence);
             sync::SpinLockRelease(g_pipe_lock, flags);
-            PipeWait(wq);
+            if (!PipeWaitCancellable(wq, &src.read_sequence, observed_sequence))
+                return kEINTR;
             continue;
         }
         const u64 src_avail = src.count;
@@ -918,6 +965,8 @@ i64 PipeSpliceFromPipe(u32 dst_idx, u32 src_idx, u64 len)
         }
         if (to_move > 0)
         {
+            WaitSequencePublishLocked(&dst.read_sequence);
+            WaitSequencePublishLocked(&src.write_sequence);
             sched::WaitQueueWakeOne(&dst.read_wq);
             sched::WaitQueueWakeOne(&src.write_wq);
         }
@@ -952,8 +1001,10 @@ i64 PipeTeeFromPipe(u32 dst_idx, u32 src_idx, u64 len)
                 return 0;
             }
             sched::WaitQueue* wq = &src.read_wq;
+            const u64 observed_sequence = WaitSequenceSnapshotLocked(&src.read_sequence);
             sync::SpinLockRelease(g_pipe_lock, flags);
-            PipeWait(wq);
+            if (!PipeWaitCancellable(wq, &src.read_sequence, observed_sequence))
+                return kEINTR;
             continue;
         }
         const u64 dst_free = kPipeBufBytes - dst.count;
@@ -969,7 +1020,10 @@ i64 PipeTeeFromPipe(u32 dst_idx, u32 src_idx, u64 len)
             src_cursor = (src_cursor + 1) % kPipeBufBytes;
         }
         if (to_copy > 0)
+        {
+            WaitSequencePublishLocked(&dst.read_sequence);
             sched::WaitQueueWakeOne(&dst.read_wq);
+        }
         sync::SpinLockRelease(g_pipe_lock, flags);
         return static_cast<i64>(to_copy);
     }
@@ -1015,6 +1069,7 @@ i32 EventfdAlloc(u64 initval, u32 flags)
         e.refs = 1;
         e.pins = 0;
         e.counter = initval;
+        e.read_sequence = 1;
         e.flags = flags;
         e.read_wq.head = nullptr;
         e.read_wq.tail = nullptr;
@@ -1176,7 +1231,7 @@ void EventfdRetain(u32 idx)
         return;
     sync::SpinLockGuard guard(g_pipe_lock);
     Eventfd& e = g_eventfd_pool[idx];
-    if (e.in_use && !e.closing)
+    if (e.in_use && !e.closing && e.refs != ~0U)
         ++e.refs;
 }
 
@@ -1192,12 +1247,14 @@ void EventfdRelease(u32 idx)
     if (e.refs == 0)
     {
         e.closing = true;
+        WaitSequencePublishLocked(&e.read_sequence);
         sched::WaitQueueWakeAll(&e.read_wq);
         if (e.pins == 0)
         {
             e.in_use = false;
             e.closing = false;
             e.counter = 0;
+            e.read_sequence = 0;
         }
     }
 }
@@ -1222,8 +1279,10 @@ i64 EventfdRead(u32 idx, u64 user_dst, u64 len)
         if (e.counter == 0)
         {
             sched::WaitQueue* wq = &e.read_wq;
+            const u64 observed_sequence = WaitSequenceSnapshotLocked(&e.read_sequence);
             sync::SpinLockRelease(g_pipe_lock, flags);
-            PipeWait(wq);
+            if (!PipeWaitCancellable(wq, &e.read_sequence, observed_sequence))
+                return kEINTR;
             continue;
         }
         u64 out;
@@ -1289,6 +1348,7 @@ i64 EventfdWrite(u32 idx, u64 user_src, u64 len)
         return kEINVAL;
     const u64 cap = static_cast<u64>(-1) - 1;
     e.counter = (e.counter > cap - in) ? cap : e.counter + in;
+    WaitSequencePublishLocked(&e.read_sequence);
     sched::WaitQueueWakeOne(&e.read_wq);
     return 8;
 }
@@ -1311,82 +1371,91 @@ i64 DoPipe2(u64 user_fds, u64 flags)
     core::Process* p = core::CurrentProcess();
     if (p == nullptr)
         return kEPERM;
-    // Allocate the read end first; reserve the slot by stamping
-    // its state immediately so the second AllocLowest doesn't
-    // hand us back the same fd.
-    const i32 r_fd = core::LinuxFdAllocLowest(p, 3);
-    if (r_fd < 0)
-        return kEMFILE;
-    p->linux_fds[r_fd].state = 3;
-    const i32 w_fd = core::LinuxFdAllocLowest(p, 3);
-    if (w_fd < 0)
-    {
-        p->linux_fds[r_fd].state = 0;
-        return kEMFILE;
-    }
-    p->linux_fds[w_fd].state = 4;
-
     const i32 idx = PipeAlloc();
     if (idx < 0)
-    {
-        p->linux_fds[r_fd].state = 0;
-        p->linux_fds[w_fd].state = 0;
         return kENFILE;
-    }
 
-    p->linux_fds[r_fd].flags = 0;
-    p->linux_fds[r_fd].first_cluster = static_cast<u32>(idx);
-    p->linux_fds[r_fd].size = 0;
-    p->linux_fds[r_fd].offset = 0;
-    p->linux_fds[r_fd].path[0] = '\0';
-    p->linux_fds[w_fd].flags = 0;
-    p->linux_fds[w_fd].first_cluster = static_cast<u32>(idx);
-    p->linux_fds[w_fd].size = 0;
-    p->linux_fds[w_fd].offset = 0;
-    p->linux_fds[w_fd].path[0] = '\0';
-
-    // Attach KFile sidecars so close / dup / fork all route the
-    // per-pool release through KObject refcounting. The initial
-    // pool refs (read_refs=1, write_refs=1 from PipeAlloc) are
-    // handed off to the two KFile destroy callbacks; no explicit
-    // Retain at the syscall site.
-    if (!core::LinuxFdAttachKFile(p, static_cast<u32>(r_fd), /*kind=*/3, static_cast<u32>(idx), &PipeReleaseRead))
+    auto read_file_result = ::duetos::ipc::KFileCreate(::duetos::ipc::KFileKind::PipeRead, static_cast<u32>(idx),
+                                                       &PipeReleaseRead, nullptr, 0);
+    if (!read_file_result.has_value())
     {
-        p->linux_fds[r_fd].state = 0;
-        p->linux_fds[w_fd].state = 0;
         PipeReleaseRead(static_cast<u32>(idx));
         PipeReleaseWrite(static_cast<u32>(idx));
         return kENOMEM;
     }
-    if (!core::LinuxFdAttachKFile(p, static_cast<u32>(w_fd), /*kind=*/4, static_cast<u32>(idx), &PipeReleaseWrite))
+    auto write_file_result = ::duetos::ipc::KFileCreate(::duetos::ipc::KFileKind::PipeWrite, static_cast<u32>(idx),
+                                                        &PipeReleaseWrite, nullptr, 0);
+    if (!write_file_result.has_value())
     {
-        // r_fd's KFile sidecar will release its read ref via
-        // LinuxFdClose. The write end's pool ref needs an explicit
-        // release here (no KFile attached on w_fd).
-        core::LinuxFdClose(p, static_cast<u32>(r_fd));
-        p->linux_fds[w_fd].state = 0;
+        ::duetos::ipc::KObjectRelease(&read_file_result.value()->base);
         PipeReleaseWrite(static_cast<u32>(idx));
         return kENOMEM;
     }
 
+    core::Process::LinuxFd read_payload{};
+    read_payload.state = 3;
+    read_payload.first_cluster = static_cast<u32>(idx);
+    core::Process::LinuxFd write_payload{};
+    write_payload.state = 4;
+    write_payload.first_cluster = static_cast<u32>(idx);
     if ((flags & kO_CLOEXEC) != 0)
     {
-        core::LinuxFdSetCloexec(p, static_cast<u32>(r_fd), true);
-        core::LinuxFdSetCloexec(p, static_cast<u32>(w_fd), true);
+        read_payload.flags = core::Process::kLinuxFdFlagCloexec;
+        write_payload.flags = core::Process::kLinuxFdFlagCloexec;
     }
 
+    core::LinuxFdPrepared read_prepared{};
+    core::LinuxFdPrepared write_prepared{};
+    constexpr u32 kO_RDONLY = 0;
+    constexpr u32 kO_WRONLY = 1;
+    const u32 pipe_status_flags = static_cast<u32>(flags & kO_NONBLOCK);
+    if (!core::LinuxFdPrepare(&read_prepared, read_payload, &read_file_result.value()->base,
+                              kO_RDONLY | pipe_status_flags))
+    {
+        ::duetos::ipc::KObjectRelease(&read_file_result.value()->base);
+        ::duetos::ipc::KObjectRelease(&write_file_result.value()->base);
+        return kENFILE;
+    }
+    if (!core::LinuxFdPrepare(&write_prepared, write_payload, &write_file_result.value()->base,
+                              kO_WRONLY | pipe_status_flags))
+    {
+        core::LinuxFdPreparedRelease(&read_prepared);
+        ::duetos::ipc::KObjectRelease(&write_file_result.value()->base);
+        return kENFILE;
+    }
+
+    u32 r_fd = 0;
+    u32 w_fd = 0;
+    core::LinuxFdAcquired read_acquired{};
+    core::LinuxFdAcquired write_acquired{};
+    if (!core::LinuxFdBindPairLowest(p, 3, &read_prepared, &write_prepared, &r_fd, &w_fd, &read_acquired,
+                                     &write_acquired))
+    {
+        core::LinuxFdPreparedRelease(&read_prepared);
+        core::LinuxFdPreparedRelease(&write_prepared);
+        return kEMFILE;
+    }
+
+    // The acquired outputs pin both exact published identities across the
+    // user copy, making an EFAULT rollback generation-safe under close/reuse.
     u32 fds[2];
-    fds[0] = static_cast<u32>(r_fd);
-    fds[1] = static_cast<u32>(w_fd);
+    fds[0] = r_fd;
+    fds[1] = w_fd;
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_fds), fds, sizeof(fds)))
     {
-        // User pointer bad — both KFile sidecars get their refs
-        // dropped via LinuxFdClose, which in turn fires the per-
-        // pool release callback (drops read_refs / write_refs).
-        core::LinuxFdClose(p, static_cast<u32>(r_fd));
-        core::LinuxFdClose(p, static_cast<u32>(w_fd));
+        core::LinuxFdDetached read_detached{};
+        core::LinuxFdDetached write_detached{};
+        if (core::LinuxFdUnbindAcquired(p, r_fd, &read_acquired, &read_detached))
+            core::LinuxFdDetachedRelease(&read_detached);
+        if (core::LinuxFdUnbindAcquired(p, w_fd, &write_acquired, &write_detached))
+            core::LinuxFdDetachedRelease(&write_detached);
+        core::LinuxFdAcquiredRelease(&read_acquired);
+        core::LinuxFdAcquiredRelease(&write_acquired);
         return kEFAULT;
     }
+
+    core::LinuxFdAcquiredRelease(&read_acquired);
+    core::LinuxFdAcquiredRelease(&write_acquired);
 
     arch::SerialWrite("[linux/pipe] r_fd=");
     arch::SerialWriteHex(r_fd);
@@ -1413,29 +1482,35 @@ i64 DoEventfd2(u64 initval, u64 flags)
     core::Process* p = core::CurrentProcess();
     if (p == nullptr)
         return kEPERM;
-    const i32 fd = core::LinuxFdAllocLowest(p, 3);
-    if (fd < 0)
-        return kEMFILE;
-    p->linux_fds[fd].state = 5; // reserve so AttachKFile can't trip the slot
     const i32 idx = EventfdAlloc(initval, static_cast<u32>(flags));
     if (idx < 0)
-    {
-        p->linux_fds[fd].state = 0;
         return kENFILE;
-    }
-    p->linux_fds[fd].flags = 0;
-    p->linux_fds[fd].first_cluster = static_cast<u32>(idx);
-    p->linux_fds[fd].size = 0;
-    p->linux_fds[fd].offset = 0;
-    p->linux_fds[fd].path[0] = '\0';
-    if (!core::LinuxFdAttachKFile(p, static_cast<u32>(fd), /*kind=*/5, static_cast<u32>(idx), &EventfdRelease))
+
+    auto kfile_result = ::duetos::ipc::KFileCreate(::duetos::ipc::KFileKind::Eventfd, static_cast<u32>(idx),
+                                                   &EventfdRelease, nullptr, 0);
+    if (!kfile_result.has_value())
     {
-        p->linux_fds[fd].state = 0;
         EventfdRelease(static_cast<u32>(idx));
         return kENOMEM;
     }
-    if ((flags & kEFD_CLOEXEC) != 0)
-        core::LinuxFdSetCloexec(p, static_cast<u32>(fd), true);
+
+    core::Process::LinuxFd payload{};
+    payload.state = 5;
+    payload.first_cluster = static_cast<u32>(idx);
+    core::LinuxFdPrepared prepared{};
+    constexpr u32 kO_RDWR = 2;
+    const u32 eventfd_status_flags = kO_RDWR | static_cast<u32>(flags & kEFD_NONBLOCK);
+    if (!core::LinuxFdPrepare(&prepared, payload, &kfile_result.value()->base, eventfd_status_flags))
+    {
+        ::duetos::ipc::KObjectRelease(&kfile_result.value()->base);
+        return kENFILE;
+    }
+    const i32 fd = core::LinuxFdBindLowest(p, 3, &prepared, (flags & kEFD_CLOEXEC) != 0);
+    if (fd < 0)
+    {
+        core::LinuxFdPreparedRelease(&prepared);
+        return kEMFILE;
+    }
     arch::SerialWrite("[linux/eventfd] fd=");
     arch::SerialWriteHex(fd);
     arch::SerialWrite(" pool_idx=");

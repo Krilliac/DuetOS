@@ -17,7 +17,6 @@
 #include "subsystems/linux/syscall_internal.h"
 #include "subsystems/linux/signal_deliver.h"
 
-#include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
 #include "proc/process.h"
 #include "mm/address_space.h"
@@ -112,10 +111,12 @@ i64 LinuxSignalDeliver(core::Process* target, u32 signum)
         // before it reaches the bitmap."
         return 0;
     }
-    arch::Cli();
-    target->linux_pending_signals |= (1ULL << signum);
-    sched::WaitQueueWakeAll(&target->linux_signal_wq);
-    arch::Sti();
+    // Pending publication is an SMP atomic operation. Disabling interrupts on
+    // the calling CPU cannot serialize a producer running on another CPU, and
+    // signalfd is an independent consumer. The Process helper also preserves
+    // the caller's interrupt state while waking readers.
+    if (!core::ProcessLinuxSignalRaisePending(target, signum))
+        return kEINVAL;
     arch::SerialWrite("[linux/signal] deliver pid=");
     arch::SerialWriteHex(target->pid);
     arch::SerialWrite(" sig=");
@@ -237,7 +238,7 @@ i64 DoRtSigprocmask(u64 how, u64 user_set, u64 user_oldset, u64 sigsetsize)
         // briefly.
         constexpr u32 kSIGKILL = 9;
         constexpr u32 kSIGSTOP = 19;
-        constexpr u64 kUnblockable = (1ULL << kSIGKILL) | (1ULL << kSIGSTOP);
+        constexpr u64 kUnblockable = core::ProcessLinuxSignalBit(kSIGKILL) | core::ProcessLinuxSignalBit(kSIGSTOP);
         set &= ~kUnblockable;
         switch (how)
         {
@@ -284,7 +285,7 @@ i64 DoRtSigreturn(arch::TrapFrame* frame)
     if (!LinuxSignalRestoreFrame(frame))
     {
         arch::SerialWrite("[linux] rt_sigreturn on task without saved frame — exiting\n");
-        sched::SchedExit();
+        sched::SchedRequestCurrentExit(sched::KillReason::ProtocolViolation);
         return 0;
     }
     // The dispatcher will write rv into frame->rax; we already
@@ -304,7 +305,7 @@ i64 DoRtSigpending(u64 user_set, u64 sigsetsize)
     if (user_set == 0)
         return kEFAULT;
     core::Process* p = core::CurrentProcess();
-    const u64 pending = (p != nullptr) ? p->linux_pending_signals : 0;
+    const u64 pending = core::ProcessLinuxSignalPendingSnapshot(p);
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_set), &pending, sizeof(pending)))
         return kEFAULT;
     return 0;

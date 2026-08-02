@@ -8,8 +8,8 @@
  *     message has a `mtype` prefix (long; positive). Receivers can
  *     filter by mtype: 0 = any; > 0 = exact match; < 0 = any
  *     mtype <= |mtype|. New LinuxFd state NOT used; SysV msg
- *     queues use msqid (= pool_idx + 1) directly as the descriptor,
- *     not a per-process fd.
+ *     queues use a positive generation-bearing public ID directly, not a
+ *     per-process fd. The ID names the family, slot, and exact incarnation.
  *
  *   POSIX MQ — keyed by name string ("/foo"). Each message has an
  *     unsigned priority (0..max); receivers see the highest-priority
@@ -23,6 +23,8 @@
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
+#include "core/panic.h"
+#include "ipc/kfile.h"
 #include "mm/kheap.h"
 #include "mm/paging.h"
 #include "proc/process.h"
@@ -42,12 +44,14 @@ constexpr u32 kPosixMqPoolCap = 8;
 constexpr u32 kMqMsgsPerQueue = 16;
 constexpr u32 kMqMaxMsgBytes = 1024;
 constexpr u32 kPosixMqNameCap = 64;
+static_assert(kSysvMqPoolCap == kSysvIpcIdPoolCapacity);
 
 constexpr u64 kIpcCreat = 0x200;
 constexpr u64 kIpcExcl = 0x400;
 constexpr u64 kIpcNowait = 0x800;
 constexpr u64 kIpcRmid = 0;
 constexpr u64 kIpcStat = 2;
+constexpr i64 kSysvMqAllocBusy = -2;
 
 // SysV message: long mtype prefix + payload bytes.
 struct SysvMsg
@@ -65,6 +69,8 @@ struct SysvMq
     bool initializing;
     bool closing;
     u32 pins;
+    u64 incarnation;
+    u64 wait_sequence;
     i32 key;
     u32 head;
     u32 tail;
@@ -91,6 +97,7 @@ struct PosixMq
     u8 _pad;
     u32 refs;
     u32 pins;
+    u64 wait_sequence;
     char name[kPosixMqNameCap];
     u32 max_msgs; // current ring cap
     u32 max_msg_bytes;
@@ -107,6 +114,38 @@ constinit sync::SpinLock g_sysv_lock = {
     .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
 constinit sync::SpinLock g_posix_lock = {
     .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
+
+// Predicate epochs live in the static pool slots and are deliberately never
+// reset. Producers serialize through the owning subsystem lock, publish with
+// release ordering, and then wake. Once saturated, callers fall back to a
+// one-tick cancellable retry rather than risking a permanently lost wake.
+void WaitSequencePublishLocked(u64* sequence)
+{
+    const u64 observed = __atomic_load_n(sequence, __ATOMIC_RELAXED);
+    if (observed != ~u64{0})
+        __atomic_store_n(sequence, observed + 1, __ATOMIC_RELEASE);
+}
+
+u64 WaitSequenceSnapshotLocked(const u64* sequence)
+{
+    return __atomic_load_n(sequence, __ATOMIC_ACQUIRE);
+}
+
+bool WaitForSequenceChangeCancellable(sched::WaitQueue* wq, const u64* sequence, u64 observed_sequence)
+{
+    const sched::WaitQueueBlockResult result =
+        observed_sequence == ~u64{0}
+            ? sched::WaitQueueBlockIfSequenceUnchangedTimeoutCancellable(wq, sequence, observed_sequence, 1)
+            : sched::WaitQueueBlockIfSequenceUnchangedCancellable(wq, sequence, observed_sequence);
+    return result != sched::WaitQueueBlockResult::Cancelled;
+}
+
+struct LinuxFdAcquiredGuard
+{
+    core::LinuxFdAcquired* acquired;
+
+    ~LinuxFdAcquiredGuard() { core::LinuxFdAcquiredRelease(acquired); }
+};
 
 struct PosixMqPin
 {
@@ -196,26 +235,47 @@ struct SysvMqPin
 // SysV MQ helpers
 // =========================================================
 
-i32 SysvMqFindByKey(i32 key)
+i64 SysvMqFindByKey(i32 key)
 {
     if (key == 0)
         return -1;
     sync::SpinLockGuard guard(g_sysv_lock);
     for (u32 i = 0; i < kSysvMqPoolCap; ++i)
-        if (g_sysv_pool[i].in_use && !g_sysv_pool[i].initializing && !g_sysv_pool[i].marked_destroy &&
-            g_sysv_pool[i].key == key)
-            return static_cast<i32>(i);
+    {
+        const SysvMq& q = g_sysv_pool[i];
+        if (!q.in_use || q.marked_destroy || q.key != key)
+            continue;
+        if (q.initializing)
+            return kSysvMqAllocBusy;
+        return SysvIpcEncodeId(SysvIpcIdFamily::MessageQueue, i, q.incarnation);
+    }
     return -1;
 }
 
-i32 SysvMqAlloc(i32 key)
+i64 SysvMqAlloc(i32 key)
 {
     auto flags = sync::SpinLockAcquire(g_sysv_lock);
+    if (key != 0)
+    {
+        // Close the lookup/reservation race in DoMsgget. Initializing rows are
+        // deliberately visible here so two IPC_CREAT callers cannot publish
+        // distinct queues for the same key.
+        for (u32 i = 0; i < kSysvMqPoolCap; ++i)
+        {
+            const SysvMq& q = g_sysv_pool[i];
+            if (q.in_use && !q.marked_destroy && q.key == key)
+            {
+                sync::SpinLockRelease(g_sysv_lock, flags);
+                return kSysvMqAllocBusy;
+            }
+        }
+    }
     for (u32 i = 0; i < kSysvMqPoolCap; ++i)
     {
-        if (g_sysv_pool[i].in_use || g_sysv_pool[i].closing)
+        if (g_sysv_pool[i].in_use || g_sysv_pool[i].closing || g_sysv_pool[i].incarnation >= kSysvIpcIdGenerationMax)
             continue;
         SysvMq& q = g_sysv_pool[i];
+        ++q.incarnation;
         q.in_use = true;
         q.initializing = true;
         q.marked_destroy = false;
@@ -225,11 +285,12 @@ i32 SysvMqAlloc(i32 key)
         q.head = 0;
         q.tail = 0;
         q.count = 0;
-        q.read_wq.head = nullptr;
-        q.read_wq.tail = nullptr;
-        q.write_wq.head = nullptr;
-        q.write_wq.tail = nullptr;
+        // The embedded wait queues are static-slot state, just like the
+        // nonwrapping sequence. Do not reset their intrusive links on reuse:
+        // at sequence saturation, an old-incarnation waiter may still be in
+        // its bounded one-tick enqueue window after RMID's wake-all.
         q.ring = nullptr;
+        WaitSequencePublishLocked(&q.wait_sequence);
         sync::SpinLockRelease(g_sysv_lock, flags);
         q.ring = static_cast<SysvMsg*>(mm::KMalloc(sizeof(SysvMsg) * kMqMsgsPerQueue));
         if (q.ring == nullptr)
@@ -237,13 +298,17 @@ i32 SysvMqAlloc(i32 key)
             flags = sync::SpinLockAcquire(g_sysv_lock);
             q.in_use = false;
             q.initializing = false;
+            WaitSequencePublishLocked(&q.wait_sequence);
             sync::SpinLockRelease(g_sysv_lock, flags);
             return -1;
         }
         flags = sync::SpinLockAcquire(g_sysv_lock);
         q.initializing = false;
+        WaitSequencePublishLocked(&q.wait_sequence);
+        const u32 id = SysvIpcEncodeId(SysvIpcIdFamily::MessageQueue, i, q.incarnation);
+        KASSERT(id != 0, "linux/sysvmq", "published queue has unencodable id");
         sync::SpinLockRelease(g_sysv_lock, flags);
-        return static_cast<i32>(i);
+        return id;
     }
     sync::SpinLockRelease(g_sysv_lock, flags);
     return -1;
@@ -298,37 +363,71 @@ i64 DoMsgget(u64 key, u64 msgflg)
     const i32 ikey = static_cast<i32>(key);
     const bool create = (msgflg & kIpcCreat) != 0;
     const bool excl = (msgflg & kIpcExcl) != 0;
-    if (ikey != 0)
+    // A concurrent creator leaves a short-lived initializing row. Both lookup
+    // and allocation report that reservation under g_sysv_lock; yield until
+    // its synchronous allocator publishes or rolls back so callers never see
+    // a non-Linux EAGAIN or create a duplicate queue for the same key.
+    while (true)
     {
-        const i32 existing = SysvMqFindByKey(ikey);
-        if (existing >= 0)
+        if (ikey != 0)
         {
-            if (create && excl)
-                return -17; // -EEXIST
-            return existing + 1;
+            const i64 existing = SysvMqFindByKey(ikey);
+            if (existing == kSysvMqAllocBusy)
+            {
+                sched::SchedYield();
+                continue;
+            }
+            if (existing >= 0)
+            {
+                if (create && excl)
+                    return -17; // -EEXIST
+                return existing;
+            }
+            if (!create)
+                return -2; // -ENOENT
         }
-        if (!create)
-            return -2; // -ENOENT
+
+        const i64 id = SysvMqAlloc(ikey);
+        if (id == kSysvMqAllocBusy)
+        {
+            sched::SchedYield();
+            continue;
+        }
+        if (id < 0)
+            return -28; // -ENOSPC
+        arch::SerialWrite("[linux/sysvmq] alloc id=");
+        arch::SerialWriteHex(static_cast<u64>(id));
+        arch::SerialWrite(" key=");
+        arch::SerialWriteHex(static_cast<u64>(ikey));
+        arch::SerialWrite("\n");
+        return id;
     }
-    const i32 idx = SysvMqAlloc(ikey);
-    if (idx < 0)
-        return -28; // -ENOSPC
-    arch::SerialWrite("[linux/sysvmq] alloc idx=");
-    arch::SerialWriteHex(static_cast<u64>(idx));
-    arch::SerialWrite(" key=");
-    arch::SerialWriteHex(static_cast<u64>(ikey));
-    arch::SerialWrite("\n");
-    return idx + 1;
 }
 
 i64 DoMsgsnd(u64 msqid, u64 user_msg, u64 msgsz, u64 msgflg)
 {
-    if (msqid == 0 || msqid > kSysvMqPoolCap)
+    SysvIpcDecodedId decoded{};
+    if (!SysvIpcDecodeId(msqid, SysvIpcIdFamily::MessageQueue, &decoded))
         return -22; // -EINVAL
     if (msgsz > kMqMaxMsgBytes)
         return -22;
-    const u32 idx = static_cast<u32>(msqid - 1);
+    const u32 idx = decoded.index;
     const bool nowait = (msgflg & kIpcNowait) != 0;
+
+    // Bind this in-flight operation to the generation carried by the public id
+    // before touching user memory. RMID + reuse during CopyFromUser must report
+    // EIDRM rather than redirecting the send to the replacement queue.
+    SysvMq& q = g_sysv_pool[idx];
+    const u64 expected_incarnation = decoded.generation;
+    {
+        auto lock_flags = sync::SpinLockAcquire(g_sysv_lock);
+        if (!q.in_use || q.initializing || q.marked_destroy || q.closing || q.incarnation != expected_incarnation)
+        {
+            sync::SpinLockRelease(g_sysv_lock, lock_flags);
+            return -22;
+        }
+        sync::SpinLockRelease(g_sysv_lock, lock_flags);
+    }
 
     // First 8 bytes of user_msg are the mtype (long).
     i64 mtype = 0;
@@ -336,35 +435,6 @@ i64 DoMsgsnd(u64 msqid, u64 user_msg, u64 msgsz, u64 msgflg)
         return -14; // -EFAULT
     if (mtype <= 0)
         return -22;
-    SysvMqPin pin(idx);
-    if (!pin)
-        return -22;
-    SysvMq& q = *pin.queue;
-    while (true)
-    {
-        auto lock_flags = sync::SpinLockAcquire(g_sysv_lock);
-        if (!q.in_use || q.marked_destroy || q.closing)
-        {
-            sync::SpinLockRelease(g_sysv_lock, lock_flags);
-            return -22;
-        }
-        if (q.count != kMqMsgsPerQueue)
-        {
-            sync::SpinLockRelease(g_sysv_lock, lock_flags);
-            break;
-        }
-        if (nowait)
-        {
-            sync::SpinLockRelease(g_sysv_lock, lock_flags);
-            return -11; // -EAGAIN
-        }
-        sched::WaitQueue* wq = &q.write_wq;
-        sync::SpinLockRelease(g_sysv_lock, lock_flags);
-        arch::Cli();
-        (void)sched::WaitQueueBlockTimeout(wq, 5);
-        arch::Sti();
-    }
-    // Stage outside Cli/Sti.
     SysvMsg stage;
     stage.mtype = mtype;
     stage.len = static_cast<u32>(msgsz);
@@ -373,48 +443,85 @@ i64 DoMsgsnd(u64 msqid, u64 user_msg, u64 msgsz, u64 msgflg)
         if (!mm::CopyFromUser(stage.body, reinterpret_cast<const void*>(user_msg + sizeof(i64)), msgsz))
             return -14;
     }
-    auto lock_flags = sync::SpinLockAcquire(g_sysv_lock);
-    if (!q.in_use || q.marked_destroy || q.closing)
+
+    while (true)
     {
+        auto lock_flags = sync::SpinLockAcquire(g_sysv_lock);
+        if (!q.in_use || q.marked_destroy || q.closing || q.incarnation != expected_incarnation)
+        {
+            sync::SpinLockRelease(g_sysv_lock, lock_flags);
+            return kEIDRM;
+        }
+        if (q.count != kMqMsgsPerQueue)
+        {
+            q.ring[q.head] = stage;
+            q.head = (q.head + 1) % kMqMsgsPerQueue;
+            ++q.count;
+            WaitSequencePublishLocked(&q.wait_sequence);
+            // Receivers have heterogeneous mtype predicates. Waking only the
+            // FIFO head can strand the matching receiver indefinitely now
+            // that the old periodic poll is gone.
+            sched::WaitQueueWakeAll(&q.read_wq);
+            sync::SpinLockRelease(g_sysv_lock, lock_flags);
+            return 0;
+        }
+        if (nowait)
+        {
+            sync::SpinLockRelease(g_sysv_lock, lock_flags);
+            return -11; // -EAGAIN
+        }
+        sched::WaitQueue* wq = &q.write_wq;
+        const u64 observed_sequence = WaitSequenceSnapshotLocked(&q.wait_sequence);
         sync::SpinLockRelease(g_sysv_lock, lock_flags);
-        return -22;
+        if (!WaitForSequenceChangeCancellable(wq, &q.wait_sequence, observed_sequence))
+        {
+            // RMID wins over cancellation when both became visible while the
+            // operation was blocked, matching Linux's EIDRM precedence.
+            lock_flags = sync::SpinLockAcquire(g_sysv_lock);
+            const bool removed = !q.in_use || q.marked_destroy || q.closing || q.incarnation != expected_incarnation;
+            sync::SpinLockRelease(g_sysv_lock, lock_flags);
+            return removed ? kEIDRM : kEINTR;
+        }
     }
-    q.ring[q.head] = stage;
-    q.head = (q.head + 1) % kMqMsgsPerQueue;
-    ++q.count;
-    sched::WaitQueueWakeOne(&q.read_wq);
-    sync::SpinLockRelease(g_sysv_lock, lock_flags);
-    return 0;
 }
 
 i64 DoMsgrcv(u64 msqid, u64 user_msg, u64 msgsz, u64 mtype_filter, u64 msgflg)
 {
-    if (msqid == 0 || msqid > kSysvMqPoolCap)
+    SysvIpcDecodedId decoded{};
+    if (!SysvIpcDecodeId(msqid, SysvIpcIdFamily::MessageQueue, &decoded))
         return -22;
     if (msgsz > kMqMaxMsgBytes)
         return -22;
-    const u32 idx = static_cast<u32>(msqid - 1);
+    const u32 idx = decoded.index;
     const bool nowait = (msgflg & kIpcNowait) != 0;
     const i64 filter = static_cast<i64>(mtype_filter);
 
-    SysvMqPin pin(idx);
-    if (!pin)
-        return -22;
-    SysvMq& q = *pin.queue;
+    SysvMq& q = g_sysv_pool[idx];
+    const u64 expected_incarnation = decoded.generation;
+    {
+        auto lock_flags = sync::SpinLockAcquire(g_sysv_lock);
+        if (!q.in_use || q.initializing || q.marked_destroy || q.closing || q.incarnation != expected_incarnation)
+        {
+            sync::SpinLockRelease(g_sysv_lock, lock_flags);
+            return -22;
+        }
+        sync::SpinLockRelease(g_sysv_lock, lock_flags);
+    }
     SysvMsg out;
     while (true)
     {
         auto lock_flags = sync::SpinLockAcquire(g_sysv_lock);
-        if (!q.in_use || q.marked_destroy || q.closing)
+        if (!q.in_use || q.marked_destroy || q.closing || q.incarnation != expected_incarnation)
         {
             sync::SpinLockRelease(g_sysv_lock, lock_flags);
-            return -22;
+            return kEIDRM;
         }
         const i32 hit = SysvFindByMtype(q, filter);
         if (hit >= 0)
         {
             out = q.ring[hit];
             SysvDrainAt(q, static_cast<u32>(hit));
+            WaitSequencePublishLocked(&q.wait_sequence);
             sched::WaitQueueWakeOne(&q.write_wq);
             sync::SpinLockRelease(g_sysv_lock, lock_flags);
             break;
@@ -425,10 +532,15 @@ i64 DoMsgrcv(u64 msqid, u64 user_msg, u64 msgsz, u64 mtype_filter, u64 msgflg)
             return -42; // -ENOMSG
         }
         sched::WaitQueue* wq = &q.read_wq;
+        const u64 observed_sequence = WaitSequenceSnapshotLocked(&q.wait_sequence);
         sync::SpinLockRelease(g_sysv_lock, lock_flags);
-        arch::Cli();
-        (void)sched::WaitQueueBlockTimeout(wq, 5);
-        arch::Sti();
+        if (!WaitForSequenceChangeCancellable(wq, &q.wait_sequence, observed_sequence))
+        {
+            lock_flags = sync::SpinLockAcquire(g_sysv_lock);
+            const bool removed = !q.in_use || q.marked_destroy || q.closing || q.incarnation != expected_incarnation;
+            sync::SpinLockRelease(g_sysv_lock, lock_flags);
+            return removed ? kEIDRM : kEINTR;
+        }
     }
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_msg), &out.mtype, sizeof(out.mtype)))
         return -14;
@@ -444,12 +556,13 @@ i64 DoMsgrcv(u64 msqid, u64 user_msg, u64 msgsz, u64 mtype_filter, u64 msgflg)
 i64 DoMsgctl(u64 msqid, u64 cmd, u64 user_buf)
 {
     (void)user_buf;
-    if (msqid == 0 || msqid > kSysvMqPoolCap)
+    SysvIpcDecodedId decoded{};
+    if (!SysvIpcDecodeId(msqid, SysvIpcIdFamily::MessageQueue, &decoded))
         return -22;
-    const u32 idx = static_cast<u32>(msqid - 1);
+    const u32 idx = decoded.index;
     auto lock_flags = sync::SpinLockAcquire(g_sysv_lock);
     SysvMq& q = g_sysv_pool[idx];
-    if (!q.in_use)
+    if (!q.in_use || q.initializing || q.incarnation != decoded.generation)
     {
         sync::SpinLockRelease(g_sysv_lock, lock_flags);
         return -22;
@@ -458,11 +571,12 @@ i64 DoMsgctl(u64 msqid, u64 cmd, u64 user_buf)
     {
         q.marked_destroy = true;
         SysvMsg* ring = q.ring;
-        sched::WaitQueueWakeAll(&q.read_wq);
-        sched::WaitQueueWakeAll(&q.write_wq);
         q.closing = true;
         q.in_use = false;
         q.count = 0;
+        WaitSequencePublishLocked(&q.wait_sequence);
+        sched::WaitQueueWakeAll(&q.read_wq);
+        sched::WaitQueueWakeAll(&q.write_wq);
         if (q.pins == 0)
         {
             q.ring = nullptr;
@@ -542,30 +656,30 @@ bool LoadDeadline(u64 user_timeout, u64& out_deadline_ticks, bool& out_no_deadli
     return true;
 }
 
-// Block on `wq` honoring `deadline_ticks` (absolute). Returns:
-//   0  → woken (the surrounding loop re-checks the condition),
-//  -ETIMEDOUT → deadline reached.
-// Caller MUST hold IRQs disabled (arch::Cli) on entry; this helper
-// takes care of the wait. On return IRQs are also disabled — the
-// caller's outer loop expects to re-test under Cli().
-i64 WaitWithDeadline(::duetos::sched::WaitQueue* wq, u64 deadline_ticks, bool no_deadline)
+// Sequence-linearized block honoring an absolute deadline. The scheduler APIs
+// own interrupt save/restore. Returns 0 to re-check, -EINTR only for explicit
+// cancellation, or -ETIMEDOUT once the caller's deadline is actually reached.
+// Saturation uses a one-tick retry without exposing that internal poll as a
+// user-visible timeout.
+i64 WaitWithDeadline(::duetos::sched::WaitQueue* wq, const u64* sequence, u64 observed_sequence, u64 deadline_ticks,
+                     bool no_deadline)
 {
     if (no_deadline)
-    {
-        ::duetos::sched::WaitQueueBlock(wq);
-        ::duetos::arch::Cli();
-        return 0;
-    }
+        return WaitForSequenceChangeCancellable(wq, sequence, observed_sequence) ? 0 : kEINTR;
+
     const u64 now = ::duetos::sched::SchedNowTicks();
-    if (now >= deadline_ticks)
-    {
-        ::duetos::arch::Sti();
-        return kETimedOut;
-    }
-    const u64 wait = deadline_ticks - now;
-    const bool woken = ::duetos::sched::WaitQueueBlockTimeout(wq, wait);
-    ::duetos::arch::Cli();
-    if (!woken)
+    // Even an already-expired deadline goes through the scheduler bridge with
+    // zero ticks so cancellation and a concurrent sequence publication retain
+    // their documented precedence over TimedOut.
+    u64 wait_ticks = now >= deadline_ticks ? 0 : deadline_ticks - now;
+    if (observed_sequence == ~u64{0} && wait_ticks > 1)
+        wait_ticks = 1;
+    const sched::WaitQueueBlockResult result =
+        sched::WaitQueueBlockIfSequenceUnchangedTimeoutCancellable(wq, sequence, observed_sequence, wait_ticks);
+    if (result == sched::WaitQueueBlockResult::Cancelled)
+        return kEINTR;
+    if (result == sched::WaitQueueBlockResult::TimedOut &&
+        !(observed_sequence == ~u64{0} && ::duetos::sched::SchedNowTicks() < deadline_ticks))
         return kETimedOut;
     return 0;
 }
@@ -622,6 +736,7 @@ i32 PosixMqAlloc(const char* name, u32 max_msgs, u32 max_bytes)
         q.write_wq.head = nullptr;
         q.write_wq.tail = nullptr;
         q.ring = nullptr;
+        WaitSequencePublishLocked(&q.wait_sequence);
         sync::SpinLockRelease(g_posix_lock, flags);
         q.ring = static_cast<PosixMsg*>(mm::KMalloc(sizeof(PosixMsg) * max_msgs));
         if (q.ring == nullptr)
@@ -629,11 +744,13 @@ i32 PosixMqAlloc(const char* name, u32 max_msgs, u32 max_bytes)
             flags = sync::SpinLockAcquire(g_posix_lock);
             q.in_use = false;
             q.initializing = false;
+            WaitSequencePublishLocked(&q.wait_sequence);
             sync::SpinLockRelease(g_posix_lock, flags);
             return -1;
         }
         flags = sync::SpinLockAcquire(g_posix_lock);
         q.initializing = false;
+        WaitSequencePublishLocked(&q.wait_sequence);
         sync::SpinLockRelease(g_posix_lock, flags);
         return static_cast<i32>(i);
     }
@@ -670,6 +787,7 @@ void PosixMqRelease(u32 idx)
     {
         q.closing = true;
         q.in_use = false;
+        WaitSequencePublishLocked(&q.wait_sequence);
         sched::WaitQueueWakeAll(&q.read_wq);
         sched::WaitQueueWakeAll(&q.write_wq);
         if (q.pins == 0)
@@ -704,19 +822,20 @@ i64 DoMqOpen(u64 user_name, u64 oflag, u64 mode, u64 user_attr)
     core::Process* p = core::CurrentProcess();
     if (p == nullptr)
         return -1;
-    const i32 fd = core::LinuxFdAllocLowest(p, 3);
-    if (fd < 0)
-        return -24; // -EMFILE
 
-    const i32 existing = PosixMqFindByName(name);
-    i32 idx = existing;
-    if (existing >= 0)
+    i32 idx = -1;
     {
-        if ((oflag & (kOCreat | kOExcl)) == (kOCreat | kOExcl))
-            return -17; // -EEXIST
-        PosixMqRetain(static_cast<u32>(existing));
+        sync::SpinLockGuard guard(g_posix_lock);
+        const i32 existing = PosixMqFindByName(name);
+        if (existing >= 0)
+        {
+            if ((oflag & (kOCreat | kOExcl)) == (kOCreat | kOExcl))
+                return -17; // -EEXIST
+            ++g_posix_pool[static_cast<u32>(existing)].refs;
+            idx = existing;
+        }
     }
-    else
+    if (idx < 0)
     {
         if ((oflag & kOCreat) == 0)
             return -2; // -ENOENT
@@ -736,20 +855,29 @@ i64 DoMqOpen(u64 user_name, u64 oflag, u64 mode, u64 user_attr)
         if (idx < 0)
             return -28;
     }
-    p->linux_fds[fd].state = 13;
-    p->linux_fds[fd].flags = 0;
-    p->linux_fds[fd].first_cluster = static_cast<u32>(idx);
-    p->linux_fds[fd].size = 0;
-    p->linux_fds[fd].offset = 0;
-    p->linux_fds[fd].path[0] = '\0';
-    if (!core::LinuxFdAttachKFile(p, static_cast<u32>(fd), /*kind=*/13, static_cast<u32>(idx), &PosixMqRelease))
+
+    auto kfile_result = ipc::KFileCreate(ipc::KFileKind::PosixMq, static_cast<u32>(idx), &PosixMqRelease, nullptr, 0);
+    if (!kfile_result.has_value())
     {
-        p->linux_fds[fd].state = 0;
         PosixMqRelease(static_cast<u32>(idx));
         return -12; // -ENOMEM
     }
-    if ((oflag & kOCloexec) != 0)
-        core::LinuxFdSetCloexec(p, static_cast<u32>(fd), true);
+
+    core::Process::LinuxFd payload{};
+    payload.state = 13;
+    payload.first_cluster = static_cast<u32>(idx);
+    core::LinuxFdPrepared prepared{};
+    if (!core::LinuxFdPrepare(&prepared, payload, &kfile_result.value()->base, static_cast<u32>(oflag)))
+    {
+        ipc::KObjectRelease(&kfile_result.value()->base);
+        return kENFILE;
+    }
+    const i32 fd = core::LinuxFdBindLowest(p, 3, &prepared, (oflag & kOCloexec) != 0);
+    if (fd < 0)
+    {
+        core::LinuxFdPreparedRelease(&prepared);
+        return kEMFILE;
+    }
     arch::SerialWrite("[linux/posixmq] open fd=");
     arch::SerialWriteHex(fd);
     arch::SerialWrite(" idx=");
@@ -792,6 +920,7 @@ i64 DoMqUnlink(u64 user_name)
         }
         q.ring = nullptr;
         q.count = 0;
+        WaitSequencePublishLocked(&q.wait_sequence);
         sched::WaitQueueWakeAll(&q.read_wq);
         sched::WaitQueueWakeAll(&q.write_wq);
         sync::SpinLockRelease(g_posix_lock, lock_flags);
@@ -808,21 +937,32 @@ i64 DoMqTimedsend(u64 mqdes, u64 user_msg, u64 msg_len, u64 prio, u64 user_timeo
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || mqdes >= 16)
         return -9; // -EBADF
-    // Spectre v1 nospec — mask the index BEFORE the linux_fds[]
-    // dereference so a mispredicted bounds branch can't speculate
-    // an OOB load. See syscall_io.cpp DoWrite for class N rationale.
+    // Spectre v1 nospec — mask before passing the numeric index into
+    // the retained fd-table lookup.
     mqdes = ::duetos::util::MaskedIndex(mqdes, 16);
-    if (p->linux_fds[mqdes].state != 13)
+    core::LinuxFdAcquired acquired{};
+    if (!core::LinuxFdAcquire(p, static_cast<u32>(mqdes), 13, &acquired))
         return -9;
-    const u32 idx = p->linux_fds[mqdes].first_cluster;
+    // Keep the exact KFile receipt alive across every wait. It prevents the
+    // POSIX queue slot from retiring without carrying a subsystem pin or lock
+    // through the scheduler boundary.
+    LinuxFdAcquiredGuard acquired_guard{&acquired};
+    const u32 idx = acquired.snapshot.first_cluster;
     if (idx >= kPosixMqPoolCap)
         return -22;
-    PosixMqPin pin(idx);
-    if (!pin)
-        return -9;
-    PosixMq& q = *pin.queue;
-    if (msg_len > q.max_msg_bytes)
-        return -90; // -EMSGSIZE
+    PosixMq& q = g_posix_pool[idx];
+    {
+        auto lock_flags = sync::SpinLockAcquire(g_posix_lock);
+        if (!q.in_use || q.initializing || q.closing)
+        {
+            sync::SpinLockRelease(g_posix_lock, lock_flags);
+            return -9;
+        }
+        const u32 max_msg_bytes = q.max_msg_bytes;
+        sync::SpinLockRelease(g_posix_lock, lock_flags);
+        if (msg_len > max_msg_bytes)
+            return -90; // -EMSGSIZE
+    }
     u64 deadline_ticks = 0;
     bool no_deadline = true;
     if (!LoadDeadline(user_timeout, deadline_ticks, no_deadline))
@@ -847,14 +987,15 @@ i64 DoMqTimedsend(u64 mqdes, u64 user_msg, u64 msg_len, u64 prio, u64 user_timeo
         {
             q.ring[q.count] = stage;
             ++q.count;
+            WaitSequencePublishLocked(&q.wait_sequence);
             sched::WaitQueueWakeOne(&q.read_wq);
             sync::SpinLockRelease(g_posix_lock, lock_flags);
             return 0;
         }
         sched::WaitQueue* wq = &q.write_wq;
+        const u64 observed_sequence = WaitSequenceSnapshotLocked(&q.wait_sequence);
         sync::SpinLockRelease(g_posix_lock, lock_flags);
-        arch::Cli();
-        const i64 wait_rv = WaitWithDeadline(wq, deadline_ticks, no_deadline);
+        const i64 wait_rv = WaitWithDeadline(wq, &q.wait_sequence, observed_sequence, deadline_ticks, no_deadline);
         if (wait_rv != 0)
             return wait_rv;
     }
@@ -867,15 +1008,24 @@ i64 DoMqTimedreceive(u64 mqdes, u64 user_msg, u64 msg_cap, u64 user_prio, u64 us
         return -9;
     // Spectre v1 nospec — mask before dereference (see DoMqTimedsend).
     mqdes = ::duetos::util::MaskedIndex(mqdes, 16);
-    if (p->linux_fds[mqdes].state != 13)
+    core::LinuxFdAcquired acquired{};
+    if (!core::LinuxFdAcquire(p, static_cast<u32>(mqdes), 13, &acquired))
         return -9;
-    const u32 idx = p->linux_fds[mqdes].first_cluster;
+    // Same exact-receipt lifetime contract as the send path.
+    LinuxFdAcquiredGuard acquired_guard{&acquired};
+    const u32 idx = acquired.snapshot.first_cluster;
     if (idx >= kPosixMqPoolCap)
         return -22;
-    PosixMqPin pin(idx);
-    if (!pin)
-        return -9;
-    PosixMq& q = *pin.queue;
+    PosixMq& q = g_posix_pool[idx];
+    {
+        auto lock_flags = sync::SpinLockAcquire(g_posix_lock);
+        if (!q.in_use || q.initializing || q.closing)
+        {
+            sync::SpinLockRelease(g_posix_lock, lock_flags);
+            return -9;
+        }
+        sync::SpinLockRelease(g_posix_lock, lock_flags);
+    }
     u64 deadline_ticks = 0;
     bool no_deadline = true;
     if (!LoadDeadline(user_timeout, deadline_ticks, no_deadline))
@@ -901,14 +1051,15 @@ i64 DoMqTimedreceive(u64 mqdes, u64 user_msg, u64 msg_cap, u64 user_prio, u64 us
             for (u32 i = best; i + 1 < q.count; ++i)
                 q.ring[i] = q.ring[i + 1];
             --q.count;
+            WaitSequencePublishLocked(&q.wait_sequence);
             sched::WaitQueueWakeOne(&q.write_wq);
             sync::SpinLockRelease(g_posix_lock, lock_flags);
             break;
         }
         sched::WaitQueue* wq = &q.read_wq;
+        const u64 observed_sequence = WaitSequenceSnapshotLocked(&q.wait_sequence);
         sync::SpinLockRelease(g_posix_lock, lock_flags);
-        arch::Cli();
-        const i64 wait_rv = WaitWithDeadline(wq, deadline_ticks, no_deadline);
+        const i64 wait_rv = WaitWithDeadline(wq, &q.wait_sequence, observed_sequence, deadline_ticks, no_deadline);
         if (wait_rv != 0)
             return wait_rv;
     }
@@ -944,11 +1095,12 @@ i64 DoMqNotify(u64 mqdes, u64 user_notification)
         return kEBADF;
     // Spectre v1 nospec — mask before dereference (see DoMqTimedsend).
     mqdes = ::duetos::util::MaskedIndex(mqdes, 16);
-    // mqd_t is just an fd in the linux_fds table; mq state ==
-    // 13 (see DoMqOpen). Reject if the fd doesn't reference
-    // a message queue.
-    if (p->linux_fds[mqdes].state != 13)
+    // mqd_t is an fd-table index. Retain and validate state 13 so a
+    // concurrent close/reuse cannot redirect the check.
+    core::LinuxFdAcquired acquired{};
+    if (!core::LinuxFdAcquire(p, static_cast<u32>(mqdes), 13, &acquired))
         return kEBADF;
+    core::LinuxFdAcquiredRelease(&acquired);
     return 0;
 }
 
@@ -959,12 +1111,17 @@ i64 DoMqGetsetattr(u64 mqdes, u64 user_new, u64 user_old)
         return -9;
     // Spectre v1 nospec — mask before dereference (see DoMqTimedsend).
     mqdes = ::duetos::util::MaskedIndex(mqdes, 16);
-    if (p->linux_fds[mqdes].state != 13)
+    core::LinuxFdAcquired acquired{};
+    if (!core::LinuxFdAcquire(p, static_cast<u32>(mqdes), 13, &acquired))
         return -9;
-    const u32 idx = p->linux_fds[mqdes].first_cluster;
+    const u32 idx = acquired.snapshot.first_cluster;
     if (idx >= kPosixMqPoolCap)
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
         return -22;
+    }
     PosixMqPin pin(idx);
+    core::LinuxFdAcquiredRelease(&acquired);
     if (!pin)
         return -9;
     auto lock_flags = sync::SpinLockAcquire(g_posix_lock);

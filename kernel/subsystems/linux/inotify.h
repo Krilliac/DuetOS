@@ -52,7 +52,7 @@ constexpr u32 kInIsDir = 0x40000000;
 void InotifyPublish(const char* path, u32 mask);
 
 // Per-LinuxFd surface (state 10).
-i64 InotifyRead(u32 idx, u64 user_dst, u64 len);
+i64 InotifyRead(u32 idx, u64 user_dst, u64 len, bool nonblocking);
 void InotifyRelease(u32 idx);
 void InotifyRetain(u32 idx);
 

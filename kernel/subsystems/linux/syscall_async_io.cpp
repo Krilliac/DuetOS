@@ -14,28 +14,25 @@
  *   timerfd  — itimerspec converted to scheduler-tick units;
  *              expirations counted from SchedNowTicks()
  *              + interval. Read returns u64 = expirations
- *              accumulated since the last read; blocks via
- *              WaitQueueBlockTimeout against the next deadline,
- *              so the timer-tick path itself doesn't need a
- *              dedicated callback.
+ *              accumulated since the last read; blocks through a
+ *              sequence-aware cancellable wait against the exact next
+ *              deadline, so the timer-tick path itself needs no callback.
  *
- *   signalfd — slot stores the caller's mask. v0 has no signal
- *              delivery, so SignalfdRead always reports "no events
- *              pending" — non-blocking returns -EAGAIN, blocking
- *              waits forever (or until close). Sub-GAP, fixed
- *              when a real signal-delivery path lands.
+ *   signalfd — slot stores the caller's mask. Reads drain matching
+ *              bits from the process pending-signal bitmap into
+ *              Linux-stable signalfd_siginfo records. Per-signal
+ *              sender metadata is not tracked in v0, so those
+ *              record fields remain zero.
  *
  *   epoll    — instance + dynamic watch table (16 slots / inst).
  *              epoll_wait polls every watched fd via the readiness
  *              helpers exposed by the pipe / eventfd / socket /
- *              timerfd surfaces, then SchedSleepTicks(1) and
- *              repeats until either the timeout expires or any
- *              watch fires. Polling cadence is 10 ms; sub-GAP for
- *              callers that need lower latency (real Linux uses
- *              fd-side wake hooks).
+ *              timerfd surfaces, then parks on a shared publication
+ *              sequence. Fd kinds without wake hooks retain the v0
+ *              100 ms fallback cadence.
  *
- * No O_NONBLOCK / EFD_CLOEXEC / TFD_NONBLOCK enforcement in v0 —
- * flags accepted, behaviour identical to the unflagged form.
+ * CLOEXEC publication is atomic with fd installation. NONBLOCK is retained
+ * in the shared open-file description and snapshotted before a read can park.
  */
 
 #include "subsystems/linux/syscall_async_io.h"
@@ -45,6 +42,7 @@
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
+#include "ipc/kfile.h"
 #include "mm/paging.h"
 #include "proc/process.h"
 #include "sched/sched.h"
@@ -54,6 +52,11 @@
 namespace duetos::subsystems::linux::internal
 {
 
+void LinuxPollEventWake();
+u64 LinuxPollEventSequenceSnapshot();
+const u64* LinuxPollEventSequenceAddress();
+sched::WaitQueue* LinuxPollEventWq();
+
 namespace
 {
 
@@ -61,6 +64,7 @@ constexpr u32 kTimerfdPoolCap = 8;
 constexpr u32 kSignalfdPoolCap = 8;
 constexpr u32 kEpollPoolCap = 8;
 constexpr u32 kEpollWatchCap = 16;
+constexpr u32 kLinuxFdCap = 16;
 
 // 100 Hz scheduler tick → 10 ms per tick → 10_000_000 ns per tick.
 constexpr u64 kTickNs = 10'000'000ull;
@@ -85,6 +89,8 @@ struct Timerfd
     u64 expirations;      // accumulated since last read
     u32 clock_id;
     u32 _pad2;
+    u64 generation;
+    u64 read_sequence;
     sched::WaitQueue read_wq;
 };
 
@@ -96,17 +102,18 @@ struct Signalfd
     u32 refs;
     u32 pins;
     u64 mask;
-    sched::WaitQueue read_wq;
+    u64 generation;
 };
 
 struct EpollWatch
 {
     bool in_use;
     u8 _pad[3];
-    u32 fd;
+    u32 source_fd;
     u32 events; // EPOLLIN / EPOLLOUT / EPOLLERR / EPOLLHUP
     u32 _pad2;
     u64 user_data; // epoll_event.data — opaque to us
+    core::LinuxFdAcquired acquired;
 };
 
 struct Epoll
@@ -118,8 +125,18 @@ struct Epoll
     u32 pins;
     u32 watch_count;
     u32 _pad2;
+    u64 generation;
     EpollWatch watches[kEpollWatchCap];
 };
+
+bool EpollWatchMatchesIdentity(const EpollWatch& watch, u32 source_fd, const core::LinuxFdAcquired& candidate)
+{
+    return watch.in_use && watch.source_fd == source_fd &&
+           watch.acquired.snapshot.generation == candidate.snapshot.generation &&
+           watch.acquired.snapshot.state == candidate.snapshot.state &&
+           watch.acquired.snapshot.first_cluster == candidate.snapshot.first_cluster &&
+           watch.acquired.snapshot.ofd == candidate.snapshot.ofd && watch.acquired.kfile_ref == candidate.kfile_ref;
+}
 
 Timerfd g_timerfd_pool[kTimerfdPoolCap];
 Signalfd g_signalfd_pool[kSignalfdPoolCap];
@@ -127,25 +144,62 @@ Epoll g_epoll_pool[kEpollPoolCap];
 constinit sync::SpinLock g_async_lock = {
     .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
 
+void AdvanceStableSequenceLocked(u64* sequence)
+{
+    const u64 previous = __atomic_load_n(sequence, __ATOMIC_RELAXED);
+    if (previous != ~u64{0})
+        __atomic_store_n(sequence, previous + 1, __ATOMIC_RELEASE);
+}
+
+void WakeQueuePreservingInterrupts(sched::WaitQueue* queue)
+{
+    constexpr u64 kRflagsInterruptEnable = 1ULL << 9;
+    const bool interrupts_were_enabled = (arch::ReadRflags() & kRflagsInterruptEnable) != 0;
+    arch::Cli();
+    sched::WaitQueueWakeAll(queue);
+    if (interrupts_were_enabled)
+        arch::Sti();
+}
+
+sched::WaitQueueBlockResult WaitForStableSequence(sched::WaitQueue* queue, const u64* sequence, u64 observed_sequence)
+{
+    if (observed_sequence == ~u64{0})
+        return sched::WaitQueueBlockTimeoutCancellable(queue, 1);
+    return sched::WaitQueueBlockIfSequenceUnchangedCancellable(queue, sequence, observed_sequence);
+}
+
+sched::WaitQueueBlockResult WaitForStableSequenceTimeout(sched::WaitQueue* queue, const u64* sequence,
+                                                         u64 observed_sequence, u64 ticks)
+{
+    if (observed_sequence == ~u64{0})
+        return sched::WaitQueueBlockTimeoutCancellable(queue, ticks > 1 ? 1 : ticks);
+    return sched::WaitQueueBlockIfSequenceUnchangedTimeoutCancellable(queue, sequence, observed_sequence, ticks);
+}
+
 struct TimerfdPin
 {
     u32 idx;
+    u64 generation;
     Timerfd* timer;
 
-    explicit TimerfdPin(u32 value) : idx(value), timer(nullptr)
+    explicit TimerfdPin(u32 value, u64 expected_generation = 0) : idx(value), generation(0), timer(nullptr)
     {
         if (value >= kTimerfdPoolCap)
             return;
         sync::SpinLockGuard guard(g_async_lock);
         Timerfd& t = g_timerfd_pool[value];
-        if (t.in_use && !t.closing)
+        if (t.in_use && !t.closing && t.pins != ~0U &&
+            (expected_generation == 0 || t.generation == expected_generation))
         {
             ++t.pins;
+            generation = t.generation;
             timer = &t;
         }
     }
 
-    ~TimerfdPin()
+    ~TimerfdPin() { Release(); }
+
+    void Release()
     {
         if (timer == nullptr)
             return;
@@ -161,6 +215,8 @@ struct TimerfdPin
             t.interval_ticks = 0;
             t.expirations = 0;
         }
+        generation = 0;
+        timer = nullptr;
     }
 
     explicit operator bool() const { return timer != nullptr; }
@@ -169,22 +225,27 @@ struct TimerfdPin
 struct EpollPin
 {
     u32 idx;
+    u64 generation;
     Epoll* epoll;
 
-    explicit EpollPin(u32 value) : idx(value), epoll(nullptr)
+    explicit EpollPin(u32 value, u64 expected_generation = 0) : idx(value), generation(0), epoll(nullptr)
     {
         if (value >= kEpollPoolCap)
             return;
         sync::SpinLockGuard guard(g_async_lock);
         Epoll& e = g_epoll_pool[value];
-        if (e.in_use && !e.closing)
+        if (e.in_use && !e.closing && e.pins != ~0U &&
+            (expected_generation == 0 || e.generation == expected_generation))
         {
             ++e.pins;
+            generation = e.generation;
             epoll = &e;
         }
     }
 
-    ~EpollPin()
+    ~EpollPin() { Release(); }
+
+    void Release()
     {
         if (epoll == nullptr)
             return;
@@ -198,30 +259,52 @@ struct EpollPin
             e.closing = false;
             e.watch_count = 0;
         }
+        generation = 0;
+        epoll = nullptr;
     }
 
     explicit operator bool() const { return epoll != nullptr; }
 };
 
+struct ScopedLinuxFdAcquired
+{
+    core::LinuxFdAcquired* acquired;
+
+    explicit ScopedLinuxFdAcquired(core::LinuxFdAcquired* value) : acquired(value) {}
+    ~ScopedLinuxFdAcquired()
+    {
+        if (acquired != nullptr)
+            core::LinuxFdAcquiredRelease(acquired);
+    }
+
+    ScopedLinuxFdAcquired(const ScopedLinuxFdAcquired&) = delete;
+    ScopedLinuxFdAcquired& operator=(const ScopedLinuxFdAcquired&) = delete;
+};
+
 struct SignalfdPin
 {
     u32 idx;
+    u64 generation;
     Signalfd* signalfd;
 
-    explicit SignalfdPin(u32 value) : idx(value), signalfd(nullptr)
+    explicit SignalfdPin(u32 value, u64 expected_generation = 0) : idx(value), generation(0), signalfd(nullptr)
     {
         if (value >= kSignalfdPoolCap)
             return;
         sync::SpinLockGuard guard(g_async_lock);
         Signalfd& s = g_signalfd_pool[value];
-        if (s.in_use && !s.closing)
+        if (s.in_use && !s.closing && s.pins != ~0U &&
+            (expected_generation == 0 || s.generation == expected_generation))
         {
             ++s.pins;
+            generation = s.generation;
             signalfd = &s;
         }
     }
 
-    ~SignalfdPin()
+    ~SignalfdPin() { Release(); }
+
+    void Release()
     {
         if (signalfd == nullptr)
             return;
@@ -235,6 +318,8 @@ struct SignalfdPin
             s.closing = false;
             s.mask = 0;
         }
+        generation = 0;
+        signalfd = nullptr;
     }
 
     explicit operator bool() const { return signalfd != nullptr; }
@@ -245,9 +330,11 @@ i32 TimerfdAlloc(u32 clock_id)
     sync::SpinLockGuard guard(g_async_lock);
     for (u32 i = 0; i < kTimerfdPoolCap; ++i)
     {
-        if (!g_timerfd_pool[i].in_use)
+        if (!g_timerfd_pool[i].in_use && g_timerfd_pool[i].generation != ~u64{0})
         {
             Timerfd& t = g_timerfd_pool[i];
+            ++t.generation;
+            AdvanceStableSequenceLocked(&t.read_sequence);
             t.in_use = true;
             t.closing = false;
             t.refs = 1;
@@ -256,8 +343,6 @@ i32 TimerfdAlloc(u32 clock_id)
             t.interval_ticks = 0;
             t.expirations = 0;
             t.clock_id = clock_id;
-            t.read_wq.head = nullptr;
-            t.read_wq.tail = nullptr;
             return static_cast<i32>(i);
         }
     }
@@ -269,16 +354,15 @@ i32 SignalfdAlloc(u64 mask)
     sync::SpinLockGuard guard(g_async_lock);
     for (u32 i = 0; i < kSignalfdPoolCap; ++i)
     {
-        if (!g_signalfd_pool[i].in_use)
+        if (!g_signalfd_pool[i].in_use && g_signalfd_pool[i].generation != ~u64{0})
         {
             Signalfd& s = g_signalfd_pool[i];
+            ++s.generation;
             s.in_use = true;
             s.closing = false;
             s.refs = 1;
             s.pins = 0;
             s.mask = mask;
-            s.read_wq.head = nullptr;
-            s.read_wq.tail = nullptr;
             return static_cast<i32>(i);
         }
     }
@@ -290,16 +374,17 @@ i32 EpollAlloc()
     sync::SpinLockGuard guard(g_async_lock);
     for (u32 i = 0; i < kEpollPoolCap; ++i)
     {
-        if (!g_epoll_pool[i].in_use)
+        if (!g_epoll_pool[i].in_use && g_epoll_pool[i].generation != ~u64{0})
         {
             Epoll& e = g_epoll_pool[i];
+            ++e.generation;
             e.in_use = true;
             e.closing = false;
             e.refs = 1;
             e.pins = 0;
             e.watch_count = 0;
             for (u32 w = 0; w < kEpollWatchCap; ++w)
-                e.watches[w].in_use = false;
+                e.watches[w] = {};
             return static_cast<i32>(i);
         }
     }
@@ -333,29 +418,24 @@ void TimerfdAccrueExpirationsLocked(Timerfd& t, u64 now_ticks)
 // Timerfd
 // ============================================================
 
-void TimerfdRetain(u32 idx)
-{
-    if (idx >= kTimerfdPoolCap)
-        return;
-    sync::SpinLockGuard guard(g_async_lock);
-    Timerfd& t = g_timerfd_pool[idx];
-    if (t.in_use && !t.closing)
-        ++t.refs;
-}
-
 void TimerfdRelease(u32 idx)
 {
     if (idx >= kTimerfdPoolCap)
         return;
-    sync::SpinLockGuard guard(g_async_lock);
+    bool wake = false;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_async_lock);
     Timerfd& t = g_timerfd_pool[idx];
     if (!t.in_use || t.refs == 0)
+    {
+        sync::SpinLockRelease(g_async_lock, flags);
         return;
+    }
     --t.refs;
     if (t.refs == 0)
     {
-        sched::WaitQueueWakeAll(&t.read_wq);
         t.closing = true;
+        AdvanceStableSequenceLocked(&t.read_sequence);
+        wake = true;
         if (t.pins == 0)
         {
             t.in_use = false;
@@ -365,26 +445,36 @@ void TimerfdRelease(u32 idx)
             t.expirations = 0;
         }
     }
+    sync::SpinLockRelease(g_async_lock, flags);
+    if (wake)
+    {
+        WakeQueuePreservingInterrupts(&t.read_wq);
+        LinuxPollEventWake();
+    }
 }
 
-i64 TimerfdRead(u32 idx, u64 user_dst, u64 len)
+i64 TimerfdRead(u32 idx, u64 user_dst, u64 len, bool nonblocking)
 {
     if (idx >= kTimerfdPoolCap)
         return kEINVAL;
     if (len < 8)
         return kEINVAL; // timerfd reads are u64-sized
-    TimerfdPin pin(idx);
-    if (!pin)
-        return 0;
+    u64 expected_generation = 0;
     while (true)
     {
+        TimerfdPin pin(idx, expected_generation);
+        if (!pin)
+            return 0;
+        if (expected_generation == 0)
+            expected_generation = pin.generation;
         auto flags = sync::SpinLockAcquire(g_async_lock);
         Timerfd& t = *pin.timer;
-        if (!t.in_use || t.closing)
+        if (!t.in_use || t.closing || t.generation != expected_generation)
         {
             sync::SpinLockRelease(g_async_lock, flags);
             return 0;
         }
+        const u64 observed_sequence = __atomic_load_n(&t.read_sequence, __ATOMIC_ACQUIRE);
         TimerfdAccrueExpirationsLocked(t, sched::SchedNowTicks());
         if (t.expirations > 0)
         {
@@ -395,23 +485,32 @@ i64 TimerfdRead(u32 idx, u64 user_dst, u64 len)
                 return kEFAULT;
             return 8;
         }
+        if (nonblocking)
+        {
+            sync::SpinLockRelease(g_async_lock, flags);
+            return kEAGAIN;
+        }
         if (t.next_expiry_tick == 0)
         {
             // Disarmed and no expirations — block until armed/closed.
-            sched::WaitQueue* wq = &t.read_wq;
             sync::SpinLockRelease(g_async_lock, flags);
-            arch::Cli();
-            (void)sched::WaitQueueBlockTimeout(wq, 5);
-            arch::Sti();
+            pin.Release();
+            if (WaitForStableSequence(&t.read_wq, &t.read_sequence, observed_sequence) ==
+                sched::WaitQueueBlockResult::Cancelled)
+            {
+                return kEINTR;
+            }
             continue;
         }
         const u64 now = sched::SchedNowTicks();
         const u64 wait = (t.next_expiry_tick > now) ? (t.next_expiry_tick - now) : 1;
-        sched::WaitQueue* wq = &t.read_wq;
         sync::SpinLockRelease(g_async_lock, flags);
-        arch::Cli();
-        (void)sched::WaitQueueBlockTimeout(wq, wait);
-        arch::Sti();
+        pin.Release();
+        if (WaitForStableSequenceTimeout(&t.read_wq, &t.read_sequence, observed_sequence, wait) ==
+            sched::WaitQueueBlockResult::Cancelled)
+        {
+            return kEINTR;
+        }
     }
 }
 
@@ -419,33 +518,39 @@ i64 DoTimerfdCreate(u64 clockid, u64 flags)
 {
     constexpr u64 kTFD_CLOEXEC = 0x80000;
     constexpr u64 kTFD_NONBLOCK = 0x800;
+    if ((flags & ~(kTFD_CLOEXEC | kTFD_NONBLOCK)) != 0)
+        return kEINVAL;
     core::Process* p = core::CurrentProcess();
     if (p == nullptr)
         return kEPERM;
-    const i32 fd = core::LinuxFdAllocLowest(p, 3);
-    if (fd < 0)
-        return kEMFILE;
-    p->linux_fds[fd].state = 7; // reserve so AttachKFile can't trip the slot
     const i32 idx = TimerfdAlloc(static_cast<u32>(clockid));
     if (idx < 0)
-    {
-        p->linux_fds[fd].state = 0;
         return kENFILE;
-    }
-    p->linux_fds[fd].flags = 0;
-    p->linux_fds[fd].first_cluster = static_cast<u32>(idx);
-    p->linux_fds[fd].size = 0;
-    p->linux_fds[fd].offset = 0;
-    p->linux_fds[fd].path[0] = '\0';
-    if (!core::LinuxFdAttachKFile(p, static_cast<u32>(fd), /*kind=*/7, static_cast<u32>(idx), &TimerfdRelease))
+
+    auto kfile_result = ipc::KFileCreate(ipc::KFileKind::Timerfd, static_cast<u32>(idx), &TimerfdRelease, nullptr, 0);
+    if (!kfile_result.has_value())
     {
-        p->linux_fds[fd].state = 0;
         TimerfdRelease(static_cast<u32>(idx));
         return kENOMEM;
     }
-    if ((flags & kTFD_CLOEXEC) != 0)
-        core::LinuxFdSetCloexec(p, static_cast<u32>(fd), true);
-    (void)kTFD_NONBLOCK; // accepted but blocking-only in v0
+
+    core::Process::LinuxFd payload{};
+    payload.state = 7;
+    payload.first_cluster = static_cast<u32>(idx);
+    core::LinuxFdPrepared prepared{};
+    constexpr u32 kO_RDWR = 2;
+    const u32 status_flags = kO_RDWR | static_cast<u32>(flags & kTFD_NONBLOCK);
+    if (!core::LinuxFdPrepare(&prepared, payload, &kfile_result.value()->base, status_flags))
+    {
+        ipc::KObjectRelease(&kfile_result.value()->base);
+        return kENFILE;
+    }
+    const i32 fd = core::LinuxFdBindLowest(p, 3, &prepared, (flags & kTFD_CLOEXEC) != 0);
+    if (fd < 0)
+    {
+        core::LinuxFdPreparedRelease(&prepared);
+        return kEMFILE;
+    }
     arch::SerialWrite("[linux/timerfd] fd=");
     arch::SerialWriteHex(fd);
     arch::SerialWrite(" pool_idx=");
@@ -492,50 +597,59 @@ void TicksToItimerspec(u64 ticks, i64& sec_out, i64& nsec_out)
 i64 DoTimerfdSettime(u64 fd, u64 flags, u64 user_new, u64 user_old)
 {
     core::Process* p = core::CurrentProcess();
-    if (p == nullptr || fd >= 16)
+    if (p == nullptr || fd >= kLinuxFdCap)
         return kEBADF;
     // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
-    fd = util::MaskedIndex(fd, 16);
-    if (p->linux_fds[fd].state != 7)
+    fd = util::MaskedIndex(fd, kLinuxFdCap);
+    core::LinuxFdAcquired acquired{};
+    if (!core::LinuxFdAcquire(p, static_cast<u32>(fd), 7, &acquired))
         return kEBADF;
-    const u32 idx = p->linux_fds[fd].first_cluster;
+    const u32 idx = acquired.snapshot.first_cluster;
     if (idx >= kTimerfdPoolCap)
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEINVAL;
+    }
     TimerfdPin pin(idx);
     if (!pin)
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEBADF;
-    Itimerspec new_spec;
+    }
+    Itimerspec new_spec{};
     if (!mm::CopyFromUser(&new_spec, reinterpret_cast<const void*>(user_new), sizeof(new_spec)))
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEFAULT;
-    if (new_spec.it_value_nsec >= 1'000'000'000 || new_spec.it_interval_nsec >= 1'000'000'000)
+    }
+    if (new_spec.it_value_sec < 0 || new_spec.it_interval_sec < 0 || new_spec.it_value_nsec < 0 ||
+        new_spec.it_interval_nsec < 0 || new_spec.it_value_nsec >= 1'000'000'000 ||
+        new_spec.it_interval_nsec >= 1'000'000'000)
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEINVAL;
+    }
     const u64 first_ticks = ItimerspecToTicks(new_spec.it_value_sec, new_spec.it_value_nsec);
     const u64 interval_ticks = ItimerspecToTicks(new_spec.it_interval_sec, new_spec.it_interval_nsec);
     constexpr u64 kTfdTimerAbstime = 0x1;
-    auto lock_flags = sync::SpinLockAcquire(g_async_lock);
+    if ((flags & ~kTfdTimerAbstime) != 0)
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
+        return kEINVAL;
+    }
+    Itimerspec old_spec{};
+    const auto lock_flags = sync::SpinLockAcquire(g_async_lock);
     Timerfd& t = *pin.timer;
     if (!t.in_use || t.closing)
     {
         sync::SpinLockRelease(g_async_lock, lock_flags);
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEBADF;
     }
-    if (user_old != 0)
-    {
-        Itimerspec old_spec{};
-        const u64 now = sched::SchedNowTicks();
-        if (t.next_expiry_tick > now)
-            TicksToItimerspec(t.next_expiry_tick - now, old_spec.it_value_sec, old_spec.it_value_nsec);
-        TicksToItimerspec(t.interval_ticks, old_spec.it_interval_sec, old_spec.it_interval_nsec);
-        sync::SpinLockRelease(g_async_lock, lock_flags);
-        if (!mm::CopyToUser(reinterpret_cast<void*>(user_old), &old_spec, sizeof(old_spec)))
-            return kEFAULT;
-        lock_flags = sync::SpinLockAcquire(g_async_lock);
-        if (!t.in_use || t.closing)
-        {
-            sync::SpinLockRelease(g_async_lock, lock_flags);
-            return kEBADF;
-        }
-    }
+    const u64 now = sched::SchedNowTicks();
+    if (t.next_expiry_tick > now)
+        TicksToItimerspec(t.next_expiry_tick - now, old_spec.it_value_sec, old_spec.it_value_nsec);
+    TicksToItimerspec(t.interval_ticks, old_spec.it_interval_sec, old_spec.it_interval_nsec);
     if (first_ticks == 0)
     {
         // Disarm.
@@ -544,7 +658,6 @@ i64 DoTimerfdSettime(u64 fd, u64 flags, u64 user_new, u64 user_old)
     }
     else
     {
-        const u64 now = sched::SchedNowTicks();
         if ((flags & kTfdTimerAbstime) != 0)
             t.next_expiry_tick = first_ticks; // absolute tick value (caller-side).
         else
@@ -552,32 +665,48 @@ i64 DoTimerfdSettime(u64 fd, u64 flags, u64 user_new, u64 user_old)
         t.interval_ticks = interval_ticks;
     }
     t.expirations = 0;
-    sched::WaitQueueWakeAll(&t.read_wq);
+    AdvanceStableSequenceLocked(&t.read_sequence);
     sync::SpinLockRelease(g_async_lock, lock_flags);
+    WakeQueuePreservingInterrupts(&t.read_wq);
+    LinuxPollEventWake();
+    if (user_old != 0 && !mm::CopyToUser(reinterpret_cast<void*>(user_old), &old_spec, sizeof(old_spec)))
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
+        return kEFAULT;
+    }
+    core::LinuxFdAcquiredRelease(&acquired);
     return 0;
 }
 
 i64 DoTimerfdGettime(u64 fd, u64 user_curr)
 {
     core::Process* p = core::CurrentProcess();
-    if (p == nullptr || fd >= 16)
+    if (p == nullptr || fd >= kLinuxFdCap)
         return kEBADF;
     // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
-    fd = util::MaskedIndex(fd, 16);
-    if (p->linux_fds[fd].state != 7)
+    fd = util::MaskedIndex(fd, kLinuxFdCap);
+    core::LinuxFdAcquired acquired{};
+    if (!core::LinuxFdAcquire(p, static_cast<u32>(fd), 7, &acquired))
         return kEBADF;
-    const u32 idx = p->linux_fds[fd].first_cluster;
+    const u32 idx = acquired.snapshot.first_cluster;
     if (idx >= kTimerfdPoolCap)
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEINVAL;
+    }
     TimerfdPin pin(idx);
     if (!pin)
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEBADF;
+    }
     Itimerspec out{};
     auto lock_flags = sync::SpinLockAcquire(g_async_lock);
     Timerfd& t = *pin.timer;
     if (!t.in_use || t.closing)
     {
         sync::SpinLockRelease(g_async_lock, lock_flags);
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEBADF;
     }
     const u64 now = sched::SchedNowTicks();
@@ -586,23 +715,17 @@ i64 DoTimerfdGettime(u64 fd, u64 user_curr)
     TicksToItimerspec(t.interval_ticks, out.it_interval_sec, out.it_interval_nsec);
     sync::SpinLockRelease(g_async_lock, lock_flags);
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_curr), &out, sizeof(out)))
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEFAULT;
+    }
+    core::LinuxFdAcquiredRelease(&acquired);
     return 0;
 }
 
 // ============================================================
 // Signalfd
 // ============================================================
-
-void SignalfdRetain(u32 idx)
-{
-    if (idx >= kSignalfdPoolCap)
-        return;
-    sync::SpinLockGuard guard(g_async_lock);
-    Signalfd& s = g_signalfd_pool[idx];
-    if (s.in_use && !s.closing)
-        ++s.refs;
-}
 
 void SignalfdRelease(u32 idx)
 {
@@ -617,7 +740,6 @@ void SignalfdRelease(u32 idx)
     --s.refs;
     if (s.refs == 0)
     {
-        sched::WaitQueueWakeAll(&s.read_wq);
         s.closing = true;
         if (s.pins == 0)
         {
@@ -628,66 +750,94 @@ void SignalfdRelease(u32 idx)
     }
 }
 
-i64 SignalfdRead(u32 idx, u64 user_dst, u64 len)
+i64 SignalfdRead(u32 idx, u64 user_dst, u64 len, bool nonblocking)
 {
     if (idx >= kSignalfdPoolCap)
         return kEINVAL;
     if (len < 128) // sizeof(struct signalfd_siginfo)
         return kEINVAL;
-    SignalfdPin pin(idx);
-    if (!pin)
-        return 0;
     core::Process* p = core::CurrentProcess();
     if (p == nullptr)
         return kEINVAL;
-    auto lock_flags = sync::SpinLockAcquire(g_async_lock);
-    Signalfd& s = *pin.signalfd;
-    if (!s.in_use || s.closing)
+    u64 expected_generation = 0;
+    while (true)
     {
+        const u64 observed_sequence = core::ProcessLinuxSignalEventSequenceSnapshot(p);
+        SignalfdPin pin(idx, expected_generation);
+        if (!pin)
+            return 0;
+        if (expected_generation == 0)
+            expected_generation = pin.generation;
+        auto lock_flags = sync::SpinLockAcquire(g_async_lock);
+        Signalfd& s = *pin.signalfd;
+        if (!s.in_use || s.closing || s.generation != expected_generation)
+        {
+            sync::SpinLockRelease(g_async_lock, lock_flags);
+            return 0;
+        }
+        // Walk the pending bitmap; emit one signalfd_siginfo per
+        // matching signum, clear the bit. Caller-supplied buffer
+        // determines how many we can emit (each record = 128 bytes).
+        u8 stage[256];
+        u64 emitted = 0;
+        u64 claimed_mask = 0;
+        for (u32 sig = 1;
+             sig < core::Process::kLinuxSignalCount && emitted + 128 <= len && emitted + 128 <= sizeof(stage); ++sig)
+        {
+            const u64 bit = core::ProcessLinuxSignalBit(sig);
+            if ((s.mask & bit) == 0)
+                continue;
+            // Claim the exact coalesced signal bit. A producer on another CPU may
+            // publish concurrently; compare/exchange prevents this consumer from
+            // erasing that publication through a stale load/store pair.
+            if (!core::ProcessLinuxSignalClaimPending(p, sig))
+                continue;
+            // struct signalfd_siginfo — Linux-stable, 128 bytes.
+            // First 32 bytes carry the fields callers actually read:
+            //   u32 ssi_signo; i32 ssi_errno; i32 ssi_code; u32 ssi_pid;
+            //   u32 ssi_uid; i32 ssi_fd; u32 ssi_tid; u32 ssi_band;
+            //   u32 ssi_overrun; u32 ssi_trapno; i32 ssi_status; ...
+            // Padding to 128 with zeros.
+            u8* rec = stage + emitted;
+            for (u32 i = 0; i < 128; ++i)
+                rec[i] = 0;
+            const u32 sig_u32 = sig;
+            for (u32 i = 0; i < 4; ++i)
+                rec[i] = static_cast<u8>((sig_u32 >> (i * 8)) & 0xFF);
+            // ssi_pid + ssi_uid not tracked per-signal in v0 — leave 0.
+            claimed_mask |= bit;
+            emitted += 128;
+        }
         sync::SpinLockRelease(g_async_lock, lock_flags);
-        return 0;
-    }
-    // Walk the pending bitmap; emit one signalfd_siginfo per
-    // matching signum, clear the bit. Caller-supplied buffer
-    // determines how many we can emit (each record = 128 bytes).
-    u8 stage[256];
-    u64 emitted = 0;
-    for (u32 sig = 1; sig < 64 && emitted + 128 <= len && emitted + 128 <= sizeof(stage); ++sig)
-    {
-        const u64 bit = (1ULL << sig);
-        if ((p->linux_pending_signals & bit) == 0)
+        if (emitted == 0)
+        {
+            if (nonblocking)
+                return kEAGAIN;
+            pin.Release();
+            if (core::ProcessWaitForLinuxSignalEvent(p, observed_sequence) == sched::WaitQueueBlockResult::Cancelled)
+            {
+                return kEINTR;
+            }
             continue;
-        if ((s.mask & bit) == 0)
-            continue;
-        // struct signalfd_siginfo — Linux-stable, 128 bytes.
-        // First 32 bytes carry the fields callers actually read:
-        //   u32 ssi_signo; i32 ssi_errno; i32 ssi_code; u32 ssi_pid;
-        //   u32 ssi_uid; i32 ssi_fd; u32 ssi_tid; u32 ssi_band;
-        //   u32 ssi_overrun; u32 ssi_trapno; i32 ssi_status; ...
-        // Padding to 128 with zeros.
-        u8* rec = stage + emitted;
-        for (u32 i = 0; i < 128; ++i)
-            rec[i] = 0;
-        const u32 sig_u32 = sig;
-        for (u32 i = 0; i < 4; ++i)
-            rec[i] = static_cast<u8>((sig_u32 >> (i * 8)) & 0xFF);
-        // ssi_pid + ssi_uid not tracked per-signal in v0 — leave 0.
-        p->linux_pending_signals &= ~bit;
-        emitted += 128;
+        }
+        if (!mm::CopyToUser(reinterpret_cast<void*>(user_dst), stage, emitted))
+        {
+            // read(2) may consume only after its output is committed. Re-publish
+            // every claimed bit on EFAULT; standard signals remain coalesced if a
+            // producer raised the same signum during the copy attempt.
+            core::ProcessLinuxSignalRestorePending(p, claimed_mask);
+            return kEFAULT;
+        }
+        return static_cast<i64>(emitted);
     }
-    sync::SpinLockRelease(g_async_lock, lock_flags);
-    if (emitted == 0)
-        return kEAGAIN;
-    if (!mm::CopyToUser(reinterpret_cast<void*>(user_dst), stage, emitted))
-        return kEFAULT;
-    return static_cast<i64>(emitted);
 }
 
 i64 DoSignalfd(u64 fd, u64 user_mask, u64 sigsetsize, u64 flags)
 {
     constexpr u64 kSFD_CLOEXEC = 0x80000;
     constexpr u64 kSFD_NONBLOCK = 0x800;
-    (void)kSFD_NONBLOCK; // accepted but blocking-only in v0
+    if ((flags & ~(kSFD_CLOEXEC | kSFD_NONBLOCK)) != 0)
+        return kEINVAL;
     if (sigsetsize > sizeof(u64))
         return kEINVAL;
     u64 mask = 0;
@@ -702,46 +852,70 @@ i64 DoSignalfd(u64 fd, u64 user_mask, u64 sigsetsize, u64 flags)
     if (fd != static_cast<u64>(-1))
     {
         // Update existing signalfd's mask in place.
-        if (fd >= 16)
+        if (fd >= kLinuxFdCap)
             return kEINVAL;
         // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
-        fd = util::MaskedIndex(fd, 16);
-        if (p->linux_fds[fd].state != 8)
+        fd = util::MaskedIndex(fd, kLinuxFdCap);
+        core::LinuxFdAcquired acquired{};
+        if (!core::LinuxFdAcquire(p, static_cast<u32>(fd), 8, &acquired))
             return kEINVAL;
-        const u32 idx = p->linux_fds[fd].first_cluster;
+        const u32 idx = acquired.snapshot.first_cluster;
         if (idx >= kSignalfdPoolCap)
+        {
+            core::LinuxFdAcquiredRelease(&acquired);
             return kEINVAL;
+        }
         SignalfdPin pin(idx);
         if (!pin)
+        {
+            core::LinuxFdAcquiredRelease(&acquired);
             return kEINVAL;
-        sync::SpinLockGuard guard(g_async_lock);
-        if (pin.signalfd->in_use && !pin.signalfd->closing)
-            pin.signalfd->mask = mask;
-        return static_cast<i64>(fd);
+        }
+        bool updated = false;
+        {
+            sync::SpinLockGuard guard(g_async_lock);
+            if (pin.signalfd->in_use && !pin.signalfd->closing)
+            {
+                pin.signalfd->mask = mask;
+                updated = true;
+            }
+        }
+        core::LinuxFdAcquiredRelease(&acquired);
+        if (updated)
+        {
+            core::ProcessLinuxSignalNotifyWaiters(p);
+            LinuxPollEventWake();
+        }
+        return updated ? static_cast<i64>(fd) : kEINVAL;
     }
-    const i32 new_fd = core::LinuxFdAllocLowest(p, 3);
-    if (new_fd < 0)
-        return kEMFILE;
-    p->linux_fds[new_fd].state = 8; // reserve
     const i32 idx = SignalfdAlloc(mask);
     if (idx < 0)
-    {
-        p->linux_fds[new_fd].state = 0;
         return kENFILE;
-    }
-    p->linux_fds[new_fd].flags = 0;
-    p->linux_fds[new_fd].first_cluster = static_cast<u32>(idx);
-    p->linux_fds[new_fd].size = 0;
-    p->linux_fds[new_fd].offset = 0;
-    p->linux_fds[new_fd].path[0] = '\0';
-    if (!core::LinuxFdAttachKFile(p, static_cast<u32>(new_fd), /*kind=*/8, static_cast<u32>(idx), &SignalfdRelease))
+
+    auto kfile_result = ipc::KFileCreate(ipc::KFileKind::Signalfd, static_cast<u32>(idx), &SignalfdRelease, nullptr, 0);
+    if (!kfile_result.has_value())
     {
-        p->linux_fds[new_fd].state = 0;
         SignalfdRelease(static_cast<u32>(idx));
         return kENOMEM;
     }
-    if ((flags & kSFD_CLOEXEC) != 0)
-        core::LinuxFdSetCloexec(p, static_cast<u32>(new_fd), true);
+
+    core::Process::LinuxFd payload{};
+    payload.state = 8;
+    payload.first_cluster = static_cast<u32>(idx);
+    core::LinuxFdPrepared prepared{};
+    constexpr u32 kO_RDWR = 2;
+    const u32 status_flags = kO_RDWR | static_cast<u32>(flags & kSFD_NONBLOCK);
+    if (!core::LinuxFdPrepare(&prepared, payload, &kfile_result.value()->base, status_flags))
+    {
+        ipc::KObjectRelease(&kfile_result.value()->base);
+        return kENFILE;
+    }
+    const i32 new_fd = core::LinuxFdBindLowest(p, 3, &prepared, (flags & kSFD_CLOEXEC) != 0);
+    if (new_fd < 0)
+    {
+        core::LinuxFdPreparedRelease(&prepared);
+        return kEMFILE;
+    }
     arch::SerialWrite("[linux/signalfd] fd=");
     arch::SerialWriteHex(static_cast<u64>(new_fd));
     arch::SerialWrite(" mask=");
@@ -754,51 +928,55 @@ i64 DoSignalfd(u64 fd, u64 user_mask, u64 sigsetsize, u64 flags)
 // Epoll
 // ============================================================
 
-void EpollRetain(u32 idx)
-{
-    if (idx >= kEpollPoolCap)
-        return;
-    sync::SpinLockGuard guard(g_async_lock);
-    Epoll& e = g_epoll_pool[idx];
-    if (e.in_use && !e.closing)
-        ++e.refs;
-}
-
 void EpollRelease(u32 idx)
 {
     if (idx >= kEpollPoolCap)
         return;
-    sync::SpinLockGuard guard(g_async_lock);
-    Epoll& e = g_epoll_pool[idx];
-    if (!e.in_use || e.refs == 0)
-        return;
-    --e.refs;
-    if (e.refs == 0)
+
+    core::LinuxFdAcquired detached[kEpollWatchCap]{};
+    u32 detached_count = 0;
+    bool published_close = false;
     {
-        e.closing = true;
-        for (u32 w = 0; w < kEpollWatchCap; ++w)
-            e.watches[w].in_use = false;
-        if (e.pins == 0)
+        sync::SpinLockGuard guard(g_async_lock);
+        Epoll& e = g_epoll_pool[idx];
+        if (e.in_use && e.refs > 0)
         {
-            e.in_use = false;
-            e.closing = false;
-            e.watch_count = 0;
+            --e.refs;
+            if (e.refs == 0)
+            {
+                e.closing = true;
+                published_close = true;
+                for (u32 w = 0; w < kEpollWatchCap; ++w)
+                {
+                    EpollWatch& watch = e.watches[w];
+                    if (!watch.in_use)
+                        continue;
+                    detached[detached_count++] = watch.acquired;
+                    watch = {};
+                }
+                e.watch_count = 0;
+                if (e.pins == 0)
+                {
+                    e.in_use = false;
+                    e.closing = false;
+                }
+            }
         }
     }
+
+    for (u32 i = 0; i < detached_count; ++i)
+        core::LinuxFdAcquiredRelease(&detached[i]);
+    if (published_close)
+        LinuxPollEventWake();
 }
 
-u32 LinuxFdEpollReady(u32 fd, u32 interest_mask)
+u32 LinuxFdEpollReady(const core::LinuxFdAcquired& acquired, u32 interest_mask, core::Process* signal_owner)
 {
-    core::Process* p = core::CurrentProcess();
-    if (p == nullptr || fd >= 16)
-        return 0;
-    // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
-    fd = util::MaskedIndex32(fd, 16);
-    const auto& slot = p->linux_fds[fd];
-    if (slot.state == 0)
+    const auto& slot = acquired.snapshot;
+    if (acquired.snapshot.state == 0)
         return kEPOLLERR | kEPOLLHUP;
     u32 ready = 0;
-    switch (slot.state)
+    switch (acquired.snapshot.state)
     {
     case 1: // tty
         ready = (interest_mask & kEPOLLOUT);
@@ -842,30 +1020,36 @@ u32 LinuxFdEpollReady(u32 fd, u32 interest_mask)
         }
         break;
     }
-    case 8: // signalfd — never readable in v0
+    case 8: // signalfd
+    {
+        if ((interest_mask & kEPOLLIN) != 0 && signal_owner != nullptr)
+        {
+            SignalfdPin pin(slot.first_cluster);
+            if (pin)
+            {
+                sync::SpinLockGuard guard(g_async_lock);
+                const Signalfd& signal = *pin.signalfd;
+                if (signal.in_use && !signal.closing &&
+                    (core::ProcessLinuxSignalPendingSnapshot(signal_owner) & signal.mask) != 0)
+                    ready |= kEPOLLIN;
+            }
+        }
         break;
+    }
     case 9: // epoll instance — never readable through epoll
         break;
     case 12: // pidfd — readable iff target process has exited
         if (interest_mask & kEPOLLIN)
         {
-            const u64 target_pid = slot.first_cluster;
-            // Two terminal states count as "exited":
-            //   - target on g_zombies (DoExit done, not yet reaped)
-            //   - SchedProcessExists returns false (already
-            //     reaped or never existed)
-            // Unreaped-zombie is the common case for shells that
-            // poll a pidfd before wait4; reaped-already covers
-            // races where wait4 ran first.
-            if (sched::SchedIsPidZombie(target_pid))
-            {
+            // Resolve the exact KFile-owned identity. A missing/stale/corrupt
+            // target is an invalid watched descriptor, not evidence that some
+            // numeric PID exited. Readiness begins only after runtime teardown
+            // release-publishes the stable inert Exited header.
+            if (acquired.kfile_ref == nullptr)
+                break;
+            core::ScopedProcessRef target(LinuxPidfdAcquireTarget(acquired));
+            if (target && core::ProcessLifecycleLoad(target.Get()) == core::ProcessLifecycleState::Exited)
                 ready |= kEPOLLIN;
-            }
-            else
-            {
-                if (!sched::SchedProcessExists(target_pid))
-                    ready |= kEPOLLIN;
-            }
         }
         break;
     default:
@@ -883,32 +1067,38 @@ i64 DoEpollCreate(u64 size)
 i64 DoEpollCreate1(u64 flags)
 {
     constexpr u64 kEPOLL_CLOEXEC = 0x80000;
+    if ((flags & ~kEPOLL_CLOEXEC) != 0)
+        return kEINVAL;
     core::Process* p = core::CurrentProcess();
     if (p == nullptr)
         return kEPERM;
-    const i32 fd = core::LinuxFdAllocLowest(p, 3);
-    if (fd < 0)
-        return kEMFILE;
-    p->linux_fds[fd].state = 9; // reserve
     const i32 idx = EpollAlloc();
     if (idx < 0)
-    {
-        p->linux_fds[fd].state = 0;
         return kENFILE;
-    }
-    p->linux_fds[fd].flags = 0;
-    p->linux_fds[fd].first_cluster = static_cast<u32>(idx);
-    p->linux_fds[fd].size = 0;
-    p->linux_fds[fd].offset = 0;
-    p->linux_fds[fd].path[0] = '\0';
-    if (!core::LinuxFdAttachKFile(p, static_cast<u32>(fd), /*kind=*/9, static_cast<u32>(idx), &EpollRelease))
+
+    auto file_result = ipc::KFileCreate(ipc::KFileKind::Epoll, static_cast<u32>(idx), &EpollRelease, nullptr, 0);
+    if (!file_result.has_value())
     {
-        p->linux_fds[fd].state = 0;
         EpollRelease(static_cast<u32>(idx));
         return kENOMEM;
     }
-    if ((flags & kEPOLL_CLOEXEC) != 0)
-        core::LinuxFdSetCloexec(p, static_cast<u32>(fd), true);
+
+    core::Process::LinuxFd payload{};
+    payload.state = 9;
+    payload.first_cluster = static_cast<u32>(idx);
+    payload.kf_handle = ipc::kHandleInvalid;
+    core::LinuxFdPrepared prepared{};
+    if (!core::LinuxFdPrepare(&prepared, payload, &file_result.value()->base, 0))
+    {
+        ipc::KObjectRelease(&file_result.value()->base);
+        return kENOMEM;
+    }
+    const i32 fd = core::LinuxFdBindLowest(p, 3, &prepared, (flags & kEPOLL_CLOEXEC) != 0);
+    if (fd < 0)
+    {
+        core::LinuxFdPreparedRelease(&prepared);
+        return kEMFILE;
+    }
     arch::SerialWrite("[linux/epoll] fd=");
     arch::SerialWriteHex(fd);
     arch::SerialWrite(" pool_idx=");
@@ -936,106 +1126,146 @@ i64 DoEpollCtl(u64 epfd, u64 op, u64 fd, u64 user_event)
     constexpr u64 kEpollCtlDel = 2;
     constexpr u64 kEpollCtlMod = 3;
     core::Process* p = core::CurrentProcess();
-    if (p == nullptr || epfd >= 16 || fd >= 16)
+    if (p == nullptr || epfd >= kLinuxFdCap || fd >= kLinuxFdCap)
         return kEBADF;
-    // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
-    epfd = util::MaskedIndex(epfd, 16);
-    fd = util::MaskedIndex(fd, 16);
-    if (p->linux_fds[epfd].state != 9)
-        return kEBADF;
-    if (p->linux_fds[fd].state == 0)
-        return kEBADF;
-    const u32 idx = p->linux_fds[epfd].first_cluster;
-    if (idx >= kEpollPoolCap)
+    if (op != kEpollCtlAdd && op != kEpollCtlDel && op != kEpollCtlMod)
         return kEINVAL;
+    // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+    epfd = util::MaskedIndex(epfd, kLinuxFdCap);
+    fd = util::MaskedIndex(fd, kLinuxFdCap);
+
+    core::LinuxFdAcquired epoll_acquired{};
+    if (!core::LinuxFdAcquire(p, static_cast<u32>(epfd), 9, &epoll_acquired))
+        return kEBADF;
+    const u32 idx = epoll_acquired.snapshot.first_cluster;
+    if (idx >= kEpollPoolCap)
+    {
+        core::LinuxFdAcquiredRelease(&epoll_acquired);
+        return kEINVAL;
+    }
     EpollPin pin(idx);
+    core::LinuxFdAcquiredRelease(&epoll_acquired);
     if (!pin)
         return kEBADF;
-    EpollEvent ev{};
-    if (op != kEpollCtlDel && user_event != 0)
-    {
-        if (!mm::CopyFromUser(&ev, reinterpret_cast<const void*>(user_event), sizeof(ev)))
-            return kEFAULT;
-    }
-    sync::SpinLockGuard guard(g_async_lock);
-    Epoll& e = *pin.epoll;
-    if (!e.in_use || e.closing)
-    {
+
+    core::LinuxFdAcquired candidate{};
+    if (!core::LinuxFdAcquire(p, static_cast<u32>(fd), 0, &candidate))
         return kEBADF;
-    }
-    // Search for an existing watch on this fd.
-    i32 found = -1;
-    for (u32 w = 0; w < kEpollWatchCap; ++w)
-        if (e.watches[w].in_use && e.watches[w].fd == fd)
-        {
-            found = static_cast<i32>(w);
-            break;
-        }
-    if (op == kEpollCtlAdd)
+    // v0 has no nested-epoll cycle detector. Reject epoll sources instead of
+    // creating an uncollectable KFile reference cycle.
+    if (candidate.snapshot.state == 9)
     {
-        if (found >= 0)
+        core::LinuxFdAcquiredRelease(&candidate);
+        return kEINVAL;
+    }
+
+    EpollEvent ev{};
+    if (op != kEpollCtlDel)
+    {
+        if (user_event == 0 || !mm::CopyFromUser(&ev, reinterpret_cast<const void*>(user_event), sizeof(ev)))
         {
-            return -17; // -EEXIST
+            core::LinuxFdAcquiredRelease(&candidate);
+            return kEFAULT;
         }
-        for (u32 w = 0; w < kEpollWatchCap; ++w)
+    }
+
+    core::LinuxFdAcquired detached{};
+    i64 result = kEINVAL;
+    {
+        sync::SpinLockGuard guard(g_async_lock);
+        Epoll& e = *pin.epoll;
+        if (!e.in_use || e.closing)
         {
-            if (!e.watches[w].in_use)
+            result = kEBADF;
+        }
+        else
+        {
+            i32 found = -1;
+            for (u32 w = 0; w < kEpollWatchCap; ++w)
             {
-                e.watches[w].in_use = true;
-                e.watches[w].fd = static_cast<u32>(fd);
-                e.watches[w].events = ev.events;
-                e.watches[w].user_data = ev.data;
-                ++e.watch_count;
-                return 0;
+                const EpollWatch& watch = e.watches[w];
+                if (EpollWatchMatchesIdentity(watch, static_cast<u32>(fd), candidate))
+                {
+                    found = static_cast<i32>(w);
+                    break;
+                }
+            }
+
+            if (op == kEpollCtlAdd)
+            {
+                result = -17; // -EEXIST
+                if (found < 0)
+                {
+                    result = kENOMEM;
+                    for (u32 w = 0; w < kEpollWatchCap; ++w)
+                    {
+                        if (e.watches[w].in_use)
+                            continue;
+                        EpollWatch& watch = e.watches[w];
+                        watch.in_use = true;
+                        watch.source_fd = static_cast<u32>(fd);
+                        watch.events = ev.events;
+                        watch.user_data = ev.data;
+                        watch.acquired = candidate;
+                        candidate = {};
+                        ++e.watch_count;
+                        result = 0;
+                        break;
+                    }
+                }
+            }
+            else if (op == kEpollCtlDel)
+            {
+                result = kENOENT;
+                if (found >= 0)
+                {
+                    EpollWatch& watch = e.watches[static_cast<u32>(found)];
+                    detached = watch.acquired;
+                    watch = {};
+                    --e.watch_count;
+                    result = 0;
+                }
+            }
+            else
+            {
+                result = kENOENT;
+                if (found >= 0)
+                {
+                    EpollWatch& watch = e.watches[static_cast<u32>(found)];
+                    watch.events = ev.events;
+                    watch.user_data = ev.data;
+                    result = 0;
+                }
             }
         }
-        return kENOMEM;
     }
-    if (op == kEpollCtlDel)
-    {
-        if (found < 0)
-        {
-            return kENOENT;
-        }
-        e.watches[found].in_use = false;
-        --e.watch_count;
-        return 0;
-    }
-    if (op == kEpollCtlMod)
-    {
-        if (found < 0)
-        {
-            return kENOENT;
-        }
-        e.watches[found].events = ev.events;
-        e.watches[found].user_data = ev.data;
-        return 0;
-    }
-    return kEINVAL;
+
+    core::LinuxFdAcquiredRelease(&candidate);
+    core::LinuxFdAcquiredRelease(&detached);
+    if (result == 0)
+        LinuxPollEventWake();
+    return result;
 }
 
 i64 DoEpollWait(u64 epfd, u64 user_events, u64 maxevents, u64 timeout_ms)
 {
     core::Process* p = core::CurrentProcess();
-    if (p == nullptr || epfd >= 16)
+    if (p == nullptr || epfd >= kLinuxFdCap)
         return kEBADF;
-    // Spectre v1 nospec — mask BEFORE the linux_fds[] dereference
-    // (see syscall_io.cpp DoWrite). A mispredicted bounds branch can
-    // otherwise speculate an OOB load and leak via cache side-channel.
-    epfd = util::MaskedIndex(epfd, 16);
-    if (p->linux_fds[epfd].state != 9)
-        return kEBADF;
+    epfd = util::MaskedIndex(epfd, kLinuxFdCap);
     if (maxevents == 0)
         return kEINVAL;
     if (maxevents > 64)
         maxevents = 64;
-    const u32 idx = p->linux_fds[epfd].first_cluster;
+
+    core::LinuxFdAcquired epoll_acquired{};
+    if (!core::LinuxFdAcquire(p, static_cast<u32>(epfd), 9, &epoll_acquired))
+        return kEBADF;
+    ScopedLinuxFdAcquired epoll_receipt(&epoll_acquired);
+    const u32 idx = epoll_acquired.snapshot.first_cluster;
     if (idx >= kEpollPoolCap)
         return kEINVAL;
     // Convert timeout_ms (signed by caller convention; -1 = infinite)
-    EpollPin pin(idx);
-    if (!pin)
-        return kEBADF;
     // into a tick budget. 10 ms per tick, round up so a 1 ms timeout
     // still polls once before returning.
     bool infinite = false;
@@ -1053,81 +1283,94 @@ i64 DoEpollWait(u64 epfd, u64 user_events, u64 maxevents, u64 timeout_ms)
         deadline_tick = (ticks > static_cast<u64>(-1) - now) ? static_cast<u64>(-1) : now + ticks;
     }
     EpollEvent out_buf[64];
+    u64 expected_generation = 0;
     while (true)
     {
+        // Snapshot before evaluating readiness. Any publisher that races the
+        // scan either changes this value before enqueue or wakes the enqueued
+        // waiter afterwards.
+        const u64 observed_poll_sequence = LinuxPollEventSequenceSnapshot();
+        EpollPin pin(idx, expected_generation);
+        if (!pin)
+            return kEBADF;
+        if (expected_generation == 0)
+            expected_generation = pin.generation;
+
         u32 hits = 0;
+        bool snapshot_ok = true;
+        EpollWatch snap[kEpollWatchCap]{};
         auto lock_flags = sync::SpinLockAcquire(g_async_lock);
         Epoll& e = *pin.epoll;
-        if (!e.in_use || e.closing)
+        if (!e.in_use || e.closing || e.generation != expected_generation)
         {
             sync::SpinLockRelease(g_async_lock, lock_flags);
             return kEBADF;
         }
-        const u32 watch_count_snap = e.watch_count;
-        if (watch_count_snap == 0)
+        for (u32 w = 0; w < kEpollWatchCap; ++w)
         {
-            sync::SpinLockRelease(g_async_lock, lock_flags);
-            // Empty epoll set — block until timeout (Linux returns 0
-            // immediately if no watches, but we mimic the more useful
-            // "wait for the timeout" so callers can throttle loops
-            // through an empty epoll). Fall through to sleep.
+            const EpollWatch& watch = e.watches[w];
+            if (!watch.in_use)
+                continue;
+            snap[w].in_use = true;
+            snap[w].source_fd = watch.source_fd;
+            snap[w].events = watch.events;
+            snap[w].user_data = watch.user_data;
+            if (!core::LinuxFdAcquiredClone(&watch.acquired, &snap[w].acquired))
+            {
+                snapshot_ok = false;
+                break;
+            }
         }
-        else
+        sync::SpinLockRelease(g_async_lock, lock_flags);
+        // The retained fd receipt anchors this exact epoll instance. A pool pin
+        // is needed only while cloning its watch table and must never cross a
+        // readiness callback or scheduler block.
+        pin.Release();
+
+        if (snapshot_ok)
         {
-            EpollWatch snap[kEpollWatchCap]{};
             for (u32 w = 0; w < kEpollWatchCap; ++w)
-                snap[w] = e.watches[w];
-            sync::SpinLockRelease(g_async_lock, lock_flags);
-            for (u32 w = 0; w < kEpollWatchCap && hits < maxevents; ++w)
             {
                 if (!snap[w].in_use)
                     continue;
-                const u32 ready = LinuxFdEpollReady(snap[w].fd, snap[w].events);
-                if (ready != 0)
+                if (hits < maxevents)
                 {
-                    out_buf[hits].events = ready;
-                    out_buf[hits].data = snap[w].user_data;
-                    ++hits;
+                    const u32 ready = LinuxFdEpollReady(snap[w].acquired, snap[w].events, p);
+                    if (ready != 0)
+                    {
+                        out_buf[hits].events = ready;
+                        out_buf[hits].data = snap[w].user_data;
+                        ++hits;
+                    }
                 }
             }
         }
-        if (watch_count_snap > 0)
-        {
-            // Already released cli during snap copy — no-op here.
-        }
+
+        for (u32 w = 0; w < kEpollWatchCap; ++w)
+            core::LinuxFdAcquiredRelease(&snap[w].acquired);
+        if (!snapshot_ok)
+            return kEBADF;
+
         if (hits > 0)
         {
             if (!mm::CopyToUser(reinterpret_cast<void*>(user_events), out_buf, hits * sizeof(EpollEvent)))
                 return kEFAULT;
             return static_cast<i64>(hits);
         }
-        // If the watch set includes a pidfd, prefer blocking on
-        // the pidfd-exit waitqueue: any process exit wakes us
-        // immediately and we re-evaluate readiness. For watch
-        // sets without a pidfd, fall back to the timer cadence
-        // so unrelated fd state changes still get the 100 ms
-        // poll-and-recheck. Sub-GAP: only pidfd has a real wake
-        // source; pipes / sockets / timerfds / signalfds still
-        // rely on the timer cadence within this loop.
-        const bool has_pidfd = LinuxProcessHasPidfd(p);
+        u64 step = 10; // Preserve the v0 100 ms fallback for fd kinds without hooks.
         if (!infinite)
         {
             const u64 now = sched::SchedNowTicks();
             if (now >= deadline_tick)
                 return 0;
             const u64 remaining = deadline_tick - now;
-            const u64 step = (remaining < 1) ? 1 : ((remaining < 10) ? remaining : 10);
-            if (has_pidfd)
-                (void)sched::WaitQueueBlockTimeout(LinuxPidfdExitWq(), step);
-            else
-                sched::SchedSleepTicks(step);
+            step = remaining < 10 ? remaining : 10;
         }
-        else
+        const sched::WaitQueueBlockResult wait_result = WaitForStableSequenceTimeout(
+            LinuxPollEventWq(), LinuxPollEventSequenceAddress(), observed_poll_sequence, step);
+        if (wait_result == sched::WaitQueueBlockResult::Cancelled)
         {
-            if (has_pidfd)
-                (void)sched::WaitQueueBlockTimeout(LinuxPidfdExitWq(), 10);
-            else
-                sched::SchedSleepTicks(10); // 100 ms infinite-poll cadence
+            return kEINTR;
         }
     }
 }

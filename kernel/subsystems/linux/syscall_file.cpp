@@ -25,6 +25,7 @@
 #include "subsystems/linux/syscall_socket.h"
 
 #include "diag/fix_journal.h"
+#include "ipc/kfile.h"
 #include "proc/process.h"
 #include "fs/fat32.h"
 #include "mm/address_space.h"
@@ -39,6 +40,17 @@ namespace duetos::subsystems::linux::internal
 
 namespace
 {
+
+constexpr u32 LinuxOpenStatusFlags(u64 flags)
+{
+    // F_GETFL-visible access/status bits. Creation, path-resolution, and
+    // descriptor-only flags (notably O_CLOEXEC) never enter the shared OFD.
+    constexpr u64 kStatusMask = 0x3 /* O_ACCMODE */ | 0x400 /* O_APPEND */ | 0x800 /* O_NONBLOCK */ |
+                                0x1000 /* O_DSYNC */ | 0x2000 /* O_ASYNC */ | 0x4000 /* O_DIRECT */ |
+                                0x8000 /* O_LARGEFILE */ | 0x40000 /* O_NOATIME */ | 0x100000 /* __O_SYNC */ |
+                                0x200000; /* O_PATH */
+    return static_cast<u32>(flags & kStatusMask);
+}
 
 // Owner-aware release callback for dirfd KFiles. Fires from
 // `KFileDestroy` when the last reference (close / process exit /
@@ -236,32 +248,37 @@ i64 DoOpen(u64 user_path, u64 flags, u64 mode)
         if (dh < 0)
             return kENOMEM;
         const u32 dslot = static_cast<u32>(dh) - static_cast<u32>(core::Process::kWin32DirBase);
-        const i32 fd = core::LinuxFdAllocLowest(p, 3);
-        if (fd < 0)
+        auto kfile_result = ::duetos::ipc::KFileCreateWithOwner(::duetos::ipc::KFileKind::DirSnapshot, dslot,
+                                                                &DirfdReleaseOwnerAware, p, nullptr, 0);
+        if (!kfile_result.has_value())
         {
             ::duetos::subsystems::win32::SysDirClose(p, static_cast<u64>(dh));
-            return kEMFILE;
+            return kENOMEM;
         }
-        p->linux_fds[fd].state = 11;
-        p->linux_fds[fd].first_cluster = dslot;
-        p->linux_fds[fd].size = 0;
-        p->linux_fds[fd].offset = 0;
-        p->linux_fds[fd].path[0] = '\0';
+
+        core::Process::LinuxFd payload{};
+        payload.state = 11;
+        payload.first_cluster = dslot;
+        core::LinuxFdPrepared prepared{};
         // Attach a KFile sidecar so close / fork-then-close /
         // process-exit all route through the unified handle table.
         // The owner-aware release fires `SysDirClose(p, ...)` once
         // per dirfd lifetime — same shape as the legacy DoClose
         // arm, but driven by KObject refcounting instead of an
         // open-coded per-state branch.
-        if (!core::LinuxFdAttachKFileOwned(p, static_cast<u32>(fd), /*kind=*/11, dslot, &DirfdReleaseOwnerAware))
+        if (!core::LinuxFdPrepare(&prepared, payload, &kfile_result.value()->base, LinuxOpenStatusFlags(flags)))
         {
-            ::duetos::subsystems::win32::SysDirClose(p, static_cast<u64>(dh));
-            p->linux_fds[fd].state = 0;
-            p->linux_fds[fd].first_cluster = 0;
-            return kENOMEM;
+            // Prepare leaves ownership with the caller on failure. Dropping
+            // the KFile runs the owner-aware dir-snapshot cleanup exactly once.
+            ::duetos::ipc::KObjectRelease(&kfile_result.value()->base);
+            return kENFILE;
         }
-        if ((flags & kO_CLOEXEC) != 0)
-            core::LinuxFdSetCloexec(p, static_cast<u32>(fd), true);
+        const i32 fd = core::LinuxFdBindLowest(p, 3, &prepared, (flags & kO_CLOEXEC) != 0);
+        if (fd < 0)
+        {
+            core::LinuxFdPreparedRelease(&prepared);
+            return kEMFILE;
+        }
         return static_cast<i64>(fd);
     }
     // Stamp the canary flag at open time — same wall the Win32
@@ -271,39 +288,42 @@ i64 DoOpen(u64 user_path, u64 flags, u64 mode)
     // those handles are by-construction not canaries; existing
     // files we just check.
     const bool open_canary = !pending_create && ::duetos::security::CanaryMatchesPath(leaf);
-    const i32 fd = core::LinuxFdAllocLowest(p, 3);
-    if (fd < 0)
-        return kEMFILE;
-    p->linux_fds[fd].state = 2;
+    core::Process::LinuxFd payload{};
+    payload.state = 2;
     u8 fd_flags = pending_create ? core::Process::kLinuxFdFlagPendingCreate : 0;
     if (open_canary)
         fd_flags |= core::Process::kLinuxFdFlagCanary;
-    p->linux_fds[fd].flags = fd_flags;
-    p->linux_fds[fd].first_cluster = entry.first_cluster;
-    p->linux_fds[fd].size = entry.size_bytes;
-    p->linux_fds[fd].offset = 0;
+    payload.flags = fd_flags;
+    payload.first_cluster = entry.first_cluster;
+    payload.size = entry.size_bytes;
     // Remember the (stripped) volume-relative path so
     // sys_write can call Fat32AppendAtPath on extend.
     u32 pi = 0;
-    while (leaf[pi] != 0 && pi + 1 < sizeof(p->linux_fds[fd].path))
+    while (leaf[pi] != 0 && pi + 1 < sizeof(payload.path))
     {
-        p->linux_fds[fd].path[pi] = leaf[pi];
+        payload.path[pi] = leaf[pi];
         ++pi;
     }
-    p->linux_fds[fd].path[pi] = 0;
-    if ((flags & kO_CLOEXEC) != 0)
-        core::LinuxFdSetCloexec(p, static_cast<u32>(fd), true);
+    payload.path[pi] = 0;
+
+    core::LinuxFdPrepared prepared{};
+    if (!core::LinuxFdPrepare(&prepared, payload, nullptr, LinuxOpenStatusFlags(flags)))
+        return kENFILE;
+    const i32 fd = core::LinuxFdBindLowest(p, 3, &prepared, (flags & kO_CLOEXEC) != 0);
+    if (fd < 0)
+    {
+        core::LinuxFdPreparedRelease(&prepared);
+        return kEMFILE;
+    }
     return static_cast<i64>(fd);
 }
 
 // Linux: close(fd). Marks the slot unused. No destructor work
 // for FAT32-backed regular files (snapshotted at open). For
 // pool-backed kinds the per-pool release is driven by the
-// slot's KFile sidecar (`kf_handle`): `LinuxFdClose` calls
-// `HandleTableRemove`, the resulting `KObjectRelease` fires
-// `KFileDestroy`, and that dispatches to the per-pool release
-// callback (e.g. `PipeReleaseRead`, or `DirfdReleaseOwnerAware`
-// for state 11) registered when the slot was created.
+// slot's retained KFile receipt: `LinuxFdUnbind` detaches table
+// ownership, then `LinuxFdDetachedRelease` fires `KFileDestroy`
+// and its per-pool callback after all table locks are gone.
 //
 // Every state-kind that owns a per-pool ref (3..10, 11, 12..15)
 // is now on the KFile path — there are no legacy explicit
@@ -318,15 +338,17 @@ i64 DoClose(u64 fd)
     // Spectre v1 nospec — see DoWrite for the rationale.
     fd = util::MaskedIndex(fd, 16);
     // fd 0/1/2 are reserved-tty, never file handles; refuse close.
-    if (fd < 3 || p->linux_fds[fd].state == 0)
+    if (fd < 3)
     {
         return kEBADF;
     }
 
-    // Centralised slot teardown — drops the KFile ref when a
-    // sidecar is attached (firing the per-pool release callback
-    // for migrated kinds, including dirfd's owner-aware variant).
-    core::LinuxFdClose(p, static_cast<u32>(fd));
+    // Centralised teardown returns ownership explicitly so pool
+    // callbacks cannot run beneath the fd-table lock.
+    core::LinuxFdDetached detached{};
+    if (!core::LinuxFdUnbind(p, static_cast<u32>(fd), &detached))
+        return kEBADF;
+    core::LinuxFdDetachedRelease(&detached);
     return 0;
 }
 
@@ -365,7 +387,10 @@ i64 DoFstat(u64 fd, u64 user_buf)
         return kEBADF;
     // Spectre v1 nospec — see DoWrite for the rationale.
     fd = util::MaskedIndex(fd, 16);
-    const auto state = p->linux_fds[fd].state;
+    core::LinuxFdAcquired acquired{};
+    if (!core::LinuxFdAcquire(p, static_cast<u32>(fd), 0, &acquired))
+        return kEBADF;
+    const auto state = acquired.snapshot.state;
     fs::fat32::DirEntry entry;
     for (u64 i = 0; i < sizeof(entry.name); ++i)
         entry.name[i] = 0;
@@ -380,18 +405,25 @@ i64 DoFstat(u64 fd, u64 user_buf)
         sbuf[25] = 0x21;
         // st_nlink=1 at 16:
         sbuf[16] = 1;
-        if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), sbuf, sizeof(sbuf)))
+        const bool copied = mm::CopyToUser(reinterpret_cast<void*>(user_buf), sbuf, sizeof(sbuf));
+        core::LinuxFdAcquiredRelease(&acquired);
+        if (!copied)
             return kEFAULT;
         return 0;
     }
     if (state != 2)
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEBADF;
+    }
     entry.attributes = 0;
-    entry.first_cluster = p->linux_fds[fd].first_cluster;
-    entry.size_bytes = p->linux_fds[fd].size;
+    entry.first_cluster = acquired.snapshot.first_cluster;
+    entry.size_bytes = acquired.snapshot.size;
     u8 sbuf[144];
     FillStatFromEntry(entry, sbuf);
-    if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), sbuf, sizeof(sbuf)))
+    const bool copied = mm::CopyToUser(reinterpret_cast<void*>(user_buf), sbuf, sizeof(sbuf));
+    core::LinuxFdAcquiredRelease(&acquired);
+    if (!copied)
         return kEFAULT;
     return 0;
 }

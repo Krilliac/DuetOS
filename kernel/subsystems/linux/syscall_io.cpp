@@ -48,6 +48,231 @@ namespace
 // write path so behaviour stays predictable across ABIs.
 constexpr u64 kLinuxIoMax = 4096;
 
+constexpr u32 kOAccmode = 0x3;
+constexpr u32 kOWronly = 0x1;
+constexpr u32 kOAppend = 0x400;
+constexpr u32 kONonblock = 0x800;
+
+bool SnapshotAcquiredNonblocking(const core::LinuxFdAcquired& acquired, bool* nonblocking_out)
+{
+    if (nonblocking_out == nullptr)
+        return false;
+    *nonblocking_out = false;
+    core::LinuxFdIoGuard guard{};
+    if (!core::LinuxFdIoGuardEnter(&acquired, &guard))
+        return false;
+    u32 status_flags = 0;
+    const bool valid = core::LinuxFdIoGuardGetStatusFlags(&guard, &status_flags);
+    core::LinuxFdIoGuardExit(&guard);
+    if (!valid)
+        return false;
+    *nonblocking_out = (status_flags & kONonblock) != 0;
+    return true;
+}
+
+i64 FinishRegularIo(core::LinuxFdIoGuard* guard, core::LinuxFdAcquired* acquired, i64 result)
+{
+    core::LinuxFdIoGuardExit(guard);
+    core::LinuxFdAcquiredRelease(acquired);
+    return result;
+}
+
+i64 FinishRegularWrite(core::Process* process, core::LinuxFdIoGuard* guard, core::LinuxFdAcquired* acquired,
+                       u64 written, i64 result)
+{
+    core::LinuxFdIoGuardExit(guard);
+    core::LinuxFdAcquiredRelease(acquired);
+    if (written != 0)
+        core::RecordFsWrite(process, written);
+    return result;
+}
+
+i64 ReadRegularAcquired(core::Process* process, u32 fd, core::LinuxFdAcquired* acquired, u64 user_buf, u64 len,
+                        bool positioned, u64 position)
+{
+    core::LinuxFdIoGuard guard{};
+    if (!core::LinuxFdIoGuardEnter(acquired, &guard))
+    {
+        core::LinuxFdAcquiredRelease(acquired);
+        return kEBADF;
+    }
+
+    core::Process::LinuxFd snapshot{};
+    u32 status_flags = 0;
+    if (!core::LinuxFdRefreshAcquired(process, fd, acquired, &guard, &snapshot) ||
+        !core::LinuxFdIoGuardGetStatusFlags(&guard, &status_flags))
+        return FinishRegularIo(&guard, acquired, kEBADF);
+    if ((status_flags & kOAccmode) == kOWronly)
+        return FinishRegularIo(&guard, acquired, kEBADF);
+    if (len == 0)
+        return FinishRegularIo(&guard, acquired, 0);
+
+    const auto* volume = fs::fat32::Fat32Volume(0);
+    if (volume == nullptr)
+        return FinishRegularIo(&guard, acquired, kEIO);
+
+    u8 scratch[kLinuxIoMax];
+    fs::fat32::DirEntry entry{};
+    entry.first_cluster = snapshot.first_cluster;
+    entry.size_bytes = snapshot.size;
+    const i64 total = fs::fat32::Fat32ReadFile(volume, &entry, scratch, sizeof(scratch));
+    if (total < 0)
+        return FinishRegularIo(&guard, acquired, kEIO);
+
+    u64 offset = position;
+    if (!positioned && !core::LinuxFdIoGuardGetOffset(&guard, &offset))
+        return FinishRegularIo(&guard, acquired, kEBADF);
+    const u64 size = static_cast<u64>(total);
+    if (offset >= size)
+        return FinishRegularIo(&guard, acquired, 0);
+
+    u64 to_copy = size - offset;
+    if (to_copy > len)
+        to_copy = len;
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), scratch + offset, to_copy))
+        return FinishRegularIo(&guard, acquired, kEFAULT);
+    if (!positioned && !core::LinuxFdIoGuardSetOffset(&guard, offset + to_copy))
+        return FinishRegularIo(&guard, acquired, kEBADF);
+    return FinishRegularIo(&guard, acquired, static_cast<i64>(to_copy));
+}
+
+i64 WriteRegularAcquired(core::Process* process, u32 fd, core::LinuxFdAcquired* acquired, u64 user_buf, u64 len,
+                         bool positioned, u64 position)
+{
+    // Canary is descriptor-local and immutable for the lifetime of this exact
+    // receipt, so trip the wall before taking the sleepable OFD I/O guard.
+    if ((acquired->snapshot.flags & core::Process::kLinuxFdFlagCanary) != 0)
+    {
+        ::duetos::security::CanaryTrip(acquired->snapshot.path, "write-existing");
+        core::LinuxFdAcquiredRelease(acquired);
+        return kEACCES;
+    }
+    if (!core::ProcessHasCap(process, core::kCapFsWrite))
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/io", "write: kCapFsWrite gate REFUSED -> EACCES; fd", fd);
+        core::RecordSandboxDenial(core::kCapFsWrite);
+        core::LinuxFdAcquiredRelease(acquired);
+        return kEACCES;
+    }
+
+    core::LinuxFdIoGuard guard{};
+    if (!core::LinuxFdIoGuardEnter(acquired, &guard))
+    {
+        core::LinuxFdAcquiredRelease(acquired);
+        return kEBADF;
+    }
+
+    core::Process::LinuxFd snapshot{};
+    u32 status_flags = 0;
+    if (!core::LinuxFdRefreshAcquired(process, fd, acquired, &guard, &snapshot) ||
+        !core::LinuxFdIoGuardGetStatusFlags(&guard, &status_flags))
+        return FinishRegularIo(&guard, acquired, kEBADF);
+    if ((status_flags & kOAccmode) == 0)
+        return FinishRegularIo(&guard, acquired, kEBADF);
+    if (len == 0)
+        return FinishRegularIo(&guard, acquired, 0);
+
+    const u64 size = snapshot.size;
+    u64 offset = position;
+    if (!positioned)
+    {
+        if (!core::LinuxFdIoGuardGetOffset(&guard, &offset))
+            return FinishRegularIo(&guard, acquired, kEBADF);
+        if ((status_flags & kOAppend) != 0)
+            offset = size;
+    }
+    if (offset > size)
+        return FinishRegularIo(&guard, acquired, kEINVAL);
+
+    u64 to_copy = len;
+    if (to_copy > kLinuxIoMax)
+        to_copy = kLinuxIoMax;
+    constexpr u64 kFat32MaxFileSize = static_cast<u64>(~u32(0));
+    if (to_copy > kFat32MaxFileSize - offset)
+        return FinishRegularIo(&guard, acquired, kEFBIG);
+
+    u8 kbuf[kLinuxIoMax];
+    if (!mm::CopyFromUser(kbuf, reinterpret_cast<const void*>(user_buf), to_copy))
+        return FinishRegularIo(&guard, acquired, kEFAULT);
+    const auto* volume = fs::fat32::Fat32Volume(0);
+    if (volume == nullptr)
+        return FinishRegularIo(&guard, acquired, kEIO);
+
+    u64 written = 0;
+    if (offset < size)
+    {
+        const u64 in_bounds_len = (size - offset < to_copy) ? (size - offset) : to_copy;
+        fs::fat32::DirEntry entry{};
+        entry.first_cluster = snapshot.first_cluster;
+        entry.size_bytes = snapshot.size;
+        const i64 count = fs::fat32::Fat32WriteInPlace(volume, &entry, offset, kbuf, in_bounds_len);
+        if (count < 0)
+            return FinishRegularIo(&guard, acquired, kEIO);
+        written = static_cast<u64>(count);
+        if (written < in_bounds_len)
+        {
+            if (!positioned && !core::LinuxFdIoGuardSetOffset(&guard, offset + written))
+                return FinishRegularWrite(process, &guard, acquired, written, kEBADF);
+            return FinishRegularWrite(process, &guard, acquired, written, static_cast<i64>(written));
+        }
+    }
+
+    bool clear_pending_create = false;
+    bool update_first_cluster = false;
+    u32 first_cluster = snapshot.first_cluster;
+    if (written < to_copy)
+    {
+        const u64 extend_len = to_copy - written;
+        i64 count = -1;
+        if ((snapshot.flags & core::Process::kLinuxFdFlagPendingCreate) != 0)
+        {
+            count = fs::fat32::Fat32CreateAtPath(volume, snapshot.path, kbuf + written, extend_len);
+            if (count >= 0)
+            {
+                clear_pending_create = true;
+                fs::fat32::DirEntry created{};
+                if (fs::fat32::Fat32LookupPath(volume, snapshot.path, &created))
+                {
+                    update_first_cluster = true;
+                    first_cluster = created.first_cluster;
+                }
+            }
+        }
+        else
+        {
+            count = fs::fat32::Fat32AppendAtPath(volume, snapshot.path, kbuf + written, extend_len);
+        }
+        if (count < 0)
+        {
+            if (!positioned && !core::LinuxFdIoGuardSetOffset(&guard, offset + written))
+                return FinishRegularWrite(process, &guard, acquired, written, kEBADF);
+            const i64 result = written != 0 ? static_cast<i64>(written) : kEIO;
+            return FinishRegularWrite(process, &guard, acquired, written, result);
+        }
+        written += static_cast<u64>(count);
+    }
+
+    const u64 final_end = offset + written;
+    core::LinuxFdRegularMetadataCommit commit{};
+    if (clear_pending_create)
+    {
+        commit.flags_mask = core::Process::kLinuxFdFlagPendingCreate;
+        commit.flags_value = 0;
+    }
+    commit.update_first_cluster = update_first_cluster;
+    commit.first_cluster = first_cluster;
+    commit.update_size = final_end > size;
+    commit.size = static_cast<u32>(commit.update_size ? final_end : size);
+    if ((commit.flags_mask != 0 || commit.update_first_cluster || commit.update_size) &&
+        !core::LinuxFdCommitRegularMetadataAcquired(process, fd, acquired, &guard, &commit))
+        return FinishRegularWrite(process, &guard, acquired, written,
+                                  written != 0 ? static_cast<i64>(written) : kEBADF);
+    if (!positioned && !core::LinuxFdIoGuardSetOffset(&guard, final_end))
+        return FinishRegularWrite(process, &guard, acquired, written,
+                                  written != 0 ? static_cast<i64>(written) : kEBADF);
+    return FinishRegularWrite(process, &guard, acquired, written, static_cast<i64>(written));
+}
+
 } // namespace
 
 // Linux: write(fd, buf, count). v0 implements fd=1 (stdout) and
@@ -81,154 +306,64 @@ i64 DoWrite(u64 fd, u64 user_buf, u64 len)
         return kEBADF;
     }
     core::Process* p = core::CurrentProcess();
+    if (p == nullptr)
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/io", "write: no Process -> EBADF; fd", fd);
+        return kEBADF;
+    }
     // Spectre v1 nospec: even though the runtime check above proves
     // fd < 16, the speculator could redirect through the branch and
     // dereference linux_fds[fd] for an OOB fd. Mask the index so the
     // speculative load is bounded to [0, 16). wiki/security/Linux-CVE-Audit.md
     // class N.
     fd = util::MaskedIndex(fd, 16);
-    if (p == nullptr || p->linux_fds[fd].state == 0)
+    core::LinuxFdAcquired acquired{};
+    if (!core::LinuxFdAcquire(p, static_cast<u32>(fd), 0, &acquired))
     {
         KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/io", "write: fd not open (state=0) -> EBADF; fd", fd);
         return kEBADF;
     }
+    const u8 state = acquired.snapshot.state;
     // Pipe-write end → dispatch to pipe pool.
-    if (p->linux_fds[fd].state == 4)
-        return PipeWrite(p->linux_fds[fd].first_cluster, user_buf, len);
+    if (state == 4)
+    {
+        const i64 result = PipeWrite(acquired.snapshot.first_cluster, user_buf, len);
+        core::LinuxFdAcquiredRelease(&acquired);
+        return result;
+    }
     // Eventfd → dispatch to eventfd pool (counter add).
-    if (p->linux_fds[fd].state == 5)
-        return EventfdWrite(p->linux_fds[fd].first_cluster, user_buf, len);
+    if (state == 5)
+    {
+        const i64 result = EventfdWrite(acquired.snapshot.first_cluster, user_buf, len);
+        core::LinuxFdAcquiredRelease(&acquired);
+        return result;
+    }
     // Socket → dispatch to socket layer.
-    if (p->linux_fds[fd].state == 6)
-        return SocketFdWrite(p->linux_fds[fd].first_cluster, user_buf, len);
+    if (state == 6)
+    {
+        const i64 result = SocketFdWrite(acquired.snapshot.first_cluster, user_buf, len);
+        core::LinuxFdAcquiredRelease(&acquired);
+        return result;
+    }
     // Pipe-read end / timerfd / signalfd / epoll / inotify — all
     // read-only fd kinds reject writes with -EBADF, matching Linux.
-    if (p->linux_fds[fd].state == 3 || p->linux_fds[fd].state == 7 || p->linux_fds[fd].state == 8 ||
-        p->linux_fds[fd].state == 9 || p->linux_fds[fd].state == 10 || p->linux_fds[fd].state == 12 ||
-        p->linux_fds[fd].state == 13 || p->linux_fds[fd].state == 14 || p->linux_fds[fd].state == 15)
+    if (state == 3 || state == 7 || state == 8 || state == 9 || state == 10 || state == 12 || state == 13 ||
+        state == 14 || state == 15)
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEBADF;
-    if (p->linux_fds[fd].state == 11)
+    }
+    if (state == 11)
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEISDIR;
-    if (p->linux_fds[fd].state != 2)
+    }
+    if (state != 2)
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEBADF;
-    // Canary wall — handle-stamped variant. Stamped at open
-    // time by `DoOpen`; closes the in-place-overwrite gap the
-    // O_CREAT-time check couldn't cover. CanaryTrip will flag
-    // the calling task for kill; we surface -EACCES so the
-    // caller's strerror is consistent with other denials.
-    if ((p->linux_fds[fd].flags & core::Process::kLinuxFdFlagCanary) != 0)
-    {
-        ::duetos::security::CanaryTrip(p->linux_fds[fd].path, "write-existing");
-        return kEACCES;
     }
-    // Subsystem isolation: file mutation requires kCapFsWrite —
-    // same gate the native ABI's SYS_FILE_WRITE enforces. Linux
-    // ELF binaries don't get to skip the gate by entering through
-    // their ABI front-end. See
-    // wiki/kernel/Subsystem-Isolation.md.
-    if (!core::ProcessHasCap(p, core::kCapFsWrite))
-    {
-        KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/io", "write: kCapFsWrite gate REFUSED -> EACCES; fd", fd);
-        core::RecordSandboxDenial(core::kCapFsWrite);
-        return kEACCES;
-    }
-
-    // File write. Three regions to consider:
-    //   [off, min(off+len, size))     — in-bounds: WriteInPlace
-    //   [max(off, size), off+len)     — extending: AppendAtPath
-    // When off > size (seek past EOF), v0 refuses — FAT32 has no
-    // sparse-file support and zeroing a gap would need an extra
-    // write path. musl's write-loop never seeks past EOF so this
-    // corner rarely matters.
-    const u64 size = p->linux_fds[fd].size;
-    const u64 off = p->linux_fds[fd].offset;
-    if (off > size)
-        return kEINVAL;
-    u64 to_copy = len;
-    if (to_copy > kLinuxIoMax)
-        to_copy = kLinuxIoMax;
-    // Per-call on the kernel stack, NOT process-shared static: the
-    // FAT32 write below can block/reschedule, so a file-scope
-    // buffer would let a concurrent write() from another process
-    // inject its bytes between CopyFromUser and the disk write.
-    u8 kbuf[kLinuxIoMax];
-    if (!mm::CopyFromUser(kbuf, reinterpret_cast<const void*>(user_buf), to_copy))
-        return kEFAULT;
-    const auto* v = fs::fat32::Fat32Volume(0);
-    if (v == nullptr)
-        return kEIO;
-
-    u64 written = 0;
-    // In-bounds portion.
-    if (off < size)
-    {
-        const u64 in_bounds_len = (size - off < to_copy) ? (size - off) : to_copy;
-        fs::fat32::DirEntry entry;
-        for (u64 i = 0; i < sizeof(entry.name); ++i)
-            entry.name[i] = 0;
-        entry.attributes = 0;
-        entry.first_cluster = p->linux_fds[fd].first_cluster;
-        entry.size_bytes = size;
-        const i64 n = fs::fat32::Fat32WriteInPlace(v, &entry, off, kbuf, in_bounds_len);
-        if (n < 0)
-            return kEIO;
-        written = static_cast<u64>(n);
-        if (written < in_bounds_len)
-        {
-            p->linux_fds[fd].offset = off + written;
-            return static_cast<i64>(written);
-        }
-    }
-    // Extend portion.
-    if (written < to_copy)
-    {
-        const u64 extend_len = to_copy - written;
-        // Fat32AppendAtPath appends to end-of-file; caller's
-        // offset + written MUST equal the current on-disk size.
-        // (True by construction: in-bounds code wrote up to size.)
-        // SPECIAL CASE: if the fd carries kLinuxFdFlagPendingCreate
-        // (O_CREAT-on-not-yet-existing), the file's dir entry
-        // doesn't exist on disk yet — route through
-        // Fat32CreateAtPath instead, which allocates the entry +
-        // first cluster + writes the bytes in one shot. Clear the
-        // flag so subsequent writes go through the normal append
-        // path.
-        i64 n = -1;
-        if (p->linux_fds[fd].flags & core::Process::kLinuxFdFlagPendingCreate)
-        {
-            n = fs::fat32::Fat32CreateAtPath(v, p->linux_fds[fd].path, kbuf + written, extend_len);
-            if (n >= 0)
-            {
-                p->linux_fds[fd].flags =
-                    static_cast<u8>(p->linux_fds[fd].flags & ~core::Process::kLinuxFdFlagPendingCreate);
-                // Re-look up the just-created entry so first_cluster
-                // is populated for subsequent in-bounds writes.
-                fs::fat32::DirEntry e;
-                if (fs::fat32::Fat32LookupPath(v, p->linux_fds[fd].path, &e))
-                    p->linux_fds[fd].first_cluster = e.first_cluster;
-            }
-        }
-        else
-        {
-            n = fs::fat32::Fat32AppendAtPath(v, p->linux_fds[fd].path, kbuf + written, extend_len);
-        }
-        if (n < 0)
-        {
-            p->linux_fds[fd].offset = off + written;
-            return written > 0 ? static_cast<i64>(written) : kEIO;
-        }
-        written += static_cast<u64>(n);
-        // Update the cached size — AppendAtPath / CreateAtPath just
-        // extended the on-disk size; our cached copy follows.
-        p->linux_fds[fd].size = static_cast<u32>(size + (to_copy - (size - off)));
-    }
-    p->linux_fds[fd].offset = off + written;
-    // Ransomware-rate guard. Same hook the Win32 SYS_FILE_WRITE
-    // path uses (see kernel/fs/file_route.cpp WriteForProcess).
-    // Subsystem isolation: a Linux ELF turning malicious has to
-    // pass the same byte-rate cap as a native or Win32 PE.
-    ::duetos::core::RecordFsWrite(p, written);
-    return static_cast<i64>(written);
+    return WriteRegularAcquired(p, static_cast<u32>(fd), &acquired, user_buf, len, false, 0);
 }
 
 // Linux: read(fd, buf, count).
@@ -254,90 +389,125 @@ i64 DoRead(u64 fd, u64 user_buf, u64 len)
     }
     // Spectre v1 nospec — see DoWrite for the rationale.
     fd = util::MaskedIndex(fd, 16);
+    core::LinuxFdAcquired acquired{};
+    if (!core::LinuxFdAcquire(p, static_cast<u32>(fd), 0, &acquired))
+        return kEBADF;
+    const u8 state = acquired.snapshot.state;
     // Pipe-read end → dispatch to pipe pool.
-    if (p->linux_fds[fd].state == 3)
-        return PipeRead(p->linux_fds[fd].first_cluster, user_buf, len);
+    if (state == 3)
+    {
+        const i64 result = PipeRead(acquired.snapshot.first_cluster, user_buf, len);
+        core::LinuxFdAcquiredRelease(&acquired);
+        return result;
+    }
     // Eventfd → dispatch to eventfd pool (counter read).
-    if (p->linux_fds[fd].state == 5)
-        return EventfdRead(p->linux_fds[fd].first_cluster, user_buf, len);
+    if (state == 5)
+    {
+        const i64 result = EventfdRead(acquired.snapshot.first_cluster, user_buf, len);
+        core::LinuxFdAcquiredRelease(&acquired);
+        return result;
+    }
     // Socket → dispatch to socket layer.
-    if (p->linux_fds[fd].state == 6)
-        return SocketFdRead(p->linux_fds[fd].first_cluster, user_buf, len);
+    if (state == 6)
+    {
+        const i64 result = SocketFdRead(acquired.snapshot.first_cluster, user_buf, len);
+        core::LinuxFdAcquiredRelease(&acquired);
+        return result;
+    }
     // Timerfd / signalfd → dispatch to async-I/O pools.
-    if (p->linux_fds[fd].state == 7)
-        return TimerfdRead(p->linux_fds[fd].first_cluster, user_buf, len);
-    if (p->linux_fds[fd].state == 8)
-        return SignalfdRead(p->linux_fds[fd].first_cluster, user_buf, len);
+    if (state == 7)
+    {
+        bool nonblocking = false;
+        if (!SnapshotAcquiredNonblocking(acquired, &nonblocking))
+        {
+            core::LinuxFdAcquiredRelease(&acquired);
+            return kEBADF;
+        }
+        const i64 result = TimerfdRead(acquired.snapshot.first_cluster, user_buf, len, nonblocking);
+        core::LinuxFdAcquiredRelease(&acquired);
+        return result;
+    }
+    if (state == 8)
+    {
+        bool nonblocking = false;
+        if (!SnapshotAcquiredNonblocking(acquired, &nonblocking))
+        {
+            core::LinuxFdAcquiredRelease(&acquired);
+            return kEBADF;
+        }
+        const i64 result = SignalfdRead(acquired.snapshot.first_cluster, user_buf, len, nonblocking);
+        core::LinuxFdAcquiredRelease(&acquired);
+        return result;
+    }
     // Epoll instance — Linux returns -EINVAL on read.
-    if (p->linux_fds[fd].state == 9)
+    if (state == 9)
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEINVAL;
+    }
     // Inotify instance → drain event ring.
-    if (p->linux_fds[fd].state == 10)
-        return InotifyRead(p->linux_fds[fd].first_cluster, user_buf, len);
+    if (state == 10)
+    {
+        bool nonblocking = false;
+        if (!SnapshotAcquiredNonblocking(acquired, &nonblocking))
+        {
+            core::LinuxFdAcquiredRelease(&acquired);
+            return kEBADF;
+        }
+        const i64 result = InotifyRead(acquired.snapshot.first_cluster, user_buf, len, nonblocking);
+        core::LinuxFdAcquiredRelease(&acquired);
+        return result;
+    }
     // Directory iterator — read() on a dirfd is an error in Linux;
     // callers must use getdents64 instead.
-    if (p->linux_fds[fd].state == 11)
+    if (state == 11)
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEISDIR;
+    }
     // pidfd — read is unsupported on Linux too.
-    if (p->linux_fds[fd].state == 12)
+    if (state == 12)
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEINVAL;
+    }
     // POSIX message queue — must use mq_timedreceive, not read.
-    if (p->linux_fds[fd].state == 13)
+    if (state == 13)
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEBADF;
+    }
     // memfd — read/write only via mmap in v0.
-    if (p->linux_fds[fd].state == 14)
+    if (state == 14)
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEBADF;
+    }
     // fanotify instance — drain event ring.
-    if (p->linux_fds[fd].state == 15)
-        return FanotifyRead(p->linux_fds[fd].first_cluster, user_buf, len);
+    if (state == 15)
+    {
+        bool nonblocking = false;
+        if (!SnapshotAcquiredNonblocking(acquired, &nonblocking))
+        {
+            core::LinuxFdAcquiredRelease(&acquired);
+            return kEBADF;
+        }
+        const i64 result = FanotifyRead(acquired.snapshot.first_cluster, user_buf, len, nonblocking);
+        core::LinuxFdAcquiredRelease(&acquired);
+        return result;
+    }
     // Pipe-write end is write-only.
-    if (p->linux_fds[fd].state == 4)
+    if (state == 4)
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEBADF;
-    if (p->linux_fds[fd].state != 2)
+    }
+    if (state != 2)
     {
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEBADF;
     }
-    if (len == 0)
-    {
-        return 0;
-    }
-    const auto* v = fs::fat32::Fat32Volume(0);
-    if (v == nullptr)
-    {
-        return kEIO;
-    }
-
-    // Per-call on the kernel stack, NOT process-shared static: the
-    // FAT32 read blocks/reschedules, so a shared buffer would let a
-    // concurrent read() from another process leak its file bytes
-    // into this caller via CopyToUser below.
-    u8 scratch[4096];
-    fs::fat32::DirEntry entry;
-    for (u64 i = 0; i < sizeof(entry.name); ++i)
-        entry.name[i] = 0;
-    entry.attributes = 0;
-    entry.first_cluster = p->linux_fds[fd].first_cluster;
-    entry.size_bytes = p->linux_fds[fd].size;
-    const i64 total = fs::fat32::Fat32ReadFile(v, &entry, scratch, sizeof(scratch));
-    if (total < 0)
-    {
-        return kEIO;
-    }
-    const u64 size = static_cast<u64>(total);
-    const u64 off = p->linux_fds[fd].offset;
-    if (off >= size)
-    {
-        return 0; // past-EOF
-    }
-    u64 to_copy = size - off;
-    if (to_copy > len)
-        to_copy = len;
-    if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), scratch + off, to_copy))
-    {
-        return kEFAULT;
-    }
-    p->linux_fds[fd].offset = off + to_copy;
-    return static_cast<i64>(to_copy);
+    return ReadRegularAcquired(p, static_cast<u32>(fd), &acquired, user_buf, len, false, 0);
 }
 
 // Linux: writev(fd, iov, iovcnt). Each iovec is two u64s: base
@@ -427,36 +597,77 @@ i64 DoLseek(u64 fd, i64 offset, u64 whence)
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || fd >= 16)
         return kEBADF;
-    if (p->linux_fds[fd].state == 1)
+    fd = util::MaskedIndex(fd, 16);
+    core::LinuxFdAcquired acquired{};
+    if (!core::LinuxFdAcquire(p, static_cast<u32>(fd), 0, &acquired))
+        return kEBADF;
+    if (acquired.snapshot.state == 1)
     {
         KLOG_DEBUG_AV(::duetos::core::LogArea::Linux, "linux/io", "lseek on tty -> ESPIPE; fd", fd);
+        core::LinuxFdAcquiredRelease(&acquired);
         return kESPIPE; // tty: can't seek
     }
-    if (p->linux_fds[fd].state != 2)
+    if (acquired.snapshot.state != 2)
     {
         KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/io", "lseek: fd not a regular file -> EBADF; fd", fd);
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEBADF;
     }
 
-    i64 new_off = 0;
+    core::LinuxFdIoGuard guard{};
+    if (!core::LinuxFdIoGuardEnter(&acquired, &guard))
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
+        return kEBADF;
+    }
+    core::Process::LinuxFd snapshot{};
+    if (!core::LinuxFdRefreshAcquired(p, static_cast<u32>(fd), &acquired, &guard, &snapshot))
+        return FinishRegularIo(&guard, &acquired, kEBADF);
+
+    u64 base = 0;
     switch (whence)
     {
     case 0:
-        new_off = offset;
         break;
     case 1:
-        new_off = static_cast<i64>(p->linux_fds[fd].offset) + offset;
+        if (!core::LinuxFdIoGuardGetOffset(&guard, &base))
+            return FinishRegularIo(&guard, &acquired, kEBADF);
         break;
     case 2:
-        new_off = static_cast<i64>(p->linux_fds[fd].size) + offset;
+        base = snapshot.size;
         break;
     default:
-        return kEINVAL;
+        return FinishRegularIo(&guard, &acquired, kEINVAL);
     }
-    if (new_off < 0)
-        return kEINVAL;
-    p->linux_fds[fd].offset = static_cast<u64>(new_off);
-    return new_off;
+
+    u64 new_offset = 0;
+    if (whence == 0)
+    {
+        if (offset < 0)
+            return FinishRegularIo(&guard, &acquired, kEINVAL);
+        new_offset = static_cast<u64>(offset);
+    }
+    else if (offset >= 0)
+    {
+        constexpr u64 kSignedOffsetMax = (~u64(0)) >> 1;
+        const u64 delta = static_cast<u64>(offset);
+        if (delta > kSignedOffsetMax - base)
+            return FinishRegularIo(&guard, &acquired, kEOVERFLOW);
+        new_offset = base + delta;
+    }
+    else
+    {
+        const u64 magnitude = static_cast<u64>(-(offset + 1)) + 1;
+        if (magnitude > base)
+            return FinishRegularIo(&guard, &acquired, kEINVAL);
+        new_offset = base - magnitude;
+        constexpr u64 kSignedOffsetMax = (~u64(0)) >> 1;
+        if (new_offset > kSignedOffsetMax)
+            return FinishRegularIo(&guard, &acquired, kEOVERFLOW);
+    }
+    if (!core::LinuxFdIoGuardSetOffset(&guard, new_offset))
+        return FinishRegularIo(&guard, &acquired, kEBADF);
+    return FinishRegularIo(&guard, &acquired, static_cast<i64>(new_offset));
 }
 
 // Linux: ioctl(fd, cmd, arg). Handle the three ioctls musl's
@@ -479,15 +690,17 @@ i64 DoIoctl(u64 fd, u64 cmd, u64 arg)
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || fd >= 16)
         return kEBADF;
-    if (p->linux_fds[fd].state == 0)
+    core::LinuxFdAcquired acquired{};
+    if (!core::LinuxFdAcquire(p, static_cast<u32>(fd), 0, &acquired))
     {
         KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/io", "ioctl: fd not open -> EBADF; fd", fd);
         return kEBADF;
     }
-    const bool is_tty = (p->linux_fds[fd].state == 1);
+    const bool is_tty = (acquired.snapshot.state == 1);
     if (!is_tty)
     {
         KLOG_DEBUG_AV(::duetos::core::LogArea::Linux, "linux/io", "ioctl: fd is not a tty -> ENOTTY; fd", fd);
+        core::LinuxFdAcquiredRelease(&acquired);
         return kENOTTY;
     }
     switch (cmd)
@@ -519,7 +732,9 @@ i64 DoIoctl(u64 fd, u64 cmd, u64 arg)
         t.c_cc[2] = 0x7F; // VERASE
         t.c_cc[3] = 0x15; // VKILL
         t.c_cc[4] = 0x04; // VEOF
-        if (!mm::CopyToUser(reinterpret_cast<void*>(arg), &t, sizeof(t)))
+        const bool copied = mm::CopyToUser(reinterpret_cast<void*>(arg), &t, sizeof(t));
+        core::LinuxFdAcquiredRelease(&acquired);
+        if (!copied)
             return kEFAULT;
         return 0;
     }
@@ -529,6 +744,7 @@ i64 DoIoctl(u64 fd, u64 cmd, u64 arg)
         // Accept + ignore. The cooked-mode / raw-mode distinction
         // has no observable effect on a serial-only tty today.
         (void)arg;
+        core::LinuxFdAcquiredRelease(&acquired);
         return 0;
     case kTIOCGWINSZ:
     {
@@ -541,7 +757,9 @@ i64 DoIoctl(u64 fd, u64 cmd, u64 arg)
         } w{};
         w.ws_row = 24;
         w.ws_col = 80;
-        if (!mm::CopyToUser(reinterpret_cast<void*>(arg), &w, sizeof(w)))
+        const bool copied = mm::CopyToUser(reinterpret_cast<void*>(arg), &w, sizeof(w));
+        core::LinuxFdAcquiredRelease(&acquired);
+        if (!copied)
             return kEFAULT;
         return 0;
     }
@@ -551,11 +769,14 @@ i64 DoIoctl(u64 fd, u64 cmd, u64 arg)
         // as the foreground pgid so shells' "am I in the fg?" test
         // resolves to yes.
         const i32 pgid = i32(p->pid);
-        if (!mm::CopyToUser(reinterpret_cast<void*>(arg), &pgid, sizeof(pgid)))
+        const bool copied = mm::CopyToUser(reinterpret_cast<void*>(arg), &pgid, sizeof(pgid));
+        core::LinuxFdAcquiredRelease(&acquired);
+        if (!copied)
             return kEFAULT;
         return 0;
     }
     default:
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEINVAL;
     }
 }
@@ -570,8 +791,10 @@ i64 DoFsync(u64 fd)
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || fd >= 16)
         return kEBADF;
-    if (p->linux_fds[fd].state == 0)
+    core::LinuxFdAcquired acquired{};
+    if (!core::LinuxFdAcquire(p, static_cast<u32>(fd), 0, &acquired))
         return kEBADF;
+    core::LinuxFdAcquiredRelease(&acquired);
     return 0;
 }
 i64 DoFdatasync(u64 fd)
@@ -580,9 +803,7 @@ i64 DoFdatasync(u64 fd)
 }
 
 // Linux: pread64(fd, buf, count, offset). Read at an explicit
-// offset without mutating the fd's position cursor. Implemented
-// as a save-restore around the existing offset — simplest way
-// to reuse DoRead without duplicating the FAT32 walk.
+// offset without mutating the shared open-file-description cursor.
 i64 DoPread64(u64 fd, u64 user_buf, u64 len, i64 offset)
 {
     if (fd >= 16)
@@ -592,11 +813,21 @@ i64 DoPread64(u64 fd, u64 user_buf, u64 len, i64 offset)
         return kEBADF;
     if (offset < 0)
         return kEINVAL;
-    const u64 saved = p->linux_fds[fd].offset;
-    p->linux_fds[fd].offset = static_cast<u64>(offset);
-    const i64 n = DoRead(fd, user_buf, len);
-    p->linux_fds[fd].offset = saved;
-    return n;
+    fd = util::MaskedIndex(fd, 16);
+    core::LinuxFdAcquired acquired{};
+    if (!core::LinuxFdAcquire(p, static_cast<u32>(fd), 0, &acquired))
+        return kEBADF;
+    if (acquired.snapshot.state == 11)
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
+        return kEISDIR;
+    }
+    if (acquired.snapshot.state != 2)
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
+        return kESPIPE;
+    }
+    return ReadRegularAcquired(p, static_cast<u32>(fd), &acquired, user_buf, len, true, static_cast<u64>(offset));
 }
 
 // Linux: pwrite64(fd, buf, count, offset). Mirror of pread64.
@@ -609,11 +840,21 @@ i64 DoPwrite64(u64 fd, u64 user_buf, u64 len, i64 offset)
         return kEBADF;
     if (offset < 0)
         return kEINVAL;
-    const u64 saved = p->linux_fds[fd].offset;
-    p->linux_fds[fd].offset = static_cast<u64>(offset);
-    const i64 n = DoWrite(fd, user_buf, len);
-    p->linux_fds[fd].offset = saved;
-    return n;
+    fd = util::MaskedIndex(fd, 16);
+    core::LinuxFdAcquired acquired{};
+    if (!core::LinuxFdAcquire(p, static_cast<u32>(fd), 0, &acquired))
+        return kEBADF;
+    if (acquired.snapshot.state == 11)
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
+        return kEISDIR;
+    }
+    if (acquired.snapshot.state != 2)
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
+        return kESPIPE;
+    }
+    return WriteRegularAcquired(p, static_cast<u32>(fd), &acquired, user_buf, len, true, static_cast<u64>(offset));
 }
 
 // =============================================================
@@ -765,11 +1006,19 @@ i64 DoSendfile(u64 out_fd, u64 in_fd, u64 user_offset, u64 count)
 // efficient than the spec asks). Caller's data lands.
 i64 DoSyncFileRange(u64 fd, u64 offset, u64 nbytes, u64 flags)
 {
-    (void)fd;
     (void)offset;
     (void)nbytes;
     (void)flags;
-    return DoSync();
+    core::Process* process = core::CurrentProcess();
+    if (process == nullptr || fd >= 16)
+        return kEBADF;
+    fd = util::MaskedIndex(fd, 16);
+    core::LinuxFdAcquired acquired{};
+    if (!core::LinuxFdAcquire(process, static_cast<u32>(fd), 0, &acquired))
+        return kEBADF;
+    const i64 result = DoSync();
+    core::LinuxFdAcquiredRelease(&acquired);
+    return result;
 }
 
 // fallocate(fd, mode, offset, len) — preallocate / punch /
@@ -787,30 +1036,68 @@ i64 DoFallocate(u64 fd, u64 mode, u64 offset, u64 len)
     auto* p = ::duetos::core::CurrentProcess();
     if (p == nullptr || fd >= 16)
         return kEBADF;
-    // Spectre v1 nospec — mirror every other linux_fds[] accessor so
-    // a speculative load past the bound can't leak adjacent state.
-    const u64 fd_masked = ::duetos::util::MaskedIndex(fd, 16);
-    auto& slot = p->linux_fds[fd_masked];
-    if (slot.state != 2 /*regular file*/)
-        return kEBADF;
     // Overflow-safe end computation. Without this, a caller passing
     // offset near u64-max with a small len would wrap `want_end` to
-    // a tiny value, bypass the `<= slot.size` check, and truncate
+    // a tiny value, bypass the cached-size check, and truncate
     // the file via Fat32TruncateAtPath(..., wrapped_end). Reject
     // before the add.
     if (len > 0 && offset > (~u64(0)) - len)
         return kEINVAL;
     const u64 want_end = offset + len;
-    if (want_end <= slot.size)
-        return 0; // already large enough; mode==0 spec is satisfied.
+
+    fd = ::duetos::util::MaskedIndex(fd, 16);
+    core::LinuxFdAcquired acquired{};
+    if (!core::LinuxFdAcquire(p, static_cast<u32>(fd), 0, &acquired))
+        return kEBADF;
+    if (acquired.snapshot.state != 2)
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
+        return kEBADF;
+    }
+    if ((acquired.snapshot.flags & core::Process::kLinuxFdFlagCanary) != 0)
+    {
+        ::duetos::security::CanaryTrip(acquired.snapshot.path, "fallocate-existing");
+        core::LinuxFdAcquiredRelease(&acquired);
+        return kEACCES;
+    }
+    if (!core::ProcessHasCap(p, core::kCapFsWrite))
+    {
+        core::RecordSandboxDenial(core::kCapFsWrite);
+        core::LinuxFdAcquiredRelease(&acquired);
+        return kEACCES;
+    }
+
+    core::LinuxFdIoGuard guard{};
+    if (!core::LinuxFdIoGuardEnter(&acquired, &guard))
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
+        return kEBADF;
+    }
+    core::Process::LinuxFd snapshot{};
+    u32 status_flags = 0;
+    if (!core::LinuxFdRefreshAcquired(p, static_cast<u32>(fd), &acquired, &guard, &snapshot) ||
+        !core::LinuxFdIoGuardGetStatusFlags(&guard, &status_flags))
+        return FinishRegularIo(&guard, &acquired, kEBADF);
+    if ((status_flags & kOAccmode) == 0)
+        return FinishRegularIo(&guard, &acquired, kEBADF);
+    if (want_end <= snapshot.size)
+        return FinishRegularIo(&guard, &acquired, 0);
+    if (want_end > static_cast<u64>(~u32(0)))
+        return FinishRegularIo(&guard, &acquired, kEFBIG);
     const auto* v = ::duetos::fs::fat32::Fat32Volume(0);
     if (v == nullptr)
-        return kENOENT;
-    const i64 rc = ::duetos::fs::fat32::Fat32TruncateAtPath(v, slot.path, want_end);
+        return FinishRegularIo(&guard, &acquired, kENOENT);
+    const i64 rc = ::duetos::fs::fat32::Fat32TruncateAtPath(v, snapshot.path, want_end);
     if (rc < 0)
-        return kEIO;
-    slot.size = static_cast<u32>(want_end);
-    return 0;
+        return FinishRegularIo(&guard, &acquired, kEIO);
+
+    core::LinuxFdRegularMetadataCommit commit{};
+    commit.update_size = true;
+    commit.size = static_cast<u32>(want_end);
+    const u64 growth = want_end - snapshot.size;
+    if (!core::LinuxFdCommitRegularMetadataAcquired(p, static_cast<u32>(fd), &acquired, &guard, &commit))
+        return FinishRegularWrite(p, &guard, &acquired, growth, kEBADF);
+    return FinishRegularWrite(p, &guard, &acquired, growth, 0);
 }
 
 } // namespace duetos::subsystems::linux::internal

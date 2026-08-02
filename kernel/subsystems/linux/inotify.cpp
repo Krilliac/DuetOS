@@ -20,6 +20,7 @@
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
+#include "ipc/kfile.h"
 #include "log/klog.h"
 #include "mm/paging.h"
 #include "proc/process.h"
@@ -29,6 +30,8 @@
 
 namespace duetos::subsystems::linux::internal
 {
+
+void LinuxPollEventWake();
 
 namespace
 {
@@ -73,6 +76,8 @@ struct InotifyInstance
     u32 tail;
     u32 count;
     u32 _pad3;
+    u64 generation;
+    u64 read_sequence;
     sched::WaitQueue read_wq;
 };
 
@@ -83,17 +88,20 @@ constinit sync::SpinLock g_inotify_lock = {
 struct InotifyPin
 {
     u32 idx;
+    u64 generation;
     InotifyInstance* instance;
 
-    explicit InotifyPin(u32 value) : idx(value), instance(nullptr)
+    explicit InotifyPin(u32 value, u64 expected_generation = 0) : idx(value), generation(0), instance(nullptr)
     {
         if (value >= kInotifyPoolCap)
             return;
         sync::SpinLockGuard guard(g_inotify_lock);
         InotifyInstance& inst = g_inotify_pool[value];
-        if (inst.in_use && !inst.closing)
+        if (inst.in_use && !inst.closing && inst.pins != ~0U &&
+            (expected_generation == 0 || inst.generation == expected_generation))
         {
             ++inst.pins;
+            generation = inst.generation;
             instance = &inst;
         }
     }
@@ -129,6 +137,30 @@ bool PathEqual(const char* a, const char* b)
     return *a == '\0' && *b == '\0';
 }
 
+void AdvanceReadSequenceLocked(InotifyInstance& inst)
+{
+    const u64 previous = __atomic_load_n(&inst.read_sequence, __ATOMIC_RELAXED);
+    if (previous != ~u64{0})
+        __atomic_store_n(&inst.read_sequence, previous + 1, __ATOMIC_RELEASE);
+}
+
+sched::WaitQueueBlockResult WaitForReadSequence(InotifyInstance& inst, u64 observed_sequence)
+{
+    if (observed_sequence == ~u64{0})
+        return sched::WaitQueueBlockTimeoutCancellable(&inst.read_wq, 1);
+    return sched::WaitQueueBlockIfSequenceUnchangedCancellable(&inst.read_wq, &inst.read_sequence, observed_sequence);
+}
+
+void WakeReadWaiters(InotifyInstance& inst)
+{
+    constexpr u64 kRflagsInterruptEnable = 1ULL << 9;
+    const bool interrupts_were_enabled = (arch::ReadRflags() & kRflagsInterruptEnable) != 0;
+    arch::Cli();
+    sched::WaitQueueWakeAll(&inst.read_wq);
+    if (interrupts_were_enabled)
+        arch::Sti();
+}
+
 void CopyPath(const char* src, char (&dst)[kInotifyPathCap])
 {
     u32 i = 0;
@@ -142,9 +174,11 @@ i32 InotifyAlloc()
     sync::SpinLockGuard guard(g_inotify_lock);
     for (u32 i = 0; i < kInotifyPoolCap; ++i)
     {
-        if (!g_inotify_pool[i].in_use)
+        if (!g_inotify_pool[i].in_use && g_inotify_pool[i].generation != ~u64{0})
         {
             InotifyInstance& inst = g_inotify_pool[i];
+            ++inst.generation;
+            AdvanceReadSequenceLocked(inst);
             inst.in_use = true;
             inst.closing = false;
             inst.refs = 1;
@@ -155,8 +189,6 @@ i32 InotifyAlloc()
             inst.head = 0;
             inst.tail = 0;
             inst.count = 0;
-            inst.read_wq.head = nullptr;
-            inst.read_wq.tail = nullptr;
             return static_cast<i32>(i);
         }
     }
@@ -201,6 +233,7 @@ void RingPushLocked(InotifyInstance& inst, i32 wd, u32 mask, const char* path)
     e.name_len = nlen;
     inst.head = (inst.head + 1) % kInotifyRingCap;
     ++inst.count;
+    AdvanceReadSequenceLocked(inst);
 }
 
 } // namespace
@@ -209,12 +242,14 @@ void InotifyPublish(const char* path, u32 mask)
 {
     if (path == nullptr || path[0] == '\0' || mask == 0)
         return;
+    u32 wake_mask = 0;
     auto lock_flags = sync::SpinLockAcquire(g_inotify_lock);
     for (u32 i = 0; i < kInotifyPoolCap; ++i)
     {
         InotifyInstance& inst = g_inotify_pool[i];
         if (!inst.in_use)
             continue;
+        bool published = false;
         // Fan out: any watch whose path is EITHER the full event
         // path OR the parent directory of the event path matches.
         // The subtree case is approximated by the parent-dir check:
@@ -231,6 +266,7 @@ void InotifyPublish(const char* path, u32 mask)
             if (PathEqual(watch.path, path))
             {
                 RingPushLocked(inst, watch.wd, mask, path);
+                published = true;
                 continue;
             }
             // Parent-of check: does watch.path == parent(path)?
@@ -246,7 +282,10 @@ void InotifyPublish(const char* path, u32 mask)
             if (parent_len == 0)
             {
                 if (watch.path[0] == '/' && watch.path[1] == '\0')
+                {
                     RingPushLocked(inst, watch.wd, mask, path);
+                    published = true;
+                }
                 continue;
             }
             // Normal case: watch.path must equal path[0..parent_len]
@@ -263,12 +302,22 @@ void InotifyPublish(const char* path, u32 mask)
                 ++ci;
             }
             if (match && watch.path[parent_len] == '\0')
+            {
                 RingPushLocked(inst, watch.wd, mask, path);
+                published = true;
+            }
         }
-        if (inst.count > 0)
-            sched::WaitQueueWakeAll(&inst.read_wq);
+        if (published)
+            wake_mask |= (1U << i);
     }
     sync::SpinLockRelease(g_inotify_lock, lock_flags);
+    for (u32 i = 0; i < kInotifyPoolCap; ++i)
+    {
+        if ((wake_mask & (1U << i)) != 0)
+            WakeReadWaiters(g_inotify_pool[i]);
+    }
+    if (wake_mask != 0)
+        LinuxPollEventWake();
     // Fan the same event out to fanotify subscribers. Lives outside
     // the inotify Cli/Sti window because fanotify owns its own.
     FanotifyPublishFromInotify(path, mask);
@@ -291,17 +340,20 @@ void InotifyRelease(u32 idx)
 {
     if (idx >= kInotifyPoolCap)
         return;
-    sync::SpinLockGuard guard(g_inotify_lock);
+    bool wake = false;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_inotify_lock);
     InotifyInstance& inst = g_inotify_pool[idx];
     if (!inst.in_use || inst.refs == 0)
     {
+        sync::SpinLockRelease(g_inotify_lock, flags);
         return;
     }
     --inst.refs;
     if (inst.refs == 0)
     {
-        sched::WaitQueueWakeAll(&inst.read_wq);
         inst.closing = true;
+        AdvanceReadSequenceLocked(inst);
+        wake = true;
         for (u32 w = 0; w < kInotifyWatchCap; ++w)
             inst.watches[w].in_use = false;
         if (inst.pins == 0)
@@ -313,70 +365,92 @@ void InotifyRelease(u32 idx)
             inst.tail = 0;
         }
     }
+    sync::SpinLockRelease(g_inotify_lock, flags);
+    if (wake)
+    {
+        WakeReadWaiters(inst);
+        LinuxPollEventWake();
+    }
 }
 
-i64 InotifyRead(u32 idx, u64 user_dst, u64 len)
+i64 InotifyRead(u32 idx, u64 user_dst, u64 len, bool nonblocking)
 {
     if (idx >= kInotifyPoolCap)
         return kEINVAL;
     if (len < 16)
         return kEINVAL;
-    InotifyPin pin(idx);
-    if (!pin)
-        return 0;
+    u64 expected_generation = 0;
     while (true)
     {
-        auto lock_flags = sync::SpinLockAcquire(g_inotify_lock);
-        InotifyInstance& inst = *pin.instance;
-        if (!inst.in_use || inst.closing)
+        u64 observed_sequence = 0;
+        bool should_wait = false;
         {
-            sync::SpinLockRelease(g_inotify_lock, lock_flags);
-            return 0;
+            InotifyPin pin(idx, expected_generation);
+            if (!pin)
+                return 0;
+            if (expected_generation == 0)
+                expected_generation = pin.generation;
+
+            const sync::IrqFlags lock_flags = sync::SpinLockAcquire(g_inotify_lock);
+            InotifyInstance& inst = *pin.instance;
+            if (!inst.in_use || inst.closing || inst.generation != expected_generation)
+            {
+                sync::SpinLockRelease(g_inotify_lock, lock_flags);
+                return 0;
+            }
+            observed_sequence = __atomic_load_n(&inst.read_sequence, __ATOMIC_ACQUIRE);
+            if (inst.count == 0)
+            {
+                sync::SpinLockRelease(g_inotify_lock, lock_flags);
+                if (nonblocking)
+                    return kEAGAIN;
+                should_wait = true;
+            }
+            else
+            {
+                // Copy as many events as fit in the user buffer.
+                u8 stage[256];
+                u64 emitted = 0;
+                while (inst.count > 0)
+                {
+                    const InotifyEvent& e = inst.ring[inst.tail];
+                    const u64 record = 16 + e.name_len;
+                    if (emitted + record > sizeof(stage) || emitted + record > len)
+                        break;
+                    u8* p = stage + emitted;
+                    const i32 wd = e.wd;
+                    const u32 mask = e.mask;
+                    const u32 cookie = e.cookie;
+                    const u32 name_len = e.name_len;
+                    for (u32 i = 0; i < 4; ++i)
+                        p[i] = static_cast<u8>((wd >> (i * 8)) & 0xFF);
+                    for (u32 i = 0; i < 4; ++i)
+                        p[4 + i] = static_cast<u8>((mask >> (i * 8)) & 0xFF);
+                    for (u32 i = 0; i < 4; ++i)
+                        p[8 + i] = static_cast<u8>((cookie >> (i * 8)) & 0xFF);
+                    for (u32 i = 0; i < 4; ++i)
+                        p[12 + i] = static_cast<u8>((name_len >> (i * 8)) & 0xFF);
+                    for (u32 i = 0; i < name_len; ++i)
+                        p[16 + i] = (i < kInotifyPathCap && e.name[i] != '\0') ? static_cast<u8>(e.name[i]) : 0;
+                    emitted += record;
+                    inst.tail = (inst.tail + 1) % kInotifyRingCap;
+                    --inst.count;
+                }
+                sync::SpinLockRelease(g_inotify_lock, lock_flags);
+                if (emitted == 0)
+                    return kEAGAIN;
+                if (!mm::CopyToUser(reinterpret_cast<void*>(user_dst), stage, emitted))
+                    return kEFAULT;
+                return static_cast<i64>(emitted);
+            }
         }
-        if (inst.count == 0)
+
+        if (should_wait)
         {
-            sched::WaitQueue* wq = &inst.read_wq;
-            sync::SpinLockRelease(g_inotify_lock, lock_flags);
-            arch::Cli();
-            (void)sched::WaitQueueBlockTimeout(wq, 5);
-            arch::Sti();
-            continue;
+            InotifyInstance& inst = g_inotify_pool[idx];
+            if (WaitForReadSequence(inst, observed_sequence) == sched::WaitQueueBlockResult::Cancelled)
+                return kEINTR;
         }
-        // Copy as many events as fit in the user buffer.
-        u8 stage[256];
-        u64 emitted = 0;
-        while (inst.count > 0)
-        {
-            const InotifyEvent& e = inst.ring[inst.tail];
-            const u64 record = 16 + e.name_len;
-            if (emitted + record > sizeof(stage) || emitted + record > len)
-                break;
-            // Pack: 16-byte header + name padded to e.name_len.
-            u8* p = stage + emitted;
-            const i32 wd = e.wd;
-            const u32 mask = e.mask;
-            const u32 cookie = e.cookie;
-            const u32 name_len = e.name_len;
-            for (u32 i = 0; i < 4; ++i)
-                p[i] = static_cast<u8>((wd >> (i * 8)) & 0xFF);
-            for (u32 i = 0; i < 4; ++i)
-                p[4 + i] = static_cast<u8>((mask >> (i * 8)) & 0xFF);
-            for (u32 i = 0; i < 4; ++i)
-                p[8 + i] = static_cast<u8>((cookie >> (i * 8)) & 0xFF);
-            for (u32 i = 0; i < 4; ++i)
-                p[12 + i] = static_cast<u8>((name_len >> (i * 8)) & 0xFF);
-            for (u32 i = 0; i < name_len; ++i)
-                p[16 + i] = (i < kInotifyPathCap && e.name[i] != '\0') ? static_cast<u8>(e.name[i]) : 0;
-            emitted += record;
-            inst.tail = (inst.tail + 1) % kInotifyRingCap;
-            --inst.count;
-        }
-        sync::SpinLockRelease(g_inotify_lock, lock_flags);
-        if (emitted == 0)
-            return kEAGAIN;
-        if (!mm::CopyToUser(reinterpret_cast<void*>(user_dst), stage, emitted))
-            return kEFAULT;
-        return static_cast<i64>(emitted);
     }
 }
 
@@ -393,33 +467,36 @@ i64 InotifyInit1(u64 flags)
 {
     constexpr u64 kIN_CLOEXEC = 0x80000;
     constexpr u64 kIN_NONBLOCK = 0x800;
-    (void)kIN_NONBLOCK; // accepted but blocking-only in v0
     core::Process* p = core::CurrentProcess();
     if (p == nullptr)
         return kEPERM;
-    const i32 fd = core::LinuxFdAllocLowest(p, 3);
-    if (fd < 0)
-        return kEMFILE;
-    p->linux_fds[fd].state = 10; // reserve
     const i32 idx = InotifyAlloc();
     if (idx < 0)
-    {
-        p->linux_fds[fd].state = 0;
         return kENFILE;
-    }
-    p->linux_fds[fd].flags = 0;
-    p->linux_fds[fd].first_cluster = static_cast<u32>(idx);
-    p->linux_fds[fd].size = 0;
-    p->linux_fds[fd].offset = 0;
-    p->linux_fds[fd].path[0] = '\0';
-    if (!core::LinuxFdAttachKFile(p, static_cast<u32>(fd), /*kind=*/10, static_cast<u32>(idx), &InotifyRelease))
+
+    auto kfile_result = ipc::KFileCreate(ipc::KFileKind::Inotify, static_cast<u32>(idx), &InotifyRelease, nullptr, 0);
+    if (!kfile_result.has_value())
     {
-        p->linux_fds[fd].state = 0;
         InotifyRelease(static_cast<u32>(idx));
         return kENOMEM;
     }
-    if ((flags & kIN_CLOEXEC) != 0)
-        core::LinuxFdSetCloexec(p, static_cast<u32>(fd), true);
+
+    core::Process::LinuxFd payload{};
+    payload.state = 10;
+    payload.first_cluster = static_cast<u32>(idx);
+    core::LinuxFdPrepared prepared{};
+    const u32 status_flags = static_cast<u32>(flags & kIN_NONBLOCK);
+    if (!core::LinuxFdPrepare(&prepared, payload, &kfile_result.value()->base, status_flags))
+    {
+        ipc::KObjectRelease(&kfile_result.value()->base);
+        return kENFILE;
+    }
+    const i32 fd = core::LinuxFdBindLowest(p, 3, &prepared, (flags & kIN_CLOEXEC) != 0);
+    if (fd < 0)
+    {
+        core::LinuxFdPreparedRelease(&prepared);
+        return kEMFILE;
+    }
     arch::SerialWrite("[linux/inotify] init fd=");
     arch::SerialWriteHex(static_cast<u64>(fd));
     arch::SerialWrite(" pool_idx=");
@@ -435,19 +512,33 @@ i64 DoInotifyAddWatch(u64 fd, u64 user_path, u64 mask)
         return kEBADF;
     // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
     fd = util::MaskedIndex(fd, 16);
-    if (p->linux_fds[fd].state != 10)
+    core::LinuxFdAcquired acquired{};
+    if (!core::LinuxFdAcquire(p, static_cast<u32>(fd), 10, &acquired))
         return kEBADF;
-    const u32 idx = p->linux_fds[fd].first_cluster;
+    const u32 idx = acquired.snapshot.first_cluster;
     if (idx >= kInotifyPoolCap)
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEINVAL;
+    }
     char path[kInotifyPathCap];
     const auto copy = mm::CopyUserCString(path, sizeof(path), reinterpret_cast<const void*>(user_path));
     if (copy.status == mm::UserStringCopyStatus::Fault || copy.status == mm::UserStringCopyStatus::BadArgument)
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEFAULT;
+    }
     if (copy.status == mm::UserStringCopyStatus::NoTerminator)
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
         return kENAMETOOLONG;
+    }
+    InotifyPin pin(idx);
+    core::LinuxFdAcquiredRelease(&acquired);
+    if (!pin)
+        return kEBADF;
     sync::SpinLockGuard guard(g_inotify_lock);
-    InotifyInstance& inst = g_inotify_pool[idx];
+    InotifyInstance& inst = *pin.instance;
     if (!inst.in_use)
     {
         return kEBADF;
@@ -490,13 +581,21 @@ i64 DoInotifyRmWatch(u64 fd, u64 wd_arg)
         return kEBADF;
     // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
     fd = util::MaskedIndex(fd, 16);
-    if (p->linux_fds[fd].state != 10)
+    core::LinuxFdAcquired acquired{};
+    if (!core::LinuxFdAcquire(p, static_cast<u32>(fd), 10, &acquired))
         return kEBADF;
-    const u32 idx = p->linux_fds[fd].first_cluster;
+    const u32 idx = acquired.snapshot.first_cluster;
     if (idx >= kInotifyPoolCap)
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEINVAL;
+    }
+    InotifyPin pin(idx);
+    core::LinuxFdAcquiredRelease(&acquired);
+    if (!pin)
+        return kEBADF;
     sync::SpinLockGuard guard(g_inotify_lock);
-    InotifyInstance& inst = g_inotify_pool[idx];
+    InotifyInstance& inst = *pin.instance;
     if (!inst.in_use)
     {
         return kEBADF;

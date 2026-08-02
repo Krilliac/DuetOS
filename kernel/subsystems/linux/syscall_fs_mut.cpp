@@ -77,8 +77,10 @@ i64 DoFchmod(u64 fd, u64 mode)
         return kEBADF;
     // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
     fd = util::MaskedIndex(fd, 16);
-    if (p->linux_fds[fd].state == 0)
+    core::LinuxFdAcquired acquired{};
+    if (!core::LinuxFdAcquire(p, static_cast<u32>(fd), 0, &acquired))
         return kEBADF;
+    core::LinuxFdAcquiredRelease(&acquired);
     return 0;
 }
 i64 DoChown(u64 user_path, u64 uid, u64 gid)
@@ -156,18 +158,45 @@ i64 DoFtruncate(u64 fd, u64 length)
         return kEBADF;
     // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
     fd = util::MaskedIndex(fd, 16);
-    if (p->linux_fds[fd].state != 2)
+    core::LinuxFdAcquired acquired{};
+    if (!core::LinuxFdAcquire(p, static_cast<u32>(fd), 2, &acquired))
         return kEBADF;
     if (!RequireFsWrite(p))
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEACCES;
+    }
+    core::LinuxFdIoGuard guard{};
+    if (!core::LinuxFdIoGuardEnter(&acquired, &guard))
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
+        return kEBADF;
+    }
     const auto* v = fs::fat32::Fat32Volume(0);
     if (v == nullptr)
+    {
+        core::LinuxFdIoGuardExit(&guard);
+        core::LinuxFdAcquiredRelease(&acquired);
         return kENOENT;
-    const i64 rc = fs::fat32::Fat32TruncateAtPath(v, p->linux_fds[fd].path, length);
+    }
+    const i64 rc = fs::fat32::Fat32TruncateAtPath(v, acquired.snapshot.path, length);
     if (rc < 0)
+    {
+        core::LinuxFdIoGuardExit(&guard);
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEIO;
-    // Keep the cached size in sync — a future read/write needs it.
-    p->linux_fds[fd].size = static_cast<u32>(length);
+    }
+    // Commit the shared OFD size; the exact live slot mirror is refreshed only
+    // if close/reuse has not replaced this descriptor generation.
+    core::LinuxFdRegularMetadataCommit commit{};
+    commit.update_size = true;
+    commit.size = static_cast<u32>(length);
+    const bool committed =
+        core::LinuxFdCommitRegularMetadataAcquired(p, static_cast<u32>(fd), &acquired, &guard, &commit);
+    core::LinuxFdIoGuardExit(&guard);
+    core::LinuxFdAcquiredRelease(&acquired);
+    if (!committed)
+        return kEIO;
     return 0;
 }
 
@@ -409,8 +438,10 @@ i64 DoUtimensat(i64 dirfd, u64 user_path, u64 user_times, u64 flags)
         return kEBADF;
     // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
     const u64 masked_dirfd = util::MaskedIndex(static_cast<u64>(dirfd), 16);
-    if (p->linux_fds[masked_dirfd].state == 0)
+    core::LinuxFdAcquired acquired{};
+    if (!core::LinuxFdAcquire(p, static_cast<u32>(masked_dirfd), 0, &acquired))
         return kEBADF;
+    core::LinuxFdAcquiredRelease(&acquired);
     return 0;
 }
 
