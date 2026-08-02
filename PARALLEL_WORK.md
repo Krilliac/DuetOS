@@ -3242,3 +3242,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Generation-safe
 - **Claimed**: 2026-08-02T00:20:14Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] net-mt7921-contract
+- **Session**: `Codex-MT7921Contract-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/drivers/net/mt7921_contract.h,kernel/drivers/net/mt7921_contract.cpp,tests/host/test_mt7921_contract.cpp,tools/test/test-mt7921-contract.py`
+- **Description**: Clean-room exact MT7921 PCI contract, bounded firmware/MCU/ring validation, and fail-closed bring-up state machine
+- **Claimed**: 2026-08-02T00:43:55Z
+- **Status**: IN PROGRESS
