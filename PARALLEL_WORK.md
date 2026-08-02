@@ -1171,13 +1171,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T21:14:42Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] exec-admission
+### [DONE] exec-admission
 - **Session**: `Codex-exec-admission`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/loader/exec_admission.h kernel/loader/exec_admission.cpp tests/host/test_exec_admission.cpp`
 - **Description**: Allocation-free frozen executable-plan admission seam with exact prepare consume cancel identity
 - **Claimed**: 2026-07-31T21:15:59Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T05:52:59Z
 
 ### [ACTIVE] host-msvc-kernel32-nls-test
 - **Session**: `Nathan-1841`
