@@ -3258,3 +3258,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Generation-bearing
 - **Claimed**: 2026-08-02T00:58:26Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] net-stack-tcp-generation-selftest-20260801
+- **Session**: `Codex-NetTcpGeneration-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/net/tcp_selftest.cpp`
+- **Description**: Update
+- **Claimed**: 2026-08-02T01:02:31Z
+- **Status**: IN PROGRESS
