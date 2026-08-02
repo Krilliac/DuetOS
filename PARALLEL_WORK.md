@@ -4130,3 +4130,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Recover
 - **Claimed**: 2026-08-02T12:39:13Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] kernel-service-package-build-graph-recovery-20260802
+- **Session**: `Codex-ProcessLifecycle-Recovery-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/CMakeLists.txt`
+- **Description**: Recover
+- **Claimed**: 2026-08-02T12:41:18Z
+- **Status**: IN PROGRESS
