@@ -3787,13 +3787,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T08:10:12Z
 - **Status**: COMPLETED @ 2026-08-02T08:48:47Z
 
-### [ACTIVE] service-exit-reap-ledger-fix-20260802
+### [DONE] service-exit-reap-ledger-fix-20260802
 - **Session**: `Codex-ServiceExitReapFix-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/core/service_exit_reap_ledger.h,kernel/core/service_exit_reap_ledger.cpp,tests/host/test_service_exit_reap_ledger.cpp,tools/test/test-service-exit-reap-ledger-contract.py`
 - **Description**: Repair
 - **Claimed**: 2026-08-02T08:48:00Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T09:54:50Z
 
 ### [DONE] ipc-foundation-publish-20260802
 - **Session**: `Codex-IPCFoundationPublish-20260802`
