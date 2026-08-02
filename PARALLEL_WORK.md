@@ -3530,3 +3530,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Remove generic Duplicate and Transfer rights from ServiceEndpoint handles and prove mint paths fail closed
 - **Claimed**: 2026-08-02T04:53:17Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] net-protocol-state-smp-p0-20260802
+- **Session**: `Nathan-596`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/net/firewall.h,kernel/net/firewall.cpp,kernel/net/ipv6.h,kernel/net/ipv6.cpp`
+- **Description**: IRQ-safe
+- **Claimed**: 2026-08-02T04:58:15Z
+- **Status**: IN PROGRESS
