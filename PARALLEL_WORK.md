@@ -1427,13 +1427,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T23:06:33Z
 - **Status**: COMPLETED @ 2026-08-01T00:07:22Z
 
-### [ACTIVE] native-syscall-policy-json
+### [DONE] native-syscall-policy-json
 - **Session**: `Nathan-663`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/build/gen-native-syscall-abi.py tools/test/test-native-syscall-idl.py docs/native-syscall-policy.json`
 - **Description**: Generate canonical machine-readable native syscall policy JSON with deterministic drift coverage
 - **Claimed**: 2026-07-31T23:06:45Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T03:14:42Z
 
 ### [DONE] service-lifecycle-broker-source
 - **Session**: `Codex-root-lifecycle`
