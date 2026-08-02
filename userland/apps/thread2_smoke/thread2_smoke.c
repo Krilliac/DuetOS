@@ -126,11 +126,16 @@ void __cdecl mainCRTStartup(void)
         if (r != WAIT_OBJECT_0)
             retirement_ok = FALSE;
 
-        /* GetExitCodeThread. */
+        /* GetExitCodeThread. Emit the verdict in ONE Out() call: the
+         * smoke harness greps for the exact contiguous line, and the
+         * old two-call split let a concurrently-logging CPU interleave
+         * a kernel line between prefix and verdict, breaking the match
+         * on an otherwise-passing run (observed 2026-08-02). */
         ExitCodeCanary completed = {EXIT_CANARY_BEFORE, EXIT_CANARY_UNTOUCHED, EXIT_CANARY_AFTER};
         BOOL gec = GetExitCodeThread(t, &completed.value);
-        Out("[thread2_smoke] GetExitCodeThread     = ");
-        Out(gec && completed.value == 0x42 && ExitCodeCanariesIntact(&completed) ? "PASS (0x42)\r\n" : "FAIL/STUB\r\n");
+        Out(gec && completed.value == 0x42 && ExitCodeCanariesIntact(&completed)
+                ? "[thread2_smoke] GetExitCodeThread     = PASS (0x42)\r\n"
+                : "[thread2_smoke] GetExitCodeThread     = FAIL/STUB\r\n");
         if (!gec || completed.value != 0x42 || !ExitCodeCanariesIntact(&completed) || g_ran == 0)
             retirement_ok = FALSE;
 

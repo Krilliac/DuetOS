@@ -398,9 +398,24 @@ void FlushAllAreas()
 
 // Line-sink entry point — called once per fully-formatted klog
 // line. Routes to the area's file based on the area bit.
-void LineSink(LogLevel /*level*/, LogArea area, const char* line, u32 line_len)
+void LineSink(LogLevel level, LogArea area, const char* line, u32 line_len)
 {
     if (g_in_flush || !g_installed || line == nullptr || line_len == 0)
+    {
+        return;
+    }
+    // Persist Info and above only. Debug builds emit a steady stream of
+    // [T]/[D] lines (policy ticks, DLL loader tracing, per-op counters);
+    // persisting them drives every area file across kLogSizeCap during a
+    // long profile, and the rotation that crossing triggers runs
+    // SYNCHRONOUSLY on whichever task logged the crossing line — inside
+    // the FAT32 mutex, for ~kLogSizeCap x (N+1) bytes of 4 KiB-chunk
+    // block I/O, on an append path that re-walks the file's whole
+    // cluster chain per call. Under KASAN that is minutes of invisible
+    // stall and it timed out the pe-threads smoke twice (2026-08-02).
+    // The in-memory ring still holds every level for BSOD tails and
+    // `inspect log`; only the on-disk copy is Info+.
+    if (level < LogLevel::Info)
     {
         return;
     }
