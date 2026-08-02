@@ -3946,3 +3946,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Register exact hosted reap-ledger target and thread linkage proof
 - **Claimed**: 2026-08-02T10:31:54Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] gui-send-transaction-recovery-20260802
+- **Session**: `Codex-GuiSendTransaction-Recovery-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/drivers/video/gui_send_transaction.h,kernel/drivers/video/gui_send_transaction.cpp,tests/host/test_gui_send_transaction.cpp`
+- **Description**: Audit and publish generation-safe synchronous GUI send transactions
+- **Claimed**: 2026-08-02T10:42:06Z
+- **Status**: IN PROGRESS
