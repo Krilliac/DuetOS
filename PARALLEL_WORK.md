@@ -3370,3 +3370,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Make
 - **Claimed**: 2026-08-02T02:33:59Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] ntdll-vm-abi-20260802
+- **Session**: `Codex-NtdllVmAbi-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `userland/libs/ntdll/ntdll.c,tools/test/test-ntdll-vm-abi-contract.py`
+- **Description**: Correct
+- **Claimed**: 2026-08-02T02:40:13Z
+- **Status**: IN PROGRESS
