@@ -68,7 +68,7 @@ bool AuthorityEquals(const ServiceRuntimeActivationAuthorityV1& left, const Serv
 {
     return left.stage == right.stage && left.lifecycle == right.lifecycle &&
            left.exit_observer == right.exit_observer && left.directory == right.directory &&
-           left.manifest_identity == right.manifest_identity &&
+           left.exit_reap_ledger == right.exit_reap_ledger && left.manifest_identity == right.manifest_identity &&
            left.manifest_authority_identity == right.manifest_authority_identity &&
            HashEquals(left.manifest_object_hash, right.manifest_object_hash) &&
            left.manifest_object_extent == right.manifest_object_extent &&
@@ -663,7 +663,8 @@ ServiceControlPlatformInitializeResultV1 InitializePlatform(ServiceControlPlatfo
         return fail(ServiceControlPlatformAdapterStatusV1::BrokerNotReady);
     }
     if (authority.stage == nullptr || authority.lifecycle == nullptr || authority.exit_observer == nullptr ||
-        authority.directory == nullptr || runtime_snapshot.service_count == 0 ||
+        authority.directory == nullptr || authority.exit_reap_ledger == nullptr ||
+        authority.exit_reap_ledger != ledger || runtime_snapshot.service_count == 0 ||
         runtime_snapshot.broker_epoch != broker.snapshot.broker_epoch ||
         runtime_snapshot.manifest_identity != authority.manifest_identity ||
         runtime_snapshot.manifest_authority_identity != authority.manifest_authority_identity ||
@@ -854,10 +855,11 @@ ServiceControlPlatformAdapterV1::ServiceControlPlatformAdapterV1()
 }
 
 #if !defined(DUETOS_HOST_TEST)
-ServiceControlPlatformInitializeResultV1 ServiceControlPlatformInstallKernelV1(ServiceExitReapLedger* ledger)
+ServiceControlPlatformInitializeResultV1 ServiceControlPlatformInstallKernelV1()
 {
-    return InitializePlatform(&g_kernel_service_control_platform, ServiceRuntimeKernelV1(), ledger,
-                              &kProductionOperations);
+    ServiceRuntimeV1* const runtime = ServiceRuntimeKernelV1();
+    return InitializePlatform(&g_kernel_service_control_platform, runtime,
+                              runtime == nullptr ? nullptr : &runtime->exit_reap_ledger, &kProductionOperations);
 }
 #else
 ServiceControlPlatformInitializeResultV1 ServiceControlPlatformInitializeForTestV1(

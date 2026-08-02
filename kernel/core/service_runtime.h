@@ -5,9 +5,10 @@
  *
  * The staging package remains owned by its boot storage.  This object owns the
  * independently synchronized lifecycle broker, exact process-exit observer,
- * endpoint pool, and authenticated directory that consume that package.  It
- * does not choose restart policy, parse user messages, start a Process, or
- * publish readiness.  Those are later adapters over this owner.
+ * endpoint pool, authenticated directory, and durable exit-reap ledger that
+ * consume that package.  It does not choose restart policy, parse user
+ * messages, start a Process, or publish readiness.  Those are later adapters
+ * over this owner.
  *
  * Initialization is a boot-only, one-shot transaction.  A failure after a
  * component becomes live leaves the complete owner terminally Failed and
@@ -19,6 +20,7 @@
 #include "core/service_bootstrap_stage.h"
 #include "core/service_directory.h"
 #include "core/service_exit_observer.h"
+#include "core/service_exit_reap_ledger.h"
 #include "core/service_lifecycle_broker.h"
 #include "util/types.h"
 
@@ -50,6 +52,7 @@ enum class ServiceRuntimeStatusV1 : u8
     ExitObserverInitializeFailed,
     EndpointOwnerInitializeFailed,
     DirectoryInitializeFailed,
+    ExitReapLedgerInitializeFailed,
     ExitObserverInstallFailed,
     NotInitialized,
     Failed,
@@ -70,6 +73,7 @@ struct ServiceRuntimeV1
     ServiceExitObserver exit_observer;
     ServiceEndpointOwner endpoint_owner;
     ServiceDirectory directory;
+    ServiceExitReapLedger exit_reap_ledger;
 };
 
 struct ServiceRuntimeInitializeResultV1
@@ -82,6 +86,7 @@ struct ServiceRuntimeInitializeResultV1
     ServiceExitObserverStatus exit_observer_status;
     ServiceEndpointStatus endpoint_status;
     ServiceDirectoryStatus directory_status;
+    ServiceExitReapStatus exit_reap_status;
 };
 
 struct [[nodiscard]] ServiceRuntimeDeferAcceptedProcessResultV1
@@ -111,6 +116,7 @@ struct ServiceRuntimeSnapshotV1
     u64 broker_epoch;
     u64 observer_epoch;
     u64 observer_event_sequence;
+    u32 exit_reap_live_rows;
     u64 stage_registry_identity;
 };
 
@@ -124,6 +130,7 @@ struct ServiceRuntimeActivationAuthorityV1
     ServiceLifecycleBroker* lifecycle;
     ServiceExitObserver* exit_observer;
     ServiceDirectory* directory;
+    ServiceExitReapLedger* exit_reap_ledger;
     u64 manifest_identity;
     u64 manifest_authority_identity;
     loader::Hash256 manifest_object_hash;

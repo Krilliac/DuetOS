@@ -1,4 +1,5 @@
 #include "core/service_bootstrap_live.h"
+#include "core/service_control_platform.h"
 
 #if !defined(DUETOS_HOST_TEST)
 #include "mm/frame_allocator.h"
@@ -220,6 +221,7 @@ ServiceBootstrapLiveResultV1 ServiceBootstrapLiveInitializeV1()
 {
     ServiceBootstrapLiveResultV1 result{};
     result.status = ServiceBootstrapLiveStatusV1::AlreadyAttempted;
+    result.platform_status = ServiceControlPlatformAdapterStatusV1::NullArgument;
     result.discard_status = ServiceBootstrapStageStatus::Ok;
     if (!BeginOneShotInitialize())
         return result;
@@ -280,6 +282,15 @@ ServiceBootstrapLiveResultV1 ServiceBootstrapLiveInitializeV1()
     result.status = ServiceBootstrapLiveStatusV1::CompatibilityRequired;
     g_service_bootstrap_live.last_status = static_cast<u32>(result.status);
     LiveStateStore(ServiceBootstrapLiveStateV1::RuntimeOpenCompatibilityRequired);
+
+    const ServiceControlPlatformInitializeResultV1 platform = ServiceControlPlatformInstallKernelV1();
+    result.platform_status = platform.status;
+    if (platform.status != ServiceControlPlatformAdapterStatusV1::Ok)
+    {
+        result.status = ServiceBootstrapLiveStatusV1::ServiceControlPlatformFailed;
+        g_service_bootstrap_live.last_status = static_cast<u32>(result.status);
+        LiveStateStore(ServiceBootstrapLiveStateV1::Failed);
+    }
     return result;
 }
 
@@ -493,6 +504,8 @@ const char* ServiceBootstrapLiveStatusNameV1(ServiceBootstrapLiveStatusV1 status
         return "runtime-failed";
     case ServiceBootstrapLiveStatusV1::RuntimeFailedStageDiscardFailed:
         return "runtime-failed-stage-discard-failed";
+    case ServiceBootstrapLiveStatusV1::ServiceControlPlatformFailed:
+        return "service-control-platform-failed";
     case ServiceBootstrapLiveStatusV1::NotInitialized:
         return "not-initialized";
     case ServiceBootstrapLiveStatusV1::Busy:

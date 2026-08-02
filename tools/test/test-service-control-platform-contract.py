@@ -29,6 +29,7 @@ class ServiceControlPlatformContract(unittest.TestCase):
         self.assertIn("runtime_inspect", init)
         self.assertIn("bind_authority", init)
         self.assertIn("broker_describe", init)
+        self.assertIn("authority.exit_reap_ledger != ledger", init)
         self.assertIn("ledger_inspect", init)
         self.assertIn("live_inspect", init)
         self.assertIn("StateStore(platform, ServiceControlPlatformAdapterStateV1::Open)", init)
@@ -63,6 +64,8 @@ class ServiceControlPlatformContract(unittest.TestCase):
         )
         for symbol in required:
             self.assertIn(symbol, SOURCE)
+        self.assertIn("&runtime->exit_reap_ledger", SOURCE)
+        self.assertIn("ServiceControlPlatformInstallKernelV1()", HEADER)
 
     def test_restage_and_ack_preserve_independent_exact_values(self) -> None:
         restage = body("ServiceControlPlatformStatusV1 RestageCallback(",

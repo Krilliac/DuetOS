@@ -443,7 +443,19 @@ struct StageFixture
                                                     static_cast<u32>(slots.size()))
                       .status,
                   ServiceBootstrapStageStatus::Ok);
-        EXPECT_EQ(ServiceRuntimeInitializeForTestV1(&service_runtime, &runtime).status, ServiceRuntimeStatusV1::Ok);
+        const ServiceRuntimeInitializeResultV1 initialized =
+            ServiceRuntimeInitializeForTestV1(&service_runtime, &runtime);
+        EXPECT_EQ(initialized.status, ServiceRuntimeStatusV1::Ok);
+        EXPECT_EQ(initialized.exit_reap_status, ServiceExitReapStatus::Ok);
+
+        ServiceExitReapLedgerSnapshot ledger{};
+        EXPECT_EQ(ServiceExitReapLedgerInspect(&service_runtime.exit_reap_ledger, &ledger), ServiceExitReapStatus::Ok);
+        EXPECT_EQ(ledger.state, ServiceExitReapLedgerState::Open);
+        EXPECT_EQ(ledger.live_rows, 0U);
+
+        ServiceRuntimeActivationAuthorityV1 authority{};
+        EXPECT_EQ(ServiceRuntimeBindActivationAuthorityV1(&service_runtime, &authority), ServiceRuntimeStatusV1::Ok);
+        EXPECT_TRUE(authority.exit_reap_ledger == &service_runtime.exit_reap_ledger);
     }
 };
 

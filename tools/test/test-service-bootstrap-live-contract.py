@@ -91,6 +91,7 @@ class ServiceBootstrapLiveContract(unittest.TestCase):
             "ServiceBootstrapStageGeneratedV1",
             "ServiceRuntimeInitializeKernelV1",
             "ServiceBootstrapLiveStateV1::RuntimeOpenCompatibilityRequired",
+            "ServiceControlPlatformInstallKernelV1()",
         )
         cursor = 0
         for token in order:
@@ -98,6 +99,17 @@ class ServiceBootstrapLiveContract(unittest.TestCase):
             self.assertGreaterEqual(found, 0, token)
             cursor = found + len(token)
         self.assertIn("__atomic_compare_exchange_n", SOURCE)
+
+    def test_service_control_install_observes_published_live_state_and_fails_terminally(self) -> None:
+        initialize = function_body(SOURCE, "ServiceBootstrapLiveInitializeV1")
+        publish = initialize.index("LiveStateStore(ServiceBootstrapLiveStateV1::RuntimeOpenCompatibilityRequired)")
+        install = initialize.index("ServiceControlPlatformInstallKernelV1()")
+        failure = initialize.index("ServiceBootstrapLiveStatusV1::ServiceControlPlatformFailed")
+        terminal = initialize.index("LiveStateStore(ServiceBootstrapLiveStateV1::Failed)", failure)
+        self.assertLess(publish, install)
+        self.assertLess(install, failure)
+        self.assertLess(failure, terminal)
+        self.assertIn("ServiceControlPlatformAdapterStatusV1 platform_status", HEADER)
 
     def test_runtime_failure_discards_only_still_private_stage(self) -> None:
         initialize = function_body(SOURCE, "ServiceBootstrapLiveInitializeV1")
