@@ -3379,13 +3379,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T02:40:13Z
 - **Status**: COMPLETED @ 2026-08-02T02:42:08Z
 
-### [ACTIVE] net-protocol-state-smp-20260802
+### [DONE] net-protocol-state-smp-20260802
 - **Session**: `Nathan-848`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/net/stack.h,kernel/net/stack.cpp,tests/host/test_net_protocol_state_smp.cpp,tools/test/test-net-protocol-state-sync-contract.py,wiki/networking/Network-Stack.md`
 - **Description**: IRQ-safe ARP UDP DNS NTP DHCP state with generation-revalidated snapshot commit and hostile hosted concurrency coverage
 - **Claimed**: 2026-08-02T02:47:10Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T05:37:03Z
 
 ### [DONE] service-package-ci-20260802
 - **Session**: `Codex-ServicePackageCI-20260802`
