@@ -29,6 +29,8 @@ namespace duetos::core
 
 inline constexpr u32 kServiceRuntimeVersion1 = 1;
 inline constexpr u32 kServiceRuntimeInitializedMarkerV1 = 0x53525631U; // "SRV1"
+inline constexpr u32 kServiceRuntimeExitReapAcquireBudgetV1 = 1;
+inline constexpr u32 kServiceRuntimeExitReapPumpStepBudgetV1 = 4;
 
 enum class ServiceRuntimeStateV1 : u32
 {
@@ -106,6 +108,16 @@ struct [[nodiscard]] ServiceRuntimeDriveDeferredAcceptedResultV1
     u32 pending_channels;
 };
 
+struct [[nodiscard]] ServiceRuntimeDriveExitReapResultV1
+{
+    // Subordinate statuses describe attempted component work only when the
+    // runtime owner itself revalidated as Ok.
+    ServiceRuntimeStatusV1 runtime_status;
+    ServiceExitReapStatus acquire_status;
+    ServiceExitObserverStatus observer_status;
+    ServiceExitReapPumpResult pump;
+};
+
 struct ServiceRuntimeSnapshotV1
 {
     ServiceRuntimeStateV1 state;
@@ -159,6 +171,14 @@ ServiceRuntimeDeferAcceptedProcessResultV1 ServiceRuntimeDeferAcceptedProcessKer
 // Busy retains every exact owner row for a later pass.
 // [task context, no scheduler/Process/runtime-admission lock held]
 ServiceRuntimeDriveDeferredAcceptedResultV1 ServiceRuntimeDriveDeferredAcceptedKernelV1();
+
+// Admit one pending exact exit event and fairly advance the durable reap
+// ledger. The fixed budgets bound scheduler-maintenance latency; now_ns must
+// use the same monotonic epoch as lifecycle activation and stop timestamps.
+// No ReadyForDelivery row is reported as pump work merely because it awaits a
+// userland acknowledgement.
+// [task context, no scheduler/Process/runtime-admission lock held]
+ServiceRuntimeDriveExitReapResultV1 ServiceRuntimeDriveExitReapKernelV1(u64 now_ns);
 #else
 // Host-only detached initialization.  It exercises the exact component
 // transaction but deliberately cannot mutate the production global observer.
@@ -168,6 +188,7 @@ ServiceRuntimeInitializeResultV1 ServiceRuntimeInitializeForTestV1(ServiceRuntim
 ServiceRuntimeDeferAcceptedProcessResultV1 ServiceRuntimeDeferAcceptedProcessForTestV1(ServiceRuntimeV1* runtime,
                                                                                        ProcessKey process);
 ServiceRuntimeDriveDeferredAcceptedResultV1 ServiceRuntimeDriveDeferredAcceptedForTestV1(ServiceRuntimeV1* runtime);
+ServiceRuntimeDriveExitReapResultV1 ServiceRuntimeDriveExitReapForTestV1(ServiceRuntimeV1* runtime, u64 now_ns);
 #endif
 
 ServiceRuntimeStatusV1 ServiceRuntimeInspectV1(const ServiceRuntimeV1* runtime, ServiceRuntimeSnapshotV1* snapshot_out);

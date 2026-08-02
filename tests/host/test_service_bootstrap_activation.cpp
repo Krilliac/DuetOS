@@ -847,6 +847,17 @@ void ExpectDirectoryUnpublished(const ServiceDirectory& directory)
 
 int main()
 {
+    // Maintenance never reaches partially initialized component storage. The
+    // runtime status gates the subordinate not-attempted statuses.
+    {
+        ServiceRuntimeV1 uninitialized{};
+        const ServiceRuntimeDriveExitReapResultV1 maintenance = ServiceRuntimeDriveExitReapForTestV1(&uninitialized, 1);
+        EXPECT_EQ(maintenance.runtime_status, ServiceRuntimeStatusV1::NotInitialized);
+        EXPECT_EQ(maintenance.acquire_status, ServiceExitReapStatus::NotInitialized);
+        EXPECT_EQ(maintenance.observer_status, ServiceExitObserverStatus::NotInitialized);
+        EXPECT_EQ(maintenance.pump.status, ServiceExitReapStatus::NotInitialized);
+    }
+
     // Dependency refusal is reversible: no VM/process work begins, the stage
     // returns to Staged with a consumed receipt generation, and the broker row
     // is byte-for-byte unstarted.
@@ -868,6 +879,14 @@ int main()
         EXPECT_EQ(empty_maintenance.endpoint_status, ServiceEndpointStatus::Ok);
         EXPECT_EQ(empty_maintenance.released_channels, 0U);
         EXPECT_EQ(empty_maintenance.pending_channels, 0U);
+        const ServiceRuntimeDriveExitReapResultV1 empty_exit_maintenance =
+            ServiceRuntimeDriveExitReapForTestV1(&fixture.service_runtime, 1);
+        EXPECT_EQ(empty_exit_maintenance.runtime_status, ServiceRuntimeStatusV1::Ok);
+        EXPECT_EQ(empty_exit_maintenance.acquire_status, ServiceExitReapStatus::NoEvent);
+        EXPECT_EQ(empty_exit_maintenance.observer_status, ServiceExitObserverStatus::NoEvent);
+        EXPECT_EQ(empty_exit_maintenance.pump.status, ServiceExitReapStatus::Ok);
+        EXPECT_EQ(empty_exit_maintenance.pump.steps_attempted, 0U);
+        EXPECT_EQ(empty_exit_maintenance.pump.rows_pending, 0U);
         FakePlatform fake{};
         fake.image_arena = &fixture.slot_fixtures[1].arena;
         auto platform = fake.Interface();
@@ -1351,15 +1370,39 @@ int main()
         EXPECT_EQ(pending.active_count, 1U);
         EXPECT_EQ(pending.pending_count, 1U);
         EXPECT_EQ(pending.event_sequence, 2ULL);
-        ServiceExitDequeueResult exit = ServiceExitObserverDequeue(&fixture.service_runtime.exit_observer);
-        EXPECT_EQ(exit.status, ServiceExitObserverStatus::Ok);
-        EXPECT_EQ(exit.event.receipt.process, fake.publication_key);
-        EXPECT_EQ(exit.event.instance, result.instance);
-        EXPECT_EQ(exit.event.exit_code, fake.fast_exit_code);
-        EXPECT_EQ(exit.event.failed, 1U);
-        EXPECT_EQ(ServiceExitObserverAcknowledge(&fixture.service_runtime.exit_observer, &exit.event.receipt),
-                  ServiceExitObserverStatus::Ok);
+
+        const ServiceRuntimeDriveExitReapResultV1 maintenance =
+            ServiceRuntimeDriveExitReapForTestV1(&fixture.service_runtime, 61);
+        EXPECT_EQ(maintenance.runtime_status, ServiceRuntimeStatusV1::Ok);
+        EXPECT_EQ(maintenance.acquire_status, ServiceExitReapStatus::Ok);
+        EXPECT_EQ(maintenance.observer_status, ServiceExitObserverStatus::Ok);
+        EXPECT_EQ(maintenance.pump.status, ServiceExitReapStatus::Ok);
+        EXPECT_EQ(maintenance.pump.steps_attempted, 3U);
+        EXPECT_EQ(maintenance.pump.lifecycle_committed, 1U);
+        EXPECT_EQ(maintenance.pump.directory_committed, 1U);
+        EXPECT_EQ(maintenance.pump.ready_transitions, 1U);
+        EXPECT_EQ(maintenance.pump.rows_pending, 0U);
         ExpectObserverEmpty(fixture.service_runtime.exit_observer, 2);
+
+        ServiceExitReapLedgerSnapshot ledger{};
+        EXPECT_EQ(ServiceExitReapLedgerInspect(&fixture.service_runtime.exit_reap_ledger, &ledger),
+                  ServiceExitReapStatus::Ok);
+        EXPECT_EQ(ledger.live_rows, 1U);
+        EXPECT_EQ(ledger.stage_counts[static_cast<u32>(ServiceExitReapRowStage::ReadyForDelivery)], 1U);
+
+        // A delivery-pending row is userland work, not scheduler maintenance
+        // work. An idle follow-up must neither advance nor request polling.
+        const ServiceRuntimeDriveExitReapResultV1 idle =
+            ServiceRuntimeDriveExitReapForTestV1(&fixture.service_runtime, 62);
+        EXPECT_EQ(idle.runtime_status, ServiceRuntimeStatusV1::Ok);
+        EXPECT_EQ(idle.acquire_status, ServiceExitReapStatus::NoEvent);
+        EXPECT_EQ(idle.observer_status, ServiceExitObserverStatus::NoEvent);
+        EXPECT_EQ(idle.pump.status, ServiceExitReapStatus::Ok);
+        EXPECT_EQ(idle.pump.steps_attempted, 0U);
+        EXPECT_EQ(idle.pump.rows_pending, 0U);
+        EXPECT_EQ(ServiceExitReapLedgerInspect(&fixture.service_runtime.exit_reap_ledger, &ledger),
+                  ServiceExitReapStatus::Ok);
+        EXPECT_EQ(ledger.live_rows, 1U);
 
         fake.ReapPublished();
         EXPECT_EQ(fixture.slot_fixtures[0].arena.live, 0U);

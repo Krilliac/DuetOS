@@ -83,6 +83,29 @@ class ServiceRuntimeOwnerContract(unittest.TestCase):
         self.assertIn("ServiceExitReapLedger* exit_reap_ledger", authority)
         self.assertIn("&runtime->exit_reap_ledger", bind)
 
+    def test_exit_reap_maintenance_is_bounded_ordered_and_clock_agnostic(self) -> None:
+        self.assertIn("kServiceRuntimeExitReapAcquireBudgetV1 = 1", HEADER)
+        self.assertIn("kServiceRuntimeExitReapPumpStepBudgetV1 = 4", HEADER)
+        drive = SOURCE[
+            SOURCE.index("ServiceRuntimeDriveExitReapResultV1 DriveExitReap(") :
+            SOURCE.index("ServiceRuntimeInitializeResultV1 InitializeRuntime")
+        ]
+        order = (
+            "ServiceRuntimeInspectV1",
+            "ServiceExitReapLedgerAcquireFromObserver",
+            "ServiceExitReapLedgerPump",
+        )
+        cursor = 0
+        for token in order:
+            found = drive.find(token, cursor)
+            self.assertGreaterEqual(found, 0, token)
+            cursor = found + len(token)
+        self.assertIn("attempt < kServiceRuntimeExitReapAcquireBudgetV1", drive)
+        self.assertIn("now_ns, kServiceRuntimeExitReapPumpStepBudgetV1", drive)
+        self.assertNotIn("MonotonicNs", drive)
+        self.assertIn("ServiceRuntimeDriveExitReapKernelV1(u64 now_ns)", HEADER + SOURCE)
+        self.assertIn("ServiceRuntimeDriveExitReapForTestV1(ServiceRuntimeV1* runtime, u64 now_ns)", HEADER + SOURCE)
+
     def test_no_runtime_policy_or_scheduler_entry(self) -> None:
         forbidden = (
             "SchedCreate",
