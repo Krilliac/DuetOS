@@ -3914,3 +3914,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Pin embedded reap ledger initialization and activation authority identity in hosted runtime fixture
 - **Claimed**: 2026-08-02T10:13:26Z
 - **Status**: COMPLETED @ 2026-08-02T10:16:23Z
+
+### [ACTIVE] service-exit-directory-binding-20260802
+- **Session**: `Codex-ServiceExitBinding-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/service_exit_observer.h,kernel/core/service_exit_observer.cpp,kernel/core/service_bootstrap_activation.cpp,kernel/core/service_exit_reap_ledger.h,kernel/core/service_exit_reap_ledger.cpp,kernel/core/service_control_platform.cpp,tests/host/test_service_exit_observer.cpp,tests/host/test_service_exit_reap_ledger.cpp,tests/host/test_service_bootstrap_activation.cpp,tools/test/test-service-exit-observer-contract.py,tools/test/test-service-exit-reap-ledger-contract.py,tools/test/test-service-publication-directory-contract.py,tools/test/test-service-bootstrap-activation-contract.py`
+- **Description**: Carry exact directory generation from joint publication through observer events into durable reap rows
+- **Claimed**: 2026-08-02T10:16:57Z
+- **Status**: IN PROGRESS
