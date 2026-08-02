@@ -3243,13 +3243,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T00:20:14Z
 - **Status**: COMPLETED @ 2026-08-02T00:57:35Z
 
-### [ACTIVE] net-mt7921-contract
+### [DONE] net-mt7921-contract
 - **Session**: `Codex-MT7921Contract-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/drivers/net/mt7921_contract.h,kernel/drivers/net/mt7921_contract.cpp,tests/host/test_mt7921_contract.cpp,tools/test/test-mt7921-contract.py`
 - **Description**: Clean-room exact MT7921 PCI contract, bounded firmware/MCU/ring validation, and fail-closed bring-up state machine
 - **Claimed**: 2026-08-02T00:43:55Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T01:24:42Z
 
 ### [ACTIVE] net-stack-tcp-generation-20260801
 - **Session**: `Codex-NetTcpGeneration-20260801`
