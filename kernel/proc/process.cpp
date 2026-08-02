@@ -1,5 +1,7 @@
 #include "proc/process.h"
 
+#include "core/service_exit_observer.h"
+#include "core/service_runtime.h"
 #include "ipc/kfile.h"
 #include "ipc/kobject.h"
 #include "arch/x86_64/cpu.h"
@@ -13,9 +15,12 @@
 #include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
 #include "fs/file_route.h"
+#include "fs/ramfs.h"
 #include "mm/address_space.h"
 #include "mm/kheap.h"
+#include "mm/paging.h"
 #include "net/socket.h"
+#include "proc/job.h"
 #include "util/string.h"
 #include "subsystems/linux/syscall_internal.h"
 #include "subsystems/win32/custom.h"
@@ -24,6 +29,7 @@
 #include "subsystems/win32/window_syscall.h"
 #include "sched/sched.h"
 #include "sync/spinlock.h"
+#include "syscall/service_endpoint_ingress.h"
 #include "log/klog.h"
 #include "core/panic.h"
 #include "loader/pe_loader.h"
@@ -65,57 +71,56 @@ u64 MintProcessKey()
     }
 }
 
-CapSet AtomicCapsSnapshot(const CapSet& caps)
-{
-    return CapSet{__atomic_load_n(&caps.bits, __ATOMIC_ACQUIRE)};
-}
+void StdinFocusClearIf(Process* process);
 
-void AtomicCapsGrant(CapSet& caps, Cap cap)
+void ReleaseProcessSecurityOwners(Process* process, const char* reason)
 {
-    if (cap == kCapNone || cap >= kCapCount)
-        return;
-    __atomic_fetch_or(&caps.bits, 1ULL << static_cast<u32>(cap), __ATOMIC_ACQ_REL);
-}
-
-CapSet AtomicCapsDropMask(CapSet& caps, u64 drop_mask)
-{
-    return CapSet{__atomic_fetch_and(&caps.bits, ~drop_mask, __ATOMIC_ACQ_REL)};
-}
-
-void ExpireCapLeasesLocked(Process* process)
-{
-    sync::SpinLockAssertHeld(process->cap_lock);
-    u64 lease_bits = AtomicCapsSnapshot(process->cap_leases).bits;
-    if (lease_bits == 0)
-        return;
-
-    const u64 now = duetos::time::MonotonicNs();
-    for (u32 cap_index = 1; cap_index < static_cast<u32>(kCapCount); ++cap_index)
+    if (AuthorizationContextKeyIsValid(process->authorization) && !AuthorizationRelease(&process->authorization))
     {
-        const u64 bit = 1ULL << cap_index;
-        if ((lease_bits & bit) == 0)
-            continue;
-
-        u64 deadline = __atomic_load_n(&process->cap_lease_deadline_ns[cap_index], __ATOMIC_ACQUIRE);
-        if (now != 0 && deadline != 0 && now < deadline)
-            continue;
-        if (__atomic_compare_exchange_n(&process->cap_lease_deadline_ns[cap_index], &deadline, 0, false,
-                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
-        {
-            __atomic_store_n(&process->cap_lease_generation[cap_index], 0, __ATOMIC_RELEASE);
-            AtomicCapsDropMask(process->cap_leases, bit);
-        }
+        PanicWithValue("core/process", reason, process->authorization.generation);
+    }
+    if (CredentialKeyIsValid(process->credentials) && !CredentialRelease(&process->credentials))
+    {
+        PanicWithValue("core/process", reason, process->credentials.generation);
     }
 }
 
-CapSet EffectiveCapsLocked(Process* process)
+void ReleaseProcessResourceDomainOwner(Process* process, const char* reason)
 {
-    sync::SpinLockAssertHeld(process->cap_lock);
-    ExpireCapLeasesLocked(process);
-    const CapSet caps = AtomicCapsSnapshot(process->caps);
-    const CapSet leases = AtomicCapsSnapshot(process->cap_leases);
-    const CapSet ceiling = AtomicCapsSnapshot(process->cap_ceiling);
-    return CapSet{(caps.bits | leases.bits) & ceiling.bits};
+    const ResourceDomainKey doomed = process->resource_domain;
+    process->resource_domain = kInvalidResourceDomainKey;
+    if (ResourceDomainKeyIsValid(doomed) && !ResourceDomainRelease(doomed))
+    {
+        PanicWithValue("core/process", reason, doomed.generation);
+    }
+}
+
+// Event sequences bridge an external predicate lock to g_sched_lock. Never
+// wrap one back onto an earlier observation: at UINT64_MAX the wait side uses
+// a bounded cancellable fallback and rescans instead.
+bool AdvanceStableEventSequenceLocked(u64* sequence)
+{
+    KASSERT(sequence != nullptr, "core/process", "null stable event sequence");
+    const u64 previous = __atomic_load_n(sequence, __ATOMIC_RELAXED);
+    if (previous == ~u64{0})
+        return false;
+    __atomic_store_n(sequence, previous + 1, __ATOMIC_RELEASE);
+    return true;
+}
+
+void AdvanceStableEventSequenceAtomic(u64* sequence)
+{
+    KASSERT(sequence != nullptr, "core/process", "null atomic stable event sequence");
+    u64 observed = __atomic_load_n(sequence, __ATOMIC_RELAXED);
+    while (observed != ~u64{0})
+    {
+        const u64 desired = observed + 1;
+        if (__atomic_compare_exchange_n(sequence, &observed, desired, /*weak=*/false, __ATOMIC_RELEASE,
+                                        __ATOMIC_RELAXED))
+        {
+            return;
+        }
+    }
 }
 
 } // namespace
@@ -124,11 +129,85 @@ CapSet ProcessCapsSnapshot(const Process* process)
 {
     if (process == nullptr)
         return CapSetEmpty();
-    Process* mutable_process = const_cast<Process*>(process);
-    const sync::IrqFlags flags = sync::SpinLockAcquire(mutable_process->cap_lock);
-    const CapSet effective = EffectiveCapsLocked(mutable_process);
-    sync::SpinLockRelease(mutable_process->cap_lock, flags);
-    return effective;
+    AuthorizationContextSnapshot snapshot{};
+    return AuthorizationSnapshot(process->authorization, duetos::time::MonotonicNs(), &snapshot) &&
+                   snapshot.state == AuthorizationContextState::Live
+               ? CapSet{snapshot.effective_bits}
+               : CapSetEmpty();
+}
+
+CredentialKey ProcessCredentialKeySnapshot(const Process* process)
+{
+    return process != nullptr ? process->credentials : kInvalidCredentialKey;
+}
+
+AuthorizationContextKey ProcessAuthorizationKeySnapshot(const Process* process)
+{
+    return process != nullptr ? process->authorization : kInvalidAuthorizationContextKey;
+}
+
+bool ProcessInspectCredentials(const Process* process, CredentialSnapshot* snapshot_out)
+{
+    if (snapshot_out == nullptr)
+        return false;
+    *snapshot_out = {};
+    return process != nullptr && CredentialInspectExact(process->credentials, snapshot_out) &&
+           snapshot_out->state == CredentialState::Live;
+}
+
+bool ProcessInspectAuthorization(const Process* process, AuthorizationContextSnapshot* snapshot_out)
+{
+    if (snapshot_out == nullptr)
+        return false;
+    *snapshot_out = {};
+    return process != nullptr &&
+           AuthorizationSnapshot(process->authorization, duetos::time::MonotonicNs(), snapshot_out) &&
+           snapshot_out->state == AuthorizationContextState::Live;
+}
+
+AuthorizationActionResult ProcessChargeExecutionTicks(Process* process, u64 ticks)
+{
+    if (process == nullptr)
+    {
+        return AuthorizationActionResult{false, false, false, AuthorizationAction::None,
+                                         kAuthorizationNoFsWriteWindow, 0};
+    }
+    return AuthorizationChargeTick(process->authorization, ticks);
+}
+
+u64 ProcessTickBudgetSnapshot(const Process* process)
+{
+    AuthorizationContextSnapshot snapshot{};
+    return ProcessInspectAuthorization(process, &snapshot) ? snapshot.tick_budget : 0;
+}
+
+u64 ProcessTicksUsedSnapshot(const Process* process)
+{
+    AuthorizationContextSnapshot snapshot{};
+    return ProcessInspectAuthorization(process, &snapshot) ? snapshot.ticks_used : 0;
+}
+
+u64 ProcessSandboxDenialCountSnapshot(const Process* process)
+{
+    AuthorizationContextSnapshot snapshot{};
+    return ProcessInspectAuthorization(process, &snapshot) ? snapshot.denial_count : 0;
+}
+
+bool ProcessCapsTrySnapshotNoExpire(const Process* process, CapSet* snapshot_out)
+{
+    if (snapshot_out == nullptr)
+        return false;
+    *snapshot_out = CapSetEmpty();
+    if (process == nullptr)
+        return false;
+
+    // Stop-loop diagnostics must not run lease expiry: it reads the live
+    // clock and mutates authority while another stopped CPU may own the lock.
+    AuthorizationContextSnapshot snapshot{};
+    if (!AuthorizationTrySnapshotNoExpire(process->authorization, &snapshot))
+        return false;
+    *snapshot_out = CapSet{snapshot.effective_bits};
+    return true;
 }
 
 u32 ProcessWin32ThreadHandleCount(const Process* process)
@@ -156,6 +235,7 @@ void ProcessPublishWin32ThreadExit(Process* process, u64 tid, u32 exit_code)
 {
     if (process == nullptr || tid == 0)
         return;
+    sched::WaitQueue* waiters_to_wake = nullptr;
     const sync::IrqFlags flags = sync::SpinLockAcquire(process->win32_thread_lock);
     for (u32 i = 0; i < Process::kWin32ThreadCap; ++i)
     {
@@ -166,6 +246,8 @@ void ProcessPublishWin32ThreadExit(Process* process, u64 tid, u32 exit_code)
             {
                 row.exit_code = exit_code;
                 row.exited = true;
+                (void)AdvanceStableEventSequenceLocked(&row.event_sequence);
+                waiters_to_wake = &row.waiters;
             }
             // CloseHandle on a running thread hides the public
             // handle but cannot recycle its TEB/TLS resource slot.
@@ -183,6 +265,8 @@ void ProcessPublishWin32ThreadExit(Process* process, u64 tid, u32 exit_code)
         }
     }
     sync::SpinLockRelease(process->win32_thread_lock, flags);
+    if (waiters_to_wake != nullptr)
+        sched::WaitQueueWakeAll(waiters_to_wake);
 }
 
 bool ProcessHasCap(const Process* process, Cap cap)
@@ -192,113 +276,44 @@ bool ProcessHasCap(const Process* process, Cap cap)
 
 bool ProcessCapsGrant(Process* process, Cap cap)
 {
-    if (process == nullptr || cap == kCapNone || cap >= kCapCount)
-        return false;
-    const sync::IrqFlags flags = sync::SpinLockAcquire(process->cap_lock);
-    const u64 bit = 1ULL << static_cast<u32>(cap);
-    if ((AtomicCapsSnapshot(process->cap_ceiling).bits & bit) == 0)
-    {
-        sync::SpinLockRelease(process->cap_lock, flags);
-        return false;
-    }
-    AtomicCapsGrant(process->caps, cap);
-    sync::SpinLockRelease(process->cap_lock, flags);
-    return true;
+    return process != nullptr && AuthorizationGrantDurable(process->authorization, cap);
 }
 
 bool ProcessCapsGrantLease(Process* process, Cap cap, u64 deadline_ns, u64 generation)
 {
-    if (process == nullptr || cap == kCapNone || cap >= kCapCount || deadline_ns == 0 || generation == 0)
-        return false;
-
-    const sync::IrqFlags flags = sync::SpinLockAcquire(process->cap_lock);
     const u64 now = duetos::time::MonotonicNs();
-    if (now == 0 || deadline_ns <= now)
-    {
-        sync::SpinLockRelease(process->cap_lock, flags);
-        return false;
-    }
-    const u64 bit = 1ULL << static_cast<u32>(cap);
-    if ((AtomicCapsSnapshot(process->cap_ceiling).bits & bit) == 0)
-    {
-        sync::SpinLockRelease(process->cap_lock, flags);
-        return false;
-    }
-    __atomic_store_n(&process->cap_lease_deadline_ns[static_cast<u32>(cap)], deadline_ns, __ATOMIC_RELEASE);
-    __atomic_store_n(&process->cap_lease_generation[static_cast<u32>(cap)], generation, __ATOMIC_RELEASE);
-    AtomicCapsGrant(process->cap_leases, cap);
-    sync::SpinLockRelease(process->cap_lock, flags);
-    return true;
+    return process != nullptr && AuthorizationGrantLease(process->authorization, cap, now, deadline_ns, generation);
 }
 
 bool ProcessCapsRevokeLease(Process* process, Cap cap, u64 expected_generation)
 {
-    if (process == nullptr || cap == kCapNone || cap >= kCapCount || expected_generation == 0)
-        return false;
-
-    const sync::IrqFlags flags = sync::SpinLockAcquire(process->cap_lock);
-    const u64 bit = 1ULL << static_cast<u32>(cap);
-    if ((AtomicCapsSnapshot(process->cap_leases).bits & bit) == 0 ||
-        __atomic_load_n(&process->cap_lease_generation[static_cast<u32>(cap)], __ATOMIC_ACQUIRE) != expected_generation)
-    {
-        sync::SpinLockRelease(process->cap_lock, flags);
-        return false;
-    }
-    __atomic_store_n(&process->cap_lease_deadline_ns[static_cast<u32>(cap)], 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&process->cap_lease_generation[static_cast<u32>(cap)], 0, __ATOMIC_RELEASE);
-    AtomicCapsDropMask(process->cap_leases, bit);
-    sync::SpinLockRelease(process->cap_lock, flags);
-    return true;
+    return process != nullptr && AuthorizationRevokeLease(process->authorization, cap, expected_generation);
 }
 
 CapSet ProcessCapCeilingSnapshot(const Process* process)
 {
     if (process == nullptr)
         return CapSetEmpty();
-    Process* mutable_process = const_cast<Process*>(process);
-    const sync::IrqFlags flags = sync::SpinLockAcquire(mutable_process->cap_lock);
-    const CapSet ceiling = AtomicCapsSnapshot(mutable_process->cap_ceiling);
-    sync::SpinLockRelease(mutable_process->cap_lock, flags);
-    return ceiling;
+    AuthorizationContextSnapshot snapshot{};
+    return ProcessInspectAuthorization(process, &snapshot) ? CapSet{snapshot.ceiling_bits} : CapSetEmpty();
 }
 
 CapSet ProcessCapsDisableMask(Process* process, u64 disable_mask)
 {
-    if (process == nullptr)
-        return CapSetEmpty();
-    const sync::IrqFlags flags = sync::SpinLockAcquire(process->cap_lock);
-    const CapSet before = EffectiveCapsLocked(process);
-    AtomicCapsDropMask(process->caps, disable_mask);
-    AtomicCapsDropMask(process->cap_leases, disable_mask);
-    for (u32 cap_index = 1; cap_index < static_cast<u32>(kCapCount); ++cap_index)
-    {
-        if ((disable_mask & (1ULL << cap_index)) == 0)
-            continue;
-        __atomic_store_n(&process->cap_lease_deadline_ns[cap_index], 0, __ATOMIC_RELEASE);
-        __atomic_store_n(&process->cap_lease_generation[cap_index], 0, __ATOMIC_RELEASE);
-    }
-    sync::SpinLockRelease(process->cap_lock, flags);
-    return before;
+    u64 before = 0;
+    return process != nullptr &&
+                   AuthorizationDisableMask(process->authorization, duetos::time::MonotonicNs(), disable_mask, &before)
+               ? CapSet{before}
+               : CapSetEmpty();
 }
 
 CapSet ProcessCapsDropMask(Process* process, u64 drop_mask)
 {
-    if (process == nullptr)
-        return CapSetEmpty();
-    const sync::IrqFlags flags = sync::SpinLockAcquire(process->cap_lock);
-    const CapSet before = EffectiveCapsLocked(process);
-    AtomicCapsDropMask(process->cap_ceiling, drop_mask);
-    AtomicCapsDropMask(process->cap_leases, drop_mask);
-    for (u32 cap_index = 1; cap_index < static_cast<u32>(kCapCount); ++cap_index)
-    {
-        if ((drop_mask & (1ULL << cap_index)) == 0)
-            continue;
-        __atomic_store_n(&process->cap_lease_deadline_ns[cap_index], 0, __ATOMIC_RELEASE);
-        __atomic_store_n(&process->cap_lease_generation[cap_index], 0, __ATOMIC_RELEASE);
-    }
-    AtomicCapsDropMask(process->caps, drop_mask);
-    sync::SpinLockRelease(process->cap_lock, flags);
-    return before;
+    u64 before = 0;
+    return process != nullptr && AuthorizationDropIrreversiblyWithPrevious(
+                                     process->authorization, duetos::time::MonotonicNs(), drop_mask, &before)
+               ? CapSet{before}
+               : CapSetEmpty();
 }
 
 bool ProcessCaptureSpawnAuthority(const Process* process, u64 required_mask, CapSet* child_caps_out,
@@ -307,15 +322,15 @@ bool ProcessCaptureSpawnAuthority(const Process* process, u64 required_mask, Cap
     if (process == nullptr || child_caps_out == nullptr || ceiling_out == nullptr || authority_out == nullptr)
         return false;
 
-    Process* mutable_process = const_cast<Process*>(process);
-    const sync::IrqFlags flags = sync::SpinLockAcquire(mutable_process->cap_lock);
-    const CapSet ceiling = AtomicCapsSnapshot(mutable_process->cap_ceiling);
-    const CapSet authority{EffectiveCapsLocked(mutable_process).bits & ceiling.bits};
-    const CapSet child_caps{AtomicCapsSnapshot(mutable_process->caps).bits & ceiling.bits};
+    AuthorizationContextSnapshot snapshot{};
+    if (!ProcessInspectAuthorization(process, &snapshot))
+        return false;
+    const CapSet ceiling{snapshot.ceiling_bits};
+    const CapSet authority{snapshot.effective_bits & snapshot.ceiling_bits};
+    const CapSet child_caps{snapshot.durable_bits & snapshot.ceiling_bits};
     *child_caps_out = child_caps;
     *ceiling_out = ceiling;
     *authority_out = authority;
-    sync::SpinLockRelease(mutable_process->cap_lock, flags);
 
     const u64 defined_mask = CapSetTrusted().bits;
     return required_mask != 0 && (required_mask & ~defined_mask) == 0 &&
@@ -342,28 +357,132 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     // carrying whatever was last in it — including the freed-payload
     // poison (0xDE) from the C2 frame-allocator patch. Several
     // embedded sub-structures (HandleTable kobj_handles, the
-    // win32_dirs[] table, linux_child_exits[]) hold a SpinLock or
+    // win32_dirs[] table, linux_child_relations[]) hold a SpinLock or
     // depend on zero-initialised state. Without this memset the
-    // `HandleTableDrain` call in ProcessRelease would lock-acquire
+    // `HandleTableDrain` call in Process runtime teardown would lock-acquire
     // a garbage SpinLock and spin forever — confirmed locally as
     // the cause of the qemu-smoke pe-* / ring3 / linux profiles
     // hanging at exactly the post-CleanupProcess marker, while the
     // smoke task slept waiting for a sentinel that never came.
     memset(p, 0, sizeof(Process));
 
-    // ProcessCreate can run concurrently on multiple CPUs. Mint one exact,
-    // non-wrapping incarnation and use it as the current legacy PID. A
-    // terminal namespace refuses creation instead of aliasing an earlier
-    // ProcessKey retained by a service or other long-lived authority.
+    // Establish resource-domain ownership before assigning a PID or exposing
+    // any partially initialized Process state. User-originated spawns inherit
+    // their parent's exact immutable domain; kernel roots receive an ordinary
+    // trusted or sandbox domain based on the filesystem-root trust boundary.
+    // Authenticated services replace this default only from their manifest-
+    // authenticated prepublication callback.
+    ResourceDomainKey resource_domain = kInvalidResourceDomainKey;
+    Process* spawn_parent = CurrentProcess();
+    bool have_resource_domain = false;
+    if (spawn_parent != nullptr)
+    {
+        have_resource_domain = ResourceDomainKeyIsValid(spawn_parent->resource_domain) &&
+                               ResourceDomainRetain(spawn_parent->resource_domain);
+        if (have_resource_domain)
+            resource_domain = spawn_parent->resource_domain;
+    }
+    else if (root == fs::RamfsSandboxRoot())
+    {
+        have_resource_domain = ResourceDomainCreateSandbox(as->frame_budget, &resource_domain);
+    }
+    else
+    {
+        have_resource_domain = ResourceDomainCreateTrusted(&resource_domain);
+    }
+    if (!have_resource_domain)
+    {
+        KLOG_ERROR("core/process", "ProcessCreate: resource-domain acquisition failed");
+        mm::KFree(p);
+        return nullptr;
+    }
+    p->resource_domain = resource_domain;
+
+    // Credentials are immutable ABI identity, never a translation of DuetOS
+    // caps. A normal child retains its parent's exact identity. Crossing from
+    // a trusted root into the sandbox root mints the fixed nobody identity;
+    // sandbox-to-trusted elevation is rejected independently by authorization
+    // provenance below. No user buffer, path spelling, PID, or manifest claim
+    // participates in either authority-bearing constructor.
+    p->credentials = kInvalidCredentialKey;
+    const bool sandbox_launch = root == fs::RamfsSandboxRoot();
+    bool have_credentials = false;
+    if (spawn_parent != nullptr && root == spawn_parent->root)
+    {
+        have_credentials = CredentialKeyIsValid(spawn_parent->credentials) &&
+                           CredentialRetain(spawn_parent->credentials);
+        if (have_credentials)
+            p->credentials = spawn_parent->credentials;
+    }
+    else if (sandbox_launch)
+    {
+        have_credentials = CredentialAuthorityCreateNobodySandbox(&p->credentials);
+    }
+    else
+    {
+        have_credentials = CredentialAuthorityCreateTrustedRoot(&p->credentials);
+    }
+    if (!have_credentials)
+    {
+        ReleaseProcessResourceDomainOwner(p, "credential failure resource-domain release failed");
+        KLOG_ERROR("core/process", "ProcessCreate: credential acquisition failed");
+        mm::KFree(p);
+        return nullptr;
+    }
+
+    // Authorization is an independent per-Process row. Children derive only
+    // durable bits and a subset ceiling from the parent's exact context;
+    // leases can authorize the outer spawn syscall but are never inherited.
+    // Kernel roots use one explicit trusted/sandbox constructor. This makes
+    // every Process creation failure-atomic without a mutable authority mirror.
+    p->authorization = kInvalidAuthorizationContextKey;
+    const CapSet bounded_caps{caps.bits & cap_ceiling.bits};
+    const AuthorizationLaunchProfile launch_profile = sandbox_launch ? AuthorizationLaunchProfile::Sandbox
+                                                                      : AuthorizationLaunchProfile::Trusted;
+    bool have_authorization = false;
+    if (spawn_parent != nullptr)
+    {
+        const u64 now_ns = duetos::time::MonotonicNs();
+        have_authorization = AuthorizationContextKeyIsValid(spawn_parent->authorization) &&
+                             AuthorizationDeriveForSpawn(spawn_parent->authorization, now_ns, 0, bounded_caps,
+                                                         cap_ceiling, tick_budget, launch_profile, &p->authorization);
+    }
+    else if (sandbox_launch)
+    {
+        have_authorization = AuthorizationCreateSandbox(bounded_caps, cap_ceiling, tick_budget, &p->authorization);
+    }
+    else
+    {
+        have_authorization = AuthorizationCreateTrusted(bounded_caps, cap_ceiling, tick_budget, &p->authorization);
+    }
+    if (!have_authorization)
+    {
+        ReleaseProcessSecurityOwners(p, "authorization failure credential release failed");
+        ReleaseProcessResourceDomainOwner(p, "authorization failure resource-domain release failed");
+        KLOG_ERROR("core/process", "ProcessCreate: authorization acquisition failed");
+        mm::KFree(p);
+        return nullptr;
+    }
+
+    // ProcessCreate can run concurrently on multiple CPUs. Mint one exact
+    // non-wrapping incarnation and use its current PID component for legacy
+    // scheduler lookup. Long-lived authorities carry the full ProcessKey.
     const u64 process_identity = MintProcessKey();
     if (process_identity == 0)
     {
+        ReleaseProcessSecurityOwners(p, "PID exhaustion security-owner release failed");
+        ReleaseProcessResourceDomainOwner(p, "PID exhaustion resource-domain release failed");
         KLOG_ERROR("core/process", "ProcessCreate: ProcessKey namespace exhausted");
         mm::KFree(p);
         return nullptr;
     }
     p->pid = process_identity;
     p->process_identity = process_identity;
+    p->lifecycle_state = ProcessLifecycleState::Private;
+    p->termination_state = ProcessTerminationState::Open;
+    p->win32_exit_status = 0;
+    p->job_inheritance_parent =
+        spawn_parent != nullptr ? ProcessKeySnapshot(spawn_parent) : kInvalidProcessKey;
     u64 name_len = 0;
     while (name[name_len] != '\0' && name_len + 1 < Process::kNameCap)
     {
@@ -373,8 +492,6 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     p->name_storage[name_len] = '\0';
     p->name = p->name_storage;
     p->as = as;
-    p->cap_ceiling = cap_ceiling;
-    p->caps = CapSet{caps.bits & cap_ceiling.bits};
     p->root = root;
     p->user_code_va = user_code_va;
     p->user_stack_va = user_stack_va;
@@ -400,12 +517,24 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
         p->dll_images[i].has_exports = false;
     }
     p->dll_image_count = 0;
-    p->tick_budget = tick_budget;
-    p->ticks_used = 0;
-    p->sandbox_denials = 0;
+    p->win32_heap_lock.owner = nullptr;
+    p->win32_heap_lock.waiters.head = nullptr;
+    p->win32_heap_lock.waiters.tail = nullptr;
+    p->win32_heap_lock.class_id = sync::kLockClassUnclassified;
+    p->win32_heap_lock.ownership_class = sched::Mutex::OwnershipClass::Internal;
     p->heap_base = 0;  // PeLoad fills these when the PE has
     p->heap_pages = 0; // imports — see subsystems/win32/heap.cpp
     p->heap_free_head = 0;
+    for (u32 slot = 0; slot < Process::kWin32ExtraHeapCap; ++slot)
+    {
+        p->extra_heaps[slot].in_use = false;
+        for (u32 pad = 0; pad < sizeof(p->extra_heaps[slot]._pad); ++pad)
+            p->extra_heaps[slot]._pad[pad] = 0;
+        p->extra_heaps[slot].generation = 0;
+        p->extra_heaps[slot].base_va = 0;
+        p->extra_heaps[slot].pages = 0;
+        p->extra_heaps[slot].free_head = 0;
+    }
     // Linux fd table: reserve stdin/stdout/stderr, mark rest unused.
     for (u32 i = 0; i < 16; ++i)
     {
@@ -416,12 +545,13 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
         p->linux_fds[i].kf_handle = ::duetos::ipc::kHandleInvalid;
         p->linux_fds[i].offset = 0;
         p->linux_fds[i].ofd = 0; // no shared open-file description yet
+        p->linux_fds[i].generation = 1;
         for (u32 j = 0; j < sizeof(p->linux_fds[i].path); ++j)
             p->linux_fds[i].path[j] = 0;
     }
     p->linux_brk_base = 0; // loader fills when abi_flavor = kAbiLinux
     p->linux_brk_current = 0;
-    p->linux_mmap_cursor = 0;
+    p->linux_mmap_cursor = Process::kCompatAutoVmBase;
     p->linux_vdso_base = 0;
     p->linux_vdso_rt_sigreturn_va = 0;
     p->linux_vdso_clock_gettime_va = 0;
@@ -464,8 +594,21 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
         p->win32_threads[i].exited = false;
         p->win32_threads[i].exit_code = 0x103; // STILL_ACTIVE
         p->win32_threads[i].generation = 0;
+        __atomic_store_n(&p->win32_threads[i].event_sequence, 0, __ATOMIC_RELAXED);
+        p->win32_threads[i].waiters.head = nullptr;
+        p->win32_threads[i].waiters.tail = nullptr;
         p->win32_threads[i].tid = 0;
         p->win32_threads[i].user_stack_va = 0;
+    }
+    // Process-handle publication advances zero-initialized rows to generation
+    // one. Terminal generations retire permanently instead of wrapping.
+    for (u32 i = 0; i < Process::kWin32ProcessCap; ++i)
+    {
+        p->win32_proc_handles[i].generation = 0;
+        p->win32_proc_handles[i].state = Process::Win32ProcessHandleState::Free;
+        for (u32 j = 0; j < sizeof(p->win32_proc_handles[i]._pad); ++j)
+            p->win32_proc_handles[i]._pad[j] = 0;
+        p->win32_proc_handles[i].target = nullptr;
     }
     // Win32 foreign-thread table — every slot starts free.
     // Populated by NtOpenThread (SYS_THREAD_OPEN), drained by
@@ -482,20 +625,23 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     // by NtClose's by-range dispatch.
     for (u32 i = 0; i < Process::kWin32SectionCap; ++i)
     {
-        p->win32_section_handles[i].in_use = false;
+        p->win32_section_handles[i].generation = 0;
+        p->win32_section_handles[i].state = Process::Win32SectionHandleState::Free;
         for (u32 j = 0; j < sizeof(p->win32_section_handles[i]._pad); ++j)
             p->win32_section_handles[i]._pad[j] = 0;
-        p->win32_section_handles[i].pool_index = 0;
+        p->win32_section_handles[i].key = subsystems::win32::section::kInvalidSectionKey;
     }
     // Win32 section VIEW records — every slot free. Populated by
     // NtMapViewOfSection, cleared by NtUnmapViewOfSection, drained
-    // by ProcessRelease before the address space is torn down.
+    // by Process runtime teardown before the address space is torn down.
     for (u32 i = 0; i < Process::kWin32SectionCap; ++i)
     {
-        p->win32_section_views[i].in_use = false;
+        p->win32_section_views[i].generation = 0;
+        p->win32_section_views[i].state = Process::Win32SectionViewState::Free;
         for (u32 j = 0; j < sizeof(p->win32_section_views[i]._pad); ++j)
             p->win32_section_views[i]._pad[j] = 0;
-        p->win32_section_views[i].pool_index = 0;
+        p->win32_section_views[i].key = subsystems::win32::section::kInvalidSectionKey;
+        p->win32_section_views[i]._pad2 = 0;
         p->win32_section_views[i].base_va = 0;
     }
     // Win32 directory handles — every slot empty; entries pointer
@@ -527,37 +673,44 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
         p->linux_sigactions[i].mask = 0;
     }
     p->linux_signal_mask = 0;
-    p->linux_pending_signals = 0;
+    __atomic_store_n(&p->linux_pending_signals, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&p->linux_signal_event_sequence, 0, __ATOMIC_RELAXED);
     p->linux_signal_wq.head = nullptr;
     p->linux_signal_wq.tail = nullptr;
     // Rlimit soft caps default to "no cap below kernel hard
     // ceiling"; setrlimit/prlimit64 lower these and fd-alloc /
     // clone honour them.
     p->linux_rlimit_nofile_cur = 0xFFFFFFFFFFFFFFFFull;
-    p->linux_rlimit_nproc_cur = 0xFFFFFFFFFFFFFFFFull;
-    // Linux parent / wait state. fork() / clone() patches the
-    // parent_pid into the child after ProcessCreate returns; bare
+    __atomic_store_n(&p->linux_rlimit_nproc_cur, 0xFFFFFFFFFFFFFFFFull, __ATOMIC_RELEASE);
+    // Linux parent / wait state. fork() / clone() registers the child in a
+    // parent-owned relation row before scheduler publication; bare
     // ProcessCreate has no parent (init-spawned).
+    p->linux_parent = nullptr;
     p->linux_parent_pid = 0;
     p->linux_exit_code = 0;
     p->linux_was_signaled = false;
     p->linux_exit_signal = 0;
     for (u32 i = 0; i < sizeof(p->_linux_exit_pad); ++i)
         p->_linux_exit_pad[i] = 0;
-    p->linux_child_exit_count = 0;
-    for (u64 i = 0; i < Process::kLinuxChildExitCap; ++i)
+    p->linux_child_relation_count = 0;
+    for (u64 i = 0; i < Process::kLinuxChildRelationCap; ++i)
     {
-        p->linux_child_exits[i].pid = 0;
-        p->linux_child_exits[i].exit_code = 0;
-        p->linux_child_exits[i].exit_signal = 0;
-        p->linux_child_exits[i].was_signaled = false;
+        p->linux_child_relations[i] = Process::LinuxChildRelation{};
     }
+    __atomic_store_n(&p->linux_child_event_sequence, 0, __ATOMIC_RELAXED);
     p->linux_wait_wq.head = nullptr;
     p->linux_wait_wq.tail = nullptr;
     // Win32 custom-diagnostics state lazy-allocates on first opt-in.
     p->win32_custom_state = nullptr;
-    // Default cwd is "/" — matches the value DoGetcwd hard-coded
-    // before this field existed.
+    // The CWD lock is process-owned and is initialized before this private
+    // Process can be published. It needs no teardown; zero-ticket state is
+    // unlocked, and the explicit diagnostic owner makes that state clear.
+    p->linux_cwd_lock.next_ticket = 0;
+    p->linux_cwd_lock.now_serving = 0;
+    p->linux_cwd_lock.owner_cpu = 0xFFFFFFFFu;
+    p->linux_cwd_lock.class_id = sync::kLockClassUnclassified;
+    // Default cwd is "/" — matches the value DoGetcwd hard-coded before this
+    // field existed. Publication happens only after initialization completes.
     for (u32 i = 0; i < Process::kLinuxCwdCap; ++i)
         p->linux_cwd[i] = 0;
     p->linux_cwd[0] = '/';
@@ -599,12 +752,41 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     return p;
 }
 
-ProcessKey ProcessKeySnapshot(const Process* process)
+bool ProcessReplaceResourceDomainBeforePublish(Process* process, ResourceDomainKey replacement)
 {
-    KASSERT(process != nullptr, "core/process", "ProcessKeySnapshot null process");
-    const ProcessKey key{process->process_identity, process->pid};
-    KASSERT(ProcessKeyIsValid(key), "core/process", "Process owns invalid immutable identity");
-    return key;
+    if (process == nullptr || !ResourceDomainKeyIsValid(replacement) ||
+        __atomic_load_n(&process->refcount, __ATOMIC_ACQUIRE) != 1 ||
+        ProcessLifecycleLoad(process) != ProcessLifecycleState::Private)
+    {
+        return false;
+    }
+    if (!ResourceDomainRetain(replacement))
+        return false;
+
+    const ResourceDomainKey previous = process->resource_domain;
+    if (!ResourceDomainRelease(previous))
+    {
+        const bool rolled_back = ResourceDomainRelease(replacement);
+        if (!rolled_back)
+            PanicWithValue("core/process", "resource-domain replacement rollback failed", replacement.generation);
+        return false;
+    }
+    process->resource_domain = replacement;
+    return true;
+}
+
+bool ProcessInstallPublicationGateBeforePublish(Process* process, ProcessPublicationGate gate, void* context)
+{
+    if (process == nullptr || gate == nullptr || __atomic_load_n(&process->refcount, __ATOMIC_ACQUIRE) != 1 ||
+        ProcessLifecycleLoad(process) != ProcessLifecycleState::Private || process->publication_gate != nullptr ||
+        process->publication_gate_context != nullptr)
+    {
+        return false;
+    }
+
+    process->publication_gate = gate;
+    process->publication_gate_context = context;
+    return true;
 }
 
 void ProcessRetain(Process* p)
@@ -638,6 +820,10 @@ void ProcessRetain(Process* p)
         {
             PanicWithValue("core/process", "ProcessRetain on refcount==0 (use-after-free?)", reinterpret_cast<u64>(p));
         }
+        if (cur == ~0ULL)
+        {
+            PanicWithValue("core/process", "ProcessRetain would wrap saturated refcount", reinterpret_cast<u64>(p));
+        }
         const u64 next = cur + 1;
         if (__atomic_compare_exchange_n(&p->refcount, &cur, next, /*weak=*/false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
         {
@@ -645,6 +831,163 @@ void ProcessRetain(Process* p)
         }
         // CAS lost the race; cur has the fresh value. Loop and retry.
     }
+}
+
+ProcessLifecycleState ProcessLifecycleLoad(const Process* process)
+{
+    KASSERT(process != nullptr, "core/process", "ProcessLifecycleLoad null process");
+    static_assert(sizeof(ProcessLifecycleState) == sizeof(u32));
+    ProcessLifecycleState observed = ProcessLifecycleState::Private;
+    // Use the generic builtin on the enum object itself. Reinterpreting the
+    // storage as u32 gives the compiler an aliasing story the C++ type system
+    // does not permit, even though the representation sizes match.
+    __atomic_load(&process->lifecycle_state, &observed, __ATOMIC_ACQUIRE);
+    return observed;
+}
+
+bool ProcessLifecycleTransition(Process* process, ProcessLifecycleState expected, ProcessLifecycleState desired)
+{
+    KASSERT(process != nullptr, "core/process", "ProcessLifecycleTransition null process");
+    const bool valid = (expected == ProcessLifecycleState::Private && desired == ProcessLifecycleState::Published) ||
+                       (expected == ProcessLifecycleState::Published && desired == ProcessLifecycleState::Exiting) ||
+                       (expected == ProcessLifecycleState::Exiting && desired == ProcessLifecycleState::Exited);
+    KASSERT(valid, "core/process", "invalid Process lifecycle transition");
+    ProcessLifecycleState observed = expected;
+    ProcessLifecycleState replacement = desired;
+    return __atomic_compare_exchange(&process->lifecycle_state, &observed, &replacement, /*weak=*/false,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+}
+
+ProcessTerminationState ProcessTerminationLoad(const Process* process)
+{
+    KASSERT(process != nullptr, "core/process", "ProcessTerminationLoad null process");
+    static_assert(sizeof(ProcessTerminationState) == sizeof(u32));
+    ProcessTerminationState observed = ProcessTerminationState::Open;
+    __atomic_load(&process->termination_state, &observed, __ATOMIC_ACQUIRE);
+    return observed;
+}
+
+namespace
+{
+constexpr u64 kWin32ExitStatusPublished = 1ULL << 32;
+constexpr u32 kWin32StillActive = 0x103;
+
+u64 EncodeWin32ProcessExitStatus(u32 exit_code)
+{
+    return kWin32ExitStatusPublished | static_cast<u64>(exit_code);
+}
+} // namespace
+
+bool ProcessTerminationClose(Process* process, u32 exit_code)
+{
+    KASSERT(process != nullptr, "core/process", "ProcessTerminationClose null process");
+    ProcessTerminationState observed = ProcessTerminationState::Open;
+    ProcessTerminationState replacement = ProcessTerminationState::Closed;
+    if (__atomic_compare_exchange(&process->termination_state, &observed, &replacement, /*weak=*/false,
+                                  __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+    {
+        u64 empty = 0;
+        const u64 published = EncodeWin32ProcessExitStatus(exit_code);
+        KASSERT(__atomic_compare_exchange_n(&process->win32_exit_status, &empty, published, false,
+                                            __ATOMIC_RELEASE, __ATOMIC_RELAXED),
+                "core/process", "first Process close lost exit-status publication");
+        return true;
+    }
+    KASSERT(observed == ProcessTerminationState::Closed, "core/process", "invalid Process termination state");
+    return false;
+}
+
+void ProcessPublishLastTaskExitCodeIfUnset(Process* process, u32 exit_code)
+{
+    KASSERT(process != nullptr, "core/process", "last-Task exit-status publication on null process");
+    u64 empty = 0;
+    const u64 published = EncodeWin32ProcessExitStatus(exit_code);
+    (void)__atomic_compare_exchange_n(&process->win32_exit_status, &empty, published, false,
+                                      __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+}
+
+u32 ProcessWin32ExitCodeSnapshot(const Process* process)
+{
+    KASSERT(process != nullptr, "core/process", "ProcessWin32ExitCodeSnapshot null process");
+    if (ProcessLifecycleLoad(process) != ProcessLifecycleState::Exited)
+        return kWin32StillActive;
+
+    const u64 published = __atomic_load_n(&process->win32_exit_status, __ATOMIC_ACQUIRE);
+    KASSERT((published & kWin32ExitStatusPublished) != 0, "core/process",
+            "Exited Process has no durable Win32 exit status");
+    return static_cast<u32>(published);
+}
+
+ProcessKey ProcessKeySnapshot(const Process* process)
+{
+    KASSERT(process != nullptr, "core/process", "ProcessKeySnapshot null process");
+    const ProcessKey key{process->process_identity, process->pid};
+    KASSERT(ProcessKeyIsValid(key), "core/process", "Process owns invalid immutable identity");
+    return key;
+}
+
+bool ProcessRunPublicationGateAtSchedulerPublication(Process* process)
+{
+    KASSERT(process != nullptr, "core/process", "Process publication gate on null process");
+    KASSERT(ProcessLifecycleLoad(process) == ProcessLifecycleState::Private, "core/process",
+            "Process publication gate requires Private lifecycle");
+
+    const ProcessKey key = ProcessKeySnapshot(process);
+    ProcessPublicationGate gate = process->publication_gate;
+    void* context = process->publication_gate_context;
+    process->publication_gate = nullptr;
+    process->publication_gate_context = nullptr;
+    if (gate == nullptr)
+    {
+        KASSERT(context == nullptr, "core/process", "Process publication gate has orphan context");
+        return true;
+    }
+    return gate(key, context);
+}
+
+u64 EncodeWin32FileHandle(const Process::Win32FileHandleIdentity& identity)
+{
+    static_assert((Process::kWin32HandleBase & ~Process::kWin32FileHandleTagMask) == 0,
+                  "Win32 file-handle base must fit in the low tag");
+    static_assert(Process::kWin32HandleBase + Process::kWin32HandleCap - 1 <= Process::kWin32FileHandleTagMask,
+                  "Win32 file-handle tag band must fit in the low tag");
+    static_assert(Process::kWin32FileHandleMaxGeneration == 0x7FFFF,
+                  "Win32 file-handle generation must fit PE32 bits 12..30");
+
+    if (identity.slot >= Process::kWin32HandleCap || identity.generation == 0 ||
+        identity.generation > Process::kWin32FileHandleMaxGeneration)
+    {
+        return 0;
+    }
+
+    const u64 tag = Process::kWin32HandleBase + identity.slot;
+    return (identity.generation << Process::kWin32FileHandleGenerationShift) | tag;
+}
+
+bool DecodeWin32FileHandle(u64 handle, Process::Win32FileHandleIdentity* identity_out)
+{
+    if (identity_out == nullptr || handle > Process::kWin32FileHandleMaxValue)
+        return false;
+
+    const u64 generation = handle >> Process::kWin32FileHandleGenerationShift;
+    const u64 tag = handle & Process::kWin32FileHandleTagMask;
+    if (generation == 0 || generation > Process::kWin32FileHandleMaxGeneration || tag < Process::kWin32HandleBase ||
+        tag >= Process::kWin32HandleBase + Process::kWin32HandleCap)
+    {
+        return false;
+    }
+
+    Process::Win32FileHandleIdentity identity{};
+    identity.slot = static_cast<u32>(util::MaskedIndex(tag - Process::kWin32HandleBase, Process::kWin32HandleCap));
+    identity.generation = generation;
+    *identity_out = identity;
+    return true;
+}
+
+bool IsWin32FileHandle(u64 handle)
+{
+    Process::Win32FileHandleIdentity identity{};
+    return DecodeWin32FileHandle(handle, &identity);
 }
 
 bool ProcessReserveWin32FileHandle(Process* owner, Process::Win32FileReservation* reservation_out)
@@ -658,7 +1001,7 @@ bool ProcessReserveWin32FileHandle(Process* owner, Process::Win32FileReservation
     for (u32 i = 0; i < Process::kWin32HandleCap; ++i)
     {
         Process::Win32FileHandle& row = owner->win32_handles[i];
-        if (row.kind != Process::FsBackingKind::None || row.generation == ~0ULL)
+        if (row.kind != Process::FsBackingKind::None || row.generation >= Process::kWin32FileHandleMaxGeneration)
             continue;
 
         const u64 generation = row.generation + 1;
@@ -689,6 +1032,11 @@ bool ProcessPublishWin32FileHandle(Process* owner, const Process::Win32FileReser
         return false;
     }
 
+    const Process::Win32FileHandleIdentity identity{reservation.slot, 0, reservation.generation};
+    const u64 encoded_handle = EncodeWin32FileHandle(identity);
+    if (encoded_handle == 0)
+        return false;
+
     bool published = false;
     const u32 slot = static_cast<u32>(util::MaskedIndex(reservation.slot, Process::kWin32HandleCap));
     const sync::IrqFlags flags = sync::SpinLockAcquire(owner->win32_file_lock);
@@ -702,13 +1050,14 @@ bool ProcessPublishWin32FileHandle(Process* owner, const Process::Win32FileReser
     sync::SpinLockRelease(owner->win32_file_lock, flags);
 
     if (published)
-        *handle_out = Process::kWin32HandleBase + slot;
+        *handle_out = encoded_handle;
     return published;
 }
 
 void ProcessAbortWin32FileHandle(Process* owner, const Process::Win32FileReservation& reservation)
 {
-    if (owner == nullptr || reservation.slot >= Process::kWin32HandleCap || reservation.generation == 0)
+    if (owner == nullptr || reservation.slot >= Process::kWin32HandleCap || reservation.generation == 0 ||
+        reservation.generation > Process::kWin32FileHandleMaxGeneration)
         return;
 
     const u32 slot = static_cast<u32>(util::MaskedIndex(reservation.slot, Process::kWin32HandleCap));
@@ -727,17 +1076,15 @@ void ProcessAbortWin32FileHandle(Process* owner, const Process::Win32FileReserva
 
 bool ProcessDetachWin32FileHandle(Process* owner, u64 handle, Process::Win32FileHandle* detached_out)
 {
-    if (owner == nullptr || detached_out == nullptr || handle < Process::kWin32HandleBase)
+    Process::Win32FileHandleIdentity identity{};
+    if (owner == nullptr || detached_out == nullptr || !DecodeWin32FileHandle(handle, &identity))
         return false;
-    u64 raw_slot = handle - Process::kWin32HandleBase;
-    if (raw_slot >= Process::kWin32HandleCap)
-        return false;
-    raw_slot = util::MaskedIndex(raw_slot, Process::kWin32HandleCap);
 
     bool detached = false;
     const sync::IrqFlags flags = sync::SpinLockAcquire(owner->win32_file_lock);
-    Process::Win32FileHandle& row = owner->win32_handles[raw_slot];
-    if (row.kind != Process::FsBackingKind::None && row.kind != Process::FsBackingKind::Reserved)
+    Process::Win32FileHandle& row = owner->win32_handles[identity.slot];
+    if (row.generation == identity.generation && row.kind != Process::FsBackingKind::None &&
+        row.kind != Process::FsBackingKind::Reserved)
     {
         *detached_out = row;
         Process::Win32FileHandle empty{};
@@ -751,6 +1098,572 @@ bool ProcessDetachWin32FileHandle(Process* owner, u64 handle, Process::Win32File
     return detached;
 }
 
+u32 ProcessWin32FileHandleCount(const Process* owner)
+{
+    if (owner == nullptr)
+        return 0;
+
+    u32 count = 0;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(owner->win32_file_lock);
+    for (u32 slot = 0; slot < Process::kWin32HandleCap; ++slot)
+    {
+        const Process::Win32FileHandle& row = owner->win32_handles[slot];
+        if (row.kind != Process::FsBackingKind::None && row.kind != Process::FsBackingKind::Reserved &&
+            row.generation != 0 && row.generation <= Process::kWin32FileHandleMaxGeneration)
+        {
+            ++count;
+        }
+    }
+    sync::SpinLockRelease(owner->win32_file_lock, flags);
+    return count;
+}
+
+u64 EncodeWin32SectionHandle(const Process::Win32SectionHandleIdentity& identity)
+{
+    static_assert((Process::kWin32SectionBase & ~Process::kWin32SectionHandleTagMask) == 0,
+                  "Win32 Section base must fit in the low tag");
+    static_assert(Process::kWin32SectionBase + Process::kWin32SectionCap - 1 <= Process::kWin32SectionHandleTagMask,
+                  "Win32 Section tag band must fit in the low tag");
+    static_assert(Process::kWin32SectionHandleMaxGeneration == 0x7FFFF,
+                  "Win32 Section generation must fit PE32 bits 12..30");
+    static_assert(Process::kWin32SectionHandleMaxGeneration == subsystems::win32::section::kSectionMaxGeneration,
+                  "public Section rows and pool keys must share the PE32 generation ceiling");
+
+    if (identity.slot >= Process::kWin32SectionCap || identity.generation == 0 ||
+        identity.generation > Process::kWin32SectionHandleMaxGeneration)
+    {
+        return 0;
+    }
+
+    const u64 tag = Process::kWin32SectionBase + identity.slot;
+    return (static_cast<u64>(identity.generation) << Process::kWin32SectionHandleGenerationShift) | tag;
+}
+
+bool DecodeWin32SectionHandle(u64 handle, Process::Win32SectionHandleIdentity* identity_out)
+{
+    if (identity_out == nullptr || handle > Process::kWin32SectionHandleMaxValue)
+        return false;
+
+    const u64 generation = handle >> Process::kWin32SectionHandleGenerationShift;
+    const u64 tag = handle & Process::kWin32SectionHandleTagMask;
+    if (generation == 0 || generation > Process::kWin32SectionHandleMaxGeneration || tag < Process::kWin32SectionBase ||
+        tag >= Process::kWin32SectionBase + Process::kWin32SectionCap)
+    {
+        return false;
+    }
+
+    Process::Win32SectionHandleIdentity identity{};
+    identity.slot = static_cast<u32>(util::MaskedIndex(tag - Process::kWin32SectionBase, Process::kWin32SectionCap));
+    identity.generation = static_cast<u32>(generation);
+    *identity_out = identity;
+    return true;
+}
+
+bool IsWin32SectionHandle(u64 handle)
+{
+    Process::Win32SectionHandleIdentity identity{};
+    return DecodeWin32SectionHandle(handle, &identity);
+}
+
+bool ProcessReserveWin32SectionHandle(Process* owner, Process::Win32SectionHandleReservation* reservation_out)
+{
+    if (owner == nullptr || reservation_out == nullptr)
+        return false;
+
+    bool reserved = false;
+    Process::Win32SectionHandleReservation reservation{};
+    const sync::IrqFlags flags = sync::SpinLockAcquire(owner->win32_section_lock);
+    for (u32 slot = 0; slot < Process::kWin32SectionCap; ++slot)
+    {
+        Process::Win32SectionHandle& row = owner->win32_section_handles[slot];
+        if (row.state != Process::Win32SectionHandleState::Free ||
+            row.generation >= Process::kWin32SectionHandleMaxGeneration)
+        {
+            continue;
+        }
+
+        ++row.generation;
+        row.state = Process::Win32SectionHandleState::Reserved;
+        row.key = subsystems::win32::section::kInvalidSectionKey;
+        reservation.slot = slot;
+        reservation.generation = row.generation;
+        reserved = true;
+        break;
+    }
+    sync::SpinLockRelease(owner->win32_section_lock, flags);
+
+    if (reserved)
+        *reservation_out = reservation;
+    return reserved;
+}
+
+bool ProcessPublishWin32SectionHandle(Process* owner, const Process::Win32SectionHandleReservation& reservation,
+                                      subsystems::win32::section::SectionKey key, u64* handle_out)
+{
+    if (owner == nullptr || handle_out == nullptr || reservation.slot >= Process::kWin32SectionCap ||
+        reservation.generation == 0 || reservation.generation > Process::kWin32SectionHandleMaxGeneration ||
+        !subsystems::win32::section::SectionKeyIsValid(key))
+    {
+        return false;
+    }
+
+    const Process::Win32SectionHandleIdentity identity{reservation.slot, reservation.generation};
+    const u64 handle = EncodeWin32SectionHandle(identity);
+    if (handle == 0)
+        return false;
+
+    bool published = false;
+    const u32 slot = static_cast<u32>(util::MaskedIndex(reservation.slot, Process::kWin32SectionCap));
+    const sync::IrqFlags flags = sync::SpinLockAcquire(owner->win32_section_lock);
+    Process::Win32SectionHandle& row = owner->win32_section_handles[slot];
+    if (row.state == Process::Win32SectionHandleState::Reserved && row.generation == reservation.generation)
+    {
+        row.key = key;
+        row.state = Process::Win32SectionHandleState::Live;
+        published = true;
+    }
+    sync::SpinLockRelease(owner->win32_section_lock, flags);
+
+    if (published)
+        *handle_out = handle;
+    return published;
+}
+
+void ProcessAbortWin32SectionHandle(Process* owner, const Process::Win32SectionHandleReservation& reservation)
+{
+    if (owner == nullptr || reservation.slot >= Process::kWin32SectionCap || reservation.generation == 0 ||
+        reservation.generation > Process::kWin32SectionHandleMaxGeneration)
+    {
+        return;
+    }
+
+    const u32 slot = static_cast<u32>(util::MaskedIndex(reservation.slot, Process::kWin32SectionCap));
+    const sync::IrqFlags flags = sync::SpinLockAcquire(owner->win32_section_lock);
+    Process::Win32SectionHandle& row = owner->win32_section_handles[slot];
+    if (row.state == Process::Win32SectionHandleState::Reserved && row.generation == reservation.generation)
+    {
+        row.state = Process::Win32SectionHandleState::Free;
+        row.key = subsystems::win32::section::kInvalidSectionKey;
+    }
+    sync::SpinLockRelease(owner->win32_section_lock, flags);
+}
+
+bool ProcessAcquireWin32SectionHandle(Process* owner, u64 handle, subsystems::win32::section::SectionKey* key_out)
+{
+    Process::Win32SectionHandleIdentity identity{};
+    if (owner == nullptr || key_out == nullptr || !DecodeWin32SectionHandle(handle, &identity))
+        return false;
+
+    subsystems::win32::section::SectionKey key = subsystems::win32::section::kInvalidSectionKey;
+    {
+        const sync::IrqFlags flags = sync::SpinLockAcquire(owner->win32_section_lock);
+        const Process::Win32SectionHandle& row = owner->win32_section_handles[identity.slot];
+        if (row.state == Process::Win32SectionHandleState::Live && row.generation == identity.generation &&
+            subsystems::win32::section::SectionKeyIsValid(row.key))
+        {
+            key = row.key;
+        }
+        sync::SpinLockRelease(owner->win32_section_lock, flags);
+    }
+
+    // The Section pool is a separate lifetime domain. Pin it without holding
+    // the per-Process table lock, then revalidate the exact public row before
+    // publishing the operation reference. This avoids a Process->Section
+    // nested-lock edge while making a concurrent close/recycle a clean miss.
+    if (!subsystems::win32::section::SectionKeyIsValid(key) || !subsystems::win32::section::SectionRetain(key))
+    {
+        return false;
+    }
+
+    bool acquired = false;
+    {
+        const sync::IrqFlags flags = sync::SpinLockAcquire(owner->win32_section_lock);
+        const Process::Win32SectionHandle& row = owner->win32_section_handles[identity.slot];
+        acquired = row.state == Process::Win32SectionHandleState::Live && row.generation == identity.generation &&
+                   row.key == key;
+        sync::SpinLockRelease(owner->win32_section_lock, flags);
+    }
+
+    if (!acquired)
+    {
+        subsystems::win32::section::SectionRelease(key);
+        return false;
+    }
+
+    if (key_out != nullptr)
+        *key_out = key;
+    return true;
+}
+
+bool ProcessDetachWin32SectionHandle(Process* owner, u64 handle, subsystems::win32::section::SectionKey* key_out)
+{
+    Process::Win32SectionHandleIdentity identity{};
+    if (owner == nullptr || key_out == nullptr || !DecodeWin32SectionHandle(handle, &identity))
+        return false;
+
+    bool detached = false;
+    subsystems::win32::section::SectionKey key = subsystems::win32::section::kInvalidSectionKey;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(owner->win32_section_lock);
+    Process::Win32SectionHandle& row = owner->win32_section_handles[identity.slot];
+    if (row.state == Process::Win32SectionHandleState::Live && row.generation == identity.generation &&
+        subsystems::win32::section::SectionKeyIsValid(row.key))
+    {
+        key = row.key;
+        row.state = Process::Win32SectionHandleState::Free;
+        row.key = subsystems::win32::section::kInvalidSectionKey;
+        detached = true;
+    }
+    sync::SpinLockRelease(owner->win32_section_lock, flags);
+
+    if (detached)
+        *key_out = key;
+    return detached;
+}
+
+u32 ProcessWin32SectionHandleCount(const Process* owner)
+{
+    if (owner == nullptr)
+        return 0;
+
+    u32 count = 0;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(owner->win32_section_lock);
+    for (u32 slot = 0; slot < Process::kWin32SectionCap; ++slot)
+    {
+        const Process::Win32SectionHandle& row = owner->win32_section_handles[slot];
+        if (row.state == Process::Win32SectionHandleState::Live && row.generation != 0 &&
+            row.generation <= Process::kWin32SectionHandleMaxGeneration &&
+            subsystems::win32::section::SectionKeyIsValid(row.key))
+        {
+            ++count;
+        }
+    }
+    sync::SpinLockRelease(owner->win32_section_lock, flags);
+    return count;
+}
+
+bool ProcessReserveWin32SectionView(Process* owner, Process::Win32SectionViewReservation* reservation_out)
+{
+    if (owner == nullptr || reservation_out == nullptr)
+        return false;
+
+    bool reserved = false;
+    Process::Win32SectionViewReservation reservation{};
+    const sync::IrqFlags flags = sync::SpinLockAcquire(owner->win32_section_lock);
+    for (u32 slot = 0; slot < Process::kWin32SectionCap; ++slot)
+    {
+        Process::Win32SectionView& row = owner->win32_section_views[slot];
+        if (row.state != Process::Win32SectionViewState::Free || row.generation == ~0ULL)
+            continue;
+
+        ++row.generation;
+        row.state = Process::Win32SectionViewState::Reserved;
+        row.key = subsystems::win32::section::kInvalidSectionKey;
+        row.base_va = 0;
+        reservation.slot = slot;
+        reservation.generation = row.generation;
+        reserved = true;
+        break;
+    }
+    sync::SpinLockRelease(owner->win32_section_lock, flags);
+
+    if (reserved)
+        *reservation_out = reservation;
+    return reserved;
+}
+
+bool ProcessPublishWin32SectionView(Process* owner, const Process::Win32SectionViewReservation& reservation,
+                                    subsystems::win32::section::SectionKey key, u64 base_va)
+{
+    if (owner == nullptr || reservation.slot >= Process::kWin32SectionCap || reservation.generation == 0 ||
+        !subsystems::win32::section::SectionKeyIsValid(key) || base_va == 0)
+    {
+        return false;
+    }
+
+    bool published = false;
+    const u32 slot = static_cast<u32>(util::MaskedIndex(reservation.slot, Process::kWin32SectionCap));
+    const sync::IrqFlags flags = sync::SpinLockAcquire(owner->win32_section_lock);
+    Process::Win32SectionView& row = owner->win32_section_views[slot];
+    if (row.state == Process::Win32SectionViewState::Reserved && row.generation == reservation.generation)
+    {
+        row.key = key;
+        row.base_va = base_va;
+        row.state = Process::Win32SectionViewState::Live;
+        published = true;
+    }
+    sync::SpinLockRelease(owner->win32_section_lock, flags);
+    return published;
+}
+
+void ProcessAbortWin32SectionView(Process* owner, const Process::Win32SectionViewReservation& reservation)
+{
+    if (owner == nullptr || reservation.slot >= Process::kWin32SectionCap || reservation.generation == 0)
+        return;
+
+    const u32 slot = static_cast<u32>(util::MaskedIndex(reservation.slot, Process::kWin32SectionCap));
+    const sync::IrqFlags flags = sync::SpinLockAcquire(owner->win32_section_lock);
+    Process::Win32SectionView& row = owner->win32_section_views[slot];
+    if (row.state == Process::Win32SectionViewState::Reserved && row.generation == reservation.generation)
+    {
+        row.state = Process::Win32SectionViewState::Free;
+        row.key = subsystems::win32::section::kInvalidSectionKey;
+        row.base_va = 0;
+    }
+    sync::SpinLockRelease(owner->win32_section_lock, flags);
+}
+
+bool ProcessClaimWin32SectionView(Process* owner, u64 base_va, Process::Win32SectionViewClaim* claim_out)
+{
+    if (owner == nullptr || claim_out == nullptr || base_va == 0)
+        return false;
+
+    bool claimed = false;
+    Process::Win32SectionViewClaim claim{};
+    const sync::IrqFlags flags = sync::SpinLockAcquire(owner->win32_section_lock);
+    for (u32 slot = 0; slot < Process::kWin32SectionCap; ++slot)
+    {
+        Process::Win32SectionView& row = owner->win32_section_views[slot];
+        if (row.state != Process::Win32SectionViewState::Live || row.base_va != base_va ||
+            !subsystems::win32::section::SectionKeyIsValid(row.key))
+        {
+            continue;
+        }
+
+        row.state = Process::Win32SectionViewState::Claimed;
+        claim.slot = slot;
+        claim.generation = row.generation;
+        claim.key = row.key;
+        claim.base_va = row.base_va;
+        claimed = true;
+        break;
+    }
+    sync::SpinLockRelease(owner->win32_section_lock, flags);
+
+    if (claimed)
+        *claim_out = claim;
+    return claimed;
+}
+
+bool ProcessClaimWin32SectionViewExact(Process* owner, const Process::Win32SectionViewReservation& reservation,
+                                       subsystems::win32::section::SectionKey key, u64 base_va,
+                                       Process::Win32SectionViewClaim* claim_out)
+{
+    if (owner == nullptr || claim_out == nullptr || reservation.slot >= Process::kWin32SectionCap ||
+        reservation.generation == 0 || !subsystems::win32::section::SectionKeyIsValid(key) || base_va == 0)
+    {
+        return false;
+    }
+
+    bool claimed = false;
+    Process::Win32SectionViewClaim claim{};
+    const u32 slot = static_cast<u32>(util::MaskedIndex(reservation.slot, Process::kWin32SectionCap));
+    const sync::IrqFlags flags = sync::SpinLockAcquire(owner->win32_section_lock);
+    Process::Win32SectionView& row = owner->win32_section_views[slot];
+    if (row.state == Process::Win32SectionViewState::Live && row.generation == reservation.generation &&
+        row.key == key && row.base_va == base_va)
+    {
+        row.state = Process::Win32SectionViewState::Claimed;
+        claim.slot = slot;
+        claim.generation = row.generation;
+        claim.key = row.key;
+        claim.base_va = row.base_va;
+        claimed = true;
+    }
+    sync::SpinLockRelease(owner->win32_section_lock, flags);
+
+    if (claimed)
+        *claim_out = claim;
+    return claimed;
+}
+
+bool ProcessRestoreWin32SectionView(Process* owner, const Process::Win32SectionViewClaim& claim)
+{
+    if (owner == nullptr || claim.slot >= Process::kWin32SectionCap || claim.generation == 0 ||
+        !subsystems::win32::section::SectionKeyIsValid(claim.key) || claim.base_va == 0)
+    {
+        return false;
+    }
+
+    bool restored = false;
+    const u32 slot = static_cast<u32>(util::MaskedIndex(claim.slot, Process::kWin32SectionCap));
+    const sync::IrqFlags flags = sync::SpinLockAcquire(owner->win32_section_lock);
+    Process::Win32SectionView& row = owner->win32_section_views[slot];
+    if (row.state == Process::Win32SectionViewState::Claimed && row.generation == claim.generation &&
+        row.key == claim.key && row.base_va == claim.base_va)
+    {
+        row.state = Process::Win32SectionViewState::Live;
+        restored = true;
+    }
+    sync::SpinLockRelease(owner->win32_section_lock, flags);
+    return restored;
+}
+
+bool ProcessFinishWin32SectionView(Process* owner, const Process::Win32SectionViewClaim& claim)
+{
+    if (owner == nullptr || claim.slot >= Process::kWin32SectionCap || claim.generation == 0 ||
+        !subsystems::win32::section::SectionKeyIsValid(claim.key) || claim.base_va == 0)
+    {
+        return false;
+    }
+
+    bool finished = false;
+    const u32 slot = static_cast<u32>(util::MaskedIndex(claim.slot, Process::kWin32SectionCap));
+    const sync::IrqFlags flags = sync::SpinLockAcquire(owner->win32_section_lock);
+    Process::Win32SectionView& row = owner->win32_section_views[slot];
+    if (row.state == Process::Win32SectionViewState::Claimed && row.generation == claim.generation &&
+        row.key == claim.key && row.base_va == claim.base_va)
+    {
+        row.state = Process::Win32SectionViewState::Free;
+        row.key = subsystems::win32::section::kInvalidSectionKey;
+        row.base_va = 0;
+        finished = true;
+    }
+    sync::SpinLockRelease(owner->win32_section_lock, flags);
+    return finished;
+}
+
+u32 ProcessWin32SectionViewCount(const Process* owner)
+{
+    if (owner == nullptr)
+        return 0;
+
+    u32 count = 0;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(owner->win32_section_lock);
+    for (u32 slot = 0; slot < Process::kWin32SectionCap; ++slot)
+    {
+        const Process::Win32SectionView& row = owner->win32_section_views[slot];
+        if ((row.state == Process::Win32SectionViewState::Live ||
+             row.state == Process::Win32SectionViewState::Claimed) &&
+            subsystems::win32::section::SectionKeyIsValid(row.key) && row.base_va != 0)
+        {
+            ++count;
+        }
+    }
+    sync::SpinLockRelease(owner->win32_section_lock, flags);
+    return count;
+}
+
+bool ProcessHasBorrowedUserMappings(const Process* owner)
+{
+    if (owner == nullptr)
+        return false;
+
+    // Reserved and Claimed rows are included deliberately. Production map
+    // and unmap paths hold vm_transaction_lock across those transient states,
+    // so exec cannot normally observe one; treating one as busy is the safe
+    // response to a future caller that violates that outer contract.
+    const sync::IrqFlags section_flags = sync::SpinLockAcquire(owner->win32_section_lock);
+    for (u32 slot = 0; slot < Process::kWin32SectionCap; ++slot)
+    {
+        if (owner->win32_section_views[slot].state != Process::Win32SectionViewState::Free)
+        {
+            sync::SpinLockRelease(owner->win32_section_lock, section_flags);
+            return true;
+        }
+    }
+    sync::SpinLockRelease(owner->win32_section_lock, section_flags);
+
+    for (u32 slot = 0; slot < Process::kLinuxShmAttachCap; ++slot)
+    {
+        if (owner->linux_shm_attaches[slot].in_use)
+            return true;
+    }
+    return false;
+}
+
+namespace
+{
+
+struct Win32SectionDrainSnapshot
+{
+    subsystems::win32::section::SectionKey handle_keys[Process::kWin32SectionCap];
+    Process::Win32SectionViewClaim views[Process::kWin32SectionCap];
+    u32 handle_count;
+    u32 view_count;
+};
+
+void DetachAllWin32SectionRows(Process* owner, Win32SectionDrainSnapshot* snapshot)
+{
+    if (owner == nullptr || snapshot == nullptr)
+        return;
+
+    const sync::IrqFlags flags = sync::SpinLockAcquire(owner->win32_section_lock);
+    for (u32 slot = 0; slot < Process::kWin32SectionCap; ++slot)
+    {
+        Process::Win32SectionHandle& handle = owner->win32_section_handles[slot];
+        if (handle.state == Process::Win32SectionHandleState::Live &&
+            subsystems::win32::section::SectionKeyIsValid(handle.key))
+        {
+            snapshot->handle_keys[snapshot->handle_count++] = handle.key;
+        }
+        handle.state = Process::Win32SectionHandleState::Free;
+        handle.key = subsystems::win32::section::kInvalidSectionKey;
+
+        Process::Win32SectionView& view = owner->win32_section_views[slot];
+        if ((view.state == Process::Win32SectionViewState::Live ||
+             view.state == Process::Win32SectionViewState::Claimed) &&
+            subsystems::win32::section::SectionKeyIsValid(view.key) && view.base_va != 0)
+        {
+            Process::Win32SectionViewClaim& detached = snapshot->views[snapshot->view_count++];
+            detached.slot = slot;
+            detached.generation = view.generation;
+            detached.key = view.key;
+            detached.base_va = view.base_va;
+        }
+        view.state = Process::Win32SectionViewState::Free;
+        view.key = subsystems::win32::section::kInvalidSectionKey;
+        view.base_va = 0;
+    }
+    sync::SpinLockRelease(owner->win32_section_lock, flags);
+}
+
+} // namespace
+
+u64 EncodeWin32ProcessHandle(const Process::Win32ProcessHandleIdentity& identity)
+{
+    static_assert((Process::kWin32ProcessBase & ~Process::kWin32ProcessHandleTagMask) == 0,
+                  "Win32 Process base must fit in the low tag");
+    static_assert(Process::kWin32ProcessBase + Process::kWin32ProcessCap - 1 <= Process::kWin32ProcessHandleTagMask,
+                  "Win32 Process tag band must fit in the low tag");
+    static_assert(Process::kWin32ProcessHandleMaxGeneration == 0x7FFFF,
+                  "Win32 Process generation must fit PE32 bits 12..30");
+
+    if (identity.slot >= Process::kWin32ProcessCap || identity.generation == 0 ||
+        identity.generation > Process::kWin32ProcessHandleMaxGeneration)
+    {
+        return 0;
+    }
+
+    const u64 tag = Process::kWin32ProcessBase + identity.slot;
+    return (static_cast<u64>(identity.generation) << Process::kWin32ProcessHandleGenerationShift) | tag;
+}
+
+bool DecodeWin32ProcessHandle(u64 handle, Process::Win32ProcessHandleIdentity* identity_out)
+{
+    if (identity_out == nullptr || handle > Process::kWin32ProcessHandleMaxValue)
+        return false;
+
+    const u64 generation = handle >> Process::kWin32ProcessHandleGenerationShift;
+    const u64 tag = handle & Process::kWin32ProcessHandleTagMask;
+    if (generation == 0 || generation > Process::kWin32ProcessHandleMaxGeneration || tag < Process::kWin32ProcessBase ||
+        tag >= Process::kWin32ProcessBase + Process::kWin32ProcessCap)
+    {
+        return false;
+    }
+
+    Process::Win32ProcessHandleIdentity identity{};
+    identity.slot = static_cast<u32>(util::MaskedIndex(tag - Process::kWin32ProcessBase, Process::kWin32ProcessCap));
+    identity.generation = static_cast<u32>(generation);
+    *identity_out = identity;
+    return true;
+}
+
+bool IsWin32ProcessHandle(u64 handle)
+{
+    Process::Win32ProcessHandleIdentity identity{};
+    return DecodeWin32ProcessHandle(handle, &identity);
+}
+
 u64 ProcessInstallWin32ProcessHandle(Process* owner, Process* target)
 {
     if (owner == nullptr || target == nullptr)
@@ -758,39 +1671,41 @@ u64 ProcessInstallWin32ProcessHandle(Process* owner, Process* target)
         return 0;
     }
 
-    u64 slot = Process::kWin32ProcessCap;
+    u64 encoded_handle = 0;
     const sync::IrqFlags flags = sync::SpinLockAcquire(owner->win32_handle_lock);
-    for (u64 i = 0; i < Process::kWin32ProcessCap; ++i)
+    for (u32 i = 0; i < Process::kWin32ProcessCap; ++i)
     {
-        if (!owner->win32_proc_handles[i].in_use)
+        Process::Win32ProcessHandle& row = owner->win32_proc_handles[i];
+        if (row.state != Process::Win32ProcessHandleState::Free)
+            continue;
+        if (row.generation >= Process::kWin32ProcessHandleMaxGeneration)
         {
-            slot = i;
-            owner->win32_proc_handles[i].target = target;
-            owner->win32_proc_handles[i].in_use = true;
-            break;
+            row.state = Process::Win32ProcessHandleState::Retired;
+            continue;
         }
+
+        ++row.generation;
+        row.target = target;
+        row.state = Process::Win32ProcessHandleState::Live;
+        encoded_handle = EncodeWin32ProcessHandle(Process::Win32ProcessHandleIdentity{i, row.generation});
+        KASSERT(encoded_handle != 0, "core/process", "live Win32 Process row did not encode");
+        break;
     }
     sync::SpinLockRelease(owner->win32_handle_lock, flags);
-    return (slot == Process::kWin32ProcessCap) ? 0 : (Process::kWin32ProcessBase + slot);
+    return encoded_handle;
 }
 
 Process* ProcessLookupWin32ProcessHandleRetained(Process* owner, u64 handle)
 {
-    if (owner == nullptr || handle < Process::kWin32ProcessBase)
-    {
+    Process::Win32ProcessHandleIdentity identity{};
+    if (owner == nullptr || !DecodeWin32ProcessHandle(handle, &identity))
         return nullptr;
-    }
-    u64 slot = handle - Process::kWin32ProcessBase;
-    if (slot >= Process::kWin32ProcessCap)
-    {
-        return nullptr;
-    }
-    slot = util::MaskedIndex(slot, Process::kWin32ProcessCap);
 
     Process* target = nullptr;
     const sync::IrqFlags flags = sync::SpinLockAcquire(owner->win32_handle_lock);
-    const Process::Win32ProcessHandle& row = owner->win32_proc_handles[slot];
-    if (row.in_use && row.target != nullptr)
+    const Process::Win32ProcessHandle& row = owner->win32_proc_handles[identity.slot];
+    if (row.state == Process::Win32ProcessHandleState::Live && row.generation == identity.generation &&
+        row.target != nullptr)
     {
         target = row.target;
         ProcessRetain(target);
@@ -801,27 +1716,23 @@ Process* ProcessLookupWin32ProcessHandleRetained(Process* owner, u64 handle)
 
 bool ProcessCloseWin32ProcessHandle(Process* owner, u64 handle)
 {
-    if (owner == nullptr || handle < Process::kWin32ProcessBase)
-    {
+    Process::Win32ProcessHandleIdentity identity{};
+    if (owner == nullptr || !DecodeWin32ProcessHandle(handle, &identity))
         return false;
-    }
-    u64 slot = handle - Process::kWin32ProcessBase;
-    if (slot >= Process::kWin32ProcessCap)
-    {
-        return false;
-    }
-    slot = util::MaskedIndex(slot, Process::kWin32ProcessCap);
 
     Process* target = nullptr;
     bool removed = false;
     const sync::IrqFlags flags = sync::SpinLockAcquire(owner->win32_handle_lock);
-    Process::Win32ProcessHandle& row = owner->win32_proc_handles[slot];
-    if (row.in_use)
+    Process::Win32ProcessHandle& row = owner->win32_proc_handles[identity.slot];
+    if (row.state == Process::Win32ProcessHandleState::Live && row.generation == identity.generation &&
+        row.target != nullptr)
     {
         removed = true;
         target = row.target;
-        row.in_use = false;
         row.target = nullptr;
+        row.state = (row.generation == Process::kWin32ProcessHandleMaxGeneration)
+                        ? Process::Win32ProcessHandleState::Retired
+                        : Process::Win32ProcessHandleState::Free;
     }
     sync::SpinLockRelease(owner->win32_handle_lock, flags);
 
@@ -842,7 +1753,7 @@ u32 ProcessWin32ProcessHandleCount(const Process* owner)
     const sync::IrqFlags flags = sync::SpinLockAcquire(owner->win32_handle_lock);
     for (u64 i = 0; i < Process::kWin32ProcessCap; ++i)
     {
-        if (owner->win32_proc_handles[i].in_use)
+        if (owner->win32_proc_handles[i].state == Process::Win32ProcessHandleState::Live)
         {
             ++count;
         }
@@ -864,13 +1775,15 @@ void ProcessDropOwnedProcessHandles(Process* p)
         for (u64 i = 0; i < Process::kWin32ProcessCap; ++i)
         {
             Process::Win32ProcessHandle& h = p->win32_proc_handles[i];
-            if (!h.in_use)
+            if (h.state != Process::Win32ProcessHandleState::Live)
             {
                 continue;
             }
             targets[target_count++] = h.target;
-            h.in_use = false;
             h.target = nullptr;
+            h.state = (h.generation == Process::kWin32ProcessHandleMaxGeneration)
+                          ? Process::Win32ProcessHandleState::Retired
+                          : Process::Win32ProcessHandleState::Free;
         }
         sync::SpinLockRelease(p->win32_handle_lock, flags);
     }
@@ -880,83 +1793,220 @@ void ProcessDropOwnedProcessHandles(Process* p)
     // A<->B cycle; no destructor can re-enter a half-cleared table.
     for (u32 i = 0; i < target_count; ++i)
     {
+        if (targets[i] == p && __atomic_load_n(&p->refcount, __ATOMIC_ACQUIRE) == 0)
+        {
+            PanicWithValue("core/process", "zero-reference Process contained an impossible self-handle", p->pid);
+        }
         ProcessRelease(targets[i]);
     }
 }
 
-void ProcessRelease(Process* p)
+namespace
 {
-    if (p == nullptr)
-    {
-        return;
-    }
-    // Atomic decrement-and-test. Plain `--p->refcount` was the
-    // cross-CPU race source — two CPUs both observing refcount=1
-    // and both decrementing to 0 would both enter the destruction
-    // path, double-freeing the Process struct + its AS. Use
-    // `__atomic_sub_fetch` with ACQ_REL so the witness of "I'm
-    // the one who dropped it to 0" is well-defined across CPUs:
-    // exactly one CPU sees `new == 0` and runs the destructor;
-    // the others see `new > 0` and return early.
-    //
-    // ACQ_REL ordering: the destruction path below reads every
-    // owned field (windows, popup menus, AS, etc.); those reads
-    // must observe writes from prior retain/release pairs on
-    // peer CPUs (acquire side). The decrement itself is
-    // observable to peers as the release side.
-    const u64 prev = __atomic_load_n(&p->refcount, __ATOMIC_ACQUIRE);
-    if (prev == 0)
-    {
-        PanicWithValue("core/process", "ProcessRelease on refcount==0", reinterpret_cast<u64>(p));
-    }
-    const u64 new_count = __atomic_sub_fetch(&p->refcount, 1, __ATOMIC_ACQ_REL);
-    if (new_count != 0)
+void AdvanceLinuxChildEventLocked(Process* parent)
+{
+    (void)AdvanceStableEventSequenceLocked(&parent->linux_child_event_sequence);
+}
+
+void ClearLinuxChildRelationLocked(Process* parent, Process::LinuxChildRelation& relation)
+{
+    KASSERT(parent->linux_child_relation_count != 0, "core/process", "Linux child relation count underflow");
+    relation = Process::LinuxChildRelation{};
+    --parent->linux_child_relation_count;
+    AdvanceLinuxChildEventLocked(parent);
+}
+
+void RollbackLinuxParentRelation(Process* child)
+{
+    Process* parent = child->linux_parent;
+    if (parent == nullptr)
     {
         return;
     }
 
-    KBP_PROBE_V(::duetos::debug::ProbeId::kProcessDestroy, p->pid);
-
-    // Reap any windows this process registered but never
-    // DestroyWindow'd. Walks the compositor registry under the
-    // compositor lock so it serialises cleanly with the input
-    // threads + ui ticker that also draw. Triggered on the LAST
-    // reference-drop, so multi-threaded processes reap exactly
-    // once (when the final thread exits). `WindowReapByOwner`
-    // refuses pid==0 (kernel-owned boot windows) as a safety
-    // belt.
+    ScopedProcessRuntimeAccess parent_runtime(parent);
+    if (!parent_runtime)
     {
-        duetos::drivers::video::CompositorLock();
-        const u32 reaped = duetos::drivers::video::WindowReapByOwner(p->pid);
-        if (reaped > 0)
+        // The parent has no live task that can observe this failed fork. Keep
+        // its Exiting/Exited header inert and simply drop the child's strong
+        // identity edge.
+        child->linux_parent = nullptr;
+        child->linux_parent_pid = 0;
+        ProcessRelease(parent);
+        return;
+    }
+
+    bool removed = false;
+    {
+        sync::SpinLockGuard child_guard(parent->linux_child_exit_lock);
+        for (u64 i = 0; i < Process::kLinuxChildRelationCap; ++i)
         {
-            const duetos::drivers::video::Theme& theme = duetos::drivers::video::ThemeCurrent();
-            duetos::drivers::video::DesktopCompose(theme.desktop_bg, nullptr);
-            arch::SerialLineGuard guard;
-            arch::SerialWrite("[proc] reap-windows pid=");
-            arch::SerialWriteHex(p->pid);
-            arch::SerialWrite(" count=");
-            arch::SerialWriteHex(reaped);
-            arch::SerialWrite("\n");
+            Process::LinuxChildRelation& relation = parent->linux_child_relations[i];
+            if (relation.state != Process::LinuxChildRelationState::Live || relation.exit.pid != child->pid)
+            {
+                continue;
+            }
+            ClearLinuxChildRelationLocked(parent, relation);
+            removed = true;
+            break;
         }
-        duetos::drivers::video::CompositorUnlock();
     }
-    // Cancel any in-flight TrackPopupMenu owned by this pid so the
-    // syscall waiter doesn't block forever on a vanished caller.
-    // Done OUTSIDE the compositor lock — TrackPopupCancelByOwner
-    // takes both locks itself (in lock order tp_lock → compositor).
-    duetos::subsystems::win32::TrackPopupCancelByOwner(p->pid);
 
-    // Reclaim the GDI objects this process still holds. Memory DCs,
-    // compatible bitmaps, brushes and pens all live in system-wide
-    // tables; without this an exiting PE strands both its pixel bytes
-    // and its table slots for the rest of the boot, and a PE that
-    // exhausted its per-process ceiling before exiting would deny
-    // those slots to everything that starts afterwards. Stock and
-    // sys-colour objects (owner 0) are untouched.
-    duetos::subsystems::win32::GdiReapByOwner(p->pid);
+    KASSERT(removed, "core/process", "Private child lost its registered parent relation");
+    child->linux_parent = nullptr;
+    child->linux_parent_pid = 0;
+    parent_runtime.Unlock();
 
+    // A sibling parent task may already be waiting on this Live row. Wake it
+    // after the rollback is visible so it can rescan and return ECHILD.
+    sched::WaitQueueWakeAll(&parent->linux_wait_wq);
+    ProcessRelease(parent);
+}
+
+Process* QueueLinuxParentExit(Process* child)
+{
+    Process* parent = child->linux_parent;
+    if (parent == nullptr)
     {
+        return nullptr;
+    }
+
+    // A parent that has already entered Exiting has no task that can consume
+    // status. Runtime admission shares the parent's VM transaction with the
+    // reaper's Published -> Exiting transition, so success also proves the
+    // relation row cannot become inert halfway through this update.
+    ScopedProcessRuntimeAccess parent_runtime(parent);
+    if (!parent_runtime)
+    {
+        child->linux_parent = nullptr;
+        child->linux_parent_pid = 0;
+        // No parent task can consume this row. It is header-local metadata and
+        // contains no child pointer/reference, so leaving it untouched keeps
+        // the Exiting/Exited parent inert; dropping the child's strong edge
+        // below allows that header to be reclaimed normally.
+        ProcessRelease(parent);
+        return nullptr;
+    }
+
+    bool published = false;
+    {
+        sync::SpinLockGuard child_guard(parent->linux_child_exit_lock);
+        for (u64 i = 0; i < Process::kLinuxChildRelationCap; ++i)
+        {
+            Process::LinuxChildRelation& relation = parent->linux_child_relations[i];
+            if (relation.state != Process::LinuxChildRelationState::Live || relation.exit.pid != child->pid)
+            {
+                continue;
+            }
+            relation.exit.exit_code = child->linux_exit_code;
+            relation.exit.was_signaled = child->linux_was_signaled;
+            relation.exit.exit_signal = child->linux_exit_signal;
+            relation.state = Process::LinuxChildRelationState::Exited;
+            AdvanceLinuxChildEventLocked(parent);
+            published = true;
+            break;
+        }
+    }
+
+    KASSERT(published, "core/process", "Exited child lost its registered parent relation");
+    child->linux_parent = nullptr;
+    return parent;
+}
+
+void TransferAcceptedServiceEndpointOwners(ProcessKey process)
+{
+    KASSERT(ProcessKeyIsValid(process), "core/process", "invalid ProcessKey during service endpoint teardown");
+
+    // Transfer every exact accepted row in place before the generic handle
+    // table can release a server endpoint KObject. The row's outer owner keeps
+    // the boot-global endpoint slot and ChannelCore alive even if a peer is
+    // NT-suspended while retaining an operation pin. This operation allocates
+    // no second queue and has no Busy path: maintenance later retries the
+    // exact generation-bearing rows from the scheduler reaper.
+    const ServiceRuntimeDeferAcceptedProcessResultV1 deferred =
+        ServiceRuntimeDeferAcceptedProcessKernelV1(process);
+    if (deferred.runtime_status == ServiceRuntimeStatusV1::NotInitialized)
+        return;
+    if (deferred.runtime_status != ServiceRuntimeStatusV1::Ok)
+    {
+        PanicWithValue("core/process", "service runtime rejected Process endpoint ownership transfer",
+                       static_cast<u64>(deferred.runtime_status));
+    }
+    if (deferred.directory_status != ServiceDirectoryStatus::Ok)
+    {
+        PanicWithValue("core/process", "service endpoint ownership transfer failed closed",
+                       static_cast<u64>(deferred.directory_status));
+    }
+}
+
+void TeardownProcessRuntimeResources(Process* p, bool observable_exit)
+{
+    KASSERT(p != nullptr, "core/process", "null Process runtime teardown");
+    const ProcessLifecycleState lifecycle = ProcessLifecycleLoad(p);
+    KASSERT((observable_exit && lifecycle == ProcessLifecycleState::Exiting) ||
+                (!observable_exit && lifecycle == ProcessLifecycleState::Private),
+            "core/process", "runtime teardown mode does not match lifecycle");
+    KASSERT(p->as != nullptr, "core/process", "Process runtime teardown repeated after AS release");
+    if (observable_exit)
+        KBP_PROBE_V(::duetos::debug::ProbeId::kProcessDestroy, p->pid);
+
+    // SchedCreateUser consumes the creator's Process reference even when task
+    // allocation/publication fails. A pre-publication fork therefore reaches
+    // this Private teardown path with a registered Live relation. Remove it,
+    // advance the parent's event sequence, wake waiters, and release the
+    // child's strong parent edge before reclaiming any other runtime state.
+    if (!observable_exit)
+        RollbackLinuxParentRelation(p);
+
+    // Job member removal is scheduler-linearized with the exact last-Task
+    // unlink before this unlocked teardown begins. Preserve the remaining
+    // ordering: strong process-handle cycle breaking, then owner-Job
+    // retirement, before GUI callbacks and address-space destruction.
+    const ProcessKey process_key = ProcessKeySnapshot(p);
+
+    // Completion receipts and accepted endpoint rows are both exact ProcessKey
+    // authority. Retire ingress first, then transfer every accepted owner into
+    // durable in-directory deferred state before any generic KObject handle can
+    // release its raw ServiceEndpoint reference. The scheduler reaper drives
+    // those strong owner rows outside this one-shot Process teardown, so a peer
+    // suspended while holding an operation pin cannot wedge all Process exits.
+    ServiceEndpointIngressCancelProcessKernel(process_key);
+    TransferAcceptedServiceEndpointOwners(process_key);
+
+    ProcessDropOwnedProcessHandles(p);
+    if (observable_exit)
+        JobDrainOwned(process_key);
+
+    // A Private creator abort has never executed user code, so it cannot own
+    // GUI, socket, or stdin-focus state. Avoid touching those potentially
+    // uninitialized subsystems on early loader failure.
+    if (observable_exit)
+    {
+        // Reap any windows this process registered but never DestroyWindow'd.
+        // Walks the compositor registry under the compositor lock so it
+        // serialises cleanly with input and UI workers.
+        {
+            duetos::drivers::video::CompositorLock();
+            const u32 reaped = duetos::drivers::video::WindowReapByOwner(p->pid);
+            if (reaped > 0)
+            {
+                const duetos::drivers::video::Theme& theme = duetos::drivers::video::ThemeCurrent();
+                duetos::drivers::video::DesktopCompose(theme.desktop_bg, nullptr);
+                arch::SerialLineGuard guard;
+                arch::SerialWrite("[proc] reap-windows pid=");
+                arch::SerialWriteHex(p->pid);
+                arch::SerialWrite(" count=");
+                arch::SerialWriteHex(reaped);
+                arch::SerialWrite("\n");
+            }
+            duetos::drivers::video::CompositorUnlock();
+        }
+
+        // These helpers run outside the compositor lock. TrackPopup takes its
+        // own locks in tp_lock -> compositor order; GDI owns a separate pool.
+        duetos::subsystems::win32::TrackPopupCancelByOwner(p->pid);
+        duetos::subsystems::win32::GdiReapByOwner(p->pid);
+
         arch::SerialLineGuard guard;
         arch::SerialWrite("[proc] destroy pid=");
         arch::SerialWriteHex(p->pid);
@@ -965,50 +2015,6 @@ void ProcessRelease(Process* p)
         arch::SerialWrite("\"\n");
     }
 
-    // Notify the Linux parent (if any) that this process has exited.
-    // Parent is found by PID — pids are monotonically incrementing
-    // and never reused, so a missed lookup means the parent died
-    // first (orphaned child case; nothing to do — sub-GAP: no
-    // init-style reaper yet, so orphaned exits drop their status).
-    //
-    // Done BEFORE the KFree below so the parent's queue mutation
-    // happens while the dying process's data is still valid.
-    if (p->linux_parent_pid != 0)
-    {
-        Process* parent = sched::SchedFindProcessByPidRetained(p->linux_parent_pid);
-        if (parent != nullptr)
-        {
-            bool queued = false;
-            {
-                sync::SpinLockGuard child_guard(parent->linux_child_exit_lock);
-                if (parent->linux_child_exit_count < Process::kLinuxChildExitCap)
-                {
-                    auto& slot = parent->linux_child_exits[parent->linux_child_exit_count];
-                    slot.pid = p->pid;
-                    slot.exit_code = p->linux_exit_code;
-                    slot.was_signaled = p->linux_was_signaled;
-                    slot.exit_signal = p->linux_exit_signal;
-                    ++parent->linux_child_exit_count;
-                    queued = true;
-                }
-            }
-            if (queued)
-            {
-                sched::WaitQueueWakeOne(&parent->linux_wait_wq);
-            }
-            ProcessRelease(parent);
-        }
-    }
-
-    // Release any Win32 process handles (OpenProcess results) this
-    // process still holds. Each in-use slot retains the target
-    // Process; without this loop an app that exits without calling
-    // CloseHandle on an OpenProcess result pins the target Process
-    // + AddressSpace forever. Idempotent — the sched reaper may
-    // have already called this, in which case every slot is cleared
-    // and the loop is a no-op.
-    ProcessDropOwnedProcessHandles(p);
-
     // Release any SysV SHM attachments still held. DoShmat takes a refcount
     // that only shmdt(2) dropped, so a process exiting while attached used to
     // strand the segment and its pool slot for the rest of the boot. Runs
@@ -1016,41 +2022,61 @@ void ProcessRelease(Process* p)
     // does not touch p->as (SHM pages are borrowed, not AS-owned).
     ::duetos::subsystems::linux::internal::LinuxShmDrainProcess(p);
 
-    // Tear down every section view still installed in this AS.
-    // MUST run BEFORE the AddressSpaceRelease below — SectionUnmap
-    // dereferences `p->as`, and after the release that pointer is
-    // dangling.
-    //
-    // A view holds its own section-pool reference and its frames
-    // are borrowed, not AS-owned, so AS teardown neither drops the
-    // reference nor returns the frames. Unmap-then-release matches
-    // the ordering SYS_SECTION_UNMAP uses (see the 0x900 arm in
-    // kernel/syscall/syscall.cpp). The unmap is book-keeping only
-    // at this point — the page tables are about to be freed
-    // wholesale — but it keeps the one code path that clears a
-    // borrowed PTE the same on both the syscall and the exit legs.
-    for (u64 i = 0; i < Process::kWin32SectionCap; ++i)
+    // Atomically detach every Section handle and view row before touching the
+    // global pool or this address space. The Published -> Exiting transition
+    // was serialized by vm_transaction_lock, so admitted foreign Section
+    // operations are finished and new operations fail before row access.
+    Win32SectionDrainSnapshot section_drain{};
+    DetachAllWin32SectionRows(p, &section_drain);
+
+    // Exact view unmap must precede any release that could free its frames.
+    // A mismatch leaves the view reference intact. Keep those exact keys in a
+    // deferred list until the sole AS reference is released and its page
+    // tables are destroyed, so a surviving PTE can never name freed frames.
+    subsystems::win32::section::SectionKey deferred_view_releases[Process::kWin32SectionCap]{};
+    u32 deferred_view_release_count = 0;
+    for (u32 i = 0; i < section_drain.view_count; ++i)
     {
-        if (p->win32_section_views[i].in_use)
+        const Process::Win32SectionViewClaim& view = section_drain.views[i];
+        if (!subsystems::win32::section::SectionUnmapAndReleaseView(view.key, p->as, view.base_va))
         {
-            const u32 pool_idx = p->win32_section_views[i].pool_index;
-            const u64 base_va = p->win32_section_views[i].base_va;
-            p->win32_section_views[i].in_use = false;
-            p->win32_section_views[i].pool_index = 0;
-            p->win32_section_views[i].base_va = 0;
-            (void)subsystems::win32::section::SectionUnmap(pool_idx, p->as, base_va);
-            subsystems::win32::section::SectionRelease(pool_idx);
+            deferred_view_releases[deferred_view_release_count++] = view.key;
         }
     }
+    for (u32 i = 0; i < section_drain.handle_count; ++i)
+    {
+        subsystems::win32::section::SectionRelease(section_drain.handle_keys[i]);
+    }
 
-    // Drop the AS reference we took at create. If this was the last
-    // process/task holding that AS (v0: always true — one task per
-    // process, one process per AS), the AS destroy path runs inline:
-    // user-half tables freed, backing frames returned, PML4 frame
-    // returned.
+    // Drop the AS reference we took at create. Tasks retain Process rather
+    // than its AddressSpace, so Process remains the sole AS owner even when
+    // it has multiple tasks. The AS destroy path therefore runs inline:
+    // user-half tables freed, backing frames returned, PML4 frame returned.
+    const u64 section_teardown_as_refs = __atomic_load_n(&p->as->refcount.value, __ATOMIC_ACQUIRE);
+    const bool as_will_destroy = section_teardown_as_refs == 1;
+    if (!as_will_destroy && deferred_view_release_count != 0)
+    {
+        KLOG_CRITICAL_V("core/process", "shared AddressSpace during failed Section unmap; pinning deferred view refs",
+                        section_teardown_as_refs);
+    }
+    KASSERT_WITH_VALUE(as_will_destroy, "core/process", "deferred Section release requires sole AddressSpace ownership",
+                       section_teardown_as_refs);
     mm::AddressSpaceRelease(p->as);
     p->as = nullptr;
-    arch::SerialWrite("[proc] release: post-AS\n");
+
+    // AddressSpaceRetain currently has no callers: Process owns the sole AS
+    // reference, so the release above destroys every remaining PTE inline.
+    // In an assertion-disabled future shared-AS build, fail safe by pinning
+    // the deferred refs instead of freeing frames below surviving PTEs.
+    if (as_will_destroy)
+    {
+        for (u32 i = 0; i < deferred_view_release_count; ++i)
+        {
+            subsystems::win32::section::SectionRelease(deferred_view_releases[i]);
+        }
+    }
+    if (observable_exit)
+        arch::SerialWrite("[proc] release: post-AS\n");
 
     // Emit the recorded diagnostic data to serial before the
     // state is freed. No-op when the process has no custom state
@@ -1058,14 +2084,18 @@ void ProcessRelease(Process* p)
     // observability tier is auto-on, so this fires for every Win32
     // PE exit and gives a post-mortem record without anyone having
     // to know the dump syscall exists.
-    subsystems::win32::custom::DumpExitDiagnostics(p);
-    arch::SerialWrite("[proc] release: post-exit-diagnostics\n");
+    if (observable_exit)
+    {
+        subsystems::win32::custom::DumpExitDiagnostics(p);
+        arch::SerialWrite("[proc] release: post-exit-diagnostics\n");
+    }
 
     // Free the Win32 custom-diagnostics state if any was allocated.
     // No-op when the process never opted into any custom-Win32
     // feature (the common path).
     subsystems::win32::custom::CleanupProcess(p);
-    arch::SerialWrite("[proc] release: post-CleanupProcess\n");
+    if (observable_exit)
+        arch::SerialWrite("[proc] release: post-CleanupProcess\n");
 
     // Close every Linux fd slot BEFORE the KObject drain below.
     //
@@ -1105,7 +2135,8 @@ void ProcessRelease(Process* p)
     // handles only Win32-only dir slots that had no KFile sidecar
     // (raw FindFirstFile callers without an attached Linux fd).
     ::duetos::ipc::HandleTableDrain(p->kobj_handles);
-    arch::SerialWrite("[proc] release: post-HandleTableDrain\n");
+    if (observable_exit)
+        arch::SerialWrite("[proc] release: post-HandleTableDrain\n");
 
     // Reclaim any kernel sockets this process left bound/open. Without
     // this, a networked process that exits (or crashes) leaks its pool
@@ -1113,13 +2144,8 @@ void ProcessRelease(Process* p)
     // restart=Always service (e.g. netd) fail to re-bind on respawn
     // with EADDRINUSE. Kernel-owned sockets (owner_pid 0, e.g. DRSH)
     // are not touched.
-    ::duetos::net::SocketReleaseByOwner(p->pid);
-
-    // Surface anything still attributable to this PID after the
-    // earlier drain steps (kobject handles, Win32 handle slots,
-    // ticks-over-budget, future GPU residue). Silent on a clean
-    // exit; logs WARN + fires kLeakAttributable on residue.
-    ::duetos::diag::LeakDetectorReportProcessExit(*p);
+    if (observable_exit)
+        ::duetos::net::SocketReleaseByOwner(p->pid);
 
     // Close every Win32 file handle the process left open. Ramfs /
     // Fat32 / DuetFs / RamVol slots own nothing (a borrowed node or
@@ -1134,27 +2160,25 @@ void ProcessRelease(Process* p)
     //
     // CloseForProcess is idempotent, clears the slot itself, takes
     // no reference on `p`, and wakes pipe waiters — all fine here:
-    // ProcessRelease runs in reaper / syscall task context with
+    // Runtime teardown runs in reaper or creator-abort task context with
     // interrupts on, not in an IRQ handler.
-    for (u64 i = 0; i < Process::kWin32HandleCap; ++i)
-        (void)fs::routing::CloseForProcess(p, Process::kWin32HandleBase + i);
-
-    // Drop the section-pool reference held by every section handle
-    // the process left open. Mirrors DoFileClose's 0x900 arm
-    // (kernel/subsystems/win32/file_syscall.cpp). Without it a
-    // leaked handle keeps Section.refcount above 0 forever, so
-    // SectionRelease never reaches its frames-free branch — up to
-    // kSectionMaxBytes of physical frames stranded per section, out
-    // of a global pool of only 8 sections.
-    for (u64 i = 0; i < Process::kWin32SectionCap; ++i)
+    for (u32 slot = 0; slot < Process::kWin32HandleCap; ++slot)
     {
-        if (p->win32_section_handles[i].in_use)
+        u64 handle = 0;
+        const sync::IrqFlags flags = sync::SpinLockAcquire(p->win32_file_lock);
+        const Process::Win32FileHandle& row = p->win32_handles[slot];
+        if (row.kind != Process::FsBackingKind::None && row.kind != Process::FsBackingKind::Reserved)
         {
-            const u32 pool_idx = p->win32_section_handles[i].pool_index;
-            p->win32_section_handles[i].in_use = false;
-            p->win32_section_handles[i].pool_index = 0;
-            subsystems::win32::section::SectionRelease(pool_idx);
+            const Process::Win32FileHandleIdentity identity{slot, 0, row.generation};
+            handle = EncodeWin32FileHandle(identity);
         }
+        sync::SpinLockRelease(p->win32_file_lock, flags);
+
+        // Close re-decodes and generation-checks the snapshot. If an impossible
+        // late recycler raced this terminal drain, the old identity cannot
+        // detach the new row.
+        if (handle != 0)
+            (void)fs::routing::CloseForProcess(p, handle);
     }
 
     // Free any directory-iteration snapshots the process leaked
@@ -1170,17 +2194,262 @@ void ProcessRelease(Process* p)
         }
     }
 
-    arch::SerialWrite("[proc] release: post-win32_dirs\n");
+    if (observable_exit)
+        arch::SerialWrite("[proc] release: post-win32_dirs\n");
 
     // Drop the stdin focus if this process held it. Without this,
     // kbd-reader would keep pushing into the freed ring's head
     // cursor and walking off the heap. No-op for processes that
     // never called SYS_STDIN_READ.
-    StdinFocusClearIf(p);
+    if (observable_exit)
+        StdinFocusClearIf(p);
+
+    // Surface anything still attributable to this PID only after every normal
+    // runtime drain above has completed. This callback may release diagnostic
+    // GPU residue; it runs without any Process table or scheduler lock held.
+    if (observable_exit)
+        ::duetos::diag::LeakDetectorReportProcessExit(*p);
+
+    // Every operation that could consult credentials or enforcement state has
+    // now drained, including diagnostics and KObject/backend destruction.
+    // Retire the exact security owners before the final resource-domain edge;
+    // no Process header survives with live mutable authority after Exited.
+    ReleaseProcessSecurityOwners(p, "security-owner final release failed");
+    ReleaseProcessResourceDomainOwner(p, "resource-domain final release failed");
+
+    if (observable_exit)
+        arch::SerialWrite("[proc] release: done\n");
+}
+} // namespace
+
+bool ProcessRegisterLinuxChildRelation(Process* parent, Process* child, u64 child_limit)
+{
+    if (parent == nullptr || child == nullptr || parent == child || child_limit == 0 ||
+        ProcessLifecycleLoad(child) != ProcessLifecycleState::Private || child->linux_parent != nullptr)
+    {
+        return false;
+    }
+
+    // Retain before publishing the pointer into the Private child. Failure
+    // drops this speculative edge only after the parent relation lock is free.
+    ProcessRetain(parent);
+    ScopedProcessRuntimeAccess parent_runtime(parent);
+    if (!parent_runtime)
+    {
+        ProcessRelease(parent);
+        return false;
+    }
+    bool registered = false;
+    {
+        sync::SpinLockGuard child_guard(parent->linux_child_exit_lock);
+        // Revalidate the soft limit inside the same relation transaction that
+        // serializes sibling fork admissions. A concurrent release-store from
+        // setrlimit either linearizes before this acquire-load (and is honored)
+        // or after this fork admission; lowering a limit never retroactively
+        // invalidates an already-admitted child.
+        const u64 latest_soft_limit = __atomic_load_n(&parent->linux_rlimit_nproc_cur, __ATOMIC_ACQUIRE);
+        const u64 configured_limit = latest_soft_limit == ~u64(0) ? Process::kLinuxChildRelationCap : latest_soft_limit;
+        const u64 snapshot_limit =
+            child_limit < Process::kLinuxChildRelationCap ? child_limit : Process::kLinuxChildRelationCap;
+        const u64 admission_limit = configured_limit < snapshot_limit ? configured_limit : snapshot_limit;
+        if (parent->linux_child_relation_count < admission_limit)
+        {
+            for (u64 i = 0; i < Process::kLinuxChildRelationCap; ++i)
+            {
+                Process::LinuxChildRelation& relation = parent->linux_child_relations[i];
+                if (relation.state != Process::LinuxChildRelationState::Free)
+                {
+                    KASSERT(relation.exit.pid != child->pid, "core/process", "duplicate Linux child relation PID");
+                    continue;
+                }
+
+                relation.exit.pid = child->pid;
+                relation.exit.exit_code = 0;
+                relation.exit.exit_signal = 0;
+                relation.exit.was_signaled = false;
+                relation.state = Process::LinuxChildRelationState::Live;
+                ++parent->linux_child_relation_count;
+                child->linux_parent = parent;
+                child->linux_parent_pid = parent->pid;
+                AdvanceLinuxChildEventLocked(parent);
+                registered = true;
+                break;
+            }
+        }
+    }
+    parent_runtime.Unlock();
+
+    if (!registered)
+    {
+        ProcessRelease(parent);
+        return false;
+    }
+
+    // Registration changes exact-pid ECHILD answers for sibling waiters. The
+    // wait queue is selector-shared, so wake all rather than risking that a
+    // waiter for another PID consumes the sole wake.
+    sched::WaitQueueWakeAll(&parent->linux_wait_wq);
+    return true;
+}
+
+LinuxChildWaitResult ProcessPollLinuxChild(Process* parent, i64 target_pid, Process::LinuxChildExit* exit_out,
+                                           u64* observed_sequence_out)
+{
+    KASSERT(parent != nullptr, "core/process", "ProcessPollLinuxChild null parent");
+    KASSERT(exit_out != nullptr, "core/process", "ProcessPollLinuxChild null exit output");
+    KASSERT(observed_sequence_out != nullptr, "core/process", "ProcessPollLinuxChild null sequence output");
+
+    *exit_out = Process::LinuxChildExit{};
+    *observed_sequence_out = 0;
+    bool consumed = false;
+    bool matching_relation = false;
+    {
+        sync::SpinLockGuard child_guard(parent->linux_child_exit_lock);
+        for (u64 i = 0; i < Process::kLinuxChildRelationCap; ++i)
+        {
+            Process::LinuxChildRelation& relation = parent->linux_child_relations[i];
+            if (relation.state == Process::LinuxChildRelationState::Free ||
+                (target_pid > 0 && static_cast<i64>(relation.exit.pid) != target_pid))
+            {
+                continue;
+            }
+
+            matching_relation = true;
+            if (relation.state != Process::LinuxChildRelationState::Exited)
+            {
+                continue;
+            }
+
+            *exit_out = relation.exit;
+            ClearLinuxChildRelationLocked(parent, relation);
+            consumed = true;
+            break;
+        }
+
+        *observed_sequence_out = __atomic_load_n(&parent->linux_child_event_sequence, __ATOMIC_ACQUIRE);
+    }
+
+    if (consumed)
+    {
+        // Consumption can turn another waiter's answer into ECHILD. Publish
+        // that relation-set change to every selector sharing this queue.
+        sched::WaitQueueWakeAll(&parent->linux_wait_wq);
+        return LinuxChildWaitResult::Exited;
+    }
+    return matching_relation ? LinuxChildWaitResult::Pending : LinuxChildWaitResult::NoMatchingChild;
+}
+
+sched::WaitQueueBlockResult ProcessWaitForLinuxChildEvent(Process* parent, u64 observed_sequence)
+{
+    KASSERT(parent != nullptr, "core/process", "ProcessWaitForLinuxChildEvent null parent");
+    if (observed_sequence == ~u64{0})
+        return sched::WaitQueueBlockTimeoutCancellable(&parent->linux_wait_wq, 1);
+    return sched::WaitQueueBlockIfSequenceUnchangedCancellable(
+        &parent->linux_wait_wq, &parent->linux_child_event_sequence, observed_sequence);
+}
+
+void ProcessCompleteExitFromReaper(Process* process)
+{
+    KASSERT(process != nullptr, "core/process", "null Process exit completion");
+    KASSERT(ProcessLifecycleLoad(process) == ProcessLifecycleState::Exiting, "core/process",
+            "Process exit completion requires Exiting lifecycle");
+
+    // These callbacks may release Process references, so the reaper's strong
+    // pin is a precondition. No scheduler, runtime-admission, or table lock is
+    // held across any callback or resource destructor.
+    TeardownProcessRuntimeResources(process, true);
+
+    // Publish the terminal lifecycle before making child status visible. A
+    // parent already polling its queue must never observe a ready wait row
+    // while the child's mutable runtime is still only Exiting.
+    KASSERT(ProcessLifecycleTransition(process, ProcessLifecycleState::Exiting, ProcessLifecycleState::Exited),
+            "core/process", "Process runtime teardown failed to publish Exited");
+    __atomic_sub_fetch(&g_live_processes, 1, __ATOMIC_RELAXED);
+
+    // The observer keeps only the immutable ProcessKey and durable scalar exit
+    // result. Runtime teardown is complete, Exited is release-published, and
+    // no scheduler or VM lock is held while its lower-ranked fixed-table lock
+    // is acquired. Ordinary non-service Processes have no row and are benign.
+    const ProcessKey exited_process = ProcessKeySnapshot(process);
+    const u32 exit_code = ProcessWin32ExitCodeSnapshot(process);
+    const ServiceExitObserverStatus exit_observer_status =
+        ServiceExitObserverPublishKernelProcessExit(exited_process, exit_code);
+    KASSERT(exit_observer_status == ServiceExitObserverStatus::Ok ||
+                exit_observer_status == ServiceExitObserverStatus::NotFound ||
+                exit_observer_status == ServiceExitObserverStatus::NotInitialized ||
+                exit_observer_status == ServiceExitObserverStatus::Closed,
+            "core/process", "Process exit observer rejected exact terminal publication");
+
+    // The child retained this exact parent identity when its fixed relation
+    // row was registered before scheduler publication. Transition that row in
+    // place; there is no exit-time allocation or capacity failure.
+    Process* parent_to_wake = QueueLinuxParentExit(process);
+
+    if (parent_to_wake != nullptr)
+    {
+        // Waiters share one queue but can select different PIDs. WakeAll is
+        // required: WakeOne could wake the wrong selector and strand the
+        // waiter whose child actually exited.
+        sched::WaitQueueWakeAll(&parent_to_wake->linux_wait_wq);
+        ProcessRelease(parent_to_wake);
+    }
+    ::duetos::subsystems::linux::internal::LinuxPidfdExitWake();
+}
+
+void ProcessRelease(Process* p)
+{
+    if (p == nullptr)
+        return;
+
+    // Checked CAS decrement. A load-then-atomic-sub sequence still permits two
+    // buggy releasers to both witness 1: one reaches zero while the other
+    // underflows to UINT64_MAX on freed storage. Refuse zero inside the
+    // transition loop so only an exact witnessed value can be decremented.
+    // ACQ_REL publishes the decrement and makes the sole zero-transition owner
+    // observe every field write released by prior holders before reclamation.
+    u64 current = __atomic_load_n(&p->refcount, __ATOMIC_ACQUIRE);
+    u64 new_count = 0;
+    for (;;)
+    {
+        if (current == 0)
+            PanicWithValue("core/process", "ProcessRelease on refcount==0", reinterpret_cast<u64>(p));
+        new_count = current - 1;
+        if (__atomic_compare_exchange_n(&p->refcount, &current, new_count, /*weak=*/false, __ATOMIC_ACQ_REL,
+                                        __ATOMIC_ACQUIRE))
+        {
+            break;
+        }
+    }
+    if (new_count != 0)
+        return;
+
+    const ProcessLifecycleState lifecycle = ProcessLifecycleLoad(p);
+    if (lifecycle == ProcessLifecycleState::Private)
+    {
+        // A creator abort was never scheduler-visible: reclaim resources but
+        // emit no Job, parent, pidfd, exit-diagnostic, or lifecycle event.
+        TeardownProcessRuntimeResources(p, false);
+        __atomic_sub_fetch(&g_live_processes, 1, __ATOMIC_RELAXED);
+    }
+    else if (lifecycle == ProcessLifecycleState::Exited)
+    {
+        // Runtime ownership ended at last-Task exit. Strong external handles
+        // keep only stable identity metadata alive until this final release.
+        KASSERT(p->as == nullptr, "core/process", "Exited Process retained a live address space");
+        KASSERT(!ResourceDomainKeyIsValid(p->resource_domain), "core/process",
+                "Exited Process retained a resource domain");
+        KASSERT(!CredentialKeyIsValid(p->credentials), "core/process", "Exited Process retained credentials");
+        KASSERT(!AuthorizationContextKeyIsValid(p->authorization), "core/process",
+                "Exited Process retained authorization");
+        KASSERT(p->linux_parent == nullptr, "core/process", "Exited Process retained a Linux parent reference");
+    }
+    else
+    {
+        PanicWithValue("core/process", "ProcessRelease reached zero outside a terminal lifecycle state",
+                       static_cast<u64>(lifecycle));
+    }
 
     mm::KFree(p);
-    __atomic_sub_fetch(&g_live_processes, 1, __ATOMIC_RELAXED);
-    arch::SerialWrite("[proc] release: done\n");
 }
 
 Process* CurrentProcess()
@@ -1193,12 +2462,212 @@ Process* CurrentProcess()
     return sched::TaskProcess(t);
 }
 
-void RecordSandboxDenial(Cap cap)
+u64 ProcessLinuxSignalPendingSnapshot(const Process* process)
+{
+    if (process == nullptr)
+        return 0;
+    return __atomic_load_n(&process->linux_pending_signals, __ATOMIC_ACQUIRE);
+}
+
+namespace
+{
+
+void WakeLinuxSignalReaders(Process* process)
+{
+    // WaitQueueWakeAll requires interrupts disabled, but callers include both
+    // ordinary syscall context and trap-return paths. Preserve the incoming
+    // IF state instead of unconditionally enabling interrupts on return.
+    constexpr u64 kRflagsInterruptEnable = 1ULL << 9;
+    const bool interrupts_were_enabled = (arch::ReadRflags() & kRflagsInterruptEnable) != 0;
+    arch::Cli();
+    sched::WaitQueueWakeAll(&process->linux_signal_wq);
+    if (interrupts_were_enabled)
+        arch::Sti();
+}
+
+} // namespace
+
+bool ProcessLinuxSignalRaisePending(Process* process, u32 signum)
+{
+    const u64 bit = ProcessLinuxSignalBit(signum);
+    if (process == nullptr || bit == 0)
+        return false;
+    __atomic_fetch_or(&process->linux_pending_signals, bit, __ATOMIC_RELEASE);
+    AdvanceStableEventSequenceAtomic(&process->linux_signal_event_sequence);
+    WakeLinuxSignalReaders(process);
+    return true;
+}
+
+bool ProcessLinuxSignalClaimPending(Process* process, u32 signum)
+{
+    const u64 bit = ProcessLinuxSignalBit(signum);
+    if (process == nullptr || bit == 0)
+        return false;
+
+    u64 observed = __atomic_load_n(&process->linux_pending_signals, __ATOMIC_ACQUIRE);
+    while ((observed & bit) != 0)
+    {
+        const u64 desired = observed & ~bit;
+        if (__atomic_compare_exchange_n(&process->linux_pending_signals, &observed, desired, false, __ATOMIC_ACQ_REL,
+                                        __ATOMIC_ACQUIRE))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+void ProcessLinuxSignalRestorePending(Process* process, u64 signal_mask)
+{
+    if (process == nullptr || signal_mask == 0)
+        return;
+    __atomic_fetch_or(&process->linux_pending_signals, signal_mask, __ATOMIC_RELEASE);
+    AdvanceStableEventSequenceAtomic(&process->linux_signal_event_sequence);
+    WakeLinuxSignalReaders(process);
+}
+
+u64 ProcessLinuxSignalEventSequenceSnapshot(const Process* process)
+{
+    if (process == nullptr)
+        return 0;
+    return __atomic_load_n(&process->linux_signal_event_sequence, __ATOMIC_ACQUIRE);
+}
+
+void ProcessLinuxSignalNotifyWaiters(Process* process)
+{
+    if (process == nullptr)
+        return;
+    AdvanceStableEventSequenceAtomic(&process->linux_signal_event_sequence);
+    WakeLinuxSignalReaders(process);
+}
+
+sched::WaitQueueBlockResult ProcessWaitForLinuxSignalEvent(Process* process, u64 observed_sequence)
+{
+    KASSERT(process != nullptr, "core/process", "ProcessWaitForLinuxSignalEvent null process");
+    if (observed_sequence == ~u64{0})
+        return sched::WaitQueueBlockTimeoutCancellable(&process->linux_signal_wq, 1);
+    return sched::WaitQueueBlockIfSequenceUnchangedCancellable(
+        &process->linux_signal_wq, &process->linux_signal_event_sequence, observed_sequence);
+}
+
+bool ProcessReserveMmapRange(Process* process, u64 size_bytes, u64* base_out)
+{
+    constexpr u64 kUserMaxExclusive = 0x0000800000000000ULL;
+    if (process == nullptr || base_out == nullptr || size_bytes == 0 || (size_bytes & (mm::kPageSize - 1)) != 0)
+    {
+        return false;
+    }
+    *base_out = 0;
+    const u64 limit = process->abi_flavor == kAbiLinux ? kUserMaxExclusive : Process::kCompatAutoVmLimit;
+    u64 cursor = __atomic_load_n(&process->linux_mmap_cursor, __ATOMIC_ACQUIRE);
+    for (;;)
+    {
+        if (cursor == 0 || (cursor & (mm::kPageSize - 1)) != 0 || cursor >= limit || size_bytes > (limit - cursor))
+        {
+            return false;
+        }
+        const u64 next = cursor + size_bytes;
+        if (__atomic_compare_exchange_n(&process->linux_mmap_cursor, &cursor, next, /*weak=*/false, __ATOMIC_ACQ_REL,
+                                        __ATOMIC_ACQUIRE))
+        {
+            *base_out = cursor;
+            return true;
+        }
+    }
+}
+
+UserAbiWordStatus ProcessCopyUserAbiWordFrom(const Process* process, const void* user_src, u64* value_out)
+{
+    if (process == nullptr || user_src == nullptr || value_out == nullptr)
+    {
+        return UserAbiWordStatus::InvalidArgument;
+    }
+    *value_out = 0;
+    if (process->user_is_pe32)
+    {
+        u32 value32 = 0;
+        if (!mm::CopyFromUser(&value32, user_src, sizeof(value32)))
+        {
+            return UserAbiWordStatus::Fault;
+        }
+        *value_out = value32;
+        return UserAbiWordStatus::Ok;
+    }
+    return mm::CopyFromUser(value_out, user_src, sizeof(*value_out)) ? UserAbiWordStatus::Ok : UserAbiWordStatus::Fault;
+}
+
+UserAbiWordStatus ProcessCopyUserAbiWordTo(const Process* process, void* user_dst, u64 value)
+{
+    if (process == nullptr || user_dst == nullptr)
+    {
+        return UserAbiWordStatus::InvalidArgument;
+    }
+    if (process->user_is_pe32)
+    {
+        if (value > static_cast<u64>(~0U))
+        {
+            return UserAbiWordStatus::ValueTooWide;
+        }
+        const u32 value32 = static_cast<u32>(value);
+        return mm::CopyToUser(user_dst, &value32, sizeof(value32)) ? UserAbiWordStatus::Ok : UserAbiWordStatus::Fault;
+    }
+    return mm::CopyToUser(user_dst, &value, sizeof(value)) ? UserAbiWordStatus::Ok : UserAbiWordStatus::Fault;
+}
+
+u64 ProcessMmapCursorSnapshot(const Process* process)
+{
+    return process == nullptr ? 0 : __atomic_load_n(&process->linux_mmap_cursor, __ATOMIC_ACQUIRE);
+}
+
+ScopedProcessVmTransaction::ScopedProcessVmTransaction(Process* process) : m_process(process)
+{
+    KASSERT(m_process != nullptr, "core/process", "null Process VM transaction");
+    sched::MutexLock(&m_process->vm_transaction_lock);
+}
+
+ScopedProcessVmTransaction::~ScopedProcessVmTransaction()
+{
+    Unlock();
+}
+
+void ScopedProcessVmTransaction::Unlock()
+{
+    if (m_process == nullptr)
+        return;
+    sched::MutexUnlock(&m_process->vm_transaction_lock);
+    m_process = nullptr;
+}
+
+ScopedProcessRuntimeAccess::ScopedProcessRuntimeAccess(Process* process) : m_process(process)
+{
+    KASSERT(m_process != nullptr, "core/process", "null Process runtime admission");
+    sched::MutexLock(&m_process->vm_transaction_lock);
+    if (ProcessLifecycleLoad(m_process) != ProcessLifecycleState::Published || m_process->as == nullptr)
+    {
+        sched::MutexUnlock(&m_process->vm_transaction_lock);
+        m_process = nullptr;
+    }
+}
+
+ScopedProcessRuntimeAccess::~ScopedProcessRuntimeAccess()
+{
+    Unlock();
+}
+
+void ScopedProcessRuntimeAccess::Unlock()
+{
+    if (m_process == nullptr)
+        return;
+    sched::MutexUnlock(&m_process->vm_transaction_lock);
+    m_process = nullptr;
+}
+
+u64 RecordSandboxDenial(Cap cap)
 {
     sched::Task* t = sched::CurrentTask();
     if (t == nullptr)
     {
-        return;
+        return 0;
     }
     // Defence-in-depth against early-boot pre-PerCpuInit calls and
     // any future regression where CurrentTask() returns garbage:
@@ -1211,7 +2680,7 @@ void RecordSandboxDenial(Cap cap)
     // pre-init caller fails closed instead of triple-faulting.
     if (!PlausibleKernelAddress(reinterpret_cast<u64>(t)))
     {
-        return;
+        return 0;
     }
     Process* p = sched::TaskProcess(t);
     if (p == nullptr)
@@ -1223,16 +2692,19 @@ void RecordSandboxDenial(Cap cap)
         // memory corruption or a gating-table bug. Log once so the
         // first occurrence is visible without paniccing the live system.
         KLOG_ONCE_WARN("proc", "RecordSandboxDenial: kernel-only task hit cap denial (gating bug?)");
-        return;
+        return 0;
     }
-    // Atomic increment: a multi-threaded hostile PE can drive
-    // denials from several CPUs at once, and a plain read-modify-
-    // write would tear and lose increments — delaying (or, in the
-    // limit, masking) the kill-threshold crossing. Capture the
-    // post-increment value ONCE and use that snapshot for every
-    // decision below so the rate-limit, journal, and kill checks
-    // all agree on the same count.
-    const u64 denials = __atomic_add_fetch(&p->sandbox_denials, 1, __ATOMIC_RELAXED);
+    // AuthorizationContext serializes the cross-CPU increment and returns the
+    // exact post-increment value plus the one-shot threshold action. Use that
+    // single result for logging, journaling, and termination.
+    const AuthorizationActionResult denial = AuthorizationRecordDenial(p->authorization);
+    if (!denial.resolved)
+    {
+        KLOG_ONCE_WARN("proc", "RecordSandboxDenial: stale authorization owner; terminating fail-closed");
+        sched::FlagCurrentForKill(sched::KillReason::SandboxDenialThreshold);
+        return ~u64{0};
+    }
+    const u64 denials = denial.value;
 
     // Fire the sandbox-denial probe at the same rate-limit the
     // existing denial logger uses (first hit + every 32nd). Same
@@ -1273,19 +2745,10 @@ void RecordSandboxDenial(Cap cap)
             denials, /*severity=*/1);
     }
 
-    // Threshold-crossing: fire once at the first denial that lands
-    // at-or-past kSandboxDenialKillThreshold. Use `>=` (not `==`)
-    // paired with the threshold-already-fired flag so that even if
-    // two CPUs' atomic increments straddle the threshold (one sees
-    // N, the next sees N+1), exactly one of them trips the kill and
-    // the message prints once.
-    if (denials >= kSandboxDenialKillThreshold &&
-        !__atomic_exchange_n(&p->sandbox_kill_flagged, true, __ATOMIC_RELAXED))
+    // AuthorizationContext latches this action under its registry lock, so
+    // exactly one CPU performs the threshold side effects.
+    if (denial.action == AuthorizationAction::DenialThresholdExceeded)
     {
-        // The atomic test-and-set above is the single-fire gate: the
-        // CPU that flips the flag false->true runs this block; any
-        // peer that already observed it true skips. No separate
-        // assignment needed.
         arch::SerialWrite("[sandbox] pid=");
         arch::SerialWriteHex(p->pid);
         arch::SerialWrite(" hit ");
@@ -1299,6 +2762,7 @@ void RecordSandboxDenial(Cap cap)
         ::duetos::security::IrRunbookEmit(::duetos::security::EventKind::SandboxDenialKill, pid);
         sched::FlagCurrentForKill(sched::KillReason::SandboxDenialThreshold);
     }
+    return denials;
 }
 
 u64 ProcessLiveCount()
@@ -1326,42 +2790,18 @@ i32 RecordFsWriteCheckLevel(Process* p, u64 bytes)
 {
     if (p == nullptr || bytes == 0)
         return -1;
-    p->fs_write_bytes_total += bytes;
-
-    // Walk every window level. TickCount is monotonic, so a
-    // "now older than start by >= window" check covers both
-    // the fresh-window (start_tick == 0) case and the legitimate
-    // roll case in one expression. We deliberately reset to
-    // `bytes` (not 0) on roll so a single oversized write is
-    // still counted toward the new window — an attacker cannot
-    // evade the cap by pacing one >cap write per window.
-    //
-    // Returns the index of the FIRST level that tripped, or -1
-    // if all three are still within budget. Returning the index
-    // (instead of bool) lets the caller log which timescale's
-    // wall just fired — an attacker who tripped the long-tail
-    // wall is materially different from one who tripped the
-    // burst wall, and operators care about the difference.
-    const u64 now = ::duetos::time::TickCount();
-    i32 first_tripped = -1;
-    for (u32 lvl = 0; lvl < Process::kFsWriteWindowCount; ++lvl)
+    const AuthorizationActionResult result =
+        AuthorizationRecordFsWrite(p->authorization, ::duetos::time::TickCount(), bytes);
+    if (!result.resolved)
     {
-        const u64 ticks = kFsWriteWindowTicksByLevel[lvl];
-        const u64 cap = kFsWriteWindowByteCapByLevel[lvl];
-        const u64 start = p->fs_write_window_start_tick[lvl];
-        if (start == 0 || now - start >= ticks)
-        {
-            p->fs_write_window_start_tick[lvl] = now;
-            p->fs_write_window_bytes[lvl] = bytes;
-        }
-        else
-        {
-            p->fs_write_window_bytes[lvl] += bytes;
-        }
-        if (first_tripped < 0 && p->fs_write_window_bytes[lvl] > cap)
-            first_tripped = static_cast<i32>(lvl);
+        KLOG_ONCE_WARN("proc", "RecordFsWrite: stale authorization owner; terminating fail-closed");
+        return 0;
     }
-    return first_tripped;
+    if (result.fs_write_window != kAuthorizationNoFsWriteWindow)
+        return static_cast<i32>(result.fs_write_window);
+    // Overflow and a regressing accounting clock are fail-closed even when no
+    // ordinary rate window is the direct cause.
+    return result.action == AuthorizationAction::FsWriteRateExceeded ? 0 : -1;
 }
 
 bool RecordFsWriteCheck(Process* p, u64 bytes)
@@ -1374,6 +2814,11 @@ void RecordFsWrite(Process* p, u64 bytes)
     const i32 lvl = RecordFsWriteCheckLevel(p, bytes);
     if (lvl < 0)
         return;
+    AuthorizationContextSnapshot authorization{};
+    const bool have_snapshot = ProcessInspectAuthorization(p, &authorization);
+    const u64 window_bytes = have_snapshot && static_cast<u32>(lvl) < kAuthorizationFsWriteWindowCount
+                                 ? authorization.fs_write_window_bytes[static_cast<u32>(lvl)]
+                                 : ~u64{0};
     // Threshold crossed. Log every over-cap call so the operator
     // sees how badly the rogue process pushed past the limit;
     // FlagCurrentForKill is itself idempotent so repeated calls
@@ -1385,7 +2830,7 @@ void RecordFsWrite(Process* p, u64 bytes)
     arch::SerialWrite("\" tripped ");
     arch::SerialWrite(kFsWriteWindowLabels[lvl]);
     arch::SerialWrite(" cap (window_bytes=");
-    arch::SerialWriteHex(p->fs_write_window_bytes[lvl]);
+    arch::SerialWriteHex(window_bytes);
     arch::SerialWrite(") — terminating (suspected ransomware)\n");
     RuntimeCheckerNoteFsWriteRateExceeded(static_cast<u32>(lvl));
     {
@@ -1403,7 +2848,7 @@ void RecordFsWrite(Process* p, u64 bytes)
             kind = ::duetos::security::EventKind::FsWriteRateLong;
             break;
         }
-        ::duetos::security::EventRingPublishKind(kind, pid, p->fs_write_window_bytes[lvl], static_cast<u64>(lvl),
+        ::duetos::security::EventRingPublishKind(kind, pid, window_bytes, static_cast<u64>(lvl),
                                                  p->name != nullptr ? p->name : "?");
         ::duetos::security::IrRunbookEmit(kind, pid);
     }
@@ -1792,11 +3237,77 @@ void ProcessHandleLifetimeSelfTest()
     memset(target, 0, sizeof(Process));
     target->refcount = Process::kWin32ProcessCap + 2;
 
+    constexpr u64 kMmapFixtureBase = 0x0000700000000000ULL;
+    owner->abi_flavor = kAbiLinux;
+    owner->linux_mmap_cursor = kMmapFixtureBase; // fixture is not published
+    u64 first_mmap_base = 0;
+    u64 second_mmap_base = 0;
+    Expect(ProcessMmapCursorSnapshot(owner) == kMmapFixtureBase, "mmap cursor snapshot is exact");
+    Expect(ProcessReserveMmapRange(owner, mm::kPageSize, &first_mmap_base) && first_mmap_base == kMmapFixtureBase,
+           "first mmap range reservation starts at cursor");
+    Expect(ProcessReserveMmapRange(owner, 2 * mm::kPageSize, &second_mmap_base) &&
+               second_mmap_base == kMmapFixtureBase + mm::kPageSize,
+           "second mmap range reservation is disjoint");
+    Expect(!ProcessReserveMmapRange(owner, 0, &second_mmap_base), "zero-length mmap reservation rejected");
+    Expect(!ProcessReserveMmapRange(owner, mm::kPageSize + 1, &second_mmap_base),
+           "unaligned mmap reservation rejected");
+    __atomic_store_n(&owner->linux_mmap_cursor, 0x00007FFFFFFFF000ULL, __ATOMIC_RELEASE);
+    Expect(ProcessReserveMmapRange(owner, mm::kPageSize, &second_mmap_base),
+           "terminal user page can be reserved exactly once");
+    Expect(!ProcessReserveMmapRange(owner, mm::kPageSize, &second_mmap_base),
+           "mmap cursor cannot cross into kernel half");
+
+    owner->abi_flavor = kAbiNative;
+    __atomic_store_n(&owner->linux_mmap_cursor, 0, __ATOMIC_RELEASE);
+    Expect(!ProcessReserveMmapRange(owner, mm::kPageSize, &second_mmap_base),
+           "automatic VM reservation never returns page zero");
+    __atomic_store_n(&owner->linux_mmap_cursor, Process::kCompatAutoVmBase, __ATOMIC_RELEASE);
+    Expect(ProcessReserveMmapRange(owner, mm::kPageSize, &second_mmap_base) &&
+               second_mmap_base == Process::kCompatAutoVmBase,
+           "native automatic VM reservation starts in the PE32-safe arena");
+    __atomic_store_n(&owner->linux_mmap_cursor, Process::kCompatAutoVmLimit - mm::kPageSize, __ATOMIC_RELEASE);
+    Expect(ProcessReserveMmapRange(owner, mm::kPageSize, &second_mmap_base) &&
+               second_mmap_base == Process::kCompatAutoVmLimit - mm::kPageSize,
+           "terminal PE32-safe automatic VM page can be reserved once");
+    Expect(!ProcessReserveMmapRange(owner, mm::kPageSize, &second_mmap_base),
+           "native automatic VM cursor cannot cross the PE32-safe arena");
+
+    // Process handles retain the 0x700..0x707 low-tag dispatch band while
+    // carrying a non-zero generation in bits 12..30. Legacy slot-only and
+    // PE32-negative values are malformed before any table access.
+    Process::Win32ProcessHandleIdentity decoded_process{};
+    Expect(!IsWin32ProcessHandle(Process::kWin32ProcessBase), "legacy slot-only Process handle rejected");
+    Expect(!DecodeWin32ProcessHandle(Process::kWin32ProcessBase, &decoded_process),
+           "legacy Process handle cannot be decoded");
+    Expect(!IsWin32ProcessHandle((1ULL << 63) | (1ULL << Process::kWin32ProcessHandleGenerationShift) |
+                                 Process::kWin32ProcessBase),
+           "negative Process handle rejected");
+    Expect(!IsWin32ProcessHandle((1ULL << 31) | (1ULL << Process::kWin32ProcessHandleGenerationShift) |
+                                 Process::kWin32ProcessBase),
+           "PE32-negative Process handle rejected");
+    Expect(EncodeWin32ProcessHandle(Process::Win32ProcessHandleIdentity{0, 0}) == 0,
+           "zero Process generation cannot encode");
+    Expect(EncodeWin32ProcessHandle(
+               Process::Win32ProcessHandleIdentity{static_cast<u32>(Process::kWin32ProcessCap), 1}) == 0,
+           "out-of-range Process slot cannot encode");
+    Expect(EncodeWin32ProcessHandle(Process::Win32ProcessHandleIdentity{
+               0, static_cast<u32>(Process::kWin32ProcessHandleMaxGeneration + 1)}) == 0,
+           "overflow Process generation cannot encode");
+    const u64 terminal_process_encoding = EncodeWin32ProcessHandle(
+        Process::Win32ProcessHandleIdentity{0, static_cast<u32>(Process::kWin32ProcessHandleMaxGeneration)});
+    Expect(terminal_process_encoding != 0 && terminal_process_encoding <= Process::kWin32ProcessHandleMaxValue,
+           "terminal Process generation remains PE32-positive");
+    Expect(DecodeWin32ProcessHandle(terminal_process_encoding, &decoded_process) && decoded_process.slot == 0 &&
+               decoded_process.generation == Process::kWin32ProcessHandleMaxGeneration,
+           "terminal Process identity round-trips exactly");
+
     u64 handles[Process::kWin32ProcessCap]{};
-    for (u64 i = 0; i < Process::kWin32ProcessCap; ++i)
+    for (u32 i = 0; i < Process::kWin32ProcessCap; ++i)
     {
         handles[i] = ProcessInstallWin32ProcessHandle(owner, target);
-        Expect(handles[i] == Process::kWin32ProcessBase + i, "process-handle slot publication");
+        Expect(DecodeWin32ProcessHandle(handles[i], &decoded_process) && decoded_process.slot == i &&
+                   decoded_process.generation == 1,
+               "process-handle slot publication carries generation one");
     }
     Expect(ProcessWin32ProcessHandleCount(owner) == Process::kWin32ProcessCap, "process-handle count at capacity");
     Expect(ProcessInstallWin32ProcessHandle(owner, target) == 0, "process-handle saturation refused");
@@ -1804,144 +3315,512 @@ void ProcessHandleLifetimeSelfTest()
            "failed process-handle install preserves caller ownership");
     ProcessRelease(target); // drop the unadopted saturation-attempt ref
 
-    Process* pinned = ProcessLookupWin32ProcessHandleRetained(owner, handles[0]);
+    const u64 first_process_handle = handles[0];
+    Process* pinned = ProcessLookupWin32ProcessHandleRetained(owner, first_process_handle);
     Expect(pinned == target, "process-handle retained lookup");
     Expect(__atomic_load_n(&target->refcount, __ATOMIC_ACQUIRE) == Process::kWin32ProcessCap + 2,
            "process-handle lookup increments refcount");
-    Expect(ProcessCloseWin32ProcessHandle(owner, handles[0]), "process-handle close succeeds once");
-    Expect(!ProcessCloseWin32ProcessHandle(owner, handles[0]), "process-handle double close refused");
-    Expect(ProcessLookupWin32ProcessHandleRetained(owner, handles[0]) == nullptr,
-           "closed process handle cannot be looked up");
+    Expect(ProcessCloseWin32ProcessHandle(owner, first_process_handle), "process-handle close succeeds once");
+
+    ProcessRetain(target); // next successful install transfers this exact ref
+    const u64 second_process_handle = ProcessInstallWin32ProcessHandle(owner, target);
+    Expect(second_process_handle != first_process_handle, "same-slot reuse advances the public Process identity");
+    Expect(DecodeWin32ProcessHandle(second_process_handle, &decoded_process) && decoded_process.slot == 0 &&
+               decoded_process.generation == 2,
+           "same-slot Process reuse advances the row generation");
+    Expect(ProcessLookupWin32ProcessHandleRetained(owner, first_process_handle) == nullptr,
+           "stale Process handle cannot resolve a recycled row");
+    Expect(!ProcessCloseWin32ProcessHandle(owner, first_process_handle),
+           "stale Process close cannot detach a recycled row");
     ProcessRelease(pinned);
 
     ProcessDropOwnedProcessHandles(owner);
     ProcessDropOwnedProcessHandles(owner);
     Expect(ProcessWin32ProcessHandleCount(owner) == 0, "process-handle drain is idempotent");
+    Expect(ProcessLookupWin32ProcessHandleRetained(owner, second_process_handle) == nullptr,
+           "drained Process handle cannot be looked up");
     Expect(__atomic_load_n(&target->refcount, __ATOMIC_ACQUIRE) == 1, "process-handle references balance after drain");
+
+    // Force one row to its final publishable generation and every other row
+    // retired so allocation cannot choose a different slot.
+    const sync::IrqFlags process_flags = sync::SpinLockAcquire(owner->win32_handle_lock);
+    for (u32 slot = 0; slot < Process::kWin32ProcessCap; ++slot)
+    {
+        owner->win32_proc_handles[slot].generation = Process::kWin32ProcessHandleMaxGeneration;
+        owner->win32_proc_handles[slot].state = Process::Win32ProcessHandleState::Retired;
+        owner->win32_proc_handles[slot].target = nullptr;
+    }
+    owner->win32_proc_handles[0].generation = Process::kWin32ProcessHandleMaxGeneration - 1;
+    owner->win32_proc_handles[0].state = Process::Win32ProcessHandleState::Free;
+    sync::SpinLockRelease(owner->win32_handle_lock, process_flags);
+
+    ProcessRetain(target);
+    const u64 final_process_handle = ProcessInstallWin32ProcessHandle(owner, target);
+    Expect(DecodeWin32ProcessHandle(final_process_handle, &decoded_process) && decoded_process.slot == 0 &&
+               decoded_process.generation == Process::kWin32ProcessHandleMaxGeneration,
+           "terminal Process row publishes exactly once");
+    Expect(ProcessCloseWin32ProcessHandle(owner, final_process_handle), "terminal Process row closes once");
+    const sync::IrqFlags retired_flags = sync::SpinLockAcquire(owner->win32_handle_lock);
+    const Process::Win32ProcessHandleState retired_state = owner->win32_proc_handles[0].state;
+    sync::SpinLockRelease(owner->win32_handle_lock, retired_flags);
+    Expect(retired_state == Process::Win32ProcessHandleState::Retired,
+           "terminal Process generation retires instead of wrapping");
+    Expect(ProcessInstallWin32ProcessHandle(owner, target) == 0, "retired Process rows cannot be reused");
+
+    // File handles retain their low 0x100..0x10F tag for dispatch, but the
+    // public value must carry a non-zero generation in bits 12..30. The old
+    // slot-only ABI and every negative pseudo-handle are therefore malformed.
+    Process::Win32FileHandleIdentity decoded{};
+    Expect(!IsWin32FileHandle(Process::kWin32HandleBase), "legacy slot-only file handle rejected");
+    Expect(!DecodeWin32FileHandle(Process::kWin32HandleBase, &decoded), "legacy file handle cannot be decoded");
+    Expect(!IsWin32FileHandle((1ULL << 63) | (1ULL << Process::kWin32FileHandleGenerationShift) |
+                              Process::kWin32HandleBase),
+           "negative file handle rejected");
+    Expect(!IsWin32FileHandle((1ULL << 31) | (1ULL << Process::kWin32FileHandleGenerationShift) |
+                              Process::kWin32HandleBase),
+           "PE32-negative file handle rejected");
+    Expect(EncodeWin32FileHandle(Process::Win32FileHandleIdentity{0, 0, 0}) == 0, "zero file generation cannot encode");
+    Expect(EncodeWin32FileHandle(Process::Win32FileHandleIdentity{static_cast<u32>(Process::kWin32HandleCap), 0, 1}) ==
+               0,
+           "out-of-range file slot cannot encode");
+    Expect(EncodeWin32FileHandle(Process::Win32FileHandleIdentity{0, 0, Process::kWin32FileHandleMaxGeneration + 1}) ==
+               0,
+           "overflow file generation cannot encode");
+    const u64 terminal_file_handle =
+        EncodeWin32FileHandle(Process::Win32FileHandleIdentity{0, 0, Process::kWin32FileHandleMaxGeneration});
+    Expect(terminal_file_handle != 0 && terminal_file_handle <= Process::kWin32FileHandleMaxValue,
+           "terminal file generation remains PE32-positive");
+    Expect(DecodeWin32FileHandle(terminal_file_handle, &decoded) &&
+               decoded.generation == Process::kWin32FileHandleMaxGeneration,
+           "terminal file generation round-trips exactly");
+
+    Process::Win32FileReservation first_reservation{};
+    Expect(ProcessReserveWin32FileHandle(owner, &first_reservation), "first file row reserved");
+    Process::Win32FileHandle candidate{};
+    candidate.kind = Process::FsBackingKind::Ramfs;
+    candidate.named_pipe_registry_slot = -1;
+    u64 first_file_handle = 0;
+    Expect(ProcessPublishWin32FileHandle(owner, first_reservation, candidate, &first_file_handle),
+           "first file row published");
+    Expect(IsWin32FileHandle(first_file_handle), "published file handle has valid opaque encoding");
+    Expect((first_file_handle & (1ULL << 63)) == 0, "published file handle remains positive");
+    Expect(DecodeWin32FileHandle(first_file_handle, &decoded), "published file handle decodes");
+    Expect(decoded.slot == first_reservation.slot && decoded.generation == first_reservation.generation,
+           "decoded file identity matches reservation");
+    Expect((first_file_handle & Process::kWin32FileHandleTagMask) == Process::kWin32HandleBase + first_reservation.slot,
+           "published file handle preserves low tag band");
+    Expect(ProcessWin32FileHandleCount(owner) == 1, "published file handle counted once");
+
+    Process::Win32FileHandle detached{};
+    Expect(!ProcessDetachWin32FileHandle(owner, Process::kWin32HandleBase, &detached),
+           "legacy file handle cannot detach a live row");
+    Expect(ProcessDetachWin32FileHandle(owner, first_file_handle, &detached), "exact first file identity detaches");
+    Expect(detached.generation == first_reservation.generation, "detached first file identity preserved");
+    Expect(ProcessWin32FileHandleCount(owner) == 0, "detached file row no longer counted");
+
+    Process::Win32FileReservation second_reservation{};
+    Expect(ProcessReserveWin32FileHandle(owner, &second_reservation), "recycled file row reserved");
+    Expect(second_reservation.slot == first_reservation.slot &&
+               second_reservation.generation == first_reservation.generation + 1,
+           "recycled file row advances generation");
+    u64 second_file_handle = 0;
+    Expect(ProcessPublishWin32FileHandle(owner, second_reservation, candidate, &second_file_handle),
+           "recycled file row published");
+    Expect(second_file_handle != first_file_handle, "recycled file handle has distinct identity");
+    Expect((second_file_handle & Process::kWin32FileHandleTagMask) ==
+               (first_file_handle & Process::kWin32FileHandleTagMask),
+           "recycled file handle retains its slot tag");
+    Expect(!ProcessDetachWin32FileHandle(owner, first_file_handle, &detached),
+           "stale file handle cannot detach recycled row");
+    Expect(ProcessWin32FileHandleCount(owner) == 1, "stale close leaves recycled row live");
+    Expect(ProcessDetachWin32FileHandle(owner, second_file_handle, &detached), "exact recycled file identity detaches");
+
+    const sync::IrqFlags file_flags = sync::SpinLockAcquire(owner->win32_file_lock);
+    for (u32 slot = 0; slot < Process::kWin32HandleCap; ++slot)
+    {
+        Process::Win32FileHandle saturated{};
+        saturated.generation = Process::kWin32FileHandleMaxGeneration;
+        saturated.kind = Process::FsBackingKind::None;
+        saturated.named_pipe_registry_slot = -1;
+        owner->win32_handles[slot] = saturated;
+    }
+    sync::SpinLockRelease(owner->win32_file_lock, file_flags);
+    Process::Win32FileReservation saturated_reservation{};
+    Expect(!ProcessReserveWin32FileHandle(owner, &saturated_reservation),
+           "saturated file generations are never reused");
+
+    // Section handles use the same positive PE32-safe shape, with the
+    // 0x900..0x907 low tag and an independent process-row generation.
+    Process::Win32SectionHandleIdentity decoded_section{};
+    Expect(!IsWin32SectionHandle(Process::kWin32SectionBase), "legacy slot-only Section handle rejected");
+    Expect(!DecodeWin32SectionHandle(Process::kWin32SectionBase, &decoded_section),
+           "legacy Section handle cannot be decoded");
+    Expect(!IsWin32SectionHandle((1ULL << 63) | (1ULL << Process::kWin32SectionHandleGenerationShift) |
+                                 Process::kWin32SectionBase),
+           "negative Section handle rejected");
+    Expect(!IsWin32SectionHandle((1ULL << 31) | (1ULL << Process::kWin32SectionHandleGenerationShift) |
+                                 Process::kWin32SectionBase),
+           "PE32-negative Section handle rejected");
+    Expect(EncodeWin32SectionHandle(Process::Win32SectionHandleIdentity{0, 0}) == 0,
+           "zero Section generation cannot encode");
+    Expect(EncodeWin32SectionHandle(
+               Process::Win32SectionHandleIdentity{static_cast<u32>(Process::kWin32SectionCap), 1}) == 0,
+           "out-of-range Section slot cannot encode");
+    Expect(EncodeWin32SectionHandle(
+               Process::Win32SectionHandleIdentity{0, Process::kWin32SectionHandleMaxGeneration + 1}) == 0,
+           "overflow Section generation cannot encode");
+    const u64 terminal_section_handle =
+        EncodeWin32SectionHandle(Process::Win32SectionHandleIdentity{0, Process::kWin32SectionHandleMaxGeneration});
+    Expect(terminal_section_handle != 0 && terminal_section_handle <= Process::kWin32SectionHandleMaxValue,
+           "terminal Section generation remains PE32-positive");
+    Expect(DecodeWin32SectionHandle(terminal_section_handle, &decoded_section) &&
+               decoded_section.generation == Process::kWin32SectionHandleMaxGeneration,
+           "terminal Section generation round-trips exactly");
+
+    ResourceDomainKey section_test_domain = kInvalidResourceDomainKey;
+    Expect(ResourceDomainCreateTrusted(&section_test_domain), "Section selftest resource domain created");
+
+    Process::Win32SectionHandleReservation first_section_reservation{};
+    Expect(ProcessReserveWin32SectionHandle(owner, &first_section_reservation), "first Section row reserved");
+    subsystems::win32::section::SectionKey first_section_key{};
+    Expect(subsystems::win32::section::SectionCreate(section_test_domain, mm::kPageSize, 0x04, &first_section_key),
+           "first Section pool identity created");
+    u64 first_section_handle = 0;
+    Expect(ProcessPublishWin32SectionHandle(owner, first_section_reservation, first_section_key, &first_section_handle),
+           "first Section row published");
+    Expect(IsWin32SectionHandle(first_section_handle), "published Section handle has opaque encoding");
+    Expect(DecodeWin32SectionHandle(first_section_handle, &decoded_section) &&
+               decoded_section.slot == first_section_reservation.slot &&
+               decoded_section.generation == first_section_reservation.generation,
+           "published Section handle decodes to exact row identity");
+    Expect(ProcessWin32SectionHandleCount(owner) == 1, "published Section handle counted once");
+
+    subsystems::win32::section::SectionKey first_operation_key{};
+    Expect(ProcessAcquireWin32SectionHandle(owner, first_section_handle, &first_operation_key) &&
+               first_operation_key == first_section_key,
+           "Section handle acquire pins exact pool generation");
+    subsystems::win32::section::SectionKey detached_section_key{};
+    Expect(!ProcessDetachWin32SectionHandle(owner, Process::kWin32SectionBase, &detached_section_key),
+           "legacy Section handle cannot detach live row");
+    Expect(ProcessDetachWin32SectionHandle(owner, first_section_handle, &detached_section_key) &&
+               detached_section_key == first_section_key,
+           "exact first Section identity detaches");
+    subsystems::win32::section::SectionRelease(detached_section_key);
+    Expect(subsystems::win32::section::SectionViewSize(first_operation_key) == mm::kPageSize,
+           "operation pin keeps detached Section generation alive");
+    subsystems::win32::section::SectionRelease(first_operation_key);
+    Expect(subsystems::win32::section::SectionViewSize(first_section_key) == 0,
+           "Section handle and operation references balance after close");
+
+    Process::Win32SectionHandleReservation second_section_reservation{};
+    Expect(ProcessReserveWin32SectionHandle(owner, &second_section_reservation), "recycled Section row reserved");
+    Expect(second_section_reservation.slot == first_section_reservation.slot &&
+               second_section_reservation.generation == first_section_reservation.generation + 1,
+           "recycled Section row advances generation");
+    subsystems::win32::section::SectionKey second_section_key{};
+    Expect(subsystems::win32::section::SectionCreate(section_test_domain, mm::kPageSize, 0x04, &second_section_key),
+           "recycled Section pool identity created");
+    u64 second_section_handle = 0;
+    Expect(
+        ProcessPublishWin32SectionHandle(owner, second_section_reservation, second_section_key, &second_section_handle),
+        "recycled Section row published");
+    Expect(second_section_handle != first_section_handle, "same-slot Section reuse publishes a distinct generation");
+    Expect(!ProcessAcquireWin32SectionHandle(owner, first_section_handle, &first_operation_key),
+           "stale Section handle cannot pin recycled row");
+    Expect(!ProcessDetachWin32SectionHandle(owner, first_section_handle, &detached_section_key),
+           "stale Section close cannot detach recycled row");
+
+    const u32 foreign_generation = second_section_reservation.generation + 1;
+    const u64 foreign_section_handle = EncodeWin32SectionHandle(
+        Process::Win32SectionHandleIdentity{second_section_reservation.slot, foreign_generation});
+    Expect(foreign_section_handle != 0 && IsWin32SectionHandle(foreign_section_handle),
+           "foreign-generation Section handle is structurally valid");
+    Expect(!ProcessAcquireWin32SectionHandle(owner, foreign_section_handle, &first_operation_key),
+           "foreign-generation Section handle cannot pin live row");
+    Expect(!ProcessDetachWin32SectionHandle(owner, foreign_section_handle, &detached_section_key),
+           "foreign-generation Section close cannot detach live row");
+    subsystems::win32::section::SectionRelease(first_section_key);
+    Expect(subsystems::win32::section::SectionViewSize(second_section_key) == mm::kPageSize,
+           "stale pool-key release cannot damage recycled Section");
+
+    // Exercise the view-row token machine with one explicit simulated view
+    // reference. Claim is exclusive, Restore returns ownership to the row,
+    // and Finish follows consumption of exactly that one reference.
+    Expect(!ProcessHasBorrowedUserMappings(owner), "fresh process has no borrowed user mappings");
+    Expect(subsystems::win32::section::SectionRetain(second_section_key), "simulated Section view reference retained");
+    Process::Win32SectionViewReservation view_reservation{};
+    Expect(ProcessReserveWin32SectionView(owner, &view_reservation), "Section view row reserved");
+    Expect(ProcessHasBorrowedUserMappings(owner), "reserved Section view fails exec admission closed");
+    constexpr u64 kTestSectionViewBase = 0x0000000054000000ULL;
+    Expect(ProcessPublishWin32SectionView(owner, view_reservation, second_section_key, kTestSectionViewBase),
+           "Section view row published");
+    Expect(ProcessWin32SectionViewCount(owner) == 1, "published Section view counted once");
+    Process::Win32SectionViewClaim view_claim{};
+    Expect(ProcessClaimWin32SectionViewExact(owner, view_reservation, second_section_key, kTestSectionViewBase,
+                                             &view_claim),
+           "Section view claimed by exact publication identity");
+    Process::Win32SectionViewClaim duplicate_view_claim{};
+    Expect(!ProcessClaimWin32SectionViewExact(owner, view_reservation, second_section_key, kTestSectionViewBase,
+                                              &duplicate_view_claim),
+           "claimed Section view cannot be double-claimed");
+    Expect(ProcessRestoreWin32SectionView(owner, view_claim), "failed-unmap token restores Section view");
+    Expect(ProcessClaimWin32SectionView(owner, kTestSectionViewBase, &view_claim),
+           "restored Section view can be claimed by normal unmap");
+    subsystems::win32::section::SectionRelease(second_section_key); // simulated successful exact unmap
+    Expect(ProcessFinishWin32SectionView(owner, view_claim), "successful-unmap token finishes Section view");
+    Expect(!ProcessRestoreWin32SectionView(owner, view_claim), "finished Section view token cannot restore");
+    Expect(ProcessWin32SectionViewCount(owner) == 0, "finished Section view no longer counted");
+    Expect(!ProcessHasBorrowedUserMappings(owner), "finished Section view reopens exec admission");
+
+    // Reuse the same row and VA, then prove a delayed rollback carrying the
+    // first publication token cannot claim or unmap the newer view.
+    Expect(subsystems::win32::section::SectionRetain(second_section_key),
+           "recycled simulated Section view reference retained");
+    Process::Win32SectionViewReservation recycled_view_reservation{};
+    Expect(ProcessReserveWin32SectionView(owner, &recycled_view_reservation), "recycled Section view row reserved");
+    Expect(recycled_view_reservation.slot == view_reservation.slot &&
+               recycled_view_reservation.generation == view_reservation.generation + 1,
+           "recycled Section view row advances generation");
+    Expect(ProcessPublishWin32SectionView(owner, recycled_view_reservation, second_section_key, kTestSectionViewBase),
+           "same-base recycled Section view published");
+    Expect(!ProcessClaimWin32SectionViewExact(owner, view_reservation, second_section_key, kTestSectionViewBase,
+                                              &duplicate_view_claim),
+           "stale exact rollback token cannot claim same-base recycled view");
+    Expect(ProcessWin32SectionViewCount(owner) == 1, "stale exact rollback leaves recycled view live");
+    Expect(ProcessClaimWin32SectionViewExact(owner, recycled_view_reservation, second_section_key, kTestSectionViewBase,
+                                             &view_claim),
+           "recycled Section view accepts exact current token");
+    subsystems::win32::section::SectionRelease(second_section_key); // simulated successful exact unmap
+    Expect(ProcessFinishWin32SectionView(owner, view_claim), "recycled Section view finishes once");
+    Expect(ProcessWin32SectionViewCount(owner) == 0, "recycled Section view no longer counted");
+    Expect(!ProcessHasBorrowedUserMappings(owner), "recycled Section teardown clears borrowed-map gate");
+
+    owner->linux_shm_attaches[0].in_use = true;
+    owner->linux_shm_attaches[0].shmid = 1;
+    owner->linux_shm_attaches[0].base_va = Process::kLinuxShmArenaBase;
+    owner->linux_shm_attaches[0].page_count = 1;
+    Expect(ProcessHasBorrowedUserMappings(owner), "live SysV SHM attachment blocks exec admission");
+    owner->linux_shm_attaches[0] = Process::LinuxShmAttach{};
+    Expect(!ProcessHasBorrowedUserMappings(owner), "SysV SHM detach reopens exec admission");
+
+    Expect(ProcessDetachWin32SectionHandle(owner, second_section_handle, &detached_section_key) &&
+               detached_section_key == second_section_key,
+           "exact recycled Section identity detaches");
+    subsystems::win32::section::SectionRelease(detached_section_key);
+    Expect(subsystems::win32::section::SectionViewSize(second_section_key) == 0,
+           "recycled Section references balance after close");
+
+    const sync::IrqFlags section_flags = sync::SpinLockAcquire(owner->win32_section_lock);
+    for (u32 slot = 0; slot < Process::kWin32SectionCap; ++slot)
+    {
+        owner->win32_section_handles[slot].generation = Process::kWin32SectionHandleMaxGeneration;
+        owner->win32_section_handles[slot].state = Process::Win32SectionHandleState::Free;
+        owner->win32_section_handles[slot].key = subsystems::win32::section::kInvalidSectionKey;
+    }
+    sync::SpinLockRelease(owner->win32_section_lock, section_flags);
+    Process::Win32SectionHandleReservation saturated_section_reservation{};
+    Expect(!ProcessReserveWin32SectionHandle(owner, &saturated_section_reservation),
+           "saturated Section row generations are never reused");
+
+    Expect(ResourceDomainRelease(section_test_domain), "Section selftest resource domain released");
 
     mm::KFree(target);
     mm::KFree(owner);
-    arch::SerialWrite("[process-handle-selftest] PASS\n");
+    arch::SerialWrite("[process-handle-selftest] PASS (process + opaque file + Section lifetime)\n");
 }
 
 // ---------------------------------------------------------------
 // Stdin ring buffer — per-process keyboard input pipe.
 //
-// Producer:  kbd-reader thread in core/main.cpp (single-writer).
-// Consumer:  ring-3 task in SYS_STDIN_READ (single-reader).
+// Producer: kbd-reader thread in core/main.cpp. Consumers are ring-3 tasks in
+// SYS_STDIN_READ. A per-ring spinlock protects the bytes and both cursors; an
+// atomic event sequence closes the otherwise racy empty-check/waiter-enqueue
+// window without nesting the scheduler lock under the ring lock.
 //
-// Lock-free single-writer / single-reader semantics: head moves
-// only inside ProcessFeedStdinChar, tail moves only inside
-// ProcessReadStdinBlocking. Interrupts are masked across the
-// "check empty + block" pair in the reader so a wake from the
-// producer can't slip between the read of `head` and the call
-// into WaitQueueBlock.
-//
-// Overflow policy: drop oldest. The kbd-reader can't usefully
-// back-pressure the IRQ source, and a wedged ring-3 reader
-// shouldn't be able to freeze the pipeline. Treats stdin like a
-// tty input queue.
+// Overflow policy: when full, drop exactly the oldest byte before inserting
+// the new byte. This preserves the newest kCap bytes and avoids back-pressure
+// from a wedged reader into the keyboard input path.
 // ---------------------------------------------------------------
 
 namespace
 {
 
-// Single-process stdin focus. Set on the first SYS_STDIN_READ
-// from a process; cleared on ProcessRelease for that process.
-// nullptr = no ring-3 consumer is waiting on stdin, so the kbd-
-// reader simply doesn't push anything (printable keys still feed
-// the kernel shell + window-active-app handlers, unchanged).
+// Single-process stdin focus. The pointer is protected by this lock and owns
+// exactly one Process reference while non-null. Published runtime teardown
+// breaks the otherwise self-pinning edge before the last Task pin is dropped.
+constinit sync::SpinLock g_stdin_focus_lock{};
 constinit Process* g_stdin_focus = nullptr;
 
-} // namespace
-
-void ProcessFeedStdinChar(Process* proc, char c)
+void StdinAdvanceEventLocked(Process::StdinRing& ring)
 {
-    if (proc == nullptr)
-        return;
-    Process::StdinRing& r = proc->stdin_ring;
-    arch::Cli();
-    // Drop oldest on overflow — keep the producer non-blocking.
-    if (r.head - r.tail >= Process::StdinRing::kCap)
-        ++r.tail;
-    r.buf[r.head & (Process::StdinRing::kCap - 1)] = static_cast<u8>(c);
-    ++r.head;
-    sched::WaitQueueWakeOne(&r.waiters);
-    arch::Sti();
+    const u64 previous = __atomic_load_n(&ring.event_sequence, __ATOMIC_RELAXED);
+    KASSERT(previous != ~u64{0}, "core/process", "stdin event sequence saturated");
+    __atomic_store_n(&ring.event_sequence, previous + 1, __ATOMIC_RELEASE);
 }
+
+void StdinFocusClaimIfEmpty(Process* process)
+{
+    if (process == nullptr)
+        return;
+
+    ProcessRetain(process);
+    ScopedProcessRef candidate(process);
+    ScopedProcessRuntimeAccess runtime_access(process);
+    if (!runtime_access)
+        return;
+
+    sync::SpinLockGuard focus_guard(g_stdin_focus_lock);
+    if (g_stdin_focus == nullptr)
+        g_stdin_focus = candidate.Detach();
+}
+
+void StdinFocusClearIf(Process* process)
+{
+    Process* detached = nullptr;
+    {
+        sync::SpinLockGuard focus_guard(g_stdin_focus_lock);
+        if (g_stdin_focus == process)
+        {
+            detached = g_stdin_focus;
+            g_stdin_focus = nullptr;
+        }
+    }
+    // ProcessRelease may run teardown or panic, so never call it under the
+    // focus spinlock. The reaper still owns the dying Task's pin here.
+    ProcessRelease(detached);
+}
+
+} // namespace
 
 i64 ProcessReadStdinBlocking(Process* proc, void* dst_user, u64 cap)
 {
     if (proc == nullptr || dst_user == nullptr || cap == 0)
         return -1;
-    // Claim the stdin focus on the first read. Lets the kbd-reader
-    // start delivering bytes without an explicit registration call.
-    if (g_stdin_focus == nullptr)
-        g_stdin_focus = proc;
+    // Claim the focus without holding runtime admission across the blocking
+    // wait below. The focus itself owns the durable Process reference.
+    StdinFocusClaimIfEmpty(proc);
 
     Process::StdinRing& r = proc->stdin_ring;
-    arch::Cli();
-    while (r.head == r.tail)
-    {
-        sched::WaitQueueBlock(&r.waiters);
-        // Returns with interrupts still off. Loop re-checks the
-        // ring in case of a spurious wake.
-    }
-    // Drain whatever's available (cap-bounded). Bytes go into a
-    // small kernel scratch first so CopyToUser is one shot per
-    // call — the user buffer can't be touched with IRQs masked
-    // (page fault on demand-paged user pages would never resolve).
-    const u32 available = static_cast<u32>(r.head - r.tail);
-    const u32 to_copy_u32 = (cap < available) ? static_cast<u32>(cap) : available;
     u8 scratch[Process::StdinRing::kCap];
-    for (u32 i = 0; i < to_copy_u32; ++i)
-        scratch[i] = r.buf[(r.tail + i) & (Process::StdinRing::kCap - 1)];
-    r.tail += to_copy_u32;
-    arch::Sti();
+    u32 to_copy_u32 = 0;
 
+    for (;;)
+    {
+        u64 observed_sequence = 0;
+        {
+            sync::SpinLockGuard ring_guard(r.lock);
+            const u32 available = static_cast<u32>(r.head - r.tail);
+            if (available != 0)
+            {
+                to_copy_u32 = (cap < available) ? static_cast<u32>(cap) : available;
+                for (u32 i = 0; i < to_copy_u32; ++i)
+                    scratch[i] = r.buf[(r.tail + i) & (Process::StdinRing::kCap - 1)];
+                r.tail += to_copy_u32;
+            }
+            observed_sequence = __atomic_load_n(&r.event_sequence, __ATOMIC_ACQUIRE);
+        }
+
+        if (to_copy_u32 != 0)
+            break;
+
+        // If a producer published after the empty snapshot, the scheduler
+        // declines to block. Otherwise it enqueues us and hands off under one
+        // continuous scheduler-lock critical section, closing the lost wake.
+        (void)sched::WaitQueueBlockIfSequenceUnchanged(&r.waiters, &r.event_sequence, observed_sequence);
+    }
+
+    // User access may fault or block and therefore occurs after dropping the
+    // ring spinlock. As before, a failed copy consumes the drained bytes.
     if (!mm::CopyToUser(dst_user, scratch, to_copy_u32))
         return -1;
     return static_cast<i64>(to_copy_u32);
 }
 
-Process* StdinFocusGet()
-{
-    return g_stdin_focus;
-}
-
-void StdinFocusSet(Process* proc)
-{
-    g_stdin_focus = proc;
-}
-
-void StdinFocusClearIf(Process* proc)
-{
-    arch::Cli();
-    if (g_stdin_focus == proc)
-        g_stdin_focus = nullptr;
-    arch::Sti();
-}
-
 void ProcessFeedStdinFocusChar(char c)
 {
-    // Read the focus pointer and push to the ring under one IRQ-
-    // off section so a reaper running on this CPU can't free the
-    // process between the two operations. The kbd-reader is the
-    // sole caller; the cost (one Cli/Sti pair per byte) is
-    // negligible compared to the IRQ-off hop the kbd-reader
-    // already does to drain the scancode ring.
-    arch::Cli();
-    Process* const proc = g_stdin_focus;
-    if (proc != nullptr)
+    Process* process = nullptr;
     {
-        Process::StdinRing& r = proc->stdin_ring;
+        sync::SpinLockGuard focus_guard(g_stdin_focus_lock);
+        if (g_stdin_focus != nullptr)
+        {
+            ProcessRetain(g_stdin_focus);
+            process = g_stdin_focus;
+        }
+    }
+    ScopedProcessRef focus_pin(process);
+    if (!focus_pin)
+        return;
+
+    ScopedProcessRuntimeAccess runtime_access(process);
+    if (!runtime_access)
+        return;
+
+    Process::StdinRing& r = process->stdin_ring;
+    {
+        sync::SpinLockGuard ring_guard(r.lock);
         if (r.head - r.tail >= Process::StdinRing::kCap)
             ++r.tail;
         r.buf[r.head & (Process::StdinRing::kCap - 1)] = static_cast<u8>(c);
         ++r.head;
-        sched::WaitQueueWakeOne(&r.waiters);
+        StdinAdvanceEventLocked(r);
     }
-    arch::Sti();
+
+    // Wake after publishing and after dropping the ring lock: waiter enqueue
+    // and this wake serialize on the scheduler lock without a lock inversion.
+    sched::WaitQueueWakeOne(&r.waiters);
+}
+
+bool ProcessSnapshotLinuxCwd(const Process* process, LinuxCwdSnapshot* snapshot_out)
+{
+    if (snapshot_out == nullptr)
+        return false;
+    *snapshot_out = LinuxCwdSnapshot{};
+    if (process == nullptr)
+        return false;
+
+    LinuxCwdSnapshot candidate{};
+    {
+        // Leaf critical section: fixed storage copy only. Validation and
+        // result publication happen after IRQ state and the lock are restored.
+        sync::SpinLockGuard cwd_guard(process->linux_cwd_lock);
+        for (u64 i = 0; i < Process::kLinuxCwdCap; ++i)
+            candidate.path[i] = process->linux_cwd[i];
+    }
+
+    while (candidate.length < Process::kLinuxCwdCap && candidate.path[candidate.length] != 0)
+        ++candidate.length;
+    if (candidate.length == Process::kLinuxCwdCap)
+        return false;
+
+    *snapshot_out = candidate;
+    return true;
+}
+
+bool ProcessReplaceLinuxCwd(Process* process, const char* path, u64 length)
+{
+    if (process == nullptr || path == nullptr || length == 0 || length >= Process::kLinuxCwdCap)
+        return false;
+
+    // Copy and validate before taking the spinlock. Besides keeping the
+    // critical section bounded, this prevents an invalid source read from
+    // occurring with IRQs disabled. Callers must supply a trusted kernel
+    // buffer; user pointers are copied before entering this API.
+    char candidate[Process::kLinuxCwdCap]{};
+    for (u64 i = 0; i < length; ++i)
+    {
+        if (path[i] == 0)
+            return false;
+        candidate[i] = path[i];
+    }
+
+    {
+        // Leaf critical section: never nest with fd/OFD/handle/VM locks and
+        // never allocate, copy user memory, invoke VFS, log, or schedule here.
+        sync::SpinLockGuard cwd_guard(process->linux_cwd_lock);
+        for (u64 i = 0; i < Process::kLinuxCwdCap; ++i)
+            process->linux_cwd[i] = candidate[i];
+    }
+    return true;
 }
 
 // =========================================================================
@@ -2010,6 +3889,17 @@ struct OpenFileDescription
     u32 refcount;     // number of fds (across all processes) pointing here
     u32 status_flags; // O_* status flags shared by all referencing fds
     u64 offset;       // shared file offset (read/write cursor)
+    // Authoritative mutable backing metadata for regular files. Descriptor
+    // slots retain compatibility mirrors, but dup/fork siblings observe and
+    // commit these fields through the one shared OFD.
+    u8 regular_flags; // shared subset: kLinuxFdFlagPendingCreate only
+    u8 _regular_pad[3];
+    u32 first_cluster;
+    u32 size;
+    // Sleepable I/O/position serialization. Never acquire while holding
+    // g_ofd_lock or a Process fd spinlock. A retained receipt pins this OFD
+    // while a caller sleeps on or holds the mutex.
+    sched::Mutex position_lock;
 };
 
 constinit OpenFileDescription g_ofd_pool[kOfdPoolCap] = {};
@@ -2018,7 +3908,7 @@ sync::SpinLock g_ofd_lock{};
 // Allocate a fresh description with refcount 1. Returns the
 // 1-based pool index, or 0 if the pool is exhausted. Caller holds
 // g_ofd_lock.
-u16 OfdAllocLocked(u64 offset, u32 status_flags)
+u16 OfdAllocLocked(u64 offset, u32 status_flags, u8 regular_flags, u32 first_cluster, u32 size)
 {
     for (u32 i = 0; i < kOfdPoolCap; ++i)
     {
@@ -2027,19 +3917,25 @@ u16 OfdAllocLocked(u64 offset, u32 status_flags)
             g_ofd_pool[i].refcount = 1;
             g_ofd_pool[i].offset = offset;
             g_ofd_pool[i].status_flags = status_flags;
+            g_ofd_pool[i].regular_flags = static_cast<u8>(regular_flags & Process::kLinuxFdFlagPendingCreate);
+            g_ofd_pool[i].first_cluster = first_cluster;
+            g_ofd_pool[i].size = size;
             return static_cast<u16>(i + 1);
         }
     }
     return 0;
 }
 
-// Bump the refcount of an existing description (dup / fork).
-// `ofd` is 1-based; 0 is a no-op. Caller holds g_ofd_lock.
-void OfdRetainLocked(u16 ofd)
+// Checked retain for an existing description. Caller holds g_ofd_lock.
+bool OfdRetainLocked(u16 ofd)
 {
     if (ofd == 0 || ofd > kOfdPoolCap)
-        return;
-    ++g_ofd_pool[ofd - 1].refcount;
+        return false;
+    OpenFileDescription& d = g_ofd_pool[ofd - 1];
+    if (d.refcount == 0 || d.refcount == static_cast<u32>(-1))
+        return false;
+    ++d.refcount;
+    return true;
 }
 
 // Drop one reference; frees (refcount→0) the description on the
@@ -2061,24 +3957,1142 @@ void OfdReleaseLocked(u16 ofd)
     {
         d.offset = 0;
         d.status_flags = 0;
+        d.regular_flags = 0;
+        d.first_cluster = 0;
+        d.size = 0;
     }
 }
 
+constexpr u64 kLinuxFdKFileRights =
+    ::duetos::ipc::kHandleRightDuplicate | ::duetos::ipc::kHandleRightTransfer | ::duetos::ipc::kHandleRightDestroy;
+
+bool LinuxFdNextGeneration(u32 generation, u32* next_out)
+{
+    if (next_out == nullptr)
+        return false;
+    *next_out = 0;
+    if (generation == Process::kLinuxFdGenerationExhausted)
+        return false;
+    const u32 next = generation + 1;
+    KASSERT(next != 0, "proc/linux-fd", "fd generation wrapped despite saturation guard");
+    *next_out = next;
+    return true;
+}
+
+void LinuxFdClearSnapshot(Process::LinuxFd* snapshot)
+{
+    if (snapshot == nullptr)
+        return;
+    memset(snapshot, 0, sizeof(*snapshot));
+    snapshot->kf_handle = ::duetos::ipc::kHandleInvalid;
+}
+
+void LinuxFdClearSlotLocked(Process::LinuxFd& slot)
+{
+    u32 generation = Process::kLinuxFdGenerationExhausted;
+    (void)LinuxFdNextGeneration(slot.generation, &generation);
+    LinuxFdClearSnapshot(&slot);
+    slot.generation = generation;
+}
+
+i32 LinuxFdFindLowestLocked(Process* p, u32 lo, i32 excluded = -1)
+{
+    sync::SpinLockAssertHeld(p->linux_fd_lock);
+    const u32 fd_max = LinuxFdEffectiveMaxLocal(p);
+    if (lo >= fd_max)
+        return -1;
+    for (u32 fd = lo; fd < fd_max; ++fd)
+    {
+        if (static_cast<i32>(fd) != excluded && p->linux_fds[fd].state == 0 &&
+            p->linux_fds[fd].generation != Process::kLinuxFdGenerationExhausted)
+            return static_cast<i32>(fd);
+    }
+    return -1;
+}
+
+void LinuxFdReleaseOfd(u16 ofd)
+{
+    if (ofd == 0)
+        return;
+    sync::SpinLockGuard guard(g_ofd_lock);
+    OfdReleaseLocked(ofd);
+}
+
+void LinuxFdOverlayOfdSnapshotLocked(const OpenFileDescription& description, Process::LinuxFd* snapshot)
+{
+    snapshot->offset = description.offset;
+    if (snapshot->state != 2)
+        return;
+    snapshot->flags =
+        static_cast<u8>((snapshot->flags & ~Process::kLinuxFdFlagPendingCreate) | description.regular_flags);
+    snapshot->first_cluster = description.first_cluster;
+    snapshot->size = description.size;
+}
+
+OpenFileDescription* LinuxFdGuardDescriptionLocked(const LinuxFdIoGuard* guard)
+{
+    if (guard == nullptr || !guard->held || guard->ofd == 0 || guard->ofd > kOfdPoolCap)
+        return nullptr;
+    OpenFileDescription& description = g_ofd_pool[guard->ofd - 1];
+    if (description.refcount == 0 || guard->position_lock != &description.position_lock)
+        return nullptr;
+    return &description;
+}
+
+bool LinuxFdReceiptValid(const Process::LinuxFd& snapshot, ::duetos::ipc::KObject* kfile_ref, bool owns_ofd_ref)
+{
+    if (snapshot.state == 0 || snapshot.kf_handle != ::duetos::ipc::kHandleInvalid)
+        return false;
+    if ((snapshot.ofd != 0) != owns_ofd_ref)
+        return false;
+    return kfile_ref == nullptr || kfile_ref->type == ::duetos::ipc::KObjectType::File;
+}
+
+bool LinuxFdAcquiredShapeValid(const LinuxFdAcquired* acquired)
+{
+    return acquired != nullptr && acquired->snapshot.state != 0 && acquired->snapshot.generation != 0 &&
+           acquired->snapshot.kf_handle == ::duetos::ipc::kHandleInvalid &&
+           (acquired->snapshot.ofd != 0) == acquired->owns_ofd_ref &&
+           (acquired->kfile_ref == nullptr || acquired->kfile_ref->type == ::duetos::ipc::KObjectType::File);
+}
+
+bool LinuxFdGuardMatchesAcquired(const LinuxFdAcquired* acquired, const LinuxFdIoGuard* guard)
+{
+    return LinuxFdAcquiredShapeValid(acquired) && guard != nullptr && guard->held && guard->position_lock != nullptr &&
+           guard->ofd == acquired->snapshot.ofd;
+}
+
+bool LinuxFdMatchesAcquiredLocked(Process* p, u32 fd, const LinuxFdAcquired* acquired)
+{
+    sync::SpinLockAssertHeld(p->linux_fd_lock);
+    if (!LinuxFdAcquiredShapeValid(acquired) || fd >= kLinuxFdHardCap)
+        return false;
+    const Process::LinuxFd& slot = p->linux_fds[fd];
+    return slot.state == acquired->snapshot.state && slot.generation == acquired->snapshot.generation &&
+           slot.ofd == acquired->snapshot.ofd &&
+           (slot.kf_handle != ::duetos::ipc::kHandleInvalid) == (acquired->kfile_ref != nullptr);
+}
+
+bool LinuxFdRetainPreparedIdentity(const LinuxFdPrepared* prepared, LinuxFdAcquired* acquired)
+{
+    *acquired = {};
+    LinuxFdClearSnapshot(&acquired->snapshot);
+    if (prepared == nullptr || !LinuxFdReceiptValid(prepared->snapshot, prepared->kfile_ref, prepared->owns_ofd_ref))
+        return false;
+
+    LinuxFdAcquired candidate{};
+    candidate.snapshot = prepared->snapshot;
+    candidate.snapshot.kf_handle = ::duetos::ipc::kHandleInvalid;
+    candidate.owns_ofd_ref = prepared->owns_ofd_ref;
+    if (candidate.owns_ofd_ref)
+    {
+        sync::SpinLockGuard guard(g_ofd_lock);
+        if (!OfdRetainLocked(candidate.snapshot.ofd))
+            return false;
+    }
+    if (prepared->kfile_ref != nullptr && !::duetos::ipc::KObjectAcquire(prepared->kfile_ref))
+    {
+        LinuxFdReleaseOfd(candidate.owns_ofd_ref ? candidate.snapshot.ofd : 0);
+        return false;
+    }
+    candidate.kfile_ref = prepared->kfile_ref;
+    *acquired = candidate;
+    return true;
+}
+
+bool LinuxFdRetainSlotLocked(Process* p, u32 fd, u8 expected_state, LinuxFdAcquired* acquired)
+{
+    sync::SpinLockAssertHeld(p->linux_fd_lock);
+    Process::LinuxFd& slot = p->linux_fds[fd];
+    if (slot.state == 0 || (expected_state != 0 && slot.state != expected_state))
+        return false;
+    if (slot.generation == 0)
+        slot.generation = 1;
+
+    LinuxFdAcquired candidate{};
+    candidate.snapshot = slot;
+    candidate.snapshot.kf_handle = ::duetos::ipc::kHandleInvalid;
+
+    if (slot.kf_handle != ::duetos::ipc::kHandleInvalid)
+    {
+        candidate.kfile_ref =
+            ::duetos::ipc::HandleTableLookupRef(p->kobj_handles, slot.kf_handle, ::duetos::ipc::KObjectType::File);
+        if (candidate.kfile_ref == nullptr)
+        {
+            *acquired = candidate;
+            return false;
+        }
+    }
+
+    if (slot.state != 1)
+    {
+        sync::SpinLockGuard ofd_guard(g_ofd_lock);
+        if (slot.ofd == 0)
+        {
+            u32 next_generation = 0;
+            if (!LinuxFdNextGeneration(slot.generation, &next_generation))
+            {
+                *acquired = candidate;
+                return false;
+            }
+            const u16 ofd = OfdAllocLocked(slot.offset, /*status_flags=*/0, slot.flags, slot.first_cluster, slot.size);
+            if (ofd != 0)
+            {
+                slot.ofd = ofd;
+                slot.generation = next_generation;
+            }
+        }
+        if (slot.ofd == 0 || !OfdRetainLocked(slot.ofd))
+        {
+            *acquired = candidate;
+            return false;
+        }
+        candidate.snapshot.ofd = slot.ofd;
+        candidate.snapshot.generation = slot.generation;
+        LinuxFdOverlayOfdSnapshotLocked(g_ofd_pool[slot.ofd - 1], &candidate.snapshot);
+        candidate.owns_ofd_ref = true;
+    }
+    else
+    {
+        candidate.snapshot.ofd = 0;
+    }
+
+    *acquired = candidate;
+    return true;
+}
+
+bool LinuxFdDetachSlotLocked(Process* p, u32 fd, LinuxFdDetached* detached)
+{
+    sync::SpinLockAssertHeld(p->linux_fd_lock);
+    Process::LinuxFd& slot = p->linux_fds[fd];
+    if (slot.state == 0)
+        return false;
+
+    LinuxFdDetached candidate{};
+    candidate.source_fd = fd;
+    candidate.snapshot = slot;
+    candidate.snapshot.kf_handle = ::duetos::ipc::kHandleInvalid;
+    candidate.owns_ofd_ref = slot.ofd != 0;
+
+    if (slot.kf_handle != ::duetos::ipc::kHandleInvalid)
+    {
+        auto object =
+            ::duetos::ipc::HandleTableDetach(p->kobj_handles, slot.kf_handle, ::duetos::ipc::KObjectType::File);
+        if (!object.has_value())
+            return false;
+        candidate.kfile_ref = object.value();
+    }
+
+    LinuxFdClearSlotLocked(slot);
+    *detached = candidate;
+    return true;
+}
+
+void LinuxFdConsumePrepared(LinuxFdPrepared* prepared)
+{
+    LinuxFdClearSnapshot(&prepared->snapshot);
+    prepared->kfile_ref = nullptr;
+    prepared->owns_ofd_ref = false;
+}
+
+void LinuxFdConsumeTransfer(LinuxFdTransfer* transfer)
+{
+    transfer->source_fd = 0;
+    LinuxFdClearSnapshot(&transfer->snapshot);
+    transfer->kfile_ref = nullptr;
+    transfer->owns_ofd_ref = false;
+}
+
+bool LinuxFdPublishLocked(Process::LinuxFd& destination, const Process::LinuxFd& source,
+                          ::duetos::ipc::Handle kfile_handle, bool cloexec)
+{
+    u32 generation = 0;
+    if (!LinuxFdNextGeneration(destination.generation, &generation))
+        return false;
+    destination = source;
+    destination.generation = generation;
+    destination.kf_handle = kfile_handle;
+    if (cloexec)
+        destination.flags = static_cast<u8>(destination.flags | Process::kLinuxFdFlagCloexec);
+    else
+        destination.flags = static_cast<u8>(destination.flags & ~Process::kLinuxFdFlagCloexec);
+    return true;
+}
+
 } // namespace
+
+bool LinuxFdPrepare(LinuxFdPrepared* prepared, const Process::LinuxFd& payload, ::duetos::ipc::KObject* owned_kfile,
+                    u32 status_flags)
+{
+    if (prepared == nullptr)
+        return false;
+    *prepared = {};
+    LinuxFdClearSnapshot(&prepared->snapshot);
+    if (payload.state == 0 || payload.ofd != 0 || payload.kf_handle != ::duetos::ipc::kHandleInvalid ||
+        (owned_kfile != nullptr &&
+         (owned_kfile->type != ::duetos::ipc::KObjectType::File || ::duetos::ipc::KObjectRefcount(owned_kfile) == 0)))
+        return false;
+
+    u16 ofd = 0;
+    if (payload.state != 1)
+    {
+        sync::SpinLockGuard guard(g_ofd_lock);
+        ofd = OfdAllocLocked(payload.offset, status_flags, payload.flags, payload.first_cluster, payload.size);
+        if (ofd == 0)
+            return false;
+    }
+
+    prepared->snapshot = payload;
+    prepared->snapshot.ofd = ofd;
+    prepared->snapshot.kf_handle = ::duetos::ipc::kHandleInvalid;
+    prepared->snapshot.generation = 0;
+    prepared->kfile_ref = owned_kfile;
+    prepared->owns_ofd_ref = ofd != 0;
+    return true;
+}
+
+void LinuxFdPreparedRelease(LinuxFdPrepared* prepared)
+{
+    if (prepared == nullptr)
+        return;
+    ::duetos::ipc::KObject* object = prepared->kfile_ref;
+    const u16 ofd = prepared->owns_ofd_ref ? prepared->snapshot.ofd : 0;
+    LinuxFdConsumePrepared(prepared);
+    ::duetos::ipc::KObjectRelease(object);
+    LinuxFdReleaseOfd(ofd);
+}
+
+i32 LinuxFdBindLowest(Process* p, u32 lo, LinuxFdPrepared* prepared, bool cloexec, LinuxFdAcquired* acquired_out)
+{
+    if (acquired_out != nullptr)
+    {
+        *acquired_out = {};
+        LinuxFdClearSnapshot(&acquired_out->snapshot);
+    }
+    if (p == nullptr || prepared == nullptr ||
+        !LinuxFdReceiptValid(prepared->snapshot, prepared->kfile_ref, prepared->owns_ofd_ref))
+        return -1;
+
+    LinuxFdAcquired retained{};
+    LinuxFdClearSnapshot(&retained.snapshot);
+    if (acquired_out != nullptr && !LinuxFdRetainPreparedIdentity(prepared, &retained))
+        return -1;
+
+    i32 result = -1;
+    {
+        sync::SpinLockGuard guard(p->linux_fd_lock);
+        const i32 fd = LinuxFdFindLowestLocked(p, lo);
+        if (fd >= 0)
+        {
+            ::duetos::ipc::Handle handle = ::duetos::ipc::kHandleInvalid;
+            bool can_publish = true;
+            if (prepared->kfile_ref != nullptr)
+            {
+                auto inserted =
+                    ::duetos::ipc::HandleTableInsert(p->kobj_handles, prepared->kfile_ref, kLinuxFdKFileRights);
+                if (!inserted.has_value())
+                    can_publish = false;
+                else
+                    handle = inserted.value();
+            }
+            if (can_publish)
+            {
+                Process::LinuxFd& slot = p->linux_fds[static_cast<u32>(fd)];
+                if (!LinuxFdPublishLocked(slot, prepared->snapshot, handle, cloexec))
+                {
+                    if (handle != ::duetos::ipc::kHandleInvalid)
+                    {
+                        auto detached =
+                            ::duetos::ipc::HandleTableDetach(p->kobj_handles, handle, ::duetos::ipc::KObjectType::File);
+                        KASSERT(detached.has_value() && detached.value() == prepared->kfile_ref, "proc/linux-fd",
+                                "bind generation rollback lost KFile ownership");
+                    }
+                }
+                else
+                {
+                    if (acquired_out != nullptr)
+                    {
+                        retained.snapshot = slot;
+                        retained.snapshot.kf_handle = ::duetos::ipc::kHandleInvalid;
+                    }
+                    LinuxFdConsumePrepared(prepared);
+                    result = fd;
+                }
+            }
+        }
+    }
+
+    if (result < 0)
+        LinuxFdAcquiredRelease(&retained);
+    else if (acquired_out != nullptr)
+        *acquired_out = retained;
+    return result;
+}
+
+bool LinuxFdBindPairLowest(Process* p, u32 lo, LinuxFdPrepared* first, LinuxFdPrepared* second, u32* first_fd,
+                           u32* second_fd, LinuxFdAcquired* first_acquired_out, LinuxFdAcquired* second_acquired_out)
+{
+    if (first_fd != nullptr)
+        *first_fd = static_cast<u32>(-1);
+    if (second_fd != nullptr)
+        *second_fd = static_cast<u32>(-1);
+    if (first_acquired_out != nullptr)
+    {
+        *first_acquired_out = {};
+        LinuxFdClearSnapshot(&first_acquired_out->snapshot);
+    }
+    if (second_acquired_out != nullptr)
+    {
+        *second_acquired_out = {};
+        LinuxFdClearSnapshot(&second_acquired_out->snapshot);
+    }
+    if (p == nullptr || first == nullptr || second == nullptr || first == second || first_fd == nullptr ||
+        second_fd == nullptr || (first_acquired_out != nullptr && first_acquired_out == second_acquired_out) ||
+        !LinuxFdReceiptValid(first->snapshot, first->kfile_ref, first->owns_ofd_ref) ||
+        !LinuxFdReceiptValid(second->snapshot, second->kfile_ref, second->owns_ofd_ref))
+        return false;
+
+    LinuxFdAcquired retained[2]{};
+    LinuxFdClearSnapshot(&retained[0].snapshot);
+    LinuxFdClearSnapshot(&retained[1].snapshot);
+    if (first_acquired_out != nullptr && !LinuxFdRetainPreparedIdentity(first, &retained[0]))
+        return false;
+    if (second_acquired_out != nullptr && !LinuxFdRetainPreparedIdentity(second, &retained[1]))
+    {
+        LinuxFdAcquiredRelease(&retained[0]);
+        return false;
+    }
+
+    bool success = false;
+    {
+        sync::SpinLockGuard guard(p->linux_fd_lock);
+        const i32 fd0 = LinuxFdFindLowestLocked(p, lo);
+        const i32 fd1 = fd0 < 0 ? -1 : LinuxFdFindLowestLocked(p, lo, fd0);
+        if (fd0 >= 0 && fd1 >= 0)
+        {
+            ::duetos::ipc::Handle handles[2]{::duetos::ipc::kHandleInvalid, ::duetos::ipc::kHandleInvalid};
+            LinuxFdPrepared* receipts[2]{first, second};
+            bool handles_ready = true;
+            u32 inserted_count = 0;
+            for (u32 i = 0; i < 2; ++i)
+            {
+                if (receipts[i]->kfile_ref == nullptr)
+                    continue;
+                auto inserted =
+                    ::duetos::ipc::HandleTableInsert(p->kobj_handles, receipts[i]->kfile_ref, kLinuxFdKFileRights);
+                if (!inserted.has_value())
+                {
+                    handles_ready = false;
+                    break;
+                }
+                handles[i] = inserted.value();
+                inserted_count = i + 1;
+            }
+            if (!handles_ready)
+            {
+                for (u32 rollback = 0; rollback < inserted_count; ++rollback)
+                {
+                    if (handles[rollback] == ::duetos::ipc::kHandleInvalid)
+                        continue;
+                    auto detached = ::duetos::ipc::HandleTableDetach(p->kobj_handles, handles[rollback],
+                                                                     ::duetos::ipc::KObjectType::File);
+                    KASSERT(detached.has_value() && detached.value() == receipts[rollback]->kfile_ref, "proc/linux-fd",
+                            "pair-bind handle rollback lost ownership");
+                }
+            }
+            else
+            {
+                const bool first_cloexec = (first->snapshot.flags & Process::kLinuxFdFlagCloexec) != 0;
+                const bool second_cloexec = (second->snapshot.flags & Process::kLinuxFdFlagCloexec) != 0;
+                Process::LinuxFd& first_slot = p->linux_fds[static_cast<u32>(fd0)];
+                Process::LinuxFd& second_slot = p->linux_fds[static_cast<u32>(fd1)];
+                KASSERT(LinuxFdPublishLocked(first_slot, first->snapshot, handles[0], first_cloexec), "proc/linux-fd",
+                        "lowest-pair finder returned an exhausted first slot");
+                KASSERT(LinuxFdPublishLocked(second_slot, second->snapshot, handles[1], second_cloexec),
+                        "proc/linux-fd", "lowest-pair finder returned an exhausted second slot");
+                if (first_acquired_out != nullptr)
+                {
+                    retained[0].snapshot = first_slot;
+                    retained[0].snapshot.kf_handle = ::duetos::ipc::kHandleInvalid;
+                }
+                if (second_acquired_out != nullptr)
+                {
+                    retained[1].snapshot = second_slot;
+                    retained[1].snapshot.kf_handle = ::duetos::ipc::kHandleInvalid;
+                }
+                LinuxFdConsumePrepared(first);
+                LinuxFdConsumePrepared(second);
+                *first_fd = static_cast<u32>(fd0);
+                *second_fd = static_cast<u32>(fd1);
+                success = true;
+            }
+        }
+    }
+
+    if (!success)
+    {
+        LinuxFdAcquiredRelease(&retained[0]);
+        LinuxFdAcquiredRelease(&retained[1]);
+        return false;
+    }
+    if (first_acquired_out != nullptr)
+        *first_acquired_out = retained[0];
+    if (second_acquired_out != nullptr)
+        *second_acquired_out = retained[1];
+    return true;
+}
+
+bool LinuxFdAcquire(Process* p, u32 fd, u8 expected_state, LinuxFdAcquired* acquired)
+{
+    if (acquired == nullptr)
+        return false;
+    *acquired = {};
+    LinuxFdClearSnapshot(&acquired->snapshot);
+    if (p == nullptr || fd >= kLinuxFdHardCap)
+        return false;
+
+    LinuxFdAcquired candidate{};
+    LinuxFdClearSnapshot(&candidate.snapshot);
+    bool retained = false;
+    {
+        sync::SpinLockGuard guard(p->linux_fd_lock);
+        retained = LinuxFdRetainSlotLocked(p, fd, expected_state, &candidate);
+    }
+    if (!retained)
+    {
+        LinuxFdAcquiredRelease(&candidate);
+        return false;
+    }
+    *acquired = candidate;
+    return true;
+}
+
+bool LinuxFdAcquiredClone(const LinuxFdAcquired* source, LinuxFdAcquired* clone_out)
+{
+    if (clone_out == nullptr)
+        return false;
+    *clone_out = {};
+    LinuxFdClearSnapshot(&clone_out->snapshot);
+    if (source == nullptr || source->snapshot.state == 0 || source->snapshot.generation == 0 ||
+        (source->snapshot.ofd != 0) != source->owns_ofd_ref ||
+        (source->kfile_ref != nullptr && source->kfile_ref->type != ::duetos::ipc::KObjectType::File))
+        return false;
+
+    LinuxFdAcquired candidate = *source;
+    candidate.snapshot.kf_handle = ::duetos::ipc::kHandleInvalid;
+    if (source->owns_ofd_ref)
+    {
+        sync::SpinLockGuard guard(g_ofd_lock);
+        if (!OfdRetainLocked(source->snapshot.ofd))
+            return false;
+    }
+    if (source->kfile_ref != nullptr && !::duetos::ipc::KObjectAcquire(source->kfile_ref))
+    {
+        LinuxFdReleaseOfd(source->owns_ofd_ref ? source->snapshot.ofd : 0);
+        return false;
+    }
+    *clone_out = candidate;
+    return true;
+}
+
+void LinuxFdAcquiredRelease(LinuxFdAcquired* acquired)
+{
+    if (acquired == nullptr)
+        return;
+    ::duetos::ipc::KObject* object = acquired->kfile_ref;
+    const u16 ofd = acquired->owns_ofd_ref ? acquired->snapshot.ofd : 0;
+    *acquired = {};
+    LinuxFdClearSnapshot(&acquired->snapshot);
+    ::duetos::ipc::KObjectRelease(object);
+    LinuxFdReleaseOfd(ofd);
+}
+
+bool LinuxFdIoGuardEnter(const LinuxFdAcquired* acquired, LinuxFdIoGuard* guard)
+{
+    if (guard == nullptr || guard->position_lock != nullptr || guard->ofd != 0 || guard->held ||
+        !LinuxFdAcquiredShapeValid(acquired) || !acquired->owns_ofd_ref)
+        return false;
+
+    sched::Mutex* position_lock = nullptr;
+    {
+        sync::SpinLockGuard ofd_guard(g_ofd_lock);
+        const u16 ofd = acquired->snapshot.ofd;
+        if (ofd == 0 || ofd > kOfdPoolCap || g_ofd_pool[ofd - 1].refcount == 0)
+            return false;
+        position_lock = &g_ofd_pool[ofd - 1].position_lock;
+    }
+
+    // The retained receipt pins this OFD, so the pool slot and mutex cannot
+    // be recycled while this potentially sleeping acquisition is in flight.
+    sched::MutexLock(position_lock);
+    guard->position_lock = position_lock;
+    guard->ofd = acquired->snapshot.ofd;
+    guard->held = true;
+    return true;
+}
+
+void LinuxFdIoGuardExit(LinuxFdIoGuard* guard)
+{
+    if (guard == nullptr || !guard->held || guard->position_lock == nullptr)
+        return;
+    sched::Mutex* position_lock = guard->position_lock;
+    guard->position_lock = nullptr;
+    guard->ofd = 0;
+    guard->held = false;
+    sched::MutexUnlock(position_lock);
+}
+
+bool LinuxFdIoGuardGetOffset(const LinuxFdIoGuard* guard, u64* offset_out)
+{
+    if (offset_out == nullptr)
+        return false;
+    *offset_out = 0;
+    sync::SpinLockGuard ofd_guard(g_ofd_lock);
+    OpenFileDescription* description = LinuxFdGuardDescriptionLocked(guard);
+    if (description == nullptr)
+        return false;
+    *offset_out = description->offset;
+    return true;
+}
+
+bool LinuxFdIoGuardSetOffset(LinuxFdIoGuard* guard, u64 offset)
+{
+    sync::SpinLockGuard ofd_guard(g_ofd_lock);
+    OpenFileDescription* description = LinuxFdGuardDescriptionLocked(guard);
+    if (description == nullptr)
+        return false;
+    description->offset = offset;
+    return true;
+}
+
+bool LinuxFdIoGuardAdvanceOffset(LinuxFdIoGuard* guard, u64 delta, u64* previous_out, u64* current_out)
+{
+    if (previous_out != nullptr)
+        *previous_out = 0;
+    if (current_out != nullptr)
+        *current_out = 0;
+    sync::SpinLockGuard ofd_guard(g_ofd_lock);
+    OpenFileDescription* description = LinuxFdGuardDescriptionLocked(guard);
+    if (description == nullptr || delta > static_cast<u64>(-1) - description->offset)
+        return false;
+    const u64 previous = description->offset;
+    description->offset += delta;
+    if (previous_out != nullptr)
+        *previous_out = previous;
+    if (current_out != nullptr)
+        *current_out = description->offset;
+    return true;
+}
+
+bool LinuxFdIoGuardGetStatusFlags(const LinuxFdIoGuard* guard, u32* flags_out)
+{
+    if (flags_out == nullptr)
+        return false;
+    *flags_out = 0;
+    sync::SpinLockGuard ofd_guard(g_ofd_lock);
+    OpenFileDescription* description = LinuxFdGuardDescriptionLocked(guard);
+    if (description == nullptr)
+        return false;
+    *flags_out = description->status_flags;
+    return true;
+}
+
+bool LinuxFdIoGuardSetStatusFlags(LinuxFdIoGuard* guard, u32 flags)
+{
+    sync::SpinLockGuard ofd_guard(g_ofd_lock);
+    OpenFileDescription* description = LinuxFdGuardDescriptionLocked(guard);
+    if (description == nullptr)
+        return false;
+    description->status_flags = flags;
+    return true;
+}
+
+bool LinuxFdRefreshAcquired(Process* p, u32 fd, const LinuxFdAcquired* acquired, const LinuxFdIoGuard* guard,
+                            Process::LinuxFd* snapshot_out)
+{
+    if (snapshot_out == nullptr)
+        return false;
+    LinuxFdClearSnapshot(snapshot_out);
+    if (p == nullptr || fd >= kLinuxFdHardCap || !LinuxFdGuardMatchesAcquired(acquired, guard))
+        return false;
+
+    sync::SpinLockGuard fd_guard(p->linux_fd_lock);
+    if (!LinuxFdMatchesAcquiredLocked(p, fd, acquired))
+        return false;
+    Process::LinuxFd candidate = p->linux_fds[fd];
+    candidate.kf_handle = ::duetos::ipc::kHandleInvalid;
+    {
+        sync::SpinLockGuard ofd_guard(g_ofd_lock);
+        OpenFileDescription* description = LinuxFdGuardDescriptionLocked(guard);
+        if (description == nullptr || candidate.ofd != guard->ofd)
+            return false;
+        LinuxFdOverlayOfdSnapshotLocked(*description, &candidate);
+    }
+    *snapshot_out = candidate;
+    return true;
+}
+
+bool LinuxFdRefreshRetainedRegular(const LinuxFdAcquired* acquired, const LinuxFdIoGuard* guard,
+                                   Process::LinuxFd* snapshot_out)
+{
+    if (snapshot_out == nullptr)
+        return false;
+    LinuxFdClearSnapshot(snapshot_out);
+    if (!LinuxFdAcquiredShapeValid(acquired) || acquired->snapshot.state != 2)
+        return false;
+
+    const bool guard_matches = LinuxFdGuardMatchesAcquired(acquired, guard);
+    KASSERT(guard_matches, "proc/linux-fd", "retained regular refresh requires matching OFD guard");
+    if (!guard_matches)
+        return false;
+    const bool guard_owned = guard->position_lock->owner == sched::CurrentTask();
+    KASSERT(guard_owned, "proc/linux-fd", "retained regular refresh requires held OFD guard");
+    if (!guard_owned)
+        return false;
+
+    Process::LinuxFd candidate = acquired->snapshot;
+    {
+        sync::SpinLockGuard ofd_guard(g_ofd_lock);
+        OpenFileDescription* description = LinuxFdGuardDescriptionLocked(guard);
+        if (description == nullptr || candidate.ofd != guard->ofd)
+            return false;
+        candidate.flags =
+            static_cast<u8>((candidate.flags & ~Process::kLinuxFdFlagPendingCreate) | description->regular_flags);
+        candidate.first_cluster = description->first_cluster;
+        candidate.size = description->size;
+    }
+    *snapshot_out = candidate;
+    return true;
+}
+
+bool LinuxFdUnbind(Process* p, u32 fd, LinuxFdDetached* detached)
+{
+    if (detached == nullptr)
+        return false;
+    *detached = {};
+    LinuxFdClearSnapshot(&detached->snapshot);
+    if (p == nullptr || fd >= kLinuxFdHardCap)
+        return false;
+    sync::SpinLockGuard guard(p->linux_fd_lock);
+    return LinuxFdDetachSlotLocked(p, fd, detached);
+}
+
+bool LinuxFdUnbindAcquired(Process* p, u32 fd, const LinuxFdAcquired* acquired, LinuxFdDetached* detached)
+{
+    if (detached == nullptr)
+        return false;
+    *detached = {};
+    LinuxFdClearSnapshot(&detached->snapshot);
+    if (p == nullptr || fd >= kLinuxFdHardCap)
+        return false;
+    sync::SpinLockGuard guard(p->linux_fd_lock);
+    if (!LinuxFdMatchesAcquiredLocked(p, fd, acquired))
+        return false;
+    return LinuxFdDetachSlotLocked(p, fd, detached);
+}
+
+bool LinuxFdSetCloexecAcquired(Process* p, u32 fd, const LinuxFdAcquired* acquired, bool on)
+{
+    if (p == nullptr || fd >= kLinuxFdHardCap)
+        return false;
+    sync::SpinLockGuard guard(p->linux_fd_lock);
+    if (!LinuxFdMatchesAcquiredLocked(p, fd, acquired))
+        return false;
+    Process::LinuxFd& slot = p->linux_fds[fd];
+    if (on)
+        slot.flags = static_cast<u8>(slot.flags | Process::kLinuxFdFlagCloexec);
+    else
+        slot.flags = static_cast<u8>(slot.flags & ~Process::kLinuxFdFlagCloexec);
+    return true;
+}
+
+bool LinuxFdCommitRegularMetadataAcquired(Process* p, u32 fd, const LinuxFdAcquired* acquired,
+                                          const LinuxFdIoGuard* guard, const LinuxFdRegularMetadataCommit* commit)
+{
+    if (commit == nullptr || !LinuxFdGuardMatchesAcquired(acquired, guard) || acquired->snapshot.state != 2 ||
+        (commit->flags_mask & ~Process::kLinuxFdFlagPendingCreate) != 0 ||
+        (commit->flags_value & ~commit->flags_mask) != 0)
+        return false;
+
+    u8 regular_flags = 0;
+    u32 first_cluster = 0;
+    u32 size = 0;
+    {
+        sync::SpinLockGuard ofd_guard(g_ofd_lock);
+        OpenFileDescription* description = LinuxFdGuardDescriptionLocked(guard);
+        if (description == nullptr)
+            return false;
+        description->regular_flags = static_cast<u8>((description->regular_flags & ~commit->flags_mask) |
+                                                     (commit->flags_value & commit->flags_mask));
+        if (commit->update_first_cluster)
+            description->first_cluster = commit->first_cluster;
+        if (commit->update_size)
+            description->size = commit->size;
+        regular_flags = description->regular_flags;
+        first_cluster = description->first_cluster;
+        size = description->size;
+    }
+
+    // close(2) removes the descriptor, not an operation already holding the
+    // open-file description. The shared update above therefore always wins.
+    // Mirror only into the original slot identity; close+reuse must never let
+    // the old operation overwrite the replacement descriptor.
+    if (p != nullptr && fd < kLinuxFdHardCap)
+    {
+        sync::SpinLockGuard fd_guard(p->linux_fd_lock);
+        if (LinuxFdMatchesAcquiredLocked(p, fd, acquired))
+        {
+            Process::LinuxFd& slot = p->linux_fds[fd];
+            slot.flags = static_cast<u8>((slot.flags & ~Process::kLinuxFdFlagPendingCreate) | regular_flags);
+            slot.first_cluster = first_cluster;
+            slot.size = size;
+        }
+    }
+    return true;
+}
+
+namespace
+{
+u32 LinuxFdDetachMatching(Process* p, LinuxFdDetached* detached, u32 capacity, bool cloexec_only)
+{
+    if (p == nullptr || detached == nullptr || capacity == 0)
+        return 0;
+    if (capacity > kLinuxFdHardCap)
+        capacity = kLinuxFdHardCap;
+
+    u32 count = 0;
+    sync::SpinLockGuard guard(p->linux_fd_lock);
+    for (u32 fd = 0; fd < kLinuxFdHardCap && count < capacity; ++fd)
+    {
+        const Process::LinuxFd& slot = p->linux_fds[fd];
+        if (slot.state == 0 || (cloexec_only && (slot.flags & Process::kLinuxFdFlagCloexec) == 0))
+            continue;
+        detached[count] = {};
+        LinuxFdClearSnapshot(&detached[count].snapshot);
+        if (LinuxFdDetachSlotLocked(p, fd, &detached[count]))
+            ++count;
+        else
+            KLOG_ONCE_WARN_V("proc/linux-fd", "batch detach failed for live fd", fd);
+    }
+    return count;
+}
+} // namespace
+
+u32 LinuxFdDetachAll(Process* p, LinuxFdDetached* detached, u32 capacity)
+{
+    return LinuxFdDetachMatching(p, detached, capacity, false);
+}
+
+u32 LinuxFdDetachCloexec(Process* p, LinuxFdDetached* detached, u32 capacity)
+{
+    return LinuxFdDetachMatching(p, detached, capacity, true);
+}
+
+void LinuxFdDetachedRelease(LinuxFdDetached* detached)
+{
+    if (detached == nullptr)
+        return;
+    ::duetos::ipc::KObject* object = detached->kfile_ref;
+    const u16 ofd = detached->owns_ofd_ref ? detached->snapshot.ofd : 0;
+    *detached = {};
+    LinuxFdClearSnapshot(&detached->snapshot);
+    ::duetos::ipc::KObjectRelease(object);
+    LinuxFdReleaseOfd(ofd);
+}
+
+bool LinuxFdExport(Process* source, u32 source_fd, LinuxFdTransfer* transfer)
+{
+    if (transfer == nullptr)
+        return false;
+    *transfer = {};
+    LinuxFdClearSnapshot(&transfer->snapshot);
+    LinuxFdAcquired acquired{};
+    if (!LinuxFdAcquire(source, source_fd, 0, &acquired))
+        return false;
+    transfer->source_fd = source_fd;
+    transfer->snapshot = acquired.snapshot;
+    transfer->kfile_ref = acquired.kfile_ref;
+    transfer->owns_ofd_ref = acquired.owns_ofd_ref;
+    acquired.kfile_ref = nullptr;
+    acquired.owns_ofd_ref = false;
+    return true;
+}
+
+void LinuxFdTransferRelease(LinuxFdTransfer* transfer)
+{
+    if (transfer == nullptr)
+        return;
+    ::duetos::ipc::KObject* object = transfer->kfile_ref;
+    const u16 ofd = transfer->owns_ofd_ref ? transfer->snapshot.ofd : 0;
+    LinuxFdConsumeTransfer(transfer);
+    ::duetos::ipc::KObjectRelease(object);
+    LinuxFdReleaseOfd(ofd);
+}
+
+i32 LinuxFdImportLowest(Process* destination, u32 lo, LinuxFdTransfer* transfer, bool cloexec)
+{
+    if (destination == nullptr || transfer == nullptr ||
+        !LinuxFdReceiptValid(transfer->snapshot, transfer->kfile_ref, transfer->owns_ofd_ref))
+        return -1;
+
+    sync::SpinLockGuard guard(destination->linux_fd_lock);
+    const i32 fd = LinuxFdFindLowestLocked(destination, lo);
+    if (fd < 0)
+        return -1;
+
+    ::duetos::ipc::Handle handle = ::duetos::ipc::kHandleInvalid;
+    if (transfer->kfile_ref != nullptr)
+    {
+        auto inserted =
+            ::duetos::ipc::HandleTableInsert(destination->kobj_handles, transfer->kfile_ref, kLinuxFdKFileRights);
+        if (!inserted.has_value())
+            return -1;
+        handle = inserted.value();
+    }
+    if (!LinuxFdPublishLocked(destination->linux_fds[static_cast<u32>(fd)], transfer->snapshot, handle, cloexec))
+    {
+        if (handle != ::duetos::ipc::kHandleInvalid)
+        {
+            auto detached =
+                ::duetos::ipc::HandleTableDetach(destination->kobj_handles, handle, ::duetos::ipc::KObjectType::File);
+            KASSERT(detached.has_value() && detached.value() == transfer->kfile_ref, "proc/linux-fd",
+                    "import generation rollback lost KFile ownership");
+        }
+        return -1;
+    }
+    LinuxFdConsumeTransfer(transfer);
+    return fd;
+}
+
+bool LinuxFdImportExact(Process* destination, u32 destination_fd, LinuxFdTransfer* transfer, bool cloexec)
+{
+    if (destination == nullptr || transfer == nullptr || destination_fd >= kLinuxFdHardCap ||
+        destination_fd >= LinuxFdEffectiveMaxLocal(destination) ||
+        !LinuxFdReceiptValid(transfer->snapshot, transfer->kfile_ref, transfer->owns_ofd_ref))
+        return false;
+
+    ::duetos::ipc::KObject* displaced_object = nullptr;
+    u16 displaced_ofd = 0;
+    bool success = false;
+    {
+        sync::SpinLockGuard guard(destination->linux_fd_lock);
+        Process::LinuxFd& slot = destination->linux_fds[destination_fd];
+        u32 next_generation = 0;
+        if (!LinuxFdNextGeneration(slot.generation, &next_generation))
+            return false;
+        ::duetos::ipc::Handle replacement_handle = ::duetos::ipc::kHandleInvalid;
+
+        if (slot.kf_handle != ::duetos::ipc::kHandleInvalid && transfer->kfile_ref != nullptr)
+        {
+            auto replaced =
+                ::duetos::ipc::HandleTableAdoptReplace(destination->kobj_handles, slot.kf_handle, transfer->kfile_ref,
+                                                       kLinuxFdKFileRights, ::duetos::ipc::KObjectType::File);
+            if (!replaced.has_value())
+                return false;
+            replacement_handle = replaced.value().handle;
+            displaced_object = replaced.value().displaced;
+        }
+        else if (slot.kf_handle != ::duetos::ipc::kHandleInvalid)
+        {
+            auto detached = ::duetos::ipc::HandleTableDetach(destination->kobj_handles, slot.kf_handle,
+                                                             ::duetos::ipc::KObjectType::File);
+            if (!detached.has_value())
+                return false;
+            displaced_object = detached.value();
+        }
+        else if (transfer->kfile_ref != nullptr)
+        {
+            auto inserted =
+                ::duetos::ipc::HandleTableInsert(destination->kobj_handles, transfer->kfile_ref, kLinuxFdKFileRights);
+            if (!inserted.has_value())
+                return false;
+            replacement_handle = inserted.value();
+        }
+
+        displaced_ofd = slot.ofd;
+        KASSERT(LinuxFdPublishLocked(slot, transfer->snapshot, replacement_handle, cloexec), "proc/linux-fd",
+                "validated exact-import slot became exhausted under lock");
+        LinuxFdConsumeTransfer(transfer);
+        success = true;
+    }
+
+    // These may run pool callbacks/destructors, so they are deliberately after
+    // both linux_fd_lock and HandleTable's internal lock have been released.
+    ::duetos::ipc::KObjectRelease(displaced_object);
+    LinuxFdReleaseOfd(displaced_ofd);
+    return success;
+}
+
+bool LinuxFdExportTable(Process* source, LinuxFdTransfer* transfers, u32 capacity, u32* count_out)
+{
+    if (count_out == nullptr)
+        return false;
+    *count_out = 0;
+    if (source == nullptr || transfers == nullptr || capacity == 0)
+        return false;
+    if (capacity > kLinuxFdHardCap)
+        capacity = kLinuxFdHardCap;
+
+    u32 count = 0;
+    bool failed = false;
+    {
+        sync::SpinLockGuard guard(source->linux_fd_lock);
+        u32 live = 0;
+        for (u32 fd = 0; fd < kLinuxFdHardCap; ++fd)
+            if (source->linux_fds[fd].state != 0)
+                ++live;
+        if (live > capacity)
+            failed = true;
+
+        for (u32 fd = 0; !failed && fd < kLinuxFdHardCap; ++fd)
+        {
+            if (source->linux_fds[fd].state == 0)
+                continue;
+            LinuxFdAcquired acquired{};
+            LinuxFdClearSnapshot(&acquired.snapshot);
+            if (!LinuxFdRetainSlotLocked(source, fd, 0, &acquired))
+            {
+                // Preserve any partial ownership so cleanup happens after the
+                // source fd lock rather than inside this failure leg.
+                transfers[count] = {};
+                transfers[count].source_fd = fd;
+                transfers[count].snapshot = acquired.snapshot;
+                transfers[count].kfile_ref = acquired.kfile_ref;
+                transfers[count].owns_ofd_ref = acquired.owns_ofd_ref;
+                ++count;
+                failed = true;
+                break;
+            }
+            transfers[count] = {};
+            transfers[count].source_fd = fd;
+            transfers[count].snapshot = acquired.snapshot;
+            transfers[count].kfile_ref = acquired.kfile_ref;
+            transfers[count].owns_ofd_ref = acquired.owns_ofd_ref;
+            ++count;
+        }
+    }
+
+    if (!failed)
+    {
+        *count_out = count;
+        return true;
+    }
+    for (u32 i = 0; i < count; ++i)
+        LinuxFdTransferRelease(&transfers[i]);
+    return false;
+}
+
+bool LinuxFdImportTable(Process* destination, LinuxFdTransfer* transfers, u32 count)
+{
+    if (destination == nullptr || (count != 0 && transfers == nullptr) || count > kLinuxFdHardCap)
+        return false;
+
+    ::duetos::ipc::Handle handles[kLinuxFdHardCap]{};
+    bool present[kLinuxFdHardCap]{};
+    for (u32 i = 0; i < kLinuxFdHardCap; ++i)
+        handles[i] = ::duetos::ipc::kHandleInvalid;
+
+    sync::SpinLockGuard guard(destination->linux_fd_lock);
+    // Fork imports into a private ProcessCreate table. Validate every row, not
+    // only rows present in the source snapshot, so a closed parent descriptor
+    // clears the child's default TTY row instead of silently resurrecting it.
+    for (u32 fd = 0; fd < kLinuxFdHardCap; ++fd)
+    {
+        const Process::LinuxFd& slot = destination->linux_fds[fd];
+        if (slot.kf_handle != ::duetos::ipc::kHandleInvalid || slot.ofd != 0 || (slot.state != 0 && slot.state != 1))
+            return false;
+    }
+    for (u32 i = 0; i < count; ++i)
+    {
+        const u32 fd = transfers[i].source_fd;
+        if (fd >= kLinuxFdHardCap || fd >= LinuxFdEffectiveMaxLocal(destination) ||
+            !LinuxFdReceiptValid(transfers[i].snapshot, transfers[i].kfile_ref, transfers[i].owns_ofd_ref))
+            return false;
+        u32 next_generation = 0;
+        if (!LinuxFdNextGeneration(destination->linux_fds[fd].generation, &next_generation))
+            return false;
+        for (u32 prior = 0; prior < i; ++prior)
+            if (transfers[prior].source_fd == fd)
+                return false;
+        present[fd] = true;
+    }
+
+    u32 inserted_count = 0;
+    for (; inserted_count < count; ++inserted_count)
+    {
+        if (transfers[inserted_count].kfile_ref == nullptr)
+            continue;
+        auto inserted = ::duetos::ipc::HandleTableInsert(destination->kobj_handles, transfers[inserted_count].kfile_ref,
+                                                         kLinuxFdKFileRights);
+        if (!inserted.has_value())
+            break;
+        handles[inserted_count] = inserted.value();
+    }
+
+    if (inserted_count != count)
+    {
+        for (u32 i = 0; i < inserted_count; ++i)
+        {
+            if (handles[i] == ::duetos::ipc::kHandleInvalid)
+                continue;
+            auto detached = ::duetos::ipc::HandleTableDetach(destination->kobj_handles, handles[i],
+                                                             ::duetos::ipc::KObjectType::File);
+            KASSERT(detached.has_value() && detached.value() == transfers[i].kfile_ref, "proc/linux-fd",
+                    "table-import rollback lost KFile ownership");
+        }
+        return false;
+    }
+
+    // Handle publication can no longer fail. First remove default child rows
+    // absent from the source snapshot, then publish every imported identity.
+    for (u32 fd = 0; fd < kLinuxFdHardCap; ++fd)
+        if (!present[fd] && destination->linux_fds[fd].state != 0)
+            LinuxFdClearSlotLocked(destination->linux_fds[fd]);
+    for (u32 i = 0; i < count; ++i)
+    {
+        const u32 fd = transfers[i].source_fd;
+        const bool cloexec = (transfers[i].snapshot.flags & Process::kLinuxFdFlagCloexec) != 0;
+        KASSERT(LinuxFdPublishLocked(destination->linux_fds[fd], transfers[i].snapshot, handles[i], cloexec),
+                "proc/linux-fd", "validated table-import slot became exhausted under lock");
+        LinuxFdConsumeTransfer(&transfers[i]);
+    }
+    return true;
+}
+
+i32 LinuxFdDuplicateLowest(Process* p, u32 oldfd, u32 lo, bool cloexec)
+{
+    LinuxFdTransfer transfer{};
+    if (!LinuxFdExport(p, oldfd, &transfer))
+        return -1;
+    const i32 fd = LinuxFdImportLowest(p, lo, &transfer, cloexec);
+    LinuxFdTransferRelease(&transfer);
+    return fd;
+}
+
+bool LinuxFdDuplicateExact(Process* p, u32 oldfd, u32 newfd, bool cloexec)
+{
+    if (p == nullptr || oldfd >= kLinuxFdHardCap || newfd >= kLinuxFdHardCap)
+        return false;
+    if (oldfd == newfd)
+    {
+        sync::SpinLockGuard guard(p->linux_fd_lock);
+        return p->linux_fds[oldfd].state != 0;
+    }
+
+    LinuxFdTransfer transfer{};
+    if (!LinuxFdExport(p, oldfd, &transfer))
+        return false;
+    const bool imported = LinuxFdImportExact(p, newfd, &transfer, cloexec);
+    LinuxFdTransferRelease(&transfer);
+    return imported;
+}
 
 i32 LinuxFdAllocLowest(Process* p, u32 lo)
 {
     if (p == nullptr)
         return -1;
-    const u32 fd_max = LinuxFdEffectiveMaxLocal(p);
-    if (lo >= fd_max)
-        return -1;
-    for (u32 i = lo; i < fd_max; ++i)
-    {
-        if (p->linux_fds[i].state == 0)
-            return static_cast<i32>(i);
-    }
-    return -1;
+    sync::SpinLockGuard guard(p->linux_fd_lock);
+    return LinuxFdFindLowestLocked(p, lo);
 }
 
 bool LinuxFdAttachKFile(Process* p, u32 fd, u8 kind, u32 pool_index, void (*release)(u32), bool* out_pool_released)
@@ -2099,8 +5113,27 @@ bool LinuxFdAttachKFile(Process* p, u32 fd, u8 kind, u32 pool_index, void (*rele
         KLOG_ONCE_WARN_V("proc/linux-fd", "KFileCreate failed (pool exhausted) on attach (kind)", kind);
         return false;
     }
-    auto h_r = ::duetos::ipc::HandleTableInsert(p->kobj_handles, &kf_r.value()->base);
-    if (!h_r.has_value())
+    bool installed = false;
+    {
+        sync::SpinLockGuard guard(p->linux_fd_lock);
+        Process::LinuxFd& slot = p->linux_fds[fd];
+        if (slot.state != 0 && slot.kf_handle == ::duetos::ipc::kHandleInvalid)
+        {
+            u32 next_generation = 0;
+            if (LinuxFdNextGeneration(slot.generation, &next_generation))
+            {
+                auto inserted =
+                    ::duetos::ipc::HandleTableInsert(p->kobj_handles, &kf_r.value()->base, kLinuxFdKFileRights);
+                if (inserted.has_value())
+                {
+                    slot.generation = next_generation;
+                    slot.kf_handle = inserted.value();
+                    installed = true;
+                }
+            }
+        }
+    }
+    if (!installed)
     {
         // Insert failed (table full). Drop the fresh KFile ref so
         // its destroy callback runs and releases the pool slot —
@@ -2112,7 +5145,6 @@ bool LinuxFdAttachKFile(Process* p, u32 fd, u8 kind, u32 pool_index, void (*rele
             *out_pool_released = true;
         return false;
     }
-    p->linux_fds[fd].kf_handle = h_r.value();
     return true;
 }
 
@@ -2127,8 +5159,27 @@ bool LinuxFdAttachKFileOwned(Process* p, u32 fd, u8 kind, u32 pool_index, void (
         KLOG_ONCE_WARN_V("proc/linux-fd", "KFileCreateWithOwner failed on attach (kind)", kind);
         return false;
     }
-    auto h_r = ::duetos::ipc::HandleTableInsert(p->kobj_handles, &kf_r.value()->base);
-    if (!h_r.has_value())
+    bool installed = false;
+    {
+        sync::SpinLockGuard guard(p->linux_fd_lock);
+        Process::LinuxFd& slot = p->linux_fds[fd];
+        if (slot.state != 0 && slot.kf_handle == ::duetos::ipc::kHandleInvalid)
+        {
+            u32 next_generation = 0;
+            if (LinuxFdNextGeneration(slot.generation, &next_generation))
+            {
+                auto inserted =
+                    ::duetos::ipc::HandleTableInsert(p->kobj_handles, &kf_r.value()->base, kLinuxFdKFileRights);
+                if (inserted.has_value())
+                {
+                    slot.generation = next_generation;
+                    slot.kf_handle = inserted.value();
+                    installed = true;
+                }
+            }
+        }
+    }
+    if (!installed)
     {
         // Same rollback shape as `LinuxFdAttachKFile` — KObjectRelease
         // fires the owner-aware destroy callback, which frees the
@@ -2137,156 +5188,26 @@ bool LinuxFdAttachKFileOwned(Process* p, u32 fd, u8 kind, u32 pool_index, void (
         ::duetos::ipc::KObjectRelease(&kf_r.value()->base);
         return false;
     }
-    p->linux_fds[fd].kf_handle = h_r.value();
     return true;
 }
 
 void LinuxFdClose(Process* p, u32 fd)
 {
-    if (p == nullptr || fd >= 16)
-        return;
-    Process::LinuxFd& lf = p->linux_fds[fd];
-    if (lf.state == 0)
-        return;
-    if (lf.kf_handle != ::duetos::ipc::kHandleInvalid)
-    {
-        // Drops the table's KObject ref. KFileDestroy fires on
-        // refcount=0, dispatching to the per-pool release callback
-        // (PipeReleaseRead/Write, EventfdRelease, etc.) — no
-        // explicit `*Release` call needed at the syscall layer
-        // for KFile-backed fds.
-        (void)::duetos::ipc::HandleTableRemove(p->kobj_handles, lf.kf_handle);
-        lf.kf_handle = ::duetos::ipc::kHandleInvalid;
-    }
-    // Drop this fd's reference on the shared open-file description.
-    // Last close frees it; a dup sibling still holding a ref keeps
-    // the offset/flags alive. No-op when the slot never got an OFD
-    // (lf.ofd == 0).
-    if (lf.ofd != 0)
-    {
-        sync::SpinLockGuard g(g_ofd_lock);
-        OfdReleaseLocked(lf.ofd);
-        lf.ofd = 0;
-    }
-    lf.state = 0;
-    lf.flags = 0;
-    lf.first_cluster = 0;
-    lf.size = 0;
-    lf.offset = 0;
-    for (u32 j = 0; j < sizeof(lf.path); ++j)
-        lf.path[j] = 0;
+    LinuxFdDetached detached{};
+    if (LinuxFdUnbind(p, fd, &detached))
+        LinuxFdDetachedRelease(&detached);
 }
 
 bool LinuxFdDup(Process* p, u32 oldfd, u32 newfd)
 {
-    if (p == nullptr || oldfd >= 16 || newfd >= 16)
-        return false;
-    if (oldfd == newfd)
-        return true;
-    Process::LinuxFd& src = p->linux_fds[oldfd];
-    if (src.state == 0)
-        return false;
-    // Open-file-description sharing (POSIX dup semantics). The new
-    // fd must reference the SAME description as the source so a
-    // seek / F_SETFL through one is visible through the other. If
-    // the source slot doesn't yet own a description (older open
-    // paths that haven't migrated to LinuxFdOpenDescription), lazily
-    // materialise one from its current inline offset/flags so both
-    // fds end up sharing it. Do this BEFORE touching dst so a pool-
-    // exhaustion failure leaves the whole table untouched.
-    //
-    // "BEFORE touching dst" includes the close of any slot already
-    // sitting at newfd: POSIX requires a FAILED dup2() to leave
-    // newfd exactly as it was, so the OFD materialise — the only
-    // step here that can fail before dst is written — has to run
-    // ahead of it. (This block used to sit after the close, which
-    // meant an exhausted pool destroyed newfd and then reported
-    // failure.) An fd already sharing src's description simply
-    // sees refcount go up here and back down in the close below.
-    u16 shared_ofd = 0;
-    {
-        sync::SpinLockGuard g(g_ofd_lock);
-        if (src.ofd == 0)
-        {
-            // Inline offset is the live cursor; status flags aren't
-            // tracked inline yet, so seed the description's flags to 0.
-            // GAP: status flags for pre-OFD opens are seeded empty —
-            // revisit when sys_open/pipe2/socket call
-            // LinuxFdOpenDescription with the real O_* flags so a
-            // dup'd fd inherits the source's status flags too.
-            src.ofd = OfdAllocLocked(src.offset, /*status_flags=*/0);
-            if (src.ofd == 0)
-            {
-                KLOG_ONCE_WARN("proc/linux-fd", "OFD pool exhausted on dup (src materialise)");
-                return false;
-            }
-        }
-        OfdRetainLocked(src.ofd);
-        shared_ofd = src.ofd;
-    }
-
-    // Close any existing slot at newfd. Drops the dst's KFile ref
-    // via the unified path. Everything past this point either
-    // succeeds or rolls dst back explicitly.
-    LinuxFdClose(p, newfd);
-
-    Process::LinuxFd& dst = p->linux_fds[newfd];
-    dst.state = src.state;
-    dst.flags = src.flags;
-    // Drop FD_CLOEXEC on the new fd by default. Linux semantics:
-    // dup() always produces a non-cloexec fd; dup3() with
-    // O_CLOEXEC re-sets it via LinuxFdSetCloexec at the call site.
-    // FD_CLOEXEC is a per-fd (per-descriptor) flag, NOT part of the
-    // shared open-file description — correct to differ per dup.
-    dst.flags = static_cast<u8>(dst.flags & ~Process::kLinuxFdFlagCloexec);
-    dst.first_cluster = src.first_cluster;
-    dst.size = src.size;
-    dst.ofd = shared_ofd;
-    // Seed dst's inline mirror from the shared description so the
-    // existing inline readers see the right cursor immediately.
-    dst.offset = LinuxFdGetOffset(p, newfd);
-    for (u32 j = 0; j < sizeof(dst.path); ++j)
-        dst.path[j] = src.path[j];
-
-    // Duplicate the KFile sidecar so both fds share the underlying
-    // pool ref. Each fd holds one ref — closing one drops one ref;
-    // closing both fires the per-pool release callback.
-    if (src.kf_handle != ::duetos::ipc::kHandleInvalid)
-    {
-        auto h_r = ::duetos::ipc::HandleTableDuplicate(p->kobj_handles, p->kobj_handles, src.kf_handle);
-        if (!h_r.has_value())
-        {
-            // Roll back EVERYTHING — we promised "either both fds
-            // reference the same KFile + OFD, or neither does".
-            // Drop the OFD ref we just took (refcount asymmetry
-            // guard: the retain above must be matched on this leg).
-            {
-                sync::SpinLockGuard g(g_ofd_lock);
-                OfdReleaseLocked(shared_ofd);
-            }
-            dst.state = 0;
-            dst.flags = 0;
-            dst.first_cluster = 0;
-            dst.size = 0;
-            dst.offset = 0;
-            dst.ofd = 0;
-            for (u32 j = 0; j < sizeof(dst.path); ++j)
-                dst.path[j] = 0;
-            return false;
-        }
-        dst.kf_handle = h_r.value();
-    }
-    else
-    {
-        dst.kf_handle = ::duetos::ipc::kHandleInvalid;
-    }
-    return true;
+    return LinuxFdDuplicateExact(p, oldfd, newfd, false);
 }
 
 void LinuxFdSetCloexec(Process* p, u32 fd, bool on)
 {
     if (p == nullptr || fd >= 16)
         return;
+    sync::SpinLockGuard guard(p->linux_fd_lock);
     Process::LinuxFd& lf = p->linux_fds[fd];
     if (lf.state == 0)
         return;
@@ -2300,6 +5221,7 @@ bool LinuxFdGetCloexec(const Process* p, u32 fd)
 {
     if (p == nullptr || fd >= 16)
         return false;
+    sync::SpinLockGuard guard(const_cast<Process*>(p)->linux_fd_lock);
     const Process::LinuxFd& lf = p->linux_fds[fd];
     if (lf.state == 0)
         return false;
@@ -2310,6 +5232,7 @@ bool LinuxFdOpenDescription(Process* p, u32 fd, u64 initial_offset, u32 status_f
 {
     if (p == nullptr || fd >= 16)
         return false;
+    sync::SpinLockGuard fd_guard(p->linux_fd_lock);
     Process::LinuxFd& lf = p->linux_fds[fd];
     if (lf.state == 0)
         return false;
@@ -2319,17 +5242,24 @@ bool LinuxFdOpenDescription(Process* p, u32 fd, u64 initial_offset, u32 status_f
         // mirror and leave the shared object alone. (Re-opening a
         // description over a live one would silently orphan dup
         // siblings.)
-        lf.offset = LinuxFdGetOffset(p, fd);
+        sync::SpinLockGuard ofd_guard(g_ofd_lock);
+        if (lf.ofd > kOfdPoolCap || g_ofd_pool[lf.ofd - 1].refcount == 0)
+            return false;
+        LinuxFdOverlayOfdSnapshotLocked(g_ofd_pool[lf.ofd - 1], &lf);
         return true;
     }
     sync::SpinLockGuard g(g_ofd_lock);
-    const u16 ofd = OfdAllocLocked(initial_offset, status_flags);
+    u32 next_generation = 0;
+    if (!LinuxFdNextGeneration(lf.generation, &next_generation))
+        return false;
+    const u16 ofd = OfdAllocLocked(initial_offset, status_flags, lf.flags, lf.first_cluster, lf.size);
     if (ofd == 0)
     {
         KLOG_ONCE_WARN("proc/linux-fd", "OFD pool exhausted on open");
         return false;
     }
     lf.ofd = ofd;
+    lf.generation = next_generation;
     lf.offset = initial_offset; // keep the inline mirror in step
     return true;
 }
@@ -2338,10 +5268,13 @@ u64 LinuxFdGetOffset(const Process* p, u32 fd)
 {
     if (p == nullptr || fd >= 16)
         return 0;
+    sync::SpinLockGuard fd_guard(const_cast<Process*>(p)->linux_fd_lock);
     const Process::LinuxFd& lf = p->linux_fds[fd];
     if (lf.ofd == 0)
         return lf.offset; // no shared description — inline is authoritative
     sync::SpinLockGuard g(g_ofd_lock);
+    if (lf.ofd > kOfdPoolCap || g_ofd_pool[lf.ofd - 1].refcount == 0)
+        return lf.offset;
     return g_ofd_pool[lf.ofd - 1].offset;
 }
 
@@ -2349,6 +5282,7 @@ void LinuxFdSetOffset(Process* p, u32 fd, u64 offset)
 {
     if (p == nullptr || fd >= 16)
         return;
+    sync::SpinLockGuard fd_guard(p->linux_fd_lock);
     Process::LinuxFd& lf = p->linux_fds[fd];
     if (lf.ofd == 0)
     {
@@ -2357,6 +5291,8 @@ void LinuxFdSetOffset(Process* p, u32 fd, u64 offset)
     }
     {
         sync::SpinLockGuard g(g_ofd_lock);
+        if (lf.ofd > kOfdPoolCap || g_ofd_pool[lf.ofd - 1].refcount == 0)
+            return;
         g_ofd_pool[lf.ofd - 1].offset = offset;
     }
     // Keep the inline mirror in step for the TUs that still read
@@ -2373,10 +5309,13 @@ u32 LinuxFdGetStatusFlags(const Process* p, u32 fd)
 {
     if (p == nullptr || fd >= 16)
         return 0;
+    sync::SpinLockGuard fd_guard(const_cast<Process*>(p)->linux_fd_lock);
     const Process::LinuxFd& lf = p->linux_fds[fd];
     if (lf.ofd == 0)
         return 0;
     sync::SpinLockGuard g(g_ofd_lock);
+    if (lf.ofd > kOfdPoolCap || g_ofd_pool[lf.ofd - 1].refcount == 0)
+        return 0;
     return g_ofd_pool[lf.ofd - 1].status_flags;
 }
 
@@ -2384,147 +5323,70 @@ void LinuxFdSetStatusFlags(Process* p, u32 fd, u32 status_flags)
 {
     if (p == nullptr || fd >= 16)
         return;
+    sync::SpinLockGuard fd_guard(p->linux_fd_lock);
     Process::LinuxFd& lf = p->linux_fds[fd];
     if (lf.ofd == 0)
         return;
     sync::SpinLockGuard g(g_ofd_lock);
+    if (lf.ofd > kOfdPoolCap || g_ofd_pool[lf.ofd - 1].refcount == 0)
+        return;
     g_ofd_pool[lf.ofd - 1].status_flags = status_flags;
 }
 
 bool LinuxFdCopyAcrossProcesses(Process* dst, u32 dst_fd, Process* src, u32 src_fd)
 {
-    if (dst == nullptr || src == nullptr || dst_fd >= 16 || src_fd >= 16)
+    LinuxFdTransfer transfer{};
+    if (!LinuxFdExport(src, src_fd, &transfer))
         return false;
-    Process::LinuxFd& s = src->linux_fds[src_fd];
-    if (s.state == 0)
-        return false;
-    Process::LinuxFd& d = dst->linux_fds[dst_fd];
-
-    // Per-fd payload copies verbatim. FD_CLOEXEC rides along in
-    // `flags`: fork() preserves it (only execve drops it); callers
-    // that must force it on or off do so with `LinuxFdSetCloexec`
-    // after this returns.
-    d.state = s.state;
-    d.flags = s.flags;
-    d.first_cluster = s.first_cluster;
-    d.size = s.size;
-    d.offset = s.offset;
-    for (u32 j = 0; j < sizeof(d.path); ++j)
-        d.path[j] = s.path[j];
-
-    // Open-file-description SHARING. `ofd` is a 1-based index into
-    // the kernel-wide g_ofd_pool, so the raw value IS meaningful in
-    // another process — but it is refcounted, and a copy that skips
-    // the retain leaves the destination's eventual close dropping a
-    // reference it never took. If the source held the only one, the
-    // description is freed while the source fd still points at it:
-    // its cursor silently resets and then aliases whatever fd next
-    // allocates that pool slot.
-    //
-    // Reserved-tty slots (state 1) carry no offset semantics — leave
-    // them OFD-less rather than burn a pool slot per fork on the
-    // three standard streams.
-    u16 shared_ofd = 0;
-    if (s.state != 1)
-    {
-        sync::SpinLockGuard g(g_ofd_lock);
-        if (s.ofd == 0)
-        {
-            s.ofd = OfdAllocLocked(s.offset, /*status_flags=*/0);
-        }
-        // A no-op when the pool was exhausted just above (s.ofd
-        // stays 0): both sides keep their independent inline offset
-        // mirror — degraded but safe.
-        // GAP: offset sharing is lost for that fd under OFD-pool
-        // pressure — revisit by growing kOfdPoolCap or making the
-        // pool KMalloc-backed if real workloads exhaust 64 live
-        // descriptions.
-        OfdRetainLocked(s.ofd);
-        shared_ofd = s.ofd;
-    }
-    d.ofd = shared_ofd;
-
-    // KFile sidecar. `kf_handle` is a DENSE INDEX INTO THE SOURCE'S
-    // OWN handle table — no owner tag, no generation counter — so
-    // copying the raw value across names whatever object sits at
-    // that index in the DESTINATION's table. Both tables allocate
-    // from index 0 upward, which makes collision with one of the
-    // destination's own live fds the common case: the destination's
-    // close would then destroy an unrelated object it still has an
-    // open fd on. Duplicating through the handle table is the only
-    // correct transfer — it installs a real second reference on the
-    // same KObject, and that reference IS the per-pool reference, so
-    // no explicit `*Retain` belongs at any caller of this helper.
-    if (s.kf_handle != ::duetos::ipc::kHandleInvalid)
-    {
-        auto h_r = ::duetos::ipc::HandleTableDuplicate(src->kobj_handles, dst->kobj_handles, s.kf_handle);
-        if (!h_r.has_value())
-        {
-            // Destination handle table full. Roll the whole copy
-            // back — including the OFD retain taken above — so we
-            // never leave a populated slot with no reference behind
-            // it (refcount-asymmetry discipline, mirroring
-            // `LinuxFdDup`'s rollback).
-            if (shared_ofd != 0)
-            {
-                sync::SpinLockGuard g(g_ofd_lock);
-                OfdReleaseLocked(shared_ofd);
-            }
-            d.state = 0;
-            d.flags = 0;
-            d.first_cluster = 0;
-            d.size = 0;
-            d.offset = 0;
-            d.ofd = 0;
-            d.kf_handle = ::duetos::ipc::kHandleInvalid;
-            for (u32 j = 0; j < sizeof(d.path); ++j)
-                d.path[j] = 0;
-            KLOG_ONCE_WARN("proc/linux-fd", "cross-process fd copy: HandleTableDuplicate failed (dst table full)");
-            return false;
-        }
-        d.kf_handle = h_r.value();
-    }
-    else
-    {
-        d.kf_handle = ::duetos::ipc::kHandleInvalid;
-    }
-    return true;
+    const bool cloexec = (transfer.snapshot.flags & Process::kLinuxFdFlagCloexec) != 0;
+    const bool imported = LinuxFdImportExact(dst, dst_fd, &transfer, cloexec);
+    LinuxFdTransferRelease(&transfer);
+    return imported;
 }
 
-void LinuxFdInheritFromParent(Process* parent, Process* child)
+bool LinuxFdInheritFromParent(Process* parent, Process* child)
 {
-    if (parent == nullptr || child == nullptr)
-        return;
-    for (u32 fd = 0; fd < 16; ++fd)
+    if (parent == nullptr || child == nullptr || parent == child)
+        return false;
+
+    LinuxFdTransfer transfers[kLinuxFdHardCap]{};
+    u32 count = 0;
+    if (!LinuxFdExportTable(parent, transfers, kLinuxFdHardCap, &count))
+        return false;
+
+    // Directory-snapshot KFiles close a Process::win32_dirs slot through an
+    // owner-aware callback and therefore cannot cross into another Process.
+    // Drop their retained export references before the child table is ever
+    // published, compacting the remaining ownership receipts in place.
+    constexpr u8 kDirSnapshotState = static_cast<u8>(::duetos::ipc::KFileKind::DirSnapshot);
+    u32 inheritable_count = 0;
+    for (u32 i = 0; i < count; ++i)
     {
-        if (parent->linux_fds[fd].state == 0)
+        if (transfers[i].snapshot.state == kDirSnapshotState)
+        {
+            LinuxFdTransferRelease(&transfers[i]);
             continue;
-        // POSIX fork(): the child gets the same fd numbers, SHARES
-        // the parent's open file descriptions, holds its own KFile
-        // reference on each pool object, and keeps FD_CLOEXEC —
-        // exactly `LinuxFdCopyAcrossProcesses`' contract, so fork
-        // and pidfd_getfd run one implementation. Reserved-tty slots
-        // (state 1) in the freshly-created child are simply
-        // overwritten with the parent's equivalent. A failed copy
-        // leaves the child's slot unused (state 0) rather than
-        // populated-but-unreferenced, which is what the old
-        // best-effort arm did (and leaked the pool ref for).
-        (void)LinuxFdCopyAcrossProcesses(child, fd, parent, fd);
+        }
+        if (inheritable_count != i)
+        {
+            transfers[inheritable_count] = transfers[i];
+            LinuxFdConsumeTransfer(&transfers[i]);
+        }
+        ++inheritable_count;
     }
+
+    const bool imported = LinuxFdImportTable(child, transfers, inheritable_count);
+    for (u32 i = 0; i < count; ++i)
+        LinuxFdTransferRelease(&transfers[i]);
+    return imported;
 }
 
 void LinuxFdCloseOnExec(Process* p)
 {
-    if (p == nullptr)
-        return;
-    for (u32 fd = 0; fd < 16; ++fd)
-    {
-        if (p->linux_fds[fd].state == 0)
-            continue;
-        if ((p->linux_fds[fd].flags & Process::kLinuxFdFlagCloexec) == 0)
-            continue;
-        LinuxFdClose(p, fd);
-    }
+    LinuxFdDetached detached[kLinuxFdHardCap]{};
+    const u32 count = LinuxFdDetachCloexec(p, detached, kLinuxFdHardCap);
+    for (u32 i = 0; i < count; ++i)
+        LinuxFdDetachedRelease(&detached[i]);
 }
 
 // Side-channel for the self-test's synthetic per-pool release
@@ -2564,6 +5426,7 @@ void LinuxFdSelfTest()
     {
         p->linux_fds[i].state = (i < 3) ? 1 : 0;
         p->linux_fds[i].kf_handle = ::duetos::ipc::kHandleInvalid;
+        p->linux_fds[i].generation = 1;
     }
 
     // 1) AllocLowest: should hand out fd 3 first (0/1/2 reserved).
@@ -2648,7 +5511,7 @@ void LinuxFdSelfTest()
     if (g_ofd_pool[shared_ofd - 1].refcount != 0)
         core::Panic("proc/linux-fd", "self-test: OFD not freed on last close (refcount asymmetry)");
 
-    // 7) Exit drain. `ProcessRelease` closes the whole fd table on
+    // 7) Exit drain. Process runtime teardown closes the whole fd table on
     // the way out precisely so an fd the guest never close()d does
     // not strand its open-file description in the kernel-wide OFD
     // pool. Exercise that same whole-table loop here: two fds
@@ -2690,6 +5553,7 @@ void LinuxFdSelfTest()
     {
         q->linux_fds[i].state = (i < 3) ? 1 : 0;
         q->linux_fds[i].kf_handle = ::duetos::ipc::kHandleInvalid;
+        q->linux_fds[i].generation = 1;
     }
 
     // Source fd in `p`, and a DIFFERENT object already parked at
@@ -2735,6 +5599,108 @@ void LinuxFdSelfTest()
     LinuxFdClose(q, 3);
     if (g_lfd_selftest_release_calls != 2 || g_lfd_selftest_release_idx != 0xC0DE)
         core::Panic("proc/linux-fd", "self-test: destination close did not release its own pool index");
+
+    // 9) Strong acquired identity survives numeric-slot detach/reuse. The
+    // detached table ref and two acquired refs must release independently;
+    // only the last explicit receipt cleanup may fire the pool callback.
+    g_lfd_selftest_release_calls = 0;
+    g_lfd_selftest_release_idx = 0;
+    auto acquired_kfile =
+        ::duetos::ipc::KFileCreate(::duetos::ipc::KFileKind::Eventfd, 0xD00D, &LinuxFdSelfTestRelease, nullptr, 0);
+    if (!acquired_kfile.has_value())
+        core::Panic("proc/linux-fd", "self-test: acquired-identity KFileCreate failed");
+    Process::LinuxFd acquired_payload{};
+    acquired_payload.state = 5;
+    acquired_payload.first_cluster = 0xD00D;
+    acquired_payload.offset = 0x4242;
+    acquired_payload.kf_handle = ::duetos::ipc::kHandleInvalid;
+    LinuxFdPrepared acquired_prepared{};
+    if (!LinuxFdPrepare(&acquired_prepared, acquired_payload, &acquired_kfile.value()->base, 0x800))
+        core::Panic("proc/linux-fd", "self-test: LinuxFdPrepare failed");
+    const i32 acquired_fd = LinuxFdBindLowest(p, 3, &acquired_prepared, false);
+    if (acquired_fd < 0)
+        core::Panic("proc/linux-fd", "self-test: LinuxFdBindLowest failed");
+    const u32 acquired_generation = p->linux_fds[static_cast<u32>(acquired_fd)].generation;
+    const u16 acquired_ofd = p->linux_fds[static_cast<u32>(acquired_fd)].ofd;
+
+    LinuxFdAcquired acquired{};
+    LinuxFdAcquired acquired_clone{};
+    if (!LinuxFdAcquire(p, static_cast<u32>(acquired_fd), 5, &acquired) ||
+        !LinuxFdAcquiredClone(&acquired, &acquired_clone))
+        core::Panic("proc/linux-fd", "self-test: acquired identity retain/clone failed");
+    LinuxFdDetached acquired_detached{};
+    if (!LinuxFdUnbind(p, static_cast<u32>(acquired_fd), &acquired_detached))
+        core::Panic("proc/linux-fd", "self-test: acquired identity unbind failed");
+    if (acquired_detached.snapshot.generation != acquired_generation ||
+        p->linux_fds[static_cast<u32>(acquired_fd)].generation == acquired_generation)
+        core::Panic("proc/linux-fd", "self-test: fd generation did not advance across unbind");
+    LinuxFdDetachedRelease(&acquired_detached);
+    LinuxFdAcquiredRelease(&acquired);
+    if (g_lfd_selftest_release_calls != 0)
+        core::Panic("proc/linux-fd", "self-test: acquired identity released backing too early");
+    LinuxFdAcquiredRelease(&acquired_clone);
+    if (g_lfd_selftest_release_calls != 1 || g_lfd_selftest_release_idx != 0xD00D)
+        core::Panic("proc/linux-fd", "self-test: acquired identity final release imbalance");
+    if (acquired_ofd == 0 || g_ofd_pool[acquired_ofd - 1].refcount != 0)
+        core::Panic("proc/linux-fd", "self-test: acquired identity leaked its OFD");
+
+    // 10) Pair publication is atomic and exact duplicate replacement adopts
+    // the new KFile before returning the displaced object for deferred cleanup.
+    auto pair_a_kfile =
+        ::duetos::ipc::KFileCreate(::duetos::ipc::KFileKind::Eventfd, 0xE001, &LinuxFdSelfTestRelease, nullptr, 0);
+    auto pair_b_kfile =
+        ::duetos::ipc::KFileCreate(::duetos::ipc::KFileKind::Eventfd, 0xE002, &LinuxFdSelfTestRelease, nullptr, 0);
+    if (!pair_a_kfile.has_value() || !pair_b_kfile.has_value())
+        core::Panic("proc/linux-fd", "self-test: pair KFileCreate failed");
+    Process::LinuxFd pair_a_payload{};
+    pair_a_payload.state = 5;
+    pair_a_payload.first_cluster = 0xE001;
+    pair_a_payload.kf_handle = ::duetos::ipc::kHandleInvalid;
+    Process::LinuxFd pair_b_payload{};
+    pair_b_payload.state = 5;
+    pair_b_payload.first_cluster = 0xE002;
+    pair_b_payload.kf_handle = ::duetos::ipc::kHandleInvalid;
+    LinuxFdPrepared pair_a{};
+    LinuxFdPrepared pair_b{};
+    if (!LinuxFdPrepare(&pair_a, pair_a_payload, &pair_a_kfile.value()->base, 0) ||
+        !LinuxFdPrepare(&pair_b, pair_b_payload, &pair_b_kfile.value()->base, 0))
+        core::Panic("proc/linux-fd", "self-test: pair prepare failed");
+    u32 pair_a_fd = 0;
+    u32 pair_b_fd = 0;
+    if (!LinuxFdBindPairLowest(p, 3, &pair_a, &pair_b, &pair_a_fd, &pair_b_fd) || pair_a_fd == pair_b_fd)
+        core::Panic("proc/linux-fd", "self-test: atomic pair bind failed");
+    g_lfd_selftest_release_calls = 0;
+    g_lfd_selftest_release_idx = 0;
+    if (!LinuxFdDuplicateExact(p, pair_a_fd, pair_b_fd, false))
+        core::Panic("proc/linux-fd", "self-test: exact duplicate replacement failed");
+    if (g_lfd_selftest_release_calls != 1 || g_lfd_selftest_release_idx != 0xE002)
+        core::Panic("proc/linux-fd", "self-test: displaced exact-dup backing was not released once");
+    LinuxFdClose(p, pair_a_fd);
+    if (g_lfd_selftest_release_calls != 1)
+        core::Panic("proc/linux-fd", "self-test: exact-dup shared backing released too early");
+    LinuxFdClose(p, pair_b_fd);
+    if (g_lfd_selftest_release_calls != 2 || g_lfd_selftest_release_idx != 0xE001)
+        core::Panic("proc/linux-fd", "self-test: exact-dup final backing release imbalance");
+
+    // 11) Generation exhaustion is terminal for a numeric slot. Closing a
+    // live max-generation identity must preserve the saturated epoch and the
+    // lowest-free search must skip that otherwise-empty row forever.
+    Process::LinuxFd& exhausted_slot = p->linux_fds[15];
+    exhausted_slot.state = 5;
+    exhausted_slot.generation = Process::kLinuxFdGenerationExhausted;
+    exhausted_slot.kf_handle = ::duetos::ipc::kHandleInvalid;
+    exhausted_slot.ofd = 0;
+    LinuxFdDetached exhausted_detached{};
+    if (!LinuxFdUnbind(p, 15, &exhausted_detached))
+        core::Panic("proc/linux-fd", "self-test: saturated fd detach failed");
+    LinuxFdDetachedRelease(&exhausted_detached);
+    u32 forbidden_next = 7;
+    if (exhausted_slot.state != 0 || exhausted_slot.generation != Process::kLinuxFdGenerationExhausted ||
+        LinuxFdAllocLowest(p, 15) >= 0 ||
+        LinuxFdNextGeneration(Process::kLinuxFdGenerationExhausted, &forbidden_next) || forbidden_next != 0)
+    {
+        core::Panic("proc/linux-fd", "self-test: saturated fd slot became reusable");
+    }
 
     mm::KFree(q);
     mm::KFree(p);

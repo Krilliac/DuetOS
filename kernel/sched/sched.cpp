@@ -56,6 +56,7 @@
 #include "log/klog.h"
 #include "core/panic.h"
 #include "core/service_runtime.h"
+#include "proc/job.h"
 #include "proc/process.h"
 #include "proc/user_stack.h"
 #include "diag/recovery.h"
@@ -63,10 +64,10 @@
 #include "cpu/percpu.h"
 #include "cpu/topology.h"
 #include "debug/probes.h"
+#include "drivers/video/widget.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
 #include "security/guard.h"
-#include "subsystems/win32/job_syscall.h"
 #include "mm/kheap.h"
 #include "mm/kstack.h"
 #include "mm/paging.h"
@@ -79,6 +80,12 @@
 
 namespace duetos::sched
 {
+
+using core::ProcessLifecycleLoad;
+using core::ProcessLifecycleState;
+using core::ProcessLifecycleTransition;
+using core::ProcessTerminationLoad;
+using core::ProcessTerminationState;
 
 // ContextSwitch is defined in context_switch.S. Signature: save callee-
 // saved regs + rsp into *old_rsp_slot, adopt new_rsp, pop and return.
@@ -133,6 +140,15 @@ struct Task
     // (nullptr otherwise). Lets OnTimerTick unlink a timed-waiter
     // from its wait queue when the timeout path wakes it first.
     WaitQueue* waiting_on;
+    // Only result-bearing user-waitable primitives may set this marker.
+    // SignalTaskLocked may promptly detach those waits because their caller
+    // has an explicit Cancelled outcome with which to unwind references.
+    bool wait_cancellable;
+    // Latched dequeue authority for a result-bearing wait. SignalTaskLocked
+    // sets this when cancellation actually removes the task from its queue;
+    // an explicit wake clears it. Sticky kill intent alone must not overwrite
+    // a wake that already won, because a generic WaitQueue cannot hand it back.
+    bool wake_by_cancel;
     // Transient flag set by the timer path when a timed wait
     // expires, cleared by the wait-queue path when an explicit
     // wake pre-empts the timeout. Read by WaitQueueBlockTimeout
@@ -158,10 +174,9 @@ struct Task
     // Per-process address space. nullptr means "kernel AS" (the
     // boot PML4) — used by every kernel-only thread (workers,
     // reaper, idle, keyboard reader, etc.). A non-null AS means
-    // this task holds a process reference that transitively owns
-    // the AS: the reaper calls core::ProcessRelease on process,
-    // which drops the AS reference, which runs the AS destructor
-    // if it was the last holder.
+    // this task holds a process reference. The Process owns the AS;
+    // the reaper drains it at the exact last-task boundary, while
+    // later ProcessRelease calls reclaim only the inert identity header.
     //
     // Schedule() publishes task->as to CR3 on every switch-in via
     // AddressSpaceActivate. Same-AS switches (kernel→kernel) hit
@@ -187,22 +202,24 @@ struct Task
     mm::AddressSpaceReservationToken user_stack_reservation;
     bool owns_user_stack_mappings;
 
-    // Flag set by any kernel subsystem that wants this task
-    // killed at next resched. Historical name was tick_exhausted
-    // because the tick-budget path set it first; now the cap-
-    // denial threshold, future audit-triggered kills, etc. all
-    // route through the same flag. Checked by Schedule() on each
-    // re-enqueue; when set, the task is diverted to the zombie
-    // list instead of being put back on the runqueue, and the
-    // reaper tears it down normally. Irrelevant for kernel-only
-    // tasks (process == nullptr — they have neither budgets nor
-    // sandbox policies).
-    bool kill_requested;
-    // Why the kill was requested. Populated alongside
-    // kill_requested; Schedule() reads this to log a meaningful
-    // reason when it converts the task into a zombie. Only valid
-    // when kill_requested is true.
-    KillReason kill_reason;
+    // Atomic nonce-like cancellation ticket. Zero means no request. A
+    // non-zero value combines the stable KillReason and exact u32 exit code;
+    // one CAS makes the first writer win both fields together. Publishing
+    // intent must not discard a live kernel stack: only a cooperative
+    // boundary may consume it.
+    u64 kill_ticket;
+    // Nested kernel-frame ownership barrier. User Tasks begin with one
+    // bootstrap deferral, and syscall/trap dispatchers add scoped deferrals.
+    // The outermost leave may finalize only after bootstrap and internal-lock
+    // obligations are both clear.
+    u32 cancellation_defer_depth;
+    bool bootstrap_pending;
+    bool cancellation_finalizing;
+    // Internal sleeping mutexes cannot be abandoned because their protected
+    // invariants have no ABI recovery contract. Abandonable user waitables are
+    // deliberately excluded and live on this separate Task-owned ledger.
+    u32 owned_internal_mutex_count;
+    AbandonableOwnershipNode* owned_abandonable_head;
 
     // Hung-task detector opt-out. Some kernel tasks legitimately
     // sit in `TaskState::Blocked` forever waiting for a wake-up
@@ -355,18 +372,18 @@ struct Task
     u64 dr3;
     u64 dr7;
 
-    // NT-style suspend count. Read/written by SchedSuspendTask /
-    // SchedResumeTask under arch::Cli. While this is non-zero,
+    // NT-style suspend count. Read/written by SchedSuspendByTid /
+    // SchedResumeByTid under g_sched_lock. While this is non-zero,
     // the scheduler refuses to pick the task off the runqueue —
     // RunqueuePopRunnable detects suspended pops and re-parks
     // them on g_suspended_head. Sleeping / blocked tasks remain
     // on their wait/sleep queue while suspended; the wake path
     // routes them through the same re-parker.
     //
-    // Only the cross-task control APIs (SchedSuspendTask /
-    // SchedResumeTask) and the wake path (RunqueueOrSuspendPush)
-    // mutate this. Every mutator runs under arch::Cli + the
-    // sched lock; reads outside the scheduler are racy by design
+    // Only the cross-task control APIs (SchedSuspendByTid /
+    // SchedResumeByTid) and the wake path (RunqueueOrSuspendPush)
+    // mutate this. Every mutator runs under the scheduler lock;
+    // reads outside the scheduler are racy by design
     // (a snapshot for diagnostics is fine).
     u32 suspend_count;
 
@@ -379,17 +396,15 @@ struct Task
     // override the routing decision when a peer CPU is idle.
     u32 last_cpu;
 
-    // Adaptive-mutex on-CPU flag. 1 while the task is the
+    // Cross-CPU diagnostic on-CPU flag. 1 while the task is the
     // currently-running task on SOME CPU; 0 otherwise (Ready in the
     // runqueue, Blocked / Sleeping on a wait or sleep queue, Dead).
-    // Set with __ATOMIC_RELEASE on the resuming task right before
-    // ContextSwitch, cleared with __ATOMIC_RELEASE on the outgoing
-    // task right before ContextSwitch. The adaptive mutex slow path
-    // reads this with __ATOMIC_ACQUIRE on a foreign CPU to decide
-    // "spin (owner still running, release imminent)" vs "park (owner
-    // is off-CPU; spinning would burn cycles waiting for a
-    // reschedule)". u8 not bool so the layout is explicit; one byte
-    // packs cheaply alongside the existing u32 last_cpu.
+    // The context-switch path publishes it with RELEASE and
+    // TaskIsOnCpu samples it with ACQUIRE. It is not an ownership or
+    // lifetime pin; AdaptiveMutex no longer consumes it because that
+    // compatibility facade delegates directly to sched::Mutex and does
+    // not adaptively spin. u8 keeps the layout explicit and packs beside
+    // the existing u32 last_cpu.
     u8 on_cpu;
 
     // Hard CPU affinity: bit (1u << cpu_id) set => the task is
@@ -622,10 +637,32 @@ u8 SchedBandForProcess(const core::Process* p)
 
 constinit Task* g_sleep_head = nullptr; // sorted by wake_tick (ascending)
 constinit u64 g_tick_now = 0;
-// ID dispenser. Bumped via __atomic_fetch_add — SchedCreateInternal
-// assigns the id BEFORE it takes g_sched_lock, and CreateApBootSentinel
-// runs on a bringing-up AP, so the increment has no common lock.
+// Non-wrapping ID dispenser. SchedCreateInternal assigns before taking
+// g_sched_lock, and CreateApBootSentinel runs on a bringing-up AP, so minting
+// uses a CAS rather than a shared lock.
 constinit u64 g_next_task_id = 0;
+
+bool MintTaskId(u64* out)
+{
+    if (out == nullptr)
+        return false;
+
+    u64 current = __atomic_load_n(&g_next_task_id, __ATOMIC_RELAXED);
+    for (;;)
+    {
+        // ~0 is CurrentTaskId's public "no current Task" sentinel. Refuse
+        // exhaustion rather than minting it or wrapping back to boot TID 0.
+        if (current == ~u64{0})
+            return false;
+        if (__atomic_compare_exchange_n(&g_next_task_id, &current, current + 1, false, __ATOMIC_RELAXED,
+                                        __ATOMIC_RELAXED))
+        {
+            *out = current;
+            return true;
+        }
+    }
+}
+
 constinit u64 g_context_switches = 0;
 // g_tasks_* counters moved to PerCpu::sched_tasks_*. Reads sum
 // across all online CPUs (see SchedStatsRead); writes target
@@ -1474,18 +1511,18 @@ Task* RunqueuePop()
 // on the runqueue / wait queue / sleep queue / zombies.
 //
 // Lifecycle:
-//   - SchedSuspendTask increments the count. If the task is on
+//   - SchedSuspendByTid increments the count. If the task is on
 //     the runqueue, RunqueuePopRunnable will reroute it the next
 //     time Schedule() runs. If it's Sleeping / Blocked, it stays
 //     where it is — when it would otherwise be woken, the wake
 //     path checks suspend_count and reroutes here.
-//   - SchedResumeTask decrements. When it hits zero, the task
+//   - SchedResumeByTid decrements. When it hits zero, the task
 //     gets unlinked from this list and pushed onto the runqueue.
 //
-// Single-CPU correctness: no IPI needed because the SUSPENDER is
-// the running task; the SUSPENDEE cannot also be running. A real
-// SMP design needs an IPI to evict a target running on another
-// core; that lands with the rest of the SMP scheduler work.
+// SMP contract: suspension is lazy. A target already running on a
+// peer CPU finishes its current slice; its next scheduler pass sees
+// suspend_count and parks it here. Context access rejects such a
+// target as Running until the context switch makes it quiescent.
 constinit Task* g_suspended_head = nullptr;
 constinit Task* g_suspended_tail = nullptr;
 
@@ -1752,8 +1789,17 @@ constinit u32 g_sched_force_balance_mask = 0;
 // defined later in the file) to keep this hot-adjacent setter self-contained.
 void ArmForcedActiveBalance()
 {
-    const u32 online = static_cast<u32>(arch::SmpCpusOnline());
-    const u32 mask = (online == 0u) ? 0u : (online >= 32u ? ~0u : ((1u << online) - 1u));
+    // CPU IDs need not be dense: an AP that fails admission leaves a hole.
+    // Derive the broadcast from actual admitted PerCpu slots rather than an
+    // online count that would misaddress every slot after the first hole.
+    u32 mask = 0;
+    const u32 limit = arch::SmpCpuIdLimit() < 32u ? arch::SmpCpuIdLimit() : 32u;
+    for (u32 cpu_id = 0; cpu_id < limit; ++cpu_id)
+    {
+        const cpu::PerCpu* pcpu = arch::SmpGetPercpu(cpu_id);
+        if (pcpu != nullptr && pcpu->online)
+            mask |= 1u << cpu_id;
+    }
     __atomic_or_fetch(&g_sched_force_balance_mask, mask, __ATOMIC_RELAXED);
 }
 
@@ -2045,10 +2091,12 @@ void SleepqueueRemove(Task* t)
 }
 
 // Remove a task from a specific wait queue. Used when a timeout
-// fires for a timed waiter and needs to detach from its wait
-// queue before going onto the runqueue.
+// fires for a timed waiter, or when termination cancels a blocked
+// task, before putting the task back on a runqueue. Caller holds
+// g_sched_lock, which serializes both enqueue and every detach.
 void WaitQueueUnlink(WaitQueue* wq, Task* t)
 {
+    sync::SpinLockAssertHeld(g_sched_lock);
     if (wq->head == t)
     {
         wq->head = t->next;
@@ -2076,6 +2124,32 @@ void WaitQueueUnlink(WaitQueue* wq, Task* t)
     t->next = nullptr;
 }
 
+// Result-bearing cancellation counterpart to the ordinary wake path.  The
+// caller keeps g_sched_lock held from kill-intent publication through queue
+// removal and runnable publication, so timeout, hand-off, and cancellation
+// have one winner.  State/runqueue publication stays with the caller because
+// SignalTaskLocked must also override suspension before making the task Ready.
+void WaitQueueDetachTaskLocked(WaitQueue* wq, Task* target)
+{
+    sync::SpinLockAssertHeld(g_sched_lock);
+    KASSERT(wq != nullptr && target != nullptr, "sched", "cancellable wait detach with null input");
+    KASSERT(target->state == TaskState::Blocked, "sched", "cancellable wait detach on non-Blocked task");
+    KASSERT(target->waiting_on == wq, "sched", "cancellable wait detach queue mismatch");
+
+    WaitQueueUnlink(wq, target);
+    if (target->wake_tick != 0)
+    {
+        SleepqueueRemove(target);
+        SchedCpuDecSleeping();
+    }
+    target->waiting_on = nullptr;
+    target->wake_tick = 0;
+    target->wake_by_timeout = false;
+    target->block_start_tick = 0;
+    target->next = nullptr;
+    SchedCpuDecBlocked();
+}
+
 // Wrap-safe tick deadline compare. Works as long as nobody sleeps for more
 // than 2^63-1 ticks in one call (orders of magnitude beyond practical use).
 DUETOS_NO_SANITIZE_WRAP bool TickReached(u64 now, u64 deadline)
@@ -2083,11 +2157,29 @@ DUETOS_NO_SANITIZE_WRAP bool TickReached(u64 now, u64 deadline)
     return static_cast<i64>(now - deadline) >= 0;
 }
 
-// Forward decl — defined in the wait-queue block further down.
-// Schedule() needs it for the tick-budget kill path (it already
-// holds g_sched_lock and can't call the non-_Locked variant that
-// would re-acquire). Must be extern-linkage inside this anon
-// namespace; the definition below has the same linkage.
+constexpr u64 kMaxRelativeWaitTicks = (~u64{0}) >> 1;
+
+u64 ClampRelativeWaitTicks(u64 ticks)
+{
+    return ticks > kMaxRelativeWaitTicks ? kMaxRelativeWaitTicks : ticks;
+}
+
+// TickReached uses signed modular subtraction, so a deadline more than half
+// the u64 namespace ahead is indistinguishable from an already-passed one.
+// Clamp relative waits to that horizon and preserve the scheduler's existing
+// non-wrapping absolute-counter convention near UINT64_MAX.
+u64 RelativeDeadlineFromNow(u64 now, u64 ticks)
+{
+    const u64 bounded_ticks = ClampRelativeWaitTicks(ticks);
+    return bounded_ticks > (~u64{0} - now) ? ~u64{0} : now + bounded_ticks;
+}
+
+// Forward declarations, defined in the wait-queue block below. Earlier
+// scheduler paths already hold g_sched_lock and cannot call public variants
+// that re-acquire it; the reaper also needs a locked block primitive for its
+// atomic predicate-to-park transition. The declarations and definitions
+// share this anonymous-namespace linkage.
+void WaitQueueBlockCurrentLocked(WaitQueue* wq);
 Task* WaitQueueWakeOneLocked(WaitQueue* wq);
 
 // Defined in context_switch.S. The first `ret` out of ContextSwitch for a
@@ -2163,14 +2255,13 @@ extern "C" void SchedTaskTrampolineValidateEntry(void* entry)
 //   2. SchedTaskTrampoline (context_switch.S), as the first instruction
 //      a fresh task ever runs — before the entry function fires.
 //
-// Reads this CPU's PerCpu slot — written by the source side of the
-// switch under g_sched_lock — and releases the lock with the saved
-// IRQ flags. The slot is per-CPU because it identifies "the lock THIS
-// CPU just acquired in Schedule()"; the resumed task is irrelevant to
-// the release decision. nullptr slot = nothing to release (a fresh AP
-// joining the scheduler hits this path with the slot still cleared
-// from PerCpuInitBsp / SmpStartAps initialisation).
-extern "C" void SchedFinishTaskSwitch()
+// Reads the lock pointer from this CPU's PerCpu slot — written by the source
+// side under g_sched_lock — but restores IRQ state from the resumed task's
+// suspended ScheduleLockedHandoff frame. The lock identity is per-CPU; the IF
+// state is necessarily per-task. nullptr slot = nothing to release (a fresh
+// AP joining the scheduler hits this path with the slot still cleared from
+// PerCpuInitBsp / SmpStartAps initialisation).
+extern "C" void SchedFinishTaskSwitch(u64 resumed_lock_rflags)
 {
     cpu::PerCpu* pcpu = cpu::CurrentCpu();
     void* lock_ptr = pcpu->ctxsw_lock_to_release;
@@ -2222,11 +2313,13 @@ extern "C" void SchedFinishTaskSwitch()
         if (self != nullptr)
             self->first_run = false;
     }
-    sync::IrqFlags flags{.rflags = pcpu->ctxsw_lock_flags};
-    // Lock-pass releases restore the IF bit captured by the task that switched
-    // us in, not by the suspended task whose stack we have just resumed. When
-    // the target task is resuming inside an old hardware IRQ tail
-    // (hard_irq_depth > 0), restoring the source IF=1 here enables timer IRQs
+    // After ContextSwitch returns, `resumed_lock_rflags` comes from the
+    // ScheduleLockedHandoff frame on this resumed task's own stack. The
+    // per-CPU ctxsw_lock_flags slot is only a source-side diagnostic breadcrumb;
+    // using it here would import the switching task's IF state into this task.
+    sync::IrqFlags flags{.rflags = resumed_lock_rflags};
+    // When the target task is resuming inside an old hardware IRQ tail
+    // (hard_irq_depth > 0), restoring that task's saved IF=1 here enables timer IRQs
     // before the target's outer iretq has unwound. That re-enters the timer at
     // hard depth 2 and can livelock in the F-050 nested-preempt defer path.
     // Keep interrupts masked for this one scheduler-lock release; the real
@@ -2291,7 +2384,10 @@ void SchedInit()
     // unset would carry the poison and dereference garbage.
     memset(boot_task, 0, sizeof(Task));
 
-    boot_task->id = __atomic_fetch_add(&g_next_task_id, 1, __ATOMIC_RELAXED);
+    if (!MintTaskId(&boot_task->id))
+    {
+        PanicSched("Task ID namespace exhausted during scheduler bootstrap");
+    }
     boot_task->state = TaskState::Running;
     boot_task->rsp = 0; // populated on first context switch out
     boot_task->stack_base = nullptr;
@@ -2302,13 +2398,19 @@ void SchedInit()
     boot_task->sleep_next = nullptr;
     boot_task->sleep_prev = nullptr;
     boot_task->waiting_on = nullptr;
+    boot_task->wait_cancellable = false;
+    boot_task->wake_by_cancel = false;
     boot_task->wake_by_timeout = false;
     boot_task->priority = TaskPriority::Normal;
-    boot_task->band = SchedBandForProcess(nullptr);  // kernel task → Normal band
-    boot_task->as = nullptr;                         // kernel AS — boot PML4
-    boot_task->process = nullptr;                    // kernel-only — no owning process
-    boot_task->kill_requested = false;               // kernel tasks never hit a budget
-    boot_task->kill_reason = KillReason::TickBudget; // unused when kill_requested=false
+    boot_task->band = SchedBandForProcess(nullptr); // kernel task → Normal band
+    boot_task->as = nullptr;                        // kernel AS — boot PML4
+    boot_task->process = nullptr;                   // kernel-only — no owning process
+    boot_task->kill_ticket = 0;                     // kernel tasks never accept public cancellation
+    boot_task->cancellation_defer_depth = 0;
+    boot_task->bootstrap_pending = false;
+    boot_task->cancellation_finalizing = false;
+    boot_task->owned_internal_mutex_count = 0;
+    boot_task->owned_abandonable_head = nullptr;
     boot_task->hung_task_exempt = false;             // default: detector watches every task
     boot_task->published = true;                     // task 0 is live immediately
     boot_task->suspend_count = 0;                    // boot/kernel tasks never get suspended
@@ -2316,11 +2418,10 @@ void SchedInit()
     boot_task->last_cpu = cpu::CurrentCpu()->cpu_id; // BSP pin — boot task only ever runs here
     boot_task->affinity_mask = kAffinityAll;         // unrestricted by default
     // Boot task is the currently-running task on this CPU from the
-    // moment SchedInit returns. Mark on_cpu=1 so the adaptive-mutex
-    // slow path on a peer CPU sees the correct state if it observes
-    // the boot task as a mutex holder before the first real context
-    // switch flips the flag. RELEASE pairs with the ACQUIRE the
-    // slow path uses to read.
+    // moment SchedInit returns. Publish on_cpu=1 before any peer can
+    // take a diagnostic snapshot; RELEASE pairs with TaskIsOnCpu's
+    // ACQUIRE load. Mutex ownership is serialized separately under
+    // g_sched_lock.
     __atomic_store_n(&boot_task->on_cpu, 1u, __ATOMIC_RELEASE);
 
     Current() = boot_task;
@@ -2340,6 +2441,45 @@ void SchedInit()
 namespace
 {
 
+// Roll back a Task that never crossed the scheduler publication boundary.
+// Process-backed callers hold the Process VM transaction across this helper,
+// so an owned stack reservation can be released without racing exec or the
+// last-Task reaper.  The Process reference itself remains caller-owned until
+// CreateUserTask observes the failed receipt and releases it exactly once.
+void DestroyUnpublishedTask(Task* task)
+{
+    KASSERT(task != nullptr, "sched", "DestroyUnpublishedTask null task");
+    KASSERT(!task->published, "sched", "DestroyUnpublishedTask on published task");
+    KASSERT(task->state == TaskState::Ready, "sched", "DestroyUnpublishedTask on non-private task state");
+    KASSERT(task->waiting_on == nullptr && task->next == nullptr, "sched",
+            "DestroyUnpublishedTask found scheduler-owned links");
+    KASSERT(task->owned_internal_mutex_count == 0 && task->owned_abandonable_head == nullptr, "sched",
+            "DestroyUnpublishedTask found live ownership ledgers");
+
+    if (task->owns_user_stack_mappings)
+    {
+        KASSERT(task->as != nullptr, "sched", "unpublished owned user stack without AddressSpace");
+        KASSERT(core::UserStackRangeIsValid(task->user_stack), "sched",
+                "unpublished owned user-stack descriptor invalid");
+        KASSERT(task->user_stack_reservation.IsValid(), "sched",
+                "unpublished owned user stack missing reservation token");
+        core::UserStackReleaseOwnedMappings(task->as, task->user_stack, task->user_stack_reservation);
+        task->user_stack = core::UserStackRange{};
+        task->user_stack_reservation = mm::AddressSpaceReservationToken{};
+        task->owns_user_stack_mappings = false;
+    }
+
+    if (task->stack_base != nullptr)
+    {
+        mm::FreeKernelStack(task->stack_base, task->stack_size);
+        task->stack_base = nullptr;
+        task->stack_size = 0;
+    }
+    task->process = nullptr;
+    task->as = nullptr;
+    mm::KFree(task);
+}
+
 // Shared body for SchedCreate / SchedCreateUser. The only difference
 // between the two callers is the task's address space (kernel-only
 // tasks pass nullptr; ring-3-bound tasks pass a freshly-created AS)
@@ -2350,7 +2490,7 @@ namespace
 // can pull it off the queue and start running it. If `t->process`
 // is still nullptr at that point, Ring3UserEntry's `CurrentProcess()`
 // returns null and panics with "Ring3UserEntry without a Process".
-void PublishCreatedTask(Task* task)
+bool PublishCreatedTask(Task* task)
 {
     KASSERT(task != nullptr, "sched", "PublishCreatedTask null task");
     KASSERT(!task->published, "sched", "PublishCreatedTask called twice");
@@ -2372,25 +2512,136 @@ void PublishCreatedTask(Task* task)
         {
             if (it->as == task->as && it->owns_user_stack_mappings)
             {
-                KASSERT(core::UserStackRangesDisjoint(task->user_stack, it->user_stack), "sched",
-                        "Task user-stack ownership windows overlap");
+                // Only guard_lo/top are immutable after publication. An
+                // existing Task may be growing its stack concurrently on a
+                // peer CPU, so re-validating its whole descriptor here would
+                // race commit_lo/guard_taken. The new private descriptor was
+                // validated above; compare only the immutable reservation
+                // bounds that establish ownership disjointness.
+                KASSERT(task->user_stack.top <= it->user_stack.guard_lo ||
+                            it->user_stack.top <= task->user_stack.guard_lo,
+                        "sched", "Task user-stack ownership windows overlap");
             }
         }
     }
+
+    bool has_existing_process_task = false;
+    for (Task* existing = g_all_tasks_head; existing != nullptr; existing = existing->all_next)
+    {
+        if (existing->process == task->process)
+        {
+            has_existing_process_task = task->process != nullptr;
+            if (has_existing_process_task)
+                break;
+        }
+    }
+    if (task->process != nullptr)
+    {
+        // Process-wide kill and Task publication share g_sched_lock. Closing
+        // first therefore rejects both the first and every additional Task;
+        // publication first makes the new Task visible to the kill scan.
+        if (ProcessTerminationLoad(task->process) != ProcessTerminationState::Open)
+            return false;
+
+        if (has_existing_process_task)
+        {
+            if (ProcessLifecycleLoad(task->process) != ProcessLifecycleState::Published)
+                return false;
+        }
+        else
+        {
+            if (ProcessLifecycleLoad(task->process) != ProcessLifecycleState::Private)
+                return false;
+
+            core::JobPublicationTicket inherited_job{};
+            const core::ProcessKey parent_key = task->process->job_inheritance_parent;
+            if (core::ProcessKeyIsValid(parent_key))
+            {
+                // A child may inherit only from the exact still-live parent
+                // incarnation captured by ProcessCreate. Parent exit and this
+                // first publication share g_sched_lock, so no PID reuse or
+                // scan/replay window can let the child escape a Job.
+                bool parent_live = false;
+                for (Task* parent_task = g_all_tasks_head; parent_task != nullptr;
+                     parent_task = parent_task->all_next)
+                {
+                    if (parent_task->process != nullptr && parent_task->state != TaskState::Dead &&
+                        core::ProcessKeySnapshot(parent_task->process) == parent_key)
+                    {
+                        parent_live = true;
+                        break;
+                    }
+                }
+                if (!parent_live)
+                    return false;
+
+                const core::JobPublishPrepareResult prepared = core::JobPrepareInheritedMember(
+                    parent_key, core::ProcessKeySnapshot(task->process), &inherited_job);
+                if (prepared != core::JobPublishPrepareResult::NoParentJob &&
+                    prepared != core::JobPublishPrepareResult::Prepared)
+                {
+                    return false;
+                }
+            }
+
+            // Consume the Process's one-shot private publication gate while
+            // g_sched_lock still excludes every scheduler observer. A service
+            // gate may take the lower-ranked lifecycle lock and record the
+            // exact ProcessKey; rejection leaves the Task wholly private for
+            // DestroyUnpublishedTask below.
+            if (!core::ProcessRunPublicationGateAtSchedulerPublication(task->process))
+            {
+                if (inherited_job.active)
+                {
+                    KASSERT(core::JobAbortInheritedMember(&inherited_job), "sched",
+                            "rejected Process publication lost inherited Job ticket");
+                }
+                return false;
+            }
+
+            if (inherited_job.active)
+            {
+                KASSERT(core::JobCommitInheritedMember(&inherited_job), "sched",
+                        "accepted Process publication lost inherited Job ticket");
+            }
+
+            // The outer Process VM transaction excludes exec/reap and this is
+            // still the first Task under g_sched_lock, so the transition cannot
+            // lose after an accepted external gate.
+            KASSERT(ProcessLifecycleTransition(task->process, ProcessLifecycleState::Private,
+                                               ProcessLifecycleState::Published),
+                    "sched", "accepted publication gate lost Process lifecycle transition");
+        }
+    }
+
+    cpu::PerCpu* idle_home = nullptr;
+    if (task->priority == TaskPriority::Idle)
+    {
+        idle_home = cpu::CurrentCpu();
+        KASSERT(idle_home != nullptr, "sched", "Idle Task publication without a home CPU");
+        KASSERT(idle_home->cpu_id < 32, "sched", "Idle Task home CPU exceeds affinity mask width");
+        KASSERT(idle_home->idle_task == nullptr, "sched", "CPU already has a published Idle Task");
+        task->last_cpu = idle_home->cpu_id;
+        task->affinity_mask = 1u << idle_home->cpu_id;
+    }
+
     task->published = true;
     RunqueuePush(task);
     // Add the new task to the global "all live tasks" list under
     // the same lock as the runqueue push. The hung-task detector
     // can observe it only after every caller-owned field is ready.
     AllTasksLink(task);
+    if (idle_home != nullptr)
+        idle_home->idle_task = task;
     SchedStatsProcessPublishedLocked(task);
     SchedCpuIncCreated();
     SchedCpuIncLive();
+    return true;
 }
 
-Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPriority priority, mm::AddressSpace* as,
-                          core::Process* process = nullptr, TaskPrepareFn prepare = nullptr,
-                          void* prepare_context = nullptr)
+TaskCreateResult SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPriority priority,
+                                     mm::AddressSpace* as, core::Process* process = nullptr,
+                                     TaskPrepareFn prepare = nullptr, void* prepare_context = nullptr)
 {
     KASSERT(entry != nullptr, "sched", "SchedCreate null entry fn");
     KASSERT(name != nullptr, "sched", "SchedCreate null name");
@@ -2404,7 +2655,7 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
         // and every existing caller fire-and-forgets the result.
         // A failed worker thread is preferable to a halted box.
         core::DebugPanicOrWarn("sched", "KMalloc failed for Task");
-        return nullptr;
+        return TaskCreateResult{false, 0};
     }
     // Zero the struct first; explicit assignments below overwrite the
     // fields we care about, but any field NOT covered would otherwise
@@ -2425,7 +2676,7 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
         // we don't leak on the release path.
         core::DebugPanicOrWarn("sched", "AllocateKernelStack failed for kernel stack");
         mm::KFree(t);
-        return nullptr;
+        return TaskCreateResult{false, 0};
     }
 
     // Plant the canary at the low edge of the (usable) stack BEFORE
@@ -2434,7 +2685,13 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     // page is an unlikely large-frame-skip but cheap to keep covered.
     *reinterpret_cast<u64*>(stack) = kStackCanary;
 
-    t->id = __atomic_fetch_add(&g_next_task_id, 1, __ATOMIC_RELAXED);
+    if (!MintTaskId(&t->id))
+    {
+        core::DebugPanicOrWarn("sched", "Task ID namespace exhausted");
+        mm::FreeKernelStack(stack, kKernelStackBytes);
+        mm::KFree(t);
+        return TaskCreateResult{false, 0};
+    }
     t->state = TaskState::Ready;
     t->first_run = true; // SchedFinishTaskSwitch flips this to false on first entry
     t->stack_base = stack;
@@ -2452,6 +2709,8 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     t->sleep_next = nullptr;
     t->sleep_prev = nullptr;
     t->waiting_on = nullptr;
+    t->wait_cancellable = false;
+    t->wake_by_cancel = false;
     t->wake_by_timeout = false;
     t->priority = priority;
     t->as = as;
@@ -2464,8 +2723,12 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     // SetPriorityClass takes effect — this just gives the first
     // enqueue (the one inside the locked block below) a valid band.
     t->band = SchedBandForProcess(process);
-    t->kill_requested = false;
-    t->kill_reason = KillReason::TickBudget;
+    t->kill_ticket = 0;
+    t->cancellation_defer_depth = process != nullptr ? 1u : 0u;
+    t->bootstrap_pending = process != nullptr;
+    t->cancellation_finalizing = false;
+    t->owned_internal_mutex_count = 0;
+    t->owned_abandonable_head = nullptr;
     t->hung_task_exempt = false; // default: detector watches every task
     t->published = false;
     t->stats_process_counted = false;
@@ -2585,18 +2848,30 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
         SerialWrite("\n");
     }
 
+    const TaskCreateResult receipt{true, t->id};
+
     // Publish last. Once this releases g_sched_lock, a peer may run
     // and reap an immediate-return task, so no caller-independent
     // Task field may be dereferenced below this point.
-    PublishCreatedTask(t);
-    return t;
+    const bool published = PublishCreatedTask(t);
+    if (!published)
+    {
+        DestroyUnpublishedTask(t);
+        return TaskCreateResult{false, 0};
+    }
+    return receipt;
 }
 
 } // namespace
 
-Task* SchedCreate(TaskEntry entry, void* arg, const char* name, TaskPriority priority)
+namespace
 {
-    KLOG_INFO_S("sched", "SchedCreate: kernel task", "name", name);
+
+TaskCreateResult CreateKernelTask(TaskEntry entry, void* arg, const char* name, TaskPriority priority,
+                                  TaskPrepareFn prepare, void* prepare_context)
+{
+    KLOG_INFO_S("sched", prepare != nullptr ? "SchedCreatePrepared: kernel task" : "SchedCreate: kernel task", "name",
+                name);
     // Name-based security gate. No image bytes to scan at this
     // layer — that happens in the loader before entry is ever
     // handed to the scheduler — so this catches only filename
@@ -2604,16 +2879,31 @@ Task* SchedCreate(TaskEntry entry, void* arg, const char* name, TaskPriority pri
     if (!duetos::security::GateThread(duetos::security::ImageKind::KernelThread, name))
     {
         KLOG_WARN_S("sched", "SchedCreate denied by image guard", "name", name);
-        return nullptr;
+        return TaskCreateResult{false, 0};
     }
-    return SchedCreateInternal(entry, arg, name, priority, /*as=*/nullptr);
+    return SchedCreateInternal(entry, arg, name, priority, /*as=*/nullptr, /*process=*/nullptr, prepare,
+                               prepare_context);
+}
+
+} // namespace
+
+TaskCreateResult SchedCreate(TaskEntry entry, void* arg, const char* name, TaskPriority priority)
+{
+    return CreateKernelTask(entry, arg, name, priority, nullptr, nullptr);
+}
+
+TaskCreateResult SchedCreatePrepared(TaskEntry entry, void* arg, const char* name, TaskPrepareFn prepare, void* context,
+                                     TaskPriority priority)
+{
+    KASSERT(prepare != nullptr, "sched", "SchedCreatePrepared without initializer");
+    return CreateKernelTask(entry, arg, name, priority, prepare, context);
 }
 
 namespace
 {
 
-Task* CreateUserTask(TaskEntry entry, void* arg, const char* name, core::Process* process, TaskPrepareFn prepare,
-                     void* prepare_context)
+TaskCreateResult CreateUserTask(TaskEntry entry, void* arg, const char* name, core::Process* process,
+                                TaskPrepareFn prepare, void* prepare_context)
 {
     KLOG_INFO_S("sched", prepare != nullptr ? "SchedCreateUserPrepared: ring-3 task" : "SchedCreateUser: ring-3 task",
                 "name", name);
@@ -2628,7 +2918,20 @@ Task* CreateUserTask(TaskEntry entry, void* arg, const char* name, core::Process
         // unless we release it here on the gate-denial exit path.
         KLOG_WARN_S("sched", "SchedCreateUser denied by image guard", "name", name);
         core::ProcessRelease(process);
-        return nullptr;
+        return TaskCreateResult{false, 0};
+    }
+
+    // Serialize lifecycle admission, private Task preparation, and scheduler
+    // publication with exec and the last-Task reaper.  Lock order is the
+    // established Process VM transaction -> g_sched_lock order.
+    core::ScopedProcessVmTransaction vm_transaction(process);
+    const ProcessLifecycleState lifecycle = ProcessLifecycleLoad(process);
+    if (lifecycle != ProcessLifecycleState::Private && lifecycle != ProcessLifecycleState::Published)
+    {
+        vm_transaction.Unlock();
+        KLOG_WARN_S("sched", "SchedCreateUser rejected exiting Process", "name", name);
+        core::ProcessRelease(process);
+        return TaskCreateResult{false, 0};
     }
 
     // Hand `process` to the internal helper so `t->process` is set
@@ -2638,9 +2941,9 @@ Task* CreateUserTask(TaskEntry entry, void* arg, const char* name, core::Process
     // the new task then enters Ring3UserEntry, hits the
     // `CurrentProcess() == nullptr` gate, and panics.
     const u64 process_pid = process->pid;
-    Task* t =
+    const TaskCreateResult result =
         SchedCreateInternal(entry, arg, name, TaskPriority::Normal, process->as, process, prepare, prepare_context);
-    if (t == nullptr)
+    if (!result.created)
     {
         // SchedCreateInternal failed (Task/kstack OOM — warn, not
         // panic, in release). The caller handed us its Process ref
@@ -2649,8 +2952,9 @@ Task* CreateUserTask(TaskEntry entry, void* arg, const char* name, core::Process
         // leaks forever — and the trigger is memory pressure, so the
         // leak would compound the very condition that caused it.
         KLOG_WARN_S("sched", "SchedCreateUser: task alloc failed, releasing process ref", "name", name);
+        vm_transaction.Unlock();
         core::ProcessRelease(process);
-        return nullptr;
+        return TaskCreateResult{false, 0};
     }
     // Publication can run and reap the child on another CPU before the
     // creator resumes, so no Task or Process field may be read here.
@@ -2660,18 +2964,18 @@ Task* CreateUserTask(TaskEntry entry, void* arg, const char* name, core::Process
     // to this Task — no retain needed. Subsequent Tasks that want
     // to share the Process (future thread spawn) must ProcessRetain
     // before calling SchedCreateUser with an already-owned process.
-    return t;
+    return result;
 }
 
 } // namespace
 
-Task* SchedCreateUser(TaskEntry entry, void* arg, const char* name, core::Process* process)
+TaskCreateResult SchedCreateUser(TaskEntry entry, void* arg, const char* name, core::Process* process)
 {
     return CreateUserTask(entry, arg, name, process, nullptr, nullptr);
 }
 
-Task* SchedCreateUserPrepared(TaskEntry entry, void* arg, const char* name, core::Process* process,
-                              TaskPrepareFn prepare, void* context)
+TaskCreateResult SchedCreateUserPrepared(TaskEntry entry, void* arg, const char* name, core::Process* process,
+                                         TaskPrepareFn prepare, void* context)
 {
     KASSERT(prepare != nullptr, "sched", "SchedCreateUserPrepared without initializer");
     return CreateUserTask(entry, arg, name, process, prepare, context);
@@ -2818,11 +3122,11 @@ bool TaskIsOnCpu(const Task* t)
     {
         return false;
     }
-    // Read with ACQUIRE so a peer CPU spinning on this flag pairs
-    // cleanly with the RELEASE-store the context-switch path
-    // performs around the same `next->state = Running` /
-    // `prev->state = Ready` transitions. AdaptiveMutex's slow path
-    // is the dominant caller.
+    // Read with ACQUIRE so a peer diagnostic snapshot pairs cleanly
+    // with the RELEASE stores around `next->state = Running` and
+    // `prev->state = Ready`. The result neither pins `t` nor grants
+    // ownership; lifetime-sensitive callers must use a scheduler-owned
+    // by-ID or retained-object API instead.
     return __atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE) != 0;
 }
 
@@ -2876,21 +3180,169 @@ arch::TrapFrame* SchedFindUserTrapFrame(Task* t)
     return tf;
 }
 
-void FlagCurrentForKill(KillReason reason)
+namespace
 {
-    Task* t = Current();
-    if (t == nullptr)
+constexpr u64 kKillReasonMask = 0xFF;
+constexpr u32 kKillExitCodeShift = 32;
+
+// The irreversible TaskState::Dead publication is intentionally a same-TU
+// primitive. Public callers select only the narrow direct kernel/bootstrap
+// boundary; cooperative cancellation and the context-switch trampoline use
+// separately asserted routes so process-backed runtime code cannot silently
+// bypass its unwind boundary.
+enum class TaskTerminalContext : u8
+{
+    DirectKernelOrBootstrap,
+    CooperativeCancellation,
+    TrampolineReturn,
+};
+
+[[noreturn]] void SchedExitTerminal(TaskTerminalContext context);
+
+u64 EncodeKillTicket(KillReason reason, u32 exit_code)
+{
+    const u64 encoded_reason = static_cast<u64>(reason);
+    KASSERT(encoded_reason != 0 && (encoded_reason & ~kKillReasonMask) == 0, "sched",
+            "KillReason does not fit cancellation ticket");
+    return encoded_reason | (static_cast<u64>(exit_code) << kKillExitCodeShift);
+}
+
+u64 KillTicketLoad(const Task* task)
+{
+    return task != nullptr ? __atomic_load_n(&task->kill_ticket, __ATOMIC_ACQUIRE) : 0;
+}
+
+bool KillPending(const Task* task)
+{
+    return KillTicketLoad(task) != 0;
+}
+
+KillReason PendingKillReason(const Task* task)
+{
+    const u64 ticket = KillTicketLoad(task);
+    KASSERT(ticket != 0, "sched", "PendingKillReason without a pending request");
+    return static_cast<KillReason>(ticket & kKillReasonMask);
+}
+
+u32 PendingKillExitCode(const Task* task)
+{
+    const u64 ticket = KillTicketLoad(task);
+    return ticket == 0 ? 1 : static_cast<u32>(ticket >> kKillExitCodeShift);
+}
+
+bool PublishKillIntent(Task* task, KillReason reason, u32 exit_code)
+{
+    if (task == nullptr || task->process == nullptr)
+    {
+        return false;
+    }
+    u64 expected = 0;
+    const u64 desired = EncodeKillTicket(reason, exit_code);
+    return __atomic_compare_exchange_n(&task->kill_ticket, &expected, desired, false, __ATOMIC_RELEASE,
+                                       __ATOMIC_RELAXED);
+}
+
+[[noreturn]] void FinalizeCurrentCancellation(Task* task)
+{
+    KASSERT(task != nullptr && task == Current(), "sched", "cancellation finalizer requires current Task");
+    KASSERT(task->process != nullptr, "sched", "kernel Task reached cancellation finalizer");
+    KASSERT(KillPending(task), "sched", "cancellation finalizer without request");
+    KASSERT(task->cancellation_defer_depth == 0, "sched", "cancellation finalized beneath live deferral");
+    KASSERT(!task->bootstrap_pending, "sched", "cancellation finalized before user bootstrap cleanup");
+    KASSERT_WITH_VALUE(task->owned_internal_mutex_count == 0, "sched",
+                       "cancellation finalized while owning internal mutexes", task->owned_internal_mutex_count);
+    KASSERT(!task->cancellation_finalizing, "sched", "recursive cancellation finalization");
+    task->cancellation_finalizing = true;
+
+    SerialWrite("[sched] finalizing task cancellation id=");
+    SerialWriteHex(task->id);
+    SerialWrite(" name=\"");
+    SerialWrite(task->name != nullptr ? task->name : "<unknown>");
+    SerialWrite("\" reason=");
+    SerialWrite(KillReasonName(PendingKillReason(task)));
+    SerialWrite("\n");
+    SchedExitTerminal(TaskTerminalContext::CooperativeCancellation);
+}
+
+void MaybeFinalizeCurrentCancellation()
+{
+    Task* task = Current();
+    if (task == nullptr || task->process == nullptr || !KillPending(task) || task->bootstrap_pending ||
+        task->cancellation_defer_depth != 0 || task->owned_internal_mutex_count != 0)
     {
         return;
     }
-    // Schedule() converts (kill_requested == true) on re-enqueue
-    // into a Dead transition. The reason is logged there.
-    // Setting the flag is atomic from this context (single-CPU,
-    // same core). On SMP the flag is per-task, so only this CPU's
-    // Schedule() reads it for this task.
-    t->kill_requested = true;
-    t->kill_reason = reason;
+    FinalizeCurrentCancellation(task);
+}
+
+bool CancellationDeferEnterCurrent()
+{
+    Task* task = Current();
+    if (task == nullptr || task->process == nullptr)
+    {
+        return false;
+    }
+    KASSERT(!task->cancellation_finalizing, "sched", "entered cancellation deferral while finalizing");
+    KASSERT(task->cancellation_defer_depth != ~u32{0}, "sched", "cancellation deferral depth saturated");
+    ++task->cancellation_defer_depth;
+    return true;
+}
+
+void CancellationDeferLeaveCurrent()
+{
+    Task* task = Current();
+    KASSERT(task != nullptr && task->process != nullptr, "sched", "left cancellation deferral without user Task");
+    KASSERT(task->cancellation_defer_depth != 0, "sched", "cancellation deferral depth underflow");
+    --task->cancellation_defer_depth;
+    MaybeFinalizeCurrentCancellation();
+}
+} // namespace
+
+void FlagCurrentForKill(KillReason reason, u32 exit_code)
+{
+    Task* self = CurrentTask();
+    if (!PublishKillIntent(self, reason, exit_code))
+    {
+        // Public cancellation is process-backed only. In particular, a
+        // kernel worker must not even acquire a scheduler side effect from a
+        // stray policy hook, and pre-SchedInit callers are a true no-op.
+        return;
+    }
     NeedResched() = true;
+}
+
+void SchedRequestCurrentExit(KillReason reason, u32 exit_code)
+{
+    FlagCurrentForKill(reason, exit_code);
+}
+
+ScopedTaskCancellationDeferral::ScopedTaskCancellationDeferral(bool enabled)
+    : active_(enabled && CancellationDeferEnterCurrent())
+{
+}
+
+ScopedTaskCancellationDeferral::~ScopedTaskCancellationDeferral()
+{
+    if (active_)
+    {
+        CancellationDeferLeaveCurrent();
+    }
+}
+
+void SchedUserBootstrapComplete()
+{
+    Task* task = Current();
+    if (task == nullptr || task->process == nullptr)
+    {
+        return;
+    }
+    if (task->bootstrap_pending)
+    {
+        KASSERT(task->cancellation_defer_depth != 0, "sched", "user bootstrap deferral missing");
+        task->bootstrap_pending = false;
+        --task->cancellation_defer_depth;
+    }
+    MaybeFinalizeCurrentCancellation();
 }
 
 const char* KillReasonName(KillReason r)
@@ -2909,6 +3361,14 @@ const char* KillReasonName(KillReason r)
         return "CanaryFileTouched";
     case KillReason::PersistenceDrop:
         return "PersistenceDrop";
+    case KillReason::ExplicitExit:
+        return "ExplicitExit";
+    case KillReason::UserFault:
+        return "UserFault";
+    case KillReason::ProtocolViolation:
+        return "ProtocolViolation";
+    case KillReason::JobTermination:
+        return "JobTermination";
     default:
         KLOG_ONCE_WARN("sched", "KillReasonName: unrecognised KillReason enumerator");
         return "<unknown>";
@@ -3082,50 +3542,10 @@ void ScheduleLockedHandoff(sync::IrqFlags lock_flags)
     prev = Current();
     if (prev->state == TaskState::Running)
     {
-        if (prev->kill_requested)
-        {
-            SerialWrite("[sched] killing task id=");
-            SerialWriteHex(prev->id);
-            SerialWrite(" name=\"");
-            SerialWrite(prev->name);
-            SerialWrite("\" reason=");
-            SerialWrite(KillReasonName(prev->kill_reason));
-            SerialWrite("\n");
-            // CPU-tick budget ran out (flagged by OnTimerTick). Treat
-            // identically to SchedExit but inline — we're already
-            // inside Schedule()'s locked section, calling SchedExit
-            // here would re-enter the lock and fight the state
-            // machine. Transition Running → Dead and DEFER the
-            // zombie-push exactly as SchedExit does.
-            prev->state = TaskState::Dead;
-            core::ProcessPublishWin32ThreadExit(prev->process, prev->id, 1);
-            __atomic_fetch_add(&g_tasks_exited, 1, __ATOMIC_RELAXED);
-            SchedCpuDecLive();
-            // Recovery Class C hook — fired for SchedExit too. Keep the
-            // two termination paths symmetric so a budget-killed ring-3
-            // task gets the same teardown (AS/fd/cap/ipc) once this hook
-            // grows teeth; today it is a no-op.
-            core::OnTaskExited();
-            // SMP-safe zombie handoff — DO NOT push to g_zombies here.
-            // We are still executing on `prev`'s kernel stack; the
-            // ContextSwitch that takes this CPU off it is far below in
-            // this same Schedule() call. Pushing `prev` onto g_zombies
-            // now (and waking the reaper) lets the reaper — running on a
-            // peer CPU — pop `prev`, FreeKernelStack(prev->stack_base),
-            // and unmap the very pages this CPU is still executing on.
-            // The subsequent ContextSwitch then saves/reloads rsp/rip
-            // out of freed, reused memory and the resume jumps wild.
-            // This is the SMP=4 boot-tail wild-jump cascade (Roadmap
-            // 2026-06-05): the SAME reaper-frees-running-stack UAF that
-            // SchedExit already closed via the deferred slot, on the
-            // budget-kill path that the 2026-05-22 fix missed. Stash
-            // `prev` into the per-CPU defer slot; SchedFinishTaskSwitch
-            // promotes it to g_zombies and wakes the reaper AFTER
-            // ContextSwitch has committed the rsp swap — at which point
-            // `prev` is provably off-CPU on every peer.
-            cpu::CurrentCpu()->ctxsw_dying_task_to_zombie = prev;
-        }
-        else if (prev->no_requeue)
+        // Cancellation intent never kills an arbitrary suspended kernel
+        // frame here. A process-backed task is requeued and later exits only
+        // when its outermost syscall/trap/bootstrap boundary has unwound.
+        if (prev->no_requeue)
         {
             // One-shot boot context (AP boot sentinel). It exists
             // only so THIS first Schedule() had a valid `prev`;
@@ -3148,7 +3568,7 @@ void ScheduleLockedHandoff(sync::IrqFlags lock_flags)
             // suspend is the only way the latter happens on
             // single-CPU — a different task suspending us
             // can't preempt us, so we always reach this point
-            // after our own SchedSuspendTask call.
+            // after our own SchedSuspendByTid call.
             RunqueueOrSuspendPush(prev);
         }
     }
@@ -3160,7 +3580,7 @@ void ScheduleLockedHandoff(sync::IrqFlags lock_flags)
     Current() = next;
     ++g_context_switches;
 
-    // Adaptive-mutex on-CPU flag handoff. Cleared on the outgoing
+    // Cross-CPU diagnostic on-CPU handoff. Cleared on the outgoing
     // task BEFORE ContextSwitch (it is about to stop running on this
     // CPU); set on the resuming task right before its rsp is loaded.
     // Both stores carry RELEASE ordering so a peer CPU reading the
@@ -3171,9 +3591,8 @@ void ScheduleLockedHandoff(sync::IrqFlags lock_flags)
     //
     // Order matters: clear `prev` first (it is no longer the owner
     // of this CPU), then set `next` (it is). On single-CPU early boot
-    // these atomics are still cheap; on SMP they close the race a
-    // spinning adaptive-mutex waiter on a peer CPU would otherwise
-    // see ("flag says on-cpu, but the task is parked on a wait queue").
+    // these atomics are still cheap; on SMP they keep diagnostic
+    // snapshots from reporting both tasks as current on this CPU.
     if (prev != next)
     {
         __atomic_store_n(&prev->on_cpu, 0u, __ATOMIC_RELEASE);
@@ -3570,14 +3989,15 @@ void ScheduleLockedHandoff(sync::IrqFlags lock_flags)
     // it to the incoming task BEFORE the stack flip, so Current()
     // here is the task that just resumed.
     //
-    // First thing on the new stack: drain the lock-pass slot. The
-    // SOURCE-CPU side of THIS Schedule() call (which may have been a
-    // different physical Schedule() invocation, on this same CPU,
-    // some time in the past — whenever this task was switched out)
-    // wrote the slot before its ContextSwitch. We release it here
-    // BEFORE touching any other shared state so the scheduler is
-    // unlocked promptly after the resumption.
-    SchedFinishTaskSwitch();
+    // First thing on the new stack: drain the lock-pass slot. The task that
+    // switched us in wrote the per-CPU lock pointer before ContextSwitch; this
+    // resumed stack frame supplies its own older lock_flags value. We release
+    // the shared lock with that resumed-task state BEFORE touching any other
+    // shared state.
+    // This local belongs to the ScheduleLockedHandoff invocation suspended on
+    // the task that has just resumed. It therefore restores that task's own
+    // pre-handoff IF state, not the unrelated source task that switched it in.
+    SchedFinishTaskSwitch(lock_flags.rflags);
     {
         const u64 v = Current()->fs_base;
         const u32 lo = static_cast<u32>(v);
@@ -3652,12 +4072,19 @@ void SchedSleepTicks(u64 ticks)
     // is non-null. Assert before the state/wake_tick derefs so a stray
     // pre-Schedule caller fails with a diagnostic, not a page fault.
     KASSERT(current != nullptr, "sched", "SchedSleepTicks with no current task");
+    // Cross-task kill publication also owns g_sched_lock. Check the combined
+    // ticket before publishing Sleeping while this same transaction is held,
+    // so a kill can neither be lost immediately before the state flip nor
+    // strand a cancelled task on the timer queue. The sticky ticket is
+    // consumed only by the outer cooperative boundary after this call unwinds.
+    if (current->process != nullptr && KillPending(current))
+    {
+        sync::SpinLockRelease(g_sched_lock, f);
+        MaybeFinalizeCurrentCancellation();
+        return;
+    }
     current->state = TaskState::Sleeping;
-    // Saturate (same idiom as WaitQueueBlockTimeout): an unclamped
-    // sum can wrap to 0, which is the "not a timed waiter" sentinel
-    // and would make the sleeper wake immediately instead of after
-    // the requested interval.
-    current->wake_tick = (ticks > (~u64(0) - g_tick_now)) ? ~u64(0) : (g_tick_now + ticks);
+    current->wake_tick = RelativeDeadlineFromNow(g_tick_now, ticks);
     SleepqueueInsert(current);
     SchedCpuIncSleeping();
     ScheduleLockedHandoff(f);
@@ -3688,6 +4115,15 @@ void SchedSleepUntil(u64 deadline_tick)
     Task* current = Current();
     // Precondition mirrors SchedSleepTicks: a dispatched task only.
     KASSERT(current != nullptr, "sched", "SchedSleepUntil with no current task");
+    // Keep kill observation and sleep publication in the same scheduler-lock
+    // transaction. A pending cancellation returns to the cooperative unwind
+    // boundary without ever becoming timer-queue owned.
+    if (current->process != nullptr && KillPending(current))
+    {
+        sync::SpinLockRelease(g_sched_lock, f);
+        MaybeFinalizeCurrentCancellation();
+        return;
+    }
     current->state = TaskState::Sleeping;
     current->wake_tick = deadline_tick;
     SleepqueueInsert(current);
@@ -3700,9 +4136,12 @@ u64 SchedNowTicks()
     return g_tick_now;
 }
 
-void SchedExit()
+namespace
 {
-    KLOG_INFO("sched", "SchedExit: task entering termination path");
+
+[[noreturn]] void SchedExitTerminal(TaskTerminalContext context)
+{
+    KLOG_INFO("sched", "SchedExitTerminal: task entering termination path");
     // A task can't exit while owning a critical section — there's
     // no Exit pair on the dying side to drain the per-CPU counter.
     // Leaving critnest > 0 across the post-switch onto a different
@@ -3718,7 +4157,35 @@ void SchedExit()
     // into a triple-fault with no diagnostic. Current() is documented
     // nullable (sched.h) and guarded in sibling paths (OnTimerTick,
     // SchedExemptCurrentFromHungTask); this keeps SchedExit consistent.
-    KASSERT(self != nullptr, "sched", "SchedExit with no current task");
+    KASSERT(self != nullptr, "sched", "SchedExitTerminal with no current task");
+
+    switch (context)
+    {
+    case TaskTerminalContext::DirectKernelOrBootstrap:
+        KASSERT(!self->cancellation_finalizing, "sched", "direct terminal exit while cancellation is finalizing");
+        KASSERT(self->process == nullptr || (self->bootstrap_pending && self->cancellation_defer_depth == 1), "sched",
+                "process-backed direct exit bypassed cooperative cancellation boundary");
+        KASSERT(self->process != nullptr || self->cancellation_defer_depth == 0, "sched",
+                "kernel Task exit beneath cancellation deferral");
+        break;
+    case TaskTerminalContext::CooperativeCancellation:
+        KASSERT(self->process != nullptr, "sched", "kernel Task reached cooperative terminal exit");
+        KASSERT(self->cancellation_finalizing, "sched", "cooperative terminal exit without finalizer ownership");
+        KASSERT(KillPending(self), "sched", "cooperative terminal exit without kill ticket");
+        KASSERT(!self->bootstrap_pending && self->cancellation_defer_depth == 0, "sched",
+                "cooperative terminal exit beneath bootstrap or live deferral");
+        break;
+    case TaskTerminalContext::TrampolineReturn:
+        KASSERT(!self->cancellation_finalizing, "sched", "task trampoline returned while cancellation is finalizing");
+        KASSERT(self->process == nullptr || (self->bootstrap_pending && self->cancellation_defer_depth == 1), "sched",
+                "process-backed TaskEntry returned after user bootstrap");
+        KASSERT(self->process != nullptr || self->cancellation_defer_depth == 0, "sched",
+                "kernel Task trampoline returned beneath cancellation deferral");
+        break;
+    }
+    KASSERT_WITH_VALUE(self->owned_internal_mutex_count == 0, "sched",
+                       "SchedExitTerminal while owning internal sched::Mutex instances",
+                       self->owned_internal_mutex_count);
     // SchedExit must fire exactly once per task. A second call would
     // double-decrement sched_tasks_live, double-push onto the zombie list
     // (corrupting the intrusive `next` link), and re-arm the reaper
@@ -3726,12 +4193,12 @@ void SchedExit()
     // so this should be structurally unreachable; the assert catches
     // any future path that forgets (e.g., a syscall handler that
     // calls SchedExit and then falls through).
-    KASSERT(self->state != TaskState::Dead, "sched", "SchedExit called twice on same task");
-    // SYS_EXIT may already have published the application-supplied
-    // code. Other termination paths (NtTerminateThread, process kill,
-    // tick/cap budget) converge here without one; publish a generic
-    // non-zero fallback exactly once so handle waits cannot hang.
-    core::ProcessPublishWin32ThreadExit(self->process, self->id, 1);
+    KASSERT(self->state != TaskState::Dead, "sched", "SchedExitTerminal called twice on same task");
+    // Publish the exact code bound atomically to the first kill reason. A
+    // direct internal SchedExit has no ticket and uses the historical generic
+    // non-zero fallback. ProcessPublishWin32ThreadExit is itself first-writer
+    // safe for a user-mode SYS_EXIT that recorded the same code earlier.
+    core::ProcessPublishWin32ThreadExit(self->process, self->id, PendingKillExitCode(self));
     self->state = TaskState::Dead;
     __atomic_fetch_add(&g_tasks_exited, 1, __ATOMIC_RELAXED);
     SchedCpuDecLive();
@@ -3774,6 +4241,21 @@ void SchedExit()
     {
         Schedule();
     }
+}
+
+} // namespace
+
+[[noreturn]] void SchedExit()
+{
+    SchedExitTerminal(TaskTerminalContext::DirectKernelOrBootstrap);
+}
+
+// The assembly context-switch trampoline calls this only after a planted
+// TaskEntry returns. Kernel Tasks may return normally; process-backed entries
+// are permitted to return only during their initial bootstrap failure path.
+[[noreturn]] void SchedExitFromTrampoline()
+{
+    SchedExitTerminal(TaskTerminalContext::TrampolineReturn);
 }
 
 void SetNeedResched()
@@ -3824,20 +4306,15 @@ void OnApTimerTick()
                 ++self_pcpu->sched_idle_ticks;
             }
         }
-        // Per-process CPU-time budget — same enforcement OnTimerTick
-        // applies, so a runaway task scheduled on this AP is still
-        // flagged for termination at the next reschedule. We do NOT
-        // call SchedExit here (IRQ context); Schedule() converts a
-        // budget-burned task into a Dead one on re-enqueue.
+        // Per-process CPU-time budget — publish cancellation intent from
+        // IRQ context. The interrupted task consumes it only after its
+        // outermost user-origin trap/syscall boundary unwinds.
         if (cur->process != nullptr)
         {
             core::Process* proc = cur->process;
-            ++proc->ticks_used;
-            if (proc->ticks_used >= proc->tick_budget && !cur->kill_requested)
-            {
-                cur->kill_requested = true;
-                cur->kill_reason = KillReason::TickBudget;
-            }
+            const core::AuthorizationActionResult charge = core::ProcessChargeExecutionTicks(proc, 1);
+            if (!charge.resolved || charge.action == core::AuthorizationAction::TickBudgetExceeded)
+                (void)PublishKillIntent(cur, KillReason::TickBudget, 1);
         }
     }
     // Request preemption on this CPU. The whole point of the AP tick:
@@ -3901,27 +4378,13 @@ void OnTimerTick(u64 now_ticks)
 {
     g_tick_now = now_ticks;
 
-    // Tick-budget accounting for the currently-running task's
-    // process. Every tick this task is Running counts against
-    // its process's CPU-time budget. When the budget is exhausted,
-    // flag the task to be terminated at next resched — we do NOT
-    // call SchedExit here (this is IRQ context; Schedule() would
-    // switch away before LAPIC EOI, leaving the in-service bit
-    // stuck). The flag is read by Schedule() which converts a
-    // budget-exhausted task into a Dead one on re-enqueue.
-    //
-    // Kernel-only tasks (process == nullptr) don't have a budget
-    // — they're trusted runtime threads (reaper, idle, workers).
-    // Tick-budget accounting for the currently-running task's process.
-    // Every tick the task was Running counts against its process's CPU
-    // budget. When exhausted, flag the task — Schedule() reads the flag
-    // and converts a budget-burned task into a Dead one on next resched
-    // (we deliberately don't call SchedExit here; this is IRQ context
-    // and SchedExit ends in a Schedule that would switch-away before
-    // LAPIC EOI, leaving the in-service bit stuck).
-    //
-    // Kernel-only tasks (process == nullptr) don't have budgets —
-    // they're trusted runtime threads (reaper, idle, workers).
+    // Tick-budget accounting for the currently-running task's Process.
+    // Every tick this task is Running counts against the shared CPU budget.
+    // Exhaustion atomically publishes cancellation intent, but IRQ context
+    // never calls SchedExit: switching away before LAPIC EOI would leave the
+    // in-service bit stuck. The interrupted user-origin trap guard consumes
+    // the request only after all IRQ/trap scopes unwind. Kernel-only Tasks
+    // (process == nullptr) have no budget and reject cancellation publication.
     Task* cur = Current();
     // CPU-time accounting: charge ONE tick to whichever task was on
     // the CPU when the timer fired. Idle tasks charge normally — the
@@ -3958,11 +4421,10 @@ void OnTimerTick(u64 now_ticks)
     // every idle task as the legitimate "always on-CPU" case
     // rather than warning every time the BSP idles for 1s.
     const bool cur_is_idle = (cur != nullptr) && (cur->priority == TaskPriority::Idle);
-    // Pass the task name so the soft-lockup warning can identify the
-    // offender by name rather than just by TID — TIDs are reused
-    // after reaping (a TID killed early in boot gets reassigned
-    // later), and `val=<tid>` alone is opaque in the log. The
-    // detector substitutes "<unknown>" when name is nullptr, so
+    // Pass the task name so the soft-lockup warning is human-readable rather
+    // than exposing only an opaque numeric identity. TIDs are monotonic and
+    // never reused; the name supplies context, not uniqueness. The detector
+    // substitutes "<unknown>" when name is nullptr, so
     // passing nullptr for the idle slot is harmless even though
     // that path early-returns inside the detector anyway.
     const char* cur_name = (cur != nullptr) ? cur->name : nullptr;
@@ -3982,11 +4444,10 @@ void OnTimerTick(u64 now_ticks)
     if (cur != nullptr && cur->process != nullptr)
     {
         core::Process* proc = cur->process;
-        ++proc->ticks_used;
-        if (proc->ticks_used >= proc->tick_budget && !cur->kill_requested)
+        const core::AuthorizationActionResult charge = core::ProcessChargeExecutionTicks(proc, 1);
+        if ((!charge.resolved || charge.action == core::AuthorizationAction::TickBudgetExceeded) &&
+            PublishKillIntent(cur, KillReason::TickBudget, 1))
         {
-            cur->kill_requested = true;
-            cur->kill_reason = KillReason::TickBudget;
             arch::SerialWrite("[sched] tick budget exhausted pid=");
             arch::SerialWriteHex(proc->pid);
             arch::SerialWrite("\n");
@@ -4018,6 +4479,7 @@ void OnTimerTick(u64 now_ticks)
                 KASSERT(wq != nullptr, "sched", "Blocked task without waiting_on");
                 WaitQueueUnlink(wq, woken);
                 woken->waiting_on = nullptr;
+                woken->wake_by_cancel = false;
                 woken->wake_by_timeout = true;
                 SchedCpuDecBlocked();
             }
@@ -4171,12 +4633,78 @@ Task* CurrentTask()
 
 u64 CurrentTaskId()
 {
-    Task* self = Current();
+    // Match CurrentTask's pre-PerCpu guard. Diagnostics and failed early-boot
+    // try-lock paths are permitted to ask for an identity before GSBASE and
+    // the BSP scheduler slot exist; that must return the sentinel, not touch
+    // an uninstalled PerCpu pointer.
+    Task* self = CurrentTask();
     if (self == nullptr)
     {
         return ~0ULL;
     }
     return self->id;
+}
+
+bool SchedTrackCurrentAbandonableOwnership(AbandonableOwnershipNode* node)
+{
+    if (node == nullptr || node->abandon == nullptr)
+    {
+        return false;
+    }
+
+    sync::SpinLockGuard guard(g_sched_lock);
+    Task* self = CurrentTask();
+    if (self == nullptr || node->owner != nullptr || node->prev != nullptr || node->next != nullptr)
+    {
+        return false;
+    }
+
+    node->owner = self;
+    node->prev = nullptr;
+    node->next = self->owned_abandonable_head;
+    if (node->next != nullptr)
+    {
+        node->next->prev = node;
+    }
+    self->owned_abandonable_head = node;
+    return true;
+}
+
+bool SchedUntrackCurrentAbandonableOwnership(AbandonableOwnershipNode* node)
+{
+    if (node == nullptr)
+    {
+        return false;
+    }
+
+    sync::SpinLockGuard guard(g_sched_lock);
+    Task* self = CurrentTask();
+    if (self == nullptr)
+    {
+        return false;
+    }
+    if (node->owner != self)
+    {
+        return false;
+    }
+
+    if (node->prev != nullptr)
+    {
+        node->prev->next = node->next;
+    }
+    else
+    {
+        KASSERT(self->owned_abandonable_head == node, "sched", "abandonable ownership head mismatch");
+        self->owned_abandonable_head = node->next;
+    }
+    if (node->next != nullptr)
+    {
+        node->next->prev = node->prev;
+    }
+    node->prev = nullptr;
+    node->next = nullptr;
+    node->owner = nullptr;
+    return true;
 }
 
 u32 CurrentTaskWin32LastError()
@@ -4492,21 +5020,20 @@ const char* TaskName(const Task* t)
     return (t->name != nullptr) ? t->name : "<noname>";
 }
 
-// Online-CPU bit window: bits [0, SmpCpusOnline()) set. Used to
-// reject masks that select no existing CPU and to clamp a caller
-// mask to CPUs that actually exist on this box.
+// Exact online-CPU bit set. AP admission can leave sparse CPU IDs, so a dense
+// [0, SmpCpusOnline()) window can advertise an offline slot while omitting a
+// higher admitted CPU. Used to validate and clamp affinity masks.
 static u32 OnlineCpuMask()
 {
-    const u32 online = static_cast<u32>(arch::SmpCpusOnline());
-    if (online == 0)
+    u32 mask = 0;
+    const u32 limit = arch::SmpCpuIdLimit() < 32u ? arch::SmpCpuIdLimit() : 32u;
+    for (u32 cpu_id = 0; cpu_id < limit; ++cpu_id)
     {
-        return 0u;
+        const cpu::PerCpu* pcpu = arch::SmpGetPercpu(cpu_id);
+        if (pcpu != nullptr && pcpu->online)
+            mask |= 1u << cpu_id;
     }
-    if (online >= 32u)
-    {
-        return ~0u;
-    }
-    return (1u << online) - 1u;
+    return mask;
 }
 
 static void ApplyAffinityMaskLocked(Task* task, u32 effective, u32 online_bits)
@@ -5930,49 +6457,6 @@ const char* KillResultName(KillResult r)
 namespace
 {
 
-bool SchedNameEq(const char* a, const char* b)
-{
-    for (u32 i = 0; i < 64; ++i)
-    {
-        if (a[i] != b[i])
-            return false;
-        if (a[i] == '\0')
-            return true;
-    }
-    return true;
-}
-
-bool SchedNameStarts(const char* s, const char* prefix)
-{
-    for (u32 i = 0;; ++i)
-    {
-        if (prefix[i] == '\0')
-            return true;
-        if (s[i] != prefix[i])
-            return false;
-    }
-}
-
-// Task is considered "protected" if killing it would break
-// kernel invariants: the boot task (pid 0), the reaper (we
-// need it to clean up zombies — including the very task we'd
-// be killing), and any idle task (empty runqueue would panic
-// Schedule()).
-bool IsProtectedTask(const Task* t)
-{
-    if (t == nullptr)
-        return true;
-    if (t->id == 0)
-        return true;
-    if (t->name == nullptr)
-        return false;
-    if (SchedNameEq(t->name, "reaper"))
-        return true;
-    if (SchedNameStarts(t->name, "idle-"))
-        return true;
-    return false;
-}
-
 Task* FindTaskByTidLocked(u64 tid)
 {
     sync::SpinLockAssertHeld(g_sched_lock);
@@ -5989,6 +6473,7 @@ Task* FindTaskByTidLocked(u64 tid)
 // Caller holds CLI.
 void SleepQueueRemove(Task* t)
 {
+    sync::SpinLockAssertHeld(g_sched_lock);
     // A task on the list always has prev != nullptr OR is the
     // head. Off-list tasks have both nullptr AND aren't the
     // head, so this safely no-ops them.
@@ -6014,9 +6499,89 @@ void SleepQueueRemove(Task* t)
     SchedCpuDecSleeping();
 }
 
+// Install a termination request while g_sched_lock owns the Task lifetime
+// and every intrusive queue that may contain it. WaitQueueBlockCurrentLocked,
+// the timeout path, and every wake path use this same lock, so `waiting_on`
+// is an authoritative queue back-pointer here: no producer can be mid-enqueue
+// while termination detaches the task.
+KillResult SignalTaskLocked(Task* target, KillReason reason, u32 exit_code)
+{
+    sync::SpinLockAssertHeld(g_sched_lock);
+    if (target == nullptr)
+        return KillResult::NotFound;
+    // Public cancellation is a user-process operation. Protect every kernel
+    // worker by ownership, never by its attacker-controlled diagnostic name.
+    if (target->process == nullptr)
+        return KillResult::Protected;
+    if (target->state == TaskState::Dead)
+        return KillResult::AlreadyDead;
+
+    (void)PublishKillIntent(target, reason, exit_code);
+
+    // Termination overrides NT-style suspension. This is scheduler-owned
+    // parking, not a live subsystem call frame, so resuming it is safe.
+    target->suspend_count = 0;
+
+    if (target->state == TaskState::Blocked)
+    {
+        if (target->waiting_on != nullptr)
+        {
+            if (target->wait_cancellable)
+            {
+                WaitQueueDetachTaskLocked(target->waiting_on, target);
+                // Latch cancellation as the dequeue authority. Clear the
+                // capability marker immediately: cleanup may next park on an
+                // ordinary wait, which a repeated signal must not detach.
+                target->wake_by_cancel = true;
+                target->wait_cancellable = false;
+                target->state = TaskState::Ready;
+                RunqueuePush(target);
+                return KillResult::Signaled;
+            }
+
+            // A WaitQueue-blocked task owns a suspended kernel call stack.
+            // Detaching it without a result-bearing interruptible wait API
+            // would skip caller-side reference/lock cleanup. Leave it queued;
+            // its natural signal/timeout resumes the stack, and the outermost
+            // syscall/trap cancellation guard finalizes after unwind.
+            return KillResult::Blocked;
+        }
+
+        // A lazily suspended Ready task uses TaskState::Blocked but has no
+        // WaitQueue owner. It lives on the scheduler-owned suspended list.
+        if (SuspendedListRemove(target))
+        {
+            target->state = TaskState::Ready;
+            RunqueuePush(target);
+            return KillResult::Signaled;
+        }
+
+        // Defensive compatibility for a malformed/legacy Blocked task with
+        // no owning queue. The request is still installed, but there is no
+        // list we can safely detach it from.
+        return KillResult::Blocked;
+    }
+
+    // Plain sleepers are only on g_sleep_head. Lift them immediately so
+    // termination does not wait for an arbitrary deadline.
+    if (target->state == TaskState::Sleeping)
+    {
+        SleepQueueRemove(target);
+        target->wake_tick = 0;
+        target->block_start_tick = 0;
+        target->state = TaskState::Ready;
+        RunqueuePush(target);
+    }
+
+    // Ready / Running tasks need no relocation. A Ready task executes its
+    // bootstrap/dispatcher stack; a Running user task reaches a user-origin
+    // trap boundary. Neither is culled from a foreign CPU.
+    return KillResult::Signaled;
+}
+
 } // namespace
 
-KillResult SchedKillByPid(u64 tid)
+KillResult SchedKillByPid(u64 tid, u32 exit_code)
 {
     // g_sched_lock (not bare Cli): the walk reads peer CPUs'
     // runqueues, and the Sleeping branch below mutates the sleep
@@ -6035,155 +6600,167 @@ KillResult SchedKillByPid(u64 tid)
         return KillResult::NotFound;
     }
 
-    if (IsProtectedTask(target))
-    {
-        return KillResult::Protected;
-    }
-    if (target->state == TaskState::Dead)
-    {
-        return KillResult::AlreadyDead;
-    }
-    // Blocked tasks sit on a WaitQueue threaded via `next`. We
-    // don't have a safe cross-queue detach primitive in v0 — the
-    // producer that owns the WaitQueue might be mid-enqueue. So
-    // mark the flag but DON'T try to move the task; the next
-    // wake (from its normal producer) will see kill_requested
-    // and terminate. Report the constraint to the caller.
-    target->kill_requested = true;
-    target->kill_reason = KillReason::UserKill;
-    if (target->state == TaskState::Blocked)
-    {
-        return KillResult::Blocked;
-    }
-    // Sleeping: lift off the sleep queue + re-queue Ready so
-    // the task runs and takes the kill path on its next slot.
-    if (target->state == TaskState::Sleeping)
-    {
-        SleepQueueRemove(target);
-        target->wake_tick = 0;
-        target->state = TaskState::Ready;
-        RunqueuePush(target);
-    }
-    // Ready / Running tasks don't need repositioning — they'll
-    // hit Schedule() naturally and die there.
-    return KillResult::Signaled;
+    return SignalTaskLocked(target, KillReason::UserKill, exit_code);
 }
 
-u64 SchedKillProcessByPid(u64 process_pid)
+u64 SchedKillProcessByPid(u64 process_pid, u32 exit_code)
 {
     if (process_pid == 0)
         return 0;
 
-    // Resolve Process identity and install every request in one scheduler
-    // transaction. PID and TID are independent allocators; no Task* or
-    // Process* may escape this lock hold.
-    sync::SpinLockGuard guard(g_sched_lock);
-    core::Process* target_process = nullptr;
-    for (Task* task = g_all_tasks_head; task != nullptr; task = task->all_next)
+    u64 signalled = 0;
+    u64 deferred = 0;
     {
-        if (task->process != nullptr && task->process->pid == process_pid)
+        sync::SpinLockGuard guard(g_sched_lock);
+
+        // PID and TID are independent allocators. Resolve the PID to the
+        // unique Process object while the all-tasks registry pins every
+        // task-owned Process pointer, then compare identity on the kill pass.
+        // The pointer never escapes this lock hold and needs no extra retain.
+        core::Process* target = nullptr;
+        for (Task* task = g_all_tasks_head; task != nullptr; task = task->all_next)
         {
-            target_process = task->process;
-            break;
+            if (task->process != nullptr && task->process->pid == process_pid)
+            {
+                target = task->process;
+                break;
+            }
+        }
+        if (target == nullptr)
+            return 0;
+
+        // Linearization boundary with PublishCreatedTask: no new Task for
+        // this Process can cross publication after this tombstone closes.
+        (void)core::ProcessTerminationClose(target, exit_code);
+
+        for (Task* task = g_all_tasks_head; task != nullptr; task = task->all_next)
+        {
+            if (task->process != target || task->state == TaskState::Dead || KillPending(task))
+                continue;
+            const KillResult result = SignalTaskLocked(task, KillReason::UserKill, exit_code);
+            if (result == KillResult::Signaled || result == KillResult::Blocked)
+            {
+                ++signalled;
+                if (result == KillResult::Blocked)
+                    ++deferred;
+            }
         }
     }
-    if (target_process == nullptr)
-        return 0;
 
-    u64 signalled = 0;
-    for (Task* task = g_all_tasks_head; task != nullptr; task = task->all_next)
+    if (deferred != 0)
     {
-        if (task->process != target_process || task->state == TaskState::Dead || task->kill_requested ||
-            IsProtectedTask(task))
-        {
-            continue;
-        }
-
-        task->kill_requested = true;
-        task->kill_reason = KillReason::UserKill;
-        if (task->state == TaskState::Sleeping)
-        {
-            SleepQueueRemove(task);
-            task->wake_tick = 0;
-            task->state = TaskState::Ready;
-            RunqueuePush(task);
-        }
-        // Baseline v0 cannot detach an arbitrary WaitQueue-blocked Task.
-        // Its request remains installed and the owning producer's normal
-        // wake path will make it runnable so it can take the kill.
-        ++signalled;
+        KLOG_WARN_V("sched", "SchedKillProcessByPid deferred cancellation for non-cancellable or unowned waits",
+                    deferred);
     }
     return signalled;
 }
 
-u64 SchedKillByProcess(core::Process* target)
+u64 SchedKillByProcess(core::Process* target, u32 exit_code)
 {
     if (target == nullptr)
         return 0;
-    // Collect TIDs under g_sched_lock (peer CPUs mutate the runqueues;
-    // bare Cli would only fence this CPU), then release before calling
-    // SchedKillByPid — which takes the same non-recursive lock itself.
-    //
-    // The batch array is stack-bounded, but the SWEEP is not: this used
-    // to collect at most 32 TIDs in a single pass and silently drop the
-    // rest, so a process with more threads than that survived SIGKILL
-    // with the excess still running. The comment justified 32 as "win32
-    // thread table is 8 + main + margin for Linux clone(CLONE_THREAD)",
-    // which is an assumption about callers, not a bound the kernel
-    // enforces. Batching in a loop removes the cliff without growing the
-    // frame.
-    //
-    // The pass count IS bounded, deliberately. A naive "repeat until
-    // empty" would spin forever on a thread SchedKillByPid cannot
-    // actually terminate — an untimed-blocked task is signalled but not
-    // cancelled, so it stays non-Dead and would be re-collected every
-    // pass. Bounding the sweep converts that into a WARN plus a live
-    // residue count instead of a wedged kernel.
-    constexpr u32 kTidBatch = 32;
+    // Walk the scheduler-owned registry once under its lifetime lock and
+    // install every request in place. This has no arbitrary thread-count
+    // cliff, cannot spin forever if a target concurrently spawns, and is
+    // O(tasks) instead of repeatedly resolving TIDs with O(tasks) scans.
+    // Publication takes the same lock. Closing the Process tombstone before
+    // this exact snapshot rejects every later first/additional Task publication
+    // without advancing lifecycle; only last-Task reap enters Exiting.
     u64 signalled = 0;
-
-    for (;;)
+    u64 deferred = 0;
     {
-        u64 tids[kTidBatch];
-        u32 ntids = 0;
+        sync::SpinLockGuard guard(g_sched_lock);
+        // A retained Process handle may outlive execution. Once the exact
+        // last Task has entered Exiting, its durable fallback status is
+        // already selected and a late TerminateProcess is not a new close.
+        if (ProcessLifecycleLoad(target) != ProcessLifecycleState::Published)
+            return 0;
+        (void)core::ProcessTerminationClose(target, exit_code);
+        for (Task* task = g_all_tasks_head; task != nullptr; task = task->all_next)
         {
-            sync::SpinLockGuard guard(g_sched_lock);
-            for (Task* task = g_all_tasks_head; task != nullptr && ntids < kTidBatch; task = task->all_next)
-            {
-                if (task->process == target && task->state != TaskState::Dead && !task->kill_requested &&
-                    !IsProtectedTask(task))
-                    tids[ntids++] = task->id;
-            }
-        }
-        if (ntids == 0)
-            break;
-
-        u64 progressed = 0;
-        for (u32 i = 0; i < ntids; ++i)
-        {
-            const KillResult r = SchedKillByPid(tids[i]);
+            if (task->process != target || task->state == TaskState::Dead || KillPending(task))
+                continue;
+            const KillResult r = SignalTaskLocked(task, KillReason::UserKill, exit_code);
             if (r == KillResult::Signaled || r == KillResult::Blocked)
             {
                 ++signalled;
-                ++progressed;
+                if (r == KillResult::Blocked)
+                    ++deferred;
             }
         }
-        // No task in this batch could even be signalled — another pass
-        // would re-collect the same set and achieve nothing.
-        if (progressed == 0)
-            break;
     }
 
-    // Surface anything still alive. Silence here is what let the old
-    // 32-thread truncation hide: a caller that asked to kill a process
-    // got a plausible non-zero count back while threads kept running.
-    const u64 residue = SchedCountLiveTasksForProcess(target);
-    if (residue != 0)
+    if (deferred != 0)
     {
-        KLOG_WARN_V("sched", "SchedKillByProcess left live tasks (already-signalled blocked tasks await wake)",
-                    residue);
+        KLOG_WARN_V("sched", "SchedKillByProcess deferred cancellation for non-cancellable or unowned waits", deferred);
     }
     return signalled;
+}
+
+core::JobAssignResult SchedAssignProcessToJob(core::JobKey key, core::ProcessKey owner,
+                                              core::Process* target)
+{
+    if (target == nullptr)
+        return core::JobAssignResult::NotLive;
+
+    sync::SpinLockGuard guard(g_sched_lock);
+    if (ProcessLifecycleLoad(target) != ProcessLifecycleState::Published ||
+        ProcessTerminationLoad(target) != ProcessTerminationState::Open)
+    {
+        return core::JobAssignResult::NotLive;
+    }
+
+    bool has_live_task = false;
+    for (Task* task = g_all_tasks_head; task != nullptr; task = task->all_next)
+    {
+        if (task->process == target && task->state != TaskState::Dead)
+        {
+            has_live_task = true;
+            break;
+        }
+    }
+    if (!has_live_task)
+        return core::JobAssignResult::NotLive;
+
+    return core::JobAssign(key, owner, core::ProcessKeySnapshot(target));
+}
+
+core::JobTerminateResult SchedTerminateJob(core::JobKey key, core::ProcessKey owner, u32 exit_code)
+{
+    sync::SpinLockGuard guard(g_sched_lock);
+    core::JobTerminationIntent intent{};
+    const core::JobTerminateResult result = core::JobBeginTermination(key, owner, exit_code, &intent);
+    if (result != core::JobTerminateResult::Begun)
+        return result;
+
+    // One scheduler-registry pass covers Ready, Running, Sleeping, Blocked,
+    // and Dead-but-not-yet-unlinked Tasks. The exact ProcessKey intent cannot
+    // alias a later PID incarnation. A Dead Task still closes its Process so
+    // the Job-supplied DWORD can beat the last-task fallback publication.
+    for (Task* task = g_all_tasks_head; task != nullptr; task = task->all_next)
+    {
+        if (task->process == nullptr)
+            continue;
+        const core::ProcessKey task_process = core::ProcessKeySnapshot(task->process);
+        bool selected = false;
+        for (u32 member = 0; member < intent.member_count; ++member)
+        {
+            if (intent.members[member] == task_process)
+            {
+                selected = true;
+                break;
+            }
+        }
+        if (!selected)
+            continue;
+
+        (void)core::ProcessTerminationClose(task->process, exit_code);
+        if (task->state != TaskState::Dead && !KillPending(task))
+            (void)SignalTaskLocked(task, KillReason::JobTermination, exit_code);
+    }
+
+    KASSERT(core::JobFinishTermination(&intent), "sched", "Job termination ticket completion failed");
+    return result;
 }
 
 u64 SchedCountLiveTasksForProcess(const core::Process* process)
@@ -6203,94 +6780,6 @@ u64 SchedCountLiveTasksForProcess(const core::Process* process)
             ++live;
     }
     return live;
-}
-
-SuspendResult SchedSuspendTask(Task* target, u32* prev_count_out)
-{
-    if (target == nullptr)
-    {
-        return SuspendResult::NotFound;
-    }
-    // No manual Cli/Sti around the guard: SpinLockAcquire saves +
-    // disables IF itself and the guard's release restores it. The
-    // previous explicit `arch::Sti()` before each return executed
-    // BEFORE the guard's destructor released the lock — a window
-    // where a timer IRQ (whose Schedule()/sleep-drain paths take
-    // g_sched_lock) could fire on this CPU while it still held the
-    // lock, tripping the always-on self-deadlock panic.
-    sync::SpinLockGuard guard(g_sched_lock);
-    if (target->state == TaskState::Dead)
-    {
-        return SuspendResult::AlreadyDead;
-    }
-    if (target == Current())
-    {
-        // Self-suspend on single-CPU: the count goes up, the
-        // task continues running until its next yield. At that
-        // yield Schedule()'s prev re-enqueue path routes it
-        // through RunqueueOrSuspendPush, which sees the non-zero
-        // count and parks it on g_suspended.
-        if (prev_count_out != nullptr)
-        {
-            *prev_count_out = target->suspend_count;
-        }
-        ++target->suspend_count;
-        return SuspendResult::Signaled;
-    }
-    if (prev_count_out != nullptr)
-    {
-        *prev_count_out = target->suspend_count;
-    }
-    ++target->suspend_count;
-    // For Ready tasks the suspend takes effect lazily — the next
-    // RunqueuePopRunnable that touches the task drops it onto
-    // the suspended list. For Sleeping / Blocked tasks the
-    // suspend takes effect at wake time via RunqueueOrSuspendPush.
-    // No eager relocation needed in either case.
-    return SuspendResult::Signaled;
-}
-
-SuspendResult SchedResumeTask(Task* target, u32* prev_count_out)
-{
-    if (target == nullptr)
-    {
-        return SuspendResult::NotFound;
-    }
-    // See SchedSuspendTask: the guard owns IF save/restore; a
-    // manual Sti before the guard released g_sched_lock opened an
-    // IRQ-while-holding window.
-    sync::SpinLockGuard guard(g_sched_lock);
-    if (target->state == TaskState::Dead)
-    {
-        return SuspendResult::AlreadyDead;
-    }
-    if (prev_count_out != nullptr)
-    {
-        *prev_count_out = target->suspend_count;
-    }
-    if (target->suspend_count == 0)
-    {
-        // Resume on an unsuspended task is a no-op that returns
-        // 0 (matching NT — NtResumeThread on a thread with count
-        // 0 returns 0 and stays 0).
-        return SuspendResult::Signaled;
-    }
-    --target->suspend_count;
-    if (target->suspend_count == 0)
-    {
-        // Last reference dropped. If the task was parked on
-        // g_suspended, move it back onto the runqueue Ready.
-        // If it's elsewhere (still Sleeping / Blocked on a real
-        // wait queue, because the suspend was applied while it
-        // was sleeping and we never moved it), the natural wake
-        // path already handles it now that suspend_count is 0.
-        if (SuspendedListRemove(target))
-        {
-            target->state = TaskState::Ready;
-            RunqueuePush(target);
-        }
-    }
-    return SuspendResult::Signaled;
 }
 
 SuspendResult SchedSuspendByTid(u64 target_tid, u32* prev_count_out)
@@ -6516,6 +7005,85 @@ void SchedEnumerate(SchedEnumCb cb, void* cookie)
     EmitList(g_zombies, cb, cookie, running);
 }
 
+core::ErrorCode SchedSnapshotTasksStopped(SchedTaskInfo* out, u32 capacity, u32* total_out)
+{
+    if (total_out == nullptr || (capacity != 0 && out == nullptr))
+        return core::ErrorCode::InvalidArgument;
+    *total_out = 0;
+    if (!cpu::BspInstalled())
+        return core::ErrorCode::Ok;
+
+    sync::SpinLockTryGuard guard(g_sched_lock);
+    if (!guard)
+        return guard.reason();
+
+    u32 total = 0;
+    for (Task* t = g_all_tasks_head; t != nullptr; t = t->all_next)
+    {
+        if (total < capacity)
+        {
+            SchedTaskInfo& info = out[total];
+            info.id = t->id;
+            info.name = t->name;
+            info.wake_tick = t->wake_tick;
+            info.stack_size = t->stack_size;
+            info.ticks_run = t->ticks_run;
+            info.owner_pid = t->process != nullptr ? t->process->pid : 0;
+            info.state = static_cast<u8>(t->state);
+            info.priority = static_cast<u8>(t->priority);
+            info.is_running = __atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE) != 0;
+            info.has_process = t->process != nullptr;
+            info.abi = kTaskAbiNone;
+            if (t->process != nullptr)
+            {
+                if (t->process->pe_image_base != 0)
+                    info.abi = kTaskAbiWin32Pe;
+                else if (t->process->abi_flavor == core::kAbiLinux)
+                    info.abi = kTaskAbiLinux;
+                else
+                    info.abi = kTaskAbiNative;
+            }
+            info._pad[0] = 0;
+            info._pad[1] = 0;
+            info._pad[2] = 0;
+            // Deliberately omit AddressSpaceUserPageCount here: a peer can be
+            // NMI-frozen while owning regions_lock. VM commands take their own
+            // one-shot region snapshot after this scheduler lock is released.
+            info.mapped_pages = 0;
+        }
+        ++total;
+    }
+    *total_out = total;
+    return core::ErrorCode::Ok;
+}
+
+core::ErrorCode SchedFindProcessByPidStopped(u64 pid, core::Process** process_out, bool* vm_quiescent_out)
+{
+    if (process_out == nullptr || vm_quiescent_out == nullptr || pid == 0)
+        return core::ErrorCode::InvalidArgument;
+    *process_out = nullptr;
+    *vm_quiescent_out = false;
+    if (!cpu::BspInstalled())
+        return core::ErrorCode::NotFound;
+
+    sync::SpinLockTryGuard guard(g_sched_lock);
+    if (!guard)
+        return guard.reason();
+
+    for (Task* t = g_all_tasks_head; t != nullptr; t = t->all_next)
+    {
+        core::Process* process = t->process;
+        if (process == nullptr || process->pid != pid)
+            continue;
+        *process_out = process;
+        *vm_quiescent_out = process->vm_transaction_lock.owner == nullptr &&
+                            process->vm_transaction_lock.waiters.head == nullptr &&
+                            process->vm_transaction_lock.waiters.tail == nullptr;
+        return core::ErrorCode::Ok;
+    }
+    return core::ErrorCode::NotFound;
+}
+
 u64 SchedSnapshotBlockedTasks(SchedBlockedTaskInfo* out, u64 cap)
 {
     if (out == nullptr || cap == 0)
@@ -6665,9 +7233,9 @@ bool SchedProcessAlive(u64 target_pid)
     }
     // Walk the global all-tasks registry (every live task in every
     // state, including Blocked-on-a-WaitQueue) under g_sched_lock —
-    // the same anchor the hung-task detector uses. A task parked in a
-    // blocking syscall is NOT on the runqueue / sleep / zombie lists
-    // SchedFindProcessByPid walks, so only this registry sees it. A
+    // the same anchor every scheduler-owned identity lookup uses. A
+    // task parked in a blocking syscall is absent from all per-state
+    // queues, so only this registry provides complete visibility. A
     // process is "alive" if any of its tasks is not Dead; Dead tasks
     // linger here only until reaped.
     bool alive = false;
@@ -6688,55 +7256,18 @@ bool SchedProcessAlive(u64 target_pid)
     return alive;
 }
 
-u64 SchedCountChildrenOfPid(u64 parent_pid)
-{
-    if (!cpu::BspInstalled())
-    {
-        return 0;
-    }
-    auto count_in = [&](Task* head, bool follow_sleep) -> u64
-    {
-        u64 n = 0;
-        for (Task* t = head; t != nullptr; t = follow_sleep ? t->sleep_next : t->next)
-        {
-            if (t->process != nullptr && t->process->linux_parent_pid == parent_pid)
-                ++n;
-        }
-        return n;
-    };
-
-    sync::SpinLockGuard guard(g_sched_lock);
-    u64 total = 0;
-    Task* running = Current();
-    if (running != nullptr && running->process != nullptr && running->process->linux_parent_pid == parent_pid)
-        ++total;
-    ForEachRunqueueTask(
-        [&](Task* t)
-        {
-            if (t->process != nullptr && t->process->linux_parent_pid == parent_pid)
-            {
-                ++total;
-            }
-            return false;
-        });
-    total += count_in(g_sleep_head, true);
-    return total;
-}
-
 // Resolve a pid to its owning Process.
 //
 // The AUTHORITATIVE list here is `g_all_tasks_head` — the global
 // live-task registry, which holds every task in every state and is
-// only unlinked at reap. The runqueue / sleep / zombie walks below
-// are a fast path for the common cases; they are NOT sufficient on
-// their own, because a task parked in a blocking syscall
+// only unlinked at reap. Per-state queues are intentionally not
+// searched: a task parked in a blocking syscall
 // (`WaitQueueBlockCurrentLocked` sets state=Blocked and links the
 // task onto the WaitQueue, off every scheduler list) appears in the
 // registry and nowhere else. `SchedProcessAlive` already documents
 // that gap; before the registry fallback existed, a pidfd on a
 // process sitting in read()/wait4()/futex resolved to nullptr, so
-// `pidfd_send_signal` returned -ESRCH to a perfectly live process
-// and the pidfd epoll path reported it as "exited".
+// `pidfd_send_signal` would otherwise return -ESRCH to a live process.
 //
 // Do NOT filter on task state: a Dead-but-unreaped task must still
 // resolve so exit bookkeeping can find its Process. Any future
@@ -6744,62 +7275,32 @@ u64 SchedCountChildrenOfPid(u64 parent_pid)
 // as another walk here (whitelist-incompleteness class).
 core::Process* FindProcessByPidLocked(u64 target_pid)
 {
-    auto match = [&](Task* t) -> core::Process*
+    sync::SpinLockAssertHeld(g_sched_lock);
+    // g_all_tasks_head is the authoritative lifetime registry. It contains
+    // Running, Ready, Sleeping, wait-queue Blocked, suspended, and Dead-but-
+    // unreaped tasks. A task is removed only before the reaper detaches its
+    // Process pointer, so a matching pointer is retainable for this lock hold.
+    for (Task* task = g_all_tasks_head; task != nullptr; task = task->all_next)
     {
-        if (t == nullptr)
-        {
-            return nullptr;
-        }
-        core::Process* p = t->process;
-        if (p == nullptr)
-        {
-            return nullptr;
-        }
-        if (p->pid != target_pid)
-        {
-            return nullptr;
-        }
-        return p;
-    };
+        core::Process* process = task->process;
+        if (process != nullptr && process->pid == target_pid)
+            return process;
+    }
+    return nullptr;
+}
 
-    core::Process* hit = nullptr;
-    Task* running = Current();
-    if ((hit = match(running)) != nullptr)
+core::Process* FindProcessByKeyLocked(core::ProcessKey target)
+{
+    sync::SpinLockAssertHeld(g_sched_lock);
+    for (Task* task = g_all_tasks_head; task != nullptr; task = task->all_next)
     {
-        return hit;
-    }
-    ForEachRunqueueTask(
-        [&](Task* t)
+        core::Process* process = task->process;
+        if (process != nullptr && process->pid == target.pid && process->process_identity == target.identity)
         {
-            hit = match(t);
-            return hit != nullptr;
-        });
-    if (hit == nullptr)
-    {
-        for (Task* t = g_sleep_head; t != nullptr && hit == nullptr; t = t->sleep_next)
-        {
-            hit = match(t);
+            return process;
         }
     }
-    if (hit == nullptr)
-    {
-        for (Task* t = g_zombies; t != nullptr && hit == nullptr; t = t->next)
-        {
-            hit = match(t);
-        }
-    }
-    if (hit == nullptr)
-    {
-        // Authoritative walk — catches Blocked tasks (parked on a
-        // WaitQueue, on none of the lists above) and anything a
-        // future scheduler list would otherwise hide. Same anchor
-        // and same lock as `SchedProcessAlive`.
-        for (Task* t = g_all_tasks_head; t != nullptr && hit == nullptr; t = t->all_next)
-        {
-            hit = match(t);
-        }
-    }
-    return hit;
+    return nullptr;
 }
 
 bool SchedProcessExists(u64 target_pid)
@@ -6823,6 +7324,24 @@ core::Process* SchedFindProcessByPidRetained(u64 target_pid)
     // the last task reference before a caller could pin it.
     sync::SpinLockGuard guard(g_sched_lock);
     core::Process* hit = FindProcessByPidLocked(target_pid);
+    if (hit != nullptr)
+    {
+        core::ProcessRetain(hit);
+    }
+    return hit;
+}
+
+core::Process* SchedFindProcessByKeyRetained(core::ProcessKey target)
+{
+    if (!core::ProcessKeyIsValid(target) || !cpu::BspInstalled())
+    {
+        return nullptr;
+    }
+
+    // Match both immutable components and pin the exact incarnation before
+    // the reaper can unlink its final Task and release the Process reference.
+    sync::SpinLockGuard guard(g_sched_lock);
+    core::Process* hit = FindProcessByKeyLocked(target);
     if (hit != nullptr)
     {
         core::ProcessRetain(hit);
@@ -6876,23 +7395,32 @@ bool SchedTaskBelongsToProcessByTid(u64 target_tid, const core::Process* process
     return hit != nullptr && hit->state != TaskState::Dead && hit->process == process;
 }
 
-u64 SchedCountTasksForProcess(const core::Process* process)
+bool SchedProcessReadyForExec(const core::Process* process)
 {
-    // Count live (non-Dead) tasks sharing `process`. SYS_EXECVE uses this to
-    // refuse an exec that would tear an address space down underneath sibling
-    // threads still executing in it.
+    // The current Task must be the sole member, not merely the sole live
+    // member. A Dead Task remains here until the reaper has taken the same
+    // Process VM transaction lock as exec, detached its stack token, and
+    // unlinked it. Ignoring Dead rows creates an unlink/release window in
+    // which AddressSpaceClearUserMappings can observe a live reservation.
     if (!cpu::BspInstalled() || process == nullptr)
     {
-        return 0;
+        return false;
     }
+    const Task* self = CurrentTask();
+    if (self == nullptr)
+        return false;
+
     sync::SpinLockGuard guard(g_sched_lock);
-    u64 count = 0;
+    bool found_self = false;
     for (const Task* task = g_all_tasks_head; task != nullptr; task = task->all_next)
     {
-        if (task->process == process && task->state != TaskState::Dead)
-            ++count;
+        if (task->process != process)
+            continue;
+        if (task != self || task->state == TaskState::Dead || found_self)
+            return false;
+        found_self = true;
     }
-    return count;
+    return found_self;
 }
 
 // ---------------------------------------------------------------------------
@@ -6909,14 +7437,46 @@ u64 SchedCountTasksForProcess(const core::Process* process)
 // stack, so by the time it sees a zombie, that zombie is off-CPU
 // and its stack is safe to free.
 //
-// v0 is lazy — one reap per wake. Batching when many tasks exit at
-// once is a straightforward follow-up (the zombie list is already
-// a LIFO singly-linked list; we could drain it entirely per wake).
+// Each wake detaches the entire LIFO zombie list under g_sched_lock,
+// then reaps that private batch without holding the scheduler lock.
+// New exits form the next batch and wake the reaper again.
 // ---------------------------------------------------------------------------
 namespace
 {
 
-void WaitQueueBlockCurrentLocked(WaitQueue* wq);
+AbandonableOwnershipNode* TaskDetachAbandonableOwnershipLocked(Task* dead)
+{
+    sync::SpinLockAssertHeld(g_sched_lock);
+    KASSERT(dead != nullptr, "sched/reaper", "detach abandonable ownership for null Task");
+
+    AbandonableOwnershipNode* detached = dead->owned_abandonable_head;
+    dead->owned_abandonable_head = nullptr;
+    for (AbandonableOwnershipNode* node = detached; node != nullptr; node = node->next)
+    {
+        KASSERT(node->owner == dead, "sched/reaper", "abandonable ownership ledger owner mismatch");
+        node->owner = nullptr;
+        node->prev = nullptr;
+    }
+    return detached;
+}
+
+void RunAbandonableOwnershipCallbacks(AbandonableOwnershipNode* detached)
+{
+    while (detached != nullptr)
+    {
+        AbandonableOwnershipNode* node = detached;
+        detached = node->next;
+        node->next = nullptr;
+        node->prev = nullptr;
+        if (detached != nullptr)
+        {
+            detached->prev = nullptr;
+        }
+        KASSERT(node->owner == nullptr, "sched/reaper", "detached abandonable node still has an owner");
+        KASSERT(node->abandon != nullptr, "sched/reaper", "abandonable node has no callback");
+        (node->abandon)(node);
+    }
+}
 
 bool DriveServiceRuntimeMaintenance()
 {
@@ -7016,10 +7576,15 @@ bool DriveServiceRuntimeMaintenance()
     SchedExemptCurrentFromHungTask();
     for (;;)
     {
-        // A task may resume here with IF inherited from the switcher rather
-        // than from its own suspended frame. Reassert ordinary worker context
-        // before calling runtime maintenance or entering a timed wait.
+        // Lock-pass restore uses the RFLAGS captured by the task that switched
+        // us in, not the RFLAGS saved on this suspended stack.  A dying task
+        // reaches Schedule with IF=0, so every wake after SchedExit can resume
+        // the reaper masked even though its previous wait began with IF=1.
+        // Reassert the worker-context invariant on every iteration before the
+        // next wait or confirmed peer TLB barrier; one enable before the loop
+        // is insufficient after the first park/resume cycle.
         arch::Sti();
+
         const bool service_runtime_work_pending = DriveServiceRuntimeMaintenance();
 
         // Detach the entire zombie list. `SchedFinishTaskSwitch`
@@ -7037,15 +7602,15 @@ bool DriveServiceRuntimeMaintenance()
         // list in one pass avoids N wake-up round trips when a
         // burst of tasks exits at once.
         Task* drained = nullptr;
-        sync::IrqFlags lf = sync::SpinLockAcquire(g_sched_lock);
+        sync::IrqFlags wait_flags = sync::SpinLockAcquire(g_sched_lock);
         if (g_zombies == nullptr)
         {
             if (service_runtime_work_pending)
             {
-                // Never poll while holding g_sched_lock. One scheduler tick
-                // gives a peer or serviced a fair chance to release the exact
-                // operation pin / delivery capacity that caused backpressure.
-                sync::SpinLockRelease(g_sched_lock, lf);
+                // Never poll while holding g_sched_lock. A one-tick park gives
+                // a peer resumed by terminal ChannelCore close a fair chance
+                // to unsuspend and release its operation pin.
+                sync::SpinLockRelease(g_sched_lock, wait_flags);
                 SchedSleepTicks(1);
                 continue;
             }
@@ -7054,12 +7619,12 @@ bool DriveServiceRuntimeMaintenance()
             // takes this same lock, and ScheduleLockedHandoff keeps it held
             // until this task is genuinely off-CPU.
             WaitQueueBlockCurrentLocked(&g_reaper_wq);
-            ScheduleLockedHandoff(lf);
+            ScheduleLockedHandoff(wait_flags);
             continue;
         }
         drained = g_zombies;
         g_zombies = nullptr;
-        sync::SpinLockRelease(g_sched_lock, lf);
+        sync::SpinLockRelease(g_sched_lock, wait_flags);
 
         // The scheduler-lock release restored the entry IRQ state, so KFree
         // never runs inside the predicate transaction.
@@ -7068,24 +7633,44 @@ bool DriveServiceRuntimeMaintenance()
             Task* dead = drained;
             drained = dead->next;
             dead->next = nullptr;
+            KASSERT_WITH_VALUE(dead->owned_internal_mutex_count == 0, "sched/reaper",
+                               "reaper received Task that still owns internal sched::Mutex instances",
+                               dead->owned_internal_mutex_count);
 
-            // First make the dead task unreachable through every
-            // scheduler-owned lookup and detach its lifetime-bearing
-            // pointers while g_sched_lock still serializes those readers.
-            // Dropping the last Process reference before this handoff would
-            // leave dead->process visible in g_all_tasks_head, allowing a
-            // concurrent find-and-retain lookup to touch refcount-zero or
-            // already-freed Process storage.
+            // Pin the owning Process while the scheduler registry still
+            // proves the pointer belongs to this dead Task. Do not wait for
+            // the Process VM mutex under g_sched_lock: exec takes VM first and
+            // then enters the scheduler, so doing so would invert the order.
+            core::Process* vm_process = nullptr;
+            {
+                sync::SpinLockGuard registry_guard(g_sched_lock);
+                vm_process = dead->process;
+                if (vm_process != nullptr)
+                    core::ProcessRetain(vm_process);
+            }
+            core::ScopedProcessRef vm_process_pin(vm_process);
+
+            // Make the dead task unreachable through every scheduler-owned
+            // lookup, then release its exact stack reservation before leaving
+            // the Process VM transaction. Exec holds the same outer mutex
+            // while checking scheduler quiescence and clearing the AS, so it
+            // can observe either (a) this still-linked dead Task and refuse or
+            // (b) the fully drained state, never the unsafe gap between them.
             core::Process* dead_process = nullptr;
             mm::AddressSpace* dead_as = nullptr;
             core::UserStackRange dead_user_stack{};
             mm::AddressSpaceReservationToken dead_user_stack_reservation{};
             bool dead_owns_user_stack = false;
+            bool dead_was_last_process_task = false;
             bool on_runq = false;
             bool is_current = false;
             ::duetos::u32 current_cpu = 0;
+            AbandonableOwnershipNode* dead_abandonables = nullptr;
+            const auto detach_and_release_stack = [&]()
             {
-                sync::IrqFlags verify_flags = sync::SpinLockAcquire(g_sched_lock);
+                sync::IrqFlags registry_flags = sync::SpinLockAcquire(g_sched_lock);
+                KASSERT(dead->process == vm_process, "sched/reaper",
+                        "dead Task Process changed between pin and VM transaction");
                 on_runq = ForEachRunqueueTask([dead](Task* task) { return task == dead; });
                 const u32 lim = arch::SmpCpuIdLimit();
                 for (u32 i = 0; i < lim; ++i)
@@ -7100,19 +7685,76 @@ bool DriveServiceRuntimeMaintenance()
                 }
                 if (!on_runq && !is_current)
                 {
+                    dead_abandonables = TaskDetachAbandonableOwnershipLocked(dead);
                     AllTasksUnlink(dead);
                     dead_process = dead->process;
                     dead_as = dead->as;
                     dead_user_stack = dead->user_stack;
                     dead_user_stack_reservation = dead->user_stack_reservation;
                     dead_owns_user_stack = dead->owns_user_stack_mappings;
+                    // Prove the last-Task boundary in the same registry
+                    // transaction that unlinked `dead`. Count every remaining
+                    // Task for the Process, including Dead siblings awaiting
+                    // this reaper batch. SchedCountLiveTasksForProcess excludes
+                    // those siblings and can therefore report zero too early,
+                    // causing process-exit hooks to run more than once.
+                    dead_was_last_process_task = dead_process != nullptr;
+                    for (Task* remaining = g_all_tasks_head; dead_was_last_process_task && remaining != nullptr;
+                         remaining = remaining->all_next)
+                    {
+                        if (remaining->process == dead_process)
+                            dead_was_last_process_task = false;
+                    }
+                    if (dead_was_last_process_task)
+                    {
+                        // Process-wide TerminateProcess/Job closure already
+                        // selected a durable result when it closed Task
+                        // publication. Only a process with no such writer may
+                        // inherit this exact last Task's ticket code.
+                        core::ProcessPublishLastTaskExitCodeIfUnset(dead_process, PendingKillExitCode(dead));
+                        KASSERT(ProcessLifecycleTransition(dead_process, ProcessLifecycleState::Published,
+                                                           ProcessLifecycleState::Exiting),
+                                "sched/reaper", "last Task failed to enter Process Exiting state");
+                        // Job assignment and the last-Task boundary share this
+                        // same outer lock. Removing exact membership here
+                        // makes exited slots immediately reusable and removes
+                        // the old scan/replay race from the adapter.
+                        core::JobOnProcessExit(core::ProcessKeySnapshot(dead_process));
+                    }
                     dead->process = nullptr;
                     dead->as = nullptr;
                     dead->user_stack = core::UserStackRange{};
                     dead->user_stack_reservation = mm::AddressSpaceReservationToken{};
                     dead->owns_user_stack_mappings = false;
                 }
-                sync::SpinLockRelease(g_sched_lock, verify_flags);
+                sync::SpinLockRelease(g_sched_lock, registry_flags);
+
+                // The Task is now unreachable and off-CPU, but its Process
+                // reference and the temporary pin keep `dead_as` alive. The
+                // exact reservation release may wait for a TLB shootdown, so
+                // it runs outside g_sched_lock while the outer Process VM
+                // transaction still excludes exec and foreign VM mutation.
+                if (dead_owns_user_stack)
+                {
+                    KASSERT(dead_as != nullptr, "sched/reaper", "owned user stack without an address space");
+                    KASSERT(core::UserStackRangeIsValid(dead_user_stack), "sched/reaper",
+                            "owned user stack descriptor corrupted before teardown");
+                    KASSERT(dead_user_stack_reservation.IsValid(), "sched/reaper",
+                            "owned user stack missing reservation token");
+                    core::UserStackReleaseOwnedMappings(dead_as, dead_user_stack, dead_user_stack_reservation);
+                }
+            };
+
+            if (vm_process != nullptr)
+            {
+                core::ScopedProcessVmTransaction vm_transaction(vm_process);
+                detach_and_release_stack();
+            }
+            else
+            {
+                // Kernel-only and legacy AS-only Tasks have no Process VM
+                // transaction boundary. They cannot race process exec.
+                detach_and_release_stack();
             }
 
             // The zombie handoff promises `dead` is off every runqueue and
@@ -7141,31 +7783,27 @@ bool DriveServiceRuntimeMaintenance()
                 core::PanicWithValue("sched/reaper", "freeing a still-reachable task (resume UAF root)", dead->id);
             }
 
-            // The Task is now unreachable and off-CPU, but its Process
-            // reference still keeps `dead_as` alive. Reclaim only mappings
-            // explicitly owned by this Task, outside g_sched_lock and before
-            // ProcessRelease can destroy the AS. Linux clone stacks never set
-            // the ownership bit and are intentionally left to their caller or
-            // the eventual whole-AS teardown.
-            if (dead_owns_user_stack)
+            // The ledger was detached atomically with AllTasksUnlink, but the
+            // callbacks may wake mutex waiters and release KObjects.  Invoke
+            // them only after g_sched_lock and the Process VM transaction are
+            // both gone; each callback saved its embedding object through the
+            // holder reference installed at acquisition time.
+            RunAbandonableOwnershipCallbacks(dead_abandonables);
+
+            // GUI queues and HWND ownership are keyed by immutable {pid,tid},
+            // never Task*. Reap only after this Task is unlinked and off-CPU,
+            // while its Process reference still pins the PID identity.
+            if (dead_process != nullptr)
             {
-                KASSERT(dead_as != nullptr, "sched/reaper", "owned user stack without an address space");
-                KASSERT(core::UserStackRangeIsValid(dead_user_stack), "sched/reaper",
-                        "owned user stack descriptor corrupted before teardown");
-                KASSERT(dead_user_stack_reservation.IsValid(), "sched/reaper",
-                        "owned user stack missing reservation token");
-                core::UserStackReleaseOwnedMappings(dead_as, dead_user_stack, dead_user_stack_reservation);
+                (void)::duetos::drivers::video::WindowReapByTask(dead_process->pid, dead->id);
             }
 
-            // Drop the task's process reference. The Process owns
-            // the AS — ProcessRelease drops its AS reference, and
-            // when the last holder goes away the AS destructor
-            // walks the region table, returns every backing user
-            // frame, walks the user-half page tables to free
-            // intermediate PDPT/PD/PT pages, and frees the PML4
-            // frame. Tasks with process == nullptr (kernel-only
-            // workers, idle, reaper's own thread) fall through
-            // with no state change.
+            // Complete the owning Process runtime at the exact last-task
+            // boundary, then drop this Task's strong identity reference.
+            // Runtime teardown releases the AS inline: it walks the region
+            // table, returns backing user frames, frees intermediate user-half
+            // page tables, and returns the PML4 frame. Tasks with process ==
+            // nullptr (kernel-only workers, idle, reaper) fall through.
             //
             // AS-only tasks (process == nullptr but as != nullptr)
             // don't exist today but the fallback path is preserved
@@ -7180,41 +7818,22 @@ bool DriveServiceRuntimeMaintenance()
             // switched away).
             if (dead_process != nullptr)
             {
-                // Last task of this process? Then drop the
-                // references its Win32 process-handle table
-                // (NtOpenProcess) holds on other processes — and
-                // possibly on itself.
+                // Strong external process handles may outlive execution, so
+                // final refcount zero cannot define process exit. The exact
+                // last-task boundary below breaks self/cross-handle cycles and
+                // drains all mutable runtime state while retaining the stable
+                // identity header for later wait/query/close operations.
                 //
-                // This has to happen HERE and not inside
-                // ProcessRelease. A retained process handle is
-                // counted in Process::refcount, so it is precisely
-                // what stops the refcount reaching 0: a self-handle
-                // pins the process forever and an A<->B pair forms
-                // a cycle, and in both cases ProcessRelease's
-                // destroy body — the obvious place for a sweep —
-                // never runs. Everything in that body is skipped
-                // for a pinned process: the whole address space
-                // (every user frame, every intermediate page table,
-                // the PML4), compositor windows, popup menus, the
-                // kobject handle table, and its bound sockets,
-                // which is how one leaked 0x7xx handle wedges a
-                // restart=Always service out of its listener port.
-                //
-                // `dead` is already Dead and unlinked from the all-tasks
-                // registry, so a count of 0 means this was the last task.
-                if (SchedCountLiveTasksForProcess(dead_process) == 0)
+                // `dead_was_last_process_task` was captured atomically with
+                // AllTasksUnlink and includes Dead siblings still queued for
+                // reaping. It is the exact one-shot Process exit boundary.
+                if (dead_was_last_process_task)
                 {
-                    // Membership exit is a protocol event distinct from
-                    // owner teardown. The scheduler lock is not held here,
-                    // and dead_process remains pinned by the reaper until
-                    // ProcessRelease below.
-                    core::JobOnProcessExit(dead_process);
-                    core::ProcessDropOwnedProcessHandles(dead_process);
-                    // Jobs hold strong member references, including a
-                    // possible reference back to their owner. Drain them at
-                    // the same last-task boundary; waiting for ProcessRelease
-                    // would leave an uncloseable self-membership cycle.
-                    ::duetos::subsystems::win32::JobDrainOwnedByProcess(dead_process);
+                    // The Process owns the complete one-shot exit transaction:
+                    // runtime drain, cycle-breaking hooks, observer queueing,
+                    // release publication of Exited, and post-publication
+                    // wakes. No scheduler lock or VM transaction is held here.
+                    core::ProcessCompleteExitFromReaper(dead_process);
                 }
                 core::ProcessRelease(dead_process);
             }
@@ -7236,6 +7855,19 @@ bool DriveServiceRuntimeMaintenance()
                 {
                     core::PanicWithValue("sched/reaper", "stack canary corrupted (task overflow?)", canary);
                 }
+                // Exit hooks may contend on a sleeping mutex (notably the
+                // compositor during WindowReapByTask). The central lock-pass
+                // finish restores this task's own IF after such a resume, but
+                // make the reclamation precondition local and fail-safe too:
+                // no critical section may survive teardown, and confirmed
+                // peer TLB callbacks require IF=1 before frames can be reused.
+                KASSERT_WITH_VALUE(cpu::CriticalNesting() == 0, "sched/reaper",
+                                   "kernel-stack reclaim inside critical section", cpu::CriticalNesting());
+                constexpr u64 kReclaimRflagsIf = 1ULL << 9;
+                const u64 reclaim_rflags = arch::ReadRflags();
+                KASSERT_WITH_VALUE((reclaim_rflags & kReclaimRflagsIf) != 0, "sched/reaper",
+                                   "kernel-stack reclaim lost resumed-task IF", reclaim_rflags);
+                arch::Sti();
                 mm::FreeKernelStack(dead->stack_base, dead->stack_size);
             }
             mm::KFree(dead);
@@ -7355,32 +7987,22 @@ inline void CpuIdleLowPower(volatile u8* monitor_cell, bool use_mwait)
 void SchedStartIdle(const char* name)
 {
     KASSERT(name != nullptr, "sched", "SchedStartIdle null name");
-    Task* idle = SchedCreate(&IdleMain, nullptr, name, TaskPriority::Idle);
-    // Pin the idle task to the CPU that is starting it. The rest of
-    // the scheduler treats idle tasks as strictly per-CPU ("Idle
-    // tasks are per-CPU and not eligible to steal"), but SchedCreate
-    // defaults affinity_mask to kAffinityAll — an unpinned idle task
-    // can then be popped / load-balanced onto a DIFFERENT CPU. When
-    // two CPUs end up sharing one idle task's stack / Task struct
-    // the result is a task running on two CPUs at once, surfacing
-    // as the intermittent MUTEX-NONOWNER the gui-fuzz harness
-    // reproduces under SMP. SchedStartIdle runs on the owning CPU
-    // (BSP from SchedInit, each AP from SchedEnterOnAp), so
-    // CurrentCpu() is the correct home. Direct mask store (not
-    // SchedSetAffinityMask) — the task was just created, nothing
-    // is contending it yet, and the heavier re-home path is
-    // needless this early.
-    if (idle != nullptr)
+    const TaskCreateResult idle = SchedCreate(&IdleMain, nullptr, name, TaskPriority::Idle);
+    // PublishCreatedTask recognizes the Idle priority while the Task is still
+    // private and, under g_sched_lock, pins it to this CPU and installs the
+    // scheduler-owned PerCpu::idle_task pointer. This closes both the
+    // post-publication raw-pointer UAF and the window where a peer could route
+    // work to a CPU whose fallback had not yet become visible.
+    if (idle.created)
     {
         cpu::PerCpu* self = cpu::CurrentCpu();
         if (self != nullptr)
         {
-            idle->affinity_mask = (1u << self->cpu_id);
-            // Publish the per-CPU idle task pointer. Read by
-            // ScheduleLockedHandoff as a last-resort dispatch
-            // target — see PerCpu::idle_task in cpu/percpu.h for
-            // the race this closes.
-            self->idle_task = idle;
+            KASSERT(self->idle_task != nullptr, "sched", "Idle Task receipt without per-CPU publication");
+            KASSERT(TaskId(self->idle_task) == idle.tid, "sched", "Idle Task receipt/pointer identity mismatch");
+            // The raw pointer was installed before the creation call released
+            // g_sched_lock. The immutable receipt proves this is the exact
+            // Task just published.
             // Open the wake/balance/steal gate: from here on,
             // peer CPUs may route tasks to this CPU. This MUST
             // be the last write before the Log call below — see
@@ -7400,7 +8022,7 @@ void SchedStartIdle(const char* name)
             arch::SerialWrite(" perpcu=");
             arch::SerialWriteHex(reinterpret_cast<u64>(self));
             arch::SerialWrite(" idle=");
-            arch::SerialWriteHex(reinterpret_cast<u64>(idle));
+            arch::SerialWriteHex(reinterpret_cast<u64>(self->idle_task));
             arch::SerialWrite("\n");
         }
     }
@@ -7425,7 +8047,11 @@ Task* CreateApBootSentinel(u32 cpu_id)
         PanicSched("KMalloc failed for AP boot sentinel");
     }
     memset(t, 0, sizeof(Task));
-    t->id = __atomic_fetch_add(&g_next_task_id, 1, __ATOMIC_RELAXED);
+    if (!MintTaskId(&t->id))
+    {
+        mm::KFree(t);
+        PanicSched("Task ID namespace exhausted during AP bootstrap");
+    }
     t->state = TaskState::Running;
     // NEVER re-enqueue this fake task. Without this, the AP's first
     // Schedule() sees prev==sentinel in state Running and
@@ -7653,6 +8279,70 @@ void WaitQueueBlockCurrentLocked(WaitQueue* wq)
     SchedCpuIncBlocked();
 }
 
+// Timed counterpart used by both the public wait-queue primitive and the
+// mutex timed-acquire state machine. The caller computes one absolute
+// deadline and holds g_sched_lock from its predicate check through enqueue
+// and ScheduleLockedHandoff; retrying a spurious/cancellation wake therefore
+// never extends the original timeout.
+void WaitQueueBlockCurrentUntilLocked(WaitQueue* wq, u64 deadline_tick)
+{
+    sync::SpinLockAssertHeld(g_sched_lock);
+    KASSERT(wq != nullptr, "sched", "WaitQueueBlockCurrentUntilLocked null queue");
+    KASSERT(deadline_tick != 0, "sched", "WaitQueueBlockCurrentUntilLocked zero deadline");
+    Task* t = Current();
+    KASSERT(t != nullptr, "sched", "WaitQueueBlockCurrentUntilLocked with no current task");
+    KASSERT(t->state == TaskState::Running, "sched", "WaitQueueBlockCurrentUntilLocked on non-Running task");
+
+    t->state = TaskState::Blocked;
+    t->block_start_tick = g_tick_now;
+    t->next = nullptr;
+    t->wake_tick = deadline_tick;
+    t->waiting_on = wq;
+    t->wake_by_timeout = false;
+    if (wq->tail == nullptr)
+    {
+        wq->head = wq->tail = t;
+    }
+    else
+    {
+        wq->tail->next = t;
+        wq->tail = t;
+    }
+    SchedCpuIncBlocked();
+    SleepqueueInsert(t);
+    SchedCpuIncSleeping();
+}
+
+// Classify one result-bearing wait after its blocked stack resumes. Wakers,
+// timeout expiry, and SignalTaskLocked all serialize queue removal under
+// g_sched_lock and latch which authority won. Sticky kill intent is not the
+// result: a kill published after an explicit wake must not consume a wake the
+// generic queue cannot hand back. The caller still observes that later kill at
+// its next cancellable wait or outer cancellation boundary.
+WaitQueueBlockResult ClassifyCancellableWaitResume(bool timed)
+{
+    sync::IrqFlags flags = sync::SpinLockAcquire(g_sched_lock);
+    Task* self = Current();
+    KASSERT(self != nullptr, "sched", "cancellable wait resumed without current Task");
+    KASSERT(self->state == TaskState::Running, "sched", "cancellable wait resumed outside Running state");
+    KASSERT(self->waiting_on == nullptr, "sched", "cancellable wait resumed while still queue-owned");
+    KASSERT(self->wait_cancellable || self->wake_by_cancel, "sched",
+            "cancellable wait resumed without marker or cancellation latch");
+
+    const bool cancelled = self->wake_by_cancel;
+    const bool timed_out = timed && self->wake_by_timeout;
+    self->wait_cancellable = false;
+    self->wake_by_cancel = false;
+    self->wake_by_timeout = false;
+    sync::SpinLockRelease(g_sched_lock, flags);
+
+    if (cancelled)
+        return WaitQueueBlockResult::Cancelled;
+    if (timed_out)
+        return WaitQueueBlockResult::TimedOut;
+    return WaitQueueBlockResult::Woken;
+}
+
 } // namespace
 
 void WaitQueueBlock(WaitQueue* wq)
@@ -7672,6 +8362,33 @@ void WaitQueueBlock(WaitQueue* wq)
     ScheduleLockedHandoff(f);
     // Woken. Our state was flipped back to Running by the scheduler +
     // the waker pushed us onto the runqueue before we got here.
+}
+
+bool WaitQueueBlockIfSequenceUnchanged(WaitQueue* wq, const u64* sequence, u64 observed_sequence)
+{
+    KASSERT(wq != nullptr, "sched", "WaitQueueBlockIfSequenceUnchanged null queue");
+    KASSERT(sequence != nullptr, "sched", "WaitQueueBlockIfSequenceUnchanged null sequence");
+    KASSERT_WITH_VALUE(cpu::CriticalNesting() == 0, "sched",
+                       "WaitQueueBlockIfSequenceUnchanged from inside critical section", cpu::CriticalNesting());
+
+    // The external predicate lock is deliberately not part of scheduler lock
+    // ordering. Its owner publishes an atomic sequence after changing the
+    // predicate, drops that lock, and only then wakes this queue. Rechecking
+    // after acquiring g_sched_lock gives two exhaustive outcomes:
+    //   1. sequence changed: return without enqueue; the caller rescans.
+    //   2. unchanged: enqueue and hand off while g_sched_lock remains held;
+    //      a producer's wake cannot pass us until we are genuinely blocked.
+    sync::IrqFlags flags = sync::SpinLockAcquire(g_sched_lock);
+    if (__atomic_load_n(sequence, __ATOMIC_ACQUIRE) != observed_sequence)
+    {
+        sync::SpinLockRelease(g_sched_lock, flags);
+        return false;
+    }
+
+    KASSERT(Current() != nullptr, "sched", "WaitQueueBlockIfSequenceUnchanged with no current task");
+    WaitQueueBlockCurrentLocked(wq);
+    ScheduleLockedHandoff(flags);
+    return true;
 }
 
 bool WaitQueueBlockTimeout(WaitQueue* wq, u64 ticks)
@@ -7710,13 +8427,7 @@ bool WaitQueueBlockTimeout(WaitQueue* wq, u64 ticks)
         // the wait was timed.
         t->block_start_tick = g_tick_now;
         t->next = nullptr;
-        // Saturate the deadline rather than wrap. Without the clamp,
-        // `g_tick_now + ticks` could overflow u64 (e.g., a Linux ABI
-        // caller passing nsec_to_ticks(LLONG_MAX)); the wake-tick
-        // comparator uses signed-diff arithmetic and would then read
-        // the wrapped deadline as already-elapsed, making the wait
-        // return immediately instead of blocking.
-        t->wake_tick = (ticks > (~u64(0) - g_tick_now)) ? ~u64(0) : (g_tick_now + ticks);
+        t->wake_tick = RelativeDeadlineFromNow(g_tick_now, ticks);
         t->waiting_on = wq;
         t->wake_by_timeout = false;
 
@@ -7748,6 +8459,140 @@ bool WaitQueueBlockTimeout(WaitQueue* wq, u64 ticks)
     // is reused on the next wait.
     const bool timed_out = Current()->wake_by_timeout;
     return !timed_out;
+}
+
+WaitQueueBlockResult WaitQueueBlockCancellable(WaitQueue* wq)
+{
+    KASSERT(wq != nullptr, "sched", "WaitQueueBlockCancellable null queue");
+    KASSERT_WITH_VALUE(cpu::CriticalNesting() == 0, "sched", "WaitQueueBlockCancellable from inside critical section",
+                       cpu::CriticalNesting());
+
+    sync::IrqFlags flags = sync::SpinLockAcquire(g_sched_lock);
+    Task* self = Current();
+    KASSERT(self != nullptr, "sched", "cancellable wait without current Task");
+    KASSERT(!self->wait_cancellable, "sched", "nested cancellable wait marker");
+    if (KillPending(self))
+    {
+        sync::SpinLockRelease(g_sched_lock, flags);
+        return WaitQueueBlockResult::Cancelled;
+    }
+
+    self->wake_by_cancel = false;
+    self->wait_cancellable = true;
+    WaitQueueBlockCurrentLocked(wq);
+    ScheduleLockedHandoff(flags);
+    return ClassifyCancellableWaitResume(false);
+}
+
+WaitQueueBlockResult WaitQueueBlockTimeoutCancellable(WaitQueue* wq, u64 ticks)
+{
+    KASSERT(wq != nullptr, "sched", "WaitQueueBlockTimeoutCancellable null queue");
+    KASSERT_WITH_VALUE(cpu::CriticalNesting() == 0, "sched",
+                       "WaitQueueBlockTimeoutCancellable from inside critical section", cpu::CriticalNesting());
+
+    const u64 wait_ticks = ClampRelativeWaitTicks(ticks);
+
+    sync::IrqFlags flags = sync::SpinLockAcquire(g_sched_lock);
+    Task* self = Current();
+    KASSERT(self != nullptr, "sched", "timed cancellable wait without current Task");
+    KASSERT(!self->wait_cancellable, "sched", "nested timed cancellable wait marker");
+    if (KillPending(self))
+    {
+        sync::SpinLockRelease(g_sched_lock, flags);
+        return WaitQueueBlockResult::Cancelled;
+    }
+    if (wait_ticks == 0)
+    {
+        sync::SpinLockRelease(g_sched_lock, flags);
+        SchedYield();
+        return WaitQueueBlockResult::TimedOut;
+    }
+
+    const u64 deadline_tick = RelativeDeadlineFromNow(g_tick_now, wait_ticks);
+    self->wake_by_cancel = false;
+    self->wait_cancellable = true;
+    WaitQueueBlockCurrentUntilLocked(wq, deadline_tick);
+    ScheduleLockedHandoff(flags);
+    return ClassifyCancellableWaitResume(true);
+}
+
+WaitQueueBlockResult WaitQueueBlockIfSequenceUnchangedCancellable(WaitQueue* wq, const u64* sequence,
+                                                                   u64 observed_sequence)
+{
+    KASSERT(wq != nullptr, "sched", "WaitQueueBlockIfSequenceUnchangedCancellable null queue");
+    KASSERT(sequence != nullptr, "sched", "WaitQueueBlockIfSequenceUnchangedCancellable null sequence");
+    KASSERT_WITH_VALUE(cpu::CriticalNesting() == 0, "sched",
+                       "WaitQueueBlockIfSequenceUnchangedCancellable from inside critical section",
+                       cpu::CriticalNesting());
+
+    // Cancellation, the predicate bridge, marker publication, and enqueue are
+    // one scheduler-lock transaction. A producer publishes its sequence before
+    // taking this lock in WaitQueueWake*, so it either changes the value before
+    // this acquire-load or sees the waiter after it has been fully enqueued.
+    sync::IrqFlags flags = sync::SpinLockAcquire(g_sched_lock);
+    Task* self = Current();
+    KASSERT(self != nullptr, "sched", "sequence cancellable wait without current Task");
+    KASSERT(!self->wait_cancellable, "sched", "nested sequence cancellable wait marker");
+    if (KillPending(self))
+    {
+        sync::SpinLockRelease(g_sched_lock, flags);
+        return WaitQueueBlockResult::Cancelled;
+    }
+    if (__atomic_load_n(sequence, __ATOMIC_ACQUIRE) != observed_sequence)
+    {
+        sync::SpinLockRelease(g_sched_lock, flags);
+        return WaitQueueBlockResult::SequenceChanged;
+    }
+
+    self->wake_by_cancel = false;
+    self->wait_cancellable = true;
+    WaitQueueBlockCurrentLocked(wq);
+    ScheduleLockedHandoff(flags);
+    return ClassifyCancellableWaitResume(false);
+}
+
+WaitQueueBlockResult WaitQueueBlockIfSequenceUnchangedTimeoutCancellable(WaitQueue* wq, const u64* sequence,
+                                                                         u64 observed_sequence, u64 ticks)
+{
+    KASSERT(wq != nullptr, "sched", "WaitQueueBlockIfSequenceUnchangedTimeoutCancellable null queue");
+    KASSERT(sequence != nullptr, "sched", "WaitQueueBlockIfSequenceUnchangedTimeoutCancellable null sequence");
+    KASSERT_WITH_VALUE(cpu::CriticalNesting() == 0, "sched",
+                       "WaitQueueBlockIfSequenceUnchangedTimeoutCancellable from inside critical section",
+                       cpu::CriticalNesting());
+
+    const u64 wait_ticks = ClampRelativeWaitTicks(ticks);
+
+    // Cancellation, predicate validation, zero-timeout classification, marker
+    // publication, and timed dual-queue enqueue form one scheduler-lock
+    // transaction. The result precedence is cancellation, sequence change,
+    // then timeout/wake, matching the existing cancellable wait contracts.
+    sync::IrqFlags flags = sync::SpinLockAcquire(g_sched_lock);
+    Task* self = Current();
+    KASSERT(self != nullptr, "sched", "timed sequence cancellable wait without current Task");
+    KASSERT(!self->wait_cancellable, "sched", "nested timed sequence cancellable wait marker");
+    if (KillPending(self))
+    {
+        sync::SpinLockRelease(g_sched_lock, flags);
+        return WaitQueueBlockResult::Cancelled;
+    }
+    if (__atomic_load_n(sequence, __ATOMIC_ACQUIRE) != observed_sequence)
+    {
+        sync::SpinLockRelease(g_sched_lock, flags);
+        return WaitQueueBlockResult::SequenceChanged;
+    }
+    if (wait_ticks == 0)
+    {
+        sync::SpinLockRelease(g_sched_lock, flags);
+        SchedYield();
+        return WaitQueueBlockResult::TimedOut;
+    }
+
+    const u64 deadline_tick = RelativeDeadlineFromNow(g_tick_now, wait_ticks);
+    self->wake_by_cancel = false;
+    self->wait_cancellable = true;
+    WaitQueueBlockCurrentUntilLocked(wq, deadline_tick);
+    ScheduleLockedHandoff(flags);
+    return ClassifyCancellableWaitResume(true);
 }
 
 namespace
@@ -7783,6 +8628,10 @@ Task* WaitQueueWakeOneLocked(WaitQueue* wq)
     }
     t->waiting_on = nullptr;
     t->wake_tick = 0;
+    // Explicit wake won the dequeue race. A later sticky kill intent is
+    // delivered at the next cancellable wait / outer boundary, not by
+    // consuming this already-committed wake result.
+    t->wake_by_cancel = false;
     t->wake_by_timeout = false;
     // Clear the hung-task anchor — once we've handed the task
     // back to the runqueue (or the suspended list), the previous
@@ -7854,11 +8703,65 @@ u64 WaitQueueWakeAll(WaitQueue* wq)
 // the waiters queue; Unlock hands the lock directly to the longest-waiting
 // task (FIFO fairness), avoiding the thundering-herd pattern of "wake all,
 // everyone re-races for the lock."
+//
+// sync::AdaptiveMutex embeds the default Internal form and delegates every
+// live acquire/release to these functions; it has no separate adaptive-spin
+// protocol. Internal waits are deliberately non-cancellable and internal
+// owners cannot be abandoned. The cancellation finalizer waits for the
+// per-task internal-owner count to reach zero. Only KMutex selects
+// AbandonableUserWaitable, the result-bearing cancellable acquire APIs, and
+// the reaper-driven MutexAbandon path.
 // ---------------------------------------------------------------------------
+
+namespace
+{
+
+void MutexOwnerInstallLocked(Mutex* mutex, Task* owner)
+{
+    sync::SpinLockAssertHeld(g_sched_lock);
+    KASSERT(mutex != nullptr, "sched", "MutexOwnerInstallLocked null mutex");
+    KASSERT(owner != nullptr, "sched", "MutexOwnerInstallLocked null Task owner");
+    KASSERT(mutex->owner == nullptr, "sched", "MutexOwnerInstallLocked over existing owner");
+    if (mutex->ownership_class == Mutex::OwnershipClass::Internal)
+    {
+        KASSERT(owner->owned_internal_mutex_count != ~u32{0}, "sched", "Task internal-mutex count saturated");
+        ++owner->owned_internal_mutex_count;
+    }
+    mutex->owner = owner;
+}
+
+void MutexOwnerDropLocked(Mutex* mutex, Task* owner)
+{
+    sync::SpinLockAssertHeld(g_sched_lock);
+    KASSERT(mutex != nullptr, "sched", "MutexOwnerDropLocked null mutex");
+    KASSERT(mutex->owner == owner, "sched", "MutexOwnerDropLocked owner mismatch");
+    if (owner != nullptr && mutex->ownership_class == Mutex::OwnershipClass::Internal)
+    {
+        KASSERT(owner->owned_internal_mutex_count != 0, "sched", "Task internal-mutex count underflow");
+        --owner->owned_internal_mutex_count;
+    }
+    mutex->owner = nullptr;
+}
+
+bool MutexRelinquishOwnerLocked(Mutex* mutex, Task* owner)
+{
+    sync::SpinLockAssertHeld(g_sched_lock);
+    MutexOwnerDropLocked(mutex, owner);
+    Task* successor = WaitQueueWakeOneLocked(&mutex->waiters);
+    if (successor == nullptr)
+    {
+        return false;
+    }
+    MutexOwnerInstallLocked(mutex, successor);
+    return true;
+}
+
+} // namespace
 
 void MutexLock(Mutex* m)
 {
     KASSERT(m != nullptr, "sched", "MutexLock null mutex");
+    KASSERT(CurrentTask() != nullptr, "sched", "MutexLock before scheduler task installation");
     // Sleeping-mutex acquire inside a preempt-off critical section
     // is a contract violation — the park path goes through
     // ScheduleLockedHandoff which would deschedule us while
@@ -7893,39 +8796,34 @@ void MutexLock(Mutex* m)
     // The owner test + the (fast claim | slow enqueue) decision +
     // the deschedule are now ONE continuous hold, with no gap an
     // Unlock hand-off or a peer-CPU waker can slip into.
-    sync::IrqFlags f = sync::SpinLockAcquire(g_sched_lock);
-    // Self-deadlock guard (the owning-re-entry check sched.h's
-    // Mutex doc explicitly asks for). Recursion is unsupported: if
-    // the caller already owns `m`, the else-branch would block it
-    // on m->waiters waiting for an unlock that only it could issue
-    // — that task never runs again, and anything waiting on it
-    // cascades into a system-wide hang. Always-on (KASSERT): an
-    // unrecoverable hang is catastrophic in release too.
-    // Predicate is owner==nullptr || owner!=Current — NOT
-    // owner!=Current alone: during early boot Current() is nullptr
-    // and the uncontended owner is also nullptr, so the naive form
-    // would panic every pre-scheduler mutex acquire (slab uses a
-    // sched::Mutex before tasks exist). A self-deadlock requires a
-    // non-null owner equal to the running task.
-    KASSERT(m->owner == nullptr || m->owner != Current(), "sched",
-            "self-deadlock: MutexLock of a mutex this task already owns");
-    if (m->owner == nullptr)
+    bool waited = false;
+    for (;;)
     {
-        // Fast path: uncontended acquire.
-        m->owner = Current();
-        sync::SpinLockRelease(g_sched_lock, f);
-    }
-    else
-    {
-        // Slow path: enqueue self on the waiters queue and
-        // deschedule under the SAME hold the owner test ran under,
-        // so neither an Unlock hand-off nor a peer-CPU waker can
-        // slip between "decide to wait" and "actually off-CPU".
-        // Unlock's hand-off sets m->owner = us BEFORE waking us, so
-        // there's nothing to redo here — the lock is already ours
-        // when ScheduleLockedHandoff returns (on our resumed stack).
+        sync::IrqFlags f = sync::SpinLockAcquire(g_sched_lock);
+        Task* self = Current();
+
+        // First-entry self ownership is recursion. After a park it is the
+        // valid direct hand-off published by MutexUnlock before the wake.
+        if (self != nullptr && m->owner == self)
+        {
+            KASSERT(waited, "sched", "self-deadlock: MutexLock of a mutex this task already owns");
+            KASSERT(m->ownership_class != Mutex::OwnershipClass::Internal || self->owned_internal_mutex_count != 0,
+                    "sched", "mutex hand-off omitted internal owner accounting");
+            sync::SpinLockRelease(g_sched_lock, f);
+            break;
+        }
+
+        if (m->owner == nullptr)
+        {
+            MutexOwnerInstallLocked(m, self);
+            sync::SpinLockRelease(g_sched_lock, f);
+            break;
+        }
+
+        KASSERT(self != nullptr, "sched", "contended MutexLock before scheduler task installation");
         WaitQueueBlockCurrentLocked(&m->waiters);
         ScheduleLockedHandoff(f);
+        waited = true;
     }
 
     // After successful acquire — push onto the lockdep held stack.
@@ -7941,16 +8839,27 @@ bool MutexTryLock(Mutex* m)
 {
     KASSERT(m != nullptr, "sched", "MutexTryLock null mutex");
 
+    // A null owner is the unlocked sentinel, never a synthetic bootstrap
+    // owner. Match MutexLock's refusal without touching g_sched_lock or
+    // lockdep before PerCpu task context exists.
+    Task* caller = CurrentTask();
+    if (caller == nullptr || caller->state == TaskState::Dead)
+    {
+        return false;
+    }
+
     // Same SMP rationale as MutexLock: the owner test + claim must
     // run under g_sched_lock or a concurrent hand-off on another
     // CPU races the read-modify-write of m->owner.
     bool ok = false;
     {
         sync::SpinLockGuard guard(g_sched_lock);
-        ok = (m->owner == nullptr);
+        Task* self = Current();
+        KASSERT(self == caller, "sched", "MutexTryLock current Task changed while preemption was disabled");
+        ok = m->owner == nullptr;
         if (ok)
         {
-            m->owner = Current();
+            MutexOwnerInstallLocked(m, self);
         }
     }
     if (ok)
@@ -7968,6 +8877,10 @@ bool MutexTryLock(Mutex* m)
 bool MutexLockTimed(Mutex* m, u64 ticks)
 {
     KASSERT(m != nullptr, "sched", "MutexLockTimed null mutex");
+    if (CurrentTask() == nullptr)
+    {
+        return false;
+    }
 
     // Lockdep edge-walk before the wait/acquire — even on the timed
     // path, the "held → this" edge is real once we decide to wait.
@@ -7976,34 +8889,75 @@ bool MutexLockTimed(Mutex* m, u64 ticks)
     // appears to be held.
     ::duetos::sync::LockdepBeforeAcquire(m->class_id);
 
-    arch::Cli();
-    // Same self-deadlock guard as MutexLock: an owner that re-enters
-    // here skips the fast path and blocks on m->waiters waiting for
-    // its own unlock — best case it burns the full timeout and then
-    // wrongly returns false for a mutex it actually holds. Recursion
-    // is unsupported (sched.h Mutex doc); make the contract uniform
-    // across every blocking acquire entry point.
-    // owner==nullptr || owner!=Current — see the MutexLock guard for
-    // why the nullptr disjunct is load-bearing (early-boot Current()).
-    KASSERT(m->owner == nullptr || m->owner != Current(), "sched",
-            "self-deadlock: MutexLockTimed of a mutex this task already owns");
-    if (m->owner == nullptr)
-    {
-        // Fast path: uncontended acquire.
-        m->owner = Current();
-        arch::Sti();
-        ::duetos::sync::LockdepAfterAcquire(m->class_id);
-        ::duetos::diag::EventTrace(::duetos::diag::kEventMutexAcquire, reinterpret_cast<u64>(m), CurrentTaskId());
-        return true;
-    }
+    // TickReached uses a signed modular difference and is valid only when a
+    // relative deadline is no more than INT64_MAX ticks ahead. Clamp hostile
+    // ABI-scale durations to that representable horizon instead of turning
+    // UINT64_MAX into a deadline that appears to have already expired.
+    const u64 wait_ticks = ClampRelativeWaitTicks(ticks);
 
-    // Slow path with timeout. MutexUnlock's hand-off sets m->owner
-    // = us BEFORE WaitQueueWakeOne wakes us, so a `true` return
-    // means the lock is already ours. A `false` return means the
-    // timer fired first and unlinked us from m->waiters before any
-    // unlock could pick us — m->owner is unchanged.
-    const bool got = WaitQueueBlockTimeout(&m->waiters, ticks);
-    arch::Sti();
+    bool got = false;
+    bool waited = false;
+    bool deadline_ready = false;
+    u64 deadline_tick = 0;
+    for (;;)
+    {
+        sync::IrqFlags f = sync::SpinLockAcquire(g_sched_lock);
+        Task* self = Current();
+
+        if (self != nullptr && m->owner == self)
+        {
+            KASSERT(waited, "sched", "self-deadlock: MutexLockTimed of a mutex this task already owns");
+            KASSERT(m->ownership_class != Mutex::OwnershipClass::Internal || self->owned_internal_mutex_count != 0,
+                    "sched", "timed mutex hand-off omitted internal owner accounting");
+            got = true;
+            sync::SpinLockRelease(g_sched_lock, f);
+            break;
+        }
+
+        // Direct FIFO hand-off above wins even if this task was not dispatched
+        // until after the wall-clock deadline: ownership transferred while the
+        // waiter was still queued. Without ownership, however, a timer-first
+        // wake or a spurious wake dispatched after the deadline must fail
+        // before observing a now-free mutex.
+        KASSERT(!waited || self != nullptr, "sched", "timed mutex waiter resumed without current task");
+        if (waited && (self->wake_by_timeout || TickReached(g_tick_now, deadline_tick)))
+        {
+            self->wake_by_timeout = false;
+            sync::SpinLockRelease(g_sched_lock, f);
+            break;
+        }
+
+        if (m->owner == nullptr)
+        {
+            MutexOwnerInstallLocked(m, self);
+            got = true;
+            sync::SpinLockRelease(g_sched_lock, f);
+            break;
+        }
+
+        if (wait_ticks == 0)
+        {
+            sync::SpinLockRelease(g_sched_lock, f);
+            SchedYield();
+            break;
+        }
+
+        KASSERT(self != nullptr, "sched", "contended MutexLockTimed before scheduler task installation");
+        if (!deadline_ready)
+        {
+            deadline_tick = RelativeDeadlineFromNow(g_tick_now, wait_ticks);
+            deadline_ready = true;
+        }
+        if (TickReached(g_tick_now, deadline_tick))
+        {
+            sync::SpinLockRelease(g_sched_lock, f);
+            break;
+        }
+
+        WaitQueueBlockCurrentUntilLocked(&m->waiters, deadline_tick);
+        ScheduleLockedHandoff(f);
+        waited = true;
+    }
 
     if (got)
     {
@@ -8013,13 +8967,164 @@ bool MutexLockTimed(Mutex* m, u64 ticks)
     return got;
 }
 
+MutexAcquireResult MutexLockCancellable(Mutex* m)
+{
+    // The representable modular-deadline horizon is effectively infinite at
+    // the 100 Hz scheduler tick.  Keeping one state machine avoids semantic
+    // drift between finite and Win32 INFINITE waits.
+    return MutexLockTimedCancellable(m, (~u64{0}) >> 1);
+}
+
+MutexAcquireResult MutexLockTimedCancellable(Mutex* m, u64 ticks)
+{
+    KASSERT(m != nullptr, "sched", "MutexLockTimedCancellable null mutex");
+    KASSERT(CurrentTask() != nullptr, "sched", "MutexLockTimedCancellable before scheduler task installation");
+    KASSERT(m->ownership_class == Mutex::OwnershipClass::AbandonableUserWaitable, "sched",
+            "cancellable acquisition requires an abandonable user waitable");
+    KASSERT_WITH_VALUE(cpu::CriticalNesting() == 0, "sched", "MutexLockTimedCancellable from inside critical section",
+                       cpu::CriticalNesting());
+
+    ::duetos::sync::LockdepBeforeAcquire(m->class_id);
+
+    const u64 wait_ticks = ClampRelativeWaitTicks(ticks);
+    bool waited = false;
+    bool deadline_ready = false;
+    bool handed_off_after_cancel = false;
+    u64 deadline_tick = 0;
+    MutexAcquireResult result = MutexAcquireResult::TimedOut;
+
+    for (;;)
+    {
+        sync::IrqFlags flags = sync::SpinLockAcquire(g_sched_lock);
+        Task* self = Current();
+        KASSERT(self != nullptr, "sched", "cancellable mutex wait without current Task");
+
+        // Kill signalling may either detach us from the wait queue or race a
+        // FIFO unlock that already transferred ownership.  In the latter
+        // case the cancelled task must relinquish that hand-off before its
+        // caller unwinds, otherwise the mutex stays owned by a task that will
+        // immediately exit.  A never-blocked acquire of a free mutex is
+        // allowed to finish; the task-owned ledger will abandon it safely at
+        // the outer cancellation boundary.
+        if (KillPending(self))
+        {
+            if (m->owner == self)
+            {
+                handed_off_after_cancel = MutexRelinquishOwnerLocked(m, self);
+                self->wait_cancellable = false;
+                sync::SpinLockRelease(g_sched_lock, flags);
+                result = MutexAcquireResult::Cancelled;
+                break;
+            }
+            if (!waited && m->owner == nullptr)
+            {
+                MutexOwnerInstallLocked(m, self);
+                self->wait_cancellable = false;
+                sync::SpinLockRelease(g_sched_lock, flags);
+                result = MutexAcquireResult::Acquired;
+                break;
+            }
+            self->wait_cancellable = false;
+            sync::SpinLockRelease(g_sched_lock, flags);
+            result = MutexAcquireResult::Cancelled;
+            break;
+        }
+
+        if (m->owner == self)
+        {
+            KASSERT(waited, "sched", "self-deadlock in cancellable mutex acquisition");
+            self->wait_cancellable = false;
+            sync::SpinLockRelease(g_sched_lock, flags);
+            result = MutexAcquireResult::Acquired;
+            break;
+        }
+
+        if (waited && (self->wake_by_timeout || TickReached(g_tick_now, deadline_tick)))
+        {
+            self->wake_by_timeout = false;
+            self->wait_cancellable = false;
+            sync::SpinLockRelease(g_sched_lock, flags);
+            result = MutexAcquireResult::TimedOut;
+            break;
+        }
+
+        if (m->owner == nullptr)
+        {
+            MutexOwnerInstallLocked(m, self);
+            self->wait_cancellable = false;
+            sync::SpinLockRelease(g_sched_lock, flags);
+            result = MutexAcquireResult::Acquired;
+            break;
+        }
+
+        if (wait_ticks == 0)
+        {
+            self->wait_cancellable = false;
+            sync::SpinLockRelease(g_sched_lock, flags);
+            SchedYield();
+            result = MutexAcquireResult::TimedOut;
+            break;
+        }
+
+        if (!deadline_ready)
+        {
+            deadline_tick = RelativeDeadlineFromNow(g_tick_now, wait_ticks);
+            deadline_ready = true;
+        }
+        if (TickReached(g_tick_now, deadline_tick))
+        {
+            self->wait_cancellable = false;
+            sync::SpinLockRelease(g_sched_lock, flags);
+            result = MutexAcquireResult::TimedOut;
+            break;
+        }
+
+        self->wait_cancellable = true;
+        WaitQueueBlockCurrentUntilLocked(&m->waiters, deadline_tick);
+        ScheduleLockedHandoff(flags);
+        waited = true;
+    }
+
+    if (handed_off_after_cancel)
+    {
+        NeedResched() = true;
+    }
+    if (result == MutexAcquireResult::Acquired)
+    {
+        ::duetos::sync::LockdepAfterAcquire(m->class_id);
+        ::duetos::diag::EventTrace(::duetos::diag::kEventMutexAcquire, reinterpret_cast<u64>(m), CurrentTaskId());
+    }
+    return result;
+}
+
+bool MutexAbandon(Mutex* m)
+{
+    if (m == nullptr)
+    {
+        return false;
+    }
+
+    bool handed_off = false;
+    {
+        sync::SpinLockGuard guard(g_sched_lock);
+        if (m->ownership_class != Mutex::OwnershipClass::AbandonableUserWaitable || m->owner == nullptr)
+        {
+            return false;
+        }
+        Task* departed_owner = m->owner;
+        handed_off = MutexRelinquishOwnerLocked(m, departed_owner);
+    }
+    if (handed_off)
+    {
+        NeedResched() = true;
+    }
+    return true;
+}
+
 void MutexUnlock(Mutex* m)
 {
     KASSERT(m != nullptr, "sched", "MutexUnlock null mutex");
-
-    // Pop from lockdep held stack BEFORE the owner pointer changes —
-    // mirrors the SpinLockRelease ordering.
-    ::duetos::sync::LockdepBeforeRelease(m->class_id);
+    KASSERT(CurrentTask() != nullptr, "sched", "MutexUnlock before scheduler task installation");
 
     // The owner test, the m->owner clear, and the hand-off
     // (wake-one + ownership transfer) are ONE region under
@@ -8035,18 +9140,29 @@ void MutexUnlock(Mutex* m)
     // keeps the wake inside the same hold instead of dropping and
     // retaking g_sched_lock mid-transfer.
     bool nonowner = false;
-    Task* bad_owner = nullptr;
+    u64 bad_owner_tid = ~u64{0};
     bool handed_off = false;
+    bool released_last_for_kill = false;
     {
         sync::SpinLockGuard guard(g_sched_lock);
-        if (m->owner != Current())
+        Task* self = Current();
+        if (m->owner != self)
         {
             nonowner = true;
-            bad_owner = m->owner;
+            // Capture only immutable identity while g_sched_lock pins the
+            // Task. The owner may release, exit, and be reaped immediately
+            // after this guard; a raw Task* must not escape for diagnostics.
+            bad_owner_tid = m->owner != nullptr ? m->owner->id : ~u64{0};
         }
         else
         {
-            m->owner = nullptr;
+            // Validate ownership before mutating lockdep. An invalid release
+            // is an API error, not a logical unlock, and must leave the
+            // caller's held-set intact. Lockdep supports out-of-order removal,
+            // so dropping this class while g_sched_lock is also held is valid.
+            ::duetos::sync::LockdepBeforeRelease(m->class_id);
+            MutexOwnerDropLocked(m, self);
+            released_last_for_kill = self != nullptr && KillPending(self) && self->owned_internal_mutex_count == 0;
             // Hand-off: wake the longest waiter AND transfer
             // ownership directly. Without hand-off a freshly-woken
             // waiter would re-acquire a lock we just cleared,
@@ -8055,7 +9171,7 @@ void MutexUnlock(Mutex* m)
             Task* next = WaitQueueWakeOneLocked(&m->waiters);
             if (next != nullptr)
             {
-                m->owner = next;
+                MutexOwnerInstallLocked(m, next);
                 handed_off = true;
             }
         }
@@ -8077,7 +9193,7 @@ void MutexUnlock(Mutex* m)
         arch::SerialWrite(" class=");
         arch::SerialWriteHex(static_cast<u64>(m->class_id));
         arch::SerialWrite(" actual_owner_tid=");
-        arch::SerialWriteHex((bad_owner != nullptr) ? bad_owner->id : 0);
+        arch::SerialWriteHex(bad_owner_tid);
         arch::SerialWrite(" caller_tid=");
         arch::SerialWriteHex(CurrentTaskId());
         arch::SerialWrite(" caller_rip=");
@@ -8092,7 +9208,7 @@ void MutexUnlock(Mutex* m)
     // the dispatcher already re-checks it after EOI. need_resched
     // is per-CPU, so setting it outside the lock is safe — this
     // mirrors what the public WaitQueueWakeOne did for us before.
-    if (handed_off)
+    if (handed_off || released_last_for_kill)
     {
         NeedResched() = true;
     }
@@ -8158,15 +9274,20 @@ void CondvarWait(Condvar* cv, Mutex* m)
     // keeps the whole sequence indivisible from a peer CPU's view.
     sync::IrqFlags f = sync::SpinLockAcquire(g_sched_lock);
     {
+        Task* t = Current();
+        MutexOwnerDropLocked(m, t);
         // Atomic mutex hand-off: wake the longest-waiting contender
         // and transfer ownership directly to it. Same FIFO-fairness
         // semantics as MutexUnlock; inlined so no sched_lock
         // re-entry is needed.
         Task* successor = WaitQueueWakeOneLocked(&m->waiters);
-        m->owner = successor; // nullptr if no contender, fine
+        if (successor != nullptr)
+            MutexOwnerInstallLocked(m, successor);
 
-        // Enqueue self on the condvar's waiters.
-        Task* t = Current();
+        // Enqueue self on the condvar's waiters. Cancellation intent cannot
+        // abandon this live caller frame; it is consumed only after the wait
+        // wakes naturally, the companion mutex is reacquired, and the caller
+        // unwinds to its outer dispatcher boundary.
         t->state = TaskState::Blocked;
         // Anchor for the hung-task detector — see
         // WaitQueueBlockCurrentLocked above for the rationale.
@@ -8236,27 +9357,20 @@ bool CondvarWaitTimeout(Condvar* cv, Mutex* m, u64 ticks)
     // WaitQueueBlockTimeout.
     sync::IrqFlags f = sync::SpinLockAcquire(g_sched_lock);
     {
+        Task* t = Current();
+        MutexOwnerDropLocked(m, t);
         // Atomic mutex hand-off (identical to CondvarWait).
         Task* successor = WaitQueueWakeOneLocked(&m->waiters);
-        m->owner = successor;
+        if (successor != nullptr)
+            MutexOwnerInstallLocked(m, successor);
 
-        // Enqueue self on condvar's waiters with a deadline, and
-        // also on the sleep queue — the timer path is the second
-        // wake arm, exactly like WaitQueueBlockTimeout.
-        Task* t = Current();
+        // Enqueue self on condvar's waiters with a deadline, and also on the
+        // sleep queue. A pending cancellation still waits for this frame to
+        // unwind; timeout/signalling remains the only dequeue authority.
         t->state = TaskState::Blocked;
-        // Anchor for the hung-task detector — see
-        // WaitQueueBlockCurrentLocked above for the rationale.
         t->block_start_tick = g_tick_now;
         t->next = nullptr;
-        // Saturate exactly like WaitQueueBlockTimeout (line ~3417):
-        // an unclamped g_tick_now + ticks can wrap to 0 for a huge
-        // (Linux-ABI-reachable) timeout, and wake_tick == 0 is the
-        // "not a timed waiter" sentinel — WaitQueueWakeOneLocked
-        // would then skip the sleep-queue unlink and leave this task
-        // linked on the sleep list while it runs, corrupting the
-        // intrusive sleep_next/sleep_prev chain.
-        t->wake_tick = (ticks > (~u64(0) - g_tick_now)) ? ~u64(0) : (g_tick_now + ticks);
+        t->wake_tick = RelativeDeadlineFromNow(g_tick_now, ticks);
         t->waiting_on = &cv->waiters;
         t->wake_by_timeout = false;
         if (cv->waiters.tail == nullptr)
@@ -8283,6 +9397,96 @@ bool CondvarWaitTimeout(Condvar* cv, Mutex* m, u64 ticks)
     return !timed_out;
 }
 
+namespace
+{
+
+WaitQueueBlockResult CondvarWaitCancellableImpl(Condvar* cv, Mutex* m, bool timed, u64 ticks)
+{
+    KASSERT(cv != nullptr, "sched", "CondvarWaitCancellable null condvar");
+    KASSERT(m != nullptr, "sched", "CondvarWaitCancellable null mutex");
+    KASSERT_WITH_VALUE(cpu::CriticalNesting() == 0, "sched", "CondvarWaitCancellable from inside critical section",
+                       cpu::CriticalNesting());
+
+    // Match the ordinary condvar interrupt contract while validating ownership
+    // before touching lockdep. The running owner cannot change underneath
+    // itself; g_sched_lock below closes the cross-CPU kill/enqueue race.
+    arch::Cli();
+    Task* self = Current();
+    // The public contract promises that `m` is held on every return.  An
+    // ownership violation cannot be represented by WaitQueueBlockResult, so
+    // fail-stop instead of returning a plausible timeout with no mutex held.
+    KASSERT(self != nullptr && m->owner == self, "sched",
+            "CondvarWaitCancellable called without the companion mutex held");
+    // Pop `m` before acquiring g_sched_lock, exactly like the ordinary
+    // CondvarWait path. A kill can race this bookkeeping step, so re-check
+    // under g_sched_lock and restore the held-stack entry if no logical mutex
+    // release occurred.
+    ::duetos::sync::LockdepBeforeRelease(m->class_id);
+    sync::IrqFlags flags = sync::SpinLockAcquire(g_sched_lock);
+    self = Current();
+    KASSERT(self != nullptr && m->owner == self, "sched", "cancellable condvar ownership changed before enqueue");
+    if (KillPending(self))
+    {
+        sync::SpinLockRelease(g_sched_lock, flags);
+        ::duetos::sync::LockdepAfterAcquire(m->class_id);
+        arch::Sti();
+        return WaitQueueBlockResult::Cancelled;
+    }
+
+    MutexOwnerDropLocked(m, self);
+    Task* successor = WaitQueueWakeOneLocked(&m->waiters);
+    if (successor != nullptr)
+        MutexOwnerInstallLocked(m, successor);
+
+    // Preserve the legacy zero-timeout contract: atomically drop/hand off the
+    // companion mutex, then yield and re-acquire without joining the condvar
+    // queue. The cancellation check above is serialized with that decision;
+    // a later sticky request is delivered at the outer boundary.
+    if (timed && ticks == 0)
+    {
+        sync::SpinLockRelease(g_sched_lock, flags);
+        arch::Sti();
+        SchedYield();
+        MutexLock(m);
+        return WaitQueueBlockResult::TimedOut;
+    }
+
+    self->wake_by_cancel = false;
+    self->wait_cancellable = true;
+    if (timed)
+    {
+        const u64 wait_ticks = ClampRelativeWaitTicks(ticks);
+        const u64 deadline_tick = RelativeDeadlineFromNow(g_tick_now, wait_ticks);
+        WaitQueueBlockCurrentUntilLocked(&cv->waiters, deadline_tick);
+    }
+    else
+    {
+        WaitQueueBlockCurrentLocked(&cv->waiters);
+    }
+
+    ScheduleLockedHandoff(flags);
+    const WaitQueueBlockResult wait_result = ClassifyCancellableWaitResume(timed);
+
+    // ScheduleLockedHandoff restored the IF state captured after arch::Cli(),
+    // so re-enable interrupts before an ordinary (non-cancellable) companion
+    // mutex reacquire. Cleanup may not return until this mutex is held.
+    arch::Sti();
+    MutexLock(m);
+    return wait_result;
+}
+
+} // namespace
+
+WaitQueueBlockResult CondvarWaitCancellable(Condvar* cv, Mutex* m)
+{
+    return CondvarWaitCancellableImpl(cv, m, false, 0);
+}
+
+WaitQueueBlockResult CondvarWaitTimeoutCancellable(Condvar* cv, Mutex* m, u64 ticks)
+{
+    return CondvarWaitCancellableImpl(cv, m, true, ticks);
+}
+
 void CondvarSignal(Condvar* cv)
 {
     KASSERT(cv != nullptr, "sched", "CondvarSignal null condvar");
@@ -8302,7 +9506,12 @@ u64 CondvarBroadcast(Condvar* cv)
 
 } // namespace duetos::sched
 
+extern "C" void SchedUserBootstrapComplete()
+{
+    duetos::sched::SchedUserBootstrapComplete();
+}
+
 extern "C" [[noreturn]] void SchedExitC()
 {
-    duetos::sched::SchedExit();
+    duetos::sched::SchedExitFromTrampoline();
 }
