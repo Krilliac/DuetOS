@@ -311,11 +311,34 @@ inline constexpr void CapSetRemove(CapSet& s, Cap c)
     s.bits &= ~(1ULL << static_cast<u32>(c));
 }
 
+/// Immutable process-incarnation identity for authorities that can outlive a
+/// scheduler lookup. `identity` is minted from a non-wrapping namespace;
+/// `pid` remains the current lookup label. Persistent owners must compare both
+/// fields so future PID recycling cannot retarget stale authority.
+struct ProcessKey
+{
+    u64 identity;
+    u64 pid;
+};
+
+inline constexpr ProcessKey kInvalidProcessKey{0, 0};
+
+constexpr bool ProcessKeyIsValid(ProcessKey key)
+{
+    return key.identity != 0 && key.pid != 0;
+}
+
+constexpr bool operator==(ProcessKey lhs, ProcessKey rhs)
+{
+    return lhs.identity == rhs.identity && lhs.pid == rhs.pid;
+}
+
 struct Process
 {
     static constexpr u64 kNameCap = 64;
 
     u64 pid;
+    u64 process_identity;
     // ProcessCreate copies every caller-supplied label here. Syscall spawn
     // paths build their leaf name on the syscall stack, so retaining the
     // incoming pointer would leave both process diagnostics and task labels
@@ -1695,6 +1718,10 @@ inline Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet cap
 {
     return ProcessCreate(name, as, caps, root, user_code_va, user_stack_va, tick_budget, caps);
 }
+
+/// Snapshot the immutable incarnation and current PID of a retained Process.
+/// Both fields are non-zero for every successfully-created Process.
+ProcessKey ProcessKeySnapshot(const Process* process);
 
 /// Bump refcount. Use when a second holder appears (a future thread
 /// spawn that shares the process, a borrow into a non-owning table).

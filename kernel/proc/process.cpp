@@ -46,6 +46,25 @@ namespace
 constinit u64 g_next_pid = 1;
 constinit u64 g_live_processes = 0;
 
+u64 MintProcessKey()
+{
+    u64 observed = __atomic_load_n(&g_next_pid, __ATOMIC_RELAXED);
+    for (;;)
+    {
+        // PID/identity zero is invalid and UINT64_MAX is the terminal
+        // exhaustion sentinel. Refuse a new Process rather than wrapping the
+        // namespace onto an earlier live or externally-retained identity.
+        if (observed == ~u64{0})
+            return 0;
+        const u64 next = observed + 1;
+        if (__atomic_compare_exchange_n(&g_next_pid, &observed, next, /*weak=*/false, __ATOMIC_RELAXED,
+                                        __ATOMIC_RELAXED))
+        {
+            return observed;
+        }
+    }
+}
+
 CapSet AtomicCapsSnapshot(const CapSet& caps)
 {
     return CapSet{__atomic_load_n(&caps.bits, __ATOMIC_ACQUIRE)};
@@ -332,13 +351,19 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     // smoke task slept waiting for a sentinel that never came.
     memset(p, 0, sizeof(Process));
 
-    // Atomic fetch-add: ProcessCreate can run concurrently on
-    // multiple CPUs (there is no global spawn lock), so a plain
-    // post-increment would race two CPUs onto the SAME pid — and
-    // pids gate IPC / event-ring / handle delivery, so a collision
-    // mis-routes one process's notifications to another. Matches
-    // the CAS discipline the refcount path already uses.
-    p->pid = __atomic_fetch_add(&g_next_pid, 1, __ATOMIC_RELAXED);
+    // ProcessCreate can run concurrently on multiple CPUs. Mint one exact,
+    // non-wrapping incarnation and use it as the current legacy PID. A
+    // terminal namespace refuses creation instead of aliasing an earlier
+    // ProcessKey retained by a service or other long-lived authority.
+    const u64 process_identity = MintProcessKey();
+    if (process_identity == 0)
+    {
+        KLOG_ERROR("core/process", "ProcessCreate: ProcessKey namespace exhausted");
+        mm::KFree(p);
+        return nullptr;
+    }
+    p->pid = process_identity;
+    p->process_identity = process_identity;
     u64 name_len = 0;
     while (name[name_len] != '\0' && name_len + 1 < Process::kNameCap)
     {
@@ -572,6 +597,14 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
 
     KBP_PROBE_V(::duetos::debug::ProbeId::kProcessCreate, p->pid);
     return p;
+}
+
+ProcessKey ProcessKeySnapshot(const Process* process)
+{
+    KASSERT(process != nullptr, "core/process", "ProcessKeySnapshot null process");
+    const ProcessKey key{process->process_identity, process->pid};
+    KASSERT(ProcessKeyIsValid(key), "core/process", "Process owns invalid immutable identity");
+    return key;
 }
 
 void ProcessRetain(Process* p)
