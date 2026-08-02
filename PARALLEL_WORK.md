@@ -3930,3 +3930,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Extend runtime pristine validation for carried directory service identity
 - **Claimed**: 2026-08-02T10:18:49Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] gui-message-policy-recovery-20260802
+- **Session**: `Codex-GuiMessagePolicy-Recovery-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/drivers/video/gui_message_policy.h,kernel/drivers/video/gui_message_policy.cpp,tests/host/test_gui_message_policy.cpp`
+- **Description**: Audit and publish pure hostile GUI message authorization policy
+- **Claimed**: 2026-08-02T10:19:21Z
+- **Status**: IN PROGRESS
