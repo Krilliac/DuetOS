@@ -239,4 +239,10 @@ inline constexpr u32 kTimerTickMs = 50;
 
 void TimerTick();
 
+/// Destroy every TCP object owned by one exact interface publication. The
+/// stack calls this only after closing interface admission and draining all
+/// admitted packet/TX operations, before allowing the slot to rebind. Stale
+/// TcbIds are invalidated and all waiters are woken.
+u32 RetireInterface(NetInterfaceBinding binding);
+
 } // namespace duetos::net::tcp

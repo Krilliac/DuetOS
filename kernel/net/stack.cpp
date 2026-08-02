@@ -46,9 +46,14 @@
 #include "core/panic.h"
 #include "drivers/net/net.h"
 #include "sched/sched.h"
+#include "sync/spinlock.h"
 #include "util/string.h"
 #include "util/compiler.h"
 #include "util/random.h"
+
+#if defined(_MSC_VER)
+#include <atomic>
+#endif
 
 namespace duetos::net
 {
@@ -70,6 +75,112 @@ ArpStats g_arp_stats = {};
 Ipv4Stats g_ipv4_stats = {};
 IcmpStats g_icmp_stats = {};
 
+namespace interface_lifetime
+{
+
+inline u64 LoadAcquire(const u64* value)
+{
+#if defined(_MSC_VER)
+    return std::atomic_ref<u64>(*const_cast<u64*>(value)).load(std::memory_order_acquire);
+#else
+    return __atomic_load_n(value, __ATOMIC_ACQUIRE);
+#endif
+}
+
+inline void StoreRelease(u64* value, u64 desired)
+{
+#if defined(_MSC_VER)
+    std::atomic_ref<u64>(*value).store(desired, std::memory_order_release);
+#else
+    __atomic_store_n(value, desired, __ATOMIC_RELEASE);
+#endif
+}
+
+inline bool CompareExchange(u64* value, u64* expected, u64 desired)
+{
+#if defined(_MSC_VER)
+    return std::atomic_ref<u64>(*value).compare_exchange_strong(*expected, desired, std::memory_order_acq_rel,
+                                                                std::memory_order_acquire);
+#else
+    return __atomic_compare_exchange_n(value, expected, desired, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+#endif
+}
+
+inline u64 FetchAdd(u64* value, u64 increment)
+{
+#if defined(_MSC_VER)
+    return std::atomic_ref<u64>(*value).fetch_add(increment, std::memory_order_relaxed);
+#else
+    return __atomic_fetch_add(value, increment, __ATOMIC_RELAXED);
+#endif
+}
+
+struct alignas(8) OperationGate
+{
+    u64 state;
+};
+
+inline constexpr u64 kOpen = u64(1) << 63;
+inline constexpr u64 kPinsMask = ~kOpen;
+
+bool Open(OperationGate& gate)
+{
+    u64 expected = 0;
+    return CompareExchange(&gate.state, &expected, kOpen);
+}
+
+bool TryPin(OperationGate& gate)
+{
+    u64 observed = LoadAcquire(&gate.state);
+    while ((observed & kOpen) != 0)
+    {
+        if ((observed & kPinsMask) == kPinsMask)
+            return false;
+        u64 expected = observed;
+        if (CompareExchange(&gate.state, &expected, observed + 1))
+            return true;
+        observed = expected;
+    }
+    return false;
+}
+
+void Close(OperationGate& gate)
+{
+    u64 observed = LoadAcquire(&gate.state);
+    while ((observed & kOpen) != 0)
+    {
+        u64 expected = observed;
+        if (CompareExchange(&gate.state, &expected, observed & kPinsMask))
+            return;
+        observed = expected;
+    }
+}
+
+void Release(OperationGate& gate)
+{
+    u64 observed = LoadAcquire(&gate.state);
+    while ((observed & kPinsMask) != 0)
+    {
+        u64 expected = observed;
+        if (CompareExchange(&gate.state, &expected, observed - 1))
+            return;
+        observed = expected;
+    }
+    KASSERT(false, "net/stack", "interface operation pin underflow");
+}
+
+bool IsOpen(const OperationGate& gate)
+{
+    return (LoadAcquire(&gate.state) & kOpen) != 0;
+}
+
+u64 PinCount(const OperationGate& gate)
+{
+    return LoadAcquire(&gate.state) & kPinsMask;
+}
+
+} // namespace interface_lifetime
+
 // Ping state — single-outstanding in v0. NetPingArm captures the
 // id/seq + send tick; the ICMP path in Ipv4HandleIncoming stamps
 // the reply tick + flips g_ping_replied when a matching reply
@@ -81,6 +192,8 @@ constinit u16 g_ping_seq = 0;
 constinit u64 g_ping_send_ticks = 0;
 constinit u64 g_ping_reply_ticks = 0;
 constinit Ipv4Address g_ping_reply_ip = {};
+constinit u32 g_ping_iface_index = kInvalidNetInterfaceIndex;
+constinit u64 g_ping_binding_generation = 0;
 
 // Per-interface binding populated by NetStackBindInterface.
 // Keyed by iface_index; cap matches kMaxNics so every discovered
@@ -89,13 +202,122 @@ constinit Ipv4Address g_ping_reply_ip = {};
 constexpr u32 kMaxInterfaces = 4;
 struct Interface
 {
+    interface_lifetime::OperationGate operations;
+    u64 generation;
     bool bound;
+    bool retiring;
     MacAddress mac;
     Ipv4Address ip;
-    NetTxFn tx;
+    NetTxFn legacy_tx;
+    NetTxContextFn context_tx;
+    void* driver_context;
     IfaceCounters counters;
 };
 Interface g_interfaces[kMaxInterfaces] = {};
+
+// Serialises bind/unbind publication metadata and count recomputation. It is
+// never held across a TX callback, RX dispatch, scheduler wait, or TCP lock.
+// OperationGate pins keep an ordinary published row stable after this lock is
+// dropped. During final unbind, `retiring` prevents replacement publication
+// while exact-generation TCP state is retired without this lock held.
+constinit sync::SpinLock g_interface_lock = {
+    .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
+
+struct InterfaceOperation
+{
+    u32 iface_index;
+    u64 generation;
+    MacAddress mac;
+    Ipv4Address ip;
+    NetTxFn legacy_tx;
+    NetTxContextFn context_tx;
+    void* driver_context;
+};
+
+bool InterfaceOperationAcquire(u32 iface_index, u64 expected_generation, InterfaceOperation& out)
+{
+    if (iface_index >= kMaxInterfaces)
+        return false;
+    Interface& ifc = g_interfaces[iface_index];
+    if (!interface_lifetime::TryPin(ifc.operations))
+        return false;
+
+    // Once pinned, unbind may close admission but cannot clear or replace the
+    // row until this receipt is released. The metadata lock additionally
+    // serializes DHCP's live IP update with snapshots; callback/context and
+    // generation are otherwise immutable for the publication's lifetime.
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_interface_lock);
+    const u64 generation = interface_lifetime::LoadAcquire(&ifc.generation);
+    if (expected_generation != 0 && generation != expected_generation)
+    {
+        sync::SpinLockRelease(g_interface_lock, flags);
+        interface_lifetime::Release(ifc.operations);
+        return false;
+    }
+    out.iface_index = iface_index;
+    out.generation = generation;
+    out.mac = ifc.mac;
+    out.ip = ifc.ip;
+    out.legacy_tx = ifc.legacy_tx;
+    out.context_tx = ifc.context_tx;
+    out.driver_context = ifc.driver_context;
+    sync::SpinLockRelease(g_interface_lock, flags);
+    return true;
+}
+
+void InterfaceOperationRelease(const InterfaceOperation& operation)
+{
+    KASSERT(operation.iface_index < kMaxInterfaces, "net/stack", "interface operation index invalid");
+    interface_lifetime::Release(g_interfaces[operation.iface_index].operations);
+}
+
+class InterfaceOperationGuard
+{
+  public:
+    explicit InterfaceOperationGuard(u32 iface_index, u64 expected_generation = 0)
+        : m_acquired(InterfaceOperationAcquire(iface_index, expected_generation, m_operation))
+    {
+    }
+
+    ~InterfaceOperationGuard()
+    {
+        if (m_acquired)
+            InterfaceOperationRelease(m_operation);
+    }
+
+    InterfaceOperationGuard(const InterfaceOperationGuard&) = delete;
+    InterfaceOperationGuard& operator=(const InterfaceOperationGuard&) = delete;
+
+    explicit operator bool() const { return m_acquired; }
+    const InterfaceOperation& operation() const { return m_operation; }
+
+  private:
+    InterfaceOperation m_operation{};
+    bool m_acquired;
+};
+
+u64 InterfaceGenerationRead(u32 iface_index)
+{
+    if (iface_index >= kMaxInterfaces)
+        return 0;
+    return interface_lifetime::LoadAcquire(&g_interfaces[iface_index].generation);
+}
+
+bool InterfaceGenerationIsOpen(u32 iface_index, u64 generation)
+{
+    if (iface_index >= kMaxInterfaces || generation == 0)
+        return false;
+    Interface& ifc = g_interfaces[iface_index];
+    return interface_lifetime::IsOpen(ifc.operations) && InterfaceGenerationRead(iface_index) == generation;
+}
+
+void InterfaceCountRecomputeLocked()
+{
+    g_interface_count = 0;
+    for (u32 i = 0; i < kMaxInterfaces; ++i)
+        if (g_interfaces[i].bound)
+            g_interface_count = i + 1;
+}
 
 // Map an IP protocol number to the firewall's enum. Anything we
 // don't recognise is treated as Any so a rule that targets only
@@ -121,20 +343,24 @@ firewall::Proto ToFwProto(u8 ip_proto)
 // driver's bound TX trampoline. Mirrors the rx side for symmetry —
 // every TX site that previously called `ifc.tx` directly now goes
 // through here so the firewall and counters can't be bypassed.
-bool IfaceTx(u32 iface_index, const void* frame, u64 frame_len)
+bool IfaceTxForGeneration(u32 iface_index, u64 expected_generation, const void* frame, u64 frame_len)
 {
     if (iface_index >= kMaxInterfaces)
     {
         return false;
     }
-    Interface& ifc = g_interfaces[iface_index];
-    if (!ifc.bound || ifc.tx == nullptr)
+    InterfaceOperation operation{};
+    if (!InterfaceOperationAcquire(iface_index, expected_generation, operation))
     {
-        ++ifc.counters.tx_dropped_unbound;
+        // A closed gate has no generation that an entrant may safely charge:
+        // teardown may already be clearing these counters and a replacement
+        // may publish immediately afterwards. Do not touch per-binding state
+        // unless the operation owns a lifetime pin.
         return false;
     }
     if (frame == nullptr || frame_len < 14)
     {
+        InterfaceOperationRelease(operation);
         return false;
     }
 
@@ -175,18 +401,35 @@ bool IfaceTx(u32 iface_index, const void* frame, u64 frame_len)
                                                               src_port, dst_port, tcp_flags, nullptr);
         if (verdict == firewall::Action::Deny)
         {
-            ++ifc.counters.tx_dropped_firewall;
+            interface_lifetime::FetchAdd(&g_interfaces[iface_index].counters.tx_dropped_firewall, 1);
+            InterfaceOperationRelease(operation);
             return false;
         }
     }
 
-    if (!ifc.tx(iface_index, frame, frame_len))
+    bool sent = false;
+    if (operation.context_tx != nullptr)
     {
+        sent = operation.context_tx(operation.driver_context, iface_index, frame, frame_len);
+    }
+    else if (operation.legacy_tx != nullptr)
+    {
+        sent = operation.legacy_tx(iface_index, frame, frame_len);
+    }
+    if (!sent)
+    {
+        InterfaceOperationRelease(operation);
         return false;
     }
-    ++ifc.counters.tx_packets;
-    ifc.counters.tx_bytes += frame_len;
+    interface_lifetime::FetchAdd(&g_interfaces[iface_index].counters.tx_packets, 1);
+    interface_lifetime::FetchAdd(&g_interfaces[iface_index].counters.tx_bytes, frame_len);
+    InterfaceOperationRelease(operation);
     return true;
+}
+
+bool IfaceTx(u32 iface_index, const void* frame, u64 frame_len)
+{
+    return IfaceTxForGeneration(iface_index, /*expected_generation=*/0, frame, frame_len);
 }
 
 // UDP bindings. Fixed-cap table; v0 has a small number of ports
@@ -215,6 +458,7 @@ struct DhcpState
     };
     Stage stage;
     u32 iface_index;
+    u64 binding_generation;
     u32 xid;
     Ipv4Address offered_ip;
     Ipv4Address server_ip;
@@ -249,18 +493,19 @@ bool IsZeroIp(Ipv4Address ip)
 
 bool SendArpRequest(u32 iface_index, Ipv4Address target_ip)
 {
-    if (iface_index >= kMaxInterfaces || !g_interfaces[iface_index].bound)
+    InterfaceOperation operation{};
+    if (!InterfaceOperationAcquire(iface_index, /*expected_generation=*/0, operation))
         return false;
-    const Interface& ifc = g_interfaces[iface_index];
-    if (ifc.tx == nullptr || IsZeroIp(ifc.ip))
+    if ((operation.context_tx == nullptr && operation.legacy_tx == nullptr) || IsZeroIp(operation.ip))
     {
         ++g_arp_stats.tx_failures;
+        InterfaceOperationRelease(operation);
         return false;
     }
 
     u8 req[42] = {};
     memset(req, 0xFF, 6); // Ethernet broadcast dst
-    memcpy(req + 6, ifc.mac.octets, 6);
+    memcpy(req + 6, operation.mac.octets, 6);
     req[12] = 0x08;
     req[13] = 0x06; // ARP
     req[14] = 0x00;
@@ -271,14 +516,15 @@ bool SendArpRequest(u32 iface_index, Ipv4Address target_ip)
     req[19] = 0x04;
     req[20] = 0x00;
     req[21] = 0x01; // request
-    memcpy(req + 22, ifc.mac.octets, 6);
-    memcpy(req + 28, ifc.ip.octets, 4);
+    memcpy(req + 22, operation.mac.octets, 6);
+    memcpy(req + 28, operation.ip.octets, 4);
     memcpy(req + 38, target_ip.octets, 4);
 
     ++g_arp_stats.tx_requests;
     const bool ok = IfaceTx(iface_index, req, sizeof(req));
     if (!ok)
         ++g_arp_stats.tx_failures;
+    InterfaceOperationRelease(operation);
     return ok;
 }
 
@@ -538,14 +784,13 @@ void NetStackInit()
     // Protocol-reply self-tests. Bind iface index 1 to a capturing
     // TX hook, inject a synthetic ARP request, verify the captured
     // frame is a valid ARP reply with our MAC + IP. Then do the
-    // same for an ICMP echo request. Real drivers bind iface 0,
-    // so the index-1 slot stays out of the way. Left bound after
-    // the test — no driver drains it, no side effect.
+    // same for an ICMP echo request. The exact receipt is unbound
+    // at the end so a later real driver can safely reuse index 1.
     static u8 s_last_tx[1600];
     static u64 s_last_tx_len;
     struct SelfTestTx
     {
-        static bool Fn(u32 /*iface*/, const void* frame, u64 len)
+        static bool Fn(void* /*context*/, u32 /*iface*/, const void* frame, u64 len)
         {
             if (len > sizeof(s_last_tx))
                 return false;
@@ -559,7 +804,10 @@ void NetStackInit()
     const Ipv4Address test_ip{{192, 168, 1, 1}};
     const MacAddress peer_mac{{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF}};
     const Ipv4Address peer_ip{{192, 168, 1, 100}};
-    NetStackBindInterface(/*iface_index=*/1, test_mac, test_ip, &SelfTestTx::Fn);
+    NetInterfaceBinding selftest_binding = kInvalidNetInterfaceBinding;
+    KASSERT(
+        NetStackBindInterfaceOwned(/*iface_index=*/1, test_mac, test_ip, &SelfTestTx::Fn, nullptr, &selftest_binding),
+        "net/stack", "reply self-test interface bind failed");
 
     // ARP request probe.
     {
@@ -584,7 +832,7 @@ void NetStackInit()
         memcpy(req + 38, test_ip.octets, 4);
 
         s_last_tx_len = 0;
-        NetStackInjectRx(/*iface_index=*/1, req, sizeof(req));
+        NetStackInjectRx(selftest_binding, req, sizeof(req));
 
         const bool length_ok = (s_last_tx_len == 42);
         const bool oper_ok = length_ok && s_last_tx[21] == 0x02; // reply
@@ -637,7 +885,7 @@ void NetStackInit()
         req[34 + 3] = u8(icmp_ck & 0xFF);
 
         s_last_tx_len = 0;
-        NetStackInjectRx(/*iface_index=*/1, req, sizeof(req));
+        NetStackInjectRx(selftest_binding, req, sizeof(req));
 
         const bool length_ok = (s_last_tx_len == 46);
         const bool type_ok = length_ok && s_last_tx[34] == 0x00; // echo reply
@@ -651,32 +899,44 @@ void NetStackInit()
         else
             core::Log(core::LogLevel::Warn, "net/icmp", "echo-reply self-test: malformed reply captured");
     }
+
+    KASSERT(NetStackUnbindInterface(selftest_binding, /*drain_timeout_ticks=*/0) == NetInterfaceUnbindResult::Unbound,
+            "net/stack", "reply self-test interface unbind failed");
 }
 
 u64 InterfaceCount()
 {
-    return g_interface_count;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_interface_lock);
+    const u64 count = g_interface_count;
+    sync::SpinLockRelease(g_interface_lock, flags);
+    return count;
 }
 
 bool InterfaceIsBound(u32 iface_index)
 {
     if (iface_index >= kMaxInterfaces)
         return false;
-    return g_interfaces[iface_index].bound;
+    return interface_lifetime::IsOpen(g_interfaces[iface_index].operations);
 }
 
 Ipv4Address InterfaceIp(u32 iface_index)
 {
-    if (iface_index >= kMaxInterfaces || !g_interfaces[iface_index].bound)
+    InterfaceOperation operation{};
+    if (!InterfaceOperationAcquire(iface_index, /*expected_generation=*/0, operation))
         return Ipv4Address{};
-    return g_interfaces[iface_index].ip;
+    const Ipv4Address ip = operation.ip;
+    InterfaceOperationRelease(operation);
+    return ip;
 }
 
 MacAddress InterfaceMac(u32 iface_index)
 {
-    if (iface_index >= kMaxInterfaces || !g_interfaces[iface_index].bound)
+    InterfaceOperation operation{};
+    if (!InterfaceOperationAcquire(iface_index, /*expected_generation=*/0, operation))
         return MacAddress{};
-    return g_interfaces[iface_index].mac;
+    const MacAddress mac = operation.mac;
+    InterfaceOperationRelease(operation);
+    return mac;
 }
 
 u32 ArpEntryCount()
@@ -688,6 +948,8 @@ u32 ArpEntryCount()
         if (e.expiry_ticks == 0)
             continue;
         if (now >= e.expiry_ticks)
+            continue;
+        if (!InterfaceGenerationIsOpen(e.iface_index, e.binding_generation))
             continue;
         ++live;
     }
@@ -736,13 +998,19 @@ const ArpEntry* ArpLookup(u32 iface_index, Ipv4Address ip)
 {
     const u64 now = NowTicks();
     const u32 h = ArpHash(iface_index, ip);
+    const u64 binding_generation = InterfaceGenerationRead(iface_index);
+    if (!InterfaceGenerationIsOpen(iface_index, binding_generation))
+    {
+        ++g_arp_stats.lookups_miss;
+        return nullptr;
+    }
 
     u8* link = &g_arp_hash_heads[h];
     while (*link != kArpEntryNone)
     {
         const u8 idx = *link;
         ArpEntry& e = g_arp_cache[idx];
-        if (e.iface_index == iface_index && IpEq(e.ip, ip))
+        if (e.iface_index == iface_index && e.binding_generation == binding_generation && IpEq(e.ip, ip))
         {
             if (now >= e.expiry_ticks)
             {
@@ -768,6 +1036,9 @@ void ArpInsert(u32 iface_index, Ipv4Address ip, MacAddress mac)
 {
     const u64 now = NowTicks();
     const u32 h = ArpHash(iface_index, ip);
+    const u64 binding_generation = InterfaceGenerationRead(iface_index);
+    if (!InterfaceGenerationIsOpen(iface_index, binding_generation))
+        return;
 
     // Refresh an existing entry if it's already on this bucket's chain.
     //
@@ -797,7 +1068,7 @@ void ArpInsert(u32 iface_index, Ipv4Address ip, MacAddress mac)
             break;
         }
         ArpEntry& e = g_arp_cache[idx];
-        if (e.iface_index == iface_index && IpEq(e.ip, ip))
+        if (e.iface_index == iface_index && e.binding_generation == binding_generation && IpEq(e.ip, ip))
         {
             e.mac = mac;
             e.expiry_ticks = now + kArpEntryTtlTicks;
@@ -811,7 +1082,8 @@ void ArpInsert(u32 iface_index, Ipv4Address ip, MacAddress mac)
     u8 free_idx = kArpEntryNone;
     for (u32 i = 0; i < kArpCacheCap; ++i)
     {
-        if (g_arp_cache[i].expiry_ticks == 0 || g_arp_cache[i].expiry_ticks <= now)
+        if (g_arp_cache[i].expiry_ticks == 0 || g_arp_cache[i].expiry_ticks <= now ||
+            !InterfaceGenerationIsOpen(g_arp_cache[i].iface_index, g_arp_cache[i].binding_generation))
         {
             free_idx = static_cast<u8>(i);
             break;
@@ -852,6 +1124,7 @@ void ArpInsert(u32 iface_index, Ipv4Address ip, MacAddress mac)
     e.ip = ip;
     e.mac = mac;
     e.iface_index = iface_index;
+    e.binding_generation = binding_generation;
     e.expiry_ticks = now + kArpEntryTtlTicks;
     e.next_idx = g_arp_hash_heads[h];
     g_arp_hash_heads[h] = free_idx;
@@ -909,12 +1182,11 @@ bool ArpHandleIncoming(u32 iface_index, const void* frame, u64 len)
     // ARP request: reply iff we own the target IP on a bound
     // interface. Also learn the requester's mapping so the next
     // L3 transmit path can cache-hit without doing its own ARP.
-    if (iface_index >= kMaxInterfaces || !g_interfaces[iface_index].bound)
-    {
+    const InterfaceOperationGuard interface_guard(iface_index);
+    if (!interface_guard)
         return false;
-    }
-    const Interface& ifc = g_interfaces[iface_index];
-    if (!IpEq(tpa, ifc.ip))
+    const InterfaceOperation& operation = interface_guard.operation();
+    if (!IpEq(tpa, operation.ip))
     {
         return false; // not asking about us
     }
@@ -929,7 +1201,7 @@ bool ArpHandleIncoming(u32 iface_index, const void* frame, u64 len)
     for (u64 i = 0; i < 6; ++i)
         reply[i] = sha.octets[i];
     for (u64 i = 0; i < 6; ++i)
-        reply[6 + i] = ifc.mac.octets[i];
+        reply[6 + i] = operation.mac.octets[i];
     reply[12] = 0x08;
     reply[13] = 0x06;
     // ARP header: htype=1, ptype=0x0800, hlen=6, plen=4, oper=2.
@@ -943,9 +1215,9 @@ bool ArpHandleIncoming(u32 iface_index, const void* frame, u64 len)
     reply[21] = 0x02; // reply
     // Sender (us).
     for (u64 i = 0; i < 6; ++i)
-        reply[22 + i] = ifc.mac.octets[i];
+        reply[22 + i] = operation.mac.octets[i];
     for (u64 i = 0; i < 4; ++i)
-        reply[28 + i] = ifc.ip.octets[i];
+        reply[28 + i] = operation.ip.octets[i];
     // Target (requester).
     for (u64 i = 0; i < 6; ++i)
         reply[32 + i] = sha.octets[i];
@@ -1122,13 +1394,14 @@ bool Ipv4HandleIncoming(u32 iface_index, const void* frame, u64 len)
         // and the IPv4 destination matches our address (we don't
         // reply on behalf of other hosts). ICMP starts after the
         // IPv4 header options.
-        if (iface_index >= kMaxInterfaces || !g_interfaces[iface_index].bound)
+        const InterfaceOperationGuard interface_guard(iface_index);
+        if (!interface_guard)
             break;
-        const Interface& ifc = g_interfaces[iface_index];
+        const InterfaceOperation& operation = interface_guard.operation();
         Ipv4Address dst = {};
         for (u64 i = 0; i < 4; ++i)
             dst.octets[i] = ip[16 + i];
-        if (!IpEq(dst, ifc.ip))
+        if (!IpEq(dst, operation.ip))
             break;
 
         const u64 ip_header_bytes = u64(ihl) * 4;
@@ -1139,7 +1412,8 @@ bool Ipv4HandleIncoming(u32 iface_index, const void* frame, u64 len)
         // Echo Reply (type=0) — match against the pending ping
         // request. If id + seq match, stash the reply arrival
         // tick so the shell's wait loop can print the RTT.
-        if (icmp[0] == 0x00 && g_ping_pending)
+        if (icmp[0] == 0x00 && g_ping_pending && g_ping_iface_index == iface_index &&
+            g_ping_binding_generation == operation.generation)
         {
             const u16 id = (u16(icmp[4]) << 8) | u16(icmp[5]);
             const u16 seq = (u16(icmp[6]) << 8) | u16(icmp[7]);
@@ -1175,7 +1449,7 @@ bool Ipv4HandleIncoming(u32 iface_index, const void* frame, u64 len)
 
         // Ethernet: swap src/dst, ethertype = IPv4.
         memcpy(reply, eth + 6, 6); // dst = incoming src
-        memcpy(reply + 6, ifc.mac.octets, 6);
+        memcpy(reply + 6, operation.mac.octets, 6);
         reply[12] = 0x08;
         reply[13] = 0x00;
 
@@ -1346,11 +1620,12 @@ bool NetUdpBindRx(u16 local_port, UdpRxFn handler)
 bool NetUdpSend(u32 iface_index, const MacAddress& dst_mac, Ipv4Address dst_ip, u16 dst_port, Ipv4Address src_ip,
                 u16 src_port, const void* payload, u64 payload_len)
 {
-    if (iface_index >= kMaxInterfaces || !g_interfaces[iface_index].bound)
+    const InterfaceOperationGuard interface_guard(iface_index);
+    if (!interface_guard)
         return false;
-    const Interface& ifc = g_interfaces[iface_index];
+    const InterfaceOperation& operation = interface_guard.operation();
     const u64 frame_len = 14 + 20 + 8 + payload_len;
-    if (frame_len > kEthFrameMaxBytes)
+    if (frame_len > kEthFrameMaxBytes || (payload == nullptr && payload_len != 0))
     {
         ++g_udp_stats.tx_failures;
         return false;
@@ -1364,7 +1639,7 @@ bool NetUdpSend(u32 iface_index, const MacAddress& dst_mac, Ipv4Address dst_ip, 
     for (u64 i = 0; i < 6; ++i)
         frame[i] = dst_mac.octets[i];
     for (u64 i = 0; i < 6; ++i)
-        frame[6 + i] = ifc.mac.octets[i];
+        frame[6 + i] = operation.mac.octets[i];
     frame[12] = 0x08;
     frame[13] = 0x00;
 
@@ -1543,9 +1818,12 @@ void DhcpBuildPayload(u8* buf, u64 cap, u8 msg_type, u32 xid, const MacAddress& 
 void DhcpSendDiscover(u32 iface_index)
 {
     const DhcpState& st = g_dhcp[iface_index];
-    const Interface& ifc = g_interfaces[iface_index];
+    const InterfaceOperationGuard interface_guard(iface_index, st.binding_generation);
+    if (!interface_guard)
+        return;
+    const InterfaceOperation& operation = interface_guard.operation();
     u8 payload[kDhcpFrameBytes];
-    DhcpBuildPayload(payload, sizeof(payload), kDhcpMsgDiscover, st.xid, ifc.mac, false, {}, {});
+    DhcpBuildPayload(payload, sizeof(payload), kDhcpMsgDiscover, st.xid, operation.mac, false, {}, {});
     const MacAddress bcast_mac{{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}};
     const Ipv4Address bcast_ip{{0xFF, 0xFF, 0xFF, 0xFF}};
     const Ipv4Address any_ip{{0, 0, 0, 0}};
@@ -1556,9 +1834,13 @@ void DhcpSendDiscover(u32 iface_index)
 void DhcpSendRequest(u32 iface_index)
 {
     const DhcpState& st = g_dhcp[iface_index];
-    const Interface& ifc = g_interfaces[iface_index];
+    const InterfaceOperationGuard interface_guard(iface_index, st.binding_generation);
+    if (!interface_guard)
+        return;
+    const InterfaceOperation& operation = interface_guard.operation();
     u8 payload[kDhcpFrameBytes];
-    DhcpBuildPayload(payload, sizeof(payload), kDhcpMsgRequest, st.xid, ifc.mac, true, st.offered_ip, st.server_ip);
+    DhcpBuildPayload(payload, sizeof(payload), kDhcpMsgRequest, st.xid, operation.mac, true, st.offered_ip,
+                     st.server_ip);
     const MacAddress bcast_mac{{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}};
     const Ipv4Address bcast_ip{{0xFF, 0xFF, 0xFF, 0xFF}};
     const Ipv4Address any_ip{{0, 0, 0, 0}};
@@ -1585,6 +1867,8 @@ void DhcpOnUdp(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, 
     if (iface_index >= kMaxInterfaces)
         return;
     DhcpState& st = g_dhcp[iface_index];
+    if (!InterfaceGenerationIsOpen(iface_index, st.binding_generation))
+        return;
     if (payload == nullptr || len < kDhcpFrameBytes)
         return;
     const auto* buf = static_cast<const u8*>(payload);
@@ -1640,7 +1924,12 @@ void DhcpOnUdp(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, 
 
         // Rebind the interface's IP so subsequent outbound traffic
         // uses the leased address.
-        g_interfaces[iface_index].ip = yiaddr;
+        const sync::IrqFlags flags = sync::SpinLockAcquire(g_interface_lock);
+        Interface& ifc = g_interfaces[iface_index];
+        if (ifc.bound && InterfaceGenerationRead(iface_index) == st.binding_generation &&
+            interface_lifetime::IsOpen(ifc.operations))
+            ifc.ip = yiaddr;
+        sync::SpinLockRelease(g_interface_lock, flags);
 
         {
             arch::SerialLineGuard line;
@@ -1667,17 +1956,20 @@ void DhcpOnUdp(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, 
 
 bool DhcpStart(u32 iface_index)
 {
-    if (iface_index >= kMaxInterfaces || !g_interfaces[iface_index].bound)
+    const InterfaceOperationGuard interface_guard(iface_index);
+    if (!interface_guard)
         return false;
+    const InterfaceOperation& operation = interface_guard.operation();
     DhcpState& st = g_dhcp[iface_index];
     if (st.stage == DhcpState::Stage::Discovered)
         return false; // already in flight on THIS interface
 
     st = {};
     st.iface_index = iface_index;
+    st.binding_generation = operation.generation;
     // Deterministic xid derived from MAC + a constant so repeated
     // starts don't reuse xid=0 (DHCP servers filter that).
-    const MacAddress& mac = g_interfaces[iface_index].mac;
+    const MacAddress& mac = operation.mac;
     st.xid = 0xC05A0000u ^
              ((u32(mac.octets[2]) << 24) | (u32(mac.octets[3]) << 16) | (u32(mac.octets[4]) << 8) | u32(mac.octets[5]));
     st.stage = DhcpState::Stage::Discovered;
@@ -1690,7 +1982,10 @@ DhcpLease DhcpLeaseRead(u32 iface_index)
 {
     if (iface_index >= kMaxInterfaces)
         return DhcpLease{};
-    return g_dhcp[iface_index].lease;
+    const DhcpState& state = g_dhcp[iface_index];
+    if (!InterfaceGenerationIsOpen(iface_index, state.binding_generation))
+        return DhcpLease{};
+    return state.lease;
 }
 
 DhcpLease DhcpLeaseRead()
@@ -1699,7 +1994,7 @@ DhcpLease DhcpLeaseRead()
     // so the wired NIC (iface 0) is preferred over loopback/wireless
     // test interfaces when both are up.
     for (u32 i = 0; i < kMaxInterfaces; ++i)
-        if (g_dhcp[i].lease.valid)
+        if (g_dhcp[i].lease.valid && InterfaceGenerationIsOpen(i, g_dhcp[i].binding_generation))
             return g_dhcp[i].lease;
     return DhcpLease{};
 }
@@ -1710,9 +2005,10 @@ DhcpLease DhcpLeaseRead()
 
 bool NetIcmpSendEcho(u32 iface_index, Ipv4Address dst_ip, u16 id, u16 seq)
 {
-    if (iface_index >= kMaxInterfaces || !g_interfaces[iface_index].bound)
+    const InterfaceOperationGuard interface_guard(iface_index);
+    if (!interface_guard)
         return false;
-    const Interface& ifc = g_interfaces[iface_index];
+    const InterfaceOperation& operation = interface_guard.operation();
     const ArpEntry* arp = ArpLookup(iface_index, dst_ip);
     if (arp == nullptr)
         return false;
@@ -1724,7 +2020,7 @@ bool NetIcmpSendEcho(u32 iface_index, Ipv4Address dst_ip, u16 id, u16 seq)
     for (u64 i = 0; i < 6; ++i)
         frame[i] = arp->mac.octets[i];
     for (u64 i = 0; i < 6; ++i)
-        frame[6 + i] = ifc.mac.octets[i];
+        frame[6 + i] = operation.mac.octets[i];
     frame[12] = 0x08;
     frame[13] = 0x00;
     // IPv4.
@@ -1743,7 +2039,7 @@ bool NetIcmpSendEcho(u32 iface_index, Ipv4Address dst_ip, u16 id, u16 seq)
     ip[10] = 0;
     ip[11] = 0;
     for (u64 i = 0; i < 4; ++i)
-        ip[12 + i] = ifc.ip.octets[i];
+        ip[12 + i] = operation.ip.octets[i];
     for (u64 i = 0; i < 4; ++i)
         ip[16 + i] = dst_ip.octets[i];
     const u16 ip_ck = Ipv4HeaderChecksum(ip, 20);
@@ -1765,6 +2061,8 @@ bool NetIcmpSendEcho(u32 iface_index, Ipv4Address dst_ip, u16 id, u16 seq)
     icmp[2] = u8(icmp_ck >> 8);
     icmp[3] = u8(icmp_ck & 0xFF);
 
+    g_ping_iface_index = iface_index;
+    g_ping_binding_generation = operation.generation;
     if (!IfaceTx(iface_index, frame, sizeof(frame)))
     {
         ++g_icmp_stats.tx_failures;
@@ -1782,6 +2080,9 @@ void NetPingArm(u16 id, u16 seq)
     g_ping_seq = seq;
     g_ping_send_ticks = NowTicks();
     g_ping_reply_ticks = 0;
+    g_ping_reply_ip = {};
+    g_ping_iface_index = kInvalidNetInterfaceIndex;
+    g_ping_binding_generation = 0;
 }
 
 PingResult NetPingRead()
@@ -1804,6 +2105,8 @@ constinit bool g_dns_pending = false;
 constinit bool g_dns_resolved = false;
 constinit u16 g_dns_xid = 0;
 constinit Ipv4Address g_dns_result_ip = {};
+constinit u32 g_dns_iface_index = kInvalidNetInterfaceIndex;
+constinit u64 g_dns_binding_generation = 0;
 
 // ML-03: source-validation + anti-spoof state. A reply is only
 // accepted when it arrives from the resolver we queried, from
@@ -1836,8 +2139,8 @@ u64 DnsSkipName(const u8* buf, u64 offset, u64 len)
 
 void DnsOnUdp(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, const void* payload, u64 len)
 {
-    (void)iface_index;
-    if (!g_dns_pending)
+    if (!g_dns_pending || iface_index != g_dns_iface_index ||
+        !InterfaceGenerationIsOpen(iface_index, g_dns_binding_generation))
         return;
     // ML-03: reject spoofed / off-path replies. Only accept a
     // datagram that came from the resolver we asked, from the DNS
@@ -1949,9 +2252,10 @@ u32 EncodeDnsName(const char* name, u8* out, u32 cap)
 
 bool NetDnsQueryA(u32 iface_index, Ipv4Address resolver_ip, const char* name)
 {
-    if (iface_index >= kMaxInterfaces || !g_interfaces[iface_index].bound || name == nullptr)
+    const InterfaceOperationGuard interface_guard(iface_index);
+    if (!interface_guard || name == nullptr)
         return false;
-    const Interface& ifc = g_interfaces[iface_index];
+    const InterfaceOperation& operation = interface_guard.operation();
 
     // Resolve the L2 destination. First try direct resolver IP;
     // on miss, resolve and use the gateway.
@@ -2004,6 +2308,8 @@ bool NetDnsQueryA(u32 iface_index, Ipv4Address resolver_ip, const char* name)
     g_dns_resolved = false;
     g_dns_xid = xid;
     g_dns_result_ip = {};
+    g_dns_iface_index = iface_index;
+    g_dns_binding_generation = operation.generation;
     // ML-03: remember the resolver so DnsOnUdp can source-validate
     // the reply.
     g_dns_resolver_ip = resolver_ip;
@@ -2023,11 +2329,22 @@ bool NetDnsQueryA(u32 iface_index, Ipv4Address resolver_ip, const char* name)
         // and the demux table is left in a sane state.
         g_dns_pending = false;
         g_dns_src_port = 0;
+        g_dns_iface_index = kInvalidNetInterfaceIndex;
+        g_dns_binding_generation = 0;
         return false;
     }
     g_dns_src_port = sport;
 
-    return NetUdpSend(iface_index, dst_mac, resolver_ip, /*dst_port=*/53, ifc.ip, sport, qbuf, qpos);
+    const bool sent = NetUdpSend(iface_index, dst_mac, resolver_ip, /*dst_port=*/53, operation.ip, sport, qbuf, qpos);
+    if (!sent)
+    {
+        NetUdpBindRx(sport, nullptr);
+        g_dns_pending = false;
+        g_dns_src_port = 0;
+        g_dns_iface_index = kInvalidNetInterfaceIndex;
+        g_dns_binding_generation = 0;
+    }
+    return sent;
 }
 
 DnsResult NetDnsResultRead()
@@ -2048,6 +2365,9 @@ namespace
 constinit bool g_ntp_pending = false;
 constinit bool g_ntp_synced = false;
 constinit NtpResult g_ntp_result = {};
+constinit u32 g_ntp_iface_index = kInvalidNetInterfaceIndex;
+constinit u64 g_ntp_binding_generation = 0;
+constinit Ipv4Address g_ntp_server_ip = {};
 constexpr u16 kNtpEphemeralPort = 32123;
 // NTP epoch (1900-01-01) → Unix epoch (1970-01-01) offset in
 // seconds. 70 years × 365.25 × 86400 rounded to the right value.
@@ -2055,11 +2375,9 @@ constexpr u64 kNtpToUnixEpochOffset = 2208988800ULL;
 
 void NtpOnUdp(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, const void* payload, u64 len)
 {
-    (void)iface_index;
-    (void)src_ip;
-    (void)src_port;
-    (void)dst_port;
-    if (!g_ntp_pending || len < 48)
+    if (!g_ntp_pending || iface_index != g_ntp_iface_index ||
+        !InterfaceGenerationIsOpen(iface_index, g_ntp_binding_generation) || !IpEq(src_ip, g_ntp_server_ip) ||
+        src_port != 123 || dst_port != kNtpEphemeralPort || payload == nullptr || len < 48)
         return;
     const auto* b = static_cast<const u8*>(payload);
     // byte 0 low 3 bits = Mode; server replies are Mode 4.
@@ -2089,9 +2407,10 @@ void NtpOnUdp(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, c
 
 bool NetNtpQuery(u32 iface_index, Ipv4Address server_ip)
 {
-    if (iface_index >= kMaxInterfaces || !g_interfaces[iface_index].bound)
+    const InterfaceOperationGuard interface_guard(iface_index);
+    if (!interface_guard)
         return false;
-    const Interface& ifc = g_interfaces[iface_index];
+    const InterfaceOperation& operation = interface_guard.operation();
 
     const ArpEntry* arp = ResolveL2Destination(iface_index, server_ip);
     MacAddress dst_mac = {};
@@ -2108,9 +2427,30 @@ bool NetNtpQuery(u32 iface_index, Ipv4Address server_ip)
     g_ntp_pending = true;
     g_ntp_synced = false;
     g_ntp_result = {};
-    NetUdpBindRx(kNtpEphemeralPort, NtpOnUdp);
+    g_ntp_iface_index = iface_index;
+    g_ntp_binding_generation = operation.generation;
+    g_ntp_server_ip = server_ip;
+    NetUdpBindRx(kNtpEphemeralPort, nullptr);
+    if (!NetUdpBindRx(kNtpEphemeralPort, NtpOnUdp))
+    {
+        g_ntp_pending = false;
+        g_ntp_iface_index = kInvalidNetInterfaceIndex;
+        g_ntp_binding_generation = 0;
+        g_ntp_server_ip = {};
+        return false;
+    }
 
-    return NetUdpSend(iface_index, dst_mac, server_ip, /*dst_port=*/123, ifc.ip, kNtpEphemeralPort, pkt, sizeof(pkt));
+    const bool sent = NetUdpSend(iface_index, dst_mac, server_ip, /*dst_port=*/123, operation.ip, kNtpEphemeralPort,
+                                 pkt, sizeof(pkt));
+    if (!sent)
+    {
+        NetUdpBindRx(kNtpEphemeralPort, nullptr);
+        g_ntp_pending = false;
+        g_ntp_iface_index = kInvalidNetInterfaceIndex;
+        g_ntp_binding_generation = 0;
+        g_ntp_server_ip = {};
+    }
+    return sent;
 }
 
 NtpResult NetNtpResultRead()
@@ -2118,15 +2458,44 @@ NtpResult NetNtpResultRead()
     return g_ntp_result;
 }
 
-bool NetStackBindInterface(u32 iface_index, MacAddress mac, Ipv4Address ip, NetTxFn tx)
+namespace
 {
-    if (iface_index >= kMaxInterfaces || tx == nullptr)
+
+bool BindInterfaceInternal(u32 iface_index, MacAddress mac, Ipv4Address ip, NetTxFn legacy_tx,
+                           NetTxContextFn context_tx, void* driver_context, NetInterfaceBinding* out_binding)
+{
+    if (iface_index >= kMaxInterfaces || (legacy_tx == nullptr) == (context_tx == nullptr))
         return false;
-    g_interfaces[iface_index].mac = mac;
-    g_interfaces[iface_index].ip = ip;
-    g_interfaces[iface_index].tx = tx;
-    g_interfaces[iface_index].bound = true;
-    g_interfaces[iface_index].counters = IfaceCounters{};
+
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_interface_lock);
+    Interface& ifc = g_interfaces[iface_index];
+    const u64 prior_generation = InterfaceGenerationRead(iface_index);
+    if (ifc.bound || ifc.retiring || interface_lifetime::PinCount(ifc.operations) != 0 || prior_generation == ~u64(0))
+    {
+        sync::SpinLockRelease(g_interface_lock, flags);
+        return false;
+    }
+
+    const u64 generation = prior_generation + 1;
+    ifc.mac = mac;
+    ifc.ip = ip;
+    ifc.legacy_tx = legacy_tx;
+    ifc.context_tx = context_tx;
+    ifc.driver_context = driver_context;
+    ifc.counters = {};
+    g_dhcp[iface_index] = {};
+    g_dhcp[iface_index].iface_index = iface_index;
+    interface_lifetime::StoreRelease(&ifc.generation, generation);
+    if (!interface_lifetime::Open(ifc.operations))
+    {
+        ifc.legacy_tx = nullptr;
+        ifc.context_tx = nullptr;
+        ifc.driver_context = nullptr;
+        sync::SpinLockRelease(g_interface_lock, flags);
+        return false;
+    }
+    ifc.bound = true;
+
     // Interface bindings arrive AFTER NetStackInit's NicCount() scan
     // (drivers bind asynchronously at NIC bring-up / DHCP completion),
     // so the init-time count is stale — it never saw these slots. Keep
@@ -2138,6 +2507,10 @@ bool NetStackBindInterface(u32 iface_index, MacAddress mac, Ipv4Address ip, NetT
     {
         g_interface_count = iface_index + 1;
     }
+    if (out_binding != nullptr)
+        *out_binding = NetInterfaceBinding{iface_index, generation};
+    sync::SpinLockRelease(g_interface_lock, flags);
+
     arch::SerialWrite("[net-stack] iface ");
     arch::SerialWriteHex(iface_index);
     arch::SerialWrite(" bound ip=");
@@ -2152,16 +2525,183 @@ bool NetStackBindInterface(u32 iface_index, MacAddress mac, Ipv4Address ip, NetT
     return true;
 }
 
-IfaceCounters InterfaceCountersRead(u32 iface_index)
+} // namespace
+
+bool NetStackBindInterface(u32 iface_index, MacAddress mac, Ipv4Address ip, NetTxFn tx)
 {
-    if (iface_index >= kMaxInterfaces)
-    {
-        return IfaceCounters{};
-    }
-    return g_interfaces[iface_index].counters;
+    return BindInterfaceInternal(iface_index, mac, ip, tx, nullptr, nullptr, nullptr);
 }
 
-void NetStackInjectRx(u32 iface_index, const void* frame, u64 len)
+bool NetStackBindInterfaceOwned(u32 iface_index, MacAddress mac, Ipv4Address ip, NetTxContextFn tx,
+                                void* driver_context, NetInterfaceBinding* out_binding)
+{
+    if (out_binding == nullptr)
+        return false;
+    *out_binding = kInvalidNetInterfaceBinding;
+    return BindInterfaceInternal(iface_index, mac, ip, nullptr, tx, driver_context, out_binding);
+}
+
+bool NetStackAcquireInterface(u32 iface_index, NetInterfaceSnapshot* out_snapshot)
+{
+    if (out_snapshot == nullptr)
+        return false;
+    *out_snapshot = NetInterfaceSnapshot{.binding = kInvalidNetInterfaceBinding, .mac = {}, .ip = {}};
+
+    InterfaceOperation operation{};
+    if (!InterfaceOperationAcquire(iface_index, /*expected_generation=*/0, operation))
+        return false;
+    out_snapshot->binding = NetInterfaceBinding{operation.iface_index, operation.generation};
+    out_snapshot->mac = operation.mac;
+    out_snapshot->ip = operation.ip;
+    return true;
+}
+
+void NetStackReleaseInterface(NetInterfaceBinding binding)
+{
+    KASSERT(NetInterfaceBindingIsValid(binding) && binding.iface_index < kMaxInterfaces, "net/stack",
+            "invalid interface pin receipt");
+    KASSERT(InterfaceGenerationRead(binding.iface_index) == binding.generation, "net/stack",
+            "stale interface pin receipt");
+    InterfaceOperation operation{};
+    operation.iface_index = binding.iface_index;
+    operation.generation = binding.generation;
+    InterfaceOperationRelease(operation);
+}
+
+bool NetStackTransmit(NetInterfaceBinding binding, const void* frame, u64 len)
+{
+    if (!NetInterfaceBindingIsValid(binding))
+        return false;
+    return IfaceTxForGeneration(binding.iface_index, binding.generation, frame, len);
+}
+
+NetInterfaceUnbindResult NetStackUnbindInterface(NetInterfaceBinding binding, u64 drain_timeout_ticks)
+{
+    if (!NetInterfaceBindingIsValid(binding) || binding.iface_index >= kMaxInterfaces)
+        return NetInterfaceUnbindResult::StaleBinding;
+
+    Interface& ifc = g_interfaces[binding.iface_index];
+    sync::IrqFlags flags = sync::SpinLockAcquire(g_interface_lock);
+    if (InterfaceGenerationRead(binding.iface_index) != binding.generation)
+    {
+        sync::SpinLockRelease(g_interface_lock, flags);
+        return NetInterfaceUnbindResult::StaleBinding;
+    }
+    if (!ifc.bound && !ifc.retiring)
+    {
+        sync::SpinLockRelease(g_interface_lock, flags);
+        return NetInterfaceUnbindResult::Unbound;
+    }
+    if (ifc.bound)
+    {
+        // One atomic transition closes admission and preserves the already-
+        // published pin count. There is no check-then-increment window in
+        // which teardown could mistake an entrant for a drained interface.
+        interface_lifetime::Close(ifc.operations);
+        ifc.bound = false;
+        ifc.retiring = true;
+        InterfaceCountRecomputeLocked();
+    }
+    sync::SpinLockRelease(g_interface_lock, flags);
+
+    for (u64 waited = 0; interface_lifetime::PinCount(ifc.operations) != 0; ++waited)
+    {
+        if (waited >= drain_timeout_ticks)
+            return NetInterfaceUnbindResult::DrainTimedOut;
+        sched::SchedSleepTicks(1);
+    }
+
+    // Persistent TCP work owns this same exact receipt. Retire every TCB
+    // before the slot can re-open so timer/retransmit work cannot survive
+    // into the replacement generation. Do this without g_interface_lock:
+    // another interface may hold g_tcb_lock while its exact TX snapshots
+    // metadata. The retiring state still rejects replacement publication.
+    // SendSegment also uses exact TX, so any concurrently finishing segment
+    // fails closed once admission is shut.
+    (void)tcp::RetireInterface(binding);
+
+    flags = sync::SpinLockAcquire(g_interface_lock);
+    if (InterfaceGenerationRead(binding.iface_index) != binding.generation)
+    {
+        sync::SpinLockRelease(g_interface_lock, flags);
+        return NetInterfaceUnbindResult::StaleBinding;
+    }
+    if (!ifc.retiring)
+    {
+        sync::SpinLockRelease(g_interface_lock, flags);
+        return NetInterfaceUnbindResult::Unbound;
+    }
+    KASSERT(interface_lifetime::PinCount(ifc.operations) == 0, "net/stack", "unbind finalised with live pins");
+
+    // Callback and context are cleared only after the exact generation's
+    // final admitted operation released its pin. A timeout above deliberately
+    // skips this block so the driver can quarantine and retry safely.
+    ifc.legacy_tx = nullptr;
+    ifc.context_tx = nullptr;
+    ifc.driver_context = nullptr;
+    ifc.mac = {};
+    ifc.ip = {};
+    ifc.counters = {};
+    g_dhcp[binding.iface_index] = {};
+
+    if (g_ping_iface_index == binding.iface_index && g_ping_binding_generation == binding.generation)
+    {
+        g_ping_pending = false;
+        g_ping_replied = false;
+        g_ping_iface_index = kInvalidNetInterfaceIndex;
+        g_ping_binding_generation = 0;
+    }
+    if (g_dns_iface_index == binding.iface_index && g_dns_binding_generation == binding.generation)
+    {
+        if (g_dns_src_port != 0)
+            NetUdpBindRx(g_dns_src_port, nullptr);
+        g_dns_pending = false;
+        g_dns_resolved = false;
+        g_dns_src_port = 0;
+        g_dns_iface_index = kInvalidNetInterfaceIndex;
+        g_dns_binding_generation = 0;
+    }
+    if (g_ntp_iface_index == binding.iface_index && g_ntp_binding_generation == binding.generation)
+    {
+        NetUdpBindRx(kNtpEphemeralPort, nullptr);
+        g_ntp_pending = false;
+        g_ntp_synced = false;
+        g_ntp_iface_index = kInvalidNetInterfaceIndex;
+        g_ntp_binding_generation = 0;
+        g_ntp_server_ip = {};
+    }
+
+    ifc.retiring = false;
+    InterfaceCountRecomputeLocked();
+    sync::SpinLockRelease(g_interface_lock, flags);
+
+    arch::SerialWrite("[net-stack] iface unbound generation=");
+    arch::SerialWriteHex(binding.generation);
+    arch::SerialWrite("\n");
+    return NetInterfaceUnbindResult::Unbound;
+}
+
+IfaceCounters InterfaceCountersRead(u32 iface_index)
+{
+    const InterfaceOperationGuard interface_guard(iface_index);
+    if (!interface_guard)
+        return IfaceCounters{};
+
+    const IfaceCounters& counters = g_interfaces[iface_index].counters;
+    return IfaceCounters{
+        .rx_packets = interface_lifetime::LoadAcquire(&counters.rx_packets),
+        .rx_bytes = interface_lifetime::LoadAcquire(&counters.rx_bytes),
+        .tx_packets = interface_lifetime::LoadAcquire(&counters.tx_packets),
+        .tx_bytes = interface_lifetime::LoadAcquire(&counters.tx_bytes),
+        .tx_dropped_firewall = interface_lifetime::LoadAcquire(&counters.tx_dropped_firewall),
+        .tx_dropped_unbound = interface_lifetime::LoadAcquire(&counters.tx_dropped_unbound),
+    };
+}
+
+namespace
+{
+
+void InjectRxInternal(u32 iface_index, u64 expected_generation, const void* frame, u64 len)
 {
     if (frame == nullptr || len < 14)
         return;
@@ -2182,8 +2722,11 @@ void NetStackInjectRx(u32 iface_index, const void* frame, u64 len)
     // makes the invariant uniform.
     if (iface_index >= kMaxInterfaces)
         return;
-    ++g_interfaces[iface_index].counters.rx_packets;
-    g_interfaces[iface_index].counters.rx_bytes += len;
+    const InterfaceOperationGuard interface_guard(iface_index, expected_generation);
+    if (!interface_guard)
+        return;
+    interface_lifetime::FetchAdd(&g_interfaces[iface_index].counters.rx_packets, 1);
+    interface_lifetime::FetchAdd(&g_interfaces[iface_index].counters.rx_bytes, len);
     const auto* eth = static_cast<const u8*>(frame);
     const u16 ether_type = (u16(eth[12]) << 8) | u16(eth[13]);
     switch (ether_type)
@@ -2204,6 +2747,20 @@ void NetStackInjectRx(u32 iface_index, const void* frame, u64 len)
         // otherwise not tracked (v0 intentionally narrow).
         break;
     }
+}
+
+} // namespace
+
+void NetStackInjectRx(u32 iface_index, const void* frame, u64 len)
+{
+    InjectRxInternal(iface_index, /*expected_generation=*/0, frame, len);
+}
+
+void NetStackInjectRx(NetInterfaceBinding binding, const void* frame, u64 len)
+{
+    if (!NetInterfaceBindingIsValid(binding))
+        return;
+    InjectRxInternal(binding.iface_index, binding.generation, frame, len);
 }
 
 } // namespace duetos::net
