@@ -3354,3 +3354,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Wire existing browser smoke profile into runner and CI with exact runtime markers and correct docs
 - **Claimed**: 2026-08-02T02:23:54Z
 - **Status**: COMPLETED @ 2026-08-02T02:26:48Z
+
+### [ACTIVE] service-bootstrap-qemu-verdict-20260802
+- **Session**: `Codex-ServiceBootstrapVerdict-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tools/test/test-service-bootstrap-live-contract.py`
+- **Description**: Make every QEMU profile require the live service package and runtime anchor
+- **Claimed**: 2026-08-02T02:27:51Z
+- **Status**: IN PROGRESS
