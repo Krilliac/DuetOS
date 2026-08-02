@@ -3466,3 +3466,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Atomically publish lifecycle exit observer and ServiceDirectory identity at first Task publication with exact rollback
 - **Claimed**: 2026-08-02T04:14:16Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] root-arp-copyout-contract-join-20260802
+- **Session**: `Nathan-998`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tools/test/test-net-stack-restart-contract.py`
+- **Description**: Update restart structural oracle for lock-safe ARP copy-out caller
+- **Claimed**: 2026-08-02T04:15:11Z
+- **Status**: IN PROGRESS
