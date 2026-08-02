@@ -4018,3 +4018,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Audit
 - **Claimed**: 2026-08-02T11:18:26Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] handle-table-extraction-recovery-20260802
+- **Session**: `Codex-HandleTable-Recovery-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/ipc/handle_table.h,kernel/ipc/handle_table.cpp,kernel/ipc/handle_table_selftest.cpp,kernel/core/boot_bringup.cpp,tools/test/test-handle-publication-reservation-contract.py`
+- **Description**: Audit
+- **Claimed**: 2026-08-02T11:18:59Z
+- **Status**: IN PROGRESS
