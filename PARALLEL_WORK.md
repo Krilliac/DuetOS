@@ -3554,3 +3554,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: ProcessKey-aware accepted ServiceEndpoint owner release before raw Process HandleTable drain with durable bounded Busy retry
 - **Claimed**: 2026-08-02T05:04:26Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] root-service-endpoint-contract-drift-20260802
+- **Session**: `Codex-Root-EndpointContract-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tools/test/test-service-endpoint-contract.py`
+- **Description**: Repair
+- **Claimed**: 2026-08-02T05:38:22Z
+- **Status**: IN PROGRESS
