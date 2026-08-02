@@ -617,7 +617,12 @@ void NetStackInit()
     const u64 n = drivers::net::NicCount();
     for (u64 i = 0; i < n; ++i)
     {
-        const drivers::net::NicInfo& nic = drivers::net::Nic(i);
+        drivers::net::NicInfo nic{};
+        if (!drivers::net::NicSnapshot(i, &nic))
+        {
+            core::LogWithValue(core::LogLevel::Warn, "net/stack", "NIC snapshot unavailable during bind scan", i);
+            continue;
+        }
         arch::SerialWrite("[net-stack] would bind iface ");
         arch::SerialWriteHex(i);
         arch::SerialWrite(" to nic ");
