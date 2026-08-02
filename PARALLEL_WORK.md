@@ -3651,10 +3651,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T06:27:41Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] displayd-dormant-contract-drift-20260802
+### [DONE] displayd-dormant-contract-drift-20260802
 - **Session**: `Codex-DisplaydContractDrift-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/test/test-displayd-engine-contract.py`
 - **Description**: Repair stale dormant displayd entrypoint assertion after artifact engine link while preserving authenticated-ingress boundary
 - **Claimed**: 2026-08-02T06:32:10Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T06:32:49Z
