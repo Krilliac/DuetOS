@@ -3498,3 +3498,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Generation-safe bounded write lease that pins exact user mappings across irreversible syscall operations without holding VM locks
 - **Claimed**: 2026-08-02T04:34:36Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-endpoint-drain-handoff-20260802
+- **Session**: `Nathan-1618`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/service_endpoint.cpp`
+- **Description**: Lost-wakeup-proof drain-driver retry handoff for last operation release
+- **Claimed**: 2026-08-02T04:41:10Z
+- **Status**: IN PROGRESS
