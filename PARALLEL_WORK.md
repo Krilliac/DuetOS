@@ -4058,3 +4058,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Recover
 - **Claimed**: 2026-08-02T11:54:21Z
 - **Status**: COMPLETED @ 2026-08-02T12:04:16Z
+
+### [ACTIVE] pcnet-virtio-restart-recovery-20260802
+- **Session**: `Codex-PcnetVirtioRestart-Recovery-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/drivers/net/pcnet.h,kernel/drivers/net/pcnet.cpp,tests/host/test_pcnet_restart.cpp,tools/test/test-pcnet-restart-contract.py,kernel/drivers/virtio/virtio_net.h,kernel/drivers/virtio/virtio_net.cpp,tests/host/test_virtio_net_restart.cpp,tools/test/test-virtio-net-restart-contract.py`
+- **Description**: Recover and publish restart-safe PCnet and Virtio-net lifecycle closures
+- **Claimed**: 2026-08-02T12:07:01Z
+- **Status**: IN PROGRESS
