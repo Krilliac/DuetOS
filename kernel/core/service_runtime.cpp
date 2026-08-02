@@ -180,6 +180,15 @@ ServiceRuntimeDriveDeferredAcceptedResultV1 DriveDeferredAcceptedFailure(
                                                        released_channels, pending_channels};
 }
 
+ServiceRuntimeDriveExitReapResultV1 DriveExitReapFailure(
+    ServiceRuntimeStatusV1 runtime_status, ServiceExitReapStatus acquire_status = ServiceExitReapStatus::NotInitialized,
+    ServiceExitObserverStatus observer_status = ServiceExitObserverStatus::NotInitialized)
+{
+    ServiceExitReapPumpResult pump{};
+    pump.status = acquire_status;
+    return ServiceRuntimeDriveExitReapResultV1{runtime_status, acquire_status, observer_status, pump};
+}
+
 ServiceRuntimeDeferAcceptedProcessResultV1 DeferAcceptedProcess(ServiceRuntimeV1* runtime, ProcessKey process)
 {
     if (runtime == nullptr || !ProcessKeyIsValid(process))
@@ -211,6 +220,34 @@ ServiceRuntimeDriveDeferredAcceptedResultV1 DriveDeferredAccepted(ServiceRuntime
     return ServiceRuntimeDriveDeferredAcceptedResultV1{ServiceRuntimeStatusV1::Ok, driven.status,
                                                        driven.endpoint_status, driven.released_channels,
                                                        driven.pending_channels};
+}
+
+ServiceRuntimeDriveExitReapResultV1 DriveExitReap(ServiceRuntimeV1* runtime, u64 now_ns)
+{
+    if (runtime == nullptr)
+    {
+        return DriveExitReapFailure(ServiceRuntimeStatusV1::NullArgument, ServiceExitReapStatus::NullArgument,
+                                    ServiceExitObserverStatus::NullArgument);
+    }
+
+    ServiceRuntimeSnapshotV1 snapshot{};
+    const ServiceRuntimeStatusV1 inspected = ServiceRuntimeInspectV1(runtime, &snapshot);
+    if (inspected != ServiceRuntimeStatusV1::Ok)
+        return DriveExitReapFailure(inspected);
+
+    ServiceExitReapAcquireResult acquired{ServiceExitReapStatus::NoEvent, ServiceExitObserverStatus::NoEvent,
+                                          kInvalidServiceExitReapRowTicket};
+    for (u32 attempt = 0; attempt < kServiceRuntimeExitReapAcquireBudgetV1; ++attempt)
+    {
+        acquired = ServiceExitReapLedgerAcquireFromObserver(&runtime->exit_reap_ledger, &runtime->exit_observer);
+        if (acquired.status != ServiceExitReapStatus::Ok)
+            break;
+    }
+    const ServiceExitReapPumpResult pumped =
+        ServiceExitReapLedgerPump(&runtime->exit_reap_ledger, &runtime->lifecycle, &runtime->directory,
+                                  &runtime->exit_observer, now_ns, kServiceRuntimeExitReapPumpStepBudgetV1);
+    return ServiceRuntimeDriveExitReapResultV1{ServiceRuntimeStatusV1::Ok, acquired.status, acquired.observer_status,
+                                               pumped};
 }
 
 ServiceRuntimeInitializeResultV1 InitializeRuntime(ServiceRuntimeV1* runtime, ServiceBootstrapStageRuntimeV1* stage,
@@ -387,6 +424,24 @@ ServiceRuntimeDriveDeferredAcceptedResultV1 ServiceRuntimeDriveDeferredAcceptedK
     }
     return DriveDeferredAccepted(runtime);
 }
+
+ServiceRuntimeDriveExitReapResultV1 ServiceRuntimeDriveExitReapKernelV1(u64 now_ns)
+{
+    ServiceRuntimeV1* runtime = ServiceRuntimeKernelV1();
+    if (runtime == nullptr)
+    {
+        const u32 raw_state = RuntimeStateLoad(&g_kernel_service_runtime);
+        if (raw_state == static_cast<u32>(ServiceRuntimeStateV1::Uninitialized) ||
+            raw_state == static_cast<u32>(ServiceRuntimeStateV1::Initializing))
+        {
+            return DriveExitReapFailure(ServiceRuntimeStatusV1::NotInitialized);
+        }
+        if (raw_state == static_cast<u32>(ServiceRuntimeStateV1::Failed))
+            return DriveExitReapFailure(ServiceRuntimeStatusV1::Failed);
+        return DriveExitReapFailure(ServiceRuntimeStatusV1::CorruptState);
+    }
+    return DriveExitReap(runtime, now_ns);
+}
 #else
 ServiceRuntimeInitializeResultV1 ServiceRuntimeInitializeForTestV1(ServiceRuntimeV1* runtime,
                                                                    ServiceBootstrapStageRuntimeV1* stage)
@@ -403,6 +458,11 @@ ServiceRuntimeDeferAcceptedProcessResultV1 ServiceRuntimeDeferAcceptedProcessFor
 ServiceRuntimeDriveDeferredAcceptedResultV1 ServiceRuntimeDriveDeferredAcceptedForTestV1(ServiceRuntimeV1* runtime)
 {
     return DriveDeferredAccepted(runtime);
+}
+
+ServiceRuntimeDriveExitReapResultV1 ServiceRuntimeDriveExitReapForTestV1(ServiceRuntimeV1* runtime, u64 now_ns)
+{
+    return DriveExitReap(runtime, now_ns);
 }
 #endif
 
