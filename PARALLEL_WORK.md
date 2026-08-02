@@ -3707,13 +3707,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T06:55:57Z
 - **Status**: COMPLETED @ 2026-08-02T07:53:25Z
 
-### [ACTIVE] service-control-cap-name-20260802
+### [DONE] service-control-cap-name-20260802
 - **Session**: `Codex-ServiceControlSyscall-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/proc/process.cpp`
 - **Description**: Register the dedicated service-control capability name and self-test without widening service manifest v1
 - **Claimed**: 2026-08-02T07:00:37Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T07:53:32Z
 
 ### [DONE] fuzz-pe-vm-reservation-shim-20260802
 - **Session**: `Codex-Root-FuzzPeVmShim-20260802`
