@@ -20,6 +20,7 @@ class ServiceRuntimeOwnerContract(unittest.TestCase):
             "ServiceExitObserver exit_observer",
             "ServiceEndpointOwner endpoint_owner",
             "ServiceDirectory directory",
+            "ServiceExitReapLedger exit_reap_ledger",
         ):
             self.assertIn(token, body)
 
@@ -35,6 +36,7 @@ class ServiceRuntimeOwnerContract(unittest.TestCase):
             "ServiceExitObserverInitialize",
             "ServiceEndpointOwnerInitialize",
             "ServiceDirectoryInitialize",
+            "ServiceExitReapLedgerInitialize",
             "ServiceExitObserverInstallKernelObserver",
             "ServiceRuntimeStateV1::Open",
         )
@@ -66,6 +68,20 @@ class ServiceRuntimeOwnerContract(unittest.TestCase):
         self.assertIn("lifecycle.snapshot.manifest_authority_identity != stage.authority_identity", inspect)
         self.assertIn("stage.registry_identity == 0", inspect)
         self.assertIn("snapshot.stage_registry_identity = stage.registry_identity", inspect)
+        self.assertIn("ServiceExitReapLedgerInspect", inspect)
+        self.assertIn("exit_reap.state != ServiceExitReapLedgerState::Open", inspect)
+
+    def test_activation_authority_exposes_only_the_embedded_ledger(self) -> None:
+        authority = HEADER[
+            HEADER.index("struct ServiceRuntimeActivationAuthorityV1") :
+            HEADER.index("#if !defined(DUETOS_HOST_TEST)")
+        ]
+        bind = SOURCE[
+            SOURCE.index("ServiceRuntimeStatusV1 ServiceRuntimeBindActivationAuthorityV1") :
+            SOURCE.index("const char* ServiceRuntimeStatusNameV1")
+        ]
+        self.assertIn("ServiceExitReapLedger* exit_reap_ledger", authority)
+        self.assertIn("&runtime->exit_reap_ledger", bind)
 
     def test_no_runtime_policy_or_scheduler_entry(self) -> None:
         forbidden = (

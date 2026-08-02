@@ -23,6 +23,8 @@
 namespace duetos::core
 {
 
+enum class ServiceControlPlatformAdapterStatusV1 : u8;
+
 inline constexpr u32 kServiceBootstrapLiveVersion1 = 1;
 
 // Build-frozen capacity for the currently generated package.  Growth is an
@@ -53,6 +55,7 @@ enum class ServiceBootstrapLiveStatusV1 : u8
     StageFailed,
     RuntimeFailed,
     RuntimeFailedStageDiscardFailed,
+    ServiceControlPlatformFailed,
     NotInitialized,
     Busy,
     CorruptState,
@@ -86,6 +89,7 @@ struct ServiceBootstrapLiveResultV1
     ServiceBootstrapLiveStatusV1 status;
     ServiceBootstrapStageResultV1 stage;
     ServiceRuntimeInitializeResultV1 runtime;
+    ServiceControlPlatformAdapterStatusV1 platform_status;
     ServiceBootstrapStageStatus discard_status;
     u32 generated_service_count;
     u32 package_owned_pages;
@@ -126,8 +130,9 @@ struct ServiceBootstrapLiveRestageResultV1
 };
 
 #if !defined(DUETOS_HOST_TEST)
-// Anchor the generated package and the static ServiceRuntime owner.  Success
-// is reported as CompatibilityRequired because no service is activated.
+// Anchor the generated package and static ServiceRuntime owner, then install
+// the dormant service-control ingress over that exact authority.  Success is
+// reported as CompatibilityRequired because no service is activated.
 ServiceBootstrapLiveResultV1 ServiceBootstrapLiveInitializeV1();
 
 // Returns a coherent terminal snapshot.  Initializing is reported as

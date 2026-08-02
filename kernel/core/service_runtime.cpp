@@ -79,6 +79,51 @@ bool ExitObserverStorageIsPristine(const ServiceExitObserver& observer)
     return true;
 }
 
+bool ExitReapEventIsZero(const ServiceExitEvent& event)
+{
+    return event.receipt.registration.observer_epoch == 0 && event.receipt.registration.slot == 0 &&
+           event.receipt.registration.generation == 0 && event.receipt.registration.start.broker_epoch == 0 &&
+           event.receipt.registration.start.transition.service_identity == 0 &&
+           event.receipt.registration.start.transition.generation == 0 && event.receipt.process.identity == 0 &&
+           event.receipt.process.pid == 0 && event.instance.start.broker_epoch == 0 &&
+           event.instance.start.transition.service_identity == 0 && event.instance.start.transition.generation == 0 &&
+           event.instance.process.process_identity == 0 && event.instance.process.pid == 0 && event.exit_code == 0 &&
+           event.failed == 0 && event.reserved8[0] == 0 && event.reserved8[1] == 0 && event.reserved8[2] == 0;
+}
+
+bool ExitReapRowStorageIsPristine(const ServiceExitReapRow& row)
+{
+    return row.stage == ServiceExitReapRowStage::Free && row.pump_inflight == 0 &&
+           row.lifecycle_disposition == ServiceExitReapLifecycleDisposition::None &&
+           row.directory_disposition == ServiceExitReapDirectoryDisposition::None &&
+           row.observer_ack_disposition == ServiceExitReapObserverAckDisposition::None && row.directory_bound == 0 &&
+           row.reserved8[0] == 0 && row.reserved8[1] == 0 && row.admission == kServiceExitReapInvalidAdmission &&
+           row.event_sequence == kServiceExitReapInvalidEventSequence && ExitReapEventIsZero(row.event) &&
+           row.directory_service == kInvalidServiceKey && row.directory_owner == kInvalidServiceInstanceToken &&
+           row.lifecycle_status == ServiceLifecycleStatus::Ok && row.directory_status == ServiceDirectoryStatus::Ok &&
+           row.directory_endpoint_status == ServiceEndpointStatus::Ok &&
+           row.observer_ack_status == ServiceExitObserverStatus::Ok && row.directory_drained_channels == 0 &&
+           row.delivery_token == kServiceExitReapInvalidDeliveryToken && row.delivery_owner == kInvalidProcessKey &&
+           row.delivery_count == 0 && row.reserved32 == 0;
+}
+
+bool ExitReapLedgerStorageIsPristine(const ServiceExitReapLedger& ledger)
+{
+    if (ledger.lock.next_ticket != 0 || ledger.lock.now_serving != 0 || ledger.lock.owner_cpu != 0xFFFFFFFFu ||
+        ledger.lock.class_id != sync::kLockClassServiceLifecycle ||
+        ledger.state != ServiceExitReapLedgerState::Uninitialized || ledger.initialized != 0 ||
+        ledger.reserved16 != 0 || ledger.live_rows != 0 || ledger.pump_cursor != 0 || ledger.acquisitions_inflight != 0)
+    {
+        return false;
+    }
+    for (u32 index = 0; index < kServiceExitReapLedgerCapacity; ++index)
+    {
+        if (!ExitReapRowStorageIsPristine(ledger.rows[index]))
+            return false;
+    }
+    return true;
+}
+
 bool RuntimeStorageIsPristine(const ServiceRuntimeV1& runtime)
 {
     return runtime.initialized == 0 && runtime.version == 0 &&
@@ -88,7 +133,7 @@ bool RuntimeStorageIsPristine(const ServiceRuntimeV1& runtime)
            ExitObserverStorageIsPristine(runtime.exit_observer) && runtime.endpoint_owner.initialized == 0 &&
            runtime.endpoint_owner.state == ServiceEndpointOwnerState::Uninitialized &&
            runtime.directory.initialized == 0 && runtime.directory.state == ServiceDirectoryState::Uninitialized &&
-           runtime.directory.endpoint_owner == nullptr;
+           runtime.directory.endpoint_owner == nullptr && ExitReapLedgerStorageIsPristine(runtime.exit_reap_ledger);
 }
 
 bool RuntimeStorageWasTouched(const ServiceRuntimeV1& runtime)
@@ -96,7 +141,9 @@ bool RuntimeStorageWasTouched(const ServiceRuntimeV1& runtime)
     return RuntimeStateLoad(&runtime) != static_cast<u32>(ServiceRuntimeStateV1::Uninitialized) ||
            runtime.initialized != 0 || runtime.version != 0 || runtime.stage != nullptr ||
            runtime.lifecycle.initialized != 0 || runtime.exit_observer.initialized != 0 ||
-           runtime.endpoint_owner.initialized != 0 || runtime.directory.initialized != 0;
+           runtime.endpoint_owner.initialized != 0 || runtime.directory.initialized != 0 ||
+           runtime.exit_reap_ledger.initialized != 0 ||
+           runtime.exit_reap_ledger.state != ServiceExitReapLedgerState::Uninitialized;
 }
 
 ServiceRuntimeInitializeResultV1 InitializeResult(ServiceRuntimeStatusV1 status)
@@ -110,6 +157,7 @@ ServiceRuntimeInitializeResultV1 InitializeResult(ServiceRuntimeStatusV1 status)
     result.exit_observer_status = ServiceExitObserverStatus::Ok;
     result.endpoint_status = ServiceEndpointStatus::Ok;
     result.directory_status = ServiceDirectoryStatus::Ok;
+    result.exit_reap_status = ServiceExitReapStatus::Ok;
     return result;
 }
 
@@ -250,6 +298,14 @@ ServiceRuntimeInitializeResultV1 InitializeRuntime(ServiceRuntimeV1* runtime, Se
         return result;
     }
 
+    result.exit_reap_status = ServiceExitReapLedgerInitialize(&runtime->exit_reap_ledger);
+    if (result.exit_reap_status != ServiceExitReapStatus::Ok)
+    {
+        result.status = ServiceRuntimeStatusV1::ExitReapLedgerInitializeFailed;
+        RuntimeStateStore(runtime, ServiceRuntimeStateV1::Failed);
+        return result;
+    }
+
 #if !defined(DUETOS_HOST_TEST)
     if (install_kernel_observer)
     {
@@ -376,10 +432,14 @@ ServiceRuntimeStatusV1 ServiceRuntimeInspectV1(const ServiceRuntimeV1* runtime, 
     const ServiceBootstrapStageStatus stage_status = ServiceBootstrapStageInspectV1(runtime->stage, &stage);
     const ServiceDirectoryStatus directory_status = ServiceDirectoryValidateRuntimeOwner(
         const_cast<ServiceDirectory*>(&runtime->directory), &runtime->endpoint_owner);
+    ServiceExitReapLedgerSnapshot exit_reap{};
+    const ServiceExitReapStatus exit_reap_status =
+        ServiceExitReapLedgerInspect(const_cast<ServiceExitReapLedger*>(&runtime->exit_reap_ledger), &exit_reap);
     const ServiceManifestPlanV1& manifest = runtime->stage->package.manifest_plan;
     const ServiceManifestAuthoritySnapshotV1& authority = runtime->stage->package.manifest_authority;
     if (lifecycle.status != ServiceLifecycleStatus::Ok || observer_status != ServiceExitObserverStatus::Ok ||
         stage_status != ServiceBootstrapStageStatus::Ok || directory_status != ServiceDirectoryStatus::Ok ||
+        exit_reap_status != ServiceExitReapStatus::Ok || exit_reap.state != ServiceExitReapLedgerState::Open ||
         !ServiceEndpointOwnerIsReady(const_cast<ServiceEndpointOwner*>(&runtime->endpoint_owner)) ||
         lifecycle.snapshot.service_count != stage.service_count ||
         lifecycle.snapshot.manifest_identity != runtime->stage->package.manifest_plan.document.manifest_identity ||
@@ -402,6 +462,7 @@ ServiceRuntimeStatusV1 ServiceRuntimeInspectV1(const ServiceRuntimeV1* runtime, 
     snapshot.broker_epoch = lifecycle.snapshot.broker_epoch;
     snapshot.observer_epoch = observer.observer_epoch;
     snapshot.observer_event_sequence = observer.event_sequence;
+    snapshot.exit_reap_live_rows = exit_reap.live_rows;
     snapshot.stage_registry_identity = stage.registry_identity;
     *snapshot_out = snapshot;
     return ServiceRuntimeStatusV1::Ok;
@@ -435,6 +496,7 @@ ServiceRuntimeStatusV1 ServiceRuntimeBindActivationAuthorityV1(ServiceRuntimeV1*
         &runtime->lifecycle,
         &runtime->exit_observer,
         &runtime->directory,
+        &runtime->exit_reap_ledger,
         snapshot.manifest_identity,
         snapshot.manifest_authority_identity,
         manifest.plan->sealed_object_hash,
@@ -472,6 +534,8 @@ const char* ServiceRuntimeStatusNameV1(ServiceRuntimeStatusV1 status)
         return "endpoint-owner-initialize-failed";
     case ServiceRuntimeStatusV1::DirectoryInitializeFailed:
         return "directory-initialize-failed";
+    case ServiceRuntimeStatusV1::ExitReapLedgerInitializeFailed:
+        return "exit-reap-ledger-initialize-failed";
     case ServiceRuntimeStatusV1::ExitObserverInstallFailed:
         return "exit-observer-install-failed";
     case ServiceRuntimeStatusV1::NotInitialized:

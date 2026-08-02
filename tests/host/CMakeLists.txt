@@ -435,6 +435,7 @@ target_sources(
         "${CMAKE_SOURCE_DIR}/../../kernel/core/service_manifest.cpp"
         "${CMAKE_SOURCE_DIR}/../../kernel/core/service_lifecycle_broker.cpp"
         "${CMAKE_SOURCE_DIR}/../../kernel/core/service_exit_observer.cpp"
+        "${CMAKE_SOURCE_DIR}/../../kernel/core/service_exit_reap_ledger.cpp"
         "${CMAKE_SOURCE_DIR}/../../kernel/core/service_runtime.cpp"
         "${CMAKE_SOURCE_DIR}/../../kernel/core/service_directory.cpp"
         "${CMAKE_SOURCE_DIR}/../../kernel/core/service_endpoint.cpp"
@@ -453,6 +454,14 @@ target_sources(
 if(MSVC)
     target_link_options(test_service_bootstrap_activation PRIVATE "/STACK:8388608")
 endif()
+add_host_test(service_control_platform)
+target_compile_definitions(test_service_control_platform PRIVATE DUETOS_HOST_TEST=1)
+target_sources(
+    test_service_control_platform
+    PRIVATE
+        "${CMAKE_SOURCE_DIR}/../../kernel/core/service_control_platform.cpp"
+)
+target_link_libraries(test_service_control_platform PRIVATE Threads::Threads)
 add_host_test(service_lifecycle_broker)
 target_compile_definitions(test_service_lifecycle_broker PRIVATE DUETOS_HOST_TEST=1)
 target_sources(

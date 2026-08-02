@@ -121,6 +121,7 @@ struct Fixture
         authority.lifecycle = Sentinel<ServiceLifecycleBroker>(0x40000);
         authority.exit_observer = Sentinel<ServiceExitObserver>(0x50000);
         authority.directory = Sentinel<ServiceDirectory>(0x60000);
+        authority.exit_reap_ledger = ledger;
         authority.manifest_identity = kManifestIdentity;
         authority.manifest_authority_identity = kManifestAuthorityIdentity;
         authority.manifest_object_extent = 4096;
@@ -447,6 +448,14 @@ void TestFailClosedInitialization()
         ServiceControlPlatformAdapterV1 platform;
         fixture.broker_snapshot.state = ServiceLifecycleBrokerState::Closed;
         EXPECT_EQ(Initialize(fixture, platform).status, ServiceControlPlatformAdapterStatusV1::BrokerNotReady);
+        EXPECT_EQ(fixture.install_calls.load(), 0U);
+    }
+    {
+        Fixture fixture;
+        ServiceControlPlatformAdapterV1 platform;
+        fixture.authority.exit_reap_ledger = Sentinel<ServiceExitReapLedger>(0x21000);
+        EXPECT_EQ(Initialize(fixture, platform).status, ServiceControlPlatformAdapterStatusV1::CorruptState);
+        EXPECT_EQ(fixture.ledger_inspect_calls.load(), 0U);
         EXPECT_EQ(fixture.install_calls.load(), 0U);
     }
     {

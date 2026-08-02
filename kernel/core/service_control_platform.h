@@ -124,9 +124,10 @@ struct ServiceControlPlatformInitializeResultV1
 };
 
 #if !defined(DUETOS_HOST_TEST)
-// Validate and install the sole production adapter.  `ledger` must be the
-// static-lifetime initialized reap ledger owned by boot bring-up.
-ServiceControlPlatformInitializeResultV1 ServiceControlPlatformInstallKernelV1(ServiceExitReapLedger* ledger);
+// Validate and install the sole production adapter.  The ledger is derived
+// from the static-lifetime runtime owner; production callers cannot substitute
+// a peer ledger from another runtime incarnation.
+ServiceControlPlatformInitializeResultV1 ServiceControlPlatformInstallKernelV1();
 #else
 // Hosted one-shot initializer using the exact production transaction and
 // callback implementation with deterministic typed backend operations.
