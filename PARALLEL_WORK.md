@@ -3587,13 +3587,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T05:42:08Z
 - **Status**: COMPLETED @ 2026-08-02T06:50:43Z
 
-### [ACTIVE] service-endpoint-connect-send-ingress-20260802
+### [DONE] service-endpoint-connect-send-ingress-20260802
 - **Session**: `Nathan-984`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/syscall/service_endpoint_ingress.cpp,userland/libc/include/duet/service_endpoint.h,tests/host/test_service_endpoint_ingress.cpp,tools/test/test-service-endpoint-ingress-contract.py`
 - **Description**: Enforce exact protocol routes and add CONNECT and SEND_REQUEST operations with failure-atomic settlement
 - **Claimed**: 2026-08-02T05:42:19Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T06:50:58Z
 
 ### [ACTIVE] service-stage-load-image-reset-20260802
 - **Session**: `Nathan-1080`
