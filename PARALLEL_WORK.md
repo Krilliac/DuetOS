@@ -4106,3 +4106,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Recover
 - **Claimed**: 2026-08-02T12:24:32Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] process-authority-callsite-recovery-20260802
+- **Session**: `Codex-ProcessLifecycle-Recovery-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/security/attack_sim.cpp,kernel/security/broker.cpp,kernel/security/grace.cpp,kernel/shell/shell_security.cpp,kernel/syscall/cap_gate.cpp,kernel/subsystems/linux/syscall_misc.cpp,kernel/subsystems/linux/syscall_time.cpp,kernel/subsystems/win32/spawn_syscall.cpp,kernel/subsystems/win32/token_syscall.cpp`
+- **Description**: Recover
+- **Claimed**: 2026-08-02T12:28:32Z
+- **Status**: IN PROGRESS
