@@ -33,9 +33,9 @@ class NativeSyscallIdlTests(unittest.TestCase):
 
     def test_repository_idl_is_complete_and_matches_legacy_bridge(self) -> None:
         rows = IDL.validate_document(self.document)
-        self.assertEqual(223, len(rows))
+        self.assertEqual(225, len(rows))
         self.assertEqual((0, "SYS_EXIT"), (rows[0]["number"], rows[0]["name"]))
-        self.assertEqual((226, "SYS_GDI_GET_TEXT_METRICS"), (rows[-1]["number"], rows[-1]["name"]))
+        self.assertEqual((228, "SYS_SERVICE_CONTROL"), (rows[-1]["number"], rows[-1]["name"]))
         IDL.verify_legacy(ROOT, rows)
 
     def test_bootstrap_is_deterministic(self) -> None:

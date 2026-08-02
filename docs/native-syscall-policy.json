@@ -8472,6 +8472,104 @@
         "category": "graphics",
         "sensitive": false
       }
+    },
+    {
+      "arguments": [
+        {
+          "description": "duet_service_endpoint_request_v1 followed by at most 4096 inline frame bytes",
+          "kind": "user_buffer",
+          "register": "rdi"
+        },
+        {
+          "description": "exact request byte count",
+          "kind": "size",
+          "register": "rsi"
+        },
+        {
+          "description": "duet_service_endpoint_result_v1 followed by caller-reserved inline receive storage",
+          "kind": "user_buffer",
+          "register": "rdx"
+        },
+        {
+          "description": "bounded result capacity",
+          "kind": "size",
+          "register": "r10"
+        }
+      ],
+      "authorization": {
+        "capabilities": [],
+        "mode": "dynamic",
+        "owner": "kernel/syscall/service_endpoint_ingress.cpp",
+        "rationale": "The handler derives the full current ProcessKey, immutable credentials, current capability snapshot, service instance, and endpoint generation inside the kernel. No caller-supplied process or service identity grants authority."
+      },
+      "fuzz": {
+        "enabled": true,
+        "profile": "mixed"
+      },
+      "name": "SYS_SERVICE_ENDPOINT_OP",
+      "number": 227,
+      "object_rights": {
+        "mode": "dynamic",
+        "owner": "kernel/syscall/service_endpoint_ingress.cpp",
+        "rationale": "Each operation performs an exact typed HandleTable lookup and checks Read, Write, Wait, Destroy, Duplicate, or Transfer rights after bounded control-block decoding.",
+        "rights": []
+      },
+      "returns": "0 when a structured result was delivered; negative errno for invalid ABI storage, copy faults, or unavailable kernel ingress",
+      "status": "implemented",
+      "summary": "Authenticated versioned ServiceEndpoint accept, receive, reply-ack, close, and typed ObjectTransfer multiplexer.",
+      "trace": {
+        "category": "ipc",
+        "sensitive": true
+      }
+    },
+    {
+      "arguments": [
+        {
+          "description": "pointer to fixed pointer-free duet_service_control_request_v1",
+          "kind": "user_buffer",
+          "register": "rdi"
+        },
+        {
+          "description": "exact request size",
+          "kind": "size",
+          "register": "rsi"
+        },
+        {
+          "description": "pointer to fixed duet_service_control_result_v1",
+          "kind": "user_buffer",
+          "register": "rdx"
+        },
+        {
+          "description": "exact result capacity",
+          "kind": "size",
+          "register": "r10"
+        }
+      ],
+      "authorization": {
+        "capabilities": [],
+        "mode": "dynamic",
+        "owner": "kernel/syscall/service_control_ingress.cpp",
+        "rationale": "DESCRIBE_SELF and MARK_READY derive the exact current service instance from the kernel ProcessKey. ENUMERATE, ACTIVATE, STOP, RESTAGE, EXIT_DEQUEUE, and EXIT_ACK require the kernel-owned kCapServiceControl effective snapshot; no request field carries or widens capability authority."
+      },
+      "fuzz": {
+        "enabled": true,
+        "profile": "mixed"
+      },
+      "name": "SYS_SERVICE_CONTROL",
+      "number": 228,
+      "object_rights": {
+        "mode": "none",
+        "owner": "none",
+        "rationale": "The fixed request contains no handle or kernel pointer. Every mutation is bound to broker, service generation, ProcessKey, and operation-token identities resolved by the service runtime.",
+        "rights": []
+      },
+      "returns": "0 when a structured result was delivered; negative errno for invalid ABI storage, copy faults, or unavailable kernel ingress",
+      "status": "implemented",
+      "summary": "Versioned native service self-readiness and capability-gated supervisor lifecycle and exit-ledger ingress.",
+      "trace": {
+        "category": "process",
+        "sensitive": true
+      }
     }
   ]
 }

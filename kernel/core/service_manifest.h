@@ -55,9 +55,11 @@ inline constexpr u16 kServiceManifestV1KnownFlags = 0;
 inline constexpr u32 kServiceManifestAuthoritySealed = 1u << 0;
 inline constexpr u32 kServiceManifestAuthorityKnownFlags = kServiceManifestAuthoritySealed;
 
-// V1 freezes the currently-defined process capabilities (bits 1..11).  A new
-// capability must make an explicit manifest-version compatibility decision.
-inline constexpr u64 kServiceManifestCapabilityMaskV1 = 0xFFEULL;
+// V1 accepts process capability bits 1..12. Bit 12 was added deliberately for
+// the supervisor-only Service Control plane: accepting the bit here does not
+// grant it to every authenticated service; each row must request it and the
+// independent build authority must allow it. Only serviced does so.
+inline constexpr u64 kServiceManifestCapabilityMaskV1 = 0x1FFEULL;
 inline constexpr u64 kServiceManifestFrameBudgetMaximum = 8192;
 inline constexpr u64 kServiceManifestTickBudgetMaximum = 1ULL << 40;
 inline constexpr u32 kServiceManifestSectionObjectMaximum = 4;

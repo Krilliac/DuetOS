@@ -215,6 +215,17 @@ enum Cap : u32
     // Withheld from every sandboxed profile.
     kCapPowerTune = 11,
 
+    // Supervise the authenticated service runtime through
+    // SYS_SERVICE_CONTROL operations 3..8 (enumerate, activate, stop,
+    // restage, exit dequeue, and exit acknowledgement). The syscall's two
+    // self-service operations derive identity from CurrentProcess and do not
+    // consult this bit. No request field can synthesize or widen this cap.
+    //
+    // ServiceManifest v1 deliberately admits this bit only through the
+    // independent build authority. The generated package grants it solely to
+    // serviced; accepting bit 12 does not widen any other service profile.
+    kCapServiceControl = 12,
+
     // Sentinel: keep this as the last entry so kProfileTrusted can
     // be built by a loop that iterates [1 .. kCapCount). Do NOT
     // use kCapCount as a live cap — it's a boundary marker.

@@ -227,3 +227,5 @@ _Generated from `abi/native_syscalls.json`; do not edit by hand._
 | 224 | `SYS_GDI_CREATE_CURSOR_RGBA` | dynamic | none | graphics | pointer | `rdi` user_pointer; `rsi` scalar; `rdx` identifier |
 | 225 | `SYS_GDI_CREATE_FONT` | dynamic | dynamic | graphics | handle | `rdi` handle |
 | 226 | `SYS_GDI_GET_TEXT_METRICS` | dynamic | none | graphics | pointer | `rdi` scalar; `rsi` user_pointer |
+| 227 | `SYS_SERVICE_ENDPOINT_OP` | dynamic | dynamic | ipc | mixed | `rdi` user_buffer; `rsi` size; `rdx` user_buffer; `r10` size |
+| 228 | `SYS_SERVICE_CONTROL` | dynamic | none | process | mixed | `rdi` user_buffer; `rsi` size; `rdx` user_buffer; `r10` size |

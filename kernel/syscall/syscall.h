@@ -2315,6 +2315,29 @@ enum SyscallNumber : u64
     //   rsi = pointer to user-land TEXTMETRICA (57 bytes)
     //   rax <- 1 on success, 0 on failure.
     SYS_GDI_GET_TEXT_METRICS = 226,
+
+    // SYS_SERVICE_ENDPOINT_OP — authenticated native ServiceEndpoint ingress.
+    //   rdi = pointer to duet_service_endpoint_request_v1 followed by
+    //         at most 4096 inline frame bytes
+    //   rsi = exact request bytes
+    //   rdx = pointer to duet_service_endpoint_result_v1 followed by
+    //         caller-reserved inline receive storage
+    //   r10 = bounded result capacity
+    // The fixed control block contains no pointers. Identity and authority are
+    // derived from CurrentProcess plus generation-bearing kernel objects. The
+    // exact writable result pages are leased before any irreversible endpoint
+    // transition and released on every syscall exit.
+    SYS_SERVICE_ENDPOINT_OP = 227,
+
+    // SYS_SERVICE_CONTROL — versioned native service lifecycle control.
+    //   rdi = pointer to fixed duet_service_control_request_v1
+    //   rsi = exact request size
+    //   rdx = pointer to fixed duet_service_control_result_v1
+    //   r10 = exact result capacity
+    // The wire structures contain no pointers or capability masks. Operations
+    // 1-2 derive the exact current service instance; operations 3-8 require
+    // kCapServiceControl inside the mixed-policy ingress.
+    SYS_SERVICE_CONTROL = 228,
 };
 
 // Vulkan syscall op-codes. Used as the `rdi` value to SYS_VK_CALL
