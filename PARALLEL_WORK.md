@@ -3635,10 +3635,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T06:13:44Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] host-sanitizer-ci-finish-20260802
+### [DONE] host-sanitizer-ci-finish-20260802
 - **Session**: `Codex-HostSanitizerCIFinish-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tests/fuzz/host_shim/sync/spinlock.h,tools/test/test-host-sanitizer-ci-contract.py`
 - **Description**: Commit independently validated TSan-visible hosted spinlock and CI structural contract after stale-claim recovery
 - **Claimed**: 2026-08-02T06:25:42Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T06:26:12Z
