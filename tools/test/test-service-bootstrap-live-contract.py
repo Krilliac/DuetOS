@@ -14,6 +14,7 @@ MAIN = (ROOT / "kernel/core/main.cpp").read_text(encoding="utf-8")
 KERNEL_CMAKE = (ROOT / "kernel/CMakeLists.txt").read_text(encoding="utf-8")
 PROFILE_RUNNER = (ROOT / "tools/test/profile-boot-smoke.sh").read_text(encoding="utf-8")
 FULL_RUNNER = (ROOT / "tools/test/ctest-boot-smoke.sh").read_text(encoding="utf-8")
+STAGE_HOST = (ROOT / "tests/host/test_service_bootstrap_stage.cpp").read_text(encoding="utf-8")
 
 
 def function_body(source: str, name: str) -> str:
@@ -39,17 +40,24 @@ class ServiceBootstrapLiveContract(unittest.TestCase):
             "kServiceBootstrapLiveImageBytesPerServiceV1 = 64ULL * 1024ULL",
             "kServiceBootstrapLiveRegionsPerServiceV1 = 8",
             "kServiceBootstrapLiveTotalArtifactByteCapacityV1 = 256ULL * 1024ULL",
-            "images[kServiceBootstrapLiveServiceCapacityV1]",
-            "pages[kServiceBootstrapLiveServiceCapacityV1][kServiceBootstrapLivePagesPerServiceV1]",
-            "plan_storage[kServiceBootstrapLiveServiceCapacityV1][loader::kLoadImageMaxPlanBytes]",
-            "admissions[kServiceBootstrapLiveServiceCapacityV1]",
-            "admission_storage[kServiceBootstrapLiveServiceCapacityV1][loader::kExecAdmissionMaxPlanBytes]",
+            "kServiceBootstrapLiveBanksPerServiceV1 = 2",
+            "images[kServiceBootstrapLiveServiceCapacityV1][kServiceBootstrapLiveBanksPerServiceV1]",
+            "pages[kServiceBootstrapLiveServiceCapacityV1][kServiceBootstrapLiveBanksPerServiceV1]",
+            "plan_storage[kServiceBootstrapLiveServiceCapacityV1][kServiceBootstrapLiveBanksPerServiceV1]",
+            "admissions[kServiceBootstrapLiveServiceCapacityV1][kServiceBootstrapLiveBanksPerServiceV1]",
+            "admission_storage[kServiceBootstrapLiveServiceCapacityV1][kServiceBootstrapLiveBanksPerServiceV1]",
+            "active_bank_indices[kServiceBootstrapLiveServiceCapacityV1]",
         ):
             self.assertIn(token, HEADER + SOURCE)
         self.assertRegex(
             SOURCE,
             r"regions\[kServiceBootstrapLiveServiceCapacityV1\]\s*"
+            r"\[kServiceBootstrapLiveBanksPerServiceV1\]\s*"
             r"\[kServiceBootstrapLiveRegionsPerServiceV1\]",
+        )
+        self.assertIn(
+            "static_assert(kServiceBootstrapLiveBanksPerServiceV1 == kServiceBootstrapStageBankCapacityV1)",
+            HEADER,
         )
         self.assertIn("kBootServicePackageArtifactCount == kServiceBootstrapLiveServiceCapacityV1", SOURCE)
         self.assertIn("kBootServicePackageTotalArtifactBytes <=", SOURCE)
@@ -79,7 +87,7 @@ class ServiceBootstrapLiveContract(unittest.TestCase):
             "BeginOneShotInitialize()",
             "ServiceBootstrapGeneratedServiceCountV1()",
             "result.generated_service_count != kServiceBootstrapLiveServiceCapacityV1",
-            "BuildSlotDescriptors(slots)",
+            "BuildInitialSlotDescriptors(slots)",
             "ServiceBootstrapStageGeneratedV1",
             "ServiceRuntimeInitializeKernelV1",
             "ServiceBootstrapLiveStateV1::RuntimeOpenCompatibilityRequired",
@@ -98,6 +106,62 @@ class ServiceBootstrapLiveContract(unittest.TestCase):
                         runtime_failure.index("LiveStateStore(ServiceBootstrapLiveStateV1::Failed)"))
         self.assertIn("RuntimeFailedStageDiscardFailed", runtime_failure)
         self.assertIn("cannot be reset", initialize)
+
+    def test_live_owner_restage_selects_only_inactive_bank_and_commits_selector_last(self) -> None:
+        restage = function_body(SOURCE, "ServiceBootstrapLiveRestageV1")
+        ordered = (
+            "LiveOwnerOperationGuard operation",
+            "ServiceBootstrapStageFindServiceV1",
+            "service.activation_generation != expected_activation_generation",
+            "const u8 active_bank = g_service_bootstrap_live.active_bank_indices[service_index]",
+            "const u8 inactive_bank = static_cast<u8>(1u - active_bank)",
+            "row.image != &g_service_bootstrap_live.images[service_index][active_bank]",
+            "loader::LoadImageInspect(retired_image, &retired_snapshot)",
+            "retired_snapshot.target_owned_pages != 0",
+            "loader::LoadImageCanResetQuiescent(retired_image)",
+            "loader::ExecAdmissionCanResetQuiescent(retired_admission)",
+            "BuildSlotDescriptor(service_index, inactive_bank)",
+            "ServiceBootstrapStageRestageV1",
+            "result.stage.status != ServiceBootstrapStageStatus::Ok",
+            "g_service_bootstrap_live.active_bank_indices[service_index] = inactive_bank",
+        )
+        cursor = 0
+        for token in ordered:
+            found = restage.find(token, cursor)
+            self.assertGreaterEqual(found, 0, token)
+            cursor = found + len(token)
+
+        selector_commit = "g_service_bootstrap_live.active_bank_indices[service_index] = inactive_bank"
+        self.assertEqual(restage.count(selector_commit), 1)
+        success_tail = restage[restage.index("result.stage.status != ServiceBootstrapStageStatus::Ok") :]
+        self.assertLess(success_tail.index("return result"), success_tail.index(selector_commit))
+
+    def test_retired_target_gate_is_lifecycle_policy_not_fake_frame_authority(self) -> None:
+        for token in (
+            "old Process and its",
+            "target ledger is already the sole frame owner",
+            "clears observer metadata without freeing or reusing frames",
+            "ServiceBootstrapLiveRetiredTargetTeardownV1::TeardownComplete",
+            "ServiceBootstrapLiveRestageStatusV1::RetiredTargetTeardownRequired",
+        ):
+            self.assertIn(token, HEADER + SOURCE)
+
+    def test_owner_operation_gate_does_not_hold_a_spinlock_across_restage(self) -> None:
+        self.assertIn("operation_busy", SOURCE)
+        self.assertIn("__atomic_compare_exchange_n(&g_service_bootstrap_live.operation_busy", SOURCE)
+        self.assertIn("LiveOwnerOperationGuard", SOURCE)
+        self.assertNotIn("SpinLock", SOURCE)
+
+    def test_lower_host_fixture_covers_six_alternations_stale_failure_and_retired_lifetime(self) -> None:
+        for token in (
+            "constexpr u32 kRestageCycles = 6",
+            "const u32 replacement_bank = 1u - active_bank",
+            "ServiceBootstrapStageStatus::StaleActivationGeneration",
+            "ExpectRowUnchanged",
+            "retired_snapshot.target_owned_pages",
+            "Publication does not clear the old bank",
+        ):
+            self.assertIn(token, STAGE_HOST)
 
     def test_anchor_cannot_activate_or_publish_any_service(self) -> None:
         for forbidden in (
