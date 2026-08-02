@@ -3451,13 +3451,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T04:00:19Z
 - **Status**: COMPLETED @ 2026-08-02T04:12:22Z
 
-### [ACTIVE] root-arp-copyout-callers-20260802
+### [DONE] root-arp-copyout-callers-20260802
 - **Session**: `Nathan-175`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/net/socket.cpp`
 - **Description**: Migrate legacy ARP pointer caller to lock-safe copy-out API
 - **Claimed**: 2026-08-02T04:10:09Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T04:16:57Z
 
 ### [ACTIVE] service-publication-directory-join-20260802
 - **Session**: `Nathan-265`
