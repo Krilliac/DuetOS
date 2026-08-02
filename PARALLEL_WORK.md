@@ -4147,10 +4147,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T12:45:39Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] arp-copyout-consumers-recovery-20260802
+### [DONE] arp-copyout-consumers-recovery-20260802
 - **Session**: `Codex-ArpCopyoutConsumers-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/net/socket.cpp,kernel/shell/shell_network.cpp,tools/test/test-arp-copyout-consumers-contract.py`
 - **Description**: Recover and publish SMP-safe ARP copy-out consumers without retaining mutable cache pointers
 - **Claimed**: 2026-08-02T13:14:08Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T13:26:24Z
