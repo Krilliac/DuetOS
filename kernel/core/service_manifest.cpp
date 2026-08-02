@@ -71,7 +71,7 @@ static_assert(kServiceManifestSectionObjectMaximum == kAuthenticatedServiceSecti
 static_assert(kServiceManifestSectionPageMaximum == kAuthenticatedServiceSectionPageLimit,
               "section page ceiling changed without a manifest v1 decision");
 static_assert(static_cast<u8>(ServiceManifestResourceProfile::Sandbox) ==
-                  static_cast<u8>(ResourceDomainProfile::Sandbox) &&
+                      static_cast<u8>(ResourceDomainProfile::Sandbox) &&
                   static_cast<u8>(ServiceManifestResourceProfile::Trusted) ==
                       static_cast<u8>(ResourceDomainProfile::Trusted) &&
                   static_cast<u8>(ServiceManifestResourceProfile::AuthenticatedService) ==
@@ -85,8 +85,8 @@ u16 ReadLe16(const u8* bytes)
 
 u32 ReadLe32(const u8* bytes)
 {
-    return static_cast<u32>(bytes[0]) | (static_cast<u32>(bytes[1]) << 8u) |
-           (static_cast<u32>(bytes[2]) << 16u) | (static_cast<u32>(bytes[3]) << 24u);
+    return static_cast<u32>(bytes[0]) | (static_cast<u32>(bytes[1]) << 8u) | (static_cast<u32>(bytes[2]) << 16u) |
+           (static_cast<u32>(bytes[3]) << 24u);
 }
 
 u64 ReadLe64(const u8* bytes)
@@ -202,8 +202,7 @@ bool NameIsCanonical(const ServiceManifestServiceV1& service)
         if (!NameCharacterIsCanonical(service.name[index], index == 0))
             return false;
     }
-    return AllZero(service.name + service.name_length,
-                   kServiceManifestServiceNameCapacity - service.name_length);
+    return AllZero(service.name + service.name_length, kServiceManifestServiceNameCapacity - service.name_length);
 }
 
 bool PathCharacterIsCanonical(u8 value)
@@ -335,13 +334,12 @@ u32 ResourcePageMaximum(ServiceManifestResourceProfile profile)
 u64 FrameMaximum(ServiceManifestResourceProfile profile)
 {
     return profile == ServiceManifestResourceProfile::Sandbox ? mm::kFrameBudgetSandbox
-                                                               : kServiceManifestFrameBudgetMaximum;
+                                                              : kServiceManifestFrameBudgetMaximum;
 }
 
 u64 TickMaximum(ServiceManifestResourceProfile profile)
 {
-    return profile == ServiceManifestResourceProfile::Sandbox ? kTickBudgetSandbox
-                                                               : kServiceManifestTickBudgetMaximum;
+    return profile == ServiceManifestResourceProfile::Sandbox ? kTickBudgetSandbox : kServiceManifestTickBudgetMaximum;
 }
 
 bool ServiceIsZero(const ServiceManifestServiceV1& service)
@@ -396,8 +394,7 @@ ServiceManifestError ValidateService(const ServiceManifestServiceV1& service,
         return ServiceManifestError::InvalidAutostart;
     if ((service.requested_capability_ceiling & ~kServiceManifestCapabilityMaskV1) != 0)
         return ServiceManifestError::InvalidCapabilities;
-    if (authority != nullptr &&
-        (service.requested_capability_ceiling & ~authority->allowed_capabilities) != 0)
+    if (authority != nullptr && (service.requested_capability_ceiling & ~authority->allowed_capabilities) != 0)
         return ServiceManifestError::CapabilityDenied;
     if (!ResourceProfileIsValid(service.resource_profile))
         return ServiceManifestError::InvalidResourceProfile;
@@ -412,9 +409,8 @@ ServiceManifestError ValidateService(const ServiceManifestServiceV1& service,
     {
         return ServiceManifestError::InvalidResourceCeiling;
     }
-    if (authority != nullptr &&
-        (service.requested_section_objects > authority->maximum_section_objects ||
-         service.requested_section_pages > authority->maximum_section_pages))
+    if (authority != nullptr && (service.requested_section_objects > authority->maximum_section_objects ||
+                                 service.requested_section_pages > authority->maximum_section_pages))
     {
         return ServiceManifestError::ResourceCeilingDenied;
     }
@@ -423,8 +419,7 @@ ServiceManifestError ValidateService(const ServiceManifestServiceV1& service,
     {
         return ServiceManifestError::InvalidFrameBudget;
     }
-    if (authority != nullptr &&
-        service.requested_frame_budget_pages > authority->maximum_frame_budget_pages)
+    if (authority != nullptr && service.requested_frame_budget_pages > authority->maximum_frame_budget_pages)
     {
         return ServiceManifestError::FrameBudgetDenied;
     }
@@ -544,6 +539,8 @@ ServiceManifestError ValidateDocumentInternal(const ServiceManifestDocumentV1& d
         {
             if (NamesEqual(document.services[previous], service))
                 return ServiceManifestError::DuplicateServiceName;
+            if (document.services[previous].executable_transfer_ref == service.executable_transfer_ref)
+                return ServiceManifestError::DuplicateTransferReference;
         }
         if (service.dependency_first != dependency_cursor ||
             static_cast<u32>(service.dependency_count) > document.dependency_count - dependency_cursor)
@@ -552,8 +549,8 @@ ServiceManifestError ValidateDocumentInternal(const ServiceManifestDocumentV1& d
         }
 
         u64 previous_dependency = 0;
-        for (u32 edge_index = dependency_cursor;
-             edge_index < dependency_cursor + service.dependency_count; ++edge_index)
+        for (u32 edge_index = dependency_cursor; edge_index < dependency_cursor + service.dependency_count;
+             ++edge_index)
         {
             const ServiceManifestDependencyV1& edge = document.dependencies[edge_index];
             if (edge.owner_service_identity != service.service_identity ||
@@ -696,8 +693,7 @@ bool ServiceManifestAuthoritySnapshotIsCanonicalV1(const ServiceManifestAuthorit
            snapshot.allowed_immutable_policies != 0 && (snapshot.allowed_immutable_policies & 1ULL) == 0 &&
            snapshot.maximum_frame_budget_pages != 0 &&
            snapshot.maximum_frame_budget_pages <= kServiceManifestFrameBudgetMaximum &&
-           snapshot.maximum_tick_budget != 0 &&
-           snapshot.maximum_tick_budget <= kServiceManifestTickBudgetMaximum &&
+           snapshot.maximum_tick_budget != 0 && snapshot.maximum_tick_budget <= kServiceManifestTickBudgetMaximum &&
            snapshot.allowed_service_kinds != 0 &&
            (snapshot.allowed_service_kinds & ~kServiceManifestKnownKindMask) == 0 &&
            snapshot.allowed_resource_profiles != 0 &&
@@ -705,8 +701,8 @@ bool ServiceManifestAuthoritySnapshotIsCanonicalV1(const ServiceManifestAuthorit
            snapshot.maximum_section_objects != 0 &&
            snapshot.maximum_section_objects <= kServiceManifestSectionObjectMaximum &&
            snapshot.maximum_section_pages != 0 &&
-           snapshot.maximum_section_pages <= kServiceManifestSectionPageMaximum &&
-           snapshot.maximum_services != 0 && snapshot.maximum_services <= kServiceManifestMaximumServices &&
+           snapshot.maximum_section_pages <= kServiceManifestSectionPageMaximum && snapshot.maximum_services != 0 &&
+           snapshot.maximum_services <= kServiceManifestMaximumServices &&
            snapshot.maximum_dependencies <= kServiceManifestMaximumDependencies &&
            snapshot.flags == kServiceManifestAuthoritySealed && snapshot.reserved == 0;
 }
@@ -819,9 +815,8 @@ ServiceManifestError ServiceManifestValidateV1(const void* bytes_void, u64 byte_
         return ServiceManifestError::InvalidPointerRange;
     if (bytes_void != nullptr && byte_count != 0 && !PointerRangeIsValid(bytes_void, byte_count))
         return ServiceManifestError::InvalidPointerRange;
-    if (authority != nullptr &&
-        PointerRangesOverlap(plan_out, sizeof(ServiceManifestPlanV1), authority,
-                             sizeof(ServiceManifestAuthoritySnapshotV1)))
+    if (authority != nullptr && PointerRangesOverlap(plan_out, sizeof(ServiceManifestPlanV1), authority,
+                                                     sizeof(ServiceManifestAuthoritySnapshotV1)))
     {
         return ServiceManifestError::AliasedOutput;
     }
@@ -879,8 +874,7 @@ ServiceManifestError ServiceManifestValidateV1(const void* bytes_void, u64 byte_
         return ServiceManifestError::UnsupportedVersion;
     if (header_bytes != kServiceManifestV1HeaderBytes)
         return ServiceManifestError::HeaderSizeMismatch;
-    if (service_bytes != kServiceManifestV1ServiceBytes ||
-        dependency_bytes != kServiceManifestV1DependencyBytes)
+    if (service_bytes != kServiceManifestV1ServiceBytes || dependency_bytes != kServiceManifestV1DependencyBytes)
     {
         return ServiceManifestError::RecordSizeMismatch;
     }
@@ -948,63 +942,122 @@ const char* ServiceManifestErrorName(ServiceManifestError error)
 {
     switch (error)
     {
-    case ServiceManifestError::Ok: return "ok";
-    case ServiceManifestError::NullArgument: return "null-argument";
-    case ServiceManifestError::InvalidPointerRange: return "invalid-pointer-range";
-    case ServiceManifestError::AliasedOutput: return "aliased-output";
-    case ServiceManifestError::DefinitionAliasesOutput: return "definition-aliases-output";
-    case ServiceManifestError::SnapshotFromWire: return "snapshot-from-wire";
-    case ServiceManifestError::AuthorityMalformed: return "authority-malformed";
-    case ServiceManifestError::HeaderTruncated: return "header-truncated";
-    case ServiceManifestError::ManifestTooLarge: return "manifest-too-large";
-    case ServiceManifestError::OutputTooSmall: return "output-too-small";
-    case ServiceManifestError::SizeOverflow: return "size-overflow";
-    case ServiceManifestError::SizeMismatch: return "size-mismatch";
-    case ServiceManifestError::UnsupportedVersion: return "unsupported-version";
-    case ServiceManifestError::HeaderSizeMismatch: return "header-size-mismatch";
-    case ServiceManifestError::RecordSizeMismatch: return "record-size-mismatch";
-    case ServiceManifestError::InvalidOffsets: return "invalid-offsets";
-    case ServiceManifestError::UnknownFlags: return "unknown-flags";
-    case ServiceManifestError::ReservedNonZero: return "reserved-nonzero";
-    case ServiceManifestError::InvalidManifestIdentity: return "invalid-manifest-identity";
-    case ServiceManifestError::SignerMismatch: return "signer-mismatch";
-    case ServiceManifestError::ProfileMismatch: return "profile-mismatch";
-    case ServiceManifestError::ObjectExtentMismatch: return "object-extent-mismatch";
-    case ServiceManifestError::ObjectHashMismatch: return "object-hash-mismatch";
-    case ServiceManifestError::NoServices: return "no-services";
-    case ServiceManifestError::TooManyServices: return "too-many-services";
-    case ServiceManifestError::TooManyDependencies: return "too-many-dependencies";
-    case ServiceManifestError::InvalidServiceIdentity: return "invalid-service-identity";
-    case ServiceManifestError::DuplicateServiceIdentity: return "duplicate-service-identity";
-    case ServiceManifestError::InvalidServiceName: return "invalid-service-name";
-    case ServiceManifestError::DuplicateServiceName: return "duplicate-service-name";
-    case ServiceManifestError::InvalidExecutablePath: return "invalid-executable-path";
-    case ServiceManifestError::InvalidTransferReference: return "invalid-transfer-reference";
-    case ServiceManifestError::MissingExecutableHash: return "missing-executable-hash";
-    case ServiceManifestError::InvalidImmutablePolicy: return "invalid-immutable-policy";
-    case ServiceManifestError::ImmutablePolicyDenied: return "immutable-policy-denied";
-    case ServiceManifestError::InvalidServiceKind: return "invalid-service-kind";
-    case ServiceManifestError::ServiceKindDenied: return "service-kind-denied";
-    case ServiceManifestError::InvalidRestartPolicy: return "invalid-restart-policy";
-    case ServiceManifestError::InvalidAutostart: return "invalid-autostart";
-    case ServiceManifestError::InvalidCapabilities: return "invalid-capabilities";
-    case ServiceManifestError::CapabilityDenied: return "capability-denied";
-    case ServiceManifestError::InvalidResourceProfile: return "invalid-resource-profile";
-    case ServiceManifestError::ResourceProfileDenied: return "resource-profile-denied";
-    case ServiceManifestError::InvalidResourceCeiling: return "invalid-resource-ceiling";
-    case ServiceManifestError::ResourceCeilingDenied: return "resource-ceiling-denied";
-    case ServiceManifestError::InvalidFrameBudget: return "invalid-frame-budget";
-    case ServiceManifestError::FrameBudgetDenied: return "frame-budget-denied";
-    case ServiceManifestError::InvalidTickBudget: return "invalid-tick-budget";
-    case ServiceManifestError::TickBudgetDenied: return "tick-budget-denied";
-    case ServiceManifestError::InvalidDependencyRange: return "invalid-dependency-range";
-    case ServiceManifestError::InvalidDependency: return "invalid-dependency";
-    case ServiceManifestError::MissingDependency: return "missing-dependency";
-    case ServiceManifestError::DuplicateDependency: return "duplicate-dependency";
-    case ServiceManifestError::DependencyCycle: return "dependency-cycle";
-    case ServiceManifestError::NonCanonicalUnusedStorage: return "noncanonical-unused-storage";
-    case ServiceManifestError::ServiceCountDenied: return "service-count-denied";
-    case ServiceManifestError::DependencyCountDenied: return "dependency-count-denied";
+    case ServiceManifestError::Ok:
+        return "ok";
+    case ServiceManifestError::NullArgument:
+        return "null-argument";
+    case ServiceManifestError::InvalidPointerRange:
+        return "invalid-pointer-range";
+    case ServiceManifestError::AliasedOutput:
+        return "aliased-output";
+    case ServiceManifestError::DefinitionAliasesOutput:
+        return "definition-aliases-output";
+    case ServiceManifestError::SnapshotFromWire:
+        return "snapshot-from-wire";
+    case ServiceManifestError::AuthorityMalformed:
+        return "authority-malformed";
+    case ServiceManifestError::HeaderTruncated:
+        return "header-truncated";
+    case ServiceManifestError::ManifestTooLarge:
+        return "manifest-too-large";
+    case ServiceManifestError::OutputTooSmall:
+        return "output-too-small";
+    case ServiceManifestError::SizeOverflow:
+        return "size-overflow";
+    case ServiceManifestError::SizeMismatch:
+        return "size-mismatch";
+    case ServiceManifestError::UnsupportedVersion:
+        return "unsupported-version";
+    case ServiceManifestError::HeaderSizeMismatch:
+        return "header-size-mismatch";
+    case ServiceManifestError::RecordSizeMismatch:
+        return "record-size-mismatch";
+    case ServiceManifestError::InvalidOffsets:
+        return "invalid-offsets";
+    case ServiceManifestError::UnknownFlags:
+        return "unknown-flags";
+    case ServiceManifestError::ReservedNonZero:
+        return "reserved-nonzero";
+    case ServiceManifestError::InvalidManifestIdentity:
+        return "invalid-manifest-identity";
+    case ServiceManifestError::SignerMismatch:
+        return "signer-mismatch";
+    case ServiceManifestError::ProfileMismatch:
+        return "profile-mismatch";
+    case ServiceManifestError::ObjectExtentMismatch:
+        return "object-extent-mismatch";
+    case ServiceManifestError::ObjectHashMismatch:
+        return "object-hash-mismatch";
+    case ServiceManifestError::NoServices:
+        return "no-services";
+    case ServiceManifestError::TooManyServices:
+        return "too-many-services";
+    case ServiceManifestError::TooManyDependencies:
+        return "too-many-dependencies";
+    case ServiceManifestError::InvalidServiceIdentity:
+        return "invalid-service-identity";
+    case ServiceManifestError::DuplicateServiceIdentity:
+        return "duplicate-service-identity";
+    case ServiceManifestError::InvalidServiceName:
+        return "invalid-service-name";
+    case ServiceManifestError::DuplicateServiceName:
+        return "duplicate-service-name";
+    case ServiceManifestError::InvalidExecutablePath:
+        return "invalid-executable-path";
+    case ServiceManifestError::InvalidTransferReference:
+        return "invalid-transfer-reference";
+    case ServiceManifestError::DuplicateTransferReference:
+        return "duplicate-transfer-reference";
+    case ServiceManifestError::MissingExecutableHash:
+        return "missing-executable-hash";
+    case ServiceManifestError::InvalidImmutablePolicy:
+        return "invalid-immutable-policy";
+    case ServiceManifestError::ImmutablePolicyDenied:
+        return "immutable-policy-denied";
+    case ServiceManifestError::InvalidServiceKind:
+        return "invalid-service-kind";
+    case ServiceManifestError::ServiceKindDenied:
+        return "service-kind-denied";
+    case ServiceManifestError::InvalidRestartPolicy:
+        return "invalid-restart-policy";
+    case ServiceManifestError::InvalidAutostart:
+        return "invalid-autostart";
+    case ServiceManifestError::InvalidCapabilities:
+        return "invalid-capabilities";
+    case ServiceManifestError::CapabilityDenied:
+        return "capability-denied";
+    case ServiceManifestError::InvalidResourceProfile:
+        return "invalid-resource-profile";
+    case ServiceManifestError::ResourceProfileDenied:
+        return "resource-profile-denied";
+    case ServiceManifestError::InvalidResourceCeiling:
+        return "invalid-resource-ceiling";
+    case ServiceManifestError::ResourceCeilingDenied:
+        return "resource-ceiling-denied";
+    case ServiceManifestError::InvalidFrameBudget:
+        return "invalid-frame-budget";
+    case ServiceManifestError::FrameBudgetDenied:
+        return "frame-budget-denied";
+    case ServiceManifestError::InvalidTickBudget:
+        return "invalid-tick-budget";
+    case ServiceManifestError::TickBudgetDenied:
+        return "tick-budget-denied";
+    case ServiceManifestError::InvalidDependencyRange:
+        return "invalid-dependency-range";
+    case ServiceManifestError::InvalidDependency:
+        return "invalid-dependency";
+    case ServiceManifestError::MissingDependency:
+        return "missing-dependency";
+    case ServiceManifestError::DuplicateDependency:
+        return "duplicate-dependency";
+    case ServiceManifestError::DependencyCycle:
+        return "dependency-cycle";
+    case ServiceManifestError::NonCanonicalUnusedStorage:
+        return "noncanonical-unused-storage";
+    case ServiceManifestError::ServiceCountDenied:
+        return "service-count-denied";
+    case ServiceManifestError::DependencyCountDenied:
+        return "dependency-count-denied";
     }
     return "?";
 }
