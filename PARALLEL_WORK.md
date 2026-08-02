@@ -3947,13 +3947,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T10:31:54Z
 - **Status**: COMPLETED @ 2026-08-02T10:47:28Z
 
-### [ACTIVE] gui-send-transaction-recovery-20260802
+### [DONE] gui-send-transaction-recovery-20260802
 - **Session**: `Codex-GuiSendTransaction-Recovery-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/drivers/video/gui_send_transaction.h,kernel/drivers/video/gui_send_transaction.cpp,tests/host/test_gui_send_transaction.cpp`
 - **Description**: Audit and publish generation-safe synchronous GUI send transactions
 - **Claimed**: 2026-08-02T10:42:06Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T10:48:38Z
 
 ### [ACTIVE] mt7921-contract-recovery-20260802
 - **Session**: `Nathan-1913`
