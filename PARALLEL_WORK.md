@@ -2379,13 +2379,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T14:21:58Z
 - **Status**: COMPLETED @ 2026-08-01T14:22:20Z
 
-### [ACTIVE] fable-targeted-contract-ci-20260801
+### [DONE] fable-targeted-contract-ci-20260801
 - **Session**: `Codex-root-ci-contracts`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `.github/workflows/build.yml`
 - **Description**: Register integrated Fable-targeted hostile structural contracts in authoritative CI
 - **Claimed**: 2026-08-01T14:26:06Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T06:55:08Z
 
 ### [DONE] linux-fd-fork-inheritance-caller-20260801
 - **Session**: `Nathan-1452`
