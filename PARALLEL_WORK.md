@@ -3722,3 +3722,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Keep PE fuzz host shim synchronized with reservation-backed loader VM API
 - **Claimed**: 2026-08-02T07:01:40Z
 - **Status**: COMPLETED @ 2026-08-02T07:04:13Z
+
+### [ACTIVE] service-manifest-format-integration-20260802
+- **Session**: `Codex-Root-FormatManifest-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/service_manifest.cpp,kernel/core/service_manifest.h`
+- **Description**: Integrate duplicate transfer identity contract and satisfy branch clang-format gate
+- **Claimed**: 2026-08-02T07:06:33Z
+- **Status**: IN PROGRESS
