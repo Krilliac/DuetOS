@@ -6,7 +6,7 @@
 /*
  * DuetOS kernel-stack arena — v0.
  *
- * Every task spawned via SchedCreate needs a 16 KiB kernel stack.
+ * Every task spawned via SchedCreate needs a 128 KiB kernel stack.
  * Before this module, those stacks came from the kernel heap
  * (mm::KMalloc). An overflow silently scribbled the next heap
  * chunk — typically another task's stack or its header — and was
@@ -24,48 +24,39 @@
  * panic with the offending task id — no more silent corruption
  * window.
  *
- * Layout (each slot, stride = kKernelStackSlotBytes = 20 KiB):
+ * Layout (each slot, stride = kKernelStackSlotBytes = 132 KiB):
  *
- *   +0x0000 ┌─────────────────────────┐
- *           │  guard page (unmapped)  │   #PF on any access
- *   +0x1000 ├─────────────────────────┤  <-- AllocateKernelStack returns this
- *           │   stack page 0   (RW+NX)│
- *   +0x2000 ├─────────────────────────┤
- *           │   stack page 1   (RW+NX)│
- *   +0x3000 ├─────────────────────────┤
- *           │   stack page 2   (RW+NX)│
- *   +0x4000 ├─────────────────────────┤
- *           │   stack page 3   (RW+NX)│
- *   +0x5000 └─────────────────────────┘   <-- top-of-stack (16 KiB above base)
+ *   +0x00000  guard page (unmapped; #PF on access)
+ *   +0x01000  usable base returned by AllocateKernelStack
+ *              32 stack pages (RW+NX)
+ *   +0x21000  top of stack (128 KiB above the usable base)
  *
  * Arena base is 0xFFFFFFFFE0000000 (the "reserved for future
- * use" range documented in paging.h). 512 slots * 20 KiB =
- * 10 MiB of kernel virtual space — covers 512 simultaneously-
+ * use" range documented in paging.h). 512 slots * 132 KiB =
+ * 66 MiB of kernel virtual space — covers 512 simultaneously-
  * live tasks, well above anything today's boot creates, and
  * leaves the rest of the reserved range for future use (per-CPU
  * IST stacks, for instance).
  *
  * Scope limits (v0):
- *   - Boot task (task 0) keeps its boot.S-provisioned stack; it
- *     is not relocated onto a guarded slot. Boot-stack hardening
- *     is a separate slice.
- *   - SMP AP bootstrap stacks (arch/x86_64/smp.cpp) still come
- *     from mm::KMalloc. APs today only run `cli; hlt` so they
- *     cannot overflow; swap to AllocateKernelStack when APs join
- *     the scheduler.
- *   - TLB shootdown on FreeKernelStack (fixed 2026-05-22):
- *     after the UnmapPage loop, broadcast `SmpTlbShootdown` to
- *     every online peer so stale TLB entries for the freed slot
- *     can't read back the old physical page once the slot is
- *     re-allocated. The boot-tail wild-RIP bug (Roadmap entry)
- *     was caused by exactly this race.
- *   - Single slot size (16 KiB usable). If a task needs more,
+ *   - Boot task (task 0) keeps its boot.S-provisioned stack and the
+ *     dedicated guard page installed by InstallBootStackGuard.
+ *   - SMP AP bootstrap stacks use guarded arena slots. They remain
+ *     mapped for the CPU lifetime because a rejected AP parks on its
+ *     stack and the admitted path has no post-switch reclamation owner.
+ *   - TLB reclamation barrier on FreeKernelStack: clear every stack
+ *     PTE, wait for confirmed per-target invalidation on each IPI-ready
+ *     peer, and only then return the physical frames to the allocator.
+ *     A slow peer is waited out; it is never converted into permission
+ *     to reuse a frame behind a stale translation. The boot-tail wild-RIP
+ *     bug (Roadmap entry) was caused by exactly this race.
+ *   - Single slot size (128 KiB usable). If a task needs more,
  *     add a new size class; don't parameterise on the fly.
  *
  * Context: kernel. Safe from any kernel code that is NOT in IRQ
  * context (uses a spinlock + MapPage/UnmapPage, which are not
- * IRQ-safe). The sole caller today is sched::SchedCreate and
- * the reaper.
+ * IRQ-safe). Allocation callers are sched::SchedCreate and
+ * arch::SmpStartAps; the reaper releases ordinary task stacks.
  */
 
 namespace duetos::mm
@@ -127,10 +118,10 @@ inline constexpr u64 kKernelStackArenaBytes = kKernelStackMaxSlots * kKernelStac
 void* AllocateKernelStack(u64 stack_bytes);
 
 /// Release a stack slot. `base` is the pointer AllocateKernelStack
-/// returned; `stack_bytes` must match. Unmaps the four stack
-/// pages, frees the backing frames, pushes the slot index onto
-/// the freelist so the next AllocateKernelStack reuses the same
-/// VA range (LIFO).
+/// returned; `stack_bytes` must match. Unmaps every stack page, completes
+/// the cross-CPU TLB reclamation barrier, then frees the backing frames and
+/// pushes the slot index onto the freelist so the next AllocateKernelStack
+/// reuses the same VA range (LIFO).
 ///
 /// The guard-page PTE is never mapped in the first place, so
 /// nothing to unmap there — but because UnmapPage is a no-op on
@@ -140,7 +131,7 @@ void FreeKernelStack(void* base, u64 stack_bytes);
 
 /// Deep-usage canary. True if the kernel thread whose stack usable-base is
 /// `base` has crossed the 75% tripwire — a sentinel word written at the
-/// 48 KiB-used line on allocation has been overwritten by downward stack
+/// 96 KiB-used line on allocation has been overwritten by downward stack
 /// growth. O(1) (one read); `base` must be a value AllocateKernelStack
 /// returned. FreeKernelStack checks this automatically and WARNs + fires the
 /// kKernelStackDeepUsage probe; this accessor lets a diagnostic scan LIVE

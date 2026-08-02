@@ -89,8 +89,14 @@ __declspec(dllexport) NTSTATUS NtReturnNotImpl(void)
 
 __declspec(dllexport) NTSTATUS NtClose(HANDLE h)
 {
-    long long discard;
-    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)22), "D"((long long)h) : "memory");
+    if (h == (HANDLE)0 || h == (HANDLE)(long long)-1)
+        return NTSTATUS_INVALID_HANDLE;
+
+    long long rv;
+    const long long syscall_number = ntdll_has_job_handle_tag(h) ? 168 : 22; /* SYS_JOB_CLOSE / SYS_FILE_CLOSE */
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"(syscall_number), "D"((long long)h) : "memory");
+    if (rv < 0)
+        return NTSTATUS_INVALID_HANDLE;
     return NTSTATUS_SUCCESS;
 }
 
@@ -216,14 +222,15 @@ __declspec(dllexport) NTSTATUS NtAllocateVirtualMemory(HANDLE hProcess, void** B
     long long sz = (long long)*RegionSize;
     long long out_base = 0;
     long long status;
-    __asm__ volatile("mov %4, %%r10\n\t"
-                     "mov %5, %%r8\n\t"
-                     "mov %6, %%r9\n\t"
+    __asm__ volatile("mov %[allocation_type], %%r10\n\t"
+                     "mov %[protect], %%r8\n\t"
+                     "mov %[out_base], %%r9\n\t"
                      "int $0x80"
                      : "=a"(status)
                      : "a"((long long)148), "D"((long long)hProcess), "S"(hint), "d"(sz),
-                       "r"((long long)AllocationType), "r"((long long)Protect), "r"((long long)&out_base)
-                     : "r10", "r8", "r9", "memory");
+                       [allocation_type] "r"((long long)AllocationType), [protect] "r"((long long)Protect),
+                       [out_base] "r"((long long)&out_base)
+                     : "r10", "r8", "r9", "rcx", "r11", "memory");
     if (status != 0)
         return (NTSTATUS)status;
     *BaseAddress = (void*)out_base;
@@ -246,11 +253,12 @@ __declspec(dllexport) NTSTATUS NtFreeVirtualMemory(HANDLE hProcess, void** BaseA
     long long va = (long long)*BaseAddress;
     long long sz = (long long)*RegionSize;
     long long status;
-    __asm__ volatile("mov %4, %%r10\n\t"
+    __asm__ volatile("mov %[free_type], %%r10\n\t"
                      "int $0x80"
                      : "=a"(status)
-                     : "a"((long long)149), "D"((long long)hProcess), "S"(va), "d"(sz), "r"((long long)FreeType)
-                     : "r10", "memory");
+                     : "a"((long long)149), "D"((long long)hProcess), "S"(va), "d"(sz),
+                       [free_type] "r"((long long)FreeType)
+                     : "r10", "rcx", "r11", "memory");
     return (NTSTATUS)status;
 }
 
@@ -272,13 +280,13 @@ __declspec(dllexport) NTSTATUS NtProtectVirtualMemory(HANDLE hProcess, void** Ba
     long long va = (long long)*BaseAddress;
     long long sz = (long long)*RegionSize;
     long long status;
-    __asm__ volatile("mov %4, %%r10\n\t"
-                     "mov %5, %%r8\n\t"
+    __asm__ volatile("mov %[new_protect], %%r10\n\t"
+                     "mov %[old_protect], %%r8\n\t"
                      "int $0x80"
                      : "=a"(status)
-                     : "a"((long long)150), "D"((long long)hProcess), "S"(va), "d"(sz), "r"((long long)NewProtect),
-                       "r"((long long)OldProtect)
-                     : "r10", "r8", "memory");
+                     : "a"((long long)150), "D"((long long)hProcess), "S"(va), "d"(sz),
+                       [new_protect] "r"((long long)NewProtect), [old_protect] "r"((long long)OldProtect)
+                     : "r10", "r8", "rcx", "r11", "memory");
     return (NTSTATUS)status;
 }
 
@@ -481,15 +489,17 @@ __declspec(dllexport) NTSTATUS NtWaitForSingleObject(HANDLE h, BOOL bAlertable, 
 {
     (void)bAlertable;
     unsigned long long handle = (unsigned long long)h;
+    const unsigned long long low_tag = handle & 0xFFFULL;
+    const int opaque_kobj = handle <= 0x7FFFFFFFULL && (handle >> 12) != 0;
     long long syscall_num;
-    /* Mutex / event / semaphore handles are base + a kobj_handles
-     * slot (1..63) — the caps grew 8 -> 64 when those objects
-     * migrated to the unified handle table. */
-    if (handle >= 0x200 && handle < 0x240)
+    /* Mutex / event / semaphore handles carry a non-zero generation in
+     * bits 12..30 and a type+identity tag in the low 12 bits. Preserve the
+     * full value for the syscall; classify only valid positive opaque tokens. */
+    if (opaque_kobj && low_tag > 0x200ULL && low_tag < 0x240ULL)
         syscall_num = 26; /* SYS_MUTEX_WAIT */
-    else if (handle >= 0x300 && handle < 0x340)
+    else if (opaque_kobj && low_tag > 0x300ULL && low_tag < 0x340ULL)
         syscall_num = 33; /* SYS_EVENT_WAIT */
-    else if (handle >= 0x500 && handle < 0x540)
+    else if (opaque_kobj && low_tag > 0x500ULL && low_tag < 0x540ULL)
         syscall_num = 53; /* SYS_SEM_WAIT */
     else if (handle >= 0x400 && handle < 0x408)
         syscall_num = 54; /* SYS_THREAD_WAIT */

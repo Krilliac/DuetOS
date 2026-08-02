@@ -141,11 +141,22 @@ inline constexpr u64 kMaxBorrowedRangePages = 1024;
 // mapper from occupying an as-yet-uncommitted page. The page bound keeps
 // the no-present-PTE validation pass finite while covering the maximum
 // 4 MiB stack reservation plus its four guard pages (1028 pages).
-inline constexpr u64 kMaxUserVmReservationPages = 2048;
+inline constexpr u64 kMaxUserVmReservationPages = kMaxUserVmRegionsPerAs;
 inline constexpr u16 kInitialUserVmReservationCapacity = 4;
 inline constexpr u16 kMaxUserVmReservationsPerAs = 64;
 
+// A syscall may reserve a small output window before it performs a state
+// transition whose result cannot be rolled back.  The lease is a logical PTE
+// pin: unmap, protection downgrade, reservation replacement, and exec teardown
+// refuse or wait while an overlapping lease is live.  No VM mutex stays held
+// while the syscall blocks.  Four pages cover the largest native control
+// result (including an unaligned first byte) while keeping validation and the
+// direct-map copy strictly bounded under the structural spinlock.
+inline constexpr u16 kAddressSpaceWriteLeaseCapacity = 32;
+inline constexpr u16 kAddressSpaceWriteLeaseMaxPages = 4;
+
 struct AddressSpace;
+enum class AddressSpaceWriteLeaseStatus : u8;
 
 /// Opaque, AS-scoped capability for one exact user-VA reservation. Token
 /// values come from one kernel-global, non-wrapping source, so a stale token
@@ -169,8 +180,47 @@ class AddressSpaceReservationToken
     friend bool AddressSpaceReserveUserRange(AddressSpace*, u64, u64, AddressSpaceReservationToken*);
     friend bool AddressSpaceMapReservedUserPage(AddressSpace*, const AddressSpaceReservationToken&, u64, PhysAddr, u64);
     friend bool AddressSpaceReservationMatches(AddressSpace*, const AddressSpaceReservationToken&, u64, u64);
+    friend bool AddressSpaceCommitUserReservation(AddressSpace*, const AddressSpaceReservationToken&, u64, u64);
+    friend bool AddressSpaceCommitUserReservationReplacingOwnedRange(AddressSpace*, const AddressSpaceReservationToken&,
+                                                                     u64, u64, u64, u64);
     friend bool AddressSpaceReleaseUserReservation(AddressSpace*, const AddressSpaceReservationToken&, u64, u64);
     friend void AddressSpaceSelfTest();
+};
+
+/// Opaque, non-transferable authority to write one exact, already-mapped user
+/// range.  Token identities come from a boot-global non-wrapping source, so a
+/// copied stale lease cannot revive after AddressSpace allocator reuse.  A
+/// successful acquisition retains its AddressSpace until exact release.
+class AddressSpaceWriteLease
+{
+  public:
+    constexpr AddressSpaceWriteLease() = default;
+    AddressSpaceWriteLease(const AddressSpaceWriteLease&) = delete;
+    AddressSpaceWriteLease& operator=(const AddressSpaceWriteLease&) = delete;
+    AddressSpaceWriteLease(AddressSpaceWriteLease&&) = delete;
+    AddressSpaceWriteLease& operator=(AddressSpaceWriteLease&&) = delete;
+    constexpr bool IsValid() const { return owner_ != nullptr && token_value_ != 0 && lo_ < hi_; }
+
+  private:
+    AddressSpace* owner_ = nullptr;
+    u64 token_value_ = 0;
+    u64 lo_ = 0;
+    u64 hi_ = 0;
+
+    friend AddressSpaceWriteLeaseStatus AddressSpaceAcquireWriteLease(AddressSpace*, u64, u64, AddressSpaceWriteLease*);
+    friend bool AddressSpaceCopyToWriteLease(const AddressSpaceWriteLease&, u64, const void*, u64);
+    friend bool AddressSpaceReleaseWriteLease(AddressSpaceWriteLease*);
+};
+
+enum class AddressSpaceWriteLeaseStatus : u8
+{
+    Ok = 0,
+    InvalidArgument,
+    Unmapped,
+    NotWritable,
+    CapacityExhausted,
+    TokenExhausted,
+    CorruptState,
 };
 
 struct AddressSpaceUserRegion
@@ -180,6 +230,15 @@ struct AddressSpaceUserRegion
     u64 reservation_token = 0; // 0=ordinary AS-owned page; otherwise exact reservation owner
 };
 
+// Consistent, pointer-free diagnostic view of the owned-region ledger.
+// No region row or backing-frame identity escapes the structural lock.
+struct AddressSpaceUserRegionSummary
+{
+    u16 page_count{};
+    u64 min_vaddr{};
+    u64 max_vaddr_exclusive{};
+};
+
 struct AddressSpaceUserReservation
 {
     u64 lo;          // inclusive, page-aligned
@@ -187,8 +246,16 @@ struct AddressSpaceUserReservation
     u64 token_value; // non-zero and never reused anywhere in this boot
 };
 
+struct AddressSpaceWriteLeaseRow
+{
+    u64 lo;          // exact inclusive user byte address
+    u64 hi;          // exact exclusive user byte address
+    u64 token_value; // zero when free; otherwise globally unique
+};
+
 static_assert(sizeof(AddressSpaceUserRegion) == 24, "user-region ledger cost changed");
 static_assert(sizeof(AddressSpaceUserReservation) == 24, "user-reservation ledger cost changed");
+static_assert(sizeof(AddressSpaceWriteLeaseRow) == 24, "write-lease ledger cost changed");
 
 struct AddressSpace
 {
@@ -239,10 +306,20 @@ struct AddressSpace
     u16 reservation_capacity;
     AddressSpaceUserReservation* reservations;
 
+    // Exact writable user ranges pinned across fallible/state-changing
+    // syscalls.  Acquisition takes mutation_lock -> write_leases_lock ->
+    // regions_lock.  Release needs only write_leases_lock, allowing a lease to
+    // quiesce while exec waits outside mutation_lock.  The fixed table avoids
+    // allocation after input validation and bounds deliberate capacity use.
+    u16 write_lease_count;
+    u16 next_write_lease_hint;
+    AddressSpaceWriteLeaseRow write_leases[kAddressSpaceWriteLeaseCapacity];
+    mutable sync::SpinLock write_leases_lock;
+
     // Bitmask of CPU ids that currently have THIS AS loaded in CR3.
     // Bit (1u << cpu_id) is set by AddressSpaceActivate when a CPU
-    // switches in, cleared when the same CPU switches to a different
-    // AS. The TLB shootdown broadcast consults this mask and only
+    // switches in, cleared only after that CPU has reloaded CR3 away
+    // from the AS. The TLB shootdown barrier consults this mask and only
     // IPIs CPUs whose bit is set, avoiding wake-ups on peers that
     // have no cached TLB entries for the target AS. Updates use
     // atomic OR/AND so concurrent activates from different CPUs
@@ -321,6 +398,29 @@ bool AddressSpaceMapReservedUserPage(AddressSpace* as, const AddressSpaceReserva
 /// True only when `token` is live in `as` and names exactly [lo, hi).
 /// Used at the loader/scheduler handoff before a private Task is published.
 bool AddressSpaceReservationMatches(AddressSpace* as, const AddressSpaceReservationToken& token, u64 lo, u64 hi);
+
+/// Convert one fully populated exact reservation into ordinary AS-owned
+/// mappings. Every page in [expected_lo, expected_hi) must be present and
+/// tagged with `token`; partial reservations fail without mutation. On
+/// success the row tags become ordinary ownership and the reservation is
+/// retired atomically, allowing normal protect/unmap operations.
+bool AddressSpaceCommitUserReservation(AddressSpace* as, const AddressSpaceReservationToken& token, u64 expected_lo,
+                                       u64 expected_hi);
+
+/// Atomically publish one fully populated exact destination reservation and
+/// retire one disjoint, fully populated ordinary AS-owned source range. Both
+/// ranges are validated in full before either changes: every destination page
+/// must be tagged with `token`, and every source page must have exactly one
+/// ordinary owned-ledger row whose PTE still names the recorded frame. A hole,
+/// borrowed page, duplicate row, stale token, reservation overlap, or ledger /
+/// PTE disagreement returns false with both ranges untouched. On success the
+/// destination becomes ordinary ownership and the source pages, TLB entries,
+/// frames, and now-empty page tables are retired before return. Task context
+/// only; never call under a spinlock.
+bool AddressSpaceCommitUserReservationReplacingOwnedRange(AddressSpace* as,
+                                                          const AddressSpaceReservationToken& destination_token,
+                                                          u64 destination_lo, u64 destination_hi, u64 source_lo,
+                                                          u64 source_hi);
 
 /// Retire every AS-owned page tagged with `token`, complete each required
 /// TLB shootdown and frame/table release outside regions_lock, then remove
@@ -402,10 +502,11 @@ bool AddressSpaceUnmapBorrowedRangeExpected(AddressSpace* as, u64 virt, const Ph
 /// take — kPagePresent | kPageUser | kPageWritable | kPageNoExecute
 /// in any combination, with the same W^X invariant). Preserves
 /// the backing frame; only the protection bits change. Returns
-/// true if the page is owned by this AS, present, and the PTE was rewritten;
-/// false if `virt` is unmapped or is a borrowed mapping owned by another
-/// subsystem. Borrowed mappings must be protected through their owner's
-/// transaction so its frame and W^X ledgers cannot diverge from the PTE.
+/// true if the page is ordinary-owned by this AS, present, and the PTE was
+/// rewritten; false if `virt` is unmapped, lies inside a live reservation, or
+/// is a borrowed mapping owned by another subsystem. Reserved and borrowed
+/// mappings must be protected through their owner's transaction so ownership,
+/// frame, and W^X ledgers cannot diverge from the PTE.
 ///
 /// TLB invalidation is broadcast to every CPU currently using `as`
 /// before the mutation transaction completes.
@@ -502,6 +603,36 @@ bool AddressSpaceReadUserMemory(AddressSpace* as, u64 user_va, void* kernel_dst,
 /// read-only/RX mapping through the kernel direct map.
 bool AddressSpaceWriteUserMemory(AddressSpace* as, u64 user_va, const void* kernel_src, u64 len);
 
+/// [task context, thread-safe] Pin an exact, currently present and writable
+/// user range without retaining mutation_lock after return.  The range may
+/// span at most kAddressSpaceWriteLeaseMaxPages.  Overlapping unmap/protect,
+/// reservation replacement/release, and exec teardown cannot retire or narrow
+/// these PTEs until AddressSpaceReleaseWriteLease succeeds.
+AddressSpaceWriteLeaseStatus AddressSpaceAcquireWriteLease(AddressSpace* as, u64 user_va, u64 len,
+                                                           AddressSpaceWriteLease* out_lease);
+
+/// Copy trusted bytes through the direct map while validating the exact live
+/// lease and every leaf PTE. `offset + len` must remain inside the leased
+/// range.  Validation of all pages precedes the first byte write, so a corrupt
+/// mapping cannot produce a partial result.
+bool AddressSpaceCopyToWriteLease(const AddressSpaceWriteLease& lease, u64 offset, const void* kernel_src, u64 len);
+
+/// Consume one exact lease and drop its AddressSpace reference. Leases are
+/// deliberately non-copyable/non-movable: a stale copy could otherwise retain
+/// a raw owner pointer after the one ledger-held AddressSpace reference was
+/// released. Forged and already-consumed objects are rejected without touching
+/// ledger state.
+bool AddressSpaceReleaseWriteLease(AddressSpaceWriteLease* lease);
+
+/// [panic/stop diagnostics, bounded/IRQ-safe] Attempt one non-blocking
+/// regions_lock acquisition and summarize the owned-region ledger. The
+/// function never waits, allocates, logs, or calls another subsystem. It
+/// returns false with a zeroed `out` when the lock is busy/self-held, the
+/// arguments are invalid, or a panic-time invariant check cannot produce a
+/// trustworthy snapshot. The caller must independently keep `as` alive for
+/// the duration of this call; no pointer or frame receipt escapes it.
+bool AddressSpaceTrySnapshotUserRegionSummary(const AddressSpace* as, AddressSpaceUserRegionSummary* out);
+
 /// Activate `as` by loading its PML4 into CR3 — but only if `as` is
 /// not already the active AS on this CPU. Updates the per-CPU
 /// current-AS tracker. `as == nullptr` selects the kernel AS (the
@@ -565,25 +696,27 @@ AddressSpaceStats AddressSpaceStatsRead();
 //
 // wiki/security/Linux-CVE-Audit.md class FF.
 //
-// Today on uniprocessor: shootdown collapses to a local `invlpg` (already
-// done by the caller paths). The API exists so the unmap/protect callers
-// don't have to grow SMP-awareness scattered through their bodies — they
-// call TlbShootdown* once and the helper decides what to do based on
-// SmpCpusOnline().
+// On a uniprocessor the barrier collapses to local `invlpg`. On SMP it
+// snapshots the exact sparse active/ready set and uses confirmed per-target
+// IPI-call completion. Unmap/protect callers therefore need no scattered SMP
+// policy and cannot mistake a soft timeout for permission to reclaim.
 // ---------------------------------------------------------------------------
 
-/// Flush a single virtual address from every CPU's TLB that has `as`
-/// active, including the current CPU. Safe to call before SMP comes
-/// up — collapses to a local `invlpg` when only the BSP is online.
-/// Must be called AFTER the PTE is cleared (or downgraded) in memory;
-/// the helper does not synchronise with the page-table mutation.
+/// Flush a single virtual address from every IPI-ready CPU that had `as`
+/// active at the barrier snapshot, including the current CPU. Safe before
+/// SMP bring-up and collapses to local `invlpg` with no ready peer. Must be
+/// called AFTER the PTE is cleared or downgraded. With a ready peer this is
+/// a task-context operation that requires IF=1; migration is pinned while
+/// the exact sparse target set is drained. The function does not return
+/// until every target acknowledges, so backing frames and retired page-table
+/// frames may be reused only after it returns. AP readiness is monotonic;
+/// each excluded AP performs a full TLB flush before joining the domain.
 void TlbShootdownAddr(AddressSpace* as, u64 virt);
 
-/// Flush a contiguous virtual range `[virt, virt + len)`. Same rules
-/// as TlbShootdownAddr. Caller is responsible for breaking the range
-/// up into page-sized invalidations if the range is large enough that
-/// a full CR3 reload would be cheaper — the helper does per-page
-/// invlpg only.
+/// Flush a contiguous virtual range `[virt, virt + len)`. Same confirmed
+/// completion and caller-context rules as TlbShootdownAddr. The helper rounds
+/// the range to whole pages and performs one `invlpg` per page on each target.
+/// Zero length is a no-op; range overflow is a kernel invariant failure.
 void TlbShootdownRange(AddressSpace* as, u64 virt, u64 len);
 
 /// Boot-time self-test: create two ASes, map a unique user page in
