@@ -3275,13 +3275,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T01:04:54Z
 - **Status**: COMPLETED @ 2026-08-02T01:25:42Z
 
-### [ACTIVE] net-registry-snapshot-20260801
+### [DONE] net-registry-snapshot-20260801
 - **Session**: `Codex-NetRegistry-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/diag/telemetry.cpp,kernel/net/wireless/inventory.cpp,kernel/drivers/video/netpanel.cpp,kernel/shell/shell_network.cpp,kernel/shell/shell_hardware.cpp,kernel/drivers/net/nic_telemetry.cpp,tests/fuzz/host_shim/net_stubs.cpp,tools/test/test-net-registry-lifecycle-contract.py`
 - **Description**: Lock-protected NIC registry lifecycle with copy-out snapshots and fail-closed restart state
 - **Claimed**: 2026-08-02T01:06:09Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T11:34:59Z
 
 ### [DONE] pci-endpoint-identity-20260801
 - **Session**: `Nathan-1003`
