@@ -164,6 +164,7 @@ fi
 # Expected signatures — every ring3 smoke probe prints its own
 # line. See kernel/proc/ring3_smoke.cpp.
 expected=(
+    "package staged and runtime open; activation disabled, compatibility manager retained"
     "[hello-pe] Hello from a PE executable!"
     "[hello-winapi] printed via kernel32.WriteFile!"
     "[vcruntime140] memset+memcpy+memmove OK"

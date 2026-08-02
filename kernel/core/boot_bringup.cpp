@@ -337,6 +337,7 @@
 #include "core/panic.h"
 #include "core/serial_input.h"
 #include "core/service.h"
+#include "core/service_bootstrap_live.h"
 #include "core/session_restore.h"
 #include "syscall/cap_gate.h"
 #include "proc/process.h"
@@ -2338,10 +2339,40 @@ void BootBringupDevices(bool force_net_smoke)
     duetos::net::drsh::DrshInit();
     DUETOS_BOOT_SELFTEST(duetos::net::drsh::DrshSelfTest());
 
-    // Service manager: build the runtime table (no spawns yet — the
-    // autostart set launches later, after ramfs snapshots, where the
-    // inline boot spawns used to run). Self-test covers the crash-loop
-    // respawn rate limiter.
+    // Anchor the generated authority-bound service package in fixed kernel
+    // storage. This stages sealed images and opens the runtime substrate only;
+    // ActivationReady is still false, so no Process, Task, or endpoint is
+    // published here and the compatibility manager remains authoritative.
+    const ServiceBootstrapLiveResultV1 service_bootstrap = ServiceBootstrapLiveInitializeV1();
+    if (service_bootstrap.status == ServiceBootstrapLiveStatusV1::CompatibilityRequired)
+    {
+        KLOG_INFO_2V("core/service-bootstrap",
+                     "package staged and runtime open; activation disabled, compatibility manager retained", "services",
+                     service_bootstrap.generated_service_count, "package-pages", service_bootstrap.package_owned_pages);
+    }
+    else
+    {
+        KLOG_WARN_S("core/service-bootstrap", "live anchor failed; compatibility manager retained", "status",
+                    ServiceBootstrapLiveStatusNameV1(service_bootstrap.status));
+        if (service_bootstrap.status == ServiceBootstrapLiveStatusV1::StageFailed)
+        {
+            KLOG_DEBUG_S("core/service-bootstrap", "live anchor stage result", "status",
+                         ServiceBootstrapStageStatusName(service_bootstrap.stage.status));
+        }
+        else if (service_bootstrap.status == ServiceBootstrapLiveStatusV1::RuntimeFailed ||
+                 service_bootstrap.status == ServiceBootstrapLiveStatusV1::RuntimeFailedStageDiscardFailed)
+        {
+            KLOG_DEBUG_S("core/service-bootstrap", "live anchor runtime result", "status",
+                         ServiceRuntimeStatusNameV1(service_bootstrap.runtime.status));
+            KLOG_DEBUG_S("core/service-bootstrap", "live anchor discard result", "status",
+                         ServiceBootstrapStageStatusName(service_bootstrap.discard_status));
+        }
+    }
+
+    // The compatibility manager remains the live launcher until authenticated
+    // endpoint activation is implemented and its generated marker is true. It
+    // builds the old runtime table without spawning; the autostart set launches
+    // later, after ramfs snapshots. Its self-test covers crash-loop limiting.
     duetos::core::ServiceManagerInit();
     DUETOS_BOOT_SELFTEST(duetos::core::ServiceManagerSelfTest());
 

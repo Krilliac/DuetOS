@@ -130,6 +130,7 @@ echo "smoke: qemu_rc=${QEMU_RC} exit_class=${EXIT_CLASS:-<unstructured>} exit_ph
 # self-tests. The forbidden list is also shared.
 common_expected=(
     "boot : metrics bringup-complete"
+    "package staged and runtime open; activation disabled, compatibility manager retained"
     "[smoke] profile=${PROFILE} complete"
     "[string-selftest] PASS"
     "[hexdump-selftest] PASS"
