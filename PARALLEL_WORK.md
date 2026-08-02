@@ -3619,13 +3619,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T05:54:44Z
 - **Status**: COMPLETED @ 2026-08-02T06:51:10Z
 
-### [ACTIVE] service-endpoint-connect-send-ingress-state-20260802
+### [DONE] service-endpoint-connect-send-ingress-state-20260802
 - **Session**: `Codex-ServiceEndpointDataplane-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/syscall/service_endpoint_ingress.h`
 - **Description**: Add trusted resource-domain snapshot and durable connect rollback authority state
 - **Claimed**: 2026-08-02T05:59:40Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T06:51:25Z
 
 ### [DONE] service-joint-readiness-20260802
 - **Session**: `Nathan-1443`
