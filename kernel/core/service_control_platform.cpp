@@ -246,7 +246,6 @@ ServiceControlPlatformStatusV1 MapReapStatus(ServiceExitReapStatus status)
     case ServiceExitReapStatus::Ok:
         return ServiceControlPlatformStatusV1::Ok;
     case ServiceExitReapStatus::NullArgument:
-    case ServiceExitReapStatus::InvalidBinding:
     case ServiceExitReapStatus::InvalidProcessKey:
     case ServiceExitReapStatus::InvalidEventKey:
         return ServiceControlPlatformStatusV1::InvalidArgument;

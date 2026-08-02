@@ -71,7 +71,8 @@ bool ExitObserverStorageIsPristine(const ServiceExitObserver& observer)
         const ServiceExitObserverSlot& slot = observer.slots[index];
         if (slot.state != ServiceExitObserverSlotState::Free || !AllZero(slot.reserved8, sizeof(slot.reserved8)) ||
             slot.generation != 0 || !(slot.start == kInvalidServiceLifecycleStartTicket) ||
-            !(slot.process == kInvalidProcessKey) || slot.exit_code != 0 || slot.reserved32 != 0)
+            !(slot.process == kInvalidProcessKey) || !(slot.directory_service == kInvalidServiceKey) ||
+            slot.exit_code != 0 || slot.reserved32 != 0)
         {
             return false;
         }
@@ -88,7 +89,8 @@ bool ExitReapEventIsZero(const ServiceExitEvent& event)
            event.receipt.process.pid == 0 && event.instance.start.broker_epoch == 0 &&
            event.instance.start.transition.service_identity == 0 && event.instance.start.transition.generation == 0 &&
            event.instance.process.process_identity == 0 && event.instance.process.pid == 0 && event.exit_code == 0 &&
-           event.failed == 0 && event.reserved8[0] == 0 && event.reserved8[1] == 0 && event.reserved8[2] == 0;
+           event.directory_service.slot == 0 && event.directory_service.generation == 0 && event.failed == 0 &&
+           event.reserved8[0] == 0 && event.reserved8[1] == 0 && event.reserved8[2] == 0;
 }
 
 bool ExitReapRowStorageIsPristine(const ServiceExitReapRow& row)

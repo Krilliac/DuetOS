@@ -17,6 +17,7 @@
  * cannot alias a later service incarnation even when a PID is recycled.
  */
 
+#include "core/service_directory.h"
 #include "core/service_lifecycle_broker.h"
 #include "proc/process.h"
 #include "sync/spinlock.h"
@@ -88,6 +89,7 @@ enum class ServiceExitObserverStatus : u8
     DuplicateRegistration,
     InvalidRegistration,
     InvalidProcessKey,
+    InvalidDirectoryRegistration,
     DuplicateProcess,
     ExitAlreadyPublished,
     NotFound,
@@ -150,6 +152,10 @@ struct ServiceExitEvent
 {
     ServiceExitEventReceipt receipt;
     ServiceLifecycleInstanceToken instance;
+    // Exact scalar teardown identity captured from the same private
+    // registration reservation consumed by joint lifecycle/directory
+    // publication. It is metadata, not observer acknowledgement authority.
+    ServiceKey directory_service;
     u32 exit_code;
     u8 failed;
     u8 reserved8[3];
@@ -168,6 +174,7 @@ struct ServiceExitObserverSlot
     u32 generation;
     ServiceLifecycleStartTicket start;
     ProcessKey process;
+    ServiceKey directory_service;
     u32 exit_code;
     u32 reserved32;
 };
@@ -210,9 +217,9 @@ ServiceExitReservationResult ServiceExitObserverReserve(ServiceExitObserver* obs
 
 // Called by the Process publication gate. It performs no callback, allocation,
 // wait, logging, or scheduler operation and never retains a Process pointer.
-ServiceExitObserverStatus ServiceExitObserverBindAtSchedulerPublication(ServiceExitObserver* observer,
-                                                                        ServiceExitRegistration registration,
-                                                                        ProcessKey process);
+ServiceExitObserverStatus ServiceExitObserverBindAtSchedulerPublication(
+    ServiceExitObserver* observer, ServiceExitRegistration registration, ProcessKey process,
+    const ServiceRegistrationReservation& directory_registration);
 
 // Only an unbound reservation may be aborted.
 ServiceExitObserverStatus ServiceExitObserverAbort(ServiceExitObserver* observer,

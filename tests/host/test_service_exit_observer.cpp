@@ -57,6 +57,13 @@ ProcessKey Key(u64 identity)
     return ProcessKey{identity, identity + 1000};
 }
 
+ServiceRegistrationReservation DirectoryReservation(u64 identity)
+{
+    const u64 generation = identity + 1;
+    return ServiceRegistrationReservation{
+        ServiceKey{static_cast<u32>(identity % kServiceDirectoryCapacity), generation}, generation};
+}
+
 void Initialize(ServiceExitObserver* observer)
 {
     ServiceExitObserverEpoch epoch = ServiceExitObserverMintEpoch();
@@ -101,14 +108,21 @@ int main()
     EXPECT_TRUE(ServiceExitRegistrationIsValid(first.registration));
     EXPECT_EQ(ServiceExitObserverReserve(&observer, first_start).status,
               ServiceExitObserverStatus::DuplicateRegistration);
-    EXPECT_EQ(ServiceExitObserverBindAtSchedulerPublication(&observer, first.registration, kInvalidProcessKey),
+    const ServiceRegistrationReservation first_directory = DirectoryReservation(1);
+    EXPECT_EQ(ServiceExitObserverBindAtSchedulerPublication(&observer, first.registration, kInvalidProcessKey,
+                                                            first_directory),
               ServiceExitObserverStatus::InvalidProcessKey);
 
     const ProcessKey first_process = Key(501);
-    EXPECT_EQ(ServiceExitObserverBindAtSchedulerPublication(&observer, first.registration, first_process),
-              ServiceExitObserverStatus::Ok);
-    EXPECT_EQ(ServiceExitObserverBindAtSchedulerPublication(&observer, first.registration, first_process),
-              ServiceExitObserverStatus::InvalidRegistration);
+    EXPECT_EQ(ServiceExitObserverBindAtSchedulerPublication(&observer, first.registration, first_process,
+                                                            kInvalidServiceRegistrationReservation),
+              ServiceExitObserverStatus::InvalidDirectoryRegistration);
+    EXPECT_EQ(
+        ServiceExitObserverBindAtSchedulerPublication(&observer, first.registration, first_process, first_directory),
+        ServiceExitObserverStatus::Ok);
+    EXPECT_EQ(
+        ServiceExitObserverBindAtSchedulerPublication(&observer, first.registration, first_process, first_directory),
+        ServiceExitObserverStatus::InvalidRegistration);
     ServiceExitRegistration bound_copy = first.registration;
     EXPECT_EQ(ServiceExitObserverAbort(&observer, &bound_copy), ServiceExitObserverStatus::InvalidRegistration);
 
@@ -124,8 +138,10 @@ int main()
     ServiceExitDequeueResult event = ServiceExitObserverDequeue(&observer);
     EXPECT_EQ(event.status, ServiceExitObserverStatus::Ok);
     EXPECT_TRUE(ServiceExitEventReceiptIsValid(event.event.receipt));
+    const u32 first_slot = event.event.receipt.registration.slot;
     EXPECT_EQ(event.event.instance.start, first.registration.start);
     EXPECT_EQ(event.event.instance.process, (ServiceInstanceKey{first_process.identity, first_process.pid}));
+    EXPECT_EQ(event.event.directory_service, first_directory.service);
     EXPECT_EQ(event.event.exit_code, 73U);
     EXPECT_EQ(event.event.failed, 1U);
     EXPECT_EQ(ServiceExitObserverDequeue(&observer).status, ServiceExitObserverStatus::NoEvent);
@@ -138,9 +154,11 @@ int main()
     event = ServiceExitObserverDequeue(&observer);
     EXPECT_EQ(event.status, ServiceExitObserverStatus::Ok);
     EXPECT_EQ(event.event.receipt.process, first_process);
+    EXPECT_EQ(event.event.directory_service, first_directory.service);
     ServiceExitEventReceipt stale_receipt = event.event.receipt;
     EXPECT_EQ(ServiceExitObserverAcknowledge(&observer, &event.event.receipt), ServiceExitObserverStatus::Ok);
     EXPECT_FALSE(ServiceExitEventReceiptIsValid(event.event.receipt));
+    EXPECT_EQ(observer.slots[first_slot].directory_service, kInvalidServiceKey);
     EXPECT_EQ(ServiceExitObserverAcknowledge(&observer, &stale_receipt),
               ServiceExitObserverStatus::InvalidEventReceipt);
 
@@ -150,21 +168,25 @@ int main()
     const ServiceExitRegistration aborted_stale = aborted.registration;
     EXPECT_EQ(ServiceExitObserverAbort(&observer, &aborted.registration), ServiceExitObserverStatus::Ok);
     EXPECT_FALSE(ServiceExitRegistrationIsValid(aborted.registration));
-    EXPECT_EQ(ServiceExitObserverBindAtSchedulerPublication(&observer, aborted_stale, Key(502)),
-              ServiceExitObserverStatus::InvalidRegistration);
+    EXPECT_EQ(
+        ServiceExitObserverBindAtSchedulerPublication(&observer, aborted_stale, Key(502), DirectoryReservation(2)),
+        ServiceExitObserverStatus::InvalidRegistration);
 
     // Cross-observer and duplicate-Process authority fail closed.
     ServiceExitObserver other{};
     Initialize(&other);
     ServiceExitReservationResult cross = ServiceExitObserverReserve(&observer, Start(11, 103, 1));
     EXPECT_EQ(cross.status, ServiceExitObserverStatus::Ok);
-    EXPECT_EQ(ServiceExitObserverBindAtSchedulerPublication(&other, cross.registration, Key(503)),
-              ServiceExitObserverStatus::InvalidRegistration);
-    EXPECT_EQ(ServiceExitObserverBindAtSchedulerPublication(&observer, cross.registration, Key(503)),
-              ServiceExitObserverStatus::Ok);
+    EXPECT_EQ(
+        ServiceExitObserverBindAtSchedulerPublication(&other, cross.registration, Key(503), DirectoryReservation(3)),
+        ServiceExitObserverStatus::InvalidRegistration);
+    EXPECT_EQ(
+        ServiceExitObserverBindAtSchedulerPublication(&observer, cross.registration, Key(503), DirectoryReservation(3)),
+        ServiceExitObserverStatus::Ok);
     ServiceExitReservationResult duplicate_process = ServiceExitObserverReserve(&observer, Start(11, 104, 1));
     EXPECT_EQ(duplicate_process.status, ServiceExitObserverStatus::Ok);
-    EXPECT_EQ(ServiceExitObserverBindAtSchedulerPublication(&observer, duplicate_process.registration, Key(503)),
+    EXPECT_EQ(ServiceExitObserverBindAtSchedulerPublication(&observer, duplicate_process.registration, Key(503),
+                                                            DirectoryReservation(4)),
               ServiceExitObserverStatus::DuplicateProcess);
     EXPECT_EQ(ServiceExitObserverAbort(&observer, &duplicate_process.registration), ServiceExitObserverStatus::Ok);
     EXPECT_EQ(ServiceExitObserverPublishExit(&observer, Key(503), 0), ServiceExitObserverStatus::Ok);
@@ -178,7 +200,9 @@ int main()
     ServiceExitReservationResult gate_rejected = ServiceExitObserverReserve(&observer, Start(11, 105, 1));
     EXPECT_EQ(gate_rejected.status, ServiceExitObserverStatus::Ok);
     const ProcessKey rejected_process = Key(504);
-    EXPECT_EQ(ServiceExitObserverBindAtSchedulerPublication(&observer, gate_rejected.registration, rejected_process),
+    const u32 rejected_slot = gate_rejected.registration.slot;
+    EXPECT_EQ(ServiceExitObserverBindAtSchedulerPublication(&observer, gate_rejected.registration, rejected_process,
+                                                            DirectoryReservation(5)),
               ServiceExitObserverStatus::Ok);
     ServiceExitRegistration wrong_process_receipt = gate_rejected.registration;
     EXPECT_EQ(ServiceExitObserverRollbackBound(&observer, &wrong_process_receipt, Key(505)),
@@ -187,16 +211,19 @@ int main()
     EXPECT_EQ(ServiceExitObserverRollbackBound(&observer, &gate_rejected.registration, rejected_process),
               ServiceExitObserverStatus::Ok);
     EXPECT_FALSE(ServiceExitRegistrationIsValid(gate_rejected.registration));
+    EXPECT_EQ(observer.slots[rejected_slot].directory_service, kInvalidServiceKey);
     EXPECT_EQ(ServiceExitObserverPublishExit(&observer, rejected_process, 1), ServiceExitObserverStatus::NotFound);
     EXPECT_EQ(ServiceExitObserverDequeue(&observer).status, ServiceExitObserverStatus::NoEvent);
-    EXPECT_EQ(ServiceExitObserverBindAtSchedulerPublication(&observer, rejected_stale, rejected_process),
+    EXPECT_EQ(ServiceExitObserverBindAtSchedulerPublication(&observer, rejected_stale, rejected_process,
+                                                            DirectoryReservation(5)),
               ServiceExitObserverStatus::InvalidRegistration);
 
     // Rollback is never an alternate acknowledgement path once a real exit is
     // pending or delivered.
     ServiceExitReservationResult cannot_rollback = ServiceExitObserverReserve(&observer, Start(11, 106, 1));
     const ProcessKey exiting_process = Key(506);
-    EXPECT_EQ(ServiceExitObserverBindAtSchedulerPublication(&observer, cannot_rollback.registration, exiting_process),
+    EXPECT_EQ(ServiceExitObserverBindAtSchedulerPublication(&observer, cannot_rollback.registration, exiting_process,
+                                                            DirectoryReservation(6)),
               ServiceExitObserverStatus::Ok);
     EXPECT_EQ(ServiceExitObserverPublishExit(&observer, exiting_process, 2), ServiceExitObserverStatus::Ok);
     ServiceExitRegistration pending_registration = cannot_rollback.registration;
@@ -222,8 +249,9 @@ int main()
     ServiceExitReservationResult after_terminal = ServiceExitObserverReserve(&exhaustion, Start(12, 201, 1));
     EXPECT_EQ(after_terminal.status, ServiceExitObserverStatus::Ok);
     EXPECT_EQ(after_terminal.registration.slot, 1U);
-    EXPECT_EQ(ServiceExitObserverBindAtSchedulerPublication(&exhaustion, terminal_stale, Key(600)),
-              ServiceExitObserverStatus::InvalidRegistration);
+    EXPECT_EQ(
+        ServiceExitObserverBindAtSchedulerPublication(&exhaustion, terminal_stale, Key(600), DirectoryReservation(7)),
+        ServiceExitObserverStatus::InvalidRegistration);
     EXPECT_EQ(ServiceExitObserverAbort(&exhaustion, &after_terminal.registration), ServiceExitObserverStatus::Ok);
 
     // Capacity and contention: every worker independently reserves, binds, and
@@ -246,8 +274,8 @@ int main()
                 if (reserved.status != ServiceExitObserverStatus::Ok)
                     return;
                 const ProcessKey process = Key(2000 + index);
-                bind_status[index] =
-                    ServiceExitObserverBindAtSchedulerPublication(&concurrent, reserved.registration, process);
+                bind_status[index] = ServiceExitObserverBindAtSchedulerPublication(
+                    &concurrent, reserved.registration, process, DirectoryReservation(100 + index));
                 if (bind_status[index] == ServiceExitObserverStatus::Ok)
                     publish_status[index] = ServiceExitObserverPublishExit(&concurrent, process, index);
             });
@@ -273,6 +301,7 @@ int main()
             EXPECT_FALSE(seen[index]);
             seen[index] = true;
             EXPECT_EQ(next.event.exit_code, index);
+            EXPECT_EQ(next.event.directory_service, DirectoryReservation(100 + index).service);
         }
         EXPECT_EQ(ServiceExitObserverAcknowledge(&concurrent, &next.event.receipt), ServiceExitObserverStatus::Ok);
     }
@@ -306,6 +335,8 @@ int main()
                             "exit-already-published") == 0);
     EXPECT_TRUE(std::strcmp(ServiceExitObserverStatusName(ServiceExitObserverStatus::InvalidEventReceipt),
                             "invalid-event-receipt") == 0);
+    EXPECT_TRUE(std::strcmp(ServiceExitObserverStatusName(ServiceExitObserverStatus::InvalidDirectoryRegistration),
+                            "invalid-directory-registration") == 0);
 
     return duetos_host_test::finish_main("service_exit_observer");
 }

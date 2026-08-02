@@ -1203,8 +1203,10 @@ int main()
         ServiceExitReservationResult foreign =
             ServiceExitObserverReserve(&fixture.service_runtime.exit_observer, foreign_start);
         EXPECT_EQ(foreign.status, ServiceExitObserverStatus::Ok);
+        const ServiceRegistrationReservation foreign_directory{ServiceKey{kServiceDirectoryCapacity - 1, 1}, 1};
         EXPECT_EQ(ServiceExitObserverBindAtSchedulerPublication(&fixture.service_runtime.exit_observer,
-                                                                foreign.registration, fake.publication_key),
+                                                                foreign.registration, fake.publication_key,
+                                                                foreign_directory),
                   ServiceExitObserverStatus::Ok);
         auto platform = fake.Interface();
         const ServiceBootstrapActivationResultV1 result =

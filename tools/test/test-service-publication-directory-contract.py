@@ -108,6 +108,8 @@ class ServicePublicationDirectoryContract(unittest.TestCase):
             "ServiceExitObserverRollbackBound",
         )
         self.assertIn("directory_registration_owned", gate)
+        self.assertIn("process, *context->directory_registration", gate)
+        self.assertIn("context->directory, context->directory_registration", gate)
 
     def test_lifecycle_lock_covers_final_directory_publish_and_exact_rollback(self) -> None:
         joint = braced_body(

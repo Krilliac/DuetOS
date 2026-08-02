@@ -101,6 +101,8 @@ class ServiceBootstrapActivationContract(unittest.TestCase):
                         gate.index("ServiceLifecycleBrokerCommitPublication"))
         self.assertIn("ServiceLifecycleBrokerCommitPublication", gate)
         self.assertIn("ServiceInstanceKey{process.identity, process.pid}", gate)
+        self.assertIn("process, *context->directory_registration", gate)
+        self.assertIn("context->directory, context->directory_registration", gate)
         self.assertGreater(gate.index("ServiceExitObserverRollbackBound"),
                            gate.index("ServiceLifecycleBrokerCommitPublication"))
 
