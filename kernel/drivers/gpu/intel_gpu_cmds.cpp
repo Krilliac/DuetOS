@@ -60,7 +60,12 @@ void IntelGpuCmdsSelfTest()
     const BatchStartPacket bb = EncodeBatchBufferStart(0x01234000ull, /*ggtt=*/true);
     const PipeControlPacket pc = EncodePipeControlQwWrite(0x0ABCD000ull, 0x42ull);
     const ColorBltPacket cb = EncodeColorBlt(0x800000ull, 7680u, 10u, 20u, 110u, 70u, 0xFF3366CCu);
-    const BltSurfaceGeometry surface{0x1000u, 64u, 64u, 256u, 32u};
+    // 64 rows x 256-byte pitch needs 0x4000 backing bytes — same geometry
+    // the compile-time kBltSurfaceTest proves. The earlier 0x1000 here
+    // under-sized the backing and made the validity gate (correctly)
+    // reject the surface, failing the selftest at runtime while every
+    // static_assert passed.
+    const BltSurfaceGeometry surface{0x4000u, 64u, 64u, 256u, 32u};
     const bool ok = bb.dw[0] == 0x18800001u && bb.dw[1] == 0x01234000u && kMiBatchBufferEnd == 0x05000000u &&
                     pc.dw[0] == 0x7A000004u && pc.dw[1] == 0x01104000u && cb.dw[0] == 0x54300005u &&
                     cb.dw[1] == 0x03F01E00u && kMiFlushDw == 0x13000001u && IsBltSurfaceGeometryValid(surface) &&
