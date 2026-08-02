@@ -4011,13 +4011,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T11:12:48Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] pci-bar-endpoint-recovery-20260802
+### [DONE] pci-bar-endpoint-recovery-20260802
 - **Session**: `Nathan-996`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/drivers/pci/pci.h,kernel/drivers/pci/pci.cpp,tests/host/test_pci_bar_probe.cpp,tests/host/test_pci_endpoint_identity.cpp,tools/test/test-pci-bar-sizing-contract.py,tools/test/test-pci-endpoint-identity-contract.py`
 - **Description**: Audit
 - **Claimed**: 2026-08-02T11:18:26Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T11:31:40Z
 
 ### [ACTIVE] handle-table-extraction-recovery-20260802
 - **Session**: `Codex-HandleTable-Recovery-20260802`
