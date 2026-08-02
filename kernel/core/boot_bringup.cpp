@@ -1910,6 +1910,12 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
                                                   duetos::ipc::KMailboxContentionSelfTest();
                                                   return duetos::core::Result<void>{};
                                               });
+        duetos::core::InitcallRegisterOrPanic(duetos::core::Phase::Sched, "handle-table-contention-selftest",
+                                              []()
+                                              {
+                                                  duetos::ipc::HandleTableContentionSelfTest();
+                                                  return duetos::core::Result<void>{};
+                                              });
         // Kernel work pool — N worker threads pulling work items
         // from a shared bounded FIFO. Self-test fans 256 increment
         // ops out across 4 workers with a queue intentionally
