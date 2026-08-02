@@ -3459,13 +3459,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T04:10:09Z
 - **Status**: COMPLETED @ 2026-08-02T04:16:57Z
 
-### [ACTIVE] service-publication-directory-join-20260802
+### [DONE] service-publication-directory-join-20260802
 - **Session**: `Nathan-265`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/core/service_bootstrap_activation.h,kernel/core/service_bootstrap_activation.cpp,kernel/core/service_lifecycle_broker.h,kernel/core/service_lifecycle_broker.cpp,kernel/core/service_runtime.h,kernel/core/service_runtime.cpp,kernel/core/service_directory.h,kernel/core/service_directory.cpp,tests/host/test_service_bootstrap_activation.cpp,tests/host/test_service_publication_directory.cpp,tools/test/test-service-publication-directory-contract.py`
 - **Description**: Atomically publish lifecycle exit observer and ServiceDirectory identity at first Task publication with exact rollback
 - **Claimed**: 2026-08-02T04:14:16Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T06:13:19Z
 
 ### [DONE] root-arp-copyout-contract-join-20260802
 - **Session**: `Nathan-998`
