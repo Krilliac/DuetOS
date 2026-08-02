@@ -3658,3 +3658,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Repair stale dormant displayd entrypoint assertion after artifact engine link while preserving authenticated-ingress boundary
 - **Claimed**: 2026-08-02T06:32:10Z
 - **Status**: COMPLETED @ 2026-08-02T06:32:49Z
+
+### [ACTIVE] service-object-package-lifecycle-link-20260802
+- **Session**: `Codex-ServiceObjectPackageLink-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tests/host/test_service_object_package.cpp`
+- **Description**: Provide exact hosted directory stubs required by lifecycle broker linkage in the focused service object package target
+- **Claimed**: 2026-08-02T06:36:13Z
+- **Status**: IN PROGRESS
