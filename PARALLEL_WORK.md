@@ -3443,13 +3443,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T03:57:58Z
 - **Status**: COMPLETED @ 2026-08-02T04:12:10Z
 
-### [ACTIVE] root-service-manifest-host-clang-gate-20260802
+### [DONE] root-service-manifest-host-clang-gate-20260802
 - **Session**: `Nathan-337`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tests/host/test_service_manifest.cpp`
 - **Description**: Remove dead manifest fixture offsets rejected by Clang Werror
 - **Claimed**: 2026-08-02T04:00:19Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T04:12:22Z
 
 ### [ACTIVE] root-arp-copyout-callers-20260802
 - **Session**: `Nathan-175`
