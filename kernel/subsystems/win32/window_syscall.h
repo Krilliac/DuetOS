@@ -11,19 +11,16 @@
  *   SYS_WIN_MSGBOX    (61) — rdi=text ptr, rsi=caption ptr
  *   SYS_WIN_PEEK_MSG  (62) — rdi=out ptr, rsi=hwnd filter, rdx=remove
  *   SYS_WIN_GET_MSG   (63) — rdi=out ptr, rsi=hwnd filter
- *   SYS_WIN_POST_MSG  (64) — rdi=hwnd, rsi=msg, rdx=wparam, r10=lparam
+ *   SYS_WIN_POST_MSG  (64) — rdi=hwnd or tagged tid, rsi=msg, rdx=wparam, r10=lparam
  *   SYS_GDI_FILL_RECT (65) — rdi=hwnd, rsi=x, rdx=y, r10=w, r8=h, r9=rgb
  *   SYS_GDI_TEXT_OUT  (66) — rdi=hwnd, rsi=x, rdx=y, r10=text, r8=len, r9=rgb
  *   SYS_GDI_RECTANGLE (67) — same shape as FILL_RECT
  *   SYS_GDI_CLEAR     (68) — rdi=hwnd
  *
  * Bridges user32.dll + gdi32.dll into the kernel-mode compositor
- * and per-window message queues in
- * kernel/drivers/video/widget.{h,cpp}. Each window carries an
- * owner pid so the process-exit reaper (called from
- * `ProcessRelease` when the last task drops its reference) can
- * close every window belonging to a dying process in a single
- * walk.
+ * and per-task message queues in kernel/drivers/video. Each window carries an
+ * immutable creating {pid,tid} so task/process exit reapers can close every
+ * window and drain every queue without retaining a raw scheduler Task pointer.
  */
 
 namespace duetos::arch
@@ -34,12 +31,12 @@ struct TrapFrame;
 namespace duetos::subsystems::win32
 {
 
-/// Resolve a ring-3-supplied biased Win32 HWND to a compositor
+/// Resolve a ring-3-supplied generation-tagged Win32 HWND to a compositor
 /// handle, asserting ownership belongs to the caller. Returns
 /// `duetos::drivers::video::kWindowInvalid` on bad handle, dead
 /// window, or cross-process attempt. Exposed for other subsystem
 /// modules (GDI object handlers) that also need to translate HWNDs.
-u32 HwndToCompositorHandleForCaller(u64 hwnd_biased, u64 pid);
+u32 HwndToCompositorHandleForCaller(u64 hwnd, u64 pid);
 
 void DoWinCreate(arch::TrapFrame* frame);
 void DoWinDestroy(arch::TrapFrame* frame);
