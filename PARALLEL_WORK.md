@@ -1099,13 +1099,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T20:00:48Z
 - **Status**: COMPLETED @ 2026-07-31T20:04:38Z
 
-### [ACTIVE] socket-alloc-transaction
+### [DONE] socket-alloc-transaction
 - **Session**: `Nathan-1456`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/net/socket.cpp`
 - **Description**: Atomic socket slot reservation across BSP preemption and SMP allocation races
 - **Claimed**: 2026-07-31T20:08:21Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T04:09:57Z
 
 ### [DONE] rust-ffi-hard-ingress
 - **Session**: `Nathan-1340`
