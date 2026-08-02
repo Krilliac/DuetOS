@@ -24,9 +24,10 @@
  * Init flow:
  *   1. AcpiInit -> SratInit (acpi/srat.cpp): builds APIC -> node table.
  *   2. PerCpuInitBsp -> TopologyInitBsp: BSP decodes its own row.
- *   3. Each AP, in ApEntryFromTrampoline before signaling online_flag,
- *      calls TopologyInitAp(cpu_id) so the BSP's WaitForApOnline
- *      poll doubles as the rendezvous on AP topology decode.
+ *   3. Each AP calls TopologyInitAp(cpu_id) in its CPUHP startup chain,
+ *      before publishing the exact ready token. The BSP's
+ *      WaitForApReady(attempt_token) poll is therefore the rendezvous on
+ *      AP topology decode; a stale generation cannot satisfy it.
  *   4. After SmpStartAps returns, BSP calls TopologyAssignClusters
  *      to pick the collapse rule and write each CPU's cluster_id.
  *   5. TopologyDump emits the per-CPU detail at debug log level.
@@ -84,9 +85,9 @@ void TopologyInitBsp();
 
 /// Decode the AP's own topology and populate slot `cpu_id` of
 /// the per-CPU topology table. Must run on the AP itself, after
-/// its GS-base has been programmed and before signaling
-/// `online_flag` to the BSP — the trampoline's online handshake
-/// doubles as the rendezvous point so `TopologyAssignClusters`
+/// its GS-base has been programmed and before publishing the exact
+/// attempt's ready token to the BSP. That generation-safe rendezvous
+/// completes before scheduler admission, so `TopologyAssignClusters`
 /// is safe to run on the BSP after `SmpStartAps` returns.
 void TopologyInitAp(u32 cpu_id);
 
