@@ -462,6 +462,14 @@ target_sources(
         "${CMAKE_SOURCE_DIR}/../../kernel/core/service_control_platform.cpp"
 )
 target_link_libraries(test_service_control_platform PRIVATE Threads::Threads)
+add_host_test(service_control_ingress)
+target_compile_definitions(test_service_control_ingress PRIVATE DUETOS_HOST_TEST=1)
+target_sources(
+    test_service_control_ingress
+    PRIVATE
+        "${CMAKE_SOURCE_DIR}/../../kernel/syscall/service_control_ingress.cpp"
+)
+target_link_libraries(test_service_control_ingress PRIVATE Threads::Threads)
 add_host_test(service_lifecycle_broker)
 target_compile_definitions(test_service_lifecycle_broker PRIVATE DUETOS_HOST_TEST=1)
 target_sources(
@@ -569,6 +577,7 @@ target_sources(test_registryd_store PRIVATE ${REGISTRYD_STORE_SOURCES})
 target_include_directories(
     test_registryd_store PRIVATE "${CMAKE_SOURCE_DIR}/../../userland/native-apps/registryd"
 )
+target_link_libraries(test_registryd_store PRIVATE Threads::Threads)
 
 set(EXECD_WORKER_SOURCES
     "${CMAKE_SOURCE_DIR}/../../userland/native-apps/execd/worker.c"
@@ -787,6 +796,7 @@ target_sources(
         "${CMAKE_SOURCE_DIR}/../../kernel/ipc/message_abi.cpp"
         "${CMAKE_SOURCE_DIR}/../../kernel/ipc/versioned_payload.cpp"
 )
+target_link_libraries(test_gui_broker_protocol PRIVATE Threads::Threads)
 # Phase A dynamic fix-discovery: decision logic is a freestanding header
 # (syscall/inferred_gap_decide.h), so the test needs no kernel TU.
 add_host_test(inferred_gap)
