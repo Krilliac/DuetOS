@@ -74,10 +74,8 @@ enum class ServiceManifestKind : u8
 };
 
 inline constexpr u32 kServiceManifestKnownKindMask =
-    (1u << static_cast<u8>(ServiceManifestKind::Native)) |
-    (1u << static_cast<u8>(ServiceManifestKind::Win32)) |
-    (1u << static_cast<u8>(ServiceManifestKind::Linux)) |
-    (1u << static_cast<u8>(ServiceManifestKind::Broker));
+    (1u << static_cast<u8>(ServiceManifestKind::Native)) | (1u << static_cast<u8>(ServiceManifestKind::Win32)) |
+    (1u << static_cast<u8>(ServiceManifestKind::Linux)) | (1u << static_cast<u8>(ServiceManifestKind::Broker));
 
 enum class ServiceManifestRestartPolicy : u8
 {
@@ -136,8 +134,7 @@ struct ServiceManifestServiceV1
     u8 name[kServiceManifestServiceNameCapacity];
     u8 executable_path[kServiceManifestExecutablePathCapacity];
 };
-static_assert(sizeof(ServiceManifestServiceV1) == kServiceManifestV1ServiceBytes,
-              "service row native mirror changed");
+static_assert(sizeof(ServiceManifestServiceV1) == kServiceManifestV1ServiceBytes, "service row native mirror changed");
 
 // Canonical native input accepted by the deterministic encoder.  Unused rows
 // and dependencies must be zero so one logical document has one native form.
@@ -253,6 +250,7 @@ enum class ServiceManifestError : u8
     DuplicateDependency,
     DependencyCycle,
     NonCanonicalUnusedStorage,
+    DuplicateTransferReference,
 };
 
 struct ServiceManifestEncodeResult
@@ -263,8 +261,7 @@ struct ServiceManifestEncodeResult
 
 inline constexpr u32 ServiceManifestEncodedSizeV1(u32 service_count, u32 dependency_count)
 {
-    return service_count > kServiceManifestMaximumServices ||
-                   dependency_count > kServiceManifestMaximumDependencies
+    return service_count > kServiceManifestMaximumServices || dependency_count > kServiceManifestMaximumDependencies
                ? 0
                : kServiceManifestV1HeaderBytes + service_count * kServiceManifestV1ServiceBytes +
                      dependency_count * kServiceManifestV1DependencyBytes;
