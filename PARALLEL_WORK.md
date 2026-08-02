@@ -3859,13 +3859,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T09:45:41Z
 - **Status**: COMPLETED @ 2026-08-02T09:54:11Z
 
-### [ACTIVE] proc-thread-group-closure-20260802
+### [DONE] proc-thread-group-closure-20260802
 - **Session**: `Codex-ThreadGroupClosure-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/proc/thread_group.h,kernel/proc/thread_group.cpp,tests/host/test_thread_group.cpp,tools/test/test-thread-group-contract.py`
 - **Description**: Audit
 - **Claimed**: 2026-08-02T09:47:59Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T10:00:32Z
 
 ### [ACTIVE] execd-protocol-recovery-20260802
 - **Session**: `Codex-ExecdProtocol-Recovery-20260802`
