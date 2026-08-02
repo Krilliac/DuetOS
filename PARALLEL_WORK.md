@@ -3747,13 +3747,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T07:15:37Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] service-control-idl-counts-20260802
+### [DONE] service-control-idl-counts-20260802
 - **Session**: `Codex-ServiceControlSyscall-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/test/test-native-syscall-idl.py,tools/test/test-native-syscall-dispatch-bijection.py`
 - **Description**: Advance native syscall IDL and dispatch bijection cardinality for dedicated SYS_SERVICE_CONTROL 228
 - **Claimed**: 2026-08-02T07:20:25Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T07:53:38Z
 
 ### [ACTIVE] service-control-manifest-policy-20260802
 - **Session**: `Codex-ServiceControlSyscall-20260802`
