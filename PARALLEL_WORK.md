@@ -4067,13 +4067,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T12:07:01Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] net-protocol-state-p0-recovery-20260802
+### [DONE] net-protocol-state-p0-recovery-20260802
 - **Session**: `Nathan-61`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/net/firewall.h,kernel/net/firewall.cpp,kernel/net/ipv6.cpp`
 - **Description**: Recover
 - **Claimed**: 2026-08-02T12:12:16Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T12:25:31Z
 
 ### [DONE] service-teardown-reaper-contract-recovery-20260802
 - **Session**: `Codex-ServiceTeardownContract-Recovery-20260802`
