@@ -3355,10 +3355,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T02:23:54Z
 - **Status**: COMPLETED @ 2026-08-02T02:26:48Z
 
-### [ACTIVE] service-bootstrap-qemu-verdict-20260802
+### [DONE] service-bootstrap-qemu-verdict-20260802
 - **Session**: `Codex-ServiceBootstrapVerdict-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/test/test-service-bootstrap-live-contract.py`
 - **Description**: Make every QEMU profile require the live service package and runtime anchor
 - **Claimed**: 2026-08-02T02:27:51Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T02:29:03Z
