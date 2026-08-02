@@ -579,7 +579,7 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T07:25:58Z
 - **Status**: COMPLETED @ 2026-07-31T07:31:13Z
 
-### [DONE] gpu-intel-t403
+### [DONE] gpu-intel-t403-retry-1458
 - **Session**: `Nathan-806`
 - **Branch**: `claude/gpu-intel-t403-20260731`
 - **Files**: `kernel/drivers/gpu/intel_gpu.cpp kernel/drivers/gpu/intel_gpu.h kernel/drivers/gpu/intel_gpu_cmds.h kernel/drivers/video/framebuffer.cpp tests/host/test_intel_blt.cpp tests/host/CMakeLists.txt`
@@ -587,7 +587,7 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T07:24:16Z
 - **Status**: COMPLETED @ 2026-07-31T07:37:50Z
 
-### [DONE] gpu-intel-t403
+### [DONE] gpu-intel-t403-final-1837
 - **Session**: `Nathan-1458`
 - **Branch**: `claude/gpu-intel-t403-20260731`
 - **Files**: `kernel/drivers/gpu/intel_gpu.cpp kernel/drivers/gpu/intel_gpu.h kernel/drivers/gpu/intel_gpu_cmds.cpp kernel/drivers/gpu/intel_gpu_cmds.h kernel/drivers/video/framebuffer.cpp tests/host/test_intel_blt.cpp tests/host/CMakeLists.txt`
@@ -1651,7 +1651,7 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T04:43:11Z
 - **Status**: COMPLETED @ 2026-08-01T05:04:25Z
 
-### [DONE] authorization-context-audit-20260801
+### [DONE] authorization-context-audit-source-20260801
 - **Session**: `Nathan-1525`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/proc/authorization_context.h`
@@ -1659,7 +1659,7 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T04:45:20Z
 - **Status**: COMPLETED @ 2026-08-01T04:46:05Z
 
-### [DONE] authorization-context-audit-20260801
+### [DONE] authorization-context-audit-full-20260801
 - **Session**: `Nathan-1836`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/proc/authorization_context.h`
@@ -2027,7 +2027,7 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T10:31:36Z
 - **Status**: COMPLETED @ 2026-08-01T10:32:03Z
 
-### [ACTIVE] task-receipt-loadtest-20260801
+### [ACTIVE] task-receipt-loadtest-root-20260801
 - **Session**: `Codex-root-lifecycle-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/shell/shell_loadtest.cpp`
@@ -2179,7 +2179,7 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T13:16:07Z
 - **Status**: COMPLETED @ 2026-08-01T13:32:52Z
 
-### [DONE] linux-fd-io-migration
+### [DONE] linux-fd-io-transaction-migration
 - **Session**: `Nathan-1410`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/subsystems/linux/syscall_fd.cpp`
@@ -3163,7 +3163,7 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T22:16:32Z
 - **Status**: COMPLETED @ 2026-08-01T22:58:18Z
 
-### [ACTIVE] registryd-store-20260801
+### [DONE] registryd-store-20260801
 - **Session**: `Nathan-1239`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `userland/native-apps/registryd/registry_store.h,userland/native-apps/registryd/registry_store.c,userland/native-apps/registryd/registry_persistence.c,tests/host/test_registryd_store.cpp,tools/test/test-registryd-store-contract.py`
