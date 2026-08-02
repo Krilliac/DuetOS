@@ -3195,13 +3195,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T23:00:56Z
 - **Status**: COMPLETED @ 2026-08-02T00:02:38Z
 
-### [ACTIVE] driver-id-watch-hardening-20260801
+### [DONE] driver-id-watch-hardening-20260801
 - **Session**: `Codex-DriverIntegration-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/drivers/net/nic_ids.h,kernel/drivers/net/net.h,kernel/drivers/net/net.cpp,kernel/drivers/net/iwlwifi.cpp,kernel/drivers/net/rtl88xx.cpp,kernel/drivers/net/bcm43xx.cpp,kernel/drivers/net/mt76.cpp,kernel/drivers/net/wireless_watch.h,kernel/drivers/net/wireless_watch.cpp,tests/host/test_nic_ids.cpp,tests/host/test_wireless_watch.cpp,tools/test/test-nic-id-classification-contract.py,tools/test/test-wireless-watch-lifecycle-contract.py,tools/test/ctest-boot-smoke.sh,wiki/drivers/Networking-Drivers.md,wiki/reference/Design-Decisions.md`
 - **Description**: Audit and integrate Fable NIC PCI-ID safety plus race-free wireless watcher teardown
 - **Claimed**: 2026-08-01T23:05:29Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T11:34:43Z
 
 ### [DONE] netd-socket-engine-20260801
 - **Session**: `Codex-NetdSocketEngine-20260801`
