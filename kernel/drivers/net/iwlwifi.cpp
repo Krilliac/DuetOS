@@ -3,12 +3,10 @@
 #include "arch/x86_64/serial.h"
 #include "diag/cleanroom_trace.h"
 #include "drivers/net/iwlwifi_fw.h"
-#include "drivers/net/iwlwifi_rings.h"
 #include "drivers/net/iwlwifi_upload.h"
-#include "net/wireless/wifi_diag.h"
 #include "loader/firmware_loader.h"
 #include "log/klog.h"
-#include "sched/sched.h"
+#include "net/wireless/wifi_diag.h"
 
 namespace duetos::drivers::net
 {
@@ -16,12 +14,11 @@ namespace duetos::drivers::net
 namespace
 {
 
-// CSR (Control + Status Register) block, BAR0-relative. Layout is
-// stable across iwlwifi silicon from 1000-series through AX/Be —
-// only the *meaning* of fields varies, not the offsets. We touch
-// the register file read-only here; writing would require knowing
-// the exact silicon family, which means walking HW_REV first
-// anyway.
+// Retained experimental iwlwifi shell. Its CSR, revision, subsystem-table,
+// and firmware contracts are not yet complete enough to authorize MMIO.
+// IwlwifiMatches therefore fails closed, and BringUp repeats that gate before
+// any register access. These offsets are dormant until a generation-specific
+// backend is implemented and audited.
 constexpr u32 kCsrHwRev = 0x028;   // u32 — silicon stepping + dash + sku
 constexpr u32 kCsrGpCntrl = 0x024; // u32 — power / sleep state
 constexpr u32 kCsrIntCoalescingReg = 0x004;
@@ -76,103 +73,20 @@ u32 Mmio32Read(const NicInfo& n, u64 off)
     return *reinterpret_cast<volatile u32*>(static_cast<u8*>(n.mmio_virt) + off);
 }
 
-// Periodic watch loop — re-reads HW_REV every 1 s. Catches the case
-// where the card was hot-removed or the firmware loader (when it
-// arrives) puts the chip in a state that returns all-ones.
-void IwlwifiWatchEntry(void* arg)
-{
-    auto* n = static_cast<NicInfo*>(arg);
-    if (n == nullptr)
-        return;
-    for (;;)
-    {
-        ++g_stats.watch_polls;
-        const u32 rev = Mmio32Read(*n, kCsrHwRev);
-        if (rev == 0xFFFFFFFFu)
-        {
-            ++g_stats.unexpected_dead_polls;
-            // Mark the NIC offline so the GUI flips the indicator.
-            // Don't tear MMIO down — a future firmware loader may
-            // bring it back. Drop any attached TX rings so a future
-            // re-attach starts clean.
-            if (n->driver_online)
-            {
-                IwlRingsDeactivate();
-            }
-            n->driver_online = false;
-            n->link_up = false;
-        }
-        // Periodic-poll fallback for TX completions: the IRQ-driven
-        // path is the canonical caller, but in v0 (no real MSI-X
-        // wiring) the watch task is the producer of TX-completion
-        // signals. No-op when rings aren't attached (firmware
-        // loader hasn't activated them yet); ready the moment a
-        // future Activate call lands. RX bookkeeping rides along.
-        (void)IwlRingsServicePending(*n);
-        // Sleep ~1 s on a 100 Hz tick.
-        duetos::sched::SchedSleepTicks(100);
-    }
-}
-
 } // namespace
 
 bool IwlwifiMatches(u16 vendor_id, u16 device_id)
 {
-    if (vendor_id != kVendorIntel)
-        return false;
-
-    // 1000 series.
-    if (device_id == 0x0083 || device_id == 0x0084 || device_id == 0x0085 || device_id == 0x0087 ||
-        device_id == 0x0089 || device_id == 0x008A || device_id == 0x008B)
-        return true;
-
-    // 6000 series — overlaps with 1000 in the dense 0x008x area, plus
-    // its own dense range 0x0082..0x0091.
-    if (device_id >= 0x0082 && device_id <= 0x0091)
-        return true;
-    if (device_id == 0x008D || device_id == 0x008E)
-        return true;
-
-    // 4965AGN.
-    if (device_id == 0x4229 || device_id == 0x4230)
-        return true;
-
-    // 5000 series + 5150.
-    if (device_id >= 0x4232 && device_id <= 0x423D)
-        return true;
-
-    // 7260/3160 family.
-    if (device_id >= 0x08B1 && device_id <= 0x08B4)
-        return true;
-
-    // 7265/3165/3168.
-    if (device_id == 0x095A || device_id == 0x095B)
-        return true;
-
-    // 8260/3168.
-    if (device_id == 0x24F3 || device_id == 0x24F4 || device_id == 0x24F5 || device_id == 0x24FD)
-        return true;
-
-    // 9000 family (Wireless-AC 9260, Killer 1550, JfP).
-    if (device_id == 0x2526 || device_id == 0x271B || device_id == 0x271C || device_id == 0x30DC ||
-        device_id == 0x31DC || device_id == 0x9DF0 || device_id == 0xA370)
-        return true;
-
-    // AX2xx (AX200, AX201, AX210/AX211).
-    if (device_id == 0x2723 || device_id == 0x2725 || device_id == 0x7AF0 || device_id == 0x7E40 ||
-        device_id == 0xA0F0 || device_id == 0x43F0)
-        return true;
-
-    // Be2xx (Wi-Fi 7).
-    if (device_id == 0x272B || device_id == 0x51F0 || device_id == 0x51F1 || device_id == 0xD2F0 || device_id == 0xE2F0)
-        return true;
-
-    return false;
+    // ID table lives in drivers/net/nic_ids.h — shared with the
+    // net.cpp family classifier so the two can't drift apart.
+    return vendor_id == kVendorIntel && nic_ids::IntelIwlwifiProbeEligible(device_id);
 }
 
 bool IwlwifiBringUp(NicInfo& n)
 {
     KLOG_TRACE_SCOPE("drivers/net/iwlwifi", "BringUp");
+    if (!IwlwifiMatches(n.vendor_id, n.device_id))
+        return false;
     if (n.mmio_virt == nullptr)
     {
         // No MMIO BAR means the PCI enumerator didn't (or couldn't)
@@ -377,9 +291,9 @@ bool IwlwifiBringUp(NicInfo& n)
 
 void IwlwifiStartWatch(NicInfo& n)
 {
-    if (!n.driver_online || n.mmio_virt == nullptr)
-        return;
-    duetos::sched::SchedCreate(IwlwifiWatchEntry, &n, "iwlwifi-watch");
+    // Disabled until the transport-specific backend owns a restart-safe
+    // DriverWorkerLease. Never publish an immortal task with a raw NicInfo*.
+    (void)n;
 }
 
 IwlwifiStats IwlwifiStatsRead()
