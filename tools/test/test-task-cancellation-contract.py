@@ -18,6 +18,7 @@ LINUX_SYSCALL_CPP = ROOT / "kernel" / "subsystems" / "linux" / "syscall.cpp"
 TRANSLATE_CPP = ROOT / "kernel" / "subsystems" / "translation" / "translate.cpp"
 TRAPS_CPP = ROOT / "kernel" / "arch" / "x86_64" / "traps.cpp"
 USERMODE_ASM = ROOT / "kernel" / "arch" / "x86_64" / "usermode.S"
+CONTEXT_SWITCH_ASM = ROOT / "kernel" / "sched" / "context_switch.S"
 
 
 def braced_body(source: str, opening: int) -> str:
@@ -67,6 +68,20 @@ class TaskCancellationContractTests(unittest.TestCase):
         cls.translate_cpp = TRANSLATE_CPP.read_text(encoding="utf-8")
         cls.traps_cpp = TRAPS_CPP.read_text(encoding="utf-8")
         cls.usermode_asm = USERMODE_ASM.read_text(encoding="utf-8")
+        cls.context_switch_asm = CONTEXT_SWITCH_ASM.read_text(encoding="utf-8")
+
+    def test_fresh_task_handoff_supplies_masked_rflags(self) -> None:
+        require_pattern(
+            self.sched_cpp,
+            r'extern\s+"C"\s+void\s+SchedFinishTaskSwitch\s*\(\s*u64\s+\w+\s*\)',
+            "scheduler handoff no longer accepts the resumed lock RFLAGS",
+        )
+        trampoline = assembly_body(self.context_switch_asm, "SchedTaskTrampoline")
+        require_pattern(
+            trampoline,
+            r"xor\s+edi\s*,\s*edi\s*\n\s*call\s+SchedFinishTaskSwitch",
+            "fresh-task trampoline passes undefined RFLAGS to SchedFinishTaskSwitch",
+        )
 
     def test_kill_intent_never_culls_ready_or_blocked_tasks(self) -> None:
         reject_pattern(

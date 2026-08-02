@@ -157,18 +157,20 @@ SchedTaskTrampoline:
     sub     rsp, 16
     /* Drain this CPU's lock-pass slot. The Schedule() call that
      * switched INTO this fresh task left g_sched_lock held; we own
-     * the release. SchedFinishTaskSwitch is callee-saved-clean
-     * (extern "C", no args), so rbx (entry) and rbp (arg) survive
+     * the release. A fresh task has no suspended ScheduleLockedHandoff
+     * frame carrying its own pre-switch RFLAGS, so pass IF=0 and keep
+     * the release masked until the explicit sti immediately below.
+     * SchedFinishTaskSwitch is callee-saved-clean (extern "C"), so
+     * rbx (entry) and rbp (arg) survive
      * the call and the existing first-run primer wiring still
      * works. */
+    xor     edi, edi
     call    SchedFinishTaskSwitch
     /* The first time we run a fresh task we arrive here via ret from
-     * ContextSwitch, not via iretq — so RFLAGS.IF is whatever the prior
-     * caller had. Typical path: Schedule() was invoked from the timer
-     * IRQ dispatcher with IF=0. Unmask so the new task can be preempted
-     * normally. On the "task previously switched out and back in" path
-     * iretq restores the saved RFLAGS, so this sti is only actually
-     * meaningful on the first-run-ever path. */
+     * ContextSwitch, not via iretq, and deliberately passed IF=0 to the
+     * scheduler-lock release above. Unmask now so the entry function can be
+     * preempted normally. Resumed tasks bypass this trampoline and restore
+     * their own suspended handoff flags in the C++ return path. */
     sti
     /* Diagnostic: validate the planted entry function (rbx) is in
      * kernel .text range BEFORE we indirect-call it. The trampoline
