@@ -3899,13 +3899,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T10:09:24Z
 - **Status**: COMPLETED @ 2026-08-02T10:16:15Z
 
-### [ACTIVE] gui-broker-protocol-recovery-20260802
+### [DONE] gui-broker-protocol-recovery-20260802
 - **Session**: `Codex-GuiBrokerProtocol-Recovery-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/drivers/video/gui_broker_protocol.h,kernel/drivers/video/gui_broker_protocol.cpp,tests/host/test_gui_broker_protocol.cpp`
 - **Description**: Audit and publish hostile GUI broker wire protocol
 - **Claimed**: 2026-08-02T10:12:06Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T10:18:08Z
 
 ### [DONE] service-runtime-reap-host-proof-20260802
 - **Session**: `Codex-ServiceLiveControlIntegration-20260802`
