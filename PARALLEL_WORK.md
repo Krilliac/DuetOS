@@ -1283,13 +1283,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T21:42:06Z
 - **Status**: COMPLETED @ 2026-08-02T09:46:26Z
 
-### [ACTIVE] gui-broker-protocol
+### [DONE] gui-broker-protocol
 - **Session**: `Nathan-1592`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/drivers/video/gui_broker_protocol.h kernel/drivers/video/gui_broker_protocol.cpp tests/host/test_gui_broker_protocol.cpp`
 - **Description**: Versioned transport-independent GUI broker wire contract and hostile host vectors
 - **Claimed**: 2026-07-31T21:49:13Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T10:11:36Z
 
 ### [ACTIVE] process-decomposition-map
 - **Session**: `Nathan-1684`
