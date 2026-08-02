@@ -3858,3 +3858,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Audit and publish immutable hostile-input load-plan authority
 - **Claimed**: 2026-08-02T09:45:41Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] proc-thread-group-closure-20260802
+- **Session**: `Codex-ThreadGroupClosure-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/proc/thread_group.h,kernel/proc/thread_group.cpp,tests/host/test_thread_group.cpp,tools/test/test-thread-group-contract.py`
+- **Description**: Audit
+- **Claimed**: 2026-08-02T09:47:59Z
+- **Status**: IN PROGRESS
