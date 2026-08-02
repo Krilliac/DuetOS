@@ -3187,13 +3187,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T22:50:16Z
 - **Status**: COMPLETED @ 2026-08-01T23:06:46Z
 
-### [ACTIVE] displayd-engine-20260801
+### [DONE] displayd-engine-20260801
 - **Session**: `Nathan-715`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `userland/native-apps/displayd/display_engine.h,userland/native-apps/displayd/display_engine_internal.h,userland/native-apps/displayd/display_engine.c,userland/native-apps/displayd/display_engine_request.c,tests/host/test_displayd_engine.cpp,tools/test/test-displayd-engine-contract.py`
 - **Description**: Fixed-capacity
 - **Claimed**: 2026-08-01T23:00:56Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T00:02:38Z
 
 ### [ACTIVE] driver-id-watch-hardening-20260801
 - **Session**: `Codex-DriverIntegration-20260801`
