@@ -64,10 +64,18 @@ bool WriteFatEntry(const Volume& v, u32 cluster, u32 value)
     return true;
 }
 
-// Find the lowest-numbered free cluster (FAT entry == 0), mark it
-// as EOC in BOTH FAT copies, and return its number. Returns 0 on
-// full-disk or I/O error. Capped at 1,000,000 clusters scanned so
-// a pathological volume can't spin forever.
+// Search hint for AllocateFreeCluster — the cluster after the last
+// successful allocation. Purely advisory (see the wrap logic below);
+// a stale or wrong value costs at most one extra wrapped pass and
+// never changes which clusters are considered free. Deliberately not
+// per-volume: the hint is self-correcting on the next call.
+constinit u32 g_alloc_rover = 2;
+
+// Find a free cluster (FAT entry == 0), mark it as EOC in BOTH FAT
+// copies, and return its number. Returns 0 on full-disk or I/O error.
+// Capped at 1,000,000 clusters scanned so a pathological volume can't
+// spin forever. The search starts from a rover hint and wraps, so it
+// still covers the whole FAT before declaring the volume full.
 u32 AllocateFreeCluster(const Volume& v)
 {
     const u32 entries_per_sector = v.bytes_per_sector / 4;
@@ -84,9 +92,36 @@ u32 AllocateFreeCluster(const Volume& v)
     // cancellation-smp@2cpu and ring3, both parked in KPathPersistFlush).
     // One read per sector keeps the same scan order and the same
     // first-free result.
-    u32 cluster = 2;
-    while (cluster < hard_cap)
+    // Search from a rover hint rather than restarting at cluster 2 on
+    // every call. Writing an N-cluster file calls this N times, and a
+    // from-scratch scan re-walks all previously-allocated clusters each
+    // time — quadratic, and every re-walk is real block I/O. Rotating
+    // one 256 KiB klog area (64 clusters, and rename is a whole-file
+    // copy) therefore cost thousands of device reads and stalled the
+    // pe-threads / pe-winkill smoke profiles for minutes with the kernel
+    // otherwise healthy (2026-08-02). The rover is only a hint: the
+    // search still wraps and covers [2, hard_cap) in full before
+    // reporting the volume full, so the allocation result is unchanged.
+    if (g_alloc_rover < 2 || g_alloc_rover >= hard_cap)
+        g_alloc_rover = 2;
+    const u32 start = g_alloc_rover;
+    bool wrapped = false;
+    u32 cluster = start;
+    while (true)
     {
+        if (cluster >= hard_cap)
+        {
+            if (wrapped)
+                break;
+            wrapped = true;
+            cluster = 2;
+            if (start <= 2)
+                break;
+        }
+        // Once wrapped, stop where the first pass began.
+        if (wrapped && cluster >= start)
+            break;
+
         const u64 byte_off = u64(cluster) * 4;
         const u64 sec_off = byte_off / v.bytes_per_sector;
         const u64 lba = u64(v.reserved_sectors) + sec_off;
@@ -96,7 +131,9 @@ u32 AllocateFreeCluster(const Volume& v)
         // Walk every entry that lives in the sector just read.
         const u32 first_in_sector = static_cast<u32>(sec_off * entries_per_sector);
         const u32 sector_end = first_in_sector + entries_per_sector;
-        const u32 scan_end = sector_end < hard_cap ? sector_end : hard_cap;
+        u32 scan_end = sector_end < hard_cap ? sector_end : hard_cap;
+        if (wrapped && scan_end > start)
+            scan_end = start;
         for (; cluster < scan_end; ++cluster)
         {
             // Some tiny fixture images leave the root directory cluster's
@@ -115,9 +152,12 @@ u32 AllocateFreeCluster(const Volume& v)
                 // not just convenient.
                 if (!WriteFatEntry(v, cluster, 0x0FFFFFFFu))
                     return 0;
+                g_alloc_rover = cluster + 1;
                 return cluster;
             }
         }
+        if (cluster >= scan_end && scan_end == start && wrapped)
+            break;
     }
     return 0;
 }
