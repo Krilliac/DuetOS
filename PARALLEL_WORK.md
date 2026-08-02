@@ -3618,3 +3618,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Add trusted manifest keyed route policy resolver with fail-closed capability intersection and authority mint tests
 - **Claimed**: 2026-08-02T05:54:44Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-endpoint-connect-send-ingress-state-20260802
+- **Session**: `Codex-ServiceEndpointDataplane-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/syscall/service_endpoint_ingress.h`
+- **Description**: Add trusted resource-domain snapshot and durable connect rollback authority state
+- **Claimed**: 2026-08-02T05:59:40Z
+- **Status**: IN PROGRESS
