@@ -3883,13 +3883,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T10:02:46Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] ipc-kmessage-port-recovery-20260802
+### [DONE] ipc-kmessage-port-recovery-20260802
 - **Session**: `Codex-KMessagePortRecovery-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/ipc/kmessage_port.h,kernel/ipc/kmessage_port.cpp,tests/host/test_kmessage_port.cpp,tools/test/test-ipc-residual-wait-cancellation-contract.py`
 - **Description**: Audit
 - **Claimed**: 2026-08-02T10:03:27Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T10:11:58Z
 
 ### [ACTIVE] service-live-control-host-build-20260802
 - **Session**: `Codex-ServiceLiveControlIntegration-20260802`
