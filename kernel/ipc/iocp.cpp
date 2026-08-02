@@ -10,6 +10,19 @@ namespace duetos::ipc
 namespace
 {
 
+constexpr u64 kMaxRelativeWaitTicks = (~u64{0}) >> 1;
+
+u64 RelativeDeadlineFromNow(u64 now, u64 ticks)
+{
+    const u64 bounded_ticks = ticks > kMaxRelativeWaitTicks ? kMaxRelativeWaitTicks : ticks;
+    return bounded_ticks > (~u64{0} - now) ? ~u64{0} : now + bounded_ticks;
+}
+
+bool TickDeadlineReached(u64 now, u64 deadline)
+{
+    return static_cast<i64>(now - deadline) >= 0;
+}
+
 void Zero(IocpCompletion* c)
 {
     c->overlapped_user_va = 0;
@@ -97,50 +110,74 @@ bool IocpTryPop(IocpPort* port, IocpCompletion* out)
     return true;
 }
 
-bool IocpWait(IocpPort* port, IocpCompletion* out, u64 timeout_ticks)
+IocpWaitResult IocpWait(IocpPort* port, IocpCompletion* out, u64 timeout_ticks)
 {
     if (port == nullptr || out == nullptr)
-        return false;
+        return IocpWaitResult::Failed;
     sched::MutexLock(&port->inner);
-    if (port->count == 0 && !port->closed)
+    if (port->closed)
     {
-        if (timeout_ticks == 0)
-        {
-            // Probe-and-return — same observable as IocpTryPop
-            // on an empty port, with the lock already taken.
-            sched::MutexUnlock(&port->inner);
-            return false;
-        }
-        if (timeout_ticks == kIocpTimeoutInfinite)
-        {
-            // Win32 `INFINITE` — loop until either a producer
-            // signals not_empty or `IocpClose` broadcasts.
-            while (port->count == 0 && !port->closed)
-                sched::CondvarWait(&port->not_empty, &port->inner);
-        }
-        else
-        {
-            // Finite timeout — single CondvarWaitTimeout pass.
-            // Win32 GetQueuedCompletionStatus's timeout is a
-            // best-effort budget; spurious wakes are rare in
-            // this codebase and the caller can re-issue if it
-            // needs sharper granularity.
-            (void)sched::CondvarWaitTimeout(&port->not_empty, &port->inner, timeout_ticks);
-        }
-    }
-    if (port->count == 0)
-    {
-        // Either timed out or the port was closed underneath us.
         sched::MutexUnlock(&port->inner);
-        return false;
+        return IocpWaitResult::Closed;
     }
+    if (port->count == 0 && timeout_ticks == 0)
+    {
+        // Probe-and-return: same observable as IocpTryPop on an
+        // empty port, with the lock already taken.
+        sched::MutexUnlock(&port->inner);
+        return IocpWaitResult::TimedOut;
+    }
+    if (timeout_ticks == kIocpTimeoutInfinite)
+    {
+        while (port->count == 0 && !port->closed)
+        {
+            if (sched::CondvarWaitCancellable(&port->not_empty, &port->inner) == sched::WaitQueueBlockResult::Cancelled)
+            {
+                sched::MutexUnlock(&port->inner);
+                return IocpWaitResult::Cancelled;
+            }
+        }
+    }
+    else if (port->count == 0)
+    {
+        // One absolute deadline: spurious wakes and a completion
+        // consumed by another waiter never re-arm the caller's budget.
+        const u64 deadline = RelativeDeadlineFromNow(sched::SchedNowTicks(), timeout_ticks);
+        while (port->count == 0 && !port->closed)
+        {
+            const u64 now = sched::SchedNowTicks();
+            if (TickDeadlineReached(now, deadline))
+            {
+                sched::MutexUnlock(&port->inner);
+                return IocpWaitResult::TimedOut;
+            }
+            const sched::WaitQueueBlockResult wait_result =
+                sched::CondvarWaitTimeoutCancellable(&port->not_empty, &port->inner, deadline - now);
+            if (wait_result == sched::WaitQueueBlockResult::Cancelled)
+            {
+                sched::MutexUnlock(&port->inner);
+                return IocpWaitResult::Cancelled;
+            }
+            if (wait_result == sched::WaitQueueBlockResult::TimedOut && port->count == 0 && !port->closed)
+            {
+                sched::MutexUnlock(&port->inner);
+                return IocpWaitResult::TimedOut;
+            }
+        }
+    }
+    if (port->closed)
+    {
+        sched::MutexUnlock(&port->inner);
+        return IocpWaitResult::Closed;
+    }
+    KASSERT(port->count > 0, "ipc/iocp", "wait: missing completion after wake");
     KASSERT_WITH_VALUE(port->tail < IocpPort::kCapacity, "ipc/iocp", "wait: tail oob", static_cast<u64>(port->tail));
     *out = port->slots[port->tail];
     Zero(&port->slots[port->tail]);
     port->tail = (port->tail + 1) % IocpPort::kCapacity;
     --port->count;
     sched::MutexUnlock(&port->inner);
-    return true;
+    return IocpWaitResult::Dequeued;
 }
 
 void IocpClose(IocpPort* port)
@@ -256,10 +293,24 @@ void IocpSelfTest()
     IocpInit(&port);
 
     // IocpWait with timeout_ticks == 0 behaves like IocpTryPop:
-    // empty queue returns false without parking the caller.
+    // empty queue reports timeout without parking the caller.
     IocpCompletion drained = {};
-    if (IocpWait(&port, &drained, /*timeout_ticks=*/0))
-        ::duetos::core::Panic("ipc/iocp", "self-test: IocpWait(timeout=0) returned true on empty");
+    drained.overlapped_user_va = 0x1111;
+    drained.completion_key = 0x2222;
+    drained.bytes_transferred = 0x3333;
+    drained.ntstatus = 0x4444;
+    if (IocpWait(nullptr, &drained, /*timeout_ticks=*/0) != IocpWaitResult::Failed ||
+        IocpWait(&port, nullptr, /*timeout_ticks=*/0) != IocpWaitResult::Failed)
+    {
+        ::duetos::core::Panic("ipc/iocp", "self-test: invalid wait arguments did not fail");
+    }
+    if (IocpWait(&port, &drained, /*timeout_ticks=*/0) != IocpWaitResult::TimedOut)
+        ::duetos::core::Panic("ipc/iocp", "self-test: IocpWait(timeout=0) did not report timeout");
+    if (drained.overlapped_user_va != 0x1111 || drained.completion_key != 0x2222 ||
+        drained.bytes_transferred != 0x3333 || drained.ntstatus != 0x4444)
+    {
+        ::duetos::core::Panic("ipc/iocp", "self-test: timed-out wait modified output");
+    }
 
     // IocpWait drains a posted completion (single-threaded — the
     // post happens before the wait, so no parking is required to
@@ -270,7 +321,7 @@ void IocpSelfTest()
     fresh.bytes_transferred = 7;
     if (!IocpTryPost(&port, fresh))
         ::duetos::core::Panic("ipc/iocp", "self-test: try-post failed before IocpWait");
-    if (!IocpWait(&port, &drained, /*timeout_ticks=*/1))
+    if (IocpWait(&port, &drained, /*timeout_ticks=*/1) != IocpWaitResult::Dequeued)
         ::duetos::core::Panic("ipc/iocp", "self-test: IocpWait failed to drain a queued completion");
     if (drained.overlapped_user_va != 0xC0DEULL || drained.completion_key != 0xAA55 || drained.bytes_transferred != 7)
         ::duetos::core::Panic("ipc/iocp", "self-test: IocpWait returned the wrong completion");
@@ -291,14 +342,22 @@ void IocpSelfTest()
     // short-circuit below.
 
     // Closed port short-circuits IocpWait without parking — even
-    // a timeout=0 probe must return false once `closed` is set.
+    // a timeout=0 probe must report Closed once `closed` is set.
     // This is the production path real GetQueuedCompletionStatus
     // callers hit when the port is destroyed underneath them
     // (the infinite-wait wake-on-close broadcast is exercised by
     // real workloads, not the boot self-test).
     IocpClose(&port);
-    if (IocpWait(&port, &drained, /*timeout_ticks=*/0))
-        ::duetos::core::Panic("ipc/iocp", "self-test: IocpWait returned true on closed port");
+    const IocpCompletion before_closed_wait = drained;
+    if (IocpWait(&port, &drained, /*timeout_ticks=*/0) != IocpWaitResult::Closed)
+        ::duetos::core::Panic("ipc/iocp", "self-test: IocpWait did not report closed port");
+    if (drained.overlapped_user_va != before_closed_wait.overlapped_user_va ||
+        drained.completion_key != before_closed_wait.completion_key ||
+        drained.bytes_transferred != before_closed_wait.bytes_transferred ||
+        drained.ntstatus != before_closed_wait.ntstatus)
+    {
+        ::duetos::core::Panic("ipc/iocp", "self-test: closed wait modified output");
+    }
 
     // Re-init to leave the port in a clean state for any
     // subsequent self-test extensions.
@@ -338,7 +397,7 @@ void IocpSelfTest()
     if (!IocpTryPost(heap, c2))
         ::duetos::core::Panic("ipc/iocp", "self-test: heap port try-post failed");
     IocpCompletion posted = {};
-    if (!IocpWait(heap, &posted, /*timeout_ticks=*/1))
+    if (IocpWait(heap, &posted, /*timeout_ticks=*/1) != IocpWaitResult::Dequeued)
         ::duetos::core::Panic("ipc/iocp", "self-test: heap port IocpWait failed to drain the post");
     if (posted.overlapped_user_va != 0xBEEFULL || posted.completion_key != 0xCAFE || posted.bytes_transferred != 42 ||
         posted.ntstatus != 0)

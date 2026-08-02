@@ -17,14 +17,11 @@
  * server code (winsock, ReadFile, ConnectNamedPipe, …) leans
  * on this hard.
  *
- * v0 (this header): the kernel-side primitive — a typed
- * completion queue. Implemented as a thin wrapper over KMailbox,
- * which already provides the FIFO + blocking-wait infrastructure
- * (`kernel/ipc/kmailbox.h`). The Win32 ABI surface
- * (`CreateIoCompletionPort` / `GetQueuedCompletionStatus` /
- * `PostQueuedCompletionStatus`) is GAP — it lands in a future
- * slice and goes through SYS_IOCP_* syscalls that map to these
- * primitives.
+ * The kernel primitive is a typed fixed-capacity completion ring
+ * guarded by a scheduler Mutex + Condvar. The `SYS_IOCP_*` surface
+ * maps NtCreate/Set/RemoveIoCompletion onto this object through the
+ * unified HandleTable; kernel32 facade consolidation remains a
+ * separate compatibility slice.
  *
  * Why scaffold instead of a full implementation:
  * - The kernel-side queue is reusable: any subsystem that wants
@@ -39,10 +36,9 @@
  *   touch it directly — needs user copy on completion delivery).
  *   That design lands with the syscall surface, not here.
  *
- * Context: kernel. The wrapper holds a KMailbox by value, so
- * lifetime tracks the embedding struct (handle-table slot, in
- * the real implementation). Allocation-free post path: callers
- * pass the completion record by value.
+ * Context: kernel. Queue storage is inline in the IocpPort, so the
+ * post path is allocation-free and object lifetime is governed by
+ * a KObject reference (or by the stack-local boot-self-test owner).
  */
 
 namespace duetos::ipc
@@ -102,9 +98,9 @@ struct IocpPort
     u32 count;             // 0..kCapacity.
     u32 association_count; // # of file handles associated, for diag.
     /// True after `IocpClose` ran. `IocpWait` wakes blocked
-    /// consumers when this flips and returns false from then on
-    /// — the Win32 ABI maps that to STATUS_ABANDONED_WAIT_0 /
-    /// ERROR_ABANDONED_WAIT_0 in a future consolidation slice.
+    /// consumers when this flips and returns `Closed` from then on.
+    /// The current Win32 ABI keeps its legacy no-packet mapping;
+    /// the object API does not conflate close with timeout.
     bool closed;
     u8 _pad[7];
 };
@@ -114,10 +110,19 @@ struct IocpPort
 /// closed". Matches Win32 `INFINITE` for GetQueuedCompletionStatus.
 inline constexpr u64 kIocpTimeoutInfinite = ~u64{0};
 
-/// Initialise an IOCP port. Calls through to `KMailboxInit`
-/// with a completion-record-shaped slot size and a v0 fixed
-/// depth. Idempotent on the same port — a port may be reused
-/// after `Close` clears it.
+/// Result-bearing blocking dequeue. Only `Dequeued` commits a ring
+/// mutation or writes the caller's completion output.
+enum class IocpWaitResult : u8
+{
+    Dequeued,
+    TimedOut,
+    Closed,
+    Cancelled,
+    Failed,
+};
+
+/// Initialise the fixed ring and its scheduler synchronization fields.
+/// A quiescent port may be re-used after `Close` by initializing it again.
 void IocpInit(IocpPort* port);
 
 /// Post a completion. Non-blocking; returns false if the queue
@@ -139,10 +144,13 @@ bool IocpTryPop(IocpPort* port, IocpCompletion* out);
 ///   - `kIocpTimeoutInfinite` — wait indefinitely.
 ///   - any other      — wait at most `timeout_ticks` scheduler
 ///                      timer ticks (one tick = 10 ms at 100 Hz).
-/// Returns true iff a completion was popped into `*out`. Returns
-/// false on timeout or on a port that has been closed. Safe to
-/// call from any kernel context whose task is allowed to block.
-bool IocpWait(IocpPort* port, IocpCompletion* out, u64 timeout_ticks);
+/// Returns `Dequeued` iff a completion was popped into `*out`; every
+/// other result leaves `*out` unchanged. Cooperative cancellation is
+/// distinct from timeout/close and returns only after the companion
+/// mutex has been reacquired and unlocked. The caller must keep the
+/// port alive for the full call: this API also supports stack-local
+/// ports initialized by `IocpInit`, so it cannot take a KObject pin.
+IocpWaitResult IocpWait(IocpPort* port, IocpCompletion* out, u64 timeout_ticks);
 
 /// Tear down a port — drains the queue, zeroes the association
 /// count. Safe to call on an already-clean port. Does NOT free

@@ -28,6 +28,24 @@ static_assert(__builtin_offsetof(KSemaphore, base) == 0, "KObject must be the fi
 namespace
 {
 
+constexpr u64 kMaxRelativeWaitTicks = (~u64{0}) >> 1;
+
+u64 ClampRelativeWaitTicks(u64 ticks)
+{
+    return ticks > kMaxRelativeWaitTicks ? kMaxRelativeWaitTicks : ticks;
+}
+
+u64 RelativeDeadlineFromNow(u64 now, u64 ticks)
+{
+    const u64 bounded_ticks = ClampRelativeWaitTicks(ticks);
+    return bounded_ticks > (~u64{0} - now) ? ~u64{0} : now + bounded_ticks;
+}
+
+bool TickDeadlineReached(u64 now, u64 deadline)
+{
+    return static_cast<i64>(now - deadline) >= 0;
+}
+
 void KSemaphoreDestroy(KObject* obj)
 {
     auto* s = reinterpret_cast<KSemaphore*>(obj);
@@ -59,16 +77,24 @@ void KSemaphoreDestroy(KObject* obj)
     return s;
 }
 
-void KSemaphoreAcquire(KSemaphore* s)
+KSemaphoreWaitResult KSemaphoreAcquire(KSemaphore* s)
 {
-    // Pin during the operation. Even the fast path needs the
-    // storage alive; closing every handle from another task
-    // can't race a destroy in past us.
-    KObjectAcquire(&s->base);
+    // Pin during the operation. The caller supplies a live reference
+    // at entry; this extra pin extends it across blocking so a parallel
+    // close cannot destroy the semaphore beneath the waiter.
+    if (s == nullptr || !KObjectAcquire(&s->base))
+    {
+        return KSemaphoreWaitResult::Failed;
+    }
     sched::MutexLock(&s->inner);
     while (s->count == 0)
     {
-        sched::CondvarWait(&s->cv, &s->inner);
+        if (sched::CondvarWaitCancellable(&s->cv, &s->inner) == sched::WaitQueueBlockResult::Cancelled)
+        {
+            sched::MutexUnlock(&s->inner);
+            KObjectRelease(&s->base);
+            return KSemaphoreWaitResult::Cancelled;
+        }
     }
     // Loop-exit precondition: `count > 0` here. If a concurrent
     // path corrupted `count` we'd underflow into UINT32_MAX and
@@ -77,41 +103,58 @@ void KSemaphoreAcquire(KSemaphore* s)
     --s->count;
     sched::MutexUnlock(&s->inner);
     KObjectRelease(&s->base);
+    return KSemaphoreWaitResult::Acquired;
 }
 
-bool KSemaphoreAcquireTimed(KSemaphore* s, u64 ticks)
+KSemaphoreWaitResult KSemaphoreAcquireTimed(KSemaphore* s, u64 ticks)
 {
-    KObjectAcquire(&s->base);
+    if (s == nullptr || !KObjectAcquire(&s->base))
+    {
+        return KSemaphoreWaitResult::Failed;
+    }
     sched::MutexLock(&s->inner);
     if (s->count > 0)
     {
         --s->count;
         sched::MutexUnlock(&s->inner);
         KObjectRelease(&s->base);
-        return true;
+        return KSemaphoreWaitResult::Acquired;
     }
     if (ticks == 0)
     {
         sched::MutexUnlock(&s->inner);
         KObjectRelease(&s->base);
-        return false;
+        return KSemaphoreWaitResult::TimedOut;
     }
-    const u64 deadline = sched::SchedNowTicks() + ticks;
+    const u64 deadline = RelativeDeadlineFromNow(sched::SchedNowTicks(), ticks);
     while (s->count == 0)
     {
         const u64 now = sched::SchedNowTicks();
-        if (now >= deadline)
+        if (TickDeadlineReached(now, deadline))
         {
             sched::MutexUnlock(&s->inner);
             KObjectRelease(&s->base);
-            return false;
+            return KSemaphoreWaitResult::TimedOut;
         }
-        sched::CondvarWaitTimeout(&s->cv, &s->inner, deadline - now);
+        const sched::WaitQueueBlockResult wait_result =
+            sched::CondvarWaitTimeoutCancellable(&s->cv, &s->inner, deadline - now);
+        if (wait_result == sched::WaitQueueBlockResult::Cancelled)
+        {
+            sched::MutexUnlock(&s->inner);
+            KObjectRelease(&s->base);
+            return KSemaphoreWaitResult::Cancelled;
+        }
+        if (wait_result == sched::WaitQueueBlockResult::TimedOut && s->count == 0)
+        {
+            sched::MutexUnlock(&s->inner);
+            KObjectRelease(&s->base);
+            return KSemaphoreWaitResult::TimedOut;
+        }
     }
     --s->count;
     sched::MutexUnlock(&s->inner);
     KObjectRelease(&s->base);
-    return true;
+    return KSemaphoreWaitResult::Acquired;
 }
 
 void KSemaphoreRelease(KSemaphore* s, u32 n)
@@ -121,7 +164,9 @@ void KSemaphoreRelease(KSemaphore* s, u32 n)
         return;
     }
     sched::MutexLock(&s->inner);
-    if (s->count + n > s->max_count)
+    KASSERT_WITH_VALUE(s->count <= s->max_count, "ipc/ksemaphore", "release: count > max_count precondition",
+                       static_cast<u64>(s->count));
+    if (n > s->max_count - s->count)
     {
         // Debug: panic; release: log and refuse the release. The
         // mutex is already dropped — letting `count` exceed
@@ -146,14 +191,10 @@ void KSemaphoreRelease(KSemaphore* s, u32 n)
     // against, and we don't want it stripped in release.
     KASSERT_WITH_VALUE(s->count <= s->max_count, "ipc/ksemaphore", "release: count > max_count postcondition",
                        static_cast<u64>(s->count));
-    // Wake up to n waiters. Each will re-check `count > 0` under
-    // the mutex and consume one permit. Broadcasting all and
-    // letting them filter is correct but wasteful when n < waiter
-    // count; a per-N signal loop matches the intent.
-    for (u32 i = 0; i < n; ++i)
-    {
-        sched::CondvarSignal(&s->cv);
-    }
+    // One bounded wake operation even when n == UINT32_MAX. Every
+    // waiter rechecks count under this mutex; at most n can consume
+    // permits, and any excess waiter reparks without changing state.
+    (void)sched::CondvarBroadcast(&s->cv);
     sched::MutexUnlock(&s->inner);
 }
 
@@ -180,10 +221,9 @@ bool KSemaphoreTryRelease(KSemaphore* s, u32 n, u32* prev_out)
     s->count = static_cast<u32>(new_count);
     KASSERT_WITH_VALUE(s->count <= s->max_count, "ipc/ksemaphore", "try-release: count > max_count postcondition",
                        static_cast<u64>(s->count));
-    for (u32 i = 0; i < n; ++i)
-    {
-        sched::CondvarSignal(&s->cv);
-    }
+    // Keep wake cost independent of the user-controlled release count.
+    // The count predicate, not the number of wake calls, grants permits.
+    (void)sched::CondvarBroadcast(&s->cv);
     sched::MutexUnlock(&s->inner);
     if (prev_out != nullptr)
     {
@@ -229,12 +269,18 @@ void KSemaphoreSelfTest()
     }
 
     // Drain via two acquires. count → 1 → 0.
-    KSemaphoreAcquire(s);
+    if (KSemaphoreAcquire(s) != KSemaphoreWaitResult::Acquired)
+    {
+        core::Panic("ipc/ksemaphore", "self-test: first acquire failed");
+    }
     if (KSemaphoreCount(s) != 1)
     {
         core::Panic("ipc/ksemaphore", "self-test: count after one acquire != 1");
     }
-    KSemaphoreAcquire(s);
+    if (KSemaphoreAcquire(s) != KSemaphoreWaitResult::Acquired)
+    {
+        core::Panic("ipc/ksemaphore", "self-test: second acquire failed");
+    }
     if (KSemaphoreCount(s) != 0)
     {
         core::Panic("ipc/ksemaphore", "self-test: count after two acquires != 0");
@@ -254,11 +300,24 @@ void KSemaphoreSelfTest()
         core::Panic("ipc/ksemaphore", "self-test: release(0) changed count");
     }
 
+    // A full-width release request must be rejected before u32 addition.
+    // Use the non-panicking ABI-facing variant so the boot self-test can
+    // exercise this hostile input in debug builds as well as release builds.
+    u32 overflow_prev = 0xA5A5A5A5u;
+    if (KSemaphoreTryRelease(s, ~u32{0}, &overflow_prev))
+    {
+        core::Panic("ipc/ksemaphore", "self-test: UINT32_MAX release unexpectedly succeeded");
+    }
+    if (KSemaphoreCount(s) != 2 || overflow_prev != 0xA5A5A5A5u)
+    {
+        core::Panic("ipc/ksemaphore", "self-test: rejected UINT32_MAX release mutated state");
+    }
+
     // Timed-acquire fast paths: count > 0 consumes a permit
-    // immediately; count == 0 with a zero budget returns false
+    // immediately; count == 0 with a zero budget returns TimedOut
     // without blocking. Real waiter contention is out of scope
     // until SMP AP bringup unlocks spawned-waiter tests.
-    if (!KSemaphoreAcquireTimed(s, 5))
+    if (KSemaphoreAcquireTimed(s, 5) != KSemaphoreWaitResult::Acquired)
     {
         core::Panic("ipc/ksemaphore", "self-test: AcquireTimed(5) on count=2 failed");
     }
@@ -266,7 +325,7 @@ void KSemaphoreSelfTest()
     {
         core::Panic("ipc/ksemaphore", "self-test: AcquireTimed did not decrement count");
     }
-    if (!KSemaphoreAcquireTimed(s, 0))
+    if (KSemaphoreAcquireTimed(s, 0) != KSemaphoreWaitResult::Acquired)
     {
         core::Panic("ipc/ksemaphore", "self-test: AcquireTimed(0) on count=1 failed");
     }
@@ -274,9 +333,9 @@ void KSemaphoreSelfTest()
     {
         core::Panic("ipc/ksemaphore", "self-test: AcquireTimed(0) did not decrement count");
     }
-    if (KSemaphoreAcquireTimed(s, 0))
+    if (KSemaphoreAcquireTimed(s, 0) != KSemaphoreWaitResult::TimedOut)
     {
-        core::Panic("ipc/ksemaphore", "self-test: AcquireTimed(0) on count=0 returned true");
+        core::Panic("ipc/ksemaphore", "self-test: AcquireTimed(0) on count=0 did not time out");
     }
     if (KSemaphoreCount(s) != 0)
     {
@@ -287,17 +346,19 @@ void KSemaphoreSelfTest()
 
     // Round-trip through HandleTable.
     static HandleTable table{};
-    auto insert_r = HandleTableInsert(table, &s->base);
+    auto insert_r = HandleTableInsert(table, &s->base, TypeAllowedRights(KObjectType::Semaphore));
     if (!insert_r.has_value())
     {
         core::Panic("ipc/ksemaphore", "self-test: HandleTableInsert failed");
     }
     const Handle h = insert_r.value();
-    if (HandleTableLookup(table, h, KObjectType::Semaphore) != &s->base)
+    KObject* looked_up = HandleTableLookupRef(table, h, KObjectType::Semaphore);
+    if (looked_up != &s->base)
     {
         core::Panic("ipc/ksemaphore", "self-test: lookup did not return semaphore");
     }
-    if (HandleTableLookup(table, h, KObjectType::Mutex) != nullptr)
+    KObjectRelease(looked_up);
+    if (HandleTableLookupRef(table, h, KObjectType::Mutex) != nullptr)
     {
         core::Panic("ipc/ksemaphore", "self-test: lookup with wrong type-tag returned non-null");
     }

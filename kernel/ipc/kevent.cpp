@@ -28,16 +28,31 @@ static_assert(__builtin_offsetof(KEvent, base) == 0, "KObject must be the first 
 namespace
 {
 
+constexpr u64 kMaxRelativeWaitTicks = (~u64{0}) >> 1;
+
+u64 ClampRelativeWaitTicks(u64 ticks)
+{
+    return ticks > kMaxRelativeWaitTicks ? kMaxRelativeWaitTicks : ticks;
+}
+
+u64 RelativeDeadlineFromNow(u64 now, u64 ticks)
+{
+    const u64 bounded_ticks = ClampRelativeWaitTicks(ticks);
+    return bounded_ticks > (~u64{0} - now) ? ~u64{0} : now + bounded_ticks;
+}
+
+bool TickDeadlineReached(u64 now, u64 deadline)
+{
+    return static_cast<i64>(now - deadline) >= 0;
+}
+
 void KEventDestroy(KObject* obj)
 {
     auto* e = reinterpret_cast<KEvent*>(obj);
     // No "still held" panic equivalent — the event has no owner;
-    // any task still blocked on the condvar would never see this
-    // path because `HandleTableRemove` only runs when the last
-    // handle drops, and a blocked task would still hold its own
-    // implicit reference through being on the wait queue. v0
-    // doesn't track that link; if a future audit shows we need
-    // it, this is where the assertion goes.
+    // any task still blocked on the condvar holds an explicit wait
+    // pin. Closing the last handle therefore cannot reach this path
+    // until every waiter has unwound and dropped that pin.
     duetos::mm::KFree(e);
 }
 
@@ -93,18 +108,24 @@ void KEventReset(KEvent* e)
     sched::MutexUnlock(&e->inner);
 }
 
-void KEventWait(KEvent* e)
+KEventWaitResult KEventWait(KEvent* e)
 {
     // Pin during the wait so closing every handle while a waiter
-    // is blocked cannot free the storage. The fast path takes the
-    // ref defensively too — even checking `e->signaled` requires
-    // the storage to be alive, and we do not assume the caller
-    // already holds an external ref.
-    KObjectAcquire(&e->base);
+    // is blocked cannot free the storage. The caller supplies a live
+    // reference at entry; this extra pin extends it across blocking.
+    if (e == nullptr || !KObjectAcquire(&e->base))
+    {
+        return KEventWaitResult::Failed;
+    }
     sched::MutexLock(&e->inner);
     while (!e->signaled)
     {
-        sched::CondvarWait(&e->cv, &e->inner);
+        if (sched::CondvarWaitCancellable(&e->cv, &e->inner) == sched::WaitQueueBlockResult::Cancelled)
+        {
+            sched::MutexUnlock(&e->inner);
+            KObjectRelease(&e->base);
+            return KEventWaitResult::Cancelled;
+        }
     }
     if (!e->manual_reset)
     {
@@ -114,11 +135,15 @@ void KEventWait(KEvent* e)
     }
     sched::MutexUnlock(&e->inner);
     KObjectRelease(&e->base);
+    return KEventWaitResult::Signaled;
 }
 
-bool KEventWaitTimed(KEvent* e, u64 ticks)
+KEventWaitResult KEventWaitTimed(KEvent* e, u64 ticks)
 {
-    KObjectAcquire(&e->base);
+    if (e == nullptr || !KObjectAcquire(&e->base))
+    {
+        return KEventWaitResult::Failed;
+    }
     sched::MutexLock(&e->inner);
     if (e->signaled)
     {
@@ -128,42 +153,49 @@ bool KEventWaitTimed(KEvent* e, u64 ticks)
         }
         sched::MutexUnlock(&e->inner);
         KObjectRelease(&e->base);
-        return true;
+        return KEventWaitResult::Signaled;
     }
     if (ticks == 0)
     {
         sched::MutexUnlock(&e->inner);
         KObjectRelease(&e->base);
-        return false;
+        return KEventWaitResult::TimedOut;
     }
     // Compute the deadline once so spurious wakeups and "another
     // waiter consumed the auto-reset signal first" races don't
     // re-arm the full budget on every iteration.
-    const u64 deadline = sched::SchedNowTicks() + ticks;
-    bool got = false;
+    const u64 deadline = RelativeDeadlineFromNow(sched::SchedNowTicks(), ticks);
     while (!e->signaled)
     {
         const u64 now = sched::SchedNowTicks();
-        if (now >= deadline)
+        if (TickDeadlineReached(now, deadline))
         {
             sched::MutexUnlock(&e->inner);
             KObjectRelease(&e->base);
-            return false;
+            return KEventWaitResult::TimedOut;
         }
-        // CondvarWaitTimeout drops + re-acquires e->inner. Return
-        // value is "woken by signal vs by timer"; we don't act on
-        // it directly — the loop re-tests `signaled` to handle
-        // both spurious wakes and waiters racing for an auto-reset.
-        sched::CondvarWaitTimeout(&e->cv, &e->inner, deadline - now);
+        const sched::WaitQueueBlockResult wait_result =
+            sched::CondvarWaitTimeoutCancellable(&e->cv, &e->inner, deadline - now);
+        if (wait_result == sched::WaitQueueBlockResult::Cancelled)
+        {
+            sched::MutexUnlock(&e->inner);
+            KObjectRelease(&e->base);
+            return KEventWaitResult::Cancelled;
+        }
+        if (wait_result == sched::WaitQueueBlockResult::TimedOut && !e->signaled)
+        {
+            sched::MutexUnlock(&e->inner);
+            KObjectRelease(&e->base);
+            return KEventWaitResult::TimedOut;
+        }
     }
-    got = true;
     if (!e->manual_reset)
     {
         e->signaled = false;
     }
     sched::MutexUnlock(&e->inner);
     KObjectRelease(&e->base);
-    return got;
+    return KEventWaitResult::Signaled;
 }
 
 bool KEventIsSignaled(KEvent* e)
@@ -203,7 +235,10 @@ void KEventSelfTest()
     }
 
     // Wait on signaled manual event — must return without blocking.
-    KEventWait(manual);
+    if (KEventWait(manual) != KEventWaitResult::Signaled)
+    {
+        core::Panic("ipc/kevent", "self-test: Wait on signaled manual event failed");
+    }
     // Manual-reset should STILL be signaled after a wait.
     if (!manual->signaled)
     {
@@ -227,7 +262,10 @@ void KEventSelfTest()
         core::Panic("ipc/kevent", "self-test: auto KEventCreate failed");
     }
     KEvent* auto_ev = auto_r.value();
-    KEventWait(auto_ev);
+    if (KEventWait(auto_ev) != KEventWaitResult::Signaled)
+    {
+        core::Panic("ipc/kevent", "self-test: Wait on signaled auto event failed");
+    }
     if (auto_ev->signaled)
     {
         core::Panic("ipc/kevent", "self-test: auto-reset did not clear after wait");
@@ -240,26 +278,26 @@ void KEventSelfTest()
 
     // Timed-wait fast paths. Already-signaled event consumes the
     // signal regardless of the budget. Cleared event with a zero
-    // budget returns false without blocking. Real "Set during
+    // budget returns TimedOut without blocking. Real "Set during
     // wait wins the race" + "timer fires before Set" verification
     // needs spawned waiter tasks (deferred to an SMP/contention
     // test); v0 covers the un-contended branches.
-    if (!KEventWaitTimed(auto_ev, 5))
+    if (KEventWaitTimed(auto_ev, 5) != KEventWaitResult::Signaled)
     {
-        core::Panic("ipc/kevent", "self-test: WaitTimed on signaled auto event returned false");
+        core::Panic("ipc/kevent", "self-test: WaitTimed on signaled auto event did not signal");
     }
     if (auto_ev->signaled)
     {
         core::Panic("ipc/kevent", "self-test: WaitTimed did not consume auto-reset signal");
     }
-    if (KEventWaitTimed(auto_ev, 0))
+    if (KEventWaitTimed(auto_ev, 0) != KEventWaitResult::TimedOut)
     {
-        core::Panic("ipc/kevent", "self-test: WaitTimed(0) on cleared event returned true");
+        core::Panic("ipc/kevent", "self-test: WaitTimed(0) on cleared event did not time out");
     }
     KEventSet(manual);
-    if (!KEventWaitTimed(manual, 0))
+    if (KEventWaitTimed(manual, 0) != KEventWaitResult::Signaled)
     {
-        core::Panic("ipc/kevent", "self-test: WaitTimed(0) on signaled manual event returned false");
+        core::Panic("ipc/kevent", "self-test: WaitTimed(0) on signaled manual event did not signal");
     }
     if (!manual->signaled)
     {
@@ -270,18 +308,20 @@ void KEventSelfTest()
     // (the auto-reset path has equivalent insert/lookup/remove
     // shape; one round-trip suffices to exercise the IPC layer).
     static HandleTable table{};
-    auto insert_r = HandleTableInsert(table, &manual->base);
+    auto insert_r = HandleTableInsert(table, &manual->base, TypeAllowedRights(KObjectType::Event));
     if (!insert_r.has_value())
     {
         core::Panic("ipc/kevent", "self-test: HandleTableInsert failed");
     }
     const Handle h = insert_r.value();
-    if (HandleTableLookup(table, h, KObjectType::Event) != &manual->base)
+    KObject* looked_up = HandleTableLookupRef(table, h, KObjectType::Event);
+    if (looked_up != &manual->base)
     {
         core::Panic("ipc/kevent", "self-test: lookup did not return manual event");
     }
+    KObjectRelease(looked_up);
     // Wrong type-tag rejects.
-    if (HandleTableLookup(table, h, KObjectType::Mutex) != nullptr)
+    if (HandleTableLookupRef(table, h, KObjectType::Mutex) != nullptr)
     {
         core::Panic("ipc/kevent", "self-test: lookup with wrong type-tag returned non-null");
     }

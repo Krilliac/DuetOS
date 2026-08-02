@@ -51,6 +51,13 @@
 namespace duetos::ipc
 {
 
+enum class KMailboxWaitResult : u8
+{
+    Completed,
+    Cancelled,
+    Failed,
+};
+
 struct KMailboxMessage
 {
     u64 type;     ///< Caller-defined tag.
@@ -82,16 +89,18 @@ struct KMailbox
 ::duetos::core::Result<KMailbox*> KMailboxCreate(u32 capacity);
 
 /// Block until a slot is available, then enqueue `msg`. Wakes a
-/// blocked consumer if the queue was empty.
-void KMailboxPost(KMailbox* mb, const KMailboxMessage& msg);
+/// blocked consumer if the queue was empty. Cancellation leaves the
+/// queue unchanged and returns only after dropping the wait pin.
+KMailboxWaitResult KMailboxPost(KMailbox* mb, const KMailboxMessage& msg);
 
 /// Non-blocking variant. Returns true on success, false if the
 /// queue is full. Useful for caller-decides-overflow patterns.
 bool KMailboxTryPost(KMailbox* mb, const KMailboxMessage& msg);
 
 /// Block until a message is available, then dequeue into `out`.
-/// Wakes a blocked producer if the queue was full.
-void KMailboxReceive(KMailbox* mb, KMailboxMessage* out);
+/// Wakes a blocked producer if the queue was full. Cancellation leaves
+/// both the queue and `*out` unchanged and drops the wait pin first.
+KMailboxWaitResult KMailboxReceive(KMailbox* mb, KMailboxMessage* out);
 
 /// Non-blocking variant. Returns true on success, false if the
 /// queue is empty. `out` is unchanged on false.
