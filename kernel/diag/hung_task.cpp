@@ -321,8 +321,8 @@ void HungTaskSelfTest()
     SelfTestFixture fx = {};
     fx.entered_block = false;
     fx.please_exit = false;
-    sched::Task* victim = sched::SchedCreate(&SelfTestVictimMain, &fx, kSelfTestTaskName);
-    if (victim == nullptr)
+    const sched::TaskCreateResult victim = sched::SchedCreate(&SelfTestVictimMain, &fx, kSelfTestTaskName);
+    if (!victim.created)
     {
         // SchedCreate logs its own failure; bail without panic so
         // a release build under memory pressure doesn't take the
@@ -341,7 +341,7 @@ void HungTaskSelfTest()
     // own Running→Blocked transition; the snapshot is the
     // authoritative answer. Bound the spin so a regression in
     // the scheduler can't deadlock the boot self-test path.
-    const u64 victim_tid = sched::TaskId(victim);
+    const u64 victim_tid = victim.tid;
     bool victim_seen_blocked = false;
     for (u32 i = 0; i < 4096 && !victim_seen_blocked; ++i)
     {
@@ -416,7 +416,7 @@ void HungTaskSelfTest()
     bool victim_slotted = false;
     for (u32 i = 0; i < kMaxConcurrentHungTracks; ++i)
     {
-        if (g_slots[i].warned_tid == sched::TaskId(victim))
+        if (g_slots[i].warned_tid == victim_tid)
         {
             victim_slotted = true;
             break;

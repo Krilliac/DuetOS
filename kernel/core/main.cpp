@@ -283,6 +283,7 @@
 #include "core/menu_dispatch.h"
 #include "core/panic.h"
 #include "core/serial_input.h"
+#include "core/service.h"
 #include "core/session_restore.h"
 #include "syscall/cap_gate.h"
 #include "proc/process.h"
@@ -425,7 +426,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // transient visual artifact, not corrupt state. A proper
     // compositor mutex lands with the first crash, or on SMP
     // scheduler join — whichever comes first.
-    duetos::sched::Task* kbd_reader_task =
+    const duetos::sched::TaskCreateResult kbd_reader =
         duetos::sched::SchedCreate(duetos::core::KbdReaderTask, nullptr, "kbd-reader");
     SerialWrite("[bringup-tail] kbd-reader spawned\n");
 
@@ -433,9 +434,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // off-thread broker requests (Win32 NtAdjustPrivilegesToken, any
     // future user-mode elevation API) route through the deferred-
     // prompt path instead of racing the shell for keystrokes.
-    if (kbd_reader_task != nullptr)
+    if (kbd_reader.created)
     {
-        duetos::security::BrokerSetKbdReaderTid(duetos::sched::TaskId(kbd_reader_task));
+        duetos::security::BrokerSetKbdReaderTid(kbd_reader.tid);
     }
 
     // `pentest=gui` scripts keystrokes into the login gate + shell.
@@ -686,19 +687,6 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         }
     }
 
-    // qemu-smoke profile dispatch. If the cmdline carried
-    // `smoke=<profile>`, we've spawned exactly the profile's
-    // target task(s) above (every other ShouldSpawn call returned
-    // false). Sleep long enough for those tasks to print their
-    // expected sentinels, write the [smoke] complete line, and
-    // exit QEMU via isa-debug-exit. The boot tail below
-    // (SmpStartAps, Phase::Userland, idle loop) is reserved for
-    // profile=None / bare-metal full boot — under a smoke profile
-    // we never reach it, sparing the wall budget.
-    SerialWrite("[boot] >>> SmokeProfileSleepAndExit\n");
-    duetos::test::SmokeProfileSleepAndExit();
-    SerialWrite("[boot] <<< SmokeProfileSleepAndExit (returned, profile=None path)\n");
-
     // Reschedule-IPI handler must be installed BEFORE any AP can
     // wake, since the moment an AP joins the scheduler a peer-CPU
     // wake (e.g. WaitQueueWakeOne firing on the BSP and routing to
@@ -925,6 +913,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     }
     RESULT_LOG_AND_DROP(duetos::core::RunPhase(duetos::core::Phase::Userland), "boot", "RunPhase Userland");
 
+    // The managed ELF/PE service set is the first user workload admitted
+    // after every scheduler and Userland initcall has completed. Starting it
+    // in BootBringupDesktop is too early for the address-space transaction
+    // mutex; starting it in BootBringupDevices lets persistent services
+    // consume the bounded task pool before SMP/Userland self-tests finish.
+    duetos::core::ServiceManagerStartAll();
+
     duetos::core::StartHeartbeatThread();
 
     // Cross-subsystem self-portrait + causal-chain ring. Mirrors
@@ -942,6 +937,20 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::arch::MarkInitComplete();
 
     SerialWrite("[boot] All subsystems online. Entering idle loop.\n");
+
+    // qemu-smoke profile termination. The selected target task(s) were spawned
+    // above before AP bring-up, preserving their original start order and giving
+    // them the whole SMP/Userland tail in which to run. Do not terminate a smoke
+    // profile before this point: every verdict-bearing profile must exercise
+    // SmpStartAps, Phase::Smp, finalized topology, the cross-CPU IPI check,
+    // Phase::Userland, background-service startup, and MarkInitComplete before
+    // the canonical "All subsystems online" marker. Only then may BootReport +
+    // the profile completion sentinel authorize QEMU's isa-debug-exit.
+    // Profile=None returns immediately and continues through the optional survey,
+    // demo, and normal SchedExit tail below.
+    SerialWrite("[boot] >>> SmokeProfileSleepAndExit\n");
+    duetos::test::SmokeProfileSleepAndExit();
+    SerialWrite("[boot] <<< SmokeProfileSleepAndExit (returned, profile=None path)\n");
 
 #ifdef DUETOS_CRTRACE_SURVEY
     // Survey-mode dump. The shell-side `crtrace show` command also

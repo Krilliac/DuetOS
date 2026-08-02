@@ -19,6 +19,7 @@
 #include "mm/paging.h"
 #include "sched/sched.h"
 #include "subsystems/win32/thunks.h"
+#include "util/nospec.h"
 
 namespace duetos::subsystems::win32
 {
@@ -166,42 +167,87 @@ constexpr u64 kThreadStackReserveBytes = core::kUserStackReserveMin;
 constexpr u64 kThreadStackInitialCommitBytes = core::kUserStackCommitMinPages * mm::kPageSize;
 constexpr u64 kThreadStackFootprint = kThreadStackReserveBytes + core::kUserStackGuardPages * mm::kPageSize;
 
-// Map `va` in `proc->as` if unmapped, else reuse the existing
-// frame (slots are recycled across thread create/exit, so the
-// per-slot region may already be mapped from a prior thread —
-// reusing avoids an AddressSpaceMapUserPage "virt already mapped"
-// panic without needing exit-time teardown). Returns the
-// kernel-direct pointer to the page, or nullptr on OOM.
-u8* MapOrReuse(core::Process* proc, u64 va, u64 flags)
+constexpr u64 kUserMaxExclusive = 0x0000800000000000ULL;
+
+bool UserRangeIsValid(u64 user_va, u64 len)
 {
-    mm::PhysAddr fr = mm::AddressSpaceLookupUserFrame(proc->as, va & ~0xFFFULL);
-    if (fr == mm::kNullFrame)
-    {
-        fr = mm::AllocateFrame().value_or(mm::kNullFrame);
-        if (fr == mm::kNullFrame)
-            return nullptr;
-        if (!mm::AddressSpaceMapUserPage(proc->as, va, fr, flags))
-        {
-            mm::FreeFrame(fr);
-            return nullptr;
-        }
-    }
-    return static_cast<u8*>(mm::PhysToVirt(fr));
+    return len == 0 || (user_va < kUserMaxExclusive && len <= kUserMaxExclusive - user_va);
 }
 
-// Copy `len` bytes from `proc->as` VA `src` into `dst`. Returns
-// false if any source page is unmapped.
-bool AsReadInto(core::Process* proc, u64 src, u8* dst, u64 len)
+// Copy an arbitrary bounded user range a page at a time. Each individual
+// transaction pins the resolved mapping against concurrent unmap/remap and
+// never lets a physical-frame receipt or direct-map pointer escape.
+bool ReadUserRange(mm::AddressSpace* as, u64 user_va, void* kernel_dst, u64 len)
 {
-    for (u64 i = 0; i < len; ++i)
+    if (len == 0)
+        return true;
+    if (as == nullptr || kernel_dst == nullptr || !UserRangeIsValid(user_va, len))
+        return false;
+
+    auto* destination = static_cast<u8*>(kernel_dst);
+    while (len != 0)
     {
-        const u64 cur = src + i;
-        const mm::PhysAddr fr = mm::AddressSpaceLookupUserFrame(proc->as, cur & ~0xFFFULL);
-        if (fr == mm::kNullFrame)
+        u64 chunk = mm::kPageSize - (user_va & (mm::kPageSize - 1));
+        if (chunk > len)
+            chunk = len;
+        if (!mm::AddressSpaceReadUserMemory(as, user_va, destination, chunk))
             return false;
-        dst[i] = static_cast<const u8*>(mm::PhysToVirt(fr))[cur & 0xFFFULL];
+        user_va += chunk;
+        destination += chunk;
+        len -= chunk;
     }
     return true;
+}
+
+// Return an owned frame receipt whose direct-map alias is used only before
+// the frame can become visible in an AddressSpace. The caller must either
+// transfer the frame to a successful map transaction or FreeFrame it.
+mm::PhysAddr AllocateInitializedFrame(const u8* initial, u64 initial_len)
+{
+    if (initial_len > mm::kPageSize || (initial_len != 0 && initial == nullptr))
+        return mm::kNullFrame;
+
+    const mm::PhysAddr frame = mm::AllocateFrame().value_or(mm::kNullFrame);
+    if (frame == mm::kNullFrame)
+        return mm::kNullFrame;
+    {
+        auto* private_page = static_cast<u8*>(mm::PhysToVirt(frame));
+        for (u64 index = 0; index < mm::kPageSize; ++index)
+            private_page[index] = 0;
+        for (u64 index = 0; index < initial_len; ++index)
+            private_page[index] = initial[index];
+    }
+    return frame;
+}
+
+// Replace one subsystem-owned TLS page without ever retaining an AS frame
+// snapshot. The old per-slot page belongs to a completed thread;
+// borrowed/colliding mappings are not detached and make the new map fail
+// closed. Once mapping succeeds, ownership transfers to the AddressSpace.
+bool ReplaceOwnedUserPageFromKernel(mm::AddressSpace* as, u64 user_va, u64 flags, const u8* initial, u64 initial_len)
+{
+    if (as == nullptr || (user_va & (mm::kPageSize - 1)) != 0)
+        return false;
+
+    const mm::PhysAddr frame = AllocateInitializedFrame(initial, initial_len);
+    if (frame == mm::kNullFrame)
+        return false;
+
+    // Slots are recycled only after task death. Removing an old owned page
+    // is therefore safe; a borrowed or absent page simply remains untouched.
+    (void)mm::AddressSpaceUnmapUserPage(as, user_va);
+    if (!mm::AddressSpaceMapUserPage(as, user_va, frame, flags))
+    {
+        mm::FreeFrame(frame);
+        return false;
+    }
+    return true;
+}
+
+void ZeroPage(u8* page)
+{
+    for (u64 index = 0; index < mm::kPageSize; ++index)
+        page[index] = 0;
 }
 
 // Give thread `slot` its own TEB + static-TLS block (a fresh copy
@@ -214,44 +260,48 @@ bool AsReadInto(core::Process* proc, u64 src, u8* dst, u64 len)
 bool SetupPerThreadTls(core::Process* proc, u32 slot, u64 real_start_va, u64 thread_param, u64* out_teb_va,
                        u64* out_entry_va)
 {
+    if (proc == nullptr || proc->as == nullptr || out_teb_va == nullptr || out_entry_va == nullptr)
+        return false;
+
     const u64 region = kPerThreadTlsBase + static_cast<u64>(slot) * kPerThreadTlsStride;
     const u64 teb_va = region + kPerThreadTebOff;
     const u64 arr_va = region + kPerThreadArrOff;
     const u64 blk_va = region + kPerThreadBlkOff;
     const u64 tr_va = region + kPerThreadTrampOff;
-    const u64 total = proc->tls_tmpl_raw + proc->tls_tmpl_zerofill;
-    if (total > kPerThreadBlkMaxPages * mm::kPageSize)
+    constexpr u64 kTlsTemplateMaxBytes = kPerThreadBlkMaxPages * mm::kPageSize;
+    if (proc->tls_tmpl_raw > kTlsTemplateMaxBytes ||
+        proc->tls_tmpl_zerofill > kTlsTemplateMaxBytes - proc->tls_tmpl_raw ||
+        !UserRangeIsValid(proc->tls_tmpl_src_va, proc->tls_tmpl_raw))
     {
         arch::SerialWrite("[thread-tls] FAIL template too large\n");
         return false;
     }
+    const u64 total = proc->tls_tmpl_raw + proc->tls_tmpl_zerofill;
     constexpr u64 rw = mm::kPagePresent | mm::kPageUser | mm::kPageWritable | mm::kPageNoExecute;
+    u8 page_image[mm::kPageSize]{};
 
     // 1. TEB: clone the main-thread TEB page (inherits the PEB /
     //    PEB_LDR scaffold a CRT thread-attach may walk), then
     //    repoint NT_TIB.Self and TLS pointer at this thread's.
-    u8* teb = MapOrReuse(proc, teb_va, rw);
-    if (teb == nullptr)
-        return false;
-    if (!AsReadInto(proc, proc->user_gs_base, teb, mm::kPageSize))
+    if (!ReadUserRange(proc->as, proc->user_gs_base, page_image, mm::kPageSize))
     {
         arch::SerialWrite("[thread-tls] FAIL main-TEB read\n");
         return false;
     }
     for (u64 b = 0; b < 8; ++b)
     {
-        teb[kTebOffSelf + b] = static_cast<u8>((teb_va >> (b * 8)) & 0xFF);
-        teb[kTebOffTlsPtr + b] = static_cast<u8>((arr_va >> (b * 8)) & 0xFF);
+        page_image[kTebOffSelf + b] = static_cast<u8>((teb_va >> (b * 8)) & 0xFF);
+        page_image[kTebOffTlsPtr + b] = static_cast<u8>((arr_va >> (b * 8)) & 0xFF);
     }
+    if (!ReplaceOwnedUserPageFromKernel(proc->as, teb_va, rw, page_image, sizeof(page_image)))
+        return false;
 
     // 2. Per-thread TLS slot array: slot[_tls_index(=0)] = block.
-    u8* arr = MapOrReuse(proc, arr_va, rw);
-    if (arr == nullptr)
-        return false;
-    for (u64 i = 0; i < mm::kPageSize; ++i)
-        arr[i] = 0;
+    ZeroPage(page_image);
     for (u64 b = 0; b < 8; ++b)
-        arr[b] = static_cast<u8>((blk_va >> (b * 8)) & 0xFF);
+        page_image[b] = static_cast<u8>((blk_va >> (b * 8)) & 0xFF);
+    if (!ReplaceOwnedUserPageFromKernel(proc->as, arr_va, rw, page_image, sizeof(page_image)))
+        return false;
 
     // 3. Per-thread TLS data block: fresh copy of the template +
     //    zero-fill tail (so each thread's __declspec(thread) data
@@ -259,32 +309,22 @@ bool SetupPerThreadTls(core::Process* proc, u32 slot, u64 real_start_va, u64 thr
     const u64 npages = total == 0 ? 1 : ((total + mm::kPageSize - 1) / mm::kPageSize);
     for (u64 p = 0; p < npages; ++p)
     {
-        u8* pg = MapOrReuse(proc, blk_va + p * mm::kPageSize, rw);
-        if (pg == nullptr)
-            return false;
-        for (u64 i = 0; i < mm::kPageSize; ++i)
-            pg[i] = 0;
-    }
-    for (u64 done = 0; done < proc->tls_tmpl_raw;)
-    {
-        u8 tmp[256];
-        u64 chunk = proc->tls_tmpl_raw - done;
-        if (chunk > sizeof(tmp))
-            chunk = sizeof(tmp);
-        if (!AsReadInto(proc, proc->tls_tmpl_src_va + done, tmp, chunk))
+        ZeroPage(page_image);
+        const u64 page_offset = p * mm::kPageSize;
+        u64 raw_on_page = 0;
+        if (page_offset < proc->tls_tmpl_raw)
+        {
+            raw_on_page = proc->tls_tmpl_raw - page_offset;
+            if (raw_on_page > mm::kPageSize)
+                raw_on_page = mm::kPageSize;
+        }
+        if (raw_on_page != 0 && !ReadUserRange(proc->as, proc->tls_tmpl_src_va + page_offset, page_image, raw_on_page))
         {
             arch::SerialWrite("[thread-tls] FAIL template read\n");
             return false;
         }
-        for (u64 i = 0; i < chunk; ++i)
-        {
-            const u64 off = done + i;
-            u8* pg = MapOrReuse(proc, blk_va + (off & ~0xFFFULL), rw);
-            if (pg == nullptr)
-                return false;
-            pg[off & 0xFFFULL] = tmp[i];
-        }
-        done += chunk;
+        if (!ReplaceOwnedUserPageFromKernel(proc->as, blk_va + page_offset, rw, page_image, sizeof(page_image)))
+            return false;
     }
 
     *out_teb_va = teb_va;
@@ -299,11 +339,18 @@ bool SetupPerThreadTls(core::Process* proc, u32 slot, u64 real_start_va, u64 thr
     // 5. DLL_THREAD_ATTACH trampoline. Entry state (per
     //    EnterUserModeThread + DoThreadCreate stack setup):
     //    rcx=param, rsp%16==8, [rsp]=thread-exit trampoline.
-    u8* code = MapOrReuse(proc, tr_va, mm::kPagePresent | mm::kPageUser); // R-X
-    if (code == nullptr)
-        return false;
+    ZeroPage(page_image);
     u64 n = 0;
-    auto emit = [&](u8 b) { code[n++] = b; };
+    bool emit_ok = true;
+    auto emit = [&](u8 b)
+    {
+        if (n >= sizeof(page_image))
+        {
+            emit_ok = false;
+            return;
+        }
+        page_image[n++] = b;
+    };
     auto emit_u64 = [&](u64 v)
     {
         for (int i = 0; i < 8; ++i)
@@ -346,6 +393,10 @@ bool SetupPerThreadTls(core::Process* proc, u32 slot, u64 real_start_va, u64 thr
     emit_u64(real_start_va); // mov rax, real thread proc
     emit(0xFF);
     emit(0xE0); // jmp rax
+    if (!emit_ok || !ReplaceOwnedUserPageFromKernel(proc->as, tr_va, mm::kPagePresent | mm::kPageUser, page_image, n))
+    {
+        return false;
+    }
     (void)thread_param;
     *out_entry_va = tr_va;
     arch::SerialWrite("[thread-tls] per-thread TLS armed slot=");
@@ -496,10 +547,9 @@ void DoThreadCreate(arch::TrapFrame* frame)
     // Commit only the bounded initial top pages as RW + user + NX;
     // page faults grow the current Task's descriptor downward.
     const u64 stack_pages = (user_stack.top - user_stack.commit_lo) / mm::kPageSize;
-    mm::PhysAddr top_frame_phys = mm::kNullFrame;
     for (u64 p = 0; p < stack_pages; ++p)
     {
-        const mm::PhysAddr frame_phys = mm::AllocateFrame().value_or(mm::kNullFrame);
+        const mm::PhysAddr frame_phys = AllocateInitializedFrame(nullptr, 0);
         if (frame_phys == mm::kNullFrame)
         {
             SerialWrite("[thread] create FAIL stack frame alloc pid=");
@@ -516,11 +566,6 @@ void DoThreadCreate(arch::TrapFrame* frame)
             return;
         }
         const u64 page_va = user_stack.commit_lo + p * mm::kPageSize;
-        auto* frame_bytes = static_cast<u8*>(mm::PhysToVirt(frame_phys));
-        for (u64 i = 0; i < mm::kPageSize; ++i)
-        {
-            frame_bytes[i] = 0;
-        }
         if (!mm::AddressSpaceMapReservedUserPage(proc->as, stack_reservation, page_va, frame_phys,
                                                  mm::kPagePresent | mm::kPageUser | mm::kPageWritable |
                                                      mm::kPageNoExecute))
@@ -531,8 +576,6 @@ void DoThreadCreate(arch::TrapFrame* frame)
             frame->rax = static_cast<u64>(-1);
             return;
         }
-        if (p == stack_pages - 1)
-            top_frame_phys = frame_phys;
     }
     const u64 stack_top = user_stack.top;
     // Microsoft x64 ABI at function entry:
@@ -557,10 +600,17 @@ void DoThreadCreate(arch::TrapFrame* frame)
     constexpr u64 kShadowReserve = 0x28;
     const u64 user_rsp = stack_top - kShadowReserve;
 
-    KASSERT(top_frame_phys != mm::kNullFrame, "win32/thread", "thread stack has no committed top page");
-    auto* top_page_kva = static_cast<u8*>(mm::PhysToVirt(top_frame_phys));
-    auto* retaddr_slot = reinterpret_cast<u64*>(top_page_kva + mm::kPageSize - kShadowReserve);
-    *retaddr_slot = ::duetos::win32::kWin32ThreadExitTrampVa;
+    const u64 thread_exit_va = ::duetos::win32::kWin32ThreadExitTrampVa;
+    if (!mm::AddressSpaceWriteUserMemory(proc->as, user_rsp, &thread_exit_va, sizeof(thread_exit_va)))
+    {
+        SerialWrite("[thread] create FAIL stack return-address write pid=");
+        SerialWriteHex(proc->pid);
+        SerialWrite("\n");
+        unwind_stack();
+        release_claimed_slot();
+        frame->rax = static_cast<u64>(-1);
+        return;
+    }
 
     // Build the kernel-heap ThreadDesc that Ring3ThreadEntry
     // will consume. Heap-allocated so the ring-0 stack frame
@@ -635,9 +685,9 @@ void DoThreadCreate(arch::TrapFrame* frame)
 
     ThreadPrepareContext prepare_context{proc,           slot, claim_generation, user_stack, stack_reservation,
                                          per_thread_teb, 0};
-    sched::Task* t = sched::SchedCreateUserPrepared(&Ring3ThreadEntry, desc, thread_name, proc, &PrepareWin32ThreadTask,
-                                                    &prepare_context);
-    if (t == nullptr)
+    const sched::TaskCreateResult result = sched::SchedCreateUserPrepared(&Ring3ThreadEntry, desc, thread_name, proc,
+                                                                          &PrepareWin32ThreadTask, &prepare_context);
+    if (!result.created)
     {
         SerialWrite("[thread] create FAIL SchedCreateUser\n");
         unwind_stack();
@@ -649,6 +699,7 @@ void DoThreadCreate(arch::TrapFrame* frame)
         frame->rax = static_cast<u64>(-1);
         return;
     }
+    KASSERT(result.tid == prepare_context.tid, "win32/thread", "Task receipt disagrees with prepared handle TID");
 
     const u64 handle = Process::kWin32ThreadBase + slot;
     SerialWrite("[thread] create ok pid=");
@@ -677,6 +728,142 @@ void DoThreadCreate(arch::TrapFrame* frame)
         th.creating = false;
         frame->rax = handle;
         sync::SpinLockRelease(proc->win32_thread_lock, flags);
+    }
+}
+
+namespace
+{
+
+constexpr u64 kThreadWaitObject0 = 0;
+constexpr u64 kThreadWaitTimeout = 0x102;
+constexpr u64 kThreadWaitInfiniteMs = 0xFFFFFFFFULL;
+constexpr u64 kThreadWaitMsPerTick = 10;
+
+struct ThreadWaitSnapshot
+{
+    bool exited;
+    u64 generation;
+    u64 tid;
+    u64 event_sequence;
+};
+
+bool SnapshotThreadWait(core::Process* process, u64 slot, u64 expected_generation, u64 expected_tid,
+                        ThreadWaitSnapshot* snapshot)
+{
+    KASSERT(process != nullptr && snapshot != nullptr && slot < core::Process::kWin32ThreadCap, "win32/thread",
+            "invalid thread wait snapshot request");
+
+    bool valid = false;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(process->win32_thread_lock);
+    const auto& row = process->win32_threads[slot];
+    if (row.in_use && row.handle_open && !row.creating && row.generation != 0 && row.tid != 0 &&
+        (expected_generation == 0 ||
+         (row.generation == expected_generation && row.tid == expected_tid)))
+    {
+        snapshot->exited = row.exited;
+        snapshot->generation = row.generation;
+        snapshot->tid = row.tid;
+        snapshot->event_sequence = __atomic_load_n(&row.event_sequence, __ATOMIC_ACQUIRE);
+        valid = true;
+    }
+    sync::SpinLockRelease(process->win32_thread_lock, flags);
+    return valid;
+}
+
+u64 ThreadWaitDeadlineFromNow(u64 now, u64 ticks)
+{
+    return ticks > (~u64{0} - now) ? ~u64{0} : now + ticks;
+}
+
+bool ThreadWaitDeadlineReached(u64 now, u64 deadline)
+{
+    return static_cast<i64>(now - deadline) >= 0;
+}
+
+} // namespace
+
+void DoThreadWait(arch::TrapFrame* frame)
+{
+    core::Process* process = core::CurrentProcess();
+    const u64 handle = frame->rdi;
+    if (process == nullptr || handle < core::Process::kWin32ThreadBase ||
+        handle >= core::Process::kWin32ThreadBase + core::Process::kWin32ThreadCap)
+    {
+        frame->rax = static_cast<u64>(-1);
+        return;
+    }
+
+    const u64 slot = util::MaskedIndex(handle - core::Process::kWin32ThreadBase,
+                                       core::Process::kWin32ThreadCap);
+    const u64 timeout_ms = frame->rsi & 0xFFFFFFFFULL;
+    const bool infinite = timeout_ms == kThreadWaitInfiniteMs;
+    const u64 timeout_ticks = infinite ? 0 : (timeout_ms + (kThreadWaitMsPerTick - 1)) / kThreadWaitMsPerTick;
+    const u64 deadline = infinite ? 0 : ThreadWaitDeadlineFromNow(sched::SchedNowTicks(), timeout_ticks);
+    u64 expected_generation = 0;
+    u64 expected_tid = 0;
+
+    for (;;)
+    {
+        ThreadWaitSnapshot snapshot{};
+        if (!SnapshotThreadWait(process, slot, expected_generation, expected_tid, &snapshot))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        if (expected_generation == 0)
+        {
+            expected_generation = snapshot.generation;
+            expected_tid = snapshot.tid;
+        }
+        if (snapshot.exited)
+        {
+            frame->rax = kThreadWaitObject0;
+            return;
+        }
+
+        u64 remaining_ticks = 0;
+        if (!infinite)
+        {
+            const u64 now = sched::SchedNowTicks();
+            if (ThreadWaitDeadlineReached(now, deadline))
+            {
+                frame->rax = kThreadWaitTimeout;
+                return;
+            }
+            remaining_ticks = deadline - now;
+        }
+
+        sched::WaitQueueBlockResult block_result;
+        auto* waiters = &process->win32_threads[slot].waiters;
+        const auto* sequence = &process->win32_threads[slot].event_sequence;
+        if (snapshot.event_sequence == ~u64{0})
+        {
+            // A stable sequence never wraps onto an old observation. Once it
+            // saturates, bounded cancellable waits guarantee a rescan even if
+            // an exit wake races just before enqueue.
+            const u64 fallback_ticks = infinite || remaining_ticks > 1 ? 1 : remaining_ticks;
+            block_result = sched::WaitQueueBlockTimeoutCancellable(waiters, fallback_ticks);
+        }
+        else if (infinite)
+        {
+            block_result = sched::WaitQueueBlockIfSequenceUnchangedCancellable(
+                waiters, sequence, snapshot.event_sequence);
+        }
+        else
+        {
+            block_result = sched::WaitQueueBlockIfSequenceUnchangedTimeoutCancellable(
+                waiters, sequence, snapshot.event_sequence, remaining_ticks);
+        }
+
+        if (block_result == sched::WaitQueueBlockResult::Cancelled)
+        {
+            // Internal unwind sentinel only. The syscall dispatcher's outer
+            // cancellation guard exits the task before ring 3 observes it.
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        // Woken, SequenceChanged, and TimedOut all rescan exact generation,
+        // TID, and terminal state before selecting the public wait result.
     }
 }
 

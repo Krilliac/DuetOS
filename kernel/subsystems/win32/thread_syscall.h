@@ -18,6 +18,12 @@ namespace duetos::subsystems::win32
 
 void DoThreadCreate(arch::TrapFrame* frame);
 
+/// Wait for one local CreateThread handle. Both finite and infinite waits
+/// bridge the generation/TID predicate to scheduler enqueue through the
+/// slot's stable event sequence; cancellation returns an internal failure
+/// sentinel so the outer syscall boundary can unwind and terminate safely.
+void DoThreadWait(arch::TrapFrame* frame);
+
 /// Ring-3 entry point for a thread Task. SchedCreateUser
 /// launches the Task with this as the ring-0 entry; it reads
 /// the thread-specific (start_va, param, stack_top) from the
