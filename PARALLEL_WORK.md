@@ -1219,13 +1219,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T21:29:27Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] gui-message-policy
+### [DONE] gui-message-policy
 - **Session**: `Nathan-1665`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/drivers/video/gui_message_policy.h kernel/drivers/video/gui_message_policy.cpp tests/host/test_gui_message_policy.cpp`
 - **Description**: Pure bounded cross-process GUI broker authorization policy and host properties
 - **Claimed**: 2026-07-31T21:37:46Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T10:19:08Z
 
 ### [DONE] Codex-exec-admission
 - **Session**: `Nathan-1477`
