@@ -356,6 +356,18 @@ void Fat32SelfTest();
 /// guard for the foreign-volume-adoption bug.
 void Fat32OwnershipSelfTest();
 
+/// True iff the CALLING task is already inside a FAT32 operation (it
+/// owns the driver-wide mutex). `Fat32Guard` deliberately allows the
+/// owning task to re-enter without re-locking, and every FAT32 path
+/// shares one `g_scratch` staging buffer — so a re-entrant operation
+/// silently clobbers the outer one's buffer mid-flight. Any code that
+/// might be invoked from INSIDE a FAT32 operation and would itself
+/// start a FAT32 operation (the klog / kpath persistence sinks are the
+/// live examples) must consult this and drop its write instead.
+/// Safe to call from any context; returns false before the scheduler
+/// is online, where re-entry cannot happen.
+bool Fat32BusyOnCurrentTask();
+
 /// Drop the in-memory volume registry. Used by the
 /// `fs/fat32` fault-domain teardown so a subsequent `Fat32Probe`
 /// re-walks the block layer cleanly. The on-disk content is left

@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/timer.h"
+#include "cpu/critical.h"
 #include "cpu/percpu.h"
 #include "fs/fat32.h"
 #include "log/klog.h"
@@ -445,6 +446,20 @@ void LineSink(LogLevel /*level*/, LogArea area, const char* line, u32 line_len)
     //      SubmitAndWait → WaitQueueBlock backtrace in the
     //      crash dump). Same consumer-side recovery as 1-3:
     //      drop the persist write; the ring keeps the line.
+    //   5. RE-ENTRY INTO AN IN-FLIGHT FAT32 OPERATION. `held_locks_count`
+    //      counts spinlocks; `g_fat32_mutex` is a SLEEPING sched::Mutex,
+    //      so it does not register there and the check above cannot see
+    //      it. Fat32Guard lets the owning task re-enter without
+    //      re-locking, and every FAT32 path stages through one shared
+    //      `g_scratch` buffer — so a log line emitted from inside a
+    //      FAT32 write (the NVMe layer alone emits several) reached
+    //      FlushArea -> Fat32AppendAtPath on the SAME task and clobbered
+    //      the outer operation's staging buffer mid-flight, corrupting
+    //      whichever FAT sector or file cluster it was assembling.
+    //      Observed live 2026-08-02 as multi-minute smoke-profile stalls
+    //      inside KPathPersistFlush with the kernel otherwise healthy.
+    //      Same consumer-side recovery as 1-4: drop the persist write,
+    //      keep the line in the ring.
     {
         cpu::PerCpu* self = cpu::CurrentCpu();
         if (self != nullptr)
@@ -458,6 +473,26 @@ void LineSink(LogLevel /*level*/, LogArea area, const char* line, u32 line_len)
                 return;
             }
         }
+        if (::duetos::fs::fat32::Fat32BusyOnCurrentTask())
+        {
+            return;
+        }
+    }
+    //   6. PREEMPT-OFF CRITICAL SECTION. Distinct from case 1: cases
+    //      1-4 gate on `held_locks_count` (spinlocks), but CriticalEnter
+    //      keeps its own nesting count, and MutexLock hard-asserts
+    //      "MutexLock from inside critical section" because its park
+    //      path would deschedule with critnest > 0 and disable
+    //      preemption forever. The FAT32 driver mutex is exactly such a
+    //      sleeping mutex, so a log line emitted inside a critical
+    //      section panicked the box via LineSink -> FlushArea ->
+    //      Fat32AppendAtPath -> Fat32Guard (observed live 2026-08-02).
+    //      This list is the set of contexts from which persistence is
+    //      unsafe; every entry is a separate mechanism, so adding one
+    //      here is the fix rather than relaxing the assert.
+    if (::duetos::cpu::CriticalNesting() != 0)
+    {
+        return;
     }
     AreaFile* a = SlotFor(area);
     if (a == nullptr || a->base == nullptr)

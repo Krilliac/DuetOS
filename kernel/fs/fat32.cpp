@@ -107,6 +107,7 @@ Fat32Guard::~Fat32Guard()
         sched::MutexUnlock(&g_fat32_mutex);
 }
 
+
 // Volatile-zero / volatile-copy — same rationale as the guard
 // and AHCI drivers: prevent clang from lowering a byte loop into
 // libc memset/memcpy, which the freestanding kernel does not link.
@@ -250,6 +251,12 @@ u32 ReadFatEntry(const Volume& v, u32 cluster)
 // helpers below) can call them unqualified. Internal-only consumers
 // outside this TU pick the names up by including fat32_internal.h.
 using namespace internal;
+
+bool Fat32BusyOnCurrentTask()
+{
+    const sched::Task* me = sched::CurrentTask();
+    return me != nullptr && internal::g_fat32_mutex.owner == me;
+}
 
 namespace
 {
