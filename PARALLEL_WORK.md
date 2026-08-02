@@ -3555,13 +3555,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T05:04:26Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] root-service-endpoint-contract-drift-20260802
+### [DONE] root-service-endpoint-contract-drift-20260802
 - **Session**: `Codex-Root-EndpointContract-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/test/test-service-endpoint-contract.py`
 - **Description**: Repair
 - **Claimed**: 2026-08-02T05:38:22Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T05:39:49Z
 
 ### [ACTIVE] service-stage-restage-20260802
 - **Session**: `Nathan-1615`
