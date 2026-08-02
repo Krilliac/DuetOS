@@ -891,13 +891,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T17:17:23Z
 - **Status**: COMPLETED @ 2026-08-01T18:16:35Z
 
-### [ACTIVE] kobject-handle-v2
+### [DONE] kobject-handle-v2
 - **Session**: `Codex-kobject-handle-v2`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/ipc/handle_table.h`
 - **Description**: No description provided
 - **Claimed**: 2026-07-31T18:24:07Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T11:18:28Z
 
 ### [DONE] kobject-handle-v2-callers
 - **Session**: `Codex-kobject-handle-v2`
