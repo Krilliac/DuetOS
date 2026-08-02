@@ -3298,3 +3298,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Exact fixed/L1 register-map planner and stricter bring-up resource contract for MT7921
 - **Claimed**: 2026-08-02T01:34:16Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] pcnet-restart-20260801
+- **Session**: `Codex-PcnetRestart-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/drivers/net/pcnet.h,kernel/drivers/net/pcnet.cpp,tests/host/test_pcnet_restart.cpp,tools/test/test-pcnet-restart-contract.py`
+- **Description**: Restart-safe AMD PCnet exact binding worker operation DMA and PCI teardown contract
+- **Claimed**: 2026-08-02T01:56:49Z
+- **Status**: IN PROGRESS
