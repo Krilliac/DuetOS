@@ -1251,13 +1251,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T21:39:33Z
 - **Status**: COMPLETED @ 2026-08-02T09:56:14Z
 
-### [ACTIVE] execd-protocol-test
+### [DONE] execd-protocol-test
 - **Session**: `Nathan-945`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tests/host/test_execd_protocol.cpp`
 - **Description**: Hostile
 - **Claimed**: 2026-07-31T21:39:40Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T09:56:27Z
 
 ### [DONE] proc-thread-group-api
 - **Session**: `Nathan-963`
