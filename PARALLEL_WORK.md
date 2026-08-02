@@ -3419,13 +3419,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T03:24:07Z
 - **Status**: COMPLETED @ 2026-08-02T03:55:01Z
 
-### [ACTIVE] service-endpoint-ingress-names-20260802
+### [DONE] service-endpoint-ingress-names-20260802
 - **Session**: `Codex-ServiceEndpointIngress-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/syscall/syscall_names.def`
 - **Description**: Register SYS_SERVICE_ENDPOINT_OP in the canonical generated syscall name table
 - **Claimed**: 2026-08-02T03:36:09Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T06:50:30Z
 
 ### [DONE] root-clang-idl-gate-fixes-20260802
 - **Session**: `Nathan-169`
