@@ -1307,13 +1307,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-07-31T22:01:39Z
 - **Status**: COMPLETED @ 2026-08-02T07:09:27Z
 
-### [ACTIVE] ipc-object-transfer-source
+### [DONE] ipc-object-transfer-source
 - **Session**: `Nathan-840`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/ipc/object_transfer.cpp`
 - **Description**: Object
 - **Claimed**: 2026-07-31T22:01:49Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T07:09:34Z
 
 ### [ACTIVE] ipc-object-transfer-test
 - **Session**: `Nathan-1467`
