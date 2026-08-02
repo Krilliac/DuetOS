@@ -4066,3 +4066,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Recover and publish restart-safe PCnet and Virtio-net lifecycle closures
 - **Claimed**: 2026-08-02T12:07:01Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] net-protocol-state-p0-recovery-20260802
+- **Session**: `Nathan-61`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/net/firewall.h,kernel/net/firewall.cpp,kernel/net/ipv6.cpp`
+- **Description**: Recover
+- **Claimed**: 2026-08-02T12:12:16Z
+- **Status**: IN PROGRESS
