@@ -4075,10 +4075,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T12:12:16Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] service-teardown-reaper-contract-recovery-20260802
+### [DONE] service-teardown-reaper-contract-recovery-20260802
 - **Session**: `Codex-ServiceTeardownContract-Recovery-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/test/test-service-process-endpoint-teardown-contract.py`
 - **Description**: Align
 - **Claimed**: 2026-08-02T12:18:01Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T12:19:38Z
