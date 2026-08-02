@@ -3330,3 +3330,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Audit and integrate Fable exact fixed/L1 register mapping and generation-bound planning
 - **Claimed**: 2026-08-02T02:09:09Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-artifact-engine-link-20260802
+- **Session**: `Codex-ServiceArtifactWiring-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/CMakeLists.txt,userland/native-apps/serviced/serviced.c,userland/native-apps/execd/execd.c,userland/native-apps/displayd/displayd.c`
+- **Description**: Link serviced execd displayd production artifacts with their completed policy engines and park safely until authenticated userland endpoint ingress exists
+- **Claimed**: 2026-08-02T02:19:45Z
+- **Status**: IN PROGRESS
