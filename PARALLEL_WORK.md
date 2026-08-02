@@ -4002,3 +4002,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Audit
 - **Claimed**: 2026-08-02T11:07:56Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-runtime-reaper-bridge-20260802
+- **Session**: `Codex-ServiceRuntimeReaper-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/sched/sched.cpp,tools/test/test-service-runtime-reaper-contract.py`
+- **Description**: Drive bounded endpoint and exact exit-reap maintenance from scheduler reaper with monotonic time and retry-safe sleep
+- **Claimed**: 2026-08-02T11:12:48Z
+- **Status**: IN PROGRESS
