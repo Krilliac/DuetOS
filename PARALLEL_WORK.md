@@ -4083,13 +4083,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T12:18:01Z
 - **Status**: COMPLETED @ 2026-08-02T12:19:38Z
 
-### [ACTIVE] net-stack-boot-order-recovery-20260802
+### [DONE] net-stack-boot-order-recovery-20260802
 - **Session**: `Nathan-647`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/core/boot_bringup.cpp,tools/test/test-net-stack-boot-order-contract.py`
 - **Description**: Publish
 - **Claimed**: 2026-08-02T12:20:27Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T13:09:38Z
 
 ### [ACTIVE] process-lifecycle-integration-recovery-20260802
 - **Session**: `Codex-ProcessLifecycle-Recovery-20260802`
