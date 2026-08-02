@@ -3251,13 +3251,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T00:43:55Z
 - **Status**: COMPLETED @ 2026-08-02T01:24:42Z
 
-### [ACTIVE] net-stack-tcp-generation-20260801
+### [DONE] net-stack-tcp-generation-20260801
 - **Session**: `Codex-NetTcpGeneration-20260801`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/net/stack.h,kernel/net/stack.cpp,kernel/net/tcp.h,kernel/net/tcp_internal.h,kernel/net/tcp.cpp,kernel/net/tcp_segment.cpp,tests/host/test_net_stack_restart.cpp,tools/test/test-net-stack-restart-contract.py`
 - **Description**: Generation-bearing
 - **Claimed**: 2026-08-02T00:58:26Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T01:58:26Z
 
 ### [ACTIVE] net-stack-tcp-generation-selftest-20260801
 - **Session**: `Codex-NetTcpGeneration-20260801`
