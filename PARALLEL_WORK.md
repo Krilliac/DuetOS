@@ -3290,3 +3290,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Cached endpoint-only revision programming-interface and subsystem identity with hostile decode coverage
 - **Claimed**: 2026-08-02T01:26:34Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] net-mt7921-fixedmap-20260801
+- **Session**: `Fable-MT7921Slice-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/drivers/net/mt7921_contract.h,kernel/drivers/net/mt7921_contract.cpp,tests/host/test_mt7921_contract.cpp,tools/test/test-mt7921-contract.py`
+- **Description**: Exact fixed/L1 register-map planner and stricter bring-up resource contract for MT7921
+- **Claimed**: 2026-08-02T01:34:16Z
+- **Status**: IN PROGRESS
