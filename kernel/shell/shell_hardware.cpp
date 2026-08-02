@@ -861,7 +861,8 @@ void CmdHw(u32 argc, char** argv)
         // to replay controller init sequences that own IRQ routing.
         duetos::drivers::gpu::GpuInit();
         duetos::drivers::audio::AudioInit();
-        duetos::drivers::net::NetInit();
+        if (!duetos::drivers::net::NetInit())
+            ConsoleWriteln("HW: NIC activation refused (registry transition or quarantined teardown)");
         duetos::drivers::mei::MeiInit();
         duetos::drivers::npu::NpuInit();
         duetos::drivers::storage::NvmeInit();

@@ -22,12 +22,9 @@ u64 NicCount()
 {
     return 0;
 }
-const NicInfo& Nic(u64)
+bool NicSnapshot(u64, NicInfo*)
 {
-    // NicCount() == 0, so callers never reach here; a static
-    // zero-initialised instance satisfies the reference return.
-    static const NicInfo k_dummy{};
-    return k_dummy;
+    return false;
 }
 } // namespace duetos::drivers::net
 
