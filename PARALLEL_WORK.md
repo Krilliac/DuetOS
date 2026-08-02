@@ -3738,3 +3738,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Audit
 - **Claimed**: 2026-08-02T07:13:12Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] registryd-store-integration-20260802
+- **Session**: `Nathan-1336`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `userland/native-apps/registryd/registry_store.h,userland/native-apps/registryd/registry_store.c,userland/native-apps/registryd/registry_persistence.c,tests/host/test_registryd_store.cpp,tools/test/test-registryd-store-contract.py`
+- **Description**: Audit and finish uncommitted registryd store slice (bounded, WAL replay hardening)
+- **Claimed**: 2026-08-02T07:15:37Z
+- **Status**: IN PROGRESS
