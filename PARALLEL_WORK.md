@@ -3922,3 +3922,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Carry exact directory generation from joint publication through observer events into durable reap rows
 - **Claimed**: 2026-08-02T10:16:57Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-exit-binding-runtime-pristine-20260802
+- **Session**: `Codex-ServiceExitBinding-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/service_runtime.cpp`
+- **Description**: Extend runtime pristine validation for carried directory service identity
+- **Claimed**: 2026-08-02T10:18:49Z
+- **Status**: IN PROGRESS
