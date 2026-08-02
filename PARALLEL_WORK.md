@@ -3994,3 +3994,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Publish bounded combined endpoint and exact service-exit reap maintenance API without touching dirty scheduler integration
 - **Claimed**: 2026-08-02T10:57:54Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] gui-message-queue-recovery-20260802
+- **Session**: `Nathan-1559`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/drivers/video/gui_message_queue.h,kernel/drivers/video/gui_message_queue.cpp,tests/host/test_gui_message_queue.cpp`
+- **Description**: Audit
+- **Claimed**: 2026-08-02T11:07:56Z
+- **Status**: IN PROGRESS
