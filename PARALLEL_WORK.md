@@ -3603,13 +3603,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T05:50:36Z
 - **Status**: COMPLETED @ 2026-08-02T07:09:14Z
 
-### [ACTIVE] service-stage-exec-admission-reset-20260802
+### [DONE] service-stage-exec-admission-reset-20260802
 - **Session**: `Nathan-1368`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/loader/exec_admission.h,kernel/loader/exec_admission.cpp,tests/host/test_exec_admission.cpp`
 - **Description**: Quiescent
 - **Claimed**: 2026-08-02T05:53:41Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T07:09:21Z
 
 ### [DONE] service-protocol-policy-20260802
 - **Session**: `Codex-ServiceEndpointDataplane-20260802`
