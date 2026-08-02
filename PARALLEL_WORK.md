@@ -3539,13 +3539,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T04:58:15Z
 - **Status**: COMPLETED @ 2026-08-02T05:22:05Z
 
-### [ACTIVE] net-protocol-state-smp-fixtures-20260802
+### [DONE] net-protocol-state-smp-fixtures-20260802
 - **Session**: `Nathan-1403`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tests/host/net_protocol_state_smp_frames.h`
 - **Description**: Bounded
 - **Claimed**: 2026-08-02T05:03:30Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T05:22:16Z
 
 ### [ACTIVE] service-process-endpoint-teardown-20260802
 - **Session**: `Nathan-265`
