@@ -3986,3 +3986,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Recover audit harden and publish ResourceDomain channel charging host proof
 - **Claimed**: 2026-08-02T10:57:26Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-runtime-maintenance-bridge-20260802
+- **Session**: `Codex-ServiceRuntimeMaintenance-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/service_runtime.h,kernel/core/service_runtime.cpp,tests/host/test_service_bootstrap_activation.cpp,tools/test/test-service-runtime-owner-contract.py`
+- **Description**: Publish bounded combined endpoint and exact service-exit reap maintenance API without touching dirty scheduler integration
+- **Claimed**: 2026-08-02T10:57:54Z
+- **Status**: IN PROGRESS
