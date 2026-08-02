@@ -4114,3 +4114,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Recover
 - **Claimed**: 2026-08-02T12:28:32Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] process-gdb-stop-support-recovery-20260802
+- **Session**: `Codex-ProcessLifecycle-Recovery-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/arch/x86_64/smp.h,kernel/cpu/percpu.h,kernel/cpu/percpu.cpp,kernel/cpu/topology.h`
+- **Description**: Recover
+- **Claimed**: 2026-08-02T12:36:52Z
+- **Status**: IN PROGRESS
