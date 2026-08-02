@@ -3699,13 +3699,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T06:52:53Z
 - **Status**: COMPLETED @ 2026-08-02T07:23:22Z
 
-### [ACTIVE] service-control-syscall-20260802
+### [DONE] service-control-syscall-20260802
 - **Session**: `Codex-ServiceControlSyscall-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `abi/native_syscalls.json,kernel/syscall/cap_table.def,kernel/syscall/syscall_idl_generated.def,kernel/syscall/syscall_names.def,userland/libc/include/duet/syscall_numbers_generated.h,docs/native-syscall-policy.json,docs/native-syscall-policy.md,kernel/syscall/syscall.h,kernel/syscall/syscall.cpp,userland/libc/src/syscall.c,userland/libc/include/duet/service_control.h,kernel/syscall/service_control_ingress.h,kernel/syscall/service_control_ingress.cpp,kernel/proc/process.h,tests/host/test_service_control_ingress.cpp,tools/test/test-service-control-ingress-contract.py`
 - **Description**: Dedicated versioned native service-control ABI 228 with exact self and supervisor authority and typed platform adapters
 - **Claimed**: 2026-08-02T06:55:57Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T07:53:25Z
 
 ### [ACTIVE] service-control-cap-name-20260802
 - **Session**: `Codex-ServiceControlSyscall-20260802`
