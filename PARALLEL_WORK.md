@@ -3762,3 +3762,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Deliberately extend ServiceManifest v1 capability policy for kCapServiceControl and grant it only to serviced
 - **Claimed**: 2026-08-02T07:23:59Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] resource-domain-integration-20260802
+- **Session**: `Nathan-1326`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/proc/resource_domain.h,kernel/proc/resource_domain.cpp,tests/host/test_resource_domain.cpp`
+- **Description**: Audit and integrate generation-safe resource-domain lifetime and exact Section frame charging
+- **Claimed**: 2026-08-02T07:25:50Z
+- **Status**: IN PROGRESS
