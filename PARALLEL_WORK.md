@@ -3315,10 +3315,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T02:00:12Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] structural-contract-drift-20260802
+### [DONE] structural-contract-drift-20260802
 - **Session**: `Codex-StructuralDrift-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tools/test/test-gdb-monitor-stop-safety-contract.py,tools/test/test-process-runtime-access-contract.py,tools/test/test-service-bootstrap-stage-contract.py`
 - **Description**: Repair structural tests after authorization, scheduler-linearized Job exit, and service-doc wording migrations
 - **Claimed**: 2026-08-02T02:01:20Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T02:05:34Z
