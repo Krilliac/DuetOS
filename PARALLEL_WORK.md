@@ -3835,10 +3835,10 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T09:01:11Z
 - **Status**: COMPLETED @ 2026-08-02T09:11:29Z
 
-### [ACTIVE] service-control-event-sequence-abi-20260802
+### [DONE] service-control-event-sequence-abi-20260802
 - **Session**: `Codex-ServiceControlPlatform-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `userland/libc/include/duet/service_control.h,kernel/syscall/service_control_ingress.h,kernel/syscall/service_control_ingress.cpp,tests/host/test_service_control_ingress.cpp,tools/test/test-service-control-ingress-contract.py`
 - **Description**: Separate exact exit event sequence from public acknowledgement token while preserving service-control v1 ABI size
 - **Claimed**: 2026-08-02T09:12:14Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T09:35:37Z
