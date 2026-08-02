@@ -3571,13 +3571,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T05:39:13Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] service-deferred-endpoint-reaper-20260802
+### [DONE] service-deferred-endpoint-reaper-20260802
 - **Session**: `Nathan-826`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/proc/process.cpp,kernel/sched/sched.cpp`
 - **Description**: Transfer
 - **Claimed**: 2026-08-02T05:40:34Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T06:13:06Z
 
 ### [ACTIVE] service-endpoint-route-authority-20260802
 - **Session**: `Nathan-914`
