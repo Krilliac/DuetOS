@@ -75,11 +75,13 @@ bool IpZero(Ipv4Address a)
     return a.octets[0] == 0 && a.octets[1] == 0 && a.octets[2] == 0 && a.octets[3] == 0;
 }
 
-DUETOS_NO_SANITIZE_WRAP u32 BucketHash(u32 iface, Ipv4Address local_ip, u16 local_port, Ipv4Address peer_ip,
-                                       u16 peer_port)
+DUETOS_NO_SANITIZE_WRAP u32 BucketHash(NetInterfaceBinding binding, Ipv4Address local_ip, u16 local_port,
+                                       Ipv4Address peer_ip, u16 peer_port)
 {
     u32 h = 5381u;
-    h = ((h << 5) + h) + iface;
+    h = ((h << 5) + h) + binding.iface_index;
+    h = ((h << 5) + h) + u32(binding.generation);
+    h = ((h << 5) + h) + u32(binding.generation >> 32);
     h = ((h << 5) + h) + local_port;
     h = ((h << 5) + h) + peer_port;
     for (u32 i = 0; i < 4; ++i)
@@ -144,7 +146,7 @@ Tcb* TcbFromId(TcbId id)
 void BucketInsert(u32 idx)
 {
     Tcb& t = g_tcbs[idx];
-    const u32 h = BucketHash(t.iface_index, t.local_ip, t.local_port, t.peer_ip, t.peer_port);
+    const u32 h = BucketHash(t.interface_binding, t.local_ip, t.local_port, t.peer_ip, t.peer_port);
     t.bucket_next = g_buckets[h];
     g_buckets[h] = u8(idx);
 }
@@ -152,7 +154,7 @@ void BucketInsert(u32 idx)
 void BucketRemove(u32 idx)
 {
     Tcb& t = g_tcbs[idx];
-    const u32 h = BucketHash(t.iface_index, t.local_ip, t.local_port, t.peer_ip, t.peer_port);
+    const u32 h = BucketHash(t.interface_binding, t.local_ip, t.local_port, t.peer_ip, t.peer_port);
     u8* prev = &g_buckets[h];
     while (*prev != kBucketNone)
     {
@@ -166,27 +168,29 @@ void BucketRemove(u32 idx)
     }
 }
 
-u32 LookupExact(u32 iface, Ipv4Address local_ip, u16 local_port, Ipv4Address peer_ip, u16 peer_port)
+u32 LookupExact(NetInterfaceBinding binding, Ipv4Address local_ip, u16 local_port, Ipv4Address peer_ip, u16 peer_port)
 {
-    const u32 h = BucketHash(iface, local_ip, local_port, peer_ip, peer_port);
+    const u32 h = BucketHash(binding, local_ip, local_port, peer_ip, peer_port);
     u8 idx = g_buckets[h];
     while (idx != kBucketNone)
     {
         Tcb& t = g_tcbs[idx];
-        if (t.in_use && !t.is_listener && t.iface_index == iface && t.local_port == local_port &&
-            t.peer_port == peer_port && IpEq(t.local_ip, local_ip) && IpEq(t.peer_ip, peer_ip))
+        if (t.in_use && !t.is_listener && NetInterfaceBindingEqual(t.interface_binding, binding) &&
+            t.local_port == local_port && t.peer_port == peer_port && IpEq(t.local_ip, local_ip) &&
+            IpEq(t.peer_ip, peer_ip))
             return idx;
         idx = t.bucket_next;
     }
     return kTcbCap;
 }
 
-u32 LookupListener(u16 local_port)
+u32 LookupListener(NetInterfaceBinding binding, u16 local_port)
 {
     for (u32 i = 0; i < kTcbCap; ++i)
     {
         Tcb& t = g_tcbs[i];
-        if (t.in_use && t.is_listener && t.local_port == local_port)
+        if (t.in_use && t.is_listener && NetInterfaceBindingEqual(t.interface_binding, binding) &&
+            t.local_port == local_port)
             return i;
     }
     return kTcbCap;
@@ -235,11 +239,13 @@ void ResetTcbStorage(Tcb& t)
     t.is_listener = false;
     t.state = State::Closed;
     t.retries = 0;
-    t.iface_index = 0;
+    t.interface_binding = kInvalidNetInterfaceBinding;
     t.local_ip = {};
     t.peer_ip = {};
     t.local_port = 0;
     t.peer_port = 0;
+    for (u32 i = 0; i < 6; ++i)
+        t.local_mac.octets[i] = 0;
     for (u32 i = 0; i < 6; ++i)
         t.peer_mac.octets[i] = 0;
     t.refs = 0;
@@ -432,9 +438,13 @@ TcbId Listen(u32 iface_index, Ipv4Address local_ip, u16 local_port, u32 backlog)
         backlog = kListenBacklogMax;
     if (local_port == 0)
         return kInvalidTcbId;
+    const StackInterfacePinGuard interface_guard(iface_index);
+    if (!interface_guard)
+        return kInvalidTcbId;
+    const NetInterfaceSnapshot& interface = interface_guard.snapshot();
 
     auto flags = sync::SpinLockAcquire(g_tcb_lock);
-    if (LookupListener(local_port) != kTcbCap)
+    if (LookupListener(interface.binding, local_port) != kTcbCap)
     {
         sync::SpinLockRelease(g_tcb_lock, flags);
         return kInvalidTcbId;
@@ -452,8 +462,9 @@ TcbId Listen(u32 iface_index, Ipv4Address local_ip, u16 local_port, u32 backlog)
     t.in_use = true;
     t.is_listener = true;
     t.state = State::Listen;
-    t.iface_index = iface_index;
+    t.interface_binding = interface.binding;
     t.local_ip = local_ip;
+    t.local_mac = interface.mac;
     t.local_port = local_port;
     t.backlog_max = backlog;
     t.refs = 1;
@@ -509,6 +520,10 @@ sched::WaitQueue* AcceptWaitQueue(TcbId listener)
 TcbId Connect(u32 iface_index, Ipv4Address dst_ip, u16 dst_port, u16 local_port)
 {
     using namespace internal;
+    const StackInterfacePinGuard interface_guard(iface_index);
+    if (!interface_guard)
+        return kInvalidTcbId;
+    const NetInterfaceSnapshot& interface = interface_guard.snapshot();
     auto flags = sync::SpinLockAcquire(g_tcb_lock);
     if (local_port == 0)
     {
@@ -520,8 +535,8 @@ TcbId Connect(u32 iface_index, Ipv4Address dst_ip, u16 dst_port, u16 local_port)
         }
     }
     // Source IP — bind to the iface's IP. The caller may pass 0.
-    Ipv4Address local_ip = InterfaceIp(iface_index);
-    if (LookupExact(iface_index, local_ip, local_port, dst_ip, dst_port) != kTcbCap)
+    const Ipv4Address local_ip = interface.ip;
+    if (LookupExact(interface.binding, local_ip, local_port, dst_ip, dst_port) != kTcbCap)
     {
         sync::SpinLockRelease(g_tcb_lock, flags);
         return kInvalidTcbId;
@@ -552,8 +567,9 @@ TcbId Connect(u32 iface_index, Ipv4Address dst_ip, u16 dst_port, u16 local_port)
     t.initializing = false;
     t.is_listener = false;
     t.state = State::SynSent;
-    t.iface_index = iface_index;
+    t.interface_binding = interface.binding;
     t.local_ip = local_ip;
+    t.local_mac = interface.mac;
     t.peer_ip = dst_ip;
     t.local_port = local_port;
     t.peer_port = dst_port;
