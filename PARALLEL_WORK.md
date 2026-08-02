@@ -3362,3 +3362,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Make every QEMU profile require the live service package and runtime anchor
 - **Claimed**: 2026-08-02T02:27:51Z
 - **Status**: COMPLETED @ 2026-08-02T02:29:03Z
+
+### [ACTIVE] host-sanitizer-ci-20260802
+- **Session**: `Codex-HostSanitizerCI-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tests/fuzz/host_shim/sync/spinlock.h,tools/test/test-host-sanitizer-ci-contract.py`
+- **Description**: Make
+- **Claimed**: 2026-08-02T02:33:59Z
+- **Status**: IN PROGRESS
