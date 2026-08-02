@@ -3851,13 +3851,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T09:44:58Z
 - **Status**: COMPLETED @ 2026-08-02T09:45:30Z
 
-### [ACTIVE] immutable-load-plan-recovery-20260802b
+### [DONE] immutable-load-plan-recovery-20260802b
 - **Session**: `Codex-ImmutableLoadPlan-Recovery-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/loader/load_plan.h,kernel/loader/load_plan.cpp,tests/host/test_load_plan.cpp`
 - **Description**: Audit and publish immutable hostile-input load-plan authority
 - **Claimed**: 2026-08-02T09:45:41Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T09:54:11Z
 
 ### [ACTIVE] proc-thread-group-closure-20260802
 - **Session**: `Codex-ThreadGroupClosure-20260802`
