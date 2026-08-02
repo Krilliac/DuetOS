@@ -3867,13 +3867,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T09:47:59Z
 - **Status**: COMPLETED @ 2026-08-02T10:00:32Z
 
-### [ACTIVE] execd-protocol-recovery-20260802
+### [DONE] execd-protocol-recovery-20260802
 - **Session**: `Codex-ExecdProtocol-Recovery-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/loader/execd_protocol.h,kernel/loader/execd_protocol.cpp,tests/host/test_execd_protocol.cpp`
 - **Description**: Audit and publish hostile framed execd transport protocol
 - **Claimed**: 2026-08-02T09:56:42Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T10:09:12Z
 
 ### [ACTIVE] service-live-control-integration-20260802
 - **Session**: `Codex-ServiceLiveControlIntegration-20260802`
