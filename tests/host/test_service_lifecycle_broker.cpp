@@ -3,6 +3,7 @@
 
 #include "crypto_host_shims.h"
 #include "host_test_helper.h"
+#include "core/service_directory.h"
 #include "core/service_lifecycle_broker.h"
 #include "crypto/sha256.h"
 
@@ -36,6 +37,25 @@ void SpinLockRelease(SpinLock&, IrqFlags)
 }
 
 } // namespace duetos::sync
+
+namespace duetos::core
+{
+
+// This unit isolates the lifecycle state machine. The broker object file also
+// contains the separately hosted lifecycle->directory join, so provide inert
+// leaves that must never be reached by this test binary.
+ServiceDirectoryStatus ServiceDirectoryPublishRegistration(ServiceDirectory*, ServiceRegistrationReservation*,
+                                                           ServiceInstanceToken)
+{
+    return ServiceDirectoryStatus::CorruptState;
+}
+
+ServiceDirectoryStatus ServiceDirectoryCommitJointReady(ServiceDirectory*, ServiceKey, ServiceInstanceToken, bool*)
+{
+    return ServiceDirectoryStatus::CorruptState;
+}
+
+} // namespace duetos::core
 
 namespace
 {
@@ -166,7 +186,7 @@ u64 InitializeBroker(ServiceLifecycleBroker* broker, const ServiceManifestPlanV1
     return described.snapshot.broker_epoch;
 }
 
-ServiceInstanceKey Process(u64 pid)
+ServiceInstanceKey Instance(u64 pid)
 {
     return ServiceInstanceKey{0x8000000000000000ULL | pid, pid};
 }
@@ -183,7 +203,7 @@ ServiceLifecycleStartResult Start(ServiceLifecycleBroker& broker, u64 identity, 
 ServiceLifecycleInstanceToken Publish(ServiceLifecycleBroker& broker, ServiceLifecycleStartTicket ticket, u64 pid,
                                       u64 now_ns)
 {
-    const ServiceInstanceKey process = Process(pid);
+    const ServiceInstanceKey process = Instance(pid);
     const ServiceLifecyclePublicationResult result =
         ServiceLifecycleBrokerCommitPublication(&broker, ticket, process, now_ns);
     EXPECT_EQ(result.status, ServiceLifecycleStatus::Ok);
@@ -327,6 +347,41 @@ int main()
     EXPECT_EQ(ServiceLifecycleBrokerInspect(&broker, 999).status, ServiceLifecycleStatus::NotFound);
     EXPECT_EQ(ServiceLifecycleBrokerInspectAt(&broker, 3).status, ServiceLifecycleStatus::NotFound);
 
+    // Dependency readiness and the selected start reservation share one broker
+    // lock. A denied dependent row remains byte-for-byte at generation zero;
+    // publication alone is deliberately insufficient until the separate joint
+    // broker/directory ready transaction commits.
+    {
+        ServiceLifecycleBroker dependency_broker{};
+        InitializeBroker(&dependency_broker, plan, authority);
+        const ServiceLifecycleStartResult blocked =
+            ServiceLifecycleBrokerReserveStartWithDependencies(&dependency_broker, 200, 0, 1);
+        EXPECT_EQ(blocked.status, ServiceLifecycleStatus::DependencyNotReady);
+        EXPECT_TRUE(!ServiceLifecycleStartTicketIsValid(blocked.ticket));
+        ServiceLifecycleInspectResult dependent = ServiceLifecycleBrokerInspect(&dependency_broker, 200);
+        EXPECT_EQ(dependent.status, ServiceLifecycleStatus::Ok);
+        EXPECT_EQ(dependent.snapshot.phase, ServiceTransitionPhase::Stopped);
+        EXPECT_EQ(dependent.snapshot.transition_generation, 0ULL);
+        EXPECT_EQ(dependent.snapshot.builder_state, ServiceLifecycleBuilderState::None);
+
+        const ServiceLifecycleStartResult prerequisite =
+            ServiceLifecycleBrokerReserveStartWithDependencies(&dependency_broker, 100, 0, 2);
+        EXPECT_EQ(prerequisite.status, ServiceLifecycleStatus::Ok);
+        const ServiceLifecycleInstanceToken prerequisite_instance =
+            Publish(dependency_broker, prerequisite.ticket, 0xD00, 3);
+        EXPECT_FALSE(ServiceLifecycleBrokerInspect(&dependency_broker, 100).snapshot.ready);
+        const ServiceLifecycleStartResult still_blocked =
+            ServiceLifecycleBrokerReserveStartWithDependencies(&dependency_broker, 200, 0, 4);
+        EXPECT_EQ(still_blocked.status, ServiceLifecycleStatus::DependencyNotReady);
+        EXPECT_FALSE(ServiceLifecycleStartTicketIsValid(still_blocked.ticket));
+        const ServiceLifecycleStopResult prerequisite_stop =
+            ServiceLifecycleBrokerRequestStop(&dependency_broker, 100, 1, 5);
+        EXPECT_EQ(prerequisite_stop.status, ServiceLifecycleStatus::KillRequired);
+        EXPECT_TRUE(prerequisite_stop.instance_to_kill == prerequisite_instance);
+        EXPECT_EQ(ServiceLifecycleBrokerObserveExit(&dependency_broker, prerequisite_instance, 6, false),
+                  ServiceLifecycleStatus::Ok);
+    }
+
     EXPECT_EQ(ServiceLifecycleBrokerReserveStart(&broker, 999, 0, 1).status, ServiceLifecycleStatus::NotFound);
     EXPECT_EQ(ServiceLifecycleBrokerReserveStart(&broker, 100, 1, 1).status, ServiceLifecycleStatus::StaleGeneration);
     ServiceLifecycleStartResult start = Start(broker, 100, 0, 10);
@@ -337,7 +392,7 @@ int main()
     const ServiceLifecycleStartResult other_start = Start(other_broker, 100, 0, 10);
     EXPECT_EQ(other_start.ticket.transition, start.ticket.transition);
     EXPECT_TRUE(other_start.ticket.broker_epoch != start.ticket.broker_epoch);
-    EXPECT_EQ(ServiceLifecycleBrokerCommitPublication(&other_broker, start.ticket, Process(699), 12).status,
+    EXPECT_EQ(ServiceLifecycleBrokerCommitPublication(&other_broker, start.ticket, Instance(699), 12).status,
               ServiceLifecycleStatus::StaleBrokerEpoch);
     EXPECT_EQ(ServiceLifecycleBrokerRecordSpawnFailure(&other_broker, other_start.ticket, 13),
               ServiceLifecycleStatus::Ok);
@@ -392,7 +447,7 @@ int main()
     EXPECT_TRUE(stop.start_to_cancel == cancelled.ticket);
     EXPECT_EQ(ServiceLifecycleBrokerReserveStart(&broker, 300, 1, 111).status,
               ServiceLifecycleStatus::StartRetirementPending);
-    EXPECT_EQ(ServiceLifecycleBrokerCommitPublication(&broker, cancelled.ticket, Process(900), 120).status,
+    EXPECT_EQ(ServiceLifecycleBrokerCommitPublication(&broker, cancelled.ticket, Instance(900), 120).status,
               ServiceLifecycleStatus::TransitionRejected);
     EXPECT_EQ(ServiceLifecycleBrokerAcknowledgeCancelledStart(&broker, cancelled.ticket, 120),
               ServiceLifecycleStatus::Ok);
@@ -509,7 +564,7 @@ int main()
         ServiceLifecycleBroker raced{};
         InitializeBroker(&raced, plan, authority);
         const ServiceLifecycleStartResult raced_start = Start(raced, 100, 0, 1);
-        const ServiceInstanceKey raced_process = Process(0x10000ULL + iteration);
+        const ServiceInstanceKey raced_process = Instance(0x10000ULL + iteration);
         std::barrier line(3);
         std::atomic<u32> publish_status{static_cast<u32>(ServiceLifecycleStatus::CorruptState)};
         std::atomic<u32> drain_status{static_cast<u32>(ServiceLifecycleStatus::CorruptState)};
@@ -581,6 +636,8 @@ int main()
     EXPECT_EQ(ServiceLifecycleBrokerAcknowledgeCancelledStart(&corrupt_closed, corrupt_builder, 3),
               ServiceLifecycleStatus::CorruptState);
     EXPECT_TRUE(std::strcmp(ServiceLifecycleStatusName(ServiceLifecycleStatus::KillRequired), "kill-required") == 0);
+    EXPECT_TRUE(std::strcmp(ServiceLifecycleStatusName(ServiceLifecycleStatus::DependencyNotReady),
+                            "dependency-not-ready") == 0);
 
     return duetos_host_test::finish_main("service_lifecycle_broker");
 }

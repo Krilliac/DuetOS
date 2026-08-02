@@ -1,5 +1,7 @@
 #include "core/service_lifecycle_broker.h"
 
+#include "core/service_directory.h"
+
 #if defined(DUETOS_HOST_TEST)
 #include <atomic>
 #endif
@@ -213,6 +215,12 @@ bool BrokerRowsAreCanonical(const ServiceLifecycleBroker& broker)
             return false;
         }
         const ServiceTransitionPhase phase = row.transition.phase;
+        if (row.ready &&
+            (phase != ServiceTransitionPhase::Running || !ServiceInstanceKeyIsValid(row.transition.instance) ||
+             row.builder_state != ServiceLifecycleBuilderState::None))
+        {
+            return false;
+        }
         if (broker.state != ServiceLifecycleBrokerState::Open &&
             (phase == ServiceTransitionPhase::Starting || phase == ServiceTransitionPhase::Running))
         {
@@ -224,6 +232,23 @@ bool BrokerRowsAreCanonical(const ServiceLifecycleBroker& broker)
             return false;
         }
         previous_identity = row.transition.service_identity;
+    }
+    return true;
+}
+
+bool DependenciesAreRunningLocked(const ServiceLifecycleBroker& broker, const ServiceLifecycleRow& row)
+{
+    for (u32 index = 0; index < broker.service_count; ++index)
+    {
+        if ((row.dependency_mask & (1ULL << index)) == 0)
+            continue;
+        const ServiceLifecycleRow& dependency = broker.rows[index];
+        if (dependency.transition.phase != ServiceTransitionPhase::Running ||
+            !ServiceInstanceKeyIsValid(dependency.transition.instance) ||
+            dependency.builder_state != ServiceLifecycleBuilderState::None || !dependency.ready)
+        {
+            return false;
+        }
     }
     return true;
 }
@@ -267,6 +292,63 @@ ServiceLifecyclePublicationResult PublicationFailure(ServiceLifecycleStatus stat
     return ServiceLifecyclePublicationResult{status, kInvalidServiceLifecycleInstanceToken};
 }
 
+ServiceLifecycleDirectoryPublicationResult DirectoryPublicationFailure(
+    ServiceLifecycleStatus lifecycle_status, ServiceDirectoryStatus directory_status = ServiceDirectoryStatus::Ok)
+{
+    return ServiceLifecycleDirectoryPublicationResult{lifecycle_status, directory_status,
+                                                      kInvalidServiceLifecycleInstanceToken};
+}
+
+ServiceLifecycleDirectoryReadyResult DirectoryReadyFailure(
+    ServiceLifecycleStatus lifecycle_status, ServiceDirectoryStatus directory_status = ServiceDirectoryStatus::Ok)
+{
+    return ServiceLifecycleDirectoryReadyResult{lifecycle_status, directory_status};
+}
+
+// This token never crosses the broker implementation boundary.  It exists
+// only while CommitDirectoryPublication holds the lifecycle lock, so it cannot
+// be retained and replayed after scheduler visibility.  Capturing the complete
+// pre-commit row makes rollback exact rather than a hand-authored inverse.
+struct UnpublishedPublicationRollbackToken
+{
+    u64 broker_epoch;
+    u32 row_index;
+    ServiceLifecycleStartTicket ticket;
+    ServiceInstanceKey instance;
+    ServiceLifecycleRow prior_row;
+    bool valid;
+};
+
+ServiceLifecycleStatus RollbackUnpublishedPublicationLocked(ServiceLifecycleBroker& broker,
+                                                            UnpublishedPublicationRollbackToken* rollback)
+{
+    if (rollback == nullptr || !rollback->valid || rollback->broker_epoch != broker.broker_epoch ||
+        rollback->row_index >= broker.service_count || !ServiceLifecycleStartTicketIsValid(rollback->ticket) ||
+        !ServiceInstanceKeyIsValid(rollback->instance))
+    {
+        return ServiceLifecycleStatus::TransitionRejected;
+    }
+
+    ServiceLifecycleRow& row = broker.rows[rollback->row_index];
+    const u32 expected_publications =
+        rollback->prior_row.successful_publications == ~0U ? ~0U : rollback->prior_row.successful_publications + 1U;
+    if (row.transition.service_identity != rollback->ticket.transition.service_identity ||
+        row.transition.generation != rollback->ticket.transition.generation ||
+        row.builder_state != ServiceLifecycleBuilderState::None ||
+        !ServiceTransitionIsCurrentRunning(row.transition,
+                                           ServiceInstanceToken{rollback->ticket.transition, rollback->instance}) ||
+        row.successful_publications != expected_publications ||
+        !ServiceTransitionIsCurrentStart(rollback->prior_row.transition, rollback->ticket.transition) ||
+        rollback->prior_row.builder_state != ServiceLifecycleBuilderState::Constructing)
+    {
+        return ServiceLifecycleStatus::TransitionRejected;
+    }
+
+    row = rollback->prior_row;
+    rollback->valid = false;
+    return ServiceLifecycleStatus::Ok;
+}
+
 ServiceLifecycleStopResult StopFailure(ServiceLifecycleStatus status)
 {
     return ServiceLifecycleStopResult{status, kInvalidServiceLifecycleInstanceToken,
@@ -295,7 +377,8 @@ ServiceLifecycleSnapshot SnapshotRow(const ServiceLifecycleRow& row)
                                     row.spawn_failures,
                                     row.observed_exits,
                                     row.failed_exits,
-                                    row.builder_state};
+                                    row.builder_state,
+                                    row.ready};
 }
 
 ServiceLifecycleBrokerSnapshot SnapshotBroker(const ServiceLifecycleBroker& broker)
@@ -333,6 +416,53 @@ ServiceLifecycleStatus ReadyBroker(ServiceLifecycleBroker* broker)
     if (broker->initialized != 1)
         return ServiceLifecycleStatus::NotInitialized;
     return ServiceLifecycleStatus::Ok;
+}
+
+ServiceLifecycleStartResult ReserveStartLocked(ServiceLifecycleBroker& broker, u64 service_identity,
+                                               u64 expected_generation, u64 now_ns, bool require_dependencies)
+{
+    if (!BrokerIsCanonical(broker))
+        return StartFailure(ServiceLifecycleStatus::CorruptState);
+    if (broker.state == ServiceLifecycleBrokerState::Closed)
+        return StartFailure(ServiceLifecycleStatus::Closed);
+    if (broker.state == ServiceLifecycleBrokerState::Draining)
+        return StartFailure(ServiceLifecycleStatus::Draining);
+
+    const u32 index = FindBrokerIndex(broker, service_identity);
+    if (index >= broker.service_count)
+        return StartFailure(ServiceLifecycleStatus::NotFound);
+    ServiceLifecycleRow& row = broker.rows[index];
+    if (row.transition.generation != expected_generation)
+        return StartFailure(ServiceLifecycleStatus::StaleGeneration);
+    if (now_ns < row.last_transition_ns)
+        return StartFailure(ServiceLifecycleStatus::InvalidTimestamp);
+    if (row.builder_state == ServiceLifecycleBuilderState::CancelledAwaitingRetirement)
+        return StartFailure(ServiceLifecycleStatus::StartRetirementPending);
+    if (require_dependencies && !DependenciesAreRunningLocked(broker, row))
+        return StartFailure(ServiceLifecycleStatus::DependencyNotReady);
+
+    ServiceStartTicket ticket = kInvalidServiceStartTicket;
+    const ServiceTransitionPhase prior_phase = row.transition.phase;
+    switch (ServiceTransitionReserveStart(&row.transition, &ticket))
+    {
+    case ServiceStartReserveResult::Reserved:
+        row.builder_state = ServiceLifecycleBuilderState::Constructing;
+        row.ready = false;
+        row.last_transition_ns = now_ns;
+        return ServiceLifecycleStartResult{ServiceLifecycleStatus::Ok,
+                                           ServiceLifecycleStartTicket{broker.broker_epoch, ticket}};
+    case ServiceStartReserveResult::AlreadyRequested:
+        return StartFailure(ServiceLifecycleStatus::AlreadyRequested);
+    case ServiceStartReserveResult::StopInProgress:
+        return StartFailure(ServiceLifecycleStatus::StopInProgress);
+    case ServiceStartReserveResult::GenerationExhausted:
+        if (prior_phase != ServiceTransitionPhase::GenerationExhausted)
+            row.last_transition_ns = now_ns;
+        return StartFailure(ServiceLifecycleStatus::GenerationExhausted);
+    case ServiceStartReserveResult::Rejected:
+        return StartFailure(ServiceLifecycleStatus::TransitionRejected);
+    }
+    return StartFailure(ServiceLifecycleStatus::CorruptState);
 }
 
 } // namespace
@@ -431,45 +561,18 @@ ServiceLifecycleStartResult ServiceLifecycleBrokerReserveStart(ServiceLifecycleB
     if (ready != ServiceLifecycleStatus::Ok)
         return StartFailure(ready);
     sync::SpinLockGuard guard(broker->lock);
-    if (!BrokerIsCanonical(*broker))
-        return StartFailure(ServiceLifecycleStatus::CorruptState);
-    if (broker->state == ServiceLifecycleBrokerState::Closed)
-        return StartFailure(ServiceLifecycleStatus::Closed);
-    if (broker->state == ServiceLifecycleBrokerState::Draining)
-        return StartFailure(ServiceLifecycleStatus::Draining);
+    return ReserveStartLocked(*broker, service_identity, expected_generation, now_ns, false);
+}
 
-    const u32 index = FindBrokerIndex(*broker, service_identity);
-    if (index >= broker->service_count)
-        return StartFailure(ServiceLifecycleStatus::NotFound);
-    ServiceLifecycleRow& row = broker->rows[index];
-    if (row.transition.generation != expected_generation)
-        return StartFailure(ServiceLifecycleStatus::StaleGeneration);
-    if (now_ns < row.last_transition_ns)
-        return StartFailure(ServiceLifecycleStatus::InvalidTimestamp);
-    if (row.builder_state == ServiceLifecycleBuilderState::CancelledAwaitingRetirement)
-        return StartFailure(ServiceLifecycleStatus::StartRetirementPending);
-
-    ServiceStartTicket ticket = kInvalidServiceStartTicket;
-    const ServiceTransitionPhase prior_phase = row.transition.phase;
-    switch (ServiceTransitionReserveStart(&row.transition, &ticket))
-    {
-    case ServiceStartReserveResult::Reserved:
-        row.builder_state = ServiceLifecycleBuilderState::Constructing;
-        row.last_transition_ns = now_ns;
-        return ServiceLifecycleStartResult{ServiceLifecycleStatus::Ok,
-                                           ServiceLifecycleStartTicket{broker->broker_epoch, ticket}};
-    case ServiceStartReserveResult::AlreadyRequested:
-        return StartFailure(ServiceLifecycleStatus::AlreadyRequested);
-    case ServiceStartReserveResult::StopInProgress:
-        return StartFailure(ServiceLifecycleStatus::StopInProgress);
-    case ServiceStartReserveResult::GenerationExhausted:
-        if (prior_phase != ServiceTransitionPhase::GenerationExhausted)
-            row.last_transition_ns = now_ns;
-        return StartFailure(ServiceLifecycleStatus::GenerationExhausted);
-    case ServiceStartReserveResult::Rejected:
-        return StartFailure(ServiceLifecycleStatus::TransitionRejected);
-    }
-    return StartFailure(ServiceLifecycleStatus::CorruptState);
+ServiceLifecycleStartResult ServiceLifecycleBrokerReserveStartWithDependencies(ServiceLifecycleBroker* broker,
+                                                                               u64 service_identity,
+                                                                               u64 expected_generation, u64 now_ns)
+{
+    const ServiceLifecycleStatus ready = ReadyBroker(broker);
+    if (ready != ServiceLifecycleStatus::Ok)
+        return StartFailure(ready);
+    sync::SpinLockGuard guard(broker->lock);
+    return ReserveStartLocked(*broker, service_identity, expected_generation, now_ns, true);
 }
 
 ServiceLifecycleStatus ServiceLifecycleBrokerRecordSpawnFailure(ServiceLifecycleBroker* broker,
@@ -504,6 +607,7 @@ ServiceLifecycleStatus ServiceLifecycleBrokerRecordSpawnFailure(ServiceLifecycle
     }
 
     row.builder_state = ServiceLifecycleBuilderState::None;
+    row.ready = false;
     row.last_transition_ns = now_ns;
     IncrementSaturating(&row.spawn_failures);
     return ServiceLifecycleStatus::Ok;
@@ -536,6 +640,7 @@ ServiceLifecycleStatus ServiceLifecycleBrokerAcknowledgeCancelledStart(ServiceLi
         return ServiceLifecycleStatus::TransitionRejected;
 
     row.builder_state = ServiceLifecycleBuilderState::None;
+    row.ready = false;
     row.last_transition_ns = now_ns;
     return ServiceLifecycleStatus::Ok;
 }
@@ -573,10 +678,123 @@ ServiceLifecyclePublicationResult ServiceLifecycleBrokerCommitPublication(Servic
         return PublicationFailure(ServiceLifecycleStatus::TransitionRejected);
     }
     row.builder_state = ServiceLifecycleBuilderState::None;
+    row.ready = false;
     row.last_transition_ns = now_ns;
     IncrementSaturating(&row.successful_publications);
     return ServiceLifecyclePublicationResult{ServiceLifecycleStatus::Ok,
                                              ServiceLifecycleInstanceToken{ticket, instance}};
+}
+
+ServiceLifecycleDirectoryPublicationResult ServiceLifecycleBrokerCommitDirectoryPublication(
+    ServiceLifecycleBroker* broker, ServiceLifecycleStartTicket ticket, ServiceInstanceKey instance, u64 now_ns,
+    ServiceDirectory* directory, ServiceRegistrationReservation* reservation)
+{
+    if (directory == nullptr || reservation == nullptr || !ServiceRegistrationReservationIsValid(*reservation))
+        return DirectoryPublicationFailure(ServiceLifecycleStatus::NullArgument);
+
+    const ServiceLifecycleStatus ready = ReadyBroker(broker);
+    if (ready != ServiceLifecycleStatus::Ok)
+        return DirectoryPublicationFailure(ready);
+
+    sync::SpinLockGuard guard(broker->lock);
+    if (!BrokerIsCanonical(*broker))
+        return DirectoryPublicationFailure(ServiceLifecycleStatus::CorruptState);
+    const ServiceLifecycleStatus ticket_status = ValidateTicketEpoch(*broker, ticket);
+    if (ticket_status != ServiceLifecycleStatus::Ok)
+        return DirectoryPublicationFailure(ticket_status);
+    if (broker->state == ServiceLifecycleBrokerState::Closed)
+        return DirectoryPublicationFailure(ServiceLifecycleStatus::Closed);
+    if (broker->state == ServiceLifecycleBrokerState::Draining)
+        return DirectoryPublicationFailure(ServiceLifecycleStatus::Draining);
+
+    const u32 row_index = FindBrokerIndex(*broker, ticket.transition.service_identity);
+    if (row_index >= broker->service_count)
+        return DirectoryPublicationFailure(ServiceLifecycleStatus::NotFound);
+    ServiceLifecycleRow& row = broker->rows[row_index];
+    if (row.transition.generation != ticket.transition.generation)
+        return DirectoryPublicationFailure(ServiceLifecycleStatus::StaleGeneration);
+    if (now_ns < row.last_transition_ns)
+        return DirectoryPublicationFailure(ServiceLifecycleStatus::InvalidTimestamp);
+    if (row.builder_state != ServiceLifecycleBuilderState::Constructing ||
+        !ServiceTransitionIsCurrentStart(row.transition, ticket.transition))
+    {
+        return DirectoryPublicationFailure(ServiceLifecycleStatus::TransitionRejected);
+    }
+
+    UnpublishedPublicationRollbackToken rollback{
+        broker->broker_epoch, row_index, ticket, instance, row, true,
+    };
+    if (ServiceTransitionCommitAtSchedulerPublication(&row.transition, ticket.transition, instance) !=
+        ServicePublicationResult::Published)
+    {
+        return DirectoryPublicationFailure(ServiceLifecycleStatus::TransitionRejected);
+    }
+    row.builder_state = ServiceLifecycleBuilderState::None;
+    row.ready = false;
+    row.last_transition_ns = now_ns;
+    IncrementSaturating(&row.successful_publications);
+
+    const ServiceInstanceToken directory_owner{ticket.transition, instance};
+    const ServiceDirectoryStatus directory_status =
+        ServiceDirectoryPublishRegistration(directory, reservation, directory_owner);
+    if (directory_status != ServiceDirectoryStatus::Ok)
+    {
+        const ServiceLifecycleStatus rollback_status = RollbackUnpublishedPublicationLocked(*broker, &rollback);
+        return DirectoryPublicationFailure(rollback_status, directory_status);
+    }
+
+    // Directory publication is the last fallible visibility mutation.  The
+    // exact rollback token remains implementation-private and dies here, while
+    // the still-held lifecycle lock prevents a concurrent stop from observing
+    // a Running row before the Active directory identity exists.
+    rollback.valid = false;
+    return ServiceLifecycleDirectoryPublicationResult{ServiceLifecycleStatus::Ok, ServiceDirectoryStatus::Ok,
+                                                      ServiceLifecycleInstanceToken{ticket, instance}};
+}
+
+ServiceLifecycleDirectoryReadyResult ServiceLifecycleBrokerMarkReady(ServiceLifecycleBroker* broker,
+                                                                     ServiceLifecycleInstanceToken instance,
+                                                                     ServiceDirectory* directory, ServiceKey service)
+{
+    if (directory == nullptr)
+        return DirectoryReadyFailure(ServiceLifecycleStatus::NullArgument);
+    const ServiceLifecycleStatus ready = ReadyBroker(broker);
+    if (ready != ServiceLifecycleStatus::Ok)
+        return DirectoryReadyFailure(ready);
+
+    sync::SpinLockGuard guard(broker->lock);
+    if (!BrokerIsCanonical(*broker))
+        return DirectoryReadyFailure(ServiceLifecycleStatus::CorruptState);
+    const ServiceLifecycleStatus token_status = ValidateTokenEpoch(*broker, instance);
+    if (token_status != ServiceLifecycleStatus::Ok)
+        return DirectoryReadyFailure(token_status);
+    if (broker->state == ServiceLifecycleBrokerState::Closed)
+        return DirectoryReadyFailure(ServiceLifecycleStatus::Closed);
+    if (broker->state == ServiceLifecycleBrokerState::Draining)
+        return DirectoryReadyFailure(ServiceLifecycleStatus::Draining);
+
+    const u32 index = FindBrokerIndex(*broker, instance.start.transition.service_identity);
+    if (index >= broker->service_count)
+        return DirectoryReadyFailure(ServiceLifecycleStatus::NotFound);
+    ServiceLifecycleRow& row = broker->rows[index];
+    if (row.transition.generation != instance.start.transition.generation)
+        return DirectoryReadyFailure(ServiceLifecycleStatus::StaleGeneration);
+    const ServiceInstanceToken transition_instance{instance.start.transition, instance.process};
+    if (row.builder_state != ServiceLifecycleBuilderState::None ||
+        !ServiceTransitionIsCurrentRunning(row.transition, transition_instance))
+    {
+        return DirectoryReadyFailure(ServiceLifecycleStatus::TransitionRejected);
+    }
+
+    const ServiceDirectoryStatus directory_status =
+        ServiceDirectoryCommitJointReady(directory, service, transition_instance, &row.ready);
+    if (directory_status != ServiceDirectoryStatus::Ok)
+        return DirectoryReadyFailure(ServiceLifecycleStatus::Ok, directory_status);
+
+    // The lower-ranked directory leaf performed both ordered no-fail writes
+    // before releasing its lock. This still-held broker lock prevents stop or
+    // dependency admission from interleaving with the joint commit.
+    return ServiceLifecycleDirectoryReadyResult{ServiceLifecycleStatus::Ok, ServiceDirectoryStatus::Ok};
 }
 
 ServiceLifecycleStopResult ServiceLifecycleBrokerRequestStop(ServiceLifecycleBroker* broker, u64 service_identity,
@@ -609,12 +827,14 @@ ServiceLifecycleStopResult ServiceLifecycleBrokerRequestStop(ServiceLifecycleBro
         return StopFailure(ServiceLifecycleStatus::AlreadyStopped);
     case ServiceStopResult::StartCancelled:
         row.builder_state = ServiceLifecycleBuilderState::CancelledAwaitingRetirement;
+        row.ready = false;
         row.last_transition_ns = now_ns;
         return ServiceLifecycleStopResult{
             ServiceLifecycleStatus::StartCancelled, kInvalidServiceLifecycleInstanceToken,
             ServiceLifecycleStartTicket{
                 broker->broker_epoch, ServiceStartTicket{row.transition.service_identity, row.transition.generation}}};
     case ServiceStopResult::KillRequired:
+        row.ready = false;
         row.last_transition_ns = now_ns;
         return ServiceLifecycleStopResult{
             ServiceLifecycleStatus::KillRequired,
@@ -657,6 +877,7 @@ ServiceLifecycleStatus ServiceLifecycleBrokerObserveExit(ServiceLifecycleBroker*
     if (ServiceTransitionObserveExit(&row.transition, transition_instance) != ServiceExitResult::Applied)
         return ServiceLifecycleStatus::TransitionRejected;
 
+    row.ready = false;
     row.last_transition_ns = now_ns;
     IncrementSaturating(&row.observed_exits);
     if (failed)
@@ -707,6 +928,7 @@ ServiceLifecycleStatus ServiceLifecycleBrokerBeginDrain(ServiceLifecycleBroker* 
         const ServiceStopResult result = ServiceTransitionStop(&row.transition, &token);
         if (result == ServiceStopResult::KillRequired)
         {
+            row.ready = false;
             row.last_transition_ns = now_ns;
             plan_out->instances[plan_out->kill_count++] = ServiceLifecycleInstanceToken{
                 ServiceLifecycleStartTicket{broker->broker_epoch, token.start}, token.process};
@@ -714,6 +936,7 @@ ServiceLifecycleStatus ServiceLifecycleBrokerBeginDrain(ServiceLifecycleBroker* 
         else if (result == ServiceStopResult::StartCancelled)
         {
             row.builder_state = ServiceLifecycleBuilderState::CancelledAwaitingRetirement;
+            row.ready = false;
             row.last_transition_ns = now_ns;
             plan_out->cancelled_starts[plan_out->cancel_count++] = ServiceLifecycleStartTicket{
                 broker->broker_epoch, ServiceStartTicket{row.transition.service_identity, row.transition.generation}};
@@ -839,6 +1062,8 @@ const char* ServiceLifecycleStatusName(ServiceLifecycleStatus status)
         return "already-stopping";
     case ServiceLifecycleStatus::StartRetirementPending:
         return "start-retirement-pending";
+    case ServiceLifecycleStatus::DependencyNotReady:
+        return "dependency-not-ready";
     case ServiceLifecycleStatus::Busy:
         return "busy";
     }
