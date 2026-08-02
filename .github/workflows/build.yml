@@ -121,10 +121,109 @@ jobs:
           sudo ln -sf /usr/bin/llvm-nm-18 /usr/local/bin/llvm-nm
           sudo ln -sf /usr/bin/llvm-addr2line-18 /usr/local/bin/llvm-addr2line
           sudo ln -sf /usr/bin/ld.lld-18 /usr/local/bin/ld.lld
+      - name: Verify host structural contracts
+        run: |
+          python3 tools/test/test-verify-boot-verdict.py
+          python3 tools/test/test-profile-boot-verdict-integration.py
+          python3 tools/test/test-smoke-profile-order.py
+          python3 tools/test/test-browser-smoke-profile-contract.py
+          python3 tools/test/test-service-boot-order.py
+          python3 tools/test/test-smp-ap-handshake.py
+          python3 tools/test/test-tlb-shootdown-contract.py
+          python3 tools/test/test-user-tlb-reclaim-contract.py
+          python3 tools/test/test-task-cancellation-contract.py
+          python3 tools/test/test-cancellable-wait-contract.py
+          python3 tools/test/test-cancellation-smp-oracle-contract.py
+          python3 tools/test/test-kmutex-cancellation-contract.py
+          python3 tools/test/test-linux-exit-unwind-contract.py
+          python3 tools/test/test-ipc-wait-cancellation-contract.py
+          python3 tools/test/test-ipc-residual-wait-cancellation-contract.py
+          python3 tools/test/test-gdb-stop-rendezvous-contract.py
+          python3 tools/test/test-gdb-monitor-stop-safety-contract.py
+          python3 tools/test/test-stdin-ring-linearizability-contract.py
+          python3 tools/test/test-process-runtime-access-contract.py
+          python3 tools/test/test-process-task-publication-contract.py
+          python3 tools/test/test-job-member-completion-contract.py
+          python3 tools/test/test-job-userland-ingress-contract.py
+          python3 tools/test/test-job-scheduler-linearization-contract.py
+          python3 tools/test/test-job-runtime-proof-contract.py
+          python3 tools/test/test-service-publication-gate-contract.py
+          python3 tools/test/test-linux-child-relation-contract.py
+          python3 tools/test/test-linux-cwd-sync-contract.py
+          python3 tools/test/test-linux-mmap-vm-receipt-contract.py
+          python3 tools/test/test-linux-fd-transaction-contract.py
+          python3 tools/test/test-linux-fd-receipt-extension-contract.py
+          python3 tools/test/test-linux-fd-io-transaction-contract.py
+          python3 tools/test/test-linux-fd-async-pools-contract.py
+          python3 tools/test/test-linux-sysv-ipc-wait-cancellation-contract.py
+          python3 tools/test/test-linux-sysv-ipc-id-generation-contract.py
+          python3 tools/test/test-linux-fd-residual-receipt-contract.py
+          python3 tools/test/test-linux-fd-generation-exhaustion-contract.py
+          python3 tools/test/test-linux-timer-signalfd-receipt-contract.py
+          python3 tools/test/test-linux-signal-pending-sync-contract.py
+          python3 tools/test/test-linux-pipe-wait-cancellation-contract.py
+          python3 tools/test/test-linux-notify-aio-wait-cancellation-contract.py
+          python3 tools/test/test-process-child-wait-cancellation-contract.py
+          python3 tools/test/test-win32-thread-wait-cancellation-contract.py
+          python3 tools/test/test-win32-directory-address-wait-cancellation-contract.py
+          python3 tools/test/test-pidfd-strong-identity-contract.py
+          python3 tools/test/test-epoll-fd-identity-contract.py
+          python3 tools/test/test-process-handle-generation-contract.py
+          python3 tools/test/test-handle-publication-reservation-contract.py
+          python3 tools/test/test-gui-message-wait-sequence-contract.py
+          python3 tools/test/test-address-space-region-sync-contract.py
+          python3 tools/test/test-breakpoint-address-space-read-contract.py
+          python3 tools/test/test-dbg-core-scan-coherence-contract.py
+          python3 tools/test/test-ap-bootstrap-stack-contract.py
+          python3 tools/test/test-win32-heap-vm-safety-contract.py
+          python3 tools/test/test-win32-thread-tls-vm-safety-contract.py
+          python3 tools/test/test-loader-image-patch-vm-receipt-contract.py
+          python3 tools/test/test-native-syscall-idl.py
+          python3 tools/test/test-native-syscall-dispatch-bijection.py
+          python3 tools/test/test-rust-ffi-signatures.py
+          python3 tools/test/test-rust-ingress-hardening-contract.py
+          python3 tools/test/test-gen-service-manifest.py
+          python3 tools/test/test-service-elf-load-image-contract.py
+          python3 tools/test/test-service-bootstrap-stage-contract.py
+          python3 tools/test/test-service-bootstrap-activation-contract.py
+          python3 tools/test/test-service-exit-observer-contract.py
+          python3 tools/test/test-service-endpoint-contract.py
+          python3 tools/test/test-service-endpoint-request-lifecycle-contract.py
+          python3 tools/test/test-service-process-endpoint-teardown-contract.py
+          python3 tools/test/test-service-protocol-policy-contract.py
+          python3 tools/test/test-service-endpoint-ingress-contract.py
+          python3 tools/test/test-service-publication-directory-contract.py
+          python3 tools/test/test-service-runtime-owner-contract.py
+          python3 tools/test/test-service-bootstrap-live-contract.py
+          python3 tools/test/test-win32-service-endpoint-close-contract.py
+          python3 tools/test/test-process-authority-wiring-contract.py
+          python3 tools/test/test-serviced-supervisor-contract.py
+          python3 tools/test/test-registryd-store-contract.py
+          python3 tools/test/test-execd-worker-contract.py
+          python3 tools/test/test-displayd-engine-contract.py
+          python3 tools/test/test-netd-socket-engine-contract.py
+          python3 tools/test/test-nic-id-classification-contract.py
+          python3 tools/test/test-wireless-watch-lifecycle-contract.py
+          python3 tools/test/test-net-registry-lifecycle-contract.py
+          python3 tools/test/test-net-stack-boot-order-contract.py
+          python3 tools/test/test-net-stack-restart-contract.py
+          python3 tools/test/test-net-protocol-state-sync-contract.py
+          python3 tools/test/test-mt7921-contract.py
+          python3 tools/test/test-pci-bar-sizing-contract.py
+          python3 tools/test/test-pci-endpoint-identity-contract.py
+          python3 tools/test/test-pcnet-restart-contract.py
+          python3 tools/test/test-virtio-net-restart-contract.py
+          python3 tools/test/test-host-sanitizer-ci-contract.py
+          python3 tools/test/test-ntdll-vm-abi-contract.py
+          python3 tools/test/test-service-package-ci-contract.py
+          python3 tools/test/test-release-publisher-singleton-contract.py
+          python3 tools/test/test-parallel-claim-safety.py
       - name: Configure
         run: cmake --preset x86_64-debug
       - name: Build
         run: cmake --build build/x86_64-debug --parallel $(nproc)
+      - name: Verify deterministic service package and typed binding
+        run: cmake --build build/x86_64-debug --target duetos-service-package-verify --parallel 2
       - name: Upload kernel
         uses: actions/upload-artifact@v4
         with:
@@ -313,6 +412,7 @@ jobs:
           set +e
           echo "::group::flavor=${{ matrix.preset }} bringup"
           DUETOS_PRESET=${{ matrix.preset }} \
+          DUETOS_EXPECTED_CPUS=4 \
           DUETOS_TIMEOUT=480 \
             tools/test/profile-boot-smoke.sh bringup build/${{ matrix.preset }}
           rc=$?
@@ -320,7 +420,7 @@ jobs:
           cp -f "build/${{ matrix.preset }}/smoke-bringup.log" \
                 "smoke-${{ matrix.preset }}.log" 2>/dev/null || true
           if [[ $rc -eq 1 ]]; then echo "::error::flavor=${{ matrix.preset }} regression"; fi
-          if [[ $rc -eq 2 ]]; then echo "::warning::QEMU not available; smoke skipped"; rc=0; fi
+          if [[ $rc -eq 2 ]]; then echo "::error::required CI smoke attempted to skip"; rc=1; fi
           exit $rc
       - name: Upload serial logs (on failure)
         if: failure()
@@ -346,7 +446,9 @@ jobs:
     # whole matrix is bound by the slowest profile (pe-threads),
     # not the sum, and a single hang in one profile no longer
     # masks the rest.
-    name: qemu smoke (${{ matrix.profile }})
+    # Every profile row uses 4 vCPUs; include adds focused 2-vCPU
+    # bringup and cancellation-race topology coverage.
+    name: qemu smoke (${{ matrix.profile }}, ${{ matrix.cpus }} vCPU)
     needs: build-debug
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -367,6 +469,15 @@ jobs:
           - pe-threads
           - pe-winkill
           - linux
+          - browser
+          - cancellation-smp
+        cpus:
+          - 4
+        include:
+          - profile: bringup
+            cpus: 2
+          - profile: cancellation-smp
+            cpus: 2
     steps:
       - uses: actions/checkout@v4
       - name: Install QEMU + grub
@@ -436,24 +547,25 @@ jobs:
           # duration before emitting its sentinel; this outer timeout
           # catches a guest or harness wedge.
           set +e
-          echo "::group::smoke profile=${{ matrix.profile }}"
+          echo "::group::smoke profile=${{ matrix.profile }} cpus=${{ matrix.cpus }}"
+          DUETOS_EXPECTED_CPUS=${{ matrix.cpus }} \
           DUETOS_TIMEOUT=480 \
             tools/test/profile-boot-smoke.sh "${{ matrix.profile }}" build/x86_64-debug
           rc=$?
           echo "::endgroup::"
           cp -f "build/x86_64-debug/smoke-${{ matrix.profile }}.log" \
-                "smoke-${{ matrix.profile }}.log" 2>/dev/null || true
+                "smoke-${{ matrix.profile }}-${{ matrix.cpus }}cpu.log" 2>/dev/null || true
           case ${rc} in
             0) status="pass"     ;;
             1) status="regression" ;;
-            2) status="skip"     ;;
+            2) status="infrastructure-failure" ;;
             *) status="unknown"  ;;
           esac
           echo "rc=${rc}"         >> "$GITHUB_OUTPUT"
           echo "status=${status}" >> "$GITHUB_OUTPUT"
-          if [[ "${status}" == "skip" ]]; then
-            echo "::warning::QEMU not available; smoke test skipped."
-            exit 0
+          if [[ "${status}" == "infrastructure-failure" ]]; then
+            echo "::error::required CI smoke attempted to skip."
+            exit 1
           fi
           if [[ "${status}" == "pass" ]]; then exit 0; fi
           exit 1
@@ -461,9 +573,9 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: qemu-serial-log-${{ matrix.profile }}
+          name: qemu-serial-log-${{ matrix.profile }}-${{ matrix.cpus }}cpu
           path: |
-            smoke-${{ matrix.profile }}.log
+            smoke-${{ matrix.profile }}-${{ matrix.cpus }}cpu.log
             build/x86_64-debug/smoke-${{ matrix.profile }}.log
             qemu.log
           retention-days: 7
@@ -479,7 +591,8 @@ jobs:
           script: |
             const fs = require('fs');
             const profile = '${{ matrix.profile }}';
-            const MARKER = `<!-- duetos-qemu-smoke-report-${profile} -->`;
+            const cpus = '${{ matrix.cpus }}';
+            const MARKER = `<!-- duetos-qemu-smoke-report-${profile}-${cpus}cpu -->`;
             const status = '${{ steps.smoke.outputs.status }}' || 'unknown';
             const rc = '${{ steps.smoke.outputs.rc }}' || '?';
             const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
@@ -495,7 +608,7 @@ jobs:
             if (status === 'pass' && !existing) return;
 
             const candidates = [
-              `smoke-${profile}.log`,
+              `smoke-${profile}-${cpus}cpu.log`,
               `build/x86_64-debug/smoke-${profile}.log`,
             ];
             let tail = '(no serial log captured)';
@@ -508,12 +621,12 @@ jobs:
             }
 
             const verdict = {
-              pass:       `:white_check_mark: **qemu-smoke (${profile}) passed** for \`${sha}\`.`,
-              regression: `:x: **Regression in qemu-smoke (${profile})** — an expected signature is missing, or a forbidden one (PANIC / DUETOS CRASH / triple fault / [health] ESCALATE) appeared (\`${sha}\`). No retry — single-attempt gate.`,
-              skip:       `:information_source: **qemu-smoke (${profile}) skipped** — QEMU not available.`,
-            }[status] || `:question: qemu-smoke (${profile}) exited rc=${rc} (status=${status}).`;
+              'infrastructure-failure': `:x: **qemu-smoke (${profile}, ${cpus} vCPU) could not run its required gate**; an environment skip is a CI failure.`,
+              pass:       `:white_check_mark: **qemu-smoke (${profile}, ${cpus} vCPU) passed** for \`${sha}\`.`,
+              regression: `:x: **Regression in qemu-smoke (${profile}, ${cpus} vCPU)** — the strict machine verdict or a scenario signature failed (\`${sha}\`). No retry — single-attempt gate.`,
+            }[status] || `:question: qemu-smoke (${profile}, ${cpus} vCPU) exited rc=${rc} (status=${status}).`;
 
-            const bodyParts = [MARKER, '', `## qemu-smoke — \`${profile}\``, '', verdict, '', `[View full run](${run})`];
+            const bodyParts = [MARKER, '', `## qemu-smoke — \`${profile}\`, ${cpus} vCPU`, '', verdict, '', `[View full run](${run})`];
             if (status !== 'pass') {
               bodyParts.push('', '<details><summary>Last 40 lines of serial log</summary>', '', '```', tail, '```', '', '</details>');
             }
@@ -680,10 +793,14 @@ jobs:
     # UBSan, and can't hide regressions behind a "kernel got slow"
     # excuse. They're a faster signal that complements the boot
     # smoke matrix; both are required before merge.
-    name: host tests
+    name: host tests (${{ matrix.sanitizer }})
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     needs: []
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [asan-ubsan, thread]
     steps:
       - uses: actions/checkout@v4
       - name: Install host toolchain
@@ -699,7 +816,16 @@ jobs:
           done
           sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
           sudo ln -sf /usr/bin/clang++-18 /usr/local/bin/clang++
-      - name: Configure (host-tests, ASan + UBSan)
+      - name: Install Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+            sh -s -- -y --default-toolchain none --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Sync pinned Rust toolchain
+        run: |
+          rustup show
+          rustc --version --verbose
+      - name: Configure (host-tests, ${{ matrix.sanitizer }})
         # Pin the compiler explicitly. Installing clang-18 and symlinking it
         # into /usr/local/bin is NOT enough: CMake's default C/CXX search
         # probes `cc`/`c++` first, which on ubuntu-24.04 resolve to GCC — so
@@ -713,6 +839,8 @@ jobs:
           cmake -S tests/host -B build/host-tests -G Ninja
           -DCMAKE_C_COMPILER=clang-18
           -DCMAKE_CXX_COMPILER=clang++-18
+          -DDUETOS_HOST_TESTS_SANITIZERS=${{ matrix.sanitizer == 'asan-ubsan' }}
+          -DDUETOS_HOST_TESTS_TSAN=${{ matrix.sanitizer == 'thread' }}
       - name: Show resolved compiler
         run: grep -E '^CMAKE_(C|CXX)_COMPILER:' build/host-tests/CMakeCache.txt
       - name: Build
