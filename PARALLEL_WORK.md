@@ -3410,3 +3410,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Authenticated versioned native-userland ServiceEndpoint accept receive reply-ack and typed object-transfer ingress with process-bound receipts
 - **Claimed**: 2026-08-02T03:15:30Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] parallel-claim-safety-20260802
+- **Session**: `Codex-ParallelClaimSafety-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tools/parallel/claim.sh,tools/parallel/status.sh,tools/parallel/release.sh,tools/parallel/claims_guard.py,tools/test/test-parallel-claim-safety.py,CLAUDE_PARALLEL.md`
+- **Description**: Serialize coordinator mutation and fail closed on scope ambiguity sync and publication errors
+- **Claimed**: 2026-08-02T03:24:07Z
+- **Status**: IN PROGRESS
