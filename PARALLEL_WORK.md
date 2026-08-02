@@ -3227,13 +3227,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-01T23:50:40Z
 - **Status**: COMPLETED @ 2026-08-02T00:02:35Z
 
-### [ACTIVE] service-driver-test-build-integration-20260801
+### [DONE] service-driver-test-build-integration-20260801
 - **Session**: `Nathan-1437`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tests/host/CMakeLists.txt,.github/workflows/build.yml`
 - **Description**: Register completed service engines and NIC safety contracts in hosted build and CI
 - **Claimed**: 2026-08-02T00:09:14Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T06:55:16Z
 
 ### [DONE] net-stack-restart-20260801
 - **Session**: `Codex-NetStackRestart-20260801`
