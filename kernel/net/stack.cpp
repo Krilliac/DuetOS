@@ -72,8 +72,35 @@ ArpEntry g_arp_cache[kArpCacheCap] = {};
 // — zero-init would alias to "head is entry 0", which is a bug.
 u8 g_arp_hash_heads[kArpHashSize] = {};
 ArpStats g_arp_stats = {};
-Ipv4Stats g_ipv4_stats = {};
-IcmpStats g_icmp_stats = {};
+// Protects the cache, hash chains, and ARP stats. No other stack lock may be
+// acquired while this is held; callers copy state out before TX or waiting.
+constinit sync::SpinLock g_arp_lock = {
+    .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
+constinit Ipv4Stats g_ipv4_stats = {};
+// IPv4 accounting is a separate publication domain. Keep this lock out of
+// firewall evaluation and transport/RX callbacks: updates are tiny, and
+// readers copy the complete snapshot before returning.
+constinit sync::SpinLock g_ipv4_stats_lock = {
+    .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
+constinit IcmpStats g_icmp_stats = {};
+// Protects ICMP accounting and the single outstanding ping transaction.
+// Interface lifetime, ARP lookup, TX, and time reads all happen unlocked.
+constinit sync::SpinLock g_icmp_lock = {
+    .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
+
+void Ipv4StatIncrement(u64 Ipv4Stats::*field)
+{
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_ipv4_stats_lock);
+    ++(g_ipv4_stats.*field);
+    sync::SpinLockRelease(g_ipv4_stats_lock, flags);
+}
+
+void IcmpStatIncrement(u64 IcmpStats::*field)
+{
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_icmp_lock);
+    ++(g_icmp_stats.*field);
+    sync::SpinLockRelease(g_icmp_lock, flags);
+}
 
 namespace interface_lifetime
 {
@@ -438,11 +465,169 @@ bool IfaceTx(u32 iface_index, const void* frame, u64 frame_len)
 struct UdpBinding
 {
     bool in_use;
+    bool closing;
     u16 port;
     UdpRxFn handler;
+    u64 generation;
+    u64 active_calls;
 };
 UdpBinding g_udp_bindings[kUdpBindingsMax] = {};
 UdpStats g_udp_stats = {};
+// Protects only the kernel UDP binding table and its stats. Socket dispatch
+// and snapshotted handlers are always invoked after this lock is released.
+constinit sync::SpinLock g_udp_lock = {
+    .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
+
+inline constexpr u32 kInvalidUdpBindingSlot = ~u32(0);
+
+struct UdpBindingReceipt
+{
+    u32 slot;
+    u64 generation;
+};
+
+inline constexpr UdpBindingReceipt kInvalidUdpBindingReceipt{kInvalidUdpBindingSlot, 0};
+
+struct UdpDispatchSnapshot
+{
+    UdpBindingReceipt receipt;
+    UdpRxFn handler;
+};
+
+bool UdpBindingReceiptIsValid(UdpBindingReceipt receipt)
+{
+    return receipt.slot < kUdpBindingsMax && receipt.generation != 0;
+}
+
+void UdpStatIncrement(u64& counter)
+{
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_udp_lock);
+    ++counter;
+    sync::SpinLockRelease(g_udp_lock, flags);
+}
+
+bool UdpBindingBind(u16 port, UdpRxFn handler, UdpBindingReceipt* out_receipt)
+{
+    if (handler == nullptr || out_receipt == nullptr)
+        return false;
+    *out_receipt = kInvalidUdpBindingReceipt;
+
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_udp_lock);
+    for (u32 i = 0; i < kUdpBindingsMax; ++i)
+    {
+        UdpBinding& binding = g_udp_bindings[i];
+        if (binding.port != port || (!binding.in_use && !binding.closing))
+            continue;
+        if (binding.in_use && !binding.closing && binding.handler == handler)
+        {
+            *out_receipt = UdpBindingReceipt{i, binding.generation};
+            sync::SpinLockRelease(g_udp_lock, flags);
+            return true;
+        }
+        sync::SpinLockRelease(g_udp_lock, flags);
+        return false;
+    }
+
+    for (u32 i = 0; i < kUdpBindingsMax; ++i)
+    {
+        UdpBinding& binding = g_udp_bindings[i];
+        if (binding.in_use || binding.closing || binding.active_calls != 0)
+            continue;
+        ++binding.generation;
+        if (binding.generation == 0)
+            ++binding.generation;
+        binding.in_use = true;
+        binding.closing = false;
+        binding.port = port;
+        binding.handler = handler;
+        *out_receipt = UdpBindingReceipt{i, binding.generation};
+        sync::SpinLockRelease(g_udp_lock, flags);
+        return true;
+    }
+    sync::SpinLockRelease(g_udp_lock, flags);
+    return false;
+}
+
+bool UdpBindingAcquire(u16 port, UdpDispatchSnapshot& out)
+{
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_udp_lock);
+    for (u32 i = 0; i < kUdpBindingsMax; ++i)
+    {
+        UdpBinding& binding = g_udp_bindings[i];
+        if (!binding.in_use || binding.closing || binding.port != port || binding.handler == nullptr)
+            continue;
+        if (binding.active_calls == ~u64(0))
+        {
+            sync::SpinLockRelease(g_udp_lock, flags);
+            return false;
+        }
+        ++binding.active_calls;
+        out.receipt = UdpBindingReceipt{i, binding.generation};
+        out.handler = binding.handler;
+        sync::SpinLockRelease(g_udp_lock, flags);
+        return true;
+    }
+    sync::SpinLockRelease(g_udp_lock, flags);
+    return false;
+}
+
+void UdpBindingRelease(UdpBindingReceipt receipt)
+{
+    KASSERT(UdpBindingReceiptIsValid(receipt), "net/udp", "invalid UDP callback receipt");
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_udp_lock);
+    UdpBinding& binding = g_udp_bindings[receipt.slot];
+    const bool valid = binding.generation == receipt.generation && binding.active_calls != 0;
+    if (valid)
+        --binding.active_calls;
+    sync::SpinLockRelease(g_udp_lock, flags);
+    KASSERT(valid, "net/udp", "stale UDP callback receipt");
+}
+
+void UdpBindingUnbindExact(UdpBindingReceipt receipt)
+{
+    if (!UdpBindingReceiptIsValid(receipt))
+        return;
+
+    for (;;)
+    {
+        const sync::IrqFlags flags = sync::SpinLockAcquire(g_udp_lock);
+        UdpBinding& binding = g_udp_bindings[receipt.slot];
+        if (binding.generation != receipt.generation)
+        {
+            sync::SpinLockRelease(g_udp_lock, flags);
+            return;
+        }
+        binding.in_use = false;
+        binding.closing = true;
+        if (binding.active_calls == 0)
+        {
+            binding.port = 0;
+            binding.handler = nullptr;
+            binding.closing = false;
+            sync::SpinLockRelease(g_udp_lock, flags);
+            return;
+        }
+        sync::SpinLockRelease(g_udp_lock, flags);
+        sched::SchedSleepTicks(1);
+    }
+}
+
+void UdpBindingUnbindPort(u16 port)
+{
+    UdpBindingReceipt receipt = kInvalidUdpBindingReceipt;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_udp_lock);
+    for (u32 i = 0; i < kUdpBindingsMax; ++i)
+    {
+        const UdpBinding& binding = g_udp_bindings[i];
+        if ((binding.in_use || binding.closing) && binding.port == port)
+        {
+            receipt = UdpBindingReceipt{i, binding.generation};
+            break;
+        }
+    }
+    sync::SpinLockRelease(g_udp_lock, flags);
+    UdpBindingUnbindExact(receipt);
+}
 
 // DHCP client state. Single-interface in v0 — one transaction at
 // a time across the whole stack. Tracks which interface owns the
@@ -453,12 +638,15 @@ struct DhcpState
     enum class Stage : u8
     {
         Idle = 0,
-        Discovered,
+        Discovering,
+        Requesting,
+        CommittingAck,
         Acked,
     };
     Stage stage;
     u32 iface_index;
     u64 binding_generation;
+    u64 transaction;
     u32 xid;
     Ipv4Address offered_ip;
     Ipv4Address server_ip;
@@ -472,6 +660,12 @@ struct DhcpState
 // interface it transmitted on. One DhcpState per interface lets each
 // NIC hold and resolve its own lease independently.
 DhcpState g_dhcp[kMaxInterfaces] = {};
+u32 g_dhcp_next_xid[kMaxInterfaces] = {};
+u64 g_dhcp_next_transaction[kMaxInterfaces] = {};
+// Protects every DhcpState and both monotonic per-interface allocators. DHCP
+// never holds this lock while touching the interface table, UDP demux, or TX.
+constinit sync::SpinLock g_dhcp_lock = {
+    .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
 
 bool IpEq(Ipv4Address a, Ipv4Address b)
 {
@@ -491,14 +685,74 @@ bool IsZeroIp(Ipv4Address ip)
     return ip.octets[0] == 0 && ip.octets[1] == 0 && ip.octets[2] == 0 && ip.octets[3] == 0;
 }
 
-bool SendArpRequest(u32 iface_index, Ipv4Address target_ip)
+void ArpStatIncrement(u64& counter)
+{
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_arp_lock);
+    ++counter;
+    sync::SpinLockRelease(g_arp_lock, flags);
+}
+
+const ArpEntry* ArpLookupLocked(NetInterfaceBinding binding, Ipv4Address ip, u64 now, ArpEntry* out_entry);
+
+} // namespace
+
+const ArpEntry* ArpLookup(u32 iface_index, Ipv4Address ip)
+{
+    const u64 binding_generation = InterfaceGenerationRead(iface_index);
+    if (!InterfaceGenerationIsOpen(iface_index, binding_generation))
+    {
+        ArpStatIncrement(g_arp_stats.lookups_miss);
+        return nullptr;
+    }
+    const InterfaceOperationGuard interface_guard(iface_index, binding_generation);
+    if (!interface_guard)
+    {
+        ArpStatIncrement(g_arp_stats.lookups_miss);
+        return nullptr;
+    }
+    const u64 now = NowTicks();
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_arp_lock);
+    const ArpEntry* result = ArpLookupLocked(NetInterfaceBinding{iface_index, binding_generation}, ip, now, nullptr);
+    sync::SpinLockRelease(g_arp_lock, flags);
+    return result;
+}
+
+bool ArpLookup(u32 iface_index, Ipv4Address ip, ArpEntry* out_entry)
+{
+    if (out_entry == nullptr)
+        return false;
+    *out_entry = {};
+    const u64 binding_generation = InterfaceGenerationRead(iface_index);
+    if (!InterfaceGenerationIsOpen(iface_index, binding_generation))
+    {
+        ArpStatIncrement(g_arp_stats.lookups_miss);
+        return false;
+    }
+    const InterfaceOperationGuard interface_guard(iface_index, binding_generation);
+    if (!interface_guard)
+    {
+        ArpStatIncrement(g_arp_stats.lookups_miss);
+        return false;
+    }
+    const u64 now = NowTicks();
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_arp_lock);
+    const bool found =
+        ArpLookupLocked(NetInterfaceBinding{iface_index, binding_generation}, ip, now, out_entry) != nullptr;
+    sync::SpinLockRelease(g_arp_lock, flags);
+    return found;
+}
+
+namespace
+{
+
+bool SendArpRequest(NetInterfaceBinding binding, Ipv4Address target_ip)
 {
     InterfaceOperation operation{};
-    if (!InterfaceOperationAcquire(iface_index, /*expected_generation=*/0, operation))
+    if (!InterfaceOperationAcquire(binding.iface_index, binding.generation, operation))
         return false;
     if ((operation.context_tx == nullptr && operation.legacy_tx == nullptr) || IsZeroIp(operation.ip))
     {
-        ++g_arp_stats.tx_failures;
+        ArpStatIncrement(g_arp_stats.tx_failures);
         InterfaceOperationRelease(operation);
         return false;
     }
@@ -520,52 +774,58 @@ bool SendArpRequest(u32 iface_index, Ipv4Address target_ip)
     memcpy(req + 28, operation.ip.octets, 4);
     memcpy(req + 38, target_ip.octets, 4);
 
-    ++g_arp_stats.tx_requests;
-    const bool ok = IfaceTx(iface_index, req, sizeof(req));
+    ArpStatIncrement(g_arp_stats.tx_requests);
+    const bool ok = IfaceTxForGeneration(binding.iface_index, binding.generation, req, sizeof(req));
     if (!ok)
-        ++g_arp_stats.tx_failures;
+        ArpStatIncrement(g_arp_stats.tx_failures);
     InterfaceOperationRelease(operation);
     return ok;
 }
 
-const ArpEntry* ArpResolveWithWait(u32 iface_index, Ipv4Address ip, u64 per_try_timeout_ticks, u32 max_tries)
+bool ArpResolveWithWait(NetInterfaceBinding binding, Ipv4Address ip, u64 per_try_timeout_ticks, u32 max_tries,
+                        ArpEntry& out)
 {
-    const ArpEntry* hit = ArpLookup(iface_index, ip);
-    if (hit != nullptr)
-        return hit;
+    if (ArpLookup(binding.iface_index, ip, &out) && out.binding_generation == binding.generation)
+        return true;
 
     if (max_tries == 0)
-        return nullptr;
+        return false;
 
     for (u32 attempt = 0; attempt < max_tries; ++attempt)
     {
-        if (!SendArpRequest(iface_index, ip))
-            return nullptr;
+        if (!SendArpRequest(binding, ip))
+            return false;
 
         const u64 start = NowTicks();
         while ((NowTicks() - start) < per_try_timeout_ticks)
         {
             duetos::sched::SchedSleepTicks(1);
-            hit = ArpLookup(iface_index, ip);
-            if (hit != nullptr)
-                return hit;
+            if (ArpLookup(binding.iface_index, ip, &out) && out.binding_generation == binding.generation)
+                return true;
         }
     }
-    return nullptr;
+    return false;
 }
 
-const ArpEntry* ResolveL2Destination(u32 iface_index, Ipv4Address target_ip)
+bool ResolveL2Destination(const InterfaceOperation& operation, Ipv4Address target_ip, MacAddress& out_mac)
 {
-    const DhcpLease lease = DhcpLeaseRead(iface_index);
+    const NetInterfaceBinding binding{operation.iface_index, operation.generation};
+    const DhcpLease lease = DhcpLeaseRead(operation.iface_index);
     const Ipv4Address fallback_gw =
         lease.valid ? lease.router : Ipv4Address{{target_ip.octets[0], target_ip.octets[1], target_ip.octets[2], 2}};
 
     // First try direct destination resolution.
-    const ArpEntry* dst = ArpResolveWithWait(iface_index, target_ip, /*per_try_timeout_ticks=*/10, /*max_tries=*/3);
-    if (dst != nullptr)
-        return dst;
+    ArpEntry entry{};
+    if (ArpResolveWithWait(binding, target_ip, /*per_try_timeout_ticks=*/10, /*max_tries=*/3, entry))
+    {
+        out_mac = entry.mac;
+        return true;
+    }
     // Then try resolving the DHCP/default gateway.
-    return ArpResolveWithWait(iface_index, fallback_gw, /*per_try_timeout_ticks=*/10, /*max_tries=*/3);
+    if (!ArpResolveWithWait(binding, fallback_gw, /*per_try_timeout_ticks=*/10, /*max_tries=*/3, entry))
+        return false;
+    out_mac = entry.mac;
+    return true;
 }
 
 } // namespace
@@ -659,6 +919,17 @@ void NetStackInit()
     // ARP reply: HTYPE=1, PTYPE=0x0800, HLEN=6, PLEN=4, OPER=2,
     // SHA = 52:54:00:12:34:56, SPA = 10.0.2.2, THA=zeros, TPA=0.0.0.0.
     {
+        struct CacheSelfTestTx
+        {
+            static bool Fn(void*, u32, const void*, u64) { return true; }
+        };
+        const MacAddress cache_test_mac{{0x02, 0x00, 0x00, 0x00, 0x00, 0x03}};
+        const Ipv4Address cache_test_ip{{10, 0, 2, 15}};
+        NetInterfaceBinding cache_test_binding = kInvalidNetInterfaceBinding;
+        KASSERT(NetStackBindInterfaceOwned(/*iface_index=*/2, cache_test_mac, cache_test_ip, &CacheSelfTestTx::Fn,
+                                           nullptr, &cache_test_binding),
+                "net/arp", "cache self-test interface bind failed");
+
         u8 frame[42] = {};
         // Ethernet header (dst / src / ether_type=ARP 0x0806).
         frame[0] = 0xFF;
@@ -697,20 +968,20 @@ void NetStackInit()
         frame[30] = 2;
         frame[31] = 2;
         // THA + TPA left zero.
-        const u32 iface = 0;
+        const u32 iface = cache_test_binding.iface_index;
         const bool inserted = ArpHandleIncoming(iface, frame, sizeof(frame));
         if (inserted)
         {
             Ipv4Address gw = {{10, 0, 2, 2}};
-            const ArpEntry* e = ArpLookup(iface, gw);
-            if (e != nullptr)
+            ArpEntry entry{};
+            if (ArpLookup(iface, gw, &entry))
             {
                 arch::SerialWrite("[arp] self-test OK — cached 10.0.2.2 -> ");
                 for (u64 i = 0; i < 6; ++i)
                 {
                     if (i != 0)
                         arch::SerialWrite(":");
-                    arch::SerialWriteHex(e->mac.octets[i]);
+                    arch::SerialWriteHex(entry.mac.octets[i]);
                 }
                 arch::SerialWrite("\n");
             }
@@ -723,6 +994,10 @@ void NetStackInit()
         {
             core::Log(core::LogLevel::Warn, "net/arp", "self-test: synthetic ARP reply rejected");
         }
+
+        KASSERT(NetStackUnbindInterface(cache_test_binding, /*drain_timeout_ticks=*/0) ==
+                    NetInterfaceUnbindResult::Unbound,
+                "net/arp", "cache self-test interface unbind failed");
     }
 
     // IPv4 self-test. Build a minimal Ethernet + IPv4 frame
@@ -947,8 +1222,14 @@ MacAddress InterfaceMac(u32 iface_index)
 u32 ArpEntryCount()
 {
     const u64 now = NowTicks();
+    ArpEntry entries[kArpCacheCap] = {};
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_arp_lock);
+    for (u32 i = 0; i < kArpCacheCap; ++i)
+        entries[i] = g_arp_cache[i];
+    sync::SpinLockRelease(g_arp_lock, flags);
+
     u32 live = 0;
-    for (const ArpEntry& e : g_arp_cache)
+    for (const ArpEntry& e : entries)
     {
         if (e.expiry_ticks == 0)
             continue;
@@ -997,45 +1278,43 @@ void ArpUnlinkFromBucket(u8 idx, u32 h)
     }
 }
 
-} // namespace
-
-const ArpEntry* ArpLookup(u32 iface_index, Ipv4Address ip)
+const ArpEntry* ArpLookupLocked(NetInterfaceBinding binding, Ipv4Address ip, u64 now, ArpEntry* out_entry)
 {
-    const u64 now = NowTicks();
-    const u32 h = ArpHash(iface_index, ip);
-    const u64 binding_generation = InterfaceGenerationRead(iface_index);
-    if (!InterfaceGenerationIsOpen(iface_index, binding_generation))
-    {
-        ++g_arp_stats.lookups_miss;
-        return nullptr;
-    }
-
+    const u32 h = ArpHash(binding.iface_index, ip);
     u8* link = &g_arp_hash_heads[h];
-    while (*link != kArpEntryNone)
+    u32 walked = 0;
+    while (*link != kArpEntryNone && walked++ < kArpCacheCap)
     {
         const u8 idx = *link;
-        ArpEntry& e = g_arp_cache[idx];
-        if (e.iface_index == iface_index && e.binding_generation == binding_generation && IpEq(e.ip, ip))
+        if (idx >= kArpCacheCap)
         {
-            if (now >= e.expiry_ticks)
+            *link = kArpEntryNone;
+            break;
+        }
+        ArpEntry& entry = g_arp_cache[idx];
+        if (entry.iface_index == binding.iface_index && entry.binding_generation == binding.generation &&
+            IpEq(entry.ip, ip))
+        {
+            if (now >= entry.expiry_ticks)
             {
-                // Lazy expiry: splice out of the chain so the next
-                // lookup doesn't re-traverse a dead entry, and free
-                // the slot for a future insert.
-                *link = e.next_idx;
-                e.next_idx = kArpEntryNone;
-                e.expiry_ticks = 0;
+                *link = entry.next_idx;
+                entry.next_idx = kArpEntryNone;
+                entry.expiry_ticks = 0;
                 ++g_arp_stats.lookups_miss;
                 return nullptr;
             }
+            if (out_entry != nullptr)
+                *out_entry = entry;
             ++g_arp_stats.lookups_hit;
-            return &e;
+            return &entry;
         }
-        link = &e.next_idx;
+        link = &entry.next_idx;
     }
     ++g_arp_stats.lookups_miss;
     return nullptr;
 }
+
+} // namespace
 
 void ArpInsert(u32 iface_index, Ipv4Address ip, MacAddress mac)
 {
@@ -1044,6 +1323,10 @@ void ArpInsert(u32 iface_index, Ipv4Address ip, MacAddress mac)
     const u64 binding_generation = InterfaceGenerationRead(iface_index);
     if (!InterfaceGenerationIsOpen(iface_index, binding_generation))
         return;
+    const InterfaceOperationGuard interface_guard(iface_index, binding_generation);
+    if (!interface_guard)
+        return;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_arp_lock);
 
     // Refresh an existing entry if it's already on this bucket's chain.
     //
@@ -1078,6 +1361,7 @@ void ArpInsert(u32 iface_index, Ipv4Address ip, MacAddress mac)
             e.mac = mac;
             e.expiry_ticks = now + kArpEntryTtlTicks;
             ++g_arp_stats.inserts;
+            sync::SpinLockRelease(g_arp_lock, flags);
             return;
         }
     }
@@ -1088,7 +1372,7 @@ void ArpInsert(u32 iface_index, Ipv4Address ip, MacAddress mac)
     for (u32 i = 0; i < kArpCacheCap; ++i)
     {
         if (g_arp_cache[i].expiry_ticks == 0 || g_arp_cache[i].expiry_ticks <= now ||
-            !InterfaceGenerationIsOpen(g_arp_cache[i].iface_index, g_arp_cache[i].binding_generation))
+            (g_arp_cache[i].iface_index == iface_index && g_arp_cache[i].binding_generation != binding_generation))
         {
             free_idx = static_cast<u8>(i);
             break;
@@ -1134,22 +1418,44 @@ void ArpInsert(u32 iface_index, Ipv4Address ip, MacAddress mac)
     e.next_idx = g_arp_hash_heads[h];
     g_arp_hash_heads[h] = free_idx;
     ++g_arp_stats.inserts;
+    sync::SpinLockRelease(g_arp_lock, flags);
 }
+
+namespace
+{
+
+void ArpRetireBinding(NetInterfaceBinding binding)
+{
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_arp_lock);
+    for (u32 i = 0; i < kArpCacheCap; ++i)
+    {
+        ArpEntry& entry = g_arp_cache[i];
+        if (entry.expiry_ticks == 0 || entry.iface_index != binding.iface_index ||
+            entry.binding_generation != binding.generation)
+            continue;
+        ArpUnlinkFromBucket(static_cast<u8>(i), ArpHash(entry.iface_index, entry.ip));
+        entry = {};
+        entry.next_idx = kArpEntryNone;
+    }
+    sync::SpinLockRelease(g_arp_lock, flags);
+}
+
+} // namespace
 
 bool ArpHandleIncoming(u32 iface_index, const void* frame, u64 len)
 {
-    ++g_arp_stats.rx_packets;
+    ArpStatIncrement(g_arp_stats.rx_packets);
     // Minimum: Ethernet header (14) + ARP payload (28) = 42 bytes.
     if (frame == nullptr || len < 42)
     {
-        ++g_arp_stats.rx_rejects;
+        ArpStatIncrement(g_arp_stats.rx_rejects);
         return false;
     }
     const auto* eth = static_cast<const u8*>(frame);
     const u16 ether_type = u16(eth[12]) << 8 | u16(eth[13]);
     if (ether_type != kEtherTypeArp)
     {
-        ++g_arp_stats.rx_rejects;
+        ArpStatIncrement(g_arp_stats.rx_rejects);
         return false;
     }
     const u8* arp = eth + 14;
@@ -1161,7 +1467,7 @@ bool ArpHandleIncoming(u32 iface_index, const void* frame, u64 len)
     // Only IPv4-over-Ethernet requests + replies are meaningful.
     if (htype != 1 || ptype != kEtherTypeIpv4 || hlen != 6 || plen != 4)
     {
-        ++g_arp_stats.rx_rejects;
+        ArpStatIncrement(g_arp_stats.rx_rejects);
         return false;
     }
     MacAddress sha = {};
@@ -1235,7 +1541,10 @@ bool ArpHandleIncoming(u32 iface_index, const void* frame, u64 len)
 
 ArpStats ArpStatsRead()
 {
-    return g_arp_stats;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_arp_lock);
+    const ArpStats stats = g_arp_stats;
+    sync::SpinLockRelease(g_arp_lock, flags);
+    return stats;
 }
 
 u16 Ipv4HeaderChecksum(const void* buf, u64 len)
@@ -1261,17 +1570,17 @@ bool Ipv4HeaderValid(const void* buf, u64 len)
 bool Ipv4HandleIncoming(u32 iface_index, const void* frame, u64 len)
 {
     (void)iface_index;
-    ++g_ipv4_stats.rx_packets;
+    Ipv4StatIncrement(&Ipv4Stats::rx_packets);
     if (frame == nullptr || len < 14 + sizeof(Ipv4Header))
     {
-        ++g_ipv4_stats.rx_bad_length;
+        Ipv4StatIncrement(&Ipv4Stats::rx_bad_length);
         return false;
     }
     const auto* eth = static_cast<const u8*>(frame);
     const u16 ether_type = (u16(eth[12]) << 8) | u16(eth[13]);
     if (ether_type != kEtherTypeIpv4)
     {
-        ++g_ipv4_stats.rx_bad_length;
+        Ipv4StatIncrement(&Ipv4Stats::rx_bad_length);
         return false;
     }
     const u8* ip = eth + 14;
@@ -1280,23 +1589,23 @@ bool Ipv4HandleIncoming(u32 iface_index, const void* frame, u64 len)
     const u8 ihl = ip[0] & 0x0F;
     if (version != 4)
     {
-        ++g_ipv4_stats.rx_bad_version;
+        Ipv4StatIncrement(&Ipv4Stats::rx_bad_version);
         return false;
     }
     if (ihl < 5 || u64(ihl) * 4 > ip_len)
     {
-        ++g_ipv4_stats.rx_bad_ihl;
+        Ipv4StatIncrement(&Ipv4Stats::rx_bad_ihl);
         return false;
     }
     const u16 total_len = (u16(ip[2]) << 8) | u16(ip[3]);
     if (total_len > ip_len)
     {
-        ++g_ipv4_stats.rx_bad_length;
+        Ipv4StatIncrement(&Ipv4Stats::rx_bad_length);
         return false;
     }
     if (Ipv4HeaderChecksum(ip, u64(ihl) * 4) != 0)
     {
-        ++g_ipv4_stats.rx_bad_checksum;
+        Ipv4StatIncrement(&Ipv4Stats::rx_bad_checksum);
         return false;
     }
     // Firewall ingress check. Parse the 5-tuple needed by the
@@ -1351,7 +1660,7 @@ bool Ipv4HandleIncoming(u32 iface_index, const void* frame, u64 len)
     {
     case kIpProtoUdp:
     {
-        ++g_ipv4_stats.rx_udp;
+        Ipv4StatIncrement(&Ipv4Stats::rx_udp);
         // Dispatch to UDP layer. UDP header starts at ip +
         // ihl*4 and is always 8 bytes. Payload follows.
         const u64 ip_header_bytes = u64(ihl) * 4;
@@ -1371,7 +1680,7 @@ bool Ipv4HandleIncoming(u32 iface_index, const void* frame, u64 len)
     }
     case kIpProtoTcp:
     {
-        ++g_ipv4_stats.rx_tcp;
+        Ipv4StatIncrement(&Ipv4Stats::rx_tcp);
         // Parse + dispatch to the passive TCP handler. TCP starts
         // at the end of the IPv4 options (IHL × 4). Peer MAC is
         // whatever the ethernet header had as src.
@@ -1394,7 +1703,7 @@ bool Ipv4HandleIncoming(u32 iface_index, const void* frame, u64 len)
     }
     case kIpProtoIcmp:
     {
-        ++g_ipv4_stats.rx_icmp;
+        Ipv4StatIncrement(&Ipv4Stats::rx_icmp);
         // ICMP echo-reply path — only fire if this iface is bound
         // and the IPv4 destination matches our address (we don't
         // reply on behalf of other hosts). ICMP starts after the
@@ -1417,28 +1726,31 @@ bool Ipv4HandleIncoming(u32 iface_index, const void* frame, u64 len)
         // Echo Reply (type=0) — match against the pending ping
         // request. If id + seq match, stash the reply arrival
         // tick so the shell's wait loop can print the RTT.
-        if (icmp[0] == 0x00 && g_ping_pending && g_ping_iface_index == iface_index &&
-            g_ping_binding_generation == operation.generation)
+        if (icmp[0] == 0x00)
         {
             const u16 id = (u16(icmp[4]) << 8) | u16(icmp[5]);
             const u16 seq = (u16(icmp[6]) << 8) | u16(icmp[7]);
-            if (id == g_ping_id && seq == g_ping_seq)
+            Ipv4Address src_ip = {};
+            for (u64 i = 0; i < 4; ++i)
+                src_ip.octets[i] = ip[12 + i];
+            const u64 reply_ticks = NowTicks();
+            const sync::IrqFlags ping_flags = sync::SpinLockAcquire(g_icmp_lock);
+            if (g_ping_pending && g_ping_iface_index == iface_index &&
+                g_ping_binding_generation == operation.generation && id == g_ping_id && seq == g_ping_seq)
             {
-                Ipv4Address src_ip = {};
-                for (u64 i = 0; i < 4; ++i)
-                    src_ip.octets[i] = ip[12 + i];
-                g_ping_reply_ticks = NowTicks();
+                g_ping_reply_ticks = reply_ticks;
                 g_ping_reply_ip = src_ip;
                 g_ping_replied = true;
                 ++g_icmp_stats.echo_replies_rx;
             }
+            sync::SpinLockRelease(g_icmp_lock, ping_flags);
             break;
         }
 
         if (icmp[0] != 0x08 /* Echo Request */)
             break;
 
-        ++g_icmp_stats.echo_requests_rx;
+        IcmpStatIncrement(&IcmpStats::echo_requests_rx);
 
         // Build the reply into a stack buffer. Size = 14 (ethernet)
         // + total_len (copy of IPv4 + ICMP). Cap at the max ethernet
@@ -1491,16 +1803,16 @@ bool Ipv4HandleIncoming(u32 iface_index, const void* frame, u64 len)
 
         if (IfaceTx(iface_index, reply, reply_len))
         {
-            ++g_icmp_stats.echo_replies_tx;
+            IcmpStatIncrement(&IcmpStats::echo_replies_tx);
         }
         else
         {
-            ++g_icmp_stats.tx_failures;
+            IcmpStatIncrement(&IcmpStats::tx_failures);
         }
         break;
     }
     default:
-        ++g_ipv4_stats.rx_other_proto;
+        Ipv4StatIncrement(&Ipv4Stats::rx_other_proto);
         break;
     }
     return true;
@@ -1508,12 +1820,18 @@ bool Ipv4HandleIncoming(u32 iface_index, const void* frame, u64 len)
 
 Ipv4Stats Ipv4StatsRead()
 {
-    return g_ipv4_stats;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_ipv4_stats_lock);
+    const Ipv4Stats stats = g_ipv4_stats;
+    sync::SpinLockRelease(g_ipv4_stats_lock, flags);
+    return stats;
 }
 
 IcmpStats IcmpStatsRead()
 {
-    return g_icmp_stats;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_icmp_lock);
+    const IcmpStats stats = g_icmp_stats;
+    sync::SpinLockRelease(g_icmp_lock, flags);
+    return stats;
 }
 
 // ---------------------------------------------------------------
@@ -1551,7 +1869,7 @@ u16 UdpChecksum(Ipv4Address src, Ipv4Address dst, const u8* udp, u64 udp_len)
 
 void NetUdpDispatch(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, const void* payload, u64 len)
 {
-    ++g_udp_stats.rx_packets;
+    UdpStatIncrement(g_udp_stats.rx_packets);
     // Drop frames whose iface_index is outside our interface table —
     // every UDP handler indexes g_interfaces[iface_index] without
     // its own bounds check, and the IP RX path does not gate UDP
@@ -1560,14 +1878,14 @@ void NetUdpDispatch(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_p
     // alias into adjacent kernel state.
     if (iface_index >= kMaxInterfaces)
     {
-        ++g_udp_stats.rx_no_port;
+        UdpStatIncrement(g_udp_stats.rx_no_port);
         return;
     }
     // A null payload with a non-zero len would be a driver bug —
     // refuse rather than walk a null pointer in the handler.
     if (payload == nullptr && len != 0)
     {
-        ++g_udp_stats.rx_no_port;
+        UdpStatIncrement(g_udp_stats.rx_no_port);
         return;
     }
     // Sockets first — once a userland process binds a UDP port via
@@ -1576,50 +1894,25 @@ void NetUdpDispatch(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_p
     // DNS / NTP) and only fires if no socket consumed the datagram.
     if (SocketUdpDispatch(iface_index, src_ip, src_port, dst_port, payload, len))
         return;
-    for (const UdpBinding& b : g_udp_bindings)
+    UdpDispatchSnapshot snapshot{};
+    if (!UdpBindingAcquire(dst_port, snapshot))
     {
-        if (b.in_use && b.port == dst_port && b.handler != nullptr)
-        {
-            b.handler(iface_index, src_ip, src_port, dst_port, payload, len);
-            return;
-        }
+        UdpStatIncrement(g_udp_stats.rx_no_port);
+        return;
     }
-    ++g_udp_stats.rx_no_port;
+    snapshot.handler(iface_index, src_ip, src_port, dst_port, payload, len);
+    UdpBindingRelease(snapshot.receipt);
 }
 
 bool NetUdpBindRx(u16 local_port, UdpRxFn handler)
 {
-    // Unbind request: clear any slot holding this port.
     if (handler == nullptr)
     {
-        for (UdpBinding& b : g_udp_bindings)
-        {
-            if (b.in_use && b.port == local_port)
-            {
-                b.in_use = false;
-                b.port = 0;
-                b.handler = nullptr;
-            }
-        }
+        UdpBindingUnbindPort(local_port);
         return true;
     }
-    // Reject a duplicate binding.
-    for (const UdpBinding& b : g_udp_bindings)
-    {
-        if (b.in_use && b.port == local_port)
-            return false;
-    }
-    for (UdpBinding& b : g_udp_bindings)
-    {
-        if (!b.in_use)
-        {
-            b.in_use = true;
-            b.port = local_port;
-            b.handler = handler;
-            return true;
-        }
-    }
-    return false; // table full
+    UdpBindingReceipt receipt = kInvalidUdpBindingReceipt;
+    return UdpBindingBind(local_port, handler, &receipt);
 }
 
 bool NetUdpSend(u32 iface_index, const MacAddress& dst_mac, Ipv4Address dst_ip, u16 dst_port, Ipv4Address src_ip,
@@ -1632,7 +1925,7 @@ bool NetUdpSend(u32 iface_index, const MacAddress& dst_mac, Ipv4Address dst_ip, 
     const u64 frame_len = 14 + 20 + 8 + payload_len;
     if (frame_len > kEthFrameMaxBytes || (payload == nullptr && payload_len != 0))
     {
-        ++g_udp_stats.tx_failures;
+        UdpStatIncrement(g_udp_stats.tx_failures);
         return false;
     }
     // Same stack-buffer trick as the ICMP reply: leave uninitialized
@@ -1695,16 +1988,19 @@ bool NetUdpSend(u32 iface_index, const MacAddress& dst_mac, Ipv4Address dst_ip, 
 
     if (!IfaceTx(iface_index, frame, frame_len))
     {
-        ++g_udp_stats.tx_failures;
+        UdpStatIncrement(g_udp_stats.tx_failures);
         return false;
     }
-    ++g_udp_stats.tx_packets;
+    UdpStatIncrement(g_udp_stats.tx_packets);
     return true;
 }
 
 UdpStats UdpStatsRead()
 {
-    return g_udp_stats;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_udp_lock);
+    const UdpStats stats = g_udp_stats;
+    sync::SpinLockRelease(g_udp_lock, flags);
+    return stats;
 }
 
 // ---------------------------------------------------------------
@@ -1820,36 +2116,46 @@ void DhcpBuildPayload(u8* buf, u64 cap, u8 msg_type, u32 xid, const MacAddress& 
     buf[o++] = kDhcpOptEnd;
 }
 
-void DhcpSendDiscover(u32 iface_index)
+struct DhcpTxSnapshot
 {
-    const DhcpState& st = g_dhcp[iface_index];
-    const InterfaceOperationGuard interface_guard(iface_index, st.binding_generation);
+    NetInterfaceBinding binding;
+    u64 transaction;
+    u32 xid;
+    Ipv4Address offered_ip;
+    Ipv4Address server_ip;
+};
+
+bool DhcpSendDiscover(const DhcpTxSnapshot& state)
+{
+    const InterfaceOperationGuard interface_guard(state.binding.iface_index, state.binding.generation);
     if (!interface_guard)
-        return;
+        return false;
     const InterfaceOperation& operation = interface_guard.operation();
     u8 payload[kDhcpFrameBytes];
-    DhcpBuildPayload(payload, sizeof(payload), kDhcpMsgDiscover, st.xid, operation.mac, false, {}, {});
+    DhcpBuildPayload(payload, sizeof(payload), kDhcpMsgDiscover, state.xid, operation.mac, false, {}, {});
     const MacAddress bcast_mac{{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}};
     const Ipv4Address bcast_ip{{0xFF, 0xFF, 0xFF, 0xFF}};
     const Ipv4Address any_ip{{0, 0, 0, 0}};
-    NetUdpSend(iface_index, bcast_mac, bcast_ip, /*dst_port=*/67, any_ip, /*src_port=*/68, payload, sizeof(payload));
+    const bool sent = NetUdpSend(state.binding.iface_index, bcast_mac, bcast_ip, /*dst_port=*/67, any_ip,
+                                 /*src_port=*/68, payload, sizeof(payload));
     arch::SerialWrite("[dhcp] DISCOVER sent\n");
+    return sent;
 }
 
-void DhcpSendRequest(u32 iface_index)
+bool DhcpSendRequest(const DhcpTxSnapshot& state)
 {
-    const DhcpState& st = g_dhcp[iface_index];
-    const InterfaceOperationGuard interface_guard(iface_index, st.binding_generation);
+    const InterfaceOperationGuard interface_guard(state.binding.iface_index, state.binding.generation);
     if (!interface_guard)
-        return;
+        return false;
     const InterfaceOperation& operation = interface_guard.operation();
     u8 payload[kDhcpFrameBytes];
-    DhcpBuildPayload(payload, sizeof(payload), kDhcpMsgRequest, st.xid, operation.mac, true, st.offered_ip,
-                     st.server_ip);
+    DhcpBuildPayload(payload, sizeof(payload), kDhcpMsgRequest, state.xid, operation.mac, true, state.offered_ip,
+                     state.server_ip);
     const MacAddress bcast_mac{{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}};
     const Ipv4Address bcast_ip{{0xFF, 0xFF, 0xFF, 0xFF}};
     const Ipv4Address any_ip{{0, 0, 0, 0}};
-    NetUdpSend(iface_index, bcast_mac, bcast_ip, /*dst_port=*/67, any_ip, /*src_port=*/68, payload, sizeof(payload));
+    const bool sent = NetUdpSend(state.binding.iface_index, bcast_mac, bcast_ip, /*dst_port=*/67, any_ip,
+                                 /*src_port=*/68, payload, sizeof(payload));
     {
         arch::SerialLineGuard line;
         arch::SerialWrite("[dhcp] REQUEST sent for ");
@@ -1857,31 +2163,50 @@ void DhcpSendRequest(u32 iface_index)
         {
             if (i != 0)
                 arch::SerialWrite(".");
-            arch::SerialWriteHex(st.offered_ip.octets[i]);
+            arch::SerialWriteHex(state.offered_ip.octets[i]);
         }
         arch::SerialWrite("\n");
     }
+    return sent;
 }
 
 } // namespace
 
 void DhcpOnUdp(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, const void* payload, u64 len)
 {
-    (void)src_port;
-    (void)dst_port;
+    // Relay agents may source the UDP datagram from an address other than the
+    // selected server; DHCP option 54 is the canonical server identity below.
+    (void)src_ip;
     if (iface_index >= kMaxInterfaces)
         return;
-    DhcpState& st = g_dhcp[iface_index];
-    if (!InterfaceGenerationIsOpen(iface_index, st.binding_generation))
+    // DHCP server replies are 67 -> 68. The UDP demux is shared by all
+    // interfaces, so accepting an arbitrary source/destination port would let
+    // unrelated traffic drive the client state machine.
+    if (src_port != 67 || dst_port != 68)
         return;
     if (payload == nullptr || len < kDhcpFrameBytes)
         return;
-    const auto* buf = static_cast<const u8*>(payload);
-    if (buf[0] != kDhcpOpReply)
+
+    DhcpState snapshot{};
+    sync::IrqFlags state_flags = sync::SpinLockAcquire(g_dhcp_lock);
+    snapshot = g_dhcp[iface_index];
+    sync::SpinLockRelease(g_dhcp_lock, state_flags);
+    if (snapshot.stage != DhcpState::Stage::Discovering && snapshot.stage != DhcpState::Stage::Requesting)
         return;
+    const InterfaceOperationGuard interface_guard(iface_index, snapshot.binding_generation);
+    if (!interface_guard)
+        return;
+    const InterfaceOperation& operation = interface_guard.operation();
+
+    const auto* buf = static_cast<const u8*>(payload);
+    if (buf[0] != kDhcpOpReply || buf[1] != 1 /* Ethernet */ || buf[2] != 6 /* MAC bytes */)
+        return;
+    for (u32 i = 0; i < 6; ++i)
+        if (buf[28 + i] != operation.mac.octets[i])
+            return;
     // Check xid matches this interface's in-flight transaction.
     const u32 xid = (u32(buf[4]) << 24) | (u32(buf[5]) << 16) | (u32(buf[6]) << 8) | u32(buf[7]);
-    if (xid != st.xid)
+    if (xid != snapshot.xid)
         return;
     // Magic cookie at offset 236.
     if (buf[236] != 0x63 || buf[237] != 0x82 || buf[238] != 0x53 || buf[239] != 0x63)
@@ -1898,43 +2223,110 @@ void DhcpOnUdp(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, 
     Ipv4Address yiaddr = {};
     for (u64 i = 0; i < 4; ++i)
         yiaddr.octets[i] = buf[16 + i];
-    Ipv4Address server_id = src_ip;
-    if (DhcpFindOption(opts, opts_len, kDhcpOptServerId, &v, &vl) && vl == 4)
-    {
-        for (u64 i = 0; i < 4; ++i)
-            server_id.octets[i] = v[i];
-    }
+    if (IsZeroIp(yiaddr))
+        return;
+    if (!DhcpFindOption(opts, opts_len, kDhcpOptServerId, &v, &vl) || vl != 4)
+        return;
+    Ipv4Address server_id = {};
+    for (u64 i = 0; i < 4; ++i)
+        server_id.octets[i] = v[i];
+    if (IsZeroIp(server_id))
+        return;
 
-    if (msg == kDhcpMsgOffer && st.stage == DhcpState::Stage::Discovered)
+    if (msg == kDhcpMsgOffer && snapshot.stage == DhcpState::Stage::Discovering)
     {
-        st.offered_ip = yiaddr;
-        st.server_ip = server_id;
-        DhcpSendRequest(iface_index);
+        DhcpTxSnapshot request{};
+        state_flags = sync::SpinLockAcquire(g_dhcp_lock);
+        DhcpState& current = g_dhcp[iface_index];
+        if (current.transaction != snapshot.transaction || current.binding_generation != snapshot.binding_generation ||
+            current.xid != snapshot.xid || current.stage != DhcpState::Stage::Discovering)
+        {
+            sync::SpinLockRelease(g_dhcp_lock, state_flags);
+            return;
+        }
+        current.offered_ip = yiaddr;
+        current.server_ip = server_id;
+        current.stage = DhcpState::Stage::Requesting;
+        request = DhcpTxSnapshot{.binding = NetInterfaceBinding{iface_index, current.binding_generation},
+                                 .transaction = current.transaction,
+                                 .xid = current.xid,
+                                 .offered_ip = current.offered_ip,
+                                 .server_ip = current.server_ip};
+        sync::SpinLockRelease(g_dhcp_lock, state_flags);
+
+        if (!DhcpSendRequest(request))
+        {
+            state_flags = sync::SpinLockAcquire(g_dhcp_lock);
+            DhcpState& failed = g_dhcp[iface_index];
+            if (failed.transaction == request.transaction && failed.binding_generation == request.binding.generation &&
+                failed.stage == DhcpState::Stage::Requesting)
+            {
+                failed = {};
+                failed.iface_index = iface_index;
+            }
+            sync::SpinLockRelease(g_dhcp_lock, state_flags);
+        }
         return;
     }
-    if (msg == kDhcpMsgAck && (st.stage == DhcpState::Stage::Discovered || st.stage == DhcpState::Stage::Acked))
+    if (msg == kDhcpMsgAck && snapshot.stage == DhcpState::Stage::Requesting)
     {
-        st.stage = DhcpState::Stage::Acked;
-        st.lease.valid = true;
-        st.lease.ip = yiaddr;
-        st.lease.server = server_id;
+        // This client implements SELECTING only: an ACK is valid solely for
+        // the exact server and address chosen from the preceding OFFER.
+        if (!IpEq(server_id, snapshot.server_ip) || !IpEq(yiaddr, snapshot.offered_ip))
+            return;
+        DhcpLease lease{};
+        lease.valid = true;
+        lease.ip = yiaddr;
+        lease.server = server_id;
         if (DhcpFindOption(opts, opts_len, kDhcpOptRouter, &v, &vl) && vl >= 4)
             for (u64 i = 0; i < 4; ++i)
-                st.lease.router.octets[i] = v[i];
+                lease.router.octets[i] = v[i];
         if (DhcpFindOption(opts, opts_len, kDhcpOptDns, &v, &vl) && vl >= 4)
             for (u64 i = 0; i < 4; ++i)
-                st.lease.dns.octets[i] = v[i];
+                lease.dns.octets[i] = v[i];
         if (DhcpFindOption(opts, opts_len, kDhcpOptLeaseTime, &v, &vl) && vl == 4)
-            st.lease.lease_secs = (u32(v[0]) << 24) | (u32(v[1]) << 16) | (u32(v[2]) << 8) | u32(v[3]);
+            lease.lease_secs = (u32(v[0]) << 24) | (u32(v[1]) << 16) | (u32(v[2]) << 8) | u32(v[3]);
+
+        state_flags = sync::SpinLockAcquire(g_dhcp_lock);
+        DhcpState& current = g_dhcp[iface_index];
+        if (current.transaction != snapshot.transaction || current.binding_generation != snapshot.binding_generation ||
+            current.xid != snapshot.xid || current.stage != DhcpState::Stage::Requesting ||
+            !IpEq(current.server_ip, snapshot.server_ip) || !IpEq(current.offered_ip, snapshot.offered_ip))
+        {
+            sync::SpinLockRelease(g_dhcp_lock, state_flags);
+            return;
+        }
+        current.stage = DhcpState::Stage::CommittingAck;
+        current.lease = lease;
+        sync::SpinLockRelease(g_dhcp_lock, state_flags);
 
         // Rebind the interface's IP so subsequent outbound traffic
         // uses the leased address.
         const sync::IrqFlags flags = sync::SpinLockAcquire(g_interface_lock);
         Interface& ifc = g_interfaces[iface_index];
-        if (ifc.bound && InterfaceGenerationRead(iface_index) == st.binding_generation &&
-            interface_lifetime::IsOpen(ifc.operations))
+        const bool rebound = ifc.bound && InterfaceGenerationRead(iface_index) == snapshot.binding_generation &&
+                             interface_lifetime::IsOpen(ifc.operations);
+        if (rebound)
             ifc.ip = yiaddr;
         sync::SpinLockRelease(g_interface_lock, flags);
+
+        state_flags = sync::SpinLockAcquire(g_dhcp_lock);
+        DhcpState& committed = g_dhcp[iface_index];
+        if (committed.transaction == snapshot.transaction &&
+            committed.binding_generation == snapshot.binding_generation &&
+            committed.stage == DhcpState::Stage::CommittingAck)
+        {
+            if (rebound)
+                committed.stage = DhcpState::Stage::Acked;
+            else
+            {
+                committed = {};
+                committed.iface_index = iface_index;
+            }
+        }
+        sync::SpinLockRelease(g_dhcp_lock, state_flags);
+        if (!rebound)
+            return;
 
         {
             arch::SerialLineGuard line;
@@ -1950,10 +2342,10 @@ void DhcpOnUdp(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, 
             {
                 if (i != 0)
                     arch::SerialWrite(".");
-                arch::SerialWriteHex(st.lease.router.octets[i]);
+                arch::SerialWriteHex(lease.router.octets[i]);
             }
             arch::SerialWrite(" lease_secs=");
-            arch::SerialWriteHex(st.lease.lease_secs);
+            arch::SerialWriteHex(lease.lease_secs);
             arch::SerialWrite("\n");
         }
     }
@@ -1965,21 +2357,56 @@ bool DhcpStart(u32 iface_index)
     if (!interface_guard)
         return false;
     const InterfaceOperation& operation = interface_guard.operation();
-    DhcpState& st = g_dhcp[iface_index];
-    if (st.stage == DhcpState::Stage::Discovered)
-        return false; // already in flight on THIS interface
 
-    st = {};
-    st.iface_index = iface_index;
-    st.binding_generation = operation.generation;
-    // Deterministic xid derived from MAC + a constant so repeated
-    // starts don't reuse xid=0 (DHCP servers filter that).
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_dhcp_lock);
+    DhcpState& state = g_dhcp[iface_index];
+    if (state.stage == DhcpState::Stage::Discovering || state.stage == DhcpState::Stage::Requesting ||
+        state.stage == DhcpState::Stage::CommittingAck)
+    {
+        sync::SpinLockRelease(g_dhcp_lock, flags);
+        return false;
+    }
+
     const MacAddress& mac = operation.mac;
-    st.xid = 0xC05A0000u ^
-             ((u32(mac.octets[2]) << 24) | (u32(mac.octets[3]) << 16) | (u32(mac.octets[4]) << 8) | u32(mac.octets[5]));
-    st.stage = DhcpState::Stage::Discovered;
-    NetUdpBindRx(/*local_port=*/68, DhcpOnUdp);
-    DhcpSendDiscover(iface_index);
+    u32& next_xid = g_dhcp_next_xid[iface_index];
+    if (next_xid == 0)
+    {
+        next_xid = 0xC05A0000u ^ ((u32(mac.octets[2]) << 24) | (u32(mac.octets[3]) << 16) | (u32(mac.octets[4]) << 8) |
+                                  u32(mac.octets[5]));
+    }
+    next_xid += 0x9E3779B9u;
+    if (next_xid == 0)
+        ++next_xid;
+    u64& next_transaction = g_dhcp_next_transaction[iface_index];
+    ++next_transaction;
+    if (next_transaction == 0)
+        ++next_transaction;
+
+    state = {};
+    state.stage = DhcpState::Stage::Discovering;
+    state.iface_index = iface_index;
+    state.binding_generation = operation.generation;
+    state.transaction = next_transaction;
+    state.xid = next_xid;
+    const DhcpTxSnapshot snapshot{.binding = NetInterfaceBinding{iface_index, operation.generation},
+                                  .transaction = state.transaction,
+                                  .xid = state.xid,
+                                  .offered_ip = {},
+                                  .server_ip = {}};
+    sync::SpinLockRelease(g_dhcp_lock, flags);
+
+    if (!NetUdpBindRx(/*local_port=*/68, DhcpOnUdp) || !DhcpSendDiscover(snapshot))
+    {
+        const sync::IrqFlags rollback_flags = sync::SpinLockAcquire(g_dhcp_lock);
+        DhcpState& failed = g_dhcp[iface_index];
+        if (failed.transaction == snapshot.transaction && failed.binding_generation == snapshot.binding.generation)
+        {
+            failed = {};
+            failed.iface_index = iface_index;
+        }
+        sync::SpinLockRelease(g_dhcp_lock, rollback_flags);
+        return false;
+    }
     return true;
 }
 
@@ -1987,10 +2414,24 @@ DhcpLease DhcpLeaseRead(u32 iface_index)
 {
     if (iface_index >= kMaxInterfaces)
         return DhcpLease{};
-    const DhcpState& state = g_dhcp[iface_index];
-    if (!InterfaceGenerationIsOpen(iface_index, state.binding_generation))
+
+    sync::IrqFlags flags = sync::SpinLockAcquire(g_dhcp_lock);
+    const DhcpState snapshot = g_dhcp[iface_index];
+    sync::SpinLockRelease(g_dhcp_lock, flags);
+    if (snapshot.stage != DhcpState::Stage::Acked || !snapshot.lease.valid)
         return DhcpLease{};
-    return state.lease;
+    const InterfaceOperationGuard interface_guard(iface_index, snapshot.binding_generation);
+    if (!interface_guard)
+        return DhcpLease{};
+
+    flags = sync::SpinLockAcquire(g_dhcp_lock);
+    const DhcpState& current = g_dhcp[iface_index];
+    const bool unchanged = current.transaction == snapshot.transaction &&
+                           current.binding_generation == snapshot.binding_generation &&
+                           current.stage == DhcpState::Stage::Acked && current.lease.valid;
+    const DhcpLease lease = unchanged ? current.lease : DhcpLease{};
+    sync::SpinLockRelease(g_dhcp_lock, flags);
+    return lease;
 }
 
 DhcpLease DhcpLeaseRead()
@@ -1999,8 +2440,11 @@ DhcpLease DhcpLeaseRead()
     // so the wired NIC (iface 0) is preferred over loopback/wireless
     // test interfaces when both are up.
     for (u32 i = 0; i < kMaxInterfaces; ++i)
-        if (g_dhcp[i].lease.valid && InterfaceGenerationIsOpen(i, g_dhcp[i].binding_generation))
-            return g_dhcp[i].lease;
+    {
+        const DhcpLease lease = DhcpLeaseRead(i);
+        if (lease.valid)
+            return lease;
+    }
     return DhcpLease{};
 }
 
@@ -2014,8 +2458,8 @@ bool NetIcmpSendEcho(u32 iface_index, Ipv4Address dst_ip, u16 id, u16 seq)
     if (!interface_guard)
         return false;
     const InterfaceOperation& operation = interface_guard.operation();
-    const ArpEntry* arp = ArpLookup(iface_index, dst_ip);
-    if (arp == nullptr)
+    ArpEntry arp{};
+    if (!ArpLookup(iface_index, dst_ip, &arp) || arp.binding_generation != operation.generation)
         return false;
 
     // Build ethernet + IPv4 + ICMP echo request (14 + 20 + 8 + 32).
@@ -2023,7 +2467,7 @@ bool NetIcmpSendEcho(u32 iface_index, Ipv4Address dst_ip, u16 id, u16 seq)
     u8 frame[14 + 20 + 8 + kPayloadBytes];
     // Ethernet.
     for (u64 i = 0; i < 6; ++i)
-        frame[i] = arp->mac.octets[i];
+        frame[i] = arp.mac.octets[i];
     for (u64 i = 0; i < 6; ++i)
         frame[6 + i] = operation.mac.octets[i];
     frame[12] = 0x08;
@@ -2066,36 +2510,46 @@ bool NetIcmpSendEcho(u32 iface_index, Ipv4Address dst_ip, u16 id, u16 seq)
     icmp[2] = u8(icmp_ck >> 8);
     icmp[3] = u8(icmp_ck & 0xFF);
 
-    g_ping_iface_index = iface_index;
-    g_ping_binding_generation = operation.generation;
+    sync::IrqFlags ping_flags = sync::SpinLockAcquire(g_icmp_lock);
+    if (g_ping_pending && g_ping_id == id && g_ping_seq == seq)
+    {
+        g_ping_iface_index = iface_index;
+        g_ping_binding_generation = operation.generation;
+    }
+    sync::SpinLockRelease(g_icmp_lock, ping_flags);
     if (!IfaceTx(iface_index, frame, sizeof(frame)))
     {
-        ++g_icmp_stats.tx_failures;
+        IcmpStatIncrement(&IcmpStats::tx_failures);
         return false;
     }
-    ++g_icmp_stats.echo_requests_tx;
+    IcmpStatIncrement(&IcmpStats::echo_requests_tx);
     return true;
 }
 
 void NetPingArm(u16 id, u16 seq)
 {
+    const u64 send_ticks = NowTicks();
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_icmp_lock);
     g_ping_pending = true;
     g_ping_replied = false;
     g_ping_id = id;
     g_ping_seq = seq;
-    g_ping_send_ticks = NowTicks();
+    g_ping_send_ticks = send_ticks;
     g_ping_reply_ticks = 0;
     g_ping_reply_ip = {};
     g_ping_iface_index = kInvalidNetInterfaceIndex;
     g_ping_binding_generation = 0;
+    sync::SpinLockRelease(g_icmp_lock, flags);
 }
 
 PingResult NetPingRead()
 {
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_icmp_lock);
     PingResult r = {};
     r.replied = g_ping_replied;
     r.rtt_ticks = g_ping_replied ? (g_ping_reply_ticks - g_ping_send_ticks) : 0;
     r.from = g_ping_reply_ip;
+    sync::SpinLockRelease(g_icmp_lock, flags);
     return r;
 }
 
@@ -2107,11 +2561,19 @@ namespace
 {
 
 constinit bool g_dns_pending = false;
+constinit bool g_dns_starting = false;
 constinit bool g_dns_resolved = false;
 constinit u16 g_dns_xid = 0;
 constinit Ipv4Address g_dns_result_ip = {};
 constinit u32 g_dns_iface_index = kInvalidNetInterfaceIndex;
 constinit u64 g_dns_binding_generation = 0;
+constinit u64 g_dns_transaction = 0;
+constinit u64 g_dns_next_transaction = 0;
+constinit UdpBindingReceipt g_dns_udp_binding = kInvalidUdpBindingReceipt;
+// Protects the one DNS transaction/result record. UDP binding changes, ARP
+// resolution, parsing, TX, and interface generation checks run unlocked.
+constinit sync::SpinLock g_dns_lock = {
+    .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
 
 // ML-03: source-validation + anti-spoof state. A reply is only
 // accepted when it arrives from the resolver we queried, from
@@ -2125,6 +2587,34 @@ constinit Ipv4Address g_dns_resolver_ip = {};
 // The ephemeral source port bound for the in-flight query. 0 ==
 // no port currently bound (nothing to unbind yet).
 constinit u16 g_dns_src_port = 0;
+
+struct DnsStateSnapshot
+{
+    bool starting;
+    bool pending;
+    bool resolved;
+    u64 transaction;
+    NetInterfaceBinding binding;
+    u16 xid;
+    Ipv4Address result_ip;
+    Ipv4Address resolver_ip;
+    u16 src_port;
+    UdpBindingReceipt udp_binding;
+};
+
+DnsStateSnapshot DnsStateReadLocked()
+{
+    return DnsStateSnapshot{.starting = g_dns_starting,
+                            .pending = g_dns_pending,
+                            .resolved = g_dns_resolved,
+                            .transaction = g_dns_transaction,
+                            .binding = NetInterfaceBinding{g_dns_iface_index, g_dns_binding_generation},
+                            .xid = g_dns_xid,
+                            .result_ip = g_dns_result_ip,
+                            .resolver_ip = g_dns_resolver_ip,
+                            .src_port = g_dns_src_port,
+                            .udp_binding = g_dns_udp_binding};
+}
 
 // Skip over a DNS name in the RR stream. Handles both raw label
 // sequences + RFC 1035 §4.1.4 name-compression pointers (top two
@@ -2144,25 +2634,30 @@ u64 DnsSkipName(const u8* buf, u64 offset, u64 len)
 
 void DnsOnUdp(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, const void* payload, u64 len)
 {
-    if (!g_dns_pending || iface_index != g_dns_iface_index ||
-        !InterfaceGenerationIsOpen(iface_index, g_dns_binding_generation))
+    sync::IrqFlags state_flags = sync::SpinLockAcquire(g_dns_lock);
+    const DnsStateSnapshot snapshot = DnsStateReadLocked();
+    sync::SpinLockRelease(g_dns_lock, state_flags);
+    if (!snapshot.pending || iface_index != snapshot.binding.iface_index)
+        return;
+    const InterfaceOperationGuard interface_guard(iface_index, snapshot.binding.generation);
+    if (!interface_guard)
         return;
     // ML-03: reject spoofed / off-path replies. Only accept a
     // datagram that came from the resolver we asked, from the DNS
     // service port (53), addressed to the exact random ephemeral
     // port we bound for this query. Combined with the random xid
     // check below, an attacker must guess all four to be heard.
-    if (!IpEq(src_ip, g_dns_resolver_ip))
+    if (!IpEq(src_ip, snapshot.resolver_ip))
         return;
     if (src_port != 53)
         return;
-    if (dst_port != g_dns_src_port)
+    if (dst_port != snapshot.src_port)
         return;
     if (payload == nullptr || len < 12)
         return;
     const auto* b = static_cast<const u8*>(payload);
     const u16 xid = (u16(b[0]) << 8) | u16(b[1]);
-    if (xid != g_dns_xid)
+    if (xid != snapshot.xid)
         return;
     // Flags bit 15 == 1 (response). Flags bits 3..0 = RCODE.
     const u16 flags = (u16(b[2]) << 8) | u16(b[3]);
@@ -2201,8 +2696,17 @@ void DnsOnUdp(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, c
             Ipv4Address ip = {};
             for (u64 k = 0; k < 4; ++k)
                 ip.octets[k] = b[off + k];
-            g_dns_result_ip = ip;
-            g_dns_resolved = true;
+            state_flags = sync::SpinLockAcquire(g_dns_lock);
+            const DnsStateSnapshot current = DnsStateReadLocked();
+            if (current.pending && current.transaction == snapshot.transaction &&
+                NetInterfaceBindingEqual(current.binding, snapshot.binding) && current.xid == snapshot.xid &&
+                current.src_port == snapshot.src_port && IpEq(current.resolver_ip, snapshot.resolver_ip))
+            {
+                g_dns_result_ip = ip;
+                g_dns_resolved = true;
+                g_dns_pending = false;
+            }
+            sync::SpinLockRelease(g_dns_lock, state_flags);
             return;
         }
         off += rdlen;
@@ -2255,8 +2759,11 @@ u32 EncodeDnsName(const char* name, u8* out, u32 cap)
 
 } // namespace
 
-bool NetDnsQueryA(u32 iface_index, Ipv4Address resolver_ip, const char* name)
+bool NetDnsQueryA(u32 iface_index, Ipv4Address resolver_ip, const char* name, DnsQueryReceipt* out_receipt)
 {
+    if (out_receipt == nullptr)
+        return false;
+    *out_receipt = kInvalidDnsQueryReceipt;
     const InterfaceOperationGuard interface_guard(iface_index);
     if (!interface_guard || name == nullptr)
         return false;
@@ -2264,11 +2771,9 @@ bool NetDnsQueryA(u32 iface_index, Ipv4Address resolver_ip, const char* name)
 
     // Resolve the L2 destination. First try direct resolver IP;
     // on miss, resolve and use the gateway.
-    const ArpEntry* arp = ResolveL2Destination(iface_index, resolver_ip);
     MacAddress dst_mac = {};
-    if (arp == nullptr)
+    if (!ResolveL2Destination(operation, resolver_ip, dst_mac))
         return false;
-    dst_mac = arp->mac;
 
     // Build query.
     u8 qbuf[12 + kDnsMaxName + 2 + 4];
@@ -2309,15 +2814,29 @@ bool NetDnsQueryA(u32 iface_index, Ipv4Address resolver_ip, const char* name)
     qbuf[qpos++] = 0;
     qbuf[qpos++] = 1;
 
-    g_dns_pending = true;
+    sync::IrqFlags state_flags = sync::SpinLockAcquire(g_dns_lock);
+    if (g_dns_starting)
+    {
+        sync::SpinLockRelease(g_dns_lock, state_flags);
+        return false;
+    }
+    const UdpBindingReceipt old_udp_binding = g_dns_udp_binding;
+    ++g_dns_next_transaction;
+    if (g_dns_next_transaction == 0)
+        ++g_dns_next_transaction;
+    const u64 transaction = g_dns_next_transaction;
+    g_dns_starting = true;
+    g_dns_pending = false;
     g_dns_resolved = false;
     g_dns_xid = xid;
     g_dns_result_ip = {};
     g_dns_iface_index = iface_index;
     g_dns_binding_generation = operation.generation;
-    // ML-03: remember the resolver so DnsOnUdp can source-validate
-    // the reply.
+    g_dns_transaction = transaction;
     g_dns_resolver_ip = resolver_ip;
+    g_dns_src_port = sport;
+    g_dns_udp_binding = kInvalidUdpBindingReceipt;
+    sync::SpinLockRelease(g_dns_lock, state_flags);
     // ML-03: a fresh random port each query would leak UDP demux
     // slots — the table only has kUdpBindingsMax slots and DHCP/NTP
     // already hold some, so it fills after a handful of queries and
@@ -2325,39 +2844,112 @@ bool NetDnsQueryA(u32 iface_index, Ipv4Address resolver_ip, const char* name)
     // Unbind the port the previous query bound before claiming the
     // new one, preserving the single-slot budget the old fixed-port
     // design relied on.
-    if (g_dns_src_port != 0)
-        NetUdpBindRx(g_dns_src_port, nullptr);
-    if (!NetUdpBindRx(sport, DnsOnUdp))
+    UdpBindingUnbindExact(old_udp_binding);
+    UdpBindingReceipt udp_binding = kInvalidUdpBindingReceipt;
+    if (!UdpBindingBind(sport, DnsOnUdp, &udp_binding))
     {
         // No RX slot — sending anyway would drop the reply with no
         // handler. Fail the query cleanly so the caller times out
         // and the demux table is left in a sane state.
-        g_dns_pending = false;
-        g_dns_src_port = 0;
-        g_dns_iface_index = kInvalidNetInterfaceIndex;
-        g_dns_binding_generation = 0;
+        state_flags = sync::SpinLockAcquire(g_dns_lock);
+        if (g_dns_transaction == transaction && g_dns_starting)
+        {
+            g_dns_starting = false;
+            g_dns_src_port = 0;
+            g_dns_iface_index = kInvalidNetInterfaceIndex;
+            g_dns_binding_generation = 0;
+        }
+        sync::SpinLockRelease(g_dns_lock, state_flags);
         return false;
     }
-    g_dns_src_port = sport;
+    state_flags = sync::SpinLockAcquire(g_dns_lock);
+    const bool published = g_dns_transaction == transaction && g_dns_starting && g_dns_iface_index == iface_index &&
+                           g_dns_binding_generation == operation.generation;
+    if (published)
+    {
+        g_dns_udp_binding = udp_binding;
+        g_dns_pending = true;
+        g_dns_starting = false;
+    }
+    sync::SpinLockRelease(g_dns_lock, state_flags);
+    if (!published)
+    {
+        UdpBindingUnbindExact(udp_binding);
+        return false;
+    }
 
     const bool sent = NetUdpSend(iface_index, dst_mac, resolver_ip, /*dst_port=*/53, operation.ip, sport, qbuf, qpos);
     if (!sent)
     {
-        NetUdpBindRx(sport, nullptr);
-        g_dns_pending = false;
-        g_dns_src_port = 0;
-        g_dns_iface_index = kInvalidNetInterfaceIndex;
-        g_dns_binding_generation = 0;
+        UdpBindingReceipt failed_binding = kInvalidUdpBindingReceipt;
+        state_flags = sync::SpinLockAcquire(g_dns_lock);
+        if (g_dns_transaction == transaction && g_dns_binding_generation == operation.generation)
+        {
+            failed_binding = g_dns_udp_binding;
+            g_dns_pending = false;
+            g_dns_resolved = false;
+            g_dns_udp_binding = kInvalidUdpBindingReceipt;
+            g_dns_src_port = 0;
+            g_dns_iface_index = kInvalidNetInterfaceIndex;
+            g_dns_binding_generation = 0;
+        }
+        sync::SpinLockRelease(g_dns_lock, state_flags);
+        UdpBindingUnbindExact(failed_binding);
     }
-    return sent;
+    if (!sent)
+        return false;
+
+    state_flags = sync::SpinLockAcquire(g_dns_lock);
+    const DnsStateSnapshot accepted = DnsStateReadLocked();
+    const bool still_current =
+        accepted.transaction == transaction &&
+        NetInterfaceBindingEqual(accepted.binding, NetInterfaceBinding{iface_index, operation.generation}) &&
+        (accepted.pending || accepted.resolved);
+    sync::SpinLockRelease(g_dns_lock, state_flags);
+    if (!still_current)
+        return false;
+    *out_receipt =
+        DnsQueryReceipt{.binding = NetInterfaceBinding{iface_index, operation.generation}, .transaction = transaction};
+    return true;
+}
+
+bool NetDnsQueryA(u32 iface_index, Ipv4Address resolver_ip, const char* name)
+{
+    DnsQueryReceipt receipt = kInvalidDnsQueryReceipt;
+    return NetDnsQueryA(iface_index, resolver_ip, name, &receipt);
+}
+
+DnsResult NetDnsResultRead(DnsQueryReceipt receipt)
+{
+    if (!DnsQueryReceiptIsValid(receipt))
+        return DnsResult{};
+    sync::IrqFlags flags = sync::SpinLockAcquire(g_dns_lock);
+    const DnsStateSnapshot snapshot = DnsStateReadLocked();
+    sync::SpinLockRelease(g_dns_lock, flags);
+    if (!snapshot.resolved || snapshot.transaction != receipt.transaction ||
+        !NetInterfaceBindingEqual(snapshot.binding, receipt.binding))
+        return DnsResult{};
+    const InterfaceOperationGuard interface_guard(receipt.binding.iface_index, receipt.binding.generation);
+    if (!interface_guard)
+        return DnsResult{};
+
+    flags = sync::SpinLockAcquire(g_dns_lock);
+    const DnsStateSnapshot current = DnsStateReadLocked();
+    const DnsResult result = current.resolved && current.transaction == receipt.transaction &&
+                                     NetInterfaceBindingEqual(current.binding, receipt.binding)
+                                 ? DnsResult{.resolved = true, .ip = current.result_ip}
+                                 : DnsResult{};
+    sync::SpinLockRelease(g_dns_lock, flags);
+    return result;
 }
 
 DnsResult NetDnsResultRead()
 {
-    DnsResult r = {};
-    r.resolved = g_dns_resolved;
-    r.ip = g_dns_result_ip;
-    return r;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_dns_lock);
+    const DnsStateSnapshot snapshot = DnsStateReadLocked();
+    const DnsQueryReceipt receipt{.binding = snapshot.binding, .transaction = snapshot.transaction};
+    sync::SpinLockRelease(g_dns_lock, flags);
+    return NetDnsResultRead(receipt);
 }
 
 // ---------------------------------------------------------------
@@ -2368,21 +2960,61 @@ namespace
 {
 
 constinit bool g_ntp_pending = false;
+constinit bool g_ntp_starting = false;
 constinit bool g_ntp_synced = false;
 constinit NtpResult g_ntp_result = {};
 constinit u32 g_ntp_iface_index = kInvalidNetInterfaceIndex;
 constinit u64 g_ntp_binding_generation = 0;
 constinit Ipv4Address g_ntp_server_ip = {};
+constinit u64 g_ntp_transaction = 0;
+constinit u64 g_ntp_next_transaction = 0;
+constinit u64 g_ntp_request_cookie = 0;
+constinit UdpBindingReceipt g_ntp_udp_binding = kInvalidUdpBindingReceipt;
+// Protects the one NTP transaction/result record. The fixed UDP-port drain,
+// ARP resolution, packet parsing, TX, and generation checks run unlocked.
+constinit sync::SpinLock g_ntp_lock = {
+    .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
 constexpr u16 kNtpEphemeralPort = 32123;
 // NTP epoch (1900-01-01) → Unix epoch (1970-01-01) offset in
 // seconds. 70 years × 365.25 × 86400 rounded to the right value.
 constexpr u64 kNtpToUnixEpochOffset = 2208988800ULL;
 
+struct NtpStateSnapshot
+{
+    bool starting;
+    bool pending;
+    bool synced;
+    u64 transaction;
+    NetInterfaceBinding binding;
+    Ipv4Address server_ip;
+    u64 request_cookie;
+    UdpBindingReceipt udp_binding;
+    NtpResult result;
+};
+
+NtpStateSnapshot NtpStateReadLocked()
+{
+    return NtpStateSnapshot{.starting = g_ntp_starting,
+                            .pending = g_ntp_pending,
+                            .synced = g_ntp_synced,
+                            .transaction = g_ntp_transaction,
+                            .binding = NetInterfaceBinding{g_ntp_iface_index, g_ntp_binding_generation},
+                            .server_ip = g_ntp_server_ip,
+                            .request_cookie = g_ntp_request_cookie,
+                            .udp_binding = g_ntp_udp_binding,
+                            .result = g_ntp_result};
+}
+
 void NtpOnUdp(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, const void* payload, u64 len)
 {
-    if (!g_ntp_pending || iface_index != g_ntp_iface_index ||
-        !InterfaceGenerationIsOpen(iface_index, g_ntp_binding_generation) || !IpEq(src_ip, g_ntp_server_ip) ||
+    sync::IrqFlags state_flags = sync::SpinLockAcquire(g_ntp_lock);
+    const NtpStateSnapshot snapshot = NtpStateReadLocked();
+    sync::SpinLockRelease(g_ntp_lock, state_flags);
+    if (!snapshot.pending || iface_index != snapshot.binding.iface_index || !IpEq(src_ip, snapshot.server_ip) ||
         src_port != 123 || dst_port != kNtpEphemeralPort || payload == nullptr || len < 48)
+        return;
+    const InterfaceOperationGuard interface_guard(iface_index, snapshot.binding.generation);
+    if (!interface_guard)
         return;
     const auto* b = static_cast<const u8*>(payload);
     // byte 0 low 3 bits = Mode; server replies are Mode 4.
@@ -2390,6 +3022,11 @@ void NtpOnUdp(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, c
     if (mode != 4)
         return;
     const u8 stratum = b[1];
+    u64 originate = 0;
+    for (u32 i = 0; i < 8; ++i)
+        originate = (originate << 8) | u64(b[24 + i]);
+    if (originate != snapshot.request_cookie)
+        return;
     // Transmit Timestamp — bytes 40..47. Top 32 bits = NTP seconds
     // since 1900, bottom 32 bits = fractional seconds.
     u64 ntp_secs = 0;
@@ -2398,50 +3035,103 @@ void NtpOnUdp(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, c
     u32 ntp_frac = 0;
     for (u32 i = 0; i < 4; ++i)
         ntp_frac = (ntp_frac << 8) | u32(b[44 + i]);
-    if (ntp_secs == 0)
+    if (ntp_secs < kNtpToUnixEpochOffset)
         return; // unsynchronized server
 
-    g_ntp_result.synced = true;
-    g_ntp_result.unix_secs = ntp_secs - kNtpToUnixEpochOffset;
-    g_ntp_result.fractional_secs = ntp_frac;
-    g_ntp_result.stratum = stratum;
-    g_ntp_synced = true;
+    const NtpResult result{
+        .synced = true, .unix_secs = ntp_secs - kNtpToUnixEpochOffset, .fractional_secs = ntp_frac, .stratum = stratum};
+    state_flags = sync::SpinLockAcquire(g_ntp_lock);
+    const NtpStateSnapshot current = NtpStateReadLocked();
+    if (current.pending && current.transaction == snapshot.transaction &&
+        NetInterfaceBindingEqual(current.binding, snapshot.binding) &&
+        current.request_cookie == snapshot.request_cookie && IpEq(current.server_ip, snapshot.server_ip))
+    {
+        g_ntp_result = result;
+        g_ntp_synced = true;
+        g_ntp_pending = false;
+    }
+    sync::SpinLockRelease(g_ntp_lock, state_flags);
 }
 
 } // namespace
 
-bool NetNtpQuery(u32 iface_index, Ipv4Address server_ip)
+bool NetNtpQuery(u32 iface_index, Ipv4Address server_ip, NtpQueryReceipt* out_receipt)
 {
+    if (out_receipt == nullptr)
+        return false;
+    *out_receipt = kInvalidNtpQueryReceipt;
     const InterfaceOperationGuard interface_guard(iface_index);
     if (!interface_guard)
         return false;
     const InterfaceOperation& operation = interface_guard.operation();
 
-    const ArpEntry* arp = ResolveL2Destination(iface_index, server_ip);
     MacAddress dst_mac = {};
-    if (arp == nullptr)
+    if (!ResolveL2Destination(operation, server_ip, dst_mac))
         return false;
-    dst_mac = arp->mac;
 
-    // 48-byte NTP v3 client packet. Only byte 0 matters for a
-    // query: LI=0, VN=3, Mode=3 (client) → 0x1B. Everything else
-    // zero — the server ignores them.
+    // 48-byte NTP v3 client packet. Byte 0 carries LI=0, VN=3, Mode=3
+    // (client) -> 0x1B. The transmit timestamp carries a random request
+    // cookie that a valid server must echo as its originate timestamp.
     u8 pkt[48] = {};
     pkt[0] = 0x1B;
+    u64 request_cookie = ::duetos::core::RandomU64();
+    if (request_cookie == 0)
+        request_cookie = 1;
+    for (u32 i = 0; i < 8; ++i)
+        pkt[40 + i] = u8(request_cookie >> ((7 - i) * 8));
 
-    g_ntp_pending = true;
+    sync::IrqFlags state_flags = sync::SpinLockAcquire(g_ntp_lock);
+    if (g_ntp_starting)
+    {
+        sync::SpinLockRelease(g_ntp_lock, state_flags);
+        return false;
+    }
+    const UdpBindingReceipt old_udp_binding = g_ntp_udp_binding;
+    ++g_ntp_next_transaction;
+    if (g_ntp_next_transaction == 0)
+        ++g_ntp_next_transaction;
+    const u64 transaction = g_ntp_next_transaction;
+    g_ntp_starting = true;
+    g_ntp_pending = false;
     g_ntp_synced = false;
     g_ntp_result = {};
     g_ntp_iface_index = iface_index;
     g_ntp_binding_generation = operation.generation;
     g_ntp_server_ip = server_ip;
-    NetUdpBindRx(kNtpEphemeralPort, nullptr);
-    if (!NetUdpBindRx(kNtpEphemeralPort, NtpOnUdp))
+    g_ntp_transaction = transaction;
+    g_ntp_request_cookie = request_cookie;
+    g_ntp_udp_binding = kInvalidUdpBindingReceipt;
+    sync::SpinLockRelease(g_ntp_lock, state_flags);
+
+    UdpBindingUnbindExact(old_udp_binding);
+    UdpBindingReceipt udp_binding = kInvalidUdpBindingReceipt;
+    if (!UdpBindingBind(kNtpEphemeralPort, NtpOnUdp, &udp_binding))
     {
-        g_ntp_pending = false;
-        g_ntp_iface_index = kInvalidNetInterfaceIndex;
-        g_ntp_binding_generation = 0;
-        g_ntp_server_ip = {};
+        state_flags = sync::SpinLockAcquire(g_ntp_lock);
+        if (g_ntp_transaction == transaction && g_ntp_starting)
+        {
+            g_ntp_starting = false;
+            g_ntp_iface_index = kInvalidNetInterfaceIndex;
+            g_ntp_binding_generation = 0;
+            g_ntp_server_ip = {};
+        }
+        sync::SpinLockRelease(g_ntp_lock, state_flags);
+        return false;
+    }
+
+    state_flags = sync::SpinLockAcquire(g_ntp_lock);
+    const bool published = g_ntp_transaction == transaction && g_ntp_starting && g_ntp_iface_index == iface_index &&
+                           g_ntp_binding_generation == operation.generation;
+    if (published)
+    {
+        g_ntp_udp_binding = udp_binding;
+        g_ntp_pending = true;
+        g_ntp_starting = false;
+    }
+    sync::SpinLockRelease(g_ntp_lock, state_flags);
+    if (!published)
+    {
+        UdpBindingUnbindExact(udp_binding);
         return false;
     }
 
@@ -2449,18 +3139,75 @@ bool NetNtpQuery(u32 iface_index, Ipv4Address server_ip)
                                  pkt, sizeof(pkt));
     if (!sent)
     {
-        NetUdpBindRx(kNtpEphemeralPort, nullptr);
-        g_ntp_pending = false;
-        g_ntp_iface_index = kInvalidNetInterfaceIndex;
-        g_ntp_binding_generation = 0;
-        g_ntp_server_ip = {};
+        UdpBindingReceipt failed_binding = kInvalidUdpBindingReceipt;
+        state_flags = sync::SpinLockAcquire(g_ntp_lock);
+        if (g_ntp_transaction == transaction && g_ntp_binding_generation == operation.generation)
+        {
+            failed_binding = g_ntp_udp_binding;
+            g_ntp_pending = false;
+            g_ntp_synced = false;
+            g_ntp_udp_binding = kInvalidUdpBindingReceipt;
+            g_ntp_iface_index = kInvalidNetInterfaceIndex;
+            g_ntp_binding_generation = 0;
+            g_ntp_server_ip = {};
+        }
+        sync::SpinLockRelease(g_ntp_lock, state_flags);
+        UdpBindingUnbindExact(failed_binding);
     }
-    return sent;
+    if (!sent)
+        return false;
+
+    state_flags = sync::SpinLockAcquire(g_ntp_lock);
+    const NtpStateSnapshot accepted = NtpStateReadLocked();
+    const bool still_current =
+        accepted.transaction == transaction &&
+        NetInterfaceBindingEqual(accepted.binding, NetInterfaceBinding{iface_index, operation.generation}) &&
+        (accepted.pending || accepted.synced);
+    sync::SpinLockRelease(g_ntp_lock, state_flags);
+    if (!still_current)
+        return false;
+    *out_receipt =
+        NtpQueryReceipt{.binding = NetInterfaceBinding{iface_index, operation.generation}, .transaction = transaction};
+    return true;
+}
+
+bool NetNtpQuery(u32 iface_index, Ipv4Address server_ip)
+{
+    NtpQueryReceipt receipt = kInvalidNtpQueryReceipt;
+    return NetNtpQuery(iface_index, server_ip, &receipt);
+}
+
+NtpResult NetNtpResultRead(NtpQueryReceipt receipt)
+{
+    if (!NtpQueryReceiptIsValid(receipt))
+        return NtpResult{};
+    sync::IrqFlags flags = sync::SpinLockAcquire(g_ntp_lock);
+    const NtpStateSnapshot snapshot = NtpStateReadLocked();
+    sync::SpinLockRelease(g_ntp_lock, flags);
+    if (!snapshot.synced || snapshot.transaction != receipt.transaction ||
+        !NetInterfaceBindingEqual(snapshot.binding, receipt.binding))
+        return NtpResult{};
+    const InterfaceOperationGuard interface_guard(receipt.binding.iface_index, receipt.binding.generation);
+    if (!interface_guard)
+        return NtpResult{};
+
+    flags = sync::SpinLockAcquire(g_ntp_lock);
+    const NtpStateSnapshot current = NtpStateReadLocked();
+    const NtpResult result = current.synced && current.transaction == receipt.transaction &&
+                                     NetInterfaceBindingEqual(current.binding, receipt.binding)
+                                 ? current.result
+                                 : NtpResult{};
+    sync::SpinLockRelease(g_ntp_lock, flags);
+    return result;
 }
 
 NtpResult NetNtpResultRead()
 {
-    return g_ntp_result;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_ntp_lock);
+    const NtpStateSnapshot snapshot = NtpStateReadLocked();
+    const NtpQueryReceipt receipt{.binding = snapshot.binding, .transaction = snapshot.transaction};
+    sync::SpinLockRelease(g_ntp_lock, flags);
+    return NetNtpResultRead(receipt);
 }
 
 namespace
@@ -2488,8 +3235,6 @@ bool BindInterfaceInternal(u32 iface_index, MacAddress mac, Ipv4Address ip, NetT
     ifc.context_tx = context_tx;
     ifc.driver_context = driver_context;
     ifc.counters = {};
-    g_dhcp[iface_index] = {};
-    g_dhcp[iface_index].iface_index = iface_index;
     interface_lifetime::StoreRelease(&ifc.generation, generation);
     if (!interface_lifetime::Open(ifc.operations))
     {
@@ -2647,8 +3392,13 @@ NetInterfaceUnbindResult NetStackUnbindInterface(NetInterfaceBinding binding, u6
     ifc.mac = {};
     ifc.ip = {};
     ifc.counters = {};
-    g_dhcp[binding.iface_index] = {};
 
+    sync::SpinLockRelease(g_interface_lock, flags);
+
+    // Every protocol owns a separate, non-nested lock. The interface remains
+    // retiring until all exact-generation records and UDP callback receipts
+    // are gone, so no replacement can publish between these phases.
+    flags = sync::SpinLockAcquire(g_icmp_lock);
     if (g_ping_iface_index == binding.iface_index && g_ping_binding_generation == binding.generation)
     {
         g_ping_pending = false;
@@ -2656,26 +3406,65 @@ NetInterfaceUnbindResult NetStackUnbindInterface(NetInterfaceBinding binding, u6
         g_ping_iface_index = kInvalidNetInterfaceIndex;
         g_ping_binding_generation = 0;
     }
+    sync::SpinLockRelease(g_icmp_lock, flags);
+
+    ArpRetireBinding(binding);
+
+    flags = sync::SpinLockAcquire(g_dhcp_lock);
+    if (g_dhcp[binding.iface_index].binding_generation == binding.generation)
+    {
+        g_dhcp[binding.iface_index] = {};
+        g_dhcp[binding.iface_index].iface_index = binding.iface_index;
+    }
+    sync::SpinLockRelease(g_dhcp_lock, flags);
+
+    UdpBindingReceipt dns_udp_binding = kInvalidUdpBindingReceipt;
+    flags = sync::SpinLockAcquire(g_dns_lock);
     if (g_dns_iface_index == binding.iface_index && g_dns_binding_generation == binding.generation)
     {
-        if (g_dns_src_port != 0)
-            NetUdpBindRx(g_dns_src_port, nullptr);
+        dns_udp_binding = g_dns_udp_binding;
+        g_dns_starting = false;
         g_dns_pending = false;
         g_dns_resolved = false;
+        g_dns_result_ip = {};
+        g_dns_udp_binding = kInvalidUdpBindingReceipt;
         g_dns_src_port = 0;
         g_dns_iface_index = kInvalidNetInterfaceIndex;
         g_dns_binding_generation = 0;
+        g_dns_resolver_ip = {};
     }
+    sync::SpinLockRelease(g_dns_lock, flags);
+    UdpBindingUnbindExact(dns_udp_binding);
+
+    UdpBindingReceipt ntp_udp_binding = kInvalidUdpBindingReceipt;
+    flags = sync::SpinLockAcquire(g_ntp_lock);
     if (g_ntp_iface_index == binding.iface_index && g_ntp_binding_generation == binding.generation)
     {
-        NetUdpBindRx(kNtpEphemeralPort, nullptr);
+        ntp_udp_binding = g_ntp_udp_binding;
+        g_ntp_starting = false;
         g_ntp_pending = false;
         g_ntp_synced = false;
+        g_ntp_result = {};
+        g_ntp_udp_binding = kInvalidUdpBindingReceipt;
         g_ntp_iface_index = kInvalidNetInterfaceIndex;
         g_ntp_binding_generation = 0;
         g_ntp_server_ip = {};
+        g_ntp_request_cookie = 0;
     }
+    sync::SpinLockRelease(g_ntp_lock, flags);
+    UdpBindingUnbindExact(ntp_udp_binding);
 
+    flags = sync::SpinLockAcquire(g_interface_lock);
+    if (InterfaceGenerationRead(binding.iface_index) != binding.generation)
+    {
+        sync::SpinLockRelease(g_interface_lock, flags);
+        return NetInterfaceUnbindResult::StaleBinding;
+    }
+    if (!ifc.retiring)
+    {
+        sync::SpinLockRelease(g_interface_lock, flags);
+        return NetInterfaceUnbindResult::Unbound;
+    }
     ifc.retiring = false;
     InterfaceCountRecomputeLocked();
     sync::SpinLockRelease(g_interface_lock, flags);
