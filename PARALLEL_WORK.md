@@ -3499,13 +3499,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T04:34:36Z
 - **Status**: COMPLETED @ 2026-08-02T05:23:41Z
 
-### [ACTIVE] service-endpoint-drain-handoff-20260802
+### [DONE] service-endpoint-drain-handoff-20260802
 - **Session**: `Nathan-1618`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/core/service_endpoint.cpp`
 - **Description**: Lost-wakeup-proof drain-driver retry handoff for last operation release
 - **Claimed**: 2026-08-02T04:41:10Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T05:23:56Z
 
 ### [ACTIVE] service-endpoint-drain-handoff-header-20260802
 - **Session**: `Nathan-1083`
