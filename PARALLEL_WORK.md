@@ -4019,13 +4019,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T11:18:26Z
 - **Status**: COMPLETED @ 2026-08-02T11:31:40Z
 
-### [ACTIVE] handle-table-extraction-recovery-20260802
+### [DONE] handle-table-extraction-recovery-20260802
 - **Session**: `Codex-HandleTable-Recovery-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/ipc/handle_table.h,kernel/ipc/handle_table.cpp,kernel/ipc/handle_table_selftest.cpp,kernel/core/boot_bringup.cpp,tools/test/test-handle-publication-reservation-contract.py`
 - **Description**: Audit
 - **Claimed**: 2026-08-02T11:18:59Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T12:02:49Z
 
 ### [DONE] process-key-foundation-20260802
 - **Session**: `Nathan-793`
