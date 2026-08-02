@@ -3643,13 +3643,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T06:25:42Z
 - **Status**: COMPLETED @ 2026-08-02T06:26:12Z
 
-### [ACTIVE] service-exit-reap-ledger-20260802
+### [DONE] service-exit-reap-ledger-20260802
 - **Session**: `Fable-ServiceExitReapLedger-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/core/service_exit_reap_ledger.h,kernel/core/service_exit_reap_ledger.cpp,tests/host/test_service_exit_reap_ledger.cpp,tools/test/test-service-exit-reap-ledger-contract.py`
 - **Description**: Fixed-capacity allocation-free exit reap ledger between exit observer, lifecycle broker ObserveExit, directory OwnerCrashed, and later SYS_SERVICE_CONTROL delivery/ACK plane
 - **Claimed**: 2026-08-02T06:27:41Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T08:47:42Z
 
 ### [DONE] displayd-dormant-contract-drift-20260802
 - **Session**: `Codex-DisplaydContractDrift-20260802`
