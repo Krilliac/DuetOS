@@ -872,9 +872,9 @@ i64 SocketSendDgram(u32 idx, Ipv4Address dst_ip, u16 dst_port, const u8* data, u
     if (IpZero(src))
         src = InterfaceIp(0);
     MacAddress dst_mac{};
-    const ArpEntry* arp = ArpLookup(0, dst);
-    if (arp != nullptr)
-        dst_mac = arp->mac;
+    ArpEntry arp{};
+    if (ArpLookup(0, dst, &arp))
+        dst_mac = arp.mac;
     else
     {
         for (u8& b : dst_mac.octets)
