@@ -3563,13 +3563,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T05:38:22Z
 - **Status**: COMPLETED @ 2026-08-02T05:39:49Z
 
-### [ACTIVE] service-stage-restage-20260802
+### [DONE] service-stage-restage-20260802
 - **Session**: `Nathan-1615`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/core/service_bootstrap_stage.h,kernel/core/service_bootstrap_stage.cpp,tests/host/test_service_bootstrap_stage.cpp,tools/test/test-service-bootstrap-stage-contract.py`
 - **Description**: Restart
 - **Claimed**: 2026-08-02T05:39:13Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T07:09:08Z
 
 ### [DONE] service-deferred-endpoint-reaper-20260802
 - **Session**: `Nathan-826`
