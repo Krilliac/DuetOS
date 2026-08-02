@@ -3450,3 +3450,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Remove dead manifest fixture offsets rejected by Clang Werror
 - **Claimed**: 2026-08-02T04:00:19Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] root-arp-copyout-callers-20260802
+- **Session**: `Nathan-175`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/net/socket.cpp`
+- **Description**: Migrate legacy ARP pointer caller to lock-safe copy-out API
+- **Claimed**: 2026-08-02T04:10:09Z
+- **Status**: IN PROGRESS
