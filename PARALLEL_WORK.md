@@ -3482,3 +3482,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Synchronize project workflow docs with fail-closed coordinator and normal-push semantics
 - **Claimed**: 2026-08-02T04:18:31Z
 - **Status**: COMPLETED @ 2026-08-02T04:19:25Z
+
+### [ACTIVE] channel-core-deferred-drain-20260802
+- **Session**: `Nathan-1834`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/ipc/channel_core.h,kernel/ipc/channel_core.cpp,tests/host/test_channel_core.cpp,tests/host/test_service_endpoint.cpp`
+- **Description**: Defer
+- **Claimed**: 2026-08-02T04:28:38Z
+- **Status**: IN PROGRESS
