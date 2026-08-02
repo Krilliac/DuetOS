@@ -3955,13 +3955,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T10:42:06Z
 - **Status**: COMPLETED @ 2026-08-02T10:48:38Z
 
-### [ACTIVE] mt7921-contract-recovery-20260802
+### [DONE] mt7921-contract-recovery-20260802
 - **Session**: `Nathan-1913`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/drivers/net/mt7921_contract.h,kernel/drivers/net/mt7921_contract.cpp,tests/host/test_mt7921_contract.cpp,tools/test/test-mt7921-contract.py`
 - **Description**: Recover audit harden and publish the orphaned MT7921 contract closure
 - **Claimed**: 2026-08-02T10:43:43Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T10:53:07Z
 
 ### [DONE] host-build-graph-closure-20260802
 - **Session**: `Codex-HostBuildGraph-20260802`
