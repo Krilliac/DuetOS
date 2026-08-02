@@ -4035,13 +4035,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T11:25:29Z
 - **Status**: COMPLETED @ 2026-08-02T11:42:43Z
 
-### [ACTIVE] driver-network-registry-recovery-20260802
+### [DONE] driver-network-registry-recovery-20260802
 - **Session**: `Codex-DriverNetworkRegistryRecovery-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/drivers/net/nic_ids.h,kernel/drivers/net/net.h,kernel/drivers/net/net.cpp,kernel/drivers/net/iwlwifi.h,kernel/drivers/net/iwlwifi.cpp,kernel/drivers/net/rtl88xx.h,kernel/drivers/net/rtl88xx.cpp,kernel/drivers/net/bcm43xx.h,kernel/drivers/net/bcm43xx.cpp,kernel/drivers/net/mt76.h,kernel/drivers/net/mt76.cpp,kernel/drivers/net/wireless_watch.h,tests/host/test_nic_ids.cpp,tests/host/test_wireless_watch.cpp,tools/test/test-nic-id-classification-contract.py,tools/test/test-wireless-watch-lifecycle-contract.py,tools/test/ctest-boot-smoke.sh,wiki/drivers/Networking-Drivers.md,wiki/reference/Design-Decisions.md,kernel/diag/telemetry.cpp,kernel/net/wireless/inventory.cpp,kernel/drivers/video/netpanel.cpp,kernel/shell/shell_network.cpp,kernel/shell/shell_hardware.cpp,kernel/drivers/net/nic_telemetry.cpp,tests/fuzz/host_shim/net_stubs.cpp,tools/test/test-net-registry-lifecycle-contract.py`
 - **Description**: Recover orphaned wireless lifetime NIC identity and generation-safe network registry snapshots as one dependency-ordered closure
 - **Claimed**: 2026-08-02T11:35:20Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T13:13:38Z
 
 ### [DONE] net-stack-restart-recovery-20260802
 - **Session**: `Nathan-808`
