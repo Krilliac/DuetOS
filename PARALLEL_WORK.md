@@ -3714,3 +3714,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Register the dedicated service-control capability name and self-test without widening service manifest v1
 - **Claimed**: 2026-08-02T07:00:37Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] fuzz-pe-vm-reservation-shim-20260802
+- **Session**: `Codex-Root-FuzzPeVmShim-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `tests/fuzz/host_shim/pe_stubs.cpp`
+- **Description**: Keep PE fuzz host shim synchronized with reservation-backed loader VM API
+- **Claimed**: 2026-08-02T07:01:40Z
+- **Status**: IN PROGRESS
