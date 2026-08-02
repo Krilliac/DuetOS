@@ -3611,13 +3611,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T05:53:41Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] service-protocol-policy-20260802
+### [DONE] service-protocol-policy-20260802
 - **Session**: `Codex-ServiceEndpointDataplane-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/core/service_protocol_policy.h,kernel/core/service_protocol_policy.cpp,tests/host/test_service_protocol_policy.cpp,tools/test/test-service-protocol-policy-contract.py`
 - **Description**: Add trusted manifest keyed route policy resolver with fail-closed capability intersection and authority mint tests
 - **Claimed**: 2026-08-02T05:54:44Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T06:51:10Z
 
 ### [ACTIVE] service-endpoint-connect-send-ingress-state-20260802
 - **Session**: `Codex-ServiceEndpointDataplane-20260802`
