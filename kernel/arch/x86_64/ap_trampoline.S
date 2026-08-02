@@ -15,8 +15,11 @@
  *     0x00F0  _tramp_gdt     — 5-entry GDT (null, 32c, 32d, 64c, 64d)
  *     0x0118  _tramp_gdt_ptr — GDTR value (limit + base)
  *     ...
- *     0xFD4   online_flag (u32) — AP writes 1 when it's alive
- *     0xFD8   cpu_id (u32)      — BSP writes per-AP
+ *     0xFCC   captured_token (u32) — AP echoes after loading params
+ *     0xFD0   parked_token (u32)   — rejected AP echoes when quiescent
+ *     0xFD4   ready_token (u32)    — AP echoes after CPUHP succeeds
+ *     0xFD8   cpu_id (u32)         — BSP writes per-AP
+ *     0xFDC   attempt_token (u32)  — BSP writes generation + slot
  *     0xFE0   ap_entry_fn (u64) — BSP writes (kernel VA of ApEntry)
  *     0xFE8   stack_top (u64)   — BSP writes per-AP
  *     0xFF0   pml4_phys (u64)   — BSP writes (shared PML4 root)
@@ -40,8 +43,11 @@
 .set OFF_LONG,          0x00A0
 .set OFF_GDT,           0x00F0
 .set OFF_GDT_PTR,       0x0118
-.set OFF_ONLINE_FLAG,   0xFD4
+.set OFF_CAPTURED_TOKEN, 0xFCC
+.set OFF_PARKED_TOKEN,  0xFD0
+.set OFF_READY_TOKEN,   0xFD4
 .set OFF_CPU_ID,        0xFD8
+.set OFF_ATTEMPT_TOKEN, 0xFDC
 .set OFF_ENTRY,         0xFE0
 .set OFF_STACK,         0xFE8
 .set OFF_PML4,          0xFF0
@@ -155,6 +161,18 @@ ap_trampoline_start:
     mov     rax, TRAMP_BASE + OFF_CPU_ID
     mov     edi, [rax]
 
+    /* attempt_token -> rsi (SysV second arg). */
+    mov     rax, TRAMP_BASE + OFF_ATTEMPT_TOKEN
+    mov     esi, [rax]
+
+    /* All mutable parameters are now in registers/RSP. Publish this exact
+       generation token from the trampoline itself, closing the window where
+       a descheduled AP could otherwise receive a redundant second SIPI after
+       it had consumed the parameter block but before C++ ran. x86 store
+       ordering pairs with the BSP's acquire load. */
+    mov     rax, TRAMP_BASE + OFF_CAPTURED_TOKEN
+    mov     [rax], esi
+
     /* Tail-call into the kernel's C++ entry point. [[noreturn]]. */
     mov     rax, TRAMP_BASE + OFF_ENTRY
     jmp     [rax]
@@ -177,7 +195,7 @@ _tramp_gdt:
     .quad   TRAMP_BASE + OFF_GDT   /* base = absolute addr of gdt */
 
 /* Pad the whole trampoline to a full 4 KiB so that the parameter
-   block at 0xFD4..0xFFF stays inside the section the BSP copies.
+   block at 0xFCC..0xFFF stays inside the section the BSP copies.
    BSS-style `.space` is fine since we zero-fill at copy time. */
 .org 0x1000
 ap_trampoline_end:
