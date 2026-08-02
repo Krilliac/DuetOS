@@ -3427,13 +3427,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T03:36:09Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] root-clang-idl-gate-fixes-20260802
+### [DONE] root-clang-idl-gate-fixes-20260802
 - **Session**: `Nathan-169`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `tests/host/test_load_image.cpp,tools/test/test-native-syscall-idl.py,tools/test/test-native-syscall-dispatch-bijection.py`
 - **Description**: Repair Clang dead-helper gate and synchronize syscall 227 generated-count expectations
 - **Claimed**: 2026-08-02T03:56:12Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T04:11:55Z
 
 ### [ACTIVE] root-authorization-host-clang-gate-20260802
 - **Session**: `Nathan-795`
