@@ -3394,3 +3394,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Require
 - **Claimed**: 2026-08-02T02:54:27Z
 - **Status**: COMPLETED @ 2026-08-02T03:02:21Z
+
+### [ACTIVE] release-publisher-singleton-20260802
+- **Session**: `Codex-ReleasePublisherSingleton-20260802`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `.github/workflows/release.yml,wiki/tooling/Build-System.md,wiki/getting-started/Architecture-Overview.md,wiki/reference/Design-Decisions.md,tools/test/test-release-publisher-singleton-contract.py`
+- **Description**: Make build.yml the sole main-push rolling-release publisher while preserving tag and manual release entrypoints
+- **Claimed**: 2026-08-02T03:13:05Z
+- **Status**: IN PROGRESS
