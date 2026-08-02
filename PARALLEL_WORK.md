@@ -3803,13 +3803,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T08:50:35Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] process-authority-foundation-publish-20260802
+### [DONE] process-authority-foundation-publish-20260802
 - **Session**: `Codex-ProcessAuthorityPublish-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/proc/credentials.h,kernel/proc/credentials.cpp,kernel/proc/authorization_context.h,kernel/proc/authorization_context.cpp,tests/host/test_credentials.cpp,tests/host/test_authorization_context.cpp`
 - **Description**: Audit, harden, independently verify, and publish the released process authority foundation
 - **Claimed**: 2026-08-02T08:51:11Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T08:56:45Z
 
 ### [ACTIVE] daemon-source-publish-20260802
 - **Session**: `Codex-DaemonSourcePublish-20260802`
