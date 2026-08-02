@@ -126,11 +126,18 @@ int visible = 9;
         ordered(self, self.next_generation, "*next_out = 0", "kLinuxFdGenerationExhausted", "return false")
 
     def test_close_preserves_saturation_and_allocator_skips_retired_slot(self) -> None:
+        # LinuxFdNextGeneration zeroes its out parameter before the
+        # saturation check, so the cleared slot must adopt the advanced
+        # generation only when the call succeeds and otherwise fall back to
+        # the terminal epoch explicitly. Pinning an initialize-then-clobber
+        # shape here previously masked exactly that bug.
         ordered(
             self,
             self.clear_slot,
-            "generation = Process::kLinuxFdGenerationExhausted",
-            "LinuxFdNextGeneration(slot.generation, &generation)",
+            "u32 next_generation = 0",
+            "LinuxFdNextGeneration(slot.generation, &next_generation)",
+            "? next_generation",
+            ": Process::kLinuxFdGenerationExhausted",
             "LinuxFdClearSnapshot(&slot)",
             "slot.generation = generation",
         )

@@ -169,8 +169,8 @@ AuthorizationActionResult ProcessChargeExecutionTicks(Process* process, u64 tick
 {
     if (process == nullptr)
     {
-        return AuthorizationActionResult{false, false, false, AuthorizationAction::None,
-                                         kAuthorizationNoFsWriteWindow, 0};
+        return AuthorizationActionResult{false, false, false, AuthorizationAction::None, kAuthorizationNoFsWriteWindow,
+                                         0};
     }
     return AuthorizationChargeTick(process->authorization, ticks);
 }
@@ -409,8 +409,8 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     bool have_credentials = false;
     if (spawn_parent != nullptr && root == spawn_parent->root)
     {
-        have_credentials = CredentialKeyIsValid(spawn_parent->credentials) &&
-                           CredentialRetain(spawn_parent->credentials);
+        have_credentials =
+            CredentialKeyIsValid(spawn_parent->credentials) && CredentialRetain(spawn_parent->credentials);
         if (have_credentials)
             p->credentials = spawn_parent->credentials;
     }
@@ -437,8 +437,8 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     // every Process creation failure-atomic without a mutable authority mirror.
     p->authorization = kInvalidAuthorizationContextKey;
     const CapSet bounded_caps{caps.bits & cap_ceiling.bits};
-    const AuthorizationLaunchProfile launch_profile = sandbox_launch ? AuthorizationLaunchProfile::Sandbox
-                                                                      : AuthorizationLaunchProfile::Trusted;
+    const AuthorizationLaunchProfile launch_profile =
+        sandbox_launch ? AuthorizationLaunchProfile::Sandbox : AuthorizationLaunchProfile::Trusted;
     bool have_authorization = false;
     if (spawn_parent != nullptr)
     {
@@ -481,8 +481,7 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     p->lifecycle_state = ProcessLifecycleState::Private;
     p->termination_state = ProcessTerminationState::Open;
     p->win32_exit_status = 0;
-    p->job_inheritance_parent =
-        spawn_parent != nullptr ? ProcessKeySnapshot(spawn_parent) : kInvalidProcessKey;
+    p->job_inheritance_parent = spawn_parent != nullptr ? ProcessKeySnapshot(spawn_parent) : kInvalidProcessKey;
     u64 name_len = 0;
     while (name[name_len] != '\0' && name_len + 1 < Process::kNameCap)
     {
@@ -888,8 +887,8 @@ bool ProcessTerminationClose(Process* process, u32 exit_code)
     {
         u64 empty = 0;
         const u64 published = EncodeWin32ProcessExitStatus(exit_code);
-        KASSERT(__atomic_compare_exchange_n(&process->win32_exit_status, &empty, published, false,
-                                            __ATOMIC_RELEASE, __ATOMIC_RELAXED),
+        KASSERT(__atomic_compare_exchange_n(&process->win32_exit_status, &empty, published, false, __ATOMIC_RELEASE,
+                                            __ATOMIC_RELAXED),
                 "core/process", "first Process close lost exit-status publication");
         return true;
     }
@@ -902,8 +901,8 @@ void ProcessPublishLastTaskExitCodeIfUnset(Process* process, u32 exit_code)
     KASSERT(process != nullptr, "core/process", "last-Task exit-status publication on null process");
     u64 empty = 0;
     const u64 published = EncodeWin32ProcessExitStatus(exit_code);
-    (void)__atomic_compare_exchange_n(&process->win32_exit_status, &empty, published, false,
-                                      __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+    (void)__atomic_compare_exchange_n(&process->win32_exit_status, &empty, published, false, __ATOMIC_RELEASE,
+                                      __ATOMIC_RELAXED);
 }
 
 u32 ProcessWin32ExitCodeSnapshot(const Process* process)
@@ -1923,8 +1922,7 @@ void TransferAcceptedServiceEndpointOwners(ProcessKey process)
     // NT-suspended while retaining an operation pin. This operation allocates
     // no second queue and has no Busy path: maintenance later retries the
     // exact generation-bearing rows from the scheduler reaper.
-    const ServiceRuntimeDeferAcceptedProcessResultV1 deferred =
-        ServiceRuntimeDeferAcceptedProcessKernelV1(process);
+    const ServiceRuntimeDeferAcceptedProcessResultV1 deferred = ServiceRuntimeDeferAcceptedProcessKernelV1(process);
     if (deferred.runtime_status == ServiceRuntimeStatusV1::NotInitialized)
         return;
     if (deferred.runtime_status != ServiceRuntimeStatusV1::Ok)
@@ -2344,8 +2342,8 @@ sched::WaitQueueBlockResult ProcessWaitForLinuxChildEvent(Process* parent, u64 o
     KASSERT(parent != nullptr, "core/process", "ProcessWaitForLinuxChildEvent null parent");
     if (observed_sequence == ~u64{0})
         return sched::WaitQueueBlockTimeoutCancellable(&parent->linux_wait_wq, 1);
-    return sched::WaitQueueBlockIfSequenceUnchangedCancellable(
-        &parent->linux_wait_wq, &parent->linux_child_event_sequence, observed_sequence);
+    return sched::WaitQueueBlockIfSequenceUnchangedCancellable(&parent->linux_wait_wq,
+                                                               &parent->linux_child_event_sequence, observed_sequence);
 }
 
 void ProcessCompleteExitFromReaper(Process* process)
@@ -3989,8 +3987,15 @@ void LinuxFdClearSnapshot(Process::LinuxFd* snapshot)
 
 void LinuxFdClearSlotLocked(Process::LinuxFd& slot)
 {
-    u32 generation = Process::kLinuxFdGenerationExhausted;
-    (void)LinuxFdNextGeneration(slot.generation, &generation);
+    // LinuxFdNextGeneration zeroes its out parameter before the saturation
+    // check, so a clobbered initializer cannot express "stay exhausted" —
+    // adopt the advanced generation only on success. A saturated slot keeps
+    // kLinuxFdGenerationExhausted across clear; the lowest-free search
+    // treats that epoch as a permanently retired row.
+    u32 next_generation = 0;
+    const u32 generation = LinuxFdNextGeneration(slot.generation, &next_generation)
+                               ? next_generation
+                               : Process::kLinuxFdGenerationExhausted;
     LinuxFdClearSnapshot(&slot);
     slot.generation = generation;
 }
