@@ -23,11 +23,30 @@ struct IrqFlags
 {
     u64 rflags;
 };
-inline IrqFlags SpinLockAcquire(SpinLock&)
+inline IrqFlags SpinLockAcquire(SpinLock& lock)
 {
+#if defined(DUETOS_HOST_TEST)
+    // Hosted whole-TU tests are multithreaded. Use the mirrored ticket words
+    // as real atomics so their production critical sections remain serialized
+    // and ThreadSanitizer can observe the acquire/release edge. LibFuzzer does
+    // not define DUETOS_HOST_TEST and keeps the cheaper single-threaded shim.
+    const u32 ticket = __atomic_fetch_add(&lock.next_ticket, 1u, __ATOMIC_RELAXED);
+    while (__atomic_load_n(&lock.now_serving, __ATOMIC_ACQUIRE) != ticket)
+    {
+    }
+#else
+    (void)lock;
+#endif
     return IrqFlags{0};
 }
-inline void SpinLockRelease(SpinLock&, IrqFlags) {}
+inline void SpinLockRelease(SpinLock& lock, IrqFlags)
+{
+#if defined(DUETOS_HOST_TEST)
+    (void)__atomic_fetch_add(&lock.now_serving, 1u, __ATOMIC_RELEASE);
+#else
+    (void)lock;
+#endif
+}
 
 // RAII guard mirroring kernel/sync/spinlock.h. Fuzzed TUs that use the
 // guard form (kernel/net/socket.cpp, kernel/subsystems/win32/section.cpp)
@@ -36,8 +55,8 @@ inline void SpinLockRelease(SpinLock&, IrqFlags) {}
 // exposes and a fuzzed TU calls must be mirrored here or the build dies
 // with "no member named 'SpinLockGuard'".
 //
-// Single-threaded by construction under libFuzzer, so acquire/release
-// are no-ops; the guard exists to satisfy the shape, not to serialise.
+// LibFuzzer remains single-threaded and uses the no-op path. Hosted whole-TU
+// tests define DUETOS_HOST_TEST and receive the real ticket-lock path above.
 class SpinLockGuard
 {
   public:
