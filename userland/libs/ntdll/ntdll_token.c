@@ -1,25 +1,61 @@
 #include "ntdll_internal.h"
 
 /* ------------------------------------------------------------------
- * NT job-object surface — userland-only NotImpl stubs.
+ * NT Job-object surface.
  *
- * Job objects are a Win32 mechanism for grouping processes for
- * resource limits + bulk termination. v0 has no job engine; the
- * kernel cap-set already handles the per-process limit cases we
- * care about. These stubs return STATUS_NOT_IMPLEMENTED so a
- * sandboxed PE checking for a job assignment gets a clean
- * answer.
+ * This translation unit validates the stable NT-facing shapes,
+ * shuffles arguments into the DuetOS syscall ABI, and returns
+ * NTSTATUS. Kernel32 separately owns NTSTATUS-to-LastError policy.
  * ------------------------------------------------------------------ */
+#define DUETOS_JOB_INFO_BASIC_ACCOUNTING 1UL
+#define DUETOS_JOB_INFO_BASIC_PROCESS_ID_LIST 3UL
+#define DUETOS_JOB_INFO_BASIC_AND_IO_ACCOUNTING 8UL
+#define DUETOS_JOB_BASIC_ACCOUNTING_SIZE 48UL
+#define DUETOS_JOB_BASIC_AND_IO_ACCOUNTING_SIZE 96UL
+#define DUETOS_JOB_PROCESS_ID_LIST_MAX_SIZE (8UL + 32UL * 8UL)
+
+static long long ntdll_job_query_syscall(HANDLE JobHandle, ULONG JobObjectInformationClass, void* JobObjectInformation,
+                                         ULONG JobObjectInformationLength)
+{
+    long long rv;
+    __asm__ volatile("mov %5, %%r10\n\t"
+                     "int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)167), /* SYS_JOB_QUERY */
+                       "D"((long long)JobHandle), "S"((long long)JobObjectInformationClass),
+                       "d"((long long)JobObjectInformation), "r"((long long)JobObjectInformationLength)
+                     : "r10", "memory");
+    return rv;
+}
+
+static long long ntdll_job_is_process_in_syscall(HANDLE ProcessHandle, HANDLE JobHandle, unsigned int* out)
+{
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)165), /* SYS_JOB_IS_IN */
+                       "D"((long long)JobHandle), "S"((long long)ProcessHandle), "d"((long long)out)
+                     : "memory");
+    return rv;
+}
+
 __declspec(dllexport) NTSTATUS NtCreateJobObject(HANDLE* JobHandle, ULONG DesiredAccess, void* ObjectAttributes)
 {
     (void)DesiredAccess;
-    (void)ObjectAttributes;
     if (JobHandle == (HANDLE*)0)
         return NTSTATUS_INVALID_PARAMETER;
+    if (ObjectAttributes != (void*)0)
+        return NTSTATUS_NOT_SUPPORTED;
     long long rv;
     __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)163) : "memory"); /* SYS_JOB_CREATE */
     if (rv < 0)
-        return (NTSTATUS)0xC0000002;
+        /* SYS_JOB_CREATE currently has one negative result for both a
+         * capability denial and fixed-pool exhaustion. Preserve the
+         * security failure at this boundary until the syscall grows
+         * typed errors. */
+        return NTSTATUS_ACCESS_DENIED;
+    if (!ntdll_is_job_handle((HANDLE)rv))
+        return NTSTATUS_UNSUCCESSFUL;
     *JobHandle = (HANDLE)rv;
     return NTSTATUS_SUCCESS;
 }
@@ -31,6 +67,8 @@ __declspec(dllexport) NTSTATUS ZwCreateJobObject(HANDLE* JobHandle, ULONG Desire
 
 __declspec(dllexport) NTSTATUS NtAssignProcessToJobObject(HANDLE JobHandle, HANDLE ProcessHandle)
 {
+    if (!ntdll_is_job_handle(JobHandle) || ProcessHandle == (HANDLE)0)
+        return NTSTATUS_INVALID_HANDLE;
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
@@ -38,7 +76,12 @@ __declspec(dllexport) NTSTATUS NtAssignProcessToJobObject(HANDLE JobHandle, HAND
                        "D"((long long)JobHandle), "S"((long long)ProcessHandle)
                      : "memory");
     if (rv < 0)
-        return (NTSTATUS)0xC0000022; /* STATUS_ACCESS_DENIED */
+    {
+        unsigned int membership = 0;
+        if (ntdll_job_is_process_in_syscall(ProcessHandle, JobHandle, &membership) < 0)
+            return NTSTATUS_INVALID_HANDLE;
+        return NTSTATUS_ACCESS_DENIED;
+    }
     return NTSTATUS_SUCCESS;
 }
 
@@ -49,21 +92,19 @@ __declspec(dllexport) NTSTATUS ZwAssignProcessToJobObject(HANDLE JobHandle, HAND
 
 __declspec(dllexport) NTSTATUS NtIsProcessInJob(HANDLE ProcessHandle, HANDLE JobHandle)
 {
-    /* Returns STATUS_PROCESS_IN_JOB (1) or STATUS_PROCESS_NOT_IN_JOB (0). */
+    if (ProcessHandle == (HANDLE)0 || (JobHandle != (HANDLE)0 && !ntdll_is_job_handle(JobHandle)))
+        return NTSTATUS_INVALID_HANDLE;
     unsigned int out = 0;
-    long long rv;
-    __asm__ volatile("int $0x80"
-                     : "=a"(rv)
-                     : "a"((long long)165), /* SYS_JOB_IS_IN */
-                       "D"((long long)JobHandle), "S"((long long)ProcessHandle), "d"((long long)&out)
-                     : "memory");
+    const long long rv = ntdll_job_is_process_in_syscall(ProcessHandle, JobHandle, &out);
     if (rv < 0)
-        return (NTSTATUS)0xC0000008;
-    return (NTSTATUS)(out ? 0x00000001 : 0x00000000);
+        return NTSTATUS_INVALID_HANDLE;
+    return out ? NTSTATUS_PROCESS_IN_JOB : NTSTATUS_PROCESS_NOT_IN_JOB;
 }
 
 __declspec(dllexport) NTSTATUS NtTerminateJobObject(HANDLE JobHandle, NTSTATUS ExitStatus)
 {
+    if (!ntdll_is_job_handle(JobHandle))
+        return NTSTATUS_INVALID_HANDLE;
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
@@ -71,7 +112,7 @@ __declspec(dllexport) NTSTATUS NtTerminateJobObject(HANDLE JobHandle, NTSTATUS E
                        "D"((long long)JobHandle), "S"((long long)ExitStatus)
                      : "memory");
     if (rv < 0)
-        return (NTSTATUS)0xC0000008;
+        return NTSTATUS_INVALID_HANDLE;
     return NTSTATUS_SUCCESS;
 }
 
@@ -84,16 +125,42 @@ __declspec(dllexport) NTSTATUS NtQueryInformationJobObject(HANDLE JobHandle, ULO
                                                            void* JobObjectInformation, ULONG JobObjectInformationLength,
                                                            ULONG* ReturnLength)
 {
-    long long rv;
-    __asm__ volatile("mov %4, %%r10\n\t"
-                     "int $0x80"
-                     : "=a"(rv)
-                     : "a"((long long)167), /* SYS_JOB_QUERY */
-                       "D"((long long)JobHandle), "S"((long long)JobObjectInformationClass),
-                       "d"((long long)JobObjectInformation), "r"((long long)JobObjectInformationLength)
-                     : "r10", "memory");
+    ULONG minimum_size;
+    if (JobHandle != (HANDLE)0 && !ntdll_is_job_handle(JobHandle))
+        return NTSTATUS_INVALID_HANDLE;
+    if (JobObjectInformationClass == DUETOS_JOB_INFO_BASIC_ACCOUNTING)
+        minimum_size = DUETOS_JOB_BASIC_ACCOUNTING_SIZE;
+    else if (JobObjectInformationClass == DUETOS_JOB_INFO_BASIC_PROCESS_ID_LIST)
+        minimum_size = 8;
+    else if (JobObjectInformationClass == DUETOS_JOB_INFO_BASIC_AND_IO_ACCOUNTING)
+        minimum_size = DUETOS_JOB_BASIC_AND_IO_ACCOUNTING_SIZE;
+    else
+        return NTSTATUS_INVALID_INFO_CLASS;
+
+    if (JobObjectInformationLength < minimum_size)
+        return NTSTATUS_INFO_LENGTH_MISMATCH;
+    if (JobObjectInformation == (void*)0)
+        return NTSTATUS_ACCESS_VIOLATION;
+
+    long long rv =
+        ntdll_job_query_syscall(JobHandle, JobObjectInformationClass, JobObjectInformation, JobObjectInformationLength);
     if (rv < 0)
-        return (NTSTATUS)0xC0000004; /* STATUS_INFO_LENGTH_MISMATCH */
+    {
+        /* The kernel's negative result conflates a stale/foreign Job,
+         * a short variable-length PID list, and CopyToUser failure.
+         * A bounded stack probe distinguishes them without trusting
+         * the caller's output buffer. */
+        unsigned char probe[DUETOS_JOB_PROCESS_ID_LIST_MAX_SIZE];
+        const ULONG probe_size = (JobObjectInformationClass == DUETOS_JOB_INFO_BASIC_PROCESS_ID_LIST)
+                                     ? DUETOS_JOB_PROCESS_ID_LIST_MAX_SIZE
+                                     : minimum_size;
+        const long long probe_rv = ntdll_job_query_syscall(JobHandle, JobObjectInformationClass, probe, probe_size);
+        if (probe_rv < 0)
+            return NTSTATUS_INVALID_HANDLE;
+        if ((unsigned long long)JobObjectInformationLength < (unsigned long long)probe_rv)
+            return NTSTATUS_INFO_LENGTH_MISMATCH;
+        return NTSTATUS_ACCESS_VIOLATION;
+    }
     if (ReturnLength != (ULONG*)0)
         *ReturnLength = (ULONG)rv;
     return NTSTATUS_SUCCESS;

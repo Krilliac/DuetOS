@@ -19,10 +19,42 @@ __declspec(dllexport) void RtlSetLastWin32Error(DWORD err)
 
 __declspec(dllexport) ULONG RtlNtStatusToDosError(NTSTATUS s)
 {
-    (void)s;
-    /* v0: every NTSTATUS maps to ERROR_SUCCESS (0). Matches
-     * the flat kOffReturnZero registration. */
-    return 0;
+    /* Small, deterministic subset used by real ntdll -> kernel32
+     * boundaries. Values match Windows' RtlNtStatusToDosError;
+     * unknown statuses return ERROR_MR_MID_NOT_FOUND rather than
+     * silently turning a failure into ERROR_SUCCESS. */
+    switch (s)
+    {
+    case NTSTATUS_SUCCESS:
+        return 0; /* ERROR_SUCCESS */
+    case NTSTATUS_UNSUCCESSFUL:
+        return 31;     /* ERROR_GEN_FAILURE */
+    case 0xC0000002UL: /* STATUS_NOT_IMPLEMENTED */
+        return 1;      /* ERROR_INVALID_FUNCTION */
+    case NTSTATUS_INVALID_INFO_CLASS:
+    case NTSTATUS_INVALID_PARAMETER:
+        return 87; /* ERROR_INVALID_PARAMETER */
+    case NTSTATUS_INFO_LENGTH_MISMATCH:
+        return 24; /* ERROR_BAD_LENGTH */
+    case NTSTATUS_ACCESS_VIOLATION:
+        return 998; /* ERROR_NOACCESS */
+    case NTSTATUS_INVALID_HANDLE:
+        return 6; /* ERROR_INVALID_HANDLE */
+    case NTSTATUS_NO_MEMORY:
+        return 8; /* ERROR_NOT_ENOUGH_MEMORY */
+    case NTSTATUS_ACCESS_DENIED:
+        return 5; /* ERROR_ACCESS_DENIED */
+    case NTSTATUS_INSUFFICIENT_RESOURCES:
+        return 1450; /* ERROR_NO_SYSTEM_RESOURCES */
+    case NTSTATUS_NOT_SUPPORTED:
+        return 50; /* ERROR_NOT_SUPPORTED */
+    case NTSTATUS_PROCESS_NOT_IN_JOB:
+        return 759; /* ERROR_PROCESS_NOT_IN_JOB */
+    case NTSTATUS_PROCESS_IN_JOB:
+        return 760; /* ERROR_PROCESS_IN_JOB */
+    default:
+        return 317; /* ERROR_MR_MID_NOT_FOUND */
+    }
 }
 
 /* Rtl heap aliases — same syscall bindings as HeapAlloc etc. */

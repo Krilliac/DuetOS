@@ -5,8 +5,8 @@
  *
  * This layer owns public handle tags, Win32 information-class layouts,
  * capability checks, user copies, and scheduler kill requests. Pool state,
- * member references, accounting, termination pins, and owner drain live in
- * proc/job.{h,cpp}.
+ * exact ProcessKey completion records, accounting, termination pins, and
+ * owner drain live in proc/job.{h,cpp}.
  *
  * (Formerly iocp_job.h — the IOCP half migrated to the KObject-
  * shaped ipc::IocpPort + kobj_handles; see iocp_syscall.h.)
@@ -39,11 +39,10 @@ i64 SysJobTerminate(u64 job_handle, u64 exit_code);
 i64 SysJobQuery(u64 job_handle, u64 info_class, u64 user_buf, u64 buf_len);
 i64 SysJobClose(u64 job_handle);
 
-/// Last-task-exit hook for a Job owner. Detaches every owned job and
-/// its member references under the Job pool lock, then drops those
-/// references after unlocking. This must run before the owner's final
-/// task reference is released so a self-membership cannot pin a dead
-/// Process forever. Idempotent.
+/// Last-task-exit hook for a Job owner. Retires every owned Job under the
+/// Job-pool lock. Jobs contain exact ProcessKey completion records rather than
+/// Process references, so this operation cannot pin or release ProcessCore.
+/// Idempotent.
 void JobDrainOwnedByProcess(core::Process* owner);
 
 /// Heap-phase reference-balance test for the owner-exit drain. Must run
