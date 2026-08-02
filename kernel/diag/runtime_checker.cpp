@@ -1085,12 +1085,21 @@ extern "C" const u8 _rodata_end[];
 
 bool CheckPteFlags()
 {
+    // The CPU sets Accessed (bit 5) / Dirty (bit 6) on legitimate use of
+    // a mapped page — they are hardware-managed bookkeeping, not
+    // security attributes. Comparing them raw turned the FIRST read of a
+    // sampled .rodata page into a false "per-page W^X bypass" alarm
+    // (observed live 2026-08-02: baseline 0x..01 -> now 0x..21, the
+    // delta being exactly the Accessed bit). Mask both sides; W (bit 1),
+    // U/S (bit 2), and NX (bit 63) — the bits the detector exists for —
+    // remain fully compared.
+    constexpr u64 kPteHwManagedMask = (1ull << 5) | (1ull << 6);
     bool any_drift = false;
     for (u32 i = 0; i < g_baseline_pte_count; ++i)
     {
         const u64 va = g_baseline_pte_va[i];
-        const u64 baseline = g_baseline_pte_attrs[i];
-        const u64 now = mm::GetPteFlags4K(va);
+        const u64 baseline = g_baseline_pte_attrs[i] & ~kPteHwManagedMask;
+        const u64 now = mm::GetPteFlags4K(va) & ~kPteHwManagedMask;
         if (now != baseline)
         {
             arch::SerialWrite("[health] PTE flags drifted: va=");
