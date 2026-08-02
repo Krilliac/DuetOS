@@ -3971,13 +3971,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T10:48:05Z
 - **Status**: COMPLETED @ 2026-08-02T10:49:59Z
 
-### [ACTIVE] netd-socket-engine-recovery-20260802
+### [DONE] netd-socket-engine-recovery-20260802
 - **Session**: `Codex-NetdSocketEngine-Recovery-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `userland/native-apps/netd/socket_engine.c,userland/native-apps/netd/socket_engine.h,userland/native-apps/netd/socket_engine_internal.h,userland/native-apps/netd/socket_engine_lifecycle.c,userland/native-apps/netd/socket_engine_request.c,userland/native-apps/netd/socket_engine_validate.c,tests/host/test_netd_socket_engine.cpp,tools/test/test-netd-socket-engine-contract.py`
 - **Description**: Audit and publish hostile generation-safe netd socket engine closure
 - **Claimed**: 2026-08-02T10:51:17Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T11:15:53Z
 
 ### [DONE] resource-domain-channel-host-proof-20260802
 - **Session**: `Nathan-604`
