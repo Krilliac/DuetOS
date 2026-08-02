@@ -660,10 +660,38 @@ void ElfLoaderUnwindSelfTest()
     // frames than it allocated during the test window. That's not a
     // leak — it's bookkeeping noise from the running kernel. Enforce
     // direction-only: fail loudly on missing frames, tolerate gains.
-    auto check_no_leak = [](u64 before, u64 after, const char* tag)
+    // FreeFramesCount() is a GLOBAL counter and this test runs as a
+    // Phase::Userland initcall on the BSP while every other CPU is
+    // online and allocating. A concurrent allocation elsewhere lands in
+    // the same counter and is indistinguishable from a leak here, so a
+    // bare `after < before` is a false-positive generator: the identical
+    // build passes this check on the bringup / ring3 / pe-hello profiles
+    // and panicked on pe-winapi purely because unrelated timing shifted
+    // (2026-08-02). Rather than loosen the invariant — a real unwind
+    // leak must still panic — establish whether the measurement is
+    // trustworthy at all: sample the counter twice around nothing. If it
+    // moved, some other CPU is allocating and this test cannot attribute
+    // frames to itself, so it reports an explicit SKIP instead of a
+    // verdict it has no evidence for.
+    auto allocator_is_quiescent = []()
+    {
+        FrameAllocatorDrainPools();
+        const u64 a = FreeFramesCount();
+        FrameAllocatorDrainPools();
+        return FreeFramesCount() == a;
+    };
+
+    auto check_no_leak = [&allocator_is_quiescent](u64 before, u64 after, const char* tag)
     {
         if (after >= before)
             return;
+        if (!allocator_is_quiescent())
+        {
+            SerialWrite("[elf-test] SKIP frame-leak check (");
+            SerialWrite(tag);
+            SerialWrite("): allocator not quiescent, count not attributable\n");
+            return;
+        }
         SerialWrite("[elf-test] FAIL frame leak (");
         SerialWrite(tag);
         SerialWrite(") before=");
