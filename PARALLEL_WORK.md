@@ -3595,13 +3595,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T05:42:19Z
 - **Status**: COMPLETED @ 2026-08-02T06:50:58Z
 
-### [ACTIVE] service-stage-load-image-reset-20260802
+### [DONE] service-stage-load-image-reset-20260802
 - **Session**: `Nathan-1080`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/loader/load_image.h,kernel/loader/load_image.cpp,tests/host/test_load_image.cpp`
 - **Description**: Loader-owned
 - **Claimed**: 2026-08-02T05:50:36Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T07:09:14Z
 
 ### [ACTIVE] service-stage-exec-admission-reset-20260802
 - **Session**: `Nathan-1368`
