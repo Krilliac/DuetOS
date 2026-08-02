@@ -3506,3 +3506,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Lost-wakeup-proof drain-driver retry handoff for last operation release
 - **Claimed**: 2026-08-02T04:41:10Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] service-endpoint-drain-handoff-header-20260802
+- **Session**: `Nathan-1083`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/core/service_endpoint.h`
+- **Description**: Durable drain retry request bit for active-driver handoff
+- **Claimed**: 2026-08-02T04:41:45Z
+- **Status**: IN PROGRESS
