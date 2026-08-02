@@ -3795,13 +3795,13 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Claimed**: 2026-08-02T08:48:00Z
 - **Status**: IN PROGRESS
 
-### [ACTIVE] ipc-foundation-publish-20260802
+### [DONE] ipc-foundation-publish-20260802
 - **Session**: `Codex-IPCFoundationPublish-20260802`
 - **Branch**: `claude/audit-ps2-spsc-20260731`
 - **Files**: `kernel/ipc/channel_core.h,kernel/ipc/channel_core.cpp,tests/host/test_channel_core.cpp,kernel/ipc/message_ring.h,kernel/ipc/message_ring.cpp,tests/host/test_message_ring.cpp,kernel/ipc/versioned_payload.h,kernel/ipc/versioned_payload.cpp,tests/host/test_versioned_payload.cpp`
 - **Description**: Audit and publish released IPC channel message ring and versioned payload foundation closure
 - **Claimed**: 2026-08-02T08:50:35Z
-- **Status**: IN PROGRESS
+- **Status**: COMPLETED @ 2026-08-02T08:58:57Z
 
 ### [DONE] process-authority-foundation-publish-20260802
 - **Session**: `Codex-ProcessAuthorityPublish-20260802`
