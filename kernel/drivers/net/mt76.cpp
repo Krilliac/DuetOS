@@ -4,7 +4,6 @@
 #include "drivers/net/mt76_fw.h"
 #include "loader/firmware_loader.h"
 #include "log/klog.h"
-#include "sched/sched.h"
 
 namespace duetos::drivers::net
 {
@@ -12,13 +11,10 @@ namespace duetos::drivers::net
 namespace
 {
 
-// MT_HW_BOUND register. Reading BAR0+0x0008 returns the
-// concatenation (chip-class << 16) | chip-revision on every MT76xx
-// chip family we care about. Reference: Linux
-// `drivers/net/wireless/mediatek/mt76/mt7921/regs.h::MT_HW_BOUND`.
-// The exact bit layout shifted across silicon revisions but the
-// "0xFFFFFFFF means BAR is unmapped" / "0 means stuck in reset"
-// rejection bands hold for every variant.
+// Retained experimental MediaTek shell. MT76 PCIe generations require
+// family-specific power ownership and L1 register mapping before register
+// reads; BAR0+8 is not a universal safe identification probe. Mt76Matches
+// fails closed, and BringUp repeats that gate before this dormant read.
 constexpr u32 kRegHwBound = 0x0008;
 
 constinit Mt76Stats g_stats = {};
@@ -30,90 +26,24 @@ u32 Mmio32Read(const NicInfo& n, u64 off)
     return *reinterpret_cast<volatile u32*>(static_cast<u8*>(n.mmio_virt) + off);
 }
 
-void Mt76WatchEntry(void* arg)
-{
-    auto* n = static_cast<NicInfo*>(arg);
-    if (n == nullptr)
-        return;
-    for (;;)
-    {
-        ++g_stats.watch_polls;
-        const u32 v = Mmio32Read(*n, kRegHwBound);
-        if (v == 0xFFFFFFFFu)
-        {
-            ++g_stats.unexpected_dead_polls;
-            n->driver_online = false;
-            n->link_up = false;
-        }
-        duetos::sched::SchedSleepTicks(100);
-    }
-}
 
 } // namespace
 
-const char* Mt76FamilyName(Mt76Family f)
-{
-    switch (f)
-    {
-    case Mt76Family::Mt7615:
-        return "mt7615";
-    case Mt76Family::Mt7663:
-        return "mt7663";
-    case Mt76Family::Mt7915:
-        return "mt7915";
-    case Mt76Family::Mt7916:
-        return "mt7916";
-    case Mt76Family::Mt7921:
-        return "mt7921";
-    case Mt76Family::Mt7922:
-        return "mt7922";
-    case Mt76Family::Mt7925:
-        return "mt7925";
-    case Mt76Family::Unknown:
-    default:
-        return "mt76";
-    }
-}
-
-Mt76Family Mt76FamilyFromDeviceId(u16 device_id)
-{
-    switch (device_id)
-    {
-    case 0x7615:
-    case 0x7611:
-        return Mt76Family::Mt7615;
-    case 0x7663:
-        return Mt76Family::Mt7663;
-    case 0x7915:
-    case 0x7906:
-    case 0x7902:
-        return Mt76Family::Mt7915;
-    case 0x7916:
-        return Mt76Family::Mt7916;
-    case 0x7961: // MT7921 — most common consumer chip
-    case 0x0608: // MT7921 alt product code
-    case 0x7920:
-        return Mt76Family::Mt7921;
-    case 0x0616: // MT7922
-        return Mt76Family::Mt7922;
-    case 0x0717: // MT7925
-    case 0x7925:
-        return Mt76Family::Mt7925;
-    default:
-        return Mt76Family::Unknown;
-    }
-}
-
 bool Mt76Matches(u16 vendor_id, u16 device_id)
 {
-    if (vendor_id != kVendorMediaTek)
-        return false;
-    return Mt76FamilyFromDeviceId(device_id) != Mt76Family::Unknown;
+    // Inventory recognizes exact upstream candidates, but the retired shell
+    // treated BAR0+8 as a universal MT_HW_BOUND register. Current mt76 PCIe
+    // transports require family-specific power ownership and L1 register
+    // mapping before those reads. Fail closed until that backend exists.
+    (void)Mt76FamilyFromIdentity(vendor_id, device_id);
+    return false;
 }
 
 bool Mt76BringUp(NicInfo& n)
 {
     KLOG_TRACE_SCOPE("drivers/net/mt76", "BringUp");
+    if (!Mt76Matches(n.vendor_id, n.device_id))
+        return false;
     if (n.mmio_virt == nullptr)
     {
         KLOG_WARN("drivers/net/mt76", "no MMIO BAR — skipping");
@@ -132,7 +62,7 @@ bool Mt76BringUp(NicInfo& n)
         return false;
     }
 
-    const Mt76Family family = Mt76FamilyFromDeviceId(n.device_id);
+    const Mt76Family family = Mt76FamilyFromIdentity(n.vendor_id, n.device_id);
     const u16 chip_class = u16((hw_bound >> 16) & 0xFFFFu);
     const u16 chip_revision = u16(hw_bound & 0xFFFFu);
 
@@ -221,9 +151,7 @@ bool Mt76BringUp(NicInfo& n)
 
 void Mt76StartWatch(NicInfo& n)
 {
-    if (!n.driver_online || n.mmio_virt == nullptr)
-        return;
-    duetos::sched::SchedCreate(Mt76WatchEntry, &n, "mt76-watch");
+    (void)n;
 }
 
 Mt76Stats Mt76StatsRead()
