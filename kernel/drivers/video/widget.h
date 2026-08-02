@@ -1,5 +1,6 @@
 #pragma once
 
+#include "drivers/video/gui_message_queue.h"
 #include "util/types.h"
 
 /*
@@ -49,9 +50,11 @@ struct ButtonWidget
     // When `owner` is a valid WindowHandle, `x` / `y` are
     // interpreted as OFFSETS from the owning window's origin —
     // the button moves with its window on every drag. When
-    // `owner == kWindowInvalid` (the default for zero-init),
+    // `owner == kWindowInvalid` (callers must set it explicitly),
     // `x` / `y` are absolute framebuffer coordinates and the
     // button stays put regardless of which window is on top.
+    // WindowClose purges this raw internal slot before ring-3 reuse, so a
+    // surviving widget cannot attach to an unrelated window generation.
     u32 owner;
 
     bool pressed; // current visual state
@@ -125,6 +128,25 @@ constexpr u32 kWindowInvalid = 0xFFFFFFFFu;
 constexpr u32 kMaxWindows = 40;
 
 using WindowHandle = u32;
+
+// Public HWND encoding (positive and lossless in PE32):
+//   bits  0..5  slot + 1 (0 remains NULL)
+//   bits  6..23 non-zero, non-wrapping generation
+//   bits 24..31 zero (keeps the GDI object tag range disjoint)
+inline constexpr u32 kWindowHandleSlotBits = 6;
+inline constexpr u32 kWindowHandleSlotMask = (1u << kWindowHandleSlotBits) - 1u;
+inline constexpr u32 kWindowHandleGenerationShift = kWindowHandleSlotBits;
+inline constexpr u32 kWindowHandleGenerationMask = (1u << 18) - 1u;
+inline constexpr u32 kWindowHandleAllowedMask = 0x00FFFFFFu;
+
+/// Encode a live compositor slot as its public opaque HWND. Returns 0 for an
+/// invalid/dead slot.
+u32 WindowPublicHandle(WindowHandle h);
+
+/// Resolve and generation-check an untrusted public HWND. Values with high
+/// bits set, generation zero, a dead/retired slot, or a stale generation are
+/// rejected.
+WindowHandle WindowResolvePublicHandle(u64 hwnd);
 
 /// Maximum ASCII bytes stored in a window's mutable title buffer
 /// (NUL included). Matches the syscall-side `kWinTitleMax` but
@@ -441,11 +463,10 @@ void WindowSetOpacity(WindowHandle h, u8 opacity);
 /// windows as fully transparent.
 u8 WindowGetOpacity(WindowHandle h);
 
-/// Mark `h` closed: the window stops drawing, stops participating
-/// in hit-testing, and its widgets (buttons with owner=h) also
-/// disappear. The handle stays valid — no re-use — but the slot
-/// is effectively leaked for the rest of boot. A future session
-/// (delete / re-register, handle pools) cleans that up.
+/// Mark `h` closed: the window stops drawing and hit-testing, raw side-table
+/// bindings are purged, and ring-3 slots become generation-safe reuse
+/// candidates. Queued messages for the exact public HWND are purged and
+/// GetMessage waiters are signalled after the compositor unlocks.
 void WindowClose(WindowHandle h);
 
 /// Total windows ever registered — dead + alive. Handles are
@@ -552,18 +573,15 @@ void WindowDispatchWheel(WindowHandle h, i32 client_x, i32 client_y, i32 dz, u32
                          u8 modifiers);
 
 // ---------------------------------------------------------------
-// Per-window ownership + message queue + GDI display list.
+// Per-window ownership + per-Task message queue + GDI display list.
 //
-// Ring-3 windows registered via SYS_WIN_CREATE carry the owning
-// process's pid so the process-exit reaper can close every window
-// belonging to a dying process in one walk. Kernel-owned boot
-// windows (Calculator, Notepad, ...) use owner_pid == 0 so the
-// reaper never touches them.
+// Ring-3 windows registered via SYS_WIN_CREATE carry immutable
+// {owner_pid, owner_tid}. Kernel-owned boot windows use zero for
+// both ids, so task/process reapers never touch them.
 //
-// Each window owns a small fixed-size message ring that
-// SYS_WIN_POST_MSG enqueues into and SYS_WIN_GET/PEEK_MSG
-// dequeues from. Overflow drops the oldest message (standard
-// finite-queue policy for input events).
+// Every window created by one task delivers into that task's fixed
+// transactional queue in gui_message_queue.{h,cpp}. A full queue
+// rejects the post truthfully; it never discards an older message.
 //
 // Each window also owns a small display list of GDI primitives —
 // FillRect / TextOut / Rectangle recordings — that the compositor
@@ -576,9 +594,6 @@ void WindowDispatchWheel(WindowHandle h, i32 client_x, i32 client_y, i32 dz, u32
 // WindowClearDisplayList directly (also backing SYS_GDI_CLEAR).
 // ---------------------------------------------------------------
 
-/// Maximum messages queued per window. Oldest-dropped on overflow.
-constexpr u32 kWinMsgQueueDepth = 32;
-
 /// Maximum recorded GDI primitives per window, per paint cycle.
 /// Oldest-dropped on overflow. Sized to cover a full client area of
 /// 8 px text rows (a ~500 px-tall client is ~60 TextOut lines) plus
@@ -589,14 +604,6 @@ constexpr u32 kWinDisplayListDepth = 64;
 
 /// Maximum ASCII text length stored per TextOut primitive.
 constexpr u32 kWinTextOutMax = 47; // + NUL = 48
-
-struct WindowMsg
-{
-    u32 hwnd_biased; // HWND as seen by user32 (biased +1)
-    u32 message;     // WM_KEYDOWN / WM_CHAR / WM_CLOSE / WM_QUIT / ...
-    u64 wparam;
-    u64 lparam;
-};
 
 enum class WinGdiPrimKind : u8
 {
@@ -631,41 +638,20 @@ struct WinGdiPrim
 // records); see `PrimListAppend`.
 inline constexpr u32 kWinBlitPoolBytes = 256 * 1024;
 
-/// Set the owning pid on `h`. Ring-3-created windows call this
-/// from the SYS_WIN_CREATE handler; boot-time windows leave it at
-/// the default 0 (kernel-owned, never reaped).
-void WindowSetOwnerPid(WindowHandle h, u64 pid);
+/// Bind a ring-3 window to its creating task and ensure that task's GUI queue.
+bool WindowSetOwner(WindowHandle h, u64 pid, u64 tid);
 
-/// Enqueue a message on `h`. Returns false if the handle is
-/// invalid; on queue full the oldest message is evicted and the
-/// call still returns true.
+/// Enqueue on the owning task queue. Full queues reject without eviction. A
+/// successful post requests a GetMessage broadcast; calls made under the
+/// compositor are consolidated and delivered after CompositorUnlock.
 bool WindowPostMessage(WindowHandle h, u32 message, u64 wparam, u64 lparam);
 
-/// Dequeue a message from `h` (FIFO). Returns false if the queue
-/// is empty or the handle is invalid. Sets `*out` on success.
-bool WindowPopMessage(WindowHandle h, WindowMsg* out);
+/// Post an HWND-less message to one exact task queue and signal its waiters.
+bool WindowPostThreadMessage(u64 pid, u64 tid, u32 message, u64 wparam, u64 lparam);
 
-/// Peek the head message without removing it. Returns false on
-/// empty / invalid handle.
-bool WindowPeekMessage(WindowHandle h, WindowMsg* out);
-
-/// Pop the first pending message across ANY alive window owned
-/// by `pid`. Matches Win32 GetMessage(hWnd=NULL) semantics scoped
-/// to the calling process. Returns false if no queued message
-/// exists across every window owned by `pid`.
-bool WindowPopMessageAny(u64 pid, WindowMsg* out);
-
-/// True iff at least one alive window owned by `pid` has a
-/// non-empty message queue. Non-blocking — the caller's message
-/// pump polls this, yields on false, and re-enters GetMessage.
-bool WindowAnyMessagePending(u64 pid);
-
-/// Peek (no remove) the first pending message across ANY alive
-/// window owned by `pid`. Walks the window table once with
-/// direct field accesses, fusing what was three nested public-API
-/// calls (WindowIsAlive + WindowOwnerPid + WindowPeekMessage) per
-/// iteration in the caller. Returns false if no message exists.
-bool WindowPeekMessageAny(u64 pid, WindowMsg* out);
+/// Close windows and drain queued messages owned by one exact task identity.
+/// Acquires the compositor lock internally; call from ordinary task context.
+u32 WindowReapByTask(u64 pid, u64 tid);
 
 /// Close every alive window whose owner_pid matches `pid`. Called
 /// from `ProcessRelease` when the last task holding a Process
@@ -674,21 +660,33 @@ bool WindowPeekMessageAny(u64 pid, WindowMsg* out);
 /// pid == 0 (would close every kernel-owned boot window).
 u32 WindowReapByOwner(u64 pid);
 
-/// Block the current task on the global message wait queue for
-/// up to `timeout_ticks` (10 ms per tick). Returns when woken
-/// by `WindowMsgWakeAll` OR when the timeout expires. Caller
-/// must hold interrupts disabled across the "queue empty check"
-/// and this call — same contract as `sched::WaitQueueBlockTimeout`.
-/// Wakes are broadcast: every blocker re-checks its own queue
-/// after return, so spurious wakes are expected and the caller
-/// must loop. The timeout is also a safety net against a lost
-/// wake landing in the narrow window between "check queue
-/// empty" and "enter wait queue".
-void WindowMsgWaitBlockTimeout(u64 timeout_ticks);
+void WindowMessageIdentitySelfTest();
+bool WindowMessageIdentitySelfTestPassed();
 
-/// Wake every task blocked in `WindowMsgWaitBlockTimeout`.
-/// Called from the PostMessage syscall and the keyboard / mouse
-/// routers after appending a message. Safe from IRQ context.
+enum class WindowMsgWaitResult : u8
+{
+    Woken,
+    Cancelled,
+    SequenceChanged,
+};
+
+/// Acquire-load the global message-event sequence. Message pumps snapshot it
+/// before probing their task queue, then pass the exact value to the atomic
+/// compare-and-block wrapper below.
+u64 WindowMsgSequenceSnapshot();
+
+/// Atomically compare the global event sequence and enqueue the current task
+/// on the message wait queue only if it remains unchanged. The scheduler owns
+/// interrupt state and the compare-to-enqueue transaction. Woken and
+/// SequenceChanged are both spurious-safe re-probe outcomes; Cancelled tells
+/// the syscall to unwind so its outer cancellation boundary can finalize.
+/// A saturated sequence never blocks, preventing wraparound ABA.
+WindowMsgWaitResult WindowMsgWaitIfSequenceUnchangedCancellable(u64 observed_sequence);
+
+/// Publish a message event and wake every blocked message pump. Preserves the
+/// caller's IF state. If the current task owns the compositor mutex, records a
+/// single pending broadcast that CompositorUnlock delivers after dropping the
+/// mutex, avoiding compositor -> scheduler lock-order edges. Safe from IRQ.
 void WindowMsgWakeAll();
 
 /// Append a solid fill primitive to `h`'s display list. Coords
@@ -751,6 +749,13 @@ bool WindowDisplayListSelfTestPassed();
 /// whether to post to the window's queue (PE-owned, pid > 0) or
 /// fall through to the native shell (pid == 0).
 u64 WindowOwnerPid(WindowHandle h);
+
+/// Read the immutable creating TID. Returns 0 for invalid/kernel windows.
+u64 WindowOwnerTid(WindowHandle h);
+
+/// True only when `h` is a live ring-3 window owned by non-zero `pid`.
+/// Syscall policy uses this predicate to fail closed on cross-process HWNDs.
+bool WindowOwnedByProcess(WindowHandle h, u64 pid);
 
 // ---------------------------------------------------------------
 // Visibility (SW_HIDE re-showable) + mutable title (SetWindowText)

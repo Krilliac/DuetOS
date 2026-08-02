@@ -274,6 +274,48 @@ u32 FindWidgetAt(u32 cx, u32 cy)
     return kWidgetInvalid;
 }
 
+// ButtonWidget::owner is an internal compositor slot, not a public HWND.
+// Ring-3 window slots can be generation-reused, so every binding must leave
+// the table before WindowClose makes the slot available to WindowRegister.
+// Compacting keeps the fixed table reusable and avoids adding a second
+// generation field to a kernel-native widget descriptor.
+u32 PurgeWidgetsForOwner(WindowHandle owner)
+{
+    if (owner == kWindowInvalid)
+    {
+        return 0;
+    }
+
+    u32 write = 0;
+    for (u32 read = 0; read < g_widget_count; ++read)
+    {
+        if (g_widgets[read].owner == owner)
+        {
+            continue;
+        }
+        if (write != read)
+        {
+            g_widgets[write] = g_widgets[read];
+        }
+        ++write;
+    }
+
+    const u32 removed = g_widget_count - write;
+    for (u32 i = write; i < g_widget_count; ++i)
+    {
+        g_widgets[i] = {};
+    }
+    g_widget_count = write;
+    if (removed != 0)
+    {
+        // Compaction invalidates every cached widget index, even when the
+        // hovered widget itself survived and merely shifted left.
+        g_tooltip_widget = kWidgetInvalid;
+        g_tooltip_arm_tick = 0;
+    }
+    return removed;
+}
+
 } // namespace
 
 void WidgetTooltipTrack(u32 cx, u32 cy, u64 now_tick)
@@ -335,14 +377,6 @@ void WidgetTooltipRender()
 namespace
 {
 
-struct WindowMsgRing
-{
-    WindowMsg buf[kWinMsgQueueDepth];
-    u32 head; // next read
-    u32 tail; // next write
-    u32 count;
-};
-
 struct RegisteredWindow
 {
     WindowChrome chrome;
@@ -363,7 +397,8 @@ struct RegisteredWindow
     WindowScrollbarSurface scrollbar; // most-recent scrollbar geometry
     WindowScrollSetFn scroll_fn;      // nullable scrollbar-input callback
     u64 owner_pid;                    // 0 = kernel-owned boot window, >0 = ring-3 pid
-    WindowMsgRing msgs;
+    u64 owner_tid;                    // immutable creating Task id; never a Task pointer
+    u32 generation;                   // public HWND generation (non-zero, non-wrapping)
     WinGdiPrim prims[kWinDisplayListDepth];
     u32 prim_count;
     u8 blit_pool[kWinBlitPoolBytes];
@@ -395,6 +430,10 @@ struct RegisteredWindow
     u8 anim_post_action; // 0 = none, 1 = hide on completion
     bool anim_active;
     bool alive;
+    bool retired; // saturated or native-raw slot; never allocated again
+    // External native apps still retain raw WindowHandle slots. Only a ring-3
+    // generation, whose consumers hold opaque HWNDs, is safe to reuse.
+    bool ring3_generation;
     bool visible;
     bool dirty;     // set by InvalidateRect; cleared by BeginPaint / WindowDrainPaints
     bool maximized; // true while WindowMaximize has been applied without a Restore
@@ -427,12 +466,15 @@ struct RegisteredWindow
 };
 
 constinit RegisteredWindow g_windows[kMaxWindows] = {};
+// High-water mark over g_windows. Dead, non-retired slots below this mark are
+// eligible for generation-bumped reuse.
 constinit u32 g_window_count = 0;
 
 // z_order[0] = bottom of stack, z_order[count-1] = topmost. All
-// entries are indices into `g_windows`. We never delete windows
-// in v0, so this is append-only modulo raise-to-top moves.
+// entries are indices into `g_windows`. Closed windows are removed before a
+// slot can be reused, preventing duplicate/stale z-order entries.
 constinit u32 g_z_order[kMaxWindows] = {};
+constinit u32 g_z_order_count = 0;
 
 // Single compositor mutex guarding every UI-side mutable: cursor
 // backing, window registry, widget table, console buffer, and
@@ -452,9 +494,48 @@ constinit duetos::sched::Mutex g_compositor_mutex{
 // SYS_WIN_GET_MSG parks here until PostMessage (or an input
 // router) calls WindowMsgWakeAll. Single queue is sufficient
 // for v1 — one wake broadcast per post, each blocker re-checks
-// its own per-window ring. Upgrades to per-process queues when
-// a workload has many concurrent message pumps.
+// its own task-owned queue. Queue contents and transactions live in
+// gui_message_queue.cpp; this wait queue is only the wake transport.
 constinit duetos::sched::WaitQueue g_msg_wq{};
+
+// Monotonic publication word bridging task-owned queue predicates to the
+// scheduler wait queue. Producers mutate a queue/window first, publish this
+// sequence with release ordering, drop external locks, and then broadcast.
+// Saturation never wraps: the wait wrapper treats UINT64_MAX as permanently
+// changed, preserving correctness through an unreachable-but-hostile ABA.
+constinit duetos::u64 g_msg_event_sequence = 1;
+
+// A message post can occur while the compositor mutex protects window state.
+// Waking a scheduler wait queue there would add compositor -> sched to the
+// lock graph. Record one pending broadcast and let CompositorUnlock perform it
+// only after dropping the compositor; repeated posts collapse to one wake.
+constinit bool g_msg_wake_pending = false;
+
+void PublishWindowMsgEvent()
+{
+    constexpr duetos::u64 kSaturated = ~static_cast<duetos::u64>(0);
+    duetos::u64 observed = __atomic_load_n(&g_msg_event_sequence, __ATOMIC_RELAXED);
+    while (observed != kSaturated)
+    {
+        const duetos::u64 desired = observed + 1;
+        if (__atomic_compare_exchange_n(&g_msg_event_sequence, &observed, desired, false, __ATOMIC_RELEASE,
+                                        __ATOMIC_RELAXED))
+        {
+            return;
+        }
+    }
+}
+
+void WakeWindowMsgWaitersNow()
+{
+    const duetos::u64 saved_rflags = duetos::arch::ReadRflags();
+    duetos::arch::Cli();
+    (void)duetos::sched::WaitQueueWakeAll(&g_msg_wq);
+    if ((saved_rflags & (1ull << 9)) != 0)
+    {
+        duetos::arch::Sti();
+    }
+}
 
 // Async keyboard state — 1 bit per VK code. The kbd-reader
 // toggles bits on every press/release edge before dispatching
@@ -581,10 +662,45 @@ constexpr u32 kInactiveTitleRgb = 0x00506070;
 
 bool WindowValid(WindowHandle h)
 {
-    return h < g_window_count && g_windows[h].alive;
+    return h < g_window_count && g_windows[h].alive && !g_windows[h].retired;
 }
 
 } // namespace
+
+u32 WindowPublicHandle(WindowHandle h)
+{
+    if (!WindowValid(h))
+    {
+        return 0;
+    }
+    const u32 generation = g_windows[h].generation;
+    if (generation == 0 || generation > kWindowHandleGenerationMask || h >= kWindowHandleSlotMask)
+    {
+        return 0;
+    }
+    return (generation << kWindowHandleGenerationShift) | (h + 1u);
+}
+
+WindowHandle WindowResolvePublicHandle(u64 hwnd)
+{
+    if (hwnd == 0 || (hwnd & ~static_cast<u64>(kWindowHandleAllowedMask)) != 0)
+    {
+        return kWindowInvalid;
+    }
+    const u32 value = static_cast<u32>(hwnd);
+    const u32 biased_slot = value & kWindowHandleSlotMask;
+    const u32 generation = (value >> kWindowHandleGenerationShift) & kWindowHandleGenerationMask;
+    if (biased_slot == 0 || biased_slot > kMaxWindows || generation == 0)
+    {
+        return kWindowInvalid;
+    }
+    const WindowHandle h = biased_slot - 1u;
+    if (!WindowValid(h) || g_windows[h].generation != generation)
+    {
+        return kWindowInvalid;
+    }
+    return h;
+}
 
 namespace
 {
@@ -1071,11 +1187,32 @@ void StoreSubtitle(RegisteredWindow& w, const char* src)
 
 WindowHandle WindowRegister(const WindowChrome& chrome, const char* title)
 {
-    if (g_window_count >= kMaxWindows)
+    WindowHandle h = kWindowInvalid;
+    for (u32 i = 0; i < g_window_count; ++i)
     {
-        return kWindowInvalid;
+        RegisteredWindow& candidate = g_windows[i];
+        if (candidate.alive || candidate.retired)
+        {
+            continue;
+        }
+        if (candidate.generation == kWindowHandleGenerationMask)
+        {
+            candidate.retired = true;
+            continue;
+        }
+        h = i;
+        break;
     }
-    const WindowHandle h = g_window_count;
+    if (h == kWindowInvalid)
+    {
+        if (g_window_count >= kMaxWindows)
+        {
+            return kWindowInvalid;
+        }
+        h = g_window_count++;
+    }
+    RegisteredWindow& window = g_windows[h];
+    window.generation = (window.generation == 0) ? 1 : window.generation + 1;
     g_windows[h].chrome = chrome;
     StoreTitle(g_windows[h], title);
     StoreSubtitle(g_windows[h], nullptr);
@@ -1105,10 +1242,10 @@ WindowHandle WindowRegister(const WindowChrome& chrome, const char* title)
     g_windows[h].anim_target_w = 0;
     g_windows[h].anim_target_h = 0;
     g_windows[h].owner_pid = 0;
+    g_windows[h].owner_tid = 0;
     g_windows[h].parent = kWindowInvalid;
-    g_windows[h].msgs.head = 0;
-    g_windows[h].msgs.tail = 0;
-    g_windows[h].msgs.count = 0;
+    g_windows[h].retired = false;
+    g_windows[h].ring3_generation = false;
     g_windows[h].prim_count = 0;
     g_windows[h].blit_pool_used = 0;
     g_windows[h].content_fn = nullptr;
@@ -1120,8 +1257,7 @@ WindowHandle WindowRegister(const WindowChrome& chrome, const char* title)
     {
         g_windows[h].longs[i] = 0;
     }
-    g_z_order[g_window_count] = h;
-    ++g_window_count;
+    g_z_order[g_z_order_count++] = h;
     // The latest-registered window lands on top of z-order and
     // is the obvious "just appeared" active choice. Boot-time
     // registration ends with the last window active, which is
@@ -1138,7 +1274,7 @@ WindowHandle WindowRegister(const WindowChrome& chrome, const char* title)
         using duetos::arch::SerialWriteHex;
         SerialLineGuard guard;
         SerialWrite("[win] create handle=");
-        SerialWriteHex(static_cast<u64>(h));
+        SerialWriteHex(WindowPublicHandle(h));
         SerialWrite(" title=\"");
         SerialWrite(title ? title : "");
         SerialWrite("\"\n");
@@ -1168,18 +1304,18 @@ void WindowRaise(WindowHandle h)
     // by one, place `h` at the top. O(count) — fine for tiny
     // counts; a linked list would be overkill at kMaxWindows=40.
     u32 idx = 0;
-    for (; idx < g_window_count; ++idx)
+    for (; idx < g_z_order_count; ++idx)
     {
         if (g_z_order[idx] == h)
         {
             break;
         }
     }
-    if (idx == g_window_count)
+    if (idx == g_z_order_count)
     {
         return; // not in z-order — shouldn't happen for a valid handle
     }
-    if (idx + 1 == g_window_count)
+    if (idx + 1 == g_z_order_count)
     {
         // Already topmost in z-order, but if the window was hidden
         // moments ago (set visible above) the compositor still has
@@ -1192,11 +1328,11 @@ void WindowRaise(WindowHandle h)
         }
         return;
     }
-    for (u32 j = idx; j + 1 < g_window_count; ++j)
+    for (u32 j = idx; j + 1 < g_z_order_count; ++j)
     {
         g_z_order[j] = g_z_order[j + 1];
     }
-    g_z_order[g_window_count - 1] = h;
+    g_z_order[g_z_order_count - 1] = h;
 
     // Z-order changed — force the next EndCompose to do an unconditional
     // shadow->live blit + snapshot resync over the FULL surface. The
@@ -1249,14 +1385,14 @@ void WindowCycleActive()
     // Alt+Tab even though the user can't see them on the desktop.
     // The taskbar already filters to visible windows; Alt+Tab
     // must agree.
-    if (g_window_count == 0)
+    if (g_z_order_count == 0)
     {
         return;
     }
     // Locate the active window's index in z_order (search from
     // the top since that's where it lives).
-    u32 active_idx = g_window_count;
-    for (u32 i = 0; i < g_window_count; ++i)
+    u32 active_idx = g_z_order_count;
+    for (u32 i = 0; i < g_z_order_count; ++i)
     {
         if (g_z_order[i] == g_active_window)
         {
@@ -1267,10 +1403,10 @@ void WindowCycleActive()
     // Start the search one past the active slot (wrap). Walk up
     // to kMaxWindows steps; bail out if no other visible window
     // is alive.
-    const u32 start = (active_idx + 1) % g_window_count;
-    for (u32 step = 0; step < g_window_count; ++step)
+    const u32 start = (active_idx + 1) % g_z_order_count;
+    for (u32 step = 0; step < g_z_order_count; ++step)
     {
-        const u32 idx = (start + step) % g_window_count;
+        const u32 idx = (start + step) % g_z_order_count;
         const WindowHandle candidate = g_z_order[idx];
         if (candidate != g_active_window && WindowValid(candidate) && g_windows[candidate].visible)
         {
@@ -1363,7 +1499,7 @@ WindowHandle WindowTopmostAt(u32 x, u32 y)
 {
     // Walk top-down so the first match is the visually-topmost
     // window — matches what the user expects from a click.
-    for (u32 i = g_window_count; i > 0; --i)
+    for (u32 i = g_z_order_count; i > 0; --i)
     {
         const WindowHandle h = g_z_order[i - 1];
         if (!g_windows[h].alive || !g_windows[h].visible)
@@ -1840,7 +1976,7 @@ void WindowMinimize(WindowHandle h)
     if (g_active_window == h)
     {
         g_active_window = kWindowInvalid;
-        for (u32 i = g_window_count; i > 0; --i)
+        for (u32 i = g_z_order_count; i > 0; --i)
         {
             const WindowHandle cand = g_z_order[i - 1];
             if (cand != h && WindowValid(cand) && g_windows[cand].visible)
@@ -2247,7 +2383,39 @@ void WindowClose(WindowHandle h)
     {
         return;
     }
-    g_windows[h].alive = false;
+    RegisteredWindow& window = g_windows[h];
+    const u32 public_hwnd = WindowPublicHandle(h);
+    const u64 owner_pid = window.owner_pid;
+    const u64 owner_tid = window.owner_tid;
+    const bool notify_message_waiters = owner_pid != 0 && owner_tid != 0 && public_hwnd != 0;
+
+    // Remove every delivery and timer that still names this exact generation
+    // before the slot becomes reusable. Thread messages (HWND == 0) remain
+    // queued for the owning task.
+    if (notify_message_waiters)
+    {
+        (void)GuiMessagePurgeWindow(owner_pid, owner_tid, public_hwnd);
+        // Purge advances the queue epoch even when no message matched. The
+        // wake is published only after every raw reference and owner field
+        // below has been invalidated.
+    }
+    if (owner_pid != 0)
+    {
+        WindowTimerReap(owner_pid, h);
+    }
+
+    // Button owners are raw compositor slots. Purge them while this exact
+    // generation is still live so a later ring-3 slot reuse cannot turn an
+    // old callback surface into a child of an unrelated window.
+    (void)PurgeWidgetsForOwner(h);
+
+    window.alive = false;
+    if (window.generation == kWindowHandleGenerationMask || !window.ring3_generation)
+    {
+        // Generation never wraps. Native callers still retain raw slots, so
+        // those generations preserve the old no-reuse lifetime as well.
+        window.retired = true;
+    }
     // Greppable sentinel so spawn/teardown balance is measurable
     // from the serial log (chaos-pe-driver, boot-log-analyze).
     // Emitted for ALL closes — native teardown via WindowReapForPid
@@ -2258,7 +2426,7 @@ void WindowClose(WindowHandle h)
         using duetos::arch::SerialWriteHex;
         SerialLineGuard guard;
         SerialWrite("[win] destroy handle=");
-        SerialWriteHex(static_cast<u64>(h));
+        SerialWriteHex(public_hwnd);
         SerialWrite("\n");
     }
     // Clear the PE-requested cursor shape so the next-allocated
@@ -2266,14 +2434,61 @@ void WindowClose(WindowHandle h)
     // doesn't observe stale state. Cheap, deterministic; the
     // mouse-loop's per-packet hit-test relies on this flag being
     // false-by-default for kernel-owned windows.
-    g_windows[h].requested_cursor_set = false;
-    g_windows[h].requested_cursor = 0;
+    window.requested_cursor_set = false;
+    window.requested_cursor = 0;
+
+    if (g_mouse_capture == h)
+    {
+        g_mouse_capture = kWindowInvalid;
+    }
+    if (g_focus_hwnd == h)
+    {
+        g_focus_hwnd = kWindowInvalid;
+    }
+    if (g_caret.owner == h)
+    {
+        g_caret = {};
+        g_caret.owner = kWindowInvalid;
+        g_caret_on = false;
+    }
+
+    // Raw parent links are compositor-internal. Clear every child link before
+    // this raw slot can denote a new generation.
+    for (u32 i = 0; i < g_window_count; ++i)
+    {
+        if (g_windows[i].alive && g_windows[i].parent == h)
+        {
+            g_windows[i].parent = kWindowInvalid;
+        }
+    }
+
+    // Closed slots must disappear from z-order before reuse, otherwise the
+    // same raw slot could appear twice after a generation-bumped register.
+    for (u32 i = 0; i < g_z_order_count; ++i)
+    {
+        if (g_z_order[i] != h)
+        {
+            continue;
+        }
+        for (u32 j = i; j + 1 < g_z_order_count; ++j)
+        {
+            g_z_order[j] = g_z_order[j + 1];
+        }
+        --g_z_order_count;
+        g_z_order[g_z_order_count] = kWindowInvalid;
+        break;
+    }
+
+    if (h < 32)
+    {
+        g_show_desktop_mask &= ~(1u << h);
+    }
     if (g_active_window == h)
     {
         // Promote the next topmost alive window, if any, so
         // activation doesn't dangle on a dead handle.
         g_active_window = kWindowInvalid;
-        for (u32 i = g_window_count; i > 0; --i)
+        for (u32 i = g_z_order_count; i > 0; --i)
         {
             const WindowHandle candidate = g_z_order[i - 1];
             if (candidate != h && WindowValid(candidate))
@@ -2283,11 +2498,15 @@ void WindowClose(WindowHandle h)
             }
         }
     }
-    // Leave entry in z_order — WindowDrawAllOrdered already
-    // skips dead windows via the `alive` check, and compacting
-    // the z-order would require touching every index stored in
-    // any drag state elsewhere. Slot is "leaked" in the sense
-    // that it can't be re-registered; v0 doesn't need to.
+    window.owner_pid = 0;
+    window.owner_tid = 0;
+    window.parent = kWindowInvalid;
+    if (notify_message_waiters)
+    {
+        // Filtered GetMessage waiters must observe the destroyed generation.
+        // This defers to CompositorUnlock when the caller holds that mutex.
+        WindowMsgWakeAll();
+    }
 }
 
 u32 WindowRegistryCount()
@@ -2383,7 +2602,6 @@ void WindowDispatchWheel(WindowHandle h, i32 /*client_x*/, i32 /*client_y*/, i32
                            (mk_buttons & 0xFFFFU);
         const u64 lparam = (static_cast<u64>(screen_x & 0xFFFFU)) | ((static_cast<u64>(screen_y & 0xFFFFU)) << 16);
         WindowPostMessage(h, kWmMouseWheel, wparam, lparam);
-        WindowMsgWakeAll();
         return;
     }
     if (g_windows[h].wheel_fn != nullptr)
@@ -2394,7 +2612,7 @@ void WindowDispatchWheel(WindowHandle h, i32 /*client_x*/, i32 /*client_y*/, i32
 
 void WindowDrawAllOrdered()
 {
-    for (u32 i = 0; i < g_window_count; ++i)
+    for (u32 i = 0; i < g_z_order_count; ++i)
     {
         const WindowHandle h = g_z_order[i];
         if (!g_windows[h].alive || !g_windows[h].visible)
@@ -2427,7 +2645,7 @@ void WindowDrawAllOrdered()
         // FramebufferDropShadow paints. The shallow strip primitive
         // remains the fallback for tactility=off themes (Amber,
         // HighContrast) + the runtime `tactility off` override.
-        const bool only_window = (g_window_count == 1);
+        const bool only_window = (g_z_order_count == 1);
         const bool deep_cast = (is_active || only_window);
         u8 atlas_opacity = 0;
         if (ThemeTactilityEffective())
@@ -2891,7 +3109,7 @@ void WindowDrawAllOrdered()
         // Skipped in single-window scenes (every window is
         // "active enough" when there's nothing else to compete
         // with).
-        if (!is_active && g_window_count > 1)
+        if (!is_active && g_z_order_count > 1)
         {
             const u32 overlay = (0x18u << 24) | (g_compose_desktop_rgb & 0x00FFFFFFu);
             FramebufferBlendFill(g_windows[h].chrome.x, g_windows[h].chrome.y, g_windows[h].chrome.w,
@@ -2940,7 +3158,13 @@ void CompositorLock()
 
 void CompositorUnlock()
 {
+    const bool wake_messages = g_msg_wake_pending;
+    g_msg_wake_pending = false;
     duetos::sched::MutexUnlock(&g_compositor_mutex);
+    if (wake_messages)
+    {
+        WakeWindowMsgWaitersNow();
+    }
 }
 
 void DesktopCompose(u32 desktop_rgb, const char* banner)
@@ -3211,15 +3435,24 @@ u32 WidgetRouteMouse(u32 cursor_x, u32 cursor_y, u8 button_mask)
     return kWidgetInvalid;
 }
 
-// --- Owner pid / message queue / display list --------------------
+// --- Task ownership / message queue / display list ---------------
 
-void WindowSetOwnerPid(WindowHandle h, u64 pid)
+bool WindowSetOwner(WindowHandle h, u64 pid, u64 tid)
 {
-    if (!WindowValid(h))
+    if (!WindowValid(h) || pid == 0 || tid == 0)
     {
-        return;
+        return false;
+    }
+    // Mark the intended generation reusable even if queue allocation fails;
+    // DoWinCreate will close it on failure and must not burn a compositor slot.
+    g_windows[h].ring3_generation = true;
+    if (!GuiMessageEnsureQueue(pid, tid))
+    {
+        return false;
     }
     g_windows[h].owner_pid = pid;
+    g_windows[h].owner_tid = tid;
+    return true;
 }
 
 u64 WindowOwnerPid(WindowHandle h)
@@ -3231,40 +3464,19 @@ u64 WindowOwnerPid(WindowHandle h)
     return g_windows[h].owner_pid;
 }
 
-namespace
+u64 WindowOwnerTid(WindowHandle h)
 {
-
-constexpr u32 kWindowHwndBias = 1; // mirrors window_syscall.cpp kHwndBias
-
-bool MsgRingPop(WindowMsgRing& r, WindowMsg* out)
-{
-    if (r.count == 0)
+    if (!WindowValid(h))
     {
-        return false;
+        return 0;
     }
-    *out = r.buf[r.head];
-    r.head = (r.head + 1) % kWinMsgQueueDepth;
-    --r.count;
-    return true;
+    return g_windows[h].owner_tid;
 }
 
-void MsgRingPush(WindowMsgRing& r, const WindowMsg& m)
+bool WindowOwnedByProcess(WindowHandle h, u64 pid)
 {
-    if (r.count == kWinMsgQueueDepth)
-    {
-        // Evict oldest — standard "drop-oldest" policy for a
-        // bounded input queue. Caller's syscall still reports
-        // success because the message landed (the victim was
-        // already stale).
-        r.head = (r.head + 1) % kWinMsgQueueDepth;
-        --r.count;
-    }
-    r.buf[r.tail] = m;
-    r.tail = (r.tail + 1) % kWinMsgQueueDepth;
-    ++r.count;
+    return pid != 0 && WindowValid(h) && g_windows[h].owner_pid == pid;
 }
-
-} // namespace
 
 bool WindowPostMessage(WindowHandle h, u32 message, u64 wparam, u64 lparam)
 {
@@ -3272,93 +3484,59 @@ bool WindowPostMessage(WindowHandle h, u32 message, u64 wparam, u64 lparam)
     {
         return false;
     }
-    WindowMsg m{};
-    m.hwnd_biased = h + kWindowHwndBias;
-    m.message = message;
-    m.wparam = wparam;
-    m.lparam = lparam;
-    MsgRingPush(g_windows[h].msgs, m);
-    return true;
+    const RegisteredWindow& window = g_windows[h];
+    const u32 public_hwnd = WindowPublicHandle(h);
+    if (window.owner_pid == 0 || window.owner_tid == 0 || public_hwnd == 0)
+    {
+        return false;
+    }
+    const WindowMsg queued{public_hwnd, message, wparam, lparam};
+    const bool posted = GuiMessagePost(window.owner_pid, window.owner_tid, queued);
+    if (posted)
+    {
+        WindowMsgWakeAll();
+    }
+    return posted;
 }
 
-bool WindowPopMessage(WindowHandle h, WindowMsg* out)
+bool WindowPostThreadMessage(u64 pid, u64 tid, u32 message, u64 wparam, u64 lparam)
 {
-    if (!WindowValid(h) || out == nullptr)
+    const WindowMsg queued{0, message, wparam, lparam};
+    const bool posted = GuiMessagePost(pid, tid, queued);
+    if (posted)
     {
-        return false;
+        WindowMsgWakeAll();
     }
-    return MsgRingPop(g_windows[h].msgs, out);
+    return posted;
 }
 
-bool WindowPeekMessage(WindowHandle h, WindowMsg* out)
+u32 WindowReapByTask(u64 pid, u64 tid)
 {
-    if (!WindowValid(h) || out == nullptr)
+    if (pid == 0 || tid == 0)
     {
-        return false;
+        return 0;
     }
-    WindowMsgRing& r = g_windows[h].msgs;
-    if (r.count == 0)
-    {
-        return false;
-    }
-    *out = r.buf[r.head];
-    return true;
-}
 
-bool WindowPopMessageAny(u64 pid, WindowMsg* out)
-{
-    if (pid == 0 || out == nullptr)
-    {
-        return false;
-    }
+    CompositorLock();
+    u32 reaped = 0;
     for (u32 i = 0; i < g_window_count; ++i)
     {
-        if (!g_windows[i].alive || g_windows[i].owner_pid != pid)
-            continue;
-        if (MsgRingPop(g_windows[i].msgs, out))
+        if (g_windows[i].alive && g_windows[i].owner_pid == pid && g_windows[i].owner_tid == tid)
         {
-            return true;
+            WindowClose(static_cast<WindowHandle>(i));
+            ++reaped;
         }
     }
-    return false;
-}
-
-bool WindowAnyMessagePending(u64 pid)
-{
-    if (pid == 0)
+    (void)GuiMessageReapTask(pid, tid);
+    // Reaping an active-but-empty queue is still a Gone transition.
+    WindowMsgWakeAll();
+    if (reaped > 0)
     {
-        return false;
+        const Theme& theme = ThemeCurrent();
+        DesktopCompose(theme.desktop_bg, nullptr);
     }
-    for (u32 i = 0; i < g_window_count; ++i)
-    {
-        if (g_windows[i].alive && g_windows[i].owner_pid == pid && g_windows[i].msgs.count > 0)
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool WindowPeekMessageAny(u64 pid, WindowMsg* out)
-{
-    if (pid == 0 || out == nullptr)
-    {
-        return false;
-    }
-    // Fused walk: direct field reads instead of WindowIsAlive +
-    // WindowOwnerPid + WindowPeekMessage per iteration. Each of
-    // those public APIs revalidates the handle; we already know
-    // i < g_window_count and we're reading the live struct
-    // directly.
-    for (u32 i = 0; i < g_window_count; ++i)
-    {
-        const auto& w = g_windows[i];
-        if (!w.alive || w.owner_pid != pid || w.msgs.count == 0)
-            continue;
-        *out = w.msgs.buf[w.msgs.head];
-        return true;
-    }
-    return false;
+    CompositorUnlock();
+    return reaped;
 }
 
 u32 WindowReapByOwner(u64 pid)
@@ -3372,37 +3550,67 @@ u32 WindowReapByOwner(u64 pid)
     {
         if (g_windows[i].alive && g_windows[i].owner_pid == pid)
         {
-            WindowTimerReap(pid, static_cast<WindowHandle>(i));
             WindowClose(static_cast<WindowHandle>(i));
             ++reaped;
         }
     }
-    // If the dying process held mouse capture, release it.
-    if (WindowGetCapture() != kWindowInvalid && WindowOwnerPid(WindowGetCapture()) == pid)
-    {
-        WindowReleaseCapture();
-    }
+    (void)GuiMessageReapProcess(pid);
     // A process going away could have been holding a pump open
     // in a sibling thread. Wake any GetMessage blockers so they
     // re-check and either dequeue a pending WM_QUIT or exit
     // naturally when their own pid no longer owns any windows.
-    if (reaped > 0)
-    {
-        WindowMsgWakeAll();
-    }
+    // Queue disappearance is observable even when it discarded zero entries.
+    // ProcessRelease calls here with the compositor held, so this request is
+    // consolidated and drained by CompositorUnlock.
+    WindowMsgWakeAll();
     return reaped;
 }
 
-void WindowMsgWaitBlockTimeout(u64 timeout_ticks)
+u64 WindowMsgSequenceSnapshot()
 {
-    (void)duetos::sched::WaitQueueBlockTimeout(&g_msg_wq, timeout_ticks);
+    return __atomic_load_n(&g_msg_event_sequence, __ATOMIC_ACQUIRE);
+}
+
+WindowMsgWaitResult WindowMsgWaitIfSequenceUnchangedCancellable(u64 observed_sequence)
+{
+    constexpr u64 kSaturated = ~static_cast<u64>(0);
+    if (observed_sequence == kSaturated)
+    {
+        // Once saturated the sequence can no longer prove that no event raced
+        // this wait. Refuse to enqueue and let the message pump re-probe.
+        return WindowMsgWaitResult::SequenceChanged;
+    }
+
+    const sched::WaitQueueBlockResult result =
+        sched::WaitQueueBlockIfSequenceUnchangedCancellable(&g_msg_wq, &g_msg_event_sequence, observed_sequence);
+    switch (result)
+    {
+    case sched::WaitQueueBlockResult::Woken:
+        return WindowMsgWaitResult::Woken;
+    case sched::WaitQueueBlockResult::Cancelled:
+        return WindowMsgWaitResult::Cancelled;
+    case sched::WaitQueueBlockResult::SequenceChanged:
+        return WindowMsgWaitResult::SequenceChanged;
+    case sched::WaitQueueBlockResult::TimedOut:
+        // The sequence primitive has no timer arm. Fail open to a re-probe if
+        // a future scheduler refactor nevertheless surfaces this shared-enum
+        // value; sleeping again would be the unsafe choice.
+        return WindowMsgWaitResult::SequenceChanged;
+    }
+    return WindowMsgWaitResult::SequenceChanged;
 }
 
 void WindowMsgWakeAll()
 {
-    duetos::arch::Cli();
-    (void)duetos::sched::WaitQueueWakeAll(&g_msg_wq);
-    duetos::arch::Sti();
+    PublishWindowMsgEvent();
+    duetos::sched::Task* current = duetos::sched::CurrentTask();
+    if (current != nullptr && g_compositor_mutex.owner == current)
+    {
+        g_msg_wake_pending = true;
+        return;
+    }
+
+    WakeWindowMsgWaitersNow();
 }
 
 namespace
@@ -3603,6 +3811,7 @@ void WindowClearDisplayList(WindowHandle h)
 namespace
 {
 constinit bool s_displaylist_selftest_passed = false;
+constinit bool s_window_message_identity_selftest_passed = false;
 } // namespace
 
 // Guards the per-window GDI display-list invariants the BeginPaint
@@ -3616,12 +3825,8 @@ void WindowDisplayListSelfTest()
 {
     using duetos::arch::SerialWrite;
 
-    // WindowClose leaks its slot (g_window_count is never
-    // decremented), so register a scratch window, exercise it, then
-    // restore the table cursor + active handle by hand — otherwise
-    // every boot would burn one of the kMaxWindows slots here. Safe
-    // because boot self-tests run single-threaded.
-    const u32 saved_count = g_window_count;
+    // Register a scratch window and close it afterward. Closed slots are
+    // generation-bumped on reuse, so the self-test leaves no live slot behind.
     const WindowHandle saved_active = g_active_window;
 
     WindowChrome chrome{};
@@ -3629,6 +3834,10 @@ void WindowDisplayListSelfTest()
     chrome.h = 120;
     chrome.title_height = 22;
     const WindowHandle h = WindowRegister(chrome, "dl-selftest");
+    if (h != kWindowInvalid)
+    {
+        g_windows[h].ring3_generation = true;
+    }
 
     u32 fail_code = 0;
     const char* fail_msg = nullptr;
@@ -3683,12 +3892,12 @@ void WindowDisplayListSelfTest()
                 }
             }
         }
+    }
+    if (h != kWindowInvalid)
+    {
         WindowClose(h);
     }
 
-    // Restore the window-table cursor so the scratch slot is reused
-    // by the next real WindowRegister rather than leaked.
-    g_window_count = saved_count;
     g_active_window = saved_active;
 
     if (fail_msg != nullptr)
@@ -3706,6 +3915,170 @@ void WindowDisplayListSelfTest()
 bool WindowDisplayListSelfTestPassed()
 {
     return s_displaylist_selftest_passed;
+}
+
+void WindowMessageIdentitySelfTest()
+{
+    using duetos::arch::SerialWrite;
+
+    s_window_message_identity_selftest_passed = false;
+    GuiMessageQueueSelfTest();
+
+    WindowChrome chrome{};
+    chrome.w = 64;
+    chrome.h = 64;
+    chrome.title_height = 18;
+
+    const WindowHandle saved_active = g_active_window;
+    const u32 saved_widget_count = g_widget_count;
+    const WindowHandle first = WindowRegister(chrome, "hwnd-selftest-a");
+    bool scratch_widget_registered = false;
+    if (first != kWindowInvalid)
+    {
+        g_windows[first].ring3_generation = true;
+        constexpr u64 kOwnerPid = 0x47554950u;
+        constexpr u64 kOwnerTid = 0x47554954u;
+        g_windows[first].owner_pid = kOwnerPid;
+        g_windows[first].owner_tid = kOwnerTid;
+
+        ButtonWidget scratch{};
+        scratch.id = 0xABABA001u;
+        scratch.x = 1;
+        scratch.y = 1;
+        scratch.w = 8;
+        scratch.h = 8;
+        scratch.owner = first;
+        scratch_widget_registered = WidgetRegisterButton(scratch);
+    }
+    const u32 first_public = WindowPublicHandle(first);
+    u32 fail_code = 0;
+    const char* fail_message = nullptr;
+
+    if (!GuiMessageQueueSelfTestPassed())
+    {
+        fail_code = 0x720;
+        fail_message = "[hwnd-selftest] FAIL task queue dependency";
+    }
+    else if (first == kWindowInvalid || first_public == 0 || (first_public & 0xFF000000u) != 0 ||
+             WindowResolvePublicHandle(first_public) != first)
+    {
+        fail_code = 0x721;
+        fail_message = "[hwnd-selftest] FAIL first encoding";
+    }
+    else if (!WindowOwnedByProcess(first, 0x47554950u) || WindowOwnedByProcess(first, 0x47554951u) ||
+             WindowOwnedByProcess(first, 0))
+    {
+        fail_code = 0x725;
+        fail_message = "[hwnd-selftest] FAIL post ownership policy";
+    }
+    else if (!scratch_widget_registered)
+    {
+        fail_code = 0x726;
+        fail_message = "[hwnd-selftest] FAIL widget fixture registration";
+    }
+
+    const MenuItem scratch_menu{"identity", 1, 0, nullptr, 0};
+    MenuOpenWindow(&scratch_menu, 1, 0, 0, 0xC0FFEEu, first_public);
+    const bool window_menu_identity_ok = MenuContext() == 0xC0FFEEu && MenuWindowIdentity() == first_public;
+    MenuClose();
+    MenuOpen(&scratch_menu, 1, 0, 0, 0x1234u);
+    const bool generic_menu_identity_ok = MenuContext() == 0x1234u && MenuWindowIdentity() == 0;
+    MenuClose();
+    if (fail_message == nullptr && !window_menu_identity_ok)
+    {
+        fail_code = 0x728;
+        fail_message = "[hwnd-selftest] FAIL window menu identity separation";
+    }
+    else if (fail_message == nullptr && !generic_menu_identity_ok)
+    {
+        fail_code = 0x729;
+        fail_message = "[hwnd-selftest] FAIL generic menu identity reset";
+    }
+
+    if (first != kWindowInvalid)
+    {
+        WindowClose(first);
+    }
+    if (fail_message == nullptr && WindowResolvePublicHandle(first_public) != kWindowInvalid)
+    {
+        fail_code = 0x722;
+        fail_message = "[hwnd-selftest] FAIL stale handle survived close";
+    }
+
+    const WindowHandle second = WindowRegister(chrome, "hwnd-selftest-b");
+    if (second != kWindowInvalid)
+    {
+        g_windows[second].ring3_generation = true;
+    }
+    const u32 second_public = WindowPublicHandle(second);
+    if (fail_message == nullptr &&
+        (second == kWindowInvalid || second != first || second_public == 0 || second_public == first_public ||
+         WindowResolvePublicHandle(second_public) != second ||
+         WindowResolvePublicHandle(first_public) != kWindowInvalid))
+    {
+        fail_code = 0x723;
+        fail_message = "[hwnd-selftest] FAIL generation reuse";
+    }
+    if (fail_message == nullptr)
+    {
+        bool stale_widget_owner = g_widget_count != saved_widget_count;
+        for (u32 i = 0; i < g_widget_count && !stale_widget_owner; ++i)
+        {
+            stale_widget_owner = g_widgets[i].owner == second;
+        }
+        if (stale_widget_owner)
+        {
+            fail_code = 0x727;
+            fail_message = "[hwnd-selftest] FAIL widget owner survived slot reuse";
+        }
+    }
+
+    if (second != kWindowInvalid)
+    {
+        // Close the live generation normally so create/destroy diagnostics
+        // retain a matching public identity. Then force the dead scratch slot
+        // to the allocation boundary and prove WindowRegister retires it
+        // instead of wrapping it back to generation one.
+        const u32 saved_generation = g_windows[second].generation;
+        WindowClose(second);
+        g_windows[second].generation = kWindowHandleGenerationMask;
+        g_windows[second].retired = false;
+        const WindowHandle replacement = WindowRegister(chrome, "hwnd-selftest-saturation");
+        if (replacement != kWindowInvalid)
+        {
+            g_windows[replacement].ring3_generation = true;
+        }
+        if (fail_message == nullptr &&
+            (!g_windows[second].retired || replacement == kWindowInvalid || replacement == second))
+        {
+            fail_code = 0x724;
+            fail_message = "[hwnd-selftest] FAIL saturated slot retirement";
+        }
+        if (replacement != kWindowInvalid)
+        {
+            WindowClose(replacement);
+        }
+        g_windows[second].generation = saved_generation;
+        g_windows[second].retired = false;
+    }
+    (void)PurgeWidgetsForOwner(first);
+    g_active_window = saved_active;
+
+    if (fail_message != nullptr)
+    {
+        SerialWrite(fail_message);
+        SerialWrite("\n");
+        KBP_PROBE_V(duetos::debug::ProbeId::kBootSelftestFail, fail_code);
+        return;
+    }
+
+    s_window_message_identity_selftest_passed = true;
+    SerialWrite("[hwnd-selftest] PASS\n");
+}
+
+bool WindowMessageIdentitySelfTestPassed()
+{
+    return s_window_message_identity_selftest_passed;
 }
 
 bool WindowIsVisible(WindowHandle h)
@@ -3726,7 +4099,7 @@ void WindowSetVisible(WindowHandle h, bool visible)
     if (!visible && g_active_window == h)
     {
         g_active_window = kWindowInvalid;
-        for (u32 i = g_window_count; i > 0; --i)
+        for (u32 i = g_z_order_count; i > 0; --i)
         {
             const WindowHandle candidate = g_z_order[i - 1];
             if (candidate != h && WindowValid(candidate) && g_windows[candidate].visible)
@@ -4148,7 +4521,6 @@ void WindowTimerReap(u64 pid, WindowHandle hwnd)
 void WindowTimerTick()
 {
     constexpr u32 kWmTimer = 0x0113;
-    bool any_posted = false;
     for (u32 i = 0; i < kWindowTimersMax; ++i)
     {
         auto& s = g_timers[i];
@@ -4171,13 +4543,8 @@ void WindowTimerTick()
             {
                 WindowPostMessage(s.hwnd, kWmTimer, s.timer_id, 0);
                 s.remaining_ticks = s.interval_ticks;
-                any_posted = true;
             }
         }
-    }
-    if (any_posted)
-    {
-        WindowMsgWakeAll();
     }
 }
 
@@ -4220,7 +4587,7 @@ WindowHandle WindowGetRelated(WindowHandle h, WindowRel rel)
     {
     case WindowRel::First:
     {
-        for (u32 i = 0; i < g_window_count; ++i)
+        for (u32 i = 0; i < g_z_order_count; ++i)
         {
             const WindowHandle w = g_z_order[i];
             if (WindowValid(w))
@@ -4230,7 +4597,7 @@ WindowHandle WindowGetRelated(WindowHandle h, WindowRel rel)
     }
     case WindowRel::Last:
     {
-        for (u32 i = g_window_count; i > 0; --i)
+        for (u32 i = g_z_order_count; i > 0; --i)
         {
             const WindowHandle w = g_z_order[i - 1];
             if (WindowValid(w))
@@ -4243,8 +4610,8 @@ WindowHandle WindowGetRelated(WindowHandle h, WindowRel rel)
     {
         if (!WindowValid(h))
             return kWindowInvalid;
-        u32 idx = g_window_count;
-        for (u32 i = 0; i < g_window_count; ++i)
+        u32 idx = g_z_order_count;
+        for (u32 i = 0; i < g_z_order_count; ++i)
         {
             if (g_z_order[i] == h)
             {
@@ -4252,11 +4619,11 @@ WindowHandle WindowGetRelated(WindowHandle h, WindowRel rel)
                 break;
             }
         }
-        if (idx == g_window_count)
+        if (idx == g_z_order_count)
             return kWindowInvalid;
         if (rel == WindowRel::Next)
         {
-            for (u32 i = idx + 1; i < g_window_count; ++i)
+            for (u32 i = idx + 1; i < g_z_order_count; ++i)
             {
                 if (WindowValid(g_z_order[i]))
                     return g_z_order[i];
@@ -4307,12 +4674,12 @@ void WindowSetFocus(WindowHandle h)
     }
     if (prev != kWindowInvalid && WindowValid(prev))
     {
-        WindowPostMessage(prev, kWmKillFocus, static_cast<u64>(h) + 1, 0);
+        WindowPostMessage(prev, kWmKillFocus, (h == kWindowInvalid) ? 0 : WindowPublicHandle(h), 0);
     }
     g_focus_hwnd = h;
     if (h != kWindowInvalid)
     {
-        WindowPostMessage(h, kWmSetFocus, (prev == kWindowInvalid) ? 0 : (static_cast<u64>(prev) + 1), 0);
+        WindowPostMessage(h, kWmSetFocus, (prev == kWindowInvalid) ? 0 : WindowPublicHandle(prev), 0);
     }
 }
 
@@ -4427,10 +4794,6 @@ u32 WindowDrainPaints()
         WindowPostMessage(static_cast<WindowHandle>(i), kWmPaint, 0, 0);
         g_windows[i].dirty = false;
         ++posted;
-    }
-    if (posted > 0)
-    {
-        WindowMsgWakeAll();
     }
     return posted;
 }
