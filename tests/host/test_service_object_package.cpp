@@ -82,6 +82,18 @@ void WriteLe32(u8* bytes, u32 value)
     bytes[3] = static_cast<u8>(value >> 24u);
 }
 
+void WriteLe16(u8* bytes, u16 value)
+{
+    bytes[0] = static_cast<u8>(value);
+    bytes[1] = static_cast<u8>(value >> 8u);
+}
+
+void WriteLe64(u8* bytes, u64 value)
+{
+    WriteLe32(bytes, static_cast<u32>(value));
+    WriteLe32(bytes + 4, static_cast<u32>(value >> 32u));
+}
+
 bool HashEquals(const duetos::loader::Hash256& left, const duetos::loader::Hash256& right)
 {
     return std::memcmp(left.bytes, right.bytes, sizeof(left.bytes)) == 0;
@@ -153,6 +165,10 @@ struct Fixture
     u32 manifest_byte_count = 0;
     ServiceManifestAuthoritySnapshotV1 authority{};
     std::array<ServiceExecutableObjectDefinitionV1, 2> objects{};
+    std::array<std::array<u8, duetos::loader::kLoadPlanV1HeaderBytes + duetos::loader::kLoadRegionV1Bytes>, 2>
+        plan_bytes{};
+    std::array<ServiceBootstrapPlanDefinitionV1, 2> plans{};
+    bool plans_bound = false;
     ServiceObjectPackageDefinitionV1 definition{};
 
     Fixture()
@@ -192,12 +208,45 @@ struct Fixture
                                                       &authority,
                                                       objects.data(),
                                                       static_cast<u32>(objects.size()),
+                                                      0,
+                                                      plans_bound ? plans.data() : nullptr,
+                                                      plans_bound ? static_cast<u32>(plans.size()) : 0,
                                                       0};
     }
 
     void RefreshManifestAuthority()
     {
         authority = MakeAuthority(document, manifest_bytes.data(), manifest_byte_count);
+        RefreshDefinition();
+    }
+
+    void BindPlans()
+    {
+        for (u32 index = 0; index < plans.size(); ++index)
+        {
+            auto& bytes = plan_bytes[index];
+            bytes = {};
+            WriteLe32(bytes.data(), static_cast<u32>(bytes.size()));
+            WriteLe16(bytes.data() + 4, duetos::loader::kLoadPlanVersion1);
+            WriteLe16(bytes.data() + 6, static_cast<u16>(duetos::loader::ImageFormat::Elf64));
+            WriteLe64(bytes.data() + 8, 0x400000);
+            WriteLe64(bytes.data() + 16, 0x400000);
+            WriteLe32(bytes.data() + 24, 1);
+            for (u32 hash_index = 0; hash_index < sizeof(document.services[index].executable_content_hash.bytes);
+                 ++hash_index)
+            {
+                bytes[32 + hash_index] = document.services[index].executable_content_hash.bytes[hash_index];
+            }
+            duetos::loader::Hash256 plan_hash{};
+            duetos::crypto::Sha256Hash(bytes.data(), static_cast<u32>(bytes.size()), plan_hash.bytes);
+            plans[index] = ServiceBootstrapPlanDefinitionV1{document.services[index].executable_transfer_ref,
+                                                            kServiceBootstrapPlanDefinitionSealed,
+                                                            bytes.data(),
+                                                            static_cast<u32>(bytes.size()),
+                                                            0,
+                                                            plan_hash};
+        }
+        plans_bound = true;
         RefreshDefinition();
     }
 };
@@ -254,6 +303,68 @@ int main()
                   ServiceObjectPackageStatus::CorruptPackage);
         EXPECT_EQ(ServiceObjectPackageGetManifestV1(&package, &manifest).status,
                   ServiceObjectPackageStatus::CorruptPackage);
+    }
+
+    {
+        Fixture fixture;
+        fixture.BindPlans();
+        ServiceObjectPackageV1 package{};
+        EXPECT_EQ(ServiceObjectPackageInitializeV1(&package, &fixture.definition).status,
+                  ServiceObjectPackageStatus::Ok);
+        EXPECT_EQ(package.bootstrap_plan_count, 2u);
+
+        ServiceBootstrapPlanTransferSnapshotV1 plan{};
+        EXPECT_EQ(ServiceObjectPackageResolveBootstrapPlanV1(&package, 0x100, 1, &plan).status,
+                  ServiceObjectPackageStatus::Ok);
+        EXPECT_TRUE(plan.bytes == fixture.plan_bytes[0].data());
+        EXPECT_EQ(plan.byte_count, fixture.plan_bytes[0].size());
+        EXPECT_EQ(ServiceObjectPackageResolveBootstrapPlanV1(&package, 0x200, 1, &plan).status,
+                  ServiceObjectPackageStatus::ServiceBindingMismatch);
+        EXPECT_TRUE(plan.bytes == nullptr);
+
+        const auto plan_before_alias_probe = fixture.plan_bytes[0];
+        auto* aliased_plan = reinterpret_cast<ServiceBootstrapPlanTransferSnapshotV1*>(fixture.plan_bytes[0].data());
+        EXPECT_EQ(ServiceObjectPackageResolveBootstrapPlanV1(&package, 0x100, 1, aliased_plan).status,
+                  ServiceObjectPackageStatus::AliasedOutput);
+        EXPECT_TRUE(fixture.plan_bytes[0] == plan_before_alias_probe);
+
+        fixture.plan_bytes[0].back() ^= 0x5A;
+        EXPECT_EQ(ServiceObjectPackageResolveBootstrapPlanV1(&package, 0x100, 1, &plan).status,
+                  ServiceObjectPackageStatus::CorruptPackage);
+    }
+
+    {
+        Fixture fixture;
+        fixture.BindPlans();
+        fixture.definition.bootstrap_plan_count = 1;
+        ServiceObjectPackageV1 package{};
+        EXPECT_EQ(ServiceObjectPackageInitializeV1(&package, &fixture.definition).status,
+                  ServiceObjectPackageStatus::PlanCountMismatch);
+        EXPECT_TRUE(AllZero(&package, sizeof(package)));
+    }
+
+    {
+        Fixture fixture;
+        fixture.BindPlans();
+        fixture.plans[0].content_hash.bytes[0] ^= 1;
+        fixture.RefreshDefinition();
+        ServiceObjectPackageV1 package{};
+        EXPECT_EQ(ServiceObjectPackageInitializeV1(&package, &fixture.definition).status,
+                  ServiceObjectPackageStatus::BootstrapPlanHashMismatch);
+        EXPECT_TRUE(AllZero(&package, sizeof(package)));
+    }
+
+    {
+        Fixture fixture;
+        fixture.BindPlans();
+        WriteLe64(fixture.plan_bytes[0].data() + duetos::loader::kLoadPlanV1HeaderBytes + 16, 0x5356000000000001ULL);
+        duetos::crypto::Sha256Hash(fixture.plan_bytes[0].data(), static_cast<u32>(fixture.plan_bytes[0].size()),
+                                   fixture.plans[0].content_hash.bytes);
+        fixture.RefreshDefinition();
+        ServiceObjectPackageV1 package{};
+        EXPECT_EQ(ServiceObjectPackageInitializeV1(&package, &fixture.definition).status,
+                  ServiceObjectPackageStatus::InvalidBootstrapPlan);
+        EXPECT_TRUE(AllZero(&package, sizeof(package)));
     }
 
     // A duplicate ref is rejected by the manifest trust boundary before the
@@ -364,6 +475,8 @@ int main()
 
     EXPECT_STREQ(ServiceObjectPackageStatusName(ServiceObjectPackageStatus::ContentHashMismatch),
                  "content-hash-mismatch");
+    EXPECT_STREQ(ServiceObjectPackageStatusName(ServiceObjectPackageStatus::BootstrapPlanHashMismatch),
+                 "bootstrap-plan-hash-mismatch");
     EXPECT_STREQ(ServiceObjectPackageStatusName(static_cast<ServiceObjectPackageStatus>(0xFF)), "unknown");
     return duetos_host_test::finish_main("test_service_object_package");
 }

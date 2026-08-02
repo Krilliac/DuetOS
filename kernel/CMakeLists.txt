@@ -365,6 +365,7 @@ set(DUETOS_SERVICE_PACKAGE_COMMAND
     --authority "${DUETOS_SERVICE_AUTHORITY_CONFIG}"
     --artifact-root "${DUETOS_SERVICE_ARTIFACT_ROOT}"
     ${DUETOS_SERVICE_ARTIFACT_MAP_ARGS}
+    --bootstrap-plans
     --header "${DUETOS_SERVICE_MANIFEST_HEADER}"
     --binary "${DUETOS_SERVICE_MANIFEST_BINARY}"
     --normalized "${DUETOS_SERVICE_MANIFEST_NORMALIZED}"
@@ -399,9 +400,9 @@ add_custom_target(duetos-service-package-verify
 add_dependencies(duetos-service-package-verify duetos-service-package-data)
 
 # Compile the generated typed binding independently of the kernel-target
-# staging seam.  No live boot call site anchors that seam yet, so section GC
-# may discard it; if retained later, it still stops before mapping, activation,
-# or publication.
+# staging seam. The generated package binds exact ELF bytes and relocatable
+# bootstrap-plan templates; activation still stops before process/endpoint
+# publication until those separately owned contracts are integrated.
 set(DUETOS_SERVICE_PACKAGE_COMPILE_CHECK
     "${CMAKE_CURRENT_BINARY_DIR}/service_package_compile_check.cpp")
 file(GENERATE OUTPUT "${DUETOS_SERVICE_PACKAGE_COMPILE_CHECK}" CONTENT [=[
@@ -409,7 +410,9 @@ file(GENERATE OUTPUT "${DUETOS_SERVICE_PACKAGE_COMPILE_CHECK}" CONTENT [=[
 
 static_assert(!duetos::core::generated::kBootServicePackageActivationReady);
 static_assert(duetos::core::generated::kBootServicePackageAuthorityBound);
-static_assert(!duetos::core::generated::kBootServicePackageBootstrapPlansBound);
+static_assert(duetos::core::generated::kBootServicePackageBootstrapPlansBound);
+static_assert(!duetos::core::generated::kBootServicePackageProcessPublicationBound);
+static_assert(!duetos::core::generated::kBootServicePackageEndpointReadinessBound);
 ]=])
 set_source_files_properties("${DUETOS_SERVICE_PACKAGE_COMPILE_CHECK}"
     PROPERTIES GENERATED TRUE)

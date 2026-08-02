@@ -10,21 +10,23 @@
  *
  *   - canonical manifest bytes;
  *   - a trusted, separately retained manifest-authority snapshot; and
- *   - one embedded sealed executable object for every manifest service.
+ *   - one embedded sealed executable object for every manifest service; and
+ *   - optionally, one sealed relocatable bootstrap-plan template per service.
  *
  * The package never creates signer authority and never treats a path, hash, or
  * transfer reference from the manifest as proof.  It validates the manifest
  * against the supplied authority, hashes every executable object, requires an
  * exact immutable-policy match, rejects duplicate/extra/missing references,
  * and only then copies the authority and scalar plan into package-owned
- * storage.  Resolver calls re-hash the selected bytes so accidental mutation
- * after construction fails closed.
+ * storage. Bootstrap-plan templates are independently hashed and bound to the
+ * same service/transfer pair. Resolver calls re-hash selected bytes so
+ * accidental mutation after construction fails closed.
  *
  * Ownership and threading:
  *   - Definition arrays are borrowed only for Initialize.
- *   - Executable bytes remain borrowed for the package lifetime.  Production
- *     callers must use authenticated kernel-image/package storage whose bytes
- *     cannot be replaced or freed while the package is live.
+ *   - Executable and bootstrap-plan bytes remain borrowed for the package
+ *     lifetime. Production callers must use authenticated kernel-image/package
+ *     storage whose bytes cannot be replaced or freed while the package lives.
  *   - The manifest plan, authority snapshot, and binding rows are copied and
  *     independently retained inside the package.
  *   - Initialize is [boot/task context, single-threaded, unpublished].
@@ -43,6 +45,8 @@ inline constexpr u32 kServiceObjectPackageExecutableMaximumBytes = 256u * 1024u 
 inline constexpr u64 kServiceObjectPackageTotalExecutableMaximumBytes = 1024ULL * 1024ULL * 1024ULL;
 inline constexpr u32 kServiceObjectDefinitionSealed = 1u << 0;
 inline constexpr u32 kServiceObjectDefinitionKnownFlags = kServiceObjectDefinitionSealed;
+inline constexpr u32 kServiceBootstrapPlanDefinitionSealed = 1u << 0;
+inline constexpr u32 kServiceBootstrapPlanDefinitionKnownFlags = kServiceBootstrapPlanDefinitionSealed;
 inline constexpr u32 kServiceObjectPackageNoObjectIndex = ~0U;
 
 // Trusted package-builder input.  `bytes` must refer to an exact immutable
@@ -59,6 +63,19 @@ struct ServiceExecutableObjectDefinitionV1
     u32 reserved;
 };
 
+// Relocatable LoadPlan v1 template. Every LoadRegion memory_object field must
+// be zero; staging binds those slots to its freshly minted typed object handle
+// and requires all remaining bytes to exactly match the runtime parser output.
+struct ServiceBootstrapPlanDefinitionV1
+{
+    u32 executable_transfer_ref;
+    u32 flags;
+    const u8* bytes;
+    u32 byte_count;
+    u32 reserved;
+    loader::Hash256 content_hash;
+};
+
 struct ServiceObjectPackageDefinitionV1
 {
     const u8* manifest_bytes;
@@ -67,6 +84,9 @@ struct ServiceObjectPackageDefinitionV1
     const ServiceExecutableObjectDefinitionV1* executable_objects;
     u32 executable_object_count;
     u32 reserved;
+    const ServiceBootstrapPlanDefinitionV1* bootstrap_plans;
+    u32 bootstrap_plan_count;
+    u32 reserved_bootstrap;
 };
 
 struct ServiceObjectPackageRowV1
@@ -79,6 +99,15 @@ struct ServiceObjectPackageRowV1
     loader::Hash256 content_hash;
 };
 
+struct ServiceBootstrapPlanRowV1
+{
+    u64 service_identity;
+    u32 executable_transfer_ref;
+    u32 byte_count;
+    const u8* bytes;
+    loader::Hash256 content_hash;
+};
+
 // Public only so boot code can provide fixed, allocation-free storage.  Treat
 // every field as opaque after successful initialization.
 struct ServiceObjectPackageV1
@@ -86,9 +115,12 @@ struct ServiceObjectPackageV1
     u32 initialized;
     u16 version;
     u16 executable_object_count;
+    u16 bootstrap_plan_count;
+    u16 reserved;
     ServiceManifestPlanV1 manifest_plan;
     ServiceManifestAuthoritySnapshotV1 manifest_authority;
     ServiceObjectPackageRowV1 executable_objects[kServiceManifestMaximumServices];
+    ServiceBootstrapPlanRowV1 bootstrap_plans[kServiceManifestMaximumServices];
 };
 
 struct ServiceObjectPackageManifestV1
@@ -104,6 +136,15 @@ struct ServiceExecutableTransferSnapshotV1
     u32 immutable_policy_selector;
     const u8* bytes;
     u64 byte_count;
+    loader::Hash256 content_hash;
+};
+
+struct ServiceBootstrapPlanTransferSnapshotV1
+{
+    u64 service_identity;
+    u32 executable_transfer_ref;
+    u32 byte_count;
+    const u8* bytes;
     loader::Hash256 content_hash;
 };
 
@@ -129,6 +170,9 @@ enum class ServiceObjectPackageStatus : u8
     CorruptPackage,
     NotFound,
     ServiceBindingMismatch,
+    PlanCountMismatch,
+    InvalidBootstrapPlan,
+    BootstrapPlanHashMismatch,
 };
 
 struct ServiceObjectPackageResult
@@ -158,6 +202,13 @@ ServiceObjectPackageResult ServiceObjectPackageResolveExecutableV1(const Service
                                                                    u64 expected_service_identity,
                                                                    u32 executable_transfer_ref,
                                                                    ServiceExecutableTransferSnapshotV1* transfer_out);
+
+// Resolve an exact service/ref-bound bootstrap template. Packages without a
+// complete template set return NotFound. The selected bytes are re-hashed
+// before their immutable borrowed snapshot is returned.
+ServiceObjectPackageResult ServiceObjectPackageResolveBootstrapPlanV1(
+    const ServiceObjectPackageV1* package, u64 expected_service_identity, u32 executable_transfer_ref,
+    ServiceBootstrapPlanTransferSnapshotV1* transfer_out);
 
 const char* ServiceObjectPackageStatusName(ServiceObjectPackageStatus status);
 

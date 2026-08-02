@@ -10,15 +10,16 @@
  *   1. validate and retain the separately-authorized object package;
  *   2. resolve each exact service/transfer-reference pair;
  *   3. mint a boot-private, typed, stable memory-object identity;
- *   4. stage native ELF bytes through ElfLoadImagePrepare; and
- *   5. copy and consume the sealed plan through ExecAdmission against the
+ *   4. stage native ELF bytes through ElfLoadImagePrepare;
+ *   5. require runtime output to match its bound build-time plan template; and
+ *   6. copy and consume the sealed plan through ExecAdmission against the
  *      exact backing row in this registry.
  *
  * It deliberately does not map an AddressSpace, create a Process/Task,
  * install capabilities or resource domains, publish scheduler state, create
  * IPC endpoints, or start a lifecycle transition.  A Ready staging package
- * is therefore not ActivationReady, and runtime-produced plans do not make
- * the build-time BootstrapPlansBound marker true.
+ * is therefore not ActivationReady. Build-time plan binding proves parser
+ * agreement, but cannot stand in for process/endpoint publication authority.
  *
  * Ownership and threading:
  *   - The definition and executable bytes are borrowed through the retained
@@ -82,9 +83,11 @@ enum class ServiceBootstrapStageStatus : u8
     IdentityExhausted,
     UnsupportedServiceKind,
     ExecutableResolveFailed,
+    BootstrapPlanResolveFailed,
     ElfStageRejected,
     ResourceBudgetExceeded,
     PlanUnavailable,
+    BootstrapPlanMismatch,
     AdmissionRejected,
     CorruptRuntime,
     NotReady,
@@ -323,10 +326,10 @@ u64 ServiceBootstrapStageExchangeNextRegistryIdentityForTestV1(u64 next_identity
 ServiceBootstrapStageStatus ServiceBootstrapStageDiscardV1(ServiceBootstrapStageRuntimeV1* runtime);
 
 #if !defined(DUETOS_HOST_TEST)
-// Compiled production seam for generated_boot_service_package_data.h. No live
-// boot call site anchors it yet, so section GC may discard it. If invoked by a
-// future boot owner, the generated truth markers still remain authority=true,
-// plans=false, activation=false.
+// Production seam for generated_boot_service_package_data.h. A linked live
+// owner consumes authority-bound ELF and bootstrap-plan templates through this
+// same entry point; process publication and endpoint readiness remain false,
+// so activation remains fail-closed.
 u32 ServiceBootstrapGeneratedServiceCountV1();
 ServiceBootstrapStageResultV1 ServiceBootstrapStageGeneratedV1(ServiceBootstrapStageRuntimeV1* runtime,
                                                                const ServiceBootstrapSlotStorageV1* slots,

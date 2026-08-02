@@ -25,7 +25,9 @@ class ServiceBootstrapStageContract(unittest.TestCase):
         self.assertIn('#include "service-package/generated_boot_service_package_data.h"', SOURCE)
         self.assertIn("generated::kBootServicePackageDefinition", SOURCE)
         self.assertIn("static_assert(generated::kBootServicePackageAuthorityBound)", SOURCE)
-        self.assertIn("static_assert(!generated::kBootServicePackageBootstrapPlansBound)", SOURCE)
+        self.assertIn("static_assert(generated::kBootServicePackageBootstrapPlansBound)", SOURCE)
+        self.assertIn("static_assert(!generated::kBootServicePackageProcessPublicationBound)", SOURCE)
+        self.assertIn("static_assert(!generated::kBootServicePackageEndpointReadinessBound)", SOURCE)
         self.assertIn("static_assert(!generated::kBootServicePackageActivationReady)", SOURCE)
 
     def test_package_resolution_staging_and_admission_are_ordered(self) -> None:
@@ -35,6 +37,7 @@ class ServiceBootstrapStageContract(unittest.TestCase):
             "ServiceObjectPackageGetManifestV1",
             "PreflightSlots",
             "ServiceObjectPackageResolveExecutableV1",
+            "ServiceObjectPackageResolveBootstrapPlanV1",
             "PrepareStagedRow",
             "ServiceBootstrapStageState::Ready",
         )
@@ -49,6 +52,7 @@ class ServiceBootstrapStageContract(unittest.TestCase):
             "ElfLoadImagePrepare",
             "LoadImageInspect",
             "LoadImagePlanBytes",
+            "BootstrapPlanMatches",
             "ExecAdmissionInitialize",
             "ExecAdmissionPrepare",
             "ExecAdmissionConsume",
@@ -90,6 +94,7 @@ class ServiceBootstrapStageContract(unittest.TestCase):
             "definition.manifest_bytes",
             "definition.manifest_authority",
             "artifact.bytes",
+            "plan.bytes",
         ):
             self.assertIn(needle, preflight)
 
@@ -133,6 +138,7 @@ class ServiceBootstrapStageContract(unittest.TestCase):
             "PreflightRestageSlot",
             "ExecAdmissionQuiescentSuccessorIdentity",
             "ServiceObjectPackageResolveExecutableV1",
+            "ServiceObjectPackageResolveBootstrapPlanV1",
             "MintRegistryIdentity",
             "ResetRetiredRestageSlot",
             "PrepareStagedRow",
@@ -219,10 +225,11 @@ class ServiceBootstrapStageContract(unittest.TestCase):
         self.assertIn("add_host_test(service_bootstrap_stage)", HOST_CMAKE)
         self.assertIn("kernel/core/service_bootstrap_stage.cpp", HOST_CMAKE)
         self.assertIn("Why the readiness markers stay false", WIKI)
+        self.assertIn("BootstrapPlansBound = true", WIKI)
         self.assertIn("ActivationReady = false", WIKI)
         self.assertIn("scheduler publication lock", WIKI)
         self.assertRegex(WIKI, r"compiled(?:-| )but(?:-| )dormant")
-        self.assertIn("section GC may discard", HEADER)
+        self.assertIn("activation remains fail-closed", HEADER)
 
 
 if __name__ == "__main__":

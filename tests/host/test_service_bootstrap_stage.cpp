@@ -211,6 +211,12 @@ void SetText(u8* destination, u32 capacity, u8* length_out, const char* text)
     *length_out = static_cast<u8>(length);
 }
 
+void WriteLe64(u8* bytes, u64 value)
+{
+    for (u32 index = 0; index < 8; ++index)
+        bytes[index] = static_cast<u8>(value >> (index * 8u));
+}
+
 ServiceManifestServiceV1 MakeService(u64 identity, u32 transfer_ref, ServiceManifestKind kind, const char* name,
                                      const char* path, const u8* bytes, u32 byte_count)
 {
@@ -266,6 +272,9 @@ struct PackageFixture
     u32 manifest_byte_count = 0;
     ServiceManifestAuthoritySnapshotV1 authority{};
     std::array<ServiceExecutableObjectDefinitionV1, 2> objects{};
+    std::array<std::array<u8, kLoadImageMaxPlanBytes>, 2> plan_bytes{};
+    std::array<ServiceBootstrapPlanDefinitionV1, 2> plans{};
+    bool plans_bound = false;
     ServiceObjectPackageDefinitionV1 definition{};
 
     PackageFixture()
@@ -307,6 +316,9 @@ struct PackageFixture
                                                       &authority,
                                                       objects.data(),
                                                       static_cast<u32>(objects.size()),
+                                                      0,
+                                                      plans_bound ? plans.data() : nullptr,
+                                                      plans_bound ? static_cast<u32>(plans.size()) : 0,
                                                       0};
     }
 };
@@ -330,6 +342,41 @@ struct StageFixture
                                                  static_cast<u32>(slots.size()));
     }
 };
+
+void BindPlansFromRuntime(PackageFixture* package, const ServiceBootstrapStageRuntimeV1& source)
+{
+    EXPECT_TRUE(package != nullptr);
+    if (package == nullptr)
+        return;
+    EXPECT_EQ(source.service_count, static_cast<u32>(package->plans.size()));
+    if (source.service_count != static_cast<u32>(package->plans.size()))
+        return;
+    for (u32 index = 0; index < source.service_count; ++index)
+    {
+        const LoadPlanViewV1& plan = source.rows[index].admitted_plan;
+        EXPECT_TRUE(plan.bytes != nullptr);
+        EXPECT_TRUE(plan.size <= package->plan_bytes[index].size());
+        if (plan.bytes == nullptr || plan.size > package->plan_bytes[index].size())
+            return;
+        std::memcpy(package->plan_bytes[index].data(), plan.bytes, plan.size);
+        for (u32 region_index = 0; region_index < plan.header.region_count; ++region_index)
+        {
+            u8* region = package->plan_bytes[index].data() + kLoadPlanV1HeaderBytes + region_index * kLoadRegionV1Bytes;
+            WriteLe64(region + 16, 0);
+        }
+        Hash256 plan_hash{};
+        duetos::crypto::Sha256Hash(package->plan_bytes[index].data(), plan.size, plan_hash.bytes);
+        package->plans[index] =
+            ServiceBootstrapPlanDefinitionV1{package->document.services[index].executable_transfer_ref,
+                                             kServiceBootstrapPlanDefinitionSealed,
+                                             package->plan_bytes[index].data(),
+                                             plan.size,
+                                             0,
+                                             plan_hash};
+    }
+    package->plans_bound = true;
+    package->Refresh();
+}
 
 using StageRowBytes = std::array<u8, sizeof(ServiceBootstrapStageRowV1)>;
 using ImageBytes = std::array<u8, sizeof(LoadImage)>;
@@ -436,6 +483,46 @@ int main()
                                                          first_region.length, &backing, &second.runtime));
         EXPECT_EQ(ServiceBootstrapStageDiscardV1(&first.runtime), ServiceBootstrapStageStatus::Ok);
         EXPECT_EQ(ServiceBootstrapStageDiscardV1(&second.runtime), ServiceBootstrapStageStatus::Ok);
+    }
+
+    // Build-time templates carry zero memory-object relocation slots. The
+    // package re-hashes them, and staging accepts only the exact runtime parser
+    // output with each slot rebound to this runtime's typed object handle.
+    {
+        parser_fixture::Reset();
+        parser_fixture::AddSingleRxSegment();
+        StageFixture producer;
+        EXPECT_EQ(producer.Stage().status, ServiceBootstrapStageStatus::Ok);
+
+        StageFixture matching;
+        BindPlansFromRuntime(&matching.package, producer.runtime);
+        EXPECT_EQ(matching.Stage().status, ServiceBootstrapStageStatus::Ok);
+        EXPECT_EQ(matching.runtime.package.bootstrap_plan_count, 2u);
+        EXPECT_TRUE(matching.runtime.registry_identity != producer.runtime.registry_identity);
+
+        ServiceBootstrapPlanTransferSnapshotV1 template_plan{};
+        EXPECT_EQ(
+            ServiceObjectPackageResolveBootstrapPlanV1(&matching.runtime.package, 0x100, 1, &template_plan).status,
+            ServiceObjectPackageStatus::Ok);
+        EXPECT_TRUE(template_plan.bytes != nullptr);
+        EXPECT_EQ(template_plan.bytes[kLoadPlanV1HeaderBytes + 16], 0u);
+        LoadRegionV1 runtime_region{};
+        ASSERT_TRUE(LoadPlanRegionAt(matching.runtime.rows[0].admitted_plan, 0, &runtime_region));
+        EXPECT_EQ(runtime_region.memory_object, matching.runtime.rows[0].memory_object);
+
+        StageFixture mismatched;
+        BindPlansFromRuntime(&mismatched.package, producer.runtime);
+        mismatched.package.plan_bytes[0][mismatched.package.plans[0].byte_count - 1] ^= 1;
+        duetos::crypto::Sha256Hash(mismatched.package.plan_bytes[0].data(), mismatched.package.plans[0].byte_count,
+                                   mismatched.package.plans[0].content_hash.bytes);
+        mismatched.package.Refresh();
+        const ServiceBootstrapStageResultV1 mismatch = mismatched.Stage();
+        EXPECT_EQ(mismatch.status, ServiceBootstrapStageStatus::BootstrapPlanMismatch);
+        EXPECT_EQ(mismatch.service_index, 0u);
+        EXPECT_EQ(mismatched.runtime.state, ServiceBootstrapStageState::Failed);
+
+        EXPECT_EQ(ServiceBootstrapStageDiscardV1(&producer.runtime), ServiceBootstrapStageStatus::Ok);
+        EXPECT_EQ(ServiceBootstrapStageDiscardV1(&matching.runtime), ServiceBootstrapStageStatus::Ok);
     }
 
     // A valid ownership transfer remains structurally canonical, but the
@@ -1146,6 +1233,8 @@ int main()
     }
 
     EXPECT_STREQ(ServiceBootstrapStageStatusName(ServiceBootstrapStageStatus::AdmissionRejected), "admission-rejected");
+    EXPECT_STREQ(ServiceBootstrapStageStatusName(ServiceBootstrapStageStatus::BootstrapPlanMismatch),
+                 "bootstrap-plan-mismatch");
     EXPECT_STREQ(ServiceBootstrapStageStatusName(static_cast<ServiceBootstrapStageStatus>(0xFF)), "unknown");
     return duetos_host_test::finish_main("test_service_bootstrap_stage");
 }

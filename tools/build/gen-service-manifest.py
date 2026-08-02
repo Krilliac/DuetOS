@@ -13,8 +13,16 @@ ceiling is inferred from the manifest it constrains.
 
 Build-tree packaging uses an explicit artifact root plus one canonical
 SERVICE=RELATIVE/PATH mapping for every manifest row.  The package header then
-embeds the same bytes that were hashed.  Bootstrap-plan and activation
-readiness remain hard-disabled even when the separate authority is bound.
+embeds the same bytes that were hashed.  With --bootstrap-plans it also emits
+one canonical, sealed LoadPlan v1 template per exact ELF.  Template memory
+object fields are zero relocation slots; the boot stage must reproduce every
+other byte and bind those slots to its freshly minted typed object handle.
+
+Activation readiness is a conjunction of explicit package contracts.  This
+generator can bind artifacts, authority, and parser-independent bootstrap
+plans.  Process publication and endpoint readiness remain separate runtime
+contracts, so generated packages stay fail-closed until those owners expose
+and bind their side of the cutover.
 """
 
 from __future__ import annotations
@@ -60,7 +68,24 @@ MAX_SECTION_OBJECTS = 4
 MAX_SECTION_PAGES = 2048
 RESERVED_IDENTITY = (1 << 64) - 1
 STAGED_HASH_DOMAIN = b"duetos-staged-service-v1\0"
-GENERATOR_VERSION = 1
+GENERATOR_VERSION = 2
+
+LOAD_PLAN_HEADER_BYTES = 64
+LOAD_PLAN_REGION_BYTES = 72
+LOAD_PLAN_MAX_REGIONS = 256
+LOAD_PLAN_PAGE_SIZE = 4096
+LOAD_PLAN_MAX_MAPPED_BYTES = 1024 * 1024 * 1024
+LOAD_PLAN_USER_MIN = LOAD_PLAN_PAGE_SIZE
+LOAD_PLAN_USER_MAX = 0x00007FFFFFFFFFFF
+ELF_MAX_SEGMENT_SPAN_BYTES = 256 * 1024 * 1024
+ELF64_MACHINE_X86_64 = 0x3E
+ELF_PT_LOAD = 1
+ELF_PF_X = 1
+ELF_PF_W = 2
+LOAD_PLAN_FORMAT_ELF64 = 3
+VM_PROTECTION_READ = 1
+VM_PROTECTION_WRITE = 2
+VM_PROTECTION_EXECUTE = 4
 
 KIND_VALUES = {"native": 1, "win32": 2, "linux": 3, "broker": 4}
 RESTART_VALUES = {"never": 0, "always": 1, "on-failure": 2}
@@ -208,6 +233,207 @@ class AuthorityPolicy:
     max_section_pages: int
     max_services: int
     max_dependencies: int
+
+
+@dataclass(frozen=True)
+class BootstrapPlan:
+    service_identity: int
+    executable_transfer_ref: int
+    content: bytes
+    sha256: bytes
+
+
+def _u16(data: bytes, offset: int) -> int:
+    return struct.unpack_from("<H", data, offset)[0]
+
+
+def _u32(data: bytes, offset: int) -> int:
+    return struct.unpack_from("<I", data, offset)[0]
+
+
+def _u64(data: bytes, offset: int) -> int:
+    return struct.unpack_from("<Q", data, offset)[0]
+
+
+def build_bootstrap_plan(service: Service) -> BootstrapPlan:
+    """Mirror ElfLoadImagePrepare/LoadImageSeal with relocatable object slots."""
+
+    data = service.artifact_bytes
+    context = f"service {service.name!r} bootstrap plan"
+    if data is None:
+        raise ManifestError(f"{context}: exact artifact bytes are required")
+    if len(data) < 64:
+        raise ManifestError(f"{context}: ELF header is truncated")
+    if data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1 or data[6] != 1:
+        raise ManifestError(f"{context}: expected little-endian ELF64 v1")
+    if _u16(data, 18) != ELF64_MACHINE_X86_64:
+        raise ManifestError(f"{context}: expected x86_64 ELF machine")
+
+    entry_point = _u64(data, 24)
+    phoff = _u64(data, 32)
+    phentsize = _u16(data, 54)
+    phnum = _u16(data, 56)
+    if phoff == 0 or phnum == 0 or phentsize < 56:
+        raise ManifestError(f"{context}: program-header table is missing")
+    table_bytes = phnum * phentsize
+    if phoff > len(data) or table_bytes > len(data) - phoff:
+        raise ManifestError(f"{context}: program-header table is out of bounds")
+
+    segments: list[tuple[int, int, int, int, int]] = []
+    load_base: int | None = None
+    image_end = 0
+    entry_executable = False
+    for index in range(phnum):
+        offset = phoff + index * phentsize
+        if _u32(data, offset) != ELF_PT_LOAD:
+            continue
+        if len(segments) == LOAD_PLAN_MAX_REGIONS:
+            raise ManifestError(f"{context}: too many PT_LOAD segments")
+        flags = _u32(data, offset + 4) & 0x7
+        file_offset = _u64(data, offset + 8)
+        virtual_address = _u64(data, offset + 16)
+        file_size = _u64(data, offset + 32)
+        memory_size = _u64(data, offset + 40)
+        alignment = _u64(data, offset + 48)
+        if file_offset > len(data) or file_size > len(data) - file_offset:
+            raise ManifestError(f"{context}: PT_LOAD[{index}] file range is out of bounds")
+        if file_size > memory_size:
+            raise ManifestError(f"{context}: PT_LOAD[{index}] filesz exceeds memsz")
+        if virtual_address > LOAD_PLAN_USER_MAX or (
+            memory_size > 0 and memory_size - 1 > LOAD_PLAN_USER_MAX - virtual_address
+        ):
+            raise ManifestError(f"{context}: PT_LOAD[{index}] address is out of bounds")
+        if alignment > 1 and file_offset % alignment != virtual_address % alignment:
+            raise ManifestError(f"{context}: PT_LOAD[{index}] offset/address alignment differs")
+        segments.append((flags, file_offset, virtual_address, file_size, memory_size))
+        if memory_size == 0:
+            continue
+        if flags & ELF_PF_W and flags & ELF_PF_X:
+            raise ManifestError(f"{context}: PT_LOAD[{index}] violates W^X")
+        segment_end = virtual_address + memory_size
+        page_start = virtual_address & ~(LOAD_PLAN_PAGE_SIZE - 1)
+        page_end = (segment_end + LOAD_PLAN_PAGE_SIZE - 1) & ~(LOAD_PLAN_PAGE_SIZE - 1)
+        if (
+            page_start < LOAD_PLAN_USER_MIN
+            or page_end <= page_start
+            or page_end - page_start > ELF_MAX_SEGMENT_SPAN_BYTES
+            or page_end - 1 > LOAD_PLAN_USER_MAX
+        ):
+            raise ManifestError(f"{context}: PT_LOAD[{index}] page span is out of bounds")
+        load_base = page_start if load_base is None else min(load_base, page_start)
+        image_end = max(image_end, page_end)
+        if flags & ELF_PF_X and virtual_address <= entry_point < segment_end:
+            entry_executable = True
+
+    if not segments or load_base is None or image_end <= load_base:
+        raise ManifestError(f"{context}: no non-empty PT_LOAD segments")
+    if not entry_executable:
+        raise ManifestError(f"{context}: entry point is not in an executable PT_LOAD segment")
+    if image_end - load_base > LOAD_PLAN_MAX_MAPPED_BYTES:
+        raise ManifestError(f"{context}: mapped image exceeds LoadPlan v1 ceiling")
+
+    pages: dict[int, tuple[int, bytearray]] = {}
+    for flags, file_offset, virtual_address, file_size, memory_size in segments:
+        if memory_size == 0:
+            continue
+        protection = VM_PROTECTION_READ
+        if flags & ELF_PF_W:
+            protection |= VM_PROTECTION_WRITE
+        if flags & ELF_PF_X:
+            protection |= VM_PROTECTION_EXECUTE
+        segment_end = virtual_address + memory_size
+        page_start = virtual_address & ~(LOAD_PLAN_PAGE_SIZE - 1)
+        page_end = (segment_end + LOAD_PLAN_PAGE_SIZE - 1) & ~(LOAD_PLAN_PAGE_SIZE - 1)
+        first_page = (page_start - load_base) // LOAD_PLAN_PAGE_SIZE
+        final_page = (page_end - load_base) // LOAD_PLAN_PAGE_SIZE
+        for page_index in range(first_page, final_page):
+            existing = pages.get(page_index)
+            if existing is None:
+                if len(pages) >= service.frame_budget_pages:
+                    raise ManifestError(
+                        f"{context}: image exceeds authorized frame budget"
+                    )
+                existing = (0, bytearray(LOAD_PLAN_PAGE_SIZE))
+            existing_protection, content = existing
+            combined = existing_protection | protection
+            if combined & VM_PROTECTION_WRITE and combined & VM_PROTECTION_EXECUTE:
+                raise ManifestError(f"{context}: shared PT_LOAD page violates W^X")
+            pages[page_index] = (combined, content)
+        copied = 0
+        while copied < file_size:
+            image_offset = virtual_address - load_base + copied
+            page_index = image_offset // LOAD_PLAN_PAGE_SIZE
+            page_offset = image_offset % LOAD_PLAN_PAGE_SIZE
+            chunk = min(file_size - copied, LOAD_PLAN_PAGE_SIZE - page_offset)
+            pages[page_index][1][page_offset : page_offset + chunk] = data[
+                file_offset + copied : file_offset + copied + chunk
+            ]
+            copied += chunk
+
+    ordered_pages = sorted(pages)
+    regions: list[tuple[int, int, int, bytes]] = []
+    cursor = 0
+    while cursor < len(ordered_pages):
+        first_page = ordered_pages[cursor]
+        protection = pages[first_page][0]
+        end = cursor + 1
+        while (
+            end < len(ordered_pages)
+            and ordered_pages[end] == ordered_pages[end - 1] + 1
+            and pages[ordered_pages[end]][0] == protection
+        ):
+            end += 1
+        digest = hashlib.sha256()
+        for page_index in ordered_pages[cursor:end]:
+            digest.update(pages[page_index][1])
+        page_count = end - cursor
+        object_offset = first_page * LOAD_PLAN_PAGE_SIZE
+        regions.append(
+            (
+                load_base + object_offset,
+                page_count * LOAD_PLAN_PAGE_SIZE,
+                protection,
+                digest.digest(),
+            )
+        )
+        cursor = end
+
+    plan_size = LOAD_PLAN_HEADER_BYTES + len(regions) * LOAD_PLAN_REGION_BYTES
+    plan = bytearray(plan_size)
+    struct.pack_into(
+        "<IHHQQII32s",
+        plan,
+        0,
+        plan_size,
+        FORMAT_VERSION,
+        LOAD_PLAN_FORMAT_ELF64,
+        entry_point,
+        load_base,
+        len(regions),
+        0,
+        service.content_hash,
+    )
+    for index, (virtual_address, length, protection, content_hash) in enumerate(regions):
+        object_offset = virtual_address - load_base
+        struct.pack_into(
+            "<QQQQI32sI",
+            plan,
+            LOAD_PLAN_HEADER_BYTES + index * LOAD_PLAN_REGION_BYTES,
+            virtual_address,
+            length,
+            0,  # Runtime-owned typed memory-object relocation slot.
+            object_offset,
+            protection,
+            content_hash,
+            0,
+        )
+    content = bytes(plan)
+    return BootstrapPlan(
+        service_identity=service.identity,
+        executable_transfer_ref=service.transfer_ref,
+        content=content,
+        sha256=hashlib.sha256(content).digest(),
+    )
 
 
 def _reject_unknown(table: dict[str, Any], allowed: set[str], context: str) -> None:
@@ -889,13 +1115,33 @@ def encode_manifest(manifest: Manifest) -> bytes:
 
 
 def normalized_json(
-    manifest: Manifest, wire: bytes, authority: AuthorityPolicy | None = None
+    manifest: Manifest,
+    wire: bytes,
+    authority: AuthorityPolicy | None = None,
+    bootstrap_plans: tuple[BootstrapPlan, ...] | None = None,
 ) -> str:
+    bootstrap_plans_bound = (
+        bootstrap_plans is not None
+        and len(bootstrap_plans) == len(manifest.services)
+    )
+    process_publication_bound = False
+    endpoint_readiness_bound = False
+    activation_ready = (
+        manifest.artifacts_resolved
+        and authority is not None
+        and bootstrap_plans_bound
+        and process_publication_bound
+        and endpoint_readiness_bound
+    )
     payload = {
-        "activation_ready": False,
+        "activation_contract": {
+            "endpoint_readiness_bound": endpoint_readiness_bound,
+            "process_publication_bound": process_publication_bound,
+        },
+        "activation_ready": activation_ready,
         "artifacts_resolved": manifest.artifacts_resolved,
         "authority_bound": authority is not None,
-        "bootstrap_plans_bound": False,
+        "bootstrap_plans_bound": bootstrap_plans_bound,
         "dependency_count": manifest.dependency_count,
         "format_version": FORMAT_VERSION,
         "manifest_identity": f"0x{manifest.manifest_identity:016x}",
@@ -1016,6 +1262,7 @@ def render_package_header(
     wire: bytes,
     source_label: str,
     authority: AuthorityPolicy | None = None,
+    bootstrap_plans: tuple[BootstrapPlan, ...] | None = None,
 ) -> str:
     if not manifest.artifacts_resolved:
         raise ManifestError("package header requires resolved artifacts")
@@ -1027,6 +1274,17 @@ def render_package_header(
         raise ManifestError(
             f"embedded artifact package exceeds {MAX_EMBEDDED_PACKAGE_BYTES} bytes"
         )
+    if bootstrap_plans is not None and len(bootstrap_plans) != len(manifest.services):
+        raise ManifestError("package header requires one bootstrap plan per service")
+    bootstrap_plans_bound = bootstrap_plans is not None
+    process_publication_bound = False
+    endpoint_readiness_bound = False
+    activation_ready = (
+        authority is not None
+        and bootstrap_plans_bound
+        and process_publication_bound
+        and endpoint_readiness_bound
+    )
     manifest_digest = hashlib.sha256(wire).digest()
     lines = [
         "#pragma once",
@@ -1034,9 +1292,11 @@ def render_package_header(
         "// Generated by tools/build/gen-service-manifest.py; do not edit.",
         f"// Source: {source_label}",
         "// This header binds manifest transfer references to exact build bytes.",
-        "// A separately configured authenticated-kernel-image authority may bind",
-        "// the manifest hash/extent, but sealed serviced/execd bootstrap plans and",
-        "// activation remain absent.",
+        "// A separately configured authenticated-kernel-image authority binds the",
+        "// manifest hash/extent. Bootstrap plans, when requested, are immutable",
+        "// templates whose zero object slots are rebound and compared at staging.",
+        "// Activation additionally requires process publication and endpoint",
+        "// readiness contracts owned outside this generator.",
         "",
         '#include "core/service_object_package.h"',
         "",
@@ -1047,8 +1307,16 @@ def render_package_header(
         "inline constexpr bool kBootServicePackageArtifactsResolved = true;",
         "inline constexpr bool kBootServicePackageAuthorityBound = "
         + ("true;" if authority is not None else "false;"),
-        "inline constexpr bool kBootServicePackageBootstrapPlansBound = false;",
-        "inline constexpr bool kBootServicePackageActivationReady = false;",
+        "inline constexpr bool kBootServicePackageBootstrapPlansBound = "
+        + ("true;" if bootstrap_plans_bound else "false;"),
+        "inline constexpr bool kBootServicePackageProcessPublicationBound = false;",
+        "inline constexpr bool kBootServicePackageEndpointReadinessBound = false;",
+        "inline constexpr bool kBootServicePackageActivationReady =",
+        "    kBootServicePackageArtifactsResolved &&",
+        "    kBootServicePackageAuthorityBound &&",
+        "    kBootServicePackageBootstrapPlansBound &&",
+        "    kBootServicePackageProcessPublicationBound &&",
+        "    kBootServicePackageEndpointReadinessBound;",
         f"inline constexpr u32 kBootServicePackageManifestSize = {len(wire)};",
         f"inline constexpr u32 kBootServicePackageArtifactCount = {len(manifest.services)};",
         f"inline constexpr u64 kBootServicePackageTotalArtifactBytes = {total_artifact_bytes}ULL;",
@@ -1134,6 +1402,56 @@ def render_package_header(
             ]
         )
     lines.extend(["};", ""])
+    if bootstrap_plans is not None:
+        for service, plan in zip(manifest.services, bootstrap_plans, strict=True):
+            if (
+                plan.service_identity != service.identity
+                or plan.executable_transfer_ref != service.transfer_ref
+            ):
+                raise ManifestError(
+                    f"service {service.name!r}: bootstrap plan binding mismatch"
+                )
+            symbol = f"kBootServicePlanRef{service.transfer_ref:08X}Bytes"
+            lines.extend(
+                [
+                    f"// service={service.name} bootstrap-plan-template",
+                    f"// sha256={plan.sha256.hex()}",
+                ]
+            )
+            _append_byte_array(
+                lines,
+                f"alignas(8) inline constexpr u8 {symbol}[] = {{",
+                plan.content,
+            )
+            lines.append("")
+
+        lines.append(
+            "inline constexpr ServiceBootstrapPlanDefinitionV1 "
+            "kBootServicePackageBootstrapPlans[] = {"
+        )
+        for service, plan in zip(manifest.services, bootstrap_plans, strict=True):
+            symbol = f"kBootServicePlanRef{service.transfer_ref:08X}Bytes"
+            lines.extend(
+                [
+                    "    {",
+                    f"        {service.transfer_ref}U,",
+                    "        kServiceBootstrapPlanDefinitionSealed,",
+                    f"        {symbol},",
+                    f"        sizeof({symbol}),",
+                    "        0U,",
+                    "        ::duetos::loader::Hash256{{",
+                ]
+            )
+            for offset in range(0, len(plan.sha256), 12):
+                chunk = plan.sha256[offset : offset + 12]
+                lines.append(
+                    "            "
+                    + ", ".join(f"0x{value:02X}" for value in chunk)
+                    + ","
+                )
+            lines.extend(["        }},", "    },"])
+        lines.extend(["};", ""])
+
     if authority is not None:
         lines.extend(
             [
@@ -1143,6 +1461,13 @@ def render_package_header(
                 "    &kBootServicePackageManifestAuthority,",
                 "    kBootServicePackageExecutableObjects,",
                 "    kBootServicePackageArtifactCount,",
+                "    0U,",
+                "    kBootServicePackageBootstrapPlans,"
+                if bootstrap_plans is not None
+                else "    nullptr,",
+                "    kBootServicePackageArtifactCount,"
+                if bootstrap_plans is not None
+                else "    0U,",
                 "    0U,",
                 "};",
                 "",
@@ -1160,7 +1485,11 @@ def render_package_header(
             "static_assert(kBootServicePackageAuthorityBound);"
             if authority is not None
             else "static_assert(!kBootServicePackageAuthorityBound);",
-            "static_assert(!kBootServicePackageBootstrapPlansBound);",
+            "static_assert(kBootServicePackageBootstrapPlansBound);"
+            if bootstrap_plans_bound
+            else "static_assert(!kBootServicePackageBootstrapPlansBound);",
+            "static_assert(!kBootServicePackageProcessPublicationBound);",
+            "static_assert(!kBootServicePackageEndpointReadinessBound);",
             "static_assert(!kBootServicePackageActivationReady);",
             "",
             "} // namespace duetos::core::generated",
@@ -1265,6 +1594,11 @@ def main(argv: list[str] | None = None) -> int:
         metavar="SERVICE=RELATIVE/PATH",
         help="bind one manifest service to a file strictly below --artifact-root",
     )
+    parser.add_argument(
+        "--bootstrap-plans",
+        action="store_true",
+        help="bind canonical ELF64 LoadPlan v1 templates into the package header",
+    )
     parser.add_argument("--check", action="store_true", help="verify outputs instead of writing them")
     args = parser.parse_args(argv)
     if (
@@ -1280,6 +1614,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.authority is not None and args.package_header is None:
             raise ManifestError("authority requires --package-header")
+        if args.bootstrap_plans and (
+            args.package_header is None or args.authority is None
+        ):
+            raise ManifestError(
+                "bootstrap-plans requires --package-header and --authority"
+            )
         mappings = parse_artifact_mappings(args.artifact_map)
         mapping_requested = args.artifact_root is not None or bool(args.artifact_map)
         if (args.artifact_root is None) != (not args.artifact_map):
@@ -1292,18 +1632,29 @@ def main(argv: list[str] | None = None) -> int:
         )
         wire = encode_manifest(manifest)
         authority = load_authority(args.authority, manifest) if args.authority is not None else None
+        bootstrap_plans = (
+            tuple(build_bootstrap_plan(service) for service in manifest.services)
+            if args.bootstrap_plans
+            else None
+        )
         header_bytes = (
             render_header(manifest, wire, _source_label(args.input)).encode("ascii")
             if args.header is not None
             else None
         )
         normalized_bytes = (
-            normalized_json(manifest, wire, authority).encode("ascii")
+            normalized_json(manifest, wire, authority, bootstrap_plans).encode("ascii")
             if args.normalized is not None
             else None
         )
         package_header_bytes = (
-            render_package_header(manifest, wire, _source_label(args.input), authority).encode("ascii")
+            render_package_header(
+                manifest,
+                wire,
+                _source_label(args.input),
+                authority,
+                bootstrap_plans,
+            ).encode("ascii")
             if args.package_header is not None
             else None
         )

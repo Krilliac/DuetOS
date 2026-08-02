@@ -61,6 +61,9 @@ class ServiceBootstrapLiveContract(unittest.TestCase):
         )
         self.assertIn("kBootServicePackageArtifactCount == kServiceBootstrapLiveServiceCapacityV1", SOURCE)
         self.assertIn("kBootServicePackageTotalArtifactBytes <=", SOURCE)
+        self.assertIn("static_assert(generated::kBootServicePackageBootstrapPlansBound)", SOURCE)
+        self.assertIn("static_assert(!generated::kBootServicePackageProcessPublicationBound)", SOURCE)
+        self.assertIn("static_assert(!generated::kBootServicePackageEndpointReadinessBound)", SOURCE)
         for forbidden in ("KMalloc(", "KFree(", "malloc(", "new ", "std::vector"):
             self.assertNotIn(forbidden, SOURCE)
 

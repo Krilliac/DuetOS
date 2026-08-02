@@ -80,6 +80,29 @@ BASE_MANIFEST = textwrap.dedent(
 )
 
 
+def make_elf64(payload: bytes, flags: int = 5) -> bytes:
+    image = bytearray(0x200)
+    image[:4] = b"\x7fELF"
+    image[4:7] = b"\x02\x01\x01"
+    struct.pack_into("<H", image, 16, 2)
+    struct.pack_into("<H", image, 18, 0x3E)
+    struct.pack_into("<I", image, 20, 1)
+    struct.pack_into("<Q", image, 24, 0x400100)
+    struct.pack_into("<Q", image, 32, 64)
+    struct.pack_into("<H", image, 52, 64)
+    struct.pack_into("<H", image, 54, 56)
+    struct.pack_into("<H", image, 56, 1)
+    struct.pack_into("<I", image, 64, 1)
+    struct.pack_into("<I", image, 68, flags)
+    struct.pack_into("<Q", image, 72, 0)
+    struct.pack_into("<Q", image, 80, 0x400000)
+    struct.pack_into("<Q", image, 96, len(image))
+    struct.pack_into("<Q", image, 104, 0x1000)
+    struct.pack_into("<Q", image, 112, 0x1000)
+    image[0x100 : 0x100 + len(payload)] = payload
+    return bytes(image)
+
+
 class ManifestGeneratorTest(unittest.TestCase):
     def _load_text(self, text: str):
         with tempfile.TemporaryDirectory() as temporary:
@@ -307,7 +330,9 @@ class ManifestGeneratorTest(unittest.TestCase):
             self.assertIn("kBootServicePackageDefinition", package)
             self.assertIn("kServiceManifestAuthoritySealed", package)
             self.assertIn("kBootServicePackageBootstrapPlansBound = false", package)
-            self.assertIn("kBootServicePackageActivationReady = false", package)
+            self.assertIn("kBootServicePackageActivationReady =\n", package)
+            self.assertIn("kBootServicePackageProcessPublicationBound = false", package)
+            self.assertIn("kBootServicePackageEndpointReadinessBound = false", package)
             self.assertTrue(audit["authority_bound"])
             self.assertFalse(audit["bootstrap_plans_bound"])
             self.assertFalse(audit["activation_ready"])
@@ -339,9 +364,14 @@ class ManifestGeneratorTest(unittest.TestCase):
         cmake = (REPO_ROOT / "kernel" / "CMakeLists.txt").read_text(encoding="utf-8")
         self.assertIn("set(DUETOS_SERVICE_AUTHORITY_CONFIG", cmake)
         self.assertIn('--authority "${DUETOS_SERVICE_AUTHORITY_CONFIG}"', cmake)
+        self.assertIn("--bootstrap-plans", cmake)
         self.assertIn('"${DUETOS_SERVICE_AUTHORITY_CONFIG}"\n        ${DUETOS_SERVICE_ARTIFACTS}', cmake)
         self.assertIn(
             "static_assert(duetos::core::generated::kBootServicePackageAuthorityBound);",
+            cmake,
+        )
+        self.assertIn(
+            "static_assert(duetos::core::generated::kBootServicePackageBootstrapPlansBound);",
             cmake,
         )
 
@@ -452,7 +482,7 @@ class ManifestGeneratorTest(unittest.TestCase):
             self.assertIn("kBootServicePackageArtifactsResolved = true", package_text)
             self.assertIn("kBootServicePackageAuthorityBound = false", package_text)
             self.assertIn("kBootServicePackageBootstrapPlansBound = false", package_text)
-            self.assertIn("kBootServicePackageActivationReady = false", package_text)
+            self.assertIn("kBootServicePackageActivationReady =\n", package_text)
             self.assertIn("kBootServicePackageExecutableObjects[]", package_text)
             self.assertNotIn("ServiceObjectPackageDefinitionV1", package_text)
             for service in reversed_manifest.services:
@@ -505,6 +535,103 @@ class ManifestGeneratorTest(unittest.TestCase):
             )
             self.assertEqual(checked.returncode, 0, checked.stderr)
             self.assertEqual((output_root / "package.h").read_bytes(), rendered[0][2])
+
+    def test_bootstrap_plans_bind_canonical_relocatable_load_plan(self) -> None:
+        authority_text = textwrap.dedent(
+            """\
+            [authority]
+            format_version = 1
+            trust_source = "authenticated-kernel-image"
+            authority_identity = 0x400
+            manifest_identity = 0x100
+            signer_identity = 0x200
+            profile_identity = 0x300
+            allowed_capabilities = ["serial-console", "fs-read", "spawn-thread"]
+            allowed_immutable_policies = [1]
+            allowed_service_kinds = ["native", "broker"]
+            allowed_resource_profiles = ["authenticated-service"]
+            max_frame_budget_pages = 256
+            max_tick_budget = 20000
+            max_section_objects = 3
+            max_section_pages = 128
+            max_services = 2
+            max_dependencies = 1
+            """
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = root / "services.toml"
+            authority_path = root / "authority.toml"
+            artifact_root = root / "artifacts"
+            artifact_root.mkdir()
+            config.write_text(BASE_MANIFEST, encoding="utf-8", newline="\n")
+            authority_path.write_text(authority_text, encoding="utf-8", newline="\n")
+            (artifact_root / "alpha.elf").write_bytes(make_elf64(b"alpha"))
+            (artifact_root / "beta.elf").write_bytes(make_elf64(b"beta"))
+            manifest = GENERATOR.load_manifest(
+                config,
+                artifact_root=artifact_root,
+                artifact_mappings={"alpha": "alpha.elf", "beta": "beta.elf"},
+                retain_artifact_bytes=True,
+            )
+            authority = GENERATOR.load_authority(authority_path, manifest)
+            plans = tuple(GENERATOR.build_bootstrap_plan(row) for row in manifest.services)
+            wire = GENERATOR.encode_manifest(manifest)
+            package = GENERATOR.render_package_header(
+                manifest, wire, "services.toml", authority, plans
+            )
+            audit = json.loads(GENERATOR.normalized_json(manifest, wire, authority, plans))
+
+            self.assertIn("kBootServicePackageBootstrapPlansBound = true", package)
+            self.assertIn("kBootServicePackageBootstrapPlans[]", package)
+            self.assertIn("kServiceBootstrapPlanDefinitionSealed", package)
+            self.assertTrue(audit["bootstrap_plans_bound"])
+            self.assertFalse(audit["activation_ready"])
+            self.assertFalse(audit["activation_contract"]["process_publication_bound"])
+            self.assertFalse(audit["activation_contract"]["endpoint_readiness_bound"])
+
+            first = plans[0].content
+            size, version, image_format, entry, preferred, regions, dependencies = struct.unpack_from(
+                "<IHHQQII", first, 0
+            )
+            self.assertEqual((size, version, image_format), (len(first), 1, 3))
+            self.assertEqual((entry, preferred, regions, dependencies), (0x400100, 0x400000, 1, 0))
+            self.assertEqual(first[32:64], manifest.services[0].content_hash)
+            virtual_address, length, memory_object, object_offset, protection = struct.unpack_from(
+                "<QQQQI", first, 64
+            )
+            self.assertEqual(
+                (virtual_address, length, memory_object, object_offset, protection),
+                (0x400000, 0x1000, 0, 0, 5),
+            )
+            page = bytearray(4096)
+            artifact = manifest.services[0].artifact_bytes
+            self.assertIsNotNone(artifact)
+            page[: len(artifact)] = artifact
+            self.assertEqual(first[100:132], hashlib.sha256(page).digest())
+
+            bad_service = manifest.services[0]
+            bad_bytes = bytearray(bad_service.artifact_bytes or b"")
+            struct.pack_into("<I", bad_bytes, 68, 7)
+            bad_service = GENERATOR.Service(
+                **{**bad_service.__dict__, "artifact_bytes": bytes(bad_bytes),
+                   "content_hash": hashlib.sha256(bad_bytes).digest()}
+            )
+            with self.assertRaisesRegex(GENERATOR.ManifestError, "W.X"):
+                GENERATOR.build_bootstrap_plan(bad_service)
+
+            oversized_bytes = bytearray(manifest.services[0].artifact_bytes or b"")
+            struct.pack_into("<Q", oversized_bytes, 104, 0x2000)
+            oversized = GENERATOR.Service(
+                **{
+                    **manifest.services[0].__dict__,
+                    "artifact_bytes": bytes(oversized_bytes),
+                    "content_hash": hashlib.sha256(oversized_bytes).digest(),
+                    "frame_budget_pages": 1,
+                }
+            )
+            with self.assertRaisesRegex(GENERATOR.ManifestError, "authorized frame budget"):
+                GENERATOR.build_bootstrap_plan(oversized)
 
     def test_artifact_root_mapping_rejects_ambiguous_or_escaping_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
