@@ -3234,3 +3234,11 @@ Auto-managed by tools/parallel/claim.sh and release.sh — do not edit by hand.
 - **Description**: Register completed service engines and NIC safety contracts in hosted build and CI
 - **Claimed**: 2026-08-02T00:09:14Z
 - **Status**: IN PROGRESS
+
+### [ACTIVE] net-stack-restart-20260801
+- **Session**: `Codex-NetStackRestart-20260801`
+- **Branch**: `claude/audit-ps2-spsc-20260731`
+- **Files**: `kernel/net/stack.h,kernel/net/stack.cpp,tests/host/test_net_stack_restart.cpp,tools/test/test-net-stack-restart-contract.py`
+- **Description**: Generation-safe
+- **Claimed**: 2026-08-02T00:20:14Z
+- **Status**: IN PROGRESS
