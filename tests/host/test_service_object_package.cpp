@@ -47,7 +47,7 @@ ServiceDirectoryStatus ServiceDirectoryPublishRegistration(ServiceDirectory*, Se
     return ServiceDirectoryStatus::CorruptState;
 }
 
-ServiceDirectoryStatus ServiceDirectoryMarkReady(ServiceDirectory*, ServiceKey, ServiceInstanceToken)
+ServiceDirectoryStatus ServiceDirectoryCommitJointReady(ServiceDirectory*, ServiceKey, ServiceInstanceToken, bool*)
 {
     return ServiceDirectoryStatus::CorruptState;
 }
