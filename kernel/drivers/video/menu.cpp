@@ -33,6 +33,10 @@ struct Panel
 constinit Panel g_panels[kMenuMaxStack] = {};
 constinit u32 g_panel_depth = 0; // 0 = closed; otherwise number of open panels
 constinit u32 g_context = 0;
+// Optional generation-tagged public HWND for window action menus. Kept
+// separate from g_context because Files menus encode a row index there and
+// TrackPopupMenu uses a sentinel.
+constinit u32 g_window_identity = 0;
 
 // Theme-driven chrome palette. Defaults match the original
 // hardcoded slate/blue look so a kernel that never calls
@@ -123,9 +127,11 @@ void MenuSetColours(u32 body_rgb, u32 border_rgb, u32 ink_rgb, u32 accent_rgb)
 
 void MenuOpen(const MenuItem* items, u32 count, u32 ax, u32 ay, u32 context)
 {
+    g_window_identity = 0;
     if (items == nullptr || count == 0)
     {
         g_panel_depth = 0;
+        g_context = 0;
         return;
     }
     if (count > kMaxItems)
@@ -153,6 +159,15 @@ void MenuOpen(const MenuItem* items, u32 count, u32 ax, u32 ay, u32 context)
     }
     g_panel_depth = 1;
     g_context = context;
+}
+
+void MenuOpenWindow(const MenuItem* items, u32 count, u32 ax, u32 ay, u32 context, u32 public_hwnd)
+{
+    MenuOpen(items, count, ax, ay, context);
+    if (g_panel_depth != 0)
+    {
+        g_window_identity = public_hwnd;
+    }
 }
 
 void MenuOpenSubmenu(u32 row)
@@ -219,10 +234,16 @@ u32 MenuContext()
     return g_context;
 }
 
+u32 MenuWindowIdentity()
+{
+    return g_window_identity;
+}
+
 void MenuClose()
 {
     g_panel_depth = 0;
     g_context = 0;
+    g_window_identity = 0;
     // Drop the snapshot so the next EndCompose takes the
     // conservative full-blit path. The menu's tactility
     // drop-shadow (RenderSoftShadow with a non-zero atlas
