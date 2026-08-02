@@ -141,8 +141,8 @@ void IngestNic(const drivers::net::NicInfo& n, u64 /*nic_index*/)
     // Candidate classification is inventory evidence, not functional
     // admission. The four *Matches functions deliberately fail closed, so
     // using them here would hide every unsupported adapter from diagnostics.
-    const bool is_wireless = n.subclass == drivers::net::kPciSubclassOther ||
-                             drivers::net::nic_ids::NicFamilyLooksWireless(n.family);
+    const bool is_wireless =
+        n.subclass == drivers::net::kPciSubclassOther || drivers::net::nic_ids::NicFamilyLooksWireless(n.family);
     if (!is_wireless)
         return;
 
@@ -157,9 +157,8 @@ void IngestNic(const drivers::net::NicInfo& n, u64 /*nic_index*/)
     e.driver_online = n.driver_online;
     e.fw_state = n.wireless_fw_state;
 
-    if (n.vendor_id == drivers::net::kVendorIntel &&
-        drivers::net::nic_ids::IntelWirelessBackendFromDeviceId(n.device_id) !=
-            drivers::net::nic_ids::WirelessBackend::None)
+    if (n.vendor_id == drivers::net::kVendorIntel && drivers::net::nic_ids::IntelWirelessBackendFromDeviceId(
+                                                         n.device_id) != drivers::net::nic_ids::WirelessBackend::None)
     {
         e.expected_basename = IwlBasenameForDeviceId(n.device_id);
         e.firmware_path_hint = "/lib/firmware/intel-iwlwifi/";
@@ -184,8 +183,7 @@ void IngestNic(const drivers::net::NicInfo& n, u64 /*nic_index*/)
         e.openness = (n.device_id <= 0x4329) ? WirelessInventoryFwOpenness::OpenSource
                                              : WirelessInventoryFwOpenness::Redistributable;
     }
-    else if (drivers::net::Mt76FamilyIsPrimaryAdapter(
-                 drivers::net::Mt76FamilyFromIdentity(n.vendor_id, n.device_id)))
+    else if (drivers::net::Mt76FamilyIsPrimaryAdapter(drivers::net::Mt76FamilyFromIdentity(n.vendor_id, n.device_id)))
     {
         const drivers::net::Mt76Family fam = drivers::net::Mt76FamilyFromIdentity(n.vendor_id, n.device_id);
         e.expected_basename = drivers::net::Mt76FirmwareBasenameForFamily(fam);
