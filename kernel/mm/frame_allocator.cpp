@@ -40,6 +40,7 @@
 #include "cpu/percpu.h"
 #include "cpu/topology.h"
 #include "debug/probes.h"
+#include "sched/sched.h" // CurrentTask — OOM injection is task-scoped
 #include "diag/fix_journal.h"
 #include "diag/kdbg.h"
 #include "log/klog.h"
@@ -143,6 +144,29 @@ constinit u8 g_numa_node_count = 0;
 // next Allocate* returns kNullFrame and the counter stays at 0
 // (further injection requires another SetFailAfter call). 0 disables.
 constinit u64 g_fail_after = 0;
+
+// The task that armed the OOM injection. g_fail_after alone is GLOBAL and is
+// consumed on the shared allocation path, so once SMP started working a peer
+// CPU could absorb an injection meant for the arming test. On 2026-08-03 the
+// ELF unwind self-test armed a failure and a concurrent AllocateKernelStack
+// swallowed it: the box panicked with "AllocateKernelStack failed for kernel
+// stack" while the test itself reported "ElfLoad returned ok despite OOM",
+// both in the same instant. Scope the injection to the arming task so
+// unrelated allocations on other CPUs are never perturbed by a test.
+constinit sched::Task* g_fail_after_task = nullptr;
+
+// True iff an injection is armed AND this caller is who it was armed for.
+bool OomInjectionAppliesHere()
+{
+    if (__atomic_load_n(&g_fail_after, __ATOMIC_RELAXED) == 0)
+    {
+        return false;
+    }
+    sched::Task* armed_for = __atomic_load_n(&g_fail_after_task, __ATOMIC_RELAXED);
+    // A null armer means the injection was set before task context existed
+    // (early-boot self-tests), where there is no concurrency to protect from.
+    return armed_for == nullptr || sched::CurrentTask() == armed_for;
+}
 
 // Per-CPU warm pool. Each CPU caches up to kFramePoolDepth recently-
 // freed frames. AllocateFrame's fast path pops from the running CPU's
@@ -1030,11 +1054,12 @@ PhysAddr ProcessAndReturnFrame(u64 frame, u8 node)
 
 core::Result<PhysAddr> AllocateFrameNode(u8 node)
 {
-    if (g_fail_after != 0)
+    if (OomInjectionAppliesHere())
     {
         if (g_fail_after == 1)
         {
             g_fail_after = 0;
+            g_fail_after_task = nullptr;
             return core::Err{core::ErrorCode::OutOfMemory};
         }
         --g_fail_after;
@@ -1095,7 +1120,7 @@ core::Result<PhysAddr> AllocateFrame()
     // ---- Per-CPU warm pool fast path ------------------------------
     // Skip when OOM injection is active so the test counter still
     // drives the failing leg the slow path is meant to exercise.
-    if (g_fail_after == 0)
+    if (!OomInjectionAppliesHere())
     {
         PhysAddr from_pool = kNullFrame;
         {
@@ -1145,11 +1170,12 @@ core::Result<PhysAddr> AllocateFrame()
 
     // UMA / pre-NUMA path — identical behaviour to the original
     // hot loop. Kept verbatim so SRAT-less boots see no regression.
-    if (g_fail_after != 0)
+    if (OomInjectionAppliesHere())
     {
         if (g_fail_after == 1)
         {
             g_fail_after = 0;
+            g_fail_after_task = nullptr;
             return core::Err{core::ErrorCode::OutOfMemory};
         }
         --g_fail_after;
@@ -1409,11 +1435,12 @@ core::Result<PhysAddr> AllocateContiguousFrames(u64 count)
     FrameAllocatorDrainPools();
     // Test-only OOM injection mirrors the AllocateFrame path so multi-
     // frame allocations also exercise the failing leg.
-    if (g_fail_after != 0)
+    if (OomInjectionAppliesHere())
     {
         if (g_fail_after == 1)
         {
             g_fail_after = 0;
+            g_fail_after_task = nullptr;
             return core::Err{core::ErrorCode::OutOfMemory};
         }
         --g_fail_after;
@@ -1562,7 +1589,10 @@ u64 MultibootInfoSnapshotSize()
 
 void FrameAllocatorSetFailAfter(u64 n_remaining)
 {
-    g_fail_after = n_remaining;
+    // Record who armed it so only this task's allocations consume the
+    // injection. Disarming clears the owner too.
+    g_fail_after_task = (n_remaining != 0) ? sched::CurrentTask() : nullptr;
+    __atomic_store_n(&g_fail_after, n_remaining, __ATOMIC_RELAXED);
 }
 
 u64 FrameAllocatorGetFailAfter()
