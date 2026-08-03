@@ -126,13 +126,27 @@ int visible = 9;
         ordered(self, self.next_generation, "*next_out = 0", "kLinuxFdGenerationExhausted", "return false")
 
     def test_close_preserves_saturation_and_allocator_skips_retired_slot(self) -> None:
+        # LinuxFdNextGeneration zeroes its out-param *before* deciding whether
+        # the epoch may advance, so the only safe way to clear a slot is to
+        # branch on its return value. Seeding a local with the exhausted marker
+        # and discarding the return publishes generation 0 on a saturated slot,
+        # which un-retires it — the boot self-test panics with "saturated fd
+        # slot became reusable". This test previously pinned that exact broken
+        # sequence as the contract, so it passed while the kernel paniced;
+        # assert the invariant instead of the statement order.
         ordered(
             self,
             self.clear_slot,
-            "generation = Process::kLinuxFdGenerationExhausted",
-            "LinuxFdNextGeneration(slot.generation, &generation)",
+            "LinuxFdNextGeneration(slot.generation,",
             "LinuxFdClearSnapshot(&slot)",
-            "slot.generation = generation",
+            "slot.generation =",
+        )
+        # The return value must be captured, never discarded.
+        self.assertNotIn("(void)LinuxFdNextGeneration", self.clear_slot)
+        # ...and the saturated marker must be the fallback when it fails.
+        self.assertRegex(
+            self.clear_slot,
+            r"slot\.generation\s*=[^;]*Process::kLinuxFdGenerationExhausted",
         )
         self.assertIn("generation != Process::kLinuxFdGenerationExhausted", self.find_lowest)
 

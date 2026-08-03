@@ -3987,10 +3987,17 @@ void LinuxFdClearSnapshot(Process::LinuxFd* snapshot)
 
 void LinuxFdClearSlotLocked(Process::LinuxFd& slot)
 {
-    u32 generation = Process::kLinuxFdGenerationExhausted;
-    (void)LinuxFdNextGeneration(slot.generation, &generation);
+    // LinuxFdNextGeneration zeroes *next_out before it decides whether the
+    // epoch can advance, so a saturated slot comes back as 0 with a false
+    // return. Seeding `generation` with the exhausted marker and discarding
+    // that return therefore published 0 — which both violates "zero is never
+    // published" and un-retires a slot the header promises is permanently
+    // retired, letting a stale receipt become current again. Honour the
+    // return value instead.
+    u32 next = 0;
+    const bool advanced = LinuxFdNextGeneration(slot.generation, &next);
     LinuxFdClearSnapshot(&slot);
-    slot.generation = generation;
+    slot.generation = advanced ? next : Process::kLinuxFdGenerationExhausted;
 }
 
 i32 LinuxFdFindLowestLocked(Process* p, u32 lo, i32 excluded = -1)
