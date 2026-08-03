@@ -10,6 +10,7 @@
 #include "sched/sched.h"
 #include "subsystems/translation/translate.h"
 #include "fs/boot_slot.h"
+#include "fs/fat32.h" // Fat32BeginBestEffort — the heartbeat must not block on I/O
 #include "fs/installer.h"
 #include "fs/ramfs.h"
 #include "security/fault_domain.h"
@@ -54,7 +55,25 @@ bool PersistBootSlotState(const ::duetos::fs::boot_slot::State& st)
         LogWithValue(LogLevel::Warn, "kheartbeat", "boot-slot persist: no FAT32 vol", 0);
         return false;
     }
-    if (!::duetos::fs::installer::PersistSlotState(vol, st))
+    // The heartbeat drives HungTaskTick(), so it must never block on the
+    // filesystem: an I/O hang here silences the detector whose entire job
+    // is to report I/O hangs. That is not hypothetical — on 2026-08-03 a
+    // wedged FAT32 write stopped the heartbeat at t=18.2s and the
+    // hung-task detector never ran again for the remaining 455 seconds,
+    // so a task hung for 459 s produced zero warnings and CI saw only an
+    // opaque qemu_timeout.
+    //
+    // Take the volume lock with a bound and skip the write if it is
+    // contended. Losing a boot-slot state update is cheap and self-heals
+    // on the next beat; losing the watchdog is not.
+    if (!::duetos::fs::fat32::Fat32BeginBestEffort(::duetos::fs::fat32::kFat32BestEffortTicks))
+    {
+        LogWithValue(LogLevel::Warn, "kheartbeat", "boot-slot persist: volume busy, skipped", 0);
+        return false;
+    }
+    const bool persisted = ::duetos::fs::installer::PersistSlotState(vol, st);
+    ::duetos::fs::fat32::Fat32EndBestEffort();
+    if (!persisted)
     {
         LogWithValue(LogLevel::Warn, "kheartbeat", "boot-slot persist: write failed", 1);
         return false;

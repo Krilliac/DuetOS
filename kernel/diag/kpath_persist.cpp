@@ -192,7 +192,20 @@ void KPathPersistFlush()
         return;
     }
     const ::duetos::u64 len = BuildScratch(false);
+    // Best-effort: this runs from the smoke profile's tail, between the
+    // scenario sleep and the "[smoke] profile=<name> complete" sentinel
+    // that authorises QEMU exit. A diagnostic TSV must never be able to
+    // delay — let alone block — that sentinel. On 2026-08-03 this call
+    // wedged holding the volume lock and the profile never completed, so
+    // every affected smoke job died on the harness timeout with no
+    // indication of why.
+    if (!fat::Fat32BeginBestEffort(fat::kFat32BestEffortTicks))
+    {
+        KLOG_WARN("diag/kpath-persist", "volume busy — skipping TSV flush");
+        return;
+    }
     (void)WriteScratchToVolume(v, len);
+    fat::Fat32EndBestEffort();
 }
 
 void KPathPersistFlushPanicSafe()

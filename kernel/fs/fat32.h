@@ -111,6 +111,37 @@ bool Fat32Probe(u32 block_handle, u32* out_index);
 u32 Fat32VolumeCount();
 const Volume* Fat32Volume(u32 index);
 
+/// Best-effort scope for DIAGNOSTIC / TELEMETRY writers.
+///
+/// Real filesystem users must block on the volume lock — losing a user's
+/// write because the disk was busy is not acceptable. Diagnostic writers
+/// are the opposite: a boot-slot state file or a kpath TSV is worth
+/// nothing if producing it can wedge the caller.
+///
+/// That distinction is not academic. On 2026-08-03 a FAT32 write wedged
+/// while holding the volume lock; the kheartbeat task then blocked
+/// acquiring it inside PersistBootSlotState and never beat again for 455
+/// seconds. Because HungTaskTick() runs from inside the heartbeat beat,
+/// the hung-task detector went with it — so a task hung for 459 s
+/// produced zero warnings and the whole thing surfaced only as an opaque
+/// `qemu_timeout`. A watchdog that the watched subsystem can block is not
+/// a watchdog.
+///
+/// Acquire the volume lock up front with a bound. On success every nested
+/// Fat32 call inside the scope takes the existing recursive-entry path
+/// (Fat32Guard sees `owner == me`) and does not re-lock, so the whole
+/// sequence is covered by this one bounded acquire. On failure the caller
+/// MUST skip its write — it must not fall through and call Fat32 entries,
+/// which would block exactly as before.
+///
+/// Returns true iff the lock was acquired; pair with Fat32EndBestEffort.
+[[nodiscard]] bool Fat32BeginBestEffort(u64 timeout_ticks);
+void Fat32EndBestEffort();
+
+/// Ticks a diagnostic writer should wait before giving up. Long enough to
+/// ride out ordinary contention, far short of any harness timeout.
+inline constexpr u64 kFat32BestEffortTicks = 50; // 0.5 s at 100 Hz
+
 /// Case-insensitive lookup for an 8.3 name in the volume's root
 /// snapshot. `name` is the human-form "HELLO.TXT" (as emitted by
 /// Fat32Probe into DirEntry.name), NOT the raw 11-byte spaced
