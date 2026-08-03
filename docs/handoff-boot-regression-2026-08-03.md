@@ -367,3 +367,57 @@ blocked beat still never runs again, so that only masks the first occurrence.
 Also worth fixing regardless: a diagnostic TSV write should never sit between
 the smoke sleep and the completion sentinel. Even with (a) fixed,
 `KPathPersistFlush` can delay or block the sentinel that authorises QEMU exit.
+
+## GREEN — main is fully passing again (dd45d709)
+
+CI run 30850329459: **26/26 jobs, zero failures, 16 smoke jobs included**.
+First fully-green `build.yml` on `main` since 2026-07-31 (`e8669b23`).
+
+No `qemu-serial-log-*` artifacts were produced, and that upload is
+`if: failure()` — so no smoke job failed. The smoke gate asserts the
+`[smoke] profile=<name> complete` sentinel and exits non-zero when it is
+missing, so green means every profile booted to completion.
+
+### What it took, in order
+
+Each fix exposed the next real bug; the "flaky rotating timeouts" were a
+queue of stacked races, never flakiness.
+
+| # | Defect | How it was found |
+|---|--------|------------------|
+| 1 | Linux fd generation epoch published as 0, un-retiring permanently-retired slots | boot self-test panic |
+| 2 | `DumpBacktrace` walked one quad past the top of any stack | reading the panic path |
+| 3 | Guard-fault classifier reported over-top as overflow, inverting the diagnosis | arena arithmetic |
+| 4 | AP entered via `jmp` with no return address; `__builtin_return_address(0)` in `KBP_PROBE_V` read the next slot's guard page | the classifier from #3 |
+| 5 | SysV `rsp % 16 == 8` entry invariant violated (latent SSE spill misalignment) | same fix as #4 |
+| 6 | `ElfLoaderUnwindSelfTest` global frame-count oracle invalid under SMP | CI panic once SMP worked |
+| 7 | W^X drift detector fired on CPU-managed Accessed/Dirty bits, driving 46 autonomic security escalations | live 4-minute boot |
+| 8 | Intel GPU self-test surface 4x undersized — FAILed on every boot since written | live boot log |
+| 9 | ACPI RSDT entries read through misaligned `const u32*` (34 UBSan reports/boot) | live boot log |
+| 10 | fix-journal ABBA deadlock: `g_lock` held across a klog call | boot log localisation |
+| 11 | Watchdog blockable by the filesystem it watches — a wedged FAT32 write silenced the hung-task detector for 455 s | heartbeat liveness analysis |
+| 12 | Test-only OOM injection was global; a peer CPU absorbed it and panicked on `AllocateKernelStack` | decoding interleaved serial |
+
+Three of these (#6, #12, and the free-frame comparison inside #6) are the
+same class: **uniprocessor-era test scaffolding that became unsafe the moment
+SMP actually worked**. Test harnesses are where SMP assumptions hide, because
+they are written assuming nothing else is running.
+
+Two were diagnostics that lied (#3, #11). Both were worth fixing before the
+bugs they masked: #3 turned the AP fault from a misattributed "stack
+overflow" into a one-read diagnosis, and #11 restored the detector that
+names a wedged task instead of leaving an opaque `qemu_timeout`.
+
+### Still open (nothing blocking green)
+
+- 67 lock scopes kernel-wide log while holding a lock —
+  `python tools/test/check-spinlock-log-order.py`. Each is a potential ABBA
+  with the serial lock; #10 was one of them, found the expensive way.
+- GSBASE AP-GS gap: `CurrentCpu LAPIC-resolved a non-kernel GSBASE on a
+  non-BSP CPU ... REGRESSION` still fires once per boot. The kernel's own
+  comment says a clean boot must stay at zero.
+- Compositor renders offset ~285px right / ~45px down instead of filling the
+  1024x768 framebuffer, and clips the security dialog.
+- 37 of 108 contract tests pin literal C++ statements rather than invariants.
+- The FAT32 write that can block forever is mitigated (diagnostic writers no
+  longer block on it) but the underlying root cause is unfixed.
