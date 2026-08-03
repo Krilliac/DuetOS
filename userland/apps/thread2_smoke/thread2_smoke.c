@@ -25,6 +25,37 @@ static void Out(const char* s)
     WriteConsoleA(h, s, len, &n, 0);
 }
 
+/*
+ * Emit `label` + `verdict` as ONE write.
+ *
+ * The kernel's write syscall is line-atomic per call (it drives COM1 with a
+ * single SerialWriteN holding the port lock), but that guarantees nothing
+ * ACROSS calls. Emitting a verdict as `Out(label); Out(verdict);` leaves a
+ * window in which another CPU's klog lands between the two, splitting the
+ * logical line in the serial log.
+ *
+ * CI greps for exact lines, so a split line reads as a MISSING signature and
+ * fails the smoke even though the check passed. That is what took
+ * `qemu smoke (pe-threads, 4 vCPU)` down on 2026-08-03: the log contained
+ *
+ *     [thread2_smoke] GetExitCodeThread     = [t=...] [D] loader/dll : ...
+ *
+ * with `PASS (0x42)` displaced onto the following line, while
+ * `[ring3-thread2-smoke] PASS` and `[thread2_smoke] done` both showed the
+ * run had actually succeeded.
+ */
+static void OutVerdict(const char* label, const char* verdict)
+{
+    char line[160];
+    DWORD n = 0;
+    DWORD i = 0;
+    for (DWORD j = 0; label[j] != '\0' && i < sizeof(line) - 1; ++j)
+        line[i++] = label[j];
+    for (DWORD j = 0; verdict[j] != '\0' && i < sizeof(line) - 1; ++j)
+        line[i++] = verdict[j];
+    WriteConsoleA(GetStdHandle(STD_OUTPUT_HANDLE), line, i, &n, 0);
+}
+
 typedef struct ExitCodeCanary
 {
     DWORD before;
@@ -87,8 +118,8 @@ void __cdecl mainCRTStartup(void)
         retirement_ok = FALSE;
 
     HANDLE t = CreateThread(NULL, 0, worker, NULL, 0, NULL);
-    Out("[thread2_smoke] CreateThread          = ");
-    Out(t != NULL ? "PASS\r\n" : "FAIL\r\n");
+    OutVerdict("[thread2_smoke] CreateThread          = ",
+               t != NULL ? "PASS\r\n" : "FAIL\r\n");
     if (t == NULL)
         retirement_ok = FALSE;
 
@@ -101,36 +132,36 @@ void __cdecl mainCRTStartup(void)
         ExitCodeCanary active = {EXIT_CANARY_BEFORE, EXIT_CANARY_UNTOUCHED, EXIT_CANARY_AFTER};
         BOOL active_ok = g_started != 0 && GetExitCodeThread(t, &active.value) && active.value == STILL_ACTIVE &&
                          ExitCodeCanariesIntact(&active);
-        Out("[thread2_smoke] active exit-code canary= ");
-        Out(active_ok ? "PASS\r\n" : "FAIL\r\n");
+        OutVerdict("[thread2_smoke] active exit-code canary= ",
+                   active_ok ? "PASS\r\n" : "FAIL\r\n");
         if (!active_ok)
             retirement_ok = FALSE;
 
         /* GetThreadPriority. */
         int pri = GetThreadPriority(t);
-        Out("[thread2_smoke] GetThreadPriority     = ");
-        Out(pri != THREAD_PRIORITY_ERROR_RETURN ? "PASS\r\n" : "FAIL/STUB\r\n");
+        OutVerdict("[thread2_smoke] GetThreadPriority     = ",
+                   pri != THREAD_PRIORITY_ERROR_RETURN ? "PASS\r\n" : "FAIL/STUB\r\n");
 
         /* SetThreadPriority. */
         BOOL sp = SetThreadPriority(t, THREAD_PRIORITY_NORMAL);
-        Out("[thread2_smoke] SetThreadPriority     = ");
-        Out(sp ? "PASS\r\n" : "FAIL/STUB\r\n");
+        OutVerdict("[thread2_smoke] SetThreadPriority     = ",
+                   sp ? "PASS\r\n" : "FAIL/STUB\r\n");
 
         if (g_worker_release == NULL || !SetEvent(g_worker_release))
             retirement_ok = FALSE;
 
         /* Wait for finish. */
         DWORD r = WaitForSingleObject(t, 5000);
-        Out("[thread2_smoke] WaitForSingleObject(t)= ");
-        Out(r == WAIT_OBJECT_0 ? "PASS\r\n" : "FAIL/STUB\r\n");
+        OutVerdict("[thread2_smoke] WaitForSingleObject(t)= ",
+                   r == WAIT_OBJECT_0 ? "PASS\r\n" : "FAIL/STUB\r\n");
         if (r != WAIT_OBJECT_0)
             retirement_ok = FALSE;
 
         /* GetExitCodeThread. */
         ExitCodeCanary completed = {EXIT_CANARY_BEFORE, EXIT_CANARY_UNTOUCHED, EXIT_CANARY_AFTER};
         BOOL gec = GetExitCodeThread(t, &completed.value);
-        Out("[thread2_smoke] GetExitCodeThread     = ");
-        Out(gec && completed.value == 0x42 && ExitCodeCanariesIntact(&completed) ? "PASS (0x42)\r\n" : "FAIL/STUB\r\n");
+        OutVerdict("[thread2_smoke] GetExitCodeThread     = ",
+                   gec && completed.value == 0x42 && ExitCodeCanariesIntact(&completed) ? "PASS (0x42)\r\n" : "FAIL/STUB\r\n");
         if (!gec || completed.value != 0x42 || !ExitCodeCanariesIntact(&completed) || g_ran == 0)
             retirement_ok = FALSE;
 
@@ -148,8 +179,8 @@ void __cdecl mainCRTStartup(void)
         BOOL stale_rejected = WaitForSingleObject(stale, 0) == WAIT_FAILED &&
                               !GetExitCodeThread(stale, &stale_probe.value) &&
                               stale_probe.value == EXIT_CANARY_UNTOUCHED && ExitCodeCanariesIntact(&stale_probe);
-        Out("[thread2_smoke] stale handle + canary = ");
-        Out(stale_rejected ? "PASS\r\n" : "FAIL\r\n");
+        OutVerdict("[thread2_smoke] stale handle + canary = ",
+                   stale_rejected ? "PASS\r\n" : "FAIL\r\n");
         if (!stale_rejected)
             retirement_ok = FALSE;
 
@@ -171,8 +202,8 @@ void __cdecl mainCRTStartup(void)
             BOOL replacement_ok = WaitForSingleObject(replacement, 5000) == WAIT_OBJECT_0 &&
                                   GetExitCodeThread(replacement, &replacement_exit.value) &&
                                   replacement_exit.value == 0x24 && ExitCodeCanariesIntact(&replacement_exit);
-            Out("[thread2_smoke] closed row reclaimed = ");
-            Out(replacement_ok ? "PASS\r\n" : "FAIL\r\n");
+            OutVerdict("[thread2_smoke] closed row reclaimed = ",
+                       replacement_ok ? "PASS\r\n" : "FAIL\r\n");
             if (!replacement_ok)
                 retirement_ok = FALSE;
             CloseHandle(replacement);
@@ -197,8 +228,8 @@ void __cdecl mainCRTStartup(void)
     {
         INIT_ONCE io = INIT_ONCE_STATIC_INIT;
         BOOL ran = InitOnceExecuteOnce(&io, init_once_fn, NULL, NULL);
-        Out("[thread2_smoke] InitOnceExecuteOnce   = ");
-        Out(ran ? "PASS\r\n" : "FAIL/STUB\r\n");
+        OutVerdict("[thread2_smoke] InitOnceExecuteOnce   = ",
+                   ran ? "PASS\r\n" : "FAIL/STUB\r\n");
     }
 
     Out("[thread2_smoke] done\r\n");
