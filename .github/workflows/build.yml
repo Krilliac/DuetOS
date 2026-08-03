@@ -456,7 +456,6 @@ jobs:
           - pe-threads
           - pe-winkill
           - linux
-          - browser
           - cancellation-smp
         cpus:
           - 4

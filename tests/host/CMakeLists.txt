@@ -460,6 +460,19 @@ target_sources(
     test_service_control_platform
     PRIVATE
         "${CMAKE_SOURCE_DIR}/../../kernel/core/service_control_platform.cpp"
+        "${CMAKE_SOURCE_DIR}/../../kernel/core/service_exit_reap_ledger.cpp"
+        "${CMAKE_SOURCE_DIR}/../../kernel/core/service_exit_observer.cpp"
+        "${CMAKE_SOURCE_DIR}/../../kernel/core/service_lifecycle_broker.cpp"
+        "${CMAKE_SOURCE_DIR}/../../kernel/core/service_directory.cpp"
+        "${CMAKE_SOURCE_DIR}/../../kernel/core/service_endpoint.cpp"
+        "${CMAKE_SOURCE_DIR}/../../kernel/core/service_manifest.cpp"
+        "${CMAKE_SOURCE_DIR}/../../kernel/core/service_transition.cpp"
+        "${CMAKE_SOURCE_DIR}/../../kernel/ipc/channel_core.cpp"
+        "${CMAKE_SOURCE_DIR}/../../kernel/ipc/endpoint_request_ledger.cpp"
+        "${CMAKE_SOURCE_DIR}/../../kernel/ipc/handle_table.cpp"
+        "${CMAKE_SOURCE_DIR}/../../kernel/proc/credentials.cpp"
+        "${CMAKE_SOURCE_DIR}/../../kernel/proc/resource_domain.cpp"
+        "${CMAKE_SOURCE_DIR}/../../kernel/crypto/sha256.cpp"
 )
 target_link_libraries(test_service_control_platform PRIVATE Threads::Threads)
 add_host_test(service_control_ingress)

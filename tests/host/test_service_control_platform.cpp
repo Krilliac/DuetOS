@@ -1,14 +1,163 @@
 #include "core/service_control_platform.h"
 
+#include "ipc/kmessage_port.h"
+#include "ipc/kobject.h"
+#include "ipc/object_transfer.h"
+
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <mutex>
+#include <new>
 #include <thread>
 #include <vector>
 
 using namespace duetos;
 using namespace duetos::core;
+
+namespace
+{
+
+std::mutex g_host_object_lock;
+
+} // namespace
+
+namespace duetos::sync
+{
+
+IrqFlags SpinLockAcquire(SpinLock& lock)
+{
+    std::atomic_ref<u32> next_ticket(*const_cast<u32*>(&lock.next_ticket));
+    const u32 ticket = next_ticket.fetch_add(1, std::memory_order_relaxed);
+    std::atomic_ref<u32> now_serving(*const_cast<u32*>(&lock.now_serving));
+    while (now_serving.load(std::memory_order_acquire) != ticket)
+        std::this_thread::yield();
+    return IrqFlags{0};
+}
+
+void SpinLockRelease(SpinLock& lock, IrqFlags)
+{
+    std::atomic_ref<u32> now_serving(*const_cast<u32*>(&lock.now_serving));
+    now_serving.fetch_add(1, std::memory_order_release);
+}
+
+} // namespace duetos::sync
+
+namespace duetos::core
+{
+
+[[noreturn]] void Panic(const char*, const char*)
+{
+    std::abort();
+}
+
+[[noreturn]] void PanicWithValue(const char*, const char*, u64)
+{
+    std::abort();
+}
+
+} // namespace duetos::core
+
+// This fixture drives the real directory / exit-observer / reap state machines
+// without the scheduler or kernel allocator. Standard hosted ChannelCore leaf
+// doubles satisfy the link; no test here opens an endpoint.
+namespace duetos::ipc
+{
+
+namespace
+{
+
+void DestroyHostedPort(KObject* object)
+{
+    delete reinterpret_cast<KMessagePort*>(object);
+}
+
+} // namespace
+
+void KObjectInit(KObject* object, KObjectType type, KObjectDestroyFn destroy)
+{
+    object->type = type;
+    object->refcount = 1;
+    object->destroy = destroy;
+}
+
+bool KObjectAcquire(KObject* object)
+{
+    if (object == nullptr)
+        return false;
+    std::lock_guard<std::mutex> guard(g_host_object_lock);
+    if (object->refcount == 0 || object->refcount == static_cast<u32>(-1))
+        return false;
+    ++object->refcount;
+    return true;
+}
+
+void KObjectRelease(KObject* object)
+{
+    if (object == nullptr)
+        return;
+    KObjectDestroyFn destroy = nullptr;
+    {
+        std::lock_guard<std::mutex> guard(g_host_object_lock);
+        if (object->refcount == 0)
+            return;
+        --object->refcount;
+        if (object->refcount == 0)
+            destroy = object->destroy;
+    }
+    if (destroy != nullptr)
+        destroy(object);
+}
+
+u32 KObjectRefcount(const KObject* object)
+{
+    if (object == nullptr)
+        return 0;
+    std::lock_guard<std::mutex> guard(g_host_object_lock);
+    return object->refcount;
+}
+
+::duetos::core::Result<KMessagePort*> KMessagePortCreate()
+{
+    auto* port = new (std::nothrow) KMessagePort{};
+    if (port == nullptr)
+        return ::duetos::core::Err{::duetos::core::ErrorCode::OutOfMemory};
+    KObjectInit(&port->base, KObjectType::MessagePort, &DestroyHostedPort);
+    return port;
+}
+
+void KMessagePortClose(KMessagePort* port)
+{
+    if (port == nullptr)
+        return;
+    std::lock_guard<std::mutex> guard(port->inner);
+    port->closed = true;
+}
+
+ObjectTransferStatus ObjectTransferTableInitialize(ObjectTransferTable* table, u32 first_generation)
+{
+    if (table == nullptr || first_generation == 0 || first_generation > kObjectTransferGenerationMax)
+        return ObjectTransferStatus::InvalidArgument;
+    if (table->initialized != 0)
+        return ObjectTransferStatus::AlreadyInitialized;
+    table->initialized = 1;
+    table->state = ObjectTransferTableState::Open;
+    return ObjectTransferStatus::Ok;
+}
+
+ObjectTransferStatus ObjectTransferTableClose(ObjectTransferTable* table)
+{
+    if (table == nullptr)
+        return ObjectTransferStatus::InvalidArgument;
+    if (table->initialized != 1)
+        return ObjectTransferStatus::NotInitialized;
+    table->state = ObjectTransferTableState::Closed;
+    return ObjectTransferStatus::Ok;
+}
+
+} // namespace duetos::ipc
 
 namespace
 {

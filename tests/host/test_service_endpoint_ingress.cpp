@@ -45,6 +45,7 @@ ServiceDirectory* g_last_connect_directory = nullptr;
 
 ServiceLifecycleBroker::ServiceLifecycleBroker() {}
 ServiceExitObserver::ServiceExitObserver() {}
+ServiceExitReapLedger::ServiceExitReapLedger() {}
 
 [[noreturn]] void Panic(const char*, const char*)
 {

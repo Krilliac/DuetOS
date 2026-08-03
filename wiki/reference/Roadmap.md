@@ -1861,6 +1861,13 @@ done, it is merely written.
     drives WHP on the host side.
 61. **Package manager / installer**, **multi-user + fast switching**,
     **remote desktop**, **accessibility** (screen reader), **i18n**.
+62. **`browser` boot-smoke profile.** A `browser` entry was registered in the
+    qemu-smoke matrix before the profile existed in
+    `tools/test/profile-boot-smoke.sh`, so every run failed with
+    `unknown profile 'browser'`; the matrix entry has been removed. Add the
+    profile to the script first, then re-add the matrix row.
+    **PROOF:** `tools/test/profile-boot-smoke.sh browser build/x86_64-debug`
+    exits 0 against a scenario signature that exercises a real page render.
 
 ### Standing rules for this backlog
 
