@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Structural guards for authority-bound unpublished service staging."""
+"""Structural guards for authority-bound service staging and activation."""
 
 from __future__ import annotations
 
@@ -21,14 +21,14 @@ WIKI = (ROOT / "wiki/kernel/Service-Bootstrap.md").read_text(encoding="utf-8")
 
 
 class ServiceBootstrapStageContract(unittest.TestCase):
-    def test_generated_definition_is_consumed_without_claiming_readiness(self) -> None:
+    def test_generated_definition_is_consumed_with_activation_readiness(self) -> None:
         self.assertIn('#include "service-package/generated_boot_service_package_data.h"', SOURCE)
         self.assertIn("generated::kBootServicePackageDefinition", SOURCE)
         self.assertIn("static_assert(generated::kBootServicePackageAuthorityBound)", SOURCE)
         self.assertIn("static_assert(generated::kBootServicePackageBootstrapPlansBound)", SOURCE)
-        self.assertIn("static_assert(!generated::kBootServicePackageProcessPublicationBound)", SOURCE)
-        self.assertIn("static_assert(!generated::kBootServicePackageEndpointReadinessBound)", SOURCE)
-        self.assertIn("static_assert(!generated::kBootServicePackageActivationReady)", SOURCE)
+        self.assertIn("static_assert(generated::kBootServicePackageProcessPublicationBound)", SOURCE)
+        self.assertIn("static_assert(generated::kBootServicePackageEndpointReadinessBound)", SOURCE)
+        self.assertIn("static_assert(generated::kBootServicePackageActivationReady)", SOURCE)
 
     def test_package_resolution_staging_and_admission_are_ordered(self) -> None:
         body = SOURCE[SOURCE.index("ServiceBootstrapStageInitializeV1(") :]
@@ -224,12 +224,11 @@ class ServiceBootstrapStageContract(unittest.TestCase):
         self.assertIn("add_dependencies(duetos-kernel duetos-service-package-data)", KERNEL_CMAKE)
         self.assertIn("add_host_test(service_bootstrap_stage)", HOST_CMAKE)
         self.assertIn("kernel/core/service_bootstrap_stage.cpp", HOST_CMAKE)
-        self.assertIn("Why the readiness markers stay false", WIKI)
+        self.assertIn("How the readiness markers become true", WIKI)
         self.assertIn("BootstrapPlansBound = true", WIKI)
-        self.assertIn("ActivationReady = false", WIKI)
+        self.assertIn("ActivationReady = true", WIKI)
         self.assertIn("scheduler publication lock", WIKI)
-        self.assertRegex(WIKI, r"compiled(?:-| )but(?:-| )dormant")
-        self.assertIn("activation remains fail-closed", HEADER)
+        self.assertIn("activation is live", HEADER)
 
 
 if __name__ == "__main__":

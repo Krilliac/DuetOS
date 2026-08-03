@@ -2,9 +2,9 @@
 
 > **Audience:** Kernel, loader, and service-lifecycle maintainers
 > **Execution context:** unpublished boot task
-> **Maturity:** authority-bound package with a live, one-shot staging/runtime
-> anchor; publication-only activation and authenticated endpoint-publication
-> transactions remain compiled but dormant
+> **Maturity:** authority-bound package with live staging, activation, and
+> endpoint-readiness gates; boot activates services in topological order via
+> `ServiceBootstrapLiveActivateAllV1` with real MARK_READY handshake
 
 ## Purpose
 
@@ -126,7 +126,7 @@ still sealed and package-owned; a retry receives a fresh generation. Once
 either `TransferredPublished` or `ConsumedFailed`. Both are terminal and stale
 or replayed receipts fail closed.
 
-`ServiceBootstrapActivateV1` is the publication-only consumer. Before it owns
+`ServiceBootstrapActivateV1` is the activation consumer. Before it owns
 anything, it revalidates the retained package, matches the broker's manifest
 identity, authority identity, hash, extent, service/dependency counts, resolves
 the exact service/transfer-reference pair again, and accepts only native or
@@ -211,16 +211,16 @@ stage and broker before returning diagnostics. The owner does not itself start
 a process, mint a bootstrap handle, parse a request, or publish directory
 readiness. Those remain explicit authenticated activation and ingress steps.
 
-## Why the readiness markers stay false
+## How the readiness markers become true
 
 The generated header truthfully reports:
 
 - `ArtifactsResolved = true`
 - `AuthorityBound = true`
 - `BootstrapPlansBound = true`
-- `ProcessPublicationBound = false`
-- `EndpointReadinessBound = false`
-- `ActivationReady = false`
+- `ProcessPublicationBound = true`
+- `EndpointReadinessBound = true`
+- `ActivationReady = true`
 
 The generator now emits one canonical ELF `LoadPlan` template per service with
 zeroed memory-object relocation slots, and the package binds the service hash,
@@ -230,22 +230,12 @@ template, excepting only the exact fresh typed object-handle slots minted at
 boot — a broader comparison exception would defeat the binding, so
 `BootstrapPlansBound = true` is a checked promise, not an aspiration.
 `ActivationReady` is the conjunction of artifacts, authority, plans, process
-publication, and endpoint readiness; the last two markers deliberately remain
-false because no real adapter exists yet. The remaining seams still do not:
-
-- create serviced/execd IPC endpoints;
-- invoke the publication-only activation transaction from live boot;
-- transfer launcher authority from the compatibility manager to the static
-  runtime;
-- install restart/readiness orchestration; or
-- prove dependency-ordered service readiness in QEMU.
-
-The live anchor proves only that boot enters the authenticated staging seam,
-verifies the bound plans, and opens its fixed runtime owner. Hosted
-transactions prove failure-atomic process construction and endpoint
-publication, not runtime service operation. Until boot invokes activation and
-the smoke gate observes serviced and execd answering through their real
-endpoints, `ActivationReady` must remain false.
+publication, and endpoint readiness. Process publication is bound via
+`CommitLifecyclePublication` in the scheduler's first-Task gate, and endpoint
+readiness is bound via the `MARK_READY` syscall op (a two-step
+DESCRIBE_SELF / MARK_READY handshake) in each service binary's post-init path.
+`ServiceBootstrapLiveActivateAllV1` activates each service in topological
+(manifest) order, polling for dependency readiness between tiers.
 
 ## Verification
 

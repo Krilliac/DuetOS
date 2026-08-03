@@ -1,5 +1,6 @@
 #include "supervisor.h"
 
+#include "duet/service_control.h"
 #include "duet/syscall.h"
 #include "unistd.h"
 
@@ -64,6 +65,8 @@ int main(void)
     if (supervisor == (ServicedSupervisor*)0 ||
         ServicedSupervisorInitialize(supervisor, &kDormantManifest) != SERVICED_SUPERVISOR_OK)
         return 70;
+
+    (void)duet_service_mark_ready();
 
     ParkWithoutEndpoint();
     return 0;

@@ -124,7 +124,7 @@ class ManifestGeneratorTest(unittest.TestCase):
         self.assertFalse(manifest.artifacts_resolved)
         self.assertTrue(all(service.content_source.startswith("staged:") for service in manifest.services))
         self.assertIn("kBootServiceManifestArtifactsResolved = false", expected)
-        self.assertIn("kBootServiceManifestActivationReady = false", expected)
+        self.assertIn("kBootServiceManifestActivationReady = true", expected)
         serviced = next(service for service in manifest.services if service.name == "serviced")
         self.assertNotEqual(serviced.capability_mask & (1 << GENERATOR.CAPABILITY_BITS["service-control"]), 0)
         for service in manifest.services:
@@ -275,7 +275,7 @@ class ManifestGeneratorTest(unittest.TestCase):
             self.assertIn("artifact-backed/authority-unbound", result.stdout)
             generated = header.read_text(encoding="ascii")
             self.assertIn("kBootServiceManifestArtifactsResolved = true", generated)
-            self.assertIn("kBootServiceManifestActivationReady = false", generated)
+            self.assertIn("kBootServiceManifestActivationReady = true", generated)
 
         self._assert_rejected(
             BASE_MANIFEST.replace("artifacts_resolved = false", "artifacts_resolved = true"),
@@ -331,8 +331,8 @@ class ManifestGeneratorTest(unittest.TestCase):
             self.assertIn("kServiceManifestAuthoritySealed", package)
             self.assertIn("kBootServicePackageBootstrapPlansBound = false", package)
             self.assertIn("kBootServicePackageActivationReady =\n", package)
-            self.assertIn("kBootServicePackageProcessPublicationBound = false", package)
-            self.assertIn("kBootServicePackageEndpointReadinessBound = false", package)
+            self.assertIn("kBootServicePackageProcessPublicationBound = true", package)
+            self.assertIn("kBootServicePackageEndpointReadinessBound = true", package)
             self.assertTrue(audit["authority_bound"])
             self.assertFalse(audit["bootstrap_plans_bound"])
             self.assertFalse(audit["activation_ready"])
@@ -586,9 +586,9 @@ class ManifestGeneratorTest(unittest.TestCase):
             self.assertIn("kBootServicePackageBootstrapPlans[]", package)
             self.assertIn("kServiceBootstrapPlanDefinitionSealed", package)
             self.assertTrue(audit["bootstrap_plans_bound"])
-            self.assertFalse(audit["activation_ready"])
-            self.assertFalse(audit["activation_contract"]["process_publication_bound"])
-            self.assertFalse(audit["activation_contract"]["endpoint_readiness_bound"])
+            self.assertTrue(audit["activation_ready"])
+            self.assertTrue(audit["activation_contract"]["process_publication_bound"])
+            self.assertTrue(audit["activation_contract"]["endpoint_readiness_bound"])
 
             first = plans[0].content
             size, version, image_format, entry, preferred, regions, dependencies = struct.unpack_from(

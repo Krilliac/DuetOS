@@ -328,8 +328,8 @@ ServiceBootstrapStageStatus ServiceBootstrapStageDiscardV1(ServiceBootstrapStage
 #if !defined(DUETOS_HOST_TEST)
 // Production seam for generated_boot_service_package_data.h. A linked live
 // owner consumes authority-bound ELF and bootstrap-plan templates through this
-// same entry point; process publication and endpoint readiness remain false,
-// so activation remains fail-closed.
+// same entry point; process publication and endpoint readiness are bound via
+// CommitLifecyclePublication and the MARK_READY syscall, so activation is live.
 u32 ServiceBootstrapGeneratedServiceCountV1();
 ServiceBootstrapStageResultV1 ServiceBootstrapStageGeneratedV1(ServiceBootstrapStageRuntimeV1* runtime,
                                                                const ServiceBootstrapSlotStorageV1* slots,

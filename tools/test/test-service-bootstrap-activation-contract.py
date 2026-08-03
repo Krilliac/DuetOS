@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Structural guards for dormant authenticated service activation."""
+"""Structural guards for live authenticated service activation."""
 
 from __future__ import annotations
 
@@ -186,14 +186,13 @@ class ServiceBootstrapActivationContract(unittest.TestCase):
         self.assertIn("KASSERT(result.stage_status == ServiceBootstrapStageStatus::Ok", tail)
         self.assertIn("published service could not commit exact stage receipt", tail)
 
-    def test_compiled_but_dormant_boundary_and_host_gate_are_registered(self) -> None:
-        self.assertIn("compiled-but-dormant", HEADER)
-        self.assertIn("No live boot path calls it", HEADER)
-        self.assertNotIn("kBootServicePackageActivationReady = true", SOURCE + HEADER)
+    def test_live_activation_boundary_and_host_gate_are_registered(self) -> None:
+        self.assertIn("Activation transaction", HEADER)
+        self.assertIn("ServiceBootstrapLiveActivateAllV1", HEADER)
         self.assertIn("add_host_test(service_bootstrap_activation)", HOST_CMAKE)
         self.assertIn("kernel/core/service_bootstrap_activation.cpp", HOST_CMAKE)
-        self.assertIn("publication-only", WIKI)
-        self.assertIn("ActivationReady = false", WIKI)
+        self.assertIn("activation consumer", WIKI)
+        self.assertIn("ActivationReady = true", WIKI)
 
 
 if __name__ == "__main__":

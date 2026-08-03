@@ -74,7 +74,7 @@ class ServiceElfLoadImageContract(unittest.TestCase):
         self.assertIn("add_host_test(elf_load_image)", HOST_CMAKE)
         self.assertIn("kernel/loader/elf_load_image.cpp", HOST_CMAKE)
         self.assertIn("Service package ELF staging", WIKI)
-        self.assertIn("Activation readiness remains false", WIKI)
+        self.assertIn("ActivationReady = true", WIKI)
 
 
 if __name__ == "__main__":

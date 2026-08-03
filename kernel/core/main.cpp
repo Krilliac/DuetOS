@@ -284,6 +284,7 @@
 #include "core/panic.h"
 #include "core/serial_input.h"
 #include "core/service.h"
+#include "core/service_bootstrap_live.h"
 #include "core/session_restore.h"
 #include "syscall/cap_gate.h"
 #include "proc/process.h"
@@ -919,6 +920,11 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // mutex; starting it in BootBringupDevices lets persistent services
     // consume the bounded task pool before SMP/Userland self-tests finish.
     duetos::core::ServiceManagerStartAll();
+
+    // Authority-bound activation: create a Process/Task for each boot
+    // service in topological order, poll for dependency readiness between
+    // tiers, and let each service binary call MARK_READY after init.
+    duetos::core::ServiceBootstrapLiveActivateAllV1();
 
     duetos::core::StartHeartbeatThread();
 

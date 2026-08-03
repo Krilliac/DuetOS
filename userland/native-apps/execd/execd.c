@@ -1,5 +1,6 @@
 #include "worker.h"
 
+#include "duet/service_control.h"
 #include "duet/syscall.h"
 #include "unistd.h"
 
@@ -72,6 +73,8 @@ int main(void)
     if (worker == (ExecdWorker*)0 || cleanup == (ExecdWorkerCleanupBatch*)0 ||
         !InitializeDormantWorker(worker, cleanup))
         return 71;
+
+    (void)duet_service_mark_ready();
 
     ParkWithoutEndpoint();
     return 0;

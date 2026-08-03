@@ -1658,9 +1658,9 @@ ServiceBootstrapStageStatus ServiceBootstrapStageDiscardV1(ServiceBootstrapStage
 static_assert(generated::kBootServicePackageArtifactsResolved);
 static_assert(generated::kBootServicePackageAuthorityBound);
 static_assert(generated::kBootServicePackageBootstrapPlansBound);
-static_assert(!generated::kBootServicePackageProcessPublicationBound);
-static_assert(!generated::kBootServicePackageEndpointReadinessBound);
-static_assert(!generated::kBootServicePackageActivationReady);
+static_assert(generated::kBootServicePackageProcessPublicationBound);
+static_assert(generated::kBootServicePackageEndpointReadinessBound);
+static_assert(generated::kBootServicePackageActivationReady);
 
 u32 ServiceBootstrapGeneratedServiceCountV1()
 {

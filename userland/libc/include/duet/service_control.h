@@ -134,6 +134,13 @@ extern "C"
     long duet_service_control(const duet_service_control_request_v1* request, size_t request_bytes,
                               duet_service_control_result_v1* result, size_t result_capacity);
 
+    /*
+     * Two-step DESCRIBE_SELF → MARK_READY handshake.  The kernel derives the
+     * caller's identity from the current process and validates the echoed fields
+     * on the MARK_READY leg.  Returns 0 on success, -1 on any failure.
+     */
+    int duet_service_mark_ready(void);
+
 #if defined(__cplusplus)
     static_assert(sizeof(duet_service_control_request_v1) == 80, "service-control request ABI changed");
     static_assert(offsetof(duet_service_control_request_v1, operation_token) == 56,

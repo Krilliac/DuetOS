@@ -9,11 +9,11 @@
  * allocator, C++ init array, and managed paging are online.  Inspection is
  * read-only after the terminal state is published.
  *
- * RuntimeOpenCompatibilityRequired is intentionally not named Ready: the
- * generated package still has ActivationReady=false, no Process/Task exists,
- * and no endpoint is registered.  The compatibility service manager remains
- * the sole live launcher until that marker and the corresponding runtime gates
- * become truthful.
+ * Initialize anchors the generated package and opens the runtime substrate.
+ * ActivateAllV1 then creates Process/Task graphs in topological order and
+ * each service binary's MARK_READY syscall commits endpoint readiness.
+ * The compatibility service manager is retained alongside the activated
+ * services for any legacy launch paths not yet migrated.
  */
 
 #include "core/service_bootstrap_stage.h"
@@ -138,6 +138,14 @@ ServiceBootstrapLiveResultV1 ServiceBootstrapLiveInitializeV1();
 // Returns a coherent terminal snapshot.  Initializing is reported as
 // NotInitialized rather than exposing partially written storage.
 ServiceBootstrapLiveStatusV1 ServiceBootstrapLiveInspectV1(ServiceBootstrapLiveSnapshotV1* snapshot_out);
+
+// Activate all boot services in topological (manifest) order.  For each
+// service, polls until dependency readiness is satisfied, then calls
+// ServiceBootstrapActivateV1 to create the Process/Task and publish it.
+// The service binaries are expected to call MARK_READY after initialization;
+// the loop polls for that readiness before activating dependents.
+// [boot task, scheduler online, called once from main]
+void ServiceBootstrapLiveActivateAllV1();
 
 // [service-control owner, serialized internally]
 // Restage one exact terminal service into its inactive permanent bank.  A

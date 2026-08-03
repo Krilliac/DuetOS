@@ -29,6 +29,7 @@
  * forever — visible in `svc list`.
  */
 
+#include "duet/service_control.h"
 #include "duet/socket.h"
 #include "duet/syscall.h"
 #include "stdio.h"
@@ -58,6 +59,8 @@ int main(void)
         puts_str("[netd] FAIL listen\n");
         return 4;
     }
+
+    (void)duet_service_mark_ready();
 
     puts_str("[netd] listening on 0.0.0.0:7777 (TCP echo)\n");
 

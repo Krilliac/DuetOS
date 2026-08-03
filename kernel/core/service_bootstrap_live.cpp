@@ -1,10 +1,14 @@
 #include "core/service_bootstrap_live.h"
+#include "core/service_bootstrap_activation.h"
 #include "core/service_control_platform.h"
 
 #if !defined(DUETOS_HOST_TEST)
+#include "log/klog.h"
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
+#include "sched/sched.h"
 #include "service-package/generated_boot_service_package_data.h"
+#include "time/timekeeper.h"
 #endif
 
 namespace duetos::core
@@ -17,9 +21,9 @@ namespace
 static_assert(generated::kBootServicePackageArtifactsResolved);
 static_assert(generated::kBootServicePackageAuthorityBound);
 static_assert(generated::kBootServicePackageBootstrapPlansBound);
-static_assert(!generated::kBootServicePackageProcessPublicationBound);
-static_assert(!generated::kBootServicePackageEndpointReadinessBound);
-static_assert(!generated::kBootServicePackageActivationReady);
+static_assert(generated::kBootServicePackageProcessPublicationBound);
+static_assert(generated::kBootServicePackageEndpointReadinessBound);
+static_assert(generated::kBootServicePackageActivationReady);
 static_assert(generated::kBootServicePackageArtifactCount == kServiceBootstrapLiveServiceCapacityV1);
 static_assert(generated::kBootServicePackageTotalArtifactBytes <= kServiceBootstrapLiveTotalArtifactByteCapacityV1);
 static_assert(kServiceBootstrapLiveImageBytesPerServiceV1 % loader::kLoadPlanPageSize == 0);
@@ -517,6 +521,94 @@ const char* ServiceBootstrapLiveStatusNameV1(ServiceBootstrapLiveStatusV1 status
     }
     return "unknown";
 }
+
+#if !defined(DUETOS_HOST_TEST)
+void ServiceBootstrapLiveActivateAllV1()
+{
+    ServiceRuntimeV1* runtime = ServiceRuntimeKernelV1();
+    if (runtime == nullptr)
+    {
+        KLOG_WARN("svcboot", "activation skipped: runtime not published");
+        return;
+    }
+
+    ServiceRuntimeActivationAuthorityV1 authority{};
+    if (ServiceRuntimeBindActivationAuthorityV1(runtime, &authority) != ServiceRuntimeStatusV1::Ok)
+    {
+        KLOG_WARN("svcboot", "activation skipped: authority bind failed");
+        return;
+    }
+
+    ServiceBootstrapStageSnapshotV1 stage{};
+    if (ServiceBootstrapStageInspectV1(authority.stage, &stage) != ServiceBootstrapStageStatus::Ok)
+    {
+        KLOG_WARN("svcboot", "activation skipped: stage inspect failed");
+        return;
+    }
+
+    constexpr u32 kReadyPollLimit = 500;
+
+    for (u32 index = 0; index < stage.service_count; ++index)
+    {
+        ServiceLifecycleInspectResult inspect = ServiceLifecycleBrokerInspectAt(authority.lifecycle, index);
+        if (inspect.status != ServiceLifecycleStatus::Ok)
+        {
+            KLOG_WARN("svcboot", "activation aborted: lifecycle inspect failed");
+            return;
+        }
+
+        const u64 service_id = inspect.snapshot.service_identity;
+
+        if (inspect.snapshot.dependency_mask != 0)
+        {
+            u32 polls = 0;
+            while (polls < kReadyPollLimit)
+            {
+                bool deps_ready = true;
+                for (u32 dep = 0; dep < stage.service_count; ++dep)
+                {
+                    if ((inspect.snapshot.dependency_mask & (1ULL << dep)) == 0)
+                        continue;
+                    ServiceLifecycleInspectResult dep_inspect =
+                        ServiceLifecycleBrokerInspectAt(authority.lifecycle, dep);
+                    if (dep_inspect.status != ServiceLifecycleStatus::Ok ||
+                        dep_inspect.snapshot.phase != ServiceTransitionPhase::Running || !dep_inspect.snapshot.ready)
+                    {
+                        deps_ready = false;
+                        break;
+                    }
+                }
+                if (deps_ready)
+                    break;
+                sched::SchedYield();
+                ++polls;
+            }
+            if (polls >= kReadyPollLimit)
+            {
+                KLOG_WARN("svcboot", "activation aborted: dependency readiness timeout");
+                return;
+            }
+        }
+
+        ServiceBootstrapActivationRequestV1 request{};
+        request.version = kServiceBootstrapActivationVersion1;
+        request.runtime = runtime;
+        request.service_identity = service_id;
+        request.expected_transition_generation = inspect.snapshot.transition_generation;
+        request.now_ns = time::MonotonicNs();
+
+        const ServiceBootstrapActivationResultV1 result = ServiceBootstrapActivateV1(request);
+        if (result.status != ServiceBootstrapActivationStatusV1::Ok)
+        {
+            KLOG_WARN_S("svcboot", "activation failed", "status",
+                        ServiceBootstrapActivationStatusNameV1(result.status));
+            return;
+        }
+    }
+
+    KLOG_INFO("svcboot", "all boot services activated");
+}
+#endif
 
 const char* ServiceBootstrapLiveRestageStatusNameV1(ServiceBootstrapLiveRestageStatusV1 status)
 {

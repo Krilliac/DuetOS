@@ -1,16 +1,16 @@
 #pragma once
 
 /*
- * Publication-only authenticated boot-service activation, v1.
+ * Authenticated boot-service activation, v1.
  *
- * This is a compiled-but-dormant transaction. It consumes one exact staged
- * image into a fresh private address space, constructs a Process under the
- * signed manifest ceilings, then atomically joins the exact ProcessKey,
- * exit-observer binding, lifecycle instance, and ServiceDirectory identity
- * inside the scheduler's first-Task publication critical section.
- * No live boot path calls it; publication deliberately leaves both lifecycle
- * and directory readiness false. It creates no endpoints, readiness signal,
- * restart policy, or service-manager loop.
+ * Activation transaction: consumes one exact staged image into a fresh
+ * private address space, constructs a Process under the signed manifest
+ * ceilings, then atomically joins the exact ProcessKey, exit-observer
+ * binding, lifecycle instance, and ServiceDirectory identity inside the
+ * scheduler's first-Task publication critical section.
+ * Called from ServiceBootstrapLiveActivateAllV1 in topological order during
+ * boot. Each service binary calls MARK_READY after initialization; the
+ * activation loop polls for that readiness before activating dependents.
  *
  * Ownership:
  *   - a successful call publishes one scheduler-owned Task/Process graph;

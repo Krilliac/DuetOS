@@ -240,9 +240,9 @@ class ServicePublicationDirectoryContract(unittest.TestCase):
         ):
             self.assertIn(token, HOST_TEST)
 
-    def test_live_boot_readiness_remains_dormant(self) -> None:
-        self.assertNotIn("kBootServicePackageActivationReady = true", ACTIVATION_H + ACTIVATION_CPP + BOOT_HEADER)
-        self.assertIn("compiled-but-dormant", ACTIVATION_H)
+    def test_live_boot_activation_is_wired(self) -> None:
+        self.assertIn("Activation transaction", ACTIVATION_H)
+        self.assertIn("ServiceBootstrapLiveActivateAllV1", ACTIVATION_H)
 
 
 if __name__ == "__main__":

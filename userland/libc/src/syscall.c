@@ -112,6 +112,39 @@ long duet_service_control(const duet_service_control_request_v1* request, size_t
     return rv;
 }
 
+int duet_service_mark_ready(void)
+{
+    duet_service_control_request_v1 req;
+    duet_service_control_result_v1 res;
+
+    __builtin_memset(&req, 0, sizeof(req));
+    req.struct_size = sizeof(req);
+    req.version = DUET_SERVICE_CONTROL_ABI_VERSION;
+    req.operation = DUET_SERVICE_CONTROL_OP_DESCRIBE_SELF;
+    __builtin_memset(&res, 0, sizeof(res));
+
+    long rc = duet_service_control(&req, sizeof(req), &res, sizeof(res));
+    if (rc != 0 || res.status != DUET_SERVICE_CONTROL_STATUS_OK)
+        return -1;
+
+    __builtin_memset(&req, 0, sizeof(req));
+    req.struct_size = sizeof(req);
+    req.version = DUET_SERVICE_CONTROL_ABI_VERSION;
+    req.operation = DUET_SERVICE_CONTROL_OP_MARK_READY;
+    req.broker_epoch = res.broker_epoch;
+    req.service_identity = res.service_identity;
+    req.transition_generation = res.transition_generation;
+    req.process_identity = res.process_identity;
+    req.pid = res.pid;
+    __builtin_memset(&res, 0, sizeof(res));
+
+    rc = duet_service_control(&req, sizeof(req), &res, sizeof(res));
+    if (rc != 0 || res.status != DUET_SERVICE_CONTROL_STATUS_OK)
+        return -1;
+
+    return 0;
+}
+
 /* String helpers — implemented in userland/libc/src/string.S
  * (memcpy, memmove, memset, strlen, strcmp). The asm versions use
  * `rep movsb` / `rep stosb` which the silicon optimises into a

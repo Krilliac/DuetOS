@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hostile structural contract for the live, non-activating service anchor."""
+"""Hostile structural contract for the live service anchor and activation loop."""
 
 from pathlib import Path
 import re
@@ -62,8 +62,8 @@ class ServiceBootstrapLiveContract(unittest.TestCase):
         self.assertIn("kBootServicePackageArtifactCount == kServiceBootstrapLiveServiceCapacityV1", SOURCE)
         self.assertIn("kBootServicePackageTotalArtifactBytes <=", SOURCE)
         self.assertIn("static_assert(generated::kBootServicePackageBootstrapPlansBound)", SOURCE)
-        self.assertIn("static_assert(!generated::kBootServicePackageProcessPublicationBound)", SOURCE)
-        self.assertIn("static_assert(!generated::kBootServicePackageEndpointReadinessBound)", SOURCE)
+        self.assertIn("static_assert(generated::kBootServicePackageProcessPublicationBound)", SOURCE)
+        self.assertIn("static_assert(generated::kBootServicePackageEndpointReadinessBound)", SOURCE)
         for forbidden in ("KMalloc(", "KFree(", "malloc(", "new ", "std::vector"):
             self.assertNotIn(forbidden, SOURCE)
 
@@ -178,19 +178,10 @@ class ServiceBootstrapLiveContract(unittest.TestCase):
         ):
             self.assertIn(token, STAGE_HOST)
 
-    def test_anchor_cannot_activate_or_publish_any_service(self) -> None:
-        for forbidden in (
-            "ServiceBootstrapActivateV1",
-            "ServiceBootstrapStageBeginActivationV1",
-            "SchedCreate",
-            "ProcessCreate",
-            "ServiceDirectoryRegister",
-            "ServiceDirectoryPublish",
-            "ServiceLifecycleBrokerMarkReady",
-            "ServiceDirectoryCommitJointReady",
-        ):
-            self.assertNotIn(forbidden, SOURCE)
-        self.assertIn("static_assert(!generated::kBootServicePackageActivationReady)", SOURCE)
+    def test_anchor_activates_services_in_topological_order(self) -> None:
+        self.assertIn("ServiceBootstrapActivateV1", SOURCE)
+        self.assertIn("ServiceBootstrapLiveActivateAllV1", SOURCE)
+        self.assertIn("static_assert(generated::kBootServicePackageActivationReady)", SOURCE)
         self.assertIn("process_count", HEADER)
         self.assertIn("published_endpoint_count", HEADER)
 

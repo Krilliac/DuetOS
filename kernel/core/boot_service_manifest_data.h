@@ -13,7 +13,7 @@ namespace duetos::core::generated
 
 inline constexpr u32 kBootServiceManifestGeneratorVersion = 2;
 inline constexpr bool kBootServiceManifestArtifactsResolved = false;
-inline constexpr bool kBootServiceManifestActivationReady = false;
+inline constexpr bool kBootServiceManifestActivationReady = true;
 inline constexpr u64 kBootServiceManifestIdentity = 0x445545544D414E31ULL;
 inline constexpr u64 kBootServiceManifestSignerIdentity = 0x445545544255494CULL;
 inline constexpr u64 kBootServiceManifestProfileIdentity = 0x4455455453564331ULL;

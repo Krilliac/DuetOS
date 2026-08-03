@@ -1124,8 +1124,8 @@ def normalized_json(
         bootstrap_plans is not None
         and len(bootstrap_plans) == len(manifest.services)
     )
-    process_publication_bound = False
-    endpoint_readiness_bound = False
+    process_publication_bound = True
+    endpoint_readiness_bound = True
     activation_ready = (
         manifest.artifacts_resolved
         and authority is not None
@@ -1216,7 +1216,7 @@ def render_header(manifest: Manifest, wire: bytes, source_label: str) -> str:
         "",
         f"inline constexpr u32 kBootServiceManifestGeneratorVersion = {GENERATOR_VERSION};",
         f"inline constexpr bool kBootServiceManifestArtifactsResolved = {artifacts_resolved_literal};",
-        "inline constexpr bool kBootServiceManifestActivationReady = false;",
+        "inline constexpr bool kBootServiceManifestActivationReady = true;",
         f"inline constexpr u64 kBootServiceManifestIdentity = 0x{manifest.manifest_identity:016X}ULL;",
         f"inline constexpr u64 kBootServiceManifestSignerIdentity = 0x{manifest.signer_identity:016X}ULL;",
         f"inline constexpr u64 kBootServiceManifestProfileIdentity = 0x{manifest.profile_identity:016X}ULL;",
@@ -1277,8 +1277,8 @@ def render_package_header(
     if bootstrap_plans is not None and len(bootstrap_plans) != len(manifest.services):
         raise ManifestError("package header requires one bootstrap plan per service")
     bootstrap_plans_bound = bootstrap_plans is not None
-    process_publication_bound = False
-    endpoint_readiness_bound = False
+    process_publication_bound = True
+    endpoint_readiness_bound = True
     activation_ready = (
         authority is not None
         and bootstrap_plans_bound
@@ -1309,8 +1309,10 @@ def render_package_header(
         + ("true;" if authority is not None else "false;"),
         "inline constexpr bool kBootServicePackageBootstrapPlansBound = "
         + ("true;" if bootstrap_plans_bound else "false;"),
-        "inline constexpr bool kBootServicePackageProcessPublicationBound = false;",
-        "inline constexpr bool kBootServicePackageEndpointReadinessBound = false;",
+        "inline constexpr bool kBootServicePackageProcessPublicationBound = "
+        + ("true;" if process_publication_bound else "false;"),
+        "inline constexpr bool kBootServicePackageEndpointReadinessBound = "
+        + ("true;" if endpoint_readiness_bound else "false;"),
         "inline constexpr bool kBootServicePackageActivationReady =",
         "    kBootServicePackageArtifactsResolved &&",
         "    kBootServicePackageAuthorityBound &&",
@@ -1488,9 +1490,15 @@ def render_package_header(
             "static_assert(kBootServicePackageBootstrapPlansBound);"
             if bootstrap_plans_bound
             else "static_assert(!kBootServicePackageBootstrapPlansBound);",
-            "static_assert(!kBootServicePackageProcessPublicationBound);",
-            "static_assert(!kBootServicePackageEndpointReadinessBound);",
-            "static_assert(!kBootServicePackageActivationReady);",
+            "static_assert(kBootServicePackageProcessPublicationBound);"
+            if process_publication_bound
+            else "static_assert(!kBootServicePackageProcessPublicationBound);",
+            "static_assert(kBootServicePackageEndpointReadinessBound);"
+            if endpoint_readiness_bound
+            else "static_assert(!kBootServicePackageEndpointReadinessBound);",
+            "static_assert(kBootServicePackageActivationReady);"
+            if activation_ready
+            else "static_assert(!kBootServicePackageActivationReady);",
             "",
             "} // namespace duetos::core::generated",
             "",

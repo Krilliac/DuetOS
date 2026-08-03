@@ -260,9 +260,12 @@ ELF bytes from the generated manifest, the adapter:
 
 The adapter is compiled and structurally tested
 (`tests/host/test_elf_load_image.cpp`, `add_host_test(elf_load_image)`).
-Activation readiness remains false: the generated package has
-`ActivationReady = false` because the process-publication and
-endpoint-readiness adapters are not yet wired to truthful gates.
+The generated package has `ActivationReady = true`: the process-publication
+adapter (via `CommitLifecyclePublication` in the scheduler's first-Task gate)
+and endpoint-readiness adapter (via the `MARK_READY` syscall op in each
+service binary's post-init path) are wired to truthful gates.  The boot-time
+activation loop (`ServiceBootstrapLiveActivateAllV1`) activates each service
+in topological order, polling for dependency readiness between tiers.
 
 ## Related Pages
 

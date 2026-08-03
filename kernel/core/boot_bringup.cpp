@@ -2340,9 +2340,9 @@ void BootBringupDevices(bool force_net_smoke)
     DUETOS_BOOT_SELFTEST(duetos::net::drsh::DrshSelfTest());
 
     // Anchor the generated authority-bound service package in fixed kernel
-    // storage. This stages sealed images and opens the runtime substrate only;
-    // ActivationReady is still false, so no Process, Task, or endpoint is
-    // published here and the compatibility manager remains authoritative.
+    // storage. This stages sealed images and opens the runtime substrate;
+    // ServiceBootstrapLiveActivateAllV1 (called later from main) creates
+    // the Process/Task graphs and each service calls MARK_READY.
     const ServiceBootstrapLiveResultV1 service_bootstrap = ServiceBootstrapLiveInitializeV1();
     if (service_bootstrap.status == ServiceBootstrapLiveStatusV1::CompatibilityRequired)
     {

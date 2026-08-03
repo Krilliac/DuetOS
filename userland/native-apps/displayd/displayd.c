@@ -1,5 +1,6 @@
 #include "display_engine.h"
 
+#include "duet/service_control.h"
 #include "duet/syscall.h"
 #include "unistd.h"
 
@@ -68,6 +69,8 @@ int main(void)
 
     if (engine == (DisplaydEngine*)0 || !InitializeDormantEngine(engine))
         return 72;
+
+    (void)duet_service_mark_ready();
 
     ParkWithoutEndpoint();
     return 0;
