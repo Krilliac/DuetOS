@@ -41,6 +41,31 @@ Facts established:
 - Serial output at the panic is interleaved character-by-character between
   BSP and AP.
 
+Ruled out since (all verified against the source, not assumed):
+
+- **The AP's initial RSP is correct.** `AllocateKernelStack` returns the
+  *usable* base (above the guard page, see `UsableBaseFromSlot`), and
+  `smp.cpp` sets `TrampU64At(kOffStack) = stack + kKernelStackUsableBytes`,
+  which is the true top of the slot. Not an off-by-one-page or
+  base/top inversion.
+- **Not a slot collision** — guard addresses are exactly one slot apart.
+- **Not the `LinuxFdClearSlotLocked` bug** — that is fixed and the fd
+  self-test passes.
+
+The AP prints its own `AP online cpu_id` line *successfully*, then faults on
+the `call` instruction at `smp.cpp:1209`. A `call` pushes a return address,
+so the guard was hit by that push — meaning the stack was already at the
+guard boundary before the call, after only shallow work (CPUHP transitions
+and an admission spin). Genuinely consuming 128 KiB there is implausible,
+so the remaining candidates are a corrupted RSP somewhere between the
+trampoline and this point, or the AP running on a stack that is not the one
+it was given.
+
+Note the kstack 75% tripwire is only evaluated at *free* time, and an AP
+bootstrap stack is never freed, so it cannot report on this path. The
+`[tripwire]` lines in a boot log are an unrelated memory-watchpoint
+self-test — do not read them as stack-depth evidence.
+
 So an AP overflows 128 KiB inside klog, immediately on coming online.
 `percpu.cpp` documents exactly this hazard: klog tags every line via
 `CurrentCpuIdOrBsp()` → `CurrentCpu()`, and re-entering that while GSBASE is
@@ -59,7 +84,26 @@ AP init ordering in `ApSetupCurrent` reads correctly: `LoadGdtForCurrent` →
 fallbacks therefore come from somewhere else; finding that caller is the next
 concrete step.
 
-## Open failure 2 — Linux fd self-test still panics
+## CLOSED — Linux fd self-test (was "open failure 2")
+
+**This is fixed.** Booting the post-fix artifact ISO *directly* prints
+
+```
+[proc] linux-fd-table self-test OK
+```
+
+and no fd panic. The section below was written from a bad observation and
+its conclusion was wrong; it is kept only because the trap that produced it
+is worth knowing.
+
+The bad observation came from running `tools/qemu/run.sh` with
+`DUETOS_SMOKE_PROFILE` set. That combination **rebuilds the ISO from
+`BUILD_DIR`**, so it booted the stale local `build/x86_64-debug` tree —
+a kernel predating the fix — rather than the artifact named in
+`DUETOS_SMOKE_ISO`. Always boot the artifact ISO directly with
+`qemu-system-x86_64 -cdrom` when validating a downloaded build.
+
+## (superseded) Linux fd self-test still panics
 
 ```
 [panic-precis] proc/linux-fd: self-test: saturated fd slot became reusable
