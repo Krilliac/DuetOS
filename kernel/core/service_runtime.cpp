@@ -373,73 +373,80 @@ ServiceRuntimeInitializeResultV1 ServiceRuntimeInitializeKernelV1(ServiceBootstr
     return InitializeRuntime(&g_kernel_service_runtime, stage, true);
 }
 
+// Classify from a SINGLE state load. The state advances Initializing->Open
+// concurrently with any caller, so loading it once to reject and a second
+// time to classify reads that legal transition as corruption and panics the
+// reaper. The acquire load below pairs with the release store that publishes
+// Open, so observing Open here guarantees the marker write is visible too.
+static ServiceRuntimeV1* ServiceRuntimeKernelLookupV1(ServiceRuntimeStatusV1* status_out)
+{
+    const u32 raw_state = RuntimeStateLoad(&g_kernel_service_runtime);
+    if (raw_state == static_cast<u32>(ServiceRuntimeStateV1::Uninitialized) ||
+        raw_state == static_cast<u32>(ServiceRuntimeStateV1::Initializing))
+    {
+        *status_out = ServiceRuntimeStatusV1::NotInitialized;
+        return nullptr;
+    }
+    if (raw_state == static_cast<u32>(ServiceRuntimeStateV1::Failed))
+    {
+        *status_out = ServiceRuntimeStatusV1::Failed;
+        return nullptr;
+    }
+    if (raw_state != static_cast<u32>(ServiceRuntimeStateV1::Open) ||
+        g_kernel_service_runtime.initialized != kServiceRuntimeInitializedMarkerV1)
+    {
+        *status_out = ServiceRuntimeStatusV1::CorruptState;
+        return nullptr;
+    }
+    *status_out = ServiceRuntimeStatusV1::Ok;
+    return &g_kernel_service_runtime;
+}
+
 ServiceRuntimeV1* ServiceRuntimeKernelV1()
 {
-    if (RuntimeStateLoad(&g_kernel_service_runtime) != static_cast<u32>(ServiceRuntimeStateV1::Open))
-        return nullptr;
-    return g_kernel_service_runtime.initialized == kServiceRuntimeInitializedMarkerV1 ? &g_kernel_service_runtime
-                                                                                      : nullptr;
+    ServiceRuntimeStatusV1 status = ServiceRuntimeStatusV1::Ok;
+    return ServiceRuntimeKernelLookupV1(&status);
 }
 
 ServiceRuntimeDeferAcceptedProcessResultV1 ServiceRuntimeDeferAcceptedProcessKernelV1(ProcessKey process)
 {
-    ServiceRuntimeV1* runtime = ServiceRuntimeKernelV1();
+    ServiceRuntimeStatusV1 status = ServiceRuntimeStatusV1::Ok;
+    ServiceRuntimeV1* runtime = ServiceRuntimeKernelLookupV1(&status);
     if (runtime == nullptr)
     {
-        const u32 raw_state = RuntimeStateLoad(&g_kernel_service_runtime);
-        if (raw_state == static_cast<u32>(ServiceRuntimeStateV1::Uninitialized) ||
-            raw_state == static_cast<u32>(ServiceRuntimeStateV1::Initializing))
-        {
-            // The singleton is not externally reachable before Open, so no
-            // accepted endpoint owner can exist yet.
-            return DeferAcceptedProcessFailure(ServiceRuntimeStatusV1::NotInitialized,
-                                               ServiceDirectoryStatus::NotInitialized);
-        }
-        if (raw_state == static_cast<u32>(ServiceRuntimeStateV1::Failed))
-            return DeferAcceptedProcessFailure(ServiceRuntimeStatusV1::Failed);
-        // Open with a missing marker, or any unknown state, is corruption. Do
-        // not let Process teardown interpret it as a safe empty runtime and
-        // fall through to raw ServiceEndpoint handle release.
-        return DeferAcceptedProcessFailure(ServiceRuntimeStatusV1::CorruptState);
+        // The singleton is not externally reachable before Open, so no accepted
+        // endpoint owner can exist yet. Open with a missing marker, or any unknown
+        // state, is corruption: do not let Process teardown treat it as a safe
+        // empty runtime and fall through to raw ServiceEndpoint handle release.
+        return DeferAcceptedProcessFailure(status, status == ServiceRuntimeStatusV1::NotInitialized
+                                                       ? ServiceDirectoryStatus::NotInitialized
+                                                       : ServiceDirectoryStatus::Ok);
     }
     return DeferAcceptedProcess(runtime, process);
 }
 
 ServiceRuntimeDriveDeferredAcceptedResultV1 ServiceRuntimeDriveDeferredAcceptedKernelV1()
 {
-    ServiceRuntimeV1* runtime = ServiceRuntimeKernelV1();
+    ServiceRuntimeStatusV1 status = ServiceRuntimeStatusV1::Ok;
+    ServiceRuntimeV1* runtime = ServiceRuntimeKernelLookupV1(&status);
     if (runtime == nullptr)
     {
-        const u32 raw_state = RuntimeStateLoad(&g_kernel_service_runtime);
-        if (raw_state == static_cast<u32>(ServiceRuntimeStateV1::Uninitialized) ||
-            raw_state == static_cast<u32>(ServiceRuntimeStateV1::Initializing))
+        if (status == ServiceRuntimeStatusV1::NotInitialized)
         {
-            return DriveDeferredAcceptedFailure(ServiceRuntimeStatusV1::NotInitialized,
-                                                ServiceDirectoryStatus::NotInitialized,
+            return DriveDeferredAcceptedFailure(status, ServiceDirectoryStatus::NotInitialized,
                                                 ServiceEndpointStatus::NotInitialized);
         }
-        if (raw_state == static_cast<u32>(ServiceRuntimeStateV1::Failed))
-            return DriveDeferredAcceptedFailure(ServiceRuntimeStatusV1::Failed);
-        return DriveDeferredAcceptedFailure(ServiceRuntimeStatusV1::CorruptState);
+        return DriveDeferredAcceptedFailure(status);
     }
     return DriveDeferredAccepted(runtime);
 }
 
 ServiceRuntimeDriveExitReapResultV1 ServiceRuntimeDriveExitReapKernelV1(u64 now_ns)
 {
-    ServiceRuntimeV1* runtime = ServiceRuntimeKernelV1();
+    ServiceRuntimeStatusV1 status = ServiceRuntimeStatusV1::Ok;
+    ServiceRuntimeV1* runtime = ServiceRuntimeKernelLookupV1(&status);
     if (runtime == nullptr)
-    {
-        const u32 raw_state = RuntimeStateLoad(&g_kernel_service_runtime);
-        if (raw_state == static_cast<u32>(ServiceRuntimeStateV1::Uninitialized) ||
-            raw_state == static_cast<u32>(ServiceRuntimeStateV1::Initializing))
-        {
-            return DriveExitReapFailure(ServiceRuntimeStatusV1::NotInitialized);
-        }
-        if (raw_state == static_cast<u32>(ServiceRuntimeStateV1::Failed))
-            return DriveExitReapFailure(ServiceRuntimeStatusV1::Failed);
-        return DriveExitReapFailure(ServiceRuntimeStatusV1::CorruptState);
-    }
+        return DriveExitReapFailure(status);
     return DriveExitReap(runtime, now_ns);
 }
 #else

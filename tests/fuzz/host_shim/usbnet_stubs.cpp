@@ -95,9 +95,9 @@ bool DhcpStart(u32)
 // rndis-rx are `for (;;)` poll loops that would never return.
 namespace duetos::sched
 {
-Task* SchedCreate(TaskEntry, void*, const char*, TaskPriority)
+TaskCreateResult SchedCreate(TaskEntry, void*, const char*, TaskPriority)
 {
-    return nullptr;
+    return {false, 0};
 }
 void SchedSleepTicks(u64) {}
 } // namespace duetos::sched

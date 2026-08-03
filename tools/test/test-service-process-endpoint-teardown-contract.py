@@ -137,15 +137,22 @@ class ServiceProcessEndpointTeardownContract(unittest.TestCase):
         )
         require_order(
             kernel_transfer,
-            "ServiceRuntimeKernelV1()",
+            "ServiceRuntimeKernelLookupV1(&status)",
+            "DeferAcceptedProcessFailure(status",
+            "DeferAcceptedProcess(runtime, process)",
+        )
+        self.assertIn("fall through to raw ServiceEndpoint handle release", kernel_transfer)
+        # The full state classification lives in the shared lookup so every
+        # kernel entry point fails closed off one snapshot.
+        lookup = braced_body(RUNTIME_CPP, "static ServiceRuntimeV1* ServiceRuntimeKernelLookupV1")
+        require_order(
+            lookup,
             "RuntimeStateLoad(&g_kernel_service_runtime)",
             "ServiceRuntimeStateV1::Uninitialized",
             "ServiceRuntimeStateV1::Initializing",
             "ServiceRuntimeStateV1::Failed",
             "ServiceRuntimeStatusV1::CorruptState",
-            "DeferAcceptedProcess(runtime, process)",
         )
-        self.assertIn("fall through to raw ServiceEndpoint handle release", kernel_transfer)
 
     def test_process_cancels_ingress_and_transfers_owners_before_raw_drain(self) -> None:
         teardown = braced_body(PROCESS_CPP, "void TeardownProcessRuntimeResources")

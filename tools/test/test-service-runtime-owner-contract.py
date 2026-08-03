@@ -47,10 +47,28 @@ class ServiceRuntimeOwnerContract(unittest.TestCase):
             cursor = found + len(token)
 
     def test_global_runtime_is_not_exposed_before_open(self) -> None:
-        getter = SOURCE[SOURCE.index("ServiceRuntimeV1* ServiceRuntimeKernelV1") : SOURCE.index("#else", SOURCE.index("ServiceRuntimeV1* ServiceRuntimeKernelV1"))]
+        anchor = "ServiceRuntimeV1* ServiceRuntimeKernelLookupV1"
+        getter = SOURCE[SOURCE.index(anchor) : SOURCE.index("#else", SOURCE.index(anchor))]
         self.assertIn("kServiceRuntimeInitializedMarkerV1", getter)
         self.assertIn("ServiceRuntimeStateV1::Open", getter)
-        self.assertIn("? &g_kernel_service_runtime", getter)
+        self.assertIn("return &g_kernel_service_runtime;", getter)
+
+    def test_kernel_lookup_classifies_from_a_single_state_load(self) -> None:
+        # Two loads let a legal Initializing->Open transition land between the
+        # reject and the classify, which reads as CorruptState and panics the
+        # reaper. Every kernel entry point must classify off one snapshot.
+        lookup = SOURCE[
+            SOURCE.index("ServiceRuntimeV1* ServiceRuntimeKernelLookupV1") : SOURCE.index(
+                "ServiceRuntimeV1* ServiceRuntimeKernelV1"
+            )
+        ]
+        self.assertEqual(lookup.count("RuntimeStateLoad(&g_kernel_service_runtime)"), 1)
+        kernel_entry_points = SOURCE[
+            SOURCE.index("ServiceRuntimeV1* ServiceRuntimeKernelV1") : SOURCE.index(
+                "#else", SOURCE.index("ServiceRuntimeV1* ServiceRuntimeKernelV1")
+            )
+        ]
+        self.assertNotIn("RuntimeStateLoad(&g_kernel_service_runtime)", kernel_entry_points)
 
     def test_host_path_cannot_install_global_observer(self) -> None:
         self.assertRegex(SOURCE, r"#if !defined\(DUETOS_HOST_TEST\)\s+if \(install_kernel_observer\)")

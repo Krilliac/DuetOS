@@ -36,22 +36,17 @@ class ServicePackageCiContract(unittest.TestCase):
             self.cmake,
         )
 
-    def test_typed_binding_stays_fail_closed_until_activation_is_bound(self) -> None:
-        self.assertIn(
-            "static_assert(duetos::core::generated::kBootServicePackageAuthorityBound)", self.cmake
-        )
-        self.assertIn(
-            "static_assert(duetos::core::generated::kBootServicePackageBootstrapPlansBound)", self.cmake
-        )
-        self.assertIn(
-            "static_assert(!duetos::core::generated::kBootServicePackageProcessPublicationBound)", self.cmake
-        )
-        self.assertIn(
-            "static_assert(!duetos::core::generated::kBootServicePackageEndpointReadinessBound)", self.cmake
-        )
-        self.assertIn(
-            "static_assert(!duetos::core::generated::kBootServicePackageActivationReady)", self.cmake
-        )
+    def test_typed_binding_asserts_every_activation_contract_is_bound(self) -> None:
+        for flag in (
+            "kBootServicePackageAuthorityBound",
+            "kBootServicePackageBootstrapPlansBound",
+            "kBootServicePackageProcessPublicationBound",
+            "kBootServicePackageEndpointReadinessBound",
+            "kBootServicePackageActivationReady",
+        ):
+            with self.subTest(flag=flag):
+                self.assertIn(f"static_assert(duetos::core::generated::{flag})", self.cmake)
+                self.assertNotIn(f"static_assert(!duetos::core::generated::{flag})", self.cmake)
 
     def test_ci_enrolls_this_contract(self) -> None:
         self.assertIn("python3 tools/test/test-service-package-ci-contract.py", self.workflow)
