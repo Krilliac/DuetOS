@@ -166,3 +166,50 @@ Two traps that cost time here:
 
 Serial logs contain NUL bytes; parse them in Python
 (`read_bytes().replace(b"\x00", b"")`) rather than with shell text tools.
+
+## BREAKTHROUGH — it is not a stack overflow
+
+Arena geometry from the boot log (`[mm] kstack self-test ok`):
+`arena_base=0xffffffffe0000000 slot_bytes=0x21000`, guard 0x1000 at the LOW
+edge of each slot, usable above it.
+
+Sixteen scheduler tasks occupy slots 0..15 (their `rsp=` values are each
+`slot_top - 0x38`, spaced exactly 0x21000). The AP bootstrap stack is the
+next allocation, slot 16:
+
+```
+AP slot 16 usable   = [0xffffffffe0211000, 0xffffffffe0231000)
+exclusive top       =  0xffffffffe0231000
+smp.cpp initial RSP =  usable_base + kKernelStackUsableBytes
+                    =  0xffffffffe0211000 + 0x20000
+                    =  0xffffffffe0231000   <-- exactly cr2
+AP's OWN guard      =  0xffffffffe0210000   <-- NOT the faulting address
+rsp at panic        =  0xffffffffe022f7d0   (0x1830 BELOW the top,
+                                             ~126 KiB still unused below it)
+```
+
+`cr2 = 0xffffffffe0231000` is `(cr2 - arena_base) % 0x21000 == 0`, i.e. the
+base of **slot 17** — the neighbouring slot's guard page, one byte past the
+top of the AP's own stack.
+
+So the AP never came close to overflowing. Something accessed `[top]` — one
+past the end — and landed on the next slot's guard. The initial RSP is the
+correct exclusive-top value (the first push goes to `top-8`, which is
+mapped), so the bug is whatever reads/writes *at* RSP rather than below it:
+an over-pop, a `ret` on a freshly-loaded RSP, or a frame walker running off
+the top. Note `DumpBacktrace` (`panic.cpp:245`) appeared as the faulting RIP
+in one local run, which fits a frame walker reading past the top.
+
+### Second, separate bug: the guard-fault classifier misattributes
+
+`IsKernelStackGuardFault` (see `kernel/mm/kstack.h`) answers "is this address
+a stack-arena guard page?" but not "is it *this* stack's guard page". A fault
+on slot 17's guard while running on slot 16 is therefore reported as
+`sched/kstack: guard-page hit — kernel stack overflow`, which is precisely
+backwards: the stack was 99% empty and the access was above the top, not
+below the bottom.
+
+This misreport is what made the bug look like unbounded klog recursion for
+hours. Fix the classifier to compare the faulting address against the
+*running* stack's own slot and report over-top vs under-bottom distinctly —
+it will pay for itself the next time this class appears.
