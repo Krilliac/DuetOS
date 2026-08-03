@@ -213,3 +213,36 @@ This misreport is what made the bug look like unbounded klog recursion for
 hours. Fix the classifier to compare the faulting address against the
 *running* stack's own slot and report over-top vs under-bottom distinctly —
 it will pay for itself the next time this class appears.
+
+## Contract-suite audit — shape-pinning is systemic
+
+`test-linux-fd-generation-exhaustion-contract.py` passed while the kernel
+panicked because it asserted the *buggy statement sequence* as its contract.
+A sweep of all 105 `tools/test/test-*.py` shows that is not isolated:
+**37 files assert 4 or more literal C++ statements** (`assertIn("<code>")`
+where the literal contains `;`, `=`, `->`, or a qualified call).
+
+Worst offenders by count: `service-control-ingress` (23),
+`job-scheduler-linearization` (20), `thread-group` (15), `displayd-engine`
+(14), `linux-sysv-ipc-id-generation` (13).
+
+Not every one is wrong — the distinction that matters:
+
+- **Legitimate**: pinning a *value* that is itself the contract — a syscall
+  number (`SYS_SERVICE_CONTROL = 228`), an ABI constant, a capacity
+  (`kAddressSpaceWriteLeaseCapacity = 32`), a `_Static_assert` on a struct
+  size. Changing these should break a test.
+- **Shape-pinning (harmful)**: pinning *how* the code is written when the
+  contract is about behaviour — `pending.state = JobMemberState::Active`,
+  `p->linux_parent = nullptr`. These ratify whatever the code currently
+  does, so a bug written today becomes the contract tomorrow.
+
+The cheap test for any such assertion: *if the code were rewritten
+correctly but differently, would this assertion fail?* If yes, and the
+rewrite would still satisfy the stated contract, the assertion is pinning
+shape and should be replaced by one that asserts the invariant.
+
+Any assertion rewritten this way must be verified **both** directions —
+green on the fixed code and red on the broken code. Two fixes in this
+session (`linux-fd-generation-exhaustion`, `kstack-guard-classify`) were
+validated that way; treat it as the standard, not extra credit.
