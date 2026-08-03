@@ -157,6 +157,31 @@ ap_trampoline_start:
     mov     rsp, [rax]
     xor     rbp, rbp
 
+    /* Push a null return address before entering C++.
+     *
+     * We reach the entry point with `jmp`, not `call`, so nothing has
+     * pushed a return address. That leaves the outermost frame
+     * malformed in two ways:
+     *
+     *   1. Anything reading this function's return address dereferences
+     *      [rbp+8], which with rsp==top is exactly [top]. A slot's
+     *      exclusive top IS the next slot's guard page, so the read
+     *      faults. This is not theoretical: KBP_PROBE_V expands to
+     *      __builtin_return_address(0) (see debug/probes.h), and the
+     *      kSmpApOnline probe in ApEntryFromTrampoline killed every AP
+     *      this way — a guard-page fault while the AP's own 128 KiB
+     *      stack was untouched.
+     *   2. SysV expects rsp % 16 == 8 on entry (the state a `call`
+     *      leaves). Arriving with the page-aligned, therefore
+     *      16-aligned, top violates that and mis-aligns SSE spills.
+     *
+     * One push fixes both: it gives the return-address slot a mapped,
+     * zero-valued home and restores the expected entry alignment. Zero
+     * also terminates frame-pointer walks cleanly rather than sending
+     * them into unmapped memory.
+     */
+    push    0
+
     /* cpu_id → rdi (SysV first arg for ApEntryFromTrampoline). */
     mov     rax, TRAMP_BASE + OFF_CPU_ID
     mov     edi, [rax]
