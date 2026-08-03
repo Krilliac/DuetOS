@@ -301,3 +301,69 @@ Separately still open: the GSBASE AP-GS gap (`CurrentCpu LAPIC-resolved a
 non-kernel GSBASE on a non-BSP CPU ... REGRESSION`) still appears once per
 boot. The kernel's own comment says a clean boot must stay at zero, so it is
 a real defect even though the boot now succeeds.
+
+## Smoke-matrix timeouts: complete causal chain (as of 3e730aa1)
+
+The rotating `forbidden signature: qemu_timeout` on 4-5 profiles per run is
+NOT flakiness and NOT a slow boot. The kernel stays alive — timer ticks and
+the policy engine keep logging to t=473s — while tasks wedge one by one.
+Evidence from `qemu-serial-log-bringup-4cpu`, run 30840251239:
+
+```
+t=12344ms  [kpath-persist] online — kpath ledger -> KERNEL.KPATH.TSV
+           (the SAME FAT32 write succeeds here, while SMP is still quiet)
+t=14266ms  smoke: fix_journal_summary done      <- 05121fe8 fixed this stage
+t=14298ms  smoke: [kpath] visited=123/656       <- last output from the smoke task
+           smoke task -> KPathPersistFlush() -> WriteScratchToVolume()
+           -> Fat32{LookupPath,DeleteAtPath,CreateAtPath}  ** WEDGES **
+           holding g_fat32_mutex
+t=18231ms  kheartbeat: "boot-slot healthy"      <- last heartbeat EVER
+           kheartbeat -> PersistBootSlotState() -> installer::PersistSlotState()
+           -> WriteFileReplacing() -> the same Fat32 entries
+           ** BLOCKS acquiring g_fat32_mutex **
+t=18231ms .. 473480ms   455 seconds with NO heartbeat
+```
+
+Three consequences, in order:
+
+1. The smoke task never reaches `TranslatorBootSummaryEmit`, `BootReportEmit`,
+   or the `[smoke] profile=bringup complete` sentinel. The harness sees only a
+   timeout.
+2. `HungTaskTick()` is called from inside the heartbeat beat
+   (`kernel/diag/heartbeat.cpp:377`). When the heartbeat blocked, the hung-task
+   detector stopped running — which is why a task hung for 459 s produced **zero**
+   hung-task warnings. The detector is fine; it simply never ran.
+3. Which profile loses varies per run because it depends on when each task first
+   touches FAT32 — hence the rotating failure set that looked like flakiness.
+
+### Two separate defects here
+
+**(a) A FAT32 write can block forever.** Root cause not yet identified. Note
+the same write succeeds at t=12344ms, so the path works when uncontended; it
+only wedges once SMP is busy. Suspect the block/storage layer completion wait
+or contention inside the create/delete chain. `kernel/fs` is clean per
+`check-spinlock-log-order.py`, so this is NOT a log-under-lock inversion.
+
+**(b) The watchdog is blockable by the thing it watches.** `HungTaskTick()`
+runs on a task that performs filesystem I/O, so any I/O hang silences the
+detector that exists to report I/O hangs. This is a design defect independent
+of (a), and it is why (a) presented as an opaque timeout for several CI cycles
+instead of naming itself.
+
+Fixing (b) is the higher-leverage move and should come first: it converts this
+class from "opaque qemu_timeout" into a named `hung-task` report, exactly as
+the guard-fault classifier in 3247f9b7 converted the AP fault from a
+misattributed "stack overflow" into a one-read diagnosis.
+
+Suggested shape for (b), in preference order:
+  - Diagnostic/telemetry writers must be best-effort: give the FAT32 layer a
+    bounded acquire (MutexLockTimed already exists, sched.cpp:8875) and use it
+    for `PersistBootSlotState` and `KPathPersistFlush`. Real filesystem users
+    keep blocking semantics; diagnostics never block.
+  - Failing that, drive `HungTaskTick()` from a context that performs no I/O.
+Do NOT simply reorder the beat so the tick precedes the write — a permanently
+blocked beat still never runs again, so that only masks the first occurrence.
+
+Also worth fixing regardless: a diagnostic TSV write should never sit between
+the smoke sleep and the completion sentinel. Even with (a) fixed,
+`KPathPersistFlush` can delay or block the sentinel that authorises QEMU exit.
