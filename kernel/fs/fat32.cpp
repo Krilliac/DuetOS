@@ -98,35 +98,6 @@ Fat32Guard::Fat32Guard()
     owns_ = true;
 }
 
-bool Fat32BeginBestEffort(u64 timeout_ticks)
-{
-    sched::Task* me = sched::CurrentTask();
-    if (me == nullptr)
-    {
-        // Pre-scheduler: no preemption, so there is nothing to contend
-        // with and nothing to bound. Report success; EndBestEffort is a
-        // no-op for the same reason.
-        return true;
-    }
-    if (g_fat32_mutex.owner == me)
-    {
-        // Already inside a FAT32 scope on this task. Re-entering would
-        // make the paired End release a lock the outer scope still owns.
-        return false;
-    }
-    return sched::MutexLockTimed(&g_fat32_mutex, timeout_ticks);
-}
-
-void Fat32EndBestEffort()
-{
-    sched::Task* me = sched::CurrentTask();
-    if (me == nullptr || g_fat32_mutex.owner != me)
-    {
-        return;
-    }
-    sched::MutexUnlock(&g_fat32_mutex);
-}
-
 Fat32Guard::~Fat32Guard()
 {
     // Only the guard that actually took the lock unlocks it.
@@ -273,6 +244,35 @@ u32 ReadFatEntry(const Volume& v, u32 cluster)
     return LeU32(g_scratch + byte_in_sec) & 0x0FFFFFFFu;
 }
 } // namespace internal
+
+bool Fat32BeginBestEffort(u64 timeout_ticks)
+{
+    sched::Task* me = sched::CurrentTask();
+    if (me == nullptr)
+    {
+        // Pre-scheduler: no preemption, so there is nothing to contend
+        // with and nothing to bound. Report success; EndBestEffort is a
+        // no-op for the same reason.
+        return true;
+    }
+    if (internal::g_fat32_mutex.owner == me)
+    {
+        // Already inside a FAT32 scope on this task. Re-entering would
+        // make the paired End release a lock the outer scope still owns.
+        return false;
+    }
+    return sched::MutexLockTimed(&internal::g_fat32_mutex, timeout_ticks);
+}
+
+void Fat32EndBestEffort()
+{
+    sched::Task* me = sched::CurrentTask();
+    if (me == nullptr || internal::g_fat32_mutex.owner != me)
+    {
+        return;
+    }
+    sched::MutexUnlock(&internal::g_fat32_mutex);
+}
 
 // Hoist the cross-TU primitives into the driver's outer namespace so
 // the public Fat32* function bodies (and the anonymous-namespace

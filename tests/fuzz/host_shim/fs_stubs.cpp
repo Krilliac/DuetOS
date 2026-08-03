@@ -48,6 +48,13 @@ Task* CurrentTask()
 }
 void MutexLock(Mutex*) {}
 void MutexUnlock(Mutex*) {}
+// Bounded acquire used by Fat32BeginBestEffort (diagnostic writers must not
+// block on the volume lock). The harness is single-threaded and the stub
+// locks above are no-ops, so the lock is always "available".
+bool MutexLockTimed(Mutex*, u64)
+{
+    return true;
+}
 } // namespace duetos::sched
 
 namespace duetos::security
