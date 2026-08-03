@@ -319,14 +319,32 @@ const char* FixDetectorName(FixDetector d)
 
 void FixJournalInit()
 {
-    ::duetos::sync::SpinLockGuard guard(g_lock);
-    for (u64 i = 0; i < kFixJournalCapacity; ++i)
-        g_ring[i] = {};
-    g_used = 0;
-    g_next_seq = 1;
-    g_stats = {};
-    g_trap_pending = {};
-    g_inited = true;
+    // Scope the guard: this file's contract (see the header comment) is
+    // that g_lock is "held only over the linear-scan + memcpy inside
+    // intern; never across logs or allocations. No probe / klog calls
+    // happen with the lock held." The KLOG below used to sit inside the
+    // guard, which broke exactly that rule and gave g_lock -> serial-lock
+    // ordering, the inverse of every other path (a klog writer holding the
+    // serial lock can reach FixJournalRecord and want g_lock).
+    //
+    // The result was a real ABBA deadlock once SMP started working: a CPU
+    // stuck holding g_lock while blocked on the serial lock never released
+    // it, so FixJournalEmitBootSummary spun forever acquiring g_lock. That
+    // is why smoke profiles finished their sleep (`[smoke] tick=0x64/0x64`)
+    // and then emitted none of the summaries, hanging until the harness
+    // timeout while the rest of the kernel kept ticking. It presented as a
+    // flaky `qemu_timeout` on a rotating set of profiles, because which CPU
+    // lost the race varied run to run.
+    {
+        ::duetos::sync::SpinLockGuard guard(g_lock);
+        for (u64 i = 0; i < kFixJournalCapacity; ++i)
+            g_ring[i] = {};
+        g_used = 0;
+        g_next_seq = 1;
+        g_stats = {};
+        g_trap_pending = {};
+        g_inited = true;
+    }
     KLOG_INFO_V("diag/fix_journal", "online ring", static_cast<u64>(kFixJournalCapacity));
 }
 
