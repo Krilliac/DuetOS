@@ -359,6 +359,8 @@
 #include "subsystems/win32/apc_selftest.h"
 #include "subsystems/win32/custom_selftest.h"
 #include "subsystems/win32/heap_selftest.h"
+#include "subsystems/win32/job_syscall.h"
+#include "subsystems/win32/section.h"
 #include "subsystems/win32/vmap_selftest.h"
 #include "subsystems/win32/gdi_objects.h"
 #include "subsystems/win32/nt_coverage.h"
@@ -1138,6 +1140,24 @@ void BootBringupMemPaging()
                                                   KernelHeapSelfTest();
                                                   return duetos::core::Result<void>{};
                                               });
+        duetos::core::InitcallRegisterOrPanic(duetos::core::Phase::Heap, "process-handle-lifetime-selftest",
+                                              []()
+                                              {
+                                                  duetos::core::ProcessHandleLifetimeSelfTest();
+                                                  return duetos::core::Result<void>{};
+                                              });
+        duetos::core::InitcallRegisterOrPanic(duetos::core::Phase::Heap, "job-handle-lifetime-selftest",
+                                              []()
+                                              {
+                                                  duetos::subsystems::win32::JobHandleLifetimeSelfTest();
+                                                  return duetos::core::Result<void>{};
+                                              });
+        duetos::core::InitcallRegisterOrPanic(duetos::core::Phase::Heap, "job-owner-exit-selftest",
+                                              []()
+                                              {
+                                                  duetos::subsystems::win32::JobOwnerExitSelfTest();
+                                                  return duetos::core::Result<void>{};
+                                              });
         // IocpSelfTest moved to Phase::Sched — alongside the
         // other IPC primitives that use `sched::Mutex` /
         // `sched::Condvar`. IocpTryPost / IocpTryPop / IocpWait
@@ -1851,6 +1871,12 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
                                                   duetos::mm::AddressSpaceSelfTest();
                                                   return duetos::core::Result<void>{};
                                               });
+        duetos::core::InitcallRegisterOrPanic(duetos::core::Phase::Sched, "section-lifetime-selftest",
+                                              []()
+                                              {
+                                                  duetos::subsystems::win32::section::SectionLifetimeSelfTest();
+                                                  return duetos::core::Result<void>{};
+                                              });
         // Phase::Sched (plan A1-followup, 2026-04-28). RwLock state-
         // machine self-test + the two contention self-tests (RwLock +
         // SeqLock) all need the scheduler online to spawn the helper
@@ -1882,6 +1908,12 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
                                               []()
                                               {
                                                   duetos::ipc::KMailboxContentionSelfTest();
+                                                  return duetos::core::Result<void>{};
+                                              });
+        duetos::core::InitcallRegisterOrPanic(duetos::core::Phase::Sched, "handle-table-contention-selftest",
+                                              []()
+                                              {
+                                                  duetos::ipc::HandleTableContentionSelfTest();
                                                   return duetos::core::Result<void>{};
                                               });
         // Kernel work pool — N worker threads pulling work items
@@ -2184,6 +2216,14 @@ void BootBringupDevices(bool force_net_smoke)
     SerialWrite("[boot] Enumerating PCI bus.\n");
     duetos::drivers::pci::PciEnumerate();
 
+    // NetStackInit starts the TCP timer task, so it belongs after scheduler
+    // bring-up, but every protocol table and built-in interface self-test must
+    // be complete before a driver can publish a binding or deliver RX. PCI
+    // enumeration is passive; VirtioInit and NetInit below are the first
+    // activation points.
+    SerialWrite("[boot] Bringing up network stack before NIC activation.\n");
+    duetos::net::NetStackInit();
+
     SerialWrite("[boot] Probing VirtIO PCI devices.\n");
     duetos::drivers::virtio::VirtioInit();
     DUETOS_BOOT_SELFTEST(duetos::drivers::virtio::VirtioInputSelfTest());
@@ -2306,7 +2346,8 @@ void BootBringupDevices(bool force_net_smoke)
     DUETOS_BOOT_SELFTEST(duetos::core::ServiceManagerSelfTest());
 
     SerialWrite("[boot] Detecting NICs.\n");
-    duetos::drivers::net::NetInit();
+    if (!duetos::drivers::net::NetInit())
+        SerialWrite("[boot] NIC registry unavailable (transition or quarantined teardown).\n");
     // drivers/net fault domain self-registers via
     // KERNEL_INITCALL(Drivers, "drivers/net.module", ...) in
     // `kernel/drivers/net/net.cpp`.
@@ -2431,8 +2472,6 @@ void BootBringupDevices(bool force_net_smoke)
     // slice 3 will additionally wake it on an ACPI SCI.
     duetos::env::EnvironmentMonitorStart();
 
-    SerialWrite("[boot] Bringing up network stack skeleton.\n");
-    duetos::net::NetStackInit();
     DUETOS_BOOT_SELFTEST(duetos::net::firewall::FwSelfTest());
 #ifdef DUETOS_DRSH_AUTOSTART
     // Red-team fixture only.  The `true` external-policy argument is
@@ -4239,7 +4278,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         if (hit != nullptr)
         {
             duetos::u32 n = 0;
-            while (hit[n] != '\0' && hit[n] != ' ' && n < sizeof(g_peexec_path) - 1)
+            while (n < sizeof(g_peexec_path) - 1 && hit[n] != '\0' && hit[n] != ' ')
             {
                 g_peexec_path[n] = hit[n];
                 ++n;

@@ -22,7 +22,7 @@ use core::{ptr, slice};
 
 /// Reconstruct a slice from a `(ptr, len)` FFI pair, returning
 /// `None` if `ptr` is null.
-fn slice_from_raw<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
+unsafe fn slice_from_raw(ptr: *const u8, len: usize, _scope: &()) -> Option<&[u8]> {
     if ptr.is_null() {
         return None;
     }
@@ -38,7 +38,7 @@ fn slice_from_raw<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
 /// public extern "C" wrappers don't trip clippy::not_unsafe_ptr_arg_deref
 /// (the lint only fires on public functions). Zero-init via Default so a
 /// partial parse never leaks stale fields.
-fn out_init<'a, T: Default + Copy>(out: *mut T) -> Option<&'a mut T> {
+unsafe fn out_init<T: Default + Copy>(out: *mut T, _scope: &mut ()) -> Option<&mut T> {
     if out.is_null() {
         return None;
     }
@@ -127,8 +127,13 @@ fn dhcp_find_option(opts: &[u8], opt_code: u8) -> Option<&[u8]> {
 /// Mirrors the contract of the previous C++ `DhcpFindOption` so
 /// the call sites can swap one for the other with no semantic
 /// change.
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_parsers_dhcp_find_option(
+pub unsafe extern "C" fn duetos_parsers_dhcp_find_option(
     opts: *const u8,
     opts_len: usize,
     opt_code: u8,
@@ -140,7 +145,8 @@ pub extern "C" fn duetos_parsers_dhcp_find_option(
     if !dhcp_clear_outputs(out_data, out_len) {
         return false;
     }
-    let Some(buf) = slice_from_raw(opts, opts_len) else {
+    let opts_scope = ();
+    let Some(buf) = (unsafe { slice_from_raw(opts, opts_len, &opts_scope) }) else {
         return false;
     };
     let Some(value) = dhcp_find_option(buf, opt_code) else {
@@ -204,9 +210,15 @@ fn dns_skip_name(buf: &[u8], mut offset: usize) -> usize {
 /// after it (or `len` on any failure).
 ///
 /// Mirrors the contract of the previous C++ `DnsSkipName`.
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_parsers_dns_skip_name(buf: *const u8, offset: usize, len: usize) -> usize {
-    let Some(slice) = slice_from_raw(buf, len) else {
+pub unsafe extern "C" fn duetos_parsers_dns_skip_name(buf: *const u8, offset: usize, len: usize) -> usize {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return len;
     };
     if offset > slice.len() {
@@ -325,14 +337,20 @@ fn walk_tcp_options(opts: &[u8], cb: DuetosTcpOptionCallback, cookie: *mut core:
 /// Malformed options (length < 2, length > remaining stream) abort
 /// iteration without panic; a hostile peer sending a length-0 TLV
 /// can't pin the kernel in a loop.
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_parsers_tcp_walk_options(
+pub unsafe extern "C" fn duetos_parsers_tcp_walk_options(
     opts: *const u8,
     opts_len: usize,
     cb: DuetosTcpOptionCallback,
     cookie: *mut core::ffi::c_void,
 ) -> u32 {
-    let Some(slice) = slice_from_raw(opts, opts_len) else {
+    let opts_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(opts, opts_len, &opts_scope) }) else {
         return 0;
     };
     walk_tcp_options(slice, cb, cookie)
@@ -439,16 +457,23 @@ fn parse_tcp_options(opts: &[u8], out: &mut DuetosTcpParsedOptions) {
 /// inputs were non-null; the actual options stream's
 /// well-formed-ness is reflected in the populated struct (a
 /// malformed stream simply leaves later fields at default).
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_parsers_tcp_parse_options(
+pub unsafe extern "C" fn duetos_parsers_tcp_parse_options(
     opts: *const u8,
     opts_len: usize,
     out: *mut DuetosTcpParsedOptions,
 ) -> bool {
-    let Some(out_ref) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(out_ref) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(opts, opts_len) else {
+    let opts_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(opts, opts_len, &opts_scope) }) else {
         // Null opts buffer is a no-op success — caller already
         // sees a zero-initialised struct, which mirrors what the
         // C++ ParseOptions returned on an empty options field.
@@ -527,9 +552,15 @@ fn ipv4_header_valid(buf: &[u8]) -> bool {
 /// distinguishes via a sentinel since 0 is also a legitimate
 /// "matches stored" result — the typical caller pattern is
 /// "if buf is unknown to be non-null, validate it first").
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_parsers_ipv4_header_checksum(buf: *const u8, len: usize) -> u16 {
-    let Some(slice) = slice_from_raw(buf, len) else {
+pub unsafe extern "C" fn duetos_parsers_ipv4_header_checksum(buf: *const u8, len: usize) -> u16 {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return 0;
     };
     ipv4_header_checksum(slice)
@@ -538,9 +569,15 @@ pub extern "C" fn duetos_parsers_ipv4_header_checksum(buf: *const u8, len: usize
 /// FFI: validate an IPv4 header at the start of `buf`. Returns
 /// `true` iff the header is structurally well-formed AND the
 /// stored checksum matches.
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_parsers_ipv4_header_valid(buf: *const u8, len: usize) -> bool {
-    let Some(slice) = slice_from_raw(buf, len) else {
+pub unsafe extern "C" fn duetos_parsers_ipv4_header_valid(buf: *const u8, len: usize) -> bool {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     ipv4_header_valid(slice)
@@ -878,7 +915,9 @@ mod tests {
 
     fn parse_opts(buf: &[u8]) -> DuetosTcpParsedOptions {
         let mut p = DuetosTcpParsedOptions::default();
-        let ok = duetos_parsers_tcp_parse_options(buf.as_ptr(), buf.len(), &mut p);
+        // SAFETY: `buf` is readable for `buf.len()` bytes, `p` is a distinct
+        // writable output, and both remain live for the duration of the call.
+        let ok = unsafe { duetos_parsers_tcp_parse_options(buf.as_ptr(), buf.len(), &mut p) };
         assert!(ok);
         p
     }
@@ -1029,7 +1068,9 @@ mod tests {
     #[test]
     fn tcp_parse_null_out_rejects() {
         let opts = [TCP_OPT_NOP];
-        let ok = duetos_parsers_tcp_parse_options(opts.as_ptr(), opts.len(), core::ptr::null_mut());
+        // SAFETY: `opts` is readable for its full length; a null output is an
+        // explicitly supported rejection case and therefore aliases nothing.
+        let ok = unsafe { duetos_parsers_tcp_parse_options(opts.as_ptr(), opts.len(), core::ptr::null_mut()) };
         assert!(!ok);
     }
 
@@ -1038,7 +1079,9 @@ mod tests {
         let opts: [u8; 0] = [];
         let mut p = DuetosTcpParsedOptions::default();
         // Empty options is valid (e.g., established segment with no opts).
-        let ok = duetos_parsers_tcp_parse_options(opts.as_ptr(), 0, &mut p);
+        // SAFETY: the zero-length input is not dereferenced, and `p` is a
+        // distinct writable output that remains live for the call.
+        let ok = unsafe { duetos_parsers_tcp_parse_options(opts.as_ptr(), 0, &mut p) };
         assert!(ok);
         assert_eq!(p.mss, 0);
     }

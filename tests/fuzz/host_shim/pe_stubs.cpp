@@ -42,9 +42,21 @@ namespace
 
 namespace duetos::mm
 {
-void AddressSpaceMapUserPage(AddressSpace*, u64, PhysAddr, u64)
+bool AddressSpaceMapUserPage(AddressSpace*, u64, PhysAddr, u64)
 {
     Trap("AddressSpaceMapUserPage");
+}
+bool AddressSpaceReserveUserRange(AddressSpace*, u64, u64, AddressSpaceReservationToken*)
+{
+    Trap("AddressSpaceReserveUserRange");
+}
+bool AddressSpaceMapReservedUserPage(AddressSpace*, const AddressSpaceReservationToken&, u64, PhysAddr, u64)
+{
+    Trap("AddressSpaceMapReservedUserPage");
+}
+bool AddressSpaceReleaseUserReservation(AddressSpace*, const AddressSpaceReservationToken&, u64, u64)
+{
+    Trap("AddressSpaceReleaseUserReservation");
 }
 bool AddressSpaceUnmapUserPage(AddressSpace*, u64)
 {

@@ -46,6 +46,8 @@
 #include "syscall/cap_gate.h"
 #include "syscall/error.h"
 #include "syscall/inferred_gap.h"
+#include "syscall/service_control_ingress.h"
+#include "syscall/service_endpoint_ingress.h"
 #include "syscall/syscall.h"
 #include "drivers/video/cursor.h"
 #include "drivers/video/widget.h"
@@ -172,21 +174,18 @@ enum class CrossAsDir
     Write,
 };
 
-// Walk `target`'s region table page-by-page, copy `len` bytes
-// between `target_va` (in `target->as`) and `caller_buf` (in the
-// active AS — i.e. the syscall caller's). Stops at the first
-// unmapped target page; the count actually moved is returned via
-// `out_bytes`. Returns true iff the full requested length was
-// transferred.
+// Copy `len` bytes between `target_va` (in `target->as`) and
+// `caller_buf` (in the active AS — i.e. the syscall caller's).
+// Each bounded target chunk is resolved, permission-checked, and
+// copied by the AddressSpace transaction API so no raw frame can
+// outlive concurrent unmap/protect/remap. Stops at the first fault;
+// the count actually moved is returned via `out_bytes`. Returns true
+// iff the full requested length was transferred.
 //
-// Both buffers may straddle page boundaries on either side. The
-// loop chunks against the smaller of "remaining target page" /
-// "remaining caller-side run we want to copy" (we always copy
-// the same byte count on both sides — only the page geometry
-// matters for the chunking).
-//
-// Caller-side I/O still goes through CopyFromUser / CopyToUser,
-// so SMAP gating + range validation happen there for free.
+// Caller-side I/O happens outside the target-AS mutation lock: write
+// copies enter the kernel bounce first, and reads leave the target
+// transaction before CopyToUser. This prevents user faults from
+// recursively taking an AS lock and gives a single lock order.
 bool CrossAsTransfer(Process* target, u64 target_va, void* caller_buf, u64 len, CrossAsDir dir, u64* out_bytes)
 {
     *out_bytes = 0;
@@ -201,94 +200,35 @@ bool CrossAsTransfer(Process* target, u64 target_va, void* caller_buf, u64 len, 
 
     while (remaining > 0)
     {
-        const u64 page_va = t_va & ~0xFFFULL;
-        const u64 page_off = t_va - page_va;
-        const u64 chunk = (remaining < (mm::kPageSize - page_off)) ? remaining : (mm::kPageSize - page_off);
-
-        const mm::PhysAddr frame = mm::AddressSpaceLookupUserFrame(target->as, page_va);
-        if (frame == mm::kNullFrame)
+        u8 bounce[256];
+        const u64 page_remaining = mm::kPageSize - (t_va & (mm::kPageSize - 1));
+        u64 step = (remaining < page_remaining) ? remaining : page_remaining;
+        if (step > sizeof(bounce))
         {
-            return false; // partial copy; caller surfaces what we did move
+            step = sizeof(bounce);
         }
-
-        // Protection check for the write path. The kernel direct map
-        // is ALWAYS writable, so writing through PhysToVirt(frame)
-        // silently bypasses the target page's protection — an
-        // isolation / W^X hole letting a debug-capped caller write a
-        // page the target itself couldn't (an RX code page, a
-        // PAGE_READONLY data page, a guard page). Consult the
-        // target's actual leaf PTE — the existing per-page protection
-        // state, no separate flags column needed — and refuse the
-        // write unless the page is present, user-accessible, AND
-        // writable. Reads are intentionally unaffected: a debug-capped
-        // reader may observe any mapped target page (matches
-        // ReadProcessMemory), and AddressSpaceLookupUserFrame already
-        // gates the read on the page being present.
-        if (dir == CrossAsDir::Write)
-        {
-            const u64 pte = mm::AddressSpaceProbePteRaw(target->as, page_va);
-            constexpr u64 kWritableUserPage = mm::kPagePresent | mm::kPageUser | mm::kPageWritable;
-            if ((pte & kWritableUserPage) != kWritableUserPage)
-            {
-                // Not writable from the target's own view — refuse.
-                // Bytes already moved (earlier writable pages) stand;
-                // this page and everything past it are left untouched,
-                // surfaced to the caller as a partial copy.
-                return false;
-            }
-        }
-
-        auto* direct = static_cast<u8*>(mm::PhysToVirt(frame)) + page_off;
 
         if (dir == CrossAsDir::Read)
         {
-            // target → caller. Copy from kernel direct map into a
-            // bounce, then CopyToUser into the caller's buffer.
-            // Use a small on-stack bounce so we don't have to
-            // think about CopyToUser tolerating the source being
-            // a kernel direct-map alias of a user frame (it does,
-            // but the bounce keeps the contract obvious).
-            u8 bounce[256];
-            u64 moved = 0;
-            while (moved < chunk)
+            if (!mm::AddressSpaceReadUserMemory(target->as, t_va, bounce, step) ||
+                !mm::CopyToUser(c_byte, bounce, step))
             {
-                const u64 step = (chunk - moved < sizeof(bounce)) ? (chunk - moved) : sizeof(bounce);
-                for (u64 b = 0; b < step; ++b)
-                {
-                    bounce[b] = direct[moved + b];
-                }
-                if (!mm::CopyToUser(c_byte + moved, bounce, step))
-                {
-                    return false;
-                }
-                moved += step;
+                return false;
             }
         }
         else
         {
-            // caller → target. CopyFromUser into a bounce, write
-            // through the kernel direct map into the target frame.
-            u8 bounce[256];
-            u64 moved = 0;
-            while (moved < chunk)
+            if (!mm::CopyFromUser(bounce, c_byte, step) ||
+                !mm::AddressSpaceWriteUserMemory(target->as, t_va, bounce, step))
             {
-                const u64 step = (chunk - moved < sizeof(bounce)) ? (chunk - moved) : sizeof(bounce);
-                if (!mm::CopyFromUser(bounce, c_byte + moved, step))
-                {
-                    return false;
-                }
-                for (u64 b = 0; b < step; ++b)
-                {
-                    direct[moved + b] = bounce[b];
-                }
-                moved += step;
+                return false;
             }
         }
 
-        *out_bytes += chunk;
-        t_va += chunk;
-        c_byte += chunk;
-        remaining -= chunk;
+        *out_bytes += step;
+        t_va += step;
+        c_byte += step;
+        remaining -= step;
     }
     return true;
 }
@@ -358,29 +298,6 @@ u64 LookupThreadHandleTid(Process* caller, u64 handle)
     return 0;
 }
 
-// Resolve a Win32 process handle (kWin32ProcessBase + idx) on
-// `caller` to the `Process*` it refers to. Returns nullptr on
-// any out-of-range / not-in-use handle.
-Process* LookupProcessHandle(Process* caller, u64 handle)
-{
-    if (caller == nullptr || handle < Process::kWin32ProcessBase)
-    {
-        return nullptr;
-    }
-    u64 idx = handle - Process::kWin32ProcessBase;
-    if (idx >= Process::kWin32ProcessCap)
-    {
-        return nullptr;
-    }
-    // Spectre v1 nospec — see LookupThreadHandleTid for the rationale.
-    idx = util::MaskedIndex(idx, Process::kWin32ProcessCap);
-    if (!caller->win32_proc_handles[idx].in_use)
-    {
-        return nullptr;
-    }
-    return caller->win32_proc_handles[idx].target;
-}
-
 // Win32 NTSTATUS values used by the cross-process VM family.
 // Matches winnt.h conventions for the few statuses we surface.
 constexpr u64 kStatusSuccess = 0;
@@ -391,6 +308,7 @@ constexpr u64 kStatusSuccess = 0;
 // MARK a blocked thread rather than terminate it.
 constexpr u64 kStatusPending = 0x00000103ULL;
 constexpr u64 kStatusAccessViolation = 0xC0000005ULL;
+constexpr u64 kStatusPartialCopy = 0x8000000DULL;
 constexpr u64 kStatusInvalidHandle = 0xC0000008ULL;
 constexpr u64 kStatusInvalidParameter = 0xC000000DULL;
 constexpr u64 kStatusAccessDenied = 0xC0000022ULL;
@@ -530,6 +448,12 @@ i64 DoWrite(u64 fd, const void* user_buf, u64 len)
 void SyscallInit()
 {
     KLOG_TRACE_SCOPE("syscall", "SyscallInit");
+    const ServiceEndpointIngressStatus ingress_status = ServiceEndpointIngressInitializeKernel();
+    KASSERT(ingress_status == ServiceEndpointIngressStatus::Ok, "syscall",
+            "ServiceEndpoint ingress failed one-shot initialization");
+    const ServiceControlIngressStatus service_control_status = ServiceControlIngressInitializeKernel();
+    KASSERT(service_control_status == ServiceControlIngressStatus::Ok, "syscall",
+            "ServiceControl ingress failed one-shot initialization");
     arch::IdtSetUserGate(kSyscallVector, reinterpret_cast<u64>(&isr_128));
     Log(LogLevel::Info, "sys", "syscall gate online at int 0x80");
     KLOG_INFO_V("syscall", "SyscallInit: int gate installed at vector", kSyscallVector);
@@ -747,22 +671,14 @@ void SyscallDispatch(arch::TrapFrame* frame)
             return;
         }
         const u64 target_pid = frame->rdi;
-        Process* target = sched::SchedFindProcessByPid(target_pid);
+        Process* target = sched::SchedFindProcessByPidRetained(target_pid);
         if (target == nullptr)
         {
             frame->rax = 0;
             return;
         }
-        u64 idx = Process::kWin32ProcessCap;
-        for (u64 i = 0; i < Process::kWin32ProcessCap; ++i)
-        {
-            if (!caller->win32_proc_handles[i].in_use)
-            {
-                idx = i;
-                break;
-            }
-        }
-        if (idx == Process::kWin32ProcessCap)
+        const u64 process_handle = ProcessInstallWin32ProcessHandle(caller, target);
+        if (process_handle == 0)
         {
             // No free slot — caller's per-process handle table is
             // saturated. Subsequent OpenProcess calls will keep
@@ -771,13 +687,12 @@ void SyscallDispatch(arch::TrapFrame* frame)
             // misbehaving Win32 app instead of debugging a silent
             // "OpenProcess returns 0" report from user mode.
             KLOG_ONCE_WARN("syscall", "OpenProcess: per-process Win32 handle table full");
+            ProcessRelease(target);
             frame->rax = 0; // table full
             return;
         }
-        ProcessRetain(target);
-        caller->win32_proc_handles[idx].in_use = true;
-        caller->win32_proc_handles[idx].target = target;
-        frame->rax = Process::kWin32ProcessBase + idx;
+        // The handle table adopted the scheduler lookup reference.
+        frame->rax = process_handle;
         return;
     }
 
@@ -791,7 +706,8 @@ void SyscallDispatch(arch::TrapFrame* frame)
             frame->rax = kStatusAccessDenied;
             return;
         }
-        Process* target = LookupProcessHandle(caller, frame->rdi);
+        ScopedProcessRef target_ref(ProcessLookupWin32ProcessHandleRetained(caller, frame->rdi));
+        Process* target = target_ref.Get();
         if (target == nullptr)
         {
             frame->rax = kStatusInvalidHandle;
@@ -799,12 +715,20 @@ void SyscallDispatch(arch::TrapFrame* frame)
         }
         const u64 target_va = frame->rsi;
         void* caller_buf = reinterpret_cast<void*>(frame->rdx);
-        u64 len = frame->r10;
+        const u64 len = frame->r10;
         const u64 bytes_out_va = frame->r8;
 
         if (len > kSyscallProcessVmMax)
         {
-            len = kSyscallProcessVmMax;
+            // The syscall ABI is deliberately bounded; ntdll chunks larger
+            // requests. Silently truncating here used to return SUCCESS after
+            // moving only the first 16 KiB, which is indistinguishable from a
+            // complete transfer to direct/native callers.
+            const u64 moved = 0;
+            if (bytes_out_va != 0)
+                (void)mm::CopyToUser(reinterpret_cast<void*>(bytes_out_va), &moved, sizeof(moved));
+            frame->rax = kStatusInvalidParameter;
+            return;
         }
 
         u64 moved = 0;
@@ -820,7 +744,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
             mm::CopyToUser(reinterpret_cast<void*>(bytes_out_va), &moved, sizeof(moved));
         }
 
-        frame->rax = ok ? kStatusSuccess : kStatusAccessViolation;
+        frame->rax = ok ? kStatusSuccess : ((moved != 0) ? kStatusPartialCopy : kStatusAccessViolation);
         return;
     }
 
@@ -833,7 +757,8 @@ void SyscallDispatch(arch::TrapFrame* frame)
             frame->rax = kStatusAccessDenied;
             return;
         }
-        Process* target = LookupProcessHandle(caller, frame->rdi);
+        ScopedProcessRef target_ref(ProcessLookupWin32ProcessHandleRetained(caller, frame->rdi));
+        Process* target = target_ref.Get();
         if (target == nullptr)
         {
             frame->rax = kStatusInvalidHandle;
@@ -1455,7 +1380,8 @@ void SyscallDispatch(arch::TrapFrame* frame)
             frame->rax = kStatusAccessDenied;
             return;
         }
-        Process* target = LookupProcessHandle(caller, handle);
+        ScopedProcessRef target_ref(ProcessLookupWin32ProcessHandleRetained(caller, handle));
+        Process* target = target_ref.Get();
         if (target == nullptr)
         {
             frame->rax = kStatusInvalidHandle;
@@ -1556,6 +1482,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
         const u64 user_retlen = frame->r8;
         constexpr u64 kCurrentProcess = static_cast<u64>(-1);
         constexpr u64 kProcessBasicInformation = 0;
+        ScopedProcessRef target_ref;
         Process* target = caller;
         if (handle != kCurrentProcess)
         {
@@ -1565,7 +1492,8 @@ void SyscallDispatch(arch::TrapFrame* frame)
                 frame->rax = kStatusAccessDenied;
                 return;
             }
-            target = LookupProcessHandle(caller, handle);
+            target_ref.Reset(ProcessLookupWin32ProcessHandleRetained(caller, handle));
+            target = target_ref.Get();
             if (target == nullptr)
             {
                 frame->rax = kStatusInvalidHandle;
@@ -1723,12 +1651,8 @@ void SyscallDispatch(arch::TrapFrame* frame)
                 if (target->win32_handles[i].kind != Process::FsBackingKind::None)
                     ++count;
             }
-            // Win32 process handles.
-            for (u64 i = 0; i < Process::kWin32ProcessCap; ++i)
-            {
-                if (target->win32_proc_handles[i].in_use)
-                    ++count;
-            }
+            // Win32 process handles (serialized with close/open).
+            count += ProcessWin32ProcessHandleCount(target);
             // Win32 registry handles.
             for (u64 i = 0; i < Process::kWin32RegistryCap; ++i)
             {
@@ -1862,6 +1786,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
             return;
         }
         constexpr u64 kCurrentProcess = static_cast<u64>(-1);
+        ScopedProcessRef target_ref;
         Process* target = caller;
         if (handle != kCurrentProcess)
         {
@@ -1871,7 +1796,8 @@ void SyscallDispatch(arch::TrapFrame* frame)
                 frame->rax = kStatusAccessDenied;
                 return;
             }
-            target = LookupProcessHandle(caller, handle);
+            target_ref.Reset(ProcessLookupWin32ProcessHandleRetained(caller, handle));
+            target = target_ref.Get();
             if (target == nullptr)
             {
                 frame->rax = kStatusInvalidHandle;
@@ -1958,23 +1884,11 @@ void SyscallDispatch(arch::TrapFrame* frame)
             u8* kva = static_cast<u8*>(mm::PhysToVirt(fp));
             for (u64 i = 0; i < page_size; ++i)
                 kva[i] = 0;
-            mm::AddressSpaceMapUserPage(target->as, va, fp, pte_flags | mm::kPagePresent);
-            // GS-02 (CWE-401): AddressSpaceMapUserPage returns void and can
-            // silently refuse (budget exhausted / region-table grow OOM /
-            // PTE-pool dry — address_space.cpp:408/431/449), leaving `va`
-            // unmapped. The SEC-003 pre-screen at 1631 proved every page in
-            // this range was absent, so re-probing the PTE after the map is
-            // an exact success test: a still-absent PTE means the map was
-            // refused. Without this check the loop leaks `fp` (allocated at
-            // 1641, never recorded in any region table, never reclaimable
-            // until process exit) AND returns kStatusSuccess with an
-            // unmapped base_va — the caller's first touch #PFs and the
-            // process is reaped. Detect, free the orphan frame, unwind the
-            // pages mapped so far this call (same idiom as the OOM leg at
-            // 1651), and surface kStatusNoMemory. Impact is guest-self-only;
-            // this turns a silent leak-plus-false-success into a clean
-            // out-of-memory return.
-            if (mm::AddressSpaceProbePte(target->as, va) == mm::kNullFrame)
+            // GS-02 (CWE-401): MapUserPage returns false for recoverable
+            // budget/table/page-table resource refusal. The SEC-003
+            // pre-screen proved this VA was absent; a failed result means
+            // the frame remains caller-owned and the allocation must unwind.
+            if (!mm::AddressSpaceMapUserPage(target->as, va, fp, mm::kPagePresent | pte_flags))
             {
                 mm::FreeFrame(fp);
                 for (u64 j = base_va; j < va; j += page_size)
@@ -2020,6 +1934,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
         const u64 base = frame->rsi;
         const u64 size = frame->rdx;
         constexpr u64 kCurrentProcess = static_cast<u64>(-1);
+        ScopedProcessRef target_ref;
         Process* target = caller;
         if (handle != kCurrentProcess)
         {
@@ -2029,7 +1944,8 @@ void SyscallDispatch(arch::TrapFrame* frame)
                 frame->rax = kStatusAccessDenied;
                 return;
             }
-            target = LookupProcessHandle(caller, handle);
+            target_ref.Reset(ProcessLookupWin32ProcessHandleRetained(caller, handle));
+            target = target_ref.Get();
             if (target == nullptr)
             {
                 frame->rax = kStatusInvalidHandle;
@@ -2085,6 +2001,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
         const u32 protect = static_cast<u32>(frame->r10);
         const u64 user_old = frame->r8;
         constexpr u64 kCurrentProcess = static_cast<u64>(-1);
+        ScopedProcessRef target_ref;
         Process* target = caller;
         if (handle != kCurrentProcess)
         {
@@ -2094,7 +2011,8 @@ void SyscallDispatch(arch::TrapFrame* frame)
                 frame->rax = kStatusAccessDenied;
                 return;
             }
-            target = LookupProcessHandle(caller, handle);
+            target_ref.Reset(ProcessLookupWin32ProcessHandleRetained(caller, handle));
+            target = target_ref.Get();
             if (target == nullptr)
             {
                 frame->rax = kStatusInvalidHandle;
@@ -2329,9 +2247,19 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // fd table intact.
         LinuxFdCloseOnExec(caller);
 
-        // Tear down the AS user mappings, then ElfLoad into the
-        // same AS. Past this point any failure is fatal — the
-        // caller's address space is already gone.
+        // Tear down Task-owned stack authority before the generic AS
+        // clear. SchedCountTasksForProcess above proves this is the only
+        // Task that could own a reservation in the shared AS. The drop
+        // makes the descriptor unreachable under the scheduler lock, then
+        // releases its exact token outside that spinlock. If ElfLoad fails,
+        // SchedExit sees an ownership-free Task and cannot double-release.
+        // Native/ELF Tasks have no token, so the operation is a no-op.
+        sched::SchedDropCurrentOwnedUserStack();
+        caller->stack = {};
+
+        // Tear down the remaining AS user mappings, then ElfLoad into the
+        // same AS. Past this point any failure is fatal - the caller's
+        // old address space and stack authority are already gone.
         mm::AddressSpaceClearUserMappings(caller->as);
         const core::ElfLoadResult r = core::ElfLoad(buf, e.size_bytes, caller->as);
         mm::KFree(buf);
@@ -2580,13 +2508,13 @@ void SyscallDispatch(arch::TrapFrame* frame)
                     break;
                 }
             }
-            const auto* s = ::duetos::net::SocketGet(static_cast<u32>(frame->rsi));
-            if (s == nullptr)
+            const u16 socket_type = ::duetos::net::SocketTypeOf(static_cast<u32>(frame->rsi));
+            if (socket_type == 0)
             {
                 rv = -9; // -EBADF
                 break;
             }
-            if (s->type == ::duetos::net::kSocketTypeDgram)
+            if (socket_type == ::duetos::net::kSocketTypeDgram)
                 rv = ::duetos::net::SocketSendDgram(static_cast<u32>(frame->rsi), dst_ip, dst_port, stage,
                                                     static_cast<u32>(len));
             else
@@ -2600,13 +2528,13 @@ void SyscallDispatch(arch::TrapFrame* frame)
             if (cap > kStageCap)
                 cap = kStageCap;
             u8 stage[kStageCap];
-            const auto* s = ::duetos::net::SocketGet(static_cast<u32>(frame->rsi));
-            if (s == nullptr)
+            const u16 socket_type = ::duetos::net::SocketTypeOf(static_cast<u32>(frame->rsi));
+            if (socket_type == 0)
             {
                 rv = -9;
                 break;
             }
-            if (s->type == ::duetos::net::kSocketTypeDgram)
+            if (socket_type == ::duetos::net::kSocketTypeDgram)
             {
                 ::duetos::net::Ipv4Address src_ip = {};
                 u16 src_port = 0;
@@ -3048,6 +2976,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
             return;
         }
 
+        ScopedProcessRef target_ref;
         Process* target = caller;
         constexpr u64 kCurrentProcess = static_cast<u64>(-1);
         if (process_handle != kCurrentProcess)
@@ -3058,7 +2987,8 @@ void SyscallDispatch(arch::TrapFrame* frame)
                 frame->rax = kStatusAccessDenied;
                 return;
             }
-            target = LookupProcessHandle(caller, process_handle);
+            target_ref.Reset(ProcessLookupWin32ProcessHandleRetained(caller, process_handle));
+            target = target_ref.Get();
             if (target == nullptr)
             {
                 frame->rax = kStatusInvalidHandle;
@@ -3193,6 +3123,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
             frame->rax = kStatusInvalidParameter;
             return;
         }
+        ScopedProcessRef target_ref;
         Process* target = caller;
         constexpr u64 kCurrentProcess = static_cast<u64>(-1);
         if (process_handle != kCurrentProcess)
@@ -3203,7 +3134,8 @@ void SyscallDispatch(arch::TrapFrame* frame)
                 frame->rax = kStatusAccessDenied;
                 return;
             }
-            target = LookupProcessHandle(caller, process_handle);
+            target_ref.Reset(ProcessLookupWin32ProcessHandleRetained(caller, process_handle));
+            target = target_ref.Get();
             if (target == nullptr)
             {
                 frame->rax = kStatusInvalidHandle;
@@ -3618,8 +3550,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
         Process* proc = CurrentProcess();
         if (proc != nullptr && proc->as != nullptr)
         {
-            for (u16 i = 0; i < proc->as->region_count; ++i)
-                mapped_bytes += mm::kPageSize;
+            mapped_bytes = static_cast<u64>(mm::AddressSpaceUserPageCount(proc->as)) * mm::kPageSize;
         }
         st.ullAvailVirtual = (kUserVirtualBytes >= mapped_bytes) ? (kUserVirtualBytes - mapped_bytes) : 0;
         st.ullAvailExtendedVirtual = 0;
@@ -4470,7 +4401,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
         }
         // Reject path separators in the basename — the caller is
         // supposed to pass "customdll.dll", not "../etc/passwd".
-        for (u64 i = 0; kname[i] != '\0' && i < sizeof(kname); ++i)
+        for (u64 i = 0; i < sizeof(kname) && kname[i] != '\0'; ++i)
         {
             if (kname[i] == '/' || kname[i] == '\\')
             {
@@ -5077,6 +5008,14 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     case SYS_FLS_SET:
         subsystems::win32::DoFlsSet(frame);
+        return;
+
+    case SYS_SERVICE_ENDPOINT_OP:
+        DoServiceEndpointOp(frame);
+        return;
+
+    case SYS_SERVICE_CONTROL:
+        DoServiceControl(frame);
         return;
 
     case SYS_GFX_D3D_STUB:

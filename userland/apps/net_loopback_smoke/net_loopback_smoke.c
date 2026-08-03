@@ -58,7 +58,7 @@ static void OutHex(unsigned long v)
  * checksum mismatch. */
 static unsigned char gen_byte(int i)
 {
-    return (unsigned char)((i * 1103515245 + 12345) & 0xFFu);
+    return (unsigned char)(((unsigned int)i * 1103515245u + 12345u) & 0xFFu);
 }
 
 static volatile unsigned long g_observed_checksum;

@@ -535,8 +535,8 @@ void RebindCharmapBounds(u32 cx, u32 cy, u32 cw, u32 ch)
 void RefreshCharmapHeader()
 {
     u32 o = 0;
-    const char* prefix = "U+";
-    while (prefix[o] != '\0' && o + 1 < sizeof(g_header_text))
+    const char prefix[] = "U+";
+    while (o + 1 < sizeof(g_header_text) && o < sizeof(prefix) - 1 && prefix[o] != '\0')
     {
         g_header_text[o] = prefix[o];
         ++o;
@@ -620,8 +620,8 @@ void ClickCopy()
     CopySelectionToClipboard();
     char buf[64];
     u32 o = 0;
-    const char* p = "copied U+";
-    while (p[o] != '\0' && o + 1 < sizeof(buf))
+    const char p[] = "copied U+";
+    while (o < sizeof(p) - 1 && o + 1 < sizeof(buf) && p[o] != '\0')
     {
         buf[o] = p[o];
         ++o;
@@ -751,8 +751,8 @@ bool CharMapFeedChar(char c)
         CopySelectionToClipboard();
         char buf[64];
         u32 o = 0;
-        const char* p = "copied U+";
-        while (p[o] != '\0' && o + 1 < sizeof(buf))
+        const char p[] = "copied U+";
+        while (o < sizeof(p) - 1 && o + 1 < sizeof(buf) && p[o] != '\0')
         {
             buf[o] = p[o];
             ++o;

@@ -69,15 +69,20 @@ void FillRandomGuid(u8 out[gpt::kGuidBytes])
 }
 
 // UTF-16LE encode a 7-bit ASCII label into a 72-byte zero-padded
-// buffer (kPartitionNameChars = 36). Caller-supplied label must be
-// NUL-terminated; characters past 35 are truncated.
-void Utf16LePartitionName(const char* label, u8 out[72])
+// buffer (kPartitionNameChars = 36). label_len is the readable byte span;
+// a NUL terminator stops encoding early and characters past 35 are truncated.
+void Utf16LePartitionName(const char* label, u32 label_len, u8 out[72])
 {
     for (u32 i = 0; i < 72; ++i)
         out[i] = 0;
-    for (u32 i = 0; label[i] != '\0' && i < 35; ++i)
+    if (label == nullptr)
+        return;
+    const char* cursor = label;
+    for (u32 i = 0; i < 35 && i < label_len; ++i, ++cursor)
     {
-        out[i * 2] = static_cast<u8>(label[i]);
+        if (*cursor == '\0')
+            break;
+        out[i * 2] = static_cast<u8>(*cursor);
         out[i * 2 + 1] = 0;
     }
 }
@@ -323,9 +328,9 @@ Status Install(u32 block_handle, bool use_duetfs_system, Report* out_report)
     u8 esp_name[72];
     u8 sys_name[72];
     u8 crash_name[72];
-    Utf16LePartitionName("DuetOS ESP", esp_name);
-    Utf16LePartitionName("DuetOS System", sys_name);
-    Utf16LePartitionName("DuetOS CrashDump", crash_name);
+    Utf16LePartitionName("DuetOS ESP", sizeof("DuetOS ESP") - 1, esp_name);
+    Utf16LePartitionName("DuetOS System", sizeof("DuetOS System") - 1, sys_name);
+    Utf16LePartitionName("DuetOS CrashDump", sizeof("DuetOS CrashDump") - 1, crash_name);
 
     gpt::PartitionSpec specs[3];
     specs[0].type_guid = kEspTypeGuid;

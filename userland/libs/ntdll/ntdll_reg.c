@@ -414,27 +414,92 @@ __declspec(dllexport) NTSTATUS NtDeleteFile(OBJECT_ATTRIBUTES* ObjectAttributes)
  *     SIZE_T   NumberOfBytesToRead,
  *     PSIZE_T  NumberOfBytesRead);  // optional out-pointer
  *
- * Backed by SYS_PROCESS_VM_READ (132). The kernel caps any single
- * call at kSyscallProcessVmMax (16 KiB); larger transfers chunk on
- * this side. v0 does not surface STATUS_PARTIAL_COPY — a partial
- * transfer returns STATUS_ACCESS_VIOLATION, with the
- * NumberOfBytesRead out-pointer carrying the actual count moved.
+ * Backed by SYS_PROCESS_VM_READ (132). The kernel rejects any single
+ * request above kSyscallProcessVmMax (16 KiB), so this facade chunks
+ * larger NT calls and reports the aggregate byte count. A data-path
+ * fault after moving at least one byte returns
+ * STATUS_PARTIAL_COPY; administrative failures such as a revoked capability
+ * or concurrently closed handle remain visible with the aggregate count.
  * ------------------------------------------------------------------ */
+#define NTDLL_VM_SYSCALL_MAX 16384ULL
+#define NTSTATUS_ACCESS_VIOLATION_VM ((NTSTATUS)0xC0000005UL)
+#define NTSTATUS_PARTIAL_COPY_VM ((NTSTATUS)0x8000000DUL)
+
+static NTSTATUS ntdll_vm_finish(NTSTATUS status, unsigned long long total, unsigned long long* NumberOfBytesMoved)
+{
+    if (NumberOfBytesMoved != 0)
+        *NumberOfBytesMoved = total;
+    return status;
+}
+
+static NTSTATUS ntdll_vm_transfer(unsigned long long syscall_number, HANDLE ProcessHandle, void* BaseAddress,
+                                  void* Buffer, unsigned long long NumberOfBytes,
+                                  unsigned long long* NumberOfBytesMoved)
+{
+    unsigned long long total = 0;
+    const unsigned long long target_base = (unsigned long long)BaseAddress;
+    const unsigned long long caller_base = (unsigned long long)Buffer;
+
+    /* Reject a wrapping logical range before the first chunk. Otherwise a
+     * huge request could mutate/read a valid prefix and only discover the
+     * overflow after one or more successful syscalls. */
+    if (NumberOfBytes != 0)
+    {
+        const unsigned long long last_offset = NumberOfBytes - 1;
+        const unsigned long long max_u64 = ~0ULL;
+        if (target_base > max_u64 - last_offset || caller_base > max_u64 - last_offset)
+            return ntdll_vm_finish((NTSTATUS)NTSTATUS_INVALID_PARAMETER, total, NumberOfBytesMoved);
+    }
+
+    /* A zero-length NT call still enters the kernel once. The kernel owns
+     * capability and process-handle validation, and skipping int 0x80 here
+     * would turn an invalid/denied zero-length request into false SUCCESS. */
+    do
+    {
+        unsigned long long chunk = NumberOfBytes - total;
+        unsigned long long moved = 0;
+        long long raw_status;
+        if (chunk > NTDLL_VM_SYSCALL_MAX)
+            chunk = NTDLL_VM_SYSCALL_MAX;
+
+        const unsigned long long target_va = target_base + total;
+        const unsigned long long caller_va = caller_base + total;
+        if (target_va < target_base || caller_va < caller_base)
+            return (NTSTATUS)NTSTATUS_INVALID_PARAMETER;
+
+        /* Args: rdi=handle, rsi=target_va, rdx=caller_buf,
+         * r10=bounded len, r8=&moved. */
+        __asm__ volatile("mov %5, %%r10\n\t"
+                         "mov %6, %%r8\n\t"
+                         "int $0x80"
+                         : "=a"(raw_status)
+                         : "a"((long long)syscall_number), "D"((long long)ProcessHandle), "S"((long long)target_va),
+                           "d"((long long)caller_va), "r"((long long)chunk), "r"((long long)&moved)
+                         : "r10", "r8", "memory");
+
+        if (moved > chunk)
+            return ntdll_vm_finish((NTSTATUS)NTSTATUS_INVALID_PARAMETER, total, NumberOfBytesMoved);
+        total += moved;
+
+        const NTSTATUS status = (NTSTATUS)raw_status;
+        if (status != NTSTATUS_SUCCESS)
+        {
+            if (status == NTSTATUS_PARTIAL_COPY_VM || (total != 0 && status == NTSTATUS_ACCESS_VIOLATION_VM))
+                return ntdll_vm_finish(NTSTATUS_PARTIAL_COPY_VM, total, NumberOfBytesMoved);
+            return ntdll_vm_finish(status, total, NumberOfBytesMoved);
+        }
+        if (moved != chunk)
+            return ntdll_vm_finish((total != 0) ? NTSTATUS_PARTIAL_COPY_VM : NTSTATUS_ACCESS_VIOLATION_VM, total,
+                                   NumberOfBytesMoved);
+    } while (total < NumberOfBytes);
+    return ntdll_vm_finish(NTSTATUS_SUCCESS, total, NumberOfBytesMoved);
+}
+
 __declspec(dllexport) NTSTATUS NtReadVirtualMemory(HANDLE ProcessHandle, void* BaseAddress, void* Buffer,
                                                    unsigned long long NumberOfBytesToRead,
                                                    unsigned long long* NumberOfBytesRead)
 {
-    long long status;
-    /* SYS_PROCESS_VM_READ = 132. Args: rdi=handle, rsi=target_va,
-     * rdx=caller_buf, r10=len, r8=out_count_va. */
-    __asm__ volatile("mov %5, %%r10\n\t"
-                     "mov %6, %%r8\n\t"
-                     "int $0x80"
-                     : "=a"(status)
-                     : "a"((long long)132), "D"((long long)ProcessHandle), "S"((long long)BaseAddress),
-                       "d"((long long)Buffer), "r"((long long)NumberOfBytesToRead), "r"((long long)NumberOfBytesRead)
-                     : "r10", "r8", "memory");
-    return (NTSTATUS)status;
+    return ntdll_vm_transfer(132, ProcessHandle, BaseAddress, Buffer, NumberOfBytesToRead, NumberOfBytesRead);
 }
 
 /* NtWriteVirtualMemory — symmetric to the read path.
@@ -447,22 +512,13 @@ __declspec(dllexport) NTSTATUS NtReadVirtualMemory(HANDLE ProcessHandle, void* B
  *     SIZE_T   NumberOfBytesToWrite,
  *     PSIZE_T  NumberOfBytesWritten);
  *
- * Backed by SYS_PROCESS_VM_WRITE (133). Same cap, same partial-
- * copy contract.  */
+ * Backed by SYS_PROCESS_VM_WRITE (133). Same chunking and partial-
+ * copy contract. */
 __declspec(dllexport) NTSTATUS NtWriteVirtualMemory(HANDLE ProcessHandle, void* BaseAddress, void* Buffer,
                                                     unsigned long long NumberOfBytesToWrite,
                                                     unsigned long long* NumberOfBytesWritten)
 {
-    long long status;
-    __asm__ volatile("mov %5, %%r10\n\t"
-                     "mov %6, %%r8\n\t"
-                     "int $0x80"
-                     : "=a"(status)
-                     : "a"((long long)133), "D"((long long)ProcessHandle), "S"((long long)BaseAddress),
-                       "d"((long long)Buffer), "r"((long long)NumberOfBytesToWrite),
-                       "r"((long long)NumberOfBytesWritten)
-                     : "r10", "r8", "memory");
-    return (NTSTATUS)status;
+    return ntdll_vm_transfer(133, ProcessHandle, BaseAddress, Buffer, NumberOfBytesToWrite, NumberOfBytesWritten);
 }
 
 /* NtQueryVirtualMemory — probe one VA in a target process.

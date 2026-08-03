@@ -105,17 +105,26 @@ bool Win32HeapInit(duetos::core::Process* proc)
 
     // Map N RW+NX user pages starting at kWin32HeapVa. One
     // AddressSpaceMapUserPage call per page — there's no bulk
-    // API. On any failure we leak the frames we've mapped so
-    // far (they're owned by the AS now; AddressSpaceRelease
-    // will clean them up when the load itself is aborted).
+    // API. Unwind the prefix on either allocator or mapping
+    // refusal so a failed process setup does not strand pages.
     for (u64 i = 0; i < kWin32HeapPages; ++i)
     {
         auto frame_r = AllocateFrame();
         if (!frame_r)
+        {
+            for (u64 j = 0; j < i; ++j)
+                (void)AddressSpaceUnmapUserPage(proc->as, kWin32HeapVa + j * kPageSize);
             return false;
+        }
         const PhysAddr frame = frame_r.value();
-        AddressSpaceMapUserPage(proc->as, kWin32HeapVa + i * kPageSize, frame,
-                                kPagePresent | kPageUser | kPageWritable | kPageNoExecute);
+        if (!AddressSpaceMapUserPage(proc->as, kWin32HeapVa + i * kPageSize, frame,
+                                     kPagePresent | kPageUser | kPageWritable | kPageNoExecute))
+        {
+            FreeFrame(frame);
+            for (u64 j = 0; j < i; ++j)
+                (void)AddressSpaceUnmapUserPage(proc->as, kWin32HeapVa + j * kPageSize);
+            return false;
+        }
     }
 
     proc->heap_base = kWin32HeapVa;
@@ -444,8 +453,12 @@ u64 Win32HeapExCreate(duetos::core::Process* proc, u64 pages)
         if (!frame_r)
             break;
         const PhysAddr frame = frame_r.value();
-        AddressSpaceMapUserPage(proc->as, base_va + mapped * kPageSize, frame,
-                                kPagePresent | kPageUser | kPageWritable | kPageNoExecute);
+        if (!AddressSpaceMapUserPage(proc->as, base_va + mapped * kPageSize, frame,
+                                     kPagePresent | kPageUser | kPageWritable | kPageNoExecute))
+        {
+            FreeFrame(frame);
+            break;
+        }
     }
     if (mapped < pages)
     {

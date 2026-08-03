@@ -113,7 +113,7 @@ const SMBIOS_STRING_LENGTH_CAP: usize = 1024;
 
 // ---------- helpers ----------
 
-fn slice_from_raw<'a>(p: *const u8, len: usize) -> Option<&'a [u8]> {
+unsafe fn slice_from_raw(p: *const u8, len: usize, _scope: &()) -> Option<&[u8]> {
     if p.is_null() {
         return None;
     }
@@ -121,7 +121,7 @@ fn slice_from_raw<'a>(p: *const u8, len: usize) -> Option<&'a [u8]> {
     Some(unsafe { slice::from_raw_parts(p, len) })
 }
 
-fn out_init<'a, T: Default + Copy>(out: *mut T) -> Option<&'a mut T> {
+unsafe fn out_init<T: Default + Copy>(out: *mut T, _scope: &mut ()) -> Option<&mut T> {
     if out.is_null() {
         return None;
     }
@@ -424,16 +424,23 @@ fn read_string(buf: &[u8], strings_off: usize, end_off: usize, index: u8, out: &
 /// On any failure (signature miss, checksum, oversize table
 /// length, malformed entry-point) returns false with `out`
 /// zero-initialised.
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_smbios_parse_entry_point(
+pub unsafe extern "C" fn duetos_smbios_parse_entry_point(
     buf: *const u8,
     len: usize,
     out: *mut DuetosSmbiosEntryPoint,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_entry_point(slice, dst)
@@ -449,17 +456,24 @@ pub extern "C" fn duetos_smbios_parse_entry_point(
 /// and `ok=1`. The caller advances by passing `out->end_offset`
 /// back in as `off` on the next call until either `type == 127`
 /// (end-of-table sentinel) or `end_offset == buf.len()`.
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_smbios_parse_structure(
+pub unsafe extern "C" fn duetos_smbios_parse_structure(
     buf: *const u8,
     len: usize,
     off: usize,
     out: *mut DuetosSmbiosStructure,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_structure(slice, off, dst)
@@ -475,8 +489,13 @@ pub extern "C" fn duetos_smbios_parse_structure(
 /// its length in bytes (NUL exclusive), and `ok=1`. The caller can
 /// then read `[buf+offset .. buf+offset+length]` as the string
 /// contents.
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_smbios_read_string(
+pub unsafe extern "C" fn duetos_smbios_read_string(
     buf: *const u8,
     len: usize,
     strings_off: usize,
@@ -484,10 +503,12 @@ pub extern "C" fn duetos_smbios_read_string(
     index: u8,
     out: *mut DuetosSmbiosString,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     read_string(slice, strings_off, end_off, index, dst)

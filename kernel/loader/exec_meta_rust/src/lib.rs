@@ -72,7 +72,7 @@ pub enum DuetosPeImageStatus {
 
 // ---------- helpers ----------
 
-fn slice_from_raw<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
+unsafe fn slice_from_raw(ptr: *const u8, len: usize, _scope: &()) -> Option<&[u8]> {
     if ptr.is_null() {
         return None;
     }
@@ -210,9 +210,15 @@ fn elf_validate(buf: &[u8]) -> DuetosElfStatus {
 
 /// FFI: validate an ELF64 file. Returns the matching ElfStatus
 /// value cast to `u32`; the C++ caller casts back to the enum.
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_exec_meta_elf_validate(buf: *const u8, len: usize) -> u32 {
-    let Some(slice) = slice_from_raw(buf, len) else {
+pub unsafe extern "C" fn duetos_exec_meta_elf_validate(buf: *const u8, len: usize) -> u32 {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return DuetosElfStatus::TooSmall as u32;
     };
     elf_validate(slice) as u32
@@ -276,15 +282,21 @@ fn pe_validate_prefix(buf: &[u8], out: &mut DuetosPePrefix) -> DuetosPePrefixSta
 /// FFI: validate a PE prefix. Writes the matching status into
 /// `*out_status` and, on Ok, fills `*out_prefix` with the NT-base
 /// file offset + section count. Returns true on Ok.
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_exec_meta_pe_validate_prefix(
+pub unsafe extern "C" fn duetos_exec_meta_pe_validate_prefix(
     buf: *const u8,
     len: usize,
     out_prefix: *mut DuetosPePrefix,
     out_status: *mut u32,
 ) -> bool {
     let mut prefix = DuetosPePrefix::default();
-    let status = match slice_from_raw(buf, len) {
+    let buf_scope = ();
+    let status = match unsafe { slice_from_raw(buf, len, &buf_scope) } {
         Some(slice) => pe_validate_prefix(slice, &mut prefix),
         None => DuetosPePrefixStatus::TooSmall,
     };
@@ -509,15 +521,21 @@ fn write_pe_image(out: *mut DuetosPeImage, value: DuetosPeImage) {
 /// 0/1/2/3/4/5 = prefix codes, 6 = NotPe32Plus, 7 = SectionAlignUnsup,
 /// 8 = FileAlignUnsup, 9 = SectionCountZero, 10 = OptHeaderOutOfBounds,
 /// 11 = SectionOutOfBounds, 17 = ImageBaseOutOfRange).
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_exec_meta_pe_validate_image(
+pub unsafe extern "C" fn duetos_exec_meta_pe_validate_image(
     buf: *const u8,
     len: usize,
     out_image: *mut DuetosPeImage,
     out_status: *mut u32,
 ) -> bool {
     let mut image = DuetosPeImage::default();
-    let status = match slice_from_raw(buf, len) {
+    let buf_scope = ();
+    let status = match unsafe { slice_from_raw(buf, len, &buf_scope) } {
         Some(slice) => pe_validate_image(slice, &mut image),
         None => DuetosPeImageStatus::TooSmall,
     };

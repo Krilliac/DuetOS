@@ -382,7 +382,9 @@ void CmdNic()
     }
     for (u64 i = 0; i < n; ++i)
     {
-        const auto& nic = duetos::drivers::net::Nic(i);
+        duetos::drivers::net::NicInfo nic{};
+        if (!duetos::drivers::net::NicSnapshot(i, &nic))
+            break;
         ConsoleWrite("NIC ");
         WriteU64Dec(i);
         ConsoleWrite(": vid=");
@@ -422,7 +424,9 @@ void CmdIfconfig()
     }
     for (duetos::u64 i = 0; i < nics; ++i)
     {
-        const auto& nic = duetos::drivers::net::Nic(i);
+        duetos::drivers::net::NicInfo nic{};
+        if (!duetos::drivers::net::NicSnapshot(i, &nic))
+            break;
         const bool bound = duetos::net::InterfaceIsBound(static_cast<duetos::u32>(i));
         ConsoleWrite("net");
         WriteU64Dec(i);
@@ -600,14 +604,16 @@ void CmdRoute(u32 argc, char** argv)
     ConsoleWriteln("");
     if (argc < 2)
         return;
-    const auto* arp = duetos::net::ArpLookup(0, lease.router);
+    duetos::net::ArpEntry arp{};
+    const bool arp_found = duetos::net::ArpLookup(0, lease.router, &arp);
     ConsoleWrite("gateway L2: ");
-    if (arp == nullptr)
+    if (!arp_found)
     {
         ConsoleWriteln("not in ARP cache (peer hasn't replied to ARP yet)");
         return;
     }
-    WriteMac(arp->mac.octets);
+    const duetos::net::MacAddress gateway_mac = arp.mac;
+    WriteMac(gateway_mac.octets);
     ConsoleWriteln("  (ARP cached)");
 }
 
@@ -618,10 +624,11 @@ void CmdNetscan()
     bool any_eth = false;
     for (u64 i = 0; i < nics; ++i)
     {
-        const auto& nic = duetos::drivers::net::Nic(i);
-        const bool wifiish = nic.subclass == 0x80 || (nic.family != nullptr && (StrStartsWith(nic.family, "iwlwifi") ||
-                                                                                StrStartsWith(nic.family, "rtl8821") ||
-                                                                                StrStartsWith(nic.family, "bcm4")));
+        duetos::drivers::net::NicInfo nic{};
+        if (!duetos::drivers::net::NicSnapshot(i, &nic))
+            break;
+        const bool wifiish = nic.subclass == duetos::drivers::net::kPciSubclassOther ||
+                             duetos::drivers::net::nic_ids::NicFamilyLooksWireless(nic.family);
         if (wifiish)
             any_wifi = true;
         else
@@ -677,8 +684,11 @@ void CmdNetscan()
     }
     for (u64 i = 0; i < nics; ++i)
     {
-        const auto& nic = duetos::drivers::net::Nic(i);
-        if (nic.subclass == 0x80)
+        duetos::drivers::net::NicInfo nic{};
+        if (!duetos::drivers::net::NicSnapshot(i, &nic))
+            break;
+        if (nic.subclass == duetos::drivers::net::kPciSubclassOther ||
+            duetos::drivers::net::nic_ids::NicFamilyLooksWireless(nic.family))
             continue;
         ConsoleWrite("  net");
         WriteU64Dec(i);
@@ -842,10 +852,11 @@ void CmdWifi(u32 argc, char** argv)
         if (capture)
             duetos::net::wireless::diag::Clear();
 
-        duetos::drivers::net::NetInit();
+        if (!duetos::drivers::net::NetInit())
+            ConsoleWriteln("WIFI: NIC activation refused (registry transition or quarantined teardown)");
 
         const auto wifi = duetos::drivers::net::WirelessStatusRead();
-        ConsoleWrite("WIFI: hardware path activated adapters=");
+        ConsoleWrite("WIFI: inventory refreshed adapters=");
         WriteU64Dec(wifi.adapters_detected);
         ConsoleWrite(" drivers=");
         WriteU64Dec(wifi.drivers_online);
@@ -863,9 +874,12 @@ void CmdWifi(u32 argc, char** argv)
 
         for (u64 i = 0; i < duetos::drivers::net::NicCount(); ++i)
         {
-            if (!duetos::drivers::net::NicIsWireless(i))
+            duetos::drivers::net::NicInfo nic{};
+            if (!duetos::drivers::net::NicSnapshot(i, &nic))
+                break;
+            if (nic.subclass != duetos::drivers::net::kPciSubclassOther &&
+                !duetos::drivers::net::nic_ids::NicFamilyLooksWireless(nic.family))
                 continue;
-            const auto& nic = duetos::drivers::net::Nic(i);
             ConsoleWrite("  wifi");
             WriteU64Dec(i);
             ConsoleWrite(" vendor=");
@@ -1253,25 +1267,27 @@ void CmdNet(u32 argc, char** argv)
         ConsoleWriteln("");
 
         ConsoleWrite("NET TEST: gateway ARP ... ");
-        const auto* arp = duetos::net::ArpLookup(0, lease.router);
-        if (arp == nullptr)
+        duetos::net::ArpEntry arp{};
+        bool arp_found = duetos::net::ArpLookup(0, lease.router, &arp);
+        if (!arp_found)
         {
             duetos::net::NetIcmpSendEcho(0, lease.router, 0xBEEF, 1);
             for (u32 i = 0; i < 100; ++i)
             {
                 duetos::sched::SchedSleepTicks(1);
-                arp = duetos::net::ArpLookup(0, lease.router);
-                if (arp != nullptr)
+                arp_found = duetos::net::ArpLookup(0, lease.router, &arp);
+                if (arp_found)
                     break;
             }
         }
-        if (arp == nullptr)
+        if (!arp_found)
         {
             ConsoleWriteln("FAIL (gateway didn't reply to ARP)");
             return;
         }
         ConsoleWrite("OK mac=");
-        WriteMac(arp->mac.octets);
+        const duetos::net::MacAddress gateway_mac = arp.mac;
+        WriteMac(gateway_mac.octets);
         ConsoleWriteln("");
 
         ConsoleWrite("NET TEST: dns ... ");

@@ -382,30 +382,30 @@ void LoadSegment(LoadCtx& ctx, const ElfSegment& seg)
 
         if (!reusing)
         {
-            AddressSpaceMapUserPage(ctx.as, page_va, frame, flags);
-            // MapUserPage returns void and has THREE silent non-fatal
-            // refusal paths (address_space.cpp: frame budget exhausted,
-            // region-table grow OOM, page-table walker OOM). Each one
-            // `return`s WITHOUT taking ownership of `frame` and without
-            // appending a regions row — but the header contract
-            // (address_space.h:205-208) tells callers not to FreeFrame a
-            // frame they handed to MapUserPage, so an unconditional
-            // Track() would leak the frame permanently AND record a VA
-            // the unwind walk could never reclaim (UnmapUserPage finds no
-            // regions row and returns false). Probe the leaf PTE to learn
-            // which happened: present == the AS took ownership.
-            //
-            // ProbePteRaw is an O(1) table walk; LookupUserFrame would be
-            // a linear scan of the regions ledger (address_space.h:336).
-            if ((AddressSpaceProbePteRaw(ctx.as, page_va) & kPagePresent) == 0)
-            {
-                FreeFrame(frame);
-                KLOG_WARN_AV(::duetos::core::LogArea::Loader, "elf-loader",
-                             "MapUserPage refused (frame budget / OOM) — rejecting load", page_va);
-                KBP_PROBE_V(::duetos::debug::ProbeId::kElfLoaderOom, page_va);
-                ctx.ok = false;
-                return;
-            }
+            if (!AddressSpaceMapUserPage(ctx.as, page_va, frame, flags))
+                // MapUserPage can refuse three recoverable resource failures
+                // refusal paths (address_space.cpp: frame budget exhausted,
+                // region-table grow OOM, page-table walker OOM). Each one
+                // `return`s WITHOUT taking ownership of `frame` and without
+                // appending a regions row — but the header contract
+                // (address_space.h:205-208) tells callers not to FreeFrame a
+                // frame they handed to MapUserPage, so an unconditional
+                // Track() would leak the frame permanently AND record a VA
+                // the unwind walk could never reclaim (UnmapUserPage finds no
+                // regions row and returns false). Probe the leaf PTE to learn
+                // which happened: present == the AS took ownership.
+                //
+                // ProbePteRaw is an O(1) table walk; LookupUserFrame would be
+                // a linear scan of the regions ledger (address_space.h:336).
+                if ((AddressSpaceProbePteRaw(ctx.as, page_va) & kPagePresent) == 0)
+                {
+                    FreeFrame(frame);
+                    KLOG_WARN_AV(::duetos::core::LogArea::Loader, "elf-loader",
+                                 "MapUserPage refused (frame budget / OOM) — rejecting load", page_va);
+                    KBP_PROBE_V(::duetos::debug::ProbeId::kElfLoaderOom, page_va);
+                    ctx.ok = false;
+                    return;
+                }
             if (ctx.guard != nullptr)
                 ctx.guard->Track(page_va);
         }
@@ -533,20 +533,22 @@ ElfLoadResult ElfLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as
         return r;
     }
     const PhysAddr stack_frame = stack_frame_r.value();
-    AddressSpaceMapUserPage(as, kV0StackVa, stack_frame, kPagePresent | kPageUser | kPageWritable | kPageNoExecute);
-    // Same unchecked-map/unconditional-Track shape as the segment loop
-    // above: MapUserPage can silently refuse (budget / OOM) without
-    // taking ownership of `stack_frame`. Probe before tracking so a
-    // refusal frees the frame instead of leaking it, and fails the load
-    // rather than handing back a stackless image. The guard is still
-    // armed here, so the destructor unwinds the segment pages.
-    if ((AddressSpaceProbePteRaw(as, kV0StackVa) & kPagePresent) == 0)
-    {
-        FreeFrame(stack_frame);
-        KLOG_WARN_AV(LogArea::Loader, "elf-loader", "stack-page MapUserPage refused (frame budget / OOM)", kV0StackVa);
-        KBP_PROBE_V(::duetos::debug::ProbeId::kElfLoaderOom, kV0StackVa);
-        return r;
-    }
+    if (!AddressSpaceMapUserPage(as, kV0StackVa, stack_frame,
+                                 kPagePresent | kPageUser | kPageWritable | kPageNoExecute))
+        // Same unchecked-map/unconditional-Track shape as the segment loop
+        // above: MapUserPage can silently refuse (budget / OOM) without
+        // taking ownership of `stack_frame`. Probe before tracking so a
+        // refusal frees the frame instead of leaking it, and fails the load
+        // rather than handing back a stackless image. The guard is still
+        // armed here, so the destructor unwinds the segment pages.
+        if ((AddressSpaceProbePteRaw(as, kV0StackVa) & kPagePresent) == 0)
+        {
+            FreeFrame(stack_frame);
+            KLOG_WARN_AV(LogArea::Loader, "elf-loader", "stack-page MapUserPage refused (frame budget / OOM)",
+                         kV0StackVa);
+            KBP_PROBE_V(::duetos::debug::ProbeId::kElfLoaderOom, kV0StackVa);
+            return r;
+        }
     guard.Track(kV0StackVa);
 
     r.ok = true;

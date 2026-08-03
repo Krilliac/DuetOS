@@ -4,7 +4,6 @@
 #include "drivers/net/rtl88xx_fw.h"
 #include "loader/firmware_loader.h"
 #include "log/klog.h"
-#include "sched/sched.h"
 
 namespace duetos::drivers::net
 {
@@ -12,10 +11,10 @@ namespace duetos::drivers::net
 namespace
 {
 
-// Realtek MAC register offsets, BAR0-relative. The rtlwifi driver
-// in Linux defines these as REG_SYS_CFG1 / REG_SYS_CFG2 — they
-// expose the chip's silicon revision + trim configuration and are
-// stable across the rtl8723..rtl8852 generations.
+// Retained experimental Realtek shell. rtl8192se uses BAR1; the other current
+// rtlwifi modules plus rtw88 and rtw89 use BAR2. They do not share one register
+// or firmware contract. Rtl88xxMatches fails closed, and BringUp repeats that
+// gate before these dormant legacy reads.
 constexpr u32 kRegSysCfg1 = 0x00F0; // chip version + IC type + cut version
 constexpr u32 kRegSysCfg2 = 0x00FC; // trim / efuse code
 constexpr u32 kRegMacIdSetting = 0x0610;
@@ -86,61 +85,23 @@ u32 Mmio32Read(const NicInfo& n, u64 off)
     return *reinterpret_cast<volatile u32*>(static_cast<u8*>(n.mmio_virt) + off);
 }
 
-void Rtl88xxWatchEntry(void* arg)
-{
-    auto* n = static_cast<NicInfo*>(arg);
-    if (n == nullptr)
-        return;
-    for (;;)
-    {
-        ++g_stats.watch_polls;
-        const u32 cfg1 = Mmio32Read(*n, kRegSysCfg1);
-        if (cfg1 == 0xFFFFFFFFu)
-        {
-            ++g_stats.unexpected_dead_polls;
-            n->driver_online = false;
-            n->link_up = false;
-        }
-        duetos::sched::SchedSleepTicks(100);
-    }
-}
 
 } // namespace
 
 bool Rtl88xxMatches(u16 vendor_id, u16 device_id)
 {
-    if (vendor_id != kVendorRealtek)
-        return false;
-
-    // The rtl88xx wireless device IDs cluster around 0x88xx, 0xB8xx,
-    // and 0xC8xx. Match the IDs the rtlwifi pci_table covers.
-    switch (device_id)
-    {
-    case 0x8723: // rtl8723be
-    case 0xB723:
-    case 0x8812: // rtl8812ae
-    case 0xB812:
-    case 0x8813: // rtl8813ae
-    case 0xB813:
-    case 0x8814: // rtl8814ae
-    case 0xB814:
-    case 0x8821: // rtl8821ae
-    case 0xC821:
-    case 0xC822:
-    case 0xC820:
-    case 0x8822: // rtl8822be / 8822ce
-    case 0xB822:
-    case 0x8852: // rtl8852ae (Wi-Fi 6E)
-    case 0xB852:
-        return true;
-    default:
-        return false;
-    }
+    // ID table lives in drivers/net/nic_ids.h — shared with the
+    // net.cpp family classifier so the two can't drift apart.
+    // Exact candidate sets are split into rtlwifi, rtw88, and rtw89 in
+    // nic_ids.h; none is hardware-probe eligible yet.
+    return vendor_id == kVendorRealtek && nic_ids::RealtekWirelessProbeEligible(device_id);
 }
 
 bool Rtl88xxBringUp(NicInfo& n)
 {
     KLOG_TRACE_SCOPE("drivers/net/rtl88xx", "BringUp");
+    if (!Rtl88xxMatches(n.vendor_id, n.device_id))
+        return false;
     if (n.mmio_virt == nullptr)
     {
         KLOG_WARN("drivers/net/rtl88xx", "no MMIO BAR — skipping");
@@ -152,7 +113,7 @@ bool Rtl88xxBringUp(NicInfo& n)
     const u32 cfg1 = Mmio32Read(n, kRegSysCfg1);
     if (cfg1 == 0xFFFFFFFFu || cfg1 == 0)
     {
-        KLOG_WARN_V("drivers/net/rtl88xx", "chip not responsive — probe-only", cfg1);
+        KLOG_WARN_V("drivers/net/rtl88xx", "chip not responsive — leaving offline", cfg1);
         return false;
     }
 
@@ -245,9 +206,7 @@ bool Rtl88xxBringUp(NicInfo& n)
 
 void Rtl88xxStartWatch(NicInfo& n)
 {
-    if (!n.driver_online || n.mmio_virt == nullptr)
-        return;
-    duetos::sched::SchedCreate(Rtl88xxWatchEntry, &n, "rtl88xx-watch");
+    (void)n;
 }
 
 Rtl88xxStats Rtl88xxStatsRead()

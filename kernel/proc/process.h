@@ -215,6 +215,17 @@ enum Cap : u32
     // Withheld from every sandboxed profile.
     kCapPowerTune = 11,
 
+    // Supervise the authenticated service runtime through
+    // SYS_SERVICE_CONTROL operations 3..8 (enumerate, activate, stop,
+    // restage, exit dequeue, and exit acknowledgement). The syscall's two
+    // self-service operations derive identity from CurrentProcess and do not
+    // consult this bit. No request field can synthesize or widen this cap.
+    //
+    // ServiceManifest v1 deliberately admits this bit only through the
+    // independent build authority. The generated package grants it solely to
+    // serviced; accepting bit 12 does not widen any other service profile.
+    kCapServiceControl = 12,
+
     // Sentinel: keep this as the last entry so kProfileTrusted can
     // be built by a loop that iterates [1 .. kCapCount). Do NOT
     // use kCapCount as a live cap — it's a boundary marker.
@@ -300,9 +311,39 @@ inline constexpr void CapSetRemove(CapSet& s, Cap c)
     s.bits &= ~(1ULL << static_cast<u32>(c));
 }
 
+/// Immutable process-incarnation identity for authorities that can outlive a
+/// scheduler lookup. `identity` is minted from a non-wrapping namespace;
+/// `pid` remains the current lookup label. Persistent owners must compare both
+/// fields so future PID recycling cannot retarget stale authority.
+struct ProcessKey
+{
+    u64 identity;
+    u64 pid;
+};
+
+inline constexpr ProcessKey kInvalidProcessKey{0, 0};
+
+constexpr bool ProcessKeyIsValid(ProcessKey key)
+{
+    return key.identity != 0 && key.pid != 0;
+}
+
+constexpr bool operator==(ProcessKey lhs, ProcessKey rhs)
+{
+    return lhs.identity == rhs.identity && lhs.pid == rhs.pid;
+}
+
 struct Process
 {
+    static constexpr u64 kNameCap = 64;
+
     u64 pid;
+    u64 process_identity;
+    // ProcessCreate copies every caller-supplied label here. Syscall spawn
+    // paths build their leaf name on the syscall stack, so retaining the
+    // incoming pointer would leave both process diagnostics and task labels
+    // dangling as soon as the syscall returned.
+    char name_storage[kNameCap];
     const char* name;
     mm::AddressSpace* as;
     // Serializes durable caps, broker lease provenance/deadlines, and
@@ -701,6 +742,10 @@ struct Process
     enum class FsBackingKind : u8
     {
         None = 0, // slot is free
+        // Kernel-private pre-publication claim. Public operations reject a
+        // Reserved row; only the matching non-wrapping generation token can
+        // publish or abort it.
+        Reserved,
         Ramfs,
         Fat32,
         DuetFs,
@@ -709,6 +754,11 @@ struct Process
     };
     struct Win32FileHandle
     {
+        // Internal row identity. The current public ABI is still slot-shaped,
+        // but reserve/publish/abort paths must match this generation so a
+        // delayed creator cannot overwrite a row that was recycled meanwhile.
+        // Public generation encoding lands in the handle-ABI slice.
+        u64 generation;
         FsBackingKind kind;              // None = free; otherwise selects which fields below are valid
         const fs::RamfsNode* ramfs_node; // valid iff kind == Ramfs
         u32 fat32_volume_idx;            // valid iff kind == Fat32
@@ -776,8 +826,20 @@ struct Process
         // named_pipe_registry_slot < 0.
         u32 named_pipe_registry_gen;
     };
+    struct Win32FileReservation
+    {
+        u32 slot;
+        u32 _pad;
+        u64 generation;
+    };
     static constexpr u64 kWin32HandleCap = 16;
     static constexpr u64 kWin32HandleBase = 0x100;
+    // Protects file-row identity and publication only. Backing releases,
+    // filesystem I/O, allocation, user copy, and wait-queue work happen after
+    // it is released. Pipe inheritance may briefly take the pipe-pool lock
+    // while this lock is held in order to acquire a backing reference before
+    // close can detach the parent row.
+    mutable sync::SpinLock win32_file_lock;
     Win32FileHandle win32_handles[kWin32HandleCap];
 
     // Win32 mutex handle range — backs CreateMutexW /
@@ -946,6 +1008,15 @@ struct Process
     };
     static constexpr u64 kWin32ProcessCap = 8;
     static constexpr u64 kWin32ProcessBase = 0x700;
+
+    // [any thread, bounded/IRQ-safe] Serializes Win32 process-handle
+    // slots and is the designated owner lock for the section handle/view
+    // ledgers migrated in the follow-on slice. It protects only slot
+    // identity/state; ProcessRelease, section teardown, address-space
+    // mutation, allocation, and user copies always happen after release.
+    // Section pool operations may take g_section_lock while this lock is
+    // held, establishing the order win32_handle_lock -> g_section_lock.
+    mutable sync::SpinLock win32_handle_lock;
     Win32ProcessHandle win32_proc_handles[kWin32ProcessCap];
 
     // Cross-process Win32 thread handles produced by
@@ -1342,6 +1413,10 @@ struct Process
     u8 _linux_exit_pad[2];
     u64 linux_child_exit_count;
     LinuxChildExit linux_child_exits[kLinuxChildExitCap];
+    // Serializes child-exit queue producers (reaper CPUs) and
+    // wait4/waitid consumers. CLI is per-CPU and cannot protect
+    // this shared queue on SMP.
+    mutable sync::SpinLock linux_child_exit_lock;
     sched::WaitQueue linux_wait_wq;
 
     // Win32 custom-diagnostics state — opaque pointer to a
@@ -1644,6 +1719,10 @@ inline Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet cap
     return ProcessCreate(name, as, caps, root, user_code_va, user_stack_va, tick_budget, caps);
 }
 
+/// Snapshot the immutable incarnation and current PID of a retained Process.
+/// Both fields are non-zero for every successfully-created Process.
+ProcessKey ProcessKeySnapshot(const Process* process);
+
 /// Bump refcount. Use when a second holder appears (a future thread
 /// spawn that shares the process, a borrow into a non-owning table).
 /// Every Retain must be matched by exactly one Release.
@@ -1655,6 +1734,92 @@ void ProcessRetain(Process* p);
 /// only Tasks carry `process == nullptr` and release goes through
 /// this path unchanged.
 void ProcessRelease(Process* p);
+
+/// Move-only owner of one already-retained Process reference. The
+/// constructor and Reset adopt a reference; they do not increment it.
+/// Use with scheduler/handle APIs whose names end in `Retained` so every
+/// early return releases deterministically. Detach transfers ownership to
+/// a durable table or another explicit owner.
+class ScopedProcessRef final
+{
+  public:
+    explicit ScopedProcessRef(Process* process = nullptr) : m_process(process) {}
+    ~ScopedProcessRef() { ProcessRelease(m_process); }
+
+    ScopedProcessRef(const ScopedProcessRef&) = delete;
+    ScopedProcessRef& operator=(const ScopedProcessRef&) = delete;
+
+    ScopedProcessRef(ScopedProcessRef&& other) : m_process(other.m_process) { other.m_process = nullptr; }
+    ScopedProcessRef& operator=(ScopedProcessRef&& other)
+    {
+        if (this != &other)
+        {
+            Reset();
+            m_process = other.m_process;
+            other.m_process = nullptr;
+        }
+        return *this;
+    }
+
+    [[nodiscard]] Process* Get() const { return m_process; }
+    [[nodiscard]] Process* operator->() const { return m_process; }
+    [[nodiscard]] explicit operator bool() const { return m_process != nullptr; }
+
+    void Reset(Process* process = nullptr)
+    {
+        ProcessRelease(m_process);
+        m_process = process;
+    }
+
+    [[nodiscard]] Process* Detach()
+    {
+        Process* process = m_process;
+        m_process = nullptr;
+        return process;
+    }
+
+  private:
+    Process* m_process;
+};
+
+/// Claim one file-handle row without publishing it. The returned generation
+/// token must be consumed by exactly one Publish or Abort call. Saturated
+/// generations are never reused.
+bool ProcessReserveWin32FileHandle(Process* owner, Process::Win32FileReservation* reservation_out);
+
+/// Publish a fully-initialized candidate into the exact reserved row and
+/// return its public slot-shaped handle. Candidate backing ownership transfers
+/// to the table only on success.
+bool ProcessPublishWin32FileHandle(Process* owner, const Process::Win32FileReservation& reservation,
+                                   const Process::Win32FileHandle& candidate, u64* handle_out);
+
+/// Cancel an unpublished file-row reservation. A stale token is a no-op.
+void ProcessAbortWin32FileHandle(Process* owner, const Process::Win32FileReservation& reservation);
+
+/// Atomically detach a live file row and copy its owned backing metadata to
+/// `detached_out`. The caller releases that backing after the process lock is
+/// gone. Reserved/empty/invalid handles return false.
+bool ProcessDetachWin32FileHandle(Process* owner, u64 handle, Process::Win32FileHandle* detached_out);
+
+/// Install one already-retained `target` reference in `owner`'s Win32
+/// process-handle table. On success the table adopts that reference and
+/// returns an opaque handle; on failure returns 0 and ownership remains
+/// with the caller. Slot publication is serialized by win32_handle_lock.
+u64 ProcessInstallWin32ProcessHandle(Process* owner, Process* target);
+
+/// Resolve an opaque Win32 process handle and take a reference while the
+/// owning slot is still locked. The returned pointer remains alive across
+/// blocking operations and must be paired with ProcessRelease. Returns
+/// nullptr for an invalid, closed, or empty handle.
+Process* ProcessLookupWin32ProcessHandleRetained(Process* owner, u64 handle);
+
+/// Atomically remove a Win32 process-handle slot, then drop its target
+/// reference after releasing win32_handle_lock. Returns false for an
+/// invalid or already-closed handle.
+bool ProcessCloseWin32ProcessHandle(Process* owner, u64 handle);
+
+/// Count live Win32 process handles under win32_handle_lock.
+u32 ProcessWin32ProcessHandleCount(const Process* owner);
 
 /// Drop every reference this process's Win32 process-handle table
 /// (`win32_proc_handles`, backing NtOpenProcess) holds on another
@@ -1822,6 +1987,11 @@ void ProcessPublishWin32ThreadExit(Process* process, u64 tid, u32 exit_code);
 /// aren't online at the call site. Panics on any failure.
 void ProcessSelfTest();
 
+/// Heap-phase test of Win32 process-handle publication, target pinning,
+/// close/drain idempotence, and exact reference ownership. Uses synthetic
+/// Process allocations and therefore must run only after KernelHeapInit.
+void ProcessHandleLifetimeSelfTest();
+
 /// Push one cooked ASCII byte into `proc`'s stdin ring and wake any
 /// task blocked in SYS_STDIN_READ on that process. Safe to call
 /// from task context with interrupts on; the producer-side cursor
@@ -1889,7 +2059,12 @@ i32 LinuxFdAllocLowest(Process* p, u32 lo);
 /// slot + zero fd state). On success, stores the resulting
 /// `ipc::Handle` in `p->linux_fds[fd].kf_handle` so close /
 /// dup / fork can route through the unified table.
-bool LinuxFdAttachKFile(Process* p, u32 fd, u8 kind, u32 pool_index, void (*release)(u32));
+/// `out_pool_released`, when non-null, is set true when a failed
+/// HandleTableInsert already dropped the newly-created KFile and fired
+/// its pool-release callback. Callers that own the pool slot can use the
+/// false case to release it themselves (KFileCreate failure).
+bool LinuxFdAttachKFile(Process* p, u32 fd, u8 kind, u32 pool_index, void (*release)(u32),
+                        bool* out_pool_released = nullptr);
 
 /// Owner-aware variant of `LinuxFdAttachKFile`. Used by dirfd
 /// (kind=11), whose backing storage is a `Process::win32_dirs[]`

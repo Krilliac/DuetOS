@@ -1,14 +1,18 @@
 #pragma once
 
 /*
- * Win32 JobObject syscall surface.
+ * Win32 adapter for the protocol-neutral process Job service.
  *
- * Handles: kJobHandleBase = 0xC00..0xC07.
+ * This layer owns public handle tags, Win32 information-class layouts,
+ * capability checks, user copies, and scheduler kill requests. Pool state,
+ * member references, accounting, termination pins, and owner drain live in
+ * proc/job.{h,cpp}.
  *
  * (Formerly iocp_job.h — the IOCP half migrated to the KObject-
  * shaped ipc::IocpPort + kobj_handles; see iocp_syscall.h.)
  */
 
+#include "proc/job.h"
 #include "util/types.h"
 
 namespace duetos::subsystems::win32
@@ -16,7 +20,16 @@ namespace duetos::subsystems::win32
 
 // Handle-band constants — shared with DoFileClose dispatch.
 constexpr u64 kJobHandleBase = 0xC00ULL;
-constexpr u32 kJobPoolCap = 8;
+constexpr u32 kJobPoolCap = core::kJobPoolCapacity;
+constexpr u64 kJobHandleTagMask = 0xFFFULL;
+constexpr u32 kJobHandleGenerationShift = 12;
+
+inline constexpr bool IsJobHandle(u64 handle)
+{
+    const u64 tag = handle & kJobHandleTagMask;
+    return (handle & (1ULL << 63)) == 0 && (handle >> kJobHandleGenerationShift) != 0 && tag >= kJobHandleBase &&
+           tag < kJobHandleBase + kJobPoolCap;
+}
 
 // JobObject — process-grouping container.
 i64 SysJobCreate();
@@ -25,5 +38,20 @@ i64 SysJobIsProcessIn(u64 job_handle, u64 process_handle, u64 user_out);
 i64 SysJobTerminate(u64 job_handle, u64 exit_code);
 i64 SysJobQuery(u64 job_handle, u64 info_class, u64 user_buf, u64 buf_len);
 i64 SysJobClose(u64 job_handle);
+
+/// Last-task-exit hook for a Job owner. Detaches every owned job and
+/// its member references under the Job pool lock, then drops those
+/// references after unlocking. This must run before the owner's final
+/// task reference is released so a self-membership cannot pin a dead
+/// Process forever. Idempotent.
+void JobDrainOwnedByProcess(core::Process* owner);
+
+/// Heap-phase reference-balance test for the owner-exit drain. Must run
+/// after KernelHeapInit and before user tasks can create Job objects.
+void JobOwnerExitSelfTest();
+
+/// Heap-phase handle-generation, owner-isolation, close-balance, and query-ABI
+/// regression. Must run before user tasks can create Job objects.
+void JobHandleLifetimeSelfTest();
 
 } // namespace duetos::subsystems::win32

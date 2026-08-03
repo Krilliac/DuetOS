@@ -43,10 +43,14 @@
  *     ~1 s cadence. PIDs are monotonic (proc/process.cpp g_next_pid),
  *     so a poll-by-pid can never be fooled into adopting a reused id.
  *
- * Context: kernel. The manifest is a constant table; the runtime
- * table + supervisor task are owned by service.cpp and mutated only
- * from the supervisor task and the (scheduler-serialised) shell
- * command path.
+ * Context: kernel. The manifest is a constant table. The runtime
+ * table is protected by its own IRQ-safe spinlock because the
+ * supervisor and operator paths may run concurrently on different
+ * CPUs. Loader, scheduler, logging, and destructor calls never run
+ * under that lock. Start/stop/restart use a non-wrapping transition
+ * token: reserve under the lock, perform the external action unlocked,
+ * then publish only if the exact token is still current. A stop can
+ * therefore cancel an in-flight spawn without adopting its PID.
  */
 
 namespace duetos::core
@@ -130,8 +134,10 @@ bool ServiceStop(const char* name);    // kill the process; clears Always respaw
 bool ServiceRestart(const char* name); // stop (if running) then start
 
 /// Supervisor poll: reconcile each service's recorded state with the
-/// scheduler, and respawn Always-services that have exited. Called by
-/// the supervisor task; exposed so a test/diag can step it directly.
+/// scheduler, and respawn Always-services that have exited. Scheduler
+/// probes run unlocked and are committed only after exact PID and
+/// transition-generation revalidation. Called by the supervisor task;
+/// exposed so a test/diag can step it directly.
 void ServiceManagerTick();
 
 /// Manifest size + indexed status read for `svc` / diag.

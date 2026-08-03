@@ -6,7 +6,8 @@
 namespace duetos::mm
 {
 struct AddressSpace; // forward decl; defined in kernel/mm/address_space.h
-}
+class AddressSpaceReservationToken;
+} // namespace duetos::mm
 
 namespace duetos::arch
 {
@@ -15,8 +16,9 @@ struct TrapFrame; // forward decl; defined in kernel/arch/x86_64/traps.h
 
 namespace duetos::core
 {
-struct Process; // forward decl; defined in kernel/proc/process.h
-}
+struct Process;        // forward decl; defined in kernel/proc/process.h
+struct UserStackRange; // forward decl; defined in kernel/proc/user_stack.h
+} // namespace duetos::core
 
 /*
  * DuetOS kernel scheduler — v0.
@@ -109,6 +111,28 @@ using TaskPrepareFn = void (*)(Task* task, void* context);
 Task* SchedCreateUserPrepared(TaskEntry entry, void* arg, const char* name, core::Process* process,
                               TaskPrepareFn prepare, void* context);
 
+/// Attach a disjoint, scheduler-owned user-stack reservation while `task`
+/// is still private to SchedCreateUserPrepared. `token` must be the live,
+/// exact AS reservation for the descriptor's [guard_lo, top) window. The
+/// scheduler releases that capability and only its tagged pages when the
+/// Task is reaped. Calling this after publication is an invariant violation.
+void SchedPrepareOwnedUserStack(Task* task, const core::UserStackRange& stack,
+                                const mm::AddressSpaceReservationToken& token);
+
+/// Return the current Task's mutable stack descriptor and its address
+/// space as one coherent snapshot. Returns nullptr (and writes nullptr to
+/// `out_as`, when provided) for kernel Tasks and Tasks using borrowed or
+/// fixed user stacks. `out_token`, when provided, receives the immutable
+/// capability required for exact stack commits. Only the current Task may
+/// mutate the returned range.
+core::UserStackRange* SchedCurrentUserStack(mm::AddressSpace** out_as, mm::AddressSpaceReservationToken* out_token);
+
+/// Drop and exactly release the current Task's owned stack reservation.
+/// Used by guaranteed-single-task exec before replacing every user mapping.
+/// No-op for a fixed/borrowed stack. Task context only; may wait for TLB
+/// shootdown and must not run under a scheduler or subsystem spinlock.
+void SchedDropCurrentOwnedUserStack();
+
 /// Accessor for the Task's owning process pointer. nullptr for
 /// kernel-only tasks (workers, reaper, idle). Used by syscall
 /// handlers via `core::CurrentProcess()` to cap-check.
@@ -132,24 +156,17 @@ void SchedSetUserGsOverride(Task* t, u64 gs_base);
 /// never throttled. No-op-false on a null task.
 bool SchedSehDeliveryAllowed(Task* t, u64 fault_rip);
 
-/// Find the first live `core::Process*` with `pid == target_pid`.
-/// Walks every queue (running, normal-runqueue, idle-runqueue,
-/// sleep-queue, zombies) under g_sched_lock to keep the lists
-/// stable during the scan — including against peer CPUs, which
-/// bare arch::Cli never excluded. Returns nullptr if no task with
-/// that PID is alive — including the case where the task exists
-/// but is a kernel-only task (`process == nullptr`).
-///
-/// Does NOT bump the returned Process's refcount. Callers that
-/// need to hold the reference past the immediate scan window
-/// must call `core::ProcessRetain` — and accept the residual
-/// race that the process can exit between this returning and
-/// the retain. Persistent process handles require a dedicated
-/// scheduler-owned find-and-retain primitive.
-///
-/// Used by SYS_PROCESS_OPEN (NtOpenProcess) to translate a PID
-/// into a Process pointer the kernel can hand back as a handle.
-core::Process* SchedFindProcessByPid(u64 target_pid);
+/// Return whether a process-backed task with `pid == target_pid` is
+/// still registered. This intentionally exposes no borrowed pointer:
+/// callers that dereference Process state must use the retained lookup
+/// below, while liveness/pidfd probes need only this moment-in-time bool.
+bool SchedProcessExists(u64 target_pid);
+
+/// Find a process and take a Process reference while holding the
+/// scheduler lock. Use when the caller will access the process after
+/// the lookup; this is the only public API that returns a Process pointer.
+/// Caller must ProcessRelease the result (prefer ScopedProcessRef).
+core::Process* SchedFindProcessByPidRetained(u64 target_pid);
 
 /// True iff a task with `target_pid` is currently on the
 /// zombies list (TaskState::Dead, awaiting reap). Used by the
@@ -159,10 +176,8 @@ core::Process* SchedFindProcessByPid(u64 target_pid);
 bool SchedIsPidZombie(u64 target_pid);
 
 /// True iff the process `target_pid` has at least one non-Dead task
-/// in ANY state — Running, Ready, Sleeping, OR Blocked. Unlike
-/// SchedFindProcessByPid (which walks only the runqueues + sleep +
-/// zombie lists and therefore MISSES a task parked on a WaitQueue),
-/// this walks the global all-tasks registry under g_sched_lock, so a
+/// in ANY state — Running, Ready, Sleeping, OR Blocked. This walks
+/// the global all-tasks registry under g_sched_lock, so a
 /// daemon blocked in a syscall (e.g. a server in accept()) correctly
 /// reads as alive. This is the liveness predicate a supervisor must
 /// use to decide whether a service has actually exited — see
@@ -178,18 +193,11 @@ bool SchedProcessAlive(u64 target_pid);
 /// longer counts against the live-process limit.
 u64 SchedCountChildrenOfPid(u64 parent_pid);
 
-/// Find the first live Task with `id == target_tid`. Walks the
-/// same lists as SchedFindProcessByPid (running + run-normal +
-/// run-idle + sleep) under g_sched_lock. Skips zombies — a
-/// dead task has no live Process to retain, so the cross-
-/// process thread-handle opener would have nothing to refcount.
-/// Misses tasks Blocked on a wait queue (they sit on none of
-/// the walked lists). Returns nullptr if no live task matches.
-///
-/// The returned Task* is a transient diagnostic/legacy lookup
-/// only. It must never be stored in a user-visible handle or used
-/// after a scheduler lifetime boundary.
-Task* SchedFindTaskByTid(u64 target_tid);
+/// Resolve a live task TID to its owning Process and retain that
+/// Process while holding the scheduler lifetime lock. Caller must
+/// ProcessRelease the returned pointer. Returns nullptr for missing,
+/// dead, or kernel-only tasks.
+core::Process* SchedFindProcessByTidRetained(u64 target_tid);
 
 /// Validate an immutable TID for SYS_THREAD_OPEN while holding the
 /// scheduler lifetime lock. Finds Blocked tasks through the global
@@ -444,6 +452,26 @@ bool SchedSetAffinity(Task* t, u32 cpu_id);
 /// "unrestricted" sentinel is expanded to the concrete online-CPU
 /// set so callers see real CPU bits. Returns 0 for a null task.
 u32 SchedGetAffinityMask(Task* t);
+
+/// Result for scheduler-owned affinity operations that resolve an
+/// immutable TID and consume the Task entirely under g_sched_lock.
+/// No borrowed Task pointer escapes to a caller that can race reaping.
+enum class AffinityResult : u8
+{
+    Success,
+    NotFound,
+    AlreadyDead,
+    InvalidMask,
+};
+
+/// Set/get affinity by immutable TID while holding the scheduler lifetime
+/// lock across lookup and Task access. The setter intersects `mask` with
+/// online CPUs and returns InvalidMask if the effective set is empty. The
+/// getter requires a non-null output pointer. Missing/unlinked tasks return
+/// NotFound; a task observed in its pre-reap Dead state returns AlreadyDead.
+AffinityResult SchedSetAffinityMaskByTid(u64 target_tid, u32 mask);
+AffinityResult SchedSetAffinityByTid(u64 target_tid, u32 cpu_id);
+AffinityResult SchedGetAffinityMaskByTid(u64 target_tid, u32* mask_out);
 
 // ---------------------------------------------------------------------------
 // Per-task syscall trail
@@ -847,21 +875,30 @@ StackHealth SchedCheckTaskStacks();
 enum class KillResult : u8
 {
     Signaled = 0,    // Task found and flagged for termination
-    NotFound = 1,    // No task with that PID
-    Protected = 2,   // Task is special (idle / reaper / PID 0)
+    NotFound = 1,    // No task with that TID
+    Protected = 2,   // Task is special (idle / reaper / TID 0)
     AlreadyDead = 3, // Task is in the zombie list
     Blocked = 4,     // Task is Blocked — v0 can't detach safely
 };
 const char* KillResultName(KillResult r);
 
-/// Flag a non-current task by PID for termination. For Running
+/// Flag one non-current Task by TID for termination. The historical function
+/// name says PID, but Process PIDs and Task TIDs are independent and need not
+/// match. For Running
 /// / Ready targets, the kill activates the next time Schedule()
 /// runs. For Sleeping targets, the task is lifted off the sleep
 /// queue and re-queued Ready so it runs and dies on its next
 /// slot. Blocked targets are not detached in v0 — the caller
 /// gets a Blocked result code and should try again after the
 /// task is woken by something else.
-KillResult SchedKillByPid(u64 pid);
+KillResult SchedKillByPid(u64 tid);
+
+/// Resolve `process_pid` to one scheduler-owned Process identity and signal
+/// every published live Task belonging to it under the same g_sched_lock hold.
+/// No Task* or Process* escapes the lock. Returns the number of newly accepted
+/// requests (including blocked tasks whose normal wake will take the kill), or
+/// 0 when the process has no eligible live tasks.
+u64 SchedKillProcessByPid(u64 process_pid);
 
 /// Walk every live task and signal each one whose owning Process
 /// matches `target` for termination. Used by NtTerminateProcess

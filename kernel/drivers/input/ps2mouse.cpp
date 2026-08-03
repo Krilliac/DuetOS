@@ -343,7 +343,7 @@ void PushPacket(const MousePacket& p)
         // Once-warn: dropping mouse packets means the consumer (the
         // window manager) is not draining fast enough.
         KLOG_ONCE_WARN("drivers/ps2mouse", "mouse packet ring full — discarding OLDEST (consumer too slow)");
-        ++g_ring_tail; // drop oldest — same policy as the keyboard ring
+        ++g_ring_tail; // drop oldest — mouse path remains Cli-bracketed
         ++g_bytes_dropped;
     }
     g_ring[g_ring_head & kRingMask] = p;
@@ -595,7 +595,9 @@ void MouseInjectPacket(const MousePacket& p)
 {
     // Bracket with Cli/Sti so the IRQ-time PushPacket can't
     // race us on head/tail. The internal push handles the
-    // drop-oldest policy when the ring is full.
+    // drop-oldest policy when the ring is full. Unlike the keyboard's
+    // SPSC scan-code ring, this path is Cli-bracketed for its IRQ/task
+    // producer sharing and deliberately retains the packet policy.
     arch::Cli();
     PushPacket(p);
     arch::Sti();

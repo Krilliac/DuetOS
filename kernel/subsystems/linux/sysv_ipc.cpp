@@ -7,10 +7,10 @@
  *   shmget / shmat / shmdt / shmctl — named shared memory.
  *     8-segment global pool. Each segment owns N physical frames
  *     (max 256 pages = 1 MiB / segment). Attach maps every frame
- *     into the caller's AS via AddressSpaceMapBorrowedPage at a
+ *     into the caller's AS via AddressSpaceMapBorrowedRange at a
  *     bump-allocated VA in the per-process SHM arena. Detach
- *     reverses. Refcount = (handles outstanding) + (active
- *     attaches); IPC_RMID marks for destroy and frees frames
+ *     reverses. Refcount = one allocation reference + active
+ *     attaches; IPC_RMID drops the allocation reference and frees frames
  *     only when refcount hits zero.
  *
  *   semget / semop / semctl / semtimedop — named semaphore sets.
@@ -27,6 +27,7 @@
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
+#include "core/panic.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
 #include "mm/kheap.h"
@@ -34,6 +35,7 @@
 #include "mm/paging.h"
 #include "proc/process.h"
 #include "sched/sched.h"
+#include "sync/spinlock.h"
 
 namespace duetos::subsystems::linux::internal
 {
@@ -43,6 +45,7 @@ namespace
 
 constexpr u32 kShmPoolCap = 8;
 constexpr u32 kShmMaxPages = 256; // 1 MiB / segment cap
+constexpr i32 kShmAllocBusy = -2;
 
 constexpr u32 kSemPoolCap = 8;
 constexpr u32 kSemPerSet = 16;
@@ -70,8 +73,9 @@ struct ShmSegment
 {
     bool in_use;
     bool marked_destroy;
-    u8 _pad[2];
-    u32 refcount; // attachments + open handles
+    bool initializing;
+    u8 _pad;
+    u32 refcount; // initial allocation reference + active attaches
     i32 key;      // SysV key passed by the caller (IPC_PRIVATE = 0)
     u32 page_count;
     // Creating process. For IPC_PRIVATE (key == 0) segments — which carry no
@@ -105,110 +109,285 @@ struct SemSet
 };
 
 ShmSegment g_shm_pool[kShmPoolCap];
+sync::SpinLock g_shm_lock{};
 SemSet g_sem_pool[kSemPoolCap];
 
 // =========================================================
 // SHM helpers
 // =========================================================
 
-i32 ShmFindByKey(i32 key)
+// The Process VM transaction is the sole lock for this per-Process ledger.
+// Keep the transient states fail-closed (`in_use == true`) so exec and final
+// teardown never mistake an in-flight attach/detach for an empty row:
+//
+//   Free -> Reserved -> Published -> Claimed -> Free
+//                       ^              |
+//                       +--- Restore --+
+//
+// A reserved row has only `in_use` set. A claimed row has shmid == 0 while
+// retaining the exact published base/page tuple. The Process VM mutex excludes
+// peer syscalls, so an exact tuple is sufficient here; there is no callback or
+// deferred worker that can outlive the transaction and require a generation.
+struct ShmAttachReservation
+{
+    u32 slot{static_cast<u32>(core::Process::kLinuxShmAttachCap)};
+};
+
+struct ShmAttachClaim
+{
+    u32 slot{static_cast<u32>(core::Process::kLinuxShmAttachCap)};
+    core::Process::LinuxShmAttach published{};
+};
+
+bool ShmAttachRowReserved(const core::Process::LinuxShmAttach& row)
+{
+    return row.in_use && row.shmid == 0 && row.base_va == 0 && row.page_count == 0;
+}
+
+bool ShmAttachRowClaimed(const core::Process::LinuxShmAttach& row, const ShmAttachClaim& claim)
+{
+    return row.in_use && row.shmid == 0 && row.base_va == claim.published.base_va &&
+           row.page_count == claim.published.page_count;
+}
+
+bool ShmAttachReserve(core::Process* process, ShmAttachReservation* reservation)
+{
+    if (process == nullptr || reservation == nullptr)
+        return false;
+    for (u32 slot = 0; slot < core::Process::kLinuxShmAttachCap; ++slot)
+    {
+        auto& row = process->linux_shm_attaches[slot];
+        if (row.in_use)
+            continue;
+        row = {};
+        row.in_use = true;
+        reservation->slot = slot;
+        return true;
+    }
+    return false;
+}
+
+bool ShmAttachAbort(core::Process* process, const ShmAttachReservation& reservation)
+{
+    if (process == nullptr || reservation.slot >= core::Process::kLinuxShmAttachCap)
+        return false;
+    auto& row = process->linux_shm_attaches[reservation.slot];
+    if (!ShmAttachRowReserved(row))
+        return false;
+    row = {};
+    return true;
+}
+
+bool ShmAttachPublish(core::Process* process, const ShmAttachReservation& reservation, u32 shmid, u64 base_va,
+                      u32 page_count)
+{
+    if (process == nullptr || reservation.slot >= core::Process::kLinuxShmAttachCap || shmid == 0 || base_va == 0 ||
+        page_count == 0)
+    {
+        return false;
+    }
+    auto& row = process->linux_shm_attaches[reservation.slot];
+    if (!ShmAttachRowReserved(row))
+        return false;
+    row.shmid = shmid;
+    row.base_va = base_va;
+    row.page_count = page_count;
+    return true;
+}
+
+bool ShmAttachClaimByBase(core::Process* process, u64 base_va, ShmAttachClaim* claim)
+{
+    if (process == nullptr || claim == nullptr || base_va == 0)
+        return false;
+    for (u32 slot = 0; slot < core::Process::kLinuxShmAttachCap; ++slot)
+    {
+        auto& row = process->linux_shm_attaches[slot];
+        if (!row.in_use || row.shmid == 0 || row.base_va != base_va || row.page_count == 0)
+            continue;
+        claim->slot = slot;
+        claim->published = row;
+        row = {};
+        row.in_use = true;
+        row.base_va = claim->published.base_va;
+        row.page_count = claim->published.page_count;
+        return true;
+    }
+    return false;
+}
+
+bool ShmAttachRestore(core::Process* process, const ShmAttachClaim& claim)
+{
+    if (process == nullptr || claim.slot >= core::Process::kLinuxShmAttachCap)
+        return false;
+    auto& row = process->linux_shm_attaches[claim.slot];
+    if (!ShmAttachRowClaimed(row, claim))
+        return false;
+    row = claim.published;
+    return true;
+}
+
+bool ShmAttachFinish(core::Process* process, const ShmAttachClaim& claim)
+{
+    if (process == nullptr || claim.slot >= core::Process::kLinuxShmAttachCap)
+        return false;
+    auto& row = process->linux_shm_attaches[claim.slot];
+    if (!ShmAttachRowClaimed(row, claim))
+        return false;
+    row = {};
+    return true;
+}
+
+// Caller holds g_shm_lock for the complete lookup.
+i32 ShmFindByKeyLocked(i32 key)
 {
     if (key == 0) // IPC_PRIVATE
         return -1;
     for (u32 i = 0; i < kShmPoolCap; ++i)
-        if (g_shm_pool[i].in_use && !g_shm_pool[i].marked_destroy && g_shm_pool[i].key == key)
+        if (g_shm_pool[i].in_use && !g_shm_pool[i].initializing && !g_shm_pool[i].marked_destroy &&
+            g_shm_pool[i].key == key)
             return static_cast<i32>(i);
     return -1;
 }
 
-i32 ShmAlloc(i32 key, u64 size)
+struct ShmRetiredFrames
 {
-    if (size == 0)
-        return -1;
-    // Bound `size` BEFORE the page round-up: `size + kPage - 1`
-    // wraps for size in [U64_MAX-4094, U64_MAX], yielding a tiny
-    // page_count that would pass the kShmMaxPages check below and
-    // turn a near-U64_MAX request into a silent 1-page segment.
-    if (size > static_cast<u64>(kShmMaxPages) * kPage)
+    mm::PhysAddr* frames{};
+    u32 count{};
+};
+
+// Caller holds g_shm_lock. Detach ownership only; physical release is a
+// separate post-lock phase because FreeFrame/KFree are never spin-safe.
+ShmRetiredFrames ShmRetireIfReadyLocked(ShmSegment& segment)
+{
+    if (!segment.in_use || segment.initializing || segment.refcount != 0 || !segment.marked_destroy)
+        return {};
+    ShmRetiredFrames retired{segment.frames, segment.page_count};
+    segment = {};
+    return retired;
+}
+
+void ShmReleaseRetiredFrames(const ShmRetiredFrames& retired)
+{
+    if (retired.frames == nullptr)
+    {
+        KASSERT(retired.count == 0, "linux/shm", "retired frame count without vector");
+        return;
+    }
+    for (u32 page = 0; page < retired.count; ++page)
+        mm::FreeFrame(retired.frames[page]);
+    mm::KFree(retired.frames);
+}
+
+bool ShmDropReference(u32 slot)
+{
+    if (slot >= kShmPoolCap)
+        return false;
+    ShmRetiredFrames retired{};
+    bool dropped = false;
+    const sync::IrqFlags lock_flags = sync::SpinLockAcquire(g_shm_lock);
+    ShmSegment& segment = g_shm_pool[slot];
+    if (segment.in_use && !segment.initializing && segment.refcount > 0)
+    {
+        --segment.refcount;
+        retired = ShmRetireIfReadyLocked(segment);
+        dropped = true;
+    }
+    sync::SpinLockRelease(g_shm_lock, lock_flags);
+    ShmReleaseRetiredFrames(retired);
+    return dropped;
+}
+
+i32 ShmAlloc(i32 key, u64 size, u64 owner_pid)
+{
+    if (size == 0 || size > static_cast<u64>(kShmMaxPages) * kPage)
         return -1;
     const u64 page_count = (size + kPage - 1) / kPage;
-    if (page_count > kShmMaxPages)
+    if (page_count == 0 || page_count > kShmMaxPages)
         return -1;
-    arch::Cli();
+
+    u32 slot = kShmPoolCap;
+    sync::IrqFlags lock_flags = sync::SpinLockAcquire(g_shm_lock);
+    if (key != 0)
+    {
+        for (u32 i = 0; i < kShmPoolCap; ++i)
+        {
+            const ShmSegment& segment = g_shm_pool[i];
+            if (segment.in_use && !segment.marked_destroy && segment.key == key)
+            {
+                sync::SpinLockRelease(g_shm_lock, lock_flags);
+                return kShmAllocBusy;
+            }
+        }
+    }
     for (u32 i = 0; i < kShmPoolCap; ++i)
     {
         if (g_shm_pool[i].in_use)
             continue;
-        ShmSegment& s = g_shm_pool[i];
-        s.in_use = true;
-        s.marked_destroy = false;
-        s.refcount = 1; // shmget itself holds the initial reference
-        s.key = key;
-        s.owner_pid = (core::CurrentProcess() != nullptr) ? core::CurrentProcess()->pid : 0;
-        s.page_count = static_cast<u32>(page_count);
-        s.size_bytes = page_count * kPage;
-        arch::Sti();
-        // Allocate the frame array + physical frames OUTSIDE Cli/Sti.
-        s.frames = static_cast<mm::PhysAddr*>(mm::KMalloc(sizeof(mm::PhysAddr) * page_count));
-        if (s.frames == nullptr)
-        {
-            arch::Cli();
-            s.in_use = false;
-            arch::Sti();
-            return -1;
-        }
-        bool ok = true;
-        for (u32 p = 0; p < page_count; ++p)
-        {
-            const mm::PhysAddr f = mm::AllocateFrame().value_or(mm::kNullFrame);
-            if (f == mm::kNullFrame)
-            {
-                // Roll back already-allocated frames.
-                for (u32 q = 0; q < p; ++q)
-                    mm::FreeFrame(s.frames[q]);
-                mm::KFree(s.frames);
-                arch::Cli();
-                s.frames = nullptr;
-                s.in_use = false;
-                arch::Sti();
-                ok = false;
-                break;
-            }
-            // Zero-fill the frame (Linux SHM guarantees zero on
-            // first access). PhysToVirt gives a kernel-direct
-            // map pointer so we can write to the frame here.
-            volatile u8* page = reinterpret_cast<u8*>(mm::PhysToVirt(f));
-            for (u32 b = 0; b < kPage; ++b)
-                page[b] = 0;
-            s.frames[p] = f;
-        }
-        if (!ok)
-            return -1;
-        return static_cast<i32>(i);
+        ShmSegment& segment = g_shm_pool[i];
+        segment = {};
+        segment.in_use = true;
+        segment.initializing = true;
+        segment.refcount = 1; // shmget owns the initial reference
+        segment.key = key;
+        segment.owner_pid = owner_pid;
+        segment.page_count = static_cast<u32>(page_count);
+        segment.size_bytes = page_count * kPage;
+        slot = i;
+        break;
     }
-    arch::Sti();
-    return -1;
+    sync::SpinLockRelease(g_shm_lock, lock_flags);
+    if (slot == kShmPoolCap)
+        return -1;
+
+    // All fallible allocation and zero-fill work happens after the slot is
+    // marked Initializing and after the global metadata lock is released.
+    auto* frames = static_cast<mm::PhysAddr*>(mm::KMalloc(sizeof(mm::PhysAddr) * page_count));
+    u32 allocated = 0;
+    if (frames != nullptr)
+    {
+        for (; allocated < page_count; ++allocated)
+        {
+            const mm::PhysAddr frame = mm::AllocateFrame().value_or(mm::kNullFrame);
+            if (frame == mm::kNullFrame)
+                break;
+            volatile u8* page = reinterpret_cast<u8*>(mm::PhysToVirt(frame));
+            for (u32 byte = 0; byte < kPage; ++byte)
+                page[byte] = 0;
+            frames[allocated] = frame;
+        }
+    }
+
+    const bool allocation_ok = frames != nullptr && allocated == page_count;
+    bool published = false;
+    lock_flags = sync::SpinLockAcquire(g_shm_lock);
+    ShmSegment& segment = g_shm_pool[slot];
+    if (segment.in_use && segment.initializing && segment.frames == nullptr && segment.key == key &&
+        segment.owner_pid == owner_pid && segment.page_count == page_count)
+    {
+        if (allocation_ok)
+        {
+            segment.frames = frames;
+            segment.initializing = false;
+            published = true;
+        }
+        else
+        {
+            segment = {};
+        }
+    }
+    sync::SpinLockRelease(g_shm_lock, lock_flags);
+
+    if (!published)
+    {
+        for (u32 page = 0; page < allocated; ++page)
+            mm::FreeFrame(frames[page]);
+        if (frames != nullptr)
+            mm::KFree(frames);
+        return -1;
+    }
+    return static_cast<i32>(slot);
 }
 
-void ShmMaybeFreeLocked(ShmSegment& s)
-{
-    // Caller holds arch::Cli.
-    if (!s.in_use || s.refcount > 0 || !s.marked_destroy)
-        return;
-    mm::PhysAddr* frames = s.frames;
-    const u32 count = s.page_count;
-    s.frames = nullptr;
-    s.page_count = 0;
-    s.size_bytes = 0;
-    s.in_use = false;
-    s.marked_destroy = false;
-    s.key = 0;
-    arch::Sti();
-    for (u32 i = 0; i < count; ++i)
-        mm::FreeFrame(frames[i]);
-    mm::KFree(frames);
-    arch::Cli();
-}
 
 } // namespace
 
@@ -218,35 +397,70 @@ void ShmMaybeFreeLocked(ShmSegment& s)
 
 i64 DoShmget(u64 key, u64 size, u64 shmflg)
 {
+    core::Process* process = core::CurrentProcess();
+    if (process == nullptr)
+        return -22;
     const i32 ikey = static_cast<i32>(key);
     const bool create = (shmflg & kIpcCreat) != 0;
     const bool excl = (shmflg & kIpcExcl) != 0;
-    if (ikey != 0)
+
+    // A concurrent creator leaves a short-lived Initializing row. Retry
+    // outside the spin lock so keyed shmget cannot create duplicate segments.
+    constexpr u32 kCreateRetryLimit = 64;
+    for (u32 attempt = 0; attempt < kCreateRetryLimit; ++attempt)
     {
-        const i32 existing = ShmFindByKey(ikey);
-        if (existing >= 0)
+        if (ikey != 0)
         {
-            if (create && excl)
-                return -17; // -EEXIST
-            arch::Cli();
-            ++g_shm_pool[existing].refcount;
-            arch::Sti();
-            return existing + 1; // shmid = pool_idx + 1
+            bool initializing = false;
+            sync::IrqFlags lock_flags = sync::SpinLockAcquire(g_shm_lock);
+            const i32 existing = ShmFindByKeyLocked(ikey);
+            if (existing >= 0)
+            {
+                if (create && excl)
+                {
+                    sync::SpinLockRelease(g_shm_lock, lock_flags);
+                    return -17; // -EEXIST
+                }
+                sync::SpinLockRelease(g_shm_lock, lock_flags);
+                return existing + 1;
+            }
+            for (u32 slot = 0; slot < kShmPoolCap; ++slot)
+            {
+                const ShmSegment& segment = g_shm_pool[slot];
+                if (segment.in_use && segment.initializing && !segment.marked_destroy && segment.key == ikey)
+                {
+                    initializing = true;
+                    break;
+                }
+            }
+            sync::SpinLockRelease(g_shm_lock, lock_flags);
+            if (initializing)
+            {
+                sched::SchedYield();
+                continue;
+            }
+            if (!create)
+                return -2; // -ENOENT
         }
-        if (!create)
-            return -2; // -ENOENT
+
+        const i32 idx = ShmAlloc(ikey, size, process->pid);
+        if (idx == kShmAllocBusy)
+        {
+            sched::SchedYield();
+            continue;
+        }
+        if (idx < 0)
+            return -28; // -ENOSPC
+        arch::SerialWrite("[linux/shm] alloc idx=");
+        arch::SerialWriteHex(static_cast<u64>(idx));
+        arch::SerialWrite(" key=");
+        arch::SerialWriteHex(static_cast<u64>(ikey));
+        arch::SerialWrite(" size=");
+        arch::SerialWriteHex(size);
+        arch::SerialWrite("\n");
+        return idx + 1;
     }
-    const i32 idx = ShmAlloc(ikey, size);
-    if (idx < 0)
-        return -28; // -ENOSPC
-    arch::SerialWrite("[linux/shm] alloc idx=");
-    arch::SerialWriteHex(static_cast<u64>(idx));
-    arch::SerialWrite(" key=");
-    arch::SerialWriteHex(static_cast<u64>(ikey));
-    arch::SerialWrite(" size=");
-    arch::SerialWriteHex(size);
-    arch::SerialWrite("\n");
-    return idx + 1;
+    return -11; // -EAGAIN: a keyed creator did not publish in bounded retries
 }
 
 i64 DoShmat(u64 shmid, u64 shmaddr, u64 shmflg)
@@ -258,34 +472,9 @@ i64 DoShmat(u64 shmid, u64 shmaddr, u64 shmflg)
     if (p == nullptr)
         return -22;
 
-    arch::Cli();
-    if (!g_shm_pool[idx].in_use || g_shm_pool[idx].marked_destroy)
-    {
-        arch::Sti();
-        return -22;
-    }
-    // IPC_PRIVATE isolation: a key == 0 segment has no sharing token, so only
-    // its creator may attach. Keyed segments stay shareable (POSIX). This
-    // closes the brute-force-shmid cross-process leak without breaking keyed
-    // cross-process sharing.
-    if (g_shm_pool[idx].key == 0 && g_shm_pool[idx].owner_pid != p->pid)
-    {
-        arch::Sti();
-        return -13; // -EACCES
-    }
-    const u32 page_count = g_shm_pool[idx].page_count;
-    arch::Sti();
-
-    // Find a free attach slot.
-    i32 slot = -1;
-    for (u32 i = 0; i < core::Process::kLinuxShmAttachCap; ++i)
-        if (!p->linux_shm_attaches[i].in_use)
-        {
-            slot = static_cast<i32>(i);
-            break;
-        }
-    if (slot < 0)
-        return -24; // -EMFILE
+    // Outermost transaction: attach-row selection, VA selection, borrowed
+    // PTE commit, and row/cursor publication are one Process operation.
+    core::ScopedProcessVmTransaction vm_transaction(p);
 
     // Pick a base VA. shmaddr == 0 → bump-allocate from arena.
     u64 base = (shmaddr == 0) ? p->linux_shm_cursor : shmaddr;
@@ -294,50 +483,49 @@ i64 DoShmat(u64 shmid, u64 shmaddr, u64 shmflg)
 
     // Reject attach targets in the kernel half — without this an
     // attacker holding a SysV shm key can pass shmaddr =
-    // 0xFFFFFFFF80000000 and drive AddressSpaceMapBorrowedPage past
+    // 0xFFFFFFFF80000000 and drive AddressSpaceMapBorrowedRange past
     // its kUserMax PanicAs gate (kernel DoS via mm/address_space.cpp).
     constexpr u64 kShmUserMaxExclusive = 0x0000800000000000ULL;
-    const u64 want_bytes = static_cast<u64>(page_count) * kPage;
-    if (base >= kShmUserMaxExclusive || want_bytes > (kShmUserMaxExclusive - base))
+    if (base >= kShmUserMaxExclusive)
         return -22; // -EINVAL
 
-    // Pin the segment, THEN map with interrupts enabled. The map
-    // loop calls AddressSpaceMapBorrowedPage → WalkToPteIn(create) →
-    // AllocateFrame; running up to kShmMaxPages (256) of that under
-    // arch::Cli() is a long IRQ-off critical section (≈3 page-table
-    // frame allocs/page) that starves the timer/scheduler — an
-    // unprivileged ELF with a shm key could trigger it on demand.
-    // Bumping seg.refcount here (under Cli, after re-validating)
-    // pins the segment so a concurrent IPC_RMID cannot free
-    // seg.frames while we map outside the lock — the same staged
-    // discipline ShmAlloc/DoMsgsnd already use in this file.
-    arch::Cli();
+    // Reserve a fail-closed ledger row before pinning frames or touching PTEs.
+    // Every failure below aborts this exact row before the VM lock is dropped.
+    ShmAttachReservation reservation{};
+    if (!ShmAttachReserve(p, &reservation))
+        return -24; // -EMFILE
+
+    // Pin the segment under the IRQ-safe global metadata lock, then release
+    // that lock before page-table allocation or TLB work. The retained
+    // reference keeps `frames` stable through map or rollback.
+    sync::IrqFlags lock_flags = sync::SpinLockAcquire(g_shm_lock);
     auto& seg = g_shm_pool[idx];
-    if (!seg.in_use || seg.marked_destroy)
+    const bool ref_saturated = seg.refcount == ~u32{0};
+    if (!seg.in_use || seg.initializing || seg.marked_destroy || seg.frames == nullptr || seg.page_count == 0 ||
+        (seg.key == 0 && seg.owner_pid != p->pid) || ref_saturated)
     {
-        arch::Sti();
-        return -22;
+        const bool denied_private =
+            seg.in_use && !seg.initializing && !seg.marked_destroy && seg.key == 0 && seg.owner_pid != p->pid;
+        sync::SpinLockRelease(g_shm_lock, lock_flags);
+        const bool aborted = ShmAttachAbort(p, reservation);
+        KASSERT(aborted, "linux/shm", "segment revalidation lost reserved attach row");
+        return denied_private ? -13 : (ref_saturated ? -24 : -22);
     }
-    // Snapshot frames + page count together under this lock so the
-    // map loop can't mix a fresh frames[] with a stale count if the
-    // pool slot was recycled (IPC_RMID + full detach + new shmget)
-    // since the earlier validate.
+    // Snapshot and retain the exact frame vector in one locked step.
     mm::PhysAddr* const frames = seg.frames;
     const u32 pages = seg.page_count;
     ++seg.refcount;
-    arch::Sti();
+    sync::SpinLockRelease(g_shm_lock, lock_flags);
 
-    // Authoritative VA-range check against the pinned page count
-    // (the pre-pin check above used a possibly-stale count). A page
-    // past the user half would trip AddressSpaceMapBorrowedPage's
+    // Check the VA range against the pinned page count. A page past
+    // the user half would trip AddressSpaceMapBorrowedRange's
     // PanicAs gate (kernel halt) rather than fail gracefully.
     if (base >= kShmUserMaxExclusive || static_cast<u64>(pages) * kPage > (kShmUserMaxExclusive - base))
     {
-        arch::Cli();
-        if (seg.refcount > 0)
-            --seg.refcount;
-        ShmMaybeFreeLocked(seg);
-        arch::Sti();
+        const bool dropped = ShmDropReference(idx);
+        KASSERT(dropped, "linux/shm", "range rejection lost segment reference");
+        const bool aborted = ShmAttachAbort(p, reservation);
+        KASSERT(aborted, "linux/shm", "range rejection lost reserved attach row");
         return -22; // -EINVAL
     }
 
@@ -346,34 +534,30 @@ i64 DoShmat(u64 shmid, u64 shmaddr, u64 shmflg)
     const u64 kFlags = (shmflg & kShmRdonly) != 0
                            ? (mm::kPagePresent | mm::kPageUser | mm::kPageNoExecute)
                            : (mm::kPagePresent | mm::kPageWritable | mm::kPageUser | mm::kPageNoExecute);
-    bool ok = true;
-    u32 mapped = 0;
-    for (u32 i = 0; i < pages; ++i)
+    // Atomic range mapping either publishes every PTE or none of them. The
+    // segment reference above keeps the frame vector alive while this sleeps.
+    if (!mm::AddressSpaceMapBorrowedRange(p->as, base, frames, pages, kFlags))
     {
-        if (!mm::AddressSpaceMapBorrowedPage(p->as, base + i * kPage, frames[i], kFlags))
-        {
-            ok = false;
-            break;
-        }
-        ++mapped;
-    }
-    if (!ok)
-    {
-        for (u32 i = 0; i < mapped; ++i)
-            mm::AddressSpaceUnmapBorrowedPage(p->as, base + i * kPage);
-        arch::Cli();
-        if (seg.refcount > 0)
-            --seg.refcount;
-        ShmMaybeFreeLocked(seg);
-        arch::Sti();
+        const bool dropped = ShmDropReference(idx);
+        KASSERT(dropped, "linux/shm", "map refusal lost segment reference");
+        const bool aborted = ShmAttachAbort(p, reservation);
+        KASSERT(aborted, "linux/shm", "map refusal lost reserved attach row");
         return -12; // -ENOMEM
     }
     // refcount already bumped above (segment pinned); attach recorded below.
 
-    p->linux_shm_attaches[slot].in_use = true;
-    p->linux_shm_attaches[slot].shmid = static_cast<u32>(shmid);
-    p->linux_shm_attaches[slot].base_va = base;
-    p->linux_shm_attaches[slot].page_count = pages;
+    if (!ShmAttachPublish(p, reservation, static_cast<u32>(shmid), base, pages))
+    {
+        // Restore ownership before releasing the segment reference. Exact
+        // expected-frame unmap cannot clear a newer borrowed view at this VA.
+        const bool unmapped = mm::AddressSpaceUnmapBorrowedRangeExpected(p->as, base, frames, pages);
+        KASSERT(unmapped, "linux/shm", "attach publish rollback mismatched borrowed frames");
+        const bool aborted = ShmAttachAbort(p, reservation);
+        KASSERT(aborted, "linux/shm", "attach publish rollback lost reserved row");
+        const bool dropped = ShmDropReference(idx);
+        KASSERT(dropped, "linux/shm", "publish rollback lost segment reference");
+        return -12;
+    }
     if (shmaddr == 0)
         p->linux_shm_cursor = base + pages * kPage;
 
@@ -384,7 +568,7 @@ i64 DoShmat(u64 shmid, u64 shmaddr, u64 shmflg)
     arch::SerialWrite(" va=");
     arch::SerialWriteHex(base);
     arch::SerialWrite(" pages=");
-    arch::SerialWriteHex(pages); // pinned count actually mapped (page_count was the pre-pin snapshot)
+    arch::SerialWriteHex(pages);
     arch::SerialWrite("\n");
     return static_cast<i64>(base);
 }
@@ -394,26 +578,53 @@ i64 DoShmdt(u64 shmaddr)
     core::Process* p = core::CurrentProcess();
     if (p == nullptr)
         return -22;
-    for (u32 i = 0; i < core::Process::kLinuxShmAttachCap; ++i)
+
+    core::ScopedProcessVmTransaction vm_transaction(p);
+    ShmAttachClaim claim{};
+    if (!ShmAttachClaimByBase(p, shmaddr, &claim))
+        return -22;
+
+    const u32 idx = claim.published.shmid - 1;
+    if (idx >= kShmPoolCap)
     {
-        auto& att = p->linux_shm_attaches[i];
-        if (!att.in_use || att.base_va != shmaddr)
-            continue;
-        const u32 idx = att.shmid - 1;
-        if (idx >= kShmPoolCap)
-            return -22;
-        for (u32 pg = 0; pg < att.page_count; ++pg)
-            mm::AddressSpaceUnmapBorrowedPage(p->as, att.base_va + pg * kPage);
-        att.in_use = false;
-        arch::Cli();
-        ShmSegment& seg = g_shm_pool[idx];
-        if (seg.refcount > 0)
-            --seg.refcount;
-        ShmMaybeFreeLocked(seg);
-        arch::Sti();
-        return 0;
+        const bool restored = ShmAttachRestore(p, claim);
+        KASSERT(restored, "linux/shm", "invalid detach row could not be restored");
+        return -22;
     }
-    return -22; // -EINVAL: shmaddr not an active attach
+
+    // Snapshot the pinned segment vector under the metadata critical section,
+    // then drop it before the sleepable AddressSpace transaction.
+    mm::PhysAddr* frames = nullptr;
+    const sync::IrqFlags lock_flags = sync::SpinLockAcquire(g_shm_lock);
+    ShmSegment& seg = g_shm_pool[idx];
+    if (seg.in_use && !seg.initializing && seg.frames != nullptr && seg.page_count == claim.published.page_count &&
+        seg.refcount > 0)
+    {
+        frames = seg.frames;
+    }
+    sync::SpinLockRelease(g_shm_lock, lock_flags);
+    if (frames == nullptr)
+    {
+        const bool restored = ShmAttachRestore(p, claim);
+        KASSERT(restored, "linux/shm", "segment mismatch could not restore claimed attach row");
+        return -22;
+    }
+
+    if (!mm::AddressSpaceUnmapBorrowedRangeExpected(p->as, claim.published.base_va, frames, claim.published.page_count))
+    {
+        const bool restored = ShmAttachRestore(p, claim);
+        KASSERT(restored, "linux/shm", "failed exact unmap could not restore claimed attach row");
+        return -22;
+    }
+
+    const bool finished = ShmAttachFinish(p, claim);
+    KASSERT(finished, "linux/shm", "successful exact unmap lost claimed attach row");
+
+    // Only after the PTEs and ledger row are gone may the attach reference
+    // release the frame vector.
+    const bool dropped = ShmDropReference(idx);
+    KASSERT(dropped, "linux/shm", "successful detach lost segment reference");
+    return 0;
 }
 
 void LinuxShmDrainProcess(core::Process* p)
@@ -424,18 +635,14 @@ void LinuxShmDrainProcess(core::Process* p)
     // p->linux_shm_attaches[]. Before this drain existed, the only path that
     // dropped that reference was an explicit shmdt(2) — so a process that
     // exited while still attached, normally or by fault, leaked the reference
-    // permanently. ShmMaybeFreeLocked frees a segment only at refcount == 0,
+    // permanently. ShmRetireIfReadyLocked retires only at refcount == 0,
     // so the segment could never be collected and its pool slot never
     // returned. With kShmPoolCap == 8, eight such exits exhaust SysV SHM for
     // the rest of the boot, along with the backing frames.
     //
-    // Deliberately does NOT unmap the borrowed pages. ProcessRelease calls
-    // this immediately before mm::AddressSpaceRelease, which tears down the
-    // whole user half anyway, and SHM pages are mapped via
-    // AddressSpaceMapBorrowedPage, so they are not in the AS owned-frame
-    // ledger: the AS neither frees them nor requires them unmapped first.
-    // Skipping the unmap also keeps this safe to call at any point in
-    // teardown, including after p->as has been cleared.
+    // ProcessRelease calls this with no competing syscall and before releasing
+    // the sole AddressSpace reference. Exact unmap precedes every attach-ref
+    // drop, so no borrowed PTE can name a frame returned to the allocator.
     if (p == nullptr)
         return;
     for (u32 i = 0; i < core::Process::kLinuxShmAttachCap; ++i)
@@ -443,22 +650,41 @@ void LinuxShmDrainProcess(core::Process* p)
         auto& att = p->linux_shm_attaches[i];
         if (!att.in_use)
             continue;
-        // Validate against the pool BEFORE clearing the record, so a corrupt
-        // slot is dropped without indexing g_shm_pool out of range.
         const bool indexable = att.shmid != 0 && (att.shmid - 1) < kShmPoolCap;
         const u32 idx = indexable ? (att.shmid - 1) : 0;
-        att.in_use = false;
-        att.shmid = 0;
-        att.base_va = 0;
-        att.page_count = 0;
         if (!indexable)
+        {
+            att = {};
             continue;
-        arch::Cli();
-        ShmSegment& seg = g_shm_pool[idx];
-        if (seg.refcount > 0)
-            --seg.refcount;
-        ShmMaybeFreeLocked(seg);
-        arch::Sti();
+        }
+
+        // Keep the attach reference live while taking an exact frame snapshot
+        // and unmapping. If an invariant mismatch occurs, leak the reference
+        // rather than free frames beneath a surviving borrowed PTE; AS teardown
+        // immediately after this drain will still remove that PTE.
+        mm::PhysAddr* frames = nullptr;
+        const sync::IrqFlags lock_flags = sync::SpinLockAcquire(g_shm_lock);
+        ShmSegment& segment = g_shm_pool[idx];
+        if (segment.in_use && !segment.initializing && segment.frames != nullptr && segment.refcount > 0 &&
+            segment.page_count == att.page_count)
+        {
+            frames = segment.frames;
+        }
+        sync::SpinLockRelease(g_shm_lock, lock_flags);
+        if (frames == nullptr || p->as == nullptr ||
+            !mm::AddressSpaceUnmapBorrowedRangeExpected(p->as, att.base_va, frames, att.page_count))
+        {
+            arch::SerialWrite("[linux/shm] drain kept ref after exact-unmap mismatch pid=");
+            arch::SerialWriteHex(p->pid);
+            arch::SerialWrite(" va=");
+            arch::SerialWriteHex(att.base_va);
+            arch::SerialWrite("\n");
+            continue;
+        }
+
+        att = {};
+        const bool dropped = ShmDropReference(idx);
+        KASSERT(dropped, "linux/shm", "drain exact unmap lost segment reference");
     }
 }
 
@@ -471,11 +697,12 @@ i64 DoShmctl(u64 shmid, u64 cmd, u64 user_buf)
     if (p == nullptr)
         return -22;
     const u32 idx = static_cast<u32>(shmid - 1);
-    arch::Cli();
+    const bool has_debug = core::ProcessHasCap(p, core::kCapDebug);
+    sync::IrqFlags lock_flags = sync::SpinLockAcquire(g_shm_lock);
     ShmSegment& seg = g_shm_pool[idx];
-    if (!seg.in_use)
+    if (!seg.in_use || seg.initializing)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_shm_lock, lock_flags);
         return -22;
     }
     // IPC_RMID / IPC_SET mutate shared state — only the creating
@@ -483,27 +710,33 @@ i64 DoShmctl(u64 shmid, u64 cmd, u64 user_buf)
     // ELF could RMID a segment it never created, dropping the owner's
     // initial reference (a second RMID then frees the frames while a
     // peer still has them mapped — a cross-process UAF).
-    const bool is_owner = (seg.owner_pid == p->pid) || core::ProcessHasCap(p, core::kCapDebug);
+    const bool is_owner = (seg.owner_pid == p->pid) || has_debug;
     if ((cmd == kIpcRmid || cmd == kIpcSet) && !is_owner)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_shm_lock, lock_flags);
         return -1; // -EPERM
+    }
+    if (cmd == kIpcRmid && seg.marked_destroy)
+    {
+        sync::SpinLockRelease(g_shm_lock, lock_flags);
+        return -22; // the initial shmget reference was already consumed
     }
     if (cmd == kIpcRmid)
     {
         seg.marked_destroy = true;
         if (seg.refcount > 0)
             --seg.refcount; // drop the shmget initial reference
-        ShmMaybeFreeLocked(seg);
-        arch::Sti();
+        const ShmRetiredFrames retired = ShmRetireIfReadyLocked(seg);
+        sync::SpinLockRelease(g_shm_lock, lock_flags);
+        ShmReleaseRetiredFrames(retired);
         return 0;
     }
     if (cmd == kIpcStat || cmd == kIpcSet || cmd == kIpcInfo)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_shm_lock, lock_flags);
         return 0; // accept-as-noop; struct copy is sub-GAP
     }
-    arch::Sti();
+    sync::SpinLockRelease(g_shm_lock, lock_flags);
     return -22;
 }
 

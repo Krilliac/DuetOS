@@ -1,0 +1,35 @@
+# Trusted build policy for the embedded ServiceManifest v1 package.
+#
+# This file is deliberately separate from services.toml. The authenticated
+# kernel image is the trust root; the generator may bind that image's exact
+# manifest hash and extent to these ceilings, but it must never derive or widen
+# a ceiling from the manifest being authorized.
+
+[authority]
+format_version = 1
+trust_source = "authenticated-kernel-image"
+authority_identity = 0x4455455441555448 # "DUETAUTH"
+manifest_identity = 0x445545544d414e31  # "DUETMAN1"
+signer_identity = 0x445545544255494c    # "DUETBUIL"
+profile_identity = 0x4455455453564331   # "DUETSVC1"
+
+allowed_capabilities = [
+  "serial-console",
+  "fs-read",
+  "fs-write",
+  "spawn-thread",
+  "net",
+  "input",
+  "net-admin",
+  "service-control",
+]
+allowed_immutable_policies = [1]
+allowed_service_kinds = ["native", "broker"]
+allowed_resource_profiles = ["authenticated-service"]
+
+max_frame_budget_pages = 8192
+max_tick_budget = 1048576
+max_section_objects = 4
+max_section_pages = 2048
+max_services = 5
+max_dependencies = 4

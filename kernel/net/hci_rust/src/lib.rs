@@ -106,7 +106,7 @@ pub struct DuetosHciReadBdAddr {
 
 const HCI_EVENT_HEADER_SIZE: usize = 3; // packet_type + event_code + param_total_length
 
-fn slice_from_raw<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
+unsafe fn slice_from_raw(ptr: *const u8, len: usize, _scope: &()) -> Option<&[u8]> {
     if ptr.is_null() {
         return None;
     }
@@ -114,7 +114,7 @@ fn slice_from_raw<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
     Some(unsafe { slice::from_raw_parts(ptr, len) })
 }
 
-fn out_init<'a, T: Default + Copy>(out: *mut T) -> Option<&'a mut T> {
+unsafe fn out_init<T: Default + Copy>(out: *mut T, _scope: &mut ()) -> Option<&mut T> {
     if out.is_null() {
         return None;
     }
@@ -261,94 +261,147 @@ fn parse_read_bd_addr(buf: &[u8], out: &mut DuetosHciReadBdAddr) -> bool {
 
 // ---------- FFI ----------
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_hci_parse_event_packet(buf: *const u8, len: usize, out: *mut DuetosHciEvent) -> bool {
-    let Some(dst) = out_init(out) else {
+pub unsafe extern "C" fn duetos_hci_parse_event_packet(buf: *const u8, len: usize, out: *mut DuetosHciEvent) -> bool {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_event_packet(slice, dst)
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_hci_parse_command_complete(
+pub unsafe extern "C" fn duetos_hci_parse_command_complete(
     buf: *const u8,
     len: usize,
     out: *mut DuetosHciCommandComplete,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_command_complete(slice, dst)
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_hci_parse_command_status(
+pub unsafe extern "C" fn duetos_hci_parse_command_status(
     buf: *const u8,
     len: usize,
     out: *mut DuetosHciCommandStatus,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_command_status(slice, dst)
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_hci_parse_disconnection_complete(
+pub unsafe extern "C" fn duetos_hci_parse_disconnection_complete(
     buf: *const u8,
     len: usize,
     out: *mut DuetosHciDisconnectionComplete,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_disconnection_complete(slice, dst)
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_hci_parse_le_meta(buf: *const u8, len: usize, out: *mut DuetosHciLeMeta) -> bool {
-    let Some(dst) = out_init(out) else {
+pub unsafe extern "C" fn duetos_hci_parse_le_meta(buf: *const u8, len: usize, out: *mut DuetosHciLeMeta) -> bool {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_le_meta(slice, dst)
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_hci_parse_read_local_version(
+pub unsafe extern "C" fn duetos_hci_parse_read_local_version(
     buf: *const u8,
     len: usize,
     out: *mut DuetosHciReadLocalVersion,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_read_local_version(slice, dst)
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_hci_parse_read_bd_addr(buf: *const u8, len: usize, out: *mut DuetosHciReadBdAddr) -> bool {
-    let Some(dst) = out_init(out) else {
+pub unsafe extern "C" fn duetos_hci_parse_read_bd_addr(
+    buf: *const u8,
+    len: usize,
+    out: *mut DuetosHciReadBdAddr,
+) -> bool {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_read_bd_addr(slice, dst)

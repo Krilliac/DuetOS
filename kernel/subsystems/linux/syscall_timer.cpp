@@ -52,6 +52,8 @@ namespace
 
 constexpr u64 kNsPerSec = 1000000000ULL;
 constexpr u64 kSigAlrm = 14; // POSIX SIGALRM number.
+constexpr u64 kMaxU64 = ~static_cast<u64>(0);
+constexpr i64 kMaxI64 = 0x7fff'ffff'ffff'ffffLL;
 
 // Linux's struct itimerval: two timeval pairs (it_interval,
 // it_value), each {sec, usec}. 32 bytes total on 64-bit.
@@ -70,19 +72,47 @@ struct UserTimespec
     i64 nsec;
 };
 
+u64 SaturatingAdd(u64 lhs, u64 rhs)
+{
+    return rhs > kMaxU64 - lhs ? kMaxU64 : lhs + rhs;
+}
+
+u64 SaturatingMul(u64 lhs, u64 rhs)
+{
+    return lhs != 0 && rhs > kMaxU64 / lhs ? kMaxU64 : lhs * rhs;
+}
+
 u64 NsFromTimevalParts(i64 sec, i64 usec)
 {
     if (sec < 0)
         sec = 0;
     if (usec < 0)
         usec = 0;
-    return static_cast<u64>(sec) * kNsPerSec + static_cast<u64>(usec) * 1000ULL;
+    const u64 seconds_ns = SaturatingMul(static_cast<u64>(sec), kNsPerSec);
+    const u64 micros_ns = SaturatingMul(static_cast<u64>(usec), 1000ULL);
+    return SaturatingAdd(seconds_ns, micros_ns);
+}
+
+bool NsFromTimespecParts(i64 sec, i64 nsec, u64& out)
+{
+    if (sec < 0 || nsec < 0 || nsec >= static_cast<i64>(kNsPerSec))
+        return false;
+    out = SaturatingAdd(SaturatingMul(static_cast<u64>(sec), kNsPerSec), static_cast<u64>(nsec));
+    return true;
 }
 
 void NsToTimevalParts(u64 ns, i64& sec, i64& usec)
 {
-    sec = static_cast<i64>(ns / kNsPerSec);
+    const u64 sec_u = ns / kNsPerSec;
+    sec = sec_u > static_cast<u64>(kMaxI64) ? kMaxI64 : static_cast<i64>(sec_u);
     usec = static_cast<i64>((ns % kNsPerSec) / 1000ULL);
+}
+
+void NsToTimespecParts(u64 ns, i64& sec, i64& nsec)
+{
+    const u64 sec_u = ns / kNsPerSec;
+    sec = sec_u > static_cast<u64>(kMaxI64) ? kMaxI64 : static_cast<i64>(sec_u);
+    nsec = static_cast<i64>(ns % kNsPerSec);
 }
 
 constexpr u64 kItimerReal = 0;
@@ -108,7 +138,8 @@ void LinuxAlarmCheckAndRaise(::duetos::core::Process* p)
         if (p->linux_alarm_interval_ns > 0)
         {
             u64 missed = (now - p->linux_alarm_deadline_ns) / p->linux_alarm_interval_ns + 1;
-            p->linux_alarm_deadline_ns += missed * p->linux_alarm_interval_ns;
+            p->linux_alarm_deadline_ns =
+                SaturatingAdd(p->linux_alarm_deadline_ns, SaturatingMul(missed, p->linux_alarm_interval_ns));
         }
         else
         {
@@ -131,8 +162,9 @@ void LinuxAlarmCheckAndRaise(::duetos::core::Process* p)
         if (t.interval_ns > 0)
         {
             const u64 missed = (now - t.deadline_ns) / t.interval_ns + 1;
-            t.overrun += static_cast<u32>(missed > 0xFFFFFFFFu ? 0xFFFFFFFFu : missed);
-            t.deadline_ns += missed * t.interval_ns;
+            const u32 missed_u32 = static_cast<u32>(missed > 0xFFFFFFFFu ? 0xFFFFFFFFu : missed);
+            t.overrun = missed_u32 > 0xFFFFFFFFu - t.overrun ? 0xFFFFFFFFu : t.overrun + missed_u32;
+            t.deadline_ns = SaturatingAdd(t.deadline_ns, SaturatingMul(missed, t.interval_ns));
         }
         else
         {
@@ -163,10 +195,10 @@ i64 DoAlarm(u64 seconds)
     }
     else
     {
-        p->linux_alarm_deadline_ns = now + seconds * kNsPerSec;
+        p->linux_alarm_deadline_ns = SaturatingAdd(now, SaturatingMul(seconds, kNsPerSec));
         p->linux_alarm_interval_ns = 0; // alarm(2) is one-shot
     }
-    return static_cast<i64>(prior_remaining_sec);
+    return prior_remaining_sec > static_cast<u64>(kMaxI64) ? kMaxI64 : static_cast<i64>(prior_remaining_sec);
 }
 
 // getitimer(which, value) — read the current interval timer.
@@ -234,7 +266,7 @@ i64 DoSetitimer(u64 which, u64 user_new, u64 user_old)
         }
         else
         {
-            p->linux_alarm_deadline_ns = now + new_value_ns;
+            p->linux_alarm_deadline_ns = SaturatingAdd(now, new_value_ns);
             p->linux_alarm_interval_ns = new_interval_ns;
         }
     }
@@ -354,6 +386,12 @@ i64 DoTimerSettime(u64 timerid, u64 flags, u64 user_new, u64 user_old)
     if (!mm::CopyFromUser(&new_val, reinterpret_cast<const void*>(user_new), sizeof(new_val)))
         return kEFAULT;
 
+    u64 new_value_ns = 0;
+    u64 new_interval_ns = 0;
+    if (!NsFromTimespecParts(new_val.it_value.sec, new_val.it_value.nsec, new_value_ns) ||
+        !NsFromTimespecParts(new_val.it_interval.sec, new_val.it_interval.nsec, new_interval_ns))
+        return kEINVAL;
+
     auto& t = p->linux_posix_timers[timerid];
     const u64 now = ::duetos::time::MonotonicNs();
 
@@ -364,20 +402,11 @@ i64 DoTimerSettime(u64 timerid, u64 flags, u64 user_new, u64 user_old)
         u64 remaining = 0;
         if (t.deadline_ns > now)
             remaining = t.deadline_ns - now;
-        NsToTimevalParts(remaining, old_val.it_value.sec, old_val.it_value.nsec);
-        // Note: it_value.nsec stores nsec already (timespec is sec+nsec, not sec+usec).
-        old_val.it_value.nsec = static_cast<i64>(remaining % kNsPerSec);
-        old_val.it_value.sec = static_cast<i64>(remaining / kNsPerSec);
-        old_val.it_interval.sec = static_cast<i64>(t.interval_ns / kNsPerSec);
-        old_val.it_interval.nsec = static_cast<i64>(t.interval_ns % kNsPerSec);
+        NsToTimespecParts(remaining, old_val.it_value.sec, old_val.it_value.nsec);
+        NsToTimespecParts(t.interval_ns, old_val.it_interval.sec, old_val.it_interval.nsec);
         if (!mm::CopyToUser(reinterpret_cast<void*>(user_old), &old_val, sizeof(old_val)))
             return kEFAULT;
     }
-
-    const u64 new_value_ns =
-        static_cast<u64>(new_val.it_value.sec) * kNsPerSec + static_cast<u64>(new_val.it_value.nsec);
-    const u64 new_interval_ns =
-        static_cast<u64>(new_val.it_interval.sec) * kNsPerSec + static_cast<u64>(new_val.it_interval.nsec);
 
     if (new_value_ns == 0)
     {
@@ -390,7 +419,7 @@ i64 DoTimerSettime(u64 timerid, u64 flags, u64 user_new, u64 user_old)
         if ((flags & kTimerAbstime) != 0)
             t.deadline_ns = new_value_ns; // absolute monotonic time
         else
-            t.deadline_ns = now + new_value_ns;
+            t.deadline_ns = SaturatingAdd(now, new_value_ns);
         t.interval_ns = new_interval_ns;
         t.overrun = 0;
     }
@@ -412,10 +441,8 @@ i64 DoTimerGettime(u64 timerid, u64 user_curr)
     if (t.deadline_ns > now)
         remaining = t.deadline_ns - now;
     UserItimerspec out = {};
-    out.it_value.sec = static_cast<i64>(remaining / kNsPerSec);
-    out.it_value.nsec = static_cast<i64>(remaining % kNsPerSec);
-    out.it_interval.sec = static_cast<i64>(t.interval_ns / kNsPerSec);
-    out.it_interval.nsec = static_cast<i64>(t.interval_ns % kNsPerSec);
+    NsToTimespecParts(remaining, out.it_value.sec, out.it_value.nsec);
+    NsToTimespecParts(t.interval_ns, out.it_interval.sec, out.it_interval.nsec);
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_curr), &out, sizeof(out)))
         return kEFAULT;
     return 0;

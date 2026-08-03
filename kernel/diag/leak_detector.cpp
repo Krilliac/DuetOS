@@ -97,7 +97,7 @@ struct ProcessAggCookie
     // Per-task samples collected DURING the SchedEnumerate walk.
     // SchedEnumerate now holds g_sched_lock for the whole walk, so
     // the callback must not call back into the scheduler (the old
-    // shape called SchedFindProcessByPid from inside the callback —
+    // shape called process lookup from inside the callback —
     // a self-deadlock on the non-recursive lock). Collect-then-
     // resolve instead: the callback only copies, and the process
     // resolution happens after the walk returns. Cap is generous
@@ -142,7 +142,7 @@ void CountTaskAgg(const ::duetos::sched::SchedTaskInfo& info, void* cookie)
     }
 }
 
-// Post-walk resolution: one SchedFindProcessByPid per distinct
+// Post-walk resolution: one retained process lookup per distinct
 // PID, then per-process handle counts + per-task runaway checks
 // against that process's tick budget.
 //
@@ -157,7 +157,8 @@ void ResolveTaskAgg(ProcessAggCookie& c)
         if (PidAlreadyCounted(c, c.tasks[s].pid))
             continue;
 
-        ::duetos::core::Process* p = ::duetos::sched::SchedFindProcessByPid(c.tasks[s].pid);
+        ::duetos::core::ScopedProcessRef process_ref(::duetos::sched::SchedFindProcessByPidRetained(c.tasks[s].pid));
+        ::duetos::core::Process* p = process_ref.Get();
         if (p == nullptr)
             continue;
 
@@ -183,9 +184,7 @@ void ResolveTaskAgg(ProcessAggCookie& c)
             if (p->win32_handles[i].kind != ::duetos::core::Process::FsBackingKind::None)
                 ++win32;
         win32 += ::duetos::core::ProcessWin32ThreadHandleCount(p);
-        for (u64 i = 0; i < ::duetos::core::Process::kWin32ProcessCap; ++i)
-            if (p->win32_proc_handles[i].in_use)
-                ++win32;
+        win32 += ::duetos::core::ProcessWin32ProcessHandleCount(p);
         for (u64 i = 0; i < ::duetos::core::Process::kWin32SectionCap; ++i)
             if (p->win32_section_handles[i].in_use)
                 ++win32;
@@ -341,7 +340,8 @@ bool LeakDetectorSnapshotPid(u64 pid, ClassSnapshot* out)
 {
     if (out == nullptr)
         return false;
-    ::duetos::core::Process* p = ::duetos::sched::SchedFindProcessByPid(pid);
+    ::duetos::core::ScopedProcessRef process_ref(::duetos::sched::SchedFindProcessByPidRetained(pid));
+    ::duetos::core::Process* p = process_ref.Get();
     if (p == nullptr)
         return false;
 
@@ -353,9 +353,7 @@ bool LeakDetectorSnapshotPid(u64 pid, ClassSnapshot* out)
         if (p->win32_handles[i].kind != ::duetos::core::Process::FsBackingKind::None)
             ++w32;
     w32 += ::duetos::core::ProcessWin32ThreadHandleCount(p);
-    for (u64 i = 0; i < ::duetos::core::Process::kWin32ProcessCap; ++i)
-        if (p->win32_proc_handles[i].in_use)
-            ++w32;
+    w32 += ::duetos::core::ProcessWin32ProcessHandleCount(p);
     for (u64 i = 0; i < ::duetos::core::Process::kWin32SectionCap; ++i)
         if (p->win32_section_handles[i].in_use)
             ++w32;
@@ -380,12 +378,12 @@ bool LeakDetectorSnapshotPid(u64 pid, ClassSnapshot* out)
     }
 
     out[static_cast<u64>(ResourceClass::kHeap)] = ClassSnapshot{ResourceClass::kHeap, 0, 0, 0, kClassNames[0]};
-    out[static_cast<u64>(ResourceClass::kFrame)] = ClassSnapshot{
-        ResourceClass::kFrame, p->as != nullptr ? static_cast<u64>(p->as->region_count) : 0, 0,
-        p->as != nullptr ? static_cast<u64>(p->as->region_count) * ::duetos::mm::kPageSize : 0, kClassNames[1]};
+    const u64 owned_regions = ::duetos::mm::AddressSpaceUserPageCount(p->as);
+    out[static_cast<u64>(ResourceClass::kFrame)] =
+        ClassSnapshot{ResourceClass::kFrame, owned_regions, 0, owned_regions * ::duetos::mm::kPageSize, kClassNames[1]};
     out[static_cast<u64>(ResourceClass::kKStack)] = ClassSnapshot{ResourceClass::kKStack, 0, 0, 0, kClassNames[2]};
-    out[static_cast<u64>(ResourceClass::kAsRegion)] = ClassSnapshot{
-        ResourceClass::kAsRegion, p->as != nullptr ? static_cast<u64>(p->as->region_count) : 0, 0, 0, kClassNames[3]};
+    out[static_cast<u64>(ResourceClass::kAsRegion)] =
+        ClassSnapshot{ResourceClass::kAsRegion, owned_regions, 0, 0, kClassNames[3]};
     out[static_cast<u64>(ResourceClass::kHandle)] = SnapshotHandle(cookie);
     out[static_cast<u64>(ResourceClass::kWin32Handle)] = SnapshotWin32Handle(cookie);
     out[static_cast<u64>(ResourceClass::kSocket)] = ClassSnapshot{ResourceClass::kSocket, 0, 0, 0, kClassNames[6]};
@@ -419,9 +417,7 @@ void LeakDetectorReportProcessExit(const ::duetos::core::Process& p)
         if (p.win32_handles[i].kind != ::duetos::core::Process::FsBackingKind::None)
             ++w32;
     w32 += ::duetos::core::ProcessWin32ThreadHandleCount(&p);
-    for (u64 i = 0; i < ::duetos::core::Process::kWin32ProcessCap; ++i)
-        if (p.win32_proc_handles[i].in_use)
-            ++w32;
+    w32 += ::duetos::core::ProcessWin32ProcessHandleCount(&p);
     for (u64 i = 0; i < ::duetos::core::Process::kWin32SectionCap; ++i)
         if (p.win32_section_handles[i].in_use)
             ++w32;

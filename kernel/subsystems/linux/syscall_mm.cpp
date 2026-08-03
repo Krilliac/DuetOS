@@ -42,6 +42,8 @@ constexpr u64 kMapAnonymous = 0x20;
 // so all lengths round up to a 4 KiB boundary before allocation.
 u64 PageUp(u64 x)
 {
+    if (x > (~u64(0) - 0xFFFu))
+        return 0; // caller treats an unrepresentable span as invalid
     return (x + 0xFFFu) & ~0xFFFull;
 }
 
@@ -223,6 +225,8 @@ i64 DoBrk(u64 new_brk)
     }
     const u64 cur_aligned = PageUp(p->linux_brk_current);
     const u64 new_aligned = PageUp(new_brk);
+    if (cur_aligned == 0 || new_aligned == 0)
+        return static_cast<i64>(p->linux_brk_current);
     if (new_aligned > cur_aligned)
     {
         for (u64 va = cur_aligned; va < new_aligned; va += mm::kPageSize)
@@ -242,8 +246,15 @@ i64 DoBrk(u64 new_brk)
                               "brk: AllocateFrame OOM mid-grow; partial brk", va);
                 return static_cast<i64>(p->linux_brk_current);
             }
-            mm::AddressSpaceMapUserPage(p->as, va, frame,
-                                        mm::kPagePresent | mm::kPageWritable | mm::kPageUser | mm::kPageNoExecute);
+            if (!mm::AddressSpaceMapUserPage(p->as, va, frame,
+                                             mm::kPagePresent | mm::kPageWritable | mm::kPageUser | mm::kPageNoExecute))
+            {
+                mm::FreeFrame(frame);
+                p->linux_brk_current = va;
+                KLOG_ERROR_AV(::duetos::core::LogArea::Linux, "linux/mm",
+                              "brk: AddressSpaceMapUserPage refused; partial brk", va);
+                return static_cast<i64>(p->linux_brk_current);
+            }
         }
     }
     p->linux_brk_current = new_brk;
@@ -326,7 +337,13 @@ i64 DoMmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
                     (void)mm::AddressSpaceUnmapUserPage(p->as, j);
                 return kENOMEM;
             }
-            mm::AddressSpaceMapUserPage(p->as, va, frame, pte_flags);
+            if (!mm::AddressSpaceMapUserPage(p->as, va, frame, pte_flags))
+            {
+                mm::FreeFrame(frame);
+                for (u64 j = base; j < va; j += mm::kPageSize)
+                    (void)mm::AddressSpaceUnmapUserPage(p->as, j);
+                return kENOMEM;
+            }
         }
         p->linux_mmap_cursor += aligned;
         KLOG_INFO_AV(::duetos::core::LogArea::Linux, "linux/mm", "mmap anon OK; base", base);
@@ -391,7 +408,13 @@ i64 DoMmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
             for (u64 i = 0; i < to_copy; ++i)
                 dst[i] = file_scratch[page_off_in_file + i];
         }
-        mm::AddressSpaceMapUserPage(p->as, va, frame, pte_flags);
+        if (!mm::AddressSpaceMapUserPage(p->as, va, frame, pte_flags))
+        {
+            mm::FreeFrame(frame);
+            for (u64 j = base; j < va; j += mm::kPageSize)
+                (void)mm::AddressSpaceUnmapUserPage(p->as, j);
+            return kENOMEM;
+        }
     }
     p->linux_mmap_cursor += aligned;
     KLOG_INFO_AV(::duetos::core::LogArea::Linux, "linux/mm", "mmap file OK; base", base);
@@ -420,7 +443,12 @@ i64 DoMunmap(u64 addr, u64 len)
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || p->as == nullptr)
         return kEINVAL;
-    const u64 aligned_len = (len + 0xFFF) & ~u64(0xFFF);
+    const u64 aligned_len = PageUp(len);
+    if (aligned_len == 0)
+        return kEINVAL;
+    constexpr u64 kUserMaxExclusive = 0x0000800000000000ULL;
+    if (addr >= kUserMaxExclusive || aligned_len > (kUserMaxExclusive - addr))
+        return kEINVAL;
     u64 freed = 0;
     for (u64 off = 0; off < aligned_len; off += mm::kPageSize)
     {
@@ -474,8 +502,12 @@ i64 DoMremap(u64 old_addr, u64 old_len, u64 new_len, u64 flags, u64 new_addr)
     if (p == nullptr || p->abi_flavor != core::kAbiLinux)
         return kEINVAL;
 
-    const u64 old_pages = PageUp(old_len) / kPageSize;
-    const u64 new_pages = PageUp(new_len) / kPageSize;
+    const u64 old_aligned = PageUp(old_len);
+    const u64 new_aligned = PageUp(new_len);
+    if (old_aligned == 0 || new_aligned == 0)
+        return kEINVAL;
+    const u64 old_pages = old_aligned / kPageSize;
+    const u64 new_pages = new_aligned / kPageSize;
 
     if (new_pages == old_pages)
         return static_cast<i64>(old_addr);
@@ -514,7 +546,13 @@ i64 DoMremap(u64 old_addr, u64 old_len, u64 new_len, u64 flags, u64 new_addr)
                 (void)mm::AddressSpaceUnmapUserPage(p->as, base + j * kPageSize);
             return kENOMEM;
         }
-        mm::AddressSpaceMapUserPage(p->as, base + i * kPageSize, fr, pte_flags);
+        if (!mm::AddressSpaceMapUserPage(p->as, base + i * kPageSize, fr, pte_flags))
+        {
+            mm::FreeFrame(fr);
+            for (u64 j = 0; j < i; ++j)
+                (void)mm::AddressSpaceUnmapUserPage(p->as, base + j * kPageSize);
+            return kENOMEM;
+        }
     }
 
     // Copy old contents page-by-page via the direct map. Unmapped
@@ -579,18 +617,34 @@ i64 DoMsync(u64 addr, u64 len, u64 flags)
 // resident. Bad address surfaces as EFAULT.
 i64 DoMincore(u64 addr, u64 len, u64 user_vec)
 {
-    (void)addr;
     if (user_vec == 0)
         return kEFAULT;
-    const u64 pages = (len + 0xFFFu) / 0x1000u;
-    if (pages == 0)
+    if ((addr & (mm::kPageSize - 1)) != 0)
+        return kEINVAL;
+    if (len == 0)
         return 0;
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || p->as == nullptr)
+        return kEINVAL;
+    const u64 aligned_len = PageUp(len);
+    if (aligned_len == 0)
+        return kEINVAL;
+    constexpr u64 kUserMaxExclusive = 0x0000800000000000ULL;
+    if (addr >= kUserMaxExclusive || aligned_len > (kUserMaxExclusive - addr))
+        return kEFAULT;
+    const u64 pages = aligned_len / mm::kPageSize;
     constexpr u64 kMaxPages = 4096;
-    const u64 to_mark = (pages > kMaxPages) ? kMaxPages : pages;
+    if (pages > kMaxPages)
+        return kENOMEM;
+    for (u64 i = 0; i < pages; ++i)
+    {
+        if (mm::AddressSpaceProbePte(p->as, addr + i * mm::kPageSize) == mm::kNullFrame)
+            return kEFAULT;
+    }
     u8 ones[kMaxPages]; // per-call, not process-shared static
-    for (u64 i = 0; i < to_mark; ++i)
+    for (u64 i = 0; i < pages; ++i)
         ones[i] = 1;
-    if (!mm::CopyToUser(reinterpret_cast<void*>(user_vec), ones, to_mark))
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_vec), ones, pages))
         return kEFAULT;
     return 0;
 }

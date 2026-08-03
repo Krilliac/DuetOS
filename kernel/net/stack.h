@@ -20,16 +20,25 @@
  * Today the whole skeleton lives in stack.{h,cpp} so the
  * diff for the v0 shell stays small.
  *
- * Threading model: single-CPU today; every layer is called from
- * either the NIC IRQ path (RX) or a user/kernel thread (TX).
- * When SMP comes online, the plan is:
- *   - Per-CPU RX queues fed by IRQ-directed packet steering.
- *   - Per-connection locks at the TCP layer.
- *   - ARP cache read-mostly RCU-lite.
+ * Threading / lock ownership:
+ *   - RX and ordinary tasks may enter the stack concurrently on different CPUs.
+ *   - Interface publication, ARP, IPv4 stats, ICMP stats/ping, UDP demux/stats,
+ *     DHCP, DNS, NTP, IPv6 stats, and the firewall use separate IRQ-save
+ *     spinlocks. These locks are deliberately NEVER nested, so there is no
+ *     stack-internal lock order to acquire incorrectly.
+ *   - A protocol lock protects only its fixed-capacity table or transaction
+ *     record. RX handlers, socket dispatch, TX callbacks, parsing, logging,
+ *     scheduler waits, and cross-subsystem calls always run after it is dropped.
+ *   - Multi-phase work snapshots an exact NetInterfaceBinding plus a protocol
+ *     transaction token, drops the lock, then revalidates both before commit.
+ *     Interface operation pins may span an unlocked phase; they are lifetime
+ *     receipts, not spinlocks.
  *
- * Context: kernel. `NetStackInit` runs once at boot after
- * `NetInit` (the driver-layer discovery). Accessors are
- * read-only after.
+ * Context: kernel. `NetStackInit` runs exactly once after the scheduler and
+ * passive PCI enumeration, but before VirtIO or NIC activation can publish an
+ * interface or deliver RX. Its built-in protocol/interface self-tests complete
+ * synchronously inside that boundary. RX and ordinary tasks may enter the
+ * initialized stack concurrently afterward.
  */
 
 namespace duetos::net
@@ -193,15 +202,14 @@ inline constexpr u8 kTcpFlagAck = 0x10;
 // Stack entry point + status
 // -------------------------------------------------------------------
 
-/// Bring up the network stack. Walks the NIC table from
-/// drivers/net/ and registers each link with the L2 layer. Today
-/// this just logs what it would bind — actual packet I/O is
-/// deferred to the first real NIC driver slice.
+/// Bring up the network stack and its protocol state. Walks the NIC table for
+/// diagnostics; each hardware driver publishes its L2 binding asynchronously
+/// once that device's TX/RX path is ready.
 void NetStackInit();
 
-/// Number of L2 interfaces the stack has bound. Matches
-/// `drivers::net::NicCount()` today; will diverge when virtual
-/// interfaces (loopback, tun/tap) come online.
+/// Size of the enumerable interface prefix: zero when no interface is bound,
+/// otherwise one past the highest live slot. Driver-assigned indices may be
+/// sparse, so callers must still test `InterfaceIsBound` for each slot.
 u64 InterfaceCount();
 
 /// True iff `NetStackBindInterface` has run for `iface_index`. The
@@ -267,16 +275,22 @@ struct ArpEntry
 {
     Ipv4Address ip;
     MacAddress mac;
-    u64 expiry_ticks; // 0 = slot free
-    u32 iface_index;  // L2 interface the entry belongs to
-    u8 next_idx;      // chain link: index into g_arp_cache, or kArpEntryNone for tail
+    u64 expiry_ticks;       // 0 = slot free
+    u64 binding_generation; // Exact netif generation that learned this mapping.
+    u32 iface_index;        // L2 interface the entry belongs to
+    u8 next_idx;            // chain link: index into g_arp_cache, or kArpEntryNone for tail
     u8 _pad[3];
 };
 
-/// Look up an ARP entry by IPv4 address on the given interface.
-/// Returns nullptr on miss or expired. On hit, returns a pointer
-/// into the cache (valid until the next mutating call).
+/// Legacy pointer lookup. The returned cache pointer is only suitable for
+/// callers externally serialized against ARP mutation. SMP-capable paths must
+/// use the copy-out overload below so eviction cannot race a dereference.
 const ArpEntry* ArpLookup(u32 iface_index, Ipv4Address ip);
+
+/// Copy-out ARP lookup for concurrent RX/task callers. The copied entry is
+/// tagged with the exact live interface generation observed by the operation.
+/// Returns false on miss, expiry, stale generation, or a null output pointer.
+bool ArpLookup(u32 iface_index, Ipv4Address ip, ArpEntry* out_entry);
 
 /// Insert / refresh an ARP entry. Overwrites the matching slot if
 /// present; otherwise evicts the oldest entry on the same iface.
@@ -345,6 +359,7 @@ struct Ipv4Stats
 /// matching echo reply via the registered TX hook.
 bool Ipv4HandleIncoming(u32 iface_index, const void* frame, u64 len);
 
+/// Coherent IRQ-safe copy of the IPv4 counters.
 Ipv4Stats Ipv4StatsRead();
 
 // -------------------------------------------------------------------
@@ -364,18 +379,101 @@ Ipv4Stats Ipv4StatsRead();
 
 using NetTxFn = bool (*)(u32 iface_index, const void* frame, u64 len);
 
-/// Bind a NIC to the stack. `iface_index` must be < InterfaceCount().
-/// `tx` is the driver's send trampoline. `mac` is the local MAC
-/// (used as Ethernet src on every transmitted frame). `ip` is the
-/// IPv4 address the stack will respond to for ARP / ICMP. Returns
-/// false if iface_index is out of range or tx is null.
+/// Context-bearing transmit callback for restartable drivers. The stack
+/// retains `driver_context` only while the exact binding receipt is live.
+/// Unbind closes admission and drains every callback pin before clearing
+/// either pointer, so a successful unbind is the driver's lifetime join.
+using NetTxContextFn = bool (*)(void* driver_context, u32 iface_index, const void* frame, u64 len);
+
+/// Exact identity of one publication in an interface slot. Generations never
+/// repeat during a boot; zero is invalid. Drivers must retain this receipt and
+/// present it for RX injection and unbind so delayed work from an old device
+/// incarnation cannot act on a replacement bound at the same index.
+struct NetInterfaceBinding
+{
+    u32 iface_index;
+    u64 generation;
+};
+
+struct NetInterfaceSnapshot
+{
+    NetInterfaceBinding binding;
+    MacAddress mac;
+    Ipv4Address ip;
+};
+
+inline constexpr u32 kInvalidNetInterfaceIndex = ~u32(0);
+inline constexpr NetInterfaceBinding kInvalidNetInterfaceBinding{kInvalidNetInterfaceIndex, 0};
+
+inline constexpr bool NetInterfaceBindingIsValid(NetInterfaceBinding binding)
+{
+    return binding.iface_index != kInvalidNetInterfaceIndex && binding.generation != 0;
+}
+
+inline constexpr bool NetInterfaceBindingEqual(NetInterfaceBinding left, NetInterfaceBinding right)
+{
+    return left.iface_index == right.iface_index && left.generation == right.generation;
+}
+
+enum class NetInterfaceUnbindResult : u8
+{
+    Unbound = 0,   ///< Exact generation is fully drained and reset (also returned for an idempotent retry).
+    StaleBinding,  ///< Receipt is invalid or names a different generation.
+    DrainTimedOut, ///< Admission is closed, but callbacks remain pinned; retain/quarantine driver context.
+};
+
+/// Bind a NIC to the stack. `iface_index` must fit the fixed interface table
+/// and name a vacant slot. `tx` is the driver's send trampoline. `mac` is the
+/// local MAC (used as Ethernet src on every transmitted frame). `ip` is the
+/// IPv4 address the stack will respond to for ARP / ICMP. Returns false if the
+/// slot is unavailable, iface_index is out of range, or tx is null.
 bool NetStackBindInterface(u32 iface_index, MacAddress mac, Ipv4Address ip, NetTxFn tx);
+
+/// Publish a restartable NIC binding. `tx` and `driver_context` remain stable
+/// until `NetStackUnbindInterface` returns Unbound. The slot must be vacant;
+/// replacement-in-place is rejected so teardown can never be bypassed.
+/// [ordinary task context; thread-safe]
+bool NetStackBindInterfaceOwned(u32 iface_index, MacAddress mac, Ipv4Address ip, NetTxContextFn tx,
+                                void* driver_context, NetInterfaceBinding* out_binding);
+
+/// Acquire one lifetime pin on the current publication and atomically
+/// snapshot its exact identity and addresses. The caller must release the
+/// returned receipt exactly once with `NetStackReleaseInterface`. This is for
+/// protocol objects that must publish generation-bearing state while driver
+/// teardown is concurrently possible.
+/// [ordinary task or RX task; thread-safe]
+bool NetStackAcquireInterface(u32 iface_index, NetInterfaceSnapshot* out_snapshot);
+
+/// Release a pin returned by `NetStackAcquireInterface`. The exact receipt
+/// cannot become stale while its pin is held; invalid/mismatched receipts are
+/// programming errors.
+void NetStackReleaseInterface(NetInterfaceBinding binding);
+
+/// Transmit only through the exact interface publication named by `binding`.
+/// Delayed protocol work from an old generation fails closed after unbind or
+/// rebind and can never invoke the replacement driver's callback.
+bool NetStackTransmit(NetInterfaceBinding binding, const void* frame, u64 len);
+
+/// Close admission for an exact binding, wait at most `drain_timeout_ticks`
+/// for already-admitted TX/RX operations, retire every TCP TCB owned by that
+/// exact generation, then clear interface state and retire that generation's
+/// ICMP ping, ARP, DHCP, DNS, and NTP records (including callback drains). On
+/// DrainTimedOut the callback and context are deliberately retained with
+/// admission closed; the owner may retry with the same receipt.
+/// Must not be called from the binding's TX callback or RX dispatch context.
+/// [ordinary task context; thread-safe]
+NetInterfaceUnbindResult NetStackUnbindInterface(NetInterfaceBinding binding, u64 drain_timeout_ticks);
 
 /// Inject a raw ethernet frame received by the NIC. The stack
 /// parses the ethertype and dispatches to ARP or IPv4. Safe to
 /// call from the driver's RX task. No-op when iface_index isn't
 /// bound or no handler matches.
 void NetStackInjectRx(u32 iface_index, const void* frame, u64 len);
+
+/// Generation-checked RX ingress for restartable drivers. A delayed frame
+/// carrying an old receipt is dropped even after the slot has been rebound.
+/// [driver RX task; thread-safe]
+void NetStackInjectRx(NetInterfaceBinding binding, const void* frame, u64 len);
 
 struct IcmpStats
 {
@@ -385,6 +483,7 @@ struct IcmpStats
     u64 echo_requests_tx;
     u64 echo_replies_rx;
 };
+/// Coherent IRQ-safe copy of the ICMP counters.
 IcmpStats IcmpStatsRead();
 
 /// Send one ICMP echo request to `dst_ip` via `iface_index`. Uses
@@ -404,7 +503,9 @@ struct PingResult
 };
 
 /// Record the outgoing ID/seq so the RX path can match a reply.
-/// Intended as a one-shot — caller sends, sleeps, reads.
+/// Intended as a one-shot — caller sends, sleeps, reads. Concurrent callers
+/// are data-race safe, but the newest arm intentionally supersedes the prior
+/// single-outstanding transaction.
 void NetPingArm(u16 id, u16 seq);
 
 /// Poll the pending-reply state set by NetPingArm + an incoming
@@ -430,19 +531,49 @@ struct DnsResult
     Ipv4Address ip;
 };
 
+/// Exact identity of one DNS query publication. The interface generation
+/// prevents a receipt from crossing NIC restart/rebind; the monotonic
+/// transaction prevents a later query on the same binding from satisfying an
+/// earlier caller.
+struct DnsQueryReceipt
+{
+    NetInterfaceBinding binding;
+    u64 transaction;
+};
+
+inline constexpr DnsQueryReceipt kInvalidDnsQueryReceipt{kInvalidNetInterfaceBinding, 0};
+
+inline constexpr bool DnsQueryReceiptIsValid(DnsQueryReceipt receipt)
+{
+    return NetInterfaceBindingIsValid(receipt.binding) && receipt.transaction != 0;
+}
+
 /// Send a DNS A-record query for `name` (NUL-terminated, max
 /// kDnsMaxName chars) via `iface_index`. `resolver_ip` is the
 /// DNS server (typically the DHCP-supplied value or 10.0.2.3 for
 /// QEMU SLIRP). Returns false on oversized name, malformed
 /// labels, interface missing, or unresolved L2 destination
-/// after direct ARP + gateway fallback attempts.
+/// after direct ARP + gateway fallback attempts. Compatibility form for
+/// externally serialized callers; concurrent code uses the receipt overload.
 bool NetDnsQueryA(u32 iface_index, Ipv4Address resolver_ip, const char* name);
+
+/// Receipt-bearing DNS query start. `*out_receipt` is invalidated first and
+/// receives the exact interface generation + transaction only if the UDP
+/// binding is live, TX succeeds, and the transaction was not concurrently
+/// superseded. This is the required form for concurrent/restartable callers.
+bool NetDnsQueryA(u32 iface_index, Ipv4Address resolver_ip, const char* name, DnsQueryReceipt* out_receipt);
 
 /// Snapshot of the latest DNS query state. `resolved` is true
 /// iff the RX path parsed a matching A-record since the last
 /// NetDnsQueryA. Callers should read this after polling for
-/// reply arrival.
+/// reply arrival. Compatibility form; it may observe whichever query is
+/// latest, so concurrent/restartable callers must pass their exact receipt.
 DnsResult NetDnsResultRead();
+
+/// Read only the result belonging to `receipt`. A stale interface generation,
+/// superseded transaction, pending query, or invalid receipt returns an empty
+/// result and can never expose a newer caller's answer.
+DnsResult NetDnsResultRead(DnsQueryReceipt receipt);
 
 // -------------------------------------------------------------------
 // NTP client (RFC 5905 subset — one-shot Transmit Timestamp read).
@@ -462,15 +593,41 @@ struct NtpResult
     u8 stratum;
 };
 
-/// Send one NTP v3 client query to `server_ip:123`. Binds an
-/// ephemeral UDP port for the reply. Returns false on iface
-/// binding miss or unresolved L2 destination after ARP
-/// attempts.
+/// Exact identity of one NTP query publication. See DnsQueryReceipt for the
+/// generation/transaction isolation contract.
+struct NtpQueryReceipt
+{
+    NetInterfaceBinding binding;
+    u64 transaction;
+};
+
+inline constexpr NtpQueryReceipt kInvalidNtpQueryReceipt{kInvalidNetInterfaceBinding, 0};
+
+inline constexpr bool NtpQueryReceiptIsValid(NtpQueryReceipt receipt)
+{
+    return NetInterfaceBindingIsValid(receipt.binding) && receipt.transaction != 0;
+}
+
+/// Send one NTP v3 client query to `server_ip:123`. Binds the stack's
+/// fixed NTP client port and carries a random transmit-timestamp cookie
+/// that the reply must echo. Returns false on interface binding miss or
+/// unresolved L2 destination after ARP attempts. Compatibility form for
+/// externally serialized callers.
 bool NetNtpQuery(u32 iface_index, Ipv4Address server_ip);
 
-/// Snapshot of the latest NTP transaction. `synced` is true iff
-/// the server replied with a non-zero Transmit Timestamp.
+/// Receipt-bearing NTP query start. The receipt is published only after the
+/// exact UDP binding is live, TX succeeds, and no concurrent query replaced
+/// this transaction.
+bool NetNtpQuery(u32 iface_index, Ipv4Address server_ip, NtpQueryReceipt* out_receipt);
+
+/// Snapshot of the latest NTP transaction. `synced` is true iff an exact
+/// interface/transaction reply echoed the cookie and carried a valid
+/// post-Unix-epoch Transmit Timestamp. Concurrent/restartable callers use the
+/// receipt overload so a later query cannot satisfy an earlier waiter.
 NtpResult NetNtpResultRead();
+
+/// Read only the result for `receipt`; stale/superseded receipts fail closed.
+NtpResult NetNtpResultRead(NtpQueryReceipt receipt);
 
 // -------------------------------------------------------------------
 // UDP send + receive dispatch.
@@ -492,7 +649,10 @@ using UdpRxFn = void (*)(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 
 /// Bind a local UDP port to a receive handler. The handler fires
 /// from the driver's RX task context (never from IRQ). Returns
 /// false if the bindings table is full or the port is already
-/// claimed. A zero handler unbinds the port.
+/// claimed by a different handler. Rebinding the same handler is idempotent.
+/// A zero handler synchronously unbinds the port and drains callbacks already
+/// snapshotted by RX; call unbind only from ordinary task context, never from
+/// inside that port's handler.
 bool NetUdpBindRx(u16 local_port, UdpRxFn handler);
 
 /// Build + transmit a UDP datagram. Fills in ethernet, IPv4, UDP
@@ -608,6 +768,7 @@ struct Ipv6Stats
     u64 tx_failures;
 };
 
+/// Coherent IRQ-safe copy of the IPv6 counters.
 Ipv6Stats Ipv6StatsRead();
 
 /// Process an incoming Ethernet+IPv6 frame (ethertype 0x86DD).

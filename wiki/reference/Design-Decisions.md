@@ -12503,6 +12503,36 @@ markers for its richest input. Three discovery layers were added (runtime
   slice retired the 27th (`SocketRecvDgram`); every remaining entry is a
   real SMP lost-wake, not noise.
 
+## 2026-07-31 — Socket operations pin lifetime and snapshot mutable state
+
+- **Decision:** `SocketPin` / `SocketUnpin` protect every potentially
+  blocking socket operation from slot reuse and deferred teardown. Last
+  handle close and process-owner reclamation mark the entry closing, wake
+  waiters, and release the TCB, pipe endpoints, and UDP ring only after
+  operation pins drain.
+- **Decision:** stream send/recv, datagram send, and poll snapshot mutable
+  endpoint state under the socket-pool lock before calling TCP or the pipe
+  pool. Short syscall probes use lock-protected scalar accessors rather
+  than exposing a raw pool pointer.
+- **Why:** a pool lock alone cannot cover sleeps or calls into subsystems
+  with their own interrupt/lock contracts. A raw `Socket*` therefore had
+  both use-after-free and field-race hazards under close/reuse.
+- **Verification boundary:** source checks and diff review are complete;
+  hosted build, boot, and concurrent socket tests remain required before
+  this is considered runtime-proven.
+
+## 2026-07-31 — TCP accept queues discard stale children and reject overflow
+
+- **Decision:** `AcceptNonblocking` drains stale or no-longer-established
+  child IDs instead of returning a handle whose generation no longer maps
+  to a live TCB.
+- **Decision:** when a completed handshake finds the listener's accept
+  queue full, the child is reset and dropped immediately. It must not remain
+  established with `parent_listener` set, because that state has no path to
+  `accept()` and consumes a TCB slot.
+- **Verification boundary:** the fixes pass source/diff checks; boot TCP
+  selftest and concurrent backlog/close tests remain required.
+
 ## 2026-07-27 — TLB-shootdown ack targets gate on a self-set `tlb_ipi_ready`, never on `online`
 
 - **Context:** `SmpTlbShootdownBroadcast` built its kernel-AS ack mask from
@@ -14268,3 +14298,56 @@ _2026-07-30_
   This is visually coarse but functionally correct — every Win32 text
   API returns real values (not stubs), and text drawing uses the
   selected font's glyph data.
+
+---
+
+## 055 — PS/2 keyboard overflow preserves SPSC cursor ownership
+
+- **Scope:** `kernel/drivers/input/ps2kbd.{h,cpp}`
+- **Decision:** When the 64-byte scan-code ring is full, discard the
+  incoming byte. The IRQ producer advances only `g_ring_head`; the
+  single reader advances only `g_ring_tail`.
+- **Why:** The previous drop-oldest path advanced the task-owned tail
+  from IRQ context. `Cli()` masks interrupts only on the current CPU,
+  so that second writer could race a reader running on another CPU.
+  Dropping newest preserves the single-producer/single-consumer
+  invariant without introducing a scheduler release-and-block ABI.
+- **Rules out / defers:** The previous drop-oldest overflow preference.
+  The raw scan-code API remains single-reader; a future multi-reader
+  input layer can define a separate event-stream ownership contract.
+- **Revisit when:** Input latency or key-release preservation under
+  sustained overflow becomes measurable, or `WaitQueueBlockLocked` is
+  available for a fully locked queue design.
+- **Related tracks:** Track 6 (Drivers — input), Track 9 (Windowing).
+
+## 056 — Address-space region bookkeeping uses a non-sleeping structural lock
+
+- **Scope:** `kernel/mm/address_space.{h,cpp}`
+- **Decision:** Protect each AS's compacting `regions[]` table and its
+  page-table mutation helpers with a per-AS `sync::SpinLock`. Readers,
+  writers, fork snapshots, borrowed-page operations, and teardown all
+  serialize through that lock.
+- **Why:** swap-with-last unmapping can move a live row while another
+  CPU scans the table. A sleeping `RwLock` is invalid because the
+  breakpoint resolver reaches the lookup path while holding a spinlock.
+- **Rules out / defers:** lock-free region scans and partial writer-only
+  locking. AS lifetime remains separately governed by
+  `AddressSpaceRetain` / `AddressSpaceRelease`; the lock does not create
+  a lifetime reference.
+- **Verification boundary:** source-level lock coverage and diff checks
+  are complete; a full MSVC/QEMU/SMP run is still required.
+
+## 057 — Linux child-exit queue has explicit SMP ownership
+
+- **Scope:** `kernel/proc/process.{h,cpp}`,
+  `kernel/subsystems/linux/syscall_stub.cpp`
+- **Decision:** Protect the parent’s child-exit ring with a dedicated
+  process spinlock. The reaper publishes a complete record under the
+  lock, and wait4/waitid atomically find-and-drain one record under the
+  same lock before copying results to user memory.
+- **Why:** `arch::Cli()` masks only the current CPU; it cannot serialize
+  a reaper on one CPU against a wait syscall on another CPU.
+- **Residual:** the check-to-block wait-queue handoff still depends on
+  the scheduler’s existing interrupt-disabled protocol and needs the
+  planned `WaitQueueBlockLocked` primitive for a complete lost-wakeup
+  proof.

@@ -27,6 +27,7 @@
 #include "mm/paging.h"
 #include "proc/process.h"
 #include "sched/sched.h"
+#include "sync/spinlock.h"
 #include "time/tick.h"
 #include "util/nospec.h"
 
@@ -61,7 +62,9 @@ struct SysvMq
 {
     bool in_use;
     bool marked_destroy;
-    u8 _pad[2];
+    bool initializing;
+    bool closing;
+    u32 pins;
     i32 key;
     u32 head;
     u32 tail;
@@ -83,8 +86,11 @@ struct PosixMsg
 struct PosixMq
 {
     bool in_use;
-    u8 _pad[3];
+    bool initializing;
+    bool closing;
+    u8 _pad;
     u32 refs;
+    u32 pins;
     char name[kPosixMqNameCap];
     u32 max_msgs; // current ring cap
     u32 max_msg_bytes;
@@ -97,6 +103,94 @@ struct PosixMq
 
 SysvMq g_sysv_pool[kSysvMqPoolCap];
 PosixMq g_posix_pool[kPosixMqPoolCap];
+constinit sync::SpinLock g_sysv_lock = {
+    .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
+constinit sync::SpinLock g_posix_lock = {
+    .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
+
+struct PosixMqPin
+{
+    u32 idx;
+    PosixMq* queue;
+
+    explicit PosixMqPin(u32 value) : idx(value), queue(nullptr)
+    {
+        if (value >= kPosixMqPoolCap)
+            return;
+        sync::SpinLockGuard guard(g_posix_lock);
+        PosixMq& q = g_posix_pool[value];
+        if (q.in_use && !q.initializing && !q.closing)
+        {
+            ++q.pins;
+            queue = &q;
+        }
+    }
+
+    ~PosixMqPin()
+    {
+        if (queue == nullptr)
+            return;
+        auto flags = sync::SpinLockAcquire(g_posix_lock);
+        PosixMq& q = g_posix_pool[idx];
+        if (q.pins > 0)
+            --q.pins;
+        PosixMsg* ring = nullptr;
+        if (q.pins == 0 && q.refs == 0 && !q.in_use && q.closing)
+        {
+            ring = q.ring;
+            q.ring = nullptr;
+            q.closing = false;
+            q.count = 0;
+        }
+        sync::SpinLockRelease(g_posix_lock, flags);
+        if (ring != nullptr)
+            mm::KFree(ring);
+    }
+
+    explicit operator bool() const { return queue != nullptr; }
+};
+
+struct SysvMqPin
+{
+    u32 idx;
+    SysvMq* queue;
+
+    explicit SysvMqPin(u32 value) : idx(value), queue(nullptr)
+    {
+        if (value >= kSysvMqPoolCap)
+            return;
+        sync::SpinLockGuard guard(g_sysv_lock);
+        SysvMq& q = g_sysv_pool[value];
+        if (q.in_use && !q.initializing && !q.closing)
+        {
+            ++q.pins;
+            queue = &q;
+        }
+    }
+
+    ~SysvMqPin()
+    {
+        if (queue == nullptr)
+            return;
+        auto flags = sync::SpinLockAcquire(g_sysv_lock);
+        SysvMq& q = g_sysv_pool[idx];
+        if (q.pins > 0)
+            --q.pins;
+        SysvMsg* ring = nullptr;
+        if (q.pins == 0 && !q.in_use && q.closing)
+        {
+            ring = q.ring;
+            q.ring = nullptr;
+            q.closing = false;
+            q.count = 0;
+        }
+        sync::SpinLockRelease(g_sysv_lock, flags);
+        if (ring != nullptr)
+            mm::KFree(ring);
+    }
+
+    explicit operator bool() const { return queue != nullptr; }
+};
 
 // =========================================================
 // SysV MQ helpers
@@ -106,22 +200,27 @@ i32 SysvMqFindByKey(i32 key)
 {
     if (key == 0)
         return -1;
+    sync::SpinLockGuard guard(g_sysv_lock);
     for (u32 i = 0; i < kSysvMqPoolCap; ++i)
-        if (g_sysv_pool[i].in_use && !g_sysv_pool[i].marked_destroy && g_sysv_pool[i].key == key)
+        if (g_sysv_pool[i].in_use && !g_sysv_pool[i].initializing && !g_sysv_pool[i].marked_destroy &&
+            g_sysv_pool[i].key == key)
             return static_cast<i32>(i);
     return -1;
 }
 
 i32 SysvMqAlloc(i32 key)
 {
-    arch::Cli();
+    auto flags = sync::SpinLockAcquire(g_sysv_lock);
     for (u32 i = 0; i < kSysvMqPoolCap; ++i)
     {
-        if (g_sysv_pool[i].in_use)
+        if (g_sysv_pool[i].in_use || g_sysv_pool[i].closing)
             continue;
         SysvMq& q = g_sysv_pool[i];
         q.in_use = true;
+        q.initializing = true;
         q.marked_destroy = false;
+        q.closing = false;
+        q.pins = 0;
         q.key = key;
         q.head = 0;
         q.tail = 0;
@@ -130,18 +229,23 @@ i32 SysvMqAlloc(i32 key)
         q.read_wq.tail = nullptr;
         q.write_wq.head = nullptr;
         q.write_wq.tail = nullptr;
-        arch::Sti();
+        q.ring = nullptr;
+        sync::SpinLockRelease(g_sysv_lock, flags);
         q.ring = static_cast<SysvMsg*>(mm::KMalloc(sizeof(SysvMsg) * kMqMsgsPerQueue));
         if (q.ring == nullptr)
         {
-            arch::Cli();
+            flags = sync::SpinLockAcquire(g_sysv_lock);
             q.in_use = false;
-            arch::Sti();
+            q.initializing = false;
+            sync::SpinLockRelease(g_sysv_lock, flags);
             return -1;
         }
+        flags = sync::SpinLockAcquire(g_sysv_lock);
+        q.initializing = false;
+        sync::SpinLockRelease(g_sysv_lock, flags);
         return static_cast<i32>(i);
     }
-    arch::Sti();
+    sync::SpinLockRelease(g_sysv_lock, flags);
     return -1;
 }
 
@@ -155,13 +259,14 @@ i32 SysvFindByMtype(SysvMq& q, i64 mtype_filter)
         return -1;
     if (mtype_filter == 0)
         return static_cast<i32>(q.tail);
+    const u64 negative_limit = (mtype_filter < 0) ? (0ull - static_cast<u64>(mtype_filter)) : 0;
     for (u32 i = 0; i < q.count; ++i)
     {
         const u32 idx = (q.tail + i) % kMqMsgsPerQueue;
         const SysvMsg& m = q.ring[idx];
         if (mtype_filter > 0 && m.mtype == mtype_filter)
             return static_cast<i32>(idx);
-        if (mtype_filter < 0 && m.mtype <= -mtype_filter)
+        if (mtype_filter < 0 && static_cast<u64>(m.mtype) <= negative_limit)
             return static_cast<i32>(idx);
     }
     return -1;
@@ -231,44 +336,54 @@ i64 DoMsgsnd(u64 msqid, u64 user_msg, u64 msgsz, u64 msgflg)
         return -14; // -EFAULT
     if (mtype <= 0)
         return -22;
-    SysvMq& q = g_sysv_pool[idx];
-    arch::Cli();
-    while (q.in_use && !q.marked_destroy && q.count == kMqMsgsPerQueue)
+    SysvMqPin pin(idx);
+    if (!pin)
+        return -22;
+    SysvMq& q = *pin.queue;
+    while (true)
     {
+        auto lock_flags = sync::SpinLockAcquire(g_sysv_lock);
+        if (!q.in_use || q.marked_destroy || q.closing)
+        {
+            sync::SpinLockRelease(g_sysv_lock, lock_flags);
+            return -22;
+        }
+        if (q.count != kMqMsgsPerQueue)
+        {
+            sync::SpinLockRelease(g_sysv_lock, lock_flags);
+            break;
+        }
         if (nowait)
         {
-            arch::Sti();
+            sync::SpinLockRelease(g_sysv_lock, lock_flags);
             return -11; // -EAGAIN
         }
-        sched::WaitQueueBlock(&q.write_wq);
+        sched::WaitQueue* wq = &q.write_wq;
+        sync::SpinLockRelease(g_sysv_lock, lock_flags);
         arch::Cli();
-    }
-    if (!q.in_use || q.marked_destroy)
-    {
+        (void)sched::WaitQueueBlockTimeout(wq, 5);
         arch::Sti();
-        return -22;
     }
     // Stage outside Cli/Sti.
     SysvMsg stage;
     stage.mtype = mtype;
     stage.len = static_cast<u32>(msgsz);
-    arch::Sti();
     if (msgsz > 0)
     {
         if (!mm::CopyFromUser(stage.body, reinterpret_cast<const void*>(user_msg + sizeof(i64)), msgsz))
             return -14;
     }
-    arch::Cli();
-    if (!q.in_use || q.marked_destroy)
+    auto lock_flags = sync::SpinLockAcquire(g_sysv_lock);
+    if (!q.in_use || q.marked_destroy || q.closing)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_sysv_lock, lock_flags);
         return -22;
     }
     q.ring[q.head] = stage;
     q.head = (q.head + 1) % kMqMsgsPerQueue;
     ++q.count;
     sched::WaitQueueWakeOne(&q.read_wq);
-    arch::Sti();
+    sync::SpinLockRelease(g_sysv_lock, lock_flags);
     return 0;
 }
 
@@ -282,29 +397,39 @@ i64 DoMsgrcv(u64 msqid, u64 user_msg, u64 msgsz, u64 mtype_filter, u64 msgflg)
     const bool nowait = (msgflg & kIpcNowait) != 0;
     const i64 filter = static_cast<i64>(mtype_filter);
 
-    SysvMq& q = g_sysv_pool[idx];
+    SysvMqPin pin(idx);
+    if (!pin)
+        return -22;
+    SysvMq& q = *pin.queue;
     SysvMsg out;
-    arch::Cli();
-    i32 hit = -1;
-    while (q.in_use && !q.marked_destroy && (hit = SysvFindByMtype(q, filter)) < 0)
+    while (true)
     {
+        auto lock_flags = sync::SpinLockAcquire(g_sysv_lock);
+        if (!q.in_use || q.marked_destroy || q.closing)
+        {
+            sync::SpinLockRelease(g_sysv_lock, lock_flags);
+            return -22;
+        }
+        const i32 hit = SysvFindByMtype(q, filter);
+        if (hit >= 0)
+        {
+            out = q.ring[hit];
+            SysvDrainAt(q, static_cast<u32>(hit));
+            sched::WaitQueueWakeOne(&q.write_wq);
+            sync::SpinLockRelease(g_sysv_lock, lock_flags);
+            break;
+        }
         if (nowait)
         {
-            arch::Sti();
+            sync::SpinLockRelease(g_sysv_lock, lock_flags);
             return -42; // -ENOMSG
         }
-        sched::WaitQueueBlock(&q.read_wq);
+        sched::WaitQueue* wq = &q.read_wq;
+        sync::SpinLockRelease(g_sysv_lock, lock_flags);
         arch::Cli();
-    }
-    if (!q.in_use || q.marked_destroy)
-    {
+        (void)sched::WaitQueueBlockTimeout(wq, 5);
         arch::Sti();
-        return -22;
     }
-    out = q.ring[hit];
-    SysvDrainAt(q, static_cast<u32>(hit));
-    sched::WaitQueueWakeOne(&q.write_wq);
-    arch::Sti();
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_msg), &out.mtype, sizeof(out.mtype)))
         return -14;
     const u64 to_copy = (out.len < msgsz) ? out.len : msgsz;
@@ -322,11 +447,11 @@ i64 DoMsgctl(u64 msqid, u64 cmd, u64 user_buf)
     if (msqid == 0 || msqid > kSysvMqPoolCap)
         return -22;
     const u32 idx = static_cast<u32>(msqid - 1);
-    arch::Cli();
+    auto lock_flags = sync::SpinLockAcquire(g_sysv_lock);
     SysvMq& q = g_sysv_pool[idx];
     if (!q.in_use)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_sysv_lock, lock_flags);
         return -22;
     }
     if (cmd == kIpcRmid)
@@ -335,20 +460,29 @@ i64 DoMsgctl(u64 msqid, u64 cmd, u64 user_buf)
         SysvMsg* ring = q.ring;
         sched::WaitQueueWakeAll(&q.read_wq);
         sched::WaitQueueWakeAll(&q.write_wq);
+        q.closing = true;
         q.in_use = false;
-        q.ring = nullptr;
         q.count = 0;
-        arch::Sti();
+        if (q.pins == 0)
+        {
+            q.ring = nullptr;
+            q.closing = false;
+        }
+        else
+        {
+            ring = nullptr;
+        }
+        sync::SpinLockRelease(g_sysv_lock, lock_flags);
         if (ring != nullptr)
             mm::KFree(ring);
         return 0;
     }
     if (cmd == kIpcStat)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_sysv_lock, lock_flags);
         return 0; // msqid_ds copy-out deferred (sub-GAP)
     }
-    arch::Sti();
+    sync::SpinLockRelease(g_sysv_lock, lock_flags);
     return -22;
 }
 
@@ -394,12 +528,17 @@ bool LoadDeadline(u64 user_timeout, u64& out_deadline_ticks, bool& out_no_deadli
     if (ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1'000'000'000)
         return false;
 
-    const u64 abs_ns = static_cast<u64>(ts.tv_sec) * 1'000'000'000ull + static_cast<u64>(ts.tv_nsec);
+    constexpr u64 kMax = static_cast<u64>(-1);
+    const u64 sec = static_cast<u64>(ts.tv_sec);
+    const u64 nsec = static_cast<u64>(ts.tv_nsec);
+    if (sec > (kMax - nsec) / 1'000'000'000ull)
+        return false;
+    const u64 abs_ns = sec * 1'000'000'000ull + nsec;
     const u64 period_ns = ::duetos::time::TickPeriodNs();
     if (period_ns == 0)
         return false;
     // Round up so a sub-tick deadline doesn't immediately fire.
-    out_deadline_ticks = (abs_ns + (period_ns - 1)) / period_ns;
+    out_deadline_ticks = abs_ns > kMax - (period_ns - 1) ? kMax / period_ns : (abs_ns + (period_ns - 1)) / period_ns;
     return true;
 }
 
@@ -449,7 +588,7 @@ bool PosixMqNameEqual(const char* a, const char* b)
 i32 PosixMqFindByName(const char* name)
 {
     for (u32 i = 0; i < kPosixMqPoolCap; ++i)
-        if (g_posix_pool[i].in_use && PosixMqNameEqual(g_posix_pool[i].name, name))
+        if (g_posix_pool[i].in_use && !g_posix_pool[i].initializing && PosixMqNameEqual(g_posix_pool[i].name, name))
             return static_cast<i32>(i);
     return -1;
 }
@@ -460,14 +599,17 @@ i32 PosixMqAlloc(const char* name, u32 max_msgs, u32 max_bytes)
         max_msgs = kMqMsgsPerQueue;
     if (max_bytes == 0 || max_bytes > kMqMaxMsgBytes)
         max_bytes = kMqMaxMsgBytes;
-    arch::Cli();
+    auto flags = sync::SpinLockAcquire(g_posix_lock);
     for (u32 i = 0; i < kPosixMqPoolCap; ++i)
     {
-        if (g_posix_pool[i].in_use)
+        if (g_posix_pool[i].in_use || g_posix_pool[i].closing)
             continue;
         PosixMq& q = g_posix_pool[i];
         q.in_use = true;
+        q.initializing = true;
+        q.closing = false;
         q.refs = 1;
+        q.pins = 0;
         q.max_msgs = max_msgs;
         q.max_msg_bytes = max_bytes;
         q.count = 0;
@@ -479,18 +621,23 @@ i32 PosixMqAlloc(const char* name, u32 max_msgs, u32 max_bytes)
         q.read_wq.tail = nullptr;
         q.write_wq.head = nullptr;
         q.write_wq.tail = nullptr;
-        arch::Sti();
+        q.ring = nullptr;
+        sync::SpinLockRelease(g_posix_lock, flags);
         q.ring = static_cast<PosixMsg*>(mm::KMalloc(sizeof(PosixMsg) * max_msgs));
         if (q.ring == nullptr)
         {
-            arch::Cli();
+            flags = sync::SpinLockAcquire(g_posix_lock);
             q.in_use = false;
-            arch::Sti();
+            q.initializing = false;
+            sync::SpinLockRelease(g_posix_lock, flags);
             return -1;
         }
+        flags = sync::SpinLockAcquire(g_posix_lock);
+        q.initializing = false;
+        sync::SpinLockRelease(g_posix_lock, flags);
         return static_cast<i32>(i);
     }
-    arch::Sti();
+    sync::SpinLockRelease(g_posix_lock, flags);
     return -1;
 }
 
@@ -500,26 +647,42 @@ void PosixMqRetain(u32 idx)
 {
     if (idx >= kPosixMqPoolCap)
         return;
-    arch::Cli();
-    if (g_posix_pool[idx].in_use)
+    sync::SpinLockGuard guard(g_posix_lock);
+    if (g_posix_pool[idx].in_use && !g_posix_pool[idx].closing)
         ++g_posix_pool[idx].refs;
-    arch::Sti();
 }
 
 void PosixMqRelease(u32 idx)
 {
     if (idx >= kPosixMqPoolCap)
         return;
-    arch::Cli();
+    auto flags = sync::SpinLockAcquire(g_posix_lock);
     PosixMq& q = g_posix_pool[idx];
     if (!q.in_use || q.refs == 0)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_posix_lock, flags);
         return;
     }
     --q.refs;
+    PosixMsg* ring = nullptr;
     // mq_unlink + last-handle-close together free the ring.
-    arch::Sti();
+    if (q.refs == 0 && q.name[0] == '\0')
+    {
+        q.closing = true;
+        q.in_use = false;
+        sched::WaitQueueWakeAll(&q.read_wq);
+        sched::WaitQueueWakeAll(&q.write_wq);
+        if (q.pins == 0)
+        {
+            ring = q.ring;
+            q.ring = nullptr;
+            q.closing = false;
+            q.count = 0;
+        }
+    }
+    sync::SpinLockRelease(g_posix_lock, flags);
+    if (ring != nullptr)
+        mm::KFree(ring);
 }
 
 i64 DoMqOpen(u64 user_name, u64 oflag, u64 mode, u64 user_attr)
@@ -605,11 +768,11 @@ i64 DoMqUnlink(u64 user_name)
         return kEFAULT;
     if (copy.status == mm::UserStringCopyStatus::NoTerminator)
         return kENAMETOOLONG;
-    arch::Cli();
+    auto lock_flags = sync::SpinLockAcquire(g_posix_lock);
     const i32 idx = PosixMqFindByName(name);
     if (idx < 0)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_posix_lock, lock_flags);
         return -2;
     }
     PosixMq& q = g_posix_pool[idx];
@@ -620,17 +783,23 @@ i64 DoMqUnlink(u64 user_name)
     {
         // No live fd holders — free immediately.
         PosixMsg* ring = q.ring;
+        q.closing = true;
         q.in_use = false;
+        if (q.pins != 0)
+        {
+            sync::SpinLockRelease(g_posix_lock, lock_flags);
+            return 0;
+        }
         q.ring = nullptr;
         q.count = 0;
         sched::WaitQueueWakeAll(&q.read_wq);
         sched::WaitQueueWakeAll(&q.write_wq);
-        arch::Sti();
+        sync::SpinLockRelease(g_posix_lock, lock_flags);
         if (ring != nullptr)
             mm::KFree(ring);
         return 0;
     }
-    arch::Sti();
+    sync::SpinLockRelease(g_posix_lock, lock_flags);
     return 0;
 }
 
@@ -648,7 +817,10 @@ i64 DoMqTimedsend(u64 mqdes, u64 user_msg, u64 msg_len, u64 prio, u64 user_timeo
     const u32 idx = p->linux_fds[mqdes].first_cluster;
     if (idx >= kPosixMqPoolCap)
         return -22;
-    PosixMq& q = g_posix_pool[idx];
+    PosixMqPin pin(idx);
+    if (!pin)
+        return -9;
+    PosixMq& q = *pin.queue;
     if (msg_len > q.max_msg_bytes)
         return -90; // -EMSGSIZE
     u64 deadline_ticks = 0;
@@ -663,23 +835,29 @@ i64 DoMqTimedsend(u64 mqdes, u64 user_msg, u64 msg_len, u64 prio, u64 user_timeo
         if (!mm::CopyFromUser(stage.body, reinterpret_cast<const void*>(user_msg), msg_len))
             return -14;
     }
-    arch::Cli();
-    while (q.in_use && q.count == q.max_msgs)
+    while (true)
     {
-        const i64 wait_rv = WaitWithDeadline(&q.write_wq, deadline_ticks, no_deadline);
+        auto lock_flags = sync::SpinLockAcquire(g_posix_lock);
+        if (!q.in_use || q.closing)
+        {
+            sync::SpinLockRelease(g_posix_lock, lock_flags);
+            return -9;
+        }
+        if (q.count != q.max_msgs)
+        {
+            q.ring[q.count] = stage;
+            ++q.count;
+            sched::WaitQueueWakeOne(&q.read_wq);
+            sync::SpinLockRelease(g_posix_lock, lock_flags);
+            return 0;
+        }
+        sched::WaitQueue* wq = &q.write_wq;
+        sync::SpinLockRelease(g_posix_lock, lock_flags);
+        arch::Cli();
+        const i64 wait_rv = WaitWithDeadline(wq, deadline_ticks, no_deadline);
         if (wait_rv != 0)
-            return wait_rv; // -ETIMEDOUT (IRQs already re-enabled)
+            return wait_rv;
     }
-    if (!q.in_use)
-    {
-        arch::Sti();
-        return -9;
-    }
-    q.ring[q.count] = stage;
-    ++q.count;
-    sched::WaitQueueWakeOne(&q.read_wq);
-    arch::Sti();
-    return 0;
 }
 
 i64 DoMqTimedreceive(u64 mqdes, u64 user_msg, u64 msg_cap, u64 user_prio, u64 user_timeout)
@@ -694,36 +872,46 @@ i64 DoMqTimedreceive(u64 mqdes, u64 user_msg, u64 msg_cap, u64 user_prio, u64 us
     const u32 idx = p->linux_fds[mqdes].first_cluster;
     if (idx >= kPosixMqPoolCap)
         return -22;
-    PosixMq& q = g_posix_pool[idx];
+    PosixMqPin pin(idx);
+    if (!pin)
+        return -9;
+    PosixMq& q = *pin.queue;
     u64 deadline_ticks = 0;
     bool no_deadline = true;
     if (!LoadDeadline(user_timeout, deadline_ticks, no_deadline))
         return -22;
     PosixMsg out;
-    arch::Cli();
-    while (q.in_use && q.count == 0)
+    while (true)
     {
-        const i64 wait_rv = WaitWithDeadline(&q.read_wq, deadline_ticks, no_deadline);
+        auto lock_flags = sync::SpinLockAcquire(g_posix_lock);
+        if (!q.in_use || q.closing)
+        {
+            sync::SpinLockRelease(g_posix_lock, lock_flags);
+            return -9;
+        }
+        if (q.count != 0)
+        {
+            // Find highest-priority message.
+            u32 best = 0;
+            for (u32 i = 1; i < q.count; ++i)
+                if (q.ring[i].prio > q.ring[best].prio)
+                    best = i;
+            out = q.ring[best];
+            // Remove by shifting tail down.
+            for (u32 i = best; i + 1 < q.count; ++i)
+                q.ring[i] = q.ring[i + 1];
+            --q.count;
+            sched::WaitQueueWakeOne(&q.write_wq);
+            sync::SpinLockRelease(g_posix_lock, lock_flags);
+            break;
+        }
+        sched::WaitQueue* wq = &q.read_wq;
+        sync::SpinLockRelease(g_posix_lock, lock_flags);
+        arch::Cli();
+        const i64 wait_rv = WaitWithDeadline(wq, deadline_ticks, no_deadline);
         if (wait_rv != 0)
             return wait_rv;
     }
-    if (!q.in_use)
-    {
-        arch::Sti();
-        return -9;
-    }
-    // Find highest-priority message.
-    u32 best = 0;
-    for (u32 i = 1; i < q.count; ++i)
-        if (q.ring[i].prio > q.ring[best].prio)
-            best = i;
-    out = q.ring[best];
-    // Remove by shifting tail down.
-    for (u32 i = best; i + 1 < q.count; ++i)
-        q.ring[i] = q.ring[i + 1];
-    --q.count;
-    sched::WaitQueueWakeOne(&q.write_wq);
-    arch::Sti();
     if (msg_cap < out.len)
         return -90; // -EMSGSIZE
     if (out.len > 0)
@@ -776,9 +964,16 @@ i64 DoMqGetsetattr(u64 mqdes, u64 user_new, u64 user_old)
     const u32 idx = p->linux_fds[mqdes].first_cluster;
     if (idx >= kPosixMqPoolCap)
         return -22;
-    PosixMq& q = g_posix_pool[idx];
-    if (!q.in_use)
+    PosixMqPin pin(idx);
+    if (!pin)
         return -9;
+    auto lock_flags = sync::SpinLockAcquire(g_posix_lock);
+    PosixMq& q = *pin.queue;
+    if (!q.in_use || q.closing)
+    {
+        sync::SpinLockRelease(g_posix_lock, lock_flags);
+        return -9;
+    }
     if (user_old != 0)
     {
         // struct mq_attr: { mq_flags; mq_maxmsg; mq_msgsize; mq_curmsgs; }
@@ -787,8 +982,13 @@ i64 DoMqGetsetattr(u64 mqdes, u64 user_new, u64 user_old)
         attr[1] = q.max_msgs;
         attr[2] = q.max_msg_bytes;
         attr[3] = q.count;
+        sync::SpinLockRelease(g_posix_lock, lock_flags);
         if (!mm::CopyToUser(reinterpret_cast<void*>(user_old), attr, sizeof(attr)))
             return -14;
+    }
+    else
+    {
+        sync::SpinLockRelease(g_posix_lock, lock_flags);
     }
     (void)user_new; // mq_flags writes (O_NONBLOCK toggle) — sub-GAP
     return 0;

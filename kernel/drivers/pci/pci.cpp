@@ -63,6 +63,8 @@ namespace
 constexpr u16 kConfigAddressPort = 0xCF8;
 constexpr u16 kConfigDataPort = 0xCFC;
 constexpr u32 kConfigEnable = 1U << 31;
+constexpr u16 kCommandIoDecode = 1U << 0;
+constexpr u16 kCommandMemoryDecode = 1U << 1;
 
 // Tagged with `kLockClassPciConfig` for lockdep.
 constinit sync::SpinLock g_pci_config_lock{
@@ -113,23 +115,66 @@ inline bool EcamCovers(DeviceAddress addr)
     return g_ecam_mmio_virt != nullptr && addr.bus >= g_ecam_start_bus && addr.bus <= g_ecam_end_bus;
 }
 
-} // namespace
-
-u32 PciConfigRead32(DeviceAddress addr, u8 offset)
+// Callers must hold g_pci_config_lock. Keeping both ECAM and legacy
+// accesses behind the same lock makes a sequence of config dwords one
+// transaction rather than a collection of individually atomic accesses.
+u32 PciConfigRead32LockHeld(DeviceAddress addr, u8 offset)
 {
     if (EcamCovers(addr))
     {
-        // ECAM is MMIO — the spec guarantees naturally-aligned 32-bit
-        // accesses are atomic per-function, so no lock needed.
         const u64 off = EcamOffset(addr, u16(offset) & 0xFFCu);
         return *reinterpret_cast<const volatile u32*>(g_ecam_mmio_virt + off);
     }
+
     const u32 address = MakeAddress(addr, offset);
-    sync::SpinLockGuard guard(g_pci_config_lock);
     asm volatile("outl %0, %w1" : : "a"(address), "Nd"(kConfigAddressPort));
     u32 value;
     asm volatile("inl %w1, %0" : "=a"(value) : "Nd"(kConfigDataPort));
     return value;
+}
+
+// Callers must hold g_pci_config_lock and must have passed the ME/PSP
+// write fence before entering the transaction.
+void PciConfigWrite32LockHeld(DeviceAddress addr, u8 offset, u32 value)
+{
+    if (EcamCovers(addr))
+    {
+        const u64 off = EcamOffset(addr, u16(offset) & 0xFFCu);
+        *reinterpret_cast<volatile u32*>(g_ecam_mmio_virt + off) = value;
+        return;
+    }
+
+    const u32 address = MakeAddress(addr, offset);
+    asm volatile("outl %0, %w1" : : "a"(address), "Nd"(kConfigAddressPort));
+    asm volatile("outl %0, %w1" : : "a"(value), "Nd"(kConfigDataPort));
+}
+
+bool RefuseForbiddenConfigWrite(DeviceAddress addr, u8 offset)
+{
+    if (!::duetos::security::MePspGuardIsForbiddenBdf(addr.bus, addr.device, addr.function))
+    {
+        return false;
+    }
+
+    arch::SerialWrite("[me-psp] WARN PCI config write refused bdf=");
+    arch::SerialWriteHex(addr.bus);
+    arch::SerialWrite(":");
+    arch::SerialWriteHex(addr.device);
+    arch::SerialWrite(".");
+    arch::SerialWriteHex(addr.function);
+    arch::SerialWrite(" offset=");
+    arch::SerialWriteHex(offset);
+    arch::SerialWrite("\n");
+    KLOG_WARN("security/me-psp", "PCI config write refused — caller tried to reconfigure fenced coprocessor");
+    return true;
+}
+
+} // namespace
+
+u32 PciConfigRead32(DeviceAddress addr, u8 offset)
+{
+    sync::SpinLockGuard guard(g_pci_config_lock);
+    return PciConfigRead32LockHeld(addr, offset);
 }
 
 u16 PciConfigRead16(DeviceAddress addr, u8 offset)
@@ -157,108 +202,124 @@ void PciConfigWrite32(DeviceAddress addr, u8 offset, u32 value)
     // closes the legacy 0xCF8/0xCFC reconfiguration path against a
     // compromised driver that knows the BDF but has no other
     // legitimate reason to touch the device.
-    if (::duetos::security::MePspGuardIsForbiddenBdf(addr.bus, addr.device, addr.function))
+    if (RefuseForbiddenConfigWrite(addr, offset))
     {
-        arch::SerialWrite("[me-psp] WARN PciConfigWrite32 refused bdf=");
-        arch::SerialWriteHex(addr.bus);
-        arch::SerialWrite(":");
-        arch::SerialWriteHex(addr.device);
-        arch::SerialWrite(".");
-        arch::SerialWriteHex(addr.function);
-        arch::SerialWrite(" offset=");
-        arch::SerialWriteHex(offset);
-        arch::SerialWrite("\n");
-        KLOG_WARN("security/me-psp", "PciConfigWrite32 refused — caller tried to reconfigure fenced coprocessor");
         return;
     }
-    if (EcamCovers(addr))
-    {
-        const u64 off = EcamOffset(addr, u16(offset) & 0xFFCu);
-        *reinterpret_cast<volatile u32*>(g_ecam_mmio_virt + off) = value;
-        return;
-    }
-    u32 address = MakeAddress(addr, offset);
     sync::SpinLockGuard guard(g_pci_config_lock);
-    asm volatile("outl %0, %w1" : : "a"(address), "Nd"(kConfigAddressPort));
-    asm volatile("outl %0, %w1" : : "a"(value), "Nd"(kConfigDataPort));
+    PciConfigWrite32LockHeld(addr, offset, value);
 }
 
 Bar PciReadBar(DeviceAddress addr, u8 index)
 {
-    // Only header-type-0 endpoints have 6 BARs at 0x10..0x24; header-
-    // type-1 bridges have 2 BARs + secondary-bus fields. Callers are
-    // expected to check header_type before calling. v0 doesn't police
-    // it — returning size=0 for bridge "BARs" beyond index 1 is
-    // reasonable since they read back as bridge-specific registers.
     if (index >= 6)
     {
         return Bar{};
     }
 
     const u8 offset = static_cast<u8>(0x10 + index * 4);
-    const u32 original = PciConfigRead32(addr, offset);
-
-    // Empty BAR slot reads back all zeros.
-    if (original == 0)
+    if (RefuseForbiddenConfigWrite(addr, offset))
     {
         return Bar{};
     }
 
-    // Size-probe: write all 1s, read back. Low bits are fixed by the
-    // device to indicate type (bit 0 = I/O, bits 1..2 = memory type).
-    // Restore the original value before returning so we don't leave
-    // the device pointing at 0xFFFFFFFF.
-    PciConfigWrite32(addr, offset, 0xFFFFFFFFu);
-    const u32 probe = PciConfigRead32(addr, offset);
-    PciConfigWrite32(addr, offset, original);
+    // The lock spans header validation, Command decode suppression, every
+    // all-ones write/read, and exact restoration. Public config accessors
+    // use this same lock for ECAM as well as CF8/CFC, so no peer can observe
+    // a transient BAR or splice an access into a 64-bit pair probe.
+    sync::SpinLockGuard guard(g_pci_config_lock);
 
-    Bar bar{};
-    bar.is_io = (original & 0x1) != 0;
-
-    if (bar.is_io)
+    const u8 header_type = static_cast<u8>((PciConfigRead32LockHeld(addr, 0x0C) >> 16) & 0x7Fu);
+    if (header_type != 0)
     {
-        // I/O BAR: address in bits 2..31, size from inverted probe-mask.
-        bar.address = original & 0xFFFFFFFCu;
-        const u32 mask = probe & 0xFFFFFFFCu;
-        bar.size = mask == 0 ? 0 : (~static_cast<u64>(mask) + 1) & 0xFFFFFFFFu;
-        return bar;
+        return Bar{};
     }
 
-    // MMIO BAR. Bits 1..2 are the type field:
-    //   00 = 32-bit MMIO
-    //   10 = 64-bit MMIO (consumes this + next BAR)
-    //   others reserved
-    const u32 type = (original >> 1) & 0x3;
-    bar.is_prefetchable = (original & 0x8) != 0;
-    bar.is_64bit = (type == 0x2);
-
-    u64 low_mask = static_cast<u64>(probe & 0xFFFFFFF0u);
-    bar.address = static_cast<u64>(original & 0xFFFFFFF0u);
-
-    if (bar.is_64bit)
+    // Reject the high slot of an earlier 64-bit BAR. Treating that dword as
+    // an independent BAR would write all ones into half of a live address.
+    for (u8 slot = 0; slot < index;)
     {
-        // Read + probe the upper 32 bits from BAR[index+1].
-        if (index + 1 >= 6)
+        const u8 slot_offset = static_cast<u8>(0x10 + slot * 4);
+        const u32 slot_value = PciConfigRead32LockHeld(addr, slot_offset);
+        const bool slot_is_64bit = (slot_value & 0x1u) == 0 && ((slot_value >> 1) & 0x3u) == 0x2u;
+        if (slot_is_64bit)
         {
-            // Malformed: a 64-bit BAR MUST have a successor slot.
-            return Bar{};
+            if (slot + 1 == index)
+            {
+                return Bar{};
+            }
+            slot = static_cast<u8>(slot + 2);
         }
-        const u8 hi_offset = static_cast<u8>(offset + 4);
-        const u32 hi_orig = PciConfigRead32(addr, hi_offset);
-        PciConfigWrite32(addr, hi_offset, 0xFFFFFFFFu);
-        const u32 hi_probe = PciConfigRead32(addr, hi_offset);
-        PciConfigWrite32(addr, hi_offset, hi_orig);
-
-        bar.address |= static_cast<u64>(hi_orig) << 32;
-        const u64 full_mask = low_mask | (static_cast<u64>(hi_probe) << 32);
-        bar.size = full_mask == 0 ? 0 : (~full_mask + 1);
+        else
+        {
+            ++slot;
+        }
     }
-    else
+
+    const u32 original_low = PciConfigRead32LockHeld(addr, offset);
+    if (original_low == 0 || original_low == 0xFFFFFFFFu)
     {
-        bar.size = low_mask == 0 ? 0 : (~low_mask + 1) & 0xFFFFFFFFu;
+        return Bar{};
     }
 
-    return bar;
+    const bool is_io = (original_low & 0x1u) != 0;
+    const u32 memory_type = (original_low >> 1) & 0x3u;
+    const bool is_below_1m = !is_io && memory_type == 0x1u;
+    const bool is_64bit = !is_io && memory_type == 0x2u;
+    if ((!is_io && memory_type == 0x3u) || (is_64bit && index + 1 >= 6) ||
+        (is_below_1m && (original_low & 0xFFF00000u) != 0))
+    {
+        return Bar{};
+    }
+
+    const u8 high_offset = static_cast<u8>(offset + 4);
+    const u32 original_high = is_64bit ? PciConfigRead32LockHeld(addr, high_offset) : 0;
+
+    // Command and Status share dword 0x04. Capture only Command's low 16
+    // bits and always write a zero high half: echoing captured Status bits
+    // would clear write-one-to-clear events. Clear only I/O + memory decode;
+    // BME and every unrelated Command bit remain exactly as observed.
+    const u16 original_command = static_cast<u16>(PciConfigRead32LockHeld(addr, 0x04) & 0xFFFFu);
+    const u16 decode_disabled_command = static_cast<u16>(original_command & ~(kCommandIoDecode | kCommandMemoryDecode));
+    PciConfigWrite32LockHeld(addr, 0x04, static_cast<u32>(decode_disabled_command));
+    const u16 disabled_readback = static_cast<u16>(PciConfigRead32LockHeld(addr, 0x04) & 0xFFFFu);
+    if (disabled_readback != decode_disabled_command)
+    {
+        PciConfigWrite32LockHeld(addr, 0x04, static_cast<u32>(original_command));
+        (void)PciConfigRead32LockHeld(addr, 0x04);
+        return Bar{};
+    }
+
+    // For a 64-bit BAR, both all-ones writes happen before either probe
+    // read. The pair is therefore sized as one indivisible config-space
+    // transaction rather than two independently visible 32-bit probes.
+    PciConfigWrite32LockHeld(addr, offset, 0xFFFFFFFFu);
+    if (is_64bit)
+    {
+        PciConfigWrite32LockHeld(addr, high_offset, 0xFFFFFFFFu);
+    }
+    const u32 probe_low = PciConfigRead32LockHeld(addr, offset);
+    const u32 probe_high = is_64bit ? PciConfigRead32LockHeld(addr, high_offset) : 0;
+
+    // Restore every BAR dword before Command decode is restored. High-first
+    // keeps the low dword (which identifies the pair) transient for the
+    // shortest possible interval; decode remains disabled throughout.
+    if (is_64bit)
+    {
+        PciConfigWrite32LockHeld(addr, high_offset, original_high);
+    }
+    PciConfigWrite32LockHeld(addr, offset, original_low);
+    const bool low_restored = PciConfigRead32LockHeld(addr, offset) == original_low;
+    const bool high_restored = !is_64bit || PciConfigRead32LockHeld(addr, high_offset) == original_high;
+
+    PciConfigWrite32LockHeld(addr, 0x04, static_cast<u32>(original_command));
+    const bool command_restored = static_cast<u16>(PciConfigRead32LockHeld(addr, 0x04) & 0xFFFFu) == original_command;
+    if (!low_restored || !high_restored || !command_restored)
+    {
+        return Bar{};
+    }
+
+    return detail::DecodeBarProbe(index, original_low, original_high, probe_low, probe_high);
 }
 
 bool PciMsixFind(DeviceAddress addr, MsixInfo* info)
@@ -707,7 +768,8 @@ const char* PciSubclassDetail(u8 class_code, u8 subclass, u8 prog_if)
 namespace
 {
 
-void CacheDevice(DeviceAddress addr, u32 vendor_device, u32 class_reg, u32 header_reg)
+void CacheDevice(DeviceAddress addr, u32 vendor_device, u32 class_reg, u32 header_reg, u32 subsystem_reg,
+                 bool subsystem_register_read)
 {
     if (g_device_count >= kMaxDevices)
     {
@@ -715,14 +777,8 @@ void CacheDevice(DeviceAddress addr, u32 vendor_device, u32 class_reg, u32 heade
         return;
     }
     Device& d = g_devices[g_device_count++];
-    d.addr = addr;
-    d.vendor_id = static_cast<u16>(vendor_device & 0xFFFF);
-    d.device_id = static_cast<u16>((vendor_device >> 16) & 0xFFFF);
-    d.revision = static_cast<u8>(class_reg & 0xFF);
-    d.prog_if = static_cast<u8>((class_reg >> 8) & 0xFF);
-    d.subclass = static_cast<u8>((class_reg >> 16) & 0xFF);
-    d.class_code = static_cast<u8>((class_reg >> 24) & 0xFF);
-    d.header_type = static_cast<u8>((header_reg >> 16) & 0xFF);
+    d = detail::DecodeDeviceIdentity(addr, vendor_device, class_reg, header_reg, subsystem_reg,
+                                     subsystem_register_read);
     // Structured per-device log line — gives an analyst a single
     // grep-able record per discovered device. The verbose dump in
     // PciEnumerate stays for the human-readable boot log.
@@ -732,7 +788,7 @@ void CacheDevice(DeviceAddress addr, u32 vendor_device, u32 class_reg, u32 heade
                   (static_cast<u64>(d.vendor_id) << 16) | static_cast<u64>(d.device_id));
     KLOG_DEBUG_AV(::duetos::core::LogArea::PCI, "drivers/pci", "  class:sub:progif packed",
                   (static_cast<u64>(d.class_code) << 16) | (static_cast<u64>(d.subclass) << 8) |
-                      static_cast<u64>(d.prog_if));
+                      static_cast<u64>(d.programming_interface));
 }
 
 // Probe a single (bus, device, function). Returns true if a device was
@@ -747,7 +803,15 @@ bool Probe(u8 bus, u8 dev, u8 fn)
     }
     const u32 cls = PciConfigRead32(addr, 0x08);
     const u32 hdr = PciConfigRead32(addr, 0x0C);
-    CacheDevice(addr, vd, cls, hdr);
+    const u8 header_type = static_cast<u8>((hdr >> 16) & 0xFFu);
+    u32 subsystem = 0;
+    bool subsystem_register_read = false;
+    if ((header_type & 0x7Fu) == 0x00)
+    {
+        subsystem = PciConfigRead32(addr, 0x2C);
+        subsystem_register_read = true;
+    }
+    CacheDevice(addr, vd, cls, hdr, subsystem, subsystem_register_read);
     return true;
 }
 
@@ -938,10 +1002,10 @@ void PciEnumerate()
         arch::SerialWrite("/");
         arch::SerialWriteHex(d.subclass);
         arch::SerialWrite("/");
-        arch::SerialWriteHex(d.prog_if);
+        arch::SerialWriteHex(d.programming_interface);
         arch::SerialWrite(" (");
         arch::SerialWrite(PciClassName(d.class_code));
-        const char* detail = PciSubclassDetail(d.class_code, d.subclass, d.prog_if);
+        const char* detail = PciSubclassDetail(d.class_code, d.subclass, d.programming_interface);
         if (detail[0] != 0)
         {
             arch::SerialWrite(" / ");

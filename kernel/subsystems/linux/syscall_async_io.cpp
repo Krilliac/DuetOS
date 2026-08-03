@@ -48,6 +48,7 @@
 #include "mm/paging.h"
 #include "proc/process.h"
 #include "sched/sched.h"
+#include "sync/spinlock.h"
 #include "util/nospec.h"
 
 namespace duetos::subsystems::linux::internal
@@ -75,8 +76,10 @@ constexpr u32 kEPOLLHUP = 0x010;
 struct Timerfd
 {
     bool in_use;
-    u8 _pad[3];
+    bool closing;
+    u8 _pad[2];
     u32 refs;
+    u32 pins;
     u64 next_expiry_tick; // SchedNowTicks() target; 0 = disarmed
     u64 interval_ticks;   // 0 = one-shot
     u64 expirations;      // accumulated since last read
@@ -88,8 +91,10 @@ struct Timerfd
 struct Signalfd
 {
     bool in_use;
-    u8 _pad[3];
+    bool closing;
+    u8 _pad[2];
     u32 refs;
+    u32 pins;
     u64 mask;
     sched::WaitQueue read_wq;
 };
@@ -107,8 +112,10 @@ struct EpollWatch
 struct Epoll
 {
     bool in_use;
-    u8 _pad[3];
+    bool closing;
+    u8 _pad[2];
     u32 refs;
+    u32 pins;
     u32 watch_count;
     u32 _pad2;
     EpollWatch watches[kEpollWatchCap];
@@ -117,75 +124,190 @@ struct Epoll
 Timerfd g_timerfd_pool[kTimerfdPoolCap];
 Signalfd g_signalfd_pool[kSignalfdPoolCap];
 Epoll g_epoll_pool[kEpollPoolCap];
+constinit sync::SpinLock g_async_lock = {
+    .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
+
+struct TimerfdPin
+{
+    u32 idx;
+    Timerfd* timer;
+
+    explicit TimerfdPin(u32 value) : idx(value), timer(nullptr)
+    {
+        if (value >= kTimerfdPoolCap)
+            return;
+        sync::SpinLockGuard guard(g_async_lock);
+        Timerfd& t = g_timerfd_pool[value];
+        if (t.in_use && !t.closing)
+        {
+            ++t.pins;
+            timer = &t;
+        }
+    }
+
+    ~TimerfdPin()
+    {
+        if (timer == nullptr)
+            return;
+        sync::SpinLockGuard guard(g_async_lock);
+        Timerfd& t = g_timerfd_pool[idx];
+        if (t.pins > 0)
+            --t.pins;
+        if (t.pins == 0 && t.refs == 0)
+        {
+            t.in_use = false;
+            t.closing = false;
+            t.next_expiry_tick = 0;
+            t.interval_ticks = 0;
+            t.expirations = 0;
+        }
+    }
+
+    explicit operator bool() const { return timer != nullptr; }
+};
+
+struct EpollPin
+{
+    u32 idx;
+    Epoll* epoll;
+
+    explicit EpollPin(u32 value) : idx(value), epoll(nullptr)
+    {
+        if (value >= kEpollPoolCap)
+            return;
+        sync::SpinLockGuard guard(g_async_lock);
+        Epoll& e = g_epoll_pool[value];
+        if (e.in_use && !e.closing)
+        {
+            ++e.pins;
+            epoll = &e;
+        }
+    }
+
+    ~EpollPin()
+    {
+        if (epoll == nullptr)
+            return;
+        sync::SpinLockGuard guard(g_async_lock);
+        Epoll& e = g_epoll_pool[idx];
+        if (e.pins > 0)
+            --e.pins;
+        if (e.pins == 0 && e.refs == 0)
+        {
+            e.in_use = false;
+            e.closing = false;
+            e.watch_count = 0;
+        }
+    }
+
+    explicit operator bool() const { return epoll != nullptr; }
+};
+
+struct SignalfdPin
+{
+    u32 idx;
+    Signalfd* signalfd;
+
+    explicit SignalfdPin(u32 value) : idx(value), signalfd(nullptr)
+    {
+        if (value >= kSignalfdPoolCap)
+            return;
+        sync::SpinLockGuard guard(g_async_lock);
+        Signalfd& s = g_signalfd_pool[value];
+        if (s.in_use && !s.closing)
+        {
+            ++s.pins;
+            signalfd = &s;
+        }
+    }
+
+    ~SignalfdPin()
+    {
+        if (signalfd == nullptr)
+            return;
+        sync::SpinLockGuard guard(g_async_lock);
+        Signalfd& s = g_signalfd_pool[idx];
+        if (s.pins > 0)
+            --s.pins;
+        if (s.pins == 0 && s.refs == 0)
+        {
+            s.in_use = false;
+            s.closing = false;
+            s.mask = 0;
+        }
+    }
+
+    explicit operator bool() const { return signalfd != nullptr; }
+};
 
 i32 TimerfdAlloc(u32 clock_id)
 {
-    arch::Cli();
+    sync::SpinLockGuard guard(g_async_lock);
     for (u32 i = 0; i < kTimerfdPoolCap; ++i)
     {
         if (!g_timerfd_pool[i].in_use)
         {
             Timerfd& t = g_timerfd_pool[i];
             t.in_use = true;
+            t.closing = false;
             t.refs = 1;
+            t.pins = 0;
             t.next_expiry_tick = 0;
             t.interval_ticks = 0;
             t.expirations = 0;
             t.clock_id = clock_id;
             t.read_wq.head = nullptr;
             t.read_wq.tail = nullptr;
-            arch::Sti();
             return static_cast<i32>(i);
         }
     }
-    arch::Sti();
     return -1;
 }
 
 i32 SignalfdAlloc(u64 mask)
 {
-    arch::Cli();
+    sync::SpinLockGuard guard(g_async_lock);
     for (u32 i = 0; i < kSignalfdPoolCap; ++i)
     {
         if (!g_signalfd_pool[i].in_use)
         {
             Signalfd& s = g_signalfd_pool[i];
             s.in_use = true;
+            s.closing = false;
             s.refs = 1;
+            s.pins = 0;
             s.mask = mask;
             s.read_wq.head = nullptr;
             s.read_wq.tail = nullptr;
-            arch::Sti();
             return static_cast<i32>(i);
         }
     }
-    arch::Sti();
     return -1;
 }
 
 i32 EpollAlloc()
 {
-    arch::Cli();
+    sync::SpinLockGuard guard(g_async_lock);
     for (u32 i = 0; i < kEpollPoolCap; ++i)
     {
         if (!g_epoll_pool[i].in_use)
         {
             Epoll& e = g_epoll_pool[i];
             e.in_use = true;
+            e.closing = false;
             e.refs = 1;
+            e.pins = 0;
             e.watch_count = 0;
             for (u32 w = 0; w < kEpollWatchCap; ++w)
                 e.watches[w].in_use = false;
-            arch::Sti();
             return static_cast<i32>(i);
         }
     }
-    arch::Sti();
     return -1;
 }
 
 // Catch up `expirations` based on the current tick. Caller must hold
-// arch::Cli on entry.
+// g_async_lock on entry.
 void TimerfdAccrueExpirationsLocked(Timerfd& t, u64 now_ticks)
 {
     if (t.next_expiry_tick == 0)
@@ -215,34 +337,34 @@ void TimerfdRetain(u32 idx)
 {
     if (idx >= kTimerfdPoolCap)
         return;
-    arch::Cli();
+    sync::SpinLockGuard guard(g_async_lock);
     Timerfd& t = g_timerfd_pool[idx];
-    if (t.in_use)
+    if (t.in_use && !t.closing)
         ++t.refs;
-    arch::Sti();
 }
 
 void TimerfdRelease(u32 idx)
 {
     if (idx >= kTimerfdPoolCap)
         return;
-    arch::Cli();
+    sync::SpinLockGuard guard(g_async_lock);
     Timerfd& t = g_timerfd_pool[idx];
     if (!t.in_use || t.refs == 0)
-    {
-        arch::Sti();
         return;
-    }
     --t.refs;
     if (t.refs == 0)
     {
         sched::WaitQueueWakeAll(&t.read_wq);
-        t.in_use = false;
-        t.next_expiry_tick = 0;
-        t.interval_ticks = 0;
-        t.expirations = 0;
+        t.closing = true;
+        if (t.pins == 0)
+        {
+            t.in_use = false;
+            t.closing = false;
+            t.next_expiry_tick = 0;
+            t.interval_ticks = 0;
+            t.expirations = 0;
+        }
     }
-    arch::Sti();
 }
 
 i64 TimerfdRead(u32 idx, u64 user_dst, u64 len)
@@ -251,36 +373,46 @@ i64 TimerfdRead(u32 idx, u64 user_dst, u64 len)
         return kEINVAL;
     if (len < 8)
         return kEINVAL; // timerfd reads are u64-sized
-    Timerfd& t = g_timerfd_pool[idx];
-    arch::Cli();
-    while (t.in_use)
+    TimerfdPin pin(idx);
+    if (!pin)
+        return 0;
+    while (true)
     {
+        auto flags = sync::SpinLockAcquire(g_async_lock);
+        Timerfd& t = *pin.timer;
+        if (!t.in_use || t.closing)
+        {
+            sync::SpinLockRelease(g_async_lock, flags);
+            return 0;
+        }
         TimerfdAccrueExpirationsLocked(t, sched::SchedNowTicks());
         if (t.expirations > 0)
-            break;
+        {
+            const u64 expirations = t.expirations;
+            t.expirations = 0;
+            sync::SpinLockRelease(g_async_lock, flags);
+            if (!mm::CopyToUser(reinterpret_cast<void*>(user_dst), &expirations, sizeof(expirations)))
+                return kEFAULT;
+            return 8;
+        }
         if (t.next_expiry_tick == 0)
         {
             // Disarmed and no expirations — block until armed/closed.
-            sched::WaitQueueBlock(&t.read_wq);
+            sched::WaitQueue* wq = &t.read_wq;
+            sync::SpinLockRelease(g_async_lock, flags);
             arch::Cli();
+            (void)sched::WaitQueueBlockTimeout(wq, 5);
+            arch::Sti();
             continue;
         }
         const u64 now = sched::SchedNowTicks();
         const u64 wait = (t.next_expiry_tick > now) ? (t.next_expiry_tick - now) : 1;
-        sched::WaitQueueBlockTimeout(&t.read_wq, wait);
+        sched::WaitQueue* wq = &t.read_wq;
+        sync::SpinLockRelease(g_async_lock, flags);
         arch::Cli();
-    }
-    if (!t.in_use)
-    {
+        (void)sched::WaitQueueBlockTimeout(wq, wait);
         arch::Sti();
-        return 0;
     }
-    const u64 expirations = t.expirations;
-    t.expirations = 0;
-    arch::Sti();
-    if (!mm::CopyToUser(reinterpret_cast<void*>(user_dst), &expirations, sizeof(expirations)))
-        return kEFAULT;
-    return 8;
 }
 
 i64 DoTimerfdCreate(u64 clockid, u64 flags)
@@ -337,10 +469,15 @@ u64 ItimerspecToTicks(i64 sec, i64 nsec)
 {
     if (sec < 0 || nsec < 0)
         return 0;
-    const u64 total_ns = static_cast<u64>(sec) * 1'000'000'000ull + static_cast<u64>(nsec);
+    constexpr u64 kMax = static_cast<u64>(-1);
+    const u64 sec_u = static_cast<u64>(sec);
+    const u64 nsec_u = static_cast<u64>(nsec);
+    if (sec_u > (kMax - nsec_u) / 1'000'000'000ull)
+        return kMax / kTickNs;
+    const u64 total_ns = sec_u * 1'000'000'000ull + nsec_u;
     if (total_ns == 0)
         return 0;
-    return (total_ns + kTickNs - 1) / kTickNs;
+    return total_ns > kMax - (kTickNs - 1) ? kMax / kTickNs : (total_ns + kTickNs - 1) / kTickNs;
 }
 
 void TicksToItimerspec(u64 ticks, i64& sec_out, i64& nsec_out)
@@ -364,6 +501,9 @@ i64 DoTimerfdSettime(u64 fd, u64 flags, u64 user_new, u64 user_old)
     const u32 idx = p->linux_fds[fd].first_cluster;
     if (idx >= kTimerfdPoolCap)
         return kEINVAL;
+    TimerfdPin pin(idx);
+    if (!pin)
+        return kEBADF;
     Itimerspec new_spec;
     if (!mm::CopyFromUser(&new_spec, reinterpret_cast<const void*>(user_new), sizeof(new_spec)))
         return kEFAULT;
@@ -372,11 +512,11 @@ i64 DoTimerfdSettime(u64 fd, u64 flags, u64 user_new, u64 user_old)
     const u64 first_ticks = ItimerspecToTicks(new_spec.it_value_sec, new_spec.it_value_nsec);
     const u64 interval_ticks = ItimerspecToTicks(new_spec.it_interval_sec, new_spec.it_interval_nsec);
     constexpr u64 kTfdTimerAbstime = 0x1;
-    arch::Cli();
-    Timerfd& t = g_timerfd_pool[idx];
-    if (!t.in_use)
+    auto lock_flags = sync::SpinLockAcquire(g_async_lock);
+    Timerfd& t = *pin.timer;
+    if (!t.in_use || t.closing)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_async_lock, lock_flags);
         return kEBADF;
     }
     if (user_old != 0)
@@ -386,13 +526,13 @@ i64 DoTimerfdSettime(u64 fd, u64 flags, u64 user_new, u64 user_old)
         if (t.next_expiry_tick > now)
             TicksToItimerspec(t.next_expiry_tick - now, old_spec.it_value_sec, old_spec.it_value_nsec);
         TicksToItimerspec(t.interval_ticks, old_spec.it_interval_sec, old_spec.it_interval_nsec);
-        arch::Sti();
+        sync::SpinLockRelease(g_async_lock, lock_flags);
         if (!mm::CopyToUser(reinterpret_cast<void*>(user_old), &old_spec, sizeof(old_spec)))
             return kEFAULT;
-        arch::Cli();
-        if (!t.in_use)
+        lock_flags = sync::SpinLockAcquire(g_async_lock);
+        if (!t.in_use || t.closing)
         {
-            arch::Sti();
+            sync::SpinLockRelease(g_async_lock, lock_flags);
             return kEBADF;
         }
     }
@@ -408,12 +548,12 @@ i64 DoTimerfdSettime(u64 fd, u64 flags, u64 user_new, u64 user_old)
         if ((flags & kTfdTimerAbstime) != 0)
             t.next_expiry_tick = first_ticks; // absolute tick value (caller-side).
         else
-            t.next_expiry_tick = now + first_ticks;
+            t.next_expiry_tick = first_ticks > static_cast<u64>(-1) - now ? static_cast<u64>(-1) : now + first_ticks;
         t.interval_ticks = interval_ticks;
     }
     t.expirations = 0;
     sched::WaitQueueWakeAll(&t.read_wq);
-    arch::Sti();
+    sync::SpinLockRelease(g_async_lock, lock_flags);
     return 0;
 }
 
@@ -429,19 +569,22 @@ i64 DoTimerfdGettime(u64 fd, u64 user_curr)
     const u32 idx = p->linux_fds[fd].first_cluster;
     if (idx >= kTimerfdPoolCap)
         return kEINVAL;
+    TimerfdPin pin(idx);
+    if (!pin)
+        return kEBADF;
     Itimerspec out{};
-    arch::Cli();
-    Timerfd& t = g_timerfd_pool[idx];
-    if (!t.in_use)
+    auto lock_flags = sync::SpinLockAcquire(g_async_lock);
+    Timerfd& t = *pin.timer;
+    if (!t.in_use || t.closing)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_async_lock, lock_flags);
         return kEBADF;
     }
     const u64 now = sched::SchedNowTicks();
     if (t.next_expiry_tick > now)
         TicksToItimerspec(t.next_expiry_tick - now, out.it_value_sec, out.it_value_nsec);
     TicksToItimerspec(t.interval_ticks, out.it_interval_sec, out.it_interval_nsec);
-    arch::Sti();
+    sync::SpinLockRelease(g_async_lock, lock_flags);
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_curr), &out, sizeof(out)))
         return kEFAULT;
     return 0;
@@ -455,32 +598,34 @@ void SignalfdRetain(u32 idx)
 {
     if (idx >= kSignalfdPoolCap)
         return;
-    arch::Cli();
+    sync::SpinLockGuard guard(g_async_lock);
     Signalfd& s = g_signalfd_pool[idx];
-    if (s.in_use)
+    if (s.in_use && !s.closing)
         ++s.refs;
-    arch::Sti();
 }
 
 void SignalfdRelease(u32 idx)
 {
     if (idx >= kSignalfdPoolCap)
         return;
-    arch::Cli();
+    sync::SpinLockGuard guard(g_async_lock);
     Signalfd& s = g_signalfd_pool[idx];
     if (!s.in_use || s.refs == 0)
     {
-        arch::Sti();
         return;
     }
     --s.refs;
     if (s.refs == 0)
     {
         sched::WaitQueueWakeAll(&s.read_wq);
-        s.in_use = false;
-        s.mask = 0;
+        s.closing = true;
+        if (s.pins == 0)
+        {
+            s.in_use = false;
+            s.closing = false;
+            s.mask = 0;
+        }
     }
-    arch::Sti();
 }
 
 i64 SignalfdRead(u32 idx, u64 user_dst, u64 len)
@@ -489,14 +634,17 @@ i64 SignalfdRead(u32 idx, u64 user_dst, u64 len)
         return kEINVAL;
     if (len < 128) // sizeof(struct signalfd_siginfo)
         return kEINVAL;
-    Signalfd& s = g_signalfd_pool[idx];
+    SignalfdPin pin(idx);
+    if (!pin)
+        return 0;
     core::Process* p = core::CurrentProcess();
     if (p == nullptr)
         return kEINVAL;
-    arch::Cli();
-    if (!s.in_use)
+    auto lock_flags = sync::SpinLockAcquire(g_async_lock);
+    Signalfd& s = *pin.signalfd;
+    if (!s.in_use || s.closing)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_async_lock, lock_flags);
         return 0;
     }
     // Walk the pending bitmap; emit one signalfd_siginfo per
@@ -527,7 +675,7 @@ i64 SignalfdRead(u32 idx, u64 user_dst, u64 len)
         p->linux_pending_signals &= ~bit;
         emitted += 128;
     }
-    arch::Sti();
+    sync::SpinLockRelease(g_async_lock, lock_flags);
     if (emitted == 0)
         return kEAGAIN;
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_dst), stage, emitted))
@@ -563,10 +711,12 @@ i64 DoSignalfd(u64 fd, u64 user_mask, u64 sigsetsize, u64 flags)
         const u32 idx = p->linux_fds[fd].first_cluster;
         if (idx >= kSignalfdPoolCap)
             return kEINVAL;
-        arch::Cli();
-        if (g_signalfd_pool[idx].in_use)
-            g_signalfd_pool[idx].mask = mask;
-        arch::Sti();
+        SignalfdPin pin(idx);
+        if (!pin)
+            return kEINVAL;
+        sync::SpinLockGuard guard(g_async_lock);
+        if (pin.signalfd->in_use && !pin.signalfd->closing)
+            pin.signalfd->mask = mask;
         return static_cast<i64>(fd);
     }
     const i32 new_fd = core::LinuxFdAllocLowest(p, 3);
@@ -608,33 +758,33 @@ void EpollRetain(u32 idx)
 {
     if (idx >= kEpollPoolCap)
         return;
-    arch::Cli();
+    sync::SpinLockGuard guard(g_async_lock);
     Epoll& e = g_epoll_pool[idx];
-    if (e.in_use)
+    if (e.in_use && !e.closing)
         ++e.refs;
-    arch::Sti();
 }
 
 void EpollRelease(u32 idx)
 {
     if (idx >= kEpollPoolCap)
         return;
-    arch::Cli();
+    sync::SpinLockGuard guard(g_async_lock);
     Epoll& e = g_epoll_pool[idx];
     if (!e.in_use || e.refs == 0)
-    {
-        arch::Sti();
         return;
-    }
     --e.refs;
     if (e.refs == 0)
     {
-        e.in_use = false;
-        e.watch_count = 0;
+        e.closing = true;
         for (u32 w = 0; w < kEpollWatchCap; ++w)
             e.watches[w].in_use = false;
+        if (e.pins == 0)
+        {
+            e.in_use = false;
+            e.closing = false;
+            e.watch_count = 0;
+        }
     }
-    arch::Sti();
 }
 
 u32 LinuxFdEpollReady(u32 fd, u32 interest_mask)
@@ -680,15 +830,15 @@ u32 LinuxFdEpollReady(u32 fd, u32 interest_mask)
     {
         if (interest_mask & kEPOLLIN)
         {
-            arch::Cli();
-            Timerfd& t = g_timerfd_pool[slot.first_cluster];
-            if (t.in_use)
+            TimerfdPin pin(slot.first_cluster);
+            if (pin)
             {
+                sync::SpinLockGuard guard(g_async_lock);
+                Timerfd& t = *pin.timer;
                 TimerfdAccrueExpirationsLocked(t, sched::SchedNowTicks());
                 if (t.expirations > 0)
                     ready |= kEPOLLIN;
             }
-            arch::Sti();
         }
         break;
     }
@@ -702,7 +852,7 @@ u32 LinuxFdEpollReady(u32 fd, u32 interest_mask)
             const u64 target_pid = slot.first_cluster;
             // Two terminal states count as "exited":
             //   - target on g_zombies (DoExit done, not yet reaped)
-            //   - SchedFindProcessByPid returns nullptr (already
+            //   - SchedProcessExists returns false (already
             //     reaped or never existed)
             // Unreaped-zombie is the common case for shells that
             // poll a pidfd before wait4; reaped-already covers
@@ -713,8 +863,7 @@ u32 LinuxFdEpollReady(u32 fd, u32 interest_mask)
             }
             else
             {
-                core::Process* tgt = sched::SchedFindProcessByPid(target_pid);
-                if (tgt == nullptr)
+                if (!sched::SchedProcessExists(target_pid))
                     ready |= kEPOLLIN;
             }
         }
@@ -799,17 +948,19 @@ i64 DoEpollCtl(u64 epfd, u64 op, u64 fd, u64 user_event)
     const u32 idx = p->linux_fds[epfd].first_cluster;
     if (idx >= kEpollPoolCap)
         return kEINVAL;
+    EpollPin pin(idx);
+    if (!pin)
+        return kEBADF;
     EpollEvent ev{};
     if (op != kEpollCtlDel && user_event != 0)
     {
         if (!mm::CopyFromUser(&ev, reinterpret_cast<const void*>(user_event), sizeof(ev)))
             return kEFAULT;
     }
-    arch::Cli();
-    Epoll& e = g_epoll_pool[idx];
-    if (!e.in_use)
+    sync::SpinLockGuard guard(g_async_lock);
+    Epoll& e = *pin.epoll;
+    if (!e.in_use || e.closing)
     {
-        arch::Sti();
         return kEBADF;
     }
     // Search for an existing watch on this fd.
@@ -824,7 +975,6 @@ i64 DoEpollCtl(u64 epfd, u64 op, u64 fd, u64 user_event)
     {
         if (found >= 0)
         {
-            arch::Sti();
             return -17; // -EEXIST
         }
         for (u32 w = 0; w < kEpollWatchCap; ++w)
@@ -836,38 +986,31 @@ i64 DoEpollCtl(u64 epfd, u64 op, u64 fd, u64 user_event)
                 e.watches[w].events = ev.events;
                 e.watches[w].user_data = ev.data;
                 ++e.watch_count;
-                arch::Sti();
                 return 0;
             }
         }
-        arch::Sti();
         return kENOMEM;
     }
     if (op == kEpollCtlDel)
     {
         if (found < 0)
         {
-            arch::Sti();
             return kENOENT;
         }
         e.watches[found].in_use = false;
         --e.watch_count;
-        arch::Sti();
         return 0;
     }
     if (op == kEpollCtlMod)
     {
         if (found < 0)
         {
-            arch::Sti();
             return kENOENT;
         }
         e.watches[found].events = ev.events;
         e.watches[found].user_data = ev.data;
-        arch::Sti();
         return 0;
     }
-    arch::Sti();
     return kEINVAL;
 }
 
@@ -890,33 +1033,40 @@ i64 DoEpollWait(u64 epfd, u64 user_events, u64 maxevents, u64 timeout_ms)
     if (idx >= kEpollPoolCap)
         return kEINVAL;
     // Convert timeout_ms (signed by caller convention; -1 = infinite)
+    EpollPin pin(idx);
+    if (!pin)
+        return kEBADF;
     // into a tick budget. 10 ms per tick, round up so a 1 ms timeout
     // still polls once before returning.
-    const i64 timeout_signed = static_cast<i64>(timeout_ms);
     bool infinite = false;
     u64 deadline_tick = 0;
-    if (timeout_signed < 0)
+    constexpr u64 kInfiniteTimeout = static_cast<u64>(-1);
+    constexpr u64 kMaxSignedTimeout = 0x7FFF'FFFF'FFFF'FFFFull;
+    if (timeout_ms == kInfiniteTimeout)
         infinite = true;
+    else if (timeout_ms > kMaxSignedTimeout)
+        return kEINVAL;
     else
     {
-        const u64 ticks = (timeout_signed + 9) / 10;
-        deadline_tick = sched::SchedNowTicks() + ticks;
+        const u64 ticks = timeout_ms / 10 + ((timeout_ms % 10) != 0 ? 1 : 0);
+        const u64 now = sched::SchedNowTicks();
+        deadline_tick = (ticks > static_cast<u64>(-1) - now) ? static_cast<u64>(-1) : now + ticks;
     }
     EpollEvent out_buf[64];
     while (true)
     {
         u32 hits = 0;
-        arch::Cli();
-        Epoll& e = g_epoll_pool[idx];
-        if (!e.in_use)
+        auto lock_flags = sync::SpinLockAcquire(g_async_lock);
+        Epoll& e = *pin.epoll;
+        if (!e.in_use || e.closing)
         {
-            arch::Sti();
+            sync::SpinLockRelease(g_async_lock, lock_flags);
             return kEBADF;
         }
         const u32 watch_count_snap = e.watch_count;
         if (watch_count_snap == 0)
         {
-            arch::Sti();
+            sync::SpinLockRelease(g_async_lock, lock_flags);
             // Empty epoll set — block until timeout (Linux returns 0
             // immediately if no watches, but we mimic the more useful
             // "wait for the timeout" so callers can throttle loops
@@ -924,10 +1074,10 @@ i64 DoEpollWait(u64 epfd, u64 user_events, u64 maxevents, u64 timeout_ms)
         }
         else
         {
-            EpollWatch snap[kEpollWatchCap];
+            EpollWatch snap[kEpollWatchCap]{};
             for (u32 w = 0; w < kEpollWatchCap; ++w)
                 snap[w] = e.watches[w];
-            arch::Sti();
+            sync::SpinLockRelease(g_async_lock, lock_flags);
             for (u32 w = 0; w < kEpollWatchCap && hits < maxevents; ++w)
             {
                 if (!snap[w].in_use)
@@ -1010,10 +1160,19 @@ i64 DoEpollPwait2(u64 epfd, u64 events, u64 maxevents, u64 user_ts, u64 sigmask,
         } ts = {};
         if (!mm::CopyFromUser(&ts, reinterpret_cast<const void*>(user_ts), sizeof(ts)))
             return kEFAULT;
+        if (ts.sec < 0 || ts.nsec < 0 || ts.nsec >= 1000000000LL)
+            return kEINVAL;
         if (ts.sec == 0 && ts.nsec == 0)
             timeout_ms = 0;
         else
-            timeout_ms = ts.sec * 1000 + (ts.nsec + 999999) / 1000000;
+        {
+            constexpr i64 kMaxTimeoutMs = 0x7fff'ffff'ffff'ffffLL;
+            const i64 rounded_ms = (ts.nsec + 999999) / 1000000;
+            if (ts.sec > (kMaxTimeoutMs - rounded_ms) / 1000)
+                timeout_ms = kMaxTimeoutMs;
+            else
+                timeout_ms = ts.sec * 1000 + rounded_ms;
+        }
     }
     return DoEpollPwait(epfd, events, maxevents, static_cast<u64>(timeout_ms), sigmask, sigsetsize);
 }

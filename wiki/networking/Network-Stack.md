@@ -153,6 +153,12 @@ See [Shell Commands](../reference/Shell-Commands.md) for the full list.
 
 ## Threading & Locking Model
 
+- **Boot publication boundary:** scheduler bring-up and passive PCI enumeration
+  complete before `NetStackInit`. That call initializes every protocol table,
+  starts the TCP timer task, and finishes its built-in interface self-tests
+  synchronously before `VirtioInit` or `drivers::net::NetInit` may publish an
+  interface, start an RX worker, or begin DHCP. It cannot move ahead of the
+  scheduler because `tcp::Init` creates the timer task.
 - **RX** runs from the netif driver's IRQ tail via `NetStackInjectRx`,
   which copies the frame and hands it to the protocol demux. ARP / IPv4
   / IPv6 dispatch, TCP reassembly, and UDP delivery all complete in this
@@ -167,12 +173,27 @@ See [Shell Commands](../reference/Shell-Commands.md) for the full list.
   it. It covers the pool array and the stats counters; it is never held
   across a scheduling point, so a blocking recv drops it, parks on the
   socket's wait queue with a bounded timeout, and re-tests.
-- The **TCB table** (`kernel/net/tcp*.cpp`) is still on the older
-  `arch::Cli` / `arch::Sti` scheme, which excludes only the local CPU —
-  see [TCP State Machine → Known limits](TCP-State-Machine.md). The ARP
-  cache and DHCP lease ride the same IRQ-off convention. Converting
-  those to real spinlocks is outstanding work, not a documented
-  property of the current tree.
+- The protocol-global **ARP cache**, **IPv4 / ICMP / IPv6 counters and ping
+  transaction**, kernel **UDP binding table + stats**, **DHCP / DNS / NTP
+  transaction records**, and **firewall state** use separate IRQ-save ticket
+  locks. Those locks are deliberately never nested. A lock owns only its
+  fixed table or record: packet parsing, socket dispatch, RX handlers, TX
+  callbacks, interface operations, tick reads, logging, notifications, and
+  scheduler waits all happen after it is released. Stats and table readers
+  copy a complete snapshot under the owning lock.
+- UDP dispatch snapshots a handler and pins its binding generation before
+  the callout. Task-context unbind closes admission, drops the lock, and
+  drains the snapshotted callbacks before the slot can be reused. DHCP,
+  DNS, and NTP similarly snapshot an exact interface generation plus a
+  monotonic transaction token, then revalidate both before committing a
+  result. Interface teardown purges the exact ARP generation and clears
+  matching protocol transactions before allowing a replacement binding.
+- The legacy two-argument `ArpLookup` returns an internal pointer and is
+  therefore restricted to externally serialized compatibility callers.
+  Concurrent code uses the three-argument copy-out overload.
+- TCP has its own locking and lifetime model; see
+  [TCP State Machine → Known limits](TCP-State-Machine.md) for its current
+  state rather than inferring it from the protocol-global locks above.
 - **TLS / HTTP / cookies** run entirely in the caller's process context
   on top of a socket — they may block on socket reads and never run from
   IRQ.
@@ -196,7 +217,20 @@ See [Shell Commands](../reference/Shell-Commands.md) for the full list.
   port per query, and `DnsOnUdp` validates the reply's source IP
   (resolver), source port (53), and destination port before accepting it —
   blind cache poisoning now requires guessing ~30 bits instead of zero.
+  Concurrent/restartable callers use `DnsQueryReceipt` and the exact-result
+  overload: the receipt carries both interface generation and monotonic query
+  transaction, so a later answer can never satisfy an older caller.
   (Security audit ML-03, CWE-290.)
+- **NTP** places a random cookie in the client transmit timestamp and
+  accepts a response only when the server echoes it as the originate
+  timestamp, in addition to matching the exact server, port, interface
+  generation, and transaction token. `NtpQueryReceipt` gives callers the
+  same fail-closed exact-result contract as DNS.
+- **DHCP** accepts replies only on UDP 67→68 with Ethernet BOOTP type/length,
+  the exact bound client MAC, transaction ID, interface generation, and a
+  nonzero option-54 server identifier. This v0 client implements SELECTING:
+  ACK is accepted only after REQUEST and must repeat the chosen OFFER's server
+  identifier and `yiaddr`; an unsolicited or cross-offer ACK is dropped.
 
 ## Operator Surface
 
@@ -223,6 +257,13 @@ dst_port_range)`. Default policies are configurable per
 direction and default to Allow / Allow at boot so existing
 DHCP / DNS / TCP smoke paths keep working without explicit
 allow-list rules.
+
+Rules, hit/stat counters, the denial ring, conntrack table, exception counts,
+and toast rate-limit state publish through one IRQ-save firewall lock.
+`FwEvaluate` obtains the tick before entering the critical section, commits a
+verdict plus any conntrack/log record atomically, and releases the lock before
+calling the desktop notification surface. Snapshot APIs copy bounded arrays
+under the lock; they never expose live table entries.
 
 ## Per-interface Counters
 

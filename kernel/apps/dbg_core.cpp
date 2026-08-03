@@ -147,7 +147,8 @@ usize EnumerateProcesses(ProcInfo* out, usize cap)
     usize count = 0;
     for (usize i = 0; i < coll.seen_count && count < cap; ++i)
     {
-        ::duetos::core::Process* p = sched::SchedFindProcessByPid(coll.seen_pids[i]);
+        ::duetos::core::ScopedProcessRef process_ref(sched::SchedFindProcessByPidRetained(coll.seen_pids[i]));
+        ::duetos::core::Process* p = process_ref.Get();
         if (p == nullptr)
             continue;
         ProcInfo& row = out[count];
@@ -155,7 +156,7 @@ usize EnumerateProcesses(ProcInfo* out, usize cap)
         StrCopyTrunc(row.name, sizeof(row.name), p->name != nullptr ? p->name : "?");
         row.state = sched::SchedIsPidZombie(p->pid) ? 3 : 0;
         row.ticks_used = p->ticks_used;
-        row.region_count = p->as != nullptr ? p->as->region_count : 0;
+        row.region_count = mm::AddressSpaceUserPageCount(p->as);
         ++count;
     }
     return count;
@@ -165,44 +166,19 @@ bool LookupProcess(u64 pid, ProcInfo* out)
 {
     if (out == nullptr)
         return false;
-    ::duetos::core::Process* p = sched::SchedFindProcessByPid(pid);
+    ::duetos::core::ScopedProcessRef process_ref(sched::SchedFindProcessByPidRetained(pid));
+    ::duetos::core::Process* p = process_ref.Get();
     if (p == nullptr)
         return false;
     out->pid = p->pid;
     StrCopyTrunc(out->name, sizeof(out->name), p->name != nullptr ? p->name : "?");
     out->state = sched::SchedIsPidZombie(pid) ? 3 : 0;
     out->ticks_used = p->ticks_used;
-    out->region_count = p->as != nullptr ? p->as->region_count : 0;
+    out->region_count = mm::AddressSpaceUserPageCount(p->as);
     return true;
 }
 
 // ---- ReadMem / WriteMem -------------------------------------
-
-namespace
-{
-
-// Cross-AS user memory access via the kernel direct-map alias of
-// the backing frame. Returns nullptr if the page isn't mapped in
-// `as`. Identical strategy to BpReadMem's helper, but parameterised
-// on AddressSpace* so non-suspended targets work too.
-const u8* ResolveUserByteRO(mm::AddressSpace* as, u64 user_va)
-{
-    if (as == nullptr)
-        return nullptr;
-    const u64 page_va = user_va & ~0xFFFULL;
-    mm::PhysAddr frame = mm::AddressSpaceLookupUserFrame(as, page_va);
-    if (frame == mm::kNullFrame)
-        return nullptr;
-    const u8* page = static_cast<const u8*>(mm::PhysToVirt(frame));
-    return page + (user_va & 0xFFF);
-}
-
-u8* ResolveUserByteRW(mm::AddressSpace* as, u64 user_va)
-{
-    return const_cast<u8*>(ResolveUserByteRO(as, user_va));
-}
-
-} // namespace
 
 u64 ReadMem(u64 pid, u64 va, u8* out, u64 len)
 {
@@ -235,22 +211,20 @@ u64 ReadMem(u64 pid, u64 va, u8* out, u64 len)
         return copied;
     }
 
-    ::duetos::core::Process* p = sched::SchedFindProcessByPid(pid);
+    ::duetos::core::ScopedProcessRef process_ref(sched::SchedFindProcessByPidRetained(pid));
+    ::duetos::core::Process* p = process_ref.Get();
     if (p == nullptr || p->as == nullptr)
         return 0;
     u64 copied = 0;
     while (copied < len)
     {
-        const u8* src = ResolveUserByteRO(p->as, va + copied);
-        if (src == nullptr)
-            break;
         const u64 page_off = (va + copied) & 0xFFFULL;
         const u64 page_room = 0x1000 - page_off;
         u64 chunk = len - copied;
         if (chunk > page_room)
             chunk = page_room;
-        for (u64 i = 0; i < chunk; ++i)
-            out[copied + i] = src[i];
+        if (!mm::AddressSpaceReadUserMemory(p->as, va + copied, out + copied, chunk))
+            break;
         copied += chunk;
     }
     return copied;
@@ -268,22 +242,20 @@ u64 WriteMem(u64 pid, u64 va, const u8* in, u64 len)
     // through the breakpoint subsystem's PokeByte path.
     if (pid == kKernelPid)
         return 0;
-    ::duetos::core::Process* p = sched::SchedFindProcessByPid(pid);
+    ::duetos::core::ScopedProcessRef process_ref(sched::SchedFindProcessByPidRetained(pid));
+    ::duetos::core::Process* p = process_ref.Get();
     if (p == nullptr || p->as == nullptr)
         return 0;
     u64 copied = 0;
     while (copied < len)
     {
-        u8* dst = ResolveUserByteRW(p->as, va + copied);
-        if (dst == nullptr)
-            break;
         const u64 page_off = (va + copied) & 0xFFFULL;
         const u64 page_room = 0x1000 - page_off;
         u64 chunk = len - copied;
         if (chunk > page_room)
             chunk = page_room;
-        for (u64 i = 0; i < chunk; ++i)
-            dst[i] = in[copied + i];
+        if (!mm::AddressSpaceWriteUserMemory(p->as, va + copied, in + copied, chunk))
+            break;
         copied += chunk;
     }
     return copied;
@@ -304,11 +276,12 @@ usize ScanBytes(u64 pid, const u8* needle, usize nlen, u64* hits, usize cap)
     // and direct — no AS walks.
     if (pid == kKernelPid)
     {
-        const u8* lo = _text_start;
-        const u8* hi = _text_end;
-        if (hi <= lo)
+        const u64 lo_addr = reinterpret_cast<u64>(_text_start);
+        const u64 hi_addr = reinterpret_cast<u64>(_text_end);
+        if (hi_addr <= lo_addr)
             return 0;
-        const u64 size = static_cast<u64>(hi - lo);
+        const u8* lo = reinterpret_cast<const u8*>(lo_addr);
+        const u64 size = hi_addr - lo_addr;
         for (u64 off = 0; off + nlen <= size && hit_count < cap; ++off)
         {
             bool match = true;
@@ -326,18 +299,30 @@ usize ScanBytes(u64 pid, const u8* needle, usize nlen, u64* hits, usize cap)
         return hit_count;
     }
 
-    ::duetos::core::Process* p = sched::SchedFindProcessByPid(pid);
+    ::duetos::core::ScopedProcessRef process_ref(sched::SchedFindProcessByPidRetained(pid));
+    ::duetos::core::Process* p = process_ref.Get();
     if (p == nullptr || p->as == nullptr)
         return 0;
     mm::AddressSpace* as = p->as;
     // Walk the regions ledger. Each region is a 4 KiB page; we
     // scan within each page and across page boundaries within a
     // region by re-resolving every 4 KiB.
-    for (u16 r = 0; r < as->region_count && hit_count < cap; ++r)
+    u16 region_count = 0;
     {
-        const u64 base = as->regions[r].vaddr;
-        const u8* page = ResolveUserByteRO(as, base);
-        if (page == nullptr)
+        sync::SpinLockGuard region_guard(as->regions_lock);
+        region_count = as->region_count;
+    }
+    u8 page[mm::kPageSize];
+    for (u16 r = 0; r < region_count && hit_count < cap; ++r)
+    {
+        u64 base = 0;
+        {
+            sync::SpinLockGuard region_guard(as->regions_lock);
+            if (r >= as->region_count)
+                break;
+            base = as->regions[r].vaddr;
+        }
+        if (!mm::AddressSpaceReadUserMemory(as, base, page, sizeof(page)))
             continue;
         // Scan the 4 KiB page; tail-spill match must fit before
         // the page end (we deliberately don't span pages here —

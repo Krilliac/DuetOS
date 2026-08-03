@@ -127,9 +127,10 @@ static void dbg_uint(const char* prefix, unsigned v)
     /* Tiny printf for [odbg] logging. Max 16 decimal digits. */
     char buf[64];
     int n = 0;
-    while (prefix[n] && n < 40)
+    const char* cursor = prefix;
+    while (n < 40 && *cursor)
     {
-        buf[n] = prefix[n];
+        buf[n] = *cursor++;
         ++n;
     }
     /* Reverse-print v. */
