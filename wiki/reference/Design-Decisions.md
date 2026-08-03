@@ -14351,3 +14351,29 @@ _2026-07-30_
   the scheduler’s existing interrupt-disabled protocol and needs the
   planned `WaitQueueBlockLocked` primitive for a complete lost-wakeup
   proof.
+
+## 058 — Kernel service-runtime lookups classify from one state load
+
+- **Scope:** `kernel/core/service_runtime.cpp`
+- **Decision:** `ServiceRuntimeKernelLookupV1` performs a single acquire
+  load of `ServiceRuntimeV1::state` and returns both the runtime pointer
+  and the classified `ServiceRuntimeStatusV1`. The three kernel entry
+  points (`…DeferAcceptedProcessKernelV1`,
+  `…DriveDeferredAcceptedKernelV1`, `…DriveExitReapKernelV1`) consume
+  that status; none of them re-reads `state`.
+- **Why:** the previous shape looked the runtime up, then re-loaded
+  `state` to classify a null result. `state` legally advances
+  `Initializing -> Open` concurrently, so an init landing between the two
+  loads made the classifier observe `Open`, fall past every known-state
+  arm, and return `CorruptState` — panicking the reaper with "service
+  runtime rejected deferred endpoint maintenance". Intermittent by
+  construction: it fired only when the reaper's two loads straddled the
+  release store publishing `Open`.
+- **Rules out / defers:** any future entry point that re-derives runtime
+  state after a failed lookup. A caller needing the state must take it
+  from the returned status. `test-service-runtime-owner-contract.py`
+  pins the single-load property so the shape cannot regress.
+- **Verification boundary:** the acquire load pairs with the release
+  store in `InitializeRuntime`, so observing `Open` guarantees the
+  `initialized` marker is visible. Fail-closed behaviour and every
+  status/directory/endpoint failure tuple are unchanged.

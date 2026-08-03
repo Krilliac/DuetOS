@@ -205,6 +205,15 @@ last, and the singleton is not observable until a release-store publishes the
 whole owner Open. A partial failure is terminal and unpublished; component
 storage is never reset or reused in place.
 
+Every kernel entry point reaches the singleton through
+`ServiceRuntimeKernelLookupV1`, which classifies from exactly one acquire load
+of the runtime state and returns the runtime pointer alongside a
+`ServiceRuntimeStatusV1`. Callers must not re-read the state to interpret a
+null lookup: the state legally advances `Initializing -> Open` underneath them,
+and a second load that observes `Open` is indistinguishable from genuine
+corruption. That two-load shape previously panicked the reaper intermittently
+(see Design-Decisions 058).
+
 Runtime inspection revalidates the service count, manifest identity, authority
 identity, and nonzero stage-registry identity across the independently owned
 stage and broker before returning diagnostics. The owner does not itself start
