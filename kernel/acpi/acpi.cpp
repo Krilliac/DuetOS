@@ -572,6 +572,27 @@ inline u64 XsdtEntryAt(const SdtHeader* xsdt, u64 i)
     return v;
 }
 
+// The RSDT's 32-bit counterpart of XsdtEntryAt. 36 IS u32-aligned, so this
+// array is only misaligned when firmware places the table itself off a
+// 4-byte boundary — which QEMU routinely does, landing the RSDT such that
+// UBSAN reports `fault=misaligned ptr=0x...cd1 need-align=0x4 ty='const u32''
+// 34 times on a normal boot.
+//
+// Note the claim above that the XSDT helper resolves "every UBSAN
+// type-mismatch report from acpi.cpp" was not correct: it fixed the u64
+// loads only, and the four RSDT loops kept dereferencing `const u32*`.
+// Those are the reports that remained.
+inline u32 RsdtEntryAt(const SdtHeader* rsdt, u64 i)
+{
+    const auto* bytes = reinterpret_cast<const u8*>(rsdt) + sizeof(SdtHeader) + i * sizeof(u32);
+    u32 v = 0;
+    for (u64 j = 0; j < sizeof(u32); ++j)
+    {
+        v |= static_cast<u32>(bytes[j]) << (j * 8);
+    }
+    return v;
+}
+
 const SdtHeader* FindTable(const Rsdp& rsdp, const char* sig4)
 {
     // Prefer the XSDT (64-bit entry pointers) on ACPI 2.0+ firmware,
@@ -629,10 +650,9 @@ const SdtHeader* FindTable(const Rsdp& rsdp, const char* sig4)
 
     // Same underflow guard as the XSDT path above.
     const u64 count = (rsdt->length >= sizeof(SdtHeader)) ? (rsdt->length - sizeof(SdtHeader)) / sizeof(u32) : 0;
-    const auto* entries = reinterpret_cast<const u32*>(reinterpret_cast<uptr>(rsdt) + sizeof(SdtHeader));
     for (u64 i = 0; i < count; ++i)
     {
-        const auto* h = PhysToHeader(entries[i]);
+        const auto* h = PhysToHeader(RsdtEntryAt(rsdt, i));
         if (BytesEqual(h->signature, sig4, 4))
         {
             return h;
@@ -673,8 +693,7 @@ void AcpiDiagDumpRoot(const char* tag, u64 root_phys, bool entries_are_64bit)
         }
         else
         {
-            const auto* e32 = reinterpret_cast<const u32*>(reinterpret_cast<uptr>(root) + sizeof(SdtHeader));
-            ep = e32[i];
+            ep = RsdtEntryAt(root, i);
         }
         const auto* th = PhysToHeader(ep);
         char s[5] = {th->signature[0], th->signature[1], th->signature[2], th->signature[3], 0};
@@ -966,10 +985,9 @@ void CollectSsdts(const Rsdp& rsdp)
     const auto* rsdt = PhysToHeader(rsdp.rsdt_address);
     // Same underflow guard for the RSDT path.
     const u64 count = (rsdt->length >= sizeof(SdtHeader)) ? (rsdt->length - sizeof(SdtHeader)) / sizeof(u32) : 0;
-    const auto* entries = reinterpret_cast<const u32*>(reinterpret_cast<uptr>(rsdt) + sizeof(SdtHeader));
     for (u64 i = 0; i < count; ++i)
     {
-        const auto* h = PhysToHeader(entries[i]);
+        const auto* h = PhysToHeader(RsdtEntryAt(rsdt, i));
         if (BytesEqual(h->signature, "SSDT", 4))
         {
             if (!ChecksumOk(h, h->length))
@@ -977,7 +995,7 @@ void CollectSsdts(const Rsdp& rsdp)
                 core::Log(core::LogLevel::Warn, "acpi", "SSDT checksum failed; skipping table");
                 continue;
             }
-            CacheSsdt(entries[i], h->length);
+            CacheSsdt(RsdtEntryAt(rsdt, i), h->length);
         }
     }
 }
@@ -1956,10 +1974,9 @@ bool AcpiFindTablePhys(const char* sig4, u64* out_phys, u32* out_len)
     if (!BytesEqual(rsdt->signature, "RSDT", 4) || !ChecksumOk(rsdt, rsdt->length))
         return false;
     const u64 count = (rsdt->length >= sizeof(SdtHeader)) ? (rsdt->length - sizeof(SdtHeader)) / sizeof(u32) : 0;
-    const auto* entries = reinterpret_cast<const u32*>(reinterpret_cast<uptr>(rsdt) + sizeof(SdtHeader));
     for (u64 i = 0; i < count; ++i)
     {
-        const u32 phys = entries[i];
+        const u32 phys = RsdtEntryAt(rsdt, i);
         const auto* h = PhysToHeader(phys);
         if (BytesEqual(h->signature, sig4, 4))
         {
