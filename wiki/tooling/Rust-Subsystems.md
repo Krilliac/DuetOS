@@ -4,11 +4,11 @@
 >
 > **Execution context:** Kernel build tooling and kernel-linked Rust crates.
 >
-> **Maturity:** Stable foundation; twenty-four production Rust subsystems live in the kernel tree.
+> **Maturity:** Stable foundation; twenty-six production Rust subsystems live in the kernel tree.
 >
 > Production: DuetFS, USB HID, USB class config, DHCP / DNS / TCP-options / IPv4-header byte-walkers, USB MSC SCSI responses, PNG / BMP / TGA / JPEG header validators, ELF / PE-image validators, NTFS metadata walker, exFAT metadata walker, ext4 metadata walker, ACPI table walker, ACPI AML namespace walker, IEEE 802.11 management-frame walker, Bluetooth HCI walker, SMBIOS table walker, PCI / PCIe capability list walkers, Multiboot2 info-structure walker, TLS 1.2 record + handshake walker, VT/ANSI escape parser, NVIDIA GSP firmware-image (nvfw_bin_hdr) parser, AMD GFX9+ microcode-image (gfx_firmware_header_v1_0) parser, Intel iwlwifi TLV firmware parser, Realtek rtlwifi/rtw88/rtw89 firmware-header parser, and Broadcom b43 firmware-record-stream parser.
 >
-> All twenty-four crates have a current C++ caller; there are no skeleton crates left in this slice.
+> All twenty-six crates have a current C++ caller; there are no skeleton crates left in this slice.
 
 ## Overview
 
@@ -260,7 +260,9 @@ The repository now has one shared Rust foundation **and actual Rust subsystem co
   is rejected. `kernel/mm/frame_allocator.cpp::ForEachMmapEntry`
   delegates every cursor advance to the crate.
 - `/cmake/DuetOSRust.cmake` exposes `duetos_add_rust_staticlib(...)`, used by
-  `/kernel/rust/CMakeLists.txt` to build the aggregate Rust link unit.
+  `/kernel/rust/CMakeLists.txt` to build the aggregate Rust link unit. Its input
+  list is derived from the root workspace by `tools/test/check-rust-ffi.py`; a
+  missing aggregate dependency or non-member dependency stops configuration.
 
 ## Lint + format policy
 
@@ -277,6 +279,43 @@ C++ Allman convention does not bleed in. The pin lives in
 runs `cargo fmt --check`, `cargo clippy -- -D warnings`, and a host
 unit-test smoke (`tools/dev/cargo-host-test.sh`) against every crate
 that ships `#[cfg(test)]` modules.
+
+`python tools/test/check-rust-ffi.py` is the separate build-truth and FFI
+boundary audit. It inventories every explicit workspace member and checks four
+contracts:
+
+1. The aggregate crate has one local dependency and one `pub use` for every
+   other workspace member, with no extras.
+2. Rust sources, hand-written headers, manifests, build scripts, Cargo config,
+   the lockfile, and the pinned toolchain are all visible to the CMake archive
+   dependency graph.
+3. Every raw-pointer export is an `unsafe extern fn` with an inventoried ABI; a
+   safe export is accepted only by exact name in the checker's scalar-only
+   allowlist, and a signature change away from C scalars invalidates that entry. Exported
+   functions using `C`, `C-unwind`, or `system` ABI spellings are inventoried;
+   any other explicit extern ABI is a hard finding (`FFI014`).
+4. Rust export symbol names and each crate's hand-written C declaration names
+   agree. `FFI003` also applies a conservative lexical check for direct helper
+   signatures that return an unconstrained generic or `'static` borrow from a
+   raw pointer.
+
+The normal audit exits nonzero for either build errors or FFI findings. CMake
+uses the path-only emit mode: it still fails closed on workspace/build-graph
+errors, while existing FFI findings remain an explicit hardening backlog rather
+than being silently grandfathered into the safe-export allowlist.
+
+Canonical cross-language signature parity (arity, C/Rust type mapping, and
+pointer constness) is not implemented yet. The audit reports that omission on
+every run as a standing note (`NOTE FFI013`), which prints but does not fail the
+gate -- it is a scope limit of the audit, not a defect in the tree, and a check
+that can never go green cannot distinguish a regression from the known gap.
+Symbol-name parity must not be interpreted as proof that the declarations are
+ABI-identical.
+
+`FFI003` is a bounded source-signature heuristic, not a Rust borrow/lifetime
+proof. It deliberately catches the current unconstrained helper pattern and may
+need extension for macro-generated or type-aliased signatures; every FFI wall
+still requires independent unsafe-code review.
 
 ## Host unit tests
 
@@ -304,15 +343,26 @@ the `HOST_TEST_CRATES` list at the top of the script.
    duplicate `core` / `alloc` symbols.
 6. Add the hand-written header path to `kernel/CMakeLists.txt` if C++ code needs
    to include it directly, then expose C++ wrappers through the owning subsystem
-   directory.
+   directory. Do not add a second source/header list to
+   `/kernel/rust/CMakeLists.txt`; CMake derives those inputs from the workspace.
 
 ## CMake shape
 
 Only `/kernel/rust/CMakeLists.txt` calls `duetos_add_rust_staticlib(...)`. It
-builds the aggregate `duetos_kernel_rust` staticlib and tracks all subsystem
-Rust sources as extra dependencies. `kernel/CMakeLists.txt` links that one `.a`
-into both kernel ELF stages and includes each subsystem's hand-written C header
-directory for C++ wrappers.
+builds the aggregate `duetos_kernel_rust` staticlib. Before defining the custom
+command, `duetos_collect_rust_workspace_depends(...)` validates the explicit
+workspace/aggregate relationship and derives all current member source, header,
+manifest, and build inputs. `CONFIGURE_DEPENDS` globs are rooted only at those
+derived member directories so adding or removing a matching input regenerates
+the dependency list without a hand-maintained crate table. `kernel/CMakeLists.txt`
+links that one `.a` into both kernel ELF stages and includes each subsystem's
+hand-written C header directory for C++ wrappers.
+
+The custom command owns a completion stamp and declares the Cargo archive as a
+byproduct. Cargo may legitimately reuse an unchanged archive after a header- or
+checker-only dependency change; touching the stamp after the successful Cargo
+command records that completed validation without rewriting the archive or
+leaving Ninja permanently dirty.
 
 ## Profiles
 
@@ -321,3 +371,8 @@ same panic, LTO, optimization, and overflow-check behavior. Crate-local profile
 sections are ignored by cargo once a workspace root exists, so do not add them
 back to member crates. The panic handler lives in `/kernel/rust/src/panic.rs`;
 subsystem rlibs must not define their own `#[panic_handler]`.
+
+CMake accepts only `DUETOS_RUST_PROFILE=release` (Cargo output directory
+`release`) or `DUETOS_RUST_PROFILE=dev` (Cargo's special output directory
+`debug`). Any other cache value fails configuration instead of naming an output
+archive Cargo may never create.

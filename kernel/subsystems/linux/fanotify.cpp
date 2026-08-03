@@ -36,13 +36,17 @@
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
+#include "ipc/kfile.h"
 #include "mm/paging.h"
 #include "proc/process.h"
 #include "sched/sched.h"
+#include "sync/spinlock.h"
 #include "util/nospec.h"
 
 namespace duetos::subsystems::linux::internal
 {
+
+void LinuxPollEventWake();
 
 namespace
 {
@@ -82,18 +86,70 @@ struct FanEvent
 struct FanInstance
 {
     bool in_use;
-    u8 _pad[3];
+    bool closing;
+    u8 _pad[2];
     u32 refs;
+    u32 pins;
     FanMark marks[kFanotifyMarkCap];
     FanEvent ring[kFanotifyRingCap];
     u32 head;
     u32 tail;
     u32 count;
     u32 _pad2;
+    u64 generation;
+    u64 read_sequence;
     sched::WaitQueue read_wq;
 };
 
 FanInstance g_fan_pool[kFanotifyPoolCap];
+constinit sync::SpinLock g_fan_lock = {
+    .next_ticket = 0, .now_serving = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassUnclassified};
+
+struct FanPin
+{
+    u32 idx;
+    u64 generation;
+    FanInstance* instance;
+
+    explicit FanPin(u32 value, u64 expected_generation = 0) : idx(value), generation(0), instance(nullptr)
+    {
+        if (value >= kFanotifyPoolCap)
+            return;
+        sync::SpinLockGuard guard(g_fan_lock);
+        FanInstance& inst = g_fan_pool[value];
+        if (inst.in_use && !inst.closing && inst.pins != ~0U &&
+            (expected_generation == 0 || inst.generation == expected_generation))
+        {
+            ++inst.pins;
+            generation = inst.generation;
+            instance = &inst;
+        }
+    }
+
+    ~FanPin() { Release(); }
+
+    void Release()
+    {
+        if (instance == nullptr)
+            return;
+        sync::SpinLockGuard guard(g_fan_lock);
+        FanInstance& inst = g_fan_pool[idx];
+        if (inst.pins > 0)
+            --inst.pins;
+        if (inst.pins == 0 && inst.refs == 0)
+        {
+            inst.in_use = false;
+            inst.closing = false;
+            inst.count = 0;
+            inst.head = 0;
+            inst.tail = 0;
+        }
+        generation = 0;
+        instance = nullptr;
+    }
+
+    explicit operator bool() const { return instance != nullptr; }
+};
 
 bool FanPathEqual(const char* a, const char* b)
 {
@@ -103,6 +159,30 @@ bool FanPathEqual(const char* a, const char* b)
         ++b;
     }
     return *a == '\0' && *b == '\0';
+}
+
+void AdvanceReadSequenceLocked(FanInstance& inst)
+{
+    const u64 previous = __atomic_load_n(&inst.read_sequence, __ATOMIC_RELAXED);
+    if (previous != ~u64{0})
+        __atomic_store_n(&inst.read_sequence, previous + 1, __ATOMIC_RELEASE);
+}
+
+sched::WaitQueueBlockResult WaitForReadSequence(FanInstance& inst, u64 observed_sequence)
+{
+    if (observed_sequence == ~u64{0})
+        return sched::WaitQueueBlockTimeoutCancellable(&inst.read_wq, 1);
+    return sched::WaitQueueBlockIfSequenceUnchangedCancellable(&inst.read_wq, &inst.read_sequence, observed_sequence);
+}
+
+void WakeReadWaiters(FanInstance& inst)
+{
+    constexpr u64 kRflagsInterruptEnable = 1ULL << 9;
+    const bool interrupts_were_enabled = (arch::ReadRflags() & kRflagsInterruptEnable) != 0;
+    arch::Cli();
+    sched::WaitQueueWakeAll(&inst.read_wq);
+    if (interrupts_were_enabled)
+        arch::Sti();
 }
 
 void FanCopyPath(const char* src, char (&dst)[kFanotifyPathCap])
@@ -141,26 +221,26 @@ u64 MaskInotifyToFan(u32 in_mask)
 
 i32 FanAlloc()
 {
-    arch::Cli();
+    sync::SpinLockGuard guard(g_fan_lock);
     for (u32 i = 0; i < kFanotifyPoolCap; ++i)
     {
-        if (!g_fan_pool[i].in_use)
+        if (!g_fan_pool[i].in_use && g_fan_pool[i].generation != ~u64{0})
         {
             FanInstance& inst = g_fan_pool[i];
+            ++inst.generation;
+            AdvanceReadSequenceLocked(inst);
             inst.in_use = true;
+            inst.closing = false;
             inst.refs = 1;
+            inst.pins = 0;
             for (u32 m = 0; m < kFanotifyMarkCap; ++m)
                 inst.marks[m].in_use = false;
             inst.head = 0;
             inst.tail = 0;
             inst.count = 0;
-            inst.read_wq.head = nullptr;
-            inst.read_wq.tail = nullptr;
-            arch::Sti();
             return static_cast<i32>(i);
         }
     }
-    arch::Sti();
     return -1;
 }
 
@@ -175,12 +255,14 @@ void FanotifyPublishFromInotify(const char* path, u32 in_mask)
     if (path == nullptr || path[0] == '\0' || in_mask == 0)
         return;
     const u64 fan_mask = MaskInotifyToFan(in_mask);
-    arch::Cli();
+    u32 wake_mask = 0;
+    auto lock_flags = sync::SpinLockAcquire(g_fan_lock);
     for (u32 i = 0; i < kFanotifyPoolCap; ++i)
     {
         FanInstance& inst = g_fan_pool[i];
         if (!inst.in_use)
             continue;
+        bool published = false;
         for (u32 m = 0; m < kFanotifyMarkCap; ++m)
         {
             FanMark& mk = inst.marks[m];
@@ -239,95 +321,132 @@ void FanotifyPublishFromInotify(const char* path, u32 in_mask)
             FanCopyPath(path, e.name);
             inst.head = (inst.head + 1) % kFanotifyRingCap;
             ++inst.count;
+            AdvanceReadSequenceLocked(inst);
+            published = true;
         }
-        if (inst.count > 0)
-            sched::WaitQueueWakeAll(&inst.read_wq);
+        if (published)
+            wake_mask |= (1U << i);
     }
-    arch::Sti();
+    sync::SpinLockRelease(g_fan_lock, lock_flags);
+    for (u32 i = 0; i < kFanotifyPoolCap; ++i)
+    {
+        if ((wake_mask & (1U << i)) != 0)
+            WakeReadWaiters(g_fan_pool[i]);
+    }
+    if (wake_mask != 0)
+        LinuxPollEventWake();
 }
 
 void FanotifyRetain(u32 idx)
 {
     if (idx >= kFanotifyPoolCap)
         return;
-    arch::Cli();
-    if (g_fan_pool[idx].in_use)
+    sync::SpinLockGuard guard(g_fan_lock);
+    if (g_fan_pool[idx].in_use && !g_fan_pool[idx].closing)
         ++g_fan_pool[idx].refs;
-    arch::Sti();
 }
 
 void FanotifyRelease(u32 idx)
 {
     if (idx >= kFanotifyPoolCap)
         return;
-    arch::Cli();
+    bool wake = false;
+    const sync::IrqFlags flags = sync::SpinLockAcquire(g_fan_lock);
     FanInstance& inst = g_fan_pool[idx];
     if (!inst.in_use || inst.refs == 0)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_fan_lock, flags);
         return;
     }
     --inst.refs;
     if (inst.refs == 0)
     {
-        sched::WaitQueueWakeAll(&inst.read_wq);
-        inst.in_use = false;
+        inst.closing = true;
+        AdvanceReadSequenceLocked(inst);
+        wake = true;
         for (u32 m = 0; m < kFanotifyMarkCap; ++m)
             inst.marks[m].in_use = false;
-        inst.count = 0;
+        if (inst.pins == 0)
+        {
+            inst.in_use = false;
+            inst.closing = false;
+            inst.count = 0;
+            inst.head = 0;
+            inst.tail = 0;
+        }
     }
-    arch::Sti();
+    sync::SpinLockRelease(g_fan_lock, flags);
+    if (wake)
+    {
+        WakeReadWaiters(inst);
+        LinuxPollEventWake();
+    }
 }
 
-i64 FanotifyRead(u32 idx, u64 user_dst, u64 len)
+i64 FanotifyRead(u32 idx, u64 user_dst, u64 len, bool nonblocking)
 {
     if (idx >= kFanotifyPoolCap)
         return kEINVAL;
-    FanInstance& inst = g_fan_pool[idx];
-    arch::Cli();
-    while (inst.in_use && inst.count == 0)
+    u64 expected_generation = 0;
+    while (true)
     {
-        sched::WaitQueueBlock(&inst.read_wq);
-        arch::Cli();
+        FanPin pin(idx, expected_generation);
+        if (!pin)
+            return 0;
+        if (expected_generation == 0)
+            expected_generation = pin.generation;
+        auto lock_flags = sync::SpinLockAcquire(g_fan_lock);
+        FanInstance& inst = *pin.instance;
+        if (!inst.in_use || inst.closing || inst.generation != expected_generation)
+        {
+            sync::SpinLockRelease(g_fan_lock, lock_flags);
+            return 0;
+        }
+        if (inst.count == 0)
+        {
+            const u64 observed_sequence = __atomic_load_n(&inst.read_sequence, __ATOMIC_ACQUIRE);
+            sync::SpinLockRelease(g_fan_lock, lock_flags);
+            if (nonblocking)
+                return kEAGAIN;
+            pin.Release();
+            if (WaitForReadSequence(inst, observed_sequence) == sched::WaitQueueBlockResult::Cancelled)
+                return kEINTR;
+            continue;
+        }
+        u8 stage[256];
+        u64 emitted = 0;
+        while (inst.count > 0)
+        {
+            const FanEvent& e = inst.ring[inst.tail];
+            constexpr u32 kRecord = 24;
+            if (emitted + kRecord > sizeof(stage) || emitted + kRecord > len)
+                break;
+            u8* p = stage + emitted;
+            const u32 event_len = e.event_len;
+            for (u32 i = 0; i < 4; ++i)
+                p[i] = static_cast<u8>((event_len >> (i * 8)) & 0xFF);
+            p[4] = 3; // FANOTIFY_METADATA_VERSION
+            p[5] = 0; // reserved
+            p[6] = 24;
+            p[7] = 0; // metadata_len = 24
+            for (u32 i = 0; i < 8; ++i)
+                p[8 + i] = static_cast<u8>((e.mask >> (i * 8)) & 0xFF);
+            // fd = -1 (FAN_NOFD) — sub-GAP
+            for (u32 i = 0; i < 4; ++i)
+                p[16 + i] = 0xFF;
+            for (u32 i = 0; i < 4; ++i)
+                p[20 + i] = static_cast<u8>((e.pid >> (i * 8)) & 0xFF);
+            emitted += kRecord;
+            inst.tail = (inst.tail + 1) % kFanotifyRingCap;
+            --inst.count;
+        }
+        sync::SpinLockRelease(g_fan_lock, lock_flags);
+        if (emitted == 0)
+            return kEAGAIN;
+        if (!mm::CopyToUser(reinterpret_cast<void*>(user_dst), stage, emitted))
+            return kEFAULT;
+        return static_cast<i64>(emitted);
     }
-    if (!inst.in_use)
-    {
-        arch::Sti();
-        return 0;
-    }
-    u8 stage[256];
-    u64 emitted = 0;
-    while (inst.count > 0)
-    {
-        const FanEvent& e = inst.ring[inst.tail];
-        constexpr u32 kRecord = 24;
-        if (emitted + kRecord > sizeof(stage) || emitted + kRecord > len)
-            break;
-        u8* p = stage + emitted;
-        const u32 event_len = e.event_len;
-        for (u32 i = 0; i < 4; ++i)
-            p[i] = static_cast<u8>((event_len >> (i * 8)) & 0xFF);
-        p[4] = 3; // FANOTIFY_METADATA_VERSION
-        p[5] = 0; // reserved
-        p[6] = 24;
-        p[7] = 0; // metadata_len = 24
-        for (u32 i = 0; i < 8; ++i)
-            p[8 + i] = static_cast<u8>((e.mask >> (i * 8)) & 0xFF);
-        // fd = -1 (FAN_NOFD) — sub-GAP
-        for (u32 i = 0; i < 4; ++i)
-            p[16 + i] = 0xFF;
-        for (u32 i = 0; i < 4; ++i)
-            p[20 + i] = static_cast<u8>((e.pid >> (i * 8)) & 0xFF);
-        emitted += kRecord;
-        inst.tail = (inst.tail + 1) % kFanotifyRingCap;
-        --inst.count;
-    }
-    arch::Sti();
-    if (emitted == 0)
-        return kEAGAIN;
-    if (!mm::CopyToUser(reinterpret_cast<void*>(user_dst), stage, emitted))
-        return kEFAULT;
-    return static_cast<i64>(emitted);
 }
 
 // =====================================================
@@ -337,33 +456,41 @@ i64 FanotifyRead(u32 idx, u64 user_dst, u64 len)
 i64 DoFanotifyInit(u64 flags, u64 event_f_flags)
 {
     constexpr u64 kFAN_CLOEXEC = 0x1;
+    constexpr u64 kFAN_NONBLOCK = 0x2;
+    constexpr u64 kONonblock = 0x800;
+    // v0 emits FAN_NOFD metadata, so event_f_flags has no file descriptor to
+    // apply to yet. FAN_NONBLOCK controls the notification-group fd itself.
     (void)event_f_flags;
     core::Process* p = core::CurrentProcess();
     if (p == nullptr)
         return kEPERM;
-    const i32 fd = core::LinuxFdAllocLowest(p, 3);
-    if (fd < 0)
-        return kEMFILE;
-    p->linux_fds[fd].state = 15; // reserve
     const i32 idx = FanAlloc();
     if (idx < 0)
-    {
-        p->linux_fds[fd].state = 0;
         return kENFILE;
-    }
-    p->linux_fds[fd].flags = 0;
-    p->linux_fds[fd].first_cluster = static_cast<u32>(idx);
-    p->linux_fds[fd].size = 0;
-    p->linux_fds[fd].offset = 0;
-    p->linux_fds[fd].path[0] = '\0';
-    if (!core::LinuxFdAttachKFile(p, static_cast<u32>(fd), /*kind=*/15, static_cast<u32>(idx), &FanotifyRelease))
+
+    auto kfile_result = ipc::KFileCreate(ipc::KFileKind::Fanotify, static_cast<u32>(idx), &FanotifyRelease, nullptr, 0);
+    if (!kfile_result.has_value())
     {
-        p->linux_fds[fd].state = 0;
         FanotifyRelease(static_cast<u32>(idx));
         return kENOMEM;
     }
-    if ((flags & kFAN_CLOEXEC) != 0)
-        core::LinuxFdSetCloexec(p, static_cast<u32>(fd), true);
+
+    core::Process::LinuxFd payload{};
+    payload.state = 15;
+    payload.first_cluster = static_cast<u32>(idx);
+    core::LinuxFdPrepared prepared{};
+    const u32 status_flags = (flags & kFAN_NONBLOCK) != 0 ? kONonblock : 0;
+    if (!core::LinuxFdPrepare(&prepared, payload, &kfile_result.value()->base, status_flags))
+    {
+        ipc::KObjectRelease(&kfile_result.value()->base);
+        return kENFILE;
+    }
+    const i32 fd = core::LinuxFdBindLowest(p, 3, &prepared, (flags & kFAN_CLOEXEC) != 0);
+    if (fd < 0)
+    {
+        core::LinuxFdPreparedRelease(&prepared);
+        return kEMFILE;
+    }
     arch::SerialWrite("[linux/fanotify] init fd=");
     arch::SerialWriteHex(static_cast<u64>(fd));
     arch::SerialWrite(" idx=");
@@ -383,32 +510,44 @@ i64 DoFanotifyMark(u64 fd, u64 flags, u64 mask, u64 dirfd, u64 user_path)
         return kEBADF;
     // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
     fd = util::MaskedIndex(fd, 16);
-    if (p->linux_fds[fd].state != 15)
+    core::LinuxFdAcquired acquired{};
+    if (!core::LinuxFdAcquire(p, static_cast<u32>(fd), 15, &acquired))
         return kEBADF;
-    const u32 idx = p->linux_fds[fd].first_cluster;
+    const u32 idx = acquired.snapshot.first_cluster;
     if (idx >= kFanotifyPoolCap)
+    {
+        core::LinuxFdAcquiredRelease(&acquired);
         return kEINVAL;
+    }
     char path[kFanotifyPathCap] = {};
     if (user_path != 0)
     {
         const auto copy = mm::CopyUserCString(path, sizeof(path), reinterpret_cast<const void*>(user_path));
         if (copy.status == mm::UserStringCopyStatus::Fault || copy.status == mm::UserStringCopyStatus::BadArgument)
+        {
+            core::LinuxFdAcquiredRelease(&acquired);
             return kEFAULT;
+        }
         if (copy.status == mm::UserStringCopyStatus::NoTerminator)
+        {
+            core::LinuxFdAcquiredRelease(&acquired);
             return kENAMETOOLONG;
+        }
     }
-    arch::Cli();
-    FanInstance& inst = g_fan_pool[idx];
+    FanPin pin(idx);
+    core::LinuxFdAcquiredRelease(&acquired);
+    if (!pin)
+        return kEBADF;
+    sync::SpinLockGuard guard(g_fan_lock);
+    FanInstance& inst = *pin.instance;
     if (!inst.in_use)
     {
-        arch::Sti();
         return kEBADF;
     }
     if (flags & kFanMarkFlush)
     {
         for (u32 m = 0; m < kFanotifyMarkCap; ++m)
             inst.marks[m].in_use = false;
-        arch::Sti();
         return 0;
     }
     if (flags & kFanMarkRemove)
@@ -416,12 +555,10 @@ i64 DoFanotifyMark(u64 fd, u64 flags, u64 mask, u64 dirfd, u64 user_path)
         for (u32 m = 0; m < kFanotifyMarkCap; ++m)
             if (inst.marks[m].in_use && FanPathEqual(inst.marks[m].path, path))
                 inst.marks[m].in_use = false;
-        arch::Sti();
         return 0;
     }
     if ((flags & kFanMarkAdd) == 0 && flags != 0)
     {
-        arch::Sti();
         return kEINVAL;
     }
     // Add path (default behaviour when neither REMOVE nor FLUSH set).
@@ -430,7 +567,6 @@ i64 DoFanotifyMark(u64 fd, u64 flags, u64 mask, u64 dirfd, u64 user_path)
         if (inst.marks[m].in_use && FanPathEqual(inst.marks[m].path, path))
         {
             inst.marks[m].mask |= mask;
-            arch::Sti();
             return 0;
         }
     }
@@ -441,11 +577,9 @@ i64 DoFanotifyMark(u64 fd, u64 flags, u64 mask, u64 dirfd, u64 user_path)
             inst.marks[m].in_use = true;
             inst.marks[m].mask = mask;
             FanCopyPath(path, inst.marks[m].path);
-            arch::Sti();
             return 0;
         }
     }
-    arch::Sti();
     return kENOMEM;
 }
 

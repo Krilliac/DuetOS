@@ -10,9 +10,8 @@
  *   - DrainSendBuffer / Retransmit helpers used by the public API
  *     and the timer task.
  *
- * Everything in here runs under arch::Cli (single-CPU lock). Callers
- * that re-enter the state machine through the public API are
- * responsible for the lock.
+ * Everything in here runs under the shared IRQ-save TCB spinlock.
+ * Callers that enter the state machine are responsible for holding it.
  */
 
 #include "net/tcp.h"
@@ -34,9 +33,8 @@ namespace duetos::net::tcp
 namespace internal
 {
 
-// Forward declaration of IfaceTx-equivalent — stack.cpp has the
-// firewall-gated egress path. We don't reach past the gate.
-extern "C" bool DuetosNetIfaceTx(u32 iface_index, const void* frame, u64 frame_len);
+// Persistent TCB work reaches the stack only through generation-checked
+// NetStackTransmit; it never resolves a replacement from an iface index.
 
 // Pseudo-header TCP checksum (RFC-793).
 u16 ChecksumTcp(Ipv4Address src, Ipv4Address dst, const u8* tcp, u64 tcp_len)
@@ -405,9 +403,8 @@ bool SendSegment(Tcb& t, u8 flags, u32 seq, u32 ack, const u8* payload, u32 payl
     // Ethernet.
     for (u32 i = 0; i < 6; ++i)
         frame[i] = t.peer_mac.octets[i];
-    MacAddress local_mac = InterfaceMac(t.iface_index);
     for (u32 i = 0; i < 6; ++i)
-        frame[6 + i] = local_mac.octets[i];
+        frame[6 + i] = t.local_mac.octets[i];
     frame[12] = 0x08;
     frame[13] = 0x00;
     // IPv4.
@@ -467,7 +464,7 @@ bool SendSegment(Tcb& t, u8 flags, u32 seq, u32 ack, const u8* payload, u32 payl
     tcp[16] = u8(ck >> 8);
     tcp[17] = u8(ck & 0xFF);
 
-    const bool ok = DuetosNetIfaceTx(t.iface_index, frame, frame_len);
+    const bool ok = NetStackTransmit(t.interface_binding, frame, frame_len);
     if (ok)
     {
         ++g_stats.segs_tx;
@@ -477,14 +474,15 @@ bool SendSegment(Tcb& t, u8 flags, u32 seq, u32 ack, const u8* payload, u32 payl
     return ok;
 }
 
-void SendStandaloneRst(u32 iface_index, const MacAddress& peer_mac, Ipv4Address peer_ip, u16 peer_port, u16 local_port,
-                       u32 peer_seq, u32 peer_ack, u8 peer_flags)
+void SendStandaloneRst(const NetInterfaceSnapshot& interface, const MacAddress& peer_mac, Ipv4Address peer_ip,
+                       u16 peer_port, u16 local_port, u32 peer_seq, u32 peer_ack, u8 peer_flags)
 {
     // Build a synthetic TCB just to drive SendSegment. The TCB is
     // a local stack object — does NOT touch the table.
     Tcb t = {};
-    t.iface_index = iface_index;
-    t.local_ip = InterfaceIp(iface_index);
+    t.interface_binding = interface.binding;
+    t.local_ip = interface.ip;
+    t.local_mac = interface.mac;
     t.peer_ip = peer_ip;
     t.local_port = local_port;
     t.peer_port = peer_port;
@@ -691,15 +689,21 @@ void NotifyParentAccept(Tcb& child)
     if (parent->backlog_count >= parent->backlog_max)
     {
         ++g_stats.backlog_drops;
+        // The handshake already completed, but there is no durable place
+        // for this child. Reject it immediately; leaving an established
+        // child with parent_listener set would consume a global TCB slot
+        // forever without ever becoming accept()able.
+        SendSegment(child, kFlagRst | kFlagAck, child.snd_nxt, child.rcv_nxt, nullptr, 0);
+        ++g_stats.rst_tx;
+        DropTcb(u32(&child - &g_tcbs[0]));
         return;
     }
     parent->backlog_ring[parent->backlog_head] = MakeId(u32(&child - &g_tcbs[0]), child.generation);
     parent->backlog_head = (parent->backlog_head + 1) % kListenBacklogMax;
     ++parent->backlog_count;
     // The child graduates from half-open to accept-queued, so it stops
-    // counting against the SYN backlog. Note the early return above
-    // (accept ring full) deliberately does NOT do this: that child is
-    // established but unaccepted and still occupies a listener slot.
+    // counting against the SYN backlog. The full-queue path above drops
+    // the child, and DropTcb releases the half-open accounting there.
     if (parent->syn_backlog_count > 0)
         --parent->syn_backlog_count;
     child.parent_listener = 0; // one-shot push
@@ -1406,8 +1410,9 @@ void DeliverSegment(u32 idx, const MacAddress& peer_mac, Ipv4Address peer_ip, co
         sched::WaitQueueWakeAll(&t.write_wq);
 }
 
-void HandleListenSyn(u32 listener_idx, u32 iface_index, const MacAddress& peer_mac, Ipv4Address peer_ip, u16 peer_port,
-                     u16 local_port, u32 peer_seq, u8 peer_flags, const ParsedOptions& po)
+void HandleListenSyn(u32 listener_idx, const NetInterfaceSnapshot& interface, const MacAddress& peer_mac,
+                     Ipv4Address peer_ip, u16 peer_port, u16 local_port, u32 peer_seq, u8 peer_flags,
+                     const ParsedOptions& po, sync::IrqFlags& lock_flags)
 {
     Tcb& parent = g_tcbs[listener_idx];
     // Gate on completed-awaiting-accept AND still-handshaking children.
@@ -1432,28 +1437,59 @@ void HandleListenSyn(u32 listener_idx, u32 iface_index, const MacAddress& peer_m
     }
     Tcb& child = g_tcbs[idx];
     const u8 gen = u8(child.generation + 1);
-    if (!AllocTcbBuffers(child))
-    {
-        ++g_stats.backlog_drops;
-        return;
-    }
+    const TcbId parent_id = MakeId(listener_idx, parent.generation);
     ResetTcbStorage(child);
     child.generation = gen;
     child.in_use = true;
+    child.initializing = true;
+    sync::SpinLockRelease(g_tcb_lock, lock_flags);
+    if (!AllocTcbBuffers(child))
+    {
+        lock_flags = sync::SpinLockAcquire(g_tcb_lock);
+        child.in_use = false;
+        child.initializing = false;
+        ++g_stats.backlog_drops;
+        return;
+    }
+    lock_flags = sync::SpinLockAcquire(g_tcb_lock);
+    Tcb* current_parent = TcbFromId(parent_id);
+    if (current_parent == nullptr || !current_parent->is_listener)
+    {
+        sync::SpinLockRelease(g_tcb_lock, lock_flags);
+        FreeTcbBuffers(child);
+        lock_flags = sync::SpinLockAcquire(g_tcb_lock);
+        child.in_use = false;
+        child.initializing = false;
+        ++g_stats.backlog_drops;
+        return;
+    }
+    Tcb& parent_after_alloc = *current_parent;
+    if (parent_after_alloc.backlog_count + parent_after_alloc.syn_backlog_count >= parent_after_alloc.backlog_max)
+    {
+        sync::SpinLockRelease(g_tcb_lock, lock_flags);
+        FreeTcbBuffers(child);
+        lock_flags = sync::SpinLockAcquire(g_tcb_lock);
+        child.in_use = false;
+        child.initializing = false;
+        ++g_stats.backlog_drops;
+        return;
+    }
+    child.initializing = false;
     child.is_listener = false;
     child.state = State::SynRcvd;
-    child.iface_index = iface_index;
-    child.local_ip = InterfaceIp(iface_index);
+    child.interface_binding = interface.binding;
+    child.local_ip = interface.ip;
+    child.local_mac = interface.mac;
     child.peer_ip = peer_ip;
     child.local_port = local_port;
     child.peer_port = peer_port;
     child.peer_mac = peer_mac;
     child.refs = 1;
-    child.parent_listener = MakeId(listener_idx, parent.generation);
+    child.parent_listener = parent_id;
     // This child now occupies one of the listener's backlog slots and
     // holds it until the handshake completes (NotifyParentAccept) or
     // the Tcb is torn down (DropTcb). Both of those release it.
-    ++parent.syn_backlog_count;
+    ++parent_after_alloc.syn_backlog_count;
     // ML-02 (net-0): RFC 6528 keyed ISN — see GenIsn (tcp.cpp).
     child.iss = GenIsn(child.local_ip, child.local_port, child.peer_ip, child.peer_port);
     child.snd_una = child.iss;
@@ -1488,7 +1524,11 @@ void OnSegment(u32 iface_index, const MacAddress& peer_mac, Ipv4Address peer_ip,
     using namespace internal;
     if (tcp == nullptr || tcp_len < 20)
         return;
-    arch::Cli();
+    const StackInterfacePinGuard interface_guard(iface_index);
+    if (!interface_guard)
+        return;
+    const NetInterfaceSnapshot& interface = interface_guard.snapshot();
+    auto lock_flags = sync::SpinLockAcquire(g_tcb_lock);
     ++g_stats.segs_rx;
     const u16 src_port = (u16(tcp[0]) << 8) | u16(tcp[1]);
     const u16 dst_port = (u16(tcp[2]) << 8) | u16(tcp[3]);
@@ -1498,39 +1538,59 @@ void OnSegment(u32 iface_index, const MacAddress& peer_mac, Ipv4Address peer_ip,
     const u8 flags = tcp[13];
     if (data_off_bytes < 20 || data_off_bytes > tcp_len)
     {
-        arch::Sti();
+        sync::SpinLockRelease(g_tcb_lock, lock_flags);
         return;
     }
-    Ipv4Address local_ip = InterfaceIp(iface_index);
+    const Ipv4Address local_ip = interface.ip;
 
     // Look up an existing TCB by exact 5-tuple.
-    const u32 idx = LookupExact(iface_index, local_ip, dst_port, peer_ip, src_port);
+    const u32 idx = LookupExact(interface.binding, local_ip, dst_port, peer_ip, src_port);
     if (idx != kTcbCap)
     {
         DeliverSegment(idx, peer_mac, peer_ip, tcp, tcp_len, ip_ce);
-        arch::Sti();
+        sync::SpinLockRelease(g_tcb_lock, lock_flags);
         return;
     }
 
     // No matching TCB. If it's a SYN aimed at a listener, accept.
     if ((flags & kFlagSyn) != 0 && (flags & kFlagAck) == 0)
     {
-        const u32 lidx = LookupListener(dst_port);
+        const u32 lidx = LookupListener(interface.binding, dst_port);
         if (lidx != kTcbCap)
         {
             const u8* opts = tcp + 20;
             const u32 opts_len = data_off_bytes - 20;
             ParsedOptions po = ParseOptions(opts, opts_len);
-            HandleListenSyn(lidx, iface_index, peer_mac, peer_ip, src_port, dst_port, seq, flags, po);
-            arch::Sti();
+            HandleListenSyn(lidx, interface, peer_mac, peer_ip, src_port, dst_port, seq, flags, po, lock_flags);
+            sync::SpinLockRelease(g_tcb_lock, lock_flags);
             return;
         }
     }
 
     // Anything else gets an RST (unless it itself is an RST).
     if ((flags & kFlagRst) == 0)
-        SendStandaloneRst(iface_index, peer_mac, peer_ip, src_port, dst_port, seq, ack, flags);
-    arch::Sti();
+        SendStandaloneRst(interface, peer_mac, peer_ip, src_port, dst_port, seq, ack, flags);
+    sync::SpinLockRelease(g_tcb_lock, lock_flags);
+}
+
+u32 RetireInterface(NetInterfaceBinding binding)
+{
+    using namespace internal;
+    if (!NetInterfaceBindingIsValid(binding))
+        return 0;
+
+    auto lock_flags = sync::SpinLockAcquire(g_tcb_lock);
+    u32 retired = 0;
+    for (u32 i = 0; i < kTcbCap; ++i)
+    {
+        Tcb& t = g_tcbs[i];
+        if (!t.in_use || !NetInterfaceBindingEqual(t.interface_binding, binding))
+            continue;
+        DropTcb(i);
+        ++retired;
+    }
+    sync::SpinLockRelease(g_tcb_lock, lock_flags);
+    return retired;
 }
 
 } // namespace duetos::net::tcp

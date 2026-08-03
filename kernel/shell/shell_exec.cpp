@@ -582,8 +582,8 @@ void CmdUnzip(u32 argc, char** argv)
         {
             char dirpath[300];
             duetos::u32 di = 0;
-            const char* prefix = "/unzip/";
-            while (prefix[di] != '\0' && di < sizeof(dirpath) - 1)
+            constexpr char prefix[] = "/unzip/";
+            while (di < sizeof(prefix) - 1 && di < sizeof(dirpath) - 1 && prefix[di] != '\0')
             {
                 dirpath[di] = prefix[di];
                 ++di;
@@ -614,8 +614,8 @@ void CmdUnzip(u32 argc, char** argv)
         // does NOT auto-mkdir).
         char outpath[300];
         duetos::u32 oi = 0;
-        const char* prefix = "/unzip/";
-        while (prefix[oi] != '\0' && oi < sizeof(outpath) - 1)
+        constexpr char prefix[] = "/unzip/";
+        while (oi < sizeof(prefix) - 1 && oi < sizeof(outpath) - 1 && prefix[oi] != '\0')
         {
             outpath[oi] = prefix[oi];
             ++oi;
@@ -808,6 +808,9 @@ void CmdReadelf(u32 argc, char** argv)
 // ---------------------------------------------------------------
 namespace
 {
+// Caller holds ScopedProcessRuntimeAccess. The miss ledger is inline and
+// loader-published, but the admission requirement makes triage semantics
+// explicitly live-runtime-only and excludes an Exiting teardown race.
 void PrintProcessTriage(const duetos::core::Process* p, u64 pid)
 {
     ConsoleWrite("[pe-triage] pid=");
@@ -875,10 +878,19 @@ void CmdPeTriage(u32 argc, char** argv)
             ConsoleWriteln("PE-TRIAGE: USAGE: PE-TRIAGE [PID]");
             return;
         }
-        duetos::core::Process* p = duetos::sched::SchedFindProcessByPid(pid);
+        duetos::core::ScopedProcessRef process_ref(duetos::sched::SchedFindProcessByPidRetained(pid));
+        duetos::core::Process* p = process_ref.Get();
         if (p == nullptr)
         {
             ConsoleWrite("PE-TRIAGE: NO SUCH PID: ");
+            WriteU64Dec(pid);
+            ConsoleWriteChar('\n');
+            return;
+        }
+        duetos::core::ScopedProcessRuntimeAccess runtime_access(p);
+        if (!runtime_access)
+        {
+            ConsoleWrite("PE-TRIAGE: PID EXITING: ");
             WriteU64Dec(pid);
             ConsoleWriteChar('\n');
             return;
@@ -894,15 +906,25 @@ void CmdPeTriage(u32 argc, char** argv)
             auto* c = static_cast<TriageCookie*>(ck);
             if (!info.has_process || info.owner_pid == 0)
                 return;
-            if (TriageSeen(c, info.owner_pid))
-                return;
-            duetos::core::Process* p = duetos::sched::SchedFindProcessByPid(info.owner_pid);
-            if (p == nullptr || p->win32_iat_miss_count == 0)
-                return;
-            PrintProcessTriage(p, info.owner_pid);
-            ++c->reported;
+            (void)TriageSeen(c, info.owner_pid);
         },
         &cookie);
+    // SchedEnumerate invokes its callback under g_sched_lock. Resolve and
+    // print only after that snapshot walk has returned: retained lookup
+    // re-enters the scheduler and console output may block.
+    for (u32 i = 0; i < cookie.seen_count; ++i)
+    {
+        const u64 pid = cookie.seen[i];
+        duetos::core::ScopedProcessRef process_ref(duetos::sched::SchedFindProcessByPidRetained(pid));
+        duetos::core::Process* p = process_ref.Get();
+        if (p == nullptr)
+            continue;
+        duetos::core::ScopedProcessRuntimeAccess runtime_access(p);
+        if (!runtime_access || p->win32_iat_miss_count == 0)
+            continue;
+        PrintProcessTriage(p, pid);
+        ++cookie.reported;
+    }
     if (cookie.reported == 0)
         ConsoleWriteln("PE-TRIAGE: NO WIN32 PES WITH UNRESOLVED IMPORTS");
 }

@@ -138,14 +138,11 @@ bool AppendEntry(const WirelessInventoryEntry& e)
 
 void IngestNic(const drivers::net::NicInfo& n, u64 /*nic_index*/)
 {
-    // Skip wired Ethernet — easy heuristic: drivers::net::NicIsWireless
-    // looks at subclass + family string. We mirror its logic here
-    // (without taking a dependency on the private predicate) by
-    // checking which wireless matcher claims the device.
-    const bool is_wireless = drivers::net::IwlwifiMatches(n.vendor_id, n.device_id) ||
-                             drivers::net::Rtl88xxMatches(n.vendor_id, n.device_id) ||
-                             drivers::net::Bcm43xxMatches(n.vendor_id, n.device_id) ||
-                             drivers::net::Mt76Matches(n.vendor_id, n.device_id);
+    // Candidate classification is inventory evidence, not functional
+    // admission. The four *Matches functions deliberately fail closed, so
+    // using them here would hide every unsupported adapter from diagnostics.
+    const bool is_wireless =
+        n.subclass == drivers::net::kPciSubclassOther || drivers::net::nic_ids::NicFamilyLooksWireless(n.family);
     if (!is_wireless)
         return;
 
@@ -160,19 +157,23 @@ void IngestNic(const drivers::net::NicInfo& n, u64 /*nic_index*/)
     e.driver_online = n.driver_online;
     e.fw_state = n.wireless_fw_state;
 
-    if (drivers::net::IwlwifiMatches(n.vendor_id, n.device_id))
+    if (n.vendor_id == drivers::net::kVendorIntel && drivers::net::nic_ids::IntelWirelessBackendFromDeviceId(
+                                                         n.device_id) != drivers::net::nic_ids::WirelessBackend::None)
     {
         e.expected_basename = IwlBasenameForDeviceId(n.device_id);
         e.firmware_path_hint = "/lib/firmware/intel-iwlwifi/";
         e.openness = WirelessInventoryFwOpenness::Redistributable;
     }
-    else if (drivers::net::Rtl88xxMatches(n.vendor_id, n.device_id))
+    else if (n.vendor_id == drivers::net::kVendorRealtek &&
+             drivers::net::nic_ids::RealtekWirelessBackendFromDeviceId(n.device_id) !=
+                 drivers::net::nic_ids::WirelessBackend::None)
     {
         e.expected_basename = RtlBasenameForDeviceId(n.device_id);
         e.firmware_path_hint = "/lib/firmware/realtek-rtl88xx/";
         e.openness = WirelessInventoryFwOpenness::Redistributable;
     }
-    else if (drivers::net::Bcm43xxMatches(n.vendor_id, n.device_id))
+    else if (n.vendor_id == drivers::net::kVendorBroadcom &&
+             drivers::net::nic_ids::BroadcomWirelessCandidateBackendsFromDeviceId(n.device_id) != 0)
     {
         e.expected_basename = BcmBasenameForDeviceId(n.device_id);
         e.firmware_path_hint = "/lib/firmware/broadcom-bcm43xx/  (b43-openfwwf for legacy chips)";
@@ -182,9 +183,9 @@ void IngestNic(const drivers::net::NicInfo& n, u64 /*nic_index*/)
         e.openness = (n.device_id <= 0x4329) ? WirelessInventoryFwOpenness::OpenSource
                                              : WirelessInventoryFwOpenness::Redistributable;
     }
-    else if (drivers::net::Mt76Matches(n.vendor_id, n.device_id))
+    else if (drivers::net::Mt76FamilyIsPrimaryAdapter(drivers::net::Mt76FamilyFromIdentity(n.vendor_id, n.device_id)))
     {
-        const drivers::net::Mt76Family fam = drivers::net::Mt76FamilyFromDeviceId(n.device_id);
+        const drivers::net::Mt76Family fam = drivers::net::Mt76FamilyFromIdentity(n.vendor_id, n.device_id);
         e.expected_basename = drivers::net::Mt76FirmwareBasenameForFamily(fam);
         e.firmware_path_hint = "/lib/firmware/mediatek-mt76/";
         e.openness = WirelessInventoryFwOpenness::Redistributable;
@@ -278,7 +279,12 @@ void WirelessInventoryRefresh()
         g_entries[i] = {};
     const u64 nic_count = drivers::net::NicCount();
     for (u64 i = 0; i < nic_count; ++i)
-        IngestNic(drivers::net::Nic(i), i);
+    {
+        drivers::net::NicInfo nic{};
+        if (!drivers::net::NicSnapshot(i, &nic))
+            break;
+        IngestNic(nic, i);
+    }
     const u32 ath_count = drivers::net::AthHtcAdapterCount();
     for (u32 i = 0; i < ath_count; ++i)
         IngestAthHtc(drivers::net::AthHtcAdapterAt(i));

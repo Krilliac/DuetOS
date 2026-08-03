@@ -5,6 +5,7 @@
 #include "arch/x86_64/lapic.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/smp.h"
+#include "cpu/cpuhp.h"
 #include "log/klog.h"
 
 namespace duetos::cpu
@@ -40,8 +41,7 @@ constinit PerCpu g_bsp_percpu = {
     ._pad3 = 0,
     .held_locks = {},
     .held_lock_rips = {},
-    .gdb_frozen = 0,
-    ._pad4 = {},
+    .gdb_frozen_generation = 0,
     .gdb_snapshot_rip = 0,
     .gdb_snapshot_rsp = 0,
     .gdb_snapshot_rflags = 0,
@@ -238,17 +238,26 @@ PerCpu* CurrentCpu()
                 if (cand != &g_bsp_percpu)
                 {
                     // A non-BSP CPU reached kernel C++ with a
-                    // non-kernel GSBASE — a real swapgs / AP-GS gap
-                    // on THIS cpu. Recovered (correct CPU resolved),
-                    // but count it: a clean boot must stay at zero
-                    // now the AP-bring-up GS ordering + AP lidt are
-                    // fixed; a non-zero value is a regression.
+                    // non-kernel GSBASE. During the cpuhp STARTING
+                    // band up to and including StartingGsBase the AP
+                    // has no kernel GSBASE yet BY DESIGN — every
+                    // CurrentCpu() from those steps (state-lock
+                    // lockdep pushes included) resolves through this
+                    // fallback, so those hits are the expected
+                    // bring-up window, not a regression. Only a hit
+                    // AFTER the GsBase step completed is a real
+                    // swapgs / AP-GS gap; a clean boot must keep the
+                    // counter at zero. CpuhpStateRead is a lock-free
+                    // bounds-checked load, safe here.
                     // No klog / probe here — klog tags lines via
                     // CurrentCpuIdOrBsp() which would re-enter this
                     // path while GSBASE is still stale (unbounded
                     // recursion). The count is surfaced + probed from
                     // OnTimerTick, a kernel-GSBASE-safe site.
-                    __atomic_add_fetch(&g_gsbase_fallback_nonbsp, 1, __ATOMIC_RELAXED);
+                    if (CpuhpStateRead(cand->cpu_id) >= CpuhpState::StartingGsBase)
+                    {
+                        __atomic_add_fetch(&g_gsbase_fallback_nonbsp, 1, __ATOMIC_RELAXED);
+                    }
                 }
                 return cand;
             }

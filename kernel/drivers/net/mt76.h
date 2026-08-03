@@ -4,48 +4,20 @@
 #include "util/types.h"
 
 /*
- * DuetOS — MediaTek mt76 Wi-Fi driver shell, v0.
+ * MediaTek Wi-Fi inventory shell.
  *
- * Brings up the MediaTek mt76 PCIe wireless family (MT7615, MT7663,
- * MT7902, MT7915, MT7916, MT7921, MT7922, MT7925) to the level
- * where the chip is identified by a PCI ID match plus an MMIO
- * probe of the hardware-bound register at BAR0+0x0008, and the
- * device record carries a real chip-class dword.
- *
- * This is the biggest gap in the on-board Wi-Fi story today:
- * MediaTek MT7921 / MT7922 / MT7925 ship in the majority of recent
- * AMD Ryzen 6000/7000/8000 laptops, many Intel laptops, all current
- * Chromebooks, and most thin-and-lights from 2022 onward. Without
- * this scaffold those machines silently report "no wireless driver"
- * even though the firmware loader would happily stage the bytes.
- *
- * Scope (v0):
- *   - PCI ID match table for the mt76 PCIe parts; covers the
- *     Linux `mt7921e` / `mt7922e` / `mt7925e` / `mt7915e` /
- *     `mt7615e` driver families.
- *   - Soft chip identification: read MT_HW_BOUND (BAR0+0x0008);
- *     reject 0xFFFFFFFF / 0 (BAR mapping failed or chip stuck).
- *   - Request the per-family firmware blob through the kernel
- *     firmware loader; parse and log the v3 header when present.
- *   - Mark `driver_online=true`, `firmware_pending=true` until the
- *     upload state machine lands.
- *   - NetInit starts an `mt76-watch` task that polls MT_HW_BOUND at
- *     1 Hz so a hot-removed adapter flips `driver_online`.
- *
- * Out of scope (deferred):
- *   - WM (WLAN MCU) firmware ROM-patch download via PCI BAR4 mailbox.
- *   - DMA TX/RX ring setup; per-band hardware queues.
- *   - 802.11 management frames; firmware command channel.
- *   - WED (Wireless Ethernet Dispatcher) offload.
- *
- * Threading: bring-up runs on the NetInit task; watch task is a
- * regular kernel thread.
+ * Exact candidates are classified without treating BAR0+8 as a universal
+ * mt76 identity register. Mt76Matches returns false and the legacy dormant
+ * implementation cannot access MMIO, load firmware, publish driver_online,
+ * or start a watcher. MT7921 contract validation lives separately in
+ * mt7921_contract.h and stops before hardware bring-up.
  */
 
 namespace duetos::drivers::net
 {
 
 inline constexpr u16 kVendorMediaTek = 0x14C3;
+inline constexpr u16 kVendorIttim = 0x0B48;
 
 enum class Mt76Family : u8
 {
@@ -54,25 +26,142 @@ enum class Mt76Family : u8
     Mt7663 = 2,
     Mt7915 = 3, // Wi-Fi 6 (PCIe AP-grade)
     Mt7916 = 4,
+    Mt7902 = 8,
+    Mt7920 = 9,
+    Mt7927 = 10,
+    HifCompanion = 11,
     Mt7921 = 5, // Wi-Fi 6 / 6E — most common consumer chip
     Mt7922 = 6, // Wi-Fi 6E
     Mt7925 = 7, // Wi-Fi 7
 };
 
-const char* Mt76FamilyName(Mt76Family f);
-Mt76Family Mt76FamilyFromDeviceId(u16 device_id);
+constexpr const char* Mt76FamilyName(Mt76Family family)
+{
+    switch (family)
+    {
+    case Mt76Family::Mt7615:
+        return "mt7615";
+    case Mt76Family::Mt7663:
+        return "mt7663";
+    case Mt76Family::Mt7915:
+        return "mt7915";
+    case Mt76Family::Mt7916:
+        return "mt7916";
+    case Mt76Family::Mt7921:
+        return "mt7921";
+    case Mt76Family::Mt7922:
+        return "mt7922";
+    case Mt76Family::Mt7925:
+        return "mt7925";
+    case Mt76Family::Mt7902:
+        return "mt7902";
+    case Mt76Family::Mt7920:
+        return "mt7920";
+    case Mt76Family::Mt7927:
+        return "mt7927";
+    case Mt76Family::HifCompanion:
+        return "mt7915-hif-companion";
+    case Mt76Family::Unknown:
+    default:
+        return "mt76";
+    }
+}
 
-/// True iff (vendor_id, device_id) matches a MediaTek mt76 PCI ID.
-/// Used by `RunVendorProbe` to dispatch wireless bring-up.
+/// Classify exact product IDs from the current upstream PCI tables.
+/// MT7916/790A are secondary HIF functions and must not become independent
+/// NIC records. Distinct firmware/layout variants stay distinct even when
+/// they share an upstream transport implementation.
+constexpr Mt76Family Mt76FamilyFromDeviceId(u16 device_id)
+{
+    switch (device_id)
+    {
+    case 0x7615:
+    case 0x7611:
+        return Mt76Family::Mt7615;
+    case 0x7663:
+        return Mt76Family::Mt7663;
+    case 0x7915:
+        return Mt76Family::Mt7915;
+    case 0x7906:
+        return Mt76Family::Mt7916;
+    case 0x7916:
+    case 0x790A:
+        return Mt76Family::HifCompanion;
+    case 0x7961:
+    case 0x0608:
+        return Mt76Family::Mt7921;
+    case 0x7922:
+    case 0x0616:
+        return Mt76Family::Mt7922;
+    case 0x7920:
+        return Mt76Family::Mt7920;
+    case 0x7902:
+        return Mt76Family::Mt7902;
+    case 0x7925:
+    case 0x0717:
+        return Mt76Family::Mt7925;
+    case 0x7927:
+    case 0x6639:
+    case 0x0738:
+        return Mt76Family::Mt7927;
+    default:
+        return Mt76Family::Unknown;
+    }
+}
+
+/// ITTIM is accepted only for its upstream-listed 0B48:7922 rebadge.
+constexpr Mt76Family Mt76FamilyFromIdentity(u16 vendor_id, u16 device_id)
+{
+    if (vendor_id == kVendorIttim)
+        return device_id == 0x7922 ? Mt76Family::Mt7922 : Mt76Family::Unknown;
+    return vendor_id == kVendorMediaTek ? Mt76FamilyFromDeviceId(device_id) : Mt76Family::Unknown;
+}
+
+constexpr bool Mt76FamilyIsPrimaryAdapter(Mt76Family family)
+{
+    return family != Mt76Family::Unknown && family != Mt76Family::HifCompanion;
+}
+
+/// Returning nullptr for companion/unknown rows prevents a secondary HIF
+/// function from being published as a standalone network interface.
+constexpr const char* Mt76InventoryTag(Mt76Family family)
+{
+    switch (family)
+    {
+    case Mt76Family::Mt7615:
+        return "mt7615-wifi";
+    case Mt76Family::Mt7663:
+        return "mt7663-wifi";
+    case Mt76Family::Mt7915:
+        return "mt7915-wifi";
+    case Mt76Family::Mt7916:
+        return "mt7916-wifi";
+    case Mt76Family::Mt7921:
+        return "mt7921-wifi";
+    case Mt76Family::Mt7922:
+        return "mt7922-wifi";
+    case Mt76Family::Mt7925:
+        return "mt7925-wifi";
+    case Mt76Family::Mt7902:
+        return "mt7902-wifi";
+    case Mt76Family::Mt7920:
+        return "mt7920-wifi";
+    case Mt76Family::Mt7927:
+        return "mt7927-wifi";
+    case Mt76Family::HifCompanion:
+    case Mt76Family::Unknown:
+    default:
+        return nullptr;
+    }
+}
+
+/// Functional admission gate. Currently false for every candidate.
 bool Mt76Matches(u16 vendor_id, u16 device_id);
 
-/// Bring an mt76 NIC up to "chip identified, MMIO live, awaiting
-/// firmware". Idempotent. Returns true iff MT_HW_BOUND returned a
-/// plausible chip-class dword.
+/// Dormant implementation entry; fails closed while no safe profile exists.
 bool Mt76BringUp(NicInfo& n);
 
-/// Start the 1 Hz liveness watch after NetInit has copied the NIC
-/// record into the stable global NIC table.
+/// Compatibility no-op; no wireless worker is launched.
 void Mt76StartWatch(NicInfo& n);
 
 struct Mt76Stats

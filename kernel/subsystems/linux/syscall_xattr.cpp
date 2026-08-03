@@ -133,16 +133,20 @@ bool ResolveFdToPath(u64 fd, char* path_out)
         return false;
     // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
     fd = ::duetos::util::MaskedIndex(fd, 16);
-    const auto& slot = p->linux_fds[fd];
-    if (slot.state != 2 /*regular file*/)
+    ::duetos::core::LinuxFdAcquired acquired{};
+    if (!::duetos::core::LinuxFdAcquire(p, static_cast<u32>(fd), 2 /*regular file*/, &acquired))
         return false;
-    for (u32 i = 0; i < kPathMax && i < sizeof(slot.path); ++i)
+    for (u32 i = 0; i < kPathMax && i < sizeof(acquired.snapshot.path); ++i)
     {
-        path_out[i] = slot.path[i];
-        if (slot.path[i] == '\0')
+        path_out[i] = acquired.snapshot.path[i];
+        if (acquired.snapshot.path[i] == '\0')
+        {
+            ::duetos::core::LinuxFdAcquiredRelease(&acquired);
             return true;
+        }
     }
     path_out[kPathMax - 1] = '\0';
+    ::duetos::core::LinuxFdAcquiredRelease(&acquired);
     return true;
 }
 

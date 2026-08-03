@@ -7,9 +7,10 @@
  * process `kobj_handles` table.
  *
  *   SYS_SEM_CREATE  — rdi = initial count, rsi = max count.
- *                     Returns Win32 handle (0x500..) or -1.
+ *                     Returns opaque positive Win32 handle or -1.
  *   SYS_SEM_WAIT    — rdi = handle, rsi = timeout_ms.
- *                     Returns kWaitObject0 (0) or kWaitTimeout (0x102) or -1.
+ *                     Returns kWaitObject0 (0) or kWaitTimeout (0x102);
+ *                     cancellation returns -1 only for dispatcher-local unwind.
  *   SYS_SEM_RELEASE — rdi = handle, rsi = release_count.
  *                     Returns previous count, or -1 on overflow.
  */

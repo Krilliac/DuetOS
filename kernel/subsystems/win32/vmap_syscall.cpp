@@ -28,8 +28,15 @@ void DoVmap(arch::TrapFrame* frame)
         frame->rax = 0;
         return;
     }
+    if (bytes > (~u64(0) - (mm::kPageSize - 1)))
+    {
+        KLOG_WARN("win32/vmap", "DoVmap: byte-count rounding overflow");
+        frame->rax = 0;
+        return;
+    }
     const u64 pages = (bytes + mm::kPageSize - 1) / mm::kPageSize;
-    if (pages == 0 || proc->vmap_pages_used + pages > core::Process::kWin32VmapCapPages)
+    if (pages == 0 || proc->vmap_pages_used > core::Process::kWin32VmapCapPages ||
+        pages > core::Process::kWin32VmapCapPages - proc->vmap_pages_used)
     {
         KLOG_WARN_2V("win32/vmap", "DoVmap: arena cap exceeded", "pages", pages, "used",
                      static_cast<u64>(proc->vmap_pages_used));
@@ -51,11 +58,10 @@ void DoVmap(arch::TrapFrame* frame)
         const mm::PhysAddr f = mm::AllocateFrame().value_or(mm::kNullFrame);
         if (f == mm::kNullFrame)
         {
-            // OOM partway through — frames already mapped stay
-            // mapped but their VA is unreachable to the caller.
-            // Bump cursor anyway so stranded VAs are never reused
-            // (simpler than unwinding; v0 accepts the leak).
-            proc->vmap_pages_used += i;
+            // OOM partway through — unwind the prefix and leave the
+            // bump cursor unchanged so the arena remains reusable.
+            for (u64 j = 0; j < i; ++j)
+                (void)mm::AddressSpaceUnmapUserPage(proc->as, base + j * mm::kPageSize);
             arch::SerialWrite("[sys] vmap partial-oom pid=");
             arch::SerialWriteHex(proc->pid);
             arch::SerialWrite(" mapped=");
@@ -63,12 +69,20 @@ void DoVmap(arch::TrapFrame* frame)
             arch::SerialWrite("/");
             arch::SerialWriteHex(pages);
             arch::SerialWrite("\n");
-            KLOG_ERROR_2V("win32/vmap", "DoVmap: partial-OOM (frames stranded)", "mapped", i, "wanted", pages);
+            KLOG_ERROR_2V("win32/vmap", "DoVmap: partial-OOM (mapping unwound)", "mapped", i, "wanted", pages);
             frame->rax = 0;
             return;
         }
-        mm::AddressSpaceMapUserPage(proc->as, base + i * mm::kPageSize, f,
-                                    mm::kPagePresent | mm::kPageUser | mm::kPageWritable | mm::kPageNoExecute);
+        if (!mm::AddressSpaceMapUserPage(proc->as, base + i * mm::kPageSize, f,
+                                         mm::kPagePresent | mm::kPageUser | mm::kPageWritable | mm::kPageNoExecute))
+        {
+            mm::FreeFrame(f);
+            for (u64 j = 0; j < i; ++j)
+                (void)mm::AddressSpaceUnmapUserPage(proc->as, base + j * mm::kPageSize);
+            KLOG_ERROR_2V("win32/vmap", "DoVmap: map refusal", "mapped", i, "wanted", pages);
+            frame->rax = 0;
+            return;
+        }
     }
     proc->vmap_pages_used += pages;
     arch::SerialWrite("[sys] vmap ok pid=");
@@ -319,7 +333,14 @@ bool CommitPages(::duetos::core::Process* proc, ::duetos::core::Process::Win32Vm
             return false;
         }
         const PhysAddr f = f_r.value();
-        AddressSpaceMapUserPage(proc->as, r.base_va + i * kPageSize, f, page_flags);
+        if (!AddressSpaceMapUserPage(proc->as, r.base_va + i * kPageSize, f, page_flags))
+        {
+            FreeFrame(f);
+            for (u32 j = 0; j < i; ++j)
+                if ((mapped_mask & (1u << j)) != 0)
+                    AddressSpaceUnmapUserPage(proc->as, r.base_va + j * kPageSize);
+            return false;
+        }
         mapped_mask |= (1u << i);
     }
     r.committed_bits |= mapped_mask;

@@ -27,17 +27,6 @@ constexpr u64 kBadResult = static_cast<u64>(-1);
 constexpr u64 kPipeAccessInbound = 0x00000001;
 constexpr u64 kPipeAccessOutbound = 0x00000002;
 
-u64 FindFreeFileSlot(::duetos::core::Process* proc)
-{
-    using ::duetos::core::Process;
-    for (u64 i = 0; i < Process::kWin32HandleCap; ++i)
-    {
-        if (proc->win32_handles[i].kind == Process::FsBackingKind::None)
-            return i;
-    }
-    return Process::kWin32HandleCap;
-}
-
 void StampPipeHandle(::duetos::core::Process::Win32FileHandle& h, u32 pool_idx, bool is_write_end, i8 registry_slot,
                      u32 registry_gen)
 {
@@ -108,8 +97,8 @@ void DoNamedPipeCreate(arch::TrapFrame* frame)
 
     // Find a free Win32 file-handle slot before allocating the
     // pipe pool slot so we can fail without leaking.
-    const u64 file_slot = FindFreeFileSlot(proc);
-    if (file_slot == Process::kWin32HandleCap)
+    Process::Win32FileReservation reservation{};
+    if (!::duetos::core::ProcessReserveWin32FileHandle(proc, &reservation))
     {
         frame->rax = kBadResult;
         return;
@@ -119,6 +108,7 @@ void DoNamedPipeCreate(arch::TrapFrame* frame)
     const i32 pool_idx = ::duetos::subsystems::linux::internal::PipeAlloc();
     if (pool_idx < 0)
     {
+        ::duetos::core::ProcessAbortWin32FileHandle(proc, reservation);
         frame->rax = kBadResult;
         return;
     }
@@ -132,20 +122,33 @@ void DoNamedPipeCreate(arch::TrapFrame* frame)
     {
         ::duetos::subsystems::linux::internal::PipeReleaseRead(static_cast<u32>(pool_idx));
         ::duetos::subsystems::linux::internal::PipeReleaseWrite(static_cast<u32>(pool_idx));
+        ::duetos::core::ProcessAbortWin32FileHandle(proc, reservation);
         frame->rax = kBadResult;
         return;
     }
 
     // Plant the server-end handle. The server keeps ONE end's ref
     // (the matching one from PipeAlloc). The opposite end's ref
-    // stays at 1 as the "registry reservation" — when the client
-    // connects it acquires a fresh ref on top; when the server
-    // closes before a client connects, NamedPipeOnServerClose
-    // drops this orphan ref.
-    StampPipeHandle(proc->win32_handles[file_slot], static_cast<u32>(pool_idx),
-                    /*is_write_end=*/server_is_writer, static_cast<i8>(registry_slot), registry_gen);
+    // stays at 1 as the "registry reservation." Every client acquires
+    // a fresh ref on top; NamedPipeOnServerClose always drops the
+    // registry-owned ref after removing this exact registration.
+    Process::Win32FileHandle candidate{};
+    StampPipeHandle(candidate, static_cast<u32>(pool_idx), /*is_write_end=*/server_is_writer,
+                    static_cast<i8>(registry_slot), registry_gen);
+    u64 handle = 0;
+    if (!::duetos::core::ProcessPublishWin32FileHandle(proc, reservation, candidate, &handle))
+    {
+        ::duetos::core::ProcessAbortWin32FileHandle(proc, reservation);
+        if (server_is_writer)
+            ::duetos::subsystems::linux::internal::PipeReleaseWrite(static_cast<u32>(pool_idx));
+        else
+            ::duetos::subsystems::linux::internal::PipeReleaseRead(static_cast<u32>(pool_idx));
+        NamedPipeOnServerClose(static_cast<i8>(registry_slot), registry_gen);
+        frame->rax = kBadResult;
+        return;
+    }
 
-    frame->rax = Process::kWin32HandleBase + file_slot;
+    frame->rax = handle;
 }
 
 void DoNamedPipeOpen(arch::TrapFrame* frame)
@@ -167,47 +170,46 @@ void DoNamedPipeOpen(arch::TrapFrame* frame)
         return;
     }
 
-    // Look up + mark connected under the registry lock.
+    // Reserve the destination row before acquiring an opposite-end reference,
+    // so a full table cannot consume a client retain.
+    Process::Win32FileReservation reservation{};
+    if (!::duetos::core::ProcessReserveWin32FileHandle(proc, &reservation))
+    {
+        frame->rax = kBadResult;
+        return;
+    }
+
+    // Lookup and opposite-end retain are one registry transaction. Exact
+    // server close cannot recycle the pool slot between those steps.
     u32 pool_idx = 0;
     bool server_is_writer = false;
     if (!NamedPipeConnectClient(name, &pool_idx, &server_is_writer))
     {
+        ::duetos::core::ProcessAbortWin32FileHandle(proc, reservation);
         frame->rax = kBadResult;
         return;
     }
 
-    // Reserve a Win32 file-handle slot before we acquire the
-    // opposite-end refcount so a table-full failure doesn't leak
-    // the bump.
-    const u64 file_slot = FindFreeFileSlot(proc);
-    if (file_slot == Process::kWin32HandleCap)
-    {
-        // NamedPipeConnectClient already flipped client_connected.
-        // The opposite-end retain below has NOT happened yet, so the
-        // only state to roll back is that flag — leaving it set would
-        // make NamedPipeOnServerClose treat the reservation as
-        // consumed and skip the orphan release, leaking the slot.
-        NamedPipeUnconnectClient(name);
-        frame->rax = kBadResult;
-        return;
-    }
-
-    // Client end is the OPPOSITE of the server's end. Acquire a
-    // fresh refcount on that side so it doesn't drop to zero when
-    // the registry releases its reservation on server close.
     const bool client_is_writer = !server_is_writer;
-    if (client_is_writer)
-        ::duetos::subsystems::linux::internal::PipeRetainWrite(pool_idx);
-    else
-        ::duetos::subsystems::linux::internal::PipeRetainRead(pool_idx);
 
     // The client's handle does NOT touch the registry on close —
     // it's an ordinary pipe-pool end (slot = -1).
-    StampPipeHandle(proc->win32_handles[file_slot], pool_idx,
-                    /*is_write_end=*/client_is_writer,
+    Process::Win32FileHandle candidate{};
+    StampPipeHandle(candidate, pool_idx, /*is_write_end=*/client_is_writer,
                     /*registry_slot=*/-1, /*registry_gen=*/0);
+    u64 handle = 0;
+    if (!::duetos::core::ProcessPublishWin32FileHandle(proc, reservation, candidate, &handle))
+    {
+        if (client_is_writer)
+            ::duetos::subsystems::linux::internal::PipeReleaseWrite(pool_idx);
+        else
+            ::duetos::subsystems::linux::internal::PipeReleaseRead(pool_idx);
+        ::duetos::core::ProcessAbortWin32FileHandle(proc, reservation);
+        frame->rax = kBadResult;
+        return;
+    }
 
-    frame->rax = Process::kWin32HandleBase + file_slot;
+    frame->rax = handle;
 }
 
 } // namespace duetos::subsystems::win32

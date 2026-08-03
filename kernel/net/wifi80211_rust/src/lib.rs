@@ -124,7 +124,7 @@ const EAPOL_HEADER_BYTES: usize = 4;
 /// + 16 (iv) + 8 (rsc) + 8 (reserved) + 16 (mic) + 2 (key_data_len) = 95.
 const EAPOL_KEY_FIXED_BYTES: usize = 95;
 
-fn slice_from_raw<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
+unsafe fn slice_from_raw(ptr: *const u8, len: usize, _scope: &()) -> Option<&[u8]> {
     if ptr.is_null() {
         return None;
     }
@@ -132,7 +132,7 @@ fn slice_from_raw<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
     Some(unsafe { slice::from_raw_parts(ptr, len) })
 }
 
-fn out_init<'a, T: Default + Copy>(out: *mut T) -> Option<&'a mut T> {
+unsafe fn out_init<T: Default + Copy>(out: *mut T, _scope: &mut ()) -> Option<&mut T> {
     if out.is_null() {
         return None;
     }
@@ -325,68 +325,116 @@ fn parse_eapol_key(buf: &[u8], out: &mut DuetosWifiEapolKey) -> bool {
 
 // ---------- FFI ----------
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_wifi80211_parse_frame_header(
+pub unsafe extern "C" fn duetos_wifi80211_parse_frame_header(
     buf: *const u8,
     len: usize,
     out: *mut DuetosWifiFrameHeader,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_frame_header(slice, dst)
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_wifi80211_parse_beacon_body(
+pub unsafe extern "C" fn duetos_wifi80211_parse_beacon_body(
     buf: *const u8,
     len: usize,
     out: *mut DuetosWifiBeaconBody,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_beacon_body(slice, dst)
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_wifi80211_parse_ie(buf: *const u8, len: usize, off: usize, out: *mut DuetosWifiIe) -> bool {
-    let Some(dst) = out_init(out) else {
+pub unsafe extern "C" fn duetos_wifi80211_parse_ie(
+    buf: *const u8,
+    len: usize,
+    off: usize,
+    out: *mut DuetosWifiIe,
+) -> bool {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_ie(slice, off, dst)
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_wifi80211_parse_country_ie(buf: *const u8, len: usize, out: *mut DuetosWifiCountryIe) -> bool {
+pub unsafe extern "C" fn duetos_wifi80211_parse_country_ie(
+    buf: *const u8,
+    len: usize,
+    out: *mut DuetosWifiCountryIe,
+) -> bool {
     // Route the raw-pointer null-check + zero-init through out_init (as the
     // sibling FFI wrappers do) so the deref lives in the private helper, not
     // this public fn — clippy::not_unsafe_ptr_arg_deref fires otherwise.
     // Zero-init via Default so a partial parse never leaks stale triplets.
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_country_ie(slice, dst)
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_wifi80211_parse_eapol_key(buf: *const u8, len: usize, out: *mut DuetosWifiEapolKey) -> bool {
-    let Some(dst) = out_init(out) else {
+pub unsafe extern "C" fn duetos_wifi80211_parse_eapol_key(
+    buf: *const u8,
+    len: usize,
+    out: *mut DuetosWifiEapolKey,
+) -> bool {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_eapol_key(slice, dst)
@@ -398,7 +446,6 @@ extern crate alloc;
 #[cfg(test)]
 mod tests {
     use alloc::vec;
-    use alloc::vec::Vec;
 
     use super::*;
 
@@ -652,10 +699,8 @@ mod tests {
     #[test]
     fn country_ie_null_out_rejects() {
         let buf = [b'U', b'S', b'I'];
-        assert!(!duetos_wifi80211_parse_country_ie(
-            buf.as_ptr(),
-            buf.len(),
-            core::ptr::null_mut(),
-        ));
+        // SAFETY: `buf` is readable for its full length; a null output is an
+        // explicitly supported rejection case and therefore aliases nothing.
+        assert!(!unsafe { duetos_wifi80211_parse_country_ie(buf.as_ptr(), buf.len(), core::ptr::null_mut()) });
     }
 }

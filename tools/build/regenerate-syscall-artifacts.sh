@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT_DIR}"
 
+python3 tools/build/gen-native-syscall-abi.py --check-legacy
+
 python3 tools/linux-compat/gen-linux-syscall-table.py \
     --csv tools/linux-compat/linux-syscalls-x86_64.csv \
     --mapped-from-dispatcher kernel/subsystems/linux/syscall.cpp \

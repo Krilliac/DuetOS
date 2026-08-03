@@ -79,6 +79,11 @@ enum class SmokeProfile : duetos::u8
     /// wininet falls back to a fixed body if egress is blocked so the
     /// profile stays deterministic. Sentinel + exit.
     Browser,
+
+    /// `smoke=cancellation-smp`: run the post-bringup, process-backed
+    /// cancellation publication/unwind oracle. Requires at least two online
+    /// CPUs and is verdict-bearing on both the 2-vCPU and 4-vCPU QEMU legs.
+    CancellationSmp,
 };
 
 /// Targets a particular spawn site can ask about. Values mirror

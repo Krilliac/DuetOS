@@ -69,7 +69,6 @@
 #include "diag/log_names.h"
 #include "proc/process.h"
 #include "util/random.h"
-#include "util/debug_assert.h"
 #include "cpu/percpu.h"
 #include "fs/fat32.h"
 #include "mm/address_space.h"
@@ -685,11 +684,9 @@ i64 LinuxSchedYield()
     sched::SchedYield();
     return 0;
 }
-[[noreturn]] void LinuxExit(u64 status)
+i64 LinuxExit(u64 status)
 {
-    DoExitGroup(status);
-    // DoExitGroup calls sched::SchedExit which is [[noreturn]].
-    DEBUG_UNREACHABLE("subsystems/linux", "LinuxExit returned from DoExitGroup");
+    return DoExitGroup(status);
 }
 i64 LinuxGetPid()
 {
@@ -710,6 +707,10 @@ i64 LinuxMprotect(u64 addr, u64 len, u64 prot)
 
 extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
 {
+    // Linux exec may nest the native dispatcher. The scheduler guard is a
+    // depth, not a boolean, so only the outermost dispatcher return can
+    // finalize cancellation after every handler-local reference unwinds.
+    sched::ScopedTaskCancellationDeferral cancellation_guard;
     if constexpr (kTraceLinuxSyscallDispatch)
     {
         KLOG_TRACE_SCOPE("linux/syscall", "LinuxSyscallDispatch");
@@ -925,14 +926,10 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         rv = DoUname(frame->rdi);
         break;
     case kSysExit:
-        DoExit(frame->rdi);
-        // Exit paths don't return; keep the compiler happy.
-        rv = 0;
+        rv = DoExit(frame->rdi);
         break;
     case kSysExitGroup:
-        DoExitGroup(frame->rdi);
-        // Exit paths don't return; keep the compiler happy.
-        rv = 0;
+        rv = DoExitGroup(frame->rdi);
         break;
     case kSysGetPid:
         rv = DoGetPid();
@@ -1299,15 +1296,15 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         // proc declared at the top of LinuxSyscallDispatch.
         if (proc == nullptr || !duetos::core::ProcessHasCap(proc, duetos::core::kCapNet))
         {
-            duetos::core::RecordSandboxDenial(duetos::core::kCapNet);
-            if (proc != nullptr && duetos::core::ShouldLogDenial(proc->sandbox_denials))
+            const u64 denial_index = duetos::core::RecordSandboxDenial(duetos::core::kCapNet);
+            if (proc != nullptr && duetos::core::ShouldLogDenial(denial_index))
             {
                 arch::SerialWrite("[linux] denied socket-family pid=");
                 arch::SerialWriteHex(pid);
                 arch::SerialWrite(" syscall=");
                 arch::SerialWriteHex(nr);
                 arch::SerialWrite(" cap=Net denial_idx=");
-                arch::SerialWriteHex(proc->sandbox_denials);
+                arch::SerialWriteHex(denial_index);
                 arch::SerialWrite("\n");
             }
             rv = kEACCES;

@@ -14,12 +14,13 @@
  * v0 honours ObjectTypeInformation (class 2) only — that's the
  * class every malware-shape PE uses to confirm a handle's
  * underlying type. The implementation lives entirely in userland:
- * the kernel's handle bases are stable u64 ranges
- * (0x200..0x240 = Mutant, 0x300..0x340 = Event — both 64-slot
- *  kobj_handles ranges, 0x400..0x408 = Thread, 0x600..0x608 = Key,
- *  0x700..0x708 = Process, 0x800..0x808 = Thread (foreign),
- *  0x900..0x908 = Section), so range-matching produces the
- *  right type name without a syscall.
+ * generation-tagged KObject handles are classified by their low 12-bit tag
+ * (0x201..0x23f = Mutant, 0x301..0x33f = Event, 0x501..0x53f =
+ *  Semaphore), while 0x400..0x408 = Thread, 0x600..0x608 = Key,
+ *  0x700..0x708 low tag = Process, 0x800..0x808 = Thread (foreign),
+ *  0x900..0x908 low tag = Section). Process and Section handles additionally
+ *  carry a non-zero generation in bits 12..30, so they use exact opaque-
+ *  handle predicates rather than raw range matching.
  *
  *  Output layout for ObjectTypeInformation: a UNICODE_STRING
  *  header (16 bytes on x64) followed by the UTF-16 type name
@@ -31,23 +32,28 @@ static const wchar_t16* HandleRangeToTypeName(unsigned long long handle)
 {
     static const wchar_t16 mutant[] = {'M', 'u', 't', 'a', 'n', 't', 0};
     static const wchar_t16 event[] = {'E', 'v', 'e', 'n', 't', 0};
+    static const wchar_t16 semaphore[] = {'S', 'e', 'm', 'a', 'p', 'h', 'o', 'r', 'e', 0};
     static const wchar_t16 thread[] = {'T', 'h', 'r', 'e', 'a', 'd', 0};
     static const wchar_t16 key[] = {'K', 'e', 'y', 0};
     static const wchar_t16 process[] = {'P', 'r', 'o', 'c', 'e', 's', 's', 0};
     static const wchar_t16 section[] = {'S', 'e', 'c', 't', 'i', 'o', 'n', 0};
-    if (handle >= 0x200 && handle < 0x240)
+    const unsigned long long low_tag = handle & 0xFFFULL;
+    const int opaque_kobj = handle <= 0x7FFFFFFFULL && (handle >> 12) != 0;
+    if (opaque_kobj && low_tag > 0x200ULL && low_tag < 0x240ULL)
         return mutant;
-    if (handle >= 0x300 && handle < 0x340)
+    if (opaque_kobj && low_tag > 0x300ULL && low_tag < 0x340ULL)
         return event;
+    if (opaque_kobj && low_tag > 0x500ULL && low_tag < 0x540ULL)
+        return semaphore;
     if (handle >= 0x400 && handle < 0x408)
         return thread;
     if (handle >= 0x600 && handle < 0x608)
         return key;
-    if (handle >= 0x700 && handle < 0x708)
+    if (opaque_kobj && low_tag >= 0x700ULL && low_tag < 0x708ULL)
         return process;
     if (handle >= 0x800 && handle < 0x808)
         return thread; /* foreign-thread handles are still threads */
-    if (handle >= 0x900 && handle < 0x908)
+    if (opaque_kobj && low_tag >= 0x900ULL && low_tag < 0x908ULL)
         return section;
     return (const wchar_t16*)0;
 }

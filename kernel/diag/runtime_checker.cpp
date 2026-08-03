@@ -909,9 +909,10 @@ DUETOS_NO_SANITIZE_WRAP u64 ComputeTextSpotHash()
     constexpr u64 kFnvPrime = 0x100000001b3ULL;
     constexpr u64 kSpotBytes = 4096;
     u64 h = kFnvOffset;
-    const u8* s = _text_start;
-    const u8* e = _text_end;
-    const u64 text_bytes = u64(e - s);
+    const u64 start = reinterpret_cast<u64>(_text_start);
+    const u64 end = reinterpret_cast<u64>(_text_end);
+    const u64 text_bytes = end >= start ? end - start : 0;
+    const u8* s = reinterpret_cast<const u8*>(start);
     const u64 head_bytes = (text_bytes < kSpotBytes) ? text_bytes : kSpotBytes;
     for (u64 i = 0; i < head_bytes; ++i)
     {
@@ -922,7 +923,7 @@ DUETOS_NO_SANITIZE_WRAP u64 ComputeTextSpotHash()
     {
         for (u64 i = 0; i < kSpotBytes; ++i)
         {
-            h ^= e[-i64(kSpotBytes) + i64(i)];
+            h ^= s[text_bytes - kSpotBytes + i];
             h *= kFnvPrime;
         }
     }
@@ -938,11 +939,14 @@ DUETOS_NO_SANITIZE_WRAP u64 ComputeTextFullHash()
     constexpr u64 kFnvOffset = 0xcbf29ce484222325ULL;
     constexpr u64 kFnvPrime = 0x100000001b3ULL;
     u64 h = kFnvOffset;
-    const u8* s = _text_start;
-    const u8* e = _text_end;
-    for (const u8* p = s; p < e; ++p)
+    const u64 start = reinterpret_cast<u64>(_text_start);
+    const u64 end = reinterpret_cast<u64>(_text_end);
+    if (end < start)
+        return h;
+    const u8* s = reinterpret_cast<const u8*>(start);
+    for (u64 i = 0; i < end - start; ++i)
     {
-        h ^= *p;
+        h ^= s[i];
         h *= kFnvPrime;
     }
     return h;
@@ -1081,12 +1085,21 @@ extern "C" const u8 _rodata_end[];
 
 bool CheckPteFlags()
 {
+    // The CPU sets Accessed (bit 5) / Dirty (bit 6) on legitimate use of
+    // a mapped page — they are hardware-managed bookkeeping, not
+    // security attributes. Comparing them raw turned the FIRST read of a
+    // sampled .rodata page into a false "per-page W^X bypass" alarm
+    // (observed live 2026-08-02: baseline 0x..01 -> now 0x..21, the
+    // delta being exactly the Accessed bit). Mask both sides; W (bit 1),
+    // U/S (bit 2), and NX (bit 63) — the bits the detector exists for —
+    // remain fully compared.
+    constexpr u64 kPteHwManagedMask = (1ull << 5) | (1ull << 6);
     bool any_drift = false;
     for (u32 i = 0; i < g_baseline_pte_count; ++i)
     {
         const u64 va = g_baseline_pte_va[i];
-        const u64 baseline = g_baseline_pte_attrs[i];
-        const u64 now = mm::GetPteFlags4K(va);
+        const u64 baseline = g_baseline_pte_attrs[i] & ~kPteHwManagedMask;
+        const u64 now = mm::GetPteFlags4K(va) & ~kPteHwManagedMask;
         if (now != baseline)
         {
             arch::SerialWrite("[health] PTE flags drifted: va=");

@@ -3,18 +3,19 @@
  * @brief Demand-grown ring-3 stacks — reservation planning + #PF service.
  *
  * See kernel/proc/user_stack.h for the layout diagram and the
- * growth condition. This TU owns the only code that may move a
- * process's `stack.commit_lo`.
+ * growth condition. This TU owns the only code that may move the
+ * current Task's `user_stack.commit_lo`.
  */
 
 #include "proc/user_stack.h"
 
+#include "core/panic.h"
 #include "debug/probes.h"
 #include "log/klog.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
-#include "proc/process.h"
+#include "sched/sched.h"
 
 namespace duetos::core
 {
@@ -34,20 +35,12 @@ u64 AlignUpPage(u64 v)
 }
 
 /// Commit one page at `page_va` into `as`. Returns false on frame
-/// OOM or when the AS's frame budget refuses the mapping — both
-/// leave the PTE absent, which the probe below detects.
-///
-/// AddressSpaceMapUserPage panics on an already-mapped VA, so the
-/// present-probe here is load-bearing, not defensive padding: two
-/// growth attempts racing on the same page would otherwise take
-/// down the kernel.
-bool CommitOnePage(mm::AddressSpace* as, u64 page_va)
+/// OOM or when the reservation capability or AS frame budget refuses
+/// the mapping. The reserved-map transaction deliberately treats an
+/// existing PTE as failure: only a page tagged with this exact token
+/// may ever occupy the Task's stack window.
+bool CommitOnePage(mm::AddressSpace* as, const mm::AddressSpaceReservationToken& token, u64 page_va)
 {
-    if ((mm::AddressSpaceProbePteRaw(as, page_va) & mm::kPagePresent) != 0)
-    {
-        return true; // already committed by a concurrent grow
-    }
-
     auto frame_r = mm::AllocateFrame();
     if (!frame_r)
     {
@@ -56,16 +49,17 @@ bool CommitOnePage(mm::AddressSpace* as, u64 page_va)
         return false;
     }
 
-    mm::AddressSpaceMapUserPage(as, page_va, frame_r.value(),
-                                mm::kPagePresent | mm::kPageUser | mm::kPageWritable | mm::kPageNoExecute);
-
-    // MapUserPage returns void and refuses (with a warn) once the
-    // AS's frame budget is spent — the PTE is the only reliable
-    // success signal. Same pattern the ELF loader uses.
-    if ((mm::AddressSpaceProbePteRaw(as, page_va) & mm::kPagePresent) == 0)
+    const mm::PhysAddr frame = frame_r.value();
+    auto* bytes = static_cast<u8*>(mm::PhysToVirt(frame));
+    for (u64 i = 0; i < kPageSize; ++i)
     {
-        KLOG_WARN_V("mm/ustack", "stack grow: MapUserPage refused (frame budget) at va", page_va);
-        mm::FreeFrame(frame_r.value());
+        bytes[i] = 0;
+    }
+    if (!mm::AddressSpaceMapReservedUserPage(as, token, page_va, frame,
+                                             mm::kPagePresent | mm::kPageUser | mm::kPageWritable | mm::kPageNoExecute))
+    {
+        KLOG_WARN_V("mm/ustack", "stack grow: reserved map refused (token/conflict/budget) at va", page_va);
+        mm::FreeFrame(frame);
         return false;
     }
     return true;
@@ -93,13 +87,15 @@ const char* UserStackFaultName(UserStackFault f)
 
 UserStackFault UserStackServiceFault(u64 fault_va, u64 err_code, u64 rsp)
 {
-    Process* proc = CurrentProcess();
-    if (proc == nullptr || proc->as == nullptr || proc->stack.top == 0)
+    mm::AddressSpace* as = nullptr;
+    mm::AddressSpaceReservationToken token{};
+    UserStackRange* stack = sched::SchedCurrentUserStack(&as, &token);
+    if (stack == nullptr || as == nullptr)
     {
         return UserStackFault::NotStack;
     }
 
-    const UserStackFault verdict = UserStackClassify(proc->stack, fault_va, err_code, rsp);
+    const UserStackFault verdict = UserStackClassify(*stack, fault_va, err_code, rsp);
 
     if (verdict == UserStackFault::Guard)
     {
@@ -115,17 +111,17 @@ UserStackFault UserStackServiceFault(u64 fault_va, u64 err_code, u64 rsp)
         // RtlUnwindEx) needs several KiB, and committing it lazily
         // would just re-enter here on the dispatcher's own next
         // fault, which classifies NotStack once guard_taken is set.
-        if (!proc->stack.guard_taken)
+        if (!stack->guard_taken)
         {
-            proc->stack.guard_taken = true;
-            for (u64 va = proc->stack.reserve_lo; va > proc->stack.guard_lo; va -= kPageSize)
+            stack->guard_taken = true;
+            for (u64 va = stack->reserve_lo; va > stack->guard_lo; va -= kPageSize)
             {
                 const u64 page_va = va - kPageSize;
-                if (!CommitOnePage(proc->as, page_va))
+                if (!CommitOnePage(as, token, page_va))
                 {
                     break;
                 }
-                proc->stack.commit_lo = page_va;
+                stack->commit_lo = page_va;
             }
         }
         return UserStackFault::Guard;
@@ -136,11 +132,11 @@ UserStackFault UserStackServiceFault(u64 fault_va, u64 err_code, u64 rsp)
     }
 
     const u64 page_va = AlignDownPage(fault_va);
-    if (!CommitOnePage(proc->as, page_va))
+    if (!CommitOnePage(as, token, page_va))
     {
         return UserStackFault::Failed;
     }
-    proc->stack.commit_lo = page_va;
+    stack->commit_lo = page_va;
 
     KLOG_DEBUG_V("mm/ustack", "stack grew to", page_va);
     return UserStackFault::Grew;
@@ -152,9 +148,15 @@ bool UserStackCommitRange(u64 lo, u64 hi)
     {
         return true;
     }
+    if (hi > ~u64{0} - (kPageSize - 1))
+    {
+        return false; // AlignUpPage would wrap an untrusted range end
+    }
 
-    Process* proc = CurrentProcess();
-    if (proc == nullptr || proc->as == nullptr || proc->stack.top == 0)
+    mm::AddressSpace* as = nullptr;
+    mm::AddressSpaceReservationToken token{};
+    UserStackRange* stack = sched::SchedCurrentUserStack(&as, &token);
+    if (stack == nullptr || as == nullptr)
     {
         return false;
     }
@@ -162,7 +164,7 @@ bool UserStackCommitRange(u64 lo, u64 hi)
     const u64 lo_page = AlignDownPage(lo);
     const u64 hi_page = AlignUpPage(hi);
 
-    const UserStackRange& s = proc->stack;
+    const UserStackRange& s = *stack;
 
     // Wholly inside the committable region. That is the reservation,
     // extended by the guard page once the one-shot guard commit has
@@ -187,17 +189,26 @@ bool UserStackCommitRange(u64 lo, u64 hi)
 
     for (u64 va = s.commit_lo - kPageSize; va >= lo_page; va -= kPageSize)
     {
-        if (!CommitOnePage(proc->as, va))
+        if (!CommitOnePage(as, token, va))
         {
             return false;
         }
-        proc->stack.commit_lo = va;
+        stack->commit_lo = va;
         if (va == lo_page)
         {
             break;
         }
     }
     return true;
+}
+
+void UserStackReleaseOwnedMappings(mm::AddressSpace* as, const UserStackRange& stack,
+                                   const mm::AddressSpaceReservationToken& token)
+{
+    KASSERT(as != nullptr && UserStackRangeIsValid(stack) && token.IsValid(), "mm/ustack",
+            "invalid owned stack teardown state");
+    KASSERT(mm::AddressSpaceReleaseUserReservation(as, token, stack.guard_lo, stack.top), "mm/ustack",
+            "owned stack reservation release failed");
 }
 
 } // namespace duetos::core

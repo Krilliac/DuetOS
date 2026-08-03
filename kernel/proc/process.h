@@ -5,8 +5,12 @@
 #include "loader/compat_shim.h"
 #include "loader/manifest.h"
 #include "loader/dll_loader.h"
+#include "proc/authorization_context.h"
+#include "proc/credentials.h"
+#include "proc/resource_domain.h"
 #include "proc/user_stack.h"
 #include "sched/sched.h"
+#include "subsystems/win32/section.h"
 #include "sync/spinlock.h"
 #include "util/types.h"
 
@@ -215,6 +219,17 @@ enum Cap : u32
     // Withheld from every sandboxed profile.
     kCapPowerTune = 11,
 
+    // Supervise the authenticated service runtime through
+    // SYS_SERVICE_CONTROL operations 3..8 (enumerate, activate, stop,
+    // restage, exit dequeue, and exit acknowledgement). The syscall's two
+    // self-service operations derive identity from CurrentProcess and do not
+    // consult this bit. No request field can synthesize or widen this cap.
+    //
+    // ServiceManifest v1 deliberately admits this bit only through the
+    // independent build authority. The generated package grants it solely to
+    // serviced; accepting bit 12 does not widen any other service profile.
+    kCapServiceControl = 12,
+
     // Sentinel: keep this as the last entry so kProfileTrusted can
     // be built by a loop that iterates [1 .. kCapCount). Do NOT
     // use kCapCount as a live cap — it's a boundary marker.
@@ -300,27 +315,103 @@ inline constexpr void CapSetRemove(CapSet& s, Cap c)
     s.bits &= ~(1ULL << static_cast<u32>(c));
 }
 
+// A Process begins private to its loader, becomes scheduler-visible with its
+// first Task, enters Exiting exactly when the reaper unlinks its last Task, and
+// becomes Exited only after the one-shot runtime teardown has completed. Strong
+// external references may retain the inert identity header after Exited; they
+// do not retain the address space, handle tables, or other runtime resources.
+// The explicit state closes the otherwise-ambiguous zero-Task window between
+// creation, publication, teardown, and final header reclamation.
+enum class ProcessLifecycleState : u32
+{
+    Private,
+    Published,
+    Exiting,
+    Exited,
+};
+
+// Monotonic scheduler-publication tombstone. This is deliberately separate
+// from ProcessLifecycleState: an explicit process-wide kill closes future Task
+// publication immediately, while the Process remains Published until the
+// reaper unlinks its last Task and performs the Published -> Exiting handoff.
+enum class ProcessTerminationState : u32
+{
+    Open,
+    Closed,
+};
+
+// Stable, non-recycled identity for one Process incarnation. `pid` remains
+// the scheduler lookup and diagnostic component; `identity` is carried by
+// long-lived policy/lifecycle receipts so they never rely on a recyclable
+// namespace value. The v0 allocator mints both components together and
+// refuses exhaustion instead of wrapping.
+struct ProcessKey
+{
+    u64 identity;
+    u64 pid;
+};
+
+constexpr ProcessKey kInvalidProcessKey{0, 0};
+
+constexpr bool ProcessKeyIsValid(ProcessKey key)
+{
+    return key.identity != 0 && key.pid != 0;
+}
+
+constexpr bool operator==(ProcessKey lhs, ProcessKey rhs)
+{
+    return lhs.identity == rhs.identity && lhs.pid == rhs.pid;
+}
+
+using ProcessPublicationGate = bool (*)(ProcessKey, void*);
+
 struct Process
 {
+    static constexpr u64 kNameCap = 64;
+
     u64 pid;
+    u64 process_identity;
+    ProcessLifecycleState lifecycle_state;
+    ProcessTerminationState termination_state;
+    // Durable Win32 process result. Zero means no result has been selected;
+    // otherwise bit 32 is the publication marker and bits 0..31 are the
+    // exact DWORD supplied by the first process-wide close. If no such close
+    // exists, the scheduler publishes the last Task's exit code at the exact
+    // last-Task boundary. Readers expose STILL_ACTIVE until lifecycle Exited.
+    u64 win32_exit_status;
+    // Immutable exact parent captured by ProcessCreate. First-Task
+    // publication uses it under the scheduler lifetime lock to compose Job
+    // inheritance with the one-shot external publication gate.
+    ProcessKey job_inheritance_parent;
+    // Optional one-shot policy callback consumed under the scheduler's first-
+    // Task publication lock. Installation is limited to the exclusively-owned
+    // Private Process. The callback and borrowed context are cleared before
+    // invocation so rejection/re-entry cannot replay stale authority.
+    ProcessPublicationGate publication_gate;
+    void* publication_gate_context;
+    // ProcessCreate copies every caller-supplied label here. Syscall spawn
+    // paths build their leaf name on the syscall stack, so retaining the
+    // incoming pointer would leave both process diagnostics and task labels
+    // dangling as soon as the syscall returned.
+    char name_storage[kNameCap];
     const char* name;
     mm::AddressSpace* as;
-    // Serializes durable caps, broker lease provenance/deadlines, and
-    // the monotonic grant ceiling as one authority state. Capability
-    // helpers never call the grace cache or scheduler while held.
-    sync::SpinLock cap_lock;
-    CapSet caps;
-    // Runtime grants may set only bits that remain in this monotonic
-    // ceiling. SYS_DROPCAPS and SE_PRIVILEGE_REMOVED lower it before
-    // clearing live authority, making removal irreversible for this
-    // Process lifetime.
-    CapSet cap_ceiling;
-    // Broker leases stay separate from durable caps so expiry cannot
-    // clobber baseline authority. Effective snapshots lazily expire
-    // overdue leases under cap_lock before returning.
-    CapSet cap_leases;
-    u64 cap_lease_deadline_ns[static_cast<u32>(kCapCount)];
-    u64 cap_lease_generation[static_cast<u32>(kCapCount)];
+    // Immutable after scheduler publication. Every child Process retains and
+    // inherits this exact generation-safe domain, so Section accounting is
+    // aggregated across the whole spawn tree rather than reset per PID.
+    ResourceDomainKey resource_domain;
+    // Exact, independently synchronized security owners. Credentials are ABI
+    // identity metadata; authorization is DuetOS kernel policy. They are
+    // intentionally separate and remain valid through terminal runtime drain.
+    CredentialKey credentials;
+    AuthorizationContextKey authorization;
+    // Outer transaction and lifecycle-admission boundary for this Process's
+    // mutable runtime. Lock order is Process VM -> scheduler registry ->
+    // AddressSpace/table mutation; never wait for this mutex while holding an
+    // inner lock. VM callers keep it across result publication. Exec holds it
+    // across clear/load publication; the reaper publishes Exiting while holding
+    // it, then drains the runtime after all earlier admitted operations finish.
+    sched::Mutex vm_transaction_lock;
     // Per-process view of the filesystem root. Path resolution
     // starts here — a process cannot name any node that isn't
     // reachable from `root`. Trusted processes get the rich
@@ -371,67 +462,11 @@ struct Process
     // SyscallDispatch expects.
     bool user_is_pe32;
 
-    // CPU-tick budget. tick_budget is a hard cap; ticks_used is
-    // incremented by the timer IRQ for every tick this process's
-    // task(s) were currently-running. When ticks_used >= tick_budget,
-    // the scheduler marks the task Dead on its next re-enqueue
-    // (see sched.cpp) and the reaper drops the Process reference.
-    //
-    // Sandbox profile gets a tight budget (long enough for normal
-    // work but short enough that a spin-loop is caught in seconds).
-    // Trusted profile gets effectively unlimited — the value is
-    // stored and checked, but set so high the check never fires in
-    // practice.
-    u64 tick_budget;
-    u64 ticks_used;
-
-    // Sandbox-denial counter. Every cap-gated syscall that rejects
-    // the caller bumps this by one. Legitimate sandboxed code
-    // shouldn't attempt blocked syscalls; a process that crosses
-    // the threshold is almost certainly hostile (e.g. brute-
-    // forcing syscalls looking for something that isn't denied)
-    // and is terminated. Complements the tick budget: a spinning
-    // task would be caught by ticks, a retrying task by denials.
-    u64 sandbox_denials;
-    // Latch so the threshold-kill log + FlagCurrentForKill run at
-    // most once even if multiple racing denials all observe a
-    // counter past the kill threshold.
-    bool sandbox_kill_flagged;
-
-    // FS write rate-limit windows (multi-tier).
-    //
-    // Three rolling windows at decreasing granularities defend
-    // against the full range of mass-file-rewrite strategies:
-    //
-    //   [0] burst    — 1 s   /  16 MiB : catches "go full speed".
-    //   [1] sustained — 5 min /  256 MiB : catches "stay just under
-    //                                       the burst cap forever".
-    //   [2] long     — 1 h   /   2 GiB : catches "stay under
-    //                                     sustained too" (≤ ~700 KiB/s
-    //                                     averaged across an hour).
-    //
-    // An attacker who reads our open-source threshold constants
-    // can stay under any single window with patience; staying
-    // under all three at once requires moving so little data the
-    // attack stops being worthwhile. The three caps do NOT
-    // cumulate — a process is killed the moment ANY one of them
-    // is breached.
-    //
-    // Each successful file-write syscall (Win32 SYS_FILE_WRITE,
-    // SYS_FILE_CREATE init bytes, Linux sys_write to a regular
-    // file, copy_file_range) calls `RecordFsWrite`, which adds
-    // bytes to every window's running counter, rolls any window
-    // past its tick budget, and on threshold-cross flags the
-    // calling task for kill via `KillReason::FsWriteRateExceeded`.
-    // `fs_write_bytes_total` is the cumulative lifetime counter
-    // for telemetry only — never gates anything by itself.
-    //
-    // Threat model: trusted process IS the attacker (compromised
-    // PE / ELF, smuggled installer). No cap-based exemption.
-    static constexpr u32 kFsWriteWindowCount = 3;
-    u64 fs_write_bytes_total;
-    u64 fs_write_window_bytes[kFsWriteWindowCount];
-    u64 fs_write_window_start_tick[kFsWriteWindowCount];
+    // Capability, lease, tick, denial, and filesystem-write enforcement
+    // state lives only in the exact `authorization` owner above. Keep this
+    // compatibility count for callers that format the three policy windows;
+    // it is checked against the AuthorizationContext contract below.
+    static constexpr u32 kFsWriteWindowCount = kAuthorizationFsWriteWindowCount;
 
     // Win32 process heap — a per-process free-list allocator.
     // `heap_base` is the fixed user VA where heap pages start
@@ -441,10 +476,14 @@ struct Process
     // the user VA of the first free block's header; nullptr =
     // empty free list (everything allocated or heap uninit).
     //
-    // Managed by kernel/subsystems/win32/heap.cpp and mutated
-    // from SYS_HEAP_ALLOC / SYS_HEAP_FREE. A real Windows NT
-    // process has many heaps (default + LocalAlloc + HeapCreate
-    // returns); v0 collapses this to one process-wide heap.
+    // Managed by kernel/subsystems/win32/heap.cpp and mutated from
+    // SYS_HEAP_* on any thread in this process. `win32_heap_lock` is a
+    // sleeping mutex because heap operations enter AddressSpace mutation
+    // transactions and can map/unmap frames. It covers these default fields,
+    // every `extra_heaps[]` row below, and all in-band free-list access. Lock
+    // order is win32_heap_lock -> AddressSpace::mutation_lock -> regions_lock;
+    // callers must not enter it while holding a spinlock.
+    mutable sched::Mutex win32_heap_lock;
     u64 heap_base;
     u64 heap_pages;
     u64 heap_free_head;
@@ -483,12 +522,10 @@ struct Process
         // for the non-file states; all non-file callers must
         // ignore size/offset/path.
         u8 state;
-        // Per-fd flag bits. kLinuxFdFlagPendingCreate (0x01) marks a
-        // freshly-opened-with-O_CREAT regular-file fd whose backing
-        // disk entry doesn't exist yet — the first sys_write routes
-        // through Fat32CreateAtPath instead of Fat32AppendAtPath.
-        // (FAT32's append path can't grow a 0-byte file in v0; see
-        // fat32_write.cpp first_cluster<2 guards.)
+        // Per-fd flag bits. CLOEXEC and Canary are descriptor-local.
+        // PendingCreate is copied here as a compatibility mirror, but for a
+        // regular file the shared OFD is authoritative so dup/fork siblings
+        // observe the first successful create together.
         u8 flags;
         // Open-file-description (OFD) handle: 1-based index into the
         // kernel-wide refcounted OFD pool (see process.cpp), or 0 for
@@ -502,6 +539,9 @@ struct Process
         // existing syscall TUs that read `linux_fds[fd].offset`
         // inline keep working unchanged.
         u16 ofd;
+        // For regular files these are compatibility mirrors of the shared
+        // OFD backing metadata. For non-file states first_cluster remains the
+        // per-kind pool index described above.
         u32 first_cluster;
         u32 size;
         // Sidecar handle into `kobj_handles`. 0 (kHandleInvalid) =
@@ -519,7 +559,14 @@ struct Process
         // directory by name to update the entry's size field.
         // Cap matches the sys_open copy buffer (63 chars + NUL).
         char path[64];
+
+        // Per-slot identity epoch. Every publish and detach advances this
+        // counter while `linux_fd_lock` is held; zero is never published and
+        // wrap is forbidden. A closed slot at kLinuxFdGenerationExhausted is
+        // permanently retired so no stale receipt can become current again.
+        u32 generation;
     };
+    static constexpr u32 kLinuxFdGenerationExhausted = static_cast<u32>(-1);
     static constexpr u8 kLinuxFdFlagPendingCreate = 0x01;
     // Canary flag: set at open / O_CREAT time when the path
     // matched `security::CanaryMatchesPath`. Read on every
@@ -541,6 +588,9 @@ struct Process
     // description but resets FD_CLOEXEC on the new fd, which is why
     // this flag lives inline here, not in the OFD.
     static constexpr u8 kLinuxFdFlagCloexec = 0x04;
+    // Serializes fd-slot transitions and snapshots. KObject/OFD cleanup must
+    // run only after this lock and every handle-table lock are gone.
+    sync::SpinLock linux_fd_lock;
     LinuxFd linux_fds[16];
 
     // Linux-ABI brk heap. Meaningful only when abi_flavor ==
@@ -557,6 +607,18 @@ struct Process
     // calls return page-aligned regions starting here and march
     // forward. No reuse on munmap yet — v0 leaks mappings on
     // munmap, which is fine for short-lived smoke tasks.
+    // Once Process is published, direct reads or writes are forbidden: use
+    // ProcessReserveMmapRange / ProcessMmapCursorSnapshot so Linux mmap and
+    // zero-hint Win32 VM/Section callers cannot claim the same range or form
+    // a C++ data race. Pre-publication loader initialization may assign
+    // directly. Failed post-reservation maps intentionally leave a safe gap.
+    //
+    // Native/Win32 processes start inside the low, PE32-representable arena
+    // below kWin32VmapBase. Linux loaders replace this cursor with their high
+    // canonical-user arena before publishing the Process. Page zero is never
+    // a valid automatic-map result.
+    static constexpr u64 kCompatAutoVmBase = 0x20000000ULL;
+    static constexpr u64 kCompatAutoVmLimit = 0x40000000ULL;
     u64 linux_mmap_cursor;
 
     // Linux vDSO mapping. linux_vdso_base is the user VA where
@@ -649,7 +711,9 @@ struct Process
     // copies its own `file`/`file_len` borrows, so the kernel
     // image bytes must stay alive for the Process's lifetime —
     // which they do, because ramfs blobs are static constexpr
-    // arrays in the kernel ELF.
+    // arrays in the kernel ELF. LoadLibrary appends at runtime, so
+    // foreign readers must first acquire ScopedProcessRuntimeAccess;
+    // an Exited identity header is not an admitted DLL-table query.
     static constexpr u64 kDllImageCap = 48;
     DllImage dll_images[kDllImageCap];
     u64 dll_image_count;
@@ -689,11 +753,12 @@ struct Process
     // resolver. A follow-up replaces this with named mounts
     // (`/mnt/<name>/...`) once those exist.
     //
-    // Returned handles to user mode are `kWin32HandleBase + idx`
-    // (= 0x100 + 0..15) so they don't collide with Win32 pseudo-
-    // handles (-1 = INVALID_HANDLE_VALUE, -2 = current thread,
-    // ...) or NULL. The kernel unwraps via `idx = handle -
-    // kWin32HandleBase` and bounds-checks.
+    // Public handles are opaque positive values. Bits 0..11 hold the
+    // low-tag band `kWin32HandleBase + idx` (= 0x100 + 0..15), while
+    // bits 12..30 hold a non-zero, non-wrapping row generation. Bits 31..63
+    // stay zero so the same value is positive and lossless through both the
+    // PE32 and PE32+ syscall ABIs. A handle is permanently stale once its
+    // slot is recycled.
     //
     // 16 slots is plenty for v0 — typical console programs hold
     // ~4 (stdin/stdout/stderr + one input file). Grow to a
@@ -701,6 +766,10 @@ struct Process
     enum class FsBackingKind : u8
     {
         None = 0, // slot is free
+        // Kernel-private pre-publication claim. Public operations reject a
+        // Reserved row; only the matching non-wrapping generation token can
+        // publish or abort it.
+        Reserved,
         Ramfs,
         Fat32,
         DuetFs,
@@ -709,6 +778,10 @@ struct Process
     };
     struct Win32FileHandle
     {
+        // Internal row identity and the generation encoded in every public
+        // handle. Reserve/publish/abort/detach paths must match it so a delayed
+        // or stale caller cannot act on a recycled row.
+        u64 generation;
         FsBackingKind kind;              // None = free; otherwise selects which fields below are valid
         const fs::RamfsNode* ramfs_node; // valid iff kind == Ramfs
         u32 fat32_volume_idx;            // valid iff kind == Fat32
@@ -776,20 +849,56 @@ struct Process
         // named_pipe_registry_slot < 0.
         u32 named_pipe_registry_gen;
     };
+    struct Win32FileReservation
+    {
+        u32 slot;
+        u32 _pad;
+        u64 generation;
+    };
+    struct Win32FileHandleIdentity
+    {
+        u32 slot;
+        u32 _pad;
+        u64 generation;
+    };
     static constexpr u64 kWin32HandleCap = 16;
     static constexpr u64 kWin32HandleBase = 0x100;
+    static constexpr u64 kWin32FileHandleTagMask = 0xFFF;
+    static constexpr u32 kWin32FileHandleGenerationShift = 12;
+    // PE32 HANDLEs and syscall arguments are 32-bit. Keep bit 31 clear so an
+    // encoded handle is positive in both public ABIs; do not silently grant
+    // PE32+ more generations than PE32 can round-trip.
+    static constexpr u64 kWin32FileHandleMaxValue = (1ULL << 31) - 1;
+    static constexpr u64 kWin32FileHandleMaxGeneration = kWin32FileHandleMaxValue >> kWin32FileHandleGenerationShift;
+    // Serializes one public operation (read/write/seek/fstat/duplicate) with
+    // close for each slot. The mutex is deliberately separate from
+    // win32_file_lock: filesystem I/O, pipe waits, allocation, and user copy
+    // may block and therefore run with only this sleepable lock held.
+    //
+    // The slot mutex may independently acquire win32_file_lock to snapshot or
+    // commit identity and the pipe-pool lock to retain/release a backing. The
+    // two spinlocks are never nested; no wait, copy, allocation, or backing
+    // release occurs under win32_file_lock.
+    sched::Mutex win32_file_operation_locks[kWin32HandleCap];
+    // Protects file-row identity and publication only. Backing releases,
+    // filesystem I/O, allocation, user copy, and wait-queue work happen after
+    // it is released. Pipe operation snapshots rely on the per-slot operation
+    // mutex to exclude close, then acquire the pipe-pool lock only after this
+    // identity lock is released.
+    mutable sync::SpinLock win32_file_lock;
     Win32FileHandle win32_handles[kWin32HandleCap];
 
     // Win32 mutex handle range — backs CreateMutexW /
     // WaitForSingleObject / ReleaseMutex / CloseHandle. The
     // legacy fixed-size `Win32MutexHandle win32_mutexes[]` array
     // was removed when `SYS_MUTEX_*` migrated to `KMutex` +
-    // `kobj_handles` (kernel/ipc/). The Win32 handle is now
-    // `kWin32MutexBase + ipc_handle`, where `ipc_handle` is a
-    // slot in the unified handle table (1..kHandleTableCapacity-1).
+    // `kobj_handles` (kernel/ipc/). The public Win32 value is now a
+    // positive generation-tagged encoding whose low tag is
+    // `kWin32MutexBase + slot`; stale generations cannot alias reuse.
     // The cap below stays disjoint from kWin32EventBase (0x300)
-    // and kWin32HandleBase (0x100..0x10F) so CloseHandle can
-    // continue to dispatch by range without a tag bit.
+    // and the file handle low-tag band (0x100..0x10F). All migrated
+    // KObject wrappers are opaque and dispatch through checked low-tag plus
+    // non-zero-generation decoding.
     static constexpr u64 kWin32MutexBase = 0x200;
     static constexpr u64 kWin32MutexCap = ::duetos::ipc::kHandleTableCapacity;
 
@@ -797,9 +906,9 @@ struct Process
     // ResetEvent / WaitForSingleObject. Migrated to KEvent +
     // `kobj_handles` (kernel/ipc/) alongside mutexes; the legacy
     // `Win32EventHandle win32_events[]` array was removed at the
-    // same time. The Win32 handle is now `kWin32EventBase +
-    // ipc_handle`, with `ipc_handle` a slot in the unified handle
-    // table. The cap stays disjoint from kWin32MutexBase (0x200)
+    // same time. Its public value carries the unified slot in the low tag
+    // and that slot's generation in the high bits. The cap stays disjoint
+    // from kWin32MutexBase (0x200)
     // and kWin32ThreadBase (0x400) so CloseHandle / WFMO can
     // continue to dispatch by range.
     static constexpr u64 kWin32EventBase = 0x300;
@@ -820,9 +929,9 @@ struct Process
     // exit on another CPU while its creator is polling the handle.
     //
     // v0 SCOPE (honest about what's not done):
-    //   - WaitForSingleObject(thread) polls the durable exit code
-    //     with bounded scheduler sleeps rather than blocking on a
-    //     per-slot wait queue.
+    //   - WaitForSingleObject(thread) blocks on a per-slot wait queue.
+    //     Exit publication advances a stable event sequence before waking,
+    //     so the predicate recheck and scheduler enqueue are linearized.
     //   - Handles are slot-only values, without a generation in
     //     the public value. A stale closed handle can therefore
     //     alias a later thread that reuses the same slot.
@@ -856,6 +965,12 @@ struct Process
         // ABI compatibility, but creator cleanup/publication must
         // match the exact row generation it reserved.
         u64 generation;
+        // Never reset when this slot is recycled. Exit publication advances
+        // the sequence under win32_thread_lock before waking `waiters`; a
+        // waiter snapshots both this value and `generation`, drops the lock,
+        // then performs an atomic sequence-recheck/enqueue transaction.
+        u64 event_sequence;
+        sched::WaitQueue waiters;
         u64 tid;           // monotonic scheduler identity; never reused
         u64 user_stack_va; // base VA of the thread's user stack
     };
@@ -881,8 +996,9 @@ struct Process
     // ipc::IocpPort + `kobj_handles` (kernel/ipc/iocp.{h,cpp})
     // alongside mutexes / events / semaphores; the legacy 8-port
     // global pool in iocp_job.cpp was retired at the same time.
-    // The Win32 handle is `kWin32IocpBase + ipc_handle`. The base
-    // stays at the legacy 0xB00 (wire-compatible); the cap grows
+    // The public handle is the generation-tagged encoding of the unified
+    // slot with the legacy 0xB00 low-tag base. The base stays
+    // wire-compatible; the cap grows
     // 8 → kHandleTableCapacity and remains disjoint from the
     // 0xC00 JobObject range so CloseHandle / NtClose can keep
     // dispatching by value alone.
@@ -929,23 +1045,46 @@ struct Process
     // semantics: NtTerminateProcess on a still-open handle
     // succeeds, observers can still read the exit-code, etc.
     //
-    // Handles run kWin32ProcessBase + idx (= 0x700..0x707),
-    // disjoint from every other Win32 handle range so the
-    // shared CloseHandle / NtClose dispatch picks the right
-    // table by value alone.
+    // The public handle keeps 0x700..0x707 as its low tag and carries a
+    // non-zero row generation in bits 12..30. Decoding rejects bit 31 and
+    // all upper bits so the value stays positive in PE32 and PE32+.
     //
     // 8 slots is plenty for v0 — typical malware-style "open
     // every PID, look for one with a matching name" probes
     // close handles as soon as they're checked, so the table
     // turns over fast. Grow when a real workload pins more.
+    enum class Win32ProcessHandleState : u8
+    {
+        Free = 0,
+        Live,
+        Retired,
+    };
+
     struct Win32ProcessHandle
     {
-        bool in_use;
-        u8 _pad[7];
-        Process* target; // borrowed reference, refcount held while in_use
+        u32 generation;
+        Win32ProcessHandleState state;
+        u8 _pad[3];
+        Process* target; // borrowed pointer; one refcount is owned while Live
+    };
+
+    struct Win32ProcessHandleIdentity
+    {
+        u32 slot;
+        u32 generation;
     };
     static constexpr u64 kWin32ProcessCap = 8;
     static constexpr u64 kWin32ProcessBase = 0x700;
+    static constexpr u64 kWin32ProcessHandleTagMask = 0xFFF;
+    static constexpr u64 kWin32ProcessHandleGenerationShift = 12;
+    static constexpr u64 kWin32ProcessHandleMaxValue = (1ULL << 31) - 1;
+    static constexpr u64 kWin32ProcessHandleMaxGeneration =
+        kWin32ProcessHandleMaxValue >> kWin32ProcessHandleGenerationShift;
+
+    // [any thread, bounded/IRQ-safe] Serializes Win32 process-handle slots.
+    // It protects only slot identity/state; reference drops and all external
+    // lifetime work happen after release.
+    mutable sync::SpinLock win32_handle_lock;
     Win32ProcessHandle win32_proc_handles[kWin32ProcessCap];
 
     // Cross-process Win32 thread handles produced by
@@ -983,33 +1122,50 @@ struct Process
     static constexpr u64 kWin32ForeignThreadBase = 0x800;
     Win32ForeignThreadHandle win32_foreign_threads[kWin32ForeignThreadCap];
 
-    // Win32 section handles produced by NtCreateSection. A
-    // section is a kernel-resident pool of physical frames
-    // that can be mapped into one or more process address
-    // spaces via NtMapViewOfSection — backs Windows shared
-    // memory + memory-mapped files. v0 honours pagefile-
-    // backed (anonymous) sections only; file-backed sections
-    // (FileHandle != 0) return NotImpl in the kernel handler.
+    // Win32 section handles produced by NtCreateSection. A section is a
+    // kernel-resident pool of frames that can be mapped into one or more
+    // process address spaces. v0 honours pagefile-backed anonymous sections.
     //
-    // Disjoint from every other Win32 handle range so the
-    // shared close dispatch can pick the right table by
-    // handle value alone. 8 slots — same sizing rationale
-    // as foreign-thread/process tables.
-    //
-    // Each entry holds an index into the global
-    // g_win32_sections pool (defined in win32_section.cpp).
-    // The pool entry's refcount is incremented on open and
-    // decremented on NtClose; the section is freed only
-    // when refcount hits 0 (which means every handle AND
-    // every active mapping has gone away).
+    // Public handles are opaque positive values. Bits 0..11 hold the low tag
+    // `kWin32SectionBase + slot` (= 0x900..0x907), while bits 12..30 hold a
+    // non-zero, non-wrapping process-row generation. Bits 31..63 stay zero so
+    // PE32 and PE32+ round-trip the same identity. Each live row owns one
+    // exact generation-keyed Section pool reference.
+    enum class Win32SectionHandleState : u8
+    {
+        Free,
+        Reserved,
+        Live,
+    };
     struct Win32SectionHandle
     {
-        bool in_use;
+        u32 generation;
+        Win32SectionHandleState state;
         u8 _pad[3];
-        u32 pool_index; // index into g_win32_sections
+        subsystems::win32::section::SectionKey key;
+    };
+    struct Win32SectionHandleReservation
+    {
+        u32 slot;
+        u32 generation;
+    };
+    struct Win32SectionHandleIdentity
+    {
+        u32 slot;
+        u32 generation;
     };
     static constexpr u64 kWin32SectionCap = 8;
     static constexpr u64 kWin32SectionBase = 0x900;
+    static constexpr u64 kWin32SectionHandleTagMask = 0xFFF;
+    static constexpr u32 kWin32SectionHandleGenerationShift = 12;
+    static constexpr u64 kWin32SectionHandleMaxValue = (1ULL << 31) - 1;
+    static constexpr u32 kWin32SectionHandleMaxGeneration =
+        static_cast<u32>(kWin32SectionHandleMaxValue >> kWin32SectionHandleGenerationShift);
+    // Serializes both Section handle and view row identities. Acquire snapshots
+    // a key, pins the Section pool with this lock released, then revalidates the
+    // exact row. Mapping, unmapping, releasing frames, and user copies likewise
+    // happen after this lock is released.
+    mutable sync::SpinLock win32_section_lock;
     Win32SectionHandle win32_section_handles[kWin32SectionCap];
 
     // Live section VIEWS installed into THIS process's address
@@ -1020,23 +1176,46 @@ struct Process
     //
     // The record exists because nothing else can reconstruct the
     // set at exit. Views are installed with
-    // `mm::AddressSpaceMapBorrowedPage`, which deliberately does
+    // `mm::AddressSpaceMapBorrowedRange`, which deliberately does
     // NOT register the frame in the AS region table (the section
     // pool owns those frames, not the AS) — so AS teardown frees
     // page tables and cannot know a view was ever there. Without
     // this table a process that maps a view and exits strands the
     // section's frames even if it closed its handle correctly.
     //
-    // Populated by SYS_SECTION_MAP into the TARGET process (a
-    // kCapDebug caller may map into a foreign AS), cleared by
-    // SYS_SECTION_UNMAP, drained by ProcessRelease before the AS
-    // goes away.
+    // Populated by SYS_SECTION_MAP into the TARGET process, cleared by
+    // SYS_SECTION_UNMAP, and drained by runtime teardown before the AS goes
+    // away. Reserve/publish and claim/restore/finish tokens serialize map,
+    // unmap, rollback, and exit so exactly one path consumes each view ref.
+    enum class Win32SectionViewState : u8
+    {
+        Free,
+        Reserved,
+        Live,
+        Claimed,
+    };
     struct Win32SectionView
     {
-        bool in_use;
+        u64 generation;
+        Win32SectionViewState state;
         u8 _pad[3];
-        u32 pool_index; // index into g_win32_sections
-        u64 base_va;    // view base in the owning process's AS
+        subsystems::win32::section::SectionKey key;
+        u32 _pad2;
+        u64 base_va;
+    };
+    struct Win32SectionViewReservation
+    {
+        u32 slot;
+        u32 _pad;
+        u64 generation;
+    };
+    struct Win32SectionViewClaim
+    {
+        u32 slot;
+        u32 _pad;
+        u64 generation;
+        subsystems::win32::section::SectionKey key;
+        u64 base_va;
     };
     Win32SectionView win32_section_views[kWin32SectionCap];
 
@@ -1158,6 +1337,8 @@ struct Process
     // (0x7FFFE000) — leaves 256 MiB of contiguous VA space so
     // large requests have somewhere to go.
     static constexpr u64 kWin32VmapBase = 0x40000000ULL;
+    static_assert(kCompatAutoVmLimit == kWin32VmapBase,
+                  "automatic Win32 mappings must stop where the VirtualAlloc arena begins");
     static constexpr u64 kWin32VmapCapPages = 128; // 512 KiB max per process
     u64 vmap_base;                                 // = kWin32VmapBase after PE load
     u64 vmap_pages_used;                           // bump cursor in pages
@@ -1228,19 +1409,29 @@ struct Process
     // write `linux_rlimit_nofile_cur` and `linux_rlimit_nproc_cur`
     // and the next fd-alloc / clone consults them. 0xFFFFFFFFFFFFFFFF
     // sentinel = "no cap below kernel hard ceiling" (the constructor
-    // initialises both to that). Hard caps stay 16 / 64.
+    // initialises both to that). Hard caps stay 16 / 64. NPROC is shared
+    // between sibling fork and setrlimit calls, so every access to that field
+    // uses atomic acquire/release builtins; the relation lock serializes the
+    // actual fork admission rows.
     u64 linux_rlimit_nofile_cur;
     u64 linux_rlimit_nproc_cur;
-    // Bitmap of pending Linux signals. Bit N set = signum N is
-    // pending delivery. Populated by LinuxSignalDeliver()
+    // Bitmap of pending Linux signals. Linux's sigset ABI maps signum N to
+    // bit N-1, so bit 0 is SIGHUP (1) and bit 63 is SIGRTMAX (64). Populated
+    // by LinuxSignalDeliver()
     // (kill / tgkill / synthetic deliveries) and drained by
     // signalfd_read; rt_sigpending also reports it.
     //
     // v0 only honours the bitmap shape (one pending bit per
     // signum); real Linux distinguishes queued sigqueue() entries.
-    // 64-bit width covers signum 1..63, which is the entire
-    // POSIX rt-signal range.
+    // 64-bit width therefore covers the complete signum 1..64 range.
+    // Every access after Process publication goes through the atomic helpers
+    // below.  Interrupt masking is not an SMP synchronization primitive.
     u64 linux_pending_signals;
+    // Monotonic publication identity for signalfd waits. Unlike the pending
+    // bitmap predicate, this never moves backwards when a signal is claimed,
+    // so raise+claim ABA cannot strand a waiter between its predicate scan and
+    // scheduler enqueue. Saturates at UINT64_MAX rather than wrapping.
+    u64 linux_signal_event_sequence;
     // Top-of-frame VA recorded by LinuxSignalDeliver and consumed by
     // LinuxSignalRestoreFrame (rt_sigreturn). 0 = no delivery in
     // flight. Per-process (not a global pid-hashed slot table) so a
@@ -1309,24 +1500,30 @@ struct Process
     LinuxPosixTimer linux_posix_timers[kLinuxTimerCap];
 
     // Linux parent / wait infrastructure — backs wait4 / waitid /
-    // SIGCHLD reaping. `linux_parent_pid` is set by DoFork (clone
-    // without CLONE_THREAD); 0 means "no Linux parent" (kernel-
-    // spawned process or pre-fork init). `linux_exit_code` is
-    // populated by DoExit / DoExitGroup before the task dies; the
-    // ProcessRelease teardown reads it to push an exit notification
-    // onto the parent's queue.
+    // SIGCHLD reaping. A fork reserves one fixed parent-owned relation
+    // row before the child can become scheduler-visible. The row stays
+    // Live until the child's runtime teardown has release-published the
+    // Process lifecycle as Exited, then becomes Exited in place. wait4 /
+    // waitid consume the terminal row. Capacity is therefore admission,
+    // never a best-effort exit queue that can overflow and lose status.
     //
-    // `linux_child_exits[8]` is the per-process zombie queue: each
-    // dead child's (pid, exit_code, exit_signal) is appended here
-    // when the child's last ref is released, and drained by wait4.
-    // Cap is 8 — typical shell pipelines have 1-3 outstanding
-    // children. Overflow drops the notification (sub-GAP for >8
-    // simultaneous children).
+    // The child holds `linux_parent` as a strong identity reference from
+    // relation registration through exit publication (or Private rollback).
+    // `linux_parent_pid` remains stable ABI metadata for getppid(). The
+    // parent row does not retain the child, so this edge cannot form a cycle.
     //
-    // `linux_wait_wq` is the wake target for wait4 callers blocked
-    // waiting for any child to exit. Every queue push wakes one
-    // waiter.
-    static constexpr u64 kLinuxChildExitCap = 8;
+    // `linux_child_event_sequence` is atomically advanced for every relation
+    // event that can change a waiter's answer. Producers update the row and
+    // sequence under `linux_child_exit_lock`, drop that lock, then wake all
+    // `linux_wait_wq` waiters. Waiters use the scheduler's sequence-aware
+    // conditional block primitive to close the SMP predicate/enqueue gap.
+    static constexpr u64 kLinuxChildRelationCap = 64;
+    enum class LinuxChildRelationState : u8
+    {
+        Free = 0,
+        Live,
+        Exited,
+    };
     struct LinuxChildExit
     {
         u64 pid;
@@ -1335,20 +1532,32 @@ struct Process
         bool was_signaled; // distinguishes "exited" from "killed by signal"
         u8 _pad[2];
     };
+    struct LinuxChildRelation
+    {
+        LinuxChildRelationState state;
+        u8 _pad[7];
+        LinuxChildExit exit;
+    };
+    Process* linux_parent;
     u64 linux_parent_pid;
     u32 linux_exit_code;
     bool linux_was_signaled;
     u8 linux_exit_signal;
     u8 _linux_exit_pad[2];
-    u64 linux_child_exit_count;
-    LinuxChildExit linux_child_exits[kLinuxChildExitCap];
+    u64 linux_child_relation_count;
+    LinuxChildRelation linux_child_relations[kLinuxChildRelationCap];
+    u64 linux_child_event_sequence;
+    // Serializes relation registration/rollback, child exit publication,
+    // and wait4/waitid consumption. CLI is per-CPU and cannot protect this
+    // shared state on SMP.
+    mutable sync::SpinLock linux_child_exit_lock;
     sched::WaitQueue linux_wait_wq;
 
     // Win32 custom-diagnostics state — opaque pointer to a
     // duetos::subsystems::win32::custom::ProcessCustomState. nullptr
     // until the process opts into any custom-Win32 feature via
     // SYS_WIN32_CUSTOM op=SetPolicy. Owned by the custom module;
-    // ProcessRelease forwards to custom::CleanupProcess. Kept as
+    // Runtime teardown forwards to custom::CleanupProcess. Kept as
     // an opaque void* so process.h doesn't pull in the win32
     // subsystem headers.
     void* win32_custom_state;
@@ -1363,7 +1572,14 @@ struct Process
     // Cap matches Linux's PATH_MAX-light: 256 bytes is enough for
     // every path the v0 FAT32 driver and ramfs accept (their copy
     // bounce buffers are 64 bytes), with headroom for future growth.
+    // Access only through ProcessSnapshotLinuxCwd and
+    // ProcessReplaceLinuxCwd once Process is published. The embedded lock is
+    // initialized before publication and dies with its owning Process. It is
+    // a leaf lock: never nest it with fd/OFD/handle/VM locks, and perform no
+    // allocation, user copy, VFS operation, logging, or scheduler call while
+    // holding it.
     static constexpr u64 kLinuxCwdCap = 256;
+    mutable sync::SpinLock linux_cwd_lock;
     char linux_cwd[kLinuxCwdCap];
 
     // Linux per-task name (PR_SET_NAME / PR_GET_NAME). 16-byte
@@ -1407,7 +1623,7 @@ struct Process
     // now the table is empty by default and the existing arrays
     // stay authoritative. Future slices route SYS_MUTEX_*,
     // SYS_EVENT_*, SYS_SEM_*, and Linux fds through this table.
-    // `ProcessRelease` calls `HandleTableDrain` on it as part of
+    // Process runtime teardown calls `HandleTableDrain` on it as part of
     // teardown so any KObject references parked here get released
     // even on abnormal exit. Zero-initialised — safe to embed
     // directly with no explicit init call.
@@ -1434,16 +1650,21 @@ struct Process
     // Enter, and overflow drops the oldest byte (treats stdin like
     // a tty's input queue, not a guaranteed-delivery pipe).
     //
-    // Zero-initialised by ProcessCreate's memset — no explicit
-    // init needed. `head == tail` on a fresh process means the
-    // ring is empty; readers block on `waiters` until the kbd-
-    // reader pushes a byte.
+    // Zero-initialised by ProcessCreate's memset. The ring lock serializes
+    // every cursor/data mutation across CPUs; `head - tail` remains bounded
+    // by kCap, so unsigned cursor wrap preserves the occupancy calculation.
+    // Producers publish a non-wrapping event sequence while still holding
+    // the ring lock, then wake after dropping it. Readers use that sequence
+    // for the scheduler's atomic predicate-recheck/enqueue handoff.
     struct StdinRing
     {
         static constexpr u32 kCap = 256;
+        static_assert((kCap & (kCap - 1)) == 0);
         u8 buf[kCap];
-        u32 head; // producer cursor (kbd-reader); writes new bytes
-        u32 tail; // consumer cursor (SYS_STDIN_READ); drains
+        u32 head;
+        u32 tail;
+        sync::SpinLock lock;
+        u64 event_sequence;
         sched::WaitQueue waiters;
     };
     StdinRing stdin_ring;
@@ -1512,7 +1733,8 @@ struct Process
     // requested page count RW+NX, and seeds an independent
     // free list. Each slot's `base_va` is stable for the life
     // of the heap; HeapDestroy unmaps the pages and clears
-    // the slot.
+    // the slot. All fields are protected by `win32_heap_lock`; pointers into
+    // these rows never escape the locked heap implementation.
     //
     // 4 slots × up to 16 pages (64 KiB) per heap. Cap matches
     // typical workloads (CRT keeps one private heap; most apps
@@ -1521,9 +1743,10 @@ struct Process
     {
         bool in_use;
         u8 _pad[7];
-        u64 base_va;   // 0 = slot free
-        u64 pages;     // page count actually mapped
-        u64 free_head; // user VA of first free block (0 = full)
+        u64 generation; // never zero while live; retained across destroy
+        u64 base_va;    // 0 = slot free
+        u64 pages;      // page count actually mapped
+        u64 free_head;  // user VA of first free block (0 = full)
     };
     static constexpr u64 kWin32ExtraHeapCap = 4;
     static constexpr u64 kWin32ExtraHeapPagesMax = 16;
@@ -1551,6 +1774,31 @@ struct Process
 
 /// Snapshot effective authority after lazily expiring overdue leases.
 CapSet ProcessCapsSnapshot(const Process* process);
+
+/// Exact owned security keys. The caller must hold a Process reference and
+/// must not retain these values past terminal runtime teardown without first
+/// taking the service-specific owner reference.
+CredentialKey ProcessCredentialKeySnapshot(const Process* process);
+AuthorizationContextKey ProcessAuthorizationKeySnapshot(const Process* process);
+
+/// Value-only diagnostic/security snapshots. Credential state is immutable;
+/// authorization sampling expires leases using a pre-lock monotonic time.
+bool ProcessInspectCredentials(const Process* process, CredentialSnapshot* snapshot_out);
+bool ProcessInspectAuthorization(const Process* process, AuthorizationContextSnapshot* snapshot_out);
+
+/// Scheduler and bounded diagnostic adapters for AuthorizationContext-owned
+/// enforcement state. A malformed/stale key returns an unresolved action or
+/// zero snapshot; policy callers fail closed on unresolved actions.
+AuthorizationActionResult ProcessChargeExecutionTicks(Process* process, u64 ticks);
+u64 ProcessTickBudgetSnapshot(const Process* process);
+u64 ProcessTicksUsedSnapshot(const Process* process);
+u64 ProcessSandboxDenialCountSnapshot(const Process* process);
+
+/// Try to snapshot effective authority without waiting or expiring leases.
+/// Intended for stop-the-world diagnostics where a stopped CPU may own
+/// the AuthorizationContext lock; false leaves `snapshot_out` empty. Callers must not use this
+/// side-effect-free view for an authorization decision.
+bool ProcessCapsTrySnapshotNoExpire(const Process* process, CapSet* snapshot_out);
 
 /// Test one capability against the effective snapshot.
 bool ProcessHasCap(const Process* process, Cap cap);
@@ -1592,12 +1840,11 @@ inline constexpr u64 kTickBudgetTrusted = 1ULL << 40; // ~12 decades at 100 Hz =
 // malicious behaviour. 100 is generous — a well-written sandbox
 // probe (our ring3-sandbox task in the smoke test) stays well
 // under this — but anything higher is a hostile retry loop.
-inline constexpr u64 kSandboxDenialKillThreshold = 100;
+inline constexpr u64 kSandboxDenialKillThreshold = kAuthorizationDenialThreshold;
 
-// FS write-rate windows (multi-tier). One row per window level
-// — index matches `Process::fs_write_window_bytes[i]` and
-// `fs_write_window_start_tick[i]`. All three checks run on
-// every successful write; first cap-cross kills the caller.
+// FS write-rate windows (multi-tier). One row per window level; indexes match
+// the corresponding arrays in AuthorizationContextSnapshot. All three checks
+// run on every successful write; first cap-cross kills the caller.
 //
 // Tick rate is 100 Hz (kernel/time/tick.h kTickHz). Tuning
 // principle: each row's byte_cap / window_ticks is the
@@ -1607,17 +1854,9 @@ inline constexpr u64 kSandboxDenialKillThreshold = 100;
 // to ~580 KiB/s. Legitimate userland workloads (text editing,
 // cache writes, compile output) sit at ~10s of KiB/s averaged
 // across a session.
-inline constexpr u64 kFsWriteWindowTicksByLevel[3] = {
-    100ULL,           // 1 s    @ 100 Hz   (burst)
-    100ULL * 60 * 5,  // 5 min  @ 100 Hz   (sustained)
-    100ULL * 60 * 60, // 1 h    @ 100 Hz   (long-tail)
-};
-inline constexpr u64 kFsWriteWindowByteCapByLevel[3] = {
-    16ULL * 1024 * 1024,       // burst    : 16 MiB / 1 s
-    256ULL * 1024 * 1024,      // sustained: 256 MiB / 5 min
-    2ULL * 1024 * 1024 * 1024, // long     :  2 GiB / 1 h
-};
-inline constexpr const char* kFsWriteWindowLabels[3] = {
+inline constexpr const auto& kFsWriteWindowTicksByLevel = kAuthorizationFsWriteWindowTicks;
+inline constexpr const auto& kFsWriteWindowByteCapByLevel = kAuthorizationFsWriteWindowByteCaps;
+inline constexpr const char* kFsWriteWindowLabels[kAuthorizationFsWriteWindowCount] = {
     "1s/16MiB",
     "5min/256MiB",
     "1h/2GiB",
@@ -1630,13 +1869,25 @@ inline constexpr u64 kFsWriteWindowByteCap = kFsWriteWindowByteCapByLevel[0];
 
 /// Allocate a Process and take ownership of `as`. Does NOT bump
 /// `as`'s refcount — ProcessCreate assumes the caller hands over
-/// the one reference AddressSpaceCreate returned. On ProcessRelease,
+/// the one reference AddressSpaceCreate returned. On runtime teardown,
 /// the AS reference is dropped (which tears down the AS if nothing
 /// else holds it). `root` MUST be non-null — pick from
 /// fs::RamfsTrustedRoot() / fs::RamfsSandboxRoot() based on the
 /// process's trust level. Returns nullptr on kheap failure.
 Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, const fs::RamfsNode* root, u64 user_code_va,
                        u64 user_stack_va, u64 tick_budget, CapSet cap_ceiling);
+
+/// Replace the default root/inherited resource domain during a spawn prepare
+/// callback, before the Process is scheduler-visible. This is the sole path
+/// used by the authenticated ServiceManager profile; it retains replacement
+/// on success and releases the Process's previous owner reference.
+bool ProcessReplaceResourceDomainBeforePublish(Process* process, ResourceDomainKey replacement);
+
+/// Install one scheduler-publication callback on an exclusively-owned Private
+/// Process. The callback context is borrowed only across the synchronous spawn
+/// path and is either consumed before first-Task publication or discarded by
+/// ordinary Private Process teardown.
+bool ProcessInstallPublicationGateBeforePublish(Process* process, ProcessPublicationGate gate, void* context);
 
 inline Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, const fs::RamfsNode* root,
                               u64 user_code_va, u64 user_stack_va, u64 tick_budget)
@@ -1649,48 +1900,387 @@ inline Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet cap
 /// Every Retain must be matched by exactly one Release.
 void ProcessRetain(Process* p);
 
-/// Drop a reference. When the last reference goes away, the AS
-/// reference is dropped, the Process struct is freed, and the
-/// caller MUST NOT touch `p` again. nullptr is a no-op — kernel-
-/// only Tasks carry `process == nullptr` and release goes through
-/// this path unchanged.
+/// Acquire a stable lifecycle snapshot.  Publication and exit transitions use
+/// checked CAS operations so a stale creator/reaper cannot revive or complete
+/// the same Process twice.
+ProcessLifecycleState ProcessLifecycleLoad(const Process* process);
+bool ProcessLifecycleTransition(Process* process, ProcessLifecycleState expected, ProcessLifecycleState desired);
+
+/// Acquire the monotonic Task-publication tombstone. Process-wide kill paths
+/// close it under the scheduler registry lock before scanning existing Tasks;
+/// first and additional Task publication check it under that same lock.
+ProcessTerminationState ProcessTerminationLoad(const Process* process);
+
+/// Atomically close Task publication for this Process. Returns true only for
+/// the caller that changed Open -> Closed; that winner also publishes the
+/// supplied process-wide DWORD exactly once. Repeated closes preserve the
+/// winner's code. Callers serialize this with Task publication/reap under the
+/// scheduler registry lock; there is intentionally no reopen operation.
+bool ProcessTerminationClose(Process* process, u32 exit_code);
+
+/// Publish a fallback result for a Process whose last Task has been unlinked.
+/// This never overwrites a process-wide close result.
+void ProcessPublishLastTaskExitCodeIfUnset(Process* process, u32 exit_code);
+
+/// Win32 process-query result: STILL_ACTIVE until terminal lifecycle
+/// publication, then the exact durable DWORD selected above.
+u32 ProcessWin32ExitCodeSnapshot(const Process* process);
+
+/// Snapshot immutable identity metadata. Safe for a retained Process in every
+/// lifecycle state, including Exited.
+ProcessKey ProcessKeySnapshot(const Process* process);
+
+/// Consume and invoke the optional one-shot gate before the first Task becomes
+/// scheduler-visible. The caller holds the Process VM transaction and
+/// scheduler publication lock and the Process must still be Private.
+bool ProcessRunPublicationGateAtSchedulerPublication(Process* process);
+
+/// Complete the one-shot Published -> Exiting exit transaction after the
+/// scheduler has unlinked the last Task. Drains all runtime-owned resources,
+/// publishes Exited with release semantics, and only then wakes observers.
+/// The reaper keeps a strong reference for the entire call and holds no
+/// scheduler or Process runtime-admission lock while invoking it.
+void ProcessCompleteExitFromReaper(Process* process);
+
+/// Drop a strong identity reference. Exited references retain only the inert
+/// Process header; their last release frees that header without re-running
+/// runtime teardown. A Private zero-reference abort performs non-observable
+/// resource cleanup before freeing the header. The caller MUST NOT touch `p`
+/// after its final release. nullptr is a no-op.
 void ProcessRelease(Process* p);
+
+/// Result of one atomic parent relation scan. `Pending` means at least one
+/// matching registered child remains Live and returns the event sequence a
+/// blocking waiter must recheck. `Exited` consumes exactly one matching row.
+enum class LinuxChildWaitResult : u8
+{
+    NoMatchingChild,
+    Pending,
+    Exited,
+};
+
+/// Reserve one parent-owned child relation while `child` is still Private.
+/// `child_limit` is the caller's RLIMIT_NPROC-derived admission ceiling and is
+/// clamped to the fixed kernel capacity. On success the child owns one strong
+/// parent reference until Private rollback or post-Exited status publication.
+bool ProcessRegisterLinuxChildRelation(Process* parent, Process* child, u64 child_limit);
+
+/// Atomically scan the parent's registered relations and consume one matching
+/// Exited row. `target_pid > 0` selects that exact PID; non-positive selectors
+/// match any child until Linux process-group identity is implemented.
+LinuxChildWaitResult ProcessPollLinuxChild(Process* parent, i64 target_pid, Process::LinuxChildExit* exit_out,
+                                           u64* observed_sequence_out);
+
+/// Block only if the parent's atomic child-event sequence still equals the
+/// value returned with `Pending`. The result distinguishes cancellation from
+/// an ordinary wake/sequence race so Linux wait4/waitid can unwind with
+/// -EINTR. At the saturating terminal sequence value this degrades to a
+/// one-tick cancellable wait, guaranteeing a rescan without wrapping or an
+/// indefinite lost wake.
+sched::WaitQueueBlockResult ProcessWaitForLinuxChildEvent(Process* parent, u64 observed_sequence);
+
+// Pointer-sized Win32 ingress/egress word. PE32 callers own four-byte cells;
+// native/PE32+ callers own eight-byte cells. Keeping this decision at the
+// Process boundary prevents individual syscall handlers from accidentally
+// overwriting the canary immediately after a PE32 HANDLE*, PVOID*, or SIZE_T*.
+enum class UserAbiWordStatus : u8
+{
+    Ok,
+    InvalidArgument,
+    Fault,
+    ValueTooWide,
+};
+
+UserAbiWordStatus ProcessCopyUserAbiWordFrom(const Process* process, const void* user_src, u64* value_out);
+UserAbiWordStatus ProcessCopyUserAbiWordTo(const Process* process, void* user_dst, u64 value);
+
+/// Atomically claim one page-aligned half-open range from the process's shared
+/// mmap cursor. The cursor advances before mapping work begins, so concurrent
+/// callers receive disjoint bases; a later mapping failure leaves a safe gap.
+/// Refuses zero, unaligned, wrapping, kernel-half, or ABI-arena-crossing
+/// ranges. Native/Win32 ranges remain below 4 GiB; Linux loaders opt into the
+/// canonical 47-bit user range before publication.
+bool ProcessReserveMmapRange(Process* process, u64 size_bytes, u64* base_out);
+
+/// Acquire snapshot for pre-publication fork inheritance and diagnostics.
+u64 ProcessMmapCursorSnapshot(const Process* process);
+
+/// Move-only scope for the outer Process address-space transaction mutex.
+/// Lock order is Process::vm_transaction_lock -> scheduler registry ->
+/// AddressSpace mutation lock. The inner locks need not overlap, but callers
+/// must never acquire this while already inside either inner scope.
+class ScopedProcessVmTransaction final
+{
+  public:
+    explicit ScopedProcessVmTransaction(Process* process);
+    ~ScopedProcessVmTransaction();
+
+    ScopedProcessVmTransaction(const ScopedProcessVmTransaction&) = delete;
+    ScopedProcessVmTransaction& operator=(const ScopedProcessVmTransaction&) = delete;
+    ScopedProcessVmTransaction(ScopedProcessVmTransaction&&) = delete;
+    ScopedProcessVmTransaction& operator=(ScopedProcessVmTransaction&&) = delete;
+
+    /// Release early for a noreturn path such as fatal post-commit exec.
+    void Unlock();
+
+  private:
+    Process* m_process;
+};
+
+/// Move-only admission scope for access to a published Process's mutable
+/// runtime. The caller must already own a strong Process reference. Admission
+/// locks vm_transaction_lock and succeeds only while lifecycle is Published;
+/// the reaper transitions to Exiting under the same mutex before draining the
+/// runtime, so no admitted operation can overlap teardown and an Exited header
+/// can never expose a stale AS, fd table, Section view, or mutable handle table.
+class ScopedProcessRuntimeAccess final
+{
+  public:
+    explicit ScopedProcessRuntimeAccess(Process* process);
+    ~ScopedProcessRuntimeAccess();
+
+    ScopedProcessRuntimeAccess(const ScopedProcessRuntimeAccess&) = delete;
+    ScopedProcessRuntimeAccess& operator=(const ScopedProcessRuntimeAccess&) = delete;
+    ScopedProcessRuntimeAccess(ScopedProcessRuntimeAccess&&) = delete;
+    ScopedProcessRuntimeAccess& operator=(ScopedProcessRuntimeAccess&&) = delete;
+
+    explicit operator bool() const { return m_process != nullptr; }
+    void Unlock();
+
+  private:
+    Process* m_process;
+};
+
+/// Move-only owner of one already-retained Process reference. The
+/// constructor and Reset adopt a reference; they do not increment it.
+/// Use with scheduler/handle APIs whose names end in `Retained` so every
+/// early return releases deterministically. Detach transfers ownership to
+/// a durable table or another explicit owner.
+class ScopedProcessRef final
+{
+  public:
+    explicit ScopedProcessRef(Process* process = nullptr) : m_process(process) {}
+    ~ScopedProcessRef() { ProcessRelease(m_process); }
+
+    ScopedProcessRef(const ScopedProcessRef&) = delete;
+    ScopedProcessRef& operator=(const ScopedProcessRef&) = delete;
+
+    ScopedProcessRef(ScopedProcessRef&& other) : m_process(other.m_process) { other.m_process = nullptr; }
+    ScopedProcessRef& operator=(ScopedProcessRef&& other)
+    {
+        if (this != &other)
+        {
+            Reset();
+            m_process = other.m_process;
+            other.m_process = nullptr;
+        }
+        return *this;
+    }
+
+    [[nodiscard]] Process* Get() const { return m_process; }
+    [[nodiscard]] Process* operator->() const { return m_process; }
+    [[nodiscard]] explicit operator bool() const { return m_process != nullptr; }
+
+    void Reset(Process* process = nullptr)
+    {
+        ProcessRelease(m_process);
+        m_process = process;
+    }
+
+    [[nodiscard]] Process* Detach()
+    {
+        Process* process = m_process;
+        m_process = nullptr;
+        return process;
+    }
+
+  private:
+    Process* m_process;
+};
+
+/// Encode/decode the opaque positive Win32 file-handle ABI. Decode performs
+/// complete width, sign, generation, and slot validation and returns a nospec-
+/// masked slot. Encode returns 0 for an invalid identity.
+u64 EncodeWin32FileHandle(const Process::Win32FileHandleIdentity& identity);
+bool DecodeWin32FileHandle(u64 handle, Process::Win32FileHandleIdentity* identity_out);
+bool IsWin32FileHandle(u64 handle);
+
+/// Claim one file-handle row without publishing it. The returned generation
+/// token must be consumed by exactly one Publish or Abort call. Saturated
+/// generations are never reused.
+bool ProcessReserveWin32FileHandle(Process* owner, Process::Win32FileReservation* reservation_out);
+
+/// Publish a fully-initialized candidate into the exact reserved row and
+/// return its opaque generation-tagged handle. Candidate backing ownership transfers
+/// to the table only on success.
+bool ProcessPublishWin32FileHandle(Process* owner, const Process::Win32FileReservation& reservation,
+                                   const Process::Win32FileHandle& candidate, u64* handle_out);
+
+/// Cancel an unpublished file-row reservation. A stale token is a no-op.
+void ProcessAbortWin32FileHandle(Process* owner, const Process::Win32FileReservation& reservation);
+
+/// Atomically detach a live file row and copy its owned backing metadata to
+/// `detached_out`. The caller releases that backing after the process lock is
+/// gone. Normal close callers must first hold the matching
+/// `win32_file_operation_locks` row so cursor-bearing operations are excluded.
+/// Reserved/empty/invalid handles return false.
+bool ProcessDetachWin32FileHandle(Process* owner, u64 handle, Process::Win32FileHandle* detached_out);
+
+/// Count published, generation-valid Win32 file rows under the table lock.
+/// Reserved pre-publication rows are intentionally excluded.
+u32 ProcessWin32FileHandleCount(const Process* owner);
+
+/// Encode/decode the opaque positive Win32 Section-handle ABI. Bits 0..11
+/// retain the 0x900..0x907 low tag while bits 12..30 carry the process-row
+/// generation. Decode masks the validated slot before returning it.
+u64 EncodeWin32SectionHandle(const Process::Win32SectionHandleIdentity& identity);
+bool DecodeWin32SectionHandle(u64 handle, Process::Win32SectionHandleIdentity* identity_out);
+bool IsWin32SectionHandle(u64 handle);
+
+/// Reserve one unpublished Section handle row. The returned exact generation
+/// token must be consumed by Publish or Abort; exhausted generations never
+/// wrap. Publish adopts the caller-owned SectionCreate reference only on
+/// success.
+bool ProcessReserveWin32SectionHandle(Process* owner, Process::Win32SectionHandleReservation* reservation_out);
+bool ProcessPublishWin32SectionHandle(Process* owner, const Process::Win32SectionHandleReservation& reservation,
+                                      subsystems::win32::section::SectionKey key, u64* handle_out);
+void ProcessAbortWin32SectionHandle(Process* owner, const Process::Win32SectionHandleReservation& reservation);
+
+/// Snapshot the exact pool key named by `handle`, pin it outside the process
+/// lock, then revalidate the row. The caller owns the returned temporary pin
+/// and must SectionRelease it.
+bool ProcessAcquireWin32SectionHandle(Process* owner, u64 handle, subsystems::win32::section::SectionKey* key_out);
+
+/// Atomically detach the exact live handle row. The caller adopts its pool
+/// reference and releases it after the process lock is gone.
+bool ProcessDetachWin32SectionHandle(Process* owner, u64 handle, subsystems::win32::section::SectionKey* key_out);
+u32 ProcessWin32SectionHandleCount(const Process* owner);
+
+/// Section-view row transaction. Reserve excludes exit/unmap before mapping;
+/// Publish adopts a successfully mapped view reference. Claim transfers one
+/// live row into exclusive unmap ownership. A failed exact unmap restores it;
+/// a successful exact unmap consumes the reference and finishes the row.
+bool ProcessReserveWin32SectionView(Process* owner, Process::Win32SectionViewReservation* reservation_out);
+bool ProcessPublishWin32SectionView(Process* owner, const Process::Win32SectionViewReservation& reservation,
+                                    subsystems::win32::section::SectionKey key, u64 base_va);
+void ProcessAbortWin32SectionView(Process* owner, const Process::Win32SectionViewReservation& reservation);
+bool ProcessClaimWin32SectionView(Process* owner, u64 base_va, Process::Win32SectionViewClaim* claim_out);
+bool ProcessClaimWin32SectionViewExact(Process* owner, const Process::Win32SectionViewReservation& reservation,
+                                       subsystems::win32::section::SectionKey key, u64 base_va,
+                                       Process::Win32SectionViewClaim* claim_out);
+bool ProcessRestoreWin32SectionView(Process* owner, const Process::Win32SectionViewClaim& claim);
+bool ProcessFinishWin32SectionView(Process* owner, const Process::Win32SectionViewClaim& claim);
+u32 ProcessWin32SectionViewCount(const Process* owner);
+
+/// Fail-closed exec admission query for borrowed user mappings. The caller
+/// holds `owner->vm_transaction_lock`; the preceding sole-Task scheduler gate
+/// also excludes a concurrent current-process SysV syscall. Any non-Free
+/// Section view transaction blocks exec, as does every live SysV SHM
+/// attachment; whole-AS owned-page
+/// replacement must never leave either owner's PTEs or lifetime records behind.
+bool ProcessHasBorrowedUserMappings(const Process* owner);
+
+/// Encode/decode the positive, generation-tagged Win32 Process handle ABI.
+/// Decode validates the exact low-tag band before applying a nospec mask.
+u64 EncodeWin32ProcessHandle(const Process::Win32ProcessHandleIdentity& identity);
+bool DecodeWin32ProcessHandle(u64 handle, Process::Win32ProcessHandleIdentity* identity_out);
+bool IsWin32ProcessHandle(u64 handle);
+
+/// Install one already-retained `target` reference in `owner`'s Win32
+/// process-handle table. On success the table adopts that reference and
+/// returns an opaque handle; on failure returns 0 and ownership remains
+/// with the caller. Slot publication is serialized by win32_handle_lock.
+u64 ProcessInstallWin32ProcessHandle(Process* owner, Process* target);
+
+/// Resolve an opaque Win32 process handle and take a reference while the
+/// owning slot is still locked. The returned pointer remains alive across
+/// blocking operations and must be paired with ProcessRelease. Returns
+/// nullptr for an invalid, closed, or empty handle.
+Process* ProcessLookupWin32ProcessHandleRetained(Process* owner, u64 handle);
+
+/// Atomically remove a Win32 process-handle slot, then drop its target
+/// reference after releasing win32_handle_lock. Returns false for an
+/// invalid or already-closed handle.
+bool ProcessCloseWin32ProcessHandle(Process* owner, u64 handle);
+
+/// Count live Win32 process handles under win32_handle_lock.
+u32 ProcessWin32ProcessHandleCount(const Process* owner);
 
 /// Drop every reference this process's Win32 process-handle table
 /// (`win32_proc_handles`, backing NtOpenProcess) holds on another
 /// Process — or on itself.
 ///
-/// This CANNOT live in ProcessRelease. `Process::refcount` counts
+/// This CANNOT wait for final ProcessRelease. `Process::refcount` counts
 /// live tasks plus handle holders, so a retained process handle is
 /// exactly what keeps the refcount above 0 and makes
-/// ProcessRelease's destroy body unreachable: a process that opens
+/// final header reclamation unreachable: a process that opens
 /// a handle on itself pins itself forever, and two processes that
 /// open handles on each other form a cycle neither can break. The
 /// drop therefore has to happen on the LAST TASK EXIT — a strictly
 /// earlier event than the last reference drop — which is why the
-/// scheduler's reaper is the caller.
+/// one-shot reaper completion path is the caller.
 void ProcessDropOwnedProcessHandles(Process* p);
 
 /// Current Task's Process, or nullptr if the current Task is
 /// kernel-only. Used by syscall handlers to check caps.
 Process* CurrentProcess();
 
+// =========================================================================
+// Linux process-pending signal helpers.
+// =========================================================================
+
+/// Linux's stable sigset bit encoding. Signal numbers are 1..64 and map to
+/// bits 0..63. Invalid signal numbers return zero instead of performing an
+/// undefined-width shift.
+constexpr u64 ProcessLinuxSignalBit(u32 signum)
+{
+    return signum >= 1 && signum <= 64 ? (1ULL << (signum - 1U)) : 0;
+}
+static_assert(ProcessLinuxSignalBit(0) == 0 && ProcessLinuxSignalBit(1) == 1ULL &&
+              ProcessLinuxSignalBit(64) == (1ULL << 63) && ProcessLinuxSignalBit(65) == 0);
+
+/// Acquire-snapshot the coalesced process-pending signal set. The Process
+/// lifetime must remain pinned by the caller.
+u64 ProcessLinuxSignalPendingSnapshot(const Process* process);
+
+/// Release-publish one pending signal and wake signalfd readers after the
+/// atomic publication. Returns false for a null Process or invalid signum.
+bool ProcessLinuxSignalRaisePending(Process* process, u32 signum);
+
+/// Atomically consume exactly one pending signal. A concurrent producer can
+/// never be lost: failed compare/exchange retries observe its merged bitmap.
+bool ProcessLinuxSignalClaimPending(Process* process, u32 signum);
+
+/// Re-publish a set previously claimed by one consumer (for example when its
+/// final user copy fails), then wake readers. A zero mask is a no-op.
+void ProcessLinuxSignalRestorePending(Process* process, u64 signal_mask);
+
+/// Acquire-snapshot the stable signal publication sequence used to linearize
+/// signalfd predicate scans with scheduler enqueue.
+u64 ProcessLinuxSignalEventSequenceSnapshot(const Process* process);
+
+/// Publish a non-bitmap signalfd predicate change (for example a mask update)
+/// and wake readers. The sequence saturates instead of wrapping.
+void ProcessLinuxSignalNotifyWaiters(Process* process);
+
+/// Block only while the stable signal publication sequence is unchanged.
+/// Cancellation remains distinguishable so signalfd read can return -EINTR.
+sched::WaitQueueBlockResult ProcessWaitForLinuxSignalEvent(Process* process, u64 observed_sequence);
+
 /// Human-friendly cap name for diagnostics — returns a static
 /// string or "unknown". Must be safe from any context (no locks,
 /// no allocation).
 const char* CapName(Cap c);
 
-/// Called from every cap-denial site (inside a syscall that
-/// rejected its caller). Bumps the current Process's
-/// sandbox_denials counter and, if the threshold is crossed,
-/// flags the task for termination at next resched (same
-/// mechanism the tick-budget path uses — the scheduler
-/// converts the flag into a Dead transition).
+/// Called from every cap-denial site (inside a syscall that rejected its
+/// caller). Charges the current Process's exact AuthorizationContext and, if
+/// the threshold is crossed, flags the task for termination at next resched
+/// (the scheduler converts the flag into a Dead transition).
 ///
 /// Idempotent past the threshold — repeated calls keep
 /// counting but the task is flagged exactly once. `cap`
 /// argument is just for the log line; no functional effect.
-void RecordSandboxDenial(Cap cap);
+u64 RecordSandboxDenial(Cap cap);
 
 /// FS write rate-limit hook. Call from every successful
 /// file-write syscall site (Win32 SYS_FILE_WRITE, Linux
@@ -1801,8 +2391,8 @@ u64 ProcessFindModuleBaseByVa(const Process* proc, u64 va);
 
 /// Current count of live Process objects. Diagnostic-only; the
 /// scheduler's task counters remain the source of truth for thread
-/// counts, while this exposes the process-lifetime counter maintained
-/// by ProcessCreate / ProcessRelease.
+/// counts, while this exposes the execution-lifetime counter incremented by
+/// ProcessCreate and decremented by published exit or Private abort.
 u64 ProcessLiveCount();
 
 /// Count currently-open local and foreign Win32 thread handles
@@ -1822,13 +2412,10 @@ void ProcessPublishWin32ThreadExit(Process* process, u64 tid, u32 exit_code);
 /// aren't online at the call site. Panics on any failure.
 void ProcessSelfTest();
 
-/// Push one cooked ASCII byte into `proc`'s stdin ring and wake any
-/// task blocked in SYS_STDIN_READ on that process. Safe to call
-/// from task context with interrupts on; the producer-side cursor
-/// update is single-writer (the kbd-reader thread is the only
-/// caller in v0). Drops the oldest byte on overflow so a wedged
-/// reader doesn't back-pressure the IRQ-fed input pipeline.
-void ProcessFeedStdinChar(Process* proc, char c);
+/// Heap-phase test of Win32 process-handle publication, target pinning,
+/// close/drain idempotence, and exact reference ownership. Uses synthetic
+/// Process allocations and therefore must run only after KernelHeapInit.
+void ProcessHandleLifetimeSelfTest();
 
 /// Drain up to `cap` bytes from `proc`'s stdin ring into `dst_user`
 /// (a ring-3 VA). Blocks via the ring's waitqueue until at least
@@ -1838,23 +2425,36 @@ void ProcessFeedStdinChar(Process* proc, char c);
 /// "fill the buffer," always returns as soon as any data is ready.
 i64 ProcessReadStdinBlocking(Process* proc, void* dst_user, u64 cap);
 
-/// Last-stage stdin sink — set by the kbd-reader once login is
-/// closed and ring-3 input is the right destination. nullptr on
-/// boot until the userland shell first calls SYS_STDIN_READ;
-/// cleared on process release. Callers should prefer
-/// `ProcessFeedStdinFocusChar` to avoid the read-pointer / process-
-/// release race.
-Process* StdinFocusGet();
-void StdinFocusSet(Process* proc);
-void StdinFocusClearIf(Process* proc);
-
 /// Push one cooked byte into whatever process currently owns the
-/// stdin focus, atomically w.r.t. process teardown — the read of
-/// the focus pointer and the push happen with interrupts disabled,
-/// so the reaper can't free the process between the two on a
-/// single-CPU system. No-op when no focus is registered. The
-/// canonical kbd-reader entry point.
+/// stdin focus. The global focus owns a Process reference; this call
+/// takes a temporary pin under the focus lock and admits the mutable
+/// runtime before touching its ring. No-op when no live focus is
+/// registered. This is the sole kbd-reader producer entry point.
 void ProcessFeedStdinFocusChar(char c);
+
+// =========================================================================
+// Linux current-working-directory helpers.
+// =========================================================================
+
+/// Coherent fixed-capacity snapshot of a Process's Linux CWD. `length`
+/// excludes the trailing NUL; `path[length]` is always NUL on success.
+struct LinuxCwdSnapshot
+{
+    char path[Process::kLinuxCwdCap];
+    u64 length;
+};
+
+/// Snapshot the CWD while holding only the owning Process's leaf cwd lock.
+/// The caller must hold the Process lifetime (the current task's Process is
+/// sufficient). The helper publishes to `snapshot_out` only after dropping
+/// the lock, and performs no allocation, user copy, VFS work, or logging.
+bool ProcessSnapshotLinuxCwd(const Process* process, LinuxCwdSnapshot* snapshot_out);
+
+/// Replace the CWD from a trusted kernel buffer. `length` excludes the NUL
+/// and must be in [1, kLinuxCwdCap). Validation and candidate construction
+/// happen before taking the leaf cwd lock; the locked section is one bounded
+/// fixed-buffer copy. The source must not alias Process::linux_cwd.
+bool ProcessReplaceLinuxCwd(Process* process, const char* path, u64 length);
 
 // =========================================================================
 // Linux fd-table helpers (Linux fd → KFile migration).
@@ -1878,6 +2478,149 @@ void ProcessFeedStdinFocusChar(char c);
 /// (which honours RLIMIT_NOFILE). Returns -1 = no slot. Does
 /// NOT mark the slot in_use — caller stamps the slot's `state`
 /// + per-kind data immediately after.
+/// Plain ownership receipts for the fd transaction core. A zeroed receipt owns
+/// nothing. Live receipts are consumed by a successful operation or released
+/// explicitly after fd/handle/epoll/async locks are gone; no stack destructor
+/// performs hidden KObject or OFD cleanup.
+struct LinuxFdPrepared
+{
+    Process::LinuxFd snapshot;
+    ipc::KObject* kfile_ref;
+    bool owns_ofd_ref;
+};
+
+struct LinuxFdAcquired
+{
+    Process::LinuxFd snapshot;
+    ipc::KObject* kfile_ref;
+    bool owns_ofd_ref;
+};
+
+struct LinuxFdTransfer
+{
+    u32 source_fd;
+    Process::LinuxFd snapshot;
+    ipc::KObject* kfile_ref;
+    bool owns_ofd_ref;
+};
+
+struct LinuxFdDetached
+{
+    u32 source_fd;
+    Process::LinuxFd snapshot;
+    ipc::KObject* kfile_ref;
+    bool owns_ofd_ref;
+};
+
+/// Sleepable serialization guard for one retained open-file description.
+/// Enter only from a live LinuxFdAcquired receipt and keep that receipt alive
+/// until Exit. Enter samples the OFD under its spinlock, drops that spinlock,
+/// then acquires this mutex; callers may hold the guard across VFS work, user
+/// copies, and the final offset commit. pread/pwrite use the same guard for I/O
+/// serialization but deliberately skip the shared-position accessors.
+struct LinuxFdIoGuard
+{
+    sched::Mutex* position_lock;
+    u16 ofd;
+    bool held;
+};
+
+/// Retained regular-file OFD commit. Only PendingCreate is a valid flag mask;
+/// CLOEXEC and Canary remain per-slot and are never overwritten. The caller
+/// must hold the matching LinuxFdIoGuard so a dup/fork sibling cannot
+/// interleave backing-state changes with the VFS operation. A concurrent
+/// close does not cancel an already-started operation: the authoritative OFD
+/// is still updated, while the compatibility slot mirror is updated only if
+/// the original generation remains installed.
+struct LinuxFdRegularMetadataCommit
+{
+    u8 flags_mask;
+    u8 flags_value;
+    bool update_first_cluster;
+    bool update_size;
+    u32 first_cluster;
+    u32 size;
+};
+
+/// Build a receipt for a new descriptor. Success adopts `owned_kfile` and,
+/// for non-TTY descriptors, owns one fresh OFD reference. Failure leaves the
+/// KObject with the caller and clears `prepared`.
+bool LinuxFdPrepare(LinuxFdPrepared* prepared, const Process::LinuxFd& payload, ipc::KObject* owned_kfile,
+                    u32 status_flags);
+void LinuxFdPreparedRelease(LinuxFdPrepared* prepared);
+
+/// Publish one or two prepared descriptors at the lowest available slots.
+/// Pair publication is all-or-nothing. Success consumes the receipt(s).
+i32 LinuxFdBindLowest(Process* p, u32 lo, LinuxFdPrepared* prepared, bool cloexec,
+                      LinuxFdAcquired* acquired_out = nullptr);
+bool LinuxFdBindPairLowest(Process* p, u32 lo, LinuxFdPrepared* first, LinuxFdPrepared* second, u32* first_fd,
+                           u32* second_fd, LinuxFdAcquired* first_acquired_out = nullptr,
+                           LinuxFdAcquired* second_acquired_out = nullptr);
+
+/// Retain one exact descriptor identity. `expected_state == 0` accepts any
+/// live state. Clone duplicates an already-acquired identity without another
+/// numeric fd-table lookup, as required by epoll wait snapshots.
+bool LinuxFdAcquire(Process* p, u32 fd, u8 expected_state, LinuxFdAcquired* acquired);
+bool LinuxFdAcquiredClone(const LinuxFdAcquired* source, LinuxFdAcquired* clone_out);
+void LinuxFdAcquiredRelease(LinuxFdAcquired* acquired);
+/// Re-snapshot descriptor-local bits plus authoritative shared OFD metadata
+/// after waiting for an I/O guard. The retained identity must still match the
+/// same fd generation/state/OFD/KFile; close+reuse fails without exposing
+/// replacement metadata.
+bool LinuxFdRefreshAcquired(Process* p, u32 fd, const LinuxFdAcquired* acquired, const LinuxFdIoGuard* guard,
+                            Process::LinuxFd* snapshot_out);
+
+/// Refresh a retained regular-file receipt after acquiring its matching OFD
+/// guard. The source Process/numeric fd is deliberately not consulted: close
+/// or reuse cannot cancel an operation that already retained the OFD. Starts
+/// from the receipt snapshot and overlays only OFD-authoritative
+/// PendingCreate, first_cluster, and size; it neither writes a slot mirror nor
+/// refreshes offset/status flags.
+bool LinuxFdRefreshRetainedRegular(const LinuxFdAcquired* acquired, const LinuxFdIoGuard* guard,
+                                   Process::LinuxFd* snapshot_out);
+
+/// Acquire/release the per-OFD sleepable serialization mutex. None of these
+/// operations retain or release the receipt; the LinuxFdAcquired owner pins
+/// the OFD for the guard's entire lifetime.
+bool LinuxFdIoGuardEnter(const LinuxFdAcquired* acquired, LinuxFdIoGuard* guard);
+void LinuxFdIoGuardExit(LinuxFdIoGuard* guard);
+bool LinuxFdIoGuardGetOffset(const LinuxFdIoGuard* guard, u64* offset_out);
+bool LinuxFdIoGuardSetOffset(LinuxFdIoGuard* guard, u64 offset);
+bool LinuxFdIoGuardAdvanceOffset(LinuxFdIoGuard* guard, u64 delta, u64* previous_out, u64* current_out);
+bool LinuxFdIoGuardGetStatusFlags(const LinuxFdIoGuard* guard, u32* flags_out);
+bool LinuxFdIoGuardSetStatusFlags(LinuxFdIoGuard* guard, u32 flags);
+
+/// Detach one or a batch of slots, moving all owned references into explicit
+/// cleanup receipts. Returns the number of populated batch receipts.
+bool LinuxFdUnbind(Process* p, u32 fd, LinuxFdDetached* detached);
+bool LinuxFdUnbindAcquired(Process* p, u32 fd, const LinuxFdAcquired* acquired, LinuxFdDetached* detached);
+u32 LinuxFdDetachAll(Process* p, LinuxFdDetached* detached, u32 capacity);
+u32 LinuxFdDetachCloexec(Process* p, LinuxFdDetached* detached, u32 capacity);
+void LinuxFdDetachedRelease(LinuxFdDetached* detached);
+
+/// CLOEXEC requires the exact descriptor generation. Regular metadata commits
+/// use the retained guarded OFD as authority after VFS mutation and touch the
+/// numeric slot mirror only while the exact generation is still installed.
+bool LinuxFdSetCloexecAcquired(Process* p, u32 fd, const LinuxFdAcquired* acquired, bool on);
+bool LinuxFdCommitRegularMetadataAcquired(Process* p, u32 fd, const LinuxFdAcquired* acquired,
+                                          const LinuxFdIoGuard* guard, const LinuxFdRegularMetadataCommit* commit);
+
+/// Failure-atomic POSIX duplication. Exact replacement keeps the destination
+/// unchanged on failure and cleans displaced identities after the fd lock.
+i32 LinuxFdDuplicateLowest(Process* p, u32 oldfd, u32 lo, bool cloexec);
+bool LinuxFdDuplicateExact(Process* p, u32 oldfd, u32 newfd, bool cloexec);
+
+/// Cross-process transport. Export and import never hold two processes' fd
+/// locks together; imports consume transfers only after successful publish.
+bool LinuxFdExport(Process* source, u32 source_fd, LinuxFdTransfer* transfer);
+void LinuxFdTransferRelease(LinuxFdTransfer* transfer);
+i32 LinuxFdImportLowest(Process* destination, u32 lo, LinuxFdTransfer* transfer, bool cloexec);
+bool LinuxFdImportExact(Process* destination, u32 destination_fd, LinuxFdTransfer* transfer, bool cloexec);
+/// Export a failure-atomic table receipt. Empty tables are successful with
+/// `*count_out == 0`; false uniquely reports validation/capacity/retain failure.
+bool LinuxFdExportTable(Process* source, LinuxFdTransfer* transfers, u32 capacity, u32* count_out);
+bool LinuxFdImportTable(Process* destination, LinuxFdTransfer* transfers, u32 count);
+
 i32 LinuxFdAllocLowest(Process* p, u32 lo);
 
 /// Stamp the KFile sidecar onto an already-allocated slot.
@@ -1889,7 +2632,12 @@ i32 LinuxFdAllocLowest(Process* p, u32 lo);
 /// slot + zero fd state). On success, stores the resulting
 /// `ipc::Handle` in `p->linux_fds[fd].kf_handle` so close /
 /// dup / fork can route through the unified table.
-bool LinuxFdAttachKFile(Process* p, u32 fd, u8 kind, u32 pool_index, void (*release)(u32));
+/// `out_pool_released`, when non-null, is set true when a failed
+/// HandleTableInsert already dropped the newly-created KFile and fired
+/// its pool-release callback. Callers that own the pool slot can use the
+/// false case to release it themselves (KFileCreate failure).
+bool LinuxFdAttachKFile(Process* p, u32 fd, u8 kind, u32 pool_index, void (*release)(u32),
+                        bool* out_pool_released = nullptr);
 
 /// Owner-aware variant of `LinuxFdAttachKFile`. Used by dirfd
 /// (kind=11), whose backing storage is a `Process::win32_dirs[]`
@@ -1969,16 +2717,17 @@ void LinuxFdSetStatusFlags(Process* p, u32 fd, u32 status_flags);
 /// the destination handle table is full.
 bool LinuxFdCopyAcrossProcesses(Process* dst, u32 dst_fd, Process* src, u32 src_fd);
 
-/// Copy parent's fd table into `child` at fork time. Each
-/// occupied slot in `parent` is mirrored into `child` through
-/// `LinuxFdCopyAcrossProcesses`, so the child shares the parent's
-/// open file descriptions and holds its own KFile reference on
-/// each pool object (each side drops one ref on close).
+/// Copy the parent's inheritable fd-table snapshot into `child` at fork time
+/// through one export/filter/import transaction. State-11 directory snapshots
+/// are parent-owned and are released from the transfer set before any child
+/// publication. Every other imported slot shares the parent's OFD and owns its
+/// own KFile reference.
 /// FD_CLOEXEC is preserved on the inherited slot — Linux
 /// semantics: fork copies cloexec fds; only execve drops them.
 /// Caller (DoFork / DoClone) must have already initialised
-/// `child`'s fd table to all-unused via `ProcessCreate`.
-void LinuxFdInheritFromParent(Process* parent, Process* child);
+/// `child`'s fd table via `ProcessCreate`. Returns false without publishing a
+/// partial table; the caller must abort private child construction.
+bool LinuxFdInheritFromParent(Process* parent, Process* child);
 
 /// Walk the fd table and close every slot with FD_CLOEXEC set.
 ///

@@ -11,13 +11,14 @@
  *                                         fs::routing mutations)
  *
  * What still lives here:
- *   - wait4 / waitid        → real: drain the per-process
- *                             linux_child_exits queue (fork()
- *                             registers child exits); -ECHILD
- *                             only when the caller truly has no
- *                             children. See the GAP notes on the
- *                             handlers (no pgid model, rusage
- *                             zero-filled, no stop/continue).
+ *   - wait4 / waitid        → real: atomically consume durable
+ *                             parent-owned child relation rows;
+ *                             -ECHILD is selector-specific and
+ *                             blocking uses a sequence-aware SMP
+ *                             predicate/enqueue handoff. See the
+ *                             GAP notes on the handlers (no pgid
+ *                             model, rusage zero-filled, no
+ *                             stop/continue).
  *   - fadvise64 / readahead → 0 after fd validation (no readahead
  *                             engine, but a bad fd still sees
  *                             -EBADF).
@@ -34,7 +35,6 @@
 
 #include "subsystems/linux/syscall_internal.h"
 
-#include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
 #include "mm/paging.h"
 #include "proc/process.h"
@@ -51,14 +51,11 @@ namespace duetos::subsystems::linux::internal
 // fit for "we don't have any pipes to give you."
 // DoPipe / DoPipe2 moved to syscall_pipe.cpp.
 
-// wait4 / waitid: drain the per-process linux_child_exits queue.
-// fork() now sets child->linux_parent_pid = parent->pid; when a
-// child Process hits ProcessRelease's last-ref drop, it pushes a
-// LinuxChildExit{pid, exit_code, exit_signal} onto the parent's
-// queue and wakes linux_wait_wq. This handler scans the queue
-// for a match against `pid` (or any child if pid <= 0), drains the
-// matching entry, encodes the wait-status word the same shape musl
-// expects (WIFEXITED + 8-bit exit code), and returns the child PID.
+// wait4 / waitid atomically scan and consume parent-owned relation rows.
+// fork reserves a Live row before scheduler publication; only the child's
+// post-teardown Exited publication can make that same row waitable. Blocking
+// snapshots the parent's monotonic event sequence under the relation lock,
+// then the scheduler rechecks it while atomically enqueueing the caller.
 //
 // Sub-GAPs: process-group / session matching (pid == 0 / pid <= -1
 // as group selectors) collapse to "any child" — no pgid model
@@ -69,27 +66,6 @@ namespace
 
 constexpr u32 kWNOHANG = 0x1;
 constexpr i64 kWaitPidAny = -1;
-
-// Return queue index of the matching entry, or -1 if none.
-// `target_pid > 0` matches that exact pid; <= 0 matches any.
-i32 FindChildExitMatchLocked(core::Process* p, i64 target_pid)
-{
-    for (u64 i = 0; i < p->linux_child_exit_count; ++i)
-    {
-        if (target_pid <= 0 || static_cast<i64>(p->linux_child_exits[i].pid) == target_pid)
-            return static_cast<i32>(i);
-    }
-    return -1;
-}
-
-void DrainChildExitLocked(core::Process* p, u32 idx, core::Process::LinuxChildExit& out)
-{
-    out = p->linux_child_exits[idx];
-    // Compact: shift the tail down so the queue stays dense.
-    for (u64 i = idx + 1; i < p->linux_child_exit_count; ++i)
-        p->linux_child_exits[i - 1] = p->linux_child_exits[i];
-    --p->linux_child_exit_count;
-}
 
 i32 EncodeWStatus(const core::Process::LinuxChildExit& exit)
 {
@@ -119,36 +95,31 @@ i64 DoWait4(u64 pid, u64 user_status, u64 options, u64 user_rusage)
     const bool nonblocking = (options & kWNOHANG) != 0;
     while (true)
     {
-        arch::Cli();
-        i32 found = FindChildExitMatchLocked(p, target_pid);
-        if (found < 0)
+        core::Process::LinuxChildExit exit{};
+        u64 observed_sequence = 0;
+        const core::LinuxChildWaitResult wait_result =
+            core::ProcessPollLinuxChild(p, target_pid, &exit, &observed_sequence);
+        if (wait_result != core::LinuxChildWaitResult::Exited)
         {
-            // POSIX rule: if the caller has NO children at all
-            // (no live ones AND no zombies queued), wait4 returns
-            // -ECHILD immediately, regardless of WNOHANG. The
-            // earlier "block until something registers" was a
-            // bug — it deadlocked single-process exercisers
-            // (synfull's wait4 probe) waiting for a child that
-            // would never exist.
-            arch::Sti();
-            const u64 live_children = sched::SchedCountChildrenOfPid(p->pid);
-            if (live_children == 0)
+            // ECHILD is derived from the exact registered selector, not task
+            // counts. waitpid(specific_pid) therefore rejects a nonexistent
+            // child even while an unrelated child remains Live.
+            if (wait_result == core::LinuxChildWaitResult::NoMatchingChild)
                 return kECHILD;
-            arch::Cli();
-            // Children exist but none have exited. WNOHANG returns
-            // 0 (no exit available); blocking parks on the wait
-            // queue.
             if (nonblocking)
-            {
-                arch::Sti();
                 return 0;
-            }
-            sched::WaitQueueBlock(&p->linux_wait_wq);
+
+            // The sequence recheck and scheduler enqueue share one
+            // g_sched_lock hold. Whether this call blocks or observes a raced
+            // producer, the loop must rescan the relation table.
+            const sched::WaitQueueBlockResult block_result = core::ProcessWaitForLinuxChildEvent(p, observed_sequence);
+            if (block_result == sched::WaitQueueBlockResult::Cancelled)
+                return kEINTR;
             continue;
         }
-        core::Process::LinuxChildExit exit;
-        DrainChildExitLocked(p, static_cast<u32>(found), exit);
-        arch::Sti();
+        // GAP: status is consumed before user writeback. A faulting status or
+        // rusage pointer returns EFAULT after reaping; add a claim/commit seam
+        // if Linux-compatible retry-on-EFAULT behavior becomes necessary.
         if (user_status != 0)
         {
             const i32 wstatus = EncodeWStatus(exit);
@@ -176,10 +147,24 @@ i64 DoWait4(u64 pid, u64 user_status, u64 options, u64 user_rusage)
 
 i64 DoWaitid(u64 idtype, u64 id, u64 user_info, u64 options, u64 user_rusage)
 {
-    // idtype: P_PID = 1, P_PGID = 2, P_ALL = 0. v0 collapses every
-    // selector to "match this child's pid" (P_PID) or "any child"
-    // (others) — no pgid model. WNOHANG honoured.
+    // idtype: P_PID = 1, P_PGID = 2, P_ALL = 0. v0 collapses P_PGID
+    // to "any child" because there is no pgid model, while P_PID remains
+    // an exact positive-PID selector. WNOHANG is honoured.
+    constexpr u64 kPAll = 0;
     constexpr u64 kPPid = 1;
+    constexpr u64 kPPgid = 2;
+    constexpr u64 kMaxSignedPid = 0x7FFFFFFFFFFFFFFFull;
+    constexpr u64 kWExited = 0x4;
+    constexpr u64 kSupportedOptions = kWNOHANG | kWExited;
+    if (idtype != kPAll && idtype != kPPid && idtype != kPPgid)
+        return kEINVAL;
+    if (idtype == kPPid && (id == 0 || id > kMaxSignedPid))
+        return kEINVAL;
+    // Only exit events exist today. Requiring WEXITED prevents WSTOPPED- or
+    // WCONTINUED-only calls from consuming an unrelated terminal row, while
+    // the supported mask rejects WNOWAIT until poll has a non-consuming mode.
+    if ((options & kWExited) == 0 || (options & ~kSupportedOptions) != 0)
+        return kEINVAL;
     core::Process* p = core::CurrentProcess();
     if (p == nullptr)
         return kECHILD;
@@ -187,23 +172,16 @@ i64 DoWaitid(u64 idtype, u64 id, u64 user_info, u64 options, u64 user_rusage)
     const bool nonblocking = (options & kWNOHANG) != 0;
     while (true)
     {
-        arch::Cli();
-        i32 found = FindChildExitMatchLocked(p, target_pid);
-        if (found < 0)
+        core::Process::LinuxChildExit exit{};
+        u64 observed_sequence = 0;
+        const core::LinuxChildWaitResult wait_result =
+            core::ProcessPollLinuxChild(p, target_pid, &exit, &observed_sequence);
+        if (wait_result != core::LinuxChildWaitResult::Exited)
         {
-            // POSIX rule (mirrored from DoWait4 above): no
-            // children at all -> -ECHILD immediately, regardless
-            // of WNOHANG. Without this, a single-process exerciser
-            // calling waitid blocks forever on linux_wait_wq for
-            // a child that will never register.
-            arch::Sti();
-            const u64 live_children = sched::SchedCountChildrenOfPid(p->pid);
-            if (live_children == 0)
+            if (wait_result == core::LinuxChildWaitResult::NoMatchingChild)
                 return kECHILD;
-            arch::Cli();
             if (nonblocking)
             {
-                arch::Sti();
                 if (user_info != 0)
                 {
                     u8 zero[128];
@@ -218,12 +196,13 @@ i64 DoWaitid(u64 idtype, u64 id, u64 user_info, u64 options, u64 user_rusage)
                 }
                 return 0;
             }
-            sched::WaitQueueBlock(&p->linux_wait_wq);
+            const sched::WaitQueueBlockResult block_result = core::ProcessWaitForLinuxChildEvent(p, observed_sequence);
+            if (block_result == sched::WaitQueueBlockResult::Cancelled)
+                return kEINTR;
             continue;
         }
-        core::Process::LinuxChildExit exit;
-        DrainChildExitLocked(p, static_cast<u32>(found), exit);
-        arch::Sti();
+        // GAP: as in wait4, the terminal row is consumed before user
+        // writeback, so EFAULT cannot currently be retried.
         if (user_info != 0)
         {
             // struct siginfo_t — first 32 bytes carry si_signo /
@@ -243,7 +222,8 @@ i64 DoWaitid(u64 idtype, u64 id, u64 user_info, u64 options, u64 user_rusage)
             } info{};
             info.si_signo = 17; // SIGCHLD
             info.si_pid = static_cast<u32>(exit.pid);
-            info.si_status = static_cast<i32>(exit.exit_code & 0xFF);
+            info.si_status =
+                exit.was_signaled ? static_cast<i32>(exit.exit_signal & 0x7F) : static_cast<i32>(exit.exit_code & 0xFF);
             info.si_code = exit.was_signaled ? 2 /*CLD_KILLED*/ : 1 /*CLD_EXITED*/;
             if (!mm::CopyToUser(reinterpret_cast<void*>(user_info), &info, sizeof(info)))
                 return kEFAULT;
@@ -281,8 +261,10 @@ i64 DoFadvise64(u64 fd, u64 offset, u64 len, u64 advice)
         return kEBADF;
     // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
     fd = util::MaskedIndex(fd, 16);
-    if (p->linux_fds[fd].state == 0)
+    core::LinuxFdAcquired acquired{};
+    if (!core::LinuxFdAcquire(p, static_cast<u32>(fd), 0, &acquired))
         return kEBADF;
+    core::LinuxFdAcquiredRelease(&acquired);
     return 0;
 }
 
@@ -298,8 +280,10 @@ i64 DoReadahead(u64 fd, u64 offset, u64 count)
         return kEBADF;
     // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
     fd = util::MaskedIndex(fd, 16);
-    if (p->linux_fds[fd].state == 0)
+    core::LinuxFdAcquired acquired{};
+    if (!core::LinuxFdAcquire(p, static_cast<u32>(fd), 0, &acquired))
         return kEBADF;
+    core::LinuxFdAcquiredRelease(&acquired);
     return 0;
 }
 
@@ -416,7 +400,14 @@ i64 DoSync()
 }
 i64 DoSyncfs(u64 fd)
 {
-    (void)fd;
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || fd >= 16)
+        return kEBADF;
+    fd = util::MaskedIndex(fd, 16);
+    core::LinuxFdAcquired acquired{};
+    if (!core::LinuxFdAcquire(p, static_cast<u32>(fd), 0, &acquired))
+        return kEBADF;
+    core::LinuxFdAcquiredRelease(&acquired);
     return 0;
 }
 

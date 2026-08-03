@@ -77,7 +77,7 @@ pub const EXFAT_DIRENT_FILE: u8 = 0x85;
 pub const EXFAT_DIRENT_STREAM_EXT: u8 = 0xC0;
 pub const EXFAT_DIRENT_FILE_NAME: u8 = 0xC1;
 
-fn slice_from_raw<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
+unsafe fn slice_from_raw(ptr: *const u8, len: usize, _scope: &()) -> Option<&[u8]> {
     if ptr.is_null() {
         return None;
     }
@@ -85,7 +85,7 @@ fn slice_from_raw<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
     Some(unsafe { slice::from_raw_parts(ptr, len) })
 }
 
-fn out_init<'a, T: Default + Copy>(out: *mut T) -> Option<&'a mut T> {
+unsafe fn out_init<T: Default + Copy>(out: *mut T, _scope: &mut ()) -> Option<&mut T> {
     if out.is_null() {
         return None;
     }
@@ -274,12 +274,23 @@ fn fat_chain_next(fat: &[u8], cluster: u32) -> u32 {
 
 // ---------- FFI ----------
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_exfat_parse_boot_sector(buf: *const u8, len: usize, out: *mut DuetosExfatBootSector) -> bool {
-    let Some(dst) = out_init(out) else {
+pub unsafe extern "C" fn duetos_exfat_parse_boot_sector(
+    buf: *const u8,
+    len: usize,
+    out: *mut DuetosExfatBootSector,
+) -> bool {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_boot_sector(slice, dst)
@@ -296,12 +307,18 @@ fn read_boot_sector_by_ptr(bs: *const DuetosExfatBootSector) -> Option<DuetosExf
     Some(unsafe { ptr::read(bs) })
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_exfat_derive_geometry(
+pub unsafe extern "C" fn duetos_exfat_derive_geometry(
     bs: *const DuetosExfatBootSector,
     out: *mut DuetosExfatGeometry,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
     let Some(bs_val) = read_boot_sector_by_ptr(bs) else {
@@ -312,26 +329,39 @@ pub extern "C" fn duetos_exfat_derive_geometry(
 
 /// Parse one dirent set. `buf_entries` is the number of 32-byte
 /// slots in `buf` (call site passes bytes_to_read / 32).
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_exfat_parse_dirent_set(
+pub unsafe extern "C" fn duetos_exfat_parse_dirent_set(
     buf: *const u8,
     len: usize,
     start_idx: u32,
     buf_entries: u32,
     out: *mut DuetosExfatDirEntry,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_file_dirent_set(slice, start_idx, buf_entries, dst)
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_exfat_fat_chain_next(fat: *const u8, fat_len: usize, cluster: u32) -> u32 {
-    let Some(slice) = slice_from_raw(fat, fat_len) else {
+pub unsafe extern "C" fn duetos_exfat_fat_chain_next(fat: *const u8, fat_len: usize, cluster: u32) -> u32 {
+    let fat_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(fat, fat_len, &fat_scope) }) else {
         return 0;
     };
     fat_chain_next(slice, cluster)

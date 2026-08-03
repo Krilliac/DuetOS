@@ -97,7 +97,7 @@ __declspec(dllimport) size_t __cdecl fread(void* ptr, size_t sz, size_t nmemb, F
 __declspec(dllimport) int __cdecl fclose(FILE* f);
 __declspec(dllimport) int __cdecl printf(const char* fmt, ...);
 
-__declspec(dllimport) void __stdcall ExitProcess(UINT code);
+__declspec(dllimport) __declspec(noreturn) void __stdcall ExitProcess(UINT code);
 
 static int ascii_eq(const char* a, const char* b)
 {

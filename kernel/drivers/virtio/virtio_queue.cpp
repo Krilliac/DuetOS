@@ -66,7 +66,7 @@ bool AllocZeroPage(u64* phys_out, void** virt_out)
 
 bool VirtioQueueSetup(VirtioPciLayout* L, VirtioQueue* q, u16 queue_index, u16 want_size)
 {
-    if (L == nullptr || q == nullptr || !L->present || L->common_cfg == nullptr || L->notify == nullptr)
+    if (L == nullptr || q == nullptr || q->up || !L->present || L->common_cfg == nullptr || L->notify == nullptr)
         return false;
 
     // Select the queue and read the device's max size. queue_size
@@ -88,15 +88,29 @@ bool VirtioQueueSetup(VirtioPciLayout* L, VirtioQueue* q, u16 queue_index, u16 w
 
     // Allocate the three ring regions. Each fits in a single page
     // at queue_size=32; see header.
+    mm::PhysAddr desc_phys = mm::kNullFrame;
+    mm::PhysAddr avail_phys = mm::kNullFrame;
+    mm::PhysAddr used_phys = mm::kNullFrame;
     void* desc_v = nullptr;
     void* avail_v = nullptr;
     void* used_v = nullptr;
-    if (!AllocZeroPage(&q->desc_phys, &desc_v))
+    if (!AllocZeroPage(&desc_phys, &desc_v))
         return false;
-    if (!AllocZeroPage(&q->avail_phys, &avail_v))
+    if (!AllocZeroPage(&avail_phys, &avail_v))
+    {
+        mm::FreeFrame(desc_phys);
         return false;
-    if (!AllocZeroPage(&q->used_phys, &used_v))
+    }
+    if (!AllocZeroPage(&used_phys, &used_v))
+    {
+        mm::FreeFrame(avail_phys);
+        mm::FreeFrame(desc_phys);
         return false;
+    }
+
+    q->desc_phys = desc_phys;
+    q->avail_phys = avail_phys;
+    q->used_phys = used_phys;
 
     q->queue_index = queue_index;
     q->queue_size = size;

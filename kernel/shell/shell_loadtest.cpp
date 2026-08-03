@@ -301,9 +301,9 @@ void RunCpuLoad(u32 secs, u32 workers, bool also_mem, u32 mib)
         g_workers[i].active = true;
         ++g_active_workers;
         duetos::arch::Sti();
-        auto* t =
+        const duetos::sched::TaskCreateResult result =
             duetos::sched::SchedCreate(CpuBurnerEntry, reinterpret_cast<void*>(static_cast<uptr>(i)), "loadtest-cpu");
-        if (t == nullptr)
+        if (!result.created)
         {
             duetos::arch::Cli();
             g_workers[i].active = false;

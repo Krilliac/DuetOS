@@ -1,5 +1,38 @@
 #include "kernel32_internal.h"
 
+typedef unsigned long NTSTATUS;
+
+#define STATUS_SUCCESS 0x00000000UL
+#define STATUS_PROCESS_NOT_IN_JOB 0x00000123UL
+#define STATUS_PROCESS_IN_JOB 0x00000124UL
+
+#define ERROR_INVALID_PARAMETER 87UL
+#define ERROR_NOT_SUPPORTED 50UL
+
+#define JOB_OBJECT_ALL_ACCESS 0x001F001FUL
+
+extern NTSTATUS NtClose(HANDLE Handle);
+extern NTSTATUS NtCreateJobObject(HANDLE* JobHandle, ULONG DesiredAccess, void* ObjectAttributes);
+extern NTSTATUS NtAssignProcessToJobObject(HANDLE JobHandle, HANDLE ProcessHandle);
+extern NTSTATUS NtIsProcessInJob(HANDLE ProcessHandle, HANDLE JobHandle);
+extern NTSTATUS NtTerminateJobObject(HANDLE JobHandle, NTSTATUS ExitStatus);
+extern NTSTATUS NtQueryInformationJobObject(HANDLE JobHandle, ULONG JobObjectInformationClass,
+                                            void* JobObjectInformation, ULONG JobObjectInformationLength,
+                                            ULONG* ReturnLength);
+extern ULONG RtlNtStatusToDosError(NTSTATUS Status);
+
+static BOOL kernel32_job_fail(NTSTATUS status)
+{
+    SetLastError((DWORD)RtlNtStatusToDosError(status));
+    return 0;
+}
+
+static BOOL kernel32_is_file_handle(unsigned long long raw)
+{
+    const unsigned long long tag = raw & 0xFFFULL;
+    const unsigned long long generation = raw >> 12;
+    return raw <= 0x7FFFFFFFULL && generation != 0 && tag >= 0x100ULL && tag < 0x110ULL;
+}
 
 /* GetFileAttributesA/W live further down — they use SYS_FILE_QUERY_ATTRIBUTES
  * directly. Skipping our placeholder definitions here avoids duplicates. */
@@ -137,30 +170,67 @@ __declspec(dllexport) BOOL UnmapViewOfFile(const void* base)
     return 1;
 }
 
-/* CreateJobObjectW — opaque sentinel handle. AssignProcessToJobObject
- * accepts and returns success. IsProcessInJob reports FALSE before
- * any assignment in this v0 model. */
+/* Win32 Job APIs are last-error facades over ntdll's NTSTATUS
+ * boundary; ntdll alone owns the DuetOS syscall register ABI. */
 __declspec(dllexport) HANDLE CreateJobObjectW(void* sec, const WCHAR_t* name)
 {
-    (void)sec;
-    (void)name;
-    return (HANDLE)0x7001ULL;
+    /* Named Jobs and SECURITY_ATTRIBUTES require an object-manager
+     * namespace plus handle inheritance, neither of which exists yet.
+     * Reject them explicitly instead of manufacturing an unnamed Job. */
+    if (sec != (void*)0 || (name != (const WCHAR_t*)0 && name[0] != 0))
+    {
+        SetLastError(ERROR_NOT_SUPPORTED);
+        return (HANDLE)0;
+    }
+
+    HANDLE job = (HANDLE)0;
+    const NTSTATUS status = NtCreateJobObject(&job, JOB_OBJECT_ALL_ACCESS, (void*)0);
+    if (status != STATUS_SUCCESS)
+    {
+        kernel32_job_fail(status);
+        return (HANDLE)0;
+    }
+    return job;
 }
 
 __declspec(dllexport) BOOL AssignProcessToJobObject(HANDLE job, HANDLE proc)
 {
-    (void)job;
-    (void)proc;
-    return 1;
+    const NTSTATUS status = NtAssignProcessToJobObject(job, proc);
+    return status == STATUS_SUCCESS ? 1 : kernel32_job_fail(status);
 }
 
 __declspec(dllexport) BOOL IsProcessInJob(HANDLE proc, HANDLE job, BOOL* in_job)
 {
-    (void)proc;
-    (void)job;
-    if (in_job != (BOOL*)0)
-        *in_job = 0;
-    return 1;
+    if (in_job == (BOOL*)0)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    *in_job = 0;
+
+    const NTSTATUS status = NtIsProcessInJob(proc, job);
+    if (status == STATUS_PROCESS_IN_JOB)
+    {
+        *in_job = 1;
+        return 1;
+    }
+    if (status == STATUS_PROCESS_NOT_IN_JOB)
+        return 1;
+    return kernel32_job_fail(status);
+}
+
+__declspec(dllexport) BOOL TerminateJobObject(HANDLE job, UINT exit_code)
+{
+    const NTSTATUS status = NtTerminateJobObject(job, (NTSTATUS)exit_code);
+    return status == STATUS_SUCCESS ? 1 : kernel32_job_fail(status);
+}
+
+__declspec(dllexport) BOOL QueryInformationJobObject(HANDLE job, int info_class, void* info, DWORD info_length,
+                                                     DWORD* return_length)
+{
+    const NTSTATUS status =
+        NtQueryInformationJobObject(job, (ULONG)info_class, info, (ULONG)info_length, (ULONG*)return_length);
+    return status == STATUS_SUCCESS ? 1 : kernel32_job_fail(status);
 }
 
 /* CreateIoCompletionPort — for v0 we keep an in-memory ring of
@@ -172,10 +242,9 @@ __declspec(dllexport) BOOL IsProcessInJob(HANDLE proc, HANDLE job, BOOL* in_job)
  * T7-03: file→IOCP binding table. CreateIoCompletionPort with
  * a non-INVALID hFile + non-NULL hExisting registers the
  * binding so subsequent overlapped ReadFile / WriteFile calls
- * post a completion packet to the bound port. Only handles
- * inside the kernel-file-handle range (kWin32HandleBase ..
- * +kWin32HandleCap) are valid binding sources; others ignore
- * the call and return the existing port.
+ * post a completion packet to the bound port. Only positive,
+ * generation-bearing handles with a low file-slot tag are valid
+ * binding sources; others ignore the call and return the port.
  */
 #define DUETOS_IOCP_RING 32
 typedef struct
@@ -267,7 +336,7 @@ __declspec(dllexport) HANDLE CreateIoCompletionPort(HANDLE fileHandle, HANDLE ex
      * "create the port, no file binding". Only valid file
      * handles establish a binding. */
     const unsigned long long fh_raw = (unsigned long long)(UINT_PTR)fileHandle;
-    if (fileHandle != (HANDLE)0 && fileHandle != (HANDLE)(long long)-1 && fh_raw >= 0x100ULL && fh_raw < 0x110ULL)
+    if (fileHandle != (HANDLE)0 && fileHandle != (HANDLE)(long long)-1 && kernel32_is_file_handle(fh_raw))
     {
         for (int i = 0; i < DUETOS_IOCP_BINDING_SLOTS; ++i)
         {
@@ -1508,7 +1577,7 @@ __declspec(dllexport) BOOL WaitNamedPipeA(const char* lpName, DWORD dwTimeout)
                      : "a"((long long)203), /* SYS_NAMED_PIPE_OPEN */
                        "D"((long long)bare), "S"((long long)name_len)
                      : "memory");
-    if (rv < 0x100 || rv >= 0x110)
+    if (!kernel32_is_file_handle((unsigned long long)rv))
         return 0;
     /* Close the test-open handle so the caller's real CreateFileW
      * can take its place — single-instance pipes have only one
@@ -2091,8 +2160,9 @@ __declspec(dllexport) wchar_t16* lstrcatW(wchar_t16* dst, const wchar_t16* src)
  * WriteFile dispatches by handle range:
  *   - Pipe sentinel handles (DUETOS_PIPE_WR/_RD) → in-process
  *     anonymous-pipe ring.
- *   - Kernel file handles (0x100..0x10F, planted by CreateFileW
- *     via SYS_FILE_OPEN / SYS_FILE_CREATE) → SYS_FILE_WRITE
+ *   - Generation-bearing kernel file handles (low 12-bit tag
+ *     0x100..0x10F, planted by CreateFileW via SYS_FILE_OPEN /
+ *     SYS_FILE_CREATE) → SYS_FILE_WRITE
  *     (syscall 43); cap-gated on kCapFsWrite. Routes through the
  *     per-handle cursor + fat32 in-place-or-grow write.
  *   - Std-output / std-error handles (the negative-int values
@@ -2132,7 +2202,7 @@ __declspec(dllexport) BOOL WriteFile(HANDLE hFile, const void* buf, DWORD n, DWO
 
     const unsigned long long h_raw = (unsigned long long)(UINT_PTR)hFile;
 
-    /* Kernel file handle (Win32-shaped pseudo-handle): 0x100..0x10F.
+    /* Kernel file handle (opaque generation plus low 0x100..0x10F tag).
      * Route through SYS_FILE_WRITE so the per-handle cursor +
      * canary wall + cap gate fire. T7-03: when lpOverlapped is
      * supplied, honour OVERLAPPED.Offset (seek before write) and
@@ -2140,7 +2210,7 @@ __declspec(dllexport) BOOL WriteFile(HANDLE hFile, const void* buf, DWORD n, DWO
      * the file is bound to an IOCP via CreateIoCompletionPort,
      * post a completion packet so GetQueuedCompletionStatus
      * surfaces the result. */
-    if (h_raw >= 0x100ULL && h_raw < 0x110ULL)
+    if (kernel32_is_file_handle(h_raw))
     {
         if (lpOverlapped != (void*)0)
         {
@@ -2285,20 +2355,14 @@ __declspec(dllexport) BOOL ReadConsoleW(HANDLE hConsoleInput, wchar_t16* lpBuffe
 
 __declspec(dllexport) BOOL CloseHandle(HANDLE h)
 {
-    long long discard;
-    __asm__ volatile("int $0x80"
-                     : "=a"(discard)
-                     : "a"((long long)22), /* SYS_FILE_CLOSE */
-                       "D"((long long)h)
-                     : "memory");
-    return 1; /* Match flat-stub: always TRUE — kernel side
-               * handles unknown handles as a no-op. */
+    const NTSTATUS status = NtClose(h);
+    return status == STATUS_SUCCESS ? 1 : kernel32_job_fail(status);
 }
 
 /* CreateFileW — wide path in rcx (lpFileName), other args
  * ignored. UTF-16 → ASCII strip on a stack-local buffer, then
  * SYS_FILE_OPEN(rdi=path, rsi=len). Returns the kernel handle
- * (Win32-shaped 0x100..0x10F) or -1 on failure. */
+ * (opaque generation plus a low 0x100..0x10F tag) or -1 on failure. */
 __declspec(dllexport) HANDLE CreateFileW(const wchar_t16* lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode,
                                          void* lpSecurityAttributes, DWORD dwCreationDisposition,
                                          DWORD dwFlagsAndAttributes, HANDLE hTemplateFile)
@@ -2391,13 +2455,13 @@ __declspec(dllexport) BOOL ReadFile(HANDLE h, void* buf, DWORD count, DWORD* lpR
         return 1;
     }
 
-    /* Kernel file handle range — same numeric band as WriteFile.
+    /* Generation-bearing kernel file handle — same tag as WriteFile.
      * Anything else falls through to SYS_FILE_READ which will
      * reject it with -1; we mirror that as FALSE. T7-03: honour
      * lpOverlapped for kernel file handles — seek to
      * OVERLAPPED.Offset, read, stamp Internal/InternalHigh, and
      * post a completion packet if the file is IOCP-bound. */
-    if (h_raw >= 0x100ULL && h_raw < 0x110ULL && lpOverlapped != (void*)0)
+    if (kernel32_is_file_handle(h_raw) && lpOverlapped != (void*)0)
     {
         const unsigned long long ov_off = win32_overlapped_offset(lpOverlapped);
         if (ov_off != 0xFFFFFFFFFFFFFFFFULL)

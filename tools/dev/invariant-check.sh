@@ -82,6 +82,23 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# GATE 3 — native syscall IDL and every generated migration artifact agree.
+#
+# This closes both directions of drift: an IDL edit must regenerate names,
+# static authorization policy, userland constants, and reports; a legacy enum
+# edit must first be represented in the IDL. Hostile-schema tests keep the
+# generator fail-closed for duplicate numbers, malformed policy, argument-order
+# drift, and stale output.
+# ---------------------------------------------------------------------------
+section "GATE 3: native syscall IDL is complete and reproducible"
+if python3 tools/test/check-native-syscall-idl.py && \
+   python3 tools/test/test-native-syscall-idl.py -q; then
+    ok "223-row native syscall IDL, policy, and generated artifacts agree"
+else
+    fail "native syscall IDL validation failed"
+fi
+
+# ---------------------------------------------------------------------------
 # INFO — STUB/GAP inventory. CLAUDE.md treats this as the live gap audit
 # list. Not a gate (markers are expected to exist); surfaced so a run of
 # the analyzer doubles as the inventory refresh.

@@ -80,7 +80,7 @@ pub struct DuetosMscDiscInformation {
 
 /// Reconstruct a slice from a `(ptr, len)` FFI pair, returning
 /// `None` on a null pointer.
-fn slice_from_raw<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
+unsafe fn slice_from_raw(ptr: *const u8, len: usize, _scope: &()) -> Option<&[u8]> {
     if ptr.is_null() {
         return None;
     }
@@ -129,7 +129,7 @@ fn copy_trimmed(dst: &mut [u8], src: &[u8]) {
 /// if `out` is non-null (and the value was initialised), or `None`.
 /// Consolidates the only raw-pointer dereference any FFI entry
 /// point performs.
-fn out_init<'a, T: Default + Copy>(out: *mut T) -> Option<&'a mut T> {
+unsafe fn out_init<T: Default + Copy>(out: *mut T, _scope: &mut ()) -> Option<&mut T> {
     if out.is_null() {
         return None;
     }
@@ -207,72 +207,107 @@ fn parse_disc_information(buf: &[u8], out: &mut DuetosMscDiscInformation) -> boo
 
 // ---------- FFI exports ----------
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_msc_parse_inquiry(buf: *const u8, len: usize, out: *mut DuetosMscInquiryData) -> bool {
-    let Some(dst) = out_init(out) else {
+pub unsafe extern "C" fn duetos_msc_parse_inquiry(buf: *const u8, len: usize, out: *mut DuetosMscInquiryData) -> bool {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_inquiry(slice, dst)
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_msc_parse_read_capacity_10(
+pub unsafe extern "C" fn duetos_msc_parse_read_capacity_10(
     buf: *const u8,
     len: usize,
     out: *mut DuetosMscReadCapacity10,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_read_capacity_10(slice, dst)
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_msc_parse_get_config_header(
+pub unsafe extern "C" fn duetos_msc_parse_get_config_header(
     buf: *const u8,
     len: usize,
     out: *mut DuetosMscGetConfigHeader,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_get_config_header(slice, dst)
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_msc_parse_read_toc_header(
+pub unsafe extern "C" fn duetos_msc_parse_read_toc_header(
     buf: *const u8,
     len: usize,
     out: *mut DuetosMscReadTocHeader,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_read_toc_header(slice, dst)
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_msc_parse_disc_information(
+pub unsafe extern "C" fn duetos_msc_parse_disc_information(
     buf: *const u8,
     len: usize,
     out: *mut DuetosMscDiscInformation,
 ) -> bool {
-    let Some(dst) = out_init(out) else {
+    let mut out_scope = ();
+    let Some(dst) = (unsafe { out_init(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(slice) = slice_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(slice) = (unsafe { slice_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
     parse_disc_information(slice, dst)

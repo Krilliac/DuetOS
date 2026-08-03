@@ -210,7 +210,7 @@ fn classify_top_usage(page: u16, usage: u16) -> u8 {
     KIND_UNKNOWN
 }
 
-fn write_default<'a, T: Default>(out: *mut T) -> Option<&'a mut T> {
+unsafe fn write_default<T: Default>(out: *mut T, _scope: &mut ()) -> Option<&mut T> {
     if out.is_null() {
         return None;
     }
@@ -223,7 +223,7 @@ fn write_default<'a, T: Default>(out: *mut T) -> Option<&'a mut T> {
     }
 }
 
-fn descriptor_from_raw<'a>(buf: *const u8, len: u32) -> Option<&'a [u8]> {
+unsafe fn descriptor_from_raw(buf: *const u8, len: u32, _scope: &()) -> Option<&[u8]> {
     if len == 0 {
         return Some(&[]);
     }
@@ -251,16 +251,23 @@ fn consume_long_item(desc: &[u8], off: &mut usize) -> bool {
     true
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_usbhid_parse_descriptor(
+pub unsafe extern "C" fn duetos_usbhid_parse_descriptor(
     buf: *const u8,
     len: u32,
     out: *mut DuetosUsbHidReportSummary,
 ) -> bool {
-    let Some(out) = write_default(out) else {
+    let mut out_scope = ();
+    let Some(out) = (unsafe { write_default(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(desc) = descriptor_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(desc) = (unsafe { descriptor_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
 
@@ -401,21 +408,31 @@ fn record_field(field: &mut DuetosUsbHidMouseField, bit_offset: u32, bit_size: u
     field.bit_offset = bit_offset;
 }
 
+/// # Safety
+///
+/// Every non-null input pointer must remain readable for its paired length, and
+/// every non-null output pointer must remain writable for its declared C type.
+/// Input and output ranges must not alias for the duration of this call.
 #[no_mangle]
-pub extern "C" fn duetos_usbhid_extract_mouse_layout(
+pub unsafe extern "C" fn duetos_usbhid_extract_mouse_layout(
     buf: *const u8,
     len: u32,
     out: *mut DuetosUsbHidMouseLayout,
 ) -> bool {
-    let Some(out) = write_default(out) else {
+    let mut out_scope = ();
+    let Some(out) = (unsafe { write_default(out, &mut out_scope) }) else {
         return false;
     };
-    let Some(desc) = descriptor_from_raw(buf, len) else {
+    let buf_scope = ();
+    let Some(desc) = (unsafe { descriptor_from_raw(buf, len, &buf_scope) }) else {
         return false;
     };
 
     let mut summary = DuetosUsbHidReportSummary::default();
-    if !duetos_usbhid_parse_descriptor(buf, len, &mut summary) {
+    // SAFETY: the same call-local `desc` guard above established the input
+    // span, and `summary` is a live, uniquely borrowed output object.
+    let summary_ok = unsafe { duetos_usbhid_parse_descriptor(buf, len, &mut summary) };
+    if !summary_ok {
         return false;
     }
     if summary.primary_kind != KIND_MOUSE {

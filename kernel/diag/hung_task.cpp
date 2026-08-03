@@ -20,6 +20,7 @@
 #include "debug/probes.h"
 #include "diag/fault_react.h"
 #include "diag/fma/ereport.h"
+#include "fs/fat32.h"
 #include "log/klog.h"
 #include "sched/sched.h"
 #include "security/fault_domain.h"
@@ -172,6 +173,25 @@ u64 TickInternal(u64 now_ticks, u64 threshold)
         arch::SerialWriteHex(stuck_for);
         arch::SerialWrite("\n");
 
+        // Name the FAT32 driver-mutex holder alongside the waiter. That
+        // mutex is the widest choke point in the kernel — the klog
+        // persistence sink takes it on ordinary log lines — so when
+        // tasks pile up behind the filesystem the blocked task is
+        // usually an innocent waiter and the HOLDER is the bug. Emitted
+        // only on an already-firing report, so a healthy boot prints
+        // nothing extra.
+        u64 fs_owner_tid = 0;
+        u64 fs_acquire_rip = 0;
+        ::duetos::fs::fat32::Fat32DriverLockOwner(&fs_owner_tid, &fs_acquire_rip);
+        if (fs_owner_tid != ~u64{0})
+        {
+            arch::SerialWrite("[hung-task]   fat32 driver mutex held by tid=");
+            arch::SerialWriteHex(fs_owner_tid);
+            arch::SerialWrite(" acquired_at=");
+            arch::SerialWriteHex(fs_acquire_rip);
+            arch::SerialWrite("\n");
+        }
+
         // Fire the probe so an attached GDB can break on
         // `duetos::debug::ProbeFire` and inspect the offending
         // task's stack. Passing the TID lets the probe-ring entry
@@ -321,8 +341,8 @@ void HungTaskSelfTest()
     SelfTestFixture fx = {};
     fx.entered_block = false;
     fx.please_exit = false;
-    sched::Task* victim = sched::SchedCreate(&SelfTestVictimMain, &fx, kSelfTestTaskName);
-    if (victim == nullptr)
+    const sched::TaskCreateResult victim = sched::SchedCreate(&SelfTestVictimMain, &fx, kSelfTestTaskName);
+    if (!victim.created)
     {
         // SchedCreate logs its own failure; bail without panic so
         // a release build under memory pressure doesn't take the
@@ -341,7 +361,7 @@ void HungTaskSelfTest()
     // own Running→Blocked transition; the snapshot is the
     // authoritative answer. Bound the spin so a regression in
     // the scheduler can't deadlock the boot self-test path.
-    const u64 victim_tid = sched::TaskId(victim);
+    const u64 victim_tid = victim.tid;
     bool victim_seen_blocked = false;
     for (u32 i = 0; i < 4096 && !victim_seen_blocked; ++i)
     {
@@ -416,7 +436,7 @@ void HungTaskSelfTest()
     bool victim_slotted = false;
     for (u32 i = 0; i < kMaxConcurrentHungTracks; ++i)
     {
-        if (g_slots[i].warned_tid == sched::TaskId(victim))
+        if (g_slots[i].warned_tid == victim_tid)
         {
             victim_slotted = true;
             break;

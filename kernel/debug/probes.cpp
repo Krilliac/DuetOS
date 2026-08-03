@@ -76,14 +76,11 @@ constexpr ProbeRow kProbeTable[] = {
 static_assert(sizeof(kProbeTable) / sizeof(kProbeTable[0]) == static_cast<u64>(ProbeId::kCount),
               "kProbeTable size must match ProbeId::kCount — add a row for every enum entry");
 
-// Live state. Indexed by ProbeId. arm[] is u8 (the enum) so
-// loads are atomic on x86_64 — no lock needed on the fire
-// path. fire_count[] is u64 counter; increments are non-
-// atomic but worst case is one dropped count under contention
-// (single-CPU today so contention is nil).
-ProbeArm g_probe_arm[static_cast<u64>(ProbeId::kCount)] = {};
+// Live state, indexed by ProbeId. Explicit atomic operations keep qRcmd NMI
+// control changes linearizable with the interrupted path and preserve every
+// per-probe fire count on SMP. The arm byte stays the disarmed fast path.
+u8 g_probe_arm[static_cast<u64>(ProbeId::kCount)] = {};
 u64 g_probe_fires[static_cast<u64>(ProbeId::kCount)] = {};
-bool g_inited = false;
 
 // Per-fire timeline ring. Tracks the LAST kProbeRingSlots fires
 // across all probes (not just per-probe-counter). Each panic dump
@@ -113,10 +110,9 @@ void ProbeInit()
 {
     for (const ProbeRow& row : kProbeTable)
     {
-        g_probe_arm[static_cast<u64>(row.id)] = row.default_arm;
-        g_probe_fires[static_cast<u64>(row.id)] = 0;
+        __atomic_store_n(&g_probe_arm[static_cast<u64>(row.id)], static_cast<u8>(row.default_arm), __ATOMIC_RELEASE);
+        __atomic_store_n(&g_probe_fires[static_cast<u64>(row.id)], 0u, __ATOMIC_RELAXED);
     }
-    g_inited = true;
     KLOG_INFO("debug/probes", "probe subsystem online");
 }
 
@@ -126,15 +122,14 @@ void ProbeFire(ProbeId id, u64 caller_rip, u64 value)
     if (idx >= static_cast<u64>(ProbeId::kCount))
         return;
     // Fast path: disarmed probe is a 1-byte load + compare + ret.
-    // Intentionally no early-return for `!g_inited` — if ProbeInit
-    // hasn't run the g_probe_arm[] is zero-filled = Disarmed, so
-    // the comparison below takes the fast path anyway.
-    const ProbeArm arm = g_probe_arm[idx];
+    // Before ProbeInit the zero-filled arm byte is Disarmed, so the same
+    // atomic comparison remains the complete early-boot fast path.
+    const ProbeArm arm = static_cast<ProbeArm>(__atomic_load_n(&g_probe_arm[idx], __ATOMIC_ACQUIRE));
     if (arm == ProbeArm::Disarmed)
         return;
     // Armed — count + log. The table is in ProbeId order (enforced
     // by the static_assert above) so the name is a direct index.
-    ++g_probe_fires[idx];
+    __atomic_fetch_add(&g_probe_fires[idx], 1u, __ATOMIC_RELAXED);
     // Timeline ring entry. Cheap (one xadd + 4 stores) — adds
     // ~20 cycles on the armed-fire path; the disarmed fast path
     // is unaffected. Tick lookup uses TickCount() which is a
@@ -179,7 +174,7 @@ bool ProbeSetArm(ProbeId id, ProbeArm arm)
     const u64 idx = static_cast<u64>(id);
     if (idx >= static_cast<u64>(ProbeId::kCount))
         return false;
-    g_probe_arm[idx] = arm;
+    __atomic_store_n(&g_probe_arm[idx], static_cast<u8>(arm), __ATOMIC_RELEASE);
     return true;
 }
 
@@ -238,8 +233,8 @@ u64 ProbeList(ProbeInfo* out, u64 cap)
     {
         out[i].id = kProbeTable[i].id;
         out[i].name = kProbeTable[i].name;
-        out[i].arm = g_probe_arm[i];
-        out[i].fire_count = g_probe_fires[i];
+        out[i].arm = static_cast<ProbeArm>(__atomic_load_n(&g_probe_arm[i], __ATOMIC_ACQUIRE));
+        out[i].fire_count = __atomic_load_n(&g_probe_fires[i], __ATOMIC_RELAXED);
     }
     return lim;
 }

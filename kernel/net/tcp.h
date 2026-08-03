@@ -21,7 +21,7 @@
  * surface in the kernel.
  *
  * Threading: every TCB touches g_tcb_table under a single
- * net-stack-wide spinlock (arch::Cli for v0; the slot for a real
+ * net-stack-wide IRQ-save spinlock (replacing the old CPU-local
  * per-bucket lock is wired but not enabled). The timer task uses
  * the same lock — IRQ-off windows are short (walk one bucket,
  * fire one segment).
@@ -238,5 +238,11 @@ void OnSegment(u32 iface_index, const MacAddress& peer_mac, Ipv4Address peer_ip,
 inline constexpr u32 kTimerTickMs = 50;
 
 void TimerTick();
+
+/// Destroy every TCP object owned by one exact interface publication. The
+/// stack calls this only after closing interface admission and draining all
+/// admitted packet/TX operations, before allowing the slot to rebind. Stale
+/// TcbIds are invalidated and all waiters are woken.
+u32 RetireInterface(NetInterfaceBinding binding);
 
 } // namespace duetos::net::tcp

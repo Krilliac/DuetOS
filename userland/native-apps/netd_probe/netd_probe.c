@@ -55,7 +55,7 @@ int main(void)
         s = duet_socket(DUET_AF_INET, DUET_SOCK_STREAM);
         if (s < 0)
         {
-            puts_str("[netd-probe] FAIL socket\n");
+            puts_str("[netd-probe] setup failed: socket\n");
             return 2;
         }
         if (duet_connect(s, &dst, (int)sizeof(dst)) == 0)
@@ -69,7 +69,7 @@ int main(void)
     }
     if (!connected)
     {
-        puts_str("[netd-probe] FAIL connect (netd never came up)\n");
+        puts_str("[netd-probe] setup failed: connect (netd never came up)\n");
         return 3;
     }
 
@@ -78,7 +78,7 @@ int main(void)
     const long banner = duet_recv(s, buf, (long)sizeof(buf));
     if (banner <= 0)
     {
-        puts_str("[netd-probe] FAIL no banner\n");
+        puts_str("[netd-probe] setup failed: no banner\n");
         duet_sock_close(s);
         return 4;
     }
@@ -86,7 +86,7 @@ int main(void)
     /* Send the token and read it back. */
     if (duet_send(s, PROBE_TOKEN, PROBE_TOKEN_LEN) != PROBE_TOKEN_LEN)
     {
-        puts_str("[netd-probe] FAIL send\n");
+        puts_str("[netd-probe] setup failed: send\n");
         duet_sock_close(s);
         return 5;
     }
@@ -101,7 +101,7 @@ int main(void)
     }
     if (got != PROBE_TOKEN_LEN || !bytes_equal(buf, PROBE_TOKEN, PROBE_TOKEN_LEN))
     {
-        puts_str("[netd-probe] FAIL echo mismatch\n");
+        puts_str("[netd-probe] setup failed: echo mismatch\n");
         duet_sock_close(s);
         return 6;
     }

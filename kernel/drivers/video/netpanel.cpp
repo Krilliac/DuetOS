@@ -147,6 +147,29 @@ bool Ipv4IsZero(duetos::net::Ipv4Address ip)
     return true;
 }
 
+struct NicPanelPresence
+{
+    bool discovered;
+    bool driver_online;
+    bool link_up;
+};
+
+NicPanelPresence ReadNicPanelPresence()
+{
+    NicPanelPresence presence{};
+    const u64 count = duetos::drivers::net::NicCount();
+    for (u64 i = 0; i < count; ++i)
+    {
+        duetos::drivers::net::NicInfo nic{};
+        if (!duetos::drivers::net::NicSnapshot(i, &nic))
+            break;
+        presence.discovered = true;
+        presence.driver_online = presence.driver_online || nic.driver_online;
+        presence.link_up = presence.link_up || (nic.driver_online && nic.link_up);
+    }
+    return presence;
+}
+
 u32 ComputeFullHeight()
 {
     // Header (24) + connection summary (28) + section gap.
@@ -215,17 +238,23 @@ void DrawPreview()
     FramebufferDrawRect(g_ax, g_ay, kPreviewW, kPreviewH, g_border_rgb, 1);
 
     const auto lease = duetos::net::DhcpLeaseRead();
-    const u64 nics = duetos::drivers::net::NicCount();
-    const bool any_link = nics > 0;
-    const bool online = any_link && lease.valid;
+    const NicPanelPresence presence = ReadNicPanelPresence();
+    const bool online = presence.link_up && lease.valid;
 
     // Status pip.
     const u32 dot = 8;
     const u32 dot_x = g_ax + 10;
     const u32 dot_y = g_ay + 10;
-    FramebufferFillRect(dot_x, dot_y, dot, dot, !any_link ? kDimRgb : online ? kAccentRgb : kWarnRgb);
+    FramebufferFillRect(dot_x, dot_y, dot, dot,
+                        !presence.discovered || !presence.driver_online ? kDimRgb
+                        : online                                        ? kAccentRgb
+                                                                        : kWarnRgb);
 
-    const char* status = !any_link ? "OFFLINE (no NIC)" : online ? "CONNECTED" : "PENDING (DHCP)";
+    const char* status = !presence.discovered      ? "OFFLINE (no NIC)"
+                         : !presence.driver_online ? "OFFLINE (no driver)"
+                         : !presence.link_up       ? "OFFLINE (link down)"
+                         : online                  ? "CONNECTED"
+                                                   : "PENDING (DHCP)";
     WriteAt(g_ax + 26, g_ay + 10, status, g_ink_rgb, g_body_rgb);
 
     // IP line below.
@@ -307,10 +336,13 @@ void DrawWiredSection(u32 ax, u32& y)
     char buf[40];
     for (u64 i = 0; i < nics; ++i)
     {
-        if (duetos::drivers::net::NicIsWireless(i))
+        duetos::drivers::net::NicInfo nic{};
+        if (!duetos::drivers::net::NicSnapshot(i, &nic))
+            break;
+        if (nic.subclass == duetos::drivers::net::kPciSubclassOther ||
+            duetos::drivers::net::nic_ids::NicFamilyLooksWireless(nic.family))
             continue;
         printed = true;
-        const auto& nic = duetos::drivers::net::Nic(i);
         // Heading: "  net0  Intel e1000-82540em"
         u32 off = 0;
         const char* p = "  net";
@@ -395,14 +427,18 @@ void DrawFull()
 
     // Connection summary line.
     const auto lease = duetos::net::DhcpLeaseRead();
-    const u64 nics = duetos::drivers::net::NicCount();
-    const bool any_link = nics > 0;
-    const bool online = any_link && lease.valid;
+    const NicPanelPresence presence = ReadNicPanelPresence();
+    const bool online = presence.link_up && lease.valid;
     const u32 dot = 10;
-    FramebufferFillRect(g_ax + kMargin, y + 2, dot, dot, !any_link ? kDimRgb : online ? kAccentRgb : kWarnRgb);
-    const char* status = !any_link ? "OFFLINE — no NIC discovered"
-                         : online  ? "CONNECTED"
-                                   : "PENDING — waiting for DHCP";
+    FramebufferFillRect(g_ax + kMargin, y + 2, dot, dot,
+                        !presence.discovered || !presence.driver_online ? kDimRgb
+                        : online                                        ? kAccentRgb
+                                                                        : kWarnRgb);
+    const char* status = !presence.discovered      ? "OFFLINE — no NIC discovered"
+                         : !presence.driver_online ? "OFFLINE — no driver online"
+                         : !presence.link_up       ? "OFFLINE — link down"
+                         : online                  ? "CONNECTED"
+                                                   : "PENDING — waiting for DHCP";
     WriteAt(g_ax + kMargin + dot + 6, y + 2, status, g_ink_rgb, g_body_rgb);
     y += kRowH + 4;
     if (online)

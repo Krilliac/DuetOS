@@ -137,13 +137,14 @@ bool SlotTake(::duetos::core::Process* p, u64& out_frame_va)
 // reach a user handler).
 u32 PickEligible(::duetos::core::Process* p)
 {
-    const u64 pending = p->linux_pending_signals;
+    const u64 pending = ::duetos::core::ProcessLinuxSignalPendingSnapshot(p);
     const u64 deliverable = pending & ~p->linux_signal_mask;
     if (deliverable == 0)
         return 0;
     for (u32 sig = 1; sig < ::duetos::core::Process::kLinuxSignalCount; ++sig)
     {
-        if ((deliverable & (1ULL << sig)) == 0)
+        const u64 bit = ::duetos::core::ProcessLinuxSignalBit(sig);
+        if ((deliverable & bit) == 0)
             continue;
         if (sig == kSIGKILL || sig == kSIGSTOP)
             continue;
@@ -161,10 +162,15 @@ u32 PickEligible(::duetos::core::Process* p)
             // broken PE doesn't hang forever.
             if (p->linux_vdso_rt_sigreturn_va == 0)
             {
-                p->linux_pending_signals &= ~(1ULL << sig);
-                ::duetos::arch::SerialWrite("[linux/signal] no SA_RESTORER and no vDSO for sig=");
-                ::duetos::arch::SerialWriteHex(sig);
-                ::duetos::arch::SerialWrite(" — pending bit cleared\n");
+                // Claim exactly the bit we observed. A simultaneous producer
+                // may re-publish the same coalesced signal after this claim;
+                // no read/modify/write store is allowed to erase it.
+                if (::duetos::core::ProcessLinuxSignalClaimPending(p, sig))
+                {
+                    ::duetos::arch::SerialWrite("[linux/signal] no SA_RESTORER and no vDSO for sig=");
+                    ::duetos::arch::SerialWriteHex(sig);
+                    ::duetos::arch::SerialWrite(" — pending bit cleared\n");
+                }
                 continue;
             }
             // Else fall through — Deliver() resolves the restorer
@@ -194,11 +200,20 @@ bool LinuxSignalCheckAndDeliver(::duetos::arch::TrapFrame* frame)
         return false;
 
     Cli();
-    const u32 sig = PickEligible(p);
-    if (sig == 0)
+    u32 sig = 0;
+    for (;;)
     {
-        Sti();
-        return false;
+        sig = PickEligible(p);
+        if (sig == 0)
+        {
+            Sti();
+            return false;
+        }
+        // Selection and consumption are separate because signalfd can claim
+        // the same coalesced bit on another CPU. Only the successful atomic
+        // claimant may construct a handler frame.
+        if (::duetos::core::ProcessLinuxSignalClaimPending(p, sig))
+            break;
     }
     const auto& sa = p->linux_sigactions[sig];
     const u64 handler_va = sa.handler_va;
@@ -212,11 +227,10 @@ bool LinuxSignalCheckAndDeliver(::duetos::arch::TrapFrame* frame)
     const u64 sa_mask = sa.mask;
     const u64 prev_mask = p->linux_signal_mask;
 
-    // Clear the pending bit + transiently mask the signal (Linux
-    // semantics — handler doesn't re-enter itself). sa_mask
-    // additions are honored; alt-stack is not.
-    p->linux_pending_signals &= ~(1ULL << sig);
-    p->linux_signal_mask = prev_mask | (1ULL << sig) | sa_mask;
+    // The pending bit was atomically claimed above. Transiently mask the
+    // signal (Linux semantics: a handler does not re-enter itself); sa_mask
+    // additions are honored and alt-stack remains a sub-GAP.
+    p->linux_signal_mask = prev_mask | ::duetos::core::ProcessLinuxSignalBit(sig) | sa_mask;
     Sti();
 
     // Lay out user-stack: skip the 128-byte red zone, then make
@@ -260,7 +274,7 @@ bool LinuxSignalCheckAndDeliver(::duetos::arch::TrapFrame* frame)
         // crash — the caller will see whatever the original
         // syscall returned.
         Cli();
-        p->linux_pending_signals |= (1ULL << sig);
+        ::duetos::core::ProcessLinuxSignalRestorePending(p, ::duetos::core::ProcessLinuxSignalBit(sig));
         p->linux_signal_mask = prev_mask;
         Sti();
         ::duetos::arch::SerialWrite("[linux/signal] CopyToUser frame failed; deferring\n");
@@ -270,7 +284,7 @@ bool LinuxSignalCheckAndDeliver(::duetos::arch::TrapFrame* frame)
     if (!::duetos::mm::CopyToUser(reinterpret_cast<void*>(retaddr_va), &restorer_va, sizeof(restorer_va)))
     {
         Cli();
-        p->linux_pending_signals |= (1ULL << sig);
+        ::duetos::core::ProcessLinuxSignalRestorePending(p, ::duetos::core::ProcessLinuxSignalBit(sig));
         p->linux_signal_mask = prev_mask;
         Sti();
         ::duetos::arch::SerialWrite("[linux/signal] CopyToUser retaddr failed; deferring\n");
@@ -290,7 +304,7 @@ bool LinuxSignalCheckAndDeliver(::duetos::arch::TrapFrame* frame)
     if (!SlotPush(p, frame_va))
     {
         Cli();
-        p->linux_pending_signals |= (1ULL << sig);
+        ::duetos::core::ProcessLinuxSignalRestorePending(p, ::duetos::core::ProcessLinuxSignalBit(sig));
         p->linux_signal_mask = prev_mask;
         Sti();
         ::duetos::arch::SerialWrite("[linux/signal] nesting depth exhausted; deferring sig\n");

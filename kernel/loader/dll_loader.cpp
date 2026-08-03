@@ -1,6 +1,7 @@
 #include "loader/dll_loader.h"
 
 #include "arch/x86_64/serial.h"
+#include "core/panic.h"
 #include "log/klog.h"
 #include "loader/image_patch.h"
 #include "mm/address_space.h"
@@ -93,6 +94,140 @@ struct DllHeaders
     u32 entry_rva;
 };
 
+struct DllMappedRange
+{
+    u64 lo{};
+    u64 hi{};
+    mm::AddressSpaceReservationToken token{};
+    bool reserved{};
+};
+
+// A DLL load can run against a published process (LoadLibrary), so private-AS
+// construction is not a valid global assumption. Claim every page range
+// before the first map, tag each mapped frame with the exact reservation, and
+// release those receipts on every failure. Adjacent header/section ranges are
+// coalesced; page-overlapping sections are rejected rather than letting one
+// section rewrite another's bytes or weaken its W^X flags.
+class DllMappingTransaction final
+{
+  public:
+    explicit DllMappingTransaction(mm::AddressSpace* as) : m_as(as) {}
+
+    ~DllMappingTransaction()
+    {
+        for (u16 i = m_range_count; i != 0; --i)
+        {
+            DllMappedRange& range = m_ranges[i - 1];
+            if (!range.reserved)
+            {
+                continue;
+            }
+            KASSERT(mm::AddressSpaceReleaseUserReservation(m_as, range.token, range.lo, range.hi), "loader/dll",
+                    "failed to roll back DLL mapping reservation");
+            range.reserved = false;
+        }
+    }
+
+    DllMappingTransaction(const DllMappingTransaction&) = delete;
+    DllMappingTransaction& operator=(const DllMappingTransaction&) = delete;
+
+    bool AddRange(u64 lo, u64 hi)
+    {
+        if (lo >= hi || ((lo | hi) & kPageMask) != 0)
+        {
+            return false;
+        }
+
+        // Merge adjacency regardless of section-table order, but reject any
+        // page overlap. SectionAlignment==4 KiB makes overlap malformed; a
+        // clean refusal is safer than ambiguous byte/protection precedence.
+        for (u16 i = 0; i < m_range_count;)
+        {
+            const DllMappedRange& range = m_ranges[i];
+            if (lo < range.hi && hi > range.lo)
+            {
+                return false;
+            }
+            if (hi == range.lo || lo == range.hi)
+            {
+                if (range.lo < lo)
+                {
+                    lo = range.lo;
+                }
+                if (range.hi > hi)
+                {
+                    hi = range.hi;
+                }
+                m_ranges[i] = m_ranges[m_range_count - 1];
+                --m_range_count;
+                i = 0;
+                continue;
+            }
+            ++i;
+        }
+
+        if (m_range_count == mm::kMaxUserVmReservationsPerAs)
+        {
+            return false;
+        }
+        m_ranges[m_range_count++] = DllMappedRange{lo, hi, {}, false};
+        return true;
+    }
+
+    bool ReserveAll()
+    {
+        if (m_as == nullptr || m_range_count == 0)
+        {
+            return false;
+        }
+        for (u16 i = 0; i < m_range_count; ++i)
+        {
+            DllMappedRange& range = m_ranges[i];
+            if (!mm::AddressSpaceReserveUserRange(m_as, range.lo, range.hi, &range.token))
+            {
+                return false;
+            }
+            range.reserved = true;
+        }
+        return true;
+    }
+
+    bool MapPage(u64 virt, mm::PhysAddr frame, u64 flags)
+    {
+        for (u16 i = 0; i < m_range_count; ++i)
+        {
+            const DllMappedRange& range = m_ranges[i];
+            if (virt >= range.lo && virt < range.hi)
+            {
+                KASSERT(range.reserved, "loader/dll", "mapping through an unreserved DLL range");
+                return mm::AddressSpaceMapReservedUserPage(m_as, range.token, virt, frame, flags);
+            }
+        }
+        return false;
+    }
+
+    void CommitAll()
+    {
+        // Every reserved range is fully populated before this point. A commit
+        // refusal is therefore an internal ledger violation, not a hostile
+        // image error; fail-stop instead of returning with half the ranges
+        // already published and half rolled back.
+        for (u16 i = 0; i < m_range_count; ++i)
+        {
+            DllMappedRange& range = m_ranges[i];
+            KASSERT(range.reserved, "loader/dll", "committing an unreserved DLL range");
+            KASSERT(mm::AddressSpaceCommitUserReservation(m_as, range.token, range.lo, range.hi), "loader/dll",
+                    "failed to commit complete DLL mapping reservation");
+            range.reserved = false;
+        }
+    }
+
+  private:
+    mm::AddressSpace* m_as{};
+    DllMappedRange m_ranges[mm::kMaxUserVmReservationsPerAs]{};
+    u16 m_range_count{};
+};
+
 bool ParseHeaders(const u8* file, u64 file_len, DllHeaders& out)
 {
     if (file == nullptr || file_len < 0x40)
@@ -162,9 +297,8 @@ bool ParseHeaders(const u8* file, u64 file_len, DllHeaders& out)
     if (out.sizeof_headers > file_len)
         return false;
     // Reject DLLs whose preferred ImageBase + SizeOfImage extends out of
-    // the canonical user low half. Same DoS path as the PE loader: a
-    // hostile DLL would otherwise reach AddressSpaceMapUserPage with a
-    // kernel-half VA and PanicAs the kernel.
+    // the canonical user low half. The later ASLR validation repeats this
+    // for the final base before any range reservation or map attempt.
     constexpr u64 kDllUserMax = 0x00007FFFFFFFFFFFULL;
     if (out.image_base > kDllUserMax)
         return false;
@@ -215,24 +349,43 @@ u64 RvaToFile(const u8* file, const DllHeaders& h, u32 rva)
     return ~u64(0);
 }
 
-bool MapHeadersPage(const u8* file, u64 sizeof_headers, u64 base_va, duetos::mm::AddressSpace* as)
+bool SectionPageRange(const u8* sec, u64 base_va, u64 image_size, u64& lo_out, u64& hi_out)
+{
+    lo_out = 0;
+    hi_out = 0;
+    if (sec == nullptr)
+    {
+        return false;
+    }
+    const u32 virt_addr = LeU32(sec + kSectionHeaderVirtualAddress);
+    const u32 virt_size = LeU32(sec + kSectionHeaderVirtualSize);
+    const u32 raw_size = LeU32(sec + kSectionHeaderSizeOfRawData);
+    const u64 in_mem = virt_size > raw_size ? virt_size : raw_size;
+    if (in_mem == 0)
+    {
+        return true;
+    }
+    if ((virt_addr & kPageMask) != 0 || !loader::ImageRangeInBounds(virt_addr, in_mem, image_size))
+    {
+        return false;
+    }
+    lo_out = base_va + virt_addr;
+    hi_out = (lo_out + in_mem + kPageMask) & ~kPageMask;
+    return hi_out > lo_out;
+}
+
+bool MapHeadersPage(const u8* file, u64 sizeof_headers, u64 base_va, DllMappingTransaction& mapping)
 {
     using namespace duetos::mm;
-    if (file == nullptr || as == nullptr)
+    if (file == nullptr || sizeof_headers == 0)
         return false;
     const u64 start = base_va & ~kPageMask;
     const u64 end = (base_va + sizeof_headers + kPageMask) & ~kPageMask;
     if (end <= start)
-        return true;
+        return false;
     for (u64 page_va = start; page_va < end; page_va += kPageSize)
     {
-        // PE binaries occasionally have headers that share a page with the
-        // first section (small SizeOfHeaders + tightly packed sections).
-        // Reuse the existing frame on conflict instead of allocating a
-        // new one.
-        const PhysAddr existing = AddressSpaceLookupUserFrame(as, page_va);
-        const bool reusing = existing != kNullFrame;
-        const PhysAddr frame = reusing ? existing : AllocateFrame().value_or(kNullFrame);
+        const PhysAddr frame = AllocateFrame().value_or(kNullFrame);
         if (frame == kNullFrame)
             return false;
         auto* direct = static_cast<u8*>(PhysToVirt(frame));
@@ -241,20 +394,21 @@ bool MapHeadersPage(const u8* file, u64 sizeof_headers, u64 base_va, duetos::mm:
         const u64 n = remain < kPageSize ? remain : kPageSize;
         for (u64 i = 0; i < n; ++i)
             direct[i] = file[file_off + i];
-        if (!reusing)
+        for (u64 i = n; i < kPageSize; ++i)
+            direct[i] = 0;
+        if (!mapping.MapPage(page_va, frame, kPagePresent | kPageUser | kPageNoExecute))
         {
-            for (u64 i = n; i < kPageSize; ++i)
-                direct[i] = 0;
-            AddressSpaceMapUserPage(as, page_va, frame, kPagePresent | kPageUser | kPageNoExecute);
+            FreeFrame(frame);
+            return false;
         }
     }
     return true;
 }
 
-bool MapSection(const u8* file, const u8* sec, u64 base_va, u64 image_size, duetos::mm::AddressSpace* as)
+bool MapSection(const u8* file, const u8* sec, u64 base_va, u64 image_size, DllMappingTransaction& mapping)
 {
     using namespace duetos::mm;
-    if (file == nullptr || sec == nullptr || as == nullptr)
+    if (file == nullptr || sec == nullptr)
         return false;
     const u32 virt_addr = LeU32(sec + kSectionHeaderVirtualAddress);
     const u32 virt_size = LeU32(sec + kSectionHeaderVirtualSize);
@@ -266,48 +420,31 @@ bool MapSection(const u8* file, const u8* sec, u64 base_va, u64 image_size, duet
     if (in_mem == 0)
         return true;
 
-    // Bound the section's virtual extent against the declared image
-    // size (the validator only checks raw extent vs file_len). An
-    // unbounded VirtualAddress would run seg_va past kDllUserMax and
-    // halt the kernel in AddressSpaceMapUserPage. base_va+image_size is
-    // already validated <= kDllUserMax, so an in-image section is safe.
-    if (!loader::ImageRangeInBounds(virt_addr, in_mem, image_size))
+    u64 start = 0;
+    u64 end = 0;
+    if (!SectionPageRange(sec, base_va, image_size, start, end))
         return false;
-
     const u64 seg_va = base_va + virt_addr;
-    const u64 start = seg_va & ~kPageMask;
-    const u64 end = (seg_va + in_mem + kPageMask) & ~kPageMask;
 
     u64 flags = kPagePresent | kPageUser;
     if (chars & kScnMemWrite)
         flags |= kPageWritable;
     // W^X: force NX on any writable section so a W+X section downgrades
-    // to non-executable instead of handing W+X to AddressSpaceMapUserPage
-    // (which PanicAs("W^X violation") halts the kernel).
+    // to non-executable before it reaches the reserved-map choke point.
     if (!(chars & kScnMemExecute) || (flags & kPageWritable))
         flags |= kPageNoExecute;
 
     for (u64 page_va = start; page_va < end; page_va += kPageSize)
     {
-        // PE sections can share a 4 KiB page when SectionAlignment is
-        // smaller than the page (or when a section's tail BSS-padding
-        // crosses a page boundary into another section's first page).
-        // On conflict, copy this section's contents into the existing
-        // frame and re-stamp the page protection with the restrictive
-        // merge of both sections (see the reuse branch below) — a
-        // hostile DLL can make two sections share a page with mismatched
-        // protections, so we must NOT assume the prior flags cover the
-        // union.
-        const PhysAddr existing = AddressSpaceLookupUserFrame(as, page_va);
-        const bool reusing = existing != kNullFrame;
-        const PhysAddr frame = reusing ? existing : AllocateFrame().value_or(kNullFrame);
+        // This page is still private frame-builder state. It becomes visible
+        // only through this section's exact range receipt below.
+        const PhysAddr frame = AllocateFrame().value_or(kNullFrame);
         if (frame == kNullFrame)
             return false;
         auto* frame_direct = static_cast<u8*>(PhysToVirt(frame));
-        if (!reusing)
+        for (u64 i = 0; i < kPageSize; ++i)
         {
-            for (u64 i = 0; i < kPageSize; ++i)
-                frame_direct[i] = 0;
+            frame_direct[i] = 0;
         }
         const u64 copy_lo = page_va > seg_va ? page_va : seg_va;
         const u64 src_end = seg_va + raw_size;
@@ -321,24 +458,10 @@ bool MapSection(const u8* file, const u8* sec, u64 base_va, u64 image_size, duet
             for (u64 i = 0; i < n; ++i)
                 frame_direct[page_off + i] = file[file_off + i];
         }
-        if (!reusing)
+        if (!mapping.MapPage(page_va, frame, flags))
         {
-            AddressSpaceMapUserPage(as, page_va, frame, flags);
-        }
-        else
-        {
-            // SEC-005 (CWE-281): two DLL sections sharing this page must
-            // not keep only the first section's protection. Re-stamp with
-            // the restrictive merge: writable if EITHER wants write,
-            // executable only if BOTH are (NX set if either had NX), and
-            // force NX on any writable page. Mirrors pe_loader's GS-03.
-            const u64 existing_flags = AddressSpaceProbePteRaw(as, page_va);
-            u64 merged = kPagePresent | kPageUser;
-            if ((existing_flags & kPageWritable) || (flags & kPageWritable))
-                merged |= kPageWritable;
-            if ((existing_flags & kPageNoExecute) || (flags & kPageNoExecute) || (merged & kPageWritable))
-                merged |= kPageNoExecute;
-            AddressSpaceProtectUserPage(as, page_va, merged);
+            FreeFrame(frame);
+            return false;
         }
     }
     return true;
@@ -505,17 +628,51 @@ DllLoadResult DllLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as
         return r;
     }
 
-    const u64 base_va = h.image_base + aslr_delta;
-    // Re-validate after ASLR shift: the parser checked the preferred
-    // base, but the caller-supplied delta could push us across the
-    // user/kernel boundary.
+    // Re-validate before and after the caller-supplied ASLR shift. A wrapped
+    // or sub-page delta must fail here rather than reach a map invariant.
+    constexpr u64 kDllUserTopExclusive = 0x0000800000000000ULL;
+    if (as == nullptr || h.image_size == 0 || h.sizeof_headers == 0 || (aslr_delta & kPageMask) != 0 ||
+        h.image_base >= kDllUserTopExclusive || aslr_delta > (kDllUserTopExclusive - 1 - h.image_base))
     {
-        constexpr u64 kDllUserMax = 0x00007FFFFFFFFFFFULL;
-        if (base_va > kDllUserMax || (h.image_size > 0 && (u64(h.image_size) - 1) > (kDllUserMax - base_va)))
+        r.status = DllLoadStatus::MapFailed;
+        return r;
+    }
+    const u64 base_va = h.image_base + aslr_delta;
+    if (u64(h.image_size) > kDllUserTopExclusive - base_va ||
+        !loader::ImageRangeInBounds(0, h.sizeof_headers, h.image_size))
+    {
+        r.status = DllLoadStatus::MapFailed;
+        return r;
+    }
+
+    // Runtime LoadLibrary mutates a published AS. Reserve every concrete
+    // header/section page range before mapping any frame, so another mapper,
+    // unmapper, protector, or concurrent DLL load cannot race construction.
+    // The transaction destructor releases only token-tagged pages on every
+    // failure path; success commits all receipts after relocation/EAT parse.
+    DllMappingTransaction mapping(as);
+    const u64 header_hi = (base_va + u64(h.sizeof_headers) + kPageMask) & ~kPageMask;
+    if (header_hi <= base_va || !mapping.AddRange(base_va, header_hi))
+    {
+        r.status = DllLoadStatus::MapFailed;
+        return r;
+    }
+    for (u16 i = 0; i < h.section_count; ++i)
+    {
+        const u8* sec = file + h.section_base + u64(i) * kSectionHeaderSize;
+        u64 range_lo = 0;
+        u64 range_hi = 0;
+        if (!SectionPageRange(sec, base_va, h.image_size, range_lo, range_hi) ||
+            (range_lo != range_hi && !mapping.AddRange(range_lo, range_hi)))
         {
             r.status = DllLoadStatus::MapFailed;
             return r;
         }
+    }
+    if (!mapping.ReserveAll())
+    {
+        r.status = DllLoadStatus::MapFailed;
+        return r;
     }
 
     // Per-DLL happy-path trace lives at DEBUG: a single PE spawn
@@ -526,7 +683,7 @@ DllLoadResult DllLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as
     KLOG_DEBUG_V("loader/dll", "DLL load BEGIN base_va", base_va);
     KLOG_DEBUG_V("loader/dll", "DLL sections+chars; sections", static_cast<u64>(h.section_count));
 
-    if (!MapHeadersPage(file, h.sizeof_headers, base_va, as))
+    if (!MapHeadersPage(file, h.sizeof_headers, base_va, mapping))
     {
         r.status = DllLoadStatus::MapFailed;
         return r;
@@ -534,7 +691,7 @@ DllLoadResult DllLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as
     for (u16 i = 0; i < h.section_count; ++i)
     {
         const u8* sec = file + h.section_base + u64(i) * kSectionHeaderSize;
-        if (!MapSection(file, sec, base_va, h.image_size, as))
+        if (!MapSection(file, sec, base_va, h.image_size, mapping))
         {
             SerialWrite("[dll-load] MapSection fail idx=");
             SerialWriteHex(i);
@@ -565,6 +722,8 @@ DllLoadResult DllLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as
         r.status = DllLoadStatus::ExportParseFailed;
         return r;
     }
+
+    mapping.CommitAll();
 
     r.image.file = file;
     r.image.file_len = file_len;

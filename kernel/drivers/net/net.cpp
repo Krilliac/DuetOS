@@ -1,30 +1,23 @@
 /*
- * DuetOS — network driver glue layer: implementation.
- *
- * Companion to net.h — see there for the per-interface record,
- * driver-vtable shape, and the TX/RX queue contract the upper
- * stack consumes.
+ * DuetOS — network PCI inventory and admitted-backend dispatcher.
  *
  * WHAT
- *   The thin layer between concrete NIC drivers (e1000, RTL,
- *   USB-CDC-ECM, RNDIS) and the in-kernel TCP/IP stack
- *   (kernel/net/stack.cpp). Owns the active-interface table,
- *   driver registration, packet enqueue, and the shell-facing
- *   diagnostic dumpers behind `ifconfig` / `netscan`.
+ *   Walks PCI inventory, classifies NIC identities, admits only exact
+ *   safe-probe profiles, and owns their restart lifecycle plus the
+ *   shell-facing inventory behind `ifconfig` / `netscan`.
  *
  * HOW
- *   Drivers call `NetRegisterInterface(vtable, hw_addr)` at
- *   probe time; the layer stashes the vtable and exposes a
- *   uniform `NetTxPacket` / `NetRxPoll` to the stack. RX
- *   pollers run from a dedicated kernel thread per NIC; TX
- *   submissions come synchronously from the stack and either
- *   immediately enqueue or block on the NIC's driver lock.
+ *   The enabled 8086:100E and 8086:10D3 e1000 profiles, AMD 1022:2000
+ *   PCnet profile, and modern 1AF4:1041 virtio-net profile publish an
+ *   exact-generation `NetInterfaceBinding`. Their polling workers inject RX
+ *   through that receipt, while stack TX enters through a closable
+ *   driver-operation gate. Shutdown closes and drains both domains before
+ *   hardware DMA or stable context storage can be reclaimed.
  *
- * WHY THIS FILE IS LARGE
- *   Diagnostic surface — every NIC type wants its own pretty-
- *   print of state, every command (ifconfig / dhcp / route /
- *   netscan) lives here, and the wireless-credentials helper
- *   for the wifi flyout panel adds another section.
+ *   Other wired and wireless families remain visible as inventory but fail
+ *   closed before speculative BAR access. USB network class drivers have
+ *   separate source ownership and are not represented by a generic vtable
+ *   in this file.
  */
 
 #include "drivers/net/net.h"
@@ -38,15 +31,18 @@
 #include "drivers/net/bcm43xx.h"
 #include "drivers/net/iwlwifi.h"
 #include "drivers/net/mt76.h"
+#include "drivers/net/pcnet.h"
 #include "drivers/net/rtl88xx.h"
+#include "drivers/net/wireless_watch.h"
 #include "drivers/pci/pci.h"
+#include "drivers/virtio/virtio_net.h"
 #include "log/klog.h"
-#include "mm/frame_allocator.h"
-#include "mm/page.h"
+#include "mm/dma.h"
 #include "mm/paging.h"
 #include "net/stack.h"
 #include "sched/sched.h"
 #include "security/driver_domain.h"
+#include "sync/spinlock.h"
 
 namespace duetos::drivers::net
 {
@@ -57,10 +53,94 @@ namespace
 NicInfo g_nics[kMaxNics] = {};
 u64 g_nic_count = 0;
 
-// Module-scope so `NetShutdown` can clear it and the next
-// `NetInit` re-walks PCI. Was a function-local `static constinit`
-// while this subsystem was init-once.
-constinit bool g_init_done = false;
+enum class NicRegistryState : u8
+{
+    Stopped = 0,
+    Starting,
+    Running,
+    Stopping,
+    Quarantined,
+};
+
+sync::SpinLock g_nic_registry_lock{};
+NicRegistryState g_nic_registry_state = NicRegistryState::Stopped;
+
+// MapMmio uses a monotonic virtual arena; unmapping page tables does not
+// reclaim its cursor. Keep stable BDF/BAR mappings across NetShutdown /
+// NetInit cycles instead of consuming another aperture on every restart.
+struct NicMmioCacheEntry
+{
+    bool valid;
+    pci::DeviceAddress address;
+    u8 bar_index;
+    u64 physical_address;
+    u64 mapped_bytes;
+    void* virtual_address;
+};
+
+constexpr u32 kNicMmioCacheSlots = 8;
+NicMmioCacheEntry g_nic_mmio_cache[kNicMmioCacheSlots] = {};
+
+bool SamePciAddress(const pci::DeviceAddress& left, const pci::DeviceAddress& right)
+{
+    return left.bus == right.bus && left.device == right.device && left.function == right.function;
+}
+
+bool LivePciIdentityMatches(const NicInfo& nic)
+{
+    pci::DeviceAddress address{};
+    address.bus = nic.bus;
+    address.device = nic.device;
+    address.function = nic.function;
+
+    const u32 expected_vendor_device = static_cast<u32>(nic.vendor_id) | (static_cast<u32>(nic.device_id) << 16);
+    const u32 expected_class_revision =
+        static_cast<u32>(nic.revision_id) | (static_cast<u32>(nic.programming_interface) << 8) |
+        (static_cast<u32>(nic.subclass) << 16) | (static_cast<u32>(nic.class_code) << 24);
+    if (pci::PciConfigRead32(address, 0x00) != expected_vendor_device ||
+        pci::PciConfigRead32(address, 0x08) != expected_class_revision ||
+        ((pci::PciConfigRead32(address, 0x0C) >> 16) & 0x7Fu) != 0)
+        return false;
+
+    const u32 subsystem = pci::PciConfigRead32(address, 0x2C);
+    const u16 subsystem_vendor = static_cast<u16>(subsystem & 0xFFFFu);
+    const bool subsystem_known = subsystem_vendor != 0 && subsystem_vendor != 0xFFFFu;
+    return subsystem_known == nic.subsystem_known &&
+           (!subsystem_known || (subsystem_vendor == nic.subsystem_vendor_id &&
+                                 static_cast<u16>(subsystem >> 16) == nic.subsystem_device_id));
+}
+
+void* AcquireNicMmioMapping(const pci::DeviceAddress& address, u8 bar_index, u64 physical_address, u64 mapped_bytes)
+{
+    if (physical_address == 0 || mapped_bytes == 0)
+        return nullptr;
+
+    for (const NicMmioCacheEntry& entry : g_nic_mmio_cache)
+    {
+        if (entry.valid && SamePciAddress(entry.address, address) && entry.bar_index == bar_index &&
+            entry.physical_address == physical_address && entry.mapped_bytes >= mapped_bytes)
+            return entry.virtual_address;
+    }
+
+    for (NicMmioCacheEntry& entry : g_nic_mmio_cache)
+    {
+        if (entry.valid)
+            continue;
+        void* mapping = mm::MapMmio(physical_address, mapped_bytes);
+        if (mapping == nullptr)
+            return nullptr;
+        entry.valid = true;
+        entry.address = address;
+        entry.bar_index = bar_index;
+        entry.physical_address = physical_address;
+        entry.mapped_bytes = mapped_bytes;
+        entry.virtual_address = mapping;
+        return mapping;
+    }
+
+    KLOG_ERROR("drivers/net", "NIC MMIO mapping cache exhausted; leaving device probe-only");
+    return nullptr;
+}
 
 struct VendorEntry
 {
@@ -69,9 +149,11 @@ struct VendorEntry
 };
 
 constexpr VendorEntry kVendors[] = {
-    {kVendorIntel, "Intel"},       {kVendorRealtek, "Realtek"},   {kVendorBroadcom, "Broadcom"},
-    {kVendorMarvell, "Marvell"},   {kVendorMellanox, "Mellanox"}, {kVendorRedHatVirt, "virtio-net"},
-    {kVendorMediaTek, "MediaTek"},
+    {kVendorIntel, "Intel"},           {kVendorRealtek, "Realtek"},
+    {kVendorBroadcom, "Broadcom"},     {kVendorAmd, "AMD"},
+    {kVendorMarvell, "Marvell"},       {kVendorMellanox, "Mellanox"},
+    {kVendorRedHatVirt, "virtio-net"}, {kVendorMediaTek, "MediaTek"},
+    {kVendorIttim, "ITTIM"},
 };
 
 const char* VendorShort(u16 vid)
@@ -106,11 +188,14 @@ constexpr u64 kE1000RegRal0 = 0x05400;   // Receive Address Low  (MAC [0..3])
 constexpr u64 kE1000RegRah0 = 0x05404;   // Receive Address High (MAC [4..5] + valid)
 constexpr u32 kE1000StatusLinkUp = 1u << 1;
 constexpr u32 kE1000RahAddressValid = 1u << 31;
+// RAH0 is the highest register the v0 driver accesses. Refuse a BAR mapping
+// that cannot contain the complete final dword.
+constexpr u64 kE1000MinimumMmioBytes = kE1000RegRah0 + sizeof(u32);
 
 // Read a MMIO u32 from the NIC's mapped BAR 0. Offset is in bytes.
 u32 Mmio32(const NicInfo& n, u64 offset)
 {
-    if (n.mmio_virt == nullptr)
+    if (n.mmio_virt == nullptr || offset > n.mmio_size || n.mmio_size - offset < sizeof(u32))
         return 0;
     auto* p = reinterpret_cast<volatile u32*>(static_cast<u8*>(n.mmio_virt) + offset);
     return *p;
@@ -123,7 +208,11 @@ u32 Mmio32(const NicInfo& n, u64 offset)
 // can do without ring setup.
 void ProbeE1000State(NicInfo& n)
 {
-    if (n.mmio_virt == nullptr)
+    n.mac_valid = false;
+    n.link_up = false;
+    for (u32 i = 0; i < 6; ++i)
+        n.mac[i] = 0;
+    if (n.mmio_virt == nullptr || n.mmio_size < kE1000MinimumMmioBytes)
         return;
     const u32 ral = Mmio32(n, kE1000RegRal0);
     const u32 rah = Mmio32(n, kE1000RegRah0);
@@ -140,44 +229,23 @@ void ProbeE1000State(NicInfo& n)
     n.link_up = (status & kE1000StatusLinkUp) != 0;
 }
 
-// True for chip families whose register layout matches the e1000
-// RAL/RAH/STATUS set. Covers e1000 (82540em), e1000e (82574,
-// 82579, i210, i217). ixgbe / i40e have different layouts.
-bool IsE1000CompatFamily(const char* family)
-{
-    if (family == nullptr)
-        return false;
-    // Prefix match — tags are strings like "e1000-82540em",
-    // "e1000e-82574", "e1000e-82579/i210/i217".
-    const char* p = family;
-    if (p[0] != 'e' || p[1] != '1' || p[2] != '0' || p[3] != '0' || p[4] != '0')
-        return false;
-    // Accept "e1000" or "e1000e" prefix; reject "e10000..." etc.
-    return p[5] == '\0' || p[5] == '-' || p[5] == 'e';
-}
-
 // ---------------------------------------------------------------
-// Intel e1000 driver — full bring-up: reset, link up, RX/TX rings,
-// packet send + RX polling task. Covers 82540EM (QEMU's default),
-// 82545EM and the other "classic" e1000 variants; e1000e (PCIe
-// controllers 82571+) share most of the register file but diverge
-// enough (different PHY access, different flow control) that we
-// keep the real driver gated to kVendorIntel + classic e1000 IDs
-// for now. Wider coverage is a linear extension.
+// Intel e1000 driver — reset, link, legacy RX/TX rings, packet send, and
+// bounded polling worker. Functional admission is intentionally restricted
+// to the two emulator-backed profiles in nic_ids.h: 82540EM (100E) and
+// 82574L/e1000e (10D3). Other exact Intel IDs remain inventory-only until
+// their generation-specific PHY, reset, and queue contracts are implemented.
 // ---------------------------------------------------------------
 
 // Additional e1000 register offsets (CTRL / STATUS already above).
 constexpr u64 kE1000RegCtrl = 0x00000;
-constexpr u64 kE1000RegIcr = 0x000C0;    // Interrupt Cause Read (RC)
-constexpr u64 kE1000RegImc = 0x000D8;    // Interrupt Mask Clear
-constexpr u64 kE1000RegImsSet = 0x000D0; // Interrupt Mask Set
-constexpr u64 kE1000RegIvar = 0x000E4;   // Interrupt Vector Allocation Register (82574/e1000e)
-constexpr u64 kE1000RegIvargp = 0x000E8; // IVAR misc/other causes group
-constexpr u64 kE1000RegRctl = 0x00100;   // Receive Control
-constexpr u64 kE1000RegTctl = 0x00400;   // Transmit Control
-constexpr u64 kE1000RegTipg = 0x00410;   // TX Inter-Packet Gap
-constexpr u64 kE1000RegRdbal = 0x02800;  // RX Desc Base Addr Low
-constexpr u64 kE1000RegRdbah = 0x02804;  // RX Desc Base Addr High
+constexpr u64 kE1000RegIcr = 0x000C0;   // Interrupt Cause Read (RC)
+constexpr u64 kE1000RegImc = 0x000D8;   // Interrupt Mask Clear
+constexpr u64 kE1000RegRctl = 0x00100;  // Receive Control
+constexpr u64 kE1000RegTctl = 0x00400;  // Transmit Control
+constexpr u64 kE1000RegTipg = 0x00410;  // TX Inter-Packet Gap
+constexpr u64 kE1000RegRdbal = 0x02800; // RX Desc Base Addr Low
+constexpr u64 kE1000RegRdbah = 0x02804; // RX Desc Base Addr High
 constexpr u64 kE1000RegRdlen = 0x02808;
 constexpr u64 kE1000RegRdh = 0x02810;
 constexpr u64 kE1000RegRdt = 0x02818;
@@ -235,57 +303,69 @@ constexpr u32 kE1000TxRingSlots = 256;
 constexpr u32 kE1000RxBufBytes = 2048;
 
 // RX descriptor status bits.
-constexpr u8 kE1000RxStatusDd = 1u << 0; // Descriptor Done
-// End-Of-Packet flag — every complete frame on a 2 KiB buffer has
-// it set; we don't fragment-check today (short frames always
-// single-descriptor) but name the bit so the next slice's jumbo
-// frames / large-buffer handling doesn't have to rediscover it.
-[[maybe_unused]] constexpr u8 kE1000RxStatusEop = 1u << 1;
+constexpr u8 kE1000RxStatusDd = 1u << 0;  // Descriptor Done
+constexpr u8 kE1000RxStatusEop = 1u << 1; // End Of Packet
 
 // TX descriptor command bits.
-constexpr u8 kE1000TxCmdEop = 1u << 0;  // End Of Packet
-constexpr u8 kE1000TxCmdIfcs = 1u << 1; // Insert FCS
-constexpr u8 kE1000TxCmdRs = 1u << 3;   // Report Status
+constexpr u8 kE1000TxCmdEop = 1u << 0;   // End Of Packet
+constexpr u8 kE1000TxCmdIfcs = 1u << 1;  // Insert FCS
+constexpr u8 kE1000TxCmdRs = 1u << 3;    // Report Status
+constexpr u8 kE1000TxStatusDd = 1u << 0; // Descriptor Done
 
-// IMS / ICR bits that matter for RX-driven wakeups.
-constexpr u32 kE1000IntTxdw = 1u << 0;   // TX Desc Written Back
-constexpr u32 kE1000IntLsc = 1u << 2;    // Link Status Change
-constexpr u32 kE1000IntRxdmt0 = 1u << 4; // RX Desc Min Threshold
-constexpr u32 kE1000IntRxo = 1u << 6;    // RX Overrun
-constexpr u32 kE1000IntRxt0 = 1u << 7;   // RX Timer (desc done)
-constexpr u32 kE1000IvarValid = 1u << 7; // per-byte IVAR "entry valid"
+constexpr u16 kPciCommandMemorySpace = 1u << 1;
+constexpr u16 kPciCommandBusMaster = 1u << 2;
+
+bool DisablePciBusMasterForProbe(const pci::DeviceAddress& address)
+{
+    const u16 command = pci::PciConfigRead16(address, 0x04);
+    const u16 safe_command = static_cast<u16>(command & ~kPciCommandBusMaster);
+    // Status shares the upper half and is W1C. Write a zero upper half rather
+    // than echoing pending status while taking ownership away from firmware.
+    pci::PciConfigWrite32(address, 0x04, static_cast<u32>(safe_command));
+    return pci::PciConfigRead16(address, 0x04) == safe_command;
+}
 
 struct E1000Ctx
 {
-    bool online;
+    // Admission and pin publication share one atomic word, so shutdown can
+    // never observe zero pins between a caller's open check and publication.
+    DriverOperationGate operations;
+    // These synchronization objects are stable across restart. In particular,
+    // issued_generation is never reset, so a delayed old receipt cannot alias
+    // a future worker.
+    DriverWorkerLease rx_worker;
+    sync::SpinLock tx_lock;
+    pci::DeviceAddress pci_address;
+    nic_ids::IntelE1000BringUpProfile profile;
+    u16 pci_command_original;
+    bool pci_command_saved;
+    bool dma_armed;
+    bool stack_bound;
+    bool quarantined;
     volatile u8* mmio; // BAR 0 kernel-virtual
+    u64 mmio_bytes;
+    mm::DmaBuffer rx_ring_dma;
     E1000RxDesc* rx_ring;
-    mm::PhysAddr rx_ring_phys;
-    mm::PhysAddr rx_buf_base_phys; // contiguous 256 × 2 KiB = 512 KiB
+    mm::DmaBuffer rx_buf_dma; // 256 x 2 KiB receive buffers
     u8* rx_buf_base_virt;
     u32 rx_tail;
+    bool rx_discard_until_eop;
+    mm::DmaBuffer tx_ring_dma;
     E1000TxDesc* tx_ring;
-    mm::PhysAddr tx_ring_phys;
-    mm::PhysAddr tx_buf_base_phys; // contiguous 256 × 2 KiB = 512 KiB staging
+    mm::DmaBuffer tx_buf_dma; // 256 x 2 KiB transmit staging buffers
     u8* tx_buf_base_virt;
     u32 tx_tail;
+    u32 tx_clean;
+    u32 tx_in_flight;
     u64 rx_packets;
     u64 rx_bytes;
-    u64 rx_dropped; // RX descriptors dropped for out-of-range length
+    u64 rx_dropped;
     u64 tx_packets;
     u64 tx_bytes;
-    NicInfo* nic;
-    // Network-stack interface index this controller is bound to.
-    // Set in E1000BringUp; used by E1000DrainRx to route frames
-    // to the right stack slot. Each e1000 gets a distinct index
-    // matching its g_nics[] position.
+    // Exact network-stack binding receipt. The stack owns callback admission
+    // independently from the device gate and drains it before DMA is freed.
+    duetos::net::NetInterfaceBinding stack_binding;
     u32 iface_index;
-    // MSI-X state. `irq_vector` is non-zero when binding
-    // succeeded; in that case the RX polling task blocks on
-    // `rx_wait` and the handler wakes it on RX/link events
-    // instead of running at tick cadence.
-    u8 irq_vector;
-    duetos::sched::WaitQueue rx_wait;
 };
 
 // Per-controller state. One slot per discovered e1000 adapter;
@@ -296,15 +376,125 @@ constexpr u32 kMaxE1000 = 4;
 E1000Ctx g_e1000s[kMaxE1000] = {};
 u32 g_e1000_count = 0;
 
+bool E1000AcquireOperation(E1000Ctx& ctx)
+{
+    return DriverOperationGateTryAcquire(&ctx.operations);
+}
+
+void E1000ReleaseOperation(E1000Ctx& ctx)
+{
+    KASSERT(DriverOperationGateRelease(&ctx.operations), "drivers/net/e1000", "operation pin underflow");
+}
+
+bool E1000UpdatePciCommand(E1000Ctx& ctx, u16 set_bits, u16 clear_bits)
+{
+    const u16 current = pci::PciConfigRead16(ctx.pci_address, 0x04);
+    const u16 desired = static_cast<u16>((current | set_bits) & ~clear_bits);
+    // PCI status occupies the upper half of config dword 0x04 and contains
+    // write-one-to-clear bits. Never echo a status snapshot while changing
+    // Command: an upper half of zero preserves every pending status bit.
+    pci::PciConfigWrite32(ctx.pci_address, 0x04, static_cast<u32>(desired));
+    const u16 observed = pci::PciConfigRead16(ctx.pci_address, 0x04);
+    return (observed & set_bits) == set_bits && (observed & clear_bits) == 0;
+}
+
+bool E1000PreparePciCommand(E1000Ctx& ctx)
+{
+    ctx.pci_command_original = pci::PciConfigRead16(ctx.pci_address, 0x04);
+    ctx.pci_command_saved = true;
+    // Keep the device unable to DMA while reset and descriptor publication
+    // are in progress, but turn on memory decode before the first MMIO read.
+    return E1000UpdatePciCommand(ctx, kPciCommandMemorySpace, kPciCommandBusMaster);
+}
+
+bool E1000EnableBusMaster(E1000Ctx& ctx)
+{
+    if (!E1000UpdatePciCommand(ctx, kPciCommandMemorySpace | kPciCommandBusMaster, 0))
+        return false;
+    ctx.dma_armed = true;
+    return true;
+}
+
+bool E1000DisableBusMaster(E1000Ctx& ctx)
+{
+    const bool disabled = E1000UpdatePciCommand(ctx, 0, kPciCommandBusMaster);
+    if (disabled)
+        ctx.dma_armed = false;
+    return disabled;
+}
+
+bool E1000RestorePciCommand(E1000Ctx& ctx)
+{
+    if (!ctx.pci_command_saved)
+        return true;
+    const u16 desired = static_cast<u16>(ctx.pci_command_original & ~kPciCommandBusMaster);
+    pci::PciConfigWrite32(ctx.pci_address, 0x04, static_cast<u32>(desired));
+    const u16 observed = pci::PciConfigRead16(ctx.pci_address, 0x04);
+    const u16 owned_mask = kPciCommandMemorySpace | kPciCommandBusMaster;
+    return (observed & owned_mask) == (desired & owned_mask);
+}
+
+bool E1000MacIsUsable(const NicInfo& n)
+{
+    if (!n.mac_valid || (n.mac[0] & 1u) != 0)
+        return false;
+    bool all_zero = true;
+    for (u32 i = 0; i < 6; ++i)
+        all_zero = all_zero && n.mac[i] == 0;
+    return !all_zero;
+}
+
+// Reset only ordinary runtime fields. The operation gate, worker lease, and
+// TX lock remain at stable addresses and are never aggregate-overwritten.
+void E1000ClearRuntimeFields(E1000Ctx& ctx)
+{
+    KASSERT(!DriverOperationGateIsOpen(&ctx.operations), "drivers/net/e1000", "clear with operation gate open");
+    KASSERT(DriverOperationGatePinCount(&ctx.operations) == 0, "drivers/net/e1000", "clear with operation pins");
+    KASSERT(DriverWorkerLeaseActiveGeneration(&ctx.rx_worker) == 0, "drivers/net/e1000", "clear with live worker");
+    ctx.pci_address = {};
+    ctx.profile = nic_ids::IntelE1000BringUpProfile::None;
+    ctx.pci_command_original = 0;
+    ctx.pci_command_saved = false;
+    ctx.dma_armed = false;
+    ctx.stack_bound = false;
+    ctx.quarantined = false;
+    ctx.mmio = nullptr;
+    ctx.mmio_bytes = 0;
+    ctx.rx_ring_dma = {};
+    ctx.rx_ring = nullptr;
+    ctx.rx_buf_dma = {};
+    ctx.rx_buf_base_virt = nullptr;
+    ctx.rx_tail = 0;
+    ctx.rx_discard_until_eop = false;
+    ctx.tx_ring_dma = {};
+    ctx.tx_ring = nullptr;
+    ctx.tx_buf_dma = {};
+    ctx.tx_buf_base_virt = nullptr;
+    ctx.tx_tail = 0;
+    ctx.tx_clean = 0;
+    ctx.tx_in_flight = 0;
+    ctx.rx_packets = 0;
+    ctx.rx_bytes = 0;
+    ctx.rx_dropped = 0;
+    ctx.tx_packets = 0;
+    ctx.tx_bytes = 0;
+    ctx.stack_binding = {};
+    ctx.iface_index = 0;
+}
+
 // Per-controller MMIO helpers — each function takes an explicit
 // ctx so all the driver functions work on whichever controller
 // the caller is operating on instead of a file-scope singleton.
 void E1000Write(E1000Ctx& ctx, u64 off, u32 value)
 {
+    KASSERT(ctx.mmio != nullptr && off <= ctx.mmio_bytes && ctx.mmio_bytes - off >= sizeof(u32), "drivers/net/e1000",
+            "MMIO write outside mapped BAR extent");
     *reinterpret_cast<volatile u32*>(ctx.mmio + off) = value;
 }
 u32 E1000Read(E1000Ctx& ctx, u64 off)
 {
+    KASSERT(ctx.mmio != nullptr && off <= ctx.mmio_bytes && ctx.mmio_bytes - off >= sizeof(u32), "drivers/net/e1000",
+            "MMIO read outside mapped BAR extent");
     return *reinterpret_cast<volatile u32*>(ctx.mmio + off);
 }
 
@@ -348,93 +538,126 @@ void E1000ClearMulticastTable(E1000Ctx& ctx)
 bool E1000SetupRxRing(E1000Ctx& ctx)
 {
     // One 4 KiB frame for the RX descriptor ring (256 × 16 B).
-    auto ring_phys_r = mm::AllocateFrame();
-    if (!ring_phys_r)
+    auto ring_r = mm::AllocDmaCoherent(mm::kPageSize, mm::Zone::Dma32);
+    if (!ring_r)
         return false;
-    const mm::PhysAddr ring_phys = ring_phys_r.value();
-    auto* ring_virt = static_cast<u8*>(mm::PhysToVirt(ring_phys));
-    for (u64 i = 0; i < mm::kPageSize; ++i)
-        ring_virt[i] = 0;
-    ctx.rx_ring_phys = ring_phys;
-    ctx.rx_ring = reinterpret_cast<E1000RxDesc*>(ring_virt);
+    ctx.rx_ring_dma = ring_r.value();
+    ctx.rx_ring = static_cast<E1000RxDesc*>(ctx.rx_ring_dma.virt);
 
     // 256 × 2 KiB = 128 pages contiguous for RX buffers. Each
     // descriptor points at buf_base + slot × 2048.
-    constexpr u32 kRxBufPages = (kE1000RxRingSlots * kE1000RxBufBytes) / mm::kPageSize;
-    auto buf_phys_r = mm::AllocateContiguousFrames(kRxBufPages);
-    if (!buf_phys_r)
+    constexpr u64 kRxBufferBytes = u64(kE1000RxRingSlots) * kE1000RxBufBytes;
+    auto buffers_r = mm::AllocDmaCoherent(kRxBufferBytes, mm::Zone::Dma32);
+    if (!buffers_r)
     {
-        mm::FreeFrame(ring_phys);
+        mm::FreeDmaCoherent(ctx.rx_ring_dma);
+        ctx.rx_ring_dma = {};
+        ctx.rx_ring = nullptr;
         return false;
     }
-    const mm::PhysAddr buf_phys = buf_phys_r.value();
-    ctx.rx_buf_base_phys = buf_phys;
-    ctx.rx_buf_base_virt = static_cast<u8*>(mm::PhysToVirt(buf_phys));
+    ctx.rx_buf_dma = buffers_r.value();
+    ctx.rx_buf_base_virt = static_cast<u8*>(ctx.rx_buf_dma.virt);
     for (u32 i = 0; i < kE1000RxRingSlots; ++i)
     {
-        ctx.rx_ring[i].addr = buf_phys + u64(i) * kE1000RxBufBytes;
+        ctx.rx_ring[i].addr = ctx.rx_buf_dma.phys + u64(i) * kE1000RxBufBytes;
         ctx.rx_ring[i].status = 0;
     }
+    mm::DmaSyncForDevice(ctx.rx_ring_dma, 0, kE1000RxRingSlots * sizeof(E1000RxDesc));
 
-    E1000Write(ctx, kE1000RegRdbal, u32(ring_phys));
-    E1000Write(ctx, kE1000RegRdbah, u32(ring_phys >> 32));
+    E1000Write(ctx, kE1000RegRctl, 0);
+    E1000Write(ctx, kE1000RegRdbal, u32(ctx.rx_ring_dma.phys));
+    E1000Write(ctx, kE1000RegRdbah, u32(ctx.rx_ring_dma.phys >> 32));
     E1000Write(ctx, kE1000RegRdlen, kE1000RxRingSlots * sizeof(E1000RxDesc));
     E1000Write(ctx, kE1000RegRdh, 0);
     E1000Write(ctx, kE1000RegRdt, kE1000RxRingSlots - 1);
     ctx.rx_tail = kE1000RxRingSlots - 1;
 
-    // Enable receive: broadcast accept, strip CRC, 2 KiB buffers (BSIZE=00).
-    u32 rctl = kE1000RctlEn | kE1000RctlBam | kE1000RctlSecrc;
-    E1000Write(ctx, kE1000RegRctl, rctl);
     return true;
 }
 
 bool E1000SetupTxRing(E1000Ctx& ctx)
 {
-    auto ring_phys_r = mm::AllocateFrame();
-    if (!ring_phys_r)
+    auto ring_r = mm::AllocDmaCoherent(mm::kPageSize, mm::Zone::Dma32);
+    if (!ring_r)
         return false;
-    const mm::PhysAddr ring_phys = ring_phys_r.value();
-    auto* ring_virt = static_cast<u8*>(mm::PhysToVirt(ring_phys));
-    for (u64 i = 0; i < mm::kPageSize; ++i)
-        ring_virt[i] = 0;
-    ctx.tx_ring_phys = ring_phys;
-    ctx.tx_ring = reinterpret_cast<E1000TxDesc*>(ring_virt);
+    ctx.tx_ring_dma = ring_r.value();
+    ctx.tx_ring = static_cast<E1000TxDesc*>(ctx.tx_ring_dma.virt);
 
-    constexpr u32 kTxBufPages = (kE1000TxRingSlots * kE1000RxBufBytes) / mm::kPageSize;
-    auto buf_phys_r = mm::AllocateContiguousFrames(kTxBufPages);
-    if (!buf_phys_r)
+    constexpr u64 kTxBufferBytes = u64(kE1000TxRingSlots) * kE1000RxBufBytes;
+    auto buffers_r = mm::AllocDmaCoherent(kTxBufferBytes, mm::Zone::Dma32);
+    if (!buffers_r)
     {
-        mm::FreeFrame(ring_phys);
+        mm::FreeDmaCoherent(ctx.tx_ring_dma);
+        ctx.tx_ring_dma = {};
+        ctx.tx_ring = nullptr;
         return false;
     }
-    const mm::PhysAddr buf_phys = buf_phys_r.value();
-    ctx.tx_buf_base_phys = buf_phys;
-    ctx.tx_buf_base_virt = static_cast<u8*>(mm::PhysToVirt(buf_phys));
+    ctx.tx_buf_dma = buffers_r.value();
+    ctx.tx_buf_base_virt = static_cast<u8*>(ctx.tx_buf_dma.virt);
 
-    E1000Write(ctx, kE1000RegTdbal, u32(ring_phys));
-    E1000Write(ctx, kE1000RegTdbah, u32(ring_phys >> 32));
-    E1000Write(ctx, kE1000RegTdlen, kE1000RxRingSlots * sizeof(E1000TxDesc));
+    mm::DmaSyncForDevice(ctx.tx_ring_dma, 0, kE1000TxRingSlots * sizeof(E1000TxDesc));
+    E1000Write(ctx, kE1000RegTctl, 0);
+    E1000Write(ctx, kE1000RegTdbal, u32(ctx.tx_ring_dma.phys));
+    E1000Write(ctx, kE1000RegTdbah, u32(ctx.tx_ring_dma.phys >> 32));
+    E1000Write(ctx, kE1000RegTdlen, kE1000TxRingSlots * sizeof(E1000TxDesc));
     E1000Write(ctx, kE1000RegTdh, 0);
     E1000Write(ctx, kE1000RegTdt, 0);
     ctx.tx_tail = 0;
+    ctx.tx_clean = 0;
+    ctx.tx_in_flight = 0;
 
     // TIPG: IPGT=10, IPGR1=8 (0xA << 10), IPGR2=6 (0x6 << 20).
     // Canonical 0x0060200A for 82540EM.
     E1000Write(ctx, kE1000RegTipg, 0x0060200AU);
 
-    // Enable transmit: PSP, CT=0x10 (bits 4..11), COLD=0x40 (bits 12..21).
-    u32 tctl = kE1000TctlEn | kE1000TctlPsp | (0x10u << 4) | (0x40u << 12);
+    return true;
+}
+
+bool E1000EnableDatapath(E1000Ctx& ctx)
+{
+    // Descriptor publication completes while BME and both engines are off.
+    mm::DmaSyncForDevice(ctx.rx_ring_dma, 0, ctx.rx_ring_dma.bytes);
+    mm::DmaSyncForDevice(ctx.rx_buf_dma, 0, ctx.rx_buf_dma.bytes);
+    mm::DmaSyncForDevice(ctx.tx_ring_dma, 0, ctx.tx_ring_dma.bytes);
+    mm::DmaSyncForDevice(ctx.tx_buf_dma, 0, ctx.tx_buf_dma.bytes);
+    if (!E1000EnableBusMaster(ctx))
+        return false;
+
+    const u32 rctl = kE1000RctlEn | kE1000RctlBam | kE1000RctlSecrc;
+    const u32 tctl = kE1000TctlEn | kE1000TctlPsp | (0x10u << 4) | (0x40u << 12);
+    E1000Write(ctx, kE1000RegRctl, rctl);
     E1000Write(ctx, kE1000RegTctl, tctl);
+    (void)E1000Read(ctx, kE1000RegStatus);
     return true;
 }
 
 bool E1000Send(E1000Ctx& ctx, const u8* data, u32 len)
 {
-    if (!ctx.online || data == nullptr || len == 0)
+    if (data == nullptr || len == 0)
         return false;
     if (len > kE1000RxBufBytes)
         return false;
+    if (!E1000AcquireOperation(ctx))
+        return false;
+
+    const sync::IrqFlags flags = sync::SpinLockAcquire(ctx.tx_lock);
+    while (ctx.tx_in_flight != 0)
+    {
+        const u64 clean_offset = u64(ctx.tx_clean) * sizeof(E1000TxDesc);
+        mm::DmaSyncForCpu(ctx.tx_ring_dma, clean_offset, sizeof(E1000TxDesc));
+        if ((ctx.tx_ring[ctx.tx_clean].sta & kE1000TxStatusDd) == 0)
+            break;
+        ctx.tx_clean = (ctx.tx_clean + 1) % kE1000TxRingSlots;
+        --ctx.tx_in_flight;
+    }
+
+    // Reserve one descriptor so TDT never aliases TDH while work remains.
+    if (ctx.tx_in_flight >= kE1000TxRingSlots - 1)
+    {
+        sync::SpinLockRelease(ctx.tx_lock, flags);
+        E1000ReleaseOperation(ctx);
+        return false;
+    }
 
     const u32 slot = ctx.tx_tail;
     u8* buf = ctx.tx_buf_base_virt + u64(slot) * kE1000RxBufBytes;
@@ -442,7 +665,7 @@ bool E1000Send(E1000Ctx& ctx, const u8* data, u32 len)
         buf[i] = data[i];
 
     E1000TxDesc& d = ctx.tx_ring[slot];
-    d.addr = ctx.tx_buf_base_phys + u64(slot) * kE1000RxBufBytes;
+    d.addr = ctx.tx_buf_dma.phys + u64(slot) * kE1000RxBufBytes;
     d.length = u16(len);
     d.cso = 0;
     d.cmd = kE1000TxCmdEop | kE1000TxCmdIfcs | kE1000TxCmdRs;
@@ -450,11 +673,18 @@ bool E1000Send(E1000Ctx& ctx, const u8* data, u32 len)
     d.css = 0;
     d.special = 0;
 
+    const u64 buffer_offset = u64(slot) * kE1000RxBufBytes;
+    const u64 descriptor_offset = u64(slot) * sizeof(E1000TxDesc);
+    mm::DmaSyncForDevice(ctx.tx_buf_dma, buffer_offset, len);
+    mm::DmaSyncForDevice(ctx.tx_ring_dma, descriptor_offset, sizeof(E1000TxDesc));
     const u32 next = (slot + 1) % kE1000TxRingSlots;
     ctx.tx_tail = next;
+    ++ctx.tx_in_flight;
     E1000Write(ctx, kE1000RegTdt, next);
     ++ctx.tx_packets;
     ctx.tx_bytes += len;
+    sync::SpinLockRelease(ctx.tx_lock, flags);
+    E1000ReleaseOperation(ctx);
     return true;
 }
 
@@ -464,7 +694,7 @@ bool E1000Send(E1000Ctx& ctx, const u8* data, u32 len)
 // slot rather than all feeding index 0.
 u32 E1000DrainRx(E1000Ctx& ctx, u32 budget_packets)
 {
-    if (!ctx.online)
+    if (!DriverOperationGateIsOpen(&ctx.operations))
         return 0;
     u32 drained = 0;
     for (u32 checked = 0; checked < kE1000RxRingSlots; ++checked)
@@ -473,9 +703,19 @@ u32 E1000DrainRx(E1000Ctx& ctx, u32 budget_packets)
             break;
         const u32 slot = (ctx.rx_tail + 1) % kE1000RxRingSlots;
         volatile E1000RxDesc& d = ctx.rx_ring[slot];
-        if ((d.status & kE1000RxStatusDd) == 0)
+        const u64 descriptor_offset = u64(slot) * sizeof(E1000RxDesc);
+        mm::DmaSyncForCpu(ctx.rx_ring_dma, descriptor_offset, sizeof(E1000RxDesc));
+        const u8 status = d.status;
+        if ((status & kE1000RxStatusDd) == 0)
             break;
         const u16 len = d.length;
+        const u8 errors = d.errors;
+        const bool end_of_packet = (status & kE1000RxStatusEop) != 0;
+        const bool continued_fragment = ctx.rx_discard_until_eop;
+        if (!end_of_packet)
+            ctx.rx_discard_until_eop = true;
+        else
+            ctx.rx_discard_until_eop = false;
         // The NIC DMA-writes `length`; a non-conforming or hostile
         // device can report past the 2 KiB per-slot buffer. The 256
         // RX buffers are one contiguous allocation, so trusting an
@@ -483,86 +723,32 @@ u32 E1000DrainRx(E1000Ctx& ctx, u32 budget_packets)
         // slots (cross-frame info leak) or off the end of the whole
         // RX region on the last slot. Drop + recycle out-of-range
         // descriptors instead of injecting them.
-        if (len == 0 || len > kE1000RxBufBytes)
+        if (continued_fragment || !end_of_packet || errors != 0 || len == 0 || len > kE1000RxBufBytes)
         {
             ++ctx.rx_dropped;
-            d.status = 0;
-            ctx.rx_tail = slot;
-            E1000Write(ctx, kE1000RegRdt, slot);
-            continue;
         }
-        u8* buf = ctx.rx_buf_base_virt + u64(slot) * kE1000RxBufBytes;
-        ++ctx.rx_packets;
-        ctx.rx_bytes += len;
-        // Deliver to the stack slot this controller is bound to.
-        duetos::net::NetStackInjectRx(ctx.iface_index, buf, len);
+        else
+        {
+            const u64 buffer_offset = u64(slot) * kE1000RxBufBytes;
+            mm::DmaSyncForCpu(ctx.rx_buf_dma, buffer_offset, len);
+            u8* buf = ctx.rx_buf_base_virt + buffer_offset;
+            duetos::net::NetStackInjectRx(ctx.stack_binding, buf, len);
+            ++ctx.rx_packets;
+            ctx.rx_bytes += len;
+            ++drained;
+        }
         // Release the descriptor back to the controller.
+        d.length = 0;
+        d.checksum = 0;
         d.status = 0;
+        d.errors = 0;
+        d.special = 0;
+        mm::DmaSyncForDevice(ctx.rx_ring_dma, descriptor_offset, sizeof(E1000RxDesc));
         ctx.rx_tail = slot;
         E1000Write(ctx, kE1000RegRdt, slot);
-        ++drained;
     }
     return drained;
 }
-
-void E1000ConfigureMsixIvar(E1000Ctx& ctx, u8 vector)
-{
-    // 82574/e1000e layout: one byte per queue source in IVAR.
-    // Program queue 0 RX + queue 0 TX + misc causes to the same
-    // vector and set the VALID bit on each programmed byte.
-    const u32 entry = (u32(vector & 0x1F) | kE1000IvarValid);
-    const u32 ivar = entry | (entry << 8) | (entry << 16) | (entry << 24);
-    E1000Write(ctx, kE1000RegIvar, ivar);
-    E1000Write(ctx, kE1000RegIvargp, entry);
-    core::CleanroomTraceRecord("e1000", "ivar-programmed", vector, ivar, entry);
-}
-
-// MSI-X / MSI handlers — one per controller slot. IrqHandler is
-// void(*)() with no argument, so per-controller dispatch uses
-// per-slot thunks rather than a closure. Each thunk indexes
-// directly into g_e1000s[]. Slots beyond kMaxE1000 are never
-// bound because E1000AllocCtx caps allocation.
-//
-// ICR (Interrupt Cause Read) is clear-on-read: the single read
-// acknowledges every pending bit. Waking the RX poll task is
-// sufficient — it drains unconditionally and re-reads link state.
-void E1000IrqHandlerSlot0()
-{
-    if (g_e1000s[0].mmio == nullptr)
-        return;
-    (void)E1000Read(g_e1000s[0], kE1000RegIcr);
-    duetos::sched::WaitQueueWakeOne(&g_e1000s[0].rx_wait);
-}
-void E1000IrqHandlerSlot1()
-{
-    if (g_e1000s[1].mmio == nullptr)
-        return;
-    (void)E1000Read(g_e1000s[1], kE1000RegIcr);
-    duetos::sched::WaitQueueWakeOne(&g_e1000s[1].rx_wait);
-}
-void E1000IrqHandlerSlot2()
-{
-    if (g_e1000s[2].mmio == nullptr)
-        return;
-    (void)E1000Read(g_e1000s[2], kE1000RegIcr);
-    duetos::sched::WaitQueueWakeOne(&g_e1000s[2].rx_wait);
-}
-void E1000IrqHandlerSlot3()
-{
-    if (g_e1000s[3].mmio == nullptr)
-        return;
-    (void)E1000Read(g_e1000s[3], kE1000RegIcr);
-    duetos::sched::WaitQueueWakeOne(&g_e1000s[3].rx_wait);
-}
-
-// Table of per-slot handlers — indexed by the slot assigned in
-// E1000AllocCtx. One entry per kMaxE1000.
-constexpr duetos::arch::IrqHandler kE1000SlotHandlers[kMaxE1000] = {
-    E1000IrqHandlerSlot0,
-    E1000IrqHandlerSlot1,
-    E1000IrqHandlerSlot2,
-    E1000IrqHandlerSlot3,
-};
 
 // RX poll task entry. `arg` is &g_e1000s[n] — the slot outlives
 // the task (module-scope array).
@@ -571,47 +757,23 @@ void E1000RxPollEntry(void* arg)
     E1000Ctx* ctx = static_cast<E1000Ctx*>(arg);
     if (ctx == nullptr)
         return;
-    const bool have_msix = (ctx->irq_vector != 0);
+    const u64 generation = DriverWorkerLeaseActiveGeneration(&ctx->rx_worker);
+    if (generation == 0)
+        return;
     constexpr u32 kRxPollBudget = 64;
-    for (;;)
+    while (DriverWorkerLeaseShouldRun(&ctx->rx_worker, generation))
     {
         const u32 drained = E1000DrainRx(*ctx, kRxPollBudget);
         if (drained == kRxPollBudget)
             continue;
-        if (have_msix)
-        {
-            // Block until IRQ wakes us. Same lost-wakeup guard
-            // pattern as NVMe/xHCI: under Cli, re-check whether
-            // the next RX descriptor is marked DD; if so we
-            // skip blocking and loop to drain.
-            duetos::arch::Cli();
-            const u32 slot = (ctx->rx_tail + 1) % kE1000RxRingSlots;
-            if ((ctx->rx_ring[slot].status & kE1000RxStatusDd) != 0)
-            {
-                duetos::arch::Sti();
-                continue;
-            }
-            // Bounded wait: under QEMU SLIRP the e1000e MSI-X
-            // delivery is unreliable for some IRQ causes (RXT0 in
-            // particular). The 10 ms timeout makes the RX poll
-            // path tick-poll as a safety net while still benefiting
-            // from real IRQ wakeups when they fire.
-            duetos::sched::WaitQueueBlockTimeout(&ctx->rx_wait, /*ticks=*/1);
-            // Resume IF state is the switching-out peer's, not ours:
-            // ScheduleLockedHandoff stashes the caller's rflags in the
-            // PER-CPU slot PerCpu::ctxsw_lock_flags, and SchedFinishTaskSwitch
-            // restores that peer-written value onto whichever task resumes.
-            // WaitQueueBlock's own contract requires IF=0 on entry, so we
-            // reliably come back IRQs-off. Without this the RX task runs
-            // E1000DrainRx -> NetStackInjectRx -> the whole IPv4/TCP stack
-            // with interrupts disabled. Mirrors virtio_blk.cpp:320-323.
-            duetos::arch::Sti();
-        }
-        else
-        {
-            duetos::sched::SchedSleepTicks(1);
-        }
+        if (!DriverWorkerLeaseShouldRun(&ctx->rx_worker, generation))
+            break;
+        // Polling is intentional for both admitted v0 profiles. It avoids
+        // owning a monotonic IRQ vector/table mapping across restart until a
+        // reusable MSI-X route and exact 82574 IVAR contract exist.
+        duetos::sched::SchedSleepTicks(1);
     }
+    (void)DriverWorkerLeaseAcknowledge(&ctx->rx_worker, generation);
 }
 
 // Spec-defined broadcast address for the self-test ARP-like blast.
@@ -664,13 +826,120 @@ E1000Ctx* E1000AllocCtx()
     return &g_e1000s[g_e1000_count++];
 }
 
+void E1000FreeDmaStorage(E1000Ctx& ctx)
+{
+    KASSERT(!ctx.dma_armed, "drivers/net/e1000", "freeing DMA while PCI bus mastering may be enabled");
+    mm::FreeDmaCoherent(ctx.rx_ring_dma);
+    mm::FreeDmaCoherent(ctx.rx_buf_dma);
+    mm::FreeDmaCoherent(ctx.tx_ring_dma);
+    mm::FreeDmaCoherent(ctx.tx_buf_dma);
+
+    ctx.rx_ring_dma = {};
+    ctx.rx_ring = nullptr;
+    ctx.rx_buf_dma = {};
+    ctx.rx_buf_base_virt = nullptr;
+    ctx.tx_ring_dma = {};
+    ctx.tx_ring = nullptr;
+    ctx.tx_buf_dma = {};
+    ctx.tx_buf_base_virt = nullptr;
+}
+
+bool E1000DisableHardware(E1000Ctx& ctx)
+{
+    if (!ctx.pci_command_saved)
+        return true;
+    if (ctx.mmio == nullptr)
+        return E1000DisableBusMaster(ctx) && E1000RestorePciCommand(ctx);
+    if (!ctx.dma_armed && !E1000UpdatePciCommand(ctx, kPciCommandMemorySpace, kPciCommandBusMaster))
+        return false;
+    E1000Write(ctx, kE1000RegImc, 0xFFFFFFFFu);
+    (void)E1000Read(ctx, kE1000RegIcr);
+    E1000Write(ctx, kE1000RegRctl, 0);
+    E1000Write(ctx, kE1000RegTctl, 0);
+    (void)E1000Read(ctx, kE1000RegStatus);
+    E1000Delay();
+
+    const bool bus_master_disabled = E1000DisableBusMaster(ctx);
+    const bool reset_complete = bus_master_disabled && E1000Reset(ctx);
+    const bool command_restored = bus_master_disabled && E1000RestorePciCommand(ctx);
+    if (!bus_master_disabled || !reset_complete || !command_restored)
+    {
+        KLOG_ERROR_2V("drivers/net/e1000", "hardware quiesce unconfirmed; DMA retained", "bus-master-off",
+                      bus_master_disabled ? 1 : 0, "reset-complete", reset_complete ? 1 : 0);
+        return false;
+    }
+    return true;
+}
+
+bool E1000StackTx(void* context, u32 iface_index, const void* frame, u64 len)
+{
+    auto* ctx = static_cast<E1000Ctx*>(context);
+    if (ctx == nullptr || frame == nullptr || iface_index != ctx->iface_index || len > kE1000RxBufBytes)
+        return false;
+    return E1000Send(*ctx, static_cast<const u8*>(frame), static_cast<u32>(len));
+}
+
+bool E1000UnbindStack(E1000Ctx& ctx)
+{
+    if (!ctx.stack_bound)
+        return true;
+    constexpr u32 kStackDrainBudgetTicks = 200;
+    const duetos::net::NetInterfaceUnbindResult result =
+        duetos::net::NetStackUnbindInterface(ctx.stack_binding, kStackDrainBudgetTicks);
+    if (result != duetos::net::NetInterfaceUnbindResult::Unbound)
+    {
+        KLOG_ERROR_V("drivers/net/e1000", "network-stack binding ownership not released; context quarantined",
+                     static_cast<u64>(result));
+        return false;
+    }
+    ctx.stack_bound = false;
+    ctx.stack_binding = {};
+    return true;
+}
+
+bool E1000ReleaseUnstartedWorker(E1000Ctx& ctx, u64 generation)
+{
+    if (generation == 0)
+        return true;
+    return DriverWorkerLeaseRequestRetire(&ctx.rx_worker, generation) &&
+           DriverWorkerLeaseAcknowledge(&ctx.rx_worker, generation) &&
+           DriverWorkerLeaseRelease(&ctx.rx_worker, generation);
+}
+
+void E1000AbortUnstartedBringUp(E1000Ctx& ctx, u32 saved_count, u64 worker_generation)
+{
+    (void)DriverOperationGateClose(&ctx.operations);
+    const bool stack_unbound = E1000UnbindStack(ctx);
+    const bool worker_released = E1000ReleaseUnstartedWorker(ctx, worker_generation);
+    const bool operations_drained = DriverOperationGatePinCount(&ctx.operations) == 0;
+    // A failed stack drain may mean a TX callback is still inside the driver.
+    // Retain live hardware and DMA for NetShutdown to retry; resetting or
+    // disabling BME underneath that callback would trade a rollback failure
+    // for an in-flight MMIO/DMA race.
+    if (!stack_unbound || !worker_released || !operations_drained)
+    {
+        ctx.quarantined = true;
+        KLOG_ERROR("drivers/net/e1000", "failed bring-up retained as quarantined context");
+        return;
+    }
+    if (!E1000DisableHardware(ctx))
+    {
+        ctx.quarantined = true;
+        KLOG_ERROR("drivers/net/e1000", "failed bring-up hardware teardown quarantined");
+        return;
+    }
+    E1000FreeDmaStorage(ctx);
+    E1000ClearRuntimeFields(ctx);
+    g_e1000_count = saved_count;
+}
+
 bool E1000BringUp(NicInfo& n, u32 iface_index)
 {
-    if (n.mmio_virt == nullptr)
+    const nic_ids::IntelE1000BringUpProfile profile = nic_ids::IntelE1000BringUpProfileFromDeviceId(n.device_id);
+    if (profile == nic_ids::IntelE1000BringUpProfile::None || n.mmio_virt == nullptr ||
+        n.mmio_size < kE1000MinimumMmioBytes || !LivePciIdentityMatches(n))
         return false;
 
-    // Claim the next per-controller slot. Remember the count before
-    // allocation so we can roll it back on any bring-up failure.
     const u32 saved_count = g_e1000_count;
     E1000Ctx* ctx = E1000AllocCtx();
     if (ctx == nullptr)
@@ -682,85 +951,93 @@ bool E1000BringUp(NicInfo& n, u32 iface_index)
         return false;
     }
 
+    E1000ClearRuntimeFields(*ctx);
+    ctx->pci_address.bus = n.bus;
+    ctx->pci_address.device = n.device;
+    ctx->pci_address.function = n.function;
+    ctx->profile = profile;
     ctx->mmio = static_cast<volatile u8*>(n.mmio_virt);
-    ctx->nic = &n;
+    ctx->mmio_bytes = n.mmio_size;
     ctx->iface_index = iface_index;
 
-    if (!E1000Reset(*ctx))
+    // Config dword 0x04 is changed before the first MMIO access. If memory
+    // decode or BME-disable cannot be confirmed, do not touch the BAR.
+    if (!E1000PreparePciCommand(*ctx))
     {
-        *ctx = {};
-        g_e1000_count = saved_count;
+        // Preserve the stable context when bus-master-off cannot be proven.
+        // Clearing it here would discard the only receipt NetShutdown can use
+        // to retry the fail-closed PCI teardown.
+        E1000AbortUnstartedBringUp(*ctx, saved_count, 0);
         return false;
     }
 
-    // Re-read MAC after reset (EEPROM reload populates RAL/RAH).
-    ProbeE1000State(n);
+    if (!E1000Reset(*ctx))
+    {
+        E1000AbortUnstartedBringUp(*ctx, saved_count, 0);
+        return false;
+    }
 
-    // Bring the link up + auto-speed-detect.
-    const u32 ctrl = (E1000Read(*ctx, kE1000RegCtrl) | kE1000CtrlSlu | kE1000CtrlAsde) & ~u32(0);
+    ProbeE1000State(n);
+    if (!E1000MacIsUsable(n))
+    {
+        n.mac_valid = false;
+        KLOG_ERROR("drivers/net/e1000", "reset did not publish a usable unicast MAC");
+        E1000AbortUnstartedBringUp(*ctx, saved_count, 0);
+        return false;
+    }
+
+    const u32 ctrl = E1000Read(*ctx, kE1000RegCtrl) | kE1000CtrlSlu | kE1000CtrlAsde;
     E1000Write(*ctx, kE1000RegCtrl, ctrl);
     E1000ClearMulticastTable(*ctx);
 
     if (!E1000SetupRxRing(*ctx))
     {
-        *ctx = {};
-        g_e1000_count = saved_count;
+        E1000AbortUnstartedBringUp(*ctx, saved_count, 0);
         return false;
     }
     if (!E1000SetupTxRing(*ctx))
     {
-        // RX ring was allocated — free it before rolling back.
-        if (ctx->rx_ring_phys != mm::kNullFrame)
-            mm::FreeFrame(ctx->rx_ring_phys);
-        constexpr u32 kRxBufPages = (kE1000RxRingSlots * kE1000RxBufBytes) / mm::kPageSize;
-        if (ctx->rx_buf_base_phys != mm::kNullFrame)
-            mm::FreeContiguousFrames(ctx->rx_buf_base_phys, kRxBufPages);
-        *ctx = {};
-        g_e1000_count = saved_count;
+        E1000AbortUnstartedBringUp(*ctx, saved_count, 0);
         return false;
     }
 
-    ctx->online = true;
+    const u64 worker_generation = DriverWorkerLeasePrepare(&ctx->rx_worker);
+    if (worker_generation == 0)
+    {
+        E1000AbortUnstartedBringUp(*ctx, saved_count, 0);
+        return false;
+    }
+
+    duetos::net::MacAddress mac{};
+    for (u64 i = 0; i < 6; ++i)
+        mac.octets[i] = n.mac[i];
+    const duetos::net::Ipv4Address ip{{0, 0, 0, 0}};
+    if (!duetos::net::NetStackBindInterfaceOwned(iface_index, mac, ip, E1000StackTx, ctx, &ctx->stack_binding))
+    {
+        E1000AbortUnstartedBringUp(*ctx, saved_count, worker_generation);
+        return false;
+    }
+    ctx->stack_bound = true;
+
+    if (!E1000EnableDatapath(*ctx) || !DriverOperationGateOpen(&ctx->operations))
+    {
+        E1000AbortUnstartedBringUp(*ctx, saved_count, worker_generation);
+        return false;
+    }
+
+    const auto worker = duetos::sched::SchedCreate(E1000RxPollEntry, ctx, "e1000-rx-poll");
+    if (worker == nullptr)
+    {
+        E1000AbortUnstartedBringUp(*ctx, saved_count, worker_generation);
+        return false;
+    }
+
+    E1000Delay();
+    n.link_up = (E1000Read(*ctx, kE1000RegStatus) & kE1000StatusLinkUp) != 0;
     n.driver_online = true;
     n.firmware_pending = false;
     n.wireless_fw_state = NicInfo::WirelessFwState::NotApplicable;
-
-    // MSI-X bring-up. IrqHandler is void(*)() — use the per-slot
-    // thunk table so each controller wakes its own RX wait queue.
-    // The slot index is (ctx - g_e1000s), set just above.
-    const u32 slot_idx = u32(ctx - g_e1000s);
-    pci::DeviceAddress addr{};
-    addr.bus = n.bus;
-    addr.device = n.device;
-    addr.function = n.function;
-    auto r = pci::PciMsixBindSimple(addr, /*entry_index=*/0, kE1000SlotHandlers[slot_idx], /*out_route=*/nullptr);
-    if (r.has_value())
-    {
-        ctx->irq_vector = r.value();
-        E1000ConfigureMsixIvar(*ctx, ctx->irq_vector);
-        // Enable RX + link + TX-writeback IRQ sources. Writing
-        // to IMS (Interrupt Mask SET) turns bits on; IMC
-        // (clear) takes them off. Read ICR once to clear any
-        // pending state before we unmask.
-        (void)E1000Read(*ctx, kE1000RegIcr);
-        const u32 mask = kE1000IntRxt0 | kE1000IntRxdmt0 | kE1000IntRxo | kE1000IntLsc | kE1000IntTxdw;
-        E1000Write(*ctx, kE1000RegImsSet, mask);
-        arch::SerialWrite("[e1000] MSI-X bound vector=");
-        arch::SerialWriteHex(ctx->irq_vector);
-        arch::SerialWrite(" (IVAR programmed)\n");
-        core::CleanroomTraceRecord("e1000", "msix-bound", ctx->irq_vector, 1, 0);
-    }
-    else
-    {
-        arch::SerialWrite("[e1000] MSI-X unavailable — RX task will tick-poll\n");
-        core::CleanroomTraceRecord("e1000", "msix-fallback-poll", n.device_id, 0, 0);
-    }
-
-    // Re-read link state now that we've asserted SLU — can take a
-    // moment on real silicon, but QEMU brings it up instantly.
-    E1000Delay();
-    const u32 status = E1000Read(*ctx, kE1000RegStatus);
-    n.link_up = (status & kE1000StatusLinkUp) != 0;
+    duetos::net::DhcpStart(iface_index);
 
     arch::SerialWrite("[e1000] online iface=");
     arch::SerialWriteHex(iface_index);
@@ -779,56 +1056,20 @@ bool E1000BringUp(NicInfo& n, u32 iface_index)
     }
     arch::SerialWrite(n.link_up ? " link=up" : " link=down");
     arch::SerialWrite(" rx_ring=");
-    arch::SerialWriteHex(ctx->rx_ring_phys);
+    arch::SerialWriteHex(ctx->rx_ring_dma.phys);
     arch::SerialWrite(" tx_ring=");
-    arch::SerialWriteHex(ctx->tx_ring_phys);
-    arch::SerialWrite("\n");
+    arch::SerialWriteHex(ctx->tx_ring_dma.phys);
+    arch::SerialWrite(" mode=poll\n");
+    core::CleanroomTraceRecord("e1000", "poll-worker-online", n.device_id, iface_index, worker_generation);
 
-    // Spawn per-controller RX polling task. The task receives ctx
-    // as its argument so it operates on the correct ring.
-    duetos::sched::SchedCreate(E1000RxPollEntry, ctx, "e1000-rx-poll");
-
-    // Bind to the network stack at iface_index. NetTxFn is
-    // bool(*)(u32 iface_index, const void*, u64); the stateless
-    // lambda below converts to a function pointer because it
-    // captures nothing — the iface_index argument the stack
-    // passes back routes to the matching e1000 ctx directly.
-    // GAP: multi-NIC routing policy (source-based routing, bonding,
-    // failover) is not implemented — each iface is independent and
-    // the upper stack selects the outbound iface per-packet using
-    // its own route table — revisit when the route table lands.
-    auto tx_fn = [](u32 iface_idx, const void* frame, u64 len) -> bool
-    {
-        for (u32 i = 0; i < g_e1000_count; ++i)
-        {
-            if (g_e1000s[i].iface_index == iface_idx && g_e1000s[i].online)
-                return E1000Send(g_e1000s[i], static_cast<const u8*>(frame), u32(len));
-        }
-        return false;
-    };
-
-    duetos::net::MacAddress mac{};
-    for (u64 i = 0; i < 6; ++i)
-        mac.octets[i] = n.mac[i];
-    // Start with the all-zero IP so DHCP's DISCOVER uses the
-    // correct src=0.0.0.0. The stack rebinds the iface to the
-    // leased IP on ACK.
-    duetos::net::Ipv4Address ip{{0, 0, 0, 0}};
-    duetos::net::NetStackBindInterface(iface_index, mac, ip, tx_fn);
-    duetos::net::DhcpStart(iface_index);
-
-    // Self-test: emit one broadcast frame so a tcpdump on the host
-    // side can confirm the TX path works end-to-end.
     E1000SelfTestTx(*ctx, n);
     return true;
 }
 
-// Returns true iff the vendor ID matched one of the families we know
-// how to probe. False means no driver code touched the device — the
-// caller is then responsible for unwinding any pre-probe MMIO mapping
-// it set up rather than registering a half-initialised NIC entry. A
-// matched-but-not-brought-up device still returns true; it stays in
-// the registry so device manager can list it as `(probe only)`.
+// Returns true iff the vendor ID matched an inventory family. A match does
+// not imply MMIO access or an online driver: only the explicit safe-backend
+// branches below can perform hardware I/O. A matched-but-not-brought-up
+// device stays in the registry as `(probe only)`.
 //
 // `iface_index` is the network-stack interface slot this NIC will
 // occupy once added to g_nics[]. It equals g_nic_count at call time
@@ -846,13 +1087,16 @@ bool RunVendorProbe(NicInfo& n, u32 iface_index)
         family = RealtekNicTag(n.device_id);
         break;
     case kVendorBroadcom:
-        family = BroadcomNicTag(n.device_id);
+        family = BroadcomNicTag(n.device_id, n.subsystem_vendor_id, n.subsystem_device_id, n.subsystem_known);
         break;
     case kVendorRedHatVirt:
         family = VirtioNetTag(n.device_id);
         break;
     case kVendorMediaTek:
-        family = MediatekNicTag(n.device_id);
+    case kVendorIttim:
+        family = MediatekNicTag(n.vendor_id, n.device_id);
+        if (family == nullptr)
+            return false;
         break;
     case kVendorAmd:
         // AMD PCnet (Am79C970A/Am79C973) — VirtualBox's default adapter.
@@ -866,26 +1110,12 @@ bool RunVendorProbe(NicInfo& n, u32 iface_index)
     n.family = family;
     bool brought_up = false;
     bool wireless_shell = false;
-    if (n.vendor_id == kVendorIntel && IsE1000CompatFamily(family))
+    if (n.vendor_id == kVendorIntel && nic_ids::IntelE1000BringUpEligible(n.device_id))
     {
-        ProbeE1000State(n);
-        // Accept classic e1000 (82540-family, 0x1000..0x107F), early
-        // e1000e PCIe variants (82571..82583, 0x10A4..0x10FF) and
-        // modern e1000e (i210/i217/i218/i219, 0x1500..0x15FF). The
-        // register layout the driver touches (CTRL, STATUS, RCTL,
-        // TCTL, RAL/RAH, RDBAL/TDBAL descriptor rings) is common
-        // across the family; PHY access + EEPROM differ but the
-        // v0 driver doesn't use either. MSI-X capability presence
-        // is detected at runtime via PciMsixBindSimple — the
-        // same code path succeeds on e1000e and falls back to
-        // polling on classic e1000.
-        const bool is_classic = (n.device_id >= 0x1000 && n.device_id <= 0x107F);
-        const bool is_e1000e_early = (n.device_id >= 0x10A4 && n.device_id <= 0x10FF);
-        const bool is_e1000e_modern = (n.device_id >= 0x1500 && n.device_id <= 0x15FF);
-        if (is_classic || is_e1000e_early || is_e1000e_modern)
-        {
-            brought_up = E1000BringUp(n, iface_index);
-        }
+        // Only the explicit 100E and 10D3 emulator-backed profiles reach
+        // MMIO. E1000BringUp enables PCI memory decode before its sole
+        // post-reset MAC/status read; every other Intel family is inventory.
+        brought_up = E1000BringUp(n, iface_index);
     }
     // Wireless dispatch — order matters only insofar as each `Matches`
     // is keyed off vendor_id, so at most one will fire per NIC.
@@ -899,7 +1129,7 @@ bool RunVendorProbe(NicInfo& n, u32 iface_index)
         wireless_shell = Rtl88xxBringUp(n);
         brought_up = wireless_shell;
     }
-    else if (Bcm43xxMatches(n.vendor_id, n.device_id))
+    else if (Bcm43xxMatches(n))
     {
         wireless_shell = Bcm43xxBringUp(n);
         brought_up = wireless_shell;
@@ -911,10 +1141,26 @@ bool RunVendorProbe(NicInfo& n, u32 iface_index)
     }
     else if (n.vendor_id == kVendorAmd && n.device_id == 0x2000)
     {
-        // AMD PCnet — full wired driver (polled RX/TX + DHCP). This is the
-        // default NIC a stock VirtualBox VM exposes, so it brings real
-        // networking up with no adapter reconfiguration.
-        brought_up = PcnetBringUp(n);
+        brought_up = PcnetBringUp(n, iface_index);
+    }
+    else if (n.vendor_id == kVendorRedHatVirt && nic_ids::VirtioNetBringUpEligible(n.device_id))
+    {
+        pci::DeviceAddress address{};
+        address.bus = n.bus;
+        address.device = n.device;
+        address.function = n.function;
+        ::duetos::drivers::virtio::VirtioNetActivation activation{};
+        brought_up = ::duetos::drivers::virtio::VirtioNetRestart(address, iface_index, &activation);
+        if (brought_up)
+        {
+            for (u32 i = 0; i < 6; ++i)
+                n.mac[i] = activation.mac[i];
+            n.mac_valid = activation.mac_valid;
+            n.link_up = activation.link_up;
+            n.driver_online = true;
+            n.firmware_pending = false;
+            n.wireless_fw_state = NicInfo::WirelessFwState::NotApplicable;
+        }
     }
     {
         // Hold the serial line lock across the full vid/did/family
@@ -970,7 +1216,9 @@ void LogNic(const NicInfo& n)
     arch::SerialWrite(SubclassName(n.subclass));
     if (n.mmio_size != 0)
     {
-        arch::SerialWrite(" bar0=");
+        arch::SerialWrite(" bar");
+        arch::SerialWriteHex(n.mmio_bar);
+        arch::SerialWrite("=");
         arch::SerialWriteHex(n.mmio_phys);
         arch::SerialWrite("/");
         arch::SerialWriteHex(n.mmio_size);
@@ -983,14 +1231,24 @@ void LogNic(const NicInfo& n)
     arch::SerialWrite("\n");
 }
 
+bool NicRecordIsWireless(const NicInfo& nic)
+{
+    return nic.subclass == kPciSubclassOther || nic_ids::NicFamilyLooksWireless(nic.family);
+}
+
 } // namespace
 
-void NetInit()
+::duetos::core::Result<void> NetInit()
 {
     KLOG_TRACE_SCOPE("drivers/net", "NetInit");
-    if (g_init_done)
-        return;
-    g_init_done = true;
+    {
+        sync::SpinLockGuard guard(g_nic_registry_lock);
+        if (g_nic_registry_state == NicRegistryState::Running)
+            return {};
+        if (g_nic_registry_state != NicRegistryState::Stopped)
+            return ::duetos::core::Err{::duetos::core::ErrorCode::Busy};
+        g_nic_registry_state = NicRegistryState::Starting;
+    }
 
     const u64 n = pci::PciDeviceCount();
     for (u64 i = 0; i < n && g_nic_count < kMaxNics; ++i)
@@ -1002,51 +1260,83 @@ void NetInit()
         NicInfo nic = {};
         nic.vendor_id = d.vendor_id;
         nic.device_id = d.device_id;
+        nic.subsystem_vendor_id = d.subsystem_vendor_id;
+        nic.subsystem_device_id = d.subsystem_device_id;
         nic.bus = d.addr.bus;
         nic.device = d.addr.device;
         nic.function = d.addr.function;
+        nic.class_code = d.class_code;
         nic.subclass = d.subclass;
+        nic.programming_interface = d.programming_interface;
+        nic.revision_id = d.revision_id;
+        nic.subsystem_known = d.subsystem_known;
         nic.vendor = VendorShort(d.vendor_id);
 
-        u64 map_bytes = 0;
-        const pci::Bar bar0 = pci::PciReadBar(d.addr, 0);
-        if (bar0.size != 0 && !bar0.is_io)
+        // The PCI cache is immutable for an enumeration epoch. Revalidate the
+        // complete endpoint identity before BAR sizing or backend dispatch so
+        // a removed/replaced function cannot inherit the cached driver's
+        // register contract. Concrete backends may repeat this immediately
+        // before their first hardware write.
+        if (!LivePciIdentityMatches(nic))
         {
-            nic.mmio_phys = bar0.address;
-            nic.mmio_size = bar0.size;
-            // Cap at 2 MiB — NIC register files are tiny (<256 KiB);
-            // bigger BARs on HPC NICs are for RDMA doorbells which
-            // no v0 driver touches.
-            constexpr u64 kMmioCap = 2ULL * 1024 * 1024;
-            map_bytes = (bar0.size > kMmioCap) ? kMmioCap : bar0.size;
-            nic.mmio_virt = mm::MapMmio(bar0.address, map_bytes);
+            KLOG_WARN_V("drivers/net", "cached NIC identity changed; device skipped", nic.device_id);
+            continue;
         }
 
-        // Probe contract: false means no vendor matched. Unmap the
-        // MMIO and skip the registry add — keeping the entry would
-        // leak a 2 MiB MMIO mapping per unrecognised PCI network
-        // controller for the lifetime of the boot.
+        // Classification does not authorize MMIO. Only a backend whose
+        // register contract is explicitly safe gets a mapping. Realtek's
+        // metadata records BAR2 for future split backends, but its safe-probe
+        // gate is closed, so no speculative register read occurs.
+        nic.mmio_bar = d.vendor_id == kVendorRealtek ? nic_ids::RealtekWirelessPreferredMmioBar(d.device_id) : 0;
+        const bool requires_mapped_mmio =
+            (d.vendor_id == kVendorIntel && nic_ids::IntelE1000BringUpEligible(d.device_id)) ||
+            IwlwifiMatches(d.vendor_id, d.device_id) || Rtl88xxMatches(d.vendor_id, d.device_id) ||
+            Bcm43xxMatches(nic) || Mt76Matches(d.vendor_id, d.device_id);
+        if (requires_mapped_mmio)
+        {
+            if (!DisablePciBusMasterForProbe(d.addr))
+            {
+                KLOG_ERROR_V("drivers/net", "could not disarm NIC before BAR sizing", nic.device_id);
+            }
+            else
+            {
+                const pci::Bar bar = pci::PciReadBar(d.addr, nic.mmio_bar);
+                const u64 minimum_bytes =
+                    (d.vendor_id == kVendorIntel && nic_ids::IntelE1000BringUpEligible(d.device_id))
+                        ? kE1000MinimumMmioBytes
+                        : 1;
+                if (bar.size >= minimum_bytes && !bar.is_io)
+                {
+                    nic.mmio_phys = bar.address;
+                    constexpr u64 kMmioCap = 2ULL * 1024 * 1024;
+                    const u64 map_bytes = (bar.size > kMmioCap) ? kMmioCap : bar.size;
+                    nic.mmio_virt = AcquireNicMmioMapping(d.addr, nic.mmio_bar, bar.address, map_bytes);
+                    if (nic.mmio_virt != nullptr)
+                        nic.mmio_size = map_bytes;
+                }
+            }
+        }
+
+        // Probe contract: false means no vendor matched. Unknown devices
+        // never reached an MMIO mapping because mapping eligibility was
+        // decided independently above; skip the registry add.
         // iface_index is the g_nics[] slot this NIC will occupy on
         // success — equal to g_nic_count before the increment below.
         if (!RunVendorProbe(nic, u32(g_nic_count)))
         {
-            if (nic.mmio_virt != nullptr && map_bytes != 0)
-            {
-                mm::UnmapMmio(nic.mmio_virt, map_bytes);
-            }
             KLOG_WARN_V("drivers/net", "no vendor match; device skipped did", nic.device_id);
             KBP_PROBE_V(::duetos::debug::ProbeId::kProbeFail, nic.device_id);
             continue;
         }
         const u64 nic_index = g_nic_count++;
         g_nics[nic_index] = nic;
-        if (g_nics[nic_index].driver_online && NicIsWireless(nic_index))
+        if (g_nics[nic_index].driver_online && NicRecordIsWireless(g_nics[nic_index]))
         {
             if (IwlwifiMatches(g_nics[nic_index].vendor_id, g_nics[nic_index].device_id))
                 IwlwifiStartWatch(g_nics[nic_index]);
             else if (Rtl88xxMatches(g_nics[nic_index].vendor_id, g_nics[nic_index].device_id))
                 Rtl88xxStartWatch(g_nics[nic_index]);
-            else if (Bcm43xxMatches(g_nics[nic_index].vendor_id, g_nics[nic_index].device_id))
+            else if (Bcm43xxMatches(g_nics[nic_index]))
                 Bcm43xxStartWatch(g_nics[nic_index]);
             else if (Mt76Matches(g_nics[nic_index].vendor_id, g_nics[nic_index].device_id))
                 Mt76StartWatch(g_nics[nic_index]);
@@ -1062,83 +1352,126 @@ void NetInit()
     {
         core::Log(core::LogLevel::Warn, "drivers/net", "no PCI network controllers found");
     }
+    {
+        // Publish every completed record as one release point. Readers never
+        // inspect g_nics or g_nic_count while the state is Starting.
+        sync::SpinLockGuard guard(g_nic_registry_lock);
+        g_nic_registry_state = NicRegistryState::Running;
+    }
+    return {};
 }
 
 namespace
 {
 
-// Quiesce one e1000 controller and release its DMA rings + buffer
-// frames. Safe to call when ctx.online is false (register touches
-// are skipped). The MSI-X handler stays installed — the device-side
-// IMC mask + reset stops further events; a subsequent E1000BringUp
-// rebinds via PciMsixBindSimple. The RX-poll task spawned by
-// bring-up keeps running but observes `online == false`
-// (E1000Send / E1000DrainRx both early-return) so it idles cheaply.
-void E1000QuiesceOne(E1000Ctx& ctx)
+// Quiesce one polling e1000 controller and release its DMA rings + buffers.
+// Close driver admission, retire/join the exact worker generation, drain
+// already-pinned TX, then unbind the exact stack receipt before disabling PCI
+// bus mastering. Any failed proof retains the stable context and DMA storage.
+bool E1000QuiesceOne(E1000Ctx& ctx)
 {
-    if (!ctx.online)
-        return;
+    if (ctx.mmio == nullptr)
+        return true;
 
-    // 1. Mask all interrupt sources, drain any pending cause bits,
-    //    clear the IVAR routing so a stray IRQ during reset doesn't
-    //    target a stale vector.
-    E1000Write(ctx, kE1000RegImc, 0xFFFFFFFFu);
-    (void)E1000Read(ctx, kE1000RegIcr);
-    E1000Write(ctx, kE1000RegIvar, 0);
-    E1000Write(ctx, kE1000RegIvargp, 0);
+    constexpr u64 kRflagsInterruptEnable = 1ULL << 9;
+    if ((arch::ReadRflags() & kRflagsInterruptEnable) == 0)
+    {
+        KLOG_ERROR("drivers/net/e1000", "shutdown requires ordinary task context with interrupts enabled");
+        return false;
+    }
 
-    // 2. Disable receive + transmit so the controller stops touching
-    //    descriptor memory before we free the backing frames.
-    E1000Write(ctx, kE1000RegRctl, 0);
-    E1000Write(ctx, kE1000RegTctl, 0);
+    const u32 iface_index = ctx.iface_index;
+    const u64 generation = DriverWorkerLeaseActiveGeneration(&ctx.rx_worker);
 
-    // 3. Software reset returns ring-pointer registers (RDBAL/RDBAH/
-    //    TDBAL/TDBAH/RDLEN/TDLEN/RDH/RDT/TDH/TDT) to their power-on
-    //    defaults. Failure here just means the controller didn't
-    //    acknowledge — the ring-pointer registers we care about are
-    //    no longer being read because RCTL/TCTL are already cleared.
-    (void)E1000Reset(ctx);
+    (void)DriverOperationGateClose(&ctx.operations);
 
-    // 4. Free the descriptor rings and buffer pools. AllocateFrame
-    //    handed out one page each for the rings, AllocateContiguousFrames
-    //    a multi-page run for the buffers.
-    if (ctx.rx_ring_phys != mm::kNullFrame)
-        mm::FreeFrame(ctx.rx_ring_phys);
-    if (ctx.tx_ring_phys != mm::kNullFrame)
-        mm::FreeFrame(ctx.tx_ring_phys);
-    constexpr u32 kRxBufPages = (kE1000RxRingSlots * kE1000RxBufBytes) / mm::kPageSize;
-    constexpr u32 kTxBufPages = (kE1000TxRingSlots * kE1000RxBufBytes) / mm::kPageSize;
-    if (ctx.rx_buf_base_phys != mm::kNullFrame)
-        mm::FreeContiguousFrames(ctx.rx_buf_base_phys, kRxBufPages);
-    if (ctx.tx_buf_base_phys != mm::kNullFrame)
-        mm::FreeContiguousFrames(ctx.tx_buf_base_phys, kTxBufPages);
+    if (generation != 0)
+        (void)DriverWorkerLeaseRequestRetire(&ctx.rx_worker, generation);
 
-    // 5. Wake any sleeper on the RX wait queue so the polling task
-    //    re-checks `online` and stops dereferencing freed ring
-    //    pointers. The wake happens BEFORE the context zero so the
-    //    WaitQueue node list is still intact when WakeAll walks it.
-    (void)duetos::sched::WaitQueueWakeAll(&ctx.rx_wait);
+    constexpr u32 kRetireBudgetTicks = 200;
+    bool worker_done = generation == 0;
+    bool operations_done = false;
+    for (u32 waited = 0; waited <= kRetireBudgetTicks; ++waited)
+    {
+        worker_done = generation == 0 || DriverWorkerLeaseIsAcknowledged(&ctx.rx_worker, generation);
+        operations_done = DriverOperationGatePinCount(&ctx.operations) == 0;
+        if (worker_done && operations_done)
+            break;
+        if (waited != kRetireBudgetTicks)
+            duetos::sched::SchedSleepTicks(1);
+    }
 
-    // 6. Clear the context. `online = false` is the wake-up gate the
-    //    RX-poll task and E1000Send check on every entry; clearing
-    //    it before the rest of the state means a racing TX submission
-    //    bails before reading a freed pointer.
-    NicInfo* nic = ctx.nic;
-    ctx = {};
-    if (nic != nullptr)
-        nic->driver_online = false;
+    if (!worker_done || !operations_done)
+    {
+        KLOG_ERROR_2V("drivers/net/e1000", "retire timed out; DMA storage quarantined", "worker_done",
+                      worker_done ? 1 : 0, "operation_pins", DriverOperationGatePinCount(&ctx.operations));
+        ctx.quarantined = true;
+        return false;
+    }
 
-    arch::SerialWrite("[e1000] quiesced — IRQs masked, RX/TX disabled, rings freed\n");
+    // The worker is the sole reader of stack_binding outside stack callbacks.
+    // Join it before clearing the receipt, then drain the stack's independent
+    // callback pins while the driver gate remains closed.
+    if (!E1000UnbindStack(ctx))
+    {
+        ctx.quarantined = true;
+        return false;
+    }
+
+    if (generation != 0 && !DriverWorkerLeaseRelease(&ctx.rx_worker, generation))
+    {
+        KLOG_ERROR("drivers/net/e1000", "worker lease release failed; context quarantined");
+        ctx.quarantined = true;
+        return false;
+    }
+    if (!E1000DisableHardware(ctx))
+    {
+        ctx.quarantined = true;
+        return false;
+    }
+    E1000FreeDmaStorage(ctx);
+
+    if (iface_index < g_nic_count)
+        g_nics[iface_index].driver_online = false;
+    E1000ClearRuntimeFields(ctx);
+
+    arch::SerialWrite("[e1000] quiesced — stack/worker drained, BME off, rings freed\n");
+    return true;
 }
 
 // Quiesce all online e1000 controllers and reset the per-family
 // count so E1000AllocCtx works correctly after a NetInit/NetShutdown
 // cycle.
-void E1000QuiesceAll()
+bool E1000QuiesceAll()
 {
+    bool all_quiesced = true;
     for (u32 i = 0; i < g_e1000_count; ++i)
-        E1000QuiesceOne(g_e1000s[i]);
-    g_e1000_count = 0;
+    {
+        if (!E1000QuiesceOne(g_e1000s[i]))
+            all_quiesced = false;
+    }
+    if (all_quiesced)
+        g_e1000_count = 0;
+    return all_quiesced;
+}
+
+bool HasOnlineBackendWithoutRestartContract()
+{
+    for (u64 i = 0; i < g_nic_count; ++i)
+    {
+        const NicInfo& nic = g_nics[i];
+        if (!nic.driver_online)
+            continue;
+        if (nic.vendor_id == kVendorIntel && nic_ids::IntelE1000BringUpEligible(nic.device_id))
+            continue;
+        if (nic.vendor_id == kVendorAmd && nic.device_id == 0x2000)
+            continue;
+        if (nic.vendor_id == kVendorRedHatVirt && nic_ids::VirtioNetBringUpEligible(nic.device_id))
+            continue;
+        KLOG_WARN_V("drivers/net", "shutdown refused for live backend without teardown contract", nic.device_id);
+        return true;
+    }
+    return false;
 }
 
 } // namespace
@@ -1146,10 +1479,37 @@ void E1000QuiesceAll()
 ::duetos::core::Result<void> NetShutdown()
 {
     KLOG_TRACE_SCOPE("drivers/net", "NetShutdown");
-    E1000QuiesceAll();
-    const u64 dropped = g_nic_count;
-    g_nic_count = 0;
-    g_init_done = false;
+    {
+        sync::SpinLockGuard guard(g_nic_registry_lock);
+        if (g_nic_registry_state == NicRegistryState::Stopped)
+            return {};
+        if (g_nic_registry_state != NicRegistryState::Running && g_nic_registry_state != NicRegistryState::Quarantined)
+            return ::duetos::core::Err{::duetos::core::ErrorCode::Busy};
+        g_nic_registry_state = NicRegistryState::Stopping;
+    }
+
+    // Every admitted family gets a teardown attempt. Do not short-circuit:
+    // one quarantined device must not leave another family live indefinitely.
+    const bool unsupported_online = HasOnlineBackendWithoutRestartContract();
+    const bool pcnet_quiesced = PcnetQuiesceAll();
+    const bool e1000_quiesced = E1000QuiesceAll();
+    const bool virtio_net_quiesced = ::duetos::drivers::virtio::VirtioNetQuiesce();
+    if (unsupported_online || !pcnet_quiesced || !e1000_quiesced || !virtio_net_quiesced)
+    {
+        sync::SpinLockGuard guard(g_nic_registry_lock);
+        g_nic_registry_state = NicRegistryState::Quarantined;
+        return ::duetos::core::Err{::duetos::core::ErrorCode::Busy};
+    }
+
+    u64 dropped = 0;
+    {
+        sync::SpinLockGuard guard(g_nic_registry_lock);
+        dropped = g_nic_count;
+        for (u64 i = 0; i < g_nic_count; ++i)
+            g_nics[i] = {};
+        g_nic_count = 0;
+        g_nic_registry_state = NicRegistryState::Stopped;
+    }
     arch::SerialWrite("[drivers/net] shutdown: dropped ");
     arch::SerialWriteHex(dropped);
     arch::SerialWrite(" NIC records\n");
@@ -1158,68 +1518,43 @@ void E1000QuiesceAll()
 
 u64 NicCount()
 {
-    return g_nic_count;
+    sync::SpinLockGuard guard(g_nic_registry_lock);
+    return g_nic_registry_state == NicRegistryState::Running ? g_nic_count : 0;
 }
 
-const NicInfo& Nic(u64 index)
+bool NicSnapshot(u64 index, NicInfo* out)
 {
-    KASSERT_WITH_VALUE(index < g_nic_count, "drivers/net", "Nic index out of range", index);
-    return g_nics[index];
-}
-
-namespace
-{
-
-bool StrPrefixMatches(const char* s, const char* prefix)
-{
-    if (s == nullptr || prefix == nullptr)
+    if (out == nullptr)
         return false;
-    for (u32 i = 0; prefix[i] != '\0'; ++i)
-    {
-        if (s[i] == '\0' || s[i] != prefix[i])
-            return false;
-    }
+    sync::SpinLockGuard guard(g_nic_registry_lock);
+    if (g_nic_registry_state != NicRegistryState::Running || index >= g_nic_count)
+        return false;
+    *out = g_nics[index];
     return true;
 }
 
-bool FamilyLooksWireless(const char* family)
-{
-    if (family == nullptr)
-        return false;
-    // Match the families our vendor-tag tables emit for wireless
-    // adapters: iwlwifi (Intel), rtl8821ae-wifi (Realtek),
-    // bcm4331-wifi (Broadcom). Substring-checked at the prefix
-    // since the suffixes drift across silicon revisions.
-    return StrPrefixMatches(family, "iwlwifi") || StrPrefixMatches(family, "rtl8821") ||
-           StrPrefixMatches(family, "bcm43") || StrPrefixMatches(family, "bcm4331") ||
-           StrPrefixMatches(family, "rtl88") || StrPrefixMatches(family, "mt76") ||
-           StrPrefixMatches(family, "mt7615") || StrPrefixMatches(family, "mt7663") ||
-           StrPrefixMatches(family, "mt7915") || StrPrefixMatches(family, "mt7916") ||
-           StrPrefixMatches(family, "mt7921") || StrPrefixMatches(family, "mt7922") ||
-           StrPrefixMatches(family, "mt7925");
-}
-
-} // namespace
-
 bool NicIsWireless(u64 index)
 {
-    if (index >= g_nic_count)
+    NicInfo nic{};
+    if (!NicSnapshot(index, &nic))
         return false;
-    const NicInfo& n = g_nics[index];
     // PCI subclass 0x80 is "network controller / other" — vendors
     // ship their wireless cards there since there's no dedicated
     // PCI subclass for Wi-Fi. The family tag is the secondary
     // signal for vendors that put wireless on subclass 0x00 by
     // mistake (or pre-PCIe legacy).
-    return n.subclass == kPciSubclassOther || FamilyLooksWireless(n.family);
+    return NicRecordIsWireless(nic);
 }
 
 WirelessStatus WirelessStatusRead()
 {
     WirelessStatus s = {};
+    sync::SpinLockGuard guard(g_nic_registry_lock);
+    if (g_nic_registry_state != NicRegistryState::Running)
+        return s;
     for (u64 i = 0; i < g_nic_count; ++i)
     {
-        if (!NicIsWireless(i))
+        if (!NicRecordIsWireless(g_nics[i]))
             continue;
         ++s.adapters_detected;
         if (g_nics[i].driver_online)
@@ -1252,133 +1587,58 @@ WirelessStatus WirelessStatusRead()
 }
 
 // -------------------------------------------------------------------
-// Vendor classifiers. Coarse ranges; unknown IDs land on "unknown".
-// Source: Linux kernel driver pci_device_id tables.
+// Vendor classifiers — thin wrappers over the explicit device-ID
+// tables in drivers/net/nic_ids.h (single source of truth, shared
+// with the wireless drivers' *Matches predicates and host-tested by
+// tests/host/test_nic_ids.cpp).
 // -------------------------------------------------------------------
 
 const char* IntelNicTag(u16 device_id)
 {
-    // e1000 (82540..82547) → gigabit legacy. Every "82..." in the
-    // 0x1000..0x107F range is e1000 family.
-    if (device_id >= 0x1000 && device_id <= 0x107F)
+    const char* wifi = nic_ids::IntelWirelessTag(device_id);
+    if (wifi != nullptr)
+        return wifi;
+    if (device_id == 0x100E)
         return "e1000-82540em";
-    // e1000e (82571..82579) — PCIe variants. Many device IDs.
-    if (device_id >= 0x10A0 && device_id <= 0x10FB)
+    if (device_id == 0x10D3)
         return "e1000e-82574";
-    if (device_id >= 0x1501 && device_id <= 0x15FF)
-        return "e1000e-82579/i210/i217";
-    // ixgbe (82598..82599 + X540/X550/X710) — 10/25/40 Gbps.
-    if (device_id >= 0x10B6 && device_id <= 0x10FB)
-        return "ixgbe-82598";
-    if (device_id >= 0x1528 && device_id <= 0x1560)
-        return "ixgbe-x540/x550";
-    // i40e (X710/XL710) — 40 Gbps.
-    if (device_id >= 0x1572 && device_id <= 0x158B)
+    switch (nic_ids::IntelWiredFamilyFromDeviceId(device_id))
+    {
+    case nic_ids::IntelWiredFamily::E1000Classic:
+        return "e1000-classic";
+    case nic_ids::IntelWiredFamily::E1000e:
+        return "e1000e";
+    case nic_ids::IntelWiredFamily::Igb:
+        return "igb-82575/i210/i350";
+    case nic_ids::IntelWiredFamily::Igc:
+        return "igc-i225/i226";
+    case nic_ids::IntelWiredFamily::Ixgbe:
+        return "ixgbe-82598/82599/x540/x550";
+    case nic_ids::IntelWiredFamily::I40e:
         return "i40e-x710";
-    // Wi-Fi: iwlwifi covers 1000/4965/5000/6000/7000/8000/9000/AX/Be.
-    // The PCI IDs are scattered — match the Linux iwlwifi pci_table
-    // family-by-family rather than as one coarse range.
-    //
-    //   1000/100        : 0x0083, 0x0084, 0x0085, 0x0087, 0x0089, 0x008A, 0x008B
-    //   6000            : 0x0082..0x0091, 0x008D..0x008E
-    //   4965            : 0x4229, 0x4230
-    //   5000/5150       : 0x4232..0x423D
-    //   7260/3160       : 0x08B1..0x08B4
-    //   7265/3165/3168  : 0x095A, 0x095B
-    //   8260/3168       : 0x24F3, 0x24F4, 0x24F5, 0x24FD
-    //   9000/AX         : 0x2526, 0x271B, 0x271C, 0x30DC, 0x31DC, 0x9DF0, 0xA370
-    //   AX200/AX201/AX210: 0x2723, 0x2725, 0x7AF0, 0x7E40, 0xA0F0, 0x43F0
-    //   Be200/Be201     : 0x272B, 0x51F0, 0x51F1, 0xD2F0, 0xE2F0
-    if (device_id == 0x4229 || device_id == 0x4230)
-        return "iwlwifi-4965";
-    if (device_id >= 0x4232 && device_id <= 0x423D)
-        return "iwlwifi-5000";
-    if ((device_id >= 0x0082 && device_id <= 0x0091) || device_id == 0x008D || device_id == 0x008E)
-        return "iwlwifi-6000";
-    if (device_id == 0x0083 || device_id == 0x0084 || device_id == 0x0085 || device_id == 0x0087 ||
-        device_id == 0x0089 || device_id == 0x008A || device_id == 0x008B)
-        return "iwlwifi-1000";
-    if (device_id >= 0x08B1 && device_id <= 0x08B4)
-        return "iwlwifi-7260";
-    if (device_id == 0x095A || device_id == 0x095B)
-        return "iwlwifi-7265";
-    if (device_id == 0x24F3 || device_id == 0x24F4 || device_id == 0x24F5 || device_id == 0x24FD)
-        return "iwlwifi-8260";
-    if (device_id == 0x2526 || device_id == 0x271B || device_id == 0x271C || device_id == 0x30DC ||
-        device_id == 0x31DC || device_id == 0x9DF0 || device_id == 0xA370)
-        return "iwlwifi-9000";
-    if (device_id == 0x2723 || device_id == 0x2725 || device_id == 0x7AF0 || device_id == 0x7E40 ||
-        device_id == 0xA0F0 || device_id == 0x43F0)
-        return "iwlwifi-AX2xx";
-    if (device_id == 0x272B || device_id == 0x51F0 || device_id == 0x51F1 || device_id == 0xD2F0 || device_id == 0xE2F0)
-        return "iwlwifi-Be2xx";
-    return "intel-nic-unknown";
+    case nic_ids::IntelWiredFamily::None:
+    default:
+        return "intel-nic-unknown";
+    }
 }
 
 const char* RealtekNicTag(u16 device_id)
 {
-    switch (device_id)
-    {
-    // Wired
-    case 0x8139:
-        return "rtl8139";
-    case 0x8168:
-    case 0x8169:
-        return "rtl8169";
-    case 0x8136:
-        return "rtl8101e";
-    case 0x8125:
-        return "rtl8125-2.5g";
-    // Wireless: rtl88xx family — covers Wi-Fi 4/5/6 PCIe parts. The
-    // family tag drives the bring-up dispatch in RunVendorProbe.
-    case 0x8723:
-    case 0xB723:
-        return "rtl8723be-wifi";
-    case 0x8812:
-    case 0xB812:
-        return "rtl8812ae-wifi";
-    case 0x8813:
-    case 0xB813:
-        return "rtl8813ae-wifi";
-    case 0x8814:
-    case 0xB814:
-        return "rtl8814ae-wifi";
-    case 0x8821:
-    case 0xC821:
-    case 0xC822:
-    case 0xC820:
-        return "rtl8821ae-wifi";
-    case 0x8822:
-    case 0xB822:
-        return "rtl8822be-wifi";
-    case 0x8852:
-    case 0xB852:
-        return "rtl8852ae-wifi";
-    default:
-        return "realtek-unknown";
-    }
+    const char* wifi = nic_ids::RealtekWirelessTag(device_id);
+    if (wifi != nullptr)
+        return wifi;
+    const char* wired = nic_ids::RealtekWiredTag(device_id);
+    return wired != nullptr ? wired : "realtek-unknown";
 }
 
-const char* BroadcomNicTag(u16 device_id)
+const char* BroadcomNicTag(u16 device_id, u16 subsystem_vendor_id, u16 subsystem_device_id, bool subsystem_known)
 {
     // bcm57xx wired (tg3 family — gigabit ethernet).
     if (device_id >= 0x1600 && device_id <= 0x16FF)
         return "bcm57xx-tg3";
-    // bcm43xx wireless: Linux maps the entire 0x4300..0x43FF range
-    // to b43/brcmsmac/brcmfmac silicon. Subdivide so the bring-up
-    // logging tags the rough generation.
-    if (device_id >= 0x4300 && device_id <= 0x4329)
-        return "bcm4318-wifi";
-    if (device_id == 0x4331 || device_id == 0x4350 || device_id == 0x4351 || device_id == 0x4357 ||
-        device_id == 0x4358 || device_id == 0x4359)
-        return "bcm4331-wifi";
-    if (device_id >= 0x4350 && device_id <= 0x4360)
-        return "bcm43602-wifi";
-    if (device_id >= 0x43A0 && device_id <= 0x43FF)
-        return "bcm43xx-wifi";
-    if (device_id == 0x4727)
-        return "bcm4313-wifi";
-    return "broadcom-unknown";
+    const char* wifi =
+        nic_ids::BroadcomWirelessTagFromIdentity(device_id, subsystem_vendor_id, subsystem_device_id, subsystem_known);
+    return wifi != nullptr ? wifi : "broadcom-unknown";
 }
 
 const char* VirtioNetTag(u16 device_id)
@@ -1390,31 +1650,9 @@ const char* VirtioNetTag(u16 device_id)
     return "virtio-unknown-class";
 }
 
-const char* MediatekNicTag(u16 device_id)
+const char* MediatekNicTag(u16 vendor_id, u16 device_id)
 {
-    // MediaTek mt76 PCIe wireless family. Tag returned drives the
-    // family-string heuristic in `FamilyLooksWireless`, so the
-    // names below must start with a recognised wireless prefix.
-    switch (Mt76FamilyFromDeviceId(device_id))
-    {
-    case Mt76Family::Mt7615:
-        return "mt7615-wifi";
-    case Mt76Family::Mt7663:
-        return "mt7663-wifi";
-    case Mt76Family::Mt7915:
-        return "mt7915-wifi";
-    case Mt76Family::Mt7916:
-        return "mt7916-wifi";
-    case Mt76Family::Mt7921:
-        return "mt7921-wifi";
-    case Mt76Family::Mt7922:
-        return "mt7922-wifi";
-    case Mt76Family::Mt7925:
-        return "mt7925-wifi";
-    case Mt76Family::Unknown:
-    default:
-        return "mediatek-unknown";
-    }
+    return Mt76InventoryTag(Mt76FamilyFromIdentity(vendor_id, device_id));
 }
 
 namespace
@@ -1423,12 +1661,7 @@ namespace
 ::duetos::core::Result<void> RegisterNetModule()
 {
     ::duetos::security::RegisterDriverDomain(
-        "drivers/net",
-        []() -> ::duetos::core::Result<void>
-        {
-            ::duetos::drivers::net::NetInit();
-            return {};
-        },
+        "drivers/net", []() -> ::duetos::core::Result<void> { return ::duetos::drivers::net::NetInit(); },
         []() -> ::duetos::core::Result<void> { return ::duetos::drivers::net::NetShutdown(); });
     return {};
 }

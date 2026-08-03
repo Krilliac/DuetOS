@@ -5,33 +5,27 @@
 #include "util/types.h"
 
 /*
- * DuetOS — PCI (legacy port-IO) enumeration, v0.
+ * DuetOS — PCI / PCIe enumeration and configuration access.
  *
  * Walks the PCI config space via the classic 0xCF8 / 0xCFC port pair:
  *   - 0xCF8 CONFIG_ADDRESS — write (enable|bus|dev|fn|offset) here
  *   - 0xCFC CONFIG_DATA    — then read/write the 32-bit register
  *
- * Works on every x86 machine made in the last 25 years. Not the fastest
- * path — MMCONFIG (ECAM) via the ACPI MCFG table is ~10x faster and
- * doesn't need a locked port pair — but MCFG requires additional ACPI
- * table parsing that's deferred (see usb-xhci-scope-estimate.md
- * "Commit 1"). Once MCFG lands, this module grows a `PciConfigRead*`
- * fast path that prefers ECAM and falls back to legacy.
+ * MMCONFIG (ECAM) from the ACPI MCFG table is preferred when available;
+ * the classic 0xCF8 / 0xCFC port pair remains the fallback. Both paths
+ * share one config-space lock. ECAM does not need that lock for a single
+ * naturally aligned dword, but multi-register transactions such as BAR
+ * sizing do: no peer may observe or overwrite a temporary probe value.
  *
  * Scope limits that will be fixed in later commits:
- *   - Legacy port-IO only. No MCFG/ECAM yet.
  *   - Bus enumeration is shallow: bus 0..3, device 0..31, function
  *     0..7. Recursive walking into PCI bridges comes when we care
  *     about anything beyond the root bus (q35 hangs everything
  *     interesting on bus 0; bus 1+ is typically empty until we hit
  *     a board with bridges).
- *   - BAR parsing + resource allocation deferred. We read BAR 0..5
- *     raw when a driver asks; auto-assign + size-probe is a separate
- *     commit.
+ *   - BAR resource allocation is deferred. Drivers can inspect and size
+ *     firmware-assigned type-0 BARs, but this layer does not relocate them.
  *   - No interrupt line / INTx routing (needs ACPI _PRT or MSI).
- *   - Non-SMP-safe: two CPUs racing the CONFIG_ADDRESS register would
- *     corrupt each other. Wrapped in a spinlock when SMP runqueue
- *     spinlock lands; single-CPU today.
  *
  * Context: kernel. `PciEnumerate` runs once at boot; accessors are
  * read-only after.
@@ -55,11 +49,16 @@ struct Device
     DeviceAddress addr;
     u16 vendor_id; // 0xFFFF means no device
     u16 device_id;
-    u8 class_code; // high-level group (e.g. 0x01 mass storage)
-    u8 subclass;   // subgroup (e.g. 0x06 SATA)
-    u8 prog_if;    // programming interface (e.g. 0x01 AHCI)
-    u8 revision;
-    u8 header_type; // 0x00 endpoint, 0x01 PCI-to-PCI bridge, 0x02 CardBus
+    u16 subsystem_vendor_id;
+    u16 subsystem_device_id;
+    u8 class_code;            // high-level group (e.g. 0x01 mass storage)
+    u8 subclass;              // subgroup (e.g. 0x06 SATA)
+    u8 programming_interface; // canonical PCI name (e.g. 0x01 AHCI)
+    u8 revision_id;           // canonical PCI Revision ID name
+    u8 prog_if;               // immutable compatibility mirror
+    u8 revision;              // immutable compatibility mirror
+    u8 header_type;           // 0x00 endpoint, 0x01 PCI-to-PCI bridge, 0x02 CardBus
+    bool subsystem_known;
 };
 
 /// Walk every (bus, device, function) on bus 0..3; cache and log each
@@ -97,9 +96,10 @@ void PciConfigWrite32(DeviceAddress addr, u8 offset, u32 value);
 //
 // Each header-type-0 endpoint has up to 6 BARs at config offsets
 // 0x10, 0x14, 0x18, 0x1C, 0x20, 0x24. Each BAR is either a 32-bit
-// MMIO window, a 64-bit MMIO window (consumes the next BAR slot
-// too), or a 16-bit I/O port range. The size of each region is
-// discovered by writing all 1s and reading back the one-bits mask.
+// MMIO window (including the obsolete below-1-MiB encoding), a
+// 64-bit MMIO window (consumes the next BAR slot too), or an I/O
+// port range. The size of each region is discovered by writing all
+// 1s and reading back the one-bits mask.
 //
 // PciReadBar performs that size probe non-destructively (saves +
 // restores the BAR value) and returns the decoded result.
@@ -122,14 +122,129 @@ struct Bar
     bool _pad;
 };
 
+namespace detail
+{
+
+// Decode the standard identity dwords into one cached record. Offset 0x2C is
+// a subsystem tuple only in a type-0 header; bridge/CardBus layouts reuse that
+// address for unrelated fields. Unknown subsystem identity is normalized to
+// {0, 0, false} so a consumer that forgets the boolean still fails closed.
+constexpr Device DecodeDeviceIdentity(DeviceAddress addr, u32 vendor_device, u32 class_revision, u32 header,
+                                      u32 subsystem, bool subsystem_register_read)
+{
+    Device device{};
+    device.addr = addr;
+    device.addr._pad = 0;
+    device.vendor_id = static_cast<u16>(vendor_device & 0xFFFFu);
+    device.device_id = static_cast<u16>((vendor_device >> 16) & 0xFFFFu);
+    device.revision_id = static_cast<u8>(class_revision & 0xFFu);
+    device.programming_interface = static_cast<u8>((class_revision >> 8) & 0xFFu);
+    device.revision = device.revision_id;
+    device.prog_if = device.programming_interface;
+    device.subclass = static_cast<u8>((class_revision >> 16) & 0xFFu);
+    device.class_code = static_cast<u8>((class_revision >> 24) & 0xFFu);
+    device.header_type = static_cast<u8>((header >> 16) & 0xFFu);
+
+    const bool endpoint_layout = (device.header_type & 0x7Fu) == 0;
+    const u16 subsystem_vendor = static_cast<u16>(subsystem & 0xFFFFu);
+    if (endpoint_layout && subsystem_register_read && subsystem_vendor != 0 && subsystem_vendor != 0xFFFFu)
+    {
+        device.subsystem_vendor_id = subsystem_vendor;
+        device.subsystem_device_id = static_cast<u16>((subsystem >> 16) & 0xFFFFu);
+        device.subsystem_known = true;
+    }
+    return device;
+}
+
+// Pure BAR-mask decoder shared by the kernel transaction and hosted tests.
+// The caller supplies the exact original and all-ones-probe dwords. Invalid,
+// non-canonical, misaligned, or overflowing encodings fail closed as Bar{}.
+constexpr Bar DecodeBarProbe(u8 index, u32 original_low, u32 original_high, u32 probe_low, u32 probe_high)
+{
+    if (index >= 6 || original_low == 0 || original_low == 0xFFFFFFFFu)
+    {
+        return Bar{};
+    }
+
+    const bool is_io = (original_low & 0x1u) != 0;
+    const u32 memory_type = (original_low >> 1) & 0x3u;
+    const bool is_below_1m = !is_io && memory_type == 0x1u;
+    const bool is_64bit = !is_io && memory_type == 0x2u;
+    if ((!is_io && memory_type == 0x3u) || (is_64bit && index + 1 >= 6))
+    {
+        return Bar{};
+    }
+
+    const u32 attribute_mask = is_io ? 0x3u : 0xFu;
+    if ((original_low & attribute_mask) != (probe_low & attribute_mask) || (is_io && (original_low & 0x2u) != 0))
+    {
+        return Bar{};
+    }
+
+    // Memory type 01 is the obsolete but valid below-1-MiB format. Its
+    // address field is only bits 19:4; accepting residue in bits 31:20 would
+    // turn a malformed device response into an aliased resource.
+    if (is_below_1m && ((original_low | probe_low) & 0xFFF00000u) != 0)
+    {
+        return Bar{};
+    }
+
+    const u64 width_mask = is_64bit ? ~u64{0} : is_below_1m ? 0xFFFFFULL : 0xFFFFFFFFULL;
+    const u64 address_mask = is_io         ? 0xFFFFFFFCULL
+                             : is_64bit    ? 0xFFFFFFFFFFFFFFF0ULL
+                             : is_below_1m ? 0x000FFFF0ULL
+                                           : 0xFFFFFFF0ULL;
+    const u64 address =
+        is_64bit ? (u64(original_high) << 32) | (u64(original_low) & 0xFFFFFFF0ULL) : u64(original_low) & address_mask;
+    const u64 probe_mask =
+        is_64bit ? (u64(probe_high) << 32) | (u64(probe_low) & 0xFFFFFFF0ULL) : u64(probe_low) & address_mask;
+    if (probe_mask == 0)
+    {
+        return Bar{};
+    }
+
+    const u64 size = (~probe_mask + 1) & width_mask;
+    if (size == 0 || (size & (size - 1)) != 0)
+    {
+        return Bar{};
+    }
+
+    // A legal BAR mask is a contiguous run of implemented high address
+    // bits. Reject sparse or otherwise hostile masks even if their two's-
+    // complement happens to look like a power of two.
+    const u64 canonical_mask = (~(size - 1)) & width_mask;
+    if (probe_mask != canonical_mask || (address & (size - 1)) != 0)
+    {
+        return Bar{};
+    }
+
+    // Keep the end-address calculation representable in the BAR's width.
+    // Alignment normally implies this, but the explicit guard makes the
+    // fail-closed contract independent of that arithmetic observation.
+    if (address > width_mask - (size - 1))
+    {
+        return Bar{};
+    }
+
+    return Bar{.address = address,
+               .size = size,
+               .is_io = is_io,
+               .is_64bit = is_64bit,
+               .is_prefetchable = !is_io && (original_low & 0x8u) != 0,
+               ._pad = false};
+}
+
+} // namespace detail
+
 /// Read and size BAR `index` (0..5) on a header-type-0 endpoint.
-/// Returns Bar{size=0} for empty / invalid BARs. Non-destructive:
-/// the original BAR value is restored before returning.
+/// Returns Bar{size=0} for empty / invalid BARs. The entire probe is
+/// serialized against every other config-space access. I/O and memory
+/// decode are disabled while the BAR value is transient, then every BAR
+/// dword is restored before the exact low-16 Command value is restored.
 ///
-/// NOT safe to call on a BAR that a driver has already claimed and
-/// is actively using — the size-probe sequence briefly writes
-/// all-1s into the BAR which would re-parent any MMIO access during
-/// the probe. Call during device bring-up only.
+/// This is still a bring-up operation: bus mastering and unrelated Command
+/// bits stay unchanged by contract, and device-specific agents can exist
+/// outside this config lock. Call before the driver starts device traffic.
 Bar PciReadBar(DeviceAddress addr, u8 index);
 
 // -----------------------------------------------------------------

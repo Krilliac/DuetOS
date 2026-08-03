@@ -97,7 +97,7 @@ struct ProcessAggCookie
     // Per-task samples collected DURING the SchedEnumerate walk.
     // SchedEnumerate now holds g_sched_lock for the whole walk, so
     // the callback must not call back into the scheduler (the old
-    // shape called SchedFindProcessByPid from inside the callback —
+    // shape called process lookup from inside the callback —
     // a self-deadlock on the non-recursive lock). Collect-then-
     // resolve instead: the callback only copies, and the process
     // resolution happens after the walk returns. Cap is generous
@@ -142,7 +142,7 @@ void CountTaskAgg(const ::duetos::sched::SchedTaskInfo& info, void* cookie)
     }
 }
 
-// Post-walk resolution: one SchedFindProcessByPid per distinct
+// Post-walk resolution: one retained process lookup per distinct
 // PID, then per-process handle counts + per-task runaway checks
 // against that process's tick budget.
 //
@@ -157,38 +157,36 @@ void ResolveTaskAgg(ProcessAggCookie& c)
         if (PidAlreadyCounted(c, c.tasks[s].pid))
             continue;
 
-        ::duetos::core::Process* p = ::duetos::sched::SchedFindProcessByPid(c.tasks[s].pid);
+        ::duetos::core::ScopedProcessRef process_ref(::duetos::sched::SchedFindProcessByPidRetained(c.tasks[s].pid));
+        ::duetos::core::Process* p = process_ref.Get();
         if (p == nullptr)
             continue;
+        ::duetos::core::ScopedProcessRuntimeAccess runtime_access(p);
+        if (!runtime_access)
+            continue;
 
-        if (p->tick_budget > 0)
+        ::duetos::core::AuthorizationContextSnapshot authorization{};
+        if (::duetos::core::ProcessInspectAuthorization(p, &authorization) && authorization.tick_budget > 0)
         {
-            const u64 threshold = (p->tick_budget * 3) / 4;
+            const u64 threshold = (authorization.tick_budget * 3) / 4;
             for (u64 t = 0; t < c.task_count; ++t)
             {
                 if (c.tasks[t].pid != p->pid || c.tasks[t].ticks_run < threshold)
                     continue;
                 ++c.cpu_runaway_count;
-                if (c.tasks[t].ticks_run >= p->tick_budget)
+                if (c.tasks[t].ticks_run >= authorization.tick_budget)
                 {
-                    c.cpu_runaway_ticks_over += c.tasks[t].ticks_run - p->tick_budget;
+                    c.cpu_runaway_ticks_over += c.tasks[t].ticks_run - authorization.tick_budget;
                 }
             }
         }
 
         c.handle_table_live += ::duetos::ipc::HandleTableLiveCount(p->kobj_handles);
 
-        u64 win32 = 0;
-        for (u64 i = 0; i < ::duetos::core::Process::kWin32HandleCap; ++i)
-            if (p->win32_handles[i].kind != ::duetos::core::Process::FsBackingKind::None)
-                ++win32;
+        u64 win32 = ::duetos::core::ProcessWin32FileHandleCount(p);
         win32 += ::duetos::core::ProcessWin32ThreadHandleCount(p);
-        for (u64 i = 0; i < ::duetos::core::Process::kWin32ProcessCap; ++i)
-            if (p->win32_proc_handles[i].in_use)
-                ++win32;
-        for (u64 i = 0; i < ::duetos::core::Process::kWin32SectionCap; ++i)
-            if (p->win32_section_handles[i].in_use)
-                ++win32;
+        win32 += ::duetos::core::ProcessWin32ProcessHandleCount(p);
+        win32 += ::duetos::core::ProcessWin32SectionHandleCount(p);
         for (u64 i = 0; i < ::duetos::core::Process::kWin32DirCap; ++i)
             if (p->win32_dirs[i].entries != nullptr)
                 ++win32;
@@ -341,24 +339,21 @@ bool LeakDetectorSnapshotPid(u64 pid, ClassSnapshot* out)
 {
     if (out == nullptr)
         return false;
-    ::duetos::core::Process* p = ::duetos::sched::SchedFindProcessByPid(pid);
+    ::duetos::core::ScopedProcessRef process_ref(::duetos::sched::SchedFindProcessByPidRetained(pid));
+    ::duetos::core::Process* p = process_ref.Get();
     if (p == nullptr)
+        return false;
+    ::duetos::core::ScopedProcessRuntimeAccess runtime_access(p);
+    if (!runtime_access)
         return false;
 
     // Build a cookie that contains only this process's contribution.
     ProcessAggCookie cookie{};
     cookie.handle_table_live = ::duetos::ipc::HandleTableLiveCount(p->kobj_handles);
-    u64 w32 = 0;
-    for (u64 i = 0; i < ::duetos::core::Process::kWin32HandleCap; ++i)
-        if (p->win32_handles[i].kind != ::duetos::core::Process::FsBackingKind::None)
-            ++w32;
+    u64 w32 = ::duetos::core::ProcessWin32FileHandleCount(p);
     w32 += ::duetos::core::ProcessWin32ThreadHandleCount(p);
-    for (u64 i = 0; i < ::duetos::core::Process::kWin32ProcessCap; ++i)
-        if (p->win32_proc_handles[i].in_use)
-            ++w32;
-    for (u64 i = 0; i < ::duetos::core::Process::kWin32SectionCap; ++i)
-        if (p->win32_section_handles[i].in_use)
-            ++w32;
+    w32 += ::duetos::core::ProcessWin32ProcessHandleCount(p);
+    w32 += ::duetos::core::ProcessWin32SectionHandleCount(p);
     for (u64 i = 0; i < ::duetos::core::Process::kWin32DirCap; ++i)
         if (p->win32_dirs[i].entries != nullptr)
             ++w32;
@@ -368,24 +363,25 @@ bool LeakDetectorSnapshotPid(u64 pid, ClassSnapshot* out)
     cookie.win32_handle_live = w32;
 
     // CpuRunaway: this process's tasks above 75% budget.
-    if (p->tick_budget > 0)
+    ::duetos::core::AuthorizationContextSnapshot authorization{};
+    if (::duetos::core::ProcessInspectAuthorization(p, &authorization) && authorization.tick_budget > 0)
     {
-        const u64 threshold = (p->tick_budget * 3) / 4;
-        if (p->ticks_used >= threshold)
+        const u64 threshold = (authorization.tick_budget * 3) / 4;
+        if (authorization.ticks_used >= threshold)
         {
             cookie.cpu_runaway_count = 1;
-            if (p->ticks_used >= p->tick_budget)
-                cookie.cpu_runaway_ticks_over = p->ticks_used - p->tick_budget;
+            if (authorization.ticks_used >= authorization.tick_budget)
+                cookie.cpu_runaway_ticks_over = authorization.ticks_used - authorization.tick_budget;
         }
     }
 
     out[static_cast<u64>(ResourceClass::kHeap)] = ClassSnapshot{ResourceClass::kHeap, 0, 0, 0, kClassNames[0]};
-    out[static_cast<u64>(ResourceClass::kFrame)] = ClassSnapshot{
-        ResourceClass::kFrame, p->as != nullptr ? static_cast<u64>(p->as->region_count) : 0, 0,
-        p->as != nullptr ? static_cast<u64>(p->as->region_count) * ::duetos::mm::kPageSize : 0, kClassNames[1]};
+    const u64 owned_regions = ::duetos::mm::AddressSpaceUserPageCount(p->as);
+    out[static_cast<u64>(ResourceClass::kFrame)] =
+        ClassSnapshot{ResourceClass::kFrame, owned_regions, 0, owned_regions * ::duetos::mm::kPageSize, kClassNames[1]};
     out[static_cast<u64>(ResourceClass::kKStack)] = ClassSnapshot{ResourceClass::kKStack, 0, 0, 0, kClassNames[2]};
-    out[static_cast<u64>(ResourceClass::kAsRegion)] = ClassSnapshot{
-        ResourceClass::kAsRegion, p->as != nullptr ? static_cast<u64>(p->as->region_count) : 0, 0, 0, kClassNames[3]};
+    out[static_cast<u64>(ResourceClass::kAsRegion)] =
+        ClassSnapshot{ResourceClass::kAsRegion, owned_regions, 0, 0, kClassNames[3]};
     out[static_cast<u64>(ResourceClass::kHandle)] = SnapshotHandle(cookie);
     out[static_cast<u64>(ResourceClass::kWin32Handle)] = SnapshotWin32Handle(cookie);
     out[static_cast<u64>(ResourceClass::kSocket)] = ClassSnapshot{ResourceClass::kSocket, 0, 0, 0, kClassNames[6]};
@@ -408,23 +404,17 @@ bool LeakDetectorSnapshotPid(u64 pid, ClassSnapshot* out)
 
 void LeakDetectorReportProcessExit(const ::duetos::core::Process& p)
 {
-    // Per-process tables we expect to be drained by ProcessRelease's
-    // earlier steps. Anything still live here is a leak attributable
-    // to this PID.
+    // Called synchronously from the one-shot runtime teardown after admissions
+    // are closed and the normal table drains have completed. It deliberately
+    // inspects the Exiting Process without ScopedProcessRuntimeAccess; anything
+    // still live here is residue attributable to this PID.
     const u32 handle_live =
         ::duetos::ipc::HandleTableLiveCount(const_cast<::duetos::ipc::HandleTable&>(p.kobj_handles));
 
-    u32 w32 = 0;
-    for (u64 i = 0; i < ::duetos::core::Process::kWin32HandleCap; ++i)
-        if (p.win32_handles[i].kind != ::duetos::core::Process::FsBackingKind::None)
-            ++w32;
+    u32 w32 = ::duetos::core::ProcessWin32FileHandleCount(&p);
     w32 += ::duetos::core::ProcessWin32ThreadHandleCount(&p);
-    for (u64 i = 0; i < ::duetos::core::Process::kWin32ProcessCap; ++i)
-        if (p.win32_proc_handles[i].in_use)
-            ++w32;
-    for (u64 i = 0; i < ::duetos::core::Process::kWin32SectionCap; ++i)
-        if (p.win32_section_handles[i].in_use)
-            ++w32;
+    w32 += ::duetos::core::ProcessWin32ProcessHandleCount(&p);
+    w32 += ::duetos::core::ProcessWin32SectionHandleCount(&p);
     for (u64 i = 0; i < ::duetos::core::Process::kWin32DirCap; ++i)
         if (p.win32_dirs[i].entries != nullptr)
             ++w32;
@@ -432,7 +422,12 @@ void LeakDetectorReportProcessExit(const ::duetos::core::Process& p)
         if (p.win32_reg_handles[i].in_use)
             ++w32;
 
-    const u64 over_budget = (p.tick_budget > 0 && p.ticks_used > p.tick_budget) ? (p.ticks_used - p.tick_budget) : 0;
+    ::duetos::core::AuthorizationContextSnapshot authorization{};
+    const bool have_authorization = ::duetos::core::ProcessInspectAuthorization(&p, &authorization);
+    const u64 over_budget =
+        have_authorization && authorization.tick_budget > 0 && authorization.ticks_used > authorization.tick_budget
+            ? authorization.ticks_used - authorization.tick_budget
+            : 0;
 
     // Pull the GPU per-class snapshots so the GPU driver's exit hook
     // can cross-check (no-op today; real walk lands with the GPU

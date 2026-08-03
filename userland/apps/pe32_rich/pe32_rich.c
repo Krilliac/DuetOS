@@ -93,11 +93,19 @@ __declspec(dllimport) int __stdcall BCryptGenRandom(HANDLE, unsigned char*, DWOR
 #define FILE_TYPE_DISK 1u
 #define ERROR_INVALID_PARAMETER 87u
 
+static int IsOpaqueFileHandle(HANDLE handle)
+{
+    const unsigned raw = (unsigned)(unsigned long)handle;
+    const unsigned tag = raw & 0xFFFu;
+    const unsigned generation = raw >> 12;
+    return raw <= 0x7FFFFFFFu && generation != 0u && tag >= 0x100u && tag < 0x110u;
+}
+
 /*
  * Real file I/O against the ramfs file every trusted-root process
  * sees. Unlike the rest of this image — which only proves the IAT
  * resolves — every assertion below pins observable kernel state:
- * the handle band, the cursor SetFilePointer claims to have moved,
+ * the opaque handle identity, the cursor SetFilePointer claims to have moved,
  * the short read that proves it moved there, and the fact that
  * CloseHandle actually frees the slot.
  *
@@ -119,8 +127,9 @@ static int FileIoProbe(void)
     f = CreateFileA(kPath, GENERIC_READ, 0, (void*)0, OPEN_EXISTING, 0, (HANDLE)0);
     if (f == INVALID_HANDLE_VALUE)
         return 1;
-    /* Win32-shaped kernel file handle: kWin32HandleBase + slot. */
-    if ((unsigned long)f < 0x100u || (unsigned long)f >= 0x110u)
+    /* The low tag selects the file slot; the non-zero high generation
+     * proves this is the new stale-safe ABI rather than the legacy raw slot. */
+    if (!IsOpaqueFileHandle(f))
         return 2;
     if (GetFileType(f) != FILE_TYPE_DISK)
         return 3;

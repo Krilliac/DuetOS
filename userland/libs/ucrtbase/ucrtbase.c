@@ -777,6 +777,17 @@ __declspec(dllexport) int putchar(int c)
  * (Win32 STD_INPUT/OUTPUT/ERROR_HANDLE DWORDs).
  * ------------------------------------------------------------------ */
 
+/* Keep this freestanding mirror synchronized with Process's public file-
+ * handle ABI: a [0x100,0x10F] low tag, a non-zero generation in bits
+ * 12..30, and no bits above the PE32-positive ceiling. */
+static int duetos_is_file_handle(long long handle)
+{
+    const unsigned long long raw = (unsigned long long)handle;
+    const unsigned long long tag = raw & 0xFFFULL;
+    const unsigned long long generation = raw >> 12;
+    return raw <= 0x7FFFFFFFULL && generation != 0 && tag >= 0x100ULL && tag < 0x110ULL;
+}
+
 typedef struct ucrt_FILE
 {
     long long handle; /* Win32 handle (kernel32 file-handle range, or stdio sentinel) */
@@ -809,9 +820,9 @@ __declspec(dllexport) FILE* __acrt_iob_func(unsigned int index)
 }
 
 /* Real fopen: route to SYS_FILE_OPEN (20) which takes rdi =
- * ASCII path ptr, rsi = path length. Returns a kernel handle
- * in 0x100..0x10F (Win32 file-handle range) on success, or -1
- * on miss. Wrap that in a FILE* allocated on the process heap.
+ * ASCII path ptr, rsi = path length. Returns an opaque generation-
+ * tagged kernel handle on success, or -1 on miss. Wrap that in a
+ * FILE* allocated on the process heap.
  *
  * Mode string is parsed for 'r'/'w'/'a' for diagnostic /
  * read-vs-write disambiguation; v0 only really supports reads
@@ -849,8 +860,8 @@ __declspec(dllexport) FILE* fopen(const char* path, const char* mode)
                        "D"((long long)path), /* rdi = path */
                        "S"(n)                /* rsi = length */
                      : "memory");
-    if (rv < 0x100 || rv >= 0x110)
-        return (FILE*)0; /* out-of-range = failure */
+    if (!duetos_is_file_handle(rv))
+        return (FILE*)0;
     return alloc_FILE_wrapping(rv);
 }
 
@@ -869,7 +880,9 @@ __declspec(dllexport) FILE* _wfopen(const _ucrt_wchar_t* path, const _ucrt_wchar
         ++n;
     }
     ascii[n] = 0;
-    return fopen(ascii, (const char*)0);
+    // v0's file shim is read-oriented and currently ignores the mode;
+    // keep the call contract non-null until full UTF-16 mode handling lands.
+    return fopen(ascii, "rb");
 }
 
 __declspec(dllexport) int fclose(FILE* f)
@@ -878,7 +891,7 @@ __declspec(dllexport) int fclose(FILE* f)
         return -1;
     /* Close kernel handle if this is a real file (not a stdio
      * sentinel -10/-11/-12). SYS_FILE_CLOSE = 22. */
-    if (f->handle >= 0x100 && f->handle < 0x110)
+    if (duetos_is_file_handle(f->handle))
     {
         long long discard;
         __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)22), "D"(f->handle) : "memory");
@@ -901,10 +914,10 @@ __declspec(dllexport) size_t fwrite(const void* ptr, size_t sz, size_t nmemb, FI
         sys_write_bytes((const char*)ptr, total);
         return nmemb;
     }
-    /* Real file handle (Win32-shaped 0x100..0x10F) — route to
+    /* Real opaque file handle — route to
      * SYS_FILE_WRITE (43). rdi = handle, rsi = buf, rdx = count.
      * Returns bytes written, or negative on error. */
-    if (f->handle >= 0x100 && f->handle < 0x110)
+    if (duetos_is_file_handle(f->handle))
     {
         long long rv;
         __asm__ volatile("int $0x80"
@@ -932,7 +945,7 @@ __declspec(dllexport) size_t fread(void* ptr, size_t sz, size_t nmemb, FILE* f)
     if (!f || !ptr || sz == 0 || nmemb == 0)
         return 0;
     /* stdio sentinels can't be read in v0. */
-    if (f->handle < 0x100 || f->handle >= 0x110)
+    if (!duetos_is_file_handle(f->handle))
     {
         f->eof = 1;
         return 0;
@@ -1004,9 +1017,10 @@ __declspec(dllexport) char* tmpnam(char* buf)
     /* Format: "X:\\Temp\\duetXXXX.tmp" — 19 bytes + NUL fits in 32. */
     const char prefix[] = "X:\\Temp\\duet";
     int i = 0;
-    while (prefix[i] && i < L_tmpnam - 1)
+    const char* prefix_cursor = prefix;
+    while (i < L_tmpnam - 1 && *prefix_cursor)
     {
-        dst[i] = prefix[i];
+        dst[i] = *prefix_cursor++;
         ++i;
     }
     /* 4 hex digits of the counter so two consecutive calls
@@ -1110,7 +1124,7 @@ __declspec(dllexport) int fgetc(FILE* f)
  * Returns 0 on success (matches C stdlib contract). */
 __declspec(dllexport) int fseek(FILE* f, long off, int whence)
 {
-    if (!f || f->handle < 0x100 || f->handle >= 0x110)
+    if (!f || !duetos_is_file_handle(f->handle))
         return -1;
     long long rv;
     __asm__ volatile("int $0x80"
@@ -1130,7 +1144,7 @@ __declspec(dllexport) int fseek(FILE* f, long off, int whence)
  * in rax. */
 __declspec(dllexport) long ftell(FILE* f)
 {
-    if (!f || f->handle < 0x100 || f->handle >= 0x110)
+    if (!f || !duetos_is_file_handle(f->handle))
         return -1L;
     long long rv;
     __asm__ volatile("int $0x80"

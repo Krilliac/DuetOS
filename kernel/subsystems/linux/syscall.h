@@ -81,7 +81,10 @@ i64 LinuxFstat(u64 fd, u64 user_buf);
 i64 LinuxFsync(u64 fd);
 i64 LinuxNanosleep(u64 user_req, u64 user_rem);
 i64 LinuxSchedYield();
-[[noreturn]] void LinuxExit(u64 status);
+// Publish a cooperative current-task exit request and return. The dispatcher
+// cancellation boundary performs the non-returning teardown only after every
+// translator and syscall-local guard has unwound.
+i64 LinuxExit(u64 status);
 i64 LinuxGetPid();
 i64 LinuxMmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off);
 i64 LinuxMunmap(u64 addr, u64 len);

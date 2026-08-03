@@ -64,37 +64,100 @@ bool WriteFatEntry(const Volume& v, u32 cluster, u32 value)
     return true;
 }
 
-// Find the lowest-numbered free cluster (FAT entry == 0), mark it
-// as EOC in BOTH FAT copies, and return its number. Returns 0 on
-// full-disk or I/O error. Capped at 1,000,000 clusters scanned so
-// a pathological volume can't spin forever.
+// Search hint for AllocateFreeCluster — the cluster after the last
+// successful allocation. Purely advisory (see the wrap logic below);
+// a stale or wrong value costs at most one extra wrapped pass and
+// never changes which clusters are considered free. Deliberately not
+// per-volume: the hint is self-correcting on the next call.
+constinit u32 g_alloc_rover = 2;
+
+// Find a free cluster (FAT entry == 0), mark it as EOC in BOTH FAT
+// copies, and return its number. Returns 0 on full-disk or I/O error.
+// Capped at 1,000,000 clusters scanned so a pathological volume can't
+// spin forever. The search starts from a rover hint and wraps, so it
+// still covers the whole FAT before declaring the volume full.
 u32 AllocateFreeCluster(const Volume& v)
 {
     const u32 entries_per_sector = v.bytes_per_sector / 4;
     const u32 max_fat_entries = v.fat_size_sectors * entries_per_sector;
     const u32 hard_cap = max_fat_entries < 1000000u ? max_fat_entries : 1000000u;
-    for (u32 cluster = 2; cluster < hard_cap; ++cluster)
+    // Scan a FAT sector at a time. The per-cluster form of this loop
+    // re-read the SAME sector once per entry — 128 synchronous block
+    // reads per sector at the usual 512-byte geometry — so a scan over a
+    // mostly-full FAT cost up to ~1e6 device round trips. Each read is
+    // individually fast, so neither the hung-task detector (task never
+    // blocks past its threshold) nor the soft-lockup detector attributed
+    // the resulting multi-minute stall; it surfaced only as a QEMU smoke
+    // timeout with the kernel otherwise alive (observed 2026-08-02 in
+    // cancellation-smp@2cpu and ring3, both parked in KPathPersistFlush).
+    // One read per sector keeps the same scan order and the same
+    // first-free result.
+    // Search from a rover hint rather than restarting at cluster 2 on
+    // every call. Writing an N-cluster file calls this N times, and a
+    // from-scratch scan re-walks all previously-allocated clusters each
+    // time — quadratic, and every re-walk is real block I/O. Rotating
+    // one 256 KiB klog area (64 clusters, and rename is a whole-file
+    // copy) therefore cost thousands of device reads and stalled the
+    // pe-threads / pe-winkill smoke profiles for minutes with the kernel
+    // otherwise healthy (2026-08-02). The rover is only a hint: the
+    // search still wraps and covers [2, hard_cap) in full before
+    // reporting the volume full, so the allocation result is unchanged.
+    if (g_alloc_rover < 2 || g_alloc_rover >= hard_cap)
+        g_alloc_rover = 2;
+    const u32 start = g_alloc_rover;
+    bool wrapped = false;
+    u32 cluster = start;
+    while (true)
     {
-        // Some tiny fixture images leave the root directory cluster's
-        // FAT entry clear even though the BPB names it as live. Never
-        // hand it out as file data; doing so aliases file writes over
-        // the root directory and corrupts later directory walks.
-        if (cluster == v.root_cluster)
-            continue;
-        // ML-06: 64-bit FAT byte-offset arithmetic (see WriteFatEntry / exfat.cpp).
+        if (cluster >= hard_cap)
+        {
+            if (wrapped)
+                break;
+            wrapped = true;
+            cluster = 2;
+            if (start <= 2)
+                break;
+        }
+        // Once wrapped, stop where the first pass began.
+        if (wrapped && cluster >= start)
+            break;
+
         const u64 byte_off = u64(cluster) * 4;
         const u64 sec_off = byte_off / v.bytes_per_sector;
-        const u32 byte_in_sec = static_cast<u32>(byte_off % v.bytes_per_sector);
         const u64 lba = u64(v.reserved_sectors) + sec_off;
         if (drivers::storage::BlockDeviceRead(v.block_handle, lba, 1, g_scratch) != 0)
             return 0;
-        const u32 entry = LeU32(g_scratch + byte_in_sec) & 0x0FFFFFFFu;
-        if (entry == 0)
+
+        // Walk every entry that lives in the sector just read.
+        const u32 first_in_sector = static_cast<u32>(sec_off * entries_per_sector);
+        const u32 sector_end = first_in_sector + entries_per_sector;
+        u32 scan_end = sector_end < hard_cap ? sector_end : hard_cap;
+        if (wrapped && scan_end > start)
+            scan_end = start;
+        for (; cluster < scan_end; ++cluster)
         {
-            if (!WriteFatEntry(v, cluster, 0x0FFFFFFFu))
-                return 0;
-            return cluster;
+            // Some tiny fixture images leave the root directory cluster's
+            // FAT entry clear even though the BPB names it as live. Never
+            // hand it out as file data; doing so aliases file writes over
+            // the root directory and corrupts later directory walks.
+            if (cluster == v.root_cluster)
+                continue;
+            // ML-06: 64-bit FAT byte-offset arithmetic (see WriteFatEntry / exfat.cpp).
+            const u32 byte_in_sec = static_cast<u32>((u64(cluster) * 4) % v.bytes_per_sector);
+            const u32 entry = LeU32(g_scratch + byte_in_sec) & 0x0FFFFFFFu;
+            if (entry == 0)
+            {
+                // WriteFatEntry reuses g_scratch, so the cached sector is
+                // dead after this call — returning immediately is required,
+                // not just convenient.
+                if (!WriteFatEntry(v, cluster, 0x0FFFFFFFu))
+                    return 0;
+                g_alloc_rover = cluster + 1;
+                return cluster;
+            }
         }
+        if (cluster >= scan_end && scan_end == start && wrapped)
+            break;
     }
     return 0;
 }
@@ -330,7 +393,18 @@ bool FreeClusterChain(const Volume& v, u32 first_cluster)
         run_len = 0;
     };
 
-    for (u32 step = 0; step < 65536; ++step)
+    // A legitimate chain can never have more links than the volume has
+    // data clusters — a longer walk means a self-loop or cross-linked
+    // FAT. The old fixed 65536 cap kept a corrupt loop from spinning
+    // forever, but silently walked up to 65536 I/O-bearing hops first
+    // (minutes of short block-waits that neither the hung-task nor the
+    // soft-lockup detector attributes to anything) and then returned
+    // true. Bound at the cluster population and fail loudly instead so
+    // corruption is observable at first contact.
+    const u32 data_clusters =
+        (v.total_sectors > v.data_start_sector) ? (v.total_sectors - v.data_start_sector) / v.sectors_per_cluster : 0;
+    const u32 hop_bound = (data_clusters != 0 && data_clusters < 65536u) ? data_clusters : 65536u;
+    for (u32 step = 0; step < hop_bound; ++step)
     {
         if (cluster < 2 || cluster >= 0x0FFFFFF8u)
         {
@@ -361,7 +435,10 @@ bool FreeClusterChain(const Volume& v, u32 first_cluster)
         cluster = next;
     }
     flush_run();
-    return true;
+    core::LogWithValue(core::LogLevel::Warn, "fs/fat32",
+                       "cluster-chain walk exceeded volume cluster population (corrupt chain?) first_cluster",
+                       first_cluster);
+    return false;
 }
 
 // Find an entry by name in `dir_cluster`, returning it by value.
@@ -583,7 +660,10 @@ bool ReserveRunInDir(const Volume& v, u32 dir_cluster, u32 count, u64* out_first
     if (fresh == 0)
         return false;
     if (!ZeroCluster(v, fresh))
+    {
+        (void)FreeClusterChain(v, fresh);
         return false;
+    }
     if (!WriteFatEntry(v, tail, fresh))
     {
         // Best-effort rollback: mark the fresh cluster free again.
@@ -708,7 +788,10 @@ i64 AppendInDir(const Volume* v, u32 dir_cluster, const char* name, const void* 
         if (first == 0)
             return -1;
         if (!ZeroCluster(*v, first))
+        {
+            (void)FreeClusterChain(*v, first);
             return -1;
+        }
         // Patch the on-disk dir entry's first_cluster. RMW the
         // sector containing the SFN record.
         u64 flba = 0;
@@ -774,9 +857,15 @@ i64 AppendInDir(const Volume* v, u32 dir_cluster, const char* name, const void* 
         if (fresh == 0)
             return -1;
         if (!ZeroCluster(*v, fresh))
+        {
+            (void)FreeClusterChain(*v, fresh);
             return -1;
+        }
         if (!WriteFatEntry(*v, tail, fresh))
+        {
+            (void)FreeClusterChain(*v, fresh);
             return -1;
+        }
         tail = fresh;
         tail_off = 0;
     }
@@ -819,9 +908,15 @@ i64 AppendInDir(const Volume* v, u32 dir_cluster, const char* name, const void* 
         if (fresh == 0)
             return -1;
         if (!ZeroCluster(*v, fresh))
+        {
+            (void)FreeClusterChain(*v, fresh);
             return -1;
+        }
         if (!WriteFatEntry(*v, tail, fresh))
+        {
+            (void)FreeClusterChain(*v, fresh);
             return -1;
+        }
         tail = fresh;
         tail_off = 0;
     }
@@ -1157,9 +1252,15 @@ i64 WriteInDir(const Volume* v, u32 dir_cluster, const char* name, u64 offset, c
             if (fresh == 0)
                 return -1;
             if (!ZeroCluster(*v, fresh))
+            {
+                (void)FreeClusterChain(*v, fresh);
                 return -1;
+            }
             if (!WriteFatEntry(*v, prev, fresh))
+            {
+                (void)FreeClusterChain(*v, fresh);
                 return -1;
+            }
             cluster = fresh;
         }
         in_cluster_off = 0;

@@ -597,52 +597,58 @@ void DumpProcessVmInfo()
         arch::SerialWrite("    (no address space — kernel-AS task)\n");
         return;
     }
+    mm::AddressSpaceUserRegionSummary region_summary{};
+    const bool region_summary_available = mm::AddressSpaceTrySnapshotUserRegionSummary(as, &region_summary);
+
     arch::SerialWrite("    pml4_phys=");
     arch::SerialWriteHex(as->pml4_phys);
     arch::SerialWrite("  regions=");
-    arch::SerialWriteHex(static_cast<u64>(as->region_count));
+    if (region_summary_available)
+    {
+        arch::SerialWriteHex(static_cast<u64>(region_summary.page_count));
+    }
+    else
+    {
+        arch::SerialWrite("<unavailable>");
+    }
     arch::SerialWrite("  budget=");
     arch::SerialWriteHex(as->frame_budget);
     arch::SerialWrite("\n");
 
-    // Region span — min / max user VA + total page count. We
-    // deliberately don't print every single mapped page (up to
-    // 1024 of them per process) because the resulting block
-    // would dwarf the rest of the dump. The span + count tells
-    // an operator whether rip / rsp fall inside the mapped
-    // user range; per-page detail is available via shell at
-    // post-mortem time.
-    if (as->region_count > 0)
+    // Region span — min / max user VA + total page count comes from one
+    // fail-fast structural snapshot. We deliberately do not
+    // print every mapped page because that would dwarf the rest of the dump.
+    // If the structural lock is busy or self-held, the explicit unavailable
+    // marker is safer than walking storage that may be compacting.
+    if (!region_summary_available)
     {
-        u64 vmin = ~static_cast<u64>(0);
-        u64 vmax = 0;
-        for (u16 i = 0; i < as->region_count; ++i)
-        {
-            const u64 v = as->regions[i].vaddr;
-            if (v < vmin)
-            {
-                vmin = v;
-            }
-            if (v > vmax)
-            {
-                vmax = v;
-            }
-        }
+        arch::SerialWrite("    vmap span: <region summary unavailable>\n");
+    }
+    else if (region_summary.page_count > 0)
+    {
         arch::SerialWrite("    vmap span: [");
-        arch::SerialWriteHex(vmin);
+        arch::SerialWriteHex(region_summary.min_vaddr);
         arch::SerialWrite(" .. ");
-        arch::SerialWriteHex(vmax + 0x1000);
+        arch::SerialWriteHex(region_summary.max_vaddr_exclusive);
         arch::SerialWrite(")  pages=");
-        arch::SerialWriteHex(static_cast<u64>(as->region_count));
+        arch::SerialWriteHex(static_cast<u64>(region_summary.page_count));
         arch::SerialWrite("\n");
     }
 
-    if (proc->dll_image_count > 0)
+    // GAP: the DLL ledger has no panic-safe try-snapshot API. Clamp one
+    // count read so a peer that missed the panic stop cannot make this walk
+    // leave the fixed array; individual append-only rows may be inconsistent.
+    u64 dll_image_count = proc->dll_image_count;
+    if (dll_image_count > Process::kDllImageCap)
+    {
+        dll_image_count = Process::kDllImageCap;
+    }
+    if (dll_image_count > 0)
     {
         arch::SerialWrite("  loaded modules (");
-        arch::SerialWriteHex(proc->dll_image_count);
+        arch::SerialWriteHex(dll_image_count);
         arch::SerialWrite(" DLLs):\n");
-        for (u64 i = 0; i < proc->dll_image_count; ++i)
+        for (u64 i = 0; i < dll_image_count; ++i)
         {
             const DllImage& dll = proc->dll_images[i];
             const char* name = dll.has_exports ? PeExportsDllName(dll.exports) : nullptr;

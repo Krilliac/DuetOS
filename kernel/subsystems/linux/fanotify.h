@@ -19,7 +19,7 @@ namespace duetos::subsystems::linux::internal
 void FanotifyPublishFromInotify(const char* path, u32 in_mask);
 
 // Per-LinuxFd surface (state 15).
-i64 FanotifyRead(u32 idx, u64 user_dst, u64 len);
+i64 FanotifyRead(u32 idx, u64 user_dst, u64 len, bool nonblocking);
 void FanotifyRetain(u32 idx);
 void FanotifyRelease(u32 idx);
 

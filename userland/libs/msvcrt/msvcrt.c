@@ -697,6 +697,16 @@ typedef struct DUETOS_FILE_msvcrt
     int err;
 } DUETOS_FILE;
 
+/* Freestanding mirror of Process's cross-PE32/PE32+ opaque file-handle
+ * predicate: low tag [0x100,0x10F], non-zero generation in bits 12..30. */
+static int msvcrt_is_file_handle(long long handle)
+{
+    const unsigned long long raw = (unsigned long long)handle;
+    const unsigned long long tag = raw & 0xFFFULL;
+    const unsigned long long generation = raw >> 12;
+    return raw <= 0x7FFFFFFFULL && generation != 0 && tag >= 0x100ULL && tag < 0x110ULL;
+}
+
 __declspec(dllexport) DUETOS_FILE* fopen(const char* path, const char* mode)
 {
     (void)mode;
@@ -707,14 +717,13 @@ __declspec(dllexport) DUETOS_FILE* fopen(const char* path, const char* mode)
         ++len;
     long long h;
     __asm__ volatile("int $0x80" : "=a"(h) : "a"((long long)20), "D"((long long)path), "S"((long long)len) : "memory");
-    /* SYS_FILE_OPEN returns 0x100..0x10F on hit, (u64)-1 on miss.
-     * The previous `h == 0` check missed the (u64)-1 case, so
+    /* SYS_FILE_OPEN returns an opaque generation-tagged handle on hit,
+     * (u64)-1 on miss. The previous `h == 0` check missed the latter, so
      * fopen() on a missing path silently returned a FILE* wrapping
      * a sentinel-poisoned handle that subsequent fread()/fseek()
      * walked off into the kernel's "unknown handle" reject path.
-     * Range-check matches ucrtbase.c's identical check (the
-     * msvcrt mirror was missing it). */
-    if (h < 0x100 || h >= 0x110)
+     * The predicate matches ucrtbase.c's identical ABI mirror. */
+    if (!msvcrt_is_file_handle(h))
         return 0;
     /* Allocate a 24-byte FILE struct via SYS_HEAP_ALLOC (op 11). */
     long long fp;
@@ -925,8 +934,8 @@ static void msvcrt_sys_write(int fd, const char* p, long long n)
 }
 
 /* fwrite: std streams (1/2) route to SYS_WRITE(fd=1); a heap
- * FILE* (fopen band 0x100..0x10F stored as the first 8 bytes)
- * routes to SYS_FILE_WRITE (43). */
+ * FILE* stores an opaque file handle in its first 8 bytes and routes
+ * to SYS_FILE_WRITE (43). */
 __declspec(dllexport) size_t fwrite(const void* ptr, size_t sz, size_t nmemb, void* f)
 {
     if (!ptr || !f || sz == 0 || nmemb == 0)
@@ -941,7 +950,7 @@ __declspec(dllexport) size_t fwrite(const void* ptr, size_t sz, size_t nmemb, vo
     }
     /* Heap FILE* from this file's fopen(): handle is first 8 bytes. */
     DUETOS_FILE* fp = (DUETOS_FILE*)f;
-    if (fp->handle >= 0x100 && fp->handle < 0x110)
+    if (msvcrt_is_file_handle(fp->handle))
     {
         long long rv;
         __asm__ volatile("int $0x80"

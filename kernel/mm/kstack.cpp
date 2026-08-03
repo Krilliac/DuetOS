@@ -4,7 +4,6 @@
 #include "mm/paging.h"
 
 #include "arch/x86_64/serial.h"
-#include "arch/x86_64/smp.h"
 #include "core/panic.h"
 #include "debug/probes.h"
 #include "log/klog.h"
@@ -137,6 +136,10 @@ bool InstallStackPages(u32 slot_index)
 void TearDownStackPages(u32 slot_index)
 {
     const uptr base = UsableBaseFromSlot(slot_index);
+
+    // Validate and snapshot the complete ownership set before changing any
+    // PTE. A corrupt shadow row must not leave a half-unmapped live stack.
+    PhysAddr frames[kKernelStackPages] = {};
     for (u64 i = 0; i < kKernelStackPages; ++i)
     {
         const PhysAddr phys = g_slot_frames[slot_index][i];
@@ -145,14 +148,20 @@ void TearDownStackPages(u32 slot_index)
             PanicKstack("TearDownStackPages: slot page has no recorded frame",
                         (static_cast<u64>(slot_index) << 16) | i);
         }
-        UnmapPage(base + i * kPageSize);
-        FreeFrame(phys);
-        g_slot_frames[slot_index][i] = kNullFrame;
+        frames[i] = phys;
     }
-    // Cross-CPU TLB shootdown. UnmapPage above invalidates only the
+
+    // Retire every translation first. UnmapPage invalidates this CPU only;
+    // no backing frame may be returned to the allocator until all ready peers
+    // have confirmed that the range is absent from their TLBs as well.
+    for (u64 i = 0; i < kKernelStackPages; ++i)
+    {
+        UnmapPage(base + i * kPageSize);
+    }
+    // Cross-CPU TLB reclamation barrier. UnmapPage above invalidates only the
     // CPU running this code; peer CPUs that ran the previous owner
     // of this slot still have TLB entries pointing at the freed
-    // physical frames. Without this broadcast, the bug shape was:
+    // physical frames. Without this barrier, the bug shape was:
     //
     //   1. Task X runs on AP7, populates AP7's TLB for slot N's VAs.
     //   2. Task X exits; reaper on BSP calls FreeKernelStack. BSP's
@@ -172,10 +181,19 @@ void TearDownStackPages(u32 slot_index)
     //      self-deadlock — the canary13 boot-tail wild-RIP shape
     //      with all six in-tree validators silent.
     //
-    // The kstack-arena VAs are kernel-owned (PML4 high half), so
-    // `as=nullptr` does a full broadcast — every online peer's TLB
-    // gets the targeted slot invalidated.
-    arch::SmpTlbShootdownRange(nullptr, base, kKernelStackPages * kPageSize);
+    // The kstack-arena VAs are kernel-owned (PML4 high half), so every
+    // IPI-ready peer is targeted regardless of its current user address space.
+    // The barrier waits through delayed service; only confirmed completion
+    // permits the physical frames to become allocator-visible again.
+    KernelTlbReclaimBarrier(base, kKernelStackPages * kPageSize);
+
+    // The frames and shadow ownership become reusable only after every
+    // targeted peer has executed the invalidation callback.
+    for (u64 i = 0; i < kKernelStackPages; ++i)
+    {
+        FreeFrame(frames[i]);
+        g_slot_frames[slot_index][i] = kNullFrame;
+    }
 }
 
 // Pop a slot index from the freelist. Caller holds g_kstack_lock.
@@ -273,7 +291,13 @@ void* AllocateKernelStack(u64 stack_bytes)
             {
                 // Arena full. Return nullptr — SchedCreate already
                 // panics on a nullptr stack, preserving the prior
-                // KMalloc contract.
+                // KMalloc contract. Both nullptr legs of this function
+                // used to be silent, which left the resulting
+                // "AllocateKernelStack failed" panic unable to say
+                // WHICH resource ran out — name the leg and the live
+                // occupancy so the dump is self-diagnosing.
+                KLOG_WARN_2V("mm/kstack", "arena full (slot exhaustion)", "in_use", g_slots_in_use, "ever",
+                             g_slots_ever_allocated);
                 return nullptr;
             }
             slot_index = g_next_unseen_slot++;
@@ -286,6 +310,8 @@ void* AllocateKernelStack(u64 stack_bytes)
     // the user.
     if (!InstallStackPages(slot_index))
     {
+        KLOG_WARN_2V("mm/kstack", "backing-frame allocation failed (physical OOM, not slot exhaustion)", "slot",
+                     slot_index, "in_use", g_slots_in_use);
         sync::SpinLockGuard guard(g_kstack_lock);
         FreelistPush(slot_index);
         return nullptr;

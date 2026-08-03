@@ -28,8 +28,8 @@
  *   `Process::kobj_handles` table holds the `KMutex*`. A native
  *   (non-Win32) workload that wants a kernel-mediated mutex
  *   reaches the same primitive through the same handle table; the
- *   Win32 surface only adds the `kWaitObject0` / `kWaitTimeout`
- *   return-value translation at the syscall boundary.
+ *   Win32 surface translates the explicit acquired / abandoned /
+ *   timeout result at the syscall boundary.
  *
  * REFCOUNT SEMANTICS
  *   `KMutexCreate` allocates one through the kheap, calls
@@ -60,15 +60,24 @@
  *
  * THREADING
  *   `KMutexAcquire` / `KMutexRelease` go through the embedded
- *   `sched::Mutex`. Recursion is tracked under the same lock as
- *   `sched::Mutex::inner` provides for itself — each acquire
- *   that finds `owner == self` increments `recursion`; each
- *   release decrements; only the outermost release actually
- *   unlocks the inner mutex.
+ *   `sched::Mutex`. Public ownership uses an atomic immutable TID,
+ *   while the scheduler alone retains the Task pointer in its
+ *   intrusive abandonment ledger. Each acquire by that TID bumps
+ *   recursion; only the outermost release unlinks the ledger node
+ *   and unlocks the inner mutex.
  */
 
 namespace duetos::ipc
 {
+
+enum class KMutexWaitResult : u8
+{
+    Acquired,
+    Abandoned,
+    TimedOut,
+    Cancelled,
+    Failed,
+};
 
 struct KMutex
 {
@@ -81,13 +90,21 @@ struct KMutex
     /// FIFO hand-off behaviour.
     sched::Mutex inner;
 
-    /// Owning task — set by `KMutexAcquire` on first acquire,
-    /// cleared on outermost release. Used for recursion check
-    /// and (eventually) deadlock graph annotation.
-    sched::Task* owner;
+    /// Atomic public ownership snapshot. Task ID zero is valid, so `held`
+    /// disambiguates the boot task from an unowned mutex.
+    bool held;
+    u64 owner_tid;
 
     /// Recursion count. Zero when not held; >= 1 when held.
     u32 recursion;
+
+    /// Release-published before an abandoned owner's FIFO hand-off and
+    /// consumed exactly once by the successful successor.
+    bool abandoned_pending;
+
+    /// Scheduler-owned intrusive receipt for dead-task abandonment. KMutex
+    /// itself never retains or exposes a raw Task pointer.
+    sched::AbandonableOwnershipNode ownership_node;
 
     /// Scheduler tick at creation. Pure diagnostic; helps a
     /// future `inspect ipc mutexes` rank the oldest live mutex.
@@ -103,44 +120,42 @@ struct KMutex
 
 /// Recursive acquire. Same task may acquire repeatedly; each call
 /// must be paired with a matching `KMutexRelease`. Blocks (via
-/// `sched::MutexLock` on the inner mutex) when another task
-/// holds the lock.
-void KMutexAcquire(KMutex* m);
+/// the result-bearing scheduler mutex path) when another task holds
+/// the lock. Requires an installed current Task.
+KMutexWaitResult KMutexAcquire(KMutex* m);
 
 /// Timed recursive acquire. Identical to `KMutexAcquire` for the
 /// re-entrant fast path (recursion bumps regardless of the
 /// timeout — re-entry never blocks). Otherwise blocks at most
-/// `ticks` timer ticks via `sched::MutexLockTimed`. Returns true
-/// if the lock is held on return; false on timeout. `ticks == 0`
-/// is the non-blocking variant — yields then returns false on
-/// contention.
+/// `ticks` timer ticks via the result-bearing cancellable scheduler wait.
+/// `ticks == 0` is the non-blocking variant. The result distinguishes
+/// timeout, cooperative cancellation, failure, and one-shot abandonment.
 ///
 /// Backs the timed-wait variant of Win32-style WaitForSingleObject
 /// on a mutex handle; the SYS_MUTEX_WAIT migration ahead in the
 /// roadmap routes through here once the surface is moved onto
 /// `Process::kobj_handles`.
-bool KMutexAcquireTimed(KMutex* m, u64 ticks);
+KMutexWaitResult KMutexAcquireTimed(KMutex* m, u64 ticks);
 
 /// Drop one recursion level. The outermost release transfers
 /// ownership to the next FIFO waiter (or unlocks if the queue is
 /// empty). Calling release on a mutex this task does not own is
-/// a hard panic — KMutex is kernel-internal; an ABI front-end
-/// caught violating ownership is the kind of bug we don't want
-/// to swallow silently.
-void KMutexRelease(KMutex* m);
+/// rejected without mutation and reported as false to the ABI front-end.
+bool KMutexRelease(KMutex* m);
 
-/// Read-only accessor for diagnostics. Returns nullptr if the
-/// mutex is not held.
-sched::Task* KMutexOwner(const KMutex* m);
+/// Atomic read-only snapshots for diagnostics. `KMutexOwnerTid` is meaningful
+/// only when `KMutexHeld` is true.
+bool KMutexHeld(const KMutex* m);
+u64 KMutexOwnerTid(const KMutex* m);
 
 /// Boot-time self-test. Allocates a KMutex on the heap, inserts
 /// it into a synthetic `HandleTable`, looks it up by handle (with
-/// type check), drives one acquire/release cycle, removes it
-/// from the table, and asserts the destroy callback ran exactly
-/// once + the underlying storage is now invalid (slot reads
-/// nullptr). Demonstrates the full HandleTable round-trip on a
-/// concrete subclass without touching Process or any live
-/// syscall surface. Panics on any mismatch.
+/// type check), drives recursion/timed acquire, proves public cancellation
+/// rejects a live process-null owner, then verifies the reaper's one-shot
+/// abandoned hand-off before removing it from the table, draining the lookup
+/// and table references, and proving the stale slot no longer resolves.
+/// Demonstrates the full HandleTable round-trip on a concrete subclass without
+/// touching Process or any live syscall surface. Panics on any mismatch.
 void KMutexSelfTest();
 
 } // namespace duetos::ipc

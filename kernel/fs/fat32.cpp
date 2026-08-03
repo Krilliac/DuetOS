@@ -67,6 +67,19 @@ namespace internal
 // canonical "filesystem locks below subsystem locks" order.
 constinit sched::Mutex g_fat32_mutex = {.owner = nullptr, .waiters = {}, .class_id = duetos::sync::kLockClassFat32};
 
+// Acquire breadcrumb for the driver mutex. A task that wedges while
+// HOLDING this mutex blocks every later filesystem user, so the
+// interesting question at a stall is always "who owns it and where did
+// they take it", not "who is waiting". Recording the owning task id and
+// the acquire-site return address makes that answerable from a panic
+// dump or a diagnostic probe instead of a rebuild-and-guess cycle
+// (2026-08-02: a ~264 s holder stall cost most of a session precisely
+// because the holder was unidentifiable). Plain stores, published only
+// by the task that actually took the lock and cleared by the task that
+// releases it — the mutex itself provides the mutual exclusion.
+constinit u64 g_fat32_owner_tid = ~u64{0};
+constinit u64 g_fat32_acquire_rip = 0;
+
 // Scratch buffer for the BPB sector + any single cluster read.
 // v0 assumes 512 B sectors and ≤ 4 KiB clusters — fits in one
 // page. A future multi-sector read path (larger clusters, 4 KiB
@@ -96,6 +109,8 @@ Fat32Guard::Fat32Guard()
     }
     sched::MutexLock(&g_fat32_mutex);
     owns_ = true;
+    g_fat32_owner_tid = sched::CurrentTaskId();
+    g_fat32_acquire_rip = reinterpret_cast<u64>(__builtin_return_address(0));
 }
 
 Fat32Guard::~Fat32Guard()
@@ -104,8 +119,13 @@ Fat32Guard::~Fat32Guard()
     // Recursive-entry and early-boot (pre-scheduler) guards set
     // owns_ = false and have nothing to release.
     if (owns_)
+    {
+        g_fat32_owner_tid = ~u64{0};
+        g_fat32_acquire_rip = 0;
         sched::MutexUnlock(&g_fat32_mutex);
+    }
 }
+
 
 // Volatile-zero / volatile-copy — same rationale as the guard
 // and AHCI drivers: prevent clang from lowering a byte loop into
@@ -250,6 +270,20 @@ u32 ReadFatEntry(const Volume& v, u32 cluster)
 // helpers below) can call them unqualified. Internal-only consumers
 // outside this TU pick the names up by including fat32_internal.h.
 using namespace internal;
+
+void Fat32DriverLockOwner(u64* tid_out, u64* acquire_rip_out)
+{
+    if (tid_out != nullptr)
+        *tid_out = internal::g_fat32_owner_tid;
+    if (acquire_rip_out != nullptr)
+        *acquire_rip_out = internal::g_fat32_acquire_rip;
+}
+
+bool Fat32BusyOnCurrentTask()
+{
+    const sched::Task* me = sched::CurrentTask();
+    return me != nullptr && internal::g_fat32_mutex.owner == me;
+}
 
 namespace
 {

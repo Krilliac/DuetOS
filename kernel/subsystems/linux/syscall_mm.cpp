@@ -24,6 +24,7 @@
 #include "mm/page.h"
 #include "mm/paging.h"
 #include "proc/process.h"
+#include "util/defer.h"
 #include "util/nospec.h"
 
 namespace duetos::subsystems::linux::internal
@@ -42,7 +43,80 @@ constexpr u64 kMapAnonymous = 0x20;
 // so all lengths round up to a 4 KiB boundary before allocation.
 u64 PageUp(u64 x)
 {
+    if (x > (~u64(0) - 0xFFFu))
+        return 0; // caller treats an unrepresentable span as invalid
     return (x + 0xFFFu) & ~0xFFFull;
+}
+
+// Copy one same-address-space byte range without allowing an unpinned
+// physical-frame snapshot or direct-map pointer to escape the VM mutation
+// transaction. The direction matches memmove: a destination beginning
+// inside and above the source is copied from the end, every other shape is
+// copied from the beginning. Each transaction is bounded by both source and
+// destination page boundaries because the AddressSpace copy API deliberately
+// refuses cross-page ranges.
+bool CopyUserRangeOverlapSafe(mm::AddressSpace* as, u64 source, u64 destination, u64 length)
+{
+    constexpr u64 kUserMaxExclusive = 0x0000800000000000ULL;
+    if (length == 0 || source == destination)
+        return true;
+    if (as == nullptr || source >= kUserMaxExclusive || destination >= kUserMaxExclusive ||
+        length > (kUserMaxExclusive - source) || length > (kUserMaxExclusive - destination))
+    {
+        return false;
+    }
+
+    u8 bounce[mm::kPageSize];
+    const u64 source_end = source + length;
+    const bool copy_backward = destination > source && destination < source_end;
+    if (!copy_backward)
+    {
+        u64 copied = 0;
+        while (copied < length)
+        {
+            const u64 source_va = source + copied;
+            const u64 destination_va = destination + copied;
+            const u64 source_room = mm::kPageSize - (source_va & (mm::kPageSize - 1));
+            const u64 destination_room = mm::kPageSize - (destination_va & (mm::kPageSize - 1));
+            u64 chunk = length - copied;
+            if (chunk > sizeof(bounce))
+                chunk = sizeof(bounce);
+            if (chunk > source_room)
+                chunk = source_room;
+            if (chunk > destination_room)
+                chunk = destination_room;
+            if (!mm::AddressSpaceReadUserMemory(as, source_va, bounce, chunk) ||
+                !mm::AddressSpaceWriteUserMemory(as, destination_va, bounce, chunk))
+            {
+                return false;
+            }
+            copied += chunk;
+        }
+        return true;
+    }
+
+    u64 remaining = length;
+    while (remaining != 0)
+    {
+        const u64 source_end_va = source + remaining;
+        const u64 destination_end_va = destination + remaining;
+        const u64 source_room = ((source_end_va - 1) & (mm::kPageSize - 1)) + 1;
+        const u64 destination_room = ((destination_end_va - 1) & (mm::kPageSize - 1)) + 1;
+        u64 chunk = remaining;
+        if (chunk > sizeof(bounce))
+            chunk = sizeof(bounce);
+        if (chunk > source_room)
+            chunk = source_room;
+        if (chunk > destination_room)
+            chunk = destination_room;
+        remaining -= chunk;
+        if (!mm::AddressSpaceReadUserMemory(as, source + remaining, bounce, chunk) ||
+            !mm::AddressSpaceWriteUserMemory(as, destination + remaining, bounce, chunk))
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 } // namespace
@@ -202,6 +276,9 @@ i64 DoBrk(u64 new_brk)
         KLOG_DEBUG_A(::duetos::core::LogArea::Linux, "linux/mm", "brk: not a Linux ABI process — returning 0");
         return 0;
     }
+    core::ScopedProcessRuntimeAccess runtime_access(p);
+    if (!runtime_access)
+        return 0;
     if (new_brk == 0)
     {
         return static_cast<i64>(p->linux_brk_current);
@@ -223,6 +300,8 @@ i64 DoBrk(u64 new_brk)
     }
     const u64 cur_aligned = PageUp(p->linux_brk_current);
     const u64 new_aligned = PageUp(new_brk);
+    if (cur_aligned == 0 || new_aligned == 0)
+        return static_cast<i64>(p->linux_brk_current);
     if (new_aligned > cur_aligned)
     {
         for (u64 va = cur_aligned; va < new_aligned; va += mm::kPageSize)
@@ -242,8 +321,15 @@ i64 DoBrk(u64 new_brk)
                               "brk: AllocateFrame OOM mid-grow; partial brk", va);
                 return static_cast<i64>(p->linux_brk_current);
             }
-            mm::AddressSpaceMapUserPage(p->as, va, frame,
-                                        mm::kPagePresent | mm::kPageWritable | mm::kPageUser | mm::kPageNoExecute);
+            if (!mm::AddressSpaceMapUserPage(p->as, va, frame,
+                                             mm::kPagePresent | mm::kPageWritable | mm::kPageUser | mm::kPageNoExecute))
+            {
+                mm::FreeFrame(frame);
+                p->linux_brk_current = va;
+                KLOG_ERROR_AV(::duetos::core::LogArea::Linux, "linux/mm",
+                              "brk: AddressSpaceMapUserPage refused; partial brk", va);
+                return static_cast<i64>(p->linux_brk_current);
+            }
         }
     }
     p->linux_brk_current = new_brk;
@@ -278,6 +364,9 @@ i64 DoMmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || p->abi_flavor != core::kAbiLinux)
         return kENOSYS;
+    core::ScopedProcessRuntimeAccess runtime_access(p);
+    if (!runtime_access)
+        return kESRCH;
     // RWX detector — Linux mmap with PROT_EXEC | PROT_WRITE is a
     // canonical JIT-or-shellcode pattern; surface it for analysts.
     constexpr u64 kProtWrite = 0x2;
@@ -309,25 +398,31 @@ i64 DoMmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
 
     if ((flags & kMapAnonymous) != 0)
     {
+        const u64 anonymous_end = base + aligned;
+        mm::AddressSpaceReservationToken anonymous_reservation{};
+        if (!mm::AddressSpaceReserveUserRange(p->as, base, anonymous_end, &anonymous_reservation))
+            return kENOMEM;
+        DUETOS_DEFER_NAMED(release_anonymous_mapping, (void)mm::AddressSpaceReleaseUserReservation(
+                                                          p->as, anonymous_reservation, base, anonymous_end));
         for (u64 va = base; va < base + aligned; va += mm::kPageSize)
         {
             const mm::PhysAddr frame = mm::AllocateFrame().value_or(mm::kNullFrame);
             if (frame == mm::kNullFrame)
             {
                 KLOG_ERROR_AV(::duetos::core::LogArea::Linux, "linux/mm", "mmap anon: AllocateFrame OOM at va", va);
-                // Unwind the pages mapped so far. Without this the
-                // leaked frames stay mapped at [base, va) AND the
-                // cursor is not advanced, so the NEXT mmap hands out
-                // the same base and AddressSpaceMapUserPage panics
-                // on "virt already mapped" — an unprivileged guest
-                // turns OOM into a kernel panic. Mirrors the mremap
-                // unwind idiom below.
-                for (u64 j = base; j < va; j += mm::kPageSize)
-                    (void)mm::AddressSpaceUnmapUserPage(p->as, j);
+                // The exact reservation defer retires every page already
+                // tagged by this attempt and leaves the cursor reusable.
                 return kENOMEM;
             }
-            mm::AddressSpaceMapUserPage(p->as, va, frame, pte_flags);
+            if (!mm::AddressSpaceMapReservedUserPage(p->as, anonymous_reservation, va, frame, pte_flags))
+            {
+                mm::FreeFrame(frame);
+                return kENOMEM;
+            }
         }
+        if (!mm::AddressSpaceCommitUserReservation(p->as, anonymous_reservation, base, anonymous_end))
+            return kENOMEM;
+        release_anonymous_mapping.dismiss();
         p->linux_mmap_cursor += aligned;
         KLOG_INFO_AV(::duetos::core::LogArea::Linux, "linux/mm", "mmap anon OK; base", base);
         KLOG_INFO_AV(::duetos::core::LogArea::Linux, "linux/mm", "  aligned len", aligned);
@@ -340,33 +435,45 @@ i64 DoMmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
         KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/mm", "mmap file: fd out of range -> EBADF; fd", fd);
         return kEBADF;
     }
+    if ((off & (mm::kPageSize - 1)) != 0 || off > ~u64{0} - aligned)
+        return kEINVAL;
+
+    const u64 file_mapping_end = base + aligned;
+    mm::AddressSpaceReservationToken file_mapping_reservation{};
+    if (!mm::AddressSpaceReserveUserRange(p->as, base, file_mapping_end, &file_mapping_reservation))
+        return kENOMEM;
+    DUETOS_DEFER_NAMED(release_file_mapping, (void)mm::AddressSpaceReleaseUserReservation(
+                                                 p->as, file_mapping_reservation, base, file_mapping_end));
     // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
     fd = util::MaskedIndex(fd, 16);
-    if (p->linux_fds[fd].state != 2)
+
+    core::LinuxFdAcquired acquired{};
+    if (!core::LinuxFdAcquire(p, static_cast<u32>(fd), 2, &acquired))
     {
         KLOG_WARN_AV(::duetos::core::LogArea::Linux, "linux/mm", "mmap file: fd not open -> EBADF; fd", fd);
         return kEBADF;
     }
+    DUETOS_DEFER(core::LinuxFdAcquiredRelease(&acquired));
+
+    core::LinuxFdIoGuard io_guard{};
+    if (!core::LinuxFdIoGuardEnter(&acquired, &io_guard))
+        return kEBADF;
+    DUETOS_DEFER(core::LinuxFdIoGuardExit(&io_guard));
+
+    core::Process::LinuxFd snapshot{};
+    if (!core::LinuxFdRefreshRetainedRegular(&acquired, &io_guard, &snapshot))
+        return kEBADF;
 
     const auto* v = fs::fat32::Fat32Volume(0);
     if (v == nullptr)
         return kEIO;
 
-    // Per-call on the kernel stack, NOT process-shared static: the
-    // FAT32 read and the per-page AllocateFrame loop below can
-    // block, so a shared buffer would let a concurrent mmap() from
-    // another process leak its file bytes into this mapping.
-    u8 file_scratch[4096];
     fs::fat32::DirEntry entry;
     for (u64 i = 0; i < sizeof(entry.name); ++i)
         entry.name[i] = 0;
     entry.attributes = 0;
-    entry.first_cluster = p->linux_fds[fd].first_cluster;
-    entry.size_bytes = p->linux_fds[fd].size;
-    const i64 read_total = fs::fat32::Fat32ReadFile(v, &entry, file_scratch, sizeof(file_scratch));
-    if (read_total < 0)
-        return kEIO;
-    const u64 file_size = static_cast<u64>(read_total);
+    entry.first_cluster = snapshot.first_cluster;
+    entry.size_bytes = snapshot.size;
 
     for (u64 page_idx = 0; page_idx * mm::kPageSize < aligned; ++page_idx)
     {
@@ -374,25 +481,29 @@ i64 DoMmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
         const mm::PhysAddr frame = mm::AllocateFrame().value_or(mm::kNullFrame);
         if (frame == mm::kNullFrame)
         {
-            // Unwind [base, va) — same partial-OOM hazard as the
-            // anon branch: leaked frames + an unadvanced cursor
-            // make the next mmap re-map base and panic.
-            for (u64 j = base; j < va; j += mm::kPageSize)
-                (void)mm::AddressSpaceUnmapUserPage(p->as, j);
+            // The reservation cleanup retires every page already tagged by
+            // this mapping attempt and keeps the cursor reusable.
             return kENOMEM;
         }
-        u8* dst = static_cast<u8*>(mm::PhysToVirt(frame));
         const u64 page_off_in_file = off + page_idx * mm::kPageSize;
-        if (page_off_in_file < file_size)
+        if (page_off_in_file < snapshot.size)
         {
-            u64 to_copy = file_size - page_off_in_file;
-            if (to_copy > mm::kPageSize)
-                to_copy = mm::kPageSize;
-            for (u64 i = 0; i < to_copy; ++i)
-                dst[i] = file_scratch[page_off_in_file + i];
+            void* destination = mm::PhysToVirt(frame);
+            if (fs::fat32::Fat32ReadAt(v, &entry, page_off_in_file, destination, mm::kPageSize) < 0)
+            {
+                mm::FreeFrame(frame);
+                return kEIO;
+            }
         }
-        mm::AddressSpaceMapUserPage(p->as, va, frame, pte_flags);
+        if (!mm::AddressSpaceMapReservedUserPage(p->as, file_mapping_reservation, va, frame, pte_flags))
+        {
+            mm::FreeFrame(frame);
+            return kENOMEM;
+        }
     }
+    if (!mm::AddressSpaceCommitUserReservation(p->as, file_mapping_reservation, base, file_mapping_end))
+        return kENOMEM;
+    release_file_mapping.dismiss();
     p->linux_mmap_cursor += aligned;
     KLOG_INFO_AV(::duetos::core::LogArea::Linux, "linux/mm", "mmap file OK; base", base);
     KLOG_INFO_AV(::duetos::core::LogArea::Linux, "linux/mm", "  fd", fd);
@@ -420,7 +531,15 @@ i64 DoMunmap(u64 addr, u64 len)
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || p->as == nullptr)
         return kEINVAL;
-    const u64 aligned_len = (len + 0xFFF) & ~u64(0xFFF);
+    core::ScopedProcessRuntimeAccess runtime_access(p);
+    if (!runtime_access)
+        return kESRCH;
+    const u64 aligned_len = PageUp(len);
+    if (aligned_len == 0)
+        return kEINVAL;
+    constexpr u64 kUserMaxExclusive = 0x0000800000000000ULL;
+    if (addr >= kUserMaxExclusive || aligned_len > (kUserMaxExclusive - addr))
+        return kEINVAL;
     u64 freed = 0;
     for (u64 off = 0; off < aligned_len; off += mm::kPageSize)
     {
@@ -453,9 +572,9 @@ i64 DoMunmap(u64 addr, u64 len)
 //     [old_addr + new_len, old_addr + old_len), return old_addr.
 //   same  (new_len == old_len): no-op, return old_addr.
 //   grow with MAYMOVE: allocate a fresh range at the linux_mmap
-//     cursor (same shape as DoMmap anonymous), copy each old
-//     page's contents page-by-page via the direct map, unmap the
-//     old range, return the new base.
+//     cursor (same shape as DoMmap anonymous), copy through the
+//     mutation-serialized AddressSpace API, unmap the old range,
+//     return the new base.
 i64 DoMremap(u64 old_addr, u64 old_len, u64 new_len, u64 flags, u64 new_addr)
 {
     constexpr u64 kPageSize = 4096;
@@ -471,11 +590,21 @@ i64 DoMremap(u64 old_addr, u64 old_len, u64 new_len, u64 flags, u64 new_addr)
         return kEINVAL; // sub-GAP — fixed VA not honored
 
     core::Process* p = core::CurrentProcess();
-    if (p == nullptr || p->abi_flavor != core::kAbiLinux)
+    if (p == nullptr || p->as == nullptr || p->abi_flavor != core::kAbiLinux)
         return kEINVAL;
+    core::ScopedProcessRuntimeAccess runtime_access(p);
+    if (!runtime_access)
+        return kESRCH;
 
-    const u64 old_pages = PageUp(old_len) / kPageSize;
-    const u64 new_pages = PageUp(new_len) / kPageSize;
+    const u64 old_aligned = PageUp(old_len);
+    const u64 new_aligned = PageUp(new_len);
+    if (old_aligned == 0 || new_aligned == 0)
+        return kEINVAL;
+    constexpr u64 kMremapUserMaxExclusive = 0x0000800000000000ULL;
+    if (old_addr >= kMremapUserMaxExclusive || old_aligned > (kMremapUserMaxExclusive - old_addr))
+        return kEFAULT;
+    const u64 old_pages = old_aligned / kPageSize;
+    const u64 new_pages = new_aligned / kPageSize;
 
     if (new_pages == old_pages)
         return static_cast<i64>(old_addr);
@@ -498,10 +627,18 @@ i64 DoMremap(u64 old_addr, u64 old_len, u64 new_len, u64 flags, u64 new_addr)
     // Defense-in-depth — same kUserMax gate as DoMmap. If new_pages
     // is large enough to push the mapping into the kernel half,
     // refuse before AddressSpaceMapUserPage panics.
-    constexpr u64 kMremapUserMaxExclusive = 0x0000800000000000ULL;
-    const u64 want_bytes = new_pages * kPageSize;
-    if (base >= kMremapUserMaxExclusive || want_bytes > (kMremapUserMaxExclusive - base))
+    if (base >= kMremapUserMaxExclusive || new_aligned > (kMremapUserMaxExclusive - base))
         return kENOMEM;
+
+    const u64 destination_end = base + new_aligned;
+    const u64 source_end = old_addr + old_aligned;
+    if (base < source_end && destination_end > old_addr)
+        return kENOMEM;
+    mm::AddressSpaceReservationToken destination_reservation{};
+    if (!mm::AddressSpaceReserveUserRange(p->as, base, destination_end, &destination_reservation))
+        return kENOMEM;
+    DUETOS_DEFER_NAMED(release_destination, (void)mm::AddressSpaceReleaseUserReservation(p->as, destination_reservation,
+                                                                                         base, destination_end));
 
     // Allocate new frames for the entire new range.
     for (u64 i = 0; i < new_pages; ++i)
@@ -509,37 +646,29 @@ i64 DoMremap(u64 old_addr, u64 old_len, u64 new_len, u64 flags, u64 new_addr)
         const mm::PhysAddr fr = mm::AllocateFrame().value_or(mm::kNullFrame);
         if (fr == mm::kNullFrame)
         {
-            // Unwind freshly mapped frames so we don't leak.
-            for (u64 j = 0; j < i; ++j)
-                (void)mm::AddressSpaceUnmapUserPage(p->as, base + j * kPageSize);
+            // The reservation cleanup retires only pages tagged with this
+            // exact token; it cannot tear down a peer's replacement mapping.
             return kENOMEM;
         }
-        mm::AddressSpaceMapUserPage(p->as, base + i * kPageSize, fr, pte_flags);
+        if (!mm::AddressSpaceMapReservedUserPage(p->as, destination_reservation, base + i * kPageSize, fr, pte_flags))
+        {
+            mm::FreeFrame(fr);
+            return kENOMEM;
+        }
     }
 
-    // Copy old contents page-by-page via the direct map. Unmapped
-    // old pages (kNullFrame) just leave the corresponding new
-    // page zero-initialised, which is the same shape Linux exposes
-    // when growing past a hole inside the original VMA.
-    for (u64 i = 0; i < old_pages; ++i)
-    {
-        const u64 src_va = old_addr + i * kPageSize;
-        const u64 dst_va = base + i * kPageSize;
-        const mm::PhysAddr src_frame = mm::AddressSpaceLookupUserFrame(p->as, src_va);
-        const mm::PhysAddr dst_frame = mm::AddressSpaceLookupUserFrame(p->as, dst_va);
-        if (src_frame == mm::kNullFrame || dst_frame == mm::kNullFrame)
-            continue;
-        const u8* src = static_cast<const u8*>(mm::PhysToVirt(src_frame));
-        u8* dst = static_cast<u8*>(mm::PhysToVirt(dst_frame));
-        for (u64 b = 0; b < kPageSize; ++b)
-            dst[b] = src[b];
-    }
+    // Keep the source intact until every bounded read/write transaction has
+    // succeeded. A missing source page is EFAULT, and any failure releases
+    // the exact destination reservation so the operation is failure-atomic.
+    if (!CopyUserRangeOverlapSafe(p->as, old_addr, base, old_aligned))
+        return kEFAULT;
 
-    // Free old VAs. Each unmap returns the frame to the allocator.
-    for (u64 i = 0; i < old_pages; ++i)
-        (void)mm::AddressSpaceUnmapUserPage(p->as, old_addr + i * kPageSize);
+    if (!mm::AddressSpaceCommitUserReservationReplacingOwnedRange(p->as, destination_reservation, base, destination_end,
+                                                                  old_addr, source_end))
+        return kENOMEM;
+    release_destination.dismiss();
 
-    p->linux_mmap_cursor += new_pages * kPageSize;
+    p->linux_mmap_cursor += new_aligned;
     arch::SerialWrite("[linux] mremap MAYMOVE old=");
     arch::SerialWriteHex(old_addr);
     arch::SerialWrite(" old_pages=");
@@ -579,18 +708,37 @@ i64 DoMsync(u64 addr, u64 len, u64 flags)
 // resident. Bad address surfaces as EFAULT.
 i64 DoMincore(u64 addr, u64 len, u64 user_vec)
 {
-    (void)addr;
     if (user_vec == 0)
         return kEFAULT;
-    const u64 pages = (len + 0xFFFu) / 0x1000u;
-    if (pages == 0)
+    if ((addr & (mm::kPageSize - 1)) != 0)
+        return kEINVAL;
+    if (len == 0)
         return 0;
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || p->as == nullptr)
+        return kEINVAL;
+    core::ScopedProcessRuntimeAccess runtime_access(p);
+    if (!runtime_access)
+        return kESRCH;
+    const u64 aligned_len = PageUp(len);
+    if (aligned_len == 0)
+        return kEINVAL;
+    constexpr u64 kUserMaxExclusive = 0x0000800000000000ULL;
+    if (addr >= kUserMaxExclusive || aligned_len > (kUserMaxExclusive - addr))
+        return kEFAULT;
+    const u64 pages = aligned_len / mm::kPageSize;
     constexpr u64 kMaxPages = 4096;
-    const u64 to_mark = (pages > kMaxPages) ? kMaxPages : pages;
+    if (pages > kMaxPages)
+        return kENOMEM;
+    for (u64 i = 0; i < pages; ++i)
+    {
+        if (mm::AddressSpaceProbePte(p->as, addr + i * mm::kPageSize) == mm::kNullFrame)
+            return kEFAULT;
+    }
     u8 ones[kMaxPages]; // per-call, not process-shared static
-    for (u64 i = 0; i < to_mark; ++i)
+    for (u64 i = 0; i < pages; ++i)
         ones[i] = 1;
-    if (!mm::CopyToUser(reinterpret_cast<void*>(user_vec), ones, to_mark))
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_vec), ones, pages))
         return kEFAULT;
     return 0;
 }

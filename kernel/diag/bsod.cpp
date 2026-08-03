@@ -201,7 +201,7 @@ u32 DrawDecU32(u32 x, u32 y, u32 v, u32 fg, u32 bg)
     }
     else
     {
-        while (v > 0 && n < sizeof(buf))
+        while (v > 0 && n + 1 < sizeof(buf))
         {
             buf[n++] = static_cast<char>('0' + v % 10);
             v /= 10;

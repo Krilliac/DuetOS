@@ -1,42 +1,32 @@
 #pragma once
 
 /*
- * Win32 section objects — kernel-resident pools of physical
- * frames that can be mapped into one or more process address
- * spaces via NtMapViewOfSection. Backs Windows shared memory
- * + (eventually) memory-mapped files.
+ * Win32 anonymous section objects.
  *
- * v0 SCOPE:
- *   - Anonymous (pagefile-backed) sections only. NtCreateSection
- *     with FileHandle != 0 returns STATUS_NOT_IMPLEMENTED.
- *   - Sections are RAM-resident from creation; no demand-zero,
- *     no swap, no SEC_RESERVE-then-commit phasing.
- *   - Cap: 8 live sections, each up to kSectionMaxBytes bytes.
- *     The pool is global; NtCreateSection picks the first free
- *     slot.
- *   - Cross-process map cap-gated on kCapDebug — same threat
- *     class as cross-process VM read/write.
- *   - View granularity: whole pages. Caller-supplied
- *     SectionOffset must be page-aligned and 0 in v0; non-zero
- *     returns STATUS_INVALID_PARAMETER.
+ * A section owns a bounded vector of physical frames that may be installed as
+ * borrowed mappings in one or more process address spaces. File-backed,
+ * demand-zero, swap, and non-zero SectionOffset views remain out of scope.
  *
- * Refcount semantics:
- *   - Section.refcount == open-handles + active-mappings.
- *   - NtCreateSection bumps it to 1 (the new handle).
- *   - NtMapViewOfSection bumps it once per view.
- *   - NtClose / NtUnmapViewOfSection drop one each.
- *   - When refcount hits 0, frames are returned to the
- *     physical allocator and the slot goes back to free.
+ * Lifetime model:
+ *   - Every reference names a non-wrapping `{slot, generation}` key.
+ *   - A slot moves Free -> Constructing -> Live -> Retiring -> Free.
+ *   - The live refcount is open handles + active views + temporary operation
+ *     pins. Exactly the 1 -> 0 transition owns retirement.
+ *   - Allocation, address-space mutation, TLB waits, and frame release never
+ *     run under the global section-pool spinlock.
+ *   - Each slot has a persistent sleepable map mutex. It serializes sticky
+ *     W^X history with map/unmap and is never reinitialized between reuse.
+ *
+ * Lock graph (no reverse edges):
+ *   process section-row lock -> global section-pool lock
+ *   section map mutex -> global section-pool lock (brief snapshot/publish)
+ *   section map mutex -> address-space mutation lock -> regions lock
  */
 
 #include "mm/frame_allocator.h"
-#include "util/saturating.h"
+#include "proc/resource_domain.h"
 #include "util/types.h"
 
-namespace duetos::core
-{
-struct Process;
-}
 namespace duetos::mm
 {
 struct AddressSpace;
@@ -45,89 +35,64 @@ struct AddressSpace;
 namespace duetos::subsystems::win32::section
 {
 
-// Hard upper bound on a single section: 4 MiB. Catches a
-// caller that accidentally passes garbage in MaximumSize and
-// keeps the per-section frame pointer table small (1024
-// entries × 8 bytes = 8 KiB / section).
 constexpr u64 kSectionMaxBytes = 4 * 1024 * 1024;
 constexpr u32 kSectionPoolCap = 8;
+static_assert(kSectionPoolCap == core::kResourceSectionPoolCapacity,
+              "Section pool and resource-charge capacity must stay identical");
+// Keep identities positive and exactly representable through the PE32 ABI:
+// generations occupy public-handle bits 12..30.
+constexpr u32 kSectionMaxGeneration = 0x7FFFF;
 
-struct Section
+struct SectionKey
 {
-    bool in_use;
-    u32 num_pages;
-    // Open-handles + active-mappings. Saturating: an attacker driving
-    // NtDuplicateHandle on the same section against a Win32 PE
-    // process cannot wrap a u32 increment past 2^32 to fold to a low
-    // value and trigger a premature SectionRelease teardown (CVE-class
-    // refcount-overflow-to-UAF; wiki/security/Linux-CVE-Audit.md
-    // class O). Saturation caps at u32 max.
-    util::SatU32 refcount;
-    u32 page_protect;     // Win32 PAGE_* on creation
-    mm::PhysAddr* frames; // owned, length = num_pages, 0 entries are unallocated
-    // SEC-004
-    // Sticky W^X history across ALL views of this section. A PE could map the
-    // same section RW at va1 and RX at va2, write shellcode through va1, then
-    // execute it through va2 — classic W^X bypass that no per-view PTE check
-    // catches (each view is individually W^X-clean). Once a writable view has
-    // ever existed, no executable view is allowed for the life of the section
-    // (and vice versa). The flags are sticky (never cleared on unmap): the
-    // frames may still hold attacker-controlled bytes after a writable view is
-    // torn down, so a later executable view is just as dangerous.
-    bool has_writable_view;
-    bool has_executable_view;
+    u32 slot;
+    u32 generation;
 };
 
-// Returns the index of a freshly-created section, or -1 on
-// any failure (size==0, size>kSectionMaxBytes, pool full,
-// frame allocator out). The caller (SYS_SECTION_CREATE) is
-// responsible for installing the resulting index into a
-// Win32SectionHandle slot in the calling Process. Sections
-// start with refcount = 1 (the new handle).
-i32 SectionCreate(u64 size_bytes, u32 page_protect);
+constexpr SectionKey kInvalidSectionKey{kSectionPoolCap, 0};
 
-// Decrements refcount on the section at pool index `idx`.
-// Frees frames + pool slot when refcount hits 0. No-op on
-// already-free / out-of-range index.
-void SectionRelease(u32 idx);
+constexpr bool SectionKeyIsValid(SectionKey key)
+{
+    return key.slot < kSectionPoolCap && key.generation != 0 && key.generation <= kSectionMaxGeneration;
+}
 
-// Increments refcount on the section at pool index `idx`.
-// Used when a new mapping is installed.
-void SectionRetain(u32 idx);
+constexpr bool operator==(SectionKey lhs, SectionKey rhs)
+{
+    return lhs.slot == rhs.slot && lhs.generation == rhs.generation;
+}
 
-// Map a section's entire frame set into `target_as` starting at
-// `base_va`. `base_va` must be 4 KiB-aligned. Each page gets
-// its own PTE installed via AddressSpaceMapBorrowedPage (the
-// AS does NOT take ownership — the section pool owns the frames).
-// Returns true on success; false if any PTE install conflicts
-// with an existing mapping (caller should pick a different
-// base_va). The section's refcount is NOT touched here — the
-// caller (SYS_SECTION_MAP) handles the SectionRetain.
-bool SectionMap(u32 idx, mm::AddressSpace* target_as, u64 base_va, u32 view_protect);
+// Transactional create API. On success, key_out owns the initial handle
+// reference. The caller must publish that key into a handle row or release it.
+// page_protect is the section's immutable maximum access: only exact,
+// representable PAGE_READONLY/READWRITE/EXECUTE/EXECUTE_READ values are
+// accepted. Copy-on-write and writable+executable protections are refused.
+bool SectionCreate(core::ResourceDomainKey domain, u64 size_bytes, u32 page_protect, SectionKey* key_out);
 
-// Unmap a section view. Walks `num_pages` consecutive pages
-// starting at `base_va` and clears each PTE via
-// AddressSpaceUnmapBorrowedPage. Returns true if every page
-// was actually mapped (i.e. the unmap matches a prior
-// SectionMap); false if any page was already unmapped — that
-// case still clears the rest, so the AS isn't left half-mapped.
-bool SectionUnmap(u32 idx, mm::AddressSpace* target_as, u64 base_va);
+// Generation-exact reference operations. Retain refuses stale, constructing,
+// retiring, and saturated objects. Release performs final frame teardown only
+// for the exact live generation.
+bool SectionRetain(SectionKey key);
+void SectionRelease(SectionKey key);
 
-// Returns the size in bytes of a section's full view (page-
-// rounded). 0 on out-of-range / not-in-use index.
-u64 SectionViewSize(u32 idx);
+// Snapshot whether an exact view protection is supported and is a subset of
+// the immutable maximum stored by SectionCreate. Callers may use this to
+// return an ingress error before reserving process/view state; the map API
+// repeats the check transactionally and remains authoritative.
+bool SectionViewProtectionIsCompatible(SectionKey key, u32 view_protect);
 
-// Walk every live pool entry; for each, probe the leaf PTE
-// at `base_va` in `target_as` and check whether it points at
-// the section's frames[0]. If so, unmap that section's view
-// and return its pool index. Returns -1 if no section's
-// first frame lives at `base_va` in `target_as` (i.e. the
-// caller passed a base_va that doesn't correspond to any
-// active section view).
-i32 SectionUnmapAtVa(mm::AddressSpace* target_as, u64 base_va);
+// Atomically map the full frame vector and adopt one view reference on
+// success. Failure leaves neither PTEs nor a reference behind. Unknown,
+// copy-on-write, writable+executable, and maximum-exceeding protections fail.
+bool SectionMapAndRetainView(SectionKey key, mm::AddressSpace* target_as, u64 base_va, u32 view_protect);
 
-// Resolve a Win32 section handle on `caller` to its pool
-// index. Returns -1 on out-of-range / not-in-use handles.
-i32 LookupSectionHandle(core::Process* caller, u64 handle);
+// Atomically unmap the exact expected frame vector and release the view
+// reference on success. A stale key or PTE mismatch leaves both intact.
+bool SectionUnmapAndReleaseView(SectionKey key, mm::AddressSpace* target_as, u64 base_va);
+
+// Page-rounded size of the exact live generation, or zero for a stale key.
+u64 SectionViewSize(SectionKey key);
+
+// Boot-time generation, ref-balance, and transactional-view regression.
+void SectionLifetimeSelfTest();
 
 } // namespace duetos::subsystems::win32::section

@@ -35,7 +35,7 @@ i64 DoExitGroup(u64 status)
     SerialWriteHex(status);
     SerialWrite("\n");
     // Stash the exit code on the Process so the eventual
-    // ProcessRelease teardown can pass it to a waiting parent.
+    // last-task runtime teardown can pass it to a waiting parent.
     // Linux encodes the 8-bit status in bits 8..15 of wstatus when
     // WIFEXITED is true; we keep the raw status here and let
     // wait4 do the encoding.
@@ -45,15 +45,13 @@ i64 DoExitGroup(u64 status)
         p->linux_was_signaled = false;
         p->linux_exit_signal = 0;
     }
-    // Wake every pidfd poller before SchedExit transitions us
-    // into TaskState::Dead. The waiter's predicate
-    // (LinuxFdEpollReady on a state-12 fd) will see
-    // SchedIsPidZombie === true on this exact wakeup, so the
-    // first scheduled poll completes with EPOLLIN instead of
-    // sleeping again.
+    // Prompt pidfd pollers before publishing the deferred exit request. The
+    // reaper issues the authoritative second wake after publishing Exited, so
+    // an SMP poller that rechecks early cannot remain asleep.
     LinuxPidfdExitWake();
-    sched::SchedExit();
-    // sched::SchedExit is [[noreturn]]; this line is unreachable.
+    sched::SchedRequestCurrentExit(sched::KillReason::ExplicitExit, static_cast<u32>(status & 0xFF));
+    // Return through the Linux dispatcher so handler-local and dispatcher
+    // guards unwind before the outer cancellation boundary terminates us.
     return 0;
 }
 
@@ -68,7 +66,7 @@ i64 DoExit(u64 status)
 
 // Linux getpid() returns the TGID — in our v0 single-thread-per-
 // process model this is the Process pid (Process::pid, the same id
-// SchedFindProcessByPid resolves against). Returning CurrentTaskId()
+// scheduler process lookup resolves against). Returning CurrentTaskId()
 // here would hand back the scheduler task tid, which is a different
 // counter; the immediate symptom was pidfd_open(getpid()) coming
 // back -ESRCH because the tid never matched any Process->pid.
@@ -98,37 +96,28 @@ i64 DoSchedYield()
     return 0;
 }
 
-// Linux: tgkill(tgid, tid, sig). Used by musl's abort() to send
-// SIGABRT to itself. v0 has no signal delivery — if the target
-// is self, just exit with an abort-ish status; any other tid
-// returns -ESRCH.
 // Linux: tgkill(tgid, tid, sig). v0 collapses to the per-process
 // signal-delivery model — tid identifies the task whose owning
-// Process is the delivery target. tgid is accepted but only
-// validated at the per-task lookup; mismatches surface as -ESRCH.
+// Process is the delivery target. The retained TID lookup and TGID
+// validation prevent a task lookup/reap race and reject a thread-group
+// mismatch with -ESRCH.
 i64 DoTgkill(u64 tgid, u64 tid, u64 sig)
 {
     KLOG_INFO_2V("linux/proc", "DoTgkill", "tid", tid, "sig", sig);
-    (void)tgid;
-    if (sig == 0)
-    {
-        // Existence-probe form: verify the tid is alive.
-        sched::Task* t = sched::SchedFindTaskByTid(tid);
-        return (t != nullptr) ? 0 : kESRCH;
-    }
-    sched::Task* t = sched::SchedFindTaskByTid(tid);
-    if (t == nullptr)
+    core::ScopedProcessRef target(sched::SchedFindProcessByTidRetained(tid));
+    if (!target || target->pid != tgid)
     {
         KLOG_WARN_V("linux/proc", "DoTgkill: ESRCH (tid not found)", tid);
         return kESRCH;
     }
-    core::Process* target = sched::TaskProcess(t);
-    if (target == nullptr)
-    {
-        KLOG_WARN_V("linux/proc", "DoTgkill: ESRCH (kernel-only task)", tid);
-        return kESRCH; // kernel-only task — no Linux process to signal
-    }
-    return LinuxSignalDeliver(target, static_cast<u32>(sig));
+    core::ScopedProcessRuntimeAccess target_runtime(target.Get());
+    if (!target_runtime)
+        return kESRCH;
+    if (sig == 0)
+        return 0;
+    if (!sched::SchedProcessAlive(target->pid))
+        return kESRCH;
+    return LinuxSignalDeliver(target.Get(), static_cast<u32>(sig));
 }
 
 // Linux: kill(pid, sig). pid > 0 → deliver to the matching process.
@@ -144,11 +133,15 @@ i64 DoKill(u64 pid, u64 sig)
         // Existence probe.
         if (spid <= 0)
             return 0;
-        return (sched::SchedFindProcessByPid(static_cast<u64>(spid)) != nullptr) ? 0 : kESRCH;
+        return sched::SchedProcessExists(static_cast<u64>(spid)) ? 0 : kESRCH;
     }
+    core::ScopedProcessRef retained_target;
     core::Process* target = nullptr;
     if (spid > 0)
-        target = sched::SchedFindProcessByPid(static_cast<u64>(spid));
+    {
+        retained_target.Reset(sched::SchedFindProcessByPidRetained(static_cast<u64>(spid)));
+        target = retained_target.Get();
+    }
     else if (spid == 0)
         target = core::CurrentProcess();
     else
@@ -161,6 +154,11 @@ i64 DoKill(u64 pid, u64 sig)
         KLOG_WARN_V("linux/proc", "DoKill: ESRCH (target not found)", pid);
         return kESRCH;
     }
+    core::ScopedProcessRuntimeAccess target_runtime(target);
+    if (!target_runtime)
+        return kESRCH;
+    if (!sched::SchedProcessAlive(target->pid))
+        return kESRCH;
     return LinuxSignalDeliver(target, static_cast<u32>(sig));
 }
 
@@ -195,7 +193,7 @@ i64 DoGetPgid(u64 pid)
     // pid != 0: lookup the target. v0 hasn't built a real
     // pgid table, so report pid itself (each process is its
     // own group leader). -ESRCH if pid doesn't exist.
-    if (sched::SchedFindProcessByPid(pid) == nullptr)
+    if (!sched::SchedProcessExists(pid))
         return kESRCH;
     return static_cast<i64>(pid);
 }
@@ -208,7 +206,7 @@ i64 DoGetSid(u64 pid)
         const auto* p = core::CurrentProcess();
         return (p != nullptr) ? static_cast<i64>(p->pid) : 0;
     }
-    if (sched::SchedFindProcessByPid(pid) == nullptr)
+    if (!sched::SchedProcessExists(pid))
         return kESRCH;
     return static_cast<i64>(pid);
 }
@@ -246,13 +244,22 @@ i64 DoSetsid()
 // documented sub-GAP.
 // =============================================================
 
-// tkill(tid, sig) — single-thread variant of tgkill. Modern
-// Linux kernels treat it as tgkill(getpid(), tid, sig). Our
-// DoTgkill ignores tgid for the purpose of tid -> Process::pid
-// lookup, so passing 0 is harmless.
+// tkill(tid, sig) — legacy per-TID delivery without tgkill's caller-supplied
+// thread-group check. Keep its retained lookup and runtime admission explicit:
+// forwarding a synthetic tgid=0 would reject every ordinary process.
 i64 DoTkill(u64 tid, u64 sig)
 {
-    return DoTgkill(0, tid, sig);
+    core::ScopedProcessRef target(sched::SchedFindProcessByTidRetained(tid));
+    if (!target)
+        return kESRCH;
+    core::ScopedProcessRuntimeAccess target_runtime(target.Get());
+    if (!target_runtime)
+        return kESRCH;
+    if (sig == 0)
+        return 0;
+    if (!sched::SchedProcessAlive(target->pid))
+        return kESRCH;
+    return LinuxSignalDeliver(target.Get(), static_cast<u32>(sig));
 }
 
 // rt_tgsigqueueinfo(tgid, tid, sig, info) — tgkill that also
@@ -265,12 +272,12 @@ i64 DoRtTgsigqueueinfo(u64 tgid, u64 tid, u64 sig, u64 user_info)
 }
 
 // rt_sigqueueinfo(tgid, sig, info) — process-wide sibling of
-// rt_tgsigqueueinfo. v0 treats tid==tgid since the process
-// model is single-threaded.
+// rt_tgsigqueueinfo. A Process PID is not a scheduler Task TID, so
+// route through the retained PID lookup in kill rather than tgkill.
 i64 DoRtSigqueueinfo(u64 tgid, u64 sig, u64 user_info)
 {
     (void)user_info;
-    return DoTgkill(tgid, tgid, sig);
+    return DoKill(tgid, sig);
 }
 
 // sched_setattr / sched_getattr — extended scheduler policy

@@ -543,20 +543,23 @@ i64 NtDoGetCurrentProcessorNumber(arch::TrapFrame* /*f*/)
 }
 
 // NtTerminateThread(HANDLE Thread, NTSTATUS ExitStatus): we have
-// one task per process in v0, so this behaves like exit.
-[[noreturn]] void NtDoTerminateThread(arch::TrapFrame* f)
+// one task per process in v0, so this behaves like exit. Termination intent is
+// cooperative: both helpers return through this translator so its scopes and
+// the native dispatcher's telemetry unwind before the outer cancellation
+// boundary performs the non-returning task teardown.
+i64 NtDoTerminateThread(arch::TrapFrame* f)
 {
     const u64 exit_status = f->rdx;
-    ::duetos::subsystems::linux::LinuxExit(exit_status);
+    return ::duetos::subsystems::linux::LinuxExit(exit_status);
 }
 
 // NtTerminateProcess(HANDLE Process, NTSTATUS ExitStatus): same as
 // above for single-task-per-process. A proper implementation would
 // null-check the handle (NULL = current) and reap all threads.
-[[noreturn]] void NtDoTerminateProcess(arch::TrapFrame* f)
+i64 NtDoTerminateProcess(arch::TrapFrame* f)
 {
     const u64 exit_status = f->rdx;
-    ::duetos::subsystems::linux::LinuxExit(exit_status);
+    return ::duetos::subsystems::linux::LinuxExit(exit_status);
 }
 
 // NtFlushBuffersFile(HANDLE, PIO_STATUS_BLOCK): forward to fsync
@@ -839,11 +842,11 @@ Result NtTranslateToLinux(arch::TrapFrame* frame)
         break;
     case kNtTerminateThread:
         LogNtTranslation(nt_nr, "linux:exit");
-        NtDoTerminateThread(frame); // [[noreturn]]
+        r = {true, NtDoTerminateThread(frame)};
         break;
     case kNtTerminateProcess:
         LogNtTranslation(nt_nr, "linux:exit_group");
-        NtDoTerminateProcess(frame); // [[noreturn]]
+        r = {true, NtDoTerminateProcess(frame)};
         break;
     default:
         // Nothing wired for this NT number — let the caller see

@@ -1,8 +1,8 @@
 #include "log/klog_persist.h"
 
+#include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/timer.h"
-#include "cpu/percpu.h"
 #include "fs/fat32.h"
 #include "log/klog.h"
 #include "time/timekeeper.h"
@@ -75,7 +75,12 @@ constexpr u32 kRotationDepth = 4;
 // log line; flushes opportunistically on '\n' once half-full, and
 // on the external 1 Hz timer. Long lines (>512B) flush as soon as
 // the buffer fills.
-constexpr u64 kAreaBufBytes = 512;
+// Sized for the async design: the sink only ever buffers (no inline
+// filesystem I/O), and the UiTicker flusher drains once per second —
+// so each area buffer must absorb a full second of Info+ lines from a
+// bursty subsystem. 512 bytes forced mid-line synchronous flushes;
+// 4 KiB × 32 areas costs 128 KiB of .bss and rides out real bursts.
+constexpr u64 kAreaBufBytes = 4096;
 
 // FAT32 8.3 path: 8-char base + '.' + 3-char extension + NUL = 13.
 // Plus one for safety. Each per-area entry stores both the live
@@ -87,9 +92,53 @@ struct AreaFile
     const char* base; // e.g. "NET", "USB", "KERNEL"
     char buf[kAreaBufBytes];
     u64 used;
+    u64 dropped;      // lines dropped because the buffer was full
     u64 size_on_disk; // estimate, bumped on each successful append
     bool installed;   // live <BASE>.LOG seeded?
 };
+
+// Producer/consumer buffer lock. LineSink (any logging context, any
+// CPU) appends under it; the flusher snapshots-and-clears under it.
+// The critical section is a bounded memcpy — NEVER filesystem I/O —
+// so it is safe to take from contexts where a sleeping mutex is not
+// (spinlocked regions, critical sections, the idle task). Interrupts
+// are disabled while held so an IRQ-context log line on the same CPU
+// cannot deadlock against its own interrupted holder; the panic path
+// uses a bounded spin and drops the line rather than hanging a dying
+// CPU. Hand-rolled CAS instead of sync::SpinLock to keep the hottest
+// log path free of lockdep/held-stack bookkeeping.
+constinit u32 g_buf_lock = 0;
+
+inline u64 BufLockAcquire()
+{
+    u64 saved_rflags = 0;
+    asm volatile("pushfq; pop %0" : "=r"(saved_rflags)::"memory");
+    arch::Cli();
+    for (u64 spins = 0;; ++spins)
+    {
+        u32 expected = 0;
+        if (__atomic_compare_exchange_n(&g_buf_lock, &expected, 1u, /*weak=*/false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+        {
+            return saved_rflags | 1u; // low bit: "acquired"
+        }
+        if (spins > 5'000'000u)
+        {
+            // A holder died with the lock (panic on another CPU).
+            // Restore IF and report failure — caller drops the line.
+            if ((saved_rflags & 0x200u) != 0)
+                arch::Sti();
+            return saved_rflags & ~u64{1};
+        }
+        asm volatile("pause" ::: "memory");
+    }
+}
+
+inline void BufLockRelease(u64 token)
+{
+    __atomic_store_n(&g_buf_lock, 0u, __ATOMIC_RELEASE);
+    if ((token & 0x200u) != 0)
+        arch::Sti();
+}
 
 // 32 slots (matches the 32 LogArea bits). Indices that don't have
 // an entry in `kAreaBases` below stay with base == nullptr and are
@@ -317,21 +366,62 @@ u64 SeedFreshAreaLog(const fs::fat32::Volume* v, const char* base)
 }
 
 // Flush one area's buffer to its live file. Triggers mid-boot
-// rotation if the buffered bytes would push the file past
-// kLogSizeCap.
+// rotation if the buffered bytes would push the file past kLogSizeCap.
+//
+// The producer (LineSink) appends under g_buf_lock with interrupts
+// off; this consumer must NOT hold that lock across FAT32 I/O (the
+// whole point of the async split — I/O off the log-emitting path). So
+// it snapshots the pending bytes into a private staging buffer under a
+// brief lock, clears the shared buffer, then does all filesystem work
+// on the snapshot. A producer that races in during the I/O simply
+// fills the freshly-cleared buffer for the next tick.
+//
+// CALLER CONTRACT: only the single flusher context (UiTicker /
+// KlogPersistFlush) calls this; the FAT32 driver mutex still
+// serializes against other filesystem users, but there is exactly one
+// klog flusher so no two FlushArea calls overlap.
+constinit u8 g_flush_stage[kAreaBufBytes] = {};
+
 void FlushArea(AreaFile* a)
 {
-    if (a == nullptr || a->base == nullptr || a->used == 0)
+    if (a == nullptr || a->base == nullptr)
     {
         return;
     }
+
+    // Snapshot-and-clear under the buffer lock — bounded copy only.
+    u64 staged = 0;
+    {
+        const u64 token = BufLockAcquire();
+        if ((token & 1u) == 0)
+        {
+            return;
+        }
+        staged = a->used;
+        if (staged > sizeof(g_flush_stage))
+        {
+            staged = sizeof(g_flush_stage);
+        }
+        for (u64 i = 0; i < staged; ++i)
+        {
+            g_flush_stage[i] = static_cast<u8>(a->buf[i]);
+        }
+        a->used = 0;
+        BufLockRelease(token);
+    }
+    if (staged == 0)
+    {
+        return;
+    }
+
+    // Everything below is filesystem I/O on the private snapshot, with
+    // the buffer lock released so producers never wait on the disk.
     namespace fat = fs::fat32;
     const fat::Volume* v = fat::Fat32Volume(0);
     if (v == nullptr)
     {
-        // FAT32 disappeared (block-device error); drop the
-        // accumulated bytes rather than spinning.
-        a->used = 0;
+        // FAT32 gone (block-device error); the snapshot is dropped, the
+        // shared buffer is already clear.
         return;
     }
     char live_path[kPathBytes];
@@ -343,38 +433,26 @@ void FlushArea(AreaFile* a)
         a->size_on_disk = SeedFreshAreaLog(v, a->base);
         if (a->size_on_disk == 0)
         {
-            // Create failed — drop the buffer and try again next time.
-            a->used = 0;
-            return;
+            return; // create failed; retry next tick with fresh bytes
         }
         a->installed = true;
     }
 
-    if (a->size_on_disk + a->used > kLogSizeCap)
+    if (a->size_on_disk + staged > kLogSizeCap)
     {
         RotateAreaChain(v, a->base);
         a->size_on_disk = SeedFreshAreaLog(v, a->base);
         if (a->size_on_disk == 0)
         {
-            a->used = 0;
             return;
         }
     }
 
-    // Check the append return value: on success it's the number of
-    // bytes appended (== a->used here); on failure it's -1. If the
-    // FAT layer reported failure (e.g. cluster-chain extension OK
-    // but dir-entry size patch failed — a v0 hazard with no
-    // journal to roll back), don't advance size_on_disk because the
-    // on-disk file didn't actually grow. Still clear `used` so the
-    // next line has a fresh buffer rather than retrying the same
-    // bytes forever.
-    const i64 wrote = fat::Fat32AppendAtPath(v, live_path, a->buf, a->used);
+    const i64 wrote = fat::Fat32AppendAtPath(v, live_path, g_flush_stage, staged);
     if (wrote >= 0)
     {
         a->size_on_disk += static_cast<u64>(wrote);
     }
-    a->used = 0;
 }
 
 // Flush every per-area buffer that has pending bytes.
@@ -397,112 +475,67 @@ void FlushAllAreas()
 
 // Line-sink entry point — called once per fully-formatted klog
 // line. Routes to the area's file based on the area bit.
-void LineSink(LogLevel /*level*/, LogArea area, const char* line, u32 line_len)
+// ASYNC CONTRACT (2026-08-02 redesign): this sink NEVER touches the
+// filesystem. It copies the line into the area's memory buffer under
+// the bounded-spin buffer lock and returns; all FAT32 I/O happens on
+// the UiTicker flusher's once-per-second KlogPersistFlush. History
+// that forced this shape:
+//   - The synchronous sink did block I/O under the global FAT32 mutex
+//     on WHATEVER task logged the line, making every Info line a
+//     kernel-wide serialization point against the disk. Under the
+//     pe-threads/pe-winapi spawn storms the whole system queued behind
+//     the filesystem for minutes (2026-08-02) — including the
+//     heartbeat, which silenced the hung-task detector.
+//   - Six distinct unsafe-context classes accumulated as entry guards
+//     (spinlock held, pre-scheduler AP, idle task, FAT32 re-entry on
+//     the same task, critical section, mid-flush recursion), each a
+//     live kernel wedge or corruption in its day. A memory-only sink
+//     retires the whole family instead of enumerating it.
+void LineSink(LogLevel level, LogArea area, const char* line, u32 line_len)
 {
-    if (g_in_flush || !g_installed || line == nullptr || line_len == 0)
+    if (!g_installed || line == nullptr || line_len == 0)
     {
         return;
     }
-    // Re-entry-safe drop. The persistence path eventually acquires
-    // `g_fat32_mutex` (a sleeping `sched::Mutex`), and MutexLock
-    // unconditionally acquires `g_sched_lock`. Two distinct call
-    // chains can wedge the kernel if we proceed unconditionally:
-    //   1. SpinLockRelease -> LockdepBeforeRelease -> KLOG (the
-    //      old shape — separately fixed by routing lockdep's own
-    //      warnings through raw serial).
-    //   2. WaitQueueBlock (holds g_sched_lock) -> visitor body
-    //      with a UBSan null-check -> __ubsan_handle_* -> Report
-    //      -> KLOG. UBSan can fire from inside ANY spinlock'd
-    //      section, so the cleanest fix is the consumer side:
-    //      drop the persist write when a spinlock is held by
-    //      this CPU.
-    //   3. AP early bring-up: smp.cpp's pre-SchedEnterOnAp
-    //      KLOG_INFO + KBP_PROBE_V on AP-online run on a CPU whose
-    //      `current_task` is still null. Reaching MutexLock here
-    //      derefs Current() (UBSan tm-detail Task null) and then,
-    //      under contention, would call ScheduleLockedHandoff on
-    //      a CPU with no runnable task and no published idle —
-    //      surfacing as "no runnable task available" on the AP
-    //      that wedged. Gating on `scheduler_ready` (set by
-    //      SchedStartIdle's tail) means a pre-bringup AP's klog
-    //      lines never reach the persist sink; they still land in
-    //      the in-memory ring, so BSOD tail / inspect log keep
-    //      them.
-    // The line still hits the klog ring (the producer side runs
-    // first and is lock-free), so dropping the persist write
-    // loses only the on-disk copy of that one line.
-    //   4. The IDLE task. FlushArea → Fat32AppendAtPath → block
-    //      I/O → WaitQueueBlock parks the idle task on a wait
-    //      queue — but idle must NEVER block: with nothing else
-    //      runnable the handoff panics "no runnable task
-    //      available", and with something runnable the blocked
-    //      idle is later force-dispatched by the scheduler's
-    //      idle fallback while still LINKED on the waitqueue,
-    //      whose eventual wake re-enqueues the now-Running idle
-    //      → "popped task not Ready" → double-dispatch → wild
-    //      resume. Observed live 2026-06-10 under nested-KVM
-    //      SMP=4 (Tee → LineSink → FlushArea → fat32 → NVMe
-    //      SubmitAndWait → WaitQueueBlock backtrace in the
-    //      crash dump). Same consumer-side recovery as 1-3:
-    //      drop the persist write; the ring keeps the line.
+    // Persist Info and above only. Debug builds emit a steady stream of
+    // [T]/[D] lines; the in-memory klog ring still holds every level
+    // for BSOD tails and `inspect log` — only the on-disk copy narrows.
+    if (level < LogLevel::Info)
     {
-        cpu::PerCpu* self = cpu::CurrentCpu();
-        if (self != nullptr)
-        {
-            if (self->held_locks_count != 0 || !self->scheduler_ready)
-            {
-                return;
-            }
-            if (self->idle_task != nullptr && self->current_task == self->idle_task)
-            {
-                return;
-            }
-        }
+        return;
     }
     AreaFile* a = SlotFor(area);
     if (a == nullptr || a->base == nullptr)
     {
         return;
     }
-    g_in_flush = true;
-    // Copy line into the per-area buffer; flush opportunistically
-    // when the buffer crosses the half-full mark on a newline, or
-    // when it fills. A line bigger than the buffer is handled by
-    // flushing on overflow and re-entering the loop.
-    //
-    // CRITICAL: keep `g_in_flush` set across the FlushArea calls.
-    // The earlier save/restore-to-false pattern defeated the
-    // re-entry guard — FlushArea calls into fat32, which under
-    // I/O failure emits KLOG_WARN, which re-enters LineSink
-    // here. With `g_in_flush == false` mid-flush, the guard at
-    // the entry let the re-entry through, and the recursive
-    // FlushArea / fat32 / klog cycle blew the kernel stack and
-    // landed a #DF. Holding the flag set throughout the flush
-    // makes the inner re-entry return early via the line-382
-    // guard, dropping the inner log line — exactly the right
-    // recovery for "we're already trying to persist; don't
-    // recurse."
-    for (u32 i = 0; i < line_len; ++i)
+
+    const u64 token = BufLockAcquire();
+    if ((token & 1u) == 0)
     {
-        if (a->used >= sizeof(a->buf))
+        // Lock unobtainable (holder died mid-panic). Drop rather than
+        // hang — the klog ring still has the line.
+        return;
+    }
+    if (a->used + line_len <= sizeof(a->buf))
+    {
+        // memcpy would pull in a libc symbol the freestanding kernel
+        // doesn't link; the bounded byte loop is the house idiom.
+        for (u32 i = 0; i < line_len; ++i)
         {
-            FlushArea(a);
-            if (a->used >= sizeof(a->buf))
-            {
-                // Flush failed for some reason — drop remainder
-                // to keep the buffer well-defined.
-                break;
-            }
+            a->buf[a->used + i] = line[i];
         }
-        a->buf[a->used++] = line[i];
+        a->used += line_len;
     }
-    // Half-buffer threshold: a steady stream flushes in coalesced
-    // chunks rather than one append per line.
-    if (a->used >= sizeof(a->buf) / 2 && line[line_len - 1] == '\n')
+    else
     {
-        FlushArea(a);
+        // Buffer full for this second. Dropping the on-disk copy is the
+        // correct back-pressure: the flusher clears it within a tick,
+        // and the in-memory ring retains every line regardless. Count
+        // it so a persistently-lossy area is visible rather than silent.
+        ++a->dropped;
     }
-    g_in_flush = false;
+    BufLockRelease(token);
 }
 
 // Populate g_area_files[] from the kAreaBases[] table. Called

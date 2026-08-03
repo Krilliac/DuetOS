@@ -39,14 +39,23 @@
  *     daemon) is the first Always entry. OnFailure (respawn only on
  *     non-zero exit) needs the exit code captured at reap time and is
  *     deferred.
- *   - Liveness is polled, not event-driven: the supervisor wakes on a
- *     ~1 s cadence. PIDs are monotonic (proc/process.cpp g_next_pid),
- *     so a poll-by-pid can never be fooled into adopting a reused id.
+ *   - Liveness is still polled in this legacy manager: the supervisor wakes
+ *     on a ~1 s cadence. Process creation mints a non-wrapping exact
+ *     ProcessKey, while current scheduler lookup uses its monotonic PID
+ *     component. The lifecycle-broker replacement will move this edge to
+ *     reaper events.
  *
- * Context: kernel. The manifest is a constant table; the runtime
- * table + supervisor task are owned by service.cpp and mutated only
- * from the supervisor task and the (scheduler-serialised) shell
- * command path.
+ * Context: kernel. The manifest is a constant table. The runtime
+ * table is protected by its own IRQ-safe spinlock because the
+ * supervisor and operator paths may run concurrently on different
+ * CPUs. Loader, logging, and destructor calls never run under that lock.
+ * Start/stop/restart reserve a non-wrapping token, perform loader/resource
+ * construction unlocked, then consume a one-shot Process gate under the
+ * scheduler publication lock. The gate takes the lower-ranked service lock,
+ * records the exact ProcessKey, and the scheduler links the first Task before
+ * releasing its lock. A stop can therefore cancel an in-flight spawn;
+ * rejection destroys the Task while it is still private, so no
+ * runnable-but-unrecorded PID needs a compensating kill.
  */
 
 namespace duetos::core
@@ -130,8 +139,10 @@ bool ServiceStop(const char* name);    // kill the process; clears Always respaw
 bool ServiceRestart(const char* name); // stop (if running) then start
 
 /// Supervisor poll: reconcile each service's recorded state with the
-/// scheduler, and respawn Always-services that have exited. Called by
-/// the supervisor task; exposed so a test/diag can step it directly.
+/// scheduler, and respawn Always-services that have exited. Scheduler
+/// probes run unlocked and are committed only after exact PID and
+/// transition-generation revalidation. Called by the supervisor task;
+/// exposed so a test/diag can step it directly.
 void ServiceManagerTick();
 
 /// Manifest size + indexed status read for `svc` / diag.

@@ -210,7 +210,7 @@ void WriteDec(u32 v)
         ConsoleWrite("0");
         return;
     }
-    while (v != 0 && i < sizeof(buf))
+    while (v != 0 && i + 1 < sizeof(buf))
     {
         buf[i++] = static_cast<char>('0' + (v % 10));
         v /= 10;
@@ -318,9 +318,9 @@ const char* CeaVicName(u8 vic, char scratch[16])
     // Format "vic-N" into scratch.
     if (scratch == nullptr)
         return "vic-?";
-    const char* p = "vic-";
+    constexpr char p[] = "vic-";
     u32 i = 0;
-    while (p[i] != 0 && i < 15)
+    while (i < sizeof(p) - 1 && p[i] != 0)
     {
         scratch[i] = p[i];
         ++i;

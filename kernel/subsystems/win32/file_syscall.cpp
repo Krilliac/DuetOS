@@ -9,6 +9,8 @@
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/traps.h"
+#include "core/service_directory.h"
+#include "core/service_runtime.h"
 #include "diag/kdbg.h"
 #include "ipc/handle_table.h"
 #include "ipc/iocp.h"
@@ -33,21 +35,21 @@ void DoFileOpen(arch::TrapFrame* frame)
     // Path-based open. Routing (ramfs vs fat32 by /disk/<idx>/
     // prefix) lives in fs::routing — this layer only does the
     // syscall-context work (cap check, user-string copy, rax wiring).
-    // Returns a Win32 pseudo-handle (kWin32HandleBase + slot_idx)
-    // on success or u64(-1) on any failure.
+    // Returns an opaque positive generation-tagged file handle on success or
+    // u64(-1) on any failure.
     core::Process* proc = core::CurrentProcess();
     if (proc == nullptr || !core::ProcessHasCap(proc, core::kCapFsRead))
     {
         const u64 pid = (proc != nullptr) ? proc->pid : 0;
-        core::RecordSandboxDenial(core::kCapFsRead);
-        if (proc != nullptr && core::ShouldLogDenial(proc->sandbox_denials))
+        const u64 denial_index = core::RecordSandboxDenial(core::kCapFsRead);
+        if (proc != nullptr && core::ShouldLogDenial(denial_index))
         {
             arch::SerialWrite("[sys] denied syscall=SYS_FILE_OPEN pid=");
             arch::SerialWriteHex(pid);
             arch::SerialWrite(" cap=");
             arch::SerialWrite(core::CapName(core::kCapFsRead));
             arch::SerialWrite(" denial_idx=");
-            arch::SerialWriteHex(proc->sandbox_denials);
+            arch::SerialWriteHex(denial_index);
             arch::SerialWrite("\n");
         }
         frame->rax = static_cast<u64>(-1);
@@ -96,19 +98,14 @@ void DoFileRead(arch::TrapFrame* frame)
         frame->rax = 0;
         return;
     }
-    // Bounded staging buffer. Larger reads loop in the caller; the
-    // 4 KiB chunk matches the page size, ramfs cap reads, and the
-    // FAT32 cluster scratch's effective per-call ceiling.
-    // Per-call on the kernel stack, NOT process-shared static: the
-    // backing read can block/reschedule on the pipe and FAT32 paths,
-    // so a file-scope buffer would let a concurrent ReadFile from
-    // another process clobber the staged bytes before CopyToUser.
+    // The routing layer owns the per-call staging buffer and the complete
+    // snapshot -> backing read -> user delivery -> exact cursor commit
+    // transaction while the handle slot operation guard remains held.
     constexpr u64 kStageBytes = 4096;
     if (cap_bytes > kStageBytes)
         cap_bytes = kStageBytes;
-    u8 stage[kStageBytes];
 
-    const u64 got = fs::routing::ReadForProcess(proc, handle, stage, cap_bytes);
+    const u64 got = fs::routing::ReadToUserForProcess(proc, handle, reinterpret_cast<void*>(frame->rsi), cap_bytes);
     if (got == u64(-1))
     {
         frame->rax = static_cast<u64>(-1);
@@ -119,40 +116,15 @@ void DoFileRead(arch::TrapFrame* frame)
         frame->rax = 0;
         return;
     }
-    if (!mm::CopyToUser(reinterpret_cast<void*>(frame->rsi), stage, got))
-    {
-        // ReadForProcess already advanced the handle cursor by `got`.
-        // Rewind it (CUR-relative, negative delta) so a retry re-reads
-        // the same bytes instead of silently skipping them — closes a
-        // data-loss window on the user-copy fault path. The seek
-        // clamps to >= 0, so the worst case is a no-op.
-        // GAP: a non-seekable backing (pipe) can't un-read; for those
-        //   the bytes are gone, which is inherent to a stream and not
-        //   recoverable here.
-        (void)fs::routing::SeekForProcess(proc, handle, -static_cast<i64>(got), /*whence=CUR*/ 1);
-        // Surface the user-copy failure as -1 so the caller
-        // doesn't think it received zeros.
-        arch::SerialWrite("[sys] file_read CopyToUser FAIL pid=");
-        arch::SerialWriteHex(proc->pid);
-        arch::SerialWrite(" handle=");
-        arch::SerialWriteHex(handle);
-        arch::SerialWrite(" dst=");
-        arch::SerialWriteHex(frame->rsi);
-        arch::SerialWrite(" got=");
-        arch::SerialWriteHex(got);
-        arch::SerialWrite("\n");
-        frame->rax = static_cast<u64>(-1);
-        return;
-    }
     frame->rax = got;
 }
 
 void DoFileClose(arch::TrapFrame* frame)
 {
     KDBG_V(Win32Thunk, "win32/file", "DoFileClose handle", frame->rdi);
-    // Generic Win32 CloseHandle. Dispatches by handle range:
-    // file table (0x100..), mutex table (0x200..), event table
-    // (0x300..). Out-of-range handles are a documented no-op.
+    // Generic Win32 CloseHandle. Every migrated KObject class uses a
+    // generation-tagged opaque handle; malformed or stale handles are a
+    // documented no-op.
     core::Process* proc = core::CurrentProcess();
     if (proc == nullptr)
     {
@@ -160,44 +132,100 @@ void DoFileClose(arch::TrapFrame* frame)
         return;
     }
     const u64 handle = frame->rdi;
+    ipc::Handle mutex_ipc_h = ipc::kHandleInvalid;
+    ipc::Handle event_ipc_h = ipc::kHandleInvalid;
+    ipc::Handle semaphore_ipc_h = ipc::kHandleInvalid;
+    ipc::Handle iocp_ipc_h = ipc::kHandleInvalid;
+    const bool is_mutex = ipc::HandleDecodeTagged(handle, core::Process::kWin32MutexBase, &mutex_ipc_h);
+    const bool is_event = ipc::HandleDecodeTagged(handle, core::Process::kWin32EventBase, &event_ipc_h);
+    const bool is_semaphore = ipc::HandleDecodeTagged(handle, core::Process::kWin32SemaphoreBase, &semaphore_ipc_h);
+    const bool is_iocp = ipc::HandleDecodeTagged(handle, core::Process::kWin32IocpBase, &iocp_ipc_h);
+
+    // Service endpoints use the HandleTable's raw generation-bearing ABI, not
+    // one of the Win32 low-tag bands. Only an exact live endpoint carrying the
+    // Destroy right enters this path; malformed, stale, wrong-type, and
+    // rights-narrowed values retain the existing CloseHandle no-op policy.
+    ipc::Handle service_endpoint_ipc_h = ipc::kHandleInvalid;
+    if (handle <= ipc::kHandlePositiveMax)
+    {
+        service_endpoint_ipc_h = static_cast<ipc::Handle>(handle);
+        if (ipc::HandleDecode(service_endpoint_ipc_h, nullptr, nullptr))
+        {
+            ipc::KObject* endpoint_object =
+                ipc::HandleTableLookupRef(proc->kobj_handles, service_endpoint_ipc_h, ipc::KObjectType::ServiceEndpoint,
+                                          ipc::kHandleRightDestroy);
+            if (endpoint_object != nullptr)
+            {
+                const core::ProcessKey caller_process = core::ProcessKeySnapshot(proc);
+                core::ServiceRuntimeV1* runtime = core::ServiceRuntimeKernelV1();
+                if (runtime == nullptr)
+                {
+                    ipc::KObjectRelease(endpoint_object);
+                    frame->rax = static_cast<u64>(-1);
+                    return;
+                }
+
+                // Accepted server ownership must drain before the table can
+                // hide its exact handle. NotFound is the expected client-side
+                // case; every other failure leaves the live handle available
+                // for a truthful retry.
+                const core::ServiceDirectoryReleaseAcceptedResult accepted_release =
+                    core::ServiceDirectoryReleaseAcceptedHandle(&runtime->directory, caller_process,
+                                                                service_endpoint_ipc_h);
+                if (accepted_release.status != core::ServiceDirectoryStatus::Ok &&
+                    accepted_release.status != core::ServiceDirectoryStatus::NotFound)
+                {
+                    ipc::KObjectRelease(endpoint_object);
+                    frame->rax = static_cast<u64>(-1);
+                    return;
+                }
+
+                auto detached = ipc::HandleTableDetach(proc->kobj_handles, service_endpoint_ipc_h,
+                                                       ipc::KObjectType::ServiceEndpoint, ipc::kHandleRightDestroy);
+                if (!detached.has_value())
+                {
+                    ipc::KObjectRelease(endpoint_object);
+                    frame->rax = static_cast<u64>(-1);
+                    return;
+                }
+
+                // Both calls above have dropped their locks. Release the
+                // retained recognition reference and transferred table owner
+                // only after the full directory/table transaction completes.
+                ipc::KObjectRelease(endpoint_object);
+                ipc::KObjectRelease(detached.value());
+                custom::OnHandleClose(proc, handle);
+                frame->rax = 0;
+                return;
+            }
+        }
+    }
+
     // Win32 custom: mark this handle as closed in the per-process
     // handle ledger. Anyone reading it later (via the ledger, not
     // via the actual handle table) sees `active=false` and the
     // generation count carries the use-after-close evidence.
     custom::OnHandleClose(proc, handle);
-    if (handle >= core::Process::kWin32HandleBase &&
-        handle < core::Process::kWin32HandleBase + core::Process::kWin32HandleCap)
+    // IsWin32FileHandle recognizes Process::kWin32HandleBase as the low-tag
+    // band while rejecting generation-zero and stale-width encodings.
+    if (core::IsWin32FileHandle(handle))
     {
         fs::routing::CloseForProcess(proc, handle);
     }
-    else if (handle >= core::Process::kWin32MutexBase &&
-             handle < core::Process::kWin32MutexBase + core::Process::kWin32MutexCap)
+    else if (is_mutex)
     {
-        // Migrated to KMutex + kobj_handles. The Win32 handle is
-        // `kWin32MutexBase + ipc_handle`; map it back, type-check
-        // (via lookup-with-ref so the storage stays alive across
-        // the force-release below), and drop the table reference.
-        // Closer-as-holder is force-released through KMutexRelease
-        // first — that drains the recursion counter and hands the
-        // lock off to the longest-waiting blocker if any (KMutex's
-        // wait-time refs keep the storage alive for those waiters
-        // until they wake).
-        const ipc::Handle ipc_h = static_cast<ipc::Handle>(handle - core::Process::kWin32MutexBase);
-        ipc::KObject* obj = ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h, ipc::KObjectType::Mutex);
-        if (obj != nullptr)
+        // Detach transfers the table's reference only when the type,
+        // generation, and Destroy right all still match. Closing a handle is
+        // not thread ownership release: the holder reference keeps the object
+        // alive, and Task teardown publishes abandonment if the owner exits.
+        auto detached =
+            ipc::HandleTableDetach(proc->kobj_handles, mutex_ipc_h, ipc::KObjectType::Mutex, ipc::kHandleRightDestroy);
+        if (detached.has_value())
         {
-            auto* m = reinterpret_cast<ipc::KMutex*>(obj);
-            sched::Task* me = sched::CurrentTask();
-            while (ipc::KMutexOwner(m) == me)
-            {
-                ipc::KMutexRelease(m);
-            }
-            (void)ipc::HandleTableRemove(proc->kobj_handles, ipc_h);
-            ipc::KObjectRelease(obj); // drop the lookup ref
+            ipc::KObjectRelease(detached.value()); // drop transferred table reference
         }
     }
-    else if (handle >= core::Process::kWin32EventBase &&
-             handle < core::Process::kWin32EventBase + core::Process::kWin32EventCap)
+    else if (is_event)
     {
         // Migrated to KEvent + kobj_handles. Map the Win32 handle
         // back to its ipc::Handle slot, type-check via lookup-with-
@@ -208,16 +236,14 @@ void DoFileClose(arch::TrapFrame* frame)
         // closing the last handle while a waiter is queued is the
         // future-audit edge documented there, not a regression
         // introduced by this slice.
-        const ipc::Handle ipc_h = static_cast<ipc::Handle>(handle - core::Process::kWin32EventBase);
-        ipc::KObject* obj = ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h, ipc::KObjectType::Event);
-        if (obj != nullptr)
+        auto detached =
+            ipc::HandleTableDetach(proc->kobj_handles, event_ipc_h, ipc::KObjectType::Event, ipc::kHandleRightDestroy);
+        if (detached.has_value())
         {
-            (void)ipc::HandleTableRemove(proc->kobj_handles, ipc_h);
-            ipc::KObjectRelease(obj); // drop the lookup ref
+            ipc::KObjectRelease(detached.value());
         }
     }
-    else if (handle >= core::Process::kWin32SemaphoreBase &&
-             handle < core::Process::kWin32SemaphoreBase + core::Process::kWin32SemaphoreCap)
+    else if (is_semaphore)
     {
         // Migrated to KSemaphore + kobj_handles. Same shape as the
         // event arm above — type-check, drop the table reference,
@@ -226,16 +252,14 @@ void DoFileClose(arch::TrapFrame* frame)
         // silently leaked the legacy Win32SemaphoreHandle slot.
         // Fixed incidentally by routing through the unified
         // handle table.)
-        const ipc::Handle ipc_h = static_cast<ipc::Handle>(handle - core::Process::kWin32SemaphoreBase);
-        ipc::KObject* obj = ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h, ipc::KObjectType::Semaphore);
-        if (obj != nullptr)
+        auto detached = ipc::HandleTableDetach(proc->kobj_handles, semaphore_ipc_h, ipc::KObjectType::Semaphore,
+                                               ipc::kHandleRightDestroy);
+        if (detached.has_value())
         {
-            (void)ipc::HandleTableRemove(proc->kobj_handles, ipc_h);
-            ipc::KObjectRelease(obj); // drop the lookup ref
+            ipc::KObjectRelease(detached.value());
         }
     }
-    else if (handle >= core::Process::kWin32IocpBase &&
-             handle < core::Process::kWin32IocpBase + core::Process::kWin32IocpCap)
+    else if (is_iocp)
     {
         // Migrated to IocpPort + kobj_handles. Same shape as the
         // event / semaphore arms, plus an explicit IocpClose BEFORE
@@ -247,13 +271,13 @@ void DoFileClose(arch::TrapFrame* frame)
         // (Pre-migration: this arm did not exist; NtClose on an
         // IOCP handle silently leaked the legacy pool slot. Fixed
         // incidentally by routing through the unified handle table.)
-        const ipc::Handle ipc_h = static_cast<ipc::Handle>(handle - core::Process::kWin32IocpBase);
-        ipc::KObject* obj = ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h, ipc::KObjectType::Iocp);
-        if (obj != nullptr)
+        auto detached =
+            ipc::HandleTableDetach(proc->kobj_handles, iocp_ipc_h, ipc::KObjectType::Iocp, ipc::kHandleRightDestroy);
+        if (detached.has_value())
         {
+            ipc::KObject* obj = detached.value();
             ipc::IocpClose(reinterpret_cast<ipc::IocpPort*>(obj));
-            (void)ipc::HandleTableRemove(proc->kobj_handles, ipc_h);
-            ipc::KObjectRelease(obj); // drop the lookup ref
+            ipc::KObjectRelease(obj); // drop transferred table reference
         }
     }
     else if (handle >= core::Process::kWin32RegistryBase &&
@@ -265,23 +289,14 @@ void DoFileClose(arch::TrapFrame* frame)
         // it rather than poking the table directly here.
         (void)registry::ReleaseHandleForCurrentProcess(handle);
     }
-    else if (handle >= core::Process::kWin32ProcessBase &&
-             handle < core::Process::kWin32ProcessBase + core::Process::kWin32ProcessCap)
+    else if (core::IsWin32ProcessHandle(handle))
     {
         // Process handles drop the retained reference on the target.
         // ProcessRelease may free the target if no other holder
         // remains — which is the right Windows-shape semantics:
         // closing the last handle to a dead process actually
         // reaps it.
-        const u64 slot = handle - core::Process::kWin32ProcessBase;
-        core::Process::Win32ProcessHandle& h = proc->win32_proc_handles[slot];
-        if (h.in_use)
-        {
-            core::Process* target = h.target;
-            h.in_use = false;
-            h.target = nullptr;
-            core::ProcessRelease(target);
-        }
+        (void)core::ProcessCloseWin32ProcessHandle(proc, handle);
     }
     else if (handle >= core::Process::kWin32ThreadBase &&
              handle < core::Process::kWin32ThreadBase + core::Process::kWin32ThreadCap)
@@ -339,33 +354,24 @@ void DoFileClose(arch::TrapFrame* frame)
         // array; safe on already-closed slots.
         win32::SysDirClose(proc, handle);
     }
-    else if (handle >= core::Process::kWin32SectionBase &&
-             handle < core::Process::kWin32SectionBase + core::Process::kWin32SectionCap)
+    else if (core::IsWin32SectionHandle(handle))
     {
-        // Section handles drop one section-pool refcount per
-        // close. The pool entry frees its frames + slot only
-        // when refcount hits 0 (every handle AND every active
-        // mapping has gone away). Closing a handle deliberately
-        // does NOT tear down a still-mapped view — that matches
-        // Windows, where the view outlives the handle. The view's
-        // own reference is dropped by NtUnmapViewOfSection, or,
-        // if the process never unmaps, by ProcessRelease draining
-        // `win32_section_views[]` at exit.
-        const u64 slot = handle - core::Process::kWin32SectionBase;
-        core::Process::Win32SectionHandle& h = proc->win32_section_handles[slot];
-        if (h.in_use)
+        // Process::kWin32SectionBase remains the low 0x900..0x907 tag, while
+        // the public value also carries a process-row generation. Detach the
+        // exact identity under the process Section lock, then release the
+        // generation-keyed pool reference with no process lock held. Closing
+        // the handle deliberately leaves mapped views alive.
+        section::SectionKey key{};
+        if (core::ProcessDetachWin32SectionHandle(proc, handle, &key))
         {
-            const u32 pool_idx = h.pool_index;
-            h.in_use = false;
-            h.pool_index = 0;
-            section::SectionRelease(pool_idx);
+            section::SectionRelease(key);
         }
     }
-    else if (handle >= kJobHandleBase && handle < kJobHandleBase + kJobPoolCap)
+    else if (handle >= kJobHandleBase && IsJobHandle(handle))
     {
         // Job-object handles — route to SysJobClose which drops
-        // the job's refcount and, if it hits 0, releases every
-        // member Process's retain.
+        // the Job row's open reference. Membership consists only of immutable
+        // ProcessKey completion records, so close cannot release ProcessCore.
         win32::SysJobClose(handle);
     }
     frame->rax = 0;
@@ -455,7 +461,7 @@ void DoFileCreate(arch::TrapFrame* frame)
 {
     // CreateFileW(CREATE_NEW). rdi = path, rsi = path_cap,
     // rdx = init bytes (user pointer, may be 0), r10 = init len.
-    // Returns a Win32 pseudo-handle on success or u64(-1).
+    // Returns an opaque positive generation-tagged handle or u64(-1).
     // kCapFsWrite (which also implies create privilege; splitting
     // create into its own cap would just bloat the sandbox profile
     // without buying anything today) is gated centrally by

@@ -8,6 +8,8 @@
  */
 
 #include "duet/syscall.h"
+#include "duet/service_control.h"
+#include "duet/service_endpoint.h"
 #include "string.h"
 #include "unistd.h"
 
@@ -82,6 +84,65 @@ long duet_socket_op(long op, long a1, long a2, long a3, long a4, long a5)
                      : "a"((long)DUET_SYS_SOCKET_OP), "D"(op), "S"(a1), "d"(a2), "r"(a3), "r"(a4), "r"(a5)
                      : "r10", "r8", "r9", "rcx", "r11", "memory");
     return rv;
+}
+
+long duet_service_endpoint_op(const duet_service_endpoint_request_v1* request, size_t request_bytes,
+                              duet_service_endpoint_result_v1* result, size_t result_capacity)
+{
+    long rv;
+    __asm__ volatile("mov %5, %%r10\n\t"
+                     "int $0x80"
+                     : "=a"(rv)
+                     : "a"((long)DUET_SYS_SERVICE_ENDPOINT_OP), "D"(request), "S"((long)request_bytes), "d"(result),
+                       "r"((long)result_capacity)
+                     : "r10", "rcx", "r11", "memory");
+    return rv;
+}
+
+long duet_service_control(const duet_service_control_request_v1* request, size_t request_bytes,
+                          duet_service_control_result_v1* result, size_t result_capacity)
+{
+    long rv;
+    __asm__ volatile("mov %5, %%r10\n\t"
+                     "int $0x80"
+                     : "=a"(rv)
+                     : "a"((long)DUET_SYS_SERVICE_CONTROL), "D"(request), "S"((long)request_bytes), "d"(result),
+                       "r"((long)result_capacity)
+                     : "r10", "rcx", "r11", "memory");
+    return rv;
+}
+
+int duet_service_mark_ready(void)
+{
+    duet_service_control_request_v1 req;
+    duet_service_control_result_v1 res;
+
+    __builtin_memset(&req, 0, sizeof(req));
+    req.struct_size = sizeof(req);
+    req.version = DUET_SERVICE_CONTROL_ABI_VERSION;
+    req.operation = DUET_SERVICE_CONTROL_OP_DESCRIBE_SELF;
+    __builtin_memset(&res, 0, sizeof(res));
+
+    long rc = duet_service_control(&req, sizeof(req), &res, sizeof(res));
+    if (rc != 0 || res.status != DUET_SERVICE_CONTROL_STATUS_OK)
+        return -1;
+
+    __builtin_memset(&req, 0, sizeof(req));
+    req.struct_size = sizeof(req);
+    req.version = DUET_SERVICE_CONTROL_ABI_VERSION;
+    req.operation = DUET_SERVICE_CONTROL_OP_MARK_READY;
+    req.broker_epoch = res.broker_epoch;
+    req.service_identity = res.service_identity;
+    req.transition_generation = res.transition_generation;
+    req.process_identity = res.process_identity;
+    req.pid = res.pid;
+    __builtin_memset(&res, 0, sizeof(res));
+
+    rc = duet_service_control(&req, sizeof(req), &res, sizeof(res));
+    if (rc != 0 || res.status != DUET_SERVICE_CONTROL_STATUS_OK)
+        return -1;
+
+    return 0;
 }
 
 /* String helpers — implemented in userland/libc/src/string.S

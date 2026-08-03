@@ -559,8 +559,8 @@ void GuiFuzzArm(const char* cmdline)
 
     g_cfg.armed = true;
     SerialWrite("[gui-fuzz] arming runner\n");
-    auto* t = duetos::sched::SchedCreate(&Runner, nullptr, "gui-fuzz");
-    if (t == nullptr)
+    const duetos::sched::TaskCreateResult result = duetos::sched::SchedCreate(&Runner, nullptr, "gui-fuzz");
+    if (!result.created)
     {
         KLOG_ERROR("security/gui-fuzz", "SchedCreate failed — fuzzer not started");
         g_cfg.armed = false;

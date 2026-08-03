@@ -252,7 +252,7 @@ i64 DoTimes(u64 user_buf)
         u64 utime = 0;
         const core::Process* p = core::CurrentProcess();
         if (p != nullptr)
-            utime = p->ticks_used;
+            utime = core::ProcessTicksUsedSnapshot(p);
         struct
         {
             u64 utime;

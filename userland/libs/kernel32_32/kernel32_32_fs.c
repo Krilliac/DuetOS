@@ -63,10 +63,11 @@ void __stdcall SetLastError(DWORD err);
  * CreateFile
  * ------------------------------------------------------------------ */
 
-/* Open the normalised path with SYS_FILE_OPEN. Returns the Win32-
- * shaped kernel handle (0x100..0x10F) or (HANDLE)-1 — the syscall's
- * u64(-1) failure value arrives in eax as 0xFFFFFFFF, which is
- * already INVALID_HANDLE_VALUE, so the mapping is a pass-through. */
+/* Open the normalised path with SYS_FILE_OPEN. Returns an opaque,
+ * generation-tagged Win32 file handle whose low tag is 0x100..0x10F
+ * and whose non-zero generation occupies bits 12..30, or (HANDLE)-1.
+ * The syscall's u64(-1) failure value arrives in eax as 0xFFFFFFFF,
+ * which is already INVALID_HANDLE_VALUE, so failure is a pass-through. */
 static HANDLE Duet32FileOpen(const char* path, int len)
 {
     return (HANDLE)(unsigned long)(unsigned)duet_syscall2(20 /* SYS_FILE_OPEN */, (unsigned)(unsigned long)path,

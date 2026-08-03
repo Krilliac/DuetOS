@@ -66,6 +66,31 @@ DUETOS_TIMEOUT=30 tools/test/ctest-boot-smoke.sh build/x86_64-debug
 
 See the script header for the full env-var list.
 
+## Cancellation SMP oracle
+
+The `cancellation-smp` profile is the deterministic runtime gate for the
+process termination tombstone and cancellation-safe residual IPC unwind. It
+runs only after SMP and Userland bring-up, admits process-backed ring-0 test
+tasks through the normal publication path, and races four production
+boundaries:
+
+- pre-publication process termination against task commit;
+- KMutex owner release against waiter cancellation;
+- IOCP finite timeout against waiter cancellation;
+- message-port handle close against waiter cancellation.
+
+Every control gate and recovery wait is bounded. The profile fails closed on a
+missing worker unwind or retained reference and emits
+`[cancel-smp] PASS cpus=N cases=4` before the ordinary profile-complete marker.
+Run both supported SMP verdict legs from Git Bash or WSL:
+
+```bash
+DUETOS_EXPECTED_CPUS=2 DUETOS_SMP=2,sockets=1,cores=2,threads=1 \
+  tools/test/profile-boot-smoke.sh cancellation-smp build/x86_64-debug
+DUETOS_EXPECTED_CPUS=4 DUETOS_SMP=4,sockets=1,cores=2,threads=2 \
+  tools/test/profile-boot-smoke.sh cancellation-smp build/x86_64-debug
+```
+
 ## Emulator boot speed
 
 Under QEMU TCG (no `/dev/kvm`) the wall:guest ratio is ~9:1, so a

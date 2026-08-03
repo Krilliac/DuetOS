@@ -117,12 +117,14 @@ struct PerCpu
 
     // GDB stop-rendezvous snapshot. Distinct from panic_snapshot_*
     // because the panic path halts peers forever — the GDB stop
-    // path freezes them on a release flag and resumes them when
-    // the BSP exits its stop loop. The vector-2 handler checks
-    // arch::SmpGdbStopActive() and, when set, captures rip/rsp
-    // here BEFORE spinning on the same flag. `gdb_frozen` flips
-    // 0 → 1 once a peer has entered the freeze spin so the BSP
-    // knows the rendezvous converged before pumping packets.
+    // path freezes them on a release generation and resumes them when
+    // the stop-loop CPU exits. The vector-2 handler captures
+    // arch::SmpGdbStopGeneration() and, when nonzero, writes rip/rsp
+    // here BEFORE release-publishing `gdb_frozen_generation`.
+    // The stop-loop CPU accepts a peer only when this field equals
+    // the current nonzero stop generation; an acknowledgement left
+    // over from an earlier stop can therefore never satisfy a new
+    // rendezvous.
     //
     // `gdb_frozen_frame` points at the peer's live trap frame
     // (on its kernel stack) for the duration of the freeze spin.
@@ -132,8 +134,7 @@ struct PerCpu
     // threads via `Hg <tid>` — that's the multi-thread GDB
     // surface peers show up in. Cleared back to nullptr when the
     // peer exits the freeze spin.
-    u8 gdb_frozen;
-    u8 _pad4[7];
+    u64 gdb_frozen_generation;
     u64 gdb_snapshot_rip;
     u64 gdb_snapshot_rsp;
     u64 gdb_snapshot_rflags;
@@ -141,7 +142,8 @@ struct PerCpu
 
     // Lock to release after the next ContextSwitch on this CPU. The
     // scheduler holds g_sched_lock across ContextSwitch and stashes
-    // the lock pointer + saved IRQ flags here while still on prev's
+    // the lock pointer plus a source-side IRQ-state breadcrumb here while
+    // still on prev's
     // stack. Once ContextSwitch returns — on whatever task we just
     // resumed — SchedFinishTaskSwitch reads this slot, clears it,
     // and calls SpinLockRelease. The slot is per-CPU (not per-task)
@@ -151,8 +153,10 @@ struct PerCpu
     // ctxsw_lock_to_release is void* to keep cpu/percpu.h free of a
     // sync/spinlock.h include; sched.cpp casts it back to SpinLock*.
     // nullptr = no pending release (e.g., not currently inside
-    // Schedule). ctxsw_lock_flags is the IrqFlags::rflags value
-    // captured at acquire — required by SpinLockRelease's signature.
+    // Schedule). ctxsw_lock_flags records the source acquire for diagnostics;
+    // it must not restore IF on the resumed task. The resumed
+    // ScheduleLockedHandoff frame passes its own saved IrqFlags directly to
+    // SchedFinishTaskSwitch and therefore preserves each caller's contract.
     void* ctxsw_lock_to_release;
     u64 ctxsw_lock_flags;
 

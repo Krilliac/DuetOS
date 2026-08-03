@@ -67,13 +67,27 @@ class MonitorWriter
     bool m_truncated = false;
 };
 
+/// Snapshot of the SMP stop rendezvous that encloses one qRcmd dispatch.
+/// A null context is reserved for the early-boot dispatcher self-test. Real
+/// GDB stop-loop callers must pass a context; state/control verbs are gated
+/// when `complete` is false so a running or unacknowledged CPU cannot race the
+/// introspection surface.
+struct GdbMonitorStopContext
+{
+    u64 generation;
+    u64 expected_mask;
+    u64 acknowledged_mask;
+    bool complete;
+};
+
 /// Execute one decoded monitor command line. Returns true when
 /// `cmd` was a recognized `duet …` line (the reply is in `out`,
 /// even for an unknown subcommand — a friendly usage hint).
 /// Returns false ONLY when `cmd` is not a `duet` line at all, so
 /// the caller can answer the GDB packet with the empty
 /// "unsupported" reply.
-bool GdbMonitorDispatch(const char* cmd, u32 cmd_len, MonitorWriter& out);
+bool GdbMonitorDispatch(const char* cmd, u32 cmd_len, MonitorWriter& out,
+                        const GdbMonitorStopContext* stop_context = nullptr);
 
 /// Boot-time self-test. Exercises the dispatcher directly (no
 /// gdb_server I/O) and emits a grep-able `[gdb-monitor-selftest]

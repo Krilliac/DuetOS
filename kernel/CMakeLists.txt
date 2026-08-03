@@ -231,27 +231,29 @@ duetos_embed_blob(generated_usershell_elf.h
 # `wiki/tooling/Native-Apps.md` for the migration plan that
 # moves the in-kernel apps under `kernel/apps/` out via the
 # same helper.
+set(DUETOS_NATIVE_APP_LIBC_DEPS
+    "${CMAKE_SOURCE_DIR}/userland/libc/src/crt0.S"
+    "${CMAKE_SOURCE_DIR}/userland/libc/src/syscall.c"
+    "${CMAKE_SOURCE_DIR}/userland/libc/src/string.S"
+    "${CMAKE_SOURCE_DIR}/userland/libc/src/setjmp.S"
+    "${CMAKE_SOURCE_DIR}/userland/libc/src/stdio.c"
+    "${CMAKE_SOURCE_DIR}/userland/libc/include/duet/syscall.h"
+    "${CMAKE_SOURCE_DIR}/userland/libc/include/duet/socket.h"
+    "${CMAKE_SOURCE_DIR}/userland/libc/include/string.h"
+    "${CMAKE_SOURCE_DIR}/userland/libc/include/setjmp.h"
+    "${CMAKE_SOURCE_DIR}/userland/libc/include/stdio.h"
+    "${CMAKE_SOURCE_DIR}/userland/libc/include/unistd.h"
+    "${CMAKE_SOURCE_DIR}/userland/libc/usershell.lds")
+
 function(duetos_native_app app_name)
     set(_header "${CMAKE_CURRENT_BINARY_DIR}/generated_${app_name}_native.h")
     set(_script "${CMAKE_SOURCE_DIR}/tools/build/build-native-app.sh")
     set(_app_src "${CMAKE_SOURCE_DIR}/userland/native-apps/${app_name}/${app_name}.c")
-    set(_libc_deps
-        "${CMAKE_SOURCE_DIR}/userland/libc/src/crt0.S"
-        "${CMAKE_SOURCE_DIR}/userland/libc/src/syscall.c"
-        "${CMAKE_SOURCE_DIR}/userland/libc/src/string.S"
-        "${CMAKE_SOURCE_DIR}/userland/libc/src/setjmp.S"
-        "${CMAKE_SOURCE_DIR}/userland/libc/src/stdio.c"
-        "${CMAKE_SOURCE_DIR}/userland/libc/include/duet/syscall.h"
-        "${CMAKE_SOURCE_DIR}/userland/libc/include/duet/socket.h"
-        "${CMAKE_SOURCE_DIR}/userland/libc/include/string.h"
-        "${CMAKE_SOURCE_DIR}/userland/libc/include/setjmp.h"
-        "${CMAKE_SOURCE_DIR}/userland/libc/include/stdio.h"
-        "${CMAKE_SOURCE_DIR}/userland/libc/include/unistd.h"
-        "${CMAKE_SOURCE_DIR}/userland/libc/usershell.lds")
     add_custom_command(
         OUTPUT  "${_header}"
         COMMAND "${_script}" "${CMAKE_SOURCE_DIR}" "${_header}" "${app_name}"
-        DEPENDS "${_app_src}" "${_script}" "${DUETOS_EMBED_BLOB_SCRIPT}" ${_libc_deps}
+        DEPENDS "${_app_src}" "${_script}" "${DUETOS_EMBED_BLOB_SCRIPT}"
+                ${DUETOS_NATIVE_APP_LIBC_DEPS}
         COMMENT "Building + embedding portable native app /bin/${app_name}"
         VERBATIM)
     set(DUETOS_KERNEL_SHARED_SOURCES
@@ -265,6 +267,161 @@ duetos_native_app(nat_sysinfo)
 duetos_native_app(duet-pkg)
 duetos_native_app(netd)
 duetos_native_app(netd_probe)
+
+# Build-tree-only service package artifacts.  These binaries are not added to
+# ramfs and this target does not publish or activate a service.  It gives the
+# manifest/package generator exact reproducible ELF extents and separately
+# authenticated kernel-image policy to bind into an immutable package
+# definition.  serviced, execd, and displayd link their completed policy
+# engines but remain dormant because the native ABI does not yet expose the
+# authenticated service-endpoint ingress they require.  The remaining staged
+# artifacts keep their existing fail-closed behavior; netd reuses the existing
+# resident daemon source unchanged.
+set(DUETOS_SERVICE_ARTIFACT_ROOT "${CMAKE_CURRENT_BINARY_DIR}/service-package/artifacts")
+set(DUETOS_SERVICE_ARTIFACTS "")
+set(DUETOS_SERVICE_ARTIFACT_MAP_ARGS "")
+
+function(duetos_service_artifact app_name)
+    cmake_parse_arguments(SERVICE_ARTIFACT
+        ""
+        ""
+        "SOURCES;HEADERS"
+        ${ARGN})
+    set(_script "${CMAKE_SOURCE_DIR}/tools/build/build-native-app.sh")
+    set(_app_dir "${CMAKE_SOURCE_DIR}/userland/native-apps/${app_name}")
+    set(_app_src "${_app_dir}/${app_name}.c")
+    set(_extra_sources "")
+    set(_extra_headers "")
+    foreach(_source IN LISTS SERVICE_ARTIFACT_SOURCES)
+        list(APPEND _extra_sources "${_app_dir}/${_source}")
+    endforeach()
+    foreach(_header IN LISTS SERVICE_ARTIFACT_HEADERS)
+        list(APPEND _extra_headers "${_app_dir}/${_header}")
+    endforeach()
+    set(_header "${DUETOS_SERVICE_ARTIFACT_ROOT}/generated_${app_name}.h")
+    set(_artifact "${DUETOS_SERVICE_ARTIFACT_ROOT}/native-${app_name}/${app_name}.elf")
+    add_custom_command(
+        OUTPUT "${_header}" "${_artifact}"
+        COMMAND "${_script}" "${CMAKE_SOURCE_DIR}" "${_header}" "${app_name}"
+                ${_extra_sources}
+        DEPENDS "${_app_src}" "${_script}" "${DUETOS_EMBED_BLOB_SCRIPT}"
+                ${_extra_sources} ${_extra_headers}
+                ${DUETOS_NATIVE_APP_LIBC_DEPS}
+        COMMENT "Building deterministic service artifact /system/${app_name}"
+        VERBATIM)
+    list(APPEND DUETOS_SERVICE_ARTIFACTS "${_artifact}")
+    list(APPEND DUETOS_SERVICE_ARTIFACT_MAP_ARGS
+        "--artifact-map" "${app_name}=native-${app_name}/${app_name}.elf")
+    set(DUETOS_SERVICE_ARTIFACTS "${DUETOS_SERVICE_ARTIFACTS}" PARENT_SCOPE)
+    set(DUETOS_SERVICE_ARTIFACT_MAP_ARGS
+        "${DUETOS_SERVICE_ARTIFACT_MAP_ARGS}" PARENT_SCOPE)
+endfunction()
+
+duetos_service_artifact(serviced
+    SOURCES
+        supervisor.c
+        supervisor_policy.c
+        supervisor_reconcile.c
+        supervisor_event.c
+        supervisor_command.c
+    HEADERS
+        supervisor.h
+        supervisor_internal.h)
+duetos_service_artifact(execd
+    SOURCES
+        worker.c
+        worker_request.c
+    HEADERS
+        worker.h
+        worker_internal.h)
+duetos_service_artifact(displayd
+    SOURCES
+        display_engine.c
+        display_engine_validate.c
+        display_engine_request.c
+        display_engine_event.c
+    HEADERS
+        display_engine.h
+        display_engine_internal.h)
+duetos_service_artifact(registryd)
+duetos_service_artifact(netd)
+
+set(DUETOS_SERVICE_PACKAGE_ROOT "${CMAKE_CURRENT_BINARY_DIR}/service-package")
+set(DUETOS_SERVICE_MANIFEST_HEADER
+    "${DUETOS_SERVICE_PACKAGE_ROOT}/generated_boot_service_manifest_data.h")
+set(DUETOS_SERVICE_MANIFEST_BINARY
+    "${DUETOS_SERVICE_PACKAGE_ROOT}/boot_service_manifest.bin")
+set(DUETOS_SERVICE_MANIFEST_NORMALIZED
+    "${DUETOS_SERVICE_PACKAGE_ROOT}/boot_service_manifest.json")
+set(DUETOS_SERVICE_PACKAGE_HEADER
+    "${DUETOS_SERVICE_PACKAGE_ROOT}/generated_boot_service_package_data.h")
+set(DUETOS_SERVICE_MANIFEST_GENERATOR
+    "${CMAKE_SOURCE_DIR}/tools/build/gen-service-manifest.py")
+set(DUETOS_SERVICE_MANIFEST_CONFIG "${CMAKE_SOURCE_DIR}/config/services.toml")
+set(DUETOS_SERVICE_AUTHORITY_CONFIG "${CMAKE_SOURCE_DIR}/config/service-authority.toml")
+set(DUETOS_SERVICE_PACKAGE_COMMAND
+    python3 "${DUETOS_SERVICE_MANIFEST_GENERATOR}"
+    --input "${DUETOS_SERVICE_MANIFEST_CONFIG}"
+    --authority "${DUETOS_SERVICE_AUTHORITY_CONFIG}"
+    --artifact-root "${DUETOS_SERVICE_ARTIFACT_ROOT}"
+    ${DUETOS_SERVICE_ARTIFACT_MAP_ARGS}
+    --bootstrap-plans
+    --header "${DUETOS_SERVICE_MANIFEST_HEADER}"
+    --binary "${DUETOS_SERVICE_MANIFEST_BINARY}"
+    --normalized "${DUETOS_SERVICE_MANIFEST_NORMALIZED}"
+    --package-header "${DUETOS_SERVICE_PACKAGE_HEADER}")
+
+add_custom_command(
+    OUTPUT
+        "${DUETOS_SERVICE_MANIFEST_HEADER}"
+        "${DUETOS_SERVICE_MANIFEST_BINARY}"
+        "${DUETOS_SERVICE_MANIFEST_NORMALIZED}"
+        "${DUETOS_SERVICE_PACKAGE_HEADER}"
+    COMMAND ${DUETOS_SERVICE_PACKAGE_COMMAND}
+    DEPENDS
+        "${DUETOS_SERVICE_MANIFEST_GENERATOR}"
+        "${DUETOS_SERVICE_MANIFEST_CONFIG}"
+        "${DUETOS_SERVICE_AUTHORITY_CONFIG}"
+        ${DUETOS_SERVICE_ARTIFACTS}
+    COMMENT "Binding exact service ELF bytes to the embedded build authority"
+    VERBATIM)
+
+add_custom_target(duetos-service-package-data ALL
+    DEPENDS
+        "${DUETOS_SERVICE_MANIFEST_HEADER}"
+        "${DUETOS_SERVICE_MANIFEST_BINARY}"
+        "${DUETOS_SERVICE_MANIFEST_NORMALIZED}"
+        "${DUETOS_SERVICE_PACKAGE_HEADER}")
+
+add_custom_target(duetos-service-package-verify
+    COMMAND ${DUETOS_SERVICE_PACKAGE_COMMAND} --check
+    COMMENT "Verifying deterministic service manifest/package outputs"
+    VERBATIM)
+add_dependencies(duetos-service-package-verify duetos-service-package-data)
+
+# Compile the generated typed binding independently of the kernel-target
+# staging seam. All service-activation contracts (process publication,
+# endpoint readiness) are integrated — the guards now assert readiness.
+set(DUETOS_SERVICE_PACKAGE_COMPILE_CHECK
+    "${CMAKE_CURRENT_BINARY_DIR}/service_package_compile_check.cpp")
+file(GENERATE OUTPUT "${DUETOS_SERVICE_PACKAGE_COMPILE_CHECK}" CONTENT [=[
+#include "generated_boot_service_package_data.h"
+
+static_assert(duetos::core::generated::kBootServicePackageActivationReady);
+static_assert(duetos::core::generated::kBootServicePackageAuthorityBound);
+static_assert(duetos::core::generated::kBootServicePackageBootstrapPlansBound);
+static_assert(duetos::core::generated::kBootServicePackageProcessPublicationBound);
+static_assert(duetos::core::generated::kBootServicePackageEndpointReadinessBound);
+]=])
+set_source_files_properties("${DUETOS_SERVICE_PACKAGE_COMPILE_CHECK}"
+    PROPERTIES GENERATED TRUE)
+add_library(duetos-service-package-data-compile-check OBJECT EXCLUDE_FROM_ALL
+    "${DUETOS_SERVICE_PACKAGE_COMPILE_CHECK}")
+target_include_directories(duetos-service-package-data-compile-check PRIVATE
+    "${DUETOS_SERVICE_PACKAGE_ROOT}"
+    "${CMAKE_SOURCE_DIR}/kernel")
+add_dependencies(duetos-service-package-data-compile-check duetos-service-package-data)
+add_dependencies(duetos-service-package-verify duetos-service-package-data-compile-check)
 
 duetos_embed_blob(generated_hello_winapi.h
     SCRIPT   "${CMAKE_SOURCE_DIR}/tools/build/build-hello-winapi.sh"
@@ -1544,6 +1701,7 @@ target_include_directories(duetos-kernel-stage1 PRIVATE
     "${IVRS_RUST_INCLUDE_DIR}"
 )
 add_dependencies(duetos-kernel-stage1 ${DUETOS_KERNEL_RUST_TARGET})
+add_dependencies(duetos-kernel-stage1 duetos-service-package-data)
 set_target_properties(duetos-kernel-stage1 PROPERTIES
     OUTPUT_NAME "duetos-kernel-stage1.elf"
     C_STANDARD 17
@@ -1659,6 +1817,7 @@ target_include_directories(duetos-kernel PRIVATE
     "${IVRS_RUST_INCLUDE_DIR}"
 )
 add_dependencies(duetos-kernel ${DUETOS_KERNEL_RUST_TARGET})
+add_dependencies(duetos-kernel duetos-service-package-data)
 
 # Deliberate-panic build flag, consumed by kernel_main and triggered
 # by tools/debug/test-panic.sh. OFF for normal builds — the demo panic

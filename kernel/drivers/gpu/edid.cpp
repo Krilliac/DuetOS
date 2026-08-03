@@ -304,7 +304,7 @@ void WriteDec(u32 v)
         ConsoleWrite("0");
         return;
     }
-    while (v != 0 && i < sizeof(buf))
+    while (v != 0 && i + 1 < sizeof(buf))
     {
         buf[i++] = static_cast<char>('0' + (v % 10));
         v /= 10;

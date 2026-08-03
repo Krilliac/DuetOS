@@ -34,6 +34,7 @@
 #   pe-winkill  — spawn ring3-winkill (real-world MSVC PE).
 #                 "pe spawn name=ring3-winkill" + "Windows Kill ".
 #   linux       — spawn the seven Linux ABI smokes.
+#   cancellation-smp — race four cancellation/lifetime boundaries.
 #
 # Usage: profile-boot-smoke.sh <profile> <cmake-binary-dir>
 
@@ -41,7 +42,7 @@ set -eo pipefail
 
 if [[ $# -ne 2 ]]; then
     echo "usage: $0 <profile> <cmake-binary-dir>" >&2
-    echo "   profile = bringup | ring3 | pe-hello | pe-winapi | pe-threads | pe-winkill | linux" >&2
+    echo "   profile = bringup | ring3 | pe-hello | pe-winapi | pe-threads | pe-winkill | linux | cancellation-smp" >&2
     exit 2
 fi
 
@@ -49,6 +50,18 @@ PROFILE="$1"
 BIN_DIR="$2"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUN_SCRIPT="${REPO_ROOT}/tools/qemu/run.sh"
+
+# Keep the guest topology independent of guest output. The CI matrix supports
+# exactly the 2-vCPU and 4-vCPU cancellation-race legs documented below.
+EXPECTED_CPUS="${DUETOS_EXPECTED_CPUS:-4}"
+case "${EXPECTED_CPUS}" in
+    2) QEMU_SMP="2,sockets=1,cores=2,threads=1" ;;
+    4) QEMU_SMP="4,sockets=1,cores=2,threads=2" ;;
+    *)
+        echo "FAIL: invalid DUETOS_EXPECTED_CPUS='${EXPECTED_CPUS}' (supported: 2 or 4)" >&2
+        exit 1
+        ;;
+esac
 
 if [[ ! -x "${RUN_SCRIPT}" ]]; then
     echo "SKIP: ${RUN_SCRIPT} not found"
@@ -73,6 +86,7 @@ rm -f "${SERIAL_LOG}"
 # SIGTERMs QEMU. Capture the exit code instead of discarding it.
 QEMU_RC=0
 DUETOS_TIMEOUT="${DUETOS_TIMEOUT:-480}" \
+DUETOS_SMP="${QEMU_SMP}" \
 DUETOS_SMOKE_PROFILE="${PROFILE}" \
     "${RUN_SCRIPT}" > "${SERIAL_LOG}" 2>&1 || QEMU_RC=$?
 
@@ -116,6 +130,7 @@ echo "smoke: qemu_rc=${QEMU_RC} exit_class=${EXIT_CLASS:-<unstructured>} exit_ph
 # self-tests. The forbidden list is also shared.
 common_expected=(
     "boot : metrics bringup-complete"
+    "package staged and runtime open; activation disabled, compatibility manager retained"
     "[smoke] profile=${PROFILE} complete"
     "[string-selftest] PASS"
     "[hexdump-selftest] PASS"
@@ -317,9 +332,18 @@ case "${PROFILE}" in
             'linux'
         )
         ;;
+    cancellation-smp)
+        scenario=(
+            "[cancel-smp] case=publication-barrier PASS"
+            "[cancel-smp] case=kmutex-wake PASS"
+            "[cancel-smp] case=iocp-timeout PASS"
+            "[cancel-smp] case=message-port-close PASS"
+            "[cancel-smp] PASS cpus=${EXPECTED_CPUS} cases=4"
+        )
+        ;;
     *)
         echo "error: unknown profile '${PROFILE}'" >&2
-        echo "  valid: bringup ring3 pe-hello pe-winapi pe-threads pe-winkill linux" >&2
+        echo "  valid: bringup ring3 pe-hello pe-winapi pe-threads pe-winkill linux cancellation-smp" >&2
         exit 2
         ;;
 esac

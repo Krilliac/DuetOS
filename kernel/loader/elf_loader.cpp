@@ -9,6 +9,7 @@
 #include "mm/kheap.h"
 #include "mm/page.h"
 #include "mm/paging.h"
+#include "sched/sched.h"
 #include "security/guard.h"
 #include "log/klog.h"
 
@@ -382,30 +383,30 @@ void LoadSegment(LoadCtx& ctx, const ElfSegment& seg)
 
         if (!reusing)
         {
-            AddressSpaceMapUserPage(ctx.as, page_va, frame, flags);
-            // MapUserPage returns void and has THREE silent non-fatal
-            // refusal paths (address_space.cpp: frame budget exhausted,
-            // region-table grow OOM, page-table walker OOM). Each one
-            // `return`s WITHOUT taking ownership of `frame` and without
-            // appending a regions row — but the header contract
-            // (address_space.h:205-208) tells callers not to FreeFrame a
-            // frame they handed to MapUserPage, so an unconditional
-            // Track() would leak the frame permanently AND record a VA
-            // the unwind walk could never reclaim (UnmapUserPage finds no
-            // regions row and returns false). Probe the leaf PTE to learn
-            // which happened: present == the AS took ownership.
-            //
-            // ProbePteRaw is an O(1) table walk; LookupUserFrame would be
-            // a linear scan of the regions ledger (address_space.h:336).
-            if ((AddressSpaceProbePteRaw(ctx.as, page_va) & kPagePresent) == 0)
-            {
-                FreeFrame(frame);
-                KLOG_WARN_AV(::duetos::core::LogArea::Loader, "elf-loader",
-                             "MapUserPage refused (frame budget / OOM) — rejecting load", page_va);
-                KBP_PROBE_V(::duetos::debug::ProbeId::kElfLoaderOom, page_va);
-                ctx.ok = false;
-                return;
-            }
+            if (!AddressSpaceMapUserPage(ctx.as, page_va, frame, flags))
+                // MapUserPage can refuse three recoverable resource failures
+                // refusal paths (address_space.cpp: frame budget exhausted,
+                // region-table grow OOM, page-table walker OOM). Each one
+                // `return`s WITHOUT taking ownership of `frame` and without
+                // appending a regions row — but the header contract
+                // (address_space.h:205-208) tells callers not to FreeFrame a
+                // frame they handed to MapUserPage, so an unconditional
+                // Track() would leak the frame permanently AND record a VA
+                // the unwind walk could never reclaim (UnmapUserPage finds no
+                // regions row and returns false). Probe the leaf PTE to learn
+                // which happened: present == the AS took ownership.
+                //
+                // ProbePteRaw is an O(1) table walk; LookupUserFrame would be
+                // a linear scan of the regions ledger (address_space.h:336).
+                if ((AddressSpaceProbePteRaw(ctx.as, page_va) & kPagePresent) == 0)
+                {
+                    FreeFrame(frame);
+                    KLOG_WARN_AV(::duetos::core::LogArea::Loader, "elf-loader",
+                                 "MapUserPage refused (frame budget / OOM) — rejecting load", page_va);
+                    KBP_PROBE_V(::duetos::debug::ProbeId::kElfLoaderOom, page_va);
+                    ctx.ok = false;
+                    return;
+                }
             if (ctx.guard != nullptr)
                 ctx.guard->Track(page_va);
         }
@@ -533,20 +534,22 @@ ElfLoadResult ElfLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as
         return r;
     }
     const PhysAddr stack_frame = stack_frame_r.value();
-    AddressSpaceMapUserPage(as, kV0StackVa, stack_frame, kPagePresent | kPageUser | kPageWritable | kPageNoExecute);
-    // Same unchecked-map/unconditional-Track shape as the segment loop
-    // above: MapUserPage can silently refuse (budget / OOM) without
-    // taking ownership of `stack_frame`. Probe before tracking so a
-    // refusal frees the frame instead of leaking it, and fails the load
-    // rather than handing back a stackless image. The guard is still
-    // armed here, so the destructor unwinds the segment pages.
-    if ((AddressSpaceProbePteRaw(as, kV0StackVa) & kPagePresent) == 0)
-    {
-        FreeFrame(stack_frame);
-        KLOG_WARN_AV(LogArea::Loader, "elf-loader", "stack-page MapUserPage refused (frame budget / OOM)", kV0StackVa);
-        KBP_PROBE_V(::duetos::debug::ProbeId::kElfLoaderOom, kV0StackVa);
-        return r;
-    }
+    if (!AddressSpaceMapUserPage(as, kV0StackVa, stack_frame,
+                                 kPagePresent | kPageUser | kPageWritable | kPageNoExecute))
+        // Same unchecked-map/unconditional-Track shape as the segment loop
+        // above: MapUserPage can silently refuse (budget / OOM) without
+        // taking ownership of `stack_frame`. Probe before tracking so a
+        // refusal frees the frame instead of leaking it, and fails the load
+        // rather than handing back a stackless image. The guard is still
+        // armed here, so the destructor unwinds the segment pages.
+        if ((AddressSpaceProbePteRaw(as, kV0StackVa) & kPagePresent) == 0)
+        {
+            FreeFrame(stack_frame);
+            KLOG_WARN_AV(LogArea::Loader, "elf-loader", "stack-page MapUserPage refused (frame budget / OOM)",
+                         kV0StackVa);
+            KBP_PROBE_V(::duetos::debug::ProbeId::kElfLoaderOom, kV0StackVa);
+            return r;
+        }
     guard.Track(kV0StackVa);
 
     r.ok = true;
@@ -658,11 +661,42 @@ void ElfLoaderUnwindSelfTest()
     // frames than it allocated during the test window. That's not a
     // leak — it's bookkeeping noise from the running kernel. Enforce
     // direction-only: fail loudly on missing frames, tolerate gains.
+    // FreeFramesCount() is a GLOBAL counter, and this test runs as a
+    // Phase::Userland initcall on the BSP while every other CPU is
+    // online and allocating. A concurrent allocation anywhere lands in
+    // the same counter and is indistinguishable from a leak here.
+    //
+    // Two successive attempts to make this measurement sound on a live
+    // boot both had holes, and each shipped a false-positive PANIC:
+    //   1. Sample the counter twice around nothing and skip if it moved.
+    //      Defeated by a BURST allocator (spawn thread, take stack+TLS,
+    //      block) that is silent by the time the probe runs.
+    //   2. Skip when scheduler task-churn counters moved. Defeated by a
+    //      pure allocator that churns no tasks — which is exactly what
+    //      the async klog flusher is (2026-08-02, third false positive,
+    //      on the linux profile).
+    // The defect is not the specific gate; it is that a global counter
+    // cannot attribute frames to one caller while other CPUs allocate.
+    // No further heuristic fixes that.
+    //
+    // So the LIVE check reports instead of halting: an apparent deficit
+    // emits a WARN sentinel and fires the boot-selftest probe (an
+    // attached GDB still breaks at the exact frame), but does not panic
+    // the box on evidence it cannot stand behind. A false panic is worse
+    // than a missed one here — it halts every profile that happens to
+    // schedule badly, and it trains a reader to disbelieve the check.
+    //
+    // The authoritative, panic-severity version of this invariant
+    // belongs in the hosted tests (tests/host/test_elf_load_image.cpp,
+    // test_load_image.cpp), where the allocator is deterministic and
+    // single-threaded and `after < before` genuinely means a leak.
+    // GAP: the unwind-specific leak case is not yet covered there —
+    // port it so the strict assertion has a sound home.
     auto check_no_leak = [](u64 before, u64 after, const char* tag)
     {
         if (after >= before)
             return;
-        SerialWrite("[elf-test] FAIL frame leak (");
+        SerialWrite("[elf-test] WARN frame-count deficit (");
         SerialWrite(tag);
         SerialWrite(") before=");
         auto write_hex = [](u64 v)
@@ -678,8 +712,11 @@ void ElfLoaderUnwindSelfTest()
         write_hex(before);
         SerialWrite(" after=");
         write_hex(after);
-        SerialWrite("\n");
-        core::Panic("elf-loader", "ElfLoaderUnwindSelfTest: frame leak detected");
+        SerialWrite(" (global counter; may be a concurrent allocator, not a leak)\n");
+        // Probe so an attached GDB still breaks here on the first
+        // occurrence, and the fire count shows in the panic dump's
+        // probe table even on a boot that completes.
+        KBP_PROBE_V(::duetos::debug::ProbeId::kBootSelftestFail, 0x454Cu /* 'EL' */);
     };
 
     // Sample free-frame count BEFORE AddressSpaceCreate so the post-

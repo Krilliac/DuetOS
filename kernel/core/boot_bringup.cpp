@@ -337,6 +337,7 @@
 #include "core/panic.h"
 #include "core/serial_input.h"
 #include "core/service.h"
+#include "core/service_bootstrap_live.h"
 #include "core/session_restore.h"
 #include "syscall/cap_gate.h"
 #include "proc/process.h"
@@ -359,6 +360,8 @@
 #include "subsystems/win32/apc_selftest.h"
 #include "subsystems/win32/custom_selftest.h"
 #include "subsystems/win32/heap_selftest.h"
+#include "subsystems/win32/job_syscall.h"
+#include "subsystems/win32/section.h"
 #include "subsystems/win32/vmap_selftest.h"
 #include "subsystems/win32/gdi_objects.h"
 #include "subsystems/win32/nt_coverage.h"
@@ -1138,6 +1141,24 @@ void BootBringupMemPaging()
                                                   KernelHeapSelfTest();
                                                   return duetos::core::Result<void>{};
                                               });
+        duetos::core::InitcallRegisterOrPanic(duetos::core::Phase::Heap, "process-handle-lifetime-selftest",
+                                              []()
+                                              {
+                                                  duetos::core::ProcessHandleLifetimeSelfTest();
+                                                  return duetos::core::Result<void>{};
+                                              });
+        duetos::core::InitcallRegisterOrPanic(duetos::core::Phase::Heap, "job-handle-lifetime-selftest",
+                                              []()
+                                              {
+                                                  duetos::subsystems::win32::JobHandleLifetimeSelfTest();
+                                                  return duetos::core::Result<void>{};
+                                              });
+        duetos::core::InitcallRegisterOrPanic(duetos::core::Phase::Heap, "job-owner-exit-selftest",
+                                              []()
+                                              {
+                                                  duetos::subsystems::win32::JobOwnerExitSelfTest();
+                                                  return duetos::core::Result<void>{};
+                                              });
         // IocpSelfTest moved to Phase::Sched — alongside the
         // other IPC primitives that use `sched::Mutex` /
         // `sched::Condvar`. IocpTryPost / IocpTryPop / IocpWait
@@ -1851,6 +1872,12 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
                                                   duetos::mm::AddressSpaceSelfTest();
                                                   return duetos::core::Result<void>{};
                                               });
+        duetos::core::InitcallRegisterOrPanic(duetos::core::Phase::Sched, "section-lifetime-selftest",
+                                              []()
+                                              {
+                                                  duetos::subsystems::win32::section::SectionLifetimeSelfTest();
+                                                  return duetos::core::Result<void>{};
+                                              });
         // Phase::Sched (plan A1-followup, 2026-04-28). RwLock state-
         // machine self-test + the two contention self-tests (RwLock +
         // SeqLock) all need the scheduler online to spawn the helper
@@ -1882,6 +1909,12 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
                                               []()
                                               {
                                                   duetos::ipc::KMailboxContentionSelfTest();
+                                                  return duetos::core::Result<void>{};
+                                              });
+        duetos::core::InitcallRegisterOrPanic(duetos::core::Phase::Sched, "handle-table-contention-selftest",
+                                              []()
+                                              {
+                                                  duetos::ipc::HandleTableContentionSelfTest();
                                                   return duetos::core::Result<void>{};
                                               });
         // Kernel work pool — N worker threads pulling work items
@@ -2184,6 +2217,14 @@ void BootBringupDevices(bool force_net_smoke)
     SerialWrite("[boot] Enumerating PCI bus.\n");
     duetos::drivers::pci::PciEnumerate();
 
+    // NetStackInit starts the TCP timer task, so it belongs after scheduler
+    // bring-up, but every protocol table and built-in interface self-test must
+    // be complete before a driver can publish a binding or deliver RX. PCI
+    // enumeration is passive; VirtioInit and NetInit below are the first
+    // activation points.
+    SerialWrite("[boot] Bringing up network stack before NIC activation.\n");
+    duetos::net::NetStackInit();
+
     SerialWrite("[boot] Probing VirtIO PCI devices.\n");
     duetos::drivers::virtio::VirtioInit();
     DUETOS_BOOT_SELFTEST(duetos::drivers::virtio::VirtioInputSelfTest());
@@ -2298,15 +2339,46 @@ void BootBringupDevices(bool force_net_smoke)
     duetos::net::drsh::DrshInit();
     DUETOS_BOOT_SELFTEST(duetos::net::drsh::DrshSelfTest());
 
-    // Service manager: build the runtime table (no spawns yet — the
-    // autostart set launches later, after ramfs snapshots, where the
-    // inline boot spawns used to run). Self-test covers the crash-loop
-    // respawn rate limiter.
+    // Anchor the generated authority-bound service package in fixed kernel
+    // storage. This stages sealed images and opens the runtime substrate;
+    // ServiceBootstrapLiveActivateAllV1 (called later from main) creates
+    // the Process/Task graphs and each service calls MARK_READY.
+    const ServiceBootstrapLiveResultV1 service_bootstrap = ServiceBootstrapLiveInitializeV1();
+    if (service_bootstrap.status == ServiceBootstrapLiveStatusV1::CompatibilityRequired)
+    {
+        KLOG_INFO_2V("core/service-bootstrap",
+                     "package staged and runtime open; activation disabled, compatibility manager retained", "services",
+                     service_bootstrap.generated_service_count, "package-pages", service_bootstrap.package_owned_pages);
+    }
+    else
+    {
+        KLOG_WARN_S("core/service-bootstrap", "live anchor failed; compatibility manager retained", "status",
+                    ServiceBootstrapLiveStatusNameV1(service_bootstrap.status));
+        if (service_bootstrap.status == ServiceBootstrapLiveStatusV1::StageFailed)
+        {
+            KLOG_DEBUG_S("core/service-bootstrap", "live anchor stage result", "status",
+                         ServiceBootstrapStageStatusName(service_bootstrap.stage.status));
+        }
+        else if (service_bootstrap.status == ServiceBootstrapLiveStatusV1::RuntimeFailed ||
+                 service_bootstrap.status == ServiceBootstrapLiveStatusV1::RuntimeFailedStageDiscardFailed)
+        {
+            KLOG_DEBUG_S("core/service-bootstrap", "live anchor runtime result", "status",
+                         ServiceRuntimeStatusNameV1(service_bootstrap.runtime.status));
+            KLOG_DEBUG_S("core/service-bootstrap", "live anchor discard result", "status",
+                         ServiceBootstrapStageStatusName(service_bootstrap.discard_status));
+        }
+    }
+
+    // The compatibility manager remains the live launcher until authenticated
+    // endpoint activation is implemented and its generated marker is true. It
+    // builds the old runtime table without spawning; the autostart set launches
+    // later, after ramfs snapshots. Its self-test covers crash-loop limiting.
     duetos::core::ServiceManagerInit();
     DUETOS_BOOT_SELFTEST(duetos::core::ServiceManagerSelfTest());
 
     SerialWrite("[boot] Detecting NICs.\n");
-    duetos::drivers::net::NetInit();
+    if (!duetos::drivers::net::NetInit())
+        SerialWrite("[boot] NIC registry unavailable (transition or quarantined teardown).\n");
     // drivers/net fault domain self-registers via
     // KERNEL_INITCALL(Drivers, "drivers/net.module", ...) in
     // `kernel/drivers/net/net.cpp`.
@@ -2431,8 +2503,6 @@ void BootBringupDevices(bool force_net_smoke)
     // slice 3 will additionally wake it on an ACPI SCI.
     duetos::env::EnvironmentMonitorStart();
 
-    SerialWrite("[boot] Bringing up network stack skeleton.\n");
-    duetos::net::NetStackInit();
     DUETOS_BOOT_SELFTEST(duetos::net::firewall::FwSelfTest());
 #ifdef DUETOS_DRSH_AUTOSTART
     // Red-team fixture only.  The `true` external-policy argument is
@@ -4196,18 +4266,10 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     duetos::fs::RamfsCpuhistSnapshot();
     duetos::fs::RamfsInspectSnapshot();
 
-    // Launch the userland service set through the service manager. The
-    // manifest (kernel/core/service.cpp) is now the single source of
-    // truth for what runs at boot — the userland shell stub, the native
-    // demo apps (hello_native, nat_calc, nat_sysinfo), and the duet-pkg
-    // selftest — replacing the hand-unrolled SpawnElfFile blocks that
-    // used to live here. ServiceManagerStartAll spawns every autostart
-    // entry in manifest order and starts the `svcmon` supervisor task
-    // that tracks each service's state and respawns Always-services with
-    // crash-loop protection. Operators drive the set at runtime via the
-    // `svc` shell command. (The duet-pkg entry still emits its
-    // `[duet-pkg-selftest] PASS` sentinel on every healthy boot.)
-    duetos::core::ServiceManagerStartAll();
+    // Managed services are deliberately not started from this pre-scheduler
+    // desktop bringup path. main.cpp admits them only after SchedInit and the
+    // Userland initcall phase, when address-space transaction mutexes and
+    // task publication are available.
 
     // peexec=<FATPATH> kernel cmdline: load a Windows PE/.exe off
     // FAT32 vol 0 and spawn it as a Win32 process at boot. This is the
@@ -4239,7 +4301,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         if (hit != nullptr)
         {
             duetos::u32 n = 0;
-            while (hit[n] != '\0' && hit[n] != ' ' && n < sizeof(g_peexec_path) - 1)
+            while (n < sizeof(g_peexec_path) - 1 && hit[n] != '\0' && hit[n] != ' ')
             {
                 g_peexec_path[n] = hit[n];
                 ++n;

@@ -16,10 +16,9 @@
  *     for early boot / fault-domain recovery before auto-mount records
  *     are restored.
  *
- *   - Handle allocation against `Process::win32_handles`. Both
- *     ramfs- and fat32-backed slots reuse the same 0x100..0x10F
- *     handle range so user code (and the existing CloseHandle
- *     dispatch) doesn't have to learn a new range.
+ *   - Handle allocation against `Process::win32_handles`. Every backing
+ *     uses the same 0x100..0x10F low-tag band plus a non-wrapping row
+ *     generation, so stale handles cannot alias a recycled slot.
  *
  *   - The unified Read / Seek / Fstat / Close ops that
  *     dispatch by `Win32FileHandle::kind`. The syscall layer
@@ -42,23 +41,34 @@ namespace duetos::fs::routing
 {
 
 /// Resolve `path` and allocate a Win32FileHandle slot on `proc`.
-/// Returns the handle id (`Process::kWin32HandleBase + slot`) on
-/// success, or u64(-1) on miss / out-of-handles / bad input.
+/// Returns an opaque positive generation-tagged handle on success,
+/// or u64(-1) on miss / out-of-handles / bad input.
 /// Performs NO capability check — caller (syscall layer or self-
 /// test) is responsible for that gate.
 u64 OpenForProcess(::duetos::core::Process* proc, const char* path);
 
 /// Read up to `len` bytes from the handle into the kernel-space
-/// buffer `dst`. Advances the handle's cursor by the number of
-/// bytes copied. Returns the byte count (0 at EOF) or u64(-1)
-/// on bad handle / I/O failure.
+/// buffer `dst`. Serialized with cursor operations and close for
+/// this process/slot; mutable row state is committed through a
+/// generation check after backing I/O. Advances the cursor by the
+/// number of bytes copied. Returns the byte count (0 at EOF) or
+/// u64(-1) on bad handle / I/O failure.
 u64 ReadForProcess(::duetos::core::Process* proc, u64 handle, void* dst, u64 len);
 
+/// Transactional user-delivery variant for Win32 ReadFile. Regular-file
+/// cursor state commits only after CopyToUser succeeds while the per-slot
+/// operation guard is still held, so a failed delivery cannot rewind across
+/// a concurrent read. Pipe reads pre-probe the destination but remain
+/// destructive streams if an SMP unmap races the final copy. `len` is capped
+/// at one 4 KiB staging chunk.
+u64 ReadToUserForProcess(::duetos::core::Process* proc, u64 handle, void* user_dst, u64 len);
+
 /// Write up to `len` bytes from the kernel-space buffer `src` to
-/// the handle's backing store at the current cursor. Advances
+/// the handle's backing store at the current cursor. Serialized
+/// with cursor operations and close for this process/slot. Advances
 /// the cursor by the bytes-written count. Returns bytes written
-/// (0..len) or u64(-1) on bad handle / read-only backing /
-/// past-EOF (no growth in this slice) / I/O failure. Performs
+/// (0..len) or u64(-1) on bad handle / read-only backing / I/O
+/// failure. Writable backends may grow past EOF. Performs
 /// NO capability check — caller (syscall layer) is responsible.
 u64 WriteForProcess(::duetos::core::Process* proc, u64 handle, const void* src, u64 len);
 
@@ -83,8 +93,16 @@ u64 SeekForProcess(::duetos::core::Process* proc, u64 handle, i64 offset, u32 wh
 u64 FstatForProcess(::duetos::core::Process* proc, u64 handle, u64* out_size);
 
 /// Release the handle's slot. Idempotent — closing an already-
-/// free slot is a no-op. Always returns 0.
+/// free slot is a no-op. It waits for an in-flight operation on the
+/// same process/slot, atomically detaches the row, then releases the
+/// backing without either row lock held. Always returns 0.
 u64 CloseForProcess(::duetos::core::Process* proc, u64 handle);
+
+/// Duplicate one inheritable Win32 file handle into an unpublished child.
+/// Parent row validation, snapshot, and pipe-end retain are atomic with
+/// respect to CloseForProcess; child publication uses the generation-checked
+/// reserve/publish protocol. Returns 0 on failure, otherwise the child handle.
+u64 DuplicateForChild(::duetos::core::Process* parent, u64 parent_handle, ::duetos::core::Process* child);
 
 /// Look up a path's metadata without opening a handle. Used by
 /// NtQueryAttributesFile / NtQueryFullAttributesFile and the

@@ -64,6 +64,20 @@ Cap FirstMissingCap(u64 required_mask, CapSet held)
     return kCapNone;
 }
 
+void ResetSyntheticAuthorization(Process& process, CapSet durable, CapSet ceiling)
+{
+    if (AuthorizationContextKeyIsValid(process.authorization) && !AuthorizationRelease(&process.authorization))
+        Panic("cap-gate", "synthetic authorization release failed");
+    if (!AuthorizationCreateTrusted(durable, ceiling, kTickBudgetTrusted, &process.authorization))
+        Panic("cap-gate", "synthetic authorization create failed");
+}
+
+void ReleaseSyntheticAuthorization(Process& process)
+{
+    if (AuthorizationContextKeyIsValid(process.authorization) && !AuthorizationRelease(&process.authorization))
+        Panic("cap-gate", "synthetic authorization final release failed");
+}
+
 } // namespace
 
 Result<void> SyscallGate(u64 syscall_number, const Process* proc)
@@ -114,10 +128,8 @@ void SyscallGateSelfTest()
     // stack — the struct is ~hundreds of bytes and growing.
     static Process empty{};
     static Process trusted{};
-    empty.cap_ceiling = CapSetEmpty();
-    trusted.cap_ceiling = CapSetTrusted();
-    empty.caps = CapSetEmpty();
-    trusted.caps = CapSetTrusted();
+    ResetSyntheticAuthorization(empty, CapSetEmpty(), CapSetEmpty());
+    ResetSyntheticAuthorization(trusted, CapSetTrusted(), CapSetTrusted());
     if (ProcessCapsGrant(&empty, kCapFsRead))
         Panic("cap-gate", "empty-ceiling sandbox accepted a runtime grant");
 
@@ -127,7 +139,7 @@ void SyscallGateSelfTest()
         // Revoking a broker lease must not clobber a durable grant of the
         // same bit, and a stale generation must not revoke a renewal.
         static Process promoted{};
-        promoted.cap_ceiling = CapSetTrusted();
+        ResetSyntheticAuthorization(promoted, CapSetEmpty(), CapSetTrusted());
         constexpr u64 kPromotionGeneration = 0xCA501;
         if (!ProcessCapsGrantLease(&promoted, kCapFsRead, ~0ULL, kPromotionGeneration) ||
             !ProcessCapsGrant(&promoted, kCapFsRead) ||
@@ -136,7 +148,7 @@ void SyscallGateSelfTest()
             Panic("cap-gate", "lease revocation clobbered durable authority");
 
         static Process renewed{};
-        renewed.cap_ceiling = CapSetTrusted();
+        ResetSyntheticAuthorization(renewed, CapSetEmpty(), CapSetTrusted());
         constexpr u64 kOldGeneration = 0xCA503;
         constexpr u64 kNewGeneration = 0xCA504;
         if (!ProcessCapsGrantLease(&renewed, kCapFsWrite, ~0ULL - 1, kOldGeneration) ||
@@ -150,7 +162,7 @@ void SyscallGateSelfTest()
             Panic("cap-gate", "expired lease grant was accepted");
 
         static Process expiring{};
-        expiring.cap_ceiling = CapSetTrusted();
+        ResetSyntheticAuthorization(expiring, CapSetEmpty(), CapSetTrusted());
         constexpr u64 kExpiringGeneration = 0xCA506;
         const u64 lease_start = duetos::time::MonotonicNs();
         const u64 lease_deadline = lease_start + 1000000ull;
@@ -163,13 +175,17 @@ void SyscallGateSelfTest()
         if (duetos::time::MonotonicNs() <= lease_deadline || ProcessHasCap(&expiring, kCapDebug) ||
             ProcessCapsRevokeLease(&expiring, kCapDebug, kExpiringGeneration))
             Panic("cap-gate", "effective snapshot did not lazily expire lease");
+        ReleaseSyntheticAuthorization(expiring);
+        ReleaseSyntheticAuthorization(renewed);
+        ReleaseSyntheticAuthorization(promoted);
     }
     else
     {
         static Process clockless{};
-        clockless.cap_ceiling = CapSetTrusted();
+        ResetSyntheticAuthorization(clockless, CapSetEmpty(), CapSetTrusted());
         if (ProcessCapsGrantLease(&clockless, kCapDebug, 1, 0xCA507))
             Panic("cap-gate", "clockless lease grant did not fail closed");
+        ReleaseSyntheticAuthorization(clockless);
     }
 
     // Every row with a non-zero mask must fail with empty caps and
@@ -216,26 +232,24 @@ void SyscallGateSelfTest()
     CapSet child_caps = CapSetEmpty();
     CapSet child_ceiling = CapSetEmpty();
     CapSet authority = CapSetEmpty();
-    empty.cap_ceiling = CapSetTrusted();
-
-    empty.caps = CapSet{1ULL << static_cast<u32>(kCapFsRead)};
+    ResetSyntheticAuthorization(empty, CapSet{1ULL << static_cast<u32>(kCapFsRead)}, CapSetTrusted());
     if (ProcessCaptureSpawnAuthority(&empty, kSpawnMask, &child_caps, &child_ceiling, &authority) ||
         child_caps.bits != (1ULL << static_cast<u32>(kCapFsRead)))
         Panic("cap-gate", "FsRead-only spawn authority passed");
 
-    empty.caps = CapSet{1ULL << static_cast<u32>(kCapSpawnThread)};
+    ResetSyntheticAuthorization(empty, CapSet{1ULL << static_cast<u32>(kCapSpawnThread)}, CapSetTrusted());
     if (ProcessCaptureSpawnAuthority(&empty, kSpawnMask, &child_caps, &child_ceiling, &authority) ||
         child_caps.bits != (1ULL << static_cast<u32>(kCapSpawnThread)))
         Panic("cap-gate", "SpawnThread-only spawn authority passed");
 
-    empty.caps = CapSet{kSpawnMask};
+    ResetSyntheticAuthorization(empty, CapSet{kSpawnMask}, CapSetTrusted());
     if (!ProcessCaptureSpawnAuthority(&empty, kSpawnMask, &child_caps, &child_ceiling, &authority) ||
         child_caps.bits != kSpawnMask || child_ceiling.bits != CapSetTrusted().bits || authority.bits != kSpawnMask)
         Panic("cap-gate", "exact two-bit spawn authority changed");
 
     // A temporary lease may authorize spawn but must not become a
     // durable child capability.
-    empty.caps = CapSet{1ULL << static_cast<u32>(kCapFsRead)};
+    ResetSyntheticAuthorization(empty, CapSet{1ULL << static_cast<u32>(kCapFsRead)}, CapSetTrusted());
     constexpr u64 kSpawnLeaseGeneration = 0xCA502;
     if (lease_clock_available)
     {
@@ -245,7 +259,7 @@ void SyscallGateSelfTest()
             Panic("cap-gate", "spawn lease was rejected or laundered");
         ProcessCapsRevokeLease(&empty, kCapSpawnThread, kSpawnLeaseGeneration);
     }
-    empty.caps = CapSetEmpty();
+    ResetSyntheticAuthorization(empty, CapSetEmpty(), CapSetTrusted());
 
     // Gate must be a no-op for an unknown syscall number. Use a
     // value past the current top of the SyscallNumber enum so we
@@ -285,6 +299,9 @@ void SyscallGateSelfTest()
     {
         Panic("cap-gate", "kSyscallCapTable has no non-zero rows; nothing tested");
     }
+
+    ReleaseSyntheticAuthorization(empty);
+    ReleaseSyntheticAuthorization(trusted);
 
     duetos::security::CapAuditSuppressJournal(false);
     arch::SerialWrite("[cap-gate] self-test: empty fails, trusted passes, nullptr respects mask. OK.\n");

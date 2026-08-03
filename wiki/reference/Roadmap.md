@@ -96,7 +96,7 @@ cleanup debt: move the residual up and delete the rest.
 
 ### AddressSpace region table — synchronise reads against the swap-with-last compaction
 
-- **Finding (audit R1-14, high):** `AddressSpace::regions_lock` is
+- **Historical finding (audit R1-14, fixed in this audit):** `AddressSpace::regions_lock` was
   acquired in exactly ONE place — `AddressSpaceMapUserPage`
   (`mm/address_space.cpp:396`). `AddressSpaceUnmapUserPage`,
   `AddressSpaceClearUserMappings`, `AddressSpaceFork`,
@@ -126,57 +126,85 @@ cleanup debt: move the residual up and delete the rest.
 - **Shape a real fix has to take.** Separate the table's
   STRUCTURAL integrity from the long operations around it: a short
   IRQ-safe spinlock covering only the scan / swap / count update,
-  with frame allocation, page-table edits and TLB shootdowns kept
-  outside it. `AddressSpaceMapUserPage` allocates while holding
-  the current lock, so it cannot simply be converted in place. The
-  alternative is to stop compacting — tombstone the dying row and
-  reclaim separately — which keeps readers correct without any new
-  lock on the read path.
-- **Blocks on:** deciding between those two, since it changes an
+  with allocation/free, page copying, cross-subsystem calls, and TLB
+  shootdown waits kept outside it. Bounded page-table edits belong
+  inside the structural commit; allocating their intermediate tables
+  does not.
+- **Implemented on the audit branch:** each AS now has a task-context
+  `sched::Mutex` transaction lock above the existing structural
+  `sync::SpinLock`. Map operations inspect under the spinlock, prepare
+  region-table storage and up to three page-table frames outside it,
+  then commit the PTE and ledger atomically under it. Unmap/protect
+  detach or rewrite under the spinlock, drop it, then complete the TLB
+  shootdown and frame retirement while the mutex prevents a same-VA
+  mutation from overtaking them. Empty user-half table paths are pruned
+  during the structural commit and their frames are released only after
+  shootdown, bounding sparse map/unmap churn. Fork snapshots one row/PTE
+  at a time and performs frame allocation/copying outside the spinlock.
+  Readers, including the breakpoint resolver, still take only the
+  bounded spinlock and never sleep.
+- **Process/cross-AS lifetime slice implemented on the audit branch:**
+  Win32 process-handle slots now have an IRQ-safe owner lock. Lookup takes a
+  target reference before dropping that lock; close and final drain detach
+  rows under it and release afterward. Every VM/query/terminate/info/section
+  consumer holds the transient reference through the operation. Cross-AS
+  read/write uses a bounded address-space transaction-copy API, so PTE
+  resolution, permission validation, and direct-map access cannot race
+  unmap/protect/remap; caller user-copy runs outside the AS transaction. The
+  scheduler reaper now removes task lookup visibility before dropping its
+  Process/AS references, and public borrowed PID/TID lookups are replaced by
+  retained, existence-only, or scheduler-owned by-ID operations. Owner Jobs
+  drain at the last-task boundary, and SpawnEx installs inherited stdio before
+  the child Task becomes runnable.
+- **Remaining lifetime contracts:** raw frame lookup remains for callers that
+  must be classified as pre-publication/stopped-task safe or moved behind a
+  transaction operation. Win32 section mapping must pin its section and
+  frames before it can wait for the AS transaction, and its handle/view/W^X
+  ledgers need serialized reserve/publish/retire state. Multi-threaded fork
+  also needs sibling quiescence, COW, or an explicit rejection contract to
+  promise a coherent memory snapshot.
+- **Verification boundary:** source diff/format checks are complete.
+  Full MSVC build, rebuilt tests, multi-vCPU QEMU boot, allocation-failure
+  injection, and concurrent map/protect/unmap stress remain required.
+- **Historical blocker:** deciding between those two, since it changes an
   mm-core invariant. Not attempted as a drive-by: `address_space.cpp`
   is the highest-blast-radius file in the tree and a partial fix here
   (locking writers only, leaving the spinlock-holding reader
   unsynchronised) would buy very little while looking like a
   resolution.
 
+### AdaptiveMutex — close the SMP check-to-park lost-wake window
 
-### PS/2 scan-code ring — two writers to `g_ring_tail` on SMP
+- **Finding:** `AdaptiveMutexLock` rechecks `m_owner` after local `Cli()`,
+  then calls the public `WaitQueueBlock`. A remote unlock can clear the
+  owner and observe an empty wait queue between those two steps; the
+  waiter then enqueues after the last wake and can sleep forever.
+- **Known-good pattern:** `sched::MutexLock` holds `g_sched_lock`
+  continuously across owner check, wait-queue enqueue, and the locked
+  scheduler handoff. Local interrupt masking alone cannot provide that
+  cross-CPU transaction.
+- **Current containment:** the address-space transaction work deliberately
+  uses `sched::Mutex`, not `AdaptiveMutex`. Do not place AdaptiveMutex on
+  another correctness-critical contended path until its park handshake is
+  coupled to the scheduler lock.
+- **Required fix/verification:** expose or reuse a scheduler-owned
+  check-and-park helper, then add a deterministic two-CPU test where unlock
+  lands in the former check/enqueue window. Existing fast-path and ordinary
+  contention self-tests do not force this interleaving.
 
-- **Finding (audit R1-15, medium):** the scan-code ring is protected
-  only by `arch::Cli()` / `Sti()`, and `Ps2KeyboardTryReadChar`
-  (`drivers/input/ps2kbd.cpp:841`) has no protection at all. On SMP
-  `Cli` masks only the LOCAL CPU, so the IRQ can fire on a peer and
-  race the reader regardless.
-- **The actual defect is a second writer, not just a missing mask.**
-  `g_ring_tail` is documented as the "read cursor (task)", but the IRQ
-  producer ALSO advances it on the ring-full path
-  (`ps2kbd.cpp:687`, `++g_ring_tail; // discard oldest`). Two
-  unsynchronised read-modify-writes to the same cursor lose an update,
-  which leaves `head - tail` permanently skewed — so the fullness test
-  that drives the drop path is wrong from then on, and the consumer can
-  re-read a byte the producer intended to discard.
-- **Why a spinlock is not a drop-in.** `Ps2KeyboardRead`
-  (`ps2kbd.cpp:740`) calls `WaitQueueBlock(&g_readers)` INSIDE its
-  `Cli` region, which is what makes its check-then-sleep atomic against
-  the waker. Converting that to a spinlock requires the
-  release-and-block primitive `WaitQueueBlockLocked(wq, lock)` — which
-  Design-Decisions already records as deliberately deferred and which
-  is not exported. Locking only the producer and `TryReadChar` would
-  leave the blocking reader racing, i.e. the partial-fix trap.
-- **The other option is a design change:** switch the ring-full policy
-  from drop-OLDEST to drop-NEWEST. The producer would then only ever
-  write `g_ring_head` and the consumer only `g_ring_tail`, making it a
-  true single-producer/single-consumer ring that needs no lock at all
-  (aligned u64 loads/stores are atomic on x86_64). The cost is the
-  behaviour `ps2kbd.cpp:676-680` deliberately chose: dropping the
-  oldest keeps key-RELEASE bytes that arrive after a press, which
-  matters more than keeping the first press of a burst. Worth noting
-  the ring is only full when the consumer is already too slow, so bytes
-  are lost either way — the question is which.
-- **Blocks on:** picking one of those two. Both are defensible; the
-  first is strictly more work and gates on a scheduler-ABI addition,
-  the second trades a documented input-handling nicety for a
-  lock-free invariant.
+
+### PS/2 scan-code ring — SMP single-producer/single-consumer invariant
+
+- **Landed:** ring overflow now drops the incoming (newest) scan code
+  instead of advancing the task-owned `g_ring_tail` from IRQ context.
+  The IRQ writes only `g_ring_head`; readers write only `g_ring_tail`,
+  so the ring no longer has two unsynchronised writers on SMP.
+- **Trade-off:** under overflow, a new byte may be lost instead of the
+  oldest queued byte. This is intentional: preserving cursor ownership
+  is more important than the previous overflow preference, and either
+  policy loses input once the consumer is too slow.
+- **Residual:** the raw API remains single-reader, and the blocking
+  reader still uses the existing `Cli()` check-then-block handoff.
 
 
 ### Cancelling an untimed-blocked thread — needs a WaitQueue detach primitive
@@ -315,37 +343,6 @@ landed.)
 - **Re-open triggers:** a target-fleet CPU lacking `RDCL_NO=1`,
   or a workload that crosses a trust boundary the hardware can't
   enforce.
-
-### PE loader — unchecked `AddressSpaceMapUserPage` frame leak
-
-- **Mechanism (confirmed, mirrors a bug already fixed on the ELF
-  side 2026-07-28):** `AddressSpaceMapUserPage` returns `void` and
-  has three *silent, non-fatal* refusal paths — frame budget
-  exhausted, region-table grow OOM, page-table walker OOM
-  (`kernel/mm/address_space.cpp:398`, `:426`, `:440`). None of them
-  takes ownership of the caller's frame or appends a regions row,
-  and `address_space.h:205-208` forbids the caller from
-  `FreeFrame`-ing a frame it handed over. `pe_loader.cpp` calls it
-  and immediately `guard.Track(va)` without checking, at roughly
-  twelve sites: section pages (`:531`), header pages (`:597`), the
-  relocation/TLS paths (`:939`, `:979`, `:1084`), the image reserve
-  loop (`:2500`), TEB (`:2650`), proc-env (`:2682`),
-  KUSER_SHARED_DATA (`:2710`), and the 64- and 32-bit thunks pages
-  (`:2749`, `:2752`, `:2782`). Every page past the AS's
-  `frame_budget` leaks one 4 KiB frame permanently, `PeLoad` still
-  reports success with a half-mapped image, and the bogus `Track`
-  rows make the unwind walk call `UnmapUserPage` on VAs with no
-  regions row (returns false, reclaims nothing).
-- **Fix shape:** the ELF loader's — probe the leaf PTE with
-  `AddressSpaceProbePteRaw` (O(1)) after the map; absent ⇒ the map
-  was refused ⇒ `FreeFrame` and fail the load. See
-  `kernel/loader/elf_loader.cpp` `LoadSegment` for the landed
-  pattern.
-- **Why it wasn't done in the ELF slice:** twelve sites in a
-  ~2800-line TU with several distinct failure-propagation shapes
-  (some return `bool`, some are inside `PeLoad` proper). Fixing two
-  of twelve would leave a half-consistent loader, which is worse
-  than a uniformly-known gap. Wants its own slice.
 
 ---
 
@@ -1268,6 +1265,13 @@ of unconditionally re-enabling. That is the IRQ-save lock contract, and
 it also closes the cross-CPU use-after-free on a released socket's UDP
 RX ring.
 
+**Landed 2026-07-31:** socket operations now take a transient lifetime pin
+before sleeping or entering TCP/pipe code. Last-handle and owner teardown
+mark the entry closing and defer resource release until pins drain; stream,
+datagram, and poll paths snapshot mutable endpoint state under the pool lock.
+Raw `SocketGet` access has been removed from syscall handlers. Runtime build,
+boot, and concurrent socket validation remain outstanding for this slice.
+
 **Still open:** make interrupt nesting distinguish hardware IRQ frames
 from syscall/exception frames and rate-limit the defer diagnostic. Do
 not weaken the nested-IRQ scheduling guard. Separately, the TCB table
@@ -1857,6 +1861,13 @@ done, it is merely written.
     drives WHP on the host side.
 61. **Package manager / installer**, **multi-user + fast switching**,
     **remote desktop**, **accessibility** (screen reader), **i18n**.
+62. **`browser` boot-smoke profile.** A `browser` entry was registered in the
+    qemu-smoke matrix before the profile existed in
+    `tools/test/profile-boot-smoke.sh`, so every run failed with
+    `unknown profile 'browser'`; the matrix entry has been removed. Add the
+    profile to the script first, then re-add the matrix row.
+    **PROOF:** `tools/test/profile-boot-smoke.sh browser build/x86_64-debug`
+    exits 0 against a scenario signature that exercises a real page render.
 
 ### Standing rules for this backlog
 

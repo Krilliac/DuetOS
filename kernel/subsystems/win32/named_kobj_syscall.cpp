@@ -43,6 +43,11 @@ u64 HandleBaseFor(::duetos::ipc::KObjectType type)
     }
 }
 
+bool EncodePublicHandle(::duetos::ipc::KObjectType type, ::duetos::ipc::Handle handle, u64* out)
+{
+    return ::duetos::ipc::HandleEncodeTagged(handle, static_cast<u32>(HandleBaseFor(type)), out);
+}
+
 // Allocate a fresh kobject of the requested type using the
 // type-specific Create function. `init_state_or_owner` carries
 // the per-type init bits — see syscall.h for the encoding.
@@ -86,6 +91,14 @@ u64 HandleBaseFor(::duetos::ipc::KObjectType type)
     default:
         return nullptr;
     }
+}
+
+void ReleaseFreshAfterFailure(::duetos::ipc::KObjectType type, ::duetos::ipc::KObject* object, u64 init_state_or_owner)
+{
+    using namespace ::duetos::ipc;
+    if (type == KObjectType::Mutex && init_state_or_owner != 0)
+        KMutexRelease(reinterpret_cast<KMutex*>(object));
+    KObjectRelease(object);
 }
 
 } // namespace
@@ -147,7 +160,8 @@ void DoNamedKObjOpenOrCreate(arch::TrapFrame* frame)
     KObject* existing = NamedKObjectFind(type, name);
     if (existing != nullptr)
     {
-        auto insert_r = HandleTableInsert(proc->kobj_handles, existing);
+        const u64 rights = HandleRightsForProcess(type, ::duetos::core::ProcessCapsSnapshot(proc));
+        auto insert_r = HandleTableInsert(proc->kobj_handles, existing, rights);
         if (!insert_r.has_value())
         {
             // Drop the Find-time refcount on insert failure.
@@ -155,10 +169,15 @@ void DoNamedKObjOpenOrCreate(arch::TrapFrame* frame)
             frame->rax = kBadHandle;
             return;
         }
-        // HandleTableInsert took its own refcount; drop the
-        // Find-time one we held.
-        KObjectRelease(existing);
-        frame->rax = HandleBaseFor(type) + insert_r.value();
+        // Insert adopts the Find-time reference on success.
+        u64 public_handle = 0;
+        if (!EncodePublicHandle(type, insert_r.value(), &public_handle))
+        {
+            (void)HandleTableRemove(proc->kobj_handles, insert_r.value());
+            frame->rax = kBadHandle;
+            return;
+        }
+        frame->rax = public_handle;
         return;
     }
 
@@ -180,23 +199,64 @@ void DoNamedKObjOpenOrCreate(arch::TrapFrame* frame)
     }
     if (!NamedKObjectRegister(type, name, fresh))
     {
-        KObjectRelease(fresh);
+        ReleaseFreshAfterFailure(type, fresh, init_state_or_owner);
         frame->rax = kBadHandle;
         return;
     }
-    auto insert_r = HandleTableInsert(proc->kobj_handles, fresh);
+
+    // Register is deliberately idempotent: a concurrent creator may
+    // have installed the same (type,name) first. Resolve the registry
+    // winner after registration so this caller never publishes its
+    // private loser object under a name that resolves elsewhere.
+    KObject* registered = NamedKObjectFind(type, name);
+    if (registered == nullptr)
+    {
+        // The bounded LRU registry can evict between Register and
+        // Find. Fail closed instead of minting an unregistered name.
+        ReleaseFreshAfterFailure(type, fresh, init_state_or_owner);
+        frame->rax = kBadHandle;
+        return;
+    }
+    const bool registry_used_fresh = (registered == fresh);
+    if (registry_used_fresh)
+    {
+        // Keep the create-time ref for the handle table and discard
+        // the verification lookup ref.
+        KObjectRelease(registered);
+    }
+    else
+    {
+        // Initial-owner state applies only to a newly-created mutex.
+        // Unwind the losing object and use the winner's Find ref.
+        ReleaseFreshAfterFailure(type, fresh, init_state_or_owner);
+        fresh = registered;
+    }
+
+    const u64 rights = HandleRightsForProcess(type, ::duetos::core::ProcessCapsSnapshot(proc));
+    auto insert_r = HandleTableInsert(proc->kobj_handles, fresh, rights);
     if (!insert_r.has_value())
     {
-        // Drop our create-time ref. The named-table still holds
-        // its own ref so the kobject stays alive for future
-        // openers; that's the documented behaviour.
-        KObjectRelease(fresh);
+        // Drop the selected reference. Only a genuine fresh initial-
+        // owner mutex also carries a separate holder reference.
+        if (registry_used_fresh)
+            ReleaseFreshAfterFailure(type, fresh, init_state_or_owner);
+        else
+            KObjectRelease(fresh);
         frame->rax = kBadHandle;
         return;
     }
-    // HandleTableInsert took its own refcount; drop ours.
-    KObjectRelease(fresh);
-    frame->rax = HandleBaseFor(type) + insert_r.value();
+    // Insert adopts the create-time reference. NamedKObjectRegister
+    // independently owns the registry reference.
+    u64 public_handle = 0;
+    if (!EncodePublicHandle(type, insert_r.value(), &public_handle))
+    {
+        if (registry_used_fresh && type == KObjectType::Mutex && init_state_or_owner != 0)
+            KMutexRelease(reinterpret_cast<KMutex*>(fresh));
+        (void)HandleTableRemove(proc->kobj_handles, insert_r.value());
+        frame->rax = kBadHandle;
+        return;
+    }
+    frame->rax = public_handle;
 }
 
 } // namespace duetos::subsystems::win32

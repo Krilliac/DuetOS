@@ -4,7 +4,6 @@
 #include "drivers/net/bcm43xx_fw.h"
 #include "loader/firmware_loader.h"
 #include "log/klog.h"
-#include "sched/sched.h"
 
 namespace duetos::drivers::net
 {
@@ -12,9 +11,10 @@ namespace duetos::drivers::net
 namespace
 {
 
-// Broadcom SiliconBackplane ChipCommon core registers, BAR0-relative
-// (ChipCommon is always the first core on the backplane and maps to
-// the start of BAR0 on PCIe wireless cards).
+// Retained experimental Broadcom shell. b43/SSB, BCMA, and brcmfmac do not
+// share a universal BAR0+0 ChipCommon mapping or firmware format.
+// Bcm43xxMatches fails closed, and BringUp repeats that gate before these
+// dormant legacy reads.
 //
 // CORE_INFO layout (Broadcom backplane spec):
 //   bits[15:0]  ChipID    (e.g. 0x4331, 0x4350, 0x43A0)
@@ -85,44 +85,26 @@ const char* ChipFamilyString(u16 chip_id)
     }
 }
 
-void Bcm43xxWatchEntry(void* arg)
-{
-    auto* n = static_cast<NicInfo*>(arg);
-    if (n == nullptr)
-        return;
-    for (;;)
-    {
-        ++g_stats.watch_polls;
-        const u32 info = Mmio32Read(*n, kRegChipInfo);
-        if (info == 0xFFFFFFFFu)
-        {
-            ++g_stats.unexpected_dead_polls;
-            n->driver_online = false;
-            n->link_up = false;
-        }
-        duetos::sched::SchedSleepTicks(100);
-    }
-}
 
 } // namespace
 
-bool Bcm43xxMatches(u16 vendor_id, u16 device_id)
+bool Bcm43xxMatches(const NicInfo& n)
 {
-    if (vendor_id != kVendorBroadcom)
-        return false;
-
-    // Wireless range: every bcm43xx PCIe card lives in 0x4300..0x43FF.
-    // bcm4313 is the well-known outlier at 0x4727.
-    if (device_id >= 0x4300 && device_id <= 0x43FF)
-        return true;
-    if (device_id == 0x4727)
-        return true;
-    return false;
+    // ID table lives in drivers/net/nic_ids.h — shared with the
+    // net.cpp family classifier so the two can't drift apart.
+    // Exact candidate sets are split into b43/SSB, BCMA, and brcmfmac in
+    // nic_ids.h; none is hardware-probe eligible yet.
+    const nic_ids::WirelessBackend backend = nic_ids::BroadcomWirelessBackendFromIdentity(
+        n.device_id, n.subsystem_vendor_id, n.subsystem_device_id, n.subsystem_known);
+    return n.vendor_id == kVendorBroadcom && backend != nic_ids::WirelessBackend::None &&
+           nic_ids::BroadcomWirelessProbeEligible(backend, n.device_id);
 }
 
 bool Bcm43xxBringUp(NicInfo& n)
 {
     KLOG_TRACE_SCOPE("drivers/net/bcm43xx", "BringUp");
+    if (!Bcm43xxMatches(n))
+        return false;
     if (n.mmio_virt == nullptr)
     {
         arch::SerialWrite("[bcm43xx] no MMIO BAR — skipping\n");
@@ -153,7 +135,13 @@ bool Bcm43xxBringUp(NicInfo& n)
 
     // Probe firmware loader. bcm43xx blobs live under
     // `b43/<chip>.fw` (b43 driver) or `brcm/<chip>.bin`
-    // (brcmfmac); pick a representative name per ChipID.
+    // (brcmfmac); pick a representative name per ChipID. The chip
+    // number formatting follows brcmfmac's rule (nic_ids.h
+    // BcmChipNameFormat): five-digit chips read back as decimal
+    // (BCM43602 = 0xAA52 → "brcmfmac43602-pcie.bin"), four-digit
+    // chips as hex (0x4331 → "brcmfmac4331-pcie.bin"). The previous
+    // always-hex spelling produced "brcmfmacaa52-pcie.bin"-style
+    // names no firmware distribution ships.
     duetos::core::FwLoadRequest req{};
     req.vendor = "broadcom-bcm43xx";
     char namebuf[32];
@@ -162,12 +150,7 @@ bool Bcm43xxBringUp(NicInfo& n)
         u32 off = 0;
         for (u32 i = 0; prefix[i] != '\0' && off + 1 < sizeof(namebuf); ++i)
             namebuf[off++] = prefix[i];
-        // Hex chip id (16 bits) without 0x prefix.
-        const char* hex = "0123456789abcdef";
-        namebuf[off++] = hex[(chip_id_field >> 12) & 0xF];
-        namebuf[off++] = hex[(chip_id_field >> 8) & 0xF];
-        namebuf[off++] = hex[(chip_id_field >> 4) & 0xF];
-        namebuf[off++] = hex[(chip_id_field >> 0) & 0xF];
+        off += nic_ids::BcmChipNameFormat(chip_id_field, namebuf + off, u32(sizeof(namebuf)) - off);
         const char* suffix = "-pcie.bin";
         for (u32 i = 0; suffix[i] != '\0' && off + 1 < sizeof(namebuf); ++i)
             namebuf[off++] = suffix[i];
@@ -249,9 +232,7 @@ bool Bcm43xxBringUp(NicInfo& n)
 
 void Bcm43xxStartWatch(NicInfo& n)
 {
-    if (!n.driver_online || n.mmio_virt == nullptr)
-        return;
-    duetos::sched::SchedCreate(Bcm43xxWatchEntry, &n, "bcm43xx-watch");
+    (void)n;
 }
 
 Bcm43xxStats Bcm43xxStatsRead()

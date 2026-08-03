@@ -103,6 +103,22 @@ void MapPage(uptr virt, PhysAddr phys, u64 flags);
 /// exactly which pages they got around to mapping.
 void UnmapPage(uptr virt);
 
+/// Complete a reclamation barrier for a page-aligned kernel virtual range.
+/// The caller must clear every affected PTE first (normally via UnmapPage),
+/// and must not free or reuse any backing frame until this returns. Every
+/// peer that has joined the fixed-IPI service domain executes `invlpg` for
+/// the whole range through a confirmed `cpu::IpiCallOne(..., wait=true)`;
+/// delayed peers are waited out instead of being treated as an optional
+/// timeout. The local CPU is already invalidated by UnmapPage.
+///
+/// This is a task-context reclamation primitive: if a ready peer exists,
+/// interrupts must be enabled so simultaneous cross-CPU barriers can service
+/// one another's mailbox IPIs. The implementation pins the caller against
+/// scheduler migration while it snapshots and drains the target set. Invalid
+/// alignment, range overflow, or an IF=0 caller is a kernel bug and panics
+/// rather than risking stale translation use after frame reclamation.
+void KernelTlbReclaimBarrier(uptr virt, u64 len);
+
 /// Map a contiguous physical region for MMIO access. Allocates a virtual
 /// range out of the MMIO arena, installs `kKernelMmio` mappings for every
 /// 4 KiB page, returns the base virtual address.
@@ -292,6 +308,11 @@ bool CopyToUser(void* user_dst, const void* kernel_src, u64 len);
 /// `len == 0` range is trivially valid. Pointer accessibility (a present,
 /// correctly-flagged PTE) is a separate check; this is the cheap bounds gate.
 bool IsUserAddressRange(u64 addr, u64 len);
+
+/// Snapshot whether every page in a canonical user range is presently mapped
+/// user-writable in the active address space. This is a fail-fast probe, not
+/// a pin: callers must still use CopyToUser and handle a concurrent unmap.
+bool ProbeUserWriteRange(const void* user_dst, u64 len);
 
 /// Read up to `len` bytes from `kernel_src` into `kernel_dst`,
 /// surviving a #PF on the source. Returns true if all bytes
