@@ -29,7 +29,7 @@ jobs:
     name: build release assets
     runs-on: ubuntu-24.04
     env:
-      CARGO_HOME: ${{ runner.temp }}/duetos-cargo-home
+      CARGO_HOME: ${{ github.workspace }}/.duetos-cargo-home
     outputs:
       source_ref: ${{ steps.source.outputs.ref }}
     steps:
@@ -111,7 +111,7 @@ jobs:
     name: build flavor (${{ matrix.preset }})
     runs-on: ubuntu-24.04
     env:
-      CARGO_HOME: ${{ runner.temp }}/duetos-cargo-home
+      CARGO_HOME: ${{ github.workspace }}/.duetos-cargo-home
     needs: build-release-assets
     outputs:
       source_ref: ${{ needs.build-release-assets.outputs.source_ref }}
