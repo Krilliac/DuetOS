@@ -119,7 +119,26 @@ u64 FrameAllocatorGetFailAfter()
 {
     return 0;
 }
+// ElfLoaderUnwindSelfTest asserts the unwind invariant per-address-space
+// rather than against a global frame count (which is not a valid oracle once
+// APs are online). Report "no summary available" so the fuzz harness — which
+// never runs that self-test — links without pulling in the address-space
+// regions ledger.
+bool AddressSpaceTrySnapshotUserRegionSummary(const AddressSpace*, AddressSpaceUserRegionSummary*)
+{
+    return false;
+}
 } // namespace duetos::mm
+
+namespace duetos::arch
+{
+// The fuzz harness is single-threaded, so the self-test's global free-frame
+// oracle would be valid here. Report uniprocessor.
+u64 SmpCpusOnline()
+{
+    return 1;
+}
+} // namespace duetos::arch
 
 namespace duetos::core
 {
