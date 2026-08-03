@@ -1,6 +1,7 @@
 #include "loader/elf_loader.h"
 
 #include "arch/x86_64/serial.h"
+#include "arch/x86_64/smp.h" // SmpCpusOnline — gates the global free-frame oracle
 #include "core/panic.h"
 #include "debug/probes.h"
 #include "exec_meta_rust.h"
@@ -664,6 +665,28 @@ void ElfLoaderUnwindSelfTest()
     {
         if (after >= before)
             return;
+        // FreeFramesCount() is global. Once the APs are online they
+        // allocate and free continuously, so a peer CPU taking frames
+        // inside our sample window is indistinguishable from this test
+        // leaking — the "tolerate gains, fail on losses" heuristic below
+        // is only sound on a quiescent uniprocessor. This fired on
+        // healthy 4-vCPU boots the moment SMP actually started working
+        // (2026-08-03), panicking linux-4cpu and pe-winapi-4cpu.
+        //
+        // Don't widen the tolerance — that would blind the check in BOTH
+        // modes. Keep the hard failure where the oracle is valid, and
+        // downgrade to a WARN + probe where it is not. The real unwind
+        // invariant is checked per-address-space below, which no peer CPU
+        // can perturb.
+        if (arch::SmpCpusOnline() > 1)
+        {
+            KLOG_WARN_V("elf-loader",
+                        "unwind self-test: free-frame count dropped while APs are online — "
+                        "not a valid leak signal under SMP, frames lost",
+                        before - after);
+            KBP_PROBE_V(::duetos::debug::ProbeId::kBootSelftestFail, before - after);
+            return;
+        }
         SerialWrite("[elf-test] FAIL frame leak (");
         SerialWrite(tag);
         SerialWrite(") before=");
@@ -748,8 +771,23 @@ void ElfLoaderUnwindSelfTest()
         core::Panic("elf-loader", "ElfLoaderUnwindSelfTest: ElfLoad ignored OOM");
     }
 
-    // The guard should have unwound the two pages it tracked. The
-    // address space itself still owns its PML4/PDPT/PD frames; tear
+    // The guard should have unwound the two pages it tracked. Assert
+    // that directly, against THIS address space, before tearing it
+    // down: a per-AS page count is the actual unwind invariant and no
+    // peer CPU can perturb it, unlike the global free-frame sample
+    // below. This is the load-bearing check under SMP.
+    {
+        AddressSpaceUserRegionSummary summary{};
+        if (AddressSpaceTrySnapshotUserRegionSummary(as, &summary) && summary.page_count != 0)
+        {
+            SerialWrite("[elf-test] FAIL unwind left user pages mapped: ");
+            arch::SerialWriteHex(static_cast<u64>(summary.page_count));
+            SerialWrite("\n");
+            core::Panic("elf-loader", "ElfLoaderUnwindSelfTest: unwind left user pages mapped");
+        }
+    }
+
+    // The address space itself still owns its PML4/PDPT/PD frames; tear
     // it down before sampling FreeFramesCount.
     AddressSpaceRelease(as);
 
