@@ -1083,22 +1083,48 @@ bool CheckAttackSimVtable()
 extern "C" const u8 _rodata_start[];
 extern "C" const u8 _rodata_end[];
 
+// Accessed and Dirty are maintained by the CPU itself: it sets A on any
+// read and D on any write, with no software involvement. They carry no
+// W^X meaning — a page whose A bit flipped is exactly as writable and
+// exactly as executable as it was at baseline.
+//
+// Comparing raw PTE values therefore reports a "per-page W^X bypass" the
+// first time anything touches a watched .rodata page. That is not
+// theoretical: a live 4-minute boot logged 92 drifts, all of them
+// baseline=0x8000000000000001 -> now=0x8000000000000021, i.e. bit 5 (A)
+// and nothing else. NX and the write bit never moved.
+//
+// The cost was real rather than cosmetic. Each false report drove an
+// autonomic "security-escalate" (46 of them in that window), pushing the
+// box to Production/Enforce — which poisons every subsequent image-load
+// and sensitive-LBA write for the session. A false integrity alarm that
+// degrades the running system is worse than no alarm.
+//
+// Mask both bits out of the comparison. Every security-relevant bit —
+// Present, Writable, User, NX — is still compared exactly.
+inline constexpr u64 kPteHardwareManagedMask = mm::kPageAccessed | mm::kPageDirty;
+
 bool CheckPteFlags()
 {
     bool any_drift = false;
     for (u32 i = 0; i < g_baseline_pte_count; ++i)
     {
         const u64 va = g_baseline_pte_va[i];
-        const u64 baseline = g_baseline_pte_attrs[i];
-        const u64 now = mm::GetPteFlags4K(va);
+        const u64 baseline_raw = g_baseline_pte_attrs[i];
+        const u64 now_raw = mm::GetPteFlags4K(va);
+        const u64 baseline = baseline_raw & ~kPteHardwareManagedMask;
+        const u64 now = now_raw & ~kPteHardwareManagedMask;
         if (now != baseline)
         {
+            // Report the RAW values — a real flip needs the full PTE for
+            // diagnosis, and printing the masked form would hide which
+            // bit actually moved.
             arch::SerialWrite("[health] PTE flags drifted: va=");
             arch::SerialWriteHex(va);
             arch::SerialWrite(" baseline=");
-            arch::SerialWriteHex(baseline);
+            arch::SerialWriteHex(baseline_raw);
             arch::SerialWrite(" now=");
-            arch::SerialWriteHex(now);
+            arch::SerialWriteHex(now_raw);
             arch::SerialWrite("\n");
             Report(HealthIssue::KernelPteWxFlipped);
             any_drift = true;
