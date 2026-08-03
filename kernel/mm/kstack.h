@@ -164,6 +164,84 @@ inline bool IsKernelStackGuardFault(u64 fault_va)
     return off_in_slot < (kKernelStackGuardPages * kPageSize);
 }
 
+/// True iff `va` lies in the arena and inside the *usable* (non-guard)
+/// region of its slot; on success reports that slot's usable bounds as
+/// [out_lo, out_hi). `out_hi` is exclusive — it is the address one past
+/// the last usable byte, which is also the base of the NEXT slot's guard
+/// page and therefore must never be dereferenced.
+inline bool KernelStackUsableRangeOf(u64 va, u64* out_lo, u64* out_hi)
+{
+    if (va < kKernelStackArenaBase || va >= kKernelStackArenaBase + kKernelStackArenaBytes)
+    {
+        return false;
+    }
+    const u64 slot_index = (va - kKernelStackArenaBase) / kKernelStackSlotBytes;
+    const u64 slot_base = kKernelStackArenaBase + (slot_index * kKernelStackSlotBytes);
+    const u64 lo = slot_base + (kKernelStackGuardPages * kPageSize);
+    const u64 hi = slot_base + kKernelStackSlotBytes;
+    if (va < lo)
+    {
+        return false; // inside the guard page, not the usable region
+    }
+    if (out_lo != nullptr)
+    {
+        *out_lo = lo;
+    }
+    if (out_hi != nullptr)
+    {
+        *out_hi = hi;
+    }
+    return true;
+}
+
+/// Classification of a guard-page fault relative to the stack that was
+/// actually running. `IsKernelStackGuardFault` alone cannot tell these
+/// apart, and reporting the second as "stack overflow" is precisely
+/// backwards: the running stack may be nearly empty.
+enum class KernelStackGuardKind : u8
+{
+    NotAGuardFault = 0,
+    OwnGuard,      ///< ran off the BOTTOM of its own stack — a real overflow
+    NeighbourGuard ///< touched one past the TOP of its own stack — an over-pop
+                   ///< or an unbounded frame walk, NOT an overflow
+};
+
+/// Classify a guard-page fault using the faulting stack pointer for
+/// context. `rsp` should be the RSP of the faulting frame.
+///
+/// A slot's exclusive top is the next slot's guard base, so a read at
+/// `top` (e.g. `*(rbp + 8)` when rbp sits at `top - 8`) faults on the
+/// NEIGHBOUR's guard while the running stack still has its full depth
+/// free. Distinguishing the two is what keeps a one-past-the-top bug
+/// from being chased as unbounded recursion.
+inline KernelStackGuardKind KernelStackClassifyGuardFault(u64 fault_va, u64 rsp)
+{
+    if (!IsKernelStackGuardFault(fault_va))
+    {
+        return KernelStackGuardKind::NotAGuardFault;
+    }
+    u64 lo = 0;
+    u64 hi = 0;
+    if (!KernelStackUsableRangeOf(rsp, &lo, &hi))
+    {
+        // RSP isn't in an arena stack (boot stack, IST, or already wild) —
+        // we cannot attribute the guard, so don't claim a direction.
+        return KernelStackGuardKind::OwnGuard;
+    }
+    // The guard immediately BELOW our usable region is our own.
+    const u64 own_guard_base = lo - (kKernelStackGuardPages * kPageSize);
+    if (fault_va >= own_guard_base && fault_va < lo)
+    {
+        return KernelStackGuardKind::OwnGuard;
+    }
+    // `hi` is our exclusive top and the next slot's guard base.
+    if (fault_va >= hi && fault_va < hi + (kKernelStackGuardPages * kPageSize))
+    {
+        return KernelStackGuardKind::NeighbourGuard;
+    }
+    return KernelStackGuardKind::OwnGuard;
+}
+
 /// Snapshot of arena state. Cheap; read-only under the arena lock.
 struct KernelStackStats
 {

@@ -1764,14 +1764,38 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     if (frame->vector == 14 && (frame->cs & 3) == 0)
     {
         const u64 cr2 = ReadCr2();
-        if (mm::IsKernelStackGuardFault(cr2))
+        const mm::KernelStackGuardKind guard_kind = mm::KernelStackClassifyGuardFault(cr2, frame->rsp);
+        if (guard_kind != mm::KernelStackGuardKind::NotAGuardFault)
         {
-            SerialWrite("\n** KERNEL STACK OVERFLOW **\n  task id : ");
+            // A slot's exclusive top IS the next slot's guard base, so a
+            // read at `top` faults on the NEIGHBOUR's guard while the
+            // running stack is still nearly empty. Reporting that as
+            // "stack overflow" sends the next debugger down a recursion
+            // hunt that cannot terminate; name the two cases apart.
+            const bool over_top = (guard_kind == mm::KernelStackGuardKind::NeighbourGuard);
+            SerialWrite(over_top ? "\n** KERNEL STACK OVER-TOP ACCESS **\n  task id : "
+                                 : "\n** KERNEL STACK OVERFLOW **\n  task id : ");
             SerialWriteHex(duetos::sched::CurrentTaskId());
             SerialWrite("\n  cr2     : ");
             SerialWriteHex(cr2);
+            SerialWrite("\n  rsp     : ");
+            SerialWriteHex(frame->rsp);
             SerialWrite("\n  rip     : ");
             SerialWriteHex(frame->rip);
+            if (over_top)
+            {
+                u64 lo = 0;
+                u64 hi = 0;
+                (void)mm::KernelStackUsableRangeOf(frame->rsp, &lo, &hi);
+                SerialWrite("\n  stack   : [");
+                SerialWriteHex(lo);
+                SerialWrite(",");
+                SerialWriteHex(hi);
+                SerialWrite(") — fault is ONE PAST THE TOP, not an overflow;"
+                            " this stack still has its depth free\n");
+                core::PanicWithValue("sched/kstack",
+                                     "guard-page hit — access past top of kernel stack (not an overflow)", cr2);
+            }
             SerialWrite("\n");
             core::PanicWithValue("sched/kstack", "guard-page hit — kernel stack overflow", cr2);
         }

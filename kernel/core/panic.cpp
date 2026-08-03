@@ -234,11 +234,36 @@ bool PlausibleStackPointer(u64 addr)
 void DumpBacktrace(u64 rbp)
 {
     arch::SerialWrite("  backtrace (up to 16 frames, innermost first):\n");
+
+    // Upper bound for dereferences, when the starting RBP is a guarded
+    // arena stack. PlausibleStackPointer is only a coarse range test
+    // ("is this higher-half?"), so on its own it happily walks off the
+    // TOP of a slot: at the outermost frame RBP sits at `top - 8`, and
+    // reading `*(rbp + 8)` touches `top` exactly — which is the NEXT
+    // slot's guard page. That faults while the walked stack is nearly
+    // empty, and the guard-fault path then reports it as this stack
+    // overflowing, which is backwards. Bound the walk to the slot we
+    // started in. A zero limit means "not an arena stack" (boot stack,
+    // IST) and keeps the previous coarse behaviour.
+    u64 usable_lo = 0;
+    u64 usable_hi = 0;
+    if (!mm::KernelStackUsableRangeOf(rbp, &usable_lo, &usable_hi))
+    {
+        usable_lo = 0;
+        usable_hi = 0;
+    }
+
     for (int depth = 0; depth < 16; ++depth)
     {
         if (!PlausibleStackPointer(rbp))
         {
             arch::SerialWrite("    [end of chain]\n");
+            return;
+        }
+        // Need both quads — [rbp] and [rbp+8] — fully inside the slot.
+        if (usable_hi != 0 && (rbp < usable_lo || rbp + 16 > usable_hi))
+        {
+            arch::SerialWrite("    [end of chain — frame outside stack bounds]\n");
             return;
         }
         const u64 saved_rbp = *reinterpret_cast<const u64*>(rbp);
