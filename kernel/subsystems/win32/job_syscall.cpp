@@ -252,8 +252,7 @@ i64 SysJobTerminate(u64 job_handle, u64 exit_code)
     }
 
     const core::ProcessKey caller_key = core::ProcessKeySnapshot(caller);
-    const core::JobTerminateResult result =
-        sched::SchedTerminateJob(key, caller_key, static_cast<u32>(exit_code));
+    const core::JobTerminateResult result = sched::SchedTerminateJob(key, caller_key, static_cast<u32>(exit_code));
     if (result == core::JobTerminateResult::InvalidJob)
     {
         KLOG_ONCE_WARN_V("subsystems/win32/job", "SysJobTerminate job_handle bad/foreign", job_handle);
@@ -506,12 +505,11 @@ void JobHandleLifetimeSelfTest()
 
     core::JobTerminationIntent second_intent{};
     JobTestExpect(core::JobBeginTermination(second_key, owner_key, 0x87654321u, &second_intent) ==
-                      core::JobTerminateResult::Begun &&
+                          core::JobTerminateResult::Begun &&
                       second_intent.member_count == 1 && second_intent.members[0] == other_key &&
                       core::JobFinishTermination(&second_intent),
                   "replacement Job termination transition failed");
-    JobTestExpect(core::JobInspectLifecycle(second_key, &lifecycle) &&
-                      lifecycle.state == core::JobState::Terminating &&
+    JobTestExpect(core::JobInspectLifecycle(second_key, &lifecycle) && lifecycle.state == core::JobState::Terminating &&
                       lifecycle.references == 1,
                   "terminated Job did not remain Terminating with a live member");
     core::JobOnProcessExit(other_key);

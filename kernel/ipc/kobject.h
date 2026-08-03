@@ -64,9 +64,9 @@ enum class KObjectType : u16
     Semaphore = 3,
     Mailbox = 4,
     Waitable = 5,
-    File = 6,        ///< KFile — open file descriptor (plan A3-followup).
-    Iocp = 7,        ///< IocpPort — I/O completion port (Win32 IOCP backing).
-    MessagePort = 8, ///< Waitable validated MessageRing endpoint.
+    File = 6,            ///< KFile — open file descriptor (plan A3-followup).
+    Iocp = 7,            ///< IocpPort — I/O completion port (Win32 IOCP backing).
+    MessagePort = 8,     ///< Waitable validated MessageRing endpoint.
     ServiceEndpoint = 9, ///< Authenticated bidirectional ChannelCore endpoint.
 
     /// Used by the v0 self-test exclusively. Real kernel code must

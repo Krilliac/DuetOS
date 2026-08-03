@@ -290,8 +290,7 @@ JobAssignResult JobAssign(JobKey key, ProcessKey owner, ProcessKey member)
     return JobAssignResult::Capacity;
 }
 
-JobPublishPrepareResult JobPrepareInheritedMember(ProcessKey parent, ProcessKey child,
-                                                  JobPublicationTicket* out_ticket)
+JobPublishPrepareResult JobPrepareInheritedMember(ProcessKey parent, ProcessKey child, JobPublicationTicket* out_ticket)
 {
     if (out_ticket == nullptr)
         return JobPublishPrepareResult::Invalid;
@@ -365,8 +364,8 @@ JobPublishPrepareResult JobPrepareInheritedMember(ProcessKey parent, ProcessKey 
 
 bool JobCommitInheritedMember(JobPublicationTicket* ticket)
 {
-    if (ticket == nullptr || !ticket->active || ticket->member_slot >= kJobMemberCapacity ||
-        ticket->ticket == 0 || !ProcessKeyIsValid(ticket->process))
+    if (ticket == nullptr || !ticket->active || ticket->member_slot >= kJobMemberCapacity || ticket->ticket == 0 ||
+        !ProcessKeyIsValid(ticket->process))
     {
         return false;
     }
@@ -401,8 +400,8 @@ bool JobCommitInheritedMember(JobPublicationTicket* ticket)
 
 bool JobAbortInheritedMember(JobPublicationTicket* ticket)
 {
-    if (ticket == nullptr || !ticket->active || ticket->member_slot >= kJobMemberCapacity ||
-        ticket->ticket == 0 || !ProcessKeyIsValid(ticket->process))
+    if (ticket == nullptr || !ticket->active || ticket->member_slot >= kJobMemberCapacity || ticket->ticket == 0 ||
+        !ProcessKeyIsValid(ticket->process))
     {
         return false;
     }
@@ -495,8 +494,7 @@ bool JobSnapshotContaining(ProcessKey member, JobSnapshot* out_snapshot)
     return false;
 }
 
-JobTerminateResult JobBeginTermination(JobKey key, ProcessKey owner, u32 exit_code,
-                                       JobTerminationIntent* out_intent)
+JobTerminateResult JobBeginTermination(JobKey key, ProcessKey owner, u32 exit_code, JobTerminationIntent* out_intent)
 {
     if (!ProcessKeyIsValid(owner) || out_intent == nullptr)
         return JobTerminateResult::InvalidJob;

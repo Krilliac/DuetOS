@@ -424,10 +424,10 @@ void LeakDetectorReportProcessExit(const ::duetos::core::Process& p)
 
     ::duetos::core::AuthorizationContextSnapshot authorization{};
     const bool have_authorization = ::duetos::core::ProcessInspectAuthorization(&p, &authorization);
-    const u64 over_budget = have_authorization && authorization.tick_budget > 0 &&
-                                    authorization.ticks_used > authorization.tick_budget
-                                ? authorization.ticks_used - authorization.tick_budget
-                                : 0;
+    const u64 over_budget =
+        have_authorization && authorization.tick_budget > 0 && authorization.ticks_used > authorization.tick_budget
+            ? authorization.ticks_used - authorization.tick_budget
+            : 0;
 
     // Pull the GPU per-class snapshots so the GPU driver's exit hook
     // can cross-check (no-op today; real walk lands with the GPU

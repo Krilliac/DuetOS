@@ -269,7 +269,8 @@ void TokenAdjustSelfTest()
 {
     arch::SerialWrite("[win32/token] self-test: previous-state + reversible-disable\n");
 
-    const auto reset_authorization = [](core::Process& process) {
+    const auto reset_authorization = [](core::Process& process)
+    {
         if (core::AuthorizationContextKeyIsValid(process.authorization) &&
             !core::AuthorizationRelease(&process.authorization))
             core::Panic("win32/token", "self-test: synthetic authorization reset failed");
@@ -277,7 +278,8 @@ void TokenAdjustSelfTest()
                                               &process.authorization))
             core::Panic("win32/token", "self-test: synthetic authorization create failed");
     };
-    const auto release_authorization = [](core::Process& process) {
+    const auto release_authorization = [](core::Process& process)
+    {
         if (!core::AuthorizationRelease(&process.authorization))
             core::Panic("win32/token", "self-test: synthetic authorization release failed");
     };

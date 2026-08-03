@@ -670,8 +670,7 @@ static u64 ReadForProcessImpl(::duetos::core::Process* proc, u64 handle, void* d
             ::duetos::subsystems::linux::internal::PipeReadKernel(h.pipe_pool_idx, static_cast<u8*>(dst), len);
         if (got < 0)
             return u64(-1);
-        if (user_dst != nullptr && got != 0 &&
-            !mm::CopyToUser(user_dst, dst, static_cast<u64>(got)))
+        if (user_dst != nullptr && got != 0 && !mm::CopyToUser(user_dst, dst, static_cast<u64>(got)))
         {
             // Stream contract: a post-probe SMP unmap can still fault the
             // delivery. Those already-consumed bytes cannot be replayed.

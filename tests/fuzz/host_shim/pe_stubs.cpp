@@ -217,3 +217,16 @@ void Win32KuserSharedDataPopulate(u8*)
     Trap("Win32KuserSharedDataPopulate");
 }
 } // namespace duetos::win32
+
+namespace duetos::sched
+{
+struct Mutex;
+void MutexLock(Mutex*)
+{
+    Trap("MutexLock");
+}
+void MutexUnlock(Mutex*)
+{
+    Trap("MutexUnlock");
+}
+} // namespace duetos::sched

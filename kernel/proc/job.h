@@ -170,8 +170,7 @@ bool JobSnapshotContaining(ProcessKey member, JobSnapshot* out_snapshot);
 
 /// Transition Live -> Terminating and copy every active exact member key into
 /// a one-shot intent while pinning the Job row against generation reuse.
-JobTerminateResult JobBeginTermination(JobKey key, ProcessKey owner, u32 exit_code,
-                                       JobTerminationIntent* out_intent);
+JobTerminateResult JobBeginTermination(JobKey key, ProcessKey owner, u32 exit_code, JobTerminationIntent* out_intent);
 
 /// Consume the authentic dispatch ticket and drop its operation pin. The Job
 /// remains Terminating while any member is active; the last exact Process-exit

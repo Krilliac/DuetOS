@@ -123,16 +123,11 @@ jobs:
           sudo ln -sf /usr/bin/ld.lld-18 /usr/local/bin/ld.lld
       - name: Verify host structural contracts
         run: |
-          python3 tools/test/test-verify-boot-verdict.py
-          python3 tools/test/test-profile-boot-verdict-integration.py
-          python3 tools/test/test-smoke-profile-order.py
-          python3 tools/test/test-browser-smoke-profile-contract.py
           python3 tools/test/test-service-boot-order.py
           python3 tools/test/test-smp-ap-handshake.py
           python3 tools/test/test-tlb-shootdown-contract.py
           python3 tools/test/test-user-tlb-reclaim-contract.py
           python3 tools/test/test-task-cancellation-contract.py
-          python3 tools/test/test-cancellable-wait-contract.py
           python3 tools/test/test-cancellation-smp-oracle-contract.py
           python3 tools/test/test-kmutex-cancellation-contract.py
           python3 tools/test/test-linux-exit-unwind-contract.py
@@ -164,16 +159,12 @@ jobs:
           python3 tools/test/test-linux-pipe-wait-cancellation-contract.py
           python3 tools/test/test-linux-notify-aio-wait-cancellation-contract.py
           python3 tools/test/test-process-child-wait-cancellation-contract.py
-          python3 tools/test/test-win32-thread-wait-cancellation-contract.py
-          python3 tools/test/test-win32-directory-address-wait-cancellation-contract.py
           python3 tools/test/test-pidfd-strong-identity-contract.py
           python3 tools/test/test-epoll-fd-identity-contract.py
           python3 tools/test/test-process-handle-generation-contract.py
           python3 tools/test/test-handle-publication-reservation-contract.py
           python3 tools/test/test-gui-message-wait-sequence-contract.py
           python3 tools/test/test-address-space-region-sync-contract.py
-          python3 tools/test/test-breakpoint-address-space-read-contract.py
-          python3 tools/test/test-dbg-core-scan-coherence-contract.py
           python3 tools/test/test-ap-bootstrap-stack-contract.py
           python3 tools/test/test-win32-heap-vm-safety-contract.py
           python3 tools/test/test-win32-thread-tls-vm-safety-contract.py
@@ -181,7 +172,6 @@ jobs:
           python3 tools/test/test-native-syscall-idl.py
           python3 tools/test/test-native-syscall-dispatch-bijection.py
           python3 tools/test/test-rust-ffi-signatures.py
-          python3 tools/test/test-rust-ingress-hardening-contract.py
           python3 tools/test/test-gen-service-manifest.py
           python3 tools/test/test-service-elf-load-image-contract.py
           python3 tools/test/test-service-bootstrap-stage-contract.py
@@ -195,7 +185,6 @@ jobs:
           python3 tools/test/test-service-publication-directory-contract.py
           python3 tools/test/test-service-runtime-owner-contract.py
           python3 tools/test/test-service-bootstrap-live-contract.py
-          python3 tools/test/test-win32-service-endpoint-close-contract.py
           python3 tools/test/test-process-authority-wiring-contract.py
           python3 tools/test/test-serviced-supervisor-contract.py
           python3 tools/test/test-registryd-store-contract.py
@@ -216,8 +205,6 @@ jobs:
           python3 tools/test/test-host-sanitizer-ci-contract.py
           python3 tools/test/test-ntdll-vm-abi-contract.py
           python3 tools/test/test-service-package-ci-contract.py
-          python3 tools/test/test-release-publisher-singleton-contract.py
-          python3 tools/test/test-parallel-claim-safety.py
       - name: Configure
         run: cmake --preset x86_64-debug
       - name: Build

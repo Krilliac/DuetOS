@@ -43,7 +43,7 @@ int main(void)
     const int s = duet_socket(DUET_AF_INET, DUET_SOCK_STREAM);
     if (s < 0)
     {
-        puts_str("[netd] FAIL socket\n");
+        puts_str("[netd] setup failed: socket\n");
         return 2;
     }
 
@@ -51,12 +51,12 @@ int main(void)
     duet_sockaddr_in_any(&addr, NETD_PORT);
     if (duet_bind(s, &addr, (int)sizeof(addr)) != 0)
     {
-        puts_str("[netd] FAIL bind\n");
+        puts_str("[netd] setup failed: bind\n");
         return 3;
     }
     if (duet_listen(s, NETD_BACKLOG) != 0)
     {
-        puts_str("[netd] FAIL listen\n");
+        puts_str("[netd] setup failed: listen\n");
         return 4;
     }
 

@@ -461,7 +461,7 @@ void BrokerSelfTest()
         !duetos::core::AuthorizationRelease(&synth.authorization))
         Panic("broker", "self-test: synthetic authorization reset failed");
     if (!duetos::core::AuthorizationCreateTrusted(duetos::core::CapSetEmpty(), duetos::core::CapSetTrusted(),
-                                                   duetos::core::kTickBudgetTrusted, &synth.authorization))
+                                                  duetos::core::kTickBudgetTrusted, &synth.authorization))
         Panic("broker", "self-test: synthetic authorization create failed");
 
     // Self-test relies on the seeded admin account (auth.cpp init).

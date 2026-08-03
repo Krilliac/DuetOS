@@ -1028,8 +1028,7 @@ u64 SchedKillByProcess(core::Process* target, u32 exit_code = 1);
 /// Linearize exact Job assignment with the scheduler registry. The target
 /// must still be Published with at least one non-Dead Task in this lock hold;
 /// retained but exited Process headers are rejected and cannot consume slots.
-core::JobAssignResult SchedAssignProcessToJob(core::JobKey key, core::ProcessKey owner,
-                                              core::Process* target);
+core::JobAssignResult SchedAssignProcessToJob(core::JobKey key, core::ProcessKey owner, core::Process* target);
 
 /// Transition a Job to Terminating and dispatch its exact member set in one
 /// all-Task registry pass under g_sched_lock. Process-wide closure and every

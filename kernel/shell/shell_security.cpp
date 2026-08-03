@@ -75,9 +75,9 @@ inline void EnsureShellProcInitialized()
     if (g_shell_proc_initialized)
         return;
     g_shell_proc.pid = kShellPseudoPid;
-    g_shell_proc_initialized = duetos::core::AuthorizationCreateTrusted(
-        duetos::core::CapSetEmpty(), duetos::core::CapSetTrusted(), duetos::core::kTickBudgetTrusted,
-        &g_shell_proc.authorization);
+    g_shell_proc_initialized =
+        duetos::core::AuthorizationCreateTrusted(duetos::core::CapSetEmpty(), duetos::core::CapSetTrusted(),
+                                                 duetos::core::kTickBudgetTrusted, &g_shell_proc.authorization);
 }
 
 } // namespace

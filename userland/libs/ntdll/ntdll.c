@@ -227,8 +227,8 @@ __declspec(dllexport) NTSTATUS NtAllocateVirtualMemory(HANDLE hProcess, void** B
                      "mov %[out_base], %%r9\n\t"
                      "int $0x80"
                      : "=a"(status)
-                     : "a"((long long)148), "D"((long long)hProcess), "S"(hint), "d"(sz),
-                       [allocation_type] "r"((long long)AllocationType), [protect] "r"((long long)Protect),
+                     : "a"((long long)148), "D"((long long)hProcess), "S"(hint),
+                       "d"(sz), [allocation_type] "r"((long long)AllocationType), [protect] "r"((long long)Protect),
                        [out_base] "r"((long long)&out_base)
                      : "r10", "r8", "r9", "rcx", "r11", "memory");
     if (status != 0)
@@ -256,8 +256,8 @@ __declspec(dllexport) NTSTATUS NtFreeVirtualMemory(HANDLE hProcess, void** BaseA
     __asm__ volatile("mov %[free_type], %%r10\n\t"
                      "int $0x80"
                      : "=a"(status)
-                     : "a"((long long)149), "D"((long long)hProcess), "S"(va), "d"(sz),
-                       [free_type] "r"((long long)FreeType)
+                     : "a"((long long)149), "D"((long long)hProcess), "S"(va),
+                       "d"(sz), [free_type] "r"((long long)FreeType)
                      : "r10", "rcx", "r11", "memory");
     return (NTSTATUS)status;
 }
@@ -284,8 +284,8 @@ __declspec(dllexport) NTSTATUS NtProtectVirtualMemory(HANDLE hProcess, void** Ba
                      "mov %[old_protect], %%r8\n\t"
                      "int $0x80"
                      : "=a"(status)
-                     : "a"((long long)150), "D"((long long)hProcess), "S"(va), "d"(sz),
-                       [new_protect] "r"((long long)NewProtect), [old_protect] "r"((long long)OldProtect)
+                     : "a"((long long)150), "D"((long long)hProcess), "S"(va),
+                       "d"(sz), [new_protect] "r"((long long)NewProtect), [old_protect] "r"((long long)OldProtect)
                      : "r10", "r8", "rcx", "r11", "memory");
     return (NTSTATUS)status;
 }

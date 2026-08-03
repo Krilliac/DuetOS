@@ -138,8 +138,8 @@ void __cdecl mainCRTStartup(void)
 
     DUETOS_JOB_PROCESS_ID_HEADER process_id_header = {0xA5A5A5A5UL, 0xA5A5A5A5UL};
     return_length = 0;
-    Check(QueryInformationJobObject(job, JobObjectBasicProcessIdList, &process_id_header,
-                                    sizeof(process_id_header), &return_length),
+    Check(QueryInformationJobObject(job, JobObjectBasicProcessIdList, &process_id_header, sizeof(process_id_header),
+                                    &return_length),
           "header-only process ID list query");
     Check(return_length == sizeof(process_id_header), "header-only process ID list length");
     Check(process_id_header.NumberOfAssignedProcesses == 1 && process_id_header.NumberOfProcessIdsInList == 0,

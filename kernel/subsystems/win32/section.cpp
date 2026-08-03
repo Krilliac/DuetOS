@@ -634,8 +634,7 @@ void SectionLifetimeSelfTest()
     expect(!SectionRetain(second), "released recycled generation remained retainable");
 
     SectionKey executable{};
-    expect(SectionCreate(lifetime_domain, mm::kPageSize, 0x20, &executable),
-           "executable-read section create failed");
+    expect(SectionCreate(lifetime_domain, mm::kPageSize, 0x20, &executable), "executable-read section create failed");
     expect(SectionViewProtectionIsCompatible(executable, 0x02), "RX maximum rejected read-only subset");
     expect(SectionViewProtectionIsCompatible(executable, 0x10), "RX maximum rejected execute-only subset");
     expect(SectionViewProtectionIsCompatible(executable, 0x20), "RX maximum rejected exact RX view");
@@ -660,8 +659,7 @@ void SectionLifetimeSelfTest()
     // prospective charge back instead of crossing into reserved capacity.
     core::ResourceDomainKey service_domain = core::kInvalidResourceDomainKey;
     SectionKey service_sections[core::kResourceSectionReservedServiceSlots]{};
-    expect(core::ResourceDomainCreateAuthenticatedService(&service_domain),
-           "partition service-domain create failed");
+    expect(core::ResourceDomainCreateAuthenticatedService(&service_domain), "partition service-domain create failed");
     for (u32 index = 0; index < core::kResourceSectionReservedServiceSlots; ++index)
     {
         expect(SectionCreate(service_domain, mm::kPageSize, 0x04, &service_sections[index]),
@@ -680,8 +678,7 @@ void SectionLifetimeSelfTest()
     for (u32 section_index = 0; section_index < 6; ++section_index)
     {
         const u32 domain_index = section_index / 2;
-        expect(SectionCreate(ordinary_domains[domain_index], mm::kPageSize, 0x04,
-                             &ordinary_sections[section_index]),
+        expect(SectionCreate(ordinary_domains[domain_index], mm::kPageSize, 0x04, &ordinary_sections[section_index]),
                "ordinary Section could not fill its six-slot partition");
         expect(ordinary_sections[section_index].slot < core::kResourceSectionOrdinaryPoolCapacity,
                "ordinary Section escaped into a service-reserved slot");

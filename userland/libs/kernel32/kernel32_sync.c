@@ -5,9 +5,8 @@ typedef unsigned long NTSTATUS;
 #define STATUS_SUCCESS 0x00000000UL
 #define ERROR_INVALID_PARAMETER 87UL
 
-extern NTSTATUS NtQueryInformationProcess(HANDLE ProcessHandle, ULONG ProcessInformationClass,
-                                          void* ProcessInformation, ULONG ProcessInformationLength,
-                                          ULONG* ReturnLength);
+extern NTSTATUS NtQueryInformationProcess(HANDLE ProcessHandle, ULONG ProcessInformationClass, void* ProcessInformation,
+                                          ULONG ProcessInformationLength, ULONG* ReturnLength);
 extern ULONG RtlNtStatusToDosError(NTSTATUS Status);
 
 /* ------------------------------------------------------------------
@@ -1785,8 +1784,7 @@ __declspec(dllexport) BOOL GetExitCodeProcess(HANDLE hProcess, DWORD* lpExitCode
         return 0;
     }
 
-    const NTSTATUS status =
-        NtQueryInformationProcess(hProcess, 0, &info, (ULONG)sizeof(info), &return_length);
+    const NTSTATUS status = NtQueryInformationProcess(hProcess, 0, &info, (ULONG)sizeof(info), &return_length);
     if (status != STATUS_SUCCESS)
     {
         SetLastError((DWORD)RtlNtStatusToDosError(status));

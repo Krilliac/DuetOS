@@ -1,7 +1,8 @@
 #pragma once
 
 /* Generated from abi/native_syscalls.json. Do not edit by hand. */
-enum duet_native_syscall_number {
+enum duet_native_syscall_number
+{
     DUET_SYS_EXIT = 0,
     DUET_SYS_GETPID = 1,
     DUET_SYS_WRITE = 2,

@@ -165,7 +165,7 @@ void KObjectRelease(KObject* obj)
         // signal at destroy time.
         const u32 type_tag = static_cast<u32>(obj->type);
         const bool valid_tag = (type_tag >= static_cast<u32>(KObjectType::Mutex) &&
-                                 type_tag <= static_cast<u32>(KObjectType::ServiceEndpoint)) ||
+                                type_tag <= static_cast<u32>(KObjectType::ServiceEndpoint)) ||
                                type_tag == static_cast<u32>(KObjectType::Test);
         KASSERT_WITH_VALUE(valid_tag, "ipc/kobject", "destroy: type tag corrupted", static_cast<u64>(type_tag));
         // Run destroy outside the lock — destroy may itself touch

@@ -447,9 +447,8 @@ void RestoreBootSector()
 // sandbox AuthorizationContext and exercise the same accounting primitive.
 bool CreateRansomAuthorization(::duetos::core::AuthorizationContextKey* key_out)
 {
-    return ::duetos::core::AuthorizationCreateSandbox(::duetos::core::CapSetEmpty(),
-                                                       ::duetos::core::CapSetEmpty(),
-                                                       ::duetos::core::kTickBudgetTrusted, key_out);
+    return ::duetos::core::AuthorizationCreateSandbox(::duetos::core::CapSetEmpty(), ::duetos::core::CapSetEmpty(),
+                                                      ::duetos::core::kTickBudgetTrusted, key_out);
 }
 
 void AttackRansomwareWriteRate()
@@ -459,8 +458,7 @@ void AttackRansomwareWriteRate()
     // RecordFsWriteCheckLevel returns 0 (burst tier) when the
     // 1-second cap is the first one breached.
     using ::duetos::core::kFsWriteWindowByteCapByLevel;
-    ::duetos::core::AuthorizationContextKey authorization =
-        ::duetos::core::kInvalidAuthorizationContextKey;
+    ::duetos::core::AuthorizationContextKey authorization = ::duetos::core::kInvalidAuthorizationContextKey;
     if (!CreateRansomAuthorization(&authorization))
         return;
 
@@ -507,8 +505,7 @@ void AttackRansomwareLowAndSlow()
 {
     using ::duetos::core::kFsWriteWindowByteCapByLevel;
     using ::duetos::core::kFsWriteWindowTicksByLevel;
-    ::duetos::core::AuthorizationContextKey authorization =
-        ::duetos::core::kInvalidAuthorizationContextKey;
+    ::duetos::core::AuthorizationContextKey authorization = ::duetos::core::kInvalidAuthorizationContextKey;
     if (!CreateRansomAuthorization(&authorization))
         return;
 

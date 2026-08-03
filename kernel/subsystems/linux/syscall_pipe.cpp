@@ -451,8 +451,7 @@ bool PipeWaitCancellable(sched::WaitQueue* wq, const u64* sequence, u64 observed
     // cancellation, but cannot park forever after a lost producer wake.
     if (observed_sequence == ~u64{0})
     {
-        return sched::WaitQueueBlockTimeoutCancellable(wq, 1) !=
-               sched::WaitQueueBlockResult::Cancelled;
+        return sched::WaitQueueBlockTimeoutCancellable(wq, 1) != sched::WaitQueueBlockResult::Cancelled;
     }
     return sched::WaitQueueBlockIfSequenceUnchangedCancellable(wq, sequence, observed_sequence) !=
            sched::WaitQueueBlockResult::Cancelled;

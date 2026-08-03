@@ -74,7 +74,7 @@ bool HashIsZero(const loader::Hash256& hash)
 
 u16 ReadLe16(const u8* bytes)
 {
-    return static_cast<u16>(bytes[0]) | static_cast<u16>(bytes[1]) << 8u;
+    return static_cast<u16>(static_cast<u16>(bytes[0]) | static_cast<u16>(bytes[1]) << 8u);
 }
 
 u32 ReadLe32(const u8* bytes)

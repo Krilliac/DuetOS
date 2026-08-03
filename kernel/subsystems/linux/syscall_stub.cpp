@@ -112,8 +112,7 @@ i64 DoWait4(u64 pid, u64 user_status, u64 options, u64 user_rusage)
             // The sequence recheck and scheduler enqueue share one
             // g_sched_lock hold. Whether this call blocks or observes a raced
             // producer, the loop must rescan the relation table.
-            const sched::WaitQueueBlockResult block_result =
-                core::ProcessWaitForLinuxChildEvent(p, observed_sequence);
+            const sched::WaitQueueBlockResult block_result = core::ProcessWaitForLinuxChildEvent(p, observed_sequence);
             if (block_result == sched::WaitQueueBlockResult::Cancelled)
                 return kEINTR;
             continue;
@@ -197,8 +196,7 @@ i64 DoWaitid(u64 idtype, u64 id, u64 user_info, u64 options, u64 user_rusage)
                 }
                 return 0;
             }
-            const sched::WaitQueueBlockResult block_result =
-                core::ProcessWaitForLinuxChildEvent(p, observed_sequence);
+            const sched::WaitQueueBlockResult block_result = core::ProcessWaitForLinuxChildEvent(p, observed_sequence);
             if (block_result == sched::WaitQueueBlockResult::Cancelled)
                 return kEINTR;
             continue;

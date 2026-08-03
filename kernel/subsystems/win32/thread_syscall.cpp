@@ -757,8 +757,7 @@ bool SnapshotThreadWait(core::Process* process, u64 slot, u64 expected_generatio
     const sync::IrqFlags flags = sync::SpinLockAcquire(process->win32_thread_lock);
     const auto& row = process->win32_threads[slot];
     if (row.in_use && row.handle_open && !row.creating && row.generation != 0 && row.tid != 0 &&
-        (expected_generation == 0 ||
-         (row.generation == expected_generation && row.tid == expected_tid)))
+        (expected_generation == 0 || (row.generation == expected_generation && row.tid == expected_tid)))
     {
         snapshot->exited = row.exited;
         snapshot->generation = row.generation;
@@ -793,8 +792,7 @@ void DoThreadWait(arch::TrapFrame* frame)
         return;
     }
 
-    const u64 slot = util::MaskedIndex(handle - core::Process::kWin32ThreadBase,
-                                       core::Process::kWin32ThreadCap);
+    const u64 slot = util::MaskedIndex(handle - core::Process::kWin32ThreadBase, core::Process::kWin32ThreadCap);
     const u64 timeout_ms = frame->rsi & 0xFFFFFFFFULL;
     const bool infinite = timeout_ms == kThreadWaitInfiniteMs;
     const u64 timeout_ticks = infinite ? 0 : (timeout_ms + (kThreadWaitMsPerTick - 1)) / kThreadWaitMsPerTick;
@@ -846,8 +844,8 @@ void DoThreadWait(arch::TrapFrame* frame)
         }
         else if (infinite)
         {
-            block_result = sched::WaitQueueBlockIfSequenceUnchangedCancellable(
-                waiters, sequence, snapshot.event_sequence);
+            block_result =
+                sched::WaitQueueBlockIfSequenceUnchangedCancellable(waiters, sequence, snapshot.event_sequence);
         }
         else
         {

@@ -2562,8 +2562,7 @@ bool PublishCreatedTask(Task* task)
                 // first publication share g_sched_lock, so no PID reuse or
                 // scan/replay window can let the child escape a Job.
                 bool parent_live = false;
-                for (Task* parent_task = g_all_tasks_head; parent_task != nullptr;
-                     parent_task = parent_task->all_next)
+                for (Task* parent_task = g_all_tasks_head; parent_task != nullptr; parent_task = parent_task->all_next)
                 {
                     if (parent_task->process != nullptr && parent_task->state != TaskState::Dead &&
                         core::ProcessKeySnapshot(parent_task->process) == parent_key)
@@ -6697,8 +6696,7 @@ u64 SchedKillByProcess(core::Process* target, u32 exit_code)
     return signalled;
 }
 
-core::JobAssignResult SchedAssignProcessToJob(core::JobKey key, core::ProcessKey owner,
-                                              core::Process* target)
+core::JobAssignResult SchedAssignProcessToJob(core::JobKey key, core::ProcessKey owner, core::Process* target)
 {
     if (target == nullptr)
         return core::JobAssignResult::NotLive;
@@ -8517,7 +8515,7 @@ WaitQueueBlockResult WaitQueueBlockTimeoutCancellable(WaitQueue* wq, u64 ticks)
 }
 
 WaitQueueBlockResult WaitQueueBlockIfSequenceUnchangedCancellable(WaitQueue* wq, const u64* sequence,
-                                                                   u64 observed_sequence)
+                                                                  u64 observed_sequence)
 {
     KASSERT(wq != nullptr, "sched", "WaitQueueBlockIfSequenceUnchangedCancellable null queue");
     KASSERT(sequence != nullptr, "sched", "WaitQueueBlockIfSequenceUnchangedCancellable null sequence");
