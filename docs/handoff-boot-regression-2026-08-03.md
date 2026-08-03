@@ -246,3 +246,58 @@ Any assertion rewritten this way must be verified **both** directions —
 green on the fixed code and red on the broken code. Two fixes in this
 session (`linux-fd-generation-exhaustion`, `kstack-guard-classify`) were
 validated that way; treat it as the standard, not extra credit.
+
+## RESOLVED — the AP boot failure (root cause + fix, verified in CI)
+
+**Root cause.** `ap_trampoline.S` reaches `ApEntryFromTrampoline` with `jmp`,
+not `call`, so nothing pushed a return address and the AP arrived with
+`rsp == the stack's exclusive top`. `KBP_PROBE_V` expands to
+`__builtin_return_address(0)` (`kernel/debug/probes.h:460`), which reads the
+current function's return address at `[rbp+8]` — with `rsp == top` that is
+exactly `[top]`, and a slot's exclusive top IS the next slot's guard-page
+base. The `kSmpApOnline` probe at `smp.cpp:1210` therefore faulted on the
+neighbouring guard, which is precisely why the AP printed `AP online cpu_id`
+(1209) and never reached `AP pre-enter` (1225).
+
+**Fix** (`8220ac0c`): one `push 0` before the jump. It gives the
+return-address slot a mapped, zero-valued home *and* restores the SysV entry
+invariant `rsp % 16 == 8` — the page-aligned top is 16-aligned, so the old
+arrangement also mis-aligned SSE spill slots.
+
+**Verified in CI run 30809302454**: `OVER-TOP` banner count 0,
+`AP pre-enter` x3, `[sched/idle] armed` x4. Boot jobs went from **0/14 to
+10/14**: all four `build+smoke flavor` jobs, `bringup` 2 and 4 vCPU,
+`cancellation-smp` 2 and 4 vCPU, `ring3`, `browser`, `pe-hello` all pass.
+
+The `3247f9b7` instrumentation is what made this findable in one read
+instead of another round of inference — keep it.
+
+## NEW — ElfLoaderUnwindSelfTest false-positives under live SMP
+
+Now that SMP actually works, `linux-4cpu` and `pe-winapi-4cpu` panic with
+
+```
+[elf-test] FAIL frame leak ([full] ...)
+[panic-summary] subsystem=elf-loader msg="ElfLoaderUnwindSelfTest: frame leak detected"
+```
+
+`kernel/loader/elf_loader.cpp:663` samples a **global** free-frame count
+before and after the test window and panics when `after < before`, with the
+comment "tolerate gains, fail loudly on missing frames".
+
+That oracle is only sound on a quiescent uniprocessor. In the linux-4cpu log
+the self-test runs at line 2915, *after* `Bringing up APs` (2448) and
+`SMP bring-up complete` (2592) — three other CPUs are online and allocating.
+A peer CPU's allocation inside the window is indistinguishable from this
+test leaking, so the check fires on healthy boots. It is a uniprocessor-era
+assertion newly exposed by the AP fix, not a regression in the ELF loader.
+
+Fix direction: the global counter is the wrong instrument under concurrency.
+Either attribute frames to the address space under test, or gate the strict
+panic on uniprocessor and downgrade to WARN + probe once APs are online.
+Do not simply widen the tolerance — that hides real leaks in both modes.
+
+Separately still open: the GSBASE AP-GS gap (`CurrentCpu LAPIC-resolved a
+non-kernel GSBASE on a non-BSP CPU ... REGRESSION`) still appears once per
+boot. The kernel's own comment says a clean boot must stay at zero, so it is
+a real defect even though the boot now succeeds.
