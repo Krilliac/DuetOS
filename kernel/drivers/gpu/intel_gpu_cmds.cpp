@@ -60,7 +60,20 @@ void IntelGpuCmdsSelfTest()
     const BatchStartPacket bb = EncodeBatchBufferStart(0x01234000ull, /*ggtt=*/true);
     const PipeControlPacket pc = EncodePipeControlQwWrite(0x0ABCD000ull, 0x42ull);
     const ColorBltPacket cb = EncodeColorBlt(0x800000ull, 7680u, 10u, 20u, 110u, 70u, 0xFF3366CCu);
-    const BltSurfaceGeometry surface{0x1000u, 64u, 64u, 256u, 32u};
+    // bytes must cover pitch_bytes * height = 256 * 64 = 0x4000. This read
+    // 0x1000, which is 4x undersized, so IsBltSurfaceGeometryValid rejected
+    // it and this self-test printed FAIL on every single boot since it was
+    // written — silently, because it only logs and never panics. The
+    // compile-time kBltSurfaceTest above uses the correct 0x4000; only the
+    // runtime copy carried the typo.
+    //
+    // constexpr + static_assert so a future edit to these numbers fails the
+    // build instead of quietly re-introducing a per-boot FAIL line that
+    // nobody reads.
+    constexpr BltSurfaceGeometry surface{0x4000u, 64u, 64u, 256u, 32u};
+    static_assert(IsBltSurfaceGeometryValid(surface), "runtime self-test surface must be valid");
+    static_assert(IsBltRectValid(surface, 4u, 8u, 32u, 16u), "runtime self-test in-bounds rect");
+    static_assert(!IsBltRectValid(surface, 48u, 0u, 32u, 1u), "runtime self-test out-of-bounds rect rejected");
     const bool ok = bb.dw[0] == 0x18800001u && bb.dw[1] == 0x01234000u && kMiBatchBufferEnd == 0x05000000u &&
                     pc.dw[0] == 0x7A000004u && pc.dw[1] == 0x01104000u && cb.dw[0] == 0x54300005u &&
                     cb.dw[1] == 0x03F01E00u && kMiFlushDw == 0x13000001u && IsBltSurfaceGeometryValid(surface) &&
