@@ -425,7 +425,11 @@ def render_userland_header(rows: list[dict[str, Any]]) -> str:
         "#pragma once",
         "",
         "/* Generated from abi/native_syscalls.json. Do not edit by hand. */",
-        "enum duet_native_syscall_number {",
+        # Allman brace, per /.clang-format — the CI format gate scans every
+        # header under userland/, generated ones included, so emitting K&R
+        # here fails the build rather than merely looking inconsistent.
+        "enum duet_native_syscall_number",
+        "{",
     ]
     for row in rows:
         lines.append(f"    DUET_{row['name']} = {row['number']},")

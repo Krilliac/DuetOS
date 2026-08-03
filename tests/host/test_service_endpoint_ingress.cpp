@@ -45,6 +45,11 @@ ServiceDirectory* g_last_connect_directory = nullptr;
 
 ServiceLifecycleBroker::ServiceLifecycleBroker() {}
 ServiceExitObserver::ServiceExitObserver() {}
+// service_endpoint_ingress.cpp now embeds an exit-reap ledger. Linking the
+// real kernel/core/service_exit_reap_ledger.cpp would drag in the whole
+// observer/broker/directory cluster this fixture deliberately fakes, so stub
+// the constructor the same way as its siblings above.
+ServiceExitReapLedger::ServiceExitReapLedger() {}
 
 [[noreturn]] void Panic(const char*, const char*)
 {
