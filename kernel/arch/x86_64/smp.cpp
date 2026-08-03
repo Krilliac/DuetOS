@@ -948,6 +948,30 @@ namespace
     // worse than failing the bring-up cleanly here.
     KASSERT(bundle != nullptr, "arch/smp", "AP entered CpuhpStartGdt without an allocated GDT bundle");
     LoadGdtForCurrent(bundle);
+
+    // Re-establish GSBASE in the SAME step that loaded the GDT.
+    //
+    // LoadGdtForCurrent's `mov %ax, %gs` reloads GS's hidden base from the
+    // kernel-data descriptor (base 0), so it ZEROES IA32_GS_BASE as a side
+    // effect. These two operations are therefore inseparable: between them
+    // this CPU has no valid per-CPU pointer.
+    //
+    // Splitting them across two CPUHP states opened a window, because
+    // CpuhpBringUp logs `startup OK state` after EVERY state (cpuhp.cpp) and
+    // klog tags each line via CurrentCpuIdOrBsp() -> CurrentCpu(). That log
+    // ran with GSBASE == 0, so CurrentCpu() took its LAPIC-ID recovery path
+    // and bumped the non-BSP fallback counter — the counter whose own
+    // comment says "a clean boot must stay at zero ... a non-zero value is a
+    // regression". Every boot reported a regression that was really just
+    // this gap.
+    //
+    // Closing it here makes that invariant true again rather than weakening
+    // the claim. CpuhpStartGsBase still runs next and re-asserts the same
+    // values; the write is idempotent, and keeping the state preserves the
+    // CPUHP state numbering that the AP handshake contract pins.
+    cpu::PerCpu* pcpu = g_ap_percpus[cpu_id];
+    WriteMsrGsBase(reinterpret_cast<u64>(pcpu));
+    WriteMsrKernelGsBase(reinterpret_cast<u64>(pcpu));
     return {};
 }
 
