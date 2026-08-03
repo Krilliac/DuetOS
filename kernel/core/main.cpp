@@ -449,11 +449,14 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         duetos::security::PentestGuiStart();
     }
 
-    // `stress=cpu|mem|mix|spin` arms the boot-time stress driver in
-    // kernel/diag/stress_driver.cpp. No-op when the token is absent,
-    // so a normal boot pays nothing. Optional tunables come from the
-    // same cmdline: stress-secs=N, stress-workers=N, stress-mib=N.
-    duetos::core::diag::StressDriverArm(cmdline);
+    // NOTE: `stress=` is deliberately NOT armed here. StressDriverArm
+    // SchedCreate()s its worker immediately, and this point is ~270 lines
+    // of boot before SmpStartAps() — so the workers competed with the BSP
+    // for the very boot work that brings the other CPUs online. Measured
+    // 2026-08-03: with `stress=cpu stress-workers=64` on `-smp 8`, the boot
+    // had still not reached "Bringing up APs" at t=437s, so the run
+    // exercised ONE cpu. A stress driver that starves SMP bring-up can
+    // never stress SMP. It is armed after SmpStartAps instead — see below.
 
     // `gui-fuzz[=secs]` arms the self-driving GUI stress harness in
     // kernel/security/gui_fuzz.cpp. Like pentest=gui it must come
@@ -736,6 +739,19 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // rule (NUMA-node, package, or single) and propagate to PerCpu.
     duetos::cpu::TopologyAssignClusters();
     duetos::cpu::TopologyDump();
+
+    // `stress=cpu|mem|mix|spin` arms the stress driver in
+    // kernel/diag/stress_driver.cpp. No-op when the token is absent, so a
+    // normal boot pays nothing. Tunables come from the same cmdline:
+    // stress-secs=N, stress-workers=N, stress-mib=N.
+    //
+    // Armed HERE, after SmpStartAps and TopologyAssignClusters, so the
+    // workers land on per-CPU runqueues that actually exist and the run
+    // exercises every online CPU. Arming it during early boot (where this
+    // used to live) let the workers starve AP bring-up: with
+    // `stress=cpu stress-workers=64 -smp 8` the boot had not reached
+    // "Bringing up APs" at t=437s, so the whole run measured one CPU.
+    duetos::core::diag::StressDriverArm(cmdline);
 
     // Telemetry query surface (kernel/diag/telemetry.h) — the CPU /
     // memory / NIC / graphics / board readers a Task Manager's
